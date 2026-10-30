@@ -483,13 +483,22 @@ export type OpenAIResponseInclude =
 /**
  * A caller's hold on one request, awaited at each site that puts that request
  * on the wire. See {@link StreamOptions.beforeDispatch}.
+ *
+ * Several holds on one transport (a `beforeDispatch` given with a `fetch`
+ * that already carries another) are one barrier: the request goes out only
+ * when none of them is closed at the same moment. Each may therefore be
+ * asked more than once per attempt, since every hold before one that made
+ * the barrier wait is asked again. A hold after the first that parks every
+ * time it is asked (a pacing delay) cannot be shown open alongside another,
+ * and fails the attempt instead.
  */
 export type DispatchHold = () => Promise<void> | void;
 
 /**
  * A caller's wrapper around the transport this layer builds, for a caller that
- * must see each HTTP attempt and its response. See
- * {@link StreamOptions.wrapTransport}.
+ * must see each HTTP attempt and its response. The transport calls it once
+ * per build, and the build is live for its request, so the fetch it returns
+ * keeps its state for that request. See {@link StreamOptions.wrapTransport}.
  */
 export type TransportWrapper = (fetch: FetchImpl) => FetchImpl;
 
@@ -520,12 +529,13 @@ export interface StreamOptions {
 	 * rotated credential alike. It runs at the provider-dispatch chokepoint,
 	 * after the credential, any command-backed headers and the in-flight slot
 	 * are settled, and again at each transport's own last step before bytes go
-	 * out: the one transport fetch, the Codex websocket's `response.create`,
-	 * the Cursor HTTP/2 request, the GitLab Duo workflow socket's
-	 * `startRequest`. A caller whose requests are gated (omp's `/pause`) holds
-	 * them there, where no await of this layer's own can still follow. It
-	 * cannot change the request, and a throw from it fails that attempt like
-	 * any other dispatch error.
+	 * out: the one transport fetch; each Codex websocket connect, and each
+	 * `response.create` and `response.steer` frame on it; the Cursor HTTP/2
+	 * request; each GitLab Duo workflow socket it opens, and each
+	 * `startRequest` and `actionResponse` frame it sends. A caller whose
+	 * requests are gated (omp's `/pause`) holds them there, where no await of
+	 * this layer's own can still follow. It cannot change the request, and a
+	 * throw from it fails that attempt like any other dispatch error.
 	 *
 	 * The wait ends when {@link signal} aborts, with that signal's reason, so a
 	 * cancelled request never stays parked on a hold nobody will release.
@@ -550,6 +560,14 @@ export interface StreamOptions {
 	 * from it fails that attempt as a transport error, which the provider's
 	 * own retry loop may still retry; only an abort on {@link signal} ends
 	 * those retries at once.
+	 *
+	 * The transport built around it is live for that request. A hold given
+	 * later, with a `fetch` that already carries this wrapper, gates that
+	 * same build — every reference to the fetch waits on it from then on —
+	 * and a further wrapper goes outside it. Neither rebuilds the transport,
+	 * so this wrapper is constructed once and keeps every attempt it counted.
+	 * Cleanup traffic that skips the hold (a workflow stop) goes through a
+	 * separate build, which constructs the wrapper again.
 	 */
 	wrapTransport?: TransportWrapper;
 	/**

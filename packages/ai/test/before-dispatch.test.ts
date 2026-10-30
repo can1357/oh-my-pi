@@ -30,7 +30,8 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { armPreResponseTimeout } from "@oh-my-pi/pi-ai/utils/idle-iterator";
 import * as requestDebug from "@oh-my-pi/pi-ai/utils/request-debug";
-import { transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
+import { MAX_DISPATCH_HOLD_PASSES } from "@oh-my-pi/pi-ai/utils/dispatch-hold";
+import { transportFetch, withoutDispatchHold } from "@oh-my-pi/pi-ai/utils/transport-fetch";
 
 const SOURCE_ID = "before-dispatch-test";
 const API = "before-dispatch-test" as Api;
@@ -88,6 +89,16 @@ function model(): Model<Api> {
 		contextWindow: 1000,
 		maxTokens: 100,
 	} as Model<Api>;
+}
+
+/**
+ * One turn of the event loop: what makes a hold *park* rather than answer at
+ * once, with no wall-clock delay.
+ */
+function loopTurn(): Promise<void> {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	setImmediate(resolve);
+	return promise;
 }
 
 let limiterRoot: string | undefined;
@@ -850,5 +861,237 @@ describe("beforeDispatch", () => {
 			debugEnabled.mockRestore();
 			debugSession.mockRestore();
 		}
+	});
+
+	// Two holds were awaited one after the other, so a first hold that closed
+	// again while the second still waited was never asked again: the request
+	// went out under a gate that was closed at the time it was sent. The wait
+	// need not turn the event loop: a second hold that answers late, in the
+	// very microtasks in which the first closes again, leaves the first answer
+	// as stale as one that parked.
+	for (const { waits, between } of [
+		{ waits: "parks", between: loopTurn },
+		{ waits: "answers late", between: async () => {} },
+	]) {
+		test(`asks the first hold again when it closes while the second ${waits}`, async () => {
+			const calls: string[] = [];
+			const sentWhileClosed: boolean[] = [];
+			const gate = { closed: false };
+			const reopened = Promise.withResolvers<void>();
+			const reasked = Promise.withResolvers<void>();
+			const entered = Promise.withResolvers<void>();
+			const held = Promise.withResolvers<void>();
+			const first = () => {
+				calls.push("first");
+				if (!gate.closed) return;
+				reasked.resolve();
+				return reopened.promise;
+			};
+			const second = () => {
+				calls.push("second");
+				entered.resolve();
+				return held.promise;
+			};
+			const base = (async () => {
+				calls.push("request");
+				sentWhileClosed.push(gate.closed);
+				return new Response("{}", { status: 200 });
+			}) satisfies FetchImpl;
+			const fetch = transportFetch(model(), transportFetch(model(), base, first), second);
+
+			const sent = fetch("https://example.invalid/v1/messages", { method: "POST" });
+			await entered.promise;
+			await between();
+			gate.closed = true;
+			held.resolve();
+			// Either the request goes out past the re-closed first hold, or the
+			// first hold is asked again and parks the request.
+			await Promise.race([reasked.promise, sent]);
+			expect(sentWhileClosed).toEqual([]);
+
+			gate.closed = false;
+			reopened.resolve();
+			await sent;
+			expect(sentWhileClosed).toEqual([false]);
+			expect(calls).toEqual(["first", "second", "first", "second", "request"]);
+		});
+	}
+
+	// A hold written as an `async` function that awaits anything on its way to
+	// answering is late every time it is asked, open or not. That costs one
+	// confirming pass; failing it like a hold that parks every time would fail
+	// every request it gates alongside another hold.
+	test("sends after one confirming pass when a later hold always answers late", async () => {
+		const calls: string[] = [];
+		const base = (async () => {
+			calls.push("request");
+			return new Response("{}", { status: 200 });
+		}) satisfies FetchImpl;
+		const first = () => {
+			calls.push("first");
+		};
+		const second = async () => {
+			calls.push("second");
+			await Promise.resolve();
+		};
+		const fetch = transportFetch(model(), transportFetch(model(), base, first), second);
+
+		await fetch("https://example.invalid/v1/messages", { method: "POST" });
+
+		expect(calls).toEqual(["first", "second", "first", "second", "request"]);
+	});
+
+	// Only a hold that parks behind another makes the ones before it stale; the
+	// first hold has nothing before it, so however long it parks each hold is
+	// asked once, the same as a single hold.
+	test("asks each hold once when only the first one parks", async () => {
+		const calls: string[] = [];
+		const base = (async () => {
+			calls.push("request");
+			return new Response("{}", { status: 200 });
+		}) satisfies FetchImpl;
+		const first = async () => {
+			calls.push("first");
+			await loopTurn();
+		};
+		const second = () => {
+			calls.push("second");
+		};
+		const fetch = transportFetch(model(), transportFetch(model(), base, first), second);
+
+		await fetch("https://example.invalid/v1/messages", { method: "POST" });
+
+		expect(calls).toEqual(["first", "second", "request"]);
+	});
+
+	// A hold that parks every time it is asked can never be shown open at the
+	// same moment as another hold. Sending anyway would send under a gate
+	// nobody verified, and re-checking forever would never send at all.
+	test("fails the attempt when a later hold parks on every call", async () => {
+		let paced = 0;
+		let requests = 0;
+		const base = (async () => {
+			requests += 1;
+			return new Response("{}", { status: 200 });
+		}) satisfies FetchImpl;
+		const pacer = async () => {
+			paced += 1;
+			await loopTurn();
+		};
+		const fetch = transportFetch(
+			model(),
+			transportFetch(model(), base, () => {}),
+			pacer,
+		);
+
+		await expect(fetch("https://example.invalid/v1/messages", { method: "POST" })).rejects.toThrow(
+			"did not open together",
+		);
+		expect(requests).toBe(0);
+		expect(paced).toBe(MAX_DISPATCH_HOLD_PASSES);
+	});
+
+	// A wrapper is per-request state. Adding a hold rebuilt the transport and the
+	// wrapper with it, so the request got a fresh wrapper that had counted none
+	// of its attempts: a budget of two let a third attempt out.
+	test("gates a wrapper-carrying transport in place instead of rebuilding its wrapper", async () => {
+		const calls: string[] = [];
+		let builds = 0;
+		const wrap: TransportWrapper = inner => {
+			builds += 1;
+			let attempts = 0;
+			return async (input, init) => {
+				attempts += 1;
+				if (attempts > 2) throw new Error("attempt budget spent");
+				return inner(input, init);
+			};
+		};
+		const base = (async () => {
+			calls.push("request");
+			return new Response("{}", { status: 200 });
+		}) satisfies FetchImpl;
+		const hold = () => {
+			calls.push("hold");
+		};
+		const observed = transportFetch(model(), base, undefined, wrap);
+		await observed("https://example.invalid/v1/messages", { method: "POST" });
+
+		const held = transportFetch(model(), observed, hold);
+		expect(held).toBe(observed);
+		expect(builds).toBe(1);
+		await held("https://example.invalid/v1/messages", { method: "POST" });
+		await expect(held("https://example.invalid/v1/messages", { method: "POST" })).rejects.toThrow(
+			"attempt budget spent",
+		);
+
+		expect(calls).toEqual(["request", "hold", "request"]);
+	});
+
+	// A wrapper added to a transport that already carries one rebuilt it the
+	// same way, constructing the first wrapper again. The later wrapper goes
+	// outside the live build instead, in the order a rebuild would put it.
+	test("layers a later wrapper outside a wrapper-carrying transport without rebuilding it", async () => {
+		const calls: string[] = [];
+		const builds: string[] = [];
+		const wrapper =
+			(name: string): TransportWrapper =>
+			inner => {
+				builds.push(name);
+				return async (input, init) => {
+					calls.push(name);
+					return inner(input, init);
+				};
+			};
+		const first = wrapper("first");
+		const second = wrapper("second");
+		const base = (async () => {
+			calls.push("request");
+			return new Response("{}", { status: 200 });
+		}) satisfies FetchImpl;
+		const hold = () => {
+			calls.push("hold");
+		};
+
+		const once = transportFetch(model(), base, hold, first);
+		const twice = transportFetch(model(), once, hold, second);
+		expect(twice).not.toBe(once);
+		expect(transportFetch(model(), twice, hold, second)).toBe(twice);
+		expect(transportFetch(model(), twice, hold, first)).toBe(twice);
+		await twice("https://example.invalid/v1/messages", { method: "POST" });
+
+		expect(builds).toEqual(["first", "second"]);
+		expect(calls).toEqual(["second", "first", "hold", "request"]);
+	});
+
+	// A hold joins a wrapper-carrying build in place, so that build cannot
+	// stand in for its own unheld transport even while it has no hold yet: the
+	// cleanup traffic handed it would be held by a hold added afterwards.
+	test("keeps cleanup traffic unheld when a hold later joins a wrapper-carrying transport", async () => {
+		const calls: string[] = [];
+		const base = (async () => {
+			calls.push("request");
+			return new Response("{}", { status: 200 });
+		}) satisfies FetchImpl;
+		const wrap: TransportWrapper = inner => async (input, init) => {
+			calls.push("wrap");
+			return inner(input, init);
+		};
+		const hold = () => {
+			calls.push("hold");
+		};
+		const observed = transportFetch(model(), base, undefined, wrap);
+		const cleanup = withoutDispatchHold(observed);
+
+		expect(transportFetch(model(), observed, hold)).toBe(observed);
+		expect(withoutDispatchHold(observed)).toBe(cleanup);
+		// The cleanup transport is not live: a hold given for it builds a new
+		// transport rather than gating the cleanup one.
+		expect(transportFetch(model(), cleanup, hold)).not.toBe(cleanup);
+
+		await cleanup("https://example.invalid/v1/workflows/1", { method: "PATCH" });
+		expect(calls).toEqual(["wrap", "request"]);
+		calls.length = 0;
+		await observed("https://example.invalid/v1/messages", { method: "POST" });
+		expect(calls).toEqual(["wrap", "hold", "request"]);
 	});
 });
