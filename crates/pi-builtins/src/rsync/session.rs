@@ -560,8 +560,17 @@ pub(crate) fn run(host: &mut Host, argv: Vec<OsString>) -> i32 {
 
 /// The charset the shell's locale lets printed messages carry (upstream
 /// setup_iconv's `ic_chck`, from `LC_ALL`/`LC_CTYPE`/`LANG`).
+///
+/// This is the one lookup every run makes, so it is the one that reports a
+/// locale libc could not be asked about: the escaping that follows is then a
+/// reading of the locale's name, not libc's answer, and silence about that
+/// would look like the C locale.
 fn msg_charset(io: &HostIo) -> MsgCharset {
-	MsgCharset::for_locale(&iconv::locale_charset(&|key: &str| io.getenv(key), Some(&io.child)))
+	let locale = iconv::locale_charset(&|key: &str| io.getenv(key), Some(&io.child));
+	if let Some(warning) = &locale.warning {
+		let _ = io.err.clone().write_all(format!("rsync: warning: {warning}\n").as_bytes());
+	}
+	MsgCharset::for_locale(&locale.charset)
 }
 
 /// A logger for diagnostics before the run's own logger exists. Upstream
@@ -1677,7 +1686,9 @@ impl ClientRun<'_> {
 		}
 		let iconv = match (&opts.iconv_opt, setup_err.is_none()) {
 			(Some(spec), true) => {
-				let locale = iconv::locale_charset(&getenv, Some(&self.io.child));
+				// `log_config` has already made this lookup for the run's
+				// logger, and reported it if libc could not be asked.
+				let locale = iconv::locale_charset(&getenv, Some(&self.io.child)).charset;
 				match iconv::Iconv::with_locale(&os_bytes_lossy(spec), false, Some(&locale)) {
 					Ok(ic) => {
 						if logger.levels().debug(log::Debug::Iconv) >= 1 {
@@ -2065,7 +2076,8 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 	};
 	let iconv = match (&opts.iconv_opt, setup_err.is_none()) {
 		(Some(spec), true) => {
-			let locale = iconv::locale_charset(&getenv, Some(&io.child));
+			// As in `client_main`: `log_config` has reported this lookup.
+			let locale = iconv::locale_charset(&getenv, Some(&io.child)).charset;
 			match iconv::Iconv::with_locale(&os_bytes_lossy(spec), true, Some(&locale)) {
 				Ok(ic) => {
 					if logger.levels().debug(log::Debug::Iconv) >= 1 {

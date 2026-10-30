@@ -214,14 +214,14 @@ fn nothing_in_the_shells_directory_runs_for_the_locale() {
 	assert!(cap.out().contains("ünï.txt"), "{}", cap.out());
 }
 
-/// No `locale` command is reachable: the codeset still has to come from the
-/// shell's locale search path, and never from this process's, which is a
-/// different question. Measured on rsync 3.5.1 under `env -i
-/// LOCPATH=/nonexistent LC_ALL=… rsync -ai src/ünï.txt dst/`: `>f+++++++++
+/// No `PATH` of anyone's decides the codeset — the program that answers is
+/// named by an absolute path — and this process's own locale search path is
+/// a different question from the shell's. Measured on rsync 3.5.1 under `env
+/// -i LOCPATH=/nonexistent LC_ALL=… rsync -ai src/ünï.txt dst/`: `>f+++++++++
 /// \#303\#274n\#303\#257.txt`, the C locale's escaping.
 #[cfg(target_os = "linux")]
 #[test]
-fn without_a_locale_command_the_shells_search_path_still_answers() {
+fn no_search_path_but_the_shells_own_answers() {
 	let dir = tempfile::tempdir().unwrap();
 	let Some(locales) = shell_only_locale(dir.path()) else { return };
 	let empty = dir.path().join("empty-bin");
@@ -243,6 +243,137 @@ fn without_a_locale_command_the_shells_search_path_still_answers() {
 	unsafe { std::env::remove_var("LOCPATH") };
 	assert_eq!(code, 0, "{}", cap.err());
 	assert!(cap.out().contains("\\#303\\#274n\\#303\\#257.txt"), "{}", cap.out());
+}
+
+/// A relative search-path entry that no process can resolve must not defeat
+/// an absolute entry that supplies the locale.
+///
+/// Measured on the gate VM from a directory with mode 0600, and again from
+/// one removed after the shell entered it — both are working directories of
+/// the shell and so of its children: `env -i LOCPATH=missing:…/locales
+/// LC_ALL=… /usr/bin/locale charmap` reports `ISO-8859-1` there and rsync
+/// 3.5.1 prints `ünï.txt`. A lookup that enters the working directory before
+/// it reads the list answers for neither.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_absolute_entry_answers_from_a_directory_no_process_can_enter() {
+	use std::os::unix::fs::PermissionsExt as _;
+
+	let dir = tempfile::tempdir().unwrap();
+	let Some(locales) = shell_only_locale(dir.path()) else { return };
+	let path = format!("missing:{}", locales.display());
+	let env = |key: &str| (key == "LOCPATH").then(|| path.clone());
+	for shut in ["unsearchable", "removed"] {
+		let cwd = dir.path().join(shut);
+		fs::create_dir_all(&cwd).unwrap();
+		// The shell is already in the directory; what it cannot do is enter it
+		// again, which is what a lookup that `chdir`s asks of it.
+		let (host, _) = crate::host::Host::for_test("rsync", "", &cwd);
+		let child = host.child_env();
+		match shut {
+			"removed" => fs::remove_dir(&cwd).unwrap(),
+			_ => fs::set_permissions(&cwd, fs::Permissions::from_mode(0o600)).unwrap(),
+		}
+		let answer = crate::locale::loaded_codeset(SHELL_ONLY_LOCALE, &env, Some(&child));
+		if shut != "removed" {
+			fs::set_permissions(&cwd, fs::Permissions::from_mode(0o755)).unwrap();
+		}
+		assert!(matches!(&answer, crate::locale::Codeset::Loaded(c) if c == "ISO-8859-1"), "{shut}: {answer:?}");
+	}
+}
+
+/// A lock another thread of this process holds must not reach the lookup.
+///
+/// glibc takes one lock for every locale load, and a lookup that forks
+/// inherits it held by a thread the child does not have: the child then
+/// waits for it for ever. With `SIGALRM` blocked in the calling thread — as
+/// it is inside that signal's own handler — the child inherits the mask too,
+/// so even an alarm it set for itself cannot end the wait. Nothing here
+/// loads a locale in this process or in a copy of it, so the lock is not
+/// this lookup's business at all.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_locale_lock_another_thread_holds_does_not_reach_the_lookup() {
+	use std::sync::mpsc;
+	use std::time::Duration;
+
+	let dir = tempfile::tempdir().unwrap();
+	let Some(locales) = shell_only_locale(dir.path()) else { return };
+	// A locale whose `LC_CTYPE` is a FIFO nobody writes to: the thread that
+	// loads it blocks in `open` with glibc's locale lock held.
+	let blocking = dir.path().join("blocking");
+	fs::create_dir_all(blocking.join("omp_rsync_fifo")).unwrap();
+	let fifo = blocking.join("omp_rsync_fifo/LC_CTYPE");
+	nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+	// SAFETY: nextest gives this test its own process, and nothing else in it
+	// reads `LOCPATH` concurrently. libc reads it from the process
+	// environment, so this is the only way to aim the holding thread at the
+	// FIFO.
+	unsafe { std::env::set_var("LOCPATH", &blocking) };
+	std::thread::spawn(|| {
+		// SAFETY: a valid NUL-terminated name; the call blocks and the handle,
+		// if it ever returns one, is leaked with the thread.
+		unsafe { libc::newlocale(libc::LC_CTYPE_MASK, c"omp_rsync_fifo".as_ptr(), std::ptr::null_mut()) };
+	});
+	// The lock is taken inside `newlocale`; give the thread time to reach it.
+	std::thread::sleep(Duration::from_millis(300));
+
+	let (answered, answer) = mpsc::channel();
+	let shell_path = locales.to_str().unwrap().to_owned();
+	std::thread::spawn(move || {
+		let mut alarm = nix::sys::signal::SigSet::empty();
+		alarm.add(nix::sys::signal::SIGALRM);
+		alarm.thread_block().unwrap();
+		let env = move |key: &str| (key == "LOCPATH").then(|| shell_path.clone());
+		let _ = answered.send(format!("{:?}", crate::locale::loaded_codeset(SHELL_ONLY_LOCALE, &env, None)));
+	});
+	let codeset = answer.recv_timeout(Duration::from_secs(10));
+	// Let the holding thread out of `open` before the directory goes.
+	let _ = std::fs::OpenOptions::new().write(true).open(&fifo);
+	// SAFETY: as above.
+	unsafe { std::env::remove_var("LOCPATH") };
+	assert_eq!(codeset.as_deref(), Ok("Loaded(\"ISO-8859-1\")"));
+}
+
+/// The lookup must spend no descriptor the answer does not need.
+///
+/// Measured with `RLIMIT_NOFILE=5`, which leaves two free: the reference
+/// reports `ISO-8859-1`, while a lookup whose child keeps both ends of its
+/// own result pipe has none left for the locale data and reports nothing.
+/// Two free descriptors are exactly what the answer pipe costs here, and the
+/// child that reads the locale keeps none of them.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_descriptor_limit_with_two_to_spare_still_answers() {
+	use std::os::fd::{FromRawFd as _, OwnedFd};
+
+	use nix::sys::resource::{Resource, getrlimit, setrlimit};
+
+	let dir = tempfile::tempdir().unwrap();
+	let Some(locales) = shell_only_locale(dir.path()) else { return };
+	let shell_path = locales.to_str().unwrap().to_owned();
+	let env = move |key: &str| (key == "LOCPATH").then(|| shell_path.clone());
+	let (soft, hard) = getrlimit(Resource::RLIMIT_NOFILE).unwrap();
+	let open = u64::try_from(fs::read_dir("/proc/self/fd").unwrap().count()).unwrap();
+	// A limit just above what is open now, so filling it costs nothing.
+	setrlimit(Resource::RLIMIT_NOFILE, open + 8, hard).unwrap();
+	let mut burned: Vec<OwnedFd> = Vec::new();
+	loop {
+		// SAFETY: duplicating a descriptor this process owns until the limit
+		// refuses; each result is owned here and closed below.
+		let spare = unsafe { libc::dup(0) };
+		if spare < 0 {
+			break;
+		}
+		// SAFETY: `spare` is a fresh descriptor nothing else owns.
+		burned.push(unsafe { OwnedFd::from_raw_fd(spare) });
+	}
+	// Give back exactly two: the answer pipe fits, and nothing else does.
+	burned.truncate(burned.len().saturating_sub(2));
+	let answer = crate::locale::loaded_codeset(SHELL_ONLY_LOCALE, &env, None);
+	drop(burned);
+	setrlimit(Resource::RLIMIT_NOFILE, soft, hard).unwrap();
+	assert!(matches!(&answer, crate::locale::Codeset::Loaded(codeset) if codeset == "ISO-8859-1"), "{answer:?}");
 }
 
 /// Captured from rsync 3.5.1: `rsync --protocol=19 -a src/ d/` on a local copy.
