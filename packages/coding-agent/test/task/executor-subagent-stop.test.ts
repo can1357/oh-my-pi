@@ -5,6 +5,7 @@
  * instead of publishing the refused payload.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
@@ -85,7 +86,16 @@ interface PromptCall {
 }
 
 /** Observer a kept-alive session's IRC wake turns are bracketed with (`AgentSession.setIrcWakeTurnObserver`). */
-type WakeObserver = (records: AgentMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined;
+type WakeObserver = (
+	records: AgentMessage[],
+) => ((error?: unknown, superseded?: boolean) => void | Promise<void>) | undefined;
+
+/** One `holdForStopPass` hold the executor took on the fake session. */
+interface HoldRecord {
+	/** Abort to cancel the pass, as an explicit user prompt does. */
+	cancel: AbortController;
+	released: boolean;
+}
 
 interface StopHarness {
 	session: AgentSession;
@@ -99,6 +109,8 @@ interface StopHarness {
 	wakeObserver: () => WakeObserver | undefined;
 	/** Record a terminal `yield` outside any prompt, as a wake turn the executor does not drive would. */
 	emitTerminalYield: (data: unknown) => void;
+	/** Stop-pass holds the executor took, oldest first. */
+	holds: HoldRecord[];
 }
 
 /** Text of a captured `last_assistant_message` (the fake transcript is text-only). */
@@ -121,6 +133,8 @@ function createHarness(args: {
 	yieldTool?: YieldTool;
 	/** Runs whenever the executor waits for the fake session to go idle; a turn still running there ends inside it. */
 	onWaitForIdle?: () => void | Promise<void>;
+	/** Runs when the executor releases a stop-pass hold. */
+	onHoldRelease?: () => void;
 }): StopHarness {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	const messages: AssistantMessage[] = [];
@@ -130,6 +144,7 @@ function createHarness(args: {
 	let stopCalls = 0;
 	const yieldErrors: string[] = [];
 	let wakeObserver: WakeObserver | undefined;
+	const holds: HoldRecord[] = [];
 
 	const emit = (event: AgentSessionEvent) => {
 		// oxlint-disable-next-line unicorn/no-useless-spread -- listeners may change during dispatch
@@ -241,6 +256,21 @@ function createHarness(args: {
 		hasPendingAsyncWork: () => false,
 		getAsyncJobSnapshot: () => ({ running: [], recent: [] }),
 		settleAsyncWork: async () => {},
+		holdForStopPass: () => {
+			const record: HoldRecord = { cancel: new AbortController(), released: false };
+			holds.push(record);
+			return {
+				signal: record.cancel.signal,
+				consult: () => {},
+				prompt: (text: string, options?: PromptOptions) => session.prompt(text, options),
+				release: () => {
+					if (record.released) return;
+					record.released = true;
+					args.onHoldRelease?.();
+				},
+			};
+		},
+		waitForStopPasses: async () => {},
 		abort: async () => {},
 		isAdvisorActive: () => false,
 	};
@@ -253,6 +283,7 @@ function createHarness(args: {
 		yieldErrors,
 		wakeObserver: () => wakeObserver,
 		emitTerminalYield: data => emitYield({ status: "success", data }, "Result submitted."),
+		holds,
 	};
 }
 
@@ -419,63 +450,94 @@ describe("runSubprocess subagent_stop", () => {
 		expect(harness.prompts[1]?.text).toContain("yield again");
 	});
 
-	describe("when wake turns run while handlers consult", () => {
-		/**
-		 * The first `wakes` passes each leave a wake turn running on the idle child; it ends, recording a newer
-		 * yield, while the run waits for the session to settle. Later passes are undisturbed.
-		 */
-		async function runWithWakes(id: string, wakes: number) {
-			let pending = 0;
-			let started = 0;
-			let served = 0;
-			const harness: StopHarness = createHarness({
-				hasStopHandlers: true,
-				onPrompt: call => call.yieldTerminal({ report: "OLD-PAYLOAD" }),
-				onStop: async () => {
-					if (started < wakes) {
-						started += 1;
-						pending += 1;
-					}
-					return undefined;
-				},
-				onWaitForIdle: () => {
-					if (pending === 0) return;
-					pending -= 1;
-					served += 1;
-					harness.emitTerminalYield({ report: `WAKE-PAYLOAD-${served}` });
-				},
-			});
-			mockCreateAgentSession(harness.session);
-			registerRunning(id, harness.session);
-			const result = await runSubprocess(baseOptions(id));
-			return { harness, result };
-		}
-
-		it("lets the wake turn settle and judges the candidate it recorded before publishing", async () => {
-			const { harness, result } = await runWithWakes("WakeSettles", 1);
-
-			// The first allow was about OLD-PAYLOAD, which the wake turn replaced.
-			expect(harness.events).toHaveLength(2);
-			expect(harness.events.map(event => event.stop_hook_active)).toEqual([false, false]);
-			expect(result.exitCode).toBe(0);
-			expect(JSON.parse(result.output)).toEqual({ report: "WAKE-PAYLOAD-1" });
-			expect(JSON.stringify(result.output)).not.toContain("OLD-PAYLOAD");
+	it("holds the child session from the first pass until the result is published", async () => {
+		const id = "HeldThroughPublish";
+		const artifactPath = path.join(tempDir.path(), `${id}.md`);
+		let heldAtEveryPass = true;
+		let artifactAtRelease: string | undefined;
+		const harness: StopHarness = createHarness({
+			hasStopHandlers: true,
+			onPrompt: call => call.yieldTerminal({ report: call.promptIndex === 1 ? "REFUSED" : "replacement" }),
+			onStop: async (_event, callIndex) => {
+				heldAtEveryPass &&= harness.holds.length === 1 && !harness.holds[0]!.released;
+				return callIndex === 1 ? { decision: "block", reason: "keep going" } : undefined;
+			},
+			onHoldRelease: () => {
+				artifactAtRelease = fs.existsSync(artifactPath) ? fs.readFileSync(artifactPath, "utf8") : undefined;
+			},
 		});
+		mockCreateAgentSession(harness.session);
+		registerRunning(id, harness.session);
 
-		it("re-judges while turns keep replacing the candidate and stops once one is undisturbed", async () => {
-			const { harness, result } = await runWithWakes("WakesKeepComing", 2);
+		const result = await runSubprocess(baseOptions(id));
 
-			// Two disturbed passes, then one nothing overlapped: three consults, no more.
-			expect(harness.events).toHaveLength(3);
-			expect(JSON.parse(result.output)).toEqual({ report: "WAKE-PAYLOAD-2" });
+		// One hold spans both passes and the continuation between them, and ends
+		// only once the judged replacement is the published artifact.
+		expect(harness.events).toHaveLength(2);
+		expect(heldAtEveryPass).toBe(true);
+		expect(harness.holds).toHaveLength(1);
+		expect(harness.holds[0]?.released).toBe(true);
+		expect(JSON.parse(result.output)).toEqual({ report: "replacement" });
+		expect(artifactAtRelease).toBe(result.output);
+	});
+
+	it("stops waiting on a refusal continuation's work once a user prompt cancels the pass", async () => {
+		const id = "UserCancelledContinuation";
+		let continuationRunning = false;
+		let waitHung = false;
+		const harness: StopHarness = createHarness({
+			hasStopHandlers: true,
+			onPrompt: call => {
+				if (call.promptIndex === 1) call.yieldTerminal({ report: "REFUSED" });
+				else continuationRunning = true;
+			},
+			onStop: async () => ({ decision: "block", reason: "keep going" }),
+			// The continuation's work never settles; only the user's cancel can end the wait.
+			onWaitForIdle: async () => {
+				if (!continuationRunning || waitHung) return;
+				waitHung = true;
+				harness.holds[0]?.cancel.abort();
+				await Promise.withResolvers<void>().promise;
+			},
 		});
+		mockCreateAgentSession(harness.session);
+		registerRunning(id, harness.session);
 
-		it("consults exactly once when nothing overlaps the pass", async () => {
-			const { harness, result } = await runWithWakes("NoWake", 0);
+		const result = await runSubprocess(baseOptions(id));
 
-			expect(harness.events).toHaveLength(1);
-			expect(JSON.parse(result.output)).toEqual({ report: "OLD-PAYLOAD" });
+		expect(harness.events).toHaveLength(1);
+		expect(result.aborted).toBe(true);
+		expect(result.abortReason).toContain("user prompt cancelled the subagent_stop pass");
+		expect(result.error).not.toBe(SUBAGENT_STOP_REFUSAL_UNRESOLVED);
+		expect(result.output).not.toContain("REFUSED");
+		expect(harness.holds[0]?.released).toBe(true);
+	});
+
+	it("reports a pass a user prompt cancelled as cancelled, never as a refusal", async () => {
+		const id = "UserCancelledPass";
+		const harness: StopHarness = createHarness({
+			hasStopHandlers: true,
+			onPrompt: call => call.yieldTerminal({ report: "UNJUDGED-PAYLOAD" }),
+			onStop: async event => {
+				// An explicit user prompt to the idle child cancels the held pass.
+				harness.holds[0]?.cancel.abort();
+				expect(event.signal.aborted).toBe(true);
+				return { decision: "block", reason: "ignored: the pass was cancelled" };
+			},
 		});
+		mockCreateAgentSession(harness.session);
+		registerRunning(id, harness.session);
+
+		const result = await runSubprocess(baseOptions(id));
+
+		expect(harness.prompts).toHaveLength(1);
+		expect(result.aborted).toBe(true);
+		expect(result.abortReason).toContain("user prompt cancelled the subagent_stop pass");
+		expect(result.error).not.toBe(SUBAGENT_STOP_REFUSAL_UNRESOLVED);
+		expect(result.output).not.toContain("UNJUDGED-PAYLOAD");
+		expect(result.extractedToolData?.yield).toBeUndefined();
+		expect(AgentRegistry.global().get(id)?.lifecycle?.acceptedAt).toBeUndefined();
+		expect(harness.holds[0]?.released).toBe(true);
 	});
 
 	describe("a structured run that never yields", () => {
@@ -1006,13 +1068,14 @@ describe("runSubprocess subagent_stop", () => {
 		expect(harness.prompts).toHaveLength(1);
 		expect(result.aborted).toBe(true);
 		expect(result.exitCode).not.toBe(0);
-		expect(result.error).toBe(SUBAGENT_STOP_REFUSAL_UNRESOLVED);
+		// No handler refused anything: the run reports as cancelled, not as a refusal.
+		expect(result.error).not.toBe(SUBAGENT_STOP_REFUSAL_UNRESOLVED);
 		expect(AgentRegistry.global().get(id)?.lifecycle?.acceptedAt).toBeUndefined();
-		// Handlers never confirmed this payload either, so the cancelled run
-		// publishes no yield-derived output or artifact.
+		// Handlers never confirmed this payload, so the cancelled run publishes
+		// only the usual cancelled-run salvage, none of the yield.
 		expect(result.output).not.toContain("do the work");
 		expect(result.extractedToolData?.yield).toBeUndefined();
-		expect(await Bun.file(path.join(tempDir.path(), `${id}.md`)).exists()).toBe(false);
+		expect(await Bun.file(path.join(tempDir.path(), `${id}.md`)).text()).not.toContain("do the work");
 	});
 
 	it("does not publish a yield the run was cancelled on before handlers could judge it", async () => {
@@ -1032,44 +1095,11 @@ describe("runSubprocess subagent_stop", () => {
 		const result = await runSubprocess({ ...baseOptions(id), signal: controller.signal });
 
 		expect(harness.events).toHaveLength(0);
-		expect(result.exitCode).not.toBe(0);
+		expect(result.aborted).toBe(true);
+		expect(result.error).not.toBe(SUBAGENT_STOP_REFUSAL_UNRESOLVED);
 		expect(AgentRegistry.global().get(id)?.lifecycle?.acceptedAt).toBeUndefined();
 		expect(result.output).not.toContain("UNJUDGED-PAYLOAD");
-		expect(await Bun.file(path.join(tempDir.path(), `${id}.md`)).exists()).toBe(false);
-	});
-
-	it("drops an allowed candidate when the run is cancelled while the pass revalidates it", async () => {
-		const id = "CancelledDuringRevalidation";
-		const controller = new AbortController();
-		let stopAnswered = false;
-		let cancelled = false;
-		const harness = createHarness({
-			hasStopHandlers: true,
-			onPrompt: call => call.yieldTerminal({ report: call.text }),
-			onStop: async () => {
-				stopAnswered = true;
-				return undefined;
-			},
-			// After handlers allowed, the pass lets the child settle to see whether the candidate
-			// changed; the run is cancelled right there, so the allow was never revalidated.
-			onWaitForIdle: async () => {
-				if (!stopAnswered || cancelled) return;
-				cancelled = true;
-				controller.abort();
-				await Promise.withResolvers<void>().promise;
-			},
-		});
-		mockCreateAgentSession(harness.session);
-		registerRunning(id, harness.session);
-
-		const result = await runSubprocess({ ...baseOptions(id), signal: controller.signal });
-
-		expect(harness.events).toHaveLength(1);
-		expect(result.aborted).toBe(true);
-		expect(result.exitCode).not.toBe(0);
-		expect(AgentRegistry.global().get(id)?.lifecycle?.acceptedAt).toBeUndefined();
-		expect(result.output).not.toContain("do the work");
-		expect(await Bun.file(path.join(tempDir.path(), `${id}.md`)).exists()).toBe(false);
+		expect(await Bun.file(path.join(tempDir.path(), `${id}.md`)).text()).not.toContain("UNJUDGED-PAYLOAD");
 	});
 
 	it("gates a resumed worker's turn through the same stop pass", async () => {

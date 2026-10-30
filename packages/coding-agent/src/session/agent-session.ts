@@ -771,12 +771,35 @@ type PromptDispatchOutcome = { sessionClaimed: boolean };
 
 /** One turn bracketed by the installed turn observer; see {@link AgentSession} `#startTurnObservation`. */
 type TurnObservation = {
-	finish: (error?: unknown) => void | Promise<void>;
+	/** `superseded`: a newer turn closed the observation before its owned async work settled. */
+	finish: (error?: unknown, superseded?: boolean) => void | Promise<void>;
 	/** The observed turn returned; the observation only waits for owned async work. */
 	turnEnded: boolean;
 	closed: boolean;
 	turnError: unknown;
 };
+
+/** One {@link AgentSession.holdForStopPass} hold. */
+type StopPassHoldState = {
+	readonly cancel: AbortController;
+	/** Handlers are judging the candidate: idle deliveries wait so it cannot change under the verdict. */
+	consulting: boolean;
+};
+
+/**
+ * A `subagent_stop` pass's hold on the session, from the start of the pass until
+ * the run's result is published (see {@link AgentSession.holdForStopPass}).
+ */
+export interface StopPassHold {
+	/** Aborts when an explicit user prompt cancels the pass. */
+	readonly signal: AbortSignal;
+	/** Handlers are about to judge the candidate: hold idle deliveries until the next {@link prompt} or {@link release}. */
+	consult(): void;
+	/** Run the holder's own turn (a continuation); any other prompt waits for the release. */
+	prompt(text: string, options?: PromptOptions): Promise<boolean>;
+	/** Let other turns run again. Idempotent. */
+	release(): void;
+}
 
 type ActiveAgentContinue = {
 	schedulerToken: number;
@@ -1105,7 +1128,7 @@ export class AgentSession implements SettingsScope {
 
 	readonly #irc: IrcBridge;
 	#ircWakeTurnObserver:
-		| ((records: AgentMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined)
+		| ((records: AgentMessage[]) => ((error?: unknown, superseded?: boolean) => void | Promise<void>) | undefined)
 		| undefined;
 	/** Active {@link holdIrcWakes} holds. */
 	#ircWakeHolds = 0;
@@ -1113,6 +1136,10 @@ export class AgentSession implements SettingsScope {
 	#ircWakesAwaitingCompaction = 0;
 	/** Set while an `awaitingAssignment` session has not started its first prompt; see {@link #wakeForIrc}. */
 	#ircAwaitingAssignment = false;
+	/** Active {@link holdForStopPass} holds. */
+	readonly #stopPassHolds = new Set<StopPassHoldState>();
+	/** Settles whenever a stop-pass hold is released or stops consulting. */
+	#stopPassChanged = Promise.withResolvers<void>();
 	/** The observation whose monitor is attached; at most one at a time. */
 	#openTurnObservation: TurnObservation | undefined;
 	// Agent identity (registry id) used for IRC routing and job ownership.
@@ -1478,6 +1505,8 @@ export class AgentSession implements SettingsScope {
 		if (this.#modeExitDrainSuppressionDepth > 0 || this.#isDisposed || this.isStreaming || !this.#irc.hasPending()) {
 			return;
 		}
+		// A `subagent_stop` pass holds the session; its release resumes these.
+		if (this.#stopPassHolds.size > 0) return;
 		// A pooled yield contract means a pool turn owns this worker (installed,
 		// dispatching, or dispatch-imminent). Waking here would either emit keyed
 		// yields against its items or re-queue into the deferral path forever, so
@@ -1617,6 +1646,12 @@ export class AgentSession implements SettingsScope {
 				});
 			return;
 		}
+		// A `subagent_stop` pass holds the session until its verdict is published:
+		// every wake, the parent's included, waits for a turn of its own.
+		if (this.#stopPassHolds.size > 0) {
+			this.#irc.queueDeferredWake(wakeRecords);
+			return;
+		}
 		// While a driven run holds wakes, its monitor would take this turn's answer
 		// as the run's result: park a non-parent message for a turn of its own.
 		let records = wakeRecords;
@@ -1680,6 +1715,10 @@ export class AgentSession implements SettingsScope {
 					logger.debug("IRC wake turn deferred behind the running turn");
 					return;
 				}
+				if (this.#stopPassHolds.size > 0) {
+					this.#irc.queueDeferredWake(records);
+					return;
+				}
 				observation = this.#startTurnObservation(records);
 				return this.agent.prompt(records);
 			})
@@ -1730,13 +1769,16 @@ export class AgentSession implements SettingsScope {
 	 * it is finalized now with its own turn's outcome, and the new turn gets a fresh
 	 * monitor. Later async-result continuations then belong to the new turn. An
 	 * observation whose turn is still running means the caller is about to lose the
-	 * prompt race (AgentBusyError), so nothing is started.
+	 * prompt race (AgentBusyError), so nothing is started. Under a
+	 * {@link holdForStopPass} hold nothing is started either: the holder's monitor
+	 * observes every turn until the release.
 	 */
 	#startTurnObservation(records: AgentMessage[]): TurnObservation | undefined {
+		if (this.#stopPassHolds.size > 0) return undefined;
 		const open = this.#openTurnObservation;
 		if (open) {
 			if (!open.turnEnded) return undefined;
-			void this.#closeTurnObservation(open);
+			void this.#closeTurnObservation(open, true);
 		}
 		let finish: TurnObservation["finish"] | undefined;
 		try {
@@ -1778,12 +1820,12 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/** Runs an observation's finish exactly once; the observer detaches synchronously before the first await. */
-	async #closeTurnObservation(observation: TurnObservation): Promise<void> {
+	async #closeTurnObservation(observation: TurnObservation, superseded = false): Promise<void> {
 		if (observation.closed) return;
 		observation.closed = true;
 		if (this.#openTurnObservation === observation) this.#openTurnObservation = undefined;
 		try {
-			await observation.finish(observation.turnError);
+			await observation.finish(observation.turnError, superseded);
 		} catch (error) {
 			logger.warn("Turn observer failed to finish", { error: String(error) });
 		}
@@ -2361,6 +2403,13 @@ export class AgentSession implements SettingsScope {
 								this.yieldQueue.cancelIdleFlushScheduling();
 								return;
 							}
+						}
+						// A `subagent_stop` pass is judging this session's candidate: a delivery
+						// turn now would change it under the verdict. The entries stay queued; the
+						// hold re-requests the flush once turns may run again.
+						if (this.#stopPassConsulting()) {
+							this.yieldQueue.cancelIdleFlushScheduling();
+							return;
 						}
 						await run();
 					},
@@ -8136,6 +8185,8 @@ export class AgentSession implements SettingsScope {
 	 * @throws {AgentBusyError} while a turn runs.
 	 */
 	async resume(): Promise<void> {
+		// A user continue cancels a held `subagent_stop` pass, like a typed prompt.
+		await this.#waitOutStopPasses(true);
 		const prompt = this.#recovery.prepareResume();
 		if (!prompt) {
 			await this.prompt(manualContinuePrompt, {
@@ -8164,7 +8215,7 @@ export class AgentSession implements SettingsScope {
 		this.#toolChoiceQueue.removeByLabel("plan-mode-decision");
 	}
 
-	async #prompt(text: string, options?: PromptOptions): Promise<boolean> {
+	async #prompt(text: string, options?: PromptOptions, holder?: StopPassHoldState): Promise<boolean> {
 		// Stamp the operator's submission instant before ANY async preprocessing —
 		// command execution, image normalization, vision-model description — so the
 		// prompt→yield delta includes the whole wait, whatever path the prompt takes.
@@ -8189,9 +8240,9 @@ export class AgentSession implements SettingsScope {
 			// Locally handled commands and failed dispatches release that claim.
 			const release = await this.#maintenance.waitForMaintenanceCleanup();
 			const outcome: PromptDispatchOutcome = { sessionClaimed: false };
-			if (!release) return await this.#dispatchPrompt(text, options, submittedAt, outcome);
+			if (!release) return await this.#dispatchPrompt(text, options, submittedAt, outcome, holder);
 			try {
-				return await this.#dispatchPrompt(text, options, submittedAt, outcome);
+				return await this.#dispatchPrompt(text, options, submittedAt, outcome, holder);
 			} finally {
 				release(outcome.sessionClaimed);
 			}
@@ -8215,6 +8266,7 @@ export class AgentSession implements SettingsScope {
 		options: PromptOptions | undefined,
 		submittedAt: number,
 		outcome: PromptDispatchOutcome,
+		holder?: StopPassHoldState,
 	): Promise<boolean> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		// Slash/custom-command handling below rewrites `text`; keep the original
@@ -8294,6 +8346,13 @@ export class AgentSession implements SettingsScope {
 				this.#promptDropped?.({ text: typedText, images: options?.images });
 			}
 			return true;
+		}
+
+		// A `subagent_stop` pass holds this session until its verdict is published.
+		// Only the holder's own turns run meanwhile: an explicit user prompt cancels
+		// the pass, any other prompt waits it out.
+		if (!holder && this.#stopPassHolds.size > 0) {
+			await this.#waitOutStopPasses(options?.userInitiated === true || promptAttribution === "user");
 		}
 
 		// Captured before the normalization/vision-description awaits below so an
@@ -8487,6 +8546,8 @@ export class AgentSession implements SettingsScope {
 		// Same barrier/claim protocol as prompt(): skill invocations, collab peer
 		// prompts and the CLI initial message must not start during idle/manual
 		// compaction or before a handoff commits its history.
+		// A held `subagent_stop` pass: a user skill prompt cancels it, any other waits it out.
+		await this.#waitOutStopPasses(message.attribution === "user");
 		const release = await this.#maintenance.waitForMaintenanceCleanup();
 		const outcome: PromptDispatchOutcome = { sessionClaimed: false };
 		if (!release) return this.#dispatchCustomPrompt(message, options, outcome);
@@ -9777,6 +9838,8 @@ export class AgentSession implements SettingsScope {
 		if (
 			this.#queuedMessageDrainScheduled ||
 			this.#modeExitDrainSuppressionDepth > 0 ||
+			// A `subagent_stop` pass holds the session; its release drains the queue.
+			this.#stopPassHolds.size > 0 ||
 			this.#queuedMessageDrainBlocked ||
 			!this.#canAutoContinueForFollowUp() ||
 			!this.agent.hasQueuedMessages()
@@ -9790,6 +9853,7 @@ export class AgentSession implements SettingsScope {
 				this.#queuedMessageDrainScheduled = false;
 				return (
 					this.#modeExitDrainSuppressionDepth === 0 &&
+					this.#stopPassHolds.size === 0 &&
 					this.#canAutoContinueForFollowUp() &&
 					this.agent.hasQueuedMessages()
 				);
@@ -10173,6 +10237,10 @@ export class AgentSession implements SettingsScope {
 			timestamp: Date.now(),
 		};
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
+		// A turn-starting message waits out a held `subagent_stop` pass; a user's cancels it.
+		if (options?.triggerTurn && !this.isStreaming) {
+			await this.#waitOutStopPasses(normalizedAppMessage.attribution === "user");
+		}
 		if (this.isStreaming) {
 			// Queued into a turn the agent owns: that turn holds the session. Busy only
 			// from another prompt's setup claims nothing (that prompt decides).
@@ -12680,9 +12748,13 @@ export class AgentSession implements SettingsScope {
 	/**
 	 * Installs task-executor monitoring around kept-alive subagent turns that
 	 * have no executor caller: IRC wakes, focused prompts and bare continuations.
+	 * The returned finish runs once per turn; `superseded` is true when a newer
+	 * turn closed the observation before its owned async work settled.
 	 */
 	setIrcWakeTurnObserver(
-		observer: ((records: AgentMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined) | undefined,
+		observer:
+			| ((records: AgentMessage[]) => ((error?: unknown, superseded?: boolean) => void | Promise<void>) | undefined)
+			| undefined,
 	): void {
 		this.#ircWakeTurnObserver = observer;
 	}
@@ -12705,13 +12777,104 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
+	 * Holds the session for a `subagent_stop` pass, from the start of the pass
+	 * until the run's result is published, so the candidate the handlers judge is
+	 * the one published. Until the release no other turn starts here: IRC wakes
+	 * (the parent's included) park as deferred wakes, the queued-message drain
+	 * waits, idle deliveries wait while handlers consult, no turn observation
+	 * opens (the holder's monitor sees async-result turns between its
+	 * continuations), and prompts other than {@link StopPassHold.prompt} wait. An
+	 * explicit user prompt also aborts {@link StopPassHold.signal}, cancelling the
+	 * pass. The hold spans refusal continuations and their owned async work, so
+	 * the run's cancellation and runtime limit bound it, not the handler timeout.
+	 */
+	holdForStopPass(): StopPassHold {
+		const state: StopPassHoldState = { cancel: new AbortController(), consulting: false };
+		this.#stopPassHolds.add(state);
+		const stopConsulting = (): void => {
+			if (!state.consulting) return;
+			state.consulting = false;
+			this.#notifyStopPassChanged();
+			this.yieldQueue.requestIdleFlush();
+		};
+		let released = false;
+		return {
+			signal: state.cancel.signal,
+			consult: () => {
+				state.consulting = true;
+			},
+			prompt: async (text, options) => {
+				try {
+					return await this.#admitSubmission(() => this.#prompt(text, options, state));
+				} finally {
+					// Deliveries held during the verdict now reach the continuation's settle.
+					stopConsulting();
+				}
+			},
+			release: () => {
+				if (released) return;
+				released = true;
+				stopConsulting();
+				this.#stopPassHolds.delete(state);
+				this.#notifyStopPassChanged();
+				if (this.#stopPassHolds.size > 0) return;
+				this.#scheduleIdleQueueDrain();
+				this.yieldQueue.requestIdleFlush();
+				// A prompt that waited out the hold goes first; parked wakes follow it.
+				if (this.hasAdmittedSubmission) {
+					void this.waitForAdmittedSubmissions().then(() => this.#resumeStrandedIrcAsides());
+				} else {
+					this.#resumeStrandedIrcAsides();
+				}
+			},
+		};
+	}
+
+	/** Resolves once no {@link holdForStopPass} hold is active, or once `signal` aborts. */
+	waitForStopPasses(signal?: AbortSignal): Promise<void> {
+		return this.#waitOutStopPasses(false, signal);
+	}
+
+	/** Waits until no stop-pass hold is active; `cancel` (an explicit user prompt) first cancels every held pass. */
+	async #waitOutStopPasses(cancel: boolean, signal?: AbortSignal): Promise<void> {
+		if (this.#stopPassHolds.size === 0) return;
+		const aborted = Promise.withResolvers<void>();
+		const onAbort = (): void => aborted.resolve();
+		signal?.addEventListener("abort", onAbort, { once: true });
+		try {
+			while (this.#stopPassHolds.size > 0 && !signal?.aborted) {
+				if (cancel) for (const hold of this.#stopPassHolds) hold.cancel.abort();
+				await Promise.race([this.#stopPassChanged.promise, aborted.promise]);
+			}
+		} finally {
+			signal?.removeEventListener("abort", onAbort);
+		}
+	}
+
+	#stopPassConsulting(): boolean {
+		for (const hold of this.#stopPassHolds) if (hold.consulting) return true;
+		return false;
+	}
+
+	#notifyStopPassChanged(): void {
+		const changed = this.#stopPassChanged;
+		this.#stopPassChanged = Promise.withResolvers<void>();
+		changed.resolve();
+	}
+
+	/**
 	 * Whether IRC messages still wait here for a turn: under a {@link holdIrcWakes}
-	 * hold, behind a running idle compaction, or queued (e.g. behind a pooled yield
-	 * contract). The lifecycle must not park this session yet, since parking would
-	 * drop them.
+	 * or {@link holdForStopPass} hold, behind a running idle compaction, or queued
+	 * (e.g. behind a pooled yield contract). The lifecycle must not park this
+	 * session yet, since parking would drop them.
 	 */
 	get ircWakesPending(): boolean {
-		return this.#ircWakeHolds > 0 || this.#ircWakesAwaitingCompaction > 0 || this.#irc.hasPending();
+		return (
+			this.#ircWakeHolds > 0 ||
+			this.#stopPassHolds.size > 0 ||
+			this.#ircWakesAwaitingCompaction > 0 ||
+			this.#irc.hasPending()
+		);
 	}
 
 	/** Emits an IRC relay observation for UI rendering without persisting it. */

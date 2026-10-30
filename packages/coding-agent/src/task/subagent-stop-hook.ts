@@ -19,7 +19,7 @@
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import { resolveStopContinuationText } from "../extensibility/extensions/stop-continuation";
 import subagentStopBlockedPrompt from "../prompts/system/subagent-stop-blocked.md" with { type: "text" };
-import type { AgentSession } from "../session/agent-session";
+import type { AgentSession, StopPassHold } from "../session/agent-session";
 
 /**
  * Advisory continuations one drive (initial run, follow-up turn, or wake turn)
@@ -49,10 +49,8 @@ export type SubagentStopOutcome =
 	| { kind: "allow" }
 	/** Handlers refused the candidate: run the same session again with `text`. */
 	| { kind: "continue"; text: string }
-	/** The run was cancelled while handlers were consulting: the candidate was never confirmed. */
-	| { kind: "aborted" }
-	/** The candidate changed while handlers were consulting: the verdict is void and the run's current candidate is still unjudged. */
-	| { kind: "stale" };
+	/** The run or an explicit user prompt cancelled the pass before its verdict: the candidate was never judged. */
+	| { kind: "aborted" };
 
 /**
  * Per-run `subagent_stop` state: the continuation allowance, `stop_hook_active`,
@@ -75,19 +73,19 @@ export class SubagentStopHook {
 	/**
 	 * Offer a candidate result (a terminal yield, or a message-result run's final report) to `subagent_stop` handlers.
 	 *
-	 * Handler failures are isolated by the runner (reported through its error
-	 * channel, never thrown here), and a run cancelled mid-pass reports
-	 * {@link SubagentStopOutcome} `aborted` so the caller can drop the candidate
-	 * instead of accepting one the handlers never confirmed.
-	 *
-	 * `candidateChanged` runs once the handlers answered and resolves true when
-	 * the candidate they judged is no longer the run's current one (see
-	 * {@link SubagentStopOutcome} `stale`).
+	 * The caller holds the session (`hold`), so the candidate cannot change while
+	 * handlers consult. Handler failures are isolated by the runner (reported
+	 * through its error channel, never thrown here), and a pass the run or an
+	 * explicit user prompt cancelled reports {@link SubagentStopOutcome}
+	 * `aborted` so the caller can drop the candidate instead of accepting one the
+	 * handlers never confirmed.
 	 */
-	async run(session: AgentSession, candidateChanged?: () => Promise<boolean>): Promise<SubagentStopOutcome> {
+	async run(session: AgentSession, hold: StopPassHold): Promise<SubagentStopOutcome> {
 		const runner = session.extensionRunner;
 		if (!runner?.hasHandlers("subagent_stop")) return { kind: "allow" };
-		if (this.#signal.aborted) return { kind: "aborted" };
+		const signal = AbortSignal.any([this.#signal, hold.signal]);
+		if (signal.aborted) return { kind: "aborted" };
+		hold.consult();
 		const result = await runner.emitSubagentStop({
 			agent_id: this.#identity.agentId,
 			agent_type: this.#identity.agentType,
@@ -98,27 +96,11 @@ export class SubagentStopHook {
 			messages: [...session.messages],
 			last_assistant_message: session.getLastAssistantMessage(),
 			stop_hook_active: this.#active,
-			signal: this.#signal,
+			signal,
 		});
 		// Cancelled mid-pass: the candidate was never confirmed, so the caller
 		// must drop it rather than accept a yield a handler was still judging.
-		if (this.#signal.aborted) return { kind: "aborted" };
-		// The verdict is about the candidate the handlers were shown. When the run
-		// moved on while they consulted, it decides nothing about the candidate the
-		// run now has, so void it before it spends any state: a refusal must not
-		// count as a continuation, nor leave `stop_hook_active` set for the pass
-		// that judges the new candidate.
-		if (candidateChanged) {
-			let changed = false;
-			try {
-				changed = await candidateChanged();
-			} catch (error) {
-				if (!this.#signal.aborted) throw error;
-			}
-			// Cancelled while revalidating: the verdict never covered the candidate the run would publish.
-			if (this.#signal.aborted) return { kind: "aborted" };
-			if (changed) return { kind: "stale" };
-		}
+		if (signal.aborted) return { kind: "aborted" };
 		// The diagnostic is only consulted for a reason-less refusal; render it only for a refusal.
 		const blockedFallback =
 			result?.decision === "block" ? prompt.render(subagentStopBlockedPrompt, { structured: this.#structured }) : "";
