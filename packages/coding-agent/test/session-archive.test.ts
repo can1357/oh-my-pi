@@ -677,7 +677,6 @@ test("the staging directory a killed restore left stays where it is, reported, a
 	// Only the run that made a staging directory removes it; a later run has
 	// a record, which anybody running as this user could have written.
 	expect(standing?.isDirectory()).toBe(true);
-	expect(result.archive?.deletedTemps).toBe(0);
 	expect(result.archive?.stagingResidue).toEqual([ground]);
 });
 
@@ -693,9 +692,14 @@ test("a restore does not carry home, and does not remove, a staging directory a 
 	await ground.handle.writeFile("HALF A COPY");
 	await ground.handle.close();
 
-	const restored = await restoreArchivedSession(archiveFile, root);
+	const restored = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
 
-	expect(restored.notRestored).toEqual([]);
+	// Leaving something out is not a restore that finished: it is named, the
+	// record stays down, the command fails, and nothing advises removing it.
+	const errors = restored.restore?.errors.join("\n") ?? "";
+	expect(errors).toContain(ground.dir);
+	expect(errors).not.toContain("by hand");
+	expect(await Bun.file(restoreRecordPath(archiveFile)).exists()).toBe(true);
 	expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
 	expect(await Bun.file(ground.file).text()).toBe("HALF A COPY");
 });
@@ -3408,9 +3412,9 @@ test("a recorded staging directory that could not be cleared is not carried home
 
 	const restored = await restoreArchivedSession(archiveFile, root);
 
-	expect(restored.notRestored).toEqual([]);
+	expect(restored.notRestored.join("\n")).toContain(ground.dir);
 	expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
-	expect(await Bun.file(restoreRecordPath(archiveFile)).exists()).toBe(false);
+	expect(await Bun.file(restoreRecordPath(archiveFile)).exists()).toBe(true);
 	expect(await Bun.file(path.join(ground.dir, "planted")).text()).toBe("PLANTED");
 });
 
@@ -3429,7 +3433,8 @@ test("a staging directory a run recorded only its intent for is left and not car
 
 	const restored = await restoreArchivedSession(archiveFile, root);
 
-	expect(restored.notRestored).toEqual([]);
+	expect(restored.notRestored.join("\n")).toContain(dir);
+	expect(await Bun.file(restoreRecordPath(archiveFile)).exists()).toBe(true);
 	expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
 	expect(await Bun.file(file).exists()).toBe(true);
 });
@@ -3741,3 +3746,92 @@ test("a restore preview reports a FIFO where an archived artifact belongs", asyn
 	expect(applied.restore?.errors.length).toBeGreaterThan(0);
 	expect(preview.restore?.errors.join("\n")).toContain(path.join(liveArtifacts, "a.log"));
 });
+
+test("re-archiving changes the mode of the archived transcript only, never what its name was rebound to", async () => {
+	await archiveOnly();
+	const unrelated = path.join(root, "private.txt");
+	await Bun.write(unrelated, "DIFFERENT PRIVATE FILE");
+	await fs.chmod(unrelated, 0o600);
+	await fs.chmod(sessionFile, 0o664);
+	await fs.chmod(archiveFile, 0o644);
+
+	// As the run opens the archived transcript to give it the live mode, the
+	// name is moved aside and pointed at somebody else's private file.
+	const realOpen = fs.open;
+	let rebound = false;
+	const open = spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
+		if (!rebound && String(target) === archiveFile) {
+			rebound = true;
+			await fs.rename(archiveFile, `${archiveFile}.held`);
+			await fs.symlink(unrelated, archiveFile);
+		}
+		return await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
+	}) as typeof fs.open);
+	try {
+		await archiveOnly();
+	} finally {
+		open.mockRestore();
+	}
+
+	expect(rebound).toBe(true);
+	expect((await fs.stat(unrelated)).mode & 0o777).toBe(0o600);
+	expect(await Bun.file(unrelated).text()).toBe("DIFFERENT PRIVATE FILE");
+});
+
+for (const subject of ["an artifact", "the transcript"] as const) {
+	test(`archiving gives ${subject} the live mode as it is when the archive is written, not as it was earlier`, async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+		await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+		await fs.chmod(sessionFile, 0o664);
+		await fs.chmod(path.join(liveArtifacts, "a.log"), 0o664);
+		const live = subject === "an artifact" ? path.join(liveArtifacts, "a.log") : sessionFile;
+		const archived = subject === "an artifact" ? path.join(archivedArtifacts, "a.log") : archiveFile;
+
+		// Tightened the moment the run first opens the archived name.
+		const realOpen = fs.open;
+		let tightened = false;
+		const open = spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
+			const handle = await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
+			if (!tightened && String(target) === archived) {
+				tightened = true;
+				await fs.chmod(live, 0o600);
+			}
+			return handle;
+		}) as typeof fs.open);
+		try {
+			await archiveOnly();
+		} finally {
+			open.mockRestore();
+		}
+
+		expect(tightened).toBe(true);
+		expect((await fs.stat(archived)).mode & 0o777).toBe(0o600);
+	});
+}
+
+for (const apply of [false, true]) {
+	test(`a FIFO among the staging records is refused rather than waited on (${apply ? "apply" : "preview"})`, async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+		await archiveEverything();
+		expect(await Bun.spawn(["mkfifo", path.join(stagingLedgerDir(root), "planted.json")]).exited).toBe(0);
+
+		const run = runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply, json: true } });
+		// A real timer, because the defect is a blocking open on a FIFO in the
+		// thread pool: no fake clock reaches it, and it raises no signal to
+		// await. A passing run resolves first and pays nothing.
+		const outcome = await Promise.race([run, Bun.sleep(5_000).then(() => "hung" as const)]);
+		if (outcome === "hung") {
+			const writer = await fs.open(
+				path.join(stagingLedgerDir(root), "planted.json"),
+				fsConstants.O_WRONLY | fsConstants.O_NONBLOCK,
+			);
+			await writer.close();
+			await run.catch(() => undefined);
+		}
+
+		expect(outcome).not.toBe("hung");
+		if (outcome !== "hung") expect(outcome.restore?.errors.join("\n")).toContain("planted.json");
+	}, 15_000);
+}

@@ -151,8 +151,6 @@ export interface RestoredSession {
 	artifactsRestored: boolean;
 	/** What restoring could not bring back, in words a caller can print. */
 	notRestored: string[];
-	/** Staging directories killed runs recorded in the archived tree, left out of the live tree and left where they are. */
-	stagingResidue: string[];
 }
 
 /**
@@ -224,9 +222,10 @@ export async function inflateArchivedTranscript(
 ): Promise<number> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
 	// A directory this run mints and records, so the stage is a file of this
-	// run's own making and a kill leaves a record to reclaim it by. The
-	// transcript keeps the archive's mode, which is the live transcript's: a
-	// private session must not come back readable by more than it was.
+	// run's own making, and a later restore leaves it out of the live tree if
+	// this run is killed before removing it. The transcript keeps the
+	// archive's mode, which is the live transcript's: a private session must
+	// not come back readable by more than it was.
 	const mode = (await fs.stat(source)).mode & 0o7777;
 	const ground = await mintStagingGround(destination, ledger, mode);
 	try {
@@ -995,8 +994,8 @@ async function copyEntryDereferenced(
 		);
 	}
 	// Staged in a directory this run mints and records, so the stage is a
-	// file of this run's own making and a kill leaves a record to reclaim it
-	// by.
+	// file of this run's own making, and a later restore leaves it out of the
+	// live tree if this run is killed before removing it.
 	const ground = await mintStagingGround(destination, ledger, stat.mode & 0o7777);
 	try {
 		const archived = await fs.open(source, "r");
@@ -1341,7 +1340,17 @@ async function readStagingRecords(
 			continue;
 		}
 		try {
-			found.records.push({ path: record, entry: parseStagingRecord(await fs.readFile(record, "utf8")) });
+			// Non-blocking and regular files only: a FIFO among the records
+			// must refuse, not wait for a writer that never comes.
+			const handle = await openRegularFile(record);
+			if (!handle) throw new Error("it is not a regular file");
+			let text: string;
+			try {
+				text = await handle.readFile("utf8");
+			} finally {
+				await handle.close().catch(() => undefined);
+			}
+			found.records.push({ path: record, entry: parseStagingRecord(text) });
 		} catch (error) {
 			return { ...found, failure: `${record} could not be read: ${errorText(error)}` };
 		}
@@ -1500,22 +1509,16 @@ export async function stagingResidueUnder(agentDir: string, root: string): Promi
  * enough of it to decide whether an unfinished restore is still unfinished.
  * A FIFO, a device or a directory standing there is not the artifact: a
  * reader of it waits or fails instead of reading the archived bytes, so
- * the restore that would bring them home is still outstanding. A recorded
- * staging directory is not an artifact and is not outstanding.
+ * the restore that would bring them home is still outstanding. So is
+ * anything in a staging directory a record names: a restore leaves it out,
+ * and leaving something out is not a finished restore.
  */
-export async function archivedPathsWithoutLiveCopies(
-	archiveFile: string,
-	sessionFile: string,
-	agentDir: string,
-): Promise<string[]> {
+export async function archivedPathsWithoutLiveCopies(archiveFile: string, sessionFile: string): Promise<string[]> {
 	const archiveArtifacts = archiveFile.slice(0, -ARCHIVED_SESSION_SUFFIX.length);
 	const liveArtifacts = sessionFile.slice(0, -SESSION_SUFFIX.length);
-	const isResidue = await stagingResidueUnder(agentDir, archiveArtifacts);
 	const outstanding: string[] = [];
 	for (const file of await treeFiles(archiveArtifacts)) {
 		const name = path.relative(archiveArtifacts, file);
-		const parts = name.split(path.sep);
-		if (parts.some((_, depth) => isResidue(path.join(archiveArtifacts, ...parts.slice(0, depth + 1))))) continue;
 		if (!(await statIfPresent(path.join(liveArtifacts, name)))?.isFile()) outstanding.push(name);
 	}
 	return outstanding.sort();
@@ -1834,8 +1837,9 @@ export function agentDirFlag(agentDir?: string): string {
  * artifact tree following it, the session is half in each tree, and an
  * archive phase running in that window would copy the halves past each
  * other. Holding it also means every staging record standing in the ledger
- * is a dead run's; the directories they name are left out of the live tree
- * and left where they are — see {@link stagingResidueUnder}.
+ * is a dead run's; the directories they name are left out of the live tree,
+ * left where they are, and reported as not restored — see
+ * {@link stagingResidueUnder}.
  *
  * Ownership leases are taken first, for every transcript the restore moves —
  * the session's own, read from its header, and every nested one in either
@@ -1944,7 +1948,6 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 		}
 
 		const notRestored: string[] = [];
-		const stagingResidue: string[] = [];
 		const hasArtifacts = (await statIfPresent(archiveArtifacts)) !== undefined;
 		let artifactsRestored = !hasArtifacts && (await statIfPresent(liveArtifacts)) !== undefined;
 		// Neither copy goes. The restore publishes the session into the live
@@ -1956,9 +1959,7 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 		const leasedOwners = await ownerSignature(owners);
 		if (hasArtifacts) {
 			try {
-				stagingResidue.push(
-					...(await copyTreeDereferenced(archiveArtifacts, liveArtifacts, stagingAgentDir, notes)),
-				);
+				const leftOut = await copyTreeDereferenced(archiveArtifacts, liveArtifacts, stagingAgentDir, notes);
 				if (!(await leases.refresh())) throw noOwners();
 				if ((await ownerSignature(owners)) !== leasedOwners) {
 					throw new Error(
@@ -1967,7 +1968,18 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 							`run \`${restoreCommand}\` again`,
 					);
 				}
-				artifactsRestored = true;
+				// Leaving anything out is not a finished restore: each directory
+				// is named, the record stays down and the command fails. The
+				// directory stays in the archive, and nothing here suggests
+				// removing it.
+				for (const dir of leftOut) {
+					notRestored.push(
+						`${dir}: a staging record in ${ledger} names it, so it was left in the archive, where it still is, ` +
+							`instead of being carried home; if no gc run made it, remove that record — not the directory — ` +
+							`and restore again`,
+					);
+				}
+				artifactsRestored = leftOut.length === 0;
 			} catch (error) {
 				notRestored.push(
 					`the artifact tree (subagent transcripts, tool output) at ${archiveArtifacts}: ${
@@ -1979,7 +1991,7 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 		notRestored.push(...notes);
 		if (notRestored.length === 0) await fs.rm(record, { force: true });
 		else await fs.writeFile(record, `${restoreCommand}\n${notRestored.join("\n")}\n`);
-		return { sessionPath, archivePath: archiveFile, bytes, artifactsRestored, notRestored, stagingResidue };
+		return { sessionPath, archivePath: archiveFile, bytes, artifactsRestored, notRestored };
 	} finally {
 		leases.release();
 	}

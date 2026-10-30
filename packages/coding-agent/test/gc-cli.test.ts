@@ -781,8 +781,8 @@ describe("runGcCommand history checkpoint", () => {
 	}, 10_000);
 });
 
-describe("runGcCommand session staging sweep", () => {
-	test("removes rewrite temps abandoned by killed writers, keeping in-flight and unrelated ones", async () => {
+describe("runGcCommand session staging", () => {
+	test("leaves every staging-shaped file in the sessions tree alone, aged or not", async () => {
 		const live = await writeSession(root, "project", "live", "pending");
 		const abandoned = sessionStagingPath(live);
 		const inFlight = sessionStagingPath(live);
@@ -795,44 +795,21 @@ describe("runGcCommand session staging sweep", () => {
 		await Bun.write(path.join(getCustomSessionFilesDir(root), "session-1"), externalFile);
 		const externalAbandoned = sessionStagingPath(externalFile);
 		const unrelated = path.join(externalDir, ".notes.0123456789abcdef.tmp");
+		// Names a killed session writer could have left, and names anybody
+		// could have chosen — with its only bytes inside. Nothing records
+		// which, so none of them is the archive phase's to delete.
 		for (const file of [abandoned, nestedAbandoned, externalAbandoned, unrelated]) {
-			await Bun.write(file, "partial");
+			await Bun.write(file, "ONLY COPY");
 			await agePath(file);
 		}
-		await Bun.write(inFlight, "partial");
-		const flags = { agentDir: root, archive: true, forwardOnly: true };
+		await Bun.write(inFlight, "ONLY COPY");
 
-		const dryRun = await runGcCommand({ flags });
-		expect(dryRun.archive).toMatchObject({ wouldDeleteTemps: 3, deletedTemps: 0, tempBytes: 21 });
-		expect(await Bun.file(abandoned).exists()).toBe(true);
+		const applied = await runGcCommand({ flags: { agentDir: root, archive: true, forwardOnly: true, apply: true } });
 
-		const applied = await runGcCommand({ flags: { ...flags, apply: true } });
-		expect(applied.archive).toMatchObject({ wouldDeleteTemps: 3, deletedTemps: 3, errors: [] });
-		for (const removed of [abandoned, nestedAbandoned, externalAbandoned]) {
-			expect(await Bun.file(removed).exists()).toBe(false);
-		}
-		for (const kept of [live, inFlight, externalFile, unrelated]) {
+		expect(applied.archive?.errors).toEqual([]);
+		for (const kept of [live, abandoned, nestedAbandoned, externalAbandoned, unrelated, inFlight, externalFile]) {
 			expect(await Bun.file(kept).exists()).toBe(true);
 		}
-	});
-	test("sweeps the first-save temp of a missing registered session before its stale marker is pruned", async () => {
-		const target = path.join(root, "external-sessions", "first-save");
-		const marker = path.join(getCustomSessionFilesDir(root), "first-save");
-		await Bun.write(marker, target);
-		await agePath(marker, 2);
-		const abandoned = sessionStagingPath(target);
-		await Bun.write(abandoned, "partial");
-		await agePath(abandoned);
-
-		const result = await runGcCommand({
-			flags: { agentDir: root, archive: true, forwardOnly: true, stale: true, apply: true },
-		});
-
-		expect(result.archive).toMatchObject({ wouldDeleteTemps: 1, deletedTemps: 1, errors: [] });
-		expect(result.stale?.danglingMarkers).toBe(1);
-		expect(await Bun.file(marker).exists()).toBe(false);
-		expect(await Bun.file(abandoned).exists()).toBe(false);
-		expect(await Bun.file(target).exists()).toBe(false);
 	});
 
 	test("leaves staging-shaped files in the archive alone when no run recorded staging them", async () => {
@@ -866,7 +843,7 @@ describe("runGcCommand session staging sweep", () => {
 			},
 		});
 
-		expect(result.archive).toMatchObject({ archived: 1, wouldDeleteTemps: 0, deletedTemps: 0, errors: [] });
+		expect(result.archive).toMatchObject({ archived: 1, errors: [] });
 		for (const file of [legacyShape, stagingShape, humanNote])
 			expect(await Bun.file(file).text()).toBe("UNIQUE BYTES");
 		// The same run staged and published its own archive through that directory.

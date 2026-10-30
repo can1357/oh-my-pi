@@ -43,7 +43,6 @@ import {
 	agentDirFlag,
 	archivedHandleIsHeldBy,
 	bytesOfHandle,
-	type CopiedBytes,
 	copyHandleWithDigest,
 	digestOfHandle,
 	handleBeginsWith,
@@ -65,7 +64,7 @@ import {
 } from "../session/session-archive";
 import { codeOf, statIfPresent, withGcLock } from "../session/gc-lock";
 import { readSessionHeaderId } from "../session/session-loader";
-import { FileSessionStorage, SESSION_STAGING_RE, tryAcquireSessionLease } from "../session/session-storage";
+import { FileSessionStorage, tryAcquireSessionLease } from "../session/session-storage";
 import {
 	type CompressCandidate,
 	type CompressMethod,
@@ -94,7 +93,6 @@ const BLOB_REF_RE = /\bblob:sha256:([a-f0-9]{64})\b/gi;
 const JSONL_GLOB = new Bun.Glob("**/*.jsonl");
 const JSONL_GZ_GLOB = new Bun.Glob("**/*.jsonl.gz");
 const JSONL_BACKUP_GLOB = new Bun.Glob("**/*.jsonl.*.bak");
-const SESSION_STAGING_GLOB = new Bun.Glob("**/*.tmp");
 const ANY_FILE_GLOB = new Bun.Glob("**/*");
 const ACTIVE_STATUSES: ReadonlySet<SessionStatus> = new Set(["pending", "interrupted", "unknown"]);
 const DAY_MS = 86_400_000;
@@ -164,15 +162,10 @@ export interface ArchiveGcResult {
 	keptNewestPerCwd: number;
 	wouldArchive: number;
 	archived: number;
-	/** The session writer's transcript rewrite temps a killed or crashed writer left, past the write grace. */
-	wouldDeleteTemps: number;
-	deletedTemps: number;
-	tempBytes: number;
 	/**
 	 * Staging directories killed `gc` runs recorded and left. Reported, never
-	 * removed: a record is not proof a run made the directory, so it stays
-	 * until someone removes it by hand, and restore leaves it out of the live
-	 * tree meanwhile.
+	 * removed: a record is not proof a run made the directory. A restore of
+	 * the session leaves it in the archive, names it and does not finish.
 	 */
 	stagingResidue?: string[];
 	/** Links inside an artifact tree whose target was already gone, so the archive could not hold their bytes. */
@@ -313,8 +306,6 @@ interface ArchiveCandidate {
 	recovery: string;
 	/** Where this run records the staging directories it mints. */
 	ledger: string;
-	/** The agent directory, whose ledger says what is staging residue. */
-	agentDir: string;
 }
 
 interface ResolvedGcOptions {
@@ -988,7 +979,7 @@ function archiveDestination(
 	archiveRoot: string,
 	sessionsRoot: string,
 	session: SessionInfo,
-): Omit<ArchiveCandidate, "session" | "recovery" | "ledger" | "agentDir"> | null {
+): Omit<ArchiveCandidate, "session" | "recovery" | "ledger"> | null {
 	const sessionPath = session.path;
 	const relativePath = path.relative(sessionsRoot, sessionPath);
 	if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) return null;
@@ -1106,10 +1097,10 @@ async function gzipSessionFile(
 	supersedes?: Stats,
 ): Promise<void> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
-	// A directory of this run's own minting, recorded, so a killed run
-	// leaves a record its successor reclaims the stage by.
-	// The archive keeps the transcript's own mode: a private session copied
-	// into the archive must not become readable by more than it was.
+	// A directory of this run's own minting, recorded so a later restore
+	// leaves it out of the live tree if this run is killed before removing
+	// it. The archive keeps the transcript's own mode: a private session
+	// copied into the archive must not become readable by more than it was.
 	const mode = (await fs.stat(source)).mode & 0o7777;
 	const ground = await mintStagingGround(destination, ledger, mode);
 	let linked = false;
@@ -1163,6 +1154,28 @@ async function gzipSessionFile(
 				`${destination} is not the archive this run wrote for ${source}, so ${source} was not archived; ` +
 					`run \`omp gc --archive\` again`,
 			);
+		}
+		// The mode once more, read from the live transcript's descriptor now
+		// that the archived name has been opened and checked, and set through
+		// a descriptor proved to hold the very inode just published — never
+		// through a name, which could by now be somebody else's file — so a
+		// transcript tightened while this ran is archived tightened.
+		const live = await openRegularFile(source);
+		if (!live) throw new Error(`${source} is no longer a regular file, so it was not archived`);
+		try {
+			const published = await openRegularFile(destination);
+			const notOurs = (): Error =>
+				new Error(`${destination} is not the archive this run wrote for ${source}, so ${source} was not archived`);
+			if (!published) throw notOurs();
+			try {
+				const held = await published.stat();
+				if (held.dev !== ground.created.dev || held.ino !== ground.created.ino) throw notOurs();
+				await published.chmod((await live.stat()).mode & 0o7777);
+			} finally {
+				await published.close().catch(() => undefined);
+			}
+		} finally {
+			await live.close().catch(() => undefined);
 		}
 	} catch (error) {
 		// A superseding archive holds everything the one it replaced held, so
@@ -1322,17 +1335,21 @@ async function publishArtifactIntoArchive(
 	const ground = await mintStagingGround(destination, state.ledger, sourceStat.mode & 0o7777);
 	const tempPath = ground.file;
 	const held = ground.created;
+	// Held open until the end: the bytes and the mode published are both
+	// read from this one descriptor, and the mode is read again after the
+	// archived name was last opened, so a file tightened while this run
+	// worked is archived with the tighter mode.
+	let live: fs.FileHandle | undefined;
+	const liveMode = async (): Promise<number> => {
+		if (!live) throw new Error(`${source} was not opened`);
+		return (await live.stat()).mode & 0o7777;
+	};
 	try {
-		const live = await fs.open(source, "r");
-		let copied: CopiedBytes;
-		try {
-			copied = await copyHandleWithDigest(live, ground.handle);
-		} finally {
-			await live.close().catch(() => undefined);
-		}
+		live = await fs.open(source, "r");
+		const copied = await copyHandleWithDigest(live, ground.handle);
 		// `open` applies the umask; the archived copy keeps the live file's
 		// own permissions, so a deliberately private artifact stays private.
-		await ground.handle.chmod(sourceStat.mode & 0o7777);
+		await ground.handle.chmod(await liveMode());
 		const stem = path.basename(sourceRoot);
 		const target = stem.slice(stem.lastIndexOf("_") + 1) || stem;
 		const conflict = (): Error =>
@@ -1381,6 +1398,7 @@ async function publishArtifactIntoArchive(
 				if (note) state.notes.push(note);
 				throw notPublished();
 			}
+			await ground.handle.chmod(await liveMode());
 			state.created.push({ path: destination, dev: held.dev, ino: held.ino });
 			return;
 		}
@@ -1403,8 +1421,9 @@ async function publishArtifactIntoArchive(
 					// file's now, set through the descriptor held on that very
 					// inode, so a file tightened since it was archived is not
 					// kept in the archive readable by more than it is.
-					if ((verified.mode & 0o7777) !== (sourceStat.mode & 0o7777)) {
-						await archived.chmod(sourceStat.mode & 0o7777);
+					const mode = await liveMode();
+					if ((verified.mode & 0o7777) !== mode) {
+						await archived.chmod(mode);
 					}
 					return;
 				}
@@ -1441,6 +1460,7 @@ async function publishArtifactIntoArchive(
 				}
 				throw notPublished();
 			}
+			await ground.handle.chmod(await liveMode());
 		} finally {
 			await archived.close().catch(() => undefined);
 		}
@@ -1455,6 +1475,7 @@ async function publishArtifactIntoArchive(
 			if (note) state.notes.push(note);
 		} finally {
 			await ground.handle.close().catch(() => undefined);
+			await live?.close().catch(() => undefined);
 		}
 	}
 }
@@ -1737,18 +1758,38 @@ async function archivedModeWider(live: string, liveStat: Stats, archived: string
 }
 
 /**
- * Give an already-archived transcript the live transcript's mode, through a
- * descriptor on the archived inode, so a transcript tightened since it was
- * archived is not kept in the archive readable by more than it is.
+ * Give an already-archived transcript the live transcript's mode, so a
+ * transcript tightened since it was archived is not kept in the archive
+ * readable by more than it is.
+ *
+ * The `chmod` goes through a descriptor proved, before it is used, to be
+ * the archived transcript: the name holds that very inode as a regular file,
+ * and what the descriptor reads inflates to exactly what the live
+ * transcript holds. A name rebound to somebody else's file as this opens it
+ * fails that and is left as it is. The live mode is read from the live
+ * transcript's own descriptor last, after the archived one was opened.
  */
 async function carryLiveModeToArchive(live: string, archived: string): Promise<void> {
-	const liveMode = (await fs.stat(live)).mode & 0o7777;
-	const handle = await openRegularFile(archived);
-	if (!handle) return;
+	const changed = (): Error =>
+		new Error(`${archived} changed while it was being archived; run \`omp gc --archive\` again`);
+	const liveHandle = await openRegularFile(live);
+	if (!liveHandle) throw new Error(`${live} is no longer a regular file, so it was not archived`);
 	try {
-		if (((await handle.stat()).mode & 0o7777) !== liveMode) await handle.chmod(liveMode);
+		const archivedHandle = await openRegularFile(archived);
+		if (!archivedHandle) throw changed();
+		try {
+			const held = await archivedHandle.stat();
+			const named = await fs.lstat(archived).catch(() => undefined);
+			if (!named?.isFile() || named.dev !== held.dev || named.ino !== held.ino) throw changed();
+			const expected = await digestStream(bytesOfHandle(liveHandle));
+			if (!(await inflatesTo(expected)(archivedHandle).catch(() => false))) throw changed();
+			const mode = (await liveHandle.stat()).mode & 0o7777;
+			if ((held.mode & 0o7777) !== mode) await archivedHandle.chmod(mode);
+		} finally {
+			await archivedHandle.close().catch(() => undefined);
+		}
 	} finally {
-		await handle.close().catch(() => undefined);
+		await liveHandle.close().catch(() => undefined);
 	}
 }
 
@@ -2012,7 +2053,7 @@ async function copySessionIntoArchive(candidate: ArchiveCandidate): Promise<{ br
 	// open that session silently incomplete.
 	const record = restoreRecordPath(destSession);
 	if (await pathExists(record)) {
-		const outstanding = await archivedPathsWithoutLiveCopies(destSession, sourceSession, candidate.agentDir);
+		const outstanding = await archivedPathsWithoutLiveCopies(destSession, sourceSession);
 		if (outstanding.length === 0) {
 			await fs.rm(record, { force: true });
 		} else {
@@ -2032,83 +2073,7 @@ function sqliteNumber(value: number | bigint | null | undefined): number {
 	return 0;
 }
 
-/**
- * Staging temps ({@link SESSION_STAGING_RE}) of `.jsonl` transcripts under
- * `sessionsRoot`, plus those beside exact session files recorded elsewhere
- * (`--session` paths, collab replicas).
- */
-async function collectSessionStagingFiles(sessionsRoot: string, exactSessionFiles: string[]): Promise<string[]> {
-	const files = new Map<string, string>();
-	try {
-		for await (const name of SESSION_STAGING_GLOB.scan({ cwd: sessionsRoot, dot: true })) {
-			if (!SESSION_STAGING_RE.exec(path.basename(name))?.[1]?.endsWith(SESSION_SUFFIX)) continue;
-			const file = path.join(sessionsRoot, name);
-			files.set(normalizePathForComparison(file), file);
-		}
-	} catch (error) {
-		if (codeOf(error) !== "ENOENT") throw error;
-	}
-	for (const sessionFile of exactSessionFiles) {
-		const target = path.basename(sessionFile);
-		for (const file of await listFilesIfPresent(path.dirname(sessionFile))) {
-			if (SESSION_STAGING_RE.exec(path.basename(file))?.[1] === target) {
-				files.set(normalizePathForComparison(file), file);
-			}
-		}
-	}
-	return [...files.values()];
-}
-
-/**
- * Count, and with `--apply` delete, the session writer's abandoned rewrite
- * temps, and report the staging directories killed gc runs left.
- *
- * The session writer stages a transcript rewrite as a flat
- * `.<transcript>.<id>.tmp` beside it and renames it away within
- * milliseconds, so one older than the write grace was left by a killed or
- * crashed writer. That writer keeps no record of its temps, so these go by
- * name and age — the sweep this phase has always run, and only where that
- * writer stages: transcripts in the sessions tree and the files recorded
- * beside it, never the archive.
- *
- * The staging directories `gc --archive` and `gc --restore` mint are found
- * by their record and reported in `stagingResidue`, never removed: only the
- * run that made one removes it — see {@link surveyRecordedStagingGrounds}.
- */
-async function sweepSessionStagingFiles(
-	options: ResolvedGcOptions,
-	sessionsRoot: string,
-	registeredSessionPaths: string[],
-	result: ArchiveGcResult,
-): Promise<void> {
-	const exactSessionFiles = [
-		...registeredSessionPaths,
-		...(await collectBreadcrumbSessionFiles(getTerminalSessionsDir(options.agentDir))),
-	];
-	const deleteBeforeMs = Date.now() - GC_WRITE_GRACE_MS;
-	for (const file of await collectSessionStagingFiles(sessionsRoot, exactSessionFiles)) {
-		const stat = await statIfPresent(file);
-		if (!stat?.isFile() || stat.mtimeMs > deleteBeforeMs) continue;
-		result.wouldDeleteTemps += 1;
-		result.tempBytes += stat.size;
-		if (!options.apply) continue;
-		try {
-			await fs.unlink(file);
-			result.deletedTemps += 1;
-		} catch (error) {
-			if (codeOf(error) !== "ENOENT") result.errors.push(`${file}: ${errorMessage(error)}`);
-		}
-	}
-	const grounds = await surveyRecordedStagingGrounds(options.agentDir, options.apply);
-	if (grounds.residue.length > 0) result.stagingResidue = grounds.residue;
-	result.errors.push(...grounds.notes);
-}
-
-async function runArchiveGc(
-	options: ResolvedGcOptions,
-	archiveRoot: string,
-	registeredSessionPaths: string[],
-): Promise<ArchiveGcResult> {
+async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Promise<ArchiveGcResult> {
 	const sessionsRoot = getSessionsDir(options.agentDir);
 	const sessions = await listActiveSessions(sessionsRoot);
 	const cutoffMs = Date.now() - options.coldArchiveAfterDays * DAY_MS;
@@ -2120,9 +2085,6 @@ async function runArchiveGc(
 		keptNewestPerCwd: 0,
 		wouldArchive: 0,
 		archived: 0,
-		wouldDeleteTemps: 0,
-		deletedTemps: 0,
-		tempBytes: 0,
 		brokenLinks: 0,
 		errors: [],
 	};
@@ -2166,13 +2128,16 @@ async function runArchiveGc(
 			session,
 			recovery: agentDirFlag(options.agentDir),
 			ledger: stagingLedgerDir(options.agentDir),
-			agentDir: options.agentDir,
 		});
 	}
 
 	// Before this run stages anything of its own, so every staging record
-	// standing now is a dead run's.
-	await sweepSessionStagingFiles(options, sessionsRoot, registeredSessionPaths, result);
+	// standing now is a dead run's. Reported, never removed: only the run
+	// that made a staging directory removes it, and nothing in this phase
+	// deletes by name — see {@link surveyRecordedStagingGrounds}.
+	const grounds = await surveyRecordedStagingGrounds(options.agentDir, options.apply);
+	if (grounds.residue.length > 0) result.stagingResidue = grounds.residue;
+	result.errors.push(...grounds.notes);
 
 	// An archived session keeps every row that describes it. Its prompt-history,
 	// title and recap rows exist nowhere else, and its stats rows are only
@@ -2484,12 +2449,7 @@ export function renderText(result: GcResult): string {
 		}
 		if (result.archive.skippedActive > 0) lines.push(`sessions skipped active: ${result.archive.skippedActive}`);
 		for (const residue of result.archive.stagingResidue ?? []) {
-			lines.push(`staging left by a killed gc run, not removed (remove it by hand): ${residue}`);
-		}
-		if (result.archive.wouldDeleteTemps > 0) {
-			lines.push(
-				`session staging temps: ${result.archive.deletedTemps}/${result.archive.wouldDeleteTemps} files, ${formatBytes(result.archive.tempBytes)}`,
-			);
+			lines.push(`staging recorded as left by a killed gc run, kept where it is: ${residue}`);
 		}
 		if (result.archive.brokenLinks > 0) {
 			lines.push(`links inside artifact trees whose target was gone: ${result.archive.brokenLinks}`);
@@ -2658,16 +2618,9 @@ async function runRestoreGc(options: ResolvedGcOptions, query: string): Promise<
 		result.sessionPath = restored.sessionPath;
 		result.bytes = restored.bytes;
 		result.artifactsRestored = restored.artifactsRestored;
-		// An artifact tree left behind is a half-restored session, not a note.
+		// An artifact tree left behind — a conflict, or a recorded staging
+		// directory it left out — is a half-restored session, not a note.
 		result.errors.push(...restored.notRestored.map(note => `could not restore ${note}`));
-		// Facts, not failures: a killed run's staging directory is not part
-		// of the session, and it is left where it is.
-		result.notRestored.push(
-			...restored.stagingResidue.map(
-				residue =>
-					`staging a killed gc run left at ${residue}: not carried home, and not removed (remove it by hand)`,
-			),
-		);
 	} catch (error) {
 		result.errors.push(errorMessage(error));
 		return result;
@@ -2968,10 +2921,6 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 	}
 	const result = await withGcLock(options.agentDir, async lockPath => {
 		const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath };
-		// Stale cleanup may prune a missing first-save target's registry marker.
-		const registeredSessionPaths = options.runArchive
-			? await collectRegisteredSessionPaths(getCustomSessionFilesDir(options.agentDir))
-			: [];
 		// A restore runs alone: no sweep may race a session coming back.
 		if (options.restoreTarget !== undefined) {
 			next.restore = await runRestoreGc(options, options.restoreTarget);
@@ -2986,7 +2935,7 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 		// Pruned collab replicas release their blobs to this run's sweep.
 		if (options.runStale) next.stale = await runStaleGc(options);
 		if (options.runBlobs) next.blobs = await runBlobGc(options, archiveRoot);
-		if (options.runArchive) next.archive = await runArchiveGc(options, archiveRoot, registeredSessionPaths);
+		if (options.runArchive) next.archive = await runArchiveGc(options, archiveRoot);
 		if (options.runCompress) next.compress = await runCompressGc(options, archiveRoot);
 		if (options.runWal) next.wal = await runWalGc(options);
 		return next;
