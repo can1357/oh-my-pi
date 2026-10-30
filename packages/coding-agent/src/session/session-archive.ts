@@ -1040,15 +1040,17 @@ async function copyTreeDereferenced(
 	destination: string,
 	agentDir: string,
 	notes: string[],
-): Promise<string[]> {
+): Promise<Array<[string, string]>> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
 	const archiveRoot = await fs.realpath(source);
 	const recorded = await stagingResidueUnder(agentDir, source);
-	// What was left out, so the caller can say where it still is.
-	const leftOut = new Set<string>();
+	// What was left out, and the record that named it, so the caller can say
+	// where it still is and how to move it.
+	const leftOut = new Map<string, string>();
 	const isResidue = (entry: string): boolean => {
-		if (!recorded(entry)) return false;
-		leftOut.add(entry);
+		const record = recorded(entry);
+		if (record === undefined) return false;
+		leftOut.set(entry, record);
 		return true;
 	};
 	const ledger = stagingLedgerDir(agentDir);
@@ -1465,9 +1467,10 @@ export async function surveyRecordedStagingGrounds(agentDir: string, apply: bool
 }
 
 /**
- * Whether an entry below `root` is a staging directory a run recorded and
- * did not clear — residue, which a restore leaves out of the live tree and
- * where it is. Decided by a checked record ({@link checkRecordedGround}),
+ * The staging record that names an entry below `root` as a staging
+ * directory a run recorded and did not clear — residue, which a restore
+ * leaves out of the live tree and where it is — or undefined. Decided by a
+ * checked record ({@link checkRecordedGround}),
  * never by a name. A record can only make something be left out; it never
  * makes anything be removed. Compared by real path relative to `root`, so
  * an archive reached through a symlink still matches the directory a run
@@ -1478,15 +1481,18 @@ export async function surveyRecordedStagingGrounds(agentDir: string, apply: bool
  * that carried on would publish a partial file as one or skip an artifact as
  * the other.
  */
-export async function stagingResidueUnder(agentDir: string, root: string): Promise<(entry: string) => boolean> {
+export async function stagingResidueUnder(
+	agentDir: string,
+	root: string,
+): Promise<(entry: string) => string | undefined> {
 	const { records, failure } = await readStagingRecords(agentDir);
 	if (failure) throw new Error(`${failure}; staging residue cannot be told from artifacts, so nothing was carried`);
-	if (records.length === 0) return () => false;
+	if (records.length === 0) return () => undefined;
 	const realRoot = await fs.realpath(root).catch(() => undefined);
-	if (realRoot === undefined) return () => false;
+	if (realRoot === undefined) return () => undefined;
 	const roots = await stagingRoots(agentDir);
-	const residue = new Set<string>();
-	for (const { entry } of records) {
+	const residue = new Map<string, string>();
+	for (const { path: record, entry } of records) {
 		// A record written before its run made the directory names one that
 		// run may have made; leaving it out of the live tree is all a record
 		// can do, so it is enough that the name and the place check out.
@@ -1495,9 +1501,124 @@ export async function stagingResidueUnder(agentDir: string, root: string): Promi
 		const real = await fs.realpath(entry.dir).catch(() => undefined);
 		if (real === undefined) continue;
 		const relative = path.relative(realRoot, real);
-		if (relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative)) residue.add(relative);
+		if (relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative)) residue.set(relative, record);
 	}
-	return entry => residue.has(path.relative(root, entry));
+	return entry => residue.get(path.relative(root, entry));
+}
+
+/**
+ * What is said about a directory a staging record makes a restore leave in
+ * the archive, and what to do about it. It never advises removing the
+ * directory: a record is not proof a run made it.
+ */
+export function stagingResidueNote(dir: string, record: string, agentDirSuffix: string): string {
+	return (
+		`${dir} is named by the staging record ${record}, so a restore leaves it in the archive, where it is, and does not finish. ` +
+		`If a killed gc run left it, stop any activity for this session, look at the record and the directory, then move both ` +
+		`out of the session trees with \`omp gc --quarantine ${shellQuote(path.basename(record))} --apply${agentDirSuffix}\` ` +
+		`and restore again. If no gc run made it, move only the record out of ${path.dirname(record)} and restore again`
+	);
+}
+
+/** What `gc --quarantine` found, and moved or would move. */
+export interface StagingQuarantine {
+	record: string;
+	/** The staging directory the record names, when it is still there. */
+	directory?: string;
+	/** Where the record and its directory go, or went. */
+	quarantine?: string;
+	moved: boolean;
+	errors: string[];
+}
+
+/**
+ * Move a staging record and the directory it names out of the session trees,
+ * into `gc-quarantine` beside the tree the directory is in — outside both
+ * `sessions` and `archive/sessions`, and on the same filesystem as the
+ * directory, so the move is a `rename`. Without `apply`, say what would move.
+ *
+ * Nothing is deleted: a restore then finds neither the record nor the
+ * directory and finishes, and whatever the directory held stays readable in
+ * quarantine. A record is moved only when it is one a run of this feature
+ * could have written — see {@link checkRecordedGround}. The caller holds the
+ * gc lock, so no run is staging into the directory while it moves; the
+ * advice that names this command asks for activity on the session to stop.
+ */
+export async function quarantineStagingRecord(
+	agentDir: string,
+	query: string,
+	apply: boolean,
+): Promise<StagingQuarantine> {
+	const ledger = stagingLedgerDir(agentDir);
+	const record = path.isAbsolute(query)
+		? path.normalize(query)
+		: path.join(ledger, query.endsWith(".json") ? query : `${query}.json`);
+	const result: StagingQuarantine = { record, moved: false, errors: [] };
+	if (path.dirname(record) !== ledger || !record.endsWith(".json")) {
+		result.errors.push(`${record} is not a staging record in ${ledger}`);
+		return result;
+	}
+	let entry: StagingRecord;
+	try {
+		await assertPrivateLedger(ledger);
+		const handle = await openRegularFile(record);
+		if (!handle) throw new Error("it is not a regular file");
+		try {
+			entry = parseStagingRecord(await handle.readFile("utf8"));
+		} finally {
+			await handle.close().catch(() => undefined);
+		}
+	} catch (error) {
+		result.errors.push(`${record} could not be read: ${errorText(error)}`);
+		return result;
+	}
+	const roots = await stagingRoots(agentDir);
+	const ground = await checkRecordedGround(entry, roots);
+	if (ground.kind === "refused") {
+		result.errors.push(ground.note);
+		return result;
+	}
+	const real = ground.kind === "gone" ? undefined : await fs.realpath(entry.dir).catch(() => undefined);
+	const tree = real === undefined ? undefined : roots.find(root => isWithin(root, real));
+	const quarantine = path.join(
+		tree === undefined ? agentDir : path.dirname(tree),
+		"gc-quarantine",
+		path.basename(record, ".json"),
+	);
+	if (real !== undefined) result.directory = entry.dir;
+	result.quarantine = quarantine;
+	if (!apply) return result;
+	try {
+		await fs.mkdir(path.dirname(quarantine), { recursive: true, mode: 0o700 });
+		await fs.mkdir(quarantine, { mode: 0o700 });
+	} catch (error) {
+		result.errors.push(`${quarantine} could not be made, so nothing was moved: ${errorText(error)}`);
+		return result;
+	}
+	if (result.directory !== undefined) {
+		try {
+			await fs.rename(entry.dir, path.join(quarantine, path.basename(entry.dir)));
+		} catch (error) {
+			const across = codeOf(error) === "EXDEV" ? ", because they are on different filesystems" : "";
+			result.errors.push(
+				`${entry.dir} could not be moved into ${quarantine}${across}, so nothing was moved: ${errorText(error)}`,
+			);
+			// The directory this run just made, still empty.
+			await fs.rmdir(quarantine).catch(() => undefined);
+			return result;
+		}
+	}
+	try {
+		await fs.rename(record, path.join(quarantine, path.basename(record)));
+	} catch (error) {
+		result.errors.push(
+			`${record} could not be moved into ${quarantine}: ${errorText(error)}. Its directory was moved, so the record ` +
+				`now names nothing and the next \`omp gc --archive --apply\` drops it`,
+		);
+		return result;
+	}
+	result.moved = true;
+	return result;
 }
 
 /**
@@ -1517,10 +1638,23 @@ export async function archivedPathsWithoutLiveCopies(archiveFile: string, sessio
 	const archiveArtifacts = archiveFile.slice(0, -ARCHIVED_SESSION_SUFFIX.length);
 	const liveArtifacts = sessionFile.slice(0, -SESSION_SUFFIX.length);
 	const outstanding: string[] = [];
-	for (const file of await treeFiles(archiveArtifacts)) {
-		const name = path.relative(archiveArtifacts, file);
-		if (!(await statIfPresent(path.join(liveArtifacts, name)))?.isFile()) outstanding.push(name);
-	}
+	// Directories as well as files: an empty directory the restore left out
+	// is still something the live tree does not hold.
+	const visit = async (name: string): Promise<void> => {
+		const archived = await statIfPresent(path.join(archiveArtifacts, name));
+		if (!archived) return;
+		const live = await statIfPresent(path.join(liveArtifacts, name));
+		if (!archived.isDirectory()) {
+			if (!live?.isFile()) outstanding.push(name);
+			return;
+		}
+		if (name !== "" && !live?.isDirectory()) {
+			outstanding.push(name);
+			return;
+		}
+		for (const entry of await fs.readdir(path.join(archiveArtifacts, name))) await visit(path.join(name, entry));
+	};
+	await visit("");
 	return outstanding.sort();
 }
 
@@ -1546,7 +1680,12 @@ export async function artifactRestoreConflicts(
 			if (isEnoent(error)) return undefined;
 			throw error;
 		});
-		if (!stat || isResidue(source)) return;
+		if (!stat) return;
+		const record = isResidue(source);
+		if (record !== undefined) {
+			conflicts.push(stagingResidueNote(source, record, agentDirFlag(agentDir)));
+			return;
+		}
 		const existing = await fs.lstat(destination).catch(() => undefined);
 		if (stat.isDirectory()) {
 			if (existing && !(await statIfPresent(destination).catch(() => undefined))?.isDirectory()) {
@@ -1900,7 +2039,8 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 	];
 	const stem = path.basename(archiveFile, ARCHIVED_SESSION_SUFFIX);
 	const target = stem.slice(stem.lastIndexOf("_") + 1) || stem;
-	const restoreCommand = `omp gc --restore ${shellQuote(target)} --apply${agentDirFlag(agentDir ?? agentDirOfArchivedPath(archiveFile) ?? getAgentDir())}`;
+	const agentDirSuffix = agentDirFlag(agentDir ?? agentDirOfArchivedPath(archiveFile) ?? getAgentDir());
+	const restoreCommand = `omp gc --restore ${shellQuote(target)} --apply${agentDirSuffix}`;
 	const leases = await tryAcquireRestoreLeases(owners);
 	const noOwners = (): Error =>
 		new Error(
@@ -1972,13 +2112,7 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 				// is named, the record stays down and the command fails. The
 				// directory stays in the archive, and nothing here suggests
 				// removing it.
-				for (const dir of leftOut) {
-					notRestored.push(
-						`${dir}: a staging record in ${ledger} names it, so it was left in the archive, where it still is, ` +
-							`instead of being carried home; if no gc run made it, remove that record — not the directory — ` +
-							`and restore again`,
-					);
-				}
+				for (const [dir, staging] of leftOut) notRestored.push(stagingResidueNote(dir, staging, agentDirSuffix));
 				artifactsRestored = leftOut.length === 0;
 			} catch (error) {
 				notRestored.push(

@@ -3835,3 +3835,104 @@ for (const apply of [false, true]) {
 		if (outcome !== "hung") expect(outcome.restore?.errors.join("\n")).toContain("planted.json");
 	}, 15_000);
 }
+
+test("an archived transcript keeps the mode of the file it was read from, whatever takes the live name later", async () => {
+	await fs.chmod(sessionFile, 0o600);
+	const original = await Bun.file(sessionFile).text();
+	// Once the archive is published, the live name is given to another file
+	// with the same bytes and a wider mode.
+	const realLink = fs.link;
+	let swapped = false;
+	const link = spyOn(fs, "link").mockImplementation(async (from, to) => {
+		await realLink(from, to);
+		if (!swapped && String(to) === archiveFile) {
+			swapped = true;
+			await fs.rename(sessionFile, path.join(root, "aside.jsonl"));
+			await Bun.write(sessionFile, original);
+			await fs.chmod(sessionFile, 0o666);
+		}
+	});
+	try {
+		await archiveOnly();
+	} finally {
+		link.mockRestore();
+	}
+
+	expect(swapped).toBe(true);
+	expect((await fs.stat(archiveFile)).mode & 0o777).toBe(0o600);
+});
+
+test("a restore preview reports a recorded staging directory the restore would leave in the archive", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	await archiveEverything();
+	const ground = await mintStagingGround(path.join(archivedArtifacts, "b.log"), stagingLedgerDir(root));
+	await ground.handle.writeFile("HALF A COPY");
+	await ground.handle.close();
+
+	const preview = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, json: true } });
+
+	expect(preview.restore?.errors.join("\n")).toContain(ground.dir);
+	expect(preview.restore?.notRestored.join("\n")).toContain(ground.dir);
+});
+
+test("re-archiving keeps the restore record over an empty staging directory the restore left out", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	await archiveEverything();
+	// A run killed right after the staging `mkdir`: its intent recorded and
+	// the directory empty.
+	const dir = sessionStagingPath(path.join(archivedArtifacts, "b.log"));
+	await fs.mkdir(dir, { mode: 0o700 });
+	await fs.mkdir(stagingLedgerDir(root), { recursive: true, mode: 0o700 });
+	await Bun.write(path.join(stagingLedgerDir(root), "1.json"), JSON.stringify({ dir, file: path.join(dir, "b.log") }));
+	const restored = await restoreArchivedSession(archiveFile, root);
+	expect(restored.notRestored.join("\n")).toContain(dir);
+
+	const result = await archiveOnly();
+
+	expect(await Bun.file(restoreRecordPath(archiveFile)).exists()).toBe(true);
+	expect(result.archive?.errors.join("\n")).toContain("still missing");
+});
+
+test("a killed run's recorded stage is quarantined by gc, and the restore then finishes", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	await archiveEverything();
+	const ground = await mintStagingGround(path.join(archivedArtifacts, "b.log"), stagingLedgerDir(root));
+	await ground.handle.writeFile("PARTIAL STAGE");
+	await ground.handle.close();
+	const record = path.basename(ground.record);
+
+	const refused = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+	// The omission is in the public list as well as the errors, and the
+	// advice is the command that moves it, not a path to delete.
+	expect(refused.restore?.notRestored.join("\n")).toContain(ground.dir);
+	const advice = refused.restore?.errors.join("\n") ?? "";
+	expect(advice).toContain(`--quarantine`);
+	expect(advice).toContain(record);
+
+	const preview = await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } });
+	expect(preview.quarantine?.errors).toEqual([]);
+	expect((await fs.stat(ground.dir)).isDirectory()).toBe(true);
+
+	const moved = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+	expect(moved.quarantine?.errors).toEqual([]);
+	expect(moved.quarantine?.moved).toBe(true);
+	const quarantine = moved.quarantine?.quarantine ?? "";
+	expect(await Bun.file(path.join(quarantine, path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
+	expect(await Bun.file(path.join(quarantine, record)).exists()).toBe(true);
+	expect(await fs.stat(ground.dir).catch(() => undefined)).toBeUndefined();
+	expect(await Bun.file(ground.record).exists()).toBe(false);
+	for (const tree of [getArchivedSessionsDir(root), path.join(root, "sessions")]) {
+		expect(path.relative(tree, quarantine).startsWith("..")).toBe(true);
+	}
+
+	const restored = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+	expect(restored.restore?.errors).toEqual([]);
+	expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
+	expect(await Bun.file(restoreRecordPath(archiveFile)).exists()).toBe(false);
+});

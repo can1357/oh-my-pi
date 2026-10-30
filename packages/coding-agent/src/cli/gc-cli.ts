@@ -61,6 +61,9 @@ import {
 	liveSessionPathForArchive,
 	restoreArchivedSessionLocked,
 	artifactRestoreConflicts,
+	quarantineStagingRecord,
+	type StagingGround,
+	type StagingQuarantine,
 } from "../session/session-archive";
 import { codeOf, statIfPresent, withGcLock } from "../session/gc-lock";
 import { readSessionHeaderId } from "../session/session-loader";
@@ -128,6 +131,8 @@ export interface GcCommandFlags {
 	restore?: string;
 	/** Session id prefix or archive path whose live copy should be given up. */
 	reclaim?: string;
+	/** A staging record a killed gc run left: it and the directory it names move into quarantine. */
+	quarantine?: string;
 	coldArchiveAfterDays?: number;
 	retainNewestGlobal?: number;
 	retainNewestPerCwd?: number;
@@ -275,6 +280,7 @@ export interface GcResult {
 	archive?: ArchiveGcResult;
 	restore?: RestoreGcResult;
 	reclaim?: ReclaimGcResult;
+	quarantine?: StagingQuarantine;
 	compress?: CompressGcResult;
 	wal?: WalGcResult;
 	lockPath: string;
@@ -325,6 +331,8 @@ interface ResolvedGcOptions {
 	restoreTarget?: string;
 	/** Set by `--reclaim`; it runs alone, and it is the only phase that deletes a live session. */
 	reclaimTarget?: string;
+	/** Set by `--quarantine`; it runs alone. */
+	quarantineTarget?: string;
 	/** Phase flags the caller passed, so `--restore` can refuse to drop them. */
 	explicitPhases: string[];
 	coldArchiveAfterDays: number;
@@ -358,6 +366,19 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 	// blobs for a command that asked for a restore.
 	if (flags.restore !== undefined && flags.restore.trim() === "") {
 		throw new Error("--restore needs a session id or the path of a file in the archive");
+	}
+	if (flags.quarantine !== undefined) {
+		if (flags.quarantine.trim() === "") {
+			throw new Error("--quarantine needs a staging record: its file name in <agentDir>/gc-staging, or its path");
+		}
+		const alongside = [
+			...(flags.restore !== undefined ? ["--restore"] : []),
+			...(flags.reclaim !== undefined ? ["--reclaim"] : []),
+			...(["blobs", "archive", "wal", "stale", "compress"] as const)
+				.filter(phase => flags[phase] === true)
+				.map(phase => `--${phase}`),
+		];
+		if (alongside.length > 0) throw new Error(`--quarantine runs alone; run ${alongside.join(", ")} separately`);
 	}
 	const selected =
 		flags.blobs === true ||
@@ -414,6 +435,7 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 		forwardOnly: flags.forwardOnly === true,
 		restoreTarget: flags.restore?.trim(),
 		reclaimTarget: flags.reclaim?.trim(),
+		quarantineTarget: flags.quarantine?.trim(),
 		explicitPhases: (["blobs", "archive", "wal", "stale", "compress"] as const).filter(
 			phase => flags[phase] === true,
 		),
@@ -457,6 +479,7 @@ export function collectGcErrors(result: GcResult): string[] {
 		...(result.blobs?.errors ?? []).map(error => `blobs: ${error}`),
 		...(result.archive?.errors ?? []).map(error => `archive: ${error}`),
 		...(result.restore?.errors ?? []).map(error => `restore: ${error}`),
+		...(result.quarantine?.errors ?? []).map(error => `quarantine: ${error}`),
 		...(result.reclaim?.errors ?? []).map(error => `reclaim: ${error}`),
 		...(result.compress?.errors ?? []).map(error => `compress: ${error}`),
 	];
@@ -1097,17 +1120,28 @@ async function gzipSessionFile(
 	supersedes?: Stats,
 ): Promise<void> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
-	// A directory of this run's own minting, recorded so a later restore
-	// leaves it out of the live tree if this run is killed before removing
-	// it. The archive keeps the transcript's own mode: a private session
-	// copied into the archive must not become readable by more than it was.
-	const mode = (await fs.stat(source)).mode & 0o7777;
-	const ground = await mintStagingGround(destination, ledger, mode);
+	// The transcript is read through one descriptor from here on: its bytes,
+	// its digest and, at the end, its mode. A file put at the live name
+	// meanwhile is not what this run archives, so it lends the archive
+	// nothing — its permissions least of all.
+	const live = await openRegularFile(source);
+	if (!live) throw new Error(`${source} is not a regular file, so it was not archived`);
+	let ground: StagingGround;
+	try {
+		// A directory of this run's own minting, recorded so a later restore
+		// leaves it out of the live tree if this run is killed before removing
+		// it. The archive keeps the transcript's own mode: a private session
+		// copied into the archive must not become readable by more than it was.
+		ground = await mintStagingGround(destination, ledger, (await live.stat()).mode & 0o7777);
+	} catch (error) {
+		await live.close().catch(() => undefined);
+		throw error;
+	}
 	let linked = false;
 	try {
-		await ground.handle.chmod(mode);
-		const expected = await digestStream(Bun.file(source).stream());
-		await pipeline(Bun.file(source).stream(), createGzip({ level: 9 }), ground.handle.createWriteStream());
+		await ground.handle.chmod((await live.stat()).mode & 0o7777);
+		const expected = await digestStream(bytesOfHandle(live));
+		await pipeline(bytesOfHandle(live), createGzip({ level: 9 }), ground.handle.createWriteStream());
 		const stagedNow = await fs.lstat(ground.file).catch(() => undefined);
 		if (stagedNow?.dev !== ground.created.dev || stagedNow.ino !== ground.created.ino) {
 			throw new Error(
@@ -1155,27 +1189,20 @@ async function gzipSessionFile(
 					`run \`omp gc --archive\` again`,
 			);
 		}
-		// The mode once more, read from the live transcript's descriptor now
-		// that the archived name has been opened and checked, and set through
-		// a descriptor proved to hold the very inode just published — never
-		// through a name, which could by now be somebody else's file — so a
-		// transcript tightened while this ran is archived tightened.
-		const live = await openRegularFile(source);
-		if (!live) throw new Error(`${source} is no longer a regular file, so it was not archived`);
+		// The mode once more, from the descriptor the bytes were read through,
+		// now that the archived name has been opened and checked, and set
+		// through a descriptor proved to hold the very inode just published —
+		// never through a name, which could by now be somebody else's file.
+		const published = await openRegularFile(destination);
+		const notOurs = (): Error =>
+			new Error(`${destination} is not the archive this run wrote for ${source}, so ${source} was not archived`);
+		if (!published) throw notOurs();
 		try {
-			const published = await openRegularFile(destination);
-			const notOurs = (): Error =>
-				new Error(`${destination} is not the archive this run wrote for ${source}, so ${source} was not archived`);
-			if (!published) throw notOurs();
-			try {
-				const held = await published.stat();
-				if (held.dev !== ground.created.dev || held.ino !== ground.created.ino) throw notOurs();
-				await published.chmod((await live.stat()).mode & 0o7777);
-			} finally {
-				await published.close().catch(() => undefined);
-			}
+			const held = await published.stat();
+			if (held.dev !== ground.created.dev || held.ino !== ground.created.ino) throw notOurs();
+			await published.chmod((await live.stat()).mode & 0o7777);
 		} finally {
-			await live.close().catch(() => undefined);
+			await published.close().catch(() => undefined);
 		}
 	} catch (error) {
 		// A superseding archive holds everything the one it replaced held, so
@@ -1195,6 +1222,7 @@ async function gzipSessionFile(
 			if (note) notes.push(note);
 		} finally {
 			await ground.handle.close().catch(() => undefined);
+			await live.close().catch(() => undefined);
 		}
 	}
 }
@@ -2456,6 +2484,13 @@ export function renderText(result: GcResult): string {
 		}
 		if (result.archive.errors.length > 0) lines.push(`session errors: ${result.archive.errors.length}`);
 	}
+	if (result.quarantine) {
+		const quarantine = result.quarantine;
+		if (quarantine.quarantine && quarantine.errors.length === 0) {
+			const what = [quarantine.directory, quarantine.record].filter(Boolean).join(" and ");
+			lines.push(`quarantine: ${quarantine.moved ? "moved" : "would move"} ${what} into ${quarantine.quarantine}`);
+		}
+	}
 	if (result.restore) {
 		const restore = result.restore;
 		if (restore.sessionPath) {
@@ -2597,7 +2632,9 @@ async function runRestoreGc(options: ResolvedGcOptions, query: string): Promise<
 				return result;
 			}
 			result.sessionPath = sessionPath;
-			result.errors.push(...(await previewArtifactConflicts(archiveFile, sessionPath, options.agentDir)));
+			const conflicts = await previewArtifactConflicts(archiveFile, sessionPath, options.agentDir);
+			result.errors.push(...conflicts);
+			result.notRestored.push(...conflicts);
 			return result;
 		}
 		try {
@@ -2609,7 +2646,9 @@ async function runRestoreGc(options: ResolvedGcOptions, query: string): Promise<
 			return result;
 		}
 		result.sessionPath = sessionPath;
-		result.errors.push(...(await previewArtifactConflicts(archiveFile, sessionPath, options.agentDir)));
+		const conflicts = await previewArtifactConflicts(archiveFile, sessionPath, options.agentDir);
+		result.errors.push(...conflicts);
+		result.notRestored.push(...conflicts);
 		return result;
 	}
 	try {
@@ -2621,6 +2660,7 @@ async function runRestoreGc(options: ResolvedGcOptions, query: string): Promise<
 		// An artifact tree left behind — a conflict, or a recorded staging
 		// directory it left out — is a half-restored session, not a note.
 		result.errors.push(...restored.notRestored.map(note => `could not restore ${note}`));
+		result.notRestored.push(...restored.notRestored);
 	} catch (error) {
 		result.errors.push(errorMessage(error));
 		return result;
@@ -2921,6 +2961,12 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 	}
 	const result = await withGcLock(options.agentDir, async lockPath => {
 		const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath };
+		// Moving a staging record into quarantine runs alone as well: a restore
+		// or an archive run could otherwise be staging into the very directory.
+		if (options.quarantineTarget !== undefined) {
+			next.quarantine = await quarantineStagingRecord(options.agentDir, options.quarantineTarget, options.apply);
+			return next;
+		}
 		// A restore runs alone: no sweep may race a session coming back.
 		if (options.restoreTarget !== undefined) {
 			next.restore = await runRestoreGc(options, options.restoreTarget);

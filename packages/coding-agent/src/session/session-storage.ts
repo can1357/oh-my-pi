@@ -31,8 +31,9 @@ const utf8Decoder = new TextDecoder("utf-8");
 
 /**
  * Basename of a rewrite staged by {@link sessionStagingPath}; group 1 is the
- * target's basename. A live publish renames it away within milliseconds;
- * `omp gc` reclaims one a killed writer left behind.
+ * target's basename. A live publish renames it away within milliseconds; one
+ * a killed writer left behind stays until someone removes it, since nothing
+ * deletes a file by the shape of its name.
  */
 export const SESSION_STAGING_RE = /^\.(.+)\.[0-9a-f]{16}\.tmp$/;
 

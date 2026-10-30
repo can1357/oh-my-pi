@@ -894,25 +894,20 @@ describe("runGcCommand cold-session archive", () => {
 		const session = await writeSession(root, "project", "compression-error", "complete", { ageDays: 90 });
 		const original = await Bun.file(session).bytes();
 		const archiveDir = path.join(root, "archive", "sessions", "project");
-		const realFile = Bun.file.bind(Bun);
-		const fileSpy = spyOn(Bun, "file").mockImplementation((source, options) => {
-			const file = realFile(source as string, options);
-			if (source === session) {
-				file.stream = () => {
-					let yielded = false;
-					return new ReadableStream<Uint8Array<ArrayBuffer>>({
-						pull(controller) {
-							if (yielded) controller.error(new Error("compression read failed"));
-							else {
-								yielded = true;
-								controller.enqueue(original.subarray(0, original.length / 2));
-							}
-						},
-					});
-				};
+		// The archive reads the transcript through one descriptor; the failure
+		// comes from that descriptor, past the first chunk.
+		const realOpen = fs.open;
+		const openSpy = spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
+			const handle = await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
+			if (String(target) === session) {
+				const read = handle.read.bind(handle) as (...args: unknown[]) => Promise<unknown>;
+				handle.read = (async (...args: unknown[]) => {
+					if (typeof args[3] === "number" && args[3] > 0) throw new Error("compression read failed");
+					return await read(...args);
+				}) as typeof handle.read;
 			}
-			return file;
-		});
+			return handle;
+		}) as typeof fs.open);
 		let result: GcResult;
 		try {
 			result = await runGcCommand({
@@ -927,7 +922,7 @@ describe("runGcCommand cold-session archive", () => {
 				},
 			});
 		} finally {
-			fileSpy.mockRestore();
+			openSpy.mockRestore();
 		}
 
 		expect(result.archive?.archived).toBe(0);
