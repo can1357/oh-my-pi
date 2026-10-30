@@ -145,9 +145,9 @@ fn a_locale_only_the_shell_exports_is_honoured() {
 	}
 	fs::create_dir_all(dir.path().join("src")).unwrap();
 	fs::write(dir.path().join("src/ünï.txt"), b"x\n").unwrap();
-	// Absolute, then relative: a relative search path resolves against the
-	// *shell's* working directory (`cd /tmp/job; LOCPATH=locales rsync …`),
-	// which is this run's `cwd` and not the one the test process sits in.
+	// Absolute, then relative: a relative entry resolves against the *shell's*
+	// working directory (`cd /tmp/job; LOCPATH=locales rsync …`), which is this
+	// run's `cwd` and not the one the test process sits in.
 	for path in [locales.to_str().unwrap(), "locales"] {
 		let dest = format!("dst-{}/", path.replace('/', "_"));
 		let env = [("LC_ALL", "en_US"), ("LOCPATH", path)];
@@ -169,6 +169,13 @@ fn a_locale_only_the_shell_exports_is_honoured() {
 	unsafe { std::env::remove_var("LOCPATH") };
 	assert_eq!(code, 0, "{shared}: {}", cap.err());
 	assert!(cap.out().contains("ünï.txt"), "{shared}: {}", cap.out());
+	// The shell's `PATH` decides nothing: the helper that reads the codeset is
+	// ours, and an absolute rsync under a restricted `PATH` still loads the
+	// locale through libc.
+	let env = [("LC_ALL", "en_US"), ("LOCPATH", "locales"), ("PATH", "/nonexistent")];
+	let (code, cap) = run_util_env::<Rsync>(&["-ai", "src/ünï.txt", "dst-nopath/"], "", dir.path(), &env);
+	assert_eq!(code, 0, "restricted PATH: {}", cap.err());
+	assert!(cap.out().contains("ünï.txt"), "restricted PATH: {}", cap.out());
 }
 
 /// Captured from rsync 3.5.1: `rsync --protocol=19 -a src/ d/` on a local copy.

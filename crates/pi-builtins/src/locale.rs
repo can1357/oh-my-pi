@@ -178,6 +178,11 @@ fn codeset_from_locale_command(
 		},
 	};
 	command.arg("charmap").env("LC_ALL", locale);
+	// The helper is ours, not the shell's: a restricted `PATH` must not decide
+	// whether the locale resolves, so look it up on this process's search path
+	// (and the standard directories when it has none). The working directory
+	// and the locale environment stay the shell's.
+	command.env("PATH", std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()));
 	let output = command.output().ok()?;
 	if !output.status.success() {
 		return None;
