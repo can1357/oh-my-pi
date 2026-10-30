@@ -5,6 +5,7 @@
 ### Added
 
 - `AIError.Flag.Connection` marks a failure that died on the wire with no HTTP status and no capacity signal — a cut stream, a closed socket, a truncated chunked transfer — so callers can tell it apart from a 429, a 529 or an overload ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- A failed `AssistantMessage` from a provider that runs its own replay loop (`openai-codex-responses`, `cursor`) now reports `providerReplays`, the requests already re-sent before the failure surfaced, so recovery above the provider does not replay a request a loop below it has already replayed ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 

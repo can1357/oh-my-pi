@@ -2242,6 +2242,10 @@ function streamCursorWithWireMode(
 			} else {
 				output.errorMessage = result.message;
 			}
+			// Checkpoint resumes this turn already spent. Cursor resumes from a
+			// fresh checkpoint even after visible progress, so the content left on
+			// the message says nothing about whether the request was replayed.
+			output.providerReplays = retryAttempt;
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });

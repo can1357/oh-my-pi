@@ -372,6 +372,59 @@ describe("withReplaySafeStreamRetry", () => {
 		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
 	});
 
+	it("adds its own replays to the count, and claims none when the loop below reports none", async () => {
+		// Recovery above a provider reads a reported `0` as "this request went
+		// out exactly once" and holds its fallback chain on it. The wrapper runs
+		// over providers that report nothing (`anthropic.ts`), so it must add to
+		// a count that exists and leave the field absent when none does.
+		const failing = (providerReplays?: number) => () => {
+			const message = assistant();
+			message.stopReason = "error";
+			message.errorMessage = "The socket connection was closed unexpectedly";
+			message.providerReplays = providerReplays;
+			return streamFromEvents([
+				{ type: "start", partial: message },
+				{ type: "error", reason: "error", error: message },
+			]);
+		};
+		const run = async (providerReplays?: number): Promise<AssistantMessage> => {
+			const stream = withReplaySafeStreamRetry(
+				{},
+				CTX,
+				{ providerRetryWait: async () => {} },
+				failing(providerReplays),
+				{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+			);
+			await drain(stream);
+			return await stream.result();
+		};
+
+		// One wrapper replay spent, on top of the five the loop below reported.
+		expect((await run(5)).providerReplays).toBe(6);
+		// Same wrapper replay, over a loop that reports nothing: still known.
+		expect((await run(undefined)).providerReplays).toBe(1);
+	});
+
+	it("leaves the replay count absent when neither it nor the loop below replayed", async () => {
+		const message = assistant();
+		message.stopReason = "error";
+		message.errorMessage = "Invalid tool schema";
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ providerRetryWait: async () => {} },
+			() =>
+				streamFromEvents([
+					{ type: "start", partial: message },
+					{ type: "error", reason: "error", error: message },
+				]),
+			{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+		);
+
+		await drain(stream);
+		expect((await stream.result()).providerReplays).toBeUndefined();
+	});
+
 	it("does not retry a transient provider error after output commits", async () => {
 		let attempts = 0;
 		const message = assistant(["partial"]);

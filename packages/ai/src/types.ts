@@ -1330,6 +1330,21 @@ export interface AssistantMessage {
 	/** Structured machine-readable error classifier; see `utils/error-id.ts` for bit layout and helpers. */
 	errorId?: number;
 	/**
+	 * Requests a layer below the caller replayed before this failure surfaced;
+	 * `0` when the failing request was made exactly once. Set by the layers
+	 * that run their own replay loop (`openai-codex-responses`, `cursor`,
+	 * `empty-completion-retry`) and left `undefined` by the ones that do not,
+	 * so `undefined` means "unknown", never "none".
+	 *
+	 * Recovery above the provider has to know whether a request was already
+	 * replayed — replaying it again multiplies the loop below. Each loop stops
+	 * at its own commitment boundary and those boundaries differ (the Codex
+	 * loop replays an *empty* reasoning block, while the Anthropic loop counts
+	 * the same opened block as committed), so streamed content cannot stand in
+	 * for the count.
+	 */
+	providerReplays?: number;
+	/**
 	 * Stable identifiers for request features the provider silently dropped
 	 * during this turn (e.g. `"priority"`). Set when a server-side rejection
 	 * triggered an in-provider fallback retry that succeeded without the

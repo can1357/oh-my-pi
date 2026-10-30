@@ -184,6 +184,17 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 
 			flush();
 			if (terminal) {
+				const wrapperReplays = emptyRetries + providerErrorRetries;
+				// Only report what is actually known. A `0` here would claim the
+				// request went out once on behalf of a provider loop that reports
+				// nothing and may have replayed it many times (`anthropic.ts` runs
+				// under this wrapper), and recovery above reads a reported `0` as
+				// exactly that claim. Adding to an inner count can undercount when
+				// the inner loop stays silent, which only ever makes a reader more
+				// cautious.
+				if (terminal.type === "error" && (terminal.error.providerReplays !== undefined || wrapperReplays > 0)) {
+					terminal.error.providerReplays = (terminal.error.providerReplays ?? 0) + wrapperReplays;
+				}
 				outer.push(terminal);
 			} else if (!outer.done) {
 				try {

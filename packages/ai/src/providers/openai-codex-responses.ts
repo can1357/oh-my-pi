@@ -795,6 +795,15 @@ class CodexStreamRuntime {
 	pendingSummaryDeltas = new Map<CodexOpenItem, string[]>();
 	websocketStreamRetries = 0;
 	providerRetryAttempt = 0;
+	/**
+	 * Requests this stream re-sent after the first one, counted at the two
+	 * transport reopens every recovery rung funnels through — the retry
+	 * budgets above (`providerRetryAttempt`, `websocketStreamRetries`) each
+	 * cover one rung and none of them covers the websocket→SSE replay.
+	 * Surfaced on the failed message as `providerReplays` so recovery above
+	 * the provider never replays a request this loop already replayed.
+	 */
+	providerReplays = 0;
 	sawTerminalEvent = false;
 	canSafelyReplayWebsocketOverSse = true;
 	whitespaceToolCallArgumentsDelta?: CodexWhitespaceToolCallArgumentsDeltaState;
@@ -2127,6 +2136,10 @@ async function handleCodexStreamFailure(context: CodexStreamFailureContext, erro
 	output.errorStatus = result.status;
 	output.errorId = result.id;
 	output.errorMessage = result.message;
+	// Always a number, 0 included: recovery above reads the absence of this
+	// field as "no loop here reports", so a failure that never reached the
+	// processor (`runtime` undefined) must still say the request went out once.
+	output.providerReplays = context.runtime?.providerReplays ?? 0;
 	output.duration = performance.now() - context.startTime;
 	if (context.firstTokenTime) {
 		output.ttft = context.firstTokenTime - context.startTime;
@@ -3205,6 +3218,7 @@ class CodexStreamProcessor {
 				this.runtime.websocketStreamRetries,
 				this.options ? event => this.options?.onSseEvent?.(event, this.model) : undefined,
 			);
+			this.runtime.providerReplays += 1;
 			this.runtime.eventStream = next.eventStream;
 			this.runtime.requestBodyForState = next.requestBodyForState;
 			this.runtime.transport = next.transport;
@@ -3227,6 +3241,7 @@ class CodexStreamProcessor {
 
 	async #reopenSseStream(state: CodexWebSocketSessionState | undefined): Promise<void> {
 		const next = await openCodexSseTransport(this.model, this.requestContext, this.requestSetup, this.options, state);
+		this.runtime.providerReplays += 1;
 		this.runtime.eventStream = next.eventStream;
 		this.runtime.requestBodyForState = next.requestBodyForState;
 		this.runtime.transport = next.transport;

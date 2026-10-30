@@ -1771,39 +1771,42 @@ export class TurnRecovery {
 	 * produced caused it, so an identical replay is worth making before the
 	 * chain moves the session to a weaker model.
 	 *
-	 * "No layer below replayed it" is read two ways, because the layers below
-	 * stop for two different reasons.
+	 * "No layer below replayed it" is answered in three ways, in this order.
 	 *
-	 * - **The model had begun streaming.** Each lower retry ends exactly there:
-	 *   the Anthropic provider loop retries only while `firstTokenTime ===
-	 *   undefined` and nothing replay-unsafe has streamed (`anthropic.ts`,
-	 *   `canRetryProviderFailure`), the OpenAI pre-output retry only while
-	 *   `!committed` (`empty-completion-retry.ts`), and `fetchWithRetry` only
-	 *   before a response body exists at all. A block the stream opened counts
-	 *   even while it is still empty: `content_block_start` is where the
-	 *   Anthropic loop sets `firstTokenTime` and `streamedReplayUnsafeContent`
-	 *   and pushes the empty block, so a cut between that frame and the first
-	 *   delta leaves an empty block behind and no replay below at all.
+	 * - **The layer that replays says so.** A loop that re-sends a request
+	 *   reports the count on the message it finally surfaces
+	 *   ({@link AssistantMessage.providerReplays} — `openai-codex-responses`,
+	 *   `cursor`, `empty-completion-retry`). A non-zero count is direct
+	 *   evidence and ends the question. No count at all means that layer
+	 *   reports nothing, not that nothing happened, so the two stand-ins below
+	 *   still run.
+	 * - **The model had begun streaming.** Where a loop reports nothing, its
+	 *   own commitment boundary is what stopped it: the Anthropic provider loop
+	 *   retries only while `firstTokenTime === undefined` and nothing
+	 *   replay-unsafe has streamed (`anthropic.ts`, `canRetryProviderFailure`),
+	 *   and `fetchWithRetry` only before a response body exists at all. A block
+	 *   the stream opened counts even while it is still empty:
+	 *   `content_block_start` is where the Anthropic loop sets `firstTokenTime`
+	 *   and `streamedReplayUnsafeContent` and pushes the empty block, so a cut
+	 *   between that frame and the first delta leaves an empty block behind and
+	 *   no replay below at all.
 	 * - **The wording is one no provider loop retries.** Their gate is
 	 *   `AIError.isProviderRetryableError`; a diagnostic it rejects — an in-band
 	 *   `TransferEncodingError`, `premature close`, `read ECONNRESET`, `write
 	 *   EPIPE`, `upstream closed the connection` — was made once and never
-	 *   replayed, whether or not anything streamed.
+	 *   replayed, whether or not anything streamed. This is also the only read
+	 *   available for `fetchWithRetry`, which builds no message and so can
+	 *   report no count; its gate is the same predicate.
 	 *
 	 * A hold only applies where no lower retry layer has already replayed the
 	 * request, so it does not multiply provider retry work.
 	 *
-	 * The stand-in is close, not exact. A provider loop can spend its whole
-	 * budget on contentless failures and then fail *with* content, so the held
-	 * attempts can land on top of a loop that ran; that costs one further loop
-	 * and requires alternating wire failure modes.
-	 *
-	 * Marking the message "retries spent" at each provider instead was the
-	 * alternative: it is more direct but needs a new field threaded through
-	 * every retrying layer, and `fetchWithRetry` builds no message, so its retry
-	 * attempts would stay invisible and the signal would be wrong in exactly the
-	 * case that matters. Streamed content is one observable fact that every
-	 * layer below already agrees on.
+	 * Streamed content alone is not that answer, which is why the count exists.
+	 * The loops disagree about what commits a request: `openai-codex-responses`
+	 * measures a block by its streamed length and replays an empty reasoning
+	 * start up to five times, while the Anthropic loop treats the same opened
+	 * block as committed. Reading "a block exists" as "nothing replayed" made
+	 * three held attempts land on top of three six-request Codex loops.
 	 *
 	 * Held for the first {@link CONNECTION_FAILURE_CHAIN_HOLD_ATTEMPTS} retry
 	 * attempts, so the failing model is asked three times in all. Each held
@@ -1840,6 +1843,11 @@ export class TurnRecovery {
 		if (AIError.is(id, AIError.Flag.Timeout)) return false;
 		if (AIError.is(id, AIError.Flag.AccountPolicy) || this.isClassifierRefusal(message)) return false;
 		if (!AIError.is(id, AIError.Flag.Connection)) return false;
+		// A layer that replays reports the count, and a non-zero one settles it:
+		// the request was already made again, so a held attempt would be the
+		// second replay of a request that is still failing.
+		const providerReplays = message.providerReplays;
+		if (providerReplays !== undefined && providerReplays > 0) return false;
 		if (
 			message.content.some(
 				block =>
@@ -1852,15 +1860,18 @@ export class TurnRecovery {
 			return true;
 		}
 		// Nothing streamed, so the hold rests on the wording naming a failure no
-		// provider loop would have replayed. Two things have to be true.
+		// provider loop would have replayed.
 		//
 		// A provider that emits a structured failure event decides its own
 		// replay from that event rather than from the prose around it, and
 		// leaves a `(code=…)` marker on the message it persists. The marker
 		// alone proves only which event it was: `AIError` owns the codes and
-		// wording that provider's loop actually replays, and only those mean a
-		// loop has already run.
-		if (AIError.isReplayedProviderFailureEventText(message.errorMessage ?? "")) return false;
+		// wording that such a loop replays, and only those mean a loop has
+		// already run. A loop that reported its count above has already given a
+		// better answer than the marker can, so the marker is read only for the
+		// providers that report nothing.
+		if (providerReplays === undefined && AIError.isReplayedProviderFailureEventText(message.errorMessage ?? ""))
+			return false;
 		// Otherwise the text is all there is, and every loop that reads text
 		// gates on `AIError.isProviderRetryableError`: a diagnostic it rejects
 		// (an in-band `TransferEncodingError`, `premature close`, `read
@@ -3009,14 +3020,24 @@ export class TurnRecovery {
 				waitMs <= effectiveUsageLimitWaitMs;
 			return maxDelayMs > 0 && waitMs > maxDelayMs && !waitForUsageReset;
 		};
+		// What the next same-model attempt would actually wait. The jittered
+		// backoff is only the floor: with no usage-limit wait in play, a longer
+		// provider hint replaces it further down (`delayMs = parsedRetryAfterMs`,
+		// below the chain consult) and that is the figure the fail-fast cap then
+		// measures. Computing it here keeps both readers on one number.
+		const sameModelDelayMs =
+			usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs
+				? parsedRetryAfterMs
+				: delayMs;
 		// The hold trades the chain consult for one more request on this model, so
 		// it is only a trade while that request can still happen. When the wait it
 		// would take is past `retry.maxDelayMs` (a cap below the backoff base, e.g.
-		// 100ms against the 500ms default), the fail-fast branch below ends the
-		// turn because neither model nor credential switched — so holding would
-		// spend the chain's only consult on a retry the cap then refuses. Consult
-		// the chain instead; a switch zeroes the wait.
-		const connectionHold = connectionHoldCandidate && !exceedsDelayCap(delayMs);
+		// 100ms against the 500ms default, or a 20s `retry-after` against any cap),
+		// the fail-fast branch below ends the turn because neither model nor
+		// credential switched — so holding would spend the chain's only consult on
+		// a retry the cap then refuses. Consult the chain instead; a switch zeroes
+		// the wait.
+		const connectionHold = connectionHoldCandidate && !exceedsDelayCap(sameModelDelayMs);
 
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
 			// The retry budget bounds same-model retries against a failing provider. A
@@ -3075,11 +3096,7 @@ export class TurnRecovery {
 							(options?.fireworksFastFallback || options?.hardErrorFallback) &&
 							!this.isRetryableError(message)
 						) &&
-						!exceedsDelayCap(
-							usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs
-								? parsedRetryAfterMs
-								: delayMs,
-						),
+						!exceedsDelayCap(sameModelDelayMs),
 				});
 			}
 			// Auto fallback from a Fireworks Fast variant to its base model. Independent
@@ -3091,8 +3108,8 @@ export class TurnRecovery {
 			}
 			if (switchedModel) {
 				delayMs = 0;
-			} else if (usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs) {
-				delayMs = parsedRetryAfterMs;
+			} else {
+				delayMs = sameModelDelayMs;
 			}
 		}
 

@@ -795,6 +795,63 @@ describe("AgentSession retry recovery", () => {
 		successfulAssistantEntry(sessionManager, "recovered on fallback");
 	});
 
+	it("consults the fallback chain when the provider's own wait would refuse the held retry", async () => {
+		// The held wait is not the jittered backoff alone: with no usage-limit
+		// wait in play, a longer provider hint replaces it before the fail-fast
+		// cap measures it. Testing the hold against the backoff alone passes a
+		// 20s hint under a 100ms cap, suppresses the chain, and then ends the
+		// turn on the cap with the fallback never asked.
+		const { primary, fallback, requestedModels, fallbackEvents, sessionManager } = await runFallbackChainRecovery([
+			{
+				content: [{ type: "thinking", thinking: "partial plan for the edit" }],
+				stopReason: "error",
+				errorMessage: `${SOCKET_CLOSE_MID_STREAM} retry-after-ms=20000`,
+			},
+			{ content: ["recovered on fallback"], stopReason: "stop" },
+		]);
+
+		expect(requestedModels).toEqual([primary, fallback]);
+		expect(fallbackEvents).toHaveLength(1);
+		successfulAssistantEntry(sessionManager, "recovered on fallback");
+	});
+
+	it("advances the chain when the provider reports replays it already spent", async () => {
+		// The Codex loop replays an empty reasoning start on its own budget, so
+		// the opened block it leaves behind is not evidence that the request was
+		// made once. Reading the block instead of the reported count held three
+		// more attempts on top of three six-request provider loops.
+		const { primary, fallback, requestedModels, fallbackEvents } = await runFallbackChainRecovery([
+			{
+				content: [{ type: "thinking", thinking: "" }],
+				stopReason: "error",
+				errorMessage: CODEX_UNREPLAYED_WIRE_EVENT,
+				providerReplays: 5,
+			},
+			{ content: ["recovered on fallback"], stopReason: "stop" },
+		]);
+
+		expect(requestedModels).toEqual([primary, fallback]);
+		expect(fallbackEvents).toHaveLength(1);
+	});
+
+	it("holds the chain when the provider reports the request went out exactly once", async () => {
+		// Same opened block and same wording, but the loop below reports it
+		// never replayed, so the held same-model retry is the first replay this
+		// request gets rather than the seventh.
+		const { primary, requestedModels, fallbackEvents } = await runFallbackChainRecovery([
+			{
+				content: [{ type: "thinking", thinking: "" }],
+				stopReason: "error",
+				errorMessage: CODEX_UNREPLAYED_WIRE_EVENT,
+				providerReplays: 0,
+			},
+			{ content: ["recovered on the same model"], stopReason: "stop" },
+		]);
+
+		expect(requestedModels).toEqual([primary, primary]);
+		expect(fallbackEvents).toEqual([]);
+	});
+
 	it("holds the chain when the stream opened a block and died before its first delta", async () => {
 		// `content_block_start` is where the Anthropic loop sets `firstTokenTime`
 		// and pushes the still-empty block, so a cut right after that frame is
