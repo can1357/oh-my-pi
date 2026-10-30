@@ -18,12 +18,15 @@
  * so both hold `<agentDir>/gc.lock` while they do it.
  */
 import * as fs from "node:fs/promises";
+import type { Stats } from "node:fs";
 import * as path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createGunzip } from "node:zlib";
 import { getAgentDir, getSessionsDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { statIfPresent, withGcLock } from "./gc-lock";
+import { SESSION_TITLE_SLOT_BYTES } from "./session-entries";
 import { sessionStagingPath } from "./session-storage";
+import { parseTitleSlotFromContent } from "./session-title-slot";
 
 /** Suffix `gc --archive` gives a transcript it has compressed. */
 export const ARCHIVED_SESSION_SUFFIX = ".jsonl.gz";
@@ -176,6 +179,42 @@ export async function inflateArchivedTranscript(source: string, destination: str
 }
 
 /**
+ * Whether the live file at `destination` already holds every byte the archive
+ * has at `source` — the archived copy read as a prefix of it.
+ *
+ * That is what proves dropping the archive's copy loses nothing, and it is
+ * the same identity rule {@link archiveIsPrefixOfLive} applies to the
+ * transcript. It admits the two shapes a restore has to finish: the entry an
+ * earlier attempt already carried home byte for byte, and the complete live
+ * file whose archived copy a killed archive run left truncated. It refuses
+ * every shape that is not this entry — a different file of the same name, a
+ * rewritten one, a link whose target is gone — because for those the archive
+ * holds bytes that exist nowhere else.
+ */
+async function destinationHoldsSource(source: string, sourceStat: Stats, destination: string): Promise<boolean> {
+	// Through the link, so a symlink onto the restored file still counts and a
+	// dangling one does not. A shorter destination cannot hold the whole source.
+	const target = await statIfPresent(destination);
+	if (!target?.isFile() || target.size < sourceStat.size) return false;
+	const live = await fs.open(destination, "r");
+	try {
+		let offset = 0;
+		const window = Buffer.allocUnsafe(64 * 1024);
+		for await (const chunk of Bun.file(source).stream()) {
+			for (let at = 0; at < chunk.byteLength; at += window.byteLength) {
+				const want = Math.min(window.byteLength, chunk.byteLength - at);
+				const { bytesRead } = await live.read(window, 0, want, offset);
+				if (bytesRead !== want || !window.subarray(0, want).equals(chunk.subarray(at, at + want))) return false;
+				offset += want;
+			}
+		}
+		return true;
+	} finally {
+		await live.close();
+	}
+}
+
+/**
  * Copy one entry out of the archive, resolving symlinks into real files.
  *
  * Each file lands on a temp beside its destination and is renamed into place,
@@ -183,10 +222,13 @@ export async function inflateArchivedTranscript(source: string, destination: str
  * the retry below would take that partial for a finished one, skip it, and
  * then drop the archive's complete copy.
  *
- * An entry the live tree already holds is left alone: when a restore is
- * finishing an interrupted attempt the live side is the newer one. A live
- * entry of a different kind (a directory where the archive holds a file) is
- * not something a restore may resolve, so it is reported instead.
+ * An entry the live tree already holds with the archive's own bytes is left
+ * alone: that is an entry an interrupted attempt of this restore already
+ * carried home. Anything else standing at the destination — a different file
+ * of the same name, a dangling link, a directory where the archive holds a
+ * file — is reported, and the archive keeps its copy. Refusing to overwrite
+ * is right; the bug this guards is dropping the archived original because
+ * something unrelated happened to occupy its path.
  */
 async function copyEntryDereferenced(source: string, destination: string): Promise<void> {
 	const stat = await fs.stat(source).catch(error => {
@@ -197,7 +239,9 @@ async function copyEntryDereferenced(source: string, destination: string): Promi
 	if (!stat) return;
 	const existing = await fs.lstat(destination).catch(() => undefined);
 	if (stat.isDirectory()) {
-		if (existing && !existing.isDirectory()) {
+		// Through the link: a symlinked artifact directory is a directory the
+		// restore may merge into, the same way the archive phase walks one.
+		if (existing && !(await statIfPresent(destination))?.isDirectory()) {
 			throw new Error(`${destination} is not a directory, so ${source} cannot be restored into it`);
 		}
 		await fs.mkdir(destination, { recursive: true });
@@ -213,10 +257,13 @@ async function copyEntryDereferenced(source: string, destination: string): Promi
 		return;
 	}
 	if (!stat.isFile()) return;
-	if (existing?.isDirectory()) {
-		throw new Error(`${destination} is a directory, so the archived file ${source} cannot be restored over it`);
+	if (existing) {
+		if (await destinationHoldsSource(source, stat, destination)) return;
+		throw new Error(
+			`${destination} already holds something else, so the archived ${source} was left in the archive; ` +
+				`move that path aside and restore again`,
+		);
 	}
-	if (existing) return;
 	// Named so `omp gc` reclaims it: a killed copy leaves it behind, and the
 	// staging sweep already clears a writer's abandoned temps.
 	const tempPath = sessionStagingPath(destination);
@@ -237,11 +284,29 @@ async function copyTreeDereferenced(source: string, destination: string): Promis
 }
 
 /**
+ * Whether both transcripts open with a fixed-width title slot. The slot is
+ * rewritten in place at byte zero by `FileSessionStorage.updateSessionTitle`,
+ * so a session renamed since it was archived differs from its archive in
+ * exactly those bytes while still being the same session; comparing them
+ * would refuse the restore for ever. Every byte that carries identity — the
+ * header record with the id, timestamp and cwd — follows the slot and is
+ * still compared.
+ */
+async function bothOpenWithTitleSlot(archiveHead: Buffer, live: fs.FileHandle): Promise<boolean> {
+	if (!parseTitleSlotFromContent(archiveHead.toString("utf8"))) return false;
+	const liveHead = Buffer.allocUnsafe(SESSION_TITLE_SLOT_BYTES);
+	const { bytesRead } = await live.read(liveHead, 0, SESSION_TITLE_SLOT_BYTES, 0);
+	if (bytesRead !== SESSION_TITLE_SLOT_BYTES) return false;
+	return parseTitleSlotFromContent(liveHead.toString("utf8")) !== undefined;
+}
+
+/**
  * Whether the live transcript starts with everything the archive holds — the
  * same session, possibly carried on since it was restored. A transcript only
  * ever grows at its end, so a prefix match is identity; it is what lets a
  * restore that was interrupted before its artifact tree arrived be finished
- * after the session has been resumed.
+ * after the session has been resumed. The one span that does change in place
+ * is the title slot, and {@link bothOpenWithTitleSlot} passes over it.
  *
  * Streamed on both sides: a transcript can be tens of megabytes, and this
  * runs with the gc lock held.
@@ -252,13 +317,35 @@ export async function archiveIsPrefixOfLive(archiveFile: string, sessionPath: st
 		let offset = 0;
 		let mismatch = false;
 		const window = Buffer.allocUnsafe(64 * 1024);
+		// The archive's opening bytes, held back until there are enough of them
+		// to tell a title slot from ordinary content.
+		const head = Buffer.allocUnsafe(SESSION_TITLE_SLOT_BYTES);
+		let headBytes = 0;
+		let headSettled = false;
+		const liveMatches = async (expected: Uint8Array, at: number): Promise<boolean> => {
+			const { bytesRead } = await live.read(window, 0, expected.byteLength, at);
+			return bytesRead === expected.byteLength && window.subarray(0, expected.byteLength).equals(expected);
+		};
 		await pipeline(Bun.file(archiveFile).stream(), createGunzip(), async (source: NodeJS.ReadableStream) => {
 			for await (const chunk of source as AsyncIterable<Uint8Array>) {
 				if (mismatch) continue;
-				for (let at = 0; at < chunk.byteLength; at += window.byteLength) {
+				let at = 0;
+				if (!headSettled) {
+					const take = Math.min(SESSION_TITLE_SLOT_BYTES - headBytes, chunk.byteLength);
+					head.set(chunk.subarray(0, take), headBytes);
+					headBytes += take;
+					at = take;
+					if (headBytes < SESSION_TITLE_SLOT_BYTES) continue;
+					headSettled = true;
+					if (!(await bothOpenWithTitleSlot(head, live)) && !(await liveMatches(head, 0))) {
+						mismatch = true;
+						continue;
+					}
+					offset = SESSION_TITLE_SLOT_BYTES;
+				}
+				for (; at < chunk.byteLength; at += window.byteLength) {
 					const want = Math.min(window.byteLength, chunk.byteLength - at);
-					const { bytesRead } = await live.read(window, 0, want, offset);
-					if (bytesRead !== want || !window.subarray(0, want).equals(chunk.subarray(at, at + want))) {
+					if (!(await liveMatches(chunk.subarray(at, at + want), offset))) {
 						mismatch = true;
 						break;
 					}
@@ -266,6 +353,8 @@ export async function archiveIsPrefixOfLive(archiveFile: string, sessionPath: st
 				}
 			}
 		});
+		// An archive shorter than one title slot never settled the head above.
+		if (!mismatch && !headSettled) return await liveMatches(head.subarray(0, headBytes), 0);
 		return !mismatch;
 	} catch {
 		return false;

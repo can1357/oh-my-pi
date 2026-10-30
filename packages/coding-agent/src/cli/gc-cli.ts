@@ -106,6 +106,12 @@ export interface GcCommandFlags {
 	wal?: boolean;
 	stale?: boolean;
 	compress?: boolean;
+	/**
+	 * The operator accepts that archiving is forward-only: the transcript
+	 * leaves the sessions tree, and an omp without `gc --restore` cannot find
+	 * or read it. Required by `--archive --apply`.
+	 */
+	forwardOnly?: boolean;
 	/** Session id prefix or archive path to bring back out of the archive. */
 	restore?: string;
 	coldArchiveAfterDays?: number;
@@ -130,6 +136,12 @@ export interface BlobGcResult {
 }
 
 export interface ArchiveGcResult {
+	/**
+	 * Where the archive phase puts transcripts, and — until a run brings one
+	 * back — the only place it exists. An omp without `gc --restore` neither
+	 * searches this directory nor inflates what is in it.
+	 */
+	archiveDir: string;
 	scanned: number;
 	skippedActive: number;
 	keptNewestGlobal: number;
@@ -274,6 +286,8 @@ interface ResolvedGcOptions {
 	runWal: boolean;
 	runStale: boolean;
 	runCompress: boolean;
+	/** Set by `--forward-only`: the archive phase may move sessions with `--apply`. */
+	forwardOnly: boolean;
 	/** Set by `--restore`; it runs alone, since no sweep may race a restore. */
 	restoreTarget?: string;
 	/** Phase flags the caller passed, so `--restore` can refuse to drop them. */
@@ -338,6 +352,7 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 		apply: flags.apply === true,
 		json: flags.json === true,
 		agentDir,
+		forwardOnly: flags.forwardOnly === true,
 		restoreTarget: flags.restore?.trim(),
 		explicitPhases: (["blobs", "archive", "wal", "stale", "compress"] as const).filter(
 			phase => flags[phase] === true,
@@ -1023,10 +1038,38 @@ async function gzipSessionFile(source: string, destination: string): Promise<{ o
 	}
 }
 
-/** Undo one `gzipSessionFile`: put the transcript back and drop the archive copy. */
-async function restoreGzipSessionFile(source: string, destination: string): Promise<void> {
-	await inflateArchivedTranscript(source, destination);
-	await fs.unlink(source);
+/**
+ * Relative paths the archive already holds under `destination`, or undefined
+ * when the destination does not exist. Directories are listed too, so a
+ * cleanup can tell one it has to keep from one it made.
+ */
+async function existingTreePaths(destination: string): Promise<Set<string> | undefined> {
+	if (!(await statIfPresent(destination))) return undefined;
+	const paths = new Set<string>();
+	for await (const name of ANY_FILE_GLOB.scan({ cwd: destination, dot: true, onlyFiles: false })) {
+		paths.add(name);
+	}
+	return paths;
+}
+
+/**
+ * Undo one failed copy into the archive, and nothing more. With no
+ * `preexisting` set the destination is this run's own creation and goes
+ * whole; otherwise every path absent from that snapshot goes and every path
+ * in it stays. Recursion is safe on a path the snapshot does not name: the
+ * snapshot was taken before the copy, so nothing under a directory this run
+ * created was there before it either. Entries a parent already took are
+ * gone, which `force` passes over.
+ */
+async function removeTreeAdditions(destination: string, preexisting: Set<string> | undefined): Promise<void> {
+	if (!preexisting) {
+		await fs.rm(destination, { recursive: true, force: true });
+		return;
+	}
+	for await (const name of ANY_FILE_GLOB.scan({ cwd: destination, dot: true, onlyFiles: false })) {
+		if (preexisting.has(name)) continue;
+		await fs.rm(path.join(destination, name), { recursive: true, force: true }).catch(() => undefined);
+	}
 }
 
 /**
@@ -1039,9 +1082,16 @@ async function restoreGzipSessionFile(source: string, destination: string): Prom
  *
  * A link whose target is already gone is skipped and counted: dereferencing
  * it throws, and one broken link must not make a session unarchivable
- * forever. A failure part-way through the copy removes what it had copied,
- * so a retry never finds a stray tree in the archive with no transcript
- * beside it.
+ * forever.
+ *
+ * A failure part-way through removes only what this copy wrote, so a retry
+ * finds no stray tree of its own making — but anything the archive already
+ * held stays. After a restore that brought the transcript home and stopped
+ * before its artifact tree, the live tree is a subset of the archived one
+ * and re-archiving it copies fewer files than are already there; a cleanup
+ * that removed the destination would delete the only copy of every artifact
+ * the restore had not reached yet, and the transcript rollback could not
+ * bring those back.
  *
  * Once the copy is complete the archive holds the session, and a failure to
  * drop the live tree (a locked file, a read-only directory) is reported as a
@@ -1054,6 +1104,7 @@ async function moveArtifactsTree(
 	destination: string,
 ): Promise<{ brokenLinks: number; leftoverSource?: string }> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
+	const preexisting = await existingTreePaths(destination);
 	let brokenLinks = 0;
 	try {
 		await fs.cp(source, destination, {
@@ -1069,7 +1120,7 @@ async function moveArtifactsTree(
 			},
 		});
 	} catch (error) {
-		await fs.rm(destination, { recursive: true, force: true });
+		await removeTreeAdditions(destination, preexisting);
 		throw error;
 	}
 	try {
@@ -1143,7 +1194,13 @@ async function moveSessionWithArtifacts(
 		for (const move of moved.reverse()) {
 			try {
 				if (move.compressed) {
-					await restoreGzipSessionFile(move.destination, move.source);
+					await inflateArchivedTranscript(move.destination, move.source);
+					// The archive copy goes only when nothing is left beside it.
+					// Artifacts the archive already held — files the live tree
+					// never had — are reachable only through their `.jsonl.gz`
+					// sibling, which is what `gc --restore` and a resume by id
+					// look for; dropping it would strand them on disk.
+					if (!(await pathExists(destArtifacts))) await fs.unlink(move.destination);
 				} else {
 					await movePath(move.destination, move.source);
 				}
@@ -1269,6 +1326,7 @@ async function runArchiveGc(
 	const sessions = await listActiveSessions(sessionsRoot);
 	const cutoffMs = Date.now() - options.coldArchiveAfterDays * DAY_MS;
 	const result: ArchiveGcResult = {
+		archiveDir: archiveRoot,
 		scanned: sessions.length,
 		skippedActive: 0,
 		keptNewestGlobal: 0,
@@ -1358,12 +1416,27 @@ async function runArchiveGc(
 	return result;
 }
 
-/** Every file of a session: its transcript plus its artifact tree (subagent transcripts, tool output). */
+/**
+ * Every file of a session: its transcript plus its artifact tree (subagent
+ * transcripts, tool output).
+ *
+ * `followSymlinks`, the way {@link scanSessionTree} walks the sessions tree
+ * and the nested-session scan reads an artifact tree: a subagent transcript
+ * reached through a directory link below the artifact tree is a transcript a
+ * process can own, and the ownership leases are taken from exactly this list.
+ * A walk that stopped at the link would archive a session out from under its
+ * live writer.
+ */
 async function collectSessionFiles(session: SessionInfo): Promise<string[]> {
 	const artifactsDir = sessionArtifactsPath(session.path);
 	const files = [session.path];
 	try {
-		for await (const name of ANY_FILE_GLOB.scan({ cwd: artifactsDir, dot: true, onlyFiles: true })) {
+		for await (const name of ANY_FILE_GLOB.scan({
+			cwd: artifactsDir,
+			dot: true,
+			onlyFiles: true,
+			followSymlinks: true,
+		})) {
 			if (isCompressScratchPath(name)) continue;
 			files.push(path.join(artifactsDir, name));
 		}
@@ -1597,6 +1670,13 @@ function renderText(result: GcResult): string {
 	}
 	if (result.archive) {
 		lines.push(`sessions: ${result.archive.archived}/${result.archive.wouldArchive} archived`);
+		if (!result.apply && result.archive.wouldArchive > 0) {
+			// The dry run is where this has to be read, because `--apply` without
+			// `--forward-only` never reaches a report.
+			lines.push(
+				`these sessions would move to ${result.archive.archiveDir}; only an omp with \`gc --restore\` finds them there, so --apply needs --forward-only`,
+			);
+		}
 		for (const target of result.archive.orphanedTargets) {
 			lines.push(`archived by content, its link target left in place: ${target}`);
 		}
@@ -1749,6 +1829,22 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 		// Saying nothing about phases it dropped is how a command reports success
 		// for work it never did.
 		throw new Error(`--restore runs alone; drop ${options.explicitPhases.map(flag => `--${flag}`).join(" ")}`);
+	}
+	// Archiving is the one step `omp` cannot undo for a reader that does not
+	// know about it. A release without `gc --restore` searches `*.jsonl` under
+	// the sessions tree and reads a transcript as plain text, so a transcript
+	// under `archive/sessions` is invisible to it whether or not it is
+	// compressed. Pin a machine back to one of those and its own archived
+	// sessions stop resuming until someone inflates them by hand. Nothing is
+	// lost and the way back is one command, but nobody takes that step by
+	// accident: it is refused before any phase runs, so a refused run leaves
+	// the agent directory exactly as it found it.
+	if (options.restoreTarget === undefined && options.runArchive && options.apply && !options.forwardOnly) {
+		throw new Error(
+			`--archive --apply moves cold sessions to ${archiveRoot}, where only an omp with \`gc --restore\` can find them; ` +
+				`a release pinned back from this one cannot resume them, and inflating one by hand is \`gunzip -c "<file>.jsonl.gz" > "<sessions>/<bucket>/<file>.jsonl"\` plus its artifact directory. ` +
+				`Pass --forward-only to accept that, or drop --archive and run \`omp gc --apply\` for the phases that keep every session where it is.`,
+		);
 	}
 	const result = await withGcLock(options.agentDir, async lockPath => {
 		const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath };

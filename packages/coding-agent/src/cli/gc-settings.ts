@@ -6,7 +6,12 @@ import { register } from "../config/registry";
 
 export const cfgGcBlobs = register({ id: "gc.blobs", type: "boolean", default: true });
 
-export const cfgGcArchive = register({ id: "gc.archive", type: "boolean", default: true });
+// Opt-in: it is the one phase that moves a session out of the sessions tree,
+// and an omp without `gc --restore` — every release up to and including
+// 18.14.0 — can neither find nor read what it writes. An unqualified
+// `omp gc --apply` therefore leaves sessions where they are; `--archive
+// --apply` asks for the move by name and still needs `--forward-only`.
+export const cfgGcArchive = register({ id: "gc.archive", type: "boolean", default: false });
 
 export const cfgGcWal = register({ id: "gc.wal", type: "boolean", default: true });
 

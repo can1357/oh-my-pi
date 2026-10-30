@@ -525,7 +525,7 @@ describe("runGcCommand blob sweep", () => {
 			].join("\n"),
 		);
 
-		const result = await runGcCommand({ flags: { agentDir: root, apply: true } });
+		const result = await runGcCommand({ flags: { agentDir: root, apply: true, forwardOnly: true } });
 
 		expect(result.blobs).toBeUndefined();
 		expect(result.wal).toBeUndefined();
@@ -558,7 +558,7 @@ describe("runGcCommand blob sweep", () => {
 			].join("\n"),
 		);
 
-		const result = await runGcCommand({ flags: { agentDir: targetAgentDir, apply: true } });
+		const result = await runGcCommand({ flags: { agentDir: targetAgentDir, apply: true, forwardOnly: true } });
 
 		expect(result.blobs).toBeUndefined();
 		expect(result.wal).toBeUndefined();
@@ -584,7 +584,7 @@ describe("runGcCommand blob sweep", () => {
 			].join("\n"),
 		);
 
-		const result = await runGcCommand({ flags: { agentDir: root, apply: true } });
+		const result = await runGcCommand({ flags: { agentDir: root, apply: true, forwardOnly: true } });
 
 		expect(result.archive?.wouldArchive).toBe(0);
 		expect(result.archive?.archived).toBe(0);
@@ -607,7 +607,7 @@ describe("runGcCommand blob sweep", () => {
 			].join("\n"),
 		);
 
-		const result = await runGcCommand({ flags: { agentDir: root, apply: true } });
+		const result = await runGcCommand({ flags: { agentDir: root, apply: true, forwardOnly: true } });
 
 		expect(result.archive?.keptNewestGlobal).toBe(1);
 		expect(result.archive?.archived).toBe(0);
@@ -692,7 +692,7 @@ describe("runGcCommand blob sweep", () => {
 		expect(await Bun.file(path.join(root, "agent.db")).exists()).toBe(false);
 		expect(await Bun.file(path.join(root, "settings.json.bak")).exists()).toBe(false);
 
-		const applied = await runGcCommand({ flags: { agentDir: root, apply: true } });
+		const applied = await runGcCommand({ flags: { agentDir: root, apply: true, forwardOnly: true } });
 
 		expect(applied.archive?.archived).toBe(1);
 	});
@@ -800,7 +800,7 @@ describe("runGcCommand session staging sweep", () => {
 			await agePath(file);
 		}
 		await Bun.write(inFlight, "partial");
-		const flags = { agentDir: root, archive: true };
+		const flags = { agentDir: root, archive: true, forwardOnly: true };
 
 		const dryRun = await runGcCommand({ flags });
 		expect(dryRun.archive).toMatchObject({ wouldDeleteTemps: 3, deletedTemps: 0, tempBytes: 21 });
@@ -825,7 +825,7 @@ describe("runGcCommand session staging sweep", () => {
 		await agePath(abandoned);
 
 		const result = await runGcCommand({
-			flags: { agentDir: root, archive: true, stale: true, apply: true },
+			flags: { agentDir: root, archive: true, forwardOnly: true, stale: true, apply: true },
 		});
 
 		expect(result.archive).toMatchObject({ wouldDeleteTemps: 1, deletedTemps: 1, errors: [] });
@@ -858,6 +858,7 @@ describe("runGcCommand session staging sweep", () => {
 			flags: {
 				agentDir: root,
 				archive: true,
+				forwardOnly: true,
 				coldArchiveAfterDays: 30,
 				retainNewestGlobal: 0,
 				retainNewestPerCwd: 0,
@@ -892,6 +893,7 @@ describe("runGcCommand cold-session archive", () => {
 			flags: {
 				agentDir: root,
 				archive: true,
+				forwardOnly: true,
 				coldArchiveAfterDays: 30,
 				retainNewestGlobal: 1,
 				retainNewestPerCwd: 0,
@@ -940,6 +942,7 @@ describe("runGcCommand cold-session archive", () => {
 				flags: {
 					agentDir: root,
 					archive: true,
+					forwardOnly: true,
 					apply: true,
 					coldArchiveAfterDays: 0,
 					retainNewestGlobal: 0,
@@ -986,6 +989,7 @@ describe("runGcCommand cold-session archive", () => {
 				flags: {
 					agentDir: root,
 					archive: true,
+					forwardOnly: true,
 					apply: true,
 					coldArchiveAfterDays: 0,
 					retainNewestGlobal: 0,
@@ -1024,6 +1028,7 @@ describe("runGcCommand cold-session archive", () => {
 				flags: {
 					agentDir: root,
 					archive: true,
+					forwardOnly: true,
 					apply: true,
 					coldArchiveAfterDays: 0,
 					retainNewestGlobal: 0,
@@ -1062,6 +1067,7 @@ describe("runGcCommand cold-session archive", () => {
 				flags: {
 					agentDir: root,
 					archive: true,
+					forwardOnly: true,
 					apply: true,
 					coldArchiveAfterDays: 0,
 					retainNewestGlobal: 0,
@@ -1099,6 +1105,7 @@ describe("runGcCommand cold-session archive", () => {
 			flags: {
 				agentDir: root,
 				archive: true,
+				forwardOnly: true,
 				coldArchiveAfterDays: 30,
 				retainNewestGlobal: 0,
 				retainNewestPerCwd: 0,
@@ -1138,6 +1145,7 @@ describe("runGcCommand cold-session archive", () => {
 			flags: {
 				agentDir: root,
 				archive: true,
+				forwardOnly: true,
 				coldArchiveAfterDays: 30,
 				retainNewestGlobal: 0,
 				retainNewestPerCwd: 0,
@@ -1184,6 +1192,7 @@ describe("runGcCommand cold-session archive", () => {
 				"--agent-dir",
 				root,
 				"--archive",
+				"--forward-only",
 				"--cold-archive-after-days",
 				"30",
 				"--retain-newest-global",
@@ -1209,6 +1218,7 @@ describe("runGcCommand cold-session archive", () => {
 			flags: {
 				agentDir: root,
 				archive: true,
+				forwardOnly: true,
 				coldArchiveAfterDays: 0,
 				retainNewestGlobal: 0,
 				retainNewestPerCwd: 0,
@@ -1252,6 +1262,7 @@ describe("runGcCommand cold-session archive", () => {
 			flags: {
 				agentDir: root,
 				archive: true,
+				forwardOnly: true,
 				coldArchiveAfterDays: 30,
 				retainNewestGlobal: 0,
 				retainNewestPerCwd: 0,

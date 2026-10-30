@@ -10,6 +10,8 @@ import { restoreArchivedSession } from "@oh-my-pi/pi-coding-agent/session/sessio
 import { withGcLock } from "@oh-my-pi/pi-coding-agent/session/gc-lock";
 import { resolveResumableSession, resolveResumeTarget } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { FileSessionStorage, tryAcquireSessionLease } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 import { getAgentDir, getSessionsDir, setAgentDir } from "@oh-my-pi/pi-utils";
 
 const SESSION_ID = "01a18630-42ae-7117-ba7c-029b1eee0f4b";
@@ -51,6 +53,7 @@ async function archiveEverything(): Promise<GcResult> {
 	return runGcCommand({
 		flags: {
 			agentDir: root,
+			forwardOnly: true,
 			archive: true,
 			apply: true,
 			json: true,
@@ -409,17 +412,67 @@ test("a half-restored session that has since been resumed still gets its artifac
 	expect(await Bun.file(sessionFile).text()).toContain("later");
 });
 
-test("a restore never overwrites a live artifact file with the archived copy", async () => {
+test("a restore keeps both copies when a different file stands where an archived artifact belongs", async () => {
 	const artifacts = sessionFile.slice(0, -".jsonl".length);
 	await fs.mkdir(artifacts, { recursive: true });
-	await Bun.write(path.join(artifacts, "sub.jsonl"), "ARCHIVED\n");
+	await Bun.write(path.join(artifacts, "sub.jsonl"), "ONLY-ARCHIVED-CONVERSATION\n");
 	await archiveEverything();
 	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
-	await Bun.write(path.join(artifacts, "sub.jsonl"), "NEWER-LIVE\n");
+	// A name collision, not a finished copy: this is another conversation that
+	// happens to sit at the path the archived one is named for.
+	await Bun.write(path.join(artifacts, "sub.jsonl"), "OTHER-CONVERSATION\n");
 
-	await restoreArchivedSession(archiveFile, root);
+	const restored = await restoreArchivedSession(archiveFile, root);
 
-	expect(await Bun.file(path.join(artifacts, "sub.jsonl")).text()).toBe("NEWER-LIVE\n");
+	// The live file is not overwritten, and the archived one is not deleted for
+	// standing in its way: it was the only copy of that conversation.
+	expect(await Bun.file(path.join(artifacts, "sub.jsonl")).text()).toBe("OTHER-CONVERSATION\n");
+	expect(await Bun.file(path.join(archiveFile.slice(0, -".jsonl.gz".length), "sub.jsonl")).text()).toBe(
+		"ONLY-ARCHIVED-CONVERSATION\n",
+	);
+	expect(restored.artifactsRestored).toBe(false);
+	expect(restored.notRestored.join("\n")).toContain("sub.jsonl");
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("a dangling link at an artifact's destination does not count as a restored file", async () => {
+	const artifacts = sessionFile.slice(0, -".jsonl".length);
+	await fs.mkdir(artifacts, { recursive: true });
+	await Bun.write(path.join(artifacts, "sub.jsonl"), "ONLY-ARCHIVED-CONVERSATION\n");
+	await archiveEverything();
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	await fs.mkdir(artifacts, { recursive: true });
+	await fs.symlink(path.join(root, "target-that-is-gone"), path.join(artifacts, "sub.jsonl"));
+
+	const restored = await restoreArchivedSession(archiveFile, root);
+
+	// An entry whose target does not exist holds nothing, so treating it as
+	// "already restored" would leave the conversation in neither place.
+	expect(await Bun.file(path.join(archiveFile.slice(0, -".jsonl.gz".length), "sub.jsonl")).text()).toBe(
+		"ONLY-ARCHIVED-CONVERSATION\n",
+	);
+	expect(restored.artifactsRestored).toBe(false);
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("a restore finishes when the archive's copy of an artifact is the truncated one", async () => {
+	const artifacts = sessionFile.slice(0, -".jsonl".length);
+	await fs.mkdir(artifacts, { recursive: true });
+	await Bun.write(path.join(artifacts, "sub.jsonl"), "COMPLETE-SUBAGENT-TRANSCRIPT\n");
+	await archiveEverything();
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	await Bun.write(path.join(artifacts, "sub.jsonl"), "COMPLETE-SUBAGENT-TRANSCRIPT\n");
+	// What a killed archive run leaves: the live file complete, the archive's
+	// copy of it cut short. The live file holds every archived byte, so the
+	// restore may finish and drop the archive.
+	await Bun.write(path.join(archiveFile.slice(0, -".jsonl.gz".length), "sub.jsonl"), "COMPLETE-SUBAG");
+
+	const restored = await restoreArchivedSession(archiveFile, root);
+
+	expect(restored.notRestored).toEqual([]);
+	expect(restored.artifactsRestored).toBe(true);
+	expect(await Bun.file(path.join(artifacts, "sub.jsonl")).text()).toBe("COMPLETE-SUBAGENT-TRANSCRIPT\n");
+	expect(await Bun.file(archiveFile).exists()).toBe(false);
 });
 
 test("a restore interrupted mid-copy leaves no partial file for the retry to mistake for a finished one", async () => {
@@ -472,7 +525,7 @@ test("gc reclaims the temps a killed restore leaves behind, transcript or not", 
 	}
 
 	const result = await runGcCommand({
-		flags: { agentDir: root, archive: true, apply: true, json: true, retainNewestGlobal: 99 },
+		flags: { agentDir: root, archive: true, apply: true, json: true, forwardOnly: true, retainNewestGlobal: 99 },
 	});
 
 	expect(result.archive?.deletedTemps).toBe(2);
@@ -647,4 +700,134 @@ test("an artifact tree that cannot be dropped leaves the archive complete, not d
 	} finally {
 		rm.mockRestore();
 	}
+});
+
+test("re-archiving a half-restored session keeps the artifacts only the archive holds", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await fs.mkdir(liveArtifacts, { recursive: true });
+	await Bun.write(path.join(liveArtifacts, "first.log"), "FIRST");
+	await Bun.write(path.join(liveArtifacts, "only-copy.log"), "UNIQUE-ARCHIVED-ARTIFACT");
+	await Bun.write(path.join(liveArtifacts, "subagent-1", "deep.log"), "UNIQUE-ARCHIVED-SUBTREE");
+	await archiveEverything();
+	// A restore that brought the transcript and one artifact home and stopped:
+	// the archive still holds the complete tree, the live tree part of it.
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	await Bun.write(path.join(liveArtifacts, "first.log"), "FIRST");
+
+	const realCp = fs.cp;
+	const cp = spyOn(fs, "cp").mockImplementation(async (source, destination, options) => {
+		if (String(source) === liveArtifacts) {
+			throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+		}
+		return await realCp(source, destination, options);
+	});
+	let result: GcResult;
+	try {
+		result = await archiveEverything();
+	} finally {
+		cp.mockRestore();
+	}
+
+	expect(result.archive?.archived).toBe(0);
+	expect(result.archive?.errors.join("\n")).toContain("ENOSPC");
+	// The artifact the live tree never had is still the archive's to give back.
+	expect(await Bun.file(path.join(archivedArtifacts, "only-copy.log")).text()).toBe("UNIQUE-ARCHIVED-ARTIFACT");
+	// A whole directory the live tree never had survives too.
+	expect(await Bun.file(path.join(archivedArtifacts, "subagent-1", "deep.log")).text()).toBe(
+		"UNIQUE-ARCHIVED-SUBTREE",
+	);
+	// Both halves stay reachable: the transcript is live again, and the archive
+	// copy beside the surviving tree is what `gc --restore` and a resume by id
+	// look for.
+	expect(await Bun.file(sessionFile).exists()).toBe(true);
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("a session is left alone while a process owns a transcript below a symlinked artifact directory", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const offloaded = path.join(root, "offloaded-children");
+	const childId = "01a18630-42ae-7117-ba7c-029b1eee0f4c";
+	const child = path.join(offloaded, "child.jsonl");
+	await Bun.write(child, sessionBody(childId, "nested turn", root));
+	await fs.mkdir(liveArtifacts, { recursive: true });
+	await fs.symlink(offloaded, path.join(liveArtifacts, "child-dir"));
+	const old = new Date(Date.now() - 30 * 86_400_000);
+	await fs.utimes(child, old, old);
+
+	// The child's owner: a live process holding its ownership lease.
+	const lease = tryAcquireSessionLease(childId);
+	expect(lease).not.toBeNull();
+	let result: GcResult;
+	try {
+		result = await archiveEverything();
+	} finally {
+		lease?.release();
+	}
+
+	expect(result.archive?.archived).toBe(0);
+	expect(result.archive?.skippedActive).toBe(1);
+	// Archiving would have copied the child's current bytes and removed the
+	// directory link while its writer was still appending to the target.
+	expect(await Bun.file(sessionFile).exists()).toBe(true);
+	expect(await Bun.file(child).text()).toContain("nested turn");
+});
+
+test("a half-restored session still restores after it has been renamed", async () => {
+	const artifacts = sessionFile.slice(0, -".jsonl".length);
+	const stamp = "2026-01-01T00:00:00.000Z";
+	// What the session writer puts at byte zero: a fixed-width title slot it
+	// later rewrites in place, leaving every other byte where it was.
+	await Bun.write(sessionFile, `${serializeTitleSlot({ updatedAt: stamp })}${sessionBody(SESSION_ID, PROMPT, root)}`);
+	await fs.mkdir(artifacts, { recursive: true });
+	await Bun.write(path.join(artifacts, "sub.jsonl"), "UNRESTORED-CHILD\n");
+	await archiveEverything();
+	// A restore that landed the transcript and stopped before its tree.
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	await new FileSessionStorage().updateSessionTitle(sessionFile, {
+		title: "Renamed after the restore",
+		source: "user",
+		updatedAt: stamp,
+	});
+
+	const restored = await restoreArchivedSession(archiveFile, root);
+
+	expect(restored.artifactsRestored).toBe(true);
+	expect(await Bun.file(path.join(artifacts, "sub.jsonl")).text()).toBe("UNRESTORED-CHILD\n");
+	expect(await Bun.file(archiveFile).exists()).toBe(false);
+	// The rename is kept: the restore matched the session, it did not undo it.
+	expect(await Bun.file(sessionFile).text()).toContain("Renamed after the restore");
+});
+
+test("archiving refuses to apply until the one-way step is accepted, and changes nothing", async () => {
+	const old = new Date(Date.now() - 30 * 86_400_000);
+	await fs.utimes(sessionFile, old, old);
+
+	await expect(
+		runGcCommand({
+			flags: {
+				agentDir: root,
+				archive: true,
+				apply: true,
+				json: true,
+				coldArchiveAfterDays: 0,
+				retainNewestGlobal: 0,
+				retainNewestPerCwd: 0,
+			},
+		}),
+	).rejects.toThrow("--forward-only");
+
+	expect(await Bun.file(sessionFile).exists()).toBe(true);
+	expect(await Bun.file(archiveFile).exists()).toBe(false);
+});
+
+test("an unqualified gc --apply leaves every session where it is", async () => {
+	const old = new Date(Date.now() - 365 * 86_400_000);
+	await fs.utimes(sessionFile, old, old);
+
+	const result = await runGcCommand({ flags: { agentDir: root, apply: true, json: true } });
+
+	expect(result.archive).toBeUndefined();
+	expect(await Bun.file(sessionFile).exists()).toBe(true);
+	expect(await Bun.file(archiveFile).exists()).toBe(false);
 });

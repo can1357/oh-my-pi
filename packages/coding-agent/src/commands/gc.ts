@@ -13,7 +13,11 @@ export default class Gc extends Command {
 		json: Flags.boolean({ description: "Output JSON" }),
 		"agent-dir": Flags.string({ description: "Agent directory to maintain" }),
 		blobs: Flags.boolean({ description: "Sweep unreferenced blobs" }),
-		archive: Flags.boolean({ description: "Archive cold sessions" }),
+		archive: Flags.boolean({ description: "Archive cold sessions (needs --forward-only with --apply)" }),
+		"forward-only": Flags.boolean({
+			description:
+				"Accept that archived sessions are reachable only from an omp with `gc --restore`; required by --archive --apply",
+		}),
 		wal: Flags.boolean({ description: "Checkpoint history/model database WAL files" }),
 		stale: Flags.boolean({
 			description: "Prune dangling session markers/breadcrumbs and old debug reports and collab replicas",
@@ -47,6 +51,7 @@ export default class Gc extends Command {
 				stale: flags.stale,
 				compress: flags.compress,
 				restore: flags.restore,
+				forwardOnly: flags["forward-only"],
 				coldArchiveAfterDays: flags["cold-archive-after-days"],
 				retainNewestGlobal: flags["retain-newest-global"],
 				retainNewestPerCwd: flags["retain-newest-per-cwd"],

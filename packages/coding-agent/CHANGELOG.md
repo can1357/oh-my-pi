@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `omp gc --apply` no longer archives cold sessions by default (`gc.archive` is now off), and `omp gc --archive --apply` refuses until you pass `--forward-only`: an omp without `gc --restore` cannot find or read an archived session ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+
 ### Added
 
 - Added queueable compaction: `/compact` sent with the follow-up key (Ctrl+Q) while the agent works now runs when it yields instead of interrupting it ([#17397](https://github.com/can1357/oh-my-pi/pull/17397) by [@H4vC](https://github.com/H4vC))
@@ -34,6 +38,10 @@
 - `omp --resume <id>` of an archived session opens the file its conversation went on in, instead of the archived copy ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 - `omp --fork <archived-id>`, `omp render`, `omp session pack`/`moved` and `omp anonymize` read an archived session with its subagent transcripts and tool output, and a session whose artifact tree could not come back reports that instead of opening without it ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 - `omp gc --restore ""` is refused instead of running the configured phases, and the `--restore` dry run reports the artifact recovery `--apply` would finish rather than an error ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --archive` no longer deletes archived artifacts when it fails to re-archive a session whose restore had not finished, so the files only the archive held survive a full disk ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --restore` keeps the archived copy of an artifact when something else stands at its path (another file of the same name, a dangling link) instead of deleting it and reporting success ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --archive` no longer archives a session whose subagent transcript a live process owns through a symlinked artifact directory ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- A session renamed after a half-finished restore can be restored again, instead of refusing for ever with "a different session file" ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.0] - 2026-10-29
 
