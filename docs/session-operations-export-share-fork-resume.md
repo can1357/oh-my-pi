@@ -490,9 +490,10 @@ understands the flag.
    background job of its parent, under the subagent's id. The lifecycle reviver
    rebuilds it from its transcript, the turn goes on as below, and the parent
    receives the result as the job's ordinary `async-result`, so a parent waiting on
-   that job finds it again. Skipped when the restore follows a `/restart` that cut
-   the turn off: reviving subagents is crash recovery, and transcripts an earlier
-   crash left mid-turn would re-run tasks the user already moved past.
+   that job finds it again. A `/restart` that cuts the session's turn off records
+   the turns of its running background subagents as cut off with it, before its
+   teardown stops them, so the relaunch revives them the same way, ahead of the
+   session's own turn.
 2. **Then the session's own turn** (`AgentSession.restoreInterruptedTurn`). A turn
    cut off without a `session_exit` record (a crash, SIGKILL or power loss records
    none) is first closed the way exit recovery closes one whose exit was recorded:
@@ -537,13 +538,15 @@ selectors (`--session`, `--resume`, `--continue`, `--fork`, and foreign imports)
 It adds `--resume <current-id>` only when the session actually exists on disk;
 an in-memory or never-materialized session restarts fresh.
 
-A restart during a running turn goes on with that turn.
-`AgentSession.dispose({ reason: "restart" })` writes the `session_exit` record
-with `restartedMidTurn: true` before it aborts the turn, and the relaunch passes
-`--restore` instead of `--resume` exactly when that record was written, so the
-new process regenerates a reply the restart cut off, or re-runs a tool batch it
-cut off entirely (see [CLI `--restore`](#cli---restore)). A restart while idle
-resumes as before.
+A restart during a running turn goes on with that turn. The turn counts as
+running while it streams, waits out a retry backoff, or has a continuation
+scheduled. `AgentSession.dispose({ reason: "restart" })` writes the
+`session_exit` record with `restartedMidTurn: true` before it aborts the turn,
+together with the same record for each running background subagent, and the
+relaunch passes `--restore` instead of `--resume` exactly when that record was
+written, so the new process revives those subagents, then regenerates a reply
+the restart cut off, or re-runs a tool batch it cut off entirely (see
+[CLI `--restore`](#cli---restore)). A restart while idle resumes as before.
 
 POSIX uses process-image replacement when available. Windows or a failed exec
 falls back to spawning the replacement with inherited terminal streams.

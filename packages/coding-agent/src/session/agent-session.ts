@@ -1229,6 +1229,8 @@ export class AgentSession implements SettingsScope {
 	#deferredExtensionLoad: Promise<void> | undefined;
 	#activeAgentContinue: ActiveAgentContinue | undefined;
 	#agentContinueSchedulerToken = 0;
+	/** Continuations queued by {@link #scheduleAgentContinue} whose scheduled tasks have not settled. */
+	#queuedAgentContinues = 0;
 
 	readonly #streamingEditGuard: StreamingEditGuard;
 	readonly #loopGuards: LoopGuards;
@@ -3775,12 +3777,35 @@ export class AgentSession implements SettingsScope {
 		return this.#restartCutTurnOff;
 	}
 
+	/**
+	 * Records this session's exit as `/restart`'s before the restart's teardown stops anything,
+	 * marking a turn it cuts off ({@link restartCutTurnOff}). When it does, the background subagents
+	 * running under this session's job manager are cut off with it: their exits are recorded the
+	 * same way now, since the teardown aborts their turns before it disposes them, so the
+	 * relaunch's `omp --restore` revives them under their job ids. Idempotent;
+	 * `dispose({ reason: "restart" })` runs it first.
+	 */
+	recordRestartExit(): void {
+		if (this.#exitRecorded) return;
+		this.#recordSessionExit("restart");
+		const manager = this.#ownedAsyncJobManager;
+		if (!this.#restartCutTurnOff || !manager) return;
+		const registry = AgentRegistry.global();
+		for (const job of manager.getRunningJobs()) {
+			if (job.type === "task" && job.agentId) registry.get(job.agentId)?.session?.recordRestartExit();
+		}
+	}
+
 	#recordSessionExit(reason: SessionDisposeReason | "dispose"): void {
 		if (this.#exitRecorded) return;
 		this.#exitRecorded = true;
-		// Recorded before dispose aborts the turn: still streaming means `/restart` cuts it off,
-		// even a first turn with no reply yet.
-		const restartedMidTurn = reason === "restart" && this.isStreaming;
+		// Recorded before dispose aborts the turn: a turn still under way means `/restart` cuts it off,
+		// even a first turn with no reply yet. Under way also covers a turn waiting out an auto-retry
+		// backoff or a scheduled continuation's delay, which only a client prompt's bracket
+		// ({@link isStreaming}) spans; background deliveries, scheduled continuations and
+		// `omp --restore` start turns without one.
+		const restartedMidTurn =
+			reason === "restart" && (this.isStreaming || this.isRetrying || this.#queuedAgentContinues > 0);
 		const pendingToolCalls = collectPendingToolCalls(this.sessionManager.getBranch());
 		if (
 			!restartedMidTurn &&
@@ -5249,10 +5274,11 @@ export class AgentSession implements SettingsScope {
 			});
 	}
 
+	/** Runs `task` after the prompt's post-prompt work; the returned promise settles when the scheduled run ends, however. */
 	#schedulePostPromptTask(
 		task: (signal: AbortSignal) => Promise<void>,
 		options?: { delayMs?: number; generation?: number; onSkip?: (reason: PostPromptSkipReason) => void },
-	): void {
+	): Promise<void> {
 		const delayMs = options?.delayMs ?? 0;
 		const signal = this.#postPromptTasksAbortController.signal;
 		const scheduled = (async () => {
@@ -5275,6 +5301,7 @@ export class AgentSession implements SettingsScope {
 			await task(signal);
 		})();
 		this.#trackPostPromptTask(scheduled);
+		return scheduled;
 	}
 
 	#skipAgentContinue(reason: AgentContinueSkipReason, request: ScheduledAgentContinueRequest): void {
@@ -5386,6 +5413,12 @@ export class AgentSession implements SettingsScope {
 			source: options.source,
 			schedulerToken: request.schedulerToken,
 		});
+		// Counted until its post-prompt task settles, whichever way: started (its turn is under way
+		// until then), skipped, or failed while waiting out the delay.
+		this.#queuedAgentContinues++;
+		const release = () => {
+			this.#queuedAgentContinues--;
+		};
 		this.#schedulePostPromptTask(
 			async signal => {
 				// Defense in depth: if compaction/handoff slipped onto the post-prompt queue
@@ -5479,7 +5512,7 @@ export class AgentSession implements SettingsScope {
 				generation: options.generation,
 				onSkip: reason => this.#skipAgentContinue(reason, request),
 			},
-		);
+		).then(release, release);
 	}
 
 	#scheduleCompactionContinuation(options: {
@@ -6373,7 +6406,8 @@ export class AgentSession implements SettingsScope {
 			this.#cacheWarmer.onRefreshEnd = undefined;
 			this.#cacheWarmer.cancel();
 		}
-		this.#recordSessionExit(options.reason ?? "dispose");
+		if (options.reason === "restart") this.recordRestartExit();
+		else this.#recordSessionExit(options.reason ?? "dispose");
 		this.#cancelExitRecorder?.();
 		this.#cancelExitRecorder = undefined;
 		this.#cancelFatalRecoveryHint?.();

@@ -51,8 +51,17 @@ const finished: Message[] = [
 	assistant({ content: [{ type: "text", text: "all done" }] }),
 ];
 
-/** Writes subagent `id`'s transcript under the main session `mainFile`, with its spawn contract. */
-async function writeSubagent(mainFile: string, cwd: string, id: string, messages: Message[]): Promise<string> {
+/**
+ * Writes subagent `id`'s transcript under the main session `mainFile`, with its spawn contract,
+ * then `exit` when its process recorded one.
+ */
+async function writeSubagent(
+	mainFile: string,
+	cwd: string,
+	id: string,
+	messages: Message[],
+	exit?: SessionExitData,
+): Promise<string> {
 	const file = path.join(mainFile.slice(0, -6), `${id}.jsonl`);
 	const manager = await SessionManager.open(file, undefined, undefined, {
 		initialCwd: cwd,
@@ -61,12 +70,13 @@ async function writeSubagent(mainFile: string, cwd: string, id: string, messages
 	});
 	manager.appendSessionInit({ systemPrompt: ["sub prompt"], task: `${id} task`, tools: ["read", "yield"] });
 	for (const message of messages) manager.appendMessage(message);
+	if (exit) manager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, exit);
 	await manager.close();
 	return file;
 }
 
 describe("restoreSession (omp --restore)", () => {
-	const ids = ["Cut", "Done", "Killed"];
+	const ids = ["Cut", "Done", "Killed", "Restarted"];
 	let tempDir: TempDir | undefined;
 	let manager: AsyncJobManager | undefined;
 
@@ -130,7 +140,7 @@ describe("restoreSession (omp --restore)", () => {
 		expect(delivered).toEqual(["Cut"]);
 	});
 
-	it("goes on with the session's own turn alone after a /restart cut it off", async () => {
+	it("after a /restart cut the turn off, goes on with the subagents it cut off, before the session's own turn", async () => {
 		tempDir = TempDir.createSync("@pi-restore-subagents-");
 		const cwd = tempDir.path();
 		const main = SessionManager.create(cwd, path.join(cwd, "sessions"));
@@ -146,19 +156,42 @@ describe("restoreSession (omp --restore)", () => {
 		const mainFile = main.getSessionFile();
 		if (!mainFile) throw new Error("Expected a persisted session file");
 		await main.close();
-		// A subagent an earlier crash left mid-turn: the restart's relaunch must not re-run it.
-		await writeSubagent(mainFile, cwd, "Cut", cutOff);
+		// A subagent the restart cut off with its parent's turn: its exit record says so.
+		await writeSubagent(mainFile, cwd, "Restarted", cutOff, exit);
 
 		manager = new AsyncJobManager({});
-		const followUp = vi.spyOn(executorModule, "runSubagentFollowUpTurn").mockRejectedValue(new Error("revived"));
+		manager.registerDeliverySink(MAIN_AGENT_ID, () => {});
+		const followUp = vi.spyOn(executorModule, "runSubagentFollowUpTurn").mockResolvedValue({
+			index: 0,
+			id: "Restarted",
+			agent: "Restarted",
+			agentSource: "user",
+			task: "Restarted task",
+			exitCode: 0,
+			output: "finished after the restart",
+			stderr: "",
+			truncated: false,
+			durationMs: 5,
+			tokens: 0,
+			requests: 1,
+		});
+		const jobManager = manager;
+		// The resumed turn may wait on the subagent's job: it must be registered by then.
+		let jobWhenTurnResumed: unknown;
 		const session = {
 			sessionManager: { getSessionFile: () => mainFile, getBranch: () => branch },
 			asyncJobManager: manager,
 			settings: Settings.isolated(),
-			restoreInterruptedTurn: vi.fn(async () => true),
+			restoreInterruptedTurn: vi.fn(async () => {
+				jobWhenTurnResumed = jobManager.getJob("Restarted");
+				return true;
+			}),
 		} as unknown as AgentSession;
 
-		expect(await restoreSession(session)).toEqual({ turn: true, subagents: [] });
-		expect(followUp).not.toHaveBeenCalled();
+		expect(await restoreSession(session)).toEqual({ turn: true, subagents: ["Restarted"] });
+		expect(jobWhenTurnResumed).toBeDefined();
+		expect(followUp).toHaveBeenCalledTimes(1);
+		expect(followUp.mock.calls[0]![0]).toMatchObject({ id: "Restarted", restore: true });
+		await manager.getJob("Restarted")!.promise;
 	});
 });

@@ -5,19 +5,23 @@ import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Message, Model } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockHandler } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
 	createInterruptedToolResults,
 	createInterruptedTurnAbortMessage,
+	hasRestorableTurn,
 	SESSION_EXIT_CUSTOM_TYPE,
 	type SessionExitData,
 } from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { until } from "./helpers/fake-clock";
 
 const zeroUsage = {
 	input: 0,
@@ -119,7 +123,7 @@ describe("AgentSession.restoreInterruptedTurn (omp --restore)", () => {
 	/**
 	 * A session reopened from `persisted` (messages and `session_exit` records, in order)
 	 * as `--resume` builds it, its model answering from `responses`. `sessionManager`
-	 * receives `persisted` (default: in memory).
+	 * receives `persisted` (default: in memory); `settings` override the test defaults.
 	 */
 	function reopen(
 		model: Model,
@@ -128,6 +132,7 @@ describe("AgentSession.restoreInterruptedTurn (omp --restore)", () => {
 		responses: MockHandler[],
 		evalToolSession?: ToolSession,
 		sessionManager = SessionManager.inMemory(),
+		settings: Readonly<Record<string, unknown>> = {},
 	) {
 		for (const entry of persisted) {
 			if ("role" in entry) sessionManager.appendMessage(entry);
@@ -147,7 +152,7 @@ describe("AgentSession.restoreInterruptedTurn (omp --restore)", () => {
 		session = new AgentSession({
 			agent,
 			sessionManager,
-			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false, ...settings }),
 			modelRegistry,
 			evalToolSession,
 		});
@@ -335,6 +340,178 @@ describe("AgentSession.restoreInterruptedTurn (omp --restore)", () => {
 		const resumed = reopen(model, await written(idle.session), [], []);
 		await expect(resumed.session.restoreInterruptedTurn()).resolves.toBe(false);
 		await resumed.session.dispose();
+		session = undefined;
+	});
+
+	it("records a restored turn /restart cuts off before its continuation streams or while it backs off", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		// A crash cut the turn off mid tool call; `omp --restore` goes on with it.
+		const crashed: Message[] = [
+			{ role: "user", content: "run the probe", timestamp: Date.now() },
+			assistant(model, {
+				content: [{ type: "toolCall", id: "call_1", name: "probe", arguments: { value: "again" } }],
+				stopReason: "toolUse",
+			}),
+		];
+		const scenarios: Array<{
+			name: string;
+			responses: MockHandler[];
+			settings: Record<string, unknown>;
+			// When the restart comes; nothing streams at that point in either case.
+			restartWhen: (live: AgentSession) => Promise<void>;
+		}> = [
+			{
+				// The continuation is still waiting out its scheduling delay.
+				name: "continuation queued",
+				responses: [],
+				settings: {},
+				restartWhen: async () => {},
+			},
+			{
+				// The continuation failed and waits out the retry backoff.
+				name: "retry backoff",
+				responses: [{ throw: "503 service unavailable: overloaded_error" }],
+				settings: {
+					"retry.enabled": true,
+					"retry.baseDelayMs": 60_000,
+					"retry.maxDelayMs": 60_000,
+					"retry.maxRetries": 1,
+					"retry.modelFallback": false,
+				},
+				restartWhen: live => until(() => live.isRetrying && !live.isStreaming, "retry backoff"),
+			},
+		];
+		for (const scenario of scenarios) {
+			const live = reopen(
+				model,
+				crashed,
+				[probeTool([])],
+				scenario.responses,
+				undefined,
+				SessionManager.create(tempDir.path(), path.join(tempDir.path(), scenario.name)),
+				scenario.settings,
+			);
+			await expect(live.session.restoreInterruptedTurn()).resolves.toBe(true);
+			await scenario.restartWhen(live.session);
+			expect(live.session.isStreaming).toBe(false);
+			await live.session.dispose({ reason: "restart" });
+			expect({ scenario: scenario.name, cut: live.session.restartCutTurnOff }).toEqual({
+				scenario: scenario.name,
+				cut: true,
+			});
+
+			const relaunched = reopen(
+				model,
+				await written(live.session),
+				[probeTool([])],
+				[{ content: ["went on"], stopReason: "stop" }],
+			);
+			await expect(relaunched.session.restoreInterruptedTurn()).resolves.toBe(true);
+			await relaunched.session.waitForIdle();
+			const last = relaunched.session.agent.state.messages.at(-1);
+			expect(last?.role === "assistant" && last.content).toContainEqual({ type: "text", text: "went on" });
+			await relaunched.session.dispose();
+		}
+		session = undefined;
+	});
+
+	it("records the turns of running background subagents /restart cuts off, before teardown stops them", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const manager = new AsyncJobManager({});
+		/** A file-backed session whose first reply never comes on its own. */
+		const live = (agentId: string, owned: boolean) => {
+			const started = Promise.withResolvers<void>();
+			const prompted = Promise.withResolvers<void>();
+			const mock = createMockModel({
+				responses: [
+					() => {
+						started.resolve();
+						return { content: ["never sent"], delayMs: 60_000 };
+					},
+				],
+			});
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: mock.stream,
+			});
+			const created = new AgentSession({
+				agent,
+				sessionManager: SessionManager.create(tempDir.path(), path.join(tempDir.path(), agentId)),
+				settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+				modelRegistry,
+				agentId,
+				ownedAsyncJobManager: owned ? manager : undefined,
+				asyncJobManager: manager,
+			});
+			created.subscribe(event => {
+				if (event.type === "message_end" && event.message.role === "user") prompted.resolve();
+			});
+			/** Starts a turn; resolves once the prompt is persisted and the reply is under way. */
+			const begin = async () => {
+				const turn = created.prompt("work").catch(() => false);
+				await Promise.all([started.promise, prompted.promise]);
+				await created.settleInFlightMessagePersistence();
+				return { turn };
+			};
+			return { session: created, begin };
+		};
+
+		const sub = live("RestartSub", false);
+		const parent = live("Main", true);
+		const registry = AgentRegistry.global();
+		try {
+			const { turn: subTurn } = await sub.begin();
+			const subFile = sub.session.sessionManager.getSessionFile();
+			if (!subFile) throw new Error("Expected the subagent session to have a file");
+			registry.register({
+				id: "RestartSub",
+				displayName: "RestartSub",
+				kind: "sub",
+				parentId: "Main",
+				session: sub.session,
+				sessionFile: subFile,
+			});
+			const jobId = manager.register(
+				"task",
+				"RestartSub task",
+				async ({ signal }) => {
+					const stopped = Promise.withResolvers<void>();
+					signal.addEventListener("abort", () => stopped.resolve(), { once: true });
+					await stopped.promise;
+					// As the task executor stops a subagent: its turn is aborted, then its session disposed.
+					await sub.session.abort();
+					await subTurn;
+					await sub.session.dispose();
+					return "stopped";
+				},
+				{ ownerId: "Main", agentId: "RestartSub" },
+			);
+			const job = manager.getJob(jobId);
+			const { turn: parentTurn } = await parent.begin();
+
+			await parent.session.dispose({ reason: "restart" });
+			await parentTurn;
+			await job?.promise.catch(() => {});
+
+			expect(parent.session.restartCutTurnOff).toBe(true);
+			const subBranch = (await SessionManager.open(subFile, path.dirname(subFile))).getBranch();
+			const exits = subBranch.filter(
+				entry => entry.type === "custom" && entry.customType === SESSION_EXIT_CUSTOM_TYPE,
+			);
+			// One exit record, the restart's, marking the turn cut off; the later dispose writes none.
+			expect(exits.map(entry => (entry.type === "custom" ? entry.data : undefined))).toMatchObject([
+				{ reason: "restart", restartedMidTurn: true },
+			]);
+			expect(hasRestorableTurn(subBranch)).toBe(true);
+		} finally {
+			registry.unregister("RestartSub");
+			await sub.session.dispose();
+			await parent.session.dispose();
+			await manager.dispose({ timeoutMs: 1000 });
+		}
 		session = undefined;
 	});
 

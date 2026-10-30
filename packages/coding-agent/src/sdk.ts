@@ -5328,6 +5328,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// begins — the lifecycle await below opens an async gap before
 					// AgentSession.dispose() would otherwise set its guards.
 					session.beginDispose();
+					// Before the awaits below release adopted subagents: a restart marks the turns it
+					// cuts off, this session's and its running subagents', while they still run.
+					if (disposeOptions?.reason === "restart") session.recordRestartExit();
 					if (agentKind === "main") {
 						// Top-level teardown owns the global agent lifecycle: park timers,
 						// adopted subagent sessions, revivers. Tear it down while shared

@@ -191,12 +191,12 @@ export function isInterruptedTurnAbort(message: AgentMessage): boolean {
 
 /**
  * Whether `omp --restore` has a turn to go on with on this branch: one `/restart` cut
- * off ({@link restartCutTurnOff}), one its last process left unfinished
+ * off ({@link endsInRestartCut}), one its last process left unfinished
  * ({@link findUnfinishedTurn}, the exit assumed), or one exit recovery already closed
  * that nothing followed, not even a normal exit.
  */
 export function hasRestorableTurn(entries: readonly SessionEntry[]): boolean {
-	if (restartCutTurnOff(entries)) return true;
+	if (endsInRestartCut(entries)) return true;
 	for (let index = entries.length - 1; index >= 0; index--) {
 		const entry = entries[index]!;
 		const exit = readSessionExit(entry);
@@ -215,7 +215,7 @@ export function hasRestorableTurn(entries: readonly SessionEntry[]): boolean {
  * turn the user interrupted or that failed) means a later process went on without
  * that turn.
  */
-export function restartCutTurnOff(entries: readonly SessionEntry[]): boolean {
+export function endsInRestartCut(entries: readonly SessionEntry[]): boolean {
 	let endedReplies = 0;
 	for (let index = entries.length - 1; index >= 0; index--) {
 		const entry = entries[index]!;
