@@ -97,6 +97,23 @@ impl Expansion {
 		}
 	}
 
+	/// Appends `next` as if its text directly followed this expansion's: its
+	/// first field joins this one's last, and the rest follow.
+	fn coalesce(&mut self, next: Self) {
+		for (i, mut field) in next.fields.into_iter().enumerate() {
+			match self.fields.last_mut() {
+				Some(last) if i == 0 => {
+					last.0.append(&mut field.0);
+				},
+				_ => self.fields.push(field),
+			}
+		}
+
+		// TODO(expansion): What if expansions have different concatenation values?
+		self.concatenate = next.concatenate;
+		self.from_array = next.from_array;
+	}
+
 	fn polymorphic_len(&self) -> usize {
 		if self.from_array {
 			self.fields.len()
@@ -475,6 +492,12 @@ pub async fn assign_to_named_parameter(
 	expander.assign_to_parameter(&parameter, value).await
 }
 
+/// How many characters and pieces field splitting walks between two
+/// checkpoints. A checkpoint costs nothing next to this many steps, and since
+/// the cooperative budget lasts 128 checkpoints the walk still yields every
+/// 32 Ki steps.
+const FIELD_SPLITTING_STRIDE: usize = 256;
+
 struct WordExpander<'a, SE: extensions::ShellExtensions> {
 	/// The shell in which to perform expansion.
 	shell: &'a mut Shell<SE>,
@@ -633,7 +656,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		// must expand — not only the first. Parsing the space-joined result as a
 		// single word left every element after the first with a literal leading
 		// `~` (issue #5819).
-		let brace_expanded_words = self.brace_expand_words(word)?;
+		let brace_expanded_words = self.brace_expand_words(word).await?;
 		if tracing::enabled!(target: trace_categories::EXPANSION, tracing::Level::DEBUG)
 			&& !(brace_expanded_words.len() == 1 && brace_expanded_words[0] == word)
 		{
@@ -643,14 +666,16 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		// Expand each brace element separately (tildes, parameters, command
 		// substitutions, arithmetic), separating elements with a splittable
 		// space so downstream field splitting yields one field per element.
-		let mut expansions = vec![];
+		// Each expansion coalesces into the result as it is made, so the
+		// element checkpoint covers that work too.
+		let mut coalesced = Expansion::default();
 		for (index, element) in brace_expanded_words.iter().enumerate() {
 			// A brace range sets this count, not the script: `{1..3000000}` is
 			// one word in, three million out, and every step below is ready on
 			// a native filesystem.
 			interp::loop_checkpoint(self.params).await?;
 			if index > 0 {
-				expansions.push(Expansion::from(ExpansionPiece::Splittable(String::from(" "))));
+				coalesced.coalesce(Expansion::from(ExpansionPiece::Splittable(String::from(" "))));
 			}
 
 			let pieces = if self.heredoc_mode {
@@ -666,11 +691,9 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 
 			for piece in pieces {
 				let piece_expansion = self.expand_word_piece(piece.piece).await?;
-				expansions.push(piece_expansion);
+				coalesced.coalesce(piece_expansion);
 			}
 		}
-
-		let coalesced = coalesce_expansions(expansions);
 
 		Ok(coalesced)
 	}
@@ -719,7 +742,10 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 	///
 	/// Empty brace elements (e.g. from `{,b}`) are returned as a quoted empty
 	/// string (`""`) so they survive as empty fields, matching bash.
-	fn brace_expand_words(&self, word: &'a str) -> Result<Vec<Cow<'a, str>>, error::Error> {
+	///
+	/// The generator spends a checkpoint on each word it makes, so a range
+	/// such as `{1..3000000}` can be cancelled before the last one exists.
+	async fn brace_expand_words(&self, word: &'a str) -> Result<Vec<Cow<'a, str>>, error::Error> {
 		// We perform a non-authoritative check to see if the string *may* contain
 		// braces to expand. There may be false positives, but must be no false
 		// negatives.
@@ -743,10 +769,14 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 
 		tracing::debug!(target: trace_categories::EXPANSION, "Brace expansion pieces: {brace_expansion_pieces:?}");
 
-		let words = braceexpansion::generate_and_combine_brace_expansions(brace_expansion_pieces)
-			.into_iter()
-			.map(|s| if s.is_empty() { Cow::Borrowed("\"\"") } else { Cow::Owned(s) })
-			.collect();
+		let words = braceexpansion::generate_and_combine_brace_expansions(
+			brace_expansion_pieces,
+			self.params,
+		)
+		.await?
+		.into_iter()
+		.map(|s| if s.is_empty() { Cow::Borrowed("\"\"") } else { Cow::Owned(s) })
+		.collect();
 
 		Ok(words)
 	}
@@ -754,8 +784,8 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 	/// Convenience wrapper over [`Self::brace_expand_words`] that joins the
 	/// expanded elements back into a single space-separated string.
 	#[cfg(test)]
-	fn brace_expand_if_needed(&self, word: &'a str) -> Result<Cow<'a, str>, error::Error> {
-		let mut words = self.brace_expand_words(word)?;
+	async fn brace_expand_if_needed(&self, word: &'a str) -> Result<Cow<'a, str>, error::Error> {
+		let mut words = self.brace_expand_words(word).await?;
 		if words.len() == 1 {
 			Ok(words.remove(0))
 		} else {
@@ -774,7 +804,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		let basic_expansion = self.basic_expand(word).await?;
 
 		// Then split.
-		let fields: Vec<WordField> = self.split_fields(basic_expansion);
+		let fields: Vec<WordField> = self.split_fields(basic_expansion).await?;
 
 		// Now expand pathnames if necessary. This also unquotes as a side effect.
 		let mut result = Vec::new();
@@ -791,19 +821,37 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		Ok(result)
 	}
 
-	fn split_fields(&self, expansion: Expansion) -> Vec<WordField> {
+	/// Splits `expansion` into fields at the characters in IFS.
+	///
+	/// The text comes from run-time data, not the script, and a single field
+	/// can be any length, so the walk spends a checkpoint every
+	/// [`FIELD_SPLITTING_STRIDE`] characters and pieces rather than once per
+	/// field.
+	async fn split_fields(&self, expansion: Expansion) -> Result<Vec<WordField>, error::Error> {
 		let ifs = self.shell.ifs();
 
 		let mut fields: Vec<WordField> = vec![];
 		let mut current_field = WordField::new();
+		// Characters and pieces walked since the last checkpoint.
+		let mut steps = 0;
 
 		// Go through the fields we have so far.
 		for existing_field in expansion.fields {
 			for piece in existing_field.0 {
+				if steps == FIELD_SPLITTING_STRIDE {
+					steps = 0;
+					interp::loop_checkpoint(self.params).await?;
+				}
+				steps += 1;
 				match piece {
 					ExpansionPiece::Unsplittable(_) => current_field.0.push(piece),
 					ExpansionPiece::Splittable(s) => {
 						for c in s.chars() {
+							if steps == FIELD_SPLITTING_STRIDE {
+								steps = 0;
+								interp::loop_checkpoint(self.params).await?;
+							}
+							steps += 1;
 							if ifs.contains(c) {
 								if !current_field.0.is_empty() {
 									fields.push(std::mem::take(&mut current_field));
@@ -828,7 +876,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			}
 		}
 
-		fields
+		Ok(fields)
 	}
 
 	async fn expand_pathnames_in_field(
@@ -1221,7 +1269,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			} => {
 				let expanded_parameter = self.expand_parameter(&parameter, indirect).await?;
 				let expanded_pattern = self.basic_expand_opt_pattern(pattern).await?;
-				transform_expansion(expanded_parameter, async |s| {
+				transform_expansion(self.params, expanded_parameter, async |s| {
 					patterns::remove_smallest_matching_suffix(s.as_str(), expanded_pattern.as_ref())
 						.map(|s| s.to_owned())
 				})
@@ -1234,7 +1282,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			} => {
 				let expanded_parameter = self.expand_parameter(&parameter, indirect).await?;
 				let expanded_pattern = self.basic_expand_opt_pattern(pattern).await?;
-				transform_expansion(expanded_parameter, async |s| {
+				transform_expansion(self.params, expanded_parameter, async |s| {
 					patterns::remove_largest_matching_suffix(s.as_str(), expanded_pattern.as_ref())
 						.map(|s| s.to_owned())
 				})
@@ -1248,7 +1296,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				let expanded_parameter = self.expand_parameter(&parameter, indirect).await?;
 				let expanded_pattern = self.basic_expand_opt_pattern(pattern).await?;
 
-				transform_expansion(expanded_parameter, async |s| {
+				transform_expansion(self.params, expanded_parameter, async |s| {
 					patterns::remove_smallest_matching_prefix(s.as_str(), expanded_pattern.as_ref())
 						.map(|s| s.to_owned())
 				})
@@ -1262,7 +1310,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				let expanded_parameter = self.expand_parameter(&parameter, indirect).await?;
 				let expanded_pattern = self.basic_expand_opt_pattern(pattern).await?;
 
-				transform_expansion(expanded_parameter, async |s| {
+				transform_expansion(self.params, expanded_parameter, async |s| {
 					patterns::remove_largest_matching_prefix(s.as_str(), expanded_pattern.as_ref())
 						.map(|s| s.to_owned())
 				})
@@ -1391,6 +1439,8 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 
 				let mut transformed_fields = vec![];
 				for field in expanded_parameter.fields {
+					// `${name[@]…}` transforms one field per array element.
+					interp::loop_checkpoint(self.params).await?;
 					let s = String::from(field);
 					let transformed = self.apply_transform_to(&op, s, came_from_undefined).await?;
 					transformed_fields.push(WordField::from(transformed));
@@ -1407,7 +1457,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				let expanded_parameter = self.expand_parameter(&parameter, indirect).await?;
 				let expanded_pattern = self.basic_expand_opt_pattern(pattern).await?;
 
-				transform_expansion(expanded_parameter, async |s| {
+				transform_expansion(self.params, expanded_parameter, async |s| {
 					Self::uppercase_first_char(s, expanded_pattern.as_ref())
 				})
 				.await
@@ -1416,7 +1466,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				let expanded_parameter = self.expand_parameter(&parameter, indirect).await?;
 				let expanded_pattern = self.basic_expand_opt_pattern(pattern).await?;
 
-				transform_expansion(expanded_parameter, async |s| {
+				transform_expansion(self.params, expanded_parameter, async |s| {
 					Self::uppercase_pattern(s.as_str(), expanded_pattern.as_ref())
 				})
 				.await
@@ -1425,7 +1475,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				let expanded_parameter = self.expand_parameter(&parameter, indirect).await?;
 				let expanded_pattern = self.basic_expand_opt_pattern(pattern).await?;
 
-				transform_expansion(expanded_parameter, async |s| {
+				transform_expansion(self.params, expanded_parameter, async |s| {
 					Self::lowercase_first_char(s, expanded_pattern.as_ref())
 				})
 				.await
@@ -1434,7 +1484,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				let expanded_parameter = self.expand_parameter(&parameter, indirect).await?;
 				let expanded_pattern = self.basic_expand_opt_pattern(pattern).await?;
 
-				transform_expansion(expanded_parameter, async |s| {
+				transform_expansion(self.params, expanded_parameter, async |s| {
 					Self::lowercase_pattern(s.as_str(), expanded_pattern.as_ref())
 				})
 				.await
@@ -1462,7 +1512,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 					matches!(match_kind, brush_parser::word::SubstringMatchKind::Suffix),
 				)?;
 
-				transform_expansion(expanded_parameter, async |s| {
+				transform_expansion(self.params, expanded_parameter, async |s| {
 					Ok(Self::replace_substring(
 						s.as_str(),
 						&regex,
@@ -1728,15 +1778,18 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			brush_parser::word::Parameter::NamedWithAllIndices { name, concatenate } => {
 				if let Some((_, var)) = self.shell.env().get(name) {
 					let values = var.value().element_values(self.shell);
+					let mut fields = Vec::with_capacity(values.len());
+					for value in values {
+						// `${name[@]}` has as many fields as the array has elements.
+						interp::loop_checkpoint(self.params).await?;
+						fields.push(WordField(vec![ExpansionPiece::Splittable(value)]));
+					}
 
 					Ok(Expansion {
-						fields:      values
-							.into_iter()
-							.map(|value| WordField(vec![ExpansionPiece::Splittable(value)]))
-							.collect(),
+						fields,
 						concatenate: *concatenate,
-						from_array:  true,
-						undefined:   false,
+						from_array: true,
+						undefined: false,
 					})
 				} else {
 					Ok(Expansion {
@@ -1970,27 +2023,6 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 	}
 }
 
-fn coalesce_expansions(expansions: Vec<Expansion>) -> Expansion {
-	expansions
-		.into_iter()
-		.fold(Expansion::default(), |mut acc, expansion| {
-			for (i, mut field) in expansion.fields.into_iter().enumerate() {
-				match acc.fields.last_mut() {
-					Some(last) if i == 0 => {
-						last.0.append(&mut field.0);
-					},
-					_ => acc.fields.push(field),
-				}
-			}
-
-			// TODO(expansion): What if expansions have different concatenation values?
-			acc.concatenate = expansion.concatenate;
-			acc.from_array = expansion.from_array;
-
-			acc
-		})
-}
-
 fn to_initial_capitals(s: &str) -> String {
 	let mut result = String::new();
 	let mut capitalize_next = true;
@@ -2011,6 +2043,7 @@ fn to_initial_capitals(s: &str) -> String {
 }
 
 async fn transform_expansion<F, FReturn>(
+	params: &ExecutionParameters,
 	expansion: Expansion,
 	mut f: F,
 ) -> Result<Expansion, error::Error>
@@ -2020,6 +2053,8 @@ where
 {
 	let mut transformed_fields = vec![];
 	for field in expansion.fields {
+		// One field per array element when the parameter is an array.
+		interp::loop_checkpoint(params).await?;
 		let transformed_field = WordField::from(f(String::from(field)).await?);
 		transformed_fields.push(transformed_field);
 	}
@@ -2159,14 +2194,14 @@ mod tests {
 		let params = shell.default_exec_params();
 		let expander = WordExpander::new(&mut shell, &params);
 
-		assert_eq!(expander.brace_expand_if_needed("abc")?, "abc");
-		assert_eq!(expander.brace_expand_if_needed("a{,b}d")?, "ad abd");
-		assert_eq!(expander.brace_expand_if_needed("a{b,c}d")?, "abd acd");
-		assert_eq!(expander.brace_expand_if_needed("a{1..3}d")?, "a1d a2d a3d");
-		assert_eq!(expander.brace_expand_if_needed(r#""{a,b}""#)?, r#""{a,b}""#);
-		assert_eq!(expander.brace_expand_if_needed("a{}b")?, "a{}b");
-		assert_eq!(expander.brace_expand_if_needed("a{ }b")?, "a{ }b");
-		assert_eq!(expander.brace_expand_if_needed("{a,b{1,2}}")?, "a b1 b2");
+		assert_eq!(expander.brace_expand_if_needed("abc").await?, "abc");
+		assert_eq!(expander.brace_expand_if_needed("a{,b}d").await?, "ad abd");
+		assert_eq!(expander.brace_expand_if_needed("a{b,c}d").await?, "abd acd");
+		assert_eq!(expander.brace_expand_if_needed("a{1..3}d").await?, "a1d a2d a3d");
+		assert_eq!(expander.brace_expand_if_needed(r#""{a,b}""#).await?, r#""{a,b}""#);
+		assert_eq!(expander.brace_expand_if_needed("a{}b").await?, "a{}b");
+		assert_eq!(expander.brace_expand_if_needed("a{ }b").await?, "a{ }b");
+		assert_eq!(expander.brace_expand_if_needed("{a,b{1,2}}").await?, "a b1 b2");
 
 		Ok(())
 	}
@@ -2211,7 +2246,7 @@ mod tests {
 			..Expansion::default()
 		};
 
-		let fields = expander.split_fields(expansion);
+		let fields = expander.split_fields(expansion).await?;
 
 		assert_eq!(fields, vec![
 			WordField(vec![ExpansionPiece::Unsplittable(String::from("A"))]),

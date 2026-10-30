@@ -303,86 +303,250 @@ impl OpenFile {
 /// How much a streaming copy moves between a read and a write.
 const COPY_CHUNK_BYTES: usize = 64 * 1024;
 
-/// Runs a blocking operation off the runtime's workers.
-async fn offload<T: Send + 'static>(
-	operation: impl FnOnce() -> std::io::Result<T> + Send + 'static,
-) -> std::io::Result<T> {
-	tokio::task::spawn_blocking(operation).await.map_err(std::io::Error::other)?
+/// One end of a copy, classified by what its I/O waits on.
+enum CopySide {
+	/// A provider-backed file. Its `*_async` methods await.
+	Virtual(OpenFile),
+	/// A descriptor that can wait without end for something no storage
+	/// controller will deliver — a pipe, a FIFO, a socket, a terminal. Driven
+	/// by the reactor with `O_NONBLOCK` set, so waiting on it is an ordinary
+	/// pending future that a drop or a cancellation ends at once.
+	#[cfg(unix)]
+	Polled(PolledFd),
+	/// Everything else: a regular file, or a handle with no descriptor. Its
+	/// reads and writes wait on storage and return.
+	Plain(OpenFile),
 }
 
-/// Streams `reader` into `writer` with blocking `std::io`. Only ever called on
-/// the blocking pool.
-fn copy_blocking(reader: &mut OpenFile, writer: &mut OpenFile) -> std::io::Result<()> {
-	let mut buf = vec![0u8; COPY_CHUNK_BYTES];
-	loop {
-		let n = match std::io::Read::read(reader, &mut buf) {
-			Ok(0) => break,
-			Ok(n) => n,
-			Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-			Err(error) => return Err(error),
-		};
-		std::io::Write::write_all(writer, &buf[..n])?;
+impl CopySide {
+	fn classify(file: OpenFile) -> Self {
+		if file.is_virtual() {
+			return Self::Virtual(file);
+		}
+		#[cfg(unix)]
+		{
+			match PolledFd::new(file) {
+				Ok(polled) => Self::Polled(polled),
+				Err(file) => Self::Plain(file),
+			}
+		}
+		#[cfg(not(unix))]
+		{
+			Self::Plain(file)
+		}
 	}
-	std::io::Write::flush(writer)
+
+	async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+		match self {
+			Self::Virtual(file) => file.read_async(buf).await,
+			#[cfg(unix)]
+			Self::Polled(polled) => polled.read(buf).await,
+			Self::Plain(file) => std::io::Read::read(file, buf),
+		}
+	}
+
+	async fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+		match self {
+			Self::Virtual(file) => file.write_all_async(buf).await,
+			#[cfg(unix)]
+			Self::Polled(polled) => polled.write_all(buf).await,
+			Self::Plain(file) => std::io::Write::write_all(file, buf),
+		}
+	}
+
+	async fn flush(&mut self) -> std::io::Result<()> {
+		match self {
+			Self::Virtual(file) => file.flush_async().await,
+			// A descriptor holds nothing back; every `write` reached the kernel.
+			#[cfg(unix)]
+			Self::Polled(_) => Ok(()),
+			Self::Plain(file) => std::io::Write::flush(file),
+		}
+	}
+}
+
+/// Lends a raw descriptor to the reactor without owning it.
+#[cfg(unix)]
+struct RawDescriptor(std::os::fd::RawFd);
+
+#[cfg(unix)]
+impl std::os::fd::AsRawFd for RawDescriptor {
+	fn as_raw_fd(&self) -> std::os::fd::RawFd {
+		self.0
+	}
+}
+
+/// A descriptor the reactor polls, with `O_NONBLOCK` set for as long as the
+/// copy runs.
+///
+/// `O_NONBLOCK` lives on the open file description, which `dup` shares, so
+/// setting it is visible through every descriptor duplicated from the same
+/// `open`. It is therefore restored on drop, and only set when this copy found
+/// it clear.
+#[cfg(unix)]
+struct PolledFd {
+	/// Registered with the reactor; deregistered when this field drops, which
+	/// is before `file` closes the descriptor.
+	poll:    tokio::io::unix::AsyncFd<RawDescriptor>,
+	/// The flags to put back, when this copy was the one that changed them.
+	restore: Option<nix::libc::c_int>,
+	/// Holds the descriptor open. Declared last so it closes last, after the
+	/// reactor registration above and the flag restore below.
+	#[expect(dead_code, reason = "held for the descriptor's lifetime, never read")]
+	file:    OpenFile,
+}
+
+#[cfg(unix)]
+impl Drop for PolledFd {
+	fn drop(&mut self) {
+		if let Some(flags) = self.restore {
+			// SAFETY: `self.file` still holds the descriptor open, and `F_SETFL`
+			// is given the flags the matching `F_GETFL` returned.
+			unsafe { nix::libc::fcntl(self.poll.get_ref().0, nix::libc::F_SETFL, flags) };
+		}
+	}
+}
+
+#[cfg(unix)]
+impl PolledFd {
+	/// Takes `file` when its descriptor is one the reactor can poll, and hands
+	/// it back when it is not.
+	///
+	/// A regular file is never offered: `epoll_ctl` refuses it, and its reads
+	/// wait only on storage. Some character devices carry no `poll` either
+	/// (`/dev/null` among them), so a registration failure also hands `file`
+	/// back rather than failing the copy.
+	fn new(file: OpenFile) -> Result<Self, OpenFile> {
+		use std::os::fd::AsRawFd as _;
+
+		let Ok(borrowed) = file.try_borrow_as_fd() else {
+			return Err(file);
+		};
+		let raw = borrowed.as_raw_fd();
+		if !waits_without_end(raw) {
+			return Err(file);
+		}
+
+		// SAFETY: `raw` stays open for the life of `file`, and `F_GETFL` only reads.
+		let flags = unsafe { nix::libc::fcntl(raw, nix::libc::F_GETFL) };
+		if flags < 0 {
+			return Err(file);
+		}
+		let restore = if flags & nix::libc::O_NONBLOCK == 0 {
+			// SAFETY: as above; `F_SETFL` sets only the status flags.
+			let set = unsafe { nix::libc::fcntl(raw, nix::libc::F_SETFL, flags | nix::libc::O_NONBLOCK) };
+			if set < 0 {
+				return Err(file);
+			}
+			Some(flags)
+		} else {
+			None
+		};
+
+		match tokio::io::unix::AsyncFd::new(RawDescriptor(raw)) {
+			Ok(poll) => Ok(Self { poll, restore, file }),
+			Err(_) => {
+				if let Some(flags) = restore {
+					// SAFETY: as above.
+					unsafe { nix::libc::fcntl(raw, nix::libc::F_SETFL, flags) };
+				}
+				Err(file)
+			},
+		}
+	}
+
+	async fn read(&self, buf: &mut [u8]) -> std::io::Result<usize> {
+		self
+			.poll
+			.async_io(tokio::io::Interest::READABLE, |descriptor| {
+				// SAFETY: `descriptor` is open and `buf` is writable for `buf.len()` bytes.
+				let read = unsafe { nix::libc::read(descriptor.0, buf.as_mut_ptr().cast(), buf.len()) };
+				if read < 0 {
+					return Err(std::io::Error::last_os_error());
+				}
+				#[expect(clippy::cast_sign_loss, reason = "read is not negative here")]
+				Ok(read as usize)
+			})
+			.await
+	}
+
+	async fn write_all(&self, mut buf: &[u8]) -> std::io::Result<()> {
+		while !buf.is_empty() {
+			let written = self
+				.poll
+				.async_io(tokio::io::Interest::WRITABLE, |descriptor| {
+					// SAFETY: `descriptor` is open and `buf` is readable for `buf.len()` bytes.
+					let written =
+						unsafe { nix::libc::write(descriptor.0, buf.as_ptr().cast(), buf.len()) };
+					if written < 0 {
+						return Err(std::io::Error::last_os_error());
+					}
+					#[expect(clippy::cast_sign_loss, reason = "written is not negative here")]
+					Ok(written as usize)
+				})
+				.await?;
+			if written == 0 {
+				return Err(std::io::ErrorKind::WriteZero.into());
+			}
+			buf = &buf[written..];
+		}
+		Ok(())
+	}
+}
+
+/// Whether a descriptor is of a kind that can wait for a peer that may never
+/// come: a pipe, a FIFO, a socket, or a character device such as a terminal.
+#[cfg(unix)]
+fn waits_without_end(raw: std::os::fd::RawFd) -> bool {
+	// SAFETY: `fstat` writes only the `stat` it is given, and `raw` is open.
+	let mut stat: nix::libc::stat = unsafe { std::mem::zeroed() };
+	// SAFETY: as above.
+	if unsafe { nix::libc::fstat(raw, &raw mut stat) } != 0 {
+		return false;
+	}
+	matches!(
+		stat.st_mode & nix::libc::S_IFMT,
+		nix::libc::S_IFIFO | nix::libc::S_IFSOCK | nix::libc::S_IFCHR
+	)
 }
 
 /// Copies everything readable from `reader` into `writer` without holding a
-/// runtime worker.
+/// runtime worker, and without taking a thread that a cancellation cannot get
+/// back.
 ///
-/// Every handle other than a virtual one reads and writes with blocking
-/// `std::io`. A write to a full pipe, or a read from a pipe nobody has written
-/// to yet, parks the calling thread with no yield point; on a Tokio worker that
-/// deadlocks whenever the task that would unblock it lives on the same runtime.
-/// `$(<file)` is exactly that case — the parent drains the substitution pipe on
-/// the runtime this copy runs on — so a file larger than the pipe's capacity
-/// took a worker for ever. Blocking handles therefore copy on the blocking
-/// pool, where parking costs nothing the scheduler needs.
+/// Both ends are classified once and then streamed a chunk at a time, so the
+/// copy holds one chunk whatever its ends are. A descriptor that can wait for a
+/// peer which may never come is driven by the reactor; everything else reads
+/// and writes in place, where the only wait is on storage.
 ///
-/// A virtual handle awaits instead and cannot leave the runtime. When exactly
-/// one side is virtual the copy buffers at the boundary: the virtual side
-/// streams on the runtime, the blocking side runs as one offloaded operation.
-/// The only caller already holds the whole copy in memory, so that costs
-/// nothing extra.
+/// The problem this shape exists for: `$(<file)` copies into a pipe that a task
+/// on the same runtime drains. A blocking write into that pipe parks whichever
+/// thread runs it until the drain makes room, and the drain cannot run while a
+/// worker is parked. Moving the copy to the blocking pool only moves the
+/// deadlock onto a smaller bound — a cancelled copy keeps its pool thread until
+/// its descriptor unblocks, which may be never — so the pipe end is polled
+/// instead and no thread is taken at all.
 ///
 /// # Errors
 ///
 /// Returns the first read or write error.
-pub async fn copy_async(mut reader: OpenFile, mut writer: OpenFile) -> std::io::Result<()> {
-	match (reader.is_virtual(), writer.is_virtual()) {
-		(false, false) => offload(move || copy_blocking(&mut reader, &mut writer)).await,
-		(true, false) => {
-			let mut contents = Vec::new();
-			reader.read_to_end_async(&mut contents).await?;
-			offload(move || {
-				std::io::Write::write_all(&mut writer, &contents)?;
-				std::io::Write::flush(&mut writer)
-			})
-			.await
-		},
-		(false, true) => {
-			let contents = offload(move || {
-				let mut contents = Vec::new();
-				std::io::Read::read_to_end(&mut reader, &mut contents)?;
-				Ok(contents)
-			})
-			.await?;
-			writer.write_all_async(&contents).await?;
-			writer.flush_async().await
-		},
-		(true, true) => {
-			let mut buf = vec![0u8; COPY_CHUNK_BYTES];
-			loop {
-				let n = match reader.read_async(&mut buf).await {
-					Ok(0) => break,
-					Ok(n) => n,
-					Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-					Err(error) => return Err(error),
-				};
-				writer.write_all_async(&buf[..n]).await?;
-			}
-			writer.flush_async().await
-		},
+pub async fn copy_async(reader: OpenFile, writer: OpenFile) -> std::io::Result<()> {
+	let mut reader = CopySide::classify(reader);
+	let mut writer = CopySide::classify(writer);
+	let mut buf = vec![0u8; COPY_CHUNK_BYTES];
+	loop {
+		// A copy between two regular files awaits nothing; without this it would
+		// hold its worker for the whole file.
+		tokio::task::coop::consume_budget().await;
+		let read = match reader.read(&mut buf).await {
+			Ok(0) => break,
+			Ok(read) => read,
+			Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+			Err(error) => return Err(error),
+		};
+		writer.write_all(&buf[..read]).await?;
 	}
+	writer.flush().await
 }
 
 impl From<std::io::Stdin> for OpenFile {

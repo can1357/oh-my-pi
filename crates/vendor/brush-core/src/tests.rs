@@ -41,6 +41,7 @@ pub async fn eval_expr(
 #[cfg(test)]
 mod regression {
 	use std::{
+		borrow::Cow,
 		future::Future,
 		sync::{
 			Arc,
@@ -50,10 +51,14 @@ mod regression {
 		time::Duration,
 	};
 
+	use itertools::Itertools;
 	use tokio::sync::oneshot;
 	use tokio_util::sync::CancellationToken;
 
-	use crate::{Shell, extensions::DefaultShellExtensions};
+	use crate::{
+		ExecutionResult, Shell, ShellValue, ShellVariable, builtins, commands, error,
+		extensions::{self, DefaultShellExtensions},
+	};
 
 	/// Runs `work` on a runtime with a single worker — the shape that turns a
 	/// task holding its worker into a stall instead of a slowdown — and gives
@@ -81,31 +86,35 @@ mod regression {
 		result_rx.recv_timeout(timeout).ok()
 	}
 
-	/// Runs `command` on a single-worker runtime twice — once alone, once with
-	/// a task that cancels it the moment it starts — and reports whether each
-	/// run succeeded.
-	///
-	/// The cancelling task is ready before the run's first step, so the second
-	/// answer turns on whether the run yields at all, not on how fast it is: a
-	/// run that never yields keeps the only worker, nothing can set the token,
-	/// and the run reports success as if nobody had asked it to stop.
-	fn alone_and_cancelled_at_once(
-		command: String,
-		prepare: fn(&mut Shell<DefaultShellExtensions>),
-	) -> (bool, bool) {
-		let alone_command = command.clone();
-		let alone = on_single_worker(Duration::from_secs(60), move || async move {
+	/// Runs `command` alone on a single-worker runtime and reports whether it
+	/// succeeded.
+	fn alone(command: String, prepare: fn(&mut Shell<DefaultShellExtensions>)) -> bool {
+		on_single_worker(Duration::from_secs(60), move || async move {
 			let mut shell = Shell::builder().build().await.expect("shell");
 			prepare(&mut shell);
 			let params = shell.default_exec_params();
 			shell
-				.run_string(alone_command, &crate::SourceInfo::default(), &params)
+				.run_string(command, &crate::SourceInfo::default(), &params)
 				.await
 				.is_ok_and(|result| result.is_success())
 		})
-		.expect("the uncancelled run finished");
+		.expect("the uncancelled run finished")
+	}
 
-		let cancelled = on_single_worker(Duration::from_secs(60), move || async move {
+	/// Runs `command` on a single-worker runtime with a task that cancels it
+	/// the moment it starts, and reports whether it succeeded and what
+	/// `inspect` then reads from its shell.
+	///
+	/// The cancelling task is ready before the run's first step, so the answer
+	/// turns on whether the run yields at all, not on how fast it is: a run
+	/// that never yields keeps the only worker, nothing can set the token, and
+	/// the run reports success as if nobody had asked it to stop.
+	fn cancelled_at_once<T: Send + 'static>(
+		command: String,
+		prepare: fn(&mut Shell<DefaultShellExtensions>),
+		inspect: fn(&Shell<DefaultShellExtensions>) -> T,
+	) -> (bool, T) {
+		on_single_worker(Duration::from_secs(60), move || async move {
 			let cancellation = CancellationToken::new();
 			let (started_tx, started_rx) = oneshot::channel();
 
@@ -116,10 +125,11 @@ mod regression {
 				let mut params = shell.default_exec_params();
 				params.set_cancel_token(run_cancellation);
 				started_tx.send(()).expect("the cancelling task waits for the run");
-				shell
+				let succeeded = shell
 					.run_string(command, &crate::SourceInfo::default(), &params)
 					.await
-					.is_ok_and(|result| result.is_success())
+					.is_ok_and(|result| result.is_success());
+				(succeeded, inspect(&shell))
 			});
 
 			tokio::spawn(async move {
@@ -129,9 +139,51 @@ mod regression {
 
 			run_task.await.expect("run task")
 		})
-		.expect("the cancelled run finished");
+		.expect("the cancelled run finished")
+	}
 
-		(alone, cancelled)
+	/// Runs `command` twice — [`alone`], then [`cancelled_at_once`] — and
+	/// reports whether each run succeeded.
+	fn alone_and_cancelled_at_once(
+		command: String,
+		prepare: fn(&mut Shell<DefaultShellExtensions>),
+	) -> (bool, bool) {
+		(alone(command.clone(), prepare), cancelled_at_once(command, prepare, |_| ()).0)
+	}
+
+	/// How many `[key]=value` elements the keyed array tests assign.
+	const KEYED_ELEMENTS: usize = 2048;
+
+	/// `[0]=v0 [1]=v1 …`: keys and values with no expansion character in them.
+	fn keyed_elements() -> String {
+		(0..KEYED_ELEMENTS).map(|index| format!("[{index}]=v{index}")).join(" ")
+	}
+
+	/// Stands in for `declare`, which the bare shell lacks: a declaration
+	/// builtin that succeeds when its last argument carries every keyed
+	/// element.
+	struct DeclaresKeyedElements;
+
+	impl builtins::SimpleCommand for DeclaresKeyedElements {
+		fn get_content(
+			_name: &str,
+			_content_type: builtins::ContentType,
+			_options: &builtins::ContentOptions,
+		) -> Result<String, error::Error> {
+			Ok(String::new())
+		}
+
+		fn execute<SE: extensions::ShellExtensions, I: Iterator<Item = S>, S: AsRef<str>>(
+			_context: commands::ExecutionContext<'_, SE>,
+			args: I,
+		) -> Result<ExecutionResult, error::Error> {
+			let elements = args.last().map_or(0, |arg| arg.as_ref().matches("]=").count());
+			Ok(if elements == KEYED_ELEMENTS {
+				ExecutionResult::success()
+			} else {
+				ExecutionResult::general_error()
+			})
+		}
 	}
 
 	#[test]
@@ -225,5 +277,129 @@ mod regression {
 		let outcome = alone_and_cancelled_at_once(format!("case hit in\n{arms}esac"), |_| {});
 
 		assert_eq!(outcome, (true, false), "(uncancelled scanned every arm, cancelled stopped)");
+	}
+
+	/// One `case` arm can carry any number of alternatives (`a|b|…)`), and a
+	/// generator writes them as readily as arms. The arm checkpoint above runs
+	/// once for the whole list, so this pins the one per alternative.
+	#[test]
+	fn case_alternatives_reach_a_cancellation_task() {
+		const ALTERNATIVES: usize = 2048;
+
+		let alternatives: String = (0..ALTERNATIVES).map(|index| format!("miss{index}|")).collect();
+		// The match comes last, so the uncancelled run proves it tried them all.
+		let outcome = alone_and_cancelled_at_once(
+			format!("case hit in\n{alternatives}hit) matched=1 ;;\nesac\n(( matched == 1 ))"),
+			|_| {},
+		);
+
+		assert_eq!(outcome, (true, false), "(uncancelled reached the last alternative, cancelled stopped)");
+	}
+
+	/// A keyed element (`[k]=v`) expands its key and value as assignment
+	/// words, which take a short cut past every expansion checkpoint when they
+	/// hold no expansion character. A plain element (the brace tests) goes
+	/// through field splitting and its checkpoint instead.
+	#[test]
+	fn keyed_array_assignment_reaches_a_cancellation_task() {
+		let outcome = alone_and_cancelled_at_once(
+			format!("values=({}); (( ${{#values[@]}} == {KEYED_ELEMENTS} ))", keyed_elements()),
+			|_| {},
+		);
+
+		assert_eq!(outcome, (true, false), "(uncancelled assigned them all, cancelled stopped)");
+	}
+
+	/// A declaration builtin (`declare`, `local`, `export`, …) has its array
+	/// literal expanded on a path of its own, before the builtin runs; the
+	/// plain assignment above never reaches it.
+	#[test]
+	fn declared_keyed_array_reaches_a_cancellation_task() {
+		let outcome =
+			alone_and_cancelled_at_once(format!("declares values=({})", keyed_elements()), |shell| {
+				shell.register_builtin("declares", builtins::Registration {
+					declaration_builtin: true,
+					..builtins::simple_builtin::<DeclaresKeyedElements, DefaultShellExtensions>()
+				});
+			});
+
+		assert_eq!(outcome, (true, false), "(uncancelled declared them all, cancelled stopped)");
+	}
+
+	/// The brace generator makes every element before the first is expanded,
+	/// so the element checkpoint that `brace_expansion_reaches_a_cancellation_task`
+	/// pins comes only after all of `{1..N}` exists. Each element here bumps
+	/// `n` as it is expanded, so a run that yields inside the generator is
+	/// cancelled before `n` is ever set; one that yields only in the element
+	/// loop has already expanded a budget's worth.
+	#[test]
+	fn brace_generator_reaches_a_cancellation_task() {
+		const ELEMENTS: usize = 4096;
+
+		let command = format!(
+			"values=({{1..{ELEMENTS}}}$((n++))); (( ${{#values[@]}} == {ELEMENTS} && n == {ELEMENTS} ))"
+		);
+		assert!(alone(command.clone(), |_| {}), "the uncancelled run expanded every element");
+
+		let outcome = cancelled_at_once(command, |_| {}, |shell| {
+			shell.env().get_str("n", shell).map(Cow::into_owned)
+		});
+		assert_eq!(outcome, (false, None), "(cancelled stopped, before expanding any element)");
+	}
+
+	/// Field splitting walks the expanded text a character at a time before
+	/// the per-field loop runs. One long field with no IFS character in it
+	/// has no field boundary at all, so only a checkpoint inside that walk can
+	/// yield; every field in the brace tests is short.
+	#[test]
+	fn field_splitting_reaches_a_cancellation_task() {
+		const LENGTH: usize = 1 << 20;
+
+		let outcome = alone_and_cancelled_at_once(
+			format!("values=($long); (( ${{#values[@]}} == 1 && ${{#values[0]}} == {LENGTH} ))"),
+			|shell| {
+				shell
+					.env_mut()
+					.set_global("long", ShellVariable::new(ShellValue::String("x".repeat(LENGTH))))
+					.expect("long value");
+				// Globbing would scan the field once more; this test is about splitting.
+				shell.options_mut().disable_filename_globbing = true;
+			},
+		);
+
+		assert_eq!(outcome, (true, false), "(uncancelled split it, cancelled stopped)");
+	}
+
+	/// A pipeline starts its stages one after another, and a stage that is
+	/// only an assignment completes in place, so nothing in a long pipeline of
+	/// them waited on anything.
+	#[test]
+	fn pipeline_stages_reach_a_cancellation_task() {
+		// Each stage boundary holds a pipe open until the stages start, so the
+		// count stays well inside a default descriptor limit of 1024.
+		const STAGES: usize = 256;
+
+		let pipeline = vec!["stage=1"; STAGES].join(" | ");
+		let outcome = alone_and_cancelled_at_once(
+			format!("{pipeline}; (( ${{#PIPESTATUS[@]}} == {STAGES} ))"),
+			|_| {},
+		);
+
+		assert_eq!(outcome, (true, false), "(uncancelled ran every stage, cancelled stopped)");
+	}
+
+	/// A command of assignments alone (`a=1 b=2 …`) expands each value
+	/// through the same short cut as a keyed element, so neither its item loop
+	/// nor its assignment loop reached a checkpoint.
+	#[test]
+	fn assignment_list_reaches_a_cancellation_task() {
+		const ASSIGNMENTS: usize = 2048;
+
+		let assignments = (0..ASSIGNMENTS).map(|index| format!("v{index}={index}")).join(" ");
+		let last = ASSIGNMENTS - 1;
+		let outcome =
+			alone_and_cancelled_at_once(format!("{assignments}; (( v{last} == {last} ))"), |_| {});
+
+		assert_eq!(outcome, (true, false), "(uncancelled assigned them all, cancelled stopped)");
 	}
 }

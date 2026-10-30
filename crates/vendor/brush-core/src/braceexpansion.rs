@@ -1,35 +1,52 @@
 use brush_parser::word;
 use itertools::Itertools;
 
-pub(crate) fn generate_and_combine_brace_expansions(
-	pieces: Vec<brush_parser::word::BraceExpressionOrText>,
-) -> impl IntoIterator<Item = String> {
-	let expansions: Vec<Vec<String>> = pieces
-		.into_iter()
-		.map(|piece| expand_brace_expr_or_text(piece).collect())
-		.collect();
+use crate::{ExecutionParameters, error, interp};
 
-	expansions
-		.into_iter()
-		.multi_cartesian_product()
-		.map(|v| v.join(""))
-}
-
-fn expand_brace_expr_or_text(
-	beot: word::BraceExpressionOrText,
-) -> Box<dyn Iterator<Item = String>> {
-	match beot {
-		word::BraceExpressionOrText::Expr(members) => {
-			// Chain all member iterators together
-			Box::new(members.into_iter().flat_map(expand_brace_expr_member))
-		},
-		word::BraceExpressionOrText::Text(text) => Box::new(std::iter::once(text)),
+/// Generates every word the brace expression `pieces` stands for, in order.
+///
+/// A range sets the count here, not the script: `{1..3000000}` is 12 bytes in
+/// and three million words out, and no step waits on anything. So the
+/// generator spends a checkpoint on each word it makes, and a run cancelled
+/// partway stops here instead of after the last word.
+#[async_recursion::async_recursion]
+pub(crate) async fn generate_and_combine_brace_expansions(
+	pieces: Vec<word::BraceExpressionOrText>,
+	params: &ExecutionParameters,
+) -> Result<Vec<String>, error::Error> {
+	let mut expansions = Vec::with_capacity(pieces.len());
+	for piece in pieces {
+		let words = match piece {
+			word::BraceExpressionOrText::Expr(members) => {
+				let mut words = vec![];
+				for member in members {
+					expand_brace_expr_member(member, params, &mut words).await?;
+				}
+				words
+			},
+			word::BraceExpressionOrText::Text(text) => vec![text],
+		};
+		expansions.push(words);
 	}
+
+	let mut words = vec![];
+	for combination in expansions.into_iter().multi_cartesian_product() {
+		interp::loop_checkpoint(params).await?;
+		words.push(combination.concat());
+	}
+
+	Ok(words)
 }
 
+/// Appends the words that one member of a brace expression stands for to
+/// `words`.
 #[expect(clippy::cast_possible_truncation)]
-fn expand_brace_expr_member(bem: word::BraceExpressionMember) -> Box<dyn Iterator<Item = String>> {
-	match bem {
+async fn expand_brace_expr_member(
+	bem: word::BraceExpressionMember,
+	params: &ExecutionParameters,
+	words: &mut Vec<String>,
+) -> Result<(), error::Error> {
+	let sequence: Box<dyn Iterator<Item = String> + Send> = match bem {
 		word::BraceExpressionMember::NumberSequence { start, end, increment } => {
 			let mut increment = increment.unsigned_abs() as usize;
 			if increment == 0 {
@@ -74,8 +91,16 @@ fn expand_brace_expr_member(bem: word::BraceExpressionMember) -> Box<dyn Iterato
 		},
 
 		word::BraceExpressionMember::Child(elements) => {
-			// Chain all element iterators together
-			Box::new(generate_and_combine_brace_expansions(elements).into_iter())
+			// A nested expression spends its own checkpoint on each word.
+			words.append(&mut generate_and_combine_brace_expansions(elements, params).await?);
+			return Ok(());
 		},
+	};
+
+	for generated in sequence {
+		interp::loop_checkpoint(params).await?;
+		words.push(generated);
 	}
+
+	Ok(())
 }

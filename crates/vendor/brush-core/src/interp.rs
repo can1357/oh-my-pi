@@ -447,6 +447,15 @@ fn ensure_not_cancelled(params: &ExecutionParameters) -> Result<(), error::Error
 /// all wait for a yield that never comes. One task per worker is therefore
 /// enough to take the whole runtime, with no way back short of ending the
 /// process. Spending the cooperative budget restores all three.
+///
+/// So every loop here that a script or its data can make long spends one, or
+/// runs a step that does. The length of a script bounds nothing: a generated
+/// script is as long as its data (a `case` arm with a hundred thousand
+/// alternatives, a keyed array literal of a million elements), and each of
+/// those steps is ready at once. A loop that usually runs once (the stages of
+/// a pipeline, the items and assignments of a command) skips its first step,
+/// which the checkpoint that led to it covers: every 128 units spent cost a
+/// yield, and on a hot path those add up.
 pub(crate) async fn loop_checkpoint(params: &ExecutionParameters) -> Result<(), error::Error> {
 	tokio::task::coop::consume_budget().await;
 	// After the cooperative yield, so a cancellation raised while this task was
@@ -983,7 +992,10 @@ async fn spawn_pipeline_processes(
 	}
 
 	for (current_pipeline_index, command) in pipeline.seq.iter().enumerate() {
-		ensure_not_cancelled(params)?;
+		// The checkpoint that led to this pipeline covers its first stage.
+		if current_pipeline_index > 0 {
+			loop_checkpoint(params).await?;
+		}
 		//
 		// We run a command directly in the current shell if either of the following is
 		// true:
@@ -1486,7 +1498,12 @@ impl Execute for ast::CaseClauseCommand {
 				force_execute_next_case = false;
 			} else {
 				let mut matches = false;
-				for pattern in &case.patterns {
+				for (index, pattern) in case.patterns.iter().enumerate() {
+					// One arm can carry any number of alternatives (`a|b|…)`); the
+					// arm's own checkpoint covers the first.
+					if index > 0 {
+						loop_checkpoint(params).await?;
+					}
 					let expanded_pattern = expansion::basic_expand_pattern(shell, params, pattern)
 						.await?
 						.set_extended_globbing(shell.options().extended_globbing)
@@ -1773,8 +1790,12 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 		// if expansion (e.g., command substitution) set an exit status.
 		let status_change_count_before_expansion = context.shell.last_exit_status_change_count();
 
-		for item in prefix_iter.chain(cmd_name_items.iter()).chain(suffix_iter) {
-			ensure_not_cancelled(&params)?;
+		let items = prefix_iter.chain(cmd_name_items.iter()).chain(suffix_iter);
+		for (index, item) in items.enumerate() {
+			// The checkpoint that led to this command covers its first item.
+			if index > 0 {
+				loop_checkpoint(&params).await?;
+			}
 			match item {
 				CommandPrefixOrSuffixItem::IoRedirect(redirect) => {
 					if let Err(e) = setup_redirect(&mut context.shell, &mut params, redirect).await {
@@ -1904,7 +1925,11 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 			}
 		} else {
 			// No command to run; assignments must be applied to this shell.
-			for assignment in assignments {
+			for (index, assignment) in assignments.into_iter().enumerate() {
+				// The checkpoint that led to this command covers its first assignment.
+				if index > 0 {
+					loop_checkpoint(&params).await?;
+				}
 				// Apply the assignment. Don't mark as fatal - let errors be handled
 				// at the program level so multiple complete_commands can execute independently.
 				apply_assignment(
@@ -1950,7 +1975,11 @@ async fn execute_command(
 	// before returning.
 	let mut guard = crate::env::ScopeGuard::new(&mut context.shell, EnvironmentScope::Command);
 
-	for assignment in &assignments {
+	for (index, assignment) in assignments.iter().enumerate() {
+		// The checkpoint that led to this command covers its first assignment.
+		if index > 0 {
+			loop_checkpoint(&params).await?;
+		}
 		// Ensure it's tagged as exported and created in the command scope.
 		apply_assignment(
 			assignment,
@@ -2034,6 +2063,7 @@ async fn expand_assignment_value(
 		ast::AssignmentValue::Array(arr) => {
 			let mut expanded_values = vec![];
 			for (key, value) in arr {
+				loop_checkpoint(params).await?;
 				if let Some(k) = key {
 					let expanded_key = expansion::basic_expand_assignment_word(shell, params, k)
 						.await?
@@ -2093,6 +2123,9 @@ async fn apply_assignment(
 		ast::AssignmentValue::Array(unexpanded_values) => {
 			let mut elements = vec![];
 			for (unexpanded_key, unexpanded_value) in unexpanded_values {
+				// A key or value with no expansion character in it reaches no
+				// checkpoint of its own while it expands.
+				loop_checkpoint(params).await?;
 				let key = match unexpanded_key {
 					Some(unexpanded_key) => Some(
 						expansion::basic_expand_assignment_word(shell, params, unexpanded_key).await?,
