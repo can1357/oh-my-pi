@@ -692,7 +692,7 @@ pub(crate) const BYTE_CHECKPOINT_STRIDE: usize = 64 * 1024;
 /// also the line between the two: below it a copy takes the plain path,
 /// because calling an `async` function on each of a million fields costs more
 /// than the checkpoints it spends.
-pub(crate) const DIVIDE_COPY_ABOVE_BYTES: usize = BYTE_CHECKPOINT_STRIDE;
+pub const DIVIDE_COPY_ABOVE_BYTES: usize = BYTE_CHECKPOINT_STRIDE;
 
 /// Counts the checkpoints a loop over elements owes, by both the number of
 /// steps and the bytes those steps copy.
@@ -713,13 +713,13 @@ pub(crate) const DIVIDE_COPY_ABOVE_BYTES: usize = BYTE_CHECKPOINT_STRIDE;
 /// because that stretch is not the insertion loop but the free of the million
 /// elements the assignment replaced, which no checkpoint can enter. The test
 /// that disproved the knob asserts nanoseconds per element and stays.
-pub(crate) struct ElementBudget {
+pub struct ElementBudget {
 	steps: usize,
 	bytes: usize,
 }
 
 impl ElementBudget {
-	pub(crate) const fn new() -> Self {
+	pub const fn new() -> Self {
 		Self { steps: 0, bytes: 0 }
 	}
 
@@ -736,7 +736,7 @@ impl ElementBudget {
 	/// copy two megabytes would otherwise spend 64 and yield none.
 	#[inline]
 	#[must_use]
-	pub(crate) const fn charge(&mut self, bytes: usize) -> usize {
+	pub const fn charge(&mut self, bytes: usize) -> usize {
 		let first = self.steps == 0;
 		self.steps += 1;
 		self.bytes = self.bytes.saturating_add(bytes);
@@ -756,7 +756,7 @@ impl ElementBudget {
 /// moved — the charge converts bytes to checkpoints at one per
 /// [`BYTE_CHECKPOINT_STRIDE`] — so it reads the clock every time rather than
 /// every sixteenth.
-pub(crate) async fn loop_checkpoints(
+pub async fn loop_checkpoints(
 	params: &ExecutionParameters,
 	count: usize,
 ) -> Result<(), error::Error> {
@@ -804,7 +804,7 @@ pub async fn clone_in_strides(
 ///
 /// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part way,
 /// leaving `out` holding what had been appended by then.
-pub(crate) async fn push_str_in_strides(
+pub async fn push_str_in_strides(
 	params: &ExecutionParameters,
 	out: &mut String,
 	text: &str,

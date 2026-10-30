@@ -158,6 +158,95 @@ pub fn parse(s: &str) -> Result<Vec<PromptPiece>, error::WordParseError> {
     Ok(result)
 }
 
+/// Finds where a run of whole prompt pieces that begins at `from` ends,
+/// covering at least `stride` bytes of `s` unless the spec ends first.
+///
+/// `from` has to begin a piece: zero, or a boundary an earlier call returned.
+/// Parsing `s[from..end]` on its own then yields exactly the pieces that
+/// parsing the whole of `s` yields over that span. A run can only end where a
+/// literal run ends, and a literal run only ends where an escape sequence
+/// starts, so the pieces on either side of a boundary never merge.
+///
+/// This is here so that a caller which must not hold its thread can parse a
+/// prompt spec a stride at a time. The grammar above is a PEG that tries every
+/// escape sequence at every character of a literal, which for a spec of 16 MiB
+/// is most of a second in one call; the scan below is a search for the next
+/// backslash.
+///
+/// # Arguments
+///
+/// * `s` - The prompt string being parsed.
+/// * `from` - The byte offset the run starts at, which has to begin a piece.
+/// * `stride` - How many bytes the run should cover, at the least.
+pub fn next_piece_boundary(s: &str, from: usize, stride: usize) -> usize {
+    let target = from.saturating_add(stride).min(s.len());
+    let mut at = from.min(s.len());
+    while at < target {
+        at = piece_end(s, at);
+    }
+    at
+}
+
+/// Finds where the piece that starts at `at` ends. Mirrors `prompt_piece`.
+fn piece_end(s: &str, at: usize) -> usize {
+    if s.as_bytes()[at] != b'\\' {
+        // A literal runs until an escape sequence starts. Every escape sequence
+        // is a backslash and at least one character after it, so a backslash at
+        // the very end of the spec is literal text and the run takes it.
+        return match s.as_bytes()[at..].iter().position(|byte| *byte == b'\\') {
+            Some(offset) if at + offset + 1 < s.len() => at + offset,
+            _ => s.len(),
+        };
+    }
+    escape_end(s, at)
+}
+
+/// Finds where the escape sequence that starts at the backslash at `at` ends.
+/// Mirrors `special_sequence`.
+fn escape_end(s: &str, at: usize) -> usize {
+    let bytes = s.as_bytes();
+    let Some(&next) = bytes.get(at + 1) else {
+        // A trailing backslash matches no escape sequence at all.
+        return s.len();
+    };
+
+    // `\D{...}` runs to the first closing brace. With no brace to close it the
+    // `\D` falls through to the catch-all below, and the rest is literal text.
+    if next == b'D'
+        && bytes.get(at + 2) == Some(&b'{')
+        && let Some(offset) = bytes[at + 3..].iter().position(|byte| *byte == b'}')
+    {
+        return at + 3 + offset + 1;
+    }
+
+    // `\nnn` takes up to three octal digits.
+    if matches!(next, b'0'..=b'7') {
+        let mut end = at + 1;
+        while end < s.len() && end < at + 4 && matches!(bytes[end], b'0'..=b'7') {
+            end += 1;
+        }
+        return end;
+    }
+
+    // Every other sequence is a backslash and one character: the ones the
+    // grammar names are ASCII, and the catch-all takes whatever follows. Its
+    // length comes from the lead byte rather than from slicing, which cannot
+    // be done safely at a byte offset the caller supplied.
+    at + 1 + utf8_length(next)
+}
+
+/// How many bytes the character beginning with `lead` occupies.
+const fn utf8_length(lead: u8) -> usize {
+    match lead {
+        0x00..=0x7f => 1,
+        0xc0..=0xdf => 2,
+        0xe0..=0xef => 3,
+        // A continuation byte is not a lead byte, but a spec is valid UTF-8,
+        // so this arm is only reached for a four-byte character.
+        _ => 4,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +287,35 @@ mod tests {
                 PromptPiece::Literal(" > ".to_owned()),
             ]
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn parsing_a_stride_at_a_time_gives_the_same_pieces() -> Result<()> {
+        // Every shape a boundary can land near: escapes the grammar names, an
+        // octal run longer than three digits, a date format holding a brace
+        // and a backslash, a date format with nothing to close it, a
+        // multi-byte character after a backslash, and a trailing backslash.
+        let spec = "abc\\u@\\h \\D{%a %b\\}x\\\\\\[y\\]\\1012\\8 \\D{unclosed \\é tail\\";
+
+        let whole = parse(spec)?;
+        for stride in 1..=spec.len() {
+            let mut strided = Vec::new();
+            let mut at = 0;
+            while at < spec.len() {
+                let end = next_piece_boundary(spec, at, stride);
+                // A boundary that split a character, or made no progress,
+                // would be a scanner defect rather than a parse failure.
+                let piece = spec
+                    .get(at..end)
+                    .filter(|piece| !piece.is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("stride {stride} stalled or split at {at}"))?;
+                strided.extend(parse(piece)?);
+                at = end;
+            }
+            assert_eq!(strided, whole, "stride {stride}");
+        }
 
         Ok(())
     }

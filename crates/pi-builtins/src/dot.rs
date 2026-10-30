@@ -22,9 +22,20 @@ impl builtins::Command for DotCommand {
 		context: brush_core::ExecutionContext<'_, SE>,
 	) -> Result<brush_core::ExecutionResult, Self::Error> {
 		// TODO(dot): Handle trap inheritance.
+		//
+		// `source` copies its operands into the script's positional
+		// parameters, and `. f "${big[@]}"` lets the caller size each one:
+		// the copy used to happen inside the call, as `Into<String>` on a
+		// borrowed operand, in one uninterrupted step. Copying here in
+		// strides leaves that conversion a move.
+		let mut script_args = Vec::with_capacity(self.script_args.len());
+		for arg in &self.script_args {
+			script_args.push(brush_core::clone_in_strides(&context.params, arg).await?);
+		}
+
 		context
 			.shell
-			.source_script(Path::new(&self.script_path), self.script_args.iter(), &context.params)
+			.source_script(Path::new(&self.script_path), script_args.into_iter(), &context.params)
 			.await
 	}
 }

@@ -105,13 +105,32 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 			.ok_or_else(|| error::ErrorKind::FunctionNotFound(name.to_owned()))?
 			.to_owned();
 
+		// A function's arguments become its positional parameters, and both
+		// the number of them and the length of any one of them are the
+		// caller's: a completion function is handed the token being
+		// completed, which can be as long as the line the user typed. A long
+		// one is copied in strides rather than merely charged for, because a
+		// copy already under way cannot be interrupted.
+		let args = args.into_iter();
+		let mut command_args = Vec::with_capacity(args.size_hint().0);
+		let mut budget = crate::interp::ElementBudget::new();
+		for arg in args {
+			let arg = arg.as_ref();
+			let long = arg.len() > crate::interp::DIVIDE_COPY_ABOVE_BYTES;
+			let due = budget.charge(if long { 0 } else { arg.len() });
+			if due > 0 {
+				crate::interp::loop_checkpoints(params, due).await?;
+			}
+			let copied = if long {
+				crate::interp::clone_in_strides(params, arg).await?
+			} else {
+				String::from(arg)
+			};
+			command_args.push(commands::CommandArg::String(copied));
+		}
+
 		let context =
 			commands::ExecutionContext { shell: self, command_name, params: params.clone() };
-
-		let command_args = args
-			.into_iter()
-			.map(|s| commands::CommandArg::String(String::from(s.as_ref())))
-			.collect::<Vec<_>>();
 
 		let result =
 			commands::invoke_shell_function(func_registration, context, &command_args).await?;

@@ -363,19 +363,33 @@ impl DeclareCommand {
 				static ARRAY_AND_INDEX_RE: LazyLock<fancy_regex::Regex> =
 					LazyLock::new(|| fancy_regex::Regex::new(r"^(.*?)\[(.*?)\]$").unwrap());
 
-				if let Some(captures) = ARRAY_AND_INDEX_RE.captures(s)? {
-					name = captures
-						.get(1)
-						.ok_or_else(|| {
-							brush_core::ErrorKind::InternalError("declaration parse error".into())
-						})?
-						.as_str()
-						.to_owned();
+				// Every copy below is of text the caller expanded —
+				// `declare "$big"`, `declare "a[$big]=$big"` — so each takes
+				// the divided copy rather than `to_owned`. The bounds come out
+				// of the captures first, so nothing borrowed from the regex is
+				// held across a checkpoint.
+				let bounds = ARRAY_AND_INDEX_RE.captures(s)?.map(|captures| {
+					(
+						captures.get(1).map(|m| (m.start(), m.end())),
+						captures.get(2).map(|m| (m.start(), m.end())),
+					)
+				});
 
-					assigned_index = captures.get(2).map(|m| m.as_str().to_owned());
+				if let Some((matched_name, matched_index)) = bounds {
+					let (start, end) = matched_name.ok_or_else(|| {
+						brush_core::ErrorKind::InternalError("declaration parse error".into())
+					})?;
+					name = brush_core::clone_in_strides(params, &s[start..end]).await?;
+
+					assigned_index = match matched_index {
+						Some((start, end)) => {
+							Some(brush_core::clone_in_strides(params, &s[start..end]).await?)
+						},
+						None => None,
+					};
 					name_is_array = true;
 				} else {
-					name = s.clone();
+					name = brush_core::clone_in_strides(params, s).await?;
 					assigned_index = None;
 					name_is_array = false;
 				}
@@ -384,7 +398,7 @@ impl DeclareCommand {
 			brush_core::CommandArg::Assignment(assignment) => {
 				match &assignment.name {
 					ast::AssignmentName::VariableName(var_name) => {
-						name = var_name.to_owned();
+						name = brush_core::clone_in_strides(params, var_name).await?;
 						assigned_index = None;
 					},
 					ast::AssignmentName::ArrayElementName(var_name, index) => {
@@ -392,21 +406,24 @@ impl DeclareCommand {
 							return Err(ErrorKind::AssigningListToArrayMember.into());
 						}
 
-						name = var_name.to_owned();
-						assigned_index = Some(index.to_owned());
+						name = brush_core::clone_in_strides(params, var_name).await?;
+						assigned_index = Some(brush_core::clone_in_strides(params, index).await?);
 					},
 				}
 
+				// The value is the measured hold: `declare BIG="$big"` cloned
+				// the whole word here and then handed it to a write that had
+				// already been divided, so the time stayed in the clone.
 				match &assignment.value {
 					ast::AssignmentValue::Scalar(s) => {
+						let value = brush_core::clone_in_strides(params, &s.value).await?;
 						if let Some(index) = &assigned_index {
-							initial_value = Some(ShellValueLiteral::Array(ArrayLiteral(vec![(
-								Some(index.to_owned()),
-								s.value.clone(),
-							)])));
+							let index = brush_core::clone_in_strides(params, index).await?;
+							initial_value =
+								Some(ShellValueLiteral::Array(ArrayLiteral(vec![(Some(index), value)])));
 							name_is_array = true;
 						} else {
-							initial_value = Some(ShellValueLiteral::Scalar(s.value.clone()));
+							initial_value = Some(ShellValueLiteral::Scalar(value));
 							name_is_array = false;
 						}
 					},

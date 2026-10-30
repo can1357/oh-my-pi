@@ -451,6 +451,38 @@ pub(crate) async fn basic_expand_word_with_options(
 	expander.basic_expand_to_str(word_str.as_ref()).await
 }
 
+/// Whether `text` holds any of `chars`, spending a checkpoint before each
+/// stride of it.
+///
+/// `str::contains` over a word that a variable sized is a hold of its own: the
+/// short circuit in [`WordExpander::basic_expand`] reads a 16 MiB prompt end
+/// to end before it can decide there is nothing in it to expand.
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part way.
+async fn contains_any_in_strides(
+	params: &ExecutionParameters,
+	text: &str,
+	chars: &[char],
+) -> Result<bool, error::Error> {
+	let mut rest = text;
+	while !rest.is_empty() {
+		interp::stride_checkpoint(params).await?;
+		let mut end = rest.len().min(interp::BYTE_CHECKPOINT_STRIDE);
+		// A stride lands mid-character at most three bytes in.
+		while !rest.is_char_boundary(end) {
+			end -= 1;
+		}
+		let (piece, remaining) = rest.split_at(end);
+		if piece.contains(chars) {
+			return Ok(true);
+		}
+		rest = remaining;
+	}
+	Ok(false)
+}
+
 /// Apply tilde-expansion, parameter expansion, command substitution, and
 /// arithmetic expansion; then perform field splitting and pathname expansion on
 /// the result.
@@ -716,8 +748,21 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		} else {
 			&['$', '`', '\\', '\'', '\"', '~', '{']
 		};
-		if !word.contains(expansion_chars) {
-			return Ok(Expansion::from(ExpansionPiece::Splittable(word.to_owned())));
+		let expandable = if word.len() > interp::DIVIDE_COPY_ABOVE_BYTES {
+			contains_any_in_strides(self.params, word, expansion_chars).await?
+		} else {
+			word.contains(expansion_chars)
+		};
+		if !expandable {
+			// The word is its own expansion, and copying it is the whole of
+			// the work left: a prompt of 16 MiB reaches here with nothing in it
+			// to expand and copies all of it in one step.
+			let copied = if word.len() > interp::DIVIDE_COPY_ABOVE_BYTES {
+				interp::clone_in_strides(self.params, word).await?
+			} else {
+				word.to_owned()
+			};
+			return Ok(Expansion::from(ExpansionPiece::Splittable(copied)));
 		}
 
 		// Apply brace expansion first, before anything else (not applicable to

@@ -6,9 +6,8 @@ use std::{
 
 use brush_core::{ErrorKind, builtins, env, error, openfiles::OpenFile, variables};
 use clap::Parser;
-use itertools::Itertools;
 
-use crate::line_input::{CTRL_C, CTRL_D, LineInput, ReadAhead, decode_line};
+use crate::line_input::{CTRL_C, CTRL_D, LineInput, ReadAhead, decode_line, decode_line_in_strides};
 
 /// Exit code returned when `read` times out.
 /// This is 128 + SIGALRM (14) = 142, matching bash behavior.
@@ -120,25 +119,32 @@ impl builtins::Command for ReadCommand {
 		// Keep the runtime worker free for process-substitution producers.
 		let cancel_token = context.cancel_token();
 		let read_result = self
-			.read_line(input_stream, context.stderr(), timeout, move || {
-				cancel_token.as_ref().is_some_and(|token| token.is_cancelled())
-			})
+			.read_line(
+				input_stream,
+				context.stderr(),
+				timeout,
+				move || cancel_token.as_ref().is_some_and(|token| token.is_cancelled()),
+				&context.params,
+			)
 			.await?;
 
 		// Determine whether to skip IFS splitting (for -N option).
 		let skip_ifs_splitting = self.return_after_n_chars_no_delimiter.is_some();
 
-		// Extract the input line and determine exit code based on result.
+		// Extract the input line and determine exit code based on result. The
+		// line is borrowed out of the result rather than cloned out of it: the
+		// clone that stood here copied a line that can be any length in one
+		// step, ahead of the divided copy the assignment itself makes.
 		let (input_line, result) = match &read_result {
-			ReadResult::Line(line) => (Some(line.clone()), brush_core::ExecutionResult::success()),
+			ReadResult::Line(line) => (Some(line.as_str()), brush_core::ExecutionResult::success()),
 			ReadResult::Eof(Some(line)) => {
-				(Some(line.clone()), brush_core::ExecutionResult::general_error())
+				(Some(line.as_str()), brush_core::ExecutionResult::general_error())
 			},
 			ReadResult::Eof(None) | ReadResult::Interrupted | ReadResult::InputNotReady => {
 				(None, brush_core::ExecutionResult::general_error())
 			},
 			ReadResult::TimedOut(partial) => {
-				(partial.clone(), brush_core::ExecutionResult::new(TIMEOUT_EXIT_CODE))
+				(partial.as_deref(), brush_core::ExecutionResult::new(TIMEOUT_EXIT_CODE))
 			},
 			ReadResult::InputReady => (None, brush_core::ExecutionResult::success()),
 		};
@@ -146,7 +152,7 @@ impl builtins::Command for ReadCommand {
 		// Assign input to variables based on options.
 		assign_input_to_variables(
 			context.shell,
-			input_line.as_deref(),
+			input_line,
 			&ifs,
 			skip_ifs_splitting,
 			self.array_variable.as_deref(),
@@ -176,7 +182,7 @@ async fn assign_input_to_variables(
 	params: &brush_core::ExecutionParameters,
 ) -> Result<(), brush_core::Error> {
 	if let Some(array_variable) = array_variable {
-		let literal_fields = build_array_fields(input_line, ifs, skip_ifs_splitting);
+		let literal_fields = build_array_fields(input_line, ifs, skip_ifs_splitting, params).await?;
 		shell
 			.env_mut()
 			.update_or_add(
@@ -230,7 +236,8 @@ async fn assign_to_named_variables(
 	params: &brush_core::ExecutionParameters,
 ) -> Result<(), brush_core::Error> {
 	let mut fields =
-		build_variable_fields(input_line, ifs, skip_ifs_splitting, variable_names.len());
+		build_variable_fields(input_line, ifs, skip_ifs_splitting, variable_names.len(), params)
+			.await?;
 
 	for (i, name) in variable_names.iter().enumerate() {
 		let is_last = i == variable_names.len() - 1;
@@ -238,8 +245,11 @@ async fn assign_to_named_variables(
 		let value = if fields.is_empty() {
 			String::new()
 		} else if is_last {
-			// Last variable gets all remaining fields joined by space.
-			std::mem::take(&mut fields).into_iter().join(" ")
+			// Last variable gets all remaining fields joined by space. A line
+			// with no delimiter in it is one field as long as the line, and
+			// `join` builds the joined value in one step, so the join is
+			// divided instead.
+			join_fields_in_strides(params, std::mem::take(&mut fields)).await?
 		} else {
 			fields.pop_front().unwrap_or_default()
 		};
@@ -263,42 +273,104 @@ async fn assign_to_named_variables(
 	Ok(())
 }
 
+/// Joins the fields left for the last variable with a space between them.
+///
+/// Both the walk over the fields and the bytes it copies are charged: a line
+/// splits into as many fields as it has characters, and a single field can be
+/// as long as the line, so neither a step count nor a byte count alone says
+/// what the join costs.
+async fn join_fields_in_strides(
+	params: &brush_core::ExecutionParameters,
+	fields: VecDeque<String>,
+) -> Result<String, brush_core::Error> {
+	let mut budget = brush_core::ElementBudget::new();
+
+	// The joined value is reserved in full first: letting it grow doubles the
+	// buffer, and the last of those doublings copies half the line in a step
+	// nothing can interrupt. Measuring the lengths moves nothing, so the walk
+	// is charged for its steps alone.
+	let mut capacity = fields.len().saturating_sub(1);
+	for field in &fields {
+		let due = budget.charge(0);
+		if due > 0 {
+			brush_core::loop_checkpoints(params, due).await?;
+		}
+		capacity += field.len();
+	}
+
+	let mut joined = String::with_capacity(capacity);
+	for (index, field) in fields.into_iter().enumerate() {
+		let due = budget.charge(field.len());
+		if due > 0 {
+			brush_core::loop_checkpoints(params, due).await?;
+		}
+		if index > 0 {
+			joined.push(' ');
+		}
+		if field.len() > brush_core::DIVIDE_COPY_ABOVE_BYTES {
+			brush_core::push_str_in_strides(params, &mut joined, &field).await?;
+		} else {
+			joined.push_str(&field);
+		}
+	}
+
+	Ok(joined)
+}
+
 /// Builds array field values from input, optionally splitting by IFS.
-fn build_array_fields(
+async fn build_array_fields(
 	input_line: Option<&str>,
 	ifs: &str,
 	skip_ifs_splitting: bool,
-) -> Vec<(Option<String>, String)> {
-	match input_line {
+	params: &brush_core::ExecutionParameters,
+) -> Result<Vec<(Option<String>, String)>, brush_core::Error> {
+	Ok(match input_line {
 		Some(line) if skip_ifs_splitting => {
-			// With -N, don't split - put entire input as single element.
-			vec![(None, line.to_string())]
+			// With -N, don't split - put entire input as single element. The
+			// element is the whole line, so its copy is divided; `-N` with a
+			// 64 MiB count was measured holding the worker here, in the
+			// construction, with the assignment already divided.
+			vec![(None, brush_core::clone_in_strides(params, line).await?)]
 		},
 		Some(line) => {
-			let fields: VecDeque<_> = split_line_by_ifs(ifs, line, None /* max_fields */);
-			fields.into_iter().map(|f| (None, f)).collect()
+			let fields = split_line_by_ifs(ifs, line, None /* max_fields */, params).await?;
+			// The fields are moved rather than copied, but there is one step
+			// per field and a line splits into as many fields as it has
+			// characters, so the walk is charged for its steps.
+			let mut literal_fields = Vec::with_capacity(fields.len());
+			let mut budget = brush_core::ElementBudget::new();
+			for field in fields {
+				let due = budget.charge(0);
+				if due > 0 {
+					brush_core::loop_checkpoints(params, due).await?;
+				}
+				literal_fields.push((None, field));
+			}
+			literal_fields
 		},
 		None => vec![],
-	}
+	})
 }
 
 /// Builds field values from input for assignment to named variables.
-fn build_variable_fields(
+async fn build_variable_fields(
 	input_line: Option<&str>,
 	ifs: &str,
 	skip_ifs_splitting: bool,
 	num_variables: usize,
-) -> VecDeque<String> {
-	match input_line {
+	params: &brush_core::ExecutionParameters,
+) -> Result<VecDeque<String>, brush_core::Error> {
+	Ok(match input_line {
 		Some(line) if skip_ifs_splitting => {
-			// With -N, don't split - put entire input in first variable.
+			// With -N, don't split - put entire input in first variable. The
+			// field is the whole line, so its copy is divided.
 			let mut fields = VecDeque::new();
-			fields.push_back(line.to_string());
+			fields.push_back(brush_core::clone_in_strides(params, line).await?);
 			fields
 		},
-		Some(line) => split_line_by_ifs(ifs, line, Some(num_variables)),
+		Some(line) => split_line_by_ifs(ifs, line, Some(num_variables), params).await?,
 		None => VecDeque::new(),
-	}
+	})
 }
 
 /// Result of a `read` operation.
@@ -541,9 +613,181 @@ impl CharCount {
 	}
 }
 
+/// Why a read ended, with the line's bytes as they were read.
+///
+/// Decoding is the caller's: a read offloaded to a blocking worker decodes
+/// there, in one step, and a read made on a runtime worker decodes a stride at
+/// a time.
+enum RawResult {
+	/// A complete line (delimiter or char limit reached).
+	Line(Vec<u8>),
+	/// End of input, with any partial content read before it.
+	Eof(Option<Vec<u8>>),
+	/// The read timed out, with any partial content read before it.
+	TimedOut(Option<Vec<u8>>),
+	/// Ctrl+C was pressed.
+	Interrupted,
+}
+
+impl RawResult {
+	/// Decodes the line in one step, for a caller that holds no runtime
+	/// worker.
+	fn decode(self) -> ReadResult {
+		match self {
+			Self::Line(line) => ReadResult::Line(decode_line(line)),
+			Self::Eof(line) => ReadResult::Eof(line.map(decode_line)),
+			Self::TimedOut(line) => ReadResult::TimedOut(line.map(decode_line)),
+			Self::Interrupted => ReadResult::Interrupted,
+		}
+	}
+
+	/// Decodes the line a stride at a time, for a caller on a runtime worker.
+	async fn decode_in_strides(
+		self,
+		params: &brush_core::ExecutionParameters,
+	) -> Result<ReadResult, brush_core::Error> {
+		Ok(match self {
+			Self::Line(line) => ReadResult::Line(decode_line_in_strides(params, line).await?),
+			Self::Eof(Some(line)) => {
+				ReadResult::Eof(Some(decode_line_in_strides(params, line).await?))
+			},
+			Self::TimedOut(Some(line)) => {
+				ReadResult::TimedOut(Some(decode_line_in_strides(params, line).await?))
+			},
+			Self::Eof(None) => ReadResult::Eof(None),
+			Self::TimedOut(None) => ReadResult::TimedOut(None),
+			Self::Interrupted => ReadResult::Interrupted,
+		})
+	}
+}
+
+/// A line as it is being read, kept outside the read loop so that a read can
+/// stop after a stride of input and resume where it left off.
+#[derive(Default)]
+struct LineAccumulator {
+	/// The bytes of the line so far.
+	line:              Vec<u8>,
+	/// Characters read toward a `-n`/`-N` limit.
+	count:             CharCount,
+	/// A backslash read but not yet applied to the byte after it.
+	pending_backslash: bool,
+}
+
+impl LineAccumulator {
+	/// Reads until the line ends or `budget` input events have been taken,
+	/// whichever comes first.
+	///
+	/// `None` means the budget ran out with the line unfinished; the state to
+	/// carry on with is in `self`.
+	fn fill<F>(
+		&mut self,
+		reader: &mut InputReader,
+		config: &LineReaderConfig,
+		is_cancelled: &F,
+		budget: usize,
+	) -> Result<Option<RawResult>, brush_core::Error>
+	where
+		F: Fn() -> bool,
+	{
+		for _ in 0..budget {
+			match reader.read_event(is_cancelled)? {
+				InputEvent::Eof => {
+					// Bash discards pending backslash on EOF.
+					let line = std::mem::take(&mut self.line);
+					return Ok(Some(RawResult::Eof((!line.is_empty()).then_some(line))));
+				},
+
+				InputEvent::Timeout => {
+					// Include pending backslash on timeout (different from EOF).
+					if self.pending_backslash {
+						self.line.push(BACKSLASH);
+					}
+					let line = std::mem::take(&mut self.line);
+					return Ok(Some(RawResult::TimedOut((!line.is_empty()).then_some(line))));
+				},
+
+				InputEvent::CtrlC => {
+					return Ok(Some(RawResult::Interrupted));
+				},
+
+				InputEvent::CtrlD => {
+					// At line start = EOF, mid-input = flush current input.
+					// Bash discards pending backslash here too.
+					return Ok(Some(if self.line.is_empty() && !self.pending_backslash {
+						RawResult::Eof(None)
+					} else {
+						RawResult::Line(std::mem::take(&mut self.line))
+					}));
+				},
+
+				InputEvent::Byte(byte) => {
+					if let Some(result) = self.take_byte(config, byte) {
+						return Ok(Some(result));
+					}
+				},
+			}
+		}
+
+		Ok(None)
+	}
+
+	/// Takes one data byte, returning the line if it ends there.
+	fn take_byte(&mut self, config: &LineReaderConfig, byte: u8) -> Option<RawResult> {
+		// Handle backslash escape processing (when enabled).
+		if config.process_escapes {
+			if self.pending_backslash {
+				self.pending_backslash = false;
+
+				// Backslash-delimiter is line continuation.
+				if config.delimiter == Some(byte) {
+					return None; // Line continuation.
+				}
+
+				// For other bytes, add the byte literally (backslash consumed).
+				self.line.push(byte);
+				self.count.push(byte);
+
+				// Check character limit (based on output length).
+				if self.count.reached(config.char_limit) {
+					return Some(RawResult::Line(std::mem::take(&mut self.line)));
+				}
+				return None;
+			}
+
+			if byte == BACKSLASH {
+				self.pending_backslash = true;
+				return None;
+			}
+		}
+
+		// Check for delimiter.
+		if config.delimiter == Some(byte) {
+			return Some(RawResult::Line(std::mem::take(&mut self.line)));
+		}
+
+		// Ignore non-whitespace control characters.
+		if byte.is_ascii_control() && !byte.is_ascii_whitespace() {
+			return None;
+		}
+
+		self.line.push(byte);
+		self.count.push(byte);
+
+		// Check character limit (based on output length).
+		if self.count.reached(config.char_limit) {
+			return Some(RawResult::Line(std::mem::take(&mut self.line)));
+		}
+
+		None
+	}
+}
+
 /// Reads a complete line of input using the given reader and configuration.
 ///
-/// Returns a `ReadResult` indicating success, EOF, timeout, or interruption.
+/// Returns a `RawResult` indicating success, EOF, timeout, or interruption.
+/// The read runs to the end of the line in one step, so only a caller that
+/// holds no runtime worker may use it; everyone else uses
+/// [`read_line_divided`].
 ///
 /// Note on character counting for `-n` limit:
 /// Bash counts OUTPUT characters (after escape processing) toward the limit.
@@ -555,91 +799,45 @@ fn read_line_with_reader<F>(
 	reader: &mut InputReader,
 	config: &LineReaderConfig,
 	is_cancelled: &F,
-) -> Result<ReadResult, brush_core::Error>
+) -> Result<RawResult, brush_core::Error>
 where
 	F: Fn() -> bool,
 {
-	let mut line = Vec::new();
-	let mut count = CharCount::default();
-	let mut pending_backslash = false;
-
+	let mut line = LineAccumulator::default();
 	loop {
-		let event = reader.read_event(is_cancelled)?;
+		if let Some(result) = line.fill(reader, config, is_cancelled, usize::MAX)? {
+			return Ok(result);
+		}
+	}
+}
 
-		match event {
-			InputEvent::Eof => {
-				// Bash discards pending backslash on EOF.
-				return Ok(ReadResult::Eof((!line.is_empty()).then(|| decode_line(line))));
-			},
-
-			InputEvent::Timeout => {
-				// Include pending backslash on timeout (different from EOF).
-				if pending_backslash {
-					line.push(BACKSLASH);
-				}
-				return Ok(ReadResult::TimedOut((!line.is_empty()).then(|| decode_line(line))));
-			},
-
-			InputEvent::CtrlC => {
-				return Ok(ReadResult::Interrupted);
-			},
-
-			InputEvent::CtrlD => {
-				// At line start = EOF, mid-input = flush current input.
-				// Bash discards pending backslash here too.
-				return Ok(if line.is_empty() && !pending_backslash {
-					ReadResult::Eof(None)
-				} else {
-					ReadResult::Line(decode_line(line))
-				});
-			},
-
-			InputEvent::Byte(byte) => {
-				// Handle backslash escape processing (when enabled).
-				if config.process_escapes {
-					if pending_backslash {
-						pending_backslash = false;
-
-						// Backslash-delimiter is line continuation.
-						if config.delimiter == Some(byte) {
-							continue; // Line continuation.
-						}
-
-						// For other bytes, add the byte literally (backslash consumed).
-						line.push(byte);
-						count.push(byte);
-
-						// Check character limit (based on output length).
-						if count.reached(config.char_limit) {
-							return Ok(ReadResult::Line(decode_line(line)));
-						}
-						continue;
-					}
-
-					if byte == BACKSLASH {
-						pending_backslash = true;
-						continue;
-					}
-				}
-
-				// Check for delimiter.
-				if config.delimiter == Some(byte) {
-					return Ok(ReadResult::Line(decode_line(line)));
-				}
-
-				// Ignore non-whitespace control characters.
-				if byte.is_ascii_control() && !byte.is_ascii_whitespace() {
-					continue;
-				}
-
-				line.push(byte);
-				count.push(byte);
-
-				// Check character limit (based on output length).
-				if count.reached(config.char_limit) {
-					return Ok(ReadResult::Line(decode_line(line)));
-				}
-			},
+/// [`read_line_with_reader`] for a caller on a runtime worker: the same read,
+/// a stride of input at a time, with a checkpoint before each stride.
+///
+/// Taking a byte at a time out of a block that is already in memory is work as
+/// long as the input, and nothing in it ever awaits: a `read -r` of a 64 MiB
+/// line was measured holding the worker for 288 ms, with the assignment it
+/// feeds already divided.
+async fn read_line_divided<F>(
+	reader: &mut InputReader,
+	config: &LineReaderConfig,
+	is_cancelled: &F,
+	params: &brush_core::ExecutionParameters,
+) -> Result<RawResult, brush_core::Error>
+where
+	F: Fn() -> bool,
+{
+	let mut line = LineAccumulator::default();
+	let mut budget = brush_core::ElementBudget::new();
+	loop {
+		let due = budget.charge(brush_core::DIVIDE_COPY_ABOVE_BYTES);
+		if due > 0 {
+			brush_core::loop_checkpoints(params, due).await?;
+		}
+		if let Some(result) =
+			line.fill(reader, config, is_cancelled, brush_core::DIVIDE_COPY_ABOVE_BYTES)?
+		{
+			return Ok(result);
 		}
 	}
 }
@@ -657,6 +855,7 @@ impl ReadCommand {
 		mut stderr_file: impl std::io::Write,
 		timeout: Option<Duration>,
 		is_cancelled: F,
+		params: &brush_core::ExecutionParameters,
 	) -> Result<ReadResult, brush_core::Error>
 	where
 		F: Fn() -> bool + Send + 'static,
@@ -704,8 +903,12 @@ impl ReadCommand {
 
 		#[cfg(target_family = "wasm")]
 		{
-			// Threadless Wasm cannot spawn blocking workers.
-			read_line_with_reader(&mut reader, &config, &is_cancelled)
+			// Threadless Wasm cannot spawn blocking workers, so the read and
+			// the decode of what it read are divided in place.
+			read_line_divided(&mut reader, &config, &is_cancelled, params)
+				.await?
+				.decode_in_strides(params)
+				.await
 		}
 		#[cfg(not(target_family = "wasm"))]
 		{
@@ -714,11 +917,19 @@ impl ReadCommand {
 			// or async job) leaves the runtime workers free for that producer, and
 			// offloading again would hold this worker while queueing another one.
 			if reader.source.reads_ahead() || brush_core::commands::builtin_on_blocking_worker() {
-				return read_line_with_reader(&mut reader, &config, &is_cancelled);
+				return read_line_divided(&mut reader, &config, &is_cancelled, params)
+					.await?
+					.decode_in_strides(params)
+					.await;
 			}
-			tokio::task::spawn_blocking(move || read_line_with_reader(&mut reader, &config, &is_cancelled))
-				.await
-				.map_err(ErrorKind::ThreadingError)?
+			// The blocking worker decodes what it read as well: that walk over
+			// the line's bytes is as long as the read, and it is not the
+			// runtime's to take in one step.
+			tokio::task::spawn_blocking(move || {
+				read_line_with_reader(&mut reader, &config, &is_cancelled).map(RawResult::decode)
+			})
+			.await
+			.map_err(ErrorKind::ThreadingError)?
 		}
 	}
 
@@ -770,6 +981,76 @@ impl ReadCommand {
 	}
 }
 
+/// Whether `c` is IFS whitespace: a space, tab or newline that is also in IFS.
+fn is_ifs_whitespace(c: char, ifs_chars: &[char]) -> bool {
+	(c == ' ' || c == '\t' || c == '\n') && ifs_chars.contains(&c)
+}
+
+/// Trims leading and trailing IFS whitespace, a stride of the line at a time.
+///
+/// `str::trim_matches` walks the line in one step, and a line is whatever the
+/// descriptor held: a 64 MiB line of spaces is a 64 MiB walk before the split
+/// has begun.
+async fn trim_ifs_whitespace<'a>(
+	params: &brush_core::ExecutionParameters,
+	line: &'a str,
+	ifs_chars: &[char],
+) -> Result<&'a str, brush_core::Error> {
+	let mut budget = brush_core::ElementBudget::new();
+	let mut trimmed = line;
+
+	while let Some(c) = trimmed.chars().next() {
+		if !is_ifs_whitespace(c, ifs_chars) {
+			break;
+		}
+		// A step also scans IFS once, so IFS's length is charged with the
+		// character's: `IFS` is a variable and can itself be long.
+		let due = budget.charge(c.len_utf8() + ifs_chars.len());
+		if due > 0 {
+			brush_core::loop_checkpoints(params, due).await?;
+		}
+		trimmed = &trimmed[c.len_utf8()..];
+	}
+
+	while let Some(c) = trimmed.chars().next_back() {
+		if !is_ifs_whitespace(c, ifs_chars) {
+			break;
+		}
+		let due = budget.charge(c.len_utf8() + ifs_chars.len());
+		if due > 0 {
+			brush_core::loop_checkpoints(params, due).await?;
+		}
+		trimmed = &trimmed[..trimmed.len() - c.len_utf8()];
+	}
+
+	Ok(trimmed)
+}
+
+/// Puts one field, cut out of the line, on the end of `fields`.
+///
+/// The copy is charged by the bytes it moves, and a field longer than a
+/// stride — a line with no delimiter in it is a single field as long as the
+/// line — is copied a stride at a time. Below a stride the plain copy is
+/// taken, because an `async` call on each of a million one-character fields
+/// costs more than the checkpoints it would spend.
+async fn push_field(
+	params: &brush_core::ExecutionParameters,
+	fields: &mut VecDeque<String>,
+	budget: &mut brush_core::ElementBudget,
+	field: &str,
+) -> Result<(), brush_core::Error> {
+	let due = budget.charge(field.len());
+	if due > 0 {
+		brush_core::loop_checkpoints(params, due).await?;
+	}
+	fields.push_back(if field.len() > brush_core::DIVIDE_COPY_ABOVE_BYTES {
+		brush_core::clone_in_strides(params, field).await?
+	} else {
+		field.to_owned()
+	});
+	Ok(())
+}
+
 /// Splits a line by IFS (Internal Field Separator) according to shell rules.
 ///
 /// Shell IFS splitting has special rules:
@@ -779,22 +1060,28 @@ impl ReadCommand {
 /// - Non-whitespace IFS chars each act as individual delimiters
 /// - Trailing non-whitespace delimiter does NOT create an empty final field
 ///
+/// The walk is as long as the line and every field cut out of it is a copy, so
+/// both are charged: `read -r result` over a 64 MiB line was measured holding
+/// the worker for 450 ms with the assignment to `result` already divided, and
+/// this is where that line is taken apart.
+///
 /// # Arguments
 /// * `ifs` - The IFS string (typically " \t\n")
 /// * `line` - The input line to split
 /// * `max_fields` - Optional limit on number of fields (for `read var1 var2`)
-fn split_line_by_ifs(ifs: &str, line: &str, max_fields: Option<usize>) -> VecDeque<String> {
+/// * `params` - Execution parameters, for the checkpoints the walk spends
+async fn split_line_by_ifs(
+	ifs: &str,
+	line: &str,
+	max_fields: Option<usize>,
+	params: &brush_core::ExecutionParameters,
+) -> Result<VecDeque<String>, brush_core::Error> {
 	let ifs_chars: Vec<char> = ifs.chars().collect();
 
-	// Helper to check if a char is IFS whitespace (space, tab, or newline AND in
-	// IFS).
-	let is_ifs_whitespace =
-		|c: char| -> bool { (c == ' ' || c == '\t' || c == '\n') && ifs_chars.contains(&c) };
-
 	// Trim leading/trailing IFS whitespace from the input.
-	let trimmed_line = line.trim_matches(&is_ifs_whitespace);
+	let trimmed_line = trim_ifs_whitespace(params, line, &ifs_chars).await?;
 	if trimmed_line.is_empty() {
-		return VecDeque::new();
+		return Ok(VecDeque::new());
 	}
 
 	let max_fields = max_fields.unwrap_or(usize::MAX);
@@ -804,15 +1091,30 @@ fn split_line_by_ifs(ifs: &str, line: &str, max_fields: Option<usize>) -> VecDeq
 	// - `prev_was_non_ws_delim`: Previous char was a non-whitespace delimiter
 	// - `collecting_remainder`: We've hit max_fields, collect everything into last
 	//   field
+	//
+	// A field is always a run of the line, so it is held as the bounds of that
+	// run and cut out when it ends. Building it a character at a time grew its
+	// buffer by doubling, and the last doubling of a field as long as the line
+	// copies half of it in a step nothing can interrupt.
 	let mut fields = VecDeque::new();
-	let mut current_field = String::new();
+	let mut field_start = 0;
+	let mut field_end = 0;
 	let mut consuming_whitespace_run = false;
 	let mut prev_was_non_ws_delim = false;
 	let mut collecting_remainder = false;
+	let mut budget = brush_core::ElementBudget::new();
 
-	for c in trimmed_line.chars() {
+	for (index, c) in trimmed_line.char_indices() {
+		// The walk is one step per character and as many bytes as the line, so
+		// it is charged by both, and by the scan of IFS each step makes: a
+		// long `IFS` makes a step as long as IFS itself.
+		let due = budget.charge(c.len_utf8() + ifs_chars.len());
+		if due > 0 {
+			brush_core::loop_checkpoints(params, due).await?;
+		}
+
 		// Skip consecutive IFS whitespace (they act as single delimiter).
-		if consuming_whitespace_run && is_ifs_whitespace(c) {
+		if consuming_whitespace_run && is_ifs_whitespace(c, &ifs_chars) {
 			continue;
 		}
 		consuming_whitespace_run = false;
@@ -822,24 +1124,33 @@ fn split_line_by_ifs(ifs: &str, line: &str, max_fields: Option<usize>) -> VecDeq
 
 		if !at_field_limit && is_delimiter {
 			// Normal case: delimiter ends current field, start new one.
-			fields.push_back(std::mem::take(&mut current_field));
-			consuming_whitespace_run = is_ifs_whitespace(c);
+			let field = &trimmed_line[field_start..field_end];
+			push_field(params, &mut fields, &mut budget, field).await?;
+			field_start = index + c.len_utf8();
+			field_end = field_start;
+			consuming_whitespace_run = is_ifs_whitespace(c, &ifs_chars);
 			prev_was_non_ws_delim = !consuming_whitespace_run;
 		} else if at_field_limit && !collecting_remainder && is_delimiter {
 			// At field limit but haven't started last field content yet.
 			// Skip leading IFS whitespace for the final field.
-			if is_ifs_whitespace(c) {
+			if is_ifs_whitespace(c, &ifs_chars) {
 				consuming_whitespace_run = true;
+				field_start = index + c.len_utf8();
+				field_end = field_start;
 			} else {
 				// Non-whitespace delimiters at boundary: include in remainder.
 				// e.g., "x::y" with IFS=":" and 2 vars gives ["x", ":y"]
 				collecting_remainder = true;
-				current_field.push(c);
+				field_start = index;
+				field_end = index + c.len_utf8();
 			}
 		} else {
 			// Regular character: add to current field.
 			collecting_remainder = at_field_limit;
-			current_field.push(c);
+			if field_end == field_start {
+				field_start = index;
+			}
+			field_end = index + c.len_utf8();
 			prev_was_non_ws_delim = false;
 		}
 	}
@@ -847,11 +1158,12 @@ fn split_line_by_ifs(ifs: &str, line: &str, max_fields: Option<usize>) -> VecDeq
 	// Finalize: push last field unless it's empty AND we ended with non-ws
 	// delimiter. e.g., "a,b,c," with IFS="," gives ["a", "b", "c"], not ["a", "b",
 	// "c", ""].
-	if !current_field.is_empty() || !prev_was_non_ws_delim {
-		fields.push_back(current_field);
+	let last_field = &trimmed_line[field_start..field_end];
+	if !last_field.is_empty() || !prev_was_non_ws_delim {
+		push_field(params, &mut fields, &mut budget, last_field).await?;
 	}
 
-	fields
+	Ok(fields)
 }
 
 #[cfg(test)]
@@ -862,99 +1174,143 @@ mod tests {
 
 	// ==================== split_line_by_ifs tests ====================
 
-	#[test]
-	fn test_split_line_by_ifs_basic() {
-		let result = split_line_by_ifs(",", "a,b,c", None);
+	/// The parameters a divided walk spends its checkpoints against. A test
+	/// has no run to cancel, so the default ones will do.
+	fn test_params() -> brush_core::ExecutionParameters {
+		brush_core::ExecutionParameters::default()
+	}
+
+	async fn split(ifs: &str, line: &str, max_fields: Option<usize>) -> VecDeque<String> {
+		split_line_by_ifs(ifs, line, max_fields, &test_params())
+			.await
+			.expect("splitting an uncancelled line must succeed")
+	}
+
+	async fn array_fields(
+		input_line: Option<&str>,
+		ifs: &str,
+		skip_ifs_splitting: bool,
+	) -> Vec<(Option<String>, String)> {
+		build_array_fields(input_line, ifs, skip_ifs_splitting, &test_params())
+			.await
+			.expect("building fields of an uncancelled line must succeed")
+	}
+
+	async fn variable_fields(
+		input_line: Option<&str>,
+		ifs: &str,
+		skip_ifs_splitting: bool,
+		num_variables: usize,
+	) -> VecDeque<String> {
+		build_variable_fields(input_line, ifs, skip_ifs_splitting, num_variables, &test_params())
+			.await
+			.expect("building fields of an uncancelled line must succeed")
+	}
+
+	#[tokio::test]
+	async fn test_split_line_by_ifs_basic() {
+		let result = split(",", "a,b,c", None).await;
 		assert_equal(result, VecDeque::from(vec!["a", "b", "c"]));
 	}
 
-	#[test]
-	fn test_split_line_by_ifs_leading_or_trailing_space() {
-		let result = split_line_by_ifs(" ", "  a b c ", None);
+	#[tokio::test]
+	async fn test_split_line_by_ifs_leading_or_trailing_space() {
+		let result = split(" ", "  a b c ", None).await;
 		assert_equal(result, VecDeque::from(vec!["a", "b", "c"]));
 	}
 
-	#[test]
-	fn test_split_line_by_ifs_extra_interior_space() {
-		let result = split_line_by_ifs(" ", "a  b c", None);
+	#[tokio::test]
+	async fn test_split_line_by_ifs_extra_interior_space() {
+		let result = split(" ", "a  b c", None).await;
 		assert_equal(result, VecDeque::from(vec!["a", "b", "c"]));
 	}
 
-	#[test]
-	fn test_split_line_by_ifs_leading_non_space_delimiter() {
-		let result = split_line_by_ifs(",", ",a,b,c", None);
+	#[tokio::test]
+	async fn test_split_line_by_ifs_leading_non_space_delimiter() {
+		let result = split(",", ",a,b,c", None).await;
 		assert_equal(result, VecDeque::from(vec!["", "a", "b", "c"]));
 	}
 
-	#[test]
-	fn test_split_line_by_ifs_trailing_non_space_delimiter() {
+	#[tokio::test]
+	async fn test_split_line_by_ifs_trailing_non_space_delimiter() {
 		// Bash does NOT include empty trailing field when input ends with non-ws
 		// delimiter.
-		let result = split_line_by_ifs(",", "a,b,c,", None);
+		let result = split(",", "a,b,c,", None).await;
 		assert_equal(result, VecDeque::from(vec!["a", "b", "c"]));
 	}
 
-	#[test]
-	fn test_split_line_by_ifs_max_fields() {
+	#[tokio::test]
+	async fn test_split_line_by_ifs_max_fields() {
 		// With max_fields=2, remainder goes into second field.
-		let result = split_line_by_ifs(" ", "a b c d", Some(2));
+		let result = split(" ", "a b c d", Some(2)).await;
 		assert_equal(result, VecDeque::from(vec!["a", "b c d"]));
 	}
 
-	#[test]
-	fn test_split_line_by_ifs_max_fields_with_non_ws_delimiter() {
+	#[tokio::test]
+	async fn test_split_line_by_ifs_max_fields_with_non_ws_delimiter() {
 		// With max_fields and non-whitespace delimiter.
-		let result = split_line_by_ifs(",", "a,b,c,d", Some(2));
+		let result = split(",", "a,b,c,d", Some(2)).await;
 		assert_equal(result, VecDeque::from(vec!["a", "b,c,d"]));
 	}
 
-	#[test]
-	fn test_split_line_by_ifs_consecutive_delimiters_at_boundary() {
+	#[tokio::test]
+	async fn test_split_line_by_ifs_consecutive_delimiters_at_boundary() {
 		// Consecutive non-whitespace delimiters at field boundary should be preserved.
 		// e.g., "x::y" with IFS=":" and 2 vars gives ["x", ":y"]
-		let result = split_line_by_ifs(":", "x::y", Some(2));
+		let result = split(":", "x::y", Some(2)).await;
 		assert_equal(result, VecDeque::from(vec!["x", ":y"]));
 
 		// Triple delimiter at boundary.
-		let result = split_line_by_ifs(":", "x:::y", Some(2));
+		let result = split(":", "x:::y", Some(2)).await;
 		assert_equal(result, VecDeque::from(vec!["x", "::y"]));
 
 		// Delimiter in middle of remainder is also preserved.
-		let result = split_line_by_ifs(":", "x:y:z:w", Some(2));
+		let result = split(":", "x:y:z:w", Some(2)).await;
 		assert_equal(result, VecDeque::from(vec!["x", "y:z:w"]));
 	}
 
-	#[test]
-	fn test_split_line_by_ifs_mixed_delimiters() {
+	#[tokio::test]
+	async fn test_split_line_by_ifs_mixed_delimiters() {
 		// Mixed whitespace and non-whitespace in IFS.
-		let result = split_line_by_ifs(": ", "a:b  c:d", None);
+		let result = split(": ", "a:b  c:d", None).await;
 		assert_equal(result, VecDeque::from(vec!["a", "b", "c", "d"]));
 	}
 
-	#[test]
-	fn test_split_line_by_ifs_empty_input() {
-		let result = split_line_by_ifs(" ", "", None);
+	#[tokio::test]
+	async fn test_split_line_by_ifs_empty_input() {
+		let result = split(" ", "", None).await;
 		assert_equal(result, VecDeque::<String>::new());
 	}
 
-	#[test]
-	fn test_split_line_by_ifs_whitespace_only() {
-		let result = split_line_by_ifs(" ", "   ", None);
+	#[tokio::test]
+	async fn test_split_line_by_ifs_whitespace_only() {
+		let result = split(" ", "   ", None).await;
 		assert_equal(result, VecDeque::<String>::new());
 	}
 
-	#[test]
-	fn test_split_line_by_ifs_consecutive_non_ws_delimiters() {
+	#[tokio::test]
+	async fn test_split_line_by_ifs_consecutive_non_ws_delimiters() {
 		// Consecutive non-whitespace delimiters create empty fields.
-		let result = split_line_by_ifs(",", "a,,b", None);
+		let result = split(",", "a,,b", None).await;
 		assert_equal(result, VecDeque::from(vec!["a", "", "b"]));
+	}
+
+	/// A field is cut out of the line rather than built character by
+	/// character, and a field longer than a stride takes the divided copy:
+	/// both paths produce the field the whole line held.
+	#[tokio::test]
+	async fn test_split_line_by_ifs_field_longer_than_a_stride() {
+		let long = "a".repeat(brush_core::DIVIDE_COPY_ABOVE_BYTES * 2 + 7);
+		let line = format!("{long} {long}");
+		let result = split(" ", &line, None).await;
+		assert_equal(result, VecDeque::from(vec![long.clone(), long]));
 	}
 
 	// ==================== build_array_fields tests ====================
 
-	#[test]
-	fn test_build_array_fields_basic() {
-		let result = build_array_fields(Some("a b c"), " ", false);
+	#[tokio::test]
+	async fn test_build_array_fields_basic() {
+		let result = array_fields(Some("a b c"), " ", false).await;
 		assert_eq!(result, vec![
 			(None, "a".to_string()),
 			(None, "b".to_string()),
@@ -962,44 +1318,44 @@ mod tests {
 		]);
 	}
 
-	#[test]
-	fn test_build_array_fields_skip_splitting() {
+	#[tokio::test]
+	async fn test_build_array_fields_skip_splitting() {
 		// With -N option, entire input goes as single element.
-		let result = build_array_fields(Some("a b c"), " ", true);
+		let result = array_fields(Some("a b c"), " ", true).await;
 		assert_eq!(result, vec![(None, "a b c".to_string())]);
 	}
 
-	#[test]
-	fn test_build_array_fields_none_input() {
-		let result = build_array_fields(None, " ", false);
+	#[tokio::test]
+	async fn test_build_array_fields_none_input() {
+		let result = array_fields(None, " ", false).await;
 		assert!(result.is_empty());
 	}
 
 	// ==================== build_variable_fields tests ====================
 
-	#[test]
-	fn test_build_variable_fields_basic() {
-		let result = build_variable_fields(Some("a b c"), " ", false, 3);
+	#[tokio::test]
+	async fn test_build_variable_fields_basic() {
+		let result = variable_fields(Some("a b c"), " ", false, 3).await;
 		assert_equal(result, VecDeque::from(vec!["a", "b", "c"]));
 	}
 
-	#[test]
-	fn test_build_variable_fields_fewer_vars_than_fields() {
+	#[tokio::test]
+	async fn test_build_variable_fields_fewer_vars_than_fields() {
 		// Last variable gets remainder.
-		let result = build_variable_fields(Some("a b c d"), " ", false, 2);
+		let result = variable_fields(Some("a b c d"), " ", false, 2).await;
 		assert_equal(result, VecDeque::from(vec!["a", "b c d"]));
 	}
 
-	#[test]
-	fn test_build_variable_fields_skip_splitting() {
+	#[tokio::test]
+	async fn test_build_variable_fields_skip_splitting() {
 		// With -N option, entire input goes to first variable.
-		let result = build_variable_fields(Some("a b c"), " ", true, 3);
+		let result = variable_fields(Some("a b c"), " ", true, 3).await;
 		assert_equal(result, VecDeque::from(vec!["a b c"]));
 	}
 
-	#[test]
-	fn test_build_variable_fields_none_input() {
-		let result = build_variable_fields(None, " ", false, 3);
+	#[tokio::test]
+	async fn test_build_variable_fields_none_input() {
+		let result = variable_fields(None, " ", false, 3).await;
 		assert!(result.is_empty());
 	}
 
@@ -1037,7 +1393,7 @@ mod tests {
 		let input_file = brush_core::openfiles::OpenFile::from(reader);
 
 		let err = command
-			.read_line(input_file, Vec::<u8>::new(), None, || true)
+			.read_line(input_file, Vec::<u8>::new(), None, || true, &test_params())
 			.await
 			.expect_err("cancelled state must interrupt read builtin");
 		assert_eq!(err.to_string(), "interrupted");

@@ -442,20 +442,37 @@ impl ShellVariable {
 		}
 
 		let converter = self.value_converter();
+		let integer = self.is_treated_as_integer();
 		if !append {
 			if matches!(self.value, ShellValue::Dynamic { .. }) {
 				// TODO(dynamic): Allow updates to dynamic values
 				return Ok(());
 			}
-			// Stored rather than handed to `place_scalar`, which would convert
-			// it a second time.
-			self.value = ShellValue::String(converter.apply_divided(value, params).await?);
+			// A bounded result does not bound its input parse: `declare -i`
+			// of 64 MiB of zero digits held the worker 60.5 ms inside one
+			// `str::parse`, because neither a non-digit nor an overflow ever
+			// stopped it. The divided parse skips the zeros a stride at a
+			// time.
+			let converted = if integer {
+				parse_shell_integer_divided(params, value.as_str()).await?.to_string()
+			} else {
+				// Stored rather than handed to `place_scalar`, which would
+				// convert it a second time.
+				converter.apply_divided(value, params).await?
+			};
+			self.value = ShellValue::String(converted);
 			return Ok(());
 		}
-		if self.is_treated_as_integer() {
-			// The addition is the conversion, and an integer is as long as an
-			// integer.
-			return self.place_scalar(value, true);
+		if integer {
+			// The addition is the conversion and its result is an integer,
+			// but each side of it is a value the caller sized.
+			let left = match &self.value {
+				ShellValue::String(base) => parse_shell_integer_divided(params, base).await?,
+				_ => 0,
+			};
+			let right = parse_shell_integer_divided(params, value.as_str()).await?;
+			self.value = ShellValue::String((left + right).to_string());
+			return Ok(());
 		}
 		if converter.is_identity() {
 			// Nothing to convert, so the buffer is kept and appended to in
@@ -550,7 +567,7 @@ impl ShellVariable {
 				| ShellValue::String(_)
 				| ShellValue::Dynamic { .. } => {
 					let mut values = BTreeMap::new();
-					ShellValue::update_indexed_array_from_literals(&mut values, literal, convert, params)
+					ShellValue::update_indexed_array_from_literals(&mut values, literal, convert, params, 0)
 						.await?;
 					ShellValue::IndexedArray(values)
 				},
@@ -568,7 +585,14 @@ impl ShellVariable {
 				let ShellValue::IndexedArray(existing_values) = &mut self.value else {
 					unreachable!("matched above")
 				};
-				ShellValue::update_indexed_array_from_literals(existing_values, literal, convert, params)
+				let next = existing_values.last_key_value().map_or(0, |(largest, _)| largest + 1);
+				ShellValue::update_indexed_array_from_literals(
+					existing_values,
+					literal,
+					convert,
+					params,
+					next,
+				)
 					.await
 			},
 			ShellValue::AssociativeArray(_) => {
@@ -584,17 +608,21 @@ impl ShellVariable {
 				.await
 			},
 			// Appending to a string makes it element `0` of an array. The
-			// element is held by an empty placeholder while the literal is
-			// read, so the indices come out as they would have, and the
-			// scalar itself is moved in only at the commit — an explicit
-			// `[0]=` in the literal replaces the placeholder and the scalar
-			// is then not put back.
+			// literal is read into a map of its own, starting its unindexed
+			// elements at `1`, and the scalar is moved into slot `0` at the
+			// commit if the literal did not fill it.
 			ShellValue::String(_) => {
-				let mut values: BTreeMap<u64, String> =
-					std::iter::once((0, String::new())).collect();
-				ShellValue::update_indexed_array_from_literals(&mut values, literal, convert, params)
+				// The scalar's slot is left **absent** rather than empty.
+				// An empty string was the first marker and an author can
+				// write one: `x=base; x+=([0]='')` then looked exactly like
+				// an untouched placeholder, so the scalar was put back and
+				// the element read `base` where bash gives the empty string.
+				// A key that is not in the map is not a value, so it cannot
+				// be forged.
+				let mut values: BTreeMap<u64, String> = BTreeMap::new();
+				ShellValue::update_indexed_array_from_literals(&mut values, literal, convert, params, 1)
 					.await?;
-				if values.get(&0).is_some_and(String::is_empty) {
+				if !values.contains_key(&0) {
 					values.insert(0, self.take_scalar());
 				}
 				self.value = ShellValue::IndexedArray(values);
@@ -616,7 +644,7 @@ impl ShellVariable {
 			},
 			ShellValue::Unset(_) => {
 				let mut values = BTreeMap::new();
-				ShellValue::update_indexed_array_from_literals(&mut values, literal, convert, params)
+				ShellValue::update_indexed_array_from_literals(&mut values, literal, convert, params, 0)
 					.await?;
 				self.value = ShellValue::IndexedArray(values);
 				Ok(())
@@ -1074,7 +1102,7 @@ impl ValueConverter {
 		update_transform: ShellVariableUpdateTransform,
 	) {
 		if treat_as_int {
-			*s = (*s).parse::<i64>().unwrap_or(0).to_string();
+			*s = parse_shell_integer(s.as_str()).to_string();
 		} else {
 			match update_transform {
 				ShellVariableUpdateTransform::None => (),
@@ -1092,6 +1120,91 @@ impl ValueConverter {
 			}
 		}
 	}
+}
+
+/// What `declare -i` makes of a value: `str::parse` with a failure read as
+/// zero, in a number of steps that does not depend on the value's length.
+///
+/// **A bounded result does not bound its input parse.** `i64::from_str`
+/// stops at the first character that is not a digit and at the first
+/// overflow, so almost every long value is decided at once — but a run of
+/// zeros is neither, and 64 MiB of them held the worker **60.5 ms** inside
+/// one `parse`.
+///
+/// Leading zeros are the only part that can be long, and they carry no
+/// information: skipping them leaves at most nineteen digits that can
+/// matter, because a twentieth overflows an `i64` and `from_str` would have
+/// answered `Err` — which this reads as zero, as the caller always did.
+/// What is left is parsed by the standard library, so the answer is still
+/// its answer rather than a second opinion.
+fn parse_shell_integer(value: &str) -> i64 {
+	let (sign, digits) = split_integer_sign(value);
+	integer_from(sign, digits.trim_start_matches('0'))
+}
+
+/// Splits an optional leading sign from the digits after it.
+fn split_integer_sign(value: &str) -> (&str, &str) {
+	match value.as_bytes().first() {
+		Some(b'-') => ("-", &value[1..]),
+		Some(b'+') => ("", &value[1..]),
+		_ => ("", value),
+	}
+}
+
+/// The value of `sign` and the digits left after any leading zeros.
+///
+/// At most nineteen digits can matter, because a twentieth overflows an
+/// `i64` and `str::parse` would answer `Err`, which this reads as zero
+/// exactly as `unwrap_or_default` always did. Anything longer is therefore
+/// zero without being read: an overflow, or a value that was never a
+/// number. What is short enough is handed to the standard library, so the
+/// answer is still its answer rather than a second opinion.
+fn integer_from(sign: &str, significant: &str) -> i64 {
+	if significant.len() > 32 {
+		return 0;
+	}
+
+	let mut whole = String::with_capacity(sign.len() + significant.len());
+	whole.push_str(sign);
+	whole.push_str(significant);
+	whole.parse::<i64>().unwrap_or_default()
+}
+
+/// [`parse_shell_integer`] with the run of leading zeros skipped a stride at
+/// a time.
+///
+/// The synchronous form still walks that run in one step. It is a byte
+/// comparison rather than a digit accumulation, so 64 MiB of zeros costs
+/// about 6 ms there instead of 60 — better, and still over the bound, which
+/// is why the path a script takes uses this one.
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+/// way.
+async fn parse_shell_integer_divided(
+	params: &ExecutionParameters,
+	value: &str,
+) -> Result<i64, error::Error> {
+	let (sign, digits) = split_integer_sign(value);
+
+	let mut zeros = 0;
+	let bytes = digits.as_bytes();
+	while zeros < bytes.len() {
+		let stride = (zeros + interp::BYTE_CHECKPOINT_STRIDE).min(bytes.len());
+		if stride - zeros >= interp::BYTE_CHECKPOINT_STRIDE {
+			interp::stride_checkpoint(params).await?;
+		}
+		match bytes[zeros..stride].iter().position(|byte| *byte != b'0') {
+			Some(offset) => {
+				zeros += offset;
+				break;
+			},
+			None => zeros = stride,
+		}
+	}
+
+	Ok(integer_from(sign, &digits[zeros..]))
 }
 
 /// What a divided conversion carries from one piece to the next.
@@ -1544,7 +1657,13 @@ impl ShellValue {
 		params: &ExecutionParameters,
 	) -> Result<Self, error::Error> {
 		let mut values = BTreeMap::new();
-		Self::update_indexed_array_from_literals(&mut values, literals, ValueConverter::identity(), params)
+		Self::update_indexed_array_from_literals(
+			&mut values,
+			literals,
+			ValueConverter::identity(),
+			params,
+			0,
+		)
 			.await?;
 
 		Ok(Self::IndexedArray(values))
@@ -1572,10 +1691,9 @@ impl ShellValue {
 		literal_values: ArrayLiteral,
 		convert: ValueConverter,
 		params: &ExecutionParameters,
+		first_unindexed_key: u64,
 	) -> Result<(), error::Error> {
-		let mut new_key = existing_values
-			.last_key_value()
-			.map_or(0, |(largest_index, _)| largest_index + 1);
+		let mut new_key = first_unindexed_key;
 
 		let mut budget = interp::ElementBudget::new();
 		for (key, value) in literal_values.0 {

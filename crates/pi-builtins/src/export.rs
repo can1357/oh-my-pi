@@ -104,8 +104,14 @@ impl ExportCommand {
 					},
 				};
 
+				// `Word::flatten` is a clone of the whole word, and
+				// `export BIG="$big"` lets the caller size it: the copy that
+				// feeds the divided write has to be divided as well, or the
+				// hold simply moves one line earlier.
 				let value = match &assignment.value {
-					ast::AssignmentValue::Scalar(s) => variables::ShellValueLiteral::Scalar(s.flatten()),
+					ast::AssignmentValue::Scalar(s) => variables::ShellValueLiteral::Scalar(
+						brush_core::clone_in_strides(&context.params, s.as_ref()).await?,
+					),
 					ast::AssignmentValue::Array(a) => variables::ShellValueLiteral::Array(
 						variables::ArrayLiteral::from_assignment_elements(a, &context.params).await?,
 					),

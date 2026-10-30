@@ -377,8 +377,14 @@ impl builtins::Command for SetCommand {
 			None => 0,
 		};
 
+		// A vector of large strings is the same defect as one large string:
+		// `set -- "${big[@]}"` copied every operand here in one step, and the
+		// operands are whatever the caller expanded. Each copy is divided, and
+		// the checkpoint `clone_in_strides` spends per operand also divides a
+		// loop over a million short ones.
 		for arg in self.positional_args.iter().skip(skip) {
-			args.push(arg.to_owned());
+			let arg = brush_core::clone_in_strides(&context.params, arg).await?;
+			context.shell.current_shell_args_mut().push(arg);
 		}
 
 		saw_option = saw_option || !self.positional_args.is_empty();

@@ -44,24 +44,43 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 			checked_path
 		};
 
-		let pwd = cleaned_path.to_string_lossy().to_string();
+		// A path has no enforced bound: a virtual provider may accept one of
+		// any length, and an accepted 64 MiB working directory held the
+		// worker **105.400 ms** through these two assignments. Both the
+		// rendering of the path and the writes are divided.
+		//
+		// The parameters are the shell's own rather than the caller's, since
+		// `set_working_dir` is a plain method with thirty-odd callers: that
+		// bounds the hold, which is the defect, but a `cd` inside a cancelled
+		// run will not see that run's token.
+		let params = self.default_exec_params();
+		let pwd = crate::interp::clone_in_strides(&params, &cleaned_path.to_string_lossy()).await?;
 
-		self.env.update_or_add_scalar(
-			"PWD",
-			pwd,
-			|_| Ok(()),
-			EnvironmentLookup::Anywhere,
-			EnvironmentScope::Global,
-		)?;
+		self
+			.env
+			.update_or_add(
+				"PWD",
+				crate::variables::ShellValueLiteral::Scalar(pwd),
+				|_| Ok(()),
+				EnvironmentLookup::Anywhere,
+				EnvironmentScope::Global,
+				&params,
+			)
+			.await?;
 		let oldpwd = std::mem::replace(self.working_dir_mut(), cleaned_path);
+		let oldpwd = crate::interp::clone_in_strides(&params, &oldpwd.to_string_lossy()).await?;
 
-		self.env.update_or_add_scalar(
-			"OLDPWD",
-			oldpwd.to_string_lossy().to_string(),
-			|_| Ok(()),
-			EnvironmentLookup::Anywhere,
-			EnvironmentScope::Global,
-		)?;
+		self
+			.env
+			.update_or_add(
+				"OLDPWD",
+				crate::variables::ShellValueLiteral::Scalar(oldpwd),
+				|_| Ok(()),
+				EnvironmentLookup::Anywhere,
+				EnvironmentScope::Global,
+				&params,
+			)
+			.await?;
 
 		Ok(())
 	}

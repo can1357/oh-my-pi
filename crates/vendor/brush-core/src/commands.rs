@@ -452,6 +452,58 @@ pub async fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtension
 	Ok(cmd)
 }
 
+/// Renders `assignment` onto `out` the way its `Display` does, a stride at a
+/// time.
+///
+/// `BASH_COMMAND` is built before every command, and an assignment argument
+/// carries an expanded value: `declare x=$huge` spent **48.150 ms** in one
+/// `to_string`. The name and the operator are bounded by the assignment's
+/// own text; the value is not.
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+/// way, leaving `out` holding what had been rendered by then.
+async fn push_assignment_in_strides(
+	params: &ExecutionParameters,
+	out: &mut String,
+	assignment: &ast::Assignment,
+) -> Result<(), error::Error> {
+	out.push_str(assignment.name.to_string().as_str());
+	if assignment.append {
+		out.push('+');
+	}
+	out.push('=');
+
+	match &assignment.value {
+		ast::AssignmentValue::Scalar(word) => {
+			interp::push_str_in_strides(params, out, word.value.as_str()).await?;
+		},
+		ast::AssignmentValue::Array(words) => {
+			out.push('(');
+			let mut budget = interp::ElementBudget::new();
+			for (index, (key, value)) in words.iter().enumerate() {
+				if index > 0 {
+					out.push(' ');
+				}
+				let due = budget.charge(value.value.len());
+				if due > 0 {
+					interp::loop_checkpoints(params, due).await?;
+				}
+				if let Some(key) = key {
+					out.push('[');
+					out.push_str(key.to_string().as_str());
+					out.push_str("]=");
+				}
+				interp::push_str_in_strides(params, out, value.value.as_str()).await?;
+			}
+			out.push(')');
+		},
+	}
+
+	Ok(())
+}
+
 pub(crate) async fn on_preexecute(
 	cmd: &mut commands::SimpleCommand<'_, impl extensions::ShellExtensions>,
 ) -> Result<(), error::Error> {
@@ -459,38 +511,48 @@ pub(crate) async fn on_preexecute(
 	// executing commands).
 	//
 	// This runs before **every** command, so an ordinary command line takes
-	// the plain path and pays nothing. A generated one can be any size, and
-	// the same threshold the rest of this change uses decides which it is.
+	// the plain path and pays nothing. A generated one can be any size in
+	// two different ways — a few huge arguments or a great many small ones.
 	//
-	// The threshold is measured **before** the value is built, from the
-	// lengths of the arguments: testing it after the join divides the
-	// assignment and leaves the construction, which is where the time was —
-	// `noop "${huge[@]}"` with a 64 MiB argument spent 23.8 ms in this join.
-	let joined_len = cmd
-		.args
-		.iter()
-		.map(|arg| match arg {
-			CommandArg::String(text) => text.len(),
-			// An assignment is rendered rather than copied, and its text is
-			// bounded by the assignment itself; this is an estimate only for
-			// deciding which path to take.
-			CommandArg::Assignment(_) => 0,
-		})
-		.sum::<usize>() + cmd.args.len().saturating_sub(1);
+	// **The choice itself has to be bounded.** An earlier version summed the
+	// argument lengths to decide, which is a pass over every argument: eight
+	// million empty ones spent 20.6 ms in the deciding and never reached the
+	// divided path, because the number that would have chosen it cost 20 ms
+	// to produce. So a long argument list takes the divided path on its
+	// length alone, and only a short list — at most
+	// [`interp::ELEMENT_CHECKPOINT_STRIDE`] arguments — is examined.
+	let divided = cmd.args.len() > interp::ELEMENT_CHECKPOINT_STRIDE
+		|| cmd.args.iter().any(|arg| match arg {
+			CommandArg::String(text) => text.len() > interp::DIVIDE_COPY_ABOVE_BYTES,
+			// An assignment carries an expanded value whose rendered length
+			// is not known without rendering it, so it always takes the
+			// divided path rather than being guessed at.
+			CommandArg::Assignment(_) => true,
+		});
 
-	if joined_len > interp::DIVIDE_COPY_ABOVE_BYTES {
-		let mut full_cmd = String::with_capacity(joined_len);
+	if divided {
+		let mut full_cmd = String::new();
+		let mut budget = interp::ElementBudget::new();
 		for (index, arg) in cmd.args.iter().enumerate() {
 			if index > 0 {
 				full_cmd.push(' ');
 			}
 			match arg {
 				CommandArg::String(text) => {
-					interp::push_str_in_strides(&cmd.params, &mut full_cmd, text).await?;
+					// Charged by the step as well as the bytes, so a million
+					// empty arguments yield as surely as one huge one.
+					let due = budget.charge(text.len());
+					if due > 0 {
+						interp::loop_checkpoints(&cmd.params, due).await?;
+					}
+					if text.len() > interp::DIVIDE_COPY_ABOVE_BYTES {
+						interp::push_str_in_strides(&cmd.params, &mut full_cmd, text).await?;
+					} else {
+						full_cmd.push_str(text);
+					}
 				},
 				CommandArg::Assignment(assignment) => {
-					interp::loop_checkpoint(&cmd.params).await?;
-					full_cmd.push_str(assignment.to_string().as_str());
+					push_assignment_in_strides(&cmd.params, &mut full_cmd, assignment).await?;
 				},
 			}
 		}
@@ -705,7 +767,14 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 			Some(CommandArg::String(text)) => {
 				Ok(Some(interp::clone_in_strides(params, text).await?))
 			},
-			Some(argument) => Ok(Some(argument.to_string())),
+			// An assignment argument carries an **expanded** value, so this
+			// fallback was the same 48 ms synchronous rendering the
+			// `BASH_COMMAND` estimate used to hide.
+			Some(CommandArg::Assignment(assignment)) => {
+				let mut rendered = String::new();
+				push_assignment_in_strides(params, &mut rendered, assignment).await?;
+				Ok(Some(rendered))
+			},
 		}
 	}
 
@@ -1175,7 +1244,23 @@ pub(crate) async fn invoke_shell_function(
 		}
 	}
 
-	let positional_args = args.iter().map(|a| a.to_string());
+	// A function's positional parameters are copies of the command's
+	// arguments, and an argument is whatever the command line expanded to:
+	// `f "$huge"` spent **26.113 ms** building this list before the function
+	// body had started. Charged by the step as well as the bytes, so a
+	// function called with a million small arguments yields as surely as one
+	// called with a single huge one.
+	let mut positional_args = Vec::with_capacity(args.len());
+	let mut budget = interp::ElementBudget::new();
+	for arg in args {
+		let text = arg.to_string();
+		let due = budget.charge(text.len());
+		if due > 0 {
+			interp::loop_checkpoints(&context.params, due).await?;
+		}
+		positional_args.push(text);
+	}
+	let positional_args = positional_args.into_iter();
 
 	// Pass through open files.
 	let params = context.params.clone();
