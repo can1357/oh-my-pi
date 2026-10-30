@@ -12,6 +12,8 @@ export interface SettledArtifactAnswer {
 	inode: string;
 	/** The handle the host kept on this very file, for a reader that has to come back for the bytes. */
 	file?: string;
+	/** The hold this answer was read through, for a cell that was given none; its first read binds it. */
+	root?: string;
 	/** The bytes, when the host had to read them from the file it still holds open. */
 	text?: string;
 }
@@ -197,7 +199,8 @@ async function resolveArtifactPath(ctx: HelperContext, root: string, id: string)
 	// a verdict and a listing a copy can be announced, and the listing would
 	// be of a directory half an inheritance had reached.
 	if (ctx.resolveArtifact) {
-		const answer = await ctx.resolveArtifact(id, root, ctx.localRoots()[ARTIFACT_ROOT_TOKEN]);
+		const answer = await ctx.resolveArtifact(id, root, rootToken(ctx, root));
+		bindRoot(ctx, answer);
 		return answer?.path;
 	}
 	let files: string[];
@@ -232,11 +235,32 @@ async function settledArtifactFor(ctx: HelperContext, rawPath: string): Promise<
 	if (match === null || match[1].toLowerCase() !== "artifact" || !ARTIFACT_ID_RE.test(match[2])) return undefined;
 	const root = ctx.localRoots().artifact;
 	if (!root) return undefined;
-	return (await ctx.resolveArtifact(match[2], root, ctx.localRoots()[ARTIFACT_ROOT_TOKEN])) ?? undefined;
+	const answer = await ctx.resolveArtifact(match[2], root, rootToken(ctx, root));
+	bindRoot(ctx, answer);
+	return answer ?? undefined;
 }
 
 /** A bare `artifact://<id>`, with the id. */
 const ARTIFACT_URL_RE = /^artifact:\/\/(\d+)$/i;
+
+/**
+ * Remember the hold a cell's first read bound, on that cell's own roots.
+ *
+ * A cell started before its artifacts directory existed carries no token. Its
+ * first read takes a hold, and that hold is what every read after it uses:
+ * without this the next read resolves the pathname again, and a directory
+ * replaced between two reads of one cell is read as the cell's own. It is
+ * written on the roots object this run was given, so it binds this cell and
+ * not the next one, which is assigned the directory as it is then.
+ */
+function bindRoot(ctx: HelperContext, answer: SettledArtifactAnswer | null | undefined): void {
+	if (answer?.root) ctx.localRoots()[ARTIFACT_ROOT_TOKEN] ??= answer.root;
+}
+
+/** The hold this cell reads through: the one it was given, or the one its first read bound. */
+function rootToken(ctx: HelperContext, _root: string): string | undefined {
+	return ctx.localRoots()[ARTIFACT_ROOT_TOKEN];
+}
 
 /** The key the cell's roots carry the host's hold on the artifacts directory under. */
 const ARTIFACT_ROOT_TOKEN = "__artifactRoot";
@@ -282,7 +306,7 @@ async function readSettledArtifact(
 	// between the answer and this read. The host still holds that directory
 	// open, so it can read the file this answer is about; what it cannot do is
 	// hand over a name that still means it.
-	const again = await ctx.resolveArtifact?.(id, root, ctx.localRoots()[ARTIFACT_ROOT_TOKEN], true, answer.file);
+	const again = await ctx.resolveArtifact?.(id, root, rootToken(ctx, root), true, answer.file);
 	if (again?.text !== undefined) return again.text;
 	throw new ToolError(`${answer.path} is no longer the artifact this session was told to read`);
 }

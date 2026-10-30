@@ -317,6 +317,33 @@ describe("eval artifact readiness", () => {
 		}
 	});
 
+	it("binds a cell with no hold at its first read, and refuses the directory that replaces it", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-readiness-");
+		const late = path.join(tempDir.path(), "2026-01-01T00-00-03-000Z_late");
+		const session = sessionWithArtifacts(late);
+
+		try {
+			// A cell started before its artifacts directory existed carries no
+			// token. Its first read takes a hold, and the answer says which.
+			fs.mkdirSync(late, { recursive: true });
+			fs.writeFileSync(path.join(late, "8.read.log"), "LATE ORIGINAL");
+			const first = await resolveSettledArtifact(session, "8", late);
+			expect(first?.path).toBe(path.join(late, "8.read.log"));
+			expect(first?.root).toBeString();
+
+			// Everything after reads through that hold. A directory put at the
+			// same name is a different directory, and not this cell's.
+			fs.renameSync(late, `${late}.moved`);
+			fs.mkdirSync(late);
+			fs.writeFileSync(path.join(late, "8.read.log"), "ANOTHER CONVERSATION'S");
+			const second = await resolveSettledArtifact(session, "8", late, first?.root);
+			expect(second?.path).toBe(path.join(late, "8.read.log"));
+			expect(second?.inode).toBe(first?.inode as string);
+		} finally {
+			await releaseArtifactRoots();
+		}
+	});
+
 	it("does not hold a cell for a staging tree that no copy is using", async () => {
 		using tempDir = TempDir.createSync("@omp-eval-readiness-");
 		const destination = path.join(tempDir.path(), "2026-01-01T00-00-01-000Z_destination");

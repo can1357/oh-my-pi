@@ -21,6 +21,16 @@ export interface SettledArtifact {
 	 */
 	file?: string;
 	/**
+	 * The hold this answer was read through, for a cell that was given none.
+	 *
+	 * A cell started before its artifacts directory existed has no token, and
+	 * taking a fresh hold at every read would let the directory change under
+	 * it between two reads — the re-derivation this file exists to remove, one
+	 * level out. Its first read binds it: the token comes back here and the
+	 * reader sends it with everything after.
+	 */
+	root?: string;
+	/**
 	 * The artifact's text, read from the descriptor this process still holds
 	 * on that very file. Sent only when the reader asks for it, which it does
 	 * when what its pathname reaches is no longer what it was answered about.
@@ -258,6 +268,7 @@ export async function resolveSettledArtifact(
 	// hold is taken here instead — and a directory that exists and cannot be
 	// held refuses the read rather than falling back to the name.
 	const effective = token ?? (root ? await holdArtifactRoot(root) : undefined);
+	const bound = token ? undefined : effective;
 	// Checked and taken in the same tick: a hold validated here and used after
 	// an await is a descriptor number the cap may have closed and the kernel
 	// handed to something else by then.
@@ -267,7 +278,8 @@ export async function resolveSettledArtifact(
 	}
 	if (held) held.refs++;
 	try {
-		return await answerFromHold(session, id, root, held, signal, wantText);
+		const answer = await answerFromHold(session, id, root, held, signal, wantText);
+		return answer && bound ? { ...answer, root: bound } : answer;
 	} finally {
 		if (held) await releaseHold(held);
 	}
@@ -326,10 +338,18 @@ async function settledArtifactIn(
 	for (let attempt = 1; ; attempt++) {
 		await whenArtifactCopiesSettle(where, signal);
 		const before = artifactCopyActivity(where);
-		const found = await artifactInDirectory(at, where, id, wantText);
+		const found = await artifactInDirectory(at, where, id);
 		const after = artifactCopyActivity(where);
+		const settled = after.announced === before.announced && after.pending === 0;
+		if (settled && !signal?.aborted) {
+			// Only now, with the answer about to be handed out: a file pinned
+			// for an answer this loop is going to throw away holds a slot
+			// nobody will ever come back for, and a listing overtaken by a
+			// copy is exactly that.
+			return found ? await finalAnswer(found, wantText) : null;
+		}
+		await found?.handle.close();
 		if (signal?.aborted) throw signal.reason ?? new Error("Aborted");
-		if (after.announced === before.announced && after.pending === 0) return found;
 		// Copies arriving back to back with no gap between them would keep a
 		// reader here forever. Saying so is better than answering from a
 		// listing that was out of date before it finished.
@@ -396,10 +416,26 @@ async function artifactElsewhere(
  * answer was made, which nothing standing at the name can take its place in.
  */
 const pinnedFiles = new Map<string, { handle: fs.promises.FileHandle; answer: SettledArtifact; at: number }>();
+/**
+ * The clock a lease is measured on.
+ *
+ * `performance.now()` because a lease is a duration, not a time of day: a
+ * wall clock that steps forward retires a lease a reader still holds, and one
+ * that steps back keeps a lapsed slot out of use. Neither is a thing a reader
+ * did.
+ */
+const leaseClock = (): number => performance.now();
 /** Answers held open for a re-ask at once. */
 const PINNED_FILES_MAX = 32;
-/** How long an answer is a reader's before it counts as abandoned. */
-const PINNED_FILE_LEASE_MS = 30_000;
+/**
+ * How long an answer is its reader's before the slot can be taken back.
+ *
+ * The lease covers one bridge round trip — the reader opens what it was told
+ * about and comes straight back if that is not what it found — so it is a
+ * breath, not a timeout. Long enough and ordinary reads, which never come
+ * back, hold every slot and starve the next session for the length of it.
+ */
+const PINNED_FILE_LEASE_MS = 2_000;
 
 function pinFile(handle: fs.promises.FileHandle, answer: SettledArtifact): string {
 	// An answer already handed to a reader is that reader's until it comes
@@ -408,7 +444,7 @@ function pinFile(handle: fs.promises.FileHandle, answer: SettledArtifact): strin
 	// the ones that go are the ones nobody can still be waiting on, and when
 	// there are none the *new* answer is refused instead.
 	while (pinnedFiles.size >= PINNED_FILES_MAX) {
-		const expired = [...pinnedFiles].find(([, pinned]) => Date.now() - pinned.at >= PINNED_FILE_LEASE_MS);
+		const expired = [...pinnedFiles].find(([, pinned]) => leaseClock() - pinned.at >= PINNED_FILE_LEASE_MS);
 		if (!expired) {
 			void handle.close().catch(() => {});
 			throw new ToolError(
@@ -419,7 +455,7 @@ function pinFile(handle: fs.promises.FileHandle, answer: SettledArtifact): strin
 		void expired[1].handle.close().catch(() => {});
 	}
 	const token = `file-${crypto.randomUUID()}`;
-	pinnedFiles.set(token, { handle, answer, at: Date.now() });
+	pinnedFiles.set(token, { handle, answer, at: leaseClock() });
 	return token;
 }
 
@@ -438,12 +474,24 @@ async function textFromPinnedFile(file: string): Promise<SettledArtifact | null>
 }
 
 /** The `<id>.<tool>.log` file in the directory reached by `at`, with what it is. */
-async function artifactInDirectory(
-	at: string,
-	where: string,
-	id: string,
-	wantText = false,
-): Promise<SettledArtifact | null> {
+interface OpenArtifact {
+	answer: SettledArtifact;
+	handle: fs.promises.FileHandle;
+}
+
+/** The answer to hand out: its bytes if they were asked for, otherwise a pin on the file. */
+async function finalAnswer(found: OpenArtifact, wantText: boolean): Promise<SettledArtifact> {
+	if (wantText) {
+		try {
+			return { ...found.answer, text: await found.handle.readFile("utf8") };
+		} finally {
+			await found.handle.close();
+		}
+	}
+	return { ...found.answer, file: pinFile(found.handle, found.answer) };
+}
+
+async function artifactInDirectory(at: string, where: string, id: string): Promise<OpenArtifact | null> {
 	let names: string[];
 	try {
 		names = await fs.promises.readdir(at);
@@ -455,35 +503,42 @@ async function artifactInDirectory(
 	if (name === undefined) return null;
 	try {
 		// Non-blocking, because an ordinary open of a fifo waits for a writer
-		// before anything can be checked: a name listed a moment ago can be
-		// something that does not answer an open at all.
-		const handle = await fs.promises.open(`${at}/${name}`, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+		// before anything can be checked; `O_NOFOLLOW` because a symlink at
+		// the name is a route to a file this directory does not hold, and
+		// following it would stat the thing it points at and call it ours.
+		const handle = await fs.promises.open(
+			`${at}/${name}`,
+			fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW,
+		);
 		const stat = await handle.stat({ bigint: true });
 		if (!stat.isFile()) {
 			await handle.close();
-			return null;
+			// The id *is* here; what answers to it is not a file this
+			// directory can hand over. That is a refusal, not a miss: looking
+			// elsewhere would answer this session's number from another
+			// conversation's directory, which is the one thing the name being
+			// taken must never buy.
+			throw new ToolError(`artifact://${id} in ${where} is not a regular file`);
 		}
-		const answer: SettledArtifact = {
-			path: path.join(path.resolve(where), name),
-			device: String(stat.dev),
-			inode: String(stat.ino),
+		// Open, and left open for the caller to decide: the bytes are read and
+		// the pin is taken only when this is the answer being handed out.
+		return {
+			answer: {
+				path: path.join(path.resolve(where), name),
+				device: String(stat.dev),
+				inode: String(stat.ino),
+			},
+			handle,
 		};
-		if (wantText) {
-			// Read through the descriptor, which is the file this answer is
-			// about however the name has been reused since.
-			try {
-				answer.text = await handle.readFile("utf8");
-			} finally {
-				await handle.close();
-			}
-			return answer;
-		}
-		// Kept open for the reader that finds the name no longer reaches it.
-		answer.file = pinFile(handle, answer);
-		return answer;
 	} catch (error) {
-		if (!isEnoent(error)) throw error;
-		return null;
+		if (error instanceof ToolError) throw error;
+		if (isEnoent(error)) return null;
+		// `ELOOP` from the `O_NOFOLLOW`, `EACCES`, anything else: the name is
+		// taken by something this directory cannot hand over, which is the
+		// same answer as above.
+		throw new ToolError(
+			`artifact://${id} in ${where} could not be opened: ${error instanceof Error ? error.message : String(error)}`,
+		);
 	}
 }
 

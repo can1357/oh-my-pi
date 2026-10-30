@@ -32,6 +32,8 @@ if "__omp_prelude_loaded__" not in globals():
     _OMP_BARE_ARTIFACT_RE = re.compile(r"^artifact://\d+$", re.IGNORECASE)
     # `<id>` and whatever selector follows it (`:raw`, `:5-9`, `:raw:5-9`).
     _OMP_ARTIFACT_SELECTOR_RE = re.compile(r"^(\d+)(:.*)$")
+    # Holds bound at a cell's first read, by (cell, artifacts directory).
+    _OMP_BOUND_ROOTS: dict = {}
 
     def _omp_url_roots() -> dict:
         """On-disk roots for internal-URL schemes, keyed by scheme.
@@ -94,6 +96,15 @@ if "__omp_prelude_loaded__" not in globals():
         root = roots.get("artifact")
         if not root:
             return None
+        # A cell started before its artifacts directory existed carries no
+        # token. Its first read takes a hold, and that hold is what every read
+        # after it uses: without this the next read resolves the pathname
+        # again, and a directory replaced between two reads of one cell is
+        # read as the cell's own.
+        _run = globals().get("__omp_current_run_id__")
+        _cell = _run() if callable(_run) else None
+        _bind_key = (_cell, root)
+        token = roots.get("__artifactRoot") or _OMP_BOUND_ROOTS.get(_bind_key)
         answer = _bridge_call(
             "__artifacts_ready__",
             {
@@ -106,12 +117,17 @@ if "__omp_prelude_loaded__" not in globals():
                 # The hold this cell was given on that directory: the host
                 # answers from the directory the cell was started on, not from
                 # whatever its pathname reaches when the read lands.
-                "token": roots.get("__artifactRoot"),
+                "token": token,
             },
         )
         details = answer.get("details") if isinstance(answer, dict) else None
         if not isinstance(details, dict) or not isinstance(details.get("path"), str):
             return None
+        bound = details.get("root")
+        if isinstance(bound, str) and bound:
+            # This cell's binding, not the kernel's: the next cell is assigned
+            # the directory as it is then.
+            _OMP_BOUND_ROOTS.setdefault(_bind_key, bound)
         return details
 
     def _pinned_artifact_uri(path: str | Path) -> str:
