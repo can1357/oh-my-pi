@@ -212,6 +212,7 @@ const DETACHED_DRAFT_COMMANDS = new Set([
 	"omfg",
 	"handoff",
 	"cleanse",
+	"queue",
 ]);
 
 function looksLikePastedShellPrompt(code: string): boolean {
@@ -1838,13 +1839,13 @@ export class InputController {
 		// A follow-up comes back as the `/queue` command it was sent with, so the
 		// queue stays explicit: Enter re-queues it through the same command path,
 		// and deleting the prefix turns the draft into an ordinary steer. Steering
-		// entries need no prefix because Enter already steers.
+		// entries need no prefix because Enter already steers. A merge with ordinary
+		// text cannot express two deliveries at once, so it keeps the plain text and
+		// Enter steers the merged draft, as the Esc restore-all path does.
 		const currentText = this.ctx.editor.getText();
 		const currentBody = this.#queueCommandBody(currentText);
-		const entry =
-			popped.mode === "followUp" || currentBody !== undefined
-				? { ...popped, text: `/queue ${popped.text}` }
-				: popped;
+		const mergeable = currentBody !== undefined || currentText.trim() === "";
+		const entry = popped.mode === "followUp" && mergeable ? { ...popped, text: `/queue ${popped.text}` } : popped;
 		this.#restoreEntriesToEditor([entry], currentBody);
 		this.ctx.showStatus("Restored last queued message to editor");
 	}
@@ -1990,6 +1991,20 @@ export class InputController {
 			return;
 		}
 
+		// A queued `/skill:<name>` is a prompt template, not literal text: dispatch it
+		// through the skill path so the model never receives the raw command and a
+		// restored follow-up keeps the mode it was queued under.
+		if (isKnownSkillCommand(this.ctx, text)) {
+			await this.#invokeSkillCommand(
+				text,
+				"followUp",
+				options.images,
+				options.imageLinks,
+				options.detachedText !== undefined,
+			);
+			return;
+		}
+
 		const splitMessages = splitQueuedMessages(text);
 		if (splitMessages.length === 0 && !options.images?.length) {
 			if (options.detachedText === undefined) this.ctx.editor.clearDraft();
@@ -2107,9 +2122,6 @@ export class InputController {
 		let imageLinks =
 			images && this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
 		if (!text && !images) return;
-		// The follow-up key is already a follow-up: a restored `/queue <message>`
-		// draft drops the command instead of sending its text to the model.
-		text = this.#queueCommandBody(text) ?? text;
 
 		// Focused subagent session: follow-ups go to it; non-chat input is gated.
 		if (this.ctx.focusedAgentId && !this.ctx.approvalOwnsComposer) {
@@ -2170,6 +2182,15 @@ export class InputController {
 		// Ctrl+Enter detached the draft before the first await, so a side command
 		// has no editor state left to release; a render failure hands it back.
 		const restoreSideDraft = { restore: () => restoreDetachedDraft(this.ctx.editor, text, images, imageLinks) };
+
+		// A `/queue <message>` draft (typed, or restored by the dequeue key) runs the
+		// queue command with this detached draft: the compaction branch below would
+		// otherwise deliver the command as literal text.
+		const queuedBody = this.#queueCommandBody(text);
+		if (queuedBody !== undefined) {
+			await this.ctx.handleQueueCommand(queuedBody, { text, images, imageLinks });
+			return;
+		}
 
 		// Compaction first: while compacting, free text gets queued via
 		// `queueCompactionMessage`, and `/skill:*` rides the same queue so a

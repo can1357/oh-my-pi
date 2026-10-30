@@ -1636,7 +1636,10 @@ describe("InputController dequeue delivery mode", () => {
 		editor.setText("/queue queued follow-up, edited");
 		await editor.onSubmit!("/queue queued follow-up, edited");
 		// The visible command re-enters the queue path; nothing steers the running turn.
-		expect(spies.handleQueueCommand).toHaveBeenCalledWith("queued follow-up, edited", undefined);
+		expect(spies.handleQueueCommand).toHaveBeenCalledWith(
+			"queued follow-up, edited",
+			expect.objectContaining({ text: "/queue queued follow-up, edited" }),
+		);
 		expect(spies.prompt).not.toHaveBeenCalled();
 	});
 
@@ -1701,7 +1704,62 @@ describe("InputController dequeue delivery mode", () => {
 		expect(spies.prompt).toHaveBeenCalledWith("plain steer", { streamingBehavior: "steer", images: undefined });
 	});
 
-	it("drops the prefix when the follow-up key submits a restored draft", async () => {
+	it("queues a /queue draft through the queue path while compacting", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		const queueCompactionMessage = vi.fn();
+		Object.assign(ctx, { queueCompactionMessage });
+		Object.assign(ctx.session, { isCompacting: true });
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+
+		editor.setText("/queue body");
+		await controller.handleFollowUp();
+
+		expect(spies.handleQueueCommand).toHaveBeenCalledWith("body", expect.objectContaining({ text: "/queue body" }));
+		expect(queueCompactionMessage).not.toHaveBeenCalled();
+	});
+
+	it("keeps a mixed steer and follow-up merge as plain text", async () => {
+		const { InputController, ctx, editor } = await createContext();
+		const queue = [
+			{ text: "follow-up", mode: "followUp" as const },
+			{ text: "steer text", mode: "steer" as const },
+		];
+		Object.assign(ctx.session, { popLastQueuedMessage: () => queue.pop() });
+		const controller = new InputController(ctx);
+
+		controller.handleDequeue();
+		expect(editor.getText()).toBe("steer text");
+		// A merge with ordinary text cannot carry two deliveries; it stays plain.
+		controller.handleDequeue();
+		expect(editor.getText()).toBe("follow-up\n\nsteer text");
+	});
+
+	it("restores the /queue draft when queueing fails", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		const controller = new InputController(ctx);
+		Object.assign(ctx, {
+			handleQueueCommand: (message: string, detached?: unknown) =>
+				controller.handleQueueCommand(message, detached as never),
+		});
+		Object.assign(ctx.session, {
+			isStreaming: true,
+			followUp: vi.fn(async () => {
+				throw new Error("queue full");
+			}),
+		});
+		controller.setupEditorSubmitHandler();
+
+		editor.setText("/queue body");
+		// The real editor resets before onSubmit; the stub keeps the text.
+		editor.setText("");
+		await editor.onSubmit!("/queue body");
+
+		expect(spies.showError).toHaveBeenCalledWith("queue full");
+		expect(editor.getText()).toBe("/queue body");
+	});
+
+	it("queues a restored draft through /queue when the follow-up key submits it", async () => {
 		const { InputController, ctx, editor, spies } = await createContext();
 		(ctx.session as unknown as { isStreaming: boolean }).isStreaming = true;
 		Object.assign(ctx.session, {
@@ -1713,10 +1771,11 @@ describe("InputController dequeue delivery mode", () => {
 		expect(editor.getText()).toBe("/queue queued follow-up");
 
 		await controller.handleFollowUp();
-		expect(spies.prompt).toHaveBeenCalledWith("queued follow-up", {
-			streamingBehavior: "followUp",
-			images: undefined,
-		});
+		expect(spies.handleQueueCommand).toHaveBeenCalledWith(
+			"queued follow-up",
+			expect.objectContaining({ text: "/queue queued follow-up" }),
+		);
+		expect(spies.prompt).not.toHaveBeenCalled();
 	});
 
 	it("restores a compaction-queue follow-up as its /queue command", async () => {
@@ -1731,6 +1790,9 @@ describe("InputController dequeue delivery mode", () => {
 		expect(editor.getText()).toBe("/queue held follow-up");
 
 		await editor.onSubmit!("/queue held follow-up");
-		expect(spies.handleQueueCommand).toHaveBeenCalledWith("held follow-up", undefined);
+		expect(spies.handleQueueCommand).toHaveBeenCalledWith(
+			"held follow-up",
+			expect.objectContaining({ text: "/queue held follow-up" }),
+		);
 	});
 });

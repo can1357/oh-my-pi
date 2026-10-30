@@ -126,11 +126,15 @@ function createStubInputControllerContext(opts: {
 			prompt,
 			buildUserSkillPrompt: buildSkillPromptMessage,
 			promptCustomMessage,
+			customCommands: [],
+			promptTemplates: [],
+			slashCommands: [],
 		},
 		get viewSession() {
 			return (this as typeof ctx).session;
 		},
 		showError,
+		showStatus: vi.fn(),
 		handleGoalModeCommand,
 		goalModeEnabled: false,
 		updatePendingMessagesDisplay,
@@ -250,6 +254,33 @@ describe("InputController skill queue chip metadata", () => {
 
 		expect(setLoopPrompt).toHaveBeenCalledWith("/skill:test-skill arg1 arg2");
 		expect(queueCompactionMessage).toHaveBeenCalledWith("/skill:test-skill arg1 arg2", "steer", undefined);
+	});
+
+	it("restores a queued skill follow-up as /queue and dispatches the skill", async () => {
+		const { ctx, editor, promptCustomMessage } = createStubInputControllerContext({
+			skillCommands,
+			isStreaming: true,
+		});
+		const controller = new InputController(ctx);
+		Object.assign(ctx.session, {
+			popLastQueuedMessage: () => ({ text: "/skill:test-skill arg1", mode: "followUp" }),
+		});
+		Object.assign(ctx, {
+			handleQueueCommand: (message: string, detached?: unknown) =>
+				controller.handleQueueCommand(message, detached as never),
+		});
+		controller.setupEditorSubmitHandler();
+
+		controller.handleDequeue();
+		expect(editor.getText()).toBe("/queue /skill:test-skill arg1");
+
+		// The real editor resets before onSubmit; the stub keeps the text.
+		editor.setText("");
+		await editor.onSubmit!("/queue /skill:test-skill arg1");
+
+		// The raw command never reaches the model; the skill prompt is queued as a follow-up.
+		expect(promptCustomMessage).toHaveBeenCalledTimes(1);
+		expect(promptCustomMessage.mock.calls[0]?.[1]).toMatchObject({ streamingBehavior: "followUp" });
 	});
 
 	it("passes slash-form queueChipText for streaming skill follow-ups", async () => {
