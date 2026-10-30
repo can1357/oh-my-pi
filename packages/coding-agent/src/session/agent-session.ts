@@ -2453,6 +2453,7 @@ export class AgentSession implements SettingsScope {
 			setActiveToolNames: config.setActiveToolNames,
 			baseSystemPrompt: this.agent.state.systemPrompt,
 			skills: config.skills,
+			skillDescriptions: this.#skillDescriptions,
 			skillWarnings: config.skillWarnings,
 			skillsSettings: config.skillsSettings,
 			skillsReloadable: config.skillsReloadable,
@@ -2778,7 +2779,22 @@ export class AgentSession implements SettingsScope {
 			},
 			resetAdvisorRuntimes: (reason, options) => this.#advisors.resetAllRuntimes(reason, options),
 			rebaseAdvisorPrefix: reason => this.#advisors.rebaseDeliveredPrefixes(reason),
-			rebaseAfterCompaction: () => this.#stats.rebaseAfterCompaction(),
+			rebaseAfterCompaction: () => {
+				// Compaction may remove the only announcement of a catalog delta while
+				// keeping the cached base. Restore it before an autonomous continuation.
+				const notice = this.#tools.takeSkillDeltaNotice();
+				if (notice) {
+					this.agent.appendMessage(notice);
+					this.sessionManager.appendCustomMessageEntry(
+						notice.customType,
+						notice.content,
+						notice.display,
+						notice.details,
+						notice.attribution,
+					);
+				}
+				this.#stats.rebaseAfterCompaction();
+			},
 			recordAnchoredHistoryRewrite: tokensRemoved => this.#stats.recordAnchoredHistoryRewrite(tokensRemoved),
 			getContextBreakdown: options => this.getContextBreakdown(options),
 			getContextUsage: options => this.getContextUsage(options),
@@ -7100,9 +7116,9 @@ export class AgentSession implements SettingsScope {
 		return this.#tools.getSelectedMCPToolNames();
 	}
 
-	/** Rediscovers reloadable skills and refreshes prompt metadata. */
-	refreshSkills(): Promise<void> {
-		return this.#tools.refreshSkills();
+	/** Rediscovers skills; agent-driven calls defer the cached catalog and announce the delta instead. */
+	refreshSkills(options?: { deferSystemPrompt?: boolean; changedSkillName?: string }): Promise<void> {
+		return this.#tools.refreshSkills(options);
 	}
 
 	/**
@@ -7117,7 +7133,7 @@ export class AgentSession implements SettingsScope {
 			skills: this.skills,
 			refreshSkills: reloadable
 				? async () => {
-						await this.refreshSkills();
+						await this.refreshSkills({ deferSystemPrompt: true });
 						return this.skills;
 					}
 				: undefined,
@@ -8992,7 +9008,8 @@ export class AgentSession implements SettingsScope {
 				: undefined;
 			const evalPreludeNotice = isUserQueuedMessage(message) ? this.#tools.takeEvalPreludeNotice() : undefined;
 			const sessionAgentNotice = isUserQueuedMessage(message) ? this.#tools.takeSessionAgentNotice() : undefined;
-			if (xdevMountNotice || toolRosterNotice || evalPreludeNotice || sessionAgentNotice) {
+			const skillDeltaNotice = isUserQueuedMessage(message) ? this.#tools.takeSkillDeltaNotice() : undefined;
+			if (xdevMountNotice || toolRosterNotice || evalPreludeNotice || sessionAgentNotice || skillDeltaNotice) {
 				messages.splice(
 					xdevMountNoticeIndex,
 					0,
@@ -9000,6 +9017,7 @@ export class AgentSession implements SettingsScope {
 					...(toolRosterNotice ? [toolRosterNotice] : []),
 					...(evalPreludeNotice ? [evalPreludeNotice] : []),
 					...(sessionAgentNotice ? [sessionAgentNotice] : []),
+					...(skillDeltaNotice ? [skillDeltaNotice] : []),
 				);
 			}
 

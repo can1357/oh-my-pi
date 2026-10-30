@@ -48,7 +48,7 @@
 3. If `skill` is absent, the tool returns after the memory write/queue.
 4. If `skill.action == "create"`, the tool checks the lowercased/validated name against active authored skills. A conflict returns an error result after the lesson has already been stored or queued.
 5. Otherwise, it calls `writeManagedSkill(...)`. Skill-write failure is rethrown as a partial outcome because lesson persistence already happened.
-6. Unlike `manage_skill`, `learn` does not call the session's `refreshSkills` callback after writing. The managed skill is discovered on a later skill refresh/session.
+6. After a successful skill write, `learn` refreshes the active runtime skill registry immediately. A hidden notice on the next user request announces the change without rebuilding the cached system prompt; its listing catches up at the next unrelated rebuild or session start/resume, not at compaction.
 
 ## Modes / Variants
 
@@ -64,7 +64,7 @@
    - Managed skills write `<agent-dir>/managed-skills/<sanitized-name>/SKILL.md`; the default agent directory is `~/.omp/agent`.
    - Mnemopi writes its scoped SQLite database.
 - Network: Hindsight queue flushes to the configured server later. Mnemopi can schedule configured embedding/fact-extraction provider work after the synchronous row write; local file-backed storage itself is offline.
-- Session state: reads backend state, settings, cwd, and session id. A skill created here is not immediately injected into the active skill list.
+- Session state: reads backend state, settings, cwd, and session id. A skill created here is immediately available through `skill://` and skill commands.
 - Background work: Hindsight retention and Mnemopi extraction/embedding can continue after the tool result.
 
 ## Limits & Caps
@@ -90,4 +90,4 @@
 - Use this tool sparingly. One precise reusable lesson is better than several vague memories.
 - Put `skill` only on repeatable procedures; ordinary facts should remain memory-only.
 - Managed skill frontmatter is generated from the normalized name and sanitized description; `body` must not include frontmatter.
-- Managed skills are isolated from authored skills. `learn` writes them for a later discovery refresh; use `manage_skill` when the active session must refresh immediately after a mutation.
+- Managed skills are isolated from authored skills. Both `learn` and `manage_skill` refresh runtime availability immediately and announce changes without rewriting the cached system-prompt listing.

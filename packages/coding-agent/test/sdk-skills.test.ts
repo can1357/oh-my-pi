@@ -1,7 +1,11 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
+import { type Api, type Context, clearCustomApis, registerCustomApi } from "@oh-my-pi/pi-ai";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getActiveSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
@@ -13,6 +17,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
+import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 import { cfgAutolearnEnabled } from "@oh-my-pi/pi-coding-agent/autolearn/settings";
 import { cfgSkillsCustomDirectories } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
@@ -118,7 +123,39 @@ Loaded via symbolic link.
 	};
 	const removeTempHome = cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome }));
 
+	const captureSkillRequests = () => {
+		const api = "test-sdk-skill-notices";
+		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!bundled) throw new Error("Expected bundled skill-notice test model");
+		const model = { ...bundled, api: api as Api, provider: "sdk-skill-notices" };
+		const requests: Context[] = [];
+		sharedAuthStorage.keys.setRuntime(model.provider, "test-key");
+		registerCustomApi(api, (_model, context) => {
+			requests.push({ ...context, messages: structuredClone(context.messages) });
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage("ok");
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		});
+		return { model, requests };
+	};
+
+	const skillNotices = (request: Context | undefined): string[] =>
+		(request?.messages ?? [])
+			.map(message =>
+				typeof message.content === "string"
+					? message.content
+					: message.content
+							.flatMap(part => (part.type === "text" && "text" in part ? [part.text] : []))
+							.join("\n"),
+			)
+			.filter(text => text.includes('<system-notice id="skill-delta">'));
+
 	afterEach(async () => {
+		clearCustomApis();
+		vi.restoreAllMocks();
 		for (const session of sessions.splice(0)) {
 			if (!session.isDisposed) await session.dispose();
 		}
@@ -295,12 +332,16 @@ This skill is added after session creation.
 		setAgentDir(managedAgentDir);
 		const settings = createIsolatedSkillsSettings();
 		cfgAutolearnEnabled.set(settings, true);
+		const { model, requests } = captureSkillRequests();
 		const { session } = await createSession({
 			cwd: tempDir,
 			agentDir: managedAgentDir,
 			sessionManager: SessionManager.inMemory(tempDir),
 			modelRegistry: sharedModelRegistry,
 			settings,
+			model,
+			enableMCP: false,
+			enableLsp: false,
 		});
 		let commandMetadataChanges = 0;
 		const unsubscribeCommandMetadata = session.subscribeCommandMetadataChanged(() => {
@@ -308,6 +349,9 @@ This skill is added after session creation.
 		});
 
 		try {
+			await session.sendUserMessage("Start the session before creating a skill.");
+			const initialPrompt = [...session.agent.state.systemPrompt];
+			const initialCacheKey = session.agent.promptCacheKey;
 			const manageSkill = session.getToolByName("manage_skill");
 			expect(manageSkill).toBeDefined();
 			await manageSkill!.execute("manage-skill-create", {
@@ -320,13 +364,31 @@ This skill is added after session creation.
 			expect(session.skills.some(skill => skill.name === "runtime-managed-skill")).toBe(true);
 			expect(commandMetadataChanges).toBe(1);
 			expect(getActiveSkills().some(skill => skill.name === "runtime-managed-skill")).toBe(true);
-			expect(session.agent.state.systemPrompt.join("\n")).toContain("runtime-managed-skill");
+			expect(session.agent.state.systemPrompt).toEqual(initialPrompt);
+			expect(session.agent.promptCacheKey).toBe(initialCacheKey);
 			const readSkill = session.getToolByName("read");
 			expect(readSkill).toBeDefined();
 			const readResult = await readSkill!.execute("read-managed-skill", { path: "skill://runtime-managed-skill" });
 			expect(
 				readResult.content.some(part => part.type === "text" && part.text.includes("# Runtime Managed Skill")),
 			).toBe(true);
+			await session.sendUserMessage("Use the newly available skill.");
+			expect(skillNotices(requests.at(-1))).toHaveLength(1);
+			expect(skillNotices(requests.at(-1))[0]).toContain("runtime-managed-skill");
+			expect(skillNotices(requests.at(-1))[0]).toContain("Created by manage_skill during the session.");
+			await session.sendUserMessage("Continue without changing skills.");
+			expect(skillNotices(requests.at(-1))).toHaveLength(1);
+
+			// Body-only updates must announce a change even when the listing text is identical.
+			await manageSkill!.execute("manage-skill-update", {
+				action: "update",
+				name: "runtime-managed-skill",
+				description: "Created by manage_skill during the session.",
+				body: "# Revised Runtime Managed Skill\n\nUse the revised procedure.",
+			});
+			expect(session.agent.state.systemPrompt).toEqual(initialPrompt);
+			await session.sendUserMessage("Use the updated procedure.");
+			expect(skillNotices(requests.at(-1))).toHaveLength(2);
 
 			await manageSkill!.execute("manage-skill-delete", {
 				action: "delete",
@@ -334,14 +396,127 @@ This skill is added after session creation.
 			});
 			expect(session.skills.some(skill => skill.name === "runtime-managed-skill")).toBe(false);
 			expect(getActiveSkills().some(skill => skill.name === "runtime-managed-skill")).toBe(false);
-			expect(session.agent.state.systemPrompt.join("\n")).not.toContain("runtime-managed-skill");
-			expect(commandMetadataChanges).toBe(2);
+			expect(session.agent.state.systemPrompt).toEqual(initialPrompt);
+			expect(session.agent.promptCacheKey).toBe(initialCacheKey);
+			expect(commandMetadataChanges).toBe(3);
 			await expect(
 				readSkill!.execute("read-deleted-managed-skill", { path: "skill://runtime-managed-skill" }),
 			).rejects.toThrow(/Unknown skill/);
+			expect(session.agent.state.systemPrompt).toEqual(initialPrompt);
+			await session.sendUserMessage("Continue after deleting the skill.");
+			expect(skillNotices(requests.at(-1))).toHaveLength(3);
+			expect(skillNotices(requests.at(-1)).at(-1)).toContain("No longer available; do not load:");
+			expect(skillNotices(requests.at(-1)).at(-1)).toContain("runtime-managed-skill");
+
+			await manageSkill!.execute("transient-create", {
+				action: "create",
+				name: "transient-managed-skill",
+				description: "Never announced.",
+				body: "Temporary procedure.",
+			});
+			await manageSkill!.execute("transient-delete", { action: "delete", name: "transient-managed-skill" });
+			await session.sendUserMessage("Continue after a cancelled skill delta.");
+			expect(skillNotices(requests.at(-1))).toHaveLength(3);
+
+			await manageSkill!.execute("catchup-create", {
+				action: "create",
+				name: "catchup-managed-skill",
+				description: "Absorbed by an unrelated prompt rebuild.",
+				body: "A persistent procedure.",
+			});
+			await session.refreshBaseSystemPrompt();
+			expect(session.agent.state.systemPrompt.join("\n")).toContain("catchup-managed-skill");
+			await session.sendUserMessage("Continue with the refreshed base.");
+			expect(skillNotices(requests.at(-1))).toHaveLength(3);
+			// Old delivered add/update notices must not resurrect the deleted skill
+			// in the new base's knowledge snapshot.
+			await session.sendUserMessage("Continue again.");
+			expect(skillNotices(requests.at(-1))).toHaveLength(3);
 		} finally {
 			await session.dispose();
 			unsubscribeCommandMetadata();
+			setAgentDir(originalAgentDir);
+		}
+	});
+
+	it("re-announces skill deltas after compaction until a base rebuild absorbs them", async () => {
+		const originalAgentDir = getAgentDir();
+		const managedAgentDir = path.join(tempHomeDir, ".omp", "agent");
+		setAgentDir(managedAgentDir);
+		const { model, requests } = captureSkillRequests();
+		const settings = Settings.isolated({
+			"skills.enabled": true,
+			"skills.enableCodexUser": false,
+			"skills.enableClaudeUser": false,
+			"skills.enableClaudeProject": false,
+			"skills.enablePiUser": false,
+			"skills.enablePiProject": true,
+			"autolearn.enabled": true,
+			"compaction.enabled": false,
+			"compaction.keepRecentTokens": 1,
+			"compaction.methodOrder": ["soft"],
+			"compaction.experimentalContextManagement": false,
+		});
+		const { session } = await createSession({
+			cwd: tempDir,
+			agentDir: managedAgentDir,
+			sessionManager: SessionManager.inMemory(tempDir),
+			modelRegistry: sharedModelRegistry,
+			settings,
+			model,
+			enableMCP: false,
+			enableLsp: false,
+		});
+		try {
+			await session.sendUserMessage("Start a session with a cached catalog.");
+			const initialPrompt = [...session.agent.state.systemPrompt];
+			const manageSkill = session.getToolByName("manage_skill")!;
+			await manageSkill.execute("compaction-skill-create", {
+				action: "create",
+				name: "compaction-managed-skill",
+				description: "A skill absent from the cached base.",
+				body: "Keep this procedure available after compaction.",
+			});
+			await session.sendUserMessage("Use the skill before compaction.");
+			const originalNotice = session.agent.state.messages.find(
+				message => message.role === "custom" && message.customType === "skill-delta-notice",
+			);
+			expect(originalNotice).toBeDefined();
+			await session.sendUserMessage("A later turn keeps the original notice outside the retained tail.");
+			const compact = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+				summary: "Compacted conversation.",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			}));
+			await session.compact();
+			expect(compact).toHaveBeenCalledTimes(1);
+			expect(session.agent.state.systemPrompt).toEqual(initialPrompt);
+			// The replacement summary deliberately carries no skill knowledge.
+			// Restoration must already be in context before any continuation, not
+			// only when another user prompt happens to arrive.
+			const notices = session.agent.state.messages.filter(
+				message => message.role === "custom" && message.customType === "skill-delta-notice",
+			);
+			expect(notices).toHaveLength(1);
+			expect(notices[0]).not.toBe(originalNotice);
+			await session.sendUserMessage("Continue with the compacted context.");
+			expect(skillNotices(requests.at(-1))).toHaveLength(1);
+			expect(skillNotices(requests.at(-1))[0]).toContain("compaction-managed-skill");
+
+			await session.refreshBaseSystemPrompt();
+			expect(session.systemPrompt.join("\n")).toContain("compaction-managed-skill");
+			await session.sendUserMessage("The new base absorbs the delivered delta.");
+			expect(skillNotices(requests.at(-1))).toHaveLength(1);
+			await manageSkill.execute("compaction-skill-delete", { action: "delete", name: "compaction-managed-skill" });
+			await session.sendUserMessage("The rebuilt catalog's skill is now unavailable.");
+			expect(skillNotices(requests.at(-1))).toHaveLength(2);
+			expect(skillNotices(requests.at(-1)).at(-1)).toContain("No longer available; do not load:");
+			await session.refreshBaseSystemPrompt();
+			await session.sendUserMessage("Do not replay stale notices from an older base.");
+			expect(skillNotices(requests.at(-1))).toHaveLength(2);
+		} finally {
+			await session.dispose();
 			setAgentDir(originalAgentDir);
 		}
 	});
@@ -360,15 +535,22 @@ This skill is added after session creation.
 			"autolearn.enabled": true,
 			"memory.backend": "local",
 		});
+		const { model, requests } = captureSkillRequests();
 		const { session } = await createSession({
 			cwd: tempDir,
 			agentDir: managedAgentDir,
 			sessionManager: SessionManager.inMemory(tempDir),
 			modelRegistry: sharedModelRegistry,
 			settings,
+			model,
+			enableMCP: false,
+			enableLsp: false,
 		});
 
 		try {
+			await session.sendUserMessage("Start the session before learning a procedure.");
+			const initialPrompt = [...session.agent.state.systemPrompt];
+			const initialCacheKey = session.agent.promptCacheKey;
 			const learn = session.getToolByName("learn");
 			expect(learn).toBeDefined();
 			await learn!.execute("learn-skill-create", {
@@ -383,13 +565,28 @@ This skill is added after session creation.
 
 			expect(session.skills.some(skill => skill.name === "learned-managed-skill")).toBe(true);
 			expect(getActiveSkills().some(skill => skill.name === "learned-managed-skill")).toBe(true);
-			expect(session.agent.state.systemPrompt.join("\n")).toContain("learned-managed-skill");
+			expect(session.agent.state.systemPrompt).toEqual(initialPrompt);
+			expect(session.agent.promptCacheKey).toBe(initialCacheKey);
 			const readSkill = session.getToolByName("read");
 			expect(readSkill).toBeDefined();
 			const readResult = await readSkill!.execute("read-learned-skill", { path: "skill://learned-managed-skill" });
 			expect(
 				readResult.content.some(part => part.type === "text" && part.text.includes("# Learned Managed Skill")),
 			).toBe(true);
+			await session.sendUserMessage("Use the learned procedure.");
+			expect(skillNotices(requests.at(-1))).toHaveLength(1);
+			expect(skillNotices(requests.at(-1))[0]).toContain("learned-managed-skill");
+			expect(skillNotices(requests.at(-1))[0]).toContain("Minted by learn during the active session.");
+			const manageSkill = session.getToolByName("manage_skill")!;
+			await manageSkill.execute("delete-learned-skill", { action: "delete", name: "learned-managed-skill" });
+			expect(session.agent.state.systemPrompt).toEqual(initialPrompt);
+			await expect(
+				readSkill!.execute("read-deleted-learned-skill", { path: "skill://learned-managed-skill" }),
+			).rejects.toThrow(/Unknown skill/);
+			await session.sendUserMessage("Continue after removing the learned procedure.");
+			expect(skillNotices(requests.at(-1))).toHaveLength(2);
+			expect(skillNotices(requests.at(-1)).at(-1)).toContain("No longer available; do not load:");
+			expect(skillNotices(requests.at(-1)).at(-1)).toContain("learned-managed-skill");
 		} finally {
 			await session.dispose();
 			setAgentDir(originalAgentDir);
