@@ -115,6 +115,19 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 		}
 	});
 
+	test("keeps a broker declared while another declaration of it is withdrawn", async () => {
+		const url = "https://nested-broker.example";
+		using _outer = allowAuthBrokerForTests(url);
+		const inner = allowAuthBrokerForTests(url);
+		inner[Symbol.dispose]();
+		// Withdrawing the same declaration twice withdraws it once.
+		inner[Symbol.dispose]();
+		const env = { ...SUPPRESS_AUTH_BROKER_ENV, OMP_AUTH_BROKER_URL: url, OMP_AUTH_BROKER_TOKEN: "nested-token" };
+		await withEnv(env, async () => {
+			await expect(resolveAuthBrokerConfig({ agentDir })).resolves.toEqual({ url, token: "nested-token" });
+		});
+	});
+
 	test("strictly validates effective policy overrides without parsing superseded main-config values", async () => {
 		await Bun.write(path.join(agentDir, "config.yml"), ["auth:", "  accountPolicies: null", ""].join("\n"));
 		const invalidPolicies = [

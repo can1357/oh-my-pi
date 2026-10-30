@@ -61,8 +61,13 @@ export function getAuthBrokerTokenFilePath(): string {
 	return path.join(getConfigRootDir(), "auth-broker.token");
 }
 
-/** Origins this test process declared through {@link allowAuthBrokerForTests}. */
-const testBrokerOrigins = new Set<string>();
+/**
+ * Live declarations made through {@link allowAuthBrokerForTests}, counted per origin, so a
+ * broker stays declared until every declaration of it is withdrawn.
+ */
+const testBrokerDeclarations = new Map<string, number>();
+/** Bumped by every declaration and withdrawal; see {@link getAuthBrokerDeclarationGeneration}. */
+let testBrokerDeclarationGeneration = 0;
 
 /**
  * Let this test process connect to an auth broker it set up itself.
@@ -76,18 +81,40 @@ const testBrokerOrigins = new Set<string>();
  * declaration lives in this process: a child does not inherit it.
  *
  * @param broker URL of the broker; only its origin counts.
- * @returns a handle that withdraws the declaration when disposed.
+ * @returns a handle that withdraws this declaration when disposed. The broker stays
+ *   declared while another declaration of it is still live.
  * @throws outside the test runtime.
  */
 export function allowAuthBrokerForTests(broker: string | URL): Disposable {
 	if (!isBunTestRuntime()) throw new Error("allowAuthBrokerForTests is test-only");
 	const { origin } = new URL(broker);
-	testBrokerOrigins.add(origin);
+	testBrokerDeclarations.set(origin, (testBrokerDeclarations.get(origin) ?? 0) + 1);
+	testBrokerDeclarationGeneration++;
+	let withdrawn = false;
 	return {
 		[Symbol.dispose]() {
-			testBrokerOrigins.delete(origin);
+			if (withdrawn) return;
+			withdrawn = true;
+			const remaining = (testBrokerDeclarations.get(origin) ?? 1) - 1;
+			if (remaining > 0) testBrokerDeclarations.set(origin, remaining);
+			else testBrokerDeclarations.delete(origin);
+			testBrokerDeclarationGeneration++;
 		},
 	};
+}
+
+/**
+ * Changes whenever this test process declares or withdraws a broker through
+ * {@link allowAuthBrokerForTests}; it stays 0 outside the test runtime.
+ *
+ * {@link resolveAuthBrokerConfig} decides from the declarations live while it runs, so a
+ * memo of its result must key on this value too. Without it a memo would keep handing out
+ * a broker after the test withdrew it, and keep refusing one the test declared later. A
+ * generation rather than the set of declared origins, because a lookup refused while a
+ * withdrawal raced it must not come back when the same broker is declared again.
+ */
+export function getAuthBrokerDeclarationGeneration(): number {
+	return testBrokerDeclarationGeneration;
 }
 
 /** Whether `url` is a broker this test process declared through {@link allowAuthBrokerForTests}. */
@@ -98,7 +125,7 @@ function isDeclaredTestBroker(url: string): boolean {
 	} catch {
 		return false;
 	}
-	return testBrokerOrigins.has(origin);
+	return testBrokerDeclarations.has(origin);
 }
 
 /**
@@ -429,7 +456,7 @@ export async function resolveAuthBrokerConfig(
 ): Promise<AuthBrokerClientConfig | null> {
 	// With nothing declared, a test reads none of the developer's broker configuration:
 	// no env, no config.yml `!command`, no token file.
-	if (isBunTestRuntime() && testBrokerOrigins.size === 0) return null;
+	if (isBunTestRuntime() && testBrokerDeclarations.size === 0) return null;
 	const agentDir = options.agentDir ?? getAgentDir();
 	const resolveConfig = options.configValueResolver ?? defaultResolveConfigValue;
 
