@@ -1,0 +1,1 @@
+Session `{{sessionId}}` was resumed from `{{source}}`, but that file now holds a different session (`{{foundSessionId}}`), so this conversation continues as a fork of `{{sessionId}}` under a new session id. The transcript here is the one that was asked for, read before the file changed; the journal at that path belongs to the other session and was left untouched.

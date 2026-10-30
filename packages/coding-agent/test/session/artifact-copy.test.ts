@@ -55,20 +55,24 @@ describe("copying a session's artifacts to another session", () => {
 		expect(fs.readFileSync(path.join(destinationArtifacts, "local", "PLAN.md"), "utf8")).toBe("the plan");
 	});
 
-	it("keeps an entry the destination already has", async () => {
+	it("keeps an entry the destination already has, and does not charge the copy for it", async () => {
 		using tempDir = TempDir.createSync("@omp-artifact-copy-");
 		const sourceArtifacts = path.join(tempDir.path(), SOURCE);
 		const destinationArtifacts = path.join(tempDir.path(), DESTINATION);
 		fs.mkdirSync(sourceArtifacts, { recursive: true });
 		fs.mkdirSync(destinationArtifacts, { recursive: true });
-		fs.writeFileSync(path.join(sourceArtifacts, "1.shake.log"), "the source's");
-		fs.writeFileSync(path.join(sourceArtifacts, "2.bash.log"), "the source's");
+		fs.writeFileSync(path.join(sourceArtifacts, "1.shake.log"), "s".repeat(1000));
+		fs.writeFileSync(path.join(sourceArtifacts, "2.bash.log"), "s".repeat(1000));
+		fs.writeFileSync(path.join(sourceArtifacts, "3.bash.log"), "s".repeat(40));
 		fs.writeFileSync(path.join(destinationArtifacts, "1.shake.log"), "already here");
 		fs.writeFileSync(path.join(destinationArtifacts, "2.bash.log"), "already here");
 
-		await copySessionArtifacts(`${sourceArtifacts}.jsonl`, `${destinationArtifacts}.jsonl`);
+		const tally = await copySessionArtifacts(`${sourceArtifacts}.jsonl`, `${destinationArtifacts}.jsonl`);
 
 		expect(fs.readFileSync(path.join(destinationArtifacts, "1.shake.log"), "utf8")).toBe("already here");
 		expect(fs.readFileSync(path.join(destinationArtifacts, "2.bash.log"), "utf8")).toBe("already here");
+		// Only 3.bash.log was reproduced, so only its 40 bytes were spent: the
+		// tally reports what the copy cost, not what the source holds.
+		expect(tally).toEqual({ entries: 1, bytes: 40, largest: [{ name: "3.bash.log", bytes: 40 }] });
 	});
 });

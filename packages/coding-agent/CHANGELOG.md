@@ -10,7 +10,8 @@
 ### Fixed
 
 - Startup prewalk now arms a later fallback candidate of the role named by prewalk.into when its first candidate is unavailable, matching /prewalk and /new ([#17373](https://github.com/can1357/oh-my-pi/pull/17373)).
-- Resuming a session another live omp process is writing — at startup or with `/resume` — now continues in a fork with its own id from the start, and says so in the transcript, instead of answering to the owner's session id and then recording that still-running session as continued ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
+- Resuming a session another live omp process holds — at startup or with `/resume` — now continues in a fork with its own id from the start, and says so in the transcript, instead of answering to the owner's session id and then recording that still-running session as continued; two omp processes that resume the same idle session now settle it at the resume rather than at whichever writes first ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
+- Resuming a session whose file another session has taken over now continues the conversation that was asked for, in a fork, and names both sessions in the transcript, instead of silently carrying on with the unrelated conversation now in that file ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
 - A session forced off its file now logs what copying its artifacts cost — entries, bytes, and the largest of them — so a move that duplicates gigabytes is visible before the free space is ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.0] - 2026-10-29

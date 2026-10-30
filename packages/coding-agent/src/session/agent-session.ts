@@ -476,7 +476,7 @@ import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
-import { noteResumedOwnedElsewhere } from "./session-transfer";
+import { noteResumedSessionFork } from "./session-transfer";
 import { resolveOpenAIWebsocketPreference } from "./settings-stream-fn";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
@@ -13097,14 +13097,13 @@ export class AgentSession implements SettingsScope {
 			// The file may be reloaded at the same path with a different latest contract (or the
 			// switch rolled back via restoreState); re-read it on the next model call either way.
 			this.#sessionInit = undefined;
-			// A session another live omp process is writing is not ours to
-			// continue: take a fork of it instead of its id (same reasoning as
-			// the startup resume guard in session-transfer.ts).
-			const { forkedFrom } = await this.sessionManager.setSessionFile(sessionPath, {
-				forkIfOwnedElsewhere: true,
-			});
+			// A session another live omp process is writing, or whose file now
+			// holds a different session, is not ours to continue: take a fork of
+			// what was loaded instead of its id (same reasoning as the startup
+			// resume guard in session-transfer.ts).
+			const { forkedFrom } = await this.sessionManager.setSessionFile(sessionPath, { forkIfContested: true });
 			this.#bash.markSessionTransition(bashTransition);
-			if (forkedFrom) await noteResumedOwnedElsewhere(this.sessionManager, forkedFrom);
+			if (forkedFrom) await noteResumedSessionFork(this.sessionManager, forkedFrom);
 			const newCwd = this.sessionManager.getCwd();
 			const recordedCwd = this.sessionManager.getRecordedCwd() ?? previousSessionState.cwd;
 			if (options?.preserveLocalCwd) {

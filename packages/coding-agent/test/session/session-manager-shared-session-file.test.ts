@@ -6,14 +6,21 @@ import { findSessionContinuation } from "@oh-my-pi/pi-coding-agent/session/sessi
 import { loadEntriesFromFile, readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager, type SessionPersistenceNotice } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage, tryAcquireSessionLease } from "@oh-my-pi/pi-coding-agent/session/session-storage";
-import { adoptResumedSession, lastSessionTransfer } from "@oh-my-pi/pi-coding-agent/session/session-transfer";
+import {
+	adoptResumedSession,
+	lastSessionTransfer,
+	type SessionTransferDetails,
+} from "@oh-my-pi/pi-coding-agent/session/session-transfer";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const SESSION_MANAGER_MODULE = path.join(import.meta.dir, "../../src/session/session-manager.ts");
+const SESSION_TRANSFER_MODULE = path.join(import.meta.dir, "../../src/session/session-transfer.ts");
 
 /** What the other process reports after each command. */
 interface OtherProcessState {
 	sessionFile: string;
+	sessionId: string;
+	transfer: SessionTransferDetails | undefined;
 	notices: SessionPersistenceNotice[];
 	errors: string[];
 }
@@ -21,6 +28,10 @@ interface OtherProcessState {
 /**
  * A second omp-like process that resumes `sessionFile` (which writes nothing)
  * and then runs one command per line: `append <text>`, `rewrite`, or `close`.
+ *
+ * `resume` opens the file the way an inspector does; `adopt` goes through the
+ * startup resume guard, as `omp --resume` does, and stops before its first
+ * write so a second resume can reach the same file while it sits there.
  */
 class OtherProcess {
 	readonly #child: Bun.Subprocess<"pipe", "pipe", "pipe">;
@@ -36,17 +47,42 @@ class OtherProcess {
 		tempDir: TempDir,
 		sessionFile: string,
 	): Promise<{ other: OtherProcess; opened: OtherProcessState }> {
-		const script = tempDir.join("other-process.ts");
+		return OtherProcess.#start(tempDir, sessionFile, false);
+	}
+
+	static async adopt(
+		tempDir: TempDir,
+		sessionFile: string,
+	): Promise<{ other: OtherProcess; opened: OtherProcessState }> {
+		return OtherProcess.#start(tempDir, sessionFile, true);
+	}
+
+	static async #start(
+		tempDir: TempDir,
+		sessionFile: string,
+		throughResumeGuard: boolean,
+	): Promise<{ other: OtherProcess; opened: OtherProcessState }> {
+		const script = tempDir.join(throughResumeGuard ? "adopting-process.ts" : "other-process.ts");
 		await Bun.write(
 			script,
 			[
 				`import { SessionManager } from ${JSON.stringify(SESSION_MANAGER_MODULE)};`,
-				"const manager = await SessionManager.open(process.argv[2], undefined, undefined, { suppressBreadcrumb: true });",
+				`import { adoptResumedSession, lastSessionTransfer } from ${JSON.stringify(SESSION_TRANSFER_MODULE)};`,
+				"const opened = await SessionManager.open(process.argv[2], undefined, undefined, { suppressBreadcrumb: true });",
+				throughResumeGuard
+					? "const manager = await adoptResumedSession(opened, process.argv[3]);"
+					: "const manager = opened;",
 				"const notices = [];",
 				"const errors = [];",
 				"manager.onPersistenceNotice(notice => notices.push(notice));",
 				"manager.onPersistenceError(error => errors.push(error.message));",
-				'const report = () => process.stdout.write(JSON.stringify({ sessionFile: manager.getSessionFile(), notices, errors }) + "\\n");',
+				"const report = () => process.stdout.write(JSON.stringify({",
+				"	sessionFile: manager.getSessionFile(),",
+				"	sessionId: manager.getSessionId(),",
+				"	transfer: lastSessionTransfer(manager.getEntries()),",
+				"	notices,",
+				"	errors,",
+				'}) + "\\n");',
 				"report();",
 				"for await (const line of console) {",
 				'	if (line === "close") break;',
@@ -64,7 +100,7 @@ class OtherProcess {
 		const other = new OtherProcess(
 			// The live `process.env` (Bun.spawn defaults to the launch env), so the
 			// other process meets this test's private session-owner leases.
-			Bun.spawn([process.execPath, script, sessionFile], {
+			Bun.spawn([process.execPath, script, sessionFile, path.dirname(sessionFile)], {
 				stdin: "pipe",
 				stdout: "pipe",
 				stderr: "pipe",
@@ -142,10 +178,10 @@ async function resumeAndAppend(
 	return { savedTo: manager.getSessionFile(), notices };
 }
 
-async function createSession(tempDir: TempDir): Promise<string> {
+async function createSession(tempDir: TempDir, firstTurn = "before"): Promise<string> {
 	const creator = SessionManager.create(tempDir.path(), tempDir.path(), new FileSessionStorage());
 	await creator.ensureOnDisk();
-	creator.appendMessage(userTurn("before"));
+	creator.appendMessage(userTurn(firstTurn));
 	const sessionFile = creator.getSessionFile();
 	if (!sessionFile) throw new Error("Expected session file");
 	await creator.close();
@@ -478,11 +514,11 @@ describe("SessionManager on a session file another omp process writes", () => {
 			// `/resume` inside a live session: one manager, a different file.
 			const resuming = SessionManager.create(tempDir.path(), tempDir.path(), new FileSessionStorage());
 			await resuming.ensureOnDisk();
-			const { forkedFrom } = await resuming.setSessionFile(original, { forkIfOwnedElsewhere: true });
+			const { forkedFrom } = await resuming.setSessionFile(original, { forkIfContested: true });
 			const fork = resuming.getSessionFile();
 			if (!fork) throw new Error("Expected the resumed session to have a file");
 			try {
-				expect(forkedFrom).toEqual({ sessionId: originalId, sessionFile: original });
+				expect(forkedFrom).toEqual({ reason: "owned-elsewhere", sessionId: originalId, sessionFile: original });
 				expect(resuming.getSessionId()).not.toBe(originalId);
 				expect(fork).not.toBe(original);
 				resuming.appendMessage(userTurn("resumed here"));
@@ -498,5 +534,118 @@ describe("SessionManager on a session file another omp process writes", () => {
 		} finally {
 			await owner.close();
 		}
+	}, 30_000);
+
+	it("gives the session to the process that resumed it first, before either has written", async () => {
+		using tempDir = TempDir.createSync("@omp-shared-session-file-");
+		const original = await createSession(tempDir);
+		const originalId = await readSessionHeaderId(original);
+		if (!originalId) throw new Error("Expected a session header");
+
+		// Both resume the same idle session and stop before their first write:
+		// the window in which a lease that is probed and dropped again tells
+		// each of them that nobody owns this session.
+		const { other: first, opened: firstResume } = await OtherProcess.adopt(tempDir, original);
+		const { other: second, opened: secondResume } = await OtherProcess.adopt(tempDir, original);
+		let firstWrote: OtherProcessState;
+		let secondWrote: OtherProcessState;
+		try {
+			expect(firstResume.sessionId).toBe(originalId);
+			expect(firstResume.sessionFile).toBe(original);
+			// The second one loses at the resume, not at its first write: a
+			// different id, a file of its own, and it was told why.
+			expect(secondResume.sessionId).not.toBe(originalId);
+			expect(secondResume.sessionFile).not.toBe(original);
+			expect(secondResume.transfer).toEqual({
+				kind: "owned-elsewhere",
+				source: original,
+				sessionId: originalId,
+			});
+			firstWrote = await first.run("append first");
+			secondWrote = await second.run("append second");
+		} finally {
+			await first.close();
+			await second.close();
+		}
+		expect(firstWrote.sessionFile).toBe(original);
+		expect(secondWrote.sessionFile).toBe(secondResume.sessionFile);
+		// The second process never had to move off the shared file, so nothing
+		// records the still-live first process as a session that was continued.
+		expect(secondWrote.notices).toEqual([]);
+		expect(await findSessionContinuation(original)).toBeUndefined();
+		expect(await userTurnsIn(original, tempDir.path())).toEqual(["before", "first"]);
+		expect(await userTurnsIn(secondWrote.sessionFile, tempDir.path())).toEqual(["before", "second"]);
+	}, 30_000);
+
+	it("does not take a session from its next owner just because something read it", async () => {
+		using tempDir = TempDir.createSync("@omp-shared-session-file-");
+		const original = await createSession(tempDir);
+		const originalId = await readSessionHeaderId(original);
+		if (!originalId) throw new Error("Expected a session header");
+
+		// What `omp sessions`, `--export` and `render` do: open the session and
+		// read it, without resuming it. Held open across the resume below.
+		const reader = await SessionManager.open(original, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		try {
+			expect(await userTurnsIn(original, tempDir.path())).toEqual(["before"]);
+			const { other, opened } = await OtherProcess.adopt(tempDir, original);
+			try {
+				expect(opened.sessionId).toBe(originalId);
+				expect(opened.sessionFile).toBe(original);
+				expect(opened.transfer).toBeUndefined();
+			} finally {
+				await other.close();
+			}
+		} finally {
+			await reader.close();
+		}
+	}, 30_000);
+
+	it("resumes the conversation it loaded, not the session that took over its file", async () => {
+		using tempDir = TempDir.createSync("@omp-shared-session-file-");
+		const requested = await createSession(tempDir);
+		const requestedId = await readSessionHeaderId(requested);
+		const replacement = await createSession(tempDir, "someone else's conversation");
+		const replacementId = await readSessionHeaderId(replacement);
+		if (!requestedId || !replacementId) throw new Error("Expected session headers");
+
+		const manager = await SessionManager.open(requested, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		// Between the load and the resume guard, another session takes the path
+		// (`omp session unpack`, a gc rewrite, a restored backup).
+		fs.renameSync(replacement, requested);
+
+		const resumed = await adoptResumedSession(manager, tempDir.path());
+		try {
+			expect(resumed.getSessionId()).not.toBe(requestedId);
+			expect(resumed.getSessionFile()).not.toBe(requested);
+			// The transcript is the one that was asked for, read before the file
+			// changed — never a re-read of whatever is at that path now.
+			expect(
+				resumed
+					.getEntries()
+					.flatMap(entry =>
+						entry.type === "message" && entry.message.role === "user" ? [entry.message.content] : [],
+					),
+			).toEqual(["before"]);
+			// And the notice says what actually happened, naming both sessions.
+			expect(lastSessionTransfer(resumed.getEntries())).toEqual({
+				kind: "source-replaced",
+				source: requested,
+				sessionId: requestedId,
+				foundSessionId: replacementId,
+			});
+			const fork = resumed.getSessionFile();
+			if (!fork) throw new Error("Expected the resumed session to have a file");
+			expect((await sessionHeaderIn(fork)).parentSession).toBe(requestedId);
+		} finally {
+			await resumed.close();
+		}
+		// The journal that holds the path kept its session and its content.
+		expect(await readSessionHeaderId(requested)).toBe(replacementId);
+		expect(await userTurnsIn(requested, tempDir.path())).toEqual(["someone else's conversation"]);
 	}, 30_000);
 });

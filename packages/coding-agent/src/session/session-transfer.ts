@@ -12,8 +12,9 @@
  * {@link SESSION_TRANSFER_MESSAGE_TYPE}: the model sees where the session came
  * from, and a copy whose latest marker says it moved away is stale — resuming
  * it forks instead of continuing it ({@link forkIfMovedAway}). Resuming a
- * session another live omp process still owns forks the same way
- * ({@link forkIfOwnedElsewhere}); {@link adoptResumedSession} runs both guards.
+ * session this process may not continue — another live omp process owns it, or
+ * its file now holds a different session — forks the same way
+ * ({@link forkIfContested}); {@link adoptResumedSession} runs both guards.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -36,6 +37,7 @@ import {
 	writeArchive,
 } from "@oh-my-pi/pi-utils/ar";
 import resumeOwnedElsewhereTemplate from "../prompts/session/resume-owned-elsewhere.md" with { type: "text" };
+import resumeSourceReplacedTemplate from "../prompts/session/resume-source-replaced.md" with { type: "text" };
 import transferArrivedTemplate from "../prompts/session/transfer-arrived.md" with { type: "text" };
 import transferDepartedTemplate from "../prompts/session/transfer-departed.md" with { type: "text" };
 import transferStaleForkTemplate from "../prompts/session/transfer-stale-fork.md" with { type: "text" };
@@ -44,7 +46,7 @@ import { BLOB_HASH_RE, BlobStore } from "./blob-store";
 import type { FileEntry, SessionEntry, SessionHeader } from "./session-entries";
 import { findSessionFiles } from "./session-listing";
 import { loadEntriesFromFile, parseSessionContent, readSessionHeaderId } from "./session-loader";
-import { SessionManager } from "./session-manager";
+import { type ResumedSessionFork, SessionManager } from "./session-manager";
 import { FileSessionStorage } from "./session-storage";
 
 /** Archive format version written by {@link packSession} and the only one {@link unpackSession} reads. */
@@ -71,13 +73,18 @@ export interface SessionArchiveManifest {
  * - `departed` — this copy was handed to `to` and is stale from here on;
  * - `forked` — a stale copy (`source`) was resumed, so it continued as a fork;
  * - `owned-elsewhere` — `source` was resumed while another live omp process
- *   owned session `sessionId`, so this conversation continued as a fork of it.
+ *   owned session `sessionId`, so this conversation continued as a fork of it;
+ * - `source-replaced` — `source` was resumed, but by the time it was adopted
+ *   that file held session `foundSessionId` instead of the requested
+ *   `sessionId`, so the conversation that was loaded continued as a fork and
+ *   the journal now at `source` was left alone.
  */
 export type SessionTransferDetails =
 	| { kind: "arrived"; fromCwd: string; cwd: string }
 	| { kind: "departed"; to: string }
 	| { kind: "forked"; source: string; to: string }
-	| { kind: "owned-elsewhere"; source: string; sessionId: string };
+	| { kind: "owned-elsewhere"; source: string; sessionId: string }
+	| { kind: "source-replaced"; source: string; sessionId: string; foundSessionId: string };
 
 /** User-facing failure of a pack, unpack, or move marker: missing input, bad archive, live owner. */
 export class SessionTransferError extends Error {
@@ -157,6 +164,17 @@ export function sessionTransferDetails(entry: FileEntry): SessionTransferDetails
 			return typeof details.source === "string" && typeof details.sessionId === "string"
 				? { kind: "owned-elsewhere", source: details.source, sessionId: details.sessionId }
 				: undefined;
+		case "source-replaced":
+			return typeof details.source === "string" &&
+				typeof details.sessionId === "string" &&
+				typeof details.foundSessionId === "string"
+				? {
+						kind: "source-replaced",
+						source: details.source,
+						sessionId: details.sessionId,
+						foundSessionId: details.foundSessionId,
+					}
+				: undefined;
 		default:
 			return undefined;
 	}
@@ -182,6 +200,14 @@ function renderTransferNotice(details: SessionTransferDetails): string {
 		case "owned-elsewhere":
 			return prompt
 				.render(resumeOwnedElsewhereTemplate, { source: details.source, sessionId: details.sessionId })
+				.trim();
+		case "source-replaced":
+			return prompt
+				.render(resumeSourceReplacedTemplate, {
+					source: details.source,
+					sessionId: details.sessionId,
+					foundSessionId: details.foundSessionId,
+				})
 				.trim();
 	}
 }
@@ -706,75 +732,63 @@ export async function forkIfMovedAway(manager: SessionManager, sessionDir?: stri
 	return fork;
 }
 
-/**
- * Whether another live omp process holds the ownership lease of session `id`
- * at `file`. Claims nothing of its own: a free lease is taken and dropped in
- * the same breath, so opening a session still never counts as owning it. A
- * file whose header no longer reads as `id` also answers true: it is not this
- * session's journal to continue either way.
- */
-function ownedByAnotherProcess(id: string, file: string): boolean {
-	const release = new FileSessionStorage().claimSession(id, file);
-	if (release === null) return true;
-	release();
-	return false;
+/** The visible notice for a resume that had to fork, whichever held the file. */
+function contestedResumeNotice(forkedFrom: ResumedSessionFork): SessionTransferDetails {
+	return forkedFrom.reason === "owned-elsewhere"
+		? { kind: "owned-elsewhere", source: forkedFrom.sessionFile, sessionId: forkedFrom.sessionId }
+		: {
+				kind: "source-replaced",
+				source: forkedFrom.sessionFile,
+				sessionId: forkedFrom.sessionId,
+				foundSessionId: forkedFrom.foundSessionId ?? "",
+			};
 }
 
 /**
- * Resume guard: when another live omp process owns `manager`'s session, close
- * it untouched and return a fork of it (in `sessionDir`, default: the cwd's
- * session directory) carrying a visible `owned-elsewhere` notice. Otherwise
- * return `manager` itself.
+ * Resume guard: take this process's ownership claim on `manager`'s session and
+ * keep it, so from here on this process is its owner. When the claim cannot be
+ * taken — another live omp process owns the session, or the file now holds a
+ * different session's journal — `manager` carries on as a fork of the
+ * transcript it loaded (in `sessionDir`, default: beside the file it came
+ * from) and gets a visible notice saying which of the two happened.
  *
- * Without this the resumed process keeps the owner's session id until its
+ * Without the claim the resumed process keeps the loaded session id until its
  * first write and only then moves to a sibling file (`open-elsewhere`), so for
- * that window two live processes answer to one id, and the sibling records the
- * still-live owner as the session it continues — a lineage anything keyed on
- * the session id (a role registry, a scheduler, a peer's address book) reads
- * as a hand-over from a session that is in fact still running. Forking here
- * keeps the owner's id with the owner, and the fork is a copy from the start.
+ * that window two live processes answer to one id and write one artifacts
+ * directory, and the sibling records the still-live owner as the session it
+ * continues — a lineage anything keyed on the session id (a role registry, a
+ * scheduler, a peer's address book) reads as a hand-over from a session that
+ * is in fact still running. Claiming at the resume keeps the owner's id with
+ * the owner and makes the second process a copy from the start.
+ *
+ * The fork is of what was loaded, never a re-read of the file: when a
+ * different session has taken the path, re-reading it would silently resume
+ * that unrelated conversation under a notice naming the one that was asked
+ * for.
  */
-export async function forkIfOwnedElsewhere(manager: SessionManager, sessionDir?: string): Promise<SessionManager> {
-	const source = manager.getSessionFile();
-	if (!source) return manager;
-	const sessionId = manager.getSessionId();
-	if (!ownedByAnotherProcess(sessionId, source)) return manager;
-	const cwd = manager.getCwd();
-	await manager.close();
-	const fork = await SessionManager.forkFrom(source, cwd, sessionDir, undefined, { repairInterruptedTail: true });
-	await appendTransferNotice(fork, { kind: "owned-elsewhere", source, sessionId });
-	logger.info("Resumed a session another omp process owns; continuing in a fork", {
-		source,
-		sessionId,
-		fork: fork.getSessionFile(),
-	});
-	return fork;
+export async function forkIfContested(manager: SessionManager, sessionDir?: string): Promise<SessionManager> {
+	const forkedFrom = await manager.claimResumedSessionOrFork(sessionDir);
+	if (!forkedFrom) return manager;
+	await appendTransferNotice(manager, contestedResumeNotice(forkedFrom));
+	return manager;
 }
 
 /**
  * Every resume guard, in the order a startup resume needs them: a copy whose
  * conversation moved to another machine is stale whoever holds its lease, so
  * {@link forkIfMovedAway} answers first and its fork — on an id nobody owns —
- * passes the ownership check unchanged.
+ * claims that id in {@link forkIfContested} unchanged.
  */
 export async function adoptResumedSession(manager: SessionManager, sessionDir?: string): Promise<SessionManager> {
-	return await forkIfOwnedElsewhere(await forkIfMovedAway(manager, sessionDir), sessionDir);
+	return await forkIfContested(await forkIfMovedAway(manager, sessionDir), sessionDir);
 }
 
 /**
- * Record, in `manager`'s own transcript, that it carries on from a session
- * another live omp process still owns. The in-session `/resume` path forks
- * inside its existing manager ({@link SessionManager.setSessionFile}), so it
- * cannot use {@link forkIfOwnedElsewhere}, but the agent must be told the same
- * thing.
+ * Record, in `manager`'s own transcript, that it carries on from a session it
+ * could not continue. The in-session `/resume` path forks inside its existing
+ * manager ({@link SessionManager.setSessionFile}), so it cannot use
+ * {@link forkIfContested}, but the agent must be told the same thing.
  */
-export async function noteResumedOwnedElsewhere(
-	manager: SessionManager,
-	forkedFrom: { sessionId: string; sessionFile: string },
-): Promise<void> {
-	await appendTransferNotice(manager, {
-		kind: "owned-elsewhere",
-		source: forkedFrom.sessionFile,
-		sessionId: forkedFrom.sessionId,
-	});
+export async function noteResumedSessionFork(manager: SessionManager, forkedFrom: ResumedSessionFork): Promise<void> {
+	await appendTransferNotice(manager, contestedResumeNotice(forkedFrom));
 }
