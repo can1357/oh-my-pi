@@ -1029,6 +1029,7 @@ if "__omp_prelude_loaded__" not in globals():
         isolated=None,
         apply=None,
         merge=None,
+        checkout=None,
         tools=None,
     ):
         """Start a background subagent and return its handle."""
@@ -1047,6 +1048,8 @@ if "__omp_prelude_loaded__" not in globals():
             args["apply"] = bool(apply)
         if merge is not None:
             args["merge"] = bool(merge)
+        if checkout is not None:
+            args["checkout"] = str(checkout)
         if tools is not None:
             args["tools"] = list(tools)
         result = _bridge_call("__agent__", args)

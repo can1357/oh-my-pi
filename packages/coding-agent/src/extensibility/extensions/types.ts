@@ -1185,6 +1185,24 @@ export interface BeforeSubagentSpawnEvent {
 	spawnKey?: string;
 }
 
+/**
+ * Fired in the parent session before an isolated subagent's captured changes
+ * apply back into the checkout its isolated copy came from, nested
+ * repositories included. Fires only when there are changes to apply.
+ */
+export interface BeforeSubagentApplyEvent {
+	type: "before_subagent_apply";
+	/** Agent definition name of the child. */
+	agent: string;
+	/** The child's agent id. */
+	agentId: string;
+	invocationKind: "task" | "eval";
+	/** Root of the checkout the changes apply into. */
+	checkout: string;
+	/** `patch` applies the captured diff to the working tree; `branch` merges the task branch. */
+	merge: "patch" | "branch";
+}
+
 export type {
 	AgentEndEvent,
 	AgentStartEvent,
@@ -1644,6 +1662,7 @@ export type ExtensionEvent =
 	| AfterProviderResponseEvent
 	| BeforeAgentStartEvent
 	| BeforeSubagentSpawnEvent
+	| BeforeSubagentApplyEvent
 	| AgentStartEvent
 	| AgentEndEvent
 	| SessionStopEvent
@@ -1745,6 +1764,13 @@ export interface BeforeSubagentSpawnEventResult {
 	reason?: string;
 	/** Human-readable routing explanation surfaced with the resolved model. */
 	note?: string;
+}
+
+export interface BeforeSubagentApplyEventResult {
+	/** Refuse the apply; the captured patch or branch is kept for the caller. */
+	block?: boolean;
+	/** Refusal reason surfaced to the caller. */
+	reason?: string;
 }
 
 export type {
@@ -1851,6 +1877,10 @@ export interface ExtensionAPI {
 	on(
 		event: "before_subagent_spawn",
 		handler: ExtensionHandler<BeforeSubagentSpawnEvent, BeforeSubagentSpawnEventResult>,
+	): void;
+	on(
+		event: "before_subagent_apply",
+		handler: ExtensionHandler<BeforeSubagentApplyEvent, BeforeSubagentApplyEventResult>,
 	): void;
 	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;
 	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): void;

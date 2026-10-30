@@ -37,6 +37,7 @@ import taskSpecializationAdvisoryTemplate from "../prompts/tools/task-specializa
 import taskFollowUpTemplate from "../prompts/tools/task-follow-up.md" with { type: "text" };
 import { TASK_EFFORTS, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import { truncateForPrompt } from "../tools/approval";
+import { expandPath } from "../tools/path-utils";
 import { hasWaitTool } from "../tools/wait";
 import { isIrcEnabled } from "../irc/messaging";
 import { isReadOnlyAgent } from "./read-only-policy";
@@ -69,6 +70,7 @@ import {
 	resolveEffectiveSubagentPolicy,
 	runStructuredSubagent,
 	StructuredSubagentError,
+	type StructuredSubagentIsolationControls,
 	type StructuredSubagentRequest,
 } from "./structured-subagent";
 import { SpawnRun, type SpawnPermit } from "./spawn-run";
@@ -343,22 +345,41 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean, fileEnab
  * Normalize a validated call into its spawn list: the `tasks[]` batch when
  * provided, otherwise the single top-level spawn. The flat form's `isolated`
  * flag is only materialized when the caller sent one — `#runSpawn`
- * distinguishes an absent key from an explicit value.
+ * distinguishes an absent key from an explicit value. An isolated item's
+ * `checkout` is frozen to an absolute path against `cwd`, defaulting to `cwd`
+ * itself, so a queued spawn applies where the call was made even after the
+ * session moves.
  */
-function resolveSpawnItems(params: TaskParams): TaskItem[] {
+function resolveSpawnItems(params: TaskParams, cwd: string): TaskItem[] {
+	let items: TaskItem[];
 	if (Array.isArray(params.tasks) && params.tasks.length > 0) {
-		return params.tasks;
+		items = params.tasks;
+	} else {
+		const item: TaskItem = { name: params.name, agent: params.agent, task: params.task, taskFile: params.taskFile };
+		if ("solutionSpace" in params) item.solutionSpace = params.solutionSpace;
+		if ("outputSchema" in params) item.outputSchema = params.outputSchema;
+		if ("schemaMode" in params) item.schemaMode = params.schemaMode;
+		if ("tools" in params) item.tools = params.tools;
+		if ("effort" in params) item.effort = params.effort;
+		if ("isolated" in params) item.isolated = params.isolated;
+		if ("checkout" in params) item.checkout = params.checkout;
+		if ("sourceSession" in params) item.sourceSession = params.sourceSession;
+		if ("model" in params) item.model = params.model;
+		items = [item];
 	}
-	const item: TaskItem = { name: params.name, agent: params.agent, task: params.task, taskFile: params.taskFile };
-	if ("solutionSpace" in params) item.solutionSpace = params.solutionSpace;
-	if ("outputSchema" in params) item.outputSchema = params.outputSchema;
-	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
-	if ("tools" in params) item.tools = params.tools;
-	if ("effort" in params) item.effort = params.effort;
-	if ("isolated" in params) item.isolated = params.isolated;
-	if ("sourceSession" in params) item.sourceSession = params.sourceSession;
-	if ("model" in params) item.model = params.model;
-	return [item];
+	return items.map(item =>
+		(item.isolated ?? params.isolated) === true
+			? { ...item, checkout: path.resolve(cwd, expandPath(item.checkout ?? ".")) }
+			: item,
+	);
+}
+
+/** Isolation controls a spawn sends; a key exists only when the spawn carries it, since plan mode rejects any. */
+function isolationControls(params: TaskParams): StructuredSubagentIsolationControls | undefined {
+	const controls: StructuredSubagentIsolationControls = {};
+	if ("isolated" in params) controls.requested = params.isolated;
+	if (params.checkout !== undefined) controls.checkout = params.checkout;
+	return Object.keys(controls).length > 0 ? controls : undefined;
 }
 
 interface ResolvedTaskItem extends TaskItem {
@@ -435,6 +456,7 @@ function spawnParamsFor(params: TaskParams, item: ResolvedTaskItem, defaultAgent
 	} else if ("isolated" in params) {
 		spawn.isolated = params.isolated;
 	}
+	if (item.checkout !== undefined) spawn.checkout = item.checkout;
 	return spawn;
 }
 
@@ -456,6 +478,7 @@ function planSpawns(
 	fileEnabled: boolean,
 	defaultAgent: string,
 	seanceAdvertised: boolean,
+	cwd: string,
 ): SpawnPlan | string {
 	const params = repairTaskParams(rawParams as TaskParams);
 	const error =
@@ -463,7 +486,7 @@ function planSpawns(
 		validateSpawnParams(params, batchEnabled, fileEnabled) ??
 		validateSeanceParams({ params, batchEnabled, defaultAgent, seanceAdvertised });
 	if (error) return error;
-	const items = resolveSpawnItems(params);
+	const items = resolveSpawnItems(params, cwd);
 	return { params, items, spawns: items.map(item => spawnParamsFor(params, item, defaultAgent)) };
 }
 
@@ -783,6 +806,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				cfgTaskFile.get(this.session.settings),
 				this.#defaultAgent(),
 				this.#seanceSchemaFields() !== undefined,
+				this.session.cwd,
 			);
 			return typeof plan === "string" ? undefined : plan.spawns;
 		},
@@ -1031,7 +1055,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			model: params.model,
 			...this.#resultParams(params),
 			...this.#effortParams(params),
-			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
+			isolation: isolationControls(params),
 			blockedAgent: this.#blockedAgent,
 			enableLsp: (this.session.enableLsp ?? true) && cfgTaskEnableLsp.get(this.session.settings),
 			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
@@ -1081,6 +1105,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			cfgTaskFile.get(this.session.settings),
 			defaultAgent,
 			this.#seanceSchemaFields() !== undefined,
+			this.session.cwd,
 		);
 		if (typeof plan === "string") {
 			return createTaskModeError(plan);
@@ -1266,6 +1291,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					task: renderSubagentUserPrompt(assignment),
 					assignment,
 					...(item.taskFile !== undefined ? { taskFile: item.taskFile, taskFileSha256: item.taskFileSha256 } : {}),
+					checkout: item.checkout,
 					recentTools: [],
 					recentOutput: [],
 					toolCount: 0,
@@ -1308,7 +1334,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			},
 		});
 
-		const started: Array<{ agentId: string; jobId: string }> = [];
+		const started: Array<{ agentId: string; jobId: string; checkout?: string }> = [];
 		const failedSchedules: string[] = [];
 		for (const spawn of asyncSpawns) {
 			try {
@@ -1328,7 +1354,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					},
 				});
 				if (started.length === 0) primaryJobId = jobId;
-				started.push({ agentId: spawn.agentId, jobId });
+				started.push({ agentId: spawn.agentId, jobId, checkout: spawn.progress.checkout });
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				// An adopted run already executes; without its job nothing would own it.
@@ -1366,6 +1392,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					count: started.length,
 					agentId: started[0]?.agentId,
 					jobId: started[0]?.jobId,
+					checkout: started[0]?.checkout,
 					agentLabel,
 					started,
 					scheduleFailureSummary,
@@ -1898,7 +1925,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...(onArtifactsRetained ? { onArtifactsRetained } : {}),
 				invokedAt: launchTiming?.invokedAt,
 				acquiredAt: launchTiming?.acquiredAt,
-				...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
+				isolation: isolationControls(params),
 				blockedAgent: this.#blockedAgent,
 				enableLsp: (this.session.enableLsp ?? true) && cfgTaskEnableLsp.get(this.session.settings),
 				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
@@ -1906,7 +1933,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				signal,
 				...(tools ? { onToolResult: (result: SubagentToolResult) => appendToolResult(tools, result) } : {}),
 				onProgress: progress => {
-					latestProgress = { ...progress, ...taskFileMetadata, recentTools: progress.recentTools.slice() };
+					latestProgress = {
+						...progress,
+						...taskFileMetadata,
+						checkout: params.checkout,
+						recentTools: progress.recentTools.slice(),
+					};
 					onUpdate?.({
 						content: [{ type: "text", text: `Running agent ${progress.id}...` }],
 						details: {

@@ -91,6 +91,7 @@ const taskItemSchemaIsolated = type({
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
 	"isolated?": "boolean",
+	"checkout?": "string",
 	"+": "delete",
 });
 
@@ -103,6 +104,7 @@ export const taskSchema = type({
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
 	"isolated?": "boolean",
+	"checkout?": "string",
 	"+": "delete",
 });
 const taskSchemaNoIsolation = type({
@@ -199,6 +201,7 @@ function createTaskSchema(options: {
 				...toolsField,
 				...seanceFields,
 				"isolated?": "boolean",
+				"checkout?": "string",
 				"+": "delete",
 			});
 			return guardBatchAgent(
@@ -239,6 +242,7 @@ function createTaskSchema(options: {
 			...toolsField,
 			...seanceFields,
 			"isolated?": "boolean",
+			"checkout?": "string",
 			"+": "delete",
 		});
 	}

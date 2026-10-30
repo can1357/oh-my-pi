@@ -2516,6 +2516,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getClientBridge: () => session?.clientBridge,
 			emitBeforeSubagentSpawn: (event, signal) =>
 				session?.extensionRunner?.emitBeforeSubagentSpawn(event, signal) ?? Promise.resolve(undefined),
+			emitBeforeSubagentApply: event =>
+				session?.extensionRunner?.emitBeforeSubagentApply(event) ?? Promise.resolve(undefined),
 			queueDeferredDiagnostics: entry => session?.yieldQueue.enqueue(LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE, entry),
 			queueLaunchCompletion: notification =>
 				session?.queueLaunchCompletion(notification) ??
