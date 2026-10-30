@@ -2,9 +2,14 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, agentLoop, agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import type { AgentContext, AgentLoopConfig, AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core/types";
-import type { Message } from "@oh-my-pi/pi-ai";
+import type { Api, Message } from "@oh-my-pi/pi-ai";
+import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { createUserMessage } from "./helpers";
+
+const SOURCE_ID = "pause-gate-test";
 
 function identityConverter(messages: AgentMessage[]): Message[] {
 	return messages.filter(m => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
@@ -350,6 +355,91 @@ describe("agentPauseGate", () => {
 			expect(agent.state.isStreaming).toBe(false);
 		} finally {
 			gateWait.restore();
+		}
+	});
+
+	// The loop polls the gate before a model call, then resolves the credential,
+	// the metadata and the provider-bound context. A pause engaged during any of
+	// them used to reach the provider: the main turn installed no dispatch hold.
+	it("holds the model call when the pause engages while the credential resolves", async () => {
+		const dispatchedWhilePaused: boolean[] = [];
+		const api = "pause-gate-main-dispatch" as Api;
+		const model = buildModel({
+			id: "pause-gate-main",
+			name: "Pause Gate Main",
+			api,
+			provider: "pause-gate-test",
+			baseUrl: "https://example.invalid",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1_000,
+			maxTokens: 100,
+		});
+		registerCustomApi(
+			api,
+			() => {
+				dispatchedWhilePaused.push(agentPauseGate.paused);
+				const events = new AssistantMessageEventStream();
+				queueMicrotask(() =>
+					events.push({
+						type: "done",
+						reason: "stop",
+						message: {
+							role: "assistant",
+							content: [{ type: "text", text: "ok" }],
+							api,
+							provider: model.provider,
+							model: model.id,
+							timestamp: 0,
+							stopReason: "stop",
+							usage: {
+								input: 0,
+								output: 0,
+								cacheRead: 0,
+								cacheWrite: 0,
+								totalTokens: 0,
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+							},
+						},
+					}),
+				);
+				return events;
+			},
+			SOURCE_ID,
+		);
+		const gateWait = observeGateWait();
+		try {
+			const run = agentLoop(
+				[createUserMessage("hi")],
+				{ systemPrompt: ["Test"], messages: [], tools: [] },
+				{
+					model,
+					convertToLlm: identityConverter,
+					// The gate closes in the window between the loop's poll and the wire.
+					getApiKey: async () => {
+						agentPauseGate.pause();
+						return "pause-gate-key";
+					},
+				},
+			).result();
+
+			const reached = await Promise.race([
+				gateWait.parked.then(() => "parked"),
+				run.then(
+					() => "dispatched",
+					() => "dispatched",
+				),
+			]);
+			expect(reached).toBe("parked");
+			expect(dispatchedWhilePaused).toEqual([]);
+
+			agentPauseGate.resume();
+			await run;
+			expect(dispatchedWhilePaused).toEqual([false]);
+		} finally {
+			gateWait.restore();
+			unregisterCustomApis(SOURCE_ID);
 		}
 	});
 });

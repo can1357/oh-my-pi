@@ -2171,6 +2171,15 @@ async function streamAssistantResponse(
 				serviceTier: effectiveServiceTier,
 				cwd: effectiveCwd,
 				signal: finalRequestSignal,
+				// The loop polls the gate before this call, but the credential, the
+				// metadata resolve and the provider-bound context all await after
+				// that poll, so a `/pause` engaged during them would otherwise reach
+				// the provider. Holding here covers those awaits and the retries the
+				// stream layer dispatches itself (re-sample, rotated credential).
+				beforeDispatch: async () => {
+					await config.beforeDispatch?.();
+					if (agentPauseGate.paused) await waitForProcessPause(config, finalRequestSignal);
+				},
 				onResponse: captureOnResponse,
 				cursorOnToolResult: collectCursorToolResult,
 				liveSteering: providerCall.liveSteering,
