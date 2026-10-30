@@ -1,11 +1,12 @@
 /**
- * Move a Tern block into a tab of its own (`tern move BLOCK tab new-tab`).
+ * Move a Tern block into a tab of its own (`tern move BLOCK new-tab`).
  *
  * The daemon protocol lists `browser` and `fork` and no move, and the script
  * commands that could move a block are reachable only through a window's
  * control endpoint, which a user's own window does not open. The CLI reaches
  * the same daemon, so a fork that must land in a tab rather than beside the
- * pane it forked goes through it.
+ * pane it forked goes through it. The keyword is `new-tab` alone: `move BLOCK
+ * tab N` takes a tab number and rejects `new-tab` in that position.
  */
 
 /** Give up after this long: a move is one layout command to a live daemon. */
@@ -24,7 +25,7 @@ export interface TernMoveOptions {
 /** Moves `block` into a new tab of the session and window it currently lives in. */
 export async function moveTernBlockToNewTab(block: number, options: TernMoveOptions = {}): Promise<void> {
 	const executable = options.executable ?? (process.env.TERN_EXE?.trim() || "tern");
-	const proc = Bun.spawn([executable, "move", String(block), "tab", "new-tab"], {
+	const proc = Bun.spawn([executable, "move", String(block), "new-tab"], {
 		stdin: "ignore",
 		stdout: "pipe",
 		stderr: "pipe",
@@ -40,11 +41,11 @@ export async function moveTernBlockToNewTab(block: number, options: TernMoveOpti
 		proc.exited,
 	]);
 	clearTimeout(timeout);
-	if (timedOut) throw new Error(`${executable} move BLOCK tab new-tab timed out`);
+	if (timedOut) throw new Error(`${executable} move ${block} new-tab timed out`);
 	if (exitCode !== 0) {
 		const detail = stderr.trim() || stdout.trim();
 		throw new Error(
-			`${executable} move BLOCK tab new-tab exited with code ${exitCode}${detail ? `: ${detail.slice(-STDERR_TAIL)}` : ""}`,
+			`${executable} move ${block} new-tab exited with code ${exitCode}${detail ? `: ${detail.slice(-STDERR_TAIL)}` : ""}`,
 		);
 	}
 }
