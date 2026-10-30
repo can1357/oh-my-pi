@@ -1,9 +1,11 @@
 import { describe, expect, test, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import {
+	canReplayRemoteCompactionFrom,
 	DEFAULT_COMPACTION_SETTINGS,
 	findReadableCompactionIndex,
 	generateSummary,
+	prepareCompaction,
 	type SessionEntry,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
@@ -211,5 +213,44 @@ describe("readable compaction boundary", () => {
 
 	test("without an active model the newest entry is the boundary", () => {
 		expect(findReadableCompactionIndex(entries, DEFAULT_COMPACTION_SETTINGS)).toBe(1);
+	});
+
+	test("re-expands a trailing compaction the active model cannot replay", () => {
+		const claude = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const codex = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!claude || !codex) throw new Error("Expected built-in models to exist");
+		const messages: SessionEntry[] = Array.from({ length: 30 }, (_, i) => turn(i, 4_000))
+			.flat()
+			.map((message, i) => ({
+				type: "message",
+				id: `m${i}`,
+				parentId: i === 0 ? null : `m${i - 1}`,
+				timestamp: new Date(i).toISOString(),
+				message,
+			}));
+		const trailing = [...messages, { ...remote, firstKeptEntryId: "m58", parentId: "m59" }];
+		// The provider that wrote it reads it: nothing is left to compact.
+		expect(prepareCompaction(trailing, DEFAULT_COMPACTION_SETTINGS, codex)).toBeUndefined();
+		// Any other provider reads only its placeholder, so the history behind it is still live.
+		const preparation = prepareCompaction(trailing, DEFAULT_COMPACTION_SETTINGS, claude);
+		expect(preparation?.previousSummary).toBeUndefined();
+		expect(preparation?.messagesToSummarize.length).toBeGreaterThan(0);
+	});
+});
+
+describe("canReplayRemoteCompactionFrom", () => {
+	const codex = getBundledModel("openai-codex", "gpt-5.6-sol");
+	const openai = getBundledModel("openai", "gpt-5.4");
+	const claude = getBundledModel("anthropic", "claude-sonnet-4-5");
+	if (!codex || !openai || !claude) throw new Error("Expected built-in models to exist");
+
+	test("an OpenAI lane's payload replays only on the same provider", () => {
+		expect(canReplayRemoteCompactionFrom(codex, codex)).toBe(true);
+		expect(canReplayRemoteCompactionFrom(codex, openai)).toBe(false);
+		expect(canReplayRemoteCompactionFrom(codex, claude)).toBe(false);
+	});
+
+	test("the Anthropic lane leaves a summary any model reads", () => {
+		expect(canReplayRemoteCompactionFrom(claude, codex)).toBe(true);
 	});
 });

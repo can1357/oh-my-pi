@@ -12,6 +12,10 @@
 
 ## [18.16.0] - 2026-11-02
 
+### Added
+
+- Added `canReplayRemoteCompactionFrom()` to check whether a model can replay the provider-native compaction another model would write
+
 ### Changed
 
 - Deprecated `createFileOps`, `computeFileLists`, `formatFileOperations`, `upsertFileOperations`, `isUrlSchemePath` and `FileOperations` in `@oh-my-pi/pi-agent-core/compaction`; they now re-export `@oh-my-pi/snapcompact`, which callers should import directly
@@ -24,6 +28,10 @@
 ### Removed
 
 - Removed `PI_TOKENIZER_ACCURATE`: every model is now counted with a native tokenizer ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Compaction preparation re-expands a trailing OpenAI remote compaction the active model cannot replay instead of reporting nothing to compact
 
 ## [18.15.0] - 2026-11-01
 
