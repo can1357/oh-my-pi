@@ -11,11 +11,13 @@
  *      the failure backoff window — a repeat poll within the window is served
  *      from cache (no refetch); the entry expires and the next poll retries.
  */
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import {
 	type AuthCredential,
 	type AuthCredentialStore,
 	AuthStorage,
+	SqliteAuthCredentialStore,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
 import { usageCacheIdentity } from "@oh-my-pi/pi-ai/auth/usage-cache";
@@ -23,6 +25,7 @@ import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usa
 import { alibabaTokenPlanUsageProvider } from "@oh-my-pi/pi-ai/usage/alibaba-token-plan";
 import * as claudeUsage from "@oh-my-pi/pi-ai/usage/claude";
 import { serializeAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
+import { withEnv } from "./helpers";
 
 function anthropicReports(reports: UsageReport[] | null): UsageReport[] {
 	return (reports ?? []).filter(r => r.provider === "anthropic");
@@ -1332,29 +1335,52 @@ describe("AuthStorage usage cache: terminal refresh failure", () => {
 		}
 	});
 
-	it("suppresses last-good fallback when an expired OAuth access token has a definitive refresh failure", async () => {
+	it("suppresses last-good fallback after a leased refresh definitively fails for an expired access token", async () => {
 		const row = oauthRow(3, "expired@example.com");
 		if (row.credential.type !== "oauth") throw new Error("expected OAuth test credential");
 		row.credential.expires = Date.now() - 1000;
-		const store = makeStore([row]);
-		const cacheKey = "usage_cache:report:3:anthropic:default:oauth|account:account-3|email:expired@example.com";
-		store.cache.set(cacheKey, {
-			value: JSON.stringify({ value: makeReport("expired@example.com"), expiresAt: 1 }),
-			expiresAtSec: Math.floor((Date.now() + 24 * 60 * 60_000) / 1000),
-		});
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		const leaseSpy = vi.spyOn(store, "tryAcquireCredentialRefreshLease");
+		const disableSpy = vi.spyOn(store, "tryDisableAuthCredentialIfMatches");
 		const storage = new AuthStorage(store, {
 			usageProviderResolver: provider => (provider === "anthropic" ? claudeUsage.claudeUsageProvider : undefined),
 			refreshOAuthCredential: async () => {
 				throw new Error("OAuth refresh failed: 400 invalid_grant: refresh token revoked");
 			},
 		});
-		await storage.credentials.reload();
-		const fetchSpy = vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockResolvedValue(null);
 		try {
-			expect(anthropicReports(await storage.usage.reports())).toHaveLength(0);
+			await storage.credentials.set("anthropic", [row.credential]);
+			const credentialId = store.listAuthCredentials("anthropic")[0]!.id;
+			const cacheKey = "usage_cache:report:3:anthropic:default:oauth|account:account-3|email:expired@example.com";
+			store.setCache(
+				cacheKey,
+				JSON.stringify({ value: makeReport("expired@example.com"), expiresAt: 1 }),
+				Math.floor((Date.now() + 24 * 60 * 60_000) / 1000),
+			);
+			const fetchSpy = vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockResolvedValue(null);
+
+			let reports: UsageReport[] | null = null;
+			await withEnv({ ANTHROPIC_API_KEY: undefined, ANTHROPIC_OAUTH_TOKEN: undefined }, async () => {
+				reports = await storage.usage.reports();
+			});
+
+			// A generic OAuthError would leave the last-good report available as
+			// fallback; the original invalid_grant must reach usage-cache policy.
+			expect(anthropicReports(reports)).toHaveLength(0);
 			expect(fetchSpy).toHaveBeenCalledTimes(1);
-			expect(row.disabledCause).toBeNull();
-			const cached = JSON.parse(store.cache.get(cacheKey)!.value);
+			expect(fetchSpy.mock.calls[0]?.[0].credential.accessToken).toBe(row.credential.access);
+			expect(fetchSpy.mock.calls[0]?.[1]?.previousReport).toBeUndefined();
+			expect(leaseSpy).toHaveBeenCalledTimes(1);
+			expect(leaseSpy).toHaveBeenCalledWith(credentialId, expect.any(String), expect.any(Number));
+			expect(leaseSpy).toHaveReturnedWith(true);
+			expect(disableSpy).not.toHaveBeenCalled();
+			expect(storage.credentials.has("anthropic")).toBe(true);
+			const stored = store.listAuthCredentials("anthropic");
+			expect(stored).toHaveLength(1);
+			expect(stored[0]?.id).toBe(credentialId);
+			expect(stored[0]?.disabledCause).toBeNull();
+			expect(stored[0]?.credential).toEqual(row.credential);
+			const cached = JSON.parse(store.getCache(cacheKey, { includeExpired: true })!);
 			expect(cached.value).toBeNull();
 		} finally {
 			storage.close();

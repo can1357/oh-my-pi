@@ -924,9 +924,16 @@ export class OAuthRefresher {
 					// request was refused with; refresh again instead of returning it.
 					if (rejectedAccess === undefined || joined.access !== rejectedAccess) return joined;
 				} catch (error) {
-					// A usage probe preserves the credential on failure. A request that
-					// joined that probe must still apply the normal refresh policy.
+					// A usage probe preserves the credential on every failure. A non-usage
+					// caller retries even after a transient probe failure so it applies
+					// its own normal refresh policy.
 					if (existing.reason !== "usage-poll" || reason === "usage-poll" || signal?.aborted) throw error;
+					// The settled advisory flight remains registered until its cleanup
+					// callback runs. Remove only that entry before retrying, so this
+					// request cannot recursively join the same rejected promise.
+					if (this.#oauthCredentialRefreshInFlight.get(credentialId) === existing) {
+						this.#oauthCredentialRefreshInFlight.delete(credentialId);
+					}
 				}
 				return this.#refreshSingleFlight(provider, credential, credentialId, signal, reason, rejectedAccess);
 			}
@@ -938,6 +945,10 @@ export class OAuthRefresher {
 		if (credentialId === undefined) {
 			return this.#refreshOAuthCredentialUnshared(provider, credential, undefined, signal, reason, rejectedAccess);
 		}
+		const entry: { promise: Promise<OAuthCredentials>; reason?: OAuthRefreshReason } = {
+			promise: undefined as unknown as Promise<OAuthCredentials>,
+			reason,
+		};
 		const promise = this.#refreshOAuthCredentialUnshared(
 			provider,
 			credential,
@@ -955,9 +966,12 @@ export class OAuthRefresher {
 				return refreshed;
 			})
 			.finally(() => {
-				this.#oauthCredentialRefreshInFlight.delete(credentialId);
+				if (this.#oauthCredentialRefreshInFlight.get(credentialId) === entry) {
+					this.#oauthCredentialRefreshInFlight.delete(credentialId);
+				}
 			});
-		this.#oauthCredentialRefreshInFlight.set(credentialId, { promise, reason });
+		entry.promise = promise;
+		this.#oauthCredentialRefreshInFlight.set(credentialId, entry);
 		return raceSignal(promise, signal, "credential refresh aborted");
 	}
 
@@ -986,7 +1000,6 @@ export class OAuthRefresher {
 					this.#requestOAuthCredentialRefresh(provider, current, credentialId, refreshSignal, reason, undefined),
 				isDefinitiveFailure: error => AIError.isDefinitiveOAuthFailure(String(error)),
 				preserveCredentialOnDefinitiveFailure,
-				keepCredentialOnRefreshFailure: preserveCredentialOnDefinitiveFailure,
 				disabledCause: error => `oauth refresh failed: ${String(error)}`,
 			});
 			if (result.credential) {

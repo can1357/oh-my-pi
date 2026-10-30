@@ -11,6 +11,7 @@ import {
 } from "@oh-my-pi/pi-ai/auth-storage";
 import * as claudeUsage from "@oh-my-pi/pi-ai/usage/claude";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
+import { OAuthRefresher } from "../src/auth/refresh";
 import { removeWithRetries } from "../../utils/src/temp";
 import { withEnv } from "./helpers";
 
@@ -240,6 +241,69 @@ describe("AuthStorage OAuth refresh race", () => {
 			expect(stored[0].credential.access).toBe("still-valid-access");
 		}
 	});
+
+	test("a normal refresh joining a failed usage poll retries and disables the invalid grant once", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+
+		await authStorage.credentials.set("anthropic", [
+			{
+				type: "oauth",
+				access: "expired-access",
+				refresh: "stale-refresh",
+				expires: Date.now() - 1_000,
+			},
+		]);
+		const storedCredential = store.listAuthCredentials("anthropic")[0]!;
+		if (storedCredential.credential.type !== "oauth") throw new Error("expected OAuth test credential");
+		const { id: credentialId, credential } = storedCredential;
+		const refreshStarted = Promise.withResolvers<void>();
+		const allowRefresh = Promise.withResolvers<void>();
+		const invalidGrant = new Error('invalid_grant {"error":"invalid_grant"}');
+		let refresher: OAuthRefresher | undefined;
+		const refreshSpy = vi
+			.spyOn(oauthUtils, "refreshOAuthToken")
+			.mockRejectedValue(invalidGrant)
+			.mockImplementationOnce(async () => {
+				refreshStarted.resolve();
+				await allowRefresh.promise;
+				throw invalidGrant;
+			});
+		const originalRefresh = OAuthRefresher.prototype.refresh;
+		vi.spyOn(OAuthRefresher.prototype, "refresh").mockImplementation(
+			async function (this: OAuthRefresher, provider, credential, id, signal, reason, rejectedAccess) {
+				refresher = this;
+				if (reason !== "usage-poll") allowRefresh.resolve();
+				return originalRefresh.call(this, provider, credential, id, signal, reason, rejectedAccess);
+			},
+		);
+		authStorage.usage.setProvider("anthropic", claudeUsage.claudeUsageProvider);
+		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockResolvedValue({
+			provider: "anthropic",
+			fetchedAt: Date.now(),
+			limits: [],
+		});
+
+		await withEnv(SUPPRESS_ANTHROPIC_ENV, async () => {
+			const reports = authStorage!.usage.reports();
+			await refreshStarted.promise;
+
+			// A non-usage refresh enters the same single-flight before the advisory
+			// usage poll fails, then must apply normal definitive-failure handling.
+			if (!refresher) throw new Error("usage poll did not start a refresher");
+			const request = refresher.refresh("anthropic", credential, credentialId);
+			const requestRejected = expect(request).rejects.toThrow("OAuth credential no longer exists");
+			await Promise.all([reports, requestRejected]);
+		});
+
+		// The request must retry, not inherit the usage poll's advisory failure.
+		expect(refreshSpy).toHaveBeenCalledTimes(2);
+		expect(refreshSpy.mock.calls.map(call => call[1].refresh)).toEqual(["stale-refresh", "stale-refresh"]);
+		expect(events).toHaveLength(1);
+		expect(events[0]?.disabledCause).toContain("invalid_grant");
+		expect(authStorage.credentials.has("anthropic")).toBe(false);
+		expect(store.listAuthCredentials("anthropic")).toHaveLength(0);
+	});
+
 	test("persists every credential refreshed during candidate preflight", async () => {
 		if (!authStorage || !store) throw new Error("test setup failed");
 
