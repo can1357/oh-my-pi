@@ -7,6 +7,8 @@ import { BankManager, ValueError } from "./core/banks";
 import { BeamMemory } from "./core/beam";
 import type { ImportStats, RecallResult } from "./core/beam/types";
 import { runDiagnostics } from "./diagnose";
+import { postmortem } from "@oh-my-pi/pi-utils";
+import { startEmbedIpcServer } from "./embed-ipc";
 import { main as runMcpMain } from "./mcp-server";
 
 export interface CliIo {
@@ -176,6 +178,37 @@ export const cmdImport: CommandHandler = (args, context) => {
 export const cmdMcp: CommandHandler = async args => {
 	await runMcpMain(args);
 	return 0;
+};
+
+export const cmdEmbedServe: CommandHandler = async (args, context) => {
+	const flags = new Map<string, string>();
+	for (let i = 0; i < args.length; i += 2) {
+		const flag = args[i] ?? "";
+		const value = args[i + 1];
+		if (!["--model", "--cache-dir"].includes(flag) || value === undefined) {
+			usage("Usage: mnemopi embed-serve [--model ID] [--cache-dir DIR]");
+		}
+		flags.set(flag, value);
+	}
+	const server = await startEmbedIpcServer({ model: flags.get("--model"), cacheDir: flags.get("--cache-dir") });
+	if (server.alreadyRunning) {
+		err(context, `mnemopi embed-serve: already running at ${server.endpoint}`);
+		return 0;
+	}
+	// pi-utils postmortem owns SIGINT/SIGTERM and exits as soon as its cleanup
+	// pass settles, so a plain process listener never gets to run. Release the
+	// endpoint inside that pass, then SIGKILL before the exit reaches
+	// onnxruntime's crashing NAPI finalizer (issue #3031).
+	postmortem.register("mnemopi-embed-serve", async () => {
+		await server.stop().catch(() => {});
+		process.kill(process.pid, "SIGKILL");
+	});
+	err(context, `mnemopi embed-serve: ${server.model} at ${server.endpoint}`);
+	await server.closed.catch(error => err(context, `mnemopi embed-serve: ${String(error)}`));
+	// Release the native endpoint first, then bypass onnxruntime's crashing
+	// NAPI finalizer (issue #3031). Keep the loop parked until SIGKILL lands.
+	process.kill(process.pid, "SIGKILL");
+	return await Promise.withResolvers<number>().promise;
 };
 
 export const cmdRemember: CommandHandler = (args, context) => {
@@ -354,6 +387,7 @@ export const COMMANDS: Readonly<Record<string, CommandHandler>> = {
 	diagnose: cmdDiagnose,
 	doctor: cmdDiagnose,
 	mcp: cmdMcp,
+	"embed-serve": cmdEmbedServe,
 };
 
 export function printHelp(context?: CliContext): void {
@@ -372,6 +406,7 @@ export function printHelp(context?: CliContext): void {
 	out(context, "  diagnose                               Run diagnostics");
 	out(context, "  bank list|create|delete [name]         Manage memory banks");
 	out(context, "  mcp [args]                             Run MCP server");
+	out(context, "  embed-serve [--model ID] [--cache-dir DIR] Share local embeddings with omp");
 }
 
 export async function runCli(args: readonly string[] = Bun.argv.slice(2), context?: CliContext): Promise<number> {

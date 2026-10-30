@@ -6,6 +6,10 @@
 
 - Fixed a failing embedding provider (`embeddings.provider` or `setEmbeddingProvider`) leaving no trace: when its `embed()` or `available()` throws, the failure is now logged with the error, at debug level or at warn with runtime debug on, like local model failures; embedding still falls back to `null` as before
 
+### Added
+
+- Added `mnemopi embed-serve` so omp sessions and other mnemopi processes automatically share one local embedding model over native IPC, with an in-process fallback when no server is running. ([#13785](https://github.com/can1357/oh-my-pi/pull/13785) by [@STRML](https://github.com/STRML))
+
 ## [18.22.1] - 2026-11-17
 
 ### Fixed
