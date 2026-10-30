@@ -63,6 +63,8 @@ Native replay also requires a matching provider and a Responses-family API on th
 
 Disabling future native compaction does not disable normal replay of an existing payload. Compaction preparation has a separate, stricter reuse policy: local summarization must re-expand the original messages rather than treat an opaque placeholder as a readable summary.
 
+The LLM context is built for the model that reads it. When the active model cannot replay the latest OpenAI payload (another provider, including `openai` ↔ `openai-codex`), the context stands on the newest compaction it can read and carries the raw history behind the unreadable one; a model switch rebuilds the agent's messages when the two models stand on different boundaries. The pre-prompt threshold then measures that history, so a target whose window cannot hold it compacts before its first request. Retry fallback and context promotion judge a candidate's window against the context that candidate would read, and a compact-first switch (`/switch`, Alt+P, plan approval) skips a native method whose payload the target cannot replay.
+
 ## Compaction pipeline
 
 ### Triggers

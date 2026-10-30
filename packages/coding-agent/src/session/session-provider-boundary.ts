@@ -113,14 +113,16 @@ export class SessionProviderBoundary {
 	}
 
 	/**
-	 * Builds the current deobfuscated context for agent display and replay, sized for `model`'s frame budget
-	 * (the active model unless a caller is about to adopt another).
+	 * Builds the current deobfuscated context for agent display and replay as `model` reads it: sized for its
+	 * frame budget, standing on the newest compaction it can replay (the active model unless a caller is about
+	 * to adopt another).
 	 */
 	buildDisplaySessionContext(model = this.#host.model()): SessionContext {
 		return deobfuscateSessionContext(
 			this.#host.sessionManager.buildSessionContext({
 				inFlightToolCallIds: this.#inFlightToolCallIds(),
 				maxFrameDataBytes: snapcompact.frameDataBytesBudget(model),
+				model,
 			}),
 			this.#host.obfuscator(),
 		);

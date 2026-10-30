@@ -59,17 +59,23 @@ const codexTurn = (text: string, timestamp: number) => responsesTurn(active, tex
  */
 function maintenance(
 	messages: AgentMessage[],
-	options: { usageTokens?: number; providerSessionState?: Map<string, ProviderSessionState> } = {},
+	options: {
+		usageTokens?: number;
+		providerSessionState?: Map<string, ProviderSessionState>;
+		sessionManager?: SessionManager;
+	} = {},
 ): SessionMaintenance {
 	const agent = new Agent({ initialState: { model: active, systemPrompt: [], tools: [], messages } });
+	const sessionManager = options.sessionManager ?? SessionManager.inMemory();
 	const host = {
 		agent,
 		settings: Settings.isolated({ "compaction.reserveTokens": 200 }),
-		sessionManager: SessionManager.inMemory(),
 		model: () => active,
 		messages: () => agent.state.messages,
 		nonMessageTokenSource: () => ({}),
 		providerSessionState: options.providerSessionState,
+		sessionManager,
+		buildDisplaySessionContext: (model: Model = active) => sessionManager.buildSessionContext({ model }),
 		getContextUsage: ({ contextWindow }: { contextWindow: number }) =>
 			options.usageTokens === undefined
 				? undefined
@@ -138,5 +144,25 @@ describe("SessionMaintenance.contextFitsModel", () => {
 		const retained: AgentMessage = { role: "user", content: "x".repeat(7_600), timestamp: 0 };
 		const failed = codexTurn("Partial answer.", 1);
 		expect(maintenance([retained, failed]).contextFitsModel(candidate, failed)).toBe(false);
+	});
+
+	it("judges a candidate that cannot replay a remote compaction on the history behind it", () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({ role: "user", content: "x".repeat(16_000), timestamp: 0 });
+		const keptId = sessionManager.appendMessage(codexTurn("Compacted answer.", 1));
+		const compactionItem = { type: "compaction", encrypted_content: "native-state" };
+		sessionManager.appendCompaction("Remote compaction placeholder", undefined, keptId, 4_000, {
+			preserveData: {
+				openaiRemoteCompaction: { provider: active.provider, replacementHistory: [compactionItem], compactionItem },
+			},
+		});
+		sessionManager.appendMessage({ role: "user", content: "After compaction.", timestamp: 2 });
+		const live = sessionManager.buildSessionContext({ model: active }).messages;
+		const claude = { ...getBundledModel("anthropic", "claude-sonnet-4-5"), contextWindow: 2_000 };
+
+		// The codex candidate replays the payload: the small live context fits.
+		expect(maintenance(live, { sessionManager }).contextFitsModel(candidate)).toBe(true);
+		// Claude reads the ~4,000-token history behind it, which its window cannot hold.
+		expect(maintenance(live, { sessionManager }).contextFitsModel(claude)).toBe(false);
 	});
 });

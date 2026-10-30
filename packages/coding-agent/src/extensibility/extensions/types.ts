@@ -503,6 +503,13 @@ export interface CompactOptions {
 	 * and independent of this option.
 	 */
 	suppressContinuation?: boolean;
+	/**
+	 * The model that will read the compacted context when the caller switches to
+	 * it right after (a switch onto a smaller window compacts first). A
+	 * provider-native method whose replay payload that model cannot read is
+	 * skipped, so the switch does not land on a placeholder summary.
+	 */
+	readerModel?: Model;
 }
 
 /**

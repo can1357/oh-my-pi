@@ -6782,7 +6782,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					undefined,
 					undefined,
 					outcome => this.#applyDeferredPlanModelTransition(outcome, options.executionModel),
-					compactionPrompt,
+					{ internalGuidance: compactionPrompt, readerModel: options.executionModel?.model },
 				);
 			}
 		} finally {
@@ -9333,9 +9333,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		customInstructions?: string,
 		mode?: CompactMode,
 		beforeFlush?: (outcome: CompactionOutcome) => void | Promise<void>,
-		internalGuidance?: string,
+		options?: Pick<CompactOptions, "internalGuidance" | "readerModel">,
 	): Promise<CompactionOutcome> {
-		return this.#commandController.handleCompactCommand(customInstructions, mode, beforeFlush, internalGuidance);
+		return this.#commandController.handleCompactCommand(customInstructions, mode, beforeFlush, options);
 	}
 
 	handleHandoffCommand(customInstructions?: string): Promise<void> {

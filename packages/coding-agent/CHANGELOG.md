@@ -132,6 +132,7 @@
 ### Fixed
 
 - Fixed composer prediction ghost text being dropped or never shown when a silent advisor card lands after the turn
+- Switching away from a model whose session holds an OpenAI remote compaction (to another provider, including `openai` ↔ `openai-codex` and Codex → Grok) no longer leaves the new model with only a placeholder summary: it reads the history behind that compaction from its first request, compacting first when its window cannot hold it
 
 ## [18.15.0] - 2026-11-01
 

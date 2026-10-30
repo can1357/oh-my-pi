@@ -2453,12 +2453,12 @@ describe("InteractiveMode plan review rendering", () => {
 		// `customInstructions` channel of the `session_before_compact` hook —
 		// extensions there treat that field as user focus (issue #4359).
 		expect(compactSpy).toHaveBeenCalledTimes(1);
-		const [customInstructions, mode_, beforeFlush, internalGuidance] = compactSpy.mock.calls[0]!;
+		const [customInstructions, mode_, beforeFlush, options] = compactSpy.mock.calls[0]!;
 		expect(customInstructions).toBeUndefined();
 		expect(mode_).toBeUndefined();
 		expect(typeof beforeFlush).toBe("function");
-		expect(typeof internalGuidance).toBe("string");
-		expect(internalGuidance as string).toContain(planFilePath);
+		expect(typeof options?.internalGuidance).toBe("string");
+		expect(options?.internalGuidance).toContain(planFilePath);
 
 		// Plan-approved synthetic prompt was dispatched.
 		const planApprovedIdx = promptSpy.mock.calls.findIndex(isPlanApprovedCall);
