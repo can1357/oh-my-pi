@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added opt-in Korean interface messages while preserving default English rendering and existing behavior tests
+- Added opt-in Korean interface messages while preserving default English rendering and existing behavior tests ([#17440](https://github.com/can1357/oh-my-pi/pull/17440) by [@seojihun618-dotcom](https://github.com/seojihun618-dotcom))
 
 - Added a `maxRows` callback to `FigureMarkdown`, `SvgFigure` and `TableChartFigure` so surfaces shorter than the screen can fit their figures; zero hides a figure without delaying transcript completion ([#15661](https://github.com/can1357/oh-my-pi/issues/15661), [#15853](https://github.com/can1357/oh-my-pi/pull/15853) by [@KunoLu](https://github.com/KunoLu))
 
