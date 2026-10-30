@@ -233,6 +233,7 @@ function createRuntime() {
 			await this.moveTo(snapshot.cwd);
 			this.restoreState(snapshot);
 		},
+		commitSessionSwitch(_snapshot: { cwd: string }) {},
 		async setSessionFile(sessionFile: string) {
 			this._sessionFile = path.resolve(sessionFile);
 			const headerLine = (await Bun.file(this._sessionFile).text()).split("\n", 1)[0] ?? "{}";
