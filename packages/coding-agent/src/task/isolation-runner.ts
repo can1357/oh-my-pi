@@ -22,7 +22,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { logger, prompt } from "@oh-my-pi/pi-utils";
 import isolationErrorTemplate from "../prompts/tools/isolation-error.md" with { type: "text" };
 import isolationSummaryTemplate from "../prompts/tools/isolation-summary.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";
@@ -407,8 +407,15 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		return cleanupPromise;
 	};
 	const captureAndCleanup = async (): Promise<void> => {
-		if (!handle || !taskBaseline || retainWorkspace) {
+		try {
+			await capture();
+		} finally {
 			await cleanupHandle();
+		}
+	};
+	/** Write this run's patch, and its branch, from the sandbox as it stands. */
+	const capture = async (): Promise<void> => {
+		if (!handle || !taskBaseline || retainWorkspace) {
 			return;
 		}
 		const sandbox = handle;
@@ -464,8 +471,13 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				branchName: commitResult?.branchName,
 				nestedPatchPaths: patchResult.nestedPatchPaths,
 			});
-		} finally {
-			await cleanupHandle();
+		} catch (error) {
+			// The sandbox may be gone by the time a deferred capture runs.
+			if (releasedCapture === undefined) throw error;
+			logger.warn("later isolation capture failed; keeping the capture made at release", {
+				agentId: opts.agentId,
+				error: error instanceof Error ? error.message : String(error),
+			});
 		}
 	};
 	const releaseIsolation = (): Promise<void> => {
@@ -474,12 +486,19 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				await cleanupHandle();
 				return;
 			}
-			// Someone is still working in this sandbox. Capturing now would
-			// record the tree as it stands and miss everything they write
-			// afterwards, so the whole of capture-and-cleanup waits for them —
-			// not just the removal.
-			if (await deferTeardownWhileLeased(handle.mergedDir, captureAndCleanup)) return;
-			await captureAndCleanup();
+			// Capture now, whatever else happens: this release is what the
+			// parent's result is built from, and a capture postponed to an
+			// unknown later moment leaves that result with no patch and no
+			// branch for work the child really did.
+			await capture();
+			// Someone is still working in the sandbox — a nested child that
+			// inherited this cwd, a session another process opened in it. The
+			// removal waits for them, and so does a second capture, or
+			// everything they write after this moment is captured by nobody.
+			if (await deferTeardownWhileLeased(handle.mergedDir, captureAndCleanup, { generation: handle.generation })) {
+				return;
+			}
+			await cleanupHandle();
 		})();
 		return releasePromise;
 	};

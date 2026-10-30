@@ -2395,6 +2395,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// mutation (any tool) bumped it in the meantime.
 		const fileMutationVersions = new Map<string, number>();
 		const disposeCallbacks = new Set<() => void>();
+		/** Run the moment disposal starts, before anything it might wait on. */
+		const beginDisposeCallbacks = new Set<() => void>();
 		const activeToolNames = new Set<string>();
 		const toolRegistry = new Map<string, Tool & Pick<ToolDefinition, "defaultInactive">>();
 		const setActiveToolNames = (names: Iterable<string>): void => {
@@ -4475,8 +4477,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// than the run that owns it. Holding a lease keeps that owner's teardown
 		// — capture included — waiting for this session rather than deleting the
 		// directory it is working in.
-		const workspaceLease = await leaseIsolationWorkspace(sessionManager.getCwd());
-		disposeCallbacks.add(() => void workspaceLease());
+		// A session opened inside a task-isolation sandbox is a user of a
+		// workspace it did not materialise, and may be in another process than
+		// the run that owns it. The lease keeps that owner's teardown — capture
+		// included — waiting for this session. It carries the agent id, so the
+		// owner's own child session never pins its own run's sandbox, and it is
+		// dropped at the *start* of disposal: a session being torn down is no
+		// longer a user, and a disposal that stalls must not hold a workspace
+		// and a kernel behind it.
+		const workspaceLease = await leaseIsolationWorkspace(sessionManager.getCwd(), { agentId: resolvedAgentId });
+		beginDisposeCallbacks.add(() => void workspaceLease());
 		// Always installed; the getter-backed options are snapshotted per request,
 		// so `snapcompact.*` changes apply on the next call (a no-op while both are off).
 		const snapcompactInline = new SnapcompactInlineTransformer(
@@ -5335,6 +5345,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// begins — the lifecycle await below opens an async gap before
 					// AgentSession.dispose() would otherwise set its guards.
 					session.beginDispose();
+					// A session being torn down is no longer a user of anything it
+					// held: a hold dropped only at the end of disposal outlives a
+					// disposal that stalls, and keeps whatever is waiting on it
+					// waiting for ever.
+					for (const callback of beginDisposeCallbacks) {
+						try {
+							callback();
+						} catch (error) {
+							logger.warn("begin-dispose callback failed", { error: String(error) });
+						}
+					}
+					beginDisposeCallbacks.clear();
 					if (agentKind === "main") {
 						// Top-level teardown owns the global agent lifecycle: park timers,
 						// adopted subagent sessions, revivers. Tear it down while shared

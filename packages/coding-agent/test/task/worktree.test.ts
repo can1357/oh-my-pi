@@ -17,12 +17,15 @@ import {
 	IsolationBaselineTooLargeError,
 	mergeTaskBranches,
 	parseIsolationBackend,
-	resolveSandboxIdentity,
 } from "@oh-my-pi/pi-coding-agent/task/worktree";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { leaseIsolationWorkspace } from "@oh-my-pi/pi-coding-agent/task/isolation-lease";
-import { ISOLATION_OWNER_FILE, writeIsolationOwner } from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
+import {
+	ISOLATION_OWNER_FILE,
+	resolveSandboxIdentity,
+	writeIsolationOwner,
+} from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
 import { removeWithRetries, setWorktreesDir, tryAcquireFileLock } from "@oh-my-pi/pi-utils";
 
 const tempDirs: string[] = [];
@@ -1215,6 +1218,54 @@ describe("detachGitDir", () => {
 			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
 			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
 		}
+	});
+
+	it("refuses to materialise over a sandbox a live session is leasing", async () => {
+		// Taking the slot destroys what is in it. A live lease belongs to a
+		// session whose cwd and whose files would go with the directory.
+		const { wt } = await makeLinkedWorktree();
+		vi.spyOn(natives, "isoResolve").mockResolvedValue({
+			kind: natives.IsoBackendKind.Rcopy,
+			candidates: [natives.IsoBackendKind.Rcopy],
+			fellBack: false,
+			reason: undefined,
+		});
+		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-leased-slot-"));
+		tempDirs.push(worktreeBase);
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(worktreeBase);
+		try {
+			const handle = await ensureIsolation(wt, "leased-slot");
+			const childFile = path.join(handle.mergedDir, "child.txt");
+			await fs.writeFile(childFile, "written by a live child\n");
+			const user = await leaseIsolationWorkspace(handle.mergedDir, { agentId: "Nested-Child" });
+
+			await expect(ensureIsolation(wt, "leased-slot")).rejects.toThrow("still in use by a live session");
+			expect(await Bun.file(childFile).exists()).toBe(true);
+
+			// Once the user leaves, the slot is reusable.
+			await user();
+			const successor = await ensureIsolation(wt, "leased-slot");
+			expect(successor.generation).not.toBe(handle.generation);
+			expect(await Bun.file(childFile).exists()).toBe(false);
+		} finally {
+			setWorktreesDir(undefined);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		}
+	});
+
+	it("raises a canonicalisation failure instead of falling back to the alias", async () => {
+		// Both paths would then be lockable at once, which is the state the
+		// identity exists to prevent.
+		const real = await fs.mkdtemp(path.join(os.tmpdir(), "omp-identity-fail-"));
+		tempDirs.push(real);
+		vi.spyOn(fs, "realpath").mockImplementation(async () => {
+			throw Object.assign(new Error("EIO"), { code: "EIO" });
+		});
+
+		await expect(resolveSandboxIdentity(real)).rejects.toThrow("EIO");
 	});
 
 	it("resolves a sandbox reached through a symlink to the same identity", async () => {

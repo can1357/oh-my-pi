@@ -13,6 +13,39 @@ import { isEnoent, Snowflake } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { hasLiveIsolationLease } from "./isolation-lease";
 
+/**
+ * How long a materialisation, teardown, lease or reclamation waits for the
+ * sandbox lock another one holds. Waiting for each other is the point.
+ */
+export const SANDBOX_LOCK_WAIT = { retries: 600, retryDelayMs: 100 };
+
+/**
+ * The canonical path of a sandbox, which is its identity.
+ *
+ * A lock is a name, not a directory: two paths that reach the same directory
+ * through different symlinks hash to different lock names, so each would think
+ * it had exclusive access while both materialised and deleted the same files.
+ * Resolving symlinks before locking, claiming, leasing or deleting makes the
+ * name the directory.
+ *
+ * The sandbox need not exist yet, so a leaf that is simply absent is taken
+ * from its nearest existing parent. Any other failure — a permission error, an
+ * I/O error — is raised: silently falling back to the alias is how two holders
+ * end up with two locks on one directory, and a caller that cannot establish
+ * the identity must not act as though it had.
+ */
+export async function resolveSandboxIdentity(target: string): Promise<string> {
+	const absolute = path.resolve(target);
+	try {
+		return await fs.realpath(absolute);
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+		const parent = path.dirname(absolute);
+		if (parent === absolute) return absolute;
+		return path.join(await resolveSandboxIdentity(parent), path.basename(absolute));
+	}
+}
+
 const { IsoBackendKind } = natives;
 
 /** Marker file written into a task-isolation base dir identifying its owner. */
@@ -159,6 +192,17 @@ export async function markIsolationRetired(baseDir: string): Promise<void> {
 }
 
 /**
+ * Mark a sandbox whose teardown is still running in place, after an in-place
+ * backend stop outran its bound. The stop can still delete this path, so
+ * nothing may materialise here until it settles — and when it never does, the
+ * marker names the process to wait on, so reclamation can retire it once that
+ * process is gone.
+ */
+export async function markIsolationRetiring(baseDir: string): Promise<void> {
+	await writeProcessIdentity(path.join(baseDir, ISOLATION_OWNER_FILE), { retiring: true });
+}
+
+/**
  * What the marker at `baseDir` says, told apart from not being able to read it.
  *
  * A teardown may only delete a sandbox it can still prove is its own, so
@@ -171,6 +215,8 @@ export async function markIsolationRetired(baseDir: string): Promise<void> {
 export type IsolationClaim =
 	/** The marker names the generation that currently owns the sandbox. */
 	| { kind: "claimed"; generation: string }
+	/** A teardown is still running on this path; nothing may materialise here. */
+	| { kind: "retiring" }
 	/** The marker cannot be read, or carries no generation. */
 	| { kind: "unknown"; reason: string };
 
@@ -182,7 +228,11 @@ export async function readIsolationClaim(baseDir: string): Promise<IsolationClai
 	} catch (error) {
 		return { kind: "unknown", reason: error instanceof Error ? error.message : String(error) };
 	}
-	if (typeof decoded !== "object" || decoded === null || !("generation" in decoded)) {
+	if (typeof decoded !== "object" || decoded === null) {
+		return { kind: "unknown", reason: "marker is not an object" };
+	}
+	if ("retiring" in decoded && decoded.retiring === true) return { kind: "retiring" };
+	if (!("generation" in decoded)) {
 		return { kind: "unknown", reason: "marker carries no generation" };
 	}
 	const generation = decoded.generation;

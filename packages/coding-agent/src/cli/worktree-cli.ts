@@ -24,7 +24,13 @@ import { getWorktreesDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { acquireFileLock } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
-import { decideIsolationReclaim, ISOLATION_OWNER_FILE, readRetainedMountBackend } from "../task/isolation-ownership";
+import {
+	decideIsolationReclaim,
+	ISOLATION_OWNER_FILE,
+	readRetainedMountBackend,
+	resolveSandboxIdentity,
+	SANDBOX_LOCK_WAIT,
+} from "../task/isolation-ownership";
 import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 
 import { cfgIsolationBackend, cfgWorktreeClone } from "../task/settings";
@@ -232,17 +238,21 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 			} else {
 				if (target.kind === "task-isolation") {
 					// The scan is a decision taken earlier; this is the moment of
-					// deletion. Under the sandbox's own lock, so a materialisation
-					// cannot land between the two, ask again — unless `--all` was
-					// asked for, which deletes whatever is there.
-					const lock = await acquireFileLock(target.path);
+					// deletion. Resolve the sandbox to the directory itself first:
+					// locking and deleting the scanned path lets a symlink swapped
+					// in between point the removal at a different, live sandbox,
+					// and a lock on an alias excludes nobody. Then, under that
+					// lock, ask again — unless `--all` was asked for, which
+					// deletes whatever is there.
+					const sandbox = await resolveSandboxIdentity(target.path);
+					const lock = await acquireFileLock(sandbox, SANDBOX_LOCK_WAIT);
 					try {
-						if (!options.all && !(await decideIsolationReclaim(target.path)).reclaimable) {
+						if (!options.all && !(await decideIsolationReclaim(sandbox)).reclaimable) {
 							results.push({ path: target.path, ok: true, skipped: true });
 							continue;
 						}
-						await stopRetainedMount(target.path);
-						await fs.rm(target.path, { recursive: true, force: true });
+						await stopRetainedMount(sandbox);
+						await fs.rm(sandbox, { recursive: true, force: true });
 					} finally {
 						lock.release();
 					}

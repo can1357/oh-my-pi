@@ -11,11 +11,19 @@ import { acquireFileLock, formatBytes, getWorktreeDir, isEnoent, logger, Snowfla
 import type { SettingValueOf } from "../config/registry";
 
 import { withRepoLock } from "../utils/repo-lock";
-import { deferTeardownWhileLeased, forgetIsolationWorkspace, registerIsolationWorkspace } from "./isolation-lease";
+import {
+	deferTeardownWhileLeased,
+	forgetIsolationWorkspace,
+	hasLiveIsolationLease,
+	registerIsolationWorkspace,
+} from "./isolation-lease";
 import {
 	clearClaimedWorkspace,
 	markIsolationRetired,
+	markIsolationRetiring,
 	readIsolationClaim,
+	resolveSandboxIdentity,
+	SANDBOX_LOCK_WAIT,
 	writeIsolationOwner,
 } from "./isolation-ownership";
 import { mapWithConcurrencyLimit } from "./parallel";
@@ -26,8 +34,6 @@ const { IsoBackendKind } = natives;
 const TASK_ISOLATION_DIR_PREFIX = "t";
 const TASK_ISOLATION_DIR_DIGEST_CHARS = 9;
 const TASK_ISOLATION_MOUNT_DIR = "m";
-/** How long a materialisation or teardown waits for the sandbox lock another one holds. */
-const SANDBOX_LOCK_WAIT = { retries: 600, retryDelayMs: 100 };
 /** How long an in-place teardown holds the lock for a backend stop before leaving it to reclamation. */
 const SANDBOX_STOP_MAX_WAIT_MS = 10_000;
 const GIT_NETWORK_TIMEOUT_MS = 30 * 60 * 1000;
@@ -662,27 +668,6 @@ async function detachSubmodules(sourceRoot: string, isolationRoot: string): Prom
 	}
 }
 
-/**
- * The canonical path of a sandbox, which is its identity.
- *
- * A lock is a name, not a directory: two paths that reach the same directory
- * through different symlinks hash to different lock names, so each would think
- * it had exclusive access while both materialised and deleted the same files.
- * Resolving symlinks before locking, claiming or deleting makes the name the
- * directory. The sandbox need not exist yet, so an unresolvable leaf is taken
- * from its nearest existing parent.
- */
-export async function resolveSandboxIdentity(baseDir: string): Promise<string> {
-	const absolute = path.resolve(baseDir);
-	try {
-		return await fs.realpath(absolute);
-	} catch {
-		const parent = path.dirname(absolute);
-		if (parent === absolute) return absolute;
-		return path.join(await resolveSandboxIdentity(parent), path.basename(absolute));
-	}
-}
-
 export async function ensureIsolation(
 	baseCwd: string,
 	id: string,
@@ -703,6 +688,23 @@ export async function ensureIsolation(
 		const lock = await acquireFileLock(baseDir, SANDBOX_LOCK_WAIT);
 		let claimed = false;
 		try {
+			// Taking this slot destroys what is in it, so the same question the
+			// teardown asks is asked here, under the same lock: is anybody still
+			// working in this sandbox? A live lease belongs to a session — this
+			// process's or another's — whose cwd and whose files would go with
+			// the directory, and no replacement is worth that.
+			if (await hasLiveIsolationLease(baseDir)) {
+				throw new Error(
+					`Isolation workspace ${baseDir} is still in use by a live session; refusing to materialise over it.`,
+				);
+			}
+			// A teardown that outran its bound left its backend stop running on
+			// this path. Materialising beside it hands the successor to that
+			// stop's removal.
+			const existingClaim = await readIsolationClaim(baseDir);
+			if (existingClaim.kind === "retiring") {
+				throw new Error(`Isolation workspace ${baseDir} is being torn down; refusing to materialise over it.`);
+			}
 			// Claim ownership before anything is destroyed or materialised. The
 			// previous contents go only once this generation's marker is on disk,
 			// so live data never sits under no marker, and the previous owner's
@@ -726,8 +728,10 @@ export async function ensureIsolation(
 			await detachSubmodules(repoRoot, mergedDir);
 			await vcs.detachGitDir(mergedDir, sourceCommonDir);
 			// Descendants that inherit this cwd without materialising anything of
-			// their own are accounted for against this sandbox from here.
-			registerIsolationWorkspace(mergedDir);
+			// their own are accounted for against this sandbox from here. The
+			// owner's own child session leases it too, under this agent id, and
+			// that lease does not pin the sandbox against its own run.
+			registerIsolationWorkspace(mergedDir, { baseDir, generation, agentId: id });
 			return {
 				mergedDir,
 				generation,
@@ -795,7 +799,7 @@ export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
 				logger.warn("isolation cleanup skipped: the workspace is no longer provably this run's", {
 					mergedDir: handle.mergedDir,
 					expected: handle.generation,
-					found: claim.kind === "claimed" ? claim.generation : `unknown (${claim.reason})`,
+					found: claim.kind === "claimed" ? claim.generation : claim.kind,
 				});
 				return;
 			}
@@ -805,7 +809,13 @@ export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
 		// after the claim check, so a lease taken while this teardown was
 		// deciding still counts. The owner keeps the teardown; the last user to
 		// leave runs it. See `isolation-lease`.
-		if (await deferTeardownWhileLeased(handle.mergedDir, async () => await cleanupIsolation(handle))) return;
+		if (
+			await deferTeardownWhileLeased(handle.mergedDir, async () => await cleanupIsolation(handle), {
+				generation: handle.generation,
+			})
+		) {
+			return;
+		}
 		const candidate = `${baseDir}.retiring-${handle.generation ?? Snowflake.next()}`;
 		try {
 			await fs.rename(baseDir, candidate);
@@ -846,6 +856,12 @@ export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
 						backend: handle.backend,
 						mergedDir: teardownMerged,
 					});
+					// The stop is still running on this exact path and can still
+					// delete it. Saying so is what keeps a materialisation from
+					// taking the slot and handing its successor to that removal;
+					// the marker names this process, so reclamation can retire the
+					// directory once it is gone.
+					await markIsolationRetiring(teardownBase).catch(() => undefined);
 				}
 			} else {
 				await stop;
@@ -867,8 +883,10 @@ export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
 			});
 		} finally {
 			// Always: a removal that threw must not keep the sandbox locked for
-			// the life of this process.
-			forgetIsolationWorkspace(handle.mergedDir);
+			// the life of this process. Keyed by generation, so an older
+			// teardown finishing cannot drop the record — and the pending
+			// teardown — of the materialisation that replaced it.
+			forgetIsolationWorkspace(handle.mergedDir, handle.generation);
 			if (retiredDir === undefined) lock.release();
 		}
 	}
