@@ -17,11 +17,13 @@ import type {
 	ToolResultMessage,
 	Usage,
 } from "@oh-my-pi/pi-ai";
+import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { streamGoogle } from "@oh-my-pi/pi-ai/providers/google";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { ResponseInput, ResponseOutputItem } from "@oh-my-pi/pi-ai/providers/openai-responses-wire";
 import { createOpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai/utils";
+import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { AutoLearnController, buildAutoLearnInstructions } from "@oh-my-pi/pi-coding-agent/autolearn/controller";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -465,9 +467,9 @@ describe("isolated auto-learn capture", () => {
 		expect(new SentToolDefinitions().inactiveFor(replayed, learnWire)).toBeUndefined();
 	});
 
-	it("drops a tool the Umans gateway would run itself instead of advertising a refused copy", async () => {
-		const mock = createMockModel({ responses: [{ content: ["Nothing to keep."] }] });
-		const umans = buildModel({
+	it("sends no tool the Umans gateway would run itself, active or re-declared, on the capture's wire", async () => {
+		const mock = createMockModel({ responses: [{ content: ["Primary answer."] }] });
+		const built = buildModel({
 			id: "claude-test",
 			name: "Umans test",
 			api: "anthropic-messages",
@@ -480,22 +482,63 @@ describe("isolated auto-learn capture", () => {
 			contextWindow: 128_000,
 			maxTokens: 8_192,
 		});
+		// With declaration replay on, a withdrawn tool's sent definition would be declared again.
+		const umans = { ...built, compat: { ...built.compat, supportsMidConversationToolChanges: true } };
 		const webSearch = captureTool("web_search", "Search the web");
 		const readTool = captureTool("read", "Read files");
 		const learnTool = captureTool("learn", "Remember a fact");
-		let advertised: string[] | undefined;
-		await createAutoLearnCaptureRunner({
-			sourceAgent: new Agent({
-				initialState: { model: umans, systemPrompt: ["Test"], tools: [webSearch, readTool, learnTool] },
-			}),
-			captureTools: () => [learnTool],
-			createAgent: options => {
-				advertised = options.initialState?.tools?.map(t => t.name);
-				return new Agent({ ...options, convertToLlm, streamFn: mock.stream });
+		// The primary sent all three, and its last response kept a declaration that names `web_search`.
+		const declaring: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "Searched." }],
+			api: "anthropic-messages",
+			provider: "umans",
+			model: "claude-test",
+			usage: ZERO_USAGE,
+			stopReason: "stop",
+			timestamp: 2,
+			requestControls: {
+				messageIndex: 1,
+				tools: { declared: ["web_search", "read", "learn"], deferred: [], active: ["web_search", "read", "learn"] },
 			},
+		};
+		const sourceAgent = new Agent({
+			initialState: {
+				model: umans,
+				systemPrompt: ["Test"],
+				tools: [webSearch, readTool, learnTool],
+				messages: [{ role: "user", content: "Look it up", timestamp: 1 }, declaring],
+			},
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		await sourceAgent.prompt("Earlier task");
+		let requestBody = "";
+		const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
+			requestBody = requestBodyText(init) ?? "";
+			return new Response(
+				JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "x" } }),
+				{
+					status: 400,
+					headers: { "Content-Type": "application/json" },
+				},
+			);
+		}) as typeof fetch;
+		await createAutoLearnCaptureRunner({
+			sourceAgent,
+			captureTools: () => [learnTool],
+			createAgent: options =>
+				new Agent({
+					...options,
+					convertToLlm,
+					streamFn: (_requestModel, context, streamOptions) =>
+						streamAnthropic(umans, context, { ...streamOptions, apiKey: "test-key", fetch: fetchMock }),
+				}),
 		})("Capture");
 
-		expect(advertised).toEqual(["read", "learn"]);
+		const tools = (JSON.parse(requestBody) as { tools?: { name: string }[] }).tools ?? [];
+		expect(tools.map(t => t.name)).toEqual(["_read", "_learn"]);
+		expect(requestBody).not.toContain("web_search");
 	});
 
 	it("refuses a call to a non-capture tool without running any of its code", async () => {

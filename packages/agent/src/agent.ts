@@ -648,9 +648,12 @@ export class Agent {
 		this.#promptCacheKey = value;
 	}
 
-	/** A detached copy of the tool definitions this agent has sent (`AgentOptions.sentToolDefinitions`). */
-	copySentToolDefinitions(): SentToolDefinitions {
-		return this.#sentToolDefinitions.copy();
+	/**
+	 * A detached copy of the tool definitions this agent has sent (`AgentOptions.sentToolDefinitions`), without the
+	 * names `keep` rejects.
+	 */
+	copySentToolDefinitions(keep?: (name: string) => boolean): SentToolDefinitions {
+		return this.#sentToolDefinitions.copy(keep);
 	}
 
 	/**

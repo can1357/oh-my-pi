@@ -27,7 +27,7 @@ import type {
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import type { DiscoverAuthStorageOptions } from "@oh-my-pi/pi-ai/auth-broker/discover";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
-import { usesUmansGatewayWebSearch } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { anthropicHostRunsTool } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { isOpenAICodexWebSocketPreferred } from "@oh-my-pi/pi-ai/providers/openai-codex-transport";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
@@ -1735,13 +1735,9 @@ export interface AutoLearnCaptureRunnerOptions {
 	createSessionId?: () => string;
 }
 
-/** Tools a provider runs itself, never dispatching the call to the client: a refused copy could not stop them. */
-function providerExecutesTool(model: Model, tool: AgentTool): boolean {
-	return (
-		model.api === "anthropic-messages" &&
-		tool.name.toLowerCase() === "web_search" &&
-		usesUmansGatewayWebSearch(model as Model<"anthropic-messages">)
-	);
+/** A tool the host runs itself, never dispatching the call to the client: a refused copy could not stop it. */
+function hostRunsTool(model: Model, name: string): boolean {
+	return model.api === "anthropic-messages" && anthropicHostRunsTool(model as Model<"anthropic-messages">, name);
 }
 
 /** Build a private capture runner over a detached message snapshot and provider session. */
@@ -1792,7 +1788,7 @@ export function createAutoLearnCaptureRunner(
 				disableReasoning: options.sourceAgent.state.disableReasoning,
 				// A provider-executed tool is dropped instead: that costs the prefix only where the gateway search is on.
 				tools: captureToolList(
-					options.sourceAgent.state.tools.filter(tool => !providerExecutesTool(captureModel, tool)),
+					options.sourceAgent.state.tools.filter(tool => !hostRunsTool(captureModel, tool.name)),
 					captureTools,
 				),
 				messages: captureMessages,
@@ -1805,8 +1801,8 @@ export function createAutoLearnCaptureRunner(
 				options.sourceAgent.promptCacheKey ??
 				options.sourceAgent.sessionId,
 			// The replayed history's `requestControls` declare tools the primary withdrew (Anthropic `tool_removal`);
-			// their sent definitions keep that declaration byte-identical.
-			sentToolDefinitions: options.sourceAgent.copySentToolDefinitions(),
+			// their sent definitions keep that declaration byte-identical. A host-run tool is never declared again.
+			sentToolDefinitions: options.sourceAgent.copySentToolDefinitions(name => !hostRunsTool(captureModel, name)),
 			providerSessionState: captureProviderSessionState,
 			getApiKey: requestModel => options.sourceAgent.getApiKey?.(requestModel),
 			onPayload: options.onPayload,

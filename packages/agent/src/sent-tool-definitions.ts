@@ -13,10 +13,13 @@ export class SentToolDefinitions {
 		for (const tool of tools) this.#byName.set(tool.name, tool);
 	}
 
-	/** A detached copy: an Agent that replays another's request history declares the same withdrawn tools. */
-	copy(): SentToolDefinitions {
+	/**
+	 * A detached copy: an Agent that replays another's request history declares the same withdrawn tools. `keep`
+	 * leaves out a definition the copy must never declare.
+	 */
+	copy(keep: (name: string) => boolean = () => true): SentToolDefinitions {
 		const copy = new SentToolDefinitions();
-		copy.record([...this.#byName.values()]);
+		copy.record([...this.#byName.values()].filter(tool => keep(tool.name)));
 		return copy;
 	}
 

@@ -652,12 +652,17 @@ function getUmansWebSearchHeader(
 	return provider ? { [UMANS_WEBSEARCH_PROVIDER_HEADER]: provider } : undefined;
 }
 
-/** Whether a request to `model` has the Umans gateway run `web_search` itself, never dispatching it to the client. */
-export function usesUmansGatewayWebSearch(
+/**
+ * Whether a request to `model` sends the tool `name` for the host to run itself, never dispatching the call to the
+ * client: the same decision `encodeAnthropicToolName` makes on the wire.
+ */
+export function anthropicHostRunsTool(
 	model: Model<"anthropic-messages">,
+	name: string,
 	headers?: Record<string, string>,
 ): boolean {
-	return getUmansWebSearchHeader(model, mergeHeaders(model.headers, headers)) !== undefined;
+	const gatewayWebSearch = getUmansWebSearchHeader(model, mergeHeaders(model.headers, headers)) !== undefined;
+	return shouldUseUmansGatewayWebSearch(name, gatewayWebSearch);
 }
 
 function shouldUseUmansGatewayWebSearch(name: string, enabled: boolean): boolean {
