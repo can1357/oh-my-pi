@@ -1128,6 +1128,17 @@ export class SessionMaintenance {
 	 * `session_compact` hook or `onComplete` throwing after the append) still
 	 * resumes the interrupted turn exactly as the direct path does.
 	 */
+	/** Owns an invocation of a callback an extension handed to `ctx.compact`. This class is the
+	 *  party that CALLS `onComplete`/`onError`, so it is the only one that knows when the call
+	 *  starts and ends; the options object the extension passed is never rewritten. */
+	#ownCompactionCallback<A extends unknown[]>(
+		callback: ((...args: A) => unknown) | undefined,
+	): ((...args: A) => unknown) | undefined {
+		if (!callback) return undefined;
+		const owner = this.#host.extensionRunner?.callbackOwner;
+		return owner ? owner.ownCallback(callback) : callback;
+	}
+
 	async compact(
 		customInstructions?: string,
 		options?: CompactOptions,
@@ -1241,7 +1252,7 @@ export class SessionMaintenance {
 					compactionAbortController,
 					markCommitted,
 				);
-				options?.onComplete?.(result);
+				this.#ownCompactionCallback(options?.onComplete)?.(result);
 				return finish(result);
 			}
 
@@ -1588,7 +1599,7 @@ export class SessionMaintenance {
 				preserveData: snapcompact.stripPreservedArchive(preserveData),
 				...(providerReplayThroughEntryId ? { providerReplayThroughEntryId } : {}),
 			};
-			options?.onComplete?.(compactionResult);
+			this.#ownCompactionCallback(options?.onComplete)?.(compactionResult);
 			return finish(compactionResult);
 		} catch (error) {
 			manualCompactionError = error;
@@ -1623,7 +1634,10 @@ export class SessionMaintenance {
 					throw fallbackError;
 				}
 			}
-			options?.onError?.(err);
+			// Owned at the invoker: this is the party that CALLS `onError`, and the continuation it
+			// returns outlives the command that handed it over. The options object is left exactly
+			// as the extension passed it — only this call is wrapped.
+			this.#ownCompactionCallback(options?.onError)?.(err);
 			throw error;
 		} finally {
 			if (ownsCompactionController) {

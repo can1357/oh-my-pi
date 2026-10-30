@@ -23,12 +23,13 @@ export class ManagedTimers {
 	readonly #timers = new Set<Timer>();
 
 	/** @param onError reports a throw or rejection from a managed callback.
-	 *  @param own reports the callback itself to whoever owns extension-callback lifetimes.
+	 *  @param own wraps the callback with whoever owns extension-callback lifetimes: it refuses
+	 *  once that owner has retired, and counts the call while it runs.
 	 *  Clearing a handle stops future firings; it says nothing about a callback already running,
 	 *  and `clearAll()` on teardown is exactly the moment one is most likely to be mid-flight. */
 	constructor(
 		private readonly onError: ManagedTimerErrorHandler,
-		private readonly own: <T>(result: T) => T = result => result,
+		private readonly own: <A extends unknown[], R>(fn: (...args: A) => R) => (...args: A) => R | undefined = fn => fn,
 	) {}
 
 	/** Schedule a repeating callback whose throws are contained. */
@@ -72,7 +73,11 @@ export class ManagedTimers {
 
 	#run(kind: "interval" | "timeout", callback: (...args: unknown[]) => void, args: unknown[]): void {
 		try {
-			const result: unknown = this.own(callback(...args) as unknown);
+			// The CALLBACK is owned, not its result: clearing a handle stops future firings, and a
+			// result can only be reported after the call already happened. A retired session's
+			// timer must not run at all — including one a suspended callback scheduled after
+			// teardown — so the owner refuses it here.
+			const result: unknown = this.own(callback)(...args);
 			// Thenable duck-typing, not `instanceof`: a callback from another realm or a hand-rolled
 			// thenable rejects just as loudly, and an unreported rejection here is the
 			// uncaughtException this class exists to prevent.

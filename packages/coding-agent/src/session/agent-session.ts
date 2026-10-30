@@ -2254,6 +2254,14 @@ export class AgentSession implements SettingsScope {
 		this.#promptTemplates = config.promptTemplates ?? [];
 		this.#slashCommands = config.slashCommands ?? [];
 		this.#extensionRunner = config.extensionRunner;
+		// This session claims the runner's extension callbacks. A host may reuse one runner and
+		// runtime for several sessions in turn (see `agent-session-concurrent.test.ts`), so the
+		// claim a session takes here, and releases in `dispose`, is what keeps those callbacks
+		// live — not the runner's own lifetime. Optional call: a duck-typed partial runner is a
+		// supported host shape.
+		if (typeof config.extensionRunner?.claimExtensionCallbacks === "function") {
+			config.extensionRunner.claimExtensionCallbacks();
+		}
 		this.#cacheWarmer = config.cacheWarmer;
 		if (config.cacheWarmer) {
 			const warmer = config.cacheWarmer;
@@ -6757,7 +6765,9 @@ export class AgentSession implements SettingsScope {
 			await this.#drainQueuedPreparations();
 			await this.#drainInFlightEventHandlers();
 			await this.#drainExtensionNotifications();
-			await this.#extensionRunner?.waitForPendingHandlerWork();
+			if (typeof this.#extensionRunner?.waitForPendingHandlerWork === "function") {
+				await this.#extensionRunner.waitForPendingHandlerWork();
+			}
 		} while (this.#hasLiveSessionWork());
 	}
 
@@ -6778,7 +6788,8 @@ export class AgentSession implements SettingsScope {
 			this.#queuedPreparations.size > 0 ||
 			this.#inFlightEventHandlers.size > 0 ||
 			this.#drainingExtensionEvents ||
-			this.#extensionRunner?.hasPendingHandlerWork() === true
+			(typeof this.#extensionRunner?.hasPendingHandlerWork === "function" &&
+				this.#extensionRunner.hasPendingHandlerWork())
 		);
 	}
 

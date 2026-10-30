@@ -500,11 +500,15 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			// expose its settings to registered tools and any fallback handlers they
 			// trigger. `sdk.ts` wraps the whole tool registry with this class whenever
 			// a runner exists.
-			result = await this.runner.runScoped(() =>
+			const executed = await this.runner.runScoped(() =>
 				withFileMutationSession(this.runner.sessionId, () =>
 					this.tool.execute(toolCallId, effectiveParams, signal, onUpdate, context),
 				),
 			);
+			// `runScoped` refuses once the session is retired: its extensions must not run after
+			// disposal, and a tool call arriving then has no session left to act on.
+			if (executed === undefined) throw new Error("Session disposed; extension tool was not executed");
+			result = executed;
 		} catch (err) {
 			executionError = err instanceof Error ? err : new Error(String(err));
 			result = {

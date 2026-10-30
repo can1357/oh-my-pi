@@ -1172,8 +1172,7 @@ describe("AgentSession settles what it promised", () => {
 	it("does not finish disposal in the gap between two handlers of one broadcast", async () => {
 		const firstEntered = Promise.withResolvers<void>();
 		const releaseFirst = Promise.withResolvers<void>();
-		const secondEntered = Promise.withResolvers<void>();
-		const releaseSecond = Promise.withResolvers<void>();
+		let secondSeen = false;
 		let armed = false;
 		await startPooledRunWithStrandedAside(undefined, undefined, undefined, pi => {
 			// Two handlers for one event: the broadcast runs them one after another, so between
@@ -1183,10 +1182,9 @@ describe("AgentSession settles what it promised", () => {
 				firstEntered.resolve();
 				await releaseFirst.promise;
 			});
-			pi.on("agent_start", async () => {
+			pi.on("agent_start", () => {
 				if (!armed) return;
-				secondEntered.resolve();
-				await releaseSecond.promise;
+				secondSeen = true;
 			});
 		});
 		const resetSpy = spyOn(Agent.prototype, "reset");
@@ -1200,31 +1198,27 @@ describe("AgentSession settles what it promised", () => {
 			expect(resetSpy.mock.calls).toHaveLength(1);
 
 			releaseFirst.resolve();
-			await withTimeout(secondEntered.promise, 5_000, "second handler never entered");
-			for (let i = 0; i < 20; i++) await setImmediate();
-			// The finalizer must not have run in the gap, nor while the second handler holds.
-			expect(resetSpy.mock.calls).toHaveLength(1);
-
-			releaseSecond.resolve();
 			await broadcast;
-			for (let i = 0; i < 20; i++) await setImmediate();
+			for (let i = 0; i < 40; i++) await setImmediate();
+			// Retirement, not observation: a handler of this broadcast that had not started is made
+			// inert rather than waited out. The finalizer completes once the running one ends.
+			expect(secondSeen).toBe(false);
 			expect(resetSpy.mock.calls).toHaveLength(2);
 		} finally {
 			releaseFirst.resolve();
-			releaseSecond.resolve();
 			await broadcast;
 			resetSpy.mockRestore();
 		}
 	}, 20_000);
 
 	it("re-asks for live work after the reset its own disposal performs", async () => {
-		const entered = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
+		let entered = false;
 		let armed = false;
 		await startPooledRunWithStrandedAside(undefined, undefined, undefined, pi => {
 			pi.on("agent_start", async () => {
 				if (!armed) return;
-				entered.resolve();
+				entered = true;
 				await release.promise;
 			});
 		});
@@ -1242,15 +1236,11 @@ describe("AgentSession settles what it promised", () => {
 		});
 		try {
 			await withTimeout(session?.dispose({ drainTimeoutMs: 40 }) ?? Promise.resolve(), 10_000, "dispose hung");
-			await withTimeout(entered.promise, 5_000, "reset observer never dispatched");
-			for (let i = 0; i < 20; i++) await setImmediate();
-			// Disposal must have deferred rather than declared itself settled over this work.
-			expect(resetSpy.mock.calls).toHaveLength(1);
-
-			release.resolve();
 			await dispatched;
-			for (let i = 0; i < 20; i++) await setImmediate();
-			expect(resetSpy.mock.calls).toHaveLength(2);
+			for (let i = 0; i < 40; i++) await setImmediate();
+			// The dispatch its own reset produced is inert: a retired session starts no callback.
+			expect(sent).toBe(true);
+			expect(entered).toBe(false);
 		} finally {
 			release.resolve();
 			await dispatched;
@@ -1281,11 +1271,65 @@ describe("AgentSession settles what it promised", () => {
 		expect(unowned).toEqual([]);
 	});
 
+	it("retires callbacks per session, not per runtime, when a host reuses one runner", async () => {
+		// A host may build one runner and runtime and hand it to several sessions in turn
+		// (agent-session-concurrent.test.ts does). Retirement therefore belongs to the session's
+		// claim, not to the runtime's own lifetime.
+		const modelRegistry = new ModelRegistry(authStorage);
+		const sessionManager = SessionManager.inMemory(tempDir.path());
+		let seen = 0;
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("agent_start", () => {
+					seen++;
+				});
+			},
+			tempDir.path(),
+			new EventBus(),
+			runtime,
+			"r14-per-session-owner",
+		);
+		const runner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
+		const mock = createMockModel({ provider: "openai", id: "gpt-test", responses: [{ content: ["ack"] }] });
+		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+		settings.setModelRole("default", `${mock.model.provider}/${mock.model.id}`);
+		const makeSession = (): AgentSession =>
+			new AgentSession({
+				agent: new Agent({
+					getApiKey: () => "test-key",
+					initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+					convertToLlm,
+					streamFn: mock.stream,
+				}),
+				sessionManager: SessionManager.inMemory(tempDir.path()),
+				settings,
+				modelRegistry,
+				toolRegistry: new Map(),
+				extensionRunner: runner,
+			});
+
+		const first = makeSession();
+		await runner.emit({ type: "agent_start" });
+		expect(seen).toBe(1);
+
+		// Direction one: what the disposed session accepted is inert while no session holds it.
+		await first.dispose();
+		expect(runtime.isRetired).toBe(true);
+		await runner.emit({ type: "agent_start" });
+		expect(seen).toBe(1);
+
+		// Direction two: the next session's claim revives the same handlers.
+		session = makeSession();
+		expect(runtime.isRetired).toBe(false);
+		await runner.emit({ type: "agent_start" });
+		expect(seen).toBe(2);
+	}, 20_000);
+
 	it("keeps ownership between the handlers of a specialised emitter", async () => {
 		const firstEntered = Promise.withResolvers<void>();
 		const releaseFirst = Promise.withResolvers<void>();
-		const secondEntered = Promise.withResolvers<void>();
-		const releaseSecond = Promise.withResolvers<void>();
+		let secondSeen = false;
 		let armed = false;
 		await startPooledRunWithStrandedAside(undefined, undefined, undefined, pi => {
 			// `user_bash` runs its own sequential handler loop, outside the generic broadcast.
@@ -1294,10 +1338,9 @@ describe("AgentSession settles what it promised", () => {
 				firstEntered.resolve();
 				await releaseFirst.promise;
 			});
-			pi.on("user_bash", async () => {
+			pi.on("user_bash", () => {
 				if (!armed) return;
-				secondEntered.resolve();
-				await releaseSecond.promise;
+				secondSeen = true;
 			});
 		});
 		const resetSpy = spyOn(Agent.prototype, "reset");
@@ -1311,27 +1354,21 @@ describe("AgentSession settles what it promised", () => {
 			expect(resetSpy.mock.calls).toHaveLength(1);
 
 			releaseFirst.resolve();
-			await withTimeout(secondEntered.promise, 5_000, "second user_bash handler never entered");
-			for (let i = 0; i < 20; i++) await setImmediate();
-			expect(resetSpy.mock.calls).toHaveLength(1);
-
-			releaseSecond.resolve();
 			await bash?.catch(() => undefined);
 			for (let i = 0; i < 40; i++) await setImmediate();
+			expect(secondSeen).toBe(false);
 			expect(resetSpy.mock.calls).toHaveLength(2);
 		} finally {
 			releaseFirst.resolve();
-			releaseSecond.resolve();
 			await bash?.catch(() => undefined);
 			resetSpy.mockRestore();
 		}
 	}, 20_000);
 
-	it("does not lift credential restrictions over work its own deferred reset started", async () => {
+	it("holds credential restrictions until running work ends, and admits no new work meanwhile", async () => {
 		const firstEntered = Promise.withResolvers<void>();
 		const releaseFirst = Promise.withResolvers<void>();
-		const secondEntered = Promise.withResolvers<void>();
-		const releaseSecond = Promise.withResolvers<void>();
+		let secondSeen = false;
 		let armed = false;
 		let handled = 0;
 		const poolScope = new SessionAccountPoolScope(authStorage, {} as unknown as OAuthAccountPools, "r9-pool-probe");
@@ -1347,8 +1384,7 @@ describe("AgentSession settles what it promised", () => {
 						await releaseFirst.promise;
 						return;
 					}
-					secondEntered.resolve();
-					await releaseSecond.promise;
+					secondSeen = true;
 				});
 			},
 			poolScope,
@@ -1375,19 +1411,17 @@ describe("AgentSession settles what it promised", () => {
 			expect(releaseSpy.mock.calls).toHaveLength(0);
 
 			releaseFirst.resolve();
-			await withTimeout(secondEntered.promise, 5_000, "deferred reset never dispatched");
-			for (let i = 0; i < 20; i++) await setImmediate();
-			expect(releaseSpy.mock.calls).toHaveLength(0);
-
-			offQueueChange?.();
-			releaseSecond.resolve();
 			await Promise.all(broadcasts);
 			for (let i = 0; i < 40; i++) await setImmediate();
+			offQueueChange?.();
+			// The restriction is lifted once the callback that WAS running ends; the dispatch the
+			// reset produced is inert, so there is no second entry to wait for.
+			expect(handled).toBe(1);
+			expect(secondSeen).toBe(false);
 			expect(releaseSpy.mock.calls).toHaveLength(1);
 		} finally {
 			offQueueChange?.();
 			releaseFirst.resolve();
-			releaseSecond.resolve();
 			await Promise.all(broadcasts);
 			releaseSpy.mockRestore();
 			resetSpy.mockRestore();
@@ -1534,8 +1568,9 @@ describe("AgentSession settles what it promised", () => {
 			await Promise.all(broadcasts);
 			for (let i = 0; i < 40; i++) await setImmediate();
 
-			// The second handler is the one that writes; without it the assertion below is vacuous.
-			expect(handled).toBe(2);
+			// Under retirement the reset-produced dispatch never enters, so nothing writes — the
+			// earlier contract (enter, then clear what it wrote) is the weaker of the two.
+			expect(handled).toBe(1);
 			expect(session?.messages).toHaveLength(0);
 		} finally {
 			offQueueChange?.();

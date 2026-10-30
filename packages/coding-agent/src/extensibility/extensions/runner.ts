@@ -110,6 +110,7 @@ import type {
 
 import { cfgExtensionAssistantTextRenderers, cfgExtensionHandlersToolCallTimeoutMs } from "../settings";
 import { ownAcceptedCallbacks } from "./loader";
+import { extensionCallbackScope } from "../../utils/event-bus";
 
 /** Combined result from all before_agent_start handlers */
 interface BeforeAgentStartCombinedResult {
@@ -600,7 +601,7 @@ export class ExtensionRunner {
 	 */
 	#managedTimers = new ManagedTimers(
 		(event, error, stack) => this.emitError({ extensionPath: "<timer>", event, error, stack }),
-		result => this.runtime.trackCallback(result),
+		fn => this.runtime.ownCallback(fn),
 	);
 	/**
 	 * Disposers for the trampolines installed via {@link addFileWriteFallback} and
@@ -1598,16 +1599,20 @@ export class ExtensionRunner {
 	 * synchronous `SettingsManager.create(ctx.cwd)` inside it resolves THIS
 	 * session's manager rather than a same-cwd sibling's.
 	 *
-	 * Callbacks this runner invokes — event handlers, slash commands, keyboard shortcuts, link
-	 * activations, tool execution, the file write/delete fallbacks — are owned here for their whole
-	 * lifetime, through {@link ExtensionRuntime.trackCallback}. Callbacks the runner merely handed
-	 * to someone else (a timer, the event bus, the tool UI controller) never reach this method, so
-	 * they report to the same runtime from where they are invoked; see the comment on
-	 * `ExtensionRuntime`'s pending-callback set for why the runtime, and not this class, is the
-	 * common owner.
+	 * This is the invoker for everything this runner calls — event handlers, slash commands,
+	 * keyboard shortcuts, link activations, tool execution, the file write/delete fallbacks — so
+	 * it owns those invocations: refused once the session is retired (a `pi.on` handler stored
+	 * before disposal must not run after it, however the dispatch reaches it), counted while it
+	 * runs, and executed inside the acceptance scope so a subscription the callback makes is
+	 * attributed to this session rather than to whoever is on the stack.
 	 */
-	runScoped<T>(fn: () => T): T {
-		return this.runtime.trackCallback(withActiveSettings(this.settings, fn));
+	runScoped<T>(fn: () => T): T | undefined {
+		// Feature-tested, like every other reach into a host-supplied object here: embedders and
+		// this repo's tests pass runtimes that implement only what they use.
+		const owner = typeof this.runtime?.ownCallback === "function" ? this.runtime : undefined;
+		if (!owner) return withActiveSettings(this.settings, fn);
+		if (owner.isRetired) return undefined;
+		return extensionCallbackScope.run(owner, () => owner.trackCallback(withActiveSettings(this.settings, fn)));
 	}
 
 	/**
@@ -1855,11 +1860,24 @@ export class ExtensionRunner {
 		}
 	}
 
-	/** Makes every callback this session's extensions handed over inert. See
-	 *  `ExtensionCallbackOwner`: waiting for work this runner can see does not stop a facility it
-	 *  never told from entering a disposed session. */
+	/** Claims this runner's extension callbacks for a session that is starting. A host may build
+	 *  one runner and hand it to several sessions in turn, so the claim — not the runner's own
+	 *  lifetime — is what keeps its callbacks live. */
+	claimExtensionCallbacks(): void {
+		if (typeof this.runtime?.beginSession === "function") this.runtime.beginSession();
+	}
+
+	/** Releases this session's claim; once the last session has gone, every callback its
+	 *  extensions handed over is inert. See `ExtensionCallbackOwner`: waiting for work this runner
+	 *  can see does not stop a facility it never told from entering a disposed session. */
 	retireExtensionCallbacks(): void {
-		this.runtime.retire();
+		if (typeof this.runtime?.retire === "function") this.runtime.retire();
+	}
+
+	/** The owner a facility uses to own an invocation of a callback this session accepted. Exposed
+	 *  because the invoker — not this runner — is the party that knows when its call starts. */
+	get callbackOwner(): ExtensionRuntime {
+		return this.runtime;
 	}
 
 	async #runHandlerWithTimeout<TEvent extends { type: string }, R>(

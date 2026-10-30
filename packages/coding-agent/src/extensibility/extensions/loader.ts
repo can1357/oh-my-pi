@@ -114,21 +114,50 @@ export class ExtensionRuntimeNotInitializedError extends Error {
 	}
 }
 
-/** Takes ownership of a callback a session accepts from an extension.
+/** Takes ownership of a callback a session accepts from an extension. Only a value that IS a
+ *  function is taken.
  *
- *  Acceptance, not invocation: the set of facilities that may later CALL one is open and three
- *  rounds of review proved it cannot be enumerated; the set of places a callback crosses into the
- *  host is one `pi` or `ctx` method argument.
+ *  Ownership CANNOT be complete by registration, and it does not need to be: a facility that
+ *  invokes a callback can always own that invocation, and a facility that never invokes one has
+ *  nothing to own. `ManagedTimers`, `EventBus`, the tool UI controller, `ExtensionRunner.runScoped`,
+ *  `ModelRegistry` (`oauth.login`/`refreshToken`/`getApiKey`/`modifyModels`,
+ *  `usage.fetchUsage`/`parseRateLimitHeaders`) and `session-maintenance` (`ctx.compact`'s
+ *  `onError`/`onComplete`) each own their own calls, and the enumeration lives at those call sites.
  *
- *  Only a value that IS a function is taken. Descending into a configuration object to find
- *  `{ handler }`, `{ onSession }` or `{ oauth: { login } }` was tried and reverted: rewriting a
- *  registration's own properties breaks consumers that key on what they were handed — a
- *  re-registered built-in tool and an extension `web_search` both stopped executing, and the
- *  TTSR `willContinue` gate stopped firing. A callback reached only through such a configuration
- *  is therefore NOT owned yet; see the round-twelve section of the report. */
+ *  Retirement therefore covers WRAPPED callbacks — the ones an owner was given a chance to wrap —
+ *  not every callback an extension ever handed over. A callback reached only through an
+ *  uninstrumented invoker is still live after disposal; that is a missing invoker, not a missing
+ *  mechanism, and it is the thing to look for when a post-disposal call is observed.
+ *
+ *  Do not try to own every argument crossing the `pi` surface instead. It was built and reverted:
+ *  it broke a re-registered built-in tool, an extension `web_search` and the TTSR `willContinue`
+ *  gate, in every variant (copy, in-place, direct-functions-only). The cause was not isolated at
+ *  the time; review later showed that wrapping a CALLABLE carrying properties — an ArkType schema
+ *  with `toJsonSchema` — drops them, which fits. Either way the surface is the wrong place: it
+ *  cannot see who will call. */
 export function ownAcceptedCallbacks(value: unknown, owner: ExtensionCallbackOwner): unknown {
 	if (typeof value === "function") return owner.ownCallback(value as (...args: unknown[]) => unknown);
 	return value;
+}
+
+/** One session's hold on an extension surface, counted so that concurrent sessions sharing a
+ *  runtime release it together. Retirement belongs here rather than on the runtime because a
+ *  runtime outlives the session that used it: the next session gets a new lease, and the
+ *  callbacks an extension registered once are live again for it. */
+class ExtensionCallbackLease {
+	#holders = 1;
+
+	join(): void {
+		this.#holders++;
+	}
+
+	release(): void {
+		if (this.#holders > 0) this.#holders--;
+	}
+
+	get isRetired(): boolean {
+		return this.#holders === 0;
+	}
 }
 
 /**
@@ -157,18 +186,39 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	 */
 	readonly #pendingCallbacks = new Set<Promise<unknown>>();
 	#callbacksChanged: PromiseWithResolvers<void> | undefined;
-	#retired = false;
+	/**
+	 * The session that currently owns this runtime's callbacks, or `undefined` while no session
+	 * has claimed them.
+	 *
+	 * Retirement is per SESSION, not per runtime: a host may build one runner and runtime and use
+	 * it for several `AgentSession`s in turn — `agent-session-concurrent.test.ts` does — so
+	 * retiring the runtime itself would leave the second session's handlers refused forever. The
+	 * lease is the per-session object the wrapper consults, and {@link beginSession} installs a
+	 * fresh one once the last holder has gone. Sessions sharing a runtime at the same time share
+	 * one lease, so one sibling's disposal cannot retire callbacks another is still invoking.
+	 */
+	#lease: ExtensionCallbackLease | undefined;
 
-	/** Retires this session's extension surface: every callback accepted through `pi`/`ctx` becomes
-	 *  inert, so a facility still holding one (a bus subscription, a provider config, a timer) can
-	 *  no longer enter a session whose resources are being released. Work already running is
-	 *  unaffected and still has to be waited for. */
+	/** Claims this runtime's callbacks for a session that is starting. A lease retired by an
+	 *  earlier session is replaced; a live one gains a holder. */
+	beginSession(): void {
+		if (!this.#lease || this.#lease.isRetired) this.#lease = new ExtensionCallbackLease();
+		else this.#lease.join();
+	}
+
+	/** Retires the calling session's hold on this surface. Once the last holder has released it,
+	 *  every callback accepted through `pi`/`ctx` becomes inert, so a facility still holding one
+	 *  (a bus subscription, a provider config, a timer) can no longer enter a session whose
+	 *  resources are being released. Work already running is unaffected and still has to be
+	 *  waited for. A host that never called {@link beginSession} retires on the first call, which
+	 *  is what a single-session host has always seen. */
 	retire(): void {
-		this.#retired = true;
+		this.#lease ??= new ExtensionCallbackLease();
+		this.#lease.release();
 	}
 
 	get isRetired(): boolean {
-		return this.#retired;
+		return this.#lease?.isRetired === true;
 	}
 
 	/** Wraps a callback this session accepts. The wrapper refuses after {@link retire}, and owns
@@ -209,6 +259,14 @@ export class ExtensionRuntime implements IExtensionRuntime {
 		return adopted as T;
 	}
 
+	ownInvocation<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R {
+		const owner = this;
+		return function (this: unknown, ...args: A): R {
+			if (owner.isRetired) throw new Error("Extension session retired; its callbacks are no longer callable");
+			return extensionCallbackScope.run(owner, () => owner.trackCallback(fn.apply(this, args)));
+		};
+	}
+
 	/** Whether any extension callback is executing. */
 	hasPendingCallbacks(): boolean {
 		return this.#pendingCallbacks.size > 0;
@@ -234,7 +292,11 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	}
 
 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void {
-		this.pendingProviderRegistrations.push({ name, config, sourceId });
+		// Owned at the queue, not at each drain site: main.ts, sdk.ts and models-cli.ts all hand
+		// this configuration to ModelRegistry, and a host that drains it itself must not be able to
+		// lose the ownership by not knowing to pass an owner. Fresh copies — the extension's own
+		// objects are never rewritten.
+		this.pendingProviderRegistrations.push({ name, config: ownProviderConfigCallbacks(config, this), sourceId });
 	}
 
 	unregisterProvider(name: string): void {
@@ -352,8 +414,8 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		}
 	}
 
-	#ownAccepted(value: unknown): unknown {
-		return ownAcceptedCallbacks(value, this.runtime);
+	beginSession(): void {
+		this.runtime.beginSession();
 	}
 
 	retire(): void {
@@ -366,6 +428,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 
 	ownCallback<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R | undefined {
 		return this.runtime.ownCallback(fn);
+	}
+
+	ownInvocation<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R {
+		return this.runtime.ownInvocation(fn);
 	}
 
 	/** Callback ownership belongs to the one runtime behind every facade for this session; this
@@ -894,4 +960,38 @@ export async function discoverAndLoadExtensions(
 ): Promise<LoadExtensionsResult> {
 	const paths = await discoverExtensionPaths(configuredPaths, cwd, disabledExtensionIds, options);
 	return loadExtensions(paths, cwd, eventBus);
+}
+
+/** Owns every callback a provider configuration carries, in fresh copies. The rule, not a list:
+ *  whatever an `oauth` or `usage` block holds is invoked by the registry or the auth storage on
+ *  this session's behalf, so a route added later is owned the day it appears rather than the round
+ *  after a probe finds it. */
+function ownProviderConfigCallbacks<T extends object>(config: T, owner: ExtensionCallbackOwner): T {
+	const own = (value: object): object => {
+		let owned: Record<string, unknown> | undefined;
+		for (const [key, entry] of Object.entries(value)) {
+			if (typeof entry !== "function") continue;
+			owned ??= { ...(value as Record<string, unknown>) };
+			owned[key] = owner.ownInvocation(entry as (...args: unknown[]) => unknown);
+		}
+		return owned ?? value;
+	};
+	const source = config as Record<string, unknown>;
+	let result: Record<string, unknown> | undefined;
+	// `usage` is deliberately not copied here: the registry matches the object it was handed when
+	// an extension unregisters, and a copy breaks that. Its callbacks are owned at the registry.
+	for (const key of ["oauth"]) {
+		const block = source[key];
+		if (block === null || typeof block !== "object") continue;
+		const ownedBlock = own(block);
+		if (ownedBlock === block) continue;
+		result ??= { ...source };
+		result[key] = ownedBlock;
+	}
+	const fetchDynamicModels = source.fetchDynamicModels;
+	if (typeof fetchDynamicModels === "function") {
+		result ??= { ...source };
+		result.fetchDynamicModels = owner.ownInvocation(fetchDynamicModels as (...args: unknown[]) => unknown);
+	}
+	return (result as T | undefined) ?? config;
 }

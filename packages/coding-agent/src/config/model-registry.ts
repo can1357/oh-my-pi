@@ -52,6 +52,7 @@ import { getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-
 import { resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
 import { redactUrlForLog } from "../mcp/json-rpc";
+import type { ExtensionCallbackOwner } from "../extensibility/extensions/types";
 import type { AuthStorage } from "../session/auth-storage";
 import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
 import type { ConfigError, ConfigFile } from "./config-file";
@@ -3555,7 +3556,16 @@ export class ModelRegistry {
 	 * If provider has streamSimple: registers a custom API streaming function.
 	 * If provider has oauth: registers OAuth provider for /login support.
 	 */
-	registerProvider(providerName: string, config: ProviderConfigInput, sourceId?: string): void {
+	registerProvider(
+		providerName: string,
+		config: ProviderConfigInput,
+		sourceId?: string,
+		/** The session that accepted these callbacks, when an extension registered them. This
+		 *  registry is the party that CALLS `oauth.login` and `fetchDynamicModels`, so it is the
+		 *  only one that knows when those calls start and end; the configuration object is never
+		 *  rewritten, so nothing downstream sees a value other than the one it was handed. */
+		callbackOwner?: ExtensionCallbackOwner,
+	): void {
 		if (config.streamSimple && !config.api) {
 			throw new Error(`Provider ${providerName}: "api" is required when registering streamSimple.`);
 		}
@@ -3582,7 +3592,7 @@ export class ModelRegistry {
 
 		if (config.oauth) {
 			registerOAuthProvider({
-				...config.oauth,
+				...ownProviderCallbacks(config.oauth, callbackOwner),
 				id: providerName,
 				sourceId,
 			});
@@ -3614,7 +3624,11 @@ export class ModelRegistry {
 		// provider lifetime. #clearRuntimeProviderState removes this override when
 		// the owning extension is unregistered or replaced.
 		if (config.usage) {
-			this.authStorage.usage.setProvider(providerName, config.usage, config.apiKey);
+			this.authStorage.usage.setProvider(
+				providerName,
+				ownProviderCallbacks(config.usage, callbackOwner),
+				config.apiKey,
+			);
 		}
 		if (config.apiKey) {
 			// A provider that owns a /login flow must not let its default key
@@ -3702,10 +3716,11 @@ export class ModelRegistry {
 		}
 
 		if (config.fetchDynamicModels) {
-			const fetcher = config.fetchDynamicModels;
 			const providerBaseUrl = config.baseUrl ?? "";
 			const providerApi = config.api;
 			const providerHeaders = config.headers;
+			const rawFetcher = config.fetchDynamicModels;
+			const fetcher = callbackOwner ? callbackOwner.ownInvocation(rawFetcher) : rawFetcher;
 			const providerApiKey = config.apiKey;
 			const providerAuthHeader = config.authHeader;
 			const providerCompat = config.compat;
@@ -3893,4 +3908,19 @@ export interface ProviderConfigInput {
 		remoteCompaction?: RemoteCompactionConfig<Api>;
 		premiumMultiplier?: number;
 	}>;
+}
+
+/** Owns every callback a provider configuration hands this registry, in a fresh copy — the
+ *  extension's own object is never rewritten. The rule, not a list: this registry is the invoker
+ *  for whatever an `oauth` or `usage` block carries, so a route added later is owned the day it
+ *  appears instead of the round after a probe finds it. */
+function ownProviderCallbacks<T extends object>(config: T, owner: ExtensionCallbackOwner | undefined): T {
+	if (!owner) return config;
+	let owned: Record<string, unknown> | undefined;
+	for (const [key, value] of Object.entries(config)) {
+		if (typeof value !== "function") continue;
+		owned ??= { ...(config as Record<string, unknown>) };
+		owned[key] = owner.ownInvocation(value as (...args: unknown[]) => unknown);
+	}
+	return (owned as T | undefined) ?? config;
 }

@@ -1176,7 +1176,9 @@ export async function loadCliExtensionProviders(
 	modelRegistry.syncExtensionSources(activeSources);
 	modelRegistry.clearSourceRegistrations(new Set(activeSources));
 	for (const { name, config, sourceId } of extensionsResult.runtime.pendingProviderRegistrations) {
-		modelRegistry.registerProvider(name, config, sourceId);
+		// The runtime is this session's callback owner; ModelRegistry calls `oauth.login` and
+		// `fetchDynamicModels` and owns those invocations.
+		modelRegistry.registerProvider(name, config, sourceId, extensionsResult.runtime);
 	}
 	extensionsResult.runtime.pendingProviderRegistrations = [];
 	if (options.discoverModels !== false) await modelRegistry.refreshRuntimeProviders();
@@ -2911,7 +2913,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 		if (extensionsResult.runtime.pendingProviderRegistrations.length > 0) {
 			for (const { name, config, sourceId } of extensionsResult.runtime.pendingProviderRegistrations) {
-				modelRegistry.registerProvider(name, config, sourceId);
+				modelRegistry.registerProvider(name, config, sourceId, extensionsResult.runtime);
 			}
 			extensionsResult.runtime.pendingProviderRegistrations = [];
 		}
@@ -5720,7 +5722,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				if (session.isDisposed) return;
 				// Providers queue until the runner is initialized; drain them as session creation does.
 				for (const { name, config, sourceId } of runtime.pendingProviderRegistrations.splice(0)) {
-					modelRegistry.registerProvider(name, config, sourceId);
+					modelRegistry.registerProvider(name, config, sourceId, runtime);
 				}
 				forwardedPreparedExtensions.push(...(loaded.preparedExtensions ?? []));
 				extensionPaths.push(...loaded.extensions.map(extension => extension.resolvedPath));

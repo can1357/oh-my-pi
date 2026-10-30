@@ -2400,12 +2400,22 @@ export interface ExtensionCommandContextActions {
 export interface ExtensionCallbackOwner {
 	/** Wraps a callback this session accepts: inert after {@link retire}, owned while it runs. */
 	ownCallback<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R | undefined;
+	/** Wraps a callback whose return value the invoker needs, so it cannot be made to return
+	 *  `undefined`. Throws once retired: an invoker that needs a value cannot be fobbed off with
+	 *  one, and a session that is gone has none to give. */
+	ownInvocation<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R;
 	/** Counts `result` as a live callback when it is awaitable, returning something awaitable once
 	 *  more — a cold thenable must not be run twice. */
 	trackCallback<T>(result: T): T;
-	/** Makes every accepted callback inert. A facility still holding one — a bus subscription, a
-	 *  provider config, a timer — can no longer enter a session whose resources are released. */
+	/** Claims this surface for a session that is starting. Ownership is per SESSION even when the
+	 *  runtime is not: a host may reuse one runtime for several sessions in turn, and the next
+	 *  session's claim revives callbacks the previous one's {@link retire} made inert. */
+	beginSession(): void;
+	/** Releases the calling session's claim. Once the last one is gone, every accepted callback is
+	 *  inert: a facility still holding one — a bus subscription, a provider config, a timer — can
+	 *  no longer enter a session whose resources are released. */
 	retire(): void;
+	/** Whether no session holds this surface, so accepted callbacks are inert. */
 	readonly isRetired: boolean;
 	/** Whether any extension callback is executing. */
 	hasPendingCallbacks(): boolean;
