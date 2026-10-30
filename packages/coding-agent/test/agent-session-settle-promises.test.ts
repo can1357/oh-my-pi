@@ -210,7 +210,12 @@ describe("AgentSession settles what it promised", () => {
 	/** A pooled yield contract parks a stranded aside instead of waking a turn for it
 	 *  (#resumeStrandedIrcAsides), so the record is still queued — and still holding its
 	 *  run's `agent_end` open — when the next prompt reaches IrcBridge.flushPending(). */
-	async function startPooledRunWithStrandedAside(bodies = ["STRANDED_TRIGGER_ASIDE"]): Promise<{
+	async function startPooledRunWithStrandedAside(
+		bodies = ["STRANDED_TRIGGER_ASIDE"],
+		/** Observes `message_end` extension notifications; holding one holds a session event handler
+		 *  in flight (`#drainInFlightEventHandlers`) during disposal. */
+		onMessageEnd?: (event: { message: AgentMessage }) => Promise<void>,
+	): Promise<{
 		settles: Array<boolean | undefined>;
 		modelRegistry: ModelRegistry;
 		mock: MockModel;
@@ -238,6 +243,7 @@ describe("AgentSession settles what it promised", () => {
 						);
 					}
 				});
+				if (onMessageEnd) pi.on("message_end", onMessageEnd);
 			},
 			tempDir.path(),
 			new EventBus(),
@@ -950,5 +956,81 @@ describe("AgentSession settles what it promised", () => {
 		expect(trace.indexOf("terminal")).toBeGreaterThan(trace.indexOf("wake-record"));
 		expect(wakePresentAtTerminal).toEqual([true]);
 		expect(settles).toEqual([false, true]);
+	}, 20_000);
+
+	it("still cleans up a continuation that outlived the dispose deadline", async () => {
+		await startPooledRunWithStrandedAside();
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const unhook = session?.agent.addBeforeModelCallHook(async () => {
+			entered.resolve();
+			await release.promise;
+		});
+		try {
+			await session?.setWorkPoolYieldItems([]);
+			await withTimeout(entered.promise, 5_000, "promised continuation never started");
+
+			// The deadline bounds the caller's wait. It must not declare the run settled: the loop
+			// is still inside its hook and will repopulate everything disposal just released.
+			await session?.dispose({ drainTimeoutMs: 50 });
+
+			release.resolve();
+			await withTimeout(session?.agent.waitForIdle() ?? Promise.resolve(), 5_000, "continuation never ended");
+			for (let i = 0; i < 10; i++) await setImmediate();
+
+			// The deferred finalizer re-runs the in-memory reset once the run genuinely ends.
+			expect(session?.messages).toHaveLength(0);
+		} finally {
+			release.resolve();
+			unhook?.();
+		}
+	}, 20_000);
+
+	it("charges disposal one drain window, not one per wait", async () => {
+		const handlerEntered = Promise.withResolvers<void>();
+		const releaseHandler = Promise.withResolvers<void>();
+		// Only the marker record is gated: holding every notification would also hold the
+		// session_shutdown emit that disposal runs before it reaches these waits.
+		await startPooledRunWithStrandedAside(undefined, async event => {
+			if (event.message.role === "custom" && event.message.customType === "slow-handler") {
+				handlerEntered.resolve();
+				await releaseHandler.promise;
+			}
+		});
+		const entered = Promise.withResolvers<void>();
+		const releaseHook = Promise.withResolvers<void>();
+		const unhook = session?.agent.addBeforeModelCallHook(async () => {
+			entered.resolve();
+			await releaseHook.promise;
+		});
+		let disposal: Promise<void> | undefined;
+		try {
+			await session?.setWorkPoolYieldItems([]);
+			await withTimeout(entered.promise, 5_000, "promised continuation never started");
+			session?.agent.emitExternalEvent({
+				type: "message_end",
+				message: {
+					role: "custom",
+					customType: "slow-handler",
+					content: "HELD_HANDLER",
+					display: false,
+					timestamp: Date.now(),
+				},
+			});
+			await withTimeout(handlerEntered.promise, 5_000, "event handler never entered");
+
+			// Both the loop and an in-flight event handler are held, so both waits time out. They
+			// are one unwind and share one window.
+			const startedAt = Date.now();
+			disposal = session?.dispose({ drainTimeoutMs: 500 });
+			await disposal;
+			expect(Date.now() - startedAt).toBeLessThan(900);
+		} finally {
+			releaseHook.resolve();
+			releaseHandler.resolve();
+			unhook?.();
+			await disposal;
+			await session?.agent.waitForIdle();
+		}
 	}, 20_000);
 });

@@ -6535,7 +6535,9 @@ export class AgentSession implements SettingsScope {
 		// still attached. Only a record that never started a turn has no continuation coming, and
 		// that is what the forced settle below publishes. The wait costs nothing when nothing is
 		// owed, and `agent.abort()` above has already cancelled the run it waits for.
-		let activeRunAbandoned = false;
+		// Both waits below belong to one window: the continuation and the handlers that publish its
+		// end are the same unwind, so a stuck turn must not charge the caller two full deadlines.
+		const drainDeadlineAt = Date.now() + (options.drainTimeoutMs ?? POST_PROMPT_DRAIN_TIMEOUT_MS);
 		if (this.#agentEndOwedTerminal && this.isStreaming) {
 			try {
 				await withTimeout(
@@ -6545,13 +6547,10 @@ export class AgentSession implements SettingsScope {
 						// fire-and-forget: the handler that publishes that end is what this waits for.
 						await this.#drainInFlightEventHandlers();
 					})(),
-					options.drainTimeoutMs ?? POST_PROMPT_DRAIN_TIMEOUT_MS,
+					drainDeadlineAt - Date.now(),
 					"Timed out waiting for the promised continuation to settle during dispose",
 				);
 			} catch (error) {
-				// A run that outlasts this deadline is abandoned, not awaited again below: one
-				// stuck turn must not cost disposal two full drain windows.
-				activeRunAbandoned = true;
 				logger.warn("Promised continuation still running at dispose deadline", { error: String(error) });
 			}
 		}
@@ -6577,18 +6576,28 @@ export class AgentSession implements SettingsScope {
 		this.agent.setProviderResponseInterceptor(undefined);
 		this.agent.setRawSseEventInterceptor(undefined);
 		let drained = false;
-		try {
-			await withTimeout(
-				(async () => {
-					if (!activeRunAbandoned) await this.agent.waitForIdle();
-					await this.#drainInFlightEventHandlers();
-				})(),
-				options.drainTimeoutMs ?? POST_PROMPT_DRAIN_TIMEOUT_MS,
-				"Timed out waiting for the active agent run to settle during dispose",
-			);
-			drained = true;
-		} catch (error) {
-			logger.warn("Active agent run still settling at dispose deadline", { error: String(error) });
+		// Whatever is left of the one window. Spent already means the run is still going: it is
+		// abandoned by the caller, never *declared* settled — `drained` stays false so the deferred
+		// pass below still lifts the account pools and re-runs the in-memory reset once it ends.
+		const remainingDrainMs = drainDeadlineAt - Date.now();
+		if (remainingDrainMs <= 0) {
+			logger.warn("Active agent run still settling at dispose deadline", {
+				error: "dispose drain window was spent waiting for the promised continuation",
+			});
+		} else {
+			try {
+				await withTimeout(
+					(async () => {
+						await this.agent.waitForIdle();
+						await this.#drainInFlightEventHandlers();
+					})(),
+					remainingDrainMs,
+					"Timed out waiting for the active agent run to settle during dispose",
+				);
+				drained = true;
+			} catch (error) {
+				logger.warn("Active agent run still settling at dispose deadline", { error: String(error) });
+			}
 		}
 
 		// Event handlers can reopen the append writer while they persist their
