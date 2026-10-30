@@ -171,6 +171,37 @@ describe("settings registry", () => {
 		expect(cfgTopP.get(parent)).not.toBe(0.5);
 	});
 
+	it("keeps host overlays authoritative and delegates only subagent-derived views", () => {
+		const operator = Settings.isolated();
+		const host = operator.overlay({ modelRoles: { review: "mock/target" } });
+		const child = host.overlay({ modelRoles: { advisor: "mock/other" } }, { derived: true });
+		const grandchild = child.overlay({}, { derived: true });
+		expect(operator.grantAuthority()).toBe(operator);
+		expect(host.grantAuthority()).toBe(host);
+		expect(child.grantAuthority()).toBe(host);
+		expect(grandchild.grantAuthority()).toBe(host);
+	});
+
+	it.each([false, true])("preserves derived=%s when restoring overlay layers", derived => {
+		const parent = Settings.isolated();
+		const child = parent.overlay({ modelRoles: { review: "mock/target" } }, { derived });
+		const restored = parent.restoreOverlay(child.overlayLayers());
+		expect(restored.getModelRole("review")).toBe("mock/target");
+		expect(restored.grantAuthority()).toBe(derived ? parent : restored);
+	});
+
+	it("preserves a derived view's host authority when cloning for cwd", async () => {
+		const operator = Settings.isolated();
+		const host = operator.overlay({ modelRoles: { review: "mock/target" } });
+		const child = host.overlay({ modelRoles: { advisor: "mock/other" } }, { derived: true });
+		const clone = await child.cloneForCwd(host.getCwd());
+		expect(clone.grantAuthority()).not.toBe(clone);
+		expect(clone.grantAuthority().getModelRole("review")).toBe("mock/target");
+		expect(clone.grantAuthority().getModelRole("advisor")).toBeUndefined();
+		const hostClone = await host.cloneForCwd(host.getCwd());
+		expect(hostClone.grantAuthority()).toBe(hostClone);
+	});
+
 	it("delivers every synchronous parent write to an overlay", async () => {
 		const parent = Settings.isolated();
 		const child = parent.overlay();

@@ -10,6 +10,7 @@ import {
 	type CapturedRequest,
 	captureFetch,
 	factoryModel,
+	factoryRegistryModel,
 	WORKOS_TOKEN,
 } from "./helpers/factory-droid";
 
@@ -21,6 +22,15 @@ function breakpointTtls(body: unknown): string[] {
 		if (key !== "cache_control") return breakpointTtls(value);
 		if (typeof value !== "object" || value === null) return [];
 		return "ttl" in value && typeof value.ttl === "string" ? [value.ttl] : ["5m"];
+	});
+}
+
+/** The shared anthropic fixture with a chosen served-model id in `message_start`. */
+function anthropicChunksFrom(modelId: string, text: string): string[] {
+	return anthropicChunks(text).map(chunk => {
+		const parsed = JSON.parse(chunk) as { type?: string; message?: { model?: string } };
+		if (parsed.type === "message_start" && parsed.message) parsed.message.model = modelId;
+		return JSON.stringify(parsed);
 	});
 }
 
@@ -50,6 +60,24 @@ describe("Factory Droid anthropic wire (Claude)", () => {
 		expect(captured[0].headers["x-api-key"]).toBe("placeholder");
 	});
 
+	it.each([
+		[["anthropic"], ["claude-opus-5"]],
+		[["vertex_anthropic"], []],
+	])("sends the refusal fallback chain on a session request for a %j rotation", async (rotation, expected) => {
+		const captured: CapturedRequest[] = [];
+		const model = factoryModel("claude-fable-5", rotation);
+		await streamFactoryDroid(
+			model,
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{ apiKey: WORKOS_TOKEN, fetch: captureFetch(captured, anthropicChunks("OK")) },
+		).result();
+
+		// Session requests always carry the chain; per-call workers opt out (disableServerSideFallback) and fail closed if another model answers.
+		expect((captured[0]!.body.fallbacks as { model: string }[] | undefined)?.map(entry => entry.model) ?? []).toEqual(
+			expected,
+		);
+	});
+
 	it("withholds refusal fallbacks on vertex/bedrock rotations, which gate the beta themselves", async () => {
 		const captured: CapturedRequest[] = [];
 		const model = factoryModel("claude-fable-5");
@@ -66,6 +94,244 @@ describe("Factory Droid anthropic wire (Claude)", () => {
 
 		const request = captured[0]!;
 		expect(request.headers["x-api-provider"]).toBe("vertex_anthropic");
+		expect(request.body.fallbacks).toBeUndefined();
+		expect(request.headers["anthropic-beta"] ?? "").not.toContain("server-side-fallback-2026-06-01");
+		expect(request.headers["anthropic-beta"] ?? "").not.toContain("fallback-credit-2026-06-01");
+	});
+
+	it("fails a per-call response that was served by another model", async () => {
+		const captured: CapturedRequest[] = [];
+		const result = await streamFactoryDroid(
+			factoryModel("claude-fable-5"),
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: captureFetch(captured, anthropicChunksFrom("claude-opus-5", "OK")),
+				disableServerSideFallback: true,
+			},
+		).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage ?? "").toContain("claude-opus-5");
+		expect(result.errorMessage ?? "").toContain("claude-fable-5");
+	});
+
+	it("fails a per-call response carrying a fallback handoff block", async () => {
+		const handoff = [
+			JSON.stringify({
+				type: "message_start",
+				message: {
+					id: "msg_h",
+					type: "message",
+					role: "assistant",
+					model: "claude-fable-5",
+					content: [],
+					usage: { input_tokens: 7 },
+				},
+			}),
+			JSON.stringify({
+				type: "content_block_start",
+				index: 0,
+				content_block: { type: "fallback", from: { model: "claude-fable-5" }, to: { model: "claude-opus-5" } },
+			}),
+			JSON.stringify({ type: "content_block_stop", index: 0 }),
+			JSON.stringify({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 5 } }),
+			JSON.stringify({ type: "message_stop" }),
+		];
+		const result = await streamFactoryDroid(
+			factoryModel("claude-fable-5"),
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: captureFetch([], handoff),
+				disableServerSideFallback: true,
+			},
+		).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage ?? "").toContain("fallback handoff");
+	});
+
+	it("passes a per-call response from the requested model", async () => {
+		const result = await streamFactoryDroid(
+			factoryModel("claude-fable-5"),
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: captureFetch([], anthropicChunksFrom("claude-fable-5", "OK")),
+				disableServerSideFallback: true,
+			},
+		).result();
+
+		expect(result.stopReason).toBe("stop");
+	});
+
+	it("omits refusal fallbacks and the fallback-credit beta when a per-call request disables server-side fallback", async () => {
+		const captured: CapturedRequest[] = [];
+		await streamFactoryDroid(
+			factoryModel("claude-fable-5"),
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: captureFetch(captured, anthropicChunksFrom("claude-fable-5", "OK")),
+				disableServerSideFallback: true,
+			},
+		).result();
+
+		const request = captured[0]!;
+		expect(request.body.fallbacks).toBeUndefined();
+		expect(request.headers["anthropic-beta"] ?? "").not.toContain("server-side-fallback-2026-06-01");
+		expect(request.headers["anthropic-beta"] ?? "").not.toContain("fallback-credit-2026-06-01");
+	});
+
+	it.each([
+		["claude-fable-5", "claude-opus-5"],
+		["claude-fable-5.1", "claude-fable-5"],
+		["claude-fable-5", "claude-fable-5-1"],
+		["claude-opus-5-5-fast", "claude-opus-5"],
+		["claude-opus-5-5", "claude-opus-5-5-fast"],
+	])("fails a per-call response for %s served by %s", async (requested, served) => {
+		const result = await streamFactoryDroid(
+			factoryModel(requested),
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: captureFetch([], anthropicChunksFrom(served, "OK")),
+				disableServerSideFallback: true,
+			},
+		).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage ?? "").toContain(`served by ${served}`);
+		expect(result.errorMessage ?? "").toContain(`request on ${requested}`);
+	});
+
+	it.each([
+		["text", { type: "text", text: "" }, { type: "text_delta", text: "Wrong model" }],
+		["thinking", { type: "thinking", thinking: "" }, { type: "thinking_delta", thinking: "Wrong model" }],
+		[
+			"toolcall",
+			{ type: "tool_use", id: "call_wrong", name: "Read", input: {} },
+			{ type: "input_json_delta", partial_json: "{}" },
+		],
+	] as const)("rejects another served model before forwarding %s events", async (_kind, block, delta) => {
+		const chunks = anthropicChunksFrom("claude-opus-5", "unused");
+		chunks[1] = JSON.stringify({ type: "content_block_start", index: 0, content_block: block });
+		chunks[2] = JSON.stringify({ type: "content_block_delta", index: 0, delta });
+		const stream = streamFactoryDroid(
+			factoryModel("claude-fable-5"),
+			{
+				messages: [{ role: "user", content: "hello", timestamp: 1 }],
+				tools: [{ name: "Read", description: "Read file", parameters: type({ path: "string" }) }],
+			},
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: captureFetch([], chunks),
+				disableServerSideFallback: true,
+			},
+		);
+		const events: string[] = [];
+		for await (const event of stream) events.push(event.type);
+
+		expect(events.filter(event => event !== "start")).toEqual(["error"]);
+		expect((await stream.result()).errorMessage).toContain("served by claude-opus-5");
+	});
+
+	it("fails a per-call response carrying a fallback handoff block", async () => {
+		const handoff = [
+			JSON.stringify({
+				type: "message_start",
+				message: {
+					id: "msg_h",
+					type: "message",
+					role: "assistant",
+					model: "claude-fable-5",
+					content: [],
+					usage: { input_tokens: 7 },
+				},
+			}),
+			JSON.stringify({
+				type: "content_block_start",
+				index: 0,
+				content_block: { type: "fallback", from: { model: "claude-fable-5" }, to: { model: "claude-opus-5" } },
+			}),
+			JSON.stringify({ type: "content_block_stop", index: 0 }),
+			JSON.stringify({ type: "content_block_start", index: 1, content_block: { type: "text", text: "" } }),
+			JSON.stringify({ type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "Wrong model" } }),
+			JSON.stringify({ type: "content_block_stop", index: 1 }),
+			JSON.stringify({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 5 } }),
+			JSON.stringify({ type: "message_stop" }),
+		];
+		const stream = streamFactoryDroid(
+			factoryModel("claude-fable-5"),
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: captureFetch([], handoff),
+				disableServerSideFallback: true,
+			},
+		);
+		const events: string[] = [];
+		for await (const event of stream) events.push(event.type);
+		const result = await stream.result();
+
+		expect(events.filter(event => event !== "start")).toEqual(["error"]);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage ?? "").toContain("fallback handoff");
+	});
+
+	it.each([
+		["claude-fable-5", "claude-fable-5"],
+		["claude-fable-5.1", "claude-fable-5-1"],
+		["claude-fable-5.1", "CLAUDE-FABLE-5-1"],
+		["claude-opus-5-5", "claude-opus-5-5"],
+		["claude-opus-5-5-fast", "claude-opus-5-5"],
+	])("accepts the Factory wire identity for %s served by %s", async (requested, served) => {
+		const result = await streamFactoryDroid(
+			factoryModel(requested),
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: captureFetch([], anthropicChunksFrom(served, "OK")),
+				disableServerSideFallback: true,
+			},
+		).result();
+
+		expect(result.stopReason).toBe("stop");
+	});
+
+	it.each(["claude-opus-5-fast", "claude-opus-4-8-fast"])(
+		"accepts the registry baseVariant for %s",
+		async requested => {
+			const baseId = factoryRegistryModel(requested).policy.entitlement.baseVariant;
+			expect(baseId).toBeDefined();
+			const result = await streamFactoryDroid(
+				factoryModel(requested),
+				{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+				{
+					apiKey: WORKOS_TOKEN,
+					fetch: captureFetch([], anthropicChunksFrom(baseId!.toUpperCase(), "OK")),
+					disableServerSideFallback: true,
+				},
+			).result();
+
+			expect(result.stopReason).toBe("stop");
+		},
+	);
+
+	it("omits refusal fallbacks and the fallback-credit beta when a per-call request disables server-side fallback", async () => {
+		const captured: CapturedRequest[] = [];
+		await streamFactoryDroid(
+			factoryModel("claude-fable-5"),
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: captureFetch(captured, anthropicChunksFrom("claude-fable-5", "OK")),
+				disableServerSideFallback: true,
+			},
+		).result();
+
+		const request = captured[0]!;
 		expect(request.body.fallbacks).toBeUndefined();
 		expect(request.headers["anthropic-beta"] ?? "").not.toContain("server-side-fallback-2026-06-01");
 		expect(request.headers["anthropic-beta"] ?? "").not.toContain("fallback-credit-2026-06-01");

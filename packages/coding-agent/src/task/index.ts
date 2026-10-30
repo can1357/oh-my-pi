@@ -28,6 +28,7 @@ import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env, isRecord, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "..";
 import type { EffectiveExtensionRoots } from "../capability/types";
+import type { Settings } from "../config/settings";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "text" };
 import taskAsyncContractTemplate from "../prompts/tools/task-async-contract.md" with { type: "text" };
@@ -59,12 +60,14 @@ import { InternalUrlRouter } from "../internal-urls/router";
 import { AgentRegistry, isResumable } from "../registry/agent-registry";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
 import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
+import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "./model-approval";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/tools/task";
 import { repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
 import {
+	invalidModelSelectorReason,
 	renderSubagentUserPrompt,
 	resolveEffectiveSubagentPolicy,
 	runStructuredSubagent,
@@ -89,8 +92,10 @@ import {
 	cfgTaskMaxConcurrency,
 	cfgTaskMaxRecursionDepth,
 	cfgTaskMaxRuntimeMs,
+	cfgTaskPerCallModelFallbacks,
 	cfgTaskSpeculativeLaunch,
 	cfgTaskStructured,
+	perCallModelEnabled,
 } from "./settings";
 
 function createUsageTotals(): Usage {
@@ -156,6 +161,9 @@ interface TaskDescriptionOptions {
 	disabledAgents: string[];
 	batchEnabled: boolean;
 	effortEnabled: boolean;
+	perCallModelEnabled: boolean;
+	perCallModelFallbacks: boolean;
+	perCallModelAdvertisement?: PerCallModelAdvertisement;
 	evalToolsEnabled: boolean;
 	structured: boolean;
 	file: boolean;
@@ -207,6 +215,9 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		applyIsolatedChanges: options.applyIsolatedChanges,
 		batchEnabled: options.batchEnabled,
 		effortEnabled: options.effortEnabled,
+		perCallModelEnabled: options.perCallModelEnabled,
+		perCallModelFallbacks: options.perCallModelFallbacks,
+		perCallModelAdvertisement: options.perCallModelAdvertisement,
 		evalToolsEnabled: options.evalToolsEnabled,
 		structured: options.structured,
 		file: options.file,
@@ -291,7 +302,13 @@ function validateTaskInput(item: TaskItem | undefined, label: string, fileEnable
 	return undefined;
 }
 
-function validateSpawnParams(params: TaskParams, batchEnabled: boolean, fileEnabled: boolean): string | undefined {
+function validateSpawnParams(
+	params: TaskParams,
+	batchEnabled: boolean,
+	fileEnabled: boolean,
+	defaultAgent: string,
+	settings: Settings,
+): string | undefined {
 	const tasks = params.tasks;
 	if (
 		!fileEnabled &&
@@ -308,14 +325,13 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean, fileEnab
 		}
 		for (let i = 0; i < tasks.length; i++) {
 			const item = tasks[i];
-			const inputError = validateTaskInput(
-				item,
-				`Task ${i + 1}${item?.name ? ` (\`${item.name}\`)` : ""}`,
-				fileEnabled,
-			);
+			const label = `Task ${i + 1}${item?.name ? ` (\`${item.name}\`)` : ""}`;
+			const inputError = validateTaskInput(item, label, fileEnabled);
 			if (inputError) return inputError;
-			const effortError = validateEffort(item.effort, `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""}`);
+			const effortError = validateEffort(item.effort, label);
 			if (effortError) return effortError;
+			const modelError = validateModel(item, label, defaultAgent, settings);
+			if (modelError) return modelError;
 		}
 		const seen = new Map<string, string>();
 		for (const item of tasks) {
@@ -336,7 +352,33 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean, fileEnab
 	if (batchEnabled && params.task === undefined && params.taskFile === undefined) {
 		return "Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`.";
 	}
-	return validateTaskInput(params, "The call", fileEnabled) ?? validateEffort(params.effort, "The call");
+	return (
+		validateTaskInput(params, "The call", fileEnabled) ??
+		validateEffort(params.effort, "The call") ??
+		validateModel(params, "The call", defaultAgent, settings)
+	);
+}
+
+/**
+ * A `model` on a call naming `seance` is checked at preflight, once the name resolves:
+ * the bundled seance takes it as its source-session override, a shadowing agent as a per-call model.
+ */
+function validateModel(
+	item: TaskItem | TaskParams,
+	label: string,
+	defaultAgent: string,
+	settings: Settings,
+): string | undefined {
+	return (item.agent?.trim() || defaultAgent) === SEANCE_AGENT_NAME
+		? undefined
+		: invalidModelSelectorReason(item.model, label, { settings, invocationKind: "task" });
+}
+
+function spawnModelFields(params: TaskParams): Pick<StructuredSubagentRequest, "perCallModel" | "seanceModel"> {
+	if (params.model === undefined) return {};
+	if (params.agent === SEANCE_AGENT_NAME) return { seanceModel: params.model };
+	// `validateModel` rejected anything but one selector or a list of them before dispatch.
+	return { perCallModel: params.model };
 }
 
 /**
@@ -456,11 +498,12 @@ function planSpawns(
 	fileEnabled: boolean,
 	defaultAgent: string,
 	seanceAdvertised: boolean,
+	settings: Settings,
 ): SpawnPlan | string {
 	const params = repairTaskParams(rawParams as TaskParams);
 	const error =
 		validateShapeParams(batchEnabled, params) ??
-		validateSpawnParams(params, batchEnabled, fileEnabled) ??
+		validateSpawnParams(params, batchEnabled, fileEnabled, defaultAgent, settings) ??
 		validateSeanceParams({ params, batchEnabled, defaultAgent, seanceAdvertised });
 	if (error) return error;
 	const items = resolveSpawnItems(params);
@@ -692,6 +735,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		if (typeof params.name === "string" && params.name.trim()) {
 			lines.push(`Name: ${truncateForPrompt(params.name)}`);
 		}
+		if (typeof params.model === "string" || Array.isArray(params.model)) {
+			const requestedModel = typeof params.model === "string" ? params.model : JSON.stringify(params.model);
+			lines.push(`Model: ${truncateForPrompt(requestedModel)}`);
+		}
 		if (typeof params.task === "string") {
 			lines.push(`Task:\n${truncateForPrompt(params.task)}`);
 		}
@@ -730,6 +777,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				}
 			}
 			for (const [index, item] of tasks.entries()) {
+				if (isRecord(item) && (typeof item.model === "string" || Array.isArray(item.model))) {
+					const requestedModel = typeof item.model === "string" ? item.model : JSON.stringify(item.model);
+					lines.push(`Task ${index + 1} model: ${truncateForPrompt(requestedModel)}`);
+				}
 				if (isRecord(item) && typeof item.taskFile === "string") {
 					lines.push(`Task ${index + 1} file: ${truncateForPrompt(sanitizeText(JSON.stringify(item.taskFile)))}`);
 				}
@@ -783,6 +834,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				cfgTaskFile.get(this.session.settings),
 				this.#defaultAgent(),
 				this.#seanceSchemaFields() !== undefined,
+				this.session.settings,
 			);
 			return typeof plan === "string" ? undefined : plan.spawns;
 		},
@@ -825,6 +877,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			file: cfgTaskFile.get(this.session.settings),
 			defaultAgent: this.#defaultAgent(),
 			seanceFields: this.#seanceSchemaFields(),
+			perCallModel: perCallModelEnabled(this.session.settings, "task"),
 		});
 	}
 
@@ -850,6 +903,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const sessionAgents = this.session.advertisedSessionAgents?.() ?? this.session.getSessionAgents?.() ?? [];
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
 		const isolationEnabled = cfgTaskIsolationEnabled.get(this.session.settings);
+		const perCallModel = perCallModelEnabled(this.session.settings, "task");
 		return renderDescription({
 			agents,
 			sessionAgents,
@@ -858,6 +912,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			disabledAgents,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
+			perCallModelEnabled: perCallModel,
+			perCallModelFallbacks: cfgTaskPerCallModelFallbacks.get(this.session.settings.grantAuthority()) === "runtime",
+			perCallModelAdvertisement: perCallModel
+				? getPerCallModelAdvertisement(
+						this.session.settings,
+						this.session.getActiveModel?.(),
+						this.session.modelRegistry,
+					)
+				: undefined,
 			evalToolsEnabled: evalToolsEnabled(this.session),
 			structured: this.#isStructured(),
 			file: cfgTaskFile.get(this.session.settings),
@@ -1028,7 +1091,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			context: this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined,
 			agent: params.agent,
 			sourceSession: params.sourceSession,
-			model: params.model,
+			...spawnModelFields(params),
 			...this.#resultParams(params),
 			...this.#effortParams(params),
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
@@ -1081,6 +1144,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			cfgTaskFile.get(this.session.settings),
 			defaultAgent,
 			this.#seanceSchemaFields() !== undefined,
+			this.session.settings,
 		);
 		if (typeof plan === "string") {
 			return createTaskModeError(plan);
@@ -1871,7 +1935,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				context,
 				agent: params.agent,
 				sourceSession: params.sourceSession,
-				model: params.model,
+				...spawnModelFields(params),
 				...this.#resultParams(params),
 				...this.#effortParams(params),
 				solutionSpace: params.solutionSpace,

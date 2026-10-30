@@ -1,7 +1,8 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { Tool as AiTool } from "@oh-my-pi/pi-ai";
+import type { Model, Tool as AiTool } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { JsRuntime, type RuntimeHooks } from "@oh-my-pi/pi-coding-agent/eval/js/shared/runtime";
@@ -13,17 +14,22 @@ import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgEvalPy } from "@oh-my-pi/pi-coding-agent/eval/settings";
-import { cfgTaskMaxRecursionDepth } from "@oh-my-pi/pi-coding-agent/task/settings";
+import {
+	cfgTaskMaxRecursionDepth,
+	cfgTaskPerCallModel,
+	cfgTaskPerCallModelAllow,
+} from "@oh-my-pi/pi-coding-agent/task/settings";
 
 function makeSession(opts: {
 	spawns?: string | null;
 	backends?: Record<string, boolean>;
+	settings?: Record<string, unknown>;
 	preludes?: () => readonly EvalPreludeDefinition[];
 	taskDepth?: number;
 	maxRecursionDepth?: number;
 	readActive?: boolean;
 }): ToolSession {
-	const settings = Settings.isolated(opts.backends);
+	const settings = Settings.isolated({ ...opts.backends, ...opts.settings });
 	if (opts.maxRecursionDepth !== undefined) cfgTaskMaxRecursionDepth.set(settings, opts.maxRecursionDepth);
 	return {
 		cwd: "/tmp/eval-test",
@@ -104,6 +110,254 @@ describe("eval tool description", () => {
 		expect(disabled.helpers).toContain("budget.total");
 		expect(disabled.judge).toContain("completion(prompt");
 		expect(disabled.agents).not.toContain("tools?=None");
+	});
+
+	it("advertises approved agent()/workpool() selectors only while task.perCallModel is not off", () => {
+		for (const mode of ["off", "on", "eval"] as const) {
+			const tool = new EvalTool(
+				makeSession({
+					readActive: false,
+					settings: {
+						"task.perCallModel": mode,
+						modelRoles: { smol: "anthropic/claude-haiku-4-5", slow: "openai/gpt-5*" },
+						"task.perCallModelAllow": ["openai/gpt-5.5"],
+					},
+				}),
+			);
+			if (mode === "off") {
+				for (const text of [tool.docTopics().agents ?? "", tool.description]) {
+					for (const guidance of [
+						"model?=None",
+						"`model`: one exact",
+						"Approved roles:",
+						"Allowlist:",
+						"anthropic/claude-haiku-4-5",
+						"openai/gpt-5*",
+						"openai/gpt-5.5",
+					]) {
+						expect(text).not.toContain(guidance);
+					}
+				}
+				continue;
+			}
+			expect((tool.docTopics().agents ?? "").match(/model\?=None/g)).toHaveLength(2);
+			for (const text of [tool.docTopics().agents ?? "", tool.description]) {
+				// The literal allowlist admits only slow's grant glob; the role alias stays visible.
+				expect(text).toContain(
+					"Approved roles: `@slow` (`openai/gpt-5*`). Also approved: your own current model; the selected bundled/user agent's own configured model.",
+				);
+				expect(text).not.toContain("anthropic/claude-haiku-4-5");
+				expect(text).toContain("Allowlist: `openai/gpt-5.5` (must also be approved).");
+				expect(text).toContain("Requested model unavailable → stop and report; NEVER substitute another.");
+				expect(text).toContain("a configured `@role[:level]` listed in Approved roles, or an ordered array");
+				expect(text).not.toContain("no roles, arrays");
+			}
+		}
+	});
+
+	it("omits kind roles, role aliases, and default/inherit selectors from session advertisements", () => {
+		const tool = new EvalTool(
+			makeSession({
+				readActive: false,
+				settings: {
+					"task.perCallModel": "eval",
+					modelRoles: {
+						smol: "anthropic/claude-haiku-4-5",
+						image: "hidden/image",
+						judge: "hidden/judge",
+						alias: "@smol",
+						legacyAlias: "pi/slow",
+						wildcardAlias: "*",
+						useDefault: "default",
+						inherited: "inherit",
+						slow: "openai/gpt-5.5",
+					},
+				},
+			}),
+		);
+		for (const text of [tool.docTopics().agents ?? "", tool.description]) {
+			expect(text).toContain(
+				"Approved roles: `@smol` (`anthropic/claude-haiku-4-5`), `@slow` (`openai/gpt-5.5`). Also approved: your own current model; the selected bundled/user agent's own configured model.",
+			);
+			for (const omitted of [
+				"hidden/image",
+				"hidden/judge",
+				"`@alias`",
+				"`@legacyAlias`",
+				"`@wildcardAlias`",
+				"`@useDefault`",
+				"`@inherited`",
+				"`pi/slow`",
+				"`*`",
+				"`default`",
+				"`inherit`",
+			]) {
+				expect(text).not.toContain(omitted);
+			}
+		}
+	});
+
+	it("preserves configured comma-list and glob selectors without consulting the model registry", () => {
+		const session = makeSession({
+			readActive: false,
+			settings: {
+				"task.perCallModel": "eval",
+				modelRoles: { review: " mock/second:high, mock/*, mock/first, mock/* " },
+			},
+		});
+		const catalogLookup = vi.fn(() => [{ provider: "mock", id: "registry-expanded" }]);
+		Object.assign(session, { modelRegistry: { getAll: catalogLookup, getAvailable: catalogLookup } });
+		const tool = new EvalTool(session);
+		for (const text of [tool.docTopics().agents ?? "", tool.description]) {
+			expect(text).toContain(
+				"Approved roles: `@review` (`mock/second:high`, `mock/*`, `mock/first`). Also approved: your own current model; the selected bundled/user agent's own configured model.",
+			);
+			expect(text).toContain("A listed glob approves matching exact IDs; write the exact ID, NEVER the glob.");
+			expect(text).not.toContain("mock/registry-expanded");
+		}
+		expect(catalogLookup).not.toHaveBeenCalled();
+	});
+
+	it("advertises a bare role's resolved exact model selector for agent() and workpool()", () => {
+		const model = createMockModel({ id: "target" });
+		const session = makeSession({
+			readActive: false,
+			settings: { "task.perCallModel": "eval", modelRoles: { review: "target" } },
+		});
+		Object.assign(session, { modelRegistry: { getAll: () => [model], getAvailable: () => [model] } });
+		const tool = new EvalTool(session);
+		for (const text of [tool.docTopics().agents ?? "", tool.description]) {
+			expect(text).toContain("Approved roles: `@review` (`mock/target`).");
+			expect(text).not.toContain("`@review` (`target`)");
+		}
+	});
+
+	it("renders supplied helper advertisement data only when its per-call gate is enabled", () => {
+		const options = {
+			py: false,
+			js: true,
+			inlineTopics: true,
+			perCallModel: true,
+			perCallModelAdvertisement: {
+				roles: [{ role: "review", patterns: ["custom/first", "custom/*"] }],
+				allowlist: ["custom/first"],
+				parentModelWithheld: false,
+			},
+		};
+		for (const text of [getEvalDocTopics(options).agents ?? "", getEvalToolDescription(options)]) {
+			expect(text).toContain("Approved roles: `@review` (`custom/first`, `custom/*`).");
+			expect(text).toContain("Allowlist: `custom/first` (must also be approved).");
+			expect(text).toContain("Requested model unavailable → stop and report; NEVER substitute another.");
+		}
+		const disabled = { ...options, perCallModel: false };
+		for (const text of [getEvalDocTopics(disabled).agents ?? "", getEvalToolDescription(disabled)]) {
+			expect(text).not.toContain("`model`: one exact");
+			expect(text).not.toContain("Approved roles:");
+			expect(text).not.toContain("Allowlist:");
+			expect(text).not.toContain("custom/first");
+			expect(text).not.toContain("custom/*");
+		}
+	});
+
+	it("keeps current-model and selected trusted-agent grants when no roles grant models", () => {
+		const tool = new EvalTool(
+			makeSession({ readActive: false, settings: { "task.perCallModel": "eval", modelRoles: {} } }),
+		);
+		for (const text of [
+			tool.docTopics().agents ?? "",
+			tool.description,
+			getEvalDocTopics({ perCallModel: true }).agents ?? "",
+			getEvalToolDescription({ perCallModel: true, inlineTopics: true }),
+		]) {
+			expect(text).toContain(
+				"Approved roles: none. Also approved: your own current model; the selected bundled/user agent's own configured model.",
+			);
+			expect(text).not.toContain("Allowlist:");
+		}
+	});
+
+	it("offers the caller's own model only when one selector can name it", () => {
+		const ownModel = createMockModel({ id: "own" });
+		// Several `only` upstreams: no single selector names this route.
+		const multiRouteModel = {
+			...ownModel,
+			compat: { openRouterRouting: { only: ["anthropic", "google-vertex"] } },
+		} as unknown as Model;
+		const texts = (activeModel: Model) => {
+			// No roles grant a model; the allowlist entry shows the advertisement still renders when the clause is withheld.
+			const session = makeSession({
+				readActive: false,
+				settings: { "task.perCallModel": "eval", modelRoles: {}, "task.perCallModelAllow": ["mock/own"] },
+			});
+			Object.assign(session, { getActiveModel: () => activeModel });
+			const tool = new EvalTool(session);
+			return [tool.docTopics().agents ?? "", tool.description];
+		};
+		for (const text of texts(ownModel)) {
+			expect(text).toContain("your own current model");
+			expect(text).toContain("mock/own");
+		}
+		for (const text of texts(multiRouteModel)) {
+			expect(text).not.toContain("your own current model");
+			expect(text).toContain("mock/own");
+		}
+	});
+
+	it("refreshes approved selectors and their allowlist from current session settings", () => {
+		// Distinct role and allowlist text, so each check proves its own refresh.
+		const session = makeSession({
+			readActive: false,
+			settings: {
+				"task.perCallModel": "eval",
+				modelRoles: { smol: "mock/original*" },
+				"task.perCallModelAllow": ["mock/original-allowed"],
+			},
+		});
+		const tool = new EvalTool(session);
+		for (const text of [tool.docTopics().agents ?? "", tool.description]) {
+			expect(text).toContain("Approved roles: `@smol` (`mock/original*`).");
+			expect(text).toContain("Allowlist: `mock/original-allowed` (must also be approved).");
+		}
+
+		session.settings.overrideModelRoles({ smol: "mock/replacement*" });
+		cfgTaskPerCallModelAllow.override(session.settings, ["mock/replacement-allowed"]);
+		for (const text of [tool.docTopics().agents ?? "", tool.description]) {
+			expect(text).toContain("Approved roles: `@smol` (`mock/replacement*`).");
+			expect(text).toContain("Allowlist: `mock/replacement-allowed` (must also be approved).");
+			expect(text).not.toContain("mock/original");
+		}
+
+		cfgTaskPerCallModel.override(session.settings, "off");
+		for (const text of [tool.docTopics().agents ?? "", tool.description]) {
+			expect(text).not.toContain("Approved roles:");
+			expect(text).not.toContain("Allowlist:");
+			expect(text).not.toContain("mock/replacement");
+		}
+	});
+
+	it.each(["off", "runtime"])("keeps approved-role advertisements with the %s fallback rule", fallbacks => {
+		const tool = new EvalTool(
+			makeSession({
+				readActive: false,
+				settings: {
+					"task.perCallModel": "eval",
+					"task.perCallModelFallbacks": fallbacks,
+					modelRoles: { review: "mock/target" },
+				},
+			}),
+		);
+		for (const text of [tool.docTopics().agents ?? "", tool.description]) {
+			expect(text).toContain("Approved roles: `@review` (`mock/target`).");
+			expect(text).toContain("context promotion and prewalk stay off");
+			expect(text).toContain("Requested model unavailable → stop and report; NEVER substitute another.");
+			if (fallbacks === "runtime") {
+				expect(text).toContain("operator-configured fallback models");
+				expect(text).not.toContain("No runtime model fallback.");
+			} else {
+				expect(text).toContain("No runtime model fallback.");
+				expect(text).not.toContain("operator-configured fallback models");
+			}
+		}
 	});
 
 	it("renders helper syntax only for available runtimes", () => {

@@ -275,6 +275,12 @@ export interface TurnRecoveryHost {
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined): void;
 	/** Hard per-session effort ceiling; fallback recovery must never raise thinking above it. */
 	thinkingLevelCeiling(): Effort | undefined;
+	/** The session never switches to a retry fallback model (a per-call `model` subagent). */
+	modelFallbackDisabled?(): boolean;
+	/** Chain key the fallback walk consults first when no walk has pinned one (a per-call `model` subagent's own chain). */
+	pinnedRetryFallbackRole?(): string | undefined;
+	/** Whether the main-loop dispatch check admits `model`; a fallback walk never switches onto a model it refuses. */
+	dispatchModelAllowed?(model: Model): boolean;
 	isDisposed(): boolean;
 	isStreaming(): boolean;
 	isCompacting(): boolean;
@@ -1919,8 +1925,8 @@ export class TurnRecovery {
 
 	/**
 	 * Chain keys to consult for the active model, most specific walk first: the
-	 * chain that owns the current fallback walk, then the chain the CURRENT model
-	 * owns when that is a different key.
+	 * chain that owns the current fallback walk (or, before any hop, the session's
+	 * pinned chain), then the chain the CURRENT model owns when that is a different key.
 	 *
 	 * The second key is what makes a chain reachable from the end of another one.
 	 * `#activeRetryFallback.role` is pinned at the first hop and never
@@ -1939,7 +1945,7 @@ export class TurnRecovery {
 		currentModel: Model | null | undefined = this.#host.model(),
 		options?: { pinnedRole?: string; roleHint?: string },
 	): string[] {
-		const pinned = options?.pinnedRole ?? this.#activeRetryFallback?.role;
+		const pinned = options?.pinnedRole ?? this.#activeRetryFallback?.role ?? this.#host.pinnedRetryFallbackRole?.();
 		const current = this.resolveRetryFallbackRole(currentSelector, currentModel, options?.roleHint);
 		if (!pinned) return current ? [current] : [];
 		return current && current !== pinned ? [pinned, current] : [pinned];
@@ -2032,7 +2038,7 @@ export class TurnRecovery {
 		) {
 			return false;
 		}
-		if (!cfgRetryModelFallback.get(this.#host.settings)) return false;
+		if (!cfgRetryModelFallback.get(this.#host.settings) || this.#host.modelFallbackDisabled?.()) return false;
 
 		let fallback: { role: string; selector: RetryFallbackSelector; apiKey: string } | undefined;
 		const ceiling = this.#host.thinkingLevelCeiling();
@@ -2043,6 +2049,7 @@ export class TurnRecovery {
 				const resolved = resolveModelOverride([candidate.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidateModel = resolved.model ?? this.#host.modelRegistry.find(candidate.provider, candidate.id);
 				if (!candidateModel || !this.#host.modelRegistry.hasConfiguredAuth(candidateModel)) continue;
+				if (this.#host.dispatchModelAllowed?.(candidateModel) === false) continue;
 				if (ceiling !== undefined && !modelSupportsEffortCeiling(candidateModel, ceiling)) continue;
 				// A usage fallback must also fit: skip a candidate whose window cannot
 				// hold the live context so we never switch onto an oversized request
@@ -2319,6 +2326,10 @@ export class TurnRecovery {
 				// sets `switchedModel`, and the retry budget is reset to 1 on every
 				// failure — an unbounded retry loop against a model that cannot work.
 				if (this.#isNoOpRetryFallback(candidate, selector)) continue;
+				// A per-call worker's dispatch check refuses a model the operator has not approved
+				// for it: skip it here so the walk reaches the next approved entry instead of
+				// switching onto a model whose request would fail the turn.
+				if (this.#host.dispatchModelAllowed?.(candidate) === false) continue;
 				if (options?.excludeProvider === candidate.provider) continue;
 				// Redeeming Anthropic fallback credit replays the refused request's frozen
 				// body; the server validates thinking blocks across the boundary itself
@@ -2573,6 +2584,7 @@ export class TurnRecovery {
 		const primaryModel =
 			resolvedPrimary.model ?? this.#host.modelRegistry.find(originalSelector.provider, originalSelector.id);
 		if (!primaryModel) return false;
+		if (this.#host.dispatchModelAllowed?.(primaryModel) === false) return false;
 		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, this.#host.sessionId());
 		if (!apiKey) return false;
 
@@ -2831,7 +2843,7 @@ export class TurnRecovery {
 			}
 		}
 
-		const allowModelFallback = options?.allowModelFallback !== false;
+		const allowModelFallback = options?.allowModelFallback !== false && !this.#host.modelFallbackDisabled?.();
 		const currentModel = this.#host.model();
 		const currentSelector = currentModel
 			? formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel())
