@@ -10,7 +10,11 @@ import { type RestoredSession, restoreArchivedSession } from "@oh-my-pi/pi-codin
 import { withGcLock } from "@oh-my-pi/pi-coding-agent/session/gc-lock";
 import { resolveResumableSession, resolveResumeTarget } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { FileSessionStorage, tryAcquireSessionLease } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import {
+	FileSessionStorage,
+	sessionStagingPath,
+	tryAcquireSessionLease,
+} from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 import { getAgentDir, getSessionsDir, setAgentDir } from "@oh-my-pi/pi-utils";
 
@@ -678,14 +682,14 @@ test("an artifact tree that cannot be dropped leaves the archive complete, not d
 	const artifacts = sessionFile.slice(0, -".jsonl".length);
 	await fs.mkdir(artifacts, { recursive: true });
 	await Bun.write(path.join(artifacts, "sub.jsonl"), sessionBody("sub-1", "nested", root));
-	const realRm = fs.rm;
-	const rm = spyOn(fs, "rm").mockImplementation(async (target, options) => {
+	const realUnlink = fs.unlink;
+	const rm = spyOn(fs, "unlink").mockImplementation(async target => {
 		// A locked artifact: the copy into the archive succeeded, dropping the
 		// live tree did not.
-		if (String(target) === artifacts) {
+		if (String(target).startsWith(`${artifacts}${path.sep}`)) {
 			throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
 		}
-		return await realRm(target, options);
+		return await realUnlink(target);
 	});
 	try {
 		const result = await archiveEverything();
@@ -1051,9 +1055,9 @@ test("a restore refuses to delete the archive when the live tree becomes an alia
 	// The live tree becomes the archived tree under another name once the file
 	// has been carried home. Every path checked before that is stale, so the
 	// question has to be asked again with nothing left to do but delete.
-	const realRename = fs.rename;
-	const rename = spyOn(fs, "rename").mockImplementation(async (source, destination) => {
-		await realRename(source, destination);
+	const realLink = fs.link;
+	const rename = spyOn(fs, "link").mockImplementation(async (source, destination) => {
+		await realLink(source, destination);
 		if (String(destination) !== path.join(liveArtifacts, "sub.jsonl")) return;
 		await fs.rm(liveArtifacts, { recursive: true, force: true });
 		await fs.symlink(archivedArtifacts, liveArtifacts);
@@ -1170,7 +1174,6 @@ test("a failed archive copy keeps archive-only entries below a symlinked archive
 test("a first archive that runs out of space leaves the live session whole", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	await Bun.write(path.join(liveArtifacts, "only.log"), "LIVE-ARTIFACT");
-	const realCopyFile = fs.copyFile;
 	const copyFile = spyOn(fs, "copyFile").mockImplementation(async () => {
 		throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
 	});
@@ -1198,4 +1201,144 @@ test("a legacy-configured archive phase meets the same refusal as a configured o
 
 	expect(await Bun.file(sessionFile).exists()).toBe(true);
 	expect(await Bun.file(archiveFile).exists()).toBe(false);
+});
+test("an archived artifact nobody can read is refused, not written over", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "ARCHIVED UNIQUE SUFFIX");
+	await archiveEverything();
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "ARCHIVED");
+	// Unreadable, in a writable directory: a failure to read says nothing
+	// about what is there, and nothing may be written over it on that basis.
+	await fs.chmod(path.join(archivedArtifacts, "tool.log"), 0o000);
+
+	const result = await archiveEverything();
+
+	expect(result.archive?.archived).toBe(0);
+	await fs.chmod(path.join(archivedArtifacts, "tool.log"), 0o600);
+	expect(await Bun.file(path.join(archivedArtifacts, "tool.log")).text()).toBe("ARCHIVED UNIQUE SUFFIX");
+});
+
+test("archived names hard-linked to one file are not independent live copies", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "ONLY BYTES");
+	await archiveEverything();
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	// Both archived names are one file, and both live names point at them, so
+	// removing the archive tree would leave no directory entry at all — which
+	// a link count cannot say.
+	await fs.link(path.join(archivedArtifacts, "a.log"), path.join(archivedArtifacts, "b.log"));
+	await fs.mkdir(liveArtifacts, { recursive: true });
+	await fs.symlink(path.join(archivedArtifacts, "a.log"), path.join(liveArtifacts, "a.log"));
+	await fs.symlink(path.join(archivedArtifacts, "b.log"), path.join(liveArtifacts, "b.log"));
+
+	const restored = await restoreArchivedSession(archiveFile, root);
+
+	expect(restored.artifactsRestored).toBe(false);
+	expect(await Bun.file(path.join(archivedArtifacts, "a.log")).text()).toBe("ONLY BYTES");
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("a restore does not write over a file that appeared while it was staging", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "ARCHIVED");
+	await archiveEverything();
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+
+	const realCopyFile = fs.copyFile;
+	const copyFile = spyOn(fs, "copyFile").mockImplementation(async (source, destination, mode) => {
+		const result = await realCopyFile(source, destination, mode);
+		await Bun.write(path.join(liveArtifacts, "tool.log"), "NEW USER WORK");
+		return result;
+	});
+	let restored: RestoredSession | undefined;
+	try {
+		restored = await restoreArchivedSession(archiveFile, root);
+	} finally {
+		copyFile.mockRestore();
+	}
+
+	expect(restored?.artifactsRestored).toBe(false);
+	expect(await Bun.file(path.join(liveArtifacts, "tool.log")).text()).toBe("NEW USER WORK");
+	expect(await Bun.file(path.join(archivedArtifacts, "tool.log")).text()).toBe("ARCHIVED");
+});
+
+test("a restored artifact changed to the same length before the delete keeps the archive", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "UNIQUE");
+	await Bun.write(path.join(liveArtifacts, "z.log"), "SECOND");
+	await archiveEverything();
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+
+	// The first restored file is rewritten to different bytes of the same
+	// length while the second is still being carried home. Size and inode both
+	// still look right; only the content says otherwise.
+	const realLink = fs.link;
+	const link = spyOn(fs, "link").mockImplementation(async (source, destination) => {
+		await realLink(source, destination);
+		if (String(destination).endsWith("z.log")) await Bun.write(path.join(liveArtifacts, "a.log"), "OTHER!");
+	});
+	let restored: RestoredSession | undefined;
+	try {
+		restored = await restoreArchivedSession(archiveFile, root);
+	} finally {
+		link.mockRestore();
+	}
+
+	expect(restored?.artifactsRestored).toBe(false);
+	expect(await Bun.file(path.join(archivedArtifacts, "a.log")).text()).toBe("UNIQUE");
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("a live artifact rewritten after it was staged is kept, not deleted", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "ORIGINAL");
+
+	const realCopyFile = fs.copyFile;
+	const copyFile = spyOn(fs, "copyFile").mockImplementation(async (source, destination, mode) => {
+		const result = await realCopyFile(source, destination, mode);
+		if (String(source).endsWith("tool.log")) await Bun.write(String(source), "NEW WORK");
+		return result;
+	});
+	let result: GcResult;
+	try {
+		result = await archiveEverything();
+	} finally {
+		copyFile.mockRestore();
+	}
+
+	expect(result.archive?.leftoverArtifactTrees).toEqual([liveArtifacts]);
+	expect(await Bun.file(path.join(liveArtifacts, "tool.log")).text()).toBe("NEW WORK");
+});
+
+test("archiving keeps a deliberately private artifact directory private", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "nested", "tool.log"), "PRIVATE");
+	await fs.chmod(path.join(liveArtifacts, "nested"), 0o700);
+	await fs.chmod(liveArtifacts, 0o700);
+
+	expect((await archiveEverything()).archive?.archived).toBe(1);
+
+	expect((await fs.stat(archivedArtifacts)).mode & 0o777).toBe(0o700);
+	expect((await fs.stat(path.join(archivedArtifacts, "nested"))).mode & 0o777).toBe(0o700);
+});
+
+test("staging residue in the archive is not carried home as an artifact", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "ARTIFACT");
+	await archiveEverything();
+	const residue = sessionStagingPath(path.join(archivedArtifacts, "tool.log"));
+	await Bun.write(residue, "half a copy");
+
+	const restored = await restoreArchivedSession(archiveFile, root);
+
+	expect(restored.artifactsRestored).toBe(true);
+	expect(await Bun.file(path.join(liveArtifacts, path.basename(residue))).exists()).toBe(false);
+	expect(await Bun.file(path.join(liveArtifacts, "tool.log")).text()).toBe("ARTIFACT");
 });

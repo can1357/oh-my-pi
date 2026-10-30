@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
+import type { Stats } from "node:fs";
 import * as path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -1095,33 +1096,57 @@ async function existingTreePaths(destination: string): Promise<Set<string> | und
  * overwrite a file nothing examined, and the archived file being the live
  * file under another name is refused instead of copied over itself.
  *
- * Publishing is a rename over the verified descriptor's path, which is the
- * narrowest window POSIX offers; the gc lock and the session's ownership
- * lease are what keep anything cooperative out of it.
+ * Only the destination's absence may skip that comparison. A destination
+ * that cannot be opened — no permission, an I/O error — is not an empty
+ * slot, and reading it as one is how a file nobody could read gets written
+ * over.
+ *
+ * Nothing is written over a file this run did not examine. An absent
+ * destination is published with `link`, which fails rather than replace
+ * something that appeared in the meantime. A destination being repaired is
+ * written through the very descriptor the comparison read, so a path swapped
+ * underneath receives nothing at all: the swapped-in file keeps its own
+ * inode and its own bytes, and the run reports that the archive moved under
+ * it rather than finishing over someone's work.
  */
 async function publishArtifactIntoArchive(source: string, destination: string): Promise<void> {
 	const tempPath = sessionStagingPath(destination);
 	try {
 		await fs.copyFile(source, tempPath);
-		const archived = await fs.open(destination, "r").catch(() => undefined);
-		if (archived) {
-			try {
-				const archivedStat = await archived.stat();
-				if (archivedStat.isFile() && !(await archivedHandleIsHeldBy(archived, archivedStat, tempPath))) {
-					throw new Error(
-						`the archive already holds ${destination}, and ${source} does not hold its bytes; ` +
-							`archiving would overwrite the archived copy with a shorter or different one. ` +
-							`Restore the session first (\`omp gc --restore\`), or move one of the two aside`,
-					);
-				}
-			} finally {
-				await archived.close();
-			}
+		const archived = await fs.open(destination, "r+").catch(error => {
+			if (codeOf(error) === "ENOENT") return undefined;
+			throw error;
+		});
+		if (!archived) {
+			await fs.link(tempPath, destination);
+			return;
 		}
-		await fs.rename(tempPath, destination);
-	} catch (error) {
+		try {
+			const verified = await archived.stat();
+			if (verified.isFile() && !(await archivedHandleIsHeldBy(archived, verified, tempPath))) {
+				throw new Error(
+					`the archive already holds ${destination}, and ${source} does not hold its bytes; ` +
+						`archiving would overwrite the archived copy with a shorter or different one. ` +
+						`Restore the session first (\`omp gc --restore\`), or move one of the two aside`,
+				);
+			}
+			await archived.truncate(0);
+			let at = 0;
+			for await (const chunk of Bun.file(tempPath).stream()) {
+				await archived.write(chunk, 0, chunk.byteLength, at);
+				at += chunk.byteLength;
+			}
+			const standing = await statIfPresent(destination);
+			if (!standing || standing.dev !== verified.dev || standing.ino !== verified.ino) {
+				throw new Error(
+					`${destination} was replaced while it was being archived, so the archive wrote nothing over it; run \`omp gc --archive\` again`,
+				);
+			}
+		} finally {
+			await archived.close();
+		}
+	} finally {
 		await fs.rm(tempPath, { force: true });
-		throw error;
 	}
 }
 
@@ -1152,6 +1177,9 @@ async function copyArtifactEntryIntoArchive(
 			throw new Error(`the live artifact tree ${source} is the archived tree ${destination} itself`);
 		}
 		await fs.mkdir(destination, { recursive: true });
+		// A directory deliberately kept private stays private in the archive:
+		// `mkdir` applies the umask, which would widen a `0700` tree to `0755`.
+		await fs.chmod(destination, stat.mode & 0o7777);
 		// Sorted, so a run that fails part-way is reproducible from its report.
 		for (const entry of (await fs.readdir(source)).sort()) {
 			await copyArtifactEntryIntoArchive(path.join(source, entry), path.join(destination, entry), state);
@@ -1185,6 +1213,58 @@ async function removeTreeAdditions(destination: string, preexisting: Set<string>
 		if (preexisting.has(name)) continue;
 		await fs.rm(path.join(destination, name), { recursive: true, force: true }).catch(() => undefined);
 	}
+}
+
+/**
+ * Remove the live tree, one entry at a time, each only once the archive has
+ * been shown to hold what that entry holds *now*.
+ *
+ * The copy read the live file when it staged it; between then and here it
+ * may have been written again, and deleting it on the strength of the older
+ * reading would drop the newer work. Each file is compared in full through a
+ * descriptor of its own and unlinked immediately after. An entry that cannot
+ * be proved is kept, and the tree it sits in is reported as a leftover
+ * rather than thrown: the archive holds a complete copy by this point, so
+ * rolling back would delete the only one.
+ */
+async function removeLiveTreeOnceArchived(source: string, destination: string): Promise<boolean> {
+	const stat = await fs.lstat(source).catch(error => {
+		if (codeOf(error) === "ENOENT") return undefined;
+		throw error;
+	});
+	if (!stat) return true;
+	if (stat.isDirectory()) {
+		let emptied = true;
+		for (const entry of (await fs.readdir(source)).sort()) {
+			emptied =
+				(await removeLiveTreeOnceArchived(path.join(source, entry), path.join(destination, entry))) && emptied;
+		}
+		if (!emptied) return false;
+		return await fs
+			.rmdir(source)
+			.then(() => true)
+			.catch(() => false);
+	}
+	if (!stat.isFile()) {
+		// A link the copy resolved rather than carried, or a device: its own
+		// name is all there is to drop.
+		return await fs
+			.unlink(source)
+			.then(() => true)
+			.catch(() => false);
+	}
+	const live = await fs.open(source, "r").catch(() => undefined);
+	try {
+		const liveStat = await live?.stat();
+		if (!live || !liveStat?.isFile()) return false;
+		if (!(await archivedHandleIsHeldBy(live, liveStat, destination))) return false;
+	} finally {
+		await live?.close();
+	}
+	return await fs
+		.unlink(source)
+		.then(() => true)
+		.catch(() => false);
 }
 
 /**
@@ -1229,9 +1309,7 @@ async function moveArtifactsTree(
 		await removeTreeAdditions(destination, preexisting);
 		throw error;
 	}
-	try {
-		await fs.rm(source, { recursive: true, force: true });
-	} catch {
+	if (!(await removeLiveTreeOnceArchived(source, destination))) {
 		return { brokenLinks: state.brokenLinks, leftoverSource: source };
 	}
 	return { brokenLinks: state.brokenLinks };

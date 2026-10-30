@@ -25,7 +25,7 @@ import { createGunzip } from "node:zlib";
 import { getAgentDir, getSessionsDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { statIfPresent, withGcLock } from "./gc-lock";
 import { SESSION_TITLE_SLOT_BYTES } from "./session-entries";
-import { sessionStagingPath } from "./session-storage";
+import { SESSION_STAGING_RE, sessionStagingPath } from "./session-storage";
 import { parseTitleSlotFromContent, parseTitleSlotLine } from "./session-title-slot";
 
 /** Suffix `gc --archive` gives a transcript it has compressed. */
@@ -233,13 +233,22 @@ function readTranscriptHead(head: Uint8Array): { prefixBytes: number; header: Re
  * rewrites a transcript that predates the slot — `title` and `titleSource` on
  * the header record itself. Both are the same editable name, so neither takes
  * part in deciding whether two files are the same session. Every other field,
- * `id` and `timestamp` and `cwd` included, must match exactly.
+ * `id` and `timestamp` and `cwd` included, must match exactly — except the
+ * schema `version`, which `migrateToCurrentVersion` raises when the writer
+ * opens a transcript an older build wrote. A raised version is the same
+ * session in a newer shape; a lowered one is not, and is refused.
  */
 const RENAMEABLE_HEADER_FIELDS: Record<string, true> = { title: true, titleSource: true };
 
 function headersAreOneSession(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
 	for (const key of new Set([...Object.keys(a), ...Object.keys(b)])) {
 		if (RENAMEABLE_HEADER_FIELDS[key]) continue;
+		if (key === "version") {
+			const held = typeof a.version === "number" ? a.version : 1;
+			const holder = typeof b.version === "number" ? b.version : 1;
+			if (holder < held) return false;
+			continue;
+		}
 		if (JSON.stringify(a[key]) !== JSON.stringify(b[key])) return false;
 	}
 	return true;
@@ -249,21 +258,34 @@ function headersAreOneSession(a: Record<string, unknown>, b: Record<string, unkn
 const TRANSCRIPT_HEAD_BYTES = 64 * 1024;
 
 /**
+ * Whether a path is a session transcript by name — the `.jsonl` the writer
+ * gives one, in the sessions tree and nested in an artifact tree.
+ *
+ * Provenance, not shape: a tool-output log may happen to open with a record
+ * that looks like a session header, and reading its bytes as a session's name
+ * is how its content becomes ignorable. Only a file omp itself writes as a
+ * transcript gets transcript semantics.
+ */
+function isTranscriptPath(file: string): boolean {
+	return file.endsWith(SESSION_SUFFIX);
+}
+
+/**
  * Whether the file open as `destination` holds every byte `source` yields.
  *
  * For an ordinary artifact that is a plain byte-for-byte prefix test: opaque
  * content has no parts anyone may skip.
  *
- * For a session transcript — a file whose opening record, past an optional
- * fixed-width title slot, is a session header — the name is compared as a name
- * and the conversation byte for byte. A transcript only ever grows at its end,
- * so "the destination starts with all of this" is identity, and the one span
- * that moves under a rename is the name itself: the slot, which
- * `FileSessionStorage.updateSessionTitle` rewrites in place, and the header's
- * own `title`/`titleSource`, which the legacy rewrite adds. Each side is
- * measured on its own, so a copy that gained a slot it never had and a copy
- * renamed since still read as the same session, while a different `id`,
- * `timestamp` or `cwd` reads as a different one.
+ * For a session transcript — a file named as one, whose opening record past
+ * an optional fixed-width title slot is a session header — the name is
+ * compared as a name and the conversation byte for byte. A transcript only
+ * ever grows at its end, so "the destination starts with all of this" is
+ * identity, and the one span that moves under a rename is the name itself:
+ * the slot, which `FileSessionStorage.updateSessionTitle` rewrites in place,
+ * and the header's own `title`/`titleSource`, which the legacy rewrite adds.
+ * Each side is measured on its own, so a copy that gained a slot it never had
+ * and a copy renamed since still read as the same session, while a different
+ * `id`, `timestamp` or `cwd` reads as a different one.
  *
  * The source is drained even after a mismatch, because a caller may be feeding
  * it from a pipeline that must finish.
@@ -271,6 +293,7 @@ const TRANSCRIPT_HEAD_BYTES = 64 * 1024;
 async function sourceIsPrefixOfDestination(
 	source: AsyncIterable<Uint8Array>,
 	destination: fs.FileHandle,
+	transcript: boolean,
 ): Promise<boolean> {
 	const window = Buffer.allocUnsafe(64 * 1024);
 	const head: Uint8Array[] = [];
@@ -290,7 +313,7 @@ async function sourceIsPrefixOfDestination(
 		const sourceTranscript = readTranscriptHead(buffered);
 		const destinationTranscript = readTranscriptHead(destinationHead.subarray(0, bytesRead));
 		let skip = 0;
-		if (sourceTranscript && destinationTranscript) {
+		if (transcript && sourceTranscript && destinationTranscript) {
 			if (!headersAreOneSession(sourceTranscript.header, destinationTranscript.header)) return false;
 			skip = sourceTranscript.prefixBytes;
 			offset = destinationTranscript.prefixBytes;
@@ -325,6 +348,7 @@ async function sourceIsPrefixOfDestination(
 	if (!mismatch && !settled && !(await settle())) return false;
 	return !mismatch;
 }
+
 /** Newline-delimited records of a byte stream. */
 async function* linesOf(source: AsyncIterable<Uint8Array>): AsyncGenerator<string> {
 	const decoder = new TextDecoder();
@@ -340,20 +364,25 @@ async function* linesOf(source: AsyncIterable<Uint8Array>): AsyncGenerator<strin
 	if (buffer.length > 0) yield buffer;
 }
 
-/** The same, read positionally so the caller's pinned descriptor stays the one being read. */
-async function* linesOfHandle(handle: fs.FileHandle): AsyncGenerator<string> {
+/**
+ * A file's bytes read positionally, so the caller's pinned descriptor stays
+ * the one being read and stays open for the next comparison — a read stream
+ * over a `FileHandle` closes it when it ends.
+ */
+async function* bytesOfHandle(handle: fs.FileHandle): AsyncGenerator<Uint8Array> {
 	const window = Buffer.allocUnsafe(64 * 1024);
 	let offset = 0;
-	yield* linesOf(
-		(async function* () {
-			for (;;) {
-				const { bytesRead } = await handle.read(window, 0, window.byteLength, offset);
-				if (bytesRead === 0) return;
-				offset += bytesRead;
-				yield Uint8Array.prototype.slice.call(window, 0, bytesRead);
-			}
-		})(),
-	);
+	for (;;) {
+		const { bytesRead } = await handle.read(window, 0, window.byteLength, offset);
+		if (bytesRead === 0) return;
+		offset += bytesRead;
+		yield Uint8Array.prototype.slice.call(window, 0, bytesRead);
+	}
+}
+
+/** The same, split into newline-delimited records. */
+async function* linesOfHandle(handle: fs.FileHandle): AsyncGenerator<string> {
+	yield* linesOf(bytesOfHandle(handle));
 }
 
 /** Whether every field of `held` appears in `holder` with the same value. */
@@ -371,19 +400,81 @@ function jsonContains(held: unknown, holder: unknown): boolean {
 	const inner = holder as Record<string, unknown>;
 	return Object.entries(held as Record<string, unknown>).every(([key, value]) => jsonContains(value, inner[key]));
 }
+/**
+ * Fields `migrateToCurrentVersion` rewrites rather than preserves, by the
+ * version the archived copy was written at.
+ *
+ * A v1 transcript gets the entry tree it never had: `migrateV1ToV2` assigns
+ * every non-session record a fresh `id` and a `parentId`, and turns a
+ * compaction's `firstKeptEntryIndex` into `firstKeptEntryId`. Those are the
+ * migration's own bookkeeping, not the conversation, so they are set aside
+ * for a transcript archived before version 2 and compared for every other.
+ * Everything a record says — its type, its message, its content — is still
+ * compared, so a rewritten history is still a different session.
+ */
+const MIGRATED_RECORD_FIELDS: Record<string, true> = {
+	id: true,
+	parentId: true,
+	firstKeptEntryIndex: true,
+	firstKeptEntryId: true,
+};
 
-/** Next record of a transcript, with the title slot — the name, not the content — passed over. */
-async function nextRecord(lines: AsyncGenerator<string>): Promise<{ raw: string; value: unknown } | undefined> {
-	for (;;) {
-		const next = await lines.next();
-		if (next.done) return undefined;
-		if (parseTitleSlotLine(next.value)) continue;
-		try {
-			return { raw: next.value, value: JSON.parse(next.value) as unknown };
-		} catch {
-			return { raw: next.value, value: undefined };
+/** Whether `holder` carries `held`, allowing for the migrations `version` has since been through. */
+function recordIsCarried(held: unknown, holder: unknown, version: number): boolean {
+	if (typeof held !== "object" || held === null || Array.isArray(held)) return jsonContains(held, holder);
+	if (typeof holder !== "object" || holder === null || Array.isArray(holder)) return false;
+	const a = held as Record<string, unknown>;
+	const b = holder as Record<string, unknown>;
+	for (const [key, value] of Object.entries(a)) {
+		if (version < 2 && MIGRATED_RECORD_FIELDS[key]) continue;
+		// `migrateV2ToV3` renames the `hookMessage` role to `custom`.
+		if (version < 3 && key === "message") {
+			const held = value as Record<string, unknown> | null;
+			const holder = b.message as Record<string, unknown> | null;
+			if (held && holder && held.role === "hookMessage" && holder.role === "custom") {
+				if (!jsonContains({ ...held, role: "custom" }, holder)) return false;
+				continue;
+			}
 		}
+		if (!jsonContains(value, b[key])) return false;
 	}
+	return true;
+}
+
+/** Next record of a transcript, parsed when it parses. */
+async function nextRecord(lines: AsyncGenerator<string>): Promise<{ raw: string; value: unknown } | undefined> {
+	const next = await lines.next();
+	if (next.done) return undefined;
+	try {
+		return { raw: next.value, value: JSON.parse(next.value) as unknown };
+	} catch {
+		return { raw: next.value, value: undefined };
+	}
+}
+
+/**
+ * The session header a transcript opens with, past the fixed-width title slot
+ * when it carries one, or undefined when this is not a transcript at all.
+ *
+ * The slot is recognised only at the very start and only at its physical
+ * width, the same contract {@link titleSlotWidth} enforces on the byte path.
+ * Nothing else is passed over: an artifact whose lines happen to look like
+ * title records is not a transcript, and must not be able to compare as one.
+ */
+async function openingHeader(lines: AsyncGenerator<string>): Promise<Record<string, unknown> | undefined> {
+	let first = await nextRecord(lines);
+	if (
+		first &&
+		Buffer.byteLength(first.raw, "utf8") === SESSION_TITLE_SLOT_BYTES - 1 &&
+		parseTitleSlotLine(first.raw)
+	) {
+		first = await nextRecord(lines);
+	}
+	const header = first?.value;
+	if (typeof header !== "object" || header === null || Array.isArray(header)) return undefined;
+	const record = header as Record<string, unknown>;
+	if (record.type !== "session" || typeof record.id !== "string") return undefined;
+	return record;
 }
 
 /**
@@ -392,62 +483,78 @@ async function nextRecord(lines: AsyncGenerator<string>): Promise<{ raw: string;
  *
  * This is the slower answer to the same question {@link
  * sourceIsPrefixOfDestination} asks, and it is only asked when that one says
- * no. The writer does not only append: opening a transcript that predates the
- * title slot migrates it, which re-serialises its records and fills in fields
- * the older writer left out — the archived bytes are then no longer a prefix
- * of a file that still holds every one of their records.
+ * no. The writer does not only append: opening a transcript written by an
+ * older version migrates it, which re-serialises its records, fills in fields
+ * the older writer left out and raises the header's version — the archived
+ * bytes are then no longer a prefix of a file that still holds every one of
+ * their records.
+ *
+ * Both sides must be transcripts, proved the same way the byte path proves
+ * it, or the answer is no: opaque content has no records anyone may read past.
  *
  * Containment, not equality: each archived record must appear at its own
  * place in the live transcript with every field it had, unchanged. A record
  * the live side has filled out still carries the archived one; a record whose
- * content was pruned or replaced does not, which is how a rewritten history
- * stays a different session.
+ * content was pruned, replaced or reordered does not, which is how a
+ * rewritten history stays a different session.
  */
 async function recordsAreCarried(archived: AsyncGenerator<string>, live: AsyncGenerator<string>): Promise<boolean> {
-	for (let index = 0; ; index += 1) {
-		const held = await nextRecord(archived);
-		if (!held) return true;
-		const holder = await nextRecord(live);
-		if (!holder) return false;
-		if (index === 0) {
-			const a = held.value as Record<string, unknown> | undefined;
-			const b = holder.value as Record<string, unknown> | undefined;
-			if (!a || !b || a.type !== "session" || b.type !== "session") return false;
-			if (!headersAreOneSession(a, b)) return false;
-			continue;
-		}
-		if (held.raw === holder.raw) continue;
-		if (held.value === undefined || holder.value === undefined) return false;
-		if (!jsonContains(held.value, holder.value)) return false;
+	const held = await openingHeader(archived);
+	const holder = await openingHeader(live);
+	if (!held || !holder || !headersAreOneSession(held, holder)) return false;
+	const version = typeof held.version === "number" ? held.version : 1;
+	for (;;) {
+		const next = await nextRecord(archived);
+		if (!next) return true;
+		const onto = await nextRecord(live);
+		if (!onto) return false;
+		if (next.raw === onto.raw) continue;
+		if (next.value === undefined || onto.value === undefined) return false;
+		if (!recordIsCarried(next.value, onto.value, version)) return false;
 	}
 }
 
-/**
- * Whether `destination` and `source` are the same bytes on disk rather than
- * two copies of them.
- *
- * Identity is the inode, not the resolved path: a bind mount gives the archive
- * a second path with a different string and the same `dev`/`ino`, and a
- * symlink introduced after a path was resolved gives one that was right when
- * it was checked. A hard link is the exception that proves it — it shares the
- * inode but has a directory entry of its own, so unlinking the archive's name
- * leaves the bytes reachable, and `nlink` is what says so.
- */
-function isSameFile(source: Stats, destination: Stats): boolean {
-	return source.dev === destination.dev && source.ino === destination.ino && destination.nlink === 1;
+/** Whether `target` is `root` or lies below it, both already real paths. */
+function isWithin(root: string, target: string): boolean {
+	const relative = path.relative(root, target);
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 /**
- * Confirm every archived file has an independent live copy, immediately before
- * the archive tree is removed.
+ * Whether `destination` is a copy that survives `archiveRoot` being deleted.
  *
- * The per-entry checks run while the tree is being walked; this one runs when
- * nothing is left to do but delete, so a destination that became an alias of
- * the archive part-way through — a directory swapped under a path already
- * passed — is still caught while both copies exist.
+ * Two separate things have to hold, and a link count says neither of them.
+ * The directory entry must lie outside the tree being removed — two archived
+ * names hard-linked to one inode, with live names that are symlinks to them,
+ * have `nlink` 2 and no entry at all once the tree goes. And the entry must
+ * not be the archived file itself under another mount: a bind mount gives it
+ * a path whose string is outside the tree while `dev`/`ino` say it is the
+ * same file. A same-inode candidate is refused outright; the archive is kept
+ * and the operator is told, which costs a retry where a wrong answer costs
+ * the session.
  */
-async function assertDestinationIsIndependent(source: string, destination: string): Promise<void> {
-	const stat = await fs.stat(source).catch(error => {
+async function survivesRemovalOf(destination: string, destinationStat: Stats, source: Stats, archiveRoot: string) {
+	const real = await fs.realpath(destination).catch(() => undefined);
+	if (real === undefined || isWithin(archiveRoot, real)) return false;
+	return !(destinationStat.dev === source.dev && destinationStat.ino === source.ino);
+}
+
+/**
+ * Remove the archive tree, one entry at a time, each only once that entry has
+ * been shown to have an independent live copy carrying its content.
+ *
+ * Checking the whole tree and then deleting it leaves the whole deletion
+ * standing on observations taken before it started; checking a file by size
+ * and inode leaves it standing on the wrong question, because content that
+ * changed to the same length passes both. So each file is compared in full
+ * through a descriptor of its own and unlinked immediately after, which is
+ * the narrowest order POSIX allows. A live writer that ignores the gc lock
+ * can still change a file in the gap between one entry's check and its
+ * unlink; nothing short of holding the whole tree open closes that, and the
+ * lock is what cooperating writers use.
+ */
+async function removeArchiveTreeOnceCarried(source: string, destination: string, archiveRoot: string): Promise<void> {
+	const stat = await fs.lstat(source).catch(error => {
 		if (isEnoent(error)) return undefined;
 		throw error;
 	});
@@ -457,22 +564,44 @@ async function assertDestinationIsIndependent(source: string, destination: strin
 		if (!live?.isDirectory()) {
 			throw new Error(`${destination} is not a directory holding what ${source} holds`);
 		}
-		if (stat.dev === live.dev && stat.ino === live.ino) {
+		if (live.dev === stat.dev && live.ino === stat.ino) {
 			throw new Error(`${destination} is the archived directory ${source} itself, not a copy of it`);
 		}
 		for (const entry of (await fs.readdir(source)).sort()) {
-			await assertDestinationIsIndependent(path.join(source, entry), path.join(destination, entry));
+			await removeArchiveTreeOnceCarried(path.join(source, entry), path.join(destination, entry), archiveRoot);
 		}
+		await fs.rmdir(source);
 		return;
 	}
-	if (!stat.isFile()) return;
-	const live = await statIfPresent(destination);
-	if (!live?.isFile() || live.size < stat.size) {
-		throw new Error(`${destination} does not hold what the archived ${source} holds`);
+	if (!stat.isFile() || SESSION_STAGING_RE.test(path.basename(source))) {
+		// A link, a device, or a killed writer's staging residue: none of them
+		// was carried home, and the name is all there is to drop.
+		await fs.unlink(source);
+		return;
 	}
-	if (isSameFile(stat, live)) {
-		throw new Error(`${destination} is the archived ${source} itself, not a second copy of it`);
+	const live = await fs.open(destination, "r").catch(error => {
+		if (isEnoent(error)) return undefined;
+		throw error;
+	});
+	try {
+		const liveStat = await live?.stat();
+		if (!live || !liveStat?.isFile()) {
+			throw new Error(`${destination} does not hold what the archived ${source} holds`);
+		}
+		if (!(await survivesRemovalOf(destination, liveStat, stat, archiveRoot))) {
+			throw new Error(`${destination} is the archived ${source} itself, not a second copy of it`);
+		}
+		const transcript = isTranscriptPath(source);
+		if (
+			!(await sourceIsPrefixOfDestination(Bun.file(source).stream(), live, transcript)) &&
+			!(transcript && (await recordsAreCarried(linesOf(Bun.file(source).stream()), linesOfHandle(live))))
+		) {
+			throw new Error(`${destination} no longer holds what the archived ${source} holds`);
+		}
+	} finally {
+		await live?.close();
 	}
+	await fs.unlink(source);
 }
 
 /**
@@ -489,13 +618,16 @@ async function assertDestinationIsIndependent(source: string, destination: strin
  * of the same name, a dangling link, a directory where the archive holds a
  * file — is reported, and the archive keeps its copy.
  *
- * A destination that is the archived entry itself under another name is
- * reported too. The comparison runs through an open descriptor and the
- * identity test is that descriptor's `dev`/`ino`, so a bind mount of the
- * archive, and a link swapped in after a path was resolved, are both the file
- * that is about to be deleted rather than a second copy of it.
+ * A destination that is the archived entry itself under another name, or that
+ * would not survive the archive tree being removed, is reported too — see
+ * {@link survivesRemovalOf}. An unreadable destination is reported as well: a
+ * permission or I/O failure says nothing about what is there, and only its
+ * absence may be read as an empty slot.
+ *
+ * Staging residue the archive happens to hold is not an artifact and is not
+ * carried home; the sweep that reclaims a killed writer's temps owns it.
  */
-async function copyEntryDereferenced(source: string, destination: string): Promise<void> {
+async function copyEntryDereferenced(source: string, destination: string, archiveRoot: string): Promise<void> {
 	const stat = await fs.stat(source).catch(error => {
 		// A link whose target is gone: nothing to carry, nothing to lose.
 		if (isEnoent(error)) return undefined;
@@ -525,24 +657,31 @@ async function copyEntryDereferenced(source: string, destination: string): Promi
 		if (!existing) await fs.chmod(destination, stat.mode & 0o7777);
 		// Sorted, so a restore that stops part-way is reproducible from its report.
 		for (const entry of (await fs.readdir(source)).sort()) {
-			await copyEntryDereferenced(path.join(source, entry), path.join(destination, entry));
+			await copyEntryDereferenced(path.join(source, entry), path.join(destination, entry), archiveRoot);
 		}
 		return;
 	}
 	if (!stat.isFile()) return;
+	if (SESSION_STAGING_RE.test(path.basename(source))) return;
 	if (existing) {
-		const live = await fs.open(destination, "r").catch(() => undefined);
+		const live = await fs.open(destination, "r").catch(error => {
+			if (isEnoent(error)) return undefined;
+			throw error;
+		});
 		try {
 			const target = await live?.stat();
 			if (live && target?.isFile()) {
-				if (isSameFile(stat, target)) {
+				if (!(await survivesRemovalOf(destination, target, stat, archiveRoot))) {
 					throw new Error(
 						`${destination} is the archived ${source} itself, not a second copy of it; ` +
 							`the archive is kept — give the live tree a file of its own and restore again`,
 					);
 				}
-				if (await sourceIsPrefixOfDestination(Bun.file(source).stream(), live)) return;
-				if (await recordsAreCarried(linesOf(Bun.file(source).stream()), linesOfHandle(live))) return;
+				const transcript = isTranscriptPath(source);
+				if (await sourceIsPrefixOfDestination(Bun.file(source).stream(), live, transcript)) return;
+				if (transcript && (await recordsAreCarried(linesOf(Bun.file(source).stream()), linesOfHandle(live)))) {
+					return;
+				}
 			}
 		} finally {
 			await live?.close();
@@ -557,25 +696,27 @@ async function copyEntryDereferenced(source: string, destination: string): Promi
 	const tempPath = sessionStagingPath(destination);
 	try {
 		await fs.copyFile(source, tempPath);
-		await fs.rename(tempPath, destination);
-	} catch (error) {
+		// `link`, not `rename`: a file someone created at the destination while
+		// this copy was being staged is their work, and a rename would write
+		// over it without anyone asking. `EEXIST` sends this entry down the
+		// "already holds something else" road on the next attempt instead.
+		await fs.link(tempPath, destination);
+	} finally {
 		await fs.rm(tempPath, { force: true });
-		throw error;
 	}
 }
 
 /**
- * Bring an archived artifact tree home, then drop the archive's copy — but
- * only once every archived file has been shown to have an independent live
- * one. The last check runs with nothing left to do but delete, so a path that
- * became an alias of the archive after it was copied is caught while both
- * copies still exist.
+ * Bring an archived artifact tree home, then drop the archive's copy — one
+ * entry at a time, each only once that entry has been shown to have an
+ * independent live copy still carrying its content. See
+ * {@link removeArchiveTreeOnceCarried}.
  */
 async function copyTreeDereferenced(source: string, destination: string): Promise<void> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
-	await copyEntryDereferenced(source, destination);
-	await assertDestinationIsIndependent(source, destination);
-	await fs.rm(source, { recursive: true, force: true });
+	const archiveRoot = await fs.realpath(source);
+	await copyEntryDereferenced(source, destination, archiveRoot);
+	await removeArchiveTreeOnceCarried(source, destination, archiveRoot);
 }
 
 /**
@@ -592,7 +733,7 @@ export async function archiveIsPrefixOfLive(archiveFile: string, sessionPath: st
 	try {
 		let holds = false;
 		await pipeline(Bun.file(archiveFile).stream(), createGunzip(), async (source: NodeJS.ReadableStream) => {
-			holds = await sourceIsPrefixOfDestination(source as AsyncIterable<Uint8Array>, live);
+			holds = await sourceIsPrefixOfDestination(source as AsyncIterable<Uint8Array>, live, true);
 		});
 		if (holds) return true;
 		await pipeline(Bun.file(archiveFile).stream(), createGunzip(), async (source: NodeJS.ReadableStream) => {
@@ -619,12 +760,18 @@ export async function archivedHandleIsHeldBy(
 	archived: fs.FileHandle,
 	archivedStat: Stats,
 	candidatePath: string,
+	transcript = isTranscriptPath(candidatePath),
 ): Promise<boolean> {
 	const candidate = await fs.open(candidatePath, "r").catch(() => undefined);
 	if (!candidate) return false;
 	try {
-		if (isSameFile(archivedStat, await candidate.stat())) return false;
-		if (await sourceIsPrefixOfDestination(archived.createReadStream({ start: 0 }), candidate)) return true;
+		const candidateStat = await candidate.stat();
+		if (archivedStat.dev === candidateStat.dev && archivedStat.ino === candidateStat.ino) return false;
+		// Positional reads on both sides: a read stream over the caller's
+		// handle closes it when it ends, and the second comparison would then
+		// be answering about a descriptor that is gone.
+		if (await sourceIsPrefixOfDestination(bytesOfHandle(archived), candidate, transcript)) return true;
+		if (!transcript) return false;
 		return await recordsAreCarried(linesOfHandle(archived), linesOfHandle(candidate));
 	} catch {
 		return false;
