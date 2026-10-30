@@ -348,6 +348,64 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		terminal.stop();
 	});
 
+	it("keeps swallowing an answer whose owner has expired, and still refuses to name it", () => {
+		// Retiring a marker is a statement about how long to wait, never proof
+		// that bytes on the wire cannot land. Expiring the swallow along with
+		// the ownership published a stale colour under the replacement's token
+		// and spilled the real reply into application input — the same defect
+		// the markers were added to prevent, moved later in time.
+		vi.useFakeTimers();
+		const { terminal, received } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+
+		const events: Array<{ appearance: string; token: number | undefined }> = [];
+		terminal.onAppearanceReport?.((appearance, token) => {
+			events.push({ appearance, token });
+		});
+		events.length = 0;
+		received.length = 0;
+
+		// Request 41 is surrendered, then its ownership is retired as well.
+		expect(terminal.refreshAppearance?.(41)).toBe(41);
+		vi.advanceTimersByTime(15_000);
+
+		// 42 goes out, and only then does 41's whole exchange arrive, in order.
+		const requestToken = 42;
+		expect(terminal.refreshAppearance?.(requestToken)).toBe(requestToken);
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+
+		expect(events).toEqual([{ appearance: "light", token: requestToken }]);
+		expect(terminal.appearance).toBe("light");
+		expect(received).toEqual([]);
+		terminal.stop();
+	});
+
+	it("never hands an unowned OSC 11 report to the application", () => {
+		// It is a terminal→host report like the DA1 reply, so it is consumed
+		// whatever the bookkeeping says. Publishing it needs an owner; keeping
+		// it out of the keyboard stream does not.
+		const { terminal, received } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		received.length = 0;
+
+		const events: Array<{ appearance: string; token: number | undefined }> = [];
+		terminal.onAppearanceReport?.((appearance, token) => {
+			events.push({ appearance, token });
+		});
+		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+
+		expect(received).toEqual([]);
+		expect(events).toEqual([]);
+		terminal.stop();
+	});
+
 	it("reports every OSC 11 response while change callbacks remain deduplicated", () => {
 		const { terminal } = setupTerminal();
 		const reports: Array<{ reported: string; current: string | undefined }> = [];

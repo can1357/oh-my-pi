@@ -1063,6 +1063,19 @@ export class ProcessTerminal implements Terminal {
 	#osc11SentinelTimer?: Timer;
 	/** Grace deadlines of surrendered cycles, so teardown can drop them all. */
 	#osc11GraceTimers = new Set<Timer>();
+	/**
+	 * An answer a cycle whose ownership has expired may still send. It swallows
+	 * one colour report so that report is neither forwarded to the application
+	 * nor published under the identity of the request that replaced it, and it
+	 * names nothing, because by now nothing can say whose it was.
+	 *
+	 * One, not a count. Cycles are serialised, so at most one cycle's answers
+	 * are plausibly still in flight; a long dead spell must not build a backlog
+	 * that swallows every future answer and leaves the appearance frozen.
+	 */
+	#osc11OrphanReply = false;
+	/** The sentinel that follows an orphan's colour report, once one arrives. */
+	#osc11OrphanSentinelTimer?: Timer;
 	#osc99PendingId: string | undefined;
 	#osc99ResponseBuffer = "";
 	#osc99Capabilities = new Map<string, string>();
@@ -1697,6 +1710,13 @@ export class ProcessTerminal implements Terminal {
 						}
 					}
 				}
+				// An orphaned cycle's colour report has just been swallowed, so the
+				// sentinel that follows it is this one. It belongs to that cycle
+				// and resolves nothing in the queue.
+				if (this.#osc11OrphanSentinelTimer) {
+					this.#clearOrphanOsc11Sentinel();
+					return;
+				}
 				const owner = this.#da1SentinelOwners.shift();
 				if (!owner) {
 					// Late/unowned reply: nothing to resolve, just drop the bytes.
@@ -1828,11 +1848,20 @@ export class ProcessTerminal implements Terminal {
 			// If a new escape sequence arrives (not the ST terminator), abort buffering
 			// and forward it as normal input so user keystrokes are never swallowed.
 			//
-			// Any cycle still owed a reply keeps this filter armed, not just the live
-			// one: a cycle that gave up waiting is still the addressee of its own
-			// answer, and that answer has to be swallowed here rather than reaching
-			// the application as text or being published as somebody else's.
-			if (this.#osc11Cycles.length > 0 && (this.#osc11ResponseBuffer || sequence.startsWith("\x1b]11;"))) {
+			// An OSC 11 colour report is a terminal→host report, exactly like the
+			// DA1 reply handled below: it is recognised and consumed here whatever
+			// the bookkeeping says, because nothing a terminal reports may reach
+			// the application as typed text. Only *publishing* it needs an owner,
+			// and that is a separate question with a separate lifetime — a
+			// deadline is a statement about how long to wait, never proof that
+			// bytes already on the wire cannot land.
+			//
+			// Owners are consulted oldest first, since that is the order a
+			// terminal answers in. A cycle that gave up waiting still owns its
+			// own answer; a cycle whose ownership has since expired leaves the
+			// orphan claim, which can swallow one more answer but can never name
+			// it.
+			if (this.#osc11ResponseBuffer || sequence.startsWith("\x1b]11;")) {
 				if (this.#osc11ResponseBuffer && sequence.startsWith("\x1b") && sequence !== "\x1b\\") {
 					// New escape sequence arrived mid-buffer — not an OSC 11 continuation.
 					this.#osc11ResponseBuffer = "";
@@ -1843,9 +1872,12 @@ export class ProcessTerminal implements Terminal {
 					if (!osc11Match) return;
 					const [, rHex, gHex, bHex] = osc11Match;
 					this.#osc11ResponseBuffer = "";
-					// Oldest first: the terminal answers in the order it was asked.
-					const cycle = this.#osc11Cycles.shift()!;
-					if (!cycle.live) return;
+					if (this.#osc11OrphanReply) {
+						this.#settleOrphanOsc11Reply();
+						return;
+					}
+					const cycle = this.#osc11Cycles.shift();
+					if (!cycle?.live) return;
 					this.#osc11Pending = false;
 					this.#osc11LiveCycle = undefined;
 					this.#handleOsc11Response(rHex!, gHex!, bHex!, cycle.token);
@@ -1957,14 +1989,18 @@ export class ProcessTerminal implements Terminal {
 			// and nothing else in the renderer emits a report on a cadence —
 			// startup probes run once, DEC 2048 and CPR follow a resize, TSP acks
 			// only arrive where frames are credit-paced and this floor never
-			// applies. A narrower seam does exist: the sequence handler already
-			// separates reports from forwarded input, so invalidation could move
-			// to that dispatch, at the price of the in-band resize report — which
-			// is how a tmux attach announces itself when no SIGWINCH follows —
-			// no longer counting. Keeping the broad signal costs an idle pane
-			// nothing today and never hides a keystroke; move it only with a
-			// measurement of a real periodic reporter, and keep the DEC 2048 path
-			// invalidating explicitly if it moves.
+			// applies. A narrower seam does exist, and it has been measured: the
+			// sequence handler already separates reports from forwarded input, so
+			// invalidation could move to that dispatch. Moving it there alone
+			// loses the in-band resize contract; moving it there while the DEC
+			// 2048 handler invalidates explicitly keeps every case. That report
+			// is not how tmux announces an attach — real tmux 3.8 answers DECRQM
+			// 2048 with status 0, a same-size attach emits neither report nor
+			// signal, and a resized attach emits SIGWINCH — so the case for it is
+			// the hosts that do provide it, not tmux. Keeping the broad signal
+			// costs an idle pane nothing today and never hides a keystroke; move
+			// it with a measurement of a real periodic reporter, and keep the DEC
+			// 2048 path invalidating explicitly when it moves.
 			if (data) this.#invalidateAudience();
 			// Recover modes reset by the host before the user's next paste. Not
 			// mid-paste: the host is plainly in 2004 then, and per-key reads would
@@ -2008,10 +2044,11 @@ export class ProcessTerminal implements Terminal {
 		this.#osc11Cycles.push(cycle);
 		this.#osc11LiveCycle = cycle;
 		this.#osc11Pending = true;
-		// Not cleared: a partial reply in the buffer belongs to an older cycle
-		// that has not been answered yet, and dropping it would spill its tail
-		// into application input when the rest arrives.
-		if (this.#osc11Cycles.length === 1) this.#osc11ResponseBuffer = "";
+		// Not cleared while anything is still owed an answer: a partial reply in
+		// the buffer belongs to an older cycle, or to an orphan claim, and
+		// dropping it would spill its tail into application input when the rest
+		// arrives.
+		if (this.#osc11Cycles.length === 1 && !this.#osc11OrphanReply) this.#osc11ResponseBuffer = "";
 		if (cache) {
 			this.#safeWrite(cache.passthrough("\x1b]11;?\x07"));
 			this.#osc11CacheRefreshTimer = setTimeout(() => {
@@ -2083,21 +2120,47 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	/**
-	 * Drop a marker that has waited out its grace. Nothing it could still
-	 * absorb is expected to exist, and keeping it would grow the FIFO with
-	 * every unanswered cycle and leave it offset by one for good — every later
+	 * Retire a marker that has waited out its grace. Only its *ownership*
+	 * expires: the FIFO slot goes, because keeping it would grow with every
+	 * unanswered cycle and leave the queue offset by one for good — every later
 	 * cycle then eating its predecessor's marker and paying a timeout of its
 	 * own, however promptly the terminal answers.
+	 *
+	 * What the cycle may still send does not expire with it. A colour report it
+	 * was owed becomes the orphan claim: still swallowed, so it cannot surface
+	 * as application text or be published under the request that replaced it,
+	 * but no longer able to name a token or hold anything up.
 	 */
 	#retireOsc11Marker(marker: Da1SentinelOwner & { kind: "abandoned" }): void {
 		const slot = this.#da1SentinelOwners.indexOf(marker);
 		if (slot >= 0) this.#da1SentinelOwners.splice(slot, 1);
-		if (marker.cycle) {
-			const owed = this.#osc11Cycles.indexOf(marker.cycle);
-			if (owed >= 0) this.#osc11Cycles.splice(owed, 1);
-			// A reply the terminal never sent cannot be completing this buffer.
-			if (this.#osc11Cycles.length === 0) this.#osc11ResponseBuffer = "";
-		}
+		if (!marker.cycle) return;
+		const owed = this.#osc11Cycles.indexOf(marker.cycle);
+		if (owed < 0) return;
+		this.#osc11Cycles.splice(owed, 1);
+		this.#osc11OrphanReply = true;
+	}
+
+	/**
+	 * Consume the colour report an orphaned cycle finally sent. Its sentinel
+	 * follows — a terminal answers in that order — so one DA1 is swallowed
+	 * after it rather than being read as the live cycle's answer. That
+	 * expectation is itself bounded: a sentinel lost after a reply that late
+	 * must not leave the queue permanently offset.
+	 */
+	#settleOrphanOsc11Reply(): void {
+		this.#osc11OrphanReply = false;
+		this.#clearOrphanOsc11Sentinel();
+		const timer = setTimeout(() => {
+			if (this.#osc11OrphanSentinelTimer === timer) this.#osc11OrphanSentinelTimer = undefined;
+		}, OSC11_LATE_REPLY_GRACE_MS);
+		this.#osc11OrphanSentinelTimer = timer;
+	}
+
+	#clearOrphanOsc11Sentinel(): void {
+		if (!this.#osc11OrphanSentinelTimer) return;
+		clearTimeout(this.#osc11OrphanSentinelTimer);
+		this.#osc11OrphanSentinelTimer = undefined;
 	}
 
 	/** Run the request parked behind the cycle that just ended, if there is one. */
@@ -2713,6 +2776,8 @@ export class ProcessTerminal implements Terminal {
 		}
 		this.#clearOsc11SentinelDeadline();
 		this.#clearOsc11GraceDeadlines();
+		this.#clearOrphanOsc11Sentinel();
+		this.#osc11OrphanReply = false;
 		this.#appearanceCallbacks = [];
 		this.#appearanceReportCallbacks = [];
 		this.#osc11Pending = false;
