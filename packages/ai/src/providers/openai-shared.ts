@@ -15,6 +15,7 @@ import type {
 	VercelGatewayRouting,
 } from "@oh-my-pi/pi-catalog/types";
 import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
+import { resolveXiaomiRequestBaseUrl } from "../registry/oauth/xiaomi";
 import {
 	COREWEAVE_PROJECT_HEADER,
 	coreWeaveProjectHeaders,
@@ -279,6 +280,7 @@ export function resolveOpenAIRequestSetup(
 			baseUrl = moonshotBaseUrl;
 		}
 	}
+	baseUrl = resolveXiaomiRequestBaseUrl({ provider: model.provider, baseUrl }, rawApiKey);
 	if (model.provider === "sakana") {
 		const sakanaBaseUrl = resolveSakanaRequestBaseUrl();
 		if (sakanaBaseUrl) {

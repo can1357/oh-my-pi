@@ -73,6 +73,9 @@
 
 ### Fixed
 
+- Retained regional Token Plan request routing for both tp- and ttp- keys alongside current catalog authentication.
+- Token Plan routing only replaces the standard Xiaomi host; explicit regional endpoints and proxies, including URLs with Xiaomi names in their paths, remain unchanged. Generic Xiaomi login stores no region and defaults to SGP until discovery; explicit regional provider IDs select their region.
+
 - Codex accounts whose spend cap is used up are no longer picked through credit overage or from usage cached before the upgrade ([#16973](https://github.com/can1357/oh-my-pi/pull/16973) by [@DusKing1](https://github.com/DusKing1))
 - Fixed Codex capacity 429s (`turn_rate_limit_exceeded`, "Codex is at capacity") reporting "Try again in ~N min" from the plan's usage-window reset, which made retries wait hours instead of the response's Retry-After ([#17087](https://github.com/can1357/oh-my-pi/pull/17087) by [@H4vC](https://github.com/H4vC))
 
@@ -136,6 +139,7 @@
 
 ### Fixed
 
+- Fixed Xiaomi MiMo `tp-` Token Plan keys being sent to the standard `api.xiaomimimo.com` host from bundled or cached model rows before discovery re-resolved the base URL; requests now use the Token Plan cluster of the stored login region, else SGP. ([#16646](https://github.com/can1357/oh-my-pi/pull/16646) by [@Komzpa](https://github.com/Komzpa))
 - Fixed every OpenAI Codex request failing with HTTP 404 `{"detail":"Not Found"}` on personal ChatGPT accounts whose token is not region-pinned ([#16493](https://github.com/can1357/oh-my-pi/issues/16493))
 
 ## [18.12.4] - 2026-10-20
