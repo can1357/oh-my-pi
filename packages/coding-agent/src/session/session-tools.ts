@@ -710,7 +710,7 @@ export class SessionTools {
 	}
 
 	/**
-	 * Looks up a registered tool by its canonical name or `xd://` alias.
+	 * Looks up a registered tool by canonical name, wire name, or `xd://` alias.
 	 *
 	 * An unmatched `mcp__` name is retried under its canonical registry keys: the
 	 * identity prompt primes the Claude Code spelling `mcp__<server>__<tool>`
@@ -723,7 +723,7 @@ export class SessionTools {
 	 */
 	getToolByName(name: string): AgentTool | undefined {
 		const bareName = stripXdUrlPrefix(name);
-		const direct = this.#toolRegistry.get(name) ?? this.#toolRegistry.get(bareName);
+		const direct = this.#toolRegistry.get(name) ?? this.#resolveToolWireName(bareName);
 		if (direct) return direct;
 		return resolveMCPToolAlias(bareName, candidate => this.#toolRegistry.get(candidate));
 	}
