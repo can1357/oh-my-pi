@@ -740,6 +740,11 @@ export class TurnRecovery {
 				if (hasNonWhitespace(block.text)) text.push(block.text);
 				continue;
 			}
+			// Narration is prose the user already saw; ordinary and redacted thinking stays private.
+			if (block.type === "thinking" && block.narration) {
+				if (hasNonWhitespace(block.thinking)) text.push(block.thinking);
+				continue;
+			}
 			if (block.type === "thinking" || block.type === "redactedThinking") continue;
 			return false;
 		}

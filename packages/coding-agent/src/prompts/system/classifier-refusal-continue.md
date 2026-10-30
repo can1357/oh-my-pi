@@ -3,7 +3,7 @@ Your previous response ended before the task was complete. The user already saw 
 Continue exactly where it stopped. Do not repeat, restate, or summarize that work, and do not discuss this continuation instruction.
 
 <work-already-shown>
-{{partialText}}
+{{escapeXml partialText}}
 </work-already-shown>
 
 Attempt #{{retryCount}}/{{maxRetries}}
