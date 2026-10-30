@@ -4,7 +4,7 @@
 
 ### Added
 
-- Eval cells can call activatable MCP tools and discoverable devices without activating or mounting them first, while preserving tool restrictions and approvals.
+- Eval cells can call activatable MCP tools and discoverable devices without activating or mounting them first, while preserving tool restrictions and approvals ([#17464](https://github.com/can1357/oh-my-pi/pull/17464) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 
