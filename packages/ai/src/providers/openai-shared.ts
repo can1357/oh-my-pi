@@ -262,7 +262,14 @@ export function resolveOpenAIRequestSetup(
 		applyCoreWeaveProjectHeader(headers);
 	}
 	if (options.prependHeaders) {
-		headers = { ...options.prependHeaders(), ...headers };
+		// Model and caller headers override the prepended defaults under any
+		// casing: a plain spread keeps `X-Title` and `x-title` as two keys, which
+		// `Headers` then joins into one comma-separated value.
+		const overridden = new Set(Object.keys(headers).map(name => name.toLowerCase()));
+		const prepended = Object.entries(options.prependHeaders()).filter(
+			([name]) => !overridden.has(name.toLowerCase()),
+		);
+		headers = { ...Object.fromEntries(prepended), ...headers };
 	}
 
 	let copilotPremiumRequests: number | undefined;
