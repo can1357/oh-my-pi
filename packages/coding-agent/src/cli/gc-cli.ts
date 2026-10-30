@@ -1535,45 +1535,80 @@ async function removeTreeAdditions(created: readonly ArchiveCreation[], notes: s
 interface EntryIdentity {
 	dev: number;
 	ino: number;
-	/** The type bits of its mode: file, link, FIFO, device, socket. */
-	kind: number;
+	/** The whole mode: the type bits and the permissions. */
+	mode: number;
 	/** The device a device node stands for. */
 	rdev: number;
+	/**
+	 * When the inode last changed, for anything but a regular file. A
+	 * regular file is compared by its bytes instead, and its change time
+	 * moves when another name of it is removed from the same tree.
+	 */
+	ctimeMs?: number;
 	/** What a symbolic link points at. */
 	target?: string;
 }
 
-async function identityOf(entry: string, stat: Stats): Promise<EntryIdentity> {
+/** The identity a single `stat` reports; a link's target is read separately. */
+function identityFrom(stat: Stats): EntryIdentity {
 	return {
 		dev: stat.dev,
 		ino: stat.ino,
-		kind: stat.mode & fsConstants.S_IFMT,
+		mode: stat.mode,
 		rdev: stat.rdev,
-		target: stat.isSymbolicLink() ? await fs.readlink(entry) : undefined,
+		ctimeMs: stat.isFile() ? undefined : stat.ctimeMs,
 	};
 }
 
+function sameIdentity(a: EntryIdentity, b: EntryIdentity): boolean {
+	return (
+		a.dev === b.dev &&
+		a.ino === b.ino &&
+		a.mode === b.mode &&
+		a.rdev === b.rdev &&
+		a.ctimeMs === b.ctimeMs &&
+		a.target === b.target
+	);
+}
+
 /**
- * Whether `entry` still names exactly what `proved` describes. Inode numbers
- * come back: one freed by removing an entry came straight back as the next
- * entry made in that directory, so the number alone does not tell a link
- * from the FIFO or the other link that replaced it. Kind, device and link
- * target do. Absence is reported as `undefined`.
+ * One look at what `entry` names, or undefined when nothing does.
+ *
+ * A link's target is a second read, so it is bracketed: `lstat`,
+ * `readlink`, `lstat` again, and the two must describe the same inode with
+ * the same change time, or the target may belong to a replacement — inode
+ * numbers come back, so the number alone does not say the entry is the one
+ * first seen. Throws when the entry changed while it was being looked at.
  */
-async function standsAsProved(entry: string, proved: EntryIdentity): Promise<boolean | undefined> {
-	const standing = await fs.lstat(entry).catch(error => {
+async function lookAt(entry: string): Promise<EntryIdentity | undefined> {
+	const first = await fs.lstat(entry).catch(error => {
 		if (codeOf(error) === "ENOENT") return undefined;
 		throw error;
 	});
-	if (!standing) return undefined;
-	const now = await identityOf(entry, standing);
-	return (
-		now.dev === proved.dev &&
-		now.ino === proved.ino &&
-		now.kind === proved.kind &&
-		now.rdev === proved.rdev &&
-		now.target === proved.target
-	);
+	if (!first) return undefined;
+	const seen = identityFrom(first);
+	if (!first.isSymbolicLink()) return seen;
+	const target = await fs.readlink(entry);
+	const again = await fs.lstat(entry);
+	if (!sameIdentity(seen, identityFrom(again))) {
+		throw new Error(`${entry} changed while this run was looking at it; it was kept`);
+	}
+	return { ...seen, target };
+}
+
+/**
+ * Whether `entry` still names exactly what `proved` describes, taken in one
+ * look — see {@link lookAt}. Absence is reported as `undefined`, and an
+ * entry that changed while being looked at as `false`.
+ */
+async function standsAsProved(entry: string, proved: EntryIdentity): Promise<boolean | undefined> {
+	let now: EntryIdentity | undefined;
+	try {
+		now = await lookAt(entry);
+	} catch {
+		return false;
+	}
+	return now === undefined ? undefined : sameIdentity(now, proved);
 }
 
 /** One live entry a reclaim proved, as the entry rather than as its name. */
@@ -1612,7 +1647,7 @@ async function proveEntryStillGoes(entry: ProvenEntry): Promise<void> {
 	if (!live) return;
 	try {
 		const now = await live.stat();
-		if (!now.isFile() || now.dev !== entry.dev || now.ino !== entry.ino) {
+		if (!now.isFile() || !sameIdentity(identityFrom(now), entry)) {
 			throw new Error(`${entry.path} is no longer the file this run proved; it was kept`);
 		}
 		if (!(await archivedHandleIsHeldBy(live, now, entry.destination))) {
@@ -1695,8 +1730,14 @@ async function proveLiveTreeIsArchived(
 	}
 	if (!stat.isFile()) {
 		// A link the copy resolved rather than carried, or a device: its own
-		// name is all there is to drop, and there is nothing to compare.
-		proven.files.push({ path: source, destination, ...(await identityOf(source, stat)), compared: false });
+		// name is all there is to drop, and there is nothing to compare. What
+		// is recorded is one look at it, and it has to be the entry the walk
+		// just found — a file put in its place would go uncompared.
+		const seen = await lookAt(source);
+		if (!seen || !sameIdentity({ ...seen, target: undefined }, identityFrom(stat))) {
+			throw new Error(`${source} changed while this run was looking at it; it was kept`);
+		}
+		proven.files.push({ path: source, destination, ...seen, compared: false });
 		return;
 	}
 	const live = await fs.open(source, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK).catch(error => {
@@ -1719,7 +1760,12 @@ async function proveLiveTreeIsArchived(
 	} finally {
 		await live.close();
 	}
-	proven.files.push({ path: source, destination, ...(await identityOf(source, liveStat)), compared: true });
+	// The descriptor follows a link; the name has to be the file just read.
+	const proved = identityFrom(liveStat);
+	if ((await standsAsProved(source, proved)) !== true) {
+		throw new Error(`${source} is no longer the file this run proved; it was kept`);
+	}
+	proven.files.push({ path: source, destination, ...proved, compared: true });
 }
 
 /**
@@ -1901,7 +1947,7 @@ async function copySessionIntoArchive(candidate: ArchiveCandidate): Promise<{ br
 	// open that session silently incomplete.
 	const record = restoreRecordPath(destSession);
 	if (await pathExists(record)) {
-		const outstanding = await archivedPathsWithoutLiveCopies(destSession, sourceSession);
+		const outstanding = await archivedPathsWithoutLiveCopies(destSession, sourceSession, candidate.ledger);
 		if (outstanding.length === 0) {
 			await fs.rm(record, { force: true });
 		} else {
@@ -2562,9 +2608,14 @@ async function runRestoreGc(options: ResolvedGcOptions, query: string): Promise<
  * dead owner writes nothing late, and a lease held until the file is gone
  * means nothing claims it in between.
  *
- * What that leaves, named rather than narrowed: a process that writes into
+ * What that leaves, named rather than narrowed. A process that writes into
  * the tree without holding a lease, between the last look at an entry and
- * its `unlink`. Session writers hold one; editors and scripts do not.
+ * its `unlink`: session writers hold one; editors and scripts do not. And a
+ * process with write access to the existing archive's files during the
+ * reclaim, even with the archive directory read-only: the comparison is a
+ * reading of the archive at one moment, and a byte changed in the archived
+ * transcript after it leaves the live copy gone and an archive that does not
+ * inflate — no valid copy anywhere.
  */
 async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<ReclaimGcResult> {
 	const result: ReclaimGcResult = { query, reclaimed: 0, errors: [] };
@@ -2737,8 +2788,12 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 		// the entry proved here and checked again as it goes, the way the
 		// entries are: a name rebound while the tree was being removed is
 		// somebody else's transcript.
-		const rootStat = await fs.lstat(sessionPath);
-		const root = await identityOf(sessionPath, rootStat);
+		const root = await lookAt(sessionPath);
+		if (!root) {
+			await keepTree();
+			result.errors.push(`${sessionPath} is no longer there to reclaim`);
+			return result;
+		}
 		// Every file settled before any of it goes. Proving and deleting as
 		// the walk went meant a tree that refused on its last file had
 		// already lost the ones before it, while the report said it was kept.

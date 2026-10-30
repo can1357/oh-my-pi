@@ -28,7 +28,7 @@ import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { codeOf, statIfPresent, withGcLock } from "./gc-lock";
 import { SESSION_TITLE_SLOT_BYTES } from "./session-entries";
 import { readSessionHeaderIdFromHandle, sessionHeaderIdFromBytes } from "./session-loader";
-import { SESSION_STAGING_RE, sessionStagingPath, tryAcquireSessionLease } from "./session-storage";
+import { sessionStagingPath, tryAcquireSessionLease } from "./session-storage";
 import { parseTitleSlotFromContent, parseTitleSlotLine } from "./session-title-slot";
 
 /** Suffix `gc --archive` gives a transcript it has compressed. */
@@ -838,7 +838,12 @@ async function survivesRemovalOf(destination: string, destinationStat: Stats, so
  * so a restore that could not finish says which path is in the way instead
  * of reporting success.
  */
-async function assertLiveTreeHoldsArchive(source: string, destination: string, archiveRoot: string): Promise<void> {
+async function assertLiveTreeHoldsArchive(
+	source: string,
+	destination: string,
+	archiveRoot: string,
+	isResidue: (entry: string) => boolean,
+): Promise<void> {
 	const stat = await fs.lstat(source).catch(error => {
 		// Only absence. An I/O error says nothing about what is there, and
 		// reading it as "nothing" is how a file nobody could stat is passed
@@ -846,10 +851,10 @@ async function assertLiveTreeHoldsArchive(source: string, destination: string, a
 		if (isEnoent(error)) return undefined;
 		throw error;
 	});
-	// A killed writer's staging residue — a flat temp, or a staging
-	// directory a run did not record or could not clear — is not an artifact
-	// and was never carried home.
-	if (!stat || SESSION_STAGING_RE.test(path.basename(source))) return;
+	// A staging directory a run recorded and could not clear is residue, not
+	// an artifact, and was never carried home. Nothing else is skipped for
+	// its name: see {@link stagingLedgerDir}.
+	if (!stat || isResidue(source)) return;
 	if (stat.isDirectory()) {
 		const live = await statIfPresent(destination);
 		if (!live?.isDirectory()) {
@@ -859,7 +864,12 @@ async function assertLiveTreeHoldsArchive(source: string, destination: string, a
 			throw new Error(`${destination} is the archived directory ${source} itself, not a copy of it`);
 		}
 		for (const entry of (await fs.readdir(source)).sort()) {
-			await assertLiveTreeHoldsArchive(path.join(source, entry), path.join(destination, entry), archiveRoot);
+			await assertLiveTreeHoldsArchive(
+				path.join(source, entry),
+				path.join(destination, entry),
+				archiveRoot,
+				isResidue,
+			);
 		}
 		return;
 	}
@@ -902,9 +912,11 @@ async function assertLiveTreeHoldsArchive(source: string, destination: string, a
  * permission or I/O failure says nothing about what is there, and only its
  * absence may be read as an empty slot.
  *
- * A flat `.<name>.<id>.tmp` in the archive is a session writer's rewrite
- * that was killed before it renamed its temp away, copied in with the tree.
- * It is not an artifact and is not carried home.
+ * A staging directory a run recorded and could not clear is residue, not an
+ * artifact, and is not carried home: copying it would publish a partial or
+ * foreign file into the live tree as if the session had written it. Whether
+ * an entry is one is the ledger's answer, not its name's — see
+ * {@link stagingLedgerDir}.
  */
 async function copyEntryDereferenced(
 	source: string,
@@ -912,18 +924,14 @@ async function copyEntryDereferenced(
 	archiveRoot: string,
 	ledger: string,
 	notes: string[],
+	isResidue: (entry: string) => boolean,
 ): Promise<void> {
 	const stat = await fs.stat(source).catch(error => {
 		// A link whose target is gone: nothing to carry, nothing to lose.
 		if (isEnoent(error)) return undefined;
 		throw error;
 	});
-	// Staging residue the archive holds — a flat temp, or a staging directory
-	// a run killed before recording it, or whose record could not be cleared,
-	// left behind — is not an artifact and is not carried home. Copying one
-	// would publish a partial or foreign file into the live tree as if the
-	// session had written it.
-	if (!stat || SESSION_STAGING_RE.test(path.basename(source))) return;
+	if (!stat || isResidue(source)) return;
 	const existing = await fs.lstat(destination).catch(() => undefined);
 	if (stat.isDirectory()) {
 		// Through the link: a symlinked artifact directory is a directory the
@@ -953,6 +961,7 @@ async function copyEntryDereferenced(
 				archiveRoot,
 				ledger,
 				notes,
+				isResidue,
 			);
 		}
 		return;
@@ -1029,31 +1038,38 @@ async function copyTreeDereferenced(
 ): Promise<void> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
 	const archiveRoot = await fs.realpath(source);
-	await copyEntryDereferenced(source, destination, archiveRoot, ledger, notes);
-	await assertLiveTreeHoldsArchive(source, destination, archiveRoot);
+	const isResidue = await stagingResidueUnder(ledger, source);
+	await copyEntryDereferenced(source, destination, archiveRoot, ledger, notes, isResidue);
+	await assertLiveTreeHoldsArchive(source, destination, archiveRoot, isResidue);
 }
 
 /**
  * `<agentDir>/gc-staging`, where a run records each staging directory it
- * mints — one file per directory — before it stages a byte into it.
+ * mints — one file per directory — before it makes the directory.
  *
  * Every run that mints holds `<agentDir>/gc.lock` for its whole life, so a
  * record still standing while the lock is held belongs to a run that is
- * gone. That is what lets a later run take a dead run's staged copy away by
- * the record of what that run made, rather than by the shape of a name
- * anybody can choose.
+ * gone. A record is the only thing that makes an entry staging residue: a
+ * later run takes a dead run's staged copy away by it, and a restore leaves
+ * a recorded directory in the archive instead of carrying it home. Anything
+ * with a staging-looking name and no record is somebody's file and is
+ * treated like any other — the shape of a name proves nothing about who
+ * made it. The ledger directory itself is this feature's alone.
  */
 export function stagingLedgerDir(agentDir: string): string {
 	return path.join(agentDir, "gc-staging");
 }
 
-/** What a run records about one staging directory it minted. */
+/**
+ * What a run records about one staging directory it minted. Written first
+ * with only the names, before the directory exists, and replaced with the
+ * staged file's identity once that file has been created.
+ */
 interface StagingRecord {
 	dir: string;
-	/** The one file staged inside it, and that file's identity. */
 	file: string;
-	dev: number;
-	ino: number;
+	/** The staged file's identity; absent while the run had not yet created it. */
+	identity?: { dev: number; ino: number };
 }
 
 /** A private directory this run minted, the file it stages into there, and its record. */
@@ -1075,63 +1091,65 @@ export interface StagingGround {
  */
 const STAGING_MINT_ATTEMPTS = 16;
 
+/** Suffix of a record's replacement while it is being written; never read as a record. */
+const STAGING_RECORD_PART = ".part";
+
 /**
  * Mint a staging directory of this run's own beside `target`, create the
  * file to stage into inside it, and record both in `ledger`.
  *
- * `mkdir` without `recursive`, so `EEXIST` is the kernel saying the name is
- * taken and another is minted — uniqueness comes from the kernel rather
- * than from a name this process picked — up to
- * {@link STAGING_MINT_ATTEMPTS} times. Mode `0700`, so nothing without this
- * user's rights puts a file inside it.
+ * The record goes down first, naming the directory and file this attempt is
+ * about to make; then the directory is made with `mkdir` without
+ * `recursive`, so `EEXIST` is the kernel saying the name is taken and
+ * another is minted, up to {@link STAGING_MINT_ATTEMPTS} times; then the
+ * file is created and the record replaced, by `rename`, with the file's
+ * identity. So there is no moment at which this run has made something the
+ * ledger does not name: a run killed before the identity lands leaves a
+ * record naming an empty file, which {@link reclaimRecordedStagingGrounds}
+ * can take away without knowing its inode because it holds no bytes.
  *
- * The record is written once the directory and its file exist and before
- * anything is staged, so a run killed after that leaves a record the next
- * run reclaims by — see {@link reclaimRecordedStagingGrounds}. A run killed
- * in the instant between creating them and recording them leaves an empty
- * file in a directory nothing reclaims.
- *
+ * Mode `0700`, so nothing without this user's rights puts a file inside.
  * What the directory is not: a boundary against a process that can write
  * the directory it sits in. Such a process can rename the minted directory
  * away and put one of its own at the name, and every later step here names
  * a path — there is no system call that unlinks an inode — so it then acts
- * on whatever stands there. The identity checks below narrow what that can
- * do; they do not take it away.
+ * on whatever stands there. The identity checks narrow what that can do;
+ * they do not take it away.
  */
 export async function mintStagingGround(target: string, ledger: string, mode = 0o666): Promise<StagingGround> {
 	await fs.mkdir(ledger, { recursive: true, mode: 0o700 });
 	for (let attempt = 0; attempt < STAGING_MINT_ATTEMPTS; attempt++) {
 		const dir = sessionStagingPath(target);
+		const file = path.join(dir, path.basename(target));
+		const record = path.join(ledger, `${Snowflake.next()}.json`);
+		const intent: StagingRecord = { dir, file };
+		await fs.writeFile(record, JSON.stringify(intent), { flag: "wx", mode: 0o600 });
 		try {
 			await fs.mkdir(dir, { mode: 0o700 });
 		} catch (error) {
+			await fs.rm(record, { force: true }).catch(() => undefined);
 			if (codeOf(error) === "EEXIST") continue;
 			throw error;
 		}
-		const file = path.join(dir, path.basename(target));
-		const record = path.join(ledger, `${Snowflake.next()}.json`);
 		let handle: fs.FileHandle | undefined;
 		let created: Stats | undefined;
-		let recorded: fs.FileHandle | undefined;
 		try {
 			handle = await fs.open(file, "wx+", mode);
 			created = await handle.stat();
-			recorded = await fs.open(record, "wx", 0o600);
-			const entry: StagingRecord = { dir, file, dev: created.dev, ino: created.ino };
-			await recorded.writeFile(JSON.stringify(entry));
-			await recorded.close();
+			const recorded: StagingRecord = { ...intent, identity: { dev: created.dev, ino: created.ino } };
+			await fs.writeFile(`${record}${STAGING_RECORD_PART}`, JSON.stringify(recorded), { mode: 0o600 });
+			await fs.rename(`${record}${STAGING_RECORD_PART}`, record);
 			return { dir, file, handle, created, record };
 		} catch (error) {
 			// What this attempt made goes again before the failure is
-			// reported: a record that names nothing, or a directory nothing
-			// records, is the residue this ledger exists to rule out.
+			// reported, and the record goes with it only once nothing it
+			// names is left: a directory nothing records is a directory a
+			// restore would carry home as somebody's artifact.
 			await handle?.close().catch(() => undefined);
-			if (recorded) {
-				await recorded.close().catch(() => undefined);
-				await fs.rm(record, { force: true }).catch(() => undefined);
-			}
-			const note = await clearStagingGround(dir, file, created, "this run");
+			const note = await clearStagingGround(dir, file, created ?? "empty", "this run");
 			if (note) throw new Error(`${error instanceof Error ? error.message : String(error)}; ${note}`);
+			await fs.rm(`${record}${STAGING_RECORD_PART}`, { force: true }).catch(() => undefined);
+			await fs.rm(record, { force: true }).catch(() => undefined);
 			throw error;
 		}
 	}
@@ -1141,8 +1159,10 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 }
 
 /**
- * Take a staging directory away with the one file staged in it, while that
- * file is still the inode staged there — and nothing else.
+ * Take a staging directory away with the one file staged in it — while that
+ * file is still the regular file with the recorded identity, or, when the
+ * run died before recording one, while it is an empty regular file — and
+ * nothing else.
  *
  * Anything else inside is reported rather than deleted, and a failure to
  * look is reported rather than read as an absence: "it was not there" and "I
@@ -1154,7 +1174,7 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 async function clearStagingGround(
 	dir: string,
 	file: string,
-	created: { dev: number; ino: number } | undefined,
+	expected: { dev: number; ino: number } | "empty",
 	stager: string,
 ): Promise<string | undefined> {
 	const notes: string[] = [];
@@ -1171,13 +1191,11 @@ async function clearStagingGround(
 			return undefined;
 		});
 		if (!standing) continue;
-		if (
-			at !== file ||
-			!created ||
-			!standing.isFile() ||
-			standing.dev !== created.dev ||
-			standing.ino !== created.ino
-		) {
+		const staged =
+			at === file &&
+			standing.isFile() &&
+			(expected === "empty" ? standing.size === 0 : standing.dev === expected.dev && standing.ino === expected.ino);
+		if (!staged) {
 			notes.push(`${at} is not what ${stager} staged there, so it was left alone`);
 			continue;
 		}
@@ -1194,8 +1212,8 @@ async function clearStagingGround(
 /**
  * Take this run's staging directory away again, with what this run staged
  * there, and its record with it. A directory that cannot be taken away
- * keeps its record, so the next run looks at it again. The sentence returned
- * is the one for the command to print.
+ * keeps its record, so it stays residue and the next run looks at it again.
+ * The sentence returned is the one for the command to print.
  */
 export async function removeStagingGround(ground: StagingGround): Promise<string | undefined> {
 	const note = await clearStagingGround(ground.dir, ground.file, ground.created, "this run");
@@ -1220,13 +1238,53 @@ function parseStagingRecord(text: string): StagingRecord {
 		typeof entry !== "object" ||
 		entry === null ||
 		!("dir" in entry && typeof entry.dir === "string") ||
-		!("file" in entry && typeof entry.file === "string") ||
-		!("dev" in entry && typeof entry.dev === "number") ||
-		!("ino" in entry && typeof entry.ino === "number")
+		!("file" in entry && typeof entry.file === "string")
 	) {
 		throw new Error("not a staging record");
 	}
-	return { dir: entry.dir, file: entry.file, dev: entry.dev, ino: entry.ino };
+	if (!("identity" in entry) || entry.identity === undefined) return { dir: entry.dir, file: entry.file };
+	const identity = entry.identity;
+	if (
+		typeof identity !== "object" ||
+		identity === null ||
+		!("dev" in identity && typeof identity.dev === "number") ||
+		!("ino" in identity && typeof identity.ino === "number")
+	) {
+		throw new Error("not a staging record");
+	}
+	return { dir: entry.dir, file: entry.file, identity: { dev: identity.dev, ino: identity.ino } };
+}
+
+/** Every record in `ledger` with its path, and a note for each that could not be read. */
+async function readStagingRecords(
+	ledger: string,
+): Promise<{ records: { path: string; entry: StagingRecord }[]; parts: string[]; notes: string[] }> {
+	const found = {
+		records: [] as { path: string; entry: StagingRecord }[],
+		parts: [] as string[],
+		notes: [] as string[],
+	};
+	let names: string[];
+	try {
+		names = await fs.readdir(ledger);
+	} catch (error) {
+		if (!isEnoent(error))
+			found.notes.push(`${ledger} could not be read, so no staging directory was reclaimed: ${error}`);
+		return found;
+	}
+	for (const name of names.sort()) {
+		const record = path.join(ledger, name);
+		if (name.endsWith(STAGING_RECORD_PART)) {
+			found.parts.push(record);
+			continue;
+		}
+		try {
+			found.records.push({ path: record, entry: parseStagingRecord(await fs.readFile(record, "utf8")) });
+		} catch (error) {
+			found.notes.push(`${record} could not be read, so the staging directory it records was left alone: ${error}`);
+		}
+	}
+	return found;
 }
 
 /**
@@ -1235,30 +1293,19 @@ function parseStagingRecord(text: string): StagingRecord {
  *
  * The caller holds the gc lock, so every record here belongs to a run that
  * is gone — see {@link stagingLedgerDir}. What goes is what the record
- * names: the one staged file while it is still the inode recorded, and then
- * the directory once nothing else is in it. Anything else is reported and
- * the record kept, so the next run reports it again rather than forgetting
- * it.
+ * names: the one staged file while it is still the regular file recorded
+ * (or, for a run that died before recording its identity, while it is
+ * empty), and then the directory once nothing else is in it. Anything else
+ * is reported and the record kept, so the directory stays residue and the
+ * next run reports it again rather than forgetting it. A record replacement
+ * a run died writing is the ledger's own, and goes.
  */
 export async function reclaimRecordedStagingGrounds(ledger: string, apply: boolean): Promise<StagingReclaim> {
 	const result: StagingReclaim = { found: 0, removed: 0, bytes: 0, notes: [] };
-	let names: string[];
-	try {
-		names = await fs.readdir(ledger);
-	} catch (error) {
-		if (!isEnoent(error))
-			result.notes.push(`${ledger} could not be read, so no staging directory was reclaimed: ${error}`);
-		return result;
-	}
-	for (const name of names.sort()) {
-		const record = path.join(ledger, name);
-		let entry: StagingRecord;
-		try {
-			entry = parseStagingRecord(await fs.readFile(record, "utf8"));
-		} catch (error) {
-			result.notes.push(`${record} could not be read, so the staging directory it records was left alone: ${error}`);
-			continue;
-		}
+	const { records, parts, notes } = await readStagingRecords(ledger);
+	result.notes.push(...notes);
+	if (apply) for (const part of parts) await fs.rm(part, { force: true }).catch(() => undefined);
+	for (const { path: record, entry } of records) {
 		let standing: Stats | undefined;
 		try {
 			standing = await fs.lstat(entry.dir);
@@ -1278,9 +1325,16 @@ export async function reclaimRecordedStagingGrounds(ledger: string, apply: boole
 		}
 		result.found += 1;
 		const staged = await fs.lstat(entry.file).catch(() => undefined);
-		if (staged?.dev === entry.dev && staged.ino === entry.ino) result.bytes += staged.size;
+		if (entry.identity && staged?.dev === entry.identity.dev && staged.ino === entry.identity.ino) {
+			result.bytes += staged.size;
+		}
 		if (!apply) continue;
-		const note = await clearStagingGround(entry.dir, entry.file, entry, "the run that recorded it");
+		const note = await clearStagingGround(
+			entry.dir,
+			entry.file,
+			entry.identity ?? "empty",
+			"the run that recorded it",
+		);
 		if (note) {
 			result.notes.push(note);
 			continue;
@@ -1292,6 +1346,28 @@ export async function reclaimRecordedStagingGrounds(ledger: string, apply: boole
 }
 
 /**
+ * Whether an entry below `root` is a staging directory a run recorded and
+ * could not clear — residue, not an artifact. Decided by the record, never
+ * by the name: see {@link stagingLedgerDir}. Compared by real path relative
+ * to `root`, so an archive reached through a symlink still matches the
+ * directory a run minted inside it.
+ */
+export async function stagingResidueUnder(ledger: string, root: string): Promise<(entry: string) => boolean> {
+	const { records } = await readStagingRecords(ledger);
+	if (records.length === 0) return () => false;
+	const realRoot = await fs.realpath(root).catch(() => undefined);
+	if (realRoot === undefined) return () => false;
+	const residue = new Set<string>();
+	for (const { entry } of records) {
+		const real = await fs.realpath(entry.dir).catch(() => undefined);
+		if (real === undefined) continue;
+		const relative = path.relative(realRoot, real);
+		if (relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative)) residue.add(relative);
+	}
+	return entry => residue.has(path.relative(root, entry));
+}
+
+/**
  * Archived paths with no live counterpart, as relative names.
  *
  * The question a stale restore record raises: has the live tree caught up
@@ -1300,15 +1376,22 @@ export async function reclaimRecordedStagingGrounds(ledger: string, apply: boole
  * enough of it to decide whether an unfinished restore is still unfinished.
  * A FIFO, a device or a directory standing there is not the artifact: a
  * reader of it waits or fails instead of reading the archived bytes, so
- * the restore that would bring them home is still outstanding.
+ * the restore that would bring them home is still outstanding. A recorded
+ * staging directory is not an artifact and is not outstanding.
  */
-export async function archivedPathsWithoutLiveCopies(archiveFile: string, sessionFile: string): Promise<string[]> {
+export async function archivedPathsWithoutLiveCopies(
+	archiveFile: string,
+	sessionFile: string,
+	ledger: string,
+): Promise<string[]> {
 	const archiveArtifacts = archiveFile.slice(0, -ARCHIVED_SESSION_SUFFIX.length);
 	const liveArtifacts = sessionFile.slice(0, -SESSION_SUFFIX.length);
+	const isResidue = await stagingResidueUnder(ledger, archiveArtifacts);
 	const outstanding: string[] = [];
 	for (const file of await treeFiles(archiveArtifacts)) {
 		const name = path.relative(archiveArtifacts, file);
-		if (name.split(path.sep).some(part => SESSION_STAGING_RE.test(part))) continue;
+		const parts = name.split(path.sep);
+		if (parts.some((_, depth) => isResidue(path.join(archiveArtifacts, ...parts.slice(0, depth + 1))))) continue;
 		if (!(await statIfPresent(path.join(liveArtifacts, name)))?.isFile()) outstanding.push(name);
 	}
 	return outstanding.sort();

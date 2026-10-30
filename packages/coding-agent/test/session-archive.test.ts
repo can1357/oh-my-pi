@@ -1471,18 +1471,20 @@ test("archiving keeps a deliberately private artifact directory private", async 
 	expect((await fs.stat(path.join(archivedArtifacts, "nested"))).mode & 0o777).toBe(0o700);
 });
 
-test("staging residue in the archive is not carried home as an artifact", async () => {
+test("an archived file whose name only looks like a staging temp is carried home like any other", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
 	await Bun.write(path.join(liveArtifacts, "tool.log"), "ARTIFACT");
 	await archiveEverything();
-	const residue = sessionStagingPath(path.join(archivedArtifacts, "tool.log"));
-	await Bun.write(residue, "half a copy");
+	// Nothing recorded staging it, so nothing here can tell it from a file
+	// somebody keeps under that name.
+	const lookalike = sessionStagingPath(path.join(archivedArtifacts, "tool.log"));
+	await Bun.write(lookalike, "SOMEBODY'S BYTES");
 
 	const restored = await restoreArchivedSession(archiveFile, root);
 
-	expect(restored.artifactsRestored).toBe(true);
-	expect(await Bun.file(path.join(liveArtifacts, path.basename(residue))).exists()).toBe(false);
+	expect(restored.notRestored).toEqual([]);
+	expect(await Bun.file(path.join(liveArtifacts, path.basename(lookalike))).text()).toBe("SOMEBODY'S BYTES");
 	expect(await Bun.file(path.join(liveArtifacts, "tool.log")).text()).toBe("ARTIFACT");
 });
 test("an interrupted repair never truncates the live file the archive is linked to", async () => {
@@ -3389,22 +3391,133 @@ for (const how of ["moved aside", "deleted"] as const) {
 	});
 }
 
-test("a staging directory left in the archive is not carried home as an artifact", async () => {
+test("a recorded staging directory that could not be cleared is not carried home as an artifact", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
 	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
 	await archiveEverything();
-	// What a run killed before it recorded its stage leaves, or one whose
-	// record could not be cleared: a staging directory nothing reclaims.
-	const stage = sessionStagingPath(path.join(archivedArtifacts, "b.log"));
-	await Bun.write(path.join(stage, "b.log"), "PLANTED");
+	// A run's recorded stage with somebody else's file beside it: cleanup
+	// leaves both and keeps the record, so the directory is still residue.
+	const ground = await mintStagingGround(path.join(archivedArtifacts, "b.log"), stagingLedgerDir(root));
+	await ground.handle.writeFile("HALF A COPY");
+	await ground.handle.close();
+	await Bun.write(path.join(ground.dir, "planted"), "PLANTED");
 
 	const restored = await restoreArchivedSession(archiveFile, root);
 
 	expect(restored.notRestored).toEqual([]);
 	expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
 	expect(await Bun.file(restoreRecordPath(archiveFile)).exists()).toBe(false);
-	expect(await Bun.file(path.join(stage, "b.log")).text()).toBe("PLANTED");
+	expect(await Bun.file(path.join(ground.dir, "planted")).text()).toBe("PLANTED");
+});
+
+test("a staging directory a run recorded only its intent for is reclaimed and not carried home", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	await archiveEverything();
+	// A run killed after recording what it was about to make and before it
+	// knew the staged file's inode: the directory and an empty file.
+	const dir = sessionStagingPath(path.join(archivedArtifacts, "b.log"));
+	const file = path.join(dir, "b.log");
+	await fs.mkdir(dir, { mode: 0o700 });
+	await Bun.write(file, "");
+	await Bun.write(path.join(stagingLedgerDir(root), "1.json"), JSON.stringify({ dir, file }));
+
+	const restored = await restoreArchivedSession(archiveFile, root);
+
+	expect(restored.notRestored).toEqual([]);
+	expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
+	expect(await fs.stat(dir).catch(() => undefined)).toBeUndefined();
+	expect(await fs.readdir(stagingLedgerDir(root))).toEqual([]);
+});
+
+test("artifacts whose names only look like staging survive archive, reclaim and restore", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const nested = path.join(liveArtifacts, ".evidence.0123456789abcdef.tmp", "customer-artifact");
+	const flat = path.join(liveArtifacts, ".version.0123456789abcdef.tmp");
+	await Bun.write(nested, "CUSTOMER EVIDENCE");
+	await Bun.write(flat, "VERSION 7");
+
+	const archived = await archiveEverything();
+	expect(archived.archive?.errors).toEqual([]);
+	expect(await Bun.file(sessionFile).exists()).toBe(false);
+	const restored = await restoreArchivedSession(archiveFile, root);
+
+	expect(restored.notRestored).toEqual([]);
+	expect(await Bun.file(nested).text()).toBe("CUSTOMER EVIDENCE");
+	expect(await Bun.file(flat).text()).toBe("VERSION 7");
+});
+
+test("a reclaim keeps a file whose mode changed after it was proved", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	await Bun.write(path.join(liveArtifacts, "b.log"), "SECOND");
+	await archiveEverything();
+	await restoreArchivedSession(archiveFile, root);
+	const b = path.join(liveArtifacts, "b.log");
+
+	// Same inode, same bytes, tighter mode: the archive's copy would come
+	// back wider than the file it replaced.
+	const realUnlink = fs.unlink;
+	let changed = false;
+	const unlink = spyOn(fs, "unlink").mockImplementation(async target => {
+		await realUnlink(target);
+		if (!changed && String(target) === path.join(liveArtifacts, "a.log")) {
+			changed = true;
+			await fs.chmod(b, 0o600);
+		}
+	});
+	let result: GcResult;
+	try {
+		result = await runGcCommand({
+			flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+		});
+	} finally {
+		unlink.mockRestore();
+	}
+
+	expect(changed).toBe(true);
+	expect(result.reclaim?.reclaimed).toBe(0);
+	expect((await fs.stat(b)).mode & 0o777).toBe(0o600);
+});
+
+test("a link replaced while the reclaim was reading it is kept", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	await Bun.write(path.join(liveArtifacts, "b.log"), "SECOND");
+	await archiveEverything();
+	await restoreArchivedSession(archiveFile, root);
+	const link = path.join(liveArtifacts, "b.log");
+	await fs.rm(link);
+	await fs.symlink(path.join(archivedArtifacts, "b.log"), link);
+
+	// Replaced between the walk's `lstat` and its `readlink`: an identity
+	// put together from the two would describe the replacement.
+	const elsewhere = path.join(root, "elsewhere.log");
+	const realReadlink = fs.readlink;
+	let replaced = false;
+	const readlink = spyOn(fs, "readlink").mockImplementation((async (target: string, ...rest: unknown[]) => {
+		if (!replaced && String(target) === link) {
+			replaced = true;
+			await fs.unlink(link);
+			await fs.symlink(elsewhere, link);
+		}
+		return await (realReadlink as (...args: unknown[]) => Promise<string>)(target, ...rest);
+	}) as typeof fs.readlink);
+	let result: GcResult;
+	try {
+		result = await runGcCommand({
+			flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+		});
+	} finally {
+		readlink.mockRestore();
+	}
+
+	expect(replaced).toBe(true);
+	expect(result.reclaim?.reclaimed).toBe(0);
+	expect(await fs.readlink(link)).toBe(elsewhere);
 });
 
 for (const shape of ["a different link", "a FIFO"] as const) {
