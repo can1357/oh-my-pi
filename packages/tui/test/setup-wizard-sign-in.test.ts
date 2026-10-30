@@ -80,7 +80,7 @@ function sceneHost(login: Login) {
 
 /** The provider sheet the scene presents, or undefined while the login dialog is up. */
 function providerSheet(scene: SignInScene): { props: TspPickerProps; owner: Component } | undefined {
-	const owner = scene.describe(pickerCx).c?.[0];
+	const owner = scene.describe(pickerCx)?.c?.[0];
 	if (!owner || !("render" in owner) || !owner.describe) return undefined;
 	const picker = (owner.describe(pickerCx)?.c?.[0] as NativeNode | undefined) ?? undefined;
 	if (picker?.k !== "picker") return undefined;

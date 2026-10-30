@@ -17,6 +17,7 @@ import { theme } from "../../theme/theme";
 import { col, node, span } from "../../native/describe";
 import type { DescribeContext, NativeChild, NativeNode } from "../../native/node";
 import { Memo } from "../../native/memo";
+import { CustomProviderForm } from "./custom-provider";
 import {
 	SETUP_SHEET_ROLE,
 	type SetupScene,
@@ -50,13 +51,14 @@ type SignInOutcome =
 export class SignInScene implements SetupSceneController {
 	readonly title = SCENE_TITLE;
 	get subtitle(): string {
-		return `Sign in to one or more providers. Press ${editorKey("tui.select.cancel")} when you're done.`;
+		return `Sign in to one or more providers or add a custom endpoint. Press ${editorKey("tui.select.cancel")} when you're done.`;
 	}
 
 	#authStorage: AuthStorage;
 	#selector: OAuthSelectorComponent;
 	/** The login flow on screen; undefined while picking. */
 	#dialog: LoginDialogComponent | undefined;
+	#customProvider: CustomProviderForm | undefined;
 	#outcome: SignInOutcome | undefined;
 	/** A sign-in succeeded in this scene: leaving the step reads "Continue". */
 	#signedIn = false;
@@ -81,12 +83,21 @@ export class SignInScene implements SetupSceneController {
 				requestRender: () => this.#host.requestRender(),
 				disabledProviders: this.#host.ctx.disabledProviders,
 				sheet: this.#sheet(),
+				extraAction: this.#host.ctx.addCustomProvider
+					? {
+							id: "__omp_custom_provider__",
+							label: "Custom endpoint…",
+							onSelect: () => this.#openCustomProvider(),
+						}
+					: undefined,
 			},
 		);
 	}
 
 	dispose(): void {
 		this.#lifetime.abort();
+		this.#customProvider?.dispose();
+		this.#customProvider = undefined;
 		this.#selector.stopValidation();
 		this.#dialog = undefined;
 	}
@@ -96,9 +107,14 @@ export class SignInScene implements SetupSceneController {
 		this.#step?.invalidate();
 		this.#selector.invalidate();
 		this.#dialog?.invalidate();
+		this.#customProvider?.invalidate();
 	}
 
 	handleInput(data: string): void {
+		if (this.#customProvider) {
+			this.#customProvider.handleInput(data);
+			return;
+		}
 		if (this.#dialog) {
 			this.#dialog.handleInput(data);
 			return;
@@ -108,11 +124,12 @@ export class SignInScene implements SetupSceneController {
 
 	/** Forward mouse to the provider selector; the login dialog takes keys only. */
 	routeMouse(event: SgrMouseEvent, line: number, col: number): void {
-		if (this.#dialog) return;
+		if (this.#dialog || this.#customProvider) return;
 		this.#step?.routeMouse(event, line, col);
 	}
 
 	render(width: number, maxLines?: number): readonly string[] {
+		if (this.#customProvider) return this.#customProvider.render(width, maxLines);
 		const dialog = this.#dialog;
 		if (dialog) {
 			// Short screens cut the middle: the head keeps the title and the first link row (every
@@ -156,7 +173,9 @@ export class SignInScene implements SetupSceneController {
 	 * selector, which presents the setup sheet where the terminal draws
 	 * pickers; elsewhere it is an inline card under the lead and the outcome.
 	 */
-	describe(cx: DescribeContext): NativeNode {
+	describe(cx: DescribeContext): NativeNode | null {
+		// The custom endpoint form has no native description; fall back to its rendered rows.
+		if (this.#customProvider) return null;
 		const dialog = this.#dialog;
 		const sheet = cx.supports("picker");
 		const outcome = this.#outcome;
@@ -226,6 +245,21 @@ export class SignInScene implements SetupSceneController {
 		if (this.#dialog !== dialog) return;
 		this.#dialog = undefined;
 		this.#host.restoreFocus();
+		this.#host.requestRender();
+	}
+
+	#openCustomProvider(): void {
+		if (this.#customProvider || this.#lifetime.signal.aborted) return;
+		const addProvider = this.#host.ctx.addCustomProvider;
+		if (!addProvider) return;
+		this.#customProvider = new CustomProviderForm(this.#host, addProvider, () => this.#closeCustomProvider());
+		this.#customProvider.onActivate?.();
+		this.#host.requestRender();
+	}
+
+	#closeCustomProvider(): void {
+		this.#customProvider?.dispose();
+		this.#customProvider = undefined;
 		this.#host.requestRender();
 	}
 
