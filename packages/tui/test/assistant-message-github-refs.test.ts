@@ -49,6 +49,7 @@ describe("assistant reply GitHub refs", () => {
 			true,
 			undefined,
 			false,
+			undefined,
 			() => alphaSession.repo,
 		);
 		const beta = new AssistantMessageComponent(
@@ -60,6 +61,7 @@ describe("assistant reply GitHub refs", () => {
 			true,
 			undefined,
 			false,
+			undefined,
 			() => "owner/beta",
 		);
 		expect(linkTargets(alpha)).toEqual(new Set());
