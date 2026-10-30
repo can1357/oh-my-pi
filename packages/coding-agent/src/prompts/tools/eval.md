@@ -38,6 +38,7 @@ await tool.<name>(args) — session tool; `args` is its parameter object
 {{/if}}
 {{/ifAll}}
 {{#if toolNames}}Session tool names: {{#each toolNames}}`{{this}}`{{#unless @last}}, {{/unless}}{{/each}}.{{/if}}
+Registered discoverable tools and MCP tools need not be activated or mounted first: call `await tool.<canonical_name>(args)` or `await tool["xd://<name>"](args)` in either language. Session tool restrictions and approvals still apply; `checkpoint` and `rewind` must be called directly. The names above list enabled tools, not an exhaustive allowlist.
 </prelude>
 
 {{#if inlineTopics}}

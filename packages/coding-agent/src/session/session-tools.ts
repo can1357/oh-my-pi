@@ -397,6 +397,8 @@ export class SessionTools {
 	#announcedMountsSeeded = false;
 	#presentationPinnedToolNames: ReadonlySet<string> | undefined;
 	#runtimeSelectedToolNames: ReadonlySet<string> | undefined;
+	/** Explicit removals are restrictions, unlike tools that have never been activated. */
+	#evalBridgeExcludedToolNames = new Set<string>();
 	#baseSystemPrompt: string[];
 	/**
 	 * Per-turn system prompt returned by a `before_agent_start` extension hook
@@ -727,26 +729,49 @@ export class SessionTools {
 	}
 
 	/**
-	 * Looks up an enabled tool through the same ACP permission gate as direct calls.
+	 * Looks up an enabled or activatable tool through the direct-call ACP gate.
 	 *
-	 * Accepts the spellings direct dispatch accepts: an `xd://` prefix and the
-	 * Claude Code `mcp__<server>__<tool>` alias. The alias resolves in one
-	 * {@link resolveMCPToolAlias} pass over every enabled tool (top-level plus
-	 * mounted devices), so an alias two enabled tools answer resolves to nothing.
+	 * Discovery admission is the existing xd:// mountable partition plus manager-
+	 * and extension-owned MCP tools, not the entire registry. Initial tool grants,
+	 * explicit removals, and plan/vibe narrowing still apply; the SDK has already
+	 * filtered unavailable built-ins and restricted-session tools at registration.
+	 * This lookup does not activate or mount anything, so calling from a cell does
+	 * not change the model-visible tool list, descriptions, or prompt cache prefix.
+	 * The shared bridge policy separately refuses checkpoint/rewind.
 	 */
 	getToolForEvalBridge(name: string): AgentTool | undefined {
 		const bareName = stripXdUrlPrefix(name);
-		const enabled = new Set(this.getEnabledToolNames());
-		const named = this.#resolveToolWireName(bareName);
-		// A registered name never falls through to an alias guess, even when disabled.
-		if (named) return enabled.has(named.name) ? this.#wrapToolForAcpPermission(named) : undefined;
-		const alias = resolveMCPToolAlias(bareName, candidate =>
-			enabled.has(candidate) ? this.#toolRegistry.get(candidate) : undefined,
-		);
-		return alias && this.#wrapToolForAcpPermission(alias);
+		const named = this.#resolveToolWireName(bareName, true);
+		// Exact names shadow aliases even when the exact tool is disabled.
+		if (named) return this.#isEvalBridgeToolAvailable(named) ? this.#wrapToolForAcpPermission(named) : undefined;
+		let matches = 0;
+		const alias = resolveMCPToolAlias(bareName, candidate => {
+			const tool = this.#toolRegistry.get(candidate);
+			if (tool) matches++;
+			return tool;
+		});
+		if (matches > 1) throw new ToolError(`Ambiguous tool alias ${name}; use an exact session tool name.`);
+		return alias && this.#isEvalBridgeToolAvailable(alias) ? this.#wrapToolForAcpPermission(alias) : undefined;
 	}
 
-	/** Canonical and unambiguous wire names accepted by the eval bridge. */
+	#isEvalBridgeToolAvailable(tool: AgentTool): boolean {
+		if (this.getEnabledToolNames().includes(tool.name)) return true;
+		if (
+			this.#evalBridgeExcludedToolNames.has(tool.name) ||
+			this.#presentationPinnedToolNames !== undefined ||
+			this.#host.planModeEnabled() ||
+			this.#installedVibeToolNames.size > 0
+		) {
+			return false;
+		}
+		return (
+			isMountableUnderXdev(tool) ||
+			this.#mcpManagerToolNames.has(tool.name) ||
+			this.#extensionMcpTools.has(tool.name)
+		);
+	}
+
+	/** Enabled canonical/wire names advertised by eval, not an exhaustive invocation allowlist. */
 	getEvalBridgeToolNames(): string[] {
 		const names = new Set<string>();
 		for (const name of this.getEnabledToolNames()) {
@@ -761,13 +786,16 @@ export class SessionTools {
 	}
 
 	/** Exact registry names shadow wire aliases, including when the exact tool is disabled. */
-	#resolveToolWireName(name: string): AgentTool | undefined {
+	#resolveToolWireName(name: string, rejectAmbiguous = false): AgentTool | undefined {
 		const exact = this.#toolRegistry.get(name);
 		if (exact) return exact;
 		let resolved: AgentTool | undefined;
 		for (const tool of this.#toolRegistry.values()) {
 			if (tool.customWireName !== name) continue;
-			if (resolved) return undefined;
+			if (resolved) {
+				if (rejectAmbiguous) throw new ToolError(`Ambiguous tool alias ${name}; use an exact session tool name.`);
+				return undefined;
+			}
 			resolved = tool;
 		}
 		return resolved;
@@ -2154,6 +2182,14 @@ export class SessionTools {
 			((this.#host.planModeEnabled() && (!writeSelected || deviceOnlyWriteActive)) ||
 				(writeSelected && deviceOnlyWriteActive && (retainedMountedDevice || retainedDeferrableTool)));
 		const previousRuntimeSelectedToolNames = this.#runtimeSelectedToolNames;
+		const previousExcludedToolNames = this.#evalBridgeExcludedToolNames;
+		const excludedToolNames = new Set(previousExcludedToolNames);
+		const selectedToolNames = new Set(normalized);
+		for (const name of this.getEnabledToolNames()) {
+			if (!selectedToolNames.has(name)) excludedToolNames.add(name);
+		}
+		for (const name of selectedToolNames) excludedToolNames.delete(name);
+		this.#evalBridgeExcludedToolNames = excludedToolNames;
 		this.#runtimeSelectedToolNames = new Set(
 			normalized.filter(name => !mounted.has(name) && !(name === "write" && transportWriteActive)),
 		);
@@ -2161,6 +2197,7 @@ export class SessionTools {
 			await this.#applyActiveToolsByName(normalized, forcePromptRefresh, signal);
 		} catch (error) {
 			this.#runtimeSelectedToolNames = previousRuntimeSelectedToolNames;
+			this.#evalBridgeExcludedToolNames = previousExcludedToolNames;
 			throw error;
 		}
 	}
