@@ -149,16 +149,14 @@ impl Backend for Win32Backend {
 	/// element and types through the foreground route.
 	fn element_input(
 		&mut self,
-		target: &Target,
 		element: &AxHandle,
 		input: &ElementInput,
 		mode: DeliveryMode,
 		token: &OperationToken,
 	) -> CoreResult<ElementDelivery> {
 		token.check()?;
-		let Target::Window(id) = target else {
-			return Err(DesktopError::invalid_target("element input needs the element's window"));
-		};
+		let windows = capture::windows()?;
+		let id = self.ax.window_id(element, &windows)?;
 		match mode {
 			DeliveryMode::Background => {
 				let own = Win32Ax::own_window(element)?.ok_or_else(|| {
@@ -168,14 +166,15 @@ impl Backend for Win32Backend {
 						 the front; nothing was sent"
 					))
 				})?;
-				input::element_background(id, own, input)?;
+				input::element_background(&id, own, input)?;
 			},
 			DeliveryMode::Foreground | DeliveryMode::ForegroundReturnFocus => {
+				let target = Target::Window(id);
 				self.ax.focus(element)?;
 				match input {
-					ElementInput::Text(text) => input::type_text(target, text, mode)?,
+					ElementInput::Text(text) => input::type_text(&target, text, mode)?,
 					ElementInput::Chord(keys) => {
-						input::key_chord(&mut self.global_input, target, keys, mode)?;
+						input::key_chord(&mut self.global_input, &target, keys, mode)?;
 					},
 				}
 			},

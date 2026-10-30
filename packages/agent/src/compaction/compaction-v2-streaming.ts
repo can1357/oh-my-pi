@@ -11,11 +11,9 @@ import type { Api, CodexCompactionContext, FetchImpl, Model, ProviderSessionStat
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-compaction";
 import { applyCodexResponsesLiteShape } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
-import {
-	createOpenAICodexCompatibilityMetadata,
-	openCodexCompactionEventStream,
-	type OpenAICodexCompactionBody,
-	type OpenAICodexCompatibilityMetadata,
+import type {
+	OpenAICodexCompactionBody,
+	OpenAICodexCompatibilityMetadata,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import {
 	getOpenAIPromptCacheKey,
@@ -24,6 +22,7 @@ import {
 	resolveOpenAIRequestSetup,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
+import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
 import { isBedrockOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import {
 	applyCodexResidencyHeader,
@@ -131,7 +130,8 @@ export function shouldUseCompactionV2Streaming(
 	return getCompactionV2Endpoint(model) !== undefined;
 }
 
-function compactionV2Api(model: Model): Api | undefined {
+/** Effective compaction request adapter: the `remoteCompaction.api` override, else the model's own API. Always defined — `Model.api` is required. */
+function compactionV2Api(model: Model): Api {
 	return model.remoteCompaction?.api ?? model.api;
 }
 
@@ -169,6 +169,23 @@ function resolveCompactionV2Model(model: Model): string {
 	if (compactionV2Api(model) !== "azure-openai-responses") return requestModel;
 	const mappedDeployment = parseAzureDeploymentNameMap($env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP).get(requestModel);
 	return mappedDeployment ?? requestModel;
+}
+
+/**
+ * Catalog-policy view of a remote compaction request (V1 and V2): the
+ * effective adapter (`remoteCompaction.api`) and the wire id the body sends
+ * (`remoteCompaction.model`). Under a model override the active lane's
+ * `requestModelId` and thinking classification describe a model that never
+ * reaches the wire, so they are dropped; `reasoning` stays because the
+ * compaction body derives its reasoning config from the active model.
+ */
+export function remoteCompactionPolicyModel(model: Model): CatalogPolicyInputs {
+	const api = compactionV2Api(model);
+	const overrideId = model.remoteCompaction?.model;
+	const base = { provider: model.provider, providerType: model.providerType, api, reasoning: model.reasoning };
+	return overrideId == null
+		? { ...base, id: model.id, requestModelId: model.requestModelId, thinking: model.thinking }
+		: { ...base, id: overrideId };
 }
 
 // ============================================================================
@@ -274,18 +291,21 @@ export async function requestCompactionV2Streaming(
 
 	const retryWait = options?.retryWait ?? ((delayMs: number) => Bun.sleep(delayMs));
 	const isCodexResponses = compactionV2Api(model) === "openai-codex-responses" || model.provider === "openai-codex";
-	const codexMetadata =
-		isCodexResponses && !shouldUseCodexProviderTransport(model)
-			? createOpenAICodexCompatibilityMetadata({
-					sessionId: request.sessionId,
-					providerSessionState: options?.providerSessionState,
-					requestKind: "compaction",
-					compaction: createOpenAICodexCompactionRequestContext({
-						context: options?.codexCompaction,
-						implementation: "responses_compaction_v2",
-					}),
-				})
-			: undefined;
+	let codexMetadata: OpenAICodexCompatibilityMetadata | undefined;
+	if (isCodexResponses && !shouldUseCodexProviderTransport(model)) {
+		// Metadata generation is request work; importing compaction policy must not load the Codex transport.
+		const { createOpenAICodexCompatibilityMetadata } =
+			await import("@oh-my-pi/pi-ai/providers/openai-codex-responses");
+		codexMetadata = createOpenAICodexCompatibilityMetadata({
+			sessionId: request.sessionId,
+			providerSessionState: options?.providerSessionState,
+			requestKind: "compaction",
+			compaction: createOpenAICodexCompactionRequestContext({
+				context: options?.codexCompaction,
+				implementation: "responses_compaction_v2",
+			}),
+		});
+	}
 	let lastError: Error | undefined;
 
 	for (let attempt = 0; attempt <= V2_COMPACTION_MAX_RETRIES; attempt++) {
@@ -348,6 +368,8 @@ async function attemptCompactionV2Streaming(
 	}
 
 	if (shouldUseCodexProviderTransport(model)) {
+		// The native transport is only needed when sending a Codex compaction request.
+		const { openCodexCompactionEventStream } = await import("@oh-my-pi/pi-ai/providers/openai-codex-responses");
 		const eventStream = await openCodexCompactionEventStream(model, body, {
 			apiKey,
 			signal,
@@ -413,8 +435,9 @@ function buildCompactionV2Headers(
 					"content-type": "application/json",
 					...resolveOpenAIRequestSetup(
 						{
-							provider: model.provider,
-							id: model.id,
+							// `on-api` scoped cache policy must see the request this
+							// compaction actually sends, not the active lane.
+							...remoteCompactionPolicyModel(model),
 							baseUrl: model.baseUrl,
 							headers: model.headers,
 							compat: {
@@ -422,7 +445,16 @@ function buildCompactionV2Headers(
 									model.compat && "sessionHeader" in model.compat ? model.compat.sessionHeader : undefined,
 							},
 						},
-						{ apiKey, messages: [], sessionId: request.sessionId ?? routingSessionId, promptCacheSessionId },
+						{
+							apiKey,
+							messages: [],
+							sessionId: request.sessionId ?? routingSessionId,
+							promptCacheSessionId,
+							// The family affinity key rides only an explicit
+							// prompt-cache identity; the sessionId-derived cache-id
+							// fallback never does.
+							promptCacheAffinityKey: request.promptCacheKey ? promptCacheSessionId : undefined,
+						},
 					).headers,
 				};
 	if (api === "openai-codex-responses" || model.provider === "openai-codex") {

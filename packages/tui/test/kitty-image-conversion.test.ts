@@ -2,7 +2,9 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { Text } from "@oh-my-pi/pi-tui/components/text";
 import { ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 
 const IMAGE: ImageContent = {
@@ -90,6 +92,8 @@ describe("Kitty PNG conversion cache", () => {
 	let rebuildImage: ImageContent;
 	let liveImage: ImageContent;
 	let evictedImage: ImageContent;
+	let toolRetirementImage: ImageContent;
+	let assistantRetirementImage: ImageContent;
 	const floodImages: ImageContent[] = [];
 	let encodes = 0;
 	let originalPng: typeof Bun.Image.prototype.png;
@@ -139,6 +143,8 @@ describe("Kitty PNG conversion cache", () => {
 		rebuildImage = await webpImage(143);
 		liveImage = await webpImage(145);
 		evictedImage = await webpImage(147);
+		toolRetirementImage = await webpImage(157);
+		assistantRetirementImage = await webpImage(159);
 		for (const edge of [149, 151]) floodImages.push(await webpImage(edge));
 	});
 
@@ -226,5 +232,51 @@ describe("Kitty PNG conversion cache", () => {
 		rebuilt.updateResult({ content: [liveImage] }, false);
 		expect(encodes).toBe(1);
 		expect(rebuilt.render(80).join("\n")).toContain("\x1b_G");
+	});
+
+	it("holds a restored tool card until its WebP image can enter scrollback", async () => {
+		const landed = Promise.withResolvers<void>();
+		const ui = {
+			requestRender: () => {
+				if (!card.isTranscriptBlockPending()) landed.resolve();
+			},
+			requestComponentRender: () => {},
+			resetDisplay: () => {},
+		};
+		const card = new ToolExecutionComponent(
+			"eval",
+			{ language: "js", code: "await tab.screenshot()" },
+			{ useBuiltInRenderer: true, showImages: true },
+			undefined,
+			ui,
+		);
+		card.updateResult({ content: [{ type: "text", text: "Screenshot captured" }, toolRetirementImage] }, false);
+		const transcript = new TranscriptContainer();
+		transcript.addChild(card);
+		for (let i = 0; i < 10; i++) transcript.addChild(new Text(`Later message ${i}`, 0, 0));
+
+		expect(card.isTranscriptBlockPending()).toBe(true);
+		expect(transcript.peekFinalizedBatch(80, 5)).toBeUndefined();
+		await landed.promise;
+		expect(card.isTranscriptBlockPending()).toBe(false);
+		const batch = transcript.peekFinalizedBatch(80, 5);
+		expect(batch?.rows.join("\n")).toContain("\x1b_G");
+	});
+
+	it("holds a restored assistant image until its WebP conversion enters scrollback", async () => {
+		const landed = converted(1);
+		const message = finishedMessage();
+		message.content = [assistantRetirementImage, { type: "text", text: "Screenshot preview" }];
+		const assistant = new AssistantMessageComponent(message, false, landed.notify);
+		const transcript = new TranscriptContainer();
+		transcript.addChild(assistant);
+		for (let i = 0; i < 10; i++) transcript.addChild(new Text(`Later message ${i}`, 0, 0));
+
+		expect(assistant.isTranscriptBlockPending()).toBe(true);
+		expect(transcript.peekFinalizedBatch(80, 5)).toBeUndefined();
+		await landed.promise;
+		expect(assistant.isTranscriptBlockPending()).toBe(false);
+		const batch = transcript.peekFinalizedBatch(80, 5);
+		expect(batch?.rows.join("\n")).toContain("\x1b_G");
 	});
 });

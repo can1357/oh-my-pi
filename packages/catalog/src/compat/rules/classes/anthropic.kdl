@@ -742,9 +742,14 @@ class "anthropic" {
 	}
 	on "google-antigravity" {
 		drop-unsigned-thinking #true
-		claude-thinking-beta-header #true
 		antigravity-claude-tool-mode #true
 		antigravity-usage-label "true"
+		// The interleaved-thinking beta gated Claude 4.x thinking here. The
+		// native 2.26.0 client sends no beta for Claude 5.5, whose thinking
+		// streams without it.
+		revision "<5" {
+			claude-thinking-beta-header #true
+		}
 	}
 }
 

@@ -835,14 +835,20 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 
 		let options = patterns::FilenameExpansionOptions {
 			require_dot_in_pattern_to_match_dot_files: !self.shell.options().glob_matches_dotfiles,
+			globstar: self.shell.options().enable_star_star_glob,
+			cancel: self.params.cancel_token(),
 		};
 
-		// On error (e.g. malformed pattern), default to NoGlob so the field
-		// passes through as a literal rather than triggering failglob.
-		let expansion = pattern
-			.expand(self.shell.filesystem(), self.shell.working_dir(), &options)
-			.await
-			.unwrap_or_default();
+		let expansion =
+			match pattern.expand(self.shell.filesystem(), self.shell.working_dir(), &options).await {
+				Ok(expansion) => expansion,
+				// A cancelled run stops here instead of running the command with
+				// the word left literal.
+				Err(err) if matches!(err.kind(), error::ErrorKind::Interrupted) => return Err(err),
+				// On error (e.g. malformed pattern), default to NoGlob so the
+				// field passes through as a literal rather than triggering failglob.
+				Err(_) => patterns::PatternExpansionResult::default(),
+			};
 
 		if expansion.is_unmatched_glob() && self.shell.options().fail_expansion_on_globs_without_match
 		{
@@ -1785,12 +1791,10 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				Expansion::from(std::process::id().to_string())
 			},
 			brush_parser::word::SpecialParameter::LastBackgroundProcessId => {
-				if let Some(job) = self.shell.jobs().current_job()
-					&& let Some(pid) = job.representative_pid()
-				{
-					return Expansion::from(pid.to_string());
-				}
-				Expansion::from(String::new())
+				self.shell.last_background_pid().map_or_else(
+					|| Expansion::from(String::new()),
+					|pid| Expansion::from(pid.to_string()),
+				)
 			},
 			brush_parser::word::SpecialParameter::ShellName => Expansion::from(
 				self
@@ -2097,6 +2101,52 @@ mod tests {
 		Ok(())
 	}
 
+	/// `shopt -s globstar` must reach pathname expansion: `**` then recurses.
+	/// Without it `**/*.rs` is `*/*.rs`, which matches nothing here and stays
+	/// literal, as in bash.
+	#[tokio::test]
+	async fn test_globstar_option_reaches_pathname_expansion() -> Result<()> {
+		let scratch = tempfile::tempdir()?;
+		std::fs::create_dir_all(scratch.path().join("a/b"))?;
+		std::fs::write(scratch.path().join("a/b/f.rs"), "")?;
+		std::fs::write(scratch.path().join("g.rs"), "")?;
+
+		let mut shell = crate::shell::Shell::builder().build().await?;
+		shell.set_working_dir(scratch.path()).await?;
+		let params = shell.default_exec_params();
+		assert_eq!(full_expand_and_split_word(&mut shell, &params, "**/*.rs").await?, vec!["**/*.rs"]);
+
+		shell.options_mut().enable_star_star_glob = true; // shopt -s globstar
+		let params = shell.default_exec_params();
+		assert_eq!(full_expand_and_split_word(&mut shell, &params, "**/*.rs").await?, vec!["a/b/f.rs", "g.rs"]);
+
+		Ok(())
+	}
+
+	/// A cancelled run must reach the `**` walk, which then ends the expansion
+	/// with an interrupt instead of running the command on a literal word.
+	#[tokio::test]
+	async fn test_globstar_walk_sees_the_run_cancellation() -> Result<()> {
+		let scratch = tempfile::tempdir()?;
+		std::fs::create_dir_all(scratch.path().join("a/b"))?;
+		std::fs::write(scratch.path().join("a/b/f.rs"), "")?;
+
+		let mut shell = crate::shell::Shell::builder().build().await?;
+		shell.set_working_dir(scratch.path()).await?;
+		shell.options_mut().enable_star_star_glob = true; // shopt -s globstar
+		let mut params = shell.default_exec_params();
+		let cancel = tokio_util::sync::CancellationToken::new();
+		params.set_cancel_token(cancel.clone());
+		cancel.cancel();
+
+		let err = full_expand_and_split_word(&mut shell, &params, "**/*.rs")
+			.await
+			.expect_err("expansion ignored the cancellation");
+		assert!(matches!(err.kind(), error::ErrorKind::Interrupted), "unexpected error: {err}");
+
+		Ok(())
+	}
+
 	#[tokio::test]
 	async fn test_brace_expansion() -> Result<()> {
 		let mut shell = crate::shell::Shell::builder().build().await?;
@@ -2162,6 +2212,59 @@ mod tests {
 			WordField(vec![ExpansionPiece::Unsplittable(String::new())])
 		]);
 
+		Ok(())
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn last_background_pid_is_inherited_by_nested_shells() -> Result<()> {
+		let mut shell = crate::shell::Shell::builder().build().await?;
+		let params = shell.default_exec_params();
+		let result = shell
+			.run_string("/bin/sleep 0.1 &", &crate::SourceInfo::default(), &params)
+			.await?;
+		assert!(result.is_success());
+		let pid = shell.last_background_pid().expect("background process PID").to_string();
+
+		for word in [
+			r#""$(/bin/echo "$!" | /bin/cat)""#,
+			r#""$( (/bin/echo "$!") )""#,
+			r#""$(/bin/echo "$!")""#,
+		] {
+			assert_eq!(
+				full_expand_and_split_word(&mut shell, &params, word).await?,
+				vec![pid.clone()],
+				"nested expansion: {word}"
+			);
+			assert_eq!(shell.last_background_pid().map(|pid| pid.to_string()), Some(pid.clone()));
+		}
+		shell.jobs_mut().wait_all().await?;
+		assert_eq!(full_expand_and_split_word(&mut shell, &params, "\"$!\"").await?, vec![pid]);
+		Ok(())
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn nested_background_child_shadows_only_in_its_own_shell() -> Result<()> {
+		let mut shell = crate::shell::Shell::builder().build().await?;
+		let params = shell.default_exec_params();
+		shell
+			.run_string("/bin/sleep 0.1 &", &crate::SourceInfo::default(), &params)
+			.await?;
+		let parent = shell.last_background_pid().expect("background process PID").to_string();
+
+		for word in [
+			// `/bin/sleep`, not `/bin/true`, which macOS keeps in `/usr/bin`.
+			r#""$(/bin/sleep 0 & /bin/echo "$!")""#,
+			r#""$( (/bin/sleep 0 & /bin/echo "$!") )""#,
+		] {
+			let child = full_expand_and_split_word(&mut shell, &params, word).await?;
+			assert_eq!(child.len(), 1, "nested expansion: {word}");
+			assert!(child[0].parse::<i32>().is_ok(), "child PID: {}", child[0]);
+			assert_ne!(child[0], parent, "new child must shadow inherited PID");
+			assert_eq!(shell.last_background_pid().map(|pid| pid.to_string()), Some(parent.clone()));
+		}
+		shell.jobs_mut().wait_all().await?;
 		Ok(())
 	}
 

@@ -392,6 +392,9 @@ function devinModelSpec(
 	if (isAssignModelRouter) compat.modelRouter = true;
 	if (features?.supportsParallelToolCalls === true) compat.supportsParallelToolCalls = true;
 	const maxOutputTokens = config.modelInfo?.maxOutputTokens ?? 0;
+	// Current catalogs leave `ClientModelConfig.maxTokens` unset and carry each
+	// lane's context window on `ModelInfo.maxTokens` (200K vs 1M lanes differ there).
+	const contextWindow = config.maxTokens > 0 ? config.maxTokens : (config.modelInfo?.maxTokens ?? 0);
 	const spec: ModelSpec<"devin-agent"> = {
 		id: uid,
 		name: config.label.trim() || uid,
@@ -405,7 +408,7 @@ function devinModelSpec(
 		// mean tools are available.
 		supportsTools: features !== undefined ? features.supportsToolCalls : true,
 		cost: devinModelCost(config),
-		contextWindow: config.maxTokens > 0 ? config.maxTokens : DEFAULT_CONTEXT_WINDOW,
+		contextWindow: contextWindow > 0 ? contextWindow : DEFAULT_CONTEXT_WINDOW,
 		maxTokens: maxOutputTokens > 0 ? maxOutputTokens : DEFAULT_MAX_TOKENS,
 		...(Object.keys(compat).length > 0 ? { compat } : {}),
 	};

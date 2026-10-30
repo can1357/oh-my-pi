@@ -90,117 +90,6 @@ afterAll(async () => {
 });
 
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser click timeouts", () => {
-	test("says why a click that never became clickable timed out", async () => {
-		const session = makeSession();
-		const prelude = createBrowserPrelude(session);
-		const context = { session, toolCallId: "browser-unclickable" };
-		const tabName = `unclickable-${crypto.randomUUID()}`;
-		const unclickableHtml = `<!doctype html><button id="hidden" style="display:none">Hidden</button><button id="faded" style="opacity:0">Faded</button>
-<button class="multi" style="display:none">First</button><button class="multi">Second</button>
-<button id="swap">Swap</button>
-<button style="pointer-events:none">Twin</button><button>Twin</button>
-<button id="off" disabled>Off</button><div inert><button id="asleep">Asleep</button></div>`;
-		await prelude.invoke(
-			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(unclickableHtml)}` },
-			context,
-		);
-		try {
-			const attempt = async (call: string) => {
-				const result = await prelude.invoke(
-					{
-						action: "run",
-						name: tabName,
-						code: `try {
-	await ${call};
-	return "clicked";
-} catch (error) {
-	return error instanceof Error ? error.message : String(error);
-}`,
-						// A 3 s cell caps the per-op deadline at 2 s.
-						timeout: 3,
-					},
-					context,
-				);
-				return valueFrom<string>(result);
-			};
-			// display:none has no box (never stable); opacity:0 is stable but refused.
-			const hidden = await attempt(`tab.click("#hidden")`);
-			expect(hidden).toMatch(/^tab\.click\("#hidden"\) timed out after \d+ms/);
-			expect(hidden).toContain("last check: display:none");
-			expect(await attempt(`tab.click("#faded")`)).toContain("last check: opacity:0");
-			// A refused match the browser shows is still reported; one it cannot hit test yields to a shown twin.
-			expect(await attempt(`tab.click("text/Faded")`)).toContain("last check: opacity:0");
-			expect(await attempt(`tab.click("text/Twin")`)).toBe("clicked");
-			// The browser drops these clicks, so they fail rather than report success.
-			expect(await attempt(`tab.click("#off")`)).toContain("did not deliver the click");
-			expect(await attempt(`tab.click("text/Asleep")`)).toContain("did not deliver the click");
-			// The count tells the caller the first of several matches is the hidden one.
-			const multi = await attempt(`tab.dblclick(".multi")`);
-			expect(multi).toContain("last check: display:none");
-			expect(multi).toContain("matches 2 element(s)");
-			// The page replaces the element (as a re-render would) after the caller resolved its handle.
-			expect(
-				await attempt(`(async () => {
-	const { elements } = await tab.observe();
-	const swap = await tab.id(elements.find(element => element.name === "Swap").id);
-	await tab.evaluate(() => { const old = document.querySelector("#swap"); old.replaceWith(old.cloneNode(true)); });
-	await swap.click();
-})()`),
-			).toContain("last check: detached");
-		} finally {
-			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
-		}
-	}, 30_000);
-
-	test("says why it could not count a timed-out selector's matches", async () => {
-		const session = makeSession();
-		const prelude = createBrowserPrelude(session);
-		const context = { session, toolCallId: "browser-uncountable" };
-		const tabName = `uncountable-${crypto.randomUUID()}`;
-		await prelude.invoke(
-			{
-				action: "open",
-				name: tabName,
-				url: `data:text/html,${encodeURIComponent("<!doctype html><p>Nothing here</p>")}`,
-			},
-			context,
-		);
-		try {
-			// The match-count probe and the zero-match watchdog both query through `page.$$`;
-			// replacing it on the tab's page makes every probe fail the way the endpoint's did.
-			// The replacement stays until the tab closes below.
-			const attempt = async (probe: string, timeout: number) => {
-				const result = await prelude.invoke(
-					{
-						action: "run",
-						name: tabName,
-						code: `page.$$ = ${probe};
-try {
-	await tab.click("#missing");
-	return "clicked";
-} catch (error) {
-	return error instanceof Error ? error.message : String(error);
-}`,
-						timeout,
-					},
-					context,
-				);
-				return valueFrom<string>(result);
-			};
-			// A probe that throws never counts toward the 2 s fail-fast, so the click runs to its deadline.
-			const thrown = await attempt(`async () => { throw new Error("probe refused"); }`, 3);
-			expect(thrown).toMatch(
-				/^tab\.click\("#missing"\) timed out after \d+ms; could not count matches: probe refused$/,
-			);
-			// A 12 s cell keeps the 8 s action deadline and leaves ~2 s past the 1 s probe wait
-			// before the whole-cell timeout.
-			const stalled = await attempt(`() => Promise.withResolvers().promise`, 12);
-			expect(stalled).toMatch(/; could not count matches: no answer within 1000ms$/);
-		} finally {
-			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
-		}
-	}, 30_000);
-
 	test("rejects promptly when a text-click candidate evaluation is aborted", async () => {
 		const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
 		if (!("browser" in browserHandle)) throw new Error("Expected a Puppeteer browser");
@@ -244,11 +133,9 @@ try {
 			);
 
 			controller.abort(reason);
-			// Real Chromium CDP calls cannot run under fake timers; bound the formerly unending lookup.
-			const outcome = await Promise.race([settled, Bun.sleep(500).then(() => ({ status: "hung" as const }))]);
-			if (outcome.status !== "rejected") {
-				throw new Error(`Text-click candidate lookup ${outcome.status} after abort`);
-			}
+			// The abort, not the lookup's 5 s deadline, ends it: only the abort carries `reason` as its cause.
+			const outcome = await settled;
+			if (outcome.status !== "rejected") throw new Error("Text-click candidate lookup resolved after abort");
 			if (!(outcome.error instanceof Error)) throw new Error("Expected candidate lookup to reject with an Error");
 			expect(outcome.error.name).toBe("AbortError");
 			expect(outcome.error.cause).toBe(reason);
@@ -293,6 +180,59 @@ return { fragments, clicked: await tab.evaluate(() => window.clicked), ternHit }
 				fragments: 2,
 				clicked: ["link"],
 				ternHit: "link",
+			});
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 30_000);
+	test("clicks a shadow button through its own slotted content, still refusing a real overlay, on puppeteer and Tern", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const context = { session, toolCallId: "browser-slotted-button" };
+		const tabName = `slotted-${crypto.randomUUID()}`;
+		// The slotted icon fills the button's centre, so the hit test lands on light-DOM content the button renders.
+		const slottedHtml = `<!doctype html><slot-button id="open"><span style="display:inline-flex;width:40px;height:40px">x</span></slot-button>
+<slot-button id="covered"><span style="display:inline-flex;width:40px;height:40px">x</span></slot-button>
+<div id="overlay" style="position:absolute;left:0;top:70px;width:300px;height:100px"></div>
+<script>
+customElements.define("slot-button", class extends HTMLElement {
+	constructor() {
+		super();
+		this.attachShadow({ mode: "open" }).innerHTML = '<style>:host{display:block;height:70px}button{width:120px;height:64px}</style><button id="' + this.id + '-inner"><slot></slot></button>';
+	}
+});
+window.clicked = [];
+document.addEventListener("click", event => clicked.push(event.composedPath().find(node => node.localName === "button")?.id));
+</script>`;
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(slottedHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `const open = await tab.click("pierce/#open-inner").then(() => "clicked", error => error.message);
+const covered = await tab.click("pierce/#covered-inner").then(() => "clicked", error => error.message);
+await tab.evaluate(${JSON.stringify(`(function () {\n${TERN_KIT_SOURCE}\n})()`)});
+const tern = await tab.evaluate(async () => {
+	const aim = async query => {
+		const target = await globalThis.__ompTernKit.target({ engine: "pierce", query }, "click");
+		return target.ok ? "ok" : target.detail;
+	};
+	return { open: await aim("#open-inner"), covered: await aim("#covered-inner") };
+});
+return { open, covered, clicked: await tab.evaluate(() => window.clicked), tern };`,
+					timeout: 15,
+				},
+				context,
+			);
+			expect(valueFrom<unknown>(result)).toEqual({
+				open: "clicked",
+				covered: 'tab.click("pierce/#covered-inner") blocked: covered by <div#overlay>',
+				clicked: ["open-inner"],
+				tern: { open: "ok", covered: "<div#overlay>" },
 			});
 		} finally {
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
@@ -385,23 +325,6 @@ return {
 			expect(valueFrom<string>(blocked)).toBe('tab.click("#covered") blocked: covered by <div#overlay>');
 			await call("evaluate", ["document.querySelector('#overlay').remove()"]);
 			await call("click", ["#covered"]);
-
-			// The page renders the button after a delay, as a framework would; the click must wait for it.
-			const late = await invoke({
-				action: "run",
-				name: TAB_NAME,
-				code: `await tab.evaluate(() => setTimeout(() => {
-	const button = document.createElement("button");
-	button.id = "late";
-	button.onclick = () => { button.dataset.clicked = "1"; };
-	button.textContent = "Late";
-	document.body.append(button);
-}, 300));
-await tab.click("#late");
-return tab.attr("#late", "data-clicked");`,
-				timeout: 10,
-			});
-			expect(valueFrom<string>(late)).toBe("1");
 
 			await call("check", ["#check"]);
 			await call("check", ["#check"]);

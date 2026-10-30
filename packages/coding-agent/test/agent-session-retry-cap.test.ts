@@ -1890,6 +1890,75 @@ describe("AgentSession retry delay cap", () => {
 		});
 	});
 
+	it("honors the 45-75s model-capacity backoff for a hintless Google MODEL_CAPACITY_EXHAUSTED 429", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		const hintlessCapacityError = JSON.stringify({
+			error: {
+				code: 429,
+				message: "Resource has been exhausted (e.g. check quota).",
+				status: "RESOURCE_EXHAUSTED",
+				details: [
+					{
+						"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+						reason: "MODEL_CAPACITY_EXHAUSTED",
+						domain: "googleapis.com",
+					},
+				],
+			},
+		});
+		const mock = createMockModel({
+			responses: [
+				{ throw: `429 ${hintlessCapacityError}` },
+				{ content: ["recovered after model-capacity backoff"], stopReason: "stop" },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 90_000,
+			"retry.maxRetries": 1,
+			"retry.modelFallback": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		mockSchedulerWaitWithClock();
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+		});
+
+		await session.prompt("Trigger hintless model capacity 429");
+		await session.waitForIdle();
+
+		expect(retryStartEvents).toHaveLength(1);
+		expect(retryStartEvents[0].delayMs).toBeGreaterThanOrEqual(45_000);
+		expect(retryStartEvents[0].delayMs).toBeLessThanOrEqual(75_000);
+		expect(lastAssistant(session).content).toContainEqual({
+			type: "text",
+			text: "recovered after model-capacity backoff",
+		});
+	});
+
 	it("auto-retries OpenAI Responses stream_read_error instead of stopping the conversation", async () => {
 		const model = getBundledModel("openai", "gpt-5");
 		if (!model) {
@@ -3369,17 +3438,20 @@ describe("AgentSession retry delay cap", () => {
 	});
 
 	it.each([
-		["sub", 2],
-		["main", 1],
+		["sub", 2, 1],
+		["main", 2, 0],
 	] as const)(
-		"a %s session treats partial text as replay-%s for the Anthropic envelope error",
-		async (agentKind, expectedStreamCalls) => {
+		"a %s session recovers the partial-text Anthropic envelope error with %s stream call(s)",
+		async (agentKind, expectedStreamCalls, expectedRetryStarts) => {
 			// Production 2026-09-21: `scout` subagents whose stream died with
 			// "stream ended before message_stop" after streaming prose exited 1
 			// instead of retrying. A subagent's streamed text reaches no output
 			// sink (the parent only ever sees the yield), so it is replay-safe
-			// without the print-mode `setTextOutputCommitted(false)` dance; a
-			// main session keeps the veto because the text is already rendered.
+			// without the print-mode `setTextOutputCommitted(false)` dance and the
+			// provider replay retries it. A main session keeps the replay veto
+			// because the text is already rendered, so it continues from the
+			// partial answer instead — the same recovery a stall, an HTTP/2 reset
+			// or a gateway's in-band `error` frame gets, and no auto-retry.
 			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 			if (!model) {
 				throw new Error("Expected bundled Anthropic test model to exist");
@@ -3474,15 +3546,10 @@ describe("AgentSession retry delay cap", () => {
 			await session.waitForIdle();
 
 			expect(streamCalls).toBe(expectedStreamCalls);
-			expect(retryStartEvents).toHaveLength(expectedStreamCalls - 1);
+			expect(retryStartEvents).toHaveLength(expectedRetryStarts);
 			const last = lastAssistant(session);
-			if (agentKind === "sub") {
-				expect(last.stopReason).toBe("stop");
-				expect(last.content).toContainEqual({ type: "text", text: "recovered after envelope retry" });
-			} else {
-				expect(last.stopReason).toBe("error");
-				expect(last.errorMessage).toBe(envelopeError);
-			}
+			expect(last.stopReason).toBe("stop");
+			expect(last.content).toContainEqual({ type: "text", text: "recovered after envelope retry" });
 		},
 	);
 

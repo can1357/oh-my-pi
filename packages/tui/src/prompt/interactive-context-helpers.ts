@@ -3,14 +3,21 @@ import type { AssistantMessage, Model, TextContent } from "@oh-my-pi/pi-ai";
 import { getMarkdownLinkUrls } from "../index";
 import { EMPTY_LINK_TARGETS } from "../render/render-utils";
 import type { ImageBudget } from "../components/image";
-import type { AssistantTextDisplayRenderer, AssistantThinkingRenderer } from "../chat/extension-types";
+import type {
+	AssistantTextDisplayRenderer,
+	AssistantTextRenderer,
+	AssistantThinkingRenderer,
+} from "../chat/extension-types";
 import { AssistantMessageComponent } from "../chat/assistant-message";
+import { ReplyWriteComponent } from "../chat/reply-write";
 /** Session display capabilities supplied unchanged by the interactive host. */
 export interface AssistantMessageSession {
 	readonly model?: Model;
 	readonly extensionRunner?: {
 		getAssistantThinkingRenderers(): readonly AssistantThinkingRenderer[];
-		getAssistantTextDisplayRenderers(): readonly AssistantTextDisplayRenderer[];
+		getAssistantTextDisplayRenderers?(): readonly AssistantTextDisplayRenderer[];
+		/** Empty while the setting that enables them is off; hosts predating it may omit it. */
+		getAssistantTextRenderers?(): readonly AssistantTextRenderer[];
 	};
 }
 
@@ -112,12 +119,15 @@ export function assistantMessageLinkTargets(
 /**
  * Construct an {@link AssistantMessageComponent} wired to the live context's
  * thinking/image settings. `message` is omitted for the streaming placeholder
- * component and supplied when rendering a persisted turn.
+ * component and supplied when rendering a persisted turn. `contentOffset` is
+ * the index in the full reply of the first block of a segment drawn after a
+ * tool call, so extension text renderers see the reply's own block indexes.
  */
 export function createAssistantMessageComponent(
 	ctx: AssistantMessageHost,
 	message?: AssistantMessage,
 	linkTargets: ReadonlyMap<string, string> = getAssistantMessageLinkTargets(ctx),
+	contentOffset = 0,
 ): AssistantMessageComponent {
 	const component = new AssistantMessageComponent(
 		message,
@@ -127,9 +137,27 @@ export function createAssistantMessageComponent(
 		ctx.ui.imageBudget,
 		ctx.proseOnlyThinking,
 		linkTargets,
-		ctx.viewSession.extensionRunner?.getAssistantTextDisplayRenderers(),
+		ctx.viewSession.extensionRunner?.getAssistantTextDisplayRenderers?.(),
 		ctx.expandThinkingBlocks,
+		{ renderers: ctx.viewSession.extensionRunner?.getAssistantTextRenderers?.() ?? [], contentOffset },
 	);
+	applyHostDisplay(ctx, component);
+	return component;
+}
+
+/** Construct a {@link ReplyWriteComponent} (an `out://` write) drawn like the context's assistant prose. */
+export function createReplyWriteComponent(ctx: AssistantMessageHost): ReplyWriteComponent {
+	const component = new ReplyWriteComponent({
+		requestRender: () => ctx.ui.requestRender(),
+		imageBudget: ctx.ui.imageBudget,
+		linkTargets: getAssistantMessageLinkTargets(ctx),
+	});
+	applyHostDisplay(ctx, component);
+	return component;
+}
+
+/** Apply the context's image, chart, expansion, and scrollback-publication display state. */
+function applyHostDisplay(ctx: AssistantMessageHost, component: AssistantMessageComponent): void {
 	component.setImagesVisible(ctx.assistantImagesVisible);
 	component.setTableChartsVisible(ctx.tableChartsVisible);
 	component.setToolResultImagesVisible(!ctx.hideToolActivity);
@@ -140,5 +168,4 @@ export function createAssistantMessageComponent(
 	const compat = ctx.viewSession.model?.compat;
 	const wireRevisable = compat !== undefined && "streamRevision" in compat && compat.streamRevision === "possible";
 	component.setMidStreamPublication(!wireRevisable);
-	return component;
 }

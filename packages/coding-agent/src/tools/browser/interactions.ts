@@ -5,6 +5,7 @@ import type {
 	ElementHandle,
 	Frame,
 	JSHandle,
+	KeyboardTypeOptions,
 	KeyInput,
 	KeyPressOptions,
 	MouseButton,
@@ -105,6 +106,8 @@ interface PageElement {
 	readonly dataset: Record<string, string>;
 	readonly style: Record<string, string>;
 	parentElement: PageElement | null;
+	/** The `<slot>` rendering this node, its parent in the flat tree; `null` when unslotted. */
+	assignedSlot: PageElement | null;
 	shadowRoot: PageShadowRoot | null;
 	getBoundingClientRect(): PageRect;
 	getClientRects(): ArrayLike<PageRect>;
@@ -154,19 +157,34 @@ export class ClickRefusedError extends ToolAbortError {
 	}
 }
 
+/**
+ * Typing aborted after some keys reached the page; the field keeps those `typed` of `total` code points.
+ * The per-op timeout reports this instead of an actionability hint, since the element did take input.
+ */
+export class TypingInterruptedError extends ToolAbortError {
+	constructor(
+		readonly typed: number,
+		readonly total: number,
+		options?: ErrorOptions,
+	) {
+		super(undefined, options);
+	}
+}
+
 function requireFiniteNumber(value: number, label: string): void {
 	if (!Number.isFinite(value)) throw new ToolError(`${label} must be a finite number`);
 }
 
 /**
  * Page function (self-contained; serialisable via `.toString()`): whether `descendant` is `ancestor` or
- * sits inside it, crossing the shadow-root boundaries `Node.contains` stops at.
+ * renders inside it — its flat-tree ancestry, which follows slot assignment into shadow trees and climbs
+ * shadow-root boundaries out to their hosts, where `Node.contains` stops.
  */
 export function composedContains(ancestor: unknown, descendant: unknown): boolean {
 	for (let current = descendant as PageElement | null; current;) {
 		if (current === ancestor) return true;
 		const root: PageRoot = current.getRootNode();
-		current = current.parentElement ?? root.host ?? null;
+		current = current.assignedSlot ?? current.parentElement ?? root.host ?? null;
 	}
 	return false;
 }
@@ -237,7 +255,7 @@ function checkClickActionable(
 		let current: PageElement | null = hit;
 		while (current && current !== owner) {
 			if (current.matches(interactiveContent)) return false;
-			current = current.parentElement ?? current.getRootNode().host ?? null;
+			current = current.assignedSlot ?? current.parentElement ?? current.getRootNode().host ?? null;
 		}
 		return current === owner;
 	};
@@ -411,7 +429,7 @@ export async function clickElement(
  * had focus; a read-only one drops them. The check runs after `focus()` so a
  * focus handler that locks the field is seen.
  */
-export async function focusTextEntryTarget(
+async function focusTextEntryTarget(
 	handle: ElementHandle,
 	action: "fill" | "type into",
 	signal?: AbortSignal,
@@ -430,6 +448,46 @@ export async function focusTextEntryTarget(
 		}),
 	);
 	if (refusal) throw new ToolError(`Cannot ${action} a ${refusal} element`);
+}
+
+/**
+ * Type into the focused element one code point at a time, checking `signal` before each key.
+ * Puppeteer's `keyboard.type()` cannot be cancelled, so awaiting it whole under a deadline would leave
+ * the rest of the text typing behind a rejected call.
+ *
+ * @throws TypingInterruptedError when `signal` aborts after at least one key was sent.
+ */
+async function typeKeys(
+	page: Page,
+	text: string,
+	signal: AbortSignal | undefined,
+	options?: Readonly<KeyboardTypeOptions>,
+): Promise<void> {
+	const characters = Array.from(text);
+	let typed = 0;
+	try {
+		for (const character of characters) {
+			throwIfAborted(signal);
+			await untilAborted(signal, () => page.keyboard.type(character, options));
+			typed++;
+		}
+	} catch (error) {
+		if (signal?.aborted && typed > 0) {
+			throw new TypingInterruptedError(typed, characters.length, { cause: signal.reason });
+		}
+		throw error;
+	}
+}
+
+/** Focus a text-entry target, then type `text` so an abort stops before the next key; see {@link typeKeys}. */
+export async function typeIntoElement(
+	handle: ElementHandle,
+	text: string,
+	signal?: AbortSignal,
+	options?: Readonly<KeyboardTypeOptions>,
+): Promise<void> {
+	await focusTextEntryTarget(handle, "type into", signal);
+	await typeKeys(handle.frame.page(), text, signal, options);
 }
 
 /**
@@ -456,17 +514,9 @@ const PICKER_INPUT_TYPES = Object.keys(PICKER_VALUE_EXAMPLES);
  * that produce no animation frames — unlike Puppeteer's `Locator.fill`, whose
  * viewport/stability/enabled preconditions wait on `requestAnimationFrame`
  * and `IntersectionObserver` callbacks that a backgrounded headless tab never
- * delivers (#12892).
- *
- * `type` overrides how the value is entered, for callers that need their own
- * abort-aware keyboard loop.
+ * delivers (#12892). Typing stops at the next key once `signal` aborts.
  */
-export async function fillViaHandle(
-	handle: ElementHandle,
-	value: string,
-	signal?: AbortSignal,
-	type: (text: string) => Promise<unknown> = text => handle.type(text, { delay: 0 }),
-): Promise<void> {
+export async function fillViaHandle(handle: ElementHandle, value: string, signal?: AbortSignal): Promise<void> {
 	await focusTextEntryTarget(handle, "fill", signal);
 	const picker = await untilAborted(signal, () =>
 		handle.evaluate(
@@ -590,7 +640,7 @@ export async function fillViaHandle(
 		);
 	}
 	if (picker) return;
-	await untilAborted(signal, () => type(value));
+	await typeKeys(handle.frame.page(), value, signal);
 }
 
 interface QueryCandidate {
@@ -650,7 +700,7 @@ function measureBoxInPage(el: unknown): MeasuredBox {
 			if (!nested || nested === hit) break;
 			hit = nested;
 		}
-		for (let node = hit; node; node = node.parentElement ?? node.getRootNode().host ?? null) {
+		for (let node = hit; node; node = node.assignedSlot ?? node.parentElement ?? node.getRootNode().host ?? null) {
 			if (node === element) return true;
 		}
 		return false;

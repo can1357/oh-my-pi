@@ -83,6 +83,8 @@ export interface FileDiagnosticsResult {
 	summary: string;
 	/** Whether there are any errors (severity 1) */
 	errored: boolean;
+	/** Servers that sent no fresh report in time: the file is unverified for them, not clean. */
+	unreported?: string[];
 	/** Whether the file was formatted */
 	formatter?: FileFormatResult;
 }
@@ -163,6 +165,9 @@ export function renderCall(args: LspParams, _options: RenderResultOptions, theme
 // Result Rendering
 // =============================================================================
 
+/** A diagnostics status line for a file no server reported on in time: unverified, never "No issues". */
+const UNREPORTED_LINE_RE = /\bno diagnostics report yet\b/;
+
 /**
  * Render LSP tool result with intelligent formatting based on result type.
  * Detects hover, diagnostics, references, symbols, etc. and formats accordingly.
@@ -190,6 +195,7 @@ export function renderResult(
 	const refMatch = text.match(/(\d+)\s+reference\(s\)/);
 	const symbolsMatch = text.match(/Symbols in (.+):/);
 	const hasStatusError = text.includes(theme.status.error);
+	const unreportedCount = lines.filter(line => UNREPORTED_LINE_RE.test(line)).length;
 
 	// Static request info
 	const request = args ?? result.details?.request;
@@ -218,12 +224,12 @@ export function renderResult(
 				bodyLines: renderHover(codeBlockMatch, text, lines, expanded, theme),
 			};
 		}
-		if (errorMatch || warningMatch || hasStatusError) {
+		if (errorMatch || warningMatch || hasStatusError || unreportedCount > 0) {
 			const errorCount = errorMatch ? Number.parseInt(errorMatch[1], 10) : 0;
 			const warnCount = warningMatch ? Number.parseInt(warningMatch[1], 10) : 0;
 			return {
 				label: "Diagnostics",
-				state: errorCount > 0 ? "error" : warnCount > 0 ? "warning" : "success",
+				state: errorCount > 0 ? "error" : warnCount > 0 || unreportedCount > 0 ? "warning" : "success",
 				bodyLines: renderDiagnostics(errorMatch, warningMatch, lines, expanded, theme),
 			};
 		}
@@ -384,17 +390,19 @@ function renderDiagnostics(
 ): string[] {
 	const errorCount = errorMatch ? Number.parseInt(errorMatch[1], 10) : 0;
 	const warnCount = warningMatch ? Number.parseInt(warningMatch[1], 10) : 0;
+	const unreportedLines = lines.filter(line => UNREPORTED_LINE_RE.test(line));
 
 	const icon =
 		errorCount > 0
 			? theme.styledSymbol("status.error", "error")
-			: warnCount > 0
+			: warnCount > 0 || unreportedLines.length > 0
 				? theme.styledSymbol("status.warning", "warning")
 				: theme.styledSymbol("tool.lsp", "accent");
 
 	const meta: string[] = [];
 	if (errorCount > 0) meta.push(`${errorCount} error${errorCount !== 1 ? "s" : ""}`);
 	if (warnCount > 0) meta.push(`${warnCount} warning${warnCount !== 1 ? "s" : ""}`);
+	if (unreportedLines.length > 0) meta.push(formatCount("unverified file", unreportedLines.length));
 	if (meta.length === 0) meta.push("No issues");
 
 	const diagLines = lines.filter(l => l.includes(theme.status.error) || /:\d+:\d+/.test(l));
@@ -404,10 +412,14 @@ function renderDiagnostics(
 	const fallbackDiagnostics: RawDiagnostic[] = diagLines.map(line => ({
 		raw: sanitizeDiagnosticDisplayText(line.trim()),
 	}));
+	// Unverified files lead: they are the rows a reader must not miss among diagnostics.
+	const items: DiagnosticItem[] = [
+		...unreportedLines.map(line => ({ raw: sanitizeDiagnosticDisplayText(line.trim()) })),
+		...(parsedDiagnostics.length > 0 ? parsedDiagnostics : fallbackDiagnostics),
+	];
 
 	if (expanded) {
 		let output = `${icon} ${theme.fg("dim", meta.join(theme.sep.dot))}`;
-		const items: DiagnosticItem[] = parsedDiagnostics.length > 0 ? parsedDiagnostics : fallbackDiagnostics;
 		for (let i = 0; i < items.length; i++) {
 			const item = items[i];
 			const isLast = i === items.length - 1;
@@ -432,10 +444,8 @@ function renderDiagnostics(
 	}
 
 	// Collapsed view
-	const previewItems: DiagnosticItem[] =
-		parsedDiagnostics.length > 0 ? parsedDiagnostics.slice(0, 3) : fallbackDiagnostics.slice(0, 3);
-	const remaining =
-		(parsedDiagnostics.length > 0 ? parsedDiagnostics.length : fallbackDiagnostics.length) - previewItems.length;
+	const previewItems = items.slice(0, 3);
+	const remaining = items.length - previewItems.length;
 	const clipped = previewItems.some(
 		item => !("raw" in item) && visibleWidth(formatDiagnosticMessage(item)) > TRUNCATE_LENGTHS.CONTENT,
 	);
@@ -788,6 +798,8 @@ interface LspDiagnosticsParse {
 	diagnostics: ParsedDiagnostic[];
 	failures: string[];
 	warnings: string[];
+	/** Files a server sent no report for in time: unverified, never "No issues". */
+	unreported: string[];
 	/** Lines neither a diagnostic nor a status line (kept verbatim). */
 	other: string[];
 }
@@ -803,10 +815,10 @@ const FILE_SUMMARY_RE = /: (?:no issues|\d+ \w+\(s\)(?:, \d+ \w+\(s\))*)$/;
  * Parse a diagnostics response: grouped (`# dir/`, `## file`, `  12:5 [error] …`)
  * or flat (`file:12:5 [error] …`) diagnostic lines, and the per-file status
  * lines (`✗ file: all language servers failed (…)`, `⚠ …some servers failed`,
- * `✓ file: no issues`, `✗ file: 2 error(s)`).
+ * `⚠ file: no diagnostics report yet from …`, `✓ file: no issues`, `✗ file: 2 error(s)`).
  */
 function parseLspDiagnostics(lines: readonly string[]): LspDiagnosticsParse {
-	const out: LspDiagnosticsParse = { diagnostics: [], failures: [], warnings: [], other: [] };
+	const out: LspDiagnosticsParse = { diagnostics: [], failures: [], warnings: [], unreported: [], other: [] };
 	let file: string | undefined;
 	for (const event of walkGroupedOutput(lines)) {
 		if (event.kind !== "line") {
@@ -822,6 +834,10 @@ function parseLspDiagnostics(lines: readonly string[]): LspDiagnosticsParse {
 		}
 		if (/\bsome servers failed\b/.test(line)) {
 			out.warnings.push(line.replace(STATUS_GLYPH_RE, ""));
+			continue;
+		}
+		if (UNREPORTED_LINE_RE.test(line)) {
+			out.unreported.push(line.replace(STATUS_GLYPH_RE, ""));
 			continue;
 		}
 		if (FILE_SUMMARY_RE.test(line)) continue;
@@ -888,25 +904,30 @@ function statusRow(message: string, tone: "error" | "warning", key: string): Nat
 }
 
 /**
- * Diagnostics view: a card when there are diagnostics or failures (rows of
- * severity icon · `file:line:col` · source · message), an inline `No issues`
- * otherwise. A failed server is an error row, never "No issues".
+ * Diagnostics view: a card when there are diagnostics, failures or unverified files
+ * (rows of severity icon · `file:line:col` · source · message), an inline `No issues`
+ * otherwise. A failed server or a missing report is a row, never "No issues".
  */
 function describeLspDiagnostics(request: Partial<LspParams> | undefined, fallbackAction: string, lines: string[]) {
 	const parsed = parseLspDiagnostics(lines);
 	const counts = diagnosticCounts(parsed.diagnostics);
 	const failed =
 		parsed.failures.length > 0 ? [span(formatCount("server failure", parsed.failures.length), "error")] : undefined;
+	const unverified =
+		parsed.unreported.length > 0
+			? [span(formatCount("unverified file", parsed.unreported.length), "warning")]
+			: undefined;
 	const rows: NativeNode[] = [
 		...parsed.failures.map((message, i) => statusRow(message, "error", `x${i}`)),
+		...parsed.unreported.map((message, i) => statusRow(message, "warning", `u${i}`)),
 		...parsed.diagnostics.map((diag, i) => diagnosticRow(diag, `d${i}`)),
 		...parsed.warnings.map((message, i) => statusRow(message, "warning", `w${i}`)),
 	];
 	if (parsed.other.length > 0) rows.push(keyed(code(parsed.other.join("\n"), { wrap: true }), "other"));
 	const hasErrors = parsed.failures.length > 0 || parsed.diagnostics.some(d => d.severity === "error");
-	const meta = compact<TspText>([counts, failed, !counts && !failed && "No issues"]);
+	const meta = compact<TspText>([counts, failed, unverified, !counts && !failed && !unverified && "No issues"]);
 	const head = lspNativeHead(request, fallbackAction, meta);
-	if (parsed.diagnostics.length === 0 && parsed.failures.length === 0) {
+	if (parsed.diagnostics.length === 0 && parsed.failures.length === 0 && parsed.unreported.length === 0) {
 		return { tool: head, inline: true, body: rows.length > 0 ? rows : undefined } satisfies NativeToolView;
 	}
 	return {

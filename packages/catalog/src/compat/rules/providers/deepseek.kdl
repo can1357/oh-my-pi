@@ -64,7 +64,7 @@ provider "deepseek" {
 			max-tokens 384000
 		}
 	}
-	// residue: the dated price transition applies to the documented exact Pro SKU only.
+	// DeepSeek kept Pro billing unchanged after September 14 (2026-09-10 change log).
 	models "deepseek-v4-pro" {
 		cost-patch {
 			input 1.32
@@ -84,15 +84,6 @@ provider "deepseek" {
 					weekdays "1,2,3,4,5"
 					start-minute 360
 					end-minute 600
-				}
-			}
-			effective-rates {
-				flash-pricing {
-					effective-from "2026-09-14T04:00:00Z"
-					input 0.30
-					output 1.20
-					cache-read 0.006
-					cache-write 0
 				}
 			}
 		}

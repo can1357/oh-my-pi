@@ -171,8 +171,7 @@ pub fn vector_index_top_k(
 	});
 	let take = (limit as usize).min(order.len());
 	order.truncate(take);
-	let indices: Vec<u32> = order.iter().map(|&(_, row)| row).collect();
-	let scores: Vec<f64> = order.iter().map(|&(score, _)| score).collect();
+	let (scores, indices): (Vec<f64>, Vec<u32>) = order.into_iter().unzip();
 	Ok(VectorTopK { indices: Uint32Array::new(indices), scores: Float64Array::new(scores) })
 }
 
@@ -258,10 +257,6 @@ fn jaccard_sorted(a: &[Box<str>], b: &[Box<str>]) -> f64 {
 /// tokenize to a single non-whitespace word so Jaccard counts still agree
 /// unless a text mixes U+FFFD words with lone-surrogate words.
 #[napi]
-#[allow(
-	clippy::suboptimal_flops,
-	reason = "mul_add rounds differently; bit-exact with the TS loops is the contract"
-)]
 pub fn mmr_rerank_indices(
 	#[napi(ts_arg_type = "Array<string>")] contents: Array,
 	scores: Float64Array,
@@ -283,40 +278,60 @@ pub fn mmr_rerank_indices(
 			.ok_or_else(|| Error::new(Status::InvalidArg, "contents changed during reranking"))?;
 		sets.push(word_set(&js::utf8(content)?));
 	}
+	let selected = mmr_select_indices(&sets, scores.as_ref(), lambda_param, limit);
+	Ok(Uint32Array::new(selected))
+}
+
+/// N-API-free MMR greedy selection core, keeping each remaining candidate's
+/// running maximum similarity across selection rounds.
+#[allow(
+	clippy::suboptimal_flops,
+	reason = "mul_add rounds differently; bit-exact with the TS loops is the contract"
+)]
+fn mmr_select_indices(
+	sets: &[Vec<Box<str>>],
+	scores: &[f64],
+	lambda_param: f64,
+	limit: usize,
+) -> Vec<u32> {
+	let count = sets.len();
+	if limit == 0 || count == 0 {
+		return Vec::new();
+	}
 	let mut selected: Vec<u32> = Vec::with_capacity(limit.min(count));
 	selected.push(0);
-	let mut remaining: Vec<u32> = (1..count as u32).collect();
+	let mut remaining: Vec<(u32, f64)> = (1..count as u32).map(|i| (i, 0.0)).collect();
+	let mut last_picked = 0usize;
 
 	while !remaining.is_empty() && selected.len() < limit {
 		let mut best_idx = 0usize;
 		let mut best_score = f64::NEG_INFINITY;
-		for (idx, &candidate) in remaining.iter().enumerate() {
-			let mut max_similarity = 0.0f64;
-			for &picked in &selected {
-				let similarity = jaccard_sorted(&sets[candidate as usize], &sets[picked as usize]);
-				if similarity > max_similarity {
-					max_similarity = similarity;
-				}
+		for (idx, (candidate, max_similarity)) in remaining.iter_mut().enumerate() {
+			let similarity = jaccard_sorted(&sets[*candidate as usize], &sets[last_picked]);
+			if similarity > *max_similarity {
+				*max_similarity = similarity;
 			}
-			let relevance = scores[candidate as usize];
-			let mmr_score = lambda_param * relevance - (1.0 - lambda_param) * max_similarity;
+			let relevance = scores[*candidate as usize];
+			let mmr_score = lambda_param * relevance - (1.0 - lambda_param) * *max_similarity;
 			if mmr_score > best_score {
 				best_score = mmr_score;
 				best_idx = idx;
 			}
 		}
-		selected.push(remaining.remove(best_idx));
+		let (picked, _) = remaining.remove(best_idx);
+		last_picked = picked as usize;
+		selected.push(picked);
 	}
 	if selected.len() < limit {
-		selected.extend(remaining);
+		selected.extend(remaining.into_iter().map(|(candidate, _)| candidate));
 		selected.truncate(limit);
 	}
-	Ok(Uint32Array::new(selected))
+	selected
 }
 
 #[cfg(test)]
 mod tests {
-	use super::{cosine_one, is_js_whitespace, jaccard_sorted, word_set};
+	use super::{cosine_one, is_js_whitespace, jaccard_sorted, mmr_select_indices, word_set};
 
 	#[test]
 	fn cosine_matches_reference_semantics() {
@@ -346,5 +361,42 @@ mod tests {
 		let sim = jaccard_sorted(&a, &b);
 		assert!((sim - 2.0 / 6.0).abs() < 1e-12);
 		assert_eq!(jaccard_sorted(&a, &word_set("")), 0.0);
+	}
+
+	#[test]
+	fn mmr_retains_running_max_similarity_and_preserves_tie_and_nan_contracts() {
+		// Candidate 1 ("a b") is identical to pick 0 ("a b", sim = 1.0) and
+		// disjoint from pick 2 ("c d", sim = 0.0).
+		// Round 1 (last_picked = 0):
+		//   cand 1: 0.5 * 0.90 - 0.5 * 1.0 = -0.05
+		//   cand 2: 0.5 * 0.80 - 0.5 * 0.0 =  0.40  -> picked (2)
+		//   cand 3: 0.5 * 0.70 - 0.5 * 0.0 =  0.35
+		// Round 2 (last_picked = 2):
+		//   cand 1 has sim(1, 2) = 0.0, but its running max_similarity from pick
+		// 0   must stay 1.0 (mmr = -0.05), so cand 3 ("c e", sim(3, 2) =
+		// 1/3,   mmr = 0.35 - 1/6 = 0.1833...) beats cand 1.
+		let sets = vec![word_set("a b"), word_set("a b"), word_set("c d"), word_set("c e")];
+		let scores = vec![1.0, 0.90, 0.80, 0.70];
+		assert_eq!(mmr_select_indices(&sets, &scores, 0.5, 0), Vec::<u32>::new());
+		assert_eq!(mmr_select_indices(&sets, &scores, 0.5, 3), vec![0, 2, 3]);
+		assert_eq!(mmr_select_indices(&sets, &scores, 0.5, 10), vec![0, 2, 3, 1]);
+
+		// Tie-breaking: equal MMR scores preserve original candidate order
+		// (strict `>`).
+		let dup_sets = vec![
+			word_set("apple banana"),
+			word_set("orange grape"),
+			word_set("orange grape"),
+			word_set("orange grape"),
+		];
+		let dup_scores = vec![1.0, 0.5, 0.5, 0.5];
+		assert_eq!(mmr_select_indices(&dup_sets, &dup_scores, 0.5, 3), vec![0, 1, 2]);
+
+		// All-NaN round fallback: once candidate 2 (0.8) is picked in round 1,
+		// only NaN-scored candidates (1 and 3) remain; `best_idx = 0` picks
+		// them in order.
+		let nan_sets = vec![word_set("a b"), word_set("c d"), word_set("e f"), word_set("g h")];
+		let nan_scores = vec![0.9, f64::NAN, 0.8, f64::NAN];
+		assert_eq!(mmr_select_indices(&nan_sets, &nan_scores, 0.5, 4), vec![0, 2, 1, 3]);
 	}
 }

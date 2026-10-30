@@ -289,6 +289,115 @@ describe("codex live steering", () => {
 		]);
 	});
 
+	it("leaves accepted steering to the request that wins the socket when an overlapping one falls back to SSE", async () => {
+		const call = { type: "function_call", id: "fc_1", call_id: "call_1", name: "status", arguments: "{}" };
+		const winnerSent = Promise.withResolvers<void>();
+		let finishWinner = () => {};
+		installSocket((frame, socket) => {
+			if (frame.type === "response.create" && creates().length === 1) {
+				socket.emit(
+					{ type: "response.created", response: { id: "resp_1" } },
+					{ type: "response.output_item.added", output_index: 0, item: { ...call, arguments: "" } },
+				);
+				return;
+			}
+			if (frame.type === "response.steer") {
+				socket.emit(
+					{ type: "response.steer.accepted", steer: { id: "steer_1", previous_response_id: "resp_1" } },
+					{ type: "response.output_item.done", output_index: 0, item: { ...call, status: "completed" } },
+					{ type: "response.completed", response: { id: "resp_1", status: "completed", usage: USAGE } },
+					{
+						type: "response.steer.pending",
+						steer: { id: "steer_1", previous_response_id: "resp_1" },
+						reason: "waiting_for_required_input",
+						required_input: [{ type: "function_call_output", call_id: "call_1", name: "status" }],
+					},
+				);
+				return;
+			}
+			// Hold the terminal event so the winner still owns the socket when the
+			// stalled request tries to send.
+			socket.emit(
+				{ type: "response.created", response: { id: "resp_2" } },
+				...messageFrames("msg_2", "Scoped down"),
+			);
+			finishWinner = () =>
+				socket.emit({ type: "response.completed", response: { id: "resp_2", status: "completed", usage: USAGE } });
+			winnerSent.resolve();
+		});
+		const model = createGpt6Model();
+		const state = new Map<string, ProviderSessionState>();
+		const steering = oneShotSteering("keep it small");
+		const user: UserMessage = { role: "user", content: "Plan the project", timestamp: Date.now() };
+
+		const first = await streamOpenAICodexResponses(
+			model,
+			{ systemPrompt: SYSTEM, messages: [user] },
+			options(state, steering.source),
+		).result();
+		expect(steering.settled()).toBe("accepted");
+		const toolCall = first.content.find(block => block.type === "toolCall");
+		if (toolCall?.type !== "toolCall") throw new Error("expected a tool call");
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			content: [{ type: "text", text: "design done" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		const steerMessage: UserMessage = { role: "user", content: "keep it small", timestamp: Date.now() };
+		const context: Context = { systemPrompt: SYSTEM, messages: [user, first, toolResult, steerMessage] };
+
+		// The first request stalls in an async `onPayload` after it has looked at the
+		// steering; the second one claims the socket in the meantime.
+		const payloadReached = Promise.withResolvers<void>();
+		const releasePayload = Promise.withResolvers<void>();
+		let held = false;
+		let sseRequests = 0;
+		const loser = streamOpenAICodexResponses(model, context, {
+			...options(state),
+			onPayload: async () => {
+				if (held) return undefined;
+				held = true;
+				payloadReached.resolve();
+				await releasePayload.promise;
+				return undefined;
+			},
+			fetch: vi.fn(async () => {
+				sseRequests += 1;
+				const events = [
+					{ type: "response.created", response: { id: "resp_sse" } },
+					...messageFrames("msg_sse", "Over SSE"),
+					{ type: "response.completed", response: { id: "resp_sse", status: "completed", usage: USAGE } },
+				];
+				return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), {
+					headers: { "content-type": "text/event-stream" },
+				});
+			}) as FetchImpl,
+		}).result();
+		await payloadReached.promise;
+		const winner = streamOpenAICodexResponses(model, context, options(state)).result();
+		await winnerSent.promise;
+		releasePayload.resolve();
+		const loserResult = await loser;
+		finishWinner();
+		const winnerResult = await winner;
+
+		// The socket owner still lines up with the queued steering and sends only
+		// the tool output the server is waiting for.
+		expect(winnerResult.content).toEqual([expect.objectContaining({ type: "text", text: "Scoped down" })]);
+		expect(creates()).toHaveLength(2);
+		expect(creates()[1]?.previous_response_id).toBe("resp_1");
+		expect(creates()[1]?.input).toEqual([
+			expect.objectContaining({ type: "function_call_output", call_id: "call_1", output: "design done" }),
+		]);
+		// The request that lost the socket went over SSE instead.
+		expect(loserResult.content).toEqual([expect.objectContaining({ type: "text", text: "Over SSE" })]);
+		expect(sseRequests).toBe(1);
+		expect(ScriptedWebSocket.instances).toHaveLength(1);
+	});
+
 	it("hands rejected steering back and sends it as ordinary input next time", async () => {
 		installSocket((frame, socket) => {
 			if (frame.type === "response.create" && creates().length === 1) {

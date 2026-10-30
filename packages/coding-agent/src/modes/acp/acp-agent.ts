@@ -55,7 +55,8 @@ import {
 } from "../../extensibility/extensions";
 import { runExtensionCompact } from "../../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
-import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
+import { parseSkillInvocation } from "../../extensibility/skills";
+import { PYTHON_KERNEL_CANCEL_BUDGET_MS } from "../../eval/py/kernel";
 import { MCPManager } from "../../mcp/manager";
 import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
 import type { MCPServerConfig } from "../../mcp/types";
@@ -130,7 +131,7 @@ const SESSION_STEERING_METHOD = "_session/steering";
  * wait past this guard without hard-coding the literal.
  */
 export const ACP_BOOTSTRAP_RACE_GUARD_MS = 50;
-const ACP_CANCEL_CLEANUP_TIMEOUT_MS = 5_000;
+const ACP_CANCEL_CLEANUP_TIMEOUT_MS = PYTHON_KERNEL_CANCEL_BUDGET_MS + 1_000;
 const ACP_ASYNC_DELIVERY_DRAIN_TIMEOUT_MS = 250;
 const ACP_ASYNC_DELIVERY_DRAIN_MAX_PASSES = 3;
 
@@ -153,7 +154,6 @@ type PromptQueueState = {
  * created and resolves the wire response `cancelled` without starting the run.
  */
 type PromptDispatchCancellation = { cancelled: boolean };
-type PromptLifecycleError = Error & { readonly code: "ACP_SESSION_CLOSED" };
 
 type PromptTurnState = {
 	abortController: AbortController;
@@ -361,7 +361,7 @@ type ManagedSessionRecord = {
 	// Installed inside `#scheduleBootstrapUpdates` (post-race-guard); released
 	// in `#disposeSessionRecord`. Lives independent of any prompt turn.
 	lifetimeUnsubscribe: (() => void) | undefined;
-	closedError: PromptLifecycleError | undefined;
+	closedError: RequestError | undefined;
 	promptEventHandlers: Set<Promise<void>>;
 	extensionUserMessageTasks: Set<Promise<void>>;
 };
@@ -537,7 +537,7 @@ async function elicitFormFromAcpClient(
 			} catch (error) {
 				// A throwing `onTimeout` must not leave the elicitation promise
 				// pending — settle it via `finish` below regardless.
-				logger.warn("ACP elicitation onTimeout threw", { sessionId, method, error });
+				logger.warn("ACP elicitation onTimeout threw", { acpSessionId: sessionId, method, error });
 			}
 			finish(undefined);
 		}, dialogOptions.timeout);
@@ -561,7 +561,7 @@ async function elicitFormFromAcpClient(
 		.then(finish, error => {
 			// Caller may already have moved on via abort/timeout; suppress noise.
 			if (settled) return;
-			logger.warn("ACP elicitation failed", { sessionId, method, error });
+			logger.warn("ACP elicitation failed", { acpSessionId: sessionId, method, error });
 			finish(undefined);
 		});
 	const response = await promise;
@@ -647,7 +647,9 @@ export function createAcpExtensionUiContext(
 			return typeof value === "boolean" ? value : false;
 		},
 		input: async (title, placeholder, dialogOptions) => {
-			if (!supportsForm) return undefined;
+			// ACP form-mode elicitation has no masked/password field and the ACP spec
+			// forbids falling back to form mode for secrets or credentials.
+			if (!supportsForm || dialogOptions?.secret) return undefined;
 			const value = await elicitFromAcpClient(
 				connection,
 				getSessionId(),
@@ -748,6 +750,8 @@ export function createAcpExtensionUiContext(
 			logger.debug("ACP extension notification", { message, type });
 		},
 		onTerminalInput: () => () => {},
+		rerenderMessage: () => {},
+		getLinkClicksAvailable: () => false,
 		setStatus: () => {},
 		setWorkingMessage: () => {},
 		setWidget: () => {},
@@ -1024,7 +1028,7 @@ export class AcpAgent implements Agent {
 			// the same cleanup rejection and fails accordingly.
 			this.#beginCancelCleanup(record, activeTurn).catch(async (error: unknown) => {
 				logger.warn("ACP cancel cleanup timed out; closing session", {
-					sessionId: record.session.sessionId,
+					acpSessionId: record.session.sessionId,
 					error,
 				});
 				await this.#closeManagedSession(params.sessionId, record);
@@ -1140,10 +1144,6 @@ export class AcpAgent implements Agent {
 		if (record.closedError) {
 			throw record.closedError;
 		}
-	}
-
-	#createPromptLifecycleError(message: string): PromptLifecycleError {
-		return Object.assign(new Error(message), { code: "ACP_SESSION_CLOSED" as const });
 	}
 
 	#trackPromptEvent(record: ManagedSessionRecord, event: AgentSessionEvent): void {
@@ -1307,7 +1307,7 @@ export class AcpAgent implements Agent {
 		if (!skill) {
 			return false;
 		}
-		const built = await buildSkillPromptMessage(skill, parsed, "user");
+		const built = await record.session.buildUserSkillPrompt(skill, parsed);
 		await record.session.promptCustomMessage(
 			{
 				customType: SKILL_PROMPT_MESSAGE_TYPE,
@@ -1365,7 +1365,10 @@ export class AcpAgent implements Agent {
 		try {
 			await Promise.race([record.session.abort({ reason: USER_INTERRUPT_LABEL }), timeoutGate.promise]);
 		} catch (error: unknown) {
-			logger.warn("ACP cancel cleanup timed out; closing session", { sessionId: record.session.sessionId, error });
+			logger.warn("ACP cancel cleanup timed out; closing session", {
+				acpSessionId: record.session.sessionId,
+				error,
+			});
 			await this.#closeManagedSession(record.session.sessionId, record);
 		} finally {
 			clearTimeout(timer);
@@ -1398,7 +1401,10 @@ export class AcpAgent implements Agent {
 	async #runCancelCleanup(record: ManagedSessionRecord, promptTurn: PromptTurnState): Promise<void> {
 		let timer: NodeJS.Timeout | undefined;
 		const timeout = new Promise<never>((_, reject) => {
-			timer = setTimeout(() => reject(new Error("ACP cancel cleanup timed out")), this.#cancelCleanupTimeoutMs);
+			timer = setTimeout(
+				() => reject(RequestError.resourceNotFound(record.session.sessionId)),
+				this.#cancelCleanupTimeoutMs,
+			);
 		});
 		try {
 			await Promise.race([record.session.abort({ reason: USER_INTERRUPT_LABEL }), timeout]);
@@ -1537,8 +1543,6 @@ export class AcpAgent implements Agent {
 		try {
 			record = this.#getSessionRecord(sessionId);
 		} catch {
-			// Map unknown sessions to the method's error contract instead of
-			// the generic internal error a plain `Error` would surface as.
 			throw RequestError.invalidParams({ method: SESSION_STEERING_METHOD }, `unknown session: ${sessionId}`);
 		}
 		this.#throwIfRecordClosed(record);
@@ -1695,6 +1699,10 @@ export class AcpAgent implements Agent {
 	): Promise<ManagedSessionRecord> {
 		const record = this.#createManagedSessionRecord(session, setToolUIContext);
 		session.setClientBridge(createAcpClientBridge(this.#connection, session.sessionId, this.#clientCapabilities));
+		// Client-declared servers live in `record.mcpManager`, not the session's
+		// own (ACP sessions run with `enableMCP: false`); read it live so every
+		// reconfiguration's `refreshMCPTools` rebuild renders its instructions.
+		session.setMcpServerInstructionsSource(() => record.mcpManager?.getServerInstructions());
 		// `record.lifetimeUnsubscribe` is installed in `#scheduleBootstrapUpdates`
 		// so it shares the bootstrap race guard — see that comment for why.
 		try {
@@ -1744,7 +1752,7 @@ export class AcpAgent implements Agent {
 			await delivery;
 		} catch (error) {
 			logger.warn("Failed to push config_option_update after a lifetime event", {
-				sessionId: record.session.sessionId,
+				acpSessionId: record.session.sessionId,
 				eventType: event.type,
 				error,
 			});
@@ -1756,7 +1764,7 @@ export class AcpAgent implements Agent {
 	#getSessionRecord(sessionId: string): ManagedSessionRecord {
 		const record = this.#sessions.get(sessionId);
 		if (!record) {
-			throw new Error(`Unsupported ACP session: ${sessionId}`);
+			throw RequestError.resourceNotFound(sessionId);
 		}
 		return record;
 	}
@@ -2324,7 +2332,7 @@ export class AcpAgent implements Agent {
 			});
 		} catch (error) {
 			logger.warn("Failed to autosave approved plan", {
-				sessionId: session.sessionId,
+				acpSessionId: session.sessionId,
 				error,
 			});
 			autosaveFailed = true;
@@ -2337,7 +2345,7 @@ export class AcpAgent implements Agent {
 			await this.#pushConfigOptionUpdateForSession(session);
 		} catch (error) {
 			logger.warn("Failed to emit mode updates after plan approval", {
-				sessionId: session.sessionId,
+				acpSessionId: session.sessionId,
 				error,
 			});
 		}
@@ -3169,7 +3177,7 @@ export class AcpAgent implements Agent {
 	}
 
 	async #closeManagedSession(sessionId: string, record: ManagedSessionRecord): Promise<void> {
-		record.closedError ??= this.#createPromptLifecycleError("ACP session closed before queued prompt could run");
+		record.closedError ??= RequestError.resourceNotFound(sessionId);
 		this.#sessions.delete(sessionId);
 		await this.#cancelPromptForClose(record);
 		await this.#disposeSessionRecord(record);
@@ -3226,13 +3234,11 @@ export class AcpAgent implements Agent {
 			await Promise.all(
 				records.map(async ([sessionId, record]) => {
 					try {
-						record.closedError ??= this.#createPromptLifecycleError(
-							"ACP agent disposed before queued prompt could run",
-						);
+						record.closedError ??= RequestError.resourceNotFound(sessionId);
 						await this.#cancelPromptForClose(record);
 						await this.#disposeSessionRecord(record, reason);
 					} catch (error) {
-						logger.warn("Failed to clean up ACP session", { sessionId, error });
+						logger.warn("Failed to clean up ACP session", { acpSessionId: sessionId, error });
 					}
 				}),
 			);

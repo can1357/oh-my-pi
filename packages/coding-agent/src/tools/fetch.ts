@@ -247,58 +247,13 @@ function isInlineImageMimeTypeSupported(mimeType: string): boolean {
 }
 
 /**
- * Try fetching URL with .md appended (llms.txt convention)
- */
-async function tryMdSuffix(
-	url: string,
-	timeout: number,
-	signal?: AbortSignal,
-): Promise<{ content: string; truncated: boolean } | null> {
-	const candidates: string[] = [];
-
-	try {
-		const parsed = new URL(url);
-		const pathname = parsed.pathname;
-
-		if (pathname.endsWith("/")) {
-			// /foo/bar/ -> /foo/bar/index.html.md
-			candidates.push(`${parsed.origin}${pathname}index.html.md`);
-		} else if (pathname.includes(".")) {
-			// /foo/bar.html -> /foo/bar.html.md
-			candidates.push(`${parsed.origin}${pathname}.md`);
-		} else {
-			// /foo/bar -> /foo/bar.md
-			candidates.push(`${parsed.origin}${pathname}.md`);
-		}
-	} catch {
-		return null;
-	}
-
-	if (signal?.aborted) {
-		return null;
-	}
-
-	for (const candidate of candidates) {
-		if (signal?.aborted) {
-			return null;
-		}
-		const result = await loadPage(candidate, { timeout, signal });
-		if (result.ok && result.content.trim().length > 100 && !looksLikeHtml(result.content)) {
-			return { content: result.content, truncated: Boolean(result.truncated) };
-		}
-	}
-
-	return null;
-}
-
-/**
  * Try to fetch LLM-friendly endpoints
  */
 async function tryLlmEndpoints(
 	url: string,
 	timeout: number,
 	signal?: AbortSignal,
-): Promise<{ content: string; endpoint: string; truncated: boolean } | null> {
+): Promise<{ content: string; endpoint: string; finalUrl: string; truncated: boolean } | null> {
 	const endpoints = buildLlmEndpointCandidates(url);
 
 	if (signal?.aborted || endpoints.length === 0) {
@@ -311,7 +266,7 @@ async function tryLlmEndpoints(
 		}
 		const result = await loadPage(endpoint, { timeout: Math.min(timeout, 5), signal });
 		if (result.ok && result.content.trim().length > 100 && !looksLikeHtml(result.content)) {
-			return { content: result.content, endpoint, truncated: Boolean(result.truncated) };
+			return { content: result.content, endpoint, finalUrl: result.finalUrl, truncated: Boolean(result.truncated) };
 		}
 	}
 	return null;
@@ -324,7 +279,7 @@ async function tryContentNegotiation(
 	url: string,
 	timeout: number,
 	signal?: AbortSignal,
-): Promise<{ content: string; type: string; truncated: boolean } | null> {
+): Promise<{ content: string; type: string; finalUrl: string; truncated: boolean } | null> {
 	if (signal?.aborted) {
 		return null;
 	}
@@ -339,7 +294,12 @@ async function tryContentNegotiation(
 
 	const mime = normalizeMime(result.contentType);
 	if ((mime.includes("markdown") || mime === "text/plain") && !looksLikeHtml(result.content)) {
-		return { content: result.content, type: result.contentType, truncated: Boolean(result.truncated) };
+		return {
+			content: result.content,
+			type: result.contentType,
+			finalUrl: result.finalUrl,
+			truncated: Boolean(result.truncated),
+		};
 	}
 
 	return null;
@@ -454,6 +414,22 @@ function extractDocumentLinks(html: string, baseUrl: string): string[] {
 	} catch {}
 
 	return links;
+}
+
+/** Markdown link destination: `](dest` or `](<dest>`. */
+const MARKDOWN_LINK_DEST_RE = /\]\(\s*(?:<([^>]*)>|([^)\s]+))/g;
+
+/** Link targets a rendering kept, as written and resolved against the page, to match {@link extractDocumentLinks}. */
+function renderedLinkTargets(markdown: string, baseUrl: string): Set<string> {
+	const targets = new Set<string>();
+	for (const match of markdown.matchAll(MARKDOWN_LINK_DEST_RE)) {
+		const dest = match[1] ?? match[2];
+		targets.add(dest);
+		try {
+			targets.add(new URL(dest, baseUrl).href);
+		} catch {}
+	}
+	return targets;
 }
 
 /**
@@ -588,9 +564,9 @@ const FETCH_PROVIDER_ORDER: readonly FetchProvider[] = [
  * (in-process), trafilatura, lynx, Parallel, Firecrawl, then Jina. The
  * `providers.fetch` setting picks the order — `auto` uses the default above; any
  * specific backend is tried first, then the remaining backends as fallbacks.
- * Every backend's output must clear the same quality gate (>100 non-whitespace
- * chars and not {@link isLowQualityOutput}) before it is accepted, otherwise the
- * next backend is tried.
+ * Every backend's output must clear the same length and JavaScript-gate checks,
+ * and a lynx dump the navigation check too ({@link isLowQualityOutput}), before
+ * it is accepted, otherwise the next backend is tried.
  *
  * The overall `timeout` budget bounds the whole call; remote backends (Parallel,
  * Firecrawl, Jina) are additionally capped at `REMOTE_READER_MAX_MS` so a hung
@@ -696,7 +672,7 @@ export async function renderHtmlToText(
 			if (!rendered) continue;
 			const content = stripDataUriImages(rendered);
 			if (content.trim().length <= 100) continue;
-			if (!isLowQualityOutput(content)) {
+			if (!isLowQualityOutput(content, method)) {
 				return { content, ok: true, method };
 			}
 			lowQuality ??= { content, method };
@@ -712,9 +688,19 @@ export async function renderHtmlToText(
 }
 
 /**
- * Check if lynx output looks JS-gated or mostly navigation
+ * True when most lines are short: menus in a lynx dump, or a wrapper page around
+ * a linked document. In a reader's markdown, tables, code and lists look the same.
  */
-function isLowQualityOutput(content: string): boolean {
+function isMostlyShortLines(content: string): boolean {
+	const lines = content.split("\n").filter(l => l.trim());
+	const shortLines = lines.filter(l => l.trim().length < 40);
+	return lines.length > 10 && shortLines.length / lines.length > 0.7;
+}
+
+/**
+ * Check if rendered output looks JS-gated, or, for a lynx dump, mostly navigation.
+ */
+function isLowQualityOutput(content: string, method: string): boolean {
 	const lower = content.toLowerCase();
 
 	// JS-gated indicators
@@ -729,14 +715,9 @@ function isLowQualityOutput(content: string): boolean {
 		return true;
 	}
 
-	// Mostly navigation (high link/menu density)
-	const lines = content.split("\n").filter(l => l.trim());
-	const shortLines = lines.filter(l => l.trim().length < 40);
-	if (lines.length > 10 && shortLines.length / lines.length > 0.7) {
-		return true;
-	}
-
-	return false;
+	// Only lynx dumps the whole page, menus included; the reader backends already drop
+	// navigation, so their short lines are content and must not send the page to a weaker reader.
+	return method === "lynx" && isMostlyShortLines(content);
 }
 
 /**
@@ -1346,13 +1327,12 @@ async function renderUrl(
 	// HTML extraction) and returns the response body verbatim. Binary-oriented branches
 	// above already ran because raw isn't useful for binary payloads.
 	if (raw) {
-		const output = finalizeOutput(rawContent);
 		return {
 			url,
 			finalUrl,
 			contentType: mime,
 			method: "raw",
-			content: output,
+			content: rawContent,
 			fetchedAt,
 			truncated,
 			notes,
@@ -1414,7 +1394,7 @@ async function renderUrl(
 				const output = finalizeOutput(altResult.content);
 				return {
 					url,
-					finalUrl,
+					finalUrl: altResult.finalUrl,
 					contentType: "text/markdown",
 					method: "alternate-markdown",
 					content: output,
@@ -1425,31 +1405,14 @@ async function renderUrl(
 			}
 		}
 
-		// 5B: Try URL.md suffix (llms.txt convention)
-		const mdSuffix = await tryMdSuffix(finalUrl, timeout, signal);
-		if (mdSuffix) {
-			notes.push("Found .md suffix version");
-			const output = finalizeOutput(mdSuffix.content);
-			return {
-				url,
-				finalUrl,
-				contentType: "text/markdown",
-				method: "md-suffix",
-				content: output,
-				fetchedAt,
-				truncated: mdSuffix.truncated,
-				notes,
-			};
-		}
-
-		// 5C: Content negotiation
+		// 5B: Content negotiation
 		const negotiated = await tryContentNegotiation(url, timeout, signal);
 		if (negotiated) {
 			notes.push(`Content negotiation returned ${negotiated.type}`);
 			const output = finalizeOutput(negotiated.content);
 			return {
 				url,
-				finalUrl,
+				finalUrl: negotiated.finalUrl,
 				contentType: normalizeMime(negotiated.type),
 				method: "content-negotiation",
 				content: output,
@@ -1459,7 +1422,7 @@ async function renderUrl(
 			};
 		}
 
-		// 5D: Check for feed alternates
+		// 5C: Check for feed alternates
 		const feedAlternates = alternates.filter(alt => alt.kind === "feed");
 		for (const alt of feedAlternates.slice(0, 2)) {
 			const resolved = new URL(alt.href, finalUrl).href;
@@ -1470,7 +1433,7 @@ async function renderUrl(
 				const output = finalizeOutput(parsed);
 				return {
 					url,
-					finalUrl,
+					finalUrl: altResult.finalUrl,
 					contentType: "application/feed",
 					method: "alternate-feed",
 					content: output,
@@ -1485,7 +1448,7 @@ async function renderUrl(
 			throw new ToolAbortError();
 		}
 
-		// 5E: Render HTML via the reader-backend chain
+		// 5D: Render HTML via the reader-backend chain
 		// (native/trafilatura/lynx/parallel/firecrawl/jina)
 		const htmlResult = await renderHtmlToText(
 			finalUrl,
@@ -1505,7 +1468,7 @@ async function renderUrl(
 				const output = finalizeOutput(llmResult.content);
 				return {
 					url,
-					finalUrl,
+					finalUrl: llmResult.finalUrl,
 					contentType: "text/plain",
 					method: "llms.txt",
 					content: output,
@@ -1528,37 +1491,49 @@ async function renderUrl(
 			};
 		}
 
-		// Step 6: If rendered output is low quality, try more targeted fallbacks
-		if (isLowQualityOutput(htmlResult.content)) {
-			const docLinks = extractDocumentLinks(rawContent, finalUrl);
-			if (docLinks.length > 0) {
-				const docUrl = docLinks[0];
-				const binary = await fetchBinary(docUrl, timeout, signal);
-				if (binary.ok) {
-					const ext = getExtensionHint(docUrl, binary.contentDisposition);
-					const converted = await convertWithMarkit(binary.buffer, ext, timeout, signal);
-					if (converted.ok && converted.content.trim().length > htmlResult.content.length) {
-						notes.push(`Extracted and converted document: ${docUrl}`);
-						const output = finalizeOutput(converted.content);
-						return {
-							url,
-							finalUrl,
-							contentType: "application/document",
-							method: "extracted-document",
-							content: output,
-							fetchedAt,
-							truncated: false,
-							notes,
-						};
-					}
-					if (!converted.ok && converted.error) {
-						notes.push(`markit conversion failed: ${converted.error}`);
-					}
-				} else if (binary.error) {
-					notes.push(`Binary fetch failed: ${binary.error}`);
+		// Step 6: If rendered output is low quality, try more targeted fallbacks. A reader's
+		// rendering passes the quality gate even for a wrapper page around a PDF or DOCX, so a
+		// short-line rendering under one displayed page still has its document tried, when the
+		// link sits in the content the reader kept rather than in a dropped nav or footer.
+		const lowQuality = isLowQualityOutput(htmlResult.content, htmlResult.method);
+		const wrapperShaped =
+			!lowQuality &&
+			isMostlyShortLines(htmlResult.content) &&
+			htmlResult.content.split("\n").length <= FETCH_DEFAULT_MAX_LINES;
+		let docLinks = lowQuality || wrapperShaped ? extractDocumentLinks(rawContent, finalUrl) : [];
+		if (wrapperShaped) {
+			const rendered = renderedLinkTargets(htmlResult.content, finalUrl);
+			docLinks = docLinks.filter(link => rendered.has(link));
+		}
+		if (docLinks.length > 0) {
+			const docUrl = docLinks[0];
+			const binary = await fetchBinary(docUrl, timeout, signal);
+			if (binary.ok) {
+				const ext = getExtensionHint(docUrl, binary.contentDisposition);
+				const converted = await convertWithMarkit(binary.buffer, ext, timeout, signal);
+				if (converted.ok && converted.content.trim().length > htmlResult.content.length) {
+					notes.push(`Extracted and converted document: ${docUrl}`);
+					const output = finalizeOutput(converted.content);
+					return {
+						url,
+						finalUrl,
+						contentType: "application/document",
+						method: "extracted-document",
+						content: output,
+						fetchedAt,
+						truncated: false,
+						notes,
+					};
 				}
+				if (!converted.ok && converted.error) {
+					notes.push(`markit conversion failed: ${converted.error}`);
+				}
+			} else if (binary.error) {
+				notes.push(`Binary fetch failed: ${binary.error}`);
 			}
+		}
 
+		if (lowQuality) {
 			const llmResult = await tryLlmEndpoints(finalUrl, timeout, signal);
 			if (llmResult) {
 				notes.push(`Used llms.txt fallback: ${llmResult.endpoint}`);
@@ -1705,7 +1680,7 @@ export async function fetchReadUrl(
 		const cutNote = `Response body exceeded ${formatBytes(MAX_BYTES)} and was cut mid-stream; content is incomplete`;
 		result = { ...result, notes: [...result.notes, cutNote] };
 	}
-	const output = buildUrlReadOutput(result, result.content);
+	const output = buildUrlReadOutput(result, result.content, raw);
 	const artifact = options?.ensureArtifact ? await persistReadUrlArtifact(session, output) : undefined;
 
 	return {
@@ -1717,6 +1692,7 @@ export async function fetchReadUrl(
 			finalUrl: result.finalUrl,
 			contentType: result.contentType,
 			method: result.method,
+			raw: raw || undefined,
 			truncated: Boolean(result.truncated),
 			notes: result.notes,
 		},
@@ -1740,7 +1716,8 @@ export async function materializeReadUrlToFile(
 	return { path: contentPath, details: entry.details };
 }
 
-function buildUrlReadOutput(result: FetchRenderResult, content: string): string {
+function buildUrlReadOutput(result: FetchRenderResult, content: string, raw: boolean): string {
+	if (raw) return content;
 	let output = "";
 	output += `URL: ${result.finalUrl}\n`;
 	output += `Content-Type: ${result.contentType}\n`;

@@ -39,16 +39,24 @@ import {
 	formatPathRelativeToCwd,
 	hasGlobPathChars,
 	isLineInRanges,
+	normalizePathLikeInput,
 	parseSearchPath,
 	probeLiteralPathExists,
+	probeLiteralPathExistsSync,
 	relativeSearchResultPath,
 	resolveReadPath,
 	resolveSearchResultPath,
 	resolveToolSearchScope,
+	resolveToCwd,
 	searchPathTier,
 	splitPathAndSelPreferringLiteral,
+	splitPathAndSelPreferringLiteralSync,
 } from "./path-utils";
-import { searchApprovalCacheTargets } from "./search-approval-targets";
+import {
+	APPROVAL_ROOT_DELIMITERS,
+	approvalRootCandidates,
+	searchApprovalCacheTargets,
+} from "./search-approval-targets";
 import { type LineRange, parseLineRanges, selectorLineRanges } from "@oh-my-pi/pi-tui/tools/line-ranges";
 import { isReadableUrlPath, splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -458,6 +466,72 @@ function formatCappedFiles(paths: readonly string[]): string {
 	return rest > 0 ? `${shown} and ${rest} more ${rest === 1 ? "file" : "files"}` : shown;
 }
 
+/**
+ * Whether a path entry is a `!glob` exclusion rather than a path to search: it
+ * starts with `!` and is confirmed missing on disk once a `:selector` is split
+ * off the way `read` splits it, so `!notes.txt:1-2` still reads a real
+ * `!notes.txt`, and a dangling `!link` or an inconclusive probe stays a path
+ * whose error the search reports. Approval and execution both classify entries
+ * through this.
+ */
+function isExclusionEntry(entry: string, cwd: string): boolean {
+	if (!entry.startsWith("!")) return false;
+	return probeLiteralPathExistsSync(splitPathAndSelPreferringLiteralSync(entry, cwd).path, cwd) === "missing";
+}
+
+/** One exclusion with Windows separators and trailing separators normalized away. */
+function normalizeExclusion(pattern: string): string {
+	return pattern.trim().replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+/**
+ * Where an anchored exclusion points: one with a `/` that does not start with
+ * `**`, resolved against cwd like any tool path. `undefined` for a pattern that
+ * matches at any depth, `null` for one that resolves to no filesystem path.
+ */
+function anchoredExclusionPath(pattern: string, cwd: string): string | null | undefined {
+	if (!pattern.includes("/") || pattern.startsWith("**")) return undefined;
+	try {
+		return resolveToCwd(pattern, cwd);
+	} catch {
+		return null;
+	}
+}
+
+/** `target` relative to `root` with `/` separators, or `undefined` unless it lies strictly inside `root`. */
+function relativeInside(root: string, target: string): string | undefined {
+	const relative = path.relative(root, target);
+	// Across Windows drives `path.relative` returns an absolute path.
+	if (relative === "" || path.isAbsolute(relative)) return undefined;
+	const posix = relative.split(path.sep).join("/");
+	return posix === ".." || posix.startsWith("../") ? undefined : posix;
+}
+
+/**
+ * Rebase `!glob` exclusions, written relative to cwd, onto one search root for
+ * native grep, which matches them against root-relative paths. A pattern with
+ * no `/` (or starting with `**`) matches at any depth and passes through; any
+ * other is anchored to the root with a leading `/` (`!./gen` must not drop
+ * `sub/gen`); one naming a place outside this root has nothing to exclude there.
+ */
+function exclusionsForRoot(patterns: readonly string[], cwd: string, root: string): string[] | undefined {
+	const rebased: string[] = [];
+	const internalRoot = InternalUrlRouter.instance().canHandle(root);
+	for (const raw of patterns) {
+		const pattern = normalizeExclusion(raw);
+		if (!pattern) continue;
+		const target = anchoredExclusionPath(pattern, cwd);
+		if (target === undefined) {
+			rebased.push(pattern);
+			continue;
+		}
+		if (internalRoot || target === null) continue;
+		const relative = relativeInside(root, target);
+		if (relative !== undefined) rebased.push(`/${relative}`);
+	}
+	return rebased.length > 0 ? rebased : undefined;
+}
+
 type SearchParams = typeof searchSchema.infer;
 
 /**
@@ -492,10 +566,37 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 	 */
 	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined => {
 		const a = args as { path?: string | string[]; paths?: string | string[] } | null | undefined;
+		const cwd = this.session.cwd;
+		const splitBase = (entry: string) => parseSearchPath(splitPathAndSel(entry).path).basePath;
+		const roots = toPathList(a?.path ?? a?.paths);
+		const exclusionParts = (list: string) =>
+			approvalRootCandidates(list)
+				.slice(1)
+				.filter(part => isExclusionEntry(part, cwd));
+		// `!glob` exclusions search nothing and key nothing. A whole list holding one keys itself only when
+		// it is a real path (execution then searches it literally); its other parts key as usual.
+		const skipCandidate = (candidate: string, wholeList: boolean) =>
+			wholeList
+				? exclusionParts(candidate).length > 0 &&
+					probeLiteralPathExistsSync(splitPathAndSelPreferringLiteralSync(candidate, cwd).path, cwd) === "missing"
+				: isExclusionEntry(candidate, cwd);
+		// Execution searches cwd when every entry it splits out is an exclusion, and how it splits a list
+		// depends on its own parser (braces, empty fields, which parts resolve). Rather than re-derive that,
+		// any exclusion in a list keys cwd too: over-keying only adds a prompt, under-keying auto-allows a
+		// recursive cwd read.
+		const hasExclusion = roots.some(root => {
+			const list = normalizePathLikeInput(root);
+			return (
+				isExclusionEntry(list, cwd) ||
+				list.split(APPROVAL_ROOT_DELIMITERS).some(part => part.length > 0 && isExclusionEntry(part, cwd))
+			);
+		});
 		return searchApprovalCacheTargets(
-			toPathList(a?.path ?? a?.paths),
-			this.session.cwd,
-			entry => parseSearchPath(splitPathAndSel(entry).path).basePath,
+			hasExclusion ? [...roots, "."] : roots,
+			cwd,
+			splitBase,
+			undefined,
+			skipCandidate,
 		);
 	};
 	readonly label = "Grep";
@@ -575,7 +676,18 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 			}
 			const scopedPaths = toPathList(rawPath);
 			const effectivePaths = scopedPaths.length > 0 ? scopedPaths : ["."];
-			const rawEntries = await expandDelimitedPathEntries(effectivePaths, this.session.cwd);
+			const expandedEntries = await expandDelimitedPathEntries(effectivePaths, this.session.cwd, {
+				exclusionParts: true,
+			});
+			// `!glob` entries exclude; the rest are what to search (all of cwd when only exclusions were given).
+			// A file or folder whose name really starts with `!` is still searched.
+			const exclusions: string[] = [];
+			const searchEntries: string[] = [];
+			for (const entry of expandedEntries) {
+				if (isExclusionEntry(entry, this.session.cwd)) exclusions.push(entry.slice(1));
+				else searchEntries.push(entry);
+			}
+			const rawEntries = searchEntries.length > 0 ? searchEntries : ["."];
 			const pathSpecs = await parsePathSpecs(rawEntries, this.session.cwd);
 			const resolveContext = sessionResolveContext(this.session, { signal });
 			// Internal URLs resolve inside the native search, bounded by the tier this call was approved at.
@@ -745,6 +857,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 									maxColumns: DEFAULT_MAX_COLUMN,
 									mode: effectiveOutputMode,
 									maxCountPerFile: nativeMaxCountPerFile,
+									exclude: exclusionsForRoot(exclusions, this.session.cwd, target.basePath),
 									signal,
 									timeoutMs: SEARCH_GREP_TIMEOUT_MS,
 									filesystem,
@@ -794,6 +907,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 								maxColumns: DEFAULT_MAX_COLUMN,
 								mode: effectiveOutputMode,
 								maxCountPerFile: nativeMaxCountPerFile,
+								exclude: exclusionsForRoot(exclusions, this.session.cwd, searchPath),
 								signal,
 								timeoutMs: SEARCH_GREP_TIMEOUT_MS,
 								filesystem,

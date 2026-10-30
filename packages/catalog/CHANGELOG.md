@@ -2,22 +2,107 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Cursor's DeepSeek V4.1 Flash 1017 reporting zero cost; every effort level now bills at Cursor's API rate of $0.30/$1.20 per million tokens, with cache reads at $0.006 ([#17390](https://github.com/can1357/oh-my-pi/pull/17390) by [@eggpeat](https://github.com/eggpeat))
+
+## [18.14.0] - 2026-10-29
+
+### Breaking Changes
+
+- Removed the raw `@oh-my-pi/pi-catalog/models.json` export; use the bundled model registry APIs instead.
+
 ### Added
 
+- Added `nextBuildPriceChange(cost, now)` to identify when a model's dated pricing card may change, allowing callers to safely reuse earlier builds until that time.
+- Added the `selector-revision-suffix` catalog axis for Google Vertex, so `google-vertex/claude-opus-4-8` resolves exactly to `claude-opus-4-8@default`.
+
+### Changed
+
+- Reduced the bundled model catalog size and loading overhead.
+- Updated role defaults so Factory Droid image models are preferred for the `image` role, allowing `generate_image` to work with only a Factory login.
+- Updated `smol` and `slow` role defaults to use the currently bundled Cerebras and OpenAI Codex model identifiers.
+
+### Fixed
+
+- Fixed Mistral reasoning models so streamed thinking appears in the transcript and is preserved for subsequent turns.
+- Fixed later-turn HTTP 422 errors in Mistral-hosted DeepSeek conversations when assistant reasoning history is included.
+- Fixed DeepSeek V4.1 Flash image attachments being dropped for publisher-namespaced model IDs such as `ds/deepseek-flash`.
+
+## [18.13.3] - 2026-10-28
+
+### Added
+
+- Added DeepSeek V4.1 Flash 1017 to the Factory Droid provider for accounts with Factory's 1017 flag; turning thinking off on its Baseten route disables reasoning instead of falling back to low effort ([#17234](https://github.com/can1357/oh-my-pi/pull/17234) by [@skipper019](https://github.com/skipper019))
+
+### Changed
+
+- Made Kimi Code model discovery authoritative and cached per credential, added K3.1 Pro and K3.1 Pro Highspeed to the bundled Kimi Code catalog, and preserved live thinking metadata there ([#17224](https://github.com/can1357/oh-my-pi/pull/17224) by [@trukhinyuri](https://github.com/trukhinyuri))
+- Updated Bun engine requirement to ≥1.4.4
+
+### Fixed
+
+- Codex model refresh now lists models available to an entitled account even when other saved accounts return HTTP 402 ([#17198](https://github.com/can1357/oh-my-pi/issues/17198)).
+- LiteLLM discovery now reads every `/v2/model/info` page before selecting the proxy's model roster, rather than caching only the first 50 entries; malformed or incomplete pagination falls back without caching a partial page ([#17237](https://github.com/can1357/oh-my-pi/pull/17237) by [@maykonmichel](https://github.com/maykonmichel)).
+- Fixed hosted web search on OpenAI Responses and Codex Responses selecting GPT-5.6 Luna instead of GPT-6 Luna ([#17202](https://github.com/can1357/oh-my-pi/pull/17202) by [@mateo-bolanos](https://github.com/mateo-bolanos)).
+
+## [18.13.2] - 2026-10-27
+
+### Added
+
+- Added LM Studio decision models to discovery: models LM Studio reports as `type: "decision"` are listed as `judge` models served over its `/v1/decisions` endpoint, alongside its chat models ([#17169](https://github.com/can1357/oh-my-pi/pull/17169) by [@richiestanaway](https://github.com/richiestanaway))
+
+## [18.13.1] - 2026-10-27
+
+### Added
+
+- Added GPT-6.1 Terra: `openai/gpt-6.1-terra` ships bundled ($1/$5, $0.05 cached, >272K long-context tier, 1.05M window), and Codex-discovered `gpt-6.1-terra`/`-wm` get API-equivalent pricing, the 922K extended-context maximum, and routing to Plus-or-higher accounts.
+- Added Kimi K3.1 Pro and K3.1 Pro Highspeed support on Kimi Code (`k3.1-pro`, `k3.1-pro-highspeed`) and the Moonshot API (`kimi-k3.1-pro`, `kimi-k3.1-pro-highspeed`): official pricing ($2/$10 and $4/$20 per MTok), a 131K output cap, and K3's reasoning and wire contract ([#16901](https://github.com/can1357/oh-my-pi/pull/16901) by [@eggpeat](https://github.com/eggpeat))
+
+## [18.13.0] - 2026-10-26
+
+### Breaking Changes
+
+- Renamed the `task-sibling-prompt-cache` axis to `shared-prompt-cache` (catalog field `sharedPromptCache`); it now also covers forks and explicit prompt-cache keys ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
+
+### Added
+
+- Added the `requiresThinkingPresence` model compat (KDL `requires-thinking-presence`) for Anthropic-compatible endpoints that reject a thinking-mode request whose current turn has an assistant message without a `thinking` block ([#16739](https://github.com/can1357/oh-my-pi/pull/16739) by [@lz37](https://github.com/lz37))
 - Added `resolveAnthropicApiVersion()`: Anthropic model discovery sends API version 2026-10-21 to the official API when `PI_ANTHROPIC_API_VERSION=2026-10-21` is set ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
+- OpenCode Go `muse-spark-1.3-contributor`, `muse-spark-1.2-contributor`, `gpt-5.6-luna`, `gpt-6-luna`, `grok-4.6` (Responses) and `deepseek-v4-pro`, `omen-alpha` (Completions) opt into shared prompt caching; lanes that warmed under any key stay off ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
+- Added `CatalogPolicyInputs` so catalog-policy lookups accept a reduced model view ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
+- Added a catalog conformance test that fails the build when a `bundle="always"` seed row is missing from the bundled `models.json`, so a stale-snapshot regeneration can no longer silently drop an engine the way `web/deepseek` was lost in 18.12.2 ([#16610](https://github.com/can1357/oh-my-pi/issues/16610), [#17053](https://github.com/can1357/oh-my-pi/pull/17053) by [@ouyangjiahong26](https://github.com/ouyangjiahong26))
 
 ### Changed
 
 - llama.cpp login instructions now list both default local base URLs (`http://127.0.0.1:8080`, then `http://127.0.0.1:9931`) ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
+- Devin requests now identify as Devin CLI 3000.11.205, the current stable release, instead of 3000.11.3 ([#16906](https://github.com/can1357/oh-my-pi/pull/16906) by [@will-bogusz](https://github.com/will-bogusz))
+- Google Antigravity login now uses PKCE and requests the `aicode` scope like the official client; existing logins keep working, and the new scope applies at the next `/login` ([#17012](https://github.com/can1357/oh-my-pi/pull/17012) by [@apoc](https://github.com/apoc))
+- Antigravity requests identify as client 2.26.0 when the release manifest is unreachable (previously 2.19.1), and model discovery sends the account's project like the official client ([#17012](https://github.com/can1357/oh-my-pi/pull/17012) by [@apoc](https://github.com/apoc))
+- Antigravity's `User-Agent` now reports the native Antigravity build for the host OS (Linux `linux`/`amd64`, Windows `windows`/`amd64`) instead of always claiming macOS `darwin`/`arm64` ([#17012](https://github.com/can1357/oh-my-pi/pull/17012) by [@apoc](https://github.com/apoc))
+- Antigravity model discovery now keeps each account's per-tier `model_enum`, output cap and thinking level or budget, and the bundled Antigravity models carry them for offline use; cached Antigravity model lists are refreshed once so they pick them up ([#17012](https://github.com/can1357/oh-my-pi/pull/17012) by [@apoc](https://github.com/apoc))
 
 ### Fixed
 
+- Fixed OpenCode Go `gemini-4-argon` requests failing with an unsupported protocol; discovered models now use native Gemini routing and low, medium, or high thinking ([#17031](https://github.com/can1357/oh-my-pi/issues/17031))
+- Fixed DeepSeek V4 Pro cost estimates using Flash rates after September 14 despite Pro billing remaining unchanged ([#16875](https://github.com/can1357/oh-my-pi/issues/16875)).
+- Anthropic refusal fallbacks from Claude Opus 5.5, Opus 5 and Sonnet 5.5 to their documented target models (Opus 4.8 and Opus 5, Opus 4.8, and Sonnet 5) now redeem fallback credit: the retry is no longer billed as a full cache write, and it is no longer skipped when the conversation holds signed thinking ([#17034](https://github.com/can1357/oh-my-pi/pull/17034) by [@sjawhar](https://github.com/sjawhar))
 - Fixed Step 5 Preview reasoning choices on OpenCode Go and Zen to offer only low, medium, and high ([#14987](https://github.com/can1357/oh-my-pi/issues/14987), [#16669](https://github.com/can1357/oh-my-pi/pull/16669) by [@SheetHappiness](https://github.com/SheetHappiness))
 - Fixed GPT-6 Sol/Luna API and MiniMax-M3 long-context usage estimates above their published input thresholds ([#16711](https://github.com/can1357/oh-my-pi/issues/16711))
 - Fixed Xiaomi Token Plan login and default model selection after the V2.5 retirement by using MiMo V2.6 Flash ([#16727](https://github.com/can1357/oh-my-pi/pull/16727) by [@LiPu-jpg](https://github.com/LiPu-jpg))
+- Fixed Xiaomi model discovery sending `ttp-` Token Plan keys to the pay-as-you-go host, which rejects them ([#17045](https://github.com/can1357/oh-my-pi/issues/17045))
 - Fixed GPT-5.6 Sol requests over 272K input tokens (`openai` and `openai-codex`) being priced at the retired $10/$45 long-context card instead of $8/$30 ([#16742](https://github.com/can1357/oh-my-pi/issues/16742))
 - Fixed DeepSeek's official vision requests being held to the 5-image unknown-host floor: the catalog endpoint now carries DeepSeek's documented 600-image and 40 MiB inline-image budgets, while a custom `baseUrl` keeps the conservative floor ([vision limits](https://api-docs.deepseek.com/guides/vision#limits); [#16737](https://github.com/can1357/oh-my-pi/pull/16737) by [@Fun10165](https://github.com/Fun10165))
 - Fixed Devin model discovery falling back to the two SWE-1.6 seed models when the catalog takes longer than 5s to respond; it now waits up to 15s ([#16668](https://github.com/can1357/oh-my-pi/pull/16668) by [@DusKing1](https://github.com/DusKing1))
+- Fixed Go Task keeping stale prompt-cache affinity after a model's wire model changed ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
+- Fixed Devin models all showing a 200K context window: each model now reports its own (1M for Claude Opus 5.5 and the `-1m` lanes, 262K for SWE-2), and GPT and Grok models with a long-context price tier start at that tier's threshold, with `/extended-context on` opening their full window ([#16905](https://github.com/can1357/oh-my-pi/pull/16905) by [@will-bogusz](https://github.com/will-bogusz))
+- Added the `extended-cache-ttl-beta` compat axis so a route can opt out of the `extended-cache-ttl-2025-04-11` beta (Factory Droid does), and prompt-cache lifetimes and long-retention support for Factory Droid's Claude models ([#16296](https://github.com/can1357/oh-my-pi/pull/16296) by [@will-bogusz](https://github.com/will-bogusz))
+- Added Factory Droid's image models (GPT Image 2.5, GPT Image 2.5 Flare, Gemini 3 Pro Image) to the `image` role's choices, listed only while your Factory organization allows image generation and that model ([#16316](https://github.com/can1357/oh-my-pi/pull/16316) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed LiteLLM model groups with `mode: decisions` being listed as chat models; they now route to `openai-decisions` as judge models ([#16939](https://github.com/can1357/oh-my-pi/issues/16939))
+- Removed retired Anthropic models (Claude 3.x, Opus 4/4.1, Sonnet 4) from the bundled catalog and discovery ([#16755](https://github.com/can1357/oh-my-pi/issues/16755))
+- Fixed Kimi Code K3 and K3 256K (`k3`, `k3-256k`) pricing to include Kimi's $3/MTok cache-write rate, matching the Moonshot API `kimi-k3` card ([#16508](https://github.com/can1357/oh-my-pi/issues/16508), [#16903](https://github.com/can1357/oh-my-pi/pull/16903) by [@eggpeat](https://github.com/eggpeat))
+- Fixed Devin models all showing a 200K context window: each model now reports its own (1M for Claude Opus 5.5 and the `-1m` lanes, 262K for SWE-2), and GPT and Grok models with a long-context price tier start at that tier's threshold, with `/extended-context on` opening their full window ([#16905](https://github.com/can1357/oh-my-pi/pull/16905) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Cursor Auto (`cursor/default`) being metered against the third-party ("Other Models") pool instead of the Cursor Models pool it bills to ([#17048](https://github.com/can1357/oh-my-pi/pull/17048) by [@trukhinyuri](https://github.com/trukhinyuri))
 
 ## [18.12.6] - 2026-10-21
 

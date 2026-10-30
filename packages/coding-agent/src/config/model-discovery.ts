@@ -9,6 +9,7 @@ import { type ApiKey, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import { getAppleFoundationModelsAvailability } from "@oh-my-pi/pi-ai/providers/apple-foundation-models";
 import type { Api, FetchImpl, Model, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
 import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import {
 	getBundledModelReferenceIndex,
 	inheritReferenceThinking,
@@ -23,7 +24,13 @@ import {
 	OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS,
 	resolveLiteLLMApi,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import type { KindApiKind, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
+import {
+	type KindApiKind,
+	type ModelKind,
+	type ModelSpec,
+	type OpenAICompat,
+	runnerApiKind,
+} from "@oh-my-pi/pi-catalog/types";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ProviderDiscovery } from "./models-config-schema";
@@ -203,6 +210,9 @@ export interface DiscoveryContext {
 	 * Returns undefined when no key is stored or it is a local/no-auth
 	 * sentinel; otherwise an {@link ApiKey} whose resolver participates in the
 	 * central force-refresh/rotate auth-retry policy on 401/usage-limit.
+	 * The bearer authenticates only the discovery request: discovered models
+	 * carry just the provider's configured headers, since the model cache
+	 * never persists header values and drops rows that had them.
 	 */
 	getBearerApiKeyResolver(provider: string): Promise<ApiKey | undefined>;
 }
@@ -658,7 +668,6 @@ async function discoverLlamaCppModelsAt(
 	const modelsUrl = `${baseUrl}/models`;
 
 	const baseHeaders: Record<string, string> = { ...providerConfig.headers };
-	let headers = baseHeaders;
 	const customTimeoutMs = providerConfig.discovery.timeoutMs;
 	const attempt = async (h: Record<string, string>) => {
 		const [payload, metadata] = await Promise.all([
@@ -670,7 +679,6 @@ async function discoverLlamaCppModelsAt(
 				if (!response.ok) {
 					throw new DiscoveryHttpError(response.status, modelsUrl);
 				}
-				headers = h;
 				return (await response.json()) as unknown;
 			}),
 			discoverLlamaCppServerMetadata(ctx, baseUrl, h, customTimeoutMs),
@@ -706,7 +714,7 @@ async function discoverLlamaCppModelsAt(
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 					contextWindow,
 					maxTokens: resolveLlamaCppMaxTokens(contextWindow, serverMetadata?.maxTokens),
-					headers,
+					headers: baseHeaders,
 				},
 				providerConfig.discovery.type,
 			),
@@ -853,9 +861,16 @@ function extractOpenAIModelsListInputCapabilities(item: {
 	input?: unknown;
 	input_modalities?: unknown;
 	architecture?: unknown;
+	metadata?: unknown;
 }): ("text" | "image")[] | undefined {
 	const architecture = isRecord(item.architecture) ? item.architecture : undefined;
-	const modalities = collectModalities([item.input, item.input_modalities, architecture?.input_modalities]);
+	const metadata = isRecord(item.metadata) ? item.metadata : undefined;
+	const modalities = collectModalities([
+		item.input,
+		item.input_modalities,
+		architecture?.input_modalities,
+		metadata?.input_modalities,
+	]);
 	if (modalities.size === 0) return undefined;
 	return modalities.has("image") ? ["text", "image"] : ["text"];
 }
@@ -928,24 +943,154 @@ function extractReasoningLevels(value: unknown): Effort[] | undefined {
 }
 
 /**
+ * Discovery reads a `/v1/models` row's own reasoning ladder unless the provider
+ * opts out with `discovery.advertisedReasoning: false`. An endpoint that
+ * advertises tiers its route does not actually accept would otherwise get a
+ * picker the wire rejects; opting out falls back to the bundled reference.
+ */
+function advertisedReasoningEnabled(providerConfig: DiscoveryProviderConfig): boolean {
+	return providerConfig.discovery.advertisedReasoning !== false;
+}
+
+/** What a `/v1/models` row says about its own reasoning surface. */
+type AdvertisedReasoning =
+	/** The row states it does not reason. */
+	| { kind: "none" }
+	/** The row advertises an effort ladder, and whether it also accepts `none`. */
+	| { kind: "ladder"; efforts: Effort[]; acceptsNone: boolean; defaultLevel?: Effort };
+
+/**
  * Read server-advertised reasoning support from an OpenAI-compatible
  * `/v1/models` row. codex-lb nests the Codex registry fields under `metadata`
  * (`supported_reasoning_levels: [{ effort }]`, `default_reasoning_level`);
  * other gateways may advertise the same fields top-level. Returns undefined
- * when the row advertises no usable effort tier.
+ * when the row says nothing usable about reasoning.
+ *
+ * An explicit non-reasoning declaration is reported as `{ kind: "none" }`
+ * rather than `undefined`: the caller must be able to tell "this endpoint says
+ * the model does not reason" (which outranks a reasoning-enabled bundled
+ * reference) from "the endpoint is silent" (which leaves the reference in
+ * charge). A stray ladder beside `reasoning: false` is ignored.
  */
 function extractAdvertisedReasoning(item: {
 	metadata?: unknown;
 	supported_reasoning_levels?: unknown;
 	default_reasoning_level?: unknown;
-}): { efforts: Effort[]; defaultLevel?: Effort } | undefined {
+	reasoning?: unknown;
+}): AdvertisedReasoning | undefined {
 	const metadata = isRecord(item.metadata) ? item.metadata : undefined;
-	const efforts = extractReasoningLevels(metadata?.supported_reasoning_levels ?? item.supported_reasoning_levels);
+	// codex-lb nests every reasoning field under `metadata`; read the denial from
+	// the same place the ladder below comes from, or a nested `reasoning: false`
+	// would keep the reference dial alive.
+	if ((metadata?.reasoning ?? item.reasoning) === false) return { kind: "none" };
+	const raw = metadata?.supported_reasoning_levels ?? item.supported_reasoning_levels;
+	const efforts = extractReasoningLevels(raw);
 	if (efforts === undefined) return undefined;
 	const rawDefault = metadata?.default_reasoning_level ?? item.default_reasoning_level;
 	const defaultLevel = advertisedReasoningEffort(rawDefault);
-	if (defaultLevel !== undefined && efforts.includes(defaultLevel)) return { efforts, defaultLevel };
-	return { efforts };
+	return {
+		kind: "ladder",
+		efforts,
+		// `none` is the wire off-switch rather than a tier, so it never enters
+		// `efforts`; remembering that the endpoint listed it is what lets a
+		// thinking-off request send `reasoning_effort: "none"` instead of being
+		// clamped to the lowest tier.
+		acceptsNone: advisoryEffortEntries(raw).includes("none"),
+		...(defaultLevel !== undefined && efforts.includes(defaultLevel) ? { defaultLevel } : {}),
+	};
+}
+
+/** Raw effort strings a row lists, before the `Effort` vocabulary filters them. */
+function advisoryEffortEntries(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	return value.flatMap(entry => {
+		const raw = isRecord(entry) ? entry.effort : entry;
+		return typeof raw === "string" ? [raw.toLowerCase()] : [];
+	});
+}
+
+/**
+ * Apply what the endpoint advertises for one of its own rows. The endpoint
+ * states what it accepts on the wire, so its declaration outranks the reference
+ * guess: a cross-provider reference carries no thinking at all, and a custom
+ * provider's generic ladder drops provider-scoped tiers.
+ *
+ * OpenAI-shaped rows take the ladder in `effort` mode and drop a borrowed
+ * `reasoningEffortMap` / `omitReasoningEffort`, since those describe another
+ * host's wire (a reference that omits `reasoning_effort` would otherwise
+ * suppress the advertised tier). An advertised `none` sets `none-effort` so a
+ * thinking-off request sends the off-switch the endpoint listed rather than
+ * the lowest tier.
+ *
+ * Anthropic-shaped rows keep their identity-derived mode — adaptive vs budget
+ * is an Anthropic wire choice — and replace only the tiers.
+ */
+function withAdvertisedEfforts(
+	spec: ModelSpec<Api>,
+	advertised: AdvertisedReasoning | undefined,
+	isAnthropic: boolean,
+): ModelSpec<Api> {
+	if (advertised === undefined) return spec;
+	if (advertised.kind === "none") return withoutReasoning(spec, isAnthropic);
+	// `defaultLevel` is not decoration: `pickInitialThinkingLevel` (sdk.ts) and
+	// the model switcher read it ahead of the user's `defaultThinkingLevel`
+	// setting, so pinning it to the ladder's first tier would start every gateway
+	// model at its lowest effort and reset it on each model switch. Keep a
+	// default the ladder actually contains — the row's own, else whatever the
+	// catalog rule resolved — and only fall back when it falls outside the ladder.
+	// `resolveModelPolicy` already folds the catalog rule's default in, so an
+	// absent `advertised.defaultLevel` can still honor a rule default — but only
+	// when the ladder contains it. The value is always set, because an absent one
+	// would let `fillExplicitThinking` backfill the very level the ladder excludes.
+	const inheritedDefault = resolveModelPolicy(spec).thinking?.defaultLevel;
+	const preferredDefault = advertised.defaultLevel ?? inheritedDefault;
+	const defaultLevel =
+		preferredDefault !== undefined && advertised.efforts.includes(preferredDefault)
+			? preferredDefault
+			: advertised.efforts[0];
+	const thinking = { mode: "effort" as const, efforts: advertised.efforts, defaultLevel };
+	if (isAnthropic) {
+		const mode = resolveModelPolicy({ ...spec, reasoning: true }).thinking?.mode ?? "budget";
+		return { ...spec, reasoning: true, thinking: { ...thinking, mode } };
+	}
+	return {
+		...spec,
+		reasoning: true,
+		thinking,
+		compat: {
+			...stripBorrowedEffortCompat(spec),
+			supportsReasoningEffort: true,
+			...(advertised.acceptsNone ? { reasoningDisableMode: "none-effort" as const } : {}),
+		},
+	} as ModelSpec<Api>;
+}
+
+/**
+ * Drop transport facts a bundled reference lent this row, because they describe
+ * another host's wire: its `reasoningEffortMap` would rewrite tiers this
+ * endpoint declared, and its `omitReasoningEffort` would suppress the very
+ * field an advertised ladder enables.
+ */
+function stripBorrowedEffortCompat(spec: ModelSpec<Api>): OpenAICompat {
+	const { reasoningEffortMap: _map, omitReasoningEffort: _omit, ...compat } = (spec.compat ?? {}) as OpenAICompat;
+	return compat;
+}
+
+/**
+ * Drop the reasoning surface for a row whose endpoint declares it does not
+ * reason, overriding a reasoning-enabled bundled reference. The row's identity
+ * still comes from the reference, but the dial it implied must not survive:
+ * a model the deployment cannot reason with must not receive
+ * `reasoning_effort`.
+ */
+function withoutReasoning(spec: ModelSpec<Api>, isAnthropic: boolean): ModelSpec<Api> {
+	if (isAnthropic) return { ...spec, reasoning: false, thinking: undefined };
+	return {
+		...spec,
+		reasoning: false,
+		thinking: undefined,
+		compat: { ...stripBorrowedEffortCompat(spec), supportsReasoningEffort: false },
+	} as ModelSpec<Api>;
 }
 
 export async function discoverOpenAIModelsList(
@@ -965,7 +1110,6 @@ export async function discoverOpenAIModelsList(
 	const modelsUrl = appendModelsPath(baseUrl);
 
 	const baseHeaders: Record<string, string> = { ...providerConfig.headers };
-	let headers = baseHeaders;
 	// LM Studio is a desktop server reached over loopback, so an unanswered
 	// probe means "not installed / not running", never "slow link": give it the
 	// same tight budget the other implicit local engines use instead of the
@@ -993,7 +1137,6 @@ export async function discoverOpenAIModelsList(
 				if (!res.ok) {
 					throw new DiscoveryHttpError(res.status, modelsUrl);
 				}
-				headers = h;
 				return (await res.json()) as {
 					data?: Array<{
 						id?: string;
@@ -1013,6 +1156,7 @@ export async function discoverOpenAIModelsList(
 						metadata?: unknown;
 						supported_reasoning_levels?: unknown;
 						default_reasoning_level?: unknown;
+						reasoning?: unknown;
 					}>;
 				};
 			}),
@@ -1043,6 +1187,10 @@ export async function discoverOpenAIModelsList(
 		// headers/baseUrl/cost stay local.
 		const reference = resolveModelReference(id, references) as ModelSpec<Api> | undefined;
 		const referenceCompat = reference?.compat as OpenAICompat | undefined;
+		// codex-lb and similar registries nest the route's identity beside its
+		// reasoning ladder: `display_name`, `context_window`, `input_modalities`.
+		const metadata = isRecord(item.metadata) ? item.metadata : undefined;
+		const advertisedName = typeof metadata?.display_name === "string" ? metadata.display_name.trim() : "";
 		const input = nativeMetadataForModel?.input ??
 			extractOpenAIModelsListInputCapabilities(item) ??
 			reference?.input ?? ["text"];
@@ -1073,6 +1221,7 @@ export async function discoverOpenAIModelsList(
 		const reportedContextWindow =
 			toPositiveNumberOrUndefined(item.max_model_len) ??
 			toPositiveNumberOrUndefined(item.context_length) ??
+			toPositiveNumberOrUndefined(metadata?.context_window) ??
 			reportedLimitsContextWindow ??
 			nativeMetadataForModel?.contextWindow ??
 			reference?.contextWindow ??
@@ -1080,12 +1229,16 @@ export async function discoverOpenAIModelsList(
 		// A row that advertises a dedicated task answers through that task's
 		// runner, not the provider's chat API: leaving it on chat both hides it
 		// from its own role and offers the picker a model the chat endpoint
-		// cannot serve (issue #13021).
-		const task = extractOpenAIModelsListOutputTask(item);
+		// cannot serve (issue #13021). LM Studio lists decision models beside chat
+		// models on `/v1/models`; only its native listing says they answer on
+		// `/v1/decisions`, OpenAI's Decisions API.
+		const task: { kind: ModelKind; api: Api } | undefined = nativeMetadataForModel?.decision
+			? { kind: "judge", api: "openai-decisions" }
+			: extractOpenAIModelsListOutputTask(item);
 		if (task) {
 			specs.push({
 				id,
-				name: reference?.name ?? id,
+				name: advertisedName || reference?.name || id,
 				api: task.api,
 				kind: task.kind,
 				provider: providerConfig.provider,
@@ -1094,41 +1247,35 @@ export async function discoverOpenAIModelsList(
 				input,
 				supportsTools: false,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				// Embeddings cap their input by context; image jobs carry no
-				// token window. Neither produces output tokens.
-				contextWindow: task.kind === "embedding" ? reportedContextWindow : null,
+				// Embeddings and judges cap their input by context; image jobs
+				// carry no token window. None produces output tokens.
+				contextWindow: task.kind === "image" ? null : reportedContextWindow,
 				maxTokens: null,
-				headers,
+				headers: baseHeaders,
 			} as ModelSpec<Api>);
 			continue;
 		}
 		const api =
 			providerConfig.discovery.type === "litellm"
-				? resolveLiteLLMApi(undefined, id, providerConfig.api)
+				? resolveLiteLLMApi(item, id, providerConfig.api)
 				: providerConfig.api;
 		const contextWindow = reportedContextWindow ?? DISCOVERY_DEFAULT_CONTEXT_WINDOW;
 		// A row that advertises its own reasoning ladder (codex-lb `metadata`
 		// fields, or the top-level equivalents) is authoritative for its route:
 		// ids absent from the bundled catalog would otherwise stay non-reasoning
 		// and never send `reasoning_effort`.
-		const advertisedReasoning = extractAdvertisedReasoning(item);
-		specs.push({
+		const advertisedReasoning = advertisedReasoningEnabled(providerConfig)
+			? extractAdvertisedReasoning(item)
+			: undefined;
+		const spec = {
 			id,
-			name: reference?.name ?? id,
+			name: advertisedName || reference?.name || id,
 			api,
+			kind: runnerApiKind(api),
 			provider: providerConfig.provider,
 			baseUrl,
-			reasoning: reference?.reasoning === true || advertisedReasoning !== undefined,
-			thinking:
-				advertisedReasoning !== undefined
-					? {
-							mode: "effort" as const,
-							efforts: advertisedReasoning.efforts,
-							...(advertisedReasoning.defaultLevel !== undefined
-								? { defaultLevel: advertisedReasoning.defaultLevel }
-								: {}),
-						}
-					: inheritReferenceThinking(undefined, reference, providerConfig.provider),
+			reasoning: reference?.reasoning === true,
+			thinking: inheritReferenceThinking(undefined, reference, providerConfig.provider),
 			input,
 			...(providerConfig.discovery.type === "lm-studio" ? { imageInputDecoder: "stb" as const } : {}),
 			// Proxy/gateway pricing is provider-specific and rarely matches
@@ -1143,17 +1290,18 @@ export async function discoverOpenAIModelsList(
 				reportedMaxTokens ?? reference?.maxTokens ?? discoveryDefaultMaxTokens(api),
 				contextWindow,
 			),
-			headers,
+			headers: baseHeaders,
 			compat: {
 				supportsStore: false,
 				supportsDeveloperRole: false,
-				supportsReasoningEffort: referenceCompat?.supportsReasoningEffort ?? advertisedReasoning !== undefined,
+				supportsReasoningEffort: referenceCompat?.supportsReasoningEffort ?? false,
 				...(referenceCompat?.reasoningEffortMap ? { reasoningEffortMap: referenceCompat.reasoningEffortMap } : {}),
 				...(referenceCompat?.omitReasoningEffort !== undefined
 					? { omitReasoningEffort: referenceCompat.omitReasoningEffort }
 					: {}),
 			},
-		} as ModelSpec<Api>);
+		} as ModelSpec<Api>;
+		specs.push(withAdvertisedEfforts(spec, advertisedReasoning, api === "anthropic-messages"));
 	}
 	// `discovery.type: "litellm"` keeps LiteLLM provider policy under any alias.
 	return providerConfig.discovery.type === "litellm"
@@ -1169,10 +1317,8 @@ export async function discoverLiteLLMModels(
 	const references = getBundledModelReferenceIndex();
 	const resolveReference = (id: string) => resolveModelReference(id, references) as ModelSpec<Api> | undefined;
 	const baseHeaders: Record<string, string> = { ...providerConfig.headers };
-	let headers = baseHeaders;
 	const timeoutMs = providerConfig.discovery.timeoutMs ?? 10_000;
 	const attempt = async (h: Record<string, string>) => {
-		headers = h;
 		let authError: DiscoveryHttpError | undefined;
 		const authAwareFetch: FetchImpl = async (input, init) => {
 			const response = await ctx.fetch(input, init);
@@ -1215,7 +1361,7 @@ export async function discoverLiteLLMModels(
 	if (richModels === null) {
 		return discoverOpenAIModelsList({ ...providerConfig, baseUrl }, ctx);
 	}
-	return richModels.map(spec => buildDiscoveredModel({ ...spec, headers }, "litellm"));
+	return richModels.map(spec => buildDiscoveredModel({ ...spec, headers: baseHeaders }, "litellm"));
 }
 
 /**
@@ -1241,7 +1387,6 @@ export async function discoverProxyModels(
 	const modelsUrl = `${baseUrl}/models`;
 
 	const baseHeaders: Record<string, string> = { ...providerConfig.headers };
-	let headers = baseHeaders;
 	const timeoutMs = providerConfig.discovery.timeoutMs ?? 10_000;
 	const attempt = async (h: Record<string, string>) =>
 		withTimeoutSignal(timeoutMs, async signal => {
@@ -1252,9 +1397,17 @@ export async function discoverProxyModels(
 			if (!res.ok) {
 				throw new DiscoveryHttpError(res.status, modelsUrl);
 			}
-			headers = h;
 			return (await res.json()) as {
-				data?: Array<{ id?: string; name?: string; supported_endpoint_types?: string[]; context_length?: number }>;
+				data?: Array<{
+					id?: string;
+					name?: string;
+					supported_endpoint_types?: string[];
+					context_length?: number;
+					metadata?: unknown;
+					supported_reasoning_levels?: unknown;
+					default_reasoning_level?: unknown;
+					reasoning?: unknown;
+				}>;
 			};
 		});
 	const apiKey = await ctx.getBearerApiKeyResolver(providerConfig.provider);
@@ -1275,48 +1428,53 @@ export async function discoverProxyModels(
 		if (!api) continue;
 		const isAnthropic = api === "anthropic-messages";
 		const reference = resolveModelReference(id, getBundledModelReferenceIndex());
+		// A proxy that dispatches with its own catalog advertises the ladder it
+		// accepts for each row. That ladder is authoritative over the reference
+		// guess: cross-provider references carry no thinking at all, so rows whose
+		// ids are absent from the bundled catalog would otherwise stay
+		// non-reasoning and never send `reasoning_effort`.
+		const advertised = advertisedReasoningEnabled(providerConfig) ? extractAdvertisedReasoning(item) : undefined;
 		const discoveryName = typeof item.name === "string" ? item.name.trim() : "";
 		const displayName =
 			(discoveryName && discoveryName !== id ? discoveryName : undefined) ??
 			reference?.name ??
 			stripBracketedModelIdAffixes(id) ??
 			id;
-		discovered.push(
-			buildModel({
-				id,
-				name: displayName,
-				api,
-				provider: providerConfig.provider,
-				baseUrl,
-				reasoning: reference?.reasoning ?? false,
-				thinking: inheritReferenceThinking(undefined, reference, providerConfig.provider),
-				input: reference?.input ?? ["text"],
-				// Proxy pricing is provider-specific and usually does not match
-				// upstream bundled catalogs, so keep costs local-unknown even when
-				// we successfully recover the upstream model identity.
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				// Prefer the context_length the API reports for this model; fall
-				// back to the bundled reference, then a sane default.
-				contextWindow:
-					toPositiveNumberOrUndefined(item.context_length) ??
-					reference?.contextWindow ??
-					DISCOVERY_DEFAULT_CONTEXT_WINDOW,
-				maxTokens: reference?.maxTokens ?? discoveryDefaultMaxTokens(api),
-				headers,
-				// OpenAI-compat fields are no-ops on anthropic models; the
-				// Anthropic SDK ignores them. Provider-level disableStrictTools
-				// flows in via #applyProviderCompat for the third-party-Anthropic
-				// path. Cross-wire bundled compat is intentionally not copied:
-				// request-shaping fields are provider-wire specific.
-				compat: isAnthropic
-					? undefined
-					: {
-							supportsStore: false,
-							supportsDeveloperRole: false,
-							supportsReasoningEffort: false,
-						},
-			} as ModelSpec<Api>),
-		);
+		const spec = {
+			id,
+			name: displayName,
+			api,
+			provider: providerConfig.provider,
+			baseUrl,
+			reasoning: reference?.reasoning ?? false,
+			thinking: inheritReferenceThinking(undefined, reference, providerConfig.provider),
+			input: reference?.input ?? ["text"],
+			// Proxy pricing is provider-specific and usually does not match
+			// upstream bundled catalogs, so keep costs local-unknown even when
+			// we successfully recover the upstream model identity.
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			// Prefer the context_length the API reports for this model; fall
+			// back to the bundled reference, then a sane default.
+			contextWindow:
+				toPositiveNumberOrUndefined(item.context_length) ??
+				reference?.contextWindow ??
+				DISCOVERY_DEFAULT_CONTEXT_WINDOW,
+			maxTokens: reference?.maxTokens ?? discoveryDefaultMaxTokens(api),
+			headers: baseHeaders,
+			// OpenAI-compat fields are no-ops on anthropic models; the
+			// Anthropic SDK ignores them. Provider-level disableStrictTools
+			// flows in via #applyProviderCompat for the third-party-Anthropic
+			// path. Cross-wire bundled compat is intentionally not copied:
+			// request-shaping fields are provider-wire specific.
+			compat: isAnthropic
+				? undefined
+				: {
+						supportsStore: false,
+						supportsDeveloperRole: false,
+						supportsReasoningEffort: false,
+					},
+		} as ModelSpec<Api>;
+		discovered.push(buildModel(withAdvertisedEfforts(spec, advertised, isAnthropic)));
 	}
 	return discovered;
 }
