@@ -39,7 +39,7 @@ import {
 	type PythonPreludeSource,
 } from "./kernel";
 import { resolveExplicitPythonRuntime } from "./runtime";
-import { ensurePyToolBridge, registerPyToolBridge } from "./tool-bridge";
+import { ensurePyToolBridge, registerPyToolBridge, unregisterPyToolBridgeSession } from "./tool-bridge";
 
 export type PythonKernelMode = "session" | "per-call";
 
@@ -348,6 +348,9 @@ async function replaceSessionKernel(
 async function shutdownInvalidatedSession(session: PythonSession): Promise<KernelShutdownResult> {
 	const replacement = session.replacement;
 	if (replacement) await replacement.promise.catch(() => undefined);
+	// The kernel is going, so the threads it left running go with it: the
+	// session's standing bridge entry has nothing left to answer.
+	unregisterPyToolBridgeSession(session.sessionId);
 	return await session.kernel.shutdown();
 }
 

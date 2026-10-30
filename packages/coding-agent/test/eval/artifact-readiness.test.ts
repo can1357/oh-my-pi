@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils/temp";
@@ -149,6 +149,58 @@ describe("eval artifact readiness", () => {
 		// from a listing taken between the two.
 		expect(await resolving).toBe(path.join(destination, "1.bash.log"));
 		await whenArtifactCopiesSettle(destination);
+	});
+
+	it("re-lists when a copy both starts and finishes while it is listing", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-readiness-");
+		const source = path.join(tempDir.path(), "2026-01-01T00-00-00-000Z_source");
+		const destination = path.join(tempDir.path(), "2026-01-01T00-00-01-000Z_destination");
+		fs.mkdirSync(source, { recursive: true });
+		fs.mkdirSync(destination, { recursive: true });
+		fs.writeFileSync(path.join(source, "1.bash.log"), "INHERITED ONE");
+
+		// The whole copy happens inside the one `readdir` that is looking for
+		// the artifact: by the time the answer comes back nothing is pending,
+		// and the listing it came from is already out of date.
+		const readdir = fs.promises.readdir;
+		let injected = false;
+		const hook = spyOn(fs.promises, "readdir").mockImplementation((async (...args: unknown[]) => {
+			if (!injected && String(args[0]) === destination) {
+				injected = true;
+				await copySessionArtifacts(`${source}.jsonl`, `${destination}.jsonl`);
+			}
+			return await readdir(...(args as Parameters<typeof readdir>));
+		}) as typeof fs.promises.readdir);
+
+		try {
+			const resolved = await resolveSettledArtifact(sessionWithArtifacts(destination), "1");
+			expect(injected).toBe(true);
+			expect(resolved).toBe(path.join(destination, "1.bash.log"));
+		} finally {
+			hook.mockRestore();
+		}
+	});
+
+	it("does not answer a read that was cancelled while it was listing", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-readiness-");
+		const destination = path.join(tempDir.path(), "2026-01-01T00-00-01-000Z_destination");
+		fs.mkdirSync(destination, { recursive: true });
+		fs.writeFileSync(path.join(destination, "0.bash.log"), "THE SESSION'S OWN");
+
+		const controller = new AbortController();
+		const readdir = fs.promises.readdir;
+		const hook = spyOn(fs.promises, "readdir").mockImplementation((async (...args: unknown[]) => {
+			if (String(args[0]) === destination) controller.abort(new Error("reader gave up"));
+			return await readdir(...(args as Parameters<typeof readdir>));
+		}) as typeof fs.promises.readdir);
+
+		try {
+			await expect(
+				resolveSettledArtifact(sessionWithArtifacts(destination), "0", undefined, controller.signal),
+			).rejects.toThrow("reader gave up");
+		} finally {
+			hook.mockRestore();
+		}
 	});
 
 	it("does not hold a cell for a staging tree that no copy is using", async () => {

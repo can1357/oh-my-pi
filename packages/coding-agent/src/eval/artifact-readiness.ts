@@ -1,8 +1,9 @@
-import * as fs from "node:fs/promises";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import { contextLocalProtocolOptions } from "../internal-urls/context";
-import { artifactCopiesPending, whenArtifactCopiesSettle } from "../session/session-manager";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { artifactCopyActivity, whenArtifactCopiesSettle } from "../session/session-manager";
 import type { ToolSession } from "../tools";
 
 export { EVAL_ARTIFACTS_READY_BRIDGE_NAME } from "./artifact-readiness-name";
@@ -21,11 +22,14 @@ export { EVAL_ARTIFACTS_READY_BRIDGE_NAME } from "./artifact-readiness-name";
  * one operation, done here, and what crosses the bridge is the file.
  *
  * The loop is the same point: a copy announced while this one was listing
- * means the listing is already out of date, and the only answer that is not is
- * one taken while nothing is running.
+ * means the listing is already out of date. "Nothing is pending now" does not
+ * say that — a copy that started *and finished* during the listing leaves an
+ * empty table behind a stale answer — so what is compared is the count of
+ * copies ever announced into that directory, which only goes up.
  *
- * The caller's signal cancels the wait: a pending answer is still not
- * something to make a cancelled read sit through.
+ * The caller's signal cancels the wait and the answer alike: a listing taken
+ * before an abort is not something to hand back afterwards as though the read
+ * had succeeded.
  */
 export async function resolveSettledArtifact(
 	session: ToolSession,
@@ -37,18 +41,32 @@ export async function resolveSettledArtifact(
 	// re-adoption is not the session's current one.
 	const dir = root ?? contextLocalProtocolOptions(session)?.getArtifactsDir?.();
 	if (!dir) return null;
-	for (;;) {
+	for (let attempt = 1; ; attempt++) {
 		await whenArtifactCopiesSettle(dir, signal);
+		const before = artifactCopyActivity(dir);
 		const found = await artifactInDirectory(dir, id);
-		if (!artifactCopiesPending(dir)) return found;
+		const after = artifactCopyActivity(dir);
+		if (signal?.aborted) throw signal.reason ?? new Error("Aborted");
+		if (after.announced === before.announced && after.pending === 0) return found;
+		// Copies arriving back to back with no gap between them would keep a
+		// reader here forever. Saying so is better than answering from a
+		// listing that was out of date before it finished.
+		if (attempt >= ARTIFACT_RESOLVE_ATTEMPTS) {
+			throw new ToolError(
+				`artifact://${id} could not be read: copies into ${dir} kept arriving through ${attempt} attempts to list it`,
+			);
+		}
 	}
 }
+
+/** How many times a reader re-lists a directory that keeps gaining copies before it gives up. */
+const ARTIFACT_RESOLVE_ATTEMPTS = 16;
 
 /** The `<id>.<tool>.log` file for `id` in `dir`, or `null`. */
 async function artifactInDirectory(dir: string, id: string): Promise<string | null> {
 	let names: string[];
 	try {
-		names = await fs.readdir(dir);
+		names = await fs.promises.readdir(dir);
 	} catch (error) {
 		if (!isEnoent(error)) throw error;
 		return null;

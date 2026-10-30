@@ -45,6 +45,15 @@ interface BridgeServer {
 }
 
 const registrations = new Map<string, PyToolBridgeEntry>();
+/**
+ * The newest entry per session, outliving the cell that made it.
+ *
+ * A run-scoped entry is gone the moment its cell ends, and a background thread
+ * reading an artifact after that has no run of its own to name. The questions
+ * it may ask without one are limited at the request gate; what this holds is
+ * somewhere for them to be answered.
+ */
+const sessionRegistrations = new Map<string, PyToolBridgeEntry>();
 let serverPromise: Promise<BridgeServer> | null = null;
 
 function markExpectedBridgeShutdownError(error: unknown): error is Error {
@@ -187,7 +196,7 @@ async function startServer(): Promise<BridgeServer> {
 				return Response.json({ ok: false, error: "Missing run" }, { status: 400 });
 			}
 			const registrationKey = bridgeRegistrationKey(sessionId, runId);
-			const entry = registrations.get(registrationKey) ?? registrations.get(sessionId);
+			const entry = registrations.get(registrationKey) ?? sessionRegistrations.get(sessionId);
 			if (!entry) {
 				return Response.json(
 					{ ok: false, error: `No active Python tool bridge session: ${registrationKey}` },
@@ -276,11 +285,21 @@ function bridgeRegistrationKey(sessionId: string, runId: string): string {
 export function registerPyToolBridge(sessionId: string, runId: string, entry: PyToolBridgeEntry): () => void {
 	const key = bridgeRegistrationKey(sessionId, runId);
 	registrations.set(key, entry);
+	// Also under the session alone, and kept after the cell ends: a thread a
+	// finished cell left running still reads this session's artifacts and has
+	// no run to name. The newest cell's entry is the one that answers, which
+	// is the session it would have asked anyway.
+	sessionRegistrations.set(sessionId, entry);
 	return () => {
 		if (registrations.get(key) === entry) {
 			registrations.delete(key);
 		}
 	};
+}
+
+/** Release a session's standing bridge entry when its kernel goes. */
+export function unregisterPyToolBridgeSession(sessionId: string): void {
+	sessionRegistrations.delete(sessionId);
 }
 
 /** Stop the bridge and clear registrations. Test-only / shutdown helper. */

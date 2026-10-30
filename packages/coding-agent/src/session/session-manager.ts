@@ -601,14 +601,27 @@ export async function whenArtifactCopiesSettle(dir?: string | null, signal?: Abo
 	}
 }
 
-/** Whether an artifact copy into `dir` is running in this process right now. */
-export function artifactCopiesPending(dir: string): boolean {
-	return (pendingArtifactCopies.get(path.resolve(dir))?.size ?? 0) > 0;
+/**
+ * How many artifact copies into `dir` this process has announced, ever, and
+ * how many are running now.
+ *
+ * A reader that lists the directory needs both. "Nothing is running" taken
+ * after the listing does not say the listing was current: a copy announced and
+ * finished while it ran leaves the table empty and the listing stale. The
+ * count of announcements is what separates those, because it only goes up.
+ */
+export function artifactCopyActivity(dir: string): { announced: number; pending: number } {
+	const key = path.resolve(dir);
+	return { announced: artifactCopyAnnouncements.get(key) ?? 0, pending: pendingArtifactCopies.get(key)?.size ?? 0 };
 }
+
+/** Announcements per destination, counted for {@link artifactCopyActivity}; never reset. */
+const artifactCopyAnnouncements = new Map<string, number>();
 
 /** Announce a copy into `dir` for the readers of it, until `done` settles. */
 function announceArtifactCopy(dir: string, done: Promise<unknown>): () => void {
 	const key = path.resolve(dir);
+	artifactCopyAnnouncements.set(key, (artifactCopyAnnouncements.get(key) ?? 0) + 1);
 	const set = pendingArtifactCopies.get(key) ?? new Set();
 	set.add(done);
 	pendingArtifactCopies.set(key, set);

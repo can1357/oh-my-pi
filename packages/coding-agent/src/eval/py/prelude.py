@@ -32,9 +32,18 @@ if "__omp_prelude_loaded__" not in globals():
     _OMP_BARE_ARTIFACT_RE = re.compile(r"^artifact://\d+$", re.IGNORECASE)
 
     def _omp_url_roots() -> dict:
-        """On-disk roots for internal-URL schemes, keyed by scheme (PI_EVAL_LOCAL_ROOTS)."""
+        """On-disk roots for internal-URL schemes, keyed by scheme.
+
+        The running cell's own roots, pinned to its context, before the process
+        environment: a cell suspended across a session re-adoption still reads
+        the artifacts directory it was started with, while the environment by
+        then names whichever cell ran last."""
+        _roots_getter = globals().get("__omp_current_url_roots__")
+        _raw = _roots_getter() if callable(_roots_getter) else None
+        if not isinstance(_raw, str):
+            _raw = os.environ.get("PI_EVAL_LOCAL_ROOTS")
         try:
-            roots = json.loads(os.environ.get("PI_EVAL_LOCAL_ROOTS") or "{}")
+            roots = json.loads(_raw or "{}")
         except (ValueError, TypeError):
             return {}
         return roots if isinstance(roots, dict) else {}

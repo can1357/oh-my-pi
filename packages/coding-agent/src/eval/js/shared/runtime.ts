@@ -15,6 +15,7 @@ import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import type { EvalTableColumn } from "@oh-my-pi/pi-tui/tools/eval";
 import { type EvalDisplayOutput, evalImageMetadata } from "../../types";
 import type { EvalPreludeSource } from "../worker-protocol";
+import { EVAL_ARTIFACTS_READY_BRIDGE_NAME } from "../../artifact-readiness-name";
 import { createHelpers, type HelperBundle } from "./helpers";
 import { awaitMaybePromise, indirectEval } from "./indirect-eval";
 import { LocalModuleLoader } from "./local-module-loader";
@@ -301,6 +302,18 @@ function compiles(source: string): boolean {
  * back through `RuntimeHooks` that the embedder supplies — wire format is the embedder's
  * concern.
  */
+/**
+ * Whether a bridge rejection says the call's run has ended rather than that the
+ * call failed.
+ *
+ * A reader that outlives its cell is the one case where asking again without a
+ * run is right; anything else the host says is the answer.
+ */
+function isRunGoneError(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	return message.includes("Run no longer active");
+}
+
 export class JsRuntime {
 	#globalOwner = Symbol("JsRuntime globals");
 	#ownedGlobalKeys = new Set<string>();
@@ -408,7 +421,27 @@ export class JsRuntime {
 			// declaration that no copy is running — the host that rejects a
 			// call from a run that has ended is the same host running the copy
 			// — so a failure here fails the read.
-			...(opts.resolveArtifact ? { resolveArtifact: opts.resolveArtifact } : {}),
+			...(opts.resolveArtifact
+				? {
+						resolveArtifact: async (id: string, root: string) => {
+							// Through the reader's own run while it has one, so
+							// the wait belongs to that cell's timeout and its
+							// abort stops it. Only a reader whose cell has
+							// ended asks outside a run, where there is no
+							// deadline of its own to charge it to.
+							const hooks = this.#activeHooks("tool");
+							if (hooks) {
+								try {
+									const value = await hooks.callTool(EVAL_ARTIFACTS_READY_BRIDGE_NAME, { id, root });
+									return typeof value === "string" && value.length > 0 ? value : null;
+								} catch (error) {
+									if (!isRunGoneError(error)) throw error;
+								}
+							}
+							return await opts.resolveArtifact!(id, root);
+						},
+					}
+				: {}),
 		});
 		this.#initialGlobalKeys = new Set(Object.getOwnPropertyNames(globalThis));
 		this.#install(opts.extraGlobals);
