@@ -1035,16 +1035,14 @@ export function parseClaudePluginsRegistry(content: string): ClaudePluginsRegist
 	return data;
 }
 
-/** Project discovery never examines home or shared temporary roots, or their ancestors. */
-export function getProjectDiscoveryCeilings(): ReadonlySet<string> {
-	const ceilings = new Set<string>();
-	ceilings.add(normalizePathForComparison(os.homedir()));
-	ceilings.add(normalizePathForComparison(os.tmpdir()));
+/** Canonical home and shared temporary roots that bound project discovery. */
+export function getProjectDiscoveryCeilings(options?: { includeHome?: boolean }): ReadonlySet<string> {
+	const roots = [os.tmpdir(), process.env.TMPDIR, process.env.TMP, process.env.TEMP];
+	if (options?.includeHome !== false) roots.push(os.homedir());
 	if (process.platform !== "win32") {
-		ceilings.add(normalizePathForComparison("/tmp"));
-		ceilings.add(normalizePathForComparison("/var/tmp"));
+		roots.push("/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp");
 	}
-	return ceilings;
+	return new Set(roots.filter((root): root is string => Boolean(root)).map(normalizePathForComparison));
 }
 
 /** The current user's config roots are never project anchors. */

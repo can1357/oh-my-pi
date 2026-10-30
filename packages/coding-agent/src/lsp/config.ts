@@ -1,8 +1,18 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
-import { $which, isRecord, logger, pathIsWithin, type WhichOptions } from "@oh-my-pi/pi-utils";
+import {
+	$which,
+	isEnoent,
+	isRecord,
+	logger,
+	normalizePathForComparison,
+	pathIsWithin,
+	type WhichOptions,
+} from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
-import type { ClaudePluginRoot } from "../discovery/helpers";
+import { getConfigDirPaths } from "../config";
+import { type ClaudePluginRoot, getProjectDiscoveryCeilings } from "../discovery/helpers";
 import {
 	type ConfigFileAdapter,
 	type ConfigFileSource,
@@ -202,19 +212,117 @@ export function hasRootMarkers(cwd: string, markers: string[]): boolean {
 	return false;
 }
 
+/** A shared directory must not become a language server's indexing scope. */
+export class UnsafeLspRootError extends Error {
+	constructor(root: string) {
+		super(
+			`Refusing LSP workspace root ${JSON.stringify(root)}. Open a project directory or pass a file inside one; filesystem roots, shared temporary-directory roots and home directories without .git are not safe LSP workspaces.`,
+		);
+		this.name = "UnsafeLspRootError";
+	}
+}
+
+function broadLspRoots(): ReadonlySet<string> {
+	// Dotfiles repositories may legitimately use the home directory as their root.
+	return getProjectDiscoveryCeilings({ includeHome: !fs.existsSync(path.join(os.homedir(), ".git")) });
+}
+
+function isBroadLspRoot(root: string, broadRoots: ReadonlySet<string>): boolean {
+	const resolved = path.resolve(root);
+	const normalized = normalizePathForComparison(resolved);
+	return (
+		resolved === path.parse(resolved).root || normalized === path.parse(normalized).root || broadRoots.has(normalized)
+	);
+}
+
+/** Check lexical paths and their realpaths, including symlink aliases. */
+export function assertSafeLspRoot(cwd: string): string {
+	if (isBroadLspRoot(cwd, broadLspRoots())) throw new UnsafeLspRootError(cwd);
+	return path.resolve(cwd);
+}
+
+/** Workspace additions have the same indexing boundary as initialization. */
+export function assertSafeLspWorkspaceFolders(folders: unknown): void {
+	if (!Array.isArray(folders)) throw new Error("Invalid LSP workspace folders: expected an array");
+	for (const folder of folders) {
+		if (!isRecord(folder) || typeof folder.uri !== "string") {
+			throw new Error("Invalid LSP workspace folder: expected a file URI");
+		}
+		assertSafeLspRoot(Bun.fileURLToPath(folder.uri));
+	}
+}
+
+/** Validate raw requests and notifications before they reach a language server. */
+export function assertSafeLspWorkspaceMessage(method: string, params: unknown): void {
+	if (method === "initialize" && isRecord(params)) {
+		if (typeof params.rootPath === "string") {
+			if (!path.isAbsolute(params.rootPath)) throw new UnsafeLspRootError(params.rootPath);
+			assertSafeLspRoot(params.rootPath);
+		}
+		if (typeof params.rootUri === "string") assertSafeLspRoot(Bun.fileURLToPath(params.rootUri));
+		if (params.workspaceFolders != null) assertSafeLspWorkspaceFolders(params.workspaceFolders);
+	} else if (method === "workspace/didChangeWorkspaceFolders") {
+		if (!isRecord(params) || !isRecord(params.event)) {
+			throw new Error("Invalid LSP workspace folder change: expected event.added");
+		}
+		assertSafeLspWorkspaceFolders(params.event.added);
+	}
+}
+
+function* lspProjectAncestors(cwd: string): Generator<string> {
+	const broadRoots = broadLspRoots();
+	// Keep workspace roots lexical, matching document URIs; only safety checks resolve symlinks.
+	let dir = path.resolve(cwd);
+	while (!isBroadLspRoot(dir, broadRoots)) {
+		yield dir;
+		const parent = path.dirname(dir);
+		if (parent === dir) return;
+		dir = parent;
+	}
+}
+
+const LSP_CONFIG_FILENAMES = ["lsp.json", ".lsp.json", "lsp.yaml", ".lsp.yaml", "lsp.yml", ".lsp.yml"];
+const PROJECT_ROOT_MARKERS = [".git", ...new Set(Object.values(DEFAULTS).flatMap(config => config.rootMarkers))];
+
+/**
+ * Preserve ordinary session roots. From an unsafe cwd, a concrete file can
+ * instead select its nearest project without searching descendants or siblings.
+ */
+export function resolveLspRoot(cwd: string, targetPath?: string): string {
+	try {
+		return assertSafeLspRoot(cwd);
+	} catch (error) {
+		if (!(error instanceof UnsafeLspRootError) || targetPath === undefined) throw error;
+	}
+	const target = path.resolve(cwd, targetPath);
+	let start = path.dirname(target);
+	try {
+		if (fs.statSync(target).isDirectory()) start = target;
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+	}
+	const targetMarkers = getServersForFile(loadConfigCandidates(start), target).flatMap(([, config]) =>
+		config.disabled ? [] : config.rootMarkers.filter(marker => marker !== "."),
+	);
+	const markers = targetMarkers.length > 0 ? [".git", ...new Set(targetMarkers)] : PROJECT_ROOT_MARKERS;
+	for (const dir of lspProjectAncestors(start)) {
+		if (hasRootMarkers(dir, markers) || hasRootMarkers(dir, LSP_CONFIG_FILENAMES)) return dir;
+		const configDirs = getConfigDirPaths("", { user: false, project: true, cwd: dir });
+		if (configDirs.some(configDir => hasRootMarkers(configDir, LSP_CONFIG_FILENAMES))) return dir;
+	}
+	throw new UnsafeLspRootError(cwd);
+}
+
 /**
  * Check whether any ancestor directory of a file is an LSP project root.
  */
 export function hasRootMarkerAncestor(filePath: string, markers: string[]): boolean {
 	if (markers.length === 0) return false;
 
-	let dir = path.dirname(path.resolve(filePath));
-	while (true) {
+	for (const dir of lspProjectAncestors(path.dirname(path.resolve(filePath)))) {
 		if (hasRootMarkers(dir, markers)) return true;
-		const parent = path.dirname(dir);
-		if (parent === dir) return false;
-		dir = parent;
 	}
+	return false;
 }
 
 // =============================================================================
@@ -399,6 +507,24 @@ function marketplaceConfigSource(root: ClaudePluginRoot): ConfigFileSource<Norma
 	};
 }
 
+function loadConfigCandidates(cwd: string): LspConfig {
+	let mergedServers = coerceServerConfigs(DEFAULTS);
+	const configSources = configFileSources("lsp", cwd, adaptConfig, {
+		pluginRootSource: marketplaceConfigSource,
+	}).reverse();
+
+	let idleTimeoutMs: number | undefined;
+	for (const source of configSources) {
+		const parsed = source.read();
+		if (!parsed) continue;
+		mergedServers = mergeServers(mergedServers, parsed.servers);
+		if (parsed.idleTimeoutMs !== undefined) {
+			idleTimeoutMs = parsed.idleTimeoutMs;
+		}
+	}
+	return { servers: applyRuntimeDefaults(mergedServers), idleTimeoutMs };
+}
+
 /**
  * Load LSP configuration.
  *
@@ -432,28 +558,16 @@ function marketplaceConfigSource(root: ClaudePluginRoot): ConfigFileSource<Norma
  * ```
  */
 export function loadConfig(cwd: string): LspConfig {
-	let mergedServers = coerceServerConfigs(DEFAULTS);
-
-	const configSources = configFileSources("lsp", cwd, adaptConfig, {
-		pluginRootSource: marketplaceConfigSource,
-	}).reverse();
-
-	let idleTimeoutMs: number | undefined;
-	for (const source of configSources) {
-		const parsed = source.read();
-		if (!parsed) continue;
-		mergedServers = mergeServers(mergedServers, parsed.servers);
-		if (parsed.idleTimeoutMs !== undefined) {
-			idleTimeoutMs = parsed.idleTimeoutMs;
-		}
-	}
+	const { servers: candidates, idleTimeoutMs } = loadConfigCandidates(cwd);
 
 	// Filter to servers whose project markers exist and whose binary resolves (local or $PATH)
 	const servers: Record<string, ServerConfig> = {};
-	const candidates = applyRuntimeDefaults(mergedServers);
+	const unsafeWorkspace = isBroadLspRoot(cwd, broadLspRoots());
 	for (const name in candidates) {
 		const config = candidates[name];
 		if (config.disabled) continue;
+		// File-scoped custom linters do not initialize an LSP workspace.
+		if (unsafeWorkspace && !config.createClient) continue;
 		if (!hasRootMarkers(cwd, config.rootMarkers)) continue;
 		const resolved = resolveCommand(config.command, cwd);
 		if (!resolved) continue;

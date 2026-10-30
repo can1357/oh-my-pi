@@ -12,6 +12,7 @@ import { restoreEnvValue } from "../helpers/settings-test-state";
 import { createLspWritethrough, LspTool } from "@oh-my-pi/pi-coding-agent/lsp";
 import * as lspClient from "@oh-my-pi/pi-coding-agent/lsp/client";
 import * as lspConfig from "@oh-my-pi/pi-coding-agent/lsp/config";
+import { clearLinterClientCache } from "@oh-my-pi/pi-coding-agent/lsp/clients";
 import { configCache, getServersForFile, type LspConfig, loadConfig } from "@oh-my-pi/pi-coding-agent/lsp/config";
 import { waitForDiagnostics } from "@oh-my-pi/pi-coding-agent/lsp/diagnostics";
 import {
@@ -409,6 +410,299 @@ afterEach(() => {
 describe("lsp regressions", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
+	});
+
+	describe("unsafe workspace roots", () => {
+		let fixture: TempDir;
+		let project: string;
+		let probeConfig: ServerConfig;
+		const tempEnvKeys = ["TMPDIR", "TMP", "TEMP"] as const;
+		let originalTempEnv: Array<string | undefined>;
+
+		beforeEach(() => {
+			fixture = TempDir.createSync("@omp-lsp-root-safety-");
+			project = path.join(fixture.path(), "project");
+			fs.mkdirSync(path.join(project, ".git"), { recursive: true });
+			const probe = {
+				command: process.execPath,
+				args: ["run", path.join(import.meta.dir, "../fixtures/fake-lsp-server.ts")],
+				extensionToLanguage: { ".omp-root-probe": "plaintext" },
+			};
+			fs.writeFileSync(path.join(os.homedir(), "lsp.json"), JSON.stringify({ servers: { probe } }));
+			probeConfig = { ...probe, fileTypes: [".omp-root-probe"], rootMarkers: ["."] };
+			originalTempEnv = tempEnvKeys.map(key => process.env[key]);
+		});
+
+		afterEach(async () => {
+			await lspClient.shutdownAll();
+			clearLinterClientCache();
+			configCache.clear();
+			for (const [index, key] of tempEnvKeys.entries()) restoreEnvValue(key, originalTempEnv[index]);
+			fixture.removeSync();
+		});
+
+		it.each([
+			path.parse(process.cwd()).root,
+			os.tmpdir(),
+			...(process.platform === "win32" ? [] : ["/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp"]),
+		])("does not discover or start a server at shared root %s", async root => {
+			expect(loadConfig(root).servers.probe).toBeUndefined();
+			const server = installHandshakeLsp();
+			await expect(lspClient.getOrCreateClient(probeConfig, root, 1_000)).rejects.toThrow(
+				"Open a project directory or pass a file inside one",
+			);
+			expect(server.spawnCount).toBe(0);
+		});
+
+		it("refuses a symlink to the filesystem root", async () => {
+			const alias = path.join(fixture.path(), "root-alias");
+			fs.symlinkSync(path.parse(project).root, alias, "junction");
+			expect(loadConfig(alias).servers.probe).toBeUndefined();
+			const server = installHandshakeLsp();
+			await expect(lspClient.getOrCreateClient(probeConfig, alias, 1_000)).rejects.toThrow(
+				"Refusing LSP workspace root",
+			);
+			expect(server.spawnCount).toBe(0);
+		});
+
+		it.each([...tempEnvKeys])("refuses %s and its realpath or symlink aliases", async key => {
+			const shared = path.join(fixture.path(), "shared-temp");
+			const alias = path.join(fixture.path(), "temp-alias");
+			fs.mkdirSync(shared);
+			fs.symlinkSync(shared, alias, "junction");
+			process.env[key] = alias;
+			for (const root of [shared, alias]) {
+				expect(loadConfig(root).servers.probe).toBeUndefined();
+				const server = installHandshakeLsp();
+				await expect(lspClient.getOrCreateClient(probeConfig, root, 1_000)).rejects.toThrow(
+					"Refusing LSP workspace root",
+				);
+				expect(server.spawnCount).toBe(0);
+			}
+			expect(loadConfig(project).servers.probe).toBeDefined();
+		});
+
+		it("refuses the home directory without .git, including a symlink alias", async () => {
+			const home = os.homedir();
+			const alias = path.join(fixture.path(), "home-alias");
+			fs.symlinkSync(home, alias, "junction");
+			const server = installHandshakeLsp();
+			for (const root of [home, alias]) {
+				expect(loadConfig(root).servers.probe).toBeUndefined();
+				await expect(lspClient.getOrCreateClient(probeConfig, root, 1_000)).rejects.toThrow(
+					"Refusing LSP workspace root",
+				);
+			}
+			expect(server.spawnCount).toBe(0);
+		});
+
+		it.each(["directory", "gitfile"])("allows a home repository with a .git %s", async kind => {
+			const home = os.homedir();
+			if (kind === "directory") fs.mkdirSync(path.join(home, ".git"));
+			else fs.writeFileSync(path.join(home, ".git"), "gitdir: /dotfiles/worktree\n");
+			expect(loadConfig(home).servers.probe).toBeDefined();
+			const server = installHandshakeLsp();
+			const client = await lspClient.getOrCreateClient(probeConfig, home, 1_000);
+			expect(client.cwd).toBe(home);
+			expect(server.spawnCount).toBe(1);
+		});
+
+		it("does not exempt a home repository that is also a shared temporary root", async () => {
+			const home = os.homedir();
+			fs.mkdirSync(path.join(home, ".git"));
+			process.env.TEMP = home;
+			expect(loadConfig(home).servers.probe).toBeUndefined();
+			const server = installHandshakeLsp();
+			await expect(lspClient.getOrCreateClient(probeConfig, home, 1_000)).rejects.toThrow(
+				"Refusing LSP workspace root",
+			);
+			expect(server.spawnCount).toBe(0);
+		});
+
+		it("allows a project directory under the OS temporary directory", async () => {
+			expect(loadConfig(project).servers.probe).toBeDefined();
+			const server = installHandshakeLsp();
+			const client = await lspClient.getOrCreateClient(probeConfig, project, 1_000);
+			expect(client.cwd).toBe(project);
+			expect(server.spawnCount).toBe(1);
+		});
+
+		it("does not revalidate the workspace root when returning a cached client", async () => {
+			const server = installHandshakeLsp();
+			const guard = vi.spyOn(lspConfig, "assertSafeLspRoot");
+			const client = await lspClient.getOrCreateClient(probeConfig, project, 1_000);
+			expect(guard).toHaveBeenCalledWith(project);
+			guard.mockClear();
+
+			expect(await lspClient.getOrCreateClient({ ...probeConfig }, project, 1_000)).toBe(client);
+			expect(guard).not.toHaveBeenCalled();
+			expect(server.spawnCount).toBe(1);
+		});
+
+		it("initializes a real probe at the file's nearest project when cwd is a shared root", async () => {
+			const nestedProject = path.join(project, "nested");
+			fs.mkdirSync(path.join(nestedProject, "src"), { recursive: true });
+			fs.writeFileSync(path.join(nestedProject, "package.json"), "{}");
+			const file = path.join(nestedProject, "src", "file.omp-root-probe");
+			fs.writeFileSync(file, "probe\n");
+			const tool = new LspTool(makeLspSession(os.tmpdir()));
+			const result = await tool.execute("safe-file-root", { action: "request", file, query: "test/state" });
+			expect(result.details?.success).toBe(true);
+			const text = textResult(result);
+			expect(text).toContain(fileToUri(nestedProject));
+			expect(text).toContain(`"rootPath": "${nestedProject}"`);
+			expect(text).not.toContain(`"rootPath": "${os.tmpdir()}"`);
+		});
+
+		it.each(["project", "temporary-root"])(
+			"keeps lexical workspace and document paths through a %s symlink",
+			async kind => {
+				fs.mkdirSync(path.join(project, "src"));
+				const alias = path.join(fixture.path(), "alias");
+				fs.symlinkSync(kind === "project" ? project : fixture.path(), alias, "junction");
+				const workspace = kind === "project" ? alias : path.join(alias, "project");
+				const cwd = kind === "project" ? os.tmpdir() : alias;
+				if (kind === "temporary-root") process.env.TEMP = fixture.path();
+				const file = path.join(workspace, "src", "file.omp-root-probe");
+				fs.writeFileSync(file, "probe\n");
+
+				const root = lspConfig.resolveLspRoot(cwd, file);
+				expect(root).toBe(workspace);
+				expect(lspConfig.resolveLspRoot(cwd, path.join(workspace, "src", "missing.omp-root-probe"))).toBe(
+					workspace,
+				);
+				const server = installHandshakeLsp();
+				const client = await lspClient.getOrCreateClient(probeConfig, root, 1_000);
+				expect(server.received.find(message => message.method === "initialize")?.params).toMatchObject({
+					rootPath: workspace,
+					rootUri: fileToUri(workspace),
+					workspaceFolders: [{ uri: fileToUri(workspace), name: path.basename(workspace) }],
+				});
+
+				await lspClient.ensureFileOpen(client, file);
+				expect(await server.waitFor(message => message.method === "textDocument/didOpen")).toMatchObject({
+					params: { textDocument: { uri: fileToUri(file) } },
+				});
+				await lspClient.notifyWorkspaceWatchedFiles(root, [
+					{ filePath: file, type: lspClient.FileChangeType.Changed },
+				]);
+				expect(await server.waitFor(message => message.method === "workspace/didChangeWatchedFiles")).toMatchObject(
+					{
+						params: { changes: [{ uri: fileToUri(file), type: lspClient.FileChangeType.Changed }] },
+					},
+				);
+			},
+		);
+
+		it("resolves a custom project marker instead of a nearer unrelated language marker", async () => {
+			fs.rmSync(path.join(project, ".git"), { recursive: true });
+			fs.mkdirSync(path.join(project, "src"));
+			fs.writeFileSync(path.join(project, ".probe-project"), "");
+			fs.writeFileSync(path.join(project, "src", "Makefile"), "");
+			fs.writeFileSync(
+				path.join(os.homedir(), "lsp.json"),
+				JSON.stringify({ servers: { probe: { ...probeConfig, rootMarkers: [".probe-project"] } } }),
+			);
+			const file = path.join(project, "src", "file.omp-root-probe");
+			fs.writeFileSync(file, "probe\n");
+			const tool = new LspTool(makeLspSession(os.tmpdir()));
+			const result = await tool.execute("custom-file-root", { action: "request", file, query: "test/state" });
+			expect(result.details?.success).toBe(true);
+			expect(textResult(result)).toContain(`"rootPath": "${project}"`);
+		});
+
+		it("preserves custom linter diagnostics and status at a shared root", async () => {
+			const shared = path.join(fixture.path(), "shared");
+			fs.mkdirSync(shared);
+			process.env.TEMP = shared;
+			const file = path.join(shared, "file.omp-root-probe");
+			fs.writeFileSync(file, "probe\n");
+			const lint = vi.fn(async () => [] as Diagnostic[]);
+			const createClient = vi.fn(() => ({
+				lint,
+				format: async (_file: string, content: string) => content,
+			}));
+			configCache.set(shared, { servers: { "file-scoped-linter": { ...probeConfig, createClient } } });
+			const tool = new LspTool(makeLspSession(shared));
+			const diagnostics = await tool.execute("shared-linter", { action: "diagnostics", file });
+			expect(diagnostics.details?.success).toBe(true);
+			expect(lint).toHaveBeenCalledWith(file, expect.any(AbortSignal));
+			expect(createClient).toHaveBeenCalledWith(expect.anything(), shared);
+			const status = await tool.execute("shared-status", { action: "status" });
+			expect(status.details?.success).toBe(true);
+			expect(textResult(status)).toContain("file-scoped-linter");
+		});
+
+		it("refuses workspace-wide calls and files outside a project from a shared cwd", async () => {
+			const tool = new LspTool(makeLspSession(os.tmpdir()));
+			await expect(
+				tool.execute("unsafe-workspace", { action: "symbols", file: "*", query: "probe" }),
+			).rejects.toThrow("Open a project directory or pass a file inside one");
+			await expect(
+				tool.execute("unsafe-file", {
+					action: "request",
+					file: path.join(fixture.path(), "file.omp-root-probe"),
+					query: "test/state",
+				}),
+			).rejects.toThrow("Open a project directory or pass a file inside one");
+		});
+
+		it("does not treat a marker in the shared temporary root as an ancestor project", () => {
+			const shared = path.join(fixture.path(), "shared");
+			fs.mkdirSync(path.join(shared, "src"), { recursive: true });
+			fs.writeFileSync(path.join(shared, "project.marker"), "");
+			process.env.TEMP = shared;
+			expect(lspConfig.hasRootMarkerAncestor(path.join(shared, "src", "file.ts"), ["project.marker"])).toBe(false);
+		});
+
+		it("does not select a symlinked shared root as the file's project", () => {
+			const alias = path.join(fixture.path(), "project-alias");
+			fs.symlinkSync(project, alias, "junction");
+			process.env.TEMP = project;
+			expect(() => lspConfig.resolveLspRoot(os.tmpdir(), path.join(alias, "missing.omp-root-probe"))).toThrow(
+				"Refusing LSP workspace root",
+			);
+			expect(lspConfig.hasRootMarkerAncestor(path.join(alias, "missing.omp-root-probe"), [".git"])).toBe(false);
+		});
+
+		it.each(["notification", "request"])("refuses unsafe later workspace additions sent as a %s", async kind => {
+			const server = installHandshakeLsp();
+			const client = await lspClient.getOrCreateClient(probeConfig, project, 1_000);
+			const params = { event: { added: [{ uri: fileToUri(os.tmpdir()), name: "temp" }], removed: [] } };
+			const operation =
+				kind === "notification"
+					? lspClient.sendNotification(client, "workspace/didChangeWorkspaceFolders", params)
+					: lspClient.sendRequest(client, "workspace/didChangeWorkspaceFolders", params, undefined, 100);
+			await expect(operation).rejects.toThrow("Refusing LSP workspace root");
+			expect(server.received.some(message => message.method === "workspace/didChangeWorkspaceFolders")).toBe(false);
+			await lspClient.sendNotification(client, "workspace/didChangeWorkspaceFolders", {
+				event: { added: [{ uri: fileToUri(project), name: "project" }], removed: params.event.added },
+			});
+			expect(
+				server.received.filter(message => message.method === "workspace/didChangeWorkspaceFolders"),
+			).toHaveLength(1);
+		});
+
+		it.each(["rootPath", "rootUri", "workspaceFolders", "relativeRootPath"])(
+			"refuses a raw initialize with an unsafe %s",
+			async field => {
+				const server = installHandshakeLsp();
+				const client = await lspClient.getOrCreateClient(probeConfig, project, 1_000);
+				const key = field === "relativeRootPath" ? "rootPath" : field;
+				const value =
+					field === "relativeRootPath"
+						? ".."
+						: field === "rootPath"
+							? os.tmpdir()
+							: field === "rootUri"
+								? fileToUri(os.tmpdir())
+								: [{ uri: fileToUri(os.tmpdir()), name: "temp" }];
+				await expect(
+					lspClient.sendRequest(client, "initialize", { [key]: value }, undefined, 1_000),
+				).rejects.toThrow("Refusing LSP workspace root");
+				expect(server.received.filter(message => message.method === "initialize")).toHaveLength(1);
+			},
+		);
 	});
 
 	it("detects bracket-style glob patterns", () => {
@@ -1802,69 +2096,78 @@ describe("lsp regressions", () => {
 		expect(rowContents.join(" ").replace(/\s+/g, " ")).toContain(note);
 	});
 
-	it("answers repeated push diagnostics for unchanged text from a fresh report, without a project-load delay", async () => {
-		const tempDir = TempDir.createSync("@omp-lsp-unchanged-diags-");
-		const cwd = tempDir.path();
-		const target = path.join(cwd, "target.cpp");
-		const uri = fileToUri(target);
-		const error: Diagnostic = {
-			message: "Use of undeclared identifier 'unknown_identifier'",
-			severity: 1,
-			range: { start: { line: 0, character: 20 }, end: { line: 0, character: 38 } },
-		};
-		let overlay: string | undefined;
-		try {
-			await initTheme();
-			await Bun.write(target, "int value() { return 0; }\n");
-			installFakeLsp((message, server) => {
-				if (message.method === "initialize") {
-					server.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
-				} else if (message.method === "textDocument/didClose") {
-					overlay = undefined;
-				} else if (message.method === "textDocument/didOpen" || message.method === "textDocument/didChange") {
-					const params = message.params as {
-						textDocument: { text?: string; version: number };
-						contentChanges?: Array<{ text: string }>;
-					};
-					const text = params.textDocument.text ?? params.contentChanges![0].text;
-					// Like clangd, do not republish for an identical-text update.
-					if (text === overlay) return;
-					overlay = text;
-					server.send({
-						jsonrpc: "2.0",
-						method: "textDocument/publishDiagnostics",
-						params: {
-							uri,
-							version: params.textDocument.version,
-							diagnostics: text.includes("unknown_identifier") ? [error] : [],
-						},
-					});
-				} else if (message.method === "shutdown") {
-					server.send({ jsonrpc: "2.0", id: message.id, result: null });
-				} else if (message.method === "exit") {
-					server.exit();
-				}
-			});
-			configCache.set(cwd, { servers: { clangd: { command: "fake-lsp", fileTypes: ["cpp"], rootMarkers: [] } } });
-			const tool = new LspTool(makeLspSession(cwd));
-			const diagnostics = async () =>
-				textResult(await tool.execute("push-diags", { action: "diagnostics", file: target, timeout: 5 }));
+	it.each([false, true])(
+		"answers repeated push diagnostics without a project-load delay (shared cwd: %s)",
+		async sharedCwd => {
+			const tempDir = TempDir.createSync("@omp-lsp-unchanged-diags-");
+			const cwd = tempDir.path();
+			const target = path.join(cwd, "target.cpp");
+			const uri = fileToUri(target);
+			const error: Diagnostic = {
+				message: "Use of undeclared identifier 'unknown_identifier'",
+				severity: 1,
+				range: { start: { line: 0, character: 20 }, end: { line: 0, character: 38 } },
+			};
+			let overlay: string | undefined;
+			try {
+				await initTheme();
+				if (sharedCwd) fs.mkdirSync(path.join(cwd, ".git"));
+				await Bun.write(target, "int value() { return 0; }\n");
+				const server = installFakeLsp((message, server) => {
+					if (message.method === "initialize") {
+						server.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+					} else if (message.method === "textDocument/didClose") {
+						overlay = undefined;
+					} else if (message.method === "textDocument/didOpen" || message.method === "textDocument/didChange") {
+						const params = message.params as {
+							textDocument: { text?: string; version: number };
+							contentChanges?: Array<{ text: string }>;
+						};
+						const text = params.textDocument.text ?? params.contentChanges![0].text;
+						// Like clangd, do not republish for an identical-text update.
+						if (text === overlay) return;
+						overlay = text;
+						server.send({
+							jsonrpc: "2.0",
+							method: "textDocument/publishDiagnostics",
+							params: {
+								uri,
+								version: params.textDocument.version,
+								diagnostics: text.includes("unknown_identifier") ? [error] : [],
+							},
+						});
+					} else if (message.method === "shutdown") {
+						server.send({ jsonrpc: "2.0", id: message.id, result: null });
+					} else if (message.method === "exit") {
+						server.exit();
+					}
+				});
+				configCache.set(cwd, { servers: { clangd: { command: "fake-lsp", fileTypes: ["cpp"], rootMarkers: [] } } });
+				const tool = new LspTool(makeLspSession(sharedCwd ? os.tmpdir() : cwd));
+				const diagnostics = async () =>
+					textResult(await tool.execute("push-diags", { action: "diagnostics", file: target, timeout: 5 }));
 
-			expect(await diagnostics()).toBe("OK");
-			expect(await diagnostics()).toBe("OK");
-			await Bun.write(target, "int value() { return unknown_identifier; }\n");
-			expect(await diagnostics()).toContain("unknown_identifier");
-			expect(await diagnostics()).toContain("unknown_identifier");
-			await tool.execute("reload-push-diags", { action: "reload", file: target, timeout: 5 });
-			expect(await diagnostics()).toContain("unknown_identifier");
-			await Bun.write(target, "int value() { return 0; }\n");
-			expect(await diagnostics()).toBe("OK");
-		} finally {
-			configCache.delete(cwd);
-			await lspClient.shutdownAll();
-			tempDir.removeSync();
-		}
-	}, 10_000);
+				expect(await diagnostics()).toBe("OK");
+				expect(server.received.find(message => message.method === "initialize")?.params).toMatchObject({
+					rootPath: cwd,
+					rootUri: fileToUri(cwd),
+				});
+				expect(await diagnostics()).toBe("OK");
+				await Bun.write(target, "int value() { return unknown_identifier; }\n");
+				expect(await diagnostics()).toContain("unknown_identifier");
+				expect(await diagnostics()).toContain("unknown_identifier");
+				await tool.execute("reload-push-diags", { action: "reload", file: target, timeout: 5 });
+				expect(await diagnostics()).toContain("unknown_identifier");
+				await Bun.write(target, "int value() { return 0; }\n");
+				expect(await diagnostics()).toBe("OK");
+			} finally {
+				configCache.delete(cwd);
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		},
+		10_000,
+	);
 
 	for (const dependencyOpen of [true, false]) {
 		it(`refreshes every importer's push diagnostics after a shared ${dependencyOpen ? "open" : "never-opened"} dependency changes or disappears`, async () => {

@@ -1,6 +1,8 @@
+import * as path from "node:path";
 import { type IpcConnection, IpcServer } from "@oh-my-pi/pi-natives";
 import { isRecord, logger, postmortem, ptree, setProcessName } from "@oh-my-pi/pi-utils";
 import { encodeMessageFrame, MessageFramer } from "../../jsonrpc/message-framing";
+import { assertSafeLspRoot, assertSafeLspWorkspaceMessage } from "../config";
 import type { LspJsonRpcId, LspJsonRpcNotification, LspJsonRpcRequest, LspJsonRpcResponse } from "../types";
 import {
 	LSP_MUX_PROJECT_DIR_ENV,
@@ -81,6 +83,7 @@ class Session {
 
 class ServerInstance {
 	readonly key: string;
+	readonly cwd: string;
 	readonly proc: ptree.ChildProcess<"pipe">;
 	readonly sessions = new Set<Session>();
 	readonly documents = new Set<string>();
@@ -101,8 +104,9 @@ class ServerInstance {
 
 	constructor(key: string, params: MuxConnectParams) {
 		this.key = key;
+		this.cwd = assertSafeLspRoot(params.cwd);
 		this.proc = ptree.spawn([params.command, ...params.args], {
-			cwd: params.cwd,
+			cwd: this.cwd,
 			stdin: "pipe",
 			env: { ...Bun.env, ...params.env },
 		});
@@ -272,6 +276,12 @@ export class LspMuxServer {
 				this.#sendSession(session, rpcError(message.id, -32602, "invalid mux connect params"));
 				return;
 			}
+			try {
+				params.cwd = assertSafeLspRoot(params.cwd);
+			} catch (error) {
+				this.#sendSession(session, rpcError(message.id, -32602, String(error)));
+				return;
+			}
 			const key = muxServerKey(params);
 			let server = [...this.#servers].find(candidate => candidate.key === key && candidate.sessions.size === 0);
 			if (server && server.proc.exitCode !== null) {
@@ -295,6 +305,14 @@ export class LspMuxServer {
 		const server = session.server;
 		if (!server) {
 			if (request) this.#sendSession(session, rpcError(message.id, -32002, "muxConnect must be first"));
+			return;
+		}
+		try {
+			if (message.method === "initialize") assertSafeLspRoot(server.cwd);
+			assertSafeLspWorkspaceMessage(message.method, message.params);
+		} catch (error) {
+			if (request) this.#sendSession(session, rpcError(message.id, -32602, String(error)));
+			else logger.warn("LSP mux rejected unsafe workspace", { error: String(error) });
 			return;
 		}
 		if (message.method === MUX_RESTART_METHOD && !request) {
@@ -507,6 +525,14 @@ export class LspMuxServer {
 	}
 
 	async #handleServerRequest(server: ServerInstance, message: LspJsonRpcRequest): Promise<void> {
+		if (message.method === "workspace/workspaceFolders") {
+			const root = assertSafeLspRoot(server.cwd);
+			await this.#writeServer(
+				server,
+				rpcResult(message.id, [{ uri: Bun.pathToFileURL(root).href, name: path.basename(root) || "workspace" }]),
+			);
+			return;
+		}
 		if (
 			message.method === "client/registerCapability" ||
 			message.method === "client/unregisterCapability" ||
