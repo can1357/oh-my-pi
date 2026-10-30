@@ -977,6 +977,10 @@ export class ProcessTerminal implements Terminal {
 	// Bumped by stop(), so a probe still in flight across a stop()/start() cycle
 	// drops its answer instead of reviving it or re-arming a dead poll.
 	#audienceEpoch = 0;
+	// Bumped by every signal that proves someone is watching now. A probe that
+	// sampled the server under an older generation may no longer establish an
+	// empty audience: it asked before that signal existed.
+	#audienceGeneration = 0;
 	// Resolved once at start: a host nobody can ask never spawns a probe.
 	#audienceProbeSupported = false;
 
@@ -2781,13 +2785,24 @@ export class ProcessTerminal implements Terminal {
 	 * next probe lands. Called from the signals that prove a person is there
 	 * before any poll could: a keystroke, and the resize a tmux attach sends.
 	 *
-	 * Only from the withheld state. An established audience withholds nothing,
-	 * so there is nothing to re-open and a keystroke must not cost a probe:
-	 * every render reads {@link hasAudience}, so invalidating on a `true`
-	 * answer would spawn a `tmux` child per keystroke for someone typing at a
-	 * watched pane. A client that leaves is picked up by the next poll.
+	 * Two things happen, and they are gated differently.
+	 *
+	 * The generation bump always happens. It voids the `false` of any probe
+	 * already in flight, because that probe asked the server before this
+	 * signal arrived: its answer describes the pane the client had not
+	 * attached to yet, and letting it land would re-hide the very keystroke
+	 * that re-opened the question. Bumping an integer costs nothing when
+	 * nothing is in flight.
+	 *
+	 * Clearing the cached answer happens only from the withheld state. An
+	 * established audience withholds nothing, so there is nothing to re-open
+	 * and a keystroke must not cost a probe: every render reads
+	 * {@link hasAudience}, so forcing a re-probe on a `true` answer would
+	 * spawn a `tmux` child per keystroke for someone typing at a watched pane.
+	 * A client that leaves is picked up by the next poll.
 	 */
 	#invalidateAudience(): void {
+		this.#audienceGeneration += 1;
 		if (this.#audience !== false) return;
 		this.#audience = undefined;
 		this.#audienceProbedAtMs = Number.NEGATIVE_INFINITY;
@@ -2814,6 +2829,10 @@ export class ProcessTerminal implements Terminal {
 		// epoch no longer matches, so it neither revives a stale answer nor
 		// overwrites the interval and in-flight flag that moved on without it.
 		const epoch = this.#audienceEpoch;
+		// The generation this probe samples under. An invalidation between here
+		// and the answer means the answer predates a client who is demonstrably
+		// at the keyboard now.
+		const generation = this.#audienceGeneration;
 		void tmuxSessionHasAttachedClients()
 			// The helper answers `undefined` for every failure it knows about;
 			// this covers the rest, because an unreachable multiplexer is not an
@@ -2821,8 +2840,25 @@ export class ProcessTerminal implements Terminal {
 			.catch(() => undefined)
 			.then(attached => {
 				if (epoch !== this.#audienceEpoch) return;
-				this.#audience = attached;
 				const endedAtMs = performance.now();
+				this.#audienceProbeInFlight = false;
+				// A keystroke or an attach's resize re-opened the question while
+				// this probe was out, so its `false` is a reading of the pane
+				// before that client arrived. Accepting it would re-hide the
+				// keystroke that re-opened the question — and would overwrite the
+				// re-probe the invalidation asked for, so nothing would correct
+				// it until the next poll. Demote it to unknown, which is the full
+				// frame rate a pane someone is typing into deserves, and let the
+				// next probe — one ordinary gap from now, never a child spawned
+				// behind the one that just returned — settle it. A stale `true`
+				// or `undefined` withholds nothing and is kept as it is.
+				if (attached === false && generation !== this.#audienceGeneration) {
+					this.#audience = undefined;
+					this.#audienceProbeIntervalMs = AUDIENCE_PROBE_MIN_INTERVAL_MS;
+					this.#audienceProbedAtMs = endedAtMs;
+					return;
+				}
+				this.#audience = attached;
 				// Poll at the duty-derived cadence only while frames are actually
 				// being withheld, because that is the only state an attach has to
 				// be noticed quickly in. Watched or unknown, the longest gap is
@@ -2840,7 +2876,6 @@ export class ProcessTerminal implements Terminal {
 							)
 						: AUDIENCE_PROBE_MAX_INTERVAL_MS;
 				this.#audienceProbedAtMs = endedAtMs;
-				this.#audienceProbeInFlight = false;
 			});
 	}
 
