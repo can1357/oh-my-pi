@@ -9,7 +9,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CompactionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -284,10 +284,10 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 		});
 
 		const notices = collectNotices();
-		const compactionEnds: { result?: compactionModule.CompactionResult; skipped?: boolean }[] = [];
+		const compactionEnds: Extract<AgentSessionEvent, { type: "auto_compaction_end" }>[] = [];
 		session.subscribe(event => {
 			if (event.type === "auto_compaction_end") {
-				compactionEnds.push({ result: event.result, skipped: event.skipped });
+				compactionEnds.push(event);
 			}
 		});
 		await triggerMaintenance();
@@ -314,6 +314,9 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 		expect(snapcompact.getPreservedArchive(stale.preserveData)?.frames.length).toBe(SEEDED_FRAME_COUNT);
 		const rebuiltArchive = snapcompact.getPreservedArchive(rebuilt.preserveData);
 		expect(rebuiltArchive?.frames.length).toBe(4);
+		expect(rebuilt.tokensAfter).toBeGreaterThan(0);
+		expect(compactionEnds[0].tokensAfter).toBe(rebuilt.tokensAfter);
+		expect(compactionEnds[0].tokensAfter).not.toBe(30_000);
 
 		// The frame rescue fired first: the elide/image tiers (provable no-ops
 		// on a compaction tail) were skipped, and no misleading warning.
@@ -323,6 +326,52 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 		const recovery = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("dead-end recovery"));
 		expect(recovery.length).toBe(1);
 		expect(recovery[0].level).toBe("info");
+	});
+
+	it("reports the committed projection when only the nested frame rescue succeeds", async () => {
+		await createSession({ frameCount: SEEDED_FRAME_COUNT });
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		let rebuiltArchiveApplied = false;
+		vi.spyOn(session, "getContextUsage").mockImplementation(() =>
+			rebuiltArchiveApplied
+				? { tokens: 30000, contextWindow: 200000, percent: 15 }
+				: { tokens: 190000, contextWindow: 200000, percent: 95 },
+		);
+		vi.spyOn(session, "shake").mockResolvedValue({
+			mode: "elide",
+			toolResultsDropped: 0,
+			blocksDropped: 0,
+			tokensFreed: 0,
+		});
+		const compactSpy = vi.spyOn(snapcompact, "compact").mockImplementation(async () => {
+			rebuiltArchiveApplied = true;
+			return {
+				summary: "Nested rescue committed a smaller frame archive.",
+				shortSummary: "retried frame rescue",
+				firstKeptEntryId: (sessionManager.getBranch()[0] as { id: string }).id,
+				tokensBefore: 150_000,
+				details: { readFiles: [], modifiedFiles: [] },
+				preserveData: makeArchivePreserveData(4),
+			};
+		});
+		compactSpy.mockRejectedValueOnce(new Error("transient first frame renderer failure"));
+		const ends: Extract<AgentSessionEvent, { type: "auto_compaction_end" }>[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") ends.push(event);
+		});
+
+		await triggerMaintenance();
+
+		const entries = sessionManager
+			.getBranch()
+			.filter((entry): entry is CompactionEntry => entry.type === "compaction");
+		expect(compactSpy).toHaveBeenCalledTimes(2);
+		expect(entries).toHaveLength(2);
+		expect(ends).toHaveLength(1);
+		expect(entries[1].tokensAfter).toBeGreaterThan(0);
+		expect(ends[0].tokensAfter).toBe(entries[1].tokensAfter);
+		expect(ends[0].tokensAfter).not.toBe(30_000);
 	});
 
 	it("rebuilds the archive for a Claude reader without its reasoning", async () => {
@@ -448,6 +497,10 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 
 		const notices = collectNotices();
 		const emitSpy = vi.spyOn(ExtensionRunner.prototype, "emit");
+		const compactionEnds: Extract<AgentSessionEvent, { type: "auto_compaction_end" }>[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") compactionEnds.push(event);
+		});
 		await triggerMaintenance({ appendAssistant: true });
 
 		expect(compactSpy).toHaveBeenCalledTimes(1);
@@ -459,6 +512,11 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 		expect(hookWritten.summary).toBe("compacted");
 		expect(snapcompact.getPreservedArchive(hookWritten.preserveData)?.frames.length).toBe(SEEDED_FRAME_COUNT);
 		expect(snapcompact.getPreservedArchive(rebuilt.preserveData)?.frames.length).toBe(4);
+		expect(compactionEnds).toHaveLength(1);
+		expect(rebuilt.tokensAfter).toBeGreaterThan(0);
+		expect(rebuilt.tokensAfter).not.toBe(hookWritten.tokensAfter);
+		expect(compactionEnds[0].tokensAfter).toBe(rebuilt.tokensAfter);
+		expect(compactionEnds[0].tokensAfter).not.toBe(30_000);
 		// Extensions must be notified about the entry that is now active, not
 		// only the hook-written one the rescue superseded.
 		const compactEvents = emitSpy.mock.calls
@@ -629,6 +687,13 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 
 	it("still warns once when the trailing archive is already at the minimum frame count", async () => {
 		await createSession({ frameCount: 1 });
+		const stale = sessionManager.getBranch().findLast(entry => entry.type === "compaction");
+		if (stale?.type !== "compaction") throw new Error("Expected a stale compaction");
+		stale.tokensAfter = 12_345;
+		const compactionEnds: Extract<AgentSessionEvent, { type: "auto_compaction_end" }>[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") compactionEnds.push(event);
+		});
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
 		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 		vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 190000, contextWindow: 200000, percent: 95 });
@@ -643,6 +708,10 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 		const notices = collectNotices();
 		await triggerMaintenance();
 
+		expect(compactionEnds).toHaveLength(1);
+		expect(compactionEnds[0].skipped).toBe(true);
+		expect(compactionEnds[0].tokensAfter).toBeUndefined();
+		expect(stale.tokensAfter).toBe(12_345);
 		expect(compactSpy).not.toHaveBeenCalled();
 		expect(promptSpy).not.toHaveBeenCalled();
 		expect(continueSpy).not.toHaveBeenCalled();

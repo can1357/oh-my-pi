@@ -740,6 +740,7 @@ describe("AgentSession shake", () => {
 			const end = events.filter(e => e.type === "auto_compaction_end");
 			expect(end).toHaveLength(1);
 			expect(end[0]).toMatchObject({ type: "auto_compaction_end", action: "shake" });
+			expect(end[0].tokensAfter).toBeUndefined();
 		});
 
 		it("keeps a successful overflow shake recovery committed before retrying", async () => {
@@ -779,6 +780,7 @@ describe("AgentSession shake", () => {
 
 			const shakeEnd = events.find(event => event.type === "auto_compaction_end" && event.action === "shake");
 			expect(shakeEnd).toMatchObject({ type: "auto_compaction_end", action: "shake", willRetry: true });
+			expect(shakeEnd).not.toHaveProperty("tokensAfter");
 			expect(sessionManager.getBranch()).not.toContainEqual(
 				expect.objectContaining({
 					type: "message",

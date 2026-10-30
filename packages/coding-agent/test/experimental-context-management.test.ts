@@ -169,6 +169,14 @@ describe("experimental context management", () => {
 		expect(events.filter(event => event.type === "auto_compaction_end")).toMatchObject([
 			{ aborted: false, willRetry: false },
 		]);
+		const entry = manager.getEntries().find(candidate => candidate.type === "compaction");
+		if (entry?.type !== "compaction") throw new Error("Expected a rollover boundary");
+		const end = events.find(
+			(event): event is Extract<AgentSessionEvent, { type: "auto_compaction_end" }> =>
+				event.type === "auto_compaction_end",
+		);
+		expect(entry.tokensAfter).toBeGreaterThan(0);
+		expect(end?.tokensAfter).toBe(entry.tokensAfter);
 		expect(
 			mock.calls[1].context.messages.filter(
 				message => message.role === "user" && JSON.stringify(message.content).includes(request),
@@ -276,6 +284,11 @@ describe("experimental context management", () => {
 		]);
 		expect(events).toHaveLength(2);
 		expect(manager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
+		const end = events.find(
+			(event): event is Extract<AgentSessionEvent, { type: "auto_compaction_end" }> =>
+				event.type === "auto_compaction_end",
+		);
+		expect(end?.tokensAfter).toBeUndefined();
 		expect(session.isCompacting).toBe(false);
 	});
 	it("does not repeatedly roll over a tool loop when fixed context exceeds the recovery band", async () => {

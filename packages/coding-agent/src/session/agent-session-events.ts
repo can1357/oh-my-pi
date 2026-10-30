@@ -38,6 +38,8 @@ export type AgentSessionEvent =
 			type: "auto_compaction_end";
 			action: "context-full" | "remote" | "handoff" | "shake" | "snapcompact";
 			result: CompactionResult | undefined;
+			/** Context-token projection stored on this pass's committed compaction entry. */
+			tokensAfter?: number;
 			aborted: boolean;
 			willRetry: boolean;
 			errorMessage?: string;

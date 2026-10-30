@@ -882,6 +882,8 @@ export interface AutoCompactionEndEvent {
 	aborted: boolean;
 	willRetry: boolean;
 	result?: CompactionResult;
+	/** Context-token projection stored on this pass's committed compaction entry. */
+	tokensAfter?: number;
 	errorMessage?: string;
 	/** Compaction was skipped for a benign reason. */
 	skipped?: boolean;

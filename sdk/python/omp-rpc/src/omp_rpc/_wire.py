@@ -1070,6 +1070,8 @@ class AutoCompactionEndEvent:
     aborted: bool
     will_retry: bool
     result: CompactionResult | None = None
+    tokens_after: float | None = None
+    """Context-token projection stored on this pass's committed compaction entry."""
     error_message: str | None = None
     skipped: bool | None = None
     """Compaction was skipped for a benign reason."""
@@ -2473,6 +2475,7 @@ def parse_auto_compaction_end_event(value: object, path: str = "AutoCompactionEn
         aborted=required(payload, "aborted", decode_bool, path),
         will_retry=required(payload, "willRetry", decode_bool, path),
         result=optional(payload, "result", parse_compaction_result, path),
+        tokens_after=optional(payload, "tokensAfter", decode_float, path),
         error_message=optional(payload, "errorMessage", decode_str, path),
         skipped=optional(payload, "skipped", decode_bool, path),
     )

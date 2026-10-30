@@ -559,6 +559,8 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		expect(endEvent.result.preserveData).toEqual({ extensionState: "keep-me" });
 		const compactionEntry = sessionManager.getEntries().find(entry => entry.type === "compaction");
 		if (compactionEntry?.type !== "compaction") throw new Error("Expected persisted compaction entry");
+		expect(compactionEntry.tokensAfter).toBeGreaterThan(0);
+		expect(endEvent.tokensAfter).toBe(compactionEntry.tokensAfter);
 		expect(compactionEntry.preserveData).toEqual({
 			extensionState: "keep-me",
 			[snapcompact.PRESERVE_KEY]: archive,
@@ -610,4 +612,27 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 			);
 		},
 	);
+
+	it("publishes the persisted projection for a real automatic frame archive", async () => {
+		const bundled = getBundledModel("google", "gemini-3.1-pro-preview");
+		if (!bundled) throw new Error("Expected bundled Gemini model");
+		session.agent.setModel({ ...bundled, contextWindow: 400_000, maxTokens: 32_000 });
+		const ends: Extract<AgentSessionEvent, { type: "auto_compaction_end" }>[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") ends.push(event);
+		});
+
+		await session.runIdleCompaction();
+
+		const entry = sessionManager.getBranch().findLast(candidate => candidate.type === "compaction");
+		if (entry?.type !== "compaction") throw new Error("Expected an automatic archive");
+		expect(snapcompact.getPreservedArchive(entry.preserveData)?.frames.length).toBeGreaterThan(1);
+		expect(ends).toHaveLength(1);
+		expect(ends[0].action).toBe("snapcompact");
+		expect(ends[0].tokensAfter).toBe(entry.tokensAfter);
+		expect(ends[0].tokensAfter).toBe(
+			computeNonMessageTokens(session, session.agent.tokenizer, session.settings.revision) +
+				session.agent.tokenizer.countMessages(session.messages, { excludeEncryptedReasoning: true }),
+		);
+	});
 });

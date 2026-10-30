@@ -3908,11 +3908,13 @@ func (v AutoCompactionStartEvent) MarshalJSON() ([]byte, error) {
 }
 
 type AutoCompactionEndEvent struct {
-	Action       AutoCompactionAction `json:"action"`
-	Aborted      bool                 `json:"aborted"`
-	WillRetry    bool                 `json:"willRetry"`
-	Result       *CompactionResult    `json:"result,omitempty"`
-	ErrorMessage *string              `json:"errorMessage,omitempty"`
+	Action    AutoCompactionAction `json:"action"`
+	Aborted   bool                 `json:"aborted"`
+	WillRetry bool                 `json:"willRetry"`
+	Result    *CompactionResult    `json:"result,omitempty"`
+	// Context-token projection stored on this pass's committed compaction entry.
+	TokensAfter  *float64 `json:"tokensAfter,omitempty"`
+	ErrorMessage *string  `json:"errorMessage,omitempty"`
 	// Compaction was skipped for a benign reason.
 	Skipped *bool `json:"skipped,omitempty"`
 }
@@ -3929,6 +3931,7 @@ func (v *AutoCompactionEndEvent) decodeFrom(raw map[string]json.RawMessage) erro
 	d.required("aborted", &out.Aborted)
 	d.required("willRetry", &out.WillRetry)
 	d.optional("result", &out.Result)
+	d.optional("tokensAfter", &out.TokensAfter)
 	d.optional("errorMessage", &out.ErrorMessage)
 	d.optional("skipped", &out.Skipped)
 	if d.err != nil {

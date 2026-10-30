@@ -3744,6 +3744,9 @@ pub struct AutoCompactionEndEvent {
 	pub will_retry: bool,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub result: Option<CompactionResult>,
+	/// Context-token projection stored on this pass's committed compaction entry.
+	#[serde(rename = "tokensAfter", default, skip_serializing_if = "Option::is_none")]
+	pub tokens_after: Option<f64>,
 	#[serde(rename = "errorMessage", default, skip_serializing_if = "Option::is_none")]
 	pub error_message: Option<String>,
 	/// Compaction was skipped for a benign reason.

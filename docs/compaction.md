@@ -76,6 +76,41 @@ Compaction/context maintenance can run in six ways:
 5. **Mid-turn threshold maintenance**: before the next provider request when a tool-loop turn crosses the threshold and `compaction.midTurnEnabled !== false`. Subagent sessions always run this check: `createSubagentSettings` pins `compaction.midTurnEnabled` on for the child because a whole assignment is one turn, so post-turn maintenance would only fire after the run already ended.
 6. **Idle maintenance**: `runIdleCompaction()` can invoke the same auto-maintenance path with reason `"idle"`.
 
+### Lifecycle events
+
+Automatic maintenance emits `auto_compaction_start` (`reason`, `action`) and
+`auto_compaction_end` (`action`, `aborted`, `willRetry`, optional `result`,
+`tokensAfter`, `skipped`, `errorMessage`). Manual compaction has separate
+`manual_compaction_start` / `manual_compaction_end` events.
+
+`tokensAfter` is the context-token projection stored on this pass's committed
+compaction entry, including a replacement committed by rescue. It is omitted
+when no committed count is available, not estimated from an older entry or
+provider billing. A successful shake can have no `result`, so its absence alone
+does not indicate failure. `willRetry` describes the planned agent-turn recovery,
+not a fallback between compaction methods or a guarantee that another turn runs.
+
+#### ACP notifications
+
+ACP stdio sessions forward automatic maintenance as JSON-RPC extension
+notifications with no `id`, rather than inventing a standard `session/update` kind:
+
+| Method | Required params | Optional params |
+| --- | --- | --- |
+| `_omp/compaction/start` | `sessionId`, `reason`, `action` | — |
+| `_omp/compaction/end` | `sessionId`, `action`, `aborted`, `willRetry` | `skipped`, `errorMessage`, `tokensBefore`, `tokensAfter` |
+
+Flags retain their original event values. `tokensBefore` comes from this event's
+`result`, and `tokensAfter` from its committed projection; unavailable counts are
+omitted. Only the listed fields are sent: no full compaction result, transcript
+or archive is attached. Clients that do not implement these optional
+notifications can ignore them.
+
+The subscription lasts for the session, so maintenance outside a prompt and an
+end after prompt cancellation are still forwarded. This does not enable or
+reschedule maintenance: the ACP CLI does not opt into the idle-maintenance
+scheduler described in [SDK idle maintenance](./sdk.md#idle-maintenance).
+
 ### Compaction shape (visual)
 
 ```text

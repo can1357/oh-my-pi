@@ -84,6 +84,7 @@ export const eventDefs = {
 		type: "'auto_compaction_end'",
 		action: "AutoCompactionAction",
 		"result?": "CompactionResult",
+		"tokensAfter?": doc("number", "Context-token projection stored on this pass's committed compaction entry."),
 		aborted: "boolean",
 		willRetry: "boolean",
 		"errorMessage?": "string",

@@ -24,7 +24,7 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as snapcompact from "@oh-my-pi/snapcompact";
@@ -261,6 +261,7 @@ describe("AgentSession snapcompact no-reduction guard", () => {
 				action: string;
 				result?: compactionModule.CompactionResult;
 				errorMessage?: string;
+				tokensAfter?: number;
 			}>();
 			customSession.subscribe(event => {
 				if (event.type === "auto_compaction_end") {
@@ -268,6 +269,7 @@ describe("AgentSession snapcompact no-reduction guard", () => {
 						action: event.action,
 						result: event.result,
 						errorMessage: event.errorMessage,
+						tokensAfter: event.tokensAfter,
 					});
 				}
 			});
@@ -277,6 +279,7 @@ describe("AgentSession snapcompact no-reduction guard", () => {
 
 			const endEvent = await compactionEndPromise;
 			expect(endEvent.result).toBeUndefined();
+			expect(endEvent.tokensAfter).toBeUndefined();
 			expect(endEvent.errorMessage).toContain("would not reduce context");
 			const compactionEntries = customSessionManager
 				.getBranch()
@@ -322,6 +325,10 @@ describe("AgentSession snapcompact no-reduction guard", () => {
 				tokensBefore: preparation.tokensBefore,
 				details: {},
 			}));
+			const ends: Extract<AgentSessionEvent, { type: "auto_compaction_end" }>[] = [];
+			customSession.subscribe(event => {
+				if (event.type === "auto_compaction_end") ends.push(event);
+			});
 
 			// Turns grow 18k -> 36k -> 54k on a 100k window with a 40% (40k) trigger: the
 			// trigger is honored, so turn 3 compacts, and the kept tail is capped so the
@@ -369,6 +376,9 @@ describe("AgentSession snapcompact no-reduction guard", () => {
 			expect(compactionEntries[0].tokensAfter).toBeDefined();
 			expect(compactionEntries[0].tokensAfter!).toBeLessThan(compactionEntries[0].tokensBefore);
 			expect(compactionEntries[0].tokensAfter!).toBeLessThanOrEqual(Math.floor(40_000 * 0.8));
+			expect(ends).toHaveLength(1);
+			expect(ends[0].tokensAfter).toBe(compactionEntries[0].tokensAfter);
+			expect(ends[0].tokensAfter).not.toBe(turnUsages.at(-1));
 		} finally {
 			await customSession.dispose();
 		}
