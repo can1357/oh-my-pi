@@ -22,6 +22,7 @@ import { adjustWeights, classifyIntent } from "../query-intent";
 import { getSynonyms, STOP_WORDS as QUERY_STOP_WORDS } from "../synonyms";
 import { extractTemporal } from "../temporal-parser";
 import { cosineSimilarity } from "../vector-math";
+import { cachedEmbeddings } from "./embedding-cache";
 import type { BeamMemoryState, RecallEnhancedOptions, RecallOptions, RecallResult } from "./types";
 
 type DbValue = string | number | null | Uint8Array;
@@ -572,24 +573,6 @@ function normalizeRanks(rows: readonly Row[], key: string): Map<string | number,
 	return out;
 }
 
-function parseEmbedding(raw: unknown): number[] | null {
-	if (typeof raw !== "string") return null;
-	try {
-		const parsed = JSON.parse(raw) as unknown;
-		if (!Array.isArray(parsed)) return null;
-		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
-		const vector = new Array<number>(parsed.length);
-		for (let i = 0; i < parsed.length; i += 1) {
-			const value = Number(parsed[i]);
-			if (!Number.isFinite(value)) return null;
-			vector[i] = value;
-		}
-		return vector;
-	} catch {
-		return null;
-	}
-}
-
 function vectorSimilarities(
 	beam: BeamMemoryState,
 	memoryIds: readonly string[],
@@ -604,18 +587,8 @@ function vectorSimilarities(
 	) {
 		return out;
 	}
-	for (let offset = 0; offset < memoryIds.length; offset += 500) {
-		const chunk = memoryIds.slice(offset, offset + 500);
-		const rows = queryAll(
-			beam,
-			`SELECT memory_id, embedding_json FROM memory_embeddings WHERE memory_id IN (${placeholders(chunk.length)})`,
-			chunk,
-		);
-		for (const row of rows) {
-			const vector = parseEmbedding(row.embedding_json);
-			const id = asString(row.memory_id);
-			if (vector !== null && id.length > 0) out.set(id, Math.max(0, cosineSimilarity(queryEmbedding, vector)));
-		}
+	for (const [id, vector] of cachedEmbeddings(beam.db, memoryIds)) {
+		out.set(id, Math.max(0, cosineSimilarity(queryEmbedding, vector)));
 	}
 	return out;
 }
