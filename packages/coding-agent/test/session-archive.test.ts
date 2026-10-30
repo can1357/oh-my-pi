@@ -4119,12 +4119,13 @@ test("quarantine refuses a ledger record that is a symlink, which no gc run writ
 	expect(await fs.stat(quarantineDestination(record)).catch(() => undefined)).toBeUndefined();
 });
 
-test("a quarantine retry whose record an archive run dropped says where the moved directory is and what to do with it", async () => {
+test("a quarantine retry that finds no record anywhere says where the directory in its destination is and what to do with it", async () => {
 	const { ground, record, liveArtifacts } = await archivedWithKilledStage();
 	const destination = quarantineDestination(record);
 	const stranded = path.join(destination, path.basename(ground.dir));
-	// A quarantine killed right after moving the directory, then an archive
-	// run, which drops a record whose directory has left its tree.
+	// The directory in the destination with no copy of the record beside it,
+	// which this command never leaves itself, then an archive run, which
+	// drops a record whose directory has left its tree.
 	await fs.mkdir(destination, { recursive: true, mode: 0o700 });
 	await fs.rename(ground.dir, stranded);
 	await archiveOnly();
@@ -4218,40 +4219,163 @@ for (const filesystems of ["across filesystems", "on one filesystem"] as const) 
 }
 
 for (const written of ["nothing", "half"] as const) {
-	test(`a quarantine across filesystems stopped with ${written} of its record copied finishes when run again`, async () => {
+	for (const stage of ["still in its tree", "already in the destination"] as const) {
+		test(`a quarantine across filesystems stopped with ${written} of its record copied and the stage ${stage} finishes when run again`, async () => {
+			const { ground, record, liveArtifacts } = await archivedWithKilledStage();
+			const original = await Bun.file(ground.record).bytes();
+			const destination = quarantineDestination(record);
+			// What a kill inside the copy leaves: the copy created and part
+			// written, with the stage not yet moved, since the record goes
+			// first; and the same with the stage moved, however it got there.
+			await fs.mkdir(destination, { recursive: true, mode: 0o700 });
+			if (stage === "already in the destination") {
+				await fs.rename(ground.dir, path.join(destination, path.basename(ground.dir)));
+			}
+			const copied = written === "nothing" ? 0 : Math.floor(original.length / 2);
+			await fs.writeFile(path.join(destination, record), original.subarray(0, copied), { mode: 0o600 });
+			const before = await fs.stat(path.join(destination, record));
+
+			const across = recordAcrossFilesystems(ground.record);
+			let preview: GcResult;
+			let retried: GcResult;
+			let repeated: GcResult;
+			try {
+				preview = await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } });
+				retried = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+				repeated = await runGcCommand({
+					flags: { agentDir: root, quarantine: record, apply: true, json: true },
+				});
+			} finally {
+				across.restore();
+			}
+
+			expect(preview.quarantine?.errors).toEqual([]);
+			expect(retried.quarantine?.errors).toEqual([]);
+			expect(retried.quarantine?.moved).toBe(true);
+			expect(repeated.quarantine?.moved).toBe(true);
+			// Finished in the file the copy began, not in one put over it.
+			expect((await fs.stat(path.join(destination, record))).ino).toBe(before.ino);
+			expect(await Bun.file(path.join(destination, record)).bytes()).toEqual(original);
+			expect(await Bun.file(ground.record).exists()).toBe(false);
+			expect(await Bun.file(path.join(destination, path.basename(ground.dir), "b.log")).text()).toBe(
+				"PARTIAL STAGE",
+			);
+			const restored = await runGcCommand({
+				flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true },
+			});
+			expect(restored.restore?.errors).toEqual([]);
+			expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
+		});
+	}
+}
+
+test.skipIf(process.getuid?.() === 0)(
+	"quarantine refuses, in its preview as in applying, a part copy of the record it cannot write to finish",
+	async () => {
+		const { ground, record } = await archivedWithKilledStage();
+		const original = await Bun.file(ground.record).bytes();
+		const destination = quarantineDestination(record);
+		await fs.mkdir(destination, { recursive: true, mode: 0o700 });
+		// The review's fixture: the record's first byte, under no other name,
+		// at mode 0400.
+		const partial = path.join(destination, record);
+		await fs.writeFile(partial, original.subarray(0, 1), { mode: 0o400 });
+		const before = await fs.stat(partial);
+
+		const preview = await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } });
+		const applied = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+
+		expect(preview.quarantine?.errors.join("\n")).toContain(partial);
+		expect(applied.quarantine?.errors.join("\n")).toContain(partial);
+		expect(applied.quarantine?.moved).toBe(false);
+		// Refused before the stage moved.
+		expect(await Bun.file(ground.file).text()).toBe("PARTIAL STAGE");
+		expect(await Bun.file(ground.record).bytes()).toEqual(original);
+		const after = await fs.stat(partial);
+		expect([after.ino, after.mode, after.size]).toEqual([before.ino, before.mode, before.size]);
+	},
+);
+
+/**
+ * Stop the record's way into the destination where the review killed it: before
+ * the record is linked or copied, with its copy created and empty, or halfway
+ * through writing the copy. Each stop throws, so the run ends there as a kill
+ * would, with the steps after it not taken.
+ */
+function stopRecordCopy(at: "before" | "created" | "half", recordInto: string): { restore(): void } {
+	const realOpen = fs.open;
+	const stop = () => Object.assign(new Error("stopped as a kill would"), { code: "EINTR" });
+	const open = spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
+		if (String(target) !== recordInto || rest[0] !== "wx") {
+			return await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
+		}
+		if (at === "before") throw stop();
+		const handle = await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
+		handle.writeFile = (async (data: Uint8Array) => {
+			if (at === "half") await handle.write(data, 0, Math.floor(data.length / 2), 0);
+			throw stop();
+		}) as typeof handle.writeFile;
+		return handle;
+	}) as typeof fs.open);
+	return { restore: () => open.mockRestore() };
+}
+
+for (const at of ["before", "created", "half"] as const) {
+	test(`a quarantine across filesystems stopped ${at === "before" ? "before its record is copied" : at === "created" ? "with its record copy created and empty" : "halfway through copying its record"}, then an archive run, finishes when run again`, async () => {
 		const { ground, record, liveArtifacts } = await archivedWithKilledStage();
 		const original = await Bun.file(ground.record).bytes();
 		const destination = quarantineDestination(record);
-		// What a kill inside the copy leaves: the stage already moved, as the
-		// command moves it first, and the copy created and part written.
-		await fs.mkdir(destination, { recursive: true, mode: 0o700 });
-		await fs.rename(ground.dir, path.join(destination, path.basename(ground.dir)));
-		const copied = written === "nothing" ? 0 : Math.floor(original.length / 2);
-		await fs.writeFile(path.join(destination, record), original.subarray(0, copied), { mode: 0o600 });
-		const before = await fs.stat(path.join(destination, record));
-
 		const across = recordAcrossFilesystems(ground.record);
-		let preview: GcResult;
-		let retried: GcResult;
-		let repeated: GcResult;
 		try {
-			preview = await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } });
-			retried = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
-			repeated = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+			const stopped = stopRecordCopy(at, path.join(destination, record));
+			let first: GcResult;
+			try {
+				first = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+			} finally {
+				stopped.restore();
+			}
+			expect(first.quarantine?.moved).toBe(false);
+			// An ordinary archive run between the stop and the retry: it drops
+			// a record whose directory has left its tree.
+			await archiveOnly();
+
+			const retried = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+
+			expect(retried.quarantine?.errors).toEqual([]);
+			expect(retried.quarantine?.moved).toBe(true);
+			expect(retried.quarantine?.quarantine).toBe(destination);
 		} finally {
 			across.restore();
 		}
-
-		expect(preview.quarantine?.errors).toEqual([]);
-		expect(retried.quarantine?.errors).toEqual([]);
-		expect(retried.quarantine?.moved).toBe(true);
-		expect(repeated.quarantine?.moved).toBe(true);
-		// Finished in the file the copy began, not in one put over it.
-		expect((await fs.stat(path.join(destination, record))).ino).toBe(before.ino);
 		expect(await Bun.file(path.join(destination, record)).bytes()).toEqual(original);
 		expect(await Bun.file(ground.record).exists()).toBe(false);
+		expect(await Bun.file(path.join(destination, path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
 		const restored = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
 		expect(restored.restore?.errors).toEqual([]);
 		expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
 	});
 }
+
+test("a quarantine stopped before its directory moved, whose ledger record was then removed by hand, says the directory is still in its tree", async () => {
+	const { ground, record } = await archivedWithKilledStage();
+	const destination = quarantineDestination(record);
+	const realRename = fs.rename;
+	const rename = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+		if (String(from) === ground.dir) throw Object.assign(new Error("stopped as a kill would"), { code: "EINTR" });
+		return await realRename(from, to);
+	});
+	try {
+		await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+	} finally {
+		rename.mockRestore();
+	}
+	await fs.unlink(ground.record);
+
+	const retried = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+
+	expect(retried.quarantine?.moved).toBe(false);
+	const told = retried.quarantine?.errors.join("\n") ?? "";
+	expect(told).toContain(ground.dir);
+	expect(told).toContain(path.join(destination, record));
+	expect(await Bun.file(ground.file).text()).toBe("PARTIAL STAGE");
+});
