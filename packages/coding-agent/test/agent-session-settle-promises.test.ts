@@ -7,7 +7,12 @@ import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock"
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
-import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import {
+	EXTENSION_HANDLER_TIMEOUT_MS,
+	ExtensionRunner,
+	testSetExtensionHandlerTimeoutMs,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { RpcPromptResults } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-prompt-results";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -215,6 +220,9 @@ describe("AgentSession settles what it promised", () => {
 		/** Observes `message_end` extension notifications; holding one holds a session event handler
 		 *  in flight (`#drainInFlightEventHandlers`) during disposal. */
 		onMessageEnd?: (event: { message: AgentMessage }) => Promise<void>,
+		/** Observes `before_agent_start`, which runs inside the agent's queued-message dequeue hook:
+		 *  holding one holds a queued-message preparation. */
+		onBeforeAgentStart?: (event: { prompt: string }) => Promise<void>,
 	): Promise<{
 		settles: Array<boolean | undefined>;
 		modelRegistry: ModelRegistry;
@@ -244,6 +252,7 @@ describe("AgentSession settles what it promised", () => {
 					}
 				});
 				if (onMessageEnd) pi.on("message_end", onMessageEnd);
+				if (onBeforeAgentStart) pi.on("before_agent_start", onBeforeAgentStart);
 			},
 			tempDir.path(),
 			new EventBus(),
@@ -1031,6 +1040,112 @@ describe("AgentSession settles what it promised", () => {
 			unhook?.();
 			await disposal;
 			await session?.agent.waitForIdle();
+		}
+	}, 20_000);
+
+	it("does not let its own reset stand in for the queued preparation it is waiting on", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		// `before_agent_start` runs inside the agent's queued-message dequeue hook, so the
+		// preparation is live while this is held.
+		await startPooledRunWithStrandedAside(undefined, undefined, async event => {
+			if (event.prompt !== "QUEUED_PREPARATION") return;
+			entered.resolve();
+			await release.promise;
+		});
+		// `Agent.reset()` resolves the running prompt while a queue claim is held, so disposal's own
+		// reset makes `waitForIdle()` answer "idle". Counting resets shows whether the deferred
+		// finalizer believed it.
+		const resetSpy = spyOn(Agent.prototype, "reset");
+		try {
+			await session?.followUp("QUEUED_PREPARATION");
+			await withTimeout(entered.promise, 5_000, "queued preparation never started");
+
+			await withTimeout(session?.dispose({ drainTimeoutMs: 60 }) ?? Promise.resolve(), 10_000, "dispose hung");
+			// The finalizer must still be waiting: one reset, from disposal itself.
+			expect(resetSpy.mock.calls).toHaveLength(1);
+
+			release.resolve();
+			for (let i = 0; i < 20; i++) await setImmediate();
+			expect(resetSpy.mock.calls).toHaveLength(2);
+		} finally {
+			release.resolve();
+			resetSpy.mockRestore();
+		}
+	}, 20_000);
+
+	it("does not mistake an extension wait timeout for the handler having finished", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		await startPooledRunWithStrandedAside(undefined, async event => {
+			if (event.message.role !== "custom" || event.message.customType !== "slow-handler") return;
+			entered.resolve();
+			await release.promise;
+		});
+		const resetSpy = spyOn(Agent.prototype, "reset");
+		// The runner RACES each handler against this timeout, so the dispatch returns while the
+		// callback runs on. Set well below the dispose drain below, so the race has certainly
+		// settled by the time dispose returns and no guessed wait is needed to get past it.
+		testSetExtensionHandlerTimeoutMs(10);
+		try {
+			session?.agent.emitExternalEvent({
+				type: "message_end",
+				message: {
+					role: "custom",
+					customType: "slow-handler",
+					content: "EXTENSION_TIMEOUT",
+					display: false,
+					timestamp: Date.now(),
+				},
+			});
+			await withTimeout(entered.promise, 5_000, "extension handler never entered");
+
+			await withTimeout(session?.dispose({ drainTimeoutMs: 200 }) ?? Promise.resolve(), 10_000, "dispose hung");
+			// The dispatch has given up on the handler; the callback itself is still running.
+			expect(resetSpy.mock.calls).toHaveLength(1);
+
+			release.resolve();
+			for (let i = 0; i < 20; i++) await setImmediate();
+			expect(resetSpy.mock.calls).toHaveLength(2);
+		} finally {
+			testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
+			release.resolve();
+			resetSpy.mockRestore();
+		}
+	}, 20_000);
+
+	it("reports an interrupted prompt as aborted, not as the previous turn's success", async () => {
+		await startPooledRunWithStrandedAside();
+		const frames: unknown[] = [];
+		const results = new RpcPromptResults(session!, frame => frames.push(frame));
+		const ticket = results.begin("interrupted-prompt");
+		const off = session?.subscribe(event => results.observe(event));
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const unhook = session?.agent.addBeforeModelCallHook(async () => {
+			entered.resolve();
+			await release.promise;
+		});
+		let command: Promise<boolean> | undefined;
+		try {
+			command = session?.prompt("CURRENT_USER_PROMPT");
+			await withTimeout(entered.promise, 5_000, "prompt never reached the model call");
+
+			await withTimeout(session?.dispose({ drainTimeoutMs: 60 }) ?? Promise.resolve(), 10_000, "dispose hung");
+			release.resolve();
+			await command;
+			results.settle(ticket);
+			for (let i = 0; i < 5; i++) await setImmediate();
+
+			// The held `agent_end` describes the PREVIOUS turn, which succeeded. Publishing it to
+			// close the obligation must not report that success as this prompt's outcome.
+			expect(frames).toContainEqual(expect.objectContaining({ status: "aborted" }));
+			expect(frames).not.toContainEqual(expect.objectContaining({ status: "completed" }));
+		} finally {
+			release.resolve();
+			await command;
+			unhook?.();
+			off?.();
 		}
 	}, 20_000);
 });

@@ -374,6 +374,7 @@ import {
 	createInterruptedToolResults,
 	createInterruptedTurnAbortMessage,
 	hasRestorableTurn,
+	INTERRUPTED_TURN_ERROR,
 	SESSION_EXIT_CUSTOM_TYPE,
 	type SessionExitData,
 	summarizeToolArguments,
@@ -1976,7 +1977,40 @@ export class AgentSession implements SettingsScope {
 			return;
 		}
 		this.#agentEndOwedTerminal = undefined;
-		this.#emit(owed);
+		// A forced settle that cuts across live work is a cancellation, not that work's result. The
+		// event being held describes the PREVIOUS turn, which succeeded, so publishing it verbatim
+		// tells an outcome consumer (`RpcPromptResults`) that the prompt it interrupted completed.
+		// Close the obligation with an interrupted tail instead: bounded cancellation may end the
+		// run, it may not dress it as the earlier success.
+		this.#emit(options?.final && this.isStreaming ? this.#asInterruptedAgentEnd(owed) : owed);
+	}
+
+	/** The same `agent_end` with an aborted assistant tail, so outcome readers see the interruption
+	 *  rather than whatever the held event's last assistant message reported. Returns the event
+	 *  unchanged when no assistant message exists to take provider identity from. */
+	#asInterruptedAgentEnd(event: AgentSessionEvent): AgentSessionEvent {
+		if (event.type !== "agent_end") return event;
+		const model = this.#findLastAssistantMessage() ?? [...event.messages].reverse().find(m => m.role === "assistant");
+		if (!model || model.role !== "assistant") return event;
+		const interrupted: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: model.api,
+			provider: model.provider,
+			model: model.model,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "aborted",
+			errorMessage: INTERRUPTED_TURN_ERROR,
+			timestamp: Date.now(),
+		};
+		return { ...event, messages: [...event.messages, interrupted] };
 	}
 
 	/**
@@ -6594,7 +6628,13 @@ export class AgentSession implements SettingsScope {
 					remainingDrainMs,
 					"Timed out waiting for the active agent run to settle during dispose",
 				);
-				drained = true;
+				// Draining the dispatch queue is not the same as the work being over. A queued-message
+				// preparation survives the reset below (which resolves the agent's running prompt
+				// under a queue claim), and an extension handler is RACED against its timeout, so a
+				// dispatch that returned says nothing about its callback. `drained` gates the account
+				// pool release, so it asks about both — without waiting on them here, where the cost
+				// would be a full window of disposal latency for work the deferred pass can outlast.
+				drained = this.#queuedPreparations.size === 0 && this.#extensionRunner?.hasPendingHandlerWork() !== true;
 			} catch (error) {
 				logger.warn("Active agent run still settling at dispose deadline", { error: String(error) });
 			}
@@ -6633,13 +6673,24 @@ export class AgentSession implements SettingsScope {
 		// SEALED the session manager (a revival may reopen the same JSONL
 		// through a new manager the moment dispose returns, and this manager
 		// must never race that writer) — so re-run only the in-memory reset,
-		// and lift the account pools, once the pipeline genuinely settles. The
-		// extension runner bounds hook runtime, so this deferred pass is not
-		// unbounded.
+		// and lift the account pools, once the pipeline genuinely settles.
+		//
+		// "Genuinely" rules out two signals that look like completion and are not.
+		// `agent.waitForIdle()` alone is one: the reset above resolves the agent's
+		// running prompt whenever a queue claim is held, so asking the agent after
+		// it answers "idle" because we made it so — queued preparation is tracked
+		// separately for exactly that reason. The extension handler timeout is the
+		// other: the runner RACES each callback against it, so a dispatch that
+		// timed out proves nothing about the callback, which may still be about to
+		// resolve a credential. Waiting on the callback itself leaves this pass
+		// unbounded when an extension never returns; that is deliberate, since the
+		// alternative is lifting a restriction out from under live work.
 		if (!drained) {
 			void (async () => {
 				await this.agent.waitForIdle();
+				await this.#drainQueuedPreparations();
 				await this.#drainInFlightEventHandlers();
+				await this.#extensionRunner?.waitForPendingHandlerWork();
 				this.#releaseRetainedSessionMemory();
 				this.#accountPoolScope?.release();
 			})().catch(error => logger.warn("Deferred dispose finalization failed", { error: String(error) }));
@@ -8734,6 +8785,25 @@ export class AgentSession implements SettingsScope {
 		return images.length > 0 ? this.#buildImageDescriptionNotice(images) : undefined;
 	}
 
+	/** Queued-message preparations the agent is running inside its dequeue hook. `Agent.reset()`
+	 *  resolves `#runningPrompt` whenever a queue claim is held, so `agent.waitForIdle()` reports
+	 *  idle for a preparation that is still going — and disposal's own reset is what makes it say
+	 *  so. Anything that must outlast real preparation waits on these instead. */
+	#queuedPreparations = new Set<Promise<QueuedMessagePreparation>>();
+
+	#trackQueuedPreparation(preparation: Promise<QueuedMessagePreparation>): Promise<QueuedMessagePreparation> {
+		this.#queuedPreparations.add(preparation);
+		void preparation.catch(() => undefined).finally(() => this.#queuedPreparations.delete(preparation));
+		return preparation;
+	}
+
+	/** Resolves once no queued-message preparation is running. */
+	async #drainQueuedPreparations(): Promise<void> {
+		while (this.#queuedPreparations.size > 0) {
+			await Promise.allSettled([...this.#queuedPreparations]);
+		}
+	}
+
 	/** Queue ownership belongs to Agent; only actual user deliveries refresh submission policy. */
 	#prepareQueuedUserMessages = (
 		messages: readonly AgentMessage[],
@@ -8762,9 +8832,13 @@ export class AgentSession implements SettingsScope {
 		const preparationImages = images.length > 0 ? images : undefined;
 		// Steering amends the running task; only a follow-up starts a new one worth routing.
 		if (queue === "followUp" && userMessages.some(message => this.#isAutoPrewalkTask(message))) {
-			return this.#prepareQueuedAutoPrewalkTask(first, promptText, preparationImages, signal);
+			return this.#trackQueuedPreparation(
+				this.#prepareQueuedAutoPrewalkTask(first, promptText, preparationImages, signal),
+			);
 		}
-		return this.#prepareAgentStart(first, promptText, preparationImages, this.#promptGeneration, signal, "queued");
+		return this.#trackQueuedPreparation(
+			this.#prepareAgentStart(first, promptText, preparationImages, this.#promptGeneration, signal, "queued"),
+		);
 	};
 
 	/**

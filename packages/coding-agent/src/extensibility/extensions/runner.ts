@@ -305,6 +305,8 @@ async function raceHandlerWithTimeout<T>(
 	work: (handlerSignal: AbortSignal, timeoutBudget: HandlerTimeoutBudget) => Promise<T> | T,
 	timeoutMs: number,
 	signal?: AbortSignal,
+	/** Receives the callback itself, which outlives the race below when the timeout wins. */
+	track?: (handlerWork: Promise<unknown>) => void,
 ): Promise<T | typeof EXTENSION_HANDLER_TIMEOUT | typeof EXTENSION_HANDLER_ABORTED> {
 	if (signal?.aborted) return EXTENSION_HANDLER_ABORTED;
 
@@ -361,6 +363,7 @@ async function raceHandlerWithTimeout<T>(
 	try {
 		if (signal?.aborted) return EXTENSION_HANDLER_ABORTED;
 		const workPromise = Promise.resolve(work(handlerSignal, timeoutBudget));
+		track?.(workPromise);
 		const result = await Promise.race([workPromise, interruptPromise]);
 		if (result === EXTENSION_HANDLER_TIMEOUT) {
 			await Promise.race([
@@ -1731,6 +1734,37 @@ export class ExtensionRunner {
 	#isSessionShutdownEvent(event: RunnerEmitEvent): event is Extract<RunnerEmitEvent, { type: "session_shutdown" }> {
 		return event.type === "session_shutdown";
 	}
+
+	/** Handler callbacks still executing. {@link #runHandlerWithTimeout} RACES each one against its
+	 *  timeout, so a dispatch that times out returns while its callback keeps running — and that
+	 *  callback can still touch host resources (resolve a credential, write a file). A caller that
+	 *  needs the extension work itself to be over waits on {@link waitForPendingHandlerWork},
+	 *  never on the dispatch. */
+	#pendingHandlerWork = new Set<Promise<unknown>>();
+
+	#trackHandlerWork(handlerWork: Promise<unknown>): void {
+		const tracked: Promise<void> = handlerWork.then(
+			() => undefined,
+			() => undefined,
+		);
+		this.#pendingHandlerWork.add(tracked);
+		void tracked.finally(() => this.#pendingHandlerWork.delete(tracked));
+	}
+
+	/** Whether any handler callback is still executing. Cheap check for a caller that must not
+	 *  declare itself settled while extension work runs, but cannot afford to wait for it. */
+	hasPendingHandlerWork(): boolean {
+		return this.#pendingHandlerWork.size > 0;
+	}
+
+	/** Resolves once every handler callback dispatched so far has returned, including ones whose
+	 *  dispatch already gave up on them. Unbounded by design: a handler that never returns keeps
+	 *  whatever its caller is holding, which is safer than releasing under it. */
+	async waitForPendingHandlerWork(): Promise<void> {
+		while (this.#pendingHandlerWork.size > 0) {
+			await Promise.all([...this.#pendingHandlerWork]);
+		}
+	}
 	async #runHandlerWithTimeout<TEvent extends { type: string }, R>(
 		handler: (event: TEvent, ctx: ExtensionContext) => Promise<R | undefined> | R | undefined,
 		event: TEvent,
@@ -1783,6 +1817,7 @@ export class ExtensionRunner {
 					},
 					timeoutMs,
 					signal,
+					handlerWork => this.#trackHandlerWork(handlerWork),
 				),
 			);
 		} catch (error) {
