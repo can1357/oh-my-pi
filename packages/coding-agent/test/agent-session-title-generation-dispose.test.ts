@@ -39,6 +39,12 @@ afterEach(async () => {
  */
 const declineTitleFork = createMockModel({ handler: { content: ["<title/>"] } }).stream;
 
+/**
+ * Plain titles: a title-model title under the `fork` generator otherwise goes on
+ * to a card request, which these tests' request counts and timing do not cover.
+ */
+const PLAIN_TITLES = { "title.icons": "boring" };
+
 /** Assistant reply long enough (>= 40 words) to trigger a deferred retitle. */
 const TOKENIZER_REPLY =
 	"The screenshot shows a TypeError thrown by the tokenizer. It happens because the input stream is read after it was already closed, so the next token lookup dereferences an undefined buffer. Guarding the read and resetting the cursor when the stream closes should fix it without changing the public API.";
@@ -171,6 +177,7 @@ describe("AgentSession title generation disposal", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			modelRoles: { tiny: `${model.provider}/${model.id}` },
+			...PLAIN_TITLES,
 		});
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -233,6 +240,7 @@ describe("AgentSession title generation disposal", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			modelRoles: { tiny: `${model.provider}/${model.id}` },
+			...PLAIN_TITLES,
 		});
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -275,6 +283,7 @@ describe("AgentSession title generation disposal", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			modelRoles: { tiny: `${model.provider}/${model.id}` },
+			...PLAIN_TITLES,
 		});
 		const agent = new Agent({
 			getApiKey: () => "test-key",

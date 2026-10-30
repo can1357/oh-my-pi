@@ -148,7 +148,17 @@ export interface TableAnalysis {
 	readonly composition?: Composition;
 }
 
-const NUMBER = String.raw`(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[eE][+-]?\d+)?|\.\d+`;
+/**
+ * A whole number as written: bare, or grouped in thousands by commas (`1,988`)
+ * or by spaces as many locales write it (`1 988`, also U+00A0 and U+202F).
+ * Space groups take exactly three digits, so `12 5` and `128 2560` stay apart.
+ */
+const INTEGER = String.raw`\d{1,3}(?:,\d{3})+|\d{1,3}(?:[ \u00A0\u202F]\d{3})+(?!\d)|\d+`;
+const NUMBER = String.raw`(?:${INTEGER})(?:\.\d+)?(?:[eE][+-]?\d+)?|\.\d+`;
+/** A cell holding one whole number and nothing else (`38`, `1,980`). */
+const WHOLE = new RegExp(String.raw`^(?:${INTEGER})$`);
+/** The first number of a figure, its whole part and its decimals apart. */
+const WRITTEN = new RegExp(String.raw`(${INTEGER})(?:\.(\d+))?`);
 const CELL = new RegExp(
 	String.raw`^(?<approx>~|≈|<=|>=|<|>|≤|≥)?\s*(?<sign>[+\-−±])?\s*(?<cur>[$€£¥])?\s*(?<num>${NUMBER})(?<plus>\+(?=\s*[A-Za-zµμ%]))?\s*(?<unit>%|[A-Za-zµμ×]+(?:\/[A-Za-z]+)?|\/s)?(?<rest>.*)$`,
 );
@@ -517,8 +527,9 @@ export function parseCell(markdown: string): Cell {
 	return { ...cell, fit: "prose" };
 }
 
+/** The value of a number {@link NUMBER} matched, its comma or space group separators removed. */
 function toNumber(written: string): number {
-	return Number(written.replaceAll(",", ""));
+	return Number(written.replace(/[,\s]/g, ""));
 }
 
 /** A number of a list or sum: its value as written, its unit (known or a noun) and how it was marked. */
@@ -632,7 +643,7 @@ function listCell(text: string, base: CellBase): NumberCell | undefined {
 	// A spaced pair of bare numbers that is no score (`25.0 / 27.8`, `12.6 / 9.4`: the second is no whole, or
 	// the first exceeds it) lists two values of the column's quantity; `27 / 30` stays a score.
 	const [first, second] = items;
-	const whole = /^\d[\d,]*$/.test(text.slice(text.indexOf("/") + 1, end).trim());
+	const whole = WHOLE.test(text.slice(text.indexOf("/") + 1, end).trim());
 	const score = whole && first!.value >= 0 && first!.value <= second!.value;
 	const pair = items.length === 2 && !marked.some(Boolean) && separators[0] !== "/" && !score;
 	if (!pair && (!marked.at(-1) || !(marked.every(Boolean) || carried))) return undefined;
@@ -876,9 +887,9 @@ const WHOLE_HEADER = /\b(?:total|all|sum|overall)\b/i;
  */
 export function writtenSlack(cell: NumberCell): number {
 	if (cell.denominator !== undefined && cell.dim === "percent") return 0;
-	const match = /(\d[\d,]*)(?:\.(\d+))?/.exec(cell.figure);
+	const match = WRITTEN.exec(cell.figure);
 	if (!match) return 0;
-	const written = Number(`${match[1]!.replaceAll(",", "")}${match[2] ? `.${match[2]}` : ""}`);
+	const written = toNumber(`${match[1]!}${match[2] ? `.${match[2]}` : ""}`);
 	const factor = written ? Math.abs(cell.value) / written : 1;
 	const decimals = match[2]?.length ?? 0;
 	if (cell.dim === "count" && decimals === 0 && factor === 1 && !cell.approx) return 0;
@@ -1097,7 +1108,7 @@ const MIN_LISTS = 2;
 /** A spaced slash between list items. */
 const LIST_SLASH = /\s+\/\s+/;
 /** A list item that is one number, as written (`12`, `~1,400`, `3.5 ms`, `40%`). */
-const LISTED_NUMBER = /^[~≈]?[$€£¥]?\d[\d,]*(?:\.\d+)?\s*(?:%|[A-Za-zµμ]+)?$/;
+const LISTED_NUMBER = new RegExp(String.raw`^[~≈]?[$€£¥]?(?:${INTEGER})(?:\.\d+)?\s*(?:%|[A-Za-zµμ]+)?$`);
 
 /**
  * Rows folding several rows into one (`response anthropic / chat / responses /

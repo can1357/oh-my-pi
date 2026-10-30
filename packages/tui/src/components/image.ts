@@ -1,16 +1,19 @@
 import { encodeSixelAsync } from "@oh-my-pi/pi-natives";
 import { getKittyGraphics } from "../kitty-graphics";
+import { ensureSixelRasterWidth } from "../sixel";
 import {
 	encodeSixelNow,
 	getCellDimensions,
 	getImageDimensions,
+	getTerminalBackgroundColor,
 	type ImageDimensions,
 	ImageProtocol,
 	imageFallback,
 	renderImage,
 	TERMINAL,
 } from "../terminal-capabilities";
-import { nativeImageNode } from "../native/blobs";
+import { nativeImageNode, openableImageProps } from "../native/blobs";
+import { imageLinksEnabled, linkedImageText, transcriptImageLink } from "../prompt/image-references";
 import type { DescribeContext, NativeNode } from "../native/node";
 import type { Component } from "../tui";
 
@@ -22,6 +25,8 @@ export interface ImageOptions {
 	maxWidthCells?: number;
 	maxHeightCells?: number;
 	filename?: string;
+	/** File the image was read from; its link target. Images without one link to a blob copy of their bytes. */
+	sourcePath?: string;
 	/** Shared budget that caps how many inline images render as live graphics. */
 	budget?: ImageBudget;
 	/**
@@ -38,6 +43,13 @@ export interface ImageOptions {
 	requestRender?: () => void;
 }
 
+interface SixelEncode {
+	widthPx: number;
+	heightPx: number;
+	backgroundRgb: number;
+	sequence?: string | null;
+}
+
 /** Renders in progress whose rows are bound for native scrollback. */
 let scrollbackRenderDepth = 0;
 
@@ -52,6 +64,31 @@ export function renderForScrollback<T>(render: () => T): T {
 		return render();
 	} finally {
 		scrollbackRenderDepth--;
+	}
+}
+
+/** Renders in progress that measure rows outside display order; see {@link measureRender}. */
+let measureRenderDepth = 0;
+/** Budgeted image observations made under {@link measureRender}; only differences are meaningful. */
+let measuredImageObservations = 0;
+
+/**
+ * Run `render` to measure rows outside display order — a newest-first height
+ * walk, say. {@link ImageBudget} derives demotion from the order images are
+ * observed in, so a budgeted {@link Image} inside this scope claims no display
+ * slot: it replays the decision its slot in the surface's last full pass
+ * implies. `images` reports whether any budgeted image was observed; the caller
+ * MUST render every such block it lays out again, outside this scope and in
+ * display order, or its images keep no slot in the pass.
+ */
+export function measureRender<T>(render: () => T): { value: T; images: boolean } {
+	const before = measuredImageObservations;
+	measureRenderDepth++;
+	try {
+		const value = render();
+		return { value, images: measuredImageObservations !== before };
+	} finally {
+		measureRenderDepth--;
 	}
 }
 
@@ -92,16 +129,16 @@ interface SurfaceSplit {
 	/** Images the last full pass on this surface observed. */
 	lastTotal: number;
 	/**
-	 * Image ids shown as text in the frame currently on this surface: the
-	 * display-order prefix [0, onTerminal) of its last full pass, snapshotted by
-	 * id so a partial pass reproduces the on-screen live/text split without a
-	 * full, correctly-ordered walk.
+	 * Display slot of every image the last full pass on this surface observed,
+	 * keyed by id. A pass that cannot derive display order from its own walk — a
+	 * partial `stable` pass, or a {@link measureRender} scope — replays its
+	 * decisions from these slots instead.
 	 */
-	readonly suppressedIds: Set<number>;
+	readonly slots: Map<number, number>;
 }
 
 function newSurfaceSplit(): SurfaceSplit {
-	return { onTerminal: 0, planned: 0, lastTotal: 0, suppressedIds: new Set() };
+	return { onTerminal: 0, planned: 0, lastTotal: 0, slots: new Map() };
 }
 
 /** Return a split to "nothing has been painted on this surface yet", in place. */
@@ -109,7 +146,7 @@ function resetSurfaceSplit(split: SurfaceSplit): void {
 	split.onTerminal = 0;
 	split.planned = 0;
 	split.lastTotal = 0;
-	if (split.suppressedIds.size > 0) split.suppressedIds.clear();
+	if (split.slots.size > 0) split.slots.clear();
 }
 
 let nextImageBudgetSeed = Math.floor(Math.random() * 0xffffff);
@@ -324,16 +361,23 @@ export class ImageBudget {
 	 * During a `stable` pass ({@link beginPass}) the call order and visible subset
 	 * are not authoritative, so the decision is the surface's committed
 	 * on-terminal split, keyed by id — order- and partiality-independent.
+	 *
+	 * Inside {@link measureRender} the call claims no slot: it answers what the
+	 * image's slot in the last full pass implies under the planned threshold,
+	 * which is what the display-order render that follows will decide once the
+	 * split has converged.
 	 */
 	observe(imageId: number): boolean {
+		if (measureRenderDepth > 0) measuredImageObservations++;
 		const existing = this.#passSuppression.get(imageId);
 		if (existing !== undefined) return existing;
 		if (this.#stablePass) {
-			const suppressed = this.#cap > 0 && this.#split.suppressedIds.has(imageId);
+			const suppressed = this.#cap > 0 && this.#lastSlotBelow(imageId, this.#split.onTerminal);
 			this.#passSuppression.set(imageId, suppressed);
 			if (suppressed) this.#forgetKeyForId(imageId);
 			return suppressed;
 		}
+		if (measureRenderDepth > 0) return this.#cap > 0 && this.#lastSlotBelow(imageId, this.#split.planned);
 		const index = this.#passIds.length;
 		this.#passIds.push(imageId);
 		const suppressed = this.#cap > 0 && index < this.#split.planned;
@@ -341,6 +385,12 @@ export class ImageBudget {
 		this.#passIndex.set(imageId, index);
 		if (suppressed) this.#forgetKeyForId(imageId);
 		return suppressed;
+	}
+
+	/** Whether `imageId` held a display slot below `threshold` in the last full pass on this surface. */
+	#lastSlotBelow(imageId: number, threshold: number): boolean {
+		const slot = this.#split.slots.get(imageId);
+		return slot !== undefined && slot < threshold;
 	}
 
 	/**
@@ -361,14 +411,12 @@ export class ImageBudget {
 			this.#applyingReset = false;
 		}
 		const retry = this.#reconcile(total);
-		// Snapshot the committed display-order suppression by id: the prefix
-		// [0, onTerminal) is what this surface currently shows as text. Partial
-		// passes replay this per id (see #stablePass) instead of re-deriving it
-		// from a reversed, tail-only walk.
-		const suppressedIds = split.suppressedIds;
-		if (suppressedIds.size > 0) suppressedIds.clear();
-		const suppressedCount = Math.min(total, split.onTerminal);
-		for (let i = 0; i < suppressedCount; i++) suppressedIds.add(this.#passIds[i]);
+		// Snapshot display order by id. Partial passes (see #stablePass) and
+		// measuring renders replay their decisions from it instead of
+		// re-deriving them from a reversed or tail-only walk.
+		const slots = split.slots;
+		if (slots.size > 0) slots.clear();
+		for (let i = 0; i < total; i++) slots.set(this.#passIds[i], i);
 		return retry;
 	}
 
@@ -652,14 +700,17 @@ export class Image implements Component {
 	#cachedImageProtocol: typeof TERMINAL.imageProtocol = null;
 	#cachedCellWidthPx = 0;
 	#cachedCellHeightPx = 0;
+	#cachedSixelBackground: number | undefined;
 	#cachedKittyUnicodePlaceholders = false;
+	#cachedLinked = false;
 	// Tallest graphic placement this image has rendered. The text fallback
 	// pads itself to this height so a budget demotion never shrinks the block
 	// (its rows may already be committed to native scrollback).
 	#renderedGraphicRows = 0;
-	#native?: NativeNode;
-	/** Newest SIXEL encode: its target size and, once settled, the sequence (`null` on failure). */
-	#sixel?: { widthPx: number; heightPx: number; sequence?: string | null };
+	/** Described node and the link policy it was built under (an `off` switch drops its `href`). */
+	#native?: { linked: boolean; node: NativeNode };
+	/** Newest SIXEL encode: target size, compositing background, and settled sequence. */
+	#sixel?: SixelEncode;
 
 	constructor(
 		base64Data: string,
@@ -693,39 +744,57 @@ export class Image implements Component {
 		this.#cachedWidth = undefined;
 	}
 
+	/**
+	 * Refit to a new row ceiling; a SIXEL reserves its rows until the off-thread
+	 * encode lands. A demoted fallback keeps the height already drawn only
+	 * within the new ceiling: the owner chose to shrink the block.
+	 */
+	setMaxHeightCells(maxHeightCells: number): void {
+		if (this.#options.maxHeightCells === maxHeightCells) return;
+		this.#options.maxHeightCells = maxHeightCells;
+		this.#renderedGraphicRows = Math.min(this.#renderedGraphicRows, maxHeightCells);
+		this.#native = undefined;
+		this.invalidate();
+	}
+
 	releaseRenderCaches(): void {
 		this.#cachedLines = undefined;
 		this.#cachedWidth = undefined;
 	}
 
 	/**
-	 * SIXEL sequence for a target size. A new size starts the encode off the JS
+	 * SIXEL sequence for a target size and background. A change starts the encode off the JS
 	 * thread and answers `undefined` until it settles; the settled encode
 	 * invalidates the cached lines and requests a repaint. A render bound for
 	 * scrollback cannot wait, so it encodes synchronously.
 	 */
-	#sixelSequence(widthPx: number, heightPx: number): string | null | undefined {
+	#sixelSequence(widthPx: number, heightPx: number, backgroundRgb: number): string | null | undefined {
 		const current = this.#sixel;
-		const sameSize = current !== undefined && current.widthPx === widthPx && current.heightPx === heightPx;
-		if (sameSize && current.sequence !== undefined) return current.sequence;
+		const sameInput =
+			current !== undefined &&
+			current.widthPx === widthPx &&
+			current.heightPx === heightPx &&
+			current.backgroundRgb === backgroundRgb;
+		if (sameInput && current.sequence !== undefined) return current.sequence;
 		if (scrollbackRenderDepth > 0) {
 			// Replacing the entry makes a still-pending async encode settle as stale.
-			const sequence = encodeSixelNow(this.#base64Data, widthPx, heightPx);
-			this.#sixel = { widthPx, heightPx, sequence };
+			const sequence = encodeSixelNow(this.#base64Data, widthPx, heightPx, backgroundRgb);
+			this.#sixel = { widthPx, heightPx, backgroundRgb, sequence };
 			return sequence;
 		}
-		if (sameSize) return undefined;
-		const request: { widthPx: number; heightPx: number; sequence?: string | null } = { widthPx, heightPx };
+		if (sameInput) return undefined;
+		const request: SixelEncode = { widthPx, heightPx, backgroundRgb };
 		this.#sixel = request;
 		const settle = (sequence: string | null): void => {
-			request.sequence = sequence;
-			if (this.#sixel !== request) return;
+			request.sequence = sequence === null ? null : ensureSixelRasterWidth(sequence);
+			if (this.#sixel !== request || getTerminalBackgroundColor() !== backgroundRgb) return;
 			this.invalidate();
 			if (this.#options.requestRender) this.#options.requestRender();
 			else this.#budget?.requestRender();
 		};
-		encodeSixelAsync(new Uint8Array(Buffer.from(this.#base64Data, "base64")), widthPx, heightPx).then(settle, () =>
-			settle(null),
+		encodeSixelAsync(new Uint8Array(Buffer.from(this.#base64Data, "base64")), widthPx, heightPx, backgroundRgb).then(
+			settle,
+			() => settle(null),
 		);
 		return undefined;
 	}
@@ -736,10 +805,12 @@ export class Image implements Component {
 	 * graphics protocols do not apply.
 	 */
 	describe(_cx: DescribeContext): NativeNode {
-		if (this.#native) return this.#native;
+		const linked = imageLinksEnabled();
+		if (this.#native?.linked === linked) return this.#native.node;
 		const maxW = this.#options.maxWidthCells;
 		const maxH = this.#options.maxHeightCells;
-		this.#native = nativeImageNode(Buffer.from(this.#base64Data, "base64"), this.#mimeType, {
+		const href = transcriptImageLink({ data: this.#base64Data, mimeType: this.#mimeType }, this.#options.sourcePath);
+		const node = nativeImageNode(Buffer.from(this.#base64Data, "base64"), this.#mimeType, {
 			alt: imageFallback(this.#mimeType, this.#dimensions, this.#options.filename),
 			w: this.#dimensions.widthPx,
 			h: this.#dimensions.heightPx,
@@ -750,8 +821,10 @@ export class Image implements Component {
 							h: maxH && maxH > 0 ? `${maxH}lines` : undefined,
 						}
 					: undefined,
+			...openableImageProps(href),
 		});
-		return this.#native;
+		this.#native = { linked, node };
+		return node;
 	}
 
 	render(width: number): readonly string[] {
@@ -759,6 +832,7 @@ export class Image implements Component {
 		const hasProtocol = imageProtocol != null;
 		const cellDimensions = getCellDimensions();
 		const kittyUnicodePlaceholders = getKittyGraphics().unicodePlaceholders;
+		const sixelBackground = imageProtocol === ImageProtocol.Sixel ? getTerminalBackgroundColor() : undefined;
 		// observe() must run on every pass — even a cache hit — so the image keeps
 		// its display-order slot in the budget. Only graphics-capable frames count
 		// toward (and are demoted by) the budget; without a protocol every image is
@@ -771,6 +845,7 @@ export class Image implements Component {
 		// re-encode the full image on every render pass.
 		const imageId = this.#imageId;
 		const transmitsSeparately = imageProtocol === ImageProtocol.Kitty && imageId != null;
+		const linked = imageLinksEnabled();
 
 		if (
 			this.#cachedLines &&
@@ -779,7 +854,10 @@ export class Image implements Component {
 			this.#cachedImageProtocol === imageProtocol &&
 			this.#cachedCellWidthPx === cellDimensions.widthPx &&
 			this.#cachedCellHeightPx === cellDimensions.heightPx &&
+			this.#cachedSixelBackground === sixelBackground &&
 			this.#cachedKittyUnicodePlaceholders === kittyUnicodePlaceholders &&
+			// The text fallback embeds a link only under an enabled hyperlink policy.
+			this.#cachedLinked === linked &&
 			(!transmitsSeparately || this.#budget?.shouldTransmit(imageId) !== true) &&
 			// Cached rows reserved for a pending SIXEL encode must not reach scrollback.
 			!(scrollbackRenderDepth > 0 && this.#sixel !== undefined && this.#sixel.sequence === undefined)
@@ -801,7 +879,7 @@ export class Image implements Component {
 				maxHeightCells: this.#options.maxHeightCells,
 				imageId: this.#imageId,
 				includeTransmit: needsTransmit,
-				sixel: (widthPx, heightPx) => this.#sixelSequence(widthPx, heightPx),
+				sixel: (widthPx, heightPx) => this.#sixelSequence(widthPx, heightPx, sixelBackground!),
 			});
 
 			if (result?.transmit && this.#imageId != null && this.#budget !== undefined) {
@@ -817,9 +895,9 @@ export class Image implements Component {
 				// height. First (rows-1) lines are empty (TUI clears them); the last
 				// saves the final-row cursor, moves up to the image origin, emits the
 				// image sequence, then restores the final-row cursor. When the block
-				// straddles the viewport top, the renderer rewrites this line to the
-				// visible slice (encodeKittyPlacementLine) from the geometry
-				// registered below.
+				// straddles the viewport top, the renderer crops the source raster
+				// for SIXEL or rewrites the Kitty placement's visible source slice
+				// from the geometry registered below.
 				if (this.#imageId != null && this.#budget !== undefined) {
 					this.#budget.registerPlacementGeometry(
 						this.#imageId,
@@ -849,7 +927,9 @@ export class Image implements Component {
 		this.#cachedImageProtocol = imageProtocol;
 		this.#cachedCellWidthPx = cellDimensions.widthPx;
 		this.#cachedCellHeightPx = cellDimensions.heightPx;
+		this.#cachedSixelBackground = sixelBackground;
 		this.#cachedKittyUnicodePlaceholders = kittyUnicodePlaceholders;
+		this.#cachedLinked = linked;
 
 		return lines;
 	}
@@ -864,7 +944,11 @@ export class Image implements Component {
 	 */
 	#fallbackLines(): string[] {
 		const fallback = this.#theme.fallbackColor(
-			imageFallback(this.#mimeType, this.#dimensions, this.#options.filename),
+			linkedImageText(
+				imageFallback(this.#mimeType, this.#dimensions, this.#options.filename),
+				{ data: this.#base64Data, mimeType: this.#mimeType },
+				this.#options.sourcePath,
+			),
 		);
 		if (this.#renderedGraphicRows <= 1) return [fallback];
 		const lines: string[] = [];

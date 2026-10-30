@@ -77,17 +77,22 @@ function getMemory(context?: CliContext): { memory: BeamMemory; owned: boolean }
 	return { memory: new BeamMemory({ dbPath: resolveDbPath(context) }), owned: true };
 }
 
-async function withMemory<T>(context: CliContext | undefined, fn: (memory: BeamMemory) => T | Promise<T>): Promise<T> {
+export async function withMemory<T>(
+	context: CliContext | undefined,
+	fn: (memory: BeamMemory) => T | Promise<T>,
+): Promise<T> {
 	const { memory, owned } = getMemory(context);
 	try {
-		const result = await fn(memory);
+		return await fn(memory);
+	} finally {
 		// Drain background fact-extraction and embedding tasks before close so
 		// short-lived owners (e.g. `mnemopi store …` / `mnemopi sleep …`) don't
 		// race the SQLite handle shut from under in-flight `embed()` writes.
-		if (owned) await memory.flushExtractions();
-		return result;
-	} finally {
-		if (owned) memory.close();
+		// Runs on both success and throw paths.
+		if (owned) {
+			await memory.flushExtractions();
+			memory.close();
+		}
 	}
 }
 

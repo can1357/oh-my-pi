@@ -25,7 +25,20 @@ afterEach(() => {
 const TERN_PREPAINT = { expected: true, deferInput: true } as const;
 
 describe("keystrokes during a Tern startup prepaint", () => {
-	it("are held until the app releases them, then replayed once, in order, and delivered live", async () => {
+	it("edit the focused component live while they are plain typing, and queue a shortcut with everything after it", async () => {
+		const log = new KeyLog();
+		harness = await TspHarness.start(tui => tui.setFocus(log), TERN_PREPAINT);
+		const h = harness;
+
+		for (const key of ["a", "\x7f", "b", "\x1bp", "c", "\x7f"]) h.terminal.send(key);
+		h.flush();
+		expect(log.keys).toEqual(["a", "\x7f", "b"]);
+
+		h.tui.releaseHeldInput();
+		expect(log.keys).toEqual(["a", "\x7f", "b", "\x1bp", "c", "\x7f"]);
+	});
+
+	it("behind a shortcut are held until the app releases them, then replayed once, in order, and delivered live", async () => {
 		const log = new KeyLog();
 		harness = await TspHarness.start(tui => tui.setFocus(log), TERN_PREPAINT);
 		const h = harness;
@@ -62,8 +75,33 @@ describe("keystrokes during a Tern startup prepaint", () => {
 			h.terminal.send("b");
 			h.flush();
 			expect(getCellDimensions()).toEqual({ widthPx: 11, heightPx: 23 });
+			// The reply neither reaches the editor nor starts holding the typing after it.
+			expect(log.keys).toEqual(["a", "b"]);
 
+			h.terminal.send("\x1bp");
+			h.terminal.send("\x1b[6;24;12t");
+			h.flush();
+			expect(getCellDimensions()).toEqual({ widthPx: 12, heightPx: 24 });
 			h.tui.releaseHeldInput();
+			expect(log.keys).toEqual(["a", "b", "\x1bp"]);
+		} finally {
+			setCellDimensions(before);
+		}
+	});
+
+	it("apply iTerm2's cell-size reply in device pixels instead of replaying it as typed text", async () => {
+		const before = getCellDimensions();
+		try {
+			const log = new KeyLog();
+			harness = await TspHarness.start(tui => tui.setFocus(log), TERN_PREPAINT);
+			const h = harness;
+
+			h.terminal.send("a");
+			// Points plus the backing scale: a Retina cell of 7x17 points is 14x34 pixels.
+			h.terminal.send("\x1b]1337;ReportCellSize=17.0;7.0;2.0\x1b\\");
+			h.terminal.send("b");
+			h.flush();
+			expect(getCellDimensions()).toEqual({ widthPx: 14, heightPx: 34 });
 			expect(log.keys).toEqual(["a", "b"]);
 		} finally {
 			setCellDimensions(before);
@@ -99,7 +137,7 @@ describe("keystrokes during a Tern startup prepaint", () => {
 		harness = await TspHarness.start(tui => tui.setFocus(editor), TERN_PREPAINT);
 		const h = harness;
 
-		h.terminal.send("a");
+		h.terminal.send("\x1bp");
 		h.flush();
 		h.tui.replaceHeldFocus(editor, replacement);
 		h.tui.setFocus(replacement);
@@ -108,7 +146,7 @@ describe("keystrokes during a Tern startup prepaint", () => {
 		expect(replacement.keys).toEqual([]);
 
 		h.tui.releaseHeldInput();
-		expect(replacement.keys).toEqual(["a", "b"]);
+		expect(replacement.keys).toEqual(["\x1bp", "b"]);
 	});
 
 	it("survive a dialog stopping and restarting the TUI (an external editor)", async () => {

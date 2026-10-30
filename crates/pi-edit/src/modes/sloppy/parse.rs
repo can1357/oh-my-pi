@@ -93,6 +93,38 @@ struct RewriteBody {
 	insert: Option<Placement>,
 }
 
+impl RewriteBody {
+	/// The `*** ` operator header this body was staged under.
+	const fn operator(&self) -> &'static str {
+		match self.insert {
+			None => "*** Replace",
+			Some(at) => at.header(),
+		}
+	}
+}
+
+/// The grammar allows one operator per `*** Find`; a second one can only
+/// discard the staged body, so refuse the payload instead of silently
+/// dropping it.
+///
+/// The lead phrase is shared with [`is_conflicting_operators_error`] so region
+/// extraction can recognize a payload the edit pipeline must report. The full
+/// message stays byte-identical: models are trained on these strings.
+const CONFLICTING_OPERATORS_LEAD: &str = "*** Find is followed by both";
+fn conflicting_operators(staged: &str, incoming: &str) -> EditError {
+	parse_error(format!(
+		"{CONFLICTING_OPERATORS_LEAD} {staged} and {incoming}. Use exactly one of *** Replace, *** \
+		 Insert Before, or *** Insert After per *** Find."
+	))
+}
+
+/// Whether this rejection is the conflicting-operators signal. Region
+/// extraction preserves such payloads so the pipeline reports the parser
+/// error instead of completing the turn with no tool call.
+fn is_conflicting_operators_error(error: &EditError) -> bool {
+	matches!(error, EditError::Parse { message, .. } if message.starts_with(CONFLICTING_OPERATORS_LEAD))
+}
+
 /// Internal op-stream prefix carrying a JSON-encoded insertion body.
 const fn insert_header(at: Placement) -> &'static str {
 	match at {
@@ -252,10 +284,14 @@ fn flush_compiled(
 		}) {
 		return;
 	}
-	if sections.is_empty() {
-		sections.push(CompiledSection { path: String::new(), ir: Vec::new() });
-	}
-	let ir = &mut sections.last_mut().expect("section exists").ir;
+	let ir = match sections.last_mut() {
+		Some(section) => &mut section.ir,
+		None => {
+			&mut sections
+				.push_mut(CompiledSection { path: String::new(), ir: Vec::new() })
+				.ir
+		},
+	};
 	ir.push(format!("{OPENER}{}", if all { "*" } else { "" }));
 	if let Some(RewriteBody { lines, insert: Some(at) }) = &put {
 		ir.extend(find);
@@ -284,7 +320,8 @@ fn flush_compiled(
 	}
 }
 
-fn compile_sections(lines: &[String]) -> Vec<CompiledSection> {
+/// Compile payload lines into per-file internal op streams.
+fn compile_sections(lines: &[String]) -> Result<Vec<CompiledSection>, EditError> {
 	#[derive(Clone, Copy)]
 	enum State {
 		Idle,
@@ -329,21 +366,30 @@ fn compile_sections(lines: &[String]) -> Vec<CompiledSection> {
 				state = State::Find;
 			},
 			Header::Replace => {
+				if let Some(staged) = put_lines.as_ref() {
+					return Err(conflicting_operators(staged.operator(), "*** Replace"));
+				}
 				put_lines = Some(RewriteBody { lines: Vec::new(), insert: None });
 				state = State::Put;
 			},
 			Header::Insert(at) => {
+				if let Some(staged) = put_lines.as_ref() {
+					return Err(conflicting_operators(staged.operator(), at.header()));
+				}
 				put_lines = Some(RewriteBody { lines: Vec::new(), insert: Some(at) });
 				state = State::Put;
 			},
 		}
 	}
 	flush_compiled(&mut sections, all, &mut find_lines, &mut put_lines);
-	sections
+	Ok(sections)
 }
 
 /// Split a sloppy payload into ordered, same-path-coalesced file sections.
-pub fn split_sloppy_sections(input: &str) -> Vec<SloppySection> {
+///
+/// Fails when one `*** Find` carries more than one operator: the second
+/// operator can only discard the body the first one staged.
+pub fn split_sloppy_sections(input: &str) -> Result<Vec<SloppySection>, EditError> {
 	let mut lines = strip_envelope_noise(input.lines().collect());
 	while lines.first().is_some_and(|line| line.trim().is_empty()) {
 		lines.remove(0);
@@ -352,9 +398,9 @@ pub fn split_sloppy_sections(input: &str) -> Vec<SloppySection> {
 		parse_header(lines.first().map_or("", String::as_str)),
 		Some(Header::Edit { path: Some(_), .. })
 	) {
-		return Vec::new();
+		return Ok(Vec::new());
 	}
-	let sections = compile_sections(&lines);
+	let sections = compile_sections(&lines)?;
 	let mut bodies: HashMap<String, Vec<String>> = HashMap::new();
 	let mut paths = Vec::new();
 	for section in sections {
@@ -366,10 +412,10 @@ pub fn split_sloppy_sections(input: &str) -> Vec<SloppySection> {
 		}
 		bodies.entry(section.path).or_default().extend(section.ir);
 	}
-	paths
+	Ok(paths
 		.into_iter()
 		.map(|path| SloppySection { body: bodies.remove(&path).unwrap_or_default().join("\n"), path })
-		.collect()
+		.collect())
 }
 
 /// Extract pathful sloppy payloads embedded in prose, using UTF-16 offsets.
@@ -436,7 +482,14 @@ pub fn extract_inline_sloppy_regions(text: &str) -> Vec<InlineSloppyRegion> {
 			scan += 1;
 		}
 		let payload = lines[index..=last].join("\n");
-		if !split_sloppy_sections(&payload).is_empty() {
+		// A payload the sloppy parser rejects is not an inline sloppy region —
+		// except a conflicting-operators payload, which the edit pipeline must
+		// report rather than silently skip.
+		let recognized = match split_sloppy_sections(&payload) {
+			Ok(sections) => !sections.is_empty(),
+			Err(error) => is_conflicting_operators_error(&error),
+		};
+		if recognized {
 			regions.push(InlineSloppyRegion { start: starts[index], end: line_end(last), payload });
 		}
 		index = scan.max(last + 1);
@@ -463,7 +516,7 @@ fn is_ordinal_opener(line: &str) -> bool {
 }
 
 /// Normalize section headers or internal IR into a canonical op stream.
-pub fn normalize_input(input: &str) -> String {
+pub fn normalize_input(input: &str) -> Result<String, EditError> {
 	let mut lines = strip_envelope_noise(input.lines().collect());
 	while lines.first().is_some_and(|line| line.trim().is_empty()) {
 		lines.remove(0);
@@ -476,12 +529,10 @@ pub fn normalize_input(input: &str) -> String {
 		while lines.last().is_some_and(|line| line.trim().is_empty()) {
 			lines.pop();
 		}
-		if lines.last().is_some_and(|line| line.trim() == "```") {
-			lines.pop();
-		}
+		lines.pop_if(|line| line.trim() == "```");
 	}
 	if lines.iter().any(|line| parse_header(line).is_some()) {
-		lines = compile_sections(&lines)
+		lines = compile_sections(&lines)?
 			.into_iter()
 			.flat_map(|section| section.ir)
 			.collect();
@@ -502,7 +553,7 @@ pub fn normalize_input(input: &str) -> String {
 	while lines.last().is_some_and(|line| line.trim().is_empty()) {
 		lines.pop();
 	}
-	lines.join("\n")
+	Ok(lines.join("\n"))
 }
 
 fn normalize_block(lines: &[String], rewrite: bool) -> String {
@@ -1113,11 +1164,8 @@ fn embed_marker_lines(pattern_text: &str) -> String {
 			continue;
 		}
 		if added.len() == 1
-			&& out
-				.last()
-				.is_some_and(|anchor| is_near_variant(anchor, &added[0]))
+			&& let Some(anchor) = out.pop_if(|anchor| is_near_variant(anchor, &added[0]))
 		{
-			let anchor = out.pop().expect("checked anchor");
 			out.push(format!("{SELECT_OPEN}{anchor}{SELECT_DIVIDER}{}{SELECT_CLOSE}", added[0]));
 			continue;
 		}
@@ -1755,7 +1803,7 @@ pub(super) fn parse_section(
 	path: &str,
 	streaming: bool,
 ) -> Result<Vec<Operation>, EditError> {
-	let payload = normalize_input(input);
+	let payload = normalize_input(input)?;
 	let mut lines: Vec<String> = payload.split('\n').map(str::to_owned).collect();
 	if parse_opener(lines.first().map_or("", String::as_str)).is_none()
 		&& (lines.iter().any(|line| line.trim() == REWRITE_HEADER)

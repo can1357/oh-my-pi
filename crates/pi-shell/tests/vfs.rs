@@ -53,7 +53,33 @@ impl FileSystem for DelayedFilesystem {
 
 	async fn backing_path(&self, path: &Path) -> io::Result<Option<PathBuf>> {
 		delay().await;
+		let Some(spelled) = path.to_str().filter(|path| path.starts_with("virtual://")) else {
+			// A scheme this provider does not serve aliases nothing.
+			return Ok(None);
+		};
+		// `virtual://rendered/…` stands in for a scheme that aliases no file
+		// (`omp://`, `history://`): the provider serves it, but there is
+		// nothing for the operating system to open.
+		if spelled.starts_with("virtual://rendered") {
+			return Ok(None);
+		}
 		self.path(path).map(Some)
+	}
+
+	/// `virtual://frozen/…` stands in for an immutable file-backed scheme
+	/// (`skill://`, `artifact://`): readable, but refusing every mutation.
+	async fn access(&self, path: &Path, read: bool, write: bool, execute: bool) -> io::Result<()> {
+		delay().await;
+		if write
+			&& path
+				.to_str()
+				.is_some_and(|path| path.starts_with("virtual://frozen"))
+		{
+			return Err(pi_vfs::read_only_filesystem());
+		}
+		Fs::native()
+			.access(self.path(path)?, read, write, execute)
+			.await
 	}
 
 	async fn open(&self, path: &Path, options: &OpenOptions) -> io::Result<File> {
@@ -72,8 +98,18 @@ impl FileSystem for DelayedFilesystem {
 		Fs::native().symlink_metadata(self.path(path)?).await
 	}
 
+	/// Listing `virtual://vanishing…` stands in for a directory another
+	/// process deletes while it is refused to us: it is removed, then the
+	/// listing fails with `PermissionDenied`.
 	async fn read_dir(&self, path: &Path) -> io::Result<ReadDir> {
 		delay().await;
+		if path
+			.to_str()
+			.is_some_and(|path| path.starts_with("virtual://vanishing"))
+		{
+			Fs::native().remove_dir_all(self.path(path)?).await?;
+			return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+		}
 		let mut entries = Vec::new();
 		for entry in Fs::native().read_dir(self.path(path)?).await? {
 			let entry = entry?;
@@ -129,11 +165,22 @@ impl FileSystem for DelayedFilesystem {
 		Fs::native().remove_dir(self.path(path)?).await
 	}
 
+	/// Changing `virtual://unsettable…` stands in for a directory another
+	/// process deletes first: it is removed, then the change fails `NotFound`.
 	async fn set_permissions(&self, path: &Path, permissions: Permissions) -> io::Result<()> {
 		delay().await;
-		Fs::native()
-			.set_permissions(self.path(path)?, permissions)
-			.await
+		let target = self.path(path)?;
+		if path
+			.to_str()
+			.is_some_and(|path| path.starts_with("virtual://unsettable"))
+		{
+			let mut writable = Fs::native().metadata(&target).await?.permissions();
+			writable.set_readonly(false);
+			Fs::native().set_permissions(&target, writable).await?;
+			Fs::native().remove_dir(&target).await?;
+			return Err(io::Error::from(io::ErrorKind::NotFound));
+		}
+		Fs::native().set_permissions(target, permissions).await
 	}
 
 	async fn set_times(
@@ -273,8 +320,8 @@ cat ./*.txt"#,
 }
 
 /// `xargs`, `ifne`, and `find -exec`/`-execdir` must dispatch their command
-/// through the shell: only in-process builtins can open provider URLs, and an
-/// external program cannot even start in a provider working directory.
+/// through the shell: only in-process builtins can open provider URLs, whereas
+/// an external program is limited to the files those URLs alias.
 #[tokio::test]
 async fn command_running_utilities_dispatch_builtins_that_open_urls() {
 	let directory = tempfile::tempdir().expect("isolated provider filesystem");
@@ -297,6 +344,197 @@ async fn command_running_utilities_dispatch_builtins_that_open_urls() {
 		.expect("command-running utilities");
 	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
 	assert_eq!(captured_text(&output), "alpha\nbeta\nbeta\nalpha\n");
+}
+
+/// An external program cannot open a provider URL, so one it is handed must
+/// name the file that URL aliases, in the bare spelling and in the
+/// attached-value spelling a tool's own flags use. A scheme the filesystem
+/// does not route is not a path and must reach the child as written, as must a
+/// bare scheme root, which is far likelier a search pattern than a directory.
+#[tokio::test]
+async fn external_commands_receive_host_paths_for_backed_url_arguments() {
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	fs::create_dir(directory.path().join("docs")).expect("provider directory");
+	fs::write(directory.path().join("docs/a.txt"), b"alpha\n").expect("document");
+	let output = tempfile::tempfile().expect("captured stdout");
+	let error = tempfile::tempfile().expect("captured stderr");
+	let mut shell = virtual_shell(directory.path()).await;
+	let parameters = capture_parameters(&shell, &output, &error);
+	#[cfg(unix)]
+	let script = r#"/bin/sh -c 'printf "%s\n" "$0" "$1" "$2" "$3" "$4" "$5"' virtual://docs/a.txt --data-dir=virtual://docs https://example.com/a.txt 'https://example.com/?next=virtual://docs' virtual:// --root=virtual://"#;
+	#[cfg(windows)]
+	let script = "cmd.exe /c echo virtual://docs/a.txt && cmd.exe /c echo \
+	              --data-dir=virtual://docs && cmd.exe /c echo https://example.com/a.txt && \
+	              cmd.exe /c echo 'https://example.com/?next=virtual://docs' && cmd.exe /c \
+	              echo virtual:// && cmd.exe /c echo --root=virtual://";
+	let result = shell
+		.run_string(script, &SourceInfo::from("vfs-external-args"), &parameters)
+		.await
+		.expect("external command with url arguments");
+	let stdout = captured_text(&output);
+	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
+	// The provider aliases `virtual://x` to `root/x`, keeping the URL's own
+	// separators, so the expectation is built the same way.
+	let docs = directory.path().join("docs");
+	assert!(
+		stdout.contains(&directory.path().join("docs/a.txt").display().to_string()),
+		"bare url reached the child unresolved: {stdout}"
+	);
+	assert!(
+		stdout.contains(&format!("--data-dir={}", docs.display())),
+		"attached value reached the child unresolved: {stdout}"
+	);
+	assert!(
+		stdout.contains("https://example.com/a.txt"),
+		"an unrouted scheme was rewritten: {stdout}"
+	);
+	assert!(
+		stdout.contains("https://example.com/?next=virtual://docs"),
+		"a url embedded in a query string was rewritten: {stdout}"
+	);
+	let lines: Vec<&str> = stdout.lines().map(str::trim).collect();
+	assert!(
+		lines.contains(&"virtual://") && lines.contains(&"--root=virtual://"),
+		"a bare scheme root was rewritten: {stdout}"
+	);
+}
+
+/// A URL the provider cannot resolve fails the command with the provider's
+/// reason instead of reaching the child, which could only fail on it later
+/// with no hint why.
+#[tokio::test]
+async fn external_commands_refuse_url_arguments_the_provider_rejects() {
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	let output = tempfile::tempfile().expect("captured stdout");
+	let error = tempfile::tempfile().expect("captured stderr");
+	let mut shell = virtual_shell(directory.path()).await;
+	let parameters = capture_parameters(&shell, &output, &error);
+	#[cfg(unix)]
+	let script = "/bin/sh -c 'printf ran' virtual://../escape";
+	#[cfg(windows)]
+	let script = "cmd.exe /c echo ran virtual://../escape";
+	let result = shell
+		.run_string(script, &SourceInfo::from("vfs-external-args"), &parameters)
+		.await
+		.expect("external command with a rejected url argument");
+	assert_ne!(u8::from(result.exit_code), 0, "a rejected url reached the child");
+	assert!(!captured_text(&output).contains("ran"), "the child ran: {}", captured_text(&output));
+	assert!(
+		captured_text(&error).contains("outside mount"),
+		"the provider's reason was lost: {}",
+		captured_text(&error)
+	);
+}
+
+/// A provider directory that aliases a real one is a usable working directory
+/// for a child process, and the `PWD` the child inherits names that same host
+/// directory rather than the URL it cannot open; one that aliases nothing is
+/// still no working directory at all.
+#[tokio::test]
+async fn external_commands_start_in_backed_working_directories_only() {
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	fs::create_dir(directory.path().join("docs")).expect("provider directory");
+	fs::create_dir(directory.path().join("rendered")).expect("unbacked directory");
+	fs::create_dir(directory.path().join("frozen")).expect("read-only directory");
+	let output = tempfile::tempfile().expect("captured stdout");
+	let error = tempfile::tempfile().expect("captured stderr");
+	let mut shell = virtual_shell(directory.path()).await;
+	let parameters = capture_parameters(&shell, &output, &error);
+	// `printenv` and `cmd /c echo` report the inherited variable; a shell would
+	// re-derive `PWD` from `getcwd()` and hide a wrong value.
+	#[cfg(unix)]
+	let script = "cd virtual://docs && /bin/sh -c 'printf %s \"$PWD\"' && /usr/bin/printenv PWD";
+	#[cfg(windows)]
+	let script = "cd virtual://docs && cmd.exe /c cd && cmd.exe /c echo %PWD%";
+	let result = shell
+		.run_string(script, &SourceInfo::from("vfs-external-cwd"), &parameters)
+		.await
+		.expect("external command in a backed working directory");
+	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
+	let docs = directory.path().join("docs").display().to_string();
+	assert!(
+		captured_text(&output).matches(docs.as_str()).count() >= 2,
+		"child saw the wrong working directory or inherited PWD: {}",
+		captured_text(&output)
+	);
+
+	let error = tempfile::tempfile().expect("captured stderr");
+	let parameters = capture_parameters(&shell, &output, &error);
+	#[cfg(unix)]
+	let unbacked = "cd virtual://rendered && /bin/sh -c 'exit 0'";
+	#[cfg(windows)]
+	let unbacked = "cd virtual://rendered && cmd.exe /c exit 0";
+	let result = shell
+		.run_string(unbacked, &SourceInfo::from("vfs-external-cwd"), &parameters)
+		.await
+		.expect("external command in an unbacked working directory");
+	assert_ne!(u8::from(result.exit_code), 0, "an unbacked directory hosted a child process");
+	assert!(
+		captured_text(&error).contains("virtual working directory"),
+		"unexpected failure: {}",
+		captured_text(&error)
+	);
+
+	// A child may write anywhere under its working directory, so a directory
+	// the shell refuses to mutate is no working directory for one either.
+	let error = tempfile::tempfile().expect("captured stderr");
+	let parameters = capture_parameters(&shell, &output, &error);
+	#[cfg(unix)]
+	let frozen = "cd virtual://frozen && /bin/sh -c 'exit 0'";
+	#[cfg(windows)]
+	let frozen = "cd virtual://frozen && cmd.exe /c exit 0";
+	let result = shell
+		.run_string(frozen, &SourceInfo::from("vfs-external-cwd"), &parameters)
+		.await
+		.expect("external command in a read-only working directory");
+	assert_ne!(u8::from(result.exit_code), 0, "a read-only directory hosted a child process");
+	assert!(
+		captured_text(&error).contains("read-only working directory"),
+		"unexpected failure: {}",
+		captured_text(&error)
+	);
+}
+
+/// A script the provider aliases is executable as itself: the child runs the
+/// file behind the URL rather than failing on a path the kernel cannot see.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_executable_url_runs_as_the_file_it_aliases() {
+	use std::os::unix::fs::PermissionsExt;
+
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	let tool = directory.path().join("tool");
+	fs::write(&tool, b"#!/bin/sh\nprintf tool-ran\n").expect("provider script");
+	fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).expect("executable script");
+	let output = tempfile::tempfile().expect("captured stdout");
+	let error = tempfile::tempfile().expect("captured stderr");
+	let mut shell = virtual_shell(directory.path()).await;
+	let parameters = capture_parameters(&shell, &output, &error);
+	let result = shell
+		.run_string("virtual://tool", &SourceInfo::from("vfs-external-program"), &parameters)
+		.await
+		.expect("executable provider url");
+	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
+	assert_eq!(captured_text(&output), "tool-ran");
+}
+
+/// The same contract on Windows, where an executable is recognized by its
+/// extension rather than by its mode bits.
+#[cfg(windows)]
+#[tokio::test]
+async fn an_executable_url_runs_as_the_file_it_aliases() {
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	fs::write(directory.path().join("tool.cmd"), b"@echo tool-ran\r\n").expect("provider script");
+	let output = tempfile::tempfile().expect("captured stdout");
+	let error = tempfile::tempfile().expect("captured stderr");
+	let mut shell = virtual_shell(directory.path()).await;
+	let parameters = capture_parameters(&shell, &output, &error);
+	let result = shell
+		.run_string("virtual://tool.cmd", &SourceInfo::from("vfs-external-program"), &parameters)
+		.await
+		.expect("executable provider url");
+	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
+	assert!(captured_text(&output).contains("tool-ran"), "{}", captured_text(&output));
 }
 
 async fn wait_for_output(path: &Path, suffix: &str) -> io::Result<()> {
@@ -444,6 +682,40 @@ async fn backed_urls_expose_physical_paths_without_changing_native_readlink() {
 	assert!(!directory.path().join("missing").exists());
 }
 
+/// The operating system resolves a host symlink and cannot read a URL, so
+/// `ln -s` to a host path stores the file a backed URL aliases; a URL that
+/// aliases nothing keeps its spelling.
+#[cfg(unix)]
+#[tokio::test]
+async fn host_symlinks_to_backed_urls_store_the_backing_path() {
+	let provider = tempfile::tempdir().expect("isolated provider filesystem");
+	let host = tempfile::tempdir().expect("host working directory");
+	fs::write(provider.path().join("target"), b"content").expect("backing file");
+
+	let (code, error) = run_from_host_dir(
+		provider.path(),
+		host.path(),
+		"mkdir sub && ln -s virtual://target link && ln -s virtual://missing dangling && ln -sr \
+		 virtual://target sub/relative && ln -s virtual://rendered/x rendered",
+	)
+	.await;
+	assert_eq!(code, 0, "{error}");
+
+	assert_eq!(fs::read_link(host.path().join("link")).unwrap(), provider.path().join("target"));
+	assert_eq!(fs::read(host.path().join("link")).unwrap(), b"content");
+	assert_eq!(
+		fs::read_link(host.path().join("dangling")).unwrap(),
+		provider.path().join("missing")
+	);
+	let relative = fs::read_link(host.path().join("sub/relative")).unwrap();
+	assert!(relative.is_relative(), "{}", relative.display());
+	assert_eq!(fs::read(host.path().join("sub/relative")).unwrap(), b"content");
+	assert_eq!(
+		fs::read_link(host.path().join("rendered")).unwrap(),
+		Path::new("virtual://rendered/x")
+	);
+}
+
 #[tokio::test]
 async fn cmp_compares_nonseekable_files_and_discards_requested_prefixes() {
 	let directory = tempfile::tempdir().expect("isolated provider filesystem");
@@ -471,7 +743,7 @@ async fn cmp_compares_nonseekable_files_and_discards_requested_prefixes() {
 
 /// Runs `script` from the host directory `cwd` with `virtual://` backed by
 /// `provider_root`, returning the exit status and stderr.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn run_from_host_dir(provider_root: &Path, cwd: &Path, script: &str) -> (u8, String) {
 	let output = tempfile::tempfile().expect("captured stdout");
 	let error = tempfile::tempfile().expect("captured stderr");
@@ -486,6 +758,47 @@ async fn run_from_host_dir(provider_root: &Path, cwd: &Path, script: &str) -> (u
 		.await
 		.expect("mv between host and provider");
 	(u8::from(result.exit_code), captured_text(&error))
+}
+
+/// A directory `rm` cannot list may still be removable; if another process
+/// deleted it meanwhile, `-f` counts it as removed instead of reporting the
+/// listing's `Permission denied`.
+#[cfg(unix)]
+#[tokio::test]
+async fn forced_rm_of_a_directory_gone_while_refused_succeeds() {
+	let provider = tempfile::tempdir().expect("isolated provider filesystem");
+	let host = tempfile::tempdir().expect("host working directory");
+	let run = async |script: &str| {
+		fs::create_dir_all(provider.path().join("vanishing/child")).expect("doomed tree");
+		run_from_host_dir(provider.path(), host.path(), script).await
+	};
+
+	assert_eq!(run("rm -rf virtual://vanishing").await, (0, String::new()));
+	assert!(!provider.path().join("vanishing").exists());
+	let (code, error) = run("rm -r virtual://vanishing").await;
+	assert_eq!(code, 1);
+	assert!(error.contains("Permission denied"), "{error}");
+}
+
+/// On Windows `rm` clears a directory's read-only attribute to remove it;
+/// if another process deleted it meanwhile, `-f` counts it as removed
+/// instead of reporting the first attempt's `Permission denied`.
+#[cfg(windows)]
+#[tokio::test]
+async fn forced_rm_of_a_read_only_directory_gone_mid_retry_succeeds() {
+	let provider = tempfile::tempdir().expect("isolated provider filesystem");
+	let host = tempfile::tempdir().expect("host working directory");
+	let dir = provider.path().join("unsettable");
+	fs::create_dir(&dir).expect("read-only directory");
+	let mut permissions = fs::metadata(&dir).expect("metadata").permissions();
+	permissions.set_readonly(true);
+	fs::set_permissions(&dir, permissions).expect("read-only attribute");
+
+	assert_eq!(
+		run_from_host_dir(provider.path(), host.path(), "rm -rf virtual://unsettable").await,
+		(0, String::new())
+	);
+	assert!(!dir.exists());
 }
 
 /// A rename from the host into a provider is `EXDEV`, so `mv` copies and
@@ -576,4 +889,69 @@ async fn cross_device_mv_keeps_a_symlink_it_could_not_copy() {
 	assert!(stderr.contains("symbolic link"), "{stderr}");
 	assert_eq!(fs::read_link(tree.join("link")).expect("source link kept"), Path::new("file"));
 	assert!(tree.join("file").is_file());
+}
+
+/// A provider file whose reads never complete, as a stalled provider's.
+#[derive(Debug)]
+struct StalledFile;
+
+#[async_trait]
+impl FileHandle for StalledFile {
+	async fn read(&self, _buffer: &mut [u8]) -> io::Result<usize> {
+		std::future::pending().await
+	}
+
+	async fn write(&self, buffer: &[u8]) -> io::Result<usize> {
+		Ok(buffer.len())
+	}
+
+	async fn seek(&self, _position: SeekFrom) -> io::Result<u64> {
+		Err(pi_vfs::unsupported("seeking"))
+	}
+
+	async fn metadata(&self) -> io::Result<Metadata> {
+		Err(pi_vfs::unsupported("metadata"))
+	}
+}
+
+/// Provider-backed stdin has no descriptor to poll, and its file observes the
+/// cancellation of the command that opened it, not of the `timeout` operand
+/// reading it, so the limit did not stop a read the provider never completed
+/// and `timeout` never returned.
+///
+/// The run gets a runtime of its own on another thread, which this test leaves
+/// behind when it ends: a read the limit does not stop holds a blocking task
+/// forever, and dropping its runtime would wait for that task.
+#[test]
+fn timeout_stops_a_utility_reading_stalled_provider_stdin() {
+	let (sender, result) = std::sync::mpsc::channel();
+	std::thread::spawn(move || {
+		let runtime = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("test runtime");
+		let ran = runtime.block_on(async {
+			let directory = tempfile::tempdir().expect("isolated provider filesystem");
+			let output = tempfile::tempfile().expect("captured stdout");
+			let error = tempfile::tempfile().expect("captured stderr");
+			let mut shell = virtual_shell(directory.path()).await;
+			for (name, builtin) in pi_builtins::process_builtins() {
+				shell.register_builtin(name, builtin);
+			}
+			let mut parameters = capture_parameters(&shell, &output, &error);
+			parameters.set_fd(OpenFiles::STDIN_FD, OpenFile::from(File::from_handle(StalledFile)));
+			let result = shell
+				.run_string("timeout 0.2 cat", &SourceInfo::from("stalled-stdin"), &parameters)
+				.await
+				.expect("run the command");
+			(u8::from(result.exit_code), captured_text(&error))
+		});
+		let _ = sender.send(ran);
+		runtime.shutdown_background();
+	});
+
+	let (status, stderr) = result
+		.recv_timeout(Duration::from_secs(5))
+		.expect("`timeout` waited for the stalled read");
+	assert_eq!(status, 124, "{stderr}");
 }

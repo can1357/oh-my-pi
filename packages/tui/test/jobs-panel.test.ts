@@ -1,11 +1,15 @@
-import { describe, expect, it, vi } from "bun:test";
+import { beforeAll, describe, expect, it, vi } from "bun:test";
+import * as os from "node:os";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import {
 	type JobsPanelDetail,
 	type JobsPanelJob,
+	type JobsPanelSnapshot,
 	JobsSheet,
 	type JobsSheetSource,
 } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { modelEval } from "./fixtures/job-widget-views";
 
 const DOWN = "\x1b[B";
 const UP = "\x1b[A";
@@ -67,16 +71,10 @@ function setup(jobs: { running: JobsPanelJob[]; recent: JobsPanelJob[] } = JOBS)
 }
 
 describe("JobsSheet", () => {
-	it("lists running then recent jobs beside the first job's detail", () => {
+	it("lists running then settled jobs, oldest first, beside the first job's detail", () => {
 		const { sheet } = setup();
 		const root = sheet.describe(CX);
-		expect(list(root)?.c?.map(row => ("key" in row ? row.key : undefined))).toEqual([
-			"group-Running",
-			"task-1",
-			"bash-1",
-			"group-Recent",
-			"bash-2",
-		]);
+		expect(list(root)?.c?.map(row => ("key" in row ? row.key : undefined))).toEqual(["task-1", "bash-1", "bash-2"]);
 		expect(prop(list(root), "selected")).toBe("task-1");
 		const detail = byRole(root, "omp.jobs.detail")[0]!;
 		expect(texts(detail)).toContain("Audit credits");
@@ -153,5 +151,166 @@ describe("JobsSheet", () => {
 		expect(lines).toContain("> running  bash");
 		expect(lines).toContain("pid 41");
 		expect(lines).toContain("running 12 tests");
+	});
+
+	it("shows the selected job's full command in the terminal fallback, bounded above its facts", () => {
+		const long = `export A=1; ${"x".repeat(150)}; cargo test --workspace -- --exact tail_marker`;
+		const script = Array.from({ length: 40 }, (_, i) => `echo step ${i}`).join("\n");
+		for (const [command, expectTail] of [
+			[long, true],
+			[script, false],
+		] as const) {
+			const job: JobsPanelJob = {
+				id: "bash-x",
+				type: "bash",
+				status: "running",
+				label: command.slice(0, 40),
+				startTime: NOW,
+			};
+			const detail: JobsPanelDetail = { command, cwd: "/work", pids: [7], output: "out\n" };
+			const sheet = new JobsSheet({
+				load: () => ({ running: [job], recent: [] }),
+				inspect: () => detail,
+				close: vi.fn(),
+			});
+			const lines = sheet.render(60).map(line => Bun.stripANSI(line));
+			const text = lines.join("\n");
+			// Wrapped, not cut at the row label: the end of a long one-liner is reachable.
+			if (expectTail) expect(text).toContain("tail_marker");
+			else expect(text).toContain("… 28 more command lines");
+			// The facts and output tail still follow the command.
+			expect(text).toContain("pid 7");
+			expect(text).toContain("out");
+		}
+	});
+
+	it("strips terminal control sequences and the home directory from the full command", () => {
+		const home = os.homedir();
+		const command = `cat <<EOF > ${home}/notes.txt\n\x1b]0;pwned\x07\x1b[2Jhello\nEOF`;
+		const job: JobsPanelJob = { id: "bash-x", type: "bash", status: "running", label: "cat", startTime: NOW };
+		const sheet = new JobsSheet({
+			load: () => ({ running: [job], recent: [] }),
+			inspect: () => ({ command, pids: [] }),
+			close: vi.fn(),
+		});
+		const text = sheet.render(120).join("\n");
+		expect(text).toContain("hello");
+		expect(text).toContain("~/notes.txt");
+		expect(text).not.toContain(home);
+		expect(text).not.toContain("\x1b]0;");
+		expect(text).not.toContain("\x1b[2J");
+	});
+
+	it("renders read-only when the source cannot cancel: the jobs and detail stay, Cancel job is gone", () => {
+		// A focused subagent view only watches that agent's jobs (#14814).
+		const source: JobsSheetSource = { load: () => JOBS, inspect: (id: string) => DETAILS[id], close: vi.fn() };
+		const sheet = new JobsSheet(source);
+		expect(byRole(sheet.describe(CX), "omp.btn").map(btn => btn.key)).toEqual(["close"]);
+
+		sheet.handleInput(DOWN);
+		const lines = sheet.render(100).join("\n");
+		expect(lines).toContain("cargo test --workspace");
+		expect(lines).toContain("pid 41");
+	});
+
+	it("shows the selected job's widget above its output, natively and in the terminal fallback", async () => {
+		await initTheme();
+		const detail: JobsPanelDetail = { ...DETAILS["bash-1"]!, widget: modelEval };
+		const source: JobsSheetSource = {
+			load: () => JOBS,
+			inspect: id => (id === "bash-1" ? detail : DETAILS[id]),
+			close: vi.fn(),
+		};
+		const sheet = new JobsSheet(source);
+		sheet.handleInput(DOWN);
+		const root = sheet.describe(CX);
+		const detailNode = byRole(root, "omp.jobs.detail")[0]!;
+		const roles = (detailNode.c ?? []).map(child => ("k" in child ? prop(child, "role") : undefined));
+		expect(roles.indexOf("omp.jobs.widget")).toBeLessThan(roles.indexOf("omp.jobs.out"));
+		expect(byRole(root, "omp.job.widget.bar")).toHaveLength(3);
+
+		const lines = sheet.render(100).map(line => Bun.stripANSI(line));
+		const head = lines.findIndex(line => line.includes("eval · tests passed per model"));
+		expect(head).toBeGreaterThan(0);
+		expect(lines[head + 2]).toMatch(/^ {5}opus-4\.5 +█+░* +26\/30$/);
+		expect(lines.findIndex(line => line.includes("running 12 tests"))).toBeGreaterThan(head);
+	});
+
+	describe("as a tree of subagents", () => {
+		beforeAll(async () => {
+			await initTheme();
+		});
+		const job = (id: string, ownerId: string, extra: Partial<JobsPanelJob> = {}): JobsPanelJob => ({
+			id,
+			type: "bash",
+			status: "running",
+			label: id,
+			ownerId,
+			startTime: NOW - 1_000,
+			...extra,
+		});
+		// Main runs Audit (which runs Sub) and owns two leaf jobs; Lone's task job is gone.
+		const TREE = {
+			rootId: "Main",
+			agents: [
+				{ id: "Audit", parentId: "Main" },
+				{ id: "Sub", parentId: "Audit" },
+				{ id: "Lone", parentId: "Main" },
+			],
+			running: [
+				job("main-bash", "Main", { startTime: NOW - 9_000 }),
+				job("task-audit", "Main", { type: "task", agentId: "Audit" }),
+				job("audit-bash", "Audit", { startTime: NOW - 8_000 }),
+				job("task-sub", "Audit", { type: "task", agentId: "Sub" }),
+				job("sub-bash", "Sub"),
+				job("lone-bash", "Lone"),
+			],
+			recent: [job("main-done", "Main", { status: "completed", endTime: NOW })],
+		} satisfies JobsPanelSnapshot;
+		const treeSheet = () => {
+			const source = { load: () => TREE, inspect: () => undefined, cancel: vi.fn(), close: vi.fn() };
+			return { sheet: new JobsSheet(source satisfies JobsSheetSource), source };
+		};
+
+		it("nests each subagent's jobs under it, branchiest subtrees first and leaf jobs last", () => {
+			const { sheet } = treeSheet();
+			expect(list(sheet.describe(CX))?.c?.map(row => ("key" in row ? row.key : undefined))).toEqual([
+				"task-audit",
+				"task-sub",
+				"sub-bash",
+				"audit-bash",
+				expect.stringMatching(/^agent-/),
+				"lone-bash",
+				"main-bash",
+				"main-done",
+			]);
+			const rows = sheet
+				.render(120)
+				.slice(1, 9)
+				.map(line => line.trimEnd());
+			expect(rows).toEqual([
+				expect.stringMatching(/^> running {2}task \S+ {2}Audit: task-audit$/),
+				expect.stringMatching(/^ {2}├─ running {2}task \S+ {2}Sub: task-sub$/),
+				expect.stringMatching(/^ {2}│ {2}└─ running {2}bash \S+ {2}sub-bash$/),
+				expect.stringMatching(/^ {2}└─ running {2}bash \S+ {2}audit-bash$/),
+				"  Lone",
+				expect.stringMatching(/^ {2}└─ running {2}bash \S+ {2}lone-bash$/),
+				expect.stringMatching(/^ {2}running {2}bash \S+ {2}main-bash$/),
+				expect.stringMatching(/^ {2}completed {2}bash \S+ {2}main-done$/),
+			]);
+		});
+
+		it("cancels only jobs the root owns", () => {
+			const { sheet, source } = treeSheet();
+			sheet.handleInput(DOWN); // task-sub, owned by Audit
+			expect(byRole(sheet.describe(CX), "omp.btn").map(btn => btn.key)).toEqual(["close"]);
+			sheet.handleInput("x");
+			sheet.handleNativeEvent({ type: "action", key: "cancel", act: "cancel", mods: [] });
+			expect(source.cancel).not.toHaveBeenCalled();
+
+			sheet.handleInput(UP); // task-audit, owned by Main
+			sheet.handleInput("x");
+			expect(source.cancel).toHaveBeenCalledWith("task-audit");
+		});
 	});
 });

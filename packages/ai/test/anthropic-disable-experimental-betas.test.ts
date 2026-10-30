@@ -189,6 +189,7 @@ describe("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", () => {
 					params: {
 						model: "claude-fable-5-1",
 						messages: [{ role: "user", content: "hi" }],
+						max_tokens: 1024,
 						stream: true,
 						thinking: { type: "adaptive", block_binding: { prefix_mismatch_behavior: "drop_block" } },
 						context_management: { edits: [{ type: "clear_thinking_20251015", keep: "all" }] },

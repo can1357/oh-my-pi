@@ -12,6 +12,7 @@
  */
 
 import { type Type, type } from "@oh-my-pi/omptype";
+import { parseLocalRefPointer } from "@oh-my-pi/omptype";
 import { structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { Tool, ToolCall } from "../types";
@@ -900,16 +901,11 @@ function normalizeOptionalNullsForSchema(
 	return { value: changed ? nextValue : value, changed };
 }
 
-function decodeJsonPointerToken(token: string): string {
-	return token.replace(/~1/g, "/").replace(/~0/g, "~");
-}
-
 function resolveLocalJsonSchemaRef(root: unknown, ref: string): unknown | undefined {
-	if (ref === "#") return root;
-	if (!ref.startsWith("#/")) return undefined;
+	const pointer = parseLocalRefPointer(ref);
+	if (pointer === undefined) return undefined;
 	let current: unknown = root;
-	for (const rawToken of ref.slice(2).split("/")) {
-		const token = decodeJsonPointerToken(rawToken);
+	for (const token of pointer) {
 		if (current === null || typeof current !== "object") return undefined;
 		current = (current as Record<string, unknown>)[token];
 	}
@@ -1418,10 +1414,16 @@ function singleRequiredStringKey(schema: unknown): string | undefined {
  * property — a required string — some providers deliver the payload under a
  * different key (e.g. the `edit` tool's patch arriving as `input`/`_input`, or
  * any single-string tool whose argument the model mislabels). When the declared
- * key is absent but another field holds a string, adopt the first such string
+ * key is absent but exactly one other field holds a string, adopt that string
  * as the declared key so the call validates instead of failing with "<key> was
  * missing". A present-but-wrong-type value is left alone so its real type error
  * still surfaces.
+ *
+ * Two or more string candidates are ambiguous: nothing distinguishes the real
+ * argument from the model's other fields, so picking one would resolve by
+ * `for...in` insertion order and the same call could act on a different
+ * argument depending only on JSON key order. Such a payload is returned
+ * unchanged so validation fails and the model sees its own arguments back.
  */
 function normalizeSingleStringField(schema: unknown, value: unknown): { value: unknown; changed: boolean } {
 	const key = singleRequiredStringKey(schema);
@@ -1429,15 +1431,21 @@ function normalizeSingleStringField(schema: unknown, value: unknown): { value: u
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return { value, changed: false };
 	const record = value as Record<string, unknown>;
 	if (record[key] !== undefined) return { value, changed: false };
+	let adopted: string | undefined;
+	let ambiguous = false;
 	for (const candidate in record) {
 		if (candidate === key || !Object.hasOwn(record, candidate)) continue;
-		const candidateValue = record[candidate];
-		if (typeof candidateValue !== "string") continue;
-		const next = { ...record, [key]: candidateValue };
-		delete next[candidate];
-		return { value: next, changed: true };
+		if (typeof record[candidate] !== "string") continue;
+		if (adopted !== undefined) {
+			ambiguous = true;
+			break;
+		}
+		adopted = candidate;
 	}
-	return { value, changed: false };
+	if (ambiguous || adopted === undefined) return { value, changed: false };
+	const next = { ...record, [key]: record[adopted] };
+	delete next[adopted];
+	return { value: next, changed: true };
 }
 
 // ============================================================================
@@ -1639,6 +1647,7 @@ interface FlatIssue {
  *  - **unrecognized**: when a closed object received an extra key
  *    (`additionalProperties: false`), drop that key so re-validation succeeds.
  *    This effectively coerces object schemas to loose semantics recursively.
+ *    Dropped root keys are recorded in `droppedRootKeys` when one is supplied.
  *
  * The function is safe and conservative:
  *   - Only processes "type" and "unrecognized" issues
@@ -1646,7 +1655,11 @@ interface FlatIssue {
  *   - Only wraps singleton array values for non-union type expectations
  *   - Clones the args object before mutation (copy-on-write)
  */
-function coerceArgsFromIssues(args: unknown, issues: FlatIssue[]): { value: unknown; changed: boolean } {
+function coerceArgsFromIssues(
+	args: unknown,
+	issues: FlatIssue[],
+	droppedRootKeys?: Map<string, unknown>,
+): { value: unknown; changed: boolean } {
 	if (issues.length === 0) return { value: args, changed: false };
 
 	let changed = false;
@@ -1661,6 +1674,11 @@ function coerceArgsFromIssues(args: unknown, issues: FlatIssue[]): { value: unkn
 		// Container-to-string conversion remains enabled for string branches.
 		if (issue.keyword === "unrecognized") {
 			if (issue.unionBranch) continue;
+			if (droppedRootKeys) {
+				const segments = decodeJsonPointer(issue.instancePath);
+				const dropped = segments.length === 1 ? getValueAtPointer(nextArgs, issue.instancePath) : undefined;
+				if (dropped !== undefined) droppedRootKeys.set(segments[0]!, dropped);
+			}
 			const previous = nextArgs;
 			nextArgs = deleteValueAtPointer(nextArgs, issue.instancePath);
 			if (nextArgs !== previous) changed = true;
@@ -1745,6 +1763,19 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 function preserveUnknownRootFields(input: unknown, parsed: unknown): unknown {
 	if (!isPlainRecord(input) || !isPlainRecord(parsed)) return parsed;
 	return { ...input, ...parsed };
+}
+
+/** Put root keys the unrecognized-key repair deleted back onto a validated value, never overwriting a key it kept. */
+function restoreDroppedRootKeys(value: unknown, dropped: ReadonlyMap<string, unknown> | undefined): unknown {
+	if (!dropped || dropped.size === 0 || !isPlainRecord(value)) return value;
+	const out: Record<string, unknown> = { ...value };
+	for (const [key, entry] of dropped) {
+		// Own-property check and define: `constructor`/`__proto__` must restore as plain fields.
+		if (!Object.hasOwn(out, key)) {
+			Object.defineProperty(out, key, { value: entry, enumerable: true, writable: true, configurable: true });
+		}
+	}
+	return out;
 }
 
 function flattenJsonSchemaIssues(
@@ -1991,13 +2022,28 @@ function truncateArgsForError(value: unknown): unknown {
 	return value;
 }
 
+/** Options for {@link validateToolArguments}. */
+export interface ValidateToolArgumentsOptions {
+	/**
+	 * Keep unknown root keys on the validated value instead of letting the
+	 * unrecognized-key repair delete them from a closed schema. Set for tools
+	 * that own their refusal (`lenientArgValidation`), so execute() can reject
+	 * fields the model sent rather than run without them.
+	 */
+	keepUnknownRootKeys?: boolean;
+}
+
 /**
  * Validates tool call arguments against an ArkType or plain JSON Schema schema.
  * Applies conservative LLM-quirk normalization before declaring failure.
  *
  * @throws Error with a formatted message when validation cannot be reconciled.
  */
-export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall["arguments"] {
+export function validateToolArguments(
+	tool: Tool,
+	toolCall: ToolCall,
+	options: ValidateToolArgumentsOptions = {},
+): ToolCall["arguments"] {
 	const originalArgs = toolCall.arguments;
 	if (originalArgs && typeof originalArgs === "object" && "__parseError" in originalArgs) {
 		const parseError = originalArgs.__parseError;
@@ -2075,7 +2121,9 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
 	}
 
 	// Single-argument tools (e.g. `edit`): if the model put the lone required
-	// string under a different key, adopt the first string field as that key.
+	// string under a different key, adopt the sole string field as that key. Two
+	// or more candidates are ambiguous, so they are left alone and validation
+	// fails, and the model sees its own arguments back.
 	const singleStringNorm = normalizeSingleStringField(json, normalizedArgs);
 	if (singleStringNorm.changed) {
 		normalizedArgs = singleStringNorm.value;
@@ -2085,11 +2133,12 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
 	let result = validateContext(ctx, normalizedArgs);
 	if (result.success) return result.value as ToolCall["arguments"];
 
-	const coercionOutcome = runCoercionPasses(ctx, normalizedArgs, result);
+	const droppedRootKeys = options.keepUnknownRootKeys ? new Map<string, unknown>() : undefined;
+	const coercionOutcome = runCoercionPasses(ctx, normalizedArgs, result, true, false, droppedRootKeys);
 	normalizedArgs = coercionOutcome.args;
 	changed ||= coercionOutcome.changed;
 	result = coercionOutcome.result;
-	if (result.success) return result.value as ToolCall["arguments"];
+	if (result.success) return restoreDroppedRootKeys(result.value, droppedRootKeys) as ToolCall["arguments"];
 
 	// Last resort: some providers parse in-band tool-call syntax server-side,
 	// and a mistyped/missing `</arg_value>` closer inlines the remaining pairs
@@ -2101,11 +2150,11 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
 		changed = true;
 		result = validateContext(ctx, normalizedArgs);
 		if (!result.success) {
-			const healedOutcome = runCoercionPasses(ctx, normalizedArgs, result);
+			const healedOutcome = runCoercionPasses(ctx, normalizedArgs, result, true, false, droppedRootKeys);
 			normalizedArgs = healedOutcome.args;
 			result = healedOutcome.result;
 		}
-		if (result.success) return result.value as ToolCall["arguments"];
+		if (result.success) return restoreDroppedRootKeys(result.value, droppedRootKeys) as ToolCall["arguments"];
 	}
 
 	// Format validation errors nicely. The header phrase is asserted by
@@ -2141,6 +2190,7 @@ function runCoercionPasses(
 	initial: ContextValidationResult,
 	isRoot = true,
 	insideContent = false,
+	droppedRootKeys?: Map<string, unknown>,
 ): { args: unknown; result: ContextValidationResult; changed: boolean } {
 	const { json } = ctx;
 	const root = ctx.kind === "json" ? (ctx.root ?? json) : json;
@@ -2149,7 +2199,7 @@ function runCoercionPasses(
 	let changed = false;
 	for (let pass = 0; pass < MAX_COERCION_PASSES; pass += 1) {
 		if (result.success) break;
-		const coercion = coerceArgsFromIssues(normalizedArgs, result.flatIssues);
+		const coercion = coerceArgsFromIssues(normalizedArgs, result.flatIssues, droppedRootKeys);
 		let passChanged = coercion.changed;
 		normalizedArgs = coercion.value;
 

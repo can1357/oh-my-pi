@@ -700,24 +700,28 @@ export class Reconciler {
 			this.#ops.push(["text", id, "append", newText.slice(oldText.length)]);
 			return;
 		}
-		if ((kind === "editor" || kind === "input") && oldText.length > 0) {
+		// A streaming `md` node rewrites only its tail (the speculatively closed span it ends in), so an
+		// edit past a shared head splices too instead of resending the whole text.
+		if ((kind === "editor" || kind === "input" || kind === "md") && oldText.length > 0) {
 			const limit = Math.min(oldText.length, newText.length);
 			let prefix = 0;
 			while (prefix < limit && oldText.charCodeAt(prefix) === newText.charCodeAt(prefix)) prefix++;
-			let suffix = 0;
-			while (
-				suffix < limit - prefix &&
-				oldText.charCodeAt(oldText.length - 1 - suffix) === newText.charCodeAt(newText.length - 1 - suffix)
-			)
-				suffix++;
-			this.#ops.push([
-				"splice",
-				id,
-				prefix,
-				oldText.length - prefix - suffix,
-				newText.slice(prefix, newText.length - suffix),
-			]);
-			return;
+			if (kind !== "md" || prefix > 0) {
+				let suffix = 0;
+				while (
+					suffix < limit - prefix &&
+					oldText.charCodeAt(oldText.length - 1 - suffix) === newText.charCodeAt(newText.length - 1 - suffix)
+				)
+					suffix++;
+				this.#ops.push([
+					"splice",
+					id,
+					prefix,
+					oldText.length - prefix - suffix,
+					newText.slice(prefix, newText.length - suffix),
+				]);
+				return;
+			}
 		}
 		this.#ops.push(["text", id, "replace", newText]);
 	}

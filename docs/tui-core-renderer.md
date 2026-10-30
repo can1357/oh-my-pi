@@ -24,14 +24,14 @@ each render the provider receives the current `ViewportSize` and returns a
 
 ```ts
 interface HistoryBatch {
-  readonly id: number;
-  readonly rows: readonly string[];
-  readonly kind?: "append" | "replay";
+	readonly id: number;
+	readonly rows: readonly string[];
+	readonly kind?: "append" | "replay";
 }
 
 interface TerminalFramePlan {
-  readonly history?: HistoryBatch;
-  readonly viewport: readonly string[];
+	readonly history?: HistoryBatch;
+	readonly viewport: readonly string[];
 }
 ```
 
@@ -140,10 +140,13 @@ and image protocols; it does not change history semantics.
 
 Inside tmux, the pane environment identifies tmux rather than the attached
 emulator. At startup, terminal detection asks the local tmux server for
-`#{client_termtype}` and maps recognized client names through the normal
-capability table; an unavailable `tmux` command or missing terminal-type reply
-keeps the environment fallback. Modified keys still require tmux
-`extended-keys`, while OSC notifications require `allow-passthrough`.
+`#{client_termtype}` and `#{client_termname}` and maps recognized names through
+the normal capability table: the terminal-type reply first, then a client `TERM`
+that names its emulator (`xterm-kitty`, `xterm-ghostty`, `wezterm`). The pane's
+own `TERM` (`tmux-*`) never selects an image protocol; an unrecognized client
+leaves images to the runtime SIXEL probe. Modified keys still require tmux
+`extended-keys`, while OSC notifications and Kitty graphics require
+`allow-passthrough`.
 
 `ProcessTerminal` pairs capability queries with typed DA1 sentinel owners.
 Private CSI replies may be split across stdin flushes, so reassembly must retain
@@ -163,8 +166,12 @@ native TSP surfaces keep their own image transport.
 ### Native rendering (Tern Surface Protocol)
 
 `ProcessTerminal` also sends the TSP `hello` query (APC `tsp`) behind a `tsp`
-DA1 sentinel owner. `PI_TUI_NATIVE=0` disables it; multiplexers and Bun tests
-skip it by default, while `PI_TUI_NATIVE=1` forces the probe. A supported-version
+DA1 sentinel owner. `PI_TUI_NATIVE=0` disables it; multiplexers, devenv's
+reloading shell (`DEVENV_RELOAD_FILE`: its terminal layer forwards DA1 but drops
+APC) and Bun tests skip it by default, while `PI_TUI_NATIVE=1` forces the probe
+(tmux still needs `@tern-tsp`). With `TERM_PROGRAM=tern` only a multiplexer's
+session marker counts, not a `screen*`/`tmux*` `TERM` alone, and the debug log
+records once why the pane stayed on rows. A supported-version
 reply switches `TUI` to `native/backend.ts`: components
 are described (`describe()`, or `rows` fallback from `render()`), reconciled
 into document ops (`native/reconcile.ts`) and sent as frames, paced by the
@@ -172,24 +179,31 @@ terminal's acknowledgements instead of the render cadence. None of this
 document's history, viewport, resize-replay or CPR machinery runs on that path;
 SIGWINCH only refreshes the width used by `rows` fallback nodes. While a surface
 is live the nerd symbol preset is forced process-locally, and icon glyphs are
-sent as `icon` spans. Each surface receives omp's resolved theme (`t`: every
-theme token as hex, dark and light variants) after `o` and before its first
-frame, and again when the resolved palette changes. The first row paint waits
+sent as `icon` spans. The first row paint waits
 up to 300 ms for the probe. Direct Tern sessions optimistically open a surface
 immediately and fall back to rows if the terminal does not confirm it. Such a
-session needs raw input from the start, so a `deferInput` start holds the
-keystrokes meant for the component focused at start instead of leaving the tty
-cooked; a dialog that takes focus meanwhile (a startup hook's select or confirm)
-gets its input live, and the hold survives the TUI stop/start of an external
-editor opened from such a dialog. A swapped-in custom editor inherits the hold
-through `Composer.setEditor()` (`TUI.replaceHeldFocus()`), so its keys queue
-behind the held ones, and it keeps the startup submit gate. The cell-size reply
-is still consumed on arrival, and the sixel probe is skipped on a TSP terminal,
-so no probe listener sees held keys. `InteractiveMode.init()` calls
-`TUI.releaseHeldInput()` after startup hooks, mode reconcile, draft restore and
-every session subscription, just before lifting the submit gate: held keys edit
-the restored draft instead of racing it, a startup shortcut acts on the final,
-observed session, and a held Enter is still ignored. Ctrl+C/Ctrl+D release the
+session needs raw input from the start, so a `deferInput` start does not leave
+the tty cooked. The kernel echo that shows typing on other terminals while the
+module graph loads comes from Tern instead: the composer's `editor` node
+carries `typeahead: true` (`Editor.nativeTypeahead`, set by `Composer.start`),
+and Tern keeps the text typed into it, draws it at the caret, and writes it to
+the pty as typed once the prop clears, or ahead of the first key it does not
+keep. Typing that reaches omp during startup (from such a flush, or a Tern
+without typeahead) splits in the TUI: plain typing (printable text, Backspace)
+edits the component focused at start live; the first other key (a shortcut,
+Enter, an arrow, a paste) and every key after it are held, in typing order. A
+dialog that takes focus meanwhile (a startup hook's select or confirm) gets its
+input live, and the hold survives the TUI stop/start of an external editor
+opened from such a dialog. A swapped-in custom editor inherits the hold and
+the typeahead through `Composer.setEditor()` (`TUI.replaceHeldFocus()`), so
+its keys queue behind the held ones, and it keeps the startup submit gate. The
+cell-size reply is still consumed on arrival, and the sixel probe is skipped
+on a TSP terminal, so no probe listener sees held keys. `InteractiveMode.init()`
+calls `Composer.releaseHeldInput()` after startup hooks, mode reconcile, draft
+restore and every session subscription, just before lifting the submit gate:
+`typeahead` clears so Tern sends what it kept, a restored draft goes before
+the text typed during startup, a startup shortcut acts on the final, observed
+session, and a held Enter is still ignored. Ctrl+C/Ctrl+D release the TUI's
 queue early. The
 debug socket's `doc` op returns the reference document
 (every sent frame applied by `native/apply.ts`), and `tsp` returns recent frames.
@@ -214,7 +228,7 @@ A terminal that sees `"send"` and a ready composer may submit a supplied prompt
 with an `e` message:
 
 ```json
-{"ev":"send","sf":"s:1","id":"k.line/input","text":"First line\nSecond line"}
+{ "ev": "send", "sf": "s:1", "id": "k.line/input", "text": "First line\nSecond line" }
 ```
 
 `sf` must name a live surface and `id` its editable composer node (the

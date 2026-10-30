@@ -16,9 +16,11 @@ import {
 	lookupTableChart,
 	setTableCharts,
 	splitTableCharts,
+	TableChartFigure,
 	type TableChartPlanner,
 } from "@oh-my-pi/pi-tui/chat/table-chart";
 import { lexDocument } from "@oh-my-pi/pi-tui/components/markdown";
+import { trimBlankEdges } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { Tokens } from "@oh-my-pi/pi-utils/marked";
@@ -279,6 +281,14 @@ describe("parseCell", () => {
 		expect(parseCell("constructor").kind).toBe("text");
 	});
 
+	// Regression (#16175): `1 988` read as `1` before prose, so space-grouped columns lost to period columns.
+	it("reads thousands grouped by spaces like grouped by commas, three digits a group", () => {
+		expect(parseCell("17 083")).toMatchObject({ value: 17_083, fit: "pure" });
+		expect(parseCell("1\u00a0988\u202f000 ms")).toMatchObject({ value: 1988, dim: "duration", fit: "pure" });
+		expect(parseCell("12 5")).toMatchObject({ value: 12, fit: "prose" });
+		expect(parseCell("1 2345")).toMatchObject({ value: 1, fit: "prose" });
+	});
+
 	it("reads a lone m as millions unless the column holds other durations", () => {
 		const millions = analyze("| k | v |\n|---|---|\n| a | 3.3m |\n| b | 1.2m |\n| c | 0.4m |");
 		expect(millions.measures[0]!.dim).toBe("count");
@@ -358,6 +368,18 @@ describe("analyzeTable", () => {
 			"| Input | GNU | uutils |\n|---|---|---|\n| a | 36ms | 112ms |\n| b | 31ms | 1,222ms |\n| c | 30ms | TIMEOUT |",
 		);
 		expect(analysis.measures.map(column => column.header)).toEqual(["GNU", "uutils"]);
+	});
+
+	// Regression (#16175): space-grouped counts read as prose, so the period column became the measure.
+	it("labels by the period column when the counts beside it group thousands by spaces", () => {
+		const analysis = analyze(
+			"| Okres | Commity | Średnio dziennie |\n|---|---|---|\n| ostatnie 24 h | 386 | 386 |\n| 7 dni | 1 988 | ~284 |\n| 30 dni | 7 715 | ~257 |\n| 90 dni | 17 083 | ~190 |\n| 365 dni | 31 489 | ~86 |",
+		);
+		expect(analysis.label?.header).toBe("Okres");
+		expect(analysis.measures.map(column => column.header)).toEqual(["Commity", "Średnio dziennie"]);
+		expect(analysis.measures[0]!.cells.map(cell => cell.kind === "number" && cell.value)).toEqual([
+			386, 1988, 7715, 17_083, 31_489,
+		]);
 	});
 });
 
@@ -578,7 +600,7 @@ describe("renderChartSvg", () => {
 
 	it("writes a repeated row name once per group", () => {
 		const analysis = analyze(NESTED);
-		const { svg } = renderChartSvg(buildChart(analysis, { ...planChart(analysis)!, shading: "shared" })!);
+		const svg = renderChartSvg(buildChart(analysis, { ...planChart(analysis)!, shading: "shared" })!);
 		expect(svg.match(/>Sonnet 5\.5</g)).toHaveLength(1);
 		expect(svg.match(/>bash</g)).toHaveLength(2);
 	});
@@ -624,7 +646,7 @@ describe("renderChartSvg", () => {
 		plans.push(["scatter", { kind: "scatter", label: undefined, series: [0, 1], transpose: false }]);
 		for (const [markdown, plan] of plans) {
 			const analysis = markdown === "scatter" ? scatter : analyze(markdown);
-			const { svg } = renderChartSvg(buildChart(analysis, plan!)!);
+			const svg = renderChartSvg(buildChart(analysis, plan!)!);
 			// Gradients count as themed: their stops are tokens too.
 			expect(svg).not.toMatch(/(?:fill|stroke|stop-color)="(?!var\(--|none"|url\(#)/);
 			for (const [, name] of svg.matchAll(/var\(--([\w-]+)\)/g)) expect(palette[name!]).toBeDefined();
@@ -640,6 +662,39 @@ describe("table charts in assistant Markdown", () => {
 	});
 
 	const answer = `Timings:\n\n${TIMINGS}\n\nThat is all.`;
+
+	it("counts its separator in a caller's ceiling, and below two rows neither plans nor holds up completion", async () => {
+		const protocol = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		const choice = Promise.withResolvers<ChartPlan | null>();
+		const planner = vi.fn<TableChartPlanner>(() => choice.promise);
+		setTableCharts("smart", planner);
+		let maxRows = 1;
+		let changed = Promise.withResolvers<void>();
+		const chart = new TableChartFigure({ maxRows: () => maxRows, onChange: () => changed.resolve() });
+		chart.update(table(BEFORE_AFTER));
+		try {
+			expect(chart.render(76)).toEqual([]);
+			expect(chart.pending).toBe(false);
+			expect(planner).not.toHaveBeenCalled();
+
+			maxRows = 4;
+			chart.render(76);
+			expect(chart.pending).toBe(true);
+			choice.resolve(planner.mock.calls[0]![0].guess);
+			await changed.promise;
+			changed = Promise.withResolvers<void>();
+			chart.render(76);
+			await changed.promise;
+			const drawn = chart.render(76);
+			expect(drawn.length).toBeLessThanOrEqual(4);
+			expect(drawn[0]).toBe("");
+			expect(drawn.some(row => TERMINAL.isImageLine(row))).toBe(true);
+		} finally {
+			chart.dispose();
+			setTerminalImageProtocol(protocol);
+		}
+	});
 
 	it("leaves a table streaming at the tail whole and charts it once the answer moves on", () => {
 		setTableCharts("always");
@@ -703,15 +758,65 @@ describe("table charts in assistant Markdown", () => {
 		}
 	});
 
-	it("asks the smart planner only for multi-series tables, once per table", async () => {
-		const planner = vi.fn<TableChartPlanner>(async request => ({ ...request.guess, kind: "heatmap" }));
+	it("publishes only settled rows while an answer with a table streams", async () => {
+		const protocol = TERMINAL.imageProtocol;
+		await initTheme(false);
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		try {
+			setTableCharts("always");
+			// TIMINGS gets a chart once the answer moves past it; PROSE never does.
+			for (const body of [TIMINGS, PROSE]) {
+				const text = `The numbers from the last run, before any table arrives.\n\n${body}\n\nThat is all.`;
+				const component = new AssistantMessageComponent();
+				for (let end = 1; end <= text.length; end++) {
+					component.updateContent(
+						{
+							role: "assistant",
+							content: [{ type: "text", text: text.slice(0, end) }],
+							api: "anthropic-messages",
+							provider: "anthropic",
+							model: "claude-sonnet-4-5",
+							stopReason: "stop",
+							usage: {
+								input: 0,
+								output: 0,
+								cacheRead: 0,
+								cacheWrite: 0,
+								totalTokens: 0,
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+							},
+							timestamp: 1,
+						},
+						{ transient: true },
+					);
+					// Published rows may already be in native scrollback: every later
+					// render must still open with them, byte for byte.
+					const rows = trimBlankEdges(component.render(100));
+					const stable = component.renderTranscriptStableRows(component.getTranscriptStableRows().length, 100);
+					expect(rows.slice(0, stable.length)).toEqual([...stable]);
+				}
+				expect(component.getTranscriptStableRows().length).toBeGreaterThan(0);
+			}
+		} finally {
+			setTerminalImageProtocol(protocol);
+		}
+	});
+
+	it("asks the smart planner once per table the guess would chart, single series included", async () => {
+		const planner = vi.fn<TableChartPlanner>(async request =>
+			request.table.measures.length > 1 ? { ...request.guess, kind: "heatmap" } : null,
+		);
 		setTableCharts("smart", planner);
-		expect(lookupTableChart(table(TIMINGS))).toMatchObject({ alt: expect.stringContaining("bar chart") });
+		// Three rows of one measure draw nothing locally: nothing for the judge to veto or refine.
+		expect(lookupTableChart(table("| Step | Time |\n|---|---|\n| a | 1 s |\n| b | 2 s |\n| c | 3 s |"))).toBeNull();
+		// One measure the guess would draw, which the judge may still read as references rather than quantities.
+		await lookupTableChart(table(TIMINGS));
+		expect(lookupTableChart(table(TIMINGS))).toBeNull();
 		const pick = lookupTableChart(table(BEFORE_AFTER));
 		expect(pick).toBeInstanceOf(Promise);
 		await pick;
-		expect(lookupTableChart(table(BEFORE_AFTER))).toMatchObject({ alt: expect.stringContaining("heatmap chart") });
-		expect(planner).toHaveBeenCalledTimes(1);
+		expect(lookupTableChart(table(BEFORE_AFTER))).toContain("heatmap chart of");
+		expect(planner).toHaveBeenCalledTimes(2);
 	});
 
 	it("draws no chart when the planner declines, and the local guess when it fails", async () => {
@@ -724,6 +829,11 @@ describe("table charts in assistant Markdown", () => {
 			throw new Error("no judge");
 		});
 		await lookupTableChart(table(BEFORE_AFTER));
-		expect(lookupTableChart(table(BEFORE_AFTER))).toMatchObject({ alt: expect.stringContaining("paired chart") });
+		expect(lookupTableChart(table(BEFORE_AFTER))).toContain("paired chart of");
+
+		// No judge to ask (`auto` without a native one): the guess at once, held to the gate `always` applies.
+		setTableCharts("smart", () => undefined);
+		expect(lookupTableChart(table(BEFORE_AFTER))).toContain("paired chart of");
+		expect(lookupTableChart(table(RUNS))).toBeNull();
 	});
 });

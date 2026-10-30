@@ -9,7 +9,7 @@ import type {
 	ToolRenderer,
 } from "./renderer";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
-import { compact, keyed, md, node, span, text } from "../native/describe";
+import { code, compact, keyed, md, node, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
 import { plainText } from "../native/spans";
 import { resultText, runBox, runFoot, type RunFootInput, runInput, runOutput, type RunState } from "./native-view";
@@ -31,16 +31,21 @@ import {
 	JSON_TREE_MAX_LINES_EXPANDED,
 	JSON_TREE_SCALAR_LEN_COLLAPSED,
 	JSON_TREE_SCALAR_LEN_EXPANDED,
-	describeJsonTree,
+	describeJsonValue,
 	renderJsonTreeLines,
 } from "./json-tree";
 import { formatStyledTruncationWarning, stripOutputNotice } from "./output-meta";
+import { formatMCPProgress, parseMCPProgress } from "./mcp";
+import { splitPathAndSel } from "./read";
 import {
 	DEFAULT_TERMINAL_PREVIEW_LINES,
+	PREVIEW_LIMITS,
 	cappedHeadLines,
 	formatTitle,
+	previewLine,
 	previewWindowRows,
 	replaceTabs,
+	sanitizeDisplayLines,
 	shortenPath,
 	truncateToWidth,
 	wrapBrackets,
@@ -60,29 +65,60 @@ export interface EvalStatusEvent {
 	[key: string]: unknown;
 }
 
+/** One column of a table view. */
+export interface EvalTableColumn {
+	head: string;
+	/** Numeric values: renderers right-align the column. */
+	numeric?: boolean;
+}
+
+/**
+ * A pretty rendering of something a cell printed, shown to the user in place
+ * of its text; the model only ever sees the text.
+ * - `table`: a data frame or `console.table`; leading index columns are plain
+ *   columns, and a truncated frame's elided rows/columns are `…` cells.
+ * - `json`: a structured value (dict/list, object/array) as a collapsible tree.
+ * - `markdown`: an object's Markdown representation.
+ */
+export type EvalView =
+	| { kind: "table"; columns: EvalTableColumn[]; rows: string[][] }
+	| { kind: "json"; value: unknown }
+	| { kind: "markdown"; text: string };
+
+/**
+ * A view and the exact printed text it stands for. Renderers locate `text` in
+ * the cell's `output` (entries in print order) and show the view there; an
+ * entry whose text is no longer in the output (truncated) is skipped.
+ */
+export interface EvalViewEntry {
+	text: string;
+	view: EvalView;
+}
+
 /** Per-cell execution result for transcript rendering. */
 export interface EvalCellResult {
 	index: number;
 	title?: string;
 	code: string;
 	language?: EvalLanguage;
+	/** What the model saw: the cell's printed text plus image notes. */
 	output: string;
+	/** Pretty views of spans of `output`, in print order. */
+	views?: EvalViewEntry[];
 	status: "pending" | "running" | "complete" | "error";
 	durationMs?: number;
 	exitCode?: number;
 	statusEvents?: EvalStatusEvent[];
-	/** Discrete events dropped from the front of `statusEvents` (see {@link recordStatusEvent}). */
+	/** Evictable events dropped from the front of `statusEvents` (see {@link recordStatusEvent}). */
 	statusEventsElided?: number;
-	hasMarkdown?: boolean;
 }
 
 /** Tool result detail object surfaced to the UI/transcript. */
 export interface EvalToolDetails {
 	cells?: EvalCellResult[];
-	jsonOutputs?: unknown[];
 	images?: ImageContent[];
 	statusEvents?: EvalStatusEvent[];
-	/** Discrete events dropped from the front of `statusEvents` (see {@link recordStatusEvent}). */
+	/** Evictable events dropped from the front of `statusEvents` (see {@link recordStatusEvent}). */
 	statusEventsElided?: number;
 	isError?: boolean;
 	meta?: OutputMeta;
@@ -187,26 +223,29 @@ function pushCodeCellLines(
 type AgentEventStatus = "pending" | "running" | "completed" | "failed" | "aborted";
 
 /**
- * Coalescing key of a progress-snapshot event: `agent` and `judge_batch`
+ * Coalescing key of a progress-snapshot event: `agent`, `judge_batch`, and `mcp_progress`
  * events keyed by `id`, where only the newest snapshot matters. Discrete
  * actions (everything else) have no key. Shared by {@link upsertStatusEvent}
  * and the executors' display collectors so both coalesce identically.
  */
 export function statusEventKey(event: { op: string; [key: string]: unknown }): string | undefined {
-	if ((event.op === "agent" || event.op === "judge_batch") && typeof event.id === "string") {
+	if (
+		(event.op === "agent" || event.op === "judge_batch" || event.op === "mcp_progress") &&
+		typeof event.id === "string"
+	) {
 		return `${event.op}\0${event.id}`;
 	}
 	return undefined;
 }
 
 /**
- * Discrete status events a log keeps. A cell polling a helper in a loop emits
+ * Evictable status events a log keeps. A cell polling a helper in a loop emits
  * one event per call (hundreds of thousands), and every live update and the
  * persisted tool result would otherwise carry them all.
  */
 export const MAX_STATUS_EVENTS = 200;
 
-/** A status event list plus the count of discrete events dropped from its front. */
+/** A status event list plus the count of evictable events dropped from its front. */
 export type StatusEventLog = Pick<EvalCellResult, "statusEvents" | "statusEventsElided">;
 
 /**
@@ -228,9 +267,10 @@ export function upsertStatusEvent(events: EvalStatusEvent[], event: EvalStatusEv
 
 /**
  * {@link upsertStatusEvent} into a bounded log. Past {@link MAX_STATUS_EVENTS},
- * the oldest discrete event is dropped and counted. Snapshots stay, since agent
- * cards read them, and so does the newest committed `todo` result, which the
- * session todo panel refreshes from. Renderers already show only the newest
+ * the oldest discrete event or MCP progress snapshot is dropped and counted.
+ * Agent/judgment-batch snapshots stay, since agent cards read them, and so does
+ * the newest committed `todo` result, which the session todo panel refreshes
+ * from. Renderers already show only the newest
  * events behind an "… N earlier" row.
  */
 export function recordStatusEvent(log: StatusEventLog, event: EvalStatusEvent): void {
@@ -238,7 +278,9 @@ export function recordStatusEvent(log: StatusEventLog, event: EvalStatusEvent): 
 	upsertStatusEvent(events, event);
 	if (events.length <= MAX_STATUS_EVENTS) return;
 	const keep = events.findLastIndex(e => e.op === "todo" && e.committed === true);
-	const oldest = events.findIndex((e, i) => i !== keep && statusEventKey(e) === undefined);
+	const oldest = events.findIndex(
+		(e, i) => i !== keep && (e.op === "mcp_progress" || statusEventKey(e) === undefined),
+	);
 	if (oldest < 0) return;
 	events.splice(oldest, 1);
 	log.statusEventsElided = (log.statusEventsElided ?? 0) + 1;
@@ -379,6 +421,12 @@ function formatStatusEvent(event: EvalStatusEvent, theme: Theme): string {
 	}
 
 	switch (op) {
+		case "mcp_progress": {
+			if (data.tool) parts.push(previewLine(sanitizeText(String(data.tool)), STATUS_VALUE_WIDTH));
+			const progress = parseMCPProgress(data);
+			if (progress) parts.push(formatMCPProgress(progress, STATUS_VALUE_WIDTH));
+			break;
+		}
 		case "read":
 			parts.push(`${data.chars ?? data.bytes ?? 0} chars`);
 			if (data.path) parts.push(`from ${shortenPath(String(data.path))}`);
@@ -583,7 +631,8 @@ function formatCellOutputLines(
 	theme: Theme,
 	width: number,
 ): { lines: readonly string[]; hiddenCount: number } {
-	if (!cell.output) {
+	const output = cell.output;
+	if (!output) {
 		return { lines: [], hiddenCount: 0 };
 	}
 
@@ -595,32 +644,56 @@ function formatCellOutputLines(
 	// exact hidden-count row, so the pane marker stays off here.
 	const innerWidth = outputBlockContentWidth(width);
 
-	if (cell.hasMarkdown && cell.status !== "error") {
-		const md = new Markdown(cell.output, 0, 0, getMarkdownTheme());
-		const allLines = md.render(innerWidth);
+	const isError = cell.status === "error";
+	const styleText = (line: string): string => theme.fg(isError ? "error" : "toolOutput", replaceTabs(line));
+	// A table's printed text is already a terminal table, aligned to the line it starts on: keep it as text.
+	const parts = splitEvalOutput(
+		output,
+		cell.views?.filter(entry => entry.view.kind !== "table"),
+	);
+	if (parts.some(part => part.kind === "view")) {
+		// Printed text keeps its place; json and markdown views replace theirs with a tree / rendered Markdown.
+		const treeDepth = expanded ? JSON_TREE_MAX_DEPTH_EXPANDED : JSON_TREE_MAX_DEPTH_COLLAPSED;
+		const treeLineCap = expanded ? JSON_TREE_MAX_LINES_EXPANDED : JSON_TREE_MAX_LINES_COLLAPSED;
+		const treeScalarLen = expanded ? JSON_TREE_SCALAR_LEN_EXPANDED : JSON_TREE_SCALAR_LEN_COLLAPSED;
+		const allLines: string[] = [];
+		for (const part of parts) {
+			if (part.kind === "text") {
+				for (const line of part.text.split("\n")) allLines.push(styleText(line));
+				continue;
+			}
+			const view = part.view;
+			if (view.kind === "json") {
+				const tree = renderJsonTreeLines(view.value, theme, treeDepth, treeLineCap, treeScalarLen);
+				allLines.push(...tree.lines);
+				if (tree.truncated) allLines.push(theme.fg("dim", "…"));
+			} else if (view.kind === "markdown") {
+				allLines.push(...new Markdown(view.text, 0, 0, getMarkdownTheme()).render(innerWidth));
+			}
+		}
 		const formatted = formatOutputPaneLines(
 			{
 				lines: allLines,
 				expanded,
 				collapsedMaxLines: previewLines,
 				edge: "tail",
+				visual: true,
+				width: innerWidth,
 				showHiddenMarker: false,
 			},
 			theme,
 		);
 		return { lines: formatted.lines, hiddenCount: formatted.hiddenCount };
 	}
-
-	const isError = cell.status === "error";
 	const formatted = formatOutputPaneLines(
 		{
-			lines: cell.output.split("\n"),
+			lines: output.split("\n"),
 			expanded,
 			collapsedMaxLines: previewLines,
 			edge: "tail",
 			visual: true,
 			width: innerWidth,
-			styleLine: line => theme.fg(isError ? "error" : "toolOutput", replaceTabs(line)),
+			styleLine: styleText,
 			showHiddenMarker: false,
 		},
 		theme,
@@ -628,17 +701,47 @@ function formatCellOutputLines(
 	return { lines: formatted.lines, hiddenCount: formatted.hiddenCount };
 }
 
-/** Plain one-line summary of a status event: op plus its scalar fields. */
-function describeStatusEvent(event: EvalStatusEvent): NativeNode {
+/** Display cells a status field value keeps on its one-line summary. */
+const STATUS_VALUE_WIDTH = 200;
+
+/**
+ * Plain one-line summary of a status event: op plus its scalar fields, each
+ * collapsed to one line. MCP progress shows its tool and then the shared
+ * {@link formatMCPProgress} text; its call id is internal. A `preview` (file or
+ * command text a helper returned) never joins the line: an expanded cell shows
+ * it under the line as a code block holding its first
+ * {@link PREVIEW_LIMITS.OUTPUT_EXPANDED} lines, folded to
+ * {@link PREVIEW_LIMITS.COLLAPSED_LINES}.
+ */
+function describeStatusEvent(event: EvalStatusEvent, expanded: boolean): NativeNode {
 	const spans: TspSpan[] = [span(event.op, "accent")];
+	const mcpProgress = event.op === "mcp_progress" ? parseMCPProgress(event) : undefined;
 	for (const key in event) {
-		if (key === "op" || key === "resolvedThinkingLevel") continue;
+		if (key === "op" || key === "preview" || key === "resolvedThinkingLevel") continue;
+		if (event.op === "mcp_progress" && key !== "tool") continue;
 		const value = event[key];
 		if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-			spans.push(span(` ${key}=`, "muted"), span(sanitizeText(String(value))));
+			spans.push(span(` ${key}=`, "muted"), span(previewLine(sanitizeText(String(value)), STATUS_VALUE_WIDTH)));
 		}
 	}
-	return text(spans, { truncate: "end", role: "omp.tool.eval.status" });
+	if (mcpProgress) spans.push(span(` ${formatMCPProgress(mcpProgress, STATUS_VALUE_WIDTH)}`));
+	const line = text(spans, { truncate: "end", role: "omp.tool.eval.status" });
+	const preview = expanded ? eventString(event.preview)?.trimEnd() : undefined;
+	if (!preview) return line;
+	const head = cappedHeadLines(sanitizeDisplayLines(preview), PREVIEW_LIMITS.OUTPUT_EXPANDED).lines;
+	const path = eventString(event.path);
+	return node("col", { role: "omp.tool.eval.status.event", gap: "none" }, [
+		keyed(line, "line"),
+		keyed(
+			code(head.join("\n"), {
+				role: "omp.tool.eval.status.preview",
+				path: path ? splitPathAndSel(path).path : undefined,
+				wrap: false,
+				preview: { lines: PREVIEW_LIMITS.COLLAPSED_LINES },
+			}),
+			"preview",
+		),
+	]);
 }
 
 /**
@@ -664,96 +767,84 @@ function evalToolHead(
 	};
 }
 
-/** Box-drawing `console.table` output split out of plain text: `text` runs and parsed tables, in order. */
-type EvalOutputPart =
-	| { readonly kind: "text"; readonly text: string }
-	| { readonly kind: "table"; readonly head: readonly string[]; readonly rows: readonly string[][] };
-
-/** The cells of a `│ a │ b │` row, trimmed; undefined when the line is not a table row. */
-function tableRowCells(line: string): string[] | undefined {
-	const plain = plainText(line).trim();
-	if (plain.length < 2 || !plain.startsWith("│") || !plain.endsWith("│")) return undefined;
-	return plain
-		.slice(1, -1)
-		.split("│")
-		.map(cell => cell.trim());
-}
+/** One ordered piece of a cell's output: printed text, or a view shown in place of the text it matched. */
+export type EvalOutputPart = { kind: "text"; text: string } | { kind: "view"; view: EvalView };
 
 /**
- * Split `console.table` blocks (`┌…┐` header `├…┤` rows `└…┘`, as Node/Bun
- * print them) out of cell output so they render as a `table`; anything that
- * does not parse as one stays text.
+ * Split `output` around its views, in order: each view's `text` is searched
+ * from the end of the previous match, unmatched entries are skipped, and
+ * blank text between views is dropped (newlines bordering a view trimmed).
  */
-function splitConsoleTables(output: string): EvalOutputPart[] {
-	const lines = output.split("\n");
+export function splitEvalOutput(output: string, views: readonly EvalViewEntry[] | undefined): EvalOutputPart[] {
 	const parts: EvalOutputPart[] = [];
-	let textStart = 0;
-	const flushText = (end: number): void => {
-		const chunk = lines
-			.slice(textStart, end)
-			.join("\n")
-			.replace(/^\n+|\s+$/g, "");
-		if (chunk.length > 0) parts.push({ kind: "text", text: chunk });
+	const pushText = (chunk: string, trimStart: boolean, trimEnd: boolean): void => {
+		let text = chunk;
+		if (trimStart) text = text.replace(/^\n+/, "");
+		if (trimEnd) text = text.replace(/\n+$/, "");
+		if (text.trim().length > 0) parts.push({ kind: "text", text });
 	};
-	for (let i = 0; i < lines.length; i++) {
-		if (!plainText(lines[i]!).trimStart().startsWith("┌")) continue;
-		const head = tableRowCells(lines[i + 1] ?? "");
-		if (
-			!head ||
-			!plainText(lines[i + 2] ?? "")
-				.trimStart()
-				.startsWith("├")
-		)
-			continue;
-		const rows: string[][] = [];
-		let end = i + 3;
-		for (; end < lines.length; end++) {
-			const cells = tableRowCells(lines[end]!);
-			if (!cells) break;
-			rows.push(cells);
-		}
-		if (
-			!plainText(lines[end] ?? "")
-				.trimStart()
-				.startsWith("└")
-		)
-			continue;
-		if (rows.some(row => row.length !== head.length)) continue;
-		flushText(i);
-		parts.push({ kind: "table", head, rows });
-		i = end;
-		textStart = end + 1;
+	let cursor = 0;
+	for (const entry of views ?? []) {
+		if (!entry.text) continue;
+		const at = output.indexOf(entry.text, cursor);
+		if (at < 0) continue;
+		pushText(output.slice(cursor, at), cursor > 0, true);
+		parts.push({ kind: "view", view: entry.view });
+		cursor = at + entry.text.length;
 	}
-	flushText(lines.length);
+	pushText(output.slice(cursor), cursor > 0, cursor > 0);
 	return parts;
 }
 
-/**
- * One cell's outputs: markdown, else terminal text (following its tail,
- * clamped to the last `previewLines` while folded) with any `console.table`
- * blocks as tables.
- */
-function evalOutputNodes(output: string, markdown: boolean, previewLines: number): NativeNode[] {
-	if (output.trim().length === 0) return [];
-	if (markdown) return [keyed(md(output), "output")];
-	return splitConsoleTables(output).map((part, i) =>
-		part.kind === "text"
-			? runOutput(part.text, { role: "omp.tool.eval.output", previewLines, key: i === 0 ? "output" : `output-${i}` })
-			: node(
-					"table",
-					{
-						// Node's index column header is noise in a real table.
-						cols: part.head.map((head, c) => ({ id: `c${c}`, head: head === "(index)" ? "" : head })),
-						rows: part.rows.map((cells, r) => ({
-							id: `r${r}`,
-							cells: Object.fromEntries(cells.map((cell, c) => [`c${c}`, cell])),
-						})),
-						role: "omp.tool.eval.table",
-					},
-					undefined,
-					`table-${i}`,
-				),
+/** A table view as a native `table`; numeric columns align to the end. */
+function evalTableNode(view: Extract<EvalView, { kind: "table" }>, key: string): NativeNode {
+	return node(
+		"table",
+		{
+			cols: view.columns.map((column, c) => ({
+				id: `c${c}`,
+				head: column.head,
+				align: column.numeric ? "end" : undefined,
+			})),
+			rows: view.rows.map((cells, r) => ({
+				id: `r${r}`,
+				cells: Object.fromEntries(cells.map((cell, c) => [`c${c}`, cell])),
+			})),
+			role: "omp.tool.eval.table",
+		},
+		undefined,
+		key,
 	);
+}
+
+/**
+ * One cell's outputs in order: printed text (following its tail, clamped to
+ * the last `previewLines` while folded) with each view in place of its text.
+ * A json view is the host's own JSON viewer (`json`), top-level entries
+ * listed and containers folded, when it draws the kind; else a JSON tree.
+ */
+function evalOutputNodes(
+	output: string,
+	views: readonly EvalViewEntry[] | undefined,
+	previewLines: number,
+	json: boolean,
+): NativeNode[] {
+	if (output.trim().length === 0) return [];
+	return splitEvalOutput(output, views).map((part, i) => {
+		if (part.kind === "text") {
+			return runOutput(part.text, {
+				role: "omp.tool.eval.output",
+				previewLines,
+				key: i === 0 ? "output" : `output-${i}`,
+			});
+		}
+		const view = part.view;
+		if (view.kind === "table") return evalTableNode(view, `table-${i}`);
+		if (view.kind === "json") {
+			return keyed(describeJsonValue(view.value, { native: json, hiddenRootKeys: [] }), `json-${i}`);
+		}
+		return keyed(md(view.text), `markdown-${i}`);
+	});
 }
 
 /** Status lines a folded cell keeps: the newest ones. */
@@ -770,7 +861,9 @@ function evalStatusSection(log: StatusEventLog, expanded: boolean): NativeNode |
 	if (events.length === 0 && elided === 0) return undefined;
 	const shownFrom = expanded ? 0 : Math.max(0, events.length - RUN_STATUS_TAIL);
 	const hidden = shownFrom + elided;
-	const lines = events.slice(shownFrom).map((event, i) => keyed(describeStatusEvent(event), `s${hidden + i}`));
+	const lines = events
+		.slice(shownFrom)
+		.map((event, i) => keyed(describeStatusEvent(event, expanded), `s${hidden + i}`));
 	return node(
 		"col",
 		{ role: "omp.run.status", gap: "none" },
@@ -918,18 +1011,6 @@ export const evalToolRenderer = {
 		// the styled `warningLine` below carries the same text in ⟨…⟩ form.
 		const output = stripOutputNotice(rawOutput, details?.meta).trimEnd();
 
-		const jsonOutputs = details?.jsonOutputs ?? [];
-		const treeExpanded = options.renderContext?.expanded ?? options.expanded;
-		const treeDepth = treeExpanded ? JSON_TREE_MAX_DEPTH_EXPANDED : JSON_TREE_MAX_DEPTH_COLLAPSED;
-		const treeLineCap = treeExpanded ? JSON_TREE_MAX_LINES_EXPANDED : JSON_TREE_MAX_LINES_COLLAPSED;
-		const treeScalarLen = treeExpanded ? JSON_TREE_SCALAR_LEN_EXPANDED : JSON_TREE_SCALAR_LEN_COLLAPSED;
-		const labelOutputs = jsonOutputs.length > 1;
-		const jsonLines = jsonOutputs.flatMap((value, index) => {
-			const tree = renderJsonTreeLines(value, uiTheme, treeDepth, treeLineCap, treeScalarLen);
-			const body = tree.truncated ? [...tree.lines, uiTheme.fg("dim", "…")] : tree.lines;
-			return labelOutputs ? [uiTheme.fg("dim", `display[${index + 1}]`), ...body] : body;
-		});
-
 		const timeoutSeconds = options.renderContext?.timeout;
 		const timeoutLine =
 			typeof timeoutSeconds === "number"
@@ -1053,7 +1134,6 @@ export const evalToolRenderer = {
 							lines.push("");
 						}
 					}
-					lines.push(...jsonLines);
 					if (timeoutLine) {
 						lines.push(timeoutLine);
 					}
@@ -1076,9 +1156,6 @@ export const evalToolRenderer = {
 			});
 		}
 
-		const displayOutput = output;
-		const combinedOutput = [displayOutput, ...jsonLines].filter(Boolean).join("\n");
-
 		const statusEvents = details?.statusEvents ?? [];
 		const statusLines = renderStatusEvents(
 			statusEvents,
@@ -1087,12 +1164,12 @@ export const evalToolRenderer = {
 			details?.statusEventsElided,
 		);
 
-		if (!combinedOutput && statusLines.length === 0) {
+		if (!output && statusLines.length === 0) {
 			const lines = [timeoutLine, noticeLine, asyncLine, warningLine].filter(Boolean) as string[];
 			return new Text(lines.join("\n"), 0, 0);
 		}
 
-		if (!combinedOutput && statusLines.length > 0) {
+		if (!output && statusLines.length > 0) {
 			const lines = [
 				uiTheme.fg("dim", "Status"),
 				...statusLines,
@@ -1105,7 +1182,7 @@ export const evalToolRenderer = {
 		}
 
 		if (options.renderContext?.expanded ?? options.expanded) {
-			const styledOutput = combinedOutput
+			const styledOutput = output
 				.split("\n")
 				.map(line => uiTheme.fg("toolOutput", line))
 				.join("\n");
@@ -1120,7 +1197,7 @@ export const evalToolRenderer = {
 			return new Text(lines.join("\n"), 0, 0);
 		}
 
-		const styledOutput = combinedOutput
+		const styledOutput = output
 			.split("\n")
 			.map(line => uiTheme.fg("toolOutput", line))
 			.join("\n");
@@ -1210,9 +1287,6 @@ export const evalToolRenderer = {
 		const cancelled = options.cancelled === true;
 		const expanded = options.renderContext?.expanded ?? options.expanded;
 		const previewLines = options.renderContext?.previewLines ?? EVAL_DEFAULT_PREVIEW_LINES;
-		const jsonNodes = (details?.jsonOutputs ?? []).map((value, index) =>
-			keyed(describeJsonTree(value, { hiddenRootKeys: [] }), `display-${index}`),
-		);
 		// The call's notice and truncation join the last run's foot facts (a background job is a head badge).
 		const callFacts = { facts: compact([details?.notice]), meta: details?.meta };
 		const cellResults = details?.cells;
@@ -1238,15 +1312,7 @@ export const evalToolRenderer = {
 						language,
 						code: formatEvalCodeForDisplay(cell.code, language),
 						title: cell.title,
-						outputs: [
-							...evalOutputNodes(
-								cell.output,
-								cell.hasMarkdown === true && cell.status !== "error",
-								previewLines,
-							),
-
-							...(i === cellResults.length - 1 ? jsonNodes : []),
-						],
+						outputs: [...evalOutputNodes(cell.output, cell.views, previewLines, options.json === true)],
 						status: evalStatusSection(cell, expanded),
 						foot: state && {
 							state,
@@ -1271,10 +1337,12 @@ export const evalToolRenderer = {
 		const rawOutput = options.renderContext?.output ?? resultText(result).trimEnd();
 		const state: RunState = cancelled ? "cancelled" : isPartial ? "running" : result.isError ? "failed" : "done";
 		const last: Omit<EvalCellRun, "language" | "code" | "title"> = {
-			outputs: [
-				...evalOutputNodes(stripOutputNotice(rawOutput, details?.meta).trimEnd(), false, previewLines),
-				...jsonNodes,
-			],
+			outputs: evalOutputNodes(
+				stripOutputNotice(rawOutput, details?.meta).trimEnd(),
+				undefined,
+				previewLines,
+				options.json === true,
+			),
 			status: evalStatusSection(details ?? {}, expanded),
 			foot: { state, elapsedMs: options.elapsedMs, ...callFacts },
 		};

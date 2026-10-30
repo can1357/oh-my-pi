@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { ImageProtocol, setTerminalImageProtocol, TERMINAL, TUI } from "@oh-my-pi/pi-tui";
+import { ImageProtocol, resolveImageProtocol, setTerminalImageProtocol, TERMINAL, TUI } from "@oh-my-pi/pi-tui";
 import { VirtualTerminal } from "./virtual-terminal";
 import {
 	createProcessTerminalRenderHarness,
@@ -41,9 +41,9 @@ function restoreEnv(name: string, value: string | undefined): void {
 	else Bun.env[name] = value;
 }
 
-function startProbe(terminal: VirtualTerminal): TUI {
-	setTerminalImageProtocol(null);
-	terminalInfo.imageProtocol = null;
+function startProbe(terminal: VirtualTerminal, protocol: ImageProtocol | null = null): TUI {
+	setTerminalImageProtocol(protocol);
+	terminalInfo.imageProtocol = protocol;
 	Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 	Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
 	const tui = new TUI(terminal);
@@ -85,6 +85,17 @@ describe("TUI SIXEL capability probe", () => {
 		delete Bun.env.WSL_INTEROP;
 		const terminal = new VirtualTerminal(80, 24);
 		const tui = startProbe(terminal);
+
+		terminal.sendInput(SIXEL_SUPPORTED_REPLY);
+
+		expect(TERMINAL.imageProtocol).toBe(ImageProtocol.Sixel);
+		tui.stop();
+	});
+
+	it("selects SIXEL through the probe for an unknown tmux client", () => {
+		const env = { TMUX: "/tmp/tmux/default,1,0", TERM: "tmux-256color", TERM_PROGRAM: "tmux" };
+		const terminal = new VirtualTerminal(80, 24);
+		const tui = startProbe(terminal, resolveImageProtocol("base", env, true));
 
 		terminal.sendInput(SIXEL_SUPPORTED_REPLY);
 

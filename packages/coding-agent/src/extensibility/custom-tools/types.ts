@@ -10,7 +10,6 @@ import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import type * as zod from "@oh-my-pi/omptype/zod";
 import type {
 	AgentToolResult,
-	ApprovalDetailsOptions,
 	AgentToolUpdateCallback,
 	ToolApproval,
 	ToolApprovalDecision,
@@ -214,6 +213,8 @@ export interface CustomTool<TParams extends TSchema = TSchema, TDetails = any> {
 	mcpServerName?: string;
 	/** Original MCP tool name for discovery/search metadata. */
 	mcpToolName?: string;
+	/** MCP read-only annotation, independent of the approval tier. */
+	mcpReadOnlyHint?: boolean;
 	/** Previous public name when a rename changed minting (e.g. digits kept in
 	 *  MCP names). Approval resolution honors `deny`/`prompt` keyed on it. */
 	legacyName?: string;
@@ -221,8 +222,12 @@ export interface CustomTool<TParams extends TSchema = TSchema, TDetails = any> {
 	/** Capability tier declaration used by approval gates. Omitted means "exec". */
 	approval?: ToolApproval;
 
-	/** Lines appended after the standard approval prompt header; see {@link ApprovalDetailsOptions} for `compact`. */
-	formatApprovalDetails?: (args: unknown, options?: ApprovalDetailsOptions) => string | string[] | undefined;
+	/** Exact targets an approval mode may remember for this call (`always-ask-cached`), one key per
+	 *  target, derived from the call's args. Omit it and approvals are never remembered per target. */
+	approvalCacheTargets?: (args: unknown) => readonly string[] | undefined;
+
+	/** Lines appended after the standard approval prompt header. */
+	formatApprovalDetails?: (args: unknown) => string | string[] | undefined;
 	/**
 	 * Execute the tool.
 	 * @param toolCallId - Unique ID for this tool call

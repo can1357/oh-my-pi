@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-ai";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { parseAgentFields } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { resolveBuiltinToolPlan, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 
 describe("parseAgentFields", () => {
@@ -87,6 +89,40 @@ describe("parseAgentFields", () => {
 	test("keeps an explicitly empty tools list distinct from an absent one", () => {
 		expect(parseAgentFields({ name: "quiet", description: "desc", tools: [] })?.tools).toEqual([]);
 		expect(parseAgentFields({ name: "quiet", description: "desc" })?.tools).toBeUndefined();
+		expect(parseAgentFields({ name: "quiet", description: "desc", tools: null })?.tools).toBeUndefined();
+	});
+
+	test.each([
+		["empty string", ""],
+		["non-string scalar", 42],
+		["non-string array", [1, 2]],
+	])("treats %s tools as an empty built-in allowlist", (_label, tools) => {
+		expect(parseAgentFields({ name: "quiet", description: "desc", tools })?.tools).toEqual([]);
+	});
+
+	test("keeps string entries in mixed tools arrays and normalizes aliases", () => {
+		expect(
+			parseAgentFields({ name: "reader", description: "desc", tools: [1, "Read", true, "Search"] })?.tools,
+		).toEqual(["read", "grep"]);
+	});
+
+	test("gives a malformed tools declaration only the required child yield tool, not default built-ins", async () => {
+		const fields = parseAgentFields({ name: "quiet", description: "desc", tools: 42 });
+		if (!fields) throw new Error("agent fields did not parse");
+		const session: ToolSession = {
+			cwd: "/tmp",
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "",
+			settings: Settings.isolated(),
+			taskDepth: 1,
+			requireYieldTool: true,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		};
+
+		const plan = await resolveBuiltinToolPlan(session, fields.tools);
+		expect(plan.names).toEqual(["yield"]);
 	});
 
 	test("maps legacy search alias to grep and keeps find canonical", () => {

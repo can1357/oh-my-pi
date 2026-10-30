@@ -64,6 +64,8 @@ class Session {
 	readonly connection: IpcConnection;
 	readonly framer = new MessageFramer(Buffer.alloc(0));
 	readonly openUris = new Set<string>();
+	/** Workspace folders this session added; removed from the server when the session leaves. */
+	readonly workspaceFolders = new Map<string, unknown>();
 	readonly forwardedIds = new Map<LspJsonRpcId, LspJsonRpcId>();
 	readonly pendingClientRequests = new Map<string, ClientRequestPending>();
 	server?: ServerInstance;
@@ -203,7 +205,14 @@ export class LspMuxServer {
 		this.#shuttingDown = true;
 		clearTimeout(this.#idleTimer);
 		for (const session of Array.from(this.#sessions)) session.connection.destroy();
-		await Promise.all([...this.#servers].map(server => this.#stopServer(server)));
+		// Children killed earlier (restart, failed init) are still in #servers until they exit;
+		// await every exit so no child outlives shutdown holding its cwd or pipes.
+		await Promise.all(
+			[...this.#servers].map(async server => {
+				await this.#stopServer(server);
+				await server.proc.exited.catch(() => {});
+			}),
+		);
 		const listener = this.#ipcServer;
 		this.#ipcServer = undefined;
 		await listener?.close();
@@ -326,6 +335,11 @@ export class LspMuxServer {
 			await this.#didClose(session, server, message);
 			return;
 		}
+		if (message.method === "workspace/didChangeWorkspaceFolders" && !request) {
+			this.#trackWorkspaceFolders(session, message);
+			await this.#writeServer(server, message);
+			return;
+		}
 		if (message.method === "$/cancelRequest" && !request) {
 			if (!isRecord(message.params)) return;
 			const originalId = message.params.id;
@@ -379,8 +393,21 @@ export class LspMuxServer {
 		const uri = parseUri(message.params);
 		if (!uri) return;
 		session.openUris.delete(uri);
+		// Safe to forward: a server is reused only once its session count is zero (see connect),
+		// so no other session holds an overlay of this document on this server.
 		server.documents.delete(uri);
 		await this.#writeServer(server, message);
+	}
+
+	#trackWorkspaceFolders(session: Session, message: LspJsonRpcNotification): void {
+		const event = isRecord(message.params) ? message.params.event : undefined;
+		if (!isRecord(event)) return;
+		const folders = (value: unknown): Array<{ uri: string } & Record<string, unknown>> =>
+			Array.isArray(value)
+				? value.filter((folder): folder is { uri: string } => isRecord(folder) && typeof folder.uri === "string")
+				: [];
+		for (const folder of folders(event.removed)) session.workspaceFolders.delete(folder.uri);
+		for (const folder of folders(event.added)) session.workspaceFolders.set(folder.uri, folder);
 	}
 
 	#spawnServer(key: string, params: MuxConnectParams): ServerInstance {
@@ -593,6 +620,11 @@ export class LspMuxServer {
 		this.#sessions.delete(session);
 		const server = session.server;
 		if (server) {
+			// Detach before awaiting teardown so a link arriving meanwhile can reuse this server.
+			// Teardown writes are enqueued synchronously below, so the server still sees every
+			// orphan didClose/cancel before anything the next session sends.
+			server.initializeWaiters.delete(session);
+			server.sessions.delete(session);
 			// Teardown writes are best-effort: the language server may already
 			// have exited (crash or mux restart) and writing its stdin then
 			// rejects. #writeServer already logs those failures — a rejection
@@ -609,15 +641,22 @@ export class LspMuxServer {
 					params: { textDocument: { uri } },
 				});
 			}
-			await cleanup;
 			for (const [muxId, pending] of server.pending) {
 				if (pending.session !== session) continue;
 				pending.drop = true;
-				await writeBestEffort({ jsonrpc: "2.0", method: "$/cancelRequest", params: { id: muxId } });
+				cleanup = writeBestEffort({ jsonrpc: "2.0", method: "$/cancelRequest", params: { id: muxId } });
 			}
-			server.initializeWaiters.delete(session);
-			server.sessions.delete(session);
+			if (session.workspaceFolders.size > 0) {
+				cleanup = writeBestEffort({
+					jsonrpc: "2.0",
+					method: "workspace/didChangeWorkspaceFolders",
+					params: { event: { added: [], removed: [...session.workspaceFolders.values()] } },
+				});
+			}
+			// The write queue is serial, so the last teardown write settling means all have.
+			await cleanup;
 			if (server.sessions.size === 0 && !server.stopping) {
+				clearTimeout(server.lingerTimer);
 				server.lingerTimer = setTimeout(() => {
 					if (server.sessions.size === 0) void this.#stopServer(server);
 				}, SERVER_LINGER_MS);

@@ -31,6 +31,8 @@ export interface GroupedFileSection {
 export interface GroupedFilesOutput {
 	model: string[];
 	display: string[];
+	/** Per file, the `model` index just past its last line: a head cut keeping `n` lines shows it whole when this is <= n. */
+	modelEnds: Map<string, number>;
 }
 
 /**
@@ -66,6 +68,7 @@ export function formatGroupedFiles(
 	const tree = buildPathTree(inputs);
 	const model: string[] = [];
 	const display: string[] = [];
+	const modelEnds = new Map<string, number>();
 	let emitted = false;
 
 	for (const event of walkPathTree(tree)) {
@@ -86,9 +89,10 @@ export function formatGroupedFiles(
 		const header = `${hashes} ${event.name}${section.headerSuffix ?? ""}`;
 		model.push(header, ...section.modelLines);
 		display.push(header, ...(section.displayLines ?? section.modelLines));
+		modelEnds.set(event.key, model.length);
 	}
 
-	return { model, display };
+	return { model, display, modelEnds };
 }
 
 /** One file's rendered search matches, plus its hashline tag when editable. */
@@ -122,6 +126,7 @@ export function formatFileMatches(
 	}
 	const model: string[] = [];
 	const display: string[] = [];
+	const modelEnds = new Map<string, number>();
 	for (const filePath of files) {
 		const rendered = renderFile(filePath);
 		if (rendered.model.length === 0) continue;
@@ -132,8 +137,9 @@ export function formatFileMatches(
 		if (rendered.tag) model.push(formatHashlineHeader(filePath, rendered.tag));
 		model.push(...rendered.model);
 		display.push(...rendered.display);
+		modelEnds.set(filePath, model.length);
 	}
-	return { model, display };
+	return { model, display, modelEnds };
 }
 
 // =============================================================================
@@ -314,9 +320,14 @@ export interface NumberedLine {
  * Numbered `code` for possibly non-contiguous source lines: one block per run
  * of consecutive line numbers (`start` = the run's first line, match lines
  * `mark`ed), with a `…` row wherever the numbers jump or an elision marker
- * (`n: null`) sits. No path header: the row or head above names the file.
+ * (`n: null`) sits. `path` is the file the lines come from: Tern picks their
+ * grammar from it and draws no header (the row or head above names the file).
+ * `wrap` soft-wraps long lines instead of scrolling the block sideways.
  */
-export function numberedCode(lines: readonly NumberedLine[], opts: { lang?: string } = {}): NativeNode[] {
+export function numberedCode(
+	lines: readonly NumberedLine[],
+	opts: { path?: string; wrap?: boolean } = {},
+): NativeNode[] {
 	const out: NativeNode[] = [];
 	let run: { start: number; text: string[]; marks: { line: number; tone: TspTone }[] } | undefined;
 	const flush = () => {
@@ -328,7 +339,8 @@ export function numberedCode(lines: readonly NumberedLine[], opts: { lang?: stri
 				code(run.text.join("\n"), {
 					start: run.start,
 					numbers: true,
-					lang: opts.lang,
+					path: opts.path,
+					wrap: opts.wrap,
 					marks: run.marks.length > 0 ? run.marks : undefined,
 				}),
 				`c${run.start}`,
@@ -362,7 +374,7 @@ export function numberedCode(lines: readonly NumberedLine[], opts: { lang?: stri
  */
 export function describeGroupedOutput(
 	lines: readonly string[],
-	options: { lang?: (path: string) => string | undefined; maxFiles?: number; file?: string } = {},
+	options: { maxFiles?: number; file?: string } = {},
 ): NativeNode[] {
 	const files: NativeNode[] = [];
 	const loose: NativeNode[] = [];
@@ -375,7 +387,7 @@ export function describeGroupedOutput(
 	const flushLines = () => {
 		const target = current?.children ?? loose;
 		if (numbered.length > 0) {
-			target.push(...numberedCode(numbered, { lang: current ? options.lang?.(current.path) : undefined }));
+			target.push(...numberedCode(numbered, { path: current?.path }));
 			numbered = [];
 		}
 		if (plain.length > 0) {

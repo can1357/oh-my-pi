@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Model } from "@oh-my-pi/pi-ai";
 import type { AsyncJobRegisterOptions } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -49,6 +49,7 @@ interface TanSessionEvent {
 	type: string;
 	result?: unknown;
 	aborted?: boolean;
+	message?: AgentMessage;
 }
 
 /** Minimal tan clone session stub covering the surface `TanCommandController` drives. */
@@ -71,6 +72,7 @@ function createCloneStub(overrides?: {
 		setTodoPhases: vi.fn(),
 		getActiveToolNames: vi.fn(() => overrides?.activeToolNames ?? ["read", "bash"]),
 		getEnabledToolNames: vi.fn(() => overrides?.enabledToolNames ?? overrides?.activeToolNames ?? ["read", "bash"]),
+		setActiveToolPresentation: vi.fn(async () => {}),
 		subscribe: vi.fn((l: (event: TanSessionEvent) => void) => {
 			listener = l;
 			return () => {
@@ -132,6 +134,7 @@ function createContext(overrides?: {
 		systemPrompt: ["system prompt"],
 		getActiveToolNames: vi.fn(() => overrides?.activeToolNames ?? ["read", "bash"]),
 		getEnabledToolNames: vi.fn(() => overrides?.enabledToolNames ?? overrides?.activeToolNames ?? ["read", "bash"]),
+		getMountedXdevToolNames: vi.fn(() => []),
 		modelRegistry: { authStorage: { marker: "auth" } },
 		preparedExtensions: overrides?.preparedExtensions,
 		effectiveExtensionRoots: overrides?.effectiveExtensionRoots,
@@ -197,7 +200,7 @@ describe("TanCommandController", () => {
 		const forkSpy = vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
 		const controller = new TanCommandController(harness.ctx);
 
-		await controller.start("   ");
+		expect(await controller.start("   ")).toBe(false);
 
 		expect(forkSpy).not.toHaveBeenCalled();
 		expect(harness.ctx.showStatus).toHaveBeenCalledWith("Usage: /tan <work>");
@@ -227,7 +230,7 @@ describe("TanCommandController", () => {
 		const forkSpy = vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
 		const controller = new TanCommandController(harness.ctx);
 
-		await controller.start("write the release note");
+		expect(await controller.start("write the release note")).toBe(true);
 
 		expect(forkSpy).toHaveBeenCalledWith(
 			harness.parentFile,
@@ -648,6 +651,62 @@ describe("TanCommandController", () => {
 		);
 		// The compaction listener is released once the tan finishes.
 		expect(stub.compactionListener).toBeUndefined();
+	});
+
+	it("sends /tan images with the request and replays the admitted, template-expanded request after compaction", async () => {
+		const harness = createContext();
+		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
+		const screenshot: ImageContent = { type: "image", data: "cmF3", mimeType: "image/png" };
+		const sourceNotice = {
+			role: "custom",
+			customType: "image-attachment",
+			content: "Source path: `/tmp/shot.png`",
+			display: false,
+			attribution: "user",
+			timestamp: 1,
+		} as AgentMessage;
+		const request: AgentMessage = {
+			role: "user",
+			content: [
+				{ type: "text", text: "Review the block in this screenshot for layout bugs." },
+				{ type: "image", data: "bm9ybWFsaXplZA==", mimeType: "image/webp" },
+			],
+			attribution: "user",
+			timestamp: 1,
+		};
+		const stub = createCloneStub({
+			prompt: async () => {
+				// The session admits the request as its prompt template expanded it, with
+				// the normalized image and hidden source notice; compaction then
+				// summarizes all of it away.
+				stub.compactionListener?.({ type: "agent_start" });
+				stub.messages.push(sourceNotice, request);
+				stub.compactionListener?.({ type: "message_end", message: sourceNotice });
+				stub.compactionListener?.({ type: "message_end", message: request });
+				stub.compactionListener?.({ type: "auto_compaction_start" });
+				stub.messages.length = 0;
+				stub.compactionListener?.({ type: "auto_compaction_end", result: {}, aborted: false });
+			},
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
+			session: stub.clone,
+		} as unknown as CreateAgentSessionResult);
+		const controller = new TanCommandController(harness.ctx);
+
+		await controller.start("/review-shot", [screenshot]);
+		const run = harness.capturedRun;
+		if (!run) throw new Error("run function was not captured");
+		await run({ jobId: "job-123", signal: new AbortController().signal, reportProgress: async () => {} });
+
+		expect(stub.clone.prompt).toHaveBeenCalledWith("/review-shot", {
+			attribution: "user",
+			images: [screenshot],
+		});
+		expect(stub.appendMessage.mock.calls.slice(1).map(([message]) => message)).toEqual([
+			expect.objectContaining({ role: "developer" }),
+			{ ...sourceNotice, timestamp: expect.any(Number) },
+			{ ...request, timestamp: expect.any(Number) },
+		]);
 	});
 
 	it("does not duplicate the request when compaction runs before the initial dispatch", async () => {

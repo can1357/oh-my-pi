@@ -39,6 +39,7 @@ import {
 } from "../utils/idle-iterator";
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
+import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import { waitForRetry } from "../utils/retry-wait";
 import {
 	adaptSchemaForStrict,
@@ -103,6 +104,7 @@ import {
 	isCompiledGrammarTooLargeStrictError,
 	isOpenAIResponsesProgressEvent,
 	isStrictToolsDisabledForScope,
+	readOpenRouterRawMetadata,
 	type OpenAIPromptCacheOptions,
 	type OpenAIStrictToolsScope,
 	type OpenAIStrictToolsState,
@@ -115,6 +117,12 @@ import {
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
 } from "./openai-shared";
+import { readOpenRouterGenerationError } from "./openrouter-generation";
+import {
+	OPENAI_RESPONSES_PROVIDER_SESSION_STATE_PREFIX,
+	resetOpenAIResponsesChainState,
+	storesResponsesServerSide,
+} from "./openai-responses-state";
 
 // OpenAI Responses-specific options
 export interface OpenAIResponsesOptions extends StreamOptions {
@@ -174,7 +182,6 @@ export interface OpenAIResponsesOptions extends StreamOptions {
 	promptCache?: OpenAIPromptCacheOptions;
 }
 
-const OPENAI_RESPONSES_PROVIDER_SESSION_STATE_PREFIX = "openai-responses:";
 const OPENAI_RESPONSES_FIRST_EVENT_TIMEOUT_MESSAGE =
 	"OpenAI responses stream timed out while waiting for the first event";
 /** Consecutive stale-previous-response failures before chaining is disabled for the session. */
@@ -201,6 +208,15 @@ function isOpenAIResponsesReplayUnsafeEvent(event: ResponseStreamEvent): boolean
 }
 
 function isRetryableOpenAIResponsesStreamFailure(error: unknown): boolean {
+	// Terminal malformed output needs the agent's corrective reminder, not an
+	// identical billable replay inside the transport adapter.
+	if (
+		error instanceof AIError.ProviderResponseError &&
+		error.kind === "output" &&
+		AIError.is(AIError.classify(error), AIError.Flag.MalformedFunctionCall)
+	) {
+		return false;
+	}
 	return (
 		AIError.isTransientStreamParseError(error) ||
 		(error instanceof AIError.ProviderResponseError && error.kind === "incomplete-stream") ||
@@ -393,7 +409,7 @@ async function* resumeOpenAIResponsesEventStream(
 	} as unknown as ResponseStreamEvent;
 }
 
-interface OpenAIResponsesProviderSessionState
+export interface OpenAIResponsesProviderSessionState
 	extends ProviderSessionState, OpenAIStrictToolsState, OpenAIReasoningEffortFallbackState {
 	/**
 	 * Replay native history items. Starts false only on connection-bound hosts;
@@ -433,7 +449,7 @@ function mapResponsesEffort(
 	return model.compat.reasoningEffortMap?.[level] ?? model.thinking?.effortMap?.[level] ?? level;
 }
 
-interface OpenAIResponsesChainState {
+export interface OpenAIResponsesChainState {
 	sessionId: string;
 	/**
 	 * Wire params of the last successful turn; never carries
@@ -496,61 +512,6 @@ function getOpenAIResponsesProviderSessionState(
 	return created;
 }
 
-/**
- * Whether the next request for `model` replays native Responses history items
- * (encrypted reasoning, item ids), as {@link buildParams} decides it. A session
- * is cold, rebuilding turns from message content, from the first request on a
- * connection-bound host (`compat.connectionBoundNativeHistory`, GitHub Copilot)
- * and after `close()` on any host, until a response succeeds. Without session
- * state every request replays.
- */
-export function openAIResponsesReplaysNativeHistory(
-	model: Pick<Model, "api" | "provider" | "compat"> | null | undefined,
-	providerSessionState: Map<string, ProviderSessionState> | undefined,
-): boolean {
-	if (model?.api !== "openai-responses" || !providerSessionState) return true;
-	const state = providerSessionState.get(`${OPENAI_RESPONSES_PROVIDER_SESSION_STATE_PREFIX}${model.provider}`) as
-		| OpenAIResponsesProviderSessionState
-		| undefined;
-	if (state) return state.nativeHistoryReplayWarmed;
-	const compat = model.compat;
-	return !(compat && "connectionBoundNativeHistory" in compat && compat.connectionBoundNativeHistory);
-}
-
-/** Host per-provider storage defaults; see {@link configureProviderStoreResponses}. */
-let configuredProviderStoreResponses: Readonly<Record<string, boolean>> = {};
-
-/**
- * Set the process-wide storage default per provider id, used when a request
- * leaves `storeResponses` unset. Hosts call this from their settings so every
- * request follows the setting, including direct `streamSimple`/`completeSimple`
- * side calls that do not pass per-request options. `PI_MUSE_STORE_RESPONSES`
- * still overrides it.
- */
-export function configureProviderStoreResponses(byProvider: Readonly<Record<string, boolean>> | undefined): void {
-	configuredProviderStoreResponses = byProvider ?? {};
-}
-
-/**
- * Whether this request stores its result server-side. Only hosts whose rule
- * sets `store-responses` (they finish runs after a client disconnect, so a
- * dropped stream can be resumed) are eligible, and storage is opt-in:
- * `options.storeResponses`, then `PI_MUSE_STORE_RESPONSES`, then the host
- * default ({@link configureProviderStoreResponses}), else off. Privacy: stored
- * runs retain prompts and outputs on the provider. Off also disables resume and
- * the `previous_response_id` chaining that needs storage.
- */
-function storesResponsesServerSide(
-	model: Model<"openai-responses">,
-	options: OpenAIResponsesOptions | undefined,
-): boolean {
-	if (model.compat.storeResponses !== true) return false;
-	return (
-		options?.storeResponses ??
-		$flag("PI_MUSE_STORE_RESPONSES", configuredProviderStoreResponses[model.provider] ?? false)
-	);
-}
-
 function isOpenAIResponsesStatefulEnabled(
 	options: OpenAIResponsesOptions | undefined,
 	model: Model<"openai-responses">,
@@ -578,41 +539,6 @@ function getOpenAIResponsesChainState(
 	const created: OpenAIResponsesChainState = { sessionId, canAppend: false, staleFailures: 0, disabled: false };
 	providerSessionState.chains.set(key, created);
 	return created;
-}
-
-function resetOpenAIResponsesChainState(state: OpenAIResponsesChainState): void {
-	state.canAppend = false;
-	state.lastParams = undefined;
-	state.lastResponseId = undefined;
-	state.lastResponseItems = undefined;
-	state.lastPromptCacheBreakpointPolicy = undefined;
-}
-
-/**
- * Drop the account-bound half of every retained `openai-responses` record in
- * `states`: the stateful `previous_response_id` chain baselines.
- *
- * Chaining stores the turn server-side under the account that created it, so a
- * baseline minted by one credential is dead weight the moment the session is
- * switched to a sibling account — the next delta request answers
- * `Previous response not found` and burns a turn re-learning that. Everything
- * else this record holds describes the *deployment*, not the account
- * (strict-tools demotion, reasoning-effort fallback, native-history-replay
- * warmup, the chaining circuit breaker), and is deliberately preserved:
- * re-learning an endpoint's limits on every credential switch is the cost this
- * state exists to avoid.
- */
-export function resetOpenAIResponsesAccountScopedState(states: Map<string, ProviderSessionState>): void {
-	for (const [key, value] of states) {
-		if (!key.startsWith(OPENAI_RESPONSES_PROVIDER_SESSION_STATE_PREFIX)) continue;
-		const state = value as OpenAIResponsesProviderSessionState;
-		for (const chain of state.chains.values()) {
-			resetOpenAIResponsesChainState(chain);
-			// The stale-failure counter tallies the previous account's 404s; a
-			// fresh account must not inherit a tripped circuit breaker.
-			chain.staleFailures = 0;
-		}
-	}
 }
 
 interface OpenAIResponsesChainedParams {
@@ -783,6 +709,9 @@ const streamOpenAIResponsesOnce = (
 					messages: context.messages,
 					sessionId: options?.sessionId ?? routingSessionId,
 					promptCacheSessionId,
+					// The family affinity key rides only an explicit prompt-cache
+					// identity; the sessionId-derived cache-id fallback never does.
+					promptCacheAffinityKey: options?.promptCacheKey ? promptCacheSessionId : undefined,
 				});
 			const premiumRequestsTotal = copilotPremiumRequests;
 			const providerSessionState = getOpenAIResponsesProviderSessionState(model, options?.providerSessionState);
@@ -893,7 +822,7 @@ const streamOpenAIResponsesOnce = (
 						body: requestParams,
 						signal: requestSignal,
 						fetch: wrapFetchForCopilotFallback(
-							options?.fetch,
+							wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
 							model.provider === "github-copilot",
 							resolveCopilotRequestIdentity(options?.headers),
 							copilotCacheKey,
@@ -1128,6 +1057,32 @@ const streamOpenAIResponsesOnce = (
 							"OpenAI responses stream closed before a terminal response event was received",
 							{ provider: model.provider, kind: "incomplete-stream" },
 						);
+					}
+
+					// OpenRouter's Responses translation can hide a native failure behind
+					// "completed". Consult metadata only for truly empty stops, never
+					// for replayable reasoning or provider-hosted tool progress.
+					if (
+						model.compat.isOpenRouterHost &&
+						output.stopReason === "stop" &&
+						output.content.length === 0 &&
+						nativeOutputItems.length === 0 &&
+						!output.stopDetails &&
+						output.responseId
+					) {
+						const nativeError = await readOpenRouterGenerationError({
+							baseUrl: resolvedBaseUrl,
+							headers,
+							responseId: output.responseId,
+							outputTokens: output.usage.output,
+							reasoningTokens: output.usage.reasoningTokens,
+							fetch: options?.fetch,
+							signal: requestSignal,
+						});
+						if (abortTracker.wasCallerAbort()) throw new AIError.AbortError();
+						if (nativeError) {
+							throw new AIError.ProviderResponseError(nativeError, { provider: model.provider, kind: "output" });
+						}
 					}
 
 					if (output.stopReason === "aborted" || output.stopReason === "error") {
@@ -1376,7 +1331,7 @@ const streamOpenAIResponsesOnce = (
 				output.requestBodyReadTimeoutFullReplay = true;
 			}
 			// Some providers via OpenRouter include extra details here.
-			const rawMetadata = (error as { error?: { metadata?: { raw?: string } } })?.error?.metadata?.raw;
+			const rawMetadata = readOpenRouterRawMetadata(capturedErrorResponse);
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
@@ -1562,10 +1517,11 @@ function applyOpenAIResponsesPromptCachePolicy(
 	options: OpenAIResponsesOptions | undefined,
 	statefulCacheBaseline?: ResponseInput,
 ): void {
+	const cacheRetention = resolveCacheRetention(options?.cacheRetention);
+	if (cacheRetention === "none") return;
 	const promptCache = options?.promptCache;
-	if (!promptCache || resolveCacheRetention(options?.cacheRetention) === "none") return;
 	if (!model.compat.supportsPromptCacheBreakpoints) {
-		if (promptCache.mode === "explicit") {
+		if (promptCache?.mode === "explicit") {
 			throw new AIError.ConfigurationError(
 				`OpenAI explicit prompt caching is unsupported for ${model.provider}/${model.id}; enable compat.supportsPromptCacheBreakpoints only for a compatible endpoint.`,
 			);
@@ -1573,11 +1529,15 @@ function applyOpenAIResponsesPromptCachePolicy(
 		return;
 	}
 
+	// GPT-5.6+ replaces `prompt_cache_retention` with `prompt_cache_options.ttl`;
+	// long retention selects the 12h minimum lifetime even without an explicit policy.
+	const ttl = promptCache?.ttl ?? (cacheRetention === "long" ? "12h" : undefined);
+	if (!promptCache && ttl === undefined) return;
 	params.prompt_cache_options = {
-		mode: promptCache.mode,
-		ttl: promptCache.ttl ?? model.compat.promptCacheBreakpointTtl,
+		mode: promptCache?.mode ?? "implicit",
+		ttl: ttl ?? model.compat.promptCacheBreakpointTtl,
 	};
-	if (promptCache.mode === "explicit" && promptCache.breakpoint !== "none")
+	if (promptCache?.mode === "explicit" && promptCache.breakpoint !== "none")
 		markLatestStableResponsesCacheBreakpoint(params.input, statefulCacheBaseline);
 }
 
@@ -1659,11 +1619,14 @@ export function buildParams(
 		instructions: systemInstructions,
 		stream: true,
 		prompt_cache_key: promptCacheKey,
-		prompt_cache_retention: promptCacheKey
-			? cacheRetention === "long" && model.compat.supportsLongPromptCacheRetention
+		// GPT-5.6+ ignores the legacy retention field; its lifetime rides `prompt_cache_options.ttl`.
+		prompt_cache_retention:
+			promptCacheKey &&
+			cacheRetention === "long" &&
+			model.compat.supportsLongPromptCacheRetention &&
+			!model.compat.supportsPromptCacheBreakpoints
 				? "24h"
-				: undefined
-			: undefined,
+				: undefined,
 		// Gateway routing: OpenRouter-only Responses wire field for sticky upstream
 		// routing + observability grouping; no equivalent on direct OpenAI.
 		session_id: model.compat.isOpenRouterHost ? getOpenRouterResponsesSessionId(options) : undefined,

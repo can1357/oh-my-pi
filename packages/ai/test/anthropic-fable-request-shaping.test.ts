@@ -412,8 +412,8 @@ describe("MiniMax Anthropic adaptive thinking", () => {
 	it.each([
 		[Effort.High, "high"],
 		[Effort.Max, "max"],
-	] as const)("sends MiniMax-M3.1-Flash-Preview %s effort as output_config.effort", async (effort, wire) => {
-		const payload = await capturePayload(makeMiniMaxAnthropicModel("MiniMax-M3.1-Flash-Preview", "minimax-code"), {
+	] as const)("sends MiniMax-M3.1-Flash %s effort as output_config.effort", async (effort, wire) => {
+		const payload = await capturePayload(makeMiniMaxAnthropicModel("MiniMax-M3.1-Flash", "minimax-code"), {
 			reasoning: effort,
 			thinkingEnabled: true,
 		});
@@ -429,9 +429,10 @@ describe("MiniMax Anthropic adaptive thinking", () => {
 		["an effort-less request", {}],
 		["a forced-off request", { forceReasoningOff: true }],
 		["a disabled-reasoning request", { disableReasoning: true }],
-	] as const)("clamps MiniMax-M3.1-Flash-Preview %s to low effort with thinking on", async (_label, opts) => {
-		const model = makeMiniMaxAnthropicModel("MiniMax-M3.1-Flash-Preview", "minimax-code");
+	] as const)("clamps MiniMax-M3.1-Flash %s to low effort with thinking on", async (_label, opts) => {
+		const model = makeMiniMaxAnthropicModel("MiniMax-M3.1-Flash", "minimax-code");
 		expect(model.thinking?.requiresEffort).toBe(true);
+		expect(model.compat.supportsSamplingParams).toBe(false);
 
 		let payload: CapturedPayload | undefined;
 		await streamSimple(model, CONTEXT, {

@@ -199,7 +199,7 @@ describe("Agent hub Enter activation", () => {
 		hub.dispose();
 	});
 
-	it("Enter opens an aborted agent's read-only transcript instead of focusing it", () => {
+	it("Enter focuses a killed agent so focus revives it instead of opening a read-only transcript", async () => {
 		const agents = new AgentRegistry();
 		agents.register({
 			id: AGENT_ID,
@@ -210,10 +210,11 @@ describe("Agent hub Enter activation", () => {
 			sessionFile: null,
 			status: "aborted",
 		});
-		const focusAgent = vi.fn(async () => {});
+		const focusAgent = vi.fn(async (_id: string) => {});
 		const showOverlay = vi.fn((_component: unknown, _options: unknown) => ({ hide: () => {} }));
 		const setFocus = vi.fn();
-		const onDone = vi.fn();
+		const done = Promise.withResolvers<void>();
+		const onDone = vi.fn(() => done.resolve());
 		const hub = new AgentHubOverlayComponent({
 			...createAgentHubRuntime({ settings: Settings.isolated(), registry: agents }),
 			observers: new SessionObserverRegistry(),
@@ -232,15 +233,10 @@ describe("Agent hub Enter activation", () => {
 		});
 
 		hub.handleInput("\r");
+		await done.promise;
 
-		expect(focusAgent).not.toHaveBeenCalled();
-		expect(showOverlay).toHaveBeenCalledWith(expect.anything(), {
-			width: "100%",
-			margin: 0,
-			fullscreen: true,
-		});
-		expect(setFocus).toHaveBeenCalledWith(expect.anything());
-		expect(onDone).not.toHaveBeenCalled();
+		expect(focusAgent).toHaveBeenCalledWith(AGENT_ID);
+		expect(showOverlay).not.toHaveBeenCalled();
 		hub.dispose();
 	});
 

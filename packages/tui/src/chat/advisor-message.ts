@@ -2,11 +2,12 @@ import { type Component } from "../tui";
 import { Disclosure } from "../components/disclosure";
 import { visibleWidth } from "../utils";
 import type { AdvisorMessageDetails, AdvisorNote, AdvisorSeverity } from "./messages";
+import { chatTranscriptDisplayPreferences } from "./display-preferences";
 import { formatBadge, replaceTabs, type ToolUIColor, wrapTextWithAnsi } from "../render/render-utils";
 import { Ellipsis, truncateToWidth } from "../render";
-import { getThemeEpoch, type Theme } from "../theme";
-import type { TspSpan } from "@oh-my-pi/pi-wire";
-import { card, span, text } from "../native/describe";
+import type { Theme } from "../theme";
+import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
+import { card, node, span, text } from "../native/describe";
 import { type NativeNode, type NativeUiEvent, rootToggleExpanded } from "../native/node";
 import { plainText } from "../native/spans";
 import { Memo } from "../native/memo";
@@ -111,13 +112,16 @@ class AdvisorNotes implements Component {
 	}
 }
 
+/** The advisor a note came from; undefined for the implicit single ("default") advisor, which goes unlabeled. */
+function sourceOf(entry: AdvisorNote): string | undefined {
+	return entry.advisor && entry.advisor !== "default" ? entry.advisor : undefined;
+}
+
 /** Wrapped, truncated rail rows for a single note; shared by both branches. */
 function renderAdvisorNote(entry: AdvisorNote, width: number, uiTheme: Theme): string[] {
 	const badge = entry.severity ? `${formatBadge(entry.severity, severityColor(entry.severity), uiTheme)} ` : "";
-	// Multi-advisor: attribute the note to its source. The implicit
-	// single ("default") advisor renders unlabeled, as before.
-	const who =
-		entry.advisor && entry.advisor !== "default" ? `${uiTheme.fg("dim", `[${replaceTabs(entry.advisor)}]`)} ` : "";
+	const source = sourceOf(entry);
+	const who = source ? `${uiTheme.fg("dim", `[${replaceTabs(source)}]`)} ` : "";
 	const age = entry.turnsAgo !== undefined ? `${uiTheme.fg("dim", `T-${entry.turnsAgo}`)} ` : "";
 	const railGlyph = uiTheme.symbol("advisor.rail");
 	const rail = uiTheme.fg(severityColor(entry.severity), railGlyph);
@@ -145,14 +149,45 @@ function renderAdvisorNote(entry: AdvisorNote, width: number, uiTheme: Theme): s
 	);
 }
 
-/** Native spans for one note: severity badge, advisor attribution, then the note text. */
-function advisorNoteSpans(entry: AdvisorNote): TspSpan[] {
+/** A note's rank in the native callout: its severity, `note` when it has none. */
+type AdvisorRank = AdvisorSeverity | "note";
+
+/** Ranks worst first: the callout wears the worst rank among its notes. */
+const RANKS: readonly AdvisorRank[] = ["blocker", "concern", "nit", "note"];
+
+/** Each rank's native look, GitHub-alert style: card/icon tone, Tern icon name, label and its span style. */
+const RANK_LOOK: Record<AdvisorRank, { tone: TspTone; icon: string; label: string; style: string }> = {
+	blocker: { tone: "error", icon: "octagon-alert", label: "Blocker", style: "error strong" },
+	concern: { tone: "warning", icon: "warn", label: "Concern", style: "warning strong" },
+	nit: { tone: "neutral", icon: "lightbulb", label: "Nit", style: "strong" },
+	note: { tone: "neutral", icon: "info", label: "Note", style: "strong" },
+};
+
+function rankOf(entry: AdvisorNote): AdvisorRank {
+	return entry.severity ?? "note";
+}
+
+/** The callout's title: one note's rank (`Concern`), else a tally worst first (`1 blocker · 2 concerns`). */
+function tallySpans(notes: readonly AdvisorNote[]): TspSpan[] {
+	if (notes.length === 1) {
+		const { label, style } = RANK_LOOK[rankOf(notes[0]!)];
+		return [span(label, style)];
+	}
 	const spans: TspSpan[] = [];
-	if (entry.severity)
-		spans.push(span(entry.severity.toUpperCase(), `${severityColor(entry.severity)} strong`), span(" "));
-	if (entry.advisor && entry.advisor !== "default") spans.push(span(`[${entry.advisor}] `, "dim"));
-	spans.push(span(plainText(entry.note), "customMessageText"));
+	for (const rank of RANKS) {
+		const count = notes.filter(entry => rankOf(entry) === rank).length;
+		if (count === 0) continue;
+		if (spans.length > 0) spans.push(span(" · ", "dim"));
+		spans.push(span(`${count} ${rank}${count === 1 ? "" : "s"}`, RANK_LOOK[rank].style));
+	}
 	return spans;
+}
+
+/** Native spans for one note: its advisor when the callout mixes several, then the text. */
+function noteSpans(entry: AdvisorNote, attribute: boolean): TspSpan[] {
+	const who = attribute ? sourceOf(entry) : undefined;
+	const body = span(plainText(entry.note));
+	return who ? [span(`${who} · `, "dim"), body] : [body];
 }
 
 /** The advisor card: shared by the controlled expansion getter and native toggles. */
@@ -168,6 +203,9 @@ export interface AdvisorMessageCard extends Component {
  * output (whose `thinkingText` color equals `toolOutput` in most themes):
  * a bold `customMessageLabel` header tag (skill-card convention), a heavy
  * rail tinted per-note severity, and the note body on the default text color.
+ * Natively it is a callout tinted by its worst note: that severity's icon and
+ * the tally head it, the advisor's name ends the head, and with several notes
+ * each leads with its own severity icon.
  *
  * `getExpanded` owns expansion; a native toggle overrides it for this card
  * until the next transcript-wide change.
@@ -193,24 +231,40 @@ export function createAdvisorMessageCard(
 	};
 	const nativeMemo = new Memo();
 	const describeCard = (isExpanded: boolean): NativeNode => {
-		const head: TspSpan[] = [
-			span(`${uiTheme.status.info} Advisor`, "customMessageLabel strong"),
-			span(` ${notes.length} ${notes.length === 1 ? "note" : "notes"}`, "dim"),
-		];
-		if (blockers > 0) head.push(span(`${uiTheme.sep.dot}${blockers} blocker${blockers === 1 ? "" : "s"}`, "error"));
-		const body = notes.map((entry, index) =>
-			text(advisorNoteSpans(entry), { wrap: "word", role: "omp.advisor.note", key: `n${index}` }),
+		const look = RANK_LOOK[RANKS.find(rank => notes.some(entry => rankOf(entry) === rank)) ?? "note"];
+		const sources = new Set(notes.map(sourceOf));
+		const [sole] = sources;
+		const head = node(
+			"row",
+			{ gap: "sm", align: "center", role: "omp.advisor.head" },
+			[
+				node("icon", { name: look.icon, tone: look.tone }),
+				text(tallySpans(notes), { grow: 1 }),
+				text([span(sources.size === 1 && sole ? sole : "Advisor", "dim")], { role: "omp.advisor.source" }),
+			],
+			"head",
 		);
+		const attribute = sources.size > 1;
+		const body = notes.map((entry, index) => {
+			const spans = noteSpans(entry, attribute);
+			if (notes.length === 1) return text(spans, { wrap: "word", role: "omp.advisor.note", key: `n${index}` });
+			const { tone, icon, label } = RANK_LOOK[rankOf(entry)];
+			return node(
+				"row",
+				{ gap: "sm", align: "start", role: "omp.advisor.note", tone },
+				[node("icon", { name: icon, tone, aria: label }), text(spans, { wrap: "word", grow: 1, shrink: 1 })],
+				`n${index}`,
+			);
+		});
 		return card(
 			{
 				role: "omp.advisor",
-				tone: blockers > 0 ? "error" : "info",
-				head,
+				tone: look.tone,
 				collapsible: notes.length > COLLAPSED_NOTES,
 				collapsed: notes.length > COLLAPSED_NOTES ? !isExpanded : undefined,
 				preview: notes.length > COLLAPSED_NOTES ? "auto" : undefined,
 			},
-			body,
+			[head, ...body],
 		);
 	};
 
@@ -221,6 +275,7 @@ export function createAdvisorMessageCard(
 		body: () => new AdvisorNotes(notes, 0, uiTheme),
 		expanded: getExpanded(),
 		paddingX: 1,
+		maxCollapsedRows: chatTranscriptDisplayPreferences.advisorCollapsedLines || undefined,
 	});
 	// The tool-output toggle owns expansion state; synchronize the controlled
 	// disclosure from the callback on every render.
@@ -231,7 +286,7 @@ export function createAdvisorMessageCard(
 		},
 		describe(): NativeNode {
 			const isExpanded = expanded();
-			return nativeMemo.get([isExpanded, getThemeEpoch()], () => describeCard(isExpanded));
+			return nativeMemo.get([isExpanded], () => describeCard(isExpanded));
 		},
 		setExpanded(value: boolean): void {
 			lastGlobal = value;

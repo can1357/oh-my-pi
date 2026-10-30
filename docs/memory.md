@@ -2,19 +2,19 @@
 
 omp supports five memory modes. Memory is disabled by default; select one backend via `/settings` or `config.yml`:
 
-| `memory.backend` | Storage and behavior                                                   | Guide                                                   |
-| ---------------- | ---------------------------------------------------------------------- | ------------------------------------------------------- |
-| `off`            | No memory backend                                                      | —                                                       |
-| `local`          | Project-scoped summaries and lessons generated from persisted sessions | This page                                               |
-| `hindsight`      | Remote, bank-scoped Hindsight memory                                   | [Hindsight](#hindsight-remote-backend)                  |
-| `mnemopi`        | Local Mnemopi SQLite memory                                            | [Mnemopi memory backend](./mnemosyne-memory-backend.md) |
-| `sharpshooter`   | Friction-gated project decision files (architecture/product/style), consolidated in the background | —                           |
+| `memory.backend` | Storage and behavior                                                                               | Guide                                                   |
+| ---------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| `off`            | No memory backend                                                                                  | —                                                       |
+| `local`          | Project-scoped summaries and lessons generated from persisted sessions                             | This page                                               |
+| `hindsight`      | Remote, bank-scoped Hindsight memory                                                               | [Hindsight](#hindsight-remote-backend)                  |
+| `mnemopi`        | Local Mnemopi SQLite memory                                                                        | [Mnemopi memory backend](./mnemosyne-memory-backend.md) |
+| `sharpshooter`   | Friction-gated project decision files (architecture/product/style), consolidated in the background | [Sharpshooter](#sharpshooter-backend)                   |
 
 Enable the local summary pipeline:
 
 ```yaml
 memory:
-  backend: local
+   backend: local
 ```
 
 ## Usage
@@ -33,12 +33,12 @@ If startup consolidation finishes after the first prompt build, the active sessi
 
 The agent can read memory files directly using `memory://` URLs with the `read` tool:
 
-| URL                                    | Content                              |
-| -------------------------------------- | ------------------------------------ |
-| `memory://root`                        | Compact summary injected at startup  |
-| `memory://root/MEMORY.md`              | Full long-term memory document       |
-| `memory://root/learned.md`             | Lessons captured by the `learn` tool |
-| `memory://root/skills/<name>/SKILL.md` | A generated skill playbook           |
+| URL                                    | Content                                                                                                                                  |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `memory://root`                        | Compact summary injected at startup                                                                                                      |
+| `memory://root/MEMORY.md`              | Full long-term memory document                                                                                                           |
+| `memory://root/learned.md`             | Lessons captured by the `learn` tool                                                                                                     |
+| `memory://root/skills/<name>/SKILL.md` | A generated skill playbook                                                                                                               |
 | `memory://<memory-id>`                 | Full Mnemopi memory row (working or episodic) with a YAML frontmatter metadata header; only available when `memory.backend` is `mnemopi` |
 
 The `memory://<memory-id>` form returns the full stored row rather than the clipped recall preview (recall content that exceeds the preview cap ends with a trailing `…`); agents are instructed to read it before any `memory_edit update`.
@@ -47,15 +47,15 @@ The `memory://root[/…]` rows are file-backed and only exist with `memory.backe
 
 ### `/memory` slash command
 
-| Subcommand            | Effect                                                    |
-| --------------------- | --------------------------------------------------------- |
-| `view`                | Show the current backend injection payload                |
-| `stats`               | Show backend-specific memory statistics, when supported   |
-| `diagnose`            | Show backend-specific diagnostics, when supported         |
-| `queue`               | Show pending memory deltas awaiting consolidation         |
-| `sync`                | Run memory consolidation now                              |
-| `clear` / `reset`     | Delete active backend memory data/artifacts               |
-| `enqueue` / `rebuild` | Force consolidation/retention work for the active backend |
+| Subcommand            | Effect                                                                                                                   |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `view`                | Show the current backend injection payload                                                                               |
+| `stats`               | Show backend-specific memory statistics, when supported                                                                  |
+| `diagnose`            | Show backend-specific diagnostics, when supported                                                                        |
+| `queue`               | Show pending memory deltas awaiting consolidation                                                                        |
+| `sync`                | Run memory consolidation now                                                                                             |
+| `clear` / `reset`     | Delete active backend memory data/artifacts                                                                              |
+| `enqueue` / `rebuild` | Force consolidation/retention work for the active backend                                                                |
 | `mm …`                | Hindsight mental-model maintenance (`list`/`show`/`refresh`/`history`/`seed`/`delete`/`reload`); unsupported in ACP mode |
 
 ### Capturing lessons
@@ -64,7 +64,7 @@ Enable `autolearn.enabled` to make the `learn` tool available:
 
 ```yaml
 autolearn:
-  enabled: true
+   enabled: true
 ```
 
 With the local backend active, `learn` saves explicit durable lessons to the project's `learned.md`. Lessons are newest-first, deduplicated, secret-redacted, capped at 100 entries, and injected starting with the next session; a `learn` call does not mutate the active session's prompt-cache prefix. Each lesson's content is capped at 2,000 characters and optional context at 400 characters. Structured memory search, `recall`, `retain`, `reflect`, and `memory_edit` are not available for the local backend.
@@ -137,10 +137,10 @@ Hindsight requires a reachable [Hindsight](https://hindsight.vectorize.io/) serv
 
 ```yaml
 memory:
-  backend: hindsight
+   backend: hindsight
 hindsight:
-  apiUrl: http://localhost:8888
-  apiToken: ${HINDSIGHT_API_TOKEN}
+   apiUrl: http://localhost:8888
+   apiToken: ${HINDSIGHT_API_TOKEN}
 ```
 
 `HINDSIGHT_*` environment variables override `hindsight.*` settings, which override built-in defaults. See the [complete Hindsight environment-variable table](./environment-variables.md#hindsight-memory-backend) for all 18 supported overrides, accepted values, parsing rules, precedence, and defaults.
@@ -154,6 +154,30 @@ The primary session recalls on its first model turn (`hindsight.autoRecall: true
 Recall is injected as background context, not instructions, and recalled memory is also available as extra context during compaction. The first-turn recall is stored in the session file, so resuming, switching to, or forking the session sends it unchanged instead of recalling again; a context reset, a different bank or tag filter, or a branch that edits the first prompt recalls afresh. Hindsight memories cannot be looked up by id, so changes to them since the recall are not reported. Mental models are still reloaded when a new process starts. Selecting Hindsight exposes `recall`, `retain`, and `reflect`; `memory_edit` is not available because upstream Hindsight memories are not edited through this backend.
 
 `/memory view`, `/memory stats`, `/memory diagnose`, and `/memory enqueue` operate through the active Hindsight state. `/memory clear` first drains pending retains, then clears only the local session state and recall cache. It **does not delete the server-side bank**; delete that bank with the Hindsight UI or API.
+
+## Sharpshooter backend
+
+Sharpshooter keeps three short project decision files — `architecture.md`, `product.md`, and `style.md` — and injects them into the system prompt. It needs no server; files live under `<agentDir>/memories/sharpshooter/<bank>/`, where the bank is derived from the working directory, so each project has its own decisions.
+
+```yaml
+memory:
+   backend: sharpshooter
+sharpshooter:
+   minPromptLength: 4
+   intervalMinutes: 5
+```
+
+**Extraction:** each user prompt in the main session (subagents are skipped) goes to the extraction model, which records durable decisions the user made — architecture, product, and style decisions, constraints, rejected approaches, and corrections — as deltas in a per-session queue. Slash commands and prompts shorter than `sharpshooter.minPromptLength` characters are not sent; a session runs one extraction at a time, and a prompt that arrives while one is running is not extracted. Short replies such as "opt 2" are resolved against the preceding assistant message, but at the default of 16 characters they are too short to be sent — lower `sharpshooter.minPromptLength` to capture them.
+
+**Consolidation:** a scheduler checks every minute and, once `sharpshooter.intervalMinutes` have passed since the last run, applies the queued deltas to the three files in one model pass and removes them from the queue. `/memory enqueue` consolidates immediately; `/memory queue` lists pending deltas and `/memory clear` deletes the project's files and queue.
+
+| Setting                            | Default | Description                                                                                                                                                                                                                                                                        |
+| ---------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `memory.backend`                   | `off`   | Set to `sharpshooter` to enable this backend                                                                                                                                                                                                                                       |
+| `sharpshooter.model`               | unset   | Model selector for extraction and consolidation; unset uses the `smol` role                                                                                                                                                                                                        |
+| `sharpshooter.minPromptLength`     | `16`    | Prompts shorter than this many characters are not sent for extraction; values below `2` act as `2`. Characters are counted as displayed (one CJK character or emoji is one), the same in every language, so Chinese users may lower it to capture short replies such as "用方案二" |
+| `sharpshooter.intervalMinutes`     | `5`     | Minimum minutes between consolidation runs                                                                                                                                                                                                                                         |
+| `sharpshooter.injectionTokenLimit` | `15000` | Approximate token cap for the decision files injected into the system prompt                                                                                                                                                                                                       |
 
 ## Key files
 

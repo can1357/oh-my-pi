@@ -93,7 +93,7 @@ export class AttachmentChipsBand implements Component {
 					nativeImageNode(Buffer.from(image.data, "base64"), image.mimeType);
 				images.set(image, native);
 				content = node("image", {
-					...native.p,
+					...(native.k === "image" ? native.p : undefined),
 					alt: title,
 					w: dims?.width,
 					h: dims?.height,

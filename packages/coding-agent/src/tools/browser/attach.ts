@@ -7,6 +7,7 @@ import type { Socket } from "bun";
 import type { Browser, Page, Target } from "puppeteer-core";
 import { throwIfAborted } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { isPuppeteerTimeout } from "./launch";
 
 const ATTACH_TARGET_SKIP_PATTERN =
 	/request[\s_-]?handler|devtools|background[\s_-]?(?:page|host)|service[\s_-]?worker/i;
@@ -432,10 +433,6 @@ export async function findReusableCdp(
 	return null;
 }
 
-export function shouldPreserveConnectedBrowserFocus(target?: string): boolean {
-	return !target;
-}
-
 export interface PickTargetOptions {
 	matcher?: string;
 	preferVisible?: boolean;
@@ -598,14 +595,18 @@ export async function listRelayTargets(relayJson: string, signal?: AbortSignal):
 	return relayTargets(entries);
 }
 
-function relayEntryMatches(entry: RelayJsonEntry, needle: string): boolean {
-	return entry.url.toLowerCase().includes(needle) || entry.title.toLowerCase().includes(needle);
+function relayEntryMatches(entry: RelayJsonEntry, matcher: string): boolean {
+	const needle = matcher.toLowerCase();
+	return (
+		entry.id === matcher || entry.url.toLowerCase().includes(needle) || entry.title.toLowerCase().includes(needle)
+	);
 }
 
 function selectRelayEntry(entries: RelayJsonEntry[], options: PickTargetOptions): RelayJsonEntry | null {
-	const needle = options.matcher?.toLowerCase();
-	if (needle) {
-		const hits = entries.filter(e => relayEntryMatches(e, needle));
+	const matcher = options.matcher;
+	if (matcher) {
+		const exact = entries.find(e => e.id === matcher);
+		const hits = exact ? [exact] : entries.filter(e => relayEntryMatches(e, matcher));
 		const live = hits.filter(e => e.discarded !== "true");
 		if (live.length > 0) return live[0]!;
 		if (hits.length > 0) {
@@ -613,9 +614,9 @@ function selectRelayEntry(entries: RelayJsonEntry[], options: PickTargetOptions)
 				`The tab matching ${JSON.stringify(options.matcher)} was discarded by Chrome. Click it to reload, then retry.`,
 			);
 		}
-		const summary = entries.map(e => `- ${e.title || "(untitled)"}  ${e.url}`).join("\n");
+		const summary = entries.map(e => `- ${e.id}  ${e.title || "(untitled)"}  ${e.url}`).join("\n");
 		throw new ToolError(
-			`No page target matched ${JSON.stringify(options.matcher)} after waiting ${RELAY_MATCH_SETTLE_MS / 1000}s for a newly opened tab. Pass a target from these URLs or titles (browser.targets() lists them before adopting), or omit it to use the active tab. Available pages:\n${summary}`,
+			`No page target matched ${JSON.stringify(options.matcher)} after waiting ${RELAY_MATCH_SETTLE_MS / 1000}s for a newly opened tab. Pass a target id, URL or title substring (browser.targets() lists URLs before adopting), or omit it to use the active tab. Available pages:\n${summary}`,
 		);
 	}
 	const usable = entries.filter(isAdoptableRelayEntry);
@@ -627,13 +628,13 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 	throwIfAborted(options.signal);
 	if (options.relayJson) {
 		let entries = await fetchRelayEntries(options.relayJson, options.signal);
-		const needle = options.matcher?.toLowerCase();
+		const matcher = options.matcher;
 		const settleDeadline = Date.now() + RELAY_MATCH_SETTLE_MS;
 		// Without page metadata, target enumeration below decides at once, as before.
 		while (
-			needle &&
+			matcher &&
 			entries?.some(e => e.type === "page") &&
-			!entries.some(e => e.type === "page" && relayEntryMatches(e, needle)) &&
+			!entries.some(e => e.type === "page" && relayEntryMatches(e, matcher)) &&
 			Date.now() < settleDeadline
 		) {
 			await abortable(options.signal, () => Bun.sleep(Math.min(RELAY_MATCH_POLL_MS, settleDeadline - Date.now())));
@@ -690,7 +691,7 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 						);
 					} catch (error) {
 						throwIfAborted(options.signal);
-						if (error instanceof Error && error.name === "TimeoutError") {
+						if (isPuppeteerTimeout(error)) {
 							throw new ToolError(
 								"Selected tab did not become available before omp could attach; retry, or reopen it if it closed",
 							);
@@ -722,7 +723,7 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 			);
 		} catch (error) {
 			throwIfAborted(options.signal);
-			if (error instanceof Error && error.name === "TimeoutError") {
+			if (isPuppeteerTimeout(error)) {
 				throw new ToolError("No page targets available on the attached browser");
 			}
 			throw error;
@@ -761,10 +762,11 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 async function enrichPages(
 	pages: Page[],
 	signal?: AbortSignal,
-): Promise<Array<{ page: Page; url: string; title: string }>> {
+): Promise<Array<{ page: Page; id: string; url: string; title: string }>> {
 	return await Promise.all(
 		pages.map(async page => {
 			await waitForMainFrame(page, FRAME_READY_TIMEOUT_MS, signal);
+			const id = (page.target() as Target & { _targetId?: string })._targetId ?? "";
 			let url = "";
 			try {
 				url = page.url();
@@ -772,7 +774,7 @@ async function enrichPages(
 				url = "";
 			}
 			const title = ((await abortable(signal, () => page.title().catch(() => ""))) ?? "").trim();
-			return { page, url, title };
+			return { page, id, url, title };
 		}),
 	);
 }
@@ -796,10 +798,12 @@ async function firstVisiblePage(pages: Page[], signal?: AbortSignal): Promise<Pa
 async function pickPageFromList(pages: Page[], options: PickTargetOptions): Promise<Page> {
 	const enriched = await enrichPages(pages, options.signal);
 	if (options.matcher) {
+		const exact = enriched.find(p => p.id === options.matcher);
+		if (exact) return exact.page;
 		const needle = options.matcher.toLowerCase();
 		const hit = enriched.find(p => p.url.toLowerCase().includes(needle) || p.title.toLowerCase().includes(needle));
 		if (hit) return hit.page;
-		const summary = enriched.map(p => `- ${p.title || "(untitled)"}  ${p.url}`).join("\n");
+		const summary = enriched.map(p => `- ${p.id}  ${p.title || "(untitled)"}  ${p.url}`).join("\n");
 		throw new ToolError(`No page target matched ${JSON.stringify(options.matcher)}. Available pages:\n${summary}`);
 	}
 	const usable = enriched.filter(

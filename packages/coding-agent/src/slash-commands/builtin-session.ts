@@ -14,9 +14,12 @@ import { formatTokenCount, refreshStatusLine } from "./builtin-modes";
 import { buildContextReportText } from "./helpers/context-report";
 import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
 import { truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
+import { buildJobTree, jobTreeGuide, jobTreeIndent } from "@oh-my-pi/pi-tui/overlays/job-tree";
+import { theme } from "@oh-my-pi/pi-tui/theme";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { handleMcpAcp } from "./helpers/mcp";
 import { markdownFenceFor } from "../utils/markdown-fence";
+import { openLocalFileInEditor } from "../modes/local-file-editor";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
 import {
 	describeRedeemOutcome,
@@ -250,7 +253,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			{ name: "delete", description: "Delete current session and return to selector" },
 			{
 				name: "pin",
-				description: "Pin the current provider to a stored OAuth account",
+				description: "Pin a stored OAuth account to the current provider for this session",
 				usage: "[account]",
 			},
 		],
@@ -341,38 +344,38 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			}
 			if (rest || (verb && verb !== "full")) return usage("Usage: /jobs [full|kill <id>|kill all]", runtime);
 			const full = verb === "full";
-			const snapshot = runtime.session.getAsyncJobSnapshot({ recentLimit: 5 });
-			if (!snapshot || (snapshot.running.length === 0 && snapshot.recent.length === 0)) {
+			const tree = runtime.session.getAsyncJobTree();
+			if (!tree || (tree.running.length === 0 && tree.recent.length === 0)) {
 				await runtime.output(
 					"No background jobs running. (Background jobs run async tools — e.g. long-running bash, debug, or task subagents that would otherwise tie up a turn. They appear here while alive and briefly after (until their result is delivered; at most ~5 minutes).)",
 				);
 				return commandConsumed();
 			}
+			// One fenced block keeps the tree rails aligned; the fence outgrows any run inside a command.
 			const now = Date.now();
-			const describe = (job: { label: string; command?: string }): string => {
-				if (!full) return `    ${job.label}`;
-				const text = sanitizeText(job.command ?? job.label);
-				const fence = markdownFenceFor(text);
-				return `${fence}\n${text}\n${fence}`;
-			};
-			const lines: string[] = ["Background Jobs", `Running: ${snapshot.running.length}`];
-			if (snapshot.running.length > 0) {
-				lines.push("", "Running Jobs");
-				for (const job of snapshot.running) {
-					lines.push(`  [${job.id}] ${job.type} (${job.status}) — ${formatCoarseDuration(now - job.startTime)}`);
-					lines.push(describe(job));
+			const rows: string[] = [];
+			for (const row of buildJobTree([...tree.running, ...tree.recent], tree.agents, tree.rootId)) {
+				const guide = jobTreeGuide(row, theme);
+				if (row.kind === "agent") {
+					rows.push(`${guide}${row.agent.id}`);
+					continue;
 				}
+				const { job } = row;
+				// A spawned subagent's task job takes the agent's id as its id and label: name it once.
+				const agent = row.agent && row.agent.id !== job.id ? ` ${row.agent.id}` : "";
+				rows.push(
+					`${guide}[${job.id}] ${job.type} (${job.status}) — ${formatCoarseDuration((job.endTime ?? now) - job.startTime)}${agent}`,
+				);
+				const text = sanitizeText(full ? (job.command ?? job.label) : job.label);
+				if (text === job.id) continue;
+				const indent = jobTreeIndent(row, theme);
+				for (const line of full ? text.split("\n") : [text]) rows.push(`${indent}${line}`);
 			}
-			if (snapshot.recent.length > 0) {
-				lines.push("", "Recent Jobs");
-				for (const job of snapshot.recent) {
-					lines.push(
-						`  [${job.id}] ${job.type} (${job.status}) — ${formatCoarseDuration((job.endTime ?? now) - job.startTime)}`,
-					);
-					lines.push(describe(job));
-				}
-			}
-			await runtime.output(lines.join("\n"));
+			const body = rows.join("\n");
+			const fence = markdownFenceFor(body);
+			await runtime.output(
+				["Background Jobs", `Running: ${tree.running.length}`, "", `${fence}text`, body, fence].join("\n"),
+			);
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
@@ -450,6 +453,9 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				await runtime.output(result.message);
 			} catch (error) {
 				await runtime.output(`Stats dashboard failed: ${errorMessage(error)}`);
+				// Mark the failure like `usage()` does, for hosts that report a
+				// failed builtin (print mode does not dispatch `/stats`).
+				return commandConsumed({ failed: true });
 			}
 			return commandConsumed();
 		},
@@ -539,7 +545,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "context",
 		icon: "context",
-		description: "Show estimated context usage breakdown",
+		description: "Browse context usage and detailed content",
 		acpDescription: "Show context usage",
 		getTuiAutocompleteDescription: runtime => {
 			const usage = runtime.ctx.session.getContextUsage();
@@ -586,9 +592,21 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "local",
+		icon: "pencil",
+		description: "Open a session local:// file in $EDITOR (picker when no name given)",
+		inlineHint: "[name]",
+		allowArgs: true,
+		handleTui: async (command, runtime) => {
+			clearSubmittedText(runtime);
+			await openLocalFileInEditor(runtime.ctx, command.args);
+		},
+	},
+	{
 		name: "hub",
+		aliases: ["subagents"],
 		icon: "agents",
-		description: "Open the live Agent Hub",
+		description: "Open the live Agent Hub (subagents, including finished ones)",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showAgentHub({ initialSection: "activity" });
 			clearSubmittedText(runtime);

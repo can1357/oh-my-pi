@@ -10,7 +10,7 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { getModelPricingStatus, modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { getEffectiveTokenCost, getModelPricingStatus, modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { modelKind, type ModelKind, type ModelPricingStatus } from "@oh-my-pi/pi-catalog/types";
 import type { Component } from "../tui";
 import { FuzzyCorpus, fuzzyRank } from "../fuzzy";
@@ -42,6 +42,7 @@ import type {
 	TspPickerGroup,
 	TspPickerItem,
 	TspPickerMark,
+	TspPickerProps,
 	TspSpan,
 	TspText,
 } from "@oh-my-pi/pi-wire";
@@ -63,6 +64,7 @@ export type ModelRole =
 	| "memory"
 	| "task"
 	| "advisor"
+	| "widget"
 	| "image"
 	| "web"
 	| "speech"
@@ -79,6 +81,7 @@ export const MODEL_ROLE_IDS: ModelRole[] = [
 	"memory",
 	"task",
 	"advisor",
+	"widget",
 	"image",
 	"web",
 	"speech",
@@ -96,6 +99,7 @@ export const CHAT_MODEL_ROLE_IDS: ModelRole[] = [
 	"memory",
 	"task",
 	"advisor",
+	"widget",
 ];
 export const KIND_ROLE_IDS: ModelRole[] = ["image", "web", "speech", "dictation", "judge"];
 
@@ -742,7 +746,7 @@ function declaredPricingStatus(model: Model): Exclude<ModelPricingStatus, "fixed
 function isFreeModel(model: Model): boolean {
 	const declared = declaredPricingStatus(model);
 	if (declared !== undefined) return declared === "free";
-	const cost = model.cost;
+	const cost = model.cost ? getEffectiveTokenCost(model.cost) : undefined;
 	const credits = model.factoryDroidCredits;
 	return (!cost || (cost.input === 0 && cost.output === 0)) && (credits === undefined || credits === 0);
 }
@@ -766,7 +770,8 @@ function withCreditBadge(model: Model, price: string): string {
 	const credits = model.factoryDroidCredits;
 	if (credits === undefined) return price;
 	const badge = `${formatCostLeg(credits)}×`;
-	return model.cost.input !== 0 || model.cost.output !== 0 ? `${price} ${badge}` : badge;
+	const cost = getEffectiveTokenCost(model.cost);
+	return cost.input !== 0 || cost.output !== 0 ? `${price} ${badge}` : badge;
 }
 
 const PRICING_STATUS_LABELS: Record<Exclude<ModelPricingStatus, "fixed">, { short: string; detail: string }> = {
@@ -781,7 +786,8 @@ function formatCostPair(model: Model): string {
 	const declared = declaredPricingStatus(model);
 	if (declared !== undefined) return PRICING_STATUS_LABELS[declared].short;
 	if (isFreeModel(model)) return "free";
-	return withCreditBadge(model, `$${formatCostLeg(model.cost.input)}/${formatCostLeg(model.cost.output)}`);
+	const cost = getEffectiveTokenCost(model.cost);
+	return withCreditBadge(model, `$${formatCostLeg(cost.input)}/${formatCostLeg(cost.output)}`);
 }
 
 /** Detail-pane price fact: `$3/15 per M`, or the declared pricing state in words. */
@@ -803,14 +809,15 @@ function pickerPrice(model: Model): string {
 	const declared = declaredPricingStatus(model);
 	if (declared !== undefined) return PRICING_STATUS_LABELS[declared].short;
 	if (isFreeModel(model)) return "free";
-	return withCreditBadge(model, `$${formatCostLeg(model.cost.input)}·${formatCostLeg(model.cost.output)}`);
+	const cost = getEffectiveTokenCost(model.cost);
+	return withCreditBadge(model, `$${formatCostLeg(cost.input)}·${formatCostLeg(cost.output)}`);
 }
 
 /** `$2 in · $10 out · $0.2 cache` for a model preview. */
 function previewPrice(model: Model): string {
 	const declared = declaredPricingStatus(model);
 	if (declared !== undefined) return PRICING_STATUS_LABELS[declared].detail;
-	const cost = model.cost;
+	const cost = getEffectiveTokenCost(model.cost);
 	const parts = [`$${formatCostLeg(cost.input)} in`, `$${formatCostLeg(cost.output)} out`];
 	if (cost.cacheRead > 0) parts.push(`$${formatCostLeg(cost.cacheRead)} cache`);
 	return withCreditBadge(model, parts.join(" · "));
@@ -911,6 +918,22 @@ export interface ModelPickerCatalogue {
 	readonly itemsAdd?: readonly TspPickerItem[];
 	readonly itemsDel?: readonly string[];
 }
+
+/** The search, fact-column and row props every model `picker` sheet sends ({@link ModelBrowser.pickerRows}). */
+export type ModelPickerRows = Pick<
+	TspPickerProps,
+	| "query"
+	| "cursor"
+	| "columns"
+	| "items"
+	| "itemsAdd"
+	| "itemsDel"
+	| "order"
+	| "hits"
+	| "selected"
+	| "current"
+	| "total"
+>;
 
 /** How {@link ModelBrowser.pickerOrder} heads its rows. */
 export interface ModelPickerGrouping {
@@ -1925,6 +1948,26 @@ export class ModelBrowser implements Component {
 	get pickerSelected(): string | null {
 		const selected = this.getSelected();
 		return selected && !this.#isDisabled(selected) ? selected.selector : null;
+	}
+
+	/**
+	 * A model picker's search field, fact columns and rows: `catalogue` (from
+	 * {@link pickerItems}) in `view` order (from {@link pickerOrder}), the
+	 * selection, and `current` checked. Memoize hosts on its inputs plus
+	 * {@link query}, {@link cursor} and {@link pickerSelected}.
+	 */
+	pickerRows(catalogue: ModelPickerCatalogue, view: ModelPickerOrder, current: string | undefined): ModelPickerRows {
+		return {
+			query: this.query,
+			cursor: this.cursor,
+			columns: MODEL_PICKER_COLUMNS,
+			...catalogue,
+			order: view.order,
+			...(view.hits ? { hits: view.hits } : {}),
+			selected: this.pickerSelected,
+			...(current ? { current: [current] } : {}),
+			total: this.baseCount,
+		};
 	}
 
 	/**

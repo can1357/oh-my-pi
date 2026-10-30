@@ -23,7 +23,7 @@ import {
 } from "../ida";
 import idaDescription from "../prompts/tools/ida.md" with { type: "text" };
 import type { ToolSession } from ".";
-import { type ApprovalDetailsOptions, truncateApprovalDetail, truncateForPrompt } from "./approval";
+import { truncateForPrompt } from "./approval";
 import { saveArtifactText } from "./gh-common";
 import { resolveToCwd } from "./path-utils";
 import { cfgToolsMaxTimeout } from "./settings";
@@ -84,14 +84,14 @@ export class IdaTool implements AgentTool<typeof idaSchema, IdaToolDetails> {
 		if (action === "exec") return "exec";
 		return "write";
 	};
-	readonly formatApprovalDetails = (args: unknown, options?: ApprovalDetailsOptions): string[] => {
+	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const lines = [`Action: ${stringArg(args, "action") ?? "(missing)"}`];
 		const db = stringArg(args, "db");
 		if (db) lines.push(`DB: ${truncateForPrompt(db)}`);
 		const target = stringArg(args, "target");
 		if (target) lines.push(`Target: ${truncateForPrompt(target)}`);
 		const code = stringArg(args, "code");
-		if (code) lines.push(`Code: ${truncateApprovalDetail(code, options)}`);
+		if (code) lines.push(`Code: ${truncateForPrompt(code)}`);
 		return lines;
 	};
 	readonly label = "IDA";

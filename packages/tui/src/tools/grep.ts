@@ -1,7 +1,14 @@
+import * as path from "node:path";
+import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { Component } from "../tui";
 import { Text } from "../components/text";
-import type { NativeToolHead, NativeToolView, RenderResultOptions, ToolRenderer } from "./renderer";
-import { getLanguageFromPath } from "../lang-from-path";
+import type {
+	NativeToolHead,
+	NativeToolView,
+	RenderResultContextOptions,
+	RenderResultOptions,
+	ToolRenderer,
+} from "./renderer";
 import { compact } from "../native/describe";
 import type { NativeChild } from "../native/node";
 import { footnoteText, inlineErrorView, resultText } from "./native-view";
@@ -10,17 +17,16 @@ import type { OutputMeta } from "./output-meta";
 import type { TruncationResult } from "./streaming-output";
 import { toPathList } from "../render/render-utils";
 import {
-	Ellipsis,
 	fileHyperlink,
 	getTreeBranch,
 	getTreeContinuePrefix,
 	renderStatusLine,
 	renderTreeList,
-	truncateToWidth,
 	uriHyperlink,
 } from "../render";
 import {
 	createCachedComponent,
+	fitHeaderedRows,
 	formatCount,
 	formatEmptyMessage,
 	formatErrorMessage,
@@ -88,10 +94,82 @@ const NATIVE_COLLAPSED_FILES = 2;
 
 const SEARCH_CODE_FRAME_LINE_RE = /^\s*\*?(\d+)│/;
 
-function searchScopeMeta(details: GrepToolDetails | undefined): string | undefined {
+function searchScopeMeta(details: GrepToolDetails | undefined, searchPath?: string): string | undefined {
 	if (!details?.scopePath) return undefined;
-	const label = details.searchPath ? fileHyperlink(details.searchPath, details.scopePath) : details.scopePath;
+	const label = searchPath ? fileHyperlink(searchPath, details.scopePath) : details.scopePath;
 	return `in ${label}`;
+}
+
+function isStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every((item: unknown) => typeof item === "string");
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+	if (!isRecord(value)) return false;
+	for (const key in value) {
+		if (typeof value[key] !== "string") return false;
+	}
+	return true;
+}
+
+function samePath(filePath: string): string {
+	return filePath;
+}
+
+/** Keep only path metadata from the original details; display text always comes from sanitized details. */
+function grepLinkTargets(details: GrepToolDetails | undefined, rawDetails: unknown) {
+	if (details === rawDetails) {
+		return {
+			target: samePath,
+			searchPath: details?.searchPath,
+			fileScope: details?.searchPath,
+			displayTargets: details?.displayTargets,
+		};
+	}
+	const raw = typeof rawDetails === "object" && rawDetails !== null ? rawDetails : {};
+	const rawCwd = "cwd" in raw && typeof raw.cwd === "string" ? raw.cwd : undefined;
+	const rawSearchPath = "searchPath" in raw && typeof raw.searchPath === "string" ? raw.searchPath : undefined;
+	const rawFiles = "files" in raw && isStringArray(raw.files) ? raw.files : undefined;
+	const rawDisplayTargets =
+		"displayTargets" in raw && isStringRecord(raw.displayTargets) ? raw.displayTargets : undefined;
+	let displayTargets = details?.displayTargets;
+	if (rawDisplayTargets) {
+		displayTargets = {};
+		for (const label in rawDisplayTargets) {
+			displayTargets[sanitizeText(label)] = rawDisplayTargets[label]!;
+		}
+	}
+
+	const pathTargets = new Map<string, string>();
+	const displayBase = details?.cwd ?? details?.searchPath;
+	const rawBase = rawCwd ?? rawSearchPath ?? displayBase;
+	if (displayBase && rawBase && rawFiles && details?.files) {
+		for (let index = 0; index < Math.min(details.files.length, rawFiles.length); index++) {
+			const displayFile = path.resolve(displayBase, details.files[index]!);
+			const rawFile = path.resolve(rawBase, rawFiles[index]!);
+			pathTargets.set(displayFile, rawFile);
+			// Folded directory headers must retain the original path as well.
+			let displayDir = path.dirname(displayFile);
+			let rawDir = path.dirname(rawFile);
+			while (displayDir !== path.dirname(displayDir) && rawDir !== path.dirname(rawDir)) {
+				pathTargets.set(displayDir, rawDir);
+				displayDir = path.dirname(displayDir);
+				rawDir = path.dirname(rawDir);
+			}
+		}
+	}
+	const target = (displayPath: string): string => {
+		const known = pathTargets.get(displayPath);
+		if (known) return known;
+		if (rawCwd && details?.cwd) return path.resolve(rawCwd, path.relative(details.cwd, displayPath));
+		return displayPath;
+	};
+	return {
+		target,
+		searchPath: rawSearchPath ?? details?.searchPath,
+		fileScope: rawSearchPath ?? details?.searchPath,
+		displayTargets,
+	};
 }
 
 function linkUrlLikeSearchHeader(
@@ -133,6 +211,7 @@ function createSearchLineStyler(
 	fileScope: string | undefined,
 	uiTheme: Theme,
 	displayTargets: Record<string, string> | undefined,
+	target: (displayPath: string) => string,
 ): (index: number) => string {
 	const contexts = classifyGroupedLines(lines, headerBase, fileScope);
 	// `classifyGroupedLines` can't resolve internal URLs (TUI-only), so track the
@@ -167,7 +246,7 @@ function createSearchLineStyler(
 		let styled: string;
 		if (ctx.kind === "dir") {
 			const accent = uiTheme.fg("accent", line);
-			styled = ctx.headerPath ? fileHyperlink(ctx.headerPath, accent) : accent;
+			styled = ctx.headerPath ? fileHyperlink(target(ctx.headerPath), accent) : accent;
 		} else if (ctx.kind === "file") {
 			const raw = urlRaw[index];
 			if (raw !== undefined) {
@@ -175,12 +254,12 @@ function createSearchLineStyler(
 			} else {
 				// Root-level files keep the bright accent; nested file headers are dimmed.
 				const tinted = uiTheme.fg(ctx.depth === 1 ? "accent" : "dim", line);
-				styled = ctx.headerPath ? fileHyperlink(ctx.headerPath, tinted) : tinted;
+				styled = ctx.headerPath ? fileHyperlink(target(ctx.headerPath), tinted) : tinted;
 			}
 		} else {
 			const tinted = uiTheme.fg("toolOutput", line);
 			const lineNumber = parseSearchDisplayLineNumber(line);
-			const filePath = ctx.filePath ?? urlFiles[index];
+			const filePath = ctx.filePath ? target(ctx.filePath) : urlFiles[index];
 			styled = filePath && lineNumber !== undefined ? fileHyperlink(filePath, tinted, { line: lineNumber }) : tinted;
 		}
 		styledLines[index] = styled;
@@ -284,12 +363,12 @@ export const grepToolRenderer = {
 			{ icon: "pending", title: "Grep", titleColor: "toolTitle", description: args.pattern || "?", meta },
 			uiTheme,
 		);
-		return new Text(text, 1, 0);
+		return new Text(text, 0, 0);
 	},
 
 	renderResult(
 		result: { content: Array<{ type: string; text?: string }>; details?: GrepToolDetails; isError?: boolean },
-		options: RenderResultOptions,
+		options: RenderResultContextOptions,
 		uiTheme: Theme,
 		args?: GrepRenderArgs,
 	): Component {
@@ -297,7 +376,7 @@ export const grepToolRenderer = {
 
 		if (result.isError || details?.error) {
 			const errorText = details?.error || result.content?.find(c => c.type === "text")?.text || "Unknown error";
-			return new Text(formatErrorMessage(errorText, uiTheme), 1, 0);
+			return new Text(formatErrorMessage(errorText, uiTheme), 0, 0);
 		}
 
 		const hasDetailedData = details?.matchCount !== undefined || details?.fileCount !== undefined;
@@ -305,7 +384,7 @@ export const grepToolRenderer = {
 		if (!hasDetailedData) {
 			const textContent = result.details?.displayContent ?? result.content?.find(c => c.type === "text")?.text;
 			if (!textContent || textContent === "No matches found") {
-				return new Text(formatEmptyMessage("No matches found", uiTheme), 1, 0);
+				return new Text(formatEmptyMessage("No matches found", uiTheme), 0, 0);
 			}
 			const lines = textContent.split("\n").filter(line => line.trim() !== "");
 			const description = args?.pattern ?? undefined;
@@ -333,11 +412,11 @@ export const grepToolRenderer = {
 						},
 						uiTheme,
 					);
-					return [header, ...listLines].map(l => truncateToWidth(l, width, Ellipsis.Omit));
+					return fitHeaderedRows(header, listLines, width);
 				},
-				{ paddingX: 1 },
 			);
 		}
+		const linkTargets = grepLinkTargets(details, options.renderContext?.rawDetails);
 
 		const matchCount = details?.matchCount ?? 0;
 		const fileCount = details?.fileCount ?? 0;
@@ -353,7 +432,7 @@ export const grepToolRenderer = {
 
 		if (matchCount === 0) {
 			const meta = ["0 matches"];
-			const scopeMeta = searchScopeMeta(details);
+			const scopeMeta = searchScopeMeta(details, linkTargets.searchPath);
 			if (scopeMeta) meta.push(scopeMeta);
 			const header = renderStatusLine(
 				{ icon: "warning", title: "Grep", titleColor: "toolTitle", description: args?.pattern, meta },
@@ -361,12 +440,12 @@ export const grepToolRenderer = {
 			);
 			const lines = [header, formatEmptyMessage("No matches found", uiTheme)];
 			if (missingNote) lines.push(missingNote);
-			return new Text(lines.join("\n"), 1, 0);
+			return new Text(lines.join("\n"), 0, 0);
 		}
 
 		const summaryParts = [formatCount("match", matchCount), formatCount("file", fileCount)];
 		const meta = [...summaryParts];
-		const scopeMeta = searchScopeMeta(details);
+		const scopeMeta = searchScopeMeta(details, linkTargets.searchPath);
 		if (scopeMeta) meta.push(scopeMeta);
 		if (truncated) meta.push(uiTheme.fg("warning", "truncated"));
 		const description = args?.pattern ?? undefined;
@@ -391,9 +470,10 @@ export const grepToolRenderer = {
 		const styleLine = createSearchLineStyler(
 			allLines,
 			details?.cwd ?? details?.searchPath,
-			details?.searchPath,
+			linkTargets.fileScope,
 			uiTheme,
-			details?.displayTargets,
+			linkTargets.displayTargets,
+			linkTargets.target,
 		);
 		const matchGroups = groupLineIndicesByBlank(allLines);
 
@@ -416,9 +496,8 @@ export const grepToolRenderer = {
 					uiTheme,
 					!options.expanded,
 				);
-				return [header, ...matchLines, ...extraLines].map(l => truncateToWidth(l, width, Ellipsis.Omit));
+				return fitHeaderedRows(header, [...matchLines, ...extraLines], width);
 			},
-			{ paddingX: 1 },
 		);
 	},
 	describeCall(args: GrepRenderArgs): NativeToolView {
@@ -474,7 +553,6 @@ export const grepToolRenderer = {
 			inline: true,
 			body: compact<NativeChild>([
 				...describeGroupedOutput(textContent.split("\n"), {
-					lang: getLanguageFromPath,
 					maxFiles: options.expanded ? undefined : NATIVE_COLLAPSED_FILES,
 					file: details?.files?.length === 1 ? details.files[0] : undefined,
 				}),

@@ -107,6 +107,8 @@ function planReviewExtension(
 		handlers,
 		tools: new Map(),
 		assistantThinkingRenderers: [],
+		assistantTextRenderers: [],
+		linkSchemes: [],
 		fileWriteFallbackHandlers: [],
 		fileDeleteFallbackHandlers: [],
 		messageRenderers: new Map(),
@@ -449,6 +451,166 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(prompt.mock.calls.find(isPlanApprovedCall)).toBeDefined();
 	});
 
+	it("executes a remote approval on the extension's selected tier and reports the tiers", async () => {
+		const slow = session.modelRegistry.find("anthropic", "claude-opus-4-5");
+		const def = session.modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		if (!slow || !def) throw new Error("Expected sonnet + opus to exist in registry");
+
+		session.settings.setModelRole("default", "anthropic/claude-sonnet-4-5");
+		session.settings.setModelRole("slow", "anthropic/claude-opus-4-5");
+		session.settings.setModelRole("plan", "anthropic/claude-sonnet-4-5");
+
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nRun this on the slow tier.");
+
+		await mode.handlePlanModeCommand();
+		expect(session.getPlanModeState()?.enabled).toBe(true);
+		expect(session.model?.id).toBe(def.id);
+
+		vi.spyOn(session, "getContextUsage").mockReturnValue(undefined);
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		let answered: boolean | undefined;
+		const recorder = planReviewRecorder("remote", (event, ctx) => {
+			answered = ctx.resolvePlanReview(event.reviewId, "keep", { role: "slow" });
+			const overlay = mode.ui.getFocused() as PlanReviewOverlay;
+			overlay.handleInput("\x1b[C");
+			overlay.handleInput("\x1b[D");
+		});
+		await loadExtensions(recorder.extension);
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+		const resolved = await recorder.resolved;
+
+		const requested = recorder.events.find(
+			(event): event is PlanReviewRequestedEvent => event.type === "plan_review_requested",
+		);
+		expect(answered).toBe(true);
+		expect(requested?.tiers).toEqual([
+			{ role: "default", provider: "anthropic", model: def.id },
+			{ role: "slow", provider: "anthropic", model: slow.id },
+		]);
+		expect(resolved).toMatchObject({ reviewId: requested?.reviewId, choice: "keep", by: "extension" });
+		expect(session.model?.id).toBe(slow.id);
+	});
+
+	it("refuses a remote approval naming no selectable tier and keeps the review open", async () => {
+		session.settings.setModelRole("default", "anthropic/claude-sonnet-4-5");
+		session.settings.setModelRole("slow", "anthropic/claude-opus-4-5");
+
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nDo the thing.");
+
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		vi.spyOn(session, "getContextUsage").mockReturnValue(undefined);
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		const refused: boolean[] = [];
+		let stayedOpen = false;
+		let accepted: boolean | undefined;
+		const recorder = planReviewRecorder("remote", (event, ctx) => {
+			refused.push(
+				ctx.resolvePlanReview(event.reviewId, "execute", { role: "ultra" }),
+				ctx.resolvePlanReview(event.reviewId, "keep", { role: "ultra" }),
+				// A tier only means something for an approval; refine must not silently drop it.
+				ctx.resolvePlanReview(event.reviewId, "refine", { feedback: "tighten it", role: "slow" }),
+			);
+			stayedOpen = mode.ui.hasOverlay();
+			accepted = ctx.resolvePlanReview(event.reviewId, "execute");
+		});
+		await loadExtensions(recorder.extension);
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+		await recorder.resolved;
+
+		expect(refused).toEqual([false, false, false]);
+		expect(stayedOpen).toBe(true);
+		expect(accepted).toBe(true);
+	});
+
+	it("reopens a dismissed review from an extension and answers it", async () => {
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nDo the thing.");
+
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		const requestedEvents: PlanReviewRequestedEvent[] = [];
+		const resolvedEvents: PlanReviewResolvedEvent[] = [];
+		const firstOpened = Promise.withResolvers<PlanReviewRequestedEvent>();
+		const secondOpened = Promise.withResolvers<PlanReviewRequestedEvent>();
+		const secondResolved = Promise.withResolvers<PlanReviewResolvedEvent>();
+		let ctxForLater: ExtensionContext | undefined;
+		const answer = (event: PlanReviewRequestedEvent, ctx: ExtensionContext): void => {
+			requestedEvents.push(event);
+			ctxForLater = ctx;
+			if (requestedEvents.length === 1) firstOpened.resolve(event);
+			else secondOpened.resolve(event);
+		};
+		const observer = planReviewExtension("resolved", event => {
+			if (event.type === "plan_review_resolved") {
+				resolvedEvents.push(event);
+				if (resolvedEvents.length === 2) secondResolved.resolve(event);
+			}
+		});
+		await loadExtensions(
+			planReviewExtension("remote", (event, ctx) => {
+				if (event.type === "plan_review_requested") answer(event, ctx);
+			}),
+			observer,
+		);
+
+		const approval = mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+		const first = await firstOpened.promise;
+
+		expect(mode.ui.hasOverlay()).toBe(true);
+		// Dismiss the review like a pinned error does: the pending plan survives, the overlay does not.
+		mode.showPinnedError("test dismissal");
+		expect(mode.ui.hasOverlay()).toBe(false);
+		expect(ctxForLater?.getPendingPlanReview()).toBeUndefined();
+
+		const opened = await ctxForLater!.openPlanReview();
+		expect(opened).toBe(true);
+		expect(ctxForLater!.getPendingPlanReview()?.reviewId).not.toBe(first.reviewId);
+		expect(ctxForLater!.getPendingPlanReview()).toBeDefined();
+		const second = await secondOpened.promise;
+		expect(second.reviewId).not.toBe(first.reviewId);
+		expect(ctxForLater!.resolvePlanReview(second.reviewId, "execute")).toBe(true);
+		const resolved = await secondResolved.promise;
+		await approval;
+		expect(resolvedEvents[0]).toMatchObject({ reviewId: first.reviewId, choice: undefined, by: "local" });
+		expect(resolved).toMatchObject({ reviewId: second.reviewId, choice: "execute", by: "extension" });
+	});
+
+	it("refuses reopening a blank plan without publishing a review", async () => {
+		const planFilePath = "local://PLAN.md";
+		await Bun.write(
+			resolveLocalUrlToPath(planFilePath, {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			}),
+			"\n  \n",
+		);
+		mode.planModeEnabled = true;
+		const recorder = planReviewRecorder("observer");
+		const runner = await loadExtensions(recorder.extension);
+		expect(await runner.createContext().openPlanReview()).toBe(false);
+		expect(runner.createContext().getPendingPlanReview()).toBeUndefined();
+		expect(recorder.events).toEqual([]);
+	});
+
 	it("sends remote refinement feedback verbatim as the next planning prompt", async () => {
 		const planFilePath = "local://PLAN.md";
 		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
@@ -782,7 +944,11 @@ describe("InteractiveMode plan review rendering", () => {
 		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
 
 		const resolved = events.find((event): event is PlanReviewResolvedEvent => event.type === "plan_review_resolved");
-		expect(events.map(event => event.type)).toEqual(["plan_review_requested", "plan_review_resolved"]);
+		// `mode_changed` also fires here (the test flips plan mode on directly); this asserts review order.
+		expect(events.map(event => event.type).filter(type => type !== "mode_changed")).toEqual([
+			"plan_review_requested",
+			"plan_review_resolved",
+		]);
 		expect(resolved).toMatchObject({ choice: "execute", by: "local" });
 	});
 
@@ -2594,7 +2760,7 @@ describe("InteractiveMode plan review rendering", () => {
 				getSessionId: () => session.sessionManager.getSessionId(),
 			});
 
-		it("forwards the newest local plan file and its heading title to the approval flow", async () => {
+		it("opens the newest local plan rather than a stale draft", async () => {
 			await Bun.write(localPath("local://old-plan.md"), "# Old plan\n\nstale body");
 			await Bun.write(localPath("local://auth-refactor-plan.md"), "# Auth refactor\n\nfresh body");
 			// #listLocalPlanFiles sorts by mtime, newest first — pin mtimes so the
@@ -2606,16 +2772,15 @@ describe("InteractiveMode plan review rendering", () => {
 			// The default points at a file that never exists; the scan must still find
 			// the real plan, and getPlanReferencePath() is empty before any approval.
 			mode.planModePlanFilePath = "local://PLAN.md";
-			const approval = vi.spyOn(mode, "handlePlanApproval").mockResolvedValue();
-
-			await mode.openPlanReview();
-
-			expect(approval).toHaveBeenCalledTimes(1);
-			expect(approval).toHaveBeenCalledWith({
-				planFilePath: "local://auth-refactor-plan.md",
-				title: "Auth-refactor",
-				planExists: true,
-			});
+			const runner = await loadExtensions(planReviewExtension("observer", () => {}));
+			vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+			const ctx = runner.createContext();
+			expect(await ctx.openPlanReview()).toBe(true);
+			const review = ctx.getPendingPlanReview();
+			expect(review?.title).toBe("Auth-refactor");
+			expect(review?.planContent).toContain("fresh body");
+			expect(review?.planContent).not.toContain("stale body");
+			expect(ctx.resolvePlanReview(review!.reviewId, "refine", { feedback: "revise" })).toBe(true);
 		});
 
 		it("warns and does not start approval when plan mode is inactive", async () => {
@@ -2639,6 +2804,61 @@ describe("InteractiveMode plan review rendering", () => {
 
 			expect(approval).not.toHaveBeenCalled();
 			expect(warn).toHaveBeenCalledWith(expect.stringContaining("No plan to review"));
+		});
+
+		it("refuses an extension open while the agent is busy, without aborting or warning", async () => {
+			await Bun.write(localPath("local://auth-plan.md"), "# Auth\n\nbody");
+			mode.planModeEnabled = true;
+			const recorder = planReviewRecorder("observer");
+			const runner = await loadExtensions(recorder.extension);
+			const abort = vi.spyOn(session, "abort");
+			const warn = vi.spyOn(mode, "showWarning");
+			let streaming = true;
+			let compacting = false;
+			Object.defineProperty(session, "isStreaming", { configurable: true, get: () => streaming });
+			Object.defineProperty(session, "isCompacting", { configurable: true, get: () => compacting });
+
+			expect(await runner.createContext().openPlanReview()).toBe(false);
+			streaming = false;
+			compacting = true;
+			expect(await runner.createContext().openPlanReview()).toBe(false);
+
+			expect(abort).not.toHaveBeenCalled();
+			expect(warn).not.toHaveBeenCalled();
+			expect(mode.ui.hasOverlay()).toBe(false);
+			expect(recorder.events).toEqual([]);
+		});
+
+		it("does not mount a review when plan mode exits while the turn is aborted", async () => {
+			await Bun.write(localPath("local://auth-plan.md"), "# Auth\n\nbody");
+			mode.planModeEnabled = true;
+			const recorder = planReviewRecorder("observer");
+			await loadExtensions(recorder.extension);
+			vi.spyOn(session, "abort").mockImplementation(async () => {
+				mode.planModeEnabled = false;
+			});
+
+			expect(await mode.openPlanReview()).toBe(false);
+
+			expect(mode.ui.hasOverlay()).toBe(false);
+			expect(recorder.events).toEqual([]);
+		});
+
+		it("keeps an open review when an extension asks to open one", async () => {
+			await Bun.write(localPath("local://auth-plan.md"), "# Auth\n\nbody");
+			mode.planModeEnabled = true;
+			vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+			const recorder = planReviewRecorder("observer");
+			const runner = await loadExtensions(recorder.extension);
+			const ctx = runner.createContext();
+
+			expect(await mode.openPlanReview()).toBe(true);
+			const first = ctx.getPendingPlanReview();
+			expect(await ctx.openPlanReview()).toBe(true);
+
+			expect(ctx.getPendingPlanReview()?.reviewId).toBe(first?.reviewId);
+			expect(recorder.events.filter(event => event.type === "plan_review_resolved")).toEqual([]);
+			expect(ctx.resolvePlanReview(first!.reviewId, "refine", { feedback: "revise" })).toBe(true);
 		});
 	});
 });

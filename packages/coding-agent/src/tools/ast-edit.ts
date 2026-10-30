@@ -22,13 +22,7 @@ import astEditDescription from "../prompts/tools/ast-edit.md" with { type: "text
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { missingGrammarsNote, rerunWithGrammars } from "../utils/grammars";
 import type { ToolSession } from ".";
-import {
-	type ApprovalDetailsOptions,
-	resolveToolTier,
-	strictestApproval,
-	truncateApprovalDetail,
-	truncateForPrompt,
-} from "./approval";
+import { resolveToolTier, strictestApproval, truncateForPrompt } from "./approval";
 import { parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath, resultSnapshotPath } from "./file-recorder";
 import { formatGroupedFiles } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
@@ -174,14 +168,14 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 		}
 		return strictestApproval(decisions);
 	};
-	readonly formatApprovalDetails = (args: unknown, options?: ApprovalDetailsOptions): string[] => {
+	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<AstEditSchemaInfer>;
 		const lines: string[] = [];
 		const ops = Array.isArray(params.ops) ? params.ops : [];
 		const firstOp = ops[0];
 		if (firstOp) {
-			lines.push(`Pattern: ${truncateApprovalDetail(firstOp.pat, options)}`);
-			lines.push(`Replacement: ${truncateApprovalDetail(firstOp.out, options)}`);
+			lines.push(`Pattern: ${truncateForPrompt(firstOp.pat)}`);
+			lines.push(`Replacement: ${truncateForPrompt(firstOp.out)}`);
 			if (ops.length > 1) {
 				lines.push(`+${ops.length - 1} more op${ops.length === 2 ? "" : "s"}`);
 			}

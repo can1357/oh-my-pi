@@ -80,6 +80,8 @@ function getDefaultSessionDirName(cwd: string): {
 	hashedDirName: string;
 	/** Home-relative name a temp-root cwd got while home was checked first; migrated forward. */
 	shadowedHomeDirName?: string;
+	/** Hashed home-scoped name from before temp-root precedence. */
+	shadowedHomeHashedDirName?: string;
 	resolvedCwd: string;
 } {
 	const resolvedCwd = path.resolve(cwd);
@@ -93,12 +95,16 @@ function getDefaultSessionDirName(cwd: string): {
 	const inHome = isRelativeWithin(homeRelative);
 	let encodedDirName: string;
 	let shadowedHomeDirName: string | undefined;
+	let shadowedHomeHashedDirName: string | undefined;
 	let scope: "home" | "tmp" | "abs";
 	// The temp root is checked first: it is the more specific root wherever it
 	// nests inside home (Windows' `%USERPROFILE%\AppData\Local\Temp`).
 	if (isRelativeWithin(tempRelative)) {
 		encodedDirName = encodeRelativeSessionDirName("-tmp", tempRelative);
-		if (inHome) shadowedHomeDirName = encodeRelativeSessionDirName("-", homeRelative);
+		if (inHome) {
+			shadowedHomeDirName = encodeRelativeSessionDirName("-", homeRelative);
+			shadowedHomeHashedDirName = encodeHashedSessionDirName(canonicalCwd, "home");
+		}
 		scope = "tmp";
 	} else if (inHome) {
 		encodedDirName = encodeRelativeSessionDirName("-", homeRelative);
@@ -111,6 +117,7 @@ function getDefaultSessionDirName(cwd: string): {
 		encodedDirName,
 		hashedDirName: encodeHashedSessionDirName(canonicalCwd, scope),
 		shadowedHomeDirName,
+		shadowedHomeHashedDirName,
 		resolvedCwd,
 	};
 }
@@ -291,11 +298,13 @@ export function computeDefaultSessionDir(
 	storage: SessionStorage,
 	sessionsRoot: string = getSessionsDir(),
 ): string {
-	const { encodedDirName, hashedDirName, shadowedHomeDirName, resolvedCwd } = getDefaultSessionDirName(cwd);
+	const { encodedDirName, hashedDirName, shadowedHomeDirName, shadowedHomeHashedDirName, resolvedCwd } =
+		getDefaultSessionDirName(cwd);
 	migrateHomeSessionDirs(sessionsRoot);
 	const sessionDir = path.join(sessionsRoot, encodedDirName);
 	migrateNamedSessionDir(encodeLegacyAbsoluteSessionDirName(resolvedCwd), sessionDir, sessionsRoot);
 	if (shadowedHomeDirName) migrateNamedSessionDir(shadowedHomeDirName, sessionDir, sessionsRoot);
+	if (shadowedHomeHashedDirName) migrateNamedSessionDir(shadowedHomeHashedDirName, sessionDir, sessionsRoot);
 	migrateHashedSessionDir(hashedDirName, sessionDir, sessionsRoot);
 	storage.ensureDirSync(sessionDir);
 	return sessionDir;

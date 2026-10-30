@@ -14,16 +14,20 @@ Wrapper -> host:
   {"type": "started",     "id": ...}
   {"type": "stdout",      "id": ..., "data": str}
   {"type": "stderr",      "id": ..., "data": str}
-  {"type": "display",     "id": ..., "bundle": {<mime>: <value>}}
-  {"type": "result",      "id": ..., "bundle": {<mime>: <value>}}
+  {"type": "view",        "id": ..., "text": str, "view": {"kind": "table"|"json"|"markdown", ...}}
+  {"type": "image",       "id": ..., "image": {"mimeType": str, "data": base64,
+                              "detail"?: str, "url"?: str, "providerFile"?: dict}}
+  {"type": "status",      "id": ..., "event": {"op": str, ...}}
+  {"type": "reply",       "id": ..., "value": <tool envelope>}
   {"type": "error",       "id": ..., "ename": str, "evalue": str, "traceback": [str]}
   {"type": "done",        "id": ..., "status": "ok"|"error",
                               "executionCount": int, "cancelled": bool}
 
 The runner is intentionally self-contained: no third-party imports, no IPython.
-Magics are translated by a small line-scanner before AST parsing; rich display
-falls back through `_repr_*_` methods so pandas/PIL/plotly etc. still render
-when installed.
+Magics are translated by a small line-scanner before AST parsing. `print` and
+the trailing-expression echo write plain text to stdout; for images, data
+frames, Markdown objects and large structures they also emit `image`/`view`
+frames (a `view` pretty-prints text the cell already printed).
 """
 
 from __future__ import annotations
@@ -34,6 +38,7 @@ import base64
 import builtins
 import codecs
 import contextvars
+import functools
 import inspect
 import io
 import itertools
@@ -41,6 +46,7 @@ import json
 import hashlib
 import linecache
 import locale
+import math
 import os
 import re
 import runpy
@@ -1133,11 +1139,11 @@ def cell_magic(
 
 
 def _emit_status(op: str, **data: Any) -> None:
-    bundle = {"application/x-omp-status": {"op": op, **data}}
+    """Emit a structured status event for TUI rendering."""
     rid = _CURRENT_RID.get()
     if rid is None:
         return
-    _emit({"type": "display", "id": rid, "bundle": bundle})
+    _emit({"type": "status", "id": rid, "event": {"op": op, **data}})
 
 
 _SHELL_READ_CHUNK_BYTES = 8192
@@ -1304,24 +1310,134 @@ class _BoundedLineScanner:
 @line_magic("pip")
 def _magic_pip(args: str) -> None:
     argv = shlex.split(args) if args else ["--help"]
-    cmd = [sys.executable, "-m", "pip", *argv]
     # Installs are host work, not cell compute: suspend the eval watchdog (same
     # protocol as bridge waits in bridge-timeout.ts). Caller aborts still apply.
     _emit_status("timeout-pause")
     try:
-        _run_pip(cmd, args)
+        _run_pip(argv, args)
     finally:
         _emit_status("timeout-resume")
 
 
-def _run_pip(cmd: list[str], args: str) -> None:
+def _has_pip() -> bool:
+    import importlib.util
+
+    importlib.invalidate_caches()
+    try:
+        return importlib.util.find_spec("pip") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _child_pids() -> dict[int, list[int]]:
+    """Map each live pid to the pids of its children."""
+    children: dict[int, list[int]] = {}
+    if sys.platform.startswith("linux"):
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/stat", "rb") as stat:
+                    ppid = int(stat.read().rsplit(b")", 1)[1].split()[1])
+            except (OSError, ValueError, IndexError):
+                continue
+            children.setdefault(ppid, []).append(int(entry))
+        return children
+    try:
+        listing = subprocess.run(
+            # /bin/ps first: the kernel's PATH is the user's and may not hold it.
+            ["/bin/ps" if os.path.exists("/bin/ps") else "ps", "-A", "-o", "pid=,ppid="],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return children
+    for line in listing.splitlines():
+        fields = line.split()
+        if len(fields) == 2:
+            children.setdefault(int(fields[1]), []).append(int(fields[0]))
+    return children
+
+
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    # Installers spawn their own children (ensurepip runs pip in one, source
+    # builds run backends and compilers), so killing `proc` alone is not enough.
+    # The tree stays in the kernel's process group so kernel shutdown still
+    # reaches it.
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        proc.kill()
+        proc.wait()
+        return
+    # Stop each process before listing its children, so nothing can spawn
+    # behind the walk; then kill every stopped process.
+    stopped: list[int] = []
+    level = [proc.pid]
+    while level:
+        for pid in level:
+            try:
+                os.kill(pid, signal.SIGSTOP)
+            except ProcessLookupError:
+                continue
+            stopped.append(pid)
+        children = _child_pids()
+        level = [child for pid in level for child in children.get(pid, ())]
+    for pid in stopped:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    proc.wait()
+
+
+def _run_installer(
+    cmd: list[str],
+    on_text: Callable[[str], None] | None = None,
+    env: dict[str, str] | None = None,
+) -> int:
     # stdin=DEVNULL: see _run_shell_body.
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        env=env,
     )
+    try:
+        _stream_process_output(proc, on_text)
+        return proc.wait()
+    except BaseException:
+        # Cancelling the cell interrupts only the kernel: stop the installer too.
+        _kill_process_tree(proc)
+        raise
+
+
+def _bootstrap_pip() -> int:
+    # Environments made by `uv venv` ship without pip. Install it from the
+    # stdlib wheel; where ensurepip is missing or disabled (Debian's system
+    # Python), have uv install it into the kernel's interpreter instead.
+    code = _run_installer([sys.executable, "-m", "ensurepip"])
+    uv = shutil.which("uv")
+    if code == 0 or uv is None:
+        return code
+    return _run_installer(
+        [uv, "pip", "install", "pip"],
+        env={**os.environ, "UV_PYTHON": sys.executable},
+    )
+
+
+def _run_pip(argv: list[str], args: str) -> None:
+    if not _has_pip():
+        code = _bootstrap_pip()
+        if code != 0:
+            _emit_status("pip", args=args, installed=[], exit_code=code)
+            return
     installed_packages: list[str] = []
 
     def scan_pip_line(raw_line: str) -> None:
@@ -1333,9 +1449,8 @@ def _run_pip(cmd: list[str], args: str) -> None:
                 installed_packages.append(pkg.replace("_", "-"))
 
     scanner = _BoundedLineScanner(_PIP_LINE_SCAN_CHARS, scan_pip_line)
-    _stream_process_output(proc, scanner.add)
+    returncode = _run_installer([sys.executable, "-m", "pip", *argv], scanner.add)
     scanner.finish()
-    proc.wait()
     if installed_packages:
         import importlib
 
@@ -1346,7 +1461,7 @@ def _run_pip(cmd: list[str], args: str) -> None:
             if head in prefixes:
                 sys.modules.pop(mod_name, None)
     _emit_status(
-        "pip", args=args, installed=installed_packages, exit_code=proc.returncode
+        "pip", args=args, installed=installed_packages, exit_code=returncode
     )
 
 
@@ -1624,19 +1739,92 @@ def __omp_shell(cmd: str) -> _ShellResult:
 
 
 # ---------------------------------------------------------------------------
-# Display dispatch
+# Rich print: images and views for printed values
 # ---------------------------------------------------------------------------
+#
+# `print` and the trailing-expression echo write plain text to stdout, which is
+# all the model sees. Images additionally go out as `image` frames (model and
+# user); data frames, Markdown objects, large structures and strings holding a
+# JSON object or array go out as `view` frames carrying the exact text they
+# printed, which the host shows in place of that text.
 
 
-_REPR_MIMES = [
-    ("_repr_html_", "text/html"),
-    ("_repr_markdown_", "text/markdown"),
-    ("_repr_svg_", "image/svg+xml"),
-    ("_repr_png_", "image/png"),
-    ("_repr_jpeg_", "image/jpeg"),
-    ("_repr_json_", "application/json"),
-    ("_repr_latex_", "text/latex"),
-]
+_REAL_PRINT = builtins.print
+_PLAIN_TEXT_TYPES = frozenset({str, int, float, complex, bool, bytes, type(None)})
+# Structured values and JSON text get a JSON view only when their text is long or multi-line.
+_JSON_VIEW_MIN_CHARS = 80
+# The host drops views whose JSON exceeds 32 KiB; don't build hopeless ones.
+_JSON_VIEW_MAX_CHARS = 32 * 1024
+_MAX_SAFE_JSON_INTEGER = (1 << 53) - 1
+_JSON_TEXT_START_RE = re.compile(r"\s*[\[{]")
+_ELLIPSIS = "\u2026"
+# Polars' table defaults when its POLARS_FMT_* variables are unset.
+_POLARS_DEFAULT_MAX_ROWS = 10
+_POLARS_DEFAULT_MAX_COLS = 8
+_POLARS_DEFAULT_STR_LEN = 30
+_PANDAS_DIMENSIONS_RE = re.compile(r"\n\n\[\d+ rows x \d+ columns\]\Z")
+
+
+def _flush_stdout_proxy(rid: str) -> None:
+    stream = sys.stdout
+    if isinstance(stream, _StreamProxy):
+        stream.flush_rid(rid)
+
+
+def _emit_view(text: str, view: dict) -> None:
+    """Emit a view of ``text``, which the cell already printed to stdout."""
+    rid = _CURRENT_RID.get()
+    if rid is None:
+        return
+    _flush_stdout_proxy(rid)
+    _emit({"type": "view", "id": rid, "text": text, "view": view})
+
+
+def _emit_image(image: dict) -> None:
+    """Emit an image payload ``{mimeType, data(base64), detail?, url?, providerFile?}``."""
+    rid = _CURRENT_RID.get()
+    if rid is None:
+        return
+    _flush_stdout_proxy(rid)
+    _emit({"type": "image", "id": rid, "image": image})
+
+
+def _image_base64(data: Any) -> str | None:
+    if isinstance(data, (bytes, bytearray, memoryview)):
+        return base64.b64encode(bytes(data)).decode("ascii") if data else None
+    if isinstance(data, str):
+        return data or None
+    return None
+
+
+def _image_payload(value: Any) -> dict | None:
+    """Image payload of a ``{mimeType, data, detail?, url?, providerFile?}`` dict."""
+    if not isinstance(value, dict) or not isinstance(value.get("mimeType"), str):
+        return None
+    data = _image_base64(value.get("data"))
+    if data is None:
+        return None
+    image = {"mimeType": value["mimeType"], "data": data}
+    for key in ("detail", "url", "providerFile"):
+        if key in value:
+            image[key] = value[key]
+    return image
+
+
+def _emit_image_dict(value: Any) -> bool:
+    """Emit an image dict (prelude helper); returns whether it was a valid image."""
+    image = _image_payload(value)
+    if image is None:
+        return False
+    _emit_image(image)
+    return True
+
+
+def _omp_image(value: Any) -> dict | None:
+    """Payload of an omp image dict ``{type: "image", mimeType, data, ...}``."""
+    if isinstance(value, dict) and value.get("type") == "image":
+        return _image_payload(value)
+    return None
 
 
 def _is_matplotlib_figure(value: Any) -> bool:
@@ -1651,111 +1839,436 @@ def _is_matplotlib_figure(value: Any) -> bool:
     )
 
 
-def _matplotlib_figure_png(value: Any) -> str | None:
-    if not _is_matplotlib_figure(value):
-        return None
-
-    savefig = getattr(value, "savefig", None)
-    if not callable(savefig):
-        return None
-
-    try:
-        buf = io.BytesIO()
-        savefig(buf, format="png", bbox_inches="tight")
-    except Exception:
-        return None
-
-    displayed_ids = _CURRENT_DISPLAYED_MATPLOTLIB_FIGURE_IDS.get()
-    if displayed_ids is not None:
-        displayed_ids.add(id(value))
-    return base64.b64encode(buf.getvalue()).decode("ascii")
+def _png_payload(save: Callable[[io.BytesIO], Any]) -> dict:
+    buf = io.BytesIO()
+    save(buf)
+    return {"mimeType": "image/png", "data": base64.b64encode(buf.getvalue()).decode("ascii")}
 
 
-def _coerce_image_bytes(value: Any) -> str:
-    if isinstance(value, (bytes, bytearray)):
-        return base64.b64encode(bytes(value)).decode("ascii")
-    if isinstance(value, str):
-        return value
-    return base64.b64encode(repr(value).encode("utf-8")).decode("ascii")
-
-
-def _mime_bundle(value: Any) -> dict:
-    """Build a Jupyter-style MIME bundle for ``value``.
-
-    Honors ``_repr_mimebundle_`` first, falls back to individual ``_repr_*_``
-    accessors, and always provides ``text/plain``.
-    """
-    # Match JS display({type: "image", ...}) without losing detail or remote
-    # references in a plain PNG/JPEG MIME representation.
-    if (
-        isinstance(value, dict)
-        and value.get("type") == "image"
-        and isinstance(value.get("mimeType"), str)
-        and isinstance(value.get("data"), (str, bytes, bytearray))
-    ):
-        image = dict(value)
-        image["data"] = _coerce_image_bytes(image["data"])
-        return {"application/x-omp-image": image}
-
-    bundle: dict[str, Any] = {}
-    matplotlib_png = _matplotlib_figure_png(value)
-    if matplotlib_png is not None:
-        bundle["image/png"] = matplotlib_png
-
-    mimebundle = getattr(value, "_repr_mimebundle_", None)
-    if callable(mimebundle):
+def _value_image(value: Any) -> dict | None:
+    """Image for a matplotlib figure, PIL image or ``_repr_png_``/``_repr_jpeg_`` object."""
+    if _is_matplotlib_figure(value):
+        image = _png_payload(lambda buf: value.savefig(buf, format="png", bbox_inches="tight"))
+        shown = _CURRENT_DISPLAYED_MATPLOTLIB_FIGURE_IDS.get()
+        if shown is not None:
+            shown.add(id(value))
+        return image
+    pil_image = getattr(sys.modules.get("PIL.Image"), "Image", None)
+    if isinstance(pil_image, type) and isinstance(value, pil_image):
         try:
-            data = mimebundle()
+            return _png_payload(lambda buf: value.save(buf, format="PNG"))
         except Exception:
-            data = None
-        if isinstance(data, tuple):
-            data = data[0]
-        if isinstance(data, dict):
-            bundle.update({str(k): v for k, v in data.items()})
-
-    for attr, mime in _REPR_MIMES:
-        if mime in bundle:
-            continue
+            pass  # e.g. a mode PNG can't store; PIL's own _repr_png_ may still convert
+    for attr, mime in (("_repr_png_", "image/png"), ("_repr_jpeg_", "image/jpeg")):
         repr_fn = getattr(value, attr, None)
         if not callable(repr_fn):
             continue
+        data = repr_fn()
+        if isinstance(data, tuple):
+            data = data[0] if data else None
+        encoded = _image_base64(data)
+        if encoded is not None:
+            return {"mimeType": mime, "data": encoded}
+    return None
+
+
+def _markdown_source(value: Any) -> str | None:
+    repr_fn = getattr(value, "_repr_markdown_", None)
+    if not callable(repr_fn):
+        return None
+    data = repr_fn()
+    if isinstance(data, tuple):
+        data = data[0] if data else None
+    return data if isinstance(data, str) else None
+
+
+def _json_safe(value: Any, active: set[int] | None = None) -> Any:
+    """JSON-safe copy: unsafe integers and non-finite floats become strings,
+    other non-JSON leaves become ``str()``, and cycles are cut."""
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, int):
+        return str(value) if abs(value) > _MAX_SAFE_JSON_INTEGER else int(value)
+    if isinstance(value, float):
+        return float(value) if math.isfinite(value) else str(value)
+    if isinstance(value, (dict, list, tuple)):
+        if active is None:
+            active = set()
+        marker = id(value)
+        if marker in active:
+            return "{...}" if isinstance(value, dict) else "[...]"
+        active.add(marker)
         try:
-            data = repr_fn()
-        except Exception:
-            continue
-        if data is None:
-            continue
-        if mime in ("image/png", "image/jpeg"):
-            bundle[mime] = _coerce_image_bytes(data)
+            if isinstance(value, dict):
+                return {str(key): _json_safe(item, active) for key, item in value.items()}
+            return [_json_safe(item, active) for item in value]
+        finally:
+            active.discard(marker)
+    try:
+        return str(value)
+    except Exception:
+        return f"<unprintable {type(value).__name__}>"
+
+
+def _json_view(value: Any, text: str) -> dict | None:
+    base = next((cls for cls in (dict, list, tuple) if isinstance(value, cls)), None)
+    if base is None:
+        return None
+    # A subclass that customises its text (namedtuple, OrderedDict, ...) gets no
+    # view: the view must show what the text shows.
+    value_type = type(value)
+    if value_type.__repr__ is not base.__repr__ or value_type.__str__ is not base.__str__:
+        return None
+    if not _json_view_sized(text):
+        return None
+    return {"kind": "json", "value": _json_safe(value)}
+
+
+def _json_text_view(value: str, text: str) -> dict | None:
+    """JSON view of a string holding a JSON object or array; ``text`` is what it printed as."""
+    if not _json_view_sized(text) or not _JSON_TEXT_START_RE.match(value):
+        return None
+    return {"kind": "json", "value": _json_safe(json.loads(value))}
+
+
+def _json_view_sized(text: str) -> bool:
+    return (len(text) > _JSON_VIEW_MIN_CHARS or "\n" in text) and len(text) <= _JSON_VIEW_MAX_CHARS
+
+
+def _module_instance(value: Any, module: Any, name: str) -> bool:
+    cls = getattr(module, name, None)
+    return isinstance(cls, type) and isinstance(value, cls)
+
+
+def _table_view(
+    heads: list[str],
+    numeric: list[bool],
+    columns: list[list[str]],
+    row_split: int | None,
+    col_split: int | None,
+) -> dict | None:
+    """Assemble a table view from column-major cells, eliding at the splits."""
+    if not columns:
+        return None
+    if col_split is not None:
+        heads.insert(col_split, _ELLIPSIS)
+        numeric.insert(col_split, False)
+        columns.insert(col_split, [_ELLIPSIS] * len(columns[0]))
+    rows = [list(row) for row in zip(*columns)]
+    if row_split is not None:
+        rows.insert(row_split, [_ELLIPSIS] * len(columns))
+    return {
+        "kind": "table",
+        "columns": [
+            {"head": head, "numeric": True} if is_numeric else {"head": head}
+            for head, is_numeric in zip(heads, numeric)
+        ],
+        "rows": rows,
+    }
+
+
+def _split_positions(count: int, split: tuple[int, int] | None) -> list[int]:
+    if split is None:
+        return list(range(count))
+    head, tail = split
+    return list(range(min(head, count))) + list(range(max(count - tail, head), count))
+
+
+def _label_text(label: Any) -> str:
+    if isinstance(label, tuple):
+        return " / ".join(str(part) for part in label)
+    return str(label)
+
+
+def _pandas_numeric(pd: Any, dtype: Any) -> bool:
+    types = pd.api.types
+    return bool(types.is_numeric_dtype(dtype) and not types.is_bool_dtype(dtype))
+
+
+def _pandas_cells(series: Any) -> list[str]:
+    """Display strings for a pandas Series' values, as its own repr formats them."""
+    count = len(series)
+    lines = series.to_string(index=False).split("\n") if count else []
+    if len(lines) != count:
+        lines = [str(item) for item in series.tolist()]
+    return [line.strip() for line in lines]
+
+
+def _pandas_frame_rows(count: int, max_rows: Any, min_rows: Any) -> tuple[int, int] | None:
+    """(head, tail) rows DataFrame.to_string shows, or None when all show."""
+    fitted = max_rows
+    if fitted and count > fitted and min_rows:
+        fitted = min(min_rows, fitted)
+    if not (fitted and count > fitted):
+        return None
+    half = fitted // 2
+    return (half, half) if half >= 1 else (max_rows, 0)
+
+
+def _pandas_frame_columns(
+    pd: Any, frame: Any, text: str, render_rows: tuple[Any, Any]
+) -> tuple[int, int] | None | bool:
+    """(left, right) columns the repr shows, None when all show, False when unknown."""
+    count = len(frame.columns)
+    max_cols = pd.get_option("display.max_columns")
+    if max_cols is None:
+        return None
+    if max_cols > 0:
+        if count <= max_cols:
+            return None
+        half = max_cols // 2
+        return (half, half) if half >= 1 else (max_cols, 0)
+    # display.max_columns == 0: pandas fits the frame to the terminal width.
+    width = shutil.get_terminal_size().columns
+    if not pd.get_option("display.expand_frame_repr"):
+        return (width // 2, width // 2) if count > width else None
+    # Fitting drops middle columns by their rendered widths, then shows the
+    # first and last `h`. Find `h` by rendering: widths grow with `h`, and the
+    # final comparison confirms the match.
+    max_rows, min_rows = render_rows
+    table = _PANDAS_DIMENSIONS_RE.sub("", text)
+
+    def render(max_cols_shown: int | None) -> str:
+        return frame.to_string(
+            max_rows=max_rows,
+            min_rows=min_rows,
+            max_cols=max_cols_shown,
+            max_colwidth=pd.get_option("display.max_colwidth"),
+            show_dimensions=False,
+            line_width=None,
+        )
+
+    def line_width(rendered: str) -> int:
+        return max(len(line) for line in rendered.split("\n"))
+
+    if render(None) == table:
+        return None
+    target = line_width(table)
+    low, high = 1, (count - 1) // 2
+    if high < low:
+        return False
+    while low < high:
+        mid = (low + high + 1) // 2
+        if line_width(render(2 * mid)) <= target:
+            low = mid
         else:
-            bundle[mime] = data
-
-    if "text/plain" not in bundle:
-        try:
-            bundle["text/plain"] = repr(value)
-        except Exception:
-            bundle["text/plain"] = f"<unrepr {type(value).__name__}>"
-
-    return bundle
+            high = mid - 1
+    return (low, low) if render(2 * low) == table else False
 
 
-def _emit_display(bundle: dict, *, kind: str = "display") -> None:
-    rid = _CURRENT_RID.get()
-    if rid is None:
+def _pandas_index_columns(pd: Any, index: Any) -> tuple[list[str], list[bool], list[list[str]]]:
+    heads: list[str] = []
+    numeric: list[bool] = []
+    columns: list[list[str]] = []
+    for level, name in enumerate(index.names):
+        values = index.get_level_values(level)
+        heads.append("" if name is None else str(name))
+        numeric.append(_pandas_numeric(pd, values.dtype))
+        columns.append(_pandas_cells(values.to_series()))
+    return heads, numeric, columns
+
+
+def _pandas_frame_view(pd: Any, frame: Any, text: str) -> dict | None:
+    if frame.empty or text.startswith("<class "):  # empty or `display.large_repr = "info"`
+        return None
+    max_rows = pd.get_option("display.max_rows")
+    min_rows = pd.get_option("display.min_rows")
+    if max_rows == 0:
+        # Terminal-height mode: rows left after header, dots, prompt and dimensions.
+        height = shutil.get_terminal_size().lines
+        max_rows = height - (6 if pd.get_option("display.show_dimensions") else 3)
+        min_rows = None
+    row_split = _pandas_frame_rows(len(frame), max_rows, min_rows)
+    col_split = _pandas_frame_columns(pd, frame, text, (max_rows, min_rows))
+    if col_split is False:
+        return None
+    shown = frame.iloc[
+        _split_positions(len(frame), row_split),
+        _split_positions(len(frame.columns), col_split),
+    ]
+    heads, numeric, columns = _pandas_index_columns(pd, shown.index)
+    index_count = len(heads)
+    for position, label in enumerate(shown.columns):
+        series = shown.iloc[:, position]
+        heads.append(_label_text(label))
+        numeric.append(_pandas_numeric(pd, series.dtype))
+        columns.append(_pandas_cells(series))
+    return _table_view(
+        heads,
+        numeric,
+        columns,
+        None if row_split is None else min(row_split[0], len(frame)),
+        None if col_split is None else index_count + min(col_split[0], len(frame.columns)),
+    )
+
+
+def _pandas_series_view(pd: Any, series: Any) -> dict | None:
+    count = len(series)
+    if count == 0:
+        return None
+    max_rows = pd.get_option("display.max_rows")
+    min_rows = pd.get_option("display.min_rows")
+    if max_rows == 0:
+        max_rows = min_rows = shutil.get_terminal_size().lines
+    row_split = None
+    if max_rows and count > max_rows:
+        fitted = min(min_rows, max_rows) if min_rows else max_rows
+        row_split = (1, 0) if fitted == 1 else (fitted // 2, fitted // 2)
+    shown = series.iloc[_split_positions(count, row_split)]
+    heads, numeric, columns = _pandas_index_columns(pd, shown.index)
+    heads.append("" if series.name is None else _label_text(series.name))
+    numeric.append(_pandas_numeric(pd, series.dtype))
+    columns.append(_pandas_cells(shown))
+    return _table_view(heads, numeric, columns, None if row_split is None else row_split[0], None)
+
+
+def _polars_limit(name: str, default: int) -> int:
+    try:
+        return int(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+
+
+def _polars_split(count: int, limit: int) -> tuple[int, int] | None:
+    if limit < 0 or count <= limit:
+        return None
+    return (limit + 1) // 2, limit // 2
+
+
+def _polars_cell(value: Any, str_len: int) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return value if len(value) <= str_len else value[:str_len] + _ELLIPSIS
+    return str(value)
+
+
+def _polars_view(pl: Any, value: Any) -> dict | None:
+    if _module_instance(value, pl, "DataFrame"):
+        names = list(value.columns)
+        col_split = _polars_split(len(names), _polars_limit("POLARS_FMT_MAX_COLS", _POLARS_DEFAULT_MAX_COLS))
+        series_list = [value.get_column(names[i]) for i in _split_positions(len(names), col_split)]
+        count = value.height
+    elif _module_instance(value, pl, "Series"):
+        col_split = None
+        series_list = [value]
+        count = len(value)
+    else:
+        return None
+    row_split = _polars_split(count, _polars_limit("POLARS_FMT_MAX_ROWS", _POLARS_DEFAULT_MAX_ROWS))
+    str_len = _polars_limit("POLARS_FMT_STR_LEN", _POLARS_DEFAULT_STR_LEN)
+    heads: list[str] = []
+    numeric: list[bool] = []
+    columns: list[list[str]] = []
+    for series in series_list:
+        if row_split is None:
+            items = series.to_list()
+        else:
+            items = series.head(row_split[0]).to_list() + series.tail(row_split[1]).to_list()
+        heads.append(str(series.name))
+        numeric.append(bool(series.dtype.is_numeric()))
+        columns.append([_polars_cell(item, str_len) for item in items])
+    return _table_view(
+        heads,
+        numeric,
+        columns,
+        None if row_split is None else row_split[0],
+        None if col_split is None else col_split[0],
+    )
+
+
+def _data_view(value: Any, text: str) -> dict | None:
+    """Table view for a pandas/polars frame or series, else a JSON view for large structures."""
+    pd = sys.modules.get("pandas")
+    if pd is not None:
+        if _module_instance(value, pd, "DataFrame"):
+            return _pandas_frame_view(pd, value, text)
+        if _module_instance(value, pd, "Series"):
+            return _pandas_series_view(pd, value)
+    pl = sys.modules.get("polars")
+    if pl is not None:
+        view = _polars_view(pl, value)
+        if view is not None:
+            return view
+    return _json_view(value, text)
+
+
+def _guarded(fn: Callable[..., Any], *args: Any) -> Any:
+    """Classification never breaks a print: a failing probe means "not rich"."""
+    try:
+        return fn(*args)
+    except Exception:
+        return None
+
+
+def _rich_value(value: Any, to_text: Callable[[Any], str]) -> tuple[str, list[tuple[str, dict]]]:
+    """The text ``value`` contributes to the output, plus its images and views."""
+    if type(value) is str:
+        text = to_text(value)
+        view = _guarded(_json_text_view, value, text)
+        return text, [] if view is None else [("view", view)]
+    if type(value) in _PLAIN_TEXT_TYPES:
+        return to_text(value), []
+    image = _omp_image(value)
+    if image is not None:
+        return f"<image {image['mimeType']}>", [("image", image)]
+    if not isinstance(value, type):
+        image = _guarded(_value_image, value)
+        if image is not None:
+            return to_text(value), [("image", image)]
+        markdown = _guarded(_markdown_source, value)
+        if markdown is not None:
+            return markdown, [("view", {"kind": "markdown", "text": markdown})]
+    text = to_text(value)
+    view = _guarded(_data_view, value, text)
+    return text, [] if view is None else [("view", view)]
+
+
+def _emit_rich(text: str, parts: list[tuple[str, dict]]) -> None:
+    for kind, payload in parts:
+        if kind == "image":
+            _emit_image(payload)
+        else:
+            _emit_view(text, payload)
+
+
+def _is_cell_stdout(stream: Any) -> bool:
+    return (
+        isinstance(stream, _StreamProxy)
+        and stream._kind == "stdout"
+        and _CURRENT_RID.get() is not None
+    )
+
+
+@functools.wraps(_REAL_PRINT)
+def _rich_print(
+    *args: Any,
+    sep: str | None = " ",
+    end: str | None = "\n",
+    file: Any = None,
+    flush: bool = False,
+) -> None:
+    if not _is_cell_stdout(sys.stdout if file is None else file):
+        _REAL_PRINT(*args, sep=sep, end=end, file=file, flush=flush)
         return
-    _emit({"type": kind, "id": rid, "bundle": bundle})
+    rendered = [_rich_value(arg, str) for arg in args]
+    _REAL_PRINT(*(text for text, _ in rendered), sep=sep, end=end, file=file, flush=flush)
+    for text, parts in rendered:
+        _emit_rich(text, parts)
 
 
-def __omp_display(value: Any, *, raw: bool = False, kind: str = "display") -> None:
-    if raw:
-        if not isinstance(value, dict):
-            raise TypeError("display(..., raw=True) requires a MIME bundle dict")
-        bundle = {str(k): v for k, v in value.items()}
-        if "text/plain" not in bundle:
-            bundle["text/plain"] = ""
-        _emit_display(bundle, kind=kind)
-        return
-    _emit_display(_mime_bundle(value), kind=kind)
+builtins.print = _rich_print
+
+
+def _echo_value(value: Any) -> None:
+    """Echo a cell's trailing value like printing its repr."""
+    text, parts = _rich_value(value, repr)
+    stream = sys.stdout
+    stream.write(f"{text}\n")
+    if _is_cell_stdout(stream):
+        _emit_rich(text, parts)
 
 
 # ---------------------------------------------------------------------------
@@ -1777,10 +2290,9 @@ def _flush_matplotlib_figures() -> None:
             if id(fig) in (_CURRENT_DISPLAYED_MATPLOTLIB_FIGURE_IDS.get() or set()):
                 plt.close(fig)
                 continue
-            buf = io.BytesIO()
-            fig.savefig(buf, format="png", bbox_inches="tight")
-            data = base64.b64encode(buf.getvalue()).decode("ascii")
-            _emit_display({"image/png": data, "text/plain": f"<Figure {num}>"})
+            _emit_image(
+                _png_payload(lambda buf: fig.savefig(buf, format="png", bbox_inches="tight"))
+            )
             plt.close(fig)
         except Exception:
             continue
@@ -1797,8 +2309,8 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 
 
 def _install_builtins(ns: dict) -> None:
-    ns["display"] = __omp_display
-    ns["__omp_display"] = __omp_display
+    ns["__omp_emit_status"] = _emit_status
+    ns["__omp_emit_image"] = _emit_image_dict
     ns["__omp_magic"] = __omp_magic
     ns["__omp_magic_async"] = __omp_magic_async
     ns["__omp_magic_cell"] = __omp_magic_cell
@@ -1810,7 +2322,7 @@ _install_builtins(_STATE.user_ns)
 
 
 # ---------------------------------------------------------------------------
-# Source execution (split last expression for rich display)
+# Source execution (split last expression for the echo)
 # ---------------------------------------------------------------------------
 
 
@@ -1990,7 +2502,7 @@ def _exec_source(source: str, ns: dict) -> None:
     if has_expr and expr_code is not None:
         value = _run_compiled_sync(expr_code, ns, want_value=True)
         if value is not None:
-            __omp_display(value, kind="result")
+            _echo_value(value)
 
 
 async def _exec_source_async(
@@ -2000,8 +2512,8 @@ async def _exec_source_async(
     filename: str = "<cell>",
     linecache_source: str | None = None,
 ) -> None:
-    """Compile + execute ``source``; if the last node is an expression, route
-    its value through ``__omp_display`` so dataframes/figures render rich.
+    """Compile + execute ``source``; if the last node is an expression, echo
+    its value like ``print(repr(value))`` (with the same images and views).
     Top-level ``await`` / ``async for`` / ``async with`` is permitted; awaited
     regions yield to other requests in the runner's persistent event loop."""
     _restore_call_site_helper(ns)
@@ -2014,7 +2526,7 @@ async def _exec_source_async(
     if has_expr and expr_code is not None:
         value = await _run_compiled_async(expr_code, ns, want_value=True)
         if value is not None:
-            __omp_display(value, kind="result")
+            _echo_value(value)
 
 
 # ---------------------------------------------------------------------------
@@ -2152,7 +2664,7 @@ def _handle_tool_request(req: dict) -> None:
             envelope = {"ok": True, "value": _jsonable(result)}
         else:
             raise ValueError(f"unknown tool operation {op!r}")
-        _emit_display({"application/json": envelope})
+        _emit({"type": "reply", "id": rid, "value": _json_safe(envelope)})
     except BaseException as exc:  # noqa: BLE001 - protocol errors must settle the request
         status = "error"
         _emit_error(rid, exc)

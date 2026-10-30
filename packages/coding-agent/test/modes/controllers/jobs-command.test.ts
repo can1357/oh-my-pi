@@ -7,6 +7,7 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession, type AsyncJobSnapshotItem } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
@@ -28,12 +29,8 @@ async function renderFullJobs(running: AsyncJobSnapshotItem[]): Promise<string[]
 		keybindings: { getKeys: () => ["escape"] },
 		reportContainer,
 		commandReportRows: () => 200,
-		session: {
-			getAsyncJobSnapshot: () => ({
-				running,
-				recent: [],
-				delivery: { queued: 0, delivering: false, pendingJobIds: [] },
-			}),
+		viewSession: {
+			getAsyncJobTree: () => ({ running, recent: [], agents: [] }),
 		},
 	} as unknown as InteractiveModeContext;
 	await new CommandController(ctx).handleJobsCommand({ full: true });
@@ -201,5 +198,86 @@ describe("/jobs in the native terminal", () => {
 		expect(manager.getJob(foreignId)?.status).toBe("running");
 		expect(showStatus).toHaveBeenCalledWith(`No running background job with id "${foreignId}".`);
 		foreignGate.resolve("done");
+	});
+
+	// #14814: a subagent's jobs are owned by it, so main's owner-scoped snapshot never lists them.
+	it("a focused subagent view lists that agent's jobs, not main's, and offers no way to cancel them", async () => {
+		const worker = new AgentSession({
+			agent: new Agent({ initialState: { model: session.model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
+			settings: Settings.isolated(),
+			modelRegistry: session.modelRegistry,
+			asyncJobManager: manager,
+			agentId: "Worker",
+		});
+		const gates = [Promise.withResolvers<string>(), Promise.withResolvers<string>()];
+		manager.register("bash", "main-only build", () => gates[0].promise, { ownerId: "main" });
+		const workerJob = manager.register("bash", "worker cargo test", () => gates[1].promise, { ownerId: "Worker" });
+		Object.defineProperty(mode, "viewSession", { get: () => worker, configurable: true });
+		Object.defineProperty(mode, "focusedAgentId", { get: () => "Worker", configurable: true });
+		try {
+			await mode.handleJobsCommand();
+			const sheet = mode.ui.overlayStack.at(-1)?.component;
+			expect(sheet).toBeInstanceOf(JobsSheet);
+			const listed = Bun.stripANSI(sheet?.render(100).join("\n") ?? "");
+			expect(listed).toContain("worker cargo test");
+			expect(listed).not.toContain("main-only build");
+			sheet?.handleInput?.("x");
+			sheet?.handleNativeEvent?.({ type: "action", key: "cancel", act: "cancel", mods: [] });
+			expect(manager.getJob(workerJob)?.status).toBe("running");
+			sheet?.handleInput?.("\x1b");
+
+			setNativeRendering(false);
+			await mode.handleJobsCommand({ full: true });
+			const report = Bun.stripANSI(mode.reportContainer.render(100).join("\n"));
+			expect(report).toContain("worker cargo test");
+			expect(report).not.toContain("main-only build");
+		} finally {
+			for (const gate of gates) gate.resolve("done");
+			await worker.dispose();
+		}
+	});
+
+	it("lists subagents' jobs under the task job that runs them, the deepest branch first", async () => {
+		const registry = AgentRegistry.global();
+		const refs = [
+			registry.register({ id: "Worker", displayName: "task", kind: "sub", parentId: "main", session: null }),
+			registry.register({ id: "Deep", displayName: "task", kind: "sub", parentId: "Worker", session: null }),
+		];
+		const gates = Array.from({ length: 4 }, () => Promise.withResolvers<string>());
+		manager.register("bash", "main lint", () => gates[0].promise, { ownerId: "main" });
+		manager.register("task", "audit the worker", () => gates[1].promise, { ownerId: "main", agentId: "Worker" });
+		manager.register("bash", "worker build", () => gates[2].promise, { ownerId: "Worker" });
+		const deepId = manager.register("bash", "deep probe", () => gates[3].promise, { ownerId: "Deep" });
+		try {
+			setNativeRendering(false);
+			await mode.handleJobsCommand({ full: true });
+			const report = Bun.stripANSI(mode.reportContainer.render(120).join("\n"))
+				.split("\n")
+				.map(line => line.replace(/^│ ?|\s*│$/g, "").trimEnd())
+				.filter(line => /\S/.test(line));
+			const at = (text: string) => report.findIndex(line => line.includes(text));
+			// Worker's branch (Deep's header and job, then its own job) leads; main's own leaf trails.
+			expect(report[at("audit the worker") - 1]).toMatch(/^\S+ \[task\] running \(.*\) Worker$/);
+			expect(report[at("Deep")]).toBe("├─ Deep");
+			expect(report[at("deep probe")]).toMatch(/^│ {7}deep probe$/);
+			expect(report[at("worker build")]).toMatch(/^ {5}worker build$/);
+			expect(at("audit the worker")).toBeLessThan(at("Deep"));
+			expect(at("deep probe")).toBeLessThan(at("worker build"));
+			expect(at("worker build")).toBeLessThan(at("main lint"));
+
+			// The sheet steps past Deep's header to its job, which main can inspect.
+			setNativeRendering(true);
+			await mode.handleJobsCommand();
+			const sheet = mode.ui.overlayStack.at(-1)?.component;
+			expect(sheet).toBeInstanceOf(JobsSheet);
+			sheet?.handleInput?.("\x1b[B");
+			expect(Bun.stripANSI(sheet?.render(120).join("\n") ?? "")).toMatch(/> .*running {2}bash .* deep probe/);
+			expect(session.inspectAsyncJob(deepId)).toMatchObject({ pids: [] });
+			sheet?.handleInput?.("\x1b");
+		} finally {
+			for (const gate of gates) gate.resolve("done");
+			for (const ref of refs) registry.unregister(ref.id, ref);
+		}
 	});
 });

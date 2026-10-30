@@ -70,7 +70,8 @@ function decodeAssignRequest(body: RequestInit["body"]): AssignModelRequest {
 function decodeChatRequest(body: RequestInit["body"]): GetChatMessageRequest {
 	const framed = new Uint8Array(body as ArrayBuffer);
 	const length = new DataView(framed.buffer, framed.byteOffset, framed.byteLength).getUint32(1, false);
-	return fromBinary(GetChatMessageRequestSchema, gunzipSync(framed.subarray(5, 5 + length)));
+	const message = framed.subarray(5, 5 + length);
+	return fromBinary(GetChatMessageRequestSchema, framed[0] & 0x01 ? gunzipSync(message) : message);
 }
 
 function decodeAuthRequest(body: RequestInit["body"]): GetUserJwtRequest {
@@ -78,11 +79,7 @@ function decodeAuthRequest(body: RequestInit["body"]): GetUserJwtRequest {
 }
 
 /** Fake Devin edge: serves auth, a fixed model assignment, and one chat response frame. */
-function fakeDevin(options: {
-	assignment?: { assignmentJwt: string; modelUid: string };
-	chat?: ChatResponseFields;
-	rejectPrefixedAuth?: boolean;
-}): {
+function fakeDevin(options: { assignment?: { assignmentJwt: string; modelUid: string }; chat?: ChatResponseFields }): {
 	fetch: typeof fetch;
 	recorded: RecordedTurn;
 } {
@@ -101,11 +98,7 @@ function fakeDevin(options: {
 		const url = String(input);
 		recorded.paths.push(new URL(url).pathname);
 		if (url.includes("GetUserJwt")) {
-			const apiKey = decodeAuthRequest(init?.body).metadata?.apiKey ?? "";
-			recorded.authApiKeys.push(apiKey);
-			if (options.rejectPrefixedAuth && apiKey.startsWith("devin-session-token$")) {
-				return new Response("", { status: 401 });
-			}
+			recorded.authApiKeys.push(decodeAuthRequest(init?.body).metadata?.apiKey ?? "");
 			return new Response(AUTH_PAYLOAD);
 		}
 		if (url.includes("AssignModel")) {
@@ -152,7 +145,7 @@ describe("streamDevin router assignment", () => {
 		});
 
 		const result = await streamDevin(devinModel({ modelRouter: true }), context, {
-			apiKey: "token",
+			apiKey: "header.payload.signature",
 			fetch: fetchImpl,
 			conversationId: "cascade-42",
 		}).result();
@@ -173,8 +166,8 @@ describe("streamDevin router assignment", () => {
 			ideName: "devin-cli",
 			ideType: "chisel",
 			extensionName: "chisel",
-			extensionVersion: "3000.11.3",
-			apiKey: "devin-session-token$token",
+			extensionVersion: "3000.11.205",
+			apiKey: "devin-session-token$header.payload.signature",
 			userJwt: "",
 		});
 		// The router uid must never reach GetChatMessage as the chat model.
@@ -186,20 +179,21 @@ describe("streamDevin router assignment", () => {
 		expect(result.stopReason).toBe("stop");
 	});
 
-	it("retries auth with an unprefixed API key and keeps it for routing and chat", async () => {
+	it("sends a legacy Windsurf key bare on the first and only auth attempt", async () => {
+		// Legacy `sk-ws-` keys are rejected with the session-token prefix, so they
+		// must go out bare everywhere, without a failing prefixed probe.
 		const { fetch: fetchImpl, recorded } = fakeDevin({
-			rejectPrefixedAuth: true,
 			assignment: { assignmentJwt: "assign-jwt", modelUid: "claude-sonnet-4-5" },
 		});
 
 		const result = await streamDevin(devinModel({ modelRouter: true }), context, {
-			apiKey: "legacy-windsurf-key",
+			apiKey: "sk-ws-01-legacy",
 			fetch: fetchImpl,
 		}).result();
 
-		expect(recorded.authApiKeys).toEqual(["devin-session-token$legacy-windsurf-key", "legacy-windsurf-key"]);
-		expect(recorded.assignment?.metadata?.apiKey).toBe("legacy-windsurf-key");
-		expect(recorded.chat?.metadata?.apiKey).toBe("legacy-windsurf-key");
+		expect(recorded.authApiKeys).toEqual(["sk-ws-01-legacy"]);
+		expect(recorded.assignment?.metadata?.apiKey).toBe("sk-ws-01-legacy");
+		expect(recorded.chat?.metadata?.apiKey).toBe("sk-ws-01-legacy");
 		expect(result.stopReason).toBe("stop");
 	});
 

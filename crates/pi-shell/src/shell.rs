@@ -15,7 +15,7 @@ use std::{
 
 use anyhow::{Error, Result};
 use brush_core::{
-	ExecutionControlFlow, ExecutionExitCode, ExecutionParameters, ExecutionResult,
+	ExecutionControlFlow, ExecutionExitCode, ExecutionParameters, ExecutionResult, PipeTap,
 	ProcessGroupPolicy, ProfileLoadBehavior, RcLoadBehavior, Shell as BrushShell, ShellValue,
 	ShellVariable, SourceInfo, SpawnObserver,
 	env::EnvironmentScope,
@@ -38,6 +38,7 @@ use crate::{
 	minimizer,
 	output_decode::OutputDecoder,
 	process,
+	taps::PipeTaps,
 };
 
 struct ShellSessionCore {
@@ -123,6 +124,8 @@ struct ShellRunConfig {
 	minimizer:  Option<minimizer::MinimizerConfig>,
 	/// Replaces the session filesystem for this run only.
 	filesystem: Option<Fs>,
+	/// Mirrors the run's pipeline pipes.
+	pipe_taps:  Option<Arc<PipeTaps>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -133,6 +136,8 @@ pub struct ShellRunOptions {
 	pub timeout_ms: Option<u32>,
 	/// Filesystem for this run only; the session filesystem when `None`.
 	pub filesystem: Option<Fs>,
+	/// Receives a copy of every byte crossing the run's pipeline pipes.
+	pub pipe_taps:  Option<Arc<PipeTaps>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -193,10 +198,11 @@ impl Drop for ActiveSpawnsGuard {
 }
 
 pub struct Shell {
-	session:       Arc<TokioMutex<Option<ShellSessionCore>>>,
-	abort_state:   ShellAbortState,
-	config:        ShellConfig,
-	active_spawns: ActiveSpawns,
+	session:                  Arc<TokioMutex<Option<ShellSessionCore>>>,
+	abort_state:              ShellAbortState,
+	config:                   ShellConfig,
+	active_spawns:            ActiveSpawns,
+	background_reaper_active: Arc<AtomicBool>,
 }
 
 impl Shell {
@@ -227,6 +233,7 @@ impl Shell {
 			abort_state: ShellAbortState::default(),
 			config,
 			active_spawns: ActiveSpawns::default(),
+			background_reaper_active: Arc::new(AtomicBool::new(false)),
 		}
 	}
 
@@ -242,11 +249,13 @@ impl Shell {
 			env:        options.env,
 			minimizer:  self.config.minimizer.clone(),
 			filesystem: options.filesystem,
+			pipe_taps:  options.pipe_taps,
 		};
 		run_shell_session(
 			self.session.clone(),
 			self.abort_state.clone(),
 			self.active_spawns.clone(),
+			self.background_reaper_active.clone(),
 			self.config.clone(),
 			run_config,
 			on_chunk,
@@ -269,33 +278,29 @@ impl Shell {
 	#[must_use]
 	pub fn pids(&self) -> Vec<i32> {
 		let registry = self.active_spawns.lock().clone();
-		registry.map_or_else(Vec::new, |registry| registry.live_pids())
+		registry.map_or_default(|registry| registry.live_pids())
 	}
 
-	/// Number of live background jobs (running `&`/`nohup` children) tracked by
-	/// the persistent session. Completed jobs are reaped first via a silent
-	/// `JobManager::poll()` (no job-control notifications), so the count
-	/// reflects only processes still alive. Returns 0 when no session core is
-	/// materialized. The host uses this to decide whether to retain a per-call
-	/// shell whose background children are still running instead of dropping it
-	/// (which would SIGKILL them on kill-on-drop).
+	/// Number of live external background jobs tracked by the persistent
+	/// session. The host retains a per-call shell while this is nonzero, since
+	/// dropping it would kill its children. Reaps exited children without
+	/// discarding their status, so a later `wait` still sees the exit code.
 	pub async fn live_background_job_count(&self) -> u32 {
 		let mut guard = self.session.lock().await;
 		let Some(core) = guard.as_mut() else {
 			return 0;
 		};
 		let jobs = core.shell.jobs_mut();
-		// Fail closed: a poll error leaves the job table in an unknown state, so
-		// report 0 (drop the shell) rather than pin a retained session forever on
-		// stale `representative_pid()` entries.
-		if jobs.poll().is_err() {
+		// A poll error leaves the table in an unknown state; fail closed
+		// rather than retain a per-call shell forever on stale entries.
+		if jobs.poll_preserving_completed().is_err() {
 			return 0;
 		}
 		u32::try_from(
 			jobs
 				.jobs
 				.iter()
-				.filter(|job| job.representative_pid().is_some())
+				.filter(|job| job.external_process_count() > 0)
 				.count(),
 		)
 		.unwrap_or(u32::MAX)
@@ -323,6 +328,7 @@ pub async fn execute_shell(
 		env: options.env,
 		minimizer,
 		filesystem: None,
+		pipe_taps: None,
 	};
 	run_shell_oneshot(config, run_config, on_chunk, cancel_token).await
 }
@@ -361,6 +367,7 @@ pub async fn execute_shell_streams(
 		env:        options.env,
 		minimizer:  None,
 		filesystem: None,
+		pipe_taps:  None,
 	};
 	run_shell_oneshot_streams(config, run_config, streams, cancel_token).await
 }
@@ -380,10 +387,70 @@ const CANCEL_RUN_GRACE: Duration = Duration::from_secs(5);
 #[cfg(not(windows))]
 const CANCEL_RUN_GRACE: Duration = Duration::from_secs(2);
 
+/// How long a cancelled POSIX run's processes get to finish TERM cleanup
+/// (traps, lock/marker removal) before the KILL wave.
+#[cfg(unix)]
+const TERM_GRACE: Duration = Duration::from_secs(1);
+
+/// Delay between cancellation and cancelling the output readers. Readers stay
+/// open so pipeline consumers can flush after their producers die, and so a
+/// TERM trap that writes output during [`TERM_GRACE`] does not hit EPIPE and
+/// die before finishing its cleanup. Windows needs a wider budget for the same
+/// reason as `CANCEL_RUN_GRACE`: the consumer's flush depends on the
+/// producer's exit becoming visible through several thread wakeups. The
+/// delayed fallback still releases readers whose writers never close.
+#[cfg(windows)]
+const CANCEL_READER_GRACE: Duration = Duration::from_millis(2000);
+#[cfg(not(windows))]
+const CANCEL_READER_GRACE: Duration = Duration::from_millis(1250);
+
+/// Poll only the persistent session's background children, never process-wide
+/// waitpid: foreground runs and other shells own their own child handles.
+/// Finished jobs keep their statuses so `wait` can consume them on a later run.
+/// The caller holds the session lock, including through this initial poll.
+fn ensure_background_reaper(
+	core: &mut ShellSessionCore,
+	session: &Arc<TokioMutex<Option<ShellSessionCore>>>,
+	active: &Arc<AtomicBool>,
+) {
+	let _ = core.shell.jobs_mut().poll_preserving_completed();
+	if !core.shell.jobs().has_live_external_jobs() || active.swap(true, Ordering::AcqRel) {
+		return;
+	}
+
+	// A weak session reference lets dropping Shell keep its existing
+	// kill-on-drop behavior; the reaper never extends the session's lifetime
+	// across sleeps.
+	let session = Arc::downgrade(session);
+	let active = Arc::clone(active);
+	tokio::spawn(async move {
+		loop {
+			time::sleep(Duration::from_millis(25)).await;
+			let Some(session) = session.upgrade() else {
+				active.store(false, Ordering::Release);
+				break;
+			};
+			let mut guard = session.lock().await;
+			let still_running = guard.as_mut().is_some_and(|core| {
+				let _ = core.shell.jobs_mut().poll_preserving_completed();
+				core.shell.jobs().has_live_external_jobs()
+			});
+			if !still_running {
+				// Clear while holding the session lock. A concurrent run
+				// cannot add jobs and observe `active == true` between our
+				// last poll and this store.
+				active.store(false, Ordering::Release);
+				break;
+			}
+		}
+	});
+}
+
 async fn run_shell_session(
 	session: Arc<TokioMutex<Option<ShellSessionCore>>>,
 	abort_state: ShellAbortState,
 	active_spawns: ActiveSpawns,
+	background_reaper_active: Arc<AtomicBool>,
 	config: ShellConfig,
 	run_config: ShellRunConfig,
 	on_chunk: Option<Sender<String>>,
@@ -413,8 +480,8 @@ async fn run_shell_session(
 			// after `session_guard`, so it clears before the lock is released.
 			let _active_spawns = ActiveSpawnsGuard::publish(&active_spawns, spawn_registry.clone());
 
-			let session = match &mut *session_guard {
-				Some(session) => session,
+			let core = match &mut *session_guard {
+				Some(core) => core,
 				None => session_guard.insert(
 					create_session_for_run(
 						&config,
@@ -425,7 +492,12 @@ async fn run_shell_session(
 				),
 			};
 			abort_state.set(at).await;
-			run_shell_command(session, &run_config, on_chunk, tokio_cancel, spawn_registry).await
+			let result =
+				run_shell_command(core, &run_config, on_chunk, tokio_cancel, spawn_registry).await;
+			if result.is_ok() {
+				ensure_background_reaper(core, &session, &background_reaper_active);
+			}
+			result
 		}
 	});
 
@@ -461,8 +533,10 @@ async fn run_shell_session(
 	let _ = process_cancel_bridge.await;
 	abort_state.clear().await;
 
-	let keepalive = res.as_ref().is_ok_and(|(exec, ..)| session_keepalive(exec));
-	if !keepalive {
+	// `exit`, errexit, or a stray top-level `return`/`break` ends this command,
+	// not the session: the next run keeps the variables, functions, and options
+	// built so far. Only a failed run leaves the shell in an unknown state.
+	if res.is_err() {
 		*session.lock().await = None;
 	}
 	let (exec, minimized, working_dir) = res?;
@@ -674,10 +748,7 @@ fn inherited_env_value<'a>(key: &str, value: &'a str) -> std::borrow::Cow<'a, st
 	if !matches!(key, "TEMP" | "TMP" | "TMPDIR") || !path.is_absolute() {
 		return std::borrow::Cow::Borrowed(value);
 	}
-	match brush_core::sys::fs::expand_to_long_path(path)
-		.into_os_string()
-		.into_string()
-	{
+	match brush_core::sys::fs::expand_to_long_path(path).into_string() {
 		Ok(expanded) => std::borrow::Cow::Owned(expanded),
 		Err(_) => std::borrow::Cow::Borrowed(value),
 	}
@@ -840,8 +911,9 @@ async fn create_session_for_run(
 	// implementations that run without spawning a process and resolve paths
 	// against the shell working directory. The whole set can be disabled
 	// (falling back to system binaries) via PI_DISABLE_UUTILS_BUILTINS; the
-	// destructive set (`rm`, `mv`, `cp`, `ln`, `dd`) additionally honors
-	// PI_DISABLE_UUTILS_DESTRUCTIVE, and `rm`/`mv` have their own switches.
+	// destructive set (`rm`, `mv`, `cp`, `ln`, `dd`, `rsync`) additionally
+	// honors PI_DISABLE_UUTILS_DESTRUCTIVE, and `rm`/`mv` have their own
+	// switches.
 	if !env_flag(config, "PI_DISABLE_UUTILS_BUILTINS") {
 		let destructive_disabled = env_flag(config, "PI_DISABLE_UUTILS_DESTRUCTIVE");
 		let rm_disabled = destructive_disabled || env_flag(config, "PI_DISABLE_RM_BUILTIN");
@@ -850,9 +922,10 @@ async fn create_session_for_run(
 			let disabled = match name {
 				"rm" => rm_disabled,
 				"mv" => mv_disabled,
-				// cp and dd (`of=`) overwrite existing files, ln can clobber them
-				// via -f; gate them with the destructive set.
-				"cp" | "ln" | "dd" => destructive_disabled,
+				// cp, dd (`of=`), and rsync overwrite existing files (rsync also
+				// deletes with --delete), ln can clobber them via -f; gate them
+				// with the destructive set.
+				"cp" | "ln" | "dd" | "rsync" => destructive_disabled,
 				_ => false,
 			};
 			if !disabled {
@@ -1088,6 +1161,16 @@ async fn run_shell_command_in_filesystem(
 	})
 }
 
+/// The session's execution parameters for one run's command, carrying the
+/// run's pipe taps.
+fn command_params(session: &ShellSessionCore, options: &ShellRunConfig) -> ExecutionParameters {
+	let mut params = session.shell.default_exec_params();
+	if let Some(taps) = &options.pipe_taps {
+		params.set_pipe_tap(Arc::clone(taps) as Arc<dyn PipeTap>);
+	}
+	params
+}
+
 async fn run_shell_command_single(
 	session: &mut ShellSessionCore,
 	options: &ShellRunConfig,
@@ -1098,7 +1181,7 @@ async fn run_shell_command_single(
 ) -> Result<(ExecutionResult, Option<MinimizerResult>)> {
 	debug_assert!(!matches!(minimizer_mode, minimizer::engine::MinimizerMode::SegmentedChain));
 
-	let params = session.shell.default_exec_params();
+	let params = command_params(session, options);
 	let capture_mode = match minimizer_mode {
 		minimizer::engine::MinimizerMode::WholeCommand => {
 			let Some(config) = options.minimizer.as_ref() else {
@@ -1222,7 +1305,7 @@ async fn run_shell_command_segmented_chain(
 		.await;
 	};
 
-	let params = session.shell.default_exec_params();
+	let params = command_params(session, options);
 	let mut aggregate = Some(ChainCapture::new());
 	let mut previous_succeeded = true;
 	let mut last_result = None;
@@ -1282,7 +1365,7 @@ async fn run_shell_command_segmented_chain(
 			aggregate = None;
 		}
 
-		let keep_running = session_keepalive(&command_run.result) && !cancel_token.is_cancelled();
+		let keep_running = continues_command(&command_run.result) && !cancel_token.is_cancelled();
 		last_result = Some(command_run.result);
 		if !keep_running {
 			break;
@@ -1346,6 +1429,7 @@ async fn run_shell_command_once(
 	params.set_fd(OpenFiles::STDOUT_FD, stdout_file);
 	params.set_fd(OpenFiles::STDERR_FD, stderr_file);
 	params.process_group_policy = ProcessGroupPolicy::NewProcessGroup;
+	register_background_jobs(&session.shell, &spawn_registry);
 	params.set_cancel_token(cancel_token.clone());
 	params.set_spawn_observer(spawn_registry.clone());
 	// Only a buffered capture can be minimized, so only it asks for the report.
@@ -1380,16 +1464,6 @@ async fn run_shell_command_once(
 			}
 		}
 	});
-	// Let pipeline consumers flush output after cancellation kills their
-	// producers. The outer run cancellation remains bounded, and this delayed
-	// fallback still releases readers whose writers never close. Windows needs
-	// a wider budget for the same reason as `CANCEL_RUN_GRACE`: the consumer's
-	// flush depends on the producer's exit becoming visible through several
-	// thread wakeups.
-	#[cfg(windows)]
-	const CANCEL_READER_GRACE: Duration = Duration::from_millis(2000);
-	#[cfg(not(windows))]
-	const CANCEL_READER_GRACE: Duration = Duration::from_millis(500);
 	let cancel_bridge = tokio::spawn({
 		let cancel_token = cancel_token.clone();
 		let reader_cancel = reader_cancel.clone();
@@ -1413,7 +1487,7 @@ async fn run_shell_command_once(
 	drop(diagnostics);
 
 	if cancel_token.is_cancelled() {
-		terminate_background_jobs(&mut session.shell);
+		terminate_background_jobs(&mut session.shell, &spawn_registry).await;
 	}
 
 	drop(params);
@@ -1520,6 +1594,7 @@ async fn run_shell_command_streams_in_filesystem(
 	params.set_fd(OpenFiles::STDOUT_FD, stdout_file);
 	params.set_fd(OpenFiles::STDERR_FD, stderr_file);
 	params.process_group_policy = ProcessGroupPolicy::NewProcessGroup;
+	register_background_jobs(&session.shell, &spawn_registry);
 	params.set_cancel_token(cancel_token.clone());
 	params.set_spawn_observer(spawn_registry.clone());
 	let reader_cancel = CancellationToken::new();
@@ -1544,6 +1619,7 @@ async fn run_shell_command_streams_in_filesystem(
 		let reader_cancel = reader_cancel.clone();
 		async move {
 			cancel_token.cancelled().await;
+			time::sleep(CANCEL_READER_GRACE).await;
 			reader_cancel.cancel();
 		}
 	});
@@ -1562,7 +1638,7 @@ async fn run_shell_command_streams_in_filesystem(
 	drop(diagnostics);
 
 	if cancel_token.is_cancelled() {
-		terminate_background_jobs(&mut session.shell);
+		terminate_background_jobs(&mut session.shell, &spawn_registry).await;
 	}
 
 	if env_scope_pushed {
@@ -1732,41 +1808,58 @@ async fn terminate_run(registry: &process::SpawnRegistry) {
 			targets.signal(signal);
 		}
 		if wave + 1 < WAVES {
-			let pause = if wave == 0 {
-				Duration::from_millis(75)
+			if wave == 0 {
+				wait_for_term_grace(registry).await;
 			} else {
-				Duration::from_millis(150)
-			};
-			time::sleep(pause).await;
+				time::sleep(Duration::from_millis(150)).await;
+			}
 		}
 	}
 }
 
-fn terminate_background_jobs(shell: &mut BrushShell) {
-	let mut targets = process::TerminationTargets::new();
+#[cfg_attr(
+	not(unix),
+	expect(clippy::unused_async, reason = "the TERM grace wait only awaits on unix")
+)]
+async fn wait_for_term_grace(registry: &process::SpawnRegistry) {
+	// Windows TERM is already hard termination; there is no trap to wait for.
+	#[cfg(unix)]
+	{
+		let deadline = time::Instant::now() + TERM_GRACE;
+		while !registry.build_targets().is_empty() {
+			let now = time::Instant::now();
+			if now >= deadline {
+				break;
+			}
+			time::sleep_until((now + Duration::from_millis(25)).min(deadline)).await;
+		}
+	}
+	#[cfg(not(unix))]
+	let _ = registry;
+}
+
+fn register_background_jobs(shell: &BrushShell, registry: &process::SpawnRegistry) {
+	// Include retained session jobs in the same cancellation wave as new spawns.
+	for job in &shell.jobs().jobs {
+		// A reaped job keeps its representative PID for `wait`, but that PID
+		// may later be reused by an unrelated process. Use an external child
+		// still held by the job (the first pipeline stage may have exited).
+		let Some(pid) = job.process_ids().next() else {
+			continue;
+		};
+		let process = process::Process::from_pid(pid);
+		registry.record(job.process_group_id(), process);
+	}
+}
+
+async fn terminate_background_jobs(shell: &mut BrushShell, registry: &process::SpawnRegistry) {
+	// The run's cancellation bridge owns TERM/KILL, including background jobs.
+	// Aborting their internal tasks sooner drops ChildProcess and hard-kills
+	// children while their TERM traps are still running.
+	wait_for_term_grace(registry).await;
 	for job in &mut shell.jobs_mut().jobs {
 		job.abort_internal_tasks();
 	}
-	for job in &shell.jobs().jobs {
-		if let Some(pgid) = job.process_group_id() {
-			targets.add_pgid(pgid);
-		}
-		if let Some(pid) = job.representative_pid() {
-			targets.add_pid(pid);
-		}
-	}
-	if targets.is_empty() {
-		// Shell-internal jobs were aborted above. Pure descendant cleanup is
-		// handled by `process_cancel_bridge` while the cancel was in flight;
-		// without job-tracked pgids or pids there is nothing else to signal here.
-		return;
-	}
-
-	targets.signal(process::TERM_SIGNAL);
-	tokio::spawn(async move {
-		time::sleep(Duration::from_millis(150)).await;
-		targets.signal(process::KILL_SIGNAL);
-	});
 }
 
 /// Apply per-command environment variables onto a freshly pushed
@@ -1916,13 +2009,20 @@ fn should_skip_env_var(key: &str) -> bool {
 }
 
 fn ensure_trailing_newline_for_heredoc(command: &mut String) {
-	if command.ends_with('\n') || !command.as_bytes().windows(2).any(|window| window == b"<<") {
+	if command.ends_with('\n')
+		|| !command
+			.as_bytes()
+			.array_windows()
+			.any(|window| window == b"<<")
+	{
 		return;
 	}
 	command.push('\n');
 }
 
-const fn session_keepalive(result: &ExecutionResult) -> bool {
+/// Whether the command goes on to its next segment; `exit`, errexit, and other
+/// non-normal control flow stop it (the session itself stays usable).
+const fn continues_command(result: &ExecutionResult) -> bool {
 	match result.next_control_flow {
 		ExecutionControlFlow::Normal => true,
 		ExecutionControlFlow::BreakLoop { .. } => false,
@@ -2120,11 +2220,7 @@ fn set_nonblocking<T: std::os::fd::AsRawFd>(file: &T) -> io::Result<()> {
 
 	// SAFETY: `fd` remains valid here and we are only toggling `O_NONBLOCK`.
 	let result = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
-	if result < 0 {
-		Err(io::Error::last_os_error())
-	} else {
-		Ok(())
-	}
+	(result >= 0).ok_or_else(io::Error::last_os_error)
 }
 
 #[cfg(unix)]
@@ -2154,29 +2250,14 @@ async fn emit_chunk(text: String, callback: Option<&Sender<String>>) {
 
 fn pipe_to_files(label: &str) -> Result<(fs::File, fs::File)> {
 	let (r, w) =
-		os_pipe::pipe().map_err(|err| Error::msg(format!("Failed to create {label} pipe: {err}")))?;
+		std::io::pipe().map_err(|err| Error::msg(format!("Failed to create {label} pipe: {err}")))?;
 
 	#[cfg(unix)]
-	let (r, w): (fs::File, fs::File) = {
-		use std::os::unix::io::{FromRawFd, IntoRawFd};
-		let r = r.into_raw_fd();
-		let w = w.into_raw_fd();
-		// SAFETY: We just obtained these fds from os_pipe and own them
-		// exclusively.
-		unsafe { (FromRawFd::from_raw_fd(r), FromRawFd::from_raw_fd(w)) }
-	};
-
+	use std::os::fd::OwnedFd as Owned;
 	#[cfg(windows)]
-	let (r, w): (fs::File, fs::File) = {
-		use std::os::windows::io::{FromRawHandle, IntoRawHandle};
-		let r = r.into_raw_handle();
-		let w = w.into_raw_handle();
-		// SAFETY: We just obtained these handles from os_pipe and own them
-		// exclusively.
-		unsafe { (FromRawHandle::from_raw_handle(r), FromRawHandle::from_raw_handle(w)) }
-	};
+	use std::os::windows::io::OwnedHandle as Owned;
 
-	Ok((r, w))
+	Ok((fs::File::from(Owned::from(r)), fs::File::from(Owned::from(w))))
 }
 
 /// Whether the `nohup` builtin should stand aside for the system binary.
@@ -2206,7 +2287,6 @@ mod tests {
 	#[cfg(unix)]
 	use std::os::unix::process::ExitStatusExt as _;
 
-	#[cfg(unix)]
 	use tokio::process::Command;
 
 	use super::*;
@@ -2501,6 +2581,7 @@ mod tests {
 		(master, slave)
 	}
 
+	#[cfg(unix)]
 	async fn interactive_kill_test_context(
 		terminal_stdin: &fs::File,
 	) -> (ShellSessionCore, ExecutionParameters) {
@@ -4600,6 +4681,7 @@ mod tests {
 		// contain: a loop over the registry cannot notice a name missing from it.
 		// Adding a utility is expected to update this list.
 		let expected = [
+			"ast-grep",
 			"b2sum",
 			"base32",
 			"base64",
@@ -4649,8 +4731,10 @@ mod tests {
 			"rg",
 			"rm",
 			"rmdir",
+			"rsync",
 			"sed",
 			"seq",
+			"sg",
 			"sha1sum",
 			"sha224sum",
 			"sha256sum",
@@ -4694,12 +4778,15 @@ mod tests {
 			let help = std::fs::read_to_string(tmp.join("help.txt")).expect("help.txt");
 			let err = std::fs::read_to_string(tmp.join("err.txt")).expect("err.txt");
 			assert!(err.is_empty(), "{name} --help wrote to stderr: {err:?}");
-			// Two builtins are registered under the familiar command name but keep
-			// their implementation's own help text, exactly as the standalone
-			// versions did: `rg` is ripgrep, `jq` is jaq.
+			// Some builtins are registered under the familiar command name but
+			// keep their implementation's own help text, exactly as the
+			// standalone versions did: `rg` is ripgrep, `jq` is jaq, `sg`
+			// is ast-grep (whose help names itself only through its usage
+			// line, here `sg`).
 			let expected = match name {
 				"rg" => "ripgrep",
 				"jq" => "jaq",
+				"sg" => "using AST pattern",
 				other => other,
 			};
 			assert!(
@@ -5366,7 +5453,7 @@ mod tests {
 	/// Mirrors busybox applet probing: `grep -qx "$applet" <(strings bin)`.
 	#[tokio::test(flavor = "multi_thread")]
 	async fn grep_quiet_and_line_regexp() {
-		let tmp = std::env::temp_dir().join(format!("pi-grepq-{}", std::process::id()));
+		let tmp = std::env::temp_dir().join(format!("pi-walkerq-{}", std::process::id()));
 		let _ = std::fs::remove_dir_all(&tmp);
 		std::fs::create_dir_all(&tmp).expect("temp dir");
 		std::fs::write(tmp.join("data.txt"), "foo\nbar\nbaz\n").expect("data");
@@ -6048,12 +6135,13 @@ mod tests {
 		}
 	}
 
-	#[cfg(unix)]
 	fn shell_test_lock() -> &'static TokioMutex<()> {
-		static LOCK: std::sync::OnceLock<TokioMutex<()>> = std::sync::OnceLock::new();
-		LOCK.get_or_init(|| TokioMutex::new(()))
+		static LOCK: TokioMutex<()> = TokioMutex::const_new(());
+		&LOCK
 	}
 
+	/// Runs `command` under [`shell_test_lock`] and returns its result and
+	/// output.
 	#[cfg(unix)]
 	async fn run_command_capture(
 		command: &str,
@@ -6062,6 +6150,33 @@ mod tests {
 		cancel_token: CancelToken,
 	) -> (ShellExecuteResult, String) {
 		let _guard = shell_test_lock().lock().await;
+		capture_unlocked(command, cwd, minimizer, cancel_token).await
+	}
+
+	/// [`run_command_capture`] that fails once the run outlasts `limit`. The
+	/// limit starts when the lock is held: in a single-process `cargo test`,
+	/// the wait behind slower shell tests took up the limit of a fast one.
+	#[cfg(unix)]
+	async fn run_command_capture_within(
+		limit: Duration,
+		command: &str,
+		cwd: Option<&std::path::Path>,
+		minimizer: Option<minimizer::MinimizerOptions>,
+		cancel_token: CancelToken,
+	) -> Result<(ShellExecuteResult, String), time::error::Elapsed> {
+		let _guard = shell_test_lock().lock().await;
+		time::timeout(limit, capture_unlocked(command, cwd, minimizer, cancel_token)).await
+	}
+
+	/// Runs `command` and collects its streamed output; the caller holds
+	/// [`shell_test_lock`].
+	#[cfg(unix)]
+	async fn capture_unlocked(
+		command: &str,
+		cwd: Option<&std::path::Path>,
+		minimizer: Option<minimizer::MinimizerOptions>,
+		cancel_token: CancelToken,
+	) -> (ShellExecuteResult, String) {
 		let (tx, rx) = flume::unbounded::<String>();
 		let options = ShellExecuteOptions {
 			command: command.to_string(),
@@ -6094,15 +6209,405 @@ mod tests {
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn uutils_diff_reads_process_substitution_fds() {
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(5),
-			run_command_capture("diff <(echo a) <(echo b)", None, None, CancelToken::default()),
+			"diff <(echo a) <(echo b)",
+			None,
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("process substitution should not hang");
 
 		assert_eq!(result.exit_code, Some(1));
 		assert!(output.contains("< a\n---\n> b\n"), "diff output missing changed lines: {output:?}");
+	}
+
+	/// Every run reads through a cancellable filesystem, and its redirects must
+	/// still open a FIFO as a blocking open does. A non-blocking open let a
+	/// reader that reads the descriptor itself (an external `cat`, `$(< f)`)
+	/// see EOF before a late writer connected; the writer then blocked forever.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn fifo_redirect_waits_for_a_late_writer() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = run_command_capture_within(
+			Duration::from_secs(5),
+			"/bin/sh -c 'sleep 0.15; echo one > f' & /bin/cat < f; /bin/sh -c 'sleep 0.15; echo two \
+			 > f' & x=$(< f); echo \"x=$x\"; wait",
+			Some(root.path()),
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("a FIFO redirect waits for its writer and returns");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "one\nx=two\n"));
+	}
+
+	/// A FIFO redirect's open waits for the other end, which is often a
+	/// background job queued on the same runtime worker: `echo hi > f & cat <
+	/// f` deadlocked when the open held the worker. On a one-worker runtime,
+	/// both orders must finish.
+	#[cfg(unix)]
+	#[test]
+	fn fifo_redirects_do_not_hold_the_worker_their_other_end_needs() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		for name in ["f", "g"] {
+			pi_vfs::BlockingFs::native()
+				.make_node(root.path().join(name), pi_vfs::NodeKind::Fifo, 0o600)
+				.expect("create FIFO");
+		}
+		let (result, output) = capture_on_runtime(
+			"echo one > f & cat < f; cat < g & echo two > g; wait",
+			Some(root.path().to_path_buf()),
+			512,
+		)
+		.expect("a FIFO redirect must not hold the worker its other end needs");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "one\ntwo\n"));
+	}
+
+	/// A background external command's FIFO redirect is opened by its child,
+	/// as in bash: the parent shell spawned it and then waited for the FIFO's
+	/// other end, which was the next command, so `/bin/cat < f & echo one > f`
+	/// never returned. Job control must still see the command's real pid:
+	/// `$!` is the pid the command itself reports, and `wait`, `jobs`, `kill
+	/// %N` and `kill $!` reach a command still waiting for its FIFO.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn background_external_command_opens_its_fifo_redirect_itself() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = run_command_capture_within(
+			Duration::from_secs(10),
+			concat!(
+				// First, so the job is `%1`.
+				"/bin/sleep 30 < f & jobs; kill %1; wait $!; echo \"kill-job=$?\"\n",
+				"/bin/sleep 30 < f & kill $!; wait $!; echo \"kill-pid=$?\"\n",
+				"/bin/cat < f & pid=$!; echo one > f; wait $pid; echo \"wait=$?\"\n",
+				"/bin/sh -c 'echo $$' > f & bg=$!; read -r self < f; wait $bg\n",
+				"[ \"$self\" = \"$bg\" ] && echo same-pid",
+			),
+			Some(root.path()),
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("the shell goes on while a background command waits for its FIFO");
+
+		assert_eq!(result.exit_code, Some(0), "{output}");
+		assert!(output.contains("Running"), "`jobs` lists the waiting command: {output}");
+		assert!(output.ends_with("kill-job=143\nkill-pid=143\none\nwait=0\nsame-pid\n"), "{output}");
+	}
+
+	/// `kill %1` aborts a background job without polling it again, so a FIFO
+	/// open it was waiting in is dropped, not cancelled. Its helper thread then
+	/// stayed in `open` and took the next writer's connection, whose data was
+	/// lost. A dropped open must leave no reader behind.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn killed_job_leaves_no_reader_on_its_fifo() {
+		use std::os::unix::fs::OpenOptionsExt;
+		let root = tempfile::tempdir().expect("scratch directory");
+		let fifo = root.path().join("f");
+		pi_vfs::BlockingFs::native()
+			.make_node(&fifo, pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = run_command_capture_within(
+			Duration::from_secs(10),
+			"cat < f & sleep 0.2; kill %1; wait; echo done",
+			Some(root.path()),
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("the killed job ends");
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "done\n"));
+
+		// The release runs on its own thread; give it time, then a writer that
+		// does not wait must find no reader.
+		time::sleep(Duration::from_millis(500)).await;
+		let writer = std::fs::OpenOptions::new()
+			.write(true)
+			.custom_flags(libc::O_NONBLOCK)
+			.open(&fifo);
+		assert_eq!(
+			writer.err().and_then(|err| err.raw_os_error()),
+			Some(libc::ENXIO),
+			"a reader was left on the FIFO"
+		);
+	}
+
+	/// The release of a killed job's FIFO open must be done when `kill`
+	/// returns: a release that came later woke the next command's open of the
+	/// same FIFO too, so that reader read EOF, its writer's data was lost, and
+	/// the writer then blocked with no reader.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn killed_job_releases_its_fifo_before_the_next_command() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = run_command_capture_within(
+			Duration::from_secs(30),
+			concat!(
+				"for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do\n",
+				"  cat < f & sleep 0.05; kill %%\n",
+				"  /bin/cat < f > got & sleep 0.1; echo \"hi$i\" > f; wait\n",
+				"  read -r x < got; [ \"$x\" = \"hi$i\" ] || echo \"lost $i\"\n",
+				"done; echo done",
+			),
+			Some(root.path()),
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("no writer is left without a reader");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "done\n"));
+	}
+
+	/// A background external command's descriptor path (`/dev/stdout`) reaches
+	/// the shell's own output pipe and looked like a FIFO, so it was left to
+	/// the child, which then wrote to its `/dev/null` placeholder. And the
+	/// `/bin/sh` that makes deferred redirects stored the FIFO path in `f1`,
+	/// replacing an exported `f1` in the command's environment.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn deferred_redirects_keep_descriptor_paths_and_the_environment() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = run_command_capture_within(
+			Duration::from_secs(10),
+			concat!(
+				"/bin/echo out > /dev/stdout & wait\n",
+				"export f1=orig; /usr/bin/env > f & grep '^f1=' < f; wait",
+			),
+			Some(root.path()),
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("the commands finish");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "out\nf1=orig\n"));
+	}
+
+	/// A later redirection of a descriptor that a deferred FIFO redirection
+	/// sets (`>f >/dev/null`), or a duplication, move or close of it, made
+	/// every deferred redirection in the parent after all: the parent opened
+	/// the FIFO and waited for its reader, the next command, so the shell
+	/// never returned. The child now makes them all, in the order written.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn later_redirects_of_a_deferred_descriptor_stay_in_the_child() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = run_command_capture_within(
+			Duration::from_secs(10),
+			concat!(
+				"/bin/echo replaced >f >/dev/null & cat <f; wait; echo \"replace=$?\"\n",
+				"/bin/echo closed 3>f >&3 3>&- & cat <f; wait\n",
+				"/bin/echo moved 3>f 1>&3- & cat <f; wait\n",
+				"/bin/echo both >f &>/dev/null & cat <f; wait; echo \"both=$?\"\n",
+				"/bin/echo descriptor >f >/dev/stdout & cat <f; wait",
+			),
+			Some(root.path()),
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("the shell goes on while a background command waits for its FIFO");
+
+		assert_eq!(
+			(result.exit_code, output.as_str()),
+			(Some(0), "replace=0\nclosed\nmoved\nboth=0\ndescriptor\n")
+		);
+	}
+
+	/// A deferred duplication reads the descriptor this process holds, so the
+	/// null device that stands in for a deferred descriptor must not take its
+	/// place: `>f 1>&3 3>/dev/null` sent the output to the null device, the
+	/// move `>f 1>&4-` lost it, and so did the swap idiom.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn deferred_duplications_read_the_descriptors_the_parent_holds() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = run_command_capture_within(
+			Duration::from_secs(10),
+			concat!(
+				"{ /bin/echo dup3 >f 1>&3 3>/dev/null & cat <f; wait; } 3>out3; cat out3\n",
+				"{ /bin/echo moved4 >f 1>&4- & cat <f; wait; } 4>out4; cat out4\n",
+				"/bin/echo sw 2>f 3>&1 1>&2 2>&3 3>&- & cat <f; wait",
+			),
+			Some(root.path()),
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("the shell goes on while a background command waits for its FIFO");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "dup3\nmoved4\nsw\n"));
+	}
+
+	/// On macOS `poll` and kqueue report a FIFO's data but never its EOF, so
+	/// a builtin waiting for more input hung once the writer closed: `mapfile`
+	/// and `read` until cancelled, and `read -t` timed out instead of reading
+	/// EOF. Each writer here closes while its reader waits.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn builtins_waiting_on_a_fifo_see_its_writer_close() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = run_command_capture_within(
+			Duration::from_secs(10),
+			concat!(
+				"{ echo a; sleep 0.2; } > f & mapfile -t lines < f; wait; echo \
+				 \"mapfile=${#lines[@]}\"\n",
+				"{ echo b; sleep 0.2; } > f & while read -r l; do echo \"read=$l\"; done < f; wait\n",
+				"{ printf c; sleep 0.2; } > f & read -t 5 -r x < f; echo \"read-t=$? $x\"; wait",
+			),
+			Some(root.path()),
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("each reader ends at its writer's EOF");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "mapfile=1\nread=b\nread-t=1 c\n"));
+	}
+
+	/// Runs `command` on a dedicated single-worker runtime and fails after five
+	/// seconds.
+	#[cfg(unix)]
+	fn capture_on_single_worker(command: &'static str) -> (ShellExecuteResult, String) {
+		capture_on_runtime(command, None, 512)
+			.expect("read must not wait on a blocking worker it cannot get")
+	}
+
+	/// Runs `command` in `cwd` on a dedicated single-worker runtime whose
+	/// blocking pool holds `max_blocking_threads`; fails once the run outlasts
+	/// five seconds. The deadline lives on the calling thread, so it still
+	/// fires when a builtin blocks the runtime's only worker, and starts once
+	/// this thread holds [`shell_test_lock`].
+	#[cfg(unix)]
+	fn capture_on_runtime(
+		command: &'static str,
+		cwd: Option<std::path::PathBuf>,
+		max_blocking_threads: usize,
+	) -> Result<(ShellExecuteResult, String), std::sync::mpsc::RecvTimeoutError> {
+		let _guard = shell_test_lock().blocking_lock();
+		let (tx, rx) = std::sync::mpsc::channel();
+		std::thread::spawn(move || {
+			let runtime = tokio::runtime::Builder::new_multi_thread()
+				.worker_threads(1)
+				.max_blocking_threads(max_blocking_threads)
+				.enable_all()
+				.build()
+				.expect("single-worker runtime");
+			let _ = tx.send(runtime.block_on(capture_unlocked(
+				command,
+				cwd.as_deref(),
+				None,
+				CancelToken::default(),
+			)));
+		});
+		rx.recv_timeout(Duration::from_secs(5))
+	}
+
+	/// Owned-shell pipeline stages already hold a blocking worker. Two `read`
+	/// stages fill a two-thread pool; offloading each read again would queue it
+	/// behind the workers its own stages hold, forever.
+	#[cfg(unix)]
+	#[test]
+	fn pipeline_reads_do_not_nest_on_a_full_blocking_pool() {
+		let (result, output) =
+			capture_on_runtime("printf 'a\\n' | read -r x | read -r y; printf 'done\\n'", None, 2)
+				.expect("read must not wait on a blocking worker it cannot get");
+
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "done\n");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn async_utilities_wait_for_a_slow_producer_without_blocking_the_worker() {
+		let (result, output) =
+			capture_on_runtime("{ sleep 0.3; echo hit; } | grep hit | rg hit", None, 512)
+				.expect("async utilities must not block the runtime's only worker");
+
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "hit\n");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn async_utilities_pipe_more_than_a_pipe_buffer() {
+		let dir = tempfile::tempdir().expect("temp dir");
+		for i in 0..3000 {
+			std::fs::write(dir.path().join(format!("{}{i:05}", "f".repeat(40))), b"")
+				.expect("create file");
+		}
+
+		let find =
+			capture_on_runtime("find . -type f | grep -c f", Some(dir.path().to_path_buf()), 512);
+		let fd = capture_on_runtime("fd -t f . | rg -c f", Some(dir.path().to_path_buf()), 512);
+
+		let (result, output) = find.expect("find | grep must not deadlock on a full pipe");
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "3000\n");
+		let (result, output) = fd.expect("fd | rg must not deadlock on a full pipe");
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "3000\n");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn async_utility_waiting_on_stdin_is_cancelled_by_timeout() {
+		// The pipeline ends with its producer (1 s); `grep` must be cancelled at
+		// 0.3 s while the producer still needs the worker.
+		let (result, output) =
+			capture_on_runtime("{ sleep 1; echo x; } | timeout 0.3 grep x", None, 512)
+				.expect("timeout must cancel a utility waiting on stdin");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(124), ""));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn read_process_substitution_assigns_line() {
+		let (result, output) =
+			capture_on_single_worker("read -r line < <(printf 'ok\\n'); printf '%s\\n' \"$line\"");
+
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "ok\n");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn read_process_substitution_delivers_lines_and_reaches_eof() {
+		let (result, output) = capture_on_single_worker(
+			"while IFS= read -r l; do export X=\"$l\"; done < <(printf 'v\\n'); printf '%s\\n' \"$X\"",
+		);
+
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "v\n");
 	}
 
 	/// Builtins share the host process, so a descriptor path must reach the
@@ -6117,9 +6622,12 @@ mod tests {
 		let command = "for f in $(cat /dev/stdin <<'EOF'\na\nb\nEOF\n); do echo \"$f\"; done\necho \
 		               to-stderr > /dev/stderr\necho via-tee | tee /dev/stderr > /dev/null\nsource \
 		               /dev/stdin <<< 'echo sourced'";
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(5),
-			run_command_capture(command, None, None, CancelToken::default()),
+			command,
+			None,
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("descriptor paths must not read the host terminal");
@@ -6143,9 +6651,12 @@ mod tests {
 		let command =
 			format!("cat /dev/fd/{fd}; echo \"rc=$?\"; cat < /proc/self/fd/{fd}; echo \"rc=$?\"");
 
-		let (_, output) = time::timeout(
+		let (_, output) = run_command_capture_within(
 			Duration::from_secs(5),
-			run_command_capture(&command, None, None, CancelToken::default()),
+			&command,
+			None,
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("closed descriptor paths should fail fast");
@@ -6163,9 +6674,12 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn process_substitution_operands_keep_the_shell_fd_name() {
 		let command = "wc -l <(printf 'a\\nb\\n'); ls <(true); sed -n -f <(echo p) <<< from-sed";
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(5),
-			run_command_capture(command, None, None, CancelToken::default()),
+			command,
+			None,
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("process substitution should not hang");
@@ -6186,9 +6700,12 @@ mod tests {
 			 's/c/d/w /dev/stdout'",
 			dir.display()
 		);
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(5),
-			run_command_capture(&command, None, None, CancelToken::default()),
+			&command,
+			None,
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("sed should not hang");
@@ -6205,9 +6722,12 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn descriptor_paths_keep_their_spelling() {
 		let command = "pgrep -F /dev/fd/9; sed 'w /dev/fd/9' <<< x; readlink /dev/stdin <<< x";
-		let (_, output) = time::timeout(
+		let (_, output) = run_command_capture_within(
 			Duration::from_secs(5),
-			run_command_capture(command, None, None, CancelToken::default()),
+			command,
+			None,
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("closed descriptor paths should fail fast");
@@ -6320,6 +6840,70 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		assert!(!still_written(output.path()).await, "`yes` kept running after kill %1");
 	}
 
+	/// VictorCano's #12309 follow-up trigger (2026-10-21): a backgrounded
+	/// compound loop — not a simple builtin command at job level — inside a
+	/// subshell must also end with the subshell, like a backgrounded `yes`.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn subshell_exit_ends_backgrounded_compound_loops() {
+		let _guard = shell_test_lock().lock().await;
+		let output = tempfile::NamedTempFile::new().expect("output file");
+		let shell = Shell::new(None);
+		let command =
+			format!("(while :; do echo x >> {}; done &)", quote_arg(&output.path().to_string_lossy()));
+
+		shell
+			.run(ShellRunOptions { command, ..Default::default() }, None, CancelToken::default())
+			.await
+			.expect("run compound loop");
+
+		assert!(
+			!still_written(output.path()).await,
+			"background compound loop outlived its subshell"
+		);
+	}
+
+	/// `kill %N` must reach a backgrounded compound loop in a retained session
+	/// (the bash-tool persistent shell keeps its job table alive, so the loop
+	/// legitimately outlives the call — the agent's only off-switch is the
+	/// jobspec). Uses a writing loop so liveness is observable without timing,
+	/// and bounds both calls: a hanging `kill %1` is exactly the wedge the
+	/// reporter hit on 18.12.5, not a pass.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn kill_jobspec_ends_backgrounded_compound_loop_in_retained_session() {
+		let _guard = shell_test_lock().lock().await;
+		let output = tempfile::NamedTempFile::new().expect("output file");
+		let shell = Shell::new(None);
+		let sub =
+			format!("(while :; do echo x >> {}; done) &", quote_arg(&output.path().to_string_lossy()));
+
+		time::timeout(
+			Duration::from_secs(10),
+			shell.run(
+				ShellRunOptions { command: sub, ..Default::default() },
+				None,
+				CancelToken::default(),
+			),
+		)
+		.await
+		.expect("backgrounding a subshell loop must return promptly")
+		.expect("run backgrounded subshell loop");
+		assert!(still_written(output.path()).await, "loop never started");
+
+		let kill = time::timeout(
+			Duration::from_secs(10),
+			shell.run(
+				ShellRunOptions { command: "kill %1".into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			),
+		)
+		.await
+		.expect("kill %1 must return instead of wedging the session")
+		.expect("kill %1");
+		assert_eq!(kill.exit_code, Some(0), "kill %1 failed");
+		assert!(!still_written(output.path()).await, "kill %1 did not end the compound loop");
+	}
+
 	/// `live_background_job_count` reports 0 when the session has no live
 	/// external background jobs and 1 while one is running. The host relies on
 	/// this to retain a per-call shell whose `&`/`nohup` child is still alive
@@ -6359,6 +6943,166 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 
 		// Dropping the shell at scope end reaps the child via kill-on-drop.
 		shell.abort().await;
+	}
+
+	/// An exited `&` child must be waited on while the persistent shell is
+	/// idle, not only when the host submits another command. Keep its status
+	/// for a later explicit `wait` after the OS process has disappeared.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn persistent_shell_reaps_background_child_without_followup_run() {
+		let _guard = shell_test_lock().lock().await;
+		let shell = Shell::new(None);
+		let (tx, rx) = flume::unbounded::<String>();
+		let started = shell
+			.run(
+				ShellRunOptions {
+					command: "/bin/sh -c 'sleep 1; exit 7' >/dev/null 2>&1 & pid=$!; printf '%s\\n' \
+					          \"$pid\""
+						.into(),
+					..Default::default()
+				},
+				Some(tx),
+				CancelToken::default(),
+			)
+			.await
+			.expect("start external background child");
+		assert_eq!(started.exit_code, Some(0));
+		let output: String = rx.try_iter().collect();
+		let pid = output
+			.trim()
+			.parse::<i32>()
+			.expect("background process pid");
+		assert!(pid > 0);
+
+		// No calls to the shell (including the live-job counter) until this
+		// child has exited and its parent has reaped it.
+		time::timeout(Duration::from_secs(5), async {
+			loop {
+				// SAFETY: signal 0 only probes this pid's existence.
+				if unsafe { libc::kill(pid, 0) } == -1 {
+					let err = io::Error::last_os_error();
+					assert_eq!(err.raw_os_error(), Some(libc::ESRCH), "probe child: {err}");
+					break;
+				}
+				time::sleep(Duration::from_millis(20)).await;
+			}
+		})
+		.await
+		.expect("background child remained a zombie after exit");
+
+		assert_eq!(shell.live_background_job_count().await, 0);
+
+		let waited = shell
+			.run(
+				ShellRunOptions { command: "wait \"$pid\"".into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("wait for already-reaped child");
+		assert_eq!(waited.exit_code, Some(7));
+	}
+
+	/// A short-lived stage of a background pipeline must be reaped even if
+	/// another stage is still running. The pipeline's last-stage status must
+	/// remain available to `wait` after both children have been reaped.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn persistent_shell_reaps_early_exiting_background_pipeline_stage() {
+		let _guard = shell_test_lock().lock().await;
+		let shell = Shell::new(None);
+		let first_pidfile = tempfile::NamedTempFile::new().expect("pipeline pidfile");
+		let command = format!(
+			"/bin/sh -c 'echo $$ > \"$1\"; exec /bin/sleep 15' _ {} | /bin/sh -c 'sleep 1; exit 9' \
+			 >/dev/null 2>&1 & pid=$!; printf '%s\\n' \"$pid\"",
+			quote_arg(&first_pidfile.path().to_string_lossy())
+		);
+		let (tx, rx) = flume::unbounded::<String>();
+		let started = shell
+			.run(ShellRunOptions { command, ..Default::default() }, Some(tx), CancelToken::default())
+			.await
+			.expect("start background pipeline");
+		assert_eq!(started.exit_code, Some(0));
+		let output: String = rx.try_iter().collect();
+		let last_pid = output
+			.trim()
+			.parse::<i32>()
+			.expect("last pipeline stage pid");
+		assert!(last_pid > 0);
+		let first_pid = time::timeout(Duration::from_secs(2), async {
+			loop {
+				if let Ok(pid) = fs::read_to_string(first_pidfile.path())
+					.unwrap_or_default()
+					.trim()
+					.parse::<i32>()
+				{
+					break pid;
+				}
+				time::sleep(Duration::from_millis(20)).await;
+			}
+		})
+		.await
+		.expect("first pipeline stage did not record its pid");
+		assert_ne!(first_pid, last_pid, "pipeline stages need distinct pids");
+
+		// A zombie still responds to signal 0. The last stage must disappear
+		// while the first is alive, without another shell/tool invocation.
+		time::timeout(Duration::from_secs(5), async {
+			loop {
+				// SAFETY: signal 0 only probes this pid's existence.
+				if unsafe { libc::kill(last_pid, 0) } == -1 {
+					let err = io::Error::last_os_error();
+					assert_eq!(err.raw_os_error(), Some(libc::ESRCH), "probe child: {err}");
+					break;
+				}
+				time::sleep(Duration::from_millis(20)).await;
+			}
+		})
+		.await
+		.expect("early exiting pipeline stage remained a zombie");
+		// SAFETY: signal 0 only probes the other child, which must still be
+		// running for this to prove independent reaping.
+		assert_eq!(unsafe { libc::kill(first_pid, 0) }, 0, "first stage exited too soon");
+		// SAFETY: end only this test-owned sleep so the final wait is prompt.
+		assert_eq!(unsafe { libc::kill(first_pid, libc::SIGTERM) }, 0);
+
+		let waited = shell
+			.run(
+				ShellRunOptions { command: "wait \"$pid\"".into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("wait for background pipeline");
+		assert_eq!(waited.exit_code, Some(9), "wait must report the pipeline's last stage");
+	}
+
+	/// `exit` and errexit end the command, not the session: later runs keep
+	/// the variables, functions, and options set before them.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn exit_and_errexit_keep_session_state() {
+		let _guard = shell_test_lock().lock().await;
+		let shell = Shell::new(None);
+		let exit_code = async |command: &str| {
+			shell
+				.run(
+					ShellRunOptions { command: command.into(), ..Default::default() },
+					None,
+					CancelToken::default(),
+				)
+				.await
+				.expect("run")
+				.exit_code
+		};
+		let state_intact = "test \"$PI_KEPT\" = kept && pi_kept_fn";
+
+		assert_eq!(exit_code("set -e; PI_KEPT=kept; pi_kept_fn() { true; }").await, Some(0));
+		assert_eq!(exit_code("false; true").await, Some(1), "errexit stops the command");
+		assert_eq!(exit_code(state_intact).await, Some(0), "state lost after errexit");
+		assert_eq!(exit_code("exit 3").await, Some(3));
+		assert_eq!(exit_code(state_intact).await, Some(0), "state lost after exit");
+		assert_eq!(exit_code("false; exit 0").await, Some(1), "errexit option lost");
 	}
 
 	/// `Shell::pids` reports the in-flight run's live external children without
@@ -6486,7 +7230,7 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 			let output: String = rx.drain().collect();
 			(result, output)
 		};
-		let rows = r#"range(0; 100) | "row with many fields and a longer string value""#;
+		let rows = r#"range(0; 200) | "row with many fields and a longer string value""#;
 		// `stderr` writes no newline, so the error lands mid-line
 		let failing = format!(
 			r#"jq -r 'if . == 2 then "prefix" | stderr | error("boom") else {rows} end' in.jsonl"#
@@ -6496,9 +7240,15 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 			assert_eq!(result.exit_code, Some(0), "{command}");
 			assert!(output.contains("prefixError: \"boom\""), "{command}: {output:?}");
 			assert!(result.minimized.is_none(), "{command}: {:?}", result.minimized);
+			// Without the reported error the jq filter would shorten this capture.
+			let filtered = minimizer::apply(&failing, &output, 0, &minimizer::MinimizerConfig {
+				enabled: true,
+				..Default::default()
+			});
+			assert!(filtered.changed, "{command}");
 		}
 		for value in ["Error: expected user data", "jq: error is data"] {
-			let command = format!(r#"jq -nr 'range(0; 200) | "{value}"'"#);
+			let command = format!(r#"jq -nr 'range(0; 1000) | "{value}"'"#);
 			let (result, _) = run(&command).await;
 			assert_eq!(result.exit_code, Some(0), "{command}");
 			assert!(result.minimized.is_some(), "{command} is shortened");
@@ -6761,7 +7511,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		let mut session = create_session(&config).await.expect("create_session");
 
 		// Output pipe shared between the brush child and a concurrent reader. The
-		// reader runs on a blocking thread because `os_pipe` reads are blocking.
+		// reader runs on a blocking thread because pipe reads are blocking.
 		let (mut reader, writer) = pipe_to_files("e2e").expect("pipe");
 		let stdout_file = OpenFile::from(writer.try_clone().expect("clone"));
 		let stderr_file = OpenFile::from(writer);
@@ -6851,6 +7601,122 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			child_sid, child_pid,
 			"child PID {child_pid} should be its own session leader after setsid",
 		);
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn cancellation_allows_background_term_cleanup_while_builtin_is_running() {
+		let _guard = shell_test_lock().lock().await;
+		let root = tempfile::tempdir().expect("cleanup directory");
+		let script = root.path().join("cleanup.sh");
+		fs::write(
+			&script,
+			"trap 'sleep 0.2; printf cleaned >> cleaned; exit 0' TERM\n: > ready\nwhile :; do :; \
+			 done\n",
+		)
+		.expect("cleanup script");
+		let shell = Shell::new(None);
+		let mut cancel = CancelToken::default();
+		let abort = cancel.emplace_abort_token();
+		let cwd = root.path().to_str().expect("utf8 cwd").to_owned();
+		let task = tokio::spawn(async move {
+			shell
+				.run(
+					ShellRunOptions {
+						command: "sh cleanup.sh & sleep 30".into(),
+						cwd: Some(cwd),
+						..Default::default()
+					},
+					None,
+					cancel,
+				)
+				.await
+		});
+		time::timeout(Duration::from_secs(5), async {
+			while !root.path().join("ready").exists() {
+				time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("background child ready");
+		abort.abort(AbortReason::Signal);
+		let result = time::timeout(Duration::from_secs(5), task)
+			.await
+			.expect("cancel finished")
+			.expect("run task")
+			.expect("shell result");
+		assert!(result.cancelled);
+		assert_eq!(fs::read_to_string(root.path().join("cleaned")).expect("TERM cleanup"), "cleaned");
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn cancellation_keeps_output_open_for_a_term_trap_that_writes() {
+		let _guard = shell_test_lock().lock().await;
+		let root = tempfile::tempdir().expect("cleanup directory");
+		// The trap writes once the readers' old 500 ms cancel would have closed
+		// them, and finishes well inside the 1 s TERM grace even when a loaded
+		// runner is slow to start `sleep`.
+		fs::write(
+			root.path().join("cleanup.sh"),
+			"trap 'sleep 0.55; echo flushing; printf cleaned > cleaned; exit 0' TERM\n: > \
+			 ready\nwhile :; do :; done\n",
+		)
+		.expect("cleanup script");
+		let shell = Shell::new(None);
+		let mut cancel = CancelToken::default();
+		let abort = cancel.emplace_abort_token();
+		let cwd = root.path().to_str().expect("utf8 cwd").to_owned();
+		let task = tokio::spawn(async move {
+			shell
+				.run(
+					ShellRunOptions {
+						command: "sh cleanup.sh".into(),
+						cwd: Some(cwd),
+						..Default::default()
+					},
+					None,
+					cancel,
+				)
+				.await
+		});
+		time::timeout(Duration::from_secs(5), async {
+			while !root.path().join("ready").exists() {
+				time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("child ready");
+		abort.abort(AbortReason::Signal);
+		let result = time::timeout(Duration::from_secs(5), task)
+			.await
+			.expect("cancel finished")
+			.expect("run task")
+			.expect("shell result");
+		assert!(result.cancelled);
+		assert_eq!(
+			fs::read_to_string(root.path().join("cleaned"))
+				.expect("TERM cleanup after writing output"),
+			"cleaned"
+		);
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn termination_returns_early_after_the_child_exits() {
+		let mut command = Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+		if cfg!(windows) {
+			command.args(["/c", "ping -n 30 127.0.0.1"]);
+		} else {
+			command.args(["-c", "exec sleep 30"]);
+		}
+		let mut child = command.kill_on_drop(true).spawn().expect("child");
+		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits");
+		let registry = process::SpawnRegistry::new();
+		registry.record(None, process::Process::from_pid(pid));
+		let started = time::Instant::now();
+		let ((), status) = tokio::join!(terminate_run(&registry), child.wait());
+		assert!(status.is_ok(), "terminated child must be reaped");
+		assert!(started.elapsed() < Duration::from_millis(750), "exited child consumed TERM grace");
 	}
 
 	/// Cancelling one `Shell::run` must only signal processes spawned by that
@@ -7535,5 +8401,112 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		assert!(!result.cancelled);
 		assert!(!result.timed_out);
 		assert_eq!(received, TOTAL_BYTES, "streamed bytes were dropped under backpressure");
+	}
+
+	/// Runs `command` on a fresh shell with pipe taps, collecting its output.
+	fn run_tapped(
+		command: &str,
+		cancel: CancelToken,
+	) -> (Arc<PipeTaps>, tokio::task::JoinHandle<Result<ShellRunResult>>, flume::Receiver<String>)
+	{
+		let taps = Arc::new(PipeTaps::new());
+		let (tx, rx) = flume::unbounded::<String>();
+		let options = ShellRunOptions {
+			command: command.into(),
+			pipe_taps: Some(Arc::clone(&taps)),
+			..Default::default()
+		};
+		let run = tokio::spawn(async move { Shell::new(None).run(options, Some(tx), cancel).await });
+		(taps, run, rx)
+	}
+
+	/// Everything a finished run printed.
+	async fn collect_output(rx: &flume::Receiver<String>) -> String {
+		let mut output = String::new();
+		while let Ok(chunk) = rx.recv_async().await {
+			output.push_str(&chunk);
+		}
+		output
+	}
+
+	/// The point of the tap: while `tail` holds its input back, the bytes the
+	/// producer already wrote are readable as stream 1.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn pipe_tap_exposes_input_a_later_stage_holds_back() {
+		let _guard = shell_test_lock().lock().await;
+		let mut cancel = CancelToken::default();
+		let abort = cancel.emplace_abort_token();
+		let (taps, run, rx) = run_tapped("{ printf 'a\\nb\\nc\\n'; sleep 30; } | tail -n 1", cancel);
+
+		let seen = time::timeout(Duration::from_secs(10), async {
+			loop {
+				if let Some(read) = taps.read(1, None)
+					&& read.data == b"a\nb\nc\n"
+				{
+					return read;
+				}
+				time::sleep(Duration::from_millis(20)).await;
+			}
+		})
+		.await
+		.expect("producer output never reached stream 1");
+		assert!(seen.open);
+		assert!(rx.try_recv().is_err(), "tail printed before its input ended");
+		let [stream] = taps.list().try_into().expect("one pipe");
+		assert!(stream.producer.contains("printf"), "producer text: {}", stream.producer);
+		assert!(stream.consumer.contains("tail"), "consumer text: {}", stream.consumer);
+
+		abort.abort(AbortReason::Signal);
+		let result = time::timeout(Duration::from_secs(10), run)
+			.await
+			.expect("run did not stop after abort")
+			.expect("run task panicked")
+			.expect("run");
+		assert!(result.cancelled);
+		assert!(!taps.read(1, None).expect("stream 1").open);
+	}
+
+	/// A consumer that exits early still ends the pipeline at once through a
+	/// tapped pipe: the relay lets go of the producer's end when `head`
+	/// leaves, so `tail -f` (idle, no further writes) sees its pipe widowed.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn pipe_tap_widows_the_producer_when_the_consumer_exits() {
+		let _guard = shell_test_lock().lock().await;
+		let log = tempfile::NamedTempFile::new().expect("log file");
+		std::fs::write(log.path(), "first\nsecond\n").expect("write log");
+		let command = format!("tail -f {} | head -n 1", quote_arg(&log.path().to_string_lossy()));
+		let (_taps, run, rx) = run_tapped(&command, CancelToken::default());
+
+		let result = time::timeout(Duration::from_secs(10), run)
+			.await
+			.expect("tail -f kept following after head exited")
+			.expect("run task panicked")
+			.expect("run");
+		assert_eq!(result.exit_code, Some(0));
+		assert_eq!(collect_output(&rx).await, "first\n");
+	}
+
+	/// Every byte reaches the consumer unchanged, and the stream counts all of
+	/// them while retaining only its newest megabyte.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn pipe_tap_forwards_every_byte_and_counts_them() {
+		let _guard = shell_test_lock().lock().await;
+		const LAST: usize = 200_000;
+		let (taps, run, rx) = run_tapped(&format!("seq 1 {LAST} | wc -l"), CancelToken::default());
+
+		let result = time::timeout(Duration::from_secs(30), run)
+			.await
+			.expect("run did not finish")
+			.expect("run task panicked")
+			.expect("run");
+		assert_eq!(result.exit_code, Some(0));
+		assert_eq!(collect_output(&rx).await.trim(), LAST.to_string());
+		let written: usize = (1..=LAST).map(|n| n.to_string().len() + 1).sum();
+		let read = taps.read(1, None).expect("stream 1");
+		assert_eq!(read.end, written as u64);
+		assert_eq!(read.data.len(), written.min(1 << 20));
+		assert!(read.data.ends_with(format!("\n{LAST}\n").as_bytes()));
+		assert!(!read.open);
 	}
 }

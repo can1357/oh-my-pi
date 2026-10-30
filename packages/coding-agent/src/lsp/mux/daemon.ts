@@ -301,6 +301,7 @@ export async function connectSharedLspTransport(opts: {
 	args: string[];
 	cwd: string;
 	env?: Record<string, string>;
+	initializationOptions: unknown;
 	signal?: AbortSignal;
 }): Promise<LspTransport | null> {
 	try {
@@ -311,6 +312,7 @@ export async function connectSharedLspTransport(opts: {
 			args: opts.args,
 			cwd: opts.cwd,
 			env: opts.env,
+			initializationOptions: opts.initializationOptions,
 		});
 	} catch (error) {
 		if (opts.signal?.aborted) throw error;

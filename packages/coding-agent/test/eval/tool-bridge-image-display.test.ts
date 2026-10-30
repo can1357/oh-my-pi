@@ -1,11 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { JsRuntime, type RuntimeHooks } from "@oh-my-pi/pi-coding-agent/eval/js/shared/runtime";
-import type { JsDisplayOutput } from "@oh-my-pi/pi-coding-agent/eval/js/shared/types";
+import type { EvalDisplayOutput } from "@oh-my-pi/pi-coding-agent/eval/types";
 
 const PNG_BASE64 = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).toString("base64");
 
-function collect(callTool: RuntimeHooks["callTool"]): { hooks: RuntimeHooks; displays: JsDisplayOutput[] } {
-	const displays: JsDisplayOutput[] = [];
+function collect(callTool: RuntimeHooks["callTool"]): { hooks: RuntimeHooks; displays: EvalDisplayOutput[] } {
+	const displays: EvalDisplayOutput[] = [];
 	const hooks: RuntimeHooks = {
 		onText: () => {},
 		onDisplay: output => displays.push(output),

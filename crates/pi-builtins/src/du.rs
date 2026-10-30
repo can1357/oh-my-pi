@@ -6,8 +6,9 @@
 use std::{
 	collections::HashSet,
 	ffi::{OsStr, OsString},
+	fmt::NumBuffer,
 	io::{self, Read, Write},
-	path::Path,
+	path::{Path, PathBuf},
 };
 
 use brush_core::{ShellExtensions, builtins::Registration};
@@ -409,6 +410,42 @@ impl DuInfo {
 	}
 }
 
+/// A directory whose children are being visited, or an entry being finished.
+struct DirFrame {
+	/// Length of this entry's display name in the walk's name buffer.
+	display_len: usize,
+	level:       usize,
+	own:         DuInfo,
+	/// The children's own sizes.
+	ent:         DuInfo,
+	/// Everything below the child directories.
+	subdir:      DuInfo,
+	children:    std::vec::IntoIter<(OsString, PathBuf)>,
+	/// The error that cut the directory listing short.
+	read_error:  Option<io::Error>,
+	/// Whether this directory is on [`Walker::ancestors`].
+	is_ancestor: bool,
+}
+
+impl DirFrame {
+	fn add(&mut self, child: &Counted, separate_dirs: bool) {
+		if !(separate_dirs && child.dir_type) {
+			self.ent.add(&child.own);
+		}
+		if child.dir_type {
+			self.subdir.add(&child.inner);
+		}
+	}
+}
+
+/// How [`Walker::enter`] left an entry.
+enum Entered {
+	/// Finished, with what it adds to its parent if anything.
+	Leaf(Option<Counted>),
+	/// A directory whose children are to be visited.
+	Dir(DirFrame),
+}
+
 /// What a visited entry contributes to its parent directory.
 struct Counted {
 	own:      DuInfo,
@@ -456,17 +493,55 @@ impl Walker<'_> {
 		let display = &operand[..len];
 		let path = self.host.resolve(bytes_to_os(display));
 		self.root_dev = None;
-		self.visit(display, &path, 0);
+		self.visit(display, &path);
 	}
 
 	fn metadata(&self, path: &Path, follow: bool) -> io::Result<Metadata> {
 		if follow { self.host.fs().metadata(path) } else { self.host.fs().symlink_metadata(path) }
 	}
 
-	/// GNU's `process_file` for one entry and, for a directory, its subtree.
-	fn visit(&mut self, display: &[u8], path: &Path, level: usize) -> Option<Counted> {
+	/// GNU's `process_file` for one operand and, for a directory, its subtree.
+	///
+	/// Walks with an explicit stack of open directories: recursing once per
+	/// level overflows the thread's stack on a deep enough tree, and that
+	/// kills the whole process rather than failing the command.
+	fn visit(&mut self, display: &[u8], path: &Path) {
+		let separate_dirs = self.cfg.separate_dirs;
+		let mut display = display.to_vec();
+		let mut stack = match self.enter(&display, path, 0) {
+			Entered::Leaf(_) => return,
+			Entered::Dir(frame) => vec![frame],
+		};
+		while let Some(frame) = stack.last_mut() {
+			display.truncate(frame.display_len);
+			let Some((name, child_path)) = frame.children.next() else {
+				let frame = stack.pop().expect("the loop holds a frame");
+				let counted = self.leave(&display, frame);
+				if let (Some(child), Some(parent)) = (counted, stack.last_mut()) {
+					parent.add(&child, separate_dirs);
+				}
+				continue;
+			};
+			let level = frame.level + 1;
+			if display.last() != Some(&b'/') {
+				display.push(b'/');
+			}
+			display.extend_from_slice(&os_bytes_lossy(&name));
+			match self.enter(&display, &child_path, level) {
+				Entered::Leaf(None) => {},
+				Entered::Leaf(Some(child)) => {
+					stack.last_mut().expect("the loop holds a frame").add(&child, separate_dirs);
+				},
+				Entered::Dir(child) => stack.push(child),
+			}
+		}
+	}
+
+	/// Everything `process_file` does for an entry before visiting its
+	/// children: a non-directory, or one that is skipped, is finished here.
+	fn enter(&mut self, display: &[u8], path: &Path, level: usize) -> Entered {
 		if self.check_stop() {
-			return None;
+			return Entered::Leaf(None);
 		}
 		let cfg = self.cfg;
 		let follow = cfg.deref == Deref::Logical || (cfg.deref == Deref::CommandLine && level == 0);
@@ -479,17 +554,17 @@ impl Walker<'_> {
 					&& self.host.fs().symlink_metadata(path).is_ok();
 				// Entries that vanish mid-walk are not reported.
 				if !dangling && level > 0 && error.kind() == io::ErrorKind::NotFound {
-					return None;
+					return Entered::Leaf(None);
 				}
 				if excluded {
-					return None;
+					return Entered::Leaf(None);
 				}
 				if dangling {
 					self.error(format_args!("cannot access {}", bytes_to_os(display).quote()));
 				} else {
 					self.error(format_args!("cannot access {}: {}", bytes_to_os(display).quote(), strip_errno(&error)));
 				}
-				return None;
+				return Entered::Leaf(None);
 			},
 		};
 		if level == 0 {
@@ -497,7 +572,7 @@ impl Walker<'_> {
 		}
 		let is_dir = meta.is_dir();
 		if excluded || (cfg.one_fs && level > 0 && meta.dev() != self.root_dev) {
-			return None;
+			return Entered::Leaf(None);
 		}
 		let id = meta.file_id();
 		if !cfg.count_all
@@ -505,7 +580,7 @@ impl Walker<'_> {
 			&& let Some(id) = id
 			&& !self.seen.insert(id)
 		{
-			return None;
+			return Entered::Leaf(None);
 		}
 		if is_dir
 			&& let Some(id) = id
@@ -520,7 +595,7 @@ impl Walker<'_> {
 					bytes_to_os(display).maybe_quote()
 				));
 			}
-			return None;
+			return Entered::Leaf(None);
 		}
 
 		let size = if cfg.apparent {
@@ -532,66 +607,71 @@ impl Walker<'_> {
 				.unwrap_or_else(|| meta.len())
 		};
 		let own = DuInfo { size, inodes: 1, tmax: entry_time(&meta, cfg) };
-
-		let mut ent = DuInfo::default();
-		let mut subdir = DuInfo::default();
-		if is_dir {
-			match self.host.fs().read_dir(path) {
-				Err(error) => {
-					if level > 0 && error.kind() == io::ErrorKind::NotFound {
-						return None;
-					}
-					self.error(format_args!(
-						"cannot read directory {}: {}",
-						bytes_to_os(display).quote(),
-						strip_errno(&error)
-					));
-				},
-				Ok(entries) => {
-					let mut children = Vec::new();
-					let mut read_error = None;
-					for entry in entries {
-						if self.check_stop() {
-							return None;
-						}
-						match entry {
-							Ok(entry) => children.push((entry.file_name(), entry.path())),
-							Err(error) => {
-								read_error = Some(error);
-								break;
-							},
-						}
-					}
-					self.ancestors.push(id);
-					let mut child_display = display.to_vec();
-					if child_display.last() != Some(&b'/') {
-						child_display.push(b'/');
-					}
-					let prefix = child_display.len();
-					for (name, child_path) in children {
-						child_display.truncate(prefix);
-						child_display.extend_from_slice(&os_bytes_lossy(&name));
-						let Some(child) = self.visit(&child_display, &child_path, level + 1) else {
-							continue;
-						};
-						if !(cfg.separate_dirs && child.dir_type) {
-							ent.add(&child.own);
-						}
-						if child.dir_type {
-							subdir.add(&child.inner);
-						}
-					}
-					self.ancestors.pop();
-					if let Some(error) = read_error {
-						self.error(format_args!("{}: {}", bytes_to_os(display).maybe_quote(), strip_errno(&error)));
-					}
-				},
-			}
-			if self.stopped {
-				return None;
-			}
+		let mut frame = DirFrame {
+			display_len: display.len(),
+			level,
+			own,
+			ent: DuInfo::default(),
+			subdir: DuInfo::default(),
+			children: Vec::new().into_iter(),
+			read_error: None,
+			is_ancestor: false,
+		};
+		if !is_dir {
+			return Entered::Leaf(self.conclude(display, frame, false));
 		}
+		match self.host.fs().read_dir(path) {
+			Err(error) => {
+				if level > 0 && error.kind() == io::ErrorKind::NotFound {
+					return Entered::Leaf(None);
+				}
+				self.error(format_args!(
+					"cannot read directory {}: {}",
+					bytes_to_os(display).quote(),
+					strip_errno(&error)
+				));
+			},
+			Ok(entries) => {
+				let mut children = Vec::new();
+				for entry in entries {
+					if self.check_stop() {
+						return Entered::Leaf(None);
+					}
+					match entry {
+						Ok(entry) => children.push((entry.file_name(), entry.path())),
+						Err(error) => {
+							frame.read_error = Some(error);
+							break;
+						},
+					}
+				}
+				frame.children = children.into_iter();
+				self.ancestors.push(id);
+				frame.is_ancestor = true;
+			},
+		}
+		Entered::Dir(frame)
+	}
 
+	/// Finishes a directory once all its children are visited.
+	fn leave(&mut self, display: &[u8], frame: DirFrame) -> Option<Counted> {
+		if frame.is_ancestor {
+			self.ancestors.pop();
+		}
+		if let Some(error) = &frame.read_error {
+			self.error(format_args!("{}: {}", bytes_to_os(display).maybe_quote(), strip_errno(error)));
+		}
+		if self.stopped {
+			return None;
+		}
+		self.conclude(display, frame, true)
+	}
+
+	/// Prints a finished entry's row when selected and returns what it adds
+	/// to its parent.
+	fn conclude(&mut self, display: &[u8], frame: DirFrame, is_dir: bool) -> Option<Counted> {
+		let cfg = self.cfg;
+		let DirFrame { own, ent, subdir, level, .. } = frame;
 		let mut to_print = own;
 		to_print.add(&ent);
 		if !cfg.separate_dirs {
@@ -616,6 +696,7 @@ impl Walker<'_> {
 	/// local mount point (a bind mount, which GNU does not warn about).
 	fn mount_point_in_cycle(&mut self, id: FileId, cycle: usize) -> bool {
 		if self.mounts.is_none() {
+			#[cfg_attr(not(unix), allow(unused_mut))]
 			let mut mounts = HashSet::new();
 			#[cfg(unix)]
 			if let Ok(list) = uucore::fsext::read_fs_list() {
@@ -674,7 +755,13 @@ fn entry_time(meta: &Metadata, cfg: &Config) -> Option<(i64, i64)> {
 	match kind {
 		TimeKind::Modification => Some((meta.mtime()?, meta.mtime_nsec()?)),
 		TimeKind::Access => Some((meta.atime()?, meta.atime_nsec()?)),
-		TimeKind::Change => Some((meta.ctime()?, meta.ctime_nsec()?)),
+		// Windows has no POSIX status-change time; like `stat`, fall back to
+		// the last write time, as Cygwin does.
+		TimeKind::Change => match (meta.ctime(), meta.ctime_nsec()) {
+			(Some(secs), Some(nsec)) => Some((secs, nsec)),
+			_ if cfg!(windows) => Some((meta.mtime()?, meta.mtime_nsec()?)),
+			_ => None,
+		},
 	}
 }
 
@@ -686,7 +773,7 @@ fn show_date(out: &mut Vec<u8>, time: Option<(i64, i64)>, format: &str, zone: &T
 		return;
 	};
 	let Ok(timestamp) = jiff::Timestamp::new(seconds, i32::try_from(nanos).unwrap_or(0)) else {
-		out.extend_from_slice(seconds.to_string().as_bytes());
+		out.extend_from_slice(seconds.format_into(&mut NumBuffer::new()).as_bytes());
 		return;
 	};
 	let zoned = Zoned::new(timestamp, zone.clone());
@@ -699,7 +786,7 @@ fn show_date(out: &mut Vec<u8>, time: Option<(i64, i64)>, format: &str, zone: &T
 	if formatted.is_ok() {
 		out.extend_from_slice(&rendered);
 	} else {
-		out.extend_from_slice(seconds.to_string().as_bytes());
+		out.extend_from_slice(seconds.format_into(&mut NumBuffer::new()).as_bytes());
 	}
 }
 
@@ -840,9 +927,9 @@ fn run(host: &mut Host, matches: &ArgMatches) -> i32 {
 		match read_input(host, name) {
 			Ok(data) => {
 				for line in data.split(|&b| b == b'\n') {
-					let end = line.iter().rposition(|b| !b.is_ascii_whitespace()).map_or(0, |last| last + 1);
-					if end > 0 {
-						excludes.add(&String::from_utf8_lossy(&line[..end]));
+					let line = line.trim_ascii_end();
+					if !line.is_empty() {
+						excludes.add(&String::from_utf8_lossy(line));
 					}
 				}
 			},
@@ -1051,7 +1138,7 @@ mod tests {
 
 	fn du(cwd: &Path, args: &[&str]) -> (i32, String, String) {
 		let (code, out, err) = du_env(cwd, args, &[], "");
-		(code, String::from_utf8_lossy(&out).into_owned(), err)
+		(code, String::from_utf8_lossy_owned(out), err)
 	}
 
 	/// The fixture tree: nested dirs, a 300 KiB file, a 50 MiB sparse file,
@@ -1074,6 +1161,10 @@ mod tests {
 			std::os::unix::fs::symlink("nowhere", root.join("e/dangling")).unwrap();
 			std::os::unix::fs::symlink("f1.txt", root.join("a/flink")).unwrap();
 		}
+		// Creating symlinks needs a privilege on Windows; a 6-byte file keeps
+		// the inode and apparent-size totals the tests expect from `a/flink`.
+		#[cfg(not(unix))]
+		fs::write(root.join("a/flink"), "f1.txt").unwrap();
 		(dir, root)
 	}
 
@@ -1369,8 +1460,15 @@ mod tests {
 		let (_dir, root) = tree();
 		let at = |secs: u64| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
 		let set = |path: &str, secs: u64| {
-			fs::File::options()
-				.write(true)
+			let mut options = fs::File::options();
+			options.write(true);
+			// Windows opens a directory handle only with backup semantics.
+			#[cfg(windows)]
+			std::os::windows::fs::OpenOptionsExt::custom_flags(
+				&mut options,
+				windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS,
+			);
+			options
 				.open(root.join(path))
 				.or_else(|_| fs::File::open(root.join(path)))
 				.unwrap()
@@ -1391,6 +1489,34 @@ mod tests {
 		assert_eq!(out, b"3\t2017-07-14 02:40:00.000000000 +0000\td\n");
 		let (_, out, _) = du_env(&root, &["--time", "--inodes", "-s", "d"], &[("TZ", "UTC"), ("TIME_STYLE", "+%s")], "");
 		assert_eq!(out, b"3\t1500000000\td\n");
+	}
+
+	/// A chain as deep as path syscalls reach must be summed, not overflow
+	/// the stack of the thread the shell runs on.
+	#[test]
+	fn sums_a_directory_chain_deeper_than_the_stack() {
+		let dir = tempfile::tempdir().expect("tempdir");
+		let root = dir.path().canonicalize().expect("canonical");
+		// Stay under the host's PATH_MAX: every level adds "/d".
+		#[cfg(unix)]
+		let path_max = usize::try_from(libc::PATH_MAX).expect("PATH_MAX is positive");
+		#[cfg(not(unix))]
+		let path_max = 4096;
+		let depth = (path_max - 96 - root.join("deep").as_os_str().len()) / 2;
+		let mut chain = root.join("deep");
+		for _ in 0..depth {
+			chain.push("d");
+		}
+		fs::create_dir_all(&chain).unwrap();
+
+		let (code, out, err) = std::thread::Builder::new()
+			.stack_size(256 * 1024)
+			.spawn(move || du(&root, &["--inodes", "-s", "deep"]))
+			.unwrap()
+			.join()
+			.unwrap();
+
+		assert_eq!((code, out, err.as_str()), (0, format!("{}\tdeep\n", depth + 1), ""));
 	}
 
 	#[test]

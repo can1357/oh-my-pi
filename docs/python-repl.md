@@ -14,15 +14,14 @@ It covers tool behavior, runner lifecycle, environment handling, execution seman
 - Python wrapper / NDJSON server: `src/eval/py/runner.py`
 - Prelude helpers loaded into every kernel: `src/eval/py/prelude.py`
 - Host-side subagent helper bridge: `src/eval/agent-bridge.ts`
-- MIME bundle renderer (text + structured outputs): `src/eval/py/display.ts`
-- Tool output renderer: `packages/tui/src/tools/eval.ts`
+- Tool output renderer and view splitting: `packages/tui/src/tools/eval.ts`
 - Shared output capture: `packages/tui/src/tools/streaming-output.ts`
 - Interactive-mode renderer for user-triggered Python runs: `packages/tui/src/chat/eval-execution.ts`
 - Runtime/env filtering and Python resolution: `src/eval/py/runtime.ts`
 
 ## What eval's Python backend is
 
-The `eval` tool executes one Python cell per call inside a retained Python subprocess that speaks NDJSON over stdin/stdout. No Jupyter gateway and no extra pip dependencies are required for the runner itself; install optional display libraries separately. The availability probe runs `python -c "import sys;sys.exit(0)"`; it checks that the interpreter starts, not its version or every runner feature. Rich `display()` output (PIL, pandas, plotly, matplotlib figures) uses MIME-bundle dispatch.
+The `eval` tool executes one Python cell per call inside a retained Python subprocess that speaks NDJSON over stdin/stdout. No Jupyter gateway and no extra pip dependencies are required for the runner itself; install optional libraries (pandas, polars, matplotlib, PIL) separately. The availability probe runs `python -c "import sys;sys.exit(0)"`; it checks that the interpreter starts, not its version or every runner feature. There is no `display()`: `print` and the trailing-expression echo are the output APIs (see [Rich print](#rich-print)).
 
 Current tool input:
 
@@ -72,37 +71,42 @@ Runner → host:
 {"type": "started",  "id": "<reqId>"}
 {"type": "stdout",   "id": "<reqId>", "data": "..."}
 {"type": "stderr",   "id": "<reqId>", "data": "..."}
-{"type": "display",  "id": "<reqId>", "bundle": {<mime>: <value>}}
-{"type": "result",   "id": "<reqId>", "bundle": {<mime>: <value>}}
+{"type": "view",     "id": "<reqId>", "text": "...", "view": {"kind": "table"|"json"|"markdown", ...}}
+{"type": "image",    "id": "<reqId>", "image": {"mimeType": "...", "data": "<base64>", "detail"?: "...", "url"?: "...", "providerFile"?: {...}}}
+{"type": "status",   "id": "<reqId>", "event": {"op": "...", ...}}
+{"type": "reply",    "id": "<reqId>", "value": {"ok": true, ...}}
 {"type": "error",    "id": "<reqId>", "ename": "...", "evalue": "...", "traceback": ["..."]}
 {"type": "done",     "id": "<reqId>", "status": "ok"|"error", "executionCount": N, "cancelled": false}
 ```
 
-Status events the prelude emits (e.g. `_emit_status("find", count=…)`) ship inside display bundles under `application/x-omp-status` so the existing TUI status renderer keeps working.
+- `view` carries a pretty rendering of `text`, which the cell already printed through `stdout`; the host never adds `text` to the output stream again. The runner flushes buffered stdout before a `view` or `image`, so the text precedes it.
+- `image` reaches both the model and the user.
+- `status` carries the structured events prelude helpers and magics emit (`_emit_status("find", count=…)`) for the TUI status renderer.
+- `reply` answers a tool request (see [Tool availability and mode selection](#tool-availability-and-mode-selection)); `kernel-base.ts` returns it as `KernelExecuteResult.reply`.
 
 ## Magics
 
 The runner's source transformer rewrites IPython-style magics to plain Python calls before parsing. Supported set:
 
-| Magic                             | Effect                                                                                                                                                      |
-| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `%pip <args>`                     | `python -m pip <args>` with live streaming output; pauses the cell watchdog. Newly installed packages are evicted from `sys.modules` so the next `import` picks up the fresh install. |
-| `%cd <path>`                      | `os.chdir(path)` (with `~` expansion); emits status event.                                                                                                  |
-| `%pwd`                            | Returns `os.getcwd()`.                                                                                                                                      |
-| `%ls [path]`                      | Returns `sorted(os.listdir(path))`.                                                                                                                         |
-| `%env [KEY[=VAL]]`                | List, read, or set env vars (matches prelude `env()` semantics).                                                                                            |
-| `%set_env KEY VALUE`              | Set `os.environ[KEY]`.                                                                                                                                      |
-| `%time <expr>` / `%timeit <stmt>` | `%time` evaluates once; `%timeit` uses `timeit.Timer.autorange()` and reports per-loop timing. Both emit status events. |
-| `%who` / `%whos`                  | List user-namespace names.                                                                                                                                  |
-| `%reset`                          | Clear user globals and restore the runner's display/magic builtins, not the host prelude. Prefer tool input `reset: true` for a fully initialized fresh kernel. |
-| `%load <path>`                    | Execute a quoted file path in the retained namespace with top-level await and filename-aware tracebacks; does not echo source. A standalone `%load` cell is read by the host instead (supports `local://`). |
-| `%run <path>`                     | `runpy.run_path` and merge globals back.                                                                                                                    |
-| `%%bash`                          | Run the cell body via `bash`. The only registered shell cell magic — `%%sh` does not exist, and unregistered names raise `Cell magic function '%%<name>' not found`. |
-| `%%capture [name]`                | Run body with stdout/stderr captured into `name`.                                                                                                           |
-| `%%timeit`                        | Time the cell body.                                                                                                                                         |
-| `%%writefile <path>`              | Write body to file.                                                                                                                                         |
-| `!cmd` / `var = !cmd`             | Run command via subprocess shell; returns an SList-style result with `.n` / `.s` helpers.                                                                   |
-| `var = %name args`                | Assignment forms work for line magics and `!cmd`.                                                                                                           |
+| Magic                             | Effect                                                                                                                                                                                                                                                                                                                   |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `%pip <args>`                     | `python -m pip <args>` with live streaming output; pauses the cell watchdog. In an interpreter without pip (a `uv venv` env), first installs pip with `ensurepip`, or with `uv` (when on `PATH`) if that fails. Newly installed packages are evicted from `sys.modules` so the next `import` picks up the fresh install. |
+| `%cd <path>`                      | `os.chdir(path)` (with `~` expansion); emits status event.                                                                                                                                                                                                                                                               |
+| `%pwd`                            | Returns `os.getcwd()`.                                                                                                                                                                                                                                                                                                   |
+| `%ls [path]`                      | Returns `sorted(os.listdir(path))`.                                                                                                                                                                                                                                                                                      |
+| `%env [KEY[=VAL]]`                | List, read, or set env vars (matches prelude `env()` semantics).                                                                                                                                                                                                                                                         |
+| `%set_env KEY VALUE`              | Set `os.environ[KEY]`.                                                                                                                                                                                                                                                                                                   |
+| `%time <expr>` / `%timeit <stmt>` | `%time` evaluates once; `%timeit` uses `timeit.Timer.autorange()` and reports per-loop timing. Both emit status events.                                                                                                                                                                                                  |
+| `%who` / `%whos`                  | List user-namespace names.                                                                                                                                                                                                                                                                                               |
+| `%reset`                          | Clear user globals and restore the runner's magic builtins, not the host prelude. Prefer tool input `reset: true` for a fully initialized fresh kernel.                                                                                                                                                                  |
+| `%load <path>`                    | Execute a quoted file path in the retained namespace with top-level await and filename-aware tracebacks; does not echo source. A standalone `%load` cell is read by the host instead (supports `local://`).                                                                                                              |
+| `%run <path>`                     | `runpy.run_path` and merge globals back.                                                                                                                                                                                                                                                                                 |
+| `%%bash`                          | Run the cell body via `bash`. The only registered shell cell magic — `%%sh` does not exist, and unregistered names raise `Cell magic function '%%<name>' not found`.                                                                                                                                                     |
+| `%%capture [name]`                | Run body with stdout/stderr captured into `name`.                                                                                                                                                                                                                                                                        |
+| `%%timeit`                        | Time the cell body.                                                                                                                                                                                                                                                                                                      |
+| `%%writefile <path>`              | Write body to file.                                                                                                                                                                                                                                                                                                      |
+| `!cmd` / `var = !cmd`             | Run command via subprocess shell; returns an SList-style result with `.n` / `.s` helpers.                                                                                                                                                                                                                                |
+| `var = %name args`                | Assignment forms work for line magics and `!cmd`.                                                                                                                                                                                                                                                                        |
 
 Unknown magic names raise `NameError: UsageError: ...` inside the cell.
 
@@ -111,15 +115,15 @@ Unknown magic names raise `NameError: UsageError: ...` inside the cell.
 `python.kernelMode` controls retained kernel reuse:
 
 - `session` (default)
-  - Reuses kernel sessions keyed by namespaced eval session id plus normalized cwd and interpreter.
-  - Multiple owners can share the same retained kernel for that key.
-  - Foreground calls through the tool use exclusive scheduling; background cells and kernel-defined tool requests are separate.
-  - A dead retained subprocess is replaced before execution.
-  - If the subprocess dies during execution, the cell is not replayed because completion is uncertain. The next call starts a fresh kernel.
+   - Reuses kernel sessions keyed by namespaced eval session id plus normalized cwd and interpreter.
+   - Multiple owners can share the same retained kernel for that key.
+   - Foreground calls through the tool use exclusive scheduling; background cells and kernel-defined tool requests are separate.
+   - A dead retained subprocess is replaced before execution.
+   - If the subprocess dies during execution, the cell is not replayed because completion is uncertain. The next call starts a fresh kernel.
 - `per-call`
-  - Spawns a fresh subprocess for each call.
-  - Shuts the subprocess down after the call.
-  - No cross-call state persistence.
+   - Spawns a fresh subprocess for each call.
+   - Shuts the subprocess down after the call.
+   - No cross-call state persistence.
 
 ### State across eval calls
 
@@ -129,7 +133,7 @@ If a cell fails, definitions and mutations completed before the error can remain
 
 The host reapplies the session cwd before each cell and puts it first on `sys.path`. `%cd` or `os.chdir()` affects the rest of that cell, not the starting cwd of the next tool call. File-backed `%load` also sets `__file__` and adds the script directory to `sys.path`.
 
-Cells support top-level `await`, `async for`, and `async with` on a persistent asyncio event loop. Use top-level `await` rather than `asyncio.run()`, which cannot start a second loop in that thread. The last non-`None` expression is emitted as a rich result.
+Cells support top-level `await`, `async for`, and `async with` on a persistent asyncio event loop. Use top-level `await` rather than `asyncio.run()`, which cannot start a second loop in that thread. The last non-`None` expression is echoed like printing its `repr`, with the same images and views as `print`.
 
 ## Environment filtering and runtime resolution
 
@@ -161,7 +165,7 @@ The tool's session-scoped schema lists only enabled runtimes. If Python prefligh
 
 Python prelude helpers include `agent(prompt, *, agent=None, label=None, schema=None, schema_mode=None, isolated=None, apply=None, merge=None, tools=None)`, which registers a background subagent job and returns an `AgentHandle` (`.id`, `.handle` = `agent://<id>`, `.status`, `.done()`, `.wait(timeout=None)`, `.send()`, `.cancel()`, `.output()`, awaitable). `completion(...)` likewise returns a `CompletionHandle`. `wait(handles, timeout=None, raise_errors=True)` barriers over handles in input order. `workpool(...)` returns a `WorkPool` (`push`, `status`, `peek`, `close`); its name is the aggregate async-job id; results auto-deliver, and the zero-argument `wait` tool blocks only when nothing else remains to do. `tool.<name>(args)` is a coroutine (`await tool.read({...})`); `@tool` registers a kernel-local function as a tool for subagents (schema inferred from type hints) when `eval.tools.enabled` is on.
 
-The runner accepts a `{"type": "tool", "id", "op": "describe"|"call", ...}` request alongside cell requests. It is served on a dedicated daemon thread (POSIX; between cells on Windows) against the kernel's `__omp_tools__` registry, replies with an `application/json` display bundle (`{ok, tools, missing}` or `{ok, value}`), and reports a raising tool as an `error` frame without touching the running cell. See [Eval tool](./tools/eval.md) for the caller-facing contract.
+The runner accepts a `{"type": "tool", "id", "op": "describe"|"call", ...}` request alongside cell requests. It is served on a dedicated daemon thread (POSIX; between cells on Windows) against the kernel's `__omp_tools__` registry, replies with a `reply` frame (`{ok, tools, missing}` or `{ok, value}`), and reports a raising tool as an `error` frame without touching the running cell. See [Eval tool](./tools/eval.md) for the caller-facing contract.
 
 ## Execution flow and cancellation/timeout
 
@@ -196,26 +200,31 @@ Interactive stdin is not supported: the host's NDJSON control channel arrives on
 
 From runner frames:
 
-- `stdout` / `stderr` → plain text chunks
-- `display` / `result` → rich display handling (MIME bundle)
+- `stdout` / `stderr` → plain text chunks (all the model sees as text)
+- `view` → a user-facing rendering of text already in the stream
+- `image` → image payloads for the model and the user
 - `error` → traceback text
-- `application/x-omp-status` MIME inside `display` → structured status events
+- `status` → structured status events
 
-Display MIME precedence:
+### Rich print
 
-1. `text/markdown`
-2. `text/plain`
-3. `text/html` (converted to basic markdown)
+The runner replaces `builtins.print`. When it prints to the cell's stdout, each argument is classified; any other `file` (for example `sys.stderr`, or a redirected `sys.stdout`) gets the stock `print`. The trailing-expression echo applies the same classification to `repr(value)`.
 
-Additionally captured as structured outputs:
+| Value                                                                                                          | Text in the output  | Extra frame     |
+| -------------------------------------------------------------------------------------------------------------- | ------------------- | --------------- |
+| `{"type": "image", "mimeType", "data": str\|bytes, "detail"?, "url"?, "providerFile"?}`                        | `<image MIME>`      | `image`         |
+| matplotlib `Figure` (PNG, `bbox_inches="tight"`), `PIL.Image.Image`, objects with `_repr_png_` / `_repr_jpeg_` | `str` / `repr`      | `image`         |
+| objects (not classes) with `_repr_markdown_`                                                                   | the Markdown source | `markdown` view |
+| pandas `DataFrame` / `Series`, polars `DataFrame` / `Series`                                                   | `str` / `repr`      | `table` view    |
+| `dict` / `list` / `tuple` whose text exceeds 80 chars or spans lines                                           | `str` / `repr`      | `json` view     |
 
-- `application/json` → JSON tree data
-- `image/png` / `image/jpeg` → image payloads
-- `application/x-omp-status` → status events
+- Table views follow the library's own truncation (`display.max_rows` / `min_rows` / `max_columns`, including pandas' terminal-width fitting; polars `tbl_rows` / `tbl_cols`), so the view shows the rows and columns the text shows. Elided rows and columns become `…` cells. Index levels are leading columns; MultiIndex column labels are joined with `/`. Columns are marked `numeric` by dtype (bool is not numeric). pandas and polars are detected through `sys.modules`, never imported.
+- JSON views turn integers beyond ±2^53 into decimal strings and other non-JSON leaves into `str()`. Subclasses that customise their text (namedtuple, `OrderedDict`) get no view.
+- A probe that raises never breaks the print; the value just prints as text.
 
 ### Matplotlib
 
-The runner sets `MPLBACKEND=Agg` as an environ default so figures render off-screen. After every cell, remaining figures are emitted as PNG and closed. Figures already emitted by `display()` in that cell are closed without a duplicate image.
+The runner sets `MPLBACKEND=Agg` as an environ default so figures render off-screen. After every cell, remaining figures are emitted as PNG `image` frames (with no text) and closed. Figures already printed or echoed in that cell are closed without a duplicate image.
 
 ### Storage and truncation
 
@@ -224,14 +233,14 @@ Output is streamed through `OutputSink` in `packages/tui/src/tools/streaming-out
 ### Renderer behavior
 
 - Tool renderer (`packages/tui/src/tools/eval.ts`):
-  - shows code-cell blocks with per-cell status
-  - collapsed preview defaults to 10 lines
-  - supports expanded mode for all output retained in the tool result
+   - shows code-cell blocks with per-cell status
+   - collapsed preview defaults to 10 lines
+   - supports expanded mode for all output retained in the tool result
 - Interactive renderer (`eval-execution.ts`):
-  - used for user-triggered Python execution in TUI
-  - collapsed preview defaults to 20 lines
-  - clamps very long individual lines to 4000 visible columns for display safety
-  - shows cancellation/error/truncation notices
+   - used for user-triggered Python execution in TUI
+   - collapsed preview defaults to 20 lines
+   - clamps very long individual lines to 4000 visible columns for display safety
+   - shows cancellation/error/truncation notices
 
 ## Operational troubleshooting
 

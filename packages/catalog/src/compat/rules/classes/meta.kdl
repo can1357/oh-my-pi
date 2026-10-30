@@ -9,8 +9,10 @@ class "meta" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh" "max"
 		thinking-mode "effort"
 	}
-	// Meta documents `max` for Muse Wonder (dev.meta.ai/docs/reasoning).
-	models "muse-wonder-1.0" {
+	// Meta documents `max` for Muse Wonder (dev.meta.ai/docs/reasoning); the
+	// Muse Code-only Wonder Full and contributor tiers accept it too (verified
+	// 2026-10-12).
+	models "muse-wonder-1.0" "muse-wonder-1.0-contributor" "muse-wonder-full-1.0" "muse-wonder-full-1.0-contributor" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh" "max"
 		thinking-mode "effort"
 	}

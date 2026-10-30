@@ -420,11 +420,15 @@ describe("/fork terminal placement", () => {
 
 describe("/fork inside Tern", () => {
 	const TERN_ENV_KEYS = ["TERN_PANE_SOCKET", "TERN_PANE"] as const;
-	const savedEnv = new Map(TERN_ENV_KEYS.map(key => [key, process.env[key]]));
+	let savedEnv: Map<string, string | undefined>;
 	let daemon: FakeDaemon | undefined;
 
 	beforeAll(async () => {
 		await initTheme(false);
+	});
+
+	beforeEach(() => {
+		savedEnv = new Map(TERN_ENV_KEYS.map(key => [key, process.env[key]]));
 	});
 
 	afterEach(async () => {

@@ -2,7 +2,7 @@
  * JSON tree rendering utilities shared across tool renderers.
  */
 import { INTENT_FIELD, type TspSpan, type TspTreeNode } from "@oh-my-pi/pi-wire";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { sanitizeText, sanitizeTextDeep } from "@oh-my-pi/pi-utils";
 import { TreeView, treeRowPrefix } from "../components/tree-view";
 import { truncateToWidth } from "../render/render-utils";
 import type { Theme, ThemeColor } from "../theme/theme";
@@ -22,6 +22,8 @@ export const JSON_TREE_MAX_LINES_EXPANDED = 200;
 export const JSON_TREE_SCALAR_LEN_COLLAPSED = 60;
 /** Maximum expanded JSON scalar width. */
 export const JSON_TREE_SCALAR_LEN_EXPANDED = 2000;
+/** Characters a container's one-line form may take before a JSON tree lists its entries instead. */
+export const JSON_TREE_INLINE_LEN = 60;
 
 const HIDDEN_ARG_KEYS = { [INTENT_FIELD]: 1, __partialJson: 1 };
 const DEFAULT_HIDDEN_ROOT_KEYS: readonly string[] = Object.keys(HIDDEN_ARG_KEYS);
@@ -83,7 +85,7 @@ export function formatArgsInline(
 		const pairs: string[] = [];
 		let length = 0;
 		for (const key in args) {
-			if (!Object.hasOwn(args, key)) continue;
+			if (!Object.hasOwn(args, key) || key in HIDDEN_ARG_KEYS) continue;
 			const pair = `${options.sanitizeText?.(key) ?? key}=${formatScalar(args[key], 24, options)}`;
 			const added = pair.length + (pairs.length > 0 ? 2 : 0);
 			if (length + added > maxWidth && pairs.length > 0) {
@@ -155,6 +157,57 @@ export function formatOutputInline(data: unknown, maxWidth = 80): string {
 	return `Output: ${formatArgsInline(data as Record<string, unknown>, maxWidth - "Output: ".length, options) || "{}"}`;
 }
 
+/** Object keys a one-line JSON form shows unquoted. */
+const BARE_KEY = /^[\w$-]+$/;
+
+/** One styled run of a one-line JSON form. */
+type InlineRun = readonly [text: string, color: ThemeColor];
+
+/**
+ * A container's one-line form (`[[3, "vt"], 98]`, `{lines: 70, done: true}`)
+ * as styled runs, so tree rows show small containers whole instead of one row
+ * per value; undefined for a scalar or a form past {@link JSON_TREE_INLINE_LEN}
+ * characters. Keys stay bare unless {@link BARE_KEY} rejects them, strings are
+ * JSON-escaped, and `clean` sanitizes both first.
+ */
+function inlineJson(value: unknown, clean: (text: string) => string): InlineRun[] | undefined {
+	if (!Array.isArray(value) && !isRecord(value)) return undefined;
+	const runs: InlineRun[] = [];
+	let length = 0;
+	// Every container pushes a bracket before descending, so cycles hit the cap too.
+	const push = (text: string, color: ThemeColor): boolean => {
+		length += text.length;
+		if (length > JSON_TREE_INLINE_LEN) return false;
+		const last = runs.at(-1);
+		if (last?.[1] === color) runs[runs.length - 1] = [last[0] + text, color];
+		else runs.push([text, color]);
+		return true;
+	};
+	const walk = (entry: unknown): boolean => {
+		if (Array.isArray(entry)) {
+			if (!push("[", "muted")) return false;
+			for (let index = 0; index < entry.length; index++) {
+				if ((index > 0 && !push(", ", "muted")) || !walk(entry[index])) return false;
+			}
+			return push("]", "muted");
+		}
+		if (isRecord(entry)) {
+			if (!push("{", "muted")) return false;
+			let sep = "";
+			for (const key in entry) {
+				const name = clean(key);
+				if (!push(`${sep}${BARE_KEY.test(name) ? name : JSON.stringify(name)}: `, "muted")) return false;
+				if (!walk(entry[key])) return false;
+				sep = ", ";
+			}
+			return push("}", "muted");
+		}
+		if (typeof entry === "string") return push(JSON.stringify(clean(entry)), "syntaxString");
+		return push(clean(formatScalar(entry, JSON_TREE_INLINE_LEN)), jsonScalarToken(entry));
+	};
+	return walk(value) ? runs : undefined;
+}
+
 /** JSON hierarchy policy accepted by {@link renderJsonTreeLines}. */
 export interface JsonTreeRenderOptions {
 	maxDepth: number;
@@ -176,7 +229,7 @@ export interface JsonTreeRenderOptions {
 	rootConnectors?: "hooked" | "siblings";
 }
 
-type JsonTreeNodeKind = "array" | "object" | "scalar" | "placeholder";
+type JsonTreeNodeKind = "array" | "object" | "inline" | "scalar" | "placeholder";
 
 interface JsonTreeNode {
 	id: number;
@@ -184,6 +237,10 @@ interface JsonTreeNode {
 	value: unknown;
 	depth: number;
 	kind: JsonTreeNodeKind;
+	/** The key's color: `dim` for array indices, else `muted`. */
+	keyColor?: ThemeColor;
+	/** The one-line form of an `inline` container. */
+	inline?: readonly InlineRun[];
 	placeholder?: "…";
 	children?: readonly JsonTreeNode[];
 }
@@ -195,7 +252,8 @@ function jsonNodeKind(value: unknown): JsonTreeNodeKind {
 }
 
 /**
- * Render a JSON value as bounded tree lines. The positional form remains the
+ * Render a JSON value as bounded tree lines, containers that fit
+ * {@link JSON_TREE_INLINE_LEN} on one row. The positional form remains the
  * public tool-renderer contract; the options form exposes sanitization and root
  * connector policy for specialized adapters such as nested task output.
  */
@@ -236,26 +294,18 @@ export function renderJsonTreeLines(
 	const hookedRoots = (options.rootConnectors ?? "hooked") === "hooked";
 	let nextId = 0;
 
-	const node = (nodeValue: unknown, key: string | undefined, depth: number): JsonTreeNode => ({
-		id: nextId++,
-		key,
-		value: nodeValue,
-		depth,
-		kind: jsonNodeKind(nodeValue),
-	});
+	const node = (nodeValue: unknown, key: string | undefined, depth: number, keyColor?: ThemeColor): JsonTreeNode => {
+		const inline = inlineJson(nodeValue, sanitize);
+		const kind = inline ? "inline" : jsonNodeKind(nodeValue);
+		return { id: nextId++, key, value: nodeValue, depth, kind, keyColor, inline };
+	};
+	const entryNodes = (entries: readonly JsonEntry[], depth: number): JsonTreeNode[] =>
+		entries.map(([key, child, keyColor]) => node(child, key, depth, keyColor));
 
-	let roots: readonly JsonTreeNode[];
-	if (isRecord(value)) {
-		const objectRoots: JsonTreeNode[] = [];
-		for (const key in value) {
-			if (!hiddenRootKeys.includes(key)) objectRoots.push(node(value[key], key, 1));
-		}
-		roots = objectRoots;
-	} else if (Array.isArray(value)) {
-		roots = value.map((child, index) => node(child, `[${index}]`, 1));
-	} else {
-		roots = [node(value, undefined, 0)];
-	}
+	const roots: readonly JsonTreeNode[] =
+		Array.isArray(value) || isRecord(value)
+			? entryNodes(jsonEntries(value, hiddenRootKeys), 1)
+			: [node(value, undefined, 0)];
 
 	const prefixStyle = { vertical: (symbol: string) => symbol };
 	const hook = theme.tree.hook;
@@ -288,7 +338,7 @@ export function renderJsonTreeLines(
 						},
 					];
 				} else {
-					children = values.map((child, index) => node(child, `[${index}]`, item.depth + 1));
+					children = entryNodes(jsonEntries(values), item.depth + 1);
 				}
 			} else if (item.kind === "object" && isRecord(item.value)) {
 				const record = item.value;
@@ -307,9 +357,7 @@ export function renderJsonTreeLines(
 				} else if (keys.length === 0) {
 					children = [];
 				} else {
-					const objectChildren: JsonTreeNode[] = [];
-					for (const key in record) objectChildren.push(node(record[key], key, item.depth + 1));
-					children = objectChildren;
+					children = entryNodes(jsonEntries(record), item.depth + 1);
 				}
 			}
 			item.children = children;
@@ -331,11 +379,13 @@ export function renderJsonTreeLines(
 			let body: readonly string[];
 			const displayKey = item.key ? sanitize(item.key) : undefined;
 			const label = theme.fg(
-				"muted",
+				item.keyColor ?? "muted",
 				displayKey || (item.kind === "array" ? "array" : item.kind === "object" ? "object" : "value"),
 			);
 			if (item.kind === "placeholder") {
 				body = [theme.fg("dim", item.placeholder ?? "…")];
+			} else if (item.kind === "inline") {
+				body = [`${label}: ${(item.inline ?? []).map(([text, color]) => theme.fg(color, text)).join("")}`];
 			} else if (item.kind === "array") {
 				body = [`${label} ${theme.fg("dim", `[${(item.value as unknown[]).length}]`)}`];
 			} else if (item.kind === "object") {
@@ -402,42 +452,53 @@ export interface JsonTreeDescribeOptions {
 	openDepth?: number;
 	/** Root object keys omitted. Defaults to internal tool argument metadata. */
 	hiddenRootKeys?: readonly string[];
+	/** Called after the tree is built if a depth, node or scalar cap left part of the value out. */
+	onTruncated?: () => void;
 }
 
-type JsonEntry = readonly [key: string, value: unknown];
+type JsonEntry = readonly [key: string, value: unknown, keyColor: ThemeColor];
 
 function clipScalar(value: string, maxLen: number): string {
 	return value.length > maxLen ? `${value.slice(0, maxLen)}…` : value;
 }
 
+/**
+ * `value`'s entries: an array's indices dim and right-aligned like line
+ * numbers, an object's keys (less `hidden`) muted.
+ */
 function jsonEntries(value: unknown[] | Record<string, unknown>, hidden?: readonly string[]): JsonEntry[] {
 	const out: JsonEntry[] = [];
 	if (Array.isArray(value)) {
-		for (let index = 0; index < value.length; index++) out.push([`[${index}]`, value[index]]);
+		const width = String(value.length - 1).length;
+		for (let index = 0; index < value.length; index++) {
+			out.push([String(index).padStart(width), value[index], "dim"]);
+		}
 		return out;
 	}
 	for (const key in value) {
-		if (!hidden?.includes(key)) out.push([key, value[key]]);
+		if (!hidden?.includes(key)) out.push([key, value[key], "muted"]);
 	}
 	return out;
 }
 
-function jsonScalarToken(value: unknown): string {
+function jsonScalarToken(value: unknown): ThemeColor {
 	if (typeof value === "number" || typeof value === "bigint") return "syntaxNumber";
 	if (typeof value === "boolean" || value === null || value === undefined) return "syntaxKeyword";
 	return "dim";
 }
 
 /**
- * TSP `tree` of a JSON value: containers become expandable nodes labelled with
- * their key and size, scalars become `key: value` leaves styled by type.
- * Bounded by depth, node count and scalar length; no width math.
+ * TSP `tree` of a JSON value: containers that fit {@link JSON_TREE_INLINE_LEN}
+ * become `key: [1, "a"]` leaves, larger ones expandable nodes labelled with
+ * their key and size, scalars `key: value` leaves styled by type. Bounded by
+ * depth, node count and scalar length; no width math.
  */
 export function describeJsonTree(value: unknown, options: JsonTreeDescribeOptions = {}): NativeNode {
 	const maxDepth = Math.max(0, options.maxDepth ?? JSON_TREE_MAX_DEPTH_EXPANDED);
 	const maxScalarLen = Math.max(1, options.maxScalarLen ?? JSON_TREE_SCALAR_LEN_EXPANDED);
 	const openDepth = options.openDepth ?? JSON_TREE_MAX_DEPTH_COLLAPSED;
 	let budget = Math.max(1, options.maxNodes ?? JSON_TREE_MAX_LINES_EXPANDED);
+	let truncated = false;
 	let nextId = 0;
 	const leaf = (label: readonly TspSpan[]): TspTreeNode => ({ id: `${nextId++}`, label });
 
@@ -445,35 +506,42 @@ export function describeJsonTree(value: unknown, options: JsonTreeDescribeOption
 		const out: TspTreeNode[] = [];
 		for (let index = 0; index < entries.length; index++) {
 			if (budget <= 0) {
+				truncated = true;
 				out.push(leaf([span(`… ${entries.length - index} more`, "dim")]));
 				break;
 			}
-			const [key, child] = entries[index];
-			out.push(describeValue(key, child, depth));
+			out.push(describeValue(entries[index], depth));
 		}
 		return out;
 	};
 
-	const describeValue = (key: string | undefined, entry: unknown, depth: number): TspTreeNode => {
+	const describeValue = (
+		[key, entry, keyColor]: readonly [key: string | undefined, value: unknown, keyColor?: ThemeColor],
+		depth: number,
+	): TspTreeNode => {
 		budget--;
 		const id = `${nextId++}`;
-		const keySpans: TspSpan[] = key === undefined ? [] : [span(plainText(key), "muted")];
+		const keySpans: TspSpan[] = key === undefined ? [] : [span(plainText(key), keyColor)];
+		const prefix = keySpans.length > 0 ? [...keySpans, span(": ", "muted")] : [];
+		const inline = inlineJson(entry, plainText);
+		if (inline) return { id, label: [...prefix, ...inline.map(([text, color]) => span(text, color))] };
 		if (Array.isArray(entry) || isRecord(entry)) {
 			const entries = jsonEntries(entry);
 			const size = Array.isArray(entry) ? `[${entry.length}]` : `{${entries.length}}`;
 			const label = keySpans.length > 0 ? [...keySpans, span(` ${size}`, "dim")] : [span(size, "dim")];
-			if (entries.length === 0) return { id, label };
+			if (depth >= maxDepth) truncated = true;
 			const children = depth >= maxDepth ? [leaf([span("…", "dim")])] : describeEntries(entries, depth + 1);
 			return { id, label, open: depth < openDepth, children };
 		}
-		const prefix = keySpans.length > 0 ? [...keySpans, span(": ", "muted")] : [];
 		if (typeof entry === "string") {
 			const lines = plainText(entry).split("\n");
+			if (lines.some(line => line.length > maxScalarLen)) truncated = true;
 			const first = clipScalar(lines[0], maxScalarLen);
 			if (lines.length === 1) return { id, label: [...prefix, span(`"${first}"`, "syntaxString")] };
 			const children: TspTreeNode[] = [];
 			for (let index = 0; index < lines.length; index++) {
 				if (budget <= 0) {
+					truncated = true;
 					children.push(leaf([span(`… ${lines.length - index} more lines`, "dim")]));
 					break;
 				}
@@ -497,7 +565,37 @@ export function describeJsonTree(value: unknown, options: JsonTreeDescribeOption
 		nodes =
 			entries.length > 0 ? describeEntries(entries, 1) : [leaf([span(Array.isArray(value) ? "[]" : "{}", "dim")])];
 	} else {
-		nodes = [describeValue(undefined, value, 0)];
+		nodes = [describeValue([undefined, value], 0)];
 	}
+	if (truncated) options.onTruncated?.();
 	return node("tree", { nodes });
+}
+
+/** Options of {@link describeJsonValue}: the `json` node's own, plus the fallback tree's. */
+export interface JsonValueDescribeOptions extends JsonTreeDescribeOptions {
+	/** The host draws the `json` kind (`cx.supports("json")`). */
+	native?: boolean;
+	/** `json` node: container levels expanded below the top-level entries (default 0). */
+	open?: number;
+}
+
+/**
+ * A JSON value for a TSP host: the terminal's own `json` viewer when it draws
+ * the kind, which folds and previews containers itself and never cuts (so
+ * `onTruncated` never fires), else {@link describeJsonTree} with the same
+ * options. Root keys the tree would hide are left out of the sent value too;
+ * strings are sanitized like the tree's labels.
+ */
+export function describeJsonValue(value: unknown, options: JsonValueDescribeOptions = {}): NativeNode {
+	if (!options.native) return describeJsonTree(value, options);
+	let shown = value;
+	if (isRecord(value)) {
+		const hidden = options.hiddenRootKeys ?? DEFAULT_HIDDEN_ROOT_KEYS;
+		if (hidden.some(key => Object.hasOwn(value, key))) {
+			const kept: Record<string, unknown> = {};
+			for (const key in value) if (!hidden.includes(key)) kept[key] = value[key];
+			shown = kept;
+		}
+	}
+	return node("json", { value: sanitizeTextDeep(shown), open: options.open || undefined });
 }

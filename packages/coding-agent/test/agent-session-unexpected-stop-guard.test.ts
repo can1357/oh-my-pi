@@ -1,6 +1,7 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import * as ai from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -127,6 +128,25 @@ function assistantText(messages: AgentMessage[]): string {
 		.join("\n");
 }
 
+/**
+ * Spies the judge model call (the classifier, judge resolution and prompt
+ * rendering stay real) and answers every unexpected-stop question with
+ * `verdict`. Returns the rendered judge prompts.
+ */
+function stubJudgeVerdict(verdict: "YES" | "NO"): string[] {
+	const judgePrompts: string[] = [];
+	vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, context) => {
+		const rendered = JSON.stringify(context);
+		const isStopJudgment = rendered.includes("<message>");
+		if (isStopJudgment) judgePrompts.push(rendered);
+		return {
+			stopReason: "stop",
+			content: [{ type: "text", text: isStopJudgment ? verdict : "unrelated" }],
+		} as never;
+	});
+	return judgePrompts;
+}
+
 function reminderMessages(messages: AgentMessage[]): AgentMessage[] {
 	return messages.filter((message): message is Extract<AgentMessage, { role: "developer" }> => {
 		if (message.role !== "developer") return false;
@@ -197,6 +217,25 @@ describe("AgentSession unexpected stop guard", () => {
 		expect(assistantText(session.agent.state.messages)).toContain("finished after retries");
 	});
 
+	it("retries a stop whose only content is signed thinking with empty text", async () => {
+		const { session, mock } = await createHarness([
+			thinkingOnlyStop(""),
+			{ content: ["finished after reasoning-only stop"], stopReason: "stop" },
+		]);
+
+		await session.prompt("do the thing");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(2);
+		expect(assistantText(session.agent.state.messages)).toContain("finished after reasoning-only stop");
+		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
+		// The signed reasoning stays in context so the continuation replays it.
+		const assistants = session.agent.state.messages.filter(message => message.role === "assistant");
+		expect(assistants[0]?.content).toEqual([
+			{ type: "thinking", thinking: "", thinkingSignature: "reasoning_content" },
+		]);
+	});
+
 	it("does not retry in mechanical mode when text message was delivered", async () => {
 		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(true);
 		const { session, mock } = await createHarness([
@@ -227,29 +266,42 @@ describe("AgentSession unexpected stop guard", () => {
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
 	});
 
-	it("schedules a continuation when the classifier returns true", async () => {
-		let calls = 0;
-		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockImplementation(async () => {
-			calls++;
-			return calls === 1;
-		});
+	it("judges a text-only stop against the user's request and ends the turn on a complete answer", async () => {
+		const judgePrompts = stubJudgeVerdict("NO");
 		const { session, mock } = await createHarness(
-			[
-				unexpectedStop("I should apply the same fix to the JS eval worker. Doing that now."),
-				{ content: ["done now"], stopReason: "stop" },
-			],
-			{
-				"features.unexpectedStopDetection": "smart",
-			},
+			[unexpectedStop("Option 1 is simpler. If you want it, I will start by finding where the flag is set.")],
+			{ "features.unexpectedStopDetection": "smart" },
 		);
 
-		await session.prompt("do the thing");
+		await session.prompt("Compare the two options. Do not change anything yet.");
 		await session.waitForIdle();
 
-		expect(spy).toHaveBeenCalledTimes(2);
+		expect(judgePrompts).toHaveLength(1);
+		expect(judgePrompts[0]).toContain("<request>");
+		expect(judgePrompts[0]).toContain("Compare the two options. Do not change anything yet.");
+		expect(judgePrompts[0]).toContain("If you want it, I will start by finding where the flag is set.");
+		expect(mock.calls).toHaveLength(1);
+		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
+	});
+
+	it("continues a premature stop once and ends on the nudged no-op reply", async () => {
+		const judgePrompts = stubJudgeVerdict("YES");
+		const { session, mock } = await createHarness(
+			[
+				unexpectedStop("Found the bug in the parser. Let me run the tests now."),
+				unexpectedStop("That was the full answer; I will run the tests when you ask."),
+				unexpectedStop("unreachable third turn"),
+			],
+			{ "features.unexpectedStopDetection": "smart" },
+		);
+
+		await session.prompt("fix the parser bug");
+		await session.waitForIdle();
+
+		expect(judgePrompts).toHaveLength(1);
 		expect(mock.calls).toHaveLength(2);
-		expect(assistantText(session.agent.state.messages)).toContain("done now");
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
+		expect(assistantText(session.agent.state.messages)).not.toContain("unreachable third turn");
 	});
 
 	it("retries a thinking-only stop directly in smart mode", async () => {
@@ -292,10 +344,10 @@ describe("AgentSession unexpected stop guard", () => {
 		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(true);
 		const { session, mock } = await createHarness(
 			[
-				unexpectedStop("I should fix this next."),
-				unexpectedStop("I should fix this next."),
-				unexpectedStop("I should fix this next."),
-				unexpectedStop("I should fix this next."),
+				thinkingOnlyStop("first thought"),
+				thinkingOnlyStop("second thought"),
+				thinkingOnlyStop("third thought"),
+				thinkingOnlyStop("fourth thought"),
 			],
 			{
 				"features.unexpectedStopDetection": "smart",
@@ -305,7 +357,7 @@ describe("AgentSession unexpected stop guard", () => {
 		await session.prompt("do the thing");
 		await session.waitForIdle();
 
-		expect(spy).toHaveBeenCalledTimes(4);
+		expect(spy).not.toHaveBeenCalled();
 		expect(mock.calls).toHaveLength(4);
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(3);
 		expect(warnSpy).toHaveBeenCalled();
@@ -377,8 +429,6 @@ describe("AgentSession unexpected stop guard", () => {
 			// 15s default): the judge wait must still be alive.
 			await Bun.sleep(200);
 			expect(observedSignal?.aborted).toBe(false);
-			// Later stops are terminal: only the slow verdict under test retries.
-			spy.mockResolvedValue(false);
 			release.resolve(true);
 			await pending;
 			await session.waitForIdle();
@@ -386,7 +436,7 @@ describe("AgentSession unexpected stop guard", () => {
 			release.resolve(undefined);
 		}
 
-		expect(spy).toHaveBeenCalledTimes(2);
+		expect(spy).toHaveBeenCalledTimes(1);
 		expect(mock.calls).toHaveLength(2);
 		expect(assistantText(session.agent.state.messages)).toContain("verified, all green");
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);

@@ -7,6 +7,8 @@ import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -568,6 +570,88 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain(MCP_TOOL_NAME);
 		} finally {
 			await session.dispose();
+		}
+	}, 20_000);
+
+	// Regression for #15705: remote servers connect late or reconnect, so
+	// connection order varies within and across sessions. The section must not
+	// follow it, or every reorder rewrites the provider prompt cache.
+	it("renders server instructions in name order regardless of connection order", async () => {
+		const config: MCPStdioServerConfig = { type: "stdio", command: process.execPath, args: [FIXTURE_PATH] };
+		const renderSection = async (connectOrder: string[]): Promise<string> => {
+			const manager = new MCPManager(tempDir, null, async () => ({ configs: {}, sources: {}, exaApiKeys: [] }));
+			try {
+				for (const name of connectOrder) await manager.connectServers({ [name]: config }, {}, undefined, 0);
+				const { session } = await createAgentSession({
+					cwd: tempDir,
+					agentDir: tempDir,
+					modelRegistry,
+					sessionManager: SessionManager.inMemory(),
+					settings: Settings.isolated({}),
+					model: getBundledModel("openai", "gpt-4o-mini"),
+					disableExtensionDiscovery: true,
+					skills: [],
+					contextFiles: [],
+					promptTemplates: [],
+					slashCommands: [],
+					enableLsp: false,
+					skipPythonPreflight: true,
+					enableMCP: true,
+					mcpManager: manager,
+				});
+				try {
+					const prompt = session.systemPrompt.join("\n");
+					return prompt.slice(prompt.indexOf("## MCP Server Instructions"));
+				} finally {
+					await session.dispose();
+				}
+			} finally {
+				await manager.disconnectAll();
+			}
+		};
+
+		const lateAlpha = await renderSection(["zeta", "alpha"]);
+		expect(lateAlpha.indexOf("### alpha\n")).toBeGreaterThan(-1);
+		expect(lateAlpha.indexOf("### alpha\n")).toBeLessThan(lateAlpha.indexOf("### zeta\n"));
+		expect(await renderSection(["alpha", "zeta"])).toBe(lateAlpha);
+	}, 30_000);
+
+	// Regression for #16882: ACP sessions run with `enableMCP: false` and keep
+	// client-declared servers in a host-owned manager. Their instructions must
+	// reach the prompt through the host source, and leave it once that manager's
+	// servers are gone.
+	it("renders instructions from a host-owned manager when the session has no MCP of its own", async () => {
+		const manager = new MCPManager(tempDir, null, async () => ({ configs: {}, sources: {}, exaApiKeys: [] }));
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({}),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableLsp: false,
+			skipPythonPreflight: true,
+			enableMCP: false,
+		});
+		try {
+			session.setMcpServerInstructionsSource(() => manager.getServerInstructions());
+			const config: MCPStdioServerConfig = { type: "stdio", command: process.execPath, args: [FIXTURE_PATH] };
+			await manager.connectServers({ demo: config }, {}, undefined, 0);
+			await session.refreshMCPTools(manager.getTools());
+			expect(session.systemPrompt.join("\n")).toContain(`## MCP Server Instructions`);
+			expect(session.systemPrompt.join("\n")).toContain(`### demo\n${SERVER_INSTRUCTIONS}`);
+
+			await manager.disconnectAll();
+			await session.refreshMCPTools([]);
+			expect(session.systemPrompt.join("\n")).not.toContain(SERVER_INSTRUCTIONS);
+		} finally {
+			await session.dispose();
+			await manager.disconnectAll();
 		}
 	}, 20_000);
 });

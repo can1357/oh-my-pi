@@ -28,6 +28,11 @@ export function matchesAppToolsExpand(data: string): boolean {
 	return matchesKey(data, "ctrl+o");
 }
 
+/** Effective tools-expand key: the first bound key, or Ctrl+O when unbound. */
+export function appToolsExpandKey(): KeyId {
+	return getKeybindings().getKeys("app.tools.expand")[0] ?? "ctrl+o";
+}
+
 /** Match the generic selector cancel keybinding. */
 export function matchesSelectCancel(data: string): boolean {
 	return getKeybindings().matches(data, "tui.select.cancel");

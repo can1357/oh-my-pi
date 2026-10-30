@@ -119,11 +119,11 @@ dependencies = [
 
 [[package]]
 name = "ansi-width"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "219e3ce6f2611d83b51ec2098a12702112c29e57203a6b0a0929b2cddb486608"
+checksum = "90759a65f5178dbbd1b0eecc97b187996401bced0eb4a943d9ac6d7a6304d111"
 dependencies = [
- "unicode-width 0.1.14",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -2443,17 +2443,6 @@ checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
 
 [[package]]
 name = "fancy-regex"
-version = "0.16.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "998b056554fbe42e03ae0e152895cd1a7e1002aec800fdc6635d20270260c46f"
-dependencies = [
- "bit-set",
- "regex-automata",
- "regex-syntax",
-]
-
-[[package]]
-name = "fancy-regex"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72cf461f865c862bb7dc573f643dd6a2b6842f7c30b07882b56bd148cc2761b8"
@@ -4141,16 +4130,16 @@ dependencies = [
 [[package]]
 name = "grep-searcher"
 version = "0.1.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72348823a0eafc4bc2e9051064f28b5b42cc100b571b3a35d67918d711efcbc6"
 dependencies = [
  "bstr",
  "encoding_rs",
  "encoding_rs_io",
  "grep-matcher",
+ "grep-regex",
  "log",
  "memchr",
  "memmap2",
+ "regex",
 ]
 
 [[package]]
@@ -4318,15 +4307,15 @@ dependencies = [
 
 [[package]]
 name = "html-escape"
-version = "0.2.15"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9356095b4b41197bba32173600e1582792cda618f65d12f68e2e77d273413c5"
+checksum = "491194d601b4fa9fac3c9571e014070a0ad1bc3392d1bc10419695196a8b3cc3"
 
 [[package]]
 name = "html-to-markdown-rs"
-version = "3.14.3"
+version = "3.18.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03602615945d9872da947326d6054d51f891c1b42d611461eff35c0565be03e8"
+checksum = "33c13755d519d3e22e42732d3173695e445bbd1761444ae1de075e1e1ac5965c"
 dependencies = [
  "ahash",
  "astral-tl",
@@ -4338,8 +4327,10 @@ dependencies = [
  "once_cell",
  "phf 0.14.0",
  "regex",
+ "serde_json",
  "thiserror 2.0.21",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -5507,6 +5498,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lz4_flex"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ecbdfe44b1bd960b68170b417450a628c43f7cf56bb3c5317e61cb230ee7f226"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
 name = "mach2"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5570,6 +5570,15 @@ checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
 dependencies = [
  "cfg-if",
  "digest 0.11.3",
+]
+
+[[package]]
+name = "md4"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7da5ac363534dce5fabf69949225e174fbf111a498bf0ff794c8ea1fba9f3dda"
+dependencies = [
+ "digest 0.10.7",
 ]
 
 [[package]]
@@ -6816,14 +6825,20 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "18.10.3"
+version = "18.14.0"
 dependencies = [
  "anyhow",
  "ast-grep-core",
- "globset",
- "ignore",
+ "async-trait",
+ "futures",
+ "parking_lot",
  "phf 0.14.0",
+ "pi-vfs",
+ "pi-walker",
+ "semver",
  "serde",
+ "tokio",
+ "tokio-util",
  "tree-sitter",
  "tree-sitter-bash",
  "tree-sitter-c",
@@ -6846,30 +6861,32 @@ dependencies = [
  "tree-sitter-toml-ng",
  "tree-sitter-typescript",
  "tree-sitter-yaml",
+ "xutf",
  "xxhash-rust",
 ]
 
 [[package]]
 name = "pi-builtins"
-version = "18.10.3"
+version = "18.14.0"
 dependencies = [
  "ansi-width",
  "anyhow",
  "argmax",
+ "async-trait",
+ "base64 0.23.1",
  "bigdecimal",
  "binary-heap-plus",
  "brush-core",
  "brush-parser",
  "bstr",
  "bytecount",
- "cfg-if",
  "chrono",
  "clap",
  "codesnake",
  "compare",
  "dns-lookup",
  "fancy-regex 0.17.0",
- "filetime",
+ "flate2",
  "flume",
  "foldhash 0.2.0",
  "futures",
@@ -6897,6 +6914,9 @@ dependencies = [
  "jiff",
  "libc",
  "lscolors",
+ "lz4_flex",
+ "md-5 0.10.6",
+ "md4",
  "memchr",
  "nix 0.31.3",
  "nom 8.0.0",
@@ -6907,6 +6927,7 @@ dependencies = [
  "os_display",
  "parking_lot",
  "parse_datetime",
+ "pi-ast",
  "pi-iso",
  "pi-vfs",
  "pi-walker",
@@ -6921,6 +6942,8 @@ dependencies = [
  "rustix 1.1.5",
  "self_cell",
  "serde_json",
+ "sha1",
+ "sha2 0.10.9",
  "similar 3.2.0",
  "smallvec",
  "strum",
@@ -6934,16 +6957,18 @@ dependencies = [
  "uutils_term_grid",
  "windows-sys 0.61.2",
  "xutf",
+ "xxhash-rust",
  "yansi",
+ "zstd",
 ]
 
 [[package]]
 name = "pi-diff"
-version = "18.10.3"
+version = "18.14.0"
 
 [[package]]
 name = "pi-edit"
-version = "18.10.3"
+version = "18.14.0"
 dependencies = [
  "async-trait",
  "parking_lot",
@@ -6963,7 +6988,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "18.10.3"
+version = "18.14.0"
 dependencies = [
  "async-trait",
  "libc",
@@ -6975,36 +7000,40 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "18.10.3"
+version = "18.14.0"
 dependencies = [
  "anyhow",
  "arboard",
  "ashpd",
- "ast-grep-core",
  "async-trait",
  "atspi",
  "base64 0.23.1",
+ "bitflags 2.13.2",
  "block2",
  "clap",
  "clipboard-win",
  "core-graphics",
+ "crc32fast",
+ "data-encoding",
+ "either",
  "enigo",
- "fancy-regex 0.16.2",
+ "fancy-regex 0.17.0",
+ "fastrand",
  "find-msvc-tools",
+ "flate2",
  "flume",
+ "foldhash 0.2.0",
  "fontdue",
  "foreign-types",
  "futures",
- "globset",
  "grep-matcher",
- "grep-pcre2",
- "grep-regex",
- "grep-searcher",
+ "hashbrown 0.17.1",
  "heapless 0.9.3",
+ "html-escape",
  "html-to-markdown-rs",
  "icy_sixel",
- "ignore",
  "image",
+ "indexmap",
  "inferno",
  "libc",
  "log",
@@ -7021,7 +7050,9 @@ dependencies = [
  "objc2-foundation",
  "parking_lot",
  "pdf-inspector",
+ "peg-runtime",
  "phf 0.14.0",
+ "phf_shared 0.11.3",
  "pi-ast",
  "pi-builtins",
  "pi-diff",
@@ -7036,13 +7067,16 @@ dependencies = [
  "pipewire",
  "png",
  "portable-pty",
+ "rand_core 0.6.4",
  "rayon",
  "regex",
  "reis",
  "resvg",
  "serde",
+ "serde_core",
  "serde_json",
  "shlex 2.0.1",
+ "simd-adler32",
  "smallvec",
  "syntect",
  "tiktoken-rs",
@@ -7060,13 +7094,14 @@ dependencies = [
  "xutf",
  "xxhash-rust",
  "zbus",
+ "zlib-rs",
  "zstd",
  "zune-jpeg",
 ]
 
 [[package]]
 name = "pi-predict"
-version = "18.10.3"
+version = "18.14.0"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -7084,7 +7119,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "18.10.3"
+version = "18.14.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7095,7 +7130,6 @@ dependencies = [
  "flume",
  "jiff",
  "libc",
- "os_pipe",
  "parking_lot",
  "pi-builtins",
  "pi-vcs",
@@ -7115,7 +7149,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vcs"
-version = "18.10.3"
+version = "18.14.0"
 dependencies = [
  "futures",
  "gix",
@@ -7131,7 +7165,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vfs"
-version = "18.10.3"
+version = "18.14.0"
 dependencies = [
  "async-trait",
  "libc",
@@ -7144,7 +7178,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "18.10.3"
+version = "18.14.0"
 dependencies = [
  "bytes",
  "flume",
@@ -7158,14 +7192,23 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "18.10.3"
+version = "18.14.0"
 dependencies = [
+ "async-trait",
+ "flume",
+ "futures",
  "globset",
+ "grep-matcher",
+ "grep-pcre2",
+ "grep-regex",
+ "grep-searcher",
  "ignore",
  "libc",
+ "memchr",
  "parking_lot",
  "pi-vfs",
- "rayon",
+ "regex",
+ "tokio",
  "windows-sys 0.61.2",
 ]
 
@@ -9449,6 +9492,12 @@ dependencies = [
  "tokio-util",
  "webrtc-util",
 ]
+
+[[package]]
+name = "twox-hash"
+version = "2.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 
 [[package]]
 name = "type-map"

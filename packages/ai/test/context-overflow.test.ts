@@ -237,8 +237,8 @@ describe("Context overflow error handling", () => {
 	});
 
 	describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("Anthropic (OAuth)", () => {
-		it("claude-sonnet-4 - should detect overflow via isContextOverflow", async () => {
-			const model = getBundledModel("anthropic", "claude-sonnet-4-20250514");
+		it("claude-sonnet-4-5 - should detect overflow via isContextOverflow", async () => {
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5-20250929");
 			const result = await testContextOverflow(model, e2eApiKey("ANTHROPIC_API_KEY")!);
 			logResult(result);
 
@@ -360,9 +360,9 @@ describe("Context overflow error handling", () => {
 	describe("Google Antigravity (OAuth)", () => {
 		// Gemini model
 		it.skipIf(!antigravityToken)(
-			"gemini-3-flash - should detect overflow via isContextOverflow",
+			"gemini-3.8-flash - should detect overflow via isContextOverflow",
 			async () => {
-				const model = getBundledModel("google-antigravity", "gemini-3-flash");
+				const model = getBundledModel("google-antigravity", "gemini-3.8-flash");
 				const result = await testContextOverflow(model, antigravityToken!);
 				logResult(result);
 
@@ -436,6 +436,24 @@ describe("Context overflow error handling", () => {
 		it("llama-3.3-70b-versatile - should detect overflow via isContextOverflow", async () => {
 			const model = getBundledModel("groq", "llama-3.3-70b-versatile");
 			const result = await testContextOverflow(model, Bun.env.GROQ_API_KEY!);
+			logResult(result);
+
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toMatch(/reduce the length of the messages/i);
+			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
+		}, 120000);
+	});
+
+	// =============================================================================
+	// Inception
+	// Expected pattern: "reduce the length of the messages" (code context_length_exceeded)
+	// =============================================================================
+
+	describe.skipIf(!e2eApiKey("INCEPTION_API_KEY"))("Inception", () => {
+		// Every Mercury model shares the error contract; mercury-2 has the smallest window.
+		it("mercury-2 - should detect overflow via isContextOverflow", async () => {
+			const model = getBundledModel("inception", "mercury-2");
+			const result = await testContextOverflow(model, Bun.env.INCEPTION_API_KEY!);
 			logResult(result);
 
 			expect(result.stopReason).toBe("error");

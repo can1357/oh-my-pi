@@ -2,7 +2,8 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { createDaemonBrokerClient } from "../../src/launch/client";
+import { Process } from "@oh-my-pi/pi-natives";
+import { readLiveDaemonBrokerPid } from "../../src/launch/presence";
 import { findFreeCdpPort } from "../../src/tools/browser/attach";
 import { probeRelayServer } from "../../src/tools/browser/relay/daemon";
 
@@ -200,16 +201,7 @@ try {
 			}
 		} finally {
 			await terminateConsumer(first);
-			const rescue = await createDaemonBrokerClient(globalRuntimeDir, {
-				runtimeDir: globalRuntimeDir,
-				idleGraceMs: 200,
-			});
-			try {
-				await rescue.request({ op: "shutdown" });
-			} catch {
-				// The last-client grace may already have stopped the broker.
-			}
-			rescue.close();
+			await waitForIsolatedBrokerExit(globalRuntimeDir);
 			await fs.rm(home, { recursive: true, force: true });
 		}
 		// Budget must exceed the sum of the bounds inside the test: two 15s marker waits
@@ -270,16 +262,7 @@ try {
 		} finally {
 			if (child.exitCode === null) child.kill();
 			await child.exited;
-			const rescue = await createDaemonBrokerClient(globalRuntimeDir, {
-				runtimeDir: globalRuntimeDir,
-				idleGraceMs: 200,
-			});
-			try {
-				await rescue.request({ op: "shutdown" });
-			} catch {
-				// The last-client grace may already have stopped the broker.
-			}
-			rescue.close();
+			await waitForIsolatedBrokerExit(globalRuntimeDir);
 			await fs.rm(home, { recursive: true, force: true });
 		}
 	}, 60_000);
@@ -838,16 +821,20 @@ async function runWithIsolatedBroker(
 	} finally {
 		if (child.exitCode === null) child.kill();
 		await child.exited;
-		const rescue = await createDaemonBrokerClient(globalRuntimeDir, {
-			runtimeDir: globalRuntimeDir,
-			idleGraceMs: 200,
-		});
-		try {
-			await rescue.request({ op: "shutdown" });
-		} catch {
-			// The last-client grace may already have stopped the broker.
-		}
-		rescue.close();
+		await waitForIsolatedBrokerExit(globalRuntimeDir);
 		await fs.rm(home, { recursive: true, force: true });
 	}
+}
+
+/**
+ * Waits for the isolated global broker, and the daemons it stops on its way out, to exit before the caller removes
+ * the temp HOME: on Windows a live broker's open runtime files, or a relay whose cwd is the broker's runtime dir,
+ * make the removal fail with EBUSY. Its clients are gone, so the broker leaves after its 200ms last-client grace;
+ * no `shutdown` request is sent because a client finding no broker would spawn a fresh one into HOME.
+ */
+async function waitForIsolatedBrokerExit(runtimeDir: string): Promise<void> {
+	const pid = await readLiveDaemonBrokerPid(runtimeDir);
+	const broker = pid === undefined ? null : Process.fromPid(pid);
+	if (!broker || (await broker.waitForExit({ timeoutMs: 10_000 }))) return;
+	await broker.terminate({ group: true, gracefulMs: 0, timeoutMs: 2_000 });
 }

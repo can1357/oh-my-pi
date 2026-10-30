@@ -93,6 +93,50 @@ function installFatalCapture(): {
 }
 
 describe("WorkerCore", () => {
+	it("delivers a completion handle id after its creating cell finishes", async () => {
+		const harness = createWorkerHarness();
+		const snapshot = { cwd: process.cwd(), sessionId: `late-handle-${crypto.randomUUID()}`, localRoots: {} };
+		await initializeWorker(harness, snapshot);
+		const toolCall = waitForMessage(
+			harness,
+			message => message.type === "tool-call" && message.name === "__completion__",
+		);
+		const firstResult = waitForMessage(
+			harness,
+			message => message.type === "result" && message.runId === "create-handle",
+		);
+		try {
+			harness.send({
+				type: "run",
+				runId: "create-handle",
+				code: 'var lateHandle = completion("hi"); print("started");',
+				filename: "[create-handle].js",
+				snapshot,
+			});
+			const call = await toolCall;
+			expect(await firstResult).toMatchObject({ type: "result", ok: true });
+			if (call.type !== "tool-call") throw new Error("expected completion bridge call");
+			harness.send({ type: "tool-reply", id: call.id, reply: { ok: true, value: { id: "late-1" } } });
+
+			const text = waitForMessage(harness, message => message.type === "text" && message.runId === "read-handle");
+			const result = waitForMessage(
+				harness,
+				message => message.type === "result" && message.runId === "read-handle",
+			);
+			harness.send({
+				type: "run",
+				runId: "read-handle",
+				code: "print((await globalThis.lateHandle).id);",
+				filename: "[read-handle].js",
+				snapshot,
+			});
+			expect(await text).toMatchObject({ chunk: "late-1\n" });
+			expect(await result).toMatchObject({ ok: true });
+		} finally {
+			harness.send({ type: "close" });
+		}
+	});
+
 	it("re-init while a same-realm run is live does not crash the process", async () => {
 		const first = createWorkerHarness();
 		const second = createWorkerHarness();
@@ -444,6 +488,63 @@ describe("WorkerCore", () => {
 			expect(await run("artifact-b", dirB)).toBe("from B");
 		} finally {
 			delete probe.__omp_artifact_probe;
+			harness.send({ type: "close" });
+			await fs.rm(dirA, { recursive: true, force: true });
+			await fs.rm(dirB, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps a suspended run on its own artifact root while an overlapping run uses another", async () => {
+		const dirA = await fs.mkdtemp(path.join(os.tmpdir(), "omp-artifacts-a-"));
+		const dirB = await fs.mkdtemp(path.join(os.tmpdir(), "omp-artifacts-b-"));
+		await Bun.write(path.join(dirA, "5.eval.log"), "from A");
+		await Bun.write(path.join(dirB, "5.eval.log"), "from B");
+		const harness = createWorkerHarness();
+		const gate = Promise.withResolvers<void>();
+		const entered = Promise.withResolvers<void>();
+		const probe = globalThis as {
+			__omp_roots_gate?: { entered(): void; wait: Promise<void> };
+			__omp_roots_probe?: Record<string, unknown>;
+		};
+		probe.__omp_roots_gate = { entered: () => entered.resolve(), wait: gate.promise };
+		probe.__omp_roots_probe = {};
+		const snapshot = (artifacts: string): SessionSnapshot => ({
+			cwd: process.cwd(),
+			sessionId: "artifact-roots-overlap",
+			localRoots: { artifact: artifacts },
+		});
+		try {
+			await initializeWorker(harness, snapshot(dirA));
+			const holdResult = waitForMessage(harness, message => message.type === "result" && message.runId === "hold");
+			harness.send({
+				type: "run",
+				runId: "hold",
+				code: `globalThis.__omp_roots_gate.entered(); await globalThis.__omp_roots_gate.wait; globalThis.__omp_roots_probe.hold = await read("artifact://5");`,
+				filename: "[roots-hold].js",
+				snapshot: snapshot(dirA),
+			});
+			await entered.promise;
+
+			const overlapResult = waitForMessage(
+				harness,
+				message => message.type === "result" && message.runId === "overlap",
+			);
+			harness.send({
+				type: "run",
+				runId: "overlap",
+				code: `globalThis.__omp_roots_probe.overlap = await read("artifact://5");`,
+				filename: "[roots-overlap].js",
+				snapshot: snapshot(dirB),
+			});
+			expect(await overlapResult).toMatchObject({ type: "result", runId: "overlap", ok: true });
+
+			gate.resolve();
+			expect(await holdResult).toMatchObject({ type: "result", runId: "hold", ok: true });
+			expect(probe.__omp_roots_probe).toEqual({ overlap: "from B", hold: "from A" });
+		} finally {
+			gate.resolve();
+			delete probe.__omp_roots_gate;
+			delete probe.__omp_roots_probe;
 			harness.send({ type: "close" });
 			await fs.rm(dirA, { recursive: true, force: true });
 			await fs.rm(dirB, { recursive: true, force: true });
