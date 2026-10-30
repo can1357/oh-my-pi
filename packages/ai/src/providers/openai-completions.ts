@@ -48,6 +48,7 @@ import {
 } from "../utils/idle-iterator";
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
+import { admitsReplay, ReplayBudget } from "../utils/replay-budget";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import {
 	adaptSchemaForStrict,
@@ -818,6 +819,7 @@ const streamOpenAICompletionsOnce = (
 
 	(async () => {
 		const startTime = performance.now();
+		const replayBudget = ReplayBudget.from(options?.replayBudgetMs);
 		let firstTokenTime: number | undefined;
 
 		const output: AssistantMessage = createInitialResponsesAssistantMessage(model.api, model.provider, model.id);
@@ -957,12 +959,14 @@ const streamOpenAICompletionsOnce = (
 						body: params,
 						signal: requestSignal,
 						maxAttempts: options?.maxHttpAttempts,
+						retryGate: replayBudget?.admits,
 						fetch: wrapFetchForCopilotFallback(
-							wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
+							wrapFetchForRequestCompression(options?.fetch ?? fetch, model, replayBudget?.admits),
 							model.provider === "github-copilot",
 							resolveCopilotRequestIdentity(options?.headers),
 							copilotCacheKey,
 							copilotCacheSnapshot,
+							replayBudget?.admits,
 						),
 						// Transient 408/429/5xx get Retry-After-aware transport retries.
 						// The first-event watchdog above aborts `requestSignal`, which
@@ -1008,6 +1012,7 @@ const streamOpenAICompletionsOnce = (
 				if (reasoningEffortFallback !== undefined && activeReasoningEffortFallbackKey) {
 					const retryMarker = `${activeReasoningEffortFallbackKey}:${String(reasoningEffortFallback)}`;
 					if (attemptedReasoningEffortFallbacks.has(retryMarker)) throw error;
+					if (!admitsReplay(replayBudget, 0)) throw error;
 					attemptedReasoningEffortFallbacks.add(retryMarker);
 					requestReasoningEffortFallbacks.set(activeReasoningEffortFallbackKey, reasoningEffortFallback);
 					openaiStream = await createCompletionsStream();
@@ -1026,6 +1031,7 @@ const streamOpenAICompletionsOnce = (
 					!disableStrictTools &&
 					isCompiledGrammarTooLargeStrictError(error, capturedErrorResponse)
 				) {
+					if (!admitsReplay(replayBudget, 0)) throw error;
 					disableStrictToolsForScope(providerSessionState, strictToolsScope);
 					disableStrictTools = true;
 					openaiStream = await createCompletionsStream("none");
@@ -1039,6 +1045,7 @@ const streamOpenAICompletionsOnce = (
 					) {
 						throw error;
 					}
+					if (!admitsReplay(replayBudget, 0)) throw error;
 					// Remember the rejection for the rest of the session so every
 					// subsequent request doesn't pay a strict-400 + retry round-trip.
 					disableStrictToolsForScope(providerSessionState, strictToolsScope);
@@ -1861,6 +1868,7 @@ const streamOpenAICompletionsOnce = (
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			replayBudget?.stamp(output);
 			// Some providers via OpenRouter include extra details here.
 			const rawMetadata = readOpenRouterRawMetadata(capturedErrorResponse);
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;

@@ -1803,6 +1803,7 @@ function mapOptionsForApi<TApi extends Api>(
 		headers: options?.headers,
 		initiatorOverride: options?.initiatorOverride,
 		maxRetryDelayMs: options?.maxRetryDelayMs,
+		replayBudgetMs: options?.replayBudgetMs,
 		metadata: options?.metadata,
 		loopGuard: options?.loopGuard,
 		taskBudget: options?.taskBudget,

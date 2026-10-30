@@ -71,6 +71,21 @@ const copilotRejection = () =>
 afterEach(() => resetRequestCompressionForTesting());
 
 describe("wrapFetchForRequestCompression", () => {
+	// The uncompressed resend is a second request inside one call: a caller's
+	// replay budget that it ignored would be spent without anyone above knowing.
+	it("returns the rejection instead of resending when the call's replay budget refuses", async () => {
+		const { calls, fetch } = captureFetch([anthropicRejection()]);
+		const asked: number[] = [];
+		const response = await wrapFetchForRequestCompression(fetch, anthropic, delayMs => {
+			asked.push(delayMs);
+			return false;
+		})(ANTHROPIC_URL, post());
+
+		expect(calls).toHaveLength(1);
+		expect(response.status).toBe(400);
+		expect(asked).toEqual([0]);
+	});
+
 	it("gzips large bodies to the official Anthropic API without disturbing other headers", async () => {
 		const { calls, fetch } = captureFetch([]);
 		await wrapFetchForRequestCompression(fetch, anthropic)(ANTHROPIC_URL, post());

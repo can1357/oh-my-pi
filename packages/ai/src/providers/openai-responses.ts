@@ -40,6 +40,7 @@ import {
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
+import { admitsReplay, ReplayBudget } from "../utils/replay-budget";
 import { waitForRetry } from "../utils/retry-wait";
 import {
 	adaptSchemaForStrict,
@@ -258,12 +259,15 @@ export async function pollOpenAIResponsesResultForCompletion(args: {
 	signal?: AbortSignal;
 	/** Sleep between polls; defaults to a real wait honoring `signal`. */
 	wait?: (ms: number, signal?: AbortSignal) => Promise<void>;
+	/** Whether the caller's replay budget admits the next poll wait; omitted, every poll the deadline allows runs. */
+	admits?: (delayMs: number) => boolean;
 }): Promise<Record<string, unknown> | undefined> {
 	const deadline = Date.now() + OPENAI_RESPONSES_RESUME_DEADLINE_MS;
 	for (let attempt = 0; attempt < OPENAI_RESPONSES_RESUME_MAX_POLLS; attempt++) {
 		if (args.signal?.aborted) return undefined;
 		if (attempt > 0) {
 			if (Date.now() + OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS >= deadline) return undefined;
+			if (args.admits && !args.admits(OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS)) return undefined;
 			try {
 				await waitForRetry(args.wait, OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS, args.signal);
 			} catch {
@@ -662,6 +666,7 @@ const streamOpenAIResponsesOnce = (
 	// Start async processing
 	(async () => {
 		const startTime = performance.now();
+		const replayBudget = ReplayBudget.from(options?.replayBudgetMs);
 		let firstTokenTime: number | undefined;
 
 		const output: AssistantMessage = createInitialResponsesAssistantMessage(model.api, model.provider, model.id);
@@ -822,15 +827,17 @@ const streamOpenAIResponsesOnce = (
 						body: requestParams,
 						signal: requestSignal,
 						fetch: wrapFetchForCopilotFallback(
-							wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
+							wrapFetchForRequestCompression(options?.fetch ?? fetch, model, replayBudget?.admits),
 							model.provider === "github-copilot",
 							resolveCopilotRequestIdentity(options?.headers),
 							copilotCacheKey,
 							copilotCacheSnapshot,
+							replayBudget?.admits,
 						),
 						shouldRetryResponse: (response, bodyText) =>
 							!AIError.isRequestBodyReadTimeout(response.status, bodyText) ||
 							lastSubmittedRequestWasFullReplay !== true,
+						retryGate: replayBudget?.admits,
 						// Transient 408/429/5xx get Retry-After-aware transport
 						// retries; the first-event watchdog aborts `requestSignal`,
 						// so retries cannot extend the caller's deadline.
@@ -881,7 +888,11 @@ const streamOpenAIResponsesOnce = (
 											options?.forceReasoningOff === true || options?.disableReasoning === true,
 									})
 								: undefined;
-						if (reasoningEffortFallback !== undefined && activeReasoningEffortFallbackKey) {
+						if (
+							reasoningEffortFallback !== undefined &&
+							activeReasoningEffortFallbackKey &&
+							admitsReplay(replayBudget, 0)
+						) {
 							const retryMarker = `${activeReasoningEffortFallbackKey}:${String(reasoningEffortFallback)}`;
 							if (attemptedReasoningEffortFallbacks.has(retryMarker)) throw error;
 							attemptedReasoningEffortFallbacks.add(retryMarker);
@@ -907,7 +918,7 @@ const streamOpenAIResponsesOnce = (
 									strictToolsApplied: activeStrictToolsApplied,
 									tools: context.tools,
 								}));
-						if (canRetryWithoutStrictTools) {
+						if (canRetryWithoutStrictTools && admitsReplay(replayBudget, 0)) {
 							strictRetryAvailable = false;
 							forceDisableStrictTools = true;
 							disableStrictToolsForScope(providerSessionState, strictToolsScope);
@@ -955,6 +966,7 @@ const streamOpenAIResponsesOnce = (
 						if (!zdrRejection && !isPromptBlocked && !isOpenAIResponsesStalePreviousResponseError(error)) {
 							throw error;
 						}
+						if (!admitsReplay(replayBudget, 0)) throw error;
 						// Server rejected the chain baseline: reset, count the failure (or
 						// disable categorically on ZDR), and retry once with the full
 						// transcript. Structurally cannot loop — the retry carries no
@@ -1121,12 +1133,14 @@ const streamOpenAIResponsesOnce = (
 								resolveCopilotRequestIdentity(options?.headers),
 								copilotCacheKey,
 								copilotCacheSnapshot,
+								replayBudget?.admits,
 							),
 							url: `${resolvedBaseUrl}/responses/${resumeId}`,
 							headers,
 							responseId: resumeId,
 							signal: options?.signal,
 							wait: options?.providerRetryWait,
+							admits: replayBudget?.admits,
 						});
 						if (resumedResponse !== undefined) {
 							const deadContent = [...output.content];
@@ -1213,7 +1227,8 @@ const streamOpenAIResponsesOnce = (
 						!requestSignal.aborted &&
 						!abortTracker.wasCallerAbort() &&
 						transientStreamRetryAttempt < OPENAI_RESPONSES_MAX_TRANSIENT_STREAM_RETRIES &&
-						isRetryableOpenAIResponsesStreamFailure(streamFailure);
+						isRetryableOpenAIResponsesStreamFailure(streamFailure) &&
+						admitsReplay(replayBudget, OPENAI_RESPONSES_TRANSIENT_STREAM_RETRY_DELAY_MS);
 					if (!canRetry) {
 						forwardAttemptEvents();
 						throw streamFailure;
@@ -1327,6 +1342,7 @@ const streamOpenAIResponsesOnce = (
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			replayBudget?.stamp(output);
 			if (AIError.isRequestBodyReadTimeout(result.status, result.message) && lastSubmittedRequestWasFullReplay) {
 				output.requestBodyReadTimeoutFullReplay = true;
 			}

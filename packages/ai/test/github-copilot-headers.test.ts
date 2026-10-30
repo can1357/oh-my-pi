@@ -446,6 +446,28 @@ describe("wrapFetchForCopilotFallback", () => {
 		expect(seen).toEqual([COPILOT_CHAT_INTEGRATION_ID, "copilot-developer-cli"]);
 	});
 
+	// The identity retry is a second request inside one call: a caller's replay
+	// budget that it ignored would be spent without anyone above knowing.
+	it("returns the denial instead of retrying when the call's replay budget refuses", async () => {
+		const denied = new Response("{}", { status: 403 });
+		const fetchMock = vi.fn(async () => denied);
+		const asked: number[] = [];
+		const wrapped = wrapFetchForCopilotFallback(
+			fetchMock as unknown as typeof fetch,
+			true,
+			undefined,
+			undefined,
+			undefined,
+			delayMs => {
+				asked.push(delayMs);
+				return false;
+			},
+		);
+		await expect(wrapped(...chatRequest())).resolves.toBe(denied);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(asked).toEqual([0]);
+	});
+
 	it("retries a chat-default 400 model_not_supported once as the Copilot CLI", async () => {
 		const seen: (string | null)[] = [];
 		let calls = 0;

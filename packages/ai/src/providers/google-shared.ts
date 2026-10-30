@@ -29,6 +29,7 @@ import { normalizeSystemPrompts, normalizeToolCallId } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs } from "../utils/idle-iterator";
+import { admitsReplay, ReplayBudget } from "../utils/replay-budget";
 import { normalizeSchemaForCCA, normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
 import type {
 	Content,
@@ -1024,6 +1025,7 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 
 	(async () => {
 		const startTime = performance.now();
+		const replayBudget = ReplayBudget.from(options?.replayBudgetMs);
 		let firstTokenTime: number | undefined;
 
 		const output: AssistantMessage = {
@@ -1154,14 +1156,15 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 				) {
 					break;
 				}
-				if (emptyAttempt >= MAX_EMPTY_STREAM_RETRIES) {
+				const emptyRetryDelayMs = EMPTY_STREAM_BASE_DELAY_MS * 2 ** emptyAttempt;
+				if (emptyAttempt >= MAX_EMPTY_STREAM_RETRIES || !admitsReplay(replayBudget, emptyRetryDelayMs)) {
 					throw new AIError.ProviderResponseError(
-						`Google API returned an empty response (finishReason STOP with no content) after ${MAX_EMPTY_STREAM_RETRIES + 1} attempts`,
+						`Google API returned an empty response (finishReason STOP with no content) after ${emptyAttempt + 1} attempts`,
 						{ provider: model.provider, kind: "empty-body" },
 					);
 				}
 				try {
-					await scheduler.wait(EMPTY_STREAM_BASE_DELAY_MS * 2 ** emptyAttempt, { signal: options?.signal });
+					await scheduler.wait(emptyRetryDelayMs, { signal: options?.signal });
 				} catch {
 					throw new AIError.AbortError();
 				}
@@ -1179,6 +1182,7 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			replayBudget?.stamp(output);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });

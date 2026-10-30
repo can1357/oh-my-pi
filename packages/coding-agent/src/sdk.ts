@@ -4685,6 +4685,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					agent.state.tools.some(tool => tool.name === "think") &&
 					supportsExternalThinking(streamModel);
 				const fallbackCreditRedemption = session?.consumeActiveFallbackCreditRedemption(streamModel);
+				const heldReplayBudgetMs = session?.consumeHeldRetryReplayBudget(streamModel);
 				if (streamOptions?.promptCacheKey === undefined) session?.promoteTaskSiblingCandidate(streamModel);
 				const merged: SimpleStreamOptions = {
 					...streamOptions,
@@ -4694,6 +4695,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const stream = primaryStreamFn(streamModel, context, {
 					...merged,
 					...(fallbackCreditRedemption !== undefined ? { fallbackCreditRedemption } : {}),
+					...(heldReplayBudgetMs !== undefined ? { replayBudgetMs: heldReplayBudgetMs } : {}),
 				});
 				// A request that waited for a provider slot is checked again when it goes out.
 				if (stream instanceof Promise) {

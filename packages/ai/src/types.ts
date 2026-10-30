@@ -544,6 +544,28 @@ export interface StreamOptions {
 	 */
 	maxRetryDelayMs?: number;
 	/**
+	 * Wall-clock budget, in milliseconds from the start of this call, for every
+	 * request the call sends after its first: a backoff retry, a pre-response
+	 * HTTP retry, a transport re-send, an empty-response retry, and a resend that
+	 * corrects a rejected request (an uncompressed body, another client
+	 * identity, a dropped field, a rebuilt chain). A further request is sent only
+	 * when it, wait included, begins inside the budget; otherwise the provider
+	 * stops and returns the failure in hand with
+	 * {@link AssistantMessage.replayBudgetExhausted} set. A refusal latches for
+	 * the rest of the call, so a rung with a shorter wait cannot resend what a
+	 * longer wait was refused for.
+	 *
+	 * A server `retry-after` is never shortened to fit, because retrying sooner
+	 * than the server asked is a guaranteed failure: a requested wait that would
+	 * end past the budget ends the call at once rather than sleeping into it,
+	 * and the server's hint stays on the returned error for the caller.
+	 *
+	 * The request in flight is never cut short. `0` (and any negative or `NaN`
+	 * value) refuses every further request. Unset or `Infinity` keeps each
+	 * provider's own retry ceiling.
+	 */
+	replayBudgetMs?: number;
+	/**
 	 * Optional metadata to include in API requests.
 	 * Providers extract the fields they understand and ignore the rest.
 	 * For example, Anthropic uses `user_id` for abuse tracking and rate limiting.
@@ -1329,6 +1351,15 @@ export interface AssistantMessage {
 	errorStatus?: number;
 	/** Structured machine-readable error classifier; see `utils/error-id.ts` for bit layout and helpers. */
 	errorId?: number;
+	/**
+	 * `true` when the provider stopped replaying a transient failure because
+	 * {@link StreamOptions.replayBudgetMs} left no room for the next replay; set on
+	 * the result that replay would have replaced. Absent when the provider
+	 * stopped on its own (its retry ceiling, a failure it does not replay) or no
+	 * budget was set. A caller choosing whether to fail over reads it: the route
+	 * was not given the provider's full retry ceiling.
+	 */
+	replayBudgetExhausted?: boolean;
 	/**
 	 * Stable identifiers for request features the provider silently dropped
 	 * during this turn (e.g. `"priority"`). Set when a server-side rejection

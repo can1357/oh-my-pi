@@ -5,6 +5,7 @@
 ### Added
 
 - Added `waitForSibling` to `RotateCredentialOptions`; set it to `false` to skip the short sibling-unblock wait in `limits.rotate()` while still blocking the failed credential ([#17439](https://github.com/can1357/oh-my-pi/pull/17439) by [@wolfiesch](https://github.com/wolfiesch))
+- Added `StreamOptions.replayBudgetMs`, a wall-clock budget from the start of a streaming call for every request it sends after its first (backoff retries, pre-response HTTP retries, transport and empty-response retries, corrected resends); a wait that would end past it, a server's `retry-after` included, ends the call at once, and `AssistantMessage.replayBudgetExhausted` reports that the budget stopped it
 
 ### Changed
 

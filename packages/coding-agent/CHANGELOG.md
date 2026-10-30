@@ -13,6 +13,7 @@
 ### Changed
 
 - `read` of a web page keeps the title, description, author and dates of its `<meta>` tags and lists the others by name only, so pages cost about 6% fewer tokens ([#17393](https://github.com/can1357/oh-my-pi/pull/17393) by [@will-bogusz](https://github.com/will-bogusz))
+- A turn retried on its own model after a mid-stream disconnect, while `retry.fallbackChains` has a fallback ready, now moves to the fallback after about 2 s of retries inside the call instead of the provider's full retry ceiling (about 49 s on Anthropic), and moves at once when the server asks for a longer wait
 
 ### Fixed
 

@@ -73,6 +73,7 @@ import {
 import { getProxyForUrl } from "../utils/proxy";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
+import { admitsReplay, ReplayBudget } from "../utils/replay-budget";
 import { getHeadersFromError, getRetryAfterMsFromHeaders, type HeadersLike } from "../utils/retry-after";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { notifyRawSseEvent } from "../utils/sse-debug";
@@ -758,6 +759,8 @@ interface CodexRequestContext {
 	requestMetadata?: CodexRequestMetadata;
 	transformedBody: RequestBody;
 	rawRequestDump: RawHttpRequestDump;
+	/** The call's `replayBudgetMs`, shared by every rung that re-sends the request. */
+	replayBudget?: ReplayBudget;
 }
 
 interface CodexRequestSetup {
@@ -1374,6 +1377,7 @@ function createCodexRequestContext(
 		isolateCompactionTransport: boolean;
 		startNewTurn?: boolean;
 		turnStartedAtUnixMs?: number;
+		replayBudget?: ReplayBudget;
 	},
 ): CodexRequestContext {
 	const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
@@ -1463,6 +1467,7 @@ function createCodexRequestContext(
 		codexClientVersion,
 		transformedBody,
 		rawRequestDump,
+		replayBudget: contextOptions.replayBudget,
 	};
 }
 
@@ -1470,6 +1475,7 @@ async function buildCodexRequestContext(
 	model: Model<"openai-codex-responses">,
 	context: Context,
 	options: OpenAICodexResponsesOptions | undefined,
+	replayBudget: ReplayBudget | undefined,
 ): Promise<CodexRequestContext> {
 	const promptCacheKey = getOpenAIPromptCacheKey(options);
 	const transformedBody = await buildTransformedCodexRequestBody(model, context, options, promptCacheKey);
@@ -1477,6 +1483,7 @@ async function buildCodexRequestContext(
 		isolateCompactionTransport: true,
 		startNewTurn: options?.codexCompaction ? undefined : !isCodexWithinTurnContinuation(context),
 		turnStartedAtUnixMs: options?.codexCompaction ? undefined : getCodexTurnStartedAtUnixMs(context),
+		replayBudget,
 	});
 }
 
@@ -1628,12 +1635,16 @@ async function openInitialCodexEventStream(
 						fatal: isFatal,
 					});
 				if (!activateFallback) {
+					const delayMs = CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, websocketRetries + 1);
+					if (!admitsReplay(requestContext.replayBudget, delayMs)) throw error;
 					websocketRetries += 1;
-					await scheduler.wait(CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, websocketRetries), {
+					await scheduler.wait(delayMs, {
 						signal: requestSetup.requestSignal,
 					});
 					continue;
 				}
+				// Falling back sends the request again over SSE.
+				if (!admitsReplay(requestContext.replayBudget, 0)) throw error;
 				break;
 			}
 		}
@@ -1644,6 +1655,7 @@ async function openInitialCodexEventStream(
 		return await openCodexSseTransport(model, requestContext, requestSetup, options, websocketState, transformedBody);
 	} catch (error) {
 		if (!dropRejectedCodexAccessPrograms(transformedBody, model, requestContext.accountId, error)) throw error;
+		if (!admitsReplay(requestContext.replayBudget, 0)) throw error;
 		return openCodexSseTransport(model, requestContext, requestSetup, options, websocketState, transformedBody);
 	}
 }
@@ -2001,7 +2013,8 @@ async function openCodexSseTransport(
 				requestSetup.firstEventTimeoutMs,
 				options?.codexSseMaxAttempts,
 				event => options?.onSseEvent?.(event, model),
-				wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
+				wrapFetchForRequestCompression(options?.fetch ?? fetch, model, requestContext.replayBudget?.admits),
+				requestContext.replayBudget?.admits,
 			),
 		);
 	};
@@ -2145,6 +2158,7 @@ async function handleCodexStreamFailure(context: CodexStreamFailureContext, erro
 	output.errorStatus = result.status;
 	output.errorId = result.id;
 	output.errorMessage = result.message;
+	context.requestContext.replayBudget?.stamp(output);
 	output.duration = performance.now() - context.startTime;
 	if (context.firstTokenTime) {
 		output.ttft = context.firstTokenTime - context.startTime;
@@ -2843,7 +2857,11 @@ class CodexStreamProcessor {
 			this.runtime.whitespaceLoopRetries >= CODEX_WHITESPACE_LOOP_RETRY_LIMIT ||
 			!this.runtime.canSafelyReplayWebsocketOverSse ||
 			this.output.content.some(block => block.type !== "thinking") ||
-			this.options?.signal?.aborted
+			this.options?.signal?.aborted ||
+			!admitsReplay(
+				this.requestContext.replayBudget,
+				CODEX_WHITESPACE_LOOP_RETRY_DELAY_MS * (this.runtime.whitespaceLoopRetries + 1),
+			)
 		) {
 			return false;
 		}
@@ -2929,6 +2947,7 @@ class CodexStreamProcessor {
 			});
 
 		if (this.output.content.length > 0) {
+			if (!admitsReplay(this.requestContext.replayBudget, 0)) return false;
 			// Content already emitted to the caller — cannot safely continue on a new WS.
 			// Reset and replay the full request over SSE.
 			this.runtime.resetAccumulators();
@@ -2947,12 +2966,15 @@ class CodexStreamProcessor {
 		this.runtime.resetAccumulators();
 		this.firstTokenTime = undefined;
 		if (this.runtime.websocketStreamRetries >= CODEX_WEBSOCKET_RETRY_BUDGET) {
+			if (!admitsReplay(this.requestContext.replayBudget, 0)) return false;
 			recordCodexWebSocketFailure(websocketState, true);
 			await this.#reopenSseStream(websocketState);
 			return true;
 		}
+		const reconnectDelayMs = CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, this.runtime.websocketStreamRetries + 1);
+		if (!admitsReplay(this.requestContext.replayBudget, reconnectDelayMs)) return false;
 		this.runtime.websocketStreamRetries += 1;
-		await scheduler.wait(CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, this.runtime.websocketStreamRetries), {
+		await scheduler.wait(reconnectDelayMs, {
 			signal: this.requestSetup.requestSignal,
 		});
 		await this.#reopenWebSocketStream(websocketState);
@@ -2973,7 +2995,8 @@ class CodexStreamProcessor {
 				this.model,
 				this.requestContext.accountId,
 				error,
-			)
+			) ||
+			!admitsReplay(this.requestContext.replayBudget, 0)
 		) {
 			return false;
 		}
@@ -3010,7 +3033,8 @@ class CodexStreamProcessor {
 			this.runtime.transport !== "websocket" ||
 			this.output.content.length > 0 ||
 			this.options?.signal?.aborted ||
-			this.runtime.providerRetryAttempt >= CODEX_MAX_RETRIES
+			this.runtime.providerRetryAttempt >= CODEX_MAX_RETRIES ||
+			!admitsReplay(this.requestContext.replayBudget, 0)
 		) {
 			return false;
 		}
@@ -3045,6 +3069,7 @@ class CodexStreamProcessor {
 			// SSE never sends previous_response_id; let other recovery handle it.
 			return false;
 		}
+		if (!admitsReplay(this.requestContext.replayBudget, 0)) return false;
 
 		this.runtime.providerRetryAttempt += 1;
 		resetCodexWebSocketAppendState(websocketState);
@@ -3104,6 +3129,10 @@ class CodexStreamProcessor {
 				fatal: isFatal,
 				replayedBufferedOutput: replayingBufferedOutputOverSse,
 			});
+		const replayDelayMs = activateFallback
+			? 0
+			: CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, this.runtime.websocketStreamRetries + 1);
+		if (!admitsReplay(this.requestContext.replayBudget, replayDelayMs)) return false;
 
 		if (!activateFallback) {
 			this.runtime.websocketStreamRetries += 1;
@@ -3112,7 +3141,7 @@ class CodexStreamProcessor {
 			// web_search_call) may already have accumulated.
 			this.runtime.resetAccumulators();
 			this.firstTokenTime = undefined;
-			await scheduler.wait(CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, this.runtime.websocketStreamRetries), {
+			await scheduler.wait(replayDelayMs, {
 				signal: this.requestSetup.requestSignal,
 			});
 			await this.#reopenWebSocketStream(state);
@@ -3177,7 +3206,8 @@ class CodexStreamProcessor {
 			streamedContent ||
 			!this.runtime.canSafelyReplayWebsocketOverSse ||
 			this.runtime.providerRetryAttempt >= CODEX_MAX_RETRIES ||
-			this.options?.signal?.aborted
+			this.options?.signal?.aborted ||
+			!admitsReplay(this.requestContext.replayBudget, CODEX_RETRY_DELAY_MS * (this.runtime.providerRetryAttempt + 1))
 		) {
 			return false;
 		}
@@ -3292,6 +3322,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 
 	(async () => {
 		const startTime = performance.now();
+		const replayBudget = ReplayBudget.from(options?.replayBudgetMs);
 		const output: AssistantMessage = {
 			role: "assistant",
 			content: [],
@@ -3314,7 +3345,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 		let requestContext: CodexRequestContext | undefined;
 
 		try {
-			requestContext = await buildCodexRequestContext(model, context, options);
+			requestContext = await buildCodexRequestContext(model, context, options, replayBudget);
 			const initialTransport = await openInitialCodexEventStream(model, options, requestSetup, requestContext);
 			const runtime = new CodexStreamRuntime({
 				...initialTransport,
@@ -4643,6 +4674,7 @@ async function openCodexSseEventStream(
 	codexSseMaxAttempts: number | undefined,
 	onSseEvent?: OpenAICodexResponsesOptions["onSseEvent"],
 	fetchOverride?: FetchImpl,
+	retryGate?: (delayMs: number) => boolean,
 ): Promise<AsyncGenerator<Record<string, unknown>>> {
 	const headers = createCodexHeaders(
 		requestHeaders,
@@ -4710,6 +4742,7 @@ async function openCodexSseEventStream(
 			defaultDelayMs: attempt => CODEX_RETRY_DELAY_MS * (attempt + 1),
 			maxDelayMs: CODEX_RATE_LIMIT_BUDGET_MS,
 			fetch: fetchAttempt,
+			retryGate,
 			timeout: false,
 		});
 	} catch (error) {

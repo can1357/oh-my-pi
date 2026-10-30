@@ -26,6 +26,7 @@ import {
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
 } from "../utils/idle-iterator";
+import { ReplayBudget } from "../utils/replay-budget";
 import { sanitizeSchemaForOllama, toolWireSchema } from "../utils/schema";
 import {
 	getStreamMarkupHealingPattern,
@@ -465,6 +466,7 @@ const streamOllamaOnce = (
 	const stream = new AssistantMessageEventStream();
 	void (async () => {
 		const startTime = performance.now();
+		const replayBudget = ReplayBudget.from(options.replayBudgetMs);
 		let firstTokenTime: number | undefined;
 		const output = createEmptyOutput(model);
 		let rawRequestDump: RawHttpRequestDump | undefined;
@@ -611,6 +613,7 @@ const streamOllamaOnce = (
 					signal: watchdog.signal,
 					defaultDelayMs: OLLAMA_RETRY_DELAYS_MS,
 					shouldRetryResponse: shouldRetryOllamaResponse,
+					retryGate: replayBudget?.admits,
 					fetch: options.fetch,
 					timeout: false,
 				});
@@ -789,6 +792,7 @@ const streamOllamaOnce = (
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			replayBudget?.stamp(output);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) {
 				output.ttft = firstTokenTime - startTime;

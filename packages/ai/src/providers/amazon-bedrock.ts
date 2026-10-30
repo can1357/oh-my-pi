@@ -47,6 +47,7 @@ import {
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs } from "../utils/idle-iterator";
+import { admitsReplay, ReplayBudget } from "../utils/replay-budget";
 import { toolWireSchema } from "../utils/schema/wire";
 import { invalidateAwsCredentialCache, resolveAwsCredentials } from "./aws-credentials";
 import { decodeEventStream } from "./aws-eventstream";
@@ -193,7 +194,8 @@ function resolveBedrockRequestUrl(
 /**
  * Sign and send one Bedrock Runtime request. A non-OK InvokeModel response's
  * body is read under the same pre-response deadline, so a stalled error body
- * cannot hang the caller.
+ * cannot hang the caller. `retryGate` is the call's replay budget, consulted
+ * before each transport retry.
  */
 async function sendBedrockRequest(
 	model: Model<"bedrock-converse-stream">,
@@ -202,7 +204,8 @@ async function sendBedrockRequest(
 	base: URL,
 	input: unknown,
 	endpoint: BedrockRequestEndpoint,
-	signal: AbortSignal | undefined = options.signal,
+	signal: AbortSignal | undefined,
+	retryGate: ((delayMs: number) => boolean) | undefined,
 ): Promise<{ response: Response; responseBody?: string }> {
 	const host = base.host;
 	const { urlPath, url } = resolveBedrockRequestUrl(model, base, endpoint);
@@ -308,6 +311,7 @@ async function sendBedrockRequest(
 			body,
 			signal: watchdog.signal,
 			fetch: options.fetch,
+			retryGate,
 			timeout: false,
 		});
 		if (!response.ok && endpoint === "invoke-with-response-stream")
@@ -704,6 +708,7 @@ function createBedrockAnthropicCompactionClient(
 	region: string,
 	base: URL,
 	getPayload: () => unknown,
+	retryGate: ((delayMs: number) => boolean) | undefined,
 ): AnthropicMessagesClientLike {
 	return {
 		messages: {
@@ -722,6 +727,7 @@ function createBedrockAnthropicCompactionClient(
 							input,
 							"invoke-with-response-stream",
 							requestOptions?.signal ?? options.signal,
+							retryGate,
 						);
 						if (!sent.response.ok) {
 							if (
@@ -774,9 +780,9 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				const { base } = getRequestLocation();
 				return prepareBedrockAnthropicCompactionRequest(model, options, base, params, betas);
 			},
-			getPayload => {
+			(getPayload, retryGate) => {
 				const { region, base } = getRequestLocation();
-				return createBedrockAnthropicCompactionClient(model, options, region, base, getPayload);
+				return createBedrockAnthropicCompactionClient(model, options, region, base, getPayload, retryGate);
 			},
 			anthropicOptions => {
 				const reasoning = options.reasoning;
@@ -802,6 +808,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 
 	(async () => {
 		const startTime = performance.now();
+		const replayBudget = ReplayBudget.from(options.replayBudgetMs);
 		let firstTokenTime: number | undefined;
 
 		const output: AssistantMessage = {
@@ -899,7 +906,16 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					url: resolveBedrockRequestUrl(model, base, "converse-stream").url,
 					body: commandInput,
 				};
-				({ response } = await sendBedrockRequest(model, options, region, base, commandInput, "converse-stream"));
+				({ response } = await sendBedrockRequest(
+					model,
+					options,
+					region,
+					base,
+					commandInput,
+					"converse-stream",
+					options.signal,
+					replayBudget?.admits,
+				));
 				if (response.ok) break;
 				if (!bearerToken && (response.status === 401 || response.status === 403)) {
 					// Stale cached credentials (e.g. rotated session keys in ~/.aws/credentials) —
@@ -911,7 +927,8 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				if (
 					!prefixBindingRetryAttempted &&
 					options.anthropicPrefixMismatchBehavior !== "error" &&
-					isThinkingPrefixBindingError(errorMessage)
+					isThinkingPrefixBindingError(errorMessage) &&
+					admitsReplay(replayBudget, 0)
 				) {
 					prefixBindingRetryAttempted = true;
 					logger.warn("bedrock: thinking prefix changed, stripping bound thinking and retrying", {
@@ -1096,6 +1113,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message + diagnostics;
+			replayBudget?.stamp(output);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });

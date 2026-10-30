@@ -199,6 +199,11 @@ export function wrapFetchForCopilotFallback(
 	 * mid-flight cannot change this request's retry decision.
 	 */
 	cacheSnapshot?: string | null,
+	/**
+	 * The call's replay budget (`StreamOptions.replayBudgetMs`). The identity
+	 * retry is a further request: a refusal returns the denial as it came.
+	 */
+	retryGate?: (delayMs: number) => boolean,
 ): FetchImpl {
 	const inner = base ?? fetch;
 	if (!enabled) return inner;
@@ -219,6 +224,7 @@ export function wrapFetchForCopilotFallback(
 		const outgoingId = outgoing.get("Copilot-Integration-Id");
 		if (outgoingId === COPILOT_CHAT_INTEGRATION_ID) {
 			if (await isCopilotIdentityDenied(response)) {
+				if (retryGate && !retryGate(0)) return response;
 				try {
 					await response.arrayBuffer();
 				} catch {}
@@ -239,6 +245,7 @@ export function wrapFetchForCopilotFallback(
 		if (outgoingId === cliIntegrationId && cacheKey) {
 			if (cachedBeforeRequest !== cliIntegrationId) return response;
 			if (await isCopilotIdentityDenied(response)) {
+				if (retryGate && !retryGate(0)) return response;
 				try {
 					await response.arrayBuffer();
 				} catch {}

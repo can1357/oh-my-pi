@@ -21,6 +21,7 @@ import {
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
+import { admitsReplay, ReplayBudget } from "../utils/replay-budget";
 import { sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { mapToOpenAIResponsesToolChoice } from "../utils/tool-choice";
 import {
@@ -87,6 +88,7 @@ const streamAzureOpenAIResponsesOnce = (
 	// Start async processing
 	(async () => {
 		const startTime = performance.now();
+		const replayBudget = ReplayBudget.from(options?.replayBudgetMs);
 		let firstTokenTime: number | undefined;
 		const deploymentName = resolveDeploymentName(model, options);
 
@@ -171,6 +173,7 @@ const streamAzureOpenAIResponsesOnce = (
 						body: params,
 						signal: requestSignal,
 						fetch: options?.fetch,
+						retryGate: replayBudget?.admits,
 						// Transient 408/429/5xx get Retry-After-aware transport retries;
 						// the first-event watchdog aborts `requestSignal`, so retries
 						// cannot extend the caller's deadline.
@@ -186,6 +189,7 @@ const streamAzureOpenAIResponsesOnce = (
 					if (reasoningEffortFallback === undefined) throw error;
 					const retryMarker = `${reasoningEffortFallbackKey}:${String(reasoningEffortFallback)}`;
 					if (attemptedReasoningEffortFallbacks.has(retryMarker)) throw error;
+					if (!admitsReplay(replayBudget, 0)) throw error;
 					attemptedReasoningEffortFallbacks.add(retryMarker);
 					applyOpenAIReasoningEffortFallback(params, reasoningEffortFallback);
 					rawRequestDump.body = params;
@@ -248,6 +252,7 @@ const streamAzureOpenAIResponsesOnce = (
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			replayBudget?.stamp(output);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });

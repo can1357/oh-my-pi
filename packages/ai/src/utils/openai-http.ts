@@ -72,6 +72,8 @@ export interface OpenAIStreamRequestInit {
 	maxAttempts?: number;
 	/** Optional caller-specific gate composed with shared transport retry exclusions. */
 	shouldRetryResponse?: (response: Response, bodyText: string) => boolean | Promise<boolean>;
+	/** Consulted before each transport retry with its wait; `false` stops retrying (`StreamOptions.replayBudgetMs`). */
+	retryGate?: (delayMs: number) => boolean;
 	/**
 	 * Raw wire-frame observer (`onSseEvent` debug pipeline). Leave it unset
 	 * when no diagnostic listener exists: any observer turns on per-line raw
@@ -113,6 +115,7 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 			shouldRetryResponse: async (response, bodyText) =>
 				!isConcurrencyAdmissionRejection(response, bodyText) &&
 				(init.shouldRetryResponse === undefined || (await init.shouldRetryResponse(response, bodyText))),
+			retryGate: init.retryGate,
 			// Bun's native fetch enforces a hard ~300s pre-response timeout (issue #2422).
 			// Cold large-context streams legitimately exceed it; the caller's
 			// `firstEventTimeoutMs`/`AbortSignal` already govern stuck requests.

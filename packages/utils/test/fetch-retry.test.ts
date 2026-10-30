@@ -163,6 +163,71 @@ describe("fetchWithRetry", () => {
 
 		expect(error.message).toBe("Network error: getaddrinfo ENOTFOUND api.openai.com");
 	});
+
+	// A caller that bounds what one call may spend retrying passes a gate. A gate
+	// that is ignored lets the retry loop run to its own ceiling while the caller
+	// believes it is bounded, so both failure shapes must stop on a refusal.
+	describe("retryGate", () => {
+		it("rethrows a network failure instead of retrying when the gate refuses", async () => {
+			let calls = 0;
+			const asked: number[] = [];
+			const error = await rejectionOf(
+				fetchWithRetry("https://example.invalid/gate", {
+					fetch: async () => {
+						calls += 1;
+						throw new Error("socket hang up");
+					},
+					maxAttempts: 5,
+					defaultDelayMs: 1,
+					retryGate: delayMs => {
+						asked.push(delayMs);
+						return false;
+					},
+				}),
+			);
+
+			expect(error.message).toBe("socket hang up");
+			expect(calls).toBe(1);
+			expect(asked).toEqual([1]);
+		});
+
+		it("returns the retryable response with its server wait offered to the gate", async () => {
+			let calls = 0;
+			const asked: number[] = [];
+			const response = await fetchWithRetry("https://example.invalid/gate", {
+				fetch: async () => {
+					calls += 1;
+					return new Response("overloaded", { status: 503, headers: { "retry-after": "2" } });
+				},
+				maxAttempts: 5,
+				retryGate: delayMs => {
+					asked.push(delayMs);
+					return false;
+				},
+			});
+
+			expect(response.status).toBe(503);
+			expect(await response.text()).toBe("overloaded");
+			expect(calls).toBe(1);
+			expect(asked).toEqual([2_000]);
+		});
+
+		it("keeps retrying while the gate admits each wait", async () => {
+			let calls = 0;
+			const response = await fetchWithRetry("https://example.invalid/gate", {
+				fetch: async () => {
+					calls += 1;
+					return calls < 3 ? new Response("", { status: 503 }) : new Response("done", { status: 200 });
+				},
+				maxAttempts: 5,
+				defaultDelayMs: 1,
+				retryGate: () => true,
+			});
+
+			expect(await response.text()).toBe("done");
+			expect(calls).toBe(3);
+		});
+	});
 });
 
 describe("extractRetryHint", () => {

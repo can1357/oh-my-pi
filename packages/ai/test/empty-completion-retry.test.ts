@@ -3,7 +3,7 @@
  * attempts are bounded and discarded, while emitted content commits an attempt
  * so output is never duplicated.
  */
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage, AssistantMessageEvent, Context, Usage } from "@oh-my-pi/pi-ai/types";
 import { MAX_EMPTY_COMPLETION_RETRIES, withReplaySafeStreamRetry } from "@oh-my-pi/pi-ai/utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -518,5 +518,143 @@ describe("withReplaySafeStreamRetry", () => {
 		// The completed call reaches the consumer instead of being discarded.
 		expect(events.some(e => e.type === "toolcall_end")).toBe(true);
 		expect(result.stopReason).toBe("error");
+	});
+
+	describe("replayBudgetMs", () => {
+		function socketCut(): AssistantMessageEventStream {
+			const message = assistant();
+			message.stopReason = "error";
+			message.errorMessage = "The socket connection was closed unexpectedly";
+			return streamFromEvents([
+				{ type: "start", partial: message },
+				{ type: "error", reason: "error", error: message },
+			]);
+		}
+
+		// Without the budget the wrapper's replay runs on its own schedule and the
+		// caller that set a budget waits on it anyway, believing it was bounded.
+		it("returns the empty completion it would replay when the wait does not fit, and says so", async () => {
+			let attempts = 0;
+			const waits: number[] = [];
+			const stream = withReplaySafeStreamRetry(
+				{},
+				CTX,
+				{ providerRetryWait: async ms => void waits.push(ms), replayBudgetMs: 100 },
+				() => {
+					attempts++;
+					return emptyAttempt();
+				},
+				{ retryEmptyCompletion: true },
+			);
+
+			await drain(stream);
+			const result = await stream.result();
+
+			expect(attempts).toBe(1);
+			expect(waits).toEqual([]);
+			expect(result.stopReason).toBe("stop");
+			expect(result.replayBudgetExhausted).toBe(true);
+		});
+
+		it("returns the provider error it would replay when the wait does not fit, and says so", async () => {
+			let attempts = 0;
+			const stream = withReplaySafeStreamRetry(
+				{},
+				CTX,
+				{ providerRetryWait: async () => {}, replayBudgetMs: 0 },
+				() => {
+					attempts++;
+					return socketCut();
+				},
+				{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+			);
+
+			const result = await stream.result();
+
+			expect(attempts).toBe(1);
+			expect(result.stopReason).toBe("error");
+			expect(result.replayBudgetExhausted).toBe(true);
+		});
+
+		it("hands each attempt only the budget that is left, so nested replays share one deadline", async () => {
+			// A fake monotonic clock that the injected retry wait advances: the
+			// budget reads elapsed time, and a real sleep would make the test pay it.
+			let now = 0;
+			const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+			const handed: number[] = [];
+			let attempts = 0;
+			try {
+				const stream = withReplaySafeStreamRetry(
+					{},
+					CTX,
+					{
+						providerRetryWait: async (ms: number) => {
+							now += ms;
+						},
+						replayBudgetMs: 1_200,
+					},
+					(_model, _context, options) => {
+						attempts++;
+						handed.push(options?.replayBudgetMs ?? Number.NaN);
+						return emptyAttempt();
+					},
+					{ retryEmptyCompletion: true },
+				);
+
+				const result = await stream.result();
+
+				// The 500 ms wait fits in 1.2 s; the next 1 s wait would end at 1.5 s.
+				expect(attempts).toBe(2);
+				expect(handed).toEqual([1_200, 700]);
+				expect(result.replayBudgetExhausted).toBe(true);
+			} finally {
+				clock.mockRestore();
+			}
+		});
+
+		it("does not replay what the attempt itself stopped replaying for the budget", async () => {
+			let attempts = 0;
+			const stream = withReplaySafeStreamRetry(
+				{},
+				CTX,
+				{ providerRetryWait: async () => {}, replayBudgetMs: 60_000 },
+				() => {
+					attempts++;
+					const cut = assistant();
+					cut.stopReason = "error";
+					cut.errorMessage = "The socket connection was closed unexpectedly";
+					cut.replayBudgetExhausted = true;
+					return streamFromEvents([
+						{ type: "start", partial: cut },
+						{ type: "error", reason: "error", error: cut },
+					]);
+				},
+				{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+			);
+
+			const result = await stream.result();
+
+			expect(attempts).toBe(1);
+			expect(result.replayBudgetExhausted).toBe(true);
+		});
+
+		it("replays on its own schedule and marks nothing when no budget is set", async () => {
+			let attempts = 0;
+			const stream = withReplaySafeStreamRetry(
+				{},
+				CTX,
+				{ providerRetryWait: async () => {} },
+				() => {
+					attempts++;
+					return socketCut();
+				},
+				{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+			);
+
+			const result = await stream.result();
+
+			expect(attempts).toBe(2);
+			expect(result.replayBudgetExhausted).toBeUndefined();
+		});
 	});
 });

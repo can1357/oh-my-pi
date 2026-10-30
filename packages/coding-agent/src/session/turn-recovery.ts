@@ -108,6 +108,14 @@ const EMPTY_STOP_MAX_RETRIES = 3;
 const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
 const STREAM_STALL_CONTINUE_MAX_RETRIES = 3;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
+/**
+ * Replay budget for a retry held on the same model while a fallback chain is
+ * ready. The hold is a bet that the route survived a transient cut; this bounds
+ * the bet so a route that is gone costs the provider's first two quick replays
+ * (about 0.5 s and 1 s of backoff) instead of its whole ceiling — Anthropic's
+ * ten replays are about 49 s — before the chain is consulted.
+ */
+const HELD_RETRY_REPLAY_BUDGET_MS = 2_000;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
 const STREAM_STALL_ERROR_RE = /stream stall/i;
@@ -404,6 +412,8 @@ export class TurnRecovery {
 		targetSelector: string;
 		handle: AnthropicFallbackCreditHandle;
 	};
+	/** A same-model retry held back from a ready fallback chain; its request carries the held budget. */
+	#heldRetryReplayBudget: { targetSelector: string } | undefined;
 	#usageReserveApproval: { model: string; sessionId: string } | undefined;
 	#pendingRetryErrors: PendingRetryError[] = [];
 	#usageLimitOutcomes = new WeakMap<AssistantMessage, Promise<UsageLimitOutcome>>();
@@ -551,6 +561,7 @@ export class TurnRecovery {
 		this.#streamStallContinueCount = 0;
 		this.#acceptTerminalEmptyStopForPrompt = false;
 		this.#activeFallbackCreditRedemption = undefined;
+		this.#heldRetryReplayBudget = undefined;
 	}
 
 	/** Sets whether one terminal empty stop is accepted for the current prompt. */
@@ -570,6 +581,21 @@ export class TurnRecovery {
 			return undefined;
 		}
 		return active.handle;
+	}
+
+	/**
+	 * The `replayBudgetMs` for the next request, when it is a retry this saga
+	 * held on `targetModel` instead of walking a ready fallback chain. Consumed by
+	 * that request; `undefined` for every other one, which keeps the provider's
+	 * own retry ceiling.
+	 */
+	consumeHeldRetryReplayBudget(targetModel: Model): number | undefined {
+		const held = this.#heldRetryReplayBudget;
+		if (!held) return undefined;
+		this.#heldRetryReplayBudget = undefined;
+		return `${targetModel.provider}/${targetModel.id}` === held.targetSelector
+			? HELD_RETRY_REPLAY_BUDGET_MS
+			: undefined;
 	}
 
 	/**
@@ -2933,6 +2959,8 @@ export class TurnRecovery {
 			return maxDelayMs > 0 && waitMs > maxDelayMs && !waitForUsageReset;
 		};
 
+		// Set when this retry stays on the model although a fallback chain is ready.
+		let holdsChainForSameModel = false;
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
 			// The retry budget bounds same-model retries against a failing provider. A
 			// classifier refusal is not that: retrying the same model reproduces it, and
@@ -2947,16 +2975,29 @@ export class TurnRecovery {
 			// chains say.
 			const refusalWalkKey = this.#refusalWalkKey(currentSelector);
 			const refusalWalkRepeats = classifierRefusal && this.#refusalWalkTried.has(refusalWalkKey);
-			if (
+			const chainConsultable =
 				allowModelFallback &&
 				retrySettings.modelFallback &&
 				retryFallbackAdmits(retrySettings.fallbackOn, AIError.is(id, AIError.Flag.UsageLimit)) &&
 				!thinkingLoop &&
 				!sameModelSteerReplay &&
 				!waitForSiblingCredential &&
-				!refusalWalkRepeats &&
-				!this.#isFirstAttemptMidStreamSocketDrop(message, id, retryBudgetExhausted)
-			) {
+				!refusalWalkRepeats;
+			// The wait before another attempt on this model: the backoff, or a longer
+			// wait the server asked for.
+			const sameModelWaitMs =
+				usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs
+					? parsedRetryAfterMs
+					: delayMs;
+			// A hold is a quick bet that the route survived. A server asking for a
+			// longer wait than the held budget has already lost the bet: retrying
+			// sooner than it asked is a guaranteed failure, so walk the chain now.
+			const midStreamSocketDrop =
+				chainConsultable &&
+				sameModelWaitMs < HELD_RETRY_REPLAY_BUDGET_MS &&
+				this.#isFirstAttemptMidStreamSocketDrop(message, id, retryBudgetExhausted);
+			holdsChainForSameModel = midStreamSocketDrop && this.#hasRetryFallbackCandidate(currentSelector);
+			if (chainConsultable && !midStreamSocketDrop) {
 				if (classifierRefusal) {
 					this.#refusalWalkTried.add(refusalWalkKey);
 				} else {
@@ -2990,11 +3031,7 @@ export class TurnRecovery {
 							(options?.fireworksFastFallback || options?.hardErrorFallback) &&
 							!this.isRetryableError(message)
 						) &&
-						!exceedsDelayCap(
-							usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs
-								? parsedRetryAfterMs
-								: delayMs,
-						),
+						!exceedsDelayCap(sameModelWaitMs),
 				});
 			}
 			// Auto fallback from a Fireworks Fast variant to its base model. Independent
@@ -3141,6 +3178,14 @@ export class TurnRecovery {
 			this.#stripFailedAssistantTail();
 		}
 
+		// A held retry's request gets a bounded replay budget, so a route that is
+		// gone fails over after a few quick replays; every other retry keeps the
+		// provider's own ceiling.
+		this.#heldRetryReplayBudget =
+			holdsChainForSameModel && currentModel
+				? { targetSelector: `${currentModel.provider}/${currentModel.id}` }
+				: undefined;
+
 		// Retry via continue() outside the agent_end event callback chain. A
 		// continuation that still fails locally must close the retry saga —
 		// otherwise auto_retry_end never fires, retryPromise stays pending, and
@@ -3166,6 +3211,7 @@ export class TurnRecovery {
 		const attempt = this.#retryAttempt;
 		this.#retryAttempt = 0;
 		this.#retryAbortController = undefined;
+		this.#heldRetryReplayBudget = undefined;
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_end",
 			success: false,
@@ -3175,6 +3221,15 @@ export class TurnRecovery {
 		this.#clearPendingRetryErrors();
 		this.resolveRetry();
 		return false;
+	}
+
+	/** Whether a fallback chain offers the active selector a candidate that is not cooling down. */
+	#hasRetryFallbackCandidate(currentSelector: string): boolean {
+		return this.retryFallbackChainKeys(currentSelector).some(role =>
+			this.findRetryFallbackCandidates(role, currentSelector).some(
+				candidate => !this.isRetryFallbackSelectorSuppressed(candidate),
+			),
+		);
 	}
 
 	/**

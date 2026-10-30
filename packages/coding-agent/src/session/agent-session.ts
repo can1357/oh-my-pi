@@ -15406,4 +15406,9 @@ export class AgentSession implements SettingsScope {
 	consumeActiveFallbackCreditRedemption(targetModel?: Model): AnthropicFallbackCreditHandle | undefined {
 		return this.#recovery.consumeActiveFallbackCreditRedemption(targetModel);
 	}
+
+	/** The `replayBudgetMs` for the next request when it is a retry held off a ready fallback chain. */
+	consumeHeldRetryReplayBudget(targetModel: Model): number | undefined {
+		return this.#recovery.consumeHeldRetryReplayBudget(targetModel);
+	}
 }

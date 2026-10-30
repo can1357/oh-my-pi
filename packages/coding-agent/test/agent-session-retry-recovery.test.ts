@@ -637,6 +637,19 @@ describe("AgentSession retry recovery", () => {
 		expect(errors[0].message.retryRecovery).toMatchObject({ recovery: "plain", note: "error; retried" });
 	});
 
+	it("consults the fallback chain at once when the server asks for a longer wait than a hold may spend", async () => {
+		// Holding is a quick bet on the same route. With a 9 s server wait the
+		// bet is already lost: retrying sooner is a guaranteed failure, and
+		// waiting it out keeps the user waiting on a route the chain can replace.
+		const { primary, fallback, requestedModels, fallbackEvents } = await runFallbackChainRecovery([
+			{ ...droppedAfterThinking, errorMessage: `${SOCKET_CLOSE_MID_STREAM} retry-after-ms=9000` },
+			{ content: ["recovered on fallback"], stopReason: "stop" },
+		]);
+
+		expect(requestedModels).toEqual([primary, fallback]);
+		expect(fallbackEvents).toHaveLength(1);
+	});
+
 	it("retries the same model only once, then consults the fallback chain", async () => {
 		// The same-model retry is bounded to the first attempt: a second drop must
 		// fall through to the chain rather than keep retrying the primary.

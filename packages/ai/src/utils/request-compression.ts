@@ -131,8 +131,15 @@ async function suspectEncodingRejection(
  * host, so a genuine 400 never disables compression. When a non-JSON refusal
  * recurs uncompressed with the same status and a non-JSON body, that status
  * stops being re-checked for the host.
+ *
+ * `retryGate` is the call's replay budget (`StreamOptions.replayBudgetMs`): the
+ * resend is a further request, so a refusal returns the rejection as it came.
  */
-export function wrapFetchForRequestCompression(base: FetchImpl, model: Model): FetchImpl {
+export function wrapFetchForRequestCompression(
+	base: FetchImpl,
+	model: Model,
+	retryGate?: (delayMs: number) => boolean,
+): FetchImpl {
 	const wrapped: FetchImpl = async (input, init) => {
 		const body = init?.body;
 		const url = requestUrl(input);
@@ -173,6 +180,7 @@ export function wrapFetchForRequestCompression(base: FetchImpl, model: Model): F
 		if (!suspect) return response;
 		const refusal = `${origin} ${response.status}`;
 		if (suspect === "proxy" && encodingUnrelatedRefusals.has(refusal)) return response;
+		if (retryGate && !retryGate(0)) return response;
 
 		await response.body?.cancel().catch(() => {});
 		const plain = await base(input, init);

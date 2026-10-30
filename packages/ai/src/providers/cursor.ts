@@ -227,6 +227,7 @@ import {
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { connectProxiedSocket, getProxyForUrl, wrapFetchForProxy } from "../utils/proxy";
+import { admitsReplay, ReplayBudget } from "../utils/replay-budget";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { waitForRetry } from "../utils/retry-wait";
 import { sanitizeSchemaForCursor, toolWireSchema } from "../utils/schema";
@@ -554,6 +555,8 @@ interface CursorStreamTiming {
 	timestamp: number;
 	retry?: CursorRetryContext;
 	transport?: "http2" | "http1";
+	/** The call's `replayBudgetMs`, carried into the requests that continue it. */
+	replayBudget?: ReplayBudget;
 }
 
 interface CursorRequestState {
@@ -1191,6 +1194,7 @@ function streamCursorWithWireMode(
 		const retryContext = timing?.retry;
 		const transportMode = timing?.transport ?? (options?.transport === "http1" ? "http1" : "http2");
 		let startTime = timing?.startTime ?? performance.now();
+		const replayBudget = timing ? timing.replayBudget : ReplayBudget.from(options?.replayBudgetMs);
 		let firstTokenTime = retryContext?.firstTokenTime;
 
 		let output = retryContext?.output ?? createCursorOutput(model, timing?.timestamp ?? Date.now());
@@ -1998,7 +2002,8 @@ function streamCursorWithWireMode(
 				baseConversationId !== undefined &&
 				conversationId !== undefined &&
 				activeBlobStore !== undefined &&
-				originalRequestId !== undefined
+				originalRequestId !== undefined &&
+				admitsReplay(replayBudget, 0)
 			) {
 				clearInterval(heartbeatTimer ?? undefined);
 				heartbeatTimer = null;
@@ -2010,6 +2015,7 @@ function streamCursorWithWireMode(
 					startTime,
 					timestamp: output.timestamp,
 					transport: "http1",
+					replayBudget,
 					retry: {
 						attempt: retryContext?.attempt ?? 0,
 						originalRequestId,
@@ -2045,7 +2051,8 @@ function streamCursorWithWireMode(
 				wireMode === "normalized" &&
 				!sawProgressOrSideEffect &&
 				!options?.signal?.aborted &&
-				isCursorModelNotFound(error)
+				isCursorModelNotFound(error) &&
+				admitsReplay(replayBudget, 0)
 					? serializedFallbackWireModelId
 					: undefined;
 			if (fallbackWireModelId !== undefined) {
@@ -2060,6 +2067,7 @@ function streamCursorWithWireMode(
 					startTime,
 					timestamp: output.timestamp,
 					transport: transportMode,
+					replayBudget,
 				});
 				// The lazy watchdog observes THIS outer stream; the fallback's exec
 				// bridge marks the inner stream busy via `trackLocalWork`. Forward
@@ -2098,6 +2106,9 @@ function streamCursorWithWireMode(
 					: Bun.hash(toBinary(ConversationStateStructureSchema, retryCheckpoint)).toString(36);
 			const repeatedCheckpoint = checkpointHash !== undefined && checkpointHash === retryContext?.checkpointHash;
 			const noProgressResumes = repeatedCheckpoint ? (retryContext?.noProgressResumes ?? 0) + 1 : 0;
+			const uncappedDelayMs = CURSOR_RETRY_BASE_DELAY_MS * 2 ** retryAttempt;
+			const maxRetryDelayMs = options?.maxRetryDelayMs ?? 60_000;
+			const delayMs = maxRetryDelayMs > 0 ? Math.min(uncappedDelayMs, maxRetryDelayMs) : uncappedDelayMs;
 			const canRetryFromCheckpoint =
 				replaySafe &&
 				!options?.signal?.aborted &&
@@ -2112,7 +2123,8 @@ function streamCursorWithWireMode(
 				baseConversationId !== undefined &&
 				conversationId !== undefined &&
 				activeBlobStore !== undefined &&
-				originalRequestId !== undefined
+				originalRequestId !== undefined &&
+				admitsReplay(replayBudget, delayMs)
 			) {
 				const retryOriginalRequestId = originalRequestId;
 				const retryBlockState = openBlockState;
@@ -2127,9 +2139,6 @@ function streamCursorWithWireMode(
 				runTransport?.close();
 				h2Client?.close();
 
-				const uncappedDelayMs = CURSOR_RETRY_BASE_DELAY_MS * 2 ** retryAttempt;
-				const maxRetryDelayMs = options?.maxRetryDelayMs ?? 60_000;
-				const delayMs = maxRetryDelayMs > 0 ? Math.min(uncappedDelayMs, maxRetryDelayMs) : uncappedDelayMs;
 				logger.debug("cursor stream retrying", {
 					attempt: retryAttempt + 1,
 					checkpoint: checkpointHash,
@@ -2147,6 +2156,7 @@ function streamCursorWithWireMode(
 						startTime,
 						timestamp: output.timestamp,
 						transport: transportMode,
+						replayBudget,
 						retry: {
 							attempt: retryAttempt + 1,
 							originalRequestId: retryOriginalRequestId,
@@ -2242,6 +2252,7 @@ function streamCursorWithWireMode(
 			} else {
 				output.errorMessage = result.message;
 			}
+			replayBudget?.stamp(output);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });

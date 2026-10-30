@@ -35,6 +35,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { extractGoogleValidationUrl, formatGoogleValidationRequiredMessage } from "../utils/google-validation";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
+import { admitsReplay, ReplayBudget } from "../utils/replay-budget";
 // Refresh is the sole responsibility of AuthStorage (broker-aware, single-flighted);
 // the stream provider trusts the access token threaded through `options.apiKey`.
 import { normalizeSchemaForCCA } from "../utils/schema";
@@ -493,6 +494,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 
 	(async () => {
 		const startTime = performance.now();
+		const replayBudget = ReplayBudget.from(options?.replayBudgetMs);
 		let firstTokenTime: number | undefined;
 
 		const output: AssistantMessage = {
@@ -973,6 +975,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
 							maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
 							fetch: options?.fetch,
+							retryGate: replayBudget?.admits,
 							timeout: false,
 						});
 					} finally {
@@ -981,7 +984,8 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 
 					if (!response.ok) {
 						if (AIError.isTransientStatus(response.status)) {
-							if (!isLastEndpoint) {
+							// The next endpoint re-sends the request: a replay like any other.
+							if (!isLastEndpoint && admitsReplay(replayBudget, 0)) {
 								continue;
 							}
 						}
@@ -1011,6 +1015,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 
 						if (emptyAttempt > 0) {
 							const backoffMs = EMPTY_STREAM_BASE_DELAY_MS * 2 ** (emptyAttempt - 1);
+							if (!admitsReplay(replayBudget, backoffMs)) break;
 							try {
 								await scheduler.wait(backoffMs, { signal: options?.signal });
 							} catch {
@@ -1117,7 +1122,8 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						(AIError.isTransientStatus(status) ||
 							(status === undefined &&
 								!(error instanceof AIError.ProviderResponseError && error.kind === "output") &&
-								AIError.retriable(AIError.classify(error))))
+								AIError.retriable(AIError.classify(error)))) &&
+						admitsReplay(replayBudget, 0)
 					) {
 						continue;
 					}
@@ -1142,6 +1148,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			replayBudget?.stamp(output);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });

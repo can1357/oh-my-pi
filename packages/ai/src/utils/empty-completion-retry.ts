@@ -16,6 +16,7 @@
 import * as AIError from "../error";
 import type { AssistantMessage, AssistantMessageEvent, Context } from "../types";
 import { AssistantMessageEventStream } from "./event-stream";
+import { ReplayBudget } from "./replay-budget";
 import { waitForRetry } from "./retry-wait";
 
 export const MAX_EMPTY_COMPLETION_RETRIES = 2;
@@ -61,6 +62,7 @@ interface StreamRetryOptions {
 	signal?: AbortSignal;
 	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
 	acceptEmptyResponse?: boolean;
+	replayBudgetMs?: number;
 }
 
 /** Controls which replay-safe provider results may issue a fresh request. */
@@ -97,6 +99,9 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 ): AssistantMessageEventStream {
 	const outer = new AssistantMessageEventStream();
 	const signal = options?.signal;
+	// One deadline for every attempt: each is handed only what is left of it, so
+	// the replays inside an attempt and the replays here spend the same budget.
+	const budget = ReplayBudget.from(options?.replayBudgetMs);
 	void (async () => {
 		let emptyRetries = 0;
 		let providerErrorRetries = 0;
@@ -113,7 +118,11 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				// The attempt factory can throw synchronously (e.g. a config error
 				// raised before it creates its stream); surface it on the outer stream
 				// rather than leaking an unhandled rejection that never settles.
-				inner = attempt(model, context, options);
+				inner = attempt(
+					model,
+					context,
+					budget ? ({ ...options, replayBudgetMs: budget.remainingMs() } as O) : options,
+				);
 				for await (const event of inner) {
 					if (event.type === "done" || event.type === "error") {
 						terminal = event;
@@ -135,6 +144,10 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 			}
 
 			const completedMessage = terminal?.type === "done" ? terminal.message : undefined;
+			const failedMessage = terminal?.type === "error" ? terminal.error : undefined;
+			// An attempt that stopped replaying for the budget has spent it: replaying
+			// here would spend it again.
+			const attemptExhaustedBudget = (completedMessage ?? failedMessage)?.replayBudgetExhausted === true;
 			const retryEmpty =
 				policy.retryEmptyCompletion === true &&
 				options?.acceptEmptyResponse !== true &&
@@ -146,8 +159,8 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				!completedMessage.errorMessage &&
 				(completedMessage.usage?.output ?? 0) <= 1 &&
 				!hasVisibleAssistantContent(completedMessage) &&
-				emptyRetries < MAX_EMPTY_COMPLETION_RETRIES;
-			const failedMessage = terminal?.type === "error" ? terminal.error : undefined;
+				emptyRetries < MAX_EMPTY_COMPLETION_RETRIES &&
+				!attemptExhaustedBudget;
 			const retryProviderError =
 				policy.retryProviderErrors === true &&
 				!committed &&
@@ -156,7 +169,8 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				providerErrorRetries < (policy.maxProviderErrorRetries ?? 0) &&
 				AIError.isProviderRetryableError(
 					new FinalizedProviderStreamError(failedMessage.errorMessage, failedMessage.errorStatus),
-				);
+				) &&
+				!attemptExhaustedBudget;
 
 			let delayMs: number | undefined;
 			if (retryEmpty) {
@@ -165,6 +179,11 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 			} else if (retryProviderError) {
 				delayMs = EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** providerErrorRetries;
 				providerErrorRetries++;
+			}
+			if (delayMs !== undefined && budget && !budget.admits(delayMs)) {
+				// `delayMs` is set only for a message the policy would replay.
+				budget.stamp((completedMessage ?? failedMessage)!);
+				delayMs = undefined;
 			}
 
 			if (delayMs !== undefined && !signal?.aborted) {

@@ -308,6 +308,15 @@ export interface FetchWithRetryOptions extends RequestInit {
 	 */
 	shouldRetryResponse?: (response: Response, bodyText: string, attempt: number) => boolean | Promise<boolean>;
 	/**
+	 * Consulted before every retry with the wait that retry would take (the
+	 * server hint or the default schedule, after `maxDelayMs`). Return `false` to
+	 * stop retrying: a thrown network failure is rethrown and a retryable
+	 * response is returned, exactly as when `maxAttempts` runs out. Lets a caller
+	 * bound one call's retries by its own budget. Omitted, every retry the other
+	 * options allow is taken.
+	 */
+	retryGate?: (delayMs: number) => boolean;
+	/**
 	 * Bun extension forwarded verbatim to the underlying `fetch` call. `false`
 	 * disables Bun's native ~300s pre-response timeout (callers that own a
 	 * configurable first-event/idle watchdog or an external `AbortSignal`
@@ -339,6 +348,7 @@ export async function fetchWithRetry(
 		defaultDelayMs,
 		prepareInit,
 		shouldRetryResponse,
+		retryGate,
 		fetch: fetchImpl = fetch,
 		timeout = false,
 		...baseInit
@@ -368,7 +378,9 @@ export async function fetchWithRetry(
 			if (signal?.aborted) throw new Error("Request was aborted");
 			const wrapped = wrapNetworkError(error);
 			if (attempt + 1 >= maxAttempts) throw wrapped;
-			await waitForRetry(resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs), signal);
+			const networkDelayMs = resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs);
+			if (retryGate && !retryGate(networkDelayMs)) throw wrapped;
+			await waitForRetry(networkDelayMs, signal);
 			continue;
 		}
 
@@ -382,6 +394,7 @@ export async function fetchWithRetry(
 		if (hint !== undefined && hint > maxDelayMs) return response;
 
 		const delayMs = Math.min(hint ?? resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs), maxDelayMs);
+		if (retryGate && !retryGate(delayMs)) return response;
 		// The retried response is discarded; release its unread tee branch.
 		if (!response.bodyUsed) response.body?.cancel().catch(() => {});
 		await waitForRetry(delayMs, signal);
