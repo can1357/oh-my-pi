@@ -1,7 +1,8 @@
 import { resolveExtraCa, withExtraCaInit } from "@oh-my-pi/pi-utils";
 import { coworkFetch } from "../providers/cowork-fetch";
 import { withInferenceUserAgent } from "../providers/inference-headers";
-import type { Api, FetchImpl, Model } from "../types";
+import type { Api, DispatchHold, FetchImpl, Model } from "../types";
+import { holdBeforeDispatch } from "./dispatch-hold";
 import { getProxyForProvider, withProxyInit } from "./proxy";
 import { createFetchRequestDebugSession, isRequestDebugEnabled } from "./request-debug";
 
@@ -20,6 +21,8 @@ type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: true };
  * `hold` is the caller's `beforeDispatch`. It belongs here because this is the
  * only place every HTTP attempt passes through: a provider's own retry loop
  * and its setup requests reach the wire through this fetch and nothing else.
+ * The request's own `signal` ends the wait, so cancelling a request parked on
+ * a hold no longer leaves it parked forever.
  *
  * Idempotent: the built fetch is stamped and returned as-is on later passes,
  * hold and all — `streamSimple` re-enters `stream`, and `streamSimpleRequest`
@@ -27,11 +30,7 @@ type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: true };
  * would add another layer (three PI_REQ_DEBUG dumps, and three holds, for one
  * request).
  */
-export function transportFetch(
-	model: Model<Api>,
-	fetchImpl: FetchImpl | undefined,
-	hold?: () => Promise<void> | void,
-): FetchImpl {
+export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefined, hold?: DispatchHold): FetchImpl {
 	const given = fetchImpl as TransportFetch | undefined;
 	if (given?.[TRANSPORT_FETCH]) return given;
 	const base =
@@ -39,7 +38,7 @@ export function transportFetch(
 	const proxyUrl = getProxyForProvider(model.provider);
 
 	const fetch: TransportFetch = async (input, init) => {
-		await hold?.();
+		await holdBeforeDispatch(hold, init?.signal ?? (input instanceof Request ? input.signal : undefined));
 		if ((init?.method ?? (input instanceof Request ? input.method : "GET")) === "POST") {
 			recordDispatchOrigin(model, input);
 		}
@@ -95,7 +94,7 @@ export function resetDispatchOriginsForTesting(): void {
  * its fetch is already built and it gates nothing. A `beforeDispatch` travels
  * into the built fetch, so every HTTP attempt the transport makes waits on it.
  */
-export function withTransportFetch<T extends { fetch?: FetchImpl; beforeDispatch?: () => Promise<void> | void }>(
+export function withTransportFetch<T extends { fetch?: FetchImpl; beforeDispatch?: DispatchHold }>(
 	model: Model<Api>,
 	options: T,
 ): T {

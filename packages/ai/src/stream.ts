@@ -69,6 +69,7 @@ import type {
 	ToolChoice,
 } from "./types";
 import { getHeaderCaseInsensitive, resolveCacheRetention } from "./utils";
+import { holdBeforeDispatch } from "./utils/dispatch-hold";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 import { applyGlyphCodec } from "./utils/glyph-codec";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
@@ -695,7 +696,9 @@ function withProviderInFlightLimit<
 			}
 			// Last, so the slot wait above cannot outlast it: a throw here fails
 			// this attempt through the catch below, as any dispatch error would.
-			await hold?.();
+			// An abort ends the wait the same way, so cancelling a request held
+			// behind an indefinite hold also releases the permit acquired above.
+			await holdBeforeDispatch(hold, options?.signal);
 			if (options?.signal?.aborted) {
 				throw options.signal.reason ?? new AIError.AbortError("Provider request aborted before dispatch");
 			}

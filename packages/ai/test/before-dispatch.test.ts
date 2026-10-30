@@ -409,4 +409,46 @@ describe("beforeDispatch", () => {
 
 		expect(calls).toEqual(["hold", "request"]);
 	});
+
+	// An indefinite hold is legitimate (`/pause` holds until a human resumes);
+	// an indefinite hold after the caller cancelled is not: the request stayed
+	// parked forever, keeping its provider in-flight permit with it.
+	test("ends a hold that never resolves when the caller aborts", async () => {
+		let dispatches = 0;
+		registerCustomApi(
+			API,
+			() => {
+				dispatches += 1;
+				const events = new AssistantMessageEventStream();
+				queueMicrotask(() => events.push({ type: "done", reason: "stop", message: reply() }));
+				return events;
+			},
+			SOURCE_ID,
+		);
+		const held = Promise.withResolvers<void>();
+		const entered = Promise.withResolvers<void>();
+		const abort = new AbortController();
+
+		const result = streamSimple(model(), context(), {
+			signal: abort.signal,
+			beforeDispatch: () => {
+				entered.resolve();
+				return held.promise;
+			},
+		}).result();
+		await entered.promise;
+		abort.abort(new Error("cancelled"));
+
+		const settled = await Promise.race([
+			result.then(
+				() => "resolved",
+				(error: unknown) => (error instanceof Error ? error.message : String(error)),
+			),
+			Bun.sleep(1_000).then(() => "still held"),
+		]);
+
+		expect(settled).toBe("cancelled");
+		expect(dispatches).toBe(0);
+		held.resolve();
+	});
 });

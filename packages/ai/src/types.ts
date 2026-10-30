@@ -480,6 +480,12 @@ export type OpenAIResponseInclude =
 	| "reasoning.encrypted_content"
 	| "message.output_text.logprobs";
 
+/**
+ * A caller's hold on one request, awaited at each site that puts that request
+ * on the wire. See {@link StreamOptions.beforeDispatch}.
+ */
+export type DispatchHold = () => Promise<void> | void;
+
 export interface StreamOptions {
 	temperature?: number;
 	topP?: number;
@@ -504,14 +510,25 @@ export interface StreamOptions {
 	/**
 	 * Awaited immediately before every request this layer puts on the wire —
 	 * the caller's own, a thinking-loop re-sample, and each attempt with a
-	 * rotated credential alike — at the provider-dispatch chokepoint, after
-	 * the credential, any command-backed headers and the in-flight slot are
-	 * settled. A caller whose requests are gated (omp's `/pause`) holds them
-	 * here, where no await of this layer's own can still follow. It cannot
-	 * change the request, and a throw from it fails that attempt like any
-	 * other dispatch error.
+	 * rotated credential alike. It runs at the provider-dispatch chokepoint,
+	 * after the credential, any command-backed headers and the in-flight slot
+	 * are settled, and again at each transport's own last step before bytes go
+	 * out: the one transport fetch, the Codex websocket's `response.create`,
+	 * the Cursor HTTP/2 request, the GitLab Duo workflow socket's
+	 * `startRequest`. A caller whose requests are gated (omp's `/pause`) holds
+	 * them there, where no await of this layer's own can still follow. It
+	 * cannot change the request, and a throw from it fails that attempt like
+	 * any other dispatch error.
+	 *
+	 * The wait ends when {@link signal} aborts, with that signal's reason, so a
+	 * cancelled request never stays parked on a hold nobody will release.
+	 *
+	 * Ordering is not preserved: the hold gates each request independently, so
+	 * a request whose hold resolves first reaches the wire first even when an
+	 * earlier request is still held. A caller that needs its requests to reach
+	 * the provider in order must serialize them itself.
 	 */
-	beforeDispatch?: () => Promise<void> | void;
+	beforeDispatch?: DispatchHold;
 	/**
 	 * OpenAI chat-completions HTTP attempt budget. When set, transient provider
 	 * errors are not replayed above the transport, so retries share this limit.
