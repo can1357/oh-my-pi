@@ -1040,6 +1040,15 @@ const CHILD_NO_PROGRAM: libc::c_int = 126;
 #[cfg(target_os = "linux")]
 const CHILD_NO_SETUP: libc::c_int = 124;
 
+/// The kernel's first realtime signal, which is where the library's
+/// reserved block begins. It is 32 on every Linux architecture this
+/// builds for — `asm-generic/signal.h` and each architecture's
+/// `uapi/asm/signal.h` — while the block's far end, the first number the
+/// library hands to applications, is `SIGRTMIN` and moves with the
+/// library.
+#[cfg(target_os = "linux")]
+const FIRST_REALTIME_SIGNAL: libc::c_int = 32;
+
 /// `clone3`'s argument block, as much of it as this uses.
 #[cfg(target_os = "linux")]
 #[repr(C)]
@@ -1114,11 +1123,12 @@ static CAN_HOLD_A_CHILD: std::sync::LazyLock<bool> = std::sync::LazyLock::new(||
 /// standard output, a `setpgid` that failed left a descendant nothing
 /// would end, and a `setrlimit` that failed left the answer unbounded.
 ///
-/// Signals are blocked across the clone and every disposition is put back
-/// to default in the child, which is the pre-exec contract `posix_spawn`
-/// was keeping here: a handler of this process's that ran between the
-/// clone and the `execve` wrote into the answer and turned a loadable
-/// locale into a refusal.
+/// Signals are blocked across the clone, and every disposition this
+/// process *caught* is put back to default in the child — an ignored one
+/// is left as it is, which is the pre-exec contract `posix_spawn` was
+/// keeping here: a handler of this process's that ran between the clone
+/// and the `execve` wrote into the answer and turned a loadable locale
+/// into a refusal.
 #[cfg(target_os = "linux")]
 fn start_locale_utility(
 	program: &std::ffi::CStr,
@@ -1178,15 +1188,22 @@ fn start_locale_utility(
 			// caller, a utility that raises it and then answers succeeds
 			// under `posix_spawn` and died on signal 13 when this reset it.
 			for signal in 1..=libc::SIGRTMAX() {
-				// The two numbers the library keeps for itself sit just
-				// below the first realtime signal — 32 and 33 on glibc
-				// 2.39 — and carry nothing of this process's. A measurement
-				// of all 62 other numbers found those two the only ones
-				// whose disposition cannot be read, so every other read
-				// failure is a denial rather than a reservation, and
-				// passing over one leaves an inherited handler to run
-				// before `execve`.
-				let reserved = signal == libc::SIGRTMIN() - 1 || signal == libc::SIGRTMIN() - 2;
+				// The library keeps a block of the kernel's realtime
+				// numbers for itself and refuses `sigaction` on one, so no
+				// handler of this process's can be there and a read that
+				// fails inside the block is a reservation rather than a
+				// denial. The block starts at the kernel's first realtime
+				// signal and ends just below the library's own minimum;
+				// its *width* is the library's business and differs —
+				// two on glibc 2.39 (32 and 33, `SIGRTMIN` 34), one on
+				// glibc 2.3.2 with LinuxThreads (32, `SIGRTMIN` 33) and
+				// three on musl (32 to 34, `SIGRTMIN` 35). Taking the
+				// width to be two skipped `SIGSYS` and its handler on the
+				// second and read a reserved number on the third. Every
+				// read failure *outside* the block still ends the child,
+				// because passing over one leaves an inherited handler to
+				// run before the `execve`.
+				let reserved = signal >= FIRST_REALTIME_SIGNAL && signal < libc::SIGRTMIN();
 				if signal == libc::SIGKILL || signal == libc::SIGSTOP || reserved {
 					continue;
 				}
@@ -1206,7 +1223,11 @@ fn start_locale_utility(
 					libc::_exit(CHILD_NO_SETUP);
 				}
 			}
-			// The mask this thread had is what the utility should start with.
+			// The mask this thread had is what the utility should start
+			// with. Nothing can carry the number this call returns out of
+			// a child, so the setup status is all the caller is told —
+			// which is why "the return value is reported on every failure"
+			// is not something this code claims.
 			if libc::pthread_sigmask(libc::SIG_SETMASK, &raw const held, std::ptr::null_mut()) != 0 {
 				libc::_exit(CHILD_NO_SETUP);
 			}
@@ -1262,36 +1283,72 @@ fn start_locale_utility(
 	// `CLONE_PIDFD`.
 	let started = (child > 0 && handle >= 0)
 		.then(|| ChildHandle(unsafe { std::os::fd::OwnedFd::from_raw_fd(handle) }));
-	let cloned = match child < 0 {
-		true => Err(std::io::Error::last_os_error()),
-		false => Ok(()),
+	// Read before the mask call below, which reports through its return
+	// value and leaves `errno` as it finds it.
+	let spawned = match (child < 0, started.is_some()) {
+		(true, _) => Err(std::io::Error::last_os_error()),
+		// A child with no handle: not something `clone3` with
+		// `CLONE_PIDFD` produces, and nothing this code can hold.
+		(false, false) => Err(std::io::Error::from(std::io::ErrorKind::Unsupported)),
+		(false, true) => Ok(()),
 	};
-	// SAFETY: putting back the mask this thread had before the clone. A
-	// restoration that fails would leave the caller with nearly every
-	// signal blocked, so it is reported rather than passed over.
+	// SAFETY: putting back the mask this thread had before the clone.
 	let restored = unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &raw const held, std::ptr::null_mut()) };
-	cloned?;
-	let Some(started) = started else {
-		// A child with no handle cannot be signalled safely, and waiting
-		// for it is this thread's business rather than anyone else's.
-		if child > 0 {
-			let mut status: libc::c_int = 0;
-			// SAFETY: `pid` names this scope's child; no signal is sent, so
-			// a competing reaper taking it only yields `ECHILD` here.
-			while unsafe { libc::waitpid(child as libc::pid_t, &raw mut status, 0) } < 0
-				&& std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
-			{}
-		}
-		return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
+	// A restoration that failed leaves the caller with nearly every signal
+	// blocked, and that is reported on every way out of here. Returning
+	// the clone's own refusal first lost it: a denied clone and a denied
+	// restoration together said *Operation not permitted* and nothing at
+	// all about a thread left blocking 62 signals.
+	let failed = match (spawned, restored) {
+		(Ok(()), 0) => None,
+		(Ok(()), code) => Some(std::io::Error::from_raw_os_error(code)),
+		(Err(spawn), 0) => Some(spawn),
+		(Err(spawn), code) => {
+			let mask = std::io::Error::from_raw_os_error(code);
+			Some(std::io::Error::new(
+				mask.kind(),
+				format!("{spawn}, and this thread's signal mask was left as the clone needed it: {mask}"),
+			))
+		},
 	};
-	if restored != 0 {
+	let Some(failed) = failed else {
+		// `spawned` is `Ok` only where the handle above was owned.
+		return started.ok_or_else(|| std::io::Error::from(std::io::ErrorKind::Unsupported));
+	};
+	match started {
 		// The child is already running. Closing the descriptor is not
 		// enough: it has to be ended and reaped before this returns.
-		started.end_group();
-		let _ = started.reap();
-		return Err(std::io::Error::from_raw_os_error(restored));
+		Some(started) => {
+			started.end_group();
+			let _ = started.reap();
+		},
+		// A child with no handle cannot be signalled safely — an unheld
+		// number is the one thing this code will not reach — so it is
+		// waited for, and for no longer than the query it was started for
+		// would have lived. A review that erased the descriptor to reach
+		// this branch left the wait still pending at 6.5 seconds, past
+		// the five-second deadline.
+		None => {
+			if let Some(number) = libc::pid_t::try_from(child).ok().filter(|number| *number > 0) {
+				let deadline = std::time::Instant::now() + LOCALE_QUERY_TIMEOUT;
+				let mut status: libc::c_int = 0;
+				loop {
+					// SAFETY: `number` names this scope's child; no signal
+					// is sent, so a competing reaper taking it only yields
+					// `ECHILD` here.
+					let waited = unsafe { libc::waitpid(number, &raw mut status, libc::WNOHANG) };
+					let pending = waited == 0
+						|| (waited < 0
+							&& std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted);
+					if !pending || std::time::Instant::now() >= deadline {
+						break;
+					}
+					std::thread::sleep(std::time::Duration::from_millis(1));
+				}
+			}
+		},
 	}
-	Ok(started)
+	Err(failed)
 }
 
 #[cfg(target_os = "linux")]

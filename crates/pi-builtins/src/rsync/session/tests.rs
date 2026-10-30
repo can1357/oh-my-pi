@@ -943,45 +943,117 @@ fn a_query_leaves_the_callers_signal_settings_alone() {
 	);
 }
 
-/// An inherited *handler* is reset for every signal the child can reach,
-/// not only the ones below the realtime range.
+/// An inherited *handler* does not run in the child, in the one window
+/// `execve` does not close by itself.
 ///
-/// The reset loop has to skip the two numbers the library keeps for
-/// itself, and it used to skip any number whose disposition it could not
-/// read — so a denial narrowed to one application signal left that
-/// handler alive to run between the child's `chdir` and its `execve`. A
-/// measurement of all 62 readable numbers on glibc 2.39 found only 32 and
-/// 33 unreadable, so this pins the behaviour either side of them: a
-/// handler the caller installed must be gone, which a utility that raises
-/// the signal shows by dying on it.
+/// A successful `execve` resets every caught disposition on its own, so a
+/// utility that raises a signal once it is running says nothing about
+/// this code: the test that did that passed with the whole reset loop
+/// deleted. The handler has to be observed — or observed not to run —
+/// *before* the `execve`, and the child's life up to there is a few dozen
+/// microseconds.
 ///
-/// This is a guard rather than a reproduction. Making a disposition *read*
-/// fail needs a kernel filter, so it passes on the head before the fix as
-/// well; what it would catch is the reset loop quietly ceasing to cover a
-/// range.
+/// So this takes a process group of its own and sends `SIGUSR1` to it as
+/// fast as it can while a query runs. The child is in that group until
+/// its own `setpgid`, it starts with every signal blocked, and a signal
+/// that arrives in that window is delivered the moment it puts the
+/// caller's mask back — after the reset loop and before the `execve`.
+///
+/// The program named does not exist, so the only way the child can end
+/// *on* the signal is by taking it before the `execve`; anything else
+/// exits with the "would not run" status. That makes the test say when it
+/// missed the window instead of passing because nothing happened. With
+/// the reset loop deleted the inherited handler runs in the child
+/// instead, writes the child's own number into the record below, and the
+/// child goes on to the `execve` it cannot do — so both halves fail.
 #[cfg(target_os = "linux")]
 #[test]
-fn an_inherited_handler_is_reset_for_application_and_realtime_signals() {
-	use std::os::unix::fs::PermissionsExt as _;
+fn an_inherited_handler_does_not_run_in_the_child_before_exec() {
+	use std::os::fd::AsRawFd as _;
+	use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
-	extern "C" fn observed(_signal: libc::c_int) {}
+	/// This test's own number, and the descriptor the handler writes to.
+	static OWNER: AtomicI32 = AtomicI32::new(0);
+	static RECORD: AtomicI32 = AtomicI32::new(-1);
+
+	extern "C" fn note_whoever_runs_this(_signal: libc::c_int) {
+		// SAFETY: `getpid` and `write` are async-signal-safe, and the file
+		// the descriptor names outlives every delivery below. A process
+		// that is not this test is a child running an inherited handler.
+		unsafe {
+			let me = libc::getpid();
+			if me != OWNER.load(Ordering::Relaxed) {
+				let number = me.to_ne_bytes();
+				libc::write(RECORD.load(Ordering::Relaxed), number.as_ptr().cast(), number.len());
+			}
+		}
+	}
 
 	let dir = tempfile::tempdir().unwrap();
-	for signal in [libc::SIGUSR1, libc::SIGRTMIN() + 2, libc::SIGRTMAX()] {
-		// SAFETY: nextest gives this test its own process; the handler does
-		// nothing and the disposition is put back below.
-		let kept = unsafe { libc::signal(signal, observed as libc::sighandler_t) };
-		let program = dir.path().join(format!("locale-{signal}"));
-		fs::write(&program, format!("#!/bin/sh\nkill -{signal} $$\nprintf 'UTF-8\\n'\n")).unwrap();
-		fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+	let record = dir.path().join("ran");
+	let file = fs::File::create(&record).unwrap();
+	// SAFETY: reading this process's own number.
+	OWNER.store(unsafe { libc::getpid() }, Ordering::Relaxed);
+	RECORD.store(file.as_raw_fd(), Ordering::Relaxed);
+	// SAFETY: nextest gives this test its own process; the disposition and
+	// the process group are both put back below. `SA_RESTART` keeps the
+	// storm from turning this process's own calls into `EINTR`.
+	let (kept, grouped) = unsafe {
+		let mut catching: libc::sigaction = std::mem::zeroed();
+		catching.sa_sigaction = note_whoever_runs_this as libc::sighandler_t;
+		catching.sa_flags = libc::SA_RESTART;
+		libc::sigemptyset(&raw mut catching.sa_mask);
+		let mut kept: libc::sigaction = std::mem::zeroed();
+		assert_eq!(libc::sigaction(libc::SIGUSR1, &raw const catching, &raw mut kept), 0);
+		let was = libc::getpgrp();
+		// Its own group, so the storm reaches this test and its children
+		// and nothing else the runner has going.
+		assert_eq!(libc::setpgid(0, 0), 0, "a group of this test's own: {}", std::io::Error::last_os_error());
+		(kept, was)
+	};
+	let storming = std::sync::Arc::new(AtomicBool::new(true));
+	let until = std::sync::Arc::clone(&storming);
+	let storm = std::thread::spawn(move || {
+		while until.load(Ordering::Relaxed) {
+			// SAFETY: the group is this test's own, made above.
+			unsafe { libc::kill(0, libc::SIGUSR1) };
+			// A gap, because a storm with none starves this process: every
+			// delivery interrupts the query's own waiting, and the whole
+			// test made no progress in 90 seconds. A fifth of a
+			// millisecond still puts a signal inside a window the child
+			// takes tens of microseconds to cross, and the round below
+			// that sees it is the first.
+			std::thread::sleep(std::time::Duration::from_micros(200));
+		}
+	});
+	let program = dir.path().join("locale-no-such-program");
+	let mut taken = None;
+	let mut last = String::new();
+	for _ in 0..64 {
 		let answer = crate::locale::codeset_from_utility_for_test(&program, "C.UTF-8", &|_| None);
-		// SAFETY: as above.
-		unsafe { libc::signal(signal, kept) };
 		let crate::locale::Codeset::Unasked(why) = &answer else {
-			panic!("signal {signal}: the handler survived into the child: {answer:?}");
+			panic!("a program that is not there answered: {answer:?}");
 		};
-		assert!(why.contains(&format!("ended on signal {signal}")), "signal {signal}: {why}");
+		last = why.clone();
+		if why.contains(&format!("ended on signal {}", libc::SIGUSR1)) {
+			taken = Some(why.clone());
+			break;
+		}
 	}
+	storming.store(false, Ordering::Relaxed);
+	storm.join().unwrap();
+	// SAFETY: putting back what this test changed, before it can fail.
+	unsafe {
+		libc::sigaction(libc::SIGUSR1, &raw const kept, std::ptr::null_mut());
+		libc::setpgid(0, grouped);
+	}
+	let ran: Vec<i32> = fs::read(&record)
+		.unwrap()
+		.chunks_exact(4)
+		.map(|number| i32::from_ne_bytes(number.try_into().unwrap()))
+		.collect();
+	assert!(ran.is_empty(), "the handler ran in the child before its `execve`: {ran:?}");
+	assert!(taken.is_some(), "no query took the signal before its `execve`, so nothing was proved: {last}");
 }
 
 /// A name is the name of locale data, whatever punctuation it carries.
