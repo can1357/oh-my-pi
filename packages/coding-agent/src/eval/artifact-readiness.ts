@@ -1,48 +1,49 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { contextLocalProtocolOptions } from "../internal-urls/context";
 import { artifactsDirsFromRegistry } from "../internal-urls/registry-helpers";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { artifactCopyActivity, whenArtifactCopiesSettle } from "../session/session-manager";
 import type { ToolSession } from "../tools";
 
 export { EVAL_ARTIFACTS_READY_BRIDGE_NAME } from "./artifact-readiness-name";
 
+/** What a reader is told about the file it asked for, so it can check what it opens. */
+export interface SettledArtifact {
+	path: string;
+	device: string;
+	inode: string;
+	/**
+	 * The artifact's text, read through the descriptor this process holds on
+	 * the directory. Sent only when the reader asks for it, which it does when
+	 * the file its pathname reaches is no longer the one answered for: the
+	 * directory has been replaced under it, and the hold is the only way left
+	 * to the file.
+	 */
+	text?: string;
+}
+
 /**
- * The file backing `artifact://<id>` in this session's artifacts directory,
- * once every copy filling that directory has finished — or `null` when the id
- * is not there, or the session has no artifacts directory of its own.
+ * An artifacts directory held open for the cells that were given it.
  *
- * The helpers that answer `artifact://<n>` inside a cell run where this
- * process's record of its copies cannot be reached: a worker for JavaScript, a
- * subprocess kernel for Python. Asking them to list the directory themselves
- * is what made the answer wrong — mid-copy it holds part of an inheritance —
- * and asking first and listing afterwards only moves the gap, because a copy
- * can be announced between the two answers. So the waiting and the listing are
- * one operation, done here, and what crosses the bridge is the file.
- *
- * The loop is the same point: a copy announced while this one was listing
- * means the listing is already out of date. "Nothing is pending now" does not
- * say that — a copy that started *and finished* during the listing leaves an
- * empty table behind a stale answer — so what is compared is the count of
- * copies ever announced into that directory, which only goes up.
- *
- * The caller's signal cancels the wait and the answer alike: a listing taken
- * before an abort is not something to hand back afterwards as though the read
- * had succeeded.
+ * A pathname is not an identity. A directory moved aside and replaced, or
+ * deleted and recreated onto the same inode, answers to the same name, and a
+ * `(device, inode)` pair recorded at one moment and compared at another is the
+ * same re-derivation in smaller print. An open descriptor is the directory: it
+ * belongs to whoever opened it, it pins the inode so no recycling can alias
+ * it, and on Linux `/proc/self/fd/<n>` reads through it rather than through
+ * the name.
  */
-/**
- * What each artifacts directory was when a cell was last given it as a root,
- * by resolved path.
- *
- * A root is a pathname, and a pathname can be made to mean another directory.
- * A cell suspended while its own was moved aside and replaced would read the
- * replacement as its own artifacts — the same mistake as every other one in
- * this file, one level up: the identity was in hand when the cell started and
- * looked up again by name when it read.
- */
-const artifactRootIdentities = new Map<string, string>();
+interface HeldRoot {
+	/** Path that resolves through the descriptor, or the plain path off Linux. */
+	at: string;
+	path: string;
+	identity: string;
+	close(): Promise<void>;
+}
+
+const CAN_HOLD_DIRECTORIES = process.platform === "linux";
 
 /** The directory `dir` is now, as a device and inode pair, or `undefined`. */
 function directoryIdentity(dir: string): string | undefined {
@@ -54,57 +55,170 @@ function directoryIdentity(dir: string): string | undefined {
 	}
 }
 
-/** Record what the artifacts directory a cell is being started on is now. */
-export function rememberArtifactRoot(dir: string): void {
-	const identity = directoryIdentity(dir);
-	if (identity) artifactRootIdentities.set(path.resolve(dir), identity);
+/**
+ * The roots this process holds open, by the token a cell was given.
+ *
+ * Keyed by the token rather than by the pathname: two cells can be started on
+ * one pathname naming two different directories, and the second must not
+ * overwrite what the first is reading. A token is reused while the pathname
+ * still reaches the same directory, so an ordinary session holds one
+ * descriptor however many cells it runs.
+ */
+const heldRoots = new Map<string, HeldRoot>();
+/** Tokens by resolved pathname, so a cell on an unchanged root reuses its hold. */
+const tokensByPath = new Map<string, string>();
+/** Held roots kept at once; the oldest is closed, and a read through it is refused. */
+const HELD_ROOTS_MAX = 64;
+
+async function holdDirectory(dir: string): Promise<HeldRoot | undefined> {
+	let handle: fs.promises.FileHandle;
+	try {
+		handle = await fs.promises.open(dir, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+	} catch {
+		return undefined;
+	}
+	const stat = await handle.stat({ bigint: true });
+	return {
+		at: CAN_HOLD_DIRECTORIES ? `/proc/self/fd/${handle.fd}` : dir,
+		path: dir,
+		identity: `${stat.dev}:${stat.ino}`,
+		close: () => handle.close(),
+	};
 }
 
+/**
+ * Hold the artifacts directory a cell is being started on, and return the
+ * token that reaches it.
+ *
+ * The token travels with the cell and comes back with every read it makes, so
+ * the directory a read is answered from is the one that cell was given — not
+ * whatever its pathname reaches when the read lands.
+ */
+export async function holdArtifactRoot(dir: string): Promise<string | undefined> {
+	const resolved = path.resolve(dir);
+	const existing = tokensByPath.get(resolved);
+	const held = existing ? heldRoots.get(existing) : undefined;
+	const now = await holdDirectory(resolved);
+	if (!now) return undefined;
+	if (held && held.identity === now.identity) {
+		// The same directory, still open: one hold serves every cell on it.
+		await now.close();
+		return existing;
+	}
+	const token = `root-${crypto.randomUUID()}`;
+	heldRoots.set(token, now);
+	tokensByPath.set(resolved, token);
+	while (heldRoots.size > HELD_ROOTS_MAX) {
+		const oldest = heldRoots.keys().next().value;
+		if (oldest === undefined) break;
+		const dropped = heldRoots.get(oldest);
+		heldRoots.delete(oldest);
+		if (dropped && tokensByPath.get(path.resolve(dropped.path)) === oldest) {
+			tokensByPath.delete(path.resolve(dropped.path));
+		}
+		await dropped?.close();
+	}
+	return token;
+}
+
+/** Give up every held root; for tests and for a process winding down. */
+export async function releaseArtifactRoots(): Promise<void> {
+	const held = [...heldRoots.values()];
+	heldRoots.clear();
+	tokensByPath.clear();
+	for (const root of held) await root.close();
+}
+
+/**
+ * The file backing `artifact://<id>` for the cell that holds `token`, once
+ * every copy filling the directory it was given has finished — or an error
+ * naming what it looked in.
+ *
+ * The waiting and the listing are one operation, done here. Asking first and
+ * listing afterwards only moves the gap, because a copy can be announced
+ * between the two answers, and what is compared across the listing is the
+ * number of copies ever announced into that directory, which only goes up: a
+ * copy that started *and* finished during the listing leaves an empty pending
+ * table behind an answer that is already old.
+ *
+ * What comes back is the file *and* what it is, because the reader consumes
+ * this answer later still. A reader opens the path and checks the object it
+ * opened against the identity here; a directory replaced in between gives a
+ * different file, and the read is refused instead of returning somebody else's
+ * artifact under this session's number.
+ *
+ * The caller's signal cancels the wait and the answer alike: a listing taken
+ * before an abort is not something to hand back afterwards as though the read
+ * had succeeded.
+ */
 export async function resolveSettledArtifact(
 	session: ToolSession,
 	id: string,
 	root?: string,
+	token?: string,
 	signal?: AbortSignal,
-): Promise<string | null> {
+	wantText = false,
+): Promise<SettledArtifact | null> {
+	const held = token ? heldRoots.get(token) : undefined;
+	if (token && !held) {
+		throw new ToolError(`the artifacts directory this cell was started on is no longer held open: ${root ?? ""}`);
+	}
+	// The descriptor is the directory, but what comes back is a pathname the
+	// reader opens. So the name has to still mean the directory being read: a
+	// root moved aside, replaced or removed makes every path answered from it
+	// resolve through somebody else's tree, whatever the file behind it turns
+	// out to be. Refusing is the only honest answer there, and it is the
+	// direction that fails closed — unless the reader is asking for the bytes
+	// rather than a name, which is what it does when it has met exactly this,
+	// and which nothing standing at the pathname can intercept.
+	if (held && !wantText && directoryIdentity(held.path) !== held.identity) {
+		throw new ToolError(`${held.path} is no longer the artifacts directory this cell was started on`);
+	}
 	// The directory the reader is reading, which a cell suspended across a
 	// re-adoption is not the session's current one.
-	const dir = root ?? contextLocalProtocolOptions(session)?.getArtifactsDir?.();
+	const dir = held?.path ?? root ?? contextLocalProtocolOptions(session)?.getArtifactsDir?.();
 	if (!dir) return null;
-	const was = artifactRootIdentities.get(path.resolve(dir));
-	if (was && directoryIdentity(dir) !== was) {
-		throw new ToolError(`${dir} is no longer the artifacts directory this cell was started on`);
-	}
+	const found = await settledArtifactIn(held?.at ?? dir, dir, id, signal, wantText);
+	if (found) return found;
+	const elsewhere = await artifactElsewhere(session, dir, id, signal);
+	if (elsewhere) return elsewhere;
+	throw new ToolError(`artifact://${id} is in none of the artifacts directories this cell may read: ${dir}`);
+}
+
+/** How many times a reader re-lists a directory that keeps gaining copies before it gives up. */
+const ARTIFACT_RESOLVE_ATTEMPTS = 16;
+
+/**
+ * The artifact `id` in one directory, once the copies into it have settled.
+ *
+ * `at` is how the directory is reached — a descriptor path where this process
+ * holds it open — and `where` is where it is, which is what the copy table and
+ * the mount-independent answer are keyed by.
+ */
+async function settledArtifactIn(
+	at: string,
+	where: string,
+	id: string,
+	signal?: AbortSignal,
+	wantText = false,
+): Promise<SettledArtifact | null> {
 	for (let attempt = 1; ; attempt++) {
-		await whenArtifactCopiesSettle(dir, signal);
-		const before = artifactCopyActivity(dir);
-		const found = await artifactInDirectory(dir, id);
-		const after = artifactCopyActivity(dir);
+		await whenArtifactCopiesSettle(where, signal);
+		const before = artifactCopyActivity(where);
+		const found = await artifactInDirectory(at, where, id, wantText);
+		const after = artifactCopyActivity(where);
 		if (signal?.aborted) throw signal.reason ?? new Error("Aborted");
-		if (after.announced === before.announced && after.pending === 0) {
-			if (found) return found;
-			// A miss belongs to the directory that asked, and is answered here
-			// rather than handed back. Anything the reader does with "not
-			// there" resolves the id again, under whatever directory the
-			// session reads by then — and between this answer and the reader
-			// receiving it the session can be re-adopted, which is a different
-			// conversation's artifact wearing the same number.
-			const elsewhere = await artifactElsewhere(session, dir, id, signal);
-			if (elsewhere) return elsewhere;
-			throw new ToolError(`artifact://${id} is in none of the artifacts directories this cell may read: ${dir}`);
-		}
+		if (after.announced === before.announced && after.pending === 0) return found;
 		// Copies arriving back to back with no gap between them would keep a
 		// reader here forever. Saying so is better than answering from a
 		// listing that was out of date before it finished.
 		if (attempt >= ARTIFACT_RESOLVE_ATTEMPTS) {
 			throw new ToolError(
-				`artifact://${id} could not be read: copies into ${dir} kept arriving through ${attempt} attempts to list it`,
+				`artifact://${id} could not be read: copies into ${where} kept arriving through ${attempt} attempts to list it`,
 			);
 		}
 	}
 }
-
-/** How many times a reader re-lists a directory that keeps gaining copies before it gives up. */
-const ARTIFACT_RESOLVE_ATTEMPTS = 16;
 
 /**
  * The file for `id` in the other directories this cell may read, once the
@@ -127,33 +241,59 @@ async function artifactElsewhere(
 	dir: string,
 	id: string,
 	signal?: AbortSignal,
-): Promise<string | null> {
+): Promise<SettledArtifact | null> {
 	const current = contextLocalProtocolOptions(session)?.getArtifactsDir?.();
-	// The source a seance was started to consult is this cell's to read
-	// whatever else has happened: that is what the seance is.
 	const consulted = session.seanceSourceArtifactsDir;
 	const ownRoot = Boolean(current && path.resolve(current) === path.resolve(dir));
 	const reachable = [...(consulted ? [consulted] : []), ...(ownRoot ? artifactsDirsFromRegistry() : [])];
 	for (const other of reachable) {
 		if (path.resolve(other) === path.resolve(dir)) continue;
-		await whenArtifactCopiesSettle(other, signal);
-		const found = await artifactInDirectory(other, id);
+		// The same waiting the asking root gets: a copy still filling the
+		// directory an artifact was inherited into is the ordinary case, and a
+		// search that does not wait for it reports the artifact missing while
+		// it is on its way.
+		const found = await settledArtifactIn(other, other, id, signal);
 		if (found) return found;
 	}
 	return null;
 }
 
-/** The `<id>.<tool>.log` file for `id` in `dir`, or `null`. */
-async function artifactInDirectory(dir: string, id: string): Promise<string | null> {
+/** The `<id>.<tool>.log` file in the directory reached by `at`, with what it is. */
+async function artifactInDirectory(
+	at: string,
+	where: string,
+	id: string,
+	wantText = false,
+): Promise<SettledArtifact | null> {
 	let names: string[];
 	try {
-		names = await fs.promises.readdir(dir);
+		names = await fs.promises.readdir(at);
 	} catch (error) {
 		if (!isEnoent(error)) throw error;
 		return null;
 	}
 	const name = names.find(entry => entry.startsWith(`${id}.`));
-	return name === undefined ? null : path.join(path.resolve(dir), name);
+	if (name === undefined) return null;
+	try {
+		const handle = await fs.promises.open(`${at}/${name}`, "r");
+		try {
+			const stat = await handle.stat({ bigint: true });
+			const answer: SettledArtifact = {
+				path: path.join(path.resolve(where), name),
+				device: String(stat.dev),
+				inode: String(stat.ino),
+			};
+			// Read through the descriptor, which is the file this answer is
+			// about however the directory's name has been reused since.
+			if (wantText) answer.text = await handle.readFile("utf8");
+			return answer;
+		} finally {
+			await handle.close();
+		}
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+		return null;
+	}
 }
 
 /**

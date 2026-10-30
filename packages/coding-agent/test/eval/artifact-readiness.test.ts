@@ -8,6 +8,7 @@ import {
 	resolveSettledArtifact,
 } from "../../src/eval/artifact-readiness";
 import { createHelpers } from "../../src/eval/js/shared/helpers";
+import { settledArtifactOf } from "../../src/eval/js/shared/runtime";
 import { callSessionTool } from "../../src/eval/js/tool-bridge";
 import { copySessionArtifacts, whenArtifactCopiesSettle } from "../../src/session/session-manager";
 import type { ToolSession } from "../../src/tools";
@@ -76,9 +77,9 @@ describe("eval artifact readiness", () => {
 			env: new Map(),
 			localRoots: () => ({ artifact: destination }),
 			emitStatus: () => {},
-			resolveArtifact: async id => {
-				const value = await callSessionTool(EVAL_ARTIFACTS_READY_BRIDGE_NAME, { id }, { session });
-				return typeof value === "string" && value.length > 0 ? value : null;
+			resolveArtifact: async (id, root) => {
+				const value = await callSessionTool(EVAL_ARTIFACTS_READY_BRIDGE_NAME, { id, root }, { session });
+				return settledArtifactOf(value);
 			},
 		});
 
@@ -135,8 +136,8 @@ describe("eval artifact readiness", () => {
 
 		let answer: string | null | undefined;
 		const resolving = resolveSettledArtifact(sessionWithArtifacts(destination), "1").then(value => {
-			answer = value;
-			return value;
+			answer = value?.path ?? null;
+			return value?.path ?? null;
 		});
 		release();
 		await first;
@@ -180,7 +181,7 @@ describe("eval artifact readiness", () => {
 		try {
 			const resolved = await resolveSettledArtifact(sessionWithArtifacts(destination), "1");
 			expect(injected).toBe(true);
-			expect(resolved).toBe(path.join(destination, "1.bash.log"));
+			expect(resolved?.path).toBe(path.join(destination, "1.bash.log"));
 		} finally {
 			hook.mockRestore();
 		}
@@ -201,7 +202,7 @@ describe("eval artifact readiness", () => {
 
 		try {
 			await expect(
-				resolveSettledArtifact(sessionWithArtifacts(destination), "0", undefined, controller.signal),
+				resolveSettledArtifact(sessionWithArtifacts(destination), "0", undefined, undefined, controller.signal),
 			).rejects.toThrow("reader gave up");
 		} finally {
 			hook.mockRestore();
@@ -246,7 +247,7 @@ describe("eval artifact readiness", () => {
 			emitStatus: () => {},
 			resolveArtifact: async (id, root) => {
 				const value = await callSessionTool(EVAL_ARTIFACTS_READY_BRIDGE_NAME, { id, root }, { session });
-				return typeof value === "string" && value.length > 0 ? value : null;
+				return settledArtifactOf(value);
 			},
 		});
 

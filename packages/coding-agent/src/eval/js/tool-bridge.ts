@@ -251,10 +251,14 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 		const id = isRecord(args) && typeof args.id === "string" ? args.id : undefined;
 		if (id === undefined) throw new ToolError("Artifact readiness call needs an id");
 		const root = isRecord(args) && typeof args.root === "string" ? args.root : undefined;
+		const token = isRecord(args) && typeof args.token === "string" ? args.token : undefined;
+		const wantText = isRecord(args) && args.text === true;
 		const resolved = await withBridgeTimeoutPause(options.emitStatus, () =>
-			resolveSettledArtifact(options.session, id, root, options.signal),
+			resolveSettledArtifact(options.session, id, root, token, options.signal, wantText),
 		);
-		return resolved ?? "";
+		// The file and what it is: the reader checks the object it opens
+		// against this, because it opens it later than this was answered.
+		return resolved ? { text: resolved.path, details: resolved } : "";
 	}
 	if (name === EVAL_COMPLETION_BRIDGE_NAME) {
 		return await runEvalCompletion(args, options);

@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import { describe, expect, it } from "bun:test";
 import { $which, TempDir } from "@oh-my-pi/pi-utils";
 import { PYTHON_PRELUDE } from "../../../src/eval/py/prelude";
@@ -162,12 +163,15 @@ describe("python prelude", () => {
 				`print([read("artifact://12", limit=0), read("artifact://12", limit=-1), read("artifact://7", limit=0)])`,
 			].join("\n"),
 			{ PI_EVAL_LOCAL_ROOTS: JSON.stringify({ artifact: artifacts.path() }) },
-			async (args, name) =>
-				name === "__artifacts_ready__"
-					? // The host resolves the id against the artifacts dir once
-						// its copies have settled; the kernel never lists it.
-						artifacts.join(`${(args as unknown as { id: string }).id}.eval.log`)
-					: { text: "from the read tool" },
+			async (args, name) => {
+				if (name !== "__artifacts_ready__") return { text: "from the read tool" };
+				// The host resolves the id against the artifacts dir once its
+				// copies have settled, and says what the file is; the kernel
+				// never lists the directory and checks what it opens.
+				const file = artifacts.join(`${(args as unknown as { id: string }).id}.eval.log`);
+				const stat = fs.statSync(file, { bigint: true });
+				return { text: file, details: { path: file, device: String(stat.dev), inode: String(stat.ino) } };
+			},
 		);
 
 		expect(stderr).toBe("");
@@ -180,7 +184,9 @@ describe("python prelude", () => {
 		expect(requests).toEqual([
 			{
 				name: "__artifacts_ready__",
-				args: { id: "12", root: artifacts.path() },
+				// `text: false`: the kernel asks for the file, and only asks for
+				// the bytes if what it opens is not what it was told about.
+				args: { id: "12", root: artifacts.path(), text: false, token: null },
 				run: "",
 				session: "test-session",
 			},

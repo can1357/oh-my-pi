@@ -79,7 +79,7 @@ if "__omp_prelude_loaded__" not in globals():
             return result["text"]
         return result
 
-    def _artifact_file(path: str) -> Path | None:
+    def _artifact_file(path: str, want_text: bool = False) -> dict | None:
         """This session's file for `artifact://<id>` (`<id>.<tool>.log` in its
         artifacts dir), or None when the id is not there or no dir is known.
 
@@ -90,14 +90,26 @@ if "__omp_prelude_loaded__" not in globals():
         copy can be announced between the two. So the host does both and
         answers with the file. The call carries no run: the reader may be a
         thread a finished cell left behind."""
-        root = _omp_url_roots().get("artifact")
+        roots = _omp_url_roots()
+        root = roots.get("artifact")
         if not root:
             return None
-        resolved = _bridge_call(
+        answer = _bridge_call(
             "__artifacts_ready__",
-            {"id": path[11:], "root": os.path.abspath(root)},
+            {
+                "id": path[11:],
+                "root": os.path.abspath(root),
+                "text": want_text,
+                # The hold this cell was given on that directory: the host
+                # answers from the directory the cell was started on, not from
+                # whatever its pathname reaches when the read lands.
+                "token": roots.get("__artifactRoot"),
+            },
         )
-        return Path(resolved) if isinstance(resolved, str) and resolved else None
+        details = answer.get("details") if isinstance(answer, dict) else None
+        if not isinstance(details, dict) or not isinstance(details.get("path"), str):
+            return None
+        return details
 
     def _pinned_artifact_uri(path: str | Path) -> str:
         """`artifact://<id><selector>` with the id already resolved to its file.
@@ -117,7 +129,41 @@ if "__omp_prelude_loaded__" not in globals():
         if selector is None or not _omp_url_roots().get("artifact"):
             return path
         resolved = _artifact_file(f"artifact://{selector.group(1)}")
-        return path if resolved is None else f"{resolved}{selector.group(2)}"
+        return path if resolved is None else f"{resolved['path']}{selector.group(2)}"
+
+    def _read_settled_artifact(uri: str, answer: dict, offset: int, limit: int | None) -> str:
+        """The artifact's text, read from the object the host saw.
+
+        The file is opened and the opened object is checked, not checked and
+        then opened: a directory replaced between the host's answer and this
+        read gives a different file, and that is a refusal rather than another
+        conversation's artifact under this session's number.
+        """
+        data = answer.get("text")
+        if not isinstance(data, str):
+            with open(answer["path"], "rb") as handle:
+                stat = os.fstat(handle.fileno())
+                if str(stat.st_dev) == answer.get("device") and str(stat.st_ino) == answer.get("inode"):
+                    data = handle.read().decode("utf-8")
+                else:
+                    data = None
+        if data is None:
+            # The pathname reaches something else now — its directory was
+            # replaced between the answer and this read. The host still holds
+            # that directory open, so it can read the file this answer is
+            # about; what it cannot do is hand over a name that still means it.
+            again = _artifact_file(uri, want_text=True)
+            if again is None or not isinstance(again.get("text"), str):
+                raise RuntimeError(
+                    f"{answer['path']} is no longer the artifact this session was told to read"
+                )
+            data = again["text"]
+        lines = data.splitlines(keepends=True)
+        if offset <= 1 and limit is None:
+            return data
+        start = max(0, offset - 1)
+        end = len(lines) if limit is None else start + limit
+        return "".join(lines[start:end])
 
     def _read_through_tool(path: str, offset: int, limit: int | None) -> str:
         if limit is not None and limit <= 0:
@@ -163,9 +209,11 @@ if "__omp_prelude_loaded__" not in globals():
         if isinstance(path, str) and _OMP_BARE_ARTIFACT_RE.match(path):
             if limit is not None and limit <= 0:
                 return ""
-            p = _artifact_file(path)
-            if p is None:
-                # Another session's, or no artifacts dir was injected: the read tool searches every registered one.
+            answer = _artifact_file(path)
+            if answer is not None:
+                return _read_settled_artifact(path, answer, offset, limit)
+            else:
+                # No artifacts dir was injected: the read tool searches every registered one.
                 # A bounded raw read locates the file without inlining it; a bare `:raw` read refuses files over 50 KB.
                 located = _bridge_call("read", {"path": f"{path}:raw:1-1"})
                 details = located.get("details") if isinstance(located, dict) else None

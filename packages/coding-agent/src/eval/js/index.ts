@@ -4,7 +4,7 @@ import {
 	type ExecutorBackend,
 	type ExecutorBackendExecOptions,
 	type ExecutorBackendResult,
-	resolveEvalUrlRoots,
+	resolveEvalUrlRootsHeld,
 } from "../backend";
 import { namespaceSessionId as sharedNamespace, toExecutorBackendResult } from "../backend-helpers";
 import { defaultEvalSessionId } from "../session-id";
@@ -52,7 +52,7 @@ export default {
 			onChunk: opts.onChunk,
 			onStatus: opts.onStatus,
 			session: opts.session,
-			localRoots: resolveEvalUrlRoots(opts.session),
+			localRoots: await resolveEvalUrlRootsHeld(opts.session),
 		});
 		return toExecutorBackendResult(result);
 	},

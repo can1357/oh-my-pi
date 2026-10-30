@@ -315,6 +315,11 @@ export function unregisterPyToolBridgeSession(bridgeSessionId: string): void {
 /** Stop the bridge and clear registrations. Test-only / shutdown helper. */
 export async function disposePyToolBridge(): Promise<void> {
 	registrations.clear();
+	// The standing authority a kernel keeps for its background readers goes
+	// with the bridge: there is nothing left to answer through, and an entry
+	// that outlives the server answers for a kernel that can no longer be
+	// reached.
+	sessionRegistrations.clear();
 	const pending = serverPromise;
 	serverPromise = null;
 	if (!pending) return;

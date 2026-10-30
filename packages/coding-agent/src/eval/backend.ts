@@ -1,6 +1,6 @@
 import { buildEvalUrlRoots, LocalProtocolHandler } from "../internal-urls";
 import { contextLocalProtocolOptions } from "../internal-urls/context";
-import { rememberArtifactRoot } from "./artifact-readiness";
+import { holdArtifactRoot } from "./artifact-readiness";
 import type { OutputArtifactError } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../tools";
 import type { BackendProbeOptions } from "./probe";
@@ -91,12 +91,28 @@ export function resolveEvalUrlRoots(session: ToolSession): Record<string, string
 	const options = LocalProtocolHandler.resolveOptions({ localProtocolOptions: protocolOptions });
 	const roots = options ? buildEvalUrlRoots(options) : {};
 	const artifactsDir = protocolOptions?.getArtifactsDir?.();
-	if (artifactsDir) {
-		roots.artifact = artifactsDir;
-		// What that directory is now, so a cell reading through this root later
-		// is reading the directory it was given rather than whatever has taken
-		// its name since.
-		rememberArtifactRoot(artifactsDir);
+	if (artifactsDir) roots.artifact = artifactsDir;
+	return roots;
+}
+
+/** The key a cell's roots carry its hold on the artifacts directory under. */
+export const EVAL_ARTIFACT_ROOT_TOKEN = "__artifactRoot";
+
+/**
+ * {@link resolveEvalUrlRoots} with the artifacts directory held open for the
+ * cell, and the token that reaches the hold.
+ *
+ * The token comes back with every artifact read the cell makes, so the
+ * directory the read is answered from is the one the cell was given rather
+ * than whatever its pathname reaches by then. No scheme can be named
+ * `__artifactRoot`, so it is invisible to everything that reads these roots as
+ * scheme-to-root.
+ */
+export async function resolveEvalUrlRootsHeld(session: ToolSession): Promise<Record<string, string>> {
+	const roots = resolveEvalUrlRoots(session);
+	if (roots.artifact) {
+		const token = await holdArtifactRoot(roots.artifact);
+		if (token) roots[EVAL_ARTIFACT_ROOT_TOKEN] = token;
 	}
 	return roots;
 }

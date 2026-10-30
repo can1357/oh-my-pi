@@ -16,7 +16,7 @@ import type { EvalTableColumn } from "@oh-my-pi/pi-tui/tools/eval";
 import { type EvalDisplayOutput, evalImageMetadata } from "../../types";
 import type { EvalPreludeSource } from "../worker-protocol";
 import { EVAL_ARTIFACTS_READY_BRIDGE_NAME } from "../../artifact-readiness-name";
-import { createHelpers, type HelperBundle } from "./helpers";
+import { createHelpers, type HelperBundle, type SettledArtifactAnswer } from "./helpers";
 import { awaitMaybePromise, indirectEval } from "./indirect-eval";
 import { LocalModuleLoader } from "./local-module-loader";
 import { JAVASCRIPT_PRELUDE_SOURCE } from "./prelude";
@@ -101,7 +101,7 @@ export interface RuntimeOptions {
 	 * started a background reader has ended; left out by one where no artifact
 	 * copy can run.
 	 */
-	resolveArtifact?(id: string, root: string): Promise<string | null>;
+	resolveArtifact?(id: string, root: string, token?: string, text?: boolean): Promise<SettledArtifactAnswer | null>;
 }
 
 // Strict base64: characters from the standard alphabet plus optional `=` padding, and a
@@ -302,6 +302,23 @@ function compiles(source: string): boolean {
  * back through `RuntimeHooks` that the embedder supplies — wire format is the embedder's
  * concern.
  */
+/** The host's answer about an artifact, as it crosses the bridge. */
+export function settledArtifactOf(value: unknown): SettledArtifactAnswer | null {
+	if (!value || typeof value !== "object") return null;
+	const details = (value as { details?: unknown }).details;
+	if (!details || typeof details !== "object") return null;
+	const answer = details as Partial<SettledArtifactAnswer>;
+	if (typeof answer.path !== "string" || typeof answer.device !== "string" || typeof answer.inode !== "string") {
+		return null;
+	}
+	return {
+		path: answer.path,
+		device: answer.device,
+		inode: answer.inode,
+		...(typeof answer.text === "string" ? { text: answer.text } : {}),
+	};
+}
+
 export class JsRuntime {
 	#globalOwner = Symbol("JsRuntime globals");
 	#ownedGlobalKeys = new Set<string>();
@@ -411,7 +428,7 @@ export class JsRuntime {
 			// — so a failure here fails the read.
 			...(opts.resolveArtifact
 				? {
-						resolveArtifact: async (id: string, root: string) => {
+						resolveArtifact: async (id: string, root: string, token?: string, text?: boolean) => {
 							// Through the reader's own run, so the wait belongs
 							// to that cell's timeout and its abort ends it. The
 							// host answers this one name with the session's own
@@ -420,9 +437,9 @@ export class JsRuntime {
 							// and no reading of error text to find it.
 							const hooks = this.#activeHooks("tool");
 							const value = hooks
-								? await hooks.callTool(EVAL_ARTIFACTS_READY_BRIDGE_NAME, { id, root })
-								: await opts.resolveArtifact!(id, root);
-							return typeof value === "string" && value.length > 0 ? value : null;
+								? await hooks.callTool(EVAL_ARTIFACTS_READY_BRIDGE_NAME, { id, root, token, text })
+								: await opts.resolveArtifact!(id, root, token, text);
+							return settledArtifactOf(value);
 						},
 					}
 				: {}),

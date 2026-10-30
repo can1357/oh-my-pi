@@ -20,7 +20,7 @@ import type { JsStatusEvent } from "../js/shared/types";
 import { getEnabledEvalPreludes } from "../preludes";
 import { updateEvalState } from "../state";
 import type { EvalDisplayOutput, EvalToolDescriptor, EvalToolInvokeResult } from "../types";
-import { resolveEvalUrlRoots } from "../backend";
+import { resolveEvalUrlRootsHeld } from "../backend";
 import {
 	bridgeSessionIdFor,
 	createKernelSessionRegistry,
@@ -539,7 +539,7 @@ async function invokePythonToolRequest(
 	// started with stopped describing this session, and a tool that reads
 	// `artifact://<n>` must read the caller's artifacts, not its author's.
 	const carried: PythonToolRequest & { env?: Record<string, string> } = options.toolSession
-		? { ...request, env: { PI_EVAL_LOCAL_ROOTS: JSON.stringify(resolveEvalUrlRoots(options.toolSession)) } }
+		? { ...request, env: { PI_EVAL_LOCAL_ROOTS: JSON.stringify(await resolveEvalUrlRootsHeld(options.toolSession)) } }
 		: request;
 	const runId = Snowflake.next();
 	const unregister = registerPyToolBridge(bridgeSessionId, runId, {

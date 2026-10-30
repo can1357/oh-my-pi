@@ -1,5 +1,7 @@
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { EVAL_ARTIFACTS_READY_BRIDGE_NAME } from "../artifact-readiness-name";
+import { settledArtifactOf } from "./shared/runtime";
+import type { SettledArtifactAnswer } from "./shared/helpers";
 import { JsRuntime, type RuntimeCallIdentity, type RuntimeHooks, shadowSnapshotDigest } from "./shared/runtime";
 import type {
 	RunErrorPayload,
@@ -315,7 +317,7 @@ export class WorkerCore {
 			// Not bound to a run: the reader may be work a finished cell left
 			// behind, and the copy it has to be told about belongs to the
 			// session rather than to any one cell.
-			resolveArtifact: (id, root) => this.#resolveArtifact(id, root),
+			resolveArtifact: (id, root, token, text) => this.#resolveArtifact(id, root, token, text),
 			packageRoot: snapshot.packageRoot,
 		});
 		return this.#runtime;
@@ -464,7 +466,12 @@ export class WorkerCore {
 	 * that cell's run would be refused as belonging to a run no longer active —
 	 * which is not an answer about whether a copy is filling the directory.
 	 */
-	async #resolveArtifact(id: string, root: string): Promise<string | null> {
+	async #resolveArtifact(
+		id: string,
+		root: string,
+		token?: string,
+		text?: boolean,
+	): Promise<SettledArtifactAnswer | null> {
 		const callId = `tc-artifacts-${crypto.randomUUID()}`;
 		const { promise, resolve, reject } = Promise.withResolvers<unknown>();
 		this.#pendingTools.set(callId, { resolve, reject });
@@ -474,14 +481,13 @@ export class WorkerCore {
 				id: callId,
 				runId: "",
 				name: EVAL_ARTIFACTS_READY_BRIDGE_NAME,
-				args: { id, root },
+				args: { id, root, token, text },
 			});
 		} catch (error) {
 			this.#pendingTools.delete(callId);
 			reject(error);
 		}
-		const value = await promise;
-		return typeof value === "string" && value.length > 0 ? value : null;
+		return settledArtifactOf(await promise);
 	}
 
 	async #callTool(active: ActiveRun, name: string, args: unknown, identity?: RuntimeCallIdentity): Promise<unknown> {

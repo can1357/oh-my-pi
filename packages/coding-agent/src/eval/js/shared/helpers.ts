@@ -4,6 +4,15 @@ import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { JsStatusEvent } from "./types";
 
+/** What the host says `artifact://<id>` is, so the reader can check what it opens. */
+export interface SettledArtifactAnswer {
+	path: string;
+	device: string;
+	inode: string;
+	/** The bytes, when the host had to read them through its own hold. */
+	text?: string;
+}
+
 export interface HelperOptions {
 	limit?: number;
 	offset?: number;
@@ -35,7 +44,7 @@ export interface HelperContext {
 	 * answer fails the read rather than letting it see a directory nobody has
 	 * vouched for.
 	 */
-	resolveArtifact?(id: string, root: string): Promise<string | null>;
+	resolveArtifact?(id: string, root: string, token?: string, text?: boolean): Promise<SettledArtifactAnswer | null>;
 }
 
 /**
@@ -64,18 +73,19 @@ const utf8Encoder = new TextEncoder();
 export function createHelpers(ctx: HelperContext): HelperBundle {
 	return {
 		read: async (rawPath, options = {}) => {
+			const settled = await settledArtifactFor(ctx, rawPath);
+			if (settled) {
+				const id = ARTIFACT_URL_RE.exec(rawPath)?.[1] ?? "";
+				let text = await readSettledArtifact(ctx, id, ctx.localRoots().artifact ?? "", settled);
+				text = selectedLines(text, options);
+				ctx.emitStatus({ op: "read", path: settled.path, bytes: text.length, chars: text.length });
+				return text;
+			}
 			const resolved = await resolveRegularFile(ctx, rawPath);
 			if (!resolved) return undefined;
 			const { filePath, file, size } = resolved;
 			let text = await file.text();
-			const offset = typeof options.offset === "number" ? options.offset : 1;
-			const limit = typeof options.limit === "number" ? options.limit : undefined;
-			if (offset > 1 || limit !== undefined) {
-				const lines = text.split(/\r?\n/);
-				const start = Math.max(0, offset - 1);
-				const end = limit !== undefined ? start + limit : lines.length;
-				text = lines.slice(start, end).join("\n");
-			}
+			text = selectedLines(text, options);
 			ctx.emitStatus({ op: "read", path: filePath, bytes: size, chars: text.length });
 			return text;
 		},
@@ -177,7 +187,10 @@ async function resolveArtifactPath(ctx: HelperContext, root: string, id: string)
 	// with the file, not with a verdict this side would then act on — between
 	// a verdict and a listing a copy can be announced, and the listing would
 	// be of a directory half an inheritance had reached.
-	if (ctx.resolveArtifact) return (await ctx.resolveArtifact(id, root)) ?? undefined;
+	if (ctx.resolveArtifact) {
+		const answer = await ctx.resolveArtifact(id, root, ctx.localRoots()[ARTIFACT_ROOT_TOKEN]);
+		return answer?.path;
+	}
 	let files: string[];
 	try {
 		files = await fs.readdir(root);
@@ -187,6 +200,70 @@ async function resolveArtifactPath(ctx: HelperContext, root: string, id: string)
 	}
 	const name = files.find(file => file.startsWith(`${id}.`));
 	return name === undefined ? undefined : path.join(root, name);
+}
+
+/** The 1-indexed line window `options` asks for, or the whole text. */
+function selectedLines(text: string, options: HelperOptions): string {
+	const offset = typeof options.offset === "number" ? options.offset : 1;
+	const limit = typeof options.limit === "number" ? options.limit : undefined;
+	if (offset <= 1 && limit === undefined) return text;
+	const lines = text.split(/\r?\n/);
+	const start = Math.max(0, offset - 1);
+	const end = limit !== undefined ? start + limit : lines.length;
+	return lines.slice(start, end).join("\n");
+}
+
+/**
+ * What the host says `artifact://<id>` is for this cell, or `undefined` when
+ * the path is not a bare artifact id or no host can be asked.
+ */
+async function settledArtifactFor(ctx: HelperContext, rawPath: string): Promise<SettledArtifactAnswer | undefined> {
+	if (!ctx.resolveArtifact) return undefined;
+	const match = INTERNAL_URL_RE.exec(rawPath);
+	if (match === null || match[1].toLowerCase() !== "artifact" || !ARTIFACT_ID_RE.test(match[2])) return undefined;
+	const root = ctx.localRoots().artifact;
+	if (!root) return undefined;
+	return (await ctx.resolveArtifact(match[2], root, ctx.localRoots()[ARTIFACT_ROOT_TOKEN])) ?? undefined;
+}
+
+/** A bare `artifact://<id>`, with the id. */
+const ARTIFACT_URL_RE = /^artifact:\/\/(\d+)$/i;
+
+/** The key the cell's roots carry the host's hold on the artifacts directory under. */
+const ARTIFACT_ROOT_TOKEN = "__artifactRoot";
+
+/**
+ * The text of the artifact the host answered with, read from the object the
+ * host saw rather than from whatever the pathname reaches now.
+ *
+ * The file is opened and the opened object is checked, not checked and then
+ * opened: a directory replaced between the host's answer and this read gives a
+ * different file, and that is a refusal rather than another conversation's
+ * artifact under this session's number.
+ */
+async function readSettledArtifact(
+	ctx: HelperContext,
+	id: string,
+	root: string,
+	answer: SettledArtifactAnswer,
+): Promise<string> {
+	if (answer.text !== undefined) return answer.text;
+	const handle = await fs.open(answer.path, "r");
+	try {
+		const stat = await handle.stat({ bigint: true });
+		if (String(stat.dev) === answer.device && String(stat.ino) === answer.inode) {
+			return await handle.readFile("utf8");
+		}
+	} finally {
+		await handle.close();
+	}
+	// The pathname reaches something else now — its directory was replaced
+	// between the answer and this read. The host still holds that directory
+	// open, so it can read the file this answer is about; what it cannot do is
+	// hand over a name that still means it.
+	const again = await ctx.resolveArtifact?.(id, root, ctx.localRoots()[ARTIFACT_ROOT_TOKEN], true);
+	if (again?.text !== undefined) return again.text;
+	throw new ToolError(`${answer.path} is no longer the artifact this session was told to read`);
 }
 
 /** Resolve an internal-URL relative path under its root, mirroring the host
