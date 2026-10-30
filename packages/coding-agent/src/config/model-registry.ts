@@ -71,6 +71,14 @@ import {
 	selectLiveRegistration,
 } from "@oh-my-pi/pi-ai/auth/provider-gate";
 import { claimProviderRegistrationOwner, providerCallGate } from "../extensibility/extensions/callback-ownership";
+import {
+	type AuthorDataSchema,
+	type AuthorDataSite,
+	CALLBACK,
+	DATA,
+	fieldsOf,
+	snapshotAuthorData,
+} from "../extensibility/extensions/author-data";
 import type { ExtensionCallbackOwner } from "../extensibility/extensions/types";
 import type { AuthStorage } from "../session/auth-storage";
 import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
@@ -266,35 +274,6 @@ interface AdmittedProviderConfig {
 
 type ProviderOAuthBlock = NonNullable<ProviderConfigInput["oauth"]>;
 type HeaderResolver = NonNullable<Model<Api>["resolveHeaders"]>;
-
-/**
- * How {@link snapshotAuthorData} copies one value of a session's data.
- *
- * - `data`: an open value — a record whose keys are its content (headers, `compat`, `extraBody`),
- *   a list, or a primitive. Copied as JSON copies it: each own enumerable string key and each
- *   array element, read once. `compat` is one: unknown keys from a newer release stay intact.
- * - `fields`: a known shape — a model, its cost, its thinking. Copied by reading each field the
- *   shape has, the way a field read reads it, so an inherited or non-enumerable field and a
- *   prototype getter arrive as they would for the host. Nothing else on the object is read.
- * - `items` / `entries`: a list, or an open record, whose values all have one schema.
- * - `callback`: a function the registry calls through its registration's gate — a projected
- *   `resolveHeaders` — kept as it is.
- */
-type AuthorDataSchema =
-	| { readonly kind: "data" }
-	| { readonly kind: "callback" }
-	| { readonly kind: "fields"; readonly fields: readonly (readonly [field: string, schema: AuthorDataSchema])[] }
-	| { readonly kind: "items"; readonly items: AuthorDataSchema }
-	| { readonly kind: "entries"; readonly entries: AuthorDataSchema };
-
-const DATA: AuthorDataSchema = { kind: "data" };
-const CALLBACK: AuthorDataSchema = { kind: "callback" };
-
-/** A known shape: one entry for every field of `T`, so a field added to `T` does not compile until
- *  it says how it is copied. */
-function fieldsOf<T>(fields: { readonly [K in keyof T]-?: AuthorDataSchema }): AuthorDataSchema {
-	return { kind: "fields", fields: Object.entries<AuthorDataSchema>(fields) };
-}
 
 const TOKEN_COST_FIELDS = { input: DATA, output: DATA, cacheRead: DATA, cacheWrite: DATA };
 const LONG_CONTEXT_COST = fieldsOf<LongContextTokenCost>({
@@ -501,106 +480,11 @@ const MODEL_DEFINITIONS: AuthorDataSchema = {
 	}),
 };
 
-/** Where a copy is taken, for the error that refuses a function where data belongs: whose data,
- *  the path walked to the value (its root first), and what the author does instead. */
-interface AuthorDataSite {
-	readonly subject: string;
-	readonly path: (string | number)[];
-	readonly advice: string;
-}
-
 const REGISTERING_ADVICE = "Compute the value before registering the provider.";
 const RETURNING_ADVICE = "Compute the value before returning it.";
 
 function authorDataSite(providerName: string, root: string, advice: string): AuthorDataSite {
 	return { subject: `Provider ${providerName}`, path: [root], advice };
-}
-
-function renderAuthorDataPath(path: readonly (string | number)[]): string {
-	let rendered = "";
-	for (const step of path) {
-		if (rendered === "") rendered = String(step);
-		else if (typeof step === "number") rendered += `[${step}]`;
-		else if (/^[A-Za-z_$][\w$]*$/.test(step)) rendered += `.${step}`;
-		else rendered += `[${JSON.stringify(step)}]`;
-	}
-	return rendered;
-}
-
-/**
- * A host-owned plain copy of data an author handed over, taken inside that author's admission.
- *
- * A provider's own fields are read once (see {@link AdmittedProviderConfig}), but the objects
- * they hold are the author's code just the same: a getter, or a Proxy's `ownKeys`,
- * `getOwnPropertyDescriptor` and `get` traps, runs whenever the host enumerates or reads them —
- * and the registry does both long after registration, merging headers and serializing `compat`
- * into a request. So the nested data the registry keeps is copied here by its
- * {@link AuthorDataSchema}, each value read once, and only the copy is consumed afterwards. This
- * reads the author's data under admission; it does not wrap the author's object.
- *
- * Data holds no functions. A function where data belongs — a `toJSON` a request's serializer would
- * call, a callable record whose reflection the request builder would run — would be author code
- * the host invokes later with no admission to run under, so it is refused, with the field it was
- * found at. The callbacks the registry invokes itself are not data: they stay on the author's
- * object, read and called through their registration's gate when used. Registration takes
- * JSON-shaped data, so other built-ins are not reproduced.
- */
-function snapshotAuthorData(
-	value: unknown,
-	schema: AuthorDataSchema,
-	site: AuthorDataSite,
-	copies: Map<AuthorDataSchema, Map<object, unknown>>,
-): unknown {
-	if (schema.kind === "callback") return value;
-	if (typeof value === "function") {
-		throw new Error(
-			`${site.subject}: ${renderAuthorDataPath(site.path)} is a function, but it must be data. ${site.advice}`,
-		);
-	}
-	if (typeof value !== "object" || value === null) return value;
-	let copied = copies.get(schema);
-	if (!copied) {
-		copied = new Map();
-		copies.set(schema, copied);
-	}
-	const known = copied.get(value);
-	if (known !== undefined) return known;
-	if (Array.isArray(value)) {
-		const itemSchema = schema.kind === "items" ? schema.items : DATA;
-		const copy: unknown[] = [];
-		copied.set(value, copy);
-		const length = value.length;
-		for (let index = 0; index < length; index++) {
-			site.path.push(index);
-			copy[index] = snapshotAuthorData(value[index], itemSchema, site, copies);
-			site.path.pop();
-		}
-		return copy;
-	}
-	const copy: Record<string, unknown> = {};
-	copied.set(value, copy);
-	if (schema.kind === "fields") {
-		for (const [key, fieldSchema] of schema.fields) {
-			site.path.push(key);
-			const item = snapshotAuthorData((value as Record<string, unknown>)[key], fieldSchema, site, copies);
-			site.path.pop();
-			if (item !== undefined) copy[key] = item;
-		}
-		return copy;
-	}
-	const entrySchema = schema.kind === "entries" ? schema.entries : DATA;
-	for (const key of Object.keys(value)) {
-		site.path.push(key);
-		const item = snapshotAuthorData((value as Record<string, unknown>)[key], entrySchema, site, copies);
-		site.path.pop();
-		// Assigning an own `__proto__` key would set the copy's prototype; defined, it stays data.
-		if (key === "__proto__") {
-			Object.defineProperty(copy, key, { value: item, enumerable: true, writable: true, configurable: true });
-		} else {
-			copy[key] = item;
-		}
-	}
-	return copy;
 }
 
 /**

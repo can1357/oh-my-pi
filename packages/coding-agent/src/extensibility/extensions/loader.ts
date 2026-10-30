@@ -35,6 +35,7 @@ import { InternalUrlRouter } from "../../internal-urls/router";
 import { EventBus, extensionCallbackScope, OwnedEventBus } from "../../utils/event-bus";
 import type { AdmittedWorkKind } from "@oh-my-pi/pi-ai/auth/provider-gate";
 import * as TypeBox from "../legacy-typebox";
+import { admitToolDefinition } from "./boundary-data";
 import {
 	createProviderRegistrationQueue,
 	forgetQueuedProviderRegistrations,
@@ -594,14 +595,19 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		this.extension.handlers.set(event, list);
 	}
 
+	/** Keeps the host's copy of the definition (`admitToolDefinition`), taken here, inside the
+	 *  registering call: everything the host later reads off a registered tool — its description
+	 *  for a request, its approval answers, the environment its `shellEnv` gives a shell — is read
+	 *  from that copy, never from the extension's object. */
 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void {
+		const definition = admitToolDefinition(tool, this.runtime, this.extension.path);
 		const registered = {
-			definition: tool,
+			definition,
 			extensionPath: this.extension.path,
-			sourceInfo: extensionToolSourceInfo(tool, this.extension.resolvedPath),
+			sourceInfo: extensionToolSourceInfo(definition, this.extension.resolvedPath),
 		};
-		this.extension.tools.set(tool.name, registered);
-		for (const listener of this.extension.toolRegistrationListeners ?? []) listener(tool.name);
+		this.extension.tools.set(definition.name, registered);
+		for (const listener of this.extension.toolRegistrationListeners ?? []) listener(definition.name);
 	}
 
 	registerFileWriteFallback(handler: FileWriteFallbackHandler): void {

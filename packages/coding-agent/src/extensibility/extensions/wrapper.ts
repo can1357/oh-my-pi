@@ -28,6 +28,7 @@ import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
+import { copyHostData, copyToolResult } from "./boundary-data";
 import type { ExtensionRunner } from "./runner";
 import type { ExtensionAgentIdentity, RegisteredTool, ToolCallEventResult } from "./types";
 
@@ -111,6 +112,15 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 		}
 	}
 
+	/**
+	 * Run the extension's `execute` — the boundary between an extension tool and the host. It runs
+	 * inside the admission {@link ExtensionToolWrapper} opens around every tool, so the copies taken
+	 * here are taken inside it: `execute` is handed a copy of the params (the host's are the model's
+	 * call, persisted and handed to `tool_result` afterwards), and the partial results it streams
+	 * through `onUpdate` and the result it resolves with are copied by their schema before the host
+	 * reads them. Built-in, MCP-manager and RPC host tools reach the wrapper without this adapter;
+	 * their results are the host's data and are not copied.
+	 */
 	async execute(
 		toolCallId: string,
 		params: any,
@@ -118,24 +128,27 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 		onUpdate?: AgentToolUpdateCallback<any>,
 		context?: AgentToolContext,
 	) {
+		const { definition, extensionPath } = this.registeredTool;
+		const name = definition.name;
 		// Bind the extension context to this tool's own name so `ctx.invokeTool` delegates to the
 		// native built-in of the same name (present only when this tool re-registers a built-in). The
 		// wrapper's own context, abort signal, and progress callback are inherited by the delegated
 		// call, so a bare `ctx.invokeTool(params)` keeps the caller's `toolCall`/provider metadata
 		// (write/edit LSP batching, computer safety acknowledgement), stops when the outer call is
 		// aborted, and still streams native progress.
-		return this.registeredTool.definition.execute(
+		const result = await definition.execute(
 			toolCallId,
-			params,
+			copyHostData(params),
 			signal,
-			onUpdate,
+			onUpdate && (partial => onUpdate(copyToolResult(partial, name, extensionPath, "onUpdate() partial result"))),
 			this.runner.createContext(undefined, {
-				toolName: this.registeredTool.definition.name,
+				toolName: name,
 				context,
 				signal,
 				onUpdate,
 			}),
 		);
+		return copyToolResult(result, name, extensionPath, "execute() result");
 	}
 }
 

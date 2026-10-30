@@ -222,7 +222,13 @@ values you return, the events and results your streams carry — and the objects
 reads from its own record afterwards. So the host hands you a copy and takes a copy of what
 comes back, each read **once**, inside the session that owns the call. It never validates one
 read and then reads the same name again, and it never reads a value you touched after the call
-that produced it. Two consequences worth knowing before you write a provider.
+that produced it. Where the host _acts_ on something you gave it — navigating to a URL, opening
+a file, choosing a host — the value it acts on is the value it checked, because a check of one
+read and an action on another is a check of nothing.
+
+This holds at every surface you reach the host through: a provider's configuration, callbacks
+and streams; a hook's result; a tool's result; a browser sign-in request. Two consequences
+worth knowing before you write a provider.
 
 **What the host keeps at admission is the data and the callbacks; change either by registering
 again.** `headers`, `compat`, `remoteCompaction`, `transport` and the `models` rows are copied,
@@ -254,6 +260,15 @@ The objects handed **to** your callbacks are copies as well: the credential that
 object, the `headers` that `parseRateLimitHeaders` receives, and the fetch context's `logger`,
 which forwards to the host's. Read them and change them freely — changing them changes nothing
 the host keeps. Return what you want it to keep.
+
+Your `streamSimple` and `stream` receive copies of the model, the context and the options.
+Tool parameters arrive as the JSON Schema that goes on the wire, not as the host's live schema
+object. The callbacks among the options — `onPayload`, `onResponse`, `onSseEvent`, `fetch`,
+`providerRetryWait`, `liveSteering`, an API-key resolver, and `model.resolveHeaders` — are
+functions of the host's own that call its originals on copies of whatever you pass them; a
+function where data belongs is refused with its path, and a signal must be a real
+`AbortSignal`. `providerSessionState`, the Cursor exec handlers and tool-result hook, and the
+Anthropic slow-mode hooks are host-only and are not handed to an extension's API.
 
 Several sessions can register the same provider name; a subagent that rebinds its parent's
 extensions does. The registration in force is the most recent one whose session is still alive,

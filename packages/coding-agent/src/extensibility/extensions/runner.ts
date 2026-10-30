@@ -40,6 +40,7 @@ import type { SessionManager } from "../../session/session-manager";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
+import { assistantContentAsCopied, copyHandlerResult, copyHostData } from "./boundary-data";
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
@@ -1123,8 +1124,9 @@ export class ExtensionRunner {
 					for (const handler of ext.fileWriteFallbackHandlers) {
 						try {
 							// Through runScoped like every other extension callback: invoked straight
-							// from the filesystem helper, it would otherwise run unowned.
-							if (await this.runScoped(() => handler(req, ctx))) return true;
+							// from the filesystem helper, it would otherwise run unowned. Handed a copy: the
+							// helper rethrows `req.cause` as the original error once no handler took it.
+							if (await this.runScoped(() => handler(copyHostData(req), ctx))) return true;
 						} catch (error) {
 							logger.warn("Extension file write fallback handler threw; trying next handler", {
 								extension: ext.path,
@@ -1143,7 +1145,7 @@ export class ExtensionRunner {
 					const ctx = this.createContext();
 					for (const handler of ext.fileDeleteFallbackHandlers) {
 						try {
-							if (await this.runScoped(() => handler(req, ctx))) return true;
+							if (await this.runScoped(() => handler(copyHostData(req), ctx))) return true;
 						} catch (error) {
 							logger.warn("Extension file delete fallback handler threw; trying next handler", {
 								extension: ext.path,
@@ -1885,6 +1887,16 @@ export class ExtensionRunner {
 		return this.runtime;
 	}
 
+	/**
+	 * Runs one handler inside this session's admission, bounded by `timeoutMs`.
+	 *
+	 * Both directions of the boundary are crossed here, for every emitter: the handler is handed a
+	 * copy of the event, so an edit in place or an installed getter changes nothing the host reads
+	 * from its own records afterwards (`eventIsCopy` when the emitter built a fresh copy for this
+	 * handler itself), and what the handler returns is copied by the event's schema
+	 * (`copyHandlerResult`) before the admitted call settles — every later read by the emitter is of
+	 * the host's copy, and a result the host never reads is never touched.
+	 */
 	async #runHandlerWithTimeout<TEvent extends { type: string }, R>(
 		handler: (event: TEvent, ctx: ExtensionContext) => Promise<R | undefined> | R | undefined,
 		event: TEvent,
@@ -1893,6 +1905,7 @@ export class ExtensionRunner {
 		timeoutMs: number,
 		onFailure?: (kind: "timeout" | "error", message: string) => R,
 		outerSignal?: AbortSignal,
+		eventIsCopy = false,
 	): Promise<R | undefined> {
 		// `session_stop` carries its own signal on the event; `tool_call` receives
 		// the outer dispatch signal (loop request or wrapper execute) so an abort
@@ -1920,9 +1933,10 @@ export class ExtensionRunner {
 								handlerSignal,
 								event.type === "tool_call" ? budget : undefined,
 							);
-							result = await this.#toolRegistrationScope.run(registrationScope, () =>
-								handler(event, handlerContext),
+							const produced = await this.#toolRegistrationScope.run(registrationScope, () =>
+								handler(eventIsCopy ? event : copyHostData(event), handlerContext),
 							);
+							result = copyHandlerResult(event.type, produced, ext.path) as R | undefined;
 						} catch (error) {
 							handlerFailure = { error };
 						} finally {
@@ -2087,10 +2101,10 @@ export class ExtensionRunner {
 	 * change only in its original block position; all other metadata and blocks
 	 * remain unchanged. Text replay signatures are tied to their original text.
 	 *
-	 * Handlers see a structured clone, but the result is rebuilt from the
-	 * original blocks: unchanged blocks keep their identity and symbol-keyed
-	 * provider markers (e.g. `kCursorExecResolved`, which `structuredClone`
-	 * drops and without which agent-loop re-runs Cursor-settled tool calls).
+	 * Handlers are handed a copy (the dispatch copies every event), but the result
+	 * is rebuilt from the original blocks: unchanged blocks keep their identity
+	 * and symbol-keyed provider markers (e.g. `kCursorExecResolved`, which no copy
+	 * carries and without which agent-loop re-runs Cursor-settled tool calls).
 	 */
 	async emitAssistantMessage(
 		message: AssistantMessage,
@@ -2121,10 +2135,12 @@ export class ExtensionRunner {
 			if (!handlers?.length) continue;
 			for (const handler of handlers) {
 				if (signal?.aborted) break extensions;
-				// Detach the whole message, not just `content`: in-place edits to `usage`
-				// or other fields must not leak into the finalized message.
-				const presented = structuredClone({ ...message, content: currentContent() });
-				const event: AssistantMessageRewriteEvent = { type: "assistant_message", message: presented };
+				// The dispatch hands the handler a copy of the whole message, not just `content`:
+				// in-place edits to `usage` or other fields must not leak into the finalized message.
+				const event: AssistantMessageRewriteEvent = {
+					type: "assistant_message",
+					message: { ...message, content: currentContent() },
+				};
 				const result = (await this.#runHandlerWithTimeout(
 					handler,
 					event,
@@ -2137,8 +2153,9 @@ export class ExtensionRunner {
 				if (signal?.aborted) break extensions;
 				if (result?.content === undefined) continue;
 				const replacement = result.content;
-				// Compare against a fresh clone: the handler may have mutated `presented`.
-				const expected = structuredClone(currentContent());
+				// Compare against the current content as the copy of a replacement reads it: the
+				// fields a block declares, without the host's markers.
+				const expected = assistantContentAsCopied(currentContent());
 				if (
 					!Array.isArray(replacement) ||
 					replacement.length !== expected.length ||
@@ -2404,15 +2421,9 @@ export class ExtensionRunner {
 		if (!this.hasHandlers("context")) return messages;
 		const ctx = this.createContext();
 
-		let currentMessages: AgentMessage[];
-		try {
-			currentMessages = structuredClone(messages);
-		} catch {
-			// Messages may contain non-cloneable objects (e.g. in ToolResultMessage.details
-			// or ProviderPayload). Fall back to a shallow array clone — extensions should
-			// return new message arrays rather than mutating in place.
-			currentMessages = [...messages];
-		}
+		// The host's working copy: `copyHostData` copies what `structuredClone` cannot (a function in a
+		// tool result's details), so no handler is ever handed a live history message.
+		let currentMessages: AgentMessage[] = copyHostData(messages);
 		for (let index = 0; index < currentMessages.length; index++) {
 			const message = currentMessages[index];
 			if (message) setContextHistoryIndex(message, index);
@@ -2423,7 +2434,15 @@ export class ExtensionRunner {
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
-				const event: ContextEvent = { type: "context", messages: currentMessages };
+				// Each handler gets its own copy, carrying the history position the dispatch's generic
+				// copy would drop: an edit in place reaches neither the working copy nor history.
+				const presented = currentMessages.map(message => {
+					const copy = copyHostData(message);
+					const historyIndex = getContextHistoryIndex(message);
+					if (historyIndex !== undefined) setContextHistoryIndex(copy, historyIndex);
+					return copy;
+				});
+				const event: ContextEvent = { type: "context", messages: presented };
 				const handlerResult = await this.#runHandlerWithTimeout(
 					handler,
 					event,
@@ -2432,6 +2451,7 @@ export class ExtensionRunner {
 					extensionHandlerTimeoutMs,
 					undefined,
 					signal,
+					true,
 				);
 
 				if (handlerResult && (handlerResult as ContextEventResult).messages) {

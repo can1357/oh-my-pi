@@ -22,8 +22,16 @@ export async function captureBrowserSession(
 	request: OAuthBrowserSessionRequest,
 	signal?: AbortSignal,
 ): Promise<string> {
+	// One read of each field, and the value read is the value used. The request comes from an
+	// OAuth provider, which may be an extension's: a `url` getter answering `https:` to the
+	// check below and `http:` to the navigation would downgrade a sign-in past a check that
+	// said it was safe. Validating one read and acting on another is the defect this whole
+	// boundary exists to remove, and here it costs the transport an OAuth flow runs over.
+	const url = String(request.url);
+	const cookieNames = Array.from(request.cookieNames, String);
+
 	if (signal?.aborted) throw new LoginCancelledError();
-	if (new URL(request.url).protocol !== "https:") throw new Error("Browser sign-in requires an HTTPS URL.");
+	if (new URL(url).protocol !== "https:") throw new Error("Browser sign-in requires an HTTPS URL.");
 
 	const timeout = AbortSignal.timeout(LOGIN_TIMEOUT_MS);
 	const lifetime = signal ? AbortSignal.any([signal, timeout]) : timeout;
@@ -60,14 +68,14 @@ export async function captureBrowserSession(
 		const context = await untilAborted(waiting, () => browser!.createBrowserContext());
 		const page = await untilAborted(waiting, () => context.newPage());
 		page.once("close", () => closed.abort());
-		await untilAborted(waiting, () => page.goto(request.url, { waitUntil: "domcontentloaded", timeout: 30_000 }));
+		await untilAborted(waiting, () => page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 }));
 		await untilAborted(waiting, () => page.bringToFront());
 		const cdp = await untilAborted(waiting, () => page.createCDPSession());
 		while (true) {
 			// Chromium applies domain/path/secure matching, including HttpOnly cookies.
-			const { cookies } = await untilAborted(waiting, () => cdp.send("Network.getCookies", { urls: [request.url] }));
+			const { cookies } = await untilAborted(waiting, () => cdp.send("Network.getCookies", { urls: [url] }));
 			waiting.throwIfAborted();
-			for (const name of request.cookieNames) {
+			for (const name of cookieNames) {
 				const session = cookies.find(cookie => cookie.name === name && cookie.value);
 				if (session) return session.value;
 			}
