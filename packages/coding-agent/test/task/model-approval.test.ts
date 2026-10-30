@@ -411,6 +411,19 @@ describe("per-call model advertisement", () => {
 
 	});
 
+	it("keeps a configured default model granted without advertising @default", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "mock/target" },
+			"task.perCallModelAllow": ["mock/target"],
+		});
+		expect(approved(target, { settings, agentName: "worker" })).toBe(true);
+		expect(getPerCallModelAdvertisement(settings, undefined, registry)).toEqual({
+			roles: [],
+			allowlist: ["mock/target"],
+			parentModelWithheld: false,
+		});
+	});
+
 	it("keeps configured role order and selectors while filtering and deduplicating grants", () => {
 		const settings = Settings.isolated({
 			modelRoles: {

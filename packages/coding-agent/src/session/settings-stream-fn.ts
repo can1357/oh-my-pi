@@ -155,7 +155,7 @@ export function createSettingsAwareStreamFn(
 			tokenizers.set(tokenizerKey, tokenizer);
 		}
 		const maxTokens = fitOutputTokensToContextWindow(model, context, streamOptions?.maxTokens, tokenizer);
-		const merged: SimpleStreamOptions & { disableServerSideFallback?: boolean } = {
+		const merged: SimpleStreamOptions = {
 			...streamOptions,
 			maxTokens,
 			openrouterVariant: streamOptions?.openrouterVariant ?? openrouterVariant,
