@@ -3,7 +3,12 @@ import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
-import { aimlapiClientHeaders } from "@oh-my-pi/pi-catalog/wire/aimlapi";
+import {
+	AIMLAPI_CLIENT_HEADER_NAMES,
+	AIMLAPI_ORIGIN,
+	aimlapiClientHeaders,
+	isAimlapiOrigin,
+} from "@oh-my-pi/pi-catalog/wire/aimlapi";
 import { clinePassClientHeaders } from "@oh-my-pi/pi-catalog/wire/cline-pass";
 import {
 	$env,
@@ -20,6 +25,7 @@ import { getEnvApiKey } from "../env-api-key";
 import type {
 	AssistantMessage,
 	Context,
+	FetchImpl,
 	Message,
 	MessageAttribution,
 	Model,
@@ -48,6 +54,7 @@ import {
 	iterateWithTerminalGrace,
 } from "../utils/idle-iterator";
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
+import { wrapFetchForOriginLockedHeaders } from "../utils/origin-locked-fetch";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import {
@@ -959,7 +966,7 @@ const streamOpenAICompletionsOnce = (
 						signal: requestSignal,
 						maxAttempts: options?.maxHttpAttempts,
 						fetch: wrapFetchForCopilotFallback(
-							wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
+							wrapFetchForRequestCompression(lockAimlapiClientHeaders(options?.fetch ?? fetch, model), model),
 							model.provider === "github-copilot",
 							resolveCopilotRequestIdentity(options?.headers),
 							copilotCacheKey,
@@ -1902,6 +1909,15 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (mo
 		maxProviderErrorRetries: 1,
 	});
 };
+
+/**
+ * AI/ML API's client-identity headers (see `wire/aimlapi.ts`) may only reach
+ * its own origin; the platform would carry them across a redirect to any host.
+ */
+function lockAimlapiClientHeaders(fetchImpl: FetchImpl, model: Model<"openai-completions">): FetchImpl {
+	if (model.provider !== "aimlapi" || !isAimlapiOrigin(model.baseUrl)) return fetchImpl;
+	return wrapFetchForOriginLockedHeaders(fetchImpl, { origin: AIMLAPI_ORIGIN, names: AIMLAPI_CLIENT_HEADER_NAMES });
+}
 
 function createRequestSetup(
 	model: Model<"openai-completions">,
