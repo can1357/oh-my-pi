@@ -25,11 +25,17 @@ export interface HelperContext {
 	localRoots(): Record<string, string>;
 	emitStatus(event: JsStatusEvent): void;
 	/**
-	 * Ask the host whether this session's artifacts have finished arriving.
-	 * Absent where there is no host to ask (a hand-built context in a test),
-	 * which is also where no copy can be running.
+	 * Resolve `artifact://<id>` to its file through the host, once the copies
+	 * filling this session's artifacts directory have finished — the waiting
+	 * and the listing in one answer, because a copy can be announced between
+	 * two of them.
+	 *
+	 * Its absence is a declaration, not a fallback: an embedder that leaves it
+	 * out is saying no copy can be running here. One that has it and cannot
+	 * answer fails the read rather than letting it see a directory nobody has
+	 * vouched for.
 	 */
-	awaitArtifacts?(): Promise<void>;
+	resolveArtifact?(id: string, root: string): Promise<string | null>;
 }
 
 /**
@@ -149,10 +155,11 @@ function resolveHelperPath(ctx: HelperContext, rawPath: string, op: "read" | "wr
 async function resolveArtifactPath(ctx: HelperContext, root: string, id: string): Promise<string | undefined> {
 	// Asked of the host, here, where the artifact is read: a reader can be a
 	// tool retained across cells or work a cell left running, and neither is
-	// covered by anything decided when a cell was admitted. The answer is kept
-	// on the other side of the bridge, and nothing on this side — least of all
-	// a staging tree beside the directory — stands in for it.
-	await ctx.awaitArtifacts?.();
+	// covered by anything decided when a cell was admitted. The host answers
+	// with the file, not with a verdict this side would then act on — between
+	// a verdict and a listing a copy can be announced, and the listing would
+	// be of a directory half an inheritance had reached.
+	if (ctx.resolveArtifact) return (await ctx.resolveArtifact(id, root)) ?? undefined;
 	let files: string[];
 	try {
 		files = await fs.readdir(root);

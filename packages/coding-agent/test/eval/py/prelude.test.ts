@@ -106,7 +106,9 @@ describe("python prelude", () => {
 			expect(requests).toEqual([
 				{
 					session: "test-session",
-					run: null,
+					// No cell, so no run: the host refuses that for everything
+					// but the questions that belong to the session.
+					run: "",
 					name: "read",
 					args: { path: "mcp://server/resource:10-14" },
 				},
@@ -160,7 +162,12 @@ describe("python prelude", () => {
 				`print([read("artifact://12", limit=0), read("artifact://12", limit=-1), read("artifact://7", limit=0)])`,
 			].join("\n"),
 			{ PI_EVAL_LOCAL_ROOTS: JSON.stringify({ artifact: artifacts.path() }) },
-			async (_args, name) => (name === "__artifacts_ready__" ? "" : { text: "from the read tool" }),
+			async (args, name) =>
+				name === "__artifacts_ready__"
+					? // The host resolves the id against the artifacts dir once
+						// its copies have settled; the kernel never lists it.
+						artifacts.join(`${(args as unknown as { id: string }).id}.eval.log`)
+					: { text: "from the read tool" },
 		);
 
 		expect(stderr).toBe("");
@@ -170,7 +177,14 @@ describe("python prelude", () => {
 		// cannot see a copy still filling it. The bytes come from the dir.
 		// One readiness question, from the one read that got as far as the
 		// directory: a `limit <= 0` read answers before it looks at anything.
-		expect(requests).toEqual([{ name: "__artifacts_ready__", args: {}, run: null, session: "test-session" }]);
+		expect(requests).toEqual([
+			{
+				name: "__artifacts_ready__",
+				args: { id: "12", root: artifacts.path() },
+				run: "",
+				session: "test-session",
+			},
+		]);
 	});
 
 	it("reads an artifact another session holds in full, however large, through the read tool", async () => {

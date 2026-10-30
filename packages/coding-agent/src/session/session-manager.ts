@@ -601,6 +601,11 @@ export async function whenArtifactCopiesSettle(dir?: string | null, signal?: Abo
 	}
 }
 
+/** Whether an artifact copy into `dir` is running in this process right now. */
+export function artifactCopiesPending(dir: string): boolean {
+	return (pendingArtifactCopies.get(path.resolve(dir))?.size ?? 0) > 0;
+}
+
 /** Announce a copy into `dir` for the readers of it, until `done` settles. */
 function announceArtifactCopy(dir: string, done: Promise<unknown>): () => void {
 	const key = path.resolve(dir);

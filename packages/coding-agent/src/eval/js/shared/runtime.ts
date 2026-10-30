@@ -15,7 +15,6 @@ import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import type { EvalTableColumn } from "@oh-my-pi/pi-tui/tools/eval";
 import { type EvalDisplayOutput, evalImageMetadata } from "../../types";
 import type { EvalPreludeSource } from "../worker-protocol";
-import { EVAL_ARTIFACTS_READY_BRIDGE_NAME } from "../../artifact-readiness-name";
 import { createHelpers, type HelperBundle } from "./helpers";
 import { awaitMaybePromise, indirectEval } from "./indirect-eval";
 import { LocalModuleLoader } from "./local-module-loader";
@@ -94,6 +93,14 @@ export interface RuntimeOptions {
 	localRoots?: Record<string, string>;
 	/** Selected package directory consulted after the importing file's project. */
 	packageRoot?: string;
+	/**
+	 * Resolve `artifact://<id>` through the host once the copies filling this
+	 * session's artifacts directory have finished. Supplied by an embedder
+	 * whose host can be asked at any time, including after the run that
+	 * started a background reader has ended; left out by one where no artifact
+	 * copy can run.
+	 */
+	resolveArtifact?(id: string, root: string): Promise<string | null>;
 }
 
 // Strict base64: characters from the standard alphabet plus optional `=` padding, and a
@@ -397,18 +404,11 @@ export class JsRuntime {
 			env: this.#env,
 			localRoots: () => this.#als.getStore()?.localRoots ?? this.#localRoots,
 			emitStatus: event => this.#activeHooks("emitStatus")?.onDisplay({ type: "status", event }),
-			awaitArtifacts: async () => {
-				// A host that cannot answer the question is not a reason to
-				// refuse the read: the embedders that run copies are the ones
-				// that answer it, and the rest have none to wait for.
-				const hooks = this.#activeHooks("tool");
-				if (!hooks) return;
-				try {
-					await hooks.callTool(EVAL_ARTIFACTS_READY_BRIDGE_NAME, {});
-				} catch {
-					// Left to the read itself to fail, if it fails at all.
-				}
-			},
+			// Only where the embedder said it can answer. A rejection is not a
+			// declaration that no copy is running — the host that rejects a
+			// call from a run that has ended is the same host running the copy
+			// — so a failure here fails the read.
+			...(opts.resolveArtifact ? { resolveArtifact: opts.resolveArtifact } : {}),
 		});
 		this.#initialGlobalKeys = new Set(Object.getOwnPropertyNames(globalThis));
 		this.#install(opts.extraGlobals);

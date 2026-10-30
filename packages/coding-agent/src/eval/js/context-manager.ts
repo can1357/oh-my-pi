@@ -6,6 +6,7 @@ import {
 	resolveWorkerSpawnCmd,
 	workerEnvFromParent,
 } from "../../subprocess/worker-client";
+import { EVAL_ARTIFACTS_READY_BRIDGE_NAME } from "../artifact-readiness-name";
 import type { ToolSession } from "../../tools";
 import { ToolAbortError } from "../../tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -103,6 +104,12 @@ interface JsSession {
 	pendingShadowRuns: Map<string, PromiseWithResolvers<Extract<WorkerOutbound, { type: "shadow-run" }>>>;
 	ownerIds: Set<string>;
 	hasFallbackOwner: boolean;
+	/**
+	 * The tool session of the most recent run, kept for the questions that
+	 * outlive it: work a cell left running still reads this session's
+	 * artifacts, and has to be told about a copy filling them.
+	 */
+	lastToolSession?: ToolSession;
 }
 
 interface StartingJsSession extends SessionOwners {
@@ -241,6 +248,8 @@ export async function invokeJsTool(
 		settled: false,
 	};
 	session.pending.set(runId, pending);
+	// Kept past the run for the artifact readiness question (see `handleToolCall`).
+	session.lastToolSession = pending.toolSession;
 
 	const onAbort = (): void => {
 		if (pending.settled) return;
@@ -514,6 +523,8 @@ async function runOnce(
 		settled: false,
 	};
 	session.pending.set(runId, pending);
+	// Kept past the run for the artifact readiness question (see `handleToolCall`).
+	session.lastToolSession = pending.toolSession;
 
 	const onAbort = (): void => {
 		const reason = options.runState.signal?.reason;
@@ -790,6 +801,28 @@ function trackDeferPhase(pending: PendingRun, event: JsStatusEvent): void {
 
 async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, { type: "tool-call" }>): Promise<void> {
 	const pending = session.pending.get(msg.runId);
+	// The artifact readiness question belongs to the session, not to a cell:
+	// work a finished cell left running reads artifacts too, and refusing it
+	// because its run has ended answers nothing about the copy it would have
+	// been told to wait for.
+	if (!pending && msg.name === EVAL_ARTIFACTS_READY_BRIDGE_NAME) {
+		const toolSession = session.lastToolSession;
+		if (!toolSession) {
+			safeSend(session, {
+				type: "tool-reply",
+				id: msg.id,
+				reply: { ok: false, error: { message: "No session to resolve artifacts against" } },
+			});
+			return;
+		}
+		try {
+			const value = await callSessionTool(msg.name, msg.args, { session: toolSession });
+			safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: true, value } });
+		} catch (error) {
+			safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: false, error: toErrorPayload(error) } });
+		}
+		return;
+	}
 	if (!pending) {
 		safeSend(session, {
 			type: "tool-reply",

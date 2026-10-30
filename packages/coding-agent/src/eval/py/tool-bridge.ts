@@ -10,6 +10,7 @@
 import { logger, postmortem } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
 import type { RuntimeCallIdentity } from "../js/shared/runtime";
+import { EVAL_ARTIFACTS_READY_BRIDGE_NAME } from "../artifact-readiness-name";
 import { bridgeValueFromToolResult, callSessionTool, type JsStatusEvent } from "../js/tool-bridge";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
 
@@ -176,8 +177,14 @@ async function startServer(): Promise<BridgeServer> {
 			const sessionId = typeof body.session === "string" ? body.session : "";
 			const runId = typeof body.run === "string" ? body.run : "";
 			const name = typeof body.name === "string" ? body.name : "";
-			if (!sessionId || !runId || !name) {
-				return Response.json({ ok: false, error: "Missing session/run/name" }, { status: 400 });
+			if (!sessionId || !name) {
+				return Response.json({ ok: false, error: "Missing session/name" }, { status: 400 });
+			}
+			// The artifact readiness question belongs to the session: a thread
+			// a finished cell left running reads artifacts too, and has no run
+			// to name. Everything else still has to say which cell it is.
+			if (!runId && name !== EVAL_ARTIFACTS_READY_BRIDGE_NAME) {
+				return Response.json({ ok: false, error: "Missing run" }, { status: 400 });
 			}
 			const registrationKey = bridgeRegistrationKey(sessionId, runId);
 			const entry = registrations.get(registrationKey) ?? registrations.get(sessionId);

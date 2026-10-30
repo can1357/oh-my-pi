@@ -1,3 +1,5 @@
+import * as nodeFs from "node:fs";
+import * as nodePath from "node:path";
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -21,17 +23,23 @@ interface WorkerHarness {
 function createWorkerHarness(): WorkerHarness {
 	const hostListeners = new Set<(message: WorkerOutbound) => void>();
 	const workerListeners = new Set<(message: WorkerInbound) => void>();
+	// Every `artifact://<n>` read asks the host for the file, so that the
+	// waiting for a copy and the listing are one answer. No copy runs here, so
+	// the harness answers from the artifact root the run was started with.
+	const resolveArtifact = (id: unknown, root: unknown): string => {
+		if (typeof root !== "string" || typeof id !== "string") return "";
+		const match = nodeFs.readdirSync(root).find(name => name.startsWith(`${id}.`));
+		return match === undefined ? "" : nodePath.join(nodePath.resolve(root), match);
+	};
 	const transport: Transport = {
 		send: message => {
 			queueMicrotask(() => {
-				// Every `artifact://<n>` read asks the host whether this
-				// session's artifacts have finished arriving. No copy exists
-				// here, so the harness answers at once; a test that wants to
-				// see the call still sees it go past.
 				if (message.type === "tool-call" && message.name === "__artifacts_ready__") {
+					const args = message.args as { id?: unknown; root?: unknown } | undefined;
+					const value = resolveArtifact(args?.id, args?.root);
 					queueMicrotask(() => {
 						for (const listener of workerListeners) {
-							listener({ type: "tool-reply", id: message.id, reply: { ok: true, value: "" } });
+							listener({ type: "tool-reply", id: message.id, reply: { ok: true, value } });
 						}
 					});
 				}

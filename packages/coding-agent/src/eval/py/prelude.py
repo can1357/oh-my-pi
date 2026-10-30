@@ -73,24 +73,20 @@ if "__omp_prelude_loaded__" not in globals():
         artifacts dir), or None when the id is not there or no dir is known.
 
         A fork's artifacts arrive by copy, and this kernel is a subprocess that
-        cannot see the host's record of the copies in flight. The listing below
-        is a snapshot: mid-copy it holds part of an inheritance, and before the
-        copy creates its staging tree it holds none of it. So the host is asked
-        first, at the read, which is also where a retained tool and a thread a
-        past cell left running read from."""
+        cannot see the host's record of the copies in flight. Listing the
+        directory here is a snapshot: mid-copy it holds part of an inheritance,
+        and asking first and listing afterwards only moves the gap, because a
+        copy can be announced between the two. So the host does both and
+        answers with the file. The call carries no run: the reader may be a
+        thread a finished cell left behind."""
         root = _omp_url_roots().get("artifact")
         if not root:
             return None
-        _bridge_call("__artifacts_ready__", {})
-        artifact_id = path[11:]
-        try:
-            names = os.listdir(root)
-        except FileNotFoundError:
-            return None
-        for name in names:
-            if name.startswith(f"{artifact_id}."):
-                return Path(os.path.join(os.path.abspath(root), name))
-        return None
+        resolved = _bridge_call(
+            "__artifacts_ready__",
+            {"id": path[11:], "root": os.path.abspath(root)},
+        )
+        return Path(resolved) if isinstance(resolved, str) and resolved else None
 
     def _read_through_tool(path: str, offset: int, limit: int | None) -> str:
         if limit is not None and limit <= 0:
@@ -438,7 +434,11 @@ if "__omp_prelude_loaded__" not in globals():
             _OMP_CALL_IDENTITY.reset(token)
 
     def _bridge_call(name: str, args: dict):
-        """POST one request to the host tool bridge and return its `value`."""
+        """POST one request to the host tool bridge and return its `value`.
+
+        A call made outside a cell — by a thread a finished one left running —
+        carries no run. The host refuses that for anything but the questions
+        that belong to the session rather than to a cell."""
         base, token, session = _tool_proxy_from_env()
         _run_id_getter = globals().get("__omp_current_run_id__")
         _run_id = (
@@ -448,7 +448,7 @@ if "__omp_prelude_loaded__" not in globals():
         )
         payload = {
             "session": session,
-            "run": _run_id,
+            "run": _run_id or "",
             "name": name,
             "args": args,
         }

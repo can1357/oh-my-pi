@@ -2,7 +2,11 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils/temp";
-import { awaitEvalArtifactsSettled, EVAL_ARTIFACTS_READY_BRIDGE_NAME } from "../../src/eval/artifact-readiness";
+import {
+	awaitEvalArtifactsSettled,
+	EVAL_ARTIFACTS_READY_BRIDGE_NAME,
+	resolveSettledArtifact,
+} from "../../src/eval/artifact-readiness";
 import { createHelpers } from "../../src/eval/js/shared/helpers";
 import { callSessionTool } from "../../src/eval/js/tool-bridge";
 import { copySessionArtifacts, whenArtifactCopiesSettle } from "../../src/session/session-manager";
@@ -72,7 +76,10 @@ describe("eval artifact readiness", () => {
 			env: new Map(),
 			localRoots: () => ({ artifact: destination }),
 			emitStatus: () => {},
-			awaitArtifacts: () => callSessionTool(EVAL_ARTIFACTS_READY_BRIDGE_NAME, {}, { session }).then(() => {}),
+			resolveArtifact: async id => {
+				const value = await callSessionTool(EVAL_ARTIFACTS_READY_BRIDGE_NAME, { id }, { session });
+				return typeof value === "string" && value.length > 0 ? value : null;
+			},
 		});
 
 		const { promise: held, resolve: release } = Promise.withResolvers<void>();
@@ -93,6 +100,54 @@ describe("eval artifact readiness", () => {
 		release();
 		await copying;
 		expect(await reading).toBe("INHERITED ONE");
+		await whenArtifactCopiesSettle(destination);
+	});
+
+	it("answers with a file only while no copy is running, however late one starts", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-readiness-");
+		const source = path.join(tempDir.path(), "2026-01-01T00-00-00-000Z_source");
+		const destination = path.join(tempDir.path(), "2026-01-01T00-00-01-000Z_destination");
+		const second = path.join(tempDir.path(), "2026-01-01T00-00-02-000Z_second");
+		fs.mkdirSync(source, { recursive: true });
+		fs.mkdirSync(second, { recursive: true });
+		fs.mkdirSync(destination, { recursive: true });
+		fs.writeFileSync(path.join(source, "0.bash.log"), "INHERITED ZERO");
+		fs.writeFileSync(path.join(second, "1.bash.log"), "INHERITED ONE");
+		fs.writeFileSync(path.join(destination, "8.read.log"), "THE SESSION'S OWN");
+
+		// The second copy is announced while the first is finishing, which is
+		// the window an answer given before a listing cannot cover.
+		const { promise: held, resolve: release } = Promise.withResolvers<void>();
+		let followUp: Promise<unknown> | undefined;
+		const { promise: secondHeld, resolve: releaseSecond } = Promise.withResolvers<void>();
+		const first = copySessionArtifacts(`${source}.jsonl`, `${destination}.jsonl`, {
+			stillTheSource: async () => {
+				await held;
+				followUp = copySessionArtifacts(`${second}.jsonl`, `${destination}.jsonl`, {
+					stillTheSource: async () => {
+						await secondHeld;
+						return true;
+					},
+				});
+				return true;
+			},
+		});
+
+		let answer: string | null | undefined;
+		const resolving = resolveSettledArtifact(sessionWithArtifacts(destination), "1").then(value => {
+			answer = value;
+			return value;
+		});
+		release();
+		await first;
+		await Promise.resolve();
+		expect(answer).toBeUndefined();
+
+		releaseSecond();
+		await followUp;
+		// Answered with the file the second copy brought, not with "absent"
+		// from a listing taken between the two.
+		expect(await resolving).toBe(path.join(destination, "1.bash.log"));
 		await whenArtifactCopiesSettle(destination);
 	});
 
