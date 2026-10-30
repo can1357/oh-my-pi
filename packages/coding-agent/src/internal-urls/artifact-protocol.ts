@@ -14,6 +14,7 @@ import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import artifactDoc from "../prompts/internal-urls/artifact.md" with { type: "text" };
+import { whenArtifactCopiesSettle } from "../session/session-manager";
 import { artifactsDirsFromRegistry } from "./registry-helpers";
 import type {
 	InternalResource,
@@ -97,24 +98,43 @@ function callerInMemoryArtifact(id: string, context?: ResolveContext): string | 
 	return context?.session?.sessionManager?.getArtifactContent?.(id) ?? null;
 }
 
+/**
+ * Wait for any artifact copy still filling the directories about to be read.
+ *
+ * A fork's artifacts arrive in the background, and `ArtifactManager` waits for
+ * them — but every public `artifact://` read goes straight to the filesystem,
+ * so without this a read landing mid-copy sees a directory that is not yet the
+ * session's own.
+ */
+async function awaitArtifactsSettled(context?: ResolveContext): Promise<void> {
+	await context?.session?.sessionManager?.whenArtifactsSettled?.();
+	// Most readers hold no session object — the transcript viewer's export, a
+	// subagent's own options, a bare protocol call — so the wait is also keyed
+	// by the directory itself. With no directory to name, every copy in this
+	// process has to have settled before any of them can be answered for.
+	await whenArtifactCopiesSettle(context?.localProtocolOptions?.getArtifactsDir?.());
+}
+
 /** Resolve an `artifact://` URL to its backing file without reading artifact bytes. */
 async function resolveArtifactFile(url: InternalUrl, context?: ResolveContext): Promise<ResolvedArtifactFile> {
 	const id = parseArtifactId(url);
+	await awaitArtifactsSettled(context);
 
-	// Artifact ids are per-session counters; in multi-session hosts the same
-	// id exists in several dirs. Pin resolution to the calling session's
-	// artifacts dir first so `artifact://3` means *this* session's #3.
+	// Artifact ids are per-session counters, so an id this session does not
+	// have is not another session's to answer with: a caller with an artifacts
+	// directory of its own reads that one and nothing else. Falling through to
+	// the registry would hand a fork that lost (or has not yet received) its
+	// artifacts the bytes of whatever live session happens to hold the same
+	// number.
 	const pinnedDir = context?.localProtocolOptions?.getArtifactsDir?.() ?? null;
 	// A seance reads only its own artifacts plus the consulted source's, in
 	// place; its own ids are allocated past the source's, so neither shadows.
 	const seanceDir = context?.session?.seanceSourceArtifactsDir;
-	const dirs = seanceDir ? [] : artifactsDirsFromRegistry();
-	if (seanceDir) dirs.push(...(pinnedDir ? [pinnedDir] : []), seanceDir);
-	else if (pinnedDir) {
-		const pinnedIndex = dirs.indexOf(pinnedDir);
-		if (pinnedIndex >= 0) dirs.splice(pinnedIndex, 1);
-		dirs.unshift(pinnedDir);
-	}
+	const dirs = seanceDir
+		? [...(pinnedDir ? [pinnedDir] : []), seanceDir]
+		: pinnedDir
+			? [pinnedDir]
+			: artifactsDirsFromRegistry();
 
 	if (dirs.length === 0) {
 		throw new MissingArtifactError("No session - artifacts unavailable");

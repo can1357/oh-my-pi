@@ -71,6 +71,15 @@ export interface SessionHeader {
 	 * source: `history://`, `artifact://`, and `agent://` read them from there.
 	 */
 	seanceSource?: string;
+	/**
+	 * The highest `artifact://<n>` this transcript refers to but has no file
+	 * for, because a fork's inherited artifacts were discarded. Allocation
+	 * starts past it, so a reference the conversation already makes can never
+	 * come to name later output — and it lives in the header so that holds
+	 * after a reopen and in anything forked from here, not only in the process
+	 * that lost them.
+	 */
+	reservedArtifactId?: number;
 }
 
 export interface NewSessionOptions {

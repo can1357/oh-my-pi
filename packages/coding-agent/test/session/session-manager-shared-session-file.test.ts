@@ -5,7 +5,11 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ArtifactProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/artifact-protocol";
+import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
+import { registerArtifactsDir } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentOutputManager } from "@oh-my-pi/pi-coding-agent/task/output-manager";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { findSessionContinuation } from "@oh-my-pi/pi-coding-agent/session/session-listing";
@@ -22,6 +26,7 @@ import {
 	lastSessionTransfer,
 	markSessionMoved,
 	noteResumedSessionFork,
+	SESSION_TRANSFER_MESSAGE_TYPE,
 	type SessionTransferDetails,
 } from "@oh-my-pi/pi-coding-agent/session/session-transfer";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -207,6 +212,15 @@ function sessionFilesIn(dir: string): string[] {
 		.filter(name => name.endsWith(".jsonl"))
 		.map(name => path.join(dir, name))
 		.sort();
+}
+
+/** Add a turn that refers to `artifact://<id>`, so the transcript has spent that identifier. */
+async function appendTurnReferringToArtifact(sessionFile: string, dir: TempDir, id: number): Promise<void> {
+	const writer = await SessionManager.open(sessionFile, dir.path(), new FileSessionStorage(), {
+		suppressBreadcrumb: true,
+	});
+	writer.appendMessage(userTurn(`see artifact://${id}`));
+	await writer.close();
 }
 
 /**
@@ -603,6 +617,9 @@ describe("SessionManager on a session file another omp process writes", () => {
 		const artifacts = original.slice(0, -".jsonl".length);
 		fs.mkdirSync(artifacts, { recursive: true });
 		fs.writeFileSync(path.join(artifacts, "0.bash.log"), "this session's artifact");
+		// The transcript refers to the artifact, which is what makes its
+		// identifier one this conversation has already spent.
+		await appendTurnReferringToArtifact(original, tempDir, 0);
 
 		const { other: owner } = await OtherProcess.adopt(tempDir, original);
 		try {
@@ -632,9 +649,171 @@ describe("SessionManager on a session file another omp process writes", () => {
 					source: original,
 					sessionId: originalId,
 					reservedThroughId: 0,
+					sourceChanged: true,
 				});
 			} finally {
 				await resuming.close();
+			}
+		} finally {
+			await owner.close();
+		}
+	}, 30_000);
+
+	/** A fork whose inherited artifacts were lost to a takeover during the copy. */
+	async function forkThatLostItsArtifacts(
+		tempDir: TempDir,
+		ids: readonly number[],
+	): Promise<{ resumed: SessionManager; requested: string }> {
+		const requested = await createSession(tempDir);
+		await markSessionMoved(requested, "another-machine");
+		const replacement = await createSession(tempDir, "someone else's conversation");
+		const artifacts = requested.slice(0, -".jsonl".length);
+		fs.mkdirSync(artifacts, { recursive: true });
+		for (const id of ids) {
+			fs.writeFileSync(path.join(artifacts, `${id}.bash.log`), `artifact ${id}`);
+			await appendTurnReferringToArtifact(requested, tempDir, id);
+		}
+		const manager = await SessionManager.open(requested, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		const realpath = fs.promises.realpath;
+		const raceOnRealpath = (async (target: fs.PathLike) => {
+			if (target === requested) fs.renameSync(replacement, requested);
+			return realpath(target);
+		}) as typeof fs.promises.realpath;
+		const spy = spyOn(fs.promises, "realpath").mockImplementation(raceOnRealpath);
+		try {
+			const resumed = await adoptResumedSession(manager, tempDir.path());
+			expect(await resumed.artifactsReproduced()).toBe(false);
+			return { resumed, requested };
+		} finally {
+			spy.mockRestore();
+		}
+	}
+
+	it("keeps reserving the identifiers it lost after the session is closed and reopened", async () => {
+		using tempDir = TempDir.createSync("@omp-shared-session-file-");
+		const { resumed } = await forkThatLostItsArtifacts(tempDir, [0, 7]);
+		const forkFile = resumed.getSessionFile();
+		if (!forkFile) throw new Error("Expected a fork session file");
+		expect(resumed.reservedArtifactId()).toBe(7);
+		await resumed.close();
+
+		// A later process reads the promise out of the header rather than
+		// starting over at zero and answering for `artifact://0` with new output.
+		const reopened = await SessionManager.open(forkFile, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		try {
+			expect(reopened.reservedArtifactId()).toBe(7);
+			const allocated = await reopened.allocateArtifactPath("read");
+			expect(Number(allocated.id)).toBeGreaterThan(7);
+		} finally {
+			await reopened.close();
+		}
+	}, 30_000);
+
+	it("tells the model it is talking to that the artifacts are missing, not only the journal", async () => {
+		using tempDir = TempDir.createSync("@omp-shared-session-file-");
+		const { resumed } = await forkThatLostItsArtifacts(tempDir, [0]);
+		const authStorage = await AuthStorage.create(":memory:");
+		try {
+			authStorage.keys.setRuntime("anthropic", "test-key");
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected the bundled anthropic model");
+			const session = new AgentSession({
+				agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+				sessionManager: resumed,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry: new ModelRegistry(authStorage),
+			});
+			try {
+				// The copy has already settled, so the notice is one microtask
+				// behind the constructor.
+				await resumed.artifactsReproduced();
+				await Promise.resolve();
+				const live = session.agent.state.messages.filter(
+					message => message.role === "custom" && message.customType === SESSION_TRANSFER_MESSAGE_TYPE,
+				);
+				expect(JSON.stringify(live)).toContain("did not reach this fork");
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			authStorage.close();
+		}
+	}, 30_000);
+
+	it("never answers a public artifact read with another session's bytes while a copy is pending", async () => {
+		using tempDir = TempDir.createSync("@omp-shared-session-file-");
+		const original = await createSession(tempDir);
+		const artifacts = original.slice(0, -".jsonl".length);
+		fs.mkdirSync(artifacts, { recursive: true });
+		fs.writeFileSync(path.join(artifacts, "0.bash.log"), "ORIGINAL");
+		await appendTurnReferringToArtifact(original, tempDir, 0);
+		// A live, unrelated session holding its own artifact with the same id.
+		const unrelated = path.join(tempDir.path(), "unrelated-artifacts");
+		fs.mkdirSync(unrelated, { recursive: true });
+		fs.writeFileSync(path.join(unrelated, "0.read.log"), "UNRELATED ACTIVE SESSION");
+		const unregister = registerArtifactsDir(unrelated);
+
+		const { other: owner } = await OtherProcess.adopt(tempDir, original);
+		try {
+			const resumed = await adoptResumedSession(
+				await SessionManager.open(original, tempDir.path(), new FileSessionStorage(), {
+					suppressBreadcrumb: true,
+				}),
+				tempDir.path(),
+			);
+			try {
+				const handler = new ArtifactProtocolHandler();
+				const url = parseInternalUrl("artifact://0");
+				// The read waits for this session's own copy — as the artifact
+				// manager always has — and then answers with its own artifact.
+				const resource = await handler.resolve(url, {
+					localProtocolOptions: {
+						getArtifactsDir: () => resumed.getArtifactsDir(),
+						getSessionId: () => resumed.getSessionId(),
+					},
+				});
+				expect(resource.content).toBe("ORIGINAL");
+			} finally {
+				await resumed.close();
+			}
+		} finally {
+			unregister();
+			await owner.close();
+		}
+	}, 30_000);
+
+	it("does not let a subagent take an output name the inherited transcript already uses", async () => {
+		using tempDir = TempDir.createSync("@omp-shared-session-file-");
+		const original = await createSession(tempDir);
+		const artifacts = original.slice(0, -".jsonl".length);
+		fs.mkdirSync(artifacts, { recursive: true });
+		fs.writeFileSync(path.join(artifacts, "Worker.md"), "the inherited worker's result");
+
+		const { other: owner } = await OtherProcess.adopt(tempDir, original);
+		try {
+			const resumed = await adoptResumedSession(
+				await SessionManager.open(original, tempDir.path(), new FileSessionStorage(), {
+					suppressBreadcrumb: true,
+				}),
+				tempDir.path(),
+			);
+			try {
+				const outputs = new AgentOutputManager(() => resumed.getArtifactsDir());
+				// Allocated while the copy is still arriving: seeding from an
+				// empty directory would hand out `Worker` again, and the copy
+				// leaves a name the destination already has alone — so the
+				// inherited result would be the one lost.
+				const id = await outputs.allocate("Worker");
+				expect(id).not.toBe("Worker");
+				expect(fs.readFileSync(path.join(resumed.getArtifactsDir() as string, "Worker.md"), "utf8")).toBe(
+					"the inherited worker's result",
+				);
+			} finally {
+				await resumed.close();
 			}
 		} finally {
 			await owner.close();
@@ -844,6 +1023,7 @@ describe("SessionManager on a session file another omp process writes", () => {
 		const artifacts = requested.slice(0, -".jsonl".length);
 		fs.mkdirSync(artifacts, { recursive: true });
 		fs.writeFileSync(path.join(artifacts, "1.bash.log"), "this session's artifact");
+		await appendTurnReferringToArtifact(requested, tempDir, 1);
 
 		const manager = await SessionManager.open(requested, tempDir.path(), new FileSessionStorage(), {
 			suppressBreadcrumb: true,
@@ -880,6 +1060,7 @@ describe("SessionManager on a session file another omp process writes", () => {
 			source: requested,
 			sessionId: requestedId,
 			reservedThroughId: 1,
+			sourceChanged: true,
 		});
 		// The identifier the lost artifact carried is never handed out again, so
 		// a reference this transcript already makes cannot come to mean new output.

@@ -140,7 +140,8 @@ export class ArtifactManager {
 				// A missing source artifacts dir reserves nothing.
 			}
 		}
-		let maxId = this.#reservedThroughId?.() ?? -1;
+		const reserved = this.#reservedThroughId?.();
+		let maxId = reserved !== undefined && Number.isSafeInteger(reserved) ? reserved : -1;
 		for (const file of files) {
 			// Files are named: {id}.{toolType}.log
 			const match = file.match(/^(\d+)\..*\.log$/);
@@ -155,8 +156,15 @@ export class ArtifactManager {
 	/**
 	 * Atomically allocate next artifact ID.
 	 * IDs are sequential within the session.
+	 *
+	 * Refuses past the last identifier that counts exactly: beyond it every
+	 * allocation returns the same number, and two artifacts saved under one id
+	 * means the second silently replaces the first.
 	 */
 	allocateId(): number {
+		if (!Number.isSafeInteger(this.#nextId) || this.#nextId >= Number.MAX_SAFE_INTEGER) {
+			throw new Error(`Artifact identifiers are exhausted for this session (next would be ${this.#nextId})`);
+		}
 		return this.#nextId++;
 	}
 

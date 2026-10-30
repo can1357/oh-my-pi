@@ -476,7 +476,12 @@ import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
-import { noteResumedSessionFork } from "./session-transfer";
+import {
+	artifactsMissingNotice,
+	noteResumedSessionFork,
+	renderTransferNotice,
+	SESSION_TRANSFER_MESSAGE_TYPE,
+} from "./session-transfer";
 import { resolveOpenAIWebsocketPreference } from "./settings-stream-fn";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
@@ -1815,6 +1820,39 @@ export class AgentSession implements SettingsScope {
 		this.#recordWithoutTurn([card]);
 	}
 
+	/**
+	 * Put the "artifacts did not arrive" notice into the live conversation once
+	 * the fork's copy has settled, so the next provider request carries it.
+	 *
+	 * The journal entry is the resume guard's
+	 * ({@link noteResumedSessionFork}); this adds the same text to the message
+	 * array the agent is holding, which a transcript rebuilt later would
+	 * otherwise be the only place it appeared.
+	 */
+	#tellModelWhenArtifactsAreMissing(): void {
+		const forkedFrom = this.sessionManager.forkedFromSession?.();
+		if (!forkedFrom) return;
+		void (async () => {
+			try {
+				if (await this.sessionManager.artifactsReproduced()) return;
+				if (this.#isDisposed) return;
+				const details = artifactsMissingNotice(this.sessionManager, forkedFrom);
+				this.agent.appendMessage({
+					role: "custom",
+					customType: SESSION_TRANSFER_MESSAGE_TYPE,
+					content: renderTransferNotice(details),
+					display: true,
+					details,
+					timestamp: Date.now(),
+				});
+			} catch (error) {
+				logger.warn("Failed to tell the model its inherited artifacts are missing", {
+					error: toError(error).message,
+				});
+			}
+		})();
+	}
+
 	#resetInFlight(): void {
 		this.#inFlightEpoch++;
 		this.#promptInFlightCount = 0;
@@ -1994,6 +2032,12 @@ export class AgentSession implements SettingsScope {
 				initialEvalStateContext.timestamp,
 			);
 		}
+		// A resume that forked copies the previous session's artifacts in the
+		// background. If they never arrive, the conversation this session is
+		// actually holding has to be told — a journal entry appended after the
+		// message array was built is read by the next process, not by the model
+		// talking now.
+		this.#tellModelWhenArtifactsAreMissing();
 		const ircHost: IrcBridgeHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -13108,7 +13152,10 @@ export class AgentSession implements SettingsScope {
 			// resume guard in session-transfer.ts).
 			const { forkedFrom } = await this.sessionManager.setSessionFile(sessionPath, { forkIfContested: true });
 			this.#bash.markSessionTransition(bashTransition);
-			if (forkedFrom) await noteResumedSessionFork(this.sessionManager, forkedFrom);
+			if (forkedFrom) {
+				await noteResumedSessionFork(this.sessionManager, forkedFrom);
+				this.#tellModelWhenArtifactsAreMissing();
+			}
 			const newCwd = this.sessionManager.getCwd();
 			const recordedCwd = this.sessionManager.getRecordedCwd() ?? previousSessionState.cwd;
 			if (options?.preserveLocalCwd) {

@@ -1,7 +1,12 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { type ArtifactCopyOutcome, copySessionArtifacts } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import {
+	ARTIFACT_STAGING_SUFFIX as STAGING_SUFFIX,
+	type ArtifactCopyOutcome,
+	copySessionArtifacts,
+} from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { tryAcquireSessionLease } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 /** A session journal and the artifacts directory that sits beside it. */
@@ -41,9 +46,6 @@ describe("copying a session's artifacts to another session", () => {
 				{ name: "1.bash.log", bytes: 100 },
 			],
 		});
-		// The highest identifier the source held, which a fork that loses this
-		// copy still has to reserve.
-		expect(outcome.reservedThroughId).toBe(1);
 		expect(stagingLeftovers(tempDir.path())).toEqual([]);
 	});
 
@@ -169,9 +171,8 @@ describe("copying a session's artifacts to another session", () => {
 		expect(fs.readFileSync(path.join(destinationArtifacts, "0.read.log"), "utf8")).toBe(
 			"the destination session's own",
 		);
-		// And the identifiers the discarded artifacts carried are reported, so
-		// the session that lost them can refuse to hand them out again.
-		expect(outcome.reservedThroughId).toBe(2);
+		// And why, so the session that lost them can say something true about it.
+		expect(outcome.reason).toBe("source-changed");
 		expect(stagingLeftovers(tempDir.path())).toEqual([]);
 	});
 
@@ -192,10 +193,93 @@ describe("copying a session's artifacts to another session", () => {
 		const outcome = await copySessionArtifacts(`${sourceArtifacts}.jsonl`, `${destinationArtifacts}.jsonl`);
 
 		expect(outcome.discarded).toBe(true);
+		expect(outcome.reason).toBe("copy-failed");
 		expect(fs.readdirSync(destinationArtifacts)).toEqual(["0.read.log"]);
 		expect(fs.readFileSync(path.join(destinationArtifacts, "0.read.log"), "utf8")).toBe(
 			"the destination session's own",
 		);
+		expect(stagingLeftovers(tempDir.path())).toEqual([]);
+	});
+
+	it("leaves a directory that took its staging's name alone, and reports why it gave up", async () => {
+		using tempDir = TempDir.createSync("@omp-artifact-copy-");
+		const sourceArtifacts = path.join(tempDir.path(), SOURCE);
+		const destinationArtifacts = path.join(tempDir.path(), DESTINATION);
+		fs.mkdirSync(sourceArtifacts, { recursive: true });
+		fs.writeFileSync(path.join(sourceArtifacts, "1.bash.log"), "the copy's");
+
+		const outcome = await copySessionArtifacts(`${sourceArtifacts}.jsonl`, `${destinationArtifacts}.jsonl`, {
+			stillTheSource: async () => {
+				// Any process of this user can take a pathname. The staging
+				// directory is moved aside and an unrelated one put at its name:
+				// removing "the staging path" would destroy a stranger's file.
+				const staging = stagingLeftovers(tempDir.path())[0] as string;
+				fs.renameSync(path.join(tempDir.path(), staging), path.join(tempDir.path(), "parked"));
+				fs.mkdirSync(path.join(tempDir.path(), staging));
+				fs.writeFileSync(path.join(tempDir.path(), staging, "someone-elses.log"), "only copy");
+				return false;
+			},
+		});
+
+		expect(outcome.discarded).toBe(true);
+		expect(outcome.reason).toBe("source-changed");
+		const survivor = stagingLeftovers(tempDir.path())[0] as string;
+		expect(fs.readFileSync(path.join(tempDir.path(), survivor, "someone-elses.log"), "utf8")).toBe("only copy");
+	});
+
+	it("sweeps the staging of a copier that is gone, and leaves a live one alone", async () => {
+		using tempDir = TempDir.createSync("@omp-artifact-copy-");
+		const sourceArtifacts = path.join(tempDir.path(), SOURCE);
+		const destinationArtifacts = path.join(tempDir.path(), DESTINATION);
+		fs.mkdirSync(sourceArtifacts, { recursive: true });
+		fs.writeFileSync(path.join(sourceArtifacts, "1.bash.log"), "fresh");
+		// One left by a copier that was killed: nothing holds its lease.
+		const abandoned = `${destinationArtifacts}.abandoned${STAGING_SUFFIX}`;
+		fs.mkdirSync(abandoned, { recursive: true });
+		fs.writeFileSync(path.join(abandoned, "0.bash.log"), "never published");
+		// One a copier is still building in, which holds its lease.
+		const live = `${destinationArtifacts}.live${STAGING_SUFFIX}`;
+		fs.mkdirSync(live, { recursive: true });
+		const lease = tryAcquireSessionLease(`artifact-staging:${path.basename(live)}`);
+		expect(lease).not.toBeNull();
+
+		try {
+			await copySessionArtifacts(`${sourceArtifacts}.jsonl`, `${destinationArtifacts}.jsonl`);
+		} finally {
+			lease?.release();
+		}
+
+		expect(fs.existsSync(abandoned)).toBe(false);
+		expect(fs.existsSync(live)).toBe(true);
+		expect(fs.readFileSync(path.join(destinationArtifacts, "1.bash.log"), "utf8")).toBe("fresh");
+	});
+
+	it("publishes nothing for a source artifact that vanished while it was being read", async () => {
+		using tempDir = TempDir.createSync("@omp-artifact-copy-");
+		const sourceArtifacts = path.join(tempDir.path(), SOURCE);
+		const destinationArtifacts = path.join(tempDir.path(), DESTINATION);
+		fs.mkdirSync(sourceArtifacts, { recursive: true });
+		const vanishing = path.join(sourceArtifacts, "1.bash.log");
+		fs.writeFileSync(vanishing, "about to be reaped");
+		// Gone between the look and the read. An empty file published under its
+		// name would read as a tool that produced nothing, not as one whose
+		// output is missing.
+		const open = fs.promises.open;
+		const reapOnOpen = (async (target: fs.PathLike, flags?: string | number) => {
+			if (String(target).includes(STAGING_SUFFIX)) fs.rmSync(vanishing, { force: true });
+			return open(target, flags as string);
+		}) as typeof fs.promises.open;
+		const spy = spyOn(fs.promises, "open").mockImplementation(reapOnOpen);
+		let outcome: ArtifactCopyOutcome;
+		try {
+			outcome = await copySessionArtifacts(`${sourceArtifacts}.jsonl`, `${destinationArtifacts}.jsonl`);
+		} finally {
+			spy.mockRestore();
+		}
+
+		expect(outcome.discarded).toBe(true);
+		expect(outcome.reason).toBe("copy-failed");
+		expect(fs.existsSync(path.join(destinationArtifacts, "1.bash.log"))).toBe(false);
 		expect(stagingLeftovers(tempDir.path())).toEqual([]);
 	});
 

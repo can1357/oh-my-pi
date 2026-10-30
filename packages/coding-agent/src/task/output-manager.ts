@@ -11,6 +11,7 @@
  * collisions across repeated or nested task invocations.
  */
 import * as fs from "node:fs/promises";
+import { whenArtifactCopiesSettle } from "../session/session-manager";
 import { ADVISOR_TRANSCRIPT_STEM } from "../advisor/transcript-recorder";
 /** HUD expander click target reserved by the allocator so it cannot name a subagent. */
 export const PINNED_HUD_TOGGLE_ID = "@omp:toggle-pinned-hud";
@@ -29,10 +30,15 @@ export class AgentOutputManager {
 	readonly #taken = new Set<string>();
 	readonly #getArtifactsDir: () => string | null;
 	readonly #parentPrefix: string | undefined;
+	readonly #artifactsSettled: (() => Promise<void>) | undefined;
 
-	constructor(getArtifactsDir: () => string | null, options?: { parentPrefix?: string }) {
+	constructor(
+		getArtifactsDir: () => string | null,
+		options?: { parentPrefix?: string; artifactsSettled?: () => Promise<void> },
+	) {
 		this.#getArtifactsDir = getArtifactsDir;
 		this.#parentPrefix = options?.parentPrefix;
+		this.#artifactsSettled = options?.artifactsSettled;
 		// Reserve the advisor transcript stem: a subagent allocated this id would
 		// write `<id>.jsonl`, clobbering the advisor's `__advisor.jsonl` in the same
 		// artifacts dir. Reserving bumps such a request to `__advisor-2`.
@@ -54,8 +60,15 @@ export class AgentOutputManager {
 	}
 
 	async #seedFromDisk(): Promise<void> {
+		// A fork's inherited output arrives in the background. Seeding before it
+		// lands reads an empty directory, and the first subagent then takes a
+		// name the inherited transcript already refers to — and keeps it, since
+		// the copy leaves a name the destination already has alone.
+		await this.#artifactsSettled?.();
 		const dir = this.#getArtifactsDir();
 		if (!dir) return;
+		// Also by directory, for a caller that was handed one without a session.
+		await whenArtifactCopiesSettle(dir);
 
 		let files: string[];
 		try {
