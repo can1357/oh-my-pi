@@ -844,6 +844,12 @@ export async function archiveIsPrefixOfLive(archiveFile: string, sessionPath: st
  * examined rather than about whatever the name points at by then — so the
  * gzip stream is read from the caller's descriptor, positionally, not
  * reopened by path.
+ *
+ * It is otherwise the same question {@link archiveIsPrefixOfLive} answers,
+ * record-aware fallback included. Binding the read to a descriptor while
+ * dropping that fallback is how an ordinary migrated session — a version 1
+ * or 2 transcript the writer brought forward, or a legacy layout — stopped
+ * being re-archivable with nothing competing with it at all.
  */
 export async function archivedHandleIsPrefixOfLive(archived: fs.FileHandle, livePath: string): Promise<boolean> {
 	const live = await fs.open(livePath, "r");
@@ -851,6 +857,10 @@ export async function archivedHandleIsPrefixOfLive(archived: fs.FileHandle, live
 		let holds = false;
 		await pipeline(bytesOfHandle(archived), createGunzip(), async (source: NodeJS.ReadableStream) => {
 			holds = await sourceIsPrefixOfDestination(source as AsyncIterable<Uint8Array>, live, true);
+		});
+		if (holds) return true;
+		await pipeline(bytesOfHandle(archived), createGunzip(), async (source: NodeJS.ReadableStream) => {
+			holds = await recordsAreCarried(linesOf(source as AsyncIterable<Uint8Array>), linesOfHandle(live));
 		});
 		return holds;
 	} catch {
@@ -1161,6 +1171,28 @@ export async function restoreArchivedSession(archiveFile: string, agentDir?: str
 }
 
 /**
+ * Whether the live session already holds everything its retained archive
+ * does, so opening it needs no restore.
+ *
+ * A restore keeps its archive, so most sessions with an archive beside them
+ * are complete; only one interrupted between the transcript and its tree is
+ * not. Asking before taking any lease is what keeps an ordinary open of a
+ * complete session — a fork, a render — from needing ownership it has no
+ * reason to want.
+ */
+async function liveSessionIsComplete(sessionFile: string, archiveFile: string): Promise<boolean> {
+	const archiveArtifacts = archiveFile.slice(0, -ARCHIVED_SESSION_SUFFIX.length);
+	const liveArtifacts = sessionFile.slice(0, -SESSION_SUFFIX.length);
+	if (!(await statIfPresent(archiveArtifacts))) return true;
+	try {
+		await assertLiveTreeHoldsArchive(archiveArtifacts, liveArtifacts, await fs.realpath(archiveArtifacts));
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
  * The live `.jsonl` path of a session file, bringing it out of the archive
  * first when that is where it lives. Everything that reads a session as an
  * ordinary file — the writer, a fork and its artifact copy, `omp render`,
@@ -1190,6 +1222,14 @@ export async function materializeSessionFile(sessionFile: string, agentDir?: str
 		if (candidate !== undefined && (await statIfPresent(candidate))) archived = candidate;
 	}
 	if (archived === undefined) return sessionFile;
+	if (!isArchivedSessionPath(sessionFile) && (await liveSessionIsComplete(sessionFile, archived))) {
+		// The archive is only being retained: the live session already holds
+		// everything it does. There is nothing to finish, so this must not take
+		// the session's leases — doing so made an ordinary fork of a session
+		// the caller already owns fail with "a running process owns this
+		// session" once an archive existed beside it.
+		return sessionFile;
+	}
 	const restored = await restoreArchivedSession(archived, agentDir);
 	if (restored.notRestored.length > 0) {
 		const stem = path.basename(restored.sessionPath, SESSION_SUFFIX);

@@ -1214,28 +1214,28 @@ async function publishArtifactIntoArchive(
 	state: ArchiveCopyState,
 ): Promise<void> {
 	const tempPath = sessionStagingPath(destination);
+	// Staged exclusively, then held open until the entry is published. Both
+	// halves matter. `COPYFILE_EXCL` makes the creation this run's own; the
+	// descriptor is what makes the identity mean anything afterwards, because
+	// closing it and reopening by name lets the filesystem hand the same inode
+	// number back out to a replacement, and a stat that then matches is
+	// matching a different file. While it is open the inode cannot be reused.
+	//
+	// The window the exclusive create cannot cover — a replacement between it
+	// and the open — is closed by reading the descriptor rather than trusting
+	// it: a file that is not this source's bytes is refused, whatever its
+	// inode says.
+	await fs.rm(tempPath, { force: true });
+	await fs.copyFile(source, tempPath, fsConstants.COPYFILE_EXCL);
+	const stagedHandle = await fs.open(tempPath, "r");
 	try {
-		// A killed run can leave this name linked to the file it published, and
-		// `copyFile` onto it would truncate that archived file before anything
-		// looked at it. Dropping the name first leaves the archive's own name
-		// on the data.
-		await fs.rm(tempPath, { force: true });
-		// `COPYFILE_EXCL`, so the file this run stages is one it created: the
-		// copy fails rather than writing into something that appeared at the
-		// name. The identity then comes from a descriptor on that file, not
-		// from stating the name afterwards, and it is confirmed again before
-		// anything is published — so a temp replaced in between is refused
-		// rather than adopted as this run's creation and deleted by a later
-		// rollback.
-		await fs.copyFile(source, tempPath, fsConstants.COPYFILE_EXCL);
-		const stagedHandle = await fs.open(tempPath, "r");
 		const staged = await stagedHandle.stat();
-		await stagedHandle.close();
+		const stagedChanged = `${tempPath} was replaced while ${source} was being archived; run \`omp gc --archive\` again`;
+		if (!(await archivedHandleIsHeldBy(stagedHandle, staged, source))) throw new Error(stagedChanged);
 		const stagedIsOurs = async (): Promise<boolean> => {
 			const standing = await fs.lstat(tempPath).catch(() => undefined);
 			return standing?.dev === staged.dev && standing.ino === staged.ino;
 		};
-		const stagedChanged = `${tempPath} was replaced while ${source} was being archived; run \`omp gc --archive\` again`;
 		const archived = await fs.open(destination, "r").catch(error => {
 			if (codeOf(error) === "ENOENT") return undefined;
 			throw error;
@@ -1294,6 +1294,7 @@ async function publishArtifactIntoArchive(
 		}
 		return;
 	} finally {
+		await stagedHandle.close();
 		await fs.rm(tempPath, { force: true });
 	}
 }
