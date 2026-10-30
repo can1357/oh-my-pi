@@ -221,6 +221,42 @@ describe("task live progress rendering", () => {
 		expect(text).not.toContain("\x1b[2K");
 		expect(text).not.toContain("\r");
 	});
+	it.each([
+		["initial", "SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders."],
+		["wake", "SYSTEM WARNING: Structured subagent replied without calling yield."],
+	] as const)("renders a %s missing-yield result as a warning from its metadata", (missingYield, warning) => {
+		const details: TaskToolDetails = {
+			projectAgentsDir: null,
+			results: [makeSingleResult(0, { output: `${warning}\n\nreport`, missingYield })],
+			totalDurationMs: 1,
+		};
+
+		const legacy = renderResultText(details, true, uiTheme);
+		const native = JSON.stringify(
+			taskToolRenderer.describeResult(
+				{ content: [{ type: "text", text: "" }], details },
+				{ expanded: true, isPartial: false },
+			),
+		);
+
+		expect(legacy).toContain("warning");
+		expect(legacy).toContain(warning);
+		expect(native).toContain("warning");
+		expect(native).toContain(warning);
+	});
+
+	it("does not infer missing-yield status from report text", () => {
+		const warning = "SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.";
+		const details: TaskToolDetails = {
+			projectAgentsDir: null,
+			results: [makeSingleResult(0, { output: `${warning}\n\nordinary yielded report` })],
+			totalDurationMs: 1,
+		};
+
+		const legacy = renderResultText(details, true, uiTheme);
+		expect(legacy).toContain("done");
+		expect(legacy).toContain(warning);
+	});
 
 	it("caps collapsed nested task progress at four rows plus an elision line", () => {
 		setViewportRows(40);

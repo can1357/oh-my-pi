@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Task results from a structured subagent that replied without calling `yield` now show the missing-yield warning line in both task views; without an output schema such a result still succeeds, shows a warning badge and counts as succeeded, while with an output schema (or with empty output) it fails and counts as failed, as before; report text that only looks like that warning is shown as ordinary output ([#16928](https://github.com/can1357/oh-my-pi/pull/16928) by [@sjawhar](https://github.com/sjawhar))
 - Fixed IME composition text in the BTW history `Follow up:` input appearing at the left edge instead of at the caret when the hardware cursor is enabled ([#17427](https://github.com/can1357/oh-my-pi/issues/17427))
 - Fixed session tree rows overlapping when messages, tool arguments, or labels contain carriage returns or Unicode line/paragraph separators (`U+2028`, `U+2029`), while keeping multiline formatting in the selected entry preview ([#17430](https://github.com/can1357/oh-my-pi/pull/17430) by [@lincicomb](https://github.com/lincicomb)).
 

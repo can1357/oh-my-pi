@@ -4,7 +4,10 @@ import { AgentLink, Badge, Note, Output, ResultText, Row } from "../parts";
 import type { ToolRenderer, ToolRenderHost, ToolRenderProps } from "../types";
 import { detailsRecord, isRecord, normalizeWs, num, str, truncate } from "../util";
 
-const MISSING_YIELD_PREFIX = "SYSTEM WARNING: Subagent exited without calling yield tool";
+const MISSING_YIELD_WARNINGS = {
+	initial: "SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.",
+	wake: "SYSTEM WARNING: Structured subagent replied without calling yield.",
+} as const;
 
 /** One spawned unit of work, normalized across the batch and flat/legacy arg shapes. */
 interface TaskItemView {
@@ -58,7 +61,9 @@ function fmtCount(n: number): string {
 function resultStatus(res: Record<string, unknown>): { label: string; tone: "ok" | "err" | "warn" } {
 	if (res.aborted === true) return { label: "aborted", tone: "err" };
 	if (num(res.exitCode) === 0) {
-		return str(res.error) ? { label: "merge failed", tone: "warn" } : { label: "done", tone: "ok" };
+		if (str(res.error)) return { label: "merge failed", tone: "warn" };
+		if (res.missingYield === "initial" || res.missingYield === "wake") return { label: "warning", tone: "warn" };
+		return { label: "done", tone: "ok" };
 	}
 	return { label: "failed", tone: "err" };
 }
@@ -94,15 +99,12 @@ function AgentResult({ res, host }: { res: Record<string, unknown>; host?: ToolR
 	const model = str(res.resolvedModel);
 	if (model) stats.push(model);
 
-	// The runtime prepends a one-line warning when a subagent never called
-	// yield; lift it out of the output preview like the TUI does.
+	const missingYield = res.missingYield === "initial" || res.missingYield === "wake" ? res.missingYield : undefined;
+	const warning = missingYield ? MISSING_YIELD_WARNINGS[missingYield] : null;
 	let output = str(res.output) ?? "";
-	let warning: string | null = null;
-	const nl = output.indexOf("\n");
-	const firstLine = (nl === -1 ? output : output.slice(0, nl)).trim();
-	if (firstLine.startsWith(MISSING_YIELD_PREFIX)) {
-		warning = firstLine;
-		output = nl === -1 ? "" : output.slice(nl + 1).replace(/^\s*\n+/, "");
+	if (warning) {
+		const prefix = `${warning}\n\n`;
+		if (output.startsWith(prefix)) output = output.slice(prefix.length);
 	}
 	const error = str(res.error);
 	const aborted = res.aborted === true;
@@ -185,11 +187,14 @@ function Body({ args, result, host }: ToolRenderProps): ReactNode {
 		let aborted = 0;
 		let failed = 0;
 		for (const res of results) {
-			const { label } = resultStatus(res);
-			if (label === "done") ok++;
-			else if (label === "merge failed") mergeFailed++;
-			else if (label === "aborted") aborted++;
-			else failed++;
+			if (res.aborted === true) {
+				aborted++;
+			} else if (num(res.exitCode) === 0) {
+				if (str(res.error)) mergeFailed++;
+				else ok++;
+			} else {
+				failed++;
+			}
 		}
 		const total = details ? num(details.totalDurationMs) : null;
 		footer = (
