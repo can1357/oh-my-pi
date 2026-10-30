@@ -124,6 +124,24 @@ describe("resolveOpenAIRequestSetup User-Agent", () => {
 	});
 });
 
+test("per-call headers replace differently cased model headers on the wire", async () => {
+	const model = openaiCompletionsModel();
+	model.headers = { "X-Client-Identity": "model-client" };
+	let clientIdentity: string | null = null;
+	const fetch: FetchImpl = async (_input, init) => {
+		clientIdentity = new Headers(init?.headers).get("x-client-identity");
+		return createChatSse();
+	};
+	for await (const _event of streamOpenAICompletions(model, context, {
+		apiKey: "sk-test",
+		headers: { "x-client-identity": "request-client" },
+		fetch,
+	})) {
+		// Consume the stream so the provider dispatches the request.
+	}
+	expect(clientIdentity).toBe("request-client");
+});
+
 describe("xAI stream User-Agent", () => {
 	test("xAI Responses POST sends omp User-Agent", async () => {
 		const captured = await captureStreamHeaders(
