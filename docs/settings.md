@@ -902,6 +902,8 @@ The `path` segment abbreviates the home directory to `~`. On Windows, shared pat
 
 The `pi` segment tags the brand with the active named profile (`π-work`; see [Profiles](config-usage.md#profiles)). Set `statusLine.segmentOptions.pi.showProfile: false` to hide the tag.
 
+The `usage` segment shows each subscription quota window as a label, the used percent, and the time until reset, for example `5h 24% (4h 47m)`. Set `statusLine.segmentOptions.usage.showLabel`, `showPercent`, or `showReset` to `false` to hide that part, and set `statusLine.segmentOptions.usage.compact: true` to join the parts without spaces or parentheses (`5h24%4h47m`). A window with every part hidden is omitted. Set `statusLine.segmentOptions.usage.showResetCredits: false` to hide the saved-reset badge (`✦ 2 exp 12d 5h`); `omp usage` still lists saved resets. These options do not change the plan tier.
+
 The `cost` segment shows recorded session costs. For an active provider/model with scheduled pricing, it appends `↑` during peak hours or `↓` off-peak, refreshing at boundaries even while idle. The arrow reflects the current tariff, not past spending; flat-price models and explicit cost overrides have no arrow. See [usage costs and time-based pricing](models.md#usage-costs-and-time-based-pricing) for the UTC schedule and estimation semantics.
 
 ### Interaction

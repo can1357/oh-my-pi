@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `statusLine.segmentOptions.usage` with `showLabel`, `showPercent`, and `showReset` toggles, a `compact` option that renders quota windows as `5h24%4h47m` instead of `5h 24% (4h 47m)`, and `showResetCredits: false` to hide the saved-reset badge ([#14304](https://github.com/can1357/oh-my-pi/pull/14304) by [@iddqdld](https://github.com/iddqdld)).
 - Added a `maxRows` callback to `FigureMarkdown`, `SvgFigure` and `TableChartFigure` so surfaces shorter than the screen can fit their figures; zero hides a figure without delaying transcript completion ([#15661](https://github.com/can1357/oh-my-pi/issues/15661), [#15853](https://github.com/can1357/oh-my-pi/pull/15853) by [@KunoLu](https://github.com/KunoLu))
 
 ### Fixed

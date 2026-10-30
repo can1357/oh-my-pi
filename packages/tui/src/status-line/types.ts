@@ -41,6 +41,38 @@ export interface StatusLineSegmentOptions {
 	path?: { abbreviate?: boolean; maxLength?: number; stripWorkPrefix?: boolean };
 	git?: { showBranch?: boolean; showStaged?: boolean; showUnstaged?: boolean; showUntracked?: boolean };
 	time?: { format?: "12h" | "24h"; showSeconds?: boolean };
+	usage?: UsageSegmentOptions;
+}
+
+/**
+ * Parts of the `usage` segment; each part shows unless set to `false`.
+ * `showLabel`, `showPercent`, and `showReset` act on every quota window, and
+ * `compact` joins a window's parts without spaces or parentheses.
+ * `showResetCredits` hides the saved-reset badge.
+ */
+export interface UsageSegmentOptions {
+	showLabel?: boolean;
+	showPercent?: boolean;
+	showReset?: boolean;
+	compact?: boolean;
+	showResetCredits?: boolean;
+}
+
+/** Subscription quota snapshot rendered by the `usage` segment. */
+export interface StatusLineUsage {
+	tier?: string;
+	fiveHour?: { percent: number; resetMinutes?: number };
+	daily?: { percent: number; resetMinutes?: number };
+	sevenDay?: { percent: number; resetHours?: number };
+	monthly?: { percent: number; resetHours?: number };
+	resetCredits?: {
+		bankedCount: number;
+		redeemableCount: number;
+		expiryHours?: number;
+		expired?: boolean;
+		unavailableReason?: string;
+		expiring?: StatusResetExpiry;
+	};
 }
 
 export interface StatusLineSettings {
@@ -191,21 +223,7 @@ export interface SegmentContext {
 	 * the worktree/branch is already shown by the git segment.
 	 */
 	worktree: { projectName: string; worktreeName: string } | null;
-	usage: {
-		tier?: string;
-		fiveHour?: { percent: number; resetMinutes?: number };
-		daily?: { percent: number; resetMinutes?: number };
-		sevenDay?: { percent: number; resetHours?: number };
-		monthly?: { percent: number; resetHours?: number };
-		resetCredits?: {
-			bankedCount: number;
-			redeemableCount: number;
-			expiryHours?: number;
-			expired?: boolean;
-			unavailableReason?: string;
-			expiring?: StatusResetExpiry;
-		};
-	} | null;
+	usage: StatusLineUsage | null;
 }
 
 /** How close an account's saved resets are to expiring, when it is worth a warning. */
