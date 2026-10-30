@@ -148,6 +148,7 @@ export async function classifyDifficulty(
 	input: DifficultyInput,
 	deps: ClassifyDifficultyDeps,
 ): Promise<Effort | undefined> {
+	// model-request: caller classifyDifficulty — the judge carries `deps.signal`, the caller's cancellation.
 	const judge = resolveJudge({
 		settings: deps.settings,
 		registry: deps.registry,

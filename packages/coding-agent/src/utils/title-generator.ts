@@ -223,6 +223,7 @@ export async function generateSessionTitle(
 
 	const titleSystemPrompt = customSystemPrompt?.trim() || undefined;
 	if (firstModel.api !== "local-inference") {
+		// model-request: caller generateSessionTitle — the `signal` its caller passes.
 		return generateTitleOnlineWithModels(
 			firstMessage,
 			models,
@@ -288,6 +289,7 @@ export async function generateTitleOnline(
 		logger.warn("title-generator: no title model found", { titleSessionId: sessionId, reason: "no-title-model" });
 		return null;
 	}
+	// model-request: caller generateTitleOnline — the `signal` its caller passes.
 	return generateTitleOnlineWithModels(
 		firstMessage,
 		models,
@@ -371,6 +373,7 @@ async function generateTitleOnlineWithModels(
 			const messages: Message[] = [{ role: "user", content: userMessage, timestamp: Date.now() }];
 			if (model.supportsAssistantPrefill) messages.push(titlePrefill(model));
 
+			// model-request: caller generateTitleOnlineWithModels — the `signal` its caller passes.
 			const response = await retryTransientCompletion(
 				() =>
 					completeSimple(

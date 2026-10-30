@@ -513,22 +513,26 @@ export class HindsightApi {
 	}
 
 	/** Trigger an out-of-band refresh of a mental model. Returns the operation handle. */
-	async refreshMentalModel(bankId: string, mentalModelId: string): Promise<RefreshMentalModelResponse> {
+	async refreshMentalModel(
+		bankId: string,
+		mentalModelId: string,
+		options?: HindsightRequestOptions,
+	): Promise<RefreshMentalModelResponse> {
 		return this.#request<RefreshMentalModelResponse>(
 			"POST",
 			`/v1/default/banks/${encodeURIComponent(bankId)}/mental-models/${encodeURIComponent(mentalModelId)}/refresh`,
 			"refreshMentalModel",
-			{},
+			{ signal: options?.signal },
 		);
 	}
 
 	/** Delete a mental model. Returns `true` on success, `false` if it was already gone (404). */
-	async deleteMentalModel(bankId: string, mentalModelId: string): Promise<boolean> {
+	async deleteMentalModel(bankId: string, mentalModelId: string, options?: HindsightRequestOptions): Promise<boolean> {
 		const result = await this.#request<{ __deleted: boolean } | null>(
 			"DELETE",
 			`/v1/default/banks/${encodeURIComponent(bankId)}/mental-models/${encodeURIComponent(mentalModelId)}`,
 			"deleteMentalModel",
-			{ allow404: true },
+			{ allow404: true, signal: options?.signal },
 		);
 		return result !== null;
 	}
@@ -538,12 +542,16 @@ export class HindsightApi {
 	 * content snapshot BEFORE that change; the current content is read via
 	 * `getMentalModel`. Most-recent first.
 	 */
-	async getMentalModelHistory(bankId: string, mentalModelId: string): Promise<MentalModelHistoryEntry[]> {
+	async getMentalModelHistory(
+		bankId: string,
+		mentalModelId: string,
+		options?: HindsightRequestOptions,
+	): Promise<MentalModelHistoryEntry[]> {
 		const response = await this.#request<MentalModelHistoryEntry[] | { items?: MentalModelHistoryEntry[] }>(
 			"GET",
 			`/v1/default/banks/${encodeURIComponent(bankId)}/mental-models/${encodeURIComponent(mentalModelId)}/history`,
 			"getMentalModelHistory",
-			{},
+			{ signal: options?.signal },
 		);
 		if (Array.isArray(response)) return response;
 		return response.items ?? [];

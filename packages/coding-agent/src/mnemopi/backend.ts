@@ -631,6 +631,9 @@ async function resolveMnemopiProviderOptions(
 					}
 					// `auto` has no per-request classifier here, so it sends no effort, like an omitted suffix.
 					const level = concreteThinkingLevel(thinkingLevel);
+					// model-request: outlives-disposal — Mnemopi's completion function: the library extracts memories after
+					// turns and consolidates them, and the session's dispose() flushes and consolidates on purpose (bounded
+					// by mnemopiConsolidateTimeoutMs) so what the closing session learned is stored.
 					const message = await retryTransientCompletion(
 						() =>
 							withLoopPhase("mnemopi.extract", () =>

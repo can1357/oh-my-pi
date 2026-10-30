@@ -617,6 +617,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		const modelRegistry = this.session.modelRegistry;
 		if (modelRegistry && shouldDescribeImagesForTextModel(model, this.session.settings)) {
 			try {
+				// model-request: turn — the ask tool call's signal.
 				descriptions = await describeAttachedImagesForTextModel(
 					images,
 					{

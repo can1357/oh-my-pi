@@ -45,6 +45,20 @@ const DEFAULT_MAX_RUNNING_JOBS = 15;
 /** Abort reason used only when the owning session shuts down the entire manager. */
 export const ASYNC_JOB_MANAGER_SHUTDOWN_REASON = Symbol("AsyncJobManager shutdown");
 
+/**
+ * {@link AsyncJobRegisterOptions.survivesBeginDispose} for a job that runs a subagent the agent
+ * lifecycle tracks: a task, an eval `agent()`, a workpool worker or the pool over them, a restored
+ * or IRC-woken turn, a vibe worker. The subagent is a session of its own, and how it ends when its
+ * owner closes is a choice the owner's `dispose()` and the lifecycle make: parked for revival on a
+ * process shutdown (the {@link ASYNC_JOB_MANAGER_SHUTDOWN_REASON} it is cancelled with), detached by
+ * a vibe suspension, which marks its workers suspended before it cancels them. Cancelled when the
+ * owner merely began disposing, the job would end before that choice, and a suspended vibe worker
+ * would be tombstoned. So the subagent keeps running, and reaching the provider, until that teardown
+ * cancels it.
+ */
+export const SUBAGENT_TEARDOWN_DECIDES =
+	"runs a lifecycle-tracked subagent, which its owner's dispose() and the agent lifecycle end";
+
 /** Kind of work a managed job runs; drives job-row badges and delivery labels. */
 export type AsyncJobType = "bash" | "task" | "eval";
 
@@ -148,6 +162,8 @@ export interface AsyncJob {
 	 * outlive the job row it was kept alive for.
 	 */
 	retainedArtifactsCleanup?: () => Promise<void>;
+	/** Why the job keeps running once its owner begins disposing; see {@link AsyncJobRegisterOptions.survivesBeginDispose}. */
+	survivesBeginDispose?: string;
 }
 
 /**
@@ -263,6 +279,14 @@ export interface AsyncJobRegisterOptions {
 	process?: AsyncJobProcess;
 	/** See {@link AsyncJob.widgetInputs}. */
 	widgetInputs?: JobWidgetInputs;
+	/**
+	 * Why this job keeps running once its owner's session begins disposing. Omitted, as for most
+	 * jobs, a background job stops then (see {@link AsyncJobManager.bindOwnerDisposal}): no turn
+	 * awaits it any more, so whatever model work it does would otherwise reach the provider from a
+	 * closing session. Set it only for work whose end the owner's own teardown decides, and say why
+	 * (e.g. {@link SUBAGENT_TEARDOWN_DECIDES}).
+	 */
+	survivesBeginDispose?: string;
 }
 
 /**
@@ -303,6 +327,8 @@ export class AsyncJobManager {
 	readonly #releasedForegroundJobs = new Set<string>();
 	#nextAutoId = 1;
 	readonly #deliverySinks = new Map<string, AsyncJobDeliverySink>();
+	/** Each owner's disposal signal, bound by its session; see {@link bindOwnerDisposal}. */
+	readonly #ownerDisposals = new Map<string, AbortSignal>();
 	readonly #onJobComplete: AsyncJobManagerOptions["onJobComplete"];
 	readonly #maxRunningJobsOption: AsyncJobManagerOptions["maxRunningJobs"];
 	readonly #retentionMs: number;
@@ -424,7 +450,14 @@ export class AsyncJobManager {
 			widgetInputs: options?.widgetInputs,
 			queued: options?.queued === true,
 			...(options?.foreground ? { foreground: true } : {}),
+			...(options?.survivesBeginDispose === undefined ? {} : { survivesBeginDispose: options.survivesBeginDispose }),
 		};
+		// An owner that has begun disposing starts no background work: the job runs already
+		// cancelled, so its body sees an aborted signal from its first line.
+		if (this.#detachedFromDisposingOwner(job)) {
+			job.status = "cancelled";
+			abortController.abort();
+		}
 
 		const reportProgress = async (text: string, details?: AsyncJobDetails): Promise<void> => {
 			job.progressText = text;
@@ -584,6 +617,8 @@ export class AsyncJobManager {
 		if (!job) return false;
 		if (!job.foreground) return true;
 		job.foreground = undefined;
+		// No call awaits it any more; for an owner that has begun disposing, it stops here.
+		if (this.#detachedFromDisposingOwner(job)) this.cancel(jobId);
 		this.#suppressedDeliveries.delete(jobId);
 		if (job.status === "completed" || job.status === "failed") {
 			this.#enqueueDelivery(jobId, job.status === "completed" ? (job.resultText ?? "") : (job.errorText ?? ""));
@@ -692,6 +727,43 @@ export class AsyncJobManager {
 	/** True once a result was auto-delivered or recovered by a foreground snapshot. */
 	isJobResultConsumed(jobId: string): boolean {
 		return this.#consumedJobResults.has(jobId);
+	}
+
+	/**
+	 * Tie `ownerId`'s background jobs to `signal`, the disposal of the session that owns them. When
+	 * it aborts, every background job of the owner is cancelled, and so is one the owner backgrounds
+	 * or registers afterwards, except those registered with
+	 * {@link AsyncJobRegisterOptions.survivesBeginDispose}. A foreground-backed job belongs to the
+	 * call (and so the turn) awaiting it, and stops only if it is backgrounded.
+	 *
+	 * Last binding wins for an owner id; the returned unbind clears it only while it is still
+	 * `signal`'s, so a revived session's binding survives its predecessor's late cleanup.
+	 */
+	bindOwnerDisposal(ownerId: string, signal: AbortSignal): () => void {
+		this.#ownerDisposals.set(ownerId, signal);
+		const onAbort = (): void => {
+			if (this.#ownerDisposals.get(ownerId) !== signal) return;
+			for (const job of this.#jobs.values()) {
+				if (job.ownerId === ownerId && this.#detachedFromDisposingOwner(job)) this.cancel(job.id);
+			}
+		};
+		if (signal.aborted) onAbort();
+		else signal.addEventListener("abort", onAbort, { once: true });
+		return () => {
+			signal.removeEventListener("abort", onAbort);
+			if (this.#ownerDisposals.get(ownerId) === signal) this.#ownerDisposals.delete(ownerId);
+		};
+	}
+
+	/** Whether `job` is running background work of an owner whose session has begun disposing. */
+	#detachedFromDisposingOwner(job: AsyncJob): boolean {
+		return (
+			job.status === "running" &&
+			!job.foreground &&
+			job.survivesBeginDispose === undefined &&
+			job.ownerId !== undefined &&
+			this.#ownerDisposals.get(job.ownerId)?.aborted === true
+		);
 	}
 
 	/**

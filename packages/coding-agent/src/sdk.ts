@@ -2186,6 +2186,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// build). Effective for endpoints known before any request (official
 		// Anthropic); others warm once a request has revealed their real origin.
 		// Every mode benefits (interactive, print, rpc, acp).
+		// model-request: outlives-disposal — a credential-less HEAD that warms the pooled connection while the session is
+		// set up: no model request, nothing billed, throttled per origin and bounded by a 10-second timeout.
 		void prewarmModelConnection(model);
 		// Usage-aware credential selection may need a cold remote usage report.
 		// Start only that metadata read while tools/extensions/context are loading;
@@ -2960,6 +2962,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						// model: any value derived from the earlier fallback model's
 						// `thinking.defaultLevel` must not become sticky.
 						adoptThinkingForModel(restoredModel);
+						// model-request: outlives-disposal — a credential-less HEAD that warms the pooled connection: no model
+						// request, nothing billed, throttled per origin and bounded by a 10-second timeout.
 						void prewarmModelConnection(restoredModel);
 						return true;
 					}
@@ -3295,6 +3299,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					);
 					modelFallbackMessage = `Fallback: ${usageFallbackReason.from} -> ${target}\n${usageFallbackReason.reason}`;
 				}
+				// model-request: outlives-disposal — a credential-less HEAD that warms the pooled connection: no model
+				// request, nothing billed, throttled per origin and bounded by a 10-second timeout.
 				void prewarmModelConnection(selectedModel);
 				break;
 			}
@@ -3344,6 +3350,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// `pickInitialThinkingLevel` closes over `defaultRoleSpec`,
 				// so the role's explicit selector (e.g. `:max`) now applies.
 				adoptThinkingForModel(resolvedDefaultModel);
+				// model-request: outlives-disposal — a credential-less HEAD that warms the pooled connection: no model
+				// request, nothing billed, throttled per origin and bounded by a 10-second timeout.
 				void prewarmModelConnection(resolvedDefaultModel);
 				return true;
 			};
@@ -3418,6 +3426,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						restoredSessionThinkingLevel = retryFallback.originalThinkingLevel;
 					}
 					adoptThinkingForModel(resolved.model);
+					// model-request: outlives-disposal — a credential-less HEAD that warms the pooled connection: no model
+					// request, nothing billed, throttled per origin and bounded by a 10-second timeout.
 					void prewarmModelConnection(resolved.model);
 					return true;
 				}
@@ -4009,10 +4019,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// its own telemetry handle, so its usage stays out of the run summary.
 			// The first requests can start before `agent` is constructed; they use
 			// the telemetry config and session id the agent is constructed with.
-			compress: createSkillDescriptionCompressor(modelRegistry, settings, undefined, () =>
-				agent
-					? resolveTelemetry(agent.telemetry, agent.sessionId)
-					: resolveTelemetry(options.telemetry, providerSessionId),
+			// model-request: session — the session's disposal signal once it exists (none exists while the first
+			// compressions run during setup), joined to each request's 30-second deadline.
+			compress: createSkillDescriptionCompressor(
+				modelRegistry,
+				settings,
+				undefined,
+				() =>
+					agent
+						? resolveTelemetry(agent.telemetry, agent.sessionId)
+						: resolveTelemetry(options.telemetry, providerSessionId),
+				() => session?.disposeSignal,
 			),
 		});
 		// Instructions from MCP servers the host connects outside `mcpManager`
@@ -4633,6 +4650,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// toggles; per-turn coordinator close never touches it.
 		const speculativeToolExecution = createSpeculativeToolExecutionConfig(settings, toolSession, extensionRunner);
 
+		// model-request: session — the session's own agent: its turns are the prompts the session admits, and `dispose()`
+		// aborts it.
 		agent = new Agent({
 			initialState: {
 				systemPrompt,
@@ -5405,6 +5424,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						// Load the transport only for an actual Codex prewarm, not unrelated session setup.
 						const { prewarmOpenAICodexResponses } =
 							await import("@oh-my-pi/pi-ai/providers/openai-codex-responses");
+						// model-request: session — the prewarm's own controller, which a session disposer aborts in `beginDispose()`.
 						await logger.time("prewarmOpenAICodexResponses", prewarmOpenAICodexResponses, codexModel, {
 							apiKey: codexPrewarmApiKey,
 							sessionId: providerSessionId,
@@ -5527,6 +5547,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const captureSessionId = captureOptions.sessionId;
 				if (!captureModel || !captureSessionId) throw new Error("Auto-learn capture identity is incomplete");
 				const captureDateCwdReminder = new DateCwdReminderInjector();
+				// model-request: session — an auto-learn capture agent, which `beginDispose()` aborts
+				// (`#abortAutolearnCapture`).
 				return new Agent({
 					...captureOptions,
 					cwd: sessionManager.getCwd(),

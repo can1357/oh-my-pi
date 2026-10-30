@@ -127,6 +127,7 @@ export async function classifyAutoPrewalk(
 	deps: ClassifyAutoPrewalkDeps,
 ): Promise<AutoPrewalkDecision | undefined> {
 	if (isLowSignalTitleInput(input.request) || !hasNativeJudge(deps.settings, deps.registry)) return undefined;
+	// model-request: caller classifyAutoPrewalk — the judge carries `deps.signal`, the caller's cancellation.
 	const judge = resolveJudge({
 		settings: deps.settings,
 		registry: deps.registry,

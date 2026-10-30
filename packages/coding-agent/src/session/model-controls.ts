@@ -653,6 +653,7 @@ export class ModelControls {
 				parentId: this.#host.sessionManager.getLeafId(),
 			};
 			try {
+				// model-request: session — the classifier's timeout joined to the session's disposal signal.
 				resolved = await classifyDifficulty(
 					{ request: promptText, solutionSpace },
 					{

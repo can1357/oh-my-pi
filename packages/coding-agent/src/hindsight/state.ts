@@ -159,7 +159,9 @@ export class HindsightRetainQueue {
 		}
 
 		try {
-			await ensureBankExists(state.client, state.bankId, state.config, state.banksSet);
+			// model-request: outlives-disposal — the retain queue, which dispose() flushes on purpose so what the
+			// closing session learned is stored; it runs between turns too.
+			await ensureBankExists(state.client, state.bankId, state.config, state.banksSet, undefined);
 			const batch: MemoryItemInput[] = items.map(item => ({
 				content: item.content,
 				context: item.context ?? state.config.retainContext,
@@ -167,6 +169,8 @@ export class HindsightRetainQueue {
 				tags: state.retainTags,
 				timestamp: item.timestamp,
 			}));
+			// model-request: outlives-disposal — the retain queue, which dispose() flushes on purpose so what the
+			// closing session learned is stored; it runs between turns too.
 			await state.client.retainBatch(state.bankId, batch, { async: true });
 			if (state.config.debug) {
 				logger.debug("Hindsight retain queue: batch flushed", {
@@ -303,6 +307,7 @@ export class HindsightSessionState {
 	async recallForContext(query: string, signal?: AbortSignal): Promise<RecallOutcome> {
 		const generation = this.#recallGeneration;
 		try {
+			// model-request: caller recallForContext — the `signal` its caller passes.
 			const response = await this.client.recall(this.bankId, query, {
 				budget: this.config.recallBudget,
 				maxTokens: this.config.recallMaxTokens,
@@ -382,7 +387,11 @@ export class HindsightSessionState {
 			transcript = windowTranscript;
 		}
 
-		await ensureBankExists(this.client, this.bankId, this.config, this.banksSet);
+		// model-request: outlives-disposal — the session's transcript retained after a turn (or by `/memory enqueue`):
+		// a memory write like the retain queue's, which may finish while the session closes so it is not lost.
+		await ensureBankExists(this.client, this.bankId, this.config, this.banksSet, undefined);
+		// model-request: outlives-disposal — the session's transcript retained after a turn (or by `/memory enqueue`):
+		// a memory write like the retain queue's, which may finish while the session closes so it is not lost.
 		await this.client.retain(this.bankId, transcript, {
 			documentId,
 			context: this.config.retainContext,
@@ -477,6 +486,7 @@ export class HindsightSessionState {
 		const queryMessages = [...history, { role: "user" as const, content: latestPrompt }];
 		const query = composeRecallQuery(latestPrompt, queryMessages, this.config.recallContextTurns);
 		const truncated = truncateRecallQuery(query, latestPrompt, this.config.recallMaxQueryChars);
+		// model-request: turn — auto-recall for the turn being prepared, cancelled with its preparation (`abort()`).
 		const { context, ok } = await this.recallForContext(truncated, signal);
 		if (!ok) return undefined;
 
@@ -516,6 +526,7 @@ export class HindsightSessionState {
 
 		const query = composeRecallQuery(lastUser.content, messages, this.config.recallContextTurns);
 		const truncated = truncateRecallQuery(query, lastUser.content, this.config.recallMaxQueryChars);
+		// model-request: session — the compaction's signal, which `beginDispose()` aborts (`abortCompaction`).
 		const { context } = await this.recallForContext(truncated, signal);
 		return context ?? undefined;
 	}
@@ -531,7 +542,8 @@ export class HindsightSessionState {
 			// land `createMentalModel` against a bank the server has never seen —
 			// that surfaces as a FK / 404 on Hindsight's side. `ensureBankExists`
 			// is idempotent (PUT) and skips after the first call via `banksSet`.
-			await ensureBankExists(this.client, this.bankId, this.config, this.banksSet);
+			// model-request: session — the session's disposal signal: mental models load at startup, outside any turn.
+			await ensureBankExists(this.client, this.bankId, this.config, this.banksSet, this.session.disposeSignal);
 
 			// Seeding is opt-in (`hindsight.mentalModelAutoSeed`). Default behaviour is
 			// read-only: we surface whatever models the operator has curated on the
@@ -540,7 +552,8 @@ export class HindsightSessionState {
 			if (this.config.mentalModelAutoSeed) {
 				const seeds = resolveSeedsForScope(scope, this.config.scoping);
 				if (seeds.length > 0) {
-					await ensureMentalModels(this.client, this.bankId, seeds, this.config.debug);
+					// model-request: session — the session's disposal signal: seeding runs at startup, outside any turn.
+					await ensureMentalModels(this.client, this.bankId, seeds, this.config.debug, this.session.disposeSignal);
 				}
 			}
 
@@ -597,11 +610,14 @@ export class HindsightSessionState {
 		previousSnippet: string | undefined,
 		reason: "MM load" | "MM reload" | "MM transcript reload",
 	): Promise<void> {
+		// model-request: session — the session's disposal signal: loads at startup, on a transcript switch and on
+		// `/memory mm reload`, none inside a turn.
 		const result = await tryLoadMentalModelsBlock(
 			this.client,
 			this.bankId,
 			this.config.mentalModelMaxRenderChars,
 			this.recallTags,
+			this.session.disposeSignal,
 		);
 		if (generation !== this.#mentalModelsLoadGeneration) return;
 		if (!result.ok) {

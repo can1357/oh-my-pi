@@ -11,7 +11,13 @@ import { AgentBusyError, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-ag
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, popLoopPhase, prompt, pushLoopPhase, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
-import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobError, AsyncJobManager, type AsyncJobRunResult } from "../async";
+import {
+	ASYNC_JOB_MANAGER_SHUTDOWN_REASON,
+	AsyncJobError,
+	AsyncJobManager,
+	type AsyncJobRunResult,
+	SUBAGENT_TEARDOWN_DECIDES,
+} from "../async";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { ModelRegistry } from "../config/model-registry";
@@ -1664,6 +1670,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	// failures just leave the label unset.
 	const labelSource = assignment?.trim();
 	if (!args.description && args.modelRegistry && args.settings && labelSource) {
+		// model-request: turn — the subagent run's abort signal: the label names the run and stops with it.
 		generateTaskLabel(labelSource, args.modelRegistry, args.settings, id, abortSignal)
 			.then(label => {
 				if (!label || abortSignal.aborted || progress.description) return;
@@ -3297,6 +3304,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 						id,
 						agentId: id,
 						ownerId,
+						survivesBeginDispose: SUBAGENT_TEARDOWN_DECIDES,
 						widgetInputs: createTaskWidgetInputs({
 							manager,
 							agentId: id,

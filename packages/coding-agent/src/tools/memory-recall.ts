@@ -77,12 +77,14 @@ export class MemoryRecallTool implements AgentTool<typeof memoryRecallSchema> {
 			}
 
 			try {
+				// model-request: turn — the tool call's signal.
 				const response = await state.client.recall(state.bankId, params.query, {
 					budget: state.config.recallBudget,
 					maxTokens: state.config.recallMaxTokens,
 					types: state.config.recallTypes.length > 0 ? state.config.recallTypes : undefined,
 					tags: state.recallTags,
 					tagsMatch: state.recallTagsMatch,
+					signal,
 				});
 				const results = response.results ?? [];
 				if (results.length === 0) {

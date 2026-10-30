@@ -322,6 +322,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 						}
 					: undefined;
 				try {
+					// model-request: turn — the image tool call's signal (`requestSignal`).
 					const result = await generateImage(resolvedModel, request, {
 						apiKey,
 						fetch: ctx.fetch ?? fetch,

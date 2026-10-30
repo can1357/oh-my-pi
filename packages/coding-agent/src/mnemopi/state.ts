@@ -682,6 +682,8 @@ export class MnemopiSessionState {
 			const query = composeRecallQuery(lastUser.content, flat, this.config.recallContextTurns);
 			return truncateRecallQuery(query, lastUser.content, this.config.recallMaxQueryChars);
 		});
+		// model-request: session — the compaction's signal, which `beginDispose()` aborts. (Mnemopi's own recall; the walk
+		// matches it by name against the Hindsight state's `recallForContext`.)
 		return await this.recallForContext(truncated, signal);
 	}
 

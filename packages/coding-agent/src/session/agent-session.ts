@@ -1100,6 +1100,8 @@ export class AgentSession implements SettingsScope {
 	readonly #asyncJobManager: AsyncJobManager | undefined;
 	/** Clears this session's owner delivery sink registration; set when a manager + agent id exist. */
 	#unregisterAsyncDeliverySink: (() => void) | undefined;
+	/** Unties this session's disposal from its background jobs; see {@link AsyncJobManager.bindOwnerDisposal}. */
+	#unbindOwnerDisposal: (() => void) | undefined;
 	/**
 	 * Async-delivery generation, bumped on every session transition that evicts
 	 * this owner's jobs (see {@link AgentSession.#cancelOwnAsyncJobs}). Stamped
@@ -2036,6 +2038,7 @@ export class AgentSession implements SettingsScope {
 			resolveDefaultPrewalk: () => this.#resolveDefaultPrewalk(),
 			resolveAutoPrewalkTarget: () => this.#resolveAutoPrewalkTarget(),
 			classifyAutoPrewalk: (request, signal) =>
+				// model-request: session — the queued task's preparation signal joined to the session's disposal signal.
 				classifyAutoPrewalk(
 					{ request, history: this.agent.state.messages },
 					{
@@ -2261,6 +2264,7 @@ export class AgentSession implements SettingsScope {
 		this.#titleSystemPrompt = config.titleSystemPrompt;
 		this.#autoTitle = config.autoTitle === true;
 		this.#transformContext = config.transformContext ?? (messages => messages);
+		// model-request: caller #sideStreamFn — the side-request transport; each call passes its request's signal.
 		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
 		this.#onPayload = config.onPayload;
 		this.rawSseDebugBuffer = config.rawSseDebugBuffer ?? new RawSseDebugBuffer();
@@ -2555,6 +2559,12 @@ export class AgentSession implements SettingsScope {
 				isStale: entry => entry.epoch !== this.#asyncDeliveryEpoch || manager.isDeliverySuppressed(entry.jobId),
 				build: buildAsyncResultBatchMessage,
 			});
+			// The line between work a turn still awaits and work detached from it: from the moment
+			// this session begins disposing, a background job it owns is cancelled, and so is one it
+			// backgrounds or registers afterwards, unless the job declares at its registration why it
+			// must survive that (`survivesBeginDispose`). A future background producer gets this by
+			// registering its job, without saying anything.
+			this.#unbindOwnerDisposal = manager.bindOwnerDisposal(this.#agentId, this.#disposeAbortController.signal);
 		}
 		this.agent.setAssistantMessageEventInterceptor((message, assistantMessageEvent) => {
 			this.#loopGuards.onAssistantEvent(message, assistantMessageEvent);
@@ -2694,6 +2704,8 @@ export class AgentSession implements SettingsScope {
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
 			extensionRunner: this.#extensionRunner,
+			// model-request: transport — the advisors' side-request transport: it is called inside requests whose owners
+			// are declared where they are made (advisor compaction carries the advisor runtime's signal).
 			sideStreamFn: this.#sideStreamFn,
 			providerSessionState: this.#providerSessionState,
 			preferWebsockets: () => this.preferWebsockets,
@@ -2842,6 +2854,8 @@ export class AgentSession implements SettingsScope {
 			sessionManager: this.sessionManager,
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
+			// model-request: transport — the handoff's transport: called from `generateHandoffFromContext`, whose
+			// request carries the handoff's signal (declared there).
 			sideStreamFn: this.#sideStreamFn,
 			obfuscator: () => this.#obfuscator,
 			model: () => this.model,
@@ -3671,6 +3685,7 @@ export class AgentSession implements SettingsScope {
 	 * session hands out comes from here; `overrides` adjusts the other dependencies only.
 	 */
 	createJudge(purpose: string, overrides: Omit<Partial<JudgeDeps>, "purpose" | "signal"> = {}): ChainJudge {
+		// model-request: session — every judge the session hands out carries its disposal signal from construction.
 		return resolveJudge({
 			settings: this.settings,
 			registry: this.#modelRegistry,
@@ -6202,6 +6217,16 @@ export class AgentSession implements SettingsScope {
 		return this.#isDisposed;
 	}
 
+	/**
+	 * Aborted when the session begins disposing ({@link beginDispose}): the cancellation for work
+	 * the session owns outside any turn, such as a memory backend's startup requests or a command
+	 * the interactive mode runs against it. Pass it (joined to a timeout or a caller's signal where
+	 * one applies) to every model request such work makes.
+	 */
+	get disposeSignal(): AbortSignal {
+		return this.#disposeAbortController.signal;
+	}
+
 	markMovedFromEmptySessionFile(sessionFile: string): void {
 		this.#movedFromEmptySessionFile = path.resolve(sessionFile);
 	}
@@ -6213,7 +6238,10 @@ export class AgentSession implements SettingsScope {
 	 * background deliveries are dropped and later ones refused, the aside
 	 * provider is detached, cache warming stops for good, and settings listeners
 	 * bound to the session stop (a config reload mid-teardown must not reconnect
-	 * or re-steer anything).
+	 * or re-steer anything). Work detached from the turns that started it stops
+	 * here too: background jobs (except subagents, which `dispose()` ends),
+	 * eval `completion()` handles and `judgeBatch()` runs. A turn admitted
+	 * before this runs to its end, with the work it still awaits.
 	 * Idempotent; `dispose()` runs it first.
 	 *
 	 * Wrappers that await other teardown before delegating to `dispose()` MUST
@@ -6246,13 +6274,15 @@ export class AgentSession implements SettingsScope {
 		this.agent.hasQueuedAsides = undefined;
 		this.#advisors.stopRuntime();
 		this.#eval.beginDispose();
+		this.#stopDetachedEvalWork();
 		// Work that would otherwise run on into the teardown below, and through every
 		// wrapper's awaits before `dispose()`, each of which reached the provider or the
 		// transcript from a disposing session: extension timers (their callbacks can prompt),
 		// a speculative or retrying compaction, a manual compaction, handoff or branch summary,
 		// the unexpected-stop judge and other post-prompt work, and what listens to the disposal
-		// signal: the auto-thinking and auto-prewalk classifiers, image descriptions and side
-		// requests (`runEphemeralTurn`). `dispose()` repeats the timer, compaction and post-prompt
+		// signal: the auto-thinking and auto-prewalk classifiers, image descriptions, side
+		// requests (`runEphemeralTurn`), and the background jobs this session owns
+		// (`bindOwnerDisposal`). `dispose()` repeats the timer, compaction and post-prompt
 		// cancellation for anything its own teardown starts.
 		this.#disposeAbortController.abort();
 		// Optional only for hand-rolled `ExtensionRunner` doubles in tests, which implement just the
@@ -6283,6 +6313,21 @@ export class AgentSession implements SettingsScope {
 	dispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
 		if (!this.#disposeCall) this.#disposeCall = this.#doDispose(options);
 		return this.#disposeCall;
+	}
+
+	/**
+	 * Stop the eval work the host owns past the cell that started it: a `completion()` handle, and
+	 * a `judgeBatch()` run (one with no job manager, or at its job limit, is not an async job, which
+	 * the owner-disposal binding stops). No turn awaits either once its cell has ended, so each would
+	 * otherwise reach the provider from the closing session, through the shutdown hooks and every
+	 * wait `dispose()` makes before its own job teardown. A cell still waiting on one gets its
+	 * cancellation; one asked for after this is refused (`assertDetachedEvalWorkAllowed`). Workpools
+	 * run lifecycle-tracked subagents, which `dispose()` ends.
+	 */
+	#stopDetachedEvalWork(): void {
+		if (!this.#agentId) return;
+		releaseCompletionHandles(this.#agentId);
+		releaseJudgmentBatches(this.#agentId);
 	}
 
 	async #disposeOwnedAsyncJobs(): Promise<void> {
@@ -6536,8 +6581,14 @@ export class AgentSession implements SettingsScope {
 		// are lifted only once the run has settled: here when it drained,
 		// otherwise in the deferred pass below. Each lease lifts only the
 		// restriction it installed, never one a revival has installed on the
-		// same provider session id since.
-		if (drained) this.#accountPoolScope?.release();
+		// same provider session id since. The owner-disposal binding goes at the
+		// same point, for the same reason: until the run settles it can still
+		// background a job, which must stop; the binding unties only itself, never
+		// a revival's for the same agent id.
+		if (drained) {
+			this.#accountPoolScope?.release();
+			this.#unbindOwnerDisposal?.();
+		}
 
 		// The deadline does not cancel the drain: a handler parked in a slow
 		// extension hook resumes afterwards and would repopulate exactly the
@@ -6554,6 +6605,7 @@ export class AgentSession implements SettingsScope {
 				await this.#drainInFlightEventHandlers();
 				this.#releaseRetainedSessionMemory();
 				this.#accountPoolScope?.release();
+				this.#unbindOwnerDisposal?.();
 			})().catch(error => logger.warn("Deferred dispose finalization failed", { error: String(error) }));
 		}
 	}
@@ -6901,6 +6953,8 @@ export class AgentSession implements SettingsScope {
 	prewarmModelConnection(): void {
 		const model = this.model;
 		if (!model || this.#isDisposed || this.isStreaming) return;
+		// model-request: outlives-disposal — a credential-less HEAD that warms the pooled connection: no model request,
+		// nothing billed, throttled per origin and bounded by a 10-second timeout. None starts once disposal began.
 		void prewarmModelConnection(model);
 	}
 
@@ -8089,6 +8143,9 @@ export class AgentSession implements SettingsScope {
 		const controller = new AbortController();
 		this.#imageDescriptionAbortControllers.add(controller);
 		try {
+			// model-request: turn — the caller's signal when it passes one (the session's disposal for queued messages,
+			// the side request's for side turns), else the admitted prompt's: abort() cancels it through
+			// #imageDescriptionAbortControllers, and the admission timeout bounds it.
 			return await this.#providerBoundary.buildImageDescriptionNotice(
 				normalizedImages,
 				AbortSignal.any([
@@ -11132,6 +11189,7 @@ export class AgentSession implements SettingsScope {
 		// The title request carries user text, so it follows this session's own credential
 		// redaction policy like its conversation requests (see `settingsAwareStreamFn`).
 		const title = await withCredentialRedaction(cfgSecretsEnabled.get(this.settings), () =>
+			// model-request: session — `titleSignal` joins the session's title signal, which `beginDispose()` aborts.
 			generateSessionTitle(
 				firstMessage,
 				this.#modelRegistry,
@@ -12919,6 +12977,7 @@ export class AgentSession implements SettingsScope {
 		let assistantMessage: AssistantMessage | undefined;
 		assertEphemeralTurnReady();
 		try {
+			// model-request: session — the side request's signal, joined to the session's disposal signal above.
 			const stream = await this.#sideStreamFn(model, context, options);
 			for await (const event of stream) {
 				if (event.type === "text_delta") {
@@ -13996,6 +14055,8 @@ export class AgentSession implements SettingsScope {
 				throw new Error(`No API key for ${model.provider}`);
 			}
 			if (summaryCancelled()) return { cancelled: true, aborted: true };
+			// model-request: session — this navigation's own controller, which `abortBranchSummary()` aborts, as
+			// `beginDispose()` does.
 			const result = await generateBranchSummary(entriesToSummarize, {
 				model,
 				apiKey: this.#modelRegistry.resolver(model, this.sessionId),
@@ -14008,6 +14069,7 @@ export class AgentSession implements SettingsScope {
 				// Same per-provider concurrency cap rationale as the compaction
 				// path above (chatgpt-codex review on #3751).
 				completeImpl: async (requestModel, requestContext, requestOptions) => {
+					// model-request: transport — the branch summary's completion, called with its request options (and signal).
 					const stream = await this.#sideStreamFn(requestModel, requestContext, requestOptions);
 					return stream.result();
 				},

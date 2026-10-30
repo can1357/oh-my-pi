@@ -236,6 +236,8 @@ async function runSharpshooterExtraction(
 	if (!model || session.isDisposed) return;
 
 	const input = prompt.render(extractInputTemplate, { ...envelope });
+	// model-request: outlives-disposal — the extraction for the prompt just sent: dispose() waits for it on purpose
+	// (bounded) so a print-mode exit keeps its deltas; none starts once the session is disposed.
 	const response = await retryTransientCompletion(
 		() =>
 			completeSimple(

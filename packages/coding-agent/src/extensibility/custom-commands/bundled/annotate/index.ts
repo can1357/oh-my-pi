@@ -73,6 +73,9 @@ const defaultTextAnnotationDependencies: TextAnnotationDependencies = {
 	acquireFileTextReviewSource,
 	createPromptTextReviewSource,
 	showTextReviewOverlay,
+	// model-request: outlives-disposal — the `/annotate` command awaits this summary. A command context carries no
+	// cancellation (that is the extension boundary's to add), so a summary the user asked for finishes or hits its
+	// 60-second deadline even if the session begins closing meanwhile.
 	generateTextReviewContextSummary,
 };
 

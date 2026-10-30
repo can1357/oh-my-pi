@@ -85,6 +85,7 @@ export async function classifyUnexpectedStop(
 	deps: ClassifyUnexpectedStopDeps,
 ): Promise<boolean | undefined> {
 	try {
+		// model-request: caller classifyUnexpectedStop — the judge carries `deps.signal`, the caller's cancellation.
 		const judge = resolveJudge({
 			settings: deps.settings,
 			registry: deps.registry,

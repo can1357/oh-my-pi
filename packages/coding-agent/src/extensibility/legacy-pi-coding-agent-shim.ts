@@ -1552,6 +1552,7 @@ export function getPackageDir(): string {
 // `@oh-my-pi/pi-agent-core/compaction`, and the coding-agent barrel below does
 // not forward them, so legacy extensions importing them fail Bun's static
 // export check during validation (issues #6583, #7174, #7403, #10278).
+// model-request: extension — legacy extensions import `compact` from here; the extension boundary governs its requests.
 export { calculateContextTokens, compact, serializeConversation } from "@oh-my-pi/pi-agent-core/compaction";
 
 const legacyTokenizer = new Tokenizer();

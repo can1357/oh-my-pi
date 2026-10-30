@@ -153,8 +153,13 @@ function deltaFingerprint(rootPatch: string, nestedPatches: readonly NestedRepoP
 	return Bun.hash(key);
 }
 
-/** Build a commit-message callback for branch/nested commits; `undefined` ⇒ fall back to generic message. */
-export type BuildCommitMessage = () => undefined | ((diff: string) => Promise<string | null>);
+/**
+ * Build a commit-message callback for branch/nested commits, cancelled by `signal` (the run's);
+ * `undefined` ⇒ fall back to generic message.
+ */
+export type BuildCommitMessage = (
+	signal: AbortSignal | undefined,
+) => undefined | ((diff: string) => Promise<string | null>);
 
 /**
  * Construct the commit-message factory used by isolation branch commits and
@@ -168,13 +173,16 @@ export type BuildCommitMessage = () => undefined | ((diff: string) => Promise<st
  * generators for the same setting.
  */
 export function makeIsolationCommitMessage(session: ToolSession): BuildCommitMessage {
-	return () => {
+	return signal => {
 		const style = cfgTaskIsolationCommits.get(session.settings);
 		if (style !== "ai" || !session.modelRegistry) return undefined;
 		const registry = session.modelRegistry;
 		const settings = session.settings;
 		const sessionId = session.getSessionId?.() ?? undefined;
-		return async (diff: string) => generateCommitMessage(diff, registry, settings, sessionId);
+		return async (diff: string) =>
+			// model-request: turn — the isolated subagent's run, whose signal the runner passes: its branch commit is
+			// the run's last step. A cancelled run sends nothing and commits with the generic message.
+			generateCommitMessage(diff, registry, settings, sessionId, signal);
 	};
 }
 
@@ -509,7 +517,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 					baseline,
 					opts.agentId,
 					opts.description,
-					opts.buildCommitMessage?.(),
+					opts.buildCommitMessage?.(opts.baseOptions.signal),
 				);
 			} catch (mergeErr) {
 				// Agent succeeded but the branch commit failed. `commitToBranch`

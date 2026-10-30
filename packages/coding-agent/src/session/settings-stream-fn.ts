@@ -73,6 +73,7 @@ export interface SettingsStreamSlowModeContext {
  */
 export function createSettingsAwareStreamFn(
 	settings: Settings,
+	// model-request: transport — the stream function a session's agent and side requests call with their own signals.
 	base: StreamFn = streamSimple,
 	slowModeContext?: SettingsStreamSlowModeContext,
 ): StreamFn {

@@ -85,6 +85,7 @@ export async function askImageQuestion(
 	image: LoadedImageInput,
 	question: string,
 	signal: AbortSignal | undefined,
+	// model-request: caller askImageQuestion — the default completion, sent below with the caller's signal.
 	completeImpl: typeof completeSimple = completeSimple,
 ): Promise<ImageQuestionResult> {
 	if (cfgImagesBlockImages.get(session.settings)) {
@@ -137,6 +138,7 @@ export async function askImageQuestion(
 	session.costGate?.admit();
 	let response: AssistantMessage;
 	try {
+		// model-request: caller askImageQuestion — its caller's signal, joined to the question deadline.
 		response = await instrumentedCompleteSimple(
 			model,
 			{

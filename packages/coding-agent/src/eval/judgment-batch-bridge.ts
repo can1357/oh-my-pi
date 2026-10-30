@@ -24,7 +24,7 @@ import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { withBridgeTimeoutPause } from "./bridge-timeout";
-import { EVAL_HANDLE_CONCURRENCY, evalRequestSlots } from "./completion-bridge";
+import { assertDetachedEvalWorkAllowed, EVAL_HANDLE_CONCURRENCY, evalRequestSlots } from "./completion-bridge";
 import { JUDGMENT_BATCH_PROGRESS_EVENT_CHANNEL, type JudgmentBatchProgress } from "./judgment-batch-events";
 import type { JsStatusEvent } from "./js/shared/types";
 import {
@@ -366,7 +366,9 @@ export class JudgmentBatch {
 		const signal = this.#controller.signal;
 		let judge: ChainJudge;
 		try {
-			judge = sessionJudge({ session: this.#session }, "judge_batch", usage => {
+			// model-request: session — the batch's own controller, cancelled with the batch, which the session does
+			// when it begins disposing (the batch outlives its cell, so no turn owns it).
+			judge = sessionJudge(this.#session, this.#controller.signal, "judge_batch", usage => {
 				this.#cost += usage.usage.cost.total;
 			});
 		} catch (error) {
@@ -533,6 +535,7 @@ export async function runEvalJudgmentBatch(
 	switch (args.op) {
 		case "create": {
 			if (Object.hasOwn(args, "images")) throw invalid("images must be provided on each item");
+			assertDetachedEvalWorkAllowed(session, "judge_batch()");
 			const items = parseItems(args.items);
 			const questions = parseQuestions(args.questions);
 			const batch = new JudgmentBatch(

@@ -794,6 +794,7 @@ export async function runDryBalanceCommand(
 		((code: number) => {
 			process.exitCode = code;
 		});
+	// model-request: no-session — the dry-balance bench drives its own requests from the command line; no session exists.
 	const streamFn = deps.streamSimple ?? streamSimple;
 	const now = deps.now ?? (() => performance.now());
 	const runtime = await (deps.createRuntime?.() ?? createDefaultRuntime(command.flags.config));

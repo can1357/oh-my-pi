@@ -589,6 +589,7 @@ export class EditTool implements AgentTool<TInput> {
 			const display = path.relative(this.session.cwd, snapshot.path) || snapshot.path;
 			let repaired: EditAutoRepairOutcome | undefined;
 			try {
+				// model-request: turn — the edit tool call's signal.
 				repaired = await attemptEditAutoRepair({
 					session: this.session,
 					snapshot,

@@ -771,6 +771,7 @@ async function probeOneModel(
 	// are required" without it). `disableReasoning` is intentionally NOT set:
 	// providers like Fireworks reject the "none" effort it maps to, and we'd
 	// rather burn 16 reasoning tokens than misdiagnose a healthy credential.
+	// model-request: no-session — `omp auth-gateway` probes a credential from the command line; no session exists.
 	const response = await completeSimple(
 		model,
 		{

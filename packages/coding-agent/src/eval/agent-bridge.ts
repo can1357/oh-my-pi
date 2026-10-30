@@ -2,6 +2,7 @@
  * Host-side handler for the eval `agent()` helper.
  */
 import { type } from "@oh-my-pi/omptype";
+import { SUBAGENT_TEARDOWN_DECIDES } from "../async";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createEvalCustomTools, describeEvalTools } from "../task/eval-tools";
 import {
@@ -243,7 +244,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 					throw error;
 				}
 			},
-			{ id, agentId: id, ownerId },
+			{ id, agentId: id, ownerId, survivesBeginDispose: SUBAGENT_TEARDOWN_DECIDES },
 		);
 		return { id, agent: policy.agentName };
 	} catch (error) {

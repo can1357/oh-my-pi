@@ -366,11 +366,13 @@ export class EventController {
 		);
 		vocalizer.setEnhancer(
 			session?.modelRegistry && session.agent && session.settings
-				? new SpeechEnhancer({
+				? // model-request: session — the speech enhancer carries the session's disposal signal (`signal`).
+					new SpeechEnhancer({
 						settings: session.settings,
 						registry: session.modelRegistry,
 						sessionId: session.sessionId,
 						metadataResolver: provider => session.agent.metadataForProvider(provider),
+						signal: session.disposeSignal,
 					})
 				: null,
 		);

@@ -262,7 +262,12 @@ export class JobWidgets implements JobWidgetRegistry {
 		let installable: JobWidgetRuntime | undefined;
 		try {
 			for (let round = 0; round < 2 && !installable; round++) {
-				const answer = await author(request, controller.signal);
+				// A spec for a job that has stopped is no longer wanted: the request ends with the job (a background job
+				// stops when its owning session begins disposing) as well as with this entry.
+				const answer = await author(
+					request,
+					AbortSignal.any([controller.signal, entry.job.abortController.signal]),
+				);
 				if (controller.signal.aborted || !this.#enabled()) return;
 				if (answer === undefined) {
 					entry.authorUnavailable = true;
