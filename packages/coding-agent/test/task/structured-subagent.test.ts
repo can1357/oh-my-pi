@@ -1503,6 +1503,36 @@ describe("per-call model preflight", () => {
 		expect(policy.parentActiveModelPattern).toBeUndefined();
 	});
 
+	it.each(["SDK overlay", "nested subagent"])("reloads removed on-disk role grants through an %s", async kind => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-grant-reload-"));
+		const projectDir = path.join(root, "project");
+		const agentDir = path.join(root, "agent");
+		await fs.mkdir(projectDir, { recursive: true });
+		const configPath = path.join(agentDir, "config.yml");
+		const taskConfig = 'task:\n  perCallModel: "on"\n  isolation:\n    enabled: false\n';
+		await Bun.write(configPath, `${taskConfig}modelRoles:\n  review: mock/target\n`);
+		const liveSettings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
+		const child = executorModule.createSubagentSettings(liveSettings, {
+			modelRoles: { ...liveSettings.getModelRoles(), advisor: "mock/other" },
+		});
+		const settings = kind === "SDK overlay" ? liveSettings.overlay({}) : executorModule.createSubagentSettings(child);
+		const liveSession = Object.assign(perCallSession({}), { cwd: projectDir, settings });
+		const call = request({ session: liveSession, perCallModel: "mock/target:high" });
+		mockDiscovery();
+
+		try {
+			expect((await resolveEffectiveSubagentPolicy(call)).modelOverride).toEqual(["mock/target:high"]);
+			await Bun.write(configPath, taskConfig);
+			await expect(resolveEffectiveSubagentPolicy(call)).rejects.toThrow(
+				'Per-call model mock/target is not approved for agent "worker"',
+			);
+		} finally {
+			liveSettings.cancelPendingSaves();
+			AgentStorage.close();
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
 	it.each([
 		["an unconfigured role", "@smol", {}, /has no modelRoles entry/],
 		["an unknown role", "@nonexistent", {}, /names no configured model role/],
@@ -1631,6 +1661,17 @@ describe("per-call model preflight", () => {
 		await expect(
 			resolveEffectiveSubagentPolicy(request({ session: overlaid, perCallModel: "@sneaky" })),
 		).rejects.toThrow(/names no configured model role/);
+	});
+
+	it("uses root role settings even when a derived overlay hides the role, and still rejects its legacy alias", async () => {
+		mockDiscovery();
+		const base = perCallSession({ "task.perCallModel": "on", modelRoles: { review: "mock/target" } });
+		base.settings = base.settings.overlay({ modelRoles: { review: null } }, { derived: true });
+		const policy = await resolveEffectiveSubagentPolicy(request({ session: base, perCallModel: "@review" }));
+		expect(policy.modelOverride).toEqual(["mock/target"]);
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: base, perCallModel: "pi/review" })),
+		).rejects.toThrow(/invalid `model`/);
 	});
 
 	it("honors a configured role from an SDK host overlay", async () => {

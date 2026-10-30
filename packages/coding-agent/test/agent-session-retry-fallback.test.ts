@@ -3,7 +3,6 @@ import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
-import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import { createCompactionSummaryMessage } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	type AnthropicFallbackCreditHandle,
@@ -22,7 +21,6 @@ import { CodexApiError } from "@oh-my-pi/pi-ai/providers/openai-codex/response-h
 import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { factoryDroidRegistry } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
@@ -313,8 +311,6 @@ describe("AgentSession retry fallback", () => {
 		authStorage.keys.setRuntime("openrouter", "openrouter-test-key");
 		authStorage.keys.setRuntime("devin", "devin-test-key");
 		authStorage.keys.setRuntime("openai-codex", "openai-codex-test-key");
-		authStorage.keys.setRuntime("cursor", "cursor-test-key");
-		authStorage.keys.setRuntime("factory-droid", "factory-droid-test-key");
 		sharedRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 	});
 
@@ -7373,54 +7369,6 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.id).toBe(fallbackModel.id);
 		// Without the ceiling the fallback's `:high` would apply verbatim.
 		expect(session.thinkingLevel).toBe(Effort.Low);
-	});
-
-	it("pins provider-deferring thinking selectors to an explicit effort at or below the session ceiling", async () => {
-		// Each model's metadata says off/unset defers to a provider default that thinks:
-		// Cursor Grok is mandatory-reasoning (floored to medium on the wire), and Factory
-		// Sonnet 5.5 / Fable 5.1 keep between-tools / adaptive thinking when off.
-		const cursorGrok = getBundledModel("cursor", "cursor-grok-4.6");
-		const factory = (id: string) => {
-			const entry = factoryDroidRegistry().find(candidate => candidate.spec.id === id);
-			if (!entry) throw new Error(`Expected Factory registry model ${id}`);
-			return buildModel(entry.spec);
-		};
-		// Control: a model that can actually disable thinking keeps an explicit off.
-		const canDisable = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!cursorGrok || !canDisable) throw new Error("Expected bundled ceiling models");
-		const sent = async (model: Model, thinkingLevel: ThinkingLevel | undefined) => {
-			let options: { reasoning?: unknown; disableReasoning?: boolean } | undefined;
-			const mock = createMockModel();
-			const agent = new Agent({
-				getApiKey: () => "test-key",
-				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
-				streamFn: (streamModel, context, streamOptions) => {
-					options = streamOptions;
-					mock.push({ content: ["ok"] });
-					return mock.stream(streamModel, context, streamOptions);
-				},
-			});
-			session = new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings: Settings.isolated({ "compaction.enabled": false }),
-				modelRegistry,
-				thinkingLevel,
-				thinkingLevelCeiling: Effort.Low,
-			});
-			await session.prompt("Run under the ceiling");
-			await session.waitForIdle();
-			await session.dispose();
-			session = undefined;
-			return { reasoning: options?.reasoning, disableReasoning: options?.disableReasoning === true };
-		};
-		const pinned = { reasoning: Effort.Low, disableReasoning: false };
-		for (const model of [cursorGrok, factory("claude-sonnet-5-5"), factory("claude-fable-5.1")]) {
-			expect(await sent(model, ThinkingLevel.Off)).toEqual(pinned);
-			expect(await sent(model, ThinkingLevel.Inherit)).toEqual(pinned);
-			expect(await sent(model, undefined)).toEqual(pinned);
-		}
-		expect(await sent(canDisable, ThinkingLevel.Off)).toEqual({ reasoning: undefined, disableReasoning: true });
 	});
 
 	it("skips usage fallbacks whose effort floor exceeds the session ceiling", async () => {

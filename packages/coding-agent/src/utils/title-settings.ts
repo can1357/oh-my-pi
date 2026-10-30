@@ -1,6 +1,7 @@
 /**
  * Automatic session-title settings: which generator names a session, how its
- * card icon shows, and whether a todo replan refreshes it.
+ * card icon shows, and what refreshes it: a todo replan, or the judge finding
+ * it stale after a run of operator prompts since it last changed.
  */
 import { register } from "../config/registry";
 
@@ -62,5 +63,25 @@ export const cfgTitleRefreshOnReplan = register({
 		group: "Modes",
 		label: "Refresh Title on Replan",
 		description: "Refresh generated session titles after todo init replans unless the title was set by the user",
+	},
+});
+
+export const cfgTitleRefreshAfterPrompts = register({
+	id: "title.refreshAfterPrompts",
+	type: "number",
+	default: 0,
+	ui: {
+		tab: "tasks",
+		group: "Modes",
+		label: "Refresh Title After Prompts",
+		description:
+			"Every this many operator prompts, ask the judge model whether a generated session title still fits the conversation, and regenerate it if not",
+		options: [
+			{ value: "0", label: "Off", description: "Default" },
+			{ value: "1", label: "Every prompt" },
+			{ value: "3", label: "Every 3 prompts" },
+			{ value: "5", label: "Every 5 prompts" },
+			{ value: "10", label: "Every 10 prompts" },
+		],
 	},
 });

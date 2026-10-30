@@ -1,16 +1,10 @@
 import type { ResolvedThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
-import { usesBudgetThinking } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { ConfiguredThinkingLevel } from "./render/render-utils";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import { Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
-import {
-	clampThinkingLevelForModel,
-	defaultSupportedEffort,
-	getSupportedEfforts,
-} from "@oh-my-pi/pi-catalog/model-thinking";
+import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
-import { factoryDroidOffKeepsReasoning, resolveFactoryDroidPolicy } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 /** Thinking selectors accepted by CLI inputs, in display order. */
 export const CLI_THINKING_LEVELS: readonly ConfiguredThinkingLevel[] = ["off", ...THINKING_EFFORTS, "auto"];
 
@@ -326,52 +320,13 @@ export function resolveTaskEffortLevel(
 }
 
 /**
- * Whether `off` still reasons on `model`, per its metadata: mandatory-reasoning
- * endpoints (`thinking.requiresEffort` without a `suppressWhenOff` wire path,
- * which the stream layer floors at the default effort), Anthropic routes whose
- * disabled form keeps adaptive or between-tools thinking, and Factory routes
- * whose KDL off-path still thinks.
- */
-function offStillReasons(model: Model): boolean {
-	if (model.thinking?.requiresEffort && !model.thinking.suppressWhenOff) return true;
-	const compat = model.compat as { disabledThinking?: string; supportsBetweenToolsThinking?: boolean } | undefined;
-	if (compat?.disabledThinking === "adaptive" || compat?.disabledThinking === "between-tools") return true;
-	if (compat?.supportsBetweenToolsThinking) return true;
-	return model.api === "factory-droid-agent" && factoryDroidOffKeepsReasoning(model);
-}
-
-/** True only when the request layer can leave thinking off without a caller effort. */
-function noEffortDisablesReasoning(model: Model): boolean {
-	// streamSimple neutralizes unverified thinking until an effort is picked.
-	if (model.thinking?.unverified) return true;
-	if (offStillReasons(model)) return false;
-	switch (model.api) {
-		case "anthropic-messages":
-			return usesBudgetThinking(model as Model<"anthropic-messages">);
-		case "bedrock-converse-stream":
-		case "google-generative-ai":
-		case "google-vertex":
-			return model.thinking?.mode === "budget" || model.thinking?.mode === "anthropic-budget-effort";
-		case "factory-droid-agent":
-			return resolveFactoryDroidPolicy(model)?.defaultReasoningOff === true;
-		default:
-			return false;
-	}
-}
-
-/**
- * Clamps a thinking selector to a per-session effort ceiling (e.g. a task
- * spawn's `task.maxEffort`). Levels at or below the ceiling pass through;
- * levels above it snap to the highest model-supported effort at or below it.
- * Unset/`inherit` stay untouched when no effort disables thinking, including
- * unverified (opt-in) models. Otherwise a provider default could exceed the
- * ceiling: pin the model's own default (`defaultLevel`, else the mandatory-
- * reasoning default) under the ceiling. Verified models with unknown defaults
- * use the highest effort at or below it, since leaving them unset is unsafe.
- * `off` stays off when the route can disable thinking; otherwise pin its lowest
- * supported effort. A model whose floor exceeds the ceiling has nothing valid
- * to snap to; the requested level is returned unchanged and the caller must
- * reject or skip such models (see {@link modelSupportsEffortCeiling}).
+ * Clamps a concrete thinking selector to a per-session effort ceiling (e.g. a
+ * task spawn's `task.maxEffort`). Unset/`inherit`/`off` retain their existing
+ * meaning, as do levels already at or below the ceiling. Levels above it snap
+ * to the highest model-supported effort at or below the ceiling. A model whose
+ * floor exceeds the ceiling has nothing valid to snap to; the requested level
+ * is returned unchanged and the caller must reject or skip such models (see
+ * {@link modelSupportsEffortCeiling}).
  */
 export function clampThinkingLevelToCeiling(
 	model: Model | undefined,
@@ -388,34 +343,13 @@ export function clampThinkingLevelToCeiling(
 	level: ThinkingLevel | undefined,
 	ceiling: Effort | undefined,
 ): ThinkingLevel | undefined {
-	if (ceiling === undefined) return level;
-	const maxIndex = THINKING_EFFORTS.indexOf(ceiling);
-	const underCeiling = (candidates: readonly Effort[]) =>
-		candidates.findLast(candidate => THINKING_EFFORTS.indexOf(candidate) <= maxIndex);
-	if (level === ThinkingLevel.Off || level === ThinkingLevel.Inherit || level === undefined) {
-		const supported = model ? getSupportedEfforts(model) : [];
-		// A provider default cannot exceed a ceiling the model never goes above.
-		if (!model || !supported.some(candidate => THINKING_EFFORTS.indexOf(candidate) > maxIndex)) return level;
-		if (level === ThinkingLevel.Off) {
-			if (!offStillReasons(model)) return level;
-			return THINKING_EFFORTS.indexOf(supported[0]) <= maxIndex ? supported[0] : level;
-		}
-		if (noEffortDisablesReasoning(model)) return level;
-		const providerDefault =
-			model.thinking?.defaultLevel ?? (model.thinking?.requiresEffort ? defaultSupportedEffort(model) : undefined);
-		const pinned =
-			providerDefault === undefined
-				? undefined
-				: underCeiling(
-						supported.filter(
-							candidate => THINKING_EFFORTS.indexOf(candidate) <= THINKING_EFFORTS.indexOf(providerDefault),
-						),
-					);
-		return pinned ?? underCeiling(supported) ?? level;
+	if (ceiling === undefined || level === undefined || level === ThinkingLevel.Off || level === ThinkingLevel.Inherit) {
+		return level;
 	}
+	const maxIndex = THINKING_EFFORTS.indexOf(ceiling);
 	if (THINKING_EFFORTS.indexOf(level) <= maxIndex) return level;
 	const supported = model ? getSupportedEfforts(model) : THINKING_EFFORTS;
-	return underCeiling(supported) ?? level;
+	return supported.findLast(candidate => THINKING_EFFORTS.indexOf(candidate) <= maxIndex) ?? level;
 }
 
 /**

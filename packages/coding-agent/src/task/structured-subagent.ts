@@ -389,8 +389,9 @@ export function invalidModelSelectorReason(
 		candidates?.every(
 			candidate =>
 				ROLE_MODEL_SELECTOR.test(candidate) ||
-				// Settings make a legacy `pi/<custom role>` alias read as the role it names: only `@role` selects a role.
-				(EXACT_MODEL_SELECTOR.test(candidate) && resolveExplicitModelRole(candidate, gate.settings) === undefined),
+				// Only `@role` selects a role; recognize legacy aliases against the same grant authority.
+				(EXACT_MODEL_SELECTOR.test(candidate) &&
+					resolveExplicitModelRole(candidate, gate.settings.grantAuthority()) === undefined),
 		)
 	) {
 		return undefined;

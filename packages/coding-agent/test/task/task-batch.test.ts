@@ -391,9 +391,10 @@ describe("task.batch validation", () => {
 	});
 
 	// The agent loop validates arguments against the wire schema before execute(),
-	// and that schema deletes undeclared keys. A seance-only field on an ordinary
-	// agent must still be refused by every call form instead of being dropped,
-	// leaving the child on its own model while the caller believes it pinned another.
+	// and that schema deletes undeclared keys. With per-call model off, `model` and
+	// `sourceSession` on an ordinary agent must still be refused by every call form
+	// instead of being dropped, leaving the child on its own model while the caller
+	// believes it pinned another.
 	// `task.structured` and `task.isolation.enabled` choose between the prebuilt and
 	// generated batch schemas, each with and without `isolated`.
 	it.each([
@@ -402,6 +403,9 @@ describe("task.batch validation", () => {
 		{ form: "batch", seance: "hidden", batch: true, structured: false, isolation: true, field: "model" },
 		{ form: "batch", seance: "hidden", batch: true, structured: true, isolation: true, field: "model" },
 		{ form: "batch", seance: "hidden", batch: true, structured: false, isolation: false, field: "sourceSession" },
+		{ form: "batch", seance: "hidden", batch: true, structured: true, isolation: false, field: "sourceSession" },
+		{ form: "batch", seance: "hidden", batch: true, structured: false, isolation: true, field: "sourceSession" },
+		{ form: "batch", seance: "hidden", batch: true, structured: true, isolation: true, field: "sourceSession" },
 		{ form: "batch", seance: "advertised", batch: true, structured: false, isolation: false, field: "model" },
 		{ form: "flat", seance: "hidden", batch: false, structured: false, isolation: false, field: "model" },
 	])(

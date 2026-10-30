@@ -415,7 +415,7 @@ export interface SessionMaintenanceHost {
 	model(): Model | undefined;
 	thinkingLevel(): ThinkingLevel | undefined;
 	isDisposed(): boolean;
-	/** The session never switches models on its own (a per-call `model` subagent): no context promotion. */
+	/** Model fallback is disabled (a per-call `model` subagent): no context promotion. */
 	modelFallbackDisabled?(): boolean;
 	isStreaming(): boolean;
 	isGeneratingHandoff(): boolean;

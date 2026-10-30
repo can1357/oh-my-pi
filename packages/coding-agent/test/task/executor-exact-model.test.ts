@@ -31,13 +31,15 @@ describe("per-call exact selection after background discovery", () => {
 				id: "requested-model-complete",
 				handler: () => ({ content: ["Exact answer."] }),
 			});
+			// Available but named by no role: dispatch refuses it as unapproved, not as unavailable.
+			const unapproved = createMockModel({ id: "other" });
 			const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
 			const find = modelRegistry.find.bind(modelRegistry);
 			vi.spyOn(modelRegistry, "find").mockImplementation((provider, id) =>
 				provider === "mock" && id === model.id ? model : find(provider, id),
 			);
 			let warm = false;
-			vi.spyOn(modelRegistry, "getAvailable").mockImplementation(() => (warm ? [model] : []));
+			vi.spyOn(modelRegistry, "getAvailable").mockImplementation(() => (warm ? [model, unapproved] : []));
 			vi.spyOn(modelRegistry, "awaitBackgroundRefresh").mockImplementation(async () => {
 				warm = true;
 			});
@@ -91,7 +93,10 @@ describe("per-call exact selection after background discovery", () => {
 				expect(options?.disableModelFallback).toBe(true);
 				expect(options?.disableServerSideFallback).toBe(true);
 				expect(options?.prewalk).toBeUndefined();
-				expect(() => options?.assertDispatchModel?.(createMockModel({ id: "other" }))).toThrow(/not approved/);
+				expect(() => options?.assertDispatchModel?.(unapproved)).toThrow(/not approved/);
+				expect(() => options?.assertDispatchModel?.(createMockModel({ id: "missing" }))).toThrow(
+					/not an available chat model/,
+				);
 			} else {
 				// Preflight waits for the discovery that loads the catalog, then refuses the near-miss id
 				// instead of matching it fuzzily.
