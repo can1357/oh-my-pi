@@ -61,6 +61,8 @@ export interface CodexAcceptedSteer {
 export interface CodexSteerOutcome {
 	responseId: string | undefined;
 	accepted: CodexAcceptedSteer[];
+	/** A steer was submitted, whether or not the server accepted it. */
+	submitted: boolean;
 	/**
 	 * A submission ended without an acknowledgement, so the server may or may
 	 * not hold it. The caller must drop the socket rather than chain from it.
@@ -88,6 +90,7 @@ export class CodexSteerPump {
 	#responseId: string | undefined;
 	#run: Promise<void> | undefined;
 	#uncertain = false;
+	#submitted = false;
 
 	constructor(
 		source: LiveSteering,
@@ -117,7 +120,12 @@ export class CodexSteerPump {
 	async finish(): Promise<CodexSteerOutcome> {
 		this.#stop.abort();
 		await this.#run;
-		return { responseId: this.#responseId, accepted: this.#accepted, uncertain: this.#uncertain };
+		return {
+			responseId: this.#responseId,
+			accepted: this.#accepted,
+			submitted: this.#submitted,
+			uncertain: this.#uncertain,
+		};
 	}
 
 	async #loop(responseId: string): Promise<void> {
@@ -148,10 +156,12 @@ export class CodexSteerPump {
 				// The claim awaited the caller's own preparation, which a pause can
 				// outlast. The frame goes out in the same synchronous step as the
 				// hold's last check, so a pause landing after the hold answered
-				// still stops it.
+				// still stops it. A steer the hold stops was never submitted; one
+				// handed to the socket was, acknowledged or not.
 				let sentAt = 0;
 				const submitted = await this.#whenOpen(responseId, signal, () => {
 					sentAt = performance.now();
+					this.#submitted = true;
 					return this.#submit(responseId, input);
 				});
 				if (!submitted) {

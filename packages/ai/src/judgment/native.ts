@@ -28,6 +28,7 @@ import { type ApiKey, withAuth } from "../auth-retry";
 import * as AIError from "../error";
 import { validateImageInput } from "../images/shared";
 import { withInferenceUserAgent } from "../providers/inference-headers";
+import { redactSensitiveInObject } from "../providers/transform-messages";
 import type { ImageContent, Model, Usage } from "../types";
 import { dispatchWhenOpen } from "../utils/dispatch-hold";
 import { getRetryAfterMsFromHeaders } from "../utils/retry-after";
@@ -39,6 +40,7 @@ import {
 	type JudgeOptions,
 	type JudgmentRequest,
 	type JudgmentResult,
+	type JudgmentState,
 	type Questions,
 	tokenUsage,
 } from "./types";
@@ -358,6 +360,9 @@ export class NativeJudge implements Judge {
 		request: JudgmentRequest<Q>,
 		options?: NativeJudgeCallOptions,
 	): Promise<JudgmentResult<Q>> {
+		// The state goes to the wire as is, past the message transforms that redact chat requests.
+		const redacted = redactSensitiveInObject(request.state);
+		if (redacted.changed) request = { ...request, state: redacted.result as JudgmentState };
 		checkJudgmentImages(
 			this.label,
 			this.#wire,
