@@ -1136,6 +1136,46 @@ describe("runGcCommand cold-session archive", () => {
 		expect(stderr).toContain("GC completed with 1 error:");
 		expect(stderr).toContain(`archive: ${session}: artifact move failed`);
 	});
+	test("CLI parses --reclaim, gates it behind --forward-only and refuses to mix it with a phase", async () => {
+		const session = await writeSession(root, "project", "archive-me", "complete", { ageDays: 90 });
+		const archived = path.join(root, "archive", "sessions", "project", "archive-me.jsonl.gz");
+		await runCli([
+			"gc",
+			"--agent-dir",
+			root,
+			"--archive",
+			"--cold-archive-after-days",
+			"30",
+			"--retain-newest-global",
+			"0",
+			"--retain-newest-per-cwd",
+			"0",
+			"--apply",
+		]);
+		expect(await Bun.file(archived).exists()).toBe(true);
+		expect(await Bun.file(session).exists()).toBe(true);
+
+		// Named but unacknowledged: the one-way flag belongs to the step that
+		// gives the live copy up, and nothing is given up without it. The gate
+		// runs in `resolveOptions`, before the gc lock, so it refuses the run
+		// rather than reporting an error from inside one.
+		await expect(runCli(["gc", "--agent-dir", root, "--reclaim", "archive-me", "--apply"])).rejects.toThrow(
+			"--forward-only",
+		);
+		expect(await Bun.file(session).exists()).toBe(true);
+
+		await expect(
+			runCli(["gc", "--agent-dir", root, "--reclaim", "archive-me", "--blobs", "--apply", "--forward-only"]),
+		).rejects.toThrow("--reclaim runs alone");
+		expect(await Bun.file(session).exists()).toBe(true);
+
+		stderrWrites.length = 0;
+		process.exitCode = 0;
+		await runCli(["gc", "--agent-dir", root, "--reclaim", "archive-me", "--apply", "--forward-only"]);
+		expect(stderrWrites.join("")).toBe("");
+		expect(await Bun.file(session).exists()).toBe(false);
+		expect(await Bun.file(archived).exists()).toBe(true);
+	});
 
 	test("does not archive fresh completed sessions that may still be live", async () => {
 		const session = await writeSession(root, "project", "fresh-complete", "complete");
