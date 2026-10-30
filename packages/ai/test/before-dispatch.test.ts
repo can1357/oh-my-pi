@@ -15,7 +15,15 @@ import { clearCustomApis, registerCustomApi, unregisterCustomApis } from "@oh-my
 import * as duoWorkflow from "@oh-my-pi/pi-ai/providers/gitlab-duo-workflow";
 import { createMockModel, type MockContent, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { __providerInFlightForTesting, completeSimple, streamSimple } from "@oh-my-pi/pi-ai/stream";
-import type { Api, AssistantMessage, Context, Model, ModelSpec, SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai/types";
+import type {
+	Api,
+	AssistantMessage,
+	Context,
+	Model,
+	ModelSpec,
+	SimpleStreamOptions,
+	Usage,
+} from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 
@@ -339,6 +347,44 @@ describe("beforeDispatch", () => {
 			},
 		}).result();
 
-		expect(order).toEqual(["hold", "request"]);
+		// Twice before the one request: the dispatch chokepoint, then the
+		// transport wrapper that also covers the attempts after this one.
+		expect(order).toEqual(["hold", "hold", "request"]);
+	});
+
+	// The chokepoint hold covers the attempt the stream layer makes; the
+	// transport's own retries happen after it, and each is another paid request.
+	test("holds every transport attempt, not only the first", async () => {
+		const order: string[] = [];
+		const anthropic = buildModel({
+			id: "claude-retry",
+			name: "Claude Retry",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			baseUrl: "https://api.anthropic.com",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1_000,
+			maxTokens: 16,
+		} satisfies ModelSpec<"anthropic-messages">);
+		let attempts = 0;
+
+		await streamSimple(anthropic, context(), {
+			apiKey: "test-key",
+			maxHttpAttempts: 2,
+			maxRetryDelayMs: 1,
+			fetch: async () => {
+				attempts += 1;
+				order.push(`request-${attempts}`);
+				return new Response("{}", { status: attempts === 1 ? 529 : 400 });
+			},
+			beforeDispatch: () => {
+				order.push("hold");
+			},
+		}).result();
+
+		// The chokepoint's hold, then one per HTTP attempt.
+		expect(order).toEqual(["hold", "hold", "request-1", "hold", "request-2"]);
 	});
 });
