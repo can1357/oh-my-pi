@@ -70,10 +70,18 @@ if "__omp_prelude_loaded__" not in globals():
 
     def _artifact_file(path: str) -> Path | None:
         """This session's file for `artifact://<id>` (`<id>.<tool>.log` in its
-        artifacts dir), or None when the id is not there or no dir is known."""
+        artifacts dir), or None when the id is not there or no dir is known.
+
+        A fork's artifacts arrive by copy, and this kernel is a subprocess that
+        cannot see the host's record of the copies in flight. The listing below
+        is a snapshot: mid-copy it holds part of an inheritance, and before the
+        copy creates its staging tree it holds none of it. So the host is asked
+        first, at the read, which is also where a retained tool and a thread a
+        past cell left running read from."""
         root = _omp_url_roots().get("artifact")
         if not root:
             return None
+        _bridge_call("__artifacts_ready__", {})
         artifact_id = path[11:]
         try:
             names = os.listdir(root)

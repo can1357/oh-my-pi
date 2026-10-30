@@ -1,10 +1,12 @@
 /**
  * The names an artifact copy builds under, in a module of their own.
  *
- * `session-manager.ts` owns the copy; these two names are also what tells
- * everything else that a copy is in flight, and one of those readers is the
- * evaluation worker, which cannot import the session manager without loading
- * the native addon with it.
+ * `session-manager.ts` owns the copy, and the walkers that list a session's
+ * files have to know which directories are a copy's rather than a session's.
+ * They are not a readiness signal: a tree exists only once a copy has started
+ * building, and one left behind by a copy that was killed is kept. Whether a
+ * copy is in flight is asked of the process running it (see
+ * `eval/artifact-readiness.ts`).
  */
 
 /** Suffix of the directories an artifact copy builds itself in. */

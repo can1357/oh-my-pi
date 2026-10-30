@@ -4,7 +4,6 @@ import {
 	type ExecutorBackend,
 	type ExecutorBackendExecOptions,
 	type ExecutorBackendResult,
-	awaitEvalArtifactsSettled,
 	resolveEvalUrlRoots,
 } from "../backend";
 import { namespaceSessionId as sharedNamespace, toExecutorBackendResult } from "../backend-helpers";
@@ -51,9 +50,6 @@ export default {
 	async execute(code: string, opts: ExecutorBackendExecOptions): Promise<ExecutorBackendResult> {
 		const kernelMode = cfgPythonKernelMode.get(opts.session);
 		const identity = resolvePythonKernelIdentity(opts.session);
-		// Before the cell, not inside it: the kernel answers `artifact://<n>`
-		// from a subprocess that cannot see the readiness table.
-		await awaitEvalArtifactsSettled(opts.session, opts.signal);
 		const executorOptions: PythonExecutorOptions = {
 			cwd: identity.cwd,
 			filename: opts.filename,

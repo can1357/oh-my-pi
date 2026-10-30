@@ -4,7 +4,6 @@ import {
 	type ExecutorBackend,
 	type ExecutorBackendExecOptions,
 	type ExecutorBackendResult,
-	awaitEvalArtifactsSettled,
 	resolveEvalUrlRoots,
 } from "../backend";
 import { namespaceSessionId as sharedNamespace, toExecutorBackendResult } from "../backend-helpers";
@@ -39,9 +38,6 @@ export default {
 
 	async execute(code: string, opts: ExecutorBackendExecOptions): Promise<ExecutorBackendResult> {
 		const identity = resolveJsKernelIdentity(opts.session);
-		// Before the cell, not inside it: the helpers that answer
-		// `artifact://<n>` run in a worker that cannot see the readiness table.
-		await awaitEvalArtifactsSettled(opts.session, opts.signal);
 		const result = await executeJs(code, {
 			cwd: opts.cwd,
 			idleTimeoutMs: opts.idleTimeoutMs,

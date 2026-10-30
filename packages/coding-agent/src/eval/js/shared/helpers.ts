@@ -24,6 +24,12 @@ export interface HelperContext {
 	 */
 	localRoots(): Record<string, string>;
 	emitStatus(event: JsStatusEvent): void;
+	/**
+	 * Ask the host whether this session's artifacts have finished arriving.
+	 * Absent where there is no host to ask (a hand-built context in a test),
+	 * which is also where no copy can be running.
+	 */
+	awaitArtifacts?(): Promise<void>;
 }
 
 /**
@@ -140,13 +146,13 @@ function resolveHelperPath(ctx: HelperContext, rawPath: string, op: "read" | "wr
  * native addon), as `resolveUnderRoot` mirrors the local:// handler. A miss, including a dir still being seeded,
  * falls back to the read tool, which resolves through the manager.
  */
-async function resolveArtifactPath(root: string, id: string): Promise<string | undefined> {
-	// Whether the directory is the session's yet is not a question this side
-	// can answer — a staging tree beside it is a hint that is wrong in both
-	// directions, absent while a copy that has announced itself has yet to
-	// create one, and present forever after a copy that was killed. The host
-	// holds the cell until its copies have settled (`awaitEvalArtifactsSettled`)
-	// precisely so that this listing is the session's own.
+async function resolveArtifactPath(ctx: HelperContext, root: string, id: string): Promise<string | undefined> {
+	// Asked of the host, here, where the artifact is read: a reader can be a
+	// tool retained across cells or work a cell left running, and neither is
+	// covered by anything decided when a cell was admitted. The answer is kept
+	// on the other side of the bridge, and nothing on this side — least of all
+	// a staging tree beside the directory — stands in for it.
+	await ctx.awaitArtifacts?.();
 	let files: string[];
 	try {
 		files = await fs.readdir(root);
@@ -191,7 +197,7 @@ async function resolveRegularFile(
 	const artifactRoot = match?.[1].toLowerCase() === "artifact" ? ctx.localRoots().artifact : undefined;
 	const filePath =
 		artifactRoot && match && ARTIFACT_ID_RE.test(match[2])
-			? await resolveArtifactPath(artifactRoot, match[2])
+			? await resolveArtifactPath(ctx, artifactRoot, match[2])
 			: resolveHelperPath(ctx, rawPath, "read");
 	if (filePath === undefined) return undefined;
 	const file = Bun.file(filePath);

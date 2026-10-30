@@ -2,7 +2,9 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils/temp";
-import { awaitEvalArtifactsSettled } from "../../src/eval/backend";
+import { awaitEvalArtifactsSettled, EVAL_ARTIFACTS_READY_BRIDGE_NAME } from "../../src/eval/artifact-readiness";
+import { createHelpers } from "../../src/eval/js/shared/helpers";
+import { callSessionTool } from "../../src/eval/js/tool-bridge";
 import { copySessionArtifacts, whenArtifactCopiesSettle } from "../../src/session/session-manager";
 import type { ToolSession } from "../../src/tools";
 
@@ -49,6 +51,48 @@ describe("eval artifact readiness", () => {
 		await copying;
 		// The whole inheritance, not the part of it that had arrived.
 		expect(await cell).toEqual(["0.bash.log", "1.bash.log", "8.read.log"]);
+		await whenArtifactCopiesSettle(destination);
+	});
+
+	it("holds a helper's artifact read, not the cell that admitted it", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-readiness-");
+		const source = path.join(tempDir.path(), "2026-01-01T00-00-00-000Z_source");
+		const destination = path.join(tempDir.path(), "2026-01-01T00-00-01-000Z_destination");
+		fs.mkdirSync(source, { recursive: true });
+		fs.mkdirSync(destination, { recursive: true });
+		fs.writeFileSync(path.join(source, "0.bash.log"), "INHERITED ZERO");
+		fs.writeFileSync(path.join(source, "1.bash.log"), "INHERITED ONE");
+		fs.writeFileSync(path.join(destination, "8.read.log"), "THE SESSION'S OWN");
+		const session = sessionWithArtifacts(destination);
+
+		// The copy starts after this reader exists — a retained tool, or work a
+		// past cell left running, is in exactly this position.
+		const helpers = createHelpers({
+			cwd: () => tempDir.path(),
+			env: new Map(),
+			localRoots: () => ({ artifact: destination }),
+			emitStatus: () => {},
+			awaitArtifacts: () => callSessionTool(EVAL_ARTIFACTS_READY_BRIDGE_NAME, {}, { session }).then(() => {}),
+		});
+
+		const { promise: held, resolve: release } = Promise.withResolvers<void>();
+		const copying = copySessionArtifacts(`${source}.jsonl`, `${destination}.jsonl`, {
+			stillTheSource: async () => {
+				await held;
+				return true;
+			},
+		});
+		let answered = false;
+		const reading = helpers.read("artifact://1").then(text => {
+			answered = true;
+			return text;
+		});
+		await Promise.resolve();
+		expect(answered).toBe(false);
+
+		release();
+		await copying;
+		expect(await reading).toBe("INHERITED ONE");
 		await whenArtifactCopiesSettle(destination);
 	});
 

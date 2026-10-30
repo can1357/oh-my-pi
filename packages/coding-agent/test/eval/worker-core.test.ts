@@ -24,6 +24,17 @@ function createWorkerHarness(): WorkerHarness {
 	const transport: Transport = {
 		send: message => {
 			queueMicrotask(() => {
+				// Every `artifact://<n>` read asks the host whether this
+				// session's artifacts have finished arriving. No copy exists
+				// here, so the harness answers at once; a test that wants to
+				// see the call still sees it go past.
+				if (message.type === "tool-call" && message.name === "__artifacts_ready__") {
+					queueMicrotask(() => {
+						for (const listener of workerListeners) {
+							listener({ type: "tool-reply", id: message.id, reply: { ok: true, value: "" } });
+						}
+					});
+				}
 				for (const listener of hostListeners) listener(message);
 			});
 		},

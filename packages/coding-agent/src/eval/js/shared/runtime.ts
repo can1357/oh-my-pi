@@ -15,6 +15,7 @@ import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import type { EvalTableColumn } from "@oh-my-pi/pi-tui/tools/eval";
 import { type EvalDisplayOutput, evalImageMetadata } from "../../types";
 import type { EvalPreludeSource } from "../worker-protocol";
+import { EVAL_ARTIFACTS_READY_BRIDGE_NAME } from "../../artifact-readiness-name";
 import { createHelpers, type HelperBundle } from "./helpers";
 import { awaitMaybePromise, indirectEval } from "./indirect-eval";
 import { LocalModuleLoader } from "./local-module-loader";
@@ -396,6 +397,18 @@ export class JsRuntime {
 			env: this.#env,
 			localRoots: () => this.#als.getStore()?.localRoots ?? this.#localRoots,
 			emitStatus: event => this.#activeHooks("emitStatus")?.onDisplay({ type: "status", event }),
+			awaitArtifacts: async () => {
+				// A host that cannot answer the question is not a reason to
+				// refuse the read: the embedders that run copies are the ones
+				// that answer it, and the rest have none to wait for.
+				const hooks = this.#activeHooks("tool");
+				if (!hooks) return;
+				try {
+					await hooks.callTool(EVAL_ARTIFACTS_READY_BRIDGE_NAME, {});
+				} catch {
+					// Left to the read itself to fail, if it fails at all.
+				}
+			},
 		});
 		this.#initialGlobalKeys = new Set(Object.getOwnPropertyNames(globalThis));
 		this.#install(opts.extraGlobals);
