@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { Box } from "../components/box";
 import { Disclosure } from "../components/disclosure";
 import { type Component } from "../tui";
@@ -14,11 +15,11 @@ import { noticeRow } from "../chrome/transcript-notice";
 
 /** Divider labels per compaction method; unknown/legacy methods fall back to "compacted". */
 const COMPACTION_METHOD_LABELS: Record<string, string> = {
-	remote: "remote-compacted",
-	soft: "soft-compacted",
-	handoff: "handed-off",
-	snapcompact: "snap-compacted",
-	shake: "shaken",
+	remote: __ompTranslate("remote-compacted"),
+	soft: __ompTranslate("soft-compacted"),
+	handoff: __ompTranslate("handed-off"),
+	snapcompact: __ompTranslate("snap-compacted"),
+	shake: __ompTranslate("shaken"),
 };
 
 /** `256K→20K` amount badge, or undefined when the entry predates `tokensAfter`. */
@@ -217,13 +218,16 @@ export class CompactionSummaryMessageComponent extends SummaryMessageComponent {
 
 /** The divider chip: `Soft-compacted · 19K → 6.9K tokens`, the arrow dimmed. */
 function compactionNativeLabel(message: CompactionSummaryMessage): TspSpan[] {
-	const name = (message.method && COMPACTION_METHOD_LABELS[message.method]) || "compacted";
+	const name = (message.method && COMPACTION_METHOD_LABELS[message.method]) || __ompTranslate("compacted");
 	const spans = [span(`${name[0]!.toUpperCase()}${name.slice(1)}`, "muted")];
 	if (message.tokensAfter !== undefined && message.tokensBefore > 0) {
 		spans.push(
 			span(` · ${formatNumber(message.tokensBefore)}`, "muted mono"),
 			span(" → ", "dim"),
-			span(`${formatNumber(message.tokensAfter)} tokens`, "muted mono"),
+			span(
+				__ompTranslate("{0} tokens\u0004usage.tokens.count", `${formatNumber(message.tokensAfter)}`),
+				"muted mono",
+			),
 		);
 	}
 	if (message.warning) spans.push(span(` ${theme.icon.warning}`, "warning"));
@@ -235,8 +239,8 @@ function compactionNativeDetail(message: CompactionSummaryMessage): NativeChild[
 	const frames = message.images?.length ?? 0;
 	const caption =
 		frames > 0
-			? `Summary · ${frames} snapcompact frame${frames === 1 ? "" : "s"} attached`
-			: "Summary of the earlier conversation";
+			? __ompTranslate("Summary · {0} snapcompact frame{1} attached", `${frames}`, `${frames === 1 ? "" : "s"}`)
+			: __ompTranslate("Summary of the earlier conversation");
 	const detail: NativeChild[] = [text([span(caption, "dim")], { role: "omp.compaction.caption", key: "caption" })];
 	if (message.warning) detail.push(noticeRow("warning", message.warning, { key: "warning" }));
 	detail.push(md(message.summary, { key: "summary" }));
@@ -244,7 +248,7 @@ function compactionNativeDetail(message: CompactionSummaryMessage): NativeChild[
 }
 
 function compactionLabel(message: CompactionSummaryMessage): string {
-	const name = (message.method && COMPACTION_METHOD_LABELS[message.method]) || "compacted";
+	const name = (message.method && COMPACTION_METHOD_LABELS[message.method]) || __ompTranslate("compacted");
 	let label = `${theme.icon.camera} ${name}`;
 	const amount = compactionAmount(message);
 	if (amount) label += `${theme.sep.dot}${amount}`;
@@ -256,15 +260,23 @@ function compactionDetailMarkdown(message: CompactionSummaryMessage): string {
 	const tokenLine =
 		message.tokensBefore > 0
 			? message.tokensAfter !== undefined
-				? `Compacted from ${message.tokensBefore.toLocaleString()} to ${message.tokensAfter.toLocaleString()} tokens`
-				: `Compacted from ${message.tokensBefore.toLocaleString()} tokens`
+				? __ompTranslate(
+						"Compacted from {0} to {1} tokens",
+						`${message.tokensBefore.toLocaleString()}`,
+						`${message.tokensAfter.toLocaleString()}`,
+					)
+				: __ompTranslate("Compacted from {0} tokens", `${message.tokensBefore.toLocaleString()}`)
 			: message.tokensAfter !== undefined
-				? `Compacted to ${message.tokensAfter.toLocaleString()} tokens`
-				: "Compacted context";
+				? __ompTranslate("Compacted to {0} tokens", `${message.tokensAfter.toLocaleString()}`)
+				: __ompTranslate("Compacted context");
 	const frameCount = message.images?.length ?? 0;
 	const frameNote =
-		frameCount > 0 ? `\n\n_${frameCount} snapcompact frame${frameCount === 1 ? "" : "s"} attached_` : "";
-	const warningNote = message.warning ? `\n\n${theme.icon.warning} **Warning:** ${message.warning}` : "";
+		frameCount > 0
+			? __ompTranslate("\n\n_{0} snapcompact frame{1} attached_", `${frameCount}`, `${frameCount === 1 ? "" : "s"}`)
+			: "";
+	const warningNote = message.warning
+		? __ompTranslate("\n\n{0} **Warning:** {1}", `${theme.icon.warning}`, `${message.warning}`)
+		: "";
 	return `**${tokenLine}**${warningNote}\n\n${message.summary}${frameNote}`;
 }
 
@@ -276,12 +288,15 @@ function compactionDetailMarkdown(message: CompactionSummaryMessage): string {
 export class HandoffSummaryMessageComponent extends SummaryMessageComponent {
 	constructor(message: CustomMessage<unknown>) {
 		super({
-			label: () => `${theme.icon.context} handed-off`,
-			nativeLabel: () => [span("Handed off", "muted")],
+			label: () => __ompTranslate("{0} handed-off", `${theme.icon.context}`),
+			nativeLabel: () => [span(__ompTranslate("Handed off"), "muted")],
 			role: "omp.handoff",
 			detailMarkdown: () => {
 				const document = extractHandoffDocument(getCustomMessageText(message));
-				return `**Handoff context**\n\n${document || "_No handoff content._"}`;
+				return __ompTranslate(
+					"**Handoff context**\n\n{0}",
+					`${document || __ompTranslate("_No handoff content._")}`,
+				);
 			},
 		});
 	}
@@ -305,10 +320,10 @@ export function createHandoffSummaryMessageComponent(
 export class BranchSummaryMessageComponent extends SummaryMessageComponent {
 	constructor(message: BranchSummaryMessage) {
 		super({
-			label: () => `${theme.icon.branch} branch`,
-			nativeLabel: () => [span("Branch summarized", "muted")],
+			label: () => __ompTranslate("{0} branch", `${theme.icon.branch}`),
+			nativeLabel: () => [span(__ompTranslate("Branch summarized"), "muted")],
 			role: "omp.branch",
-			detailMarkdown: () => `**Branch summary**\n\n${message.summary}`,
+			detailMarkdown: () => __ompTranslate("**Branch summary**\n\n{0}", `${message.summary}`),
 		});
 	}
 }

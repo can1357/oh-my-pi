@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type Component, Markdown, Text, type TUI } from "../index";
 import { replaceTabs } from "../render/render-utils";
 import { getMarkdownTheme, theme } from "../theme/theme";
@@ -159,34 +160,46 @@ export class BtwPanelComponent extends OverlayPanel {
 
 	#describeBody(): NativeNode {
 		if (this.#state === "error") {
-			return text([span(sanitizeErrorLine(this.#errorMessage ?? "Unknown error"), "error")], { wrap: "word" });
+			return text([span(sanitizeErrorLine(this.#errorMessage ?? __ompTranslate("Unknown error")), "error")], {
+				wrap: "word",
+			});
 		}
 		const answer = this.#visibleAnswer;
 		if (answer) return md(answer, { stream: this.#state === "running" });
-		const waiting = this.#state === "running" ? `${theme.status.pending} Waiting for response…` : "No text returned.";
+		const waiting =
+			this.#state === "running"
+				? __ompTranslate("{0} Waiting for response…", `${theme.status.pending}`)
+				: __ompTranslate("No text returned.");
 		return text([span(waiting, "dim")]);
 	}
 
 	#describeFooter(canFollowUp: boolean, canBranch: boolean): NativeNode {
-		const esc: NativeHint = { keys: boundKeys("app.interrupt", ["escape"]).slice(0, 1), label: "to close" };
+		const esc: NativeHint = {
+			keys: boundKeys("app.interrupt", ["escape"]).slice(0, 1),
+			label: __ompTranslate("to close"),
+		};
 		switch (this.#state) {
 			case "running":
-				return hintsRow([{ ...esc, label: "to cancel" }]);
+				return hintsRow([{ ...esc, label: __ompTranslate("to cancel") }]);
 			case "complete": {
 				const hints: NativeHint[] = [];
-				if (this.isCopyable()) hints.push({ keys: ["c"], label: this.#copied ? "to copy again" : "to copy" });
-				if (canFollowUp) hints.push({ keys: ["f"], label: "to follow up" });
-				if (canBranch) hints.push({ keys: ["b"], label: "to branch" });
+				if (this.isCopyable())
+					hints.push({
+						keys: ["c"],
+						label: this.#copied ? __ompTranslate("to copy again") : __ompTranslate("to copy"),
+					});
+				if (canFollowUp) hints.push({ keys: ["f"], label: __ompTranslate("to follow up") });
+				if (canBranch) hints.push({ keys: ["b"], label: __ompTranslate("to branch") });
 				hints.push(esc);
 				if (!this.#copied) return hintsRow(hints);
-				return statusHintsRow([span("✓ Copied to clipboard", "success")], hints);
+				return statusHintsRow([span(__ompTranslate("✓ Copied to clipboard"), "success")], hints);
 			}
 			case "branching":
-				return text([span(`${theme.status.pending} Branching to chat…`, "muted")]);
+				return text([span(__ompTranslate("{0} Branching to chat…", `${theme.status.pending}`), "muted")]);
 			case "aborted":
-				return statusHintsRow([span(`${theme.status.warning} Cancelled`, "warning")], [esc]);
+				return statusHintsRow([span(__ompTranslate("{0} Cancelled", `${theme.status.warning}`), "warning")], [esc]);
 			case "error":
-				return statusHintsRow([span(`${theme.status.error} Error`, "error")], [esc]);
+				return statusHintsRow([span(__ompTranslate("{0} Error", `${theme.status.error}`), "error")], [esc]);
 		}
 	}
 
@@ -205,36 +218,51 @@ export class BtwPanelComponent extends OverlayPanel {
 		const esc = interruptKey();
 		switch (this.#state) {
 			case "running":
-				return theme.fg("muted", `${esc} to cancel`);
+				return theme.fg("muted", __ompTranslate("{0} to cancel", `${esc}`));
 			case "complete": {
 				const actions: string[] = [];
 				const copyKey = formatKeyHint("c");
-				if (this.isCopyable()) actions.push(this.#copied ? `${copyKey} to copy again` : `${copyKey} to copy`);
-				if (this.#canFollowUp?.()) actions.push(`${formatKeyHint("f")} to follow up`);
-				if (this.#canBranch?.() ?? this.isBranchable()) actions.push(`${formatKeyHint("b")} to branch`);
-				actions.push(`${esc} to close`);
+				if (this.isCopyable())
+					actions.push(
+						this.#copied
+							? __ompTranslate("{0} to copy again", `${copyKey}`)
+							: __ompTranslate("{0} to copy", `${copyKey}`),
+					);
+				if (this.#canFollowUp?.()) actions.push(__ompTranslate("{0} to follow up", `${formatKeyHint("f")}`));
+				if (this.#canBranch?.() ?? this.isBranchable())
+					actions.push(__ompTranslate("{0} to branch", `${formatKeyHint("b")}`));
+				actions.push(__ompTranslate("{0} to close", `${esc}`));
 				if (this.#copied) {
-					return `${theme.fg("success", "✓ Copied to clipboard")}${theme.fg("muted", actions.length > 0 ? ` · ${actions.join(" · ")}` : "")}`;
+					return `${theme.fg("success", __ompTranslate("✓ Copied to clipboard"))}${theme.fg("muted", actions.length > 0 ? ` · ${actions.join(" · ")}` : "")}`;
 				}
 				return theme.fg("muted", actions.join(" · "));
 			}
 			case "branching":
-				return theme.fg("muted", `${theme.status.pending} Branching to chat…`);
+				return theme.fg("muted", __ompTranslate("{0} Branching to chat…", `${theme.status.pending}`));
 			case "aborted":
-				return theme.fg("warning", `${theme.status.warning} Cancelled · ${esc} to close`);
+				return theme.fg(
+					"warning",
+					__ompTranslate("{0} Cancelled · {1} to close", `${theme.status.warning}`, `${esc}`),
+				);
 			case "error":
-				return theme.fg("error", `${theme.status.error} Error · ${esc} to close`);
+				return theme.fg("error", __ompTranslate("{0} Error · {1} to close", `${theme.status.error}`, `${esc}`));
 		}
 	}
 
 	#contentComponent(): Component {
 		if (this.#state === "error") {
-			return new Text(theme.fg("error", sanitizeErrorLine(this.#errorMessage ?? "Unknown error")), 0, 0);
+			return new Text(
+				theme.fg("error", sanitizeErrorLine(this.#errorMessage ?? __ompTranslate("Unknown error"))),
+				0,
+				0,
+			);
 		}
 		const text = this.#visibleAnswer;
 		if (!text) {
 			const waiting =
-				this.#state === "running" ? `${theme.status.pending} Waiting for response…` : "No text returned.";
+				this.#state === "running"
+					? __ompTranslate("{0} Waiting for response…", `${theme.status.pending}`)
+					: __ompTranslate("No text returned.");
 			return new Text(theme.fg("dim", waiting), 0, 0);
 		}
 		return new Markdown(text, 0, 0, getMarkdownTheme());

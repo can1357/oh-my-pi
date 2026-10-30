@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import { Container } from "../tui";
 import { Spacer } from "../components/spacer";
@@ -99,9 +100,14 @@ export function formatTurnUsage(summary: TurnUsageSummary): { text: string; titl
 	const cost = summary.cost > 0 ? (summary.cost < 0.005 ? "<$0.01" : `$${summary.cost.toFixed(2)}`) : undefined;
 	const time = summary.elapsedMs === undefined ? undefined : formatDuration(summary.elapsedMs);
 	const text = [time, `${formatNumber(tokens)} tok`, cost].filter(part => part !== undefined).join(" · ");
-	const exact = `${tokens.toLocaleString("en-US")} tokens (${summary.input.toLocaleString("en-US")} in · ${summary.output.toLocaleString("en-US")} out)`;
+	const exact = __ompTranslate(
+		"{0} tokens ({1} in · {2} out)",
+		`${tokens.toLocaleString("en-US")}`,
+		`${summary.input.toLocaleString("en-US")}`,
+		`${summary.output.toLocaleString("en-US")}`,
+	);
 	const title = [time, exact, cost].filter(part => part !== undefined).join(" · ");
-	return { text: `${text} this turn`, title: `This turn: ${title}` };
+	return { text: __ompTranslate("{0} this turn", `${text}`), title: __ompTranslate("This turn: {0}", `${title}`) };
 }
 
 /** Output tokens per second over the whole request; undefined when the duration is too short to mean anything. */
@@ -210,8 +216,11 @@ class UsageRowBlock extends Container {
 		if (this.#turnElapsedMs !== undefined && this.#turnElapsedMs > 0) {
 			parts.push(`Δ ${formatDuration(Math.round(this.#turnElapsedMs))}`);
 		}
-		parts.push(`in ${formatNumber(usage.input + usage.cacheWrite)}`, `out ${formatNumber(usage.output)}`);
-		if (usage.cacheRead > 0) parts.push(`cache ${formatNumber(usage.cacheRead)}`);
+		parts.push(
+			__ompTranslate("in {0}\u0004usage.tokens.input", `${formatNumber(usage.input + usage.cacheWrite)}`),
+			__ompTranslate("out {0}", `${formatNumber(usage.output)}`),
+		);
+		if (usage.cacheRead > 0) parts.push(__ompTranslate("cache {0}", `${formatNumber(usage.cacheRead)}`));
 		if (this.#ttftMs && this.#ttftMs > 0) parts.push(`ttft ${(this.#ttftMs / 1000).toFixed(1)}s`);
 		const children: NativeChild[] = [text([span(parts.join(" · "), "dim")])];
 		const tokPerSec = usageThroughput(usage, this.#durationMs);

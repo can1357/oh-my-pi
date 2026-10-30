@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as fs from "node:fs";
 import * as path from "node:path";
 // Subpaths, not the `@oh-my-pi/pi-utils` barrel: the barrel loads the native
@@ -94,153 +95,153 @@ export const KEYBINDINGS = {
 	...TUI_KEYBINDINGS,
 	"app.interrupt": {
 		defaultKeys: "escape",
-		description: "Interrupt current operation",
+		description: __ompTranslate("Interrupt current operation"),
 	},
 	"app.clear": {
 		defaultKeys: "ctrl+c",
-		description: "Clear screen or cancel",
+		description: __ompTranslate("Clear screen or cancel"),
 	},
 	"app.exit": {
 		defaultKeys: "ctrl+d",
-		description: "Exit application",
+		description: __ompTranslate("Exit application"),
 	},
 	"app.suspend": {
 		defaultKeys: "ctrl+z",
-		description: "Suspend application",
+		description: __ompTranslate("Suspend application"),
 	},
 	"app.display.reset": {
 		defaultKeys: "alt+l",
-		description: "Reset terminal display",
+		description: __ompTranslate("Reset terminal display"),
 	},
 	"app.thinking.cycle": {
 		defaultKeys: "shift+tab",
-		description: "Cycle thinking level",
+		description: __ompTranslate("Cycle thinking level"),
 	},
 	"app.thinking.toggle": {
 		defaultKeys: "ctrl+t",
-		description: "Toggle thinking mode",
+		description: __ompTranslate("Toggle thinking mode"),
 	},
 	"app.model.cycleForward": {
 		defaultKeys: "ctrl+p",
-		description: "Cycle to next model",
+		description: __ompTranslate("Cycle to next model"),
 	},
 	"app.model.cycleBackward": {
 		defaultKeys: "shift+ctrl+p",
-		description: "Cycle to previous model",
+		description: __ompTranslate("Cycle to previous model"),
 	},
 	"app.model.select": {
 		defaultKeys: "alt+m",
-		description: "Select model",
+		description: __ompTranslate("Select model"),
 	},
 	"app.model.selectTemporary": {
 		defaultKeys: "alt+p",
-		description: "Select temporary model for current session",
+		description: __ompTranslate("Select temporary model for current session"),
 	},
 	"app.tools.expand": {
 		defaultKeys: "ctrl+o",
-		description: "Expand tools",
+		description: __ompTranslate("Expand tools"),
 	},
 	"app.tools.toggleVisibility": {
 		defaultKeys: "ctrl+shift+o",
-		description: "Show or hide tool activity",
+		description: __ompTranslate("Show or hide tool activity"),
 	},
 	"app.ask.hide": {
 		defaultKeys: "alt+h",
-		description: "Hide or show a pending ask dialog",
+		description: __ompTranslate("Hide or show a pending ask dialog"),
 	},
 	"app.approval.approve": {
 		// A chord, not Enter: an Enter typed for the composer as the prompt appears must not approve.
 		// Ctrl+Q backs up Ctrl+Enter, which Windows Terminal cannot deliver (#1903).
 		defaultKeys: ["ctrl+enter", "ctrl+q"],
-		description: "Approve a pending tool call",
+		description: __ompTranslate("Approve a pending tool call"),
 	},
 	"app.editor.external": {
 		defaultKeys: "ctrl+g",
-		description: "Open external editor",
+		description: __ompTranslate("Open external editor"),
 	},
 	"app.local.open": {
 		defaultKeys: "alt+g",
-		description: "Open a local:// file in external editor",
+		description: __ompTranslate("Open a local:// file in external editor"),
 	},
 	"app.message.followUp": {
 		// Ctrl+Enter is preserved for terminals that deliver it (Kitty/iTerm2/WezTerm/Ghostty),
 		// but Windows Terminal does not emit a distinct event for Ctrl+Enter — Ctrl+Q is listed
 		// first so the default binding works there without remapping (#1903).
 		defaultKeys: ["ctrl+q", "ctrl+enter"],
-		description: "Send follow-up message",
+		description: __ompTranslate("Send follow-up message"),
 	},
 	"app.retry": {
 		// F5 leads: it is delivered verbatim by every terminal, unlike modified
 		// Enter chords (Ctrl/Alt/Cmd+Enter), which various terminals swallow or
 		// fold into plain Enter. The idle "F5 to Retry" status row advertises it.
 		defaultKeys: ["f5", "alt+r"],
-		description: "Retry last failed assistant turn",
+		description: __ompTranslate("Retry last failed assistant turn"),
 	},
 	"app.message.dequeue": {
 		// Shift+Up is listed alongside Alt+Up because macOS Terminal.app consumes Option
 		// for character composition, leaving Alt+Up unreachable there.
 		defaultKeys: ["alt+up", "shift+up"],
-		description: "Dequeue message",
+		description: __ompTranslate("Dequeue message"),
 	},
 	"app.clipboard.pasteImage": {
 		defaultKeys: getDefaultPasteImageKeys(),
-		description: "Paste image or text from clipboard",
+		description: __ompTranslate("Paste image or text from clipboard"),
 	},
 	"app.clipboard.pasteTextRaw": {
 		defaultKeys: ["ctrl+shift+v", "alt+shift+v"],
-		description: "Paste text from clipboard as raw text (no collapse)",
+		description: __ompTranslate("Paste text from clipboard as raw text (no collapse)"),
 	},
 	"app.clipboard.copyLine": {
 		defaultKeys: "alt+shift+l",
-		description: "Copy current line",
+		description: __ompTranslate("Copy current line"),
 	},
 	"app.clipboard.copyPrompt": {
 		defaultKeys: "alt+shift+c",
-		description: "Copy prompt",
+		description: __ompTranslate("Copy prompt"),
 	},
 	"app.session.new": {
 		defaultKeys: [],
-		description: "Create new session",
+		description: __ompTranslate("Create new session"),
 	},
 	"app.session.tree": {
 		defaultKeys: [],
-		description: "Show session tree",
+		description: __ompTranslate("Show session tree"),
 	},
 	"app.session.fork": {
 		defaultKeys: [],
-		description: "Fork session",
+		description: __ompTranslate("Fork session"),
 	},
 	"app.session.resume": {
 		defaultKeys: [],
-		description: "Resume session",
+		description: __ompTranslate("Resume session"),
 	},
 	"app.agents.hub": {
 		defaultKeys: "alt+a",
-		description: "Open the agent hub",
+		description: __ompTranslate("Open the agent hub"),
 	},
 	"app.session.observe": {
 		defaultKeys: "ctrl+s",
-		description: "Open the agent hub",
+		description: __ompTranslate("Open the agent hub"),
 	},
 	"app.session.togglePath": {
 		defaultKeys: "ctrl+p",
-		description: "Toggle session path display",
+		description: __ompTranslate("Toggle session path display"),
 	},
 	"app.session.toggleSort": {
 		defaultKeys: "ctrl+s",
-		description: "Toggle session sort order",
+		description: __ompTranslate("Toggle session sort order"),
 	},
 	"app.session.rename": {
 		defaultKeys: "ctrl+r",
-		description: "Rename session",
+		description: __ompTranslate("Rename session"),
 	},
 	"app.session.delete": {
 		defaultKeys: "ctrl+d",
-		description: "Delete session",
+		description: __ompTranslate("Delete session"),
 	},
 	"app.session.deleteNoninvasive": {
 		defaultKeys: "ctrl+backspace",
-		description: "Delete session (non-invasive)",
+		description: __ompTranslate("Delete session (non-invasive)"),
 	},
 	"app.session.pin": {
 		defaultKeys: "alt+k",
@@ -252,19 +253,19 @@ export const KEYBINDINGS = {
 	},
 	"app.tree.previousBranch": {
 		defaultKeys: [],
-		description: "Jump to the previous branch in /tree",
+		description: __ompTranslate("Jump to the previous branch in /tree"),
 	},
 	"app.tree.nextBranch": {
 		defaultKeys: [],
-		description: "Jump to the next branch in /tree",
+		description: __ompTranslate("Jump to the next branch in /tree"),
 	},
 	"app.plan.toggle": {
 		defaultKeys: "alt+shift+p",
-		description: "Toggle plan mode",
+		description: __ompTranslate("Toggle plan mode"),
 	},
 	"app.history.search": {
 		defaultKeys: "ctrl+r",
-		description: "Search history",
+		description: __ompTranslate("Search history"),
 	},
 	"app.links.hint": {
 		defaultKeys: "alt+o",
@@ -272,15 +273,15 @@ export const KEYBINDINGS = {
 	},
 	"app.stt.pushToTalk": {
 		defaultKeys: "space",
-		description: "Hold to record speech-to-text",
+		description: __ompTranslate("Hold to record speech-to-text"),
 	},
 	"app.stt.toggle": {
 		defaultKeys: [],
-		description: "Toggle speech-to-text recording",
+		description: __ompTranslate("Toggle speech-to-text recording"),
 	},
 	"app.live.toggle": {
 		defaultKeys: "ctrl+l",
-		description: "Start or stop live voice mode (/live)",
+		description: __ompTranslate("Start or stop live voice mode (/live)"),
 	},
 } as const satisfies KeybindingDefinitions;
 

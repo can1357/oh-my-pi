@@ -2,6 +2,7 @@
  * Generic selector component for hooks.
  * Displays a list of string options with keyboard navigation.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import {
 	Container,
 	Ellipsis,
@@ -296,7 +297,7 @@ export class HookSelectorComponent extends OverlayPanel {
 			this.#countdown = new CountdownTimer(
 				opts.timeout,
 				opts.tui,
-				s => (this.title = `${this.#baseTitle} (${s}s)`),
+				s => (this.title = __ompTranslate("{0} ({1}s)", `${this.#baseTitle}`, `${s}`)),
 				() => {
 					opts?.onTimeout?.();
 					// Auto-select current option on timeout (typically the first/recommended option)
@@ -320,7 +321,12 @@ export class HookSelectorComponent extends OverlayPanel {
 		this.addChild(new Spacer(1));
 		const controlsHint =
 			opts?.helpText ??
-			`${editorKeys("tui.select.up", "tui.select.down")} navigate  ${formatKeyHint("enter")} select  ${editorKey("tui.select.cancel")} cancel`;
+			__ompTranslate(
+				"{0} navigate  {1} select  {2} cancel",
+				`${editorKeys("tui.select.up", "tui.select.down")}`,
+				`${formatKeyHint("enter")}`,
+				`${editorKey("tui.select.cancel")}`,
+			);
 		this.addChild(new Text(theme.fg("dim", controlsHint), 0, 0));
 		this.addChild(new Spacer(1));
 
@@ -714,7 +720,7 @@ export class HookSelectorComponent extends OverlayPanel {
 		const result = dockedPicker({
 			title: fixed.title,
 			...(this.#detailLines.length > 0 ? { subtitle: plainText(this.#detailLines.join("\n")) } : {}),
-			noun: "options",
+			noun: __ompTranslate("options"),
 			size: "md",
 			layout: "rows",
 			preview: "none",
@@ -724,8 +730,8 @@ export class HookSelectorComponent extends OverlayPanel {
 			selected: selected ?? null,
 			...(checkbox ? { current: [...this.#checkedIndices].map(String) } : {}),
 			total: this.#options.length,
-			empty: "No matching options",
-			actions: [pickerAction("confirm", "Select", "enter", { primary: true }), CLOSE_ACTION],
+			empty: __ompTranslate("No matching options"),
+			actions: [pickerAction("confirm", __ompTranslate("Select"), "enter", { primary: true }), CLOSE_ACTION],
 		});
 		this.#pickerMemo = { items, selected, query, cursor, node: result };
 		return result;
@@ -778,7 +784,7 @@ export class HookSelectorComponent extends OverlayPanel {
 				{
 					selected: selectedItem && !this.#menu.isDisabled(selectedItem) ? (selected ?? null) : null,
 					filter: query.trim() || undefined,
-					empty: "No matching options",
+					empty: __ompTranslate("No matching options"),
 					max: { lines: this.#maxVisible },
 				},
 				rows,
@@ -787,7 +793,12 @@ export class HookSelectorComponent extends OverlayPanel {
 		);
 		if (query) {
 			children.push(
-				node("text", { spans: [span("Search: ", "dim"), span(query)], wrap: "none" }, undefined, "search"),
+				node(
+					"text",
+					{ spans: [span(__ompTranslate("Search: "), "dim"), span(query)], wrap: "none" },
+					undefined,
+					"search",
+				),
 			);
 		}
 		children.push(fixed.hints);

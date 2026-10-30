@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { DeviceType } from "@huggingface/transformers";
 import { $env } from "@oh-my-pi/pi-utils";
 
@@ -95,21 +96,33 @@ export const TINY_MODEL_DEVICE_SETTING_VALUES = [
 
 /** Submenu metadata for the `providers.tinyModelDevice` setting. */
 export const TINY_MODEL_DEVICE_SETTING_OPTIONS = [
-	{ value: "default", label: "Default", description: "CPU-only inference" },
-	{ value: "gpu", label: "GPU", description: "Accelerated provider (WebGPU/Metal, CUDA, or DirectML)" },
+	{
+		value: "default",
+		label: __ompTranslate("Default\u0004settings.value.default"),
+		description: "CPU-only inference",
+	},
+	{
+		value: "gpu",
+		label: "GPU",
+		description: __ompTranslate("Accelerated provider (WebGPU/Metal, CUDA, or DirectML)"),
+	},
 	{ value: "cpu", label: "CPU", description: "CPU-only inference" },
-	{ value: MLX_DEVICE, label: "MLX", description: "Apple silicon GPU via mlx-lm (Python subprocess; macOS arm64)" },
-	{ value: "metal", label: "Metal", description: "Alias for MLX" },
-	{ value: "webgpu", label: "WebGPU", description: "WebGPU/Metal backend" },
+	{
+		value: MLX_DEVICE,
+		label: "MLX",
+		description: __ompTranslate("Apple silicon GPU via mlx-lm (Python subprocess; macOS arm64)"),
+	},
+	{ value: "metal", label: "Metal", description: __ompTranslate("Alias for MLX") },
+	{ value: "webgpu", label: "WebGPU", description: __ompTranslate("WebGPU/Metal backend") },
 	{ value: "cuda", label: "CUDA", description: "NVIDIA CUDA (Linux x64)" },
-	{ value: "dml", label: "DirectML", description: "DirectML backend (Windows)" },
-	{ value: "coreml", label: "CoreML", description: "Apple CoreML (opt-in; can fail to load)" },
-	{ value: "auto", label: "Auto", description: "Let ONNX Runtime choose a provider" },
-	{ value: "wasm", label: "WASM", description: "WebAssembly backend" },
-	{ value: "webnn", label: "WebNN", description: "WebNN backend" },
-	{ value: "webnn-gpu", label: "WebNN GPU", description: "WebNN GPU device" },
-	{ value: "webnn-cpu", label: "WebNN CPU", description: "WebNN CPU device" },
-	{ value: "webnn-npu", label: "WebNN NPU", description: "WebNN NPU device" },
+	{ value: "dml", label: "DirectML", description: __ompTranslate("DirectML backend (Windows)") },
+	{ value: "coreml", label: "CoreML", description: __ompTranslate("Apple CoreML (opt-in; can fail to load)") },
+	{ value: "auto", label: __ompTranslate("Auto"), description: __ompTranslate("Let ONNX Runtime choose a provider") },
+	{ value: "wasm", label: "WASM", description: __ompTranslate("WebAssembly backend") },
+	{ value: "webnn", label: "WebNN", description: __ompTranslate("WebNN backend") },
+	{ value: "webnn-gpu", label: "WebNN GPU", description: __ompTranslate("WebNN GPU device") },
+	{ value: "webnn-cpu", label: "WebNN CPU", description: __ompTranslate("WebNN CPU device") },
+	{ value: "webnn-npu", label: "WebNN NPU", description: __ompTranslate("WebNN NPU device") },
 ] as const satisfies ReadonlyArray<{
 	value: (typeof TINY_MODEL_DEVICE_SETTING_VALUES)[number];
 	label: string;

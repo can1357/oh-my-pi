@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 type PendingInput = {
 	providerId: string;
 	resolve: (value: string) => void;
@@ -13,7 +14,7 @@ export class OAuthManualInputManager {
 
 	waitForInput(providerId: string): Promise<string> {
 		if (this.#pending) {
-			this.clear("Manual OAuth input superseded by a new login");
+			this.clear(__ompTranslate("Manual OAuth input superseded by a new login"));
 		}
 
 		const pending = this.#createPending(providerId);
@@ -47,7 +48,7 @@ export class OAuthManualInputManager {
 		return true;
 	}
 
-	clear(reason = "Manual OAuth input cleared"): void {
+	clear(reason = __ompTranslate("Manual OAuth input cleared")): void {
 		if (!this.#pending) return;
 		const { reject } = this.#pending;
 		this.#pending = undefined;

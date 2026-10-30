@@ -5,6 +5,7 @@
  * The room key lives only in the link fragment; the relay sees opaque bytes.
  * Sealed layout: `[12B IV][ciphertext+tag]`.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
 import type { WireFrame } from "@oh-my-pi/pi-wire";
 
 const AES_ALGORITHM = "AES-GCM";
@@ -21,7 +22,7 @@ export function generateRoomKey(): Uint8Array {
 
 export function importRoomKey(raw: Uint8Array): Promise<CryptoKey> {
 	if (raw.byteLength !== KEY_LENGTH) {
-		throw new Error(`Room key must be ${KEY_LENGTH} bytes, got ${raw.byteLength}`);
+		throw new Error(__ompTranslate("Room key must be {0} bytes, got {1}", `${KEY_LENGTH}`, `${raw.byteLength}`));
 	}
 	return crypto.subtle.importKey("raw", asStrict(raw), AES_ALGORITHM, false, ["encrypt", "decrypt"]);
 }
@@ -40,7 +41,7 @@ export async function seal(key: CryptoKey, frame: WireFrame): Promise<Uint8Array
 /** Inverse of {@link seal}. Throws on auth failure or malformed input. */
 export async function open(key: CryptoKey, data: Uint8Array): Promise<WireFrame> {
 	if (data.byteLength <= IV_LENGTH) {
-		throw new Error("Sealed frame too short");
+		throw new Error(__ompTranslate("Sealed frame too short"));
 	}
 	const iv = asStrict(data.subarray(0, IV_LENGTH));
 	const ciphertext = asStrict(data.subarray(IV_LENGTH));

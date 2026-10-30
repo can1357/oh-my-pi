@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { TspProps } from "@oh-my-pi/pi-wire";
 import { formatTooltipKey } from "../key-hint-format";
 import type { KeyId } from "../keys";
@@ -69,7 +70,7 @@ export function describeWorkingRow(spec: WorkingRowSpec, cx: DescribeContext, no
 	);
 	if (variant?.kind === "compaction") children.push(node("progress", { value: null }, undefined, "progress"));
 	if (spec.interruptKey !== undefined) {
-		const verb = variant?.kind === "retry" ? "Cancel" : "Stop";
+		const verb = variant?.kind === "retry" ? __ompTranslate("Cancel") : __ompTranslate("Stop");
 		children.push(
 			node(
 				"row",
@@ -126,7 +127,7 @@ export class Loader extends Text {
 		ui: TUI,
 		private spinnerColorFn: ColorFn,
 		private messageColorFn: LoaderMessageColorFn,
-		private message: string | (() => string) = "Loading...",
+		private message: string | (() => string) = __ompTranslate("Loading..."),
 		spinnerFrames?: string[],
 	) {
 		super("", 1, 0);

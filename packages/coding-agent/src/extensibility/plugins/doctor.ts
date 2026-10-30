@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { $which } from "@oh-my-pi/pi-utils";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import type { DoctorCheck } from "./types";
@@ -7,9 +8,9 @@ export async function runDoctorChecks(): Promise<DoctorCheck[]> {
 
 	// Check external tools
 	const tools = [
-		{ name: "sd", description: "Find-replace" },
+		{ name: "sd", description: __ompTranslate("Find-replace") },
 		{ name: "sg", description: "AST-grep" },
-		{ name: "git", description: "Version control" },
+		{ name: "git", description: __ompTranslate("Version control") },
 	];
 
 	for (const tool of tools) {
@@ -17,7 +18,9 @@ export async function runDoctorChecks(): Promise<DoctorCheck[]> {
 		checks.push({
 			name: tool.name,
 			status: path ? "ok" : "warning",
-			message: path ? `Found at ${path}` : `${tool.description} not found - some features may be limited`,
+			message: path
+				? __ompTranslate("Found at {0}", `${path}`)
+				: __ompTranslate("{0} not found - some features may be limited", `${tool.description}`),
 		});
 	}
 
@@ -25,7 +28,7 @@ export async function runDoctorChecks(): Promise<DoctorCheck[]> {
 	const apiKeys = [
 		{ name: "ANTHROPIC_API_KEY", description: "Anthropic API" },
 		{ name: "OPENAI_API_KEY", description: "OpenAI API" },
-		{ name: "EXA_API_KEY", description: "Exa search" },
+		{ name: "EXA_API_KEY", description: __ompTranslate("Exa search") },
 	];
 
 	for (const key of apiKeys) {
@@ -33,7 +36,9 @@ export async function runDoctorChecks(): Promise<DoctorCheck[]> {
 		checks.push({
 			name: key.name,
 			status: hasKey ? "ok" : "warning",
-			message: hasKey ? "Configured" : `Not set - ${key.description} unavailable`,
+			message: hasKey
+				? __ompTranslate("Configured")
+				: __ompTranslate("Not set - {0} unavailable", `${key.description}`),
 		});
 	}
 

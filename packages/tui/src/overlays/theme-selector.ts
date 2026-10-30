@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type SelectItem, SelectList, type SgrMouseEvent } from "../index";
 import { getSelectListTheme } from "../theme/theme";
 import { OverlayPanel } from "../chrome/overlay-box";
@@ -14,10 +15,10 @@ export function themePickerOptions(title: string, current: string): SelectPicker
 	return {
 		title,
 		icon: "ink",
-		noun: "themes",
+		noun: __ompTranslate("themes"),
 		searchable: true,
 		current: [current],
-		confirm: "Apply",
+		confirm: __ompTranslate("Apply"),
 		decorate: item => ({ mark: { text: item.value.slice(0, 2), seed: item.value } }),
 	};
 }
@@ -38,14 +39,14 @@ export class ThemeSelectorComponent extends OverlayPanel {
 		onCancel: () => void,
 		onPreview: (themeName: string) => void,
 	) {
-		super("Theme", "omp.overlay.theme");
+		super(__ompTranslate("Theme"), "omp.overlay.theme");
 		this.#onPreview = onPreview;
 
 		// Create select items from provided themes
 		const themeItems: SelectItem[] = themes.map(name => ({
 			value: name,
 			label: name,
-			description: name === currentTheme ? "(current)" : undefined,
+			description: name === currentTheme ? __ompTranslate("(current)") : undefined,
 		}));
 
 		// Create selector
@@ -71,7 +72,7 @@ export class ThemeSelectorComponent extends OverlayPanel {
 
 		this.addChild(this.#selectList);
 		// The picker checks the current theme, so its "(current)" text stays in the terminal list.
-		const options = themePickerOptions("Theme", currentTheme);
+		const options = themePickerOptions(__ompTranslate("Theme"), currentTheme);
 		this.#sheet = new SelectListSheet(this.#selectList, {
 			...options,
 			decorate: item => ({ ...options.decorate?.(item), detail: "" }),

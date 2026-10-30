@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { Component } from "../tui";
 import { Ellipsis, truncateToWidth, visibleWidth } from "../utils";
 import type { AnimationFrame, TranscriptPresentationTarget } from "./transcript-container";
@@ -52,10 +53,17 @@ export class CollabQrCodeComponent implements Component, TranscriptPresentationT
 
 	render(width: number): readonly string[] {
 		if (width < this.#minWidth) {
-			return [this.#hiddenHint(`terminal width ${width}; need ${this.#minWidth}`, width)];
+			return [
+				this.#hiddenHint(__ompTranslate("terminal width {0}; need {1}", `${width}`, `${this.#minWidth}`), width),
+			];
 		}
 		if (this.#allocatedRows < this.#lines.length) {
-			return [this.#hiddenHint(`viewport height ${this.#allocatedRows}; need ${this.#lines.length}`, width)];
+			return [
+				this.#hiddenHint(
+					__ompTranslate("viewport height {0}; need {1}", `${this.#allocatedRows}`, `${this.#lines.length}`),
+					width,
+				),
+			];
 		}
 		return this.#lines;
 	}
@@ -83,15 +91,15 @@ export class CollabQrCodeComponent implements Component, TranscriptPresentationT
 	renderTranscriptBlockEmergencyRow(width: number): string {
 		return this.#hiddenHint(
 			Number.isFinite(this.#allocatedRows)
-				? `viewport height ${this.#allocatedRows}; need ${this.#lines.length}`
-				: "transcript pressure",
+				? __ompTranslate("viewport height {0}; need {1}", `${this.#allocatedRows}`, `${this.#lines.length}`)
+				: __ompTranslate("transcript pressure"),
 			width,
 		);
 	}
 
 	#hiddenHint(reason: string, width: number): string {
 		return truncateToWidth(
-			`${collabBrowserLink(this.url, "Join")} ${fgOrPlain("warning", `QR code hidden: ${reason}.`)}`,
+			`${collabBrowserLink(this.url, __ompTranslate("Join"))} ${fgOrPlain("warning", __ompTranslate("QR code hidden: {0}.", `${reason}`))}`,
 			width,
 			Ellipsis.Omit,
 		);

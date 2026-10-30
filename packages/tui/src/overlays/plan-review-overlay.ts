@@ -17,6 +17,7 @@
  * scroll, and the external-editor key opens the plan. Under Tern the options
  * are a horizontal bar, so ←/→ select options and Shift+←/→ drive the slider.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import {
 	type Component,
 	Ellipsis,
@@ -64,9 +65,9 @@ import { isNativeRendering } from "../native/state";
 import { getKeybindings } from "../keybindings";
 
 /** Title shown in the overlay's top border. */
-const OVERLAY_TITLE = "Plan Review";
+const OVERLAY_TITLE = __ompTranslate("Plan Review");
 /** Native sheet title when the plan has no title heading of its own. */
-const NATIVE_TITLE = "Plan review";
+const NATIVE_TITLE = __ompTranslate("Plan review");
 /** Minimum plan-body rows kept visible even on short terminals. */
 const MIN_BODY_ROWS = 3;
 /** Visible rows for the in-overlay annotation editor before it scrolls. */
@@ -1244,35 +1245,36 @@ export class PlanReviewOverlay implements Component {
 		const enter = formatKeyHint("enter");
 		switch (this.#focus) {
 			case "actions":
-				parts.push(`${upDown} select`, `${enter} confirm`);
-				if (this.#slider) parts.push(`${formatKeyHints(["left", "right"])} model`);
+				parts.push(__ompTranslate("{0} select", `${upDown}`), __ompTranslate("{0} confirm", `${enter}`));
+				if (this.#slider) parts.push(__ompTranslate("{0} model", `${formatKeyHints(["left", "right"])}`));
 				break;
 			case "toc":
 				parts.push(
-					`${upDown} section`,
-					`${enter} open`,
-					`${formatKeyHint("a")} annotate`,
-					`${formatKeyHint("e")} edit`,
-					`${formatKeyHint("d")} delete`,
-					`${formatKeyHint("u")} undo`,
+					__ompTranslate("{0} section", `${upDown}`),
+					__ompTranslate("{0} open", `${enter}`),
+					__ompTranslate("{0} annotate", `${formatKeyHint("a")}`),
+					__ompTranslate("{0} edit", `${formatKeyHint("e")}`),
+					__ompTranslate("{0} delete", `${formatKeyHint("d")}`),
+					__ompTranslate("{0} undo", `${formatKeyHint("u")}`),
 				);
 				break;
 			case "body":
 				parts.push(
-					`${upDown} scroll`,
-					`${formatKeyHint("shift")} faster`,
+					__ompTranslate("{0} scroll", `${upDown}`),
+					__ompTranslate("{0} faster", `${formatKeyHint("shift")}`),
 					formatKeyHints(["pageUp", "pageDown"]),
-					`${formatKeyHints(["g", "shift+g"])} ends`,
-					`${formatKeyHint("a")} annotate`,
-					`${formatKeyHint("e")} edit`,
-					`${formatKeyHint("u")} undo`,
+					__ompTranslate("{0} ends", `${formatKeyHints(["g", "shift+g"])}`),
+					__ompTranslate("{0} annotate", `${formatKeyHint("a")}`),
+					__ompTranslate("{0} edit", `${formatKeyHint("e")}`),
+					__ompTranslate("{0} undo", `${formatKeyHint("u")}`),
 				);
 				break;
 		}
-		if (this.callbacks.onCopyPlan) parts.push(`${formatKeyHint("c")} copy`);
-		parts.push(`${formatKeyHint("tab")} regions`);
-		if (this.#externalEditorLabel && this.#focus !== "toc") parts.push(`${this.#externalEditorLabel} editor`);
-		parts.push(this.#helpSuffix ?? `${editorKey("tui.select.cancel")} cancel`);
+		if (this.callbacks.onCopyPlan) parts.push(__ompTranslate("{0} copy", `${formatKeyHint("c")}`));
+		parts.push(__ompTranslate("{0} regions", `${formatKeyHint("tab")}`));
+		if (this.#externalEditorLabel && this.#focus !== "toc")
+			parts.push(__ompTranslate("{0} editor", `${this.#externalEditorLabel}`));
+		parts.push(this.#helpSuffix ?? __ompTranslate("{0} cancel", `${editorKey("tui.select.cancel")}`));
 		return parts.join(sep);
 	}
 
@@ -1386,7 +1388,7 @@ export class PlanReviewOverlay implements Component {
 		for (let i = 0; i < noteLines.length; i++) {
 			const prefix =
 				i === 0
-					? `${theme.fg("warning", "▎ ")}${theme.fg("dim", "note: ")}`
+					? `${theme.fg("warning", "▎ ")}${theme.fg("dim", __ompTranslate("note: "))}`
 					: `${theme.fg("warning", "▎ ")}${theme.fg("dim", "      ")}`;
 			const available = Math.max(0, bodyContentWidth - visibleWidth(prefix));
 			const displayLine = truncateToWidth(
@@ -1466,7 +1468,7 @@ export class PlanReviewOverlay implements Component {
 						0,
 						Math.min(chooser.selected - Math.floor(optionLimit / 2), chooser.entries.length - optionLimit),
 					);
-		const lines = [theme.bold(theme.fg("accent", "Edit annotation"))];
+		const lines = [theme.bold(theme.fg("accent", __ompTranslate("Edit annotation")))];
 		for (let windowIndex = 0; windowIndex < optionLimit; windowIndex++) {
 			const optionIndex = start + windowIndex;
 			const selection = chooser.entries[optionIndex];
@@ -1474,10 +1476,13 @@ export class PlanReviewOverlay implements Component {
 			const section = this.#sections[selection.sectionIndex];
 			const annotation = section?.annotations[selection.annotationIndex];
 			if (!section || !annotation) continue;
-			const target = annotation.target.kind === "section" ? "section" : `line ${annotation.target.context}`;
+			const target =
+				annotation.target.kind === "section"
+					? __ompTranslate("section")
+					: __ompTranslate("line {0}", `${annotation.target.context}`);
 			const note = sanitizeStatusText(annotation.note);
 			const marker = optionIndex === chooser.selected ? theme.fg("accent", "› ") : "  ";
-			const label = `${marker}${sanitizeStatusText(section.title || "Plan preamble")} · ${target} · ${note}`;
+			const label = `${marker}${sanitizeStatusText(section.title || __ompTranslate("Plan preamble"))} · ${target} · ${note}`;
 			lines.push(truncateToWidth(label, innerWidth, Ellipsis.Unicode));
 		}
 		if (!Number.isFinite(maxRows) || maxRows >= 2) {
@@ -1485,7 +1490,12 @@ export class PlanReviewOverlay implements Component {
 			lines.push(
 				theme.fg(
 					"dim",
-					`${upDown} choose · ${formatKeyHint("enter")} edit · ${editorKey("tui.select.cancel")} cancel`,
+					__ompTranslate(
+						"{0} choose · {1} edit · {2} cancel",
+						`${upDown}`,
+						`${formatKeyHint("enter")}`,
+						`${editorKey("tui.select.cancel")}`,
+					),
 				),
 			);
 		}
@@ -1497,23 +1507,23 @@ export class PlanReviewOverlay implements Component {
 		if (this.#annotating) {
 			const target = this.#annotationTarget;
 			const section = target ? this.#sections[target.sectionIndex] : undefined;
-			const title = sanitizeStatusText(section?.title || "Plan preamble");
+			const title = sanitizeStatusText(section?.title || __ompTranslate("Plan preamble"));
 			const location =
 				target?.row === null
 					? `‹${title}›`
 					: `‹${title}› · ${truncateToWidth(target?.context ?? "", Math.max(1, innerWidth - 16), Ellipsis.Unicode)}`;
 			const caption = truncateToWidth(
-				`${theme.fg("dim", "Annotate")} ${theme.fg("accent", location)}`,
+				`${theme.fg("dim", __ompTranslate("Annotate"))} ${theme.fg("accent", location)}`,
 				innerWidth,
 				Ellipsis.Unicode,
 			);
 			const hintParts = [
-				`${editorKey("tui.input.submit")} save`,
-				`${editorKey("tui.input.newLine")} newline`,
-				`${editorKey("tui.select.cancel")} cancel`,
+				__ompTranslate("{0} save", `${editorKey("tui.input.submit")}`),
+				__ompTranslate("{0} newline", `${editorKey("tui.input.newLine")}`),
+				__ompTranslate("{0} cancel", `${editorKey("tui.select.cancel")}`),
 			];
-			if (this.#editingAnnotation) hintParts.push("empty deletes");
-			if (this.#externalEditorLabel) hintParts.push(`${this.#externalEditorLabel} editor`);
+			if (this.#editingAnnotation) hintParts.push(__ompTranslate("empty deletes"));
+			if (this.#externalEditorLabel) hintParts.push(__ompTranslate("{0} editor", `${this.#externalEditorLabel}`));
 			this.#editor.setMaxHeight(Math.max(1, Math.min(MAX_ANNOTATION_EDITOR_ROWS, (process.stdout.rows || 40) - 12)));
 			this.#editor.focused = true;
 			return [caption, ...this.#editor.render(innerWidth), theme.fg("dim", hintParts.join(" · "))];
@@ -1590,13 +1600,23 @@ export class PlanReviewOverlay implements Component {
 			children.push(keyed(text([span(this.#promptTitle, "muted")], { role: "omp.plan.prompt" }), "prompt"));
 		}
 		if (this.#committed) {
-			const label = this.#committedLabel ? `${this.#committedLabel} — submitting…` : "Submitting…";
+			const label = this.#committedLabel
+				? __ompTranslate("{0} — submitting…", `${this.#committedLabel}`)
+				: __ompTranslate("Submitting…");
 			children.push(node("spinner", { label: [span(label, "accent strong")] }, undefined, "options"));
 			children.push(
 				keyed(
-					text([span("Applying your selection — this can take a moment while context is prepared.", "dim")], {
-						wrap: "word",
-					}),
+					text(
+						[
+							span(
+								__ompTranslate("Applying your selection — this can take a moment while context is prepared."),
+								"dim",
+							),
+						],
+						{
+							wrap: "word",
+						},
+					),
 					"footer",
 				),
 			);
@@ -1632,7 +1652,9 @@ export class PlanReviewOverlay implements Component {
 		if (this.#committed) return undefined;
 		const buttons: NativeNode[] = [];
 		if (this.callbacks.onCopyPlan)
-			buttons.push(actionButton("Copy", "copyPlan", { keys: "c", title: "Copy plan  c" }));
+			buttons.push(
+				actionButton(__ompTranslate("Copy"), "copyPlan", { keys: "c", title: __ompTranslate("Copy plan  c") }),
+			);
 		// Unbound: the button still mirrors the callback, without a keycap.
 		const editorKeyId = getKeybindings().getKeys("app.editor.external")[0];
 		if (this.callbacks.onExternalEditor) {
@@ -1648,7 +1670,7 @@ export class PlanReviewOverlay implements Component {
 		// only leaves the draft/chooser, so the button is hidden there.
 		if (!this.#annotating && !this.#annotationChooser) {
 			const cancelKeyId = getKeybindings().getKeys("tui.select.cancel")[0];
-			buttons.push(actionButton("Cancel", "cancel", cancelKeyId ? { keys: cancelKeyId } : {}));
+			buttons.push(actionButton(__ompTranslate("Cancel"), "cancel", cancelKeyId ? { keys: cancelKeyId } : {}));
 		}
 		if (buttons.length === 0) return undefined;
 		return node("row", { role: "omp.plan.tools", gap: "sm", align: "center", justify: "end" }, buttons, "tools");
@@ -1777,20 +1799,23 @@ export class PlanReviewOverlay implements Component {
 			const entries = chooser.entries.map((selection, i) => {
 				const section = this.#sections[selection.sectionIndex];
 				const annotation = section?.annotations[selection.annotationIndex];
-				const where = annotation?.target.kind === "line" ? `line ${annotation.target.context}` : "section";
+				const where =
+					annotation?.target.kind === "line"
+						? __ompTranslate("line {0}", `${annotation.target.context}`)
+						: __ompTranslate("section");
 				return item(`c${i}`, {
 					label: sanitizeStatusText(annotation?.note ?? ""),
-					detail: `${sanitizeStatusText(section?.title || "Plan preamble")} · ${where}`,
+					detail: `${sanitizeStatusText(section?.title || __ompTranslate("Plan preamble"))} · ${where}`,
 				});
 			});
 			return [
-				keyed(text([span("Edit annotation", "accent strong")]), "chooserHead"),
+				keyed(text([span(__ompTranslate("Edit annotation"), "accent strong")]), "chooserHead"),
 				selectList("chooser", entries, { selected: `c${chooser.selected}` }),
 				hintsRow(
 					[
-						actionHint(["tui.select.up", "tui.select.down"], "choose"),
-						{ keys: ["enter"], label: "edit" },
-						actionHint("tui.select.cancel", "cancel"),
+						actionHint(["tui.select.up", "tui.select.down"], __ompTranslate("choose")),
+						{ keys: ["enter"], label: __ompTranslate("edit") },
+						actionHint("tui.select.cancel", __ompTranslate("cancel")),
 					],
 					"chooserHints",
 				),
@@ -1798,15 +1823,18 @@ export class PlanReviewOverlay implements Component {
 		}
 		if (this.#annotating) {
 			const target = this.#annotationTarget;
-			const title = sanitizeStatusText(this.#sections[target?.sectionIndex ?? -1]?.title || "Plan preamble");
+			const title = sanitizeStatusText(
+				this.#sections[target?.sectionIndex ?? -1]?.title || __ompTranslate("Plan preamble"),
+			);
 			const location = target?.row === null ? `‹${title}›` : `‹${title}› · ${target?.context ?? ""}`;
 			const hints: (NativeHint | undefined)[] = [
-				actionHint("tui.input.submit", "save"),
-				actionHint("tui.input.newLine", "newline"),
-				actionHint("tui.select.cancel", "cancel"),
+				actionHint("tui.input.submit", __ompTranslate("save")),
+				actionHint("tui.input.newLine", __ompTranslate("newline")),
+				actionHint("tui.select.cancel", __ompTranslate("cancel")),
 			];
-			if (this.#editingAnnotation) hints.push({ keys: [], label: "empty deletes" });
-			if (this.#externalEditorLabel) hints.push({ keys: [], label: `${this.#externalEditorLabel} editor` });
+			if (this.#editingAnnotation) hints.push({ keys: [], label: __ompTranslate("empty deletes") });
+			if (this.#externalEditorLabel)
+				hints.push({ keys: [], label: __ompTranslate("{0} editor", `${this.#externalEditorLabel}`) });
 			// The feedback field, inline under the plan: its caption names the anchor, omp's editor holds the text.
 			return [
 				node(
@@ -1814,7 +1842,7 @@ export class PlanReviewOverlay implements Component {
 					{ role: "omp.plan.feedback", gap: "xs" },
 					[
 						keyed(
-							text([span("Note on ", "muted"), span(location, "accent")], { truncate: "end" }),
+							text([span(__ompTranslate("Note on "), "muted"), span(location, "accent")], { truncate: "end" }),
 							"annotateHead",
 						),
 						this.#editor,
@@ -1837,34 +1865,38 @@ export class PlanReviewOverlay implements Component {
 		const hints: (NativeHint | undefined)[] = [];
 		switch (this.#focus) {
 			case "actions":
-				hints.push(key(["left", "right"], "select"), key("enter", "confirm"));
-				if (this.#slider) hints.push(key(["shift+left", "shift+right"], "model"));
+				hints.push(key(["left", "right"], __ompTranslate("select")), key("enter", __ompTranslate("confirm")));
+				if (this.#slider) hints.push(key(["shift+left", "shift+right"], __ompTranslate("model")));
 				break;
 			case "toc":
 				hints.push(
-					upDown("section"),
-					key("enter", "open"),
-					key("a", "annotate"),
-					key("e", "edit"),
-					key("d", "delete"),
-					key("u", "undo"),
+					upDown(__ompTranslate("section")),
+					key("enter", __ompTranslate("open")),
+					key("a", __ompTranslate("annotate")),
+					key("e", __ompTranslate("edit")),
+					key("d", __ompTranslate("delete")),
+					key("u", __ompTranslate("undo")),
 				);
 				break;
 			case "body":
 				hints.push(
-					upDown("scroll"),
-					key("shift", "faster"),
-					key(["pageUp", "pageDown"], "page"),
-					key(["g", "shift+g"], "ends"),
-					key("a", "annotate"),
-					key("e", "edit"),
-					key("u", "undo"),
+					upDown(__ompTranslate("scroll")),
+					key("shift", __ompTranslate("faster")),
+					key(["pageUp", "pageDown"], __ompTranslate("page")),
+					key(["g", "shift+g"], __ompTranslate("ends")),
+					key("a", __ompTranslate("annotate")),
+					key("e", __ompTranslate("edit")),
+					key("u", __ompTranslate("undo")),
 				);
 				break;
 		}
 		// Copy and the external editor are head buttons with their keycaps; the hints skip them.
-		hints.push(key("tab", "regions"));
-		hints.push(this.#helpSuffix ? { keys: [], label: this.#helpSuffix } : actionHint("tui.select.cancel", "cancel"));
+		hints.push(key("tab", __ompTranslate("regions")));
+		hints.push(
+			this.#helpSuffix
+				? { keys: [], label: this.#helpSuffix }
+				: actionHint("tui.select.cancel", __ompTranslate("cancel")),
+		);
 		return hints;
 	}
 
@@ -1878,7 +1910,9 @@ export class PlanReviewOverlay implements Component {
 
 		const committed = this.#committed;
 		const sliderLines = committed ? [] : this.#renderSliderLines();
-		const submittingLabel = this.#committedLabel ? `${this.#committedLabel} — submitting…` : "Submitting…";
+		const submittingLabel = this.#committedLabel
+			? __ompTranslate("{0} — submitting…", `${this.#committedLabel}`)
+			: __ompTranslate("Submitting…");
 		const optionLines = committed ? [theme.bold(theme.fg("accent", submittingLabel))] : this.#renderOptionLines();
 		const promptLines = this.#promptTitle ? [theme.bold(theme.fg("accent", this.#promptTitle))] : [];
 		const baseChrome = 4 + promptLines.length + sliderLines.length + optionLines.length;
@@ -1886,7 +1920,12 @@ export class PlanReviewOverlay implements Component {
 			? Math.max(0, termHeight - baseChrome - MIN_BODY_ROWS)
 			: Number.POSITIVE_INFINITY;
 		const footerLines = committed
-			? [theme.fg("dim", "Applying your selection — this can take a moment while context is prepared.")]
+			? [
+					theme.fg(
+						"dim",
+						__ompTranslate("Applying your selection — this can take a moment while context is prepared."),
+					),
+				]
 			: this.#renderFooterLines(innerWidth, chooserFooterRows);
 
 		// Chrome rows: top border, two dividers, bottom border, plus the

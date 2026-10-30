@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { SetupHost } from "./scenes/types";
 
 /** Load and run provider setup without completing onboarding or replaying the welcome intro. */
@@ -7,7 +8,7 @@ export async function runProviderSetupWizard(ctx: SetupHost): Promise<void> {
 	const { ALL_SCENES, runSetupWizard } = await import("./wizard");
 	const providersScene = ALL_SCENES.find(scene => scene.id === "providers");
 	if (!providersScene) {
-		ctx.showError("Provider setup is unavailable.");
+		ctx.showError(__ompTranslate("Provider setup is unavailable."));
 		return;
 	}
 	await runSetupWizard(ctx, [providersScene], {

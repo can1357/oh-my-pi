@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
@@ -19,7 +20,7 @@ export type MemoryReflectParams = typeof memoryReflectSchema.infer;
 export class MemoryReflectTool implements AgentTool<typeof memoryReflectSchema> {
 	readonly name = "reflect";
 	readonly approval = "read" as const;
-	readonly label = "Reflect";
+	readonly label = __ompTranslate("Reflect");
 	get description(): string {
 		return prompt.render(reflectDescription, {
 			toolRefs: sessionMemoryToolRefs(this.session),

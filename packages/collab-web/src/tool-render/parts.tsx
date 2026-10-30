@@ -2,6 +2,7 @@
  * Shared UI primitives for tool renderers. Every renderer composes these
  * instead of inventing new CSS — see tool-render.css for the `tv-` classes.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
 import type { ReactNode } from "react";
 import { useMemo, useState } from "react";
 import type { ToolRenderHost, ToolResultImage, ToolResultLike } from "./types";
@@ -124,7 +125,9 @@ export function Output({ text, maxLines = 10, lang, error, variant = "plain", ti
 			)}
 			{collapsible && (
 				<button type="button" className="tv-expand" onClick={() => setExpanded(v => !v)}>
-					{expanded ? "collapse" : `⋯ ${lines.length - maxLines} more lines`}
+					{expanded
+						? __ompTranslate("collapse")
+						: __ompTranslate("⋯ {0} more lines", `${lines.length - maxLines}`)}
 				</button>
 			)}
 		</div>
@@ -203,9 +206,13 @@ export function ResultImages({ result }: { result: ToolResultLike | undefined })
 					type="button"
 					style={{ all: "unset", display: "inline-flex" }}
 					onClick={() => openImage(img)}
-					aria-label={`Open tool result image ${i + 1}`}
+					aria-label={__ompTranslate("Open tool result image {0}", `${i + 1}`)}
 				>
-					<img className="tv-img" src={`data:${img.mimeType};base64,${img.data}`} alt={`tool result ${i + 1}`} />
+					<img
+						className="tv-img"
+						src={`data:${img.mimeType};base64,${img.data}`}
+						alt={__ompTranslate("tool result {0}", `${i + 1}`)}
+					/>
 				</button>
 			))}
 		</div>
@@ -260,7 +267,9 @@ export function DiffBlock({ diff, maxLines = 80 }: { diff: string; maxLines?: nu
 			</div>
 			{collapsible && (
 				<button type="button" className="tv-expand" onClick={() => setExpanded(v => !v)}>
-					{expanded ? "collapse" : `⋯ ${lines.length - maxLines} more lines`}
+					{expanded
+						? __ompTranslate("collapse")
+						: __ompTranslate("⋯ {0} more lines", `${lines.length - maxLines}`)}
 				</button>
 			)}
 		</div>

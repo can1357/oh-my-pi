@@ -2,6 +2,7 @@
  * `omp anonymize` — write a shareable copy of a session (and its subagent
  * transcripts) with turn contents redacted and metadata preserved.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getProjectDir, isEnoent, pathIsWithin } from "@oh-my-pi/pi-utils";
@@ -29,11 +30,12 @@ export async function runAnonymizeCommand(args: AnonymizeCommandArgs): Promise<v
 	const outDir = path.resolve(args.out ?? `${path.basename(sourcePath, ".jsonl")}.anon`);
 	// Subagent transcripts sit next to the real file, not next to a symlink pointing at it.
 	const sourceReal = await fs.realpath(sourcePath);
-	if (!(await fs.stat(sourceReal)).isFile()) throw new CliUsageError(`${sourcePath} is not a session file`);
+	if (!(await fs.stat(sourceReal)).isFile())
+		throw new CliUsageError(__ompTranslate("{0} is not a session file", `${sourcePath}`));
 	const { entries: records, malformedRecords } = await loadSessionFile(sourceReal);
 	// The loader returns [] for a file without a valid session header.
 	const header = records.find((record): record is SessionHeader => record.type === "session");
-	if (!header) throw new CliUsageError(`${sourcePath} is not a valid session file`);
+	if (!header) throw new CliUsageError(__ompTranslate("{0} is not a valid session file", `${sourcePath}`));
 	const result = await anonymizeSessionTranscripts({
 		header,
 		entries: records.filter((record): record is SessionEntry => record.type !== "session"),
@@ -53,7 +55,7 @@ export async function runAnonymizeCommand(args: AnonymizeCommandArgs): Promise<v
 	} catch (err) {
 		// `-o report.zip` (an existing file) or a file somewhere in the path is an input mistake.
 		if ((err as NodeJS.ErrnoException).code === "ENOTDIR") {
-			throw new CliUsageError(`--out ${outDir} is not a directory`);
+			throw new CliUsageError(__ompTranslate("--out {0} is not a directory", `${outDir}`));
 		}
 		throw err;
 	}
@@ -62,23 +64,27 @@ export async function runAnonymizeCommand(args: AnonymizeCommandArgs): Promise<v
 		pathIsWithin(sourceReal.slice(0, -".jsonl".length), outReal)
 	) {
 		throw new CliUsageError(
-			`--out ${outDir} would mix the export with raw session transcripts; choose another directory`,
+			__ompTranslate(
+				"--out {0} would mix the export with raw session transcripts; choose another directory",
+				`${outDir}`,
+			),
 		);
 	}
 	// Merging into an existing directory would leave stale or unrelated files beside the export.
 	if (existing.length > 0) {
-		throw new CliUsageError(`--out ${outDir} is not empty; choose a new or empty directory`);
+		throw new CliUsageError(__ompTranslate("--out {0} is not empty; choose a new or empty directory", `${outDir}`));
 	}
 	for (const [name, content] of result.files) await Bun.write(path.join(outDir, name), content);
 
 	const count = result.files.length;
 	process.stdout.write(`Anonymized ${count} transcript${count === 1 ? "" : "s"} → ${outDir}\n`);
-	if (result.subagentError) process.stdout.write(`Subagent transcripts unavailable: ${result.subagentError}\n`);
+	if (result.subagentError)
+		process.stdout.write(__ompTranslate("Subagent transcripts unavailable: {0}\n", `${result.subagentError}`));
 	for (const [member, skipped] of result.malformed) {
 		process.stdout.write(`Skipped ${skipped} malformed record${skipped === 1 ? "" : "s"} in ${member}\n`);
 	}
 	for (const member of result.unreadable)
-		process.stdout.write(`Not exported (no readable session header): ${member}\n`);
+		process.stdout.write(__ompTranslate("Not exported (no readable session header): {0}\n", `${member}`));
 	process.stdout.write(`${ANONYMIZED_REVIEW_NOTE}\n`);
 }
 

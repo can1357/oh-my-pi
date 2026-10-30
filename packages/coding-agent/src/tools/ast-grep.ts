@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { AstGrepToolDetails } from "@oh-my-pi/pi-tui/tools/ast-grep";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
@@ -150,7 +151,7 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 			this.session.cwd,
 			entry => parseSearchPath(entry).basePath,
 		);
-	readonly label = "AST Grep";
+	readonly label = __ompTranslate("AST Grep");
 	readonly summary = "Search code with AST patterns (structural grep)";
 	get description(): string {
 		const eagerDelegation = sessionDelegationBias(this.session) === "eager";

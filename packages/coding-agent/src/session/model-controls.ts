@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model, ProviderSessionState, ServiceTier, ServiceTierByFamily, ServiceTierFamily } from "@oh-my-pi/pi-ai";
 import {
@@ -241,7 +242,7 @@ export class ModelControls {
 	): Promise<{ switched: boolean }> {
 		const previousEditMode = this.#host.resolveActiveEditMode();
 		if (!this.#host.modelRegistry.hasConfiguredAuth(model)) {
-			throw new Error(`No API key for ${model.provider}/${model.id}`);
+			throw new Error(__ompTranslate("No API key for {0}/{1}", `${model.provider}`, `${model.id}`));
 		}
 
 		const targetModel = await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
@@ -287,7 +288,7 @@ export class ModelControls {
 	): Promise<void> {
 		const previousEditMode = this.#host.resolveActiveEditMode();
 		if (!this.#host.modelRegistry.hasConfiguredAuth(model)) {
-			throw new Error(`No API key for ${model.provider}/${model.id}`);
+			throw new Error(__ompTranslate("No API key for {0}/{1}", `${model.provider}`, `${model.id}`));
 		}
 
 		const targetModel = await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
@@ -480,7 +481,7 @@ export class ModelControls {
 
 		const apiKey = await this.#host.modelRegistry.getApiKey(nextModel, this.#host.sessionId());
 		if (!apiKey) {
-			throw new Error(`No API key for ${nextModel.provider}/${nextModel.id}`);
+			throw new Error(__ompTranslate("No API key for {0}/{1}", `${nextModel.provider}`, `${nextModel.id}`));
 		}
 
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(nextModel));
@@ -820,7 +821,7 @@ export class ModelControls {
 		if (!model || !family) {
 			this.#host.emitNotice(
 				"info",
-				"The current model has no service-tier control for /fast to toggle.",
+				__ompTranslate("The current model has no service-tier control for /fast to toggle."),
 				"priority",
 			);
 			return false;
@@ -833,7 +834,7 @@ export class ModelControls {
 		if (family === "openai" && !shouldSendServiceTier("priority", model)) {
 			this.#host.emitNotice(
 				"info",
-				"The current model does not offer the priority (Fast) service tier.",
+				__ompTranslate("The current model does not offer the priority (Fast) service tier."),
 				"priority",
 			);
 			return false;
@@ -858,7 +859,11 @@ export class ModelControls {
 			return true;
 		}
 		if (!model || serviceTierFamily(model) !== "openai" || !shouldSendServiceTier("ultrafast", model)) {
-			this.#host.emitNotice("info", "The current model does not offer the Ultrafast service tier.", "priority");
+			this.#host.emitNotice(
+				"info",
+				__ompTranslate("The current model does not offer the Ultrafast service tier."),
+				"priority",
+			);
 			return false;
 		}
 		this.setServiceTierFamily("openai", "ultrafast");

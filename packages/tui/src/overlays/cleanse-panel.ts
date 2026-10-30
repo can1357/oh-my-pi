@@ -1,4 +1,5 @@
 /** Anchored `/cleanse` overlay rendering the host's live board above the editor. */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { Text, type TUI } from "../index";
 import type { AgentProgress } from "../tools/task";
 import { replaceTabs } from "../render/render-utils";
@@ -216,20 +217,29 @@ export class CleansePanelComponent extends OverlayPanel {
 	}
 
 	#describeFooter(): NativeNode {
-		const esc: NativeHint = { keys: boundKeys("app.interrupt", ["escape"]).slice(0, 1), label: "dismiss" };
+		const esc: NativeHint = {
+			keys: boundKeys("app.interrupt", ["escape"]).slice(0, 1),
+			label: __ompTranslate("dismiss"),
+		};
 		switch (this.#outcome) {
 			case undefined:
-				return hintsRow([{ ...esc, label: "cancel /cleanse" }]);
+				return hintsRow([{ ...esc, label: __ompTranslate("cancel /cleanse") }]);
 			case "clean":
-				return statusHintsRow([span(`${theme.status.success} Clean`, "success")], [esc]);
+				return statusHintsRow([span(__ompTranslate("{0} Clean", `${theme.status.success}`), "success")], [esc]);
 			case "unresolved":
-				return statusHintsRow([span(`${theme.status.warning} Diagnostics remain`, "warning")], [esc]);
+				return statusHintsRow(
+					[span(__ompTranslate("{0} Diagnostics remain", `${theme.status.warning}`), "warning")],
+					[esc],
+				);
 			case "unsupported":
-				return statusHintsRow([span(`${theme.status.warning} No runnable checker`, "warning")], [esc]);
+				return statusHintsRow(
+					[span(__ompTranslate("{0} No runnable checker", `${theme.status.warning}`), "warning")],
+					[esc],
+				);
 			case "cancelled":
-				return statusHintsRow([span(`${theme.status.warning} Cancelled`, "warning")], [esc]);
+				return statusHintsRow([span(__ompTranslate("{0} Cancelled", `${theme.status.warning}`), "warning")], [esc]);
 			case "error":
-				return statusHintsRow([span(`${theme.status.error} Error`, "error")], [esc]);
+				return statusHintsRow([span(__ompTranslate("{0} Error", `${theme.status.error}`), "error")], [esc]);
 		}
 	}
 
@@ -244,17 +254,26 @@ export class CleansePanelComponent extends OverlayPanel {
 		const esc = interruptKey();
 		switch (this.#outcome) {
 			case undefined:
-				return theme.fg("muted", `${esc} cancel /cleanse`);
+				return theme.fg("muted", __ompTranslate("{0} cancel /cleanse", `${esc}`));
 			case "clean":
-				return theme.fg("success", `${theme.status.success} Clean · ${esc} dismiss`);
+				return theme.fg("success", __ompTranslate("{0} Clean · {1} dismiss", `${theme.status.success}`, `${esc}`));
 			case "unresolved":
-				return theme.fg("warning", `${theme.status.warning} Diagnostics remain · ${esc} dismiss`);
+				return theme.fg(
+					"warning",
+					__ompTranslate("{0} Diagnostics remain · {1} dismiss", `${theme.status.warning}`, `${esc}`),
+				);
 			case "unsupported":
-				return theme.fg("warning", `${theme.status.warning} No runnable checker · ${esc} dismiss`);
+				return theme.fg(
+					"warning",
+					__ompTranslate("{0} No runnable checker · {1} dismiss", `${theme.status.warning}`, `${esc}`),
+				);
 			case "cancelled":
-				return theme.fg("warning", `${theme.status.warning} Cancelled · ${esc} dismiss`);
+				return theme.fg(
+					"warning",
+					__ompTranslate("{0} Cancelled · {1} dismiss", `${theme.status.warning}`, `${esc}`),
+				);
 			case "error":
-				return theme.fg("error", `${theme.status.error} Error · ${esc} dismiss`);
+				return theme.fg("error", __ompTranslate("{0} Error · {1} dismiss", `${theme.status.error}`, `${esc}`));
 		}
 	}
 }

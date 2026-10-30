@@ -2,6 +2,7 @@
  * `login "api-key"` engine: open the provider's key page, prompt for a paste,
  * optionally validate the key against a declared probe, return the key.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { CompiledApiKeyLogin, CompiledAuthValidation } from "@oh-my-pi/pi-catalog/compat/types";
 import { $env } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
@@ -94,7 +95,11 @@ export function createApiKeyLogin(
 			throw new AIError.ApiKeyRequiredError();
 		}
 		if (rule.validate) {
-			options.onProgress?.(rule.validate.optional ? "Validating API key (optional)..." : "Validating API key...");
+			options.onProgress?.(
+				rule.validate.optional
+					? __ompTranslate("Validating API key (optional)...")
+					: __ompTranslate("Validating API key..."),
+			);
 			try {
 				await runValidation(rule.validate, label, trimmed, options);
 			} catch (error) {
@@ -108,7 +113,9 @@ export function createApiKeyLogin(
 				) {
 					throw error;
 				}
-				options.onProgress?.(`Skipping ${label} validation endpoint; continuing with provided API key.`);
+				options.onProgress?.(
+					__ompTranslate("Skipping {0} validation endpoint; continuing with provided API key.", `${label}`),
+				);
 			}
 		}
 		return trimmed;

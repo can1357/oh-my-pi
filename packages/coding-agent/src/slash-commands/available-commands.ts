@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { AvailableCommand } from "@oh-my-pi/pi-utils/acp";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { SkillsSettings } from "../extensibility/settings";
@@ -65,7 +66,7 @@ export async function buildAvailableSlashCommands(
 		for (const skill of session.skills) {
 			appendCommand({
 				name: getSkillSlashCommandName(skill),
-				description: skill.description || `Run ${skill.name} skill`,
+				description: skill.description || __ompTranslate("Run {0} skill", `${skill.name}`),
 				input: { hint: "arguments" },
 				source: "skill",
 			});
@@ -78,7 +79,7 @@ export async function buildAvailableSlashCommands(
 			if (isAcpBuiltinShadowedName(command.name)) continue;
 			appendCommand({
 				name: command.name,
-				description: command.description ?? "(extension command)",
+				description: command.description ?? __ompTranslate("(extension command)"),
 				input: { hint: "arguments" },
 				source: "extension",
 			});

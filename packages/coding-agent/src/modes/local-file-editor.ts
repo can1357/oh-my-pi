@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as fs from "node:fs/promises";
 import { disambiguateDisplayLabels, replaceTabs, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { formatBytes, sanitizeText } from "@oh-my-pi/pi-utils";
@@ -6,7 +7,7 @@ import type { SessionManager } from "../session/session-manager";
 import { getEditorCommand, openEditorOnPath } from "../utils/external-editor";
 import type { InteractiveModeContext } from "./types";
 
-const PICKER_TITLE = "Open local:// file in external editor";
+const PICKER_TITLE = __ompTranslate("Open local:// file in external editor");
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -41,10 +42,11 @@ async function locateAndValidateTarget(
 ): Promise<{ url: string; path: string }> {
 	// Non-creating locate: realpath + root containment, so traversal and escaping symlinks throw.
 	const located = await InternalUrlRouter.instance().locate(url, { localProtocolOptions: options });
-	if (located === null) throw new Error(`Local file not found: ${displayUrl}`);
+	if (located === null) throw new Error(__ompTranslate("Local file not found: {0}", `${displayUrl}`));
 	const stat = await fs.stat(located);
-	if (stat.isDirectory()) throw new Error(`${displayUrl} is a directory; name a file inside it.`);
-	if (!stat.isFile()) throw new Error(`${displayUrl} is not a regular file.`);
+	if (stat.isDirectory())
+		throw new Error(__ompTranslate("{0} is a directory; name a file inside it.", `${displayUrl}`));
+	if (!stat.isFile()) throw new Error(__ompTranslate("{0} is not a regular file.", `${displayUrl}`));
 	return { url: displayUrl, path: located };
 }
 
@@ -54,7 +56,7 @@ export async function resolveLocalEditorTarget(
 	options: LocalProtocolOptions,
 ): Promise<{ url: string; path: string }> {
 	const trimmed = target.trim();
-	if (!trimmed) throw new Error("Enter a local:// file name.");
+	if (!trimmed) throw new Error(__ompTranslate("Enter a local:// file name."));
 	// Only `local://` / `local:/` are explicit URLs: an opaque `local:` prefix can be a
 	// literal POSIX filename (`local:notes.md`) and must be encoded like any other name.
 	// A bare filesystem name (what the completer inserts) must be encoded or `%` / `#` / `?`
@@ -83,11 +85,11 @@ async function pickLocalFile(
 	try {
 		files = await listLocalFiles(options);
 	} catch (error) {
-		ctx.showError(`Failed to list local:// files: ${showErrorMessage(error)}`);
+		ctx.showError(__ompTranslate("Failed to list local:// files: {0}", `${showErrorMessage(error)}`));
 		return undefined;
 	}
 	if (files.length === 0) {
-		ctx.showStatus("No local:// files in this session yet.");
+		ctx.showStatus(__ompTranslate("No local:// files in this session yet."));
 		return undefined;
 	}
 	// Sanitize labels so filenames with ANSI/C0 escapes or tabs cannot corrupt the picker,
@@ -108,12 +110,12 @@ async function pickLocalFile(
 /** `/local [target]` and the `app.local.open` key: picker when target is blank, else open target directly. */
 export async function openLocalFileInEditor(ctx: InteractiveModeContext, target?: string): Promise<void> {
 	if (ctx.collabGuest) {
-		ctx.showStatus("/local is host-only during a collab session");
+		ctx.showStatus(__ompTranslate("/local is host-only during a collab session"));
 		return;
 	}
 	const editorCmd = getEditorCommand();
 	if (!editorCmd) {
-		ctx.showWarning("No editor configured. Set $VISUAL or $EDITOR environment variable.");
+		ctx.showWarning(__ompTranslate("No editor configured. Set $VISUAL or $EDITOR environment variable."));
 		return;
 	}
 	const options = sessionLocalProtocolOptions(ctx.sessionManager);
@@ -144,7 +146,9 @@ export async function openLocalFileInEditor(ctx: InteractiveModeContext, target?
 		ctx.ui.stop();
 		exitCode = await openEditorOnPath(editorCmd, chosen.path);
 	} catch (error) {
-		ctx.showWarning(`Failed to open external editor: ${showErrorMessage(error)}`);
+		ctx.showWarning(
+			__ompTranslate("Failed to open external editor: {0}\u0004todo.editor.failure", `${showErrorMessage(error)}`),
+		);
 		return;
 	} finally {
 		ctx.ui.start();
@@ -152,8 +156,14 @@ export async function openLocalFileInEditor(ctx: InteractiveModeContext, target?
 	}
 
 	if (exitCode !== 0) {
-		ctx.showWarning(`Editor exited with code ${exitCode}; ${sanitizeText(chosen.url)} keeps whatever it saved.`);
+		ctx.showWarning(
+			__ompTranslate(
+				"Editor exited with code {0}; {1} keeps whatever it saved.",
+				`${exitCode}`,
+				`${sanitizeText(chosen.url)}`,
+			),
+		);
 		return;
 	}
-	ctx.showStatus(`Closed ${sanitizeText(chosen.url)} in editor.`);
+	ctx.showStatus(__ompTranslate("Closed {0} in editor.", `${sanitizeText(chosen.url)}`));
 }

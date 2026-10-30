@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type KeyId, parseKey } from "./keys";
 
 /**
@@ -56,88 +57,88 @@ export type KeybindingDefinitions = Record<string, KeybindingDefinition>;
 export type KeybindingsConfig = Record<string, KeyId | KeyId[] | undefined>;
 
 export const TUI_KEYBINDINGS = {
-	"tui.editor.cursorUp": { defaultKeys: "up", description: "Move cursor up" },
-	"tui.editor.cursorDown": { defaultKeys: "down", description: "Move cursor down" },
+	"tui.editor.cursorUp": { defaultKeys: "up", description: __ompTranslate("Move cursor up") },
+	"tui.editor.cursorDown": { defaultKeys: "down", description: __ompTranslate("Move cursor down") },
 	"tui.editor.cursorLeft": {
 		defaultKeys: ["left", "ctrl+b"],
-		description: "Move cursor left",
+		description: __ompTranslate("Move cursor left"),
 	},
 	"tui.editor.cursorRight": {
 		defaultKeys: ["right", "ctrl+f"],
-		description: "Move cursor right",
+		description: __ompTranslate("Move cursor right"),
 	},
 	"tui.editor.cursorWordLeft": {
 		defaultKeys: ["alt+left", "ctrl+left", "alt+b"],
-		description: "Move cursor word left",
+		description: __ompTranslate("Move cursor word left"),
 	},
 	"tui.editor.cursorWordRight": {
 		defaultKeys: ["alt+right", "ctrl+right", "alt+f"],
-		description: "Move cursor word right",
+		description: __ompTranslate("Move cursor word right"),
 	},
 	"tui.editor.cursorLineStart": {
 		defaultKeys: ["home", "ctrl+a"],
-		description: "Move to line start",
+		description: __ompTranslate("Move to line start"),
 	},
 	"tui.editor.cursorLineEnd": {
 		defaultKeys: ["end", "ctrl+e"],
-		description: "Move to line end",
+		description: __ompTranslate("Move to line end"),
 	},
 	"tui.editor.jumpForward": {
 		defaultKeys: "ctrl+]",
-		description: "Jump forward to character",
+		description: __ompTranslate("Jump forward to character"),
 	},
 	"tui.editor.jumpBackward": {
 		defaultKeys: "ctrl+alt+]",
-		description: "Jump backward to character",
+		description: __ompTranslate("Jump backward to character"),
 	},
-	"tui.editor.pageUp": { defaultKeys: "pageUp", description: "Page up" },
-	"tui.editor.pageDown": { defaultKeys: "pageDown", description: "Page down" },
+	"tui.editor.pageUp": { defaultKeys: "pageUp", description: __ompTranslate("Page up") },
+	"tui.editor.pageDown": { defaultKeys: "pageDown", description: __ompTranslate("Page down") },
 	"tui.editor.deleteCharBackward": {
 		defaultKeys: "backspace",
-		description: "Delete character backward",
+		description: __ompTranslate("Delete character backward"),
 	},
 	"tui.editor.deleteCharForward": {
 		defaultKeys: ["delete", "ctrl+d"],
-		description: "Delete character forward",
+		description: __ompTranslate("Delete character forward"),
 	},
 	"tui.editor.deleteWordBackward": {
 		defaultKeys: ["ctrl+w", "alt+backspace", "ctrl+backspace", "super+alt+backspace"],
-		description: "Delete word backward",
+		description: __ompTranslate("Delete word backward"),
 	},
 	"tui.editor.deleteWordForward": {
 		defaultKeys: ["alt+delete", "alt+d", "ctrl+delete", "super+alt+delete", "super+alt+d"],
-		description: "Delete word forward",
+		description: __ompTranslate("Delete word forward"),
 	},
 	"tui.editor.deleteToLineStart": {
 		defaultKeys: "ctrl+u",
-		description: "Delete to line start",
+		description: __ompTranslate("Delete to line start"),
 	},
 	"tui.editor.deleteToLineEnd": {
 		defaultKeys: "ctrl+k",
-		description: "Delete to line end",
+		description: __ompTranslate("Delete to line end"),
 	},
-	"tui.editor.yank": { defaultKeys: "ctrl+y", description: "Yank" },
-	"tui.editor.yankPop": { defaultKeys: "alt+y", description: "Yank pop" },
-	"tui.editor.undo": { defaultKeys: ["ctrl+-", "ctrl+_"], description: "Undo" },
+	"tui.editor.yank": { defaultKeys: "ctrl+y", description: __ompTranslate("Yank") },
+	"tui.editor.yankPop": { defaultKeys: "alt+y", description: __ompTranslate("Yank pop") },
+	"tui.editor.undo": { defaultKeys: ["ctrl+-", "ctrl+_"], description: __ompTranslate("Undo") },
 	"tui.editor.spellingSuggestions": {
 		defaultKeys: "ctrl+.",
-		description: "Show spelling replacements",
+		description: __ompTranslate("Show spelling replacements"),
 	},
-	"tui.input.newLine": { defaultKeys: ["shift+enter", "ctrl+j"], description: "Insert newline" },
-	"tui.input.submit": { defaultKeys: "enter", description: "Submit input" },
-	"tui.input.tab": { defaultKeys: "tab", description: "Tab / autocomplete" },
-	"tui.input.copy": { defaultKeys: "ctrl+c", description: "Copy selection" },
-	"tui.select.up": { defaultKeys: "up", description: "Move selection up" },
-	"tui.select.down": { defaultKeys: "down", description: "Move selection down" },
-	"tui.select.pageUp": { defaultKeys: "pageUp", description: "Selection page up" },
+	"tui.input.newLine": { defaultKeys: ["shift+enter", "ctrl+j"], description: __ompTranslate("Insert newline") },
+	"tui.input.submit": { defaultKeys: "enter", description: __ompTranslate("Submit input") },
+	"tui.input.tab": { defaultKeys: "tab", description: __ompTranslate("Tab / autocomplete") },
+	"tui.input.copy": { defaultKeys: "ctrl+c", description: __ompTranslate("Copy selection") },
+	"tui.select.up": { defaultKeys: "up", description: __ompTranslate("Move selection up") },
+	"tui.select.down": { defaultKeys: "down", description: __ompTranslate("Move selection down") },
+	"tui.select.pageUp": { defaultKeys: "pageUp", description: __ompTranslate("Selection page up") },
 	"tui.select.pageDown": {
 		defaultKeys: "pageDown",
-		description: "Selection page down",
+		description: __ompTranslate("Selection page down"),
 	},
-	"tui.select.confirm": { defaultKeys: "enter", description: "Confirm selection" },
+	"tui.select.confirm": { defaultKeys: "enter", description: __ompTranslate("Confirm selection") },
 	"tui.select.cancel": {
 		defaultKeys: ["escape", "ctrl+c"],
-		description: "Cancel selection",
+		description: __ompTranslate("Cancel selection"),
 	},
 } as const satisfies KeybindingDefinitions;
 

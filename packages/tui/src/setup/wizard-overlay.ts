@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type Component, type OverlayFocusOwner } from "../tui";
 import { formatKeyHint } from "../app-keybindings";
 import { editorKey, editorKeys } from "../chrome/keybinding-hints";
@@ -67,7 +68,13 @@ function stepNode(label: string, position: number, state: StepState): NativeNode
 
 function sceneFooterHint(): string {
 	const navKeys = editorKeys("tui.select.up", "tui.select.down");
-	return `${navKeys} select · ${editorKey("tui.select.confirm")} confirm · ${editorKey("tui.select.cancel")} skip · ${formatKeyHint("ctrl+c")} exit setup`;
+	return __ompTranslate(
+		"{0} select · {1} confirm · {2} skip · {3} exit setup",
+		`${navKeys}`,
+		`${editorKey("tui.select.confirm")}`,
+		`${editorKey("tui.select.cancel")}`,
+		`${formatKeyHint("ctrl+c")}`,
+	);
 }
 
 function indentLine(line: string, width: number, indent: number): string {
@@ -372,7 +379,7 @@ export class SetupWizardComponent implements Component, OverlayFocusOwner {
 	#describeScene(pickers: boolean): NativeNode {
 		const scene = this.scenes[this.#sceneIndex];
 		const active = this.#activeScene;
-		const title = active?.title ?? scene?.title ?? "Setup";
+		const title = active?.title ?? scene?.title ?? __ompTranslate("Setup");
 		const subtitle = active?.subtitle;
 		const head = this.#describeHead();
 		return this.#nativeScene.get([head, active, title, subtitle, pickers], () => {
@@ -401,7 +408,7 @@ export class SetupWizardComponent implements Component, OverlayFocusOwner {
 
 	#renderScene(width: number, height: number): string[] {
 		const scene = this.scenes[this.#sceneIndex];
-		const title = this.#activeScene?.title ?? scene?.title ?? "Setup";
+		const title = this.#activeScene?.title ?? scene?.title ?? __ompTranslate("Setup");
 		const subtitle = this.#activeScene?.subtitle;
 		const { scenes: steps, current } = this.#steps();
 		const contentWidth = Math.max(MIN_CONTENT_WIDTH, width - SCENE_MARGIN_X * 2);

@@ -2,6 +2,7 @@
  * Built-in model roles and role metadata helpers.
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { modelKind, type Model } from "@oh-my-pi/pi-catalog/types";
 import {
 	KIND_ROLE_IDS,
@@ -54,40 +55,58 @@ function acceptsJudge(model: Model): boolean {
 }
 
 export const MODEL_ROLES: Record<ModelRole, ModelRoleInfo> = {
-	default: { tag: "DEFAULT", name: "Default", color: "success", section: "chat", accepts: acceptsChat },
-	smol: { tag: "SMOL", name: "Fast", color: "warning", section: "chat", accepts: acceptsChat },
-	slow: { tag: "SLOW", name: "Thinking", color: "accent", section: "chat", accepts: acceptsChat },
-	vision: { tag: "VISION", name: "Vision", color: "error", section: "chat", accepts: acceptsChat },
-	plan: { tag: "PLAN", name: "Architect", color: "muted", section: "chat", accepts: acceptsChat },
-	commit: { tag: "COMMIT", name: "Commit", color: "dim", section: "chat", accepts: acceptsChat },
-	tiny: { tag: "TINY", name: "Tiny", color: "dim", section: "chat", accepts: acceptsTinyOrChat },
-	memory: { tag: "MEMORY", name: "Memory", color: "dim", section: "chat", accepts: acceptsTinyOrChat },
-	task: { tag: "TASK", name: "Subtask", color: "muted", section: "chat", accepts: acceptsChat },
-	advisor: { tag: "ADVISOR", name: "Advisor", color: "accent", section: "chat", accepts: acceptsChat },
-	widget: { tag: "WIDGET", name: "Job widgets", color: "dim", section: "chat", accepts: acceptsChat },
+	default: {
+		tag: "DEFAULT",
+		name: __ompTranslate("Default"),
+		color: "success",
+		section: "chat",
+		accepts: acceptsChat,
+	},
+	smol: { tag: "SMOL", name: __ompTranslate("Fast"), color: "warning", section: "chat", accepts: acceptsChat },
+	slow: { tag: "SLOW", name: __ompTranslate("Thinking"), color: "accent", section: "chat", accepts: acceptsChat },
+	vision: { tag: "VISION", name: __ompTranslate("Vision"), color: "error", section: "chat", accepts: acceptsChat },
+	plan: { tag: "PLAN", name: __ompTranslate("Architect"), color: "muted", section: "chat", accepts: acceptsChat },
+	commit: { tag: "COMMIT", name: __ompTranslate("Commit"), color: "dim", section: "chat", accepts: acceptsChat },
+	tiny: { tag: "TINY", name: __ompTranslate("Tiny"), color: "dim", section: "chat", accepts: acceptsTinyOrChat },
+	memory: { tag: "MEMORY", name: __ompTranslate("Memory"), color: "dim", section: "chat", accepts: acceptsTinyOrChat },
+	task: { tag: "TASK", name: __ompTranslate("Subtask"), color: "muted", section: "chat", accepts: acceptsChat },
+	advisor: {
+		tag: "ADVISOR",
+		name: __ompTranslate("Advisor\u0004model.role.advisor"),
+		color: "accent",
+		section: "chat",
+		accepts: acceptsChat,
+	},
+	widget: { tag: "WIDGET", name: __ompTranslate("Job widgets"), color: "dim", section: "chat", accepts: acceptsChat },
 	image: {
 		tag: "IMAGE",
-		name: "Image generation",
+		name: __ompTranslate("Image generation"),
 		color: "accent",
 		section: "kind",
 		accepts: model => modelKind(model) === "image",
 	},
-	web: { tag: "WEB", name: "Web search", color: "success", section: "kind", accepts: acceptsWeb },
+	web: { tag: "WEB", name: __ompTranslate("Web search"), color: "success", section: "kind", accepts: acceptsWeb },
 	speech: {
 		tag: "SPEECH",
-		name: "Speech",
+		name: __ompTranslate("Speech"),
 		color: "warning",
 		section: "kind",
 		accepts: model => modelKind(model) === "tts",
 	},
 	dictation: {
 		tag: "DICTATION",
-		name: "Dictation",
+		name: __ompTranslate("Dictation"),
 		color: "warning",
 		section: "kind",
 		accepts: model => modelKind(model) === "stt",
 	},
-	judge: { tag: "JUDGE", name: "Judge", color: "muted", section: "kind", accepts: acceptsJudge },
+	judge: {
+		tag: "JUDGE",
+		name: __ompTranslate("Judge\u0004model.role.judge"),
+		color: "muted",
+		section: "kind",
+		accepts: acceptsJudge,
+	},
 };
 
 export type RoleInfo = ModelRoleInfo;

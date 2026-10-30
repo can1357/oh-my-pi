@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type Component, Markdown, Text, type TUI } from "../index";
 import { replaceTabs } from "../render/render-utils";
 import { getMarkdownTheme, theme } from "../theme/theme";
@@ -38,7 +39,7 @@ interface OmfgPanelComponentOptions {
 export class OmfgPanelComponent extends OverlayPanel {
 	#tui: TUI;
 	#state: OmfgPanelState = "generating";
-	#status = "Generating TTSR rule…";
+	#status = __ompTranslate("Generating TTSR rule…");
 	#preview = "";
 	#savedPath: string | undefined;
 	#errorMessage: string | undefined;
@@ -83,7 +84,7 @@ export class OmfgPanelComponent extends OverlayPanel {
 		if (this.#closed) return;
 		this.#state = "saved";
 		this.#savedPath = path;
-		this.#status = `Saved ${path}`;
+		this.#status = __ompTranslate("Saved {0}", `${path}`);
 		this.#errorMessage = undefined;
 		this.#rebuild();
 	}
@@ -91,7 +92,7 @@ export class OmfgPanelComponent extends OverlayPanel {
 	markRejected(): void {
 		if (this.#closed) return;
 		this.#state = "rejected";
-		this.#status = "Rule was not saved.";
+		this.#status = __ompTranslate("Rule was not saved.");
 		this.#errorMessage = undefined;
 		this.#rebuild();
 	}
@@ -99,7 +100,7 @@ export class OmfgPanelComponent extends OverlayPanel {
 	markAborted(): void {
 		if (this.#closed) return;
 		this.#state = "aborted";
-		this.#status = "Cancelled.";
+		this.#status = __ompTranslate("Cancelled.");
 		this.#errorMessage = undefined;
 		this.#rebuild();
 	}
@@ -107,7 +108,7 @@ export class OmfgPanelComponent extends OverlayPanel {
 	markError(message: string): void {
 		if (this.#closed) return;
 		this.#state = "error";
-		this.#status = "Could not create rule.";
+		this.#status = __ompTranslate("Could not create rule.");
 		this.#errorMessage = message;
 		this.#rebuild();
 	}
@@ -148,36 +149,41 @@ export class OmfgPanelComponent extends OverlayPanel {
 
 	#describeBody(): NativeNode {
 		if (this.#state === "error") {
-			return text([span(replaceTabs(this.#errorMessage ?? "Unknown error"), "error")], { wrap: "word" });
+			return text([span(replaceTabs(this.#errorMessage ?? __ompTranslate("Unknown error")), "error")], {
+				wrap: "word",
+			});
 		}
 		const preview = replaceTabs(this.#preview).trim();
 		if (preview) return md(preview, { stream: this.#state === "generating" });
-		return text([span(`${theme.status.pending} Waiting for candidate rule…`, "dim")]);
+		return text([span(__ompTranslate("{0} Waiting for candidate rule…", `${theme.status.pending}`), "dim")]);
 	}
 
 	#describeFooter(): NativeNode {
-		const esc: NativeHint = { keys: boundKeys("app.interrupt", ["escape"]).slice(0, 1), label: "dismiss" };
+		const esc: NativeHint = {
+			keys: boundKeys("app.interrupt", ["escape"]).slice(0, 1),
+			label: __ompTranslate("dismiss"),
+		};
 		switch (this.#state) {
 			case "generating":
 			case "validating":
 			case "confirming":
 			case "saving":
-				return hintsRow([{ ...esc, label: "cancel /omfg" }]);
+				return hintsRow([{ ...esc, label: __ompTranslate("cancel /omfg") }]);
 			case "saved":
 				return statusHintsRow(
 					[
-						span(`${theme.status.success} Registered live`, "success"),
+						span(__ompTranslate("{0} Registered live", `${theme.status.success}`), "success"),
 						span(" · ", "muted"),
-						span(replaceTabs(this.#savedPath ?? "saved"), "path"),
+						span(replaceTabs(this.#savedPath ?? __ompTranslate("saved")), "path"),
 					],
 					[esc],
 				);
 			case "rejected":
-				return statusHintsRow([span(`${theme.status.warning} Not saved`, "warning")], [esc]);
+				return statusHintsRow([span(__ompTranslate("{0} Not saved", `${theme.status.warning}`), "warning")], [esc]);
 			case "aborted":
-				return statusHintsRow([span(`${theme.status.warning} Cancelled`, "warning")], [esc]);
+				return statusHintsRow([span(__ompTranslate("{0} Cancelled", `${theme.status.warning}`), "warning")], [esc]);
 			case "error":
-				return statusHintsRow([span(`${theme.status.error} Error`, "error")], [esc]);
+				return statusHintsRow([span(__ompTranslate("{0} Error", `${theme.status.error}`), "error")], [esc]);
 		}
 	}
 
@@ -195,28 +201,43 @@ export class OmfgPanelComponent extends OverlayPanel {
 			case "validating":
 			case "confirming":
 			case "saving":
-				return theme.fg("muted", `${esc} cancel /omfg`);
+				return theme.fg("muted", __ompTranslate("{0} cancel /omfg", `${esc}`));
 			case "saved":
 				return theme.fg(
 					"success",
-					`${theme.status.success} Registered live · ${replaceTabs(this.#savedPath ?? "saved")} · ${esc} dismiss`,
+					__ompTranslate(
+						"{0} Registered live · {1} · {2} dismiss",
+						`${theme.status.success}`,
+						`${replaceTabs(this.#savedPath ?? __ompTranslate("saved"))}`,
+						`${esc}`,
+					),
 				);
 			case "rejected":
-				return theme.fg("warning", `${theme.status.warning} Not saved · ${esc} dismiss`);
+				return theme.fg(
+					"warning",
+					__ompTranslate("{0} Not saved · {1} dismiss", `${theme.status.warning}`, `${esc}`),
+				);
 			case "aborted":
-				return theme.fg("warning", `${theme.status.warning} Cancelled · ${esc} dismiss`);
+				return theme.fg(
+					"warning",
+					__ompTranslate("{0} Cancelled · {1} dismiss", `${theme.status.warning}`, `${esc}`),
+				);
 			case "error":
-				return theme.fg("error", `${theme.status.error} Error · ${esc} dismiss`);
+				return theme.fg("error", __ompTranslate("{0} Error · {1} dismiss", `${theme.status.error}`, `${esc}`));
 		}
 	}
 
 	#contentComponent(): Component {
 		if (this.#state === "error") {
-			return new Text(theme.fg("error", replaceTabs(this.#errorMessage ?? "Unknown error")), 0, 0);
+			return new Text(theme.fg("error", replaceTabs(this.#errorMessage ?? __ompTranslate("Unknown error"))), 0, 0);
 		}
 		const text = replaceTabs(this.#preview).trim();
 		if (!text) {
-			return new Text(theme.fg("dim", `${theme.status.pending} Waiting for candidate rule…`), 0, 0);
+			return new Text(
+				theme.fg("dim", __ompTranslate("{0} Waiting for candidate rule…", `${theme.status.pending}`)),
+				0,
+				0,
+			);
 		}
 		return new Markdown(text, 0, 0, getMarkdownTheme());
 	}

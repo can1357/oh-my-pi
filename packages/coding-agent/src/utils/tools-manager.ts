@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -286,7 +287,7 @@ async function downloadTool(
 	// Download archive
 	const archivePath = path.join(TOOLS_DIR, assetName);
 	await downloadFile(downloadUrl, archivePath, { signal, onProgress });
-	tracker.update({ detail: "extracting" });
+	tracker.update({ detail: __ompTranslate("extracting") });
 
 	// Extract
 	const tmp = await TempDir.create("@omp-tools-extract-");

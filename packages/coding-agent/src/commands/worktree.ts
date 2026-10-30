@@ -2,6 +2,7 @@
  * List and clean up agent-managed git worktrees under `~/.omp/wt`.
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { getProjectDir } from "@oh-my-pi/pi-utils";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { worktreeHelp as commandHelp } from "../cli/command-help";
@@ -15,17 +16,17 @@ export default class Worktree extends Command {
 	static args = {
 		// A positional action keeps `omp worktree` (the no-arg form) useful.
 		action: Args.string({
-			description: "list (default), clear, or add",
+			description: __ompTranslate("list (default), clear, or add"),
 			required: false,
 			options: ["list", "clear", "add"],
 			default: "list",
 		}),
 		path: Args.string({
-			description: "Worktree path (add)",
+			description: __ompTranslate("Worktree path (add)"),
 			required: false,
 		}),
 		commit: Args.string({
-			description: "Commit-ish to check out (add)",
+			description: __ompTranslate("Commit-ish to check out (add)"),
 			required: false,
 		}),
 	};
@@ -33,38 +34,42 @@ export default class Worktree extends Command {
 	static flags = {
 		cwd: Flags.string({
 			char: "C",
-			description: "Repository/base directory (add)",
+			description: __ompTranslate("Repository/base directory (add)"),
 		}),
 		branch: Flags.string({
 			char: "b",
-			description: "Create a new branch (add)",
+			description: __ompTranslate("Create a new branch (add)"),
 			exclusive: ["force-branch"],
 		}),
 		"force-branch": Flags.string({
 			char: "B",
-			description: "Create or reset a branch (add)",
+			description: __ompTranslate("Create or reset a branch (add)"),
 			exclusive: ["branch"],
 		}),
 		detach: Flags.boolean({
 			char: "d",
-			description: "Detach HEAD (add)",
+			description: __ompTranslate("Detach HEAD (add)"),
 			default: false,
 		}),
 		quiet: Flags.boolean({
 			char: "q",
-			description: "Suppress add output",
+			description: __ompTranslate("Suppress add output"),
 			default: false,
 		}),
 		all: Flags.boolean({
-			description: "Clear every entry, including live PR-checkout worktrees (clear)",
+			description: __ompTranslate("Clear every entry, including live PR-checkout worktrees (clear)"),
 			default: false,
 		}),
 		"dry-run": Flags.boolean({
 			char: "n",
-			description: "Print what would be removed without touching the filesystem (clear)",
+			description: __ompTranslate("Print what would be removed without touching the filesystem (clear)"),
 			default: false,
 		}),
-		json: Flags.boolean({ char: "j", description: "Emit machine-readable JSON", default: false }),
+		json: Flags.boolean({
+			char: "j",
+			description: __ompTranslate("Emit machine-readable JSON\u0004cli.output.machine-readable"),
+			default: false,
+		}),
 	};
 
 	static examples = [
@@ -85,7 +90,7 @@ export default class Worktree extends Command {
 		// its worktrees under the configured base.
 		if (args.action === "add") {
 			if (!args.path) {
-				console.error("Error: Missing required argument: path");
+				console.error(__ompTranslate("Error: Missing required argument: path"));
 				process.exitCode = 1;
 				return;
 			}

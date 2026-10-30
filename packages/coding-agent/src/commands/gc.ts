@@ -2,6 +2,7 @@
  * Run on-disk storage maintenance.
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { gcHelp as commandHelp } from "../cli/command-help";
 import { collectGcErrors, type GcCommandArgs, runGcCommand } from "../cli/gc-cli";
@@ -9,26 +10,36 @@ import { collectGcErrors, type GcCommandArgs, runGcCommand } from "../cli/gc-cli
 export default class Gc extends Command {
 	static description = commandHelp.description;
 	static flags = {
-		apply: Flags.boolean({ description: "Apply changes (default is dry-run)" }),
-		json: Flags.boolean({ description: "Output JSON" }),
-		"agent-dir": Flags.string({ description: "Agent directory to maintain" }),
-		blobs: Flags.boolean({ description: "Sweep unreferenced blobs" }),
-		archive: Flags.boolean({ description: "Archive cold sessions" }),
-		wal: Flags.boolean({ description: "Checkpoint history/model database WAL files" }),
+		apply: Flags.boolean({ description: __ompTranslate("Apply changes (default is dry-run)") }),
+		json: Flags.boolean({ description: __ompTranslate("Output JSON") }),
+		"agent-dir": Flags.string({ description: __ompTranslate("Agent directory to maintain") }),
+		blobs: Flags.boolean({ description: __ompTranslate("Sweep unreferenced blobs") }),
+		archive: Flags.boolean({ description: __ompTranslate("Archive cold sessions") }),
+		wal: Flags.boolean({ description: __ompTranslate("Checkpoint history/model database WAL files") }),
 		stale: Flags.boolean({
-			description: "Prune dangling session markers/breadcrumbs and old debug reports and collab replicas",
+			description: __ompTranslate(
+				"Prune dangling session markers/breadcrumbs and old debug reports and collab replicas",
+			),
 		}),
 		compress: Flags.boolean({
-			description: "Store idle sessions with filesystem compression in place (APFS, NTFS)",
+			description: __ompTranslate("Store idle sessions with filesystem compression in place (APFS, NTFS)"),
 		}),
-		"cold-archive-after-days": Flags.integer({ description: "Minimum session age before archiving" }),
-		"retain-newest-global": Flags.integer({ description: "Always keep this many newest sessions active" }),
-		"retain-newest-per-cwd": Flags.integer({ description: "Always keep this many newest sessions per cwd active" }),
+		"cold-archive-after-days": Flags.integer({ description: __ompTranslate("Minimum session age before archiving") }),
+		"retain-newest-global": Flags.integer({
+			description: __ompTranslate("Always keep this many newest sessions active"),
+		}),
+		"retain-newest-per-cwd": Flags.integer({
+			description: __ompTranslate("Always keep this many newest sessions per cwd active"),
+		}),
 		"stale-retain-newest": Flags.integer({
-			description: "Always keep this many newest debug reports and collab replicas",
+			description: __ompTranslate("Always keep this many newest debug reports and collab replicas"),
 		}),
-		"stale-retain-days": Flags.integer({ description: "Minimum debug report/collab replica age before pruning" }),
-		"compress-after-days": Flags.integer({ description: "Minimum idle days before compressing a session" }),
+		"stale-retain-days": Flags.integer({
+			description: __ompTranslate("Minimum debug report/collab replica age before pruning"),
+		}),
+		"compress-after-days": Flags.integer({
+			description: __ompTranslate("Minimum idle days before compressing a session"),
+		}),
 	};
 
 	async run(): Promise<void> {

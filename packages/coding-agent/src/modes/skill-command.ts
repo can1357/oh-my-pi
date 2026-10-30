@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { getSkillSlashCommandName, parseSkillInvocation } from "../extensibility/skills";
@@ -115,7 +116,7 @@ export async function invokeSkillCommandFromText(
 		if (options?.propagateErrors) {
 			throw err;
 		}
-		ctx.showError(`Failed to load skill: ${err instanceof Error ? err.message : String(err)}`);
+		ctx.showError(__ompTranslate("Failed to load skill: {0}", `${err instanceof Error ? err.message : String(err)}`));
 		return true;
 	} finally {
 		if (optimistic && ctx.optimisticSkillMessagePending) {

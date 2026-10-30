@@ -4,6 +4,7 @@
  * submitted: the section labels or workpool item in the head, the data as a
  * JSON tree (Markdown when it is a string), and the reported or rejected error.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { formatCount, isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import { compact, md } from "../native/describe";
 import { OwnerMemo } from "../native/memo";
@@ -35,7 +36,7 @@ import type {
 } from "./renderer";
 import type { YieldItem } from "./task";
 
-const TITLE = "Submit Result";
+const TITLE = __ompTranslate("Submit Result");
 
 /** Collapsed rows of string data (a report) in the ANSI card. */
 const TEXT_ROWS_COLLAPSED = 4;
@@ -73,11 +74,17 @@ function readSubmission(
 	const incremental = Array.isArray(type) && type.length > 0;
 	const data = details?.data !== undefined ? details.data : (args?.data ?? undefined);
 	let error = args?.error || undefined;
-	if (result?.isError) error = resultText(result) || `${TITLE} failed`;
-	else if (result && details?.status === "aborted") error = details.error || resultText(result) || "Aborted";
+	if (result?.isError) error = resultText(result) || __ompTranslate("{0} failed\u0004tool.error.message", `${TITLE}`);
+	else if (result && details?.status === "aborted")
+		error = details.error || resultText(result) || __ompTranslate("Aborted");
 	const settled = result !== undefined;
 	return {
-		target: typeof args?.key === "number" ? `item ${args.key}` : incremental ? type.join(", ") : undefined,
+		target:
+			typeof args?.key === "number"
+				? __ompTranslate("item {0}", `${args.key}`)
+				: incremental
+					? type.join(", ")
+					: undefined,
 		data,
 		error,
 		settled,
@@ -85,8 +92,8 @@ function readSubmission(
 		note:
 			settled && error === undefined && data === undefined
 				? incremental
-					? "Takes the last message as this section"
-					: "Ends with the sections submitted earlier, or the last message"
+					? __ompTranslate("Takes the last message as this section")
+					: __ompTranslate("Ends with the sections submitted earlier, or the last message")
 				: undefined,
 	};
 }
@@ -100,7 +107,8 @@ function sizeMeta(data: unknown): string | undefined {
 
 function describeData(data: unknown, streaming: boolean, json: boolean): NativeChild | undefined {
 	if (data === undefined) return undefined;
-	if (typeof data === "string") return data.trim() ? md(data, { stream: streaming }) : noteText("(empty)");
+	if (typeof data === "string")
+		return data.trim() ? md(data, { stream: streaming }) : noteText(__ompTranslate("(empty)"));
 	// Open to the depth cap: the data is the card's whole point, and the
 	// collapsed card's preview clamp already bounds what shows.
 	return describeJsonValue(data, {
@@ -119,7 +127,7 @@ function describeSubmission(s: Submission, streaming: boolean, json: boolean): N
 			target: s.target,
 			targetKind: s.target ? "text" : undefined,
 			meta: size ? [size] : undefined,
-			badges: s.overridden ? [{ text: "schema overridden", tone: "warning" }] : undefined,
+			badges: s.overridden ? [{ text: __ompTranslate("schema overridden"), tone: "warning" }] : undefined,
 		},
 		tone: s.settled && s.error !== undefined ? "error" : undefined,
 		body: compact([
@@ -170,7 +178,7 @@ function renderSubmission(s: Submission, options: RenderResultOptions, theme: Th
 				spinnerFrame: options.spinnerFrame,
 				title: TITLE,
 				description: s.target,
-				badge: s.overridden ? { label: "schema overridden", color: "warning" } : undefined,
+				badge: s.overridden ? { label: __ompTranslate("schema overridden"), color: "warning" } : undefined,
 				meta: size ? [size] : undefined,
 			};
 			const phase: ToolCardPhase = !s.settled ? (running ? "running" : "partial") : failed ? "error" : "success";

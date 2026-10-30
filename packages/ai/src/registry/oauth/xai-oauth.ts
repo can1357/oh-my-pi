@@ -2,6 +2,7 @@
  * xAI OAuth endpoint discovery, identity, and billing helpers.
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
 
@@ -95,7 +96,7 @@ async function xaiOAuthDiscovery(
 		});
 	} catch (error) {
 		throw new AIError.OAuthError(
-			`xAI OIDC discovery failed: ${error instanceof Error ? error.message : String(error)}`,
+			__ompTranslate("xAI OIDC discovery failed: {0}", `${error instanceof Error ? error.message : String(error)}`),
 			{
 				kind: "discovery",
 				provider: "xai",
@@ -115,7 +116,10 @@ async function xaiOAuthDiscovery(
 		payload = await response.json();
 	} catch (error) {
 		throw new AIError.OAuthError(
-			`xAI OIDC discovery returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+			__ompTranslate(
+				"xAI OIDC discovery returned invalid JSON: {0}",
+				`${error instanceof Error ? error.message : String(error)}`,
+			),
 			{ kind: "validation", provider: "xai", cause: error },
 		);
 	}

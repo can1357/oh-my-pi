@@ -1,4 +1,5 @@
 /** `lsp` — language-server queries: diagnostics, definitions, references, hover, rename, … */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
 import type { ReactNode } from "react";
 import type { Tone } from "../parts";
 import { Badge, InvalidArg, Kv, KvGrid, Output, PathText, ResultText, Row } from "../parts";
@@ -99,7 +100,7 @@ function DiagnosticRows({ text, rows }: { text: string; rows: DiagRow[] }): Reac
 				))}
 				{rows.length > shown.length && (
 					<Row>
-						<span className="tv-faint">… {rows.length - shown.length} more</span>
+						<span className="tv-faint">{__ompTranslate("… {0} more", `${rows.length - shown.length}`)}</span>
 					</Row>
 				)}
 			</div>
@@ -127,7 +128,7 @@ function LocationRows({ text, rows }: { text: string; rows: LocRow[] }): ReactNo
 				))}
 				{rows.length > shown.length && (
 					<Row>
-						<span className="tv-faint">… {rows.length - shown.length} more</span>
+						<span className="tv-faint">{__ompTranslate("… {0} more", `${rows.length - shown.length}`)}</span>
 					</Row>
 				)}
 			</div>
@@ -144,10 +145,10 @@ function Summary({ args }: ToolRenderProps): ReactNode {
 	const newName = str(args.new_name);
 	return (
 		<>
-			<Badge tone="accent">{action ? action.replace(/_/g, " ") : "request"}</Badge>
-			{file === "*" && <Badge>workspace</Badge>}
+			<Badge tone="accent">{action ? action.replace(/_/g, " ") : __ompTranslate("request")}</Badge>
+			{file === "*" && <Badge>{__ompTranslate("workspace")}</Badge>}
 			{file && file !== "*" && <PathText path={file} from={line} />}
-			{!file && line != null && <span className="tv-faint">line {line}</span>}
+			{!file && line != null && <span className="tv-faint">{__ompTranslate("line {0}", `${line}`)}</span>}
 			{symbol && <span className="tv-pattern">{truncate(normalizeWs(symbol), 48)}</span>}
 			{query && <span className="tv-muted">{truncate(normalizeWs(query), 48)}</span>}
 			{newName && <span className="tv-muted">→ {truncate(normalizeWs(newName), 48)}</span>}
@@ -178,26 +179,42 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 	return (
 		<>
 			<KvGrid>
-				<ArgKv k="action" raw={args.action} val={str(args.action)?.replace(/_/g, " ")} />
+				<ArgKv k={__ompTranslate("action")} raw={args.action} val={str(args.action)?.replace(/_/g, " ")} />
 				<ArgKv
-					k="file"
+					k={__ompTranslate("file\u0004tool.lsp.file")}
 					raw={args.file}
-					val={file === "*" ? <Badge>workspace</Badge> : file && <PathText path={file} from={line} />}
+					val={
+						file === "*" ? (
+							<Badge>{__ompTranslate("workspace")}</Badge>
+						) : (
+							file && <PathText path={file} from={line} />
+						)
+					}
 				/>
-				{!file && <ArgKv k="line" raw={args.line} val={line} />}
-				<ArgKv k="symbol" raw={args.symbol} val={symbol && truncate(normalizeWs(symbol), 120)} />
-				<ArgKv k="query" raw={args.query} val={query && truncate(normalizeWs(query), 120)} />
-				<ArgKv k="new name" raw={args.new_name} val={newName && truncate(normalizeWs(newName), 120)} />
-				<ArgKv k="apply" raw={args.apply} val={apply == null ? null : apply ? "yes" : "no"} />
-				<ArgKv k="timeout" raw={args.timeout} val={timeout != null && `${timeout}s`} />
+				{!file && <ArgKv k={__ompTranslate("line")} raw={args.line} val={line} />}
+				<ArgKv k={__ompTranslate("symbol")} raw={args.symbol} val={symbol && truncate(normalizeWs(symbol), 120)} />
+				<ArgKv k={__ompTranslate("query")} raw={args.query} val={query && truncate(normalizeWs(query), 120)} />
+				<ArgKv
+					k={__ompTranslate("new name")}
+					raw={args.new_name}
+					val={newName && truncate(normalizeWs(newName), 120)}
+				/>
+				<ArgKv
+					k={__ompTranslate("apply")}
+					raw={args.apply}
+					val={apply == null ? null : apply ? __ompTranslate("yes") : __ompTranslate("no")}
+				/>
+				<ArgKv k={__ompTranslate("timeout")} raw={args.timeout} val={timeout != null && `${timeout}s`} />
 				{args.payload !== undefined && payload == null && (
-					<Kv k="payload">
+					<Kv k={__ompTranslate("payload")}>
 						<InvalidArg what="payload" />
 					</Kv>
 				)}
-				{serverName && <Kv k="server">{serverName}</Kv>}
+				{serverName && <Kv k={__ompTranslate("server")}>{serverName}</Kv>}
 			</KvGrid>
-			{payload && <Output text={payload} lang="json" variant="code" maxLines={8} title="payload" />}
+			{payload && (
+				<Output text={payload} lang="json" variant="code" maxLines={8} title={__ompTranslate("payload")} />
+			)}
 			{diags.length > 0 ? (
 				<DiagnosticRows text={text} rows={diags} />
 			) : locs.length > 0 ? (

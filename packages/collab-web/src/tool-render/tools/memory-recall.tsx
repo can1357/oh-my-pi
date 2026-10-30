@@ -3,6 +3,8 @@
  * lives in the result text: a `Found N relevant memories (as of … UTC):`
  * header followed by blank-line-separated `- <text> [type] (date)` bullets.
  */
+import { t as ___ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
 import type { ReactNode } from "react";
 import { Badge, Badges, InvalidArg, Output, ResultText, Row } from "../parts";
 import type { ToolRenderer, ToolRenderProps } from "../types";
@@ -22,7 +24,14 @@ function Summary(props: ToolRenderProps): ReactNode {
 		<>
 			{query !== null ? <span>{truncate(normalizeWs(query), 96)}</span> : <InvalidArg what="query" />}
 			{found !== null && (
-				<> {found > 0 ? <Badge tone="accent">{found} found</Badge> : <Badge tone="warn">no matches</Badge>}</>
+				<>
+					{" "}
+					{found > 0 ? (
+						<Badge tone="accent">{__ompTranslate("{0} found", `${found}`)}</Badge>
+					) : (
+						<Badge tone="warn">{__ompTranslate("no matches")}</Badge>
+					)}
+				</>
 			)}
 		</>
 	);
@@ -69,10 +78,10 @@ function Body(props: ToolRenderProps): ReactNode {
 	}
 	return (
 		<>
-			{query && <Output text={query} title="query" maxLines={4} />}
+			{query && <Output text={query} title={___ompTranslate("query")} maxLines={4} />}
 			{entries.length > 0 ? (
 				<>
-					{asOf && <Badges items={[`as of ${asOf} UTC`]} />}
+					{asOf && <Badges items={[___ompTranslate("as of {0} UTC", `${asOf}`)]} />}
 					<div className="tv-list">
 						{entries.map((entry, i) => (
 							<Row key={i}>

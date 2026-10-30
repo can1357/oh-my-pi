@@ -1,5 +1,6 @@
 /** Inspect and maintain image publication backends. */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { imagesHelp as commandHelp } from "../cli/command-help";
 import { IMAGES_ACTIONS, type ImagesAction, type ImagesCommandArgs, runImagesCommand } from "../cli/images-cli";
@@ -9,17 +10,17 @@ export default class Images extends Command {
 	static aliases = ["img"];
 	static args = {
 		action: Args.string({
-			description: "status (default), doctor, probe, or purge",
+			description: __ompTranslate("status (default), doctor, probe, or purge"),
 			required: false,
 			options: [...IMAGES_ACTIONS],
 		}),
 	};
 	static flags = {
-		json: Flags.boolean({ description: "Output one JSON document" }),
-		apply: Flags.boolean({ description: "Apply purge deletions (default is dry-run)" }),
-		all: Flags.boolean({ description: "Purge all entries instead of expired entries only" }),
-		dir: Flags.string({ description: "Project directory (default: current directory)" }),
-		timeout: Flags.integer({ description: "External health probe timeout in seconds" }),
+		json: Flags.boolean({ description: __ompTranslate("Output one JSON document") }),
+		apply: Flags.boolean({ description: __ompTranslate("Apply purge deletions (default is dry-run)") }),
+		all: Flags.boolean({ description: __ompTranslate("Purge all entries instead of expired entries only") }),
+		dir: Flags.string({ description: __ompTranslate("Project directory (default: current directory)") }),
+		timeout: Flags.integer({ description: __ompTranslate("External health probe timeout in seconds") }),
 	};
 	static examples = [
 		"omp images",

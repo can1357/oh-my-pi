@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 /**
  * Marketplace plugin system types.
  *
@@ -28,14 +29,14 @@ export function nameSegmentCollisionKey(s: string): string {
 /** Build canonical plugin ID: `"name@marketplace"`. Both segments are validated. */
 export function buildPluginId(name: string, marketplace: string): string {
 	if (!isValidNameSegment(name)) {
-		throw new Error(`Invalid plugin name: "${name}"`);
+		throw new Error(__ompTranslate('Invalid plugin name: "{0}"', `${name}`));
 	}
 	if (!isValidNameSegment(marketplace)) {
-		throw new Error(`Invalid marketplace name: "${marketplace}"`);
+		throw new Error(__ompTranslate('Invalid marketplace name: "{0}"', `${marketplace}`));
 	}
 	const id = `${name}@${marketplace}`;
 	if (id.length > MAX_ID_LENGTH) {
-		throw new Error(`Plugin ID exceeds ${MAX_ID_LENGTH} characters: "${id}"`);
+		throw new Error(__ompTranslate('Plugin ID exceeds {0} characters: "{1}"', `${MAX_ID_LENGTH}`, `${id}`));
 	}
 	return id;
 }

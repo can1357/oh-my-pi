@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { computeSessionContextBreakdown } from "../../session/context-usage-runtime";
 import type { SlashCommandRuntime } from "../types";
 import { renderAsciiBar } from "@oh-my-pi/pi-tui/chrome/format";
@@ -11,10 +12,12 @@ export function buildContextReportText(runtime: SlashCommandRuntime): string {
 	try {
 		const breakdown = computeSessionContextBreakdown(runtime.session, { snapcompactSavings: true });
 		if (breakdown.contextWindow <= 0) {
-			return "Context usage is unavailable: no model is selected for this session.";
+			return __ompTranslate("Context usage is unavailable: no model is selected for this session.");
 		}
 		const usedPct = Math.round((breakdown.usedTokens / breakdown.contextWindow) * 100);
-		const lines = [`Context window: ${breakdown.contextWindow} tokens (${usedPct}% used)`];
+		const lines = [
+			__ompTranslate("Context window: {0} tokens ({1}% used)", `${breakdown.contextWindow}`, `${usedPct}`),
+		];
 		for (const category of breakdown.categories) {
 			if (category.tokens === 0) continue;
 			const fraction = category.tokens / breakdown.contextWindow;
@@ -33,9 +36,9 @@ export function buildContextReportText(runtime: SlashCommandRuntime): string {
 		const snap = breakdown.snapcompact;
 		if (snap) {
 			if (!snap.visionCapable) {
-				lines.push("Snapcompact: inactive (model has no image input)");
+				lines.push(__ompTranslate("Snapcompact: inactive (model has no image input)"));
 			} else {
-				lines.push("Snapcompact (estimated wire savings):");
+				lines.push(__ompTranslate("Snapcompact (estimated wire savings):"));
 				if (snap.systemPrompt) {
 					const sp = snap.systemPrompt;
 					lines.push(
@@ -53,14 +56,23 @@ export function buildContextReportText(runtime: SlashCommandRuntime): string {
 					);
 				}
 				if (snap.savedTokens > 0) {
-					lines.push(`  Estimated next request: ~${breakdown.usedTokens - snap.savedTokens} tokens on the wire`);
+					lines.push(
+						__ompTranslate(
+							"  Estimated next request: ~{0} tokens on the wire",
+							`${breakdown.usedTokens - snap.savedTokens}`,
+						),
+					);
 				}
 			}
 		}
 		return lines.join("\n");
 	} catch {
 		const fallback = runtime.session.getContextUsage();
-		if (!fallback) return "Context usage is unavailable.";
-		return ["Context", `Window: ${fallback.contextWindow}`, `Used: ${fallback.tokens ?? 0}`].join("\n");
+		if (!fallback) return __ompTranslate("Context usage is unavailable.");
+		return [
+			__ompTranslate("Context"),
+			__ompTranslate("Window: {0}", `${fallback.contextWindow}`),
+			__ompTranslate("Used: {0}", `${fallback.tokens ?? 0}`),
+		].join("\n");
 	}
 }

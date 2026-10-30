@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type {
 	CustomCommand,
 	CustomCommandAPI,
@@ -95,32 +96,32 @@ const ANNOTATE_MODE_COMPLETIONS: readonly AutocompleteItem[] = [
 	{
 		value: "last ",
 		label: "last",
-		description: "Annotate the latest assistant reply",
+		description: __ompTranslate("Annotate the latest assistant reply"),
 	},
 	{
 		value: "session ",
 		label: "session",
-		description: "Annotate a message or code block from this session",
+		description: __ompTranslate("Annotate a message or code block from this session"),
 	},
 	{
 		value: "code-review ",
 		label: "code-review",
-		description: "Annotate local changes, a GitHub pull request, or a GitLab merge request",
+		description: __ompTranslate("Annotate local changes, a GitHub pull request, or a GitLab merge request"),
 	},
 ];
 
 const ANNOTATE_GUIDANCE_COMPLETIONS: readonly AutocompleteItem[] = [
 	{
 		value: "./",
-		label: "<file path>",
-		description: "Annotate a file by path",
-		hint: "Annotate a file; paths with spaces stay unquoted",
+		label: __ompTranslate("<file path>"),
+		description: __ompTranslate("Annotate a file by path"),
+		hint: __ompTranslate("Annotate a file; paths with spaces stay unquoted"),
 	},
 	{
 		value: '"',
-		label: '"prompt text"',
-		description: "Annotate literal prompt text",
-		hint: "Wrap literal prompt text in matching quotes",
+		label: __ompTranslate('"prompt text"'),
+		description: __ompTranslate("Annotate literal prompt text"),
+		hint: __ompTranslate("Wrap literal prompt text in matching quotes"),
 	},
 ];
 

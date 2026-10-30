@@ -2,6 +2,7 @@
  * Settings declared by this domain (see `config/registry.ts`). Declaration order is the
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { combine, register, type SettingValueOf } from "../config/registry";
 import { DEFAULT_SKILLS_URL } from "@oh-my-pi/pi-wire/skillshare";
 
@@ -19,7 +20,7 @@ export const cfgSkillsRegistryUrl = register({
 	ui: {
 		tab: "interaction",
 		group: "Skills",
-		label: "Skill Registry",
+		label: __ompTranslate("Skill Registry"),
 		description:
 			"Skillshare registry used by `omp skill` to install, search, and publish skills (https://host[:port])",
 	},
@@ -35,7 +36,7 @@ export const cfgSkillsEnableSkillCommands = register({
 	ui: {
 		tab: "tasks",
 		group: "Commands & Skills",
-		label: "Skill Commands",
+		label: __ompTranslate("Skill Commands"),
 		description: "Register skills as /skill:name commands",
 	},
 });
@@ -107,7 +108,7 @@ export const cfgCommandsEnableClaudeUser = register({
 	ui: {
 		tab: "tasks",
 		group: "Commands & Skills",
-		label: "Claude User Commands",
+		label: __ompTranslate("Claude User Commands"),
 		description: "Load commands from ~/.claude/commands/",
 	},
 });
@@ -119,7 +120,7 @@ export const cfgCommandsEnableClaudeProject = register({
 	ui: {
 		tab: "tasks",
 		group: "Commands & Skills",
-		label: "Claude Project Commands",
+		label: __ompTranslate("Claude Project Commands"),
 		description: "Load commands from .claude/commands/",
 	},
 });
@@ -131,7 +132,7 @@ export const cfgCommandsEnableOpencodeUser = register({
 	ui: {
 		tab: "tasks",
 		group: "Commands & Skills",
-		label: "OpenCode User Commands",
+		label: __ompTranslate("OpenCode User Commands"),
 		description: "Load commands from ~/.config/opencode/commands/",
 	},
 });
@@ -143,7 +144,7 @@ export const cfgCommandsEnableOpencodeProject = register({
 	ui: {
 		tab: "tasks",
 		group: "Commands & Skills",
-		label: "OpenCode Project Commands",
+		label: __ompTranslate("OpenCode Project Commands"),
 		description: "Load commands from .opencode/commands/",
 	},
 });
@@ -155,7 +156,7 @@ export const cfgExtensionHandlersToolCallTimeoutMs = register({
 	ui: {
 		tab: "tools",
 		group: "Extensions",
-		label: "Tool Call Handler Timeout (ms)",
+		label: __ompTranslate("Tool Call Handler Timeout (ms)"),
 		description:
 			"Positive finite active-work timeout for extension tool_call handlers; invalid values use 30000ms, and time awaiting OMP-owned dialogs does not count",
 	},

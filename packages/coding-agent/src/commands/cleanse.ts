@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { postmortem } from "@oh-my-pi/pi-utils";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { runCleanseCommand } from "../cleanse";
@@ -8,29 +9,31 @@ export default class Cleanse extends Command {
 	static description = commandHelp.description;
 	static args = {
 		request: Args.string({
-			description: 'What to detect and fix (e.g. "ts errors"); a discovery agent works out the command',
+			description: __ompTranslate(
+				'What to detect and fix (e.g. "ts errors"); a discovery agent works out the command',
+			),
 			required: false,
 		}),
 	};
 	static flags = {
 		agents: Flags.integer({
 			char: "n",
-			description: "Maximum number of file-disjoint subagents",
+			description: __ompTranslate("Maximum number of file-disjoint subagents"),
 			default: 32,
 		}),
 		model: Flags.string({
 			char: "m",
-			description: "Subagent model selector",
+			description: __ompTranslate("Subagent model selector"),
 			default: "@smol",
 		}),
 		tests: Flags.boolean({
 			char: "t",
-			description: "Also run configured project test suites",
+			description: __ompTranslate("Also run configured project test suites"),
 			default: false,
 		}),
 		all: Flags.boolean({
 			char: "a",
-			description: "Run every discovered checker without the interactive picker",
+			description: __ompTranslate("Run every discovered checker without the interactive picker"),
 			default: false,
 		}),
 	};
@@ -47,7 +50,7 @@ export default class Cleanse extends Command {
 
 	async run(): Promise<void> {
 		const { args, flags } = await this.parse(Cleanse);
-		if (flags.agents <= 0) throw new CliUsageError("--agents must be a positive integer");
+		if (flags.agents <= 0) throw new CliUsageError(__ompTranslate("--agents must be a positive integer"));
 		const result = await runCleanseCommand({
 			maxAgents: flags.agents,
 			model: flags.model,

@@ -10,6 +10,7 @@
  * This ensures cache paths cannot be crafted to escape the cache directory.
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -30,13 +31,13 @@ export function isValidVersionForCache(version: string): boolean {
 
 function validateCacheComponents(marketplace: string, pluginName: string, version: string): void {
 	if (!isValidNameSegment(marketplace)) {
-		throw new Error(`Invalid marketplace name for cache: "${marketplace}"`);
+		throw new Error(__ompTranslate('Invalid marketplace name for cache: "{0}"', `${marketplace}`));
 	}
 	if (!isValidNameSegment(pluginName)) {
-		throw new Error(`Invalid plugin name for cache: "${pluginName}"`);
+		throw new Error(__ompTranslate('Invalid plugin name for cache: "{0}"', `${pluginName}`));
 	}
 	if (!isValidVersionForCache(version)) {
-		throw new Error(`Invalid version for cache: "${version}"`);
+		throw new Error(__ompTranslate('Invalid version for cache: "{0}"', `${version}`));
 	}
 }
 

@@ -192,6 +192,7 @@ describe("HTML export template", () => {
 		const packed = Array.from(packOut.matchAll(/^packed \S+ (.+)$/gm), match => match[1]);
 		expect(packed).toContain("src/export/html/template.html.txt");
 		expect(packed).toContain("src/export/html/viewer.generated.json");
+		expect(packed).toContain("dist/locales/ko.json");
 		for (const name of ["shell.html", "template.css", "template.js", "share-loader.js"]) {
 			expect(packed).not.toContain(`src/export/html/${name}`);
 		}

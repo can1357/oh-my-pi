@@ -10,6 +10,7 @@
  * lines and forwards key/mouse input. Every rendered frame records a hit
  * target per row so mouse clicks resolve against what is actually visible.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { Editor } from "../../components/editor";
 import { FormField, type FormFieldTheme, TextFormField } from "../../components/form";
 import { Image, type ImageBudget } from "../../components/image";
@@ -1102,8 +1103,8 @@ export class Sidebar {
 			"tabs",
 			{
 				items: [
-					{ id: "path", label: "Path" },
-					{ id: "tree", label: "Tree" },
+					{ id: "path", label: __ompTranslate("Path") },
+					{ id: "tree", label: __ompTranslate("Tree") },
 				],
 				active: this.viewStyle,
 				role: "omp.app.seg",
@@ -1126,30 +1127,45 @@ export class Sidebar {
 		const actions: NativeNode[] =
 			area === "unstaged"
 				? [
-						quietButton("Stage all", "stage-all", "Stage every change (space on the head)"),
+						quietButton(
+							__ompTranslate("Stage all"),
+							"stage-all",
+							__ompTranslate("Stage every change (space on the head)"),
+						),
 						node(
 							"icon",
 							{
 								name: "wand",
 								role: "omp.app.ibtn",
-								title: "Stage by description…",
-								aria: "Stage by description",
+								title: __ompTranslate("Stage by description…"),
+								aria: __ompTranslate("Stage by description"),
 								actions: { click: "stage-ai" },
 							},
 							undefined,
 							"ai",
 						),
 					]
-				: [quietButton("Unstage all", "unstage-all", "Unstage every change (space on the head)")];
+				: [
+						quietButton(
+							__ompTranslate("Unstage all"),
+							"unstage-all",
+							__ompTranslate("Unstage every change (space on the head)"),
+						),
+					];
 		const head = row(
 			[
 				row(
 					[
 						node("icon", { name: folded ? "chev-r" : "chev" }),
-						text(area === "unstaged" ? "Unstaged" : "Staged"),
+						text(area === "unstaged" ? __ompTranslate("Unstaged") : __ompTranslate("Staged")),
 						text([span(String(files.length), "num")], { role: "omp.app.git.count" }),
 					],
-					{ gap: "xs", align: "center", actions: { click: `fold-${area}` }, title: folded ? "Show" : "Hide" },
+					{
+						gap: "xs",
+						align: "center",
+						actions: { click: `fold-${area}` },
+						title: folded ? __ompTranslate("Show") : __ompTranslate("Hide"),
+					},
 				),
 				row(files.length > 0 ? actions : [], { gap: "xs", align: "center", role: "omp.app.git.acts" }),
 			],
@@ -1167,10 +1183,10 @@ export class Sidebar {
 					aiInput
 						? node("input", {
 								...inputProps(aiInput),
-								placeholder: "What should we stage?",
+								placeholder: __ompTranslate("What should we stage?"),
 								role: "omp.app.git.field.on",
 							})
-						: fieldText(this.aiInput.getValue(), "What should we stage?", "edit-ai", on(target)),
+						: fieldText(this.aiInput.getValue(), __ompTranslate("What should we stage?"), "edit-ai", on(target)),
 					"ai",
 				),
 			);
@@ -1183,7 +1199,8 @@ export class Sidebar {
 					entries.map(entry => this.#describeEntry(entry)),
 					{
 						selected: selected ? this.#nativeKey(selected.target) : null,
-						empty: area === "unstaged" ? "Nothing to stage" : "Nothing staged yet",
+						empty:
+							area === "unstaged" ? __ompTranslate("Nothing to stage") : __ompTranslate("Nothing staged yet"),
 						role: "omp.app.git.files",
 						actions: { click: "select", dblclick: "activate" },
 					},
@@ -1217,7 +1234,9 @@ export class Sidebar {
 		if (file.deletions) stats.push(span(`${stats.length > 0 ? " " : ""}−${file.deletions}`, "del num"));
 		return item(key, {
 			label,
-			detail: file.origPath ? [span(`from ${file.origPath}`, "dim")] : undefined,
+			detail: file.origPath
+				? [span(__ompTranslate("from {0}\u0004git.entry.source", `${file.origPath}`), "dim")]
+				: undefined,
 			value: stats.length > 0 ? stats : undefined,
 			hint: [KIND_LETTER[file.kind]],
 			tone: KIND_COLOR[file.kind],
@@ -1242,22 +1261,28 @@ export class Sidebar {
 		const summaryField = summaryInput
 			? row(
 					[
-						node("input", { ...inputProps(summaryInput), placeholder: "Summary", grow: 1 }),
+						node("input", { ...inputProps(summaryInput), placeholder: __ompTranslate("Summary"), grow: 1 }),
 						text([span(String(left), left < 0 ? "warning num" : "num")], { role: "omp.app.git.count" }),
 					],
 					{ gap: "sm", align: "center", role: "omp.app.git.summary.on" },
 				)
-			: fieldText(summary, "Summary", "edit-summary", on({ kind: "summary" }), "omp.app.git.summary");
+			: fieldText(
+					summary,
+					__ompTranslate("Summary"),
+					"edit-summary",
+					on({ kind: "summary" }),
+					"omp.app.git.summary",
+				);
 		const bodyField = descriptionEditor
 			? node("editor", {
 					...editorProps(descriptionEditor),
-					placeholder: "Description",
+					placeholder: __ompTranslate("Description"),
 					maxLines: 5,
 					role: "omp.app.git.body.on",
 				})
 			: fieldText(
 					description.split("\n", 1)[0] + (description.includes("\n") ? " …" : ""),
-					"Description",
+					__ompTranslate("Description"),
 					"edit-description",
 					on({ kind: "description" }),
 					"omp.app.git.body",
@@ -1266,12 +1291,12 @@ export class Sidebar {
 		const canCommit =
 			hasChanges && !this.generating && (summary.trim().length > 0 || description.trim().length === 0);
 		const label = this.generating
-			? "Generating message…"
+			? __ompTranslate("Generating message…")
 			: summary.trim().length === 0 && description.trim().length === 0
-				? "Generate message"
+				? __ompTranslate("Generate message")
 				: this.#model.staged.length > 0
-					? "Commit"
-					: "Stage all & commit";
+					? __ompTranslate("Commit")
+					: __ompTranslate("Stage all & commit");
 		// The panels' button (omp-panels.css `omp.btn`): accent while the keyboard is on it, muted when it can't run.
 		const commitTone = !canCommit ? "muted" : on({ kind: "commit-button" }) ? "accent" : undefined;
 		return col(
@@ -1281,12 +1306,12 @@ export class Sidebar {
 				keyed(
 					row(
 						[
-							row([node("icon", { name: this.amend ? "check" : "commit" }), text("Amend")], {
+							row([node("icon", { name: this.amend ? "check" : "commit" }), text(__ompTranslate("Amend"))], {
 								gap: "xs",
 								align: "center",
 								role: `omp.app.git.toggle${this.amend ? ".set" : ""}${on({ kind: "amend" }) ? ".on" : ""}`,
 								actions: { click: "amend" },
-								title: "Amend the previous commit",
+								title: __ompTranslate("Amend the previous commit"),
 							}),
 							row(compact([this.generating && node("spinner", { style: "dots" }), text(label)]), {
 								gap: "xs",
@@ -1296,8 +1321,8 @@ export class Sidebar {
 								actions: canCommit ? { click: "commit" } : undefined,
 								title:
 									this.#model.staged.length > 0
-										? "Commit the staged changes"
-										: "Stage everything, then commit",
+										? __ompTranslate("Commit the staged changes")
+										: __ompTranslate("Stage everything, then commit"),
 							}),
 						],
 						{ justify: "between", align: "center", role: "omp.app.git.foot" },
@@ -1313,7 +1338,9 @@ export class Sidebar {
 	#describeHead(selectedKey: string | undefined): NativeChild[] {
 		const head = this.#model.headCommit;
 		if (!head) {
-			return [keyed(text([span("No commits yet", "muted")], { role: "omp.app.git.empty" }), "empty")];
+			return [
+				keyed(text([span(__ompTranslate("No commits yet"), "muted")], { role: "omp.app.git.empty" }), "empty"),
+			];
 		}
 		const when = head.authorDate ? new Date(head.authorDate) : null;
 		const initials = head.authorName
@@ -1341,7 +1368,9 @@ export class Sidebar {
 				),
 				node("kv", {
 					items: compact([
-						when && !Number.isNaN(when.getTime()) ? { k: "authored", v: when.toLocaleString() } : undefined,
+						when && !Number.isNaN(when.getTime())
+							? { k: __ompTranslate("authored"), v: when.toLocaleString() }
+							: undefined,
 						head.parents.length > 0
 							? {
 									k: head.parents.length === 1 ? "parent" : "parents",
@@ -1356,7 +1385,7 @@ export class Sidebar {
 		);
 		const out: NativeChild[] = [keyed(commit, "head")];
 		if (!head.filesLoaded) {
-			out.push(keyed(text([span("Loading changed files…", "muted")]), "loading"));
+			out.push(keyed(text([span(__ompTranslate("Loading changed files…"), "muted")]), "loading"));
 			return out;
 		}
 		const additions = head.files.reduce((sum, file) => sum + (file.additions ?? 0), 0);
@@ -1482,8 +1511,12 @@ export class Sidebar {
 	/** Centered `Path | Tree` toggle row with column-scoped hit targets. */
 	#viewToggleRow(width: number): Row {
 		const nerd = theme.getSymbolPreset() === "nerd";
-		const pathPill = softPill(` ${nerd ? "" : "☰"} Path `, { active: this.viewStyle === "path" });
-		const treePill = softPill(` ${nerd ? "" : "└"} Tree `, { active: this.viewStyle === "tree" });
+		const pathPill = softPill(__ompTranslate(" {0} Path ", `${nerd ? "" : "☰"}`), {
+			active: this.viewStyle === "path",
+		});
+		const treePill = softPill(__ompTranslate(" {0} Tree ", `${nerd ? "" : "└"}`), {
+			active: this.viewStyle === "tree",
+		});
 		const total = visibleWidth(pathPill) + 1 + visibleWidth(treePill);
 		const left = Math.max(1, Math.floor((width - total) / 2));
 		return {
@@ -1521,7 +1554,7 @@ export class Sidebar {
 	#changesHeaderRows(width: number): Row[] {
 		const total = this.#model.unstaged.length + this.#model.staged.length;
 		const branch = this.#model.branch ? tintChip(` ${this.#model.branch} `, theme.getColorHex("accent")) : "";
-		const label = theme.bold(`${total} file change${total === 1 ? "" : "s"} on `);
+		const label = theme.bold(__ompTranslate("{0} file change{1} on ", `${total}`, `${total === 1 ? "" : "s"}`));
 		return [
 			{ text: ` ${label}${branch}` },
 			this.#viewToggleRow(width),
@@ -1536,9 +1569,13 @@ export class Sidebar {
 		const wand = theme.getSymbolPreset() === "nerd" ? "" : "✦";
 		rows.push(
 			sectionHeaderRow(
-				`${unstagedFolded ? "▸" : "▾"} Unstaged Files (${this.#model.unstaged.length})`,
+				__ompTranslate(
+					"{0} Unstaged Files ({1})",
+					`${unstagedFolded ? "▸" : "▾"}`,
+					`${this.#model.unstaged.length}`,
+				),
 				[
-					{ action: "Stage All", target: { kind: "stage-all" } },
+					{ action: __ompTranslate("Stage All"), target: { kind: "stage-all" } },
 					{ action: wand, target: { kind: "stage-ai" } },
 				],
 				unstaged,
@@ -1550,15 +1587,16 @@ export class Sidebar {
 		if (this.#aiPromptOpen) rows.push(this.#aiPromptRow(width, isSelected));
 		if (!unstagedFolded) {
 			rows.push(...this.#entryRows(this.#model.unstaged, "unstaged"));
-			if (this.#model.unstaged.length === 0) rows.push({ text: theme.fg("dim", "   no unstaged files") });
+			if (this.#model.unstaged.length === 0)
+				rows.push({ text: theme.fg("dim", __ompTranslate("   no unstaged files")) });
 		}
 		rows.push({ text: "" });
 		const staged: SectionTarget = { kind: "section", area: "staged" };
 		const stagedFolded = this.#collapsedSections.has("staged");
 		rows.push(
 			sectionHeaderRow(
-				`${stagedFolded ? "▸" : "▾"} Staged Files (${this.#model.staged.length})`,
-				[{ action: "Unstage All", target: { kind: "unstage-all" } }],
+				__ompTranslate("{0} Staged Files ({1})", `${stagedFolded ? "▸" : "▾"}`, `${this.#model.staged.length}`),
+				[{ action: __ompTranslate("Unstage All"), target: { kind: "unstage-all" } }],
 				staged,
 				width,
 				isSelected(staged),
@@ -1567,7 +1605,8 @@ export class Sidebar {
 		);
 		if (!stagedFolded) {
 			rows.push(...this.#entryRows(this.#model.staged, "staged"));
-			if (this.#model.staged.length === 0) rows.push({ text: theme.fg("dim", "   no staged files") });
+			if (this.#model.staged.length === 0)
+				rows.push({ text: theme.fg("dim", __ompTranslate("   no staged files")) });
 		}
 		return rows;
 	}
@@ -1577,7 +1616,7 @@ export class Sidebar {
 		const bar = isSelected(target) ? theme.fg("accent", "▎") : theme.fg("borderMuted", "▏");
 		const line =
 			this.aiInput.getValue().length === 0 && !this.aiInput.focused
-				? theme.fg("dim", "What should we stage?")
+				? theme.fg("dim", __ompTranslate("What should we stage?"))
 				: (this.aiInput.render(width - 4)[0] ?? "");
 		return { text: ` ${bar}${line}`, target };
 	}
@@ -1588,7 +1627,7 @@ export class Sidebar {
 
 		const amendTarget: Target = { kind: "amend" };
 		const amendBox = this.amend ? theme.fg("accent", "▣") : theme.fg("muted", "☐");
-		const amendLine = ` ${amendBox} Amend previous commit`;
+		const amendLine = __ompTranslate(" {0} Amend previous commit", `${amendBox}`);
 		rows.push({
 			text: isSelected(amendTarget) && this.focused ? `${withBg(amendLine, selectionBgAnsi())}\x1b[0m` : amendLine,
 			target: amendTarget,
@@ -1597,7 +1636,7 @@ export class Sidebar {
 		const summaryTarget: Target = { kind: "summary" };
 		const summaryLen = this.summary.getValue().length;
 		const counter = theme.fg(summaryLen > SUMMARY_LIMIT ? "warning" : "dim", String(SUMMARY_LIMIT - summaryLen));
-		const summaryLabel = theme.fg("muted", "Commit summary");
+		const summaryLabel = theme.fg("muted", __ompTranslate("Commit summary"));
 		rows.push({
 			text: ` ${summaryLabel}${" ".repeat(Math.max(1, width - 2 - visibleWidth(summaryLabel) - visibleWidth(counter)))}${counter}`,
 		});
@@ -1609,7 +1648,10 @@ export class Sidebar {
 		const descriptionLines = this.#descriptionField.render(width - 4);
 		const descriptionBar = isSelected(descriptionTarget) ? theme.fg("accent", "▎") : theme.fg("borderMuted", "▏");
 		if (this.description.getText().length === 0 && !this.#descriptionField.focused) {
-			rows.push({ text: ` ${descriptionBar}${theme.fg("dim", "Description")}`, target: descriptionTarget });
+			rows.push({
+				text: ` ${descriptionBar}${theme.fg("dim", __ompTranslate("Description"))}`,
+				target: descriptionTarget,
+			});
 		} else {
 			for (const line of descriptionLines.length > 0 ? descriptionLines : [""]) {
 				rows.push({ text: ` ${descriptionBar}${line}`, target: descriptionTarget });
@@ -1623,10 +1665,10 @@ export class Sidebar {
 		const description = this.description.getText().trim();
 		const canActivate = hasChanges && !this.generating && (summary.length > 0 || description.length === 0);
 		const label = this.generating
-			? "-○- Generating commit message"
+			? __ompTranslate("-○- Generating commit message")
 			: this.#model.staged.length > 0
-				? "-○- Commit staged changes"
-				: "-○- Stage all & commit";
+				? __ompTranslate("-○- Commit staged changes")
+				: __ompTranslate("-○- Stage all & commit");
 		const pad = Math.max(0, Math.floor((width - 4 - visibleWidth(label)) / 2));
 		const inner = `${" ".repeat(pad)}${label}${" ".repeat(pad)}`;
 		const button = pill(inner, theme.getColorHex("accent"), {
@@ -1641,7 +1683,7 @@ export class Sidebar {
 		const rows: Row[] = [];
 		const head = this.#model.headCommit;
 		if (!head) {
-			rows.push({ text: "" }, { text: theme.fg("dim", " No commits yet") });
+			rows.push({ text: "" }, { text: theme.fg("dim", __ompTranslate(" No commits yet")) });
 			return rows;
 		}
 		for (const line of Bun.wrapAnsi(theme.bold(head.subject), width - 2).split("\n")) {
@@ -1660,27 +1702,29 @@ export class Sidebar {
 		rows.push({ text: ` ${theme.bold(head.authorName)} ${theme.fg("dim", `<${head.authorEmail}>`)}` });
 		const when = head.authorDate ? new Date(head.authorDate) : null;
 		if (when && !Number.isNaN(when.getTime())) {
-			rows.push({ text: theme.fg("dim", ` authored ${when.toLocaleString()}`) });
+			rows.push({ text: theme.fg("dim", __ompTranslate(" authored {0}", `${when.toLocaleString()}`)) });
 		}
 		if (head.parents.length > 0) {
 			rows.push({
-				text: ` ${theme.fg("dim", "parent:")} ${theme.fg("accent", head.parents.map(sha => sha.slice(0, 8)).join(" "))}`,
+				text: ` ${theme.fg("dim", __ompTranslate("parent:"))} ${theme.fg("accent", head.parents.map(sha => sha.slice(0, 8)).join(" "))}`,
 			});
 		}
 		// This view only appears when there is nothing to stage or discard, so say so
 		// rather than letting the file list read as pending work.
-		rows.push({ text: theme.fg("success", ` Working tree clean — showing committed ${head.shortSha}`) });
+		rows.push({
+			text: theme.fg("success", __ompTranslate(" Working tree clean — showing committed {0}", `${head.shortSha}`)),
+		});
 		rows.push({ text: theme.fg("borderMuted", "─".repeat(Math.max(0, width))) });
 		if (!head.filesLoaded) {
-			rows.push({ text: theme.fg("dim", " Loading changed files…") });
+			rows.push({ text: theme.fg("dim", __ompTranslate(" Loading changed files…")) });
 			return rows;
 		}
 
 		const additions = head.files.reduce((sum, file) => sum + (file.additions ?? 0), 0);
 		const deletions = head.files.reduce((sum, file) => sum + (file.deletions ?? 0), 0);
-		const count = `${head.files.length} file${head.files.length === 1 ? "" : "s"}`;
+		const count = __ompTranslate("{0} file{1}", `${head.files.length}`, `${head.files.length === 1 ? "" : "s"}`);
 		rows.push({
-			text: ` ${theme.bold(count)} ${theme.fg("dim", `in ${head.shortSha}`)}  ${theme.fg("success", `+${additions}`)} ${theme.fg("error", `−${deletions}`)}`,
+			text: ` ${theme.bold(count)} ${theme.fg("dim", __ompTranslate("in {0}\u0004git.commit.location", `${head.shortSha}`))}  ${theme.fg("success", `+${additions}`)} ${theme.fg("error", `−${deletions}`)}`,
 		});
 		rows.push(this.#viewToggleRow(width));
 		rows.push(...this.#entryRows(head.files, "commit"));

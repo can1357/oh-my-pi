@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { TUI } from "@oh-my-pi/pi-tui";
@@ -87,7 +88,7 @@ async function editTextSource(
 
 async function editReviewedFile(tui: TUI, ctx: AnnotationOverlayContext, overlay: AnnotationOverlay): Promise<void> {
 	const relative = overlay.reviewFilePath();
-	if (!relative) throw new Error("No file to open.");
+	if (!relative) throw new Error(__ompTranslate("No file to open."));
 	const editor = requireEditor();
 	// Diff paths are repository-relative and exact, so resolve them from the repo root, not the session cwd.
 	const cwd = ctx.sessionManager.getCwd?.() ?? ctx.cwd;

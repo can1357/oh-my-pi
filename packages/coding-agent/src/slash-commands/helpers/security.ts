@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { prompt } from "@oh-my-pi/pi-utils";
@@ -50,13 +51,14 @@ function coordinatorFor(runtime: SlashCommandRuntime) {
 
 function requireToken(tokens: readonly string[], index: number, flag: string): string {
 	const value = tokens[index];
-	if (!value || value.startsWith("--")) throw new Error(`${flag} requires a value`);
+	if (!value || value.startsWith("--")) throw new Error(__ompTranslate("{0} requires a value", `${flag}`));
 	return value;
 }
 
 function parsePositiveCredential(value: string): number {
 	const credentialId = Number(value);
-	if (!Number.isSafeInteger(credentialId) || credentialId < 1) throw new Error(`Invalid credential id: ${value}`);
+	if (!Number.isSafeInteger(credentialId) || credentialId < 1)
+		throw new Error(__ompTranslate("Invalid credential id: {0}", `${value}`));
 	return credentialId;
 }
 
@@ -103,7 +105,7 @@ function parsePlanOptions(rest: string): SecurityPlanCliOptions {
 				credentialId = parsePositiveCredential(requireToken(tokens, ++index, token));
 				break;
 			default:
-				throw new Error(`Unknown security plan option: ${token}`);
+				throw new Error(__ompTranslate("Unknown security plan option: {0}", `${token}`));
 		}
 	}
 	const common = { includePaths, excludePaths };
@@ -147,13 +149,14 @@ function findingTarget(value: string): { uri: string; scanId: string; findingId:
 	const uriMatch = trimmed.match(/^security:\/\/scans\/([^/]+)\/findings\/([^/]+)$/);
 	if (uriMatch) return { uri: trimmed, scanId: uriMatch[1]!, findingId: uriMatch[2]! };
 	const [scanId, findingId] = parseCommandArgs(trimmed);
-	if (!scanId || !findingId) throw new Error("validate requires a finding URI or <scan-id> <finding-id>");
+	if (!scanId || !findingId)
+		throw new Error(__ompTranslate("validate requires a finding URI or <scan-id> <finding-id>"));
 	return { uri: `security://scans/${scanId}/findings/${findingId}`, scanId, findingId };
 }
 
 async function showResource(runtime: SlashCommandRuntime, rest: string): Promise<void> {
 	const raw = rest.trim();
-	if (!raw) throw new Error("show requires a scan id or security:// URI");
+	if (!raw) throw new Error(__ompTranslate("show requires a scan id or security:// URI"));
 	const uri = raw.startsWith("security://") ? raw : `security://scans/${scanIdFromInput(raw)}`;
 	const handler = new SecurityProtocolHandler(undefined, () => true);
 	const resource = await handler.resolve(parseInternalUrl(uri), { cwd: runtime.cwd });
@@ -162,7 +165,7 @@ async function showResource(runtime: SlashCommandRuntime, rest: string): Promise
 
 async function importResults(runtime: SlashCommandRuntime, rest: string): Promise<void> {
 	const [source] = parseCommandArgs(rest);
-	if (!source) throw new Error("import requires a SARIF file or Codex Security bundle directory");
+	if (!source) throw new Error(__ompTranslate("import requires a SARIF file or Codex Security bundle directory"));
 	const store = await SecurityStore.openForCwd(runtime.cwd);
 	const absolute = path.resolve(runtime.cwd, source);
 	const stats = await fs.stat(absolute);
@@ -170,13 +173,16 @@ async function importResults(runtime: SlashCommandRuntime, rest: string): Promis
 		? await importCodexSecurityBundle(absolute, { repositoryRoot: store.repositoryRoot })
 		: await importSarifFile(absolute, { repositoryRoot: store.repositoryRoot });
 	await store.putBundle(bundle);
-	await runtime.output(`Imported ${bundle.findings.length} finding(s) as security scan ${bundle.scan.id}.`);
+	await runtime.output(
+		__ompTranslate("Imported {0} finding(s) as security scan {1}.", `${bundle.findings.length}`, `${bundle.scan.id}`),
+	);
 }
 
 async function exportResults(runtime: SlashCommandRuntime, rest: string): Promise<void> {
 	const tokens = parseCommandArgs(rest);
 	const scanId = tokens[0];
-	if (!scanId) throw new Error("export requires <scan-id> --output <path> [--format bundle|sarif|report]");
+	if (!scanId)
+		throw new Error(__ompTranslate("export requires <scan-id> --output <path> [--format bundle|sarif|report]"));
 	let outputPath: string | undefined;
 	let format: "bundle" | "sarif" | "report" = "bundle";
 	for (let index = 1; index < tokens.length; index++) {
@@ -185,28 +191,28 @@ async function exportResults(runtime: SlashCommandRuntime, rest: string): Promis
 		else if (token === "--format") {
 			const value = requireToken(tokens, ++index, token);
 			if (value !== "bundle" && value !== "sarif" && value !== "report") {
-				throw new Error(`Unknown export format: ${value}`);
+				throw new Error(__ompTranslate("Unknown export format: {0}", `${value}`));
 			}
 			format = value;
-		} else throw new Error(`Unknown export option: ${token}`);
+		} else throw new Error(__ompTranslate("Unknown export option: {0}", `${token}`));
 	}
-	if (!outputPath) throw new Error("export requires --output <path>");
+	if (!outputPath) throw new Error(__ompTranslate("export requires --output <path>"));
 	const store = await SecurityStore.openForCwd(runtime.cwd);
 	const bundle = await store.getBundle(scanIdFromInput(scanId));
-	if (!bundle) throw new Error(`Unknown security scan: ${scanId}`);
+	if (!bundle) throw new Error(__ompTranslate("Unknown security scan: {0}", `${scanId}`));
 	let content: string;
 	if (format === "sarif") {
-		if (!bundle.sarif) throw new Error(`Security scan ${scanId} has no SARIF result`);
+		if (!bundle.sarif) throw new Error(__ompTranslate("Security scan {0} has no SARIF result", `${scanId}`));
 		content = `${JSON.stringify(bundle.sarif, null, 2)}\n`;
 	} else if (format === "report") {
-		if (bundle.report === undefined) throw new Error(`Security scan ${scanId} has no report`);
+		if (bundle.report === undefined) throw new Error(__ompTranslate("Security scan {0} has no report", `${scanId}`));
 		content = bundle.report;
 	} else {
 		content = `${JSON.stringify(bundle, null, 2)}\n`;
 	}
 	const absolute = path.resolve(runtime.cwd, outputPath);
 	await writeSecurityFileAtomic(absolute, content, { hardenParent: false });
-	await runtime.output(`Exported security scan ${scanId} to ${shortenPath(absolute)}.`);
+	await runtime.output(__ompTranslate("Exported security scan {0} to {1}.", `${scanId}`, `${shortenPath(absolute)}`));
 }
 
 interface CloudCliOptions {
@@ -244,7 +250,8 @@ function parseCloudOptions(rest: string, subcommand: string): CloudCliOptions {
 					break;
 				}
 				const days = Number(value);
-				if (!Number.isSafeInteger(days) || days < 1) throw new Error(`Invalid lookback: ${value}`);
+				if (!Number.isSafeInteger(days) || days < 1)
+					throw new Error(__ompTranslate("Invalid lookback: {0}", `${value}`));
 				options.lookbackDays = days;
 				break;
 			}
@@ -254,7 +261,7 @@ function parseCloudOptions(rest: string, subcommand: string): CloudCliOptions {
 					positionalConsumed = true;
 					break;
 				}
-				throw new Error(`Unknown security cloud option: ${token}`);
+				throw new Error(__ompTranslate("Unknown security cloud option: {0}", `${token}`));
 		}
 	}
 	return options;
@@ -276,7 +283,7 @@ async function handleCloudCommand(runtime: SlashCommandRuntime, rest: string): P
 			const configurations = await client.listAllConfigurations();
 			await runtime.output(
 				configurations.length === 0
-					? "No Codex Security cloud scan configurations are available for this account."
+					? __ompTranslate("No Codex Security cloud scan configurations are available for this account.")
 					: configurations
 							.map(item =>
 								[
@@ -297,7 +304,7 @@ async function handleCloudCommand(runtime: SlashCommandRuntime, rest: string): P
 		}
 		case "start": {
 			if (!options.repositoryId || !options.repositoryUrl || !options.environmentId) {
-				throw new Error("cloud start requires --repo-id, --repo-url, and --environment");
+				throw new Error(__ompTranslate("cloud start requires --repo-id, --repo-url, and --environment"));
 			}
 			const configuration = await client.startScan({
 				repositoryId: options.repositoryId,
@@ -311,12 +318,12 @@ async function handleCloudCommand(runtime: SlashCommandRuntime, rest: string): P
 			return;
 		}
 		case "status": {
-			if (!options.configurationId) throw new Error("cloud status requires a configuration id");
+			if (!options.configurationId) throw new Error(__ompTranslate("cloud status requires a configuration id"));
 			await runtime.output(JSON.stringify(await client.getStats(options.configurationId), null, 2));
 			return;
 		}
 		case "pull": {
-			if (!options.configurationId) throw new Error("cloud pull requires a configuration id");
+			if (!options.configurationId) throw new Error(__ompTranslate("cloud pull requires a configuration id"));
 			const store = await SecurityStore.openForCwd(runtime.cwd);
 			const bundle = await pullCodexSecurityCloudResults({
 				client,
@@ -329,18 +336,19 @@ async function handleCloudCommand(runtime: SlashCommandRuntime, rest: string): P
 			return;
 		}
 		default:
-			throw new Error("Usage: /security cloud <scans|start|status|pull>");
+			throw new Error(__ompTranslate("Usage: /security cloud <scans|start|status|pull>"));
 	}
 }
 
 async function updateDisposition(runtime: SlashCommandRuntime, rest: string): Promise<void> {
 	const [scanId, findingId, status, ...rationaleParts] = parseCommandArgs(rest);
 	if (!scanId || !findingId || !status) {
-		throw new Error("disposition requires <scan-id> <finding-id> <status> [rationale]");
+		throw new Error(__ompTranslate("disposition requires <scan-id> <finding-id> <status> [rationale]"));
 	}
-	if (!DISPOSITIONS.has(status as SecurityDispositionStatus)) throw new Error(`Unknown disposition: ${status}`);
+	if (!DISPOSITIONS.has(status as SecurityDispositionStatus))
+		throw new Error(__ompTranslate("Unknown disposition: {0}", `${status}`));
 	const rationale = rationaleParts.join(" ").trim();
-	if (status !== "open" && !rationale) throw new Error(`${status} requires a rationale`);
+	if (status !== "open" && !rationale) throw new Error(__ompTranslate("{0} requires a rationale", `${status}`));
 	const store = await SecurityStore.openForCwd(runtime.cwd);
 	const finding = await store.updateDisposition(scanId, findingId, {
 		status: status as SecurityDispositionStatus,
@@ -356,21 +364,25 @@ export async function handleSecurityCommand(
 	runtime: SlashCommandRuntime,
 ): Promise<SlashCommandResult> {
 	if (!cfgSecurityEnabled.get(runtime.settings)) {
-		return usage("Security is disabled. Enable security.enabled before using /security.", runtime);
+		return usage(__ompTranslate("Security is disabled. Enable security.enabled before using /security."), runtime);
 	}
 	const { verb, rest } = parseSubcommand(command.args);
 	try {
 		switch (verb || "scans") {
 			case "plan": {
 				const plan = await preflight(runtime, rest);
-				await runtime.output(`Security plan ${plan.id} is ready. Fingerprint: ${plan.fingerprint}.`);
+				await runtime.output(
+					__ompTranslate("Security plan {0} is ready. Fingerprint: {1}.", `${plan.id}`, `${plan.fingerprint}`),
+				);
 				return commandConsumed();
 			}
 			case "scan": {
 				const coordinator = coordinatorFor(runtime);
 				const planId = rest.trim().startsWith("secplan_") ? rest.trim() : (await preflight(runtime, rest)).id;
 				const operation = await coordinator.start({ planId });
-				await runtime.output(`Security scan ${operation.scanId} started as ${operation.operationId}.`);
+				await runtime.output(
+					__ompTranslate("Security scan {0} started as {1}.", `${operation.scanId}`, `${operation.operationId}`),
+				);
 				return commandConsumed();
 			}
 			case "status": {
@@ -378,7 +390,7 @@ export async function handleSecurityCommand(
 				const operationId = rest.trim();
 				if (operationId) {
 					const operation = await coordinator.status(operationId);
-					if (!operation) throw new Error(`Unknown security operation: ${operationId}`);
+					if (!operation) throw new Error(__ompTranslate("Unknown security operation: {0}", `${operationId}`));
 					await runtime.output(JSON.stringify(operation, null, 2));
 				} else {
 					await runtime.output(JSON.stringify(await coordinator.listOperations(), null, 2));
@@ -387,11 +399,11 @@ export async function handleSecurityCommand(
 			}
 			case "cancel": {
 				const operationId = rest.trim();
-				if (!operationId) throw new Error("cancel requires an operation id");
+				if (!operationId) throw new Error(__ompTranslate("cancel requires an operation id"));
 				await runtime.output(
 					(await coordinatorFor(runtime).cancel(operationId))
-						? `Cancellation requested for ${operationId}.`
-						: `No cancellable security operation ${operationId}.`,
+						? __ompTranslate("Cancellation requested for {0}.", `${operationId}`)
+						: __ompTranslate("No cancellable security operation {0}.", `${operationId}`),
 				);
 				return commandConsumed();
 			}
@@ -399,9 +411,17 @@ export async function handleSecurityCommand(
 				const scans = await (await SecurityStore.openForCwd(runtime.cwd)).listScans();
 				await runtime.output(
 					scans.length === 0
-						? "No security scans are stored for this project."
+						? __ompTranslate("No security scans are stored for this project.")
 						: scans
-								.map(scan => `${scan.id} ${scan.status} ${scan.findingCount} finding(s) ${scan.producer.name}`)
+								.map(scan =>
+									__ompTranslate(
+										"{0} {1} {2} finding(s) {3}",
+										`${scan.id}`,
+										`${scan.status}`,
+										`${scan.findingCount}`,
+										`${scan.producer.name}`,
+									),
+								)
 								.join("\n"),
 				);
 				return commandConsumed();
@@ -429,7 +449,8 @@ export async function handleSecurityCommand(
 			}
 			case "compare": {
 				const [beforeScanId, afterScanId] = parseCommandArgs(rest);
-				if (!beforeScanId || !afterScanId) throw new Error("compare requires <before-scan-id> <after-scan-id>");
+				if (!beforeScanId || !afterScanId)
+					throw new Error(__ompTranslate("compare requires <before-scan-id> <after-scan-id>"));
 				const report = await (await SecurityStore.openForCwd(runtime.cwd)).compare(beforeScanId, afterScanId);
 				await runtime.output(JSON.stringify(report, null, 2));
 				return commandConsumed();

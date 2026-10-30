@@ -2,6 +2,7 @@
  * Settings declared by this domain (see `config/registry.ts`). Declaration order is the
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { combine, register } from "../config/registry";
 import { BUILTIN_BLOB_DESTINATIONS, type BlobDestinationId, type BlobDestinationMetadata } from "./destinations";
 
@@ -29,7 +30,7 @@ export const cfgImagesUrlsEnabled = register({
 	ui: {
 		tab: "model",
 		group: "Vision",
-		label: "Serve Images as URLs",
+		label: __ompTranslate("Serve Images as URLs"),
 		description:
 			"Publish outgoing images through the configured backend chain and send URL-fetching providers short URLs instead of inline base64. Falls back to inline automatically when every backend or a provider fetch fails",
 	},
@@ -42,7 +43,7 @@ export const cfgImagesUrlsBackends = register({
 	ui: {
 		tab: "model",
 		group: "Vision",
-		label: "Image URL Backends",
+		label: __ompTranslate("Image URL Backends"),
 		description: "Ordered destinations tried when publishing images for provider access",
 		options: BLOB_BACKEND_CHOICES,
 		ordered: true,
@@ -69,7 +70,7 @@ export const cfgImagesUrlsCommand = register({
 	ui: {
 		tab: "model",
 		group: "Vision",
-		label: "Image Upload Command",
+		label: __ompTranslate("Image Upload Command"),
 		description:
 			"Argv template for the command backend; {file} is the image path, {mime}/{ext} optional. The last URL printed on stdout is used (e.g. pasta -b -f {file})",
 	},
@@ -82,7 +83,7 @@ export const cfgImagesUrlsPublicBaseUrl = register({
 	ui: {
 		tab: "model",
 		group: "Vision",
-		label: "Image URL Public Base",
+		label: __ompTranslate("Image URL Public Base"),
 		description: "Externally reachable base URL fronting the blob server (required for ssh, optional for direct)",
 	},
 });
@@ -94,7 +95,7 @@ export const cfgImagesUrlsTtlHours = register({
 	ui: {
 		tab: "model",
 		group: "Vision",
-		label: "Image URL Lifetime (hours)",
+		label: __ompTranslate("Image URL Lifetime (hours)"),
 		description:
 			"Serving window for locally hosted image URLs, measured from the last time a conversation sent them; resuming a conversation re-arms the window at the same link. 0 keeps links alive while the broker runs",
 	},
@@ -107,7 +108,7 @@ export const cfgImagesUrlsBindHost = register({
 	ui: {
 		tab: "model",
 		group: "Vision",
-		label: "Image URL Bind Host",
+		label: __ompTranslate("Image URL Bind Host"),
 		description: "Host the blob server binds to; loopback for tunnels, 0.0.0.0 for direct serving",
 	},
 });
@@ -119,7 +120,7 @@ export const cfgImagesUrlsSshTarget = register({
 	ui: {
 		tab: "model",
 		group: "Vision",
-		label: "Image URL SSH Target",
+		label: __ompTranslate("Image URL SSH Target"),
 		description: "user@host destination for the ssh reverse forward",
 	},
 });
@@ -131,7 +132,7 @@ export const cfgImagesUrlsSshRemotePort = register({
 	ui: {
 		tab: "model",
 		group: "Vision",
-		label: "Image URL SSH Remote Port",
+		label: __ompTranslate("Image URL SSH Remote Port"),
 		description: "Remote listen port of the ssh reverse forward that your web server proxies to",
 	},
 });

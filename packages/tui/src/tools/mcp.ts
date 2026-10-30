@@ -4,6 +4,7 @@
  * Provides structured display of MCP tool calls and results,
  * showing args and output in JSON tree format similar to task tool.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type Component, Markdown } from "../index";
 
 import type { NativeToolHead, NativeToolView, RenderResultOptions } from "./renderer";
@@ -35,7 +36,7 @@ import { plainToolCard, type ToolCardPhase } from "../render/tool-card";
 
 /** Expanded Args tree shared by the MCP result cards. */
 function buildMcpArgsSection(args: Record<string, unknown>, theme: Theme): readonly string[] {
-	const lines: string[] = [theme.fg("dim", "Args")];
+	const lines: string[] = [theme.fg("dim", __ompTranslate("Args"))];
 	const tree = renderJsonTreeLines(
 		args,
 		theme,
@@ -237,7 +238,7 @@ export function renderMCPResult(
 		// component selection so the opt-in Markdown path can use its own renderer.
 
 		if (!trimmedOutput) {
-			body.push(theme.fg("dim", "(no output)"));
+			body.push(theme.fg("dim", __ompTranslate("(no output)")));
 			return body;
 		}
 
@@ -309,7 +310,7 @@ function mcpArgsSection(entries: readonly [string, unknown][], json: boolean): N
 	if (entries.length === 0) return undefined;
 	return node(
 		"section",
-		{ head: [span("Args", "muted")], collapsible: true, collapsed: true },
+		{ head: [span(__ompTranslate("Args"), "muted")], collapsible: true, collapsed: true },
 		[describeJsonValue(Object.fromEntries(entries), { native: json })],
 		"args",
 	);
@@ -361,7 +362,7 @@ export function describeMCPResult(
 				// Bracketed non-JSON text falls through to Markdown/raw output.
 			}
 		}
-		if (!output) body.push(noteText("(no output)"));
+		if (!output) body.push(noteText(__ompTranslate("(no output)")));
 		else if (isError) body.push(errorText(output));
 		else if (isJson) body.push(describeJsonValue(parsed, { native: json }));
 		else if (renderMarkdownResults) body.push(md(output));

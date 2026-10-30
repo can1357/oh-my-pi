@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as path from "node:path";
 import type { ApiKeyResolver, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
 import { type AuthApiKeyOptions, type AuthPeekOptions, oauthAccountKey } from "@oh-my-pi/pi-ai/auth-storage";
@@ -1772,7 +1773,11 @@ export class ModelRegistry {
 			if (this.#warnedCompatKeys.has(keyPath)) continue;
 			this.#warnedCompatKeys.add(keyPath);
 			this.#configWarnings.push(
-				`Unknown compat key in ${this.#modelsConfigFile.path()}: ${keyPath} (configuration still loaded).`,
+				__ompTranslate(
+					"Unknown compat key in {0}: {1} (configuration still loaded).",
+					`${this.#modelsConfigFile.path()}`,
+					`${keyPath}`,
+				),
 			);
 		}
 
@@ -2245,7 +2250,15 @@ export class ModelRegistry {
 			// The endpoint env var may embed `user:pass@`, and fetch errors can echo it.
 			const detail = error.replaceAll(baseUrl, url).replace(URL_USERINFO_RE, "$1").replace(/\s+/g, " ").trim();
 			this.#configWarnings.push(
-				`Built-in ${provider} provider: model discovery at ${url} (from ${endpointEnv}) failed. Fix or unset ${endpointEnv}, or add "${provider}" to disabledProviders. Error: ${detail}`,
+				__ompTranslate(
+					'Built-in {0} provider: model discovery at {1} (from {2}) failed. Fix or unset {3}, or add "{4}" to disabledProviders. Error: {5}',
+					`${provider}`,
+					`${url}`,
+					`${endpointEnv}`,
+					`${endpointEnv}`,
+					`${provider}`,
+					`${detail}`,
+				),
 			);
 		}
 	}
@@ -3364,7 +3377,7 @@ export class ModelRegistry {
 		try {
 			const apiKey = await this.getApiKey(model);
 			if (apiKey === undefined) {
-				return { ok: false, error: `No API key found for "${model.provider}"` };
+				return { ok: false, error: __ompTranslate('No API key found for "{0}"', `${model.provider}`) };
 			}
 			const headers = await this.getProviderHeaders(model.provider);
 			return { ok: true, apiKey, headers };
@@ -3557,7 +3570,9 @@ export class ModelRegistry {
 	 */
 	registerProvider(providerName: string, config: ProviderConfigInput, sourceId?: string): void {
 		if (config.streamSimple && !config.api) {
-			throw new Error(`Provider ${providerName}: "api" is required when registering streamSimple.`);
+			throw new Error(
+				__ompTranslate('Provider {0}: "api" is required when registering streamSimple.', `${providerName}`),
+			);
 		}
 
 		validateProviderConfiguration(
@@ -3646,7 +3661,9 @@ export class ModelRegistry {
 					modelDef as CustomModelDefinitionLike,
 				);
 				if (!overlay) {
-					throw new Error(`Provider ${providerName}, model ${modelDef.id}: no "api" specified.`);
+					throw new Error(
+						__ompTranslate('Provider {0}, model {1}: no "api" specified.', `${providerName}`, `${modelDef.id}`),
+					);
 				}
 				newOverlays.push(overlay);
 			}

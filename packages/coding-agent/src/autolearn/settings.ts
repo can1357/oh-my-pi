@@ -2,6 +2,7 @@
  * Settings declared by this domain (see `config/registry.ts`). Declaration order is the
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { register } from "../config/registry";
 
 // Auto-Learn (experimental): post-stop nudge to capture lessons to memory
@@ -14,7 +15,7 @@ export const cfgAutolearnEnabled = register({
 	ui: {
 		tab: "memory",
 		group: "Auto-Learn",
-		label: "Auto-Learn (experimental)",
+		label: __ompTranslate("Auto-Learn (experimental)"),
 		description:
 			"After the agent stops, nudge it to capture lessons to memory and create/enhance isolated managed skills",
 	},
@@ -27,7 +28,7 @@ export const cfgAutolearnAutoContinue = register({
 	ui: {
 		tab: "memory",
 		group: "Auto-Learn",
-		label: "Auto-run capture at stop",
+		label: __ompTranslate("Auto-run capture at stop"),
 		description:
 			"When on, auto-run one private capture turn at stop (uses extra tokens). When off, only standing auto-learn guidance remains.",
 		condition: "autolearnActive",

@@ -16,6 +16,7 @@
  * the item id and `action` with an action id (plus `value` for
  * `scope`/`tab`/`strip`). {@link pickerEvent} folds them into one shape.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { TspPickerAction, TspPickerItem, TspPickerProps, TspProps } from "@oh-my-pi/pi-wire";
 import type { KeyName } from "../key-hint-format";
 import { getKeybindings, type Keybinding } from "../keybindings";
@@ -75,21 +76,21 @@ export function pickerAction(
 }
 
 /** The right-aligned `Close esc` every picker ends with; Tern's backdrop and head `esc` send it too. */
-export const CLOSE_ACTION: TspPickerAction = { id: "close", label: "Close", keys: ["esc"], end: true };
+export const CLOSE_ACTION: TspPickerAction = { id: "close", label: __ompTranslate("Close"), keys: ["esc"], end: true };
 
 /** A `time` fact: the compact age of `at` (`now`, `5m`, `2h`, `3d`, `2w`, `6mo`, `1y`). */
 export function pickerAge(at: Date | number, now = Date.now()): string {
 	const seconds = Math.max(0, Math.floor((now - (typeof at === "number" ? at : at.getTime())) / 1000));
-	if (seconds < 60) return "now";
+	if (seconds < 60) return __ompTranslate("now");
 	const minutes = Math.floor(seconds / 60);
-	if (minutes < 60) return `${minutes}m`;
+	if (minutes < 60) return __ompTranslate("{0}m", `${minutes}`);
 	const hours = Math.floor(minutes / 60);
-	if (hours < 24) return `${hours}h`;
+	if (hours < 24) return __ompTranslate("{0}h", `${hours}`);
 	const days = Math.floor(hours / 24);
-	if (days < 7) return `${days}d`;
-	if (days < 30) return `${Math.floor(days / 7)}w`;
-	if (days < 365) return `${Math.floor(days / 30)}mo`;
-	return `${Math.floor(days / 365)}y`;
+	if (days < 7) return __ompTranslate("{0}d", `${days}`);
+	if (days < 30) return __ompTranslate("{0}w", `${Math.floor(days / 7)}`);
+	if (days < 365) return __ompTranslate("{0}mo", `${Math.floor(days / 30)}`);
+	return __ompTranslate("{0}y", `${Math.floor(days / 365)}`);
 }
 
 /**
@@ -223,7 +224,7 @@ export function selectListPicker(list: SelectList, o: SelectPickerOptions): TspP
 		title: o.title,
 		...(o.subtitle ? { subtitle: o.subtitle } : {}),
 		...(o.icon ? { icon: o.icon } : {}),
-		noun: o.noun ?? "options",
+		noun: o.noun ?? __ompTranslate("options"),
 		size: "md",
 		layout: "rows",
 		preview: "none",
@@ -232,9 +233,14 @@ export function selectListPicker(list: SelectList, o: SelectPickerOptions): TspP
 		selected: view.selected,
 		...(o.current ? { current: o.current } : {}),
 		...(o.columns ? { columns: o.columns } : {}),
-		actions: [pickerAction("confirm", o.confirm ?? "Select", "enter", { primary: true }), CLOSE_ACTION],
+		actions: [
+			pickerAction("confirm", o.confirm ?? __ompTranslate("Select"), "enter", { primary: true }),
+			CLOSE_ACTION,
+		],
 		confirm:
-			pending?.confirmation !== undefined ? { text: pending.confirmation, act: "confirm", label: "Confirm" } : null,
+			pending?.confirmation !== undefined
+				? { text: pending.confirmation, act: "confirm", label: __ompTranslate("Confirm") }
+				: null,
 	};
 }
 

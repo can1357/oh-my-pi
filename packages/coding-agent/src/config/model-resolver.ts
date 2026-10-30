@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import {
 	MAX_THINKING_SUFFIX_OPTIONS,
 	parseThinkingSuffix,
@@ -292,7 +293,7 @@ function resolveBedrockInferenceProfileModelId(
 
 	return buildModel({
 		id: requestedId,
-		name: "Bedrock inference profile",
+		name: __ompTranslate("Bedrock inference profile"),
 		api: "bedrock-converse-stream",
 		provider: AMAZON_BEDROCK_PROVIDER,
 		baseUrl: template.baseUrl,
@@ -2200,7 +2201,7 @@ function resolveCliModelInScope(
 			model: undefined,
 			selector: undefined,
 			warning: undefined,
-			error: "No models available. Check your installation or add models to models.json.",
+			error: __ompTranslate("No models available. Check your installation or add models to models.json."),
 		};
 	}
 
@@ -2215,7 +2216,10 @@ function resolveCliModelInScope(
 			model: undefined,
 			selector: undefined,
 			warning: undefined,
-			error: `Unknown provider "${cliProvider}". Run "omp models" to see available providers/models.`,
+			error: __ompTranslate(
+				'Unknown provider "{0}". Run "omp models" to see available providers/models.',
+				`${cliProvider}`,
+			),
 		};
 	}
 
@@ -2304,7 +2308,10 @@ function resolveCliModelInScope(
 					selector: undefined,
 					thinkingLevel: undefined,
 					warning: resolved.warning,
-					error: `Model "${trimmedModel}" not found. Run "omp models" to see available models.`,
+					error: __ompTranslate(
+						'Model "{0}" not found. Run "omp models" to see available models.',
+						`${trimmedModel}`,
+					),
 				};
 			}
 		}
@@ -2425,7 +2432,7 @@ export async function findInitialModel(options: {
 	if (cliProvider && cliModel) {
 		const found = modelRegistry.find(cliProvider, cliModel);
 		if (!found) {
-			console.error(chalk.red(`Model ${cliProvider}/${cliModel} not found`));
+			console.error(chalk.red(__ompTranslate("Model {0}/{1} not found", `${cliProvider}`, `${cliModel}`)));
 			process.exit(1);
 		}
 		return { model: found, thinkingLevel: undefined, fallbackMessage: undefined };
@@ -2487,26 +2494,44 @@ export async function restoreModelFromSession(
 
 	if (restoredModel && hasApiKey) {
 		if (shouldPrintMessages) {
-			console.log(chalk.dim(`Restored model: ${savedProvider}/${savedModelId}`));
+			console.log(chalk.dim(__ompTranslate("Restored model: {0}/{1}", `${savedProvider}`, `${savedModelId}`)));
 		}
 		return { model: restoredModel, fallbackMessage: undefined };
 	}
 
 	// Model not found or no API key - fall back
-	const reason = !restoredModel ? "model no longer exists" : "no API key available";
+	const reason = !restoredModel ? __ompTranslate("model no longer exists") : __ompTranslate("no API key available");
 
 	if (shouldPrintMessages) {
-		console.error(chalk.yellow(`Warning: Could not restore model ${savedProvider}/${savedModelId} (${reason}).`));
+		console.error(
+			chalk.yellow(
+				__ompTranslate(
+					"Warning: Could not restore model {0}/{1} ({2}).",
+					`${savedProvider}`,
+					`${savedModelId}`,
+					`${reason}`,
+				),
+			),
+		);
 	}
 
 	// If we already have a model, use it as fallback
 	if (currentModel) {
 		if (shouldPrintMessages) {
-			console.log(chalk.dim(`Falling back to: ${currentModel.provider}/${currentModel.id}`));
+			console.log(
+				chalk.dim(__ompTranslate("Falling back to: {0}/{1}", `${currentModel.provider}`, `${currentModel.id}`)),
+			);
 		}
 		return {
 			model: currentModel,
-			fallbackMessage: `Could not restore model ${savedProvider}/${savedModelId} (${reason}). Using ${currentModel.provider}/${currentModel.id}.`,
+			fallbackMessage: __ompTranslate(
+				"Could not restore model {0}/{1} ({2}). Using {3}/{4}.",
+				`${savedProvider}`,
+				`${savedModelId}`,
+				`${reason}`,
+				`${currentModel.provider}`,
+				`${currentModel.id}`,
+			),
 		};
 	}
 
@@ -2518,12 +2543,21 @@ export async function restoreModelFromSession(
 	);
 	if (fallbackModel) {
 		if (shouldPrintMessages) {
-			console.log(chalk.dim(`Falling back to: ${fallbackModel.provider}/${fallbackModel.id}`));
+			console.log(
+				chalk.dim(__ompTranslate("Falling back to: {0}/{1}", `${fallbackModel.provider}`, `${fallbackModel.id}`)),
+			);
 		}
 
 		return {
 			model: fallbackModel,
-			fallbackMessage: `Could not restore model ${savedProvider}/${savedModelId} (${reason}). Using ${fallbackModel.provider}/${fallbackModel.id}.`,
+			fallbackMessage: __ompTranslate(
+				"Could not restore model {0}/{1} ({2}). Using {3}/{4}.",
+				`${savedProvider}`,
+				`${savedModelId}`,
+				`${reason}`,
+				`${fallbackModel.provider}`,
+				`${fallbackModel.id}`,
+			),
 		};
 	}
 

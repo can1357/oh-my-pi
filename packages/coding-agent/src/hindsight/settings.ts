@@ -2,6 +2,7 @@
  * Settings declared by this domain (see `config/registry.ts`). Declaration order is the
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { register } from "../config/registry";
 
 const HINDSIGHT_RECALL_TYPES_DEFAULT: string[] = ["world", "experience"];
@@ -36,7 +37,7 @@ export const cfgHindsightApiToken = register({
 	ui: {
 		tab: "memory",
 		group: "Hindsight",
-		label: "Hindsight API Token",
+		label: __ompTranslate("Hindsight API Token"),
 		description: "Bearer token for authenticated Hindsight servers",
 		condition: "hindsightActive",
 	},
@@ -50,7 +51,7 @@ export const cfgHindsightBankId = register({
 	ui: {
 		tab: "memory",
 		group: "Hindsight",
-		label: "Hindsight Bank ID",
+		label: __ompTranslate("Hindsight Bank ID"),
 		description: "Memory bank identifier (default: project name)",
 		condition: "hindsightActive",
 	},
@@ -67,25 +68,26 @@ export const cfgHindsightScoping = register({
 	ui: {
 		tab: "memory",
 		group: "Hindsight",
-		label: "Hindsight Scoping",
+		label: __ompTranslate("Hindsight Scoping"),
 		description:
 			"global = one shared bank; per-project = isolated bank per cwd; per-project-tagged = shared bank with project tags so global + project memories merge on recall",
 		options: [
 			{
 				value: "global",
-				label: "Global",
-				description: "One shared bank — every project sees the same memories",
+				label: __ompTranslate("Global"),
+				description: __ompTranslate("One shared bank — every project sees the same memories"),
 			},
 			{
 				value: "per-project",
-				label: "Per project",
-				description: "Isolated bank per cwd basename — projects cannot see each other's memories",
+				label: __ompTranslate("Per project"),
+				description: __ompTranslate("Isolated bank per cwd basename — projects cannot see each other's memories"),
 			},
 			{
 				value: "per-project-tagged",
-				label: "Per project (tagged)",
-				description:
+				label: __ompTranslate("Per project (tagged)"),
+				description: __ompTranslate(
 					"Shared bank, retains tagged with project:<cwd>. Recall surfaces project + untagged global memories together",
+				),
 			},
 		],
 		condition: "hindsightActive",
@@ -113,7 +115,7 @@ export const cfgHindsightAutoRecall = register({
 	ui: {
 		tab: "memory",
 		group: "Hindsight",
-		label: "Hindsight Auto Recall",
+		label: __ompTranslate("Hindsight Auto Recall"),
 		description: "Recall memories on the first turn of each session",
 		condition: "hindsightActive",
 	},
@@ -127,7 +129,7 @@ export const cfgHindsightAutoRetain = register({
 	ui: {
 		tab: "memory",
 		group: "Hindsight",
-		label: "Hindsight Auto Retain",
+		label: __ompTranslate("Hindsight Auto Retain"),
 		description: "Retain transcript every N turns and at session boundaries",
 		condition: "hindsightActive",
 	},
@@ -142,15 +144,19 @@ export const cfgHindsightRetainMode = register({
 	ui: {
 		tab: "memory",
 		group: "Hindsight",
-		label: "Hindsight Retain Mode",
+		label: __ompTranslate("Hindsight Retain Mode"),
 		description: "full-session = upsert one document per session, last-turn = chunked",
 		options: [
 			{
 				value: "full-session",
-				label: "Full session",
-				description: "Upsert one document per session (recommended)",
+				label: __ompTranslate("Full session"),
+				description: __ompTranslate("Upsert one document per session (recommended)"),
 			},
-			{ value: "last-turn", label: "Last turn", description: "Chunked retention sliced by turn boundaries" },
+			{
+				value: "last-turn",
+				label: __ompTranslate("Last turn"),
+				description: __ompTranslate("Chunked retention sliced by turn boundaries"),
+			},
 		],
 		condition: "hindsightActive",
 	},
@@ -248,7 +254,7 @@ export const cfgHindsightMentalModelsEnabled = register({
 	ui: {
 		tab: "memory",
 		group: "Hindsight",
-		label: "Hindsight Mental Models",
+		label: __ompTranslate("Hindsight Mental Models"),
 		description:
 			"Read curated reflect summaries (mental models) into developer instructions at boot. Loads existing models on the bank — does not write. Pair with hindsight.mentalModelAutoSeed to also auto-create the built-in seed set.",
 		condition: "hindsightActive",
@@ -262,7 +268,7 @@ export const cfgHindsightMentalModelAutoSeed = register({
 	ui: {
 		tab: "memory",
 		group: "Hindsight",
-		label: "Hindsight Mental Model Auto-Seed",
+		label: __ompTranslate("Hindsight Mental Model Auto-Seed"),
 		description:
 			"At session start, create any built-in mental models (project-conventions, project-decisions, user-preferences) that do not yet exist on the bank.",
 		condition: "hindsightActive",

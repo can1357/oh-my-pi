@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -23,7 +24,8 @@ export async function captureBrowserSession(
 	signal?: AbortSignal,
 ): Promise<string> {
 	if (signal?.aborted) throw new LoginCancelledError();
-	if (new URL(request.url).protocol !== "https:") throw new Error("Browser sign-in requires an HTTPS URL.");
+	if (new URL(request.url).protocol !== "https:")
+		throw new Error(__ompTranslate("Browser sign-in requires an HTTPS URL."));
 
 	const timeout = AbortSignal.timeout(LOGIN_TIMEOUT_MS);
 	const lifetime = signal ? AbortSignal.any([signal, timeout]) : timeout;
@@ -75,8 +77,8 @@ export async function captureBrowserSession(
 		}
 	} catch (error) {
 		if (signal?.aborted) throw new LoginCancelledError();
-		if (timeout.aborted) throw new Error("Browser sign-in timed out. Start login again.");
-		if (closed.signal.aborted) throw new Error("Login window closed before sign-in completed.");
+		if (timeout.aborted) throw new Error(__ompTranslate("Browser sign-in timed out. Start login again."));
+		if (closed.signal.aborted) throw new Error(__ompTranslate("Login window closed before sign-in completed."));
 		throw error;
 	} finally {
 		try {

@@ -6,15 +6,25 @@
  * exponential backoff. Guests survive host-drop teardown while the host recreates the room.
  */
 
+import { t as ___ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
 import type { GuestFrame, HostFrame, RelayControlMessage } from "@oh-my-pi/pi-wire";
 import { open, seal } from "./codec";
 import { packEnvelope, unpackEnvelope } from "./link";
 
 const RELAY_CLOSE_REASONS: Record<number, string> = {
-	4001: "room closed",
-	4004: "no such room",
-	4009: "a host is already connected for this room",
-	4029: "room is full",
+	get 4001() {
+		return __ompTranslate("room closed");
+	},
+	get 4004() {
+		return __ompTranslate("no such room");
+	},
+	get 4009() {
+		return __ompTranslate("a host is already connected for this room");
+	},
+	get 4029() {
+		return __ompTranslate("room is full");
+	},
 };
 
 const BACKOFF_BASE_MS = 1_000;
@@ -105,7 +115,7 @@ export class CollabSocket {
 				// already closing/closed
 			}
 		}
-		if (hadActivity && !wasClosed) this.onClose?.("closed", false);
+		if (hadActivity && !wasClosed) this.onClose?.(___ompTranslate("closed"), false);
 	}
 
 	#openSocket(): void {
@@ -159,7 +169,7 @@ export class CollabSocket {
 				try {
 					frame = (await open(await this.#opts.key, envelope.payload)) as HostFrame;
 				} catch {
-					this.#failFatal("bad key or corrupted frame");
+					this.#failFatal(___ompTranslate("bad key or corrupted frame"));
 					return;
 				}
 				if (this.#ws !== ws) return;
@@ -175,7 +185,7 @@ export class CollabSocket {
 	#handleClose(code: number, reason: string): void {
 		if (this.#closed) return;
 		const fatalReason = RELAY_CLOSE_REASONS[code];
-		const closeReason = fatalReason ?? (reason || `connection lost (code ${code})`);
+		const closeReason = fatalReason ?? (reason || ___ompTranslate("connection lost (code {0})", `${code}`));
 		const retryRoom = this.#opts.role === "guest" && (code === 4001 || (code === 4004 && this.#retryMissingRoom));
 		if (retryRoom) {
 			this.#retryMissingRoom = true;

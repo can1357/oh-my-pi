@@ -3,6 +3,7 @@
  * strongest first; each row carries a score gauge, the hyperlinked file, and
  * its strongest verified line ranges with a verbatim snippet.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as path from "node:path";
 import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import { renderProgressBar } from "../components/progress-bar";
@@ -195,7 +196,12 @@ function describeHit(hit: FindHit, rangeLimit: number, cwd: string | undefined, 
 	const score = hit.contentScore.toFixed(2);
 	const isUrlHit = splitUrlScheme(hit.rel) !== undefined;
 	const head = fileRow(hit.rel, {
-		lead: node("progress", { value: hit.contentScore, tone, title: `score ${score}`, max: { w: 40 } }),
+		lead: node("progress", {
+			value: hit.contentScore,
+			tone,
+			title: __ompTranslate("score {0}", `${score}`),
+			max: { w: 40 },
+		}),
 		detail: [
 			span(score, tone),
 			span(
@@ -225,7 +231,7 @@ function findNativeHead(
 	query: string | undefined,
 	meta: readonly NonNullable<NativeToolHead["meta"]>[number][],
 ): NativeToolHead {
-	return { title: "Find", target: query ?? "", targetKind: "query", meta };
+	return { title: __ompTranslate("Find\u0004tool.find.action"), target: query ?? "", targetKind: "query", meta };
 }
 
 function quoteQuery(query: string | undefined): string | undefined {
@@ -237,12 +243,12 @@ export const findToolRenderer = {
 	renderCall(args: FindRenderArgs, options: RenderResultOptions, uiTheme: Theme): Component {
 		const keywords = args.grep_keywords ?? [];
 		const meta = keywords.length > 0 ? [keywords.join(" ")] : [];
-		if (args.path) meta.push(`in ${args.path}`);
+		if (args.path) meta.push(__ompTranslate("in {0}\u0004tool.search.scope", `${args.path}`));
 		const text = renderStatusLine(
 			{
 				icon: "pending",
 				spinnerFrame: options.spinnerFrame,
-				title: "Find",
+				title: __ompTranslate("Find\u0004tool.find.action"),
 				titleColor: "toolTitle",
 				description: quoteQuery(args.query),
 				meta,
@@ -262,7 +268,7 @@ export const findToolRenderer = {
 		const text = result.content?.find(c => c.type === "text")?.text ?? "";
 
 		if (result.isError) {
-			return new Text(formatErrorMessage(text || "Unknown error", uiTheme), 0, 0);
+			return new Text(formatErrorMessage(text || __ompTranslate("Unknown error"), uiTheme), 0, 0);
 		}
 
 		// Streaming progress: the tool reports the phase it is in.
@@ -284,13 +290,16 @@ export const findToolRenderer = {
 		const { hits, stats, threshold } = details;
 		const linkTargets = findLinkTargets(details, options.renderContext?.rawDetails);
 		const description = quoteQuery(details.query);
-		const scope = details.scopePath === undefined ? [] : [`in ${details.scopePath}`];
+		const scope =
+			details.scopePath === undefined
+				? []
+				: [__ompTranslate("in {0}\u0004tool.search.scope", `${details.scopePath}`)];
 		const meta = [
 			formatCount("hit", hits.length),
 			...scope,
-			`${stats.filesRead} files read`,
+			__ompTranslate("{0} files read", `${stats.filesRead}`),
 			`τ ${threshold.toFixed(2)}`,
-			`${formatNumber(stats.inputTokens)} tokens`,
+			__ompTranslate("{0} tokens\u0004usage.tokens.count", `${formatNumber(stats.inputTokens)}`),
 			`$${stats.cost.toFixed(4)}`,
 			formatDuration(details.elapsedMs),
 		];
@@ -298,7 +307,12 @@ export const findToolRenderer = {
 		if (failed) meta.push(uiTheme.fg("warning", failed));
 
 		if (hits.length === 0) {
-			const emptyMeta = ["0 hits", ...scope, `$${stats.cost.toFixed(4)}`, formatDuration(details.elapsedMs)];
+			const emptyMeta = [
+				__ompTranslate("0 hits"),
+				...scope,
+				`$${stats.cost.toFixed(4)}`,
+				formatDuration(details.elapsedMs),
+			];
 			if (failed) emptyMeta.push(uiTheme.fg("warning", failed));
 			const header = renderStatusLine(
 				{ icon: "warning", title: "Find", titleColor: "toolTitle", description, meta: emptyMeta },
@@ -306,8 +320,8 @@ export const findToolRenderer = {
 			);
 			const empty =
 				details.coverage === "partial"
-					? "No relevant passages found in the judged files"
-					: "No relevant passages found";
+					? __ompTranslate("No relevant passages found in the judged files")
+					: __ompTranslate("No relevant passages found");
 			const lines = [header, formatEmptyMessage(empty, uiTheme)];
 			for (const failure of stats.failures) lines.push(uiTheme.fg("warning", failure));
 			return new Text(lines.join("\n"), 0, 0);
@@ -359,7 +373,10 @@ export const findToolRenderer = {
 		return {
 			tool: findNativeHead(
 				args.query,
-				compact([keywords.length > 0 && keywords.join(" "), args.path && `in ${args.path}`]),
+				compact([
+					keywords.length > 0 && keywords.join(" "),
+					args.path && __ompTranslate("in {0}\u0004tool.search.scope", `${args.path}`),
+				]),
 			),
 			inline: true,
 		};
@@ -378,7 +395,8 @@ export const findToolRenderer = {
 		const details = result.details;
 		const progress = result.content?.find(c => c.type === "text")?.text ?? "";
 		const query = args?.query ?? details?.query;
-		if (result.isError) return inlineErrorView(findNativeHead(query, []), progress || "Unknown error");
+		if (result.isError)
+			return inlineErrorView(findNativeHead(query, []), progress || __ompTranslate("Unknown error"));
 		if (options.isPartial || details === undefined) {
 			return {
 				tool: findNativeHead(query, progress ? [[span(progress, "muted", { fx: "shimmer" })]] : []),
@@ -387,13 +405,16 @@ export const findToolRenderer = {
 		}
 		const { hits, stats, threshold } = details;
 		const linkTargets = findLinkTargets(details, options.renderContext?.rawDetails);
-		const scope = details.scopePath === undefined ? undefined : `in ${details.scopePath}`;
+		const scope =
+			details.scopePath === undefined
+				? undefined
+				: __ompTranslate("in {0}\u0004tool.search.scope", `${details.scopePath}`);
 		const failed =
 			stats.failed > 0 ? [span(`${stats.failed}/${stats.requests} requests failed`, "warning")] : undefined;
 		const accounting = [
-			`${stats.filesRead} files read`,
+			__ompTranslate("{0} files read", `${stats.filesRead}`),
 			`τ ${threshold.toFixed(2)}`,
-			`${formatNumber(stats.inputTokens)} tokens`,
+			__ompTranslate("{0} tokens\u0004usage.tokens.count", `${formatNumber(stats.inputTokens)}`),
 			`$${stats.cost.toFixed(4)}`,
 			formatDuration(details.elapsedMs),
 		].join(" · ");
@@ -413,7 +434,7 @@ export const findToolRenderer = {
 		const hidden = hits.length - shown.length;
 		const footParts = compact([
 			hidden > 0 && formatCount("more hit", hidden),
-			`keywords: ${details.keywords.join(", ")}`,
+			__ompTranslate("keywords: {0}", `${details.keywords.join(", ")}`),
 		]);
 		// One quiet last line; the accounting ANSI prints in the head rides its tooltip.
 		const foot = keyed(

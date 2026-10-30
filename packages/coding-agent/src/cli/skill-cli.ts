@@ -2,6 +2,7 @@
  * `omp skill <action>` handlers: publish and manage packages on a Skillshare
  * registry, and dispatch install/update/uninstall/search/info to the installer.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { formatBytes, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
@@ -75,42 +76,24 @@ export interface SkillCommandArgs {
 	};
 }
 
-export const SKILL_USAGE = `Usage: omp skill <action> [...]
-
-Install and discover:
-  install [@scope/name[@range]...] [-g] [--yes]   Install skills (no specs: install from skills.json)
-  update [name...] [-g] [--yes]                   Update installed skills within their ranges
-  uninstall <name...> [-g]                        Remove installed skills
-  search <query> [--sort relevance|downloads|recent] [--json]
-  info <@scope/name[@version]> [--json]
-  list [dir] [--json]                             Skills a session in dir resolves, with warnings
-
-Publish and manage:
-  publish [dir] [--scope s] [--tag t] [--dry-run] [--allow-secrets]
-  version <patch|minor|major|x.y.z> [dir]         Bump metadata.version in SKILL.md
-  tag <@scope/name@version> <tag>                 Point a dist-tag at a version
-  tag rm <@scope/name> <tag>                      Remove a dist-tag
-  yank <@scope/name@version> [--undo]             Hide a version from range resolution
-  deprecate <@scope/name[@range]> <message|--undo>
-  owner add|rm <@scope/name> <username>
-  token create <name> [--package @scope/name]... [--expires days]
-  token ls [--json]
-  token revoke <id>
-  import <file.skill>                             Publish a Claude .skill archive
-
-Management commands accept --registry <url> (default: skills.registryUrl).
-`;
+export const SKILL_USAGE = __ompTranslate(
+	"Usage: omp skill <action> [...]\n\nInstall and discover:\n  install [@scope/name[@range]...] [-g] [--yes]   Install skills (no specs: install from skills.json)\n  update [name...] [-g] [--yes]                   Update installed skills within their ranges\n  uninstall <name...> [-g]                        Remove installed skills\n  search <query> [--sort relevance|downloads|recent] [--json]\n  info <@scope/name[@version]> [--json]\n  list [dir] [--json]                             Skills a session in dir resolves, with warnings\n\nPublish and manage:\n  publish [dir] [--scope s] [--tag t] [--dry-run] [--allow-secrets]\n  version <patch|minor|major|x.y.z> [dir]         Bump metadata.version in SKILL.md\n  tag <@scope/name@version> <tag>                 Point a dist-tag at a version\n  tag rm <@scope/name> <tag>                      Remove a dist-tag\n  yank <@scope/name@version> [--undo]             Hide a version from range resolution\n  deprecate <@scope/name[@range]> <message|--undo>\n  owner add|rm <@scope/name> <username>\n  token create <name> [--package @scope/name]... [--expires days]\n  token ls [--json]\n  token revoke <id>\n  import <file.skill>                             Publish a Claude .skill archive\n\nManagement commands accept --registry <url> (default: skills.registryUrl).\n",
+);
 
 function specOrThrow(raw: string | undefined, usage: string): SkillSpec {
 	const spec = raw === undefined ? null : parseSkillSpec(raw);
 	if (!spec)
-		throw new CliUsageError(raw === undefined ? usage : `invalid package spec ${JSON.stringify(raw)}; ${usage}`);
+		throw new CliUsageError(
+			raw === undefined
+				? usage
+				: __ompTranslate("invalid package spec {0}; {1}", `${JSON.stringify(raw)}`, `${usage}`),
+		);
 	return spec;
 }
 
 function exactVersionOrThrow(spec: SkillSpec, usage: string): string {
 	if (spec.range === undefined || !SEMVER_RE.test(spec.range)) {
-		throw new CliUsageError(`an exact version is required (@scope/name@x.y.z); ${usage}`);
+		throw new CliUsageError(__ompTranslate("an exact version is required (@scope/name@x.y.z); {0}", `${usage}`));
 	}
 	return spec.range;
 }
@@ -143,11 +126,12 @@ async function withClient<T>(
  */
 async function resolvePublishScope(client: SkillshareClient, flagScope: string | undefined): Promise<string> {
 	if (flagScope !== undefined) {
-		if (!SKILL_SCOPE_RE.test(flagScope)) throw new CliUsageError(`invalid --scope ${JSON.stringify(flagScope)}`);
+		if (!SKILL_SCOPE_RE.test(flagScope))
+			throw new CliUsageError(__ompTranslate("invalid --scope {0}", `${JSON.stringify(flagScope)}`));
 		return flagScope;
 	}
 	if (process.env[SKILLS_TOKEN_ENV]?.trim()) {
-		throw new CliUsageError(`--scope is required when publishing with ${SKILLS_TOKEN_ENV}`);
+		throw new CliUsageError(__ompTranslate("--scope is required when publishing with {0}", `${SKILLS_TOKEN_ENV}`));
 	}
 	const token = await client.authToken();
 	if (!token) throw new Error(StencilCredential.missingMessage);
@@ -164,7 +148,9 @@ async function resolvePublishScope(client: SkillshareClient, flagScope: string |
 		}
 	}
 	if (typeof username !== "string" || !SKILL_SCOPE_RE.test(username)) {
-		throw new CliUsageError("cannot determine your Stencil username from the credential; pass --scope");
+		throw new CliUsageError(
+			__ompTranslate("cannot determine your Stencil username from the credential; pass --scope"),
+		);
 	}
 	return username;
 }
@@ -206,12 +192,13 @@ async function githubOidcToken(): Promise<string | undefined> {
 	const response = await fetch(url, {
 		headers: { Authorization: `Bearer ${requestToken}`, Accept: "application/json" },
 	});
-	if (!response.ok) throw new Error(`GitHub Actions OIDC token request failed (${response.status})`);
+	if (!response.ok)
+		throw new Error(__ompTranslate("GitHub Actions OIDC token request failed ({0})", `${response.status}`));
 	const payload: unknown = await response.json().catch(() => null);
 	if (payload && typeof payload === "object" && "value" in payload && typeof payload.value === "string") {
 		return payload.value;
 	}
-	throw new Error("GitHub Actions OIDC token response has no value");
+	throw new Error(__ompTranslate("GitHub Actions OIDC token response has no value"));
 }
 
 function printPack(pack: PackResult, id: string): void {
@@ -222,12 +209,23 @@ function printPack(pack: PackResult, id: string): void {
 	for (const file of pack.files) {
 		unpacked += file.size;
 		const size = formatBytes(file.size).padStart(width);
-		out.write(`  ${chalk.dim(size)}  ${file.path}${file.executable ? chalk.yellow(" (executable)") : ""}\n`);
+		out.write(
+			`  ${chalk.dim(size)}  ${file.path}${file.executable ? chalk.yellow(__ompTranslate(" (executable)")) : ""}\n`,
+		);
 	}
-	out.write(`${pack.files.length} files, ${formatBytes(unpacked)} unpacked, ${formatBytes(pack.tgz.length)} packed\n`);
-	out.write(`${chalk.dim(`integrity ${pack.integrity}`)}\n`);
+	out.write(
+		__ompTranslate(
+			"{0} files, {1} unpacked, {2} packed\n",
+			`${pack.files.length}`,
+			`${formatBytes(unpacked)}`,
+			`${formatBytes(pack.tgz.length)}`,
+		),
+	);
+	out.write(`${chalk.dim(__ompTranslate("integrity {0}", `${pack.integrity}`))}\n`);
 	if (pack.hasScripts) {
-		out.write(`${chalk.yellow("ships scripts: installers are asked to confirm before installing")}\n`);
+		out.write(
+			`${chalk.yellow(__ompTranslate("ships scripts: installers are asked to confirm before installing"))}\n`,
+		);
 	}
 }
 
@@ -247,23 +245,25 @@ async function handlePublish(cmd: SkillCommandArgs): Promise<number> {
 
 		if (pack.secrets.length > 0) {
 			const color = cmd.flags.allowSecrets ? chalk.yellow : chalk.red;
-			process.stderr.write(`${color("possible secrets found:")}\n`);
+			process.stderr.write(`${color(__ompTranslate("possible secrets found:"))}\n`);
 			for (const finding of pack.secrets) {
 				process.stderr.write(`  ${finding.path}:${finding.line}  ${finding.kind}\n`);
 			}
 			if (!cmd.flags.allowSecrets) {
 				process.stderr.write(
-					"refusing to publish: remove them, list the files in .skillignore, or pass --allow-secrets\n",
+					__ompTranslate(
+						"refusing to publish: remove them, list the files in .skillignore, or pass --allow-secrets\n",
+					),
 				);
 				return 1;
 			}
 		}
 
 		if (cmd.flags.dryRun) {
-			process.stdout.write(chalk.dim("dry run: nothing published\n"));
+			process.stdout.write(chalk.dim(__ompTranslate("dry run: nothing published\n")));
 			return 0;
 		}
-		if (scope === undefined) throw new Error("publishing scope could not be resolved");
+		if (scope === undefined) throw new Error(__ompTranslate("publishing scope could not be resolved"));
 
 		const [provenance, githubOidc] = await Promise.all([reportedProvenance(dir), githubOidcToken()]);
 		let result: SkillPublishResponse;
@@ -275,7 +275,9 @@ async function handlePublish(cmd: SkillCommandArgs): Promise<number> {
 			});
 		} catch (error) {
 			if (error instanceof SkillshareError && error.status === 409) {
-				throw new Error(`${error.message} (versions are immutable; bump with \`omp skill version patch\`)`);
+				throw new Error(
+					__ompTranslate("{0} (versions are immutable; bump with `omp skill version patch`)", `${error.message}`),
+				);
 			}
 			throw error;
 		}
@@ -292,7 +294,7 @@ async function handlePublish(cmd: SkillCommandArgs): Promise<number> {
 
 async function handleVersion(cmd: SkillCommandArgs): Promise<number> {
 	const kind = cmd.args[0];
-	if (!kind) throw new CliUsageError("usage: omp skill version <patch|minor|major|x.y.z> [dir]");
+	if (!kind) throw new CliUsageError(__ompTranslate("usage: omp skill version <patch|minor|major|x.y.z> [dir]"));
 	const version = await bumpVersion(path.resolve(cmd.cwd, cmd.args[1] ?? "."), kind);
 	process.stdout.write(`v${version}\n`);
 	return 0;
@@ -300,22 +302,25 @@ async function handleVersion(cmd: SkillCommandArgs): Promise<number> {
 
 async function handleTag(cmd: SkillCommandArgs): Promise<number> {
 	if (cmd.args[0] === "rm" || cmd.args[0] === "remove") {
-		const usage = "usage: omp skill tag rm <@scope/name> <tag>";
+		const usage = __ompTranslate("usage: omp skill tag rm <@scope/name> <tag>");
 		const spec = specOrThrow(cmd.args[1], usage);
 		const tag = cmd.args[2];
 		if (!tag) throw new CliUsageError(usage);
-		if (tag === "latest") throw new CliUsageError("the latest tag cannot be removed; point it elsewhere instead");
+		if (tag === "latest")
+			throw new CliUsageError(__ompTranslate("the latest tag cannot be removed; point it elsewhere instead"));
 		await withClient(cmd.flags, false, client => client.removeTag(spec.scope, spec.name, tag));
 		process.stdout.write(`- ${tag}: @${spec.scope}/${spec.name}\n`);
 		return 0;
 	}
-	const usage = "usage: omp skill tag <@scope/name@version> <tag>";
+	const usage = __ompTranslate("usage: omp skill tag <@scope/name@version> <tag>");
 	const spec = specOrThrow(cmd.args[0], usage);
 	const version = exactVersionOrThrow(spec, usage);
 	const tag = cmd.args[1];
 	if (!tag) throw new CliUsageError(usage);
 	if (SEMVER_RE.test(tag) || Bun.semver.satisfies(version, tag)) {
-		throw new CliUsageError(`tag ${JSON.stringify(tag)} looks like a version or range; tags must be names`);
+		throw new CliUsageError(
+			__ompTranslate("tag {0} looks like a version or range; tags must be names", `${JSON.stringify(tag)}`),
+		);
 	}
 	await withClient(cmd.flags, false, client => client.setTag(spec.scope, spec.name, tag, version));
 	process.stdout.write(`+ ${tag}: @${spec.scope}/${spec.name}@${version}\n`);
@@ -323,23 +328,28 @@ async function handleTag(cmd: SkillCommandArgs): Promise<number> {
 }
 
 async function handleYank(cmd: SkillCommandArgs): Promise<number> {
-	const usage = "usage: omp skill yank <@scope/name@version> [--undo]";
+	const usage = __ompTranslate("usage: omp skill yank <@scope/name@version> [--undo]");
 	const spec = specOrThrow(cmd.args[0], usage);
 	const version = exactVersionOrThrow(spec, usage);
 	const yanked = !cmd.flags.undo;
 	await withClient(cmd.flags, false, client => client.yank(spec.scope, spec.name, version, yanked));
-	process.stdout.write(`${yanked ? "yanked" : "restored"} @${spec.scope}/${spec.name}@${version}\n`);
+	process.stdout.write(
+		`${yanked ? __ompTranslate("yanked") : __ompTranslate("restored")} @${spec.scope}/${spec.name}@${version}\n`,
+	);
 	return 0;
 }
 
 async function handleDeprecate(cmd: SkillCommandArgs): Promise<number> {
-	const usage = "usage: omp skill deprecate <@scope/name[@range]> <message|--undo>";
+	const usage = __ompTranslate("usage: omp skill deprecate <@scope/name[@range]> <message|--undo>");
 	const spec = specOrThrow(cmd.args[0], usage);
 	const text = cmd.args.slice(1).join(" ").trim();
-	if (cmd.flags.undo && text) throw new CliUsageError(`pass a message or --undo, not both; ${usage}`);
+	if (cmd.flags.undo && text)
+		throw new CliUsageError(__ompTranslate("pass a message or --undo, not both; {0}", `${usage}`));
 	if (!cmd.flags.undo && !text) throw new CliUsageError(usage);
 	if (text.length > SKILL_LIMITS.deprecationLength) {
-		throw new CliUsageError(`deprecation message exceeds ${SKILL_LIMITS.deprecationLength} characters`);
+		throw new CliUsageError(
+			__ompTranslate("deprecation message exceeds {0} characters", `${SKILL_LIMITS.deprecationLength}`),
+		);
 	}
 	const message = cmd.flags.undo ? null : text;
 
@@ -354,14 +364,21 @@ async function handleDeprecate(cmd: SkillCommandArgs): Promise<number> {
 				version => range === undefined || Bun.semver.satisfies(version, range),
 			);
 			if (versions.length === 0) {
-				process.stderr.write(`skill deprecate: no versions of @${spec.scope}/${spec.name} match ${range}\n`);
+				process.stderr.write(
+					__ompTranslate(
+						"skill deprecate: no versions of @{0}/{1} match {2}\n",
+						`${spec.scope}`,
+						`${spec.name}`,
+						`${range}`,
+					),
+				);
 				return 1;
 			}
 		}
 		for (const version of versions) {
 			await client.deprecate(spec.scope, spec.name, version, message);
 			process.stdout.write(
-				`${message === null ? "undeprecated" : "deprecated"} @${spec.scope}/${spec.name}@${version}\n`,
+				`${message === null ? __ompTranslate("undeprecated") : __ompTranslate("deprecated")} @${spec.scope}/${spec.name}@${version}\n`,
 			);
 		}
 		return 0;
@@ -369,15 +386,16 @@ async function handleDeprecate(cmd: SkillCommandArgs): Promise<number> {
 }
 
 async function handleOwner(cmd: SkillCommandArgs): Promise<number> {
-	const usage = "usage: omp skill owner add|rm <@scope/name> <username>";
+	const usage = __ompTranslate("usage: omp skill owner add|rm <@scope/name> <username>");
 	const op = cmd.args[0];
 	if (op !== "add" && op !== "rm" && op !== "remove") throw new CliUsageError(usage);
 	const spec = specOrThrow(cmd.args[1], usage);
-	if (spec.range !== undefined) throw new CliUsageError(`owners apply to the whole package; ${usage}`);
+	if (spec.range !== undefined)
+		throw new CliUsageError(__ompTranslate("owners apply to the whole package; {0}", `${usage}`));
 	const username = cmd.args[2];
 	if (username === undefined) throw new CliUsageError(usage);
 	if (!SKILL_SCOPE_RE.test(username))
-		throw new CliUsageError(`invalid username ${JSON.stringify(username)}; ${usage}`);
+		throw new CliUsageError(__ompTranslate("invalid username {0}; {1}", `${JSON.stringify(username)}`, `${usage}`));
 	await withClient(cmd.flags, false, client =>
 		op === "add"
 			? client.addOwner(spec.scope, spec.name, username)
@@ -390,16 +408,18 @@ async function handleOwner(cmd: SkillCommandArgs): Promise<number> {
 async function handleToken(cmd: SkillCommandArgs): Promise<number> {
 	const op = cmd.args[0];
 	if (op === "create") {
-		const usage = "usage: omp skill token create <name> [--package @scope/name]... [--expires days]";
+		const usage = __ompTranslate("usage: omp skill token create <name> [--package @scope/name]... [--expires days]");
 		const name = cmd.args.slice(1).join(" ").trim();
 		if (!name) throw new CliUsageError(usage);
 		const packages = (cmd.flags.package ?? []).map(raw => {
 			const spec = specOrThrow(raw, usage);
-			if (spec.range !== undefined) throw new CliUsageError(`--package takes @scope/name without a version`);
+			if (spec.range !== undefined)
+				throw new CliUsageError(__ompTranslate("--package takes @scope/name without a version"));
 			return `@${spec.scope}/${spec.name}`;
 		});
 		const expires = cmd.flags.expires;
-		if (expires !== undefined && expires <= 0) throw new CliUsageError("--expires must be a positive number of days");
+		if (expires !== undefined && expires <= 0)
+			throw new CliUsageError(__ompTranslate("--expires must be a positive number of days"));
 		const created = await withClient(cmd.flags, false, client =>
 			client.createToken({
 				name,
@@ -411,10 +431,15 @@ async function handleToken(cmd: SkillCommandArgs): Promise<number> {
 			process.stdout.write(`${JSON.stringify(created, null, 2)}\n`);
 			return 0;
 		}
-		process.stderr.write(`created token ${created.name} (${created.id})\n`);
+		process.stderr.write(__ompTranslate("created token {0} ({1})\n", `${created.name}`, `${created.id}`));
 		process.stdout.write(`${created.token}\n`);
 		process.stderr.write(
-			chalk.yellow(`store it now (e.g. as the ${SKILLS_TOKEN_ENV} CI secret); it cannot be shown again\n`),
+			chalk.yellow(
+				__ompTranslate(
+					"store it now (e.g. as the {0} CI secret); it cannot be shown again\n",
+					`${SKILLS_TOKEN_ENV}`,
+				),
+			),
 		);
 		return 0;
 	}
@@ -425,36 +450,44 @@ async function handleToken(cmd: SkillCommandArgs): Promise<number> {
 			return 0;
 		}
 		if (tokens.length === 0) {
-			process.stdout.write(chalk.dim("no tokens\n"));
+			process.stdout.write(chalk.dim(__ompTranslate("no tokens\n")));
 			return 0;
 		}
 		for (const token of tokens) {
-			const scope = token.packages.length > 0 ? token.packages.join(", ") : "all your packages";
+			const scope = token.packages.length > 0 ? token.packages.join(", ") : __ompTranslate("all your packages");
 			process.stdout.write(
-				`${chalk.bold(token.id)}  ${token.name}  ${chalk.dim(scope)}  created ${formatDate(token.createdAt)}  expires ${formatDate(token.expiresAt)}  last used ${formatDate(token.lastUsedAt)}\n`,
+				__ompTranslate(
+					"{0}  {1}  {2}  created {3}  expires {4}  last used {5}\n",
+					`${chalk.bold(token.id)}`,
+					`${token.name}`,
+					`${chalk.dim(scope)}`,
+					`${formatDate(token.createdAt)}`,
+					`${formatDate(token.expiresAt)}`,
+					`${formatDate(token.lastUsedAt)}`,
+				),
 			);
 		}
 		return 0;
 	}
 	if (op === "revoke" || op === "rm") {
 		const id = cmd.args[1];
-		if (!id) throw new CliUsageError("usage: omp skill token revoke <id>");
+		if (!id) throw new CliUsageError(__ompTranslate("usage: omp skill token revoke <id>"));
 		await withClient(cmd.flags, false, client => client.revokeToken(id));
-		process.stdout.write(`revoked ${id}\n`);
+		process.stdout.write(__ompTranslate("revoked {0}\n", `${id}`));
 		return 0;
 	}
-	throw new CliUsageError("usage: omp skill token create|ls|revoke");
+	throw new CliUsageError(__ompTranslate("usage: omp skill token create|ls|revoke"));
 }
 
 async function handleImport(cmd: SkillCommandArgs): Promise<number> {
 	const file = cmd.args[0];
-	if (!file) throw new CliUsageError("usage: omp skill import <file.skill>");
+	if (!file) throw new CliUsageError(__ompTranslate("usage: omp skill import <file.skill>"));
 	const resolved = path.resolve(cmd.cwd, file);
 	let zip: Uint8Array;
 	try {
 		zip = await Bun.file(resolved).bytes();
 	} catch (error) {
-		if (isEnoent(error)) throw new CliUsageError(`file not found: ${resolved}`);
+		if (isEnoent(error)) throw new CliUsageError(__ompTranslate("file not found: {0}", `${resolved}`));
 		throw error;
 	}
 	const result = await withClient(cmd.flags, false, client => client.importSkill(zip));
@@ -492,18 +525,18 @@ async function dispatch(cmd: SkillCommandArgs): Promise<number> {
 		case "update":
 			return updateSkills({ names: args, global: flags.global === true, yes: flags.yes === true, cwd });
 		case "uninstall":
-			if (args.length === 0) throw new CliUsageError("usage: omp skill uninstall <name...> [-g]");
+			if (args.length === 0) throw new CliUsageError(__ompTranslate("usage: omp skill uninstall <name...> [-g]"));
 			return uninstallSkills({ names: args, global: flags.global === true, cwd });
 		case "search": {
 			const query = args.join(" ").trim();
-			if (!query) throw new CliUsageError("usage: omp skill search <query>");
+			if (!query) throw new CliUsageError(__ompTranslate("usage: omp skill search <query>"));
 			return searchSkills({ query, sort: flags.sort ?? "relevance", json: flags.json === true });
 		}
 		case "list":
 			return handleSkillList(args, cwd, flags.json === true);
 		case "info": {
 			const spec = args[0];
-			if (!spec) throw new CliUsageError("usage: omp skill info <@scope/name[@version]>");
+			if (!spec) throw new CliUsageError(__ompTranslate("usage: omp skill info <@scope/name[@version]>"));
 			return showSkillInfo({ spec, json: flags.json === true });
 		}
 	}

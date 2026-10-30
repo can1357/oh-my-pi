@@ -6,6 +6,7 @@
  * socket, dead scopes are read from the persisted per-daemon `meta.json`
  * snapshots and `spec.json` launch specs.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -186,7 +187,7 @@ export async function collectScope(scope: PsScope): Promise<PsScopeReport> {
 					if (ping.op === "ping") scope.projectDir = ping.projectDir;
 				}
 				const result = await client.request({ op: "list" });
-				if (result.op !== "list") throw new Error(`Unexpected broker response ${result.op}`);
+				if (result.op !== "list") throw new Error(__ompTranslate("Unexpected broker response {0}", `${result.op}`));
 				return {
 					scope,
 					daemons: result.daemons.map(snapshot => ({

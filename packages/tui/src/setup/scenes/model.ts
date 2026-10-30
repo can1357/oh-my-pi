@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import type { TspPickerProps } from "@oh-my-pi/pi-wire";
@@ -99,7 +100,10 @@ class ModelSceneController implements SetupSceneController {
 				? theme.fg(status.color, status.text)
 				: theme.fg(
 						"muted",
-						`Type to search. ${formatKeyHint("enter")} saves the highlighted model as your default.`,
+						__ompTranslate(
+							"Type to search. {0} saves the highlighted model as your default.",
+							`${formatKeyHint("enter")}`,
+						),
 					),
 			0,
 			0,

@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { Component } from "../tui";
 import { Text } from "../components/text";
 import type { Theme } from "../theme/theme";
@@ -144,27 +145,30 @@ function describeDebugResult(
 ): NativeToolView {
 	const [action, target] = debugCallParts(args, result.details?.action ?? "debug");
 	const output = resultText(result);
-	if (result.isError) return errorView("Debug", output || "Debug failed", action, target);
+	if (result.isError)
+		return errorView(__ompTranslate("Debug"), output || __ompTranslate("Debug failed"), action, target);
 	const snapshot = result.details?.snapshot;
 	const body: NativeChild[] = [];
 	let sessionRows = 0;
 	if (snapshot) {
 		const location = formatLocation(snapshot);
 		const rows: [string, string | undefined][] = [
-			["Session", snapshot.id],
-			["Adapter", snapshot.adapter],
-			["Status", snapshot.status],
-			["CWD", snapshot.cwd],
-			["Program", snapshot.program],
-			["Stop reason", snapshot.stopReason],
-			["Frame", snapshot.frameName],
-			["Instruction pointer", snapshot.instructionPointerReference],
-			["Location", location ?? undefined],
+			[__ompTranslate("Session"), snapshot.id],
+			[__ompTranslate("Adapter"), snapshot.adapter],
+			[__ompTranslate("Status"), snapshot.status],
+			[__ompTranslate("CWD"), snapshot.cwd],
+			[__ompTranslate("Program"), snapshot.program],
+			[__ompTranslate("Stop reason"), snapshot.stopReason],
+			[__ompTranslate("Frame"), snapshot.frameName],
+			[__ompTranslate("Instruction pointer"), snapshot.instructionPointerReference],
+			[__ompTranslate("Location"), location ?? undefined],
 			[
-				"Configuration",
-				snapshot.needsConfigurationDone ? "pending configurationDone; set breakpoints, then continue." : undefined,
+				__ompTranslate("Configuration"),
+				snapshot.needsConfigurationDone
+					? __ompTranslate("pending configurationDone; set breakpoints, then continue.")
+					: undefined,
 			],
-			["Exit code", snapshot.exitCode !== undefined ? String(snapshot.exitCode) : undefined],
+			[__ompTranslate("Exit code"), snapshot.exitCode !== undefined ? String(snapshot.exitCode) : undefined],
 		];
 		const grid = kv(rows);
 		if (grid) {
@@ -172,9 +176,9 @@ function describeDebugResult(
 			sessionRows = rows.filter(([, value]) => value).length;
 		}
 	}
-	body.push(output ? ansi(output) : noteText("No output"));
+	body.push(output ? ansi(output) : noteText(__ompTranslate("No output")));
 	return {
-		head: toolHead("Debug", action, target),
+		head: toolHead(__ompTranslate("Debug"), action, target),
 		body,
 		preview: { lines: sessionRows + PREVIEW_LIMITS.COLLAPSED_LINES },
 	};
@@ -186,7 +190,10 @@ const debugResultMemo = new OwnerMemo<NativeToolView | undefined>();
 export const debugToolRenderer = {
 	animatedPartialResult: true,
 	renderCall(args: DebugRenderArgs, _options: RenderResultOptions, theme: Theme): Component {
-		const text = renderStatusLine({ icon: "pending", title: "Debug", description: summarizeDebugCall(args) }, theme);
+		const text = renderStatusLine(
+			{ icon: "pending", title: __ompTranslate("Debug"), description: summarizeDebugCall(args) },
+			theme,
+		);
 		return new Text(text, 0, 0);
 	},
 
@@ -206,7 +213,7 @@ export const debugToolRenderer = {
 			const summaryLines = result.details?.snapshot
 				? formatSessionSnapshot(result.details.snapshot).map(line => replaceTabs(line))
 				: [];
-			const text = result.content.find(block => block.type === "text")?.text ?? "No output";
+			const text = result.content.find(block => block.type === "text")?.text ?? __ompTranslate("No output");
 			const rawLines = replaceTabs(text).split("\n");
 			const previewLimit = options.expanded ? PREVIEW_LIMITS.EXPANDED_LINES : PREVIEW_LIMITS.COLLAPSED_LINES;
 			const displayedLines = rawLines
@@ -223,7 +230,7 @@ export const debugToolRenderer = {
 				phase: options.isPartial ? "partial" : result.isError ? "error" : "success",
 				sections: [
 					...(summaryLines.length > 0 ? [{ label: theme.fg("toolTitle", "Session"), content: summaryLines }] : []),
-					{ label: theme.fg("toolTitle", "Output"), content: displayedLines },
+					{ label: theme.fg("toolTitle", __ompTranslate("Output")), content: displayedLines },
 				],
 				applyBg: false,
 			};
@@ -231,7 +238,7 @@ export const debugToolRenderer = {
 	},
 	describeCall(args: DebugRenderArgs): NativeToolView {
 		const [action, target] = debugCallParts(args, "request");
-		return { head: toolHead("Debug", action, target) };
+		return { head: toolHead(__ompTranslate("Debug"), action, target) };
 	},
 	describeResult(
 		result: ToolRenderResult<DebugToolDetails>,

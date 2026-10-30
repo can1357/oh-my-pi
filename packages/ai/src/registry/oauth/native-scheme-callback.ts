@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { NativeOAuthCallback } from "@oh-my-pi/pi-natives";
 
 /** Native callback lifetime exposed to the provider-independent OAuth flow. */
@@ -34,7 +35,7 @@ export async function createNativeSchemeCallbackReceiver(
 		try {
 			await receiver.dispose();
 		} catch (cleanupError) {
-			throw new AggregateError([error, cleanupError], "Native OAuth setup and recovery both failed");
+			throw new AggregateError([error, cleanupError], __ompTranslate("Native OAuth setup and recovery both failed"));
 		} finally {
 			detach();
 		}

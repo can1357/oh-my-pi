@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type ComposerStyle, registerComposerStyle } from "../index";
 import type { SubmenuOption } from "./settings-defs";
 
@@ -8,43 +9,43 @@ export type ComposerShape = string;
 export const BUILTIN_COMPOSER_SHAPES = [
 	{
 		value: "band",
-		label: "Status Band (Default)",
-		description: "Flush soft-capped status band above a curved prompt, no frame",
+		label: __ompTranslate("Status Band (Default)"),
+		description: __ompTranslate("Flush soft-capped status band above a curved prompt, no frame"),
 	},
 	{
 		value: "box",
-		label: "Rounded Box",
-		description: "Status line embedded in top border, compact 2-line prompt",
+		label: __ompTranslate("Rounded Box"),
+		description: __ompTranslate("Status line embedded in top border, compact 2-line prompt"),
 	},
 	{
 		value: "claude",
 		label: "Claude Code",
-		description: "Full-width horizontal rules above and below, status line at bottom",
+		description: __ompTranslate("Full-width horizontal rules above and below, status line at bottom"),
 	},
 	{
 		value: "pi",
 		label: "Pi",
-		description: "Framed horizontal rules with status line at bottom",
+		description: __ompTranslate("Framed horizontal rules with status line at bottom"),
 	},
 	{
 		value: "borderless",
-		label: "Borderless",
-		description: "Clean prompt glyph with status line at bottom, no box borders",
+		label: __ompTranslate("Borderless"),
+		description: __ompTranslate("Clean prompt glyph with status line at bottom, no box borders"),
 	},
 	{
 		value: "rule",
-		label: "Top Rule Dock",
-		description: "Single top rule with status docked onto it and below",
+		label: __ompTranslate("Top Rule Dock"),
+		description: __ompTranslate("Single top rule with status docked onto it and below"),
 	},
 	{
 		value: "field",
-		label: "Compact Field",
-		description: "Filled one-row field with accent end caps",
+		label: __ompTranslate("Compact Field"),
+		description: __ompTranslate("Filled one-row field with accent end caps"),
 	},
 	{
 		value: "rail",
-		label: "Accent Rail",
-		description: "Filled one-row field anchored by a single accent rail",
+		label: __ompTranslate("Accent Rail"),
+		description: __ompTranslate("Filled one-row field anchored by a single accent rail"),
 	},
 ] as const;
 

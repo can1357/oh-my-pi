@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import { MessageDividerComponent } from "../chrome/message-divider";
@@ -91,7 +92,12 @@ export class ServedModelMarkerComponent extends MessageDividerComponent {
 				icon: "warn",
 				label: () => {
 					const via = info.upstreamProvider ? `${info.provider}/${info.upstreamProvider}` : info.provider;
-					return `Served ${info.served} · requested ${info.requested} · via ${via}`;
+					return __ompTranslate(
+						"Served {0} · requested {1} · via {2}",
+						`${info.served}`,
+						`${info.requested}`,
+						`${via}`,
+					);
 				},
 			},
 		});

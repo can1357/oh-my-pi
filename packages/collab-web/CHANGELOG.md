@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added host-selected Korean interface text with top-level imports and labels evaluated after language initialization
+
 ## [18.13.3] - 2026-10-28
 
 ### Changed

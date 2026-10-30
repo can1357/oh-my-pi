@@ -2,6 +2,7 @@
  * Manage plugins (install, uninstall, list, etc.).
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { pluginHelp as commandHelp } from "../cli/command-help";
 import { type PluginAction, type PluginCommandArgs, runPluginCommand } from "../cli/plugin-cli";
@@ -27,31 +28,32 @@ export default class Plugin extends Command {
 	static aliases = ["plugins"];
 	static args = {
 		action: Args.string({
-			description: "Plugin action",
+			description: __ompTranslate("Plugin action"),
 			required: false,
 			options: ACTIONS,
 		}),
 		targets: Args.string({
-			description: "Packages, paths, or plugin names",
+			description: __ompTranslate("Packages, paths, or plugin names"),
 			required: false,
 			multiple: true,
 		}),
 	};
 
 	static flags = {
-		json: Flags.boolean({ description: "Output JSON" }),
-		fix: Flags.boolean({ description: "Attempt to fix issues (doctor)" }),
-		force: Flags.boolean({ description: "Force install" }),
+		json: Flags.boolean({ description: __ompTranslate("Output JSON") }),
+		fix: Flags.boolean({ description: __ompTranslate("Attempt to fix issues (doctor)") }),
+		force: Flags.boolean({ description: __ompTranslate("Force install") }),
 		"dry-run": Flags.boolean({
-			description:
+			description: __ompTranslate(
 				"Show actions without applying changes (install, uninstall, link, upgrade of marketplace plugins)",
+			),
 		}),
-		local: Flags.boolean({ char: "l", description: "Operate on local plugin directory" }),
-		enable: Flags.string({ description: "Enable a feature" }),
-		disable: Flags.string({ description: "Disable a feature" }),
-		set: Flags.string({ description: "Set plugin config (key=value)" }),
+		local: Flags.boolean({ char: "l", description: __ompTranslate("Operate on local plugin directory") }),
+		enable: Flags.string({ description: __ompTranslate("Enable a feature") }),
+		disable: Flags.string({ description: __ompTranslate("Disable a feature") }),
+		set: Flags.string({ description: __ompTranslate("Set plugin config (key=value)") }),
 		scope: Flags.string({
-			description: 'Install scope: "user" (default) or "project"',
+			description: __ompTranslate('Install scope: "user" (default) or "project"'),
 			options: ["user", "project"],
 		}),
 	};

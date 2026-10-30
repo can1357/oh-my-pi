@@ -9,6 +9,7 @@
  * daemons before acting on them.
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { truncateToWidth } from "@oh-my-pi/pi-tui";
 import { formatDuration, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -69,7 +70,7 @@ export interface PsCommandArgs {
 async function restartDaemon(client: DaemonBrokerClient, name: string): Promise<DaemonSnapshot> {
 	if (isSharedBrowserDaemonName(name)) return restartSharedBrowser(client, name);
 	const result = await client.request({ op: "restart", name });
-	if (result.op !== "restart") throw new Error(`Unexpected broker response ${result.op}`);
+	if (result.op !== "restart") throw new Error(__ompTranslate("Unexpected broker response {0}", `${result.op}`));
 	return result.daemon;
 }
 
@@ -82,7 +83,7 @@ function createPsTopHost(): PsTopHost {
 		const client = await scopeClient(scope);
 		if (closed) {
 			client.close();
-			throw new Error("Process monitor closed");
+			throw new Error(__ompTranslate("Process monitor closed"));
 		}
 		clients.set(scope.runtimeDir, client);
 		return client;
@@ -97,13 +98,13 @@ function createPsTopHost(): PsTopHost {
 				name,
 				timeoutMs: verb === "kill" ? KILL_GRACE_MS : 5_000,
 			});
-			if (result.op !== "stop") throw new Error(`Unexpected response ${result.op}`);
+			if (result.op !== "stop") throw new Error(__ompTranslate("Unexpected response {0}", `${result.op}`));
 			return result.daemon;
 		},
 		async describe(scope, name) {
 			const client = await clientFor(scope);
 			const result = await client.request({ op: "describe", name });
-			if (result.op !== "describe") throw new Error(`Unexpected response ${result.op}`);
+			if (result.op !== "describe") throw new Error(__ompTranslate("Unexpected response {0}", `${result.op}`));
 			return { daemon: result.daemon, spec: result.spec };
 		},
 		async logs(scope, name, lines) {
@@ -117,7 +118,7 @@ function createPsTopHost(): PsTopHost {
 				renderTerminalRows: true,
 				timeoutMs: 10_000,
 			});
-			if (result.op !== "logs") throw new Error(`Unexpected response ${result.op}`);
+			if (result.op !== "logs") throw new Error(__ompTranslate("Unexpected response {0}", `${result.op}`));
 			return result;
 		},
 		close() {
@@ -139,7 +140,9 @@ export async function runPsCommand(cmd: PsCommandArgs): Promise<void> {
 			return;
 		}
 		if (!cmd.name) {
-			console.error(chalk.red(`${cmd.action} requires a process name. Run \`omp ps\` to list processes.`));
+			console.error(
+				chalk.red(__ompTranslate("{0} requires a process name. Run `omp ps` to list processes.", `${cmd.action}`)),
+			);
 			process.exitCode = 1;
 			return;
 		}
@@ -178,7 +181,7 @@ async function runList(cmd: PsCommandArgs): Promise<void> {
 		return;
 	}
 	if (reports.length === 0) {
-		console.log(chalk.dim("No daemon broker scopes found."));
+		console.log(chalk.dim(__ompTranslate("No daemon broker scopes found.")));
 		return;
 	}
 	let first = true;
@@ -187,13 +190,13 @@ async function runList(cmd: PsCommandArgs): Promise<void> {
 		first = false;
 		console.log(scopeHeader(report.scope));
 		if (report.daemons.length === 0) {
-			console.log(chalk.dim("  no processes"));
+			console.log(chalk.dim(__ompTranslate("  no processes")));
 			continue;
 		}
 		printTable(report.daemons);
 	}
 	if (!cmd.flags.all) {
-		console.log(chalk.dim("\nUse --all to include other projects and exited global services."));
+		console.log(chalk.dim(__ompTranslate("\nUse --all to include other projects and exited global services.")));
 	}
 }
 
@@ -238,14 +241,22 @@ async function runAction(cmd: PsCommandArgs, name: string): Promise<void> {
 				}
 				const daemon = result.daemon;
 				console.log(daemonLabel(daemon));
-				console.log(`  command:  ${formatCommand(result.spec)}`);
-				console.log(`  cwd:      ${result.spec.cwd}`);
+				console.log(__ompTranslate("  command:  {0}", `${formatCommand(result.spec)}`));
+				console.log(__ompTranslate("  cwd:      {0}", `${result.spec.cwd}`));
 				if (!TERMINAL_STATES[daemon.state])
-					console.log(`  uptime:   ${formatDuration(Date.now() - daemon.startedAt)}`);
-				if (daemon.exitReason) console.log(`  exit:     ${daemon.exitReason}`);
-				console.log(`  restarts: ${daemon.restartCount} (policy: ${result.spec.restart})`);
+					console.log(__ompTranslate("  uptime:   {0}", `${formatDuration(Date.now() - daemon.startedAt)}`));
+				if (daemon.exitReason) console.log(__ompTranslate("  exit:     {0}", `${daemon.exitReason}`));
 				console.log(
-					`  pty: ${result.spec.pty}  persist: ${result.spec.persist}  detached: ${result.spec.detached}  owner: ${daemon.owner ?? "-"}`,
+					__ompTranslate("  restarts: {0} (policy: {1})", `${daemon.restartCount}`, `${result.spec.restart}`),
+				);
+				console.log(
+					__ompTranslate(
+						"  pty: {0}  persist: {1}  detached: {2}  owner: {3}",
+						`${result.spec.pty}`,
+						`${result.spec.persist}`,
+						`${result.spec.detached}`,
+						`${daemon.owner ?? "-"}`,
+					),
 				);
 				return;
 			}
@@ -257,14 +268,18 @@ async function runAction(cmd: PsCommandArgs, name: string): Promise<void> {
 				const timeoutMs = cmd.action === "kill" ? KILL_GRACE_MS : Math.round((cmd.flags.timeout ?? 5) * 1000);
 				const result = await client.request({ op: "stop", name, timeoutMs });
 				if (result.op !== "stop") throw new Error(`Unexpected broker response ${result.op}`);
-				printDaemonResult(cmd, cmd.action === "kill" ? "Killed" : "Stopped", result.daemon);
+				printDaemonResult(
+					cmd,
+					cmd.action === "kill" ? __ompTranslate("Killed") : __ompTranslate("Stopped"),
+					result.daemon,
+				);
 				return;
 			}
 			case "restart":
-				printDaemonResult(cmd, "Restarted", await restartDaemon(client, name));
+				printDaemonResult(cmd, __ompTranslate("Restarted"), await restartDaemon(client, name));
 				return;
 			default:
-				throw new Error(`Unhandled action ${cmd.action}`);
+				throw new Error(__ompTranslate("Unhandled action {0}", `${cmd.action}`));
 		}
 	} catch (error) {
 		console.error(chalk.red(error instanceof Error ? error.message : String(error)));
@@ -291,7 +306,7 @@ async function runLogs(cmd: PsCommandArgs, client: DaemonBrokerClient, name: str
 		renderTerminalRows: !cmd.flags.follow,
 		timeoutMs: 30_000,
 	});
-	if (first.op !== "logs") throw new Error(`Unexpected broker response ${first.op}`);
+	if (first.op !== "logs") throw new Error(__ompTranslate("Unexpected broker response {0}", `${first.op}`));
 	if (!cmd.flags.follow) {
 		const text = first.terminalRows !== undefined ? first.terminalRows.join("\n") : first.text.replace(/\n$/, "");
 		if (text) console.log(text);
@@ -315,7 +330,7 @@ async function runLogs(cmd: PsCommandArgs, client: DaemonBrokerClient, name: str
 			renderTerminalRows: false,
 			timeoutMs: 30_000,
 		});
-		if (next.op !== "logs") throw new Error(`Unexpected broker response ${next.op}`);
+		if (next.op !== "logs") throw new Error(__ompTranslate("Unexpected broker response {0}", `${next.op}`));
 		// The broker always returns the tail window (cursor is only a wait
 		// watermark), so trim the part we already printed.
 		const fresh = next.text.slice(overlapLength(previous, next.text));

@@ -23,6 +23,7 @@
  * Declaration order is significant: the settings panel lists a tab's settings in registration order
  * (sections follow `TAB_GROUPS`), and `config/all-settings.ts` imports every domain in that order.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { logger, parseFlag } from "@oh-my-pi/pi-utils";
 import type { AnyUiMetadata, SubmenuOption, UiBase } from "@oh-my-pi/pi-tui/overlays/settings-defs";
 import type { SettingProvenance, Settings } from "./settings";
@@ -567,11 +568,13 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 				const lower = trimmed.toLowerCase();
 				if (["true", "1", "yes", "on"].includes(lower)) return true as T;
 				if (["false", "0", "no", "off"].includes(lower)) return false as T;
-				throw new Error(`Invalid boolean value: ${text}. Use true/false, yes/no, on/off, or 1/0`);
+				throw new Error(
+					__ompTranslate("Invalid boolean value: {0}. Use true/false, yes/no, on/off, or 1/0", `${text}`),
+				);
 			}
 			case "number": {
 				const parsed = trimmed === "" ? Number.NaN : Number(trimmed);
-				if (!Number.isFinite(parsed)) throw new Error(`Invalid number: ${text}`);
+				if (!Number.isFinite(parsed)) throw new Error(__ompTranslate("Invalid number: {0}", `${text}`));
 				return parsed as T;
 			}
 			case "array":
@@ -598,7 +601,9 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 				}
 				const valid = this.enumValues;
 				if (valid && !valid.includes(value)) {
-					throw new Error(`Invalid value: ${text}. Valid values: ${valid.join(", ")}`);
+					throw new Error(
+						__ompTranslate("Invalid value: {0}. Valid values: {1}", `${text}`, `${valid.join(", ")}`),
+					);
 				}
 				return value as T;
 			}
@@ -667,8 +672,17 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		}
 		this.definition.validate?.(value);
 		if (!this.accepts(value)) {
-			const expected = this.enumValues ? `one of ${this.enumValues.join(", ")}` : `a ${this.definition.type}`;
-			throw new Error(`Invalid value for ${this.id}: ${Bun.inspect(value)} (expected ${expected})`);
+			const expected = this.enumValues
+				? __ompTranslate("one of {0}", `${this.enumValues.join(", ")}`)
+				: __ompTranslate("a {0}", `${this.definition.type}`);
+			throw new Error(
+				__ompTranslate(
+					"Invalid value for {0}: {1} (expected {2})",
+					`${this.id}`,
+					`${Bun.inspect(value)}`,
+					`${expected}`,
+				),
+			);
 		}
 	}
 
@@ -814,7 +828,8 @@ const ordered: AnySetting[] = [];
  * @throws Error when `id` is already registered.
  */
 export function register<const D extends SettingDefinition>(definition: D): Setting<DefinitionValue<D>, D["id"]> {
-	if (byId.has(definition.id)) throw new Error(`Setting "${definition.id}" is registered twice`);
+	if (byId.has(definition.id))
+		throw new Error(__ompTranslate('Setting "{0}" is registered twice', `${definition.id}`));
 	const handle = new Setting<DefinitionValue<D>, D["id"]>(definition);
 	byId.set(definition.id, handle as AnySetting);
 	ordered.push(handle as AnySetting);

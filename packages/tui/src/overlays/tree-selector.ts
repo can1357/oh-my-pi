@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import {
 	type Component,
@@ -193,11 +194,11 @@ interface TreePickerView {
 }
 
 const FILTER_TABS: readonly { id: TreeFilterMode; label: string }[] = [
-	{ id: "default", label: "Default" },
-	{ id: "no-tools", label: "No tools" },
-	{ id: "user-only", label: "User only" },
-	{ id: "labeled-only", label: "Labeled" },
-	{ id: "all", label: "All" },
+	{ id: "default", label: __ompTranslate("Default\u0004settings.value.default") },
+	{ id: "no-tools", label: __ompTranslate("No tools") },
+	{ id: "user-only", label: __ompTranslate("User only") },
+	{ id: "labeled-only", label: __ompTranslate("Labeled") },
+	{ id: "all", label: __ompTranslate("All") },
 ];
 
 class TreeList implements Component {
@@ -257,7 +258,7 @@ class TreeList implements Component {
 	) {
 		this.#filterMode = initialFilterMode;
 		this.searchInput.prompt = `${theme.fg("muted", "Search:")} `;
-		this.searchInput.placeholder = "Type to search";
+		this.searchInput.placeholder = __ompTranslate("Type to search");
 		this.#multipleRoots = tree.length > 1;
 		this.#indexSession(tree);
 		this.#tree = new TreeView<TreeSelectorNode, string>({
@@ -833,13 +834,13 @@ class TreeList implements Component {
 	/** The empty-state explanation from {@link render}, as spans. */
 	#emptyText(): TspText {
 		const total = this.#tree.allRows.length;
-		if (total === 0) return [span("No entries found", "muted")];
+		if (total === 0) return [span(__ompTranslate("No entries found"), "muted")];
 		const query = this.getSearchQuery();
 		if (query.length > 0) {
 			return [
 				span(`No entries match search "${query}". Press `, "muted"),
 				span("backspace", "key"),
-				span(" to clear the search", "muted"),
+				span(__ompTranslate(" to clear the search"), "muted"),
 			];
 		}
 		const filterLabel = this.#getFilterLabel().trim() || "[default]";
@@ -907,7 +908,7 @@ class TreeList implements Component {
 			//    `model_change` + `thinking_level_change` (both hidden by the default filter)
 			//    read as "broken /tree" — see #1909.
 			if (totalCount === 0) {
-				lines.push(truncateToWidth(theme.fg("muted", "No entries found"), width));
+				lines.push(truncateToWidth(theme.fg("muted", __ompTranslate("No entries found")), width));
 				lines.push(truncateToWidth(theme.fg("muted", `(0/0)${this.#getFilterLabel()}`), width));
 			} else if (this.getSearchQuery().length > 0) {
 				lines.push(truncateToWidth(theme.fg("muted", `No entries match search "${this.getSearchQuery()}"`), width));
@@ -1420,7 +1421,7 @@ class LabelInput implements Component {
 	get preview(): readonly NativeChild[] {
 		this.#preview ??= [
 			text("Label", { role: "omp.picker.title" }),
-			text([span("Empty to remove", "muted")]),
+			text([span(__ompTranslate("Empty to remove"), "muted")]),
 			this.#input,
 		];
 		return this.#preview;
@@ -1489,7 +1490,7 @@ export class TreeSelectorComponent extends OverlayPanel {
 		/** The picker's subtitle. */
 		private readonly sessionName?: string,
 	) {
-		super("Session Tree");
+		super(__ompTranslate("Session Tree"));
 		// The outer panel has eight fixed rows around the tree list: top/bottom
 		// borders, the two spacers, help, search, and section divider.
 		const PANEL_CHROME_ROWS = 8;
@@ -1527,7 +1528,7 @@ export class TreeSelectorComponent extends OverlayPanel {
 						`${formatKeyHint("shift+l")}: label.`,
 						`${formatKeyHint("ctrl+o")}: filter.`,
 						`${formatKeyHints(["alt+d", "alt+t", "alt+u", "alt+l", "alt+a"])}: filter.`,
-						"Type to search",
+						__ompTranslate("Type to search"),
 					].join(" "),
 				),
 				0,
@@ -1573,15 +1574,15 @@ export class TreeSelectorComponent extends OverlayPanel {
 			return memo.node;
 		}
 		const props: TspPickerProps = {
-			title: "Session tree",
+			title: __ompTranslate("Session tree"),
 			...(this.sessionName ? { subtitle: this.sessionName } : {}),
 			icon: "git-branch",
-			noun: "entries",
+			noun: __ompTranslate("entries\u0004session.tree.entries"),
 			size: "lg",
 			layout: "tree",
 			preview: "side",
 			...pickerQuery(this.#treeList.searchInput),
-			placeholder: "Search entries…",
+			placeholder: __ompTranslate("Search entries…"),
 			tabs: FILTER_TABS,
 			tab: view.filterMode,
 			items: view.items,
@@ -1593,8 +1594,8 @@ export class TreeSelectorComponent extends OverlayPanel {
 			focus: label ? "preview" : "list",
 			actions: label
 				? [
-						pickerAction("label-save", "Save label", "enter", { primary: true }),
-						{ ...CLOSE_ACTION, label: "Cancel" },
+						pickerAction("label-save", __ompTranslate("Save label"), "enter", { primary: true }),
+						{ ...CLOSE_ACTION, label: __ompTranslate("Cancel") },
 					]
 				: [
 						pickerAction("switch", "Switch", "enter", { primary: true }),
@@ -1685,7 +1686,7 @@ export class TreeSelectorComponent extends OverlayPanel {
 				{ keys: ["ctrl+o"], label: "filter" },
 			]),
 		];
-		const result = overlayCard("omp.overlay.tree", "Session Tree", children);
+		const result = overlayCard("omp.overlay.tree", __ompTranslate("Session Tree"), children);
 		this.#nativeMemo = { content, query, cursor, filterMode, node: result };
 		return result;
 	}

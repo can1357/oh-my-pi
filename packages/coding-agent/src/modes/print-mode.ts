@@ -5,6 +5,7 @@
  * - `omp -p "prompt"` - text output
  * - `omp --mode json "prompt"` - JSON event stream
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { presentNarrationAsAnswer } from "@oh-my-pi/pi-ai/utils/narration";
@@ -176,11 +177,15 @@ async function runPrintModeCore(
 		mode: mode === "json" ? "json" : "print",
 		reportSendError: (action, err) => {
 			process.stderr.write(
-				`Extension ${action === "extension_send" ? "sendMessage" : "sendUserMessage"} failed: ${err.message}\n`,
+				__ompTranslate(
+					"Extension {0} failed: {1}\n",
+					`${action === "extension_send" ? "sendMessage" : "sendUserMessage"}`,
+					`${err.message}`,
+				),
 			);
 		},
 		reportRuntimeError: err => {
-			process.stderr.write(`Extension error (${err.extensionPath}): ${err.error}\n`);
+			process.stderr.write(__ompTranslate("Extension error ({0}): {1}\n", `${err.extensionPath}`, `${err.error}`));
 		},
 	});
 
@@ -200,7 +205,9 @@ async function runPrintModeCore(
 		!planYolo;
 	if (planStartupIgnored) {
 		process.stderr.write(
-			"Note: plan.defaultOnStartup is ignored in print mode (no interactive surface to review the plan). Use --plan-yolo for a headless plan flow.\n",
+			__ompTranslate(
+				"Note: plan.defaultOnStartup is ignored in print mode (no interactive surface to review the plan). Use --plan-yolo for a headless plan flow.\n",
+			),
 		);
 	}
 
@@ -352,7 +359,7 @@ async function runPrintModeCore(
 		writeStderrLine(formatPersistenceFailure(error.message));
 	});
 	session.sessionManager.onPersistenceNotice(notice => {
-		writeStderrLine(`Warning: ${formatPersistenceNotice(notice)}`);
+		writeStderrLine(__ompTranslate("Warning: {0}", `${formatPersistenceNotice(notice)}`));
 	});
 
 	// Always subscribe to enable session persistence via _handleAgentEvent
@@ -370,7 +377,11 @@ async function runPrintModeCore(
 			// hidden behind a sibling account that quietly answers the prompt, a run must
 			// say when it crossed its cost thresholds, and a memory failure must not pass
 			// as an answer that used memories.
-			writeStderrLine(event.source === COST_GATE_NOTICE_SOURCE ? event.message : `Warning: ${event.message}`);
+			writeStderrLine(
+				event.source === COST_GATE_NOTICE_SOURCE
+					? event.message
+					: __ompTranslate("Warning: {0}", `${event.message}`),
+			);
 		}
 	});
 
@@ -395,8 +406,14 @@ async function runPrintModeCore(
 			unavailable.push(server);
 			if (warnedUnavailable.has(server)) continue;
 			warnedUnavailable.add(server);
-			const after = timeoutMs > 0 ? ` after ${timeoutMs}ms` : "";
-			writeStderrLine(`Warning: MCP server "${server}" not ready${after}; its tools are unavailable for this run.`);
+			const after = timeoutMs > 0 ? __ompTranslate(" after {0}ms", `${timeoutMs}`) : "";
+			writeStderrLine(
+				__ompTranslate(
+					'Warning: MCP server "{0}" not ready{1}; its tools are unavailable for this run.',
+					`${server}`,
+					`${after}`,
+				),
+			);
 		}
 		for (const { name, error } of readiness.failed) {
 			const server = singleLine(name);
@@ -404,7 +421,11 @@ async function runPrintModeCore(
 			if (warnedUnavailable.has(server)) continue;
 			warnedUnavailable.add(server);
 			writeStderrLine(
-				`Warning: MCP server "${server}" failed to connect: ${singleLine(error)}; its tools are unavailable for this run.`,
+				__ompTranslate(
+					'Warning: MCP server "{0}" failed to connect: {1}; its tools are unavailable for this run.',
+					`${server}`,
+					`${singleLine(error)}`,
+				),
 			);
 		}
 		return unavailable;
@@ -422,14 +443,14 @@ async function runPrintModeCore(
 	};
 	const reportStrictFailure = (): void => {
 		if (strictMCPFailure) return;
-		writeStderrLine(`Error: MCP servers not ready: ${unavailable.join(", ")}`);
+		writeStderrLine(__ompTranslate("Error: MCP servers not ready: {0}", `${unavailable.join(", ")}`));
 		strictMCPFailure = true;
 	};
 
 	let wroteTextWorkingIndicator = false;
 	const writeTextWorkingIndicator = (): void => {
 		if (mode !== "text" || wroteTextWorkingIndicator) return;
-		process.stderr.write("Working...\n");
+		process.stderr.write(__ompTranslate("Working...\n"));
 		wroteTextWorkingIndicator = true;
 	};
 	/**
@@ -530,7 +551,11 @@ async function runPrintModeCore(
 			clearTimeout(deadlineTimer);
 		}
 		if (asyncWaitExpired) {
-			writeStderrLine("Error: --max-time reached before background work settled; any running jobs were cancelled.");
+			writeStderrLine(
+				__ompTranslate(
+					"Error: --max-time reached before background work settled; any running jobs were cancelled.",
+				),
+			);
 		}
 	}
 
@@ -629,7 +654,9 @@ async function runPrintModeCore(
 	// Text mode reports the terminal failure on stderr exactly as before: same
 	// line, same ordering after dispose, without terminating the process here.
 	if (mode === "text" && terminalFailure && assistantMsg) {
-		const errorLine = sanitizeText(assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`);
+		const errorLine = sanitizeText(
+			assistantMsg.errorMessage || __ompTranslate("Request {0}", `${assistantMsg.stopReason}`),
+		);
 		if (!process.stderr.write(`${errorLine}\n`)) {
 			const { promise, resolve } = Promise.withResolvers<void>();
 			process.stderr.once("drain", resolve);

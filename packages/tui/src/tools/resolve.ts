@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { ToolRenderer } from "./renderer";
 
 import type { Component } from "../index";
@@ -49,13 +50,23 @@ export interface ResolveInvocation {
 
 /** Streaming-safe call preview for a resolution-device write: `Resolve/Reject/Propose: <text>`. */
 export function renderResolutionDeviceCall(device: ResolutionDeviceName, content: unknown, uiTheme: Theme): Component {
-	const title = device === PROPOSE_DEVICE_NAME ? "Propose" : device === REJECT_DEVICE_NAME ? "Reject" : "Resolve";
+	const title =
+		device === PROPOSE_DEVICE_NAME
+			? __ompTranslate("Propose")
+			: device === REJECT_DEVICE_NAME
+				? __ompTranslate("Reject")
+				: __ompTranslate("Resolve");
 	return renderDeviceCallPreview(title, content, uiTheme, Ellipsis.Omit);
 }
 
 /** Native form of {@link renderResolutionDeviceCall}: `Resolve/Reject/Propose` head with the first content line. */
 export function describeResolutionDeviceCall(device: ResolutionDeviceName, content: unknown): NativeToolView {
-	const title = device === PROPOSE_DEVICE_NAME ? "Propose" : device === REJECT_DEVICE_NAME ? "Reject" : "Resolve";
+	const title =
+		device === PROPOSE_DEVICE_NAME
+			? __ompTranslate("Propose")
+			: device === REJECT_DEVICE_NAME
+				? __ompTranslate("Reject")
+				: __ompTranslate("Resolve");
 	return describeDeviceCallPreview(title, content);
 }
 
@@ -94,10 +105,13 @@ export const resolveRenderer = {
 		const text = renderStatusLine(
 			{
 				icon: "pending",
-				title: "Resolve",
+				title: __ompTranslate("Resolve"),
 				description: args.action,
 				badge: {
-					label: args.action === "apply" ? "proposed -> resolved" : "proposed -> rejected",
+					label:
+						args.action === "apply"
+							? __ompTranslate("proposed -> resolved")
+							: __ompTranslate("proposed -> rejected"),
 					color: args.action === "apply" ? "success" : "warning",
 				},
 				meta: reason ? [uiTheme.fg("muted", reason)] : undefined,
@@ -113,8 +127,8 @@ export const resolveRenderer = {
 		uiTheme: Theme,
 	): Component {
 		const details = result.details;
-		const label = replaceTabs(details?.label ?? "pending action");
-		const reason = replaceTabs(details?.reason?.trim() || "No reason provided");
+		const label = replaceTabs(details?.label ?? __ompTranslate("pending action"));
+		const reason = replaceTabs(details?.reason?.trim() || __ompTranslate("No reason provided"));
 		const action = details?.action ?? "apply";
 		const isApply = action === "apply" && !result.isError;
 		const isFailedApply = action === "apply" && result.isError;
@@ -155,7 +169,9 @@ export const resolveRenderer = {
 			head.push(
 				span(" "),
 				span(
-					args.action === "apply" ? "proposed → resolved" : "proposed → rejected",
+					args.action === "apply"
+						? __ompTranslate("proposed → resolved\u0004tool.resolve.transition")
+						: __ompTranslate("proposed → rejected"),
 					args.action === "apply" ? "success" : "warning",
 				),
 			);
@@ -171,8 +187,8 @@ export const resolveRenderer = {
 	}): NativeToolView | undefined {
 		return resolveResultMemo.get(result, [], () => {
 			const details = result.details;
-			const label = plainText(details?.label ?? "pending action");
-			const reason = plainText(details?.reason?.trim() || "No reason provided");
+			const label = plainText(details?.label ?? __ompTranslate("pending action"));
+			const reason = plainText(details?.reason?.trim() || __ompTranslate("No reason provided"));
 			const action = details?.action ?? "apply";
 			const isApply = action === "apply" && !result.isError;
 			const verb = isApply ? "Accept" : action === "apply" ? "Failed" : "Discard";

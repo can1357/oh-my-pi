@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
 import * as fs from "node:fs";
 import { type } from "@oh-my-pi/omptype";
@@ -144,7 +145,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 		);
 	};
 	readonly loadMode = "essential";
-	readonly label = "Glob";
+	readonly label = __ompTranslate("Glob");
 	get description(): string {
 		const hasFind = this.session.isToolActive?.("find") ?? isFindEnabled(this.session);
 		const eagerDelegation = sessionDelegationBias(this.session) === "eager";

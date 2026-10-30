@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type NarrowContext, type } from "@oh-my-pi/omptype";
 import { MODEL_KINDS, RUNNER_API_KINDS } from "@oh-my-pi/pi-catalog/types";
 import { once } from "@oh-my-pi/pi-utils";
@@ -12,7 +13,7 @@ function validateMaxContextWindow(
 			value.maxContextWindow <= 0 ||
 			(value.contextWindow !== undefined && value.maxContextWindow < value.contextWindow))
 	) {
-		return ctx.mustBe("maxContextWindow a positive integer no smaller than contextWindow");
+		return ctx.mustBe(__ompTranslate("maxContextWindow a positive integer no smaller than contextWindow"));
 	}
 	return true;
 }
@@ -22,7 +23,7 @@ function validateImageCountBudget(value: { imageCountBudget?: number }, ctx: Nar
 		value.imageCountBudget !== undefined &&
 		(!Number.isSafeInteger(value.imageCountBudget) || value.imageCountBudget <= 0)
 	) {
-		return ctx.mustBe("imageCountBudget a positive integer");
+		return ctx.mustBe(__ompTranslate("imageCountBudget a positive integer"));
 	}
 	return true;
 }
@@ -160,7 +161,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 				value.efforts !== undefined ||
 				value.levels !== undefined ||
 				(value.minLevel !== undefined && value.maxLevel !== undefined) ||
-				ctx.mustBe("thinking with `efforts` (or legacy `levels`/`minLevel`+`maxLevel`)"),
+				ctx.mustBe(__ompTranslate("thinking with `efforts` (or legacy `levels`/`minLevel`+`maxLevel`)")),
 		)
 		.pipe((value: any) => {
 			let resolved = value.efforts ?? value.levels;
@@ -193,20 +194,20 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"streamingEndpoint?": "string",
 	}).narrow((value, ctx) => {
 		if (value.endpoint !== undefined && typeof value.endpoint === "string" && value.endpoint.length === 0) {
-			return ctx.mustBe("remoteCompaction.endpoint a non-empty string");
+			return ctx.mustBe(__ompTranslate("remoteCompaction.endpoint a non-empty string"));
 		}
 		if (value.model !== undefined && typeof value.model === "string" && value.model.length === 0) {
-			return ctx.mustBe("remoteCompaction.model a non-empty string");
+			return ctx.mustBe(__ompTranslate("remoteCompaction.model a non-empty string"));
 		}
 		if (value.v2Endpoint !== undefined && typeof value.v2Endpoint === "string" && value.v2Endpoint.length === 0) {
-			return ctx.mustBe("remoteCompaction.v2Endpoint a non-empty string");
+			return ctx.mustBe(__ompTranslate("remoteCompaction.v2Endpoint a non-empty string"));
 		}
 		if (
 			value.streamingEndpoint !== undefined &&
 			typeof value.streamingEndpoint === "string" &&
 			value.streamingEndpoint.length === 0
 		) {
-			return ctx.mustBe("remoteCompaction.streamingEndpoint a non-empty string");
+			return ctx.mustBe(__ompTranslate("remoteCompaction.streamingEndpoint a non-empty string"));
 		}
 		return true;
 	});
@@ -248,27 +249,27 @@ export const getModelsConfigSchemaBundle = once(() => {
 	}).narrow((value, ctx) => {
 		// Enforce id non-empty
 		if (typeof value.id === "string" && value.id.length === 0) {
-			return ctx.mustBe("id a non-empty string");
+			return ctx.mustBe(__ompTranslate("id a non-empty string"));
 		}
 		if (value.name !== undefined && typeof value.name === "string" && value.name.length === 0) {
-			return ctx.mustBe("name a non-empty string");
+			return ctx.mustBe(__ompTranslate("name a non-empty string"));
 		}
 		if (value.baseUrl !== undefined && typeof value.baseUrl === "string" && value.baseUrl.length === 0) {
-			return ctx.mustBe("baseUrl a non-empty string");
+			return ctx.mustBe(__ompTranslate("baseUrl a non-empty string"));
 		}
 		if (
 			value.contextPromotionTarget !== undefined &&
 			typeof value.contextPromotionTarget === "string" &&
 			value.contextPromotionTarget.length === 0
 		) {
-			return ctx.mustBe("contextPromotionTarget a non-empty string");
+			return ctx.mustBe(__ompTranslate("contextPromotionTarget a non-empty string"));
 		}
 		if (
 			value.compactionModel !== undefined &&
 			typeof value.compactionModel === "string" &&
 			value.compactionModel.length === 0
 		) {
-			return ctx.mustBe("compactionModel a non-empty string");
+			return ctx.mustBe(__ompTranslate("compactionModel a non-empty string"));
 		}
 		return validateImageCountBudget(value, ctx) && validateMaxContextWindow(value, ctx);
 	});
@@ -307,21 +308,21 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"remoteCompaction?": RemoteCompactionSchema,
 	}).narrow((value, ctx) => {
 		if (value.name !== undefined && typeof value.name === "string" && value.name.length === 0) {
-			return ctx.mustBe("name a non-empty string");
+			return ctx.mustBe(__ompTranslate("name a non-empty string"));
 		}
 		if (
 			value.contextPromotionTarget !== undefined &&
 			typeof value.contextPromotionTarget === "string" &&
 			value.contextPromotionTarget.length === 0
 		) {
-			return ctx.mustBe("contextPromotionTarget a non-empty string");
+			return ctx.mustBe(__ompTranslate("contextPromotionTarget a non-empty string"));
 		}
 		if (
 			value.compactionModel !== undefined &&
 			typeof value.compactionModel === "string" &&
 			value.compactionModel.length === 0
 		) {
-			return ctx.mustBe("compactionModel a non-empty string");
+			return ctx.mustBe(__ompTranslate("compactionModel a non-empty string"));
 		}
 		return validateImageCountBudget(value, ctx) && validateMaxContextWindow(value, ctx);
 	});
@@ -352,7 +353,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"advertisedReasoning?": "boolean",
 	}).narrow((value, ctx) => {
 		if (value.injectV1 !== undefined && value.type !== "openai-models-list") {
-			return ctx.mustBe("injectV1 only on openai-models-list discovery");
+			return ctx.mustBe(__ompTranslate("injectV1 only on openai-models-list discovery"));
 		}
 		if (
 			value.advertisedReasoning !== undefined &&
@@ -366,7 +367,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 			value.timeoutMs !== undefined &&
 			(typeof value.timeoutMs !== "number" || value.timeoutMs <= 0 || !Number.isFinite(value.timeoutMs))
 		) {
-			return ctx.mustBe("timeoutMs a positive finite number");
+			return ctx.mustBe(__ompTranslate("timeoutMs a positive finite number"));
 		}
 		return true;
 	});
@@ -411,10 +412,10 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"transport?": '"pi-native"',
 	}).narrow((value, ctx) => {
 		if (value.baseUrl !== undefined && typeof value.baseUrl === "string" && value.baseUrl.length === 0) {
-			return ctx.mustBe("baseUrl a non-empty string");
+			return ctx.mustBe(__ompTranslate("baseUrl a non-empty string"));
 		}
 		if (value.apiKey !== undefined && typeof value.apiKey === "string" && value.apiKey.length === 0) {
-			return ctx.mustBe("apiKey a non-empty string");
+			return ctx.mustBe(__ompTranslate("apiKey a non-empty string"));
 		}
 		return true;
 	});

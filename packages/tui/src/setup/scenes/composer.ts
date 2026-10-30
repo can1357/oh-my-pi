@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type SgrMouseEvent } from "../../mouse";
 import { type SelectItem, SelectList } from "../../components/select-list";
 import { Container } from "../../tui";
@@ -14,8 +15,8 @@ import { Memo } from "../../native/memo";
 import type { SetupScene, SetupSceneController, SetupSceneHost } from "./types";
 
 class ComposerSceneController implements SetupSceneController {
-	title = "Choose composer shape";
-	subtitle = "Pick the prompt and status line layout for your workflow.";
+	title = __ompTranslate("Choose composer shape");
+	subtitle = __ompTranslate("Pick the prompt and status line layout for your workflow.");
 	#selectList: SelectList;
 	#shapes: readonly ComposerShape[];
 	#items: readonly SelectItem[];
@@ -81,13 +82,16 @@ class ComposerSceneController implements SetupSceneController {
 		const intro = new Text(
 			theme.fg(
 				"muted",
-				`Select a layout; live preview updates below. Press ${editorKey("tui.select.confirm")} to confirm.`,
+				__ompTranslate(
+					"Select a layout; live preview updates below. Press {0} to confirm.",
+					`${editorKey("tui.select.confirm")}`,
+				),
 			),
 			0,
 			0,
 		);
 		const preview = new Container();
-		preview.addChild(new Text(theme.fg("muted", "Preview:"), 0, 0));
+		preview.addChild(new Text(theme.fg("muted", __ompTranslate("Preview:")), 0, 0));
 		for (const line of renderComposerShapePreview(this.#currentShape, width, this.#host.ctx.statusLine)) {
 			preview.addChild(new Text(line, 0, 0));
 		}
@@ -121,10 +125,15 @@ class ComposerSceneController implements SetupSceneController {
 		return this.#native.get([this.#currentShape, cx.cols, confirm], () =>
 			col(
 				[
-					text([span(`Select a layout; live preview updates below. Press ${confirm} to confirm.`, "muted")]),
+					text([
+						span(
+							__ompTranslate("Select a layout; live preview updates below. Press {0} to confirm.", `${confirm}`),
+							"muted",
+						),
+					]),
 					this.#selectList,
 					col([
-						text([span("Preview:", "muted")]),
+						text([span(__ompTranslate("Preview:"), "muted")]),
 						ansi(renderComposerShapePreview(this.#currentShape, cx.cols, this.#host.ctx.statusLine).join("\n"), {
 							cols: cx.cols,
 						}),
@@ -154,7 +163,7 @@ class ComposerSceneController implements SetupSceneController {
 /** Select and persist the prompt composer layout. */
 export const composerSetupScene: SetupScene = {
 	id: "composer-shape",
-	title: "Choose composer shape",
+	title: __ompTranslate("Choose composer shape"),
 	step: "Composer",
 	minVersion: 2,
 	ansiOnly: true,

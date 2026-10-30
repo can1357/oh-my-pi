@@ -6,6 +6,7 @@
  * `x` kill, `r` restart, `a` toggle all scopes, `q`/`esc`/`ctrl+c` quit.
  * Sub-views (info, logs): `esc`/`q` back.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as path from "node:path";
 import { formatKeyHint, formatKeyHints } from "../app-keybindings";
 import { KeyValueList, type KeyValueRow } from "../components/key-value-list";
@@ -181,7 +182,7 @@ export class PsTopComponent implements Component {
 			const daemon = await this.#host.act(entry.scope, name, verb);
 			this.#setStatus(
 				"success",
-				`${verb === "restart" ? "Restarted" : verb === "kill" ? "Killed" : "Stopped"} ${daemonLabel(daemon)}`,
+				`${verb === "restart" ? __ompTranslate("Restarted") : verb === "kill" ? __ompTranslate("Killed") : __ompTranslate("Stopped")} ${daemonLabel(daemon)}`,
 			);
 			void this.#refresh();
 		} catch (error) {
@@ -270,7 +271,10 @@ export class PsTopComponent implements Component {
 
 	#toggleAll(): void {
 		this.#all = !this.#all;
-		this.#setStatus("muted", this.#all ? "Showing all scopes" : "Showing current scope");
+		this.#setStatus(
+			"muted",
+			this.#all ? __ompTranslate("Showing all scopes") : __ompTranslate("Showing current scope"),
+		);
 		void this.#refresh();
 	}
 
@@ -413,12 +417,14 @@ export class PsTopComponent implements Component {
 				node("icon", {
 					name: "back",
 					role: "omp.app.ibtn",
-					title: "Back  esc",
-					aria: "Back",
+					title: __ompTranslate("Back  esc"),
+					aria: __ompTranslate("Back"),
 					actions: { click: "back" },
 				}),
 				text(
-					this.#view === "logs" ? `Logs · ${entry?.row.snapshot.name ?? "?"}` : (entry?.row.snapshot.name ?? "?"),
+					this.#view === "logs"
+						? __ompTranslate("Logs · {0}", `${entry?.row.snapshot.name ?? "?"}`)
+						: (entry?.row.snapshot.name ?? "?"),
 					{
 						role: "omp.app.title",
 						truncate: "end",
@@ -440,10 +446,10 @@ export class PsTopComponent implements Component {
 								id: "current",
 								label:
 									this.#target.dir !== undefined || this.#target.global !== undefined
-										? "Target"
-										: "This project",
+										? __ompTranslate("Target")
+										: __ompTranslate("This project"),
 							},
-							{ id: "all", label: "All scopes" },
+							{ id: "all", label: __ompTranslate("All scopes") },
 						],
 						active: this.#all ? "all" : "current",
 						role: "omp.app.seg",
@@ -468,7 +474,13 @@ export class PsTopComponent implements Component {
 						align: "center",
 						role: "omp.app.fresh",
 					}),
-			node("icon", { name: "x", role: "omp.app.ibtn", title: "Quit  q", aria: "Quit", actions: { click: "quit" } }),
+			node("icon", {
+				name: "x",
+				role: "omp.app.ibtn",
+				title: __ompTranslate("Quit  q"),
+				aria: __ompTranslate("Quit"),
+				actions: { click: "quit" },
+			}),
 		);
 		return keyed(
 			row(
@@ -497,13 +509,20 @@ export class PsTopComponent implements Component {
 					[
 						text(
 							[
-								span(`Kill ${entry.row.snapshot.name}${pid === undefined ? "" : ` (pid ${pid})`}?`, "strong"),
-								span("  It stops at once, without cleanup.", "muted"),
+								span(
+									__ompTranslate(
+										"Kill {0}{1}?",
+										`${entry.row.snapshot.name}`,
+										`${pid === undefined ? "" : ` (pid ${pid})`}`,
+									),
+									"strong",
+								),
+								span(__ompTranslate("  It stops at once, without cleanup."), "muted"),
 							],
 							{ truncate: "end", grow: 1 },
 						),
-						actionButton("Cancel", "kill-cancel"),
-						actionButton("Kill", "kill-confirm", { tone: "error" }),
+						actionButton(__ompTranslate("Cancel"), "kill-cancel"),
+						actionButton(__ompTranslate("Kill"), "kill-confirm", { tone: "error" }),
 					],
 					{ gap: "sm", align: "center", role: "omp.app.confirm", tone: "error" },
 				),
@@ -512,19 +531,23 @@ export class PsTopComponent implements Component {
 		}
 		if (this.#view !== "table") {
 			return actionBar([
-				actionButton("Back", "back", { keys: "escape", tone: "accent" }),
-				...(this.#view === "info" ? [actionButton("Logs", "logs")] : []),
+				actionButton(__ompTranslate("Back"), "back", { keys: "escape", tone: "accent" }),
+				...(this.#view === "info" ? [actionButton(__ompTranslate("Logs"), "logs")] : []),
 			]);
 		}
-		if (!entry) return actionBar([null, actionButton("Quit", "quit", { keys: "q" })]);
+		if (!entry) return actionBar([null, actionButton(__ompTranslate("Quit"), "quit", { keys: "q" })]);
 		return actionBar([
-			actionButton("Info", "info", { keys: "enter", tone: "accent" }),
-			actionButton("Logs", "logs", { keys: "l" }),
-			actionButton("Restart", "restart", { keys: "r" }),
-			actionButton("Stop", "stop", { keys: "s" }),
-			actionButton("Kill", "kill", { keys: "x", tone: "error", title: "Kill the process (asks first)" }),
+			actionButton(__ompTranslate("Info"), "info", { keys: "enter", tone: "accent" }),
+			actionButton(__ompTranslate("Logs"), "logs", { keys: "l" }),
+			actionButton(__ompTranslate("Restart"), "restart", { keys: "r" }),
+			actionButton(__ompTranslate("Stop"), "stop", { keys: "s" }),
+			actionButton(__ompTranslate("Kill"), "kill", {
+				keys: "x",
+				tone: "error",
+				title: __ompTranslate("Kill the process (asks first)"),
+			}),
 			null,
-			actionButton("Quit", "quit", { keys: "q" }),
+			actionButton(__ompTranslate("Quit"), "quit", { keys: "q" }),
 		]);
 	}
 
@@ -533,10 +556,13 @@ export class PsTopComponent implements Component {
 			return keyed(
 				col(
 					[
-						text("No broker scopes", { role: "omp.app.empty-title" }),
+						text(__ompTranslate("No broker scopes"), { role: "omp.app.empty-title" }),
 						text([
-							span("No omp process broker runs here. ", "muted"),
-							span(this.#all ? "Nothing runs anywhere." : "Show every scope with ", "muted"),
+							span(__ompTranslate("No omp process broker runs here. "), "muted"),
+							span(
+								this.#all ? __ompTranslate("Nothing runs anywhere.") : __ompTranslate("Show every scope with "),
+								"muted",
+							),
 							...(this.#all ? [] : [span("a", "key"), span(".", "muted")]),
 						]),
 					],
@@ -558,7 +584,7 @@ export class PsTopComponent implements Component {
 								selected && selected.scope.runtimeDir === report.scope.runtimeDir
 									? stableKey(flatKey(selected))
 									: null,
-							empty: "No processes",
+							empty: __ompTranslate("No processes"),
 							role: "omp.ps.processes",
 						},
 						report.daemons.map(daemon => describeProcess(report.scope, daemon)),
@@ -574,26 +600,29 @@ export class PsTopComponent implements Component {
 		const info = this.#info;
 		if (!info) {
 			return keyed(
-				row([node("spinner", { style: "dots" }), text([span("Loading…", "muted")])], { gap: "sm" }),
+				row([node("spinner", { style: "dots" }), text([span(__ompTranslate("Loading…"), "muted")])], { gap: "sm" }),
 				"info",
 			);
 		}
 		const { daemon, spec } = info;
 		const items: { k: string; v: TspText }[] = [
-			{ k: "Command", v: [span(collapseCommand(formatCommand(spec)), "mono")] },
-			{ k: "Directory", v: [span(spec.cwd, "path")] },
+			{ k: __ompTranslate("Command"), v: [span(collapseCommand(formatCommand(spec)), "mono")] },
+			{ k: __ompTranslate("Directory"), v: [span(spec.cwd, "path")] },
 		];
 		if (daemon.pid !== undefined && !TERMINAL_STATES[daemon.state])
 			items.push({ k: "PID", v: [span(String(daemon.pid), "num")] });
-		if (daemon.exitReason) items.push({ k: "Exit", v: [span(daemon.exitReason, "error")] });
-		items.push({ k: "Restarts", v: `${daemon.restartCount} (policy ${spec.restart})` });
-		items.push({ k: "Owner", v: daemon.owner ?? "—" });
+		if (daemon.exitReason) items.push({ k: __ompTranslate("Exit"), v: [span(daemon.exitReason, "error")] });
+		items.push({
+			k: __ompTranslate("Restarts"),
+			v: __ompTranslate("{0} (policy {1})", `${daemon.restartCount}`, `${spec.restart}`),
+		});
+		items.push({ k: __ompTranslate("Owner"), v: daemon.owner ?? "—" });
 		const flags = [spec.pty && "pty", spec.persist && "persist", spec.detached && "detached"].filter(Boolean);
-		items.push({ k: "Flags", v: flags.length > 0 ? flags.join(" · ") : "—" });
+		items.push({ k: __ompTranslate("Flags"), v: flags.length > 0 ? flags.join(" · ") : "—" });
 		const body: NativeNode[] = [];
 		if (!TERMINAL_STATES[daemon.state]) {
 			body.push(
-				row([text([span("Up for", "muted")]), elapsed(Date.now() - daemon.startedAt)], {
+				row([text([span(__ompTranslate("Up for"), "muted")]), elapsed(Date.now() - daemon.startedAt)], {
 					gap: "xs",
 					role: "omp.app.fresh",
 				}),
@@ -630,7 +659,9 @@ export class PsTopComponent implements Component {
 	}
 
 	#header(width: number, title: string): string {
-		const age = this.#lastRefresh ? `updated ${formatDuration(Date.now() - this.#lastRefresh)} ago` : "updating…";
+		const age = this.#lastRefresh
+			? __ompTranslate("updated {0} ago", `${formatDuration(Date.now() - this.#lastRefresh)}`)
+			: __ompTranslate("updating…");
 		const left = ` ${chalk.bold("omp ps")} ${chalk.dim("·")} ${title}`;
 		const right = chalk.dim(age);
 		const pad = Math.max(1, width - Bun.stringWidth(left) - Bun.stringWidth(right) - 1);
@@ -644,15 +675,25 @@ export class PsTopComponent implements Component {
 
 	#renderTable(width: number, height: number): string[] {
 		const scopeKind = this.#all
-			? "(all)"
+			? __ompTranslate("(all)")
 			: this.#target.dir !== undefined || this.#target.global !== undefined
-				? "(target)"
-				: "(current + global)";
+				? __ompTranslate("(target)")
+				: __ompTranslate("(current + global)");
 		const scopesLabel = `${this.#flat.length} process${this.#flat.length === 1 ? "" : "es"} in ${this.#reports.length} scope${this.#reports.length === 1 ? "" : "s"} ${chalk.dim(scopeKind)}`;
 		const header = this.#header(width, scopesLabel);
 		const footer = this.#footer(
 			width,
-			`${formatKeyHints(["up", "down"])} select · ${formatKeyHint("enter")} info · ${formatKeyHint("l")} logs · ${formatKeyHint("s")} stop · ${formatKeyHint("x")} kill · ${formatKeyHint("r")} restart · ${formatKeyHint("a")} all scopes · ${formatKeyHint("q")} quit`,
+			__ompTranslate(
+				"{0} select · {1} info · {2} logs · {3} stop · {4} kill · {5} restart · {6} all scopes · {7} quit",
+				`${formatKeyHints(["up", "down"])}`,
+				`${formatKeyHint("enter")}`,
+				`${formatKeyHint("l")}`,
+				`${formatKeyHint("s")}`,
+				`${formatKeyHint("x")}`,
+				`${formatKeyHint("r")}`,
+				`${formatKeyHint("a")}`,
+				`${formatKeyHint("q")}`,
+			),
 		);
 		const bodyHeight = height - 1 - footer.length;
 
@@ -679,7 +720,7 @@ export class PsTopComponent implements Component {
 		for (const report of this.#reports) {
 			body.push({ text: ` ${scopeHeader(report.scope)}` });
 			if (report.daemons.length === 0) {
-				body.push({ text: chalk.dim("   no processes") });
+				body.push({ text: chalk.dim(__ompTranslate("   no processes")) });
 			} else {
 				body.push({ text: chalk.dim(renderRow([...TABLE_HEADER])) });
 				for (const row of report.daemons) {
@@ -693,7 +734,7 @@ export class PsTopComponent implements Component {
 			}
 			body.push({ text: "" });
 		}
-		if (body.length === 0) body.push({ text: chalk.dim(" No daemon broker scopes found.") });
+		if (body.length === 0) body.push({ text: chalk.dim(__ompTranslate(" No daemon broker scopes found.")) });
 
 		// Keep the selected logical row visible through refreshes and resizes.
 		const selectedLine = body.findIndex(line => line.flat === this.#selected);
@@ -716,27 +757,33 @@ export class PsTopComponent implements Component {
 
 	#renderInfo(width: number, height: number): string[] {
 		const info = this.#info;
-		const header = this.#header(width, "process info");
-		const footer = this.#footer(width, `${formatKeyHint("escape")} back · ${formatKeyHint("q")} back`);
+		const header = this.#header(width, __ompTranslate("process info"));
+		const footer = this.#footer(
+			width,
+			__ompTranslate("{0} back · {1} back", `${formatKeyHint("escape")}`, `${formatKeyHint("q")}`),
+		);
 		const body = [""];
 		if (info) {
 			const daemon = info.daemon;
 			body.push(` ${chalk.bold(daemonLabel(daemon))}`);
 			body.push("");
 			const rows: KeyValueRow[] = [
-				{ label: "command:", value: collapseCommand(formatCommand(info.spec)) },
-				{ label: "cwd:", value: info.spec.cwd },
+				{ label: __ompTranslate("command:"), value: collapseCommand(formatCommand(info.spec)) },
+				{ label: __ompTranslate("cwd:"), value: info.spec.cwd },
 			];
 			if (!TERMINAL_STATES[daemon.state])
-				rows.push({ label: "uptime:", value: formatDuration(Date.now() - daemon.startedAt) });
-			if (daemon.exitReason) rows.push({ label: "exit:", value: daemon.exitReason });
-			rows.push({ label: "restarts:", value: `${daemon.restartCount} (policy: ${info.spec.restart})` });
-			rows.push({ label: "owner:", value: daemon.owner ?? "-" });
+				rows.push({ label: __ompTranslate("uptime:"), value: formatDuration(Date.now() - daemon.startedAt) });
+			if (daemon.exitReason) rows.push({ label: __ompTranslate("exit:"), value: daemon.exitReason });
+			rows.push({
+				label: __ompTranslate("restarts:"),
+				value: __ompTranslate("{0} (policy: {1})", `${daemon.restartCount}`, `${info.spec.restart}`),
+			});
+			rows.push({ label: __ompTranslate("owner:"), value: daemon.owner ?? "-" });
 			this.#infoList.setRows(rows);
 			body.push(...this.#infoList.render(width));
 			body.push(`   pty: ${info.spec.pty}  persist: ${info.spec.persist}  detached: ${info.spec.detached}`);
 		} else {
-			body.push(chalk.dim(" loading…"));
+			body.push(chalk.dim(__ompTranslate(" loading…")));
 		}
 		this.#infoView.setLines(body);
 		this.#infoView.setHeight(height - 1 - footer.length);
@@ -748,11 +795,19 @@ export class PsTopComponent implements Component {
 		const name = entry?.row.snapshot.name ?? "?";
 		const header = this.#header(
 			width,
-			`logs ${chalk.bold(name)}${this.#logsState ? chalk.dim(` · ${this.#logsState}`) : ""}`,
+			__ompTranslate(
+				"logs {0}{1}",
+				`${chalk.bold(name)}`,
+				`${this.#logsState ? chalk.dim(` · ${this.#logsState}`) : ""}`,
+			),
 		);
 		const footer = this.#footer(
 			width,
-			`${formatKeyHint("escape")} back · ${formatKeyHint("q")} back · view refreshes live`,
+			__ompTranslate(
+				"{0} back · {1} back · view refreshes live",
+				`${formatKeyHint("escape")}`,
+				`${formatKeyHint("q")}`,
+			),
 		);
 		const bodyHeight = height - 1 - footer.length;
 		this.#logsView.setLines(this.#logsLines.map(line => ` ${line}`));
@@ -779,13 +834,13 @@ function daemonTone(snapshot: DaemonSnapshot): TspTone {
 function scopeSpans(scope: PsScope): TspSpan[] {
 	const spans =
 		scope.kind === "global"
-			? [span("global "), span(scope.service ?? path.basename(scope.runtimeDir), "strong")]
-			: [span("project "), span(scope.projectDir ?? path.basename(scope.runtimeDir), "strong path")];
+			? [span(__ompTranslate("global ")), span(scope.service ?? path.basename(scope.runtimeDir), "strong")]
+			: [span(__ompTranslate("project ")), span(scope.projectDir ?? path.basename(scope.runtimeDir), "strong path")];
 	spans.push(span(" — ", "dim"));
 	spans.push(
 		scope.brokerPid !== undefined
-			? span(`broker pid ${scope.brokerPid}`, "success")
-			: span("broker not running", "dim"),
+			? span(__ompTranslate("broker pid {0}\u0004process.broker.pid", `${scope.brokerPid}`), "success")
+			: span(__ompTranslate("broker not running"), "dim"),
 	);
 	return spans;
 }
@@ -818,7 +873,7 @@ function describeProcess(scope: PsScope, daemon: PsDaemonRow): NativeNode {
 	const meta = [
 		snapshot.pid !== undefined && !terminal ? `pid ${snapshot.pid}` : undefined,
 		terminal ? undefined : formatDuration(Date.now() - snapshot.startedAt),
-		`${snapshot.restartCount} restart${snapshot.restartCount === 1 ? "" : "s"}`,
+		__ompTranslate("{0} restart{1}", `${snapshot.restartCount}`, `${snapshot.restartCount === 1 ? "" : "s"}`),
 		flagsCell(daemon) || undefined,
 	].filter(part => part !== undefined);
 	const command = collapseCommand(daemon.command);

@@ -1,5 +1,6 @@
 /** Handoff document generation. Committing the document as a compaction entry is owned by SessionMaintenance. */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as path from "node:path";
 import {
 	type Agent,
@@ -29,11 +30,11 @@ function throwIfHandoffAborted(signal: AbortSignal): void {
 	if (!signal.aborted) return;
 	const reason = signal.reason;
 	if (reason instanceof DOMException && reason.name === "AbortError") {
-		throw new Error("Handoff cancelled");
+		throw new Error(__ompTranslate("Handoff cancelled\u0004session.handoff.cancelled"));
 	}
 	if (reason instanceof Error) throw reason;
 	if (typeof reason === "string" && reason.length > 0) throw new Error(reason);
-	throw new Error("Handoff aborted by session");
+	throw new Error(__ompTranslate("Handoff aborted by session"));
 }
 
 /** Capabilities borrowed from the owning AgentSession. */
@@ -119,11 +120,11 @@ export class SessionHandoff {
 
 			const model = this.#host.model();
 			if (!model) {
-				throw new Error("No model selected for handoff");
+				throw new Error(__ompTranslate("No model selected for handoff"));
 			}
 			const apiKey = await this.#host.modelRegistry.getApiKey(model, this.#host.sessionId());
 			if (!apiKey) {
-				throw new Error(`No API key for ${model.provider}`);
+				throw new Error(__ompTranslate("No API key for {0}", `${model.provider}`));
 			}
 
 			// Build the handoff request through the SAME pipeline a live turn uses
@@ -206,7 +207,7 @@ export class SessionHandoff {
 				if (options?.autoTriggered) {
 					return undefined;
 				}
-				throw new Error("Handoff generation produced no content");
+				throw new Error(__ompTranslate("Handoff generation produced no content"));
 			}
 
 			let savedPath: string | undefined;

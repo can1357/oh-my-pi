@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type PauseWorkStatus, runPauseScreen } from "@oh-my-pi/pi-tui/overlays/pause-screen";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
@@ -42,25 +43,27 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "force",
 		icon: "hammer",
-		description: "Force next turn to use a specific tool",
+		description: __ompTranslate("Force next turn to use a specific tool"),
 		aliases: ["force:"],
 		inlineHint: "<tool-name> [prompt]",
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
 			const count = runtime.ctx.session.getActiveToolNames().length;
-			return count === 0 ? "Force: no active tools" : `Force: ${count} active tools`;
+			return count === 0
+				? __ompTranslate("Force: no active tools")
+				: __ompTranslate("Force: {0} active tools", `${count}`);
 		},
 		handle: async (command, runtime) => {
 			const spaceIdx = command.args.indexOf(" ");
 			const toolName = spaceIdx === -1 ? command.args : command.args.slice(0, spaceIdx);
 			const prompt = spaceIdx === -1 ? "" : command.args.slice(spaceIdx + 1).trim();
-			if (!toolName) return usage("Usage: /force:<tool-name> [prompt]", runtime);
+			if (!toolName) return usage(__ompTranslate("Usage: /force:<tool-name> [prompt]"), runtime);
 			try {
 				runtime.session.setForcedToolChoice(toolName);
 			} catch (err) {
 				return usage(errorMessage(err), runtime);
 			}
-			await runtime.output(`Next turn forced to use ${toolName}.`);
+			await runtime.output(__ompTranslate("Next turn forced to use {0}.", `${toolName}`));
 			return prompt ? { prompt } : commandConsumed();
 		},
 		handleTui: (command, runtime) => {
@@ -69,14 +72,14 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const prompt = spaceIdx === -1 ? "" : command.args.slice(spaceIdx + 1).trim();
 
 			if (!toolName) {
-				runtime.ctx.showError("Usage: /force:<tool-name> [prompt]");
+				runtime.ctx.showError(__ompTranslate("Usage: /force:<tool-name> [prompt]"));
 				clearSubmittedText(runtime);
 				return;
 			}
 
 			try {
 				runtime.ctx.session.setForcedToolChoice(toolName);
-				runtime.ctx.showStatus(`Next turn forced to use ${toolName}.`);
+				runtime.ctx.showStatus(__ompTranslate("Next turn forced to use {0}.", `${toolName}`));
 			} catch (error) {
 				runtime.ctx.showError(errorMessage(error));
 				clearSubmittedText(runtime);
@@ -92,7 +95,7 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "live",
 		icon: "voice",
-		description: "Start Codex-backed realtime voice mode",
+		description: __ompTranslate("Start Codex-backed realtime voice mode"),
 		handleTui: async (_command, runtime) => {
 			clearSubmittedText(runtime);
 			await runtime.ctx.handleLiveCommand();
@@ -101,7 +104,7 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "record",
 		icon: "export",
-		description: "Start or stop recording this screen to a replayable file (omp play)",
+		description: __ompTranslate("Start or stop recording this screen to a replayable file (omp play)"),
 		handleTui: async (_command, runtime) => {
 			clearSubmittedText(runtime);
 			await runtime.ctx.toggleRecording();
@@ -110,7 +113,7 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "pause",
 		icon: "pause",
-		description: "Freeze all agents (main, subagents, advisor) until resumed",
+		description: __ompTranslate("Freeze all agents (main, subagents, advisor) until resumed"),
 		handleTui: async (_command, runtime) => {
 			clearSubmittedText(runtime);
 			const ctx = runtime.ctx;
@@ -120,10 +123,10 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "forget-approvals",
 		icon: "trash",
-		description: "Forget every file and folder approval Ask and remember has recorded",
+		description: __ompTranslate("Forget every file and folder approval Ask and remember has recorded"),
 		handle: async (_command, runtime) => {
 			clearApprovalGrants(runtime.settings.getAgentDir());
-			await runtime.output("Remembered approvals forgotten; the next read or write asks again.");
+			await runtime.output(__ompTranslate("Remembered approvals forgotten; the next read or write asks again."));
 			return commandConsumed();
 		},
 	},
@@ -131,7 +134,7 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		name: "quit",
 		aliases: ["q"],
 		icon: "power",
-		description: "Quit the application",
+		description: __ompTranslate("Quit the application"),
 		handleTui: shutdownHandlerTui,
 	},
 ];

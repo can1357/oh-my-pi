@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { SEANCE_SLASH_COMMAND } from "./seance";
 import { clearSubmittedText, refuseImages, restoreDetachedDraft, runWithDetachedDraft } from "./helpers/draft";
 import * as fs from "node:fs/promises";
@@ -53,14 +54,18 @@ function parseShakeMode(args: string): ShakeMode | { error: string } {
 	if (verb === "" || verb === "elide") return "elide";
 	if (verb === "images") return "images";
 	if (verb === "thinking") return "thinking";
-	return { error: `Unknown /shake mode "${verb}". Use elide, images, or thinking.` };
+	return { error: __ompTranslate('Unknown /shake mode "{0}". Use elide, images, or thinking.', `${verb}`) };
 }
 
 /** Format the session's workspace directories (cwd + additional) for display. */
 function formatWorkspaceDirectories(runtime: SlashCommandRuntime, note?: string): string {
 	const cwd = runtime.sessionManager.getCwd();
 	const additional = runtime.sessionManager.getAdditionalDirectories();
-	const lines = ["Workspace directories:", `  ${cwd} (working directory)`, ...additional.map(d => `  ${d}`)];
+	const lines = [
+		__ompTranslate("Workspace directories:"),
+		__ompTranslate("  {0} (working directory)", `${cwd}`),
+		...additional.map(d => `  ${d}`),
+	];
 	return note ? `${note}\n${lines.join("\n")}` : lines.join("\n");
 }
 async function fatalMoveFailure(text: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
@@ -76,12 +81,21 @@ async function reportFailedRollback(runtime: SlashCommandRuntime, rollbackError:
 		await rescopeHeadlessToCwd(runtime, actual);
 	} catch {
 		return fatalMoveFailure(
-			`Move failed and rollback failed: ${errorMessage(rollbackError)} (failed to re-align workspace to ${actual}; process remains at source while session is at ${actual})`,
+			__ompTranslate(
+				"Move failed and rollback failed: {0} (failed to re-align workspace to {1}; process remains at source while session is at {2})",
+				`${errorMessage(rollbackError)}`,
+				`${actual}`,
+				`${actual}`,
+			),
 			runtime,
 		);
 	}
 	return usage(
-		`Move failed and rollback failed: ${errorMessage(rollbackError)} (workspace remains at ${actual})`,
+		__ompTranslate(
+			"Move failed and rollback failed: {0} (workspace remains at {1})",
+			`${errorMessage(rollbackError)}`,
+			`${actual}`,
+		),
 		runtime,
 	);
 }
@@ -99,7 +113,10 @@ async function relocateHeadlessSession(
 	try {
 		await runtime.settings.flush();
 	} catch (err) {
-		return usage(`Failed to save pending settings: ${errorMessage(err)}`, runtime);
+		return usage(
+			__ompTranslate("Failed to save pending settings: {0}\u0004session.picker.status", `${errorMessage(err)}`),
+			runtime,
+		);
 	}
 	const previousState = runtime.sessionManager.captureState();
 	try {
@@ -137,18 +154,18 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "ssh",
 		icon: "host",
-		description: "Manage SSH hosts (add, list, remove)",
-		acpDescription: "Manage SSH connections",
+		description: __ompTranslate("Manage SSH hosts (add, list, remove)"),
+		acpDescription: __ompTranslate("Manage SSH connections"),
 		inlineHint: "<subcommand>",
 		subcommands: [
 			{
 				name: "add",
-				description: "Add an SSH host",
+				description: __ompTranslate("Add an SSH host"),
 				usage: "<name> --host <host> [--user <user>] [--port <port>] [--key <keyPath>] [--scope project|user]",
 			},
-			{ name: "list", description: "List all configured SSH hosts" },
-			{ name: "remove", description: "Remove an SSH host", usage: "<name> [--scope project|user]" },
-			{ name: "help", description: "Show help message" },
+			{ name: "list", description: __ompTranslate("List all configured SSH hosts") },
+			{ name: "remove", description: __ompTranslate("Remove an SSH host"), usage: "<name> [--scope project|user]" },
+			{ name: "help", description: __ompTranslate("Show help message") },
 		],
 		allowArgs: true,
 		handle: handleSshAcp,
@@ -160,7 +177,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "new",
 		icon: "plus",
-		description: "Start a new session",
+		description: __ompTranslate("Start a new session"),
 		handleTui: async (_command, runtime) => {
 			clearSubmittedText(runtime);
 			await runtime.ctx.handleNewCommand();
@@ -169,14 +186,16 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "fresh",
 		icon: "restart",
-		description: "Reset provider stream state without changing the local transcript",
+		description: __ompTranslate("Reset provider stream state without changing the local transcript"),
 		getTuiAutocompleteDescription: runtime =>
-			runtime.ctx.session.isStreaming ? "Fresh: unavailable while streaming" : "Fresh: ready",
+			runtime.ctx.session.isStreaming
+				? __ompTranslate("Fresh: unavailable while streaming")
+				: __ompTranslate("Fresh: ready"),
 		handle: async (_command, runtime) => {
 			const result = runtime.session.freshSession();
 			if (!result) {
 				await runtime.output(
-					"Wait for the current response to finish or abort it before refreshing provider state.",
+					__ompTranslate("Wait for the current response to finish or abort it before refreshing provider state."),
 				);
 				return commandConsumed();
 			}
@@ -191,9 +210,11 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "clear",
 		icon: "eraser",
-		description: "Clear the conversation context in place, keeping the session",
+		description: __ompTranslate("Clear the conversation context in place, keeping the session"),
 		getTuiAutocompleteDescription: runtime =>
-			runtime.ctx.session.isStreaming ? "Clear: unavailable while streaming" : "Clear: drop context, keep session",
+			runtime.ctx.session.isStreaming
+				? __ompTranslate("Clear: unavailable while streaming")
+				: __ompTranslate("Clear: drop context, keep session"),
 		handleTui: async (_command, runtime) => {
 			clearSubmittedText(runtime);
 			await runtime.ctx.handleResetContextCommand();
@@ -202,7 +223,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "delete",
 		icon: "trash",
-		description: "Delete the current session and start a new one",
+		description: __ompTranslate("Delete the current session and start a new one"),
 		handleTui: async (_command, runtime) => {
 			clearSubmittedText(runtime);
 			await runtime.ctx.handleDeleteCommand();
@@ -211,8 +232,8 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "compact",
 		icon: "compress",
-		description: "Manually compact the session context",
-		acpDescription: "Compact the conversation",
+		description: __ompTranslate("Manually compact the session context"),
+		acpDescription: __ompTranslate("Compact the conversation"),
 		subcommands: COMPACT_MODES.map(mode => ({
 			name: mode.name,
 			description: mode.description,
@@ -222,7 +243,9 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
 			const usage = runtime.ctx.session.getContextUsage();
-			return usage ? `Compact: context ${Math.round(usage.percent)}% used` : "Compact: context unavailable";
+			return usage
+				? __ompTranslate("Compact: context {0}% used", `${Math.round(usage.percent)}`)
+				: __ompTranslate("Compact: context unavailable");
 		},
 		handle: async (command, runtime) => {
 			const parsed = parseCompactArgs(command.args);
@@ -247,16 +270,23 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 					// small) and provider errors propagate as plain Errors; surface them
 					// via runtime.output so they don't fail the ACP prompt turn.
 					compactFailed = true;
-					await runtime.output(`Compaction failed: ${errorMessage(err)}`);
+					await runtime.output(__ompTranslate("Compaction failed: {0}", `${errorMessage(err)}`));
 					return;
 				}
 				const after = runtime.session.getContextUsage?.();
 				const afterTokens = after?.tokens;
 				if (beforeTokens != null && afterTokens != null) {
 					const saved = beforeTokens - afterTokens;
-					await runtime.output(`Compaction complete. Tokens: ${beforeTokens} -> ${afterTokens} (saved ${saved}).`);
+					await runtime.output(
+						__ompTranslate(
+							"Compaction complete. Tokens: {0} -> {1} (saved {2}).",
+							`${beforeTokens}`,
+							`${afterTokens}`,
+							`${saved}`,
+						),
+					);
 				} else {
-					await runtime.output("Compaction complete.");
+					await runtime.output(__ompTranslate("Compaction complete."));
 				}
 			};
 			// Provider-backed: background-dispatch under RPC so the serialized command
@@ -305,12 +335,12 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "shake",
 		icon: "vibrate",
-		description: "Drop heavy content from context (tool results, large blocks)",
-		acpDescription: "Shake heavy content out of the conversation context",
+		description: __ompTranslate("Drop heavy content from context (tool results, large blocks)"),
+		acpDescription: __ompTranslate("Shake heavy content out of the conversation context"),
 		subcommands: [
-			{ name: "elide", description: "Strip tool results + large blocks (default)" },
-			{ name: "images", description: "Strip image blocks" },
-			{ name: "thinking", description: "Drop all thinking blocks" },
+			{ name: "elide", description: __ompTranslate("Strip tool results + large blocks (default)") },
+			{ name: "images", description: __ompTranslate("Strip image blocks") },
+			{ name: "thinking", description: __ompTranslate("Drop all thinking blocks") },
 		],
 		acpInputHint: "[elide|images|thinking]",
 		allowArgs: true,
@@ -334,16 +364,19 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "handoff",
 		icon: "handoff",
-		description: "Summarize the session into a handoff document and compact in place",
-		acpDescription: "Summarize the session into a handoff document and compact in place",
-		inlineHint: "[focus instructions]",
+		description: __ompTranslate("Summarize the session into a handoff document and compact in place"),
+		acpDescription: __ompTranslate("Summarize the session into a handoff document and compact in place"),
+		inlineHint: __ompTranslate("[focus instructions]"),
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			if (runtime.session.isStreaming) {
-				return usage("Wait for the current response to finish or abort it before handing off.", runtime);
+				return usage(
+					__ompTranslate("Wait for the current response to finish or abort it before handing off."),
+					runtime,
+				);
 			}
 			if (runtime.session.isGeneratingHandoff) {
-				return usage("Handoff generation is already in progress.", runtime);
+				return usage(__ompTranslate("Handoff generation is already in progress."), runtime);
 			}
 			// Print mode turns a failed handoff into a nonzero exit; closure
 			// state because the background-dispatch branch (RPC) returns
@@ -378,7 +411,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 					// message scrolls away (same rationale as the TUI path, #7993).
 					logger.error("Handoff failed", { error: message });
 					handoffFailed = true;
-					await runtime.output(`Handoff failed: ${message}`);
+					await runtime.output(__ompTranslate("Handoff failed: {0}", `${message}`));
 					return;
 				}
 				if (!result) {
@@ -388,7 +421,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				// `savedPath` is deliberately not reported: `SessionHandoff` only writes
 				// the document to disk when `options.autoTriggered` is set, which the
 				// user-invoked path never passes.
-				await runtime.output("Context handed off and compacted in place.");
+				await runtime.output(__ompTranslate("Context handed off and compacted in place."));
 			};
 			if (runtime.runCommandInBackground) {
 				runtime.runCommandInBackground(runHandoff);
@@ -408,8 +441,8 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "resume",
 		icon: "history",
-		description: "Resume a different session",
-		inlineHint: "[session id|@claude|@codex]",
+		description: __ompTranslate("Resume a different session"),
+		inlineHint: __ompTranslate("[session id|@claude|@codex]"),
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			const sessionArg = command.args.trim();
@@ -430,7 +463,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				{ allowGlobalFallback: true },
 			);
 			if (!target) {
-				runtime.ctx.showError(`Session "${sessionArg}" not found`);
+				runtime.ctx.showError(__ompTranslate('Session "{0}" not found', `${sessionArg}`));
 				return;
 			}
 			try {
@@ -444,8 +477,8 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "pin",
 		icon: "pin",
-		description: "Pin or unpin a session at the top of the resume list",
-		inlineHint: "[session id]",
+		description: __ompTranslate("Pin or unpin a session at the top of the resume list"),
+		inlineHint: __ompTranslate("[session id]"),
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			const sessionArg = command.args.trim();
@@ -458,24 +491,31 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 					{ allowGlobalFallback: true },
 				);
 				if (!match) {
-					return usage(`Session "${sessionArg}" not found.`, runtime);
+					return usage(
+						__ompTranslate('Session "{0}" not found.\u0004session.lookup.not-found', `${sessionArg}`),
+						runtime,
+					);
 				}
 				sessionId = match.session.id;
 			} else {
 				sessionId = runtime.sessionManager.getSessionId();
 				if (!sessionId) {
-					return usage("No active session to pin.", runtime);
+					return usage(__ompTranslate("No active session to pin."), runtime);
 				}
 			}
 			const pinned = await toggleSessionPin(sessionId);
-			await runtime.output(pinned ? "Session pinned to the top of the resume list." : "Session unpinned.");
+			await runtime.output(
+				pinned
+					? __ompTranslate("Session pinned to the top of the resume list.")
+					: __ompTranslate("Session unpinned."),
+			);
 			return commandConsumed();
 		},
 	},
 	{
 		name: "btw",
 		icon: "question",
-		description: "Ask a side question, or browse this session's BTW history",
+		description: __ompTranslate("Ask a side question, or browse this session's BTW history"),
 		inlineHint: "[question]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
@@ -491,7 +531,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "tan",
 		icon: "rocket",
-		description: "Run a full background agent on tangential work",
+		description: __ompTranslate("Run a full background agent on tangential work"),
 		inlineHint: "<work>",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
@@ -504,7 +544,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "omfg",
 		icon: "rule",
-		description: "Forge a TTSR rule from a complaint to stop a recurring behavior",
+		description: __ompTranslate("Forge a TTSR rule from a complaint to stop a recurring behavior"),
 		inlineHint: "<complaint>",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
@@ -517,7 +557,9 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "cleanse",
 		icon: "stethoscope",
-		description: "Detect and fix project diagnostics with weighted parallel subagents",
+		description: __ompTranslate(
+			"Detect and fix project diagnostics with weighted parallel subagents\u0004project.diagnostics.command.description",
+		),
 		inlineHint: "[request] [--all]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
@@ -530,16 +572,19 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "retry",
 		icon: "redo",
-		description: "Retry the last failed agent turn",
+		description: __ompTranslate("Retry the last failed agent turn"),
 		handle: async (_command, runtime) => {
 			if (runtime.session.isStreaming) {
-				return usage("Wait for the current response to finish or abort it before retrying.", runtime);
+				return usage(
+					__ompTranslate("Wait for the current response to finish or abort it before retrying."),
+					runtime,
+				);
 			}
 			const didRetry = await runtime.session.retry();
 			if (!didRetry) {
-				return usage("Nothing to retry.", runtime);
+				return usage(__ompTranslate("Nothing to retry."), runtime);
 			}
-			await runtime.output("Retrying the last failed turn.");
+			await runtime.output(__ompTranslate("Retrying the last failed turn."));
 			// `AgentSession.retry()` only schedules the continuation as a
 			// post-prompt task; it returns before the retried turn streams. Hosts
 			// whose prompt turn owns the event subscription (ACP) must stay open
@@ -557,7 +602,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		handleTui: async (_command, runtime) => {
 			const didRetry = await runtime.ctx.session.retry();
 			if (!didRetry) {
-				runtime.ctx.showStatus("Nothing to retry");
+				runtime.ctx.showStatus(__ompTranslate("Nothing to retry\u0004session.retry.empty"));
 			}
 			clearSubmittedText(runtime);
 		},
@@ -565,7 +610,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "debug",
 		icon: "bug",
-		description: "Open debug tools selector",
+		description: __ompTranslate("Open debug tools selector"),
 		handleTui: async (_command, runtime) => {
 			await runtime.ctx.showDebugSelector();
 			clearSubmittedText(runtime);
@@ -574,29 +619,29 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "memory",
 		icon: "memory",
-		description: "Inspect and operate memory maintenance",
-		acpDescription: "Manage memory",
+		description: __ompTranslate("Inspect and operate memory maintenance"),
+		acpDescription: __ompTranslate("Manage memory"),
 		acpInputHint: "<subcommand>",
 		subcommands: [
-			{ name: "view", description: "Show current memory injection payload" },
-			{ name: "stats", description: "Show memory backend statistics" },
-			{ name: "diagnose", description: "Run memory backend diagnostics" },
-			{ name: "queue", description: "Show pending memory deltas awaiting consolidation" },
-			{ name: "sync", description: "Run memory consolidation now" },
-			{ name: "clear", description: "Clear persisted memory data and artifacts" },
-			{ name: "reset", description: "Alias for clear" },
-			{ name: "enqueue", description: "Enqueue memory consolidation maintenance" },
-			{ name: "rebuild", description: "Alias for enqueue" },
-			{ name: "mm list", description: "List mental models on the active bank" },
-			{ name: "mm show", description: "Show one mental model (id required)" },
+			{ name: "view", description: __ompTranslate("Show current memory injection payload") },
+			{ name: "stats", description: __ompTranslate("Show memory backend statistics") },
+			{ name: "diagnose", description: __ompTranslate("Run memory backend diagnostics") },
+			{ name: "queue", description: __ompTranslate("Show pending memory deltas awaiting consolidation") },
+			{ name: "sync", description: __ompTranslate("Run memory consolidation now") },
+			{ name: "clear", description: __ompTranslate("Clear persisted memory data and artifacts") },
+			{ name: "reset", description: __ompTranslate("Alias for clear") },
+			{ name: "enqueue", description: __ompTranslate("Enqueue memory consolidation maintenance") },
+			{ name: "rebuild", description: __ompTranslate("Alias for enqueue") },
+			{ name: "mm list", description: __ompTranslate("List mental models on the active bank") },
+			{ name: "mm show", description: __ompTranslate("Show one mental model (id required)") },
 			{
 				name: "mm refresh",
-				description: "Refresh auto-refresh models bank-wide, or one model by id",
+				description: __ompTranslate("Refresh auto-refresh models bank-wide, or one model by id"),
 			},
-			{ name: "mm history", description: "Diff the change history of a mental model" },
-			{ name: "mm seed", description: "Create any built-in mental models that are missing" },
-			{ name: "mm delete", description: "Delete a mental model from the bank (id required)" },
-			{ name: "mm reload", description: "Re-pull the cached <mental_models> block" },
+			{ name: "mm history", description: __ompTranslate("Diff the change history of a mental model") },
+			{ name: "mm seed", description: __ompTranslate("Create any built-in mental models that are missing") },
+			{ name: "mm delete", description: __ompTranslate("Delete a mental model from the bank (id required)") },
+			{ name: "mm reload", description: __ompTranslate("Re-pull the cached <mental_models> block") },
 		],
 		allowArgs: true,
 		handle: async (command, runtime) => {
@@ -610,20 +655,20 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 						runtime.settings,
 						runtime.session,
 					);
-					await runtime.output(payload || "Memory payload is empty.");
+					await runtime.output(payload || __ompTranslate("Memory payload is empty."));
 					return commandConsumed();
 				}
 				case "clear":
 				case "reset": {
 					await backend.clear(runtime.settings.getAgentDir(), runtime.cwd, runtime.session);
 					await runtime.session.refreshBaseSystemPrompt();
-					await runtime.output("Memory cleared.");
+					await runtime.output(__ompTranslate("Memory cleared."));
 					return commandConsumed();
 				}
 				case "enqueue":
 				case "rebuild": {
 					await backend.enqueue(runtime.settings.getAgentDir(), runtime.cwd, runtime.session);
-					await runtime.output("Memory consolidation enqueued.");
+					await runtime.output(__ompTranslate("Memory consolidation enqueued.\u0004session.lifecycle.status"));
 					return commandConsumed();
 				}
 				case "queue": {
@@ -632,12 +677,14 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 						cwd: runtime.cwd,
 						session: runtime.session,
 					});
-					await runtime.output(payload ?? `Memory queue is not available for the ${backend.id} backend.`);
+					await runtime.output(
+						payload ?? __ompTranslate("Memory queue is not available for the {0} backend.", `${backend.id}`),
+					);
 					return commandConsumed();
 				}
 				case "sync": {
 					await backend.enqueue(runtime.settings.getAgentDir(), runtime.cwd, runtime.session);
-					await runtime.output("Memory consolidation ran.");
+					await runtime.output(__ompTranslate("Memory consolidation ran."));
 					return commandConsumed();
 				}
 				case "stats":
@@ -649,7 +696,9 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				}
 				case "mm":
 					return usage(
-						"Mental-model maintenance via /memory mm is unsupported in ACP mode; use the hindsight HTTP API directly.",
+						__ompTranslate(
+							"Mental-model maintenance via /memory mm is unsupported in ACP mode; use the hindsight HTTP API directly.",
+						),
 						runtime,
 					);
 				default:
@@ -664,7 +713,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "rename",
 		icon: "pencil",
-		description: "Rename the current session (omit title to generate)",
+		description: __ompTranslate("Rename the current session (omit title to generate)"),
 		inlineHint: "[title]",
 		allowArgs: true,
 		handle: async (command, runtime) => {
@@ -688,7 +737,9 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 					const title = await generation;
 					if (!isCurrent() || title === undefined) return;
 					if (!title) {
-						await runtime.output("Could not generate a session title. Use /rename <title> to set one.");
+						await runtime.output(
+							__ompTranslate("Could not generate a session title. Use /rename <title> to set one."),
+						);
 						return;
 					}
 					const persistence = sessionManager.setSessionName(title, "user");
@@ -696,16 +747,16 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 					const ok = await persistence;
 					if (!isCurrent()) return;
 					if (!ok) {
-						await runtime.output("Session name not changed (a user-set name takes precedence).");
+						await runtime.output(__ompTranslate("Session name not changed (a user-set name takes precedence)."));
 						return;
 					}
 					await runtime.notifyTitleChanged?.();
 					if (!isCurrent()) return;
-					await runtime.output(`Session renamed to ${title}.`);
+					await runtime.output(__ompTranslate("Session renamed to {0}.", `${title}`));
 				} catch (err) {
 					if (!isCurrent()) return;
 					if (command.args || !runtime.runCommandInBackground) throw err;
-					await runtime.output(`Rename failed: ${errorMessage(err)}`);
+					await runtime.output(__ompTranslate("Rename failed: {0}", `${errorMessage(err)}`));
 				}
 			};
 			if (!command.args && runtime.runCommandInBackground) {
@@ -733,7 +784,9 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			)
 				return;
 			if (!title) {
-				runtime.ctx.showStatus("Could not generate a session title. Use /rename <title> to set one.");
+				runtime.ctx.showStatus(
+					__ompTranslate("Could not generate a session title. Use /rename <title> to set one."),
+				);
 				return;
 			}
 			await runtime.ctx.handleRenameCommand(title);
@@ -742,25 +795,25 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "move",
 		icon: "folderMove",
-		description: "Move the current session to a different directory",
-		acpDescription: "Move the current session to a different directory",
+		description: __ompTranslate("Move the current session to a different directory"),
+		acpDescription: __ompTranslate("Move the current session to a different directory"),
 		inlineHint: "[<path>]",
 		allowArgs: true,
 		handle: async (command, runtime) => {
-			if (runtime.session.isStreaming) return usage("Cannot move while streaming.", runtime);
-			if (!command.args) return usage("Usage: /move <path>", runtime);
+			if (runtime.session.isStreaming) return usage(__ompTranslate("Cannot move while streaming."), runtime);
+			if (!command.args) return usage(__ompTranslate("Usage: /move <path>"), runtime);
 			const resolvedPath = resolveToCwd(command.args, runtime.cwd);
 			try {
 				const stat = await fs.stat(resolvedPath);
 				if (!stat.isDirectory()) {
-					return usage(`Not a directory: ${resolvedPath}`, runtime);
+					return usage(__ompTranslate("Not a directory: {0}", `${resolvedPath}`), runtime);
 				}
 			} catch {
-				return usage(`Directory does not exist: ${resolvedPath}`, runtime);
+				return usage(__ompTranslate("Directory does not exist: {0}", `${resolvedPath}`), runtime);
 			}
 			const failure = await relocateHeadlessSession(runtime, resolvedPath);
 			if (failure) return failure;
-			await runtime.output(`Moved to ${runtime.sessionManager.getCwd()}.`);
+			await runtime.output(__ompTranslate("Moved to {0}.", `${runtime.sessionManager.getCwd()}`));
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
@@ -773,26 +826,30 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		name: "wt",
 		aliases: ["worktree"],
 		icon: "folderMove",
-		description: "Move this session into a new worktree, changes included",
-		acpDescription: "Move this session into a new worktree, changes included",
+		description: __ompTranslate("Move this session into a new worktree, changes included"),
+		acpDescription: __ompTranslate("Move this session into a new worktree, changes included"),
 		inlineHint: "[<branch>]",
 		allowArgs: true,
 		handle: async (command, runtime) => {
-			if (runtime.session.isStreaming) return usage("Cannot create a worktree while streaming.", runtime);
+			if (runtime.session.isStreaming)
+				return usage(__ompTranslate("Cannot create a worktree while streaming."), runtime);
 			const branch = command.args.trim() || defaultSessionWorktreeBranch();
 			const sourceCwd = runtime.sessionManager.getCwd();
 			let worktree: SessionWorktree;
 			try {
 				worktree = await createSessionWorktree(sourceCwd, runtime.settings, branch);
 			} catch (err) {
-				return usage(`Worktree creation failed: ${errorMessage(err)}`, runtime);
+				return usage(__ompTranslate("Worktree creation failed: {0}", `${errorMessage(err)}`), runtime);
 			}
 			const failure = await relocateHeadlessSession(runtime, worktree.path);
 			if (failure) return failure;
 			const cleanup = await cleanSourceCheckoutIfConfigured(sourceCwd, runtime.settings);
 			if (cleanup.errorMessage !== undefined) {
 				await runtime.output(
-					`Warning: Worktree created, but cleaning source checkout failed: ${cleanup.errorMessage}`,
+					__ompTranslate(
+						"Warning: Worktree created, but cleaning source checkout failed: {0}",
+						`${cleanup.errorMessage}`,
+					),
 				);
 			}
 			await runtime.output(formatSessionWorktreeSummary(worktree, cleanup.cleaned));
@@ -807,19 +864,21 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "add-dir",
 		icon: "folderPlus",
-		description: "Add a workspace directory to this session (multi-root)",
-		acpDescription: "Add a workspace directory to this session",
+		description: __ompTranslate("Add a workspace directory to this session (multi-root)"),
+		acpDescription: __ompTranslate("Add a workspace directory to this session"),
 		inlineHint: "<path>",
 		allowArgs: true,
 		handle: async (command, runtime) => {
-			if (runtime.session.isStreaming) return usage("Cannot add a directory while streaming.", runtime);
-			if (!command.args) return usage(formatWorkspaceDirectories(runtime, "Usage: /add-dir <path>"), runtime);
+			if (runtime.session.isStreaming)
+				return usage(__ompTranslate("Cannot add a directory while streaming."), runtime);
+			if (!command.args)
+				return usage(formatWorkspaceDirectories(runtime, __ompTranslate("Usage: /add-dir <path>")), runtime);
 			const resolved = resolveToCwd(command.args, runtime.cwd);
 			try {
 				const stat = await fs.stat(resolved);
-				if (!stat.isDirectory()) return usage(`Not a directory: ${resolved}`, runtime);
+				if (!stat.isDirectory()) return usage(__ompTranslate("Not a directory: {0}", `${resolved}`), runtime);
 			} catch {
-				return usage(`Directory does not exist: ${resolved}`, runtime);
+				return usage(__ompTranslate("Directory does not exist: {0}", `${resolved}`), runtime);
 			}
 			let added: string | null;
 			try {
@@ -828,7 +887,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				return usage(errorMessage(err), runtime);
 			}
 			if (added === null) {
-				await runtime.output(`Already in the workspace: ${resolved}`);
+				await runtime.output(__ompTranslate("Already in the workspace: {0}", `${resolved}`));
 				return commandConsumed();
 			}
 			await runtime.session.refreshBaseSystemPrompt();
@@ -839,16 +898,17 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "remove-dir",
 		icon: "folderMinus",
-		description: "Remove a workspace directory from this session",
-		acpDescription: "Remove a workspace directory from this session",
+		description: __ompTranslate("Remove a workspace directory from this session"),
+		acpDescription: __ompTranslate("Remove a workspace directory from this session"),
 		inlineHint: "<path>",
 		allowArgs: true,
 		handle: async (command, runtime) => {
-			if (runtime.session.isStreaming) return usage("Cannot remove a directory while streaming.", runtime);
-			if (!command.args) return usage("Usage: /remove-dir <path>", runtime);
+			if (runtime.session.isStreaming)
+				return usage(__ompTranslate("Cannot remove a directory while streaming."), runtime);
+			if (!command.args) return usage(__ompTranslate("Usage: /remove-dir <path>"), runtime);
 			const resolved = resolveToCwd(command.args, runtime.cwd);
 			if (resolved === path.resolve(runtime.cwd)) {
-				return usage("Cannot remove the working directory; use /move to change it.", runtime);
+				return usage(__ompTranslate("Cannot remove the working directory; use /move to change it."), runtime);
 			}
 			let removed: string | null;
 			try {
@@ -857,7 +917,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				return usage(errorMessage(err), runtime);
 			}
 			if (removed === null) {
-				await runtime.output(`Not a workspace directory: ${resolved}`);
+				await runtime.output(__ompTranslate("Not a workspace directory: {0}", `${resolved}`));
 				return commandConsumed();
 			}
 			await runtime.session.refreshBaseSystemPrompt();
@@ -867,8 +927,8 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	},
 	{
 		name: "dirs",
-		description: "List this session's workspace directories",
-		acpDescription: "List this session's workspace directories",
+		description: __ompTranslate("List this session's workspace directories"),
+		acpDescription: __ompTranslate("List this session's workspace directories"),
 		handle: async (_command, runtime) => {
 			await runtime.output(formatWorkspaceDirectories(runtime));
 			return commandConsumed();
@@ -876,13 +936,13 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	},
 	{
 		name: "exit",
-		description: "Exit the application",
+		description: __ompTranslate("Exit the application"),
 		handleTui: shutdownHandlerTui,
 	},
 	{
 		name: "restart",
 		icon: "restart",
-		description: "Restart omp with the same launch flags, resuming this session",
+		description: __ompTranslate("Restart omp with the same launch flags, resuming this session"),
 		handleTui: async (_command, runtime) => {
 			clearSubmittedText(runtime);
 			await runtime.ctx.restart();

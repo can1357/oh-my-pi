@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
@@ -40,7 +41,7 @@ export type ManageSkillParams = typeof manageSkillSchema.infer;
 export class ManageSkillTool implements AgentTool<typeof manageSkillSchema> {
 	readonly name = "manage_skill";
 	readonly approval = "write" as const;
-	readonly label = "Manage Skill";
+	readonly label = __ompTranslate("Manage Skill");
 	readonly description = manageSkillDescription;
 	readonly parameters = manageSkillSchema;
 	readonly strict = true;

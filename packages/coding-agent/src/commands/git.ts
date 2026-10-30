@@ -3,6 +3,7 @@
  * staging sidebar, and generated or manual commit composer.
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { getProjectDir } from "@oh-my-pi/pi-utils";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { gitHelp as commandHelp } from "../cli/command-help";
@@ -17,13 +18,16 @@ export default class Git extends Command {
 
 	static args = {
 		revision: Args.string({
-			description: "Pin the view to one commit (any revision, e.g. HEAD~2 or a sha)",
+			description: __ompTranslate("Pin the view to one commit (any revision, e.g. HEAD~2 or a sha)"),
 			required: false,
 		}),
 	};
 
 	static flags = {
-		dir: Flags.string({ char: "C", description: "Run in another directory instead of the current one" }),
+		dir: Flags.string({
+			char: "C",
+			description: __ompTranslate("Run in another directory instead of the current one"),
+		}),
 	};
 
 	static examples = ["omp git", "omp git HEAD~2", "omp git -C ~/projects/app"];
@@ -31,7 +35,7 @@ export default class Git extends Command {
 	async run(): Promise<void> {
 		const { args, flags } = await this.parse(Git);
 		if (process.stdout.isTTY !== true || process.stdin.isTTY !== true) {
-			console.error("omp git is interactive and requires a TTY");
+			console.error(__ompTranslate("omp git is interactive and requires a TTY"));
 			process.exit(1);
 		}
 		// Load settings first so the user's configured theme/symbol preset apply

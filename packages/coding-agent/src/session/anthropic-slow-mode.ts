@@ -22,6 +22,7 @@
  * requests served by another account never see them. Auto-accept policy and
  * notices stay with the requesting session.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type {
 	AnthropicSlowModeFailure,
 	AnthropicSlowModeHooks,
@@ -126,24 +127,24 @@ export function formatUsageLimitLabel(status: UsageLimitState | undefined, now =
 }
 
 const END_NOTICES: Record<AnthropicSlowModeEndReason, { level: NoticeLevel; message: string } | undefined> = {
-	reset: { level: "info", message: "Claude session limit reset — low priority ended." },
+	reset: { level: "info", message: __ompTranslate("Claude session limit reset — low priority ended.") },
 	user: undefined,
 	weekly: {
 		level: "warning",
-		message: "Low priority ended: the weekly Claude limit is reached.",
+		message: __ompTranslate("Low priority ended: the weekly Claude limit is reached."),
 	},
 	budget: {
 		level: "warning",
-		message: "Low priority ended: this week's low-priority allowance is used up.",
+		message: __ompTranslate("Low priority ended: this week's low-priority allowance is used up."),
 	},
-	off: { level: "warning", message: "Low priority ended: Anthropic turned it off for this account." },
-	ineligible: { level: "warning", message: "Low priority ended: this account is no longer eligible." },
-	wall: { level: "warning", message: "Low priority ended: Anthropic stopped serving the slow lane." },
+	off: { level: "warning", message: __ompTranslate("Low priority ended: Anthropic turned it off for this account.") },
+	ineligible: { level: "warning", message: __ompTranslate("Low priority ended: this account is no longer eligible.") },
+	wall: { level: "warning", message: __ompTranslate("Low priority ended: Anthropic stopped serving the slow lane.") },
 	max_wait: {
 		level: "warning",
-		message: "Low priority paused for 10 minutes after waiting too long for spare capacity.",
+		message: __ompTranslate("Low priority paused for 10 minutes after waiting too long for spare capacity."),
 	},
-	extra_usage: { level: "info", message: "Low priority ended: extra usage is now serving requests." },
+	extra_usage: { level: "info", message: __ompTranslate("Low priority ended: extra usage is now serving requests.") },
 };
 
 /** Slow-mode state machine for one Claude account lane; see the module docs. */

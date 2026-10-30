@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added explicit English-default language initialization, validated external Korean packs, safe fallback, and localized relative-time phrases
+
 ## [18.14.0] - 2026-10-29
 
 ### Added

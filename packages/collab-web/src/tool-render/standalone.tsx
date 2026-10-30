@@ -3,6 +3,9 @@
  * (built by scripts/build-export-viewer.ts; React included).
  * Importing registers `<omp-tool-view>`.
  */
+import { initializeI18n } from "@oh-my-pi/pi-utils/i18n-browser";
 import { defineToolViewElement } from "./element";
 
-defineToolViewElement();
+void initializeI18n().then(() => {
+	defineToolViewElement();
+});

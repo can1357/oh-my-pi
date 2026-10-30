@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
@@ -147,7 +148,7 @@ export function createAgentsHubDeps(
 			);
 			const { model } = resolveModelOverride(patterns, modelRegistry, settings);
 			const selectedModel = model ?? modelRegistry.getAvailable()[0];
-			if (!selectedModel) throw new Error("No available model to generate agent specification.");
+			if (!selectedModel) throw new Error(__ompTranslate("No available model to generate agent specification."));
 			const { session } = await createAgentSession({
 				cwd,
 				authStorage: modelRegistry.authStorage,
@@ -179,7 +180,7 @@ export function createAgentsHubDeps(
 					expandPromptTemplates: false,
 				});
 				const raw = extractAssistantText(session.state.messages);
-				if (!raw) throw new Error("No response returned by agent creation architect.");
+				if (!raw) throw new Error(__ompTranslate("No response returned by agent creation architect."));
 				return raw;
 			} finally {
 				unsubscribe();
@@ -189,11 +190,11 @@ export function createAgentsHubDeps(
 		saveAgent: async (scope, spec) => {
 			const dirs = getConfigDirs("agents", { user: scope === "user", project: scope === "project", cwd });
 			const targetDir = dirs[0]?.path;
-			if (!targetDir) throw new Error(`Cannot resolve ${scope} agents directory.`);
+			if (!targetDir) throw new Error(__ompTranslate("Cannot resolve {0} agents directory.", `${scope}`));
 			const filePath = path.join(targetDir, `${spec.identifier}.md`);
 			try {
 				await fs.stat(filePath);
-				throw new Error(`Agent file already exists: ${shortenPath(filePath)}`);
+				throw new Error(__ompTranslate("Agent file already exists: {0}", `${shortenPath(filePath)}`));
 			} catch (error) {
 				if (!isEnoent(error)) throw error;
 			}

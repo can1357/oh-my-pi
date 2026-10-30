@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
@@ -50,7 +51,10 @@ type SignInOutcome =
 export class SignInScene implements SetupSceneController {
 	readonly title = SCENE_TITLE;
 	get subtitle(): string {
-		return `Sign in to one or more providers. Press ${editorKey("tui.select.cancel")} when you're done.`;
+		return __ompTranslate(
+			"Sign in to one or more providers. Press {0} when you're done.",
+			`${editorKey("tui.select.cancel")}`,
+		);
 	}
 
 	#authStorage: AuthStorage;

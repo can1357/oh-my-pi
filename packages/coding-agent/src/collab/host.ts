@@ -9,6 +9,7 @@
  * and incremental subagent-transcript reads.
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
@@ -439,10 +440,12 @@ export class CollabHost {
 				return;
 			}
 			if (willReconnect) {
-				this.#ctx.showStatus(`Collab relay connection lost (${reason}), reconnecting…`, { dim: true });
+				this.#ctx.showStatus(__ompTranslate("Collab relay connection lost ({0}), reconnecting…", `${reason}`), {
+					dim: true,
+				});
 			} else {
 				void this.#teardown();
-				this.#ctx.session.emitNotice("warning", `Collab ended: ${reason}`, "collab");
+				this.#ctx.session.emitNotice("warning", __ompTranslate("Collab ended: {0}", `${reason}`), "collab");
 				this.#onEnded?.();
 			}
 		};
@@ -519,9 +522,12 @@ export class CollabHost {
 			publication => publication,
 			err => {
 				logger.warn("Collab host registry publication failed", { error: String(err) });
-				this.#ctx.showStatus("Collab host discovery unavailable (omp collab list will not show this session)", {
-					dim: true,
-				});
+				this.#ctx.showStatus(
+					__ompTranslate("Collab host discovery unavailable (omp collab list will not show this session)"),
+					{
+						dim: true,
+					},
+				);
 				return null;
 			},
 		);
@@ -845,7 +851,11 @@ export class CollabHost {
 		}
 		this.#ctx.session.emitNotice(
 			"info",
-			`${cleanName} joined the collab session${canWrite ? "" : " (read-only)"}`,
+			__ompTranslate(
+				"{0} joined the collab session{1}",
+				`${cleanName}`,
+				`${canWrite ? "" : __ompTranslate(" (read-only)")}`,
+			),
 			"collab",
 		);
 		this.#updateStatusSegment();
@@ -1064,7 +1074,7 @@ export class CollabHost {
 			.abort({ reason: USER_INTERRUPT_LABEL })
 			.then(() => {
 				if (!this.#guestTrafficAllowed()) return;
-				this.#ctx.session.emitNotice("info", `${name} interrupted`, "collab");
+				this.#ctx.session.emitNotice("info", __ompTranslate("{0} interrupted", `${name}`), "collab");
 			})
 			.catch(err => logger.warn("collab guest abort failed", { error: String(err) }));
 	}
@@ -1102,7 +1112,8 @@ export class CollabHost {
 		this.#peers.delete(peer);
 		// Relay controls arrive outside the normal frame handler.
 		if (!this.#guestTrafficAllowed()) return;
-		if (name) this.#ctx.session.emitNotice("info", `${name} left the collab session`, "collab");
+		if (name)
+			this.#ctx.session.emitNotice("info", __ompTranslate("{0} left the collab session", `${name}`), "collab");
 		this.#updateStatusSegment();
 		this.#scheduleStateBroadcast();
 	}

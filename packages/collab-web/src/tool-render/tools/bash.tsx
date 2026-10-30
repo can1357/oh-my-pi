@@ -1,4 +1,5 @@
 /** `bash` — shell command execution: prompt line with env prefix, badges, output tail. */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
 import type { ReactNode } from "react";
 import { Badge, Badges, InvalidArg, ResultImages, ResultText, Row } from "../parts";
 import type { ToolRenderer, ToolRenderProps } from "../types";
@@ -54,13 +55,17 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 
 	const stats: string[] = [];
 	if (wallTimeMs !== null) {
-		stats.push(wallTimeMs < 1000 ? `wall ${Math.round(wallTimeMs)}ms` : `wall ${(wallTimeMs / 1000).toFixed(1)}s`);
+		stats.push(
+			wallTimeMs < 1000
+				? __ompTranslate("wall {0}ms", `${Math.round(wallTimeMs)}`)
+				: __ompTranslate("wall {0}s", `${(wallTimeMs / 1000).toFixed(1)}`),
+		);
 	}
 	if (requestedTimeoutSeconds !== null && requestedTimeoutSeconds !== timeoutSeconds) {
-		stats.push(`requested timeout ${requestedTimeoutSeconds}s clamped`);
+		stats.push(__ompTranslate("requested timeout {0}s clamped", `${requestedTimeoutSeconds}`));
 	}
-	if (job?.jobId) stats.push(`job ${job.jobId}`);
-	if (artifactId) stats.push(`artifact ${artifactId}`);
+	if (job?.jobId) stats.push(__ompTranslate("job {0}", `${job.jobId}`));
+	if (artifactId) stats.push(__ompTranslate("artifact {0}", `${artifactId}`));
 
 	return (
 		<>
@@ -79,10 +84,10 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 					!job && args.async === true && <Badge tone="accent">async</Badge>,
 					head !== null && <Badge>head={head}</Badge>,
 					tail !== null && <Badge>tail={tail}</Badge>,
-					exitCode !== null && <Badge tone="err">exit {exitCode}</Badge>,
+					exitCode !== null && <Badge tone="err">{__ompTranslate("exit {0}", `${exitCode}`)}</Badge>,
 					job && (
 						<Badge tone={job.state === "failed" ? "err" : job.state === "running" ? "accent" : "ok"}>
-							async {job.state}
+							async {__ompTranslate(job.state)}
 						</Badge>
 					),
 				]}

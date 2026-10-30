@@ -184,4 +184,51 @@ describe("run() usage errors", () => {
 		expect(out).toContain("error: Unknown option '--unknown'");
 		expect(out).toContain("$ omp bench MODELS... [FLAGS]");
 	});
+
+	it("identifies invalid options and arguments without logging supplied values", async () => {
+		class SensitiveCommand extends Command {
+			static flags = {
+				key: Flags.string(),
+				count: Flags.integer(),
+				mode: Flags.string({ options: ["safe"] }),
+			};
+			static args = { action: Args.string({ options: ["read"] }) };
+			async run(): Promise<void> {
+				await this.parse(SensitiveCommand);
+			}
+		}
+		const commands: CommandEntry[] = [{ name: "probe", load: async () => SensitiveCommand }];
+		for (const [args, identifier] of [
+			[["--count", "PRIVATE_BAD_VALUE"], "--count"],
+			[["--mode", "PRIVATE_BAD_VALUE"], "--mode"],
+			[["PRIVATE_BAD_VALUE"], "action"],
+			[["--unknown=PRIVATE_BAD_VALUE"], "--unknown"],
+			[["--count"], "--count"],
+		] as const) {
+			const output: string[] = [];
+			const capture = (chunk: unknown) => {
+				output.push(String(chunk));
+				return true;
+			};
+			const stdout = spyOn(process.stdout, "write").mockImplementation(capture);
+			const stderr = spyOn(process.stderr, "write").mockImplementation(capture);
+			const previousExitCode = process.exitCode;
+			try {
+				await run({
+					bin: "omp",
+					version: "0.0.0",
+					argv: ["probe", "--key", "PRIVATE_UNRELATED_KEY", ...args],
+					commands,
+				});
+				expect(process.exitCode).toBe(1);
+			} finally {
+				stdout.mockRestore();
+				stderr.mockRestore();
+				process.exitCode = previousExitCode ?? 0;
+			}
+			expect(output.join("")).toContain(identifier);
+			expect(output.join("")).not.toContain("PRIVATE_BAD_VALUE");
+			expect(output.join("")).not.toContain("PRIVATE_UNRELATED_KEY");
+		}
+	});
 });

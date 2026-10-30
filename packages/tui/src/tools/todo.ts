@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { ToolRenderer } from "./renderer";
 
 import type { Component } from "../index";
@@ -513,13 +514,16 @@ function describeTodoResult(
 		return {
 			tool: { title: "Todo" },
 			tone: "error",
-			body: [errorText(resultText(result) || "Todo operation failed")],
+			body: [errorText(resultText(result) || __ompTranslate("Todo operation failed"))],
 		};
 	}
 	const phases = (result.details?.phases ?? []).filter(phase => phase.tasks.length > 0);
 	const total = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
 	if (total === 0) {
-		return { tool: { title: "Todo" }, body: [noteText(forDisplay(resultText(result) || "No todos"))] };
+		return {
+			tool: { title: "Todo" },
+			body: [noteText(forDisplay(resultText(result) || __ompTranslate("No todos")))],
+		};
 	}
 	const closed = phases.reduce((sum, phase) => sum + phase.tasks.filter(isClosedTodo).length, 0);
 	const activeDescs = options.expanded ? [] : activeTodoDescriptionsProvider();
@@ -560,7 +564,7 @@ export const todoToolRenderer = {
 		// No body worth boxing while the call streams — a lone status line reads
 		// cleaner than an empty frame. The container renders it without chrome.
 		const header = renderStatusLine(
-			{ icon: "pending", spinnerFrame: options?.spinnerFrame, title: "Todo", meta: ops },
+			{ icon: "pending", spinnerFrame: options?.spinnerFrame, title: __ompTranslate("Todo"), meta: ops },
 			uiTheme,
 		);
 		return new Text(header, 0, 0);
@@ -573,7 +577,8 @@ export const todoToolRenderer = {
 		args?: TodoRenderArgs,
 	): Component {
 		if (result.isError) {
-			const errorText = result.content?.find(content => content.type === "text")?.text ?? "Todo operation failed";
+			const errorText =
+				result.content?.find(content => content.type === "text")?.text ?? __ompTranslate("Todo operation failed");
 			const header = renderStatusLine({ icon: "error", title: "Todo" }, uiTheme);
 			return framedToolCard(uiTheme, () => ({
 				header,
@@ -599,7 +604,7 @@ export const todoToolRenderer = {
 			{
 				iconOverride: uiTheme.styledSymbol("tool.todo", "accent"),
 				title: "Todo",
-				meta: [`${allTasks.length} tasks`],
+				meta: [__ompTranslate("{0} tasks", `${allTasks.length}`)],
 			},
 			uiTheme,
 		);
@@ -607,7 +612,9 @@ export const todoToolRenderer = {
 			// Provider text on the Cursor path (the todo summary or a refusal note),
 			// so sanitize like every other label. The error branch above already
 			// goes through `formatErrorDetail`.
-			const fallback = forDisplay(result.content?.find(content => content.type === "text")?.text ?? "No todos");
+			const fallback = forDisplay(
+				result.content?.find(content => content.type === "text")?.text ?? __ompTranslate("No todos"),
+			);
 			return new Text(`${header}\n  ${uiTheme.fg("dim", fallback)}`, 0, 0);
 		}
 
@@ -748,7 +755,13 @@ export const todoToolRenderer = {
 				parts.push(`${e.items.length} ${pluralize("item", e.items.length)}`);
 			return parts.join(" ");
 		});
-		return { tool: { title: "Todo", target: ops.length === 0 ? "update" : ops.join(", "), targetKind: "text" } };
+		return {
+			tool: {
+				title: __ompTranslate("Todo"),
+				target: ops.length === 0 ? __ompTranslate("update") : ops.join(", "),
+				targetKind: "text",
+			},
+		};
 	},
 
 	describeResult(result: ToolRenderResult<TodoToolDetails>, options: RenderResultOptions): NativeToolView | undefined {

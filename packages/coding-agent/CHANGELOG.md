@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added English-default Korean UI selection and /language switching, deferred CLI help descriptions, and external language packs staged beside bundled and compiled entrypoints; upstream hosted HTML exports retain their original assets
+
 - Added queueable compaction: `/compact` sent with the follow-up key (Ctrl+Q) while the agent works now runs when it yields instead of interrupting it ([#17397](https://github.com/can1357/oh-my-pi/pull/17397) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed

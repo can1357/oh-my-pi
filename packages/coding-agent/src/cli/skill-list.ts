@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
@@ -103,7 +104,7 @@ function toTerminalSafe(value: string): string {
  * including discovery warnings.
  */
 export async function handleSkillList(args: string[], cwd: string, json: boolean): Promise<number> {
-	if (args.length > 1) throw new CliUsageError("usage: omp skill list [dir] [--json]");
+	if (args.length > 1) throw new CliUsageError(__ompTranslate("usage: omp skill list [dir] [--json]"));
 	const target = args[0] ? path.resolve(cwd, args[0]) : cwd;
 	let isDirectory = false;
 	try {
@@ -111,7 +112,7 @@ export async function handleSkillList(args: string[], cwd: string, json: boolean
 	} catch (error) {
 		if (!isEnoent(error) && !isEnotdir(error)) throw error;
 	}
-	if (!isDirectory) throw new CliUsageError(`Not a directory: ${target}`);
+	if (!isDirectory) throw new CliUsageError(__ompTranslate("Not a directory: {0}", `${target}`));
 	const result = await runSkillsCommand({ cwd: target });
 	if (json) {
 		process.stdout.write(`${JSON.stringify(result)}\n`);
@@ -120,9 +121,9 @@ export async function handleSkillList(args: string[], cwd: string, json: boolean
 	for (const skill of result.skills) {
 		process.stdout.write(`${toTerminalSafe(skill.name)}\t${toTerminalSafe(skill.description)}\n`);
 	}
-	if (result.skills.length === 0) process.stderr.write("No skills discovered.\n");
+	if (result.skills.length === 0) process.stderr.write(__ompTranslate("No skills discovered.\n"));
 	for (const warning of result.warnings) {
-		process.stderr.write(`warning: ${toTerminalSafe(warning.message)}\n`);
+		process.stderr.write(__ompTranslate("warning: {0}\n", `${toTerminalSafe(warning.message)}`));
 	}
 	return 0;
 }

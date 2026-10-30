@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { GrepToolDetails } from "@oh-my-pi/pi-tui/tools/grep";
 import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -599,7 +600,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 			skipCandidate,
 		);
 	};
-	readonly label = "Grep";
+	readonly label = __ompTranslate("Grep");
 	readonly loadMode = "discoverable";
 	readonly summary = "Search file contents by regex";
 	get description(): string {

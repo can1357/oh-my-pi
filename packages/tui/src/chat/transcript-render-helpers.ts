@@ -4,6 +4,7 @@
  * transcript rows from persisted message entries; holding the row construction
  * here keeps the two byte-for-byte identical.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { type Component } from "../tui";
@@ -65,7 +66,7 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
 		const duration = typeof job.durationMs === "number" ? formatDuration(job.durationMs) : undefined;
 		rows.push({
 			parts: [
-				{ text: `${theme.status.done} Background job completed`, color: "success" },
+				{ text: __ompTranslate("{0} Background job completed", `${theme.status.done}`), color: "success" },
 				{ text: `[${type}]`, color: "dim" },
 				{ text: jobId, color: "accent" },
 				duration ? { text: `(${duration})`, color: "dim" } : undefined,
@@ -188,7 +189,7 @@ export function buildFileMentionBlock(files: FileMentionMessage["files"], indent
 	for (const file of files) {
 		let detail: string;
 		if (file.skippedReason === "tooLarge" || file.skippedReason === "binary") {
-			const size = typeof file.byteSize === "number" ? formatBytes(file.byteSize) : "unknown size";
+			const size = typeof file.byteSize === "number" ? formatBytes(file.byteSize) : __ompTranslate("unknown size");
 			detail = file.skippedReason === "binary" ? `skipped: binary, ${size}` : `skipped: ${size}`;
 		} else {
 			detail = file.image
@@ -200,7 +201,7 @@ export function buildFileMentionBlock(files: FileMentionMessage["files"], indent
 		rows.push({
 			parts: [
 				{ text: theme.tree.last, color: "dim" },
-				{ text: "Read", color: "muted" },
+				{ text: __ompTranslate("Read"), color: "muted" },
 				{ text: file.path, color: "accent" },
 				{ text: `(${detail})`, color: "dim" },
 			],
@@ -335,7 +336,7 @@ export function resolveAssistantErrorPresentation(
 		return { kind: "full", text: resolveAbortLabel(message, retryAttempt), isError: true };
 	}
 	if (message.stopReason === "error") {
-		return { kind: "full", text: message.errorMessage || "Error", isError: true };
+		return { kind: "full", text: message.errorMessage || __ompTranslate("Error"), isError: true };
 	}
 	if (message.errorMessage && shouldRenderAbortReason(message)) {
 		return { kind: "full", text: message.errorMessage, isError: true };

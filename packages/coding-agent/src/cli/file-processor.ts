@@ -1,6 +1,7 @@
 /**
  * Process @file CLI arguments into text, document content, and image attachments
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
@@ -78,7 +79,13 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 		const maxBytes = mimeType ? MAX_CLI_IMAGE_BYTES : MAX_CLI_TEXT_BYTES;
 		if (stat.size > maxBytes) {
 			console.error(
-				chalk.yellow(`Warning: Skipping file contents (too large: ${formatBytes(stat.size)}): ${absolutePath}`),
+				chalk.yellow(
+					__ompTranslate(
+						"Warning: Skipping file contents (too large: {0}): {1}",
+						`${formatBytes(stat.size)}`,
+						`${absolutePath}`,
+					),
+				),
 			);
 			text += `<file name="${absolutePath}">(skipped: too large, ${formatBytes(stat.size)})</file>\n`;
 			continue;
@@ -152,7 +159,9 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 				text += `<file name="${absolutePath}">\n${content}\n</file>\n`;
 			} catch (error: unknown) {
 				const message = error instanceof Error ? error.message : String(error);
-				console.error(chalk.red(`Error: Could not read file ${absolutePath}: ${message}`));
+				console.error(
+					chalk.red(__ompTranslate("Error: Could not read file {0}: {1}", `${absolutePath}`, `${message}`)),
+				);
 				process.exit(1);
 			}
 		}

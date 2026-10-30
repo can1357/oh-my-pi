@@ -3,6 +3,7 @@
  *
  * Subagents can call this tool incrementally or terminally depending on `type`.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type {
 	AgentMessage,
 	AgentTool,
@@ -360,7 +361,7 @@ const MAX_EMPTY_RESULT_RETRIES = 3;
 export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 	readonly name = "yield";
 	readonly approval = "read" as const;
-	readonly label = "Submit Result";
+	readonly label = __ompTranslate("Submit Result");
 	readonly intent = "omit" as const;
 	lenientArgValidation = true;
 

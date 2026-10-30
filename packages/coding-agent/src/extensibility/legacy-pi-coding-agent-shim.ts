@@ -12,6 +12,7 @@
  * the same module identity as a direct `@oh-my-pi/pi-coding-agent` import.
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -396,17 +397,22 @@ async function executeLegacyBashOperations(
 		const snapshot = legacyBashSnapshot(output);
 		const text = snapshot.text || "(no output)";
 		if (result.exitCode !== 0 && result.exitCode !== null) {
-			throw new Error(appendStatus(text, `Command exited with code ${result.exitCode}`));
+			throw new Error(appendStatus(text, __ompTranslate("Command exited with code {0}", `${result.exitCode}`)));
 		}
 		return { content: [{ type: "text", text }], details: snapshot.details };
 	} catch (err) {
 		const snapshot = legacyBashSnapshot(output);
 		const text = snapshot.text;
 		if (err instanceof Error && err.message === "aborted") {
-			throw new Error(appendStatus(text, "Command aborted"));
+			throw new Error(appendStatus(text, __ompTranslate("Command aborted")));
 		}
 		if (err instanceof Error && err.message.startsWith("timeout:")) {
-			throw new Error(appendStatus(text, `Command timed out after ${err.message.slice("timeout:".length)} seconds`));
+			throw new Error(
+				appendStatus(
+					text,
+					__ompTranslate("Command timed out after {0} seconds", `${err.message.slice("timeout:".length)}`),
+				),
+			);
 		}
 		throw err;
 	}

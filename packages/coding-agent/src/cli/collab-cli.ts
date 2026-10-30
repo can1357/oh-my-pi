@@ -3,6 +3,7 @@
  * Listing returns metadata only; capabilities travel over authenticated IPC
  * only when a caller requests a link.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { formatAge } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import {
@@ -55,11 +56,15 @@ export async function runCollabListCommand(
 	}
 
 	if (hosts.length === 0) {
-		print(chalk.dim("No active Collab hosts."));
+		print(chalk.dim(__ompTranslate("No active Collab hosts.")));
 		return;
 	}
 
-	print(chalk.green(`${hosts.length} active Collab ${hosts.length === 1 ? "host" : "hosts"}`));
+	print(
+		chalk.green(
+			__ompTranslate("{0} active Collab {1}", `${hosts.length}`, `${hosts.length === 1 ? "host" : "hosts"}`),
+		),
+	);
 	for (const host of hosts) {
 		// Session names and POSIX paths come from other processes and may carry
 		// tabs, newlines, or escape bytes; keep each on one clean line.
@@ -71,19 +76,26 @@ export async function runCollabListCommand(
 		const details = [
 			`pid ${host.pid}`,
 			`gen ${host.generation}`,
-			host.model ? sanitizeDisplayLine(`${host.model.provider}/${host.model.id}`) : "no model",
-			`started ${formatAge(Math.round((Date.now() - host.startedAt) / 1000)) || "just now"}`,
-			`${guests} ${guests === 1 ? "guest" : "guests"}`,
+			host.model ? sanitizeDisplayLine(`${host.model.provider}/${host.model.id}`) : __ompTranslate("no model"),
+			__ompTranslate(
+				"started {0}",
+				`${formatAge(Math.round((Date.now() - host.startedAt) / 1000)) || __ompTranslate("just now")}`,
+			),
+			__ompTranslate("{0} {1}\u0004collaboration.guests.count", `${guests}`, `${guests === 1 ? "guest" : "guests"}`),
 			host.access,
-			`relay ${host.relayConnected ? "connected" : "reconnecting"}`,
+			__ompTranslate(
+				"relay {0}",
+				`${host.relayConnected ? __ompTranslate("connected") : __ompTranslate("reconnecting")}`,
+			),
 		];
-		if (host.inputRequired) details.push("input required");
-		if (host.busy !== null) details.push(host.busy ? "working" : "idle");
+		if (host.inputRequired) details.push(__ompTranslate("input required"));
+		if (host.busy !== null)
+			details.push(host.busy ? __ompTranslate("working") : __ompTranslate("idle\u0004collaboration.state"));
 		print("");
 		print(`${host.instanceId}  ${session}  ${chalk.dim(cwd)}`);
 		print(`  ${chalk.dim(details.join(" · "))}`);
 	}
-	print(chalk.dim("Get a link: omp collab link <instanceId|pid> [--view]"));
+	print(chalk.dim(__ompTranslate("Get a link: omp collab link <instanceId|pid> [--view]")));
 }
 
 export async function runCollabLinkCommand(

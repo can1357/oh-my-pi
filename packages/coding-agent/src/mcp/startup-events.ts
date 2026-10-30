@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import {
 	replaceTabs,
@@ -33,7 +34,7 @@ function sanitizeMcpStatusText(value: string, maxWidth: number): string {
 			.replace(/[\r\n]+/g, " ")
 			.trim(),
 	);
-	return truncateToWidth(text.length > 0 ? text : "(unnamed)", maxWidth);
+	return truncateToWidth(text.length > 0 ? text : __ompTranslate("(unnamed)"), maxWidth);
 }
 
 function sanitizeMcpServerName(serverName: string): string {
@@ -52,12 +53,12 @@ function sanitizeMcpStatusError(error: string): string {
 }
 
 export function formatMCPConnectingMessage(serverNames: readonly string[]): string {
-	return `Connecting to MCP servers: ${formatServerList(serverNames)}…`;
+	return __ompTranslate("Connecting to MCP servers: {0}…", `${formatServerList(serverNames)}`);
 }
 
 function formatFailedServer({ serverName, error, sourcePath }: McpConnectionFailure): string {
 	const source = sourcePath
-		? ` [config: ${sanitizeMcpStatusText(shortenPath(sourcePath), TRUNCATE_LENGTHS.CONTENT)}]`
+		? __ompTranslate(" [config: {0}]", `${sanitizeMcpStatusText(shortenPath(sourcePath), TRUNCATE_LENGTHS.CONTENT)}`)
 		: "";
 	return `${sanitizeMcpServerName(serverName)}${source}: ${sanitizeMcpStatusError(error)}`;
 }
@@ -70,23 +71,35 @@ export function formatMCPConnectionStatusMessage(snapshot: McpConnectionStatusSn
 		}
 		const parts: string[] = [];
 		if (connectedServers.length > 0) {
-			parts.push(`Connected: ${formatServerList(connectedServers)}.`);
+			parts.push(__ompTranslate("Connected: {0}.", `${formatServerList(connectedServers)}`));
 		}
 		if (failedServers.length > 0) {
-			parts.push(`Failed: ${failedServers.map(formatFailedServer).join("; ")}.`);
+			parts.push(__ompTranslate("Failed: {0}.", `${failedServers.map(formatFailedServer).join("; ")}`));
 		}
-		parts.push(`Still connecting: ${formatServerList(pendingServers)}…`);
+		parts.push(__ompTranslate("Still connecting: {0}…", `${formatServerList(pendingServers)}`));
 		return parts.join(" ");
 	}
 	if (failedServers.length > 0) {
 		const failureText = failedServers.map(formatFailedServer).join("; ");
 		if (connectedServers.length === 0) {
-			return `MCP ${formatServerCount(failedServers.length)} failed to connect: ${failureText}`;
+			return __ompTranslate(
+				"MCP {0} failed to connect: {1}",
+				`${formatServerCount(failedServers.length)}`,
+				`${failureText}`,
+			);
 		}
-		return `MCP finished with failures. Connected: ${formatServerList(connectedServers)}. Failed: ${failureText}`;
+		return __ompTranslate(
+			"MCP finished with failures. Connected: {0}. Failed: {1}",
+			`${formatServerList(connectedServers)}`,
+			`${failureText}`,
+		);
 	}
 	if (connectedServers.length > 0) {
-		return `Connected to MCP ${formatServerCount(connectedServers.length)}: ${formatServerList(connectedServers)}.`;
+		return __ompTranslate(
+			"Connected to MCP {0}: {1}.",
+			`${formatServerCount(connectedServers.length)}`,
+			`${formatServerList(connectedServers)}`,
+		);
 	}
 	return "";
 }

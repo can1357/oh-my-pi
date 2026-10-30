@@ -2,6 +2,7 @@
  * `reflect` — ask the long-term memory backend a question; the answer comes
  * back as plain result text (details are always empty).
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
 import type { ReactNode } from "react";
 import { Note, Output, ResultText } from "../parts";
 import type { ToolRenderer, ToolRenderProps } from "../types";
@@ -18,9 +19,13 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 	const failedSilently = result?.isError === true && !resultTextOf(result);
 	return (
 		<>
-			{query && <Output text={query} title="query" maxLines={4} />}
-			{context && <Output text={context} title="context" maxLines={6} />}
-			{failedSilently ? <Note tone="err">Reflect failed</Note> : <ResultText result={result} maxLines={12} />}
+			{query && <Output text={query} title={__ompTranslate("query")} maxLines={4} />}
+			{context && <Output text={context} title={__ompTranslate("context")} maxLines={6} />}
+			{failedSilently ? (
+				<Note tone="err">{__ompTranslate("Reflect failed")}</Note>
+			) : (
+				<ResultText result={result} maxLines={12} />
+			)}
 		</>
 	);
 }

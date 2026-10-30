@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { AuthApiKeyOptions, AuthStorage, SessionRestrictionLease } from "@oh-my-pi/pi-ai/auth-storage";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import { isRecord } from "@oh-my-pi/pi-utils";
@@ -23,7 +24,10 @@ export function validateAgentAccountPools(value: unknown): Record<string, OAuthA
 	if (value === undefined || value === null) return {};
 	if (!isRecord(value)) {
 		throw new Error(
-			`Invalid task.agentAccountPools: expected a map of agent name to provider account pools, got ${Array.isArray(value) ? "an array" : `a ${typeof value}`}.`,
+			__ompTranslate(
+				"Invalid task.agentAccountPools: expected a map of agent name to provider account pools, got {0}.",
+				`${Array.isArray(value) ? __ompTranslate("an array") : __ompTranslate("a {0}", `${typeof value}`)}`,
+			),
 		);
 	}
 	const pools: Record<string, OAuthAccountPools> = Object.create(null);
@@ -31,7 +35,11 @@ export function validateAgentAccountPools(value: unknown): Record<string, OAuthA
 		if (providers === null) continue;
 		if (!isRecord(providers)) {
 			throw new Error(
-				`Invalid task.agentAccountPools.${agentName}: expected a map of provider to OAuth identity keys, got ${Array.isArray(providers) ? "an array" : `a ${typeof providers}`}.`,
+				__ompTranslate(
+					"Invalid task.agentAccountPools.{0}: expected a map of provider to OAuth identity keys, got {1}.",
+					`${agentName}`,
+					`${Array.isArray(providers) ? __ompTranslate("an array") : __ompTranslate("a {0}", `${typeof providers}`)}`,
+				),
 			);
 		}
 		const agentPools: Record<string, readonly string[]> = Object.create(null);
@@ -41,7 +49,11 @@ export function validateAgentAccountPools(value: unknown): Record<string, OAuthA
 				!identityKeys.every((key): key is string => typeof key === "string" && key.length > 0 && key.trim() === key)
 			) {
 				throw new Error(
-					`Invalid task.agentAccountPools.${agentName}.${provider}: expected a list of OAuth identity keys such as "email:you@example.com|org:<org-id>".`,
+					__ompTranslate(
+						'Invalid task.agentAccountPools.{0}.{1}: expected a list of OAuth identity keys such as "email:you@example.com|org:<org-id>".',
+						`${agentName}`,
+						`${provider}`,
+					),
 				);
 			}
 			agentPools[provider] = identityKeys;
@@ -140,7 +152,7 @@ export class SessionAccountPoolScope {
 				try {
 					const apiKey = await getApiKey(model);
 					if (apiKey === undefined) {
-						return { ok: false, error: `No API key found for "${model.provider}"` };
+						return { ok: false, error: __ompTranslate('No API key found for "{0}"', `${model.provider}`) };
 					}
 					return { ok: true, apiKey, headers: await target.getProviderHeaders(model.provider) };
 				} catch (error) {

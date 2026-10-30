@@ -3,6 +3,7 @@
  *
  * Handles `omp shell` subcommand for testing the native brush-core shell.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { Shell } from "@oh-my-pi/pi-natives";
@@ -45,7 +46,7 @@ export function parseShellArgs(args: string[]): ShellCommandArgs | undefined {
 
 export async function runShellCommand(cmd: ShellCommandArgs): Promise<void> {
 	if (!process.stdin.isTTY) {
-		process.stderr.write("Error: shell console requires an interactive TTY.\n");
+		process.stderr.write(__ompTranslate("Error: shell console requires an interactive TTY.\n"));
 		process.exit(1);
 	}
 
@@ -64,25 +65,21 @@ export async function runShellCommand(cmd: ShellCommandArgs): Promise<void> {
 
 	const printHelp = () => {
 		process.stdout.write(
-			`${chalk.bold("Shell Console Commands")}
+			`${chalk.bold(__ompTranslate("Shell Console Commands"))}
 
 ` +
-				`${chalk.bold("Special Commands:")}
-  .help           Show this help
-  .exit, exit     Exit the console
-
-` +
-				`${chalk.bold("Options:")}
-  --cwd, -C <path>     Set working directory for commands
-  --timeout, -t <ms>   Timeout per command in milliseconds
-  --no-snapshot        Skip sourcing snapshot from user shell
-
-` +
-				`${chalk.bold("Notes:")}
-  Runs in a persistent brush-core shell session.
-  Variables and functions defined in one command persist for the next.
-
-`,
+				__ompTranslate(
+					"{0}\n  .help           Show this help\n  .exit, exit     Exit the console\n\n",
+					`${chalk.bold(__ompTranslate("Special Commands:"))}`,
+				) +
+				__ompTranslate(
+					"{0}\n  --cwd, -C <path>     Set working directory for commands\n  --timeout, -t <ms>   Timeout per command in milliseconds\n  --no-snapshot        Skip sourcing snapshot from user shell\n\n",
+					`${chalk.bold(__ompTranslate("Options:"))}`,
+				) +
+				__ompTranslate(
+					"{0}\n  Runs in a persistent brush-core shell session.\n  Variables and functions defined in one command persist for the next.\n\n",
+					`${chalk.bold(__ompTranslate("Notes:"))}`,
+				),
 		);
 	};
 
@@ -96,7 +93,7 @@ export async function runShellCommand(cmd: ShellCommandArgs): Promise<void> {
 	};
 
 	process.on("SIGINT", interruptHandler);
-	process.stdout.write(chalk.dim("Type .help for commands.\n"));
+	process.stdout.write(chalk.dim(__ompTranslate("Type .help for commands.\n")));
 
 	try {
 		while (true) {
@@ -138,15 +135,15 @@ export async function runShellCommand(cmd: ShellCommandArgs): Promise<void> {
 				}
 
 				if (result.timedOut) {
-					process.stderr.write(chalk.yellow("Command timed out.\n"));
+					process.stderr.write(chalk.yellow(__ompTranslate("Command timed out.\n")));
 				} else if (result.cancelled) {
-					process.stderr.write(chalk.yellow("Command cancelled.\n"));
+					process.stderr.write(chalk.yellow(__ompTranslate("Command cancelled.\n")));
 				} else if (result.exitCode !== 0 && result.exitCode !== undefined) {
-					process.stderr.write(chalk.yellow(`Exit code: ${result.exitCode}\n`));
+					process.stderr.write(chalk.yellow(__ompTranslate("Exit code: {0}\n", `${result.exitCode}`)));
 				}
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
-				process.stderr.write(chalk.red(`Error: ${message}\n`));
+				process.stderr.write(chalk.red(__ompTranslate("Error: {0}\n", `${message}`)));
 			} finally {
 				active = false;
 			}
@@ -158,20 +155,17 @@ export async function runShellCommand(cmd: ShellCommandArgs): Promise<void> {
 }
 
 export function printShellHelp(): void {
-	process.stdout.write(`${chalk.bold(`${APP_NAME} shell`)} - Interactive shell console for testing
-
-${chalk.bold("Usage:")}
-  ${APP_NAME} shell [options]
-
-${chalk.bold("Options:")}
-  --cwd, -C <path>     Set working directory for commands
-  --timeout, -t <ms>   Timeout per command in milliseconds
-  --no-snapshot        Skip sourcing snapshot from user shell
-  -h, --help           Show this help
-
-${chalk.bold("Examples:")}
-  ${APP_NAME} shell
-  ${APP_NAME} shell --cwd ./tmp
-  ${APP_NAME} shell --timeout 2000
-`);
+	process.stdout.write(
+		__ompTranslate(
+			"{0} - Interactive shell console for testing\n\n{1}\n  {2} shell [options]\n\n{3}\n  --cwd, -C <path>     Set working directory for commands\n  --timeout, -t <ms>   Timeout per command in milliseconds\n  --no-snapshot        Skip sourcing snapshot from user shell\n  -h, --help           Show this help\n\n{4}\n  {5} shell\n  {6} shell --cwd ./tmp\n  {7} shell --timeout 2000\n",
+			`${chalk.bold(`${APP_NAME} shell`)}`,
+			`${chalk.bold(__ompTranslate("Usage:"))}`,
+			`${APP_NAME}`,
+			`${chalk.bold(__ompTranslate("Options:"))}`,
+			`${chalk.bold(__ompTranslate("Examples:\u0004help.command.examples"))}`,
+			`${APP_NAME}`,
+			`${APP_NAME}`,
+			`${APP_NAME}`,
+		),
+	);
 }

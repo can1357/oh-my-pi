@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { formatDoubleTap } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
@@ -65,7 +66,7 @@ export class SessionFocusController {
 	}
 	/** Focus the main view on an agent's live session. Throws an Error with a user-displayable message. */
 	async focusAgent(id: string): Promise<void> {
-		if (this.ctx.collabGuest) throw new Error("Viewing agents is unavailable in a collab session.");
+		if (this.ctx.collabGuest) throw new Error(__ompTranslate("Viewing agents is unavailable in a collab session."));
 		if (id === MAIN_AGENT_ID) return this.unfocus();
 		const request = ++this.#focusRequestSeq;
 		let session: AgentSession;
@@ -106,7 +107,12 @@ export class SessionFocusController {
 		if (request !== this.#focusRequestSeq) return;
 		if (attached && this.#focusedAgentId === id && this.#attachedSession === session) {
 			this.ctx.showStatus(
-				`Viewing agent ${id} — ${appKey(this.ctx.keybindings, "app.interrupt")} returns to main, ${formatDoubleTap("left")} hops to parent`,
+				__ompTranslate(
+					"Viewing agent {0} — {1} returns to main, {2} hops to parent",
+					`${id}`,
+					`${appKey(this.ctx.keybindings, "app.interrupt")}`,
+					`${formatDoubleTap("left")}`,
+				),
 			);
 		}
 	}
@@ -140,7 +146,8 @@ export class SessionFocusController {
 		this.#focusedAgentId = undefined;
 		this.#attachedSession = undefined;
 		const attached = await this.#attach(this.ctx.session);
-		if (attached && this.#focusedAgentId === undefined) this.ctx.showStatus("Returned to main session");
+		if (attached && this.#focusedAgentId === undefined)
+			this.ctx.showStatus(__ompTranslate("Returned to main session"));
 	}
 
 	dispose(): void {
@@ -167,7 +174,13 @@ export class SessionFocusController {
 		const dead = event.type === "status_changed" && (event.ref.status === "parked" || event.ref.status === "aborted");
 		if (!gone && !dead) return;
 		void this.#detachToMain().then(() => {
-			this.ctx.showStatus(`Agent ${event.ref.id} is ${gone ? "gone" : event.ref.status}; returned to main session`);
+			this.ctx.showStatus(
+				__ompTranslate(
+					"Agent {0} is {1}; returned to main session",
+					`${event.ref.id}`,
+					`${gone ? __ompTranslate("gone") : event.ref.status}`,
+				),
+			);
 		});
 	}
 
@@ -252,7 +265,7 @@ export class SessionFocusController {
 					} catch (recoveryError) {
 						throw new AggregateError(
 							[error, recoveryError],
-							"Focus attachment and main-session recovery both failed",
+							__ompTranslate("Focus attachment and main-session recovery both failed"),
 						);
 					}
 				}

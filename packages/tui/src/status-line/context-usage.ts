@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { AgentMessage, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { CompactionSettings } from "@oh-my-pi/pi-agent-core/compaction";
 import { effectiveReserveTokens, resolveThresholdTokens } from "@oh-my-pi/pi-agent-core/compaction";
@@ -508,11 +509,11 @@ export function computeContextBreakdown(session: ContextUsageSession, options: C
 	}
 
 	const categories: CategoryInfo[] = [
-		{ id: "systemPrompt", label: "System prompt", tokens: systemPromptTokens },
-		{ id: "systemTools", label: "System tools", tokens: toolsTokens },
-		{ id: "systemContext", label: "System context", tokens: systemContextTokens },
-		{ id: "skills", label: "Skills", tokens: skillsTokens },
-		{ id: "messages", label: "Messages", tokens: messagesTokens },
+		{ id: "systemPrompt", label: __ompTranslate("System prompt"), tokens: systemPromptTokens },
+		{ id: "systemTools", label: __ompTranslate("System tools"), tokens: toolsTokens },
+		{ id: "systemContext", label: __ompTranslate("System context"), tokens: systemContextTokens },
+		{ id: "skills", label: __ompTranslate("Skills"), tokens: skillsTokens },
+		{ id: "messages", label: __ompTranslate("Messages"), tokens: messagesTokens },
 	];
 
 	let autoCompactBufferTokens = 0;

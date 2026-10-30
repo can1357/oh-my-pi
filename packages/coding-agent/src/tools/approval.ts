@@ -6,6 +6,7 @@
  * - compare a tool capability tier against the active approval mode,
  * - format the generic approval prompt body.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { isRecord, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import { replaceTabs } from "@oh-my-pi/pi-tui";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -708,19 +709,19 @@ export function formatApprovalArguments(args: unknown, options?: { showEmpty?: b
 		return [];
 	}
 	const formatted = formatPayloadValue(args, 0);
-	return [`Arguments:\n${truncateForPrompt(formatted)}`];
+	return [__ompTranslate("Arguments:\n{0}", `${truncateForPrompt(formatted)}`)];
 }
 
 /** The prompt's header rows: tool name, MCP origin, and the reason it asks. */
 function approvalHeader(tool: ApprovalSubject, reason?: string): string[] {
-	const lines = [`Allow tool: ${tool.name}`];
+	const lines = [__ompTranslate("Allow tool: {0}", `${tool.name}`)];
 
 	if (tool.name.startsWith("mcp__") && tool.approval === undefined) {
-		lines.push("Origin: MCP server tool");
+		lines.push(__ompTranslate("Origin: MCP server tool"));
 	}
 
 	if (reason) {
-		lines.push(`Reason: ${reason}`);
+		lines.push(__ompTranslate("Reason: {0}", `${reason}`));
 	}
 	return lines;
 }
@@ -786,13 +787,13 @@ function approvalFolderPromptBlock(
 		listing === undefined
 			? undefined
 			: listing.truncated
-				? `${listing.total}+ entries`
-				: `${count(listing.total, "entry", "entries")} (${count(listing.folders, "folder", "folders")}, ${count(listing.files, "file", "files")})`;
+				? __ompTranslate("{0}+ entries", `${listing.total}`)
+				: `${count(listing.total, __ompTranslate("entry"), __ompTranslate("entries"))} (${count(listing.folders, __ompTranslate("folder"), __ompTranslate("folders"))}, ${count(listing.files, __ompTranslate("file"), __ompTranslate("files"))})`;
 	const block = prompt.render(approvalFolderTemplate, {
 		folder: sanitizeText(folder),
 		summary,
 		entries,
-		more: hidden > 0 ? count(hidden, "more", "more") : undefined,
+		more: hidden > 0 ? count(hidden, __ompTranslate("more"), __ompTranslate("more")) : undefined,
 	});
 	return block.trimEnd() || undefined;
 }
@@ -811,8 +812,8 @@ function approvalGrantChoices(
 	if (folder) {
 		grants.push({
 			scope: "folder",
-			label: `Approve Directory: ${folder.label}`,
-			alwaysLabel: `Always Approve Directory: ${folder.label}`,
+			label: __ompTranslate("Approve Directory: {0}", `${folder.label}`),
+			alwaysLabel: __ompTranslate("Always Approve Directory: {0}", `${folder.label}`),
 		});
 	}
 	const targets = approvalCacheTargets(tool, args);
@@ -820,8 +821,8 @@ function approvalGrantChoices(
 		const files = targets.every(approvalTargetNamesFile);
 		grants.push({
 			scope: "target",
-			label: files ? "Approve File" : "Approve",
-			alwaysLabel: files ? "Always Approve File" : "Always Approve",
+			label: files ? __ompTranslate("Approve File") : __ompTranslate("Approve"),
+			alwaysLabel: files ? __ompTranslate("Always Approve File") : __ompTranslate("Always Approve"),
 		});
 	}
 	return grants;
@@ -845,7 +846,8 @@ export async function requestApproval(
 	const { reason, appendix = [], sessionSubject } = options;
 	const header = approvalHeader(tool, reason);
 	const details = approvalDetails(tool, args);
-	const session = sessionSubject === undefined ? undefined : `Approve ${sessionSubject} for this session`;
+	const session =
+		sessionSubject === undefined ? undefined : __ompTranslate("Approve {0} for this session", `${sessionSubject}`);
 	const folder = options.grants ? approvalFolderCandidate(tool, args) : undefined;
 	const grants = options.grants ? approvalGrantChoices(tool, args, folder) : [];
 	// A directory answer names what it covers: the folder's own entries, listed in the prompt.
@@ -879,7 +881,7 @@ export async function requestApproval(
 
 /** The approve-this-call-only label: "Approve", or "Approve Once" beside grants that remember more. */
 export function approvalOnceLabel(prompt: Pick<ExtensionApprovalPrompt, "grants">): string {
-	return prompt.grants?.length ? "Approve Once" : "Approve";
+	return prompt.grants?.length ? __ompTranslate("Approve Once") : __ompTranslate("Approve");
 }
 
 /**
@@ -894,7 +896,7 @@ export function approvalChoiceLabels(prompt: Pick<ExtensionApprovalPrompt, "sess
 		...grants.map(grant => grant.alwaysLabel),
 		approvalOnceLabel(prompt),
 		...(prompt.session ? [prompt.session] : []),
-		"Deny",
+		__ompTranslate("Deny"),
 	];
 }
 

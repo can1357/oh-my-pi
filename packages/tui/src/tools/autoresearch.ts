@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { Text } from "../components/text";
 import type { Theme } from "../theme/theme";
 import { replaceTabs, truncateToWidth, shortenPath } from "../render/render-utils";
@@ -245,13 +246,13 @@ function renderSummary(details: LogDetails, theme: Theme): string {
 	let summary = `${theme.fg(color, experiment.status.toUpperCase())} ${theme.fg("muted", truncateToWidth(replaceTabs(experiment.description), 100))}`;
 	summary += ` ${theme.fg("accent", `${state.metricName}=${formatNum(experiment.metric, state.metricUnit)}`)}`;
 	if (state.bestMetric !== null) {
-		summary += ` ${theme.fg("dim", `baseline ${formatNum(state.bestMetric, state.metricUnit)}`)}`;
+		summary += ` ${theme.fg("dim", __ompTranslate("baseline {0}", `${formatNum(state.bestMetric, state.metricUnit)}`))}`;
 	}
 	if (state.confidence !== null) {
-		summary += ` ${theme.fg("dim", `conf ${state.confidence.toFixed(1)}x`)}`;
+		summary += ` ${theme.fg("dim", __ompTranslate("conf {0}x\u0004tool.research.confidence", `${state.confidence.toFixed(1)}`))}`;
 	}
 	if (details.scopeDeviations.length > 0) {
-		summary += ` ${theme.fg("warning", `deviations:${details.scopeDeviations.length}`)}`;
+		summary += ` ${theme.fg("warning", __ompTranslate("deviations:{0}", `${details.scopeDeviations.length}`))}`;
 	}
 	return summary;
 }
@@ -296,15 +297,15 @@ export const logExperimentToolRenderer = {
 function describeStatus(details: RunDetails): { tone: TspTone; node: NativeNode } {
 	const duration = `${details.durationSeconds.toFixed(1)}s`;
 	let tone: TspTone = "success";
-	let label = "PASS";
+	let label = __ompTranslate("PASS");
 	let meta = duration;
 	if (details.timedOut) {
 		tone = "error";
-		label = "TIMEOUT";
+		label = __ompTranslate("TIMEOUT");
 	} else if (details.exitCode !== 0) {
 		tone = "error";
-		label = "FAIL";
-		meta = `exit=${details.exitCode} ${duration}`;
+		label = __ompTranslate("FAIL");
+		meta = __ompTranslate("exit={0} {1}", `${details.exitCode}`, `${duration}`);
 	} else if (details.parsedPrimary !== null) {
 		meta = `${duration} ${plainText(details.metricName)}=${formatNum(details.parsedPrimary, details.metricUnit)}`;
 	}
@@ -316,16 +317,19 @@ function describeStatus(details: RunDetails): { tone: TspTone; node: NativeNode 
 
 function renderStatus(details: RunDetails, theme: Theme): string {
 	if (details.timedOut) {
-		return theme.fg("error", `TIMEOUT ${details.durationSeconds.toFixed(1)}s`);
+		return theme.fg("error", __ompTranslate("TIMEOUT {0}s", `${details.durationSeconds.toFixed(1)}`));
 	}
 	if (details.exitCode !== 0) {
-		return theme.fg("error", `FAIL exit=${details.exitCode} ${details.durationSeconds.toFixed(1)}s`);
+		return theme.fg(
+			"error",
+			__ompTranslate("FAIL exit={0} {1}s", `${details.exitCode}`, `${details.durationSeconds.toFixed(1)}`),
+		);
 	}
 	const metric =
 		details.parsedPrimary !== null
 			? ` ${details.metricName}=${formatNum(details.parsedPrimary, details.metricUnit)}`
 			: "";
-	return theme.fg("success", `PASS ${details.durationSeconds.toFixed(1)}s${metric}`);
+	return theme.fg("success", __ompTranslate("PASS {0}s{1}", `${details.durationSeconds.toFixed(1)}`, `${metric}`));
 }
 
 function isRunDetails(value: unknown): value is RunDetails {
@@ -349,7 +353,7 @@ export const runExperimentToolRenderer = {
 	},
 	renderResult(result, options, theme): Text {
 		if (isProgressDetails(result.details)) {
-			const header = theme.fg("warning", `Running ${result.details.elapsed}...`);
+			const header = theme.fg("warning", __ompTranslate("Running {0}...", `${result.details.elapsed}`));
 			const preview = replaceTabs(result.content.find(part => part.type === "text")?.text ?? "");
 			return new Text(preview ? `${header}\n${theme.fg("dim", preview)}` : header, 0, 0);
 		}
@@ -366,7 +370,7 @@ export const runExperimentToolRenderer = {
 		);
 		const suffix =
 			options.expanded && details.truncation && details.fullOutputPath
-				? `\n${theme.fg("warning", `Full output: ${shortenPath(details.fullOutputPath)}`)}`
+				? `\n${theme.fg("warning", __ompTranslate("Full output: {0}", `${shortenPath(details.fullOutputPath)}`))}`
 				: "";
 		return new Text(preview ? `${statusText}\n${theme.fg("dim", preview)}${suffix}` : statusText, 0, 0);
 	},
@@ -382,7 +386,9 @@ export const runExperimentToolRenderer = {
 					tone: "warning",
 					preview: { lines: 6 },
 					body: compact([
-						node("spinner", { label: [span(`Running ${plainText(details.elapsed)}…`, "warning")] }),
+						node("spinner", {
+							label: [span(__ompTranslate("Running {0}…", `${plainText(details.elapsed)}`), "warning")],
+						}),
 						output.trim() ? ansi(output, { follow: true }) : undefined,
 					]),
 				};
@@ -396,9 +402,15 @@ export const runExperimentToolRenderer = {
 					status.node,
 					details.tailOutput.trim() ? ansi(details.tailOutput, { follow: true }) : undefined,
 					details.truncation && details.fullOutputPath
-						? text([span("Full output: ", "warning"), span(shortenPath(details.fullOutputPath), "path")], {
-								truncate: "middle",
-							})
+						? text(
+								[
+									span(__ompTranslate("Full output: "), "warning"),
+									span(shortenPath(details.fullOutputPath), "path"),
+								],
+								{
+									truncate: "middle",
+								},
+							)
 						: undefined,
 				]),
 			};

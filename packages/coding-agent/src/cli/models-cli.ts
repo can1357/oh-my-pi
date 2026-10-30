@@ -11,6 +11,7 @@
  * `ls`/`find` use the cache when fresh (`online-if-uncached`); only `refresh`
  * forces the network (`online`).
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { Api, Effort, Model } from "@oh-my-pi/pi-ai";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { getEffectiveTokenCost, getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
@@ -96,7 +97,7 @@ function writeLine(line = ""): void {
 }
 
 function writeModelsConfigError(error: Error): void {
-	writeLine(chalk.yellow("Warning: models.yml validation failed — custom providers disabled"));
+	writeLine(chalk.yellow(__ompTranslate("Warning: models.yml validation failed — custom providers disabled")));
 	for (const line of error.message.split("\n")) {
 		writeLine(`  ${line}`);
 	}
@@ -229,7 +230,10 @@ export function renderProviderModels(
 	if (json) {
 		if (configError) {
 			process.stderr.write(
-				`Warning: models.yml validation failed — custom providers disabled\n${configError.message}\n`,
+				__ompTranslate(
+					"Warning: models.yml validation failed — custom providers disabled\n{0}\n",
+					`${configError.message}`,
+				),
 			);
 		}
 		const output: ModelsJson = { models: filtered.slice().sort(byProviderThenId).map(toModelJson) };
@@ -242,11 +246,11 @@ export function renderProviderModels(
 	}
 
 	if (available.length === 0) {
-		writeLine("No models available. Set API keys in environment variables.");
+		writeLine(__ompTranslate("No models available. Set API keys in environment variables."));
 		return;
 	}
 	if (filtered.length === 0) {
-		writeLine(`No models matching "${pattern}"`);
+		writeLine(__ompTranslate('No models matching "{0}"', `${pattern}`));
 		return;
 	}
 
@@ -270,18 +274,18 @@ export function renderProviderModels(
 			model.id,
 			formatLimit(model.contextWindow),
 			formatLimit(model.maxTokens),
-			model.thinking ? getSupportedEfforts(model).join(",") : model.reasoning ? "yes" : "-",
+			model.thinking ? getSupportedEfforts(model).join(",") : model.reasoning ? __ompTranslate("yes") : "-",
 			// Wire truth, not the declared `input`: the transport drops image parts for
 			// models the catalog marks text-only (`compat.stripImageInput`, #9697).
-			sendsImageInputOnWire(model) ? "yes" : "no",
+			sendsImageInputOnWire(model) ? __ompTranslate("yes") : __ompTranslate("no"),
 		]);
 		for (const line of boxTable(
 			[
-				{ header: "model" },
-				{ header: "context", align: "right" },
-				{ header: "max-out", align: "right" },
-				{ header: "thinking" },
-				{ header: "images" },
+				{ header: __ompTranslate("model") },
+				{ header: __ompTranslate("context"), align: "right" },
+				{ header: __ompTranslate("max-out"), align: "right" },
+				{ header: __ompTranslate("thinking") },
+				{ header: __ompTranslate("images") },
 			],
 			rows,
 		)) {
@@ -352,7 +356,7 @@ export async function runModelsListing(options: RunModelsListingOptions): Promis
 
 	try {
 		for (const { path: extPath, error } of extensionsResult.errors) {
-			process.stderr.write(`Failed to load extension: ${extPath}: ${error}\n`);
+			process.stderr.write(__ompTranslate("Failed to load extension: {0}: {1}\n", `${extPath}`, `${error}`));
 		}
 
 		// Mirror sdk.ts: drain pending provider registrations into the registry.
@@ -367,7 +371,7 @@ export async function runModelsListing(options: RunModelsListingOptions): Promis
 		await modelRegistry.refreshRuntimeProviders(action === "refresh" ? "online" : "online-if-uncached");
 
 		for (const warning of modelRegistry.drainConfigWarnings()) {
-			process.stderr.write(`${chalk.yellow(`Warning: ${warning}`)}\n`);
+			process.stderr.write(`${chalk.yellow(__ompTranslate("Warning: {0}", `${warning}`))}\n`);
 		}
 		renderProviderModels(modelRegistry, action, pattern, json, kind);
 	} finally {
@@ -386,7 +390,9 @@ export async function runModelsCommand(command: ModelsCommandArgs): Promise<void
 	const kind = command.flags.kind ?? "chat";
 
 	if (action === "find" && (!pattern || pattern.trim().length === 0)) {
-		process.stderr.write("`omp models find` requires a search substring, e.g. `omp models find minimax`\n");
+		process.stderr.write(
+			__ompTranslate("`omp models find` requires a search substring, e.g. `omp models find minimax`\n"),
+		);
 		process.exitCode = 1;
 		return;
 	}
@@ -398,7 +404,7 @@ export async function runModelsCommand(command: ModelsCommandArgs): Promise<void
 		const modelRegistry = new ModelRegistry(authStorage);
 
 		if (action === "refresh" && !json && process.stderr.isTTY) {
-			process.stderr.write("Refreshing models from all providers…\n");
+			process.stderr.write(__ompTranslate("Refreshing models from all providers…\n"));
 		}
 		await modelRegistry.refresh(
 			action === "refresh" ? "online" : "online-if-uncached",

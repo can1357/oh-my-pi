@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { Component } from "../tui";
 import { Text } from "../components/text";
 import { describeShimmer, shimmerEnabled, shimmerText } from "../theme/shimmer";
@@ -287,15 +288,19 @@ function linesComponent(lines: string[] | (() => string[])): Component {
 function describeCall(op: VibeOp, args: VibeRenderArgs | undefined): string {
 	switch (op) {
 		case "spawn":
-			return `spawn ${args?.cli ?? "?"}${args?.name ? ` · ${frameText(args.name, 40)}` : ""}`;
+			return __ompTranslate(
+				"spawn {0}{1}",
+				`${args?.cli ?? "?"}`,
+				`${args?.name ? ` · ${frameText(args.name, 40)}` : ""}`,
+			);
 		case "send":
-			return `send → ${args?.session ? frameText(args.session, 40) : "?"}`;
+			return __ompTranslate("send → {0}", `${args?.session ? frameText(args.session, 40) : "?"}`);
 		case "wait":
 			return args?.sessions?.length
-				? `wait on ${frameText(args.sessions.join(", "), 60)}`
-				: "wait on running sessions";
+				? __ompTranslate("wait on {0}", `${frameText(args.sessions.join(", "), 60)}`)
+				: __ompTranslate("wait on running sessions");
 		case "kill":
-			return `kill ${args?.session ? frameText(args.session, 40) : "?"}`;
+			return __ompTranslate("kill {0}", `${args?.session ? frameText(args.session, 40) : "?"}`);
 		case "list":
 			return "sessions";
 	}
@@ -309,13 +314,15 @@ function describeCall(op: VibeOp, args: VibeRenderArgs | undefined): string {
 function vibeNativeLabel(op: VibeOp, args: VibeRenderArgs | undefined): string {
 	switch (op) {
 		case "spawn":
-			return `spawn ${args?.cli ?? "?"}${args?.name ? ` · ${args.name}` : ""}`;
+			return __ompTranslate("spawn {0}{1}", `${args?.cli ?? "?"}`, `${args?.name ? ` · ${args.name}` : ""}`);
 		case "send":
-			return `send → ${args?.session ?? "?"}`;
+			return __ompTranslate("send → {0}", `${args?.session ?? "?"}`);
 		case "wait":
-			return args?.sessions?.length ? `wait on ${args.sessions.join(", ")}` : "wait on running sessions";
+			return args?.sessions?.length
+				? __ompTranslate("wait on {0}", `${args.sessions.join(", ")}`)
+				: __ompTranslate("wait on running sessions");
 		case "kill":
-			return `kill ${args?.session ?? "?"}`;
+			return __ompTranslate("kill {0}", `${args?.session ?? "?"}`);
 		case "list":
 			return "sessions";
 	}
@@ -424,7 +431,8 @@ function describeVibeResult(
 ): NativeToolView {
 	const details = result.details;
 	const label = vibeNativeLabel(op, args);
-	if (result.isError) return { ...errorView("Vibe", resultText(result) || "vibe failed", label), inline: true };
+	if (result.isError)
+		return { ...errorView("Vibe", resultText(result) || __ompTranslate("vibe failed"), label), inline: true };
 	if (!details) {
 		const fallback = resultText(result).trim();
 		return { head: toolHead("Vibe", label), inline: true, body: fallback ? [noteText(fallback)] : [] };
@@ -435,21 +443,37 @@ function describeVibeResult(
 		const head: TspSpan[] =
 			op === "spawn"
 				? [
-						...toolHead("Vibe", "spawn"),
+						...toolHead("Vibe", __ompTranslate("spawn")),
 						span(" "),
 						span(details.spawned?.cli ?? args?.cli ?? "?", "accent strong"),
 						span(" "),
 						span(plainText(details.spawned?.id ?? args?.name ?? ""), "accent"),
 					]
-				: [...toolHead("Vibe", "send →"), span(" "), span(plainText(args?.session ?? "?"), "accent")];
+				: [
+						...toolHead("Vibe", __ompTranslate("send →")),
+						span(" "),
+						span(plainText(args?.session ?? "?"), "accent"),
+					];
 		const ack: TspSpan =
 			op === "spawn"
-				? span(`turn started${details.spawned ? ` (job ${details.spawned.jobId})` : ""}`, "success")
+				? span(
+						__ompTranslate(
+							"turn started{0}",
+							`${details.spawned ? __ompTranslate(" (job {0})", `${details.spawned.jobId}`) : ""}`,
+						),
+						"success",
+					)
 				: details.send?.mode === "steered"
-					? span("steered into the running turn", "success")
+					? span(__ompTranslate("steered into the running turn"), "success")
 					: details.send?.mode === "queued"
-						? span("mid-turn — queued as the next turn", "warning")
-						: span(`turn started${details.send?.jobId ? ` (job ${details.send.jobId})` : ""}`, "success");
+						? span(__ompTranslate("mid-turn — queued as the next turn"), "warning")
+						: span(
+								__ompTranslate(
+									"turn started{0}",
+									`${details.send?.jobId ? __ompTranslate(" (job {0})", `${details.send.jobId}`) : ""}`,
+								),
+								"success",
+							);
 		return {
 			head,
 			inline: true,
@@ -460,15 +484,22 @@ function describeVibeResult(
 	}
 
 	if (op === "kill") {
-		const note = details.killed?.cancelledTurn ? "in-flight turn cancelled" : undefined;
-		return { head: toolHead("Vibe", `kill ${details.killed?.id ?? args?.session ?? "?"}`, note), inline: true };
+		const note = details.killed?.cancelledTurn ? __ompTranslate("in-flight turn cancelled") : undefined;
+		return {
+			head: toolHead("Vibe", __ompTranslate("kill {0}", `${details.killed?.id ?? args?.session ?? "?"}`), note),
+			inline: true,
+		};
 	}
 
 	const screens = details.screens;
 	const hiddenKilled = details.hiddenKilled?.length ?? 0;
-	const killedMeta = hiddenKilled > 0 ? span(` · ${hiddenKilled} killed hidden`, "dim") : undefined;
+	const killedMeta =
+		hiddenKilled > 0 ? span(__ompTranslate(" · {0} killed hidden", `${hiddenKilled}`), "dim") : undefined;
 	if (screens.length === 0) {
-		const gist = hiddenKilled > 0 ? "no live sessions" : resultText(result).trim() || "no sessions";
+		const gist =
+			hiddenKilled > 0
+				? __ompTranslate("no live sessions")
+				: resultText(result).trim() || __ompTranslate("no sessions");
 		const head = toolHead("Vibe", op, gist);
 		if (killedMeta) head.push(killedMeta);
 		return { head, tone: "warning", inline: true };
@@ -478,13 +509,13 @@ function describeVibeResult(
 	const title =
 		op === "wait"
 			? details.wait?.waiting === true
-				? "wait — watching the wall"
-				: "wait"
-			: `sessions (${screens.length})`;
+				? __ompTranslate("wait — watching the wall")
+				: __ompTranslate("wait")
+			: __ompTranslate("sessions ({0})", `${screens.length}`);
 	const head: TspSpan[] = toolHead("Vibe", title);
-	if (running > 0) head.push(span(` · ${running} on air`, "accent"));
-	if (settledById.size > 0) head.push(span(` · ${settledById.size} settled`, "success"));
-	if (details.wait?.timedOut) head.push(span(" · timed out", "warning"));
+	if (running > 0) head.push(span(__ompTranslate(" · {0} on air", `${running}`), "accent"));
+	if (settledById.size > 0) head.push(span(__ompTranslate(" · {0} settled", `${settledById.size}`), "success"));
+	if (details.wait?.timedOut) head.push(span(__ompTranslate(" · timed out"), "warning"));
 	if (killedMeta) head.push(killedMeta);
 	const nowMs = Date.now();
 	return {
@@ -547,18 +578,27 @@ export function createVibeToolRenderer(op: VibeOp) {
 				const message = op === "spawn" ? (args?.prompt ?? "") : (args?.message ?? "");
 				const target =
 					op === "spawn"
-						? `${uiTheme.fg("muted", "vibe spawn")} ${formatBadge(details.spawned?.cli ?? args?.cli ?? "?", "accent", uiTheme)} ${uiTheme.fg("accent", frameText(details.spawned?.id ?? args?.name ?? "", 40))}`
-						: `${uiTheme.fg("muted", "vibe send →")} ${uiTheme.fg("accent", frameText(args?.session ?? "?", 40))}`;
+						? `${uiTheme.fg("muted", __ompTranslate("vibe spawn"))} ${formatBadge(details.spawned?.cli ?? args?.cli ?? "?", "accent", uiTheme)} ${uiTheme.fg("accent", frameText(details.spawned?.id ?? args?.name ?? "", 40))}`
+						: `${uiTheme.fg("muted", __ompTranslate("vibe send →"))} ${uiTheme.fg("accent", frameText(args?.session ?? "?", 40))}`;
 				const ack =
 					op === "spawn"
-						? uiTheme.fg("success", `turn started${details.spawned ? ` (job ${details.spawned.jobId})` : ""}`)
+						? uiTheme.fg(
+								"success",
+								__ompTranslate(
+									"turn started{0}",
+									`${details.spawned ? __ompTranslate(" (job {0})", `${details.spawned.jobId}`) : ""}`,
+								),
+							)
 						: details.send?.mode === "steered"
-							? uiTheme.fg("success", "steered into the running turn")
+							? uiTheme.fg("success", __ompTranslate("steered into the running turn"))
 							: details.send?.mode === "queued"
-								? uiTheme.fg("warning", "mid-turn — queued as the next turn")
+								? uiTheme.fg("warning", __ompTranslate("mid-turn — queued as the next turn"))
 								: uiTheme.fg(
 										"success",
-										`turn started${details.send?.jobId ? ` (job ${details.send.jobId})` : ""}`,
+										__ompTranslate(
+											"turn started{0}",
+											`${details.send?.jobId ? __ompTranslate(" (job {0})", `${details.send.jobId}`) : ""}`,
+										),
 									);
 				const lines = miniFrame(
 					uiTheme,
@@ -570,11 +610,15 @@ export function createVibeToolRenderer(op: VibeOp) {
 			}
 
 			if (op === "kill") {
-				const killedNote = details.killed?.cancelledTurn ? " (in-flight turn cancelled)" : "";
+				const killedNote = details.killed?.cancelledTurn ? __ompTranslate(" (in-flight turn cancelled)") : "";
 				const header = renderStatusLine(
 					{
 						icon: "done",
-						title: `vibe kill ${frameText(details.killed?.id ?? args?.session ?? "?", 40)}${killedNote}`,
+						title: __ompTranslate(
+							"vibe kill {0}{1}",
+							`${frameText(details.killed?.id ?? args?.session ?? "?", 40)}`,
+							`${killedNote}`,
+						),
 					},
 					uiTheme,
 				);
@@ -585,10 +629,11 @@ export function createVibeToolRenderer(op: VibeOp) {
 			// (see `hiddenKilled`) so a long-running director's wall stays legible.
 			const screens = details.screens;
 			const hiddenKilled = details.hiddenKilled?.length ?? 0;
-			const killedMeta = hiddenKilled > 0 ? [uiTheme.fg("dim", `${hiddenKilled} killed hidden`)] : [];
+			const killedMeta =
+				hiddenKilled > 0 ? [uiTheme.fg("dim", __ompTranslate("{0} killed hidden", `${hiddenKilled}`))] : [];
 			if (screens.length === 0) {
-				const fallback = result.content.find(part => part.type === "text")?.text ?? "no sessions";
-				const gist = hiddenKilled > 0 ? "no live sessions" : fallback;
+				const fallback = result.content.find(part => part.type === "text")?.text ?? __ompTranslate("no sessions");
+				const gist = hiddenKilled > 0 ? __ompTranslate("no live sessions") : fallback;
 				return new Text(
 					renderStatusLine(
 						{
@@ -609,16 +654,17 @@ export function createVibeToolRenderer(op: VibeOp) {
 			return linesComponent(() => {
 				const running = screens.filter(screen => screen.state === "running" || screen.state === "starting").length;
 				const meta: string[] = [];
-				if (running > 0) meta.push(uiTheme.fg("accent", `${running} on air`));
-				if (settledById.size > 0) meta.push(uiTheme.fg("success", `${settledById.size} settled`));
-				if (details.wait?.timedOut) meta.push(uiTheme.fg("warning", "timed out"));
+				if (running > 0) meta.push(uiTheme.fg("accent", __ompTranslate("{0} on air", `${running}`)));
+				if (settledById.size > 0)
+					meta.push(uiTheme.fg("success", __ompTranslate("{0} settled", `${settledById.size}`)));
+				if (details.wait?.timedOut) meta.push(uiTheme.fg("warning", __ompTranslate("timed out")));
 				meta.push(...killedMeta);
 				const title =
 					op === "wait"
 						? waiting
-							? "vibe wait — watching the wall"
-							: "vibe wait"
-						: `vibe sessions (${screens.length})`;
+							? __ompTranslate("vibe wait — watching the wall")
+							: __ompTranslate("vibe wait")
+						: __ompTranslate("vibe sessions ({0})", `${screens.length}`);
 				const header = renderStatusLine(
 					{
 						icon: details.wait?.timedOut ? "warning" : running > 0 ? "info" : "done",

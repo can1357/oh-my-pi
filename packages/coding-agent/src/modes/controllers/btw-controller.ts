@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { type OverlayHandle, replaceTabs } from "@oh-my-pi/pi-tui";
 import { logger, toError, withTimeout } from "@oh-my-pi/pi-utils";
@@ -122,22 +123,24 @@ export class BtwController {
 	}
 
 	#branchUnavailableReason(): string | undefined {
-		if (this.#branchInFlight) return "a branch is already in progress";
-		if (this.#transitionCount > 0) return "a session operation is in progress";
-		if (!this.#visible || this.#activeRequest?.component.isBranchable() !== true) return "the answer is not ready";
+		if (this.#branchInFlight) return __ompTranslate("a branch is already in progress");
+		if (this.#transitionCount > 0) return __ompTranslate("a session operation is in progress");
+		if (!this.#visible || this.#activeRequest?.component.isBranchable() !== true)
+			return __ompTranslate("the answer is not ready");
 		if (this.#activeRequest.session !== this.ctx.session || this.ctx.focusedAgentId)
-			return "only main-session answers can be branched";
+			return __ompTranslate("only main-session answers can be branched");
 		// Inline branch promotion carries one pair; do not drop earlier side turns.
-		if (this.#activeRequest.history?.length) return "multi-turn side conversations remain in BTW history";
+		if (this.#activeRequest.history?.length)
+			return __ompTranslate("multi-turn side conversations remain in BTW history");
 		if (!this.#lastQuestion || !this.#lastReplyText || !this.#lastAssistantMessage)
-			return "the answer is unavailable";
-		if (!this.#lastLeafId) return "the session has no branch point";
+			return __ompTranslate("the answer is unavailable");
+		if (!this.#lastLeafId) return __ompTranslate("the session has no branch point");
 		if (
 			this.#lastSessionId !== this.ctx.sessionManager.getSessionId() ||
 			this.#lastLeafId !== this.ctx.sessionManager.getLeafId()
 		)
-			return "the session changed since /btw started";
-		if (this.ctx.session.isStreaming) return "a turn is still running";
+			return __ompTranslate("the session changed since /btw started");
+		if (this.ctx.session.isStreaming) return __ompTranslate("a turn is still running");
 		return undefined;
 	}
 
@@ -158,7 +161,7 @@ export class BtwController {
 		const inlineRequest = options?.historyRecordId === undefined ? this.#activeRequest : undefined;
 		try {
 			await copyToClipboard(replaceTabs(answer).trim());
-			this.ctx.showStatus("Copied /btw answer to clipboard");
+			this.ctx.showStatus(__ompTranslate("Copied /btw answer to clipboard"));
 			if (options?.historyRecordId !== undefined) this.#historyPanel?.markCopied(options.historyRecordId, answer);
 			else if (inlineRequest && this.#visible && this.#activeRequest === inlineRequest)
 				inlineRequest.component.markCopied();
@@ -179,7 +182,7 @@ export class BtwController {
 	async handleBranch(): Promise<boolean> {
 		const unavailableReason = this.#branchUnavailableReason();
 		if (unavailableReason) {
-			this.ctx.showStatus(`/btw branch unavailable: ${unavailableReason}`, { dim: true });
+			this.ctx.showStatus(__ompTranslate("/btw branch unavailable: {0}", `${unavailableReason}`), { dim: true });
 			return false;
 		}
 		const request = this.#activeRequest;
@@ -196,7 +199,7 @@ export class BtwController {
 			await this.ctx.handleBtwBranch(question, assistantMessage, leafId, sessionId, images);
 			return true;
 		} catch (error) {
-			this.ctx.showError(sanitizeErrorLine(`Cannot branch /btw: ${toError(error).message}`));
+			this.ctx.showError(sanitizeErrorLine(__ompTranslate("Cannot branch /btw: {0}", `${toError(error).message}`)));
 			return false;
 		} finally {
 			this.#branchInFlight = false;
@@ -206,7 +209,7 @@ export class BtwController {
 
 	handleEscape(): boolean {
 		if (this.#branchInFlight) {
-			this.ctx.showStatus("/btw branch is in progress", { dim: true });
+			this.ctx.showStatus(__ompTranslate("/btw branch is in progress"), { dim: true });
 			return true;
 		}
 		if (!this.#visible) return false;
@@ -274,7 +277,9 @@ export class BtwController {
 		await withTimeout(
 			this.#drainWrites(),
 			timeoutMs,
-			"BTW history is still being saved. The session operation was stopped; retry when storage responds.",
+			__ompTranslate(
+				"BTW history is still being saved. The session operation was stopped; retry when storage responds.",
+			),
 		);
 	}
 
@@ -288,7 +293,10 @@ export class BtwController {
 		if (failure) {
 			throw new Error(
 				sanitizeErrorLine(
-					`BTW history could not be saved: ${sanitizeErrorLine(failure)}. The session operation was stopped; retry after fixing storage. Unsaved answers remain in /btw.`,
+					__ompTranslate(
+						"BTW history could not be saved: {0}. The session operation was stopped; retry after fixing storage. Unsaved answers remain in /btw.",
+						`${sanitizeErrorLine(failure)}`,
+					),
 					TRUNCATE_LENGTHS.RECAP,
 				),
 				{ cause: failure },
@@ -303,7 +311,9 @@ export class BtwController {
 			this.#transitionCount > 0 ||
 			(this.#activeRequest && getBtwLatestTurn(this.#activeRequest.record).status === "running")
 		) {
-			this.ctx.showStatus("Wait for the current /btw answer to finish or cancel it before moving.", { dim: true });
+			this.ctx.showStatus(__ompTranslate("Wait for the current /btw answer to finish or cancel it before moving."), {
+				dim: true,
+			});
 			return false;
 		}
 		this.#transitionCount++;
@@ -335,7 +345,7 @@ export class BtwController {
 				(this.#sessionManager.getArtifactsDir() ?? undefined) !== artifactsDir ||
 				this.#historyScope !== scope
 			) {
-				throw new Error("The session changed while opening BTW history.");
+				throw new Error(__ompTranslate("The session changed while opening BTW history."));
 			}
 			this.#storeSessionId = sessionId;
 			this.#storeArtifactsDir = artifactsDir;
@@ -381,7 +391,7 @@ export class BtwController {
 		if (signal?.aborted) return false;
 		const trimmedQuestion = question.trim();
 		if (this.#starting || this.#branchInFlight || this.#transitionCount > 0) {
-			this.ctx.showStatus("A /btw action is in progress. Please wait.", { dim: true });
+			this.ctx.showStatus(__ompTranslate("A /btw action is in progress. Please wait."), { dim: true });
 			return false;
 		}
 		const viewSession = this.ctx.focusedAgentId ? this.ctx.viewSession : this.ctx.session;
@@ -390,15 +400,20 @@ export class BtwController {
 			if (active.session !== viewSession) {
 				// Opening this view's store would dispose (cancel) the other view's live question.
 				this.ctx.showStatus(
-					"A /btw question is still running in another session view. Wait for it or cancel it first.",
+					__ompTranslate(
+						"A /btw question is still running in another session view. Wait for it or cancel it first.",
+					),
 					{ dim: true },
 				);
 				return false;
 			}
 			if (trimmedQuestion && active.sessionId === this.#sessionManager.getSessionId()) {
-				this.ctx.showStatus("A /btw question is still running. Open /btw to view it or cancel it first.", {
-					dim: true,
-				});
+				this.ctx.showStatus(
+					__ompTranslate("A /btw question is still running. Open /btw to view it or cancel it first."),
+					{
+						dim: true,
+					},
+				);
 				return false;
 			}
 		}
@@ -429,11 +444,13 @@ export class BtwController {
 				return false;
 			const previous = recordId ? store.getRecords().find(record => record.id === recordId) : undefined;
 			if (recordId && (!previous || getBtwLatestTurn(previous).status === "running")) {
-				this.ctx.showStatus("This side conversation is unavailable or still running.", { dim: true });
+				this.ctx.showStatus(__ompTranslate("This side conversation is unavailable or still running."), {
+					dim: true,
+				});
 				return false;
 			}
 			if (!viewSession.model) {
-				this.ctx.showError("No active model available for /btw.");
+				this.ctx.showError(__ompTranslate("No active model available for /btw."));
 				return false;
 			}
 			await this.#sessionManager.ensureOnDisk();
@@ -502,7 +519,9 @@ export class BtwController {
 			void this.#runRequest(request);
 			return true;
 		} catch (error) {
-			this.ctx.showError(sanitizeErrorLine(`Cannot open /btw history: ${toError(error).message}`));
+			this.ctx.showError(
+				sanitizeErrorLine(__ompTranslate("Cannot open /btw history: {0}", `${toError(error).message}`)),
+			);
 			return false;
 		} finally {
 			this.#starting = false;
@@ -582,7 +601,9 @@ export class BtwController {
 		const request = this.#activeRequest;
 		if (request && this.#isActiveRequest(request) && getBtwLatestTurn(request.record).status === "running") {
 			if (this.ctx.ui.nativeRendering) {
-				this.ctx.showStatus("/btw is still answering in the background · /btw to reopen it", { dim: true });
+				this.ctx.showStatus(__ompTranslate("/btw is still answering in the background · /btw to reopen it"), {
+					dim: true,
+				});
 			} else {
 				request.component.setAnswer(getBtwLatestTurn(request.record).answer);
 				this.#visible = true;
@@ -607,7 +628,9 @@ export class BtwController {
 				if (request.persisted) this.#failedWrites.set(request, toError(error));
 				logger.error("BTW history save failed", { error });
 				if (request.sessionId === request.sessionManager.getSessionId()) {
-					this.ctx.showError(sanitizeErrorLine(`Could not save /btw history: ${toError(error).message}`));
+					this.ctx.showError(
+						sanitizeErrorLine(__ompTranslate("Could not save /btw history: {0}", `${toError(error).message}`)),
+					);
 				}
 				return false;
 			},
@@ -649,7 +672,7 @@ export class BtwController {
 				request.component.markComplete();
 				// Tern: the sheet was put away while answering; say where the answer is.
 				if (this.ctx.ui.nativeRendering && !this.#historyOverlay) {
-					this.ctx.showStatus("/btw answer ready · /btw to read it");
+					this.ctx.showStatus(__ompTranslate("/btw answer ready · /btw to read it"));
 				}
 				const copyText = request.component.getCopyText();
 				if (copyText !== undefined) {

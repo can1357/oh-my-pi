@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -49,11 +50,11 @@ function normalizeRepositoryUrl(repository: string): string {
 export async function refreshBunGitCache(source: GitSource, cwd: string): Promise<void> {
 	const cacheResult = await runBunCli(["pm", "cache"], cwd);
 	if (cacheResult.exitCode !== 0) {
-		throw new Error(`bun pm cache failed: ${cacheResult.stderr}`);
+		throw new Error(__ompTranslate("bun pm cache failed: {0}", `${cacheResult.stderr}`));
 	}
 	const cacheDir = cacheResult.stdout.trim();
 	if (!cacheDir) {
-		throw new Error("bun pm cache returned an empty cache path");
+		throw new Error(__ompTranslate("bun pm cache returned an empty cache path"));
 	}
 
 	let entries: Dirent[];
@@ -86,7 +87,14 @@ export async function refreshBunGitCache(source: GitSource, cwd: string): Promis
 			cwd,
 		);
 		if (fetchResult.exitCode !== 0) {
-			throw new Error(`Failed to refresh Bun's git cache for ${source.host}/${source.path}: ${fetchResult.stderr}`);
+			throw new Error(
+				__ompTranslate(
+					"Failed to refresh Bun's git cache for {0}/{1}: {2}",
+					`${source.host}`,
+					`${source.path}`,
+					`${fetchResult.stderr}`,
+				),
+			);
 		}
 	}
 }

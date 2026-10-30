@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import {
 	type Component,
 	Container,
@@ -130,15 +131,15 @@ const PREVIEW_EXCERPT_CHARS = 1200;
 /** The preview follows the selection once it rests this long (holding ↓ doesn't flood the wire). */
 const PREVIEW_SETTLE_MS = 60;
 const DAY_MS = 86_400_000;
-const PINNED_GROUP = { id: "pinned", label: "Pinned" };
+const PINNED_GROUP = { id: "pinned", label: __ompTranslate("Pinned") };
 
 /** Day group of a session's last modification, relative to local midnight today. */
 function sessionDayGroup(modified: Date, startOfToday: number): { id: string; label: string } {
 	const at = modified.getTime();
-	if (at >= startOfToday) return { id: "today", label: "Today" };
-	if (at >= startOfToday - DAY_MS) return { id: "yesterday", label: "Yesterday" };
-	if (at >= startOfToday - 6 * DAY_MS) return { id: "week", label: "This week" };
-	return { id: "earlier", label: "Earlier" };
+	if (at >= startOfToday) return { id: "today", label: __ompTranslate("Today") };
+	if (at >= startOfToday - DAY_MS) return { id: "yesterday", label: __ompTranslate("Yesterday") };
+	if (at >= startOfToday - 6 * DAY_MS) return { id: "week", label: __ompTranslate("This week") };
+	return { id: "earlier", label: __ompTranslate("Earlier") };
 }
 
 /** A cwd as dim-prefix / strong-tail path spans. */
@@ -176,10 +177,10 @@ function sessionPreview(session: SessionSelectorEntry, forkedFrom: string | unde
 			["Created", created && pickerDate(created)],
 			["Modified", pickerDate(session.modified)],
 			["Size", formatBytes(session.size)],
-			["Status", status && [status]],
-			["Forked from", forkedFrom],
+			[__ompTranslate("Status"), status && [status]],
+			[__ompTranslate("Forked from"), forkedFrom],
 		]),
-		conversation.length > 0 && node("section", { head: "Conversation" }, conversation),
+		conversation.length > 0 && node("section", { head: __ompTranslate("Conversation") }, conversation),
 	]);
 }
 
@@ -263,8 +264,8 @@ interface SessionPickerMessage {
 }
 
 const SCOPE_TABS: readonly { id: "folder" | "all"; label: string }[] = [
-	{ id: "folder", label: "Current folder" },
-	{ id: "all", label: "All projects" },
+	{ id: "folder", label: __ompTranslate("Current folder") },
+	{ id: "all", label: __ompTranslate("All projects") },
 ];
 
 /** Returns the IDs of sessions whose recorded prompts match a query, best first. */
@@ -1054,7 +1055,10 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 		const title = session.title ? plainText(session.title).trim() : "";
 		const badges: { text: string; tone?: TspTone; title?: string }[] = [];
 		if (session.parentSessionPath) {
-			badges.push({ text: "fork", title: `Forked from “${this.parentLabel(session.parentSessionPath)}”` });
+			badges.push({
+				text: "fork",
+				title: __ompTranslate("Forked from “{0}”", `${this.parentLabel(session.parentSessionPath)}`),
+			});
 		}
 		if (session.path === currentPath) badges.push({ text: "current", tone: "accent" });
 		const when = pickerDate(session.modified);
@@ -1101,7 +1105,13 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 			if (!base) continue;
 			add.push(
 				now.has(key)
-					? { ...base, badges: [...(base.badges ?? []), { text: "history", title: "Matched in prompt history" }] }
+					? {
+							...base,
+							badges: [
+								...(base.badges ?? []),
+								{ text: "history", title: __ompTranslate("Matched in prompt history") },
+							],
+						}
 					: base,
 			);
 		}
@@ -1139,8 +1149,12 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 		const memo = this.#listNative;
 		if (memo?.items === items.items && memo.selected === selected && memo.query === query) return memo.node;
 		const empty: TspText = this.#showCwd
-			? [span("No sessions found", "muted")]
-			: [span("No sessions in current folder. Press ", "muted"), span("tab", "key"), span(" to view all.", "muted")];
+			? [span(__ompTranslate("No sessions found\u0004session.picker.empty"), "muted")]
+			: [
+					span(__ompTranslate("No sessions in current folder. Press "), "muted"),
+					span("tab", "key"),
+					span(__ompTranslate(" to view all."), "muted"),
+				];
 		const list = node(
 			"list",
 			{ selected: selected ?? null, filter: query.trim() || undefined, empty, virtual: true },
@@ -1206,12 +1220,17 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 
 		if (this.#menu.visibleItems.length === 0) {
 			if (this.#showCwd) {
-				lines.push(truncateToWidth(theme.fg("muted", "No sessions found"), width));
+				lines.push(
+					truncateToWidth(theme.fg("muted", __ompTranslate("No sessions found\u0004session.picker.empty")), width),
+				);
 			} else {
 				// "Current folder" scope - hint to try "all"
 				lines.push(
 					truncateToWidth(
-						theme.fg("muted", `No sessions in current folder. Press ${formatKeyHint("tab")} to view all.`),
+						theme.fg(
+							"muted",
+							__ompTranslate("No sessions in current folder. Press {0} to view all.", `${formatKeyHint("tab")}`),
+						),
 						width,
 					),
 				);
@@ -1557,7 +1576,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		onExit: () => void,
 		options: SessionSelectorOptions<T> = {},
 	) {
-		super(options.title ?? "Resume Session");
+		super(options.title ?? __ompTranslate("Resume Session"));
 
 		this.#messageContainer = new Container();
 		this.#onDelete = options.onDelete;
@@ -1571,7 +1590,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		this.#globalSessions = options.allSessions ?? null;
 		this.#getTerminalRows = options.getTerminalRows ?? (() => 24);
 		this.#fillHeight = options.fillHeight ?? false;
-		this.#title = options.title ?? "Resume Session";
+		this.#title = options.title ?? __ompTranslate("Resume Session");
 		this.#actionLabel = options.actionLabel ?? "Resume";
 		this.#pickerTitle = options.title;
 		this.#standalone = options.standalone ?? false;
@@ -1651,8 +1670,8 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 				if (!this.#loadAllSessions) return;
 				this.#toggling = true;
 				this.#messageContainer.clear();
-				this.#messageContainer.addChild(new Text(theme.fg("muted", "Loading all projects…"), 0, 0));
-				this.#message = { kind: "loading", text: "Loading all projects…" };
+				this.#messageContainer.addChild(new Text(theme.fg("muted", __ompTranslate("Loading all projects…")), 0, 0));
+				this.#message = { kind: "loading", text: __ompTranslate("Loading all projects…") };
 				this.#onRequestRender?.();
 				try {
 					global = await this.#loadAllSessions();
@@ -1744,7 +1763,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 			closeDialog();
 		};
 		this.#confirmationDialog = new HookSelectorComponent(
-			`Delete session?\n${displayName}`,
+			__ompTranslate("Delete session?\n{0}", `${displayName}`),
 			["Yes", "No"],
 			answer,
 			closeDialog,
@@ -2035,29 +2054,37 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		const loading = message?.kind === "loading";
 		const toggle = list.onToggleScope !== undefined;
 		const actions = [pickerAction("resume", this.#actionLabel, "enter", { primary: true })];
-		if (this.#onDelete) actions.push(pickerAction("delete", "Delete", "backspace"));
-		if (this.#onRename) actions.push(pickerAction("rename", "Rename", "f2"));
+		if (this.#onDelete) actions.push(pickerAction("delete", __ompTranslate("Delete"), "backspace"));
+		if (this.#onRename) actions.push(pickerAction("rename", __ompTranslate("Rename"), "f2"));
 		const pin = this.#pinAction();
 		if (pin) actions.push(pickerAction("pin", pin.label === "pin" ? "Pin" : "Unpin", bindingKeys(pin.binding)));
 		if (toggle) {
-			actions.push(pickerAction("scope", this.#scope === "all" ? "This folder" : "All projects", "tab"));
+			actions.push(
+				pickerAction(
+					"scope",
+					this.#scope === "all" ? __ompTranslate("This folder") : __ompTranslate("All projects"),
+					"tab",
+				),
+			);
 		}
 		actions.push(
-			pickerAction("close", "Close", boundKeys("app.interrupt", ["escape"])[0] ?? "escape", { end: true }),
+			pickerAction("close", __ompTranslate("Close"), boundKeys("app.interrupt", ["escape"])[0] ?? "escape", {
+				end: true,
+			}),
 		);
 		const folder = this.#scopeLabel === false ? undefined : (this.#scopeLabel ?? path.basename(getProjectDir()));
 		const title = this.#pickerTitle;
 		const placeholder =
 			loading || this.#scope === "all"
-				? "Search all sessions…"
+				? __ompTranslate("Search all sessions…")
 				: folder && !title
-					? `Search sessions in ${folder}…`
-					: "Search sessions…";
+					? __ompTranslate("Search sessions in {0}…", `${folder}`)
+					: __ompTranslate("Search sessions…");
 		const result = picker(
 			{
 				...(title ? { title, ...(folder ? { subtitle: folder } : {}) } : {}),
 				icon: "history",
-				noun: "sessions",
+				noun: __ompTranslate("sessions"),
 				size: this.#standalone ? "screen" : "lg",
 				layout: "cards",
 				preview: "side",
@@ -2078,12 +2105,18 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 				actions,
 				state: loading ? "loading" : errorOpen ? "error" : "ready",
 				...(loading || errorOpen ? { message: message!.text } : {}),
-				empty: this.#scope === "all" || !toggle ? "No sessions yet" : "No sessions in this folder yet",
+				empty:
+					this.#scope === "all" || !toggle
+						? __ompTranslate("No sessions yet")
+						: __ompTranslate("No sessions in this folder yet"),
 				confirm: choice
 					? {
-							text: `Delete “${sessionLabel(choice.session)}”? This removes the session file.`,
+							text: __ompTranslate(
+								"Delete “{0}”? This removes the session file.",
+								`${sessionLabel(choice.session)}`,
+							),
 							act: "delete-confirm",
-							label: "Delete",
+							label: __ompTranslate("Delete"),
 						}
 					: null,
 			},

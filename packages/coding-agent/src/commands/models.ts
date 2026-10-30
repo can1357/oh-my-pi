@@ -2,6 +2,7 @@
  * List, search, and refresh available models.
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { MODEL_KINDS, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { APP_NAME } from "@oh-my-pi/pi-utils";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
@@ -14,43 +15,49 @@ export default class Models extends Command {
 	static description = commandHelp.description;
 	static args = {
 		action: Args.string({
-			description: "ls (default) | find | refresh | <provider>",
+			description: __ompTranslate("ls (default) | find | refresh | <provider>"),
 			required: false,
 		}),
 		pattern: Args.string({
-			description: "Filter/search substring, or provider name (required for find)",
+			description: __ompTranslate("Filter/search substring, or provider name (required for find)"),
 			required: false,
 		}),
 	};
 
 	static flags = {
-		json: Flags.boolean({ description: "Output JSON" }),
+		json: Flags.boolean({ description: __ompTranslate("Output JSON") }),
 		kind: Flags.string({
-			description: "Catalog kind to list",
+			description: __ompTranslate("Catalog kind to list"),
 			options: MODEL_KIND_OPTIONS,
 			default: "chat",
 		}),
 		extension: Flags.string({
 			char: "e",
-			description: "Load an extension file before listing (repeatable)",
+			description: __ompTranslate("Load an extension file before listing (repeatable)"),
 			multiple: true,
 		}),
 		"no-extensions": Flags.boolean({
-			description: "Disable extension discovery (explicit -e paths still work)",
+			description: __ompTranslate("Disable extension discovery (explicit -e paths still work)"),
 		}),
 		config: Flags.string({
-			description: "Load an extra config.yml-style overlay for this run (repeatable)",
+			description: __ompTranslate("Load an extra config.yml-style overlay for this run (repeatable)"),
 			multiple: true,
 		}),
 	};
 
 	static examples = [
-		`# List available chat models, grouped by provider\n  ${APP_NAME} models`,
-		`# List models of every catalog kind\n  ${APP_NAME} models --kind all`,
-		`# List one provider's models (any provider name works)\n  ${APP_NAME} models openai-codex`,
-		`# Find models by substring\n  ${APP_NAME} models find minimax`,
-		`# Force a fresh catalog fetch (replaces rm -rf ~/.omp/models.db)\n  ${APP_NAME} models refresh`,
-		`# Machine-readable output\n  ${APP_NAME} models --json`,
+		__ompTranslate("# List available chat models, grouped by provider\n  {0} models", `${APP_NAME}`),
+		__ompTranslate("# List models of every catalog kind\n  {0} models --kind all", `${APP_NAME}`),
+		__ompTranslate(
+			"# List one provider's models (any provider name works)\n  {0} models openai-codex",
+			`${APP_NAME}`,
+		),
+		__ompTranslate("# Find models by substring\n  {0} models find minimax", `${APP_NAME}`),
+		__ompTranslate(
+			"# Force a fresh catalog fetch (replaces rm -rf ~/.omp/models.db)\n  {0} models refresh",
+			`${APP_NAME}`,
+		),
+		__ompTranslate("# Machine-readable output\n  {0} models --json", `${APP_NAME}`),
 	];
 
 	async run(): Promise<void> {

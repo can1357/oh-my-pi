@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { combine, register } from "../config/registry";
 import { cfgAutolearnEnabled } from "../autolearn/settings";
 import { cfgBashEnabled } from "../exec/settings";
@@ -16,21 +17,21 @@ export const cfgToolsArtifactSpillThreshold = register({
 	ui: {
 		tab: "tools",
 		group: "Output Limits",
-		label: "Artifact Spill Threshold (KB)",
+		label: __ompTranslate("Artifact Spill Threshold (KB)"),
 		description: "Tool output above this size is saved as an artifact; tail is kept inline",
 		options: [
-			{ value: "1", label: "1 KB", description: "~250 tokens" },
-			{ value: "2.5", label: "2.5 KB", description: "~625 tokens" },
-			{ value: "5", label: "5 KB", description: "~1.25K tokens" },
-			{ value: "10", label: "10 KB", description: "~2.5K tokens" },
-			{ value: "20", label: "20 KB", description: "~5K tokens" },
-			{ value: "30", label: "30 KB", description: "~7.5K tokens" },
-			{ value: "50", label: "50 KB", description: "Default; ~12.5K tokens" },
-			{ value: "75", label: "75 KB", description: "~19K tokens" },
-			{ value: "100", label: "100 KB", description: "~25K tokens" },
-			{ value: "200", label: "200 KB", description: "~50K tokens" },
-			{ value: "500", label: "500 KB", description: "~125K tokens" },
-			{ value: "1000", label: "1 MB", description: "~250K tokens" },
+			{ value: "1", label: "1 KB", description: __ompTranslate("~250 tokens") },
+			{ value: "2.5", label: "2.5 KB", description: __ompTranslate("~625 tokens") },
+			{ value: "5", label: "5 KB", description: __ompTranslate("~1.25K tokens") },
+			{ value: "10", label: "10 KB", description: __ompTranslate("~2.5K tokens") },
+			{ value: "20", label: "20 KB", description: __ompTranslate("~5K tokens") },
+			{ value: "30", label: "30 KB", description: __ompTranslate("~7.5K tokens") },
+			{ value: "50", label: "50 KB", description: __ompTranslate("Default; ~12.5K tokens") },
+			{ value: "75", label: "75 KB", description: __ompTranslate("~19K tokens") },
+			{ value: "100", label: "100 KB", description: __ompTranslate("~25K tokens") },
+			{ value: "200", label: "200 KB", description: __ompTranslate("~50K tokens") },
+			{ value: "500", label: "500 KB", description: __ompTranslate("~125K tokens") },
+			{ value: "1000", label: "1 MB", description: __ompTranslate("~250K tokens") },
 		],
 	},
 });
@@ -42,17 +43,17 @@ export const cfgToolsArtifactTailBytes = register({
 	ui: {
 		tab: "tools",
 		group: "Output Limits",
-		label: "Artifact Tail Size (KB)",
+		label: __ompTranslate("Artifact Tail Size (KB)"),
 		description: "Amount of tail content kept inline when output spills to artifact",
 		options: [
-			{ value: "1", label: "1 KB", description: "~250 tokens" },
-			{ value: "2.5", label: "2.5 KB", description: "~625 tokens" },
-			{ value: "5", label: "5 KB", description: "~1.25K tokens" },
-			{ value: "10", label: "10 KB", description: "~2.5K tokens" },
-			{ value: "20", label: "20 KB", description: "Default; ~5K tokens" },
-			{ value: "50", label: "50 KB", description: "~12.5K tokens" },
-			{ value: "100", label: "100 KB", description: "~25K tokens" },
-			{ value: "200", label: "200 KB", description: "~50K tokens" },
+			{ value: "1", label: "1 KB", description: __ompTranslate("~250 tokens") },
+			{ value: "2.5", label: "2.5 KB", description: __ompTranslate("~625 tokens") },
+			{ value: "5", label: "5 KB", description: __ompTranslate("~1.25K tokens") },
+			{ value: "10", label: "10 KB", description: __ompTranslate("~2.5K tokens") },
+			{ value: "20", label: "20 KB", description: __ompTranslate("Default; ~5K tokens") },
+			{ value: "50", label: "50 KB", description: __ompTranslate("~12.5K tokens") },
+			{ value: "100", label: "100 KB", description: __ompTranslate("~25K tokens") },
+			{ value: "200", label: "200 KB", description: __ompTranslate("~50K tokens") },
 		],
 	},
 });
@@ -64,19 +65,19 @@ export const cfgToolsArtifactHeadBytes = register({
 	ui: {
 		tab: "tools",
 		group: "Output Limits",
-		label: "Artifact Head Size (KB)",
+		label: __ompTranslate("Artifact Head Size (KB)"),
 		description:
 			"Amount of head content kept inline alongside the tail when output spills to artifact (middle elision). 0 disables — keep tail only.",
 		options: [
-			{ value: "0", label: "0 KB", description: "Disabled; tail-only truncation" },
-			{ value: "1", label: "1 KB", description: "~250 tokens" },
-			{ value: "2.5", label: "2.5 KB", description: "~625 tokens" },
-			{ value: "5", label: "5 KB", description: "~1.25K tokens" },
-			{ value: "10", label: "10 KB", description: "~2.5K tokens" },
-			{ value: "20", label: "20 KB", description: "Default; ~5K tokens" },
-			{ value: "50", label: "50 KB", description: "~12.5K tokens" },
-			{ value: "100", label: "100 KB", description: "~25K tokens" },
-			{ value: "200", label: "200 KB", description: "~50K tokens" },
+			{ value: "0", label: "0 KB", description: __ompTranslate("Disabled; tail-only truncation") },
+			{ value: "1", label: "1 KB", description: __ompTranslate("~250 tokens") },
+			{ value: "2.5", label: "2.5 KB", description: __ompTranslate("~625 tokens") },
+			{ value: "5", label: "5 KB", description: __ompTranslate("~1.25K tokens") },
+			{ value: "10", label: "10 KB", description: __ompTranslate("~2.5K tokens") },
+			{ value: "20", label: "20 KB", description: __ompTranslate("Default; ~5K tokens") },
+			{ value: "50", label: "50 KB", description: __ompTranslate("~12.5K tokens") },
+			{ value: "100", label: "100 KB", description: __ompTranslate("~25K tokens") },
+			{ value: "200", label: "200 KB", description: __ompTranslate("~50K tokens") },
 		],
 	},
 });
@@ -88,17 +89,17 @@ export const cfgToolsOutputMaxColumns = register({
 	ui: {
 		tab: "tools",
 		group: "Output Limits",
-		label: "Output Column Cap",
+		label: __ompTranslate("Output Column Cap"),
 		description:
 			"Per-line byte cap for streaming tool outputs (bash, python, js eval) and `read`. Lines wider than this are ellipsis-truncated; remaining bytes up to the next newline are dropped. 0 disables.",
 		options: [
-			{ value: "0", label: "Off", description: "No per-line cap" },
-			{ value: "256", label: "256", description: "Tight" },
+			{ value: "0", label: __ompTranslate("Off"), description: __ompTranslate("No per-line cap") },
+			{ value: "256", label: "256", description: __ompTranslate("Tight") },
 			{ value: "512", label: "512" },
-			{ value: "768", label: "768", description: "Default" },
+			{ value: "768", label: "768", description: __ompTranslate("Default\u0004settings.value.default") },
 			{ value: "1024", label: "1024" },
 			{ value: "2048", label: "2048" },
-			{ value: "4096", label: "4096", description: "Loose" },
+			{ value: "4096", label: "4096", description: __ompTranslate("Loose") },
 		],
 	},
 });
@@ -110,16 +111,32 @@ export const cfgToolsArtifactTailLines = register({
 	ui: {
 		tab: "tools",
 		group: "Output Limits",
-		label: "Artifact Tail Lines",
+		label: __ompTranslate("Artifact Tail Lines"),
 		description: "Maximum lines of tail content kept inline when output spills to artifact",
 		options: [
-			{ value: "50", label: "50 lines", description: "~250 tokens" },
-			{ value: "100", label: "100 lines", description: "~500 tokens" },
-			{ value: "250", label: "250 lines", description: "~1.25K tokens" },
-			{ value: "500", label: "500 lines", description: "Default; ~2.5K tokens" },
-			{ value: "1000", label: "1000 lines", description: "~5K tokens" },
-			{ value: "2000", label: "2000 lines", description: "~10K tokens" },
-			{ value: "5000", label: "5000 lines", description: "~25K tokens" },
+			{ value: "50", label: __ompTranslate("50 lines"), description: __ompTranslate("~250 tokens") },
+			{
+				value: "100",
+				label: __ompTranslate("100 lines\u0004tool.artifact.tail-lines"),
+				description: __ompTranslate("~500 tokens"),
+			},
+			{
+				value: "250",
+				label: __ompTranslate("250 lines\u0004tool.artifact.tail-lines"),
+				description: __ompTranslate("~1.25K tokens"),
+			},
+			{
+				value: "500",
+				label: __ompTranslate("500 lines\u0004tool.artifact.tail-lines"),
+				description: __ompTranslate("Default; ~2.5K tokens"),
+			},
+			{
+				value: "1000",
+				label: __ompTranslate("1000 lines\u0004tool.artifact.tail-lines"),
+				description: __ompTranslate("~5K tokens"),
+			},
+			{ value: "2000", label: __ompTranslate("2000 lines"), description: __ompTranslate("~10K tokens") },
+			{ value: "5000", label: __ompTranslate("5000 lines"), description: __ompTranslate("~25K tokens") },
 		],
 	},
 });
@@ -131,13 +148,13 @@ export const cfgToolsArtifactMaxBytes = register({
 	ui: {
 		tab: "tools",
 		group: "Output Limits",
-		label: "Artifact File Cap (MB)",
+		label: __ompTranslate("Artifact File Cap (MB)"),
 		description:
 			"Maximum size of the artifact file saved for streaming tool output (bash, python, js eval). Larger output keeps its beginning (up to 3 MB) and its most recent remainder, with a truncation notice between them. 0 = unlimited.",
 		options: [
-			{ value: "0", label: "Unlimited", description: "Save the complete output" },
+			{ value: "0", label: __ompTranslate("Unlimited"), description: __ompTranslate("Save the complete output") },
 			{ value: "4", label: "4 MB" },
-			{ value: "16", label: "16 MB", description: "Default" },
+			{ value: "16", label: "16 MB", description: __ompTranslate("Default\u0004settings.value.default") },
 			{ value: "64", label: "64 MB" },
 			{ value: "256", label: "256 MB" },
 			{ value: "1024", label: "1 GB" },
@@ -152,7 +169,7 @@ export const cfgReadLineNumbers = register({
 	ui: {
 		tab: "files",
 		group: "Reading",
-		label: "Line Numbers",
+		label: __ompTranslate("Line Numbers"),
 		description: "Prepend line numbers to read tool output by default",
 	},
 });
@@ -164,14 +181,14 @@ export const cfgReadDefaultLimit = register({
 	ui: {
 		tab: "files",
 		group: "Reading",
-		label: "Default Read Limit",
+		label: __ompTranslate("Default Read Limit"),
 		description: "Default number of lines returned when agent calls read without a limit",
 		options: [
-			{ value: "200", label: "200 lines" },
-			{ value: "300", label: "300 lines" },
-			{ value: "500", label: "500 lines" },
-			{ value: "1000", label: "1000 lines" },
-			{ value: "5000", label: "5000 lines" },
+			{ value: "200", label: __ompTranslate("200 lines") },
+			{ value: "300", label: __ompTranslate("300 lines") },
+			{ value: "500", label: __ompTranslate("500 lines\u0004tool.artifact.tail-lines") },
+			{ value: "1000", label: __ompTranslate("1000 lines\u0004tool.artifact.tail-lines") },
+			{ value: "5000", label: __ompTranslate("5000 lines") },
 		],
 	},
 });
@@ -183,7 +200,7 @@ export const cfgReadRenderMarkdown = register({
 	ui: {
 		tab: "files",
 		group: "Reading",
-		label: "Markdown Previews",
+		label: __ompTranslate("Markdown Previews"),
 		description: "Render Markdown read results as formatted terminal Markdown previews instead of raw source",
 	},
 });
@@ -195,7 +212,7 @@ export const cfgReadSummarizeEnabled = register({
 	ui: {
 		tab: "files",
 		group: "Read Summaries",
-		label: "Read Summaries",
+		label: __ompTranslate("Read Summaries"),
 		description: "Return structural code summaries when read is called without an explicit selector",
 	},
 });
@@ -207,7 +224,7 @@ export const cfgReadSummarizeProse = register({
 	ui: {
 		tab: "files",
 		group: "Read Summaries",
-		label: "Prose Summaries",
+		label: __ompTranslate("Prose Summaries"),
 		description: "Return structural summaries for Markdown and plain text reads",
 	},
 });
@@ -219,7 +236,7 @@ export const cfgReadSummarizeMinBodyLines = register({
 	ui: {
 		tab: "files",
 		group: "Read Summaries",
-		label: "Read Summary Body Lines",
+		label: __ompTranslate("Read Summary Body Lines"),
 		description: "Minimum multiline body or literal length before read summaries collapse it",
 	},
 });
@@ -231,7 +248,7 @@ export const cfgReadSummarizeMinCommentLines = register({
 	ui: {
 		tab: "files",
 		group: "Read Summaries",
-		label: "Read Summary Comment Lines",
+		label: __ompTranslate("Read Summary Comment Lines"),
 		description: "Minimum multiline block comment length before read summaries collapse it",
 	},
 });
@@ -243,7 +260,7 @@ export const cfgReadSummarizeMinTotalLines = register({
 	ui: {
 		tab: "files",
 		group: "Read Summaries",
-		label: "Read Summary Minimum File Length",
+		label: __ompTranslate("Read Summary Minimum File Length"),
 		description: "Files with fewer total lines are read verbatim instead of structurally summarized",
 	},
 });
@@ -255,7 +272,7 @@ export const cfgReadSummarizeUnfoldUntil = register({
 	ui: {
 		tab: "files",
 		group: "Read Summaries",
-		label: "Read Summary Unfold Target",
+		label: __ompTranslate("Read Summary Unfold Target"),
 		description:
 			"BFS-unfold elidable spans until the summary is at least this many visible lines. 0 keeps only the outermost elisions.",
 	},
@@ -268,7 +285,7 @@ export const cfgReadSummarizeUnfoldLimit = register({
 	ui: {
 		tab: "files",
 		group: "Read Summaries",
-		label: "Read Summary Unfold Ceiling",
+		label: __ompTranslate("Read Summary Unfold Ceiling"),
 		description:
 			"Hard ceiling on summary size while BFS-unfolding. An unfold whose revealed lines would exceed this is skipped (that span stays folded) and unfolding continues with the remaining spans.",
 	},
@@ -281,7 +298,7 @@ export const cfgReadToolResultPreview = register({
 	ui: {
 		tab: "files",
 		group: "Reading",
-		label: "Inline Read Previews",
+		label: __ompTranslate("Inline Read Previews"),
 		description: "Render read tool results inline in the transcript instead of summary rows",
 	},
 });
@@ -298,7 +315,7 @@ export const cfgToolsApproval = register({
 	ui: {
 		tab: "interaction",
 		group: "Approvals",
-		label: "Tool Approval Policies",
+		label: __ompTranslate("Tool Approval Policies"),
 		description:
 			"Per-tool approval policies. Set to 'allow' to auto-approve, 'prompt' to require confirmation, or 'deny' to block. Overrides are honored in every approval mode.",
 	},
@@ -318,32 +335,35 @@ export const cfgToolsApprovalMode = register({
 	ui: {
 		tab: "interaction",
 		group: "Approvals",
-		label: "Tool Approval",
+		label: __ompTranslate("Tool Approval"),
 		description:
 			"Default approval behavior for tool calls. 'Always ask' auto-approves read-only tools only. 'Ask and remember' also asks before file reads, and can remember a file or folder. 'Write' auto-approves read and workspace-write tools. 'Yolo' auto-approves all tiers; user policy may still prompt or block.",
 		options: [
 			{
 				value: "always-ask",
-				label: "Always ask",
-				description: "Auto-approve read-only tools; require confirmation for write and exec tools.",
+				label: __ompTranslate("Always ask"),
+				description: __ompTranslate("Auto-approve read-only tools; require confirmation for write and exec tools."),
 			},
 			{
 				value: "always-ask-cached",
-				label: "Ask and remember",
-				description:
+				label: __ompTranslate("Ask and remember"),
+				description: __ompTranslate(
 					"Ask before reading or writing a file, with answers that remember the file or its folder for this session or every session; require confirmation for exec tools.",
+				),
 			},
 			{
 				value: "write",
-				label: "Write",
-				description:
+				label: __ompTranslate("Write"),
+				description: __ompTranslate(
 					"Auto-approve read-only and write tools; require confirmation for exec tools such as bash, eval, browser, and task.",
+				),
 			},
 			{
 				value: "yolo",
-				label: "Yolo",
-				description:
+				label: __ompTranslate("Yolo"),
+				description: __ompTranslate(
 					"Auto-approve read, write, and exec tools. User policy can still require confirmation or block calls.",
+				),
 			},
 		],
 	},
@@ -381,7 +401,7 @@ export const cfgTodoEnabled = register({
 	ui: {
 		tab: "tools",
 		group: "Available Tools",
-		label: "Todos",
+		label: __ompTranslate("Todos"),
 		description: "Enable the todo tool for task tracking",
 	},
 });
@@ -393,7 +413,7 @@ export const cfgTodoReminders = register({
 	ui: {
 		tab: "tools",
 		group: "Todos",
-		label: "Todo Reminders",
+		label: __ompTranslate("Todo Reminders"),
 		description: "Remind the agent to complete todos before stopping",
 	},
 });
@@ -405,13 +425,13 @@ export const cfgTodoRemindersMax = register({
 	ui: {
 		tab: "tools",
 		group: "Todos",
-		label: "Todo Reminder Limit",
+		label: __ompTranslate("Todo Reminder Limit"),
 		description: "Maximum number of todo reminders before giving up",
 		options: [
-			{ value: "1", label: "1 reminder" },
-			{ value: "2", label: "2 reminders" },
-			{ value: "3", label: "3 reminders" },
-			{ value: "5", label: "5 reminders" },
+			{ value: "1", label: __ompTranslate("1 reminder") },
+			{ value: "2", label: __ompTranslate("2 reminders") },
+			{ value: "3", label: __ompTranslate("3 reminders") },
+			{ value: "5", label: __ompTranslate("5 reminders") },
 		],
 	},
 });
@@ -424,16 +444,24 @@ export const cfgTodoEager = register({
 	ui: {
 		tab: "tools",
 		group: "Todos",
-		label: "Create Todos Automatically",
+		label: __ompTranslate("Create Todos Automatically"),
 		description: "How strongly to push automatic todo-list creation after the first message",
 		options: [
-			{ value: "default", label: "Default", description: "Model decides; no automatic todo list" },
+			{
+				value: "default",
+				label: __ompTranslate("Default\u0004settings.value.default"),
+				description: __ompTranslate("Model decides; no automatic todo list"),
+			},
 			{
 				value: "preferred",
-				label: "Preferred",
-				description: "Suggests a todo list on the first message (reminder, not forced)",
+				label: __ompTranslate("Preferred"),
+				description: __ompTranslate("Suggests a todo list on the first message (reminder, not forced)"),
 			},
-			{ value: "always", label: "Always", description: "Forces a comprehensive todo list on the first message" },
+			{
+				value: "always",
+				label: __ompTranslate("Always"),
+				description: __ompTranslate("Forces a comprehensive todo list on the first message"),
+			},
 		],
 	},
 });
@@ -445,16 +473,20 @@ export const cfgTasksTodoClearDelay = register({
 	ui: {
 		tab: "tools",
 		group: "Todos",
-		label: "Todo Auto-Clear Delay",
+		label: __ompTranslate("Todo Auto-Clear Delay"),
 		description: "Delay before completed or abandoned todos are removed from the todo widget",
 		options: [
-			{ value: "0", label: "Instant" },
-			{ value: "60", label: "1 minute", description: "Default" },
-			{ value: "300", label: "5 minutes" },
-			{ value: "900", label: "15 minutes" },
-			{ value: "1800", label: "30 minutes" },
-			{ value: "3600", label: "1 hour" },
-			{ value: "-1", label: "Never" },
+			{ value: "0", label: __ompTranslate("Instant") },
+			{
+				value: "60",
+				label: __ompTranslate("1 minute"),
+				description: __ompTranslate("Default\u0004settings.value.default"),
+			},
+			{ value: "300", label: __ompTranslate("5 minutes") },
+			{ value: "900", label: __ompTranslate("15 minutes") },
+			{ value: "1800", label: __ompTranslate("30 minutes") },
+			{ value: "3600", label: __ompTranslate("1 hour") },
+			{ value: "-1", label: __ompTranslate("Never\u0004todo.auto-clear.never") },
 		],
 	},
 });
@@ -491,14 +523,14 @@ export const cfgGrepContextBefore = register({
 	ui: {
 		tab: "tools",
 		group: "Grep & Browser",
-		label: "Grep Context Before",
+		label: __ompTranslate("Grep Context Before"),
 		description: "Lines of context before each grep match",
 		options: [
-			{ value: "0", label: "0 lines" },
-			{ value: "1", label: "1 line" },
-			{ value: "2", label: "2 lines" },
-			{ value: "3", label: "3 lines" },
-			{ value: "5", label: "5 lines" },
+			{ value: "0", label: __ompTranslate("0 lines") },
+			{ value: "1", label: __ompTranslate("1 line") },
+			{ value: "2", label: __ompTranslate("2 lines") },
+			{ value: "3", label: __ompTranslate("3 lines") },
+			{ value: "5", label: __ompTranslate("5 lines") },
 		],
 	},
 });
@@ -510,15 +542,15 @@ export const cfgGrepContextAfter = register({
 	ui: {
 		tab: "tools",
 		group: "Grep & Browser",
-		label: "Grep Context After",
+		label: __ompTranslate("Grep Context After"),
 		description: "Lines of context after each grep match",
 		options: [
-			{ value: "0", label: "0 lines" },
-			{ value: "1", label: "1 line" },
-			{ value: "2", label: "2 lines" },
-			{ value: "3", label: "3 lines" },
-			{ value: "5", label: "5 lines" },
-			{ value: "10", label: "10 lines" },
+			{ value: "0", label: __ompTranslate("0 lines") },
+			{ value: "1", label: __ompTranslate("1 line") },
+			{ value: "2", label: __ompTranslate("2 lines") },
+			{ value: "3", label: __ompTranslate("3 lines") },
+			{ value: "5", label: __ompTranslate("5 lines") },
+			{ value: "10", label: __ompTranslate("10 lines") },
 		],
 	},
 });
@@ -530,7 +562,7 @@ export const cfgAstGrepEnabled = register({
 	ui: {
 		tab: "tools",
 		group: "Available Tools",
-		label: "AST Grep",
+		label: __ompTranslate("AST Grep"),
 		description: "Enable the ast_grep tool for structural AST search",
 	},
 });
@@ -542,7 +574,7 @@ export const cfgAstEditEnabled = register({
 	ui: {
 		tab: "tools",
 		group: "Available Tools",
-		label: "AST Edit",
+		label: __ompTranslate("AST Edit"),
 		description: "Enable the ast_edit tool for structural AST rewrites",
 	},
 });
@@ -555,17 +587,21 @@ export const cfgFindEnabled = register({
 	ui: {
 		tab: "tools",
 		group: "Available Tools",
-		label: "Find (semantic grep)",
+		label: __ompTranslate("Find (semantic grep)"),
 		description:
 			"Enable the find tool: natural-language search for files and line ranges, judged by the judge model role. Auto enables it only when the judge role resolves to a native TypeSafe jev model",
 		options: [
 			{
 				value: "auto",
-				label: "Auto",
-				description: "Enable when the judge role resolves to a native TypeSafe jev model",
+				label: __ompTranslate("Auto"),
+				description: __ompTranslate("Enable when the judge role resolves to a native TypeSafe jev model"),
 			},
-			{ value: "on", label: "On", description: "Always enable, whichever model the judge role resolves to" },
-			{ value: "off", label: "Off", description: "Disable the find tool" },
+			{
+				value: "on",
+				label: __ompTranslate("On"),
+				description: __ompTranslate("Always enable, whichever model the judge role resolves to"),
+			},
+			{ value: "off", label: __ompTranslate("Off"), description: __ompTranslate("Disable the find tool") },
 		],
 	},
 });
@@ -579,7 +615,7 @@ export const cfgDebugEnabled = register({
 	ui: {
 		tab: "tools",
 		group: "Available Tools",
-		label: "Debug",
+		label: __ompTranslate("Debug\u0004tool.debug.setting"),
 		description: "Enable the debug tool for DAP-based debugging",
 	},
 });
@@ -591,7 +627,7 @@ export const cfgLaunchEnabled = register({
 	ui: {
 		tab: "tools",
 		group: "Available Tools",
-		label: "Services",
+		label: __ompTranslate("Services"),
 		description: "Enable named bash services and proc:// supervision for shared long-running project processes",
 	},
 });
@@ -603,7 +639,7 @@ export const cfgSpeechgenEnabled = register({
 	ui: {
 		tab: "tools",
 		group: "Available Tools",
-		label: "Speech Generation",
+		label: __ompTranslate("Speech Generation"),
 		description: "Enable the tts tool for on-device (Kokoro) or xAI Grok Voice speech-file synthesis",
 	},
 });
@@ -615,7 +651,7 @@ export const cfgGenerateImageEnabled = register({
 	ui: {
 		tab: "tools",
 		group: "Available Tools",
-		label: "Generate Image",
+		label: __ompTranslate("Generate Image"),
 		description:
 			"Enable the generate_image tool (text-to-image generation and editing). Exposed as an xd:// device when tools.xdev is on.",
 	},
@@ -628,7 +664,7 @@ export const cfgComputerEnabled = register({
 	ui: {
 		tab: "tools",
 		group: "Available Tools",
-		label: "Computer",
+		label: __ompTranslate("Computer"),
 		description: "Enable the scriptable host-desktop eval prelude (screenshots, input, accessibility)",
 	},
 });
@@ -652,7 +688,7 @@ export const cfgArchiveEnabled = register({
 	ui: {
 		tab: "tools",
 		group: "Available Tools",
-		label: "Archive",
+		label: __ompTranslate("Archive"),
 		description:
 			"Enable the read-only archive eval prelude: prompt history, recent projects, past sessions and recaps",
 	},
@@ -665,7 +701,7 @@ export const cfgComputerDisplay = register({
 	ui: {
 		tab: "tools",
 		group: "Computer",
-		label: "Computer Display",
+		label: __ompTranslate("Computer Display"),
 		description: "Active window's display (active), all displays (all), or a native display id",
 	},
 });
@@ -677,7 +713,7 @@ export const cfgComputerMaxWidth = register({
 	ui: {
 		tab: "tools",
 		group: "Computer",
-		label: "Computer Screenshot Width",
+		label: __ompTranslate("Computer Screenshot Width"),
 		description: "Maximum screenshot width in pixels",
 	},
 });
@@ -689,7 +725,7 @@ export const cfgComputerMaxHeight = register({
 	ui: {
 		tab: "tools",
 		group: "Computer",
-		label: "Computer Screenshot Height",
+		label: __ompTranslate("Computer Screenshot Height"),
 		description: "Maximum screenshot height in pixels",
 	},
 });
@@ -702,21 +738,23 @@ export const cfgComputerBackgroundFallback = register({
 	ui: {
 		tab: "tools",
 		group: "Computer",
-		label: "Computer Background Fallback",
+		label: __ompTranslate("Computer Background Fallback"),
 		description:
 			"What window input does when its background route is unavailable: rerun it in takeover and return focus to your app (macOS; elsewhere plain takeover), or refuse, which also keeps the agent from taking the foreground or opening macOS menus itself",
 		options: [
 			{
 				value: "takeover",
-				label: "Takeover",
-				description:
+				label: __ompTranslate("Takeover"),
+				description: __ompTranslate(
 					"Briefly bring the target forward for that one call, then return focus to your app (on macOS even if you kept typing)",
+				),
 			},
 			{
 				value: "refuse",
-				label: "Refuse",
-				description:
+				label: __ompTranslate("Refuse"),
+				description: __ompTranslate(
 					"Fail the call; nothing takes over, and the agent's own takeover, raise, activating open, desktop input and macOS menus (context menus, popup and menu buttons; they take your keyboard while open) are refused too",
+				),
 			},
 		],
 	},
@@ -729,15 +767,15 @@ export const cfgImagesQuestionTimeoutMs = register({
 	ui: {
 		tab: "tools",
 		group: "Execution",
-		label: "Image Question Timeout",
+		label: __ompTranslate("Image Question Timeout"),
 		description:
 			"Per-request timeout for the vision-model call behind read's ?q= image questions, in milliseconds. A stalled provider fails fast with a timeout error instead of blocking until manual abort. Set to 0 to disable the timeout.",
 		options: [
-			{ value: "0", label: "Disabled" },
-			{ value: "60000", label: "1 minute" },
-			{ value: "120000", label: "2 minutes" },
-			{ value: "180000", label: "3 minutes" },
-			{ value: "300000", label: "5 minutes" },
+			{ value: "0", label: __ompTranslate("Disabled\u0004display.shimmer.disabled") },
+			{ value: "60000", label: __ompTranslate("1 minute") },
+			{ value: "120000", label: __ompTranslate("2 minutes") },
+			{ value: "180000", label: __ompTranslate("3 minutes") },
+			{ value: "300000", label: __ompTranslate("5 minutes") },
 		],
 	},
 });
@@ -749,7 +787,7 @@ export const cfgCheckpointEnabled = register({
 	ui: {
 		tab: "tools",
 		group: "Available Tools",
-		label: "Checkpoint/Rewind",
+		label: __ompTranslate("Checkpoint/Rewind"),
 		description: "Enable the checkpoint and rewind tools for context checkpointing",
 	},
 });
@@ -762,7 +800,7 @@ export const cfgFetchEnabled = register({
 	ui: {
 		tab: "tools",
 		group: "Available Tools",
-		label: "Read URLs",
+		label: __ompTranslate("Read URLs"),
 		description: "Allow the read tool to fetch and process URLs",
 	},
 });
@@ -774,7 +812,7 @@ export const cfgVaultEnabled = register({
 	ui: {
 		tab: "tools",
 		group: "Available Tools",
-		label: "Obsidian Vault",
+		label: __ompTranslate("Obsidian Vault"),
 		description:
 			"Enable the vault:// internal URL for reading and editing Obsidian vault content via the Obsidian CLI. When disabled, vault:// resolution is refused and the vault:// entry is omitted from the system prompt.",
 	},
@@ -800,7 +838,7 @@ export const cfgGithubCacheEnabled = register({
 	ui: {
 		tab: "tools",
 		group: "GitHub",
-		label: "GitHub View Cache",
+		label: __ompTranslate("GitHub View Cache"),
 		description: "Cache rendered issue/PR view output in ~/.omp/cache/github-cache.db so repeated reads are free",
 	},
 });
@@ -812,7 +850,7 @@ export const cfgGithubCacheSoftTtlSec = register({
 	ui: {
 		tab: "tools",
 		group: "GitHub",
-		label: "GitHub Cache Soft TTL",
+		label: __ompTranslate("GitHub Cache Soft TTL"),
 		description: "Within this window, cached issue/PR view rows are returned directly (seconds; default 5 minutes)",
 	},
 });
@@ -824,7 +862,7 @@ export const cfgGithubCacheHardTtlSec = register({
 	ui: {
 		tab: "tools",
 		group: "GitHub",
-		label: "GitHub Cache Hard TTL",
+		label: __ompTranslate("GitHub Cache Hard TTL"),
 		description:
 			"Past the soft TTL the cached row is returned and refreshed in the background; past the hard TTL it is dropped (seconds; default 7 days)",
 	},
@@ -837,7 +875,7 @@ export const cfgWebSearchEnabled = register({
 	ui: {
 		tab: "tools",
 		group: "Available Tools",
-		label: "Web Search",
+		label: __ompTranslate("Web Search"),
 		description: "Enable the web_search tool for live web results",
 	},
 });
@@ -849,7 +887,7 @@ export const cfgSecurityEnabled = register({
 	ui: {
 		tab: "tools",
 		group: "Available Tools",
-		label: "Security",
+		label: __ompTranslate("Security"),
 		description:
 			"Enable OMP-native security scan planning, execution, and the read-only security:// resource namespace",
 	},
@@ -862,7 +900,7 @@ export const cfgAskEnabled = register({
 	ui: {
 		tab: "tools",
 		group: "Available Tools",
-		label: "Ask",
+		label: __ompTranslate("Ask\u0004tool.ask.action"),
 		description: "Enable the ask tool for interactive user questions",
 	},
 });
@@ -889,7 +927,7 @@ export const cfgToolsIntentTracing = register({
 	ui: {
 		tab: "tools",
 		group: "Execution",
-		label: "Intent Tracing",
+		label: __ompTranslate("Intent Tracing"),
 		description: "Ask the agent to describe the intent of each tool call before executing it",
 	},
 });
@@ -901,7 +939,7 @@ export const cfgToolsAbortOnFabricatedResult = register({
 	ui: {
 		tab: "tools",
 		group: "Execution",
-		label: "Abort On Fabricated Tool Result",
+		label: __ompTranslate("Abort On Fabricated Tool Result"),
 		description:
 			"With in-band tool calls, stop the model immediately when it starts hallucinating a tool result mid-turn. Disable to let the model finish generating and discard the fabricated continuation instead.",
 	},
@@ -914,7 +952,7 @@ export const cfgToolsSpeculativeExecutionEnabled = register({
 	ui: {
 		tab: "tools",
 		group: "Execution",
-		label: "Experimental Speculative Execution",
+		label: __ompTranslate("Experimental Speculative Execution"),
 		description:
 			"Enable the discard-safe first slice: validated local reads through direct read calls and nested eval. Network requests, provider completions, and live filesystem writes are not part of this baseline.",
 	},
@@ -927,13 +965,13 @@ export const cfgToolsSpeculativeExecutionMaxInFlight = register({
 	ui: {
 		tab: "tools",
 		group: "Execution",
-		label: "Speculative Execution Concurrency",
+		label: __ompTranslate("Speculative Execution Concurrency"),
 		description: "Maximum number of validated local reads allowed to run before normal dispatch.",
 		options: [
-			{ value: "1", label: "1 operation" },
-			{ value: "2", label: "2 operations" },
-			{ value: "3", label: "3 operations" },
-			{ value: "4", label: "4 operations" },
+			{ value: "1", label: __ompTranslate("1 operation") },
+			{ value: "2", label: __ompTranslate("2 operations") },
+			{ value: "3", label: __ompTranslate("3 operations") },
+			{ value: "4", label: __ompTranslate("4 operations") },
 		],
 	},
 });
@@ -945,15 +983,15 @@ export const cfgToolsMaxTimeout = register({
 	ui: {
 		tab: "tools",
 		group: "Execution",
-		label: "Max Tool Timeout",
+		label: __ompTranslate("Max Tool Timeout"),
 		description: "Maximum timeout in seconds the agent can set for any tool (0 = no limit)",
 		options: [
-			{ value: "0", label: "No limit" },
-			{ value: "30", label: "30 seconds" },
-			{ value: "60", label: "60 seconds" },
-			{ value: "120", label: "120 seconds" },
-			{ value: "300", label: "5 minutes" },
-			{ value: "600", label: "10 minutes" },
+			{ value: "0", label: __ompTranslate("No limit") },
+			{ value: "30", label: __ompTranslate("30 seconds") },
+			{ value: "60", label: __ompTranslate("60 seconds") },
+			{ value: "120", label: __ompTranslate("120 seconds") },
+			{ value: "300", label: __ompTranslate("5 minutes") },
+			{ value: "600", label: __ompTranslate("10 minutes") },
 		],
 	},
 });
@@ -968,7 +1006,7 @@ export const cfgAsyncEnabled = register({
 	ui: {
 		tab: "tools",
 		group: "Execution",
-		label: "Async Execution",
+		label: __ompTranslate("Async Execution"),
 		description: "Enable async bash commands and background task execution",
 	},
 });
@@ -990,7 +1028,7 @@ export const cfgAsyncPrintWake = register({
 	ui: {
 		tab: "tools",
 		group: "Execution",
-		label: "Wake Print Mode on Job Results",
+		label: __ompTranslate("Wake Print Mode on Job Results"),
 		description:
 			"In print mode (-p, --mode json), keep running after the last prompt while this run's background jobs are active, and start another turn in the same session with each job's result; exits once no job or result is pending. Off: print mode exits after its prompts and cancels running jobs",
 	},
@@ -1003,7 +1041,7 @@ export const cfgAsyncWidgets = register({
 	ui: {
 		tab: "tools",
 		group: "Execution",
-		label: "Live Job Widgets",
+		label: __ompTranslate("Live Job Widgets"),
 		description:
 			"Draw a live widget for each running background job (charts, bars, status grids derived from its output) in the wait card, the jobs pill and the jobs sheet. The `widget` model role (default: `smol`) writes one spec per job; updates need no further model calls",
 	},
@@ -1016,7 +1054,7 @@ export const cfgToolsXdev = register({
 	ui: {
 		tab: "tools",
 		group: "Discovery & MCP",
-		label: "xd:// Tools",
+		label: __ompTranslate("xd:// Tools"),
 		description:
 			"Mount rarely-used (discoverable) tools under xd:// device URLs driven via read/write instead of shipping their schemas on every request. Sessions whose explicit tool list grants read but omits write mount devices through a device-only write transport (only local:// scratch stays writable besides devices). Disable to expose every enabled tool top-level.",
 	},
@@ -1030,17 +1068,25 @@ export const cfgToolsXdevDocs = register({
 	ui: {
 		tab: "tools",
 		group: "Discovery & MCP",
-		label: "xd:// Prompt Docs",
+		label: __ompTranslate("xd:// Prompt Docs"),
 		description:
 			"Choose which mounted-device docs and schemas are inlined in the system prompt. Built-ins keeps core tools inline while MCP and extension tools stay on-demand.",
 		options: [
-			{ value: "inline", label: "All Devices", description: "Inline docs and schemas for every mounted device." },
+			{
+				value: "inline",
+				label: __ompTranslate("All Devices"),
+				description: __ompTranslate("Inline docs and schemas for every mounted device."),
+			},
 			{
 				value: "builtins",
-				label: "Built-ins Only",
-				description: "Inline built-in docs; fetch MCP and extension docs on demand.",
+				label: __ompTranslate("Built-ins Only"),
+				description: __ompTranslate("Inline built-in docs; fetch MCP and extension docs on demand."),
 			},
-			{ value: "catalog", label: "Catalog Only", description: "List every device; fetch all docs on demand." },
+			{
+				value: "catalog",
+				label: __ompTranslate("Catalog Only"),
+				description: __ompTranslate("List every device; fetch all docs on demand."),
+			},
 		],
 	},
 });
@@ -1052,7 +1098,7 @@ export const cfgToolsXdevInlineDevices = register({
 	ui: {
 		tab: "tools",
 		group: "Discovery & MCP",
-		label: "xd:// Inline Devices",
+		label: __ompTranslate("xd:// Inline Devices"),
 		description:
 			"When xd:// Prompt Docs is Built-ins Only, inline dynamic devices whose names match these glob patterns (for example mcp__context_mode_*). Catalog Only ignores this setting.",
 	},
@@ -1079,7 +1125,7 @@ export const cfgDevAutoqa = register({
 	ui: {
 		tab: "tools",
 		group: "Developer",
-		label: "Auto QA",
+		label: __ompTranslate("Auto QA"),
 		description:
 			"Automated tool issue reporting (xd://report_issue). On by default; the first report asks for consent, and denying it disables reporting until re-enabled explicitly",
 	},
@@ -1092,7 +1138,7 @@ export const cfgDevAutoqaPushEndpoint = register({
 	ui: {
 		tab: "tools",
 		group: "Developer",
-		label: "Auto QA Push Endpoint",
+		label: __ompTranslate("Auto QA Push Endpoint"),
 		description: "Full URL receiving Auto QA JSON reports (default https://qa.omp.sh/v1/grievances)",
 	},
 });

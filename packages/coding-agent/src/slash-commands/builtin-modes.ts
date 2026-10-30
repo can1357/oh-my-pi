@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { clearSubmittedText, runWithDetachedDraft } from "./helpers/draft";
 import * as path from "node:path";
 import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
@@ -90,26 +91,32 @@ function runFastCommand(arg: string, session: AgentSession): string | undefined 
 	switch (arg) {
 		case "":
 		case "toggle":
-			return `Fast mode ${session.toggleFastMode() ? "enabled" : "disabled"}.`;
+			return __ompTranslate(
+				"Fast mode {0}.",
+				`${session.toggleFastMode() ? __ompTranslate("enabled\u0004mcp.server.activation.state") : __ompTranslate("disabled\u0004mcp.server.activation.state")}`,
+			);
 		case "on":
-			return session.setFastMode(true) ? "Fast mode enabled." : "Fast mode is unavailable for the current model.";
+			return session.setFastMode(true)
+				? __ompTranslate("Fast mode enabled.")
+				: __ompTranslate("Fast mode is unavailable for the current model.");
 		case "ultra":
 		case "ultrafast":
 			return session.setUltrafastMode(true)
-				? "Ultrafast mode enabled."
-				: "Ultrafast is unavailable for the current model.";
+				? __ompTranslate("Ultrafast mode enabled.")
+				: __ompTranslate("Ultrafast is unavailable for the current model.");
 		case "off":
 			session.setFastMode(false);
-			return "Fast mode disabled.";
+			return __ompTranslate("Fast mode disabled.");
 		case "status":
-			return `Fast mode is ${formatFastModeStatus(session)}.`;
+			return __ompTranslate("Fast mode is {0}.", `${formatFastModeStatus(session)}`);
 		default:
 			return undefined;
 	}
 }
 
-const SLOW_UNSUPPORTED =
-	"The current model has no slow mode: /slow uses the flex tier on OpenAI/Google models and low priority on Anthropic subscriptions.";
+const SLOW_UNSUPPORTED = __ompTranslate(
+	"The current model has no slow mode: /slow uses the flex tier on OpenAI/Google models and low priority on Anthropic subscriptions.",
+);
 
 /**
  * `/slow [on|off|status]` for the active model: the `flex` service tier on
@@ -122,22 +129,32 @@ function runSlowCommand(arg: string, session: AgentSession): string | undefined 
 	const anthropic = session.model?.provider === "anthropic";
 	if (arg === "status") {
 		const label = anthropic ? session.getAnthropicSlowModeLabel() : undefined;
-		if (!session.isSlowModeEnabled()) return label ? `Slow mode is off (${label}).` : "Slow mode is off.";
-		if (!anthropic) return "Slow mode is on (flex tier).";
-		return label ? `Slow mode is on (${label}).` : "Slow mode is on (low priority at the Claude session limit).";
+		if (!session.isSlowModeEnabled())
+			return label ? __ompTranslate("Slow mode is off ({0}).", `${label}`) : __ompTranslate("Slow mode is off.");
+		if (!anthropic) return __ompTranslate("Slow mode is on (flex tier).");
+		return label
+			? __ompTranslate("Slow mode is on ({0}).", `${label}`)
+			: __ompTranslate("Slow mode is on (low priority at the Claude session limit).");
 	}
 	const enabled = arg === "on" || (arg !== "off" && !session.isSlowModeEnabled());
 	if (!session.setSlowMode(enabled)) return SLOW_UNSUPPORTED;
 	if (!session.isSlowModeEnabled()) {
 		return anthropic
-			? "Slow mode off: at your Claude usage limit, requests may get a short wrap-up allowance, then wait for the limit to reset."
-			: "Slow mode off.";
+			? __ompTranslate(
+					"Slow mode off: at your Claude usage limit, requests may get a short wrap-up allowance, then wait for the limit to reset.",
+				)
+			: __ompTranslate("Slow mode off.");
 	}
-	if (!anthropic) return "Slow mode on: requests use the flex tier (lower cost, higher latency).";
+	if (!anthropic) return __ompTranslate("Slow mode on: requests use the flex tier (lower cost, higher latency).");
 	const resetsAtSec = session.getAnthropicSlowModeLane()?.activeResetsAtSec();
 	return resetsAtSec !== undefined
-		? `Slow mode on: continuing at low priority until your limit resets at ${formatSlowModeResetClock(resetsAtSec)}. Your weekly limit still applies, and responses may pause while waiting for spare capacity.`
-		: "Slow mode on: when your Claude subscription hits its session limit and Anthropic offers low priority, requests switch to it after any wrap-up allowance.";
+		? __ompTranslate(
+				"Slow mode on: continuing at low priority until your limit resets at {0}. Your weekly limit still applies, and responses may pause while waiting for spare capacity.",
+				`${formatSlowModeResetClock(resetsAtSec)}`,
+			)
+		: __ompTranslate(
+				"Slow mode on: when your Claude subscription hits its session limit and Anthropic offers low priority, requests switch to it after any wrap-up allowance.",
+			);
 }
 
 /** `/extended-context status` label for the premium long-context window setting. */
@@ -152,17 +169,20 @@ function applyExtendedContextCommand(settings: Settings, args: string): string |
 	if (!arg || arg === "toggle") {
 		const enabled = !current;
 		cfgExtendedContext.set(settings, enabled);
-		return `Extended context ${enabled ? "enabled" : "disabled"}.`;
+		return __ompTranslate(
+			"Extended context {0}.",
+			`${enabled ? __ompTranslate("enabled\u0004mcp.server.activation.state") : __ompTranslate("disabled\u0004mcp.server.activation.state")}`,
+		);
 	}
 	if (arg === "on") {
 		cfgExtendedContext.set(settings, true);
-		return "Extended context enabled.";
+		return __ompTranslate("Extended context enabled.");
 	}
 	if (arg === "off") {
 		cfgExtendedContext.set(settings, false);
-		return "Extended context disabled.";
+		return __ompTranslate("Extended context disabled.");
 	}
-	if (arg === "status") return `Extended context is ${formatExtendedContextStatus(settings)}.`;
+	if (arg === "status") return __ompTranslate("Extended context is {0}.", `${formatExtendedContextStatus(settings)}`);
 	return undefined;
 }
 
@@ -177,9 +197,21 @@ function formatComputerUseStatus(session: AgentSession): string {
 		backgroundFallback: cfgComputerBackgroundFallback.get(session.settings),
 	};
 	return [
-		`Computer use: ${enabled ? "enabled" : "disabled"}`,
-		`prelude: ${active ? "active" : "inactive"}`,
-		`configured: display=${configured.display}, maxWidth=${configured.maxWidth}, maxHeight=${configured.maxHeight}, backgroundFallback=${configured.backgroundFallback}`,
+		__ompTranslate(
+			"Computer use: {0}",
+			`${enabled ? __ompTranslate("enabled\u0004mcp.server.activation.state") : __ompTranslate("disabled\u0004mcp.server.activation.state")}`,
+		),
+		__ompTranslate(
+			"prelude: {0}",
+			`${active ? __ompTranslate("active\u0004session.state.active") : __ompTranslate("inactive")}`,
+		),
+		__ompTranslate(
+			"configured: display={0}, maxWidth={1}, maxHeight={2}, backgroundFallback={3}",
+			`${configured.display}`,
+			`${configured.maxWidth}`,
+			`${configured.maxHeight}`,
+			`${configured.backgroundFallback}`,
+		),
 	].join(" · ");
 }
 
@@ -193,11 +225,11 @@ function applyComputerUseToggle(session: AgentSession, enable: boolean): string 
 	cfgComputerEnabled.override(session.settings, enable);
 	if (enable && !session.getEvalPreludes().some(definition => definition.name === "computer")) {
 		cfgComputerEnabled.override(session.settings, previous);
-		return "Computer use is unavailable in this session.";
+		return __ompTranslate("Computer use is unavailable in this session.");
 	}
 	return enable
-		? `Computer use enabled for this session. ${formatComputerUseStatus(session)}`
-		: "Computer use disabled for this session.";
+		? __ompTranslate("Computer use enabled for this session. {0}", `${formatComputerUseStatus(session)}`)
+		: __ompTranslate("Computer use disabled for this session.");
 }
 
 /** Tools the ratchet loop needs: the eval kernel hosts `ratchet()`, `task` runs its analyzer. */
@@ -215,7 +247,7 @@ function prepareRatchet(session: AgentSession, request: string): { kickoff: stri
 	if (!previous) cfgRatchetEnabled.override(session.settings, true);
 	if (!session.getEvalPreludes().some(definition => definition.name === "ratchet")) {
 		if (!previous) cfgRatchetEnabled.override(session.settings, previous);
-		return { error: "The ratchet eval prelude is unavailable in this session." };
+		return { error: __ompTranslate("The ratchet eval prelude is unavailable in this session.") };
 	}
 	const kickoff = prompt.render(ratchetKickoffPrompt, { request: request.trim() || undefined, tools }).trim();
 	return { kickoff };
@@ -236,28 +268,28 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "security",
 		icon: "shield",
-		description: "Plan, run, inspect, import, and compare OMP-native security scans",
+		description: __ompTranslate("Plan, run, inspect, import, and compare OMP-native security scans"),
 		allowArgs: true,
 		acpInputHint: "<plan|scan|status|cancel|scans|show|import|export|validate|compare|disposition>",
 		subcommands: [
-			{ name: "plan", description: "Create an immutable security scan plan" },
-			{ name: "scan", description: "Start a planned or newly planned native scan" },
-			{ name: "status", description: "Show native scan operation status" },
-			{ name: "cancel", description: "Cancel a running native scan" },
-			{ name: "scans", description: "List stored project security scans" },
-			{ name: "show", description: "Render a scan or security:// resource" },
-			{ name: "import", description: "Import SARIF or a Codex Security bundle" },
-			{ name: "export", description: "Export a canonical bundle, SARIF, or report" },
-			{ name: "validate", description: "Validate one finding with OMP-native tools" },
-			{ name: "compare", description: "Compare finding lineage across two scans" },
-			{ name: "disposition", description: "Set a finding disposition with rationale" },
+			{ name: "plan", description: __ompTranslate("Create an immutable security scan plan") },
+			{ name: "scan", description: __ompTranslate("Start a planned or newly planned native scan") },
+			{ name: "status", description: __ompTranslate("Show native scan operation status") },
+			{ name: "cancel", description: __ompTranslate("Cancel a running native scan") },
+			{ name: "scans", description: __ompTranslate("List stored project security scans") },
+			{ name: "show", description: __ompTranslate("Render a scan or security:// resource") },
+			{ name: "import", description: __ompTranslate("Import SARIF or a Codex Security bundle") },
+			{ name: "export", description: __ompTranslate("Export a canonical bundle, SARIF, or report") },
+			{ name: "validate", description: __ompTranslate("Validate one finding with OMP-native tools") },
+			{ name: "compare", description: __ompTranslate("Compare finding lineage across two scans") },
+			{ name: "disposition", description: __ompTranslate("Set a finding disposition with rationale") },
 		],
 		handle: handleSecurityCommand,
 	},
 	{
 		name: "settings",
 		icon: "settings",
-		description: "Open settings menu",
+		description: __ompTranslate("Open settings menu"),
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showSettingsSelector();
 			clearSubmittedText(runtime);
@@ -267,9 +299,9 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		name: "setup",
 		aliases: ["providers"],
 		icon: "gear",
-		description: "Open provider setup",
+		description: __ompTranslate("Open provider setup"),
 		allowArgs: true,
-		subcommands: [{ name: "providers", description: "Configure sign-in and web search providers" }],
+		subcommands: [{ name: "providers", description: __ompTranslate("Configure sign-in and web search providers") }],
 		handleTui: async (command, runtime) => {
 			const args = command.args.trim().toLowerCase();
 			const opensProviders = args === "" || args === "providers";
@@ -284,17 +316,17 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "plan",
 		icon: "plan",
-		description: "Toggle plan mode (agent plans before executing)",
+		description: __ompTranslate("Toggle plan mode (agent plans before executing)"),
 		inlineHint: "[prompt]",
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
-			if (!cfgPlanEnabled.get(runtime.ctx.settings)) return "Plan: disabled in settings";
+			if (!cfgPlanEnabled.get(runtime.ctx.settings)) return __ompTranslate("Plan: disabled in settings");
 			if (runtime.ctx.planModeEnabled) {
 				const planFile = runtime.ctx.planModePlanFilePath;
-				return `Plan: on${planFile ? ` (${path.basename(planFile)})` : ""}`;
+				return __ompTranslate("Plan: on{0}", `${planFile ? ` (${path.basename(planFile)})` : ""}`);
 			}
-			if (runtime.ctx.goalModeEnabled) return "Plan: blocked by goal mode";
-			return "Plan: off";
+			if (runtime.ctx.goalModeEnabled) return __ompTranslate("Plan: blocked by goal mode");
+			return __ompTranslate("Plan: off");
 		},
 		handleTui: async (command, runtime) => {
 			await runWithDetachedDraft(command, runtime, () =>
@@ -305,9 +337,11 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "plan-review",
 		icon: "plan",
-		description: "Re-open the plan review for the latest plan (plan mode only)",
+		description: __ompTranslate("Re-open the plan review for the latest plan (plan mode only)"),
 		getTuiAutocompleteDescription: runtime =>
-			runtime.ctx.planModeEnabled ? "Plan review: available" : "Plan review: plan mode inactive",
+			runtime.ctx.planModeEnabled
+				? __ompTranslate("Plan review: available")
+				: __ompTranslate("Plan review: plan mode inactive"),
 		handleTui: async (_command, runtime) => {
 			await runtime.ctx.openPlanReview();
 			clearSubmittedText(runtime);
@@ -316,14 +350,14 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "vibe",
 		icon: "wave",
-		description: "Toggle vibe mode (direct persistent fast/good worker sessions; read-only toolset)",
+		description: __ompTranslate("Toggle vibe mode (direct persistent fast/good worker sessions; read-only toolset)"),
 		inlineHint: "[prompt]",
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
-			if (runtime.ctx.vibeModeEnabled) return "Vibe: on";
-			if (runtime.ctx.planModeEnabled) return "Vibe: blocked by plan mode";
-			if (runtime.ctx.goalModeEnabled) return "Vibe: blocked by goal mode";
-			return "Vibe: off";
+			if (runtime.ctx.vibeModeEnabled) return __ompTranslate("Vibe: on");
+			if (runtime.ctx.planModeEnabled) return __ompTranslate("Vibe: blocked by plan mode");
+			if (runtime.ctx.goalModeEnabled) return __ompTranslate("Vibe: blocked by goal mode");
+			return __ompTranslate("Vibe: off");
 		},
 		handleTui: async (command, runtime) => {
 			await runWithDetachedDraft(command, runtime, () =>
@@ -334,22 +368,24 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "goal",
 		icon: "goal",
-		description: "Toggle goal mode (persistent autonomous objective for this session)",
+		description: __ompTranslate("Toggle goal mode (persistent autonomous objective for this session)"),
 		subcommands: [
-			{ name: "set", description: "Set or replace the goal", usage: "<objective>" },
-			{ name: "show", description: "Show current goal details" },
-			{ name: "pause", description: "Pause the current goal" },
-			{ name: "resume", description: "Resume a paused goal" },
-			{ name: "drop", description: "Drop the current goal" },
-			{ name: "budget", description: "Adjust the token budget", usage: "<N|off>" },
+			{ name: "set", description: __ompTranslate("Set or replace the goal"), usage: "<objective>" },
+			{ name: "show", description: __ompTranslate("Show current goal details") },
+			{ name: "pause", description: __ompTranslate("Pause the current goal") },
+			{ name: "resume", description: __ompTranslate("Resume a paused goal") },
+			{ name: "drop", description: __ompTranslate("Drop the current goal") },
+			{ name: "budget", description: __ompTranslate("Adjust the token budget"), usage: "<N|off>" },
 		],
 		inlineHint: "[objective]",
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
-			if (!cfgGoalEnabled.get(runtime.ctx.settings)) return "Goal: disabled in settings";
-			if (runtime.ctx.planModeEnabled) return "Goal: blocked by plan mode";
+			if (!cfgGoalEnabled.get(runtime.ctx.settings)) return __ompTranslate("Goal: disabled in settings");
+			if (runtime.ctx.planModeEnabled) return __ompTranslate("Goal: blocked by plan mode");
 			const state = runtime.ctx.session.getGoalModeState();
-			return state ? `Goal: ${state.goal.status} (${shortDetail(state.goal.objective)})` : "Goal: off";
+			return state
+				? __ompTranslate("Goal: {0} ({1})", `${state.goal.status}`, `${shortDetail(state.goal.objective)}`)
+				: __ompTranslate("Goal: off");
 		},
 		handleTui: async (command, runtime) => {
 			await runWithDetachedDraft(command, runtime, () =>
@@ -360,8 +396,8 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "guided-goal",
 		icon: "compass",
-		description: "Have the agent interview you in chat, then set up goal mode",
-		inlineHint: "[rough objective]",
+		description: __ompTranslate("Have the agent interview you in chat, then set up goal mode"),
+		inlineHint: __ompTranslate("[rough objective]"),
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			await runWithDetachedDraft(command, runtime, () =>
@@ -373,7 +409,10 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		name: "loop",
 		icon: "loop",
 		get description() {
-			return `Toggle loop mode. While enabled, the next prompt you send re-submits after every yield. Bound it with a count/duration, or gate it with \`--until '<cmd>'\` / \`--while '<cmd>'\` — the command's exit status decides whether the next iteration runs. ${formatKeyHint("escape")} suspends the ongoing loop; /loop again to disable.`;
+			return __ompTranslate(
+				"Toggle loop mode. While enabled, the next prompt you send re-submits after every yield. Bound it with a count/duration, or gate it with `--until '<cmd>'` / `--while '<cmd>'` — the command's exit status decides whether the next iteration runs. {0} suspends the ongoing loop; /loop again to disable.",
+				`${formatKeyHint("escape")}`,
+			);
 		},
 		inlineHint: "[count|duration] [--while|--until '<cmd>'] [prompt]",
 		allowArgs: true,
@@ -384,9 +423,9 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				runtime.ctx.loopLimit ? describeLoopLimitRuntime(runtime.ctx.loopLimit) : undefined,
 				runtime.ctx.loopCondition ? describeLoopCondition(runtime.ctx.loopCondition) : undefined,
 			].filter((part): part is string => part !== undefined);
-			if (bounds.length > 0) return `Loop: on (${bounds.join(", ")})`;
-			if (runtime.ctx.loopPrompt) return "Loop: on (repeating prompt)";
-			return "Loop: on (waiting for next prompt)";
+			if (bounds.length > 0) return __ompTranslate("Loop: on ({0})", `${bounds.join(", ")}`);
+			if (runtime.ctx.loopPrompt) return __ompTranslate("Loop: on (repeating prompt)");
+			return __ompTranslate("Loop: on (waiting for next prompt)");
 		},
 		handleTui: async (command, runtime) => {
 			const prompt = await runtime.ctx.handleLoopCommand(command.args);
@@ -399,7 +438,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "queue",
 		icon: "inbox",
-		description: "Queue a message for after the agent yields",
+		description: __ompTranslate("Queue a message for after the agent yields"),
 		inlineHint: "<message>",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
@@ -413,8 +452,8 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		name: "model",
 		aliases: ["models"],
 		icon: "model",
-		description: "Switch model for this session",
-		acpDescription: "Show current model selection",
+		description: __ompTranslate("Switch model for this session"),
+		acpDescription: __ompTranslate("Show current model selection"),
 		getTuiAutocompleteDescription: runtime => {
 			const model = runtime.ctx.viewSession.model;
 			return model ? `Model: ${model.provider}/${model.id}` : "Model: none selected";
@@ -426,19 +465,22 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				const match = resolved.model;
 				if (!match) {
 					return usage(
-						`Unknown model: ${selector}. Use ACP \`session/setModel\` for picker-driven selection or list available models with /model.`,
+						__ompTranslate(
+							"Unknown model: {0}. Use ACP `session/setModel` for picker-driven selection or list available models with /model.",
+							`${selector}`,
+						),
 						runtime,
 					);
 				}
 				try {
 					await runtime.session.setModel(match);
 					if (resolved.thinkingLevel !== undefined) runtime.session.setThinkingLevel(resolved.thinkingLevel);
-					await runtime.output(`Model set to ${match.provider}/${match.id}.`);
+					await runtime.output(__ompTranslate("Model set to {0}/{1}.", `${match.provider}`, `${match.id}`));
 					await runtime.notifyTitleChanged?.();
 					await runtime.notifyConfigChanged?.();
 					return commandConsumed();
 				} catch (err) {
-					return usage(`Failed to set model: ${errorMessage(err)}`, runtime);
+					return usage(__ompTranslate("Failed to set model: {0}", `${errorMessage(err)}`), runtime);
 				}
 			}
 
@@ -457,9 +499,12 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		name: "switch",
 		icon: "swap",
 		get description() {
-			return `Switch model for this session (same as ${formatKeyHint("alt+p")}); accepts fuzzy ids, provider/id, @role, :level`;
+			return __ompTranslate(
+				"Switch model for this session (same as {0}); accepts fuzzy ids, provider/id, @role, :level",
+				`${formatKeyHint("alt+p")}`,
+			);
 		},
-		acpDescription: "Switch model for this session only",
+		acpDescription: __ompTranslate("Switch model for this session only"),
 		acpInputHint: "[model]",
 		inlineHint: "[model]",
 		allowArgs: true,
@@ -477,15 +522,15 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				return commandConsumed();
 			}
 			const resolved = resolveSessionModelSelector(selector, runtime.session, runtime.settings);
-			if (!resolved.model) return usage(`Unknown model: ${selector}`, runtime);
+			if (!resolved.model) return usage(__ompTranslate("Unknown model: {0}", `${selector}`), runtime);
 			try {
 				await runtime.session.setModelTemporary(resolved.model, resolved.thinkingLevel);
-				await runtime.output(`Session-only model: ${formatModelString(resolved.model)}.`);
+				await runtime.output(__ompTranslate("Session-only model: {0}.", `${formatModelString(resolved.model)}`));
 				await runtime.notifyTitleChanged?.();
 				await runtime.notifyConfigChanged?.();
 				return commandConsumed();
 			} catch (err) {
-				return usage(`Failed to switch model: ${errorMessage(err)}`, runtime);
+				return usage(__ompTranslate("Failed to switch model: {0}", `${errorMessage(err)}`), runtime);
 			}
 		},
 		handleTui: async (command, runtime) => {
@@ -497,7 +542,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			}
 			const resolved = resolveSessionModelSelector(selector, runtime.ctx.session, runtime.ctx.settings);
 			if (!resolved.model) {
-				runtime.ctx.showError(`Unknown model: ${selector}`);
+				runtime.ctx.showError(__ompTranslate("Unknown model: {0}", `${selector}`));
 				return;
 			}
 			if (resolved.warning) runtime.ctx.showStatus(resolved.warning);
@@ -507,18 +552,20 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "fast",
 		icon: "fast",
-		description:
+		description: __ompTranslate(
 			"Toggle fast service (OpenAI service_tier=priority or ultrafast, Anthropic speed=fast, Google priority)",
-		acpDescription: "Toggle fast mode",
+		),
+		acpDescription: __ompTranslate("Toggle fast mode"),
 		acpInputHint: "[on|ultra|off|status]",
 		subcommands: [
-			{ name: "on", description: "Enable fast mode (priority tier)" },
-			{ name: "ultra", description: "Enable Ultrafast (OpenAI API, or Codex models that offer it)" },
-			{ name: "off", description: "Disable fast mode" },
-			{ name: "status", description: "Show fast mode status" },
+			{ name: "on", description: __ompTranslate("Enable fast mode (priority tier)") },
+			{ name: "ultra", description: __ompTranslate("Enable Ultrafast (OpenAI API, or Codex models that offer it)") },
+			{ name: "off", description: __ompTranslate("Disable fast mode") },
+			{ name: "status", description: __ompTranslate("Show fast mode status") },
 		],
 		allowArgs: true,
-		getTuiAutocompleteDescription: runtime => `Fast: ${formatFastModeStatus(runtime.ctx.session)}`,
+		getTuiAutocompleteDescription: runtime =>
+			__ompTranslate("Fast: {0}", `${formatFastModeStatus(runtime.ctx.session)}`),
 		handle: async (command, runtime) => {
 			const message = runFastCommand(command.args.trim().toLowerCase(), runtime.session);
 			if (message === undefined) return usage(FAST_USAGE, runtime);
@@ -535,21 +582,25 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "slow",
 		icon: "fast",
-		description:
+		description: __ompTranslate(
 			"Toggle slow mode: flex tier on OpenAI/Google; on Anthropic, continue at low priority after the Claude session limit",
-		acpDescription: "Toggle slow mode",
+		),
+		acpDescription: __ompTranslate("Toggle slow mode"),
 		acpInputHint: "[on|off|status]",
 		subcommands: [
-			{ name: "on", description: "Flex tier, or Anthropic low priority at the session limit (auto)" },
-			{ name: "off", description: "Standard service; stop Anthropic low priority" },
-			{ name: "status", description: "Show slow mode status" },
+			{
+				name: "on",
+				description: __ompTranslate("Flex tier, or Anthropic low priority at the session limit (auto)"),
+			},
+			{ name: "off", description: __ompTranslate("Standard service; stop Anthropic low priority") },
+			{ name: "status", description: __ompTranslate("Show slow mode status") },
 		],
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime =>
-			runtime.ctx.session.isSlowModeEnabled() ? "Slow mode: on" : "Slow mode: off",
+			runtime.ctx.session.isSlowModeEnabled() ? __ompTranslate("Slow mode: on") : __ompTranslate("Slow mode: off"),
 		handle: async (command, runtime) => {
 			const message = runSlowCommand(command.args.trim().toLowerCase(), runtime.session);
-			if (message === undefined) return usage("Usage: /slow [on|off|status]", runtime);
+			if (message === undefined) return usage(__ompTranslate("Usage: /slow [on|off|status]"), runtime);
 			await runtime.output(message);
 			return commandConsumed();
 		},
@@ -563,22 +614,28 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "skillful",
 		icon: "compass",
-		description: "Toggle listing available skills in the system prompt (session only)",
-		acpDescription: "Toggle skill listing",
+		description: __ompTranslate("Toggle listing available skills in the system prompt (session only)"),
+		acpDescription: __ompTranslate("Toggle skill listing"),
 		acpInputHint: "[on|off|status]",
 		subcommands: [
-			{ name: "on", description: "List skills in the prompt for this session" },
-			{ name: "off", description: "Omit the skills listing for this session" },
-			{ name: "status", description: "Show skill listing status" },
+			{ name: "on", description: __ompTranslate("List skills in the prompt for this session") },
+			{ name: "off", description: __ompTranslate("Omit the skills listing for this session") },
+			{ name: "status", description: __ompTranslate("Show skill listing status") },
 		],
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime =>
-			`Skill listing: ${cfgSkillful.get(runtime.ctx.session.settings) ? "on" : "off"}`,
+			__ompTranslate(
+				"Skill listing: {0}",
+				`${cfgSkillful.get(runtime.ctx.session.settings) ? __ompTranslate("on") : __ompTranslate("off")}`,
+			),
 		handle: async (command, runtime) => {
 			const arg = command.args.trim().toLowerCase();
 			if (arg === "status") {
 				await runtime.output(
-					`Skill listing: ${cfgSkillful.get(runtime.session.settings) ? "on" : "off"} (session override; default from the skillful setting).`,
+					__ompTranslate(
+						"Skill listing: {0} (session override; default from the skillful setting).",
+						`${cfgSkillful.get(runtime.session.settings) ? __ompTranslate("on") : __ompTranslate("off")}`,
+					),
 				);
 				return commandConsumed();
 			}
@@ -589,15 +646,25 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 						: arg === "off"
 							? await runtime.session.setSkillful(false)
 							: await runtime.session.toggleSkillful();
-				await runtime.output(`Skill listing ${enabled ? "enabled" : "disabled"} for this session.`);
+				await runtime.output(
+					__ompTranslate(
+						"Skill listing {0} for this session.",
+						`${enabled ? __ompTranslate("enabled\u0004mcp.server.activation.state") : __ompTranslate("disabled\u0004mcp.server.activation.state")}`,
+					),
+				);
 				return commandConsumed();
 			}
-			return usage("Usage: /skillful [on|off|status]", runtime);
+			return usage(__ompTranslate("Usage: /skillful [on|off|status]"), runtime);
 		},
 		handleTui: async (command, runtime) => {
 			const arg = command.args.trim().toLowerCase();
 			if (arg === "status") {
-				runtime.ctx.showStatus(`Skill listing: ${cfgSkillful.get(runtime.ctx.session.settings) ? "on" : "off"}.`);
+				runtime.ctx.showStatus(
+					__ompTranslate(
+						"Skill listing: {0}.",
+						`${cfgSkillful.get(runtime.ctx.session.settings) ? __ompTranslate("on") : __ompTranslate("off")}`,
+					),
+				);
 				clearSubmittedText(runtime);
 				return;
 			}
@@ -608,7 +675,12 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 						: arg === "off"
 							? await runtime.ctx.session.setSkillful(false)
 							: await runtime.ctx.session.toggleSkillful();
-				runtime.ctx.showStatus(`Skill listing ${enabled ? "enabled" : "disabled"} for this session.`);
+				runtime.ctx.showStatus(
+					__ompTranslate(
+						"Skill listing {0} for this session.",
+						`${enabled ? __ompTranslate("enabled\u0004mcp.server.activation.state") : __ompTranslate("disabled\u0004mcp.server.activation.state")}`,
+					),
+				);
 				clearSubmittedText(runtime);
 				return;
 			}
@@ -619,20 +691,20 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "extended-context",
 		icon: "expand",
-		description: "Toggle extended context windows",
-		acpDescription: "Toggle extended context",
+		description: __ompTranslate("Toggle extended context windows"),
+		acpDescription: __ompTranslate("Toggle extended context"),
 		acpInputHint: "[on|off|status]",
 		subcommands: [
-			{ name: "on", description: "Enable larger context windows" },
-			{ name: "off", description: "Use default or standard-pricing context windows" },
-			{ name: "status", description: "Show extended context status" },
+			{ name: "on", description: __ompTranslate("Enable larger context windows") },
+			{ name: "off", description: __ompTranslate("Use default or standard-pricing context windows") },
+			{ name: "status", description: __ompTranslate("Show extended context status") },
 		],
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime =>
-			`Extended context: ${formatExtendedContextStatus(runtime.ctx.settings)}`,
+			__ompTranslate("Extended context: {0}", `${formatExtendedContextStatus(runtime.ctx.settings)}`),
 		handle: async (command, runtime) => {
 			const output = applyExtendedContextCommand(runtime.settings, command.args);
-			if (!output) return usage("Usage: /extended-context [on|off|status]", runtime);
+			if (!output) return usage(__ompTranslate("Usage: /extended-context [on|off|status]"), runtime);
 			await runtime.output(output);
 			return commandConsumed();
 		},
@@ -646,13 +718,13 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "computer",
 		icon: "computer",
-		description: "Toggle the native computer-use eval prelude for this session",
-		acpDescription: "Toggle computer use",
+		description: __ompTranslate("Toggle the native computer-use eval prelude for this session"),
+		acpDescription: __ompTranslate("Toggle computer use"),
 		acpInputHint: "[on|off|status]",
 		subcommands: [
-			{ name: "on", description: "Enable computer use for this session" },
-			{ name: "off", description: "Disable computer use for this session" },
-			{ name: "status", description: "Show computer use status" },
+			{ name: "on", description: __ompTranslate("Enable computer use for this session") },
+			{ name: "off", description: __ompTranslate("Disable computer use for this session") },
+			{ name: "status", description: __ompTranslate("Show computer use status") },
 		],
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime =>
@@ -691,8 +763,8 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "ratchet",
 		icon: "loop",
-		description: "Build (or reuse) an eval for an LLM flow, then hillclimb it unattended",
-		inlineHint: "[flow and goal]",
+		description: __ompTranslate("Build (or reuse) an eval for an LLM flow, then hillclimb it unattended"),
+		inlineHint: __ompTranslate("[flow and goal]"),
 		allowArgs: true,
 		handle: (command, runtime) => {
 			const armed = prepareRatchet(runtime.session, command.args);
@@ -725,9 +797,9 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "prewalk",
 		icon: "prewalk",
-		description: "Arm, restart, or cancel a one-shot model handoff",
+		description: __ompTranslate("Arm, restart, or cancel a one-shot model handoff"),
 		allowArgs: true,
-		acpDescription: "Arm, restart, or cancel prewalk",
+		acpDescription: __ompTranslate("Arm, restart, or cancel prewalk"),
 		acpInputHint: "[into] | restart [from] [into] | off",
 		subcommands: [
 			{
@@ -735,7 +807,10 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				description: "Return to the planning model and re-arm the handoff (default prewalk.from → prewalk.into)",
 				usage: "[from] [into]",
 			},
-			{ name: "off", description: "Cancel this session's handoff without changing the active model" },
+			{
+				name: "off",
+				description: __ompTranslate("Cancel this session's handoff without changing the active model"),
+			},
 		],
 		handle: async (command, runtime) => {
 			const [verb, ...rest] = command.args.trim().split(/\s+/).filter(Boolean);
@@ -750,8 +825,8 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				runtime.session.disarmPrewalk();
 				await runtime.output(
 					armed
-						? "Prewalk off: canceled this session's pending handoff; keeping the active model."
-						: "Prewalk already off for this session; keeping the active model.",
+						? __ompTranslate("Prewalk off: canceled this session's pending handoff; keeping the active model.")
+						: __ompTranslate("Prewalk already off for this session; keeping the active model."),
 				);
 				return commandConsumed();
 			}
@@ -761,7 +836,10 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				return usage(target.error ?? `Model "${into}" not found`, runtime);
 			}
 			if (!runtime.session.modelRegistry.hasConfiguredAuth(target.model)) {
-				return usage(`No API key for ${target.model.provider}/${target.model.id}`, runtime);
+				return usage(
+					__ompTranslate("No API key for {0}/{1}", `${target.model.provider}`, `${target.model.id}`),
+					runtime,
+				);
 			}
 			const targetLabel = `${into} (${target.model.provider}/${target.model.id})`;
 			if (restart) {
@@ -771,7 +849,10 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					return usage(source.error ?? `Model "${from}" not found`, runtime);
 				}
 				if (!runtime.session.modelRegistry.hasConfiguredAuth(source.model)) {
-					return usage(`No API key for ${source.model.provider}/${source.model.id}`, runtime);
+					return usage(
+						__ompTranslate("No API key for {0}/{1}", `${source.model.provider}`, `${source.model.id}`),
+						runtime,
+					);
 				}
 				const result = await runtime.session.restartPrewalk(
 					source.model,
@@ -791,7 +872,11 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const armed = runtime.session.armPrewalk(target.model, target.thinkingLevel);
 			if (armed) {
 				await runtime.output(
-					`Prewalk on: switching to ${target.model.provider}/${target.model.id} at the next edit/write (todo-gated).`,
+					__ompTranslate(
+						"Prewalk on: switching to {0}/{1} at the next edit/write (todo-gated).",
+						`${target.model.provider}`,
+						`${target.model.id}`,
+					),
 				);
 			}
 			return commandConsumed();
@@ -800,20 +885,24 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "modelpreset",
 		icon: "model",
-		description: "Save and switch model presets (role models + thinking level)",
-		acpDescription: "Manage model presets",
+		description: __ompTranslate("Save and switch model presets (role models + thinking level)"),
+		acpDescription: __ompTranslate("Manage model presets"),
 		acpInputHint: "[list|save|switch|delete] [name]",
 		inlineHint: "[save|switch|delete|list] [name]",
 		subcommands: [
-			{ name: "list", description: "List saved presets" },
-			{ name: "save", description: "Save the current role models and thinking level", usage: "<name>" },
-			{ name: "switch", description: "Apply a saved preset", usage: "<name>" },
-			{ name: "delete", description: "Delete a saved preset", usage: "<name>" },
+			{ name: "list", description: __ompTranslate("List saved presets") },
+			{
+				name: "save",
+				description: __ompTranslate("Save the current role models and thinking level"),
+				usage: "<name>",
+			},
+			{ name: "switch", description: __ompTranslate("Apply a saved preset"), usage: "<name>" },
+			{ name: "delete", description: __ompTranslate("Delete a saved preset"), usage: "<name>" },
 		],
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
 			const count = getModelPresetNames(runtime.ctx.settings).length;
-			return count > 0 ? `Presets: ${count} saved` : "Presets: none saved";
+			return count > 0 ? __ompTranslate("Presets: {0} saved", `${count}`) : __ompTranslate("Presets: none saved");
 		},
 		handle: async (command, runtime) => {
 			const outcome = await runPresetsCommand(command.args, runtime.settings, runtime.session);
@@ -833,7 +922,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					ctx.showStatus(NO_PRESETS_MESSAGE);
 					return;
 				}
-				const picked = await ctx.showHookSelector("Switch to model preset", names);
+				const picked = await ctx.showHookSelector(__ompTranslate("Switch to model preset"), names);
 				if (picked === undefined) return;
 				args = `switch ${picked}`;
 			}
@@ -851,9 +940,12 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		name: "effort",
 		icon: "gauge",
 		get description() {
-			return `Set reasoning effort (thinking level, intelligence) for this session; ${formatKeyHint("shift+tab")} cycles levels`;
+			return __ompTranslate(
+				"Set reasoning effort (thinking level, intelligence) for this session; {0} cycles levels",
+				`${formatKeyHint("shift+tab")}`,
+			);
 		},
-		acpDescription: "Set or show reasoning effort (thinking level, intelligence)",
+		acpDescription: __ompTranslate("Set or show reasoning effort (thinking level, intelligence)"),
 		acpInputHint: "[level]",
 		inlineHint: "[level]",
 		allowArgs: true,
@@ -862,13 +954,20 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			description: getConfiguredThinkingLevelMetadata(level).description,
 		})),
 		getTuiAutocompleteDescription: runtime =>
-			`Thinking: ${runtime.ctx.viewSession.configuredThinkingLevel() ?? "model default"}`,
+			__ompTranslate(
+				"Thinking: {0}",
+				`${runtime.ctx.viewSession.configuredThinkingLevel() ?? __ompTranslate("model default")}`,
+			),
 		handle: async (command, runtime) => {
 			const session = runtime.session;
 			if (!command.args.trim()) {
 				await runtime.output(
 					session.model?.reasoning
-						? `Thinking: ${session.configuredThinkingLevel() ?? "model default"}\nAvailable: ${session.getAvailableEffortSelectors().join(", ")}`
+						? __ompTranslate(
+								"Thinking: {0}\nAvailable: {1}",
+								`${session.configuredThinkingLevel() ?? __ompTranslate("model default")}`,
+								`${session.getAvailableEffortSelectors().join(", ")}`,
+							)
 						: noThinkingMessage(session),
 				);
 				return commandConsumed();
@@ -876,7 +975,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const resolved = resolveThinkingArgument(session, command.args);
 			if ("error" in resolved) return usage(resolved.error, runtime);
 			session.setThinkingLevel(resolved.level);
-			await runtime.output(`Thinking set to ${resolved.level}.`);
+			await runtime.output(__ompTranslate("Thinking set to {0}.", `${resolved.level}`));
 			// `setThinkingLevel` emits `thinking_level_changed`, which hosts with a
 			// session-lifetime subscription (ACP) already turn into a config push.
 			await runtime.notifyConfigChanged?.({ handledBySessionEvent: true });
@@ -898,13 +997,13 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			}
 			// thinking_level_changed refreshes the status line and editor border.
 			session.setThinkingLevel(resolved.level);
-			ctx.showStatus(`Thinking set to ${resolved.level}.`);
+			ctx.showStatus(__ompTranslate("Thinking set to {0}.", `${resolved.level}`));
 		},
 	},
 ];
 
-const PRESETS_USAGE = "Usage: /modelpreset [list | save <name> | switch <name> | delete <name>]";
-const NO_PRESETS_MESSAGE = "No model presets saved. Use /modelpreset save <name> to create one.";
+const PRESETS_USAGE = __ompTranslate("Usage: /modelpreset [list | save <name> | switch <name> | delete <name>]");
+const NO_PRESETS_MESSAGE = __ompTranslate("No model presets saved. Use /modelpreset save <name> to create one.");
 
 interface PresetsCommandOutcome {
 	message: string;
@@ -925,13 +1024,19 @@ async function runPresetsCommand(
 	switch (sub) {
 		case "list": {
 			const names = getModelPresetNames(settings);
-			return { message: names.length > 0 ? `Model presets: ${names.join(", ")}` : NO_PRESETS_MESSAGE };
+			return {
+				message:
+					names.length > 0 ? __ompTranslate("Model presets: {0}", `${names.join(", ")}`) : NO_PRESETS_MESSAGE,
+			};
 		}
 		case "save": {
-			if (!name) return { message: "Usage: /modelpreset save <name>", usage: true };
+			if (!name) return { message: __ompTranslate("Usage: /modelpreset save <name>"), usage: true };
 			if (!isValidModelPresetName(name)) {
 				return {
-					message: `Invalid preset name "${name}": use a letter, then letters, digits, - or _`,
+					message: __ompTranslate(
+						'Invalid preset name "{0}": use a letter, then letters, digits, - or _',
+						`${name}`,
+					),
 					usage: true,
 				};
 			}
@@ -939,7 +1044,7 @@ async function runPresetsCommand(
 			return { message: modelPresetSavedMessage(settings, name), changedConfig: true };
 		}
 		case "switch": {
-			if (!name) return { message: "Usage: /modelpreset switch <name>", usage: true };
+			if (!name) return { message: __ompTranslate("Usage: /modelpreset switch <name>"), usage: true };
 			const result = await applyModelPreset(settings, session, name);
 			const message = formatModelPresetSwitch(name, result);
 			const wroteRoles = result.kind === "switched" || result.kind === "failed";
@@ -951,16 +1056,20 @@ async function runPresetsCommand(
 			};
 		}
 		case "delete": {
-			if (!name) return { message: "Usage: /modelpreset delete <name>", usage: true };
+			if (!name) return { message: __ompTranslate("Usage: /modelpreset delete <name>"), usage: true };
 			const result = deleteModelPreset(settings, name);
-			if (result === "deleted") return { message: `Deleted model preset "${name}"`, changedConfig: true };
+			if (result === "deleted")
+				return { message: __ompTranslate('Deleted model preset "{0}"', `${name}`), changedConfig: true };
 			if (result === "project") {
 				return {
-					message: `Preset "${name}" is defined by a project or --config file; remove it there`,
+					message: __ompTranslate(
+						'Preset "{0}" is defined by a project or --config file; remove it there',
+						`${name}`,
+					),
 					failed: true,
 				};
 			}
-			return { message: `Preset not found: ${name}`, failed: true };
+			return { message: __ompTranslate("Preset not found: {0}", `${name}`), failed: true };
 		}
 		default:
 			return { message: PRESETS_USAGE, usage: true };

@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { Component } from "../tui";
 import { Text } from "../components/text";
 import type { Theme, ThemeColor } from "../theme/theme";
@@ -71,12 +72,17 @@ interface GoalRenderArgs {
 function describeGoalResult(result: ToolRenderResult<GoalToolDetails>, args?: GoalRenderArgs): NativeToolView {
 	const details = result.details;
 	const description = describeOp(details?.op ?? args?.op);
-	if (result.isError) return errorView("Goal", resultText(result) || "Goal tool failed", description);
+	if (result.isError)
+		return errorView(__ompTranslate("Goal"), resultText(result) || __ompTranslate("Goal tool failed"), description);
 	const goal = details?.goal ?? null;
-	if (!goal) return { head: toolHead("Goal", description, "no active goal"), tone: "warning" };
+	if (!goal)
+		return {
+			head: toolHead(__ompTranslate("Goal"), description, __ompTranslate("no active goal\u0004tool.goal.empty")),
+			tone: "warning",
+		};
 
 	const head = [
-		...toolHead("Goal", description),
+		...toolHead(__ompTranslate("Goal"), description),
 		span(" "),
 		span(goal.status, `${goalBadgeColor(goal.status)} strong`),
 	];
@@ -94,7 +100,9 @@ function describeGoalResult(result: ToolRenderResult<GoalToolDetails>, args?: Go
 		body: compact([
 			text([span(`"${goal.objective.trim()}"`, "muted")], { wrap: "word" }),
 			text([span(meta.join(" · "), "dim")], { wrap: "word" }),
-			report ? node("section", { head: [span("Report", "toolTitle")] }, [noteText(report)], "report") : undefined,
+			report
+				? node("section", { head: [span(__ompTranslate("Report"), "toolTitle")] }, [noteText(report)], "report")
+				: undefined,
 		]),
 	};
 }
@@ -114,7 +122,11 @@ export const goalToolRenderer = {
 		if (args.op === "create" && args.token_budget !== undefined) {
 			meta.push(`budget ${formatNumber(args.token_budget)}`);
 		}
-		return new Text(renderStatusLine({ icon: "pending", title: "Goal", description, meta }, uiTheme), 0, 0);
+		return new Text(
+			renderStatusLine({ icon: "pending", title: __ompTranslate("Goal"), description, meta }, uiTheme),
+			0,
+			0,
+		);
 	},
 
 	renderResult(
@@ -132,7 +144,9 @@ export const goalToolRenderer = {
 			const header = renderStatusLine({ icon: "error", title: "Goal", description }, uiTheme);
 			return framedToolCard(uiTheme, () => ({
 				header,
-				sections: [{ content: formatErrorDetail(fallbackText || "Goal tool failed", uiTheme).split("\n") }],
+				sections: [
+					{ content: formatErrorDetail(fallbackText || __ompTranslate("Goal tool failed"), uiTheme).split("\n") },
+				],
 				phase: "error",
 				borderColor: "error",
 			}));
@@ -141,7 +155,15 @@ export const goalToolRenderer = {
 		const goal = details?.goal ?? null;
 		if (!goal) {
 			return new Text(
-				renderStatusLine({ icon: "warning", title: "Goal", description, meta: ["no active goal"] }, uiTheme),
+				renderStatusLine(
+					{
+						icon: "warning",
+						title: __ompTranslate("Goal"),
+						description,
+						meta: [__ompTranslate("no active goal\u0004tool.goal.empty")],
+					},
+					uiTheme,
+				),
 				0,
 				0,
 			);
@@ -175,7 +197,10 @@ export const goalToolRenderer = {
 		const report = details?.completionBudgetReport;
 		const sections: Array<{ label?: string; content: string[] }> = [{ content: lines }];
 		if (report) {
-			sections.push({ label: "Report", content: report.split("\n").map(line => uiTheme.fg("muted", line)) });
+			sections.push({
+				label: __ompTranslate("Report"),
+				content: report.split("\n").map(line => uiTheme.fg("muted", line)),
+			});
 		}
 
 		return framedToolCard(uiTheme, () => ({
@@ -187,7 +212,7 @@ export const goalToolRenderer = {
 	},
 
 	describeCall(args: GoalRenderArgs): NativeToolView {
-		const head: TspSpan[] = toolHead("Goal", describeOp(args.op));
+		const head: TspSpan[] = toolHead(__ompTranslate("Goal"), describeOp(args.op));
 		const objective = args.objective?.trim();
 		if (args.op === "create" && objective) head.push(span(" "), span(`"${objective}"`, "muted"));
 		if (args.op === "create" && args.token_budget !== undefined) {

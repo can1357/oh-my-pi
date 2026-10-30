@@ -9,6 +9,7 @@
  *   - Lazy command imports (only the invoked command is loaded)
  *   - Typed `this.parse()` output matching oclif's API shape
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as fs from "node:fs";
 import { parseArgs as nodeParseArgs } from "node:util";
 
@@ -230,7 +231,7 @@ export abstract class Command {
 				} else {
 					const n = Number.parseInt(raw as string, 10);
 					if (Number.isNaN(n)) {
-						throw new CliUsageError(`Expected integer for --${name}, got "${raw}"`);
+						throw new CliUsageError(__ompTranslate("Expected integer for --{0}", name));
 					}
 					flags[name] = n;
 				}
@@ -244,7 +245,7 @@ export abstract class Command {
 				if (val !== undefined && desc.options && !Array.isArray(val)) {
 					if (!desc.options.includes(val as string)) {
 						throw new CliUsageError(
-							`Expected --${name} to be one of: ${[...desc.options].join(", ")}; got "${val}"`,
+							__ompTranslate("Expected --{0} to be one of: {1}", name, [...desc.options].join(", ")),
 						);
 					}
 				}
@@ -252,7 +253,7 @@ export abstract class Command {
 			}
 			// Validate required
 			if (desc.required && flags[name] === undefined) {
-				throw new CliUsageError(`Missing required flag: --${name}`);
+				throw new CliUsageError(__ompTranslate("Missing required flag: --{0}", `${name}`));
 			}
 		}
 
@@ -271,14 +272,14 @@ export abstract class Command {
 			}
 			// Validate required
 			if (desc.required && args[argName] === undefined) {
-				throw new CliUsageError(`Missing required argument: ${argName}`);
+				throw new CliUsageError(__ompTranslate("Missing required argument: {0}", `${argName}`));
 			}
 			// Validate options constraint
 			const argVal = args[argName];
 			if (argVal !== undefined && desc.options && typeof argVal === "string") {
 				if (!desc.options.includes(argVal)) {
 					throw new CliUsageError(
-						`Expected ${argName} to be one of: ${[...desc.options].join(", ")}; got "${argVal}"`,
+						__ompTranslate("Expected {0} to be one of: {1}", argName, [...desc.options].join(", ")),
 					);
 				}
 			}
@@ -297,7 +298,7 @@ export function renderRootHelp(config: CliConfig<CommandMetadata>): void {
 	const { bin, version, commands } = config;
 	const lines: string[] = [];
 	lines.push(`${bin} v${version}\n`);
-	lines.push("USAGE");
+	lines.push(__ompTranslate("USAGE"));
 	lines.push(`  $ ${bin} [COMMAND]\n`);
 
 	// Show the default command's flags/args/examples inline.
@@ -310,7 +311,7 @@ export function renderRootHelp(config: CliConfig<CommandMetadata>): void {
 	// List visible subcommands
 	const visible = [...commands.entries()].filter(([, C]) => !C.hidden);
 	if (visible.length > 0) {
-		lines.push("COMMANDS");
+		lines.push(__ompTranslate("COMMANDS"));
 		const maxLen = Math.max(...visible.map(([n]) => n.length));
 		for (const [name, command] of visible.sort((a, b) => a[0].localeCompare(b[0]))) {
 			lines.push(`  ${name.padEnd(maxLen + 2)}${command.description ?? ""}`);
@@ -347,7 +348,7 @@ export function commandUsageLine(bin: string, id: string, Cmd: CommandCtor): str
 export function renderCommandHelp(bin: string, id: string, Cmd: CommandCtor): void {
 	const lines: string[] = [];
 	if (Cmd.description) lines.push(`${Cmd.description}\n`);
-	lines.push("USAGE");
+	lines.push(__ompTranslate("USAGE"));
 	lines.push(`  ${commandUsageLine(bin, id, Cmd)}\n`);
 	renderCommandBody(lines, Cmd);
 	process.stdout.write(lines.join("\n"));
@@ -360,7 +361,7 @@ function renderCommandBody(lines: string[], command: CommandMetadata): void {
 	// Arguments
 	const argEntries = Object.entries(argDefs);
 	if (argEntries.length > 0) {
-		lines.push("ARGUMENTS");
+		lines.push(__ompTranslate("ARGUMENTS"));
 		const maxLen = Math.max(...argEntries.map(([n]) => n.length));
 		for (const [name, desc] of argEntries) {
 			const parts = [name.toUpperCase().padEnd(maxLen + 2)];
@@ -374,7 +375,7 @@ function renderCommandBody(lines: string[], command: CommandMetadata): void {
 	// Flags
 	const flagEntries = Object.entries(flagDefs);
 	if (flagEntries.length > 0) {
-		lines.push("FLAGS");
+		lines.push(__ompTranslate("FLAGS"));
 		const formatted: [string, string][] = [];
 		for (const [name, desc] of flagEntries) {
 			const charPart = desc.char ? `-${desc.char}, ` : "    ";
@@ -391,7 +392,7 @@ function renderCommandBody(lines: string[], command: CommandMetadata): void {
 
 	// Examples
 	if (command.examples && command.examples.length > 0) {
-		lines.push("EXAMPLES");
+		lines.push(__ompTranslate("EXAMPLES"));
 		for (const ex of command.examples) {
 			for (const line of ex.split("\n")) {
 				lines.push(`  ${line}`);
@@ -471,7 +472,7 @@ export async function run(opts: RunOptions): Promise<void> {
 			const Cmd = await loadEntry(entry);
 			renderCommandHelp(bin, entry.name, Cmd);
 		} else {
-			process.stderr.write(`Unknown command: ${commandId}\n`);
+			process.stderr.write(__ompTranslate("Unknown command: {0}\n", `${commandId}`));
 		}
 		return;
 	}
@@ -480,7 +481,7 @@ export async function run(opts: RunOptions): Promise<void> {
 	const entry = findEntry(opts.commands, commandId);
 
 	if (!entry) {
-		process.stderr.write(`Error: command ${commandId} not found\n`);
+		process.stderr.write(__ompTranslate("Error: command {0} not found\n", `${commandId}`));
 		process.exitCode = 1;
 		return;
 	}
@@ -496,9 +497,9 @@ export async function run(opts: RunOptions): Promise<void> {
 		// process-level catch would dump a minified `dist/cli.js` code frame over a
 		// plain argument error (issue #5369).
 		if (error instanceof CliUsageError) {
-			process.stderr.write(`error: ${error.message}\n\n`);
-			process.stderr.write(`USAGE\n  ${commandUsageLine(bin, entry.name, Cmd)}\n`);
-			process.stderr.write(`\nRun \`${bin} ${entry.name} --help\` for details.\n`);
+			process.stderr.write(__ompTranslate("error: {0}\n\n", `${error.message}`));
+			process.stderr.write(__ompTranslate("USAGE\n  {0}\n", `${commandUsageLine(bin, entry.name, Cmd)}`));
+			process.stderr.write(__ompTranslate("\nRun `{0} {1} --help` for details.\n", `${bin}`, `${entry.name}`));
 			process.exitCode = 1;
 			return;
 		}

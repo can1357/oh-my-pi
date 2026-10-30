@@ -2,6 +2,7 @@
  * Settings declared by this domain (see `config/registry.ts`). Declaration order is the
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { register } from "../config/registry";
 
 /** Whether `read` opens executables in IDA Pro and the `ida` tool is enabled. */
@@ -39,7 +40,7 @@ export const cfgIdaInstallDir = register({
 	ui: {
 		tab: "tools",
 		group: "IDA Pro",
-		label: "IDA Install Dir",
+		label: __ompTranslate("IDA Install Dir"),
 		description:
 			"Directory containing libidalib, exported as IDADIR; empty auto-detects ($IDADIR, ida-config.json, standard install paths)",
 	},
@@ -53,7 +54,7 @@ export const cfgIdaMaxOpen = register({
 	ui: {
 		tab: "tools",
 		group: "IDA Pro",
-		label: "IDA Max Open Databases",
+		label: __ompTranslate("IDA Max Open Databases"),
 		description:
 			"Most IDA databases (omp.ida.* daemons in omp ps) open at once per project; opening another saves and closes the least recently used idle one",
 		options: [
@@ -73,15 +74,15 @@ export const cfgIdaIdleCloseSec = register({
 	ui: {
 		tab: "tools",
 		group: "IDA Pro",
-		label: "IDA Idle Close Timeout",
+		label: __ompTranslate("IDA Idle Close Timeout"),
 		description:
 			"Save and close IDA databases idle longer than this many seconds (0 = never); the exec namespace resets on reopen",
 		options: [
-			{ value: "0", label: "Never" },
-			{ value: "300", label: "5 minutes" },
-			{ value: "900", label: "15 minutes" },
-			{ value: "1800", label: "30 minutes" },
-			{ value: "3600", label: "1 hour" },
+			{ value: "0", label: __ompTranslate("Never") },
+			{ value: "300", label: __ompTranslate("5 minutes") },
+			{ value: "900", label: __ompTranslate("15 minutes") },
+			{ value: "1800", label: __ompTranslate("30 minutes") },
+			{ value: "3600", label: __ompTranslate("1 hour") },
 		],
 	},
 });

@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { applyBackgroundToLine, padding, stripTerminalSequences, visibleWidth } from "../utils";
 import type { AnimationFrame, TranscriptPresentationTarget } from "../chrome/transcript-container";
 import { type Component, Container } from "../tui";
@@ -219,8 +220,8 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 					{
 						name: "copy",
 						role: "omp.user.tool",
-						title: "Copy message",
-						aria: "Copy message",
+						title: __ompTranslate("Copy message"),
+						aria: __ompTranslate("Copy message"),
 						actions: { click: "copy-message" },
 					},
 					undefined,
@@ -231,8 +232,8 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 					{
 						name: "rewind",
 						role: "omp.user.tool",
-						title: "Rewind the conversation to an earlier message",
-						aria: "Rewind",
+						title: __ompTranslate("Rewind the conversation to an earlier message"),
+						aria: __ompTranslate("Rewind"),
 						actions: { click: "rewind" },
 					},
 					undefined,
@@ -270,9 +271,9 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 		if (this.#liveSteered) {
 			badges.push(
 				node("badge", {
-					text: "steered",
+					text: __ompTranslate("steered"),
 					tone: "accent",
-					title: "Delivered into the response that was streaming",
+					title: __ompTranslate("Delivered into the response that was streaming"),
 				}),
 			);
 		}
@@ -538,7 +539,7 @@ function syntheticInputLabel(text: string): string {
 		const line = raw.trim();
 		if (!line) continue;
 		const heading = /^#{1,6}\s+(.*)$/.exec(line);
-		return heading ? heading[1]!.trim() || "Synthetic input" : "Synthetic input";
+		return heading ? heading[1]!.trim() || __ompTranslate("Synthetic input") : __ompTranslate("Synthetic input");
 	}
-	return "Synthetic input";
+	return __ompTranslate("Synthetic input");
 }

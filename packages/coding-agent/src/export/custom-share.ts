@@ -4,6 +4,7 @@
  * Allows users to define a custom share handler at ~/.omp/agent/share.ts
  * that will be used instead of the default GitHub Gist sharing.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getAgentDir } from "@oh-my-pi/pi-utils";
@@ -54,12 +55,12 @@ export async function loadCustomShare(): Promise<LoadedCustomShare | null> {
 		const fn = module.default;
 
 		if (typeof fn !== "function") {
-			throw new Error("share script must export a default function");
+			throw new Error(__ompTranslate("share script must export a default function"));
 		}
 
 		return { path: scriptPath, fn };
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		throw new Error(`Failed to load share script: ${message}`);
+		throw new Error(__ompTranslate("Failed to load share script: {0}", `${message}`));
 	}
 }

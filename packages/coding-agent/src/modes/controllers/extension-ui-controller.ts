@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
 import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
@@ -62,9 +63,9 @@ function guestAskHelpText(enterAction: string, extra = ""): string {
 	return `${formatKeyHints(["up", "down"])} navigate  ${formatKeyHint("enter")} ${enterAction}  ${extra}${formatKeyHint("escape")} cancel`;
 }
 
-const ASK_OTHER_OPTION = "Other (type your own)";
-const ASK_CHAT_OPTION = "Chat about this";
-const ASK_NEXT_OPTION = "Next →";
+const ASK_OTHER_OPTION = __ompTranslate("Other (type your own)");
+const ASK_CHAT_OPTION = __ompTranslate("Chat about this");
+const ASK_NEXT_OPTION = __ompTranslate("Next →");
 
 function withTerminalLauncher(uiContext: ExtensionUIContext, hasUI: boolean): ExtensionUIContext {
 	if (!hasUI || uiContext.openTerminal) return uiContext;
@@ -219,7 +220,7 @@ export class ExtensionUiController {
 					return await setTheme(themeArg, true);
 				}
 				// Theme object passed directly - not supported in current implementation
-				return Promise.resolve({ success: false, error: "Direct theme object not supported" });
+				return Promise.resolve({ success: false, error: __ompTranslate("Direct theme object not supported") });
 			},
 			setFooter: () => {},
 			setHeader: () => {},
@@ -233,11 +234,16 @@ export class ExtensionUiController {
 		this.ctx.session.setUsageFallbackConfirmer?.((confirmation, signal) => {
 			const reserve =
 				confirmation.remainingPercent === undefined
-					? "inside the configured reserve margin"
-					: `${confirmation.remainingPercent.toFixed(1)}% remaining`;
+					? __ompTranslate("inside the configured reserve margin")
+					: __ompTranslate("{0}% remaining", `${confirmation.remainingPercent.toFixed(1)}`);
 			return this.showHookConfirm(
-				"Coding-plan reserve reached",
-				`${confirmation.from} has ${reserve}. Switch to ${confirmation.to}? Choose No to keep using the current plan.`,
+				__ompTranslate("Coding-plan reserve reached"),
+				__ompTranslate(
+					"{0} has {1}. Switch to {2}? Choose No to keep using the current plan.",
+					`${confirmation.from}`,
+					`${reserve}`,
+					`${confirmation.to}`,
+				),
 				{ signal },
 			);
 		});
@@ -297,7 +303,7 @@ export class ExtensionUiController {
 				await this.ctx.session.reload();
 				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 				await this.ctx.reloadTodos();
-				this.ctx.showStatus("Reloaded session");
+				this.ctx.showStatus(__ompTranslate("Reloaded session"));
 			},
 			newSession: async options => {
 				await this.ctx.prepareSessionSwitch();
@@ -325,7 +331,11 @@ export class ExtensionUiController {
 
 				this.ctx.present([
 					new Spacer(1),
-					new Text(`${theme.fg("accent", `${theme.status.success} New session started`)}`, 1, 1),
+					new Text(
+						`${theme.fg("accent", __ompTranslate("{0} New session started", `${theme.status.success}`))}`,
+						1,
+						1,
+					),
 				]);
 				await this.ctx.reloadTodos();
 				this.ctx.ui.requestRender(true, { clearScrollback: true });
@@ -343,7 +353,7 @@ export class ExtensionUiController {
 				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 				await this.ctx.reloadTodos();
 				this.ctx.editor.setDraft(result.selectedText, result.selectedImages);
-				this.ctx.showStatus("Branched to new session");
+				this.ctx.showStatus(__ompTranslate("Branched to new session"));
 
 				return { cancelled: false };
 			},
@@ -359,7 +369,7 @@ export class ExtensionUiController {
 				if (result.editorText && !this.ctx.editor.getText().trim()) {
 					this.ctx.editor.setDraft(result.editorText, result.editorImages);
 				}
-				this.ctx.showStatus("Navigated to selected point");
+				this.ctx.showStatus(__ompTranslate("Navigated to selected point"));
 
 				return { cancelled: false };
 			},
@@ -436,12 +446,12 @@ export class ExtensionUiController {
 				container.addChild(new Text(line, 1, 0));
 			}
 			if (content.length > MAX_WIDGET_LINES) {
-				container.addChild(new Text(theme.fg("muted", "... (widget truncated)"), 1, 0));
+				container.addChild(new Text(theme.fg("muted", __ompTranslate("... (widget truncated)")), 1, 0));
 			}
 			return container;
 		}
 		if (content === undefined) {
-			throw new Error("Widget content missing");
+			throw new Error(__ompTranslate("Widget content missing"));
 		}
 		return content(this.ctx.ui, theme);
 	}
@@ -530,7 +540,7 @@ export class ExtensionUiController {
 				await this.ctx.session.reload();
 				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 				await this.ctx.reloadTodos();
-				this.ctx.showStatus("Reloaded session");
+				this.ctx.showStatus(__ompTranslate("Reloaded session"));
 			},
 			newSession: async options => {
 				await this.ctx.prepareSessionSwitch();
@@ -555,7 +565,11 @@ export class ExtensionUiController {
 
 				this.ctx.present([
 					new Spacer(1),
-					new Text(`${theme.fg("accent", `${theme.status.success} New session started`)}`, 1, 1),
+					new Text(
+						`${theme.fg("accent", __ompTranslate("{0} New session started", `${theme.status.success}`))}`,
+						1,
+						1,
+					),
 				]);
 				await this.ctx.reloadTodos();
 				this.ctx.ui.requestRender(true, { clearScrollback: true });
@@ -573,7 +587,7 @@ export class ExtensionUiController {
 				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 				await this.ctx.reloadTodos();
 				this.ctx.editor.setDraft(result.selectedText, result.selectedImages);
-				this.ctx.showStatus("Branched to new session");
+				this.ctx.showStatus(__ompTranslate("Branched to new session"));
 
 				return { cancelled: false };
 			},
@@ -589,7 +603,7 @@ export class ExtensionUiController {
 				if (result.editorText && !this.ctx.editor.getText().trim()) {
 					this.ctx.editor.setDraft(result.editorText, result.editorImages);
 				}
-				this.ctx.showStatus("Navigated to selected point");
+				this.ctx.showStatus(__ompTranslate("Navigated to selected point"));
 
 				return { cancelled: false };
 			},
@@ -651,7 +665,9 @@ export class ExtensionUiController {
 	 * Show a tool error in the chat.
 	 */
 	showToolError(toolName: string, error: string): void {
-		const errorText = new Text(`Tool "${toolName}" error: ${error}`, 1, 0).setStyleFn(t => theme.fg("error", t));
+		const errorText = new Text(__ompTranslate('Tool "{0}" error: {1}', `${toolName}`, `${error}`), 1, 0).setStyleFn(
+			t => theme.fg("error", t),
+		);
 		this.ctx.present(errorText);
 	}
 
@@ -843,7 +859,7 @@ export class ExtensionUiController {
 					? {
 							isBlocked: () => draftEditor.getText().length > 0,
 							handleInput: (keyData: string) => draftEditor.handleDraftEdit(keyData),
-							hint: "typing edits your prompt",
+							hint: __ompTranslate("typing edits your prompt"),
 							// Show the draft's insertion cursor while it owns input; drop it
 							// once the ask controls take over.
 							syncPresentation: (blocked: boolean) => {
@@ -1361,11 +1377,12 @@ export class ExtensionUiController {
 			}
 		};
 		const fail = (error: unknown) => finish(() => reject(error));
-		const onAbort = () => fail(options?.signal?.reason ?? new DOMException("Dialog aborted", "AbortError"));
+		const onAbort = () =>
+			fail(options?.signal?.reason ?? new DOMException(__ompTranslate("Dialog aborted"), "AbortError"));
 		const close = (result: T) => finish(() => resolve(result));
 
 		if (options?.signal?.aborted) {
-			fail(options.signal.reason ?? new DOMException("Dialog aborted", "AbortError"));
+			fail(options.signal.reason ?? new DOMException(__ompTranslate("Dialog aborted"), "AbortError"));
 			return promise;
 		}
 		options?.signal?.addEventListener("abort", onAbort, { once: true });
@@ -1434,9 +1451,11 @@ export class ExtensionUiController {
 	}
 
 	showExtensionError(extensionPath: string, error: string): void {
-		const errorText = new Text(`Extension "${extensionPath}" error: ${error}`, 1, 0).setStyleFn(t =>
-			theme.fg("error", t),
-		);
+		const errorText = new Text(
+			__ompTranslate('Extension "{0}" error: {1}', `${extensionPath}`, `${error}`),
+			1,
+			0,
+		).setStyleFn(t => theme.fg("error", t));
 		this.ctx.present(errorText);
 	}
 	async #handleInteractiveCompact(instructionsOrOptions: string | CompactOptions | undefined): Promise<void> {
@@ -1463,7 +1482,7 @@ export class ExtensionUiController {
 	 */
 	#rejectGuestExtensionTurn(): boolean {
 		if (!this.ctx.collabGuest) return false;
-		this.ctx.showStatus("Extension-initiated turns are host-only during a collab session");
+		this.ctx.showStatus(__ompTranslate("Extension-initiated turns are host-only during a collab session"));
 		return true;
 	}
 
@@ -1487,7 +1506,12 @@ export class ExtensionUiController {
 				this.#applyCustomMessageDisplay(wasStreaming, normalized, silentAppend ? messageCountBefore : undefined);
 			})
 			.catch((err: unknown) => {
-				this.ctx.showError(`Extension sendMessage failed: ${err instanceof Error ? err.message : String(err)}`);
+				this.ctx.showError(
+					__ompTranslate(
+						"Extension sendMessage failed: {0}",
+						`${err instanceof Error ? err.message : String(err)}`,
+					),
+				);
 			});
 	};
 
@@ -1495,7 +1519,12 @@ export class ExtensionUiController {
 	#sendExtensionUserMessage: SendUserMessageHandler = (content, options) => {
 		if (this.#rejectGuestExtensionTurn()) return;
 		this.ctx.session.sendUserMessage(content, options).catch((err: unknown) => {
-			this.ctx.showError(`Extension sendUserMessage failed: ${err instanceof Error ? err.message : String(err)}`);
+			this.ctx.showError(
+				__ompTranslate(
+					"Extension sendUserMessage failed: {0}",
+					`${err instanceof Error ? err.message : String(err)}`,
+				),
+			);
 		});
 	};
 

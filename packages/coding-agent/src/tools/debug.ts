@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type DebugToolDetails, formatLocation, formatSessionSnapshot } from "@oh-my-pi/pi-tui/tools/debug";
 import * as fs from "node:fs/promises";
 import { type } from "@oh-my-pi/omptype";
@@ -549,13 +550,18 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugExecutionDe
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<DebugParams>;
-		const lines = [`Action: ${typeof params.action === "string" ? params.action : "(missing)"}`];
+		const lines = [
+			__ompTranslate(
+				"Action: {0}",
+				`${typeof params.action === "string" ? params.action : __ompTranslate("(missing)\u0004tool.shell.command.missing")}`,
+			),
+		];
 		if (typeof params.program === "string" && params.program.length > 0) {
-			lines.push(`Program: ${truncateForPrompt(params.program)}`);
+			lines.push(__ompTranslate("Program: {0}", `${truncateForPrompt(params.program)}`));
 		}
 		return lines;
 	};
-	readonly label = "Debug";
+	readonly label = __ompTranslate("Debug");
 	readonly summary = "Debug a running process with DAP (debugger adapter protocol)";
 	readonly description: string;
 	readonly parameters = debugSchema;

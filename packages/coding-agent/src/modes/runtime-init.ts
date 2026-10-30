@@ -6,6 +6,7 @@
  * behavior, and UI context differ between callers — those stay as
  * caller-supplied hooks.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
 import type { ExtensionError, ExtensionMode, ExtensionUIContext } from "../extensibility/extensions/types";
@@ -83,7 +84,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 					// result should mark this send as agent-invoking, so downstream trackers (RPC's
 					// hasAgentMessageTask) don't wait on agent events that will never arrive.
 					const invokingTask = sendTask.then(started => {
-						if (!started) throw new Error("send did not invoke the agent");
+						if (!started) throw new Error(__ompTranslate("send did not invoke the agent"));
 					});
 					// A send that starts no turn (idle steer superseded by a concurrent turn,
 					// plan-mode fold, deferred ACP turn) is a normal outcome, not a process error.
@@ -200,7 +201,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 					},
 					{ detachesRun: true },
 				);
-				if (result.cancelled && session.sessionFile) throw new Error("Session reload cancelled");
+				if (result.cancelled && session.sessionFile) throw new Error(__ompTranslate("Session reload cancelled"));
 			},
 			compact: instructionsOrOptions => runExtensionCompact(session, instructionsOrOptions),
 		},

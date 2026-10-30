@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { Agent, AgentMessage, AgentToolResult, AgentTurnEndContext } from "@oh-my-pi/pi-agent-core";
 import { invalidateMessageCache } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
@@ -230,7 +231,12 @@ export class PrewalkCoordinator {
 		} catch (error) {
 			this.#host.emitNotice(
 				"warning",
-				`Prewalk: could not restore ${handoff.source.provider}/${handoff.source.id}: ${error instanceof Error ? error.message : String(error)}`,
+				__ompTranslate(
+					"Prewalk: could not restore {0}/{1}: {2}",
+					`${handoff.source.provider}`,
+					`${handoff.source.id}`,
+					`${error instanceof Error ? error.message : String(error)}`,
+				),
 				"prewalk",
 			);
 		}
@@ -293,8 +299,9 @@ export class PrewalkCoordinator {
 					? `${decision.route} (prewalk ${chance})`
 					: decision.arm
 						? `prewalk ${chance}`
-						: `prewalk ${chance} (below threshold)`;
-			if (mode === "suggest") this.#host.emitNotice("info", `Auto-prewalk: ${summary}`, "prewalk");
+						: __ompTranslate("prewalk {0} (below threshold)", `${chance}`);
+			if (mode === "suggest")
+				this.#host.emitNotice("info", __ompTranslate("Auto-prewalk: {0}", `${summary}`), "prewalk");
 			else logger.debug("auto-prewalk: not armed", { decision: summary });
 			return undefined;
 		}
@@ -310,7 +317,11 @@ export class PrewalkCoordinator {
 		this.#clearPrewalkState();
 		this.#host.emitNotice(
 			"info",
-			`Prewalk: target ${prewalk.target.provider}/${prewalk.target.id} already matches the active model and thinking level; nothing to switch.`,
+			__ompTranslate(
+				"Prewalk: target {0}/{1} already matches the active model and thinking level; nothing to switch.",
+				`${prewalk.target.provider}`,
+				`${prewalk.target.id}`,
+			),
 			"prewalk",
 		);
 	}
@@ -357,7 +368,7 @@ export class PrewalkCoordinator {
 					attribution: "agent",
 					timestamp: Date.now(),
 				});
-				this.#host.emitNotice("info", "Prewalk: injected deep-plan nudge.", "prewalk");
+				this.#host.emitNotice("info", __ompTranslate("Prewalk: injected deep-plan nudge."), "prewalk");
 			}
 			return;
 		}
@@ -409,7 +420,11 @@ export class PrewalkCoordinator {
 		this.#clearPrewalkState();
 		this.#host.emitNotice(
 			"info",
-			`Prewalk: disarmed; staying on the active model instead of switching to ${active.target.provider}/${active.target.id}.`,
+			__ompTranslate(
+				"Prewalk: disarmed; staying on the active model instead of switching to {0}/{1}.",
+				`${active.target.provider}`,
+				`${active.target.id}`,
+			),
 			"prewalk",
 		);
 	}
@@ -420,7 +435,11 @@ export class PrewalkCoordinator {
 		if (active) {
 			this.#host.emitNotice(
 				"info",
-				`Prewalk: already armed for ${active.target.provider}/${active.target.id}, waiting for the first edit/write.`,
+				__ompTranslate(
+					"Prewalk: already armed for {0}/{1}, waiting for the first edit/write.",
+					`${active.target.provider}`,
+					`${active.target.id}`,
+				),
 				"prewalk",
 			);
 			const matches =
@@ -449,7 +468,11 @@ export class PrewalkCoordinator {
 		this.#todoSeen = false;
 		this.#host.emitNotice(
 			"info",
-			`Prewalk: armed for ${target.provider}/${target.id} — will switch at the first edit/write once the todo list exists.`,
+			__ompTranslate(
+				"Prewalk: armed for {0}/{1} — will switch at the first edit/write once the todo list exists.",
+				`${target.provider}`,
+				`${target.id}`,
+			),
 			"prewalk",
 		);
 		return {
@@ -583,7 +606,7 @@ export class PrewalkCoordinator {
 			});
 			if (autosavedPlan) {
 				const displayPath = truncateToWidth(replaceTabs(shortenPath(autosavedPlan)), TRUNCATE_LENGTHS.CONTENT);
-				this.#host.emitNotice("info", `Plan autosaved to ${displayPath}.`, "plan-yolo");
+				this.#host.emitNotice("info", __ompTranslate("Plan autosaved to {0}.", `${displayPath}`), "plan-yolo");
 			}
 		} catch (error) {
 			logger.warn("Failed to autosave approved plan", { error });
@@ -597,7 +620,7 @@ export class PrewalkCoordinator {
 			);
 			this.#host.emitNotice(
 				"warning",
-				`Plan autosave failed: ${detail} Continuing with implementation.`,
+				__ompTranslate("Plan autosave failed: {0} Continuing with implementation.", `${detail}`),
 				"plan-yolo",
 			);
 		}

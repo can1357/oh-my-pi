@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type SelectItem, SelectList, type SgrMouseEvent } from "../index";
 import { getSelectListTheme } from "../theme/theme";
 import { OverlayPanel } from "../chrome/overlay-box";
@@ -17,15 +18,19 @@ export class QueueModeSelectorComponent extends OverlayPanel {
 		onSelect: (mode: "all" | "one-at-a-time") => void,
 		onCancel: () => void,
 	) {
-		super("Queue Mode", "omp.overlay.queue-mode");
+		super(__ompTranslate("Queue Mode"), "omp.overlay.queue-mode");
 
 		const queueModes: SelectItem[] = [
 			{
 				value: "one-at-a-time",
-				label: "one-at-a-time",
-				description: "Process queued messages one by one (recommended)",
+				label: __ompTranslate("one-at-a-time"),
+				description: __ompTranslate("Process queued messages one by one (recommended)"),
 			},
-			{ value: "all", label: "all", description: "Process all queued messages at once" },
+			{
+				value: "all",
+				label: __ompTranslate("all\u0004queue.mode.all"),
+				description: __ompTranslate("Process all queued messages at once"),
+			},
 		];
 
 		// Create selector
@@ -47,20 +52,23 @@ export class QueueModeSelectorComponent extends OverlayPanel {
 
 		this.addChild(this.#selectList);
 		this.#sheet = new SelectListSheet(this.#selectList, {
-			title: "Queue mode",
-			subtitle: "How messages you send while omp works are delivered",
+			title: __ompTranslate("Queue mode"),
+			subtitle: __ompTranslate("How messages you send while omp works are delivered"),
 			icon: "list",
-			noun: "modes",
+			noun: __ompTranslate("modes"),
 			current: [currentMode],
 			// The terminal list shows the setting's values; the sheet names them for people.
 			decorate: item =>
 				item.value === "one-at-a-time"
 					? {
-							label: "One at a time",
-							detail: "Each queued message gets its own turn",
-							badges: [{ text: "recommended" }],
+							label: __ompTranslate("One at a time"),
+							detail: __ompTranslate("Each queued message gets its own turn"),
+							badges: [{ text: __ompTranslate("recommended") }],
 						}
-					: { label: "All at once", detail: "Queued messages are sent together in one turn" },
+					: {
+							label: __ompTranslate("All at once"),
+							detail: __ompTranslate("Queued messages are sent together in one turn"),
+						},
 		});
 	}
 

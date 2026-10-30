@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { TUI } from "@oh-my-pi/pi-tui";
 import {
@@ -21,11 +22,11 @@ async function createHost(options: GitTuiOptions): Promise<GitTuiHost> {
 	const cwd = options.cwd ?? process.cwd();
 	const repo = vcs.git(cwd);
 	const root = repo?.info().repoRoot ?? null;
-	if (!root) throw new Error(`Not a git repository: ${cwd}`);
+	if (!root) throw new Error(__ompTranslate("Not a git repository: {0}", `${cwd}`));
 	let pinnedSha: string | undefined;
 	if (options.revision) {
 		pinnedSha = (await repo?.resolveRef(options.revision)) ?? undefined;
-		if (!pinnedSha) throw new Error(`Cannot resolve revision: ${options.revision}`);
+		if (!pinnedSha) throw new Error(__ompTranslate("Cannot resolve revision: {0}", `${options.revision}`));
 	}
 	return {
 		model: new GitModel(root, { pinnedSha }),

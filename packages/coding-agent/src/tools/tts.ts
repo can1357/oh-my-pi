@@ -1,6 +1,7 @@
 // Ported from NousResearch/hermes-agent (MIT) — tools/tts_tool.py L167-171, L896-959.
 // Speech backends are catalog models selected through the speech role chain.
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
@@ -175,7 +176,7 @@ async function synthesizeLocal(
 
 export const ttsTool: CustomTool<typeof ttsSchema, TtsToolDetails> = {
 	name: "tts",
-	label: "Speech Generation",
+	label: __ompTranslate("Speech Generation"),
 	strict: false,
 	approval: "write",
 	description: prompt.render(ttsDescription, {

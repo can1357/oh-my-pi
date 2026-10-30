@@ -2,6 +2,7 @@
  * Overview model: usage attribution, legend rows, and the occupancy map. Legend and
  * map rows have an ANSI form (`render`) and a native form (`describe`); keep the twins visually identical.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import type { ContextBreakdown } from "../status-line/context-usage";
@@ -130,8 +131,13 @@ export function buildOverviewRows(
 			});
 	}
 	rows.push(
-		{ key: "buffer", id: "buffer", label: "Auto-Compact Buffer", tokens: data.breakdown.autoCompactBufferTokens },
-		{ key: "free", id: "free", label: "Free Space", tokens: data.breakdown.freeTokens },
+		{
+			key: "buffer",
+			id: "buffer",
+			label: __ompTranslate("Auto-Compact Buffer"),
+			tokens: data.breakdown.autoCompactBufferTokens,
+		},
+		{ key: "free", id: "free", label: __ompTranslate("Free Space"), tokens: data.breakdown.freeTokens },
 	);
 	const tokenWidth = Math.max(...rows.map(row => (row.tokens === undefined ? 1 : formatNumber(row.tokens).length)));
 	const shareWidth = Math.max(
@@ -253,11 +259,11 @@ function percentString(part: number, whole: number, fractionDigits = 1): string 
 export function contextSnapcompactLines(breakdown: ContextBreakdown): string[] {
 	const snap = breakdown.snapcompact;
 	if (!snap) return [];
-	if (!snap.visionCapable) return ["Snapcompact: inactive (model has no image input)"];
-	const lines = ["Snapcompact (estimated wire savings)"];
+	if (!snap.visionCapable) return [__ompTranslate("Snapcompact: inactive (model has no image input)")];
+	const lines = [__ompTranslate("Snapcompact (estimated wire savings)")];
 	if (snap.systemPrompt) {
 		const sp = snap.systemPrompt;
-		const scope = sp.scope === "agents-md" ? "AGENTS.md" : "all";
+		const scope = sp.scope === "agents-md" ? "AGENTS.md" : __ompTranslate("all");
 		if (sp.applied) {
 			const frames = `${sp.frames} frame${sp.frames === 1 ? "" : "s"}`;
 			lines.push(
@@ -266,10 +272,10 @@ export function contextSnapcompactLines(breakdown: ContextBreakdown): string[] {
 		} else {
 			const reason =
 				sp.reason === "budget"
-					? "image budget exhausted"
+					? __ompTranslate("image budget exhausted")
 					: sp.reason === "empty"
-						? "nothing to image"
-						: "frames would not save tokens";
+						? __ompTranslate("nothing to image")
+						: __ompTranslate("frames would not save tokens");
 			lines.push(`  System prompt (${scope}): stays text (${reason})`);
 		}
 	}
@@ -373,7 +379,14 @@ export function describeContextMeter(breakdown: ContextMeterData): [NativeNode, 
 			: undefined;
 	const bar = node(
 		"meter",
-		{ value: used, style: "bar", size: "lg", parts, ...(marks ? { marks } : {}), aria: "Context usage by category" },
+		{
+			value: used,
+			style: "bar",
+			size: "lg",
+			parts,
+			...(marks ? { marks } : {}),
+			aria: __ompTranslate("Context usage by category"),
+		},
 		undefined,
 		"bar",
 	);

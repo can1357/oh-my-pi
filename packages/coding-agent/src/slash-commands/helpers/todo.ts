@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import {
 	applyOpsToPhases,
@@ -101,32 +102,37 @@ function commitTodos(runtime: SlashCommandRuntime, phases: TodoPhase[]): void {
 }
 
 const TODO_HELP_TEXT = [
-	"Usage: /todo <verb> [args]",
-	"  /todo                              Show current todos",
-	"  /todo edit                         (TUI only) open in $EDITOR",
-	"  /todo copy                         Print todos as Markdown",
-	"  /todo expand                       (TUI only) expand the sticky HUD",
-	"  /todo collapse                     (TUI only) collapse the sticky HUD",
-	"  /todo export [<path>]              Write todos to file (default: TODO.md)",
-	"  /todo import [<path>]              Replace todos from file (default: TODO.md)",
-	"  /todo append [<phase>] <task...>   Append a task",
-	"  /todo start  <task>                Mark task in_progress (fuzzy match)",
-	"  /todo done   [<task|phase>]        Mark task/phase/all completed",
-	"  /todo drop   [<task|phase>]        Mark task/phase/all abandoned",
-	"  /todo rm     [<task|phase>]        Remove task/phase/all",
+	__ompTranslate("Usage: /todo <verb> [args]"),
+	__ompTranslate("  /todo                              Show current todos"),
+	__ompTranslate("  /todo edit                         (TUI only) open in $EDITOR"),
+	__ompTranslate("  /todo copy                         Print todos as Markdown"),
+	__ompTranslate("  /todo expand                       (TUI only) expand the sticky HUD"),
+	__ompTranslate("  /todo collapse                     (TUI only) collapse the sticky HUD"),
+	__ompTranslate("  /todo export [<path>]              Write todos to file (default: TODO.md)"),
+	__ompTranslate("  /todo import [<path>]              Replace todos from file (default: TODO.md)\u0004todo.help"),
+	__ompTranslate("  /todo append [<phase>] <task...>   Append a task"),
+	__ompTranslate("  /todo start  <task>                Mark task in_progress (fuzzy match)"),
+	__ompTranslate("  /todo done   [<task|phase>]        Mark task/phase/all completed"),
+	__ompTranslate("  /todo drop   [<task|phase>]        Mark task/phase/all abandoned"),
+	__ompTranslate("  /todo rm     [<task|phase>]        Remove task/phase/all\u0004todo.help"),
 ].join("\n");
 
 async function handleTodoCopyCommand(runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
 	const phases = currentPhases(runtime);
 	const markdown = phases.length === 0 ? "" : phasesToMarkdown(phases).trimEnd();
-	await runtime.output(`Copy not available in ACP mode; printing instead:\n\n${markdown || "No todos."}`);
+	await runtime.output(
+		__ompTranslate(
+			"Copy not available in ACP mode; printing instead:\n\n{0}",
+			`${markdown || __ompTranslate("No todos.")}`,
+		),
+	);
 	return commandConsumed();
 }
 
 async function handleTodoExportCommand(restArgs: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
 	const phases = currentPhases(runtime);
 	if (phases.length === 0) {
-		await runtime.output("No todos to export.");
+		await runtime.output(__ompTranslate("No todos to export."));
 		return commandConsumed();
 	}
 	let target: string;
@@ -134,9 +140,12 @@ async function handleTodoExportCommand(restArgs: string, runtime: SlashCommandRu
 		target = resolveTodoMarkdownPath(restArgs, runtime.sessionManager.getCwd());
 		await Bun.write(target, phasesToMarkdown(phases));
 	} catch (err) {
-		return usage(`Failed to write todos: ${errorMessage(err)}`, runtime);
+		return usage(
+			__ompTranslate("Failed to write todos: {0}\u0004todo.export.status", `${errorMessage(err)}`),
+			runtime,
+		);
 	}
-	await runtime.output(`Wrote todos to ${target}`);
+	await runtime.output(__ompTranslate("Wrote todos to {0}\u0004todo.export.status", `${target}`));
 	return commandConsumed();
 }
 
@@ -147,10 +156,17 @@ async function handleTodoImportCommand(restArgs: string, runtime: SlashCommandRu
 		target = resolveTodoMarkdownPath(restArgs, runtime.sessionManager.getCwd());
 		content = await Bun.file(target).text();
 	} catch (err) {
-		return usage(`Failed to read todos: ${errorMessage(err)}`, runtime);
+		return usage(
+			__ompTranslate("Failed to read todos: {0}\u0004todo.import.status", `${errorMessage(err)}`),
+			runtime,
+		);
 	}
 	const { phases, errors } = markdownToPhases(content);
-	if (errors.length > 0) return usage(`Could not parse ${target}:\n  ${errors.join("\n  ")}`, runtime);
+	if (errors.length > 0)
+		return usage(
+			__ompTranslate("Could not parse {0}:\n  {1}\u0004todo.import.status", `${target}`, `${errors.join("\n  ")}`),
+			runtime,
+		);
 	commitTodos(runtime, phases);
 	const taskCount = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
 	await runtime.output(`Imported ${phases.length} phase(s), ${taskCount} task(s) from ${target}.`);
@@ -159,7 +175,7 @@ async function handleTodoImportCommand(restArgs: string, runtime: SlashCommandRu
 
 async function handleTodoAppendCommand(restArgs: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
 	const tokens = tokenize(restArgs);
-	if (tokens.length === 0) return usage("Usage: /todo append [<phase>] <task...>", runtime);
+	if (tokens.length === 0) return usage(__ompTranslate("Usage: /todo append [<phase>] <task...>"), runtime);
 
 	const current = currentPhases(runtime);
 	const phaseName = tokens.length === 1 ? undefined : tokens[0];
@@ -181,19 +197,26 @@ async function handleTodoAppendCommand(restArgs: string, runtime: SlashCommandRu
 	const finalContent = titleCaseSentence(content);
 	targetPhase.tasks.push({ content: finalContent, status: "pending" });
 	commitTodos(runtime, next);
-	await runtime.output(`Appended to ${targetPhase.name}: ${finalContent}`);
+	await runtime.output(__ompTranslate("Appended to {0}: {1}", `${targetPhase.name}`, `${finalContent}`));
 	return commandConsumed();
 }
 
 async function handleTodoStartCommand(restArgs: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
-	if (!restArgs) return usage("Usage: /todo start <task>", runtime);
+	if (!restArgs) return usage(__ompTranslate("Usage: /todo start <task>"), runtime);
 	const current = currentPhases(runtime);
 	const query = tokenize(restArgs).join(" ") || restArgs;
 	const hit = findTaskFuzzy(current, query);
-	if (!hit) return usage(`No task matched "${restArgs}". Use /todo to list current tasks.`, runtime);
+	if (!hit)
+		return usage(
+			__ompTranslate(
+				'No task matched "{0}". Use /todo to list current tasks.\u0004todo.start.not-found',
+				`${restArgs}`,
+			),
+			runtime,
+		);
 	const { phases } = applyOpsToPhases(current, [{ op: "start", task: hit.task.content }]);
 	commitTodos(runtime, phases);
-	await runtime.output(`Started: ${hit.task.content}`);
+	await runtime.output(__ompTranslate("Started: {0}", `${hit.task.content}`));
 	return commandConsumed();
 }
 
@@ -207,12 +230,16 @@ async function handleTodoMutationCommand(
 	if (!trimmedArg) {
 		if (verb === "rm") {
 			commitTodos(runtime, []);
-			await runtime.output("Cleared all todos.");
+			await runtime.output(__ompTranslate("Cleared all todos."));
 			return commandConsumed();
 		}
 		const { phases } = applyOpsToPhases(current, [{ op: verb }]);
 		commitTodos(runtime, phases);
-		await runtime.output(verb === "done" ? "Marked all tasks completed." : "Marked all tasks abandoned.");
+		await runtime.output(
+			verb === "done"
+				? __ompTranslate("Marked all tasks completed.")
+				: __ompTranslate("Marked all tasks abandoned."),
+		);
 		return commandConsumed();
 	}
 
@@ -220,7 +247,12 @@ async function handleTodoMutationCommand(
 	if (taskHit) {
 		const { phases } = applyOpsToPhases(current, [{ op: verb, task: taskHit.task.content }]);
 		commitTodos(runtime, phases);
-		const label = verb === "done" ? "Marked completed" : verb === "drop" ? "Marked abandoned" : "Removed";
+		const label =
+			verb === "done"
+				? __ompTranslate("Marked completed")
+				: verb === "drop"
+					? __ompTranslate("Marked abandoned")
+					: __ompTranslate("Removed");
 		await runtime.output(`${label}: ${taskHit.task.content}`);
 		return commandConsumed();
 	}
@@ -231,15 +263,18 @@ async function handleTodoMutationCommand(
 		commitTodos(runtime, phases);
 		const message =
 			verb === "done"
-				? `Marked phase ${phaseHit.name} completed.`
+				? __ompTranslate("Marked phase {0} completed.", `${phaseHit.name}`)
 				: verb === "drop"
-					? `Marked phase ${phaseHit.name} abandoned.`
-					: `Removed phase: ${phaseHit.name}`;
+					? __ompTranslate("Marked phase {0} abandoned.", `${phaseHit.name}`)
+					: __ompTranslate("Removed phase: {0}\u0004todo.phase.removed", `${phaseHit.name}`);
 		await runtime.output(message);
 		return commandConsumed();
 	}
 
-	return usage(`No task or phase matched "${trimmedArg}".`, runtime);
+	return usage(
+		__ompTranslate('No task or phase matched "{0}".\u0004todo.mutation.not-found', `${trimmedArg}`),
+		runtime,
+	);
 }
 
 /** ACP/text-mode `/todo` handler. Shared by both dispatchers via the spec. */
@@ -251,7 +286,9 @@ export async function handleTodoAcp(
 	if (!trimmed) {
 		const phases = currentPhases(runtime);
 		await runtime.output(
-			phases.length === 0 ? "No todos. Use /todo append <task> to start one." : phasesToMarkdown(phases).trimEnd(),
+			phases.length === 0
+				? __ompTranslate("No todos. Use /todo append <task> to start one.")
+				: phasesToMarkdown(phases).trimEnd(),
 		);
 		return commandConsumed();
 	}
@@ -279,12 +316,18 @@ export async function handleTodoAcp(
 			);
 		case "expand":
 		case "collapse":
-			return usage(`/todo ${verb} controls the interactive HUD and is unavailable in this mode.`, runtime);
+			return usage(
+				__ompTranslate("/todo {0} controls the interactive HUD and is unavailable in this mode.", `${verb}`),
+				runtime,
+			);
 		case "help":
 		case "?":
 			await runtime.output(TODO_HELP_TEXT);
 			return commandConsumed();
 		default:
-			return usage("Unknown /todo subcommand. Use append, start, done, drop, rm, copy, export, import.", runtime);
+			return usage(
+				__ompTranslate("Unknown /todo subcommand. Use append, start, done, drop, rm, copy, export, import."),
+				runtime,
+			);
 	}
 }

@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { presentNarrationAsAnswer } from "@oh-my-pi/pi-ai/utils/narration";
 import { type Component, Container } from "../tui";
@@ -57,9 +58,12 @@ const failedTextRenderers = new WeakSet<AssistantTextRenderer>();
 
 /** The native head of a finished thinking block: "Thought for 12s", or "Thought" when it was never seen streaming. */
 function thoughtLabel(clock: { start: number; end?: number } | undefined): string {
-	if (clock?.end === undefined) return "Thought";
+	if (clock?.end === undefined) return __ompTranslate("Thought");
 	const ms = clock.end - clock.start;
-	return `Thought for ${ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000))}s` : formatDuration(ms)}`;
+	return __ompTranslate(
+		"Thought for {0}",
+		`${ms < 60_000 ? __ompTranslate("{0}s", `${Math.max(1, Math.round(ms / 1000))}`) : formatDuration(ms)}`,
+	);
 }
 
 type ThinkingContentBlock = Extract<AssistantMessage["content"][number], { type: "thinking" }>;
@@ -772,7 +776,7 @@ export class AssistantMessageComponent extends Container {
 	#thinkingDotsLabel(): string {
 		const glyph = THINKING_DOTS_FRAMES[this.#thinkingDotsFrame % THINKING_DOTS_FRAMES.length] ?? "…";
 		const coloredGlyph = theme.fg("thinkingText", glyph);
-		const thinkingLabel = theme.fg("muted", " Thinking");
+		const thinkingLabel = theme.fg("muted", __ompTranslate(" Thinking"));
 		const rate = Math.min(SPEED_MAX, sharedSpeedTracker.getSpeed());
 		// The numeric badge ("<total> · <rate> toks/s") only renders while this block
 		// is genuinely streaming provider tokens. A block that has observed no token
@@ -1034,7 +1038,7 @@ export class AssistantMessageComponent extends Container {
 								{ gap: "sm", title },
 								[
 									node("spinner", { style: "starburst", role: "omp.thinking.spin" }),
-									text([span("Thinking…", "muted")]),
+									text([span(__ompTranslate("Thinking…"), "muted")]),
 									elapsed(performance.now() - (this.#thinkingClock.get(index)?.start ?? performance.now())),
 									...(rate >= 0.05 ? [node("rate", { value: rate, unit: "tok/s" })] : []),
 								],
@@ -1098,7 +1102,7 @@ export class AssistantMessageComponent extends Container {
 			children.push(
 				node(
 					"badge",
-					{ text: "↺ rewound", tone: "muted", role: "omp.assistant.rewound-tag" },
+					{ text: __ompTranslate("↺ rewound"), tone: "muted", role: "omp.assistant.rewound-tag" },
 					undefined,
 					"rewound",
 				),
@@ -1116,8 +1120,8 @@ export class AssistantMessageComponent extends Container {
 						{
 							name: "copy",
 							role: "omp.turn.copy",
-							title: "Copy answer",
-							aria: "Copy answer",
+							title: __ompTranslate("Copy answer"),
+							aria: __ompTranslate("Copy answer"),
 							actions: { click: "copy-answer" },
 						},
 						undefined,
@@ -1152,7 +1156,16 @@ export class AssistantMessageComponent extends Container {
 				"section",
 				{
 					role: "omp.assistant.recovered",
-					head: [span(`↻ Recovered after ${attempt} ${attempt === 1 ? "retry" : "retries"}`, "muted")],
+					head: [
+						span(
+							__ompTranslate(
+								"↻ Recovered after {0} {1}",
+								`${attempt}`,
+								`${attempt === 1 ? "retry" : "retries"}`,
+							),
+							"muted",
+						),
+					],
 					collapsible: true,
 					collapsed: true,
 				},
@@ -1174,13 +1187,13 @@ export class AssistantMessageComponent extends Container {
 		const code = /^(\d{3})\s+/.exec(lines[0] ?? "");
 		if (code) lines[0] = lines[0]!.slice(code[0].length);
 		const detail = lines.filter((line, index) => !lines.slice(index + 1).some(next => next.startsWith(line)));
-		const errorText = detail.join("\n") || "Unknown error";
+		const errorText = detail.join("\n") || __ompTranslate("Unknown error");
 		const children: NativeChild[] = [
 			node(
 				"row",
 				{ gap: "sm" },
 				[
-					text([span("Request failed", "error strong")]),
+					text([span(__ompTranslate("Request failed"), "error strong")]),
 					...(code ? [node("badge", { text: code[1]!, tone: "error", role: "omp.error.code" })] : []),
 				],
 				"head",
@@ -1205,9 +1218,14 @@ export class AssistantMessageComponent extends Container {
 					"row",
 					{ gap: "sm", role: "omp.error.actions" },
 					[
-						button("retry", "Retry", ["F5"], "Retry the failed turn"),
-						button("copy-error", "Copy error", [], "Copy the error message"),
-						button("switch-model", "Switch model", ["⌥P"], "Pick another model for this session"),
+						button("retry", __ompTranslate("Retry"), ["F5"], __ompTranslate("Retry the failed turn")),
+						button("copy-error", __ompTranslate("Copy error"), [], __ompTranslate("Copy the error message")),
+						button(
+							"switch-model",
+							__ompTranslate("Switch model"),
+							["⌥P"],
+							__ompTranslate("Pick another model for this session"),
+						),
 					],
 					"actions",
 				),
@@ -1763,7 +1781,14 @@ export class AssistantMessageComponent extends Container {
 				continue;
 			}
 			this.#contentContainer.addChild(
-				new Text(theme.fg("toolOutput", linkedImageText(`[Image: ${image.mimeType}]`, image, sourcePath)), 1, 0),
+				new Text(
+					theme.fg(
+						"toolOutput",
+						linkedImageText(__ompTranslate("[Image: {0}]", `${image.mimeType}`), image, sourcePath),
+					),
+					1,
+					0,
+				),
 			);
 		}
 	}

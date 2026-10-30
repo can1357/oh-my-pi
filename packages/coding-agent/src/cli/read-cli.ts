@@ -5,6 +5,7 @@
  * prints the resulting content blocks exactly as the model would receive them
  * (including truncation/limit notices appended by the meta-notice wrapper).
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
@@ -39,7 +40,7 @@ const SKILL_URL_RE = /skill:\/\//i;
 
 export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 	if (!cmd.path) {
-		process.stderr.write(chalk.red("error: path is required\n"));
+		process.stderr.write(chalk.red(__ompTranslate("error: path is required\n")));
 		process.exit(1);
 	}
 
@@ -119,7 +120,13 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 			} else if (block.type === "image") {
 				const decodedBytes = Buffer.from(block.data, "base64").byteLength;
 				process.stdout.write(
-					chalk.dim(`[image content: ${block.mimeType}, ${decodedBytes} bytes base64-decoded]\n`),
+					chalk.dim(
+						__ompTranslate(
+							"[image content: {0}, {1} bytes base64-decoded]\n",
+							`${block.mimeType}`,
+							`${decodedBytes}`,
+						),
+					),
 				);
 			}
 		}

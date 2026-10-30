@@ -1,4 +1,5 @@
 /** `web_search` — provider-backed web search with synthesized answer and sources. */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
 import type { ReactNode } from "react";
 import { Badge, Badges, InvalidArg, Kv, KvGrid, Note, ResultText, Row } from "../parts";
 import type { ToolRenderer, ToolRenderProps } from "../types";
@@ -16,12 +17,12 @@ function formatAge(seconds: unknown): string {
 	const s = num(seconds);
 	if (s === null || s < 0) return "";
 	const m = Math.floor(s / 60);
-	if (m < 60) return `${m}m ago`;
+	if (m < 60) return __ompTranslate("{0}m ago", `${m}`);
 	const h = Math.floor(m / 60);
-	if (h < 24) return `${h}h ago`;
+	if (h < 24) return __ompTranslate("{0}h ago", `${h}`);
 	const d = Math.floor(h / 24);
-	if (d < 365) return `${d}d ago`;
-	return `${Math.floor(d / 365)}y ago`;
+	if (d < 365) return __ompTranslate("{0}d ago", `${d}`);
+	return __ompTranslate("{0}y ago", `${Math.floor(d / 365)}`);
 }
 
 function Summary({ args }: ToolRenderProps): ReactNode {
@@ -41,7 +42,7 @@ function Summary({ args }: ToolRenderProps): ReactNode {
 
 function SourceRow({ source, index }: { source: Record<string, unknown>; index: number }): ReactNode {
 	const url = str(source.url) ?? "";
-	const title = str(source.title)?.trim() || url || "Untitled";
+	const title = str(source.title)?.trim() || url || __ompTranslate("Untitled");
 	const domain = url ? getDomain(url) : "";
 	const age = formatAge(source.ageSeconds) || (str(source.publishedDate) ?? "");
 	return (
@@ -86,10 +87,10 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 		const outTok = num(usage.outputTokens);
 		const totalTok = num(usage.totalTokens);
 		const searchReqs = num(usage.searchRequests);
-		if (inTok !== null) usageParts.push(`in ${inTok}`);
-		if (outTok !== null) usageParts.push(`out ${outTok}`);
-		if (totalTok !== null) usageParts.push(`total ${totalTok}`);
-		if (searchReqs !== null) usageParts.push(`search ${searchReqs}`);
+		if (inTok !== null) usageParts.push(__ompTranslate("in {0}\u0004usage.tokens.input", `${inTok}`));
+		if (outTok !== null) usageParts.push(__ompTranslate("out {0}", `${outTok}`));
+		if (totalTok !== null) usageParts.push(__ompTranslate("total {0}", `${totalTok}`));
+		if (searchReqs !== null) usageParts.push(__ompTranslate("search {0}", `${searchReqs}`));
 	}
 
 	return (
@@ -99,14 +100,14 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 					recency && `recency=${recency}`,
 					limit !== null && `limit=${limit}`,
 					numResults !== null && `results=${numResults}`,
-					response && `${sources.length} source${sources.length === 1 ? "" : "s"}`,
+					response && __ompTranslate("{0} source{1}", `${sources.length}`, `${sources.length === 1 ? "" : "s"}`),
 				]}
 			/>
 			{(query !== null || providerInfo || usageParts.length > 0) && (
 				<KvGrid>
-					{query !== null && <Kv k="query">{query}</Kv>}
-					{providerInfo && <Kv k="provider">{providerInfo}</Kv>}
-					{usageParts.length > 0 && <Kv k="usage">{usageParts.join(" · ")}</Kv>}
+					{query !== null && <Kv k={__ompTranslate("query")}>{query}</Kv>}
+					{providerInfo && <Kv k={__ompTranslate("provider")}>{providerInfo}</Kv>}
+					{usageParts.length > 0 && <Kv k={__ompTranslate("usage")}>{usageParts.join(" · ")}</Kv>}
 				</KvGrid>
 			)}
 			{errorMsg && !resultTextOf(result) && <Note tone="err">{errorMsg}</Note>}

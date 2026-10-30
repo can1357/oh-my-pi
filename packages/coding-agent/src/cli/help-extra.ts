@@ -1,99 +1,22 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import "@oh-my-pi/pi-utils/env";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { APP_NAME, CONFIG_DIR_NAME } from "@oh-my-pi/pi-utils/dirs";
 
 export function getExtraHelpText(): string {
-	return `${chalk.bold("Environment Variables:")}
-  ${chalk.dim("# Core Providers")}
-  ANTHROPIC_API_KEY          - Anthropic Claude models
-  ANTHROPIC_OAUTH_TOKEN      - Anthropic OAuth (takes precedence over API key)
-  CLAUDE_CODE_USE_FOUNDRY    - Enable Anthropic Foundry mode (uses Foundry endpoint + mTLS)
-  FOUNDRY_BASE_URL           - Anthropic Foundry base URL (e.g., https://<foundry-host>)
-  ANTHROPIC_FOUNDRY_API_KEY  - Anthropic token used as Authorization: Bearer <token> in Foundry mode
-  ANTHROPIC_CUSTOM_HEADERS   - Extra headers for Foundry or any custom ANTHROPIC_BASE_URL gateway (e.g., "user-id: USERNAME")
-  CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS - Omit pre-release Anthropic fields (context_management, beta tool fields, task budgets, thinking.block_binding) for gateways that reject them
-  CLAUDE_CODE_CLIENT_CERT    - Client certificate (PEM path or inline PEM) for mTLS
-  CLAUDE_CODE_CLIENT_KEY     - Client private key (PEM path or inline PEM) for mTLS
-  NODE_EXTRA_CA_CERTS        - CA bundle path (or inline PEM) for server certificate validation
-  OPENAI_API_KEY             - OpenAI GPT models
-  GEMINI_API_KEY             - Google Gemini models
-  COPILOT_GITHUB_TOKEN      - GitHub Copilot
-
-  ${chalk.dim("# Additional LLM Providers")}
-  AZURE_OPENAI_API_KEY       - Azure OpenAI models
-  GROQ_API_KEY               - Groq models
-  CEREBRAS_API_KEY           - Cerebras models
-  XAI_API_KEY                - xAI Grok models
-  OPENROUTER_API_KEY         - OpenRouter aggregated models
-  KILO_API_KEY               - Kilo Gateway models
-  MISTRAL_API_KEY            - Mistral models
-  ZAI_API_KEY                - z.ai models (ZhipuAI/GLM)
-  UMANS_AI_CODING_PLAN_API_KEY - Umans AI Coding Plan models
-  ABLITERATION_API_KEY       - Abliteration uncensored GLM models
-  UMANS_WEBSEARCH_PROVIDER    - Umans gateway web search backend (native or exa)
-  MINIMAX_API_KEY            - MiniMax models
-  OPENCODE_API_KEY           - OpenCode Zen/OpenCode Go models
-  CURSOR_ACCESS_TOKEN        - Cursor AI models
-  CLINE_API_KEY              - ClinePass subscription models
-  COMMAND_CODE_API_KEY       - Command Code Provider API models
-  CHARM_HYPER_API_KEY        - Charm Hyper inference gateway models
-  AI_GATEWAY_API_KEY         - Vercel AI Gateway
-  STEPFUN_API_KEY            - StepFun Step models
-  HELMCODE_API_KEY           - Helmcode private EU inference
-  WAFER_SERVERLESS_API_KEY   - Wafer Serverless (pay-as-you-go)
-  YOLO_AUTO_API_KEY          - Yolo-Auto flat-rate Qwen models
-  SINGULARITYAPI_DEV_API_KEY - SingularityAPI universal gateway (300+ models)
-  SINGULARITYAPI_TECH_API_KEY - SingularityAPI reserved DeepSeek lanes
-
-  ${chalk.dim("# Cloud Providers")}
-  AWS_PROFILE                - AWS Bedrock (or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY)
-  GOOGLE_CLOUD_PROJECT       - Google Vertex AI (requires GOOGLE_CLOUD_LOCATION)
-  GOOGLE_APPLICATION_CREDENTIALS - Service account for Vertex AI
-
-  ${chalk.dim("# Search & Tools")}
-  EXA_API_KEY                - Exa web search
-  BRAVE_API_KEY              - Brave web search
-  PERPLEXITY_API_KEY         - Perplexity web search API key (optional; anonymous fallback)
-  PERPLEXITY_COOKIES         - Perplexity web search (session cookie)
-  TAVILY_API_KEY             - Tavily web search
-  TINYFISH_API_KEY           - TinyFish web search
-  FIRECRAWL_API_KEY          - Firecrawl web search + fetch reader backend
-  ANTHROPIC_SEARCH_API_KEY   - Anthropic web search (override; isolates search from main ANTHROPIC_API_KEY)
-  ANTHROPIC_SEARCH_BASE_URL  - Anthropic web search base URL (override; pairs with ANTHROPIC_SEARCH_API_KEY)
-  TYPESAFE_API_KEY           - TypeSafe System One judgments (auto thinking, unexpected-stop, AI staging, eval judge())
-
-  ${chalk.dim("# Configuration")}
-  OMP_PROFILE                 - Named profile for isolated agent state (same as --profile)
-  Use \`omp --profile <name> --alias <command>\` to create a shell shortcut for a profile
-  PI_CODING_AGENT_DIR        - Session storage directory (default: ~/${CONFIG_DIR_NAME}/agent)
-  PI_PACKAGE_DIR             - Override package directory (for Nix/Guix store paths)
-  PI_SMOL_MODEL              - Override smol/fast model (see --smol)
-  PI_SLOW_MODEL              - Override slow/reasoning model (see --slow)
-  PI_PLAN_MODEL              - Override planning model (see --plan)
-  PI_NO_PTY                  - Disable PTY-based interactive bash execution
-  For complete environment variable reference, see:
-  ${chalk.dim("docs/environment-variables.md")}
-${chalk.bold("Available Tools (default-enabled unless noted):")}
-  read          - Read file contents
-  bash          - Execute bash commands
-  edit          - Edit files with find/replace
-  write         - Write files (creates/overwrites)
-  grep          - Search file contents
-  glob          - Find files by glob pattern
-  lsp           - Language server protocol (code intelligence)
-  python        - Execute Python code (requires: ${APP_NAME} setup python)
-  notebook      - Edit Jupyter notebooks
-  browser       - Browser automation (Puppeteer)
-  computer      - Native host desktop capture and input (disabled by default)
-  task          - Launch sub-agents for parallel tasks
-  todo          - Manage todo/task lists
-  web_search    - Search the web
-  ask           - Ask user questions (interactive mode only)
-
-${chalk.bold("Plugin Options:")}
-  --plugin-dir <path>        Load plugin from directory (repeatable)
-
-${chalk.bold("Useful Commands:")}
-  omp agents unpack           - Export bundled subagents to ~/.omp/agent/agents (default)
-  omp agents unpack --project - Export bundled subagents to ./.omp/agents`;
+	return __ompTranslate(
+		'{0}\n  {1}\n  ANTHROPIC_API_KEY          - Anthropic Claude models\n  ANTHROPIC_OAUTH_TOKEN      - Anthropic OAuth (takes precedence over API key)\n  CLAUDE_CODE_USE_FOUNDRY    - Enable Anthropic Foundry mode (uses Foundry endpoint + mTLS)\n  FOUNDRY_BASE_URL           - Anthropic Foundry base URL (e.g., https://<foundry-host>)\n  ANTHROPIC_FOUNDRY_API_KEY  - Anthropic token used as Authorization: Bearer <token> in Foundry mode\n  ANTHROPIC_CUSTOM_HEADERS   - Extra headers for Foundry or any custom ANTHROPIC_BASE_URL gateway (e.g., "user-id: USERNAME")\n  CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS - Omit pre-release Anthropic fields (context_management, beta tool fields, task budgets, thinking.block_binding) for gateways that reject them\n  CLAUDE_CODE_CLIENT_CERT    - Client certificate (PEM path or inline PEM) for mTLS\n  CLAUDE_CODE_CLIENT_KEY     - Client private key (PEM path or inline PEM) for mTLS\n  NODE_EXTRA_CA_CERTS        - CA bundle path (or inline PEM) for server certificate validation\n  OPENAI_API_KEY             - OpenAI GPT models\n  GEMINI_API_KEY             - Google Gemini models\n  COPILOT_GITHUB_TOKEN      - GitHub Copilot\n\n  {2}\n  AZURE_OPENAI_API_KEY       - Azure OpenAI models\n  GROQ_API_KEY               - Groq models\n  CEREBRAS_API_KEY           - Cerebras models\n  XAI_API_KEY                - xAI Grok models\n  OPENROUTER_API_KEY         - OpenRouter aggregated models\n  KILO_API_KEY               - Kilo Gateway models\n  MISTRAL_API_KEY            - Mistral models\n  ZAI_API_KEY                - z.ai models (ZhipuAI/GLM)\n  UMANS_AI_CODING_PLAN_API_KEY - Umans AI Coding Plan models\n  ABLITERATION_API_KEY       - Abliteration uncensored GLM models\n  UMANS_WEBSEARCH_PROVIDER    - Umans gateway web search backend (native or exa)\n  MINIMAX_API_KEY            - MiniMax models\n  OPENCODE_API_KEY           - OpenCode Zen/OpenCode Go models\n  CURSOR_ACCESS_TOKEN        - Cursor AI models\n  CLINE_API_KEY              - ClinePass subscription models\n  COMMAND_CODE_API_KEY       - Command Code Provider API models\n  CHARM_HYPER_API_KEY        - Charm Hyper inference gateway models\n  AI_GATEWAY_API_KEY         - Vercel AI Gateway\n  STEPFUN_API_KEY            - StepFun Step models\n  HELMCODE_API_KEY           - Helmcode private EU inference\n  WAFER_SERVERLESS_API_KEY   - Wafer Serverless (pay-as-you-go)\n  YOLO_AUTO_API_KEY          - Yolo-Auto flat-rate Qwen models\n  SINGULARITYAPI_DEV_API_KEY - SingularityAPI universal gateway (300+ models)\n  SINGULARITYAPI_TECH_API_KEY - SingularityAPI reserved DeepSeek lanes\n\n  {3}\n  AWS_PROFILE                - AWS Bedrock (or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY)\n  GOOGLE_CLOUD_PROJECT       - Google Vertex AI (requires GOOGLE_CLOUD_LOCATION)\n  GOOGLE_APPLICATION_CREDENTIALS - Service account for Vertex AI\n\n  {4}\n  EXA_API_KEY                - Exa web search\n  BRAVE_API_KEY              - Brave web search\n  PERPLEXITY_API_KEY         - Perplexity web search API key (optional; anonymous fallback)\n  PERPLEXITY_COOKIES         - Perplexity web search (session cookie)\n  TAVILY_API_KEY             - Tavily web search\n  TINYFISH_API_KEY           - TinyFish web search\n  FIRECRAWL_API_KEY          - Firecrawl web search + fetch reader backend\n  ANTHROPIC_SEARCH_API_KEY   - Anthropic web search (override; isolates search from main ANTHROPIC_API_KEY)\n  ANTHROPIC_SEARCH_BASE_URL  - Anthropic web search base URL (override; pairs with ANTHROPIC_SEARCH_API_KEY)\n  TYPESAFE_API_KEY           - TypeSafe System One judgments (auto thinking, unexpected-stop, AI staging, eval judge())\n\n  {5}\n  OMP_PROFILE                 - Named profile for isolated agent state (same as --profile)\n  Use `omp --profile <name> --alias <command>` to create a shell shortcut for a profile\n  PI_CODING_AGENT_DIR        - Session storage directory (default: ~/{6}/agent)\n  PI_PACKAGE_DIR             - Override package directory (for Nix/Guix store paths)\n  PI_SMOL_MODEL              - Override smol/fast model (see --smol)\n  PI_SLOW_MODEL              - Override slow/reasoning model (see --slow)\n  PI_PLAN_MODEL              - Override planning model (see --plan)\n  PI_NO_PTY                  - Disable PTY-based interactive bash execution\n  For complete environment variable reference, see:\n  {7}\n{8}\n  read          - Read file contents\n  bash          - Execute bash commands\n  edit          - Edit files with find/replace\n  write         - Write files (creates/overwrites)\n  grep          - Search file contents\n  glob          - Find files by glob pattern\n  lsp           - Language server protocol (code intelligence)\n  python        - Execute Python code (requires: {9} setup python)\n  notebook      - Edit Jupyter notebooks\n  browser       - Browser automation (Puppeteer)\n  computer      - Native host desktop capture and input (disabled by default)\n  task          - Launch sub-agents for parallel tasks\n  todo          - Manage todo/task lists\n  web_search    - Search the web\n  ask           - Ask user questions (interactive mode only)\n\n{10}\n  --plugin-dir <path>        Load plugin from directory (repeatable)\n\n{11}\n  omp agents unpack           - Export bundled subagents to ~/.omp/agent/agents (default)\n  omp agents unpack --project - Export bundled subagents to ./.omp/agents',
+		`${chalk.bold(__ompTranslate("Environment Variables:"))}`,
+		`${chalk.dim(__ompTranslate("# Core Providers"))}`,
+		`${chalk.dim(__ompTranslate("# Additional LLM Providers"))}`,
+		`${chalk.dim(__ompTranslate("# Cloud Providers"))}`,
+		`${chalk.dim(__ompTranslate("# Search & Tools"))}`,
+		`${chalk.dim(__ompTranslate("# Configuration"))}`,
+		`${CONFIG_DIR_NAME}`,
+		`${chalk.dim("docs/environment-variables.md")}`,
+		`${chalk.bold(__ompTranslate("Available Tools (default-enabled unless noted):"))}`,
+		`${APP_NAME}`,
+		`${chalk.bold(__ompTranslate("Plugin Options:"))}`,
+		`${chalk.bold(__ompTranslate("Useful Commands:"))}`,
+	);
 }

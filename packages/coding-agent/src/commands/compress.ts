@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { postmortem } from "@oh-my-pi/pi-utils";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { compressHelp as commandHelp } from "../cli/command-help";
@@ -7,14 +8,28 @@ import { runCompressCommand } from "../compress";
 export default class Compress extends Command {
 	static description = commandHelp.description;
 	static args = {
-		files: Args.string({ description: "Files or glob patterns to compress", required: true, multiple: true }),
+		files: Args.string({
+			description: __ompTranslate("Files or glob patterns to compress"),
+			required: true,
+			multiple: true,
+		}),
 	};
 	static flags = {
-		out: Flags.string({ char: "o", description: "Write the approved text here instead of stdout (single file)" }),
-		inPlace: Flags.boolean({ char: "i", description: "Overwrite each source file with its approved text" }),
-		rounds: Flags.integer({ char: "r", description: "Maximum drafts per file before giving up", default: 3 }),
-		agents: Flags.integer({ char: "n", description: "Files compressed concurrently", default: 4 }),
-		model: Flags.string({ char: "m", description: "Model selector" }),
+		out: Flags.string({
+			char: "o",
+			description: __ompTranslate("Write the approved text here instead of stdout (single file)"),
+		}),
+		inPlace: Flags.boolean({
+			char: "i",
+			description: __ompTranslate("Overwrite each source file with its approved text"),
+		}),
+		rounds: Flags.integer({
+			char: "r",
+			description: __ompTranslate("Maximum drafts per file before giving up"),
+			default: 3,
+		}),
+		agents: Flags.integer({ char: "n", description: __ompTranslate("Files compressed concurrently"), default: 4 }),
+		model: Flags.string({ char: "m", description: __ompTranslate("Model selector") }),
 	};
 
 	static examples = [
@@ -28,10 +43,12 @@ export default class Compress extends Command {
 	async run(): Promise<void> {
 		const { args, flags } = await this.parse(Compress);
 		const files = args.files ?? [];
-		if (files.length === 0) throw new CliUsageError("compress requires at least one file or glob pattern");
-		if (flags.rounds <= 0) throw new CliUsageError("--rounds must be a positive integer");
-		if (flags.agents <= 0) throw new CliUsageError("--agents must be a positive integer");
-		if (flags.inPlace && flags.out) throw new CliUsageError("--in-place and --out are mutually exclusive");
+		if (files.length === 0)
+			throw new CliUsageError(__ompTranslate("compress requires at least one file or glob pattern"));
+		if (flags.rounds <= 0) throw new CliUsageError(__ompTranslate("--rounds must be a positive integer"));
+		if (flags.agents <= 0) throw new CliUsageError(__ompTranslate("--agents must be a positive integer"));
+		if (flags.inPlace && flags.out)
+			throw new CliUsageError(__ompTranslate("--in-place and --out are mutually exclusive"));
 		const result = await runCompressCommand({
 			files,
 			model: flags.model,

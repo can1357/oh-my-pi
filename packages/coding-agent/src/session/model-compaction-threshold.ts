@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { resolveThresholdTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { ModelCompactionPoint } from "@oh-my-pi/pi-tui/overlays/model-browser";
@@ -90,7 +91,9 @@ function resolveTrigger(settings: CompactionSettings, window: number): ModelComp
 /** Why a trigger sits where it does, in a few words: `fixed`, `fixed 300K, capped by window`, `85% of 400K base`, `12.5% of window`. */
 function formatBasis(trigger: ModelCompactionTrigger): string {
 	if (trigger.kind === "fixed") {
-		return trigger.cappedFrom === undefined ? "fixed" : `fixed ${formatWindow(trigger.cappedFrom)}, capped by window`;
+		return trigger.cappedFrom === undefined
+			? __ompTranslate("fixed")
+			: __ompTranslate("fixed {0}, capped by window", `${formatWindow(trigger.cappedFrom)}`);
 	}
 	const share = `${trigger.share.toLocaleString("en-US", { maximumFractionDigits: 1 })}%`;
 	return trigger.fromBase ? `${share} of ${formatWindow(trigger.scaledFrom)} base` : `${share} of window`;
@@ -143,7 +146,7 @@ function planModelCompactionEntry(
 	const ceiling = tiers?.extended ?? model.contextWindow;
 	let error: string | undefined;
 	if (entry !== undefined && tokens !== undefined && ceiling !== null && ceiling !== undefined) {
-		const max = tiers ? "max " : "";
+		const max = tiers ? __ompTranslate("max ") : "";
 		if (fixed && tokens >= ceiling) error = `Must be below the ${formatWindow(ceiling)} ${max}window`;
 		if (!fixed && tokens > ceiling) error = `Must not exceed the ${formatWindow(ceiling)} ${max}window`;
 	}
@@ -152,9 +155,11 @@ function planModelCompactionEntry(
 
 /** A model entry in words, for the save message: `400,000-token base`, `fixed at 400,000 tokens`, `80% of the window`. */
 function describeModelCompactionEntry(threshold: CompactionThresholdPair): string {
-	if (threshold.thresholdTokens <= 0) return `${threshold.thresholdPercent}% of the window`;
+	if (threshold.thresholdTokens <= 0) return __ompTranslate("{0}% of the window", `${threshold.thresholdPercent}`);
 	const tokens = threshold.thresholdTokens.toLocaleString("en-US");
-	return threshold.fixed ? `fixed at ${tokens} tokens` : `${tokens}-token base`;
+	return threshold.fixed
+		? __ompTranslate("fixed at {0} tokens", `${tokens}`)
+		: __ompTranslate("{0}-token base", `${tokens}`);
 }
 
 /** Where the plan compacts; undefined when auto-compaction is off or the window is unknown. */
@@ -165,13 +170,13 @@ function planTrigger(plan: ModelCompactionEntryPlan): ModelCompactionTrigger | u
 
 /** Where the plan compacts, as one short line: `compacts at 340K · 85% of 400K base`. */
 function summarizePlan(plan: ModelCompactionEntryPlan): string | undefined {
-	if (!plan.settings.enabled) return "auto-compaction is off";
+	if (!plan.settings.enabled) return __ompTranslate("auto-compaction is off");
 	const trigger = planTrigger(plan);
 	if (!trigger) return undefined;
 	if (trigger.kind === "fixed" && trigger.cappedFrom === undefined) {
-		return `compacts at exactly ${formatWindow(trigger.tokens)}`;
+		return __ompTranslate("compacts at exactly {0}", `${formatWindow(trigger.tokens)}`);
 	}
-	return `compacts at ${formatWindow(trigger.tokens)} · ${formatBasis(trigger)}`;
+	return __ompTranslate("compacts at {0} · {1}", `${formatWindow(trigger.tokens)}`, `${formatBasis(trigger)}`);
 }
 
 /** Parse and plan typed hub input; undefined when it does not parse or fit. */
@@ -222,7 +227,7 @@ export function previewModelCompactionPoint(
 	const planned = planInput(settings, model, input, tiers);
 	if (!planned) return undefined;
 	const summary = summarizePlan(planned.plan);
-	return planned.reset && summary ? `resets: ${summary}` : summary;
+	return planned.reset && summary ? __ompTranslate("resets: {0}", `${summary}`) : summary;
 }
 
 /**
@@ -272,7 +277,9 @@ export function setModelCompactionPoint(
 		isRecord(projectThresholds.modelThresholds) &&
 		Object.hasOwn(projectThresholds.modelThresholds, key)
 	) {
-		throw new Error(`${key} is set in the project config; edit compaction.modelThresholds there`);
+		throw new Error(
+			__ompTranslate("{0} is set in the project config; edit compaction.modelThresholds there", `${key}`),
+		);
 	}
 	const { tiers } = options;
 	const plan = planModelCompactionEntry(settings, model, entry, tiers);
@@ -282,11 +289,12 @@ export function setModelCompactionPoint(
 		const trigger = resolveThresholdTokens(tiers.extended, plan.settings);
 		const threshold = model.cost.longContext?.inputThreshold;
 		const premiumFrom = threshold !== undefined && trigger > threshold ? threshold : undefined;
-		const pricing = premiumFrom !== undefined ? `; >${formatWindow(premiumFrom)} costs more` : "";
+		const pricing =
+			premiumFrom !== undefined ? __ompTranslate("; >{0} costs more", `${formatWindow(premiumFrom)}`) : "";
 		// Kept short: the hub shows it on one line beside the input field.
 		return {
 			kind: "confirm",
-			message: `Opens ${formatWindow(tiers.extended)} window${pricing}`,
+			message: __ompTranslate("Opens {0} window{1}", `${formatWindow(tiers.extended)}`, `${pricing}`),
 			extendedWindow: tiers.extended,
 			...(premiumFrom !== undefined ? { premiumFrom } : {}),
 		};
@@ -295,14 +303,17 @@ export function setModelCompactionPoint(
 	const effective = cfgCompactionModelThresholds.get(settings)[key] ?? undefined;
 	if (effective !== entry) {
 		throw new Error(
-			`${key} is overridden by a higher-priority config layer; the global entry was saved but has no effect`,
+			__ompTranslate(
+				"{0} is overridden by a higher-priority config layer; the global entry was saved but has no effect",
+				`${key}`,
+			),
 		);
 	}
 	const threshold = entry === undefined ? undefined : parseModelCompactionEntry(entry);
 	return {
 		kind: "saved",
 		entry,
-		described: threshold ? describeModelCompactionEntry(threshold) : "reset",
+		described: threshold ? describeModelCompactionEntry(threshold) : __ompTranslate("reset"),
 		trigger: planTrigger(plan),
 		summary: summarizePlan(plan),
 	};
