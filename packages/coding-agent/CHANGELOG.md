@@ -4,11 +4,12 @@
 
 ### Breaking Changes
 
-- `omp gc --apply` no longer archives cold sessions by default (`gc.archive` is now off): it still reclaims unreferenced blobs, checkpoints database WAL files and compresses idle sessions, but it no longer moves cold sessions into `archive/sessions`, where nothing in this release can find or read them. Pass `--archive` to ask for it by name ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --apply` no longer archives cold sessions by default (`gc.archive` is now off): it still reclaims unreferenced blobs and checkpoints database WAL files, but it no longer moves cold sessions into `archive/sessions`, where nothing in this release can find or read them. A configuration that sets `gc.archive` true still enables the phase without `--archive`, and `--archive` still asks for it by name ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 
-- `omp gc --blobs` no longer deletes a blob that only a symlinked transcript references: the walk that collects session files follows symlinks, the way `FileSessionStorage.listFilesSync` already does ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --blobs` no longer deletes blobs that are reachable only through a symlink. Its walks follow links the way `FileSessionStorage.listFilesSync` always has, so a blob referenced by a linked-in transcript, by a linked `*.jsonl.*.bak`, or by a backup under a linked directory is seen as referenced — and a blob that *is* a transcript linked into the sessions tree is no longer deleted outright, which used to leave a broken link with `errors: []` and cost that transcript's own blobs on the next run ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- The walk that feeds nested-session detection follows symlinks too, so `omp gc --archive` leaves alone a session whose pending subagent transcript is reached through a link instead of moving the parent out from under it ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 
 ### Added
 

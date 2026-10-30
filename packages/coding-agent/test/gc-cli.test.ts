@@ -202,6 +202,54 @@ describe("runGcCommand blob sweep", () => {
 		expect(await Bun.file(referenced).exists()).toBe(true);
 		expect(await Bun.file(orphan).exists()).toBe(false);
 	});
+	test("keeps a blob that is itself a transcript linked into the sessions tree", async () => {
+		const innerHash = hashFor("inner");
+		const inner = await writeBlob(root, innerHash, "inner");
+		await agePath(inner);
+		// A transcript stored in its own content-addressed blob file and linked
+		// into the sessions tree: one file with two names, and the one under
+		// `blobs/` is the only real one. Sweeping it leaves a broken link, and
+		// the blobs it references go unreferenced on the next run.
+		const session = await writeSession(root, "project", "linked-target", "complete", {
+			blobRef: `blob:sha256:${innerHash}`,
+		});
+		const transcript = await Bun.file(session).bytes();
+		const transcriptHash = hashFor("transcript-as-blob");
+		const asBlob = path.join(getBlobsDir(root), transcriptHash);
+		await Bun.write(asBlob, transcript);
+		await fs.rm(session);
+		await fs.symlink(asBlob, session);
+		await agePath(asBlob);
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect(await Bun.file(asBlob).exists()).toBe(true);
+		expect(await Bun.file(inner).exists()).toBe(true);
+		expect((await fs.lstat(session)).isSymbolicLink()).toBe(true);
+	});
+
+	test("keeps a blob referenced by a linked recoverable backup", async () => {
+		const referencedHash = hashFor("referenced");
+		const referenced = await writeBlob(root, referencedHash, "referenced");
+		await agePath(referenced);
+		// A `.bak` the writer leaves for recovery, kept elsewhere and linked
+		// in — and one under a linked directory. `listFilesSync` finds both,
+		// so the sweep's own walk has to as well.
+		const elsewhere = path.join(root, "elsewhere");
+		await fs.mkdir(elsewhere, { recursive: true });
+		const backup = path.join(elsewhere, "linked.jsonl.1.bak");
+		await Bun.write(backup, `${JSON.stringify({ type: "message", ref: `blob:sha256:${referencedHash}` })}\n`);
+		const sessions = path.join(getSessionsDir(root), "project");
+		await fs.mkdir(sessions, { recursive: true });
+		await fs.symlink(backup, path.join(sessions, "linked.jsonl.1.bak"));
+		await fs.symlink(elsewhere, path.join(sessions, "linked-dir"));
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect(await Bun.file(referenced).exists()).toBe(true);
+	});
 
 	test("--apply keeps fresh unreferenced blobs out of sweep candidates", async () => {
 		const blob = await writeBlob(root, hashFor("fresh-orphan"), "fresh");

@@ -439,17 +439,27 @@ async function collectCompressedJsonlFiles(root: string): Promise<string[]> {
 }
 
 async function collectBackupJsonlFiles(root: string): Promise<string[]> {
-	try {
-		const files = await Array.fromAsync(JSONL_BACKUP_GLOB.scan(root), name => path.join(root, name));
-		files.sort();
-		return files;
-	} catch (error) {
-		if (codeOf(error) === "ENOENT") return [];
-		throw error;
-	}
+	return await scanSessionTree(JSONL_BACKUP_GLOB, root);
 }
 
-async function collectReferencedBlobHashes(sessionRoots: string[], exactSessionFiles: string[]): Promise<Set<string>> {
+/**
+ * Blob hashes every session file below these roots refers to, plus the hashes
+ * of blob files that *are* session files.
+ *
+ * A transcript can be stored in its own content-addressed blob file and
+ * linked into the sessions tree — that is one file with two names, and the
+ * one in `blobs/` is the only real one. Reading its references is not
+ * enough: the blob holding the transcript itself has no reference anywhere,
+ * so the sweep deleted it, left a broken link behind, reported `errors: []`,
+ * and then deleted the blobs that transcript referenced on the next run,
+ * because by then nothing could read it. A file reachable as a session is a
+ * file in use, whichever of its names the sweep happens to be walking.
+ */
+async function collectReferencedBlobHashes(
+	sessionRoots: string[],
+	exactSessionFiles: string[],
+	blobDir: string,
+): Promise<Set<string>> {
 	const files = new Map<string, string>();
 	const decoder = new TextDecoder();
 	for (const root of sessionRoots) {
@@ -465,8 +475,14 @@ async function collectReferencedBlobHashes(sessionRoots: string[], exactSessionF
 		files.set(normalizePathForComparison(file), file);
 	}
 
+	const blobs = path.resolve(blobDir);
 	const hashes = new Set<string>();
 	for (const file of files.values()) {
+		const real = await fs.realpath(file).catch(() => undefined);
+		if (real && path.dirname(real) === blobs) {
+			const hash = path.basename(real).match(BLOB_FILE_RE)?.[1]?.toLowerCase();
+			if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
+		}
 		// Keep raw-text matching: recoverable malformed records can still own blobs.
 		await scanSessionLinesIfPresent(file, line => {
 			for (const match of decoder.decode(line).matchAll(BLOB_REF_RE)) {
@@ -637,7 +653,7 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 	for (const file of await collectBreadcrumbSessionFiles(getTerminalSessionsDir(options.agentDir))) {
 		exactSessionFiles.set(normalizePathForComparison(file), file);
 	}
-	const referenced = await collectReferencedBlobHashes(defaultRoots, [...exactSessionFiles.values()]);
+	const referenced = await collectReferencedBlobHashes(defaultRoots, [...exactSessionFiles.values()], blobDir);
 	const { candidates, staging } = await collectBlobCandidates(blobDir);
 	const result: BlobGcResult = {
 		referenced: referenced.size,
