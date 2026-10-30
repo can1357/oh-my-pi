@@ -1,3 +1,4 @@
+import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 // node:net only serves the TCP readiness probe for user daemons (`connectPort`).
 import * as net from "node:net";
@@ -476,7 +477,7 @@ class DaemonBroker {
 			{ framing: "lines", maxFrameBytes: MAX_REQUEST_BYTES },
 			socket => this.#accept(socket),
 		);
-		if (process.platform !== "win32") this.#watchEndpoint();
+		if (process.platform !== "win32") this.#watchEndpoint(await fs.stat(this.#runtimeDir));
 		this.#scheduleIdleShutdown();
 		onListening?.();
 		await this.#finished.promise;
@@ -1563,19 +1564,23 @@ class DaemonBroker {
 	 * while every new broker exits on the held lease and every new client fails
 	 * with `connect ENOENT`. Shutting down releases the lease, and the next client
 	 * spawns a broker that rebuilds the scope.
+	 *
+	 * The runtime dir is checked too. A socket path too long for `sun_path` is
+	 * bound under `/tmp/omp-<euid>/` instead, so deleting the dir leaves that
+	 * socket in place; and a client recreates the dir, so its identity is compared
+	 * with the one this broker started in rather than its mere existence.
 	 */
-	#watchEndpoint(): void {
+	#watchEndpoint(runtimeDir: Stats): void {
 		this.#endpointTimer = setInterval(() => {
-			void fs
-				.stat(this.#endpoint)
-				.then(
-					() => undefined,
-					error => {
-						if (!isEnoent(error) || this.#shuttingDown) return;
-						logger.warn("Daemon broker socket was deleted; releasing the scope", { endpoint: this.#endpoint });
-						return this.shutdown();
-					},
-				)
+			void this.#scopeLoss(runtimeDir)
+				.then(loss => {
+					if (!loss || this.#shuttingDown) return;
+					logger.warn(`Daemon broker ${loss}; releasing the scope`, {
+						endpoint: this.#endpoint,
+						runtimeDir: this.#runtimeDir,
+					});
+					return this.shutdown();
+				})
 				.catch(error => {
 					logger.warn("Daemon broker shutdown after socket loss failed", {
 						error: error instanceof Error ? error.message : String(error),
@@ -1584,12 +1589,31 @@ class DaemonBroker {
 		}, this.#endpointCheckMs);
 		this.#endpointTimer.unref();
 	}
+
+	/** Why this broker no longer owns a reachable scope, or `undefined` while it does. */
+	async #scopeLoss(runtimeDir: Stats): Promise<string | undefined> {
+		try {
+			await fs.stat(this.#endpoint);
+		} catch (error) {
+			if (isEnoent(error)) return "socket was deleted";
+			throw error;
+		}
+		try {
+			const current = await fs.stat(this.#runtimeDir);
+			return current.dev === runtimeDir.dev && current.ino === runtimeDir.ino
+				? undefined
+				: "runtime dir was replaced";
+		} catch (error) {
+			if (isEnoent(error)) return "runtime dir was deleted";
+			throw error;
+		}
+	}
 }
 
 export interface DaemonBrokerStartOptions {
 	/** Base of the exponential child-restart backoff. */
 	restartBackoffBaseMs?: number;
-	/** How often the broker checks that its socket file still exists. */
+	/** How often the broker checks that its socket file and runtime dir are still the ones it started with. */
 	endpointCheckMs?: number;
 	/**
 	 * Called once the broker accepts connections. An embedding host connects its
