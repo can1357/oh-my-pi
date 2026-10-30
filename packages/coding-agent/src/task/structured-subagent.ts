@@ -861,6 +861,11 @@ function describeSalvagedWork(result: SingleResult): string {
  * whether the hold is still owed. It is, unless the agent lifecycle took the
  * child over: that is the one thing that outlives this call and will release
  * it when the kept-alive child's lifecycle ends.
+ *
+ * The question is {@link AgentLifecycleManager.owesRelease}, not `has`: a
+ * release already under way has dropped the adoption and not yet run what it
+ * captured, and reading that gap as "never adopted" would discharge the hold
+ * while the child is still being disposed on top of it.
  */
 export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
 	const callerRelease = request.onRelease;
@@ -878,7 +883,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			childId = id;
 		});
 	} finally {
-		if (childId === undefined || !AgentLifecycleManager.global().has(childId)) await releaseOnce?.();
+		if (childId === undefined || !AgentLifecycleManager.global().owesRelease(childId)) await releaseOnce?.();
 	}
 }
 

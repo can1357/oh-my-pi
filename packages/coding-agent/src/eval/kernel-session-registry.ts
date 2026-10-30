@@ -622,12 +622,19 @@ export function createKernelSessionRegistry<
 			const inFlight = resettingSessions.get(sessionKey);
 			if (inFlight) await inFlight.catch(() => undefined);
 		}
-		// `acquireSession` returns the session already held for this call: a
-		// concurrent cell of the same owner at another key must not reclaim it
-		// between the kernel being acquired and the runner owing its first
-		// frame, which a kernel replacement stretches to seconds.
-		const session = await acquireSession(sessionKey, sessionId, cwd, options);
+		// `acquireSession` records this owner at `sessionKey` before it knows
+		// whether a kernel can be started there, so the move away from wherever
+		// the owner was is already real when a startup rejects — a missing
+		// interpreter, a spawn that fails. The boundary therefore opens *before*
+		// the acquisition, not after it: both the rejection and the ordinary end
+		// of the cell leave through the same `finally`.
+		let session: TSession | undefined;
 		try {
+			// `acquireSession` returns the session already held for this call: a
+			// concurrent cell of the same owner at another key must not reclaim it
+			// between the kernel being acquired and the runner owing its first
+			// frame, which a kernel replacement stretches to seconds.
+			session = await acquireSession(sessionKey, sessionId, cwd, options);
 			reconcileSupersededSessions();
 			throwIfCallerCancelled(options);
 			const kernel = await acquireLiveSessionKernel(session, cwd, options);
@@ -650,10 +657,10 @@ export function createKernelSessionRegistry<
 				);
 			}
 		} finally {
-			session.activeUses -= 1;
 			// This cell is done holding the session, and the owner it ran for may
 			// have moved on while it ran — an older key whose cold start finished
 			// last is superseded the moment its only cell ends.
+			if (session) session.activeUses -= 1;
 			reconcileSupersededSessions();
 		}
 	}

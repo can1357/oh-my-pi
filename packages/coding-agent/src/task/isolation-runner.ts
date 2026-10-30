@@ -596,7 +596,11 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			await releaseBase();
 		} else if (
 			!releasePromise &&
-			!(opts.baseOptions.keepAlive !== false && AgentLifecycleManager.global().has(opts.agentId))
+			// `owesRelease`, not `has`: a lifecycle release that is already running
+			// has dropped the adoption and not yet called the capture-and-cleanup
+			// it holds, and tearing the worktree down inside that gap destroys the
+			// workspace the child is still being disposed in.
+			!(opts.baseOptions.keepAlive !== false && AgentLifecycleManager.global().owesRelease(opts.agentId))
 		) {
 			if (retainWorkspace) {
 				// The workspace stays on disk, but the caller's hold is not part

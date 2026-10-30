@@ -849,6 +849,37 @@ describe("kernel session reclamation", () => {
 		}
 	});
 
+	it("reclaims the kernel an owner left behind when the key it moved to fails to start one", async () => {
+		const { kernels, registry } = createFakeRegistry(
+			async (_kernel, code) => ({ cancelled: false, value: code }),
+			async kernel => {
+				if (kernel.index === 1) throw new Error("interpreter not found");
+			},
+		);
+		try {
+			await registry.executeOnSession("first dir", "/tmp/a", {
+				sessionId: "failed-move:cwd:/tmp/a",
+				kernelOwnerId: "agent-session:one",
+			});
+			// The move is recorded before the new kernel is known to be startable,
+			// so a rejected startup still leaves the owner away from the old key.
+			await expect(
+				registry.executeOnSession("second dir", "/tmp/b", {
+					sessionId: "failed-move:cwd:/tmp/b",
+					kernelOwnerId: "agent-session:one",
+				}),
+			).rejects.toThrow("interpreter not found");
+
+			// Nothing else runs: the failed cell is the last event the registry
+			// sees, so it is the only thing that can arm the old kernel's grace.
+			await settleGrace();
+			expect(kernels[0]?.shutdowns).toBe(1);
+			expect(kernels[0]?.alive).toBe(false);
+		} finally {
+			await registry.disposeAll();
+		}
+	});
+
 	it("does not reclaim after a dispose that arrives while a busy kernel is deferred", async () => {
 		const { kernels, registry } = createFakeRegistry(async (_kernel, code) => ({ cancelled: false, value: code }));
 		await registry.executeOnSession("first dir", "/tmp/a", {

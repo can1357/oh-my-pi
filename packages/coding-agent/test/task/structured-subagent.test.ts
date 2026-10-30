@@ -1316,6 +1316,59 @@ describe("structured subagent primitive", () => {
 		expect(released).toBe(1);
 	});
 
+	it("keeps the caller hold while a lifecycle release is still disposing the child", async () => {
+		// The real lifecycle manager drops its adoption at the top of `release`
+		// and runs the release it captured only after the child's disposal
+		// finishes. A boundary that reads that gap as "never adopted" releases
+		// the kernel the child is still being disposed on top of — the opposite
+		// of a leak, and worse: it kills a runner that is in use.
+		mockDiscovery();
+		const disposeStarted = Promise.withResolvers<void>();
+		const finishDispose = Promise.withResolvers<void>();
+		const childSession = {
+			prepareForHeadlessAdvisorDrain: () => {},
+			waitForAdvisorCatchup: async () => true,
+			dispose: async () => {
+				disposeStarted.resolve();
+				await finishDispose.promise;
+			},
+		} as unknown as AgentSession;
+		let releasing: Promise<boolean> | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			AgentRegistry.global().register({
+				id: options.id,
+				displayName: options.id,
+				kind: "sub",
+				session: childSession,
+				sessionFile: `/tmp/${options.id}.jsonl`,
+				status: "running",
+			});
+			await executorModule.finalizeSubagentLifecycle({
+				id: options.id,
+				session: childSession,
+				aborted: false,
+				keepAlive: true,
+				isolated: false,
+				agentIdleTtlMs: 0,
+				reviveSession: async () => childSession,
+				onRelease: options.onRelease,
+			});
+			// The lifecycle ends while the structured call is still in flight,
+			// and parks inside the child's disposal.
+			releasing = AgentLifecycleManager.global().release(options.id);
+			await disposeStarted.promise;
+			return { ...result(), id: options.id };
+		});
+		let released = 0;
+
+		await runStructuredSubagent(request({ keepAlive: true, onRelease: () => void (released += 1) }));
+
+		expect(released).toBe(0);
+		finishDispose.resolve();
+		expect(await releasing).toBe(true);
+		expect(released).toBe(1);
+	});
+
 	it("runs the caller hold's release when the spawn fails before any child exists", async () => {
 		mockDiscovery();
 		const run = vi.spyOn(executorModule, "runSubprocess");

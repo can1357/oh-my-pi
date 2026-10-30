@@ -200,20 +200,27 @@ export async function executeInVmContext(options: {
 		const inFlight = resettingSessions.get(sessionKey);
 		if (inFlight) await inFlight.catch(() => undefined);
 	}
-	const session = await acquireSession(
-		sessionKey,
-		{
-			cwd: options.cwd,
-			sessionId: options.sessionId,
-			localRoots: options.localRoots,
-			packageRoot: options.packageRoot,
-			packageEnvironment: options.packageEnvironment,
-		},
-		options.session,
-		options.timeoutMs,
-		options.ownerId,
-	);
+	// `acquireSession` records this owner at `sessionKey` before it knows
+	// whether a worker can be started there, so the move away from wherever the
+	// owner was is already real when a startup rejects — both spawn factories
+	// failing, an init that never answers. The boundary therefore opens
+	// *before* the acquisition: the rejection and the ordinary end of the cell
+	// leave through the same `finally`.
+	let session: JsSession | undefined;
 	try {
+		session = await acquireSession(
+			sessionKey,
+			{
+				cwd: options.cwd,
+				sessionId: options.sessionId,
+				localRoots: options.localRoots,
+				packageRoot: options.packageRoot,
+				packageEnvironment: options.packageEnvironment,
+			},
+			options.session,
+			options.timeoutMs,
+			options.ownerId,
+		);
 		reconcileSupersededJsSessions();
 		const result = await runOnce(session, options);
 		if (session.state === "alive" && path.isAbsolute(options.filename)) {
@@ -226,10 +233,10 @@ export async function executeInVmContext(options: {
 		}
 		return result;
 	} finally {
-		session.activeUses -= 1;
 		// This cell is done holding the context, and its owner may have moved on
 		// while it ran — an older key whose cold start finished last is
 		// superseded the moment its only cell ends.
+		if (session) session.activeUses -= 1;
 		reconcileSupersededJsSessions();
 	}
 }

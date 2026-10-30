@@ -273,4 +273,38 @@ describe("superseded JavaScript contexts", () => {
 			restore();
 		}
 	}, 60_000);
+
+	it("drops a context when the key its owner moved to cannot start a worker", async () => {
+		setSupersededKernelGraceMs(TEST_GRACE_MS);
+		using firstDir = TempDir.createSync("@js-failed-move-a-");
+		using secondDir = TempDir.createSync("@js-failed-move-b-");
+		const owner = "agent-session:js-failed-move";
+		const firstKey = `js:cwd:${firstDir.path()}`;
+		const first = await contextId(firstDir.path(), firstKey, owner);
+
+		const refuse = (): never => {
+			throw new Error("worker spawn refused");
+		};
+		const restore = setJsEvalWorkerFactoriesForTests({ spawnProcess: refuse, spawnWorker: refuse });
+		try {
+			// The move is recorded before a worker exists there, so the owner has
+			// left the first key even though no context was ever built at the
+			// second one.
+			const failed = await executeJs("return 1", {
+				cwd: secondDir.path(),
+				sessionId: `js:cwd:${secondDir.path()}`,
+				kernelOwnerId: owner,
+				session: makeSession(secondDir.path(), path.join(secondDir.path(), "session.jsonl")),
+				timeoutMs: 30_000,
+			});
+			expect(failed.exitCode).not.toBe(0);
+		} finally {
+			restore();
+		}
+
+		// The failed cell is the last thing the registry sees; no later cell
+		// arrives to arm the first key's grace.
+		await Bun.sleep(TEST_GRACE_MS * 8);
+		expect(await contextId(firstDir.path(), firstKey, owner)).not.toBe(first);
+	}, 60_000);
 });

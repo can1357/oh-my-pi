@@ -156,6 +156,13 @@ export class AgentLifecycleManager {
 	readonly #registry: AgentRegistry;
 	readonly #adopted = new Map<string, AdoptedAgent>();
 	/**
+	 * Ids whose adoption a {@link release} has taken over and not finished
+	 * discharging. The adoption is dropped at the top of that call, long before
+	 * the captured release runs, so this is what {@link owesRelease} reads to
+	 * stay truthful across the gap.
+	 */
+	readonly #releasing = new Set<string>();
+	/**
 	 * In-flight park attempts, each bound to the ref it started from. A park is
 	 * cancelable until the live session is detached; after detach, ensureLive
 	 * waits for the park and revives.
@@ -220,6 +227,21 @@ export class AgentLifecycleManager {
 		return Boolean(
 			adopted && (expected === undefined || adopted.ref === expected || adopted.ref.session === expected),
 		);
+	}
+
+	/**
+	 * True while this manager owes the child's release: it is adopted, or a
+	 * {@link release} that took the adoption over is still running.
+	 *
+	 * {@link has} cannot answer that. A release drops the adoption before it
+	 * awaits the child's disposal and only then invokes the release it
+	 * captured, so for the whole of that window the id is absent from the
+	 * adoption map while the manager still holds — and still owes — the
+	 * caller's hold on the child. A caller that reads absence as "nobody took
+	 * it over" releases the kernel the child is being disposed on top of.
+	 */
+	owesRelease(id: string): boolean {
+		return this.#adopted.has(id) || this.#releasing.has(id);
 	}
 
 	/**
@@ -543,6 +565,9 @@ export class AgentLifecycleManager {
 		if (adopted?.ref === ref) {
 			clearTimeout(adopted.timer);
 			this.#adopted.delete(id);
+			// Taken over, not yet discharged: everything below runs before the
+			// captured release does, and {@link owesRelease} must say so.
+			this.#releasing.add(id);
 		}
 
 		const park = this.#parks.get(id);
@@ -589,6 +614,8 @@ export class AgentLifecycleManager {
 					id,
 					error: String(error),
 				});
+			} finally {
+				this.#releasing.delete(id);
 			}
 		}
 		if (!options?.tombstone) this.#registry.unregister(id, ref);
