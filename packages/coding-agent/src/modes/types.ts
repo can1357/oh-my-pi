@@ -178,6 +178,7 @@ export interface InteractiveModeContext {
 	reportContainer: Container;
 	editor: CustomEditor;
 	editorContainer: Container;
+	editorTopGapContainer: Container;
 	hookWidgetContainerAbove: Container;
 	hookWidgetContainerBelow: Container;
 	statusLine: StatusLineComponent;
