@@ -216,10 +216,15 @@ function sessionFilesIn(dir: string): string[] {
 
 /** Add a turn that refers to `artifact://<id>`, so the transcript has spent that identifier. */
 async function appendTurnReferringToArtifact(sessionFile: string, dir: TempDir, id: number): Promise<void> {
+	await appendTurnReferringTo(sessionFile, dir, `artifact://${id}`);
+}
+
+/** Add a turn citing `reference`, so the transcript has spent whatever it names. */
+async function appendTurnReferringTo(sessionFile: string, dir: TempDir, reference: string): Promise<void> {
 	const writer = await SessionManager.open(sessionFile, dir.path(), new FileSessionStorage(), {
 		suppressBreadcrumb: true,
 	});
-	writer.appendMessage(userTurn(`see artifact://${id}`));
+	writer.appendMessage(userTurn(`see ${reference}`));
 	await writer.close();
 }
 
@@ -663,6 +668,7 @@ describe("SessionManager on a session file another omp process writes", () => {
 	async function forkThatLostItsArtifacts(
 		tempDir: TempDir,
 		ids: readonly number[],
+		outputNames: readonly string[] = [],
 	): Promise<{ resumed: SessionManager; requested: string }> {
 		const requested = await createSession(tempDir);
 		await markSessionMoved(requested, "another-machine");
@@ -672,6 +678,10 @@ describe("SessionManager on a session file another omp process writes", () => {
 		for (const id of ids) {
 			fs.writeFileSync(path.join(artifacts, `${id}.bash.log`), `artifact ${id}`);
 			await appendTurnReferringToArtifact(requested, tempDir, id);
+		}
+		for (const name of outputNames) {
+			fs.writeFileSync(path.join(artifacts, `${name}.jsonl`), "{}\n");
+			await appendTurnReferringTo(requested, tempDir, `agent://${name}`);
 		}
 		const manager = await SessionManager.open(requested, tempDir.path(), new FileSessionStorage(), {
 			suppressBreadcrumb: true,
@@ -710,6 +720,46 @@ describe("SessionManager on a session file another omp process writes", () => {
 			expect(Number(allocated.id)).toBeGreaterThan(7);
 		} finally {
 			await reopened.close();
+		}
+	}, 30_000);
+
+	it("carries what a lost fork reserved into an ordinary fork of it, and drops it for a new session", async () => {
+		using tempDir = TempDir.createSync("@omp-shared-session-file-");
+		const { resumed } = await forkThatLostItsArtifacts(tempDir, [0, 7], ["Worker"]);
+		const forkFile = resumed.getSessionFile();
+		if (!forkFile) throw new Error("Expected a fork session file");
+		expect(resumed.reservedArtifactId()).toBe(7);
+		expect(resumed.reservedOutputNames()).toContain("Worker");
+		await resumed.close();
+
+		// `/fork` of a session that lost its artifacts inherits its transcript,
+		// so it inherits the claims that transcript has already spent.
+		const forked = await SessionManager.forkFrom(forkFile, tempDir.path(), tempDir.path(), new FileSessionStorage());
+		try {
+			expect(forked.reservedArtifactId()).toBe(7);
+			expect(forked.reservedOutputNames()).toContain("Worker");
+			const allocated = await forked.allocateArtifactPath("read");
+			expect(Number(allocated.id)).toBeGreaterThan(7);
+			// A session started from nothing inherits no transcript and no claim.
+			await forked.newSession();
+			expect(forked.reservedArtifactId()).toBeUndefined();
+			expect(forked.reservedOutputNames()).toEqual([]);
+			expect((await forked.allocateArtifactPath("read")).id).toBe("0");
+		} finally {
+			await forked.close();
+		}
+	}, 30_000);
+
+	it("does not let a subagent take an inherited name whose file never arrived", async () => {
+		using tempDir = TempDir.createSync("@omp-shared-session-file-");
+		const { resumed } = await forkThatLostItsArtifacts(tempDir, [0], ["Worker"]);
+		try {
+			// The allocator holds only a directory: the name it must not take is
+			// one whose file is missing, so no scan of what is there can find it.
+			const outputs = new AgentOutputManager(() => resumed.getArtifactsDir());
+			expect(await outputs.allocate("Worker")).not.toBe("Worker");
+		} finally {
+			await resumed.close();
 		}
 	}, 30_000);
 
@@ -1051,10 +1101,11 @@ describe("SessionManager on a session file another omp process writes", () => {
 		const fork = resumed.getSessionFile();
 		if (!fork) throw new Error("Expected the resumed session to have a file");
 		expect(await resumed.artifactsReproduced()).toBe(false);
-		// Nothing of the replacement's is in the fork — not the file, not the
-		// directory it would have arrived in — and the transcript says the
-		// artifacts are missing rather than leaving the agent to find out.
-		expect(fs.existsSync(fork.slice(0, -".jsonl".length))).toBe(false);
+		// Nothing of the replacement's is in the fork: the only thing in its
+		// artifacts directory is this session's own record of what it may not
+		// hand out again. The transcript says the artifacts are missing rather
+		// than leaving the agent to find out.
+		expect(fs.readdirSync(fork.slice(0, -".jsonl".length))).toEqual([".omp-reserved"]);
 		expect(lastSessionTransfer(resumed.getEntries())).toEqual({
 			kind: "artifacts-missing",
 			source: requested,

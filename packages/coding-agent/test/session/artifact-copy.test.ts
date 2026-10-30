@@ -18,6 +18,17 @@ function stagingLeftovers(dir: string): string[] {
 	return fs.readdirSync(dir).filter(name => name.endsWith(".staging"));
 }
 
+/** A staging directory with the marker a copy writes to prove the tree is its own. */
+function markedStaging(dir: string): string {
+	fs.mkdirSync(dir, { recursive: true });
+	const identity = fs.lstatSync(dir, { bigint: true });
+	fs.writeFileSync(
+		path.join(dir, ".omp-staging"),
+		JSON.stringify({ device: String(identity.dev), inode: String(identity.ino) }),
+	);
+	return dir;
+}
+
 describe("copying a session's artifacts to another session", () => {
 	it("reports what the copy cost and which entries dominated it", async () => {
 		using tempDir = TempDir.createSync("@omp-artifact-copy-");
@@ -233,13 +244,23 @@ describe("copying a session's artifacts to another session", () => {
 		const destinationArtifacts = path.join(tempDir.path(), DESTINATION);
 		fs.mkdirSync(sourceArtifacts, { recursive: true });
 		fs.writeFileSync(path.join(sourceArtifacts, "1.bash.log"), "fresh");
-		// One left by a copier that was killed: nothing holds its lease.
-		const abandoned = `${destinationArtifacts}.abandoned${STAGING_SUFFIX}`;
-		fs.mkdirSync(abandoned, { recursive: true });
+		// One left by a copier that was killed: nothing holds its lease, and the
+		// marker inside says the tree was a copy's.
+		const abandoned = markedStaging(`${destinationArtifacts}.abandoned${STAGING_SUFFIX}`);
 		fs.writeFileSync(path.join(abandoned, "0.bash.log"), "never published");
+		// A directory of somebody else's that merely wears the name: no marker,
+		// so nothing here may remove it.
+		const impostor = `${destinationArtifacts}.user-owned${STAGING_SUFFIX}`;
+		fs.mkdirSync(impostor, { recursive: true });
+		fs.writeFileSync(path.join(impostor, "notes.md"), "only copy");
+		// And one carrying a marker that names some other directory: a marker
+		// is evidence about the directory it is in, not a permission slip.
+		const forged = `${destinationArtifacts}.forged${STAGING_SUFFIX}`;
+		fs.mkdirSync(forged, { recursive: true });
+		fs.writeFileSync(path.join(forged, ".omp-staging"), JSON.stringify({ device: "0", inode: "0" }));
+		fs.writeFileSync(path.join(forged, "notes.md"), "also only copy");
 		// One a copier is still building in, which holds its lease.
-		const live = `${destinationArtifacts}.live${STAGING_SUFFIX}`;
-		fs.mkdirSync(live, { recursive: true });
+		const live = markedStaging(`${destinationArtifacts}.live${STAGING_SUFFIX}`);
 		const lease = tryAcquireSessionLease(`artifact-staging:${path.basename(live)}`);
 		expect(lease).not.toBeNull();
 
@@ -251,6 +272,8 @@ describe("copying a session's artifacts to another session", () => {
 
 		expect(fs.existsSync(abandoned)).toBe(false);
 		expect(fs.existsSync(live)).toBe(true);
+		expect(fs.readFileSync(path.join(impostor, "notes.md"), "utf8")).toBe("only copy");
+		expect(fs.readFileSync(path.join(forged, "notes.md"), "utf8")).toBe("also only copy");
 		expect(fs.readFileSync(path.join(destinationArtifacts, "1.bash.log"), "utf8")).toBe("fresh");
 	});
 
@@ -281,6 +304,80 @@ describe("copying a session's artifacts to another session", () => {
 		expect(outcome.reason).toBe("copy-failed");
 		expect(fs.existsSync(path.join(destinationArtifacts, "1.bash.log"))).toBe(false);
 		expect(stagingLeftovers(tempDir.path())).toEqual([]);
+	});
+
+	it("publishes nothing when the staged tree is substituted just before the handover", async () => {
+		using tempDir = TempDir.createSync("@omp-artifact-copy-");
+		const sourceArtifacts = path.join(tempDir.path(), SOURCE);
+		const destinationArtifacts = path.join(tempDir.path(), DESTINATION);
+		fs.mkdirSync(sourceArtifacts, { recursive: true });
+		fs.writeFileSync(path.join(sourceArtifacts, "0.bash.log"), "the copy's");
+
+		const outcome = await copySessionArtifacts(`${sourceArtifacts}.jsonl`, `${destinationArtifacts}.jsonl`, {
+			stillTheSource: async () => {
+				// The tree that was built is moved aside and another put at its
+				// name. What is handed over has to be the tree that was built,
+				// not whatever answers to its path by then.
+				const staging = path.join(tempDir.path(), stagingLeftovers(tempDir.path())[0] as string);
+				fs.renameSync(staging, path.join(tempDir.path(), "parked"));
+				fs.mkdirSync(staging);
+				fs.writeFileSync(path.join(staging, "0.bash.log"), "FOREIGN");
+				return true;
+			},
+		});
+
+		expect(outcome.discarded).toBe(true);
+		expect(fs.existsSync(path.join(destinationArtifacts, "0.bash.log"))).toBe(false);
+	});
+
+	it("gives up its staging tree when the source check cannot answer", async () => {
+		using tempDir = TempDir.createSync("@omp-artifact-copy-");
+		const sourceArtifacts = path.join(tempDir.path(), SOURCE);
+		const destinationArtifacts = path.join(tempDir.path(), DESTINATION);
+		fs.mkdirSync(sourceArtifacts, { recursive: true });
+		fs.writeFileSync(path.join(sourceArtifacts, "0.bash.log"), "the copy's");
+
+		// A check that throws is not an answer, and must not leave the tree and
+		// its lease behind for the rest of the process's life.
+		const outcome = await copySessionArtifacts(`${sourceArtifacts}.jsonl`, `${destinationArtifacts}.jsonl`, {
+			stillTheSource: async () => {
+				throw new Error("identity I/O failed");
+			},
+		});
+
+		expect(outcome).toEqual({ tally: { entries: 0, bytes: 0, largest: [] }, discarded: true, reason: "copy-failed" });
+		expect(stagingLeftovers(tempDir.path())).toEqual([]);
+		expect(fs.existsSync(destinationArtifacts)).toBe(false);
+	});
+
+	it("runs one copy into a directory at a time", async () => {
+		using tempDir = TempDir.createSync("@omp-artifact-copy-");
+		const destinationArtifacts = path.join(tempDir.path(), DESTINATION);
+		const first = path.join(tempDir.path(), "2026-01-01T00-00-00-000Z_first");
+		const second = path.join(tempDir.path(), "2026-01-01T00-00-02-000Z_second");
+		fs.mkdirSync(first, { recursive: true });
+		fs.mkdirSync(second, { recursive: true });
+		fs.writeFileSync(path.join(first, "0.bash.log"), "first");
+		fs.writeFileSync(path.join(second, "0.read.log"), "second");
+
+		// Two copies aimed at one directory must not build in it at once: a
+		// reader that waits for "the copy" would otherwise see one finish while
+		// the other is still merging its own namespace in.
+		let running = 0;
+		let most = 0;
+		const watch = async (): Promise<boolean> => {
+			running += 1;
+			most = Math.max(most, running);
+			await Promise.resolve();
+			running -= 1;
+			return true;
+		};
+		await Promise.all([
+			copySessionArtifacts(`${first}.jsonl`, `${destinationArtifacts}.jsonl`, { stillTheSource: watch }),
+			copySessionArtifacts(`${second}.jsonl`, `${destinationArtifacts}.jsonl`, { stillTheSource: watch }),
+		]);
+
+		expect(most).toBe(1);
 	});
 
 	it("keeps a discarded copy unreadable even when something links into it mid-copy", async () => {

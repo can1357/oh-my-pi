@@ -234,6 +234,11 @@ export async function exportSessionToHtml(
 
 	const sessionData = buildSessionData(sm, state);
 	if (opts.includeSubSessions !== false) {
+		// A fork's inherited subagent transcripts arrive in the background. An
+		// export taken while that copy runs is not a smaller snapshot of the
+		// session, it is a wrong one: it omits children the transcript refers
+		// to and says nothing about it.
+		await sm.whenArtifactsSettled();
 		const subSessions = await collectExportSubSessions(sessionFile);
 		if (Object.keys(subSessions).length > 0) sessionData.subSessions = subSessions;
 	}

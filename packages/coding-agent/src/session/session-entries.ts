@@ -80,6 +80,13 @@ export interface SessionHeader {
 	 * that lost them.
 	 */
 	reservedArtifactId?: number;
+	/**
+	 * Subagent output names this transcript refers to but has no file for, for
+	 * the same reason as {@link reservedArtifactId}: a later subagent handed
+	 * one of them would answer for an `agent://<name>` reference the
+	 * conversation already made.
+	 */
+	reservedOutputNames?: string[];
 }
 
 export interface NewSessionOptions {

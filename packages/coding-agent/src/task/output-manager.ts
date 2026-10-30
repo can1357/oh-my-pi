@@ -11,7 +11,8 @@
  * collisions across repeated or nested task invocations.
  */
 import * as fs from "node:fs/promises";
-import { whenArtifactCopiesSettle } from "../session/session-manager";
+import * as path from "node:path";
+import { RESERVED_CLAIMS_FILE, whenArtifactCopiesSettle } from "../session/session-manager";
 import { ADVISOR_TRANSCRIPT_STEM } from "../advisor/transcript-recorder";
 /** HUD expander click target reserved by the allocator so it cannot name a subagent. */
 export const PINNED_HUD_TOGGLE_ID = "@omp:toggle-pinned-hud";
@@ -31,14 +32,21 @@ export class AgentOutputManager {
 	readonly #getArtifactsDir: () => string | null;
 	readonly #parentPrefix: string | undefined;
 	readonly #artifactsSettled: (() => Promise<void>) | undefined;
+	readonly #reservedNames: (() => readonly string[]) | undefined;
 
 	constructor(
 		getArtifactsDir: () => string | null,
-		options?: { parentPrefix?: string; artifactsSettled?: () => Promise<void> },
+		options?: {
+			parentPrefix?: string;
+			artifactsSettled?: () => Promise<void>;
+			/** Names the session's transcript already refers to and has no file for. */
+			reservedNames?: () => readonly string[];
+		},
 	) {
 		this.#getArtifactsDir = getArtifactsDir;
 		this.#parentPrefix = options?.parentPrefix;
 		this.#artifactsSettled = options?.artifactsSettled;
+		this.#reservedNames = options?.reservedNames;
 		// Reserve the advisor transcript stem: a subagent allocated this id would
 		// write `<id>.jsonl`, clobbering the advisor's `__advisor.jsonl` in the same
 		// artifacts dir. Reserving bumps such a request to `__advisor-2`.
@@ -52,23 +60,36 @@ export class AgentOutputManager {
 	 * Seed the taken-id set from output files already on disk so a resumed
 	 * session never reuses a name that would clobber a prior subagent's output.
 	 */
-	async #ensureInitialized(): Promise<void> {
+	async #ensureInitialized(signal?: AbortSignal): Promise<void> {
 		if (this.#initialized) return;
-		this.#initializing ??= this.#seedFromDisk();
+		this.#initializing ??= this.#seedFromDisk(signal);
 		await this.#initializing;
 		this.#initialized = true;
 	}
 
-	async #seedFromDisk(): Promise<void> {
+	async #seedFromDisk(signal?: AbortSignal): Promise<void> {
 		// A fork's inherited output arrives in the background. Seeding before it
 		// lands reads an empty directory, and the first subagent then takes a
 		// name the inherited transcript already refers to — and keeps it, since
 		// the copy leaves a name the destination already has alone.
+		// Names the inherited transcript refers to are taken whether or not
+		// their files arrived: waiting for the copy only protects the ones it
+		// delivers, and a copy that lost them leaves the references behind.
+		for (const name of this.#reservedNames?.() ?? []) this.#taken.add(name);
 		await this.#artifactsSettled?.();
 		const dir = this.#getArtifactsDir();
 		if (!dir) return;
 		// Also by directory, for a caller that was handed one without a session.
-		await whenArtifactCopiesSettle(dir);
+		await whenArtifactCopiesSettle(dir, signal);
+		// The names a session has spent are recorded beside its artifacts,
+		// because a name whose file never arrived is invisible to the scan
+		// below and a caller handed only a directory has no header to read.
+		try {
+			const claims = JSON.parse(await fs.readFile(path.join(dir, RESERVED_CLAIMS_FILE), "utf8"));
+			if (Array.isArray(claims?.names)) for (const name of claims.names) this.#taken.add(String(name));
+		} catch {
+			// No claims recorded beside these artifacts.
+		}
 
 		let files: string[];
 		try {
@@ -126,8 +147,8 @@ export class AgentOutputManager {
 	 * @param id Requested ID (e.g., "Anna")
 	 * @returns Unique ID ("Anna" first, then "Anna-2", "Anna-3", …)
 	 */
-	async allocate(id: string): Promise<string> {
-		await this.#ensureInitialized();
+	async allocate(id: string, options?: { signal?: AbortSignal }): Promise<string> {
+		await this.#ensureInitialized(options?.signal);
 		return this.#allocateUnique(id);
 	}
 }

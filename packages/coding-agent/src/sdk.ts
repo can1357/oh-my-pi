@@ -2638,6 +2638,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		toolSession.agentOutputManager = new AgentOutputManager(getArtifactsDir, {
 			...(options.parentTaskPrefix ? { parentPrefix: options.parentTaskPrefix } : {}),
 			artifactsSettled: () => sessionManager.whenArtifactsSettled(),
+			reservedNames: () => sessionManager.reservedOutputNames(),
 		});
 
 		// Create built-in tools (already wrapped with meta notice formatting)

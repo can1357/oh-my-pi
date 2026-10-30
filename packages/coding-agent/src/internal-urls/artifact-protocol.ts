@@ -106,19 +106,21 @@ function callerInMemoryArtifact(id: string, context?: ResolveContext): string | 
  * so without this a read landing mid-copy sees a directory that is not yet the
  * session's own.
  */
-async function awaitArtifactsSettled(context?: ResolveContext): Promise<void> {
+async function awaitArtifactsSettled(dirs: readonly string[], context?: ResolveContext): Promise<void> {
+	const signal = context?.signal;
 	await context?.session?.sessionManager?.whenArtifactsSettled?.();
-	// Most readers hold no session object — the transcript viewer's export, a
-	// subagent's own options, a bare protocol call — so the wait is also keyed
-	// by the directory itself. With no directory to name, every copy in this
-	// process has to have settled before any of them can be answered for.
-	await whenArtifactCopiesSettle(context?.localProtocolOptions?.getArtifactsDir?.());
+	// Most readers hold no session object — an export, a subagent's own
+	// options, a bare protocol call — so the wait is also keyed by directory,
+	// and only by the directories this read could be answered from: waiting on
+	// an unrelated session's copy is a stall, not a safeguard. A caller that
+	// can be cancelled is: a pending answer is better than a wrong one, but
+	// not better than the caller's own abort.
+	for (const dir of dirs) await whenArtifactCopiesSettle(dir, signal);
 }
 
 /** Resolve an `artifact://` URL to its backing file without reading artifact bytes. */
 async function resolveArtifactFile(url: InternalUrl, context?: ResolveContext): Promise<ResolvedArtifactFile> {
 	const id = parseArtifactId(url);
-	await awaitArtifactsSettled(context);
 
 	// Artifact ids are per-session counters, so an id this session does not
 	// have is not another session's to answer with: a caller with an artifacts
@@ -139,6 +141,7 @@ async function resolveArtifactFile(url: InternalUrl, context?: ResolveContext): 
 	if (dirs.length === 0) {
 		throw new MissingArtifactError("No session - artifacts unavailable");
 	}
+	await awaitArtifactsSettled(dirs, context);
 
 	let foundPath: string | undefined;
 	let anyDirExists = false;
