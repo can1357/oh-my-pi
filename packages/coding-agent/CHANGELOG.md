@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Eval cells can call activatable MCP tools and discoverable devices without activating or mounting them first, while preserving tool restrictions and approvals.
+
 ### Fixed
 
 - Fixed agents showing as idle in the Agent Hub while still running after a failed streaming edit preview (`edit.streamingAbort`) auto-recovered the turn ([#18790](https://github.com/can1357/oh-my-pi/pull/18790) by [@H4vC](https://github.com/H4vC))

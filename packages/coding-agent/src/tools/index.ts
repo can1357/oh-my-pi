@@ -379,11 +379,11 @@ export interface ToolSession {
 	getPromptCacheKey?: () => string | undefined;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */
 	getToolByName?: (name: string) => AgentTool | undefined;
-	/** Look up an enabled tool through the eval bridge's normal permission pipeline. */
+	/** Look up an enabled/activatable tool through the eval bridge's normal permission pipeline. */
 	getToolForEvalBridge?: (name: string) => AgentTool | undefined;
 	/** Current session context for eval-bridged tool execution. */
 	getToolContext?: () => AgentToolContext | undefined;
-	/** Tool names the eval description advertises as callable from cells; frozen with the cached prompt prefix. */
+	/** Tool names the eval description advertises; frozen with the cached prompt prefix, not an exhaustive invocation allowlist. */
 	getAdvertisedEvalToolNames?: () => readonly string[];
 	/** Return whether a built-in tool is active in this turn's tool set. */
 	isToolActive?: (name: string) => boolean;
