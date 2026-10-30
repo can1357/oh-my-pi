@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import type { Api, ApiKey, Model } from "@oh-my-pi/pi-ai";
+import type { Api, ApiKey, DispatchHold, Model } from "@oh-my-pi/pi-ai";
 import { popLoopPhase, pushLoopPhase, withLoopPhase } from "@oh-my-pi/pi-utils";
 
 import { dbPath as configuredDbPath } from "../config";
@@ -57,6 +57,11 @@ export interface MnemopiOptions {
 	readonly enhancedRecall?: boolean;
 	/** Escalate best-effort failure logs (embedding pipeline) from debug to warn. */
 	readonly debug?: boolean;
+	/**
+	 * Awaited before every remote request this instance makes. See
+	 * `MnemopiRuntimeOptions.beforeDispatch`.
+	 */
+	readonly beforeDispatch?: DispatchHold;
 	/**
 	 * When `false`, skip the embedding-model reconcile (wipe-and-rebuild) on open.
 	 * Read-only / ephemeral consumers (e.g. a stats snapshot) set this so an open
@@ -265,10 +270,11 @@ function resolveRuntimeOptions(options: MnemopiOptions): ResolvedMnemopiRuntimeO
 	}
 
 	const debug = options.debug ? true : undefined;
-	if (embeddings === undefined && llm === undefined && debug === undefined) {
+	const beforeDispatch = options.beforeDispatch;
+	if (embeddings === undefined && llm === undefined && debug === undefined && beforeDispatch === undefined) {
 		return undefined;
 	}
-	return { embeddings, llm, debug };
+	return { embeddings, llm, debug, beforeDispatch };
 }
 
 let defaultInstance: Mnemopi | null = null;
@@ -333,6 +339,7 @@ function toRecallOptions(options: RecallFacadeOptions): BeamRecallFacadeOptions 
 		ftsWeight: options.ftsWeight ?? options.fts_weight ?? undefined,
 		importanceWeight: options.importanceWeight ?? options.importance_weight ?? undefined,
 		contentPreviewChars: options.contentPreviewChars,
+		signal: options.signal,
 	};
 	// Preserve the three-state semantics (`undefined` = auto-derive, `null` = explicitly
 	// FTS-only, `number[]` = caller-supplied) so callers can opt out of `recall()`'s

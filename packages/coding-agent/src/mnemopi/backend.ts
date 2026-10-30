@@ -12,6 +12,7 @@ import { logger, prompt, withLoopPhase } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { roleCandidatePool } from "../config/model-roles";
 import { resolveRoleChain } from "../config/model-resolver";
+import { sessionDisposalSignal } from "../hindsight/session-lifetime";
 import { type JudgmentUsageLedger, journalJudgmentUsage } from "../judgment";
 import type {
 	MemoryBackend,
@@ -98,6 +99,7 @@ async function installMnemopiState(
 		config,
 		session,
 		hasRecalledForFirstTurn: inherited?.hasRecalledForFirstTurn,
+		lifetime: sessionDisposalSignal(session),
 	});
 	state.lastRecallSnippet = inherited?.lastRecallSnippet;
 	const previous = setMnemopiSessionState(session, state);
@@ -597,10 +599,19 @@ async function resolveMnemopiProviderOptions(
 			// keeps the callback it already created and still journals to its start.
 			const onUsage = journalJudgmentUsage(usageLedger);
 			const request = resolveMemoryCompletionInput(prompt, opts);
-			// The caller's timeout bounds the model, not a human's `/pause`: wait a
-			// pause out before arming it. A pause engaged once it runs can still
-			// expire it, and the call then returns no completion, as a slow one does.
-			await agentPauseGate.dispatchHold()();
+			// `opts.beforeDispatch` is the hold of the memory that asked, which
+			// ends with that memory or its session; a caller with no memory
+			// behind it still waits a pause out. The caller's timeout bounds the
+			// model, not a human's `/pause`: wait a pause out before arming it.
+			// A pause engaged once it runs can still expire it, and the call
+			// then returns no completion, as a slow one does.
+			const hold = opts?.beforeDispatch ?? agentPauseGate.dispatchHold();
+			try {
+				await hold();
+			} catch {
+				// The memory or its session went away while the call was held.
+				return null;
+			}
 			const signal =
 				typeof opts?.timeout === "number" && Number.isFinite(opts.timeout) && opts.timeout > 0
 					? AbortSignal.timeout(opts.timeout)
@@ -652,7 +663,7 @@ async function resolveMnemopiProviderOptions(
 										disableReasoning: shouldDisableReasoning(level) ? true : undefined,
 										signal,
 										// Each attempt holds at the provider boundary too.
-										beforeDispatch: agentPauseGate.dispatchHold(signal),
+										beforeDispatch: hold,
 										onAttempt: message =>
 											onUsage?.({
 												purpose: "memory",

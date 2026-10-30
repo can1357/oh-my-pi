@@ -3,6 +3,7 @@ import * as fsp from "node:fs/promises";
 import * as nodePath from "node:path";
 import { type ApiKey, getOpenRouterHeaders, withAuth } from "@oh-my-pi/pi-ai";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { holdBeforeDispatch } from "@oh-my-pi/pi-ai/utils/dispatch-hold";
 import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
 import {
 	$env,
@@ -16,7 +17,9 @@ import {
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { EmbeddingModel } from "fastembed";
 import { loadFastembed, withEmbedSessionBudget } from "./fastembed-runtime";
+import { fetchBehindHold } from "./remote-dispatch";
 import {
+	activeDispatchHold,
 	type EmbeddingOutput,
 	getMnemopiRuntimeOptions,
 	mnemopiDebugEnabled,
@@ -361,7 +364,7 @@ async function getLocalModel(): Promise<LocalEmbeddingModel | null> {
 	}
 }
 
-async function embedApi(texts: readonly string[]): Promise<EmbeddingMatrix | null> {
+async function embedApi(texts: readonly string[], signal: AbortSignal | undefined): Promise<EmbeddingMatrix | null> {
 	const baseUrl = embeddingBaseUrl();
 	const isCustom = !hostMatchesUrl(baseUrl, "openrouter");
 	const apiKey = embeddingApiKey();
@@ -370,12 +373,17 @@ async function embedApi(texts: readonly string[]): Promise<EmbeddingMatrix | nul
 	}
 
 	const body = JSON.stringify({ model: defaultModel(), input: texts });
+	const hold = activeDispatchHold();
+	const fetchImpl = fetchBehindHold(fetch, hold);
 	try {
 		// withAuth re-resolves the key on 401 (force-refresh, then sibling
 		// rotation) when `apiKey` is a resolver. The 429 backoff stays inside
 		// the attempt via fetchWithRetry. An empty static key attempts without
 		// an Authorization header (local/proxy setups).
 		const response = await withAuth(apiKey, async key => {
+			// Held before the deadline is armed, like a remote completion; the
+			// send itself is gated by `fetchImpl`, in the same step as the fetch.
+			await holdBeforeDispatch(hold, signal);
 			const headers: Record<string, string> = {
 				"Content-Type": "application/json",
 				...getOpenRouterHeaders(),
@@ -387,9 +395,10 @@ async function embedApi(texts: readonly string[]): Promise<EmbeddingMatrix | nul
 				method: "POST",
 				headers,
 				body,
-				signal: AbortSignal.timeout(30000),
+				signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30000)]) : AbortSignal.timeout(30000),
 				maxAttempts: 3,
 				defaultDelayMs: attempt => 2 ** attempt * 1000,
+				fetch: fetchImpl,
 			});
 			if (res.status === 401) {
 				throw new ProviderHttpError("mnemopi embedding request unauthorized (401)", 401, { headers: res.headers });
@@ -487,7 +496,8 @@ export function availableApi(): boolean {
 	return embeddingKeyConfigured();
 }
 
-export async function embedQuery(text: string): Promise<Vector | null> {
+/** `signal` ends a remote embedding request, including its wait at the instance's dispatch hold. */
+export async function embedQuery(text: string, signal?: AbortSignal): Promise<Vector | null> {
 	if (text === "" || embeddingsDisabled()) {
 		return null;
 	}
@@ -496,7 +506,7 @@ export async function embedQuery(text: string): Promise<Vector | null> {
 	if (cached !== undefined) {
 		return cached;
 	}
-	const vectors = await embed([text]);
+	const vectors = await embed([text], signal);
 	const vector = vectors?.[0] ?? null;
 	if (vector !== null) {
 		queryCache.set(key, vector);
@@ -504,7 +514,8 @@ export async function embedQuery(text: string): Promise<Vector | null> {
 	return vector;
 }
 
-export async function embed(texts: readonly string[]): Promise<EmbeddingMatrix | null> {
+/** `signal` ends a remote embedding request, including its wait at the instance's dispatch hold. */
+export async function embed(texts: readonly string[], signal?: AbortSignal): Promise<EmbeddingMatrix | null> {
 	if (texts.length === 0 || embeddingsDisabled()) {
 		return null;
 	}
@@ -525,7 +536,7 @@ export async function embed(texts: readonly string[]): Promise<EmbeddingMatrix |
 		}
 	}
 	if (isApiModel(defaultModel())) {
-		return embedApi(texts);
+		return embedApi(texts, signal);
 	}
 	if (texts.length === 1) {
 		const key = queryCacheKey(texts[0] ?? "");

@@ -18,6 +18,7 @@ import { type BankScope, computeBankScope } from "./bank";
 import { createHindsightClient } from "./client";
 import { type HindsightConfig, isHindsightConfigured, loadHindsightConfig } from "./config";
 import { type HindsightMessage, hasSubstantiveContent } from "./content";
+import { sessionDisposalSignal } from "./session-lifetime";
 import { HindsightSessionState } from "./state";
 
 import { cfgMemoryBackend } from "../memory-backend/settings";
@@ -269,7 +270,10 @@ async function installPrimaryState(
 	const config = loadHindsightConfig(settings);
 	if (!isHindsightConfigured(config)) return undefined;
 
-	const client = createHindsightClient(config);
+	// A request this client holds for `/pause` belongs to the session, not to
+	// this state: the bank outlives a rebuild, and a rebuild drains the retain
+	// queue first. Only the session going away ends the wait.
+	const client = createHindsightClient(config, sessionDisposalSignal(session));
 	const scope = computeBankScope(config, session.sessionManager.getCwd());
 
 	// Cleanup any stale state for this session (defensive — prevents leaks

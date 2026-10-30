@@ -1,4 +1,4 @@
-import type { FetchImpl } from "@oh-my-pi/pi-ai";
+import type { DispatchHold, FetchImpl } from "@oh-my-pi/pi-ai";
 
 export interface CompleteOptions {
 	maxTokens?: number;
@@ -7,6 +7,8 @@ export interface CompleteOptions {
 	provider?: string | null;
 	model?: string | null;
 	fetch?: FetchImpl;
+	/** The calling instance's dispatch hold, for a backend that sends a remote request; see `MnemopiLlmCompleteOptions.beforeDispatch`. */
+	beforeDispatch?: DispatchHold;
 }
 
 export interface LlmBackend {

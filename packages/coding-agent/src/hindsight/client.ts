@@ -8,6 +8,9 @@
  * tests to spy on.
  */
 
+import { agentPauseGate } from "@oh-my-pi/pi-agent-core";
+import type { DispatchHold } from "@oh-my-pi/pi-ai";
+import { dispatchWhenOpen } from "@oh-my-pi/pi-ai/utils/dispatch-hold";
 import { USER_AGENT, truncate } from "@oh-my-pi/pi-utils";
 import { isTimeoutError, withTimeoutSignal } from "../utils/fetch-timeout";
 import type { HindsightConfig } from "./config";
@@ -43,6 +46,11 @@ export interface HindsightApiOptions {
 	userAgent?: string;
 	/** Per-op deadlines; unset entries fall back to built-in defaults. */
 	timeouts?: HindsightTimeouts;
+	/**
+	 * Ends the wait of a request held for `/pause`: the owning session's
+	 * disposal. A request's own `signal` ends it too.
+	 */
+	lifetime?: AbortSignal;
 }
 
 /** Caller cancellation shared by Hindsight request option bags. */
@@ -243,6 +251,12 @@ interface RequestOptions {
 	signal?: AbortSignal;
 	/** Op deadline (ms); defaults to the client's request timeout. */
 	timeoutMs?: number;
+	/**
+	 * The server runs a model to answer it (fact extraction, query embedding
+	 * and reranking, synthesis), so it is new paid-capable work and `/pause`
+	 * holds it. Reads, deletes and the bank's idempotent setup ask for none.
+	 */
+	inference?: boolean;
 }
 
 export class HindsightApi {
@@ -252,6 +266,7 @@ export class HindsightApi {
 	#recallTimeoutMs: number;
 	#retainTimeoutMs: number;
 	#requestTimeoutMs: number;
+	#hold: DispatchHold;
 
 	constructor(options: HindsightApiOptions) {
 		this.#baseUrl = options.baseUrl.replace(/\/+$/, "");
@@ -267,6 +282,7 @@ export class HindsightApi {
 		this.#reflectTimeoutMs = timeouts?.reflect ?? DEFAULT_REFLECT_TIMEOUT_MS;
 		this.#recallTimeoutMs = timeouts?.recall ?? DEFAULT_RECALL_TIMEOUT_MS;
 		this.#retainTimeoutMs = timeouts?.retain ?? DEFAULT_RETAIN_TIMEOUT_MS;
+		this.#hold = agentPauseGate.dispatchHold(options.lifetime);
 	}
 
 	async retain(bankId: string, content: string, options?: RetainOptions): Promise<RetainResponse> {
@@ -288,6 +304,7 @@ export class HindsightApi {
 				body: { items: [item], async: options?.async },
 				signal: options?.signal,
 				timeoutMs: this.#retainTimeoutMs,
+				inference: true,
 			},
 		);
 	}
@@ -320,6 +337,7 @@ export class HindsightApi {
 				},
 				signal: options?.signal,
 				timeoutMs: this.#retainTimeoutMs,
+				inference: true,
 			},
 		);
 	}
@@ -340,6 +358,7 @@ export class HindsightApi {
 				},
 				signal: options?.signal,
 				timeoutMs: this.#recallTimeoutMs,
+				inference: true,
 			},
 		);
 	}
@@ -359,6 +378,7 @@ export class HindsightApi {
 				},
 				signal: options?.signal,
 				timeoutMs: this.#reflectTimeoutMs,
+				inference: true,
 			},
 		);
 	}
@@ -508,6 +528,7 @@ export class HindsightApi {
 					trigger: options?.trigger,
 				},
 				signal: options?.signal,
+				inference: true,
 			},
 		);
 	}
@@ -518,7 +539,7 @@ export class HindsightApi {
 			"POST",
 			`/v1/default/banks/${encodeURIComponent(bankId)}/mental-models/${encodeURIComponent(mentalModelId)}/refresh`,
 			"refreshMentalModel",
-			{},
+			{ inference: true },
 		);
 	}
 
@@ -557,18 +578,20 @@ export class HindsightApi {
 		}
 
 		const timeoutMs = opts?.timeoutMs ?? this.#requestTimeoutMs;
-		const init: RequestInit = {
-			method,
-			headers: this.#headers,
-			signal: withTimeoutSignal(timeoutMs, opts?.signal),
-		};
+		const init: RequestInit = { method, headers: this.#headers };
 		if (opts?.body !== undefined) {
 			init.body = JSON.stringify(pruneUndefined(opts.body));
 		}
+		// The deadline bounds the server, not a human's `/pause`, so a held
+		// request arms it as it is sent: once released, in the same step.
+		const send = (): Promise<Response> => {
+			init.signal = withTimeoutSignal(timeoutMs, opts?.signal);
+			return fetch(url, init);
+		};
 
 		let response: Response;
 		try {
-			response = await fetch(url, init);
+			response = await (opts?.inference ? dispatchWhenOpen(this.#hold, opts.signal, send) : send());
 		} catch (err) {
 			const message = isTimeoutError(err)
 				? `${operation} request timed out after ${Math.round(timeoutMs / 1000)}s`
@@ -686,7 +709,11 @@ function safeJsonParse(text: string): unknown {
 		return null;
 	}
 }
-export function createHindsightClient(config: HindsightConfig & { hindsightApiUrl: string }): HindsightApi {
+/** `lifetime` ends the requests the client holds for `/pause`; see {@link HindsightApiOptions.lifetime}. */
+export function createHindsightClient(
+	config: HindsightConfig & { hindsightApiUrl: string },
+	lifetime?: AbortSignal,
+): HindsightApi {
 	return new HindsightApi({
 		baseUrl: config.hindsightApiUrl,
 		apiKey: config.hindsightApiToken ?? undefined,
@@ -697,5 +724,6 @@ export function createHindsightClient(config: HindsightConfig & { hindsightApiUr
 			recall: config.recallTimeoutMs,
 			retain: config.retainTimeoutMs,
 		},
+		lifetime,
 	});
 }
