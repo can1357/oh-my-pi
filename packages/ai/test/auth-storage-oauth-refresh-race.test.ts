@@ -9,6 +9,7 @@ import {
 	SqliteAuthCredentialStore,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
+import * as claudeUsage from "@oh-my-pi/pi-ai/usage/claude";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import { removeWithRetries } from "../../utils/src/temp";
 import { withEnv } from "./helpers";
@@ -199,6 +200,45 @@ describe("AuthStorage OAuth refresh race", () => {
 			expect(events).toHaveLength(1);
 			expect(events[0]?.disabledCause).toContain("invalid_grant");
 		});
+	});
+
+	test("does not disable a still-valid credential when usage polling refresh fails definitively", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+
+		await authStorage.credentials.set("anthropic", [
+			{
+				type: "oauth",
+				access: "still-valid-access",
+				refresh: "stale-refresh",
+				expires: Date.now() + 30_000,
+			},
+		]);
+		authStorage.usage.setProvider("anthropic", claudeUsage.claudeUsageProvider);
+		vi.spyOn(oauthUtils, "refreshOAuthToken").mockImplementation(async () => {
+			throw new Error('invalid_grant {"error":"invalid_grant"}');
+		});
+		const fetchSpy = vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockResolvedValue({
+			provider: "anthropic",
+			fetchedAt: Date.now(),
+			limits: [],
+		});
+
+		await withEnv(SUPPRESS_ANTHROPIC_ENV, async () => {
+			const reports = await authStorage!.usage.reports();
+
+			expect(reports).toHaveLength(1);
+			expect(fetchSpy).toHaveBeenCalledTimes(1);
+			expect(fetchSpy.mock.calls[0]?.[0].credential.accessToken).toBe("still-valid-access");
+		});
+
+		expect(events).toHaveLength(0);
+		expect(authStorage.credentials.has("anthropic")).toBe(true);
+		const stored = store.listAuthCredentials("anthropic");
+		expect(stored).toHaveLength(1);
+		expect(stored[0]?.credential.type).toBe("oauth");
+		if (stored[0]?.credential.type === "oauth") {
+			expect(stored[0].credential.access).toBe("still-valid-access");
+		}
 	});
 	test("persists every credential refreshed during candidate preflight", async () => {
 		if (!authStorage || !store) throw new Error("test setup failed");

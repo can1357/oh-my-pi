@@ -330,7 +330,7 @@ export interface CredentialDisabledEvent {
 }
 
 /** Why a delegated OAuth refresh was requested. */
-export type OAuthRefreshReason = "auth-recovery";
+export type OAuthRefreshReason = "auth-recovery" | "usage-poll";
 
 /** Configuration supplied when constructing credential storage. */
 export type AuthStorageOptions = {
@@ -361,8 +361,9 @@ export type AuthStorageOptions = {
 	 * per-provider local refresh function. Receives the credential id so the
 	 * implementation can address remote credentials.
 	 *
-	 * `reason` is `"auth-recovery"` only for a provider-auth retry; generic and
-	 * managed MCP force-refresh calls leave it unset.
+	 * `reason` is `"auth-recovery"` only for a provider-auth retry and
+	 * `"usage-poll"` for an advisory usage refresh; generic and managed MCP
+	 * force-refresh calls leave it unset.
 	 *
 	 * Must return updated {@link OAuthCredentials} with at least `access` and
 	 * `expires`. `refresh` may be an opaque sentinel (e.g. `"__remote__"`) when
@@ -641,6 +642,11 @@ export interface StoredOAuthRefreshOptions<T extends OAuthCredential = OAuthCred
 	canRefresh?: (credential: T) => boolean;
 	refreshSkewMs?: number;
 	signal?: AbortSignal;
+	/**
+	 * Keep a stored credential active when an advisory refresh receives a
+	 * definitive OAuth failure. The caller still receives the failure.
+	 */
+	preserveCredentialOnDefinitiveFailure?: boolean;
 	keepCredentialOnRefreshFailure?: boolean | ((error: unknown) => boolean);
 	onRefreshFailure?: (error: unknown) => void;
 	/** How long the caller waits (for the lease and the exchange); the exchange itself runs on until its backstop. */

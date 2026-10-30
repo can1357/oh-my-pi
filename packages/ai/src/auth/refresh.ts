@@ -145,7 +145,8 @@ export interface OAuthRefresherDeps {
 export class OAuthRefresher {
 	readonly #deps: OAuthRefresherDeps;
 	#oauthRefreshInFlight: Map<number, Promise<AuthCredentialSnapshotEntry>> = new Map();
-	#oauthCredentialRefreshInFlight: Map<number, Promise<OAuthCredentials>> = new Map();
+	#oauthCredentialRefreshInFlight: Map<number, { promise: Promise<OAuthCredentials>; reason?: OAuthRefreshReason }> =
+		new Map();
 	/** Access token this process last minted per credential id. */
 	#recentMints = new Map<number, { provider: string; access: string; at: number }>();
 	/**
@@ -725,6 +726,9 @@ export class OAuthRefresher {
 						),
 					};
 				}
+				if (options.preserveCredentialOnDefinitiveFailure) {
+					return { failure: error };
+				}
 				const disabledCause = options.disabledCause?.(error) ?? `oauth refresh failed: ${String(error)}`;
 				const disabled = this.#deps.store.tryDisableAuthCredentialIfMatches(
 					row.id,
@@ -914,10 +918,16 @@ export class OAuthRefresher {
 		if (credentialId !== undefined) {
 			const existing = this.#oauthCredentialRefreshInFlight.get(credentialId);
 			if (existing) {
-				const joined = await raceSignal(existing, signal, "credential refresh aborted");
-				// A refresh started for another request may adopt the very token this
-				// request was refused with; refresh again instead of returning it.
-				if (rejectedAccess === undefined || joined.access !== rejectedAccess) return joined;
+				try {
+					const joined = await raceSignal(existing.promise, signal, "credential refresh aborted");
+					// A refresh started for another request may adopt the very token this
+					// request was refused with; refresh again instead of returning it.
+					if (rejectedAccess === undefined || joined.access !== rejectedAccess) return joined;
+				} catch (error) {
+					// A usage probe preserves the credential on failure. A request that
+					// joined that probe must still apply the normal refresh policy.
+					if (existing.reason !== "usage-poll" || reason === "usage-poll" || signal?.aborted) throw error;
+				}
 				return this.#refreshSingleFlight(provider, credential, credentialId, signal, reason, rejectedAccess);
 			}
 		}
@@ -947,7 +957,7 @@ export class OAuthRefresher {
 			.finally(() => {
 				this.#oauthCredentialRefreshInFlight.delete(credentialId);
 			});
-		this.#oauthCredentialRefreshInFlight.set(credentialId, promise);
+		this.#oauthCredentialRefreshInFlight.set(credentialId, { promise, reason });
 		return raceSignal(promise, signal, "credential refresh aborted");
 	}
 
@@ -959,6 +969,7 @@ export class OAuthRefresher {
 		reason?: OAuthRefreshReason,
 		rejectedAccess?: string,
 	): Promise<OAuthCredentials> {
+		const preserveCredentialOnDefinitiveFailure = reason === "usage-poll";
 		if (credentialId !== undefined && hasRefreshLeases(this.#deps.store)) {
 			const forceRefresh = credential.expires === 0;
 			const result = await this.refreshStored(provider, {
@@ -974,6 +985,8 @@ export class OAuthRefresher {
 				refresh: (current, refreshSignal) =>
 					this.#requestOAuthCredentialRefresh(provider, current, credentialId, refreshSignal, reason, undefined),
 				isDefinitiveFailure: error => AIError.isDefinitiveOAuthFailure(String(error)),
+				preserveCredentialOnDefinitiveFailure,
+				keepCredentialOnRefreshFailure: preserveCredentialOnDefinitiveFailure,
 				disabledCause: error => `oauth refresh failed: ${String(error)}`,
 			});
 			if (result.credential) {
