@@ -60,6 +60,22 @@ const WINDOWS_TERMINAL_OSC11_POLL_MS = 30_000;
  * a theme change nobody has asked for twice.
  */
 const OSC11_SENTINEL_TIMEOUT_MS = 5_000;
+/**
+ * How long after a cycle gives up its answers may still arrive and be
+ * recognised as its own. A deadline can say when to stop waiting; it cannot
+ * say that bytes already on the wire will never land, so the cycle leaves
+ * markers behind that swallow its late OSC 11 reply and its late sentinel
+ * instead of letting the replacement query adopt them.
+ *
+ * One further deadline beyond the cycle's own, so a marker outlives a whole
+ * replacement cycle before it is swept. Bounded because it must be: a
+ * sentinel that is lost rather than late would otherwise leave the FIFO
+ * permanently offset by one, every later cycle paying a timeout, and the
+ * markers would accumulate for the life of the process. Past this window a
+ * reply is treated as never coming — the explicit resolution of an ambiguity
+ * that has no certain answer.
+ */
+const OSC11_LATE_REPLY_GRACE_MS = 2 * OSC11_SENTINEL_TIMEOUT_MS;
 /** How long a relayed ESC record waits for the rest of its sequence before acting as Escape (matches StdinBuffer). */
 const WIN32_RELAYED_ESCAPE_TIMEOUT_MS = 75;
 
@@ -835,20 +851,36 @@ export function isConPTYHosted(): boolean {
 /** Discriminated owner of an outstanding DA1 sentinel in the unified probe FIFO. */
 type Da1SentinelOwner =
 	| { kind: "keyboard" }
-	| { kind: "osc11" }
+	| { kind: "osc11"; cycle: Osc11Cycle }
 	| { kind: "privateMode"; mode: number }
 	| { kind: "osc99Probe"; id: string }
 	| { kind: "glyphProtocol"; phase: "support" | "confirm" }
 	| { kind: "tsp" }
 	| { kind: "drain"; answered: () => void }
 	/**
-	 * A probe that gave up waiting for its sentinel. The slot stays in the FIFO
+	 * A cycle that gave up waiting for its sentinel. The slot stays in the FIFO
 	 * with nothing left to resolve, because the FIFO is positional: dropping it
 	 * would hand a reply that is merely late to the next probe's sentinel, and
 	 * that probe would resolve as unanswered. Here the late reply is matched to
-	 * the cycle that asked for it and discarded.
+	 * the cycle that asked for it and discarded. Swept once
+	 * {@link OSC11_LATE_REPLY_GRACE_MS} has passed, so a sentinel that is lost
+	 * rather than late cannot offset the FIFO for good.
 	 */
-	| { kind: "abandoned" };
+	| { kind: "abandoned"; cycle?: Osc11Cycle };
+
+/**
+ * One background-colour question, from the moment its OSC 11 query is written
+ * until its reply is accounted for. Ordered in {@link ProcessTerminal} by when
+ * they were asked, which is the order the terminal answers them in, so a reply
+ * belongs to the oldest cycle still owed one — never to whoever happens to be
+ * live.
+ */
+interface Osc11Cycle {
+	/** Identity of the explicit refresh this cycle serves, if any. */
+	token?: TerminalAppearanceRequestToken;
+	/** False once the cycle gave up: its reply is still swallowed, never published. */
+	live: boolean;
+}
 
 let nextOsc99ProbeId = 1;
 
@@ -1014,13 +1046,23 @@ export class ProcessTerminal implements Terminal {
 	> = [];
 	#appearance: TerminalAppearance | undefined;
 	#osc11Pending = false;
-	#osc11ActiveToken?: TerminalAppearanceRequestToken;
+	/**
+	 * Cycles still owed an OSC 11 reply, oldest first — the live one, and any
+	 * that surrendered while their reply was still on the wire. A reply is
+	 * matched to the head of this queue, which is what keeps a late answer from
+	 * being published under the identity of the request that replaced it.
+	 */
+	#osc11Cycles: Osc11Cycle[] = [];
+	/** The cycle a reply would currently resolve, while one is outstanding. */
+	#osc11LiveCycle?: Osc11Cycle;
 	#osc11QueuedQuery?: { cache?: TerminalMultiplexerBackgroundColorCache; token?: TerminalAppearanceRequestToken };
 	#nextAppearanceRequestToken = 1;
 	#osc11ResponseBuffer = "";
 	#osc11CacheRefreshTimer?: Timer;
 	/** Deadline for the DA1 sentinel of the OSC 11 cycle currently outstanding. */
 	#osc11SentinelTimer?: Timer;
+	/** Grace deadlines of surrendered cycles, so teardown can drop them all. */
+	#osc11GraceTimers = new Set<Timer>();
 	#osc99PendingId: string | undefined;
 	#osc99ResponseBuffer = "";
 	#osc99Capabilities = new Map<string, string>();
@@ -1663,19 +1705,36 @@ export class ProcessTerminal implements Terminal {
 				switch (owner.kind) {
 					case "osc11": {
 						this.#clearOsc11SentinelDeadline();
-						if (this.#osc11Pending) {
-							// DA1 arrived before OSC 11 response: terminal doesn't support OSC 11.
+						if (this.#osc11LiveCycle === owner.cycle) {
+							// DA1 arrived before OSC 11 response: terminal doesn't support
+							// OSC 11. It said so itself, so unlike a cycle that merely ran
+							// out of patience this one is owed nothing more and leaves no
+							// marker behind.
+							const index = this.#osc11Cycles.indexOf(owner.cycle);
+							if (index >= 0) this.#osc11Cycles.splice(index, 1);
+							this.#osc11LiveCycle = undefined;
 							this.#osc11Pending = false;
-							this.#osc11ActiveToken = undefined;
-							this.#osc11ResponseBuffer = "";
+							if (this.#osc11Cycles.length === 0) this.#osc11ResponseBuffer = "";
 						}
 						this.#startQueuedOsc11Query();
 						break;
 					}
 					case "abandoned": {
-						// The reply this slot was waiting for, arriving after its cycle
-						// gave up. Matched here so it cannot be read as an answer to a
-						// later probe; nothing else to do with it.
+						// The sentinel this slot was waiting for, arriving after its
+						// cycle gave up. Matched here so it cannot be read as an answer
+						// to a later probe.
+						//
+						// It also settles what that cycle is still owed. A terminal
+						// answers in the order it was asked, so a colour reply would
+						// have come before this sentinel; arriving without one means
+						// none is coming, and the next reply belongs to whoever asked
+						// after. Retiring the expectation here is what keeps the
+						// surrendered cycle from swallowing its successor's answer.
+						if (owner.cycle) {
+							const index = this.#osc11Cycles.indexOf(owner.cycle);
+							if (index >= 0) this.#osc11Cycles.splice(index, 1);
+							if (this.#osc11Cycles.length === 0) this.#osc11ResponseBuffer = "";
+						}
 						break;
 					}
 					case "privateMode": {
@@ -1768,7 +1827,12 @@ export class ProcessTerminal implements Terminal {
 			// Accumulate fragments until the BEL/ST terminator arrives, then parse once.
 			// If a new escape sequence arrives (not the ST terminator), abort buffering
 			// and forward it as normal input so user keystrokes are never swallowed.
-			if (this.#osc11Pending && (this.#osc11ResponseBuffer || sequence.startsWith("\x1b]11;"))) {
+			//
+			// Any cycle still owed a reply keeps this filter armed, not just the live
+			// one: a cycle that gave up waiting is still the addressee of its own
+			// answer, and that answer has to be swallowed here rather than reaching
+			// the application as text or being published as somebody else's.
+			if (this.#osc11Cycles.length > 0 && (this.#osc11ResponseBuffer || sequence.startsWith("\x1b]11;"))) {
 				if (this.#osc11ResponseBuffer && sequence.startsWith("\x1b") && sequence !== "\x1b\\") {
 					// New escape sequence arrived mid-buffer — not an OSC 11 continuation.
 					this.#osc11ResponseBuffer = "";
@@ -1778,11 +1842,13 @@ export class ProcessTerminal implements Terminal {
 					const osc11Match = this.#osc11ResponseBuffer.match(osc11ResponsePattern);
 					if (!osc11Match) return;
 					const [, rHex, gHex, bHex] = osc11Match;
-					this.#osc11Pending = false;
-					const requestToken = this.#osc11ActiveToken;
-					this.#osc11ActiveToken = undefined;
 					this.#osc11ResponseBuffer = "";
-					this.#handleOsc11Response(rHex!, gHex!, bHex!, requestToken);
+					// Oldest first: the terminal answers in the order it was asked.
+					const cycle = this.#osc11Cycles.shift()!;
+					if (!cycle.live) return;
+					this.#osc11Pending = false;
+					this.#osc11LiveCycle = undefined;
+					this.#handleOsc11Response(rHex!, gHex!, bHex!, cycle.token);
 					return;
 				}
 			}
@@ -1876,17 +1942,29 @@ export class ProcessTerminal implements Terminal {
 			// ahead of any probe: a pane held at the no-audience cadence returns
 			// to full speed on the first keystroke instead of at the next poll.
 			//
-			// Every non-empty chunk counts, terminal reports included, and that
-			// is deliberate. Telling a report from a keystroke here would mean a
-			// second escape-sequence parser ahead of StdinBuffer's reassembly,
-			// which would misread any sequence split across reads — real cost
-			// against a cost nobody has measured, because the reports that reach
-			// a detached pane are not periodic: startup probes run once, DEC 2048
-			// and CPR reports follow a resize (itself proof of a client), and TSP
-			// acks only arrive where the renderer is credit-paced and this floor
-			// never applies. A worst case of one demoted probe and one poll gap
-			// of full-rate frames is the right price for never hiding a keystroke.
-			// Revisit if an unsolicited report ever arrives on a cadence.
+			// Every non-empty chunk counts, terminal reports included. That is a
+			// trade, not a necessity, and both sides of it are measured.
+			//
+			// A report is not proof of a client: a detached tmux or screen pane
+			// still answers device-attribute and cursor-position queries from the
+			// multiplexer itself. And the cost is not bounded by a single
+			// demotion — a report every 100 ms for 60 s holds the pane at the
+			// full rate throughout: 1,797 paints, seven probes, audience never
+			// re-established, because every probe in that window is demoted.
+			//
+			// Against that: six seconds of continuous output in a real detached
+			// tmux and a real detached screen produced no input reports at all,
+			// and nothing else in the renderer emits a report on a cadence —
+			// startup probes run once, DEC 2048 and CPR follow a resize, TSP acks
+			// only arrive where frames are credit-paced and this floor never
+			// applies. A narrower seam does exist: the sequence handler already
+			// separates reports from forwarded input, so invalidation could move
+			// to that dispatch, at the price of the in-band resize report — which
+			// is how a tmux attach announces itself when no SIGWINCH follows —
+			// no longer counting. Keeping the broad signal costs an idle pane
+			// nothing today and never hides a keystroke; move it only with a
+			// measurement of a real periodic reporter, and keep the DEC 2048 path
+			// invalidating explicitly if it moves.
 			if (data) this.#invalidateAudience();
 			// Recover modes reset by the host before the user's next paste. Not
 			// mid-paste: the host is plainly in 2004 then, and per-key reads would
@@ -1926,30 +2004,35 @@ export class ProcessTerminal implements Terminal {
 		cache: TerminalMultiplexerBackgroundColorCache | undefined,
 		token?: TerminalAppearanceRequestToken,
 	): void {
+		const cycle: Osc11Cycle = { token, live: true };
+		this.#osc11Cycles.push(cycle);
+		this.#osc11LiveCycle = cycle;
 		this.#osc11Pending = true;
-		this.#osc11ActiveToken = token;
-		this.#osc11ResponseBuffer = "";
+		// Not cleared: a partial reply in the buffer belongs to an older cycle
+		// that has not been answered yet, and dropping it would spill its tail
+		// into application input when the rest arrives.
+		if (this.#osc11Cycles.length === 1) this.#osc11ResponseBuffer = "";
 		if (cache) {
 			this.#safeWrite(cache.passthrough("\x1b]11;?\x07"));
 			this.#osc11CacheRefreshTimer = setTimeout(() => {
 				this.#osc11CacheRefreshTimer = undefined;
-				if (this.#dead || !this.#osc11Pending) return;
-				this.#startDirectOsc11Query();
+				if (this.#dead || this.#osc11LiveCycle !== cycle) return;
+				this.#startDirectOsc11Query(cycle);
 			}, cache.settleMs);
 			return;
 		}
-		this.#startDirectOsc11Query();
+		this.#startDirectOsc11Query(cycle);
 	}
 
-	#startDirectOsc11Query(): void {
-		const owner: Da1SentinelOwner = { kind: "osc11" };
+	#startDirectOsc11Query(cycle: Osc11Cycle): void {
+		const owner: Da1SentinelOwner = { kind: "osc11", cycle };
 		this.#da1SentinelOwners.push(owner);
 		this.#safeWrite("\x1b]11;?\x07"); // OSC 11 query (BEL terminated)
 		this.#safeWrite("\x1b[c"); // DA1 sentinel
 		this.#clearOsc11SentinelDeadline();
 		this.#osc11SentinelTimer = setTimeout(() => {
 			this.#osc11SentinelTimer = undefined;
-			this.#abandonOsc11Sentinel(owner);
+			this.#abandonOsc11Cycle(owner);
 		}, OSC11_SENTINEL_TIMEOUT_MS);
 	}
 
@@ -1959,29 +2042,62 @@ export class ProcessTerminal implements Terminal {
 		this.#osc11SentinelTimer = undefined;
 	}
 
+	/** Drop every grace deadline a surrendered cycle left running. */
+	#clearOsc11GraceDeadlines(): void {
+		for (const timer of this.#osc11GraceTimers) clearTimeout(timer);
+		this.#osc11GraceTimers.clear();
+	}
+
 	/**
-	 * Give up on a DA1 sentinel that never came, without letting the cycle hold
-	 * the appearance pipeline shut.
+	 * Give up on a cycle whose sentinel never came, without letting it hold the
+	 * appearance pipeline shut and without letting its answers, if they are
+	 * merely late, be read as somebody else's.
 	 *
-	 * The FIFO slot is kept and neutered rather than removed: the next reply
-	 * still belongs to this cycle positionally, so removing the slot would hand
-	 * it to a replacement query's sentinel and resolve that query as unanswered.
-	 * Everything else the cycle holds is released, including a half-finished
-	 * one whose OSC 11 reply never arrived either, so the queued request — the
-	 * notification or explicit refresh waiting behind it — runs now.
+	 * The cycle surrenders rather than disappears. Its FIFO slot is kept and
+	 * neutered, because that FIFO is positional: dropping it would hand a late
+	 * sentinel to the replacement query and resolve that query as unanswered.
+	 * Its place in the reply queue is kept for the same reason — a late colour
+	 * reply is still this cycle's, and publishing it under the replacement's
+	 * request token is the error the queue exists to prevent. Both markers are
+	 * swept {@link OSC11_LATE_REPLY_GRACE_MS} later.
 	 */
-	#abandonOsc11Sentinel(owner: Da1SentinelOwner): void {
+	#abandonOsc11Cycle(owner: Da1SentinelOwner & { kind: "osc11" }): void {
 		const index = this.#da1SentinelOwners.indexOf(owner);
 		if (index < 0 || this.#dead) return;
-		this.#da1SentinelOwners[index] = { kind: "abandoned" };
+		const owed = this.#osc11Cycles.includes(owner.cycle);
+		const marker: Da1SentinelOwner = { kind: "abandoned", cycle: owed ? owner.cycle : undefined };
+		this.#da1SentinelOwners[index] = marker;
+		if (owed) owner.cycle.live = false;
+		if (this.#osc11LiveCycle === owner.cycle) this.#osc11LiveCycle = undefined;
 		this.#osc11Pending = false;
-		this.#osc11ActiveToken = undefined;
-		this.#osc11ResponseBuffer = "";
 		if (this.#osc11CacheRefreshTimer) {
 			clearTimeout(this.#osc11CacheRefreshTimer);
 			this.#osc11CacheRefreshTimer = undefined;
 		}
+		const grace = setTimeout(() => {
+			this.#osc11GraceTimers.delete(grace);
+			this.#retireOsc11Marker(marker);
+		}, OSC11_LATE_REPLY_GRACE_MS);
+		this.#osc11GraceTimers.add(grace);
 		this.#startQueuedOsc11Query();
+	}
+
+	/**
+	 * Drop a marker that has waited out its grace. Nothing it could still
+	 * absorb is expected to exist, and keeping it would grow the FIFO with
+	 * every unanswered cycle and leave it offset by one for good — every later
+	 * cycle then eating its predecessor's marker and paying a timeout of its
+	 * own, however promptly the terminal answers.
+	 */
+	#retireOsc11Marker(marker: Da1SentinelOwner & { kind: "abandoned" }): void {
+		const slot = this.#da1SentinelOwners.indexOf(marker);
+		if (slot >= 0) this.#da1SentinelOwners.splice(slot, 1);
+		if (marker.cycle) {
+			const owed = this.#osc11Cycles.indexOf(marker.cycle);
+			if (owed >= 0) this.#osc11Cycles.splice(owed, 1);
+			// A reply the terminal never sent cannot be completing this buffer.
+			if (this.#osc11Cycles.length === 0) this.#osc11ResponseBuffer = "";
+		}
 	}
 
 	/** Run the request parked behind the cycle that just ended, if there is one. */
@@ -2596,10 +2712,12 @@ export class ProcessTerminal implements Terminal {
 			this.#osc11CacheRefreshTimer = undefined;
 		}
 		this.#clearOsc11SentinelDeadline();
+		this.#clearOsc11GraceDeadlines();
 		this.#appearanceCallbacks = [];
 		this.#appearanceReportCallbacks = [];
 		this.#osc11Pending = false;
-		this.#osc11ActiveToken = undefined;
+		this.#osc11Cycles.length = 0;
+		this.#osc11LiveCycle = undefined;
 		this.#clearWindowsTerminalAppearancePoll();
 		this.#osc11QueuedQuery = undefined;
 		this.#osc11ResponseBuffer = "";

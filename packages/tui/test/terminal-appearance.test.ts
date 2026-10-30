@@ -280,6 +280,74 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		]);
 	});
 
+	it("gives a late OSC 11 colour reply to the cycle that gave up, never the replacement's identity", () => {
+		// The deadline says when to stop waiting. It cannot say that bytes
+		// already on the wire will never land, and the colour reply is the half
+		// of the exchange that carries a value: published under the replacement
+		// request's token it is a wrong answer to a question nobody asked, and
+		// the real answer is then unrecognised and spills into application input.
+		vi.useFakeTimers();
+		const { terminal, received } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+
+		const events: Array<{ appearance: string; token: number | undefined }> = [];
+		terminal.onAppearanceReport?.((appearance, token) => {
+			events.push({ appearance, token });
+		});
+		events.length = 0;
+		received.length = 0;
+
+		expect(terminal.refreshAppearance?.(41)).toBe(41);
+		const requestToken = 42;
+		expect(terminal.refreshAppearance?.(requestToken)).toBe(requestToken);
+
+		// Cycle 41 gives up and 42 goes out — then 41's whole exchange arrives,
+		// reply first as a terminal always answers it, followed by 42's.
+		vi.advanceTimersByTime(5_000);
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+
+		expect(events).toEqual([{ appearance: "light", token: requestToken }]);
+		expect(terminal.appearance).toBe("light");
+		expect(received).toEqual([]);
+		terminal.stop();
+	});
+
+	it("retires a surrendered cycle's markers so a lost sentinel cannot offset the queue for good", () => {
+		// A sentinel that is lost rather than late would otherwise leave one
+		// marker in the FIFO for the life of the process: every later cycle
+		// would eat its predecessor's marker and then wait out its own deadline,
+		// however promptly the terminal answers.
+		vi.useFakeTimers();
+		const { terminal, queryCount } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+
+		// One cycle whose sentinel never comes at all.
+		expect(terminal.refreshAppearance?.(41)).toBe(41);
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		vi.advanceTimersByTime(5_000);
+
+		// Long enough that the marker has stopped expecting anything.
+		vi.advanceTimersByTime(10_000);
+
+		// A well-behaved cycle from here on completes on its own replies.
+		const before = queryCount();
+		expect(terminal.refreshAppearance?.(42)).toBe(42);
+		expect(queryCount()).toBe(before + 1);
+		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+		expect(terminal.refreshAppearance?.(43)).toBe(43);
+		expect(queryCount()).toBe(before + 2);
+
+		terminal.stop();
+	});
+
 	it("reports every OSC 11 response while change callbacks remain deduplicated", () => {
 		const { terminal } = setupTerminal();
 		const reports: Array<{ reported: string; current: string | undefined }> = [];
