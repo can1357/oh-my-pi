@@ -91,6 +91,7 @@ function makeSession(options: SessionOptions = {}): ToolSession {
 			"async.enabled": false,
 			"task.isolation.enabled": false,
 			"task.enableLsp": true,
+			"task.perCallModel": "on",
 		});
 	const artifactsDir = options.artifactsDir ?? null;
 	const asyncJobManager = new AsyncJobManager({});
@@ -344,19 +345,37 @@ describe("runEvalAgent", () => {
 		expect(secondOptions.outputSchemaOverridesAgent).toBeUndefined();
 	});
 
-	it("drops a per-call model argument on agent() (removed, issue #6438)", async () => {
+	it.each(["on", "eval"])("routes an agent() model above a pinned agent under %s", async perCallModel => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 
-		// The schema strips unknown keys; a legacy `model` argument is silently
-		// discarded so resolution is identical to omitting it — the agent's own
-		// frontmatter model applies (issue #6438).
-		await runEvalAgentAndWait({ prompt: "work", model: "default" }, { session: makeSession() });
-		await runEvalAgentAndWait({ prompt: "work" }, { session: makeSession() });
+		await runEvalAgentAndWait(
+			{ prompt: "work", agent: "reviewer", model: "p/requested:high" },
+			{
+				session: makeSession({
+					settings: Settings.isolated({ "task.perCallModel": perCallModel, "task.isolation.enabled": false }),
+				}),
+			},
+		);
 
-		const withModel = runSpy.mock.calls[0]?.[0];
-		const withoutModel = runSpy.mock.calls[1]?.[0];
-		expect(withModel?.modelOverride).toEqual(withoutModel?.modelOverride);
+		expect(runSpy.mock.calls[0]?.[0]?.modelOverride).toEqual(["p/requested:high"]);
+	});
+
+	it.each([
+		// The gate wins over the selector check, so an invalid selector still reports the disabled gate.
+		{ mode: "off", model: "@smol", error: /task\.perCallModel: off/ },
+		{ mode: "on", model: "default", error: /invalid `model`/ },
+		// The argument schema accepts only a string, so a candidate array never reaches preflight.
+		{ mode: "on", model: ["p/preferred:high", "p/alternative"], error: /model must be a string/ },
+	])("rejects agent() model $model under $mode before dispatch", async ({ mode, model, error }) => {
+		mockAgents();
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+		const settings = Settings.isolated({ "task.perCallModel": mode, "task.isolation.enabled": false });
+
+		await expect(
+			runEvalAgent({ prompt: "work", agent: "reviewer", model }, { session: makeSession({ settings }) }),
+		).rejects.toThrow(error);
+		expect(runSpy).not.toHaveBeenCalled();
 	});
 	it("returns host-parsed data for caller, agent, and inherited schemas", async () => {
 		const agentSchema = { type: "object" };

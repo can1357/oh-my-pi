@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
@@ -1435,4 +1436,240 @@ describe("agent frontmatter structured opt-in", () => {
 		},
 		30_000,
 	);
+});
+
+describe("per-call model preflight", () => {
+	const target = createMockModel({ id: "target" });
+	const painter = { ...createMockModel({ id: "painter" }), kind: "image" as const };
+	function perCallSession(
+		settings: Record<string, unknown>,
+		warm = true,
+		refreshPending = false,
+		parentModel?: Model,
+	): ToolSession {
+		return Object.assign(
+			session({
+				settings: Settings.isolated({ "task.isolation.enabled": false, "task.maxRecursionDepth": 2, ...settings }),
+			}),
+			{
+				getActiveModelString: () => "mock/parent",
+				...(parentModel ? { getActiveModel: () => parentModel } : {}),
+				modelRegistry: {
+					getAll: () => [target, painter],
+					getAvailable: (kind?: string) => (!warm ? [] : kind === "chat" ? [target] : [target, painter]),
+					isBackgroundRefreshPending: () => refreshPending,
+				},
+			},
+		);
+	}
+
+	// `off` refuses every kind and `eval` refuses task calls. The selector is invalid on purpose:
+	// the disabled gate is reported first, so a caller is never told to fix a selector it may not send.
+	it.each([
+		["off", "eval"],
+		["eval", "task"],
+	] as const)("rejects model under task.perCallModel: %s for %s calls", async (mode, invocationKind) => {
+		mockDiscovery();
+		await expect(
+			resolveEffectiveSubagentPolicy(
+				request({
+					session: perCallSession({ "task.perCallModel": mode }),
+					invocationKind,
+					perCallModel: "@smol",
+				}),
+			),
+		).rejects.toThrow(`task.perCallModel: ${mode}`);
+	});
+
+	it.each([
+		["on", "task"],
+		["eval", "eval"],
+	] as const)("routes an approved model above the agent's own under %s for %s calls", async (mode, invocationKind) => {
+		mockDiscovery({ ...AGENT, model: ["mock/agent-own"] });
+		const policy = await resolveEffectiveSubagentPolicy(
+			request({
+				session: perCallSession({ "task.perCallModel": mode, modelRoles: { review: "mock/target" } }),
+				invocationKind,
+				perCallModel: "mock/target:high",
+			}),
+		);
+		expect(policy.modelOverride).toEqual(["mock/target:high"]);
+		expect(policy.perCallModelGrants?.agentName).toBe("worker");
+		// A requested model never falls back to the parent's.
+		expect(policy.parentActiveModelPattern).toBeUndefined();
+	});
+
+	it.each(["SDK overlay", "nested subagent"])("reloads removed on-disk role grants through an %s", async kind => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-grant-reload-"));
+		const projectDir = path.join(root, "project");
+		const agentDir = path.join(root, "agent");
+		await fs.mkdir(projectDir, { recursive: true });
+		const configPath = path.join(agentDir, "config.yml");
+		const taskConfig = 'task:\n  perCallModel: "on"\n  isolation:\n    enabled: false\n';
+		await Bun.write(configPath, `${taskConfig}modelRoles:\n  review: mock/target\n`);
+		const liveSettings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
+		const child = executorModule.createSubagentSettings(liveSettings, {
+			modelRoles: { ...liveSettings.getModelRoles(), advisor: "mock/other" },
+		});
+		const settings = kind === "SDK overlay" ? liveSettings.overlay({}) : executorModule.createSubagentSettings(child);
+		const liveSession = Object.assign(perCallSession({}), { cwd: projectDir, settings });
+		const call = request({ session: liveSession, perCallModel: "mock/target:high" });
+		mockDiscovery();
+
+		try {
+			expect((await resolveEffectiveSubagentPolicy(call)).modelOverride).toEqual(["mock/target:high"]);
+			await Bun.write(configPath, taskConfig);
+			await expect(resolveEffectiveSubagentPolicy(call)).rejects.toThrow(
+				'Per-call model mock/target is not approved for agent "worker"',
+			);
+		} finally {
+			liveSettings.cancelPendingSaves();
+			AgentStorage.close();
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it.each([
+		["a selector that is not provider/model-id", "@smol", {}, /invalid `model`/],
+		// Shaped like provider/model-id, but names the configured custom role `review`.
+		["a legacy alias of a custom role", "pi/review", {}, /invalid `model`/],
+		["an unavailable model", "mock/missing", {}, /No available model matches/],
+		["a non-chat model", "mock/painter", {}, /image model; a subagent needs a chat model/],
+		["an unapproved model", "mock/target", { modelRoles: {} }, /not approved/],
+		[
+			"a model for an agent with an override",
+			"mock/target",
+			{ "task.agentModelOverrides": { worker: "mock/target" } },
+			/conflicts with task\.agentModelOverrides/,
+		],
+	] as const)("rejects %s", async (_name, perCallModel, settings, error) => {
+		mockDiscovery();
+		await expect(
+			resolveEffectiveSubagentPolicy(
+				request({
+					session: perCallSession({ "task.perCallModel": "on", modelRoles: { review: "mock/x" }, ...settings }),
+					perCallModel,
+				}),
+			),
+		).rejects.toThrow(error);
+	});
+
+	it("defers a model discovery has not loaded yet to the executor's post-refresh check", async () => {
+		mockDiscovery();
+		const policy = await resolveEffectiveSubagentPolicy(
+			request({ session: perCallSession({ "task.perCallModel": "on" }, true, true), perCallModel: "mock/missing" }),
+		);
+		expect(policy.modelOverride).toEqual(["mock/missing"]);
+		expect(policy.perCallModelGrants).toBeDefined();
+	});
+
+	it("still rejects a non-chat model while discovery is running", async () => {
+		mockDiscovery();
+		await expect(
+			resolveEffectiveSubagentPolicy(
+				request({
+					session: perCallSession({ "task.perCallModel": "on" }, true, true),
+					perCallModel: "mock/painter",
+				}),
+			),
+		).rejects.toThrow(/image model; a subagent needs a chat model/);
+	});
+
+	it("defers availability and approval to the executor while the registry is cold", async () => {
+		mockDiscovery();
+		const policy = await resolveEffectiveSubagentPolicy(
+			request({ session: perCallSession({ "task.perCallModel": "on" }, false), perCallModel: "mock/target" }),
+		);
+		expect(policy.perCallModelGrants).toBeDefined();
+	});
+
+	it.each([{ only: ["anthropic", "google-vertex"] }, { order: ["anthropic", "google-vertex"] }])(
+		"does not grant from a parent route that cannot be represented exactly: %j",
+		async routing => {
+			mockDiscovery();
+			// The mock API has no routing compat type; preflight reads routing generically from the live parent.
+			const parent = { ...target, compat: { openRouterRouting: routing } } as unknown as Model;
+			await expect(
+				resolveEffectiveSubagentPolicy(
+					request({
+						session: perCallSession({ "task.perCallModel": "on" }, true, false, parent),
+						perCallModel: "mock/target",
+					}),
+				),
+			).rejects.toThrow(/not approved/);
+		},
+	);
+
+	it("leaves calls without model on their configured routing", async () => {
+		mockDiscovery({ ...AGENT, model: ["mock/agent-own"] });
+		const policy = await resolveEffectiveSubagentPolicy(
+			request({ session: perCallSession({ "task.perCallModel": "on" }) }),
+		);
+		expect(policy.modelOverride).toEqual(["mock/agent-own"]);
+		expect(policy.perCallModelGrants).toBeUndefined();
+		expect(policy.parentActiveModelPattern).toBe("mock/parent");
+	});
+
+	describe("an agent shadowing the seance name", () => {
+		const shadow: AgentDefinition = { ...AGENT, name: "seance", source: "project", model: ["mock/agent-own"] };
+
+		it.each(["off", "on"] as const)(
+			"holds its model to the per-call gate under task.perCallModel: %s",
+			async mode => {
+				mockDiscovery(shadow);
+				await expect(
+					resolveEffectiveSubagentPolicy(
+						request({
+							session: perCallSession({ "task.perCallModel": mode }),
+							agent: "seance",
+							seanceModel: "mock/target",
+						}),
+					),
+				).rejects.toThrow(mode === "off" ? "task.perCallModel: off" : "not approved");
+			},
+		);
+
+		it("keeps task.agentModelOverrides authoritative", async () => {
+			mockDiscovery(shadow);
+			await expect(
+				resolveEffectiveSubagentPolicy(
+					request({
+						session: perCallSession({
+							"task.perCallModel": "on",
+							modelRoles: { review: "mock/target" },
+							"task.agentModelOverrides": { seance: "mock/agent-own" },
+						}),
+						agent: "seance",
+						seanceModel: "mock/target",
+					}),
+				),
+			).rejects.toThrow(/conflicts with task\.agentModelOverrides/);
+		});
+
+		it("rejects a candidate array instead of routing it", async () => {
+			mockDiscovery(shadow);
+			await expect(
+				resolveEffectiveSubagentPolicy(
+					request({
+						session: perCallSession({ "task.perCallModel": "on", modelRoles: { review: "mock/target" } }),
+						agent: "seance",
+						seanceModel: ["mock/target"],
+					}),
+				),
+			).rejects.toThrow(/invalid `model`/);
+		});
+
+		it("routes an approved model as a per-call worker", async () => {
+			mockDiscovery(shadow);
+			const policy = await resolveEffectiveSubagentPolicy(
+				request({
+					session: perCallSession({ "task.perCallModel": "on", modelRoles: { review: "mock/target" } }),
+					agent: "seance",
+					seanceModel: "mock/target",
+				}),
+			);
+			expect(policy.modelOverride).toEqual(["mock/target"]);
+			expect(policy.perCallModelGrants?.agentName).toBe("seance");
+		});
+	});
 });
