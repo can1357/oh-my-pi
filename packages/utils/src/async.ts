@@ -1,7 +1,7 @@
-import { scheduler } from "node:timers/promises";
+import * as timers from "node:timers/promises";
 
 /**
- * Largest delay `setTimeout` (and `timers/promises` `scheduler.wait`)
+ * Largest delay `setTimeout` (and `timers/promises` `setTimeout`)
  * accepts without 32-bit signed overflow: larger values wrap and fire
  * almost immediately instead of sleeping. Chunk day-scale provider waits
  * (e.g. a monthly quota reset parsed from an error hint) so the full
@@ -9,22 +9,33 @@ import { scheduler } from "node:timers/promises";
  */
 export const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
+/** Options for {@link sleepLong}. */
+export interface SleepLongOptions {
+	/**
+	 * Whether the pending wait keeps the process alive, as `setTimeout`'s
+	 * `ref()`/`unref()` do. `false` arms every chunk unreferenced, for a
+	 * deadline that must never by itself hold an otherwise finished process
+	 * open (a day-scale prompt deadline). Defaults to `true`.
+	 */
+	ref?: boolean;
+}
+
 /**
  * Abortable sleep for arbitrarily long delays. Waits longer than
  * {@link MAX_TIMER_DELAY_MS} chunk the sleep into back-to-back timer waits
  * so no single timer overflows; an abort during any chunk rejects like
- * `scheduler.wait`.
+ * `timers/promises` `setTimeout`.
  *
  * Uses a monotonic deadline so a timer that wakes prematurely is re-armed for
  * the unelapsed duration instead of shortening the requested sleep.
  */
-export async function sleepLong(delayMs: number, signal?: AbortSignal): Promise<void> {
+export async function sleepLong(delayMs: number, signal?: AbortSignal, options?: SleepLongOptions): Promise<void> {
 	signal?.throwIfAborted();
 	const deadline = performance.now() + delayMs;
 	while (true) {
 		const remaining = deadline - performance.now();
 		if (!(remaining > 0)) return;
-		await scheduler.wait(Math.min(remaining, MAX_TIMER_DELAY_MS), { signal });
+		await timers.setTimeout(Math.min(remaining, MAX_TIMER_DELAY_MS), undefined, { signal, ref: options?.ref });
 		signal?.throwIfAborted();
 	}
 }

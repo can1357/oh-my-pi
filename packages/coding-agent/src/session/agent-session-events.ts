@@ -1,4 +1,4 @@
-import type { AgentEvent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { AgentEvent, ThinkingLevel, ToolExecution } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort } from "@oh-my-pi/pi-ai";
 import type { Rule } from "../capability/rule";
@@ -9,6 +9,7 @@ import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { TodoItem } from "@oh-my-pi/pi-tui/tools/todo";
 import type { CustomMessage } from "./messages";
 import type { CacheWarmingRefreshEnd, CacheWarmingRefreshStart } from "./cache-warmer";
+import type { BlockedKind } from "../utils/run-status";
 
 /** Session-specific events that extend the core AgentEvent. */
 export type AgentSessionEvent =
@@ -106,7 +107,70 @@ export type AgentSessionEvent =
 	// `AgentSession.getQueuedMessages()`; `liveSteered` counts the leading
 	// `steering` entries already sent into the streaming response, which
 	// `remove_queued_message` cannot reach.
-	| { type: "queue_update"; steering: string[]; followUp: string[]; liveSteered: number };
+	| { type: "queue_update"; steering: string[]; followUp: string[]; liveSteered: number }
+	// A dialog the session itself opened mid-turn and that only a person can
+	// answer: the coding-plan reserve prompt, an MCP sign-in, a `cfg://` write,
+	// a plan approval, an ACP permission request. `start` carries what is being
+	// asked and is emitted when the first one opens; `end` when the last one
+	// settles. Without these a surface showing run state cannot tell a session
+	// that is working from one that has been waiting for a person for hours.
+	// `prompt` and `kind` are the dialog's own words and classification, so a
+	// surface that attaches mid-wait (a focus rebuild, a reconnecting RPC
+	// client) reports the operation being approved rather than a generic label
+	// it has no way to refine. `toolCalls` names every tool call whose dialog
+	// is open, so a surface tracking a call knows when that call's own wait
+	// ends — which is not when the last dialog settles, and not something the
+	// oldest dialog's words can be read to mean.
+	| { type: "user_wait_start"; prompt: string; kind?: BlockedKind; toolCalls?: string[] }
+	| { type: "user_wait_end" };
+
+/** What one dialog waiting on a person asks, and how a surface that reports run state classifies it. */
+export interface UserWaitFrame {
+	/** The dialog's own words: the operation it asks to approve, or the question it asks. */
+	prompt: string;
+	/** Absent when the opener named no classification; such a wait reads as a question. */
+	kind?: BlockedKind;
+	/**
+	 * The tool call this dialog's own caller named, when it named one: an ACP permission request,
+	 * an approval a tool asks for. A caller that names a call asserts it about this moment, so it
+	 * is taken at its word. Absent for a dialog that stands on its own (an MCP sign-in, a `cfg://`
+	 * write, an extension's own question), which owns no call and so retires none.
+	 */
+	toolCallId?: string;
+	/**
+	 * The execution the `ui` this dialog came from was handed to, when it came from a call's own
+	 * `ui`. Its holder keeps that `ui` after the call is over, and a later call can reuse the id,
+	 * so what is kept is the run itself: it identifies the dialog's call only while that run lasts.
+	 * Never serialized — it is an in-process handle, not part of any wire frame.
+	 */
+	toolCallExecution?: ToolExecution;
+	/**
+	 * True when this dialog came from a `ui` handed to one tool call. Such a dialog belongs to that
+	 * call's run and to nothing else: when {@link toolCallExecution} is absent or over, the dialog
+	 * names no call, rather than falling back to whatever happens to be executing around it.
+	 */
+	toolCallOwned?: boolean;
+}
+
+/**
+ * What `user_wait_start` carries when the caller named nothing: an SDK caller
+ * on the one-argument `waitForUser` still produces a valid frame, and the
+ * surfaces that report run state still say a person is owed an answer.
+ */
+export const UNNAMED_USER_WAIT_PROMPT = "a dialog waiting for you";
+
+/**
+ * How a session identifies one run of one tool call to a surface that must compare across a gap
+ * it saw nothing through — a focus handover, a reconnect. `mark` is equal only for the same run
+ * of the same call in the same session, and stays unique for that session's whole life, so a
+ * logical reset that recycles call ids cannot hand an old record to a new run. `live` says
+ * whether that run is still going: a surface restoring what it recorded needs both, since the
+ * same terminal mark on both sides still describes a call that is over.
+ */
+export interface ToolCallRunMark {
+	readonly mark: string;
+	readonly live: boolean;
+}
 
 /** Listener function for agent session events. */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;

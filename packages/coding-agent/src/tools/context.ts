@@ -1,7 +1,7 @@
-import type { AgentToolContext, ToolCallContext } from "@oh-my-pi/pi-agent-core";
+import { currentToolExecution, type AgentToolContext, type ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import type { CustomToolContext } from "../extensibility/custom-tools/types";
 import type { ExtensionUIContext } from "../extensibility/extensions/types";
-import { trackUserWaits, type UserWaitTracker } from "../extensibility/extensions/user-wait";
+import { trackUserWaits, type UserWaitOwner, type UserWaitTracker } from "../extensibility/extensions/user-wait";
 
 declare module "@oh-my-pi/pi-agent-core" {
 	interface AgentToolContext extends CustomToolContext {
@@ -33,6 +33,10 @@ declare module "@oh-my-pi/pi-agent-core" {
 
 export class ToolContextStore {
 	#uiContext: ExtensionUIContext | undefined;
+	/** The host's own `ui`, before tracking: a per-call wrapper is built from this. */
+	#rawUiContext: ExtensionUIContext | undefined;
+	/** The last per-call wrapper handed out, with the run it bound to, so one run shares it. */
+	#callUiContext: { owner: UserWaitOwner; ui: ExtensionUIContext } | undefined;
 	#hasUI = false;
 	#toolNames: string[] = [];
 
@@ -45,7 +49,7 @@ export class ToolContextStore {
 	getContext(toolCall?: ToolCallContext): AgentToolContext {
 		return {
 			...this.getBaseContext(),
-			ui: this.#uiContext,
+			ui: this.#uiFor(toolCall),
 			hasUI: this.#hasUI,
 			toolNames: this.#toolNames,
 			toolCall,
@@ -55,7 +59,29 @@ export class ToolContextStore {
 		};
 	}
 
+	/**
+	 * The `ui` this call gets: dialogs it raises name the run this context was built for, so the
+	 * wait each one opens says whose it is and a surface tracking that call learns when its own
+	 * dialog settles rather than when the last unrelated one does. A holder that keeps the `ui`
+	 * past that run names nothing with it — not even when a later run of the same call is the one
+	 * executing — and a context built for no call keeps the shared wrapper, which names none.
+	 */
+	#uiFor(toolCall?: ToolCallContext): ExtensionUIContext | undefined {
+		const raw = this.#rawUiContext;
+		const toolCallId = toolCall?.toolCalls[toolCall.index]?.id;
+		if (!raw || !this.trackUserWait || toolCallId === undefined) return this.#uiContext;
+		const execution = toolCall?.execution ?? currentToolExecution();
+		const cached = this.#callUiContext;
+		if (cached && cached.owner.toolCallId === toolCallId && cached.owner.execution === execution) return cached.ui;
+		const owner: UserWaitOwner = { toolCallId, execution, settled: execution !== undefined };
+		const ui = trackUserWaits(raw, this.trackUserWait, owner);
+		this.#callUiContext = { owner, ui };
+		return ui;
+	}
+
 	setUIContext(uiContext: ExtensionUIContext, hasUI: boolean): void {
+		this.#rawUiContext = uiContext;
+		this.#callUiContext = undefined;
 		this.#uiContext = this.trackUserWait ? trackUserWaits(uiContext, this.trackUserWait) : uiContext;
 		this.#hasUI = hasUI;
 	}

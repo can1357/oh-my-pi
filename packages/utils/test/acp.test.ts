@@ -302,6 +302,63 @@ describe("ACP JSON-RPC transport", () => {
 		expect(error).toBeInstanceOf(RequestError);
 		expect((error as RequestError).code).toBe(-32800);
 	});
+	it("unstable_createElicitationWithCancel ends the client's form handler via its abort signal", async () => {
+		// The reserve-deadline path cancels an open form elicitation. `cancel()`
+		// must reach the client handler through its abort signal (so the dialog
+		// tears down) and reject the elicit as request-cancelled, its late
+		// response for the dropped id ignored.
+		const pair = transportPair();
+		const handlerStarted = Promise.withResolvers<void>();
+		const handlerEnded = Promise.withResolvers<void>();
+		let handlerSignal: AbortSignal | undefined;
+		const client: Client = {
+			requestPermission: async () => ({ outcome: { outcome: "cancelled" as const } }),
+			sessionUpdate: async () => {},
+			unstable_createElicitation(_params, options) {
+				handlerSignal = options?.signal;
+				handlerStarted.resolve();
+				const gate = Promise.withResolvers<void>();
+				if (options?.signal?.aborted) gate.resolve();
+				else options?.signal?.addEventListener("abort", () => gate.resolve(), { once: true });
+				return gate.promise.then(() => {
+					handlerEnded.resolve();
+					return { action: "cancel" as const };
+				});
+			},
+		};
+		const _clientConnection = new ClientSideConnection(() => client, pair.left);
+		const agentConnection = new AgentSideConnection(
+			connection => ({
+				initialize: params => ({ protocolVersion: params.protocolVersion }),
+				newSession: async () => ({ sessionId: "session-1" }),
+				prompt: async () => {
+					void connection;
+					return { stopReason: "end_turn" as const };
+				},
+				cancel: async () => {},
+			}),
+			pair.right,
+		);
+
+		const { promise, cancel } = agentConnection.unstable_createElicitationWithCancel({
+			mode: "form",
+			sessionId: "session-1",
+			message: "Trust?",
+			requestedSchema: { type: "object", properties: {} },
+		});
+		await handlerStarted.promise;
+		expect(handlerSignal).toBeDefined();
+
+		cancel();
+		await handlerEnded.promise;
+
+		const error = await promise.then(
+			() => undefined,
+			(rejection: unknown) => rejection,
+		);
+		expect(error).toBeInstanceOf(RequestError);
+		expect((error as RequestError).code).toBe(-32800);
+	});
 
 	it("answers a peer $/cancel_request with -32800 on the wire when the dispatcher honors cancellation", async () => {
 		// ACP v1 spec: a cancelled inbound request must still receive a

@@ -924,6 +924,46 @@ before and performs no extra syscalls.
 
 `ctx.ui` implements the `ExtensionUIContext` interface. Support differs by mode.
 
+Every dialog that waits for an answer opens a run-state wait the session publishes
+(`user_wait_start`/`user_wait_end`), named by what the call asks. A dialog whose method does not say
+how to classify it — a `select` a host raises in place of an approval dialog, for one — declares it
+with `ExtensionUIDialogOptions.waitKind` (`"permission"` or `"question"`), or with
+`ExtensionCustomOptions.waitKind` on `custom`; without it the dialog reads as a question, and
+`approve` always reads as a permission. A dialog given a `timeout` opens no wait: it settles on its
+own, so its time stays the agent's. While a wait is open its frame is the whole run-state report, so
+a dialog that gives no words of its own is reported under a generic label rather than under some
+other operation's.
+
+A dialog raised for a tool call names it. A dialog raised while the call executes — `ctx.ui` inside
+a registered tool, a built-in tool's own `ctx.ui`, a host's approval opened through
+`session.waitForUser` — is attributed to that call from the execution itself; a caller that raises a
+dialog for a call it is not executing declares it with `ExtensionUIDialogOptions.toolCallId`. The
+frame the session publishes carries every waiting call in `toolCalls`, so a surface watching one
+call sees its own dialog settle — which is not the moment the last dialog settles, and not something
+another dialog's words can be read to mean. A dialog raised outside any call, and one raised by work
+a finished call left running, name none and own none: nothing retires their caller's record but its
+own end.
+
+Attribution names a run of a call, never the id on its own. Two agents in one process can hold the
+same tool-call id at once and are never confused for each other; an executor bound to no agent
+claims none of theirs; and a call that `retry` runs again is a new run — the earlier one being over
+says nothing about this one, and a dialog left open stops naming its call the moment the run that
+raised it ends, so the next run of that id answers for itself. Within a live run, timers and
+detached promises keep the identity, and a `ui` handed to a call keeps the run it was handed to —
+so a holder that keeps that `ui` past the call names nothing with it, not even while a later run
+of the same call is executing. Some boundaries lose the ambient identity: a `worker` callback, and
+work resumed on an `AsyncResource` created before the run. Pass `toolCallId` explicitly from such a
+callback when the dialog is still that call's.
+
+A host that wraps `trackUserWaits` must forward the whole frame to `session.waitForUser`. An
+adapter that copies only some fields drops the dialog's ownership, and the wait then falls back to
+whatever run is executing around it — which, inside a nested `invokeTool`, is the child rather than
+the parent that raised the dialog.
+
+None of this survives a restart: waits are not persisted, so reopening a session restores no open
+dialog and approves nothing — an unfinished call that was waiting comes back with no wait and no
+answer.
+
 ### Interactive mode (`extension-ui-controller.ts`)
 
 Supported:

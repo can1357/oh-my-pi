@@ -176,8 +176,15 @@ await runRpcMode(session, {
 		expect(requests[0]).toMatchObject({ title: "Tool choice", options: ["Keep", "Deploy"] });
 	}, 30_000);
 
-	/** Spawns an RPC runtime whose extension awaits a `confirm` in `session_start` and has a `/probe` command. */
-	async function spawnStartupDialogRuntime(temp: TempDir) {
+	/**
+	 * Spawns an RPC runtime whose extension awaits a dialog in `session_start` and has a `/probe`
+	 * command. `dialog` is the statement that opens it, so a case can choose which dialog the
+	 * client is asked to answer.
+	 */
+	async function spawnStartupDialogRuntime(
+		temp: TempDir,
+		dialog = 'ctx.ui.notify(String(await ctx.ui.confirm("Trust?", "startup")));',
+	) {
 		const fixturePath = temp.join("runtime.ts");
 		const sourceDir = path.resolve(import.meta.dir, "../src");
 		await Bun.write(
@@ -185,6 +192,7 @@ await runRpcMode(session, {
 			`
 import { createAgentSession, Settings } from ${JSON.stringify(path.join(sourceDir, "sdk.ts"))};
 import { runRpcMode } from ${JSON.stringify(path.join(sourceDir, "modes/rpc/rpc-mode.ts"))};
+import { requestApproval } from ${JSON.stringify(path.join(sourceDir, "tools/approval.ts"))};
 globalThis.fetch = async () => { throw new Error("Offline UI fixture refuses network"); };
 const { session } = await createAgentSession({
   cwd: process.cwd(),
@@ -198,8 +206,9 @@ const { session } = await createAgentSession({
       // A command's context is built per call, so it sees whether set_ask_dialog took effect.
       handler: async (_args, ctx) => ctx.ui.notify("askDialog:" + typeof ctx.ui.askDialog),
     });
+    // requestApproval is imported for the cases whose dialog raises an approval.
     pi.on("session_start", async (_event, ctx) => {
-      ctx.ui.notify(String(await ctx.ui.confirm("Trust?", "startup")));
+      ${dialog}
     });
   }],
 });
@@ -273,6 +282,63 @@ await runRpcMode(session);
 		}
 		const exitCode = await child.exited;
 		expect({ exitCode, signal: child.signalCode }, await stderr).toEqual({ exitCode: 0, signal: null });
+	}, 30_000);
+
+	it("reports the wait bracket for a dialog session_start awaits", async () => {
+		// `user_wait_start` is published once, when the dialog opens — here while
+		// startup is still inside extension initialization. A client that never
+		// receives it reports the session as idle for as long as the dialog stands.
+		// The frame carries the dialog's own title and its classification, so a
+		// client shows what is being asked without a per-tool-call record.
+		await using temp = await TempDir.create("@rpc-startup-dialog-wait-");
+		const child = await spawnStartupDialogRuntime(temp);
+		const stderr = new Response(child.stderr).text();
+		const seen: string[] = [];
+		for await (const frame of readJsonl<unknown>(child.stdout)) {
+			if (!isRecord(frame)) continue;
+			if (frame.type === "user_wait_start") seen.push(`start:${String(frame.kind)}:${String(frame.prompt)}`);
+			if (frame.type === "user_wait_end") seen.push("end");
+			if (frame.type === "extension_ui_request" && frame.method === "confirm") {
+				seen.push("confirm");
+				child.stdin.write(`${JSON.stringify({ type: "extension_ui_response", id: frame.id, confirmed: true })}\n`);
+				await child.stdin.flush();
+			}
+			if (frame.type === "extension_ui_request" && frame.method === "notify") child.stdin.end();
+		}
+		await child.exited;
+		expect(seen, await stderr).toEqual(["start:question:Trust?", "confirm", "end"]);
+	}, 30_000);
+
+	it("classifies an approval the client answers through a select as a permission wait", async () => {
+		// A host without an approval dialog answers an approval through `select`
+		// (RPC, ACP, extension hosts). The dialog is still an approval of an
+		// operation: a client that reads the wait's classification must not be
+		// told a question is open while the request beside it offers Approve and
+		// Deny for a named tool.
+		await using temp = await TempDir.create("@rpc-startup-approval-wait-");
+		const child = await spawnStartupDialogRuntime(
+			temp,
+			'ctx.ui.notify(String(await requestApproval(ctx.ui, { name: "deploy", formatApprovalDetails: () => ["Target: prod"] }, {})));',
+		);
+		const stderr = new Response(child.stderr).text();
+		const seen: string[] = [];
+		for await (const frame of readJsonl<unknown>(child.stdout)) {
+			if (!isRecord(frame)) continue;
+			if (frame.type === "user_wait_start") seen.push(`start:${String(frame.kind)}:${String(frame.prompt)}`);
+			if (frame.type === "user_wait_end") seen.push("end");
+			if (frame.type === "extension_ui_request" && frame.method === "select") {
+				seen.push(`select:${JSON.stringify(frame.options)}`);
+				child.stdin.write(`${JSON.stringify({ type: "extension_ui_response", id: frame.id, value: "Approve" })}\n`);
+				await child.stdin.flush();
+			}
+			if (frame.type === "extension_ui_request" && frame.method === "notify") child.stdin.end();
+		}
+		await child.exited;
+		expect(seen, await stderr).toEqual([
+			"start:permission:Allow tool: deploy\nTarget: prod",
+			'select:["Approve","Deny"]',
+			"end",
+		]);
 	}, 30_000);
 
 	it("keeps the label-only wire shape for bare options", async () => {

@@ -8,6 +8,7 @@ import {
 	type AgentToolResult,
 	type AgentToolUpdateCallback,
 	joinAdditionalContext,
+	runInToolCall,
 	TOOL_RESULT_ADDITIONAL_CONTEXT,
 	type ToolResultWithAdditionalContext,
 	validateAgentToolArguments,
@@ -96,6 +97,13 @@ interface CursorExecBridgeOptions {
 	getEditReplaceTool?: () => CursorBridgeTool | undefined;
 	getToolContext?: () => AgentToolContext | undefined;
 	emitEvent?: (event: AgentEvent) => void;
+	/**
+	 * Whose executions the frames this bridge runs are. Cursor resolves tool calls through its own
+	 * channel instead of the agent loop, so the bridge binds each execution itself; resolved per
+	 * frame because the bridge is built before the agent it serves. Without one, an execution is
+	 * bound to no agent and answers to whoever asks about it.
+	 */
+	getExecutionOwner?: () => object | undefined;
 	/**
 	 * Whether frames that mutate the filesystem WITHOUT running a registry tool
 	 * may do so: the native `delete` frame, and a `read_mcp_resource` carrying
@@ -344,7 +352,9 @@ async function executeTool(
 			name: toolName,
 			arguments: toolArgs,
 		});
-		result = await tool.execute(toolCallId, validatedArgs, undefined, onUpdate, bridgeContext.context);
+		result = await runInToolCall(options.getExecutionOwner?.(), toolCallId, () =>
+			tool.execute(toolCallId, validatedArgs, undefined, onUpdate, bridgeContext.context),
+		);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		result = buildToolErrorResult(message);
@@ -707,7 +717,9 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 				name: toolName,
 				arguments: toolArgs,
 			});
-			result = await tool.execute(toolCallId, validatedArgs, undefined, onUpdate, bridgeContext.context);
+			result = await runInToolCall(this.options.getExecutionOwner?.(), toolCallId, () =>
+				tool.execute(toolCallId, validatedArgs, undefined, onUpdate, bridgeContext.context),
+			);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			result = buildToolErrorResult(message);

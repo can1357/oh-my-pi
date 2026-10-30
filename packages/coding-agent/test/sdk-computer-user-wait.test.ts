@@ -16,7 +16,7 @@ import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility
 import { trackUserWaits } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/user-wait";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
-import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSession, UserWaitFrame } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { computerTurnInFlight, registerComputerController } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -184,5 +184,52 @@ describe("trackUserWaits", () => {
 		replaceable.select = async () => calls.push("second");
 		await ui.select("b", []);
 		expect(calls).toEqual(["first", "second"]);
+	});
+
+	it("names and classifies each dialog from the call that opened it", async () => {
+		// The frame the session publishes is all a surface attaching mid-wait
+		// (a focus rebuild, a reconnecting RPC client) ever sees: it has to say
+		// which operation is being approved, and that an approval — not a
+		// question — is what the person owes. A dialog with no title of its own
+		// keeps the wrapper's generic label.
+		const frames: UserWaitFrame[] = [];
+		const context = {
+			approve: async () => "once",
+			select: async () => undefined,
+			askDialog: async () => undefined,
+			custom: async () => undefined,
+		};
+		const ui = trackUserWaits(context as unknown as ExtensionUIContext, (dialog, frame) => {
+			frames.push(frame);
+			return dialog();
+		});
+
+		await ui.approve?.({ full: "Allow tool: bash\nCommand: echo first", compact: "Allow tool: bash — echo first" });
+		await ui.select("Use Postgres?", []);
+		await ui.askDialog?.([{ question: "Deploy now?" }] as never);
+		await ui.custom(undefined as never);
+
+		expect(frames).toEqual([
+			{ prompt: "Allow tool: bash — echo first", kind: "permission" },
+			{ prompt: "Use Postgres?", kind: "question" },
+			{ prompt: "Deploy now?", kind: "question" },
+			{ prompt: "an extension custom dialog", kind: "question" },
+		]);
+	});
+
+	it("takes the classification the call declares over the one its method implies", async () => {
+		// A host without an approval dialog raises an approval as a `select`
+		// (RPC, ACP, extension hosts). The call knows it asks to approve an
+		// operation and says so, so the wait it opens is a permission one.
+		const frames: UserWaitFrame[] = [];
+		const context = { select: async () => "Approve" };
+		const ui = trackUserWaits(context as unknown as ExtensionUIContext, (dialog, frame) => {
+			frames.push(frame);
+			return dialog();
+		});
+
+		await ui.select("Allow tool: deploy", ["Approve", "Deny"], { waitKind: "permission" });
+
+		expect(frames).toEqual([{ prompt: "Allow tool: deploy", kind: "permission" }]);
 	});
 });
