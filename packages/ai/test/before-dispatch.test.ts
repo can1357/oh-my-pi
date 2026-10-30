@@ -27,6 +27,7 @@ import type {
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import * as requestDebug from "@oh-my-pi/pi-ai/utils/request-debug";
 import { transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
 
 const SOURCE_ID = "before-dispatch-test";
@@ -450,5 +451,50 @@ describe("beforeDispatch", () => {
 		expect(settled).toBe("cancelled");
 		expect(dispatches).toBe(0);
 		held.resolve();
+	});
+
+	// `PI_REQ_DEBUG` dumps the request body to disk between the hold and the
+	// wire. Dumping after the hold made the hold not the last step: a pause
+	// engaged during the dump still reached the provider.
+	test("finishes request-debug preparation before the final hold", async () => {
+		const sentWhileHeld: boolean[] = [];
+		const gate = { closed: false };
+		const resumed = Promise.withResolvers<void>();
+		const debugEnabled = spyOn(requestDebug, "isRequestDebugEnabled").mockReturnValue(true);
+		const debugSession = spyOn(requestDebug, "createFetchRequestDebugSession").mockImplementation(async () => {
+			// The dump is slow enough to span a pause the caller engages.
+			gate.closed = true;
+			return {
+				id: 1,
+				requestPath: "unused",
+				responsePath: "unused",
+				openResponseLog: async () => ({ write() {}, async close() {} }),
+				wrapResponse: async (response: Response) => response,
+			};
+		});
+		try {
+			const fetch = transportFetch(
+				model(),
+				async () => {
+					sentWhileHeld.push(gate.closed);
+					return new Response("{}", { status: 200 });
+				},
+				() => {
+					if (!gate.closed) return;
+					queueMicrotask(() => {
+						gate.closed = false;
+						resumed.resolve();
+					});
+					return resumed.promise;
+				},
+			);
+
+			await fetch("https://example.invalid/v1/messages", { method: "POST" });
+		} finally {
+			debugEnabled.mockRestore();
+			debugSession.mockRestore();
+		}
+
+		expect(sentWhileHeld).toEqual([false]);
 	});
 });

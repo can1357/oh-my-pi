@@ -13,16 +13,18 @@ type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: true };
 
 /**
  * The one fetch every inference request goes through. Per call it applies, in
- * order: the caller's dispatch hold, the inference User-Agent default,
- * `NODE_EXTRA_CA_CERTS`, the per-provider proxy, and `PI_REQ_DEBUG`
- * request/response recording — then calls `fetchImpl` (or the model's default
- * fetch) exactly once. Providers never layer transport concerns themselves.
+ * order: the inference User-Agent default, `NODE_EXTRA_CA_CERTS`, the
+ * per-provider proxy, `PI_REQ_DEBUG` request recording, then the caller's
+ * dispatch hold — and then calls `fetchImpl` (or the model's default fetch)
+ * exactly once. Providers never layer transport concerns themselves.
  *
  * `hold` is the caller's `beforeDispatch`. It belongs here because this is the
  * only place every HTTP attempt passes through: a provider's own retry loop
  * and its setup requests reach the wire through this fetch and nothing else.
- * The request's own `signal` ends the wait, so cancelling a request parked on
- * a hold no longer leaves it parked forever.
+ * It runs last, after the request-debug dump: a hold with nothing of ours
+ * after it is the whole point, and the debug session awaits the body and the
+ * filesystem. The request's own `signal` ends the wait, so cancelling a
+ * request parked on a hold no longer leaves it parked forever.
  *
  * Idempotent: the built fetch is stamped and returned as-is on later passes,
  * hold and all — `streamSimple` re-enters `stream`, and `streamSimpleRequest`
@@ -38,17 +40,18 @@ export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefin
 	const proxyUrl = getProxyForProvider(model.provider);
 
 	const fetch: TransportFetch = async (input, init) => {
-		await holdBeforeDispatch(hold, init?.signal ?? (input instanceof Request ? input.signal : undefined));
-		if ((init?.method ?? (input instanceof Request ? input.method : "GET")) === "POST") {
-			recordDispatchOrigin(model, input);
-		}
+		const method = init?.method ?? (input instanceof Request ? input.method : "GET");
 		init = withInferenceUserAgent(input, init);
 		const extraCa = resolveExtraCa();
 		if (extraCa) init = withExtraCaInit(init, extraCa);
 		if (proxyUrl) init = withProxyInit(input, init, proxyUrl);
-		if (!isRequestDebugEnabled()) return base(input, init);
-		const session = await createFetchRequestDebugSession(input, init);
-		return session.wrapResponse(await base(input, init));
+		const debug = isRequestDebugEnabled() ? await createFetchRequestDebugSession(input, init) : undefined;
+		await holdBeforeDispatch(hold, init?.signal ?? (input instanceof Request ? input.signal : undefined));
+		// Recorded for the request that is now going out, not for one a hold
+		// still gates or an abort cancelled.
+		if (method === "POST") recordDispatchOrigin(model, input);
+		const response = await base(input, init);
+		return debug ? debug.wrapResponse(response) : response;
 	};
 	if (base.preconnect) fetch.preconnect = base.preconnect;
 	fetch[TRANSPORT_FETCH] = true;
