@@ -1023,7 +1023,7 @@ mod regression {
 		/// them.
 		#[test]
 		fn one_huge_element_yields_throughout() {
-			let cases: [(String, fn(&mut Shell<DefaultShellExtensions>)); 7] = [
+			let cases: [(String, fn(&mut Shell<DefaultShellExtensions>)); 10] = [
 				// Copying the element out of the variable into a field.
 				("words=(\"$open\" ${huge[@]}\"$close\"); (( ${#words[@]} == 2 ))".to_owned(), one_huge),
 				// Concatenating it into one quoted field.
@@ -1061,6 +1061,46 @@ mod regression {
 					|shell| {
 						one_sharp(shell);
 						converting(shell, "copy", ShellVariableUpdateTransform::Uppercase);
+					},
+				),
+				// A run of case-ignorable characters next to a `Σ`. Deciding
+				// whether that one `Σ` is the final form once read the whole
+				// value from it: 358 ms with the run before, 355 ms with it
+				// after and 712 ms with runs on both sides, inside a single
+				// `convert_piece` that the 8 KiB cut could not divide. The
+				// hold is not in the conversion anyone asked for; it is in
+				// deciding what one character means.
+				(
+					"words=(\"$open\" ${huge[@]}); closed=$close; [[ ${words[1]:0:1} == 'a' ]]"
+						.to_owned(),
+					|shell| {
+						let marks = "\u{0301}".repeat(ONE_HUGE_ELEMENT_BYTES / 4);
+						one_element(shell, format!("A{marks}Σ!"));
+						converting(shell, "words", ShellVariableUpdateTransform::Lowercase);
+					},
+				),
+				(
+					"words=(\"$open\" ${huge[@]}); closed=$close; [[ ${words[1]:0:1} == 'a' ]]"
+						.to_owned(),
+					|shell| {
+						let marks = "\u{0301}".repeat(ONE_HUGE_ELEMENT_BYTES / 8);
+						one_element(shell, format!("A{marks}Σ{marks}!"));
+						converting(shell, "words", ShellVariableUpdateTransform::Lowercase);
+					},
+				),
+				// Appending to a converting variable converts the whole result,
+				// so the value already in the variable is the other operand and
+				// it was walked in one synchronous step. The value here is
+				// already in the form the attribute wants, so the 25.2 ms this
+				// held was the pass itself rather than any conversion; a `ß`
+				// that had work to do held 75.2 ms.
+				(
+					"x=$open; copy+=x; closed=$close; [[ ${copy:0:1} == 'S' ]]".to_owned(),
+					|shell| {
+						let mut variable =
+							ShellVariable::new(ShellValue::String("S".repeat(ONE_HUGE_ELEMENT_BYTES)));
+						variable.set_update_transform(ShellVariableUpdateTransform::Uppercase);
+						shell.env_mut().set_global("copy", variable).expect("converting variable");
 					},
 				),
 			];

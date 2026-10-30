@@ -253,7 +253,7 @@ impl ShellVariable {
 					return Err(error::ErrorKind::ReadonlyVariable.into());
 				}
 				let value = self.value_converter().apply_divided(value, params).await?;
-				self.place_scalar(value, append)
+				self.place_scalar_divided(value, append, params).await
 			},
 			ShellValueLiteral::Array(literal) => self.assign_array(literal, append, params).await,
 		}
@@ -280,8 +280,12 @@ impl ShellVariable {
 	}
 
 	/// Stores an already-converted scalar, conditionally appending.
+	///
+	/// Appending to a variable that converts its values runs the conversion
+	/// over the **whole** result, so this is proportional to the value that is
+	/// already there. [`Self::place_scalar_divided`] is the form with
+	/// checkpoints in it; this one is for callers with no run to cancel.
 	fn place_scalar(&mut self, value: String, append: bool) -> Result<(), error::Error> {
-
 		if !append {
 			return match &self.value {
 				// Updating an array with a string updates its "0" element.
@@ -300,19 +304,7 @@ impl ShellVariable {
 			};
 		}
 
-		match &self.value {
-			// Appending to a declared-but-unset array fills it out first.
-			ShellValue::Unset(ShellValueUnsetType::IndexedArray | ShellValueUnsetType::AssociativeArray) => {
-				self.fill_unset_with_empty_array();
-			},
-			// Appending to a declared-but-unset scalar starts from the empty
-			// string, which comes out right even when it is treated as an
-			// integer.
-			ShellValue::Unset(ShellValueUnsetType::Untyped) => {
-				self.value = ShellValue::String(self.convert_value_str_for_assignment(String::new()));
-			},
-			_ => (),
-		}
+		self.fill_unset_for_append();
 
 		let treat_as_int = self.is_treated_as_integer();
 		let update_transform = self.get_update_transform();
@@ -336,6 +328,66 @@ impl ShellVariable {
 			ShellValue::Dynamic { .. } => Ok(()),
 			ShellValue::Unset(_) => unreachable!("filled in above"),
 		}
+	}
+
+	/// Brings a declared-but-unset variable to the value an append starts
+	/// from.
+	fn fill_unset_for_append(&mut self) {
+		match &self.value {
+			// Appending to a declared-but-unset array fills it out first.
+			ShellValue::Unset(ShellValueUnsetType::IndexedArray | ShellValueUnsetType::AssociativeArray) => {
+				self.fill_unset_with_empty_array();
+			},
+			// Appending to a declared-but-unset scalar starts from the empty
+			// string, which comes out right even when it is treated as an
+			// integer.
+			ShellValue::Unset(ShellValueUnsetType::Untyped) => {
+				self.value = ShellValue::String(self.convert_value_str_for_assignment(String::new()));
+			},
+			_ => (),
+		}
+	}
+
+	/// [`Self::place_scalar`] with the conversion of the existing value
+	/// divided.
+	///
+	/// **Both operands of a compound assignment are proportional to their
+	/// size, and dividing one of them is not enough.** `copy+=x` on a
+	/// converting variable concatenates and then converts the *whole* result,
+	/// so a 64 MiB value already in the variable was walked in one
+	/// synchronous step: 25.2 ms outside the allocator with that value
+	/// already in the form the attribute wants — the pass itself, with
+	/// nothing to convert — and 75.2 ms when it had work to do.
+	///
+	/// A variable that converts nothing keeps the in-place append, which
+	/// copies no more than the incoming value.
+	///
+	/// # Errors
+	///
+	/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+	/// way, **leaving the variable as it was**: the new value is built beside
+	/// the old one rather than in it.
+	async fn place_scalar_divided(
+		&mut self,
+		value: String,
+		append: bool,
+		params: &ExecutionParameters,
+	) -> Result<(), error::Error> {
+		if !append || self.is_treated_as_integer() || self.value_converter().is_identity() {
+			return self.place_scalar(value, append);
+		}
+
+		self.fill_unset_for_append();
+		let converter = self.value_converter();
+		let ShellValue::String(base) = &self.value else {
+			return self.place_scalar(value, append);
+		};
+
+		let mut combined = String::with_capacity(base.len() + value.len());
+		interp::push_str_in_strides(params, &mut combined, base).await?;
+		interp::push_str_in_strides(params, &mut combined, &value).await?;
+		self.value = ShellValue::String(converter.apply_divided(combined, params).await?);
+		Ok(())
 	}
 
 	/// Assign the given array literal to the variable, conditionally appending
@@ -576,10 +628,11 @@ impl ValueConverter {
 	/// not a way to make this exact** — an earlier version extended a piece
 	/// until it did not end in `Σ`, which lost the preceding context in one
 	/// direction, missed the following context in the other, and turned an
-	/// all-sigma string into one piece of 1.03 s at 64 MiB. Each `Σ` instead
-	/// asks the whole original string about its neighbours, which is a
-	/// constant-time question for ordinary text and the only thing in a
-	/// lowercase conversion that depends on anything outside one character.
+	/// all-sigma string into one piece of 1.03 s at 64 MiB. **Nor is asking
+	/// the whole string at each `Σ`**, which was exact and unbounded: see
+	/// [`ConversionState`], which carries the question across pieces so that
+	/// the loop reading the characters is the one that spends the
+	/// checkpoints.
 	///
 	/// # Errors
 	///
@@ -603,13 +656,15 @@ impl ValueConverter {
 		}
 
 		let mut converted = String::with_capacity(value.len());
+		let mut state = ConversionState::new();
 		let mut cut = 0;
 		while cut < value.len() {
 			interp::stride_checkpoint(params).await?;
 			let end = Self::stride_end(&value, cut);
-			Self::convert_piece(&value, cut..end, self.update_transform, &mut converted);
+			Self::convert_piece(&value, cut..end, self.update_transform, &mut converted, &mut state);
 			cut = end;
 		}
+		state.finish(&mut converted);
 
 		Ok(converted)
 	}
@@ -624,8 +679,8 @@ impl ValueConverter {
 		end
 	}
 
-	/// Converts `text[piece]` onto `converted`, reading `text` for the context
-	/// a character needs.
+	/// Converts `text[piece]` onto `converted`, carrying in `state` the only
+	/// thing a character needs from outside itself.
 	///
 	/// `Capitalize` applies only at the very start of the value; everywhere
 	/// else it lowercases, which is what capitalising the whole string does.
@@ -634,6 +689,7 @@ impl ValueConverter {
 		piece: std::ops::Range<usize>,
 		update_transform: ShellVariableUpdateTransform,
 		converted: &mut String,
+		state: &mut ConversionState,
 	) {
 		let lowercases = matches!(
 			update_transform,
@@ -643,22 +699,41 @@ impl ValueConverter {
 
 		for (offset, character) in text[piece.clone()].char_indices() {
 			let at = piece.start + offset;
+			if !lowercases {
+				converted.extend(character.to_uppercase());
+				continue;
+			}
+
+			// `Σ` is cased; asking the oracle would answer that by probing
+			// `"ΣΣ"`, and the answer is not in doubt.
+			let role = if character == 'Σ' { CaseRole::Cased } else { case_role(character) };
+			state.note(role, converted);
+
 			if capitalizes && at == 0 {
 				// Capitalising is lowercasing and then uppercasing the first
 				// character of *that*, which is not the same as uppercasing the
 				// original: `İ` lowercases to `i` and a combining dot, and only
-				// the `i` is raised again.
+				// the `i` is raised again. A `Σ` here has nothing cased before
+				// it, so it is never the final form.
 				let mut lowered = character.to_lowercase();
 				if let Some(first) = lowered.next() {
 					converted.extend(first.to_uppercase());
 				}
 				converted.extend(lowered);
-			} else if !lowercases {
-				converted.extend(character.to_uppercase());
-			} else if character == 'Σ' && final_sigma(text, at) {
-				converted.push('ς');
+			} else if character == 'Σ' {
+				let written = converted.len();
+				converted.push('σ');
+				if state.preceding_cased {
+					state.undecided_sigma = Some(written);
+				}
 			} else {
 				converted.extend(character.to_lowercase());
+			}
+
+			match role {
+				CaseRole::Ignorable => (),
+				CaseRole::Cased => state.preceding_cased = true,
+				CaseRole::Neither => state.preceding_cased = false,
 			}
 		}
 	}
@@ -689,34 +764,84 @@ impl ValueConverter {
 	}
 }
 
-/// Whether the `Σ` beginning at byte `at` of `text` lowercases to the final
-/// form `ς` rather than `σ`.
+/// What a divided conversion carries from one piece to the next.
 ///
-/// Unicode's `Final_Sigma`: a cased character comes before it and none comes
-/// after, skipping case-ignorable characters on both sides. It is the only
-/// rule in a lowercase conversion that depends on anything outside the one
-/// character being converted, which is why a conversion can otherwise be cut
-/// anywhere — and why cutting *around* this rule, as an earlier version did,
-/// cannot be made to work: it needs both sides, and a run of case-ignorable
-/// characters makes either side arbitrarily far away.
-fn final_sigma(text: &str, at: usize) -> bool {
-	let before = scan_for_cased(text[..at].chars().rev());
-	let after = scan_for_cased(text[at + 'Σ'.len_utf8()..].chars());
-	before && !after
+/// `Final_Sigma` is the only rule in a lowercase conversion that depends on
+/// anything outside the character being converted: a `Σ` is written `ς` when
+/// a cased character comes before it and none comes after, skipping
+/// case-ignorable characters on both sides.
+///
+/// An earlier version answered that by asking the whole original string at
+/// each `Σ`. It was exact, and it was unbounded: a case-ignorable run can be
+/// as long as the value, so one `convert_piece` could scan 32 MiB of
+/// combining marks with no checkpoint in it — **358 ms** on one side,
+/// **712 ms** on both, and already 5.6–11.6 ms at 1 MiB, against a 4 ms
+/// bound. Dividing the pieces bounded the pieces and not the scan.
+///
+/// This carries the scan instead of restarting it, so the conversion reads
+/// each character once and the loop that reads them is the one that already
+/// spends checkpoints:
+///
+/// - the backward question is answered by remembering what the last
+///   character that was not case-ignorable was;
+/// - the forward question is answered by **writing `σ` and coming back**.
+///   At most one `Σ` is ever undecided, because a second one would itself be
+///   the cased character that decides the first.
+///
+/// **Do not reach for a checkpoint here.** Everywhere else in this change the
+/// answer to a long step is to divide it and yield; this is the one place
+/// where the work should not exist. Checkpointing the scan would mean making
+/// it resumable across pieces, since the run it walks can be longer than one
+/// — which is this state machine, reached the long way round and with a
+/// suspended scan to carry as well as the answer.
+///
+/// It would not be quadratic, and an earlier version of this comment said it
+/// would: a `Σ` is itself cased, so it stops the scan of the `Σ` next to it,
+/// and a value of alternating sigmas and runs walks each run at most twice.
+/// The scan was linear in total and unbounded in one step, which is a
+/// different complaint and the one that mattered.
+struct ConversionState {
+	/// Whether the last character that was not case-ignorable was cased.
+	preceding_cased:  bool,
+	/// Where a `σ` was written that becomes `ς` unless a cased character
+	/// follows it.
+	undecided_sigma:  Option<usize>,
 }
 
-/// Walks until a character that is not case-ignorable, and reports whether
-/// that character is cased. Runs out of characters means not cased.
-fn scan_for_cased(characters: impl Iterator<Item = char>) -> bool {
-	for character in characters {
-		match case_role(character) {
+impl ConversionState {
+	const fn new() -> Self {
+		Self { preceding_cased: false, undecided_sigma: None }
+	}
+
+	/// Settles an undecided `Σ` as the final form, nothing cased having
+	/// followed it.
+	fn settle_as_final(&mut self, converted: &mut String) {
+		let Some(at) = self.undecided_sigma.take() else {
+			return;
+		};
+		debug_assert_eq!(&converted[at..at + 'σ'.len_utf8()], "σ");
+		// SAFETY: `at` is where a `σ` was pushed, so these are its two bytes,
+		// `CF 83`. `ς` is `CF 82`: the same length, and writing it over them
+		// leaves the string valid UTF-8.
+		unsafe { converted.as_mut_vec()[at + 1] = 0x82 };
+	}
+
+	/// Takes the role of the next character, before it is written.
+	fn note(&mut self, role: CaseRole, converted: &mut String) {
+		match role {
+			// Nothing about the scan changes, in either direction.
 			CaseRole::Ignorable => (),
-			CaseRole::Cased => return true,
-			CaseRole::Neither => return false,
+			// A cased character after an undecided `Σ` settles it as `σ`,
+			// which is what is already written.
+			CaseRole::Cased => self.undecided_sigma = None,
+			CaseRole::Neither => self.settle_as_final(converted),
 		}
 	}
 
-	false
+	/// The value has ended, so nothing cased follows an undecided `Σ`.
+	fn finish(&mut self, converted: &mut String) {
+		self.settle_as_final(converted);
+	}
 }
 
 /// What a character does to the scan either side of a `Σ`.
@@ -1452,7 +1577,7 @@ mod conversion {
 	/// lowercases to `ς` only when a cased character precedes it and none
 	/// follows, skipping case-ignorable ones — an apostrophe, a combining
 	/// mark, a zero-width joiner — on both sides.
-	const CONTEXTS: [&str; 11] = [
+	const CONTEXTS: [&str; 17] = [
 		"Σ",
 		"Σ!",
 		"ΣA",
@@ -1464,17 +1589,34 @@ mod conversion {
 		"ΣΣ",
 		"ΣßΣ",
 		"İΣ",
+		// Runs of case-ignorable characters on either side, which is what
+		// the carried state replaced an unbounded scan with: long enough to
+		// cross a stride boundary on their own.
+		"A\u{0301}\u{0301}\u{0301}Σ",
+		"AΣ\u{0301}\u{0301}\u{0301}",
+		"AΣ\u{0301}\u{0301}\u{0301}A",
+		"A\u{0301}\u{0301}Σ\u{0301}\u{0301}",
+		"A\u{0301}\u{0301}Σ\u{0301}\u{0301}A",
+		"\u{0301}Σ",
 	];
 
 	/// Divides a conversion the way an assignment does, without a runtime.
 	fn divided(converter: ValueConverter, value: &str) -> String {
 		let mut converted = String::new();
+		let mut state = ConversionState::new();
 		let mut cut = 0;
 		while cut < value.len() {
 			let end = ValueConverter::stride_end(value, cut);
-			ValueConverter::convert_piece(value, cut..end, converter.update_transform, &mut converted);
+			ValueConverter::convert_piece(
+				value,
+				cut..end,
+				converter.update_transform,
+				&mut converted,
+				&mut state,
+			);
 			cut = end;
 		}
+		state.finish(&mut converted);
 
 		converted
 	}
@@ -1524,5 +1666,30 @@ mod conversion {
 		assert_eq!(converter.apply(String::from("ßeta")), "SSeta");
 		assert_eq!(converter.apply(String::from("über")), "Über");
 		assert_eq!(converter.apply(String::new()), "");
+	}
+
+	/// The slot an undecided `Σ` is written into is an offset into the
+	/// **output**, which is not the offset of the `Σ` in the input: `İ`
+	/// lowercases to two characters, `ß` uppercases to two, and a conversion
+	/// that patched by input offset would overwrite the wrong bytes — or a
+	/// character boundary — once either had been seen.
+	#[test]
+	fn an_undecided_sigma_is_patched_by_output_offset() {
+		for transform in TRANSFORMS {
+			let converter = ValueConverter { treat_as_int: false, update_transform: transform };
+			// Characters whose conversion is longer than they are, before a
+			// `Σ` that is undecided until the `!` after it, at offsets that
+			// put the expansion and the `Σ` in different pieces.
+			for growing in ["İ", "ß", "İß"] {
+				for filler in [0, 1, CONVERSION_STRIDE_BYTES - 1, CONVERSION_STRIDE_BYTES + 1] {
+					let value = format!("{growing}{}AΣ!", "a".repeat(filler));
+					assert_eq!(
+						divided(converter, &value),
+						converter.apply(value.clone()),
+						"{transform:?} of {growing:?} with {filler} fillers"
+					);
+				}
+			}
+		}
 	}
 }
