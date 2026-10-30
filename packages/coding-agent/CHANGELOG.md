@@ -9,6 +9,7 @@
 ### Fixed
 
 - Startup prewalk now arms a later fallback candidate of the role named by prewalk.into when its first candidate is unavailable, matching /prewalk and /new ([#17373](https://github.com/can1357/oh-my-pi/pull/17373)).
+- A long session on a full disk no longer rebuilds its whole transcript in memory to rewrite the file: lines the disk refused wait and are appended in order once there is room, and a whole-file rewrite the volume cannot hold is refused before it is built. ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
 
 ## [18.14.0] - 2026-10-29
 

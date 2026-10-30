@@ -1014,6 +1014,10 @@ export class FileSessionStorage implements SessionStorage {
 	}
 
 	async updateSessionTitle(fpath: string, update: SessionTitleUpdate): Promise<void> {
+		this.updateSessionTitleSync(fpath, update);
+	}
+
+	updateSessionTitleSync(fpath: string, update: SessionTitleUpdate): void {
 		const fd = fs.openSync(fpath, "r+");
 		try {
 			const buf = Buffer.from(serializeTitleSlot(update), "utf-8");
