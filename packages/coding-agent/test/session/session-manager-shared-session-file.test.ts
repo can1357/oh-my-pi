@@ -736,7 +736,7 @@ describe("SessionManager on a session file another omp process writes", () => {
 		expect(fs.readFileSync(path.join(artifacts, "1.bash.log"), "utf8")).toBe("someone else's artifact");
 	}, 30_000);
 
-	it("refuses, and takes its copy back, when the file is taken over while the artifacts are copied", async () => {
+	it("inherits nothing, and says so, when the file is taken over while the artifacts are copied", async () => {
 		using tempDir = TempDir.createSync("@omp-shared-session-file-");
 		const requested = await createSession(tempDir);
 		const requestedId = await readSessionHeaderId(requested);
@@ -752,8 +752,9 @@ describe("SessionManager on a session file another omp process writes", () => {
 		const manager = await SessionManager.open(requested, tempDir.path(), new FileSessionStorage(), {
 			suppressBreadcrumb: true,
 		});
-		const before = sessionFilesIn(tempDir.path());
 		// The journal is taken over while the copy of its artifacts is running.
+		// The copy is already under way by then, so the resume cannot be refused
+		// any more: what it must not do is keep the files.
 		const realpath = fs.promises.realpath;
 		// `realpath` is overloaded on its encoding option; this stands in for the
 		// one call shape the copy uses.
@@ -765,19 +766,24 @@ describe("SessionManager on a session file another omp process writes", () => {
 			return realpath(target);
 		}) as typeof fs.promises.realpath;
 		const spy = spyOn(fs.promises, "realpath").mockImplementation(raceOnRealpath);
+		let resumed: SessionManager;
 		try {
-			await expect(adoptResumedSession(manager, tempDir.path())).rejects.toThrow(SessionSourceReplacedError);
+			resumed = await adoptResumedSession(manager, tempDir.path());
 		} finally {
 			spy.mockRestore();
 		}
-
-		await manager.close();
-		// No fork, and nothing of the replacement's reached one.
-		expect(sessionFilesIn(tempDir.path()).filter(file => !before.includes(file))).toEqual([]);
-		for (const file of sessionFilesIn(tempDir.path())) {
-			if (file === requested) continue;
-			expect(fs.existsSync(file.slice(0, -".jsonl".length))).toBe(false);
-		}
+		const fork = resumed.getSessionFile();
+		if (!fork) throw new Error("Expected the resumed session to have a file");
+		expect(await resumed.artifactsReproduced()).toBe(false);
+		// Nothing of the replacement's is in the fork, and the transcript says
+		// the artifacts are missing rather than leaving the agent to find out.
+		expect(fs.existsSync(path.join(fork.slice(0, -".jsonl".length), "1.bash.log"))).toBe(false);
+		expect(lastSessionTransfer(resumed.getEntries())).toEqual({
+			kind: "artifacts-missing",
+			source: requested,
+			sessionId: requestedId,
+		});
+		await resumed.close();
 	}, 30_000);
 
 	it("refuses a departed copy whose file another session took over, instead of resuming that one", async () => {
@@ -1026,6 +1032,37 @@ describe("SessionManager on a session file another omp process writes", () => {
 		const { other, opened } = await OtherProcess.adopt(sourceDir, sourceFile);
 		try {
 			expect(opened.sessionId).not.toBe(sourceId);
+		} finally {
+			await other.close();
+		}
+	}, 30_000);
+
+	it("holds no ownership of a session a switch failed before it even started", async () => {
+		using sourceDir = TempDir.createSync("@omp-switch-prepare-source-");
+		using targetDir = TempDir.createSync("@omp-switch-prepare-target-");
+		await using live = await liveSession(sourceDir, "source");
+		const { sessionManager, session, sessionFile: sourceFile, sessionId: sourceId } = live;
+		const target = await createSession(targetDir, "target");
+
+		// A failure while the switch is still preparing, before the transaction
+		// that commits or rolls it back begins.
+		const prepare = spyOn(sessionManager, "getTaskSiblingCandidate").mockImplementation(() => {
+			throw new Error("switch preparation failed");
+		});
+		try {
+			await expect(session.switchSession(target)).rejects.toThrow("switch preparation failed");
+		} finally {
+			prepare.mockRestore();
+		}
+
+		// Nothing of that attempt is left holding the source: once the session
+		// switches away for real, the next process that resumes the source gets
+		// it, rather than finding it reserved for the rest of this one's life.
+		expect(await session.switchSession(target, { onCwdChange: async () => true })).toBe(true);
+		const { other, opened } = await OtherProcess.adopt(sourceDir, sourceFile);
+		try {
+			expect(opened.sessionId).toBe(sourceId);
+			expect(opened.sessionFile).toBe(sourceFile);
 		} finally {
 			await other.close();
 		}

@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -348,6 +348,57 @@ describe("ACP lazy startup", () => {
 
 		// The process is still alive — an embedder's would be too — and must not
 		// be holding a session it never ran.
+		const lease = tryAcquireSessionLease(sessionId);
+		expect(lease).not.toBeNull();
+		lease?.release();
+	});
+
+	it("hands back the ownership of a resumed session when entering its project fails", async () => {
+		const { runRootCommand } = await import("@oh-my-pi/pi-coding-agent/main");
+		using resumeDir = TempDir.createSync("@omp-startup-rescope-ownership-");
+		const creator = SessionManager.create(resumeDir.path(), resumeDir.path());
+		creator.appendMessage({ role: "user", content: "saved conversation", timestamp: Date.now() });
+		await creator.ensureOnDisk();
+		await creator.flush();
+		const sessionFile = creator.getSessionFile();
+		const sessionId = creator.getSessionId();
+		if (!sessionFile) throw new Error("Expected a session file");
+		await creator.close();
+
+		// Rescoping settings into the resumed project fails, and so does the
+		// rollback: this is the earliest failure after the resume took the
+		// session, before extensions or any session are built.
+		const settings = Settings.isolated();
+		const reloadForCwd = spyOn(settings, "reloadForCwd").mockImplementation(() => {
+			throw new Error("settings reload failed");
+		});
+		const launchCwd = process.cwd();
+		try {
+			await expect(
+				runRootCommand(
+					{
+						mode: "rpc",
+						messages: [],
+						fileArgs: [],
+						unknownFlags: new Map(),
+						unrecognizedFlags: [],
+						invalidFlagValues: [],
+						noSkills: true,
+						noRules: true,
+						noTools: true,
+						noLsp: true,
+						resume: sessionFile,
+						sessionDir: resumeDir.path(),
+					},
+					[],
+					{ discoverAuthStorage: async () => startupAuthStorage, settings },
+				),
+			).rejects.toThrow();
+		} finally {
+			reloadForCwd.mockRestore();
+			process.chdir(launchCwd);
+		}
+
 		const lease = tryAcquireSessionLease(sessionId);
 		expect(lease).not.toBeNull();
 		lease?.release();

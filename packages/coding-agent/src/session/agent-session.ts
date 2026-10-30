@@ -13025,7 +13025,6 @@ export class AgentSession implements SettingsScope {
 		await this.#bash.flushPending();
 		// Flush pending writes before switching so restore snapshots reflect committed state.
 		await this.sessionManager.flush();
-		const previousSessionState = this.sessionManager.captureState();
 		const bashTransition = this.#bash.beginSessionTransition();
 		// Only same-session reloads compare against the prior context to detect
 		// rollback edits (`#didSessionMessagesChange` below). Building it for a
@@ -13087,6 +13086,12 @@ export class AgentSession implements SettingsScope {
 		this.#usagePreflightReadyForNextModelCall = false;
 		this.#usagePreflightReadyModel = undefined;
 
+		// Last before the try, and it must stay there: this takes a counted
+		// holder on the session being left, and only the commit at the end of
+		// the try or the rollback in its catch ends that holder. Anything that
+		// throws above runs outside both, and would leave the session reserved
+		// for a process that is no longer in it.
+		const previousSessionState = this.sessionManager.captureState();
 		let cwdChangeTarget: string | undefined;
 		try {
 			if (switchingToDifferentSession) {

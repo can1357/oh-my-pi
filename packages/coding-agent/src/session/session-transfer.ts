@@ -36,6 +36,7 @@ import {
 	readArchiveEntries,
 	writeArchive,
 } from "@oh-my-pi/pi-utils/ar";
+import resumeArtifactsMissingTemplate from "../prompts/session/resume-artifacts-missing.md" with { type: "text" };
 import resumeOwnedElsewhereTemplate from "../prompts/session/resume-owned-elsewhere.md" with { type: "text" };
 import transferArrivedTemplate from "../prompts/session/transfer-arrived.md" with { type: "text" };
 import transferDepartedTemplate from "../prompts/session/transfer-departed.md" with { type: "text" };
@@ -72,13 +73,17 @@ export interface SessionArchiveManifest {
  * - `departed` — this copy was handed to `to` and is stale from here on;
  * - `forked` — a stale copy (`source`) was resumed, so it continued as a fork;
  * - `owned-elsewhere` — `source` was resumed while another live omp process
- *   owned session `sessionId`, so this conversation continued as a fork of it.
+ *   owned session `sessionId`, so this conversation continued as a fork of it;
+ * - `artifacts-missing` — the fork of session `sessionId` could not keep that
+ *   session's artifacts, because `source` stopped holding it while they were
+ *   being copied, so they were taken back rather than inherited.
  */
 export type SessionTransferDetails =
 	| { kind: "arrived"; fromCwd: string; cwd: string }
 	| { kind: "departed"; to: string }
 	| { kind: "forked"; source: string; to: string }
-	| { kind: "owned-elsewhere"; source: string; sessionId: string };
+	| { kind: "owned-elsewhere"; source: string; sessionId: string }
+	| { kind: "artifacts-missing"; source: string; sessionId: string };
 
 /** User-facing failure of a pack, unpack, or move marker: missing input, bad archive, live owner. */
 export class SessionTransferError extends Error {
@@ -158,6 +163,10 @@ export function sessionTransferDetails(entry: FileEntry): SessionTransferDetails
 			return typeof details.source === "string" && typeof details.sessionId === "string"
 				? { kind: "owned-elsewhere", source: details.source, sessionId: details.sessionId }
 				: undefined;
+		case "artifacts-missing":
+			return typeof details.source === "string" && typeof details.sessionId === "string"
+				? { kind: "artifacts-missing", source: details.source, sessionId: details.sessionId }
+				: undefined;
 		default:
 			return undefined;
 	}
@@ -183,6 +192,10 @@ function renderTransferNotice(details: SessionTransferDetails): string {
 		case "owned-elsewhere":
 			return prompt
 				.render(resumeOwnedElsewhereTemplate, { source: details.source, sessionId: details.sessionId })
+				.trim();
+		case "artifacts-missing":
+			return prompt
+				.render(resumeArtifactsMissingTemplate, { source: details.source, sessionId: details.sessionId })
 				.trim();
 	}
 }
@@ -719,6 +732,15 @@ function resumeForkNotice(forkedFrom: ResumedSessionFork, movedTo: string | unde
  * {@link SessionSourceReplacedError} rather than continuing somebody else's
  * conversation, or its files, under this one's name.
  *
+ * The fork's artifacts are copied in the background, so a resume is never held
+ * up by a large artifacts directory. That copy cannot refuse the resume any
+ * more — it is already running — but it still takes itself back when its
+ * source stops holding the session it was copied for, and
+ * {@link noteArtifactsNotReproduced} says so in the transcript rather than
+ * leaving a conversation whose `artifact://` references quietly resolve to
+ * nothing. Discarding and refusing are not the same guarantee, and this is the
+ * weaker one.
+ *
  * The fork lands in `sessionDir`, default: beside the file it came from.
  */
 export async function adoptResumedSession(manager: SessionManager, sessionDir?: string): Promise<SessionManager> {
@@ -732,7 +754,30 @@ export async function adoptResumedSession(manager: SessionManager, sessionDir?: 
 		manager,
 		resumeForkNotice(forkedFrom, marker?.kind === "departed" ? marker.to : undefined),
 	);
+	void noteArtifactsNotReproduced(manager, forkedFrom);
 	return manager;
+}
+
+/**
+ * Once the fork's artifact copy has finished, tell the agent when it came back
+ * empty because the source stopped being the session it was copied for.
+ * Nothing is appended when the artifacts arrived, which is every ordinary
+ * resume.
+ */
+async function noteArtifactsNotReproduced(manager: SessionManager, forkedFrom: ResumedSessionFork): Promise<void> {
+	try {
+		if (await manager.artifactsReproduced()) return;
+		await appendTransferNotice(manager, {
+			kind: "artifacts-missing",
+			source: forkedFrom.sessionFile,
+			sessionId: forkedFrom.sessionId,
+		});
+	} catch (error) {
+		logger.warn("Failed to record that a fork's artifacts were not reproduced", {
+			sessionId: forkedFrom.sessionId,
+			error: String(error),
+		});
+	}
 }
 
 /**

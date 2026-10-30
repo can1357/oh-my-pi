@@ -1851,10 +1851,14 @@ export async function runRootCommand(
 	startStartupWatchdog();
 	// The session a resume adopted, and its ownership claim, until a live
 	// AgentSession takes it over. Startup can fail anywhere after the resume —
-	// a trusted extension that will not load, a session that cannot be built —
+	// rescoping settings into the resumed project, re-resolving models, a
+	// trusted extension that will not load, a session that cannot be built —
 	// and an embedder that keeps the process after this rejects would otherwise
-	// keep that session reserved for a process that is not using it.
-	let resumedSessionManager: SessionManager | undefined;
+	// keep that session reserved for a process that is not using it. Declared
+	// out here so every assignment is covered the moment it happens, rather
+	// than at some later line a throw can get in front of.
+	let sessionManager: SessionManager | undefined;
+	let sessionManagerHandedOver = false;
 	try {
 		// Non-prepaint commands still need a default theme; an existing Composer
 		// already initialized its cached theme synchronously for the first frame.
@@ -2142,7 +2146,6 @@ export async function runRootCommand(
 			parsedArgs.restore ||
 			isForeignSessionImport(parsedArgs),
 		);
-		let sessionManager: SessionManager | undefined;
 		let foreignSource: ForeignSessionSource | undefined;
 		// A resumed session whose conversation went on in another file resumes that file; say so.
 		const resumedContinuations: SessionContinuation[] = [];
@@ -2337,10 +2340,6 @@ export async function runRootCommand(
 			}
 		}
 
-		// From here on this manager — and the session ownership its resume took —
-		// belongs to startup until a live session takes it over.
-		resumedSessionManager = sessionManager;
-
 		for (const continuation of resumedContinuations) {
 			const notice = formatSessionContinuationNotice(continuation);
 			if (isInteractive) notifs.push({ kind: "warn", message: notice });
@@ -2448,7 +2447,7 @@ export async function runRootCommand(
 			const result = await logger.time("createAgentSession", createAgentSessionImpl, options);
 			// The session owns the manager it was handed, including closing it, so
 			// startup stops answering for it.
-			if (options.sessionManager === resumedSessionManager) resumedSessionManager = undefined;
+			if (options.sessionManager === sessionManager) sessionManagerHandedOver = true;
 			// Kick off background model discovery only after createAgentSession finishes its parallel
 			// discovery arms; running these concurrently contends for the event loop and stretches
 			// every parallel arm by ~30ms. Interactive startup defers it further, behind the first
@@ -2489,7 +2488,6 @@ export async function runRootCommand(
 			if (sessionManager) {
 				await sessionManager.close();
 				sessionManager = undefined;
-				resumedSessionManager = undefined;
 			}
 			// Branch-only protocol runner: keep ACP server code out of normal interactive startup.
 			const runAcpMode = deps.runAcpMode ?? (await import("./modes/acp/acp-mode")).runAcpMode;
@@ -2663,7 +2661,6 @@ export async function runRootCommand(
 				}
 				await sessionManager.close();
 				sessionManager = undefined;
-				resumedSessionManager = undefined;
 				parsedArgs.continue = false;
 				// The failed SDK attempt consumed this queue; the fresh attempt clears
 				// source registrations again before applying it.
@@ -2944,9 +2941,9 @@ export async function runRootCommand(
 		// Nothing will ever own the session this resume adopted, so its
 		// ownership goes back here: a host that keeps the process alive after
 		// this rejects must not hold a session it is not running.
-		if (resumedSessionManager) {
-			const abandoned = resumedSessionManager;
-			resumedSessionManager = undefined;
+		if (sessionManager && !sessionManagerHandedOver) {
+			const abandoned = sessionManager;
+			sessionManager = undefined;
 			try {
 				await abandoned.close();
 			} catch (closeError) {
