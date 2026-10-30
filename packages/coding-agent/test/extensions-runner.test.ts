@@ -2808,11 +2808,11 @@ describe("ExtensionRunner", () => {
 				{ type: "tool_approval_resolved", approved: true },
 			]);
 			// The select is this host's approval dialog, so the call declares the
-			// wait it opens as a permission one.
+			// wait it opens as a permission one, and which call it belongs to.
 			expect(select).toHaveBeenCalledWith(
 				expect.stringContaining("Allow tool: dangerous_tool"),
 				["Approve", "Approve dangerous_tool for this session", "Deny"],
-				{ waitKind: "permission" },
+				{ waitKind: "permission", toolCallId: expect.any(String) },
 			);
 			delete globalState.__approvalEvents;
 		});
@@ -2849,7 +2849,10 @@ describe("ExtensionRunner", () => {
 			const critical = { ...approvalTool, approval: () => ({ tier: "exec" as const, override: true }) };
 			select.mockImplementationOnce(async () => "Approve");
 			await run(critical, "call-critical");
-			expect(select).toHaveBeenLastCalledWith(expect.any(String), ["Approve", "Deny"], { waitKind: "permission" });
+			expect(select).toHaveBeenLastCalledWith(expect.any(String), ["Approve", "Deny"], {
+				waitKind: "permission",
+				toolCallId: "call-critical",
+			});
 			// A new session starts without the grant.
 			await sessionManager.newSession();
 			await run(approvalTool, "call-new-session");

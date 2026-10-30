@@ -934,6 +934,12 @@ own, so its time stays the agent's. While a wait is open its frame is the whole 
 a dialog that gives no words of its own is reported under a generic label rather than under some
 other operation's.
 
+A dialog raised for a tool call names it: `ctx.ui` inside a tool call declares that call by itself,
+and `ExtensionUIDialogOptions.toolCallId` declares one explicitly. The frame the session publishes
+carries every waiting call in `toolCalls`, so a surface watching one call sees its own dialog settle
+— which is not the moment the last dialog settles, and not something another dialog's words can be
+read to mean. A dialog raised outside any call names none and owns none.
+
 ### Interactive mode (`extension-ui-controller.ts`)
 
 Supported:

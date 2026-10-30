@@ -33,6 +33,10 @@ declare module "@oh-my-pi/pi-agent-core" {
 
 export class ToolContextStore {
 	#uiContext: ExtensionUIContext | undefined;
+	/** The host's own `ui`, before tracking: a per-call wrapper is built from this. */
+	#rawUiContext: ExtensionUIContext | undefined;
+	/** The last per-call wrapper handed out, so repeated calls for one tool call share it. */
+	#callUiContext: { toolCallId: string; ui: ExtensionUIContext } | undefined;
 	#hasUI = false;
 	#toolNames: string[] = [];
 
@@ -45,7 +49,7 @@ export class ToolContextStore {
 	getContext(toolCall?: ToolCallContext): AgentToolContext {
 		return {
 			...this.getBaseContext(),
-			ui: this.#uiContext,
+			ui: this.#uiFor(toolCall),
 			hasUI: this.#hasUI,
 			toolNames: this.#toolNames,
 			toolCall,
@@ -55,7 +59,25 @@ export class ToolContextStore {
 		};
 	}
 
+	/**
+	 * The `ui` this call gets: dialogs it raises name the call, so the wait each one opens says
+	 * whose it is and a surface tracking that call learns when its own dialog settles rather than
+	 * when the last unrelated one does. A context built for no particular call keeps the shared
+	 * wrapper, which names none.
+	 */
+	#uiFor(toolCall?: ToolCallContext): ExtensionUIContext | undefined {
+		const raw = this.#rawUiContext;
+		const toolCallId = toolCall?.toolCalls[toolCall.index]?.id;
+		if (!raw || !this.trackUserWait || toolCallId === undefined) return this.#uiContext;
+		if (this.#callUiContext?.toolCallId !== toolCallId) {
+			this.#callUiContext = { toolCallId, ui: trackUserWaits(raw, this.trackUserWait, toolCallId) };
+		}
+		return this.#callUiContext.ui;
+	}
+
 	setUIContext(uiContext: ExtensionUIContext, hasUI: boolean): void {
+		this.#rawUiContext = uiContext;
+		this.#callUiContext = undefined;
 		this.#uiContext = this.trackUserWait ? trackUserWaits(uiContext, this.trackUserWait) : uiContext;
 		this.#hasUI = hasUI;
 	}

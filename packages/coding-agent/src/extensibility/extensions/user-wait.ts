@@ -38,6 +38,19 @@ function declaredKind(args: readonly unknown[]): BlockedKind | undefined {
 	return undefined;
 }
 
+/**
+ * The tool call the caller declared on the dialog's options
+ * ({@link ExtensionUIDialogOptions.toolCallId}), so the wait this dialog opens says which call it
+ * belongs to and a surface tracking that call learns when its own wait ends. A dialog raised
+ * outside any call declares nothing and owns nothing.
+ */
+function declaredToolCallId(args: readonly unknown[]): string | undefined {
+	for (const arg of args) {
+		if (isRecord(arg) && typeof arg.toolCallId === "string" && arg.toolCallId.length > 0) return arg.toolCallId;
+	}
+	return undefined;
+}
+
 type Method = (...args: unknown[]) => unknown;
 
 /**
@@ -51,17 +64,24 @@ type Method = (...args: unknown[]) => unknown;
  * call declares otherwise through {@link declaredKind} — an approval a host without an approval
  * dialog raises as a `select` is one such: `askDialog` carries its questions, and the dialogs whose
  * first argument is their title carry that. A dialog that fits none of these (a custom component)
- * keeps the generic label.
+ * keeps the generic label. Every frame carries the call the dialog was raised for, when the caller
+ * declared one.
  */
-function describeDialog(method: string, args: readonly unknown[]): UserWaitFrame {
+function describeDialog(method: string, args: readonly unknown[], ownerToolCallId?: string): UserWaitFrame {
 	const generic = genericDialogLabel(method);
 	const declared = declaredKind(args);
+	const toolCallId = declaredToolCallId(args) ?? ownerToolCallId;
+	const call = toolCallId === undefined ? {} : { toolCallId };
 	if (method === "approve") {
 		const prompt = args[0];
 		const compact = isRecord(prompt) ? prompt.compact : undefined;
 		const full = isRecord(prompt) ? prompt.full : undefined;
 		const text = typeof compact === "string" && compact.length > 0 ? compact : full;
-		return { prompt: typeof text === "string" && text.length > 0 ? text : generic, kind: "permission" };
+		return {
+			prompt: typeof text === "string" && text.length > 0 ? text : generic,
+			kind: "permission",
+			...call,
+		};
 	}
 	if (method === "askDialog") {
 		const questions = Array.isArray(args[0]) ? args[0] : [];
@@ -69,12 +89,13 @@ function describeDialog(method: string, args: readonly unknown[]): UserWaitFrame
 			.map(question => (isRecord(question) && typeof question.question === "string" ? question.question : ""))
 			.filter(question => question.length > 0)
 			.join(" ");
-		return { prompt: asked.length > 0 ? asked : generic, kind: declared ?? "question" };
+		return { prompt: asked.length > 0 ? asked : generic, kind: declared ?? "question", ...call };
 	}
 	const title = args[0];
 	return {
 		prompt: typeof title === "string" && title.length > 0 ? title : generic,
 		kind: declared ?? "question",
+		...call,
 	};
 }
 
@@ -82,8 +103,16 @@ function describeDialog(method: string, args: readonly unknown[]): UserWaitFrame
  * `ui` with each dialog run through `track`, unless its options give it a deadline (`ask.timeout`): such a dialog
  * settles on its own and the agent goes on, possibly with nobody at the machine, so its time stays the agent's. Every
  * other member passes through. Members are read from `ui` on every access, so one it replaces later is the one called.
+ *
+ * `toolCallId` is the call whose execution this `ui` belongs to, when it belongs to one: every dialog it raises names
+ * that call unless the call itself declares another, so a surface tracking the call learns when its own dialog
+ * settles. A `ui` shared by the whole session names none.
  */
-export function trackUserWaits(ui: ExtensionUIContext, track: UserWaitTracker): ExtensionUIContext {
+export function trackUserWaits(
+	ui: ExtensionUIContext,
+	track: UserWaitTracker,
+	toolCallId?: string,
+): ExtensionUIContext {
 	// Wrappers keep their identity while the member they wrap does.
 	const methods = new Map<PropertyKey, { value: Method; method: Method }>();
 	return new Proxy(ui, {
@@ -96,7 +125,7 @@ export function trackUserWaits(ui: ExtensionUIContext, track: UserWaitTracker): 
 				? (...args) =>
 						args.some(arg => isRecord(arg) && typeof arg.timeout === "number" && arg.timeout > 0)
 							? value.apply(target, args)
-							: track(() => value.apply(target, args), describeDialog(String(property), args))
+							: track(() => value.apply(target, args), describeDialog(String(property), args, toolCallId))
 				: value.bind(target);
 			methods.set(property, { value: value as Method, method });
 			return method;

@@ -1404,7 +1404,11 @@ export class AgentSession implements SettingsScope {
 	 * published under {@link UNNAMED_USER_WAIT_PROMPT} rather than as a frame
 	 * with no `prompt`, which a strict wire decoder would reject.
 	 */
-	async waitForUser<T>(dialog: () => Promise<T>, prompt?: string, options?: { kind?: BlockedKind }): Promise<T> {
+	async waitForUser<T>(
+		dialog: () => Promise<T>,
+		prompt?: string,
+		options?: { kind?: BlockedKind; toolCallId?: string },
+	): Promise<T> {
 		const waitId = ++this.#userWaitSeq;
 		if (this.#openUserWaits.size === 0) {
 			this.#userWaitEndedTurn = this.#promptInFlightCount > 0;
@@ -1413,6 +1417,7 @@ export class AgentSession implements SettingsScope {
 		this.#openUserWaits.set(waitId, {
 			prompt: prompt ?? UNNAMED_USER_WAIT_PROMPT,
 			...(options?.kind ? { kind: options.kind } : {}),
+			...(options?.toolCallId ? { toolCallId: options.toolCallId } : {}),
 		});
 		this.#publishOpenUserWait();
 		try {
@@ -1427,25 +1432,41 @@ export class AgentSession implements SettingsScope {
 					else if (this.#agentKind === "main") resumeComputerTurnForOwner(this.#eval.getKernelOwnerId());
 				}
 			} else {
-				// The dialog that was named may be the one that just settled; the
-				// oldest one still open takes its place.
+				// The dialog that was named may be the one that just settled, and
+				// so may one that was never published: the oldest still open takes
+				// its place, and the published calls lose the one that went.
 				this.#publishOpenUserWait();
 			}
 		}
 	}
 
 	/**
-	 * Publish the oldest open dialog as the session's wait, unless the same
-	 * question is already published. A second dialog opening behind the first
-	 * changes nothing; the first one settling behind a second republishes, so
-	 * no surface keeps reporting a dialog that is gone or a classification that
-	 * belongs to one.
+	 * Publish the oldest open dialog as the session's wait, beside every tool call whose dialog is
+	 * open, unless the same question over the same calls is already published. A second dialog
+	 * opening behind the first does not change what is asked, but it does change which calls are
+	 * waiting, and a surface tracking a call needs that: a younger dialog's call can be answered
+	 * without the oldest dialog's words ever changing. The first settling behind a second
+	 * republishes too, so no surface keeps reporting a dialog that is gone, a classification that
+	 * belongs to one, or a call whose own wait has ended.
 	 */
 	#publishOpenUserWait(): void {
 		const frame = this.#openUserWaits.values().next().value;
 		if (frame === undefined) return;
-		if (frame.prompt === this.#openUserWait?.prompt && frame.kind === this.#openUserWait?.kind) return;
-		this.#openUserWait = { type: "user_wait_start", ...frame };
+		const toolCalls = [...this.#openUserWaits.values()]
+			.map(open => open.toolCallId)
+			.filter((id): id is string => id !== undefined);
+		const published = this.#openUserWait;
+		const samePrompt = frame.prompt === published?.prompt && frame.kind === published?.kind;
+		const sameCalls =
+			toolCalls.length === (published?.toolCalls?.length ?? 0) &&
+			toolCalls.every((id, index) => id === published?.toolCalls?.[index]);
+		if (published !== undefined && samePrompt && sameCalls) return;
+		this.#openUserWait = {
+			type: "user_wait_start",
+			prompt: frame.prompt,
+			...(frame.kind ? { kind: frame.kind } : {}),
+			...(toolCalls.length > 0 ? { toolCalls } : {}),
+		};
 		this.#emit(this.#openUserWait);
 	}
 

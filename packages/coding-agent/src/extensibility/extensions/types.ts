@@ -214,6 +214,12 @@ export interface ExtensionUIDialogOptions {
 	 * a question — so a caller that knows it asks to approve an operation says so here.
 	 */
 	waitKind?: BlockedKind;
+	/**
+	 * The tool call this dialog was raised for, if any. It travels with the wait the dialog opens,
+	 * so a surface tracking that call knows when its own dialog settles instead of inferring it
+	 * from another dialog's words; a host may also use it to place the dialog beside the call.
+	 */
+	toolCallId?: string;
 	/** Invoked when the UI times out while waiting for a selection/input */
 	onTimeout?: () => void;
 	/** Invoked when the UI-managed timeout countdown starts */

@@ -201,6 +201,10 @@ export const eventDefs = {
 				"'permission' | 'question'",
 				"Whether the dialog approves an operation or asks a question; absent when its opener named no classification.",
 			),
+			"toolCalls?": doc(
+				"string[]",
+				"Every tool call whose dialog is open, oldest first; absent when no open dialog belongs to one. A call that leaves this list between frames has had its own dialog answered, which is not the same moment as the last dialog settling.",
+			),
 		},
 		"The session opened a dialog only a person can answer and the turn is held until it settles.",
 	),

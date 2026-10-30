@@ -117,8 +117,11 @@ export type AgentSessionEvent =
 	// `prompt` and `kind` are the dialog's own words and classification, so a
 	// surface that attaches mid-wait (a focus rebuild, a reconnecting RPC
 	// client) reports the operation being approved rather than a generic label
-	// it has no way to refine.
-	| ({ type: "user_wait_start" } & UserWaitFrame)
+	// it has no way to refine. `toolCalls` names every tool call whose dialog
+	// is open, so a surface tracking a call knows when that call's own wait
+	// ends — which is not when the last dialog settles, and not something the
+	// oldest dialog's words can be read to mean.
+	| ({ type: "user_wait_start"; toolCalls?: string[] } & Omit<UserWaitFrame, "toolCallId">)
 	| { type: "user_wait_end" };
 
 /** What one dialog waiting on a person asks, and how a surface that reports run state classifies it. */
@@ -127,6 +130,12 @@ export interface UserWaitFrame {
 	prompt: string;
 	/** Absent when the opener named no classification; such a wait reads as a question. */
 	kind?: BlockedKind;
+	/**
+	 * The tool call this dialog belongs to, when it was opened for one: a tool's approval, an ACP
+	 * permission request. Absent for a dialog that stands on its own (an MCP sign-in, a `cfg://`
+	 * write, an extension's own question), which owns no call and so retires none.
+	 */
+	toolCallId?: string;
 }
 
 /**

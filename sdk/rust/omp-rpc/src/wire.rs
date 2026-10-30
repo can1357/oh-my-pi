@@ -3919,6 +3919,9 @@ pub struct UserWaitStartEvent {
 	/// Whether the dialog approves an operation or asks a question; absent when its opener named no classification.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub kind: Option<UserWaitStartEventKind>,
+	/// Every tool call whose dialog is open, oldest first; absent when no open dialog belongs to one. A call that leaves this list between frames has had its own dialog answered, which is not the same moment as the last dialog settling.
+	#[serde(rename = "toolCalls", default, skip_serializing_if = "Option::is_none")]
+	pub tool_calls: Option<Vec<String>>,
 }
 
 /// The last dialog waiting on a person settled; the turn goes on.

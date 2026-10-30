@@ -374,6 +374,47 @@ describe("AgentSession computer display hold per turn", () => {
 		expect(target.activeUserWait()).toBeUndefined();
 	});
 
+	it("publishes which calls wait, and drops one answered behind the dialog it keeps publishing", async () => {
+		// The oldest dialog is the one published, so a younger one is answered
+		// without the published words ever changing. The calls waiting do change,
+		// and that is the only record of it: a surface tracking a call cannot
+		// read one dialog's words to learn another call's wait is over.
+		const target = createSession([{ content: ["done"] }]);
+		const frames: Array<Record<string, unknown>> = [];
+		const unsubscribe = target.subscribe(event => {
+			if (event.type === "user_wait_start") frames.push({ prompt: event.prompt, toolCalls: event.toolCalls });
+			if (event.type === "user_wait_end") frames.push({ end: true });
+		});
+		const first = Promise.withResolvers<"once">();
+		const second = Promise.withResolvers<"once">();
+		const answers: Record<string, PromiseWithResolvers<"once">> = { "call-1": first, "call-2": second };
+		const ui = trackUserWaits(
+			{
+				approve: async (prompt: { compact: string }, options: { toolCallId: string }) =>
+					answers[options.toolCallId]!.promise,
+			} as unknown as ExtensionUIContext,
+			(dialog, frame) =>
+				target.waitForUser(dialog, frame.prompt, { kind: frame.kind, toolCallId: frame.toolCallId }),
+		);
+
+		const firstApproval = ui.approve?.({ full: "first", compact: "bash: echo first" }, { toolCallId: "call-1" });
+		const secondApproval = ui.approve?.({ full: "second", compact: "bash: echo second" }, { toolCallId: "call-2" });
+		expect(frames).toEqual([
+			{ prompt: "bash: echo first", toolCalls: ["call-1"] },
+			{ prompt: "bash: echo first", toolCalls: ["call-1", "call-2"] },
+		]);
+
+		second.resolve("once");
+		await secondApproval;
+		expect(frames.at(-1)).toEqual({ prompt: "bash: echo first", toolCalls: ["call-1"] });
+
+		first.resolve("once");
+		await firstApproval;
+		unsubscribe();
+		expect(frames.at(-1)).toEqual({ end: true });
+		expect(target.activeUserWait()).toBeUndefined();
+	});
+
 	it("marks no turn in a subagent, so its runs keep the grace period", async () => {
 		const target = createSession([step, { content: ["done"] }], "sub");
 		await target.prompt("go");

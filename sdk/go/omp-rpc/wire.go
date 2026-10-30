@@ -4512,6 +4512,8 @@ type UserWaitStartEvent struct {
 	Prompt string `json:"prompt"`
 	// Whether the dialog approves an operation or asks a question; absent when its opener named no classification.
 	Kind *UserWaitStartEventKind `json:"kind,omitempty"`
+	// Every tool call whose dialog is open, oldest first; absent when no open dialog belongs to one. A call that leaves this list between frames has had its own dialog answered, which is not the same moment as the last dialog settling.
+	ToolCalls []string `json:"toolCalls,omitempty"`
 }
 
 func (v *UserWaitStartEvent) UnmarshalJSON(data []byte) error {
@@ -4524,6 +4526,7 @@ func (v *UserWaitStartEvent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.constant("type", "user_wait_start")
 	d.required("prompt", &out.Prompt)
 	d.optional("kind", &out.Kind)
+	d.optional("toolCalls", &out.ToolCalls)
 	if d.err != nil {
 		return d.err
 	}

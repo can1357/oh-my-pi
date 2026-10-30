@@ -348,10 +348,12 @@ describe("EventController run status while prompts wait on the user", () => {
 		expect(report).toHaveBeenLastCalledWith({ state: "working" });
 	});
 
-	it("retires only the records the answered dialog named", async () => {
-		// One approval is raised through the wait bracket and another is not.
-		// Answering the bracketed one returns its call to `working`, and leaves
-		// the untracked call reported as the approval it still is.
+	it("retires only the call whose own dialog the session published", async () => {
+		// One approval is raised through a dialog that names its call, another on
+		// a host the session cannot see. Answering the named one returns its call
+		// to `working` and leaves the unnamed call reported as the approval it
+		// still is — the two are told apart by identity, never by what the words
+		// of one dialog resemble.
 		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
 		cfgToolsApproval.override(settings, { bash: "prompt", deploy: "prompt" });
 		const tools: Record<string, AgentTool> = {
@@ -369,11 +371,11 @@ describe("EventController run status while prompts wait on the user", () => {
 		await controller.handleEvent(AGENT_START);
 		await controller.handleEvent(toolStart("deploy-1", "deploy", {}));
 		await controller.handleEvent(toolStart("bash-1", "bash", { command: "echo one" }));
-		// Only `bash` asks through the bracket, under the compact rendering.
 		await controller.handleEvent({
 			type: "user_wait_start",
 			prompt: "Allow tool: bash — echo one",
 			kind: "permission",
+			toolCalls: ["bash-1"],
 		});
 		await controller.handleEvent({ type: "user_wait_end" });
 
@@ -383,12 +385,10 @@ describe("EventController run status while prompts wait on the user", () => {
 		expect(report).toHaveBeenLastCalledWith({ state: "working" });
 	});
 
-	it("retires an approval whose bracket named nothing but its classification", async () => {
-		// A host that drives its own approval UI can open the bracket through the
-		// one-argument `waitForUser`: the frame has no words, only `permission`.
-		// That is all there is to go on, and a call waiting for an approval is
-		// what it is taken to be — otherwise nothing could ever retire it and the
-		// call would read `blocked` for the rest of its run.
+	it("retires a call whose dialog named it but nothing else", async () => {
+		// A host that drives its own approval UI can open the bracket with no
+		// words of its own. What it says about the operation is useless, but the
+		// call it names is not: that call's wait ends with the dialog.
 		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
 		cfgToolsApproval.override(settings, { bash: "prompt" });
 		const bash = { name: "bash", label: "Bash" } as unknown as AgentTool;
@@ -400,6 +400,7 @@ describe("EventController run status while prompts wait on the user", () => {
 			type: "user_wait_start",
 			prompt: UNNAMED_USER_WAIT_PROMPT,
 			kind: "permission",
+			toolCalls: ["bash-1"],
 		});
 		expect(report).toHaveBeenLastCalledWith({
 			state: "blocked",
@@ -408,6 +409,49 @@ describe("EventController run status while prompts wait on the user", () => {
 		});
 
 		await controller.handleEvent({ type: "user_wait_end" });
+		expect(report).toHaveBeenLastCalledWith({ state: "working" });
+	});
+
+	it("retires a younger call answered behind the dialog that is still published", async () => {
+		// The oldest dialog is the one published, so a younger one can open and
+		// be answered without its words ever reaching a surface. Its call still
+		// leaves the published list, and that is what retires its record: the
+		// approved call runs on, and nothing reports it as waiting.
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		cfgToolsApproval.override(settings, { bash: "prompt" });
+		const bash = {
+			name: "bash",
+			label: "Bash",
+			formatApprovalDetails: (args: { command: string }) => [`Command: ${args.command}`],
+		} as unknown as AgentTool;
+		const controller = new EventController(createInteractiveModeContext({ session: { getToolByName: () => bash } }));
+		const first = "Allow tool: bash\nCommand: echo first";
+
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent(toolStart("bash-1", "bash", { command: "echo first" }));
+		await controller.handleEvent(toolStart("bash-2", "bash", { command: "echo second" }));
+		await controller.handleEvent({
+			type: "user_wait_start",
+			prompt: first,
+			kind: "permission",
+			toolCalls: ["bash-1", "bash-2"],
+		});
+		// The second is approved and starts running; the first still waits, and
+		// the dialog on screen is unchanged.
+		await controller.handleEvent({
+			type: "user_wait_start",
+			prompt: first,
+			kind: "permission",
+			toolCalls: ["bash-1"],
+		});
+		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "permission", msg: first });
+
+		// The first is denied and ends; the second is still executing and must
+		// not be reported as an approval nobody is being asked for.
+		await controller.handleEvent({ type: "user_wait_end" });
+		expect(report).toHaveBeenLastCalledWith({ state: "working" });
+
+		await controller.handleEvent(toolEnd("bash-1", "bash"));
 		expect(report).toHaveBeenLastCalledWith({ state: "working" });
 	});
 
@@ -482,7 +526,12 @@ describe("EventController run status while prompts wait on the user", () => {
 
 		await controller.handleEvent(AGENT_START);
 		await controller.handleEvent(toolStart("bash-1", "bash", { command: "sleep 60" }));
-		await controller.handleEvent({ type: "user_wait_start", prompt: "Allow tool: bash", kind: "permission" });
+		await controller.handleEvent({
+			type: "user_wait_start",
+			prompt: "Allow tool: bash",
+			kind: "permission",
+			toolCalls: ["bash-1"],
+		});
 		await controller.handleEvent({ type: "user_wait_end" });
 		expect(report).toHaveBeenLastCalledWith({ state: "working" });
 

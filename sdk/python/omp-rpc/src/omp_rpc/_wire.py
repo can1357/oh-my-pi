@@ -1246,6 +1246,8 @@ class UserWaitStartEvent:
     """What the session is asking a person to decide."""
     kind: Literal["permission", "question"] | None = None
     """Whether the dialog approves an operation or asks a question; absent when its opener named no classification."""
+    tool_calls: tuple[str, ...] | None = None
+    """Every tool call whose dialog is open, oldest first; absent when no open dialog belongs to one. A call that leaves this list between frames has had its own dialog answered, which is not the same moment as the last dialog settling."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -2685,6 +2687,7 @@ def parse_user_wait_start_event(value: object, path: str = "UserWaitStartEvent")
     return UserWaitStartEvent(
         prompt=required(payload, "prompt", decode_str, path),
         kind=optional(payload, "kind", cast('Decoder[Literal["permission", "question"]]', literal(frozenset({"permission", "question"}))), path),
+        tool_calls=optional(payload, "toolCalls", array(decode_str), path),
     )
 
 

@@ -1037,6 +1037,8 @@ export interface UserWaitStartEvent {
 	prompt: string;
 	/** Whether the dialog approves an operation or asks a question; absent when its opener named no classification. */
 	kind?: "permission" | "question";
+	/** Every tool call whose dialog is open, oldest first; absent when no open dialog belongs to one. A call that leaves this list between frames has had its own dialog answered, which is not the same moment as the last dialog settling. */
+	toolCalls?: string[];
 }
 
 /** The last dialog waiting on a person settled; the turn goes on. */
