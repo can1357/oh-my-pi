@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added the `providers.openai-codex.daybreak` setting (default on) to stop omp from automatically requesting the Daybreak Blue cyber access program on eligible ChatGPT accounts; each session follows its own value ([#17508](https://github.com/can1357/oh-my-pi/pull/17508) by [@H4vC](https://github.com/H4vC))
 - Added queueable compaction: `/compact` sent with the follow-up key (Ctrl+Q) while the agent works now runs when it yields instead of interrupting it ([#17397](https://github.com/can1357/oh-my-pi/pull/17397) by [@H4vC](https://github.com/H4vC))
 - Added `omp session lease [--json] -- <session-id>...` and the RPC command `get_session_lease`, which report which sessions a running omp owns (`{"held": [...], "unknown": [...]}`) without taking ownership, so another program can check a session without forking it ([#17428](https://github.com/can1357/oh-my-pi/pull/17428) by [@andrebrait](https://github.com/andrebrait))
 - Added opt-in `title.refreshAfterPrompts`: every N operator prompts, the judge model checks whether a generated session title still fits the conversation and regenerates it when it does not; user-set titles are never replaced ([#17443](https://github.com/can1357/oh-my-pi/pull/17443) by [@wolfiesch](https://github.com/wolfiesch))
@@ -13,6 +14,7 @@
 ### Changed
 
 - `read` of a web page keeps the title, description, author and dates of its `<meta>` tags and lists the others by name only, so pages cost about 6% fewer tokens ([#17393](https://github.com/can1357/oh-my-pi/pull/17393) by [@will-bogusz](https://github.com/will-bogusz))
+- On the Anthropic API, the newest message now keeps all its images up to the 128 MB request limit, past the 120 MB image budget ([#17492](https://github.com/can1357/oh-my-pi/pull/17492) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
@@ -29,6 +31,8 @@
 - A daemon broker gave up its scope only when its socket file disappeared, so a socket bound under `/tmp/omp-<uid>/` — which happens whenever the runtime path exceeds the 108-byte socket limit — kept the scope after its runtime directory was deleted. It now also releases when that directory is gone or has been replaced. A broker startup that failed part-way — an empty token file, a failed bind, or an `onListening` callback that throws — kept its scope lease or left its socket accepting connections; it now closes everything it opened and releases the lease before rejecting, and a shutdown finishes closing its sockets and server even when stopping a daemon fails ([#17399](https://github.com/can1357/oh-my-pi/pull/17399) by [@sjawhar](https://github.com/sjawhar))
 - A test process could export OTLP telemetry to whatever collector the developer's environment names, a local one included, and could start the machine-wide text-prediction daemon. Under the test runtime telemetry is exported only to a loopback receiver the test declared through `allowTelemetryReceiverForTests`, and the editor's prediction host is not installed ([#17399](https://github.com/can1357/oh-my-pi/pull/17399) by [@sjawhar](https://github.com/sjawhar))
 - A test's auth broker declaration now governs every later operation in its process: the CLI's memo of the broker connection no longer hands out a broker after the test withdrew its declaration, so a credential import after the withdrawal goes to the local store instead of the broker, and no longer refuses a broker the test declared later. An omp CLI, RPC or ACP process that a test starts now counts as a test process under a plain `bun test` too: the `bunfig.toml` of the repository root and of every workspace with tests preloads `scripts/test-preload.ts`, which gives every child the `PI_TEST_RUNTIME=1` marker — including a child of the native shell or terminal, and a child a Worker spawns — so such a child no longer connects to the developer's broker with their token ([#17399](https://github.com/can1357/oh-my-pi/pull/17399) by [@sjawhar](https://github.com/sjawhar))
+- Requests to the Anthropic API and Factory Droid's hosts now drop their oldest images when long text, tool arguments, or re-declared tool definitions would otherwise push the request past the host's size limit ([#17492](https://github.com/can1357/oh-my-pi/pull/17492) by [@will-bogusz](https://github.com/will-bogusz))
+- Factory Droid requests size images against what each route actually sends: Gemini models count their expanded tool schemas and no longer drop images for another model's reasoning, and only Claude models count withdrawn tool definitions ([#17492](https://github.com/can1357/oh-my-pi/pull/17492))
 
 ## [18.14.0] - 2026-10-29
 

@@ -130,7 +130,7 @@ import {
 	cfgSnapcompactShape,
 } from "./context-settings";
 import { resolveModelCompactionSettings } from "./model-compaction-threshold";
-import { cfgRetry } from "./settings";
+import { cfgProvidersOpenaiCodexDaybreak, cfgRetry } from "./settings";
 
 export type CompactionCheckResult = Readonly<{
 	continuationScheduled: boolean;
@@ -3718,6 +3718,7 @@ export class SessionMaintenance {
 						remotePromptCacheKey: this.#host.getPromptCacheKeyForModel(remoteCompactionPolicyModel(candidate)),
 						providerSessionState: this.#host.providerSessionState,
 						preferWebsockets: this.#host.preferWebsockets(),
+						codexAccessPrograms: cfgProvidersOpenaiCodexDaybreak.get(this.#host.settings),
 						// The remote and provider-native requests fetch on their own
 						// and never reach `completeImpl`, so `/pause` holds every
 						// request this compaction sends here.
@@ -5633,6 +5634,7 @@ export class SessionMaintenance {
 									),
 									providerSessionState: this.#host.providerSessionState,
 									preferWebsockets: this.#host.preferWebsockets(),
+									codexAccessPrograms: cfgProvidersOpenaiCodexDaybreak.get(this.#host.settings),
 									codexCompaction,
 									// See the manual callsite: every request this pass sends,
 									// remote and provider-native included, waits out `/pause`.

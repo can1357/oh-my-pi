@@ -286,6 +286,7 @@ export async function requestCompactionV2Streaming(
 		preferWebsockets?: boolean;
 		/** Awaited before each attempt goes out; see `SummaryOptions.beforeDispatch`. */
 		beforeDispatch?: DispatchHold;
+		codexAccessPrograms?: boolean;
 	},
 ): Promise<CompactionV2Response> {
 	let fetchImpl: FetchImpl = options?.fetch ?? globalThis.fetch;
@@ -339,6 +340,7 @@ export async function requestCompactionV2Streaming(
 					providerSessionState: options?.providerSessionState,
 					codexCompaction: options?.codexCompaction,
 					preferWebsockets: options?.preferWebsockets,
+					codexAccessPrograms: options?.codexAccessPrograms,
 					beforeDispatch: options?.beforeDispatch,
 				});
 			});
@@ -381,6 +383,7 @@ async function attemptCompactionV2Streaming(
 		codexCompaction?: CodexCompactionContext;
 		preferWebsockets?: boolean;
 		beforeDispatch?: DispatchHold;
+		codexAccessPrograms?: boolean;
 	},
 ): Promise<CompactionV2Response> {
 	// Faithful to Codex: append the compaction trigger as the final input item
@@ -406,6 +409,7 @@ async function attemptCompactionV2Streaming(
 			sessionId: request.sessionId,
 			providerSessionState: options.providerSessionState,
 			preferWebsockets: options.preferWebsockets,
+			codexAccessPrograms: options.codexAccessPrograms,
 			// The Codex transport resolves its attestation and opens or reuses
 			// its websocket after the hold above, so it holds again at each of
 			// those connect attempts and at the send.
