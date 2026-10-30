@@ -969,13 +969,13 @@ fn a_query_leaves_the_callers_signal_settings_alone() {
 ///
 /// The storm carries a second signal, one the caller *ignores*. That is
 /// the caller's own instruction and it has to reach the utility, so the
-/// last query here runs a utility that raises that very signal at itself
-/// and then answers: it answers only if the ignore survived into the
-/// child. The weaker form — no child died on it — is not a guard, and
-/// this says so because it was one: a loop that resets a readable
-/// `SIG_IGN` is one line's difference and passed that form twenty times
-/// out of twenty. What neither form reaches is the case the fallback was
-/// repaired for — an ignored disposition whose *read* is denied —
+/// last query here runs a utility that reads its own `/proc` entry,
+/// refuses unless that number is ignored and unblocked, and only then
+/// raises it at itself and answers. Surviving the signal is not proof on
+/// its own — a blocked signal with the default disposition survives too,
+/// and a mutant that reset the readable ignore and then blocked the
+/// number passed the survival form twenty times out of twenty. What this
+/// cannot reach is an ignored disposition whose *read* is denied,
 /// because denying one read needs a kernel filter, which lives in this
 /// lane's harness rather than here.
 #[cfg(target_os = "linux")]
@@ -1069,14 +1069,29 @@ fn an_inherited_handler_does_not_run_in_the_child_before_exec() {
 	storming.store(false, Ordering::Relaxed);
 	storm.join().unwrap();
 	// With the storm stopped, one query says outright whether the ignored
-	// disposition reached a child: the utility raises that very signal at
-	// itself and then answers, so it answers only if the ignore survived
-	// into it. Not knowing of a child that died is not the same as
-	// knowing one lived — a loop that resets a readable `SIG_IGN` is one
-	// line's difference and passed the "no child died on it" form of this
-	// twenty times out of twenty.
+	// disposition reached a child. Surviving the signal is not enough to
+	// say it: a *blocked* signal with the default disposition survives
+	// too, and a mutant that reset the readable ignore and then blocked
+	// the number passed that form twenty times out of twenty. So the
+	// utility reads its own `/proc` entry first and refuses unless the
+	// number is in `SigIgn` and out of `SigBlk`, and only then raises it
+	// at itself and answers. What this cannot reach is still said where
+	// it is said above; restoring the *wrong* number, and skipping the
+	// mask read-back, are covered by this lane's harness probes rather
+	// than from here.
+	let bit = 1u64 << (libc::SIGUSR2 - 1);
 	let raises = dir.path().join("locale-raises-the-ignored-signal");
-	fs::write(&raises, format!("#!/bin/sh\nkill -{} $$\nprintf 'UTF-8\\n'\n", libc::SIGUSR2)).unwrap();
+	let script = format!(
+		"#!/bin/sh\n\
+		 ignored=$(awk '/^SigIgn:/ {{ print $2 }}' /proc/$$/status)\n\
+		 blocked=$(awk '/^SigBlk:/ {{ print $2 }}' /proc/$$/status)\n\
+		 [ $(( 0x$ignored & {bit} )) -ne 0 ] || exit 71\n\
+		 [ $(( 0x$blocked & {bit} )) -eq 0 ] || exit 72\n\
+		 kill -{signal} $$\n\
+		 printf 'UTF-8\\n'\n",
+		signal = libc::SIGUSR2
+	);
+	fs::write(&raises, script).unwrap();
 	fs::set_permissions(&raises, fs::Permissions::from_mode(0o755)).unwrap();
 	let ignoring = crate::locale::codeset_from_utility_for_test(&raises, "C.UTF-8", &|_| None);
 	// SAFETY: putting back what this test changed, before it can fail.
@@ -1098,7 +1113,9 @@ fn an_inherited_handler_does_not_run_in_the_child_before_exec() {
 	);
 	assert!(
 		matches!(&ignoring, crate::locale::Codeset::Loaded(found) if found == "UTF-8"),
-		"a utility that raises the signal the caller ignores survives it: {ignoring:?}"
+		"the signal the caller ignores reached the utility ignored and unblocked, and it survived \
+		 raising it — status 71 is a disposition that is no longer ignored, 72 is a blocked one: \
+		 {ignoring:?}"
 	);
 }
 
