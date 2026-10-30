@@ -1432,10 +1432,11 @@ describe("structured subagent primitive", () => {
 		// the hold to something that has already decided what it will discharge.
 		// The adoption is refused, so the release falls to the finalizer itself.
 		mockDiscovery();
+		let childDisposals = 0;
 		const childSession = {
 			prepareForHeadlessAdvisorDrain: () => {},
 			waitForAdvisorCatchup: async () => true,
-			dispose: async () => {},
+			dispose: async () => void (childDisposals += 1),
 		} as unknown as AgentSession;
 		const blockerDisposing = Promise.withResolvers<void>();
 		const finishTeardown = Promise.withResolvers<void>();
@@ -1480,10 +1481,14 @@ describe("structured subagent primitive", () => {
 			return { ...result(), id: options.id };
 		});
 		let released = 0;
+		const settled = await runStructuredSubagent(request({ keepAlive: true, onRelease: () => void (released += 1) }));
 
-		await runStructuredSubagent(request({ keepAlive: true, onRelease: () => void (released += 1) }));
-
+		// Releasing what the caller held while leaving the child registered and
+		// revivable would hand `ensureLive` a session whose kernel and workspace
+		// have just been torn down. The child ends with its resources.
 		expect(released).toBe(1);
+		expect(childDisposals).toBe(1);
+		expect(AgentRegistry.global().get(settled.result.id)).toBeUndefined();
 		finishTeardown.resolve();
 		await tearingDown;
 	});

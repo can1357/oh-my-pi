@@ -19,6 +19,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/task/worktree";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { writeIsolationOwner } from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
 import { removeWithRetries, setWorktreesDir } from "@oh-my-pi/pi-utils";
 
 const tempDirs: string[] = [];
@@ -999,6 +1000,44 @@ describe("detachGitDir", () => {
 				.filter(line => line.startsWith("worktree "));
 			expect(worktrees).toHaveLength(2); // main + the linked parent only
 			expect(await runGit(handle.mergedDir, ["rev-parse", "HEAD^"])).toBe(baseSha);
+		} finally {
+			setWorktreesDir(undefined);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		}
+	});
+
+	it("leaves an isolation workspace a later run has claimed, and still tears down its own", async () => {
+		// The workspace path is derived from the task id, so a replacement spawn
+		// — or a second omp process — materialises the same directory. A
+		// teardown that outlived its run (a release past its lifecycle
+		// manager's deadline) must not delete the successor's workspace.
+		const { wt } = await makeLinkedWorktree();
+		vi.spyOn(natives, "isoResolve").mockResolvedValue({
+			kind: natives.IsoBackendKind.Rcopy,
+			candidates: [natives.IsoBackendKind.Rcopy],
+			fellBack: false,
+			reason: undefined,
+		});
+		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-generation-wtbase-"));
+		tempDirs.push(worktreeBase);
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(worktreeBase);
+		try {
+			const stale = await ensureIsolation(wt, "generation-guard");
+			const baseDir = path.dirname(stale.mergedDir);
+			// The successor claims the same path, as a second `ensureIsolation`
+			// for this id does.
+			const generation = await writeIsolationOwner(baseDir, "generation-guard");
+			await fs.writeFile(path.join(stale.mergedDir, "successor.txt"), "owned by a later run\n");
+
+			await cleanupIsolation(stale);
+			expect(await Bun.file(path.join(stale.mergedDir, "successor.txt")).exists()).toBe(true);
+
+			// The run that holds the current claim still tears it down.
+			await cleanupIsolation({ ...stale, generation });
+			expect(await Bun.file(path.join(stale.mergedDir, "successor.txt")).exists()).toBe(false);
 		} finally {
 			setWorktreesDir(undefined);
 			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;

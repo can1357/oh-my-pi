@@ -3659,11 +3659,16 @@ export async function finalizeSubagentLifecycle(args: {
 		},
 		ref,
 	);
-	// Exactly one of the two happens on every path out of this function: the
-	// lifecycle takes the agent and what the caller holds for it, or this runs
-	// the release. A manager tearing down refuses the adoption, and the hold it
-	// declined would otherwise belong to nobody.
-	if (!adopted) await releaseOwnedResources();
+	if (adopted) return;
+	// Nothing will keep this child: the only owner of an idle, kept-alive agent
+	// is the lifecycle, and it refused. Ending it is the same teardown a
+	// one-shot gets — dispose, unregister, release — because releasing what the
+	// caller held while leaving the child registered and revivable hands
+	// `ensureLive` a session whose workspace and kernel have just gone.
+	// `runSubprocess`'s own boundary is the backstop if this throws.
+	await disposeSession();
+	if (registry.get(args.id) === ref) registry.unregister(args.id, ref);
+	await releaseOwnedResources();
 }
 
 /** Options for {@link runSubagentFollowUpTurn}. */

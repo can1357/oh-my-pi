@@ -53,6 +53,7 @@ async function commitsAcrossRelease(id: string, runEndPatch: string, releasePatc
 	};
 	vi.spyOn(worktreeModule, "ensureIsolation").mockResolvedValue({
 		mergedDir: "/repo/isolated",
+		generation: "test",
 		backend: natives.IsoBackendKind.Rcopy,
 		fellBack: false,
 		fallbackReason: null,

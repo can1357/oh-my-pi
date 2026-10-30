@@ -8,6 +8,7 @@
  */
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
+import { Snowflake } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 
 const { IsoBackendKind } = natives;
@@ -21,6 +22,13 @@ export interface IsolationOwner {
 	pid: number;
 	/** Task id the sandbox was materialised for. */
 	id: string;
+	/**
+	 * Identifies this materialisation of {@link id}, not just the id. An id is
+	 * reused — a replacement spawn, or a second process opening the same
+	 * workspace — so a teardown still holding an older handle must be able to
+	 * see that the path it captured now belongs to a later run.
+	 */
+	generation?: string;
 	/**
 	 * Process-instance start-time token for {@link pid}, when the OS can report
 	 * it. Distinguishes the owning process from an unrelated process that later
@@ -61,15 +69,35 @@ async function processStartToken(pid: number): Promise<string | null> {
 }
 
 /**
- * Record the current process as owner of the sandbox rooted at `baseDir`.
+ * Record the current process as owner of the sandbox rooted at `baseDir`, and
+ * return the {@link IsolationOwner.generation} this materialisation is
+ * recorded under.
  *
  * Written before the isolation backend materialises `m` so a concurrent
  * `omp worktree clear` never sees an owner-less sandbox mid-creation.
  */
-export async function writeIsolationOwner(baseDir: string, id: string): Promise<void> {
+export async function writeIsolationOwner(baseDir: string, id: string): Promise<string> {
 	const startToken = await processStartToken(process.pid);
-	const owner: IsolationOwner = { pid: process.pid, id, ...(startToken ? { startToken } : {}) };
+	const generation = `${process.pid}-${Snowflake.next()}`;
+	const owner: IsolationOwner = { pid: process.pid, id, generation, ...(startToken ? { startToken } : {}) };
 	await Bun.write(path.join(baseDir, ISOLATION_OWNER_FILE), JSON.stringify(owner));
+	return generation;
+}
+
+/**
+ * The generation currently recorded for the sandbox at `baseDir`, or undefined
+ * when there is no readable marker — a sandbox from before markers carried
+ * one, or a directory nobody has claimed.
+ */
+export async function readIsolationGeneration(baseDir: string): Promise<string | undefined> {
+	let decoded: unknown;
+	try {
+		decoded = await Bun.file(path.join(baseDir, ISOLATION_OWNER_FILE)).json();
+	} catch {
+		return undefined;
+	}
+	if (typeof decoded !== "object" || decoded === null || !("generation" in decoded)) return undefined;
+	return typeof decoded.generation === "string" && decoded.generation.length > 0 ? decoded.generation : undefined;
 }
 
 /**

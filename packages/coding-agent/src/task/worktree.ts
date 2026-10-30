@@ -10,7 +10,7 @@ import { formatBytes, getWorktreeDir, isEnoent, logger, Snowflake } from "@oh-my
 import type { SettingValueOf } from "../config/registry";
 
 import { withRepoLock } from "../utils/repo-lock";
-import { writeIsolationOwner } from "./isolation-ownership";
+import { readIsolationGeneration, writeIsolationOwner } from "./isolation-ownership";
 import { mapWithConcurrencyLimit } from "./parallel";
 import type { cfgIsolationBackend } from "./settings";
 
@@ -582,6 +582,12 @@ export function formatIsolationBackend(backend: IsoBackendKind): Exclude<Isolati
 export interface IsolationHandle {
 	/** Merged view materialised by the backend; pass this to the task. */
 	mergedDir: string;
+	/**
+	 * The marker generation this materialisation wrote. `cleanupIsolation`
+	 * compares it with what is on disk, so a teardown holding a stale handle
+	 * cannot delete a path a later run has since claimed.
+	 */
+	generation: string;
 	/** Backend the PAL actually used. */
 	backend: IsoBackendKind;
 	/** True when the resolver downgraded from `preferred` to `backend`. */
@@ -666,7 +672,7 @@ export async function ensureIsolation(
 		// `omp worktree clear` never sees this sandbox without a live owner,
 		// even while a large clone is still in progress.
 		await fs.mkdir(baseDir, { recursive: true });
-		await writeIsolationOwner(baseDir, id);
+		const generation = await writeIsolationOwner(baseDir, id);
 		try {
 			await natives.isoStart(candidate, repoRoot, mergedDir);
 			// Sever the isolation's git metadata from the source checkout. Copy
@@ -680,6 +686,7 @@ export async function ensureIsolation(
 			await vcs.detachGitDir(mergedDir, sourceCommonDir);
 			return {
 				mergedDir,
+				generation,
 				backend: candidate,
 				fellBack: candidate !== resolution.kind || resolution.fellBack,
 				fallbackReason,
@@ -697,8 +704,31 @@ export async function ensureIsolation(
 	throw new Error(fallbackReason ?? "No isolation backend is available.");
 }
 
-/** Tear down a handle returned by {@link ensureIsolation}. */
+/**
+ * Tear down a handle returned by {@link ensureIsolation}.
+ *
+ * The workspace path is derived from the task id, so the same path is handed
+ * out again to a replacement spawn, to a session the SDK opens on it, or to
+ * another omp process entirely. A teardown can arrive long after its own run —
+ * a release that outlived its lifecycle manager's teardown deadline — and the
+ * directory it captured may by then be a live successor's. So the marker is
+ * re-read here and the removal happens only while the generation on disk is
+ * still the one this handle materialised. Nothing else can make that
+ * judgement: the registry is process-local, and the two colliding runs need
+ * not share a process.
+ */
 export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
+	// baseDir is the parent of the merged directory
+	const baseDir = path.dirname(handle.mergedDir);
+	const generation = await readIsolationGeneration(baseDir);
+	if (generation !== undefined && generation !== handle.generation) {
+		logger.warn("isolation cleanup skipped: the workspace now belongs to a later run", {
+			mergedDir: handle.mergedDir,
+			expected: handle.generation,
+			found: generation,
+		});
+		return;
+	}
 	try {
 		try {
 			await natives.isoStop(handle.backend, handle.mergedDir);
@@ -710,8 +740,6 @@ export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
 			});
 		}
 	} finally {
-		// baseDir is the parent of the merged directory
-		const baseDir = path.dirname(handle.mergedDir);
 		await fs.rm(baseDir, { recursive: true, force: true });
 	}
 }
