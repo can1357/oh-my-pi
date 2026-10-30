@@ -168,16 +168,14 @@ describe("AgentSession queued steer delivery", () => {
 		expect(session.agent.hasQueuedMessages()).toBe(false);
 	});
 
-	it("rejects a synthetic continue while streaming without queuing a user message", async () => {
+	it("rejects a continue shortcut while streaming without queuing a user message", async () => {
 		const { session } = await createSession([{ content: ["host answer"] }]);
 		let checked = false;
 		session.agent.setOnBeforeYield(async () => {
 			if (checked) return;
 			checked = true;
 			expect(session.isStreaming).toBe(true);
-			await expect(session.prompt(manualContinuePrompt, { synthetic: true, userInitiated: true })).rejects.toThrow(
-				AgentBusyError,
-			);
+			await expect(session.resume()).rejects.toThrow(AgentBusyError);
 			expect(session.agent.popLastSteer()).toBeUndefined();
 			expect(session.agent.popLastFollowUp()).toBeUndefined();
 		});
