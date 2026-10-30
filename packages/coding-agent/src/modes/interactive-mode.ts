@@ -246,6 +246,7 @@ import {
 	reportTernSession,
 	setSessionTerminalTitle,
 	setTerminalSessionSource,
+	setTerminalTitleBrand,
 	setTerminalTitlePullRequest,
 	setTerminalTitleSpinnerStyle,
 	setTerminalTitleStateEnabled,
@@ -417,6 +418,7 @@ import {
 	cfgTuiCompleteScrollback,
 	cfgTuiTextSizing,
 	cfgTuiTight,
+	cfgTuiTitleBrand,
 	cfgTuiTitleSpinner,
 	cfgTuiTitleState,
 	cfgTuiVimMode,
@@ -491,6 +493,7 @@ const cfgLiveUiSettings = combine({
 	"tui.tight": cfgTuiTight,
 	"tui.hyperlinks": cfgTuiHyperlinks,
 	"tui.titleState": cfgTuiTitleState,
+	"tui.titleBrand": cfgTuiTitleBrand,
 	"tui.titleSpinner": cfgTuiTitleSpinner,
 	"statusLine.preset": cfgStatusLinePreset,
 	"statusLine.leftSegments": cfgStatusLineLeftSegments,
@@ -2609,6 +2612,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// after shutdown can never write into the parent shell's tab.
 		initTerminalTitleState();
 		setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
+		setTerminalTitleBrand(cfgTuiTitleBrand.get(this.settings));
 		setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		initProgramStatus();
 		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
@@ -4261,6 +4265,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.requestRender();
 		}
 		if (any("tui.titleState")) setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
+		if (any("tui.titleBrand")) setTerminalTitleBrand(cfgTuiTitleBrand.get(this.settings));
 		if (any("tui.titleSpinner")) setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		if (any("terminal.programStatus")) setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
 

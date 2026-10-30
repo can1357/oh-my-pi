@@ -10,6 +10,7 @@ import {
 	setTerminalSessionSource,
 	setTerminalTitleSpinnerStyle,
 	setTerminalTitleState,
+	type TerminalTitleState,
 } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
 import { mockWindowsConsoleTitle, type WindowsConsoleTitleMock } from "./terminal-title-test-utils";
@@ -61,6 +62,18 @@ describe("buildTerminalTitleWithState", () => {
 		expect(buildTerminalTitleWithState(LABEL, "idle", 0, false)).toBe(`${BRAND}: ${LABEL}`);
 		expect(buildTerminalTitleWithState(LABEL, "attention", 0, false)).toBe(`${BRAND}: ${LABEL}`);
 		expect(buildTerminalTitleWithState(undefined, "idle", 0, false)).toBe(BRAND);
+	});
+
+	it("drops the brand when it is turned off, down to the bare label without run state", () => {
+		const unbranded = (label: string | undefined, state: TerminalTitleState, enabled: boolean) =>
+			buildTerminalTitleWithState(label, state, 0, enabled, "linux", "braille", {}, false, false);
+		expect(unbranded(LABEL, "idle", true)).toBe(`> ${LABEL}`);
+		expect(unbranded(LABEL, "working", true)).toBe(`⠋ ${LABEL}`);
+		expect(unbranded(LABEL, "attention", true)).toBe(`! ${LABEL}`);
+		expect(unbranded(undefined, "idle", true)).toBe(">");
+		expect(unbranded(LABEL, "working", false)).toBe(LABEL);
+		// With neither brand nor label the title still names the program instead of going blank.
+		expect(unbranded(undefined, "idle", false)).toBe("omp");
 	});
 
 	it("cycles the dots and line glyph sets while working", () => {
