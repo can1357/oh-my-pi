@@ -41,6 +41,9 @@
 ### Fixed
 
 - Fixed heuristic episodic facts storing word fragments (`Drafting is active.` → `ctive`), truncated multiword objects, or nothing for `has an …` sentences ([#17511](https://github.com/can1357/oh-my-pi/issues/17511))
+### Added
+
+- Added `mnemopi embed-serve` so omp sessions and other mnemopi processes automatically share one local embedding model over native IPC, with an in-process fallback when no server is running. ([#13785](https://github.com/can1357/oh-my-pi/pull/13785) by [@STRML](https://github.com/STRML))
 
 ## [18.13.3] - 2026-10-28
 
