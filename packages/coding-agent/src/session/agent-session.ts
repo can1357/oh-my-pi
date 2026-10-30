@@ -727,6 +727,13 @@ type CustomMessageDeliveryOptions = {
 	acceptTerminalEmptyStop?: boolean;
 };
 
+/** Who still owes delivery of a record handed to `AgentSession.#dispatchCustomMessage`.
+ *  `owed` is cleared the moment the record reaches an owner that will deliver it — a transcript, a
+ *  queue, a run that has claimed it, or another carrier it was handed to — and also when it is
+ *  deliberately dropped with the transcript it was sent to. While it is still set, the caller owns
+ *  the record and must put it back; nothing else can, because the sender was already answered. */
+type CustomMessageDelivery = { owed: boolean };
+
 type AgentContinueSkipReason =
 	| PostPromptSkipReason
 	| "session-unavailable"
@@ -1896,13 +1903,16 @@ export class AgentSession implements SettingsScope {
 
 	/** Publishes the terminal `agent_end` that a downgraded one withheld, once the tail work it
 	 *  promised a continuation for is gone. Called by every path that consumes that work without
-	 *  starting a turn — the stranded-aside folds, a prompt that folded it and then bailed. Asks
-	 *  before settling: while a turn runs or tail work is still queued, that turn's own end closes
-	 *  the run and this stays owed. */
+	 *  starting a turn — the stranded-aside folds, a prompt that folded it and then bailed,
+	 *  {@link beginDispose}'s final flush. Asks before settling, and asks about every owner, not
+	 *  just the queues: a record can live in a closure that is waiting out an idle compaction
+	 *  (#wakeForIrc) or a session transition (#deliverAfterSessionTransition), where
+	 *  `#irc.hasPending()` cannot see it and the continuation it promised has not started yet.
+	 *  {@link ircWakesPending} is the account that covers those too. */
 	#settleOwedAgentEnd(): void {
 		const owed = this.#agentEndOwedTerminal;
 		if (!owed) return;
-		if (this.isStreaming || this.#hasTailContinuationWork()) return;
+		if (this.isStreaming || this.#hasTailContinuationWork() || this.ircWakesPending) return;
 		this.#agentEndOwedTerminal = undefined;
 		this.#emit(owed);
 	}
@@ -6224,6 +6234,10 @@ export class AgentSession implements SettingsScope {
 		this.#titleGenerationAbortController.abort();
 		this.#abortAutolearnCapture();
 		this.#irc.flushPending();
+		// That flush was the last consumer of the records a non-terminal `agent_end` promised a
+		// continuation for, and the subscribers it would reach are torn down below. Close the run
+		// here or its published promise is never kept.
+		this.#settleOwedAgentEnd();
 		this.yieldQueue.clear();
 		this.agent.setAsideMessageProvider(undefined);
 		this.agent.hasIrcInterrupts = undefined;
@@ -8823,6 +8837,10 @@ export class AgentSession implements SettingsScope {
 		// directly (auto-continue, queued-hidden drain) are autonomous and
 		// deliberately do not claim it.
 		const generation = this.#promptGeneration;
+		// A prompt admitted while the session was already disposing still runs to a settled turn
+		// (the `alreadyDisposing` contract in #prepareAgentStart); only a disposal that lands
+		// *during* this setup cancels it.
+		const alreadyDisposing = this.#isDisposed;
 		this.#promptSequence++;
 		const setupAbort = new AbortController();
 		this.#promptSetupAbortController = setupAbort;
@@ -9057,13 +9075,15 @@ export class AgentSession implements SettingsScope {
 			// weighed by this turn's compaction decision or pending-token snapshot above.
 			this.#irc.flushPending();
 			// The fold notifies subscribers synchronously, and one of them (an extension's
-			// message_end handler, the interactive Esc path) can abort this prompt from inside that
-			// notification. No await separates the fold from dispatch, but synchronous reentrancy
-			// needs none, so re-ask the generation before handing the turn to the agent. The folded
+			// message_end handler, the interactive Esc path, a host tearing the session down) can
+			// cancel this prompt from inside that notification. No await separates the fold from
+			// dispatch, but synchronous reentrancy needs none, so re-ask both cancellation signals
+			// before handing the turn to the agent: an abort bumps the generation, while
+			// beginDispose() latches `#isDisposed` and leaves the generation untouched. The folded
 			// records stay delivered — they are in the transcript, and the next turn sends them —
 			// and the `agent_end` they were holding open is closed by the settle drain this bail
-			// unwinds into (#drainStrandedQueuedMessages), which now finds nothing left to continue.
-			if (this.#promptGeneration !== generation) return false;
+			// unwinds into (#drainStrandedQueuedMessages), or by beginDispose's own flush.
+			if (this.#promptGeneration !== generation || (this.#isDisposed && !alreadyDisposing)) return false;
 			// Commit the plan-reference delivery flag only now that the message is
 			// actually handed to agent.prompt. Every pre-send setup step above can
 			// return (generation-bail) or throw (@-mention reads, before_agent_start
@@ -9970,10 +9990,15 @@ export class AgentSession implements SettingsScope {
 	/** @returns true iff `agent.prompt` was actually invoked. An abort or session-generation
 	 *  change racing the usage-aware preflight can return before dispatch — callers that treat
 	 *  this as proof of agent work (e.g. suppressing a local prompt_result because agent events
-	 *  are expected) must not assume dispatch happened just because this was awaited. */
+	 *  are expected) must not assume dispatch happened just because this was awaited.
+	 *
+	 *  `delivery` is the record's ownership, released here only once the run has actually taken
+	 *  it. Returning or throwing before that leaves it with the caller, which still has to place
+	 *  it somewhere. */
 	async #promptAgentInitiatedMessage(
 		message: CustomMessage,
 		options?: { acceptTerminalEmptyStop?: boolean },
+		delivery?: CustomMessageDelivery,
 	): Promise<boolean> {
 		const inFlightEpoch = this.#beginInFlight();
 		try {
@@ -9984,6 +10009,12 @@ export class AgentSession implements SettingsScope {
 			}
 			this.#recovery.setAcceptTerminalEmptyStop(acceptTerminalEmptyStop);
 			const run = this.agent.prompt(message);
+			// `agent.prompt` claims streaming synchronously before its first await, so this is the
+			// instant the run takes the record — and the only honest acceptance point. It rejects
+			// before ever appending when the agent holds no model or is already busy, and the
+			// returned promise also rejects for failures long after the record is safely in the
+			// transcript; neither is visible from the awaited result.
+			if (delivery && this.agent.state.isStreaming) delivery.owed = false;
 			// No dispatch-live wake here: an agent-initiated turn has no
 			// client promptTurn, so steers parked on a dispatching CLIENT
 			// prompt must keep parking through it — waking on this claim
@@ -10124,17 +10155,22 @@ export class AgentSession implements SettingsScope {
 		}
 	}
 
-	/** `onDeliveryOwned` fires once this call is past every bail point and the record is certain to
-	 *  be delivered into the live transcript or dropped with it. {@link #deliverAfterSessionTransition}
-	 *  uses it as the hand-off boundary: before it fires, the caller still owns the record and must
-	 *  put it back if this throws; after it, the record is this session's and a throw is a failed
-	 *  turn, not a lost message. */
+	/** `delivery`, when given, is the caller's claim on this record: it is released at each point
+	 *  below where the record reaches an owner that will deliver it, is dropped with the transcript
+	 *  it was sent to, or is handed to another carrier. Anything this method can return or throw
+	 *  from without reaching one of those points leaves the claim standing, and the caller — see
+	 *  {@link #deliverAfterSessionTransition} — is the only party left that can put the record back.
+	 *  A single hand-off point cannot express this: dispatch re-defers, drops and prompts along
+	 *  different paths, and `agent.prompt` can reject with the record never appended. */
 	async #dispatchCustomMessage<T = unknown>(
 		message: CustomMessagePayload<T>,
 		options: CustomMessageDeliveryOptions | undefined,
 		outcome: PromptDispatchOutcome,
-		onDeliveryOwned?: () => void,
+		delivery?: CustomMessageDelivery,
 	): Promise<boolean> {
+		const settle = () => {
+			if (delivery) delivery.owed = false;
+		};
 		// Captured before the awaits below — see #sessionGeneration's doc comment.
 		const sessionGeneration = this.#sessionGeneration;
 		// A message that may start a turn waits out idle compaction, as prompt() does; plain appends do not.
@@ -10149,7 +10185,11 @@ export class AgentSession implements SettingsScope {
 			// and an extension may send from that hook — so the delivery is handed to the settle instead
 			// and this call answers now, having started no turn.
 			if (this.isSessionTransitioning) {
+				// A second carrier takes the record, so this one no longer owes it. Leaving the claim
+				// standing would have the first carrier requeue in its `finally` while the second
+				// delivers the same record.
 				this.#deliverAfterSessionTransition(message, options, sessionGeneration, promptGeneration);
+				settle();
 				return false;
 			}
 			// A session change or disposal during the wait drops the message with the transcript it was sent to.
@@ -10157,6 +10197,7 @@ export class AgentSession implements SettingsScope {
 				this.#isDisposed ||
 				(this.#sessionGeneration !== sessionGeneration && (await this.#sessionGenerationChanged(sessionGeneration)))
 			) {
+				settle();
 				return false;
 			}
 			// An abort supersedes only the turn. The message stays in this session's transcript, as it did when the
@@ -10189,24 +10230,32 @@ export class AgentSession implements SettingsScope {
 		// beginDispose() latches synchronously and can land during the normalization above — on the
 		// deferred path its own disposal check ran a suspension earlier still, and nothing has
 		// re-asked since. Every delivery below either mutates a transcript being torn down or starts
-		// a turn on a disposed session, so re-ask here rather than at entry only.
-		if (this.#isDisposed) return false;
-		onDeliveryOwned?.();
+		// a turn on a disposed session, so re-ask here rather than at entry only; the record goes
+		// with the session, as it does on every other disposal drop.
+		if (this.#isDisposed) {
+			settle();
+			return false;
+		}
 		if (this.isStreaming) {
 			// Queued into a turn the agent owns: that turn holds the session. Busy only
 			// from another prompt's setup claims nothing (that prompt decides).
 			outcome.sessionClaimed = this.agent.state.isStreaming;
 			if (options?.deliverAs === "nextTurn") {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, options?.triggerTurn ?? false);
+				settle();
 				return false;
 			}
 			if (options?.deliverAs === "aside") {
-				if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
+				if (await this.#sessionGenerationChanged(sessionGeneration)) {
+					settle();
+					return false;
+				}
 				// Non-interrupting: the agent loop's step-boundary poll (see the setAsideMessageProvider
 				// registration in the constructor) picks this up without interrupting the current tool
 				// batch. Not an agent-core queue entry, so no drain-retry latch and no idle-queue drain
 				// scheduling here.
 				this.#irc.queueAside([normalizedAppMessage]);
+				settle();
 				return false;
 			}
 			this.#allowQueuedMessageDrainRetry();
@@ -10216,6 +10265,7 @@ export class AgentSession implements SettingsScope {
 			} else {
 				this.agent.steer(normalizedAppMessage);
 			}
+			settle();
 			this.#scheduleIdleQueueDrain();
 			return false;
 		}
@@ -10224,14 +10274,18 @@ export class AgentSession implements SettingsScope {
 			if (options?.triggerTurn) {
 				if (this.#clientBridge?.deferAgentInitiatedTurns && !this.#allowAcpAgentInitiatedTurns) {
 					this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
+					settle();
 					return false;
 				}
-				outcome.sessionClaimed = await this.#promptAgentInitiatedMessage(normalizedAppMessage, {
-					acceptTerminalEmptyStop: options.acceptTerminalEmptyStop === true,
-				});
+				outcome.sessionClaimed = await this.#promptAgentInitiatedMessage(
+					normalizedAppMessage,
+					{ acceptTerminalEmptyStop: options.acceptTerminalEmptyStop === true },
+					delivery,
+				);
 				return outcome.sessionClaimed;
 			}
 			this.agent.appendMessage(normalizedAppMessage);
+			settle();
 			this.sessionManager.appendCustomMessageEntry(
 				normalizedAppMessage.customType,
 				normalizedAppMessage.content,
@@ -10243,13 +10297,17 @@ export class AgentSession implements SettingsScope {
 		}
 
 		if (options?.deliverAs === "aside") {
-			if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
+			if (await this.#sessionGenerationChanged(sessionGeneration)) {
+				settle();
+				return false;
+			}
 			if (this.#planModeState?.enabled) {
 				// Plan mode stays user-driven: fold into context without an autonomous turn, same as
 				// IrcBridge.deliver()/#resumeStrandedIrcAsides do in plan mode. Routed through the
 				// event-emitting fold path (not a direct append) so a displayable aside that began
 				// streaming still gets the message_end its sender's rebuild-skip decision expects.
 				this.#recordWithoutTurn([normalizedAppMessage]);
+				settle();
 				return false;
 			}
 			if (this.#advisors.autoResumeSuppressed) {
@@ -10260,10 +10318,12 @@ export class AgentSession implements SettingsScope {
 				// as the plan-mode branch above) and stay user-driven, matching
 				// #resumeStrandedIrcAsides's post-interrupt fold branch.
 				this.#recordWithoutTurn([normalizedAppMessage]);
+				settle();
 				return false;
 			}
 			if (this.#clientBridge?.deferAgentInitiatedTurns && !this.#allowAcpAgentInitiatedTurns) {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
+				settle();
 				return false;
 			}
 			// The generation check suspends after the isStreaming check above, so a concurrent
@@ -10273,24 +10333,29 @@ export class AgentSession implements SettingsScope {
 			if (this.isStreaming) {
 				outcome.sessionClaimed = this.agent.state.isStreaming;
 				this.#irc.queueAside([normalizedAppMessage]);
+				settle();
 				return false;
 			}
-			outcome.sessionClaimed = await this.#promptAgentInitiatedMessage(normalizedAppMessage, {
-				acceptTerminalEmptyStop: options.acceptTerminalEmptyStop === true,
-			});
+			outcome.sessionClaimed = await this.#promptAgentInitiatedMessage(
+				normalizedAppMessage,
+				{ acceptTerminalEmptyStop: options.acceptTerminalEmptyStop === true },
+				delivery,
+			);
 			return outcome.sessionClaimed;
 		}
 
 		if (options?.triggerTurn) {
 			if (this.#clientBridge?.deferAgentInitiatedTurns && !this.#allowAcpAgentInitiatedTurns) {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
+				settle();
 				return false;
 			}
-			outcome.sessionClaimed = await this.#promptAgentInitiatedMessage(normalizedAppMessage);
+			outcome.sessionClaimed = await this.#promptAgentInitiatedMessage(normalizedAppMessage, undefined, delivery);
 			return outcome.sessionClaimed;
 		}
 
 		this.agent.appendMessage(normalizedAppMessage);
+		settle();
 		this.sessionManager.appendCustomMessageEntry(
 			normalizedAppMessage.customType,
 			normalizedAppMessage.content,
@@ -10327,9 +10392,11 @@ export class AgentSession implements SettingsScope {
 	 *
 	 *  The sender already has its answer (`false`, accepted without a turn), so a failure here has
 	 *  nobody left to reject to — `runtime-init.ts`'s reportSendError is long gone. This closure
-	 *  therefore owns the record until the dispatch takes it (`onDeliveryOwned`) or it is
-	 *  deliberately dropped with its transcript, and the `finally` asks whether it is still owed
-	 *  before releasing: anything still owed goes back on the IRC queue instead of vanishing. */
+	 *  therefore owns the record ({@link CustomMessageDelivery}) until the dispatch places it,
+	 *  drops it with its transcript, or hands it to a further carrier, and only then releases:
+	 *  anything still owed goes back on the IRC queue instead of vanishing. The counter is held
+	 *  across that recovery too, so {@link ircWakesPending} never reads empty while the record is
+	 *  still in flight between owners. */
 	#deliverAfterSessionTransition<T>(
 		message: CustomMessagePayload<T>,
 		options: CustomMessageDeliveryOptions | undefined,
@@ -10337,35 +10404,34 @@ export class AgentSession implements SettingsScope {
 		promptGeneration: number,
 	): void {
 		this.#deliveriesAwaitingSessionTransition++;
-		let owed = true;
+		const delivery: CustomMessageDelivery = { owed: true };
 		void this.waitForSessionTransition()
 			.then(async () => {
 				if (this.#isDisposed) {
-					owed = false;
+					delivery.owed = false;
 					return;
 				}
 				if (
 					this.#sessionGeneration !== sessionGeneration &&
 					(await this.#sessionGenerationChanged(sessionGeneration))
 				) {
-					owed = false;
+					delivery.owed = false;
 					return;
 				}
 				// An abort supersedes only the turn, exactly as on the inline path: the message stays in
 				// this session's transcript and is delivered like one that triggers none.
-				const delivery =
+				const dispatchOptions =
 					this.#promptGeneration !== promptGeneration
 						? { ...options, triggerTurn: false, deliverAs: undefined }
 						: options;
-				await this.#dispatchCustomMessage(message, delivery, { sessionClaimed: false }, () => {
-					owed = false;
-				});
+				await this.#dispatchCustomMessage(message, dispatchOptions, { sessionClaimed: false }, delivery);
 			})
 			.catch(error =>
 				logger.warn("Custom message delivery after a session transition failed", { error: String(error) }),
 			)
+			.then(() => (delivery.owed ? this.#requeueUndeliveredDelivery(message, sessionGeneration) : undefined))
+			.catch(error => logger.warn("Requeueing an undelivered custom message failed", { error: String(error) }))
 			.finally(() => {
-				if (owed) this.#requeueUndeliveredDelivery(message);
 				this.#deliveriesAwaitingSessionTransition--;
 			});
 	}
@@ -10375,8 +10441,16 @@ export class AgentSession implements SettingsScope {
 	 *  still reach it, and where {@link ircWakesPending} keeps the lifecycle from parking the
 	 *  session on top of it. No wake is started from here: the dispatch that just failed would be
 	 *  retried immediately on the same broken precondition (no model, no key), so the record waits
-	 *  for the next settle drain like any other stranded aside. */
-	#requeueUndeliveredDelivery<T>(message: CustomMessagePayload<T>): void {
+	 *  for the next settle drain like any other stranded aside.
+	 *
+	 *  Recovery makes the same transcript-ownership decision a successful delivery makes: only the
+	 *  transcript the record was sent to can claim it, so a committed session change discards it
+	 *  rather than letting it surface in the replacement and ride its next prompt. */
+	async #requeueUndeliveredDelivery<T>(message: CustomMessagePayload<T>, sessionGeneration: number): Promise<void> {
+		if (this.#isDisposed) return;
+		if (this.#sessionGeneration !== sessionGeneration && (await this.#sessionGenerationChanged(sessionGeneration))) {
+			return;
+		}
 		if (this.#isDisposed) return;
 		const normalized = normalizeCustomMessagePayload<T>(message);
 		this.#irc.queueAside([

@@ -38,8 +38,16 @@ describe("AgentSession settles what it promised", () => {
 	 *  `session_switch` hook is what sends the aside, so the send cannot park on the transition
 	 *  it runs inside, and the record lives only in #deliverAfterSessionTransition's closure
 	 *  until that transition settles. Returns once the transition is done and the deferred
-	 *  dispatch is under way. */
-	async function sendAsideFromSessionSwitchHook(body: string): Promise<MockModel> {
+	 *  dispatch is under way.
+	 *
+	 *  `beforeSwitch` installs a `session_before_switch` handler, so a test can hold or cancel a
+	 *  *second* transition; `secondCompaction` gates the idle compaction a re-dispatch waits on,
+	 *  which is where the record changes carriers. */
+	async function sendAsideFromSessionSwitchHook(
+		body: string,
+		beforeSwitch?: () => Promise<{ cancel: true } | undefined>,
+		secondCompaction?: () => Promise<void>,
+	): Promise<MockModel> {
 		const modelRegistry = new ModelRegistry(authStorage);
 		const mock = createMockModel({
 			provider: "openai",
@@ -53,13 +61,16 @@ describe("AgentSession settles what it promised", () => {
 		const runtime = new ExtensionRuntime();
 		const extension = await loadExtensionFromFactory(
 			pi => {
+				if (beforeSwitch) pi.on("session_before_switch", beforeSwitch);
 				pi.on("session_switch", async () => {
+					if (sendFinished) return;
 					hookEntered.resolve();
 					await session?.sendCustomMessage(
 						{ customType: "ext-aside", content: body, display: false, attribution: "agent" },
 						{ deliverAs: "aside" },
 					);
 					sendFinished = true;
+					if (secondCompaction) void session?.runIdleCompaction();
 					sendSettled.resolve();
 				});
 			},
@@ -88,7 +99,12 @@ describe("AgentSession settles what it promised", () => {
 
 		const compactionStarted = Promise.withResolvers<void>();
 		const releaseCompaction = Promise.withResolvers<void>();
+		let compactionRuns = 0;
 		const compactionSpy = spyOn(SessionMaintenance.prototype, "runAutoCompaction").mockImplementation(async () => {
+			if (++compactionRuns > 1 && secondCompaction) {
+				await secondCompaction();
+				return { continuationScheduled: false };
+			}
 			compactionStarted.resolve();
 			await releaseCompaction.promise;
 			return { continuationScheduled: false };
@@ -364,5 +380,167 @@ describe("AgentSession settles what it promised", () => {
 		// the folded aside is closed now that nothing is left to continue it.
 		expect(mock.calls.length).toBe(1);
 		expect(settles.at(-1)).toBe(true);
+	}, 20_000);
+
+	it("retains an accepted deferred message when the turn rejects before appending it", async () => {
+		const reached = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const normalizeSpy = gateNormalizationOf("NO_MODEL_RECORD", async () => {
+			reached.resolve();
+			await release.promise;
+		});
+		try {
+			const mock = await sendAsideFromSessionSwitchHook("NO_MODEL_RECORD");
+			await withTimeout(reached.promise, 5_000, "deferred delivery never reached normalization");
+			// `agent.prompt` rejects with no model before it ever appends the record, which is the
+			// failure the carrier has to survive: the last bail check is long past by then.
+			session?.agent.setModel(undefined as unknown as Model);
+			release.resolve();
+			for (let i = 0; i < 5; i++) await setImmediate();
+			expect(session?.ircWakesPending).toBe(true);
+
+			session?.agent.setModel(mock.model);
+			await session?.prompt("next");
+			await session?.waitForIdle();
+			expect(session?.messages.filter(m => m.role === "custom" && m.content === "NO_MODEL_RECORD")).toHaveLength(1);
+		} finally {
+			release.resolve();
+			normalizeSpy.mockRestore();
+		}
+	}, 45_000);
+
+	it("does not recover a failed delivery into the transcript that replaced its own", async () => {
+		const reached = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let first = true;
+		const normalizeSpy = gateNormalizationOf("OLD_TRANSCRIPT_RECORD", async () => {
+			if (!first) return;
+			first = false;
+			reached.resolve();
+			await release.promise;
+			throw new Error("normalization failed after transcript replacement");
+		});
+		try {
+			await sendAsideFromSessionSwitchHook("OLD_TRANSCRIPT_RECORD");
+			await withTimeout(reached.promise, 5_000, "deferred delivery never reached normalization");
+			const previousSessionId = session?.sessionId;
+			await session?.newSession();
+			expect(session?.sessionId).not.toBe(previousSessionId);
+			release.resolve();
+			for (let i = 0; i < 5; i++) await setImmediate();
+
+			await session?.prompt("new transcript");
+			await session?.waitForIdle();
+			// Recovery makes the same transcript decision delivery makes: the outgoing session's
+			// record must not surface in the replacement and ride its next prompt to the model.
+			expect(
+				session?.messages.filter(m => m.role === "custom" && m.content === "OLD_TRANSCRIPT_RECORD"),
+			).toHaveLength(0);
+		} finally {
+			release.resolve();
+			normalizeSpy.mockRestore();
+		}
+	}, 45_000);
+
+	it("hands a re-deferred delivery to its new carrier instead of delivering it twice", async () => {
+		const dispatchWaiting = Promise.withResolvers<void>();
+		const releaseDispatch = Promise.withResolvers<void>();
+		const beforeSwitchEntered = Promise.withResolvers<void>();
+		const releaseBeforeSwitch = Promise.withResolvers<void>();
+		let secondTransition = false;
+		try {
+			const mock = await sendAsideFromSessionSwitchHook(
+				"DOUBLE_CARRIER_RECORD",
+				async () => {
+					if (!secondTransition) return undefined;
+					beforeSwitchEntered.resolve();
+					await releaseBeforeSwitch.promise;
+					return { cancel: true };
+				},
+				async () => {
+					dispatchWaiting.resolve();
+					await releaseDispatch.promise;
+				},
+			);
+			await withTimeout(dispatchWaiting.promise, 5_000, "second compaction barrier not reached");
+			// The re-dispatch wakes inside a second transition, so it defers again — to a second
+			// carrier. Only one of the two may deliver, and neither may requeue what the other took.
+			secondTransition = true;
+			const transition = session?.newSession();
+			await beforeSwitchEntered.promise;
+			releaseDispatch.resolve();
+			for (let i = 0; i < 5; i++) await setImmediate();
+			releaseBeforeSwitch.resolve();
+			expect(await transition).toBe(false);
+			for (let i = 0; i < 5; i++) await setImmediate();
+			await session?.waitForIdle();
+
+			expect(
+				session?.messages.filter(m => m.role === "custom" && m.content === "DOUBLE_CARRIER_RECORD"),
+			).toHaveLength(1);
+			expect(mock.calls.length).toBe(1);
+		} finally {
+			releaseDispatch.resolve();
+			releaseBeforeSwitch.resolve();
+		}
+	}, 45_000);
+
+	it("does not close a run while the closure carrying its continuation waits out a compaction", async () => {
+		const { settles, mock } = await startPooledRunWithStrandedAside();
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const compactionSpy = spyOn(SessionMaintenance.prototype, "runAutoCompaction").mockImplementation(async () => {
+			started.resolve();
+			await release.promise;
+			return { continuationScheduled: false };
+		});
+		try {
+			const compaction = session?.runIdleCompaction();
+			await started.promise;
+			// Clearing the contract moves the stranded aside out of the IRC queue and into
+			// #wakeForIrc's compaction-wait closure: no physical queue holds it any more, but the
+			// continuation it was promised has not started.
+			await session?.setWorkPoolYieldItems([]);
+			await session?.abort({ reason: "internal" });
+			expect([...settles]).toEqual([false]);
+			expect(session?.ircWakesPending).toBe(true);
+
+			release.resolve();
+			await compaction;
+			for (let i = 0; i < 5; i++) await setImmediate();
+			await session?.waitForIdle();
+			expect(mock.calls.length).toBe(2);
+			expect(settles).toEqual([false, true]);
+		} finally {
+			release.resolve();
+			compactionSpy.mockRestore();
+		}
+	}, 20_000);
+
+	it("closes the run it promised a continuation for when disposal folds the last record", async () => {
+		const { settles } = await startPooledRunWithStrandedAside();
+		// beginDispose()'s own flush is the last consumer of that record, and it tears the
+		// subscribers down straight after: nothing later can publish the end it promised.
+		await session?.dispose();
+		expect(settles.at(-1)).toBe(true);
+	}, 20_000);
+
+	it("does not dispatch a prompt whose own fold disposed the session", async () => {
+		const { mock } = await startPooledRunWithStrandedAside();
+		const target = session;
+		// Disposal is the other synchronous cancellation a fold subscriber can cause, and unlike an
+		// abort it leaves the prompt generation untouched.
+		const unsubscribe = target?.agent.subscribe(async (event: AgentEvent) => {
+			if (event.type === "message_start" && JSON.stringify(event.message).includes("STRANDED_TRIGGER_ASIDE")) {
+				target?.beginDispose();
+			}
+		});
+		try {
+			await target?.prompt("CANCELLED_BY_DISPOSAL").catch(() => {});
+			await target?.waitForIdle();
+		} finally {
+			unsubscribe?.();
+		}
+		expect(mock.calls.length).toBe(1);
 	}, 20_000);
 });
