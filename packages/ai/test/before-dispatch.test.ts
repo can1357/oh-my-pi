@@ -15,7 +15,8 @@ import { clearCustomApis, registerCustomApi, unregisterCustomApis } from "@oh-my
 import * as duoWorkflow from "@oh-my-pi/pi-ai/providers/gitlab-duo-workflow";
 import { createMockModel, type MockContent, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { __providerInFlightForTesting, completeSimple, streamSimple } from "@oh-my-pi/pi-ai/stream";
-import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai/types";
+import type { Api, AssistantMessage, Context, Model, ModelSpec, SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 
 const SOURCE_ID = "before-dispatch-test";
@@ -306,5 +307,38 @@ describe("beforeDispatch", () => {
 		}
 
 		expect(order).toEqual(["hold", "dispatch"]);
+	});
+
+	// Every other test here takes a custom, mock or GitLab branch, none of which
+	// goes through `mapOptionsForApi`; an ordinary provider does, and the hold
+	// has to survive that mapping.
+	test("survives the option mapping an ordinary provider goes through", async () => {
+		const order: string[] = [];
+		const anthropic = buildModel({
+			id: "claude-test",
+			name: "Claude Test",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			baseUrl: "https://api.anthropic.com",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1_000,
+			maxTokens: 16,
+		} satisfies ModelSpec<"anthropic-messages">);
+
+		await streamSimple(anthropic, context(), {
+			apiKey: "test-key",
+			maxHttpAttempts: 1,
+			fetch: async () => {
+				order.push("request");
+				return new Response("{}", { status: 400 });
+			},
+			beforeDispatch: () => {
+				order.push("hold");
+			},
+		}).result();
+
+		expect(order).toEqual(["hold", "request"]);
 	});
 });

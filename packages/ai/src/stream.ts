@@ -1832,6 +1832,10 @@ function mapOptionsForApi<TApi extends Api>(
 		minimizeEffort: options?.minimizeEffort,
 		liveSteering: options?.liveSteering,
 		maxInFlightRequests: options?.maxInFlightRequests,
+		// A mapped provider reaches the dispatch chokepoint through this object,
+		// so the caller's hold has to travel in it; without it every ordinary
+		// Anthropic/OpenAI/Google request dispatched with `undefined`.
+		beforeDispatch: options?.beforeDispatch,
 		onPayload: options?.onPayload,
 		onResponse: options?.onResponse,
 		onSseEvent: options?.onSseEvent,
