@@ -408,7 +408,7 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	/** Resolves once every extension callback executing now has returned. */
 	async waitForPendingCallbacks(): Promise<void> {
 		while (this.#pendingCallbacks.size > 0) {
-			await Promise.all([...this.#pendingCallbacks]);
+			await Promise.all(this.#pendingCallbacks);
 		}
 	}
 

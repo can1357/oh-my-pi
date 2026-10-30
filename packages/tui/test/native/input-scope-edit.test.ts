@@ -73,4 +73,45 @@ describe("a native edit addressed to a retired extension editor", () => {
 		expect(calls).toEqual([]);
 		expect(host.getText()).toBe("draft!?");
 	});
+
+	it("reaches the host editor after a frame has dropped the retired one's node", async () => {
+		const owner = ownedScope();
+		const calls: Array<[string, boolean]> = [];
+		class ExtensionEditor extends Editor {
+			override handleNativeEvent(...args: Parameters<Editor["handleNativeEvent"]>): void {
+				calls.push(["handleNativeEvent", owner.inside()]);
+				super.handleNativeEvent(...args);
+			}
+		}
+		const extension = new ExtensionEditor(defaultEditorTheme);
+		extension.setText("draft");
+		const slot = new Container();
+		slot.addChild(extension);
+		const host = new Editor(defaultEditorTheme);
+		harness = await TspHarness.start(tui => {
+			tui.addChild(slot);
+			bindInputScope(extension, owner.scope, () => {
+				host.setText(Editor.prototype.getText.call(extension));
+				slot.clear();
+				slot.addChild(host);
+				tui.setFocus(host);
+				return host;
+			});
+			tui.setFocus(extension);
+		});
+		const h = harness;
+		const sf = h.terminal.surface!;
+		const oldId = h.find(n => n.k === "editor")!.id;
+		owner.retire();
+		// The frame that swaps the host's editor in drops the old node before the terminal's
+		// edit, typed against what it last showed, arrives.
+		await h.render();
+		const currentId = h.find(n => n.k === "editor")!.id;
+		expect(currentId).not.toBe(oldId);
+		expect(h.byId(oldId)).toBeFalsy();
+
+		h.event({ ev: "edit", sf, id: oldId, from: 5, to: 5, text: "!", cursor: 6, len: 5 });
+		expect(calls).toEqual([]);
+		expect(host.getText()).toBe("draft!");
+	});
 });

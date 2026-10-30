@@ -31,6 +31,7 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import { TSP_TEXT_KINDS, type TspKind, type TspNode, type TspOp, type TspScrollBy } from "@oh-my-pi/pi-wire";
 import { type Component, Container, CURSOR_MARKER } from "../tui";
 import { getNativeBlob } from "./blobs";
+import { isRetiredInputScope } from "../tools/renderer-scope";
 import { normalizeIconProps } from "./icons";
 import type { DescribeContext, NativeChild, NativeNode, NativeRevealAt } from "./node";
 import { isNativeSettled } from "./settle";
@@ -204,6 +205,21 @@ interface PendingMove {
 
 const EMPTY_ENTRIES: readonly Entry[] = [];
 
+/** How many components a reconciler remembers after it stopped describing them: enough for the
+ *  events a terminal sends during the frames it takes to see the replacement. */
+const DEPARTED_TARGETS = 32;
+
+/** The keypath a wire id names inside its component: what follows the component's id. */
+function keypathOf(id: string, dot: number): string {
+	return dot === -1
+		? ""
+		: id
+				.slice(dot + 1)
+				.split("/")
+				.map(unescapeKey)
+				.join("/");
+}
+
 /** One surface's reconciler. */
 export class Reconciler {
 	readonly surface: string;
@@ -233,6 +249,8 @@ export class Reconciler {
 	#regions: Record<RegionId, readonly Entry[]> | null = null;
 	#rows = 0;
 	#gone = new Set<string>();
+	/** Components dropped from the description, by wire id, oldest first ({@link departedTarget}). */
+	#departed = new Map<string, Component>();
 	/** Live-only regions to re-add after the surface was closed and adopted. */
 	#readd: readonly RegionId[] = [];
 	#regionOwners: Record<RegionId, Owner> = {
@@ -338,16 +356,19 @@ export class Reconciler {
 	target(id: string): NativeTarget | null {
 		const dot = id.indexOf(".");
 		const state = this.#byId.get(dot === -1 ? id : id.slice(0, dot));
-		if (!state) return null;
-		const keypath =
-			dot === -1
-				? ""
-				: id
-						.slice(dot + 1)
-						.split("/")
-						.map(unescapeKey)
-						.join("/");
-		return { component: state.comp, keypath };
+		return state ? { component: state.comp, keypath: keypathOf(id, dot) } : null;
+	}
+
+	/**
+	 * The component that described wire node `id` in a frame this one replaced, and the keypath it
+	 * gave it: one of the last {@link DEPARTED_TARGETS} components the reconciler stopped
+	 * describing. An event the terminal sent before it saw that frame is still addressed to it;
+	 * the caller decides whether anything takes its place (`inputRecipient`).
+	 */
+	departedTarget(id: string): NativeTarget | null {
+		const dot = id.indexOf(".");
+		const component = this.#departed.get(dot === -1 ? id : id.slice(0, dot));
+		return component ? { component, keypath: keypathOf(id, dot) } : null;
 	}
 
 	/**
@@ -921,6 +942,7 @@ export class Reconciler {
 		owner.state = state;
 		this.#states.set(comp, state);
 		this.#byId.set(id, state);
+		this.#departed.delete(id);
 		return state;
 	}
 
@@ -1120,6 +1142,17 @@ export class Reconciler {
 		state.parked = false;
 		this.#states.delete(state.comp);
 		this.#byId.delete(state.id);
+		this.#departed.delete(state.id);
+		// Only a component an extension supplied that has been taken out of input is remembered: an
+		// event still addressed to it goes to what its host put in its place. Nothing else is kept
+		// past its frame.
+		if (isRetiredInputScope(state.comp)) {
+			this.#departed.set(state.id, state.comp);
+			if (this.#departed.size > DEPARTED_TARGETS) {
+				const oldest = this.#departed.keys().next();
+				if (!oldest.done) this.#departed.delete(oldest.value);
+			}
+		}
 		this.#dropNested(state);
 	}
 }

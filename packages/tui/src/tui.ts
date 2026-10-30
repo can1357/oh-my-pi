@@ -27,7 +27,7 @@ import { LoopWatchdog } from "./loop-watchdog";
 import { assumedTspHello, NativeBackend, type NativeHost } from "./native/backend";
 import { col } from "./native/describe";
 import { TSP_PREFIX, type TspHello } from "./native/encode";
-import { retireGoneInputScopes, withInputScope } from "./tools/renderer-scope";
+import { adoptInputScope, retireGoneInputScopes, withInputScope } from "./tools/renderer-scope";
 import type { DescribeContext, NativeNode, NativeScreen, NativeSurfaceProvider, NativeUiEvent } from "./native/node";
 import { cropSixelTop } from "./sixel";
 import { STDOUT_BACKLOG_CLEAR_BYTES, setAltScreenActive, type Terminal } from "./terminal";
@@ -132,8 +132,10 @@ function resizeInPlaceOverride(): boolean | null {
 	if (override === "0" || override === "false") return false;
 	return null;
 }
-type InputListenerResult = { consume?: boolean; data?: string } | undefined;
-type InputListener = (data: string) => InputListenerResult;
+/** What an input listener answers: whether it consumed the key, and the text it passes on instead. */
+export type InputListenerResult = { consume?: boolean; data?: string } | undefined;
+/** A listener the TUI hands each key before the focused component (`TUI.addInputListener`). */
+export type InputListener = (data: string) => InputListenerResult;
 type StartListener = () => void;
 
 export interface RenderTimer {
@@ -361,11 +363,13 @@ export interface OverlayFocusOwner {
 	ownsOverlayFocusTarget(component: Component): boolean;
 }
 
+/** Whether `component` is `owner` or a focus target `owner` delegates to. An extension's overlay is
+ *  asked inside its scope, and owns nothing once that has gone (`withInputScope`). */
 function isOverlayFocusTarget(owner: Component, component: Component | null): boolean {
 	if (component === owner) return true;
 	if (!component) return false;
 	const candidate = owner as Component & Partial<OverlayFocusOwner>;
-	return candidate.ownsOverlayFocusTarget?.(component) === true;
+	return withInputScope(owner, () => candidate.ownsOverlayFocusTarget?.(component) === true) === true;
 }
 
 /**
@@ -1264,6 +1268,15 @@ export class TUI extends Container {
 		// Focus moving back into a released sheet makes it hold the keys again.
 		for (const entry of this.overlayStack) {
 			if (entry.released && isOverlayFocusTarget(entry.component, component)) entry.released = false;
+		}
+
+		// A focus target an extension's overlay owns is that extension's code: it takes input in the
+		// overlay's scope, and none once that has gone (`adoptInputScope`).
+		if (component) {
+			const owner = this.overlayStack.findLast(
+				entry => entry.component !== component && isOverlayFocusTarget(entry.component, component),
+			);
+			if (owner) adoptInputScope(component, owner.component);
 		}
 
 		const previousFocusedComponent = this.#focusedComponent;
@@ -3022,18 +3035,20 @@ export class TUI extends Container {
 		const focusedForCapture = this.#inputTarget();
 		if (
 			focusedForCapture &&
-			withInputScope(focusedForCapture, () => {
-				if (
-					!focusedForCapture.handleInput ||
-					(isKeyRelease(data) && !focusedForCapture.wantsKeyRelease) ||
-					!focusedForCapture.capturesInput?.(data)
-				) {
-					return false;
-				}
-				focusedForCapture.handleInput(data);
-				return true;
-			})
+			withInputScope(
+				focusedForCapture,
+				() =>
+					!!focusedForCapture.handleInput &&
+					(!isKeyRelease(data) || !!focusedForCapture.wantsKeyRelease) &&
+					!!focusedForCapture.capturesInput?.(data),
+			)
 		) {
+			// `capturesInput` is the component's own code, and it may have closed its dialog, ended its
+			// extension's session or moved focus. The key it reserved is consumed either way, and
+			// handled only by a component that still takes input.
+			if (this.#inputTarget() === focusedForCapture) {
+				withInputScope(focusedForCapture, () => focusedForCapture.handleInput?.(data));
+			}
 			this.requestRender();
 			return;
 		}
@@ -3069,14 +3084,15 @@ export class TUI extends Container {
 		const target = this.#inputTarget();
 		if (
 			target &&
-			withInputScope(target, () => {
-				if (!target.handleInput) return false;
+			withInputScope(
+				target,
 				// Filter out key release events unless component opts in
-				if (isKeyRelease(data) && !target.wantsKeyRelease) return false;
-				target.handleInput(data);
-				return true;
-			})
+				() => !!target.handleInput && (!isKeyRelease(data) || !!target.wantsKeyRelease),
+			)
 		) {
+			// Called in its own admission, answering what `handleInput` answers: an extension's
+			// asynchronous handler is then work its session owns, and waits for, until it ends.
+			withInputScope(target, () => target.handleInput?.(data));
 			this.requestRender();
 		}
 	}

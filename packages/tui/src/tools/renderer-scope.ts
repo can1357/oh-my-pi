@@ -55,6 +55,7 @@ export type ToolRendererStage = "call" | "result" | "message" | "thinking" | "wi
 function copyRenderedLines(lines: unknown): string[] {
 	if (!Array.isArray(lines)) throw new TypeError("render() returned no array of lines");
 	const length = lines.length;
+	// oxlint-disable-next-line unicorn/no-new-array -- render-frame length preallocation
 	const copy = new Array<string>(length);
 	for (let index = 0; index < length; index++) {
 		const line: unknown = lines[index];
@@ -64,9 +65,11 @@ function copyRenderedLines(lines: unknown): string[] {
 	return copy;
 }
 
-function handleInputOf(component: Component, data: string): void {
+/** Answers what the component's `handleInput` answers, so the scope it runs in owns an asynchronous
+ *  handler until it ends. */
+function handleInputOf(component: Component, data: string): unknown {
 	const handleInput = component.handleInput;
-	if (handleInput !== undefined) handleInput.call(component, data);
+	return handleInput === undefined ? undefined : handleInput.call(component, data);
 }
 
 function invalidateOf(component: Component): void {
@@ -210,6 +213,8 @@ interface InputScope {
 	retired: boolean;
 	/** What `retire` put in the component's place: the host's own editor; none for a closed dialog. */
 	successor: Component | undefined;
+	/** Focus targets inside this one that took its scope ({@link adoptInputScope}). */
+	adopted: Set<Component> | undefined;
 }
 
 /**
@@ -236,24 +241,55 @@ const awaitingRetirement = new Set<Component>();
  * `InteractiveMode#installEditor`'s configuration calls on it (`setUseTerminalCursor` through
  * `setText`, `composer.setEditor`), drawing it as a child of `editorContainer`, and
  * `InteractiveMode#applyAutocompleteProvider`'s `editor.setAutocompleteProvider`. For a `custom`
- * dialog it is the overlay compositor drawing it, its `ownsFocusTarget` hook asked by
- * `isOverlayFocusTarget` (`tui.ts:363`), and `showHookCustom`'s `getText`/`setText` on the
- * current editor. Once the session has gone none of these reach it: the sweep below runs before
- * input is dispatched and before a frame is drawn, and takes it out first.
+ * dialog it is the overlay compositor drawing it and `showHookCustom`'s `getText`/`setText` on the
+ * current editor. Its `ownsOverlayFocusTarget` hook is asked inside its scope (`tui.ts`
+ * `isOverlayFocusTarget`), and a focus target it owns takes input in its scope
+ * ({@link adoptInputScope}). Once the session has gone none of these reach it: the sweep below runs
+ * before input is dispatched and before a frame is drawn, and takes it out first.
  */
 export function bindInputScope(
 	component: Component,
 	scope: ToolRendererScope,
 	retire: () => Component | undefined,
 ): void {
-	inputScopes.set(component, { scope, retire, retired: false, successor: undefined });
+	inputScopes.set(component, { scope, retire, retired: false, successor: undefined, adopted: undefined });
 	awaitingRetirement.add(component);
+}
+
+/**
+ * Gives `target` — a component `owner` delegates keyboard focus to (`ownsOverlayFocusTarget`) —
+ * the scope `owner` takes input in, when `owner` is an extension's and `target` has none of its
+ * own: a child of an extension's dialog is the extension's code too, and is called for input and
+ * focus only inside that scope, and not at all once it has gone. Its owner's retirement is what
+ * takes it out of input; it has no successor of its own.
+ */
+export function adoptInputScope(target: Component, owner: Component): void {
+	const bound = inputScopes.get(owner);
+	if (bound === undefined || inputScopes.has(target)) return;
+	inputScopes.set(target, {
+		scope: bound.scope,
+		retire: () => undefined,
+		retired: false,
+		successor: undefined,
+		adopted: undefined,
+	});
+	awaitingRetirement.add(target);
+	(bound.adopted ??= new Set()).add(target);
+}
+
+/** Whether `component` is an extension's that has been, or is about to be, taken out of input:
+ *  its scope has gone. A pure question — it retires nothing. */
+export function isRetiredInputScope(component: Component): boolean {
+	const bound = inputScopes.get(component);
+	return bound !== undefined && (bound.retired || !bound.scope.live);
 }
 
 /** Lets go of a component the host has stopped using while its scope was live (a dialog closed,
  *  an editor replaced). The TUI still never calls into it once its scope has gone. */
 export function unbindInputScope(component: Component): void {
 	awaitingRetirement.delete(component);
+	const adopted = inputScopes.get(component)?.adopted;
+	if (adopted) for (const target of adopted) awaitingRetirement.delete(target);
 }
 
 /**
@@ -272,7 +308,8 @@ export function withInputScope<T>(component: Component | null | undefined, call:
  *  The TUI runs this before it resolves an input target and before it draws a frame. */
 export function retireGoneInputScopes(): void {
 	if (awaitingRetirement.size === 0) return;
-	for (const component of [...awaitingRetirement]) {
+	// A retirement may bind or unbind others; a Set visits what is added and skips what is removed.
+	for (const component of awaitingRetirement) {
 		const bound = inputScopes.get(component);
 		if (bound === undefined || bound.retired || bound.scope.live) continue;
 		bound.retired = true;
@@ -318,6 +355,7 @@ function optionalText(value: unknown, at: string): string | undefined {
 function copyLines(lines: unknown, at: string): string[] {
 	if (!Array.isArray(lines)) throw new TypeError(`autocomplete ${at} is not an array of lines`);
 	const length = lines.length;
+	// oxlint-disable-next-line unicorn/no-new-array -- per-keystroke length preallocation
 	const copy = new Array<string>(length);
 	for (let index = 0; index < length; index++) copy[index] = textField(lines[index], `${at}[${index}]`);
 	return copy;
@@ -350,6 +388,7 @@ function copySuggestions(value: Suggestions | null, at: string): Suggestions | n
 	const items: unknown = value.items;
 	if (!Array.isArray(items)) throw new TypeError(`autocomplete ${at}.items is not an array`);
 	const length = items.length;
+	// oxlint-disable-next-line unicorn/no-new-array -- per-keystroke length preallocation
 	const copy = new Array<AutocompleteItem>(length);
 	for (let index = 0; index < length; index++) copy[index] = copyItem(items[index], `${at}.items[${index}]`);
 	return { items: copy, prefix: textField(value.prefix, `${at}.prefix`) };

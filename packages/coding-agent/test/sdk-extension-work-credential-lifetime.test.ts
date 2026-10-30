@@ -135,6 +135,7 @@ describe("a disposed session's account pool waits for the extension work it admi
 				pi.events.on("review", () => {
 					const operation = work();
 					return {
+						// oxlint-disable-next-line unicorn/no-thenable -- the operation under test is a thenable read once
 						get then() {
 							thenReads++;
 							return thenReads === 1

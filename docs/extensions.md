@@ -266,6 +266,27 @@ check and the selection read the same model, and the guidance a compaction valid
 guidance it summarises with. Both refuse a function where data belongs, and `ctx.compact` drops
 fields `CompactOptions` does not declare.
 
+A model you are handed — `ctx.model`, `ctx.models.list()`/`current()`/`resolve()`, the rows
+`ctx.modelRegistry` answers with — is a copy of every field a model has, whatever object the
+host holds it in, so changing its `baseUrl` or `provider` changes nothing the host sends. Its
+`resolveHeaders` calls the host's own on the host's model. Pass it to `pi.setModel` to select it.
+
+What a `ctx.ui` factory is handed besides its theme is the session's own, not the host's:
+
+- **The TUI** has every member `TUI` declares. Drawing (`requestRender`, `requestComponentRender`,
+  `invalidate`), the frame's timing, `terminal.rows`/`columns` and the image budget an image draws
+  through reach the host's. An input listener, `setFocus`, `showOverlay` and `stop` take effect
+  only while your session is live: a listener is removed at the first key after the session has
+  gone, and an overlay is taken down. `start` ends only a suspension your session started. Members
+  that steer the host's renderer, its input or its other components — `children`, `addChild`,
+  `injectDebugInput`, `getFocused`, `hideOverlay`, paint and frame listeners, and the terminal's
+  `write` — throw, naming the member.
+- **The keybindings** a `custom` dialog or a `setEditorComponent` factory receives are a manager
+  of your own built from a copy of the user's bindings; changing them changes only yours.
+- **The provider** an `addAutocompleteProvider` factory wraps is an object whose methods call the
+  host's provider. Replace its methods freely: the host's provider, which the editor falls back to
+  once your session has gone, is not changed.
+
 ### A registered tool
 
 `pi.registerTool` copies your definition when it runs. A later edit to a plain JSON Schema

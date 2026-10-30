@@ -147,7 +147,7 @@ import { WorkPoolRegistry } from "../task/workpool";
 import { type BashPtyOptions, type BashResult, releaseShellSessions } from "../exec/bash-executor";
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
-import type { CustomTool } from "../extensibility/custom-tools/types";
+import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
 import type {
 	ExtensionCommandContext,
 	ExtensionRunner,
@@ -161,8 +161,17 @@ import type {
 	TreePreparation,
 } from "../extensibility/extensions";
 import { emitSessionShutdownEvent, TOP_LEVEL_AGENT, UNAVAILABLE_ANNOTATIONS } from "../extensibility/extensions";
+import { handHostModel } from "../extensibility/extensions/boundary-data";
 import { runExtensionCompact } from "../extensibility/extensions/compact-handler";
+import {
+	type ExtensionModelRegistry,
+	type ExtensionSessionManager,
+	handLocalProtocolOptions,
+	handModelRegistry,
+	handSessionManager,
+} from "../extensibility/extensions/context-surfaces";
 import { extensionEventFromSessionEvent } from "../extensibility/extensions/lifecycle-mirror";
+import { ExtensionRuntime } from "../extensibility/extensions/loader";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
@@ -602,6 +611,15 @@ const cfgWorkspacePromptInputs = combine({
 
 const PLAN_MODE_REMINDER_MAX = 3;
 const POST_PROMPT_DRAIN_TIMEOUT_MS = 5_000;
+
+/** The surfaces a session built without a runner hands author code, and the release of the claim
+ *  that owns them. */
+interface RunnerlessSurfaces {
+	readonly release: () => void;
+	readonly sessionManager: ExtensionSessionManager;
+	readonly modelRegistry: ExtensionModelRegistry;
+	readonly localProtocolOptions: LocalProtocolOptions;
+}
 const AGENT_START_POLICY_MAX_ATTEMPTS = 3;
 /**
  * How long the first turn waits for deferred UI/RPC MCP startup (the sdk's startup barrier
@@ -1151,6 +1169,10 @@ export class AgentSession implements SettingsScope {
 	 *  when no claim was taken — so disposal can neither release twice nor release a hold this
 	 *  session never took from a sibling that is still alive. */
 	#releaseExtensionCallbacks: (() => void) | undefined;
+	/** What a session built without a runner hands author code — a custom command
+	 *  (`#createCommandContext`), a custom tool called without the loop's context — and the release
+	 *  of the claim that owns it, taken on first use (`#runnerlessSurfacesClaimed`). */
+	#runnerlessSurfaces: RunnerlessSurfaces | undefined;
 	#getEvalPreludes: (() => readonly EvalPreludeDefinition[]) | undefined;
 	#reconcileBrowserMcpFilter: AgentSessionConfig["reconcileBrowserMcpFilter"];
 	#setMcpServerInstructionsSource: AgentSessionConfig["setMcpServerInstructionsSource"];
@@ -2585,6 +2607,7 @@ export class AgentSession implements SettingsScope {
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			notifyCommandMetadataChanged: () => this.#notifyCommandMetadataChanged(),
 			localProtocolOptions: () => this.#localProtocolOptions(),
+			customToolSurfaces: () => this.#customToolSurfaces(),
 			evalPreludes: () => this.getEvalPreludes(),
 			sessionAgents: () => this.getSessionAgents(),
 			waitForUser: dialog => this.waitForUser(dialog),
@@ -6680,6 +6703,9 @@ export class AgentSession implements SettingsScope {
 		} finally {
 			this.#releaseExtensionCallbacks = undefined;
 		}
+		// The release is idempotent; the surfaces stay, retired, so a command still holding them is
+		// refused rather than handed fresh ones.
+		this.#runnerlessSurfaces?.release();
 		// A deferred load the HOST started before disposal is extension code already running;
 		// refusing the next load (loadDeferredExtensions) says nothing about this one. Wait where
 		// it is awaited, inside the drain window, so its factory finishes before the release.
@@ -6706,10 +6732,11 @@ export class AgentSession implements SettingsScope {
 				);
 				// Draining the dispatch queue is not the same as the work being over. A queued-message
 				// preparation survives the reset below (which resolves the agent's running prompt
-				// under a queue claim), and an extension handler is RACED against its timeout, so a
-				// dispatch that returned says nothing about its callback. `drained` gates the account
-				// pool release, so it asks about both — without waiting on them here, where the cost
-				// would be a full window of disposal latency for work the deferred pass can outlast.
+				// under a queue claim), and an extension callback — a handler RACED against its
+				// timeout, an asynchronous `handleInput` a key started — runs on after its dispatch
+				// returned. `drained` gates the account pool release, so it asks about both, without
+				// waiting on them here, where the cost would be a full window of disposal latency for
+				// work the deferred pass can outlast.
 				drained = !this.#hasLiveSessionWork();
 			} catch (error) {
 				logger.warn("Active agent run still settling at dispose deadline", { error: String(error) });
@@ -8966,7 +8993,7 @@ export class AgentSession implements SettingsScope {
 	/** Resolves once no queued-message preparation is running. */
 	async #drainQueuedPreparations(): Promise<void> {
 		while (this.#queuedPreparations.size > 0) {
-			await Promise.allSettled([...this.#queuedPreparations]);
+			await Promise.allSettled(this.#queuedPreparations);
 		}
 	}
 
@@ -9509,21 +9536,35 @@ export class AgentSession implements SettingsScope {
 		if (this.#extensionRunner) {
 			return this.#extensionRunner.createCommandContext();
 		}
-
+		// A session built without a runner hands a command the same surfaces a runner's context does
+		// (`context-surfaces.ts`): the command is author code, and the host keeps building requests
+		// from its registry, its history and its model after the command returns. Their owner is a
+		// claim this session takes on first use and releases at dispose.
+		const surfaces = this.#runnerlessSurfacesClaimed();
+		const getModel = (): Model | undefined => this.model ?? undefined;
+		const sessionManager = this.sessionManager;
 		return {
+			// Fixed: a session without a runner has no UI, now or later.
 			ui: noOpUIContext,
 			mode: "print",
 			hasUI: false,
-			cwd: this.sessionManager.getCwd(),
-			sessionManager: this.sessionManager,
-			modelRegistry: this.#modelRegistry,
+			// Read when asked for, as a runner's context does: a relocation moves the session's cwd.
+			get cwd() {
+				return sessionManager.getCwd();
+			},
+			sessionManager: surfaces.sessionManager,
+			modelRegistry: surfaces.modelRegistry,
+			localProtocolOptions: surfaces.localProtocolOptions,
 			isProjectTrusted: () => true,
 			// Used only when the session has no extension runner. `createAgentSession` always builds
 			// one (carrying the real identity), so only hand-constructed sessions land here.
 			agent: TOP_LEVEL_AGENT,
 
-			model: this.model ?? undefined,
-			models: createExtensionModelQuery(this.#modelRegistry, this.settings, () => this.model ?? undefined),
+			get model() {
+				const model = getModel();
+				return model && handHostModel(model);
+			},
+			models: createExtensionModelQuery(this.#modelRegistry, this.settings, getModel),
 			isIdle: () => !this.isStreaming,
 			abort: () => {
 				void this.abort();
@@ -9579,6 +9620,37 @@ export class AgentSession implements SettingsScope {
 		};
 	}
 
+	/** The surfaces a session built without a runner hands author code, owned by a claim taken on
+	 *  first use and released at dispose. A claim taken after dispose is retired at once, so the
+	 *  surfaces refuse. */
+	#runnerlessSurfacesClaimed(): RunnerlessSurfaces {
+		if (this.#runnerlessSurfaces) return this.#runnerlessSurfaces;
+		const owner = new ExtensionRuntime();
+		const release = owner.beginSession();
+		if (this.#isDisposed) release();
+		this.#runnerlessSurfaces = {
+			release,
+			sessionManager: handSessionManager(this.sessionManager, owner),
+			modelRegistry: handModelRegistry(this.#modelRegistry, owner),
+			localProtocolOptions: handLocalProtocolOptions(this.#localProtocolOptions()),
+		};
+		return this.#runnerlessSurfaces;
+	}
+
+	/** The session's services as a custom tool is handed them when it is called without the agent
+	 *  loop's context: what an extension's context hands (`context-surfaces.ts`) — the runner's,
+	 *  or this session's own surfaces when it has none. */
+	#customToolSurfaces(): Pick<CustomToolContext, "sessionManager" | "modelRegistry" | "localProtocolOptions"> {
+		const runner = this.#extensionRunner;
+		if (!runner) return this.#runnerlessSurfacesClaimed();
+		const context = runner.createContext();
+		return {
+			sessionManager: context.sessionManager,
+			modelRegistry: context.modelRegistry,
+			localProtocolOptions: context.localProtocolOptions,
+		};
+	}
+
 	/** Lazily create the runner-less command-context timer registry (#5664). */
 	#fallbackTimers(): ManagedTimers {
 		this.#fallbackExtensionTimers ??= new ManagedTimers((event, error) =>
@@ -9605,12 +9677,13 @@ export class AgentSession implements SettingsScope {
 			this.#mcpPromptCommands.find(c => c.command.name === commandName);
 		if (!loaded) return null;
 
-		// Get command context from extension runner (includes session control methods)
+		// Get command context from extension runner (includes session control methods). Delegated to,
+		// not spread: a spread reads each getter once, here — `model` among them — and the command
+		// would go on seeing that copy after it switched models.
 		const baseCtx = this.#createCommandContext();
-		const ctx = {
-			...baseCtx,
-			hasQueuedMessages: baseCtx.hasPendingMessages,
-		} as unknown as CustomCommandContext;
+		const ctx = Object.create(baseCtx, {
+			hasQueuedMessages: { value: baseCtx.hasPendingMessages, enumerable: true },
+		}) as CustomCommandContext;
 
 		try {
 			const args = parseCommandArgs(argsString);

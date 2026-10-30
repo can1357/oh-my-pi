@@ -79,7 +79,7 @@ function sessionGate(): SessionGate {
 			return held.size > 0;
 		},
 		async released() {
-			while (held.size > 0) await Promise.all([...held]);
+			while (held.size > 0) await Promise.all(held);
 		},
 	};
 	return gate;

@@ -1400,7 +1400,10 @@ function createCustomToolContext(ctx: ExtensionContext): CustomToolContext {
 	return {
 		sessionManager: ctx.sessionManager,
 		modelRegistry: ctx.modelRegistry,
-		model: ctx.model,
+		// Read when asked for, as `ctx.model` is: a tool that switched models sees the one it chose.
+		get model() {
+			return ctx.model;
+		},
 		isIdle: ctx.isIdle,
 		hasQueuedMessages: ctx.hasPendingMessages,
 		abort: ctx.abort,

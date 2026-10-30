@@ -25,7 +25,7 @@ import type {
 	ToolSpeculationStreamSession,
 } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, ImageContent, Model, TextContent } from "@oh-my-pi/pi-ai";
 import { AdmittedSignal, type ProviderCallGate } from "@oh-my-pi/pi-ai/auth/provider-gate";
 import {
 	type ContextHistoryIndexCarrier,
@@ -34,6 +34,7 @@ import {
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { wireJsonSchemaOptions } from "@oh-my-pi/pi-ai/utils/schema";
 import type { NativeToolView } from "@oh-my-pi/pi-tui/tools/renderer";
+import { MODEL_ROW } from "../../config/model-registry";
 import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
 import type { CustomMessagePayload } from "../../session/messages";
@@ -484,24 +485,67 @@ export class HandedSignals {
  * arguments, a fallback's request — so that what the callback does to it (an edit in place, an
  * installed getter) stays on the copy, and the host's own record reads the same afterwards.
  *
- * Plain objects, arrays, maps and sets are copied all the way down; strings and the other
- * primitives are shared, since nothing can change them. Binary data and dates are copied
- * (`copyBuiltInData`). An error is copied with its own properties (`message`, `code`, `errno`)
- * and keeps its class. An `AbortSignal` is handed as the counterpart `signals` admits for it, when
- * the call hands any. Any other class instance is a capability the host hands over on purpose and
- * is handed as itself, as is a function. Symbol-keyed host markers stay with the host, as
- * `structuredClone` leaves them.
+ * What reaches here is data, and it is copied as data whatever it was built with. Whether a value
+ * crosses the boundary as itself is decided by what it is for, never by its shape: the host hands
+ * a capability only through a surface built for it (`context-surfaces.ts`, {@link handHostModel}),
+ * so an object found inside data is never one, and a class instance is copied like a plain object.
+ *
+ * Objects, arrays, maps and sets are copied all the way down; strings and the other primitives are
+ * shared, since nothing can change them. Binary data and dates are copied (`copyBuiltInData`), and
+ * a regular expression is rebuilt from its source and flags. An object of any other class is copied
+ * as the data it holds, as `structuredClone` copies one: its own enumerable string-keyed fields,
+ * onto a plain object. An error is copied with its own properties (`message`, `code`, `errno`) and
+ * keeps its class. An `AbortSignal` is handed as the counterpart `signals` admits for it, or, when
+ * the call hands none, as a signal of its own that follows it. A function is host code, handed as
+ * itself to be called. Symbol-keyed host markers stay with the host, as `structuredClone` leaves
+ * them.
  */
 export function copyHostData<T>(value: T, signals?: HandedSignals): T {
 	return copyHostValue(value, new Map(), signals) as T;
+}
+
+/**
+ * A model the host hands an extension — the session's (`ctx.model`, `ctx.models.current()`), a
+ * registry row (`ctx.models.list()`, `ctx.modelRegistry.find()`) — copied by what a model is,
+ * whatever object holds it: a registry row and a class an SDK caller selected are handed alike.
+ *
+ * The host goes on building requests from its own model after the extension is done with this one
+ * — the credential `provider` chooses, the endpoint `baseUrl` names — so the copy is the
+ * extension's alone: every field a model has ({@link MODEL_ROW}), read as the host reads it (a
+ * class's getter or an inherited field included), copied as data ({@link copyHostData}) onto a
+ * plain object. A `resolveHeaders` is the host's code, not data: the copy's calls it on the host's
+ * model, with a signal of the host's own that follows the one the extension passes, and answers a
+ * copy.
+ */
+export function handHostModel(model: Model<Api>): Model<Api> {
+	const copy: Record<PropertyKey, unknown> = {};
+	for (const [field] of MODEL_ROW.fields) {
+		const value: unknown = Reflect.get(model, field);
+		if (value === undefined) continue;
+		copy[field] =
+			field === "resolveHeaders" && typeof value === "function"
+				? handHostResolver(value, model)
+				: copyHostData(value);
+	}
+	// Built from every field `Model` declares (`MODEL_ROW` is checked against it), so it is one.
+	const handed = copy as unknown as Model<Api>;
+	return handed;
+}
+
+function handHostResolver(resolver: Function, model: Model<Api>): NonNullable<Model<Api>["resolveHeaders"]> {
+	return async signal => {
+		const followed = signal === undefined ? undefined : AbortSignal.any([signal]);
+		const headers: Record<string, string> | undefined = await Reflect.apply(resolver, model, [followed]);
+		return copyHostData(headers);
+	};
 }
 
 function copyHostValue(value: unknown, copies: Map<object, unknown>, signals: HandedSignals | undefined): unknown {
 	if (typeof value !== "object" || value === null) return value;
 	const known = copies.get(value);
 	if (known !== undefined) return known;
-	if (signals && value instanceof AbortSignal) {
-		const admitted = signals.admit(value);
+	if (value instanceof AbortSignal) {
+		const admitted = signals ? signals.admit(value) : AbortSignal.any([value]);
 		copies.set(value, admitted);
 		return admitted;
 	}
@@ -509,6 +553,11 @@ function copyHostValue(value: unknown, copies: Map<object, unknown>, signals: Ha
 	if (builtIn !== undefined) {
 		copies.set(value, builtIn);
 		return builtIn;
+	}
+	if (types.isRegExp(value)) {
+		const copy = new RegExp(value);
+		copies.set(value, copy);
+		return copy;
 	}
 	if (Array.isArray(value)) {
 		const copy: unknown[] = [];
@@ -542,8 +591,6 @@ function copyHostValue(value: unknown, copies: Map<object, unknown>, signals: Ha
 		}
 		return copy;
 	}
-	const prototype: unknown = Object.getPrototypeOf(value);
-	if (prototype !== Object.prototype && prototype !== null) return value;
 	const copy: Record<string, unknown> = {};
 	copies.set(value, copy);
 	for (const key of Object.keys(value)) {

@@ -26,8 +26,21 @@
  */
 import type { ApiKeyResolver, Model } from "@oh-my-pi/pi-ai";
 import type { AuthApiKeyOptions } from "@oh-my-pi/pi-ai/auth-storage";
+import type {
+	AutocompleteItem,
+	AutocompleteProvider,
+	Component,
+	ImageBudget,
+	InputListener,
+	InputListenerResult,
+	OverlayHandle,
+	OverlayOptions,
+	Terminal,
+	TUI,
+} from "@oh-my-pi/pi-tui";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
-import type { ToolRendererScope } from "@oh-my-pi/pi-tui/tools/renderer-scope";
+import { bindInputScope, type ToolRendererScope } from "@oh-my-pi/pi-tui/tools/renderer-scope";
 import type { ApiKeyResolverModel, ApiKeyResolverOptions } from "../../config/api-key-resolver";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
@@ -35,7 +48,7 @@ import type { MemoryRuntimeContext } from "../../memory-backend";
 import type { ArtifactManager } from "../../session/artifacts";
 import type { ReadonlySessionManager } from "../../session/session-manager";
 import { type AuthorDataSite, CALLBACK, DATA, fieldsOf, snapshotAuthorData } from "./author-data";
-import { copyHostData } from "./boundary-data";
+import { copyHostData, handHostModel } from "./boundary-data";
 import { copyHandedModel } from "./compact-handler";
 import type {
 	ExtensionCallbackOwner,
@@ -180,8 +193,9 @@ const AUTH_OPTIONS = fieldsOf<AuthApiKeyOptions>({
 const RESOLVER_OPTIONS = fieldsOf<ApiKeyResolverOptions>({ sessionId: DATA, baseUrl: DATA, modelId: DATA });
 
 /** The registry as an extension's context hands it ({@link ExtensionModelRegistry}). A model the
- *  extension passes is copied as `pi.setModel` copies one ({@link copyHandedModel}); every row,
- *  state and header set the registry answers with is a copy. */
+ *  extension passes is copied as `pi.setModel` copies one ({@link copyHandedModel}); every row the
+ *  registry answers with is copied by what a model is ({@link handHostModel}), and every state and
+ *  header set it answers with is a copy. */
 export function handModelRegistry(registry: ModelRegistry, owner: ExtensionCallbackOwner): ExtensionModelRegistry {
 	const subject = "ctx.modelRegistry";
 	const model = <M extends object>(value: M): M =>
@@ -224,16 +238,16 @@ export function handModelRegistry(registry: ModelRegistry, owner: ExtensionCallb
 		getError: () => copyHostData(registry.getError()),
 		contextWindowTiers: target => copyHostData(registry.contextWindowTiers(data(owner, target, subject, "model"))),
 		getAll: kind =>
-			copyHostData(registry.getAll(kind === undefined ? undefined : data(owner, kind, subject, "kind"))),
+			registry.getAll(kind === undefined ? undefined : data(owner, kind, subject, "kind")).map(handHostModel),
 		getAvailableForProviders: (providers, kind) =>
-			copyHostData(
-				registry.getAvailableForProviders(
+			registry
+				.getAvailableForProviders(
 					copiedIn(owner, () => new Set(Array.from(providers, provider => String(provider)))),
 					kind === undefined ? undefined : data(owner, kind, subject, "kind"),
-				),
-			),
+				)
+				.map(handHostModel),
 		getAvailable: kind =>
-			copyHostData(registry.getAvailable(kind === undefined ? undefined : data(owner, kind, subject, "kind"))),
+			registry.getAvailable(kind === undefined ? undefined : data(owner, kind, subject, "kind")).map(handHostModel),
 		hasConfiguredAuth: row => registry.hasConfiguredAuth(model(row)),
 		hasConcreteAuth: provider => registry.hasConcreteAuth(text(owner, provider)),
 		hasCommandBackedApiKey: provider => registry.hasCommandBackedApiKey(text(owner, provider)),
@@ -243,8 +257,11 @@ export function handModelRegistry(registry: ModelRegistry, owner: ExtensionCallb
 		hasProvider: provider => registry.hasProvider(text(owner, provider)),
 		getProviderDiscoveryState: provider => copyHostData(registry.getProviderDiscoveryState(text(owner, provider))),
 		isProviderDiscoveryPending: provider => registry.isProviderDiscoveryPending(text(owner, provider)),
-		find: (provider, modelId) => copyHostData(registry.find(text(owner, provider), text(owner, modelId))),
-		getProviderModels: provider => copyHostData(registry.getProviderModels(text(owner, provider))),
+		find: (provider, modelId) => {
+			const row = registry.find(text(owner, provider), text(owner, modelId));
+			return row && handHostModel(row);
+		},
+		getProviderModels: provider => registry.getProviderModels(text(owner, provider)).map(handHostModel),
 		getProviderBaseUrl: provider => registry.getProviderBaseUrl(text(owner, provider)),
 		getProviderHeaders: async provider => copyHostData(await registry.getProviderHeaders(text(owner, provider))),
 		resolveModelHeaders: async (row, signal) =>
@@ -353,12 +370,29 @@ export function handSessionManager(
 // ---------------------------------------------------------------------------------------------
 
 /** `local://` as the host resolves it for this session; the extension calls the host's own
- *  answers and cannot change them. */
+ *  answers and cannot change them. Each member is read from the host's options when asked for,
+ *  so a host that swaps one later is followed; a member the extension assigns replaces it on this
+ *  object only. */
 export function handLocalProtocolOptions(options: LocalProtocolOptions): LocalProtocolOptions {
-	const { getArtifactsDir, getSessionId } = options;
+	const assigned = new Map<keyof LocalProtocolOptions, unknown>();
+	const member = <K extends keyof LocalProtocolOptions>(key: K): LocalProtocolOptions[K] => {
+		if (assigned.has(key)) return assigned.get(key) as LocalProtocolOptions[K];
+		const host = options[key];
+		return host && ((() => Reflect.apply(host, options, [])) as LocalProtocolOptions[K]);
+	};
 	const handed: Decided<LocalProtocolOptions> = {
-		getArtifactsDir: getArtifactsDir && (() => Reflect.apply(getArtifactsDir, options, [])),
-		getSessionId: getSessionId && (() => Reflect.apply(getSessionId, options, [])),
+		get getArtifactsDir() {
+			return member("getArtifactsDir");
+		},
+		set getArtifactsDir(value) {
+			assigned.set("getArtifactsDir", value);
+		},
+		get getSessionId() {
+			return member("getSessionId");
+		},
+		set getSessionId(value) {
+			assigned.set("getSessionId", value);
+		},
 	};
 	return handed;
 }
@@ -547,6 +581,460 @@ const CUSTOM_OPTIONS = fieldsOf<ExtensionCustomOptions>({
 	signal: CALLBACK,
 });
 
+// ---------------------------------------------------------------------------------------------
+// What a ctx.ui factory is handed: the TUI, the keybindings, the provider it wraps
+// ---------------------------------------------------------------------------------------------
+
+/** A member a surface lists but does not hand: there, so the surface has every member its type
+ *  declares, and refusing with its name when used. */
+function withheld(subject: string, member: string): never {
+	throw new Error(`${subject}: ${member} is the host's own; an extension's component cannot use it.`);
+}
+
+const TUI_SUBJECT = "ctx.ui tui";
+
+const OVERLAY_OPTIONS = fieldsOf<OverlayOptions>({
+	width: DATA,
+	minWidth: DATA,
+	maxHeight: DATA,
+	anchor: DATA,
+	offsetX: DATA,
+	offsetY: DATA,
+	row: DATA,
+	col: DATA,
+	margin: DATA,
+	visible: CALLBACK,
+	fullscreen: DATA,
+	mouseTracking: DATA,
+});
+
+const INERT_OVERLAY: OverlayHandle = { hide() {}, setHidden() {}, isHidden: () => true };
+
+/** What a session's input listener answered, read inside its scope: whether it consumed the key,
+ *  and the text it passes on in its place. */
+function copyListenerResult(result: unknown): InputListenerResult {
+	if (typeof result !== "object" || result === null) return undefined;
+	const consume: unknown = Reflect.get(result, "consume");
+	const data: unknown = Reflect.get(result, "data");
+	return { consume: consume === true, ...(typeof data === "string" && { data }) };
+}
+
+/** Each TUI handed out, per session scope and host TUI: one per pair, so it compares equal to
+ *  itself across factories. */
+const handedTUIs = new WeakMap<ToolRendererScope, WeakMap<TUI, TUI>>();
+
+/**
+ * The host's TUI as a session's component factory is handed it. The TUI is one object for the
+ * whole process: it takes every session's keystrokes, draws every frame, and runs the screen. So
+ * the factory is handed an object of the session's own whose members are listed (`Decided`):
+ *
+ * - drawing — a render request, the frame's timing, the terminal's size ({@link handTerminal}) and
+ *   the image budget an image draws through ({@link handImageBudget}) — calls the host's TUI;
+ * - an input listener, a focus change and an overlay are the session's, made only while its scope
+ *   is live and running in it: a listener is taken off the TUI at the first key after the scope
+ *   has gone and is never called again, and an overlay is taken down the moment the TUI's
+ *   retirement sweep finds its scope gone (`bindInputScope`). A suspension (`stop`) is made only
+ *   while the scope is live, and only the session's own suspension can be ended (`start`), at any
+ *   time, so a session that went while suspended does not leave the host stopped;
+ * - everything that steers the host's renderer, its input, its screen and its other components —
+ *   its children, its listeners for paints and frames, its debug input — is withheld.
+ */
+export function handTUI(tui: TUI, owner: ExtensionCallbackOwner, scope: ToolRendererScope): TUI {
+	// A host with no TUI to give (a test's bare controller) passes nothing, and nothing is handed.
+	if (tui === undefined || tui === null) return tui;
+	let byTUI = handedTUIs.get(scope);
+	if (!byTUI) {
+		byTUI = new WeakMap();
+		handedTUIs.set(scope, byTUI);
+	}
+	const known = byTUI.get(tui);
+	if (known) return known;
+	const refuse = (member: string): never => withheld(TUI_SUBJECT, member);
+	/** Each listener the session added, with what takes it off the host's TUI. */
+	const listeners = new Map<InputListener, () => void>();
+	let suspended = false;
+	const handed: Decided<TUI> = {
+		requestRender: force => tui.requestRender(force === true),
+		requestComponentRender: component => tui.requestComponentRender(component),
+		renderNow: () => tui.renderNow(),
+		invalidate: () => tui.invalidate(),
+		get fullRedraws() {
+			return tui.fullRedraws;
+		},
+		get synchronizedOutput() {
+			return tui.synchronizedOutput;
+		},
+		get lastFrameCostMs() {
+			return tui.lastFrameCostMs;
+		},
+		get nativeRendering() {
+			return tui.nativeRendering;
+		},
+		get nativeFallbackCount() {
+			return tui.nativeFallbackCount;
+		},
+		get terminal() {
+			return handTerminal(tui.terminal);
+		},
+		get imageBudget() {
+			return handImageBudget(tui.imageBudget);
+		},
+		getShowHardwareCursor: () => tui.getShowHardwareCursor(),
+		getResizeScrollback: () => tui.getResizeScrollback(),
+		hasOverlay: () => tui.hasOverlay(),
+		addInputListener: (listener, options) => {
+			if (!scope.live) return () => {};
+			const prepend = copiedIn(owner, () => options?.prepend === true);
+			let remove = (): void => {};
+			const unsubscribe = tui.addInputListener(
+				data => {
+					if (!scope.live) {
+						remove();
+						return undefined;
+					}
+					return scope.run(() => copyListenerResult(listener(data)));
+				},
+				{ prepend },
+			);
+			remove = () => {
+				unsubscribe();
+				listeners.delete(listener);
+			};
+			listeners.set(listener, remove);
+			return remove;
+		},
+		removeInputListener: listener => listeners.get(listener)?.(),
+		setFocus: component => {
+			if (scope.live) tui.setFocus(component);
+		},
+		showOverlay: (component, options) => {
+			if (!scope.live) return INERT_OVERLAY;
+			const copied =
+				options === undefined
+					? undefined
+					: copiedIn(
+							owner,
+							() =>
+								snapshotAuthorData(
+									options,
+									OVERLAY_OPTIONS,
+									site(TUI_SUBJECT, "showOverlay() options"),
+									new Map(),
+								) as OverlayOptions,
+						);
+			const visible = copied?.visible;
+			const handle = tui.showOverlay(
+				component,
+				copied && {
+					...copied,
+					visible:
+						typeof visible === "function"
+							? (width, height) => scope.live && scope.run(() => visible(width, height) === true)
+							: undefined,
+				},
+			);
+			bindInputScope(component, scope, () => {
+				handle.hide();
+				return undefined;
+			});
+			return handle;
+		},
+		stop: () => {
+			if (!scope.live || suspended) return;
+			suspended = true;
+			tui.stop();
+		},
+		start: () => {
+			if (!suspended) return;
+			suspended = false;
+			tui.start();
+		},
+		get children(): Component[] {
+			return refuse("children");
+		},
+		get overlayStack(): TUI["overlayStack"] {
+			return refuse("overlayStack");
+		},
+		get onDebug() {
+			return undefined;
+		},
+		setIgnoreTight: () => refuse("setIgnoreTight()"),
+		addChild: () => refuse("addChild()"),
+		removeChild: () => refuse("removeChild()"),
+		clear: () => refuse("clear()"),
+		disposeChildren: () => refuse("disposeChildren()"),
+		releaseRenderCaches: () => refuse("releaseRenderCaches()"),
+		dispose: () => refuse("dispose()"),
+		render: () => refuse("render()"),
+		describe: () => refuse("describe()"),
+		addPaintListener: () => refuse("addPaintListener()"),
+		addFrameWriteListener: () => refuse("addFrameWriteListener()"),
+		addStartListener: () => refuse("addStartListener()"),
+		setFrameProvider: () => refuse("setFrameProvider()"),
+		setMaxInlineImages: () => refuse("setMaxInlineImages()"),
+		setResizeScrollback: () => refuse("setResizeScrollback()"),
+		clearInlineImages: () => refuse("clearInlineImages()"),
+		setShowHardwareCursor: () => refuse("setShowHardwareCursor()"),
+		getFocused: () => refuse("getFocused()"),
+		getDebugPaint: () => refuse("getDebugPaint()"),
+		getDebugDocument: () => refuse("getDebugDocument()"),
+		injectDebugInput: () => refuse("injectDebugInput()"),
+		hideOverlay: () => refuse("hideOverlay()"),
+		getMutableViewport: () => refuse("getMutableViewport()"),
+		getFilledHistoryRows: () => refuse("getFilledHistoryRows()"),
+		hasProviderHistory: () => refuse("hasProviderHistory()"),
+		setInlineMouseTrackingProvider: () => refuse("setInlineMouseTrackingProvider()"),
+		closeNative: () => refuse("closeNative()"),
+		getNativeDocument: () => refuse("getNativeDocument()"),
+		getNativeFrames: () => refuse("getNativeFrames()"),
+		enableInput: () => refuse("enableInput()"),
+		releaseHeldInput: () => refuse("releaseHeldInput()"),
+		replaceHeldFocus: () => refuse("replaceHeldFocus()"),
+		resetDisplay: () => refuse("resetDisplay()"),
+		scheduleAfter: () => refuse("scheduleAfter()"),
+	};
+	// `TUI` is a class with private state, so no object the host builds can be one; this object
+	// has every public member, each handed, scoped or refused as listed above.
+	const asTUI = handed as unknown as TUI;
+	byTUI.set(tui, asTUI);
+	return asTUI;
+}
+
+const TERMINAL_SUBJECT = "ctx.ui tui.terminal";
+const handedTerminals = new WeakMap<Terminal, Terminal>();
+
+/** The host's terminal as a session's component reads it: its size and what it reported about
+ *  itself. Everything that writes to it or subscribes to it is the host's renderer's. */
+function handTerminal(terminal: Terminal): Terminal {
+	const known = handedTerminals.get(terminal);
+	if (known) return known;
+	const refuse = (member: string): never => withheld(TERMINAL_SUBJECT, member);
+	const handed: Decided<Terminal> = {
+		get columns() {
+			return terminal.columns;
+		},
+		get rows() {
+			return terminal.rows;
+		},
+		get pendingOutputBytes() {
+			return terminal.pendingOutputBytes;
+		},
+		get hostOwnsGridOnResize() {
+			return terminal.hostOwnsGridOnResize;
+		},
+		get kittyProtocolActive() {
+			return terminal.kittyProtocolActive;
+		},
+		get kittyEnableSequence() {
+			return terminal.kittyEnableSequence;
+		},
+		get keyboardEnhancementEnterSequence() {
+			return terminal.keyboardEnhancementEnterSequence;
+		},
+		get keyboardEnhancementExitSequence() {
+			return terminal.keyboardEnhancementExitSequence;
+		},
+		get keyboardEnhancementRestoreSequence() {
+			return terminal.keyboardEnhancementRestoreSequence;
+		},
+		get appearance() {
+			return terminal.appearance;
+		},
+		get tspProbePending() {
+			return terminal.tspProbePending;
+		},
+		get tspExpected() {
+			return terminal.tspExpected;
+		},
+		start: () => refuse("start()"),
+		enableInput: undefined,
+		stop: () => refuse("stop()"),
+		drainInput: () => refuse("drainInput()"),
+		write: () => refuse("write()"),
+		moveBy: () => refuse("moveBy()"),
+		hideCursor: () => refuse("hideCursor()"),
+		showCursor: () => refuse("showCursor()"),
+		setCursorShape: undefined,
+		clearLine: () => refuse("clearLine()"),
+		clearFromCursor: () => refuse("clearFromCursor()"),
+		clearScreen: () => refuse("clearScreen()"),
+		setTitle: () => refuse("setTitle()"),
+		setProgress: () => refuse("setProgress()"),
+		onAppearanceChange: () => refuse("onAppearanceChange()"),
+		onAppearanceReport: undefined,
+		refreshAppearance: undefined,
+		onPrivateModeReport: undefined,
+		onSixelSupport: undefined,
+		onGlyphProtocolReport: undefined,
+		onTspHello: undefined,
+	};
+	handedTerminals.set(terminal, handed);
+	return handed;
+}
+
+const IMAGE_BUDGET_SUBJECT = "ctx.ui tui.imageBudget";
+const handedImageBudgets = new WeakMap<ImageBudget, ImageBudget>();
+
+/** The host's image budget as an image a session's component draws reaches it: the ids, the
+ *  observations and the transmits one image makes while it draws. Running a pass, setting the cap
+ *  and taking what a frame purges are the host's renderer's. */
+function handImageBudget(budget: ImageBudget): ImageBudget {
+	const known = handedImageBudgets.get(budget);
+	if (known) return known;
+	const refuse = (member: string): never => withheld(IMAGE_BUDGET_SUBJECT, member);
+	const handed: Decided<ImageBudget> = {
+		get cap() {
+			return budget.cap;
+		},
+		get enabled() {
+			return budget.enabled;
+		},
+		get quiescent() {
+			return budget.quiescent;
+		},
+		requestRender: () => budget.requestRender(),
+		acquireId: key => budget.acquireId(typeof key === "string" ? key : undefined),
+		release: key => {
+			if (typeof key === "string") budget.release(key);
+		},
+		observe: imageId => typeof imageId === "number" && budget.observe(imageId),
+		shouldTransmit: imageId => typeof imageId === "number" && budget.shouldTransmit(imageId),
+		registerPlacementGeometry: (imageId, widthPx, heightPx) =>
+			budget.registerPlacementGeometry(Number(imageId), Number(widthPx), Number(heightPx)),
+		getPlacementGeometry: imageId => copyHostData(budget.getPlacementGeometry(Number(imageId))),
+		enqueueTransmit: (imageId, sequence) => {
+			if (typeof imageId === "number" && typeof sequence === "string") budget.enqueueTransmit(imageId, sequence);
+		},
+		hasPendingTransmits: () => budget.hasPendingTransmits(),
+		setRequestRender: () => refuse("setRequestRender()"),
+		setCap: () => refuse("setCap()"),
+		beginAltScreenLifecycle: () => refuse("beginAltScreenLifecycle()"),
+		beginPass: () => refuse("beginPass()"),
+		endPass: () => refuse("endPass()"),
+		limitResidentImages: () => refuse("limitResidentImages()"),
+		takeResetPurgeIds: () => refuse("takeResetPurgeIds()"),
+		takePurgeIds: () => refuse("takePurgeIds()"),
+		takeAllTransmittedIds: () => refuse("takeAllTransmittedIds()"),
+		takeTransmits: () => refuse("takeTransmits()"),
+		forgetTransmitted: () => refuse("forgetTransmitted()"),
+	};
+	// A class with private state, as `TUI` is: this object has every public member.
+	const asBudget = handed as unknown as ImageBudget;
+	handedImageBudgets.set(budget, asBudget);
+	return asBudget;
+}
+
+/**
+ * The keybindings a dialog or an editor factory is handed: a manager of its own, built from a copy
+ * of the user's bindings. The bindings are data; the manager the host matches keys with — the
+ * editor's submit, the next session's shortcuts — is the host's, and a binding the extension
+ * changes changes only its copy.
+ */
+export function handKeybindings(keybindings: KeybindingsManager): KeybindingsManager {
+	return keybindings === undefined || keybindings === null
+		? keybindings
+		: KeybindingsManager.inMemory(copyHostData(keybindings.getUserBindings()));
+}
+
+/**
+ * The provider an autocomplete factory wraps, as the factory is handed it. The host keeps that
+ * provider — the built-in one, or the provider the factory before this one made — and falls back
+ * to it once the extension's own provider has retired, so the factory is handed an object of the
+ * session's own whose members call the host's: a member the extension replaces is replaced there.
+ * What the extension passes is copied in inside its admission, a callback it passes is owned, and
+ * what the host's provider answers is copied out. The optional members are read when asked for.
+ */
+export function handAutocompleteProvider(
+	provider: AutocompleteProvider,
+	owner: ExtensionCallbackOwner,
+): AutocompleteProvider {
+	const subject = "ctx.ui addAutocompleteProvider() provider";
+	const lines = (value: string[]): string[] => copiedIn(owner, () => Array.from(value, line => String(line)));
+	const number = (value: number): number => copiedIn(owner, () => Number(value));
+	const handed: Decided<AutocompleteProvider> = {
+		getSuggestions: async (text, cursorLine, cursorCol, signal, onPartial) =>
+			copyHostData(
+				await provider.getSuggestions(
+					lines(text),
+					number(cursorLine),
+					number(cursorCol),
+					followSignal(signal, subject, "getSuggestions() signal"),
+					typeof onPartial === "function"
+						? owner.ownCallback((suggestions: { items: AutocompleteItem[]; prefix: string }) =>
+								onPartial(copyHostData(suggestions)),
+							)
+						: undefined,
+				),
+			),
+		applyCompletion: (text, cursorLine, cursorCol, item, prefix) =>
+			copyHostData(
+				provider.applyCompletion(
+					lines(text),
+					number(cursorLine),
+					number(cursorCol),
+					data(owner, item, subject, "applyCompletion() item"),
+					copiedIn(owner, () => String(prefix)),
+				),
+			),
+		get getInlineHint(): AutocompleteProvider["getInlineHint"] {
+			const getInlineHint = provider.getInlineHint;
+			return (
+				getInlineHint &&
+				((text, cursorLine, cursorCol) =>
+					Reflect.apply(getInlineHint, provider, [lines(text), number(cursorLine), number(cursorCol)]))
+			);
+		},
+		get trySyncSlashCompletion(): AutocompleteProvider["trySyncSlashCompletion"] {
+			const trySyncSlashCompletion = provider.trySyncSlashCompletion;
+			return (
+				trySyncSlashCompletion &&
+				(textBeforeCursor =>
+					copyHostData(
+						Reflect.apply(trySyncSlashCompletion, provider, [copiedIn(owner, () => String(textBeforeCursor))]),
+					))
+			);
+		},
+		get trySyncInlineReplace(): AutocompleteProvider["trySyncInlineReplace"] {
+			const trySyncInlineReplace = provider.trySyncInlineReplace;
+			return (
+				trySyncInlineReplace &&
+				(textBeforeCursor =>
+					copyHostData(
+						Reflect.apply(trySyncInlineReplace, provider, [copiedIn(owner, () => String(textBeforeCursor))]),
+					))
+			);
+		},
+		get getForceFileSuggestions(): AutocompleteProvider["getForceFileSuggestions"] {
+			const getForceFileSuggestions = provider.getForceFileSuggestions;
+			return (
+				getForceFileSuggestions &&
+				(async (text, cursorLine, cursorCol, signal) =>
+					copyHostData(
+						await Reflect.apply(getForceFileSuggestions, provider, [
+							lines(text),
+							number(cursorLine),
+							number(cursorCol),
+							followSignal(signal, subject, "getForceFileSuggestions() signal"),
+						]),
+					))
+			);
+		},
+		get shouldTriggerFileCompletion(): AutocompleteProvider["shouldTriggerFileCompletion"] {
+			const shouldTriggerFileCompletion = provider.shouldTriggerFileCompletion;
+			return (
+				shouldTriggerFileCompletion &&
+				((text, cursorLine, cursorCol) =>
+					Reflect.apply(shouldTriggerFileCompletion, provider, [
+						lines(text),
+						number(cursorLine),
+						number(cursorCol),
+					]) === true)
+			);
+		},
+	};
+	return handed;
+}
+
 /**
  * The UI as an extension's context hands it. The host's approval prompts go through its own UI
  * object, never this one, so nothing an extension does to what it was handed decides an approval.
@@ -579,22 +1067,29 @@ export function handUIContext(
 						onExternalEditor: owned(owner, copy.onExternalEditor),
 					};
 				});
-	/** The extension's `factory`, as the host calls it: in the session's renderer scope, with the
-	 *  host's theme handed as {@link handTheme} hands it, nothing once the scope has gone, and
-	 *  carrying the scope for the host that mounts or drives what it returns. */
-	const scoped = <F extends (...args: never[]) => unknown>(factory: F, themeAt?: number): F => {
-		const run = (...args: unknown[]): unknown => {
+	/** The extension's `factory`, as the host calls it: in the session's renderer scope, nothing once
+	 *  the scope has gone, and carrying the scope for the host that mounts or drives what it returns.
+	 *  `hand` turns what the host passes into what the factory is handed — the TUI, the theme, the
+	 *  keybindings, the provider it wraps, each as the session's own — before the factory runs. */
+	const scoped = <F extends (...args: never[]) => unknown>(
+		factory: F,
+		hand: (...args: Parameters<F>) => Parameters<F>,
+	): F => {
+		const run = (...args: Parameters<F>): unknown => {
 			if (!scope.live) return undefined;
-			const handed =
-				themeAt === undefined
-					? args
-					: args.map((arg, index) => (index === themeAt && arg !== undefined ? handTheme(arg as Theme) : arg));
+			const handed = hand(...args);
 			return scope.run(() => Reflect.apply(factory, undefined, handed));
 		};
 		return Object.assign(run, { rendererScope: scope }) as unknown as F;
 	};
-	const optionalScoped = <F extends (...args: never[]) => unknown>(factory: F | undefined, themeAt?: number) =>
-		typeof factory === "function" ? scoped(factory, themeAt) : undefined;
+	const optionalScoped = <F extends (...args: never[]) => unknown>(
+		factory: F | undefined,
+		hand: (...args: Parameters<F>) => Parameters<F>,
+	) => (typeof factory === "function" ? scoped(factory, hand) : undefined);
+	const handedTUI = (tui: TUI): TUI => handTUI(tui, owner, scope);
+	const handedTheme = (theme: Theme): Theme => (theme === undefined ? theme : handTheme(theme));
+	/** A widget's, a footer's and a header's factory: the TUI and the theme, each the session's. */
+	const component = (tui: TUI, theme: Theme): [TUI, Theme] => [handedTUI(tui), handedTheme(theme)];
 	const handed: Decided<ExtensionUIContext> = {
 		get timeoutStartsOnPresentation() {
 			return ui.timeoutStartsOnPresentation;
@@ -647,13 +1142,16 @@ export function handUIContext(
 			ui.notify(text(owner, message), type === undefined ? undefined : data(owner, type, subject, "type")),
 		onTerminalInput: handler =>
 			ui.onTerminalInput(
-				scoped(((input: string) =>
-					snapshotAuthorData(
-						handler(input),
-						DATA,
-						site(subject, "onTerminalInput() result"),
-						new Map(),
-					)) as typeof handler),
+				scoped(
+					((input: string) =>
+						snapshotAuthorData(
+							handler(input),
+							DATA,
+							site(subject, "onTerminalInput() result"),
+							new Map(),
+						)) as typeof handler,
+					input => [input],
+				),
 			),
 		rerenderMessage: timestamp => ui.rerenderMessage(copiedIn(owner, () => Number(timestamp))),
 		getLinkClicksAvailable: () => ui.getLinkClicksAvailable(),
@@ -662,15 +1160,20 @@ export function handUIContext(
 		setWidget: (key, content, options) =>
 			ui.setWidget(
 				text(owner, key),
-				typeof content === "function" ? scoped(content, 1) : data(owner, content, subject, "content"),
+				typeof content === "function" ? scoped(content, component) : data(owner, content, subject, "content"),
 				data(owner, options, subject, "options"),
 			),
-		setFooter: factory => ui.setFooter(optionalScoped(factory, 1)),
-		setHeader: factory => ui.setHeader(optionalScoped(factory, 1)),
+		setFooter: factory => ui.setFooter(optionalScoped(factory, component)),
+		setHeader: factory => ui.setHeader(optionalScoped(factory, component)),
 		setTitle: title => ui.setTitle(text(owner, title)),
 		custom: (factory, options) =>
 			ui.custom(
-				scoped(factory, 1),
+				scoped(factory, (tui, theme, keybindings, done) => [
+					handedTUI(tui),
+					handedTheme(theme),
+					handKeybindings(keybindings),
+					done,
+				]),
 				options === undefined
 					? undefined
 					: copiedIn(owner, () => {
@@ -716,8 +1219,12 @@ export function handUIContext(
 					data(owner, editorOptions, subject, "editorOptions"),
 				),
 			),
-		addAutocompleteProvider: factory => ui.addAutocompleteProvider(scoped(factory)),
-		setEditorComponent: factory => ui.setEditorComponent(optionalScoped(factory)),
+		addAutocompleteProvider: factory =>
+			ui.addAutocompleteProvider(scoped(factory, provider => [handAutocompleteProvider(provider, owner)])),
+		setEditorComponent: factory =>
+			ui.setEditorComponent(
+				optionalScoped(factory, (tui, theme, keybindings) => [handedTUI(tui), theme, handKeybindings(keybindings)]),
+			),
 		getEditorComponent: () => ui.getEditorComponent(),
 		get theme() {
 			return handTheme(ui.theme);

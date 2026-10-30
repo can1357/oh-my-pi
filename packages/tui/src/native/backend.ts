@@ -827,7 +827,10 @@ export class NativeBackend {
 		>,
 	): void {
 		const reconciler = this.#surfaceFor(event.sf)?.reconciler;
-		const target = reconciler?.target(event.id);
+		// An event the terminal sent before it saw the frame that replaced its target is still
+		// addressed to the old one (`departedTarget`): remembered only for an extension's component
+		// taken out of input, so it reaches what the host put in its place or nothing.
+		const target = reconciler?.target(event.id) ?? reconciler?.departedTarget(event.id);
 		if (!reconciler || !target) return;
 		// An event addressed to a component an extension supplied goes to whoever takes its input
 		// (`inputRecipient`): the component itself, asked and handed the event inside its session's

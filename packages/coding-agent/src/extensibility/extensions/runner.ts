@@ -41,7 +41,13 @@ import type { SessionManager } from "../../session/session-manager";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
-import { assistantContentAsCopied, copyHandlerResult, copyHostData, HandedSignals } from "./boundary-data";
+import {
+	assistantContentAsCopied,
+	copyHandlerResult,
+	copyHostData,
+	HandedSignals,
+	handHostModel,
+} from "./boundary-data";
 import { providerCallGate } from "./callback-ownership";
 import { ManagedTimers } from "./managed-timers";
 import {
@@ -218,8 +224,6 @@ function createHandlerUIContext(
 	handlerSignal: AbortSignal,
 	timeoutBudget?: HandlerTimeoutBudget,
 ): ExtensionUIContext {
-	const askDialog = ui.askDialog;
-	const approve = ui.approve;
 	const runDialog = async <T>(dialog: () => Promise<T>): Promise<T> => {
 		timeoutBudget?.pause();
 		try {
@@ -235,14 +239,24 @@ function createHandlerUIContext(
 			runDialog(() => ui.confirm(title, message, attachHandlerSignal(dialogOptions, handlerSignal))),
 		input: (title, placeholder, dialogOptions) =>
 			runDialog(() => ui.input(title, placeholder, attachHandlerSignal(dialogOptions, handlerSignal))),
-		askDialog: askDialog
-			? (questions, dialogOptions) =>
-					runDialog(() => askDialog.call(ui, questions, attachHandlerSignal(dialogOptions, handlerSignal)))
-			: undefined,
-		approve: approve
-			? (prompt, dialogOptions) =>
-					runDialog(() => approve.call(ui, prompt, attachHandlerSignal(dialogOptions, handlerSignal)))
-			: undefined,
+		// Read when asked for, as the UI they wrap reads them: a host can offer one later (RPC's
+		// `set_ask_dialog`), and a handler that started before it did sees it then.
+		get askDialog(): ExtensionUIContext["askDialog"] {
+			const askDialog = ui.askDialog;
+			return (
+				askDialog &&
+				((questions, dialogOptions) =>
+					runDialog(() => askDialog.call(ui, questions, attachHandlerSignal(dialogOptions, handlerSignal))))
+			);
+		},
+		get approve(): ExtensionUIContext["approve"] {
+			const approve = ui.approve;
+			return (
+				approve &&
+				((prompt, dialogOptions) =>
+					runDialog(() => approve.call(ui, prompt, attachHandlerSignal(dialogOptions, handlerSignal))))
+			);
+		},
 		custom: async (factory, options) => {
 			let customSettled = false;
 			let componentReady = false;
@@ -269,19 +283,22 @@ function createHandlerUIContext(
 		editor: (title, prefill, dialogOptions, editorOptions) =>
 			runDialog(() => ui.editor(title, prefill, attachHandlerSignal(dialogOptions, handlerSignal), editorOptions)),
 	} satisfies Pick<ExtensionUIContext, "select" | "confirm" | "input" | "askDialog" | "approve" | "custom" | "editor">;
-	const delegatedMethods = new Map<PropertyKey, unknown>();
+	// Bound once per function the UI answers with, not once per name: a member answered afresh
+	// later — a host's replacement, a getter's new function — is bound afresh, never served stale.
+	const delegatedMethods = new WeakMap<Function, unknown>();
 
 	return new Proxy(ui, {
 		get(target, property) {
 			if (Object.hasOwn(dialogMethods, property)) {
 				return Reflect.get(dialogMethods, property, dialogMethods);
 			}
-			const cached = delegatedMethods.get(property);
-			if (cached) return cached;
 			const value: unknown = Reflect.get(target, property, target);
 			if (typeof value !== "function") return value;
-			const delegated: unknown = value.bind(target);
-			delegatedMethods.set(property, delegated);
+			let delegated = delegatedMethods.get(value);
+			if (!delegated) {
+				delegated = value.bind(target);
+				delegatedMethods.set(value, delegated);
+			}
 			return delegated;
 		},
 	});
@@ -291,7 +308,9 @@ function createHandlerUIContext(
  * Scope `ctx` to a single handler run without spreading it: `{ ...ctx }` would
  * snapshot live accessors (notably the `model` getter), so a handler calling
  * `pi.setModel()` and then reading `ctx.model` would see a stale model.
- * Prototype delegation keeps every getter live while overriding `ui`.
+ * Prototype delegation keeps every getter live while overriding `ui` — itself read from `ctx` when
+ * asked for, so a handler running across a host rebind dialogs through the UI the host has now,
+ * wrapped once per UI object so it compares equal to itself.
  */
 function createHandlerContext(
 	ctx: ExtensionContext,
@@ -299,8 +318,17 @@ function createHandlerContext(
 	timeoutBudget?: HandlerTimeoutBudget,
 ): ExtensionContext {
 	const scoped: ExtensionContext = Object.create(ctx);
+	const handlerUIs = new WeakMap<ExtensionUIContext, ExtensionUIContext>();
 	Object.defineProperty(scoped, "ui", {
-		value: createHandlerUIContext(ctx.ui, handlerSignal, timeoutBudget),
+		get: () => {
+			const ui = ctx.ui;
+			let handlerUI = handlerUIs.get(ui);
+			if (!handlerUI) {
+				handlerUI = createHandlerUIContext(ui, handlerSignal, timeoutBudget);
+				handlerUIs.set(ui, handlerUI);
+			}
+			return handlerUI;
+		},
 		enumerable: true,
 		configurable: true,
 	});
@@ -1755,9 +1783,13 @@ export class ExtensionRunner {
 		},
 		agent: ExtensionAgentIdentity = this.agent,
 	): ExtensionContext {
-		const getModel = model ? () => model : this.#getModel;
-		const runEphemeralTurn = this.#runEphemeralTurnFn;
-		const createAnnotations = this.#createAnnotations;
+		// Every member the host can change after this context is made — its UI and mode on a rebind
+		// (`initialize`), its model, its cwd after a relocation, its memory backend, the actions it
+		// wires — is read when the extension asks for it: a context saved across the change answers
+		// as the host does now. What is captured here is captured on purpose: `model`, `delegation`
+		// and `agent` are what this one call was made with.
+		const runner = this;
+		const getModel = model ? () => model : () => this.#getModel();
 		const sendUserMessage = (text: string, options?: SendUserMessageOptions): void =>
 			this.runtime.sendUserMessage(text, options);
 		const getSessionModes = () => this.#sessionModes;
@@ -1770,19 +1802,17 @@ export class ExtensionRunner {
 			}
 			return handed;
 		};
-		const memory = this.#getMemoryFn?.();
-		let handedMemory = memory && this.#handedMemory.get(memory);
-		if (memory && !handedMemory) {
-			handedMemory = handMemory(memory, this.runtime);
-			this.#handedMemory.set(memory, handedMemory);
-		}
 		return {
 			// The host's services, each as `context-surfaces.ts` hands it: named members calling the
 			// host's object, copies in and out. The host keeps acting on its own objects — the
 			// approval prompt, the registry's rows and credentials, the history — so an extension
 			// is never handed them.
-			ui: this.handedUIContext(this.#uiContext),
-			mode: this.#mode,
+			get ui() {
+				return runner.handedUIContext(runner.#uiContext);
+			},
+			get mode() {
+				return runner.#mode;
+			},
 			getContextUsage: () => this.#getContextUsageFn(),
 			// `ctx` accepts callbacks too (`compact({ onError })`), and a continuation an extension
 			// hands over here outlives the command that made the call. Owned at acceptance, like
@@ -1790,17 +1820,23 @@ export class ExtensionRunner {
 			compact: instructionsOrOptions =>
 				this.#compactFn(ownAcceptedCallbacks(instructionsOrOptions, this.runtime) as typeof instructionsOrOptions),
 			getAsyncJobSnapshot: () => this.#getAsyncJobSnapshotFn(),
-			hasUI: this.hasUI(),
-			cwd: this.cwd,
+			get hasUI() {
+				return runner.hasUI();
+			},
+			get cwd() {
+				return runner.cwd;
+			},
 			sessionManager: (this.#handedSessionManager ??= handSessionManager(this.sessionManager, this.runtime)),
 			modelRegistry: (this.#handedModelRegistry ??= handModelRegistry(this.modelRegistry, this.runtime)),
 			isProjectTrusted: () => true,
 			agent,
-			// A copy on every read, as `ctx.models` hands them: the host keeps building requests from
-			// its model after the handler returns — the credential it chooses by `provider`, the
-			// endpoint `baseUrl` names — so an edit to the one handed over must stay on it.
+			// A copy on every read, as `ctx.models` hands them (`handHostModel`): the host keeps building
+			// requests from its model after the handler returns — the credential it chooses by
+			// `provider`, the endpoint `baseUrl` names — so an edit to the one handed over must stay on
+			// it, whether the host holds a registry row or a class an SDK caller selected.
 			get model() {
-				return copyHostData(getModel());
+				const model = getModel();
+				return model && handHostModel(model);
 			},
 			models: createExtensionModelQuery(this.modelRegistry, this.settings, getModel),
 			isIdle: () => this.#isIdleFn(),
@@ -1815,14 +1851,17 @@ export class ExtensionRunner {
 				return handSessionModesOnce(getSessionModes());
 			},
 			getSystemPrompt: () => this.#getSystemPromptFn(),
-			runEphemeralTurn: runEphemeralTurn
-				? async options => {
-						if (this.#ephemeralTurnBlocker.getStore()) {
+			get runEphemeralTurn(): ExtensionContext["runEphemeralTurn"] {
+				const runEphemeralTurn = runner.#runEphemeralTurnFn;
+				return (
+					runEphemeralTurn &&
+					(async options => {
+						if (runner.#ephemeralTurnBlocker.getStore()) {
 							throw new Error("runEphemeralTurn cannot be called recursively from an ephemeral turn hook");
 						}
 						// Resolve at call time so a running handler's cancellation is inherited.
 						// A saved context must not retain a completed handler's stale signal.
-						const registrationScope = this.#toolRegistrationScope.getStore();
+						const registrationScope = runner.#toolRegistrationScope.getStore();
 						const signals = [
 							options.signal,
 							delegation?.signal,
@@ -1835,21 +1874,35 @@ export class ExtensionRunner {
 						const request = {
 							...options,
 							onTextDelta: onTextDelta
-								? (delta: string) => this.#ephemeralTurnBlocker.exit(() => onTextDelta(delta))
+								? (delta: string) => runner.#ephemeralTurnBlocker.exit(() => onTextDelta(delta))
 								: undefined,
 							signal: signals.length ? AbortSignal.any(signals) : undefined,
 						};
-						return await this.#ephemeralTurnBlocker.run("ephemeral turn", () => runEphemeralTurn(request));
-					}
-				: undefined,
-			startLive: this.#startLiveFn,
+						return await runner.#ephemeralTurnBlocker.run("ephemeral turn", () => runEphemeralTurn(request));
+					})
+				);
+			},
+			get startLive() {
+				return runner.#startLiveFn;
+			},
+			// The runner's options are fixed at construction; the facade reads their answers per call.
 			localProtocolOptions:
 				this.localProtocolOptions &&
 				(this.#handedLocalProtocolOptions ??= handLocalProtocolOptions(this.localProtocolOptions)),
-			memory: handedMemory,
+			get memory() {
+				const memory = runner.#getMemoryFn?.();
+				if (!memory) return undefined;
+				let handed = runner.#handedMemory.get(memory);
+				if (!handed) {
+					handed = handMemory(memory, runner.runtime);
+					runner.#handedMemory.set(memory, handed);
+				}
+				return handed;
+			},
 			// A getter, not a value: `createHandlerContext` scopes a handler via `Object.create(ctx)`, and
 			// `this` here is that receiver, so the overlay mounts through the handler's timeout-aware `ui`.
 			get annotations(): ExtensionAnnotationsAPI {
+				const createAnnotations = runner.#createAnnotations;
 				return createAnnotations ? createAnnotations(() => this, sendUserMessage) : UNAVAILABLE_ANNOTATIONS;
 			},
 			setInterval: (callback, ms, ...args) => this.#managedTimers.setInterval(callback, ms, ...args),
@@ -1899,18 +1952,22 @@ export class ExtensionRunner {
 	}
 
 	createCommandContext(): ExtensionCommandContext {
-		return {
-			...this.createContext(),
+		// Delegates to the context rather than spreading it: a spread reads each getter once, here —
+		// `model`, `annotations` — and a command that switched models would go on seeing the old one.
+		const context: ExtensionContext = Object.create(this.createContext());
+		return Object.assign(context, {
 			getContextUsage: () => this.#getContextUsageFn(),
 			waitForIdle: () => this.#waitForIdleFn(),
-			newSession: options => this.#newSessionHandler(options),
-			branch: entryId => this.#branchHandler(entryId),
-			navigateTree: (targetId, options) => this.#navigateTreeHandler(targetId, options),
-			switchSession: sessionPath => this.#switchSessionHandler(sessionPath),
+			newSession: (options?: Parameters<ExtensionCommandContext["newSession"]>[0]) =>
+				this.#newSessionHandler(options),
+			branch: (entryId: string) => this.#branchHandler(entryId),
+			navigateTree: (targetId: string, options?: Parameters<ExtensionCommandContext["navigateTree"]>[1]) =>
+				this.#navigateTreeHandler(targetId, options),
+			switchSession: (sessionPath: string) => this.#switchSessionHandler(sessionPath),
 			reload: () => this.#reloadHandler(),
-			compact: instructionsOrOptions =>
+			compact: (instructionsOrOptions?: string | CompactOptions) =>
 				this.#compactFn(ownAcceptedCallbacks(instructionsOrOptions, this.runtime) as typeof instructionsOrOptions),
-		};
+		});
 	}
 
 	#isSessionBeforeEvent(event: RunnerEmitEvent): event is SessionBeforeEvent {

@@ -102,7 +102,7 @@ export class BashRunner {
 
 	/** Resolves once no execution is still running or recording its result. */
 	async waitForIdle(): Promise<void> {
-		while (this.#inFlight.size > 0) await Promise.all([...this.#inFlight]);
+		while (this.#inFlight.size > 0) await Promise.all(this.#inFlight);
 	}
 
 	async #executeBash(

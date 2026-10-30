@@ -35,9 +35,11 @@ describe("admitted work is tracked by its declared kind", () => {
 		// A terminal that is a function carrying `then`: as awaitable as a Promise, and the shape
 		// the previous predicate rejected.
 		const completion = Object.assign(function callableTerminal() {}, {
+			// oxlint-disable-next-line unicorn/no-thenable -- the completion under test is a callable thenable
 			then: done.promise.then.bind(done.promise),
 		});
 		const stream = {
+			// oxlint-disable-next-line require-yield -- an empty stream: it ends when `done` settles
 			async *[Symbol.asyncIterator]() {
 				await done.promise;
 			},
@@ -105,6 +107,7 @@ describe("admitted work is tracked by its declared kind", () => {
 		// A handler returning a lazy collection: `result()` is its own unrelated operation, which
 		// may never settle, and nobody has asked for it.
 		const collection = {
+			// oxlint-disable-next-line require-yield -- an empty collection: only the iteration is counted
 			async *[Symbol.asyncIterator]() {
 				iteratorCalls++;
 			},
@@ -130,6 +133,7 @@ describe("admitted work is tracked by its declared kind", () => {
 function oneShotThenable(then: (resolve: (value: unknown) => void, reject: (reason: unknown) => void) => void) {
 	const counts = { reads: 0, calls: 0 };
 	const value = {
+		// oxlint-disable-next-line unicorn/no-thenable -- the value under test is a thenable read once
 		get then() {
 			counts.reads++;
 			if (counts.reads > 1) return undefined;
@@ -167,6 +171,7 @@ describe("a thenable is asked `await`'s question once", () => {
 		const failure = new Error("then threw");
 		let receiver: unknown;
 		const value = {
+			// oxlint-disable-next-line unicorn/no-thenable -- the value under test is a thenable whose `then` throws
 			then(this: unknown) {
 				receiver = this;
 				throw failure;
