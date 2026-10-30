@@ -5,11 +5,16 @@
  * authenticated models, read the session model, resolve a model string or role
  * alias, and compare model families — without touching the mutable registry or
  * duplicating resolution/family heuristics.
+ *
+ * Every model it answers with is a copy (`copyHostData`). The registry's rows and the session's
+ * model are what the host builds requests from — the credential chosen by `provider`, the endpoint
+ * `baseUrl` names — so an edit to a model an extension was handed must stay on that copy.
  */
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../../config/model-resolver";
 import type { Settings } from "../../config/settings";
+import { copyHostData } from "./boundary-data";
 import type { ExtensionModelQuery } from "./types";
 
 /**
@@ -22,17 +27,19 @@ export function createExtensionModelQuery(
 	getModel: () => Model | undefined,
 ): ExtensionModelQuery {
 	return {
-		list: () => modelRegistry.getAvailable(),
-		current: () => getModel(),
+		list: () => copyHostData(modelRegistry.getAvailable()),
+		current: () => copyHostData(getModel()),
 		// resolveModelRoleValue expands a role alias (`@slow`) to its full configured
 		// priority list and tries each pattern — the same path core selection uses — so a
 		// fallback model lower in the list still resolves. Plain model strings pass through
 		// as a single pattern.
 		resolve: (spec: string): Model<Api> | undefined =>
-			resolveModelRoleValue(spec, modelRegistry.getAvailable(), {
-				settings,
-				matchPreferences: getModelMatchPreferences(settings),
-			}).model,
+			copyHostData(
+				resolveModelRoleValue(spec, modelRegistry.getAvailable(), {
+					settings,
+					matchPreferences: getModelMatchPreferences(settings),
+				}).model,
+			),
 		family: (model: Model<Api>): string =>
 			model.identity.class === "unknown" ? model.provider.toLowerCase() : model.identity.class,
 	};

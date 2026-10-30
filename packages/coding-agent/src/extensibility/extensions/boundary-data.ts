@@ -12,7 +12,9 @@ import type {
 	AgentToolArgStream,
 	AgentToolArgStreamInit,
 	AgentToolResult,
+	SpeculativeAuthorization,
 	SpeculativeChildDefinition,
+	SpeculativeChildHandle,
 	SpeculativeLaunchContext,
 	SpeculativeOperationSink,
 	SpeculativePhysicalOutcome,
@@ -30,6 +32,8 @@ import {
 	kContextHistoryIndex,
 	kStreamingPartialJson,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { wireJsonSchemaOptions } from "@oh-my-pi/pi-ai/utils/schema";
+import type { NativeToolView } from "@oh-my-pi/pi-tui/tools/renderer";
 import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
 import type { CustomMessagePayload } from "../../session/messages";
@@ -413,6 +417,25 @@ export function copyToolResult(
 }
 
 /**
+ * The host's copy of a view an extension tool's `describeCall` or `describeResult` answered,
+ * taken inside the tool's admission. A view is data — head spans, body nodes — so it is copied as
+ * data, and a function anywhere in it is refused with its path.
+ */
+export function copyToolView(
+	value: NativeToolView | undefined,
+	toolName: string,
+	extensionPath: string,
+	origin: "describeCall() view" | "describeResult() view",
+): NativeToolView | undefined {
+	return snapshotAuthorData(
+		value,
+		DATA,
+		{ subject: `Extension ${extensionPath}`, path: [`tool ${toolName} ${origin}`], advice: RETURNING_ADVICE },
+		new Map(),
+	) as NativeToolView | undefined;
+}
+
+/**
  * The signals one admitted call hands its author, each in place of a signal of the caller's: one
  * {@link AdmittedSignal} per caller signal, admitted inside the call and let go of together at its
  * terminal. A hook's event can carry several (`session_stop`, `session_before_compact` and
@@ -548,10 +571,10 @@ interface ToolFieldAdmission {
  * How the host keeps one field of a tool definition an extension registers.
  *
  * - `data`: copied as data, once, at registration.
- * - `bound`: a callback captured once, applied to the extension's own object. Either the host
- *   already invokes it inside an admission of its own (`execute` through the tool wrapper,
- *   `onSession`), or its invocation is a rendering surface outside this boundary (`renderCall`,
- *   `renderResult`, `describeCall`, `describeResult`).
+ * - `bound`: a callback captured once, applied to the extension's own object, that the host
+ *   invokes only inside an admission of its own: `execute` through the tool wrapper, `onSession`,
+ *   and the renderers (`renderCall`, `renderResult`, `describeCall`, `describeResult`), which the
+ *   tool adapter (`RegisteredToolAdapter`) runs on copies and refuses once the session has gone.
  * - `owned`: a callback the host invokes from its own code and then acts on what it answers — an
  *   approval decision, a remembered grant's targets, a shell's environment. Captured once, it
  *   runs as the session's work (refused once the session has gone), on copies of the host's
@@ -714,13 +737,6 @@ function inertOnceRetired(owner: ExtensionCallbackOwner, callback: AuthorCallbac
 }
 
 /**
- * The options `arkToWireSchema` (`@oh-my-pi/pi-ai/utils/schema`) asks a callable schema for its
- * JSON Schema with. A registered callable schema is asked once, at registration, with these, and
- * the host's wire schema is computed from that answer from then on.
- */
-const WIRE_JSON_SCHEMA_OPTIONS = { target: "draft-2020-12", fallback: (context: { base: unknown }) => context.base };
-
-/**
  * A registered tool's parameter schema, as the host keeps it.
  *
  * A JSON Schema document — plain objects and arrays, the shape a legacy TypeBox schema has too —
@@ -732,7 +748,10 @@ const WIRE_JSON_SCHEMA_OPTIONS = { target: "draft-2020-12", fallback: (context: 
  * cannot be copied that way: its checks are code, and some of that code is the extension's own
  * (`.narrow()`, `.refine()`, `.pipe()`, a message formatter). So the host keeps its own callable
  * in its place. The JSON Schema the wire carries is asked for once, here, and copied as data, so
- * building a request runs no extension code. Validation calls the extension's schema as the
+ * building a request runs no extension code. It is asked with options of its own
+ * (`wireJsonSchemaOptions`): `toJsonSchema` may be the extension's code, and a getter or a
+ * replaced `fallback` it leaves on a shared options object would answer for the next schema
+ * asked, another session's included. Validation calls the extension's schema as the
  * session's work — refused once the session has gone — on a copy of the arguments, and copies
  * what it answers before the call returns: the validated value as data, a failure as the host's
  * own `OmpErrors` with each message computed inside the call. The host's callable is frozen, so
@@ -758,7 +777,7 @@ function admitCallableSchema(
 	site: AuthorDataSite,
 ): (data: unknown) => unknown {
 	const wire = snapshotAuthorData(
-		Reflect.apply(toJsonSchema, schema, [WIRE_JSON_SCHEMA_OPTIONS]),
+		Reflect.apply(toJsonSchema, schema, [wireJsonSchemaOptions()]),
 		DATA,
 		{ ...site, path: [...site.path, "toJsonSchema()"] },
 		new Map(),
@@ -800,7 +819,10 @@ function copySchemaAnswer(out: unknown, site: AuthorDataSite): unknown {
  * receiver every argument delta and, at `toolcall_end`, the parsed arguments it will execute — the
  * host's own object. So the opener and each receiver method run as the session's work (the opener
  * and the methods are inert once it has gone), the receiver is handed copies, and what it pushes
- * back through `emit` is copied before the host streams it. An edit to the arguments the receiver
+ * back through `emit` is copied before the host streams it. The receiver keeps `emit` as long as
+ * it likes and may call it from anywhere — a listener of its own, after the session has gone — so
+ * `emit` runs as the session's work too, the update copied inside that admission, and does nothing
+ * once the session has gone. An edit to the arguments the receiver
  * is handed stays on its copy: a change to the input is made by returning it from `tool_call`.
  */
 function admitArgStream(open: unknown, admission: ToolFieldAdmission): unknown {
@@ -809,13 +831,16 @@ function admitArgStream(open: unknown, admission: ToolFieldAdmission): unknown {
 		return snapshotAuthorData(open, DATA, registrationSite(subject, "openArgStream"), new Map());
 	const emitSite: AuthorDataSite = { subject, path: ["openArgStream() emit() update"], advice: RETURNING_ADVICE };
 	return owner.ownCallback((init: AgentToolArgStreamInit): AgentToolArgStream | undefined => {
-		const emit = init.emit;
+		const hostEmit = init.emit;
+		const emit = owner.ownCallback((update: unknown): void => {
+			hostEmit(snapshotAuthorData(update, DATA, emitSite, new Map()));
+		});
 		const stream: unknown = Reflect.apply(open, receiver, [
 			{
 				toolCallId: init.toolCallId,
 				toolName: init.toolName,
 				customWireName: init.customWireName,
-				emit: (update: unknown) => emit(snapshotAuthorData(update, DATA, emitSite, new Map())),
+				emit,
 			} satisfies AgentToolArgStreamInit,
 		]);
 		if (stream === undefined || stream === null) return undefined;
@@ -984,11 +1009,15 @@ const CHILD_DEFINITION = fieldsOf<Omit<SpeculativeChildDefinition, "tool">>({
 const LAUNCH_CONTEXT = fieldsOf<Omit<SpeculativeLaunchContext, "tool">>({ toolCall: DATA, args: DATA });
 
 /**
- * The speculation coordinator as a stream session is handed it. It is the host's, and stays so;
- * what the session hands back through it is the session's data, and the coordinator acts on it
- * from host code — a child's tool is assessed and executed through its own policy, a launch's tool
- * reference is asked for an approval. So each is copied as it crosses: the plain fields as data,
- * and a tool through {@link admitToolDefinition}, as a registered tool is.
+ * The speculation coordinator as a stream session is handed it. It is the host's, and stays so —
+ * and the session keeps it as long as it likes, past the call that handed it over and past the
+ * session itself. So each method runs as the session's work. What the session hands in is copied
+ * inside that admission: the plain fields as data, and a tool through {@link admitToolDefinition},
+ * as a registered tool is, because the coordinator acts on them from host code — a child's tool is
+ * assessed and executed through its own policy, a launch's tool reference is asked for an approval.
+ * Once the session has gone, each method reads nothing it is handed and does nothing: an admission
+ * admits nothing, a launch is not allowed. What the coordinator answers is its own record, so the
+ * session is handed copies of it ({@link handChildHandle}).
  */
 function handCoordinator(
 	coordinator: SpeculativeOperationSink,
@@ -1001,38 +1030,97 @@ function handCoordinator(
 		if (typeof tool !== "object" || tool === null) throw new Error(`${subject}: ${at}.tool is not a tool.`);
 		return admitToolDefinition(tool as ToolDefinition, owner, extensionPath);
 	};
+	/** `copy` run as the session's work; `undefined`, and nothing read, once the session has gone. */
+	const copied = <T>(copy: () => T): T | undefined => (owner.isRetired ? undefined : owner.runOwned(copy));
 	const authorizeLaunch = coordinator.authorizeLaunch?.bind(coordinator);
 	const discardChildren = coordinator.discardChildren?.bind(coordinator);
 	return {
 		get maxInFlight() {
 			return coordinator.maxInFlight;
 		},
-		admit: definition => {
+		admit: async definition => {
 			const at = "speculation coordinator.admit() definition";
-			const fields = snapshotAuthorData(definition, CHILD_DEFINITION, site(at), new Map()) as Omit<
-				SpeculativeChildDefinition,
-				"tool"
-			>;
-			return coordinator.admit({ ...fields, tool: toolOf(definition, at) as AgentTool });
+			const child = copied(() => ({
+				...(snapshotAuthorData(definition, CHILD_DEFINITION, site(at), new Map()) as Omit<
+					SpeculativeChildDefinition,
+					"tool"
+				>),
+				tool: toolOf(definition, at) as AgentTool,
+			}));
+			if (!child) return undefined;
+			const handle = await coordinator.admit(child);
+			return handle && handChildHandle(handle, admission);
 		},
 		...(authorizeLaunch
 			? {
-					authorizeLaunch: (context: SpeculativeLaunchContext) => {
+					authorizeLaunch: async (context: SpeculativeLaunchContext): Promise<SpeculativeAuthorization> => {
 						const at = "speculation coordinator.authorizeLaunch() context";
-						const fields = snapshotAuthorData(context, LAUNCH_CONTEXT, site(at), new Map()) as Omit<
-							SpeculativeLaunchContext,
-							"tool"
-						>;
-						return authorizeLaunch({ ...fields, tool: toolOf(context, at) as SpeculativeToolReference });
+						const launch = copied(() => ({
+							...(snapshotAuthorData(context, LAUNCH_CONTEXT, site(at), new Map()) as Omit<
+								SpeculativeLaunchContext,
+								"tool"
+							>),
+							tool: toolOf(context, at) as SpeculativeToolReference,
+						}));
+						if (!launch) return { allowed: false, reason: `${subject}: the extension session has ended` };
+						return copyHostData(await authorizeLaunch(launch));
 					},
 				}
 			: {}),
 		...(discardChildren
 			? {
-					discardChildren: (parentToolCallId: string, reason: string) =>
-						discardChildren(String(parentToolCallId), String(reason)),
+					discardChildren: async (parentToolCallId: string, reason: string) => {
+						const strings = copied(() => [String(parentToolCallId), String(reason)] as const);
+						if (strings) await discardChildren(...strings);
+					},
 				}
 			: {}),
-		close: reason => coordinator.close(String(reason)),
+		close: async reason => {
+			const text = copied(() => String(reason));
+			if (text !== undefined) await coordinator.close(text);
+		},
+	};
+}
+
+/**
+ * A child's handle as the session that admitted the child is handed it. The handle is the
+ * coordinator's record of the child — its `outcome` is the result the host validates and commits,
+ * its `effect` the one the host authorized — so the session is handed copies: `effect` copied,
+ * `outcome` resolving to a copy of the outcome, `commit` to a copy of what was committed. What the
+ * session hands back (`commit`'s arguments, `discard`'s reason) is copied inside its admission.
+ * Once the session has gone, `commit` commits nothing and `discard` does nothing; the coordinator
+ * discards the child on its own.
+ */
+function handChildHandle(
+	handle: SpeculativeChildHandle,
+	{ owner, subject }: ToolFieldAdmission,
+): SpeculativeChildHandle {
+	const outcome = handle.outcome;
+	let handedOutcome: Promise<SpeculativePhysicalOutcome> | undefined;
+	const argsSite: AuthorDataSite = {
+		subject,
+		path: ["speculation child handle.commit() arguments"],
+		advice: "Compute the value before handing it over.",
+	};
+	return {
+		candidateId: handle.candidateId,
+		fingerprint: handle.fingerprint,
+		effect: copyHostData(handle.effect),
+		// Asked for when read, so a rejection nobody reads is not an unhandled one.
+		get outcome() {
+			handedOutcome ??= outcome.then(value => copyHostData(value));
+			return handedOutcome;
+		},
+		commit: async actualArgs => {
+			if (owner.isRetired) return undefined;
+			const args = owner.runOwned(
+				() => snapshotAuthorData(actualArgs, DATA, argsSite, new Map()) as Readonly<Record<string, unknown>>,
+			);
+			return copyHostData(await handle.commit(args));
+		},
+		discard: async reason => {
+			if (owner.isRetired) return;
+			await handle.discard(owner.runOwned(() => String(reason)));
+		},
 	};
 }

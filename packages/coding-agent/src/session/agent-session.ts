@@ -9163,6 +9163,10 @@ export class AgentSession implements SettingsScope {
 		// directly (auto-continue, queued-hidden drain) are autonomous and
 		// deliberately do not claim it.
 		const generation = this.#promptGeneration;
+		// A prompt admitted while the session was already disposing still runs to a settled turn
+		// (the `alreadyDisposing` contract in #prepareAgentStart); only a disposal that lands
+		// *during* this setup cancels it.
+		const alreadyDisposing = this.#isDisposed;
 		this.#promptSequence++;
 		const setupAbort = new AbortController();
 		this.#promptSetupAbortController = setupAbort;
@@ -9401,14 +9405,11 @@ export class AgentSession implements SettingsScope {
 			// cancel this prompt from inside that notification. No await separates the fold from
 			// dispatch, but synchronous reentrancy needs none, so re-ask both cancellation signals
 			// before handing the turn to the agent: an abort bumps the generation, while
-			// beginDispose() latches `#isDisposed` and leaves the generation untouched. Disposal is
-			// asked unconditionally, whenever it landed: beginDispose() exists to stop work started
-			// in the async gap before teardown, so a prompt admitted after it, or one disposed while
-			// it waited on maintenance, gets no model call either. The folded records stay delivered
-			// — they are in the transcript, and the next turn sends them — and the `agent_end` they
-			// were holding open is closed by the settle drain this bail unwinds into
-			// (#drainStrandedQueuedMessages), or by beginDispose's own flush.
-			if (this.#promptGeneration !== generation || this.#isDisposed) return false;
+			// beginDispose() latches `#isDisposed` and leaves the generation untouched. The folded
+			// records stay delivered — they are in the transcript, and the next turn sends them —
+			// and the `agent_end` they were holding open is closed by the settle drain this bail
+			// unwinds into (#drainStrandedQueuedMessages), or by beginDispose's own flush.
+			if (this.#promptGeneration !== generation || (this.#isDisposed && !alreadyDisposing)) return false;
 			// Commit the plan-reference delivery flag only now that the message is
 			// actually handed to agent.prompt. Every pre-send setup step above can
 			// return (generation-bail) or throw (@-mention reads, before_agent_start

@@ -3902,10 +3902,10 @@ describe("AgentSession retry delay cap", () => {
 			if (event.type === "auto_retry_start") retryStartEvents.push(event);
 		});
 
-		// Disposal lands on a run that is already live, which is the shape this guards: the
-		// abort it causes reaches an in-flight turn. A prompt *admitted* after beginDispose() is
-		// refused outright — beginDispose() exists to stop work started in the gap before
-		// teardown — so it could never reach the retry path this test is about.
+		// Disposal lands on a run that is already live: the abort it causes reaches an
+		// in-flight turn, and that disposal-driven empty abort must not schedule a retry.
+		// Whether a prompt submitted after beginDispose() may start a turn at all is a
+		// separate contract, decided in pull request #17457.
 		const prompt = session.prompt("Trigger empty aborted turn while disposing");
 		await streamEntered.promise;
 		session.beginDispose();

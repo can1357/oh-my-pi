@@ -15,6 +15,7 @@ import { type RoleChainCandidate, resolveModelRoleValue, resolveRoleChain } from
 import { roleCandidatePool } from "../../config/model-roles";
 import { settings } from "../../config/settings";
 import type { CustomTool, CustomToolContext } from "../../extensibility/custom-tools/types";
+import type { SearchModelRegistry } from "./providers/base";
 import webSearchSystemPrompt from "../../prompts/system/web-search.md" with { type: "text" };
 import webSearchDescription from "../../prompts/tools/web-search.md" with { type: "text" };
 import { resolveConfiguredModelTarget } from "../../session/role-models";
@@ -142,7 +143,7 @@ function hasRenderableSearchContent(response: SearchResponse): boolean {
 
 interface ExecuteSearchOptions {
 	authStorage: AuthStorage;
-	modelRegistry?: ModelRegistry;
+	modelRegistry?: SearchModelRegistry;
 	sessionId?: string;
 	/** The session's active model; `web/hosted` searches through it. */
 	sessionModel?: Model<Api>;
@@ -178,7 +179,7 @@ function expandHostedCandidate(
  * or prepend {@link xaiModelChain} when the chain has none. Unchanged without
  * xAI credentials.
  */
-function preferXAI(chain: RoleChainCandidate[], modelRegistry: ModelRegistry): RoleChainCandidate[] {
+function preferXAI(chain: RoleChainCandidate[], modelRegistry: SearchModelRegistry): RoleChainCandidate[] {
 	const xai = chain.filter(candidate => candidate.model.webSearch === "xai");
 	if (xai.length > 0) return [...xai, ...chain.filter(candidate => candidate.model.webSearch !== "xai")];
 	return [...xaiModelChain(modelRegistry, settings).map(model => ({ model, explicit: false })), ...chain];
@@ -464,15 +465,22 @@ export const webSearchCustomTool: CustomTool<typeof webSearchSchema, SearchResul
 		ctx: CustomToolContext,
 		signal?: AbortSignal,
 	) {
-		const authStorage = ctx.modelRegistry?.authStorage ?? (await discoverAuthStorage());
-		const sessionId = ctx.sessionManager.getSessionId();
-		return executeSearch(toolCallId, params, {
-			authStorage,
-			modelRegistry: ctx.modelRegistry,
-			sessionId,
-			sessionModel: ctx.model,
-			signal,
-		});
+		// A custom tool's context hands the registry as an extension gets it, without the credential
+		// store, so the providers that read credentials directly get the discovered one. The
+		// registry's `resolver`, and the Codex guard's `credentialProvenance`, still answer from the
+		// session's own store.
+		const authStorage = await discoverAuthStorage();
+		try {
+			return await executeSearch(toolCallId, params, {
+				authStorage,
+				modelRegistry: ctx.modelRegistry,
+				sessionId: ctx.sessionManager.getSessionId(),
+				sessionModel: ctx.model,
+				signal,
+			});
+		} finally {
+			authStorage.close();
+		}
 	},
 };
 

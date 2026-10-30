@@ -4,6 +4,13 @@ import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
 import type { CollabHost } from "../../collab/host";
 import { formatKeyHint, formatKeyHints, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import {
+	bindInputScope,
+	SafeToolRendererComponent,
+	toolRendererScope,
+	unbindInputScope,
+	withInputScope,
+} from "@oh-my-pi/pi-tui/tools/renderer-scope";
 import type {
 	CompactOptions,
 	ExtensionActions,
@@ -261,7 +268,7 @@ export class ExtensionUiController {
 			getActiveTools: () => this.ctx.session.getEnabledToolNames(),
 			getAllTools: () => this.ctx.session.getAllToolInfos(),
 			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames),
-			setModel: model => runExtensionSetModel(this.ctx.session, model),
+			setModel: (model, owner) => runExtensionSetModel(this.ctx.session, model, owner),
 			getThinkingLevel: () => this.ctx.session.thinkingLevel,
 			setThinkingLevel: level => this.ctx.session.setThinkingLevel(level),
 			getServiceTiers: () => this.ctx.session.serviceTierByFamily,
@@ -415,7 +422,8 @@ export class ExtensionUiController {
 		}
 
 		const target = placement === "belowEditor" ? this.#hookWidgetsBelow : this.#hookWidgetsAbove;
-		target.set(key, this.#createHookWidget(content));
+		const widget = this.#createHookWidget(key, content);
+		if (widget) target.set(key, widget);
 		this.#rebuildHookWidgets();
 	}
 
@@ -425,7 +433,14 @@ export class ExtensionUiController {
 		widgets.delete(key);
 	}
 
-	#createHookWidget(content: ExtensionWidgetContent): ExtensionUiComponent {
+	/**
+	 * The widget `content` draws. An extension's factory carries the scope its session's code runs
+	 * in (`ToolRendererScope`, set by the `ctx.ui` it was handed): its component is mounted through
+	 * that scope (`SafeToolRendererComponent`), so every call into it runs as the session's work and
+	 * none once the session has gone — the widget then draws nothing, as if it had never been set.
+	 * A factory refused because the session has already gone mounts no widget.
+	 */
+	#createHookWidget(key: string, content: ExtensionWidgetContent): ExtensionUiComponent | undefined {
 		if (Array.isArray(content)) {
 			const container = new Container();
 			for (const line of content.slice(0, MAX_WIDGET_LINES)) {
@@ -439,7 +454,11 @@ export class ExtensionUiController {
 		if (content === undefined) {
 			throw new Error("Widget content missing");
 		}
-		return content(this.ctx.ui, theme);
+		const scope = toolRendererScope(content);
+		const component = content(this.ctx.ui, theme);
+		if (scope === undefined) return component;
+		if (!component) return undefined;
+		return new SafeToolRendererComponent(key, "widget", component, () => undefined, scope);
 	}
 
 	#rebuildHookWidgets(): void {
@@ -489,7 +508,7 @@ export class ExtensionUiController {
 			getActiveTools: () => this.ctx.session.getEnabledToolNames(),
 			getAllTools: () => this.ctx.session.getAllToolInfos(),
 			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames),
-			setModel: model => runExtensionSetModel(this.ctx.session, model),
+			setModel: (model, owner) => runExtensionSetModel(this.ctx.session, model, owner),
 			getThinkingLevel: () => this.ctx.session.thinkingLevel,
 			setThinkingLevel: (level, persist) => this.ctx.session.setThinkingLevel(level, persist),
 			getServiceTiers: () => this.ctx.session.serviceTierByFamily,
@@ -630,7 +649,7 @@ export class ExtensionUiController {
 					await runner!.runScoped(() =>
 						registeredTool.definition.onSession!(event, {
 							...runner!.createContext(),
-							ui: uiContext,
+							ui: runner!.handedUIContext(uiContext),
 							hasUI: true,
 							compact: instructionsOrOptions => runExtensionCompact(this.ctx.session, instructionsOrOptions),
 						}),
@@ -1334,7 +1353,9 @@ export class ExtensionUiController {
 		let editorReplaced = false;
 
 		const cleanup = () => {
-			component?.dispose?.();
+			// An extension's component is disposed inside its scope, and not at all once that has gone.
+			if (component) withInputScope(component, () => component?.dispose?.());
+			if (component) unbindInputScope(component);
 			overlayHandle?.hide();
 			overlayHandle = undefined;
 			if (editorReplaced) {
@@ -1365,13 +1386,30 @@ export class ExtensionUiController {
 		}
 		options?.signal?.addEventListener("abort", onAbort, { once: true });
 
+		// An extension's factory carries the scope its session's code runs in. Its component takes the
+		// user's keystrokes, so the TUI hands it input and focus only inside that scope; once the scope
+		// has gone the dialog is closed — as an aborted one is — before anything of it runs again.
+		const scope = toolRendererScope(factory);
 		Promise.try(() => factory(this.ctx.ui, theme, keybindings, close))
 			.then(c => {
+				if (!c) {
+					fail(new DOMException("Extension session retired", "AbortError"));
+					return;
+				}
 				if (closed) {
-					c.dispose?.();
+					if (!scope) c.dispose?.();
+					else if (scope.live) scope.run(() => c.dispose?.());
 					return;
 				}
 				component = c;
+				if (scope) {
+					// What still reaches it outside the admission while the session is live (the overlay
+					// draw, `ownsFocusTarget`, this method's `getText`/`setText`) is listed at `bindInputScope`.
+					bindInputScope(c, scope, () => {
+						fail(new DOMException("Extension session retired", "AbortError"));
+						return undefined;
+					});
+				}
 				if (options?.overlay) {
 					const overlayOptions =
 						typeof options.overlayOptions === "function" ? options.overlayOptions() : options.overlayOptions;

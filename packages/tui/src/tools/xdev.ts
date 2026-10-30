@@ -8,6 +8,13 @@ import { describeDefaultToolExecution, renderDefaultToolExecution } from "./defa
 import type { NativeToolView } from "./renderer";
 import { text } from "../native/describe";
 import { parseMCPToolName } from "./mcp";
+import {
+	SafeToolRendererComponent,
+	type ToolRendererScope,
+	type ToolRendererStage,
+	toolRendererScope,
+	toolRenderersLive,
+} from "./renderer-scope";
 
 /** Mounted device display callbacks, independent of tool execution state. */
 export interface XdevMountedRenderer {
@@ -17,6 +24,9 @@ export interface XdevMountedRenderer {
 	renderCall?(...args: Parameters<ToolRenderer["renderCall"]>): unknown;
 	renderResult?(...args: Parameters<ToolRenderer["renderResult"]>): unknown;
 	mergeCallAndResult?: boolean;
+	/** Where the tool's renderers and the components they return run, for a tool that is not the
+	 *  host's own (an extension tool). Once it has gone the tool counts as having no renderer. */
+	rendererScope?: ToolRendererScope;
 }
 
 /** Tool presentation state supplied by the host's canonical tool map. */
@@ -64,12 +74,12 @@ function decodeInnerArgs(raw: unknown): Record<string, unknown> {
 
 /** Renderer for a mounted device: the live mounted tool's own render callbacks
  *  (custom/MCP/image tools carry them) first, then the static built-in renderer
- *  map keyed by name. */
+ *  map keyed by name. A tool whose renderer scope has gone has no callbacks of its own. */
 function resolveDeviceRenderer(
 	name: string,
 	mounted: XdevMountedRenderer | undefined,
 ): XdevMountedRenderer | undefined {
-	if (mounted && (mounted.renderCall || mounted.renderResult)) {
+	if (mounted && (mounted.renderCall || mounted.renderResult) && toolRenderersLive(mounted)) {
 		return mounted;
 	}
 	return rendererLookup?.(name);
@@ -137,6 +147,26 @@ function renderQueuedXdevCall(
 }
 
 /**
+ * What `renderer` returned for `stage`, as this card mounts it. A host tool's component is the
+ * host's own and is used as it is. A scoped tool's (an extension tool's) is checked inside its
+ * scope and mounted through it ({@link SafeToolRendererComponent}): every call into it runs as the
+ * tool's owner's work, and once that owner has gone `fallback` — this card's default — is drawn.
+ */
+function deviceComponent(
+	name: string,
+	stage: ToolRendererStage,
+	renderer: XdevMountedRenderer,
+	rendered: unknown,
+	fallback: () => Component | undefined,
+): Component | undefined {
+	const scope = toolRendererScope(renderer);
+	if (scope === undefined) return isComponent(rendered) ? rendered : undefined;
+	if (!scope.live) return undefined;
+	const component = scope.run(() => (isComponent(rendered) ? rendered : undefined));
+	return component && new SafeToolRendererComponent(name, stage, component, fallback, scope);
+}
+
+/**
  * Streaming-safe call preview for an `xd://` write. Until the write actually
  * executes (`executionStarted` / `tool_execution_start`), show a queued/planning
  * card so Grok-style think-after-toolcall stalls do not look like a hung
@@ -159,11 +189,13 @@ export function renderXdevCall(
 		return renderQueuedXdevCall(displayDeviceLabel(name, mounted), args, options, theme);
 	}
 	const renderer = resolveDeviceRenderer(name, mounted);
+	const label = mounted?.label ?? name;
 	if (renderer?.renderCall) {
-		const rendered = renderer.renderCall(args, options, theme);
-		return isComponent(rendered) ? rendered : undefined;
+		return deviceComponent(name, "call", renderer, renderer.renderCall(args, options, theme), () =>
+			renderDefaultToolExecution({ label, args, options }, theme),
+		);
 	}
-	return renderDefaultToolExecution({ label: mounted?.label ?? name, args, options }, theme);
+	return renderDefaultToolExecution({ label, args, options }, theme);
 }
 
 /** Native form of {@link resolveDeviceRenderer}: the first renderer that can describe. */
@@ -171,7 +203,7 @@ function resolveDeviceDescriber(
 	name: string,
 	mounted: XdevMountedRenderer | undefined,
 ): XdevMountedRenderer | undefined {
-	if (mounted && (mounted.describeCall || mounted.describeResult)) return mounted;
+	if (mounted && (mounted.describeCall || mounted.describeResult) && toolRenderersLive(mounted)) return mounted;
 	return rendererLookup?.(name);
 }
 
@@ -243,16 +275,34 @@ export function renderXdevResult(
 	const mounted = resolveMounted?.(dispatch.tool);
 	const renderer = resolveDeviceRenderer(dispatch.tool, mounted);
 	const innerResult = { content: result.content, details: dispatch.inner, isError: result.isError };
+	const defaultResult = (): Component =>
+		renderDefaultToolExecution(
+			{
+				label: mounted?.label ?? dispatch.tool,
+				args: dispatch.args ?? {},
+				result: { output: text, isError: result.isError },
+				options,
+			},
+			theme,
+		);
 	if (renderer?.renderResult) {
 		const parts: Component[] = [];
 		// Emulate the unmerged call+result topology inside the write block for
 		// renderers that expect a separate call header.
 		if (!renderer.mergeCallAndResult && renderer.renderCall) {
-			const call = renderer.renderCall(dispatch.args ?? {}, { ...options, isPartial: false }, theme);
-			if (isComponent(call)) parts.push(call);
+			const rendered = renderer.renderCall(dispatch.args ?? {}, { ...options, isPartial: false }, theme);
+			// The result part's fallback is the whole default card, so the call part has none of its own.
+			const call = deviceComponent(dispatch.tool, "call", renderer, rendered, () => undefined);
+			if (call) parts.push(call);
 		}
-		const rendered = renderer.renderResult(innerResult, options, theme, dispatch.args ?? {});
-		if (isComponent(rendered)) parts.push(rendered);
+		const rendered = deviceComponent(
+			dispatch.tool,
+			"result",
+			renderer,
+			renderer.renderResult(innerResult, options, theme, dispatch.args ?? {}),
+			defaultResult,
+		);
+		if (rendered) parts.push(rendered);
 		if (parts.length === 1) return parts[0];
 		if (parts.length > 1) {
 			const box = new Container();
@@ -260,13 +310,5 @@ export function renderXdevResult(
 			return box;
 		}
 	}
-	return renderDefaultToolExecution(
-		{
-			label: mounted?.label ?? dispatch.tool,
-			args: dispatch.args ?? {},
-			result: { output: text, isError: result.isError },
-			options,
-		},
-		theme,
-	);
+	return defaultResult();
 }

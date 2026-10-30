@@ -96,6 +96,7 @@ import type { EphemeralTurnOptions, EphemeralTurnResult } from "../../session/ag
 import type { CompactMode } from "../../session/compact-modes";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
+import type { ExtensionModelRegistry, ExtensionSessionManager } from "./context-surfaces";
 import type { BashToolInput, GlobToolInput, GrepToolInput, ReadToolInput, WriteToolInput } from "../../tools";
 import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
 import type { GrepToolDetails } from "@oh-my-pi/pi-tui/tools/grep";
@@ -760,10 +761,10 @@ export interface ExtensionContext {
 	hasUI: boolean;
 	/** Current working directory */
 	cwd: string;
-	/** Session manager (read-only) */
-	sessionManager: ReadonlySessionManager;
-	/** Model registry for API key resolution */
-	modelRegistry: ModelRegistry;
+	/** Session manager (read-only): the members `ReadonlySessionManager` declares, answering copies. */
+	sessionManager: ExtensionSessionManager;
+	/** Model registry for catalog queries and API key resolution; see `ExtensionModelRegistry`. */
+	modelRegistry: ExtensionModelRegistry;
 	/** Calling session's `local://` root mapping for external tool bridges. */
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Current model (may be undefined) */
@@ -2313,7 +2314,9 @@ export type GetCommandsHandler = () => SlashCommandInfo[];
 
 export type SetActiveToolsHandler = (toolNames: string[]) => Promise<void>;
 
-export type SetModelHandler = (model: Model) => Promise<boolean>;
+/** The `pi.setModel` action. `owner` is the session that handed the model over: the copy is taken
+ *  inside its admission, and a `resolveHeaders` the model brings runs as its work. */
+export type SetModelHandler = (model: Model, owner: ExtensionCallbackOwner) => Promise<boolean>;
 
 export type GetThinkingLevelHandler = () => ThinkingLevel | undefined;
 
@@ -2443,6 +2446,9 @@ export interface ExtensionCallbackOwner {
 
 /** Full runtime = state + actions, including host-compatible service-tier fallbacks. */
 export interface ExtensionRuntime extends ExtensionRuntimeState, ExtensionActions, ExtensionCallbackOwner {
+	/** `pi.setModel`, bound by the runner to {@link ExtensionActions.setModel} with this runtime as
+	 *  the session that hands the model over. */
+	setModel(model: Model): Promise<boolean>;
 	getServiceTiers: GetServiceTiersHandler;
 	setServiceTier: SetServiceTierHandler;
 }

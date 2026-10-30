@@ -27,6 +27,7 @@ import { LoopWatchdog } from "./loop-watchdog";
 import { assumedTspHello, NativeBackend, type NativeHost } from "./native/backend";
 import { col } from "./native/describe";
 import { TSP_PREFIX, type TspHello } from "./native/encode";
+import { retireGoneInputScopes, withInputScope } from "./tools/renderer-scope";
 import type { DescribeContext, NativeNode, NativeScreen, NativeSurfaceProvider, NativeUiEvent } from "./native/node";
 import { cropSixelTop } from "./sixel";
 import { STDOUT_BACKLOG_CLEAR_BYTES, setAltScreenActive, type Terminal } from "./terminal";
@@ -1251,7 +1252,10 @@ export class TUI extends Container {
 	setFocus(component: Component | null): void {
 		const holder = this.#getKeyHolderOverlay();
 		if (holder && !isOverlayFocusTarget(holder.component, component)) {
-			if (!holder.component.handleInput && this.#focusedComponent === holder.component) {
+			if (
+				!withInputScope(holder.component, () => holder.component.handleInput) &&
+				this.#focusedComponent === holder.component
+			) {
 				holder.preFocus = component;
 			}
 			const currentFocus = this.#focusedComponent;
@@ -1263,19 +1267,22 @@ export class TUI extends Container {
 		}
 
 		const previousFocusedComponent = this.#focusedComponent;
-		// Clear focused flag on old component
-		if (isFocusable(previousFocusedComponent)) {
-			previousFocusedComponent.focused = false;
-		}
+		// Clear focused flag on old component. An extension's component gets its flags inside its
+		// scope, and none once that has gone (`withInputScope`).
+		withInputScope(previousFocusedComponent, () => {
+			if (isFocusable(previousFocusedComponent)) previousFocusedComponent.focused = false;
+		});
 
 		this.#focusedComponent = component;
 
 		// Set focused flag on new component and keep its software/hardware cursor
 		// rendering mode aligned with TUI's single cursor-visibility preference.
-		if (isFocusable(component)) {
-			component.focused = true;
-			this.#syncTerminalCursorMode(component);
-		}
+		withInputScope(component, () => {
+			if (isFocusable(component)) {
+				component.focused = true;
+				this.#syncTerminalCursorMode(component);
+			}
+		});
 	}
 
 	/** Component currently receiving keyboard input, if any. */
@@ -3014,11 +3021,19 @@ export class TUI extends Container {
 		// and debug shortcuts see the key, then handle the raw event exactly once.
 		const focusedForCapture = this.#inputTarget();
 		if (
-			focusedForCapture?.handleInput &&
-			(!isKeyRelease(data) || focusedForCapture.wantsKeyRelease) &&
-			focusedForCapture.capturesInput?.(data)
+			focusedForCapture &&
+			withInputScope(focusedForCapture, () => {
+				if (
+					!focusedForCapture.handleInput ||
+					(isKeyRelease(data) && !focusedForCapture.wantsKeyRelease) ||
+					!focusedForCapture.capturesInput?.(data)
+				) {
+					return false;
+				}
+				focusedForCapture.handleInput(data);
+				return true;
+			})
 		) {
-			focusedForCapture.handleInput(data);
 			this.requestRender();
 			return;
 		}
@@ -3052,12 +3067,16 @@ export class TUI extends Container {
 		}
 
 		const target = this.#inputTarget();
-		if (target?.handleInput) {
-			// Filter out key release events unless component opts in
-			if (isKeyRelease(data) && !target.wantsKeyRelease) {
-				return;
-			}
-			target.handleInput(data);
+		if (
+			target &&
+			withInputScope(target, () => {
+				if (!target.handleInput) return false;
+				// Filter out key release events unless component opts in
+				if (isKeyRelease(data) && !target.wantsKeyRelease) return false;
+				target.handleInput(data);
+				return true;
+			})
+		) {
 			this.requestRender();
 		}
 	}
@@ -3067,8 +3086,12 @@ export class TUI extends Container {
 	 * leaves input with the focus it displaced; other focus owners keep their input.
 	 */
 	#inputTarget(): Component | null {
+		// A component an extension supplied whose session has gone is taken out of input — the host
+		// swaps in its own editor, closes the dialog — before anything of it runs, including
+		// `capturesInput`. A live one is asked for `handleInput` inside its scope.
+		retireGoneInputScopes();
 		const focused = this.#focusedComponent;
-		if (focused?.handleInput) return focused;
+		if (focused && withInputScope(focused, () => !!focused.handleInput)) return focused;
 		const holder = this.#getKeyHolderOverlay();
 		return holder?.component === focused ? holder.preFocus : null;
 	}
@@ -3876,6 +3899,8 @@ export class TUI extends Container {
 	/** Render one frame: alt-screen modal, provider plan, or children fallback. */
 	#doRender(): void {
 		if (this.#stopped) return;
+		// Before a frame draws anything an extension supplied whose session has gone.
+		retireGoneInputScopes();
 		if (this.#nativeLive) {
 			this.#native!.render();
 			return;

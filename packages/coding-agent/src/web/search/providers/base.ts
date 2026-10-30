@@ -5,6 +5,23 @@ import type { StructuredQuery } from "../query";
 import type { SearchProviderId, SearchResponse } from "../types";
 
 /**
+ * The registry members web search reads: the catalog, credential resolution, and the provenance a
+ * custom-endpoint guard checks against the same store. A session's registry and an extension
+ * context's (`ExtensionModelRegistry`) both satisfy it.
+ */
+export type SearchModelRegistry = Pick<
+	ModelRegistry,
+	| "getAvailable"
+	| "getAll"
+	| "getError"
+	| "getAvailableForProviders"
+	| "resolver"
+	| "resolveModelHeaders"
+	| "hasCommandBackedApiKey"
+	| "credentialProvenance"
+>;
+
+/**
  * Shared web search parameters passed to providers.
  *
  * `authStorage` is the **only** credential source providers may consult.
@@ -70,7 +87,7 @@ export interface SearchParams {
 	/** Thinking selector resolved from the model-role candidate. */
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Provider/model transport settings used by native search endpoints. */
-	modelRegistry: ModelRegistry;
+	modelRegistry: SearchModelRegistry;
 	/** Whether the selected model came from an explicit role-chain entry. */
 	explicit?: boolean;
 	/**

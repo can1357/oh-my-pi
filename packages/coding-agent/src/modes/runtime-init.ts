@@ -127,7 +127,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			setActiveTools: (toolNames: string[]) =>
 				session.setActiveToolsByName(filterActiveTools ? filterActiveTools(toolNames) : toolNames),
 			getCommands: () => getSessionSlashCommands(session),
-			setModel: model => runExtensionSetModel(session, model),
+			setModel: (model, owner) => runExtensionSetModel(session, model, owner),
 			getThinkingLevel: () => session.thinkingLevel,
 			setThinkingLevel: level => session.setThinkingLevel(level),
 			getServiceTiers: () => session.serviceTierByFamily,

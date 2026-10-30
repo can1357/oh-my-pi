@@ -47,7 +47,8 @@ import {
 	resolveImageOptions,
 } from "../render/render-utils";
 import type { XdevMountedState } from "../tools/xdev";
-import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../render/index";
+import { isFramedBlockComponent, renderStatusLine, WidthAwareText } from "../render/index";
+import { SafeToolRendererComponent, type ToolRendererScope, toolRendererScope } from "../tools/renderer-scope";
 import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "./image-loading";
 import { FenceFigure } from "./fence-figure";
 import { sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
@@ -110,8 +111,6 @@ function resolveEditModeForTool(toolName: string, tool: AgentTool | undefined): 
 	return (tool as { mode?: EditMode } | undefined)?.mode;
 }
 
-type ToolRendererStage = "call" | "result";
-
 /**
  * A renderer's preview as the fallback card's clamp (`tail` becomes a head
  * clamp of the same size; `children` leaves the clamping to the body's own previews).
@@ -128,85 +127,6 @@ type ToolDescriber = Pick<ToolRenderer, "describeCall" | "describeResult" | "mer
 
 /** Optional kinds of the host's vocabulary the describe hooks branch on. */
 type NativeHostKinds = Required<Pick<RenderResultContextOptions, "media" | "json">>;
-
-class SafeToolRendererComponent implements Component {
-	#toolName: string;
-	#stage: ToolRendererStage;
-	#component: Component;
-	#fallback: () => Component | undefined;
-	#warned = false;
-	readonly wantsKeyRelease: boolean | undefined;
-
-	constructor(
-		toolName: string,
-		stage: ToolRendererStage,
-		component: Component,
-		fallback: () => Component | undefined,
-	) {
-		this.#toolName = toolName;
-		this.#stage = stage;
-		this.#component = component;
-		this.#fallback = fallback;
-		this.wantsKeyRelease = component.wantsKeyRelease;
-		if (isFramedBlockComponent(component)) {
-			markFramedBlockComponent(this);
-		}
-	}
-
-	render(width: number): readonly string[] {
-		try {
-			return this.#component.render(width);
-		} catch (err) {
-			if (!this.#warned) {
-				this.#warned = true;
-				logger.warn("Tool renderer failed", { tool: this.#toolName, stage: this.#stage, error: String(err) });
-			}
-			return this.#fallback()?.render(width) ?? [];
-		}
-	}
-
-	handleInput(data: string): void {
-		const handleInput = this.#component.handleInput;
-		if (handleInput === undefined) return;
-		handleInput.call(this.#component, data);
-	}
-
-	invalidate(): void {
-		const invalidate = this.#component.invalidate;
-		if (invalidate === undefined) return;
-		invalidate.call(this.#component);
-	}
-
-	releaseRenderCaches(): void {
-		const release = this.#component.releaseRenderCaches;
-		if (release === undefined) return;
-		try {
-			release.call(this.#component);
-		} catch (err) {
-			if (!this.#warned) {
-				this.#warned = true;
-				logger.warn("Tool renderer failed", {
-					tool: this.#toolName,
-					stage: this.#stage,
-					phase: "releaseRenderCaches",
-					error: String(err),
-				});
-			}
-		}
-	}
-
-	setIgnoreTight(ignore: boolean): void {
-		const setIgnoreTight = this.#component.setIgnoreTight;
-		if (setIgnoreTight === undefined) return;
-		setIgnoreTight.call(this.#component, ignore);
-	}
-
-	dispose(): void {
-		const dispose = this.#component.dispose;
-		if (dispose === undefined) return;
-		dispose.call(this.#component);
-	}
-}
 
 /** Minimal TUI surface ToolExecutionComponent uses to schedule repaints and share image budget. */
 export interface ToolExecutionUi {
@@ -366,6 +286,14 @@ export class ToolExecutionComponent extends Container {
 	// Which container the constructor mounted: bespoke/built-in renderers use
 	// #contentBox, everything else the generic #contentText fallback.
 	#usesContentBox = false;
+	/** The scope this tool's own renderers and the components they return run in: an extension
+	 *  tool's (`ToolRendererScope`), or none for a host tool. */
+	readonly #rendererScope: ToolRendererScope | undefined;
+	/** Every scope the card's drawing has consulted: its own tool's, and for a `write xd://` card
+	 *  each device it resolved. Once one has gone the card redraws as having no renderer. */
+	readonly #drawnScopes = new Set<ToolRendererScope>();
+	/** Whether every scope in {@link #drawnScopes} was live when the display was last built. */
+	#builtLive = true;
 	#multiFileBoxes: (Box | Spacer)[] = []; // Extra boxes for multi-file edit results
 	#imageComponents: Image[] = [];
 	#imageSpacers: Spacer[] = [];
@@ -508,6 +436,8 @@ export class ToolExecutionComponent extends Container {
 		this.#renderer = options.useBuiltInRenderer === false ? undefined : toolRenderers[toolName];
 		this.#showImages = options.showImages ?? true;
 		this.#tool = tool;
+		this.#rendererScope = toolRendererScope(tool);
+		if (this.#rendererScope) this.#drawnScopes.add(this.#rendererScope);
 		this.#ui = ui;
 		this.#args = args;
 		this.#editMode = resolveEditModeForTool(toolName, tool);
@@ -746,14 +676,14 @@ export class ToolExecutionComponent extends Container {
 				? // Only the generic #formatToolExecution fallback consumes the frame;
 					// a custom renderCall/renderResult pair routes through the custom
 					// branch whose pending label is a static tool-name Text.
-					!this.#tool?.renderCall && !this.#tool?.renderResult
+					!this.#customRendererTool()
 				: typeof pendingAnimation === "function"
 					? pendingAnimation(this.#args)
 					: pendingAnimation === true);
 		const partialResultConsumesSpinner =
 			this.#result !== undefined &&
 			(renderer === undefined
-				? !this.#tool?.renderCall && !this.#tool?.renderResult
+				? !this.#customRendererTool()
 				: typeof partialAnimation === "function"
 					? partialAnimation(this.#args)
 					: partialAnimation === true);
@@ -1040,6 +970,7 @@ export class ToolExecutionComponent extends Container {
 			host.media,
 			host.json,
 			getThemeEpoch(),
+			this.#scopesLive(),
 		];
 		return this.#native.get(key, () =>
 			withHidden(dataFirst ? this.#describeTool(host) : this.#describeCard(host), !this.#toolActivityVisible),
@@ -1227,7 +1158,8 @@ export class ToolExecutionComponent extends Container {
 		};
 		// Custom tools (MCP, extensions) carry their own describe hooks, mirroring
 		// the ANSI path's preference for the tool's renderCall/renderResult.
-		const toolDescriber = this.#tool as ToolDescriber | undefined;
+		// A tool whose renderer scope has gone has no describe hooks of its own.
+		const toolDescriber = this.#rendererScope?.live === false ? undefined : (this.#tool as ToolDescriber | undefined);
 		const renderer: ToolDescriber | undefined =
 			toolDescriber?.describeCall || toolDescriber?.describeResult ? toolDescriber : this.#renderer;
 		if (this.#isBenignSkip() || !renderer || (!renderer.describeCall && !renderer.describeResult)) {
@@ -1336,12 +1268,28 @@ export class ToolExecutionComponent extends Container {
 		// TUI startup, so a result rendered before it lands must re-shape once it
 		// does (it gates Image children vs text fallback in #rebuildDisplay); keyed
 		// here for the same reason markdown.ts keys its render cache on it.
-		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#argsComplete ? "1" : "0"}|${this.#executionStarted ? "1" : "0"}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}|${imageLinksEnabled()}`;
+		const live = this.#scopesLive();
+		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#argsComplete ? "1" : "0"}|${this.#executionStarted ? "1" : "0"}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}|${imageLinksEnabled()}|${live ? "1" : "0"}`;
 		if (key === this.#lastDisplayKey && this.#displayBuilt) return;
 		this.#lastDisplayKey = key;
+		this.#builtLive = live;
 
 		this.#rebuildDisplay();
 		this.#displayBuilt = true;
+	}
+
+	/** The tool's own renderers, while they can be called: none for a tool without them, and none
+	 *  once its renderer scope has gone — such a tool is drawn as one with no renderer. */
+	#customRendererTool(): AgentTool | undefined {
+		const tool = this.#tool;
+		if (!tool || (!tool.renderCall && !tool.renderResult)) return undefined;
+		return this.#rendererScope?.live === false ? undefined : tool;
+	}
+
+	/** Whether every renderer scope the card's drawing has consulted is still live. */
+	#scopesLive(): boolean {
+		for (const scope of this.#drawnScopes) if (!scope.live) return false;
+		return true;
 	}
 
 	#rendererFlag(name: "forceResultViewportRepaintOnSettle"): boolean {
@@ -1382,6 +1330,9 @@ export class ToolExecutionComponent extends Container {
 		if (!this.#toolActivityVisible || this.#allocation === 0 || (this.#toolName === "wait" && this.#isBenignSkip())) {
 			return [];
 		}
+		// A scope the last build drew through has gone since: redraw as having no renderer first,
+		// so nothing the tool returned is painted or called.
+		if (this.#builtLive && this.#drawnScopes.size > 0 && !this.#scopesLive()) this.#updateDisplay();
 		let lines = super.render(width);
 		if (this.#allocation < 3) {
 			// A squeezed allocation degrades only blocks that genuinely overflow it.
@@ -1492,10 +1443,12 @@ export class ToolExecutionComponent extends Container {
 		// so bypass any bespoke error frame and draw the neutral generic card —
 		// the per-tool ✘/red-border would misread normal mid-turn steering as a
 		// failure (#7199).
+		const customTool = this.#customRendererTool();
 		if (benignSkip) {
-			this.#renderBenignSkipCard(stateBgFn);
-		} else if (this.#tool && (this.#tool.renderCall || this.#tool.renderResult)) {
-			const tool = this.#tool;
+			this.#renderGenericCard(stateBgKey, stateBgFn);
+		} else if (customTool) {
+			const tool = customTool;
+			const scope = this.#rendererScope;
 			const mergeCallAndResult = Boolean((tool as { mergeCallAndResult?: boolean }).mergeCallAndResult);
 			// Custom tools use Box for flexible component rendering
 			this.#contentBox.setBgFn(undefined);
@@ -1523,6 +1476,7 @@ export class ToolExecutionComponent extends Container {
 									"call",
 									callComponent,
 									() => new Text(theme.fg("toolTitle", theme.bold(this.#toolLabel)), 0, 0),
+									scope,
 								),
 							);
 						}
@@ -1558,11 +1512,17 @@ export class ToolExecutionComponent extends Container {
 					);
 					if (resultComponent) {
 						this.#contentBox.addChild(
-							new SafeToolRendererComponent(this.#toolName, "result", resultComponent, () => {
-								const output = this.#getTextOutput();
-								if (!output) return undefined;
-								return new Text(theme.fg("toolOutput", replaceTabs(output)), 0, 0);
-							}),
+							new SafeToolRendererComponent(
+								this.#toolName,
+								"result",
+								resultComponent,
+								() => {
+									const output = this.#getTextOutput();
+									if (!output) return undefined;
+									return new Text(theme.fg("toolOutput", replaceTabs(output)), 0, 0);
+								},
+								scope,
+							),
 						);
 					}
 				} catch (err) {
@@ -1732,10 +1692,10 @@ export class ToolExecutionComponent extends Container {
 				}
 			}
 		} else {
-			// Generic fallback (no custom/built-in renderer). WidthAwareText
-			// reformats at render time so output fills the actual terminal width
-			// instead of a fixed column cap.
-			this.#refreshContentText(stateBgKey, stateBgFn);
+			// Generic fallback (no custom/built-in renderer, or none the card may
+			// still call). WidthAwareText reformats at render time so output fills
+			// the actual terminal width instead of a fixed column cap.
+			this.#renderGenericCard(stateBgKey, stateBgFn);
 		}
 
 		// Handle images (same for both custom and built-in)
@@ -1800,7 +1760,7 @@ export class ToolExecutionComponent extends Container {
 	 */
 	#syncFigure(): void {
 		const result = this.#result;
-		const renderer = this.#tool?.renderCall || this.#tool?.renderResult ? undefined : this.#renderer;
+		const renderer = this.#customRendererTool() ? undefined : this.#renderer;
 		const fence =
 			this.#isBenignSkip() || isNativeRendering()
 				? undefined
@@ -1858,7 +1818,7 @@ export class ToolExecutionComponent extends Container {
 			return Math.max(1, Math.min(maxSeconds, value));
 		};
 
-		if (this.#renderer && !this.#tool?.renderResult && this.#rawDetails !== undefined) {
+		if (this.#renderer && !this.#customRendererTool()?.renderResult && this.#rawDetails !== undefined) {
 			context.rawDetails = this.#rawDetails;
 		}
 		if (this.#toolName === "bash") {
@@ -1912,7 +1872,13 @@ export class ToolExecutionComponent extends Container {
 			const writeTool = this.#tool as { session?: { xdev?: XdevMountedState } } | undefined;
 			const resolveXdevMounted = writeTool?.session?.xdev?.resolve;
 			if (resolveXdevMounted) {
-				context.resolveXdevMounted = resolveXdevMounted;
+				// Each device the card resolves is one whose renderers it may draw through.
+				context.resolveXdevMounted = (name: string) => {
+					const mounted = resolveXdevMounted(name);
+					const scope = toolRendererScope(mounted);
+					if (scope) this.#drawnScopes.add(scope);
+					return mounted;
+				};
 			}
 		}
 
@@ -1998,15 +1964,15 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	/**
-	 * Render a benign skip as the neutral generic card, replacing any bespoke
-	 * renderer's error frame. Generic-fallback tools already route through
-	 * {@link #renderDefaultCard} (which emits the info card for a skip); they
-	 * only need the neutral tint. Bespoke-renderer tools get their content box
-	 * swapped for the same neutral card.
+	 * Render the generic call/result card. Generic-fallback tools draw it in
+	 * #contentText ({@link #renderDefaultCard}, which also emits the info card for
+	 * a benign skip). A card built for a bespoke renderer it no longer draws with
+	 * — a benign skip replacing that renderer's error frame, or a tool whose
+	 * renderer scope has gone — gets its content box swapped for the same card.
 	 */
-	#renderBenignSkipCard(stateBgFn: (text: string) => string): void {
+	#renderGenericCard(stateBgKey: string, stateBgFn: (text: string) => string): void {
 		if (!this.#usesContentBox) {
-			this.#refreshContentText("toolPendingBg", stateBgFn);
+			this.#refreshContentText(stateBgKey, stateBgFn);
 			return;
 		}
 		for (const box of this.#multiFileBoxes) {

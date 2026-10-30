@@ -29,7 +29,9 @@ import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
-import { copyHostData, copyToolResult } from "./boundary-data";
+import type { ToolRendererScope } from "@oh-my-pi/pi-tui/tools/renderer-scope";
+import { copyHostData, copyToolResult, copyToolView } from "./boundary-data";
+import { handTheme } from "./context-surfaces";
 import type { ExtensionRunner } from "./runner";
 import type { ExtensionAgentIdentity, RegisteredTool, ToolCallEventResult } from "./types";
 
@@ -81,34 +83,77 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 
 	renderCall?: (args: any, options: any, theme: any) => any;
 	renderResult?: (result: any, options: any, theme: any, args?: any) => any;
+	describeCall?: RegisteredTool["definition"]["describeCall"];
+	describeResult?: RegisteredTool["definition"]["describeResult"];
+	/** The scope a host runs the components this tool's renderers return in: the session's
+	 *  admission, which the TUI cannot import (`@oh-my-pi/pi-tui/tools/renderer-scope`). */
+	readonly rendererScope: ToolRendererScope;
 	readonly loadMode: ToolLoadMode;
 
+	/**
+	 * The renderers are the boundary too, in both directions. Each runs inside this session's
+	 * admission ({@link ExtensionRunner.runScoped}) and not at all once the session has gone, on
+	 * copies of what the host hands it: the call's arguments and render options, the result. What
+	 * a describe hook answers is data and is copied there (`copyToolView`). What a render hook
+	 * answers is a component, the extension's live code: it is handed back as it is, and every
+	 * host that mounts it runs it through {@link rendererScope} (`SafeToolRendererComponent`).
+	 */
 	constructor(
 		private registeredTool: RegisteredTool,
 		private runner: ExtensionRunner,
 	) {
 		applyToolProxy(registeredTool.definition, this);
-		this.loadMode = defaultLoadModeForToolName(registeredTool.definition.name, registeredTool.definition.loadMode);
+		const { definition, extensionPath } = registeredTool;
+		const name = definition.name;
+		this.loadMode = defaultLoadModeForToolName(name, definition.loadMode);
+		this.rendererScope = runner.rendererScope;
 
 		// Only define render methods when the underlying definition provides them.
 		// If these exist unconditionally on the prototype, ToolExecutionComponent
 		// enters the custom-renderer path, gets undefined back, and silently
 		// discards tool result text (extensions without renderers show blank).
-		if (registeredTool.definition.renderCall) {
+		const { renderCall, renderResult, describeCall, describeResult } = definition;
+		if (renderCall) {
 			this.renderCall = (args: any, options: any, theme: any) =>
-				registeredTool.definition.renderCall!(
-					args,
-					renderOptionsWithTheme(options, theme as Theme),
-					theme as Theme,
+				runner.runScoped(() =>
+					renderCall(
+						copyHostData(args),
+						renderOptionsWithTheme(copyHostData(options), handTheme(theme)),
+						handTheme(theme),
+					),
 				);
 		}
-		if (registeredTool.definition.renderResult) {
+		if (renderResult) {
 			this.renderResult = (result: any, options: any, theme: any, args?: any) =>
-				registeredTool.definition.renderResult!(
-					result,
-					{ expanded: options.expanded, isPartial: options.isPartial, spinnerFrame: options.spinnerFrame },
-					theme as Theme,
-					args,
+				runner.runScoped(() =>
+					renderResult(
+						copyHostData(result),
+						{ expanded: options.expanded, isPartial: options.isPartial, spinnerFrame: options.spinnerFrame },
+						handTheme(theme),
+						copyHostData(args),
+					),
+				);
+		}
+		if (describeCall) {
+			this.describeCall = (args, options) =>
+				runner.runScoped(() =>
+					copyToolView(
+						describeCall(copyHostData(args), copyHostData(options)),
+						name,
+						extensionPath,
+						"describeCall() view",
+					),
+				);
+		}
+		if (describeResult) {
+			this.describeResult = (result, options, args) =>
+				runner.runScoped(() =>
+					copyToolView(
+						describeResult(copyHostData(result), copyHostData(options), copyHostData(args)),
+						name,
+						extensionPath,
+						"describeResult() view",
+					),
 				);
 		}
 	}

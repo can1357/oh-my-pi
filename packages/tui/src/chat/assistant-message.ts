@@ -19,6 +19,12 @@ import { formatDuration, formatNumber, logger } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { AssistantTextRenderer, AssistantTextRendering, AssistantThinkingRenderer } from "./extension-types";
+import {
+	SafeToolRendererComponent,
+	type ToolRendererScope,
+	toolRendererScope,
+	toolRenderersLive,
+} from "../tools/renderer-scope";
 import { ensureThemeSync, getMarkdownTheme, getMarkdownThemeWithLinkTargets, getThemeEpoch, theme } from "../theme";
 import { card, col, elapsed, node, span, text } from "../native/describe";
 import { hasTranscriptActions, runTranscriptAction } from "./transcript-actions";
@@ -412,6 +418,11 @@ export class AssistantMessageComponent extends Container {
 	#answerMessage: AssistantMessage | undefined;
 	/** Thinking-extension components per content index, recorded when the slow path mounts them. */
 	#thinkingExtensions = new Map<number, Component[]>();
+	/** Every scope an extension's thinking or text renderer this message drew with runs in
+	 *  (`ToolRendererScope`). Once one has gone the message is drawn again without it. */
+	readonly #drawnScopes = new Set<ToolRendererScope>();
+	/** Whether every scope in {@link #drawnScopes} was live when the content was last built. */
+	#builtLive = true;
 	/** Collapse state of thinking sections toggled in the terminal, by content index; cleared by {@link setHideThinkingBlock}. */
 	#thinkingCollapsed = new Map<number, boolean>();
 	/** When each thinking block was seen streaming and when it stopped (native "Thought for 12s"), by content index. */
@@ -553,6 +564,15 @@ export class AssistantMessageComponent extends Container {
 	#renderText(message: AssistantMessage, streaming: boolean): AssistantMessage {
 		const rendering = this.#textRendering;
 		if (!rendering) return message;
+		// An extension's renderer whose session has gone is no renderer; output it gave while live
+		// is not reused once one has gone.
+		let live = true;
+		for (const renderer of rendering.renderers) {
+			const scope = toolRendererScope(renderer);
+			if (scope === undefined) continue;
+			this.#drawnScopes.add(scope);
+			if (!scope.live) live = false;
+		}
 		// Renderers are display-only: hand them a deep copy so no edit, however nested, reaches the stored message.
 		let view: AssistantMessage | undefined;
 		let content: AssistantMessage["content"] | undefined;
@@ -564,12 +584,13 @@ export class AssistantMessageComponent extends Container {
 			const blockStreaming = streaming && index === tail;
 			const cached = this.#renderedText.get(index);
 			let text: string;
-			if (cached?.input === block.text && cached.streaming === blockStreaming) {
+			if (cached?.input === block.text && cached.streaming === blockStreaming && cached.live === live) {
 				text = cached.output;
 			} else {
 				view ??= structuredClone(message);
 				text = block.text;
 				for (const renderer of rendering.renderers) {
+					if (!toolRenderersLive(renderer)) continue;
 					try {
 						const rendered = renderer({
 							message: view,
@@ -577,6 +598,7 @@ export class AssistantMessageComponent extends Container {
 							text,
 							streaming: blockStreaming,
 						});
+						// A string is a value: nothing the renderer does later can change it.
 						if (typeof rendered === "string") text = rendered;
 					} catch (error) {
 						if (failedTextRenderers.has(renderer)) continue;
@@ -584,7 +606,7 @@ export class AssistantMessageComponent extends Container {
 						logger.warn("Assistant text renderer failed; drawing its input", { error: String(error) });
 					}
 				}
-				this.#renderedText.set(index, { input: block.text, streaming: blockStreaming, output: text });
+				this.#renderedText.set(index, { input: block.text, streaming: blockStreaming, live, output: text });
 			}
 			if (text === block.text) continue;
 			content ??= message.content.slice();
@@ -598,8 +620,8 @@ export class AssistantMessageComponent extends Container {
 	#textRendering: AssistantTextRendering | undefined;
 	/** Index in the full reply's `content` of this component's first block, kept across renderer swaps. */
 	readonly #textContentOffset: number;
-	/** Last renderer output per content index, reused while the block's input and `streaming` flag hold; see {@link #renderText}. */
-	readonly #renderedText = new Map<number, { input: string; streaming: boolean; output: string }>();
+	/** Last renderer output per content index, reused while the block's input, its `streaming` flag and the liveness of every renderer's scope hold; see {@link #renderText}. */
+	readonly #renderedText = new Map<number, { input: string; streaming: boolean; live: boolean; output: string }>();
 	readonly #imageBudget?: ImageBudget;
 	#proseOnlyThinking: boolean;
 	#expandThinkingBlocks: boolean;
@@ -877,9 +899,26 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	override render(width: number): readonly string[] {
+		this.#redrawIfRetired();
 		const rows = super.render(width);
 		this.#publishStableSnapshot(rows, width);
 		return rows;
+	}
+
+	/** Whether every renderer scope this message drew with is still live. */
+	#scopesLive(): boolean {
+		for (const scope of this.#drawnScopes) if (!scope.live) return false;
+		return true;
+	}
+
+	/** An extension renderer whose session has gone since the content was built is no renderer:
+	 *  draw the message again without it, as {@link rerenderMessage} does, before anything it
+	 *  returned is drawn or called. */
+	#redrawIfRetired(): void {
+		if (!this.#builtLive || this.#drawnScopes.size === 0 || this.#scopesLive()) return;
+		this.#builtLive = false;
+		this.#renderedText.clear();
+		if (this.#lastMessage) this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 	}
 
 	/**
@@ -892,6 +931,7 @@ export class AssistantMessageComponent extends Container {
 	 * and a finished thought emits nothing.
 	 */
 	override describe(cx?: DescribeContext): NativeNode {
+		this.#redrawIfRetired();
 		const media = cx?.supports("media") === true;
 		const tail = this.#answerMessage ? this.#thinkingTailIndex(this.#answerMessage) : undefined;
 		const rate =
@@ -1781,6 +1821,12 @@ export class AssistantMessageComponent extends Container {
 		const mounted: Component[] = [];
 		this.#thinkingExtensions.set(contentIndex, mounted);
 		for (const renderer of this.#thinkingRenderers) {
+			// An extension's renderer runs in its session's scope; once that has gone it is no renderer.
+			const scope = toolRendererScope(renderer);
+			if (scope !== undefined) {
+				this.#drawnScopes.add(scope);
+				if (!scope.live) continue;
+			}
 			try {
 				const component = renderer(
 					{
@@ -1792,8 +1838,19 @@ export class AssistantMessageComponent extends Container {
 					theme,
 				);
 				if (component) {
-					this.#contentContainer.addChild(component);
-					mounted.push(component);
+					// The thinking block itself is the default: a failing or retired extension adds nothing.
+					const child =
+						scope === undefined
+							? component
+							: new SafeToolRendererComponent(
+									"assistant thinking",
+									"thinking",
+									component,
+									() => undefined,
+									scope,
+								);
+					this.#contentContainer.addChild(child);
+					mounted.push(child);
 				}
 			} catch {
 				// Ignore extension renderer failures and keep the original thinking block visible.
@@ -1914,6 +1971,7 @@ export class AssistantMessageComponent extends Container {
 		this.#blockVersion++;
 		this.#lastMessage = message;
 		this.#lastUpdateTransient = opts?.transient === true;
+		this.#builtLive = this.#scopesLive();
 		// Everything below renders the display form; #lastMessage keeps the
 		// verbatim message so re-renders re-derive the reaction deterministically.
 		// Narration the provider returned as thinking renders as answer text.

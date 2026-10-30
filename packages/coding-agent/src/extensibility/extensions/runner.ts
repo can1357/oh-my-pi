@@ -44,10 +44,22 @@ import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shar
 import { assistantContentAsCopied, copyHandlerResult, copyHostData, HandedSignals } from "./boundary-data";
 import { providerCallGate } from "./callback-ownership";
 import { ManagedTimers } from "./managed-timers";
+import {
+	type ExtensionModelRegistry,
+	type ExtensionSessionManager,
+	handLocalProtocolOptions,
+	handMemory,
+	handModelRegistry,
+	handSessionManager,
+	handSessionModes,
+	handTheme,
+	handUIContext,
+} from "./context-surfaces";
 import { createExtensionModelQuery } from "./model-api";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import { extensionLinkClicksAvailable } from "@oh-my-pi/pi-tui/render/extension-links";
+import type { ToolRendererScope } from "@oh-my-pi/pi-tui/tools/renderer-scope";
 import type {
 	AfterProviderResponseEvent,
 	AssistantMessageRewriteEvent,
@@ -78,6 +90,7 @@ import type {
 	ExtensionFlag,
 	ExtensionMode,
 	ExtensionRuntime,
+	ExtensionSessionModes,
 	ExtensionShortcut,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
@@ -572,6 +585,16 @@ export class ExtensionRunner {
 	#suspensionListeners = new Set<() => void>();
 	/** Main runner whose suspensions this runner's drawing follows; see {@link followSuspension}. */
 	#suspensionParent: ExtensionRunner | undefined;
+	/** {@link rendererScope}, made once it is first asked for. */
+	#rendererScope: ToolRendererScope | undefined;
+	/** The host services a context hands this session's extensions (`context-surfaces.ts`), each
+	 *  made once per host object, so every context hands the same one. */
+	#handedSessionManager: ExtensionSessionManager | undefined;
+	#handedModelRegistry: ExtensionModelRegistry | undefined;
+	#handedLocalProtocolOptions: LocalProtocolOptions | undefined;
+	readonly #handedUI = new WeakMap<ExtensionUIContext, ExtensionUIContext>();
+	readonly #handedMemory = new WeakMap<MemoryRuntimeContext, MemoryRuntimeContext>();
+	readonly #handedSessionModes = new WeakMap<ExtensionSessionModes, ExtensionSessionModes>();
 	/**
 	 * Buffer for `credential_disabled` events received via {@link emitCredentialDisabled}
 	 * before {@link initialize} has run. Drained through {@link emit} once initialize sets
@@ -876,7 +899,9 @@ export class ExtensionRunner {
 			await actions.setActiveTools(toolNames);
 		};
 		this.runtime.getCommands = actions.getCommands;
-		this.runtime.setModel = actions.setModel;
+		// The session that hands a model over owns it: the copy is taken inside its admission, and a
+		// `resolveHeaders` the model brings runs as its work (`runExtensionSetModel`).
+		this.runtime.setModel = model => actions.setModel(model, this.runtime);
 		this.runtime.getThinkingLevel = actions.getThinkingLevel;
 		this.runtime.setThinkingLevel = actions.setThinkingLevel;
 		this.runtime.getServiceTiers = actions.getServiceTiers ?? throwUnsupportedServiceTierAction;
@@ -1084,6 +1109,18 @@ export class ExtensionRunner {
 
 	getUIContext(): ExtensionUIContext {
 		return this.#uiContext;
+	}
+
+	/** `ui` as this session's extensions are handed it (`handUIContext`): this runner's own UI in
+	 *  every context it creates, and a UI another host lends a handler (a focused subagent's
+	 *  transcript, a tool's `onSession`). One per UI object. */
+	handedUIContext(ui: ExtensionUIContext): ExtensionUIContext {
+		let handed = this.#handedUI.get(ui);
+		if (!handed) {
+			handed = handUIContext(ui, this.runtime, this.rendererScope);
+			this.#handedUI.set(ui, handed);
+		}
+		return handed;
 	}
 
 	hasUI(): boolean {
@@ -1466,18 +1503,34 @@ export class ExtensionRunner {
 		return false;
 	}
 
+	/**
+	 * The renderer an extension registered for `customType`, as a host may call it: inside
+	 * {@link runScoped} on copies of the message and options, `undefined` once the session has
+	 * gone, and carrying {@link rendererScope}, which the host mounts the returned component in
+	 * (`FramedMessageComponent`). The component is the extension's live code; it is not copied.
+	 */
 	getMessageRenderer(customType: string): MessageRenderer | undefined {
 		for (const ext of this.extensions) {
 			const renderer = ext.messageRenderers.get(customType);
 			if (renderer) {
-				return renderer;
+				const admitted: MessageRenderer = (message, options, theme) =>
+					this.runScoped(() => renderer(copyHostData(message), copyHostData(options), handTheme(theme)));
+				return Object.assign(admitted, { rendererScope: this.rendererScope });
 			}
 		}
 		return undefined;
 	}
 
+	/** The thinking renderers extensions registered, each as {@link getMessageRenderer} hands one:
+	 *  admitted, on a copy of its context, carrying the scope its component is mounted in. */
 	getAssistantThinkingRenderers(): AssistantThinkingRenderer[] {
-		return this.extensions.flatMap(ext => ext.assistantThinkingRenderers);
+		return this.extensions.flatMap(ext =>
+			ext.assistantThinkingRenderers.map(renderer => {
+				const admitted: AssistantThinkingRenderer = (context, theme) =>
+					this.runScoped(() => renderer(copyHostData(context), handTheme(theme)));
+				return Object.assign(admitted, { rendererScope: this.rendererScope });
+			}),
+		);
 	}
 
 	/**
@@ -1502,10 +1555,19 @@ export class ExtensionRunner {
 		return parent ? this.extensions.filter(ext => !parent.isExtensionSuspended(ext.resolvedPath)) : this.extensions;
 	}
 
-	/** Registered assistant text renderers; none while `extensionRenderers.assistantText` is off. */
+	/**
+	 * Registered assistant text renderers; none while `extensionRenderers.assistantText` is off.
+	 * Each runs inside {@link runScoped} on a copy of its context and answers `undefined` once the
+	 * session has gone, so the host draws the block's own text; what it answers is a string.
+	 */
 	getAssistantTextRenderers(): AssistantTextRenderer[] {
 		if (!this.settings || !cfgExtensionAssistantTextRenderers.get(this.settings)) return [];
-		return this.#drawingExtensions().flatMap(ext => ext.assistantTextRenderers);
+		return this.#drawingExtensions().flatMap(ext =>
+			ext.assistantTextRenderers.map(renderer => {
+				const admitted: AssistantTextRenderer = context => this.runScoped(() => renderer(copyHostData(context)));
+				return Object.assign(admitted, { rendererScope: this.rendererScope });
+			}),
+		);
 	}
 
 	/** Link schemes claimed with `registerLinkScheme`; none while `extensionRenderers.assistantText` is off. */
@@ -1552,7 +1614,9 @@ export class ExtensionRunner {
 		const event: LinkActivateEvent = { type: "link_activate", url, scheme };
 		const base = this.createContext();
 		const ctx: ExtensionContext =
-			ui && ui !== this.#uiContext ? Object.create(base, { ui: { value: ui }, hasUI: { value: true } }) : base;
+			ui && ui !== this.#uiContext
+				? Object.create(base, { ui: { value: this.handedUIContext(ui) }, hasUI: { value: true } })
+				: base;
 		for (const handler of handlers) {
 			try {
 				await this.runScoped(() => handler(event, ctx));
@@ -1624,6 +1688,30 @@ export class ExtensionRunner {
 		return extensionCallbackScope.run(owner, () => owner.trackCallback(withActiveSettings(this.settings, fn)));
 	}
 
+	/**
+	 * The scope a host runs this session's extension renderers in, and the components they return
+	 * (`ToolRendererScope`, `@oh-my-pi/pi-tui/tools/renderer-scope`, which cannot import this
+	 * admission): {@link runScoped}, refused once the session has retired. One per runner. A
+	 * runner whose callbacks run as the host's own never retires.
+	 */
+	get rendererScope(): ToolRendererScope {
+		if (this.#rendererScope) return this.#rendererScope;
+		const retired = (): boolean => this.#scopeOwner?.isRetired === true;
+		const runScoped = <T>(call: () => T): T | undefined => this.runScoped(call);
+		const scope: ToolRendererScope = {
+			get live() {
+				return !retired();
+			},
+			run<T>(call: () => T): T {
+				if (retired()) throw new Error("Extension session retired; its renderers are no longer callable");
+				// Live, so `runScoped` runs `call` and answers what it returned.
+				return runScoped(call) as T;
+			},
+		};
+		this.#rendererScope = scope;
+		return scope;
+	}
+
 	/** The owner {@link runScoped} runs callbacks as. Feature-tested, like every other reach into a
 	 *  host-supplied object here: embedders and this repo's tests pass runtimes that implement only
 	 *  what they use, and one without `ownCallback` runs its callbacks as the host's own. */
@@ -1673,8 +1761,27 @@ export class ExtensionRunner {
 		const sendUserMessage = (text: string, options?: SendUserMessageOptions): void =>
 			this.runtime.sendUserMessage(text, options);
 		const getSessionModes = () => this.#sessionModes;
+		const handSessionModesOnce = (modes: ExtensionSessionModes | undefined): ExtensionSessionModes | undefined => {
+			if (!modes) return undefined;
+			let handed = this.#handedSessionModes.get(modes);
+			if (!handed) {
+				handed = handSessionModes(modes, this.runtime);
+				this.#handedSessionModes.set(modes, handed);
+			}
+			return handed;
+		};
+		const memory = this.#getMemoryFn?.();
+		let handedMemory = memory && this.#handedMemory.get(memory);
+		if (memory && !handedMemory) {
+			handedMemory = handMemory(memory, this.runtime);
+			this.#handedMemory.set(memory, handedMemory);
+		}
 		return {
-			ui: this.#uiContext,
+			// The host's services, each as `context-surfaces.ts` hands it: named members calling the
+			// host's object, copies in and out. The host keeps acting on its own objects — the
+			// approval prompt, the registry's rows and credentials, the history — so an extension
+			// is never handed them.
+			ui: this.handedUIContext(this.#uiContext),
 			mode: this.#mode,
 			getContextUsage: () => this.#getContextUsageFn(),
 			// `ctx` accepts callbacks too (`compact({ onError })`), and a continuation an extension
@@ -1685,12 +1792,15 @@ export class ExtensionRunner {
 			getAsyncJobSnapshot: () => this.#getAsyncJobSnapshotFn(),
 			hasUI: this.hasUI(),
 			cwd: this.cwd,
-			sessionManager: this.sessionManager,
-			modelRegistry: this.modelRegistry,
+			sessionManager: (this.#handedSessionManager ??= handSessionManager(this.sessionManager, this.runtime)),
+			modelRegistry: (this.#handedModelRegistry ??= handModelRegistry(this.modelRegistry, this.runtime)),
 			isProjectTrusted: () => true,
 			agent,
+			// A copy on every read, as `ctx.models` hands them: the host keeps building requests from
+			// its model after the handler returns — the credential it chooses by `provider`, the
+			// endpoint `baseUrl` names — so an edit to the one handed over must stay on it.
 			get model() {
-				return getModel();
+				return copyHostData(getModel());
 			},
 			models: createExtensionModelQuery(this.modelRegistry, this.settings, getModel),
 			isIdle: () => this.#isIdleFn(),
@@ -1702,7 +1812,7 @@ export class ExtensionRunner {
 			openPlanReview: () => this.#openPlanReviewFn(),
 			// Live: a context saved before or across a host rebind sees the current controls.
 			get sessionModes() {
-				return getSessionModes();
+				return handSessionModesOnce(getSessionModes());
 			},
 			getSystemPrompt: () => this.#getSystemPromptFn(),
 			runEphemeralTurn: runEphemeralTurn
@@ -1733,8 +1843,10 @@ export class ExtensionRunner {
 					}
 				: undefined,
 			startLive: this.#startLiveFn,
-			localProtocolOptions: this.localProtocolOptions,
-			memory: this.#getMemoryFn?.(),
+			localProtocolOptions:
+				this.localProtocolOptions &&
+				(this.#handedLocalProtocolOptions ??= handLocalProtocolOptions(this.localProtocolOptions)),
+			memory: handedMemory,
 			// A getter, not a value: `createHandlerContext` scopes a handler via `Object.create(ctx)`, and
 			// `this` here is that receiver, so the overlay mounts through the handler's timeout-aware `ui`.
 			get annotations(): ExtensionAnnotationsAPI {

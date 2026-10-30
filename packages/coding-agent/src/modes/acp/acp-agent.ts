@@ -2997,7 +2997,7 @@ export class AcpAgent implements Agent {
 				getAllTools: () => record.session.getAllToolInfos(),
 				setActiveTools: toolNames => record.session.setActiveToolsByName(toolNames),
 				getCommands: () => getSessionSlashCommands(record.session),
-				setModel: model => runExtensionSetModel(record.session, model),
+				setModel: (model, owner) => runExtensionSetModel(record.session, model, owner),
 				getThinkingLevel: () => record.session.thinkingLevel,
 				setThinkingLevel: level => record.session.setThinkingLevel(level),
 				getServiceTiers: () => record.session.serviceTierByFamily,

@@ -739,48 +739,11 @@ describe("AgentSession settles what it promised", () => {
 		expect(settles).toEqual([false, true]);
 	}, 20_000);
 
-	it("refuses a prompt admitted after beginDispose", async () => {
-		const { mock } = await startPooledRunWithStrandedAside();
-		const before = mock.calls.length;
-		session?.beginDispose();
-
-		await session?.prompt("NEW_WORK_AFTER_DISPOSE");
-		await session?.waitForIdle();
-
-		expect(mock.calls.length).toBe(before);
-		expect(JSON.stringify(session?.messages)).not.toContain("NEW_WORK_AFTER_DISPOSE");
-	}, 20_000);
-
-	it("refuses an admitted prompt that disposal overtakes in its maintenance wait", async () => {
-		const { mock } = await startPooledRunWithStrandedAside();
-		const reached = Promise.withResolvers<void>();
-		const release = Promise.withResolvers<void>();
-		const compactionSpy = spyOn(SessionMaintenance.prototype, "runAutoCompaction").mockImplementation(async () => {
-			reached.resolve();
-			await release.promise;
-			return { continuationScheduled: false };
-		});
-		try {
-			const before = mock.calls.length;
-			const compaction = session?.runIdleCompaction();
-			await reached.promise;
-			const prompt = session?.prompt("DISPOSE_IN_EARLY_MAINTENANCE");
-			await setImmediate();
-			// Admitted before disposal, but it has sent nothing: beginDispose exists to stop work
-			// that starts in exactly this gap.
-			session?.beginDispose();
-			release.resolve();
-			await compaction;
-			await prompt;
-			await session?.waitForIdle();
-
-			expect(mock.calls.length).toBe(before);
-			expect(JSON.stringify(session?.messages)).not.toContain("DISPOSE_IN_EARLY_MAINTENANCE");
-		} finally {
-			release.resolve();
-			compactionSpy.mockRestore();
-		}
-	}, 20_000);
+	// Whether a prompt may reach the model once beginDispose() has run, whether it arrives
+	// after disposal began or was admitted into a maintenance wait that disposal then
+	// overtook, is decided in pull request #17457. That pull request changes the admission
+	// contract for prompt, sendUserMessage, promptCustomMessage and
+	// sendCustomMessage({ triggerTurn: true }) together, and its coverage lives there.
 
 	it("keeps its published promise when disposal outruns the carrier holding the record", async () => {
 		const { settles } = await startPooledRunWithStrandedAside();

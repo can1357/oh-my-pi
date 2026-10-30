@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import type { ApiKeyResolver, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
+import type { ApiKeyResolver, CredentialOriginKind, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
 import { type AuthApiKeyOptions, type AuthPeekOptions, oauthAccountKey } from "@oh-my-pi/pi-ai/auth-storage";
 import { registerCustomApi, unregisterCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
@@ -3770,6 +3770,16 @@ export class ModelRegistry {
 	hasCommandBackedApiKey(provider: string): boolean {
 		const keyConfig = this.#customProviderApiKeys.get(provider);
 		return isCommandConfigValue(keyConfig);
+	}
+
+	/**
+	 * Where the credential {@link resolver} would send for `provider` comes from, as this registry's
+	 * own store answers it (`oauth`, `env`, `api_key`, …), or `undefined` when it holds none.
+	 * A provenance guard and the resolver it guards must see the same storage; this lets a caller
+	 * ask that question without being handed {@link authStorage}.
+	 */
+	credentialProvenance(provider: string): CredentialOriginKind | undefined {
+		return this.authStorage.keys.source(provider)?.kind;
 	}
 
 	getDiscoverableProviders(): string[] {

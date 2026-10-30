@@ -22,14 +22,13 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import type { NativeToolView, RenderResultOptions } from "@oh-my-pi/pi-tui/tools/renderer";
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
 import type { Rule } from "../../capability/rule";
-import type { ModelRegistry } from "../../config/model-registry";
 import type { Settings } from "../../config/settings";
 import type { ExecOptions, ExecResult } from "../../exec/exec";
 import type { HookUIContext } from "../../extensibility/hooks/types";
 import type * as PiCodingAgent from "../../index";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
-import type { ReadonlySessionManager } from "../../session/session-manager";
+import type { ExtensionModelRegistry, ExtensionSessionManager } from "../extensions/context-surfaces";
 import type { TodoItem } from "@oh-my-pi/pi-tui/tools/todo";
 import type { RetryErrorUpdate } from "../shared-events";
 
@@ -84,12 +83,17 @@ export interface CustomToolAPI {
 /**
  * Context passed to tool execute and onSession callbacks.
  * Provides access to session state and model information.
+ *
+ * A custom tool is author code run through the extension runner, so it is handed the session's
+ * services as an extension's context hands them (`context-surfaces.ts`): the session manager's
+ * read-only members and the registry's catalog and credential lookups, each answering copies.
+ * The credential store itself is not handed.
  */
 export interface CustomToolContext {
-	/** Session manager (read-only) */
-	sessionManager: ReadonlySessionManager;
-	/** Model registry - use for API key resolution and model retrieval */
-	modelRegistry: ModelRegistry;
+	/** Session manager (read-only): the members `ReadonlySessionManager` declares, answering copies. */
+	sessionManager: ExtensionSessionManager;
+	/** Model registry for catalog queries and API key resolution; see `ExtensionModelRegistry`. */
+	modelRegistry: ExtensionModelRegistry;
 	/** Current model (may be undefined if no model is selected yet) */
 	model: Model | undefined;
 	/** Whether the agent is idle (not streaming) */
