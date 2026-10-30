@@ -2,7 +2,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import type { SessionState, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import type { NativeNode, NativeUiEvent } from "../native/node";
 import type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } from "./schema";
-import type { ActiveRepoContext, StatusLineSession } from "./host";
+import type { ActiveRepoContext, PromptCacheStatus, StatusLineSession } from "./host";
 import type { LoopConditionConfig, LoopLimitRuntime } from "./loop";
 
 export type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle };
@@ -206,6 +206,8 @@ export interface SegmentContext {
 			expiring?: StatusResetExpiry;
 		};
 	} | null;
+	/** What the next request finds in the prompt cache; read only when the `cache` segment is configured. */
+	promptCache?: PromptCacheStatus;
 }
 
 /** How close an account's saved resets are to expiring, when it is worth a warning. */
@@ -255,6 +257,12 @@ export interface ComposerFacts {
 	 * segments as `seg`s; the bar's flexible space, so present even when empty.
 	 */
 	readonly extras: NativeNode;
+	/**
+	 * `seg` (role `omp.composer.cache`): the prompt cache's warm/cold chip, its
+	 * details as a hover card, a click opening `/session`; absent when the `cache`
+	 * segment is not configured or there is nothing to report.
+	 */
+	readonly cache?: NativeNode;
 	/** `text` (role `omp.composer.usage`): the session cost (empty when there is none). */
 	readonly usage: NativeNode;
 }

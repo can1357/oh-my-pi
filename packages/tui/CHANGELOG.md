@@ -31,6 +31,7 @@
 ### Added
 
 - Added a `maxRows` callback to `FigureMarkdown`, `SvgFigure` and `TableChartFigure` so surfaces shorter than the screen can fit their figures; zero hides a figure without delaying transcript completion ([#15661](https://github.com/can1357/oh-my-pi/issues/15661), [#15853](https://github.com/can1357/oh-my-pi/pull/15853) by [@KunoLu](https://github.com/KunoLu))
+- Added the `cache` status-line segment, `StatusLineSession.getPromptCacheStatus` (read once per status-line build into `SegmentContext.promptCache`), `ComposerFacts.cache` (role `omp.composer.cache` with a details hover card and the `status.cache` click action) and `promptCacheDetails` ([#12677](https://github.com/can1357/oh-my-pi/issues/12677))
 
 ### Fixed
 

@@ -29,6 +29,7 @@ import {
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult } from "../extensibility/shared-events";
+import type { PromptCacheColdReason } from "@oh-my-pi/pi-tui/status-line/host";
 
 export type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult };
 
@@ -148,6 +149,11 @@ export function observedPromptCacheTier(usage: Usage): PromptCacheTier | undefin
 	return undefined;
 }
 
+/** Prompt size of a response: what its request sent, cached or not. */
+export function promptTokensOf(usage: Usage): number {
+	return usage.input + usage.cacheRead + usage.cacheWrite;
+}
+
 /**
  * Whether `message` is the response to a request sent to `model`. A
  * server-side fallback retags the response with the served model, so its
@@ -244,6 +250,8 @@ export interface CacheWarmingStatus {
 	/** Why nothing is scheduled. */
 	reason?: string;
 	nextWarmAt?: number;
+	/** When warming gives up while scheduled or refreshing: the run's streaming or idle safety window ends. */
+	stopsAt?: number;
 	/** The pending decision, or the decision that stopped warming. */
 	decision?: CacheWarmingDecision;
 	/** True when an extension changed `decision.action`. */
@@ -263,7 +271,7 @@ export interface CacheWarmStream extends AsyncIterable<AssistantMessageEvent> {
 }
 
 interface ActiveRun extends CacheWarmRequest {
-	isCurrent: () => boolean;
+	change: () => PromptCacheChange | undefined;
 	tier: PromptCacheTier;
 	delayMs: number;
 	startedAt: number;
@@ -288,11 +296,34 @@ export interface PromptCacheEntry {
 	ttlMs: number;
 }
 
+/**
+ * The entry the latest confirmed request wrote, whatever the next request
+ * would send differently: what that request would find in the cache.
+ */
+export interface ConfirmedPromptCacheEntry {
+	model: Model<Api>;
+	tier: PromptCacheTier;
+	touchedAt: number;
+	/** Undefined when the model declares no lifetime for the tier. */
+	ttlMs?: number;
+	/** Prompt size (input + cacheRead + cacheWrite) of the response that confirmed the entry. */
+	promptTokens: number;
+	/** What the next request sends differently, so it cannot read the entry. */
+	change?: PromptCacheChange;
+	/** A warm refresh of the entry missed the cache. */
+	refreshMissed: boolean;
+}
+
+/** A difference in the next request that its cached prefix cannot serve. */
+export type PromptCacheChange = Exclude<PromptCacheColdReason, { kind: "expired" | "refresh-missed" }>;
+
 interface TrackedCacheEntry {
 	model: Model<Api>;
 	tier: PromptCacheTier;
 	touchedAt: number;
-	isCurrent: () => boolean;
+	change: () => PromptCacheChange | undefined;
+	refreshMissed?: boolean;
+	promptTokens?: number;
 }
 
 /** Everything the warmer needs from its host; injected so the core stays session-agnostic. */
@@ -327,8 +358,11 @@ export class CacheWarmer {
 	#pendingEntry?: TrackedCacheEntry;
 	#inactive: CacheWarmingStatus;
 	readonly #deps: CacheWarmerDeps;
-	/** Called with every paid warm response, including one that missed the cache or was aborted after acceptance. */
-	onWarmed?: (message: AssistantMessage, extensionOverride: boolean) => void;
+	/**
+	 * Called with every paid warm response, including one that missed the cache or was aborted after acceptance.
+	 * `sentAt` is when the refresh was sent, the moment a hit restarts the entry's lifetime.
+	 */
+	onWarmed?: (message: AssistantMessage, extensionOverride: boolean, sentAt: number) => void;
 	/** Called when a refresh is handed to the stream; stop decisions and extension vetoes send nothing and skip it. */
 	onRefreshStart?: (refresh: CacheWarmingRefreshStart) => void;
 	/** Called exactly once after each onRefreshStart, unless the host cleared it (dispose) while the refresh was in flight. */
@@ -343,7 +377,7 @@ export class CacheWarmer {
 		if (this.#deps.getMode() === "off") return { state: "inactive", reason: "cache warming disabled" };
 		const run = this.#run;
 		if (!run) return this.#inactive;
-		if (!run.isCurrent()) return { state: "inactive", reason: "conversation context changed" };
+		if (run.change() !== undefined) return { state: "inactive", reason: "conversation context changed" };
 		const decision = this.#evaluate(run);
 		const refreshing = run.timer === undefined;
 		if (!decision.economicsAvailable && !refreshing) {
@@ -352,6 +386,7 @@ export class CacheWarmer {
 		return {
 			state: refreshing ? "refreshing" : "scheduled",
 			nextWarmAt: run.nextWarmAt,
+			stopsAt: run.startedAt + (run.phase === "idle" ? MAX_IDLE_WARMING_AGE_MS : MAX_WARMING_AGE_MS),
 			decision,
 			extensionOverride: run.extensionOverride,
 		};
@@ -364,16 +399,29 @@ export class CacheWarmer {
 	 * model declares no lifetime for the tier or caching is off.
 	 */
 	get cacheEntry(): PromptCacheEntry | undefined {
-		const entry = this.#entry;
-		if (!entry?.isCurrent()) return undefined;
-		const seconds = entry.model.promptCache?.[entry.tier];
-		return seconds === undefined
-			? undefined
-			: { touchedAt: entry.touchedAt, tier: entry.tier, ttlMs: seconds * 1000 };
+		const entry = this.confirmedEntry;
+		if (!entry || entry.change !== undefined || entry.ttlMs === undefined) return undefined;
+		return { touchedAt: entry.touchedAt, tier: entry.tier, ttlMs: entry.ttlMs };
 	}
 
-	/** Keep the prompt cache entry written by `request` warm while `isCurrent` holds. */
-	start(request: CacheWarmRequest, isCurrent: () => boolean): void {
+	/** {@link cacheEntry} whether or not the conversation still matches it; undefined until a response reports cache usage. */
+	get confirmedEntry(): ConfirmedPromptCacheEntry | undefined {
+		const entry = this.#entry;
+		if (!entry) return undefined;
+		const seconds = entry.model.promptCache?.[entry.tier];
+		return {
+			model: entry.model,
+			tier: entry.tier,
+			touchedAt: entry.touchedAt,
+			ttlMs: seconds === undefined ? undefined : seconds * 1000,
+			change: entry.change(),
+			refreshMissed: entry.refreshMissed === true,
+			promptTokens: entry.promptTokens ?? 0,
+		};
+	}
+
+	/** Keep the prompt cache entry written by `request` warm until `change` reports a difference in the next request. */
+	start(request: CacheWarmRequest, change: () => PromptCacheChange | undefined): void {
 		this.#clearRun();
 		// A string key is classified up front. Resolver keys (rotating
 		// credentials) cannot be inspected without consuming them; they start on
@@ -383,7 +431,7 @@ export class CacheWarmer {
 		const isOAuthToken =
 			request.model.api === "anthropic-messages" && typeof apiKey === "string" && isAnthropicOAuthToken(apiKey);
 		const tier = resolvePromptCacheTier(request.model, request.options, isOAuthToken);
-		const entry = tier === undefined ? undefined : { model: request.model, tier, touchedAt: Date.now(), isCurrent };
+		const entry = tier === undefined ? undefined : { model: request.model, tier, touchedAt: Date.now(), change };
 		this.#pendingEntry = entry;
 		const mode = this.#deps.getMode();
 		if (mode === "off") {
@@ -405,7 +453,7 @@ export class CacheWarmer {
 		}
 		this.#run = {
 			...request,
-			isCurrent,
+			change,
 			tier: entry.tier,
 			entry,
 			delayMs,
@@ -431,6 +479,7 @@ export class CacheWarmer {
 			this.#pendingEntry = undefined;
 			if (message.stopReason !== "error" && (message.usage.cacheRead > 0 || message.usage.cacheWrite > 0)) {
 				if (observed !== undefined) pending.tier = observed;
+				pending.promptTokens = promptTokensOf(message.usage);
 				this.#entry = pending;
 			}
 		}
@@ -580,7 +629,7 @@ export class CacheWarmer {
 			// Record before the abort check: a refresh cancelled or replaced after the
 			// provider accepted it was still billed, and spend tracking must see it.
 			if (message && message.usage.totalTokens > 0 && this.onWarmed) {
-				this.onWarmed(message, extensionOverride);
+				this.onWarmed(message, extensionOverride, sentAt);
 				usage = message.usage;
 			}
 			if (this.#run !== run) {
@@ -596,6 +645,7 @@ export class CacheWarmer {
 			// refreshes would each pay a full write.
 			if (message.usage.cacheRead <= 0 || message.usage.cacheWrite > 0) {
 				outcome = "miss";
+				run.entry.refreshMissed = true;
 				this.#stop("refresh missed the cache");
 				return;
 			}
@@ -603,6 +653,7 @@ export class CacheWarmer {
 			// A hit proves the run's entry exists even before its own response
 			// confirmed it, and restarts its lifetime.
 			run.entry.touchedAt = sentAt;
+			run.entry.promptTokens = promptTokensOf(message.usage);
 			this.#entry = run.entry;
 			if (this.#pendingEntry === run.entry) this.#pendingEntry = undefined;
 			if (!this.#validateRun(run)) return;
@@ -675,7 +726,8 @@ export class CacheWarmer {
 
 	#validateRun(run: ActiveRun): boolean {
 		if (this.#run !== run) return false;
-		const reason = this.#getModeStopReason(run) ?? (!run.isCurrent() ? "conversation context changed" : undefined);
+		const reason =
+			this.#getModeStopReason(run) ?? (run.change() !== undefined ? "conversation context changed" : undefined);
 		if (!reason) return true;
 		this.#stop(reason);
 		return false;
