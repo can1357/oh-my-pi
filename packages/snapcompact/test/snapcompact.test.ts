@@ -1672,6 +1672,23 @@ describe("archive helpers", () => {
 			expect(sentText(scrubbed)).not.toContain("secret");
 		});
 
+		it("keeps both ends of the text past maxChars and counts the cut middle as dropped", async () => {
+			const result = await framedArchive();
+			const archive = snapcompact.getPreservedArchive(result.preserveData)!;
+			const view = snapcompact.viewWithoutFrames(result.summary, archive, { maxChars: 400 });
+			expect(view.archive.frames).toEqual([]);
+			expect(view.archive.textHead).toHaveLength(200);
+			expect(view.archive.textTail).toHaveLength(200);
+			expect(view.archive.totalChars).toBe(400);
+			expect(view.archive.truncatedChars).toBe(archive.truncatedChars + archive.text!.length - 400);
+			const sent = sentText(view);
+			expect(sent).toContain("HEAD sentinel");
+			expect(sent).toContain("TAIL sentinel");
+			expect(sent).not.toContain("MIDDLE sentinel");
+			expect(sent).toContain("middle history omitted above");
+			expect(sent).toContain(`About ${view.archive.truncatedChars} characters of older middle history dropped`);
+		});
+
 		it("returns an archive with neither frames nor reasoning to drop as is", () => {
 			const archive = { frames: [], totalChars: 3, truncatedChars: 0, textHead: "abc" };
 			expect(snapcompact.viewWithoutFrames("s", archive)).toEqual({ summary: "s", archive });

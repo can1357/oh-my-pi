@@ -534,6 +534,14 @@ function archiveReader(model: Model): ArchiveReader {
 	return { excludeThinking, withoutFrames, key: `${excludeThinking}:${withoutFrames}` };
 }
 
+/**
+ * Whether `message` may stand for a snapcompact archive: a snapcompact summary, or one whose
+ * compaction recorded no method (legacy and extension-provided entries), which may still carry one.
+ */
+function mayHoldArchive(message: CompactionSummaryMessage): boolean {
+	return message.method === undefined || message.method === "snapcompact";
+}
+
 /** Owns compaction, pruning, shake, promotion, and automatic context maintenance. */
 export class SessionMaintenance {
 	#compactionAbortController: AbortController | undefined;
@@ -585,9 +593,9 @@ export class SessionMaintenance {
 	#experimentalNotesReminderBoundaryId: string | undefined;
 	/** Each archive's no-reasoning view, rendered (or failed closed) once per compaction entry. */
 	readonly #withoutThinkingViews = new WeakMap<CompactionEntry, Promise<snapcompact.ArchiveView>>();
-	/** Each archive's text view for readers without image input, keyed by whether reasoning is dropped
+	/** Each archive's text view for readers without image input, keyed by reader, model and text budget
 	 *  (`null`: the original already reads as text). */
-	readonly #withoutFramesViews = new WeakMap<CompactionEntry, Map<boolean, snapcompact.ArchiveView | null>>();
+	readonly #withoutFramesViews = new WeakMap<CompactionEntry, Map<string, snapcompact.ArchiveView | null>>();
 	/** The compaction entry behind each archive summary message, once found. */
 	readonly #summaryEntries = new WeakMap<CompactionSummaryMessage, CompactionEntry>();
 	/** Reader copies that read an archive as text in place of its frames. */
@@ -4803,7 +4811,7 @@ export class SessionMaintenance {
 				const original = this.#originalSummaries.get(message) ?? message;
 				const wanted =
 					(reader.excludeThinking && snapcompact.summaryIncludesThinking(original.summary)) ||
-					(reader.withoutFrames && original.method === "snapcompact")
+					(reader.withoutFrames && mayHoldArchive(original))
 						? await this.#readerSummary(original, model, reader)
 						: original;
 				if (wanted !== message) replacements.set(message, wanted);
@@ -4832,9 +4840,9 @@ export class SessionMaintenance {
 			if (message.role !== "compactionSummary") return;
 			const original = this.#originalSummaries.get(message) ?? message;
 			let wanted: AgentMessage = message;
-			if (reader.withoutFrames && original.method === "snapcompact") {
+			if (reader.withoutFrames && mayHoldArchive(original)) {
 				const entry = this.#archiveEntry(original, entries);
-				const view = entry && this.#viewWithoutFrames(entry, reader);
+				const view = entry && this.#viewWithoutFrames(entry, reader, model);
 				wanted = view ? this.#readerMessage(original, view, reader) : original;
 			} else if (!reader.withoutFrames && this.#textCopies.has(message)) {
 				wanted = original;
@@ -4871,7 +4879,7 @@ export class SessionMaintenance {
 		let view: snapcompact.ArchiveView | undefined;
 		if (entry) {
 			view = reader.withoutFrames
-				? this.#viewWithoutFrames(entry, reader)
+				? this.#viewWithoutFrames(entry, reader, model)
 				: await this.#viewWithoutThinking(entry, model);
 		} else if (reader.excludeThinking && snapcompact.summaryIncludesThinking(message.summary)) {
 			// No archive behind it (e.g. archive text a summarizer folded into a plain
@@ -4912,24 +4920,49 @@ export class SessionMaintenance {
 	}
 
 	/**
-	 * `entry`'s archive as a reader without image input reads it
+	 * `entry`'s archive as `model`, a reader without image input, reads it
 	 * ({@link snapcompact.viewWithoutFrames}), derived from its kept source once
-	 * per entry and reasoning policy; `undefined` when that is the original.
+	 * per entry, reader and budget; `undefined` when that is the original. The
+	 * text gets the share of `model`'s window snapcompact sizes an imaged
+	 * archive to ({@link SNAPCOMPACT_POST_COMPACTION_TARGET} of its compaction
+	 * threshold); past it the middle is dropped, so an archive built for a larger
+	 * window still leaves the reader room to work and to compact.
 	 */
-	#viewWithoutFrames(entry: CompactionEntry, reader: ArchiveReader): snapcompact.ArchiveView | undefined {
+	#viewWithoutFrames(
+		entry: CompactionEntry,
+		reader: ArchiveReader,
+		model: Model,
+	): snapcompact.ArchiveView | undefined {
+		const contextWindow = model.contextWindow ?? 0;
+		const targetTokens =
+			contextWindow > 0
+				? Math.floor(
+						SNAPCOMPACT_POST_COMPACTION_TARGET *
+							resolveThresholdTokens(contextWindow, resolveModelCompactionSettings(this.#host.settings, model)),
+					)
+				: undefined;
+		const key = `${reader.key}|${model.provider}/${model.id}|${targetTokens}`;
 		let views = this.#withoutFramesViews.get(entry);
 		if (!views) {
 			views = new Map();
 			this.#withoutFramesViews.set(entry, views);
 		}
-		let view = views.get(reader.excludeThinking);
+		let view = views.get(key);
 		if (view === undefined) {
 			const archive = snapcompact.getPreservedArchive(entry.preserveData)!;
-			const unfolded = snapcompact.viewWithoutFrames(entry.summary, archive, {
-				includeThinking: !reader.excludeThinking,
-			});
+			const options = { includeThinking: !reader.excludeThinking };
+			let unfolded = snapcompact.viewWithoutFrames(entry.summary, archive, options);
+			const text = `${unfolded.archive.textHead ?? ""}${unfolded.archive.textTail ?? ""}`;
+			if (unfolded.archive !== archive && targetTokens !== undefined && text.length > 0) {
+				const tokenizer = this.#tokenizer.countsAlike(model) ? this.#tokenizer : new Tokenizer(model);
+				const textTokens = tokenizer.countTokens(text);
+				if (textTokens > targetTokens) {
+					const maxChars = Math.floor((text.length * targetTokens) / textTokens);
+					unfolded = snapcompact.viewWithoutFrames(entry.summary, archive, { ...options, maxChars });
+				}
+			}
 			view = unfolded.archive === archive ? null : unfolded;
-			views.set(reader.excludeThinking, view);
+			views.set(key, view);
 		}
 		return view ?? undefined;
 	}

@@ -2348,6 +2348,33 @@ function summaryFileSection(summary: string): string | undefined {
 export interface ViewWithoutFramesOptions {
 	/** `false` for a reader that excludes assistant reasoning ({@link readerIncludesThinking}). */
 	includeThinking?: boolean;
+	/** Most archive characters the reader takes; the middle past it is dropped, both ends kept. */
+	maxChars?: number;
+}
+
+/** `archive`'s text regions cut to `maxChars`, keeping both ends and counting the cut middle as dropped. */
+function keepEnds(archive: Archive, maxChars: number): Archive {
+	if (archive.totalChars <= maxChars) return archive;
+	let head = archive.textHead ?? "";
+	let tail = archive.textTail ?? "";
+	if (tail.length === 0) {
+		const headChars = Math.ceil(maxChars / 2);
+		tail = head.slice(head.length - (maxChars - headChars));
+		head = head.slice(0, headChars);
+	} else {
+		const headChars = Math.min(head.length, Math.max(Math.ceil(maxChars / 2), maxChars - tail.length));
+		const tailChars = Math.min(tail.length, maxChars - headChars);
+		head = head.slice(0, headChars);
+		tail = tail.slice(tail.length - tailChars);
+	}
+	const { textHead: _head, textTail: _tail, ...rest } = archive;
+	return {
+		...rest,
+		totalChars: head.length + tail.length,
+		truncatedChars: archive.truncatedChars + archive.totalChars - head.length - tail.length,
+		...(head ? { textHead: head } : {}),
+		...(tail ? { textTail: tail } : {}),
+	};
 }
 
 /**
@@ -2357,9 +2384,10 @@ export interface ViewWithoutFramesOptions {
  * re-rendered without the frame legend, its file list kept. With
  * `includeThinking: false` the text and legend also leave out reasoning, as
  * {@link viewWithoutThinking} does, without rendering frames this reader
- * cannot see. An archive persisted without that source keeps its text edges
- * and counts the imaged middle as dropped. An archive with neither frames nor
- * reasoning to drop is returned as is.
+ * cannot see; past `maxChars` the middle of the text is dropped. An archive
+ * persisted without that source keeps its text edges and counts the imaged
+ * middle as dropped. An archive with neither frames nor reasoning to drop is
+ * returned as is.
  */
 export function viewWithoutFrames(
 	summary: string,
@@ -2397,6 +2425,7 @@ export function viewWithoutFrames(
 			...(textTail ? { textTail } : {}),
 		};
 	}
+	if (options.maxChars !== undefined) textArchive = keepEnds(textArchive, Math.max(0, Math.floor(options.maxChars)));
 	const source = textArchive.text ?? textArchive.textHead ?? "";
 	return {
 		summary: prompt.render(snapcompactSummaryPrompt, {

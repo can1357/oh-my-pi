@@ -135,8 +135,12 @@ describe("snapcompact archive read by another model", () => {
 		await fs.rm(tempDir, { recursive: true, force: true });
 	});
 
-	/** Appends an archive rendered under GPT (reasoning included) and a kept reply. */
-	async function seedArchive(sessionManager: SessionManager): Promise<snapcompact.CompactionResult> {
+	/** Appends an archive rendered under GPT (reasoning included) and a kept reply; `withoutMethod`
+	 *  records it as a legacy or extension-provided entry would, with no method. */
+	async function seedArchive(
+		sessionManager: SessionManager,
+		{ withoutMethod = false }: { withoutMethod?: boolean } = {},
+	): Promise<snapcompact.CompactionResult> {
 		const keptId = sessionManager.appendMessage({ role: "user", content: "Kept turn.", timestamp: Date.now() });
 		const archive = await snapcompact.compact(
 			{
@@ -153,7 +157,7 @@ describe("snapcompact archive read by another model", () => {
 		sessionManager.appendCompaction(archive.summary, archive.shortSummary, keptId, archive.tokensBefore, {
 			details: archive.details,
 			preserveData: archive.preserveData,
-			method: "snapcompact",
+			...(withoutMethod ? {} : { method: "snapcompact" }),
 		});
 		sessionManager.appendMessage(assistant(gpt, [{ type: "text", text: "Kept reply." }]));
 		return archive;
@@ -455,6 +459,44 @@ describe("snapcompact archive read by another model", () => {
 		expect(text).not.toContain(FRAME_LEGEND);
 	});
 
+	it("sends the text of an archive whose compaction recorded no method", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const original = await seedArchive(sessionManager, { withoutMethod: true });
+		const marker = imagedReply(snapcompact.getPreservedArchive(original.preserveData)!);
+		const { session, mock } = startSession(sessionManager, deepseek);
+
+		await session.prompt("Continue.");
+		const { text, images } = requestContent(mock.calls[0]?.context.messages);
+		expect(images).toEqual([]);
+		expect(text).toContain(marker);
+	});
+
+	it("keeps both ends of an archive's text that would crowd a small window, and all of it in a large one", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const original = await seedArchive(sessionManager);
+		const archive = snapcompact.getPreservedArchive(original.preserveData)!;
+		const smallWindow = 20_000;
+		const small: Model = { ...deepseek, contextWindow: smallWindow };
+		const { session, mock } = startSession(sessionManager, small);
+
+		await session.prompt("Continue.");
+		const { text, images } = requestContent(mock.calls[0]?.context.messages);
+		expect(images).toEqual([]);
+		expect(text).toContain("turn 0:");
+		expect(text).toContain("reply 39:");
+		expect(text).toContain("middle history omitted above");
+		// The archive takes at most its share of the window (0.6 of the compaction threshold).
+		const summaryTokens = session.agent.tokenizer.countTokens(text);
+		expect(summaryTokens).toBeLessThan(smallWindow * 0.6);
+		expect(text.length).toBeLessThan(archive.text!.length);
+
+		await session.setModel(deepseek);
+		await session.prompt("Continue again.");
+		const large = requestContent(mock.calls[1]?.context.messages);
+		expect(large.text).toContain(imagedReply(archive));
+		expect(large.text).not.toContain("middle history omitted above");
+	});
+
 	it("accepts a compaction that shrinks the archive's text for a model without image input", async () => {
 		const sessionManager = SessionManager.inMemory();
 		await seedArchive(sessionManager);
@@ -464,12 +506,13 @@ describe("snapcompact archive read by another model", () => {
 			sessionManager.appendMessage(assistant(deepseek, [{ type: "text", text: `later reply ${i}: ${filler}` }]));
 		}
 		const model: Model = { ...deepseek, contextWindow: 400_000 };
+		// A threshold high enough that the archive's whole text is this model's share of the window.
+		const thresholdTokens = 200_000;
 		const { session } = startSession(sessionManager, gpt, {
 			settings: Settings.isolated({
 				"compaction.enabled": true,
 				"compaction.methodOrder": ["soft"],
-				"compaction.thresholdPercent": 5,
-				"compaction.thresholdTokens": -1,
+				"compaction.thresholdTokens": thresholdTokens,
 				"compaction.keepRecentTokens": 1_000,
 				"compaction.autoContinue": false,
 				"compaction.asyncEnabled": false,
@@ -501,7 +544,7 @@ describe("snapcompact archive read by another model", () => {
 		});
 
 		const trigger = { ...assistant(model, [{ type: "text", text: "Done." }]) };
-		trigger.usage = { ...trigger.usage, input: asText, totalTokens: asText };
+		trigger.usage = { ...trigger.usage, input: thresholdTokens + 1_000, totalTokens: thresholdTokens + 1_000 };
 		session.agent.emitExternalEvent({ type: "message_end", message: trigger });
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [trigger] });
 
