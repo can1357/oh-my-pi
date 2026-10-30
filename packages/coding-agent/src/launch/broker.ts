@@ -452,6 +452,8 @@ class DaemonBroker {
 	/** Abortable `wait`/follow-`logs` requests, keyed by wire request id, so a client can cancel its own poll. */
 	readonly #inFlight = new Map<string, { socket: IpcConnection; controller: AbortController }>();
 	#server: IpcServer | undefined;
+	/** Startup's record recovery, which shutdown() waits for so it can retire what recovery adopted. */
+	#recovery: Promise<void> | undefined;
 	#idleTimer: NodeJS.Timeout | undefined;
 	#shuttingDown = false;
 
@@ -476,15 +478,9 @@ class DaemonBroker {
 
 	async run(onListening?: () => void): Promise<void> {
 		try {
-			await this.#recoverRecords();
-			this.#server = await IpcServer.listen(
-				this.#endpoint,
-				{ framing: "lines", maxFrameBytes: MAX_REQUEST_BYTES },
-				socket => this.#accept(socket),
-			);
-			if (this.#runtimeDirIdentity) this.#watchEndpoint(this.#runtimeDirIdentity);
-			this.#scheduleIdleShutdown();
-			onListening?.();
+			this.#recovery = this.#recoverRecords();
+			await this.#recovery;
+			await this.#listen(onListening);
 		} catch (error) {
 			// The caller releases the scope lease once this rejects, so whatever startup opened
 			// closes first: a bound server would go on accepting clients for a broker that no
@@ -499,9 +495,42 @@ class DaemonBroker {
 		await this.#finished.promise;
 	}
 
+	/**
+	 * Bind the endpoint and start serving, unless a shutdown has been requested.
+	 *
+	 * shutdown() closes only the server it can see. One requested while the bind is pending (from
+	 * a signal through the postmortem callback, or from a client the native listener accepted
+	 * before the bind returned here) finds none and settles without it. So startup does not bind
+	 * once a shutdown was requested, and closes a server whose bind returns after one instead of
+	 * installing it. run() returns through the lease release only after this does, so the lease is
+	 * never released while that server still listens.
+	 */
+	async #listen(onListening?: () => void): Promise<void> {
+		if (this.#shuttingDown) return;
+		const server = await IpcServer.listen(
+			this.#endpoint,
+			{ framing: "lines", maxFrameBytes: MAX_REQUEST_BYTES },
+			socket => this.#accept(socket),
+		);
+		if (this.#shuttingDown) {
+			await server.close();
+			return;
+		}
+		this.#server = server;
+		if (this.#runtimeDirIdentity) this.#watchEndpoint(this.#runtimeDirIdentity);
+		this.#scheduleIdleShutdown();
+		onListening?.();
+	}
+
 	async shutdown(): Promise<void> {
 		if (this.#shuttingDown) return this.#finished.promise;
 		this.#shuttingDown = true;
+		// Recovery adopts no further record once this is set, but the one it is adopting lands in
+		// `#records` after the loop below would have passed it: its readiness poller would keep
+		// running and its reaped state would go unwritten. Waiting lets the loop retire it like the
+		// rest. A pending bind needs no wait: the one server it can produce, #listen closes itself.
+		// A recovery failure is run()'s to report.
+		await this.#recovery?.catch(() => undefined);
 		clearTimeout(this.#idleTimer);
 		this.#idleTimer = undefined;
 		clearInterval(this.#endpointTimer);
@@ -547,6 +576,14 @@ class DaemonBroker {
 	}
 
 	#accept(socket: IpcConnection): void {
+		// A broker that is shutting down serves no new client. shutdown() destroys the connections
+		// it holds and then closes the server, and closing leaves accepted connections open. One
+		// accepted after that point, while the close is pending or before a bind that was pending
+		// at shutdown returns, would stay open and be served after the scope lease is released.
+		if (this.#shuttingDown) {
+			socket.destroy();
+			return;
+		}
 		this.#sockets.add(socket);
 		let authenticated = false;
 		// Oversized requests (> MAX_REQUEST_BYTES) close the connection natively.
@@ -1475,6 +1512,10 @@ class DaemonBroker {
 			throw error;
 		});
 		for (const entry of entries) {
+			// A broker that is shutting down takes over no more of the scope. Records not yet read stay
+			// as the previous broker left them, for the next broker to recover; shutdown() waits for the
+			// one in flight and retires it.
+			if (this.#shuttingDown) return;
 			if (!entry.isDirectory()) continue;
 			const dir = path.join(root, entry.name);
 			try {
