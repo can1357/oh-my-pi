@@ -5,12 +5,13 @@ import type { ChatUsageEvent } from "@oh-my-pi/pi-agent-core";
 import type { Api, AssistantMessage, ChoiceQuestion, ImageContent, Model, NoulQuestion } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+import { cfgJudgmentAttemptTimeoutMs, cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ChainJudge, hasNativeJudge, JudgmentCache, journalJudgmentUsage } from "@oh-my-pi/pi-coding-agent/judgment";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+import * as imageResize from "@oh-my-pi/pi-coding-agent/utils/image-resize";
 import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
@@ -114,6 +115,103 @@ function makeRegistry(models: Model<Api>[], keys: Record<string, string> = {}): 
 	// Return the supplied fixtures directly; getAvailable's normal auth filtering is intentionally bypassed.
 	vi.spyOn(registry, "getAvailable").mockReturnValue(models);
 	return registry;
+}
+
+function nativeLoopback({
+	hangBody = false,
+	attemptTimeoutMs = null,
+	delayPrimaryMs = 0,
+}: { hangBody?: boolean; attemptTimeoutMs?: number | null; delayPrimaryMs?: number } = {}) {
+	const attempted: string[] = [];
+	const started = Promise.withResolvers<void>();
+	const pending = Promise.withResolvers<Response>();
+	let healthy = false;
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		idleTimeout: 0,
+		async fetch(request) {
+			const { model } = (await request.json()) as { model: string };
+			attempted.push(model);
+			if (model === "loopback-primary" && !healthy) {
+				started.resolve();
+				return hangBody
+					? new Response(new ReadableStream(), { headers: { "Content-Type": "application/json" } })
+					: pending.promise;
+			}
+			if (model === "loopback-primary" && delayPrimaryMs > 0) {
+				// Exercise the real HTTP/platform deadline, not a simulated timer.
+				await Bun.sleep(delayPrimaryMs);
+			}
+			return Response.json({
+				model,
+				answers: { level: { type: "choice", choice: "high", probabilities: { low: 0, high: 1 }, confidence: 1 } },
+				usage: { input_tokens: 4, output_tokens: 1 },
+			});
+		},
+	});
+	const models = ["loopback-primary", "loopback-backup"].map(
+		id =>
+			({
+				...ONLINE,
+				id,
+				name: id,
+				api: "openrouter-decisions",
+				provider: "openrouter",
+				baseUrl: `http://127.0.0.1:${server.port}`,
+				kind: "judge",
+				reasoning: false,
+				input: ["text", "image"],
+			}) as Model,
+	);
+	const settings = Settings.isolated({
+		modelRoles: { judge: "openrouter/loopback-primary" },
+		"retry.fallbackChains": { judge: ["openrouter/loopback-backup"] },
+	});
+	if (attemptTimeoutMs !== null) cfgJudgmentAttemptTimeoutMs.override(settings, attemptTimeoutMs);
+	const registry = makeRegistry(models, { openrouter: "loopback-key" });
+	return {
+		deps: { settings, registry, purpose: "test", sessionId: "loopback-session" },
+		attempted,
+		started: started.promise,
+		recover: () => {
+			healthy = true;
+		},
+		[Symbol.dispose]() {
+			pending.resolve(new Response("fixture stopped", { status: 503 }));
+			server.stop(true);
+		},
+	};
+}
+
+function hangNativeSetup(registry: ModelRegistry, stage: "credentials" | "headers") {
+	const started = Promise.withResolvers<void>();
+	const pending = Promise.withResolvers<undefined>();
+	const state: { signal?: AbortSignal } = {};
+	if (stage === "credentials") {
+		const getApiKey = registry.getApiKey.bind(registry);
+		vi.spyOn(registry, "getApiKey").mockImplementation((model, sessionId, options) => {
+			if (model.id !== "loopback-primary") return getApiKey(model, sessionId, options);
+			state.signal = options?.signal;
+			started.resolve();
+			return pending.promise;
+		});
+	} else {
+		const resolveHeaders = registry.resolveModelHeaders.bind(registry);
+		vi.spyOn(registry, "resolveModelHeaders").mockImplementation((model, signal) => {
+			if (model.id !== "loopback-primary") return resolveHeaders(model, signal);
+			state.signal = signal;
+			started.resolve();
+			return pending.promise;
+		});
+	}
+	return {
+		started: started.promise,
+		state,
+		[Symbol.dispose]() {
+			pending.resolve(undefined);
+		},
+	};
 }
 
 function reply(model: Model<Api>, text: string, stopReason: AssistantMessage["stopReason"] = "stop"): AssistantMessage {
@@ -790,6 +888,174 @@ describe("ChainJudge", () => {
 
 		expect(native).not.toHaveBeenCalled();
 		expect(chat).not.toHaveBeenCalled();
+	});
+
+	it("fails over within the native attempt bound and skips the timed-out route until its cooldown expires", async () => {
+		using fixture = nativeLoopback();
+		const request = { state: "locate the scheduler", questions: { level: TIER_QUESTION } };
+		const started = performance.now();
+		const result = await new ChainJudge(fixture.deps).judge(request, { signal: AbortSignal.timeout(4_500) });
+		expect(result.answers.level.choice).toBe("high");
+		expect(result.model).toBe("loopback-backup");
+		expect(performance.now() - started).toBeLessThan(4_500);
+		expect(fixture.attempted).toEqual(["loopback-primary", "loopback-backup"]);
+
+		await new ChainJudge(fixture.deps).judge(request);
+		expect(fixture.attempted).toEqual(["loopback-primary", "loopback-backup", "loopback-backup"]);
+
+		fixture.recover();
+		const otherSession = await new ChainJudge({ ...fixture.deps, sessionId: "another-session" }).judge(request);
+		expect(otherSession.model).toBe("loopback-primary");
+		vi.spyOn(Date, "now").mockReturnValue(Date.now() + 30_001);
+		const recovered = await new ChainJudge(fixture.deps).judge(request);
+		expect(recovered.model).toBe("loopback-primary");
+		expect(fixture.attempted.slice(-2)).toEqual(["loopback-primary", "loopback-primary"]);
+	}, 7_000);
+
+	it("does not share an anonymous judge's cooldown with unrelated callers using the same registry", async () => {
+		using fixture = nativeLoopback();
+		const deps = { ...fixture.deps, sessionId: undefined };
+		const judge = new ChainJudge(deps);
+		const request = { state: "locate the scheduler", questions: { level: TIER_QUESTION } };
+		const first = await judge.judge(request, { signal: AbortSignal.timeout(4_500) });
+		expect(first.model).toBe("loopback-backup");
+		fixture.recover();
+		const sameJudge = await judge.judge(request);
+		expect(sameJudge.model).toBe("loopback-backup");
+		const unrelated = await new ChainJudge(deps).judge(request);
+		expect(unrelated.model).toBe("loopback-primary");
+		expect(fixture.attempted).toEqual(["loopback-primary", "loopback-backup", "loopback-backup", "loopback-primary"]);
+	}, 7_000);
+
+	it("permits slower healthy native responses when the candidate deadline is raised", async () => {
+		using fixture = nativeLoopback({ attemptTimeoutMs: 10_000, delayPrimaryMs: 3_100 });
+		fixture.recover();
+		const result = await new ChainJudge(fixture.deps).judge({
+			state: "locate the scheduler",
+			questions: { level: TIER_QUESTION },
+		});
+		expect(result.model).toBe("loopback-primary");
+		expect(fixture.attempted).toEqual(["loopback-primary"]);
+	}, 7_000);
+
+	it.each([0, 1.5])("rejects an invalid native attempt deadline of %d before contacting a judge", timeoutMs => {
+		using fixture = nativeLoopback();
+		expect(() => cfgJudgmentAttemptTimeoutMs.override(fixture.deps.settings, timeoutMs)).toThrow(
+			"must be a positive safe integer",
+		);
+		expect(fixture.attempted).toEqual([]);
+	});
+
+	it("bounds native response bodies that stop arriving after the headers", async () => {
+		using fixture = nativeLoopback({ hangBody: true });
+		const result = await new ChainJudge(fixture.deps).judge(
+			{ state: "locate the scheduler", questions: { level: TIER_QUESTION } },
+			{ signal: AbortSignal.timeout(4_500) },
+		);
+		expect(result.answers.level.choice).toBe("high");
+		expect(fixture.attempted).toEqual(["loopback-primary", "loopback-backup"]);
+	}, 7_000);
+
+	it("bounds native attempts through withCandidate even when the callback omits options", async () => {
+		using fixture = nativeLoopback();
+		const result = await new ChainJudge(fixture.deps).withCandidate(candidate =>
+			candidate.judge({ state: "locate the scheduler", questions: { level: TIER_QUESTION } }),
+		);
+		expect(result.model).toBe("loopback-backup");
+		expect(fixture.attempted).toEqual(["loopback-primary", "loopback-backup"]);
+	}, 7_000);
+
+	it("propagates caller cancellation of a hung native attempt without failover or a cooldown", async () => {
+		using fixture = nativeLoopback();
+		const controller = new AbortController();
+		const request = { state: "locate the scheduler", questions: { level: TIER_QUESTION } };
+		const pending = new ChainJudge(fixture.deps).withCandidate(candidate => candidate.judge(request), {
+			signal: controller.signal,
+		});
+		await fixture.started;
+		const reason = new Error("caller stopped");
+		controller.abort(reason);
+		await expect(pending).rejects.toBe(reason);
+		expect(fixture.attempted).toEqual(["loopback-primary"]);
+		fixture.recover();
+		const recovered = await new ChainJudge(fixture.deps).judge(request);
+		expect(recovered.model).toBe("loopback-primary");
+		expect(fixture.attempted).toEqual(["loopback-primary", "loopback-primary"]);
+	});
+
+	it.each(["credentials", "headers"] as const)(
+		"fails over when native %s resolution hangs and cancels that attempt",
+		async stage => {
+			using fixture = nativeLoopback();
+			using setup = hangNativeSetup(fixture.deps.registry, stage);
+			const result = await new ChainJudge(fixture.deps).judge(
+				{ state: "locate the scheduler", questions: { level: TIER_QUESTION } },
+				{ signal: AbortSignal.timeout(4_500) },
+			);
+			expect(result.model).toBe("loopback-backup");
+			expect(setup.state.signal?.aborted).toBe(true);
+			expect(fixture.attempted).toEqual(["loopback-backup"]);
+		},
+		7_000,
+	);
+
+	it.each(["credentials", "headers"] as const)(
+		"propagates caller cancellation while native %s resolution is hung",
+		async stage => {
+			using fixture = nativeLoopback();
+			using setup = hangNativeSetup(fixture.deps.registry, stage);
+			const controller = new AbortController();
+			const pending = new ChainJudge(fixture.deps).judge(
+				{ state: "locate the scheduler", questions: { level: TIER_QUESTION } },
+				{ signal: controller.signal },
+			);
+			await setup.started;
+			const reason = new Error("caller stopped");
+			controller.abort(reason);
+			await expect(pending).rejects.toBe(reason);
+			expect(setup.state.signal?.aborted).toBe(true);
+			expect(fixture.attempted).toEqual([]);
+		},
+	);
+
+	it("does not charge local image preparation to a native candidate's deadline", async () => {
+		using fixture = nativeLoopback();
+		fixture.recover();
+		vi.spyOn(ai, "nativeJudgmentAcceptsImages").mockReturnValue(false);
+		vi.spyOn(imageResize, "fitImage").mockImplementation(async image => {
+			// AbortSignal.timeout uses the platform clock; image work must outlast that real deadline.
+			await Bun.sleep(3_100);
+			return { image, content: { top: 0, left: 0, bottom: 1, right: 1 } };
+		});
+		const result = await new ChainJudge(fixture.deps).judge({
+			state: "locate the scheduler",
+			questions: { level: TIER_QUESTION },
+			images: [IMAGE_ONE],
+		});
+		expect(result.model).toBe("loopback-primary");
+		expect(fixture.attempted).toEqual(["loopback-primary"]);
+	}, 7_000);
+
+	it("cancels local image preparation without starting a native request", async () => {
+		using fixture = nativeLoopback();
+		const started = Promise.withResolvers<void>();
+		const fitted = Promise.withResolvers<imageResize.FittedImage>();
+		vi.spyOn(ai, "nativeJudgmentAcceptsImages").mockReturnValue(false);
+		vi.spyOn(imageResize, "fitImage").mockImplementation(() => {
+			started.resolve();
+			return fitted.promise;
+		});
+		const controller = new AbortController();
+		const pending = new ChainJudge(fixture.deps).judge(
+			{ state: "locate the scheduler", questions: { level: TIER_QUESTION }, images: [IMAGE_ONE] },
+			{ signal: controller.signal },
+		);
+		await started.promise;
+		const reason = new Error("caller stopped");
+		controller.abort(reason);
+		await expect(pending).rejects.toBe(reason);
+		fitted.resolve({ image: IMAGE_ONE, content: { top: 0, left: 0, bottom: 1, right: 1 } });
+		expect(fixture.attempted).toEqual([]);
 	});
 
 	it("propagates caller abort without attempting a fallback", async () => {
