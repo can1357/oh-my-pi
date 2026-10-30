@@ -16,6 +16,7 @@ import {
 	lookupTableChart,
 	setTableCharts,
 	splitTableCharts,
+	TableChartFigure,
 	type TableChartPlanner,
 } from "@oh-my-pi/pi-tui/chat/table-chart";
 import { lexDocument } from "@oh-my-pi/pi-tui/components/markdown";
@@ -661,6 +662,39 @@ describe("table charts in assistant Markdown", () => {
 	});
 
 	const answer = `Timings:\n\n${TIMINGS}\n\nThat is all.`;
+
+	it("counts its separator in a caller's ceiling, and below two rows neither plans nor holds up completion", async () => {
+		const protocol = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		const choice = Promise.withResolvers<ChartPlan | null>();
+		const planner = vi.fn<TableChartPlanner>(() => choice.promise);
+		setTableCharts("smart", planner);
+		let maxRows = 1;
+		let changed = Promise.withResolvers<void>();
+		const chart = new TableChartFigure({ maxRows: () => maxRows, onChange: () => changed.resolve() });
+		chart.update(table(BEFORE_AFTER));
+		try {
+			expect(chart.render(76)).toEqual([]);
+			expect(chart.pending).toBe(false);
+			expect(planner).not.toHaveBeenCalled();
+
+			maxRows = 4;
+			chart.render(76);
+			expect(chart.pending).toBe(true);
+			choice.resolve(planner.mock.calls[0]![0].guess);
+			await changed.promise;
+			changed = Promise.withResolvers<void>();
+			chart.render(76);
+			await changed.promise;
+			const drawn = chart.render(76);
+			expect(drawn.length).toBeLessThanOrEqual(4);
+			expect(drawn[0]).toBe("");
+			expect(drawn.some(row => TERMINAL.isImageLine(row))).toBe(true);
+		} finally {
+			chart.dispose();
+			setTerminalImageProtocol(protocol);
+		}
+	});
 
 	it("leaves a table streaming at the tail whole and charts it once the answer moves on", () => {
 		setTableCharts("always");
