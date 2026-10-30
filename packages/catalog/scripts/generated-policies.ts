@@ -82,7 +82,9 @@ export function rebakeModelThinking(model: ModelSpec<Api>): void {
 	if (
 		model.compat &&
 		"thinkingFormat" in model.compat &&
-		model.compat.thinkingFormat === "chat-template" &&
+		// These wire formats carry provider-authored controls that cannot be
+		// recovered from model identity (including Kimi's live effort ladder).
+		(model.compat.thinkingFormat === "chat-template" || model.compat.thinkingFormat === "kimi") &&
 		model.thinking
 	)
 		return;
@@ -94,6 +96,10 @@ export function rebakeModelThinking(model: ModelSpec<Api>): void {
 		return;
 	}
 	if (model.provider === "cline-pass" && model.thinking) return;
+	// Discovery rows that trust only their explicit thinking carry a live
+	// ladder (or deliberately none); the generic deriver would erase it.
+	if (model.compat && "trustExplicitThinkingOnly" in model.compat && model.compat.trustExplicitThinkingOnly === true)
+		return;
 	if (model.provider === "openrouter" && model.thinking?.requiresEffort === true) return;
 	const requiresProviderAuthoredEffort =
 		model.provider === "umans" && (model.thinking?.requiresEffort === true || model.id === "umans-kimi-k2.7");
@@ -254,9 +260,5 @@ function applyGeneratedModelPolicy(model: ModelSpec<Api>): void {
 	if (model.provider === "alibaba-token-plan") {
 		const reference = seedModels("alibaba-token-plan").find(candidate => candidate.id === model.id);
 		if (reference) model.name = reference.name;
-	}
-
-	if (model.provider === "ollama-cloud") {
-		model.omitMaxOutputTokens = true;
 	}
 }

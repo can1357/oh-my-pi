@@ -12,9 +12,12 @@ import * as natives from "@oh-my-pi/pi-natives";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 
 const tempRoots: string[] = [];
+/** Order of worktree captures and the run's IRC wake release. */
+let events: string[] = [];
 
 afterEach(async () => {
 	vi.restoreAllMocks();
+	events = [];
 	await Promise.all(tempRoots.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
 });
 
@@ -57,11 +60,9 @@ async function commitsAcrossRelease(id: string, runEndPatch: string, releasePatc
 	vi.spyOn(worktreeModule, "captureIsolationBaseline").mockResolvedValue(baseline);
 	vi.spyOn(worktreeModule, "cleanupIsolation").mockResolvedValue();
 	vi.spyOn(worktreeModule, "captureDeltaPatch").mockResolvedValue({ rootPatch: releasePatch, nestedPatches: [] });
-	const commitSpy = vi.spyOn(worktreeModule, "commitToBranch").mockResolvedValue({
-		branchName: `omp/task/${id}`,
-		baseSha: "base",
-		rootPatch: runEndPatch,
-		nestedPatches: [],
+	const commitSpy = vi.spyOn(worktreeModule, "commitToBranch").mockImplementation(async () => {
+		events.push("commit");
+		return { branchName: `omp/task/${id}`, baseSha: "base", rootPatch: runEndPatch, nestedPatches: [] };
 	});
 	const session = {
 		prepareForHeadlessAdvisorDrain: () => {},
@@ -77,6 +78,8 @@ async function commitsAcrossRelease(id: string, runEndPatch: string, releasePatc
 			sessionFile: `/tmp/${options.id}.jsonl`,
 			status: "running",
 		});
+		// A held peer message would wake a turn in the worktree once released.
+		options.deferIrcWakeRelease?.(() => events.push("irc wakes released"));
 		await executorModule.finalizeSubagentLifecycle({
 			id: options.id,
 			session,
@@ -118,5 +121,10 @@ describe("isolated agent release", () => {
 
 	it("commits follow-up work made after the run-end branch", async () => {
 		expect(await commitsAcrossRelease("ReleaseChanged", patch, `${patch}+follow-up\n`)).toBe(2);
+	});
+
+	it("lets held peer messages wake the agent only after the run-end branch is committed", async () => {
+		await commitsAcrossRelease("ReleaseAfterCapture", patch, patch);
+		expect(events).toEqual(["commit", "irc wakes released"]);
 	});
 });

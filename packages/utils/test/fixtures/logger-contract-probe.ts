@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { getLogPath } from "../../src/dirs";
 import * as logger from "../../src/logger";
 
 const scenario = process.argv[2];
@@ -80,6 +81,56 @@ switch (scenario) {
 		disableTransports();
 		break;
 	}
+	case "context": {
+		logger.setTransports({ console: false, file: primaryDir });
+		const { promise: parentLogged, resolve: parentDone } = Promise.withResolvers<void>();
+		// Two sessions interleave on one event loop: each record keeps its own
+		// session's fields across awaits and timers.
+		let parentId = "parent";
+		const parent = logger.withContext(
+			{
+				get sessionId() {
+					return parentId;
+				},
+			},
+			async () => {
+				logger.info("parent-start");
+				await Bun.sleep(5);
+				// A getter is read per record, so a re-keyed session is current at once.
+				parentId = "parent-rekeyed";
+				logger.info("parent-after-timer");
+				logger.info("explicit-wins", { sessionId: "explicit" });
+				logger.withoutContext(() => logger.info("shared-service"));
+				parentDone();
+			},
+		);
+		const child = logger.withContext({ sessionId: "child" }, async () => {
+			await parentLogged;
+			logger.withContext({ sessionId: "grandchild" }, () => logger.info("child-nested", { ordinal: 1 }));
+		});
+		logger.info("outside");
+		await Promise.all([parent, child]);
+		// Context fields named like the record's own keep the record's level and message.
+		logger.withContext({ sessionId: "reserved", level: "error", message: "scoped", timestamp: "scoped" }, () =>
+			logger.info("reserved-kept"),
+		);
+		// Sinks see the context's fields under the call's own.
+		const sinkContexts: unknown[] = [];
+		const unregister = logger.registerLogSink(event => sinkContexts.push(event.context));
+		logger.withContext({ sessionId: "sink", turn: 1 }, () => logger.info("to-sink", { turn: 2 }));
+		logger.info("to-sink-outside");
+		// A context getter that throws costs the record, never the caller.
+		const throwing = {
+			get sessionId(): string {
+				throw new Error("getter failed");
+			},
+		};
+		logger.withContext(throwing, () => logger.info("throwing-getter", { kept: true }));
+		unregister();
+		writeResult({ sinkContexts });
+		disableTransports();
+		break;
+	}
 	case "serialization-failures": {
 		logger.setTransports({ console: false, file: primaryDir });
 		interface CircularContext extends Record<string, unknown> {
@@ -115,6 +166,7 @@ switch (scenario) {
 	case "default-file":
 		logger.info("mode-default", { mode: "default" });
 		disableTransports();
+		writeResult({ logPath: getLogPath() });
 		break;
 	case "file-only":
 		logger.setTransports({ console: false, file: primaryDir });

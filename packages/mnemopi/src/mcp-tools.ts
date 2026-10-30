@@ -447,20 +447,24 @@ function sharedBeam(): BeamMemory {
 	return new BeamMemory({ sessionId: "mcp_shared_surface", dbPath });
 }
 
-async function withBeam<T>(args: ToolArguments, fn: (beam: BeamMemory, bank: string) => T | Promise<T>): Promise<T> {
+export async function withBeam<T>(
+	args: ToolArguments,
+	fn: (beam: BeamMemory, bank: string) => T | Promise<T>,
+): Promise<T> {
 	const bank = resolveBank(args);
 	const beam = createBeam(args, bank);
+	let result: T;
 	try {
-		const result = await fn(beam, bank);
+		result = await fn(beam, bank);
+	} finally {
 		// Drain background fact-extraction and embedding tasks before close so
 		// the SQLite handle stays open until in-flight `embed()` writes commit;
 		// otherwise the short-lived MCP `remember`/`update`/`sleep` paths race
 		// the close and silently drop the new dense-recall rows.
 		await beam.flushExtractions();
-		return result;
-	} finally {
 		beam.close();
 	}
+	return result;
 }
 function serialize(value: unknown): unknown {
 	if (value instanceof Date) return value.toISOString();
@@ -739,13 +743,14 @@ function surfaceLabel(content: string, kind: string): string {
 
 async function withSharedBeam<T>(fn: (beam: BeamMemory) => T | Promise<T>): Promise<T> {
 	const beam = sharedBeam();
+	let result: T;
 	try {
-		const result = await fn(beam);
-		await beam.flushExtractions();
-		return result;
+		result = await fn(beam);
 	} finally {
+		await beam.flushExtractions();
 		beam.close();
 	}
+	return result;
 }
 
 async function handleSharedRemember(args: ToolArguments): Promise<ToolResult> {

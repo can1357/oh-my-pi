@@ -91,6 +91,32 @@ describe("compaction summary output budget", () => {
 		expect(budgets).toEqual([512, MAX_SUMMARY_TOKENS, MAX_SUMMARY_TOKENS]);
 	});
 
+	test("delivers extension context to every split-turn summary request", async () => {
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("summary"));
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "kept",
+			messagesToSummarize: messages,
+			turnPrefixMessages: [{ role: "user", content: "continue", timestamp: 2 }],
+			recentMessages: [{ role: "user", content: "recent", timestamp: 3 }],
+			isSplitTurn: true,
+			tokensBefore: 900_000,
+			fileOps: createFileOps(),
+			settings: {
+				...DEFAULT_COMPACTION_SETTINGS,
+				reserveTokens: 16_384,
+				remoteEnabled: false,
+			},
+		};
+		const extraContext = "Extension note: the deploy freeze stays in place until Friday.";
+
+		await compact(preparation, getModel(), "test-key", undefined, undefined, { extraContext: [extraContext] });
+
+		expect(spy.mock.calls.length).toBe(3);
+		for (const call of spy.mock.calls) {
+			expect(JSON.stringify(call[1].messages)).toContain(extraContext);
+		}
+	});
+
 	test("leaves a reserve smaller than the cap proportional", async () => {
 		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("summary"));
 		await generateSummary(messages, getModel(), 10_000, "test-key");

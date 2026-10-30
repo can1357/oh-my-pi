@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { zhipuCodingPlanModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
@@ -173,13 +174,15 @@ describe("zhipu-coding-plan model discovery", () => {
 		expect(models?.[0]?.baseUrl).toBe("https://open.bigmodel.cn/api/coding/paas/v4");
 	});
 
-	it("maps glm-5.3-flash as a reasoning model with native image input", async () => {
+	it("keeps FlashX reasoning and image support across bundled and discovered coding-plan models", async () => {
 		const mockFetch: FetchImpl = Object.assign(
 			async (): Promise<Response> =>
 				new Response(
 					JSON.stringify({
 						data: [
 							{ id: "glm-5.3-flash", name: "GLM-5.3-Flash" },
+							{ id: "glm-5.3-flashx", name: "GLM-5.3-FlashX" },
+							{ id: "glm-4.7-flashx", name: "GLM-4.7-FlashX" },
 							{ id: "glm-4.7-flash", name: "GLM-4.7-Flash" },
 						],
 					}),
@@ -191,16 +194,33 @@ describe("zhipu-coding-plan model discovery", () => {
 		const options = zhipuCodingPlanModelManagerOptions({ apiKey: "test-key", fetch: mockFetch });
 		const models = await options.fetchDynamicModels?.();
 		const flash53 = models?.find(model => model.id === "glm-5.3-flash");
+		const flashx53 = models?.find(model => model.id === "glm-5.3-flashx");
+		const flashx47 = models?.find(model => model.id === "glm-4.7-flashx");
+		const bundled = getBundledModel<"openai-completions">("zhipu-coding-plan", "glm-5.3-flashx");
+
+		expect(bundled).toMatchObject({
+			api: "openai-completions",
+			baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
+			contextWindow: 1_000_000,
+			maxTokens: 131_072,
+			input: ["text", "image"],
+			thinking: { mode: "effort", efforts: ["low", "high", "max"], defaultLevel: "max", requiresEffort: true },
+		});
+		expect(flashx53 && buildModel(flashx53)).toMatchObject({
+			reasoning: true,
+			input: ["text", "image"],
+			contextWindow: 1_000_000,
+			maxTokens: 131_072,
+			thinking: { mode: "effort", efforts: ["low", "high", "max"], defaultLevel: "max", requiresEffort: true },
+		});
 		const flash47 = models?.find(model => model.id === "glm-4.7-flash");
 
-		// GLM-5.3-Flash is the first natively multimodal, mandatory-thinking
-		// flash SKU; its id carries no `v` marker.
 		expect(flash53?.reasoning).toBe(true);
-		// Image input is rule-owned (`providers/zhipu-coding-plan.kdl`
-		// input-modalities) and corrected at build time.
 		expect(flash53 && buildModel(flash53).input).toEqual(["text", "image"]);
 		// Older flash SKUs stay non-reasoning and text-only.
 		expect(flash47?.reasoning).toBe(false);
 		expect(flash47 && buildModel(flash47).input).toEqual(["text"]);
+		expect(flashx47?.reasoning).toBe(false);
+		expect(flashx47 && buildModel(flashx47).input).toEqual(["text"]);
 	});
 });

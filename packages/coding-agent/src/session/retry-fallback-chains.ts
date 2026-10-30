@@ -6,6 +6,7 @@ import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/ove
 import { formatModelString, formatModelStringWithRouting } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import {
+	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
 	resolveThinkingLevelForModel,
@@ -13,7 +14,7 @@ import {
 import { resolveConfiguredModelPatterns, resolveModelRoleValue } from "../config/model-resolver";
 import { getRoleInfo, isKindRole } from "../config/model-roles";
 
-import { cfgRetryFallbackChains, cfgRetryFallbackRevertPolicy } from "./settings";
+import { cfgRetryFallbackChains, cfgRetryFallbackRevertPolicy, type RetrySettings } from "./settings";
 
 /** Configured fallback chains keyed by role or model selector. */
 export type RetryFallbackChains = Record<string, string[]>;
@@ -21,12 +22,16 @@ export type RetryFallbackChains = Record<string, string[]>;
 /** Policy controlling restoration of a fallback chain's primary model. */
 export type RetryFallbackRevertPolicy = "never" | "cooldown-expiry";
 
-/** Parsed model selector used by retry fallback resolution. */
+/**
+ * Parsed model selector used by retry fallback resolution. `thinkingLevel`
+ * keeps the configured `auto` sentinel; `undefined` means the selector carried
+ * no suffix, so the session's configured level applies.
+ */
 export interface RetryFallbackSelector {
 	raw: string;
 	provider: string;
 	id: string;
-	thinkingLevel: ThinkingLevel | undefined;
+	thinkingLevel: ConfiguredThinkingLevel | undefined;
 }
 
 /** Minimal model lookup needed by fallback-chain resolution. */
@@ -108,7 +113,7 @@ export function parseRetryFallbackSelector(
 		raw: trimmed,
 		provider: parsed.provider,
 		id: parsed.id,
-		thinkingLevel: concreteThinkingLevel(parsed.thinkingLevel),
+		thinkingLevel: parsed.thinkingLevel,
 	};
 }
 
@@ -138,8 +143,8 @@ export function formatRetryFallbackSelector(model: Model, thinkingLevel: Thinkin
 	return formatModelSelectorValue(formatModelStringWithRouting(model), thinkingLevel);
 }
 
-/** Formats the model-only portion of a parsed fallback selector. */
-function formatRetryFallbackBaseSelector(selector: RetryFallbackSelector): string {
+/** Formats the model-only portion of a parsed fallback selector (`provider/id`, no thinking level). */
+export function formatRetryFallbackBaseSelector(selector: RetryFallbackSelector): string {
 	return `${selector.provider}/${selector.id}`;
 }
 
@@ -180,15 +185,15 @@ export function getRetryFallbackChains(settings: Settings): RetryFallbackChains 
 export interface RetryFallbackRole {
 	/** Selector the role is assigned (the chain's primary). */
 	primary: string;
-	/** Fallback selectors walked after the primary. */
+	/** Fallback selectors walked after the primary; empty explicitly disables fallbacks. */
 	chain: string[];
 }
 
-/** Reads the primary and non-empty chain installed for `role`, if any. */
+/** Reads the primary and chain installed for `role`, including an explicitly empty chain. */
 export function getRetryFallbackRole(settings: Settings, role: string): RetryFallbackRole | undefined {
 	const primary = settings.getModelRole(role);
 	const chain = cfgRetryFallbackChains.get(settings)[role];
-	if (!primary || !Array.isArray(chain) || chain.length === 0) return undefined;
+	if (!primary || !Array.isArray(chain)) return undefined;
 	return { primary, chain };
 }
 
@@ -241,11 +246,12 @@ function providerScopedPool(
  * Validates configured fallback chains and reports each warning via `warn`.
  *
  * `options.isDiscoveryPending` suppresses "unknown model" warnings for
- * selectors whose config-declared discovery provider has not yet populated the
- * registry (a cold discovery cache after `omp update` bumps the cache
- * namespace, #10048). Such selectors are re-checked once background discovery
- * settles. Logging is the caller's responsibility so a post-discovery re-run
- * does not double-log persistent warnings.
+ * selectors whose provider discovery has not settled yet: a cold discovery
+ * cache after `omp update` bumps the cache namespace (#10048), or a startup
+ * cache replay the pending online refresh may still extend. Such selectors
+ * are re-checked once background discovery settles. Logging is the caller's
+ * responsibility so a post-discovery re-run does not double-log persistent
+ * warnings.
  */
 export function validateRetryFallbackChains(
 	settings: Settings,
@@ -347,6 +353,18 @@ export function getRetryFallbackRevertPolicy(settings: Settings): RetryFallbackR
 	return cfgRetryFallbackRevertPolicy.get(settings) === "never" ? "never" : "cooldown-expiry";
 }
 
+/** Whether `retry.fallbackOn` lets a failure walk the fallback chain. */
+export function retryFallbackAdmits(fallbackOn: RetrySettings["fallbackOn"], usageLimit: boolean): boolean {
+	switch (fallbackOn) {
+		case "any":
+			return true;
+		case "usage-limit":
+			return usageLimit;
+		case "except-usage-limit":
+			return !usageLimit;
+	}
+}
+
 /** Resolves the primary selector represented by a fallback-chain key. */
 function getRetryFallbackPrimarySelector(
 	context: RetryFallbackResolutionContext,
@@ -396,11 +414,12 @@ function selectorMatchKind(
 	}
 	if (!matchedCurrent) return "none";
 	if (level === matchedCurrent.thinkingLevel) return "exact";
-	if (level === undefined) return "base";
+	// `auto` fixes no effort, so as a key it applies at any effort, like a suffixless key.
+	if (level === undefined || level === AUTO_THINKING) return "base";
 	if (
 		currentModel &&
 		resolveThinkingLevelForModel(currentModel, level) ===
-			resolveThinkingLevelForModel(currentModel, matchedCurrent.thinkingLevel)
+			resolveThinkingLevelForModel(currentModel, concreteThinkingLevel(matchedCurrent.thinkingLevel))
 	) {
 		return "normalized";
 	}

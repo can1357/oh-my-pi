@@ -28,6 +28,11 @@ export function matchesAppToolsExpand(data: string): boolean {
 	return matchesKey(data, "ctrl+o");
 }
 
+/** Effective tools-expand key: the first bound key, or Ctrl+O when unbound. */
+export function appToolsExpandKey(): KeyId {
+	return getKeybindings().getKeys("app.tools.expand")[0] ?? "ctrl+o";
+}
+
 /** Match the generic selector cancel keybinding. */
 export function matchesSelectCancel(data: string): boolean {
 	return getKeybindings().matches(data, "tui.select.cancel");
@@ -53,11 +58,15 @@ export function matchesSelectPageDown(data: string): boolean {
 	return getKeybindings().matches(data, "tui.select.pageDown");
 }
 
+/** Effective external-editor key: the first bound key, or Ctrl+G when unbound. */
+export function appExternalEditorKey(): KeyId {
+	return getKeybindings().getKeys("app.editor.external")[0] ?? "ctrl+g";
+}
+
 /** Match the external-editor keybinding, falling back to Ctrl+G when unbound. */
 export function matchesAppExternalEditor(data: string): boolean {
 	const keybindings = getKeybindings();
-	const externalEditorKeys = keybindings.getKeys("app.editor.external");
-	if (externalEditorKeys.length > 0) {
+	if (keybindings.getKeys("app.editor.external").length > 0) {
 		return keybindings.matches(data, "app.editor.external");
 	}
 	return matchesKey(data, "ctrl+g");
@@ -96,4 +105,18 @@ export function matchesAppFollowUp(data: string): boolean {
 		return matchesEffectiveKeys(data, keys);
 	}
 	return matchesEffectiveKeys(data, ["ctrl+enter", "ctrl+q"]);
+}
+
+/** Approve-key defaults when `app.approval.approve` is unbound: approval must stay reachable by keyboard. */
+const APPROVE_DEFAULT_KEYS: readonly KeyId[] = ["ctrl+enter", "ctrl+q"];
+
+/** Effective tool-approval keys: the `app.approval.approve` bindings, or Ctrl+Enter/Ctrl+Q when unbound. */
+export function appApproveKeys(): readonly KeyId[] {
+	const keys = getKeybindings().getKeys("app.approval.approve");
+	return keys.length > 0 ? keys : APPROVE_DEFAULT_KEYS;
+}
+
+/** Match the tool-approval key, recognizing modifier-tagged LF as Ctrl+Enter like {@link matchesAppFollowUp}. */
+export function matchesAppApprove(data: string): boolean {
+	return matchesEffectiveKeys(data, appApproveKeys());
 }

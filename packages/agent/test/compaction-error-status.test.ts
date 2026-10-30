@@ -23,9 +23,9 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 // into the UI.
 //
 // `generateHandoff` is the cheapest vehicle (one LLM call). The same
-// `createSummarizationError` helper backs all four summarizer throw
-// sites in `packages/agent/src/compaction/compaction.ts`, so verifying
-// one site is sufficient to lock the contract.
+// `createSummarizationError` helper backs every summarizer throw site
+// in `packages/agent/src/compaction/compaction.ts`, so verifying one
+// site is sufficient to lock the contract.
 
 function makeAssistantStop(content: AssistantMessage["content"]): AssistantMessage {
 	return {
@@ -138,7 +138,7 @@ describe("compaction error-status propagation", () => {
 		expect(error).toBeInstanceOf(Error);
 		const e = error as Error & { status?: number };
 		expect(e.status).toBe(403);
-		expect(e.message).toMatch(/Summarization failed|Short summary failed|Turn prefix summarization failed/);
+		expect(e.message).toMatch(/Summarization failed|Turn prefix summarization failed/);
 	});
 
 	test("missing errorStatus does not attach .status (preserves auth_unavailable regex path)", async () => {

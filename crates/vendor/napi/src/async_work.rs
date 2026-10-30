@@ -212,6 +212,8 @@ unsafe impl<'task, T: ScopedTask<'task> + Sync> Sync for AsyncWork<'task, T> {}
 /// env here is the same with the one in `CallContext`.
 /// So it actually could do nothing here, because `execute` function is called in the other thread mostly.
 unsafe extern "C" fn execute<'task, T: ScopedTask<'task>>(_env: sys::napi_env, data: *mut c_void) {
+  // An emnapi pool thread gets this work from the JS thread and may hold a stale memory size.
+  crate::on_thread_handoff();
   let work = Box::leak(unsafe { Box::from_raw(data as *mut AsyncWork<T>) });
   let value = work.inner_task.compute();
   work.value.write(value);

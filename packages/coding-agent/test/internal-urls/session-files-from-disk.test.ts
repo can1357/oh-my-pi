@@ -11,7 +11,7 @@ afterEach(() => {
 
 describe("sessionFilesFromDisk", () => {
 	it("resolves a repeated id to the caller's preferred dir even when its copy is nested deeper", async () => {
-		using tempDir = TempDir.createSync("session-files-");
+		using tempDir = TempDir.createSync("@session-files-");
 		const preferred = path.join(tempDir.path(), "preferred");
 		const registered = path.join(tempDir.path(), "registered");
 		// The registered copy is top-level, so its listing lands first; the preferred dir still wins.

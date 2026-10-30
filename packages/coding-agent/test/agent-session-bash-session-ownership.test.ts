@@ -416,6 +416,53 @@ describe("AgentSession bash session ownership", () => {
 		},
 	);
 
+	/** A persisted session the test can switch back to; the mock reply's model id is not registered. */
+	async function createSwitchableSession(extensionRunner?: ExtensionRunner): Promise<string> {
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		manager.appendModelChange("anthropic/claude-sonnet-4-5");
+		manager.appendMessage({ role: "user", content: "seed", timestamp: Date.now() });
+		manager.appendMessage(createAssistantMessage("seed reply"));
+		await manager.ensureOnDisk();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+		createSession(manager, extensionRunner);
+		return sessionFile;
+	}
+
+	it("starts a fresh shell when it returns to a session it left", async () => {
+		const oldSessionFile = await createSwitchableSession();
+		const oldSessionId = session.sessionId;
+		await session.executeBash("PI_LEFT_SESSION_MARK=kept");
+
+		await session.newSession();
+		await session.switchSession(oldSessionFile);
+
+		expect(session.sessionId).toBe(oldSessionId);
+		const result = await session.executeBash('printf "[%s]" "$PI_LEFT_SESSION_MARK"');
+		expect(result.output).toBe("[]");
+	});
+
+	it("starts a fresh shell after a command that was pending when its session was left", async () => {
+		const hook = Promise.withResolvers<undefined>();
+		const extensionRunner = {
+			hasHandlers: vi.fn((eventType: string) => eventType === "user_bash"),
+			// The first command waits in its hook until the session has changed, then runs.
+			emitUserBash: vi.fn().mockReturnValueOnce(hook.promise).mockResolvedValue(undefined),
+			emit: vi.fn().mockResolvedValue(undefined),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+		} as unknown as ExtensionRunner;
+		const oldSessionFile = await createSwitchableSession(extensionRunner);
+		const pending = session.executeBash("PI_LEFT_SESSION_MARK=kept");
+
+		await session.newSession();
+		hook.resolve(undefined);
+		await pending;
+		await session.switchSession(oldSessionFile);
+
+		const result = await session.executeBash('printf "[%s]" "$PI_LEFT_SESSION_MARK"');
+		expect(result.output).toBe("[]");
+	});
+
 	it("stores minimized bash output with the originating session", async () => {
 		const sessionDir = path.join(tempDir.path(), "sessions");
 		createSession(SessionManager.create(tempDir.path(), sessionDir));

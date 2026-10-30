@@ -5,11 +5,11 @@
  * - Table view: every registered agent except Main (Main IS the ambient
  *   chat), live from the global AgentHubRegistry — status, unread irc count,
  *   current/last task, last activity. Navigate with keys, wheel, hover, and
- *   click; `r` revives a parked agent, `x` aborts + releases one.
+ *   click; `r` revives a parked or killed agent, `x` aborts + releases one.
  * - Chat view: per-agent transcript (incremental session-file tail, absorbed
  *   from the old session observer overlay) plus an input line. Submitting
- *   revives a parked agent, then prompts/steers it; the message lands in the
- *   agent's persisted history via the normal prompt path.
+ *   revives a parked or killed agent, then prompts/steers it; the message
+ *   lands in the agent's persisted history via the normal prompt path.
  *
  * Replaces the old SessionObserverOverlayComponent (ctrl+s observer).
  */
@@ -200,6 +200,21 @@ const DATA_CHANGE_RENDER_COALESCE_MS = 100;
 /** Double-tap window for the table's left-left "close hub" gesture. */
 const LEFT_TAP_WINDOW_MS = 500;
 
+/** A row's rank, frozen when the hub first saw its generation: the batch it came in, and its status and recency then. */
+interface FrozenRank extends Pick<AgentRecordLike, "id" | "status" | "lastActivity"> {
+	/** 0 for the agents the hub opened with or the saved-agent scan found; each later batch of new generations is one lower. */
+	batch: number;
+}
+
+function compareFrozenRanks(a: FrozenRank, b: FrozenRank): number {
+	return (
+		a.batch - b.batch ||
+		STATUS_ORDER[a.status] - STATUS_ORDER[b.status] ||
+		b.lastActivity - a.lastActivity ||
+		a.id.localeCompare(b.id)
+	);
+}
+
 function activityGlyph(row: AgentActivityRow): string {
 	if (row.status === "error") return theme.fg("error", theme.status.error);
 	if (row.status === "aborted") return theme.fg("warning", theme.status.aborted);
@@ -358,11 +373,17 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	#rows: TRecord[] = [];
 	#statusCounts: Record<AgentStatus, number> = { running: 0, idle: 0, parked: 0, aborted: 0 };
 	#selectedRow = 0;
-	/** Stable roster order captured on first refresh: keyboard navigation must
-	 *  not jump as agents heartbeat. Existing agent generations keep their rank
-	 *  while the hub is open; newly appearing generations append at the end. */
-	#rowOrder: Map<TRecord, number> | undefined;
-	#nextRowOrder = 0;
+	/**
+	 * Each row keeps the rank it got when the hub first saw its generation, so
+	 * heartbeats and status changes do not move rows. An agent the saved-agent
+	 * scan finds takes its place in the status/recency order; every other new
+	 * generation goes on top.
+	 */
+	#frozenRank = new Map<TRecord, FrozenRank>();
+	/** Every id ranked so far: a new object under a known id is a new generation, not a saved agent. */
+	#seenIds = new Set<string>();
+	#opened = false;
+	#spawnBatches = 0;
 	#hoveredRow: number | null = null;
 	/** Per-render screen-line to agent-row map, shared by click and hover routing. */
 	#hitRows: Array<number | undefined> = [];
@@ -514,13 +535,11 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 						logger.warn("Failed to register persisted subagents", { error });
 					})
 					.finally(() => {
-						// Clear the loading flag first so this refresh captures the
-						// full status/recency ranking rather than a partial roster.
+						if (this.#disposed) return;
+						// Rank what the scan found before its end turns later arrivals into spawns.
+						this.#refreshRows();
 						this.#loadingPersistedSubagents = false;
-						if (!this.#disposed) {
-							this.#refreshRows();
-							this.#requestRender();
-						}
+						this.#requestRender();
 					});
 		this.#refreshRows();
 	}
@@ -889,7 +908,11 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 				id: "revive",
 				label: "Revive",
 				keys: ["r"],
-				disabled: readOnly ?? (selected?.status === "parked" ? undefined : "Only parked agents can be revived"),
+				disabled:
+					readOnly ??
+					(selected?.status === "parked" || selected?.status === "aborted"
+						? undefined
+						: "Only parked or killed agents can be revived"),
 			},
 			{ id: "kill", label: "Kill", keys: ["x"], danger: true, disabled: readOnly ?? (selected ? undefined : true) },
 			{ id: "view", label: "By parent", keys: ["t"], on: this.#viewMode === "tree" },
@@ -946,12 +969,16 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			return { ...item, depth, open: this.#childrenByParent.has(ref.id) ? true : undefined };
 		}
 		if (!metrics) return item;
+		// A running agent's active time ticks terminal-side from the age at send; a settled one
+		// is frozen text. Progress `durationMs` was current when its frame arrived, so age it to now
+		// — re-sending the stale value on every repaint rewinds Tern's clock. A first frame can
+		// report 0 ms, so a progress timestamp alone makes the row clockable.
+		const progressAt = observed?.progress ? observed.progressAt : undefined;
 		const facts: Record<string, string | number> = {
 			cost: formatCost(metrics.cost),
-			// A running agent's active time ticks terminal-side; a settled one is frozen text.
 			time:
-				ref.status === "running" && metrics.durationMs > 0
-					? metrics.durationMs
+				ref.status === "running" && (metrics.durationMs > 0 || progressAt !== undefined)
+					? metrics.durationMs + (progressAt === undefined ? 0 : Math.max(0, Date.now() - progressAt))
 					: formatDuration(metrics.durationMs),
 			req: metrics.requests,
 			tools: metrics.tools,
@@ -1519,41 +1546,36 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		this.#requestRender();
 	}
 
+	/** A parked or killed agent with no live session and an unknown id, seen while the saved-agent scan runs, is one the scan found. */
+	#foundOnDisk(ref: TRecord): boolean {
+		return (
+			this.#loadingPersistedSubagents &&
+			ref.session === null &&
+			(ref.status === "parked" || ref.status === "aborted") &&
+			!this.#seenIds.has(ref.id)
+		);
+	}
+
 	#refreshRows(): void {
 		const selectedId = this.#rows[this.#selectedRow]?.id;
 		const refs = this.#registry.list().filter(ref => ref.id !== MAIN_AGENT_ID);
 		this.#observedById = new Map();
 		for (const session of this.#observers.getSessions()) this.#observedById.set(session.id, session);
-		// Stable roster order: capture the status+recency ranking once so keyboard
-		// navigation is not disrupted by heartbeats (issue #10524). Existing rows
-		// keep their rank while the hub is open; new agents append at the end.
-		// Defer the capture until persisted-subagent discovery settles so a
-		// mid-scan refresh cannot freeze a partial roster (the remaining agents
-		// would otherwise append in readdir order instead of being ranked).
-		const rowOrder = this.#rowOrder;
-		let ordered: TRecord[];
-		if (!rowOrder) {
-			ordered = refs.sort(
-				(a, b) =>
-					STATUS_ORDER[a.status] - STATUS_ORDER[b.status] ||
-					b.lastActivity - a.lastActivity ||
-					a.id.localeCompare(b.id),
-			);
-			if (!this.#loadingPersistedSubagents && ordered.length > 0) {
-				this.#rowOrder = new Map();
-				for (const ref of ordered) this.#rowOrder.set(ref, this.#nextRowOrder++);
-			}
-		} else {
-			for (const rankedRef of rowOrder.keys()) {
-				if (!refs.includes(rankedRef)) rowOrder.delete(rankedRef);
-			}
-			ordered = refs.sort(
-				(a, b) => (rowOrder.get(a) ?? Number.MAX_SAFE_INTEGER) - (rowOrder.get(b) ?? Number.MAX_SAFE_INTEGER),
-			);
-			for (const ref of ordered) {
-				if (!rowOrder.has(ref)) rowOrder.set(ref, this.#nextRowOrder++);
-			}
+		const live = new Set(refs);
+		for (const ref of this.#frozenRank.keys()) if (!live.has(ref)) this.#frozenRank.delete(ref);
+		let spawnBatch: number | undefined;
+		for (const ref of refs) {
+			if (this.#frozenRank.has(ref)) continue;
+			this.#frozenRank.set(ref, {
+				batch: this.#opened && !this.#foundOnDisk(ref) ? (spawnBatch ??= --this.#spawnBatches) : 0,
+				id: ref.id,
+				status: ref.status,
+				lastActivity: ref.lastActivity,
+			});
+			this.#seenIds.add(ref.id);
 		}
+		this.#opened = true;
+		const ordered = refs.sort((a, b) => compareFrozenRanks(this.#frozenRank.get(a)!, this.#frozenRank.get(b)!));
 		const query = this.#agentFilter.getValue().trim();
 		const rosterRows =
 			query.length > 0
@@ -1561,7 +1583,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 				: ordered;
 
 		if (this.#viewMode === "tree") {
-			const tree = projectAgentTree(rosterRows);
+			const tree = projectAgentTree(rosterRows, ref => this.#frozenRank.get(ref)!.batch < 0);
 			this.#rows = tree.rows;
 			this.#treeDepthById = tree.depthById;
 			this.#treeParentById = tree.parentById;
@@ -2489,15 +2511,15 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	#activateAgent(ref: TRecord): void {
 		this.#notice = undefined;
 		const focusAgent = this.#focusAgent;
-		// Aborted agents and advisor refs are read-only transcripts with no
-		// revivable session; open the in-hub viewer instead of failing ensureLive.
-		if (ref.kind === "advisor" || ref.status === "aborted" || this.#remote || !focusAgent) {
+		// Advisor refs are read-only transcripts with no revivable session; open
+		// the in-hub viewer instead of failing ensureLive.
+		if (ref.kind === "advisor" || this.#remote || !focusAgent) {
 			this.openChat(ref.id);
 			return;
 		}
 		void (async () => {
 			try {
-				await focusAgent(ref.id); // ensureLive inside revives parked agents; no parking, no session files
+				await focusAgent(ref.id); // ensureLive inside revives parked and killed agents
 				this.#onDone();
 			} catch (error) {
 				this.#notice = error instanceof Error ? error.message : String(error);
@@ -2514,8 +2536,8 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			this.#requestRender();
 			return;
 		}
-		if (ref.status !== "parked") {
-			this.#notice = `Agent "${ref.id}" is ${ref.status} — only parked agents can be revived.`;
+		if (ref.status !== "parked" && ref.status !== "aborted") {
+			this.#notice = `Agent "${ref.id}" is ${ref.status} — only parked or killed agents can be revived.`;
 			this.#requestRender();
 			return;
 		}

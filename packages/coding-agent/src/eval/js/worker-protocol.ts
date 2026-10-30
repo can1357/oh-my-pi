@@ -1,7 +1,5 @@
+import type { EvalDisplayOutput } from "../types";
 import type { RuntimeCallIdentity, ShadowSnapshot } from "./shared/runtime";
-import type { JsDisplayOutput } from "./shared/types";
-
-export type { JsDisplayOutput } from "./shared/types";
 
 export interface EvalPreludeSource {
 	name: string;
@@ -63,9 +61,10 @@ export type WorkerOutbound =
 	| { type: "ready" }
 	| { type: "init-failed"; error: RunErrorPayload }
 	| { type: "text"; runId: string; chunk: string }
-	| { type: "display"; runId: string; output: JsDisplayOutput }
+	| { type: "display"; runId: string; output: EvalDisplayOutput }
 	| { type: "tool-call"; id: string; runId: string; name: string; args: unknown; identity?: RuntimeCallIdentity }
-	| { type: "result"; runId: string; ok: true }
+	/** `value` carries a tool-bridge envelope (`describe`/`call`); cell runs omit it. */
+	| { type: "result"; runId: string; ok: true; value?: unknown }
 	| { type: "result"; runId: string; ok: false; error: RunErrorPayload }
 	| { type: "log"; level: "debug" | "warn" | "error"; msg: string; meta?: Record<string, unknown> }
 	| { type: "shadow-snapshot"; id: string; eligible: boolean; reason?: string; snapshot?: ShadowSnapshot }

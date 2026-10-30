@@ -378,6 +378,7 @@ export function serializeReplicatedEntry(entry: ReplicatedEntry): SerializedRepl
 		id: entry.id,
 		parentId: entry.parentId,
 		timestamp: entry.timestamp,
+		runtime: entry.runtime,
 		customType: COLLAB_ENTRY_OMITTED_CUSTOM_TYPE,
 		display: true,
 		content: `…[${detail} omitted for collab session: too large to replicate]`,

@@ -12,6 +12,9 @@ import { getKeybindings, type Keybinding } from "../keybindings";
 import { card, kbd, list, node, row, span, text } from "./describe";
 import type { NativeChild, NativeNode } from "./node";
 
+/** Below this many columns a centered sheet fills the pane instead of floating with margins. */
+export const NARROW_SHEET_COLS = 100;
+
 /** One footer hint: the keys that trigger it and what it does. */
 export interface NativeHint {
 	/** Key ids (`"ctrl+o"`, `"escape"`); alternatives render side by side. */
@@ -116,6 +119,19 @@ export function actionButton(label: string, act: string, options: ActionButtonOp
 		},
 		children,
 		options.key ?? act,
+	);
+}
+
+/**
+ * A bare `esc` keycap button for a view's top-right corner: a click sends
+ * `act` (default `close`), which the component routes to its Esc path.
+ */
+export function escCloseButton(act = "close", key = "esc-close"): NativeNode {
+	return node(
+		"row",
+		{ role: "omp.btn", align: "center", actions: { click: act }, title: `Close  ${formatTooltipKey("escape")}` },
+		[kbd("escape")],
+		key,
 	);
 }
 

@@ -1,11 +1,11 @@
 /**
  * Status line for the speculative first frame, before any session exists.
  *
- * InteractiveMode persists {@link StatusLineStartupData} (settings plus the last
- * session's model and thinking state); the next launch renders it through the
- * real {@link StatusLineComponent} as a fresh, unnamed session at the live
- * terminal width. Path and git branch are read live; context usage is reported
- * unknown so the gauge shows the window without a percent.
+ * InteractiveMode persists {@link StatusLineStartupData} (settings plus the
+ * resolved default role model and status inputs); the next launch renders it
+ * through the real {@link StatusLineComponent} as a fresh, unnamed session at
+ * the live terminal width. Path and git branch are read live; context usage is
+ * reported unknown so the gauge shows the window without a percent.
  *
  * @example
  * ```ts ignore
@@ -32,7 +32,7 @@ import type { StatusLineSettings } from "./types";
 export interface StatusLineStartupData {
 	readonly settings: StatusLineSettings;
 	readonly gitEnabled: boolean;
-	/** Model of the last session; the next fresh session usually starts on it too. */
+	/** Model resolved for the next fresh session's default role. */
 	readonly model?: Model;
 	readonly thinkingLevel?: ThinkingLevel;
 	readonly autoThinking: boolean;

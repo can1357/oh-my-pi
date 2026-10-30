@@ -314,6 +314,16 @@ pub enum ErrorKind {
 	#[error("cannot run external command '{0}' in virtual working directory {1}")]
 	ExternalCommandInVirtualWorkingDir(String, PathBuf),
 
+	/// An external command was started while the shell's working directory is
+	/// a read-only virtual directory; the child could write into it unchecked.
+	#[error("cannot run external command '{0}' in read-only working directory {1}")]
+	ExternalCommandInReadOnlyWorkingDir(String, PathBuf),
+
+	/// A virtual path handed to an external command could not be resolved to
+	/// the host file it aliases.
+	#[error("cannot resolve {0} for an external command: {1}")]
+	ExternalCommandVirtualPathUnresolved(PathBuf, #[source] std::io::Error),
+
 	/// An external command path resolves only through the virtual filesystem;
 	/// the operating system cannot execute it.
 	#[error("cannot execute virtual path as an external command: {0}")]
@@ -383,6 +393,8 @@ impl From<&ErrorKind> for results::ExecutionExitCode {
 			ErrorKind::TestCommandParseError(..) => Self::InvalidUsage,
 			ErrorKind::FailedToExecuteCommand(..)
 			| ErrorKind::ExternalCommandInVirtualWorkingDir(..)
+			| ErrorKind::ExternalCommandInReadOnlyWorkingDir(..)
+			| ErrorKind::ExternalCommandVirtualPathUnresolved(..)
 			| ErrorKind::ExternalCommandIsVirtual(..) => Self::CannotExecute,
 			ErrorKind::FunctionNameShadowsSpecialBuiltin { .. } => Self::InvalidUsage,
 			ErrorKind::IoError(io_err) => io_err.into(),

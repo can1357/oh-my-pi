@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
@@ -11,7 +11,7 @@ import {
 	isValidVersionForCache,
 	removeCachedPlugin,
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
-import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { isEnoent, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -128,6 +128,32 @@ describe("cachePlugin, isCached, removeCachedPlugin", () => {
 		await cachePlugin(sourcePath, cacheDir, "my-market", "my-plugin", "1.0.0");
 		expect(fs.existsSync(staleFile)).toBe(false);
 		expect(fs.existsSync(path.join(cacheDir, "my-market___my-plugin___1.0.0", "plugin.json"))).toBe(true);
+	});
+
+	it("re-caching the same version deletes the old copy only after the new one is at the cache path", async () => {
+		const sourcePath = await mkSourcePlugin(sourceDir, "my-plugin");
+		const cached = await cachePlugin(sourcePath, cacheDir, "my-market", "my-plugin", "1.0.0");
+		await fsp.writeFile(path.join(sourcePath, "plugin.json"), "rebuilt");
+		// A running session reads the cached plugin at any moment of a same-version reinstall.
+		const readAfterRemoval: string[] = [];
+		const rm = fsp.rm;
+		const rmSpy = spyOn(fsp, "rm").mockImplementation(async (target, options) => {
+			await rm(target, options);
+			try {
+				readAfterRemoval.push(await Bun.file(path.join(cached, "plugin.json")).text());
+			} catch (err) {
+				if (!isEnoent(err)) throw err;
+				readAfterRemoval.push("missing");
+			}
+		});
+		try {
+			await cachePlugin(sourcePath, cacheDir, "my-market", "my-plugin", "1.0.0");
+		} finally {
+			rmSpy.mockRestore();
+		}
+
+		expect(readAfterRemoval).toEqual(["rebuilt"]);
+		expect(fs.readdirSync(cacheDir)).toEqual(["my-market___my-plugin___1.0.0"]);
 	});
 
 	it("removeCachedPlugin deletes the directory", async () => {

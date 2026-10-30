@@ -3,6 +3,7 @@ import type { AuthCredential, OAuthCredential } from "./types";
 import type { CredentialPool } from "./pool";
 import type { Provider } from "../types";
 import type { UsageCredential, UsageProvider, UsageReport } from "../usage";
+import { isRecord } from "../utils";
 
 const USAGE_CACHE_PREFIX = "usage_cache:";
 const USAGE_FORCE_REFRESH_CACHE_PREFIX = "force-refresh:";
@@ -51,6 +52,17 @@ function withoutRawPayload(value: unknown): unknown {
 	if (value === null || typeof value !== "object" || !("raw" in value)) return value;
 	const { raw: _raw, ...rest } = value;
 	return rest;
+}
+
+/**
+ * End of a cached value's durable retention. A report is retained for 24h past
+ * its last successful fetch, so re-storing it as a failure fallback never
+ * extends that window; other values are retained for 24h from now.
+ */
+function retentionDeadline(value: unknown): number {
+	const fetchedAt = isRecord(value) ? value.fetchedAt : undefined;
+	const start = typeof fetchedAt === "number" && Number.isFinite(fetchedAt) && fetchedAt > 0 ? fetchedAt : Date.now();
+	return start + USAGE_LAST_GOOD_RETENTION_MS;
 }
 
 /** Convert a stored credential for usage providers; used by usage and health services. */
@@ -203,15 +215,19 @@ export class UsageCache {
 		return parseUsageCacheEntry<T>(raw);
 	}
 
+	/** Last successful report under `key` while inside its retention window; the failure-path fallback. */
+	lastGood(key: string): UsageReport | null {
+		const report = this.getStale<UsageReport | null>(key)?.value;
+		return report && Date.now() < retentionDeadline(report) ? report : null;
+	}
+
 	set<T>(key: string, entry: UsageCacheEntry<T>): void {
 		const value = withoutRawPayload(entry.value);
-		const payload = JSON.stringify({
-			value,
-			expiresAt: entry.expiresAt,
-		});
-		const durableExpiresAt =
-			value === null ? entry.expiresAt : Math.max(entry.expiresAt, Date.now() + USAGE_LAST_GOOD_RETENTION_MS);
-		this.#store.setCache(`${USAGE_CACHE_PREFIX}${key}`, payload, Math.floor(durableExpiresAt / 1000));
+		const deadline = value === null ? undefined : retentionDeadline(value);
+		// Failure cooldowns must not make a last-good report fresh beyond retention.
+		const expiresAt = deadline === undefined ? entry.expiresAt : Math.min(entry.expiresAt, deadline);
+		const payload = JSON.stringify({ value, expiresAt });
+		this.#store.setCache(`${USAGE_CACHE_PREFIX}${key}`, payload, Math.floor((deadline ?? expiresAt) / 1000));
 	}
 
 	deletePrefix(prefix: string): boolean {

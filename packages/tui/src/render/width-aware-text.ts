@@ -25,7 +25,6 @@ export class WidthAwareText implements Component {
 	#cachedContentWidth = -1;
 	#cachedText: string | undefined;
 	#ignoreTight = false;
-	#nativeCols = -1;
 	#native: NativeNode | undefined;
 
 	constructor(format: (contentWidth: number) => string, paddingX = 1, paddingY = 1) {
@@ -51,6 +50,11 @@ export class WidthAwareText implements Component {
 		this.#inner.invalidate();
 	}
 
+	/** The formatted text stays: the inner `Text` renders from it, so dropping it would free nothing. */
+	releaseRenderCaches(): void {
+		this.#inner.releaseRenderCaches();
+	}
+
 	/**
 	 * Re-run the formatter on the next render because its inputs changed.
 	 * Unlike {@link invalidate}, the inner `Text` keeps its wrap cache, so a
@@ -66,10 +70,12 @@ export class WidthAwareText implements Component {
 	 * (the only width a describer knows) and again on `reformat()`.
 	 */
 	describe(cx: DescribeContext): NativeNode {
-		if (this.#cachedText === undefined || cx.cols !== this.#nativeCols) {
-			this.#nativeCols = cx.cols;
-			this.#cachedContentWidth = -1;
-			this.#cachedText = this.#format(Math.max(1, cx.cols));
+		// Native describe emits no padding, so the formatter gets the full
+		// column budget — the same width a native Text.describe() would use.
+		const contentWidth = Math.max(1, cx.cols);
+		if (this.#cachedText === undefined || contentWidth !== this.#cachedContentWidth) {
+			this.#cachedContentWidth = contentWidth;
+			this.#cachedText = this.#format(contentWidth);
 			this.#inner.setText(this.#cachedText);
 		}
 		this.#native ??= col([this.#inner]);

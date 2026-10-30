@@ -8,41 +8,10 @@ if "__omp_prelude_loaded__" not in globals():
     from urllib.parse import unquote
 
 
-    # __omp_display is injected by runner.py before the prelude executes; it
-    # mirrors IPython's display() semantics with the same MIME bundle output.
-    _omp_display = __omp_display  # type: ignore[name-defined]
-
-    _PRESENTABLE_REPRS = (
-        "_repr_mimebundle_",
-        "_repr_html_",
-        "_repr_json_",
-        "_repr_markdown_",
-        "_repr_png_",
-        "_repr_jpeg_",
-        "_repr_svg_",
-        "_repr_latex_",
-    )
-
-    def display(value):
-        """Render a value. Falls back to a JSON+text/plain bundle for plain dict/list/tuple."""
-        if isinstance(value, dict) and value.get("type") == "image":
-            _omp_display(value)
-            return
-        if any(hasattr(value, attr) for attr in _PRESENTABLE_REPRS):
-            _omp_display(value)
-            return
-        if isinstance(value, (dict, list, tuple)):
-            try:
-                bundle = {"application/json": value, "text/plain": repr(value)}
-                _omp_display(bundle, raw=True)
-                return
-            except Exception:
-                pass
-        _omp_display(value)
-
-    def _emit_status(op: str, **data):
-        """Emit structured status event for TUI rendering."""
-        _omp_display({"application/x-omp-status": {"op": op, **data}}, raw=True)
+    # __omp_emit_status / __omp_emit_image are injected by runner.py before the
+    # prelude executes; they write `status` / `image` frames for the current cell.
+    _emit_status = __omp_emit_status  # type: ignore[name-defined]
+    _emit_image = __omp_emit_image  # type: ignore[name-defined]
 
     def env(key: str | None = None, value: str | None = None):
         """Get/set environment variables."""
@@ -59,6 +28,8 @@ if "__omp_prelude_loaded__" not in globals():
         return val
 
     _OMP_INTERNAL_URL_RE = re.compile(r"^([a-z][a-z0-9+.-]*)://(.*)$", re.IGNORECASE)
+    _OMP_ARTIFACT_ID_RE = re.compile(r"^\d+$")
+    _OMP_BARE_ARTIFACT_RE = re.compile(r"^artifact://\d+$", re.IGNORECASE)
 
     def _omp_url_roots() -> dict:
         """On-disk roots for internal-URL schemes, keyed by scheme (PI_EVAL_LOCAL_ROOTS)."""
@@ -69,11 +40,19 @@ if "__omp_prelude_loaded__" not in globals():
         return roots if isinstance(roots, dict) else {}
 
     def _should_delegate_read(path: str | Path) -> bool:
-        """Delegate `scheme://` reads to the read tool unless the scheme has an injected root."""
+        """Delegate `scheme://` reads to the read tool unless the scheme has an injected root.
+
+        `artifact://<id>` reads its file directly; selector forms
+        (`artifact://3:raw:5-9`) stay with the read tool, which parses them."""
         if not isinstance(path, str):
             return False
         match = _OMP_INTERNAL_URL_RE.match(path)
-        return match is not None and match.group(1).lower() not in _omp_url_roots()
+        if match is None:
+            return False
+        scheme = match.group(1).lower()
+        if scheme not in _omp_url_roots():
+            return True
+        return scheme == "artifact" and not _OMP_ARTIFACT_ID_RE.match(match.group(2))
 
     def _read_line_selector(offset: int, limit: int | None) -> str | None:
         if offset <= 1 and limit is None:
@@ -89,6 +68,28 @@ if "__omp_prelude_loaded__" not in globals():
             return result["text"]
         return result
 
+    def _artifact_file(path: str) -> Path | None:
+        """This session's file for `artifact://<id>` (`<id>.<tool>.log` in its
+        artifacts dir), or None when the id is not there or no dir is known."""
+        root = _omp_url_roots().get("artifact")
+        if not root:
+            return None
+        artifact_id = path[11:]
+        try:
+            names = os.listdir(root)
+        except FileNotFoundError:
+            return None
+        for name in names:
+            if name.startswith(f"{artifact_id}."):
+                return Path(os.path.join(os.path.abspath(root), name))
+        return None
+
+    def _read_through_tool(path: str, offset: int, limit: int | None) -> str:
+        if limit is not None and limit <= 0:
+            return ""
+        selector = _read_line_selector(offset, limit)
+        return _read_tool_text(path if selector is None else f"{path}:{selector}")
+
     def _resolve_omp_path(path: str | Path) -> Path:
         """Map a helper path to a real filesystem Path.
 
@@ -96,7 +97,8 @@ if "__omp_prelude_loaded__" not in globals():
         PI_EVAL_LOCAL_ROOTS) is rewritten under that root so it lands where
         `read scheme://…` resolves — not a literal `scheme:/` directory under
         the cwd (which `Path("scheme://x")` collapses to). Plain paths pass
-        through unchanged; any other `scheme://` is rejected."""
+        through unchanged; any other `scheme://` is rejected, as is
+        `artifact://`, whose root is a lookup dir for reads, not a path prefix."""
         if not isinstance(path, str):
             return Path(path)
         match = _OMP_INTERNAL_URL_RE.match(path)
@@ -104,7 +106,7 @@ if "__omp_prelude_loaded__" not in globals():
             return Path(path)
         scheme = match.group(1).lower()
         root = _omp_url_roots().get(scheme)
-        if not root:
+        if not root or scheme == "artifact":
             raise ValueError(f"Protocol paths are not supported by this helper: {path}")
         relative = unquote(match.group(2).replace("\\", "/"))
         # Mirror the host `path.resolve`/`resolveLocalUrlToPath`: normalize and
@@ -123,13 +125,25 @@ if "__omp_prelude_loaded__" not in globals():
 
     def read(path: str | Path, offset: int = 1, limit: int | None = None) -> str:
         """Read file or read-tool URI contents. offset/limit are 1-indexed lines."""
-        if _should_delegate_read(path):
+        if isinstance(path, str) and _OMP_BARE_ARTIFACT_RE.match(path):
             if limit is not None and limit <= 0:
                 return ""
-            selector = _read_line_selector(offset, limit)
-            tool_path = path if selector is None else f"{path}:{selector}"
-            return _read_tool_text(tool_path)
-        p = _resolve_omp_path(path)
+            p = _artifact_file(path)
+            if p is None:
+                # Another session's, or no artifacts dir was injected: the read tool searches every registered one.
+                # A bounded raw read locates the file without inlining it; a bare `:raw` read refuses files over 50 KB.
+                located = _bridge_call("read", {"path": f"{path}:raw:1-1"})
+                details = located.get("details") if isinstance(located, dict) else None
+                file_path = details.get("resolvedPath") if isinstance(details, dict) else None
+                if not isinstance(file_path, str):
+                    # An extension's replacement `read` may name no file: its own text for the selected lines is the answer.
+                    return _read_through_tool(f"{path}:raw", offset, limit)
+                # Once located, the file is read like this session's artifacts and plain paths: read() is no read-tool policy gate.
+                p = Path(file_path)
+        elif _should_delegate_read(path):
+            return _read_through_tool(path, offset, limit)
+        else:
+            p = _resolve_omp_path(path)
         data = p.read_text(encoding="utf-8")
         lines = data.splitlines(keepends=True)
         if offset > 1 or limit is not None:
@@ -466,21 +480,15 @@ if "__omp_prelude_loaded__" not in globals():
         images = value.get("images")
         if not isinstance(images, list) or not images:
             return value
-        displayed = 0
+        shown = 0
         for image in images:
-            if not isinstance(image, dict):
-                continue
-            data = image.get("data")
-            mime_type = image.get("mimeType")
-            if not isinstance(data, str) or not isinstance(mime_type, str):
-                continue
-            _omp_display({"application/x-omp-image": image}, raw=True)
-            displayed += 1
-        if displayed == 0:
+            if isinstance(image, dict) and isinstance(image.get("data"), str) and _emit_image(image):
+                shown += 1
+        if shown == 0:
             return value
         surfaced = {key: item for key, item in value.items() if key != "images"}
-        suffix = "" if displayed == 1 else "s"
-        surfaced["images"] = f"({displayed} image{suffix} displayed)"
+        suffix = "" if shown == 1 else "s"
+        surfaced["images"] = f"({shown} image{suffix} displayed)"
         return surfaced
 
     async def _omp_prelude(name: str, parameters):
@@ -851,12 +859,17 @@ if "__omp_prelude_loaded__" not in globals():
         if not isinstance(questions, dict):
             raise TypeError("judge(state, questions) expects questions as a dict keyed by id")
 
-    async def judge(state, questions):
-        """Answer typed questions over one ``state``; returns ``{id: answer}`` (choice/bool/score)."""
+    async def judge(state, questions, *, images=None):
+        """Answer typed questions over one ``state``; returns ``{id: answer}`` (choice/bool/score).
+
+        ``images`` is a list of local-path strings or embedded
+        ``{"type": "image", "data": ..., "mimeType": ...}`` attachments.
+        """
         _check_questions(questions)
-        result = await asyncio.to_thread(
-            _bridge_call, "__judge__", {"state": state, "questions": questions}
-        )
+        args = {"state": state, "questions": questions}
+        if images is not None:
+            args["images"] = images
+        result = await asyncio.to_thread(_bridge_call, "__judge__", args)
         if not isinstance(result, dict) or not isinstance(result.get("answers"), dict):
             raise RuntimeError("judge() did not return answers")
         return result["answers"]
@@ -953,6 +966,7 @@ if "__omp_prelude_loaded__" not in globals():
         states,
         questions,
         *,
+        images=None,
         concurrency=None,
         retries=None,
         min_ok=None,
@@ -963,6 +977,9 @@ if "__omp_prelude_loaded__" not in globals():
         ``states`` is ``{key: state}`` or a list (keys are indices). ``intent`` is an
         optional nonempty progress/job label. Item failures land in ``JudgmentItem.error``;
         only a run that dies wholesale raises from ``drain()``.
+
+        ``images`` optionally maps state keys to lists of local-path strings or embedded
+        ``{"type": "image", "data": ..., "mimeType": ...}`` attachments.
         """
         _check_questions(questions)
         if intent is not None and (
@@ -975,6 +992,16 @@ if "__omp_prelude_loaded__" not in globals():
             items = [{"key": index, "state": state} for index, state in enumerate(states)]
         else:
             raise TypeError("judge_batch(states, questions) expects states as a dict or list")
+        if images is not None:
+            if not isinstance(images, dict):
+                raise TypeError("judge_batch() images must be a dict keyed by input key")
+            item_keys = {item["key"] for item in items}
+            for key in images:
+                if key not in item_keys:
+                    raise ValueError(f"images contains unknown input key {json.dumps(key)}")
+            for item in items:
+                if item["key"] in images:
+                    item["images"] = images[item["key"]]
         args = {"op": "create", "items": items, "questions": questions}
         if concurrency is not None:
             args["concurrency"] = int(concurrency)

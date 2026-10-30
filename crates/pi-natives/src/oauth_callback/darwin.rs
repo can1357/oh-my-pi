@@ -439,7 +439,7 @@ fn valid_legacy_record(context: &Context, record: &LegacyRecoveryRecord) -> bool
 		return false;
 	};
 	is_safe_absolute_path(&record.app_path)
-		&& !relative.as_os_str().is_empty()
+		&& !relative.is_empty()
 		&& relative
 			.components()
 			.all(|component| matches!(component, Component::Normal(_)))

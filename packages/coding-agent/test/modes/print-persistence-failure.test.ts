@@ -77,6 +77,8 @@ function assistantSession(manager: SessionManager, dispose: () => Promise<void>)
 		sessionManager: manager,
 		getLastAssistantMessage: () => assistant(""),
 		prepareForHeadlessAdvisorDrain: () => {},
+		waitForIdle: async () => {},
+		disableStopTimeTodoReminders: () => {},
 		setTextOutputCommitted: () => {},
 		waitForAdvisorCatchup: async () => true,
 		dispose,
@@ -100,7 +102,9 @@ describe("headless persistence-failure surface", () => {
 			settings: Settings.isolated(),
 			sessionManager: manager,
 			getLastAssistantMessage: () => assistant(""),
+			disableStopTimeTodoReminders: () => {},
 			prepareForHeadlessAdvisorDrain: () => {},
+			waitForIdle: async () => {},
 			setTextOutputCommitted: () => {},
 			waitForAdvisorCatchup: async () => true,
 			prompt: async () => {
@@ -147,7 +151,9 @@ describe("headless persistence-failure surface", () => {
 			settings: Settings.isolated(),
 			sessionManager: manager,
 			getLastAssistantMessage: () => assistant(""),
+			disableStopTimeTodoReminders: () => {},
 			prepareForHeadlessAdvisorDrain: () => {},
+			waitForIdle: async () => {},
 			setTextOutputCommitted: () => {},
 			waitForAdvisorCatchup: async () => true,
 			prompt: async () => {
@@ -249,7 +255,9 @@ describe("headless persistence-failure surface", () => {
 				onPersistenceNotice: () => () => {},
 			},
 			getLastAssistantMessage: () => assistant(""),
+			disableStopTimeTodoReminders: () => {},
 			prepareForHeadlessAdvisorDrain: () => {},
+			waitForIdle: async () => {},
 			setTextOutputCommitted: () => {},
 			waitForAdvisorCatchup: async () => true,
 			prompt: async () => {
@@ -290,7 +298,9 @@ describe("headless persistence-failure surface", () => {
 			settings: Settings.isolated(),
 			sessionManager: manager,
 			getLastAssistantMessage: () => assistant(""),
+			disableStopTimeTodoReminders: () => {},
 			prepareForHeadlessAdvisorDrain: () => {},
+			waitForIdle: async () => {},
 			setTextOutputCommitted: () => {},
 			waitForAdvisorCatchup: async () => true,
 			prompt: async () => {

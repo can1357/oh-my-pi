@@ -25,6 +25,7 @@ const PROVIDER_LOADERS: ProviderRegistry<SearchEngineId> = {
 	tavily: () => import("./providers/tavily").then(m => new m.TavilyProvider()),
 	firecrawl: () => import("./providers/firecrawl").then(m => new m.FirecrawlProvider()),
 	brave: () => import("./providers/brave").then(m => new m.BraveProvider()),
+	deepseek: () => import("./providers/deepseek").then(m => new m.DeepSeekProvider()),
 	kimi: () => import("./providers/kimi").then(m => new m.KimiProvider()),
 	parallel: () => import("./providers/parallel").then(m => new m.ParallelProvider()),
 	synthetic: () => import("./providers/synthetic").then(m => new m.SyntheticProvider()),
@@ -58,6 +59,12 @@ function loadProvider(id: string, loader: ProviderLoader): Promise<SearchProvide
 	return instance;
 }
 
+/** One candidate that failed during a search, in attempt order. */
+export interface SearchProviderFailure {
+	provider: { id: string; label: string };
+	error: unknown;
+}
+
 /** Format one provider failure for the user-facing fallback summary. */
 export function formatSearchProviderFailure(error: unknown, provider: { id: string; label: string }): string {
 	if (error instanceof SearchProviderError) {
@@ -77,9 +84,7 @@ export function formatSearchProviderFailure(error: unknown, provider: { id: stri
 }
 
 /** Format the ordered provider fallback failures for terminal/tool output. */
-export function formatSearchProviderFailures(
-	failures: readonly { provider: { id: string; label: string }; error: unknown }[],
-): string {
+export function formatSearchProviderFailures(failures: readonly SearchProviderFailure[]): string {
 	return failures.map(f => `${f.provider.id}: ${formatSearchProviderFailure(f.error, f.provider)}`).join("; ");
 }
 

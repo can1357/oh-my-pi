@@ -821,7 +821,7 @@ impl Object<'_> {
     }
   }
 
-  fn get_inner(&self, field: &str) -> Result<Option<sys::napi_value>> {
+  pub(crate) fn get_inner(&self, field: &str) -> Result<Option<sys::napi_value>> {
     unsafe {
       let mut property_key = std::ptr::null_mut();
       check_status!(

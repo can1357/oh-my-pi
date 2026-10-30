@@ -39,6 +39,21 @@ function fixtureConfig(): MCPStdioServerConfig {
 	return { type: "stdio", command: process.execPath, args: [FIXTURE_PATH] };
 }
 
+/**
+ * `connectServers` returns once its startup window (250 ms) closes, leaving a
+ * slower handshake to register its tools in the background. A CPU-starved
+ * runner routinely spawns the fixture past that window, so wait for both
+ * servers' initial tools before exercising ownership.
+ */
+async function connectBoth(manager: MCPManager): Promise<void> {
+	await manager.connectServers({ [SHORT_SERVER]: fixtureConfig(), [COLON_SERVER]: fixtureConfig() }, {});
+	expect(await manager.waitForStartup(0)).toEqual({
+		connected: [SHORT_SERVER, COLON_SERVER],
+		pending: [],
+		failed: [],
+	});
+}
+
 describe("MCP tool ownership with prefix-colliding server names", () => {
 	let workDir: string;
 	let manager: MCPManager;
@@ -54,7 +69,7 @@ describe("MCP tool ownership with prefix-colliding server names", () => {
 	});
 
 	it("refreshing one server keeps the sibling server's tools registered", async () => {
-		await manager.connectServers({ [SHORT_SERVER]: fixtureConfig(), [COLON_SERVER]: fixtureConfig() }, {});
+		await connectBoth(manager);
 		const names = () => manager.getTools().map(t => t.name);
 		expect(names()).toContain(SHORT_TOOL);
 		expect(names()).toContain(COLON_TOOL);
@@ -80,7 +95,7 @@ describe("MCP tool ownership with prefix-colliding server names", () => {
 	}, 20_000);
 
 	it("disconnecting a server with sanitized name characters removes exactly its tools", async () => {
-		await manager.connectServers({ [SHORT_SERVER]: fixtureConfig(), [COLON_SERVER]: fixtureConfig() }, {});
+		await connectBoth(manager);
 		const payloads: string[][] = [];
 		manager.setOnToolsChanged(tools => {
 			payloads.push(tools.map(t => t.name));

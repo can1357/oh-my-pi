@@ -436,13 +436,11 @@ impl AxBackend for AtSpiAx {
 				let builder = atspi::proxy::text::TextProxy::builder(self.connection.connection())
 					.destination(name)
 					.and_then(|builder| builder.path(object.path().clone()));
-				if let Ok(builder) = builder {
-					if let Ok(text) = builder.build().await {
-						let count = text.character_count().await.unwrap_or(0).min(16_384);
-						text.get_text(0, count).await.ok().filter(|s| !s.is_empty())
-					} else {
-						None
-					}
+				if let Ok(builder) = builder
+					&& let Ok(text) = builder.build().await
+				{
+					let count = text.character_count().await.unwrap_or(0).min(16_384);
+					text.get_text(0, count).await.ok().filter(|s| !s.is_empty())
 				} else {
 					None
 				}
@@ -491,6 +489,8 @@ impl AxBackend for AtSpiAx {
 				bounds,
 				actions,
 				child_count,
+				identity: None,
+				partial: false,
 			})
 		})
 	}
@@ -557,15 +557,11 @@ impl AxBackend for AtSpiAx {
 			let index = index.ok_or_else(|| {
 				DesktopError::ax_failed(format!("AT-SPI action '{action}' is unavailable"))
 			})? as i32;
-			if proxy
+			proxy
 				.do_action(index)
 				.await
 				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI action: {err}")))?
-			{
-				Ok(())
-			} else {
-				Err(DesktopError::ax_failed(format!("AT-SPI action '{action}' failed")))
-			}
+				.ok_or_else(|| DesktopError::ax_failed(format!("AT-SPI action '{action}' failed")))
 		})
 	}
 
@@ -595,15 +591,11 @@ impl AxBackend for AtSpiAx {
 				.await;
 				let editable = editable
 					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI editable text: {err}")))?;
-				return if editable
+				return editable
 					.set_text_contents(value)
 					.await
 					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI text value: {err}")))?
-				{
-					Ok(())
-				} else {
-					Err(DesktopError::ax_failed("AT-SPI text value was rejected"))
-				};
+					.ok_or_else(|| DesktopError::ax_failed("AT-SPI text value was rejected"));
 			}
 			if !interfaces.contains(atspi::Interface::Value) {
 				return Err(DesktopError::ax_failed("AT-SPI element has no writable value interface"));
@@ -634,15 +626,11 @@ impl AxBackend for AtSpiAx {
 			let component = Self::component(&self.connection, &object)
 				.await
 				.map_err(DesktopError::ax_failed)?;
-			if component
+			component
 				.grab_focus()
 				.await
 				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI focus: {err}")))?
-			{
-				Ok(())
-			} else {
-				Err(DesktopError::ax_failed("AT-SPI focus request was rejected"))
-			}
+				.ok_or_else(|| DesktopError::ax_failed("AT-SPI focus request was rejected"))
 		})
 	}
 

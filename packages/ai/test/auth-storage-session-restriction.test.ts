@@ -128,6 +128,20 @@ describe("AuthStorage session account restrictions", () => {
 		expect(allowedKeys).toContain((await storage.keys.get(PROVIDER, "session")) ?? "");
 	});
 
+	test("permits only allowed accounts for a restricted session", async () => {
+		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+		const [accountA, accountB] = storage.oauth.accounts(PROVIDER);
+		if (!accountA || !accountB) throw new Error("expected stored accounts");
+		const lease = storage.sessions.restrict(PROVIDER, "session", ["account:acc-a"]);
+
+		expect(storage.sessions.permits(PROVIDER, "session", accountA.credentialId)).toBe(true);
+		expect(storage.sessions.permits(PROVIDER, "session", accountB.credentialId)).toBe(false);
+		expect(storage.sessions.permits(PROVIDER, "unrestricted", accountB.credentialId)).toBe(true);
+
+		storage.sessions.unrestrict(PROVIDER, "session", lease);
+		expect(storage.sessions.permits(PROVIDER, "session", accountB.credentialId)).toBe(true);
+	});
+
 	test("keeps restrictions across a credential store replacement", async () => {
 		storage.sessions.restrict(PROVIDER, "session", ["account:acc-b"]);
 		const replacement = await SqliteAuthCredentialStore.open(path.join(tempDir, "replacement.db"));

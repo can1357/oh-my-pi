@@ -7,7 +7,6 @@
  */
 import type { TspPickerGroup, TspPickerItem, TspProps, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import type { Component } from "../../tui";
-import { formatKeyHint } from "../../app-keybindings";
 import { node, span, stableKey } from "../../native/describe";
 import type { NativeNode } from "../../native/node";
 import { pickerFuzzyHits, pickerQuery } from "../../native/picker";
@@ -499,11 +498,10 @@ export class ExtensionList implements Component {
 					]
 				: undefined,
 			facts: { kind: this.#getKindLabel(ext.kind) },
-			disabled: effectivelyDisabled
-				? masterDisabled
-					? "Provider disabled"
-					: `Disabled · ${formatKeyHint("space")} to enable`
-				: undefined,
+			// Only a disabled provider makes the row inert. An extension switched
+			// off by its own toggle must stay activatable, or the click/dblclick
+			// that turned it off could never turn it back on.
+			disabled: masterDisabled ? "Provider disabled" : undefined,
 		};
 	}
 

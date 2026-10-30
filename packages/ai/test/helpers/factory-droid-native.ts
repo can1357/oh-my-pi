@@ -10,6 +10,14 @@ export interface NativeCase {
 	model: string;
 	upstream: string;
 	effort: string;
+	/**
+	 * Resume a session whose tool round trip ran at this effort, so the one
+	 * recorded request replays a thinking-led history (projected as
+	 * `<history-thinking>`) instead of opening a fresh conversation.
+	 */
+	prime?: string;
+	/** Feature flag the capture forces on when the account is not yet entitled to the model. */
+	flag?: string;
 }
 
 /** Dialect-relevant slice of one inference request. */
@@ -20,7 +28,10 @@ export interface NativeRequest {
 }
 
 export interface NativeCapture extends NativeCase {
-	/** The opening request, then the follow-up that carries the tool result. */
+	/**
+	 * The opening request, then the follow-up that carries the tool result; a
+	 * `prime` case records only the resumed request.
+	 */
 	requests: NativeRequest[];
 }
 
@@ -41,6 +52,7 @@ export const NATIVE_CASES: readonly NativeCase[] = [
 	{ model: "glm-5.3", upstream: "baseten", effort: "high" },
 	{ model: "mistral-medium-3.5", upstream: "mistral", effort: "high" },
 	{ model: "mistral-medium-3.5", upstream: "mistral", effort: "off" },
+	{ model: "mistral-large-4", upstream: "mistral", effort: "high", flag: "mistral_large_4" },
 	{ model: "minimax-m3", upstream: "fireworks", effort: "high" },
 	{ model: "qwen3.8-max", upstream: "fireworks", effort: "xhigh" },
 	{ model: "inkling", upstream: "fireworks", effort: "medium" },
@@ -52,6 +64,8 @@ export const NATIVE_CASES: readonly NativeCase[] = [
 	{ model: "gpt-5.6-terra", upstream: "bedrock_openai", effort: "none" },
 	{ model: "gpt-5.6-sol-fast", upstream: "openai", effort: "medium" },
 	{ model: "gpt-5.2", upstream: "openai", effort: "off" },
+	{ model: "gpt-5.2", upstream: "azure_openai", effort: "off" },
+	{ model: "gpt-5.6-sol", upstream: "azure_openai", effort: "none" },
 	{ model: "gpt-6-sol", upstream: "openai", effort: "max" },
 	{ model: "grok-4.7", upstream: "xai", effort: "high" },
 	// Anthropic Messages dialects.
@@ -63,8 +77,22 @@ export const NATIVE_CASES: readonly NativeCase[] = [
 	{ model: "claude-opus-4-6", upstream: "anthropic", effort: "max" },
 	{ model: "claude-opus-4-8", upstream: "vertex_anthropic", effort: "high" },
 	{ model: "claude-opus-4-8", upstream: "anthropic", effort: "off" },
+	{ model: "claude-opus-4-8", upstream: "anthropic", effort: "off", prime: "high" },
 	{ model: "claude-opus-4-8", upstream: "azure_anthropic", effort: "high" },
 	{ model: "claude-opus-5", upstream: "snowflake", effort: "off" },
+	{ model: "claude-sonnet-5-5", upstream: "anthropic", effort: "off" },
+	{ model: "claude-sonnet-5-5", upstream: "bedrock_anthropic", effort: "off" },
+	{ model: "claude-opus-5-5", upstream: "azure_anthropic", effort: "high" },
+	// Not capturable from droid 0.237 on the capture account, so unit tests own
+	// them (factory-droid-anthropic.test.ts):
+	// - claude-sonnet-5-5@vertex_anthropic off: "Requested model was not found
+	//   on the API provider"; bedrock covers the effort beta on gated routes.
+	// - claude-haiku-5-5 (any upstream): Factory answers 400 "Invalid model ID"
+	//   even with `claude_haiku_5_5` forced on; the account is not entitled.
+	// - claude-sonnet-5-5@azure_anthropic: "Requested model was not found on the
+	//   API provider"; opus-5-5 covers the Azure prefix-binding dialect.
+	// - claude-opus-5@snowflake off after high: Snowflake replays no thinking
+	//   from the high round trip, so no thinking-led history exists to strip.
 	{ model: "claude-fable-5", upstream: "anthropic", effort: "high" },
 	{ model: "claude-opus-5-5-fast", upstream: "anthropic", effort: "high" },
 	{ model: "minimax-m2.7", upstream: "fireworks", effort: "high" },
@@ -148,15 +176,30 @@ function toolDialectKeys(tools: unknown): string[] | undefined {
 	return [...keys].sort();
 }
 
+/** Whether any replayed assistant turn still carries a thinking block. */
+function historyHasThinking(messages: unknown): boolean {
+	if (!Array.isArray(messages)) return false;
+	return messages.some(
+		message =>
+			message?.role === "assistant" &&
+			Array.isArray(message.content) &&
+			message.content.some(
+				(block: { type?: unknown }) => block?.type === "thinking" || block?.type === "redacted_thinking",
+			),
+	);
+}
+
 /**
  * Project one request onto its dialect: drops conversation content and
  * client-owned features, masks per-session values, and reduces tools to their
- * per-tool dialect keys.
+ * per-tool dialect keys. With `history`, it keeps one conversation fact: whether
+ * replayed assistant turns still carry thinking.
  */
 export function projectNativeRequest(
 	path: string,
 	headers: Record<string, string>,
 	body: Record<string, unknown>,
+	options: { history?: boolean } = {},
 ): NativeRequest {
 	const projectedHeaders: Record<string, string> = {};
 	for (const [key, value] of Object.entries(headers)) {
@@ -180,5 +223,6 @@ export function projectNativeRequest(
 	}
 	const toolKeys = toolDialectKeys(body.tools);
 	if (toolKeys) projectedBody["<tool-keys>"] = toolKeys;
+	if (options.history) projectedBody["<history-thinking>"] = historyHasThinking(body.messages);
 	return { path, headers: projectedHeaders, body: projectedBody };
 }

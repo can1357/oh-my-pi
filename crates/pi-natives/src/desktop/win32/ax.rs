@@ -64,6 +64,12 @@ impl Win32Ax {
 		}
 	}
 
+	/// The control window `handle` is itself, such as a classic edit box's;
+	/// `None` for a windowless element drawn inside a parent's window.
+	pub(super) fn own_window(handle: &AxHandle) -> CoreResult<Option<HWND>> {
+		Ok(native_window(Self::element(handle)?))
+	}
+
 	fn walker(&mut self) -> CoreResult<uiautomation::UITreeWalker> {
 		self.automation()?.get_raw_view_walker().map_err(ax_error)
 	}
@@ -389,6 +395,8 @@ impl AxBackend for Win32Ax {
 			bounds,
 			actions: actions(element),
 			child_count,
+			identity: None,
+			partial: false,
 		})
 	}
 

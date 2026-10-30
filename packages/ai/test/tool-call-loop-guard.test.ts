@@ -301,14 +301,75 @@ describe("ToolCallLoopGuard multi-call turns", () => {
 		expect(guard.recordTurn(turn(batch()))).toBeNull();
 	});
 
-	test("resets when every call in a multi-call turn is exempt", () => {
-		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: ["read"] });
-		const batch = () => [toolCall("bash", { command: "echo a" }), toolCall("read", { path: "a.ts" })];
-		expect(guard.recordTurn(turn(batch()))).toBeNull();
-		expect(
-			guard.recordTurn(turn([toolCall("read", { path: "x.ts" }), toolCall("read", { path: "y.ts" })])),
-		).toBeNull();
-		expect(guard.recordTurn(turn(batch()))).toBeNull();
+	/** An exempt `wait` turn; `useless` marks a wait that elapsed with nothing new. */
+	function waitTurn(text: string, useless: boolean) {
+		const call = toolCall("wait", {});
+		return turn(
+			[call],
+			[
+				{
+					role: "toolResult",
+					toolCallId: call.id,
+					toolName: "wait",
+					content: [{ type: "text", text }],
+					isError: false,
+					...(useless ? { useless: true } : {}),
+					timestamp: Date.now(),
+				},
+			],
+		);
+	}
+
+	test("keeps counting across an idle exempt poll between identical turns", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: ["wait"] });
+		const pytest = () => turn([toolCall("bash", { command: "pytest" })]);
+		expect(guard.recordTurn(pytest())).toBeNull();
+		// The wait elapsed with nothing new, so it does not hide the loop.
+		expect(guard.recordTurn(waitTurn("Wait limit reached.", true))).toBeNull();
+		expect(guard.recordTurn(pytest())).toMatchObject({ toolName: "bash", count: 2 });
+	});
+
+	test("resets after an exempt poll that returned something, even repeated text", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: ["wait"] });
+		const pytest = () => turn([toolCall("bash", { command: "pytest" })]);
+		expect(guard.recordTurn(pytest())).toBeNull();
+		// A finished service may have changed what the rerun sees.
+		expect(guard.recordTurn(waitTurn("A service finished.", false))).toBeNull();
+		expect(guard.recordTurn(pytest())).toBeNull();
+		expect(guard.recordTurn(waitTurn("A service finished.", false))).toBeNull();
+		expect(guard.recordTurn(pytest())).toBeNull();
+	});
+
+	test("resets after an idle exempt poll that arrived with injected context", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: ["wait"] });
+		const pytest = () => turn([toolCall("bash", { command: "pytest" })]);
+		expect(guard.recordTurn(pytest())).toBeNull();
+		// An extension attached context to the timed-out wait: the rerun may see something new.
+		expect(guard.recordTurn({ ...waitTurn("Wait limit reached.", true), injectedContext: true })).toBeNull();
+		expect(guard.recordTurn(pytest())).toBeNull();
+	});
+
+	test("resets after an exempt call that failed", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: ["grep"] });
+		const pytest = () => turn([toolCall("bash", { command: "pytest" })]);
+		const call = toolCall("grep", { pattern: "x" });
+		const failedGrep = turn(
+			[call],
+			[
+				{
+					role: "toolResult",
+					toolCallId: call.id,
+					toolName: "grep",
+					content: [{ type: "text", text: "Invalid regex." }],
+					isError: true,
+					timestamp: Date.now(),
+				},
+			],
+		);
+		expect(guard.recordTurn(pytest())).toBeNull();
+		// Only a result its tool flagged useless is an idle poll; a failure may follow real work.
+		expect(guard.recordTurn(failedGrep)).toBeNull();
+		expect(guard.recordTurn(pytest())).toBeNull();
 	});
 
 	test("counts a mixed batch and reports the first non-exempt call", () => {
