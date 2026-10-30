@@ -1,6 +1,7 @@
 Starts persistent conversational coding-agent worker session (edit, bash, grep, everything).
 
 CLI flavor by task:
+
 - `fast`: low-latency model; mechanical, well-specified work (renames, boilerplate, running tests, data collection).
 - `good`: strong model; hard work (design, debugging, multi-file changes, judgment calls).
 

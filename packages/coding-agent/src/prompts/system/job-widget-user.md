@@ -44,19 +44,24 @@ Its current stage: {{stage}}
 {{#if previous}}
 
 A spec is already in place, but {{previous.reason}}. Write a replacement that matches the lines above:
+
 ```json
 {{previous.spec}}
 ```
+
 {{/if}}
 {{#if rejected}}
 
 Your previous answer was rejected:
+
 ```json
 {{rejected.answer}}
 ```
+
 Problems:
 {{#each rejected.errors}}
+
 - {{this}}
-{{/each}}
-Fix every problem and call `respond` again.
-{{/if}}
+  {{/each}}
+  Fix every problem and call `respond` again.
+  {{/if}}

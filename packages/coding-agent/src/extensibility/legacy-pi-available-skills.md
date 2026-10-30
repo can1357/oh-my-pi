@@ -4,10 +4,10 @@ When a skill file references a relative path, resolve it against the skill direc
 
 <available_skills>
 {{#each skills}}
-  <skill>
-    <name>{{name}}</name>
-    <description>{{description}}</description>
-    <location>{{location}}</location>
-  </skill>
+<skill>
+<name>{{name}}</name>
+<description>{{description}}</description>
+<location>{{location}}</location>
+</skill>
 {{/each}}
 </available_skills>

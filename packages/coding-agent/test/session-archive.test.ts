@@ -6,7 +6,11 @@ import { gzipSync } from "node:zlib";
 import { type GcResult, runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
 import { resolveSessionFileArg } from "@oh-my-pi/pi-coding-agent/cli/session-arg";
 import { exportFromFile } from "@oh-my-pi/pi-coding-agent/export/html";
-import { type RestoredSession, restoreArchivedSession } from "@oh-my-pi/pi-coding-agent/session/session-archive";
+import {
+	getArchivedSessionsDir,
+	type RestoredSession,
+	restoreArchivedSession,
+} from "@oh-my-pi/pi-coding-agent/session/session-archive";
 import { withGcLock } from "@oh-my-pi/pi-coding-agent/session/gc-lock";
 import { resolveResumableSession, resolveResumeTarget } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -1602,4 +1606,157 @@ test("a staging name left linked to an archived file does not damage it", async 
 	}
 
 	expect(await Bun.file(archived).text()).toBe("ARCHIVED CONTENT");
+});
+
+test("a restore refuses while a process owns the session under a name of its own", async () => {
+	// A transcript archiving accepts under any filename: the id lives in the
+	// header, and the writer leases that, not the name.
+	const custom = path.join(getSessionsDir(root), "--work--", "my-session.jsonl");
+	await Bun.write(custom, sessionBody(SESSION_ID, PROMPT, root));
+	await fs.rm(sessionFile, { force: true });
+	const old = new Date(Date.now() - 30 * 86_400_000);
+	await fs.utimes(custom, old, old);
+	expect((await archiveEverything()).archive?.archived).toBe(1);
+	const archived = path.join(getArchivedSessionsDir(root), "--work--", "my-session.jsonl.gz");
+	expect(await Bun.file(archived).exists()).toBe(true);
+
+	const lease = tryAcquireSessionLease(SESSION_ID);
+	expect(lease).not.toBeNull();
+	try {
+		await expect(restoreArchivedSession(archived, root)).rejects.toThrow("owns this session");
+	} finally {
+		lease?.release();
+	}
+
+	expect(await Bun.file(archived).exists()).toBe(true);
+	expect(await Bun.file(custom).exists()).toBe(false);
+});
+
+test("a restore refuses while a process owns a subagent session below it", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	const childId = "01a18630-42ae-7117-ba7c-029b1eee0f4c";
+	// Named `.log`, because a name says nothing: the header is what the owner
+	// leases and what archiving reads.
+	await Bun.write(path.join(liveArtifacts, "child.log"), sessionBody(childId, "UNIQUE ORIGINAL", root));
+	await archiveEverything();
+
+	const lease = tryAcquireSessionLease(childId);
+	expect(lease).not.toBeNull();
+	try {
+		await expect(restoreArchivedSession(archiveFile, root)).rejects.toThrow("subagent sessions");
+	} finally {
+		lease?.release();
+	}
+
+	expect(await Bun.file(path.join(archivedArtifacts, "child.log")).text()).toContain("UNIQUE ORIGINAL");
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("an archived name that only points into the live tree is not a surviving copy", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "CONTENT");
+	await Bun.write(path.join(liveArtifacts, "b.log"), "CONTENT");
+	// The archive's `a` is a link into the live tree. It reads the same bytes
+	// as the live `a`, and holds none of its own.
+	await fs.mkdir(archivedArtifacts, { recursive: true });
+	await fs.symlink(path.join(liveArtifacts, "b.log"), path.join(archivedArtifacts, "a.log"));
+
+	const result = await archiveEverything();
+
+	expect(result.archive?.archived).toBe(0);
+	expect(await Bun.file(path.join(liveArtifacts, "a.log")).text()).toBe("CONTENT");
+	expect(await Bun.file(path.join(liveArtifacts, "b.log")).text()).toBe("CONTENT");
+});
+
+test("a migrated transcript whose entry names point at nothing is refused", async () => {
+	const artifacts = sessionFile.slice(0, -".jsonl".length);
+	const header = { type: "session", version: 1, id: SESSION_ID, timestamp: "2026-01-01T00:00:00.000Z", cwd: root };
+	const user = (content: string) => JSON.stringify({ type: "message", message: { role: "user", content } });
+	const assistant = JSON.stringify({ type: "message", message: { role: "assistant", content: [] } });
+	await Bun.write(sessionFile, `${JSON.stringify(header)}\n${user("FIRST")}\n${user("MIDDLE")}\n${assistant}\n`);
+	await Bun.write(path.join(artifacts, "sub.jsonl"), "UNRESTORED-CHILD\n");
+	await archiveEverything();
+	// Every record is still there, and the names are strings — but the first
+	// names nothing and the second's parent points at nothing, so the history
+	// the session would rebuild starts at MIDDLE.
+	await Bun.write(
+		sessionFile,
+		`${JSON.stringify({ ...header, version: 3 })}\n${JSON.stringify({
+			type: "message",
+			id: "",
+			parentId: null,
+			message: { role: "user", content: "FIRST" },
+		})}\n${JSON.stringify({
+			type: "message",
+			id: "m2",
+			parentId: "",
+			message: { role: "user", content: "MIDDLE" },
+		})}\n${JSON.stringify({ type: "message", id: "a2", parentId: "m2", message: { role: "assistant", content: [] } })}\n`,
+	);
+
+	await expect(restoreArchivedSession(archiveFile, root)).rejects.toThrow("different session file");
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("a restore does not write through a staging name left on real data", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "ONLY ARCHIVED COPY");
+	await archiveEverything();
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	const movedAside = path.join(root, "moved-aside.log");
+
+	// What a crashed publication leaves: the staging name still on the file it
+	// published, with the destination moved elsewhere. The guard that takes
+	// that name off its data is the one thing between the restore and emptying
+	// the moved-aside copy, so the collision is forced where the guard runs.
+	const realRm = fs.rm;
+	const rm = spyOn(fs, "rm").mockImplementation(async (target, options) => {
+		const staged = String(target);
+		if (staged.startsWith(liveArtifacts) && staged.endsWith(".tmp") && !(await Bun.file(staged).exists())) {
+			await Bun.write(movedAside, "SOMEONE ELSE'S DATA");
+			await fs.link(movedAside, staged);
+		}
+		return await realRm(target, options);
+	});
+	try {
+		await restoreArchivedSession(archiveFile, root);
+	} finally {
+		rm.mockRestore();
+	}
+
+	expect(await Bun.file(movedAside).text()).toBe("SOMEONE ELSE'S DATA");
+});
+
+test("a failed archive leaves no empty directory behind its own staging residue", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	await Bun.write(path.join(liveArtifacts, "z.log"), "SECOND");
+
+	// The stage for the second file cannot be removed, and the run then fails.
+	const realRm = fs.rm;
+	let blocked = true;
+	const rm = spyOn(fs, "rm").mockImplementation(async (target, options) => {
+		if (blocked && String(target).endsWith(".tmp") && String(target).includes("z.log")) {
+			blocked = false;
+			throw Object.assign(new Error("EIO: injected"), { code: "EIO" });
+		}
+		return await realRm(target, options);
+	});
+	const realCopyFile = fs.copyFile;
+	const copyFile = spyOn(fs, "copyFile").mockImplementation(async (source, destination, mode) => {
+		if (String(source).endsWith("z.log")) throw Object.assign(new Error("ENOSPC"), { code: "ENOSPC" });
+		return await realCopyFile(source, destination, mode);
+	});
+	try {
+		await archiveEverything();
+	} finally {
+		copyFile.mockRestore();
+		rm.mockRestore();
+	}
+
+	expect(await Bun.file(archivedArtifacts).exists()).toBe(false);
+	expect(await fs.readdir(archivedArtifacts).catch(() => undefined)).toBeUndefined();
 });

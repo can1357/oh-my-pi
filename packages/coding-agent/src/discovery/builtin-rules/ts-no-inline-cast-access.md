@@ -3,9 +3,9 @@ description: "Don't assert an inline object type and immediately read a property
 scope: "tool:edit(*.{ts,tsx,mts,cts}), tool:write(*.{ts,tsx,mts,cts})"
 interruptMode: never
 astCondition:
-  - "($X as { $$$BODY }).$PROP"
-  - "($X as { $$$BODY })?.$PROP"
-  - "($X as { $$$BODY })[$IDX]"
+   - "($X as { $$$BODY }).$PROP"
+   - "($X as { $$$BODY })?.$PROP"
+   - "($X as { $$$BODY })[$IDX]"
 ---
 
 ## Don't inline-cast an object type for member access

@@ -1085,6 +1085,28 @@ interface ArchiveCopyState {
 	created: ArchiveCreation[];
 }
 
+/**
+ * Whether the archive's entry at `destination` is a copy that outlives the
+ * live tree being removed.
+ *
+ * Holding the same bytes is not the same as being a second copy of them. An
+ * archived name that is a link into the live tree reads identical to the
+ * live file it points at, and the moment that tree goes the archive holds a
+ * dangling name and the artifact exists nowhere. The entry must be a file in
+ * its own right, resolving outside the tree this run is about to delete.
+ */
+async function survivesSourceRemoval(destination: string, sourceRoot: string): Promise<boolean> {
+	const entry = await fs.lstat(destination).catch(() => undefined);
+	if (!entry?.isFile()) return false;
+	const [real, root] = await Promise.all([
+		fs.realpath(destination).catch(() => undefined),
+		fs.realpath(sourceRoot).catch(() => sourceRoot),
+	]);
+	if (real === undefined) return false;
+	const relative = path.relative(root, real);
+	return relative !== "" && (relative.startsWith("..") || path.isAbsolute(relative));
+}
+
 /** Remember an entry this copy made, by the entry and not by its name. */
 async function noteCreation(target: string, state: ArchiveCopyState): Promise<void> {
 	const made = await statIfPresent(target);
@@ -1119,6 +1141,7 @@ async function publishArtifactIntoArchive(
 	source: string,
 	sourceStat: Stats,
 	destination: string,
+	sourceRoot: string,
 	state: ArchiveCopyState,
 ): Promise<void> {
 	const tempPath = sessionStagingPath(destination);
@@ -1149,18 +1172,23 @@ async function publishArtifactIntoArchive(
 			if (
 				verified.isFile() &&
 				verified.size === (await fs.stat(tempPath)).size &&
+				(await survivesSourceRemoval(destination, sourceRoot)) &&
 				(await archivedHandleIsHeldBy(archived, verified, tempPath))
 			) {
-				// The archive already holds exactly this. Nothing to write.
+				// The archive already holds exactly this, in a file of its own.
+				// Nothing to write.
 				return;
 			}
 		} finally {
 			await archived.close();
 		}
+		const stem = path.basename(sourceRoot);
 		throw new Error(
 			`the archive already holds ${destination}, and it is not what archiving ${source} would write; ` +
-				`the archive is left as it is. Bring the session home first (\`omp gc --restore\`) and archive it again, ` +
-				`or move one of the two copies aside`,
+				`the archive is left as it is. Bring the session home with ` +
+				`\`omp gc --restore ${stem.slice(stem.lastIndexOf("_") + 1) || stem} --apply\` ` +
+				`— add \`--agent-dir <dir>\` when it is not the default one — and archive it again, ` +
+				`or move one of the two copies aside. Without \`--apply\`, \`--restore\` reports what it would do and changes nothing.`,
 		);
 	} finally {
 		await fs.rm(tempPath, { force: true });
@@ -1177,6 +1205,7 @@ async function publishArtifactIntoArchive(
 async function copyArtifactEntryIntoArchive(
 	source: string,
 	destination: string,
+	sourceRoot: string,
 	state: ArchiveCopyState,
 ): Promise<void> {
 	const stat = await fs.stat(source).catch(error => {
@@ -1208,17 +1237,17 @@ async function copyArtifactEntryIntoArchive(
 		}
 		// Sorted, so a run that fails part-way is reproducible from its report.
 		for (const entry of (await fs.readdir(source)).sort()) {
-			await copyArtifactEntryIntoArchive(path.join(source, entry), path.join(destination, entry), state);
+			await copyArtifactEntryIntoArchive(path.join(source, entry), path.join(destination, entry), sourceRoot, state);
 		}
 		return;
 	}
 	if (!stat.isFile()) return;
-	await publishArtifactIntoArchive(source, stat, destination, state);
+	await publishArtifactIntoArchive(source, stat, destination, sourceRoot, state);
 }
 
 /**
  * Undo one failed copy into the archive, and nothing more.
-
+ *
  * What goes is what this copy made, and only while the name still holds what
  * it made. A pathname is not ownership in either direction: a file somebody
  * created at a destination the copy refused to replace must not be removed
@@ -1227,16 +1256,25 @@ async function copyArtifactEntryIntoArchive(
  * The entry is identified by `dev`/`ino`, so an entry that was replaced
  * since is left alone. Deepest first, so a directory is empty when its turn
  * comes.
+ *
+ * A directory this copy made can still be holding its own staging residue —
+ * a temp whose removal failed — so that is cleared first. Residue is this
+ * run's to clear; anything else in there is not, and keeps the directory.
  */
 async function removeTreeAdditions(created: readonly ArchiveCreation[]): Promise<void> {
 	for (const made of [...created].reverse()) {
 		const standing = await fs.lstat(made.path).catch(() => undefined);
 		if (!standing || standing.dev !== made.dev || standing.ino !== made.ino) continue;
-		// A directory goes only when it is empty: something else may have put a
-		// file in it since, and that file is not this run's to remove.
-		await fs.unlink(made.path).catch(async () => {
+		if (standing.isDirectory()) {
+			for (const entry of await fs.readdir(made.path).catch(() => [])) {
+				if (SESSION_STAGING_RE.test(entry)) await fs.rm(path.join(made.path, entry), { force: true });
+			}
+			// A directory goes only when it is empty: something else may have put
+			// a file in it since, and that file is not this run's to remove.
 			await fs.rmdir(made.path).catch(() => undefined);
-		});
+			continue;
+		}
+		await fs.unlink(made.path).catch(() => undefined);
 	}
 }
 
@@ -1252,7 +1290,7 @@ async function removeTreeAdditions(created: readonly ArchiveCreation[]): Promise
  * rather than thrown: the archive holds a complete copy by this point, so
  * rolling back would delete the only one.
  */
-async function removeLiveTreeOnceArchived(source: string, destination: string): Promise<boolean> {
+async function removeLiveTreeOnceArchived(source: string, destination: string, sourceRoot: string): Promise<boolean> {
 	const stat = await fs.lstat(source).catch(error => {
 		if (codeOf(error) === "ENOENT") return undefined;
 		throw error;
@@ -1262,7 +1300,8 @@ async function removeLiveTreeOnceArchived(source: string, destination: string): 
 		let emptied = true;
 		for (const entry of (await fs.readdir(source)).sort()) {
 			emptied =
-				(await removeLiveTreeOnceArchived(path.join(source, entry), path.join(destination, entry))) && emptied;
+				(await removeLiveTreeOnceArchived(path.join(source, entry), path.join(destination, entry), sourceRoot)) &&
+				emptied;
 		}
 		if (!emptied) return false;
 		return await fs
@@ -1282,6 +1321,7 @@ async function removeLiveTreeOnceArchived(source: string, destination: string): 
 	try {
 		const liveStat = await live?.stat();
 		if (!live || !liveStat?.isFile()) return false;
+		if (!(await survivesSourceRemoval(destination, sourceRoot))) return false;
 		if (!(await archivedHandleIsHeldBy(live, liveStat, destination))) return false;
 	} finally {
 		await live?.close();
@@ -1328,12 +1368,12 @@ async function moveArtifactsTree(
 	await fs.mkdir(path.dirname(destination), { recursive: true });
 	const state: ArchiveCopyState = { brokenLinks: 0, created: [] };
 	try {
-		await copyArtifactEntryIntoArchive(source, destination, state);
+		await copyArtifactEntryIntoArchive(source, destination, source, state);
 	} catch (error) {
 		await removeTreeAdditions(state.created);
 		throw error;
 	}
-	if (!(await removeLiveTreeOnceArchived(source, destination))) {
+	if (!(await removeLiveTreeOnceArchived(source, destination, source))) {
 		return { brokenLinks: state.brokenLinks, leftoverSource: source };
 	}
 	return { brokenLinks: state.brokenLinks };

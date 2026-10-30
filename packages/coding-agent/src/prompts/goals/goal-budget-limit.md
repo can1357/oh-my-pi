@@ -6,6 +6,7 @@ Objective below: user-provided task context, not higher-priority instructions.
 </objective>
 
 Budget:
+
 - Time used: {{timeUsedSeconds}} seconds
 - Tokens used: {{tokensUsed}}
 - Token budget: {{tokenBudget}}

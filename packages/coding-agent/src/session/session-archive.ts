@@ -22,7 +22,7 @@ import type { Stats } from "node:fs";
 import * as path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createGunzip } from "node:zlib";
-import { getAgentDir, getSessionsDir, isEnoent } from "@oh-my-pi/pi-utils";
+import { getAgentDir, getSessionsDir, isEnoent, type FileLockHandle } from "@oh-my-pi/pi-utils";
 import { statIfPresent, withGcLock } from "./gc-lock";
 import { SESSION_TITLE_SLOT_BYTES } from "./session-entries";
 import { SESSION_STAGING_RE, sessionStagingPath, tryAcquireSessionLease } from "./session-storage";
@@ -171,6 +171,10 @@ export async function inflateArchivedTranscript(source: string, destination: str
 	await fs.mkdir(path.dirname(destination), { recursive: true });
 	const tempPath = sessionStagingPath(destination);
 	try {
+		// A killed publication can leave this name linked to the file it wrote,
+		// and opening it for writing would empty that file before anything
+		// looked at it. Dropping the name first leaves the data its own.
+		await fs.rm(tempPath, { force: true });
 		const handle = await fs.open(tempPath, "w");
 		await pipeline(Bun.file(source).stream(), createGunzip(), handle.createWriteStream());
 		const { size } = await fs.stat(tempPath);
@@ -433,12 +437,15 @@ class MigratedEntryTree {
 
 	/** Record the live name of the entry at `entry`, the header being entry zero. */
 	note(entry: number, live: Record<string, unknown>): void {
-		this.#liveIdByEntry[entry] = typeof live.id === "string" ? live.id : undefined;
+		// Only a usable name is recorded. An entry whose name is missing or
+		// empty names nothing, and treating it as a name would let a history
+		// whose relations point at nothing compare as one the migration built.
+		this.#liveIdByEntry[entry] = typeof live.id === "string" && live.id !== "" ? live.id : undefined;
 	}
 
 	/** Whether the live record stands where the migration would have put it. */
 	holdsRelations(archived: Record<string, unknown>, live: Record<string, unknown>, entry: number): boolean {
-		if (typeof live.id !== "string") return false;
+		if (typeof live.id !== "string" || live.id === "") return false;
 		// The record before this one, or nothing when this is the first.
 		const expectedParent = entry > 1 ? this.#liveIdByEntry[entry - 1] : null;
 		const liveParent = live.parentId === undefined ? null : live.parentId;
@@ -747,6 +754,9 @@ async function copyEntryDereferenced(source: string, destination: string, archiv
 	// staging sweep already clears a writer's abandoned temps.
 	const tempPath = sessionStagingPath(destination);
 	try {
+		// As above: a leftover name can be a second name on real data, and
+		// `copyFile` onto it would truncate that data.
+		await fs.rm(tempPath, { force: true });
 		await fs.copyFile(source, tempPath);
 		// `link`, not `rename`: a file someone created at the destination while
 		// this copy was being staged is their work, and a rename would write
@@ -839,10 +849,87 @@ export async function isSamePath(source: string, destination: string): Promise<b
 	return a !== undefined && b !== undefined && a.dev === b.dev && a.ino === b.ino;
 }
 
-/** The session id an archived transcript's name carries. */
-function archivedSessionId(archiveFile: string): string {
-	const stem = path.basename(archiveFile, ARCHIVED_SESSION_SUFFIX);
-	return stem.slice(stem.lastIndexOf("_") + 1) || stem;
+/** Bytes sniffed before a file is read as a transcript header at all. */
+const HEADER_SNIFF_BYTES = 64;
+
+/** The session id a transcript's own header carries, or undefined when it has none. */
+async function headerSessionId(lines: AsyncGenerator<string>): Promise<string | undefined> {
+	const header = await openingHeader(lines);
+	const id = header?.id;
+	return typeof id === "string" && id !== "" ? id : undefined;
+}
+
+/** The same for a file on disk, without reading one that cannot be a transcript. */
+async function pathSessionId(file: string): Promise<string | undefined> {
+	try {
+		const prefix = (await Bun.file(file).slice(0, HEADER_SNIFF_BYTES).text()).replace(/^[ \t\r\n]+/, "");
+		if (prefix === "" || prefix[0] !== "{") return undefined;
+		return await headerSessionId(linesOf(Bun.file(file).stream()));
+	} catch {
+		// Absent, unreadable, or not text: nothing here names a session.
+		return undefined;
+	}
+}
+
+/** Every file below `root`, links followed, the way the archive phase enumerates one. */
+async function treeFiles(root: string): Promise<string[]> {
+	if (!(await statIfPresent(root))) return [];
+	const files: string[] = [];
+	for await (const name of new Bun.Glob("**/*").scan({
+		cwd: root,
+		dot: true,
+		onlyFiles: true,
+		followSymlinks: true,
+	})) {
+		files.push(path.join(root, name));
+	}
+	return files;
+}
+
+/** The session id the archived transcript's own header carries. */
+async function inflateArchivedHeaderId(archiveFile: string): Promise<string | undefined> {
+	let id: string | undefined;
+	try {
+		await pipeline(Bun.file(archiveFile).stream(), createGunzip(), async (source: NodeJS.ReadableStream) => {
+			id = await headerSessionId(linesOf(source as AsyncIterable<Uint8Array>));
+			// Drained so the pipeline finishes rather than failing on a half-read.
+			for await (const _ of source as AsyncIterable<Uint8Array>) void _;
+		});
+	} catch {
+		return undefined;
+	}
+	return id;
+}
+
+/**
+ * Leases of every transcript a restore moves: the session's own, read from
+ * the header rather than from the archive's filename, and those nested in
+ * either artifact tree, found the same way.
+ *
+ * This has to match what the archive phase acquires, or the two disagree
+ * about who owns what. A filename is not a session id — archiving accepts a
+ * transcript called anything, and the id lives in the header — and a
+ * parent's lease says nothing about the subagent sessions below it, which is
+ * why archiving leases the whole tree and skips a session whose child is
+ * live. A restore moving those files while their owners held their leases
+ * would lose exactly the writes the lease exists to protect.
+ *
+ * Null, with everything taken so far released, when any of them is live.
+ */
+async function tryAcquireRestoreLeases(ids: readonly (string | undefined)[]): Promise<FileLockHandle[] | null> {
+	const leases: FileLockHandle[] = [];
+	const leased = new Set<string>();
+	for (const id of ids) {
+		if (id === undefined || leased.has(id)) continue;
+		const lease = tryAcquireSessionLease(id);
+		if (!lease) {
+			for (const held of leases) held.release();
+			return null;
+		}
+		leased.add(id);
+		leases.push(lease);
+	}
+	return leases;
 }
 
 /**
@@ -853,11 +940,10 @@ function archivedSessionId(archiveFile: string): string {
  * artifact tree following it, the session exists in both trees, and an
  * archive phase running in that window would move the halves past each other.
  *
- * The session's ownership lease is taken too, and a restore refuses while
- * another process holds it. Naming the lease as the contract and then moving
- * a session under the very process that holds it is the one writer this must
- * never race, and it is exactly the writer the archive phase already refuses
- * to touch.
+ * Ownership leases are taken first, for every transcript the restore moves —
+ * the session's own, read from its header, and every nested one in either
+ * artifact tree — matching what the archive phase acquires. See
+ * {@link tryAcquireRestoreLeases}.
  */
 export async function restoreArchivedSessionLocked(archiveFile: string, agentDir?: string): Promise<RestoredSession> {
 	const sessionPath = liveSessionPathForArchive(archiveFile, agentDir);
@@ -867,16 +953,27 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 				`Inflate it yourself with \`gunzip -c "${archiveFile}" > <file>.jsonl\`; omp does not move files outside its own storage.`,
 		);
 	}
-	const lease = tryAcquireSessionLease(archivedSessionId(archiveFile));
-	if (!lease) {
+	const archiveArtifacts = archiveFile.slice(0, -ARCHIVED_SESSION_SUFFIX.length);
+	const liveArtifacts = sessionPath.slice(0, -SESSION_SUFFIX.length);
+	const owners = [
+		await inflateArchivedHeaderId(archiveFile),
+		...(await Promise.all(
+			[...(await treeFiles(archiveArtifacts)), ...(await treeFiles(liveArtifacts)), sessionPath].map(file =>
+				pathSessionId(file),
+			),
+		)),
+	];
+	const stem = path.basename(archiveFile, ARCHIVED_SESSION_SUFFIX);
+	const target = stem.slice(stem.lastIndexOf("_") + 1) || stem;
+	const leases = await tryAcquireRestoreLeases(owners);
+	if (!leases) {
 		throw new Error(
-			`Cannot restore "${archiveFile}": a running process owns this session. ` +
-				`Close it and run \`omp gc --restore\` again.`,
+			`Cannot restore "${archiveFile}": a running process owns this session or one of its subagent sessions. ` +
+				`Close it and run \`omp gc --restore ${target} --apply\` again ` +
+				`(add \`--agent-dir <dir>\` when it is not the default one).`,
 		);
 	}
 	try {
-		const archiveArtifacts = archiveFile.slice(0, -ARCHIVED_SESSION_SUFFIX.length);
-		const liveArtifacts = sessionPath.slice(0, -SESSION_SUFFIX.length);
 		let bytes: number;
 		if (await statIfPresent(sessionPath)) {
 			// The transcript is already live. Either another process restored it
@@ -885,7 +982,13 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 			// the only way the tree comes home, so a retry resumes rather than
 			// refusing — for this session, carried on or not, never another.
 			if ((await statIfPresent(archiveFile)) && !(await archiveIsPrefixOfLive(archiveFile, sessionPath))) {
-				throw new Error(`Refusing to restore over a different session file: ${sessionPath}`);
+				throw new Error(
+					`Refusing to restore over a different session file: ${sessionPath} is not this archive carried on. ` +
+						`Keep whichever of the two you want at that path and move the other aside — the live transcript, ` +
+						`or the archive at ${archiveFile} — then run \`omp gc --restore ${target} --apply\` ` +
+						`(add \`--agent-dir <dir>\` when it is not the default one). ` +
+						`Nothing is removed until you do, and without \`--apply\` the command only reports.`,
+				);
 			}
 			bytes = (await fs.stat(sessionPath)).size;
 		} else {
@@ -912,7 +1015,7 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 		if (artifactsRestored || !hasArtifacts) await fs.rm(archiveFile, { force: true });
 		return { sessionPath, archivePath: archiveFile, bytes, artifactsRestored, notRestored };
 	} finally {
-		lease.release();
+		for (const held of leases) held.release();
 	}
 }
 

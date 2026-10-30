@@ -1,8 +1,8 @@
 ---
 description: Use match ergonomics instead of ref/ref mut patterns
 condition:
-  - "\\(ref mut "
-  - "\\(ref [a-z_]"
+   - "\\(ref mut "
+   - "\\(ref [a-z_]"
 scope: "tool:edit(*.rs), tool:write(*.rs)"
 interruptMode: never
 ---
