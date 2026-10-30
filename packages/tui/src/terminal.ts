@@ -1740,6 +1740,7 @@ export class ProcessTerminal implements Terminal {
 				// and resolves nothing in the queue.
 				if (this.#osc11SentinelClaims > 0) {
 					this.#osc11SentinelClaims -= 1;
+					this.#settleCycleWhoseSentinelWasSpent();
 					return;
 				}
 				const owner = this.#da1SentinelOwners.shift();
@@ -1795,6 +1796,7 @@ export class ProcessTerminal implements Terminal {
 							if (index >= 0) this.#osc11Cycles.splice(index, 1);
 							if (this.#osc11Cycles.length === 0) this.#osc11ResponseBuffer = "";
 						}
+						this.#settleCycleWhoseSentinelWasSpent();
 						break;
 					}
 					case "privateMode": {
@@ -2292,6 +2294,34 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	/**
+	 * A sentinel has just been spent on an older debt — a claim, or a marker a
+	 * surrendered cycle left. The cycle waiting behind it has therefore lost
+	 * its own, and if its colour already arrived there is nothing else it is
+	 * owed, so it is finished here exactly as its own sentinel would have
+	 * finished it.
+	 *
+	 * Without this the debt is transferable and therefore perpetual: that cycle
+	 * waits out its deadline, surrenders, and leaves a marker or a claim of its
+	 * own, so every later refresh pays the same five seconds for the rest of
+	 * the session. Paying somebody else's debt must not make you a debtor.
+	 */
+	#settleCycleWhoseSentinelWasSpent(): void {
+		const slot = this.#da1SentinelOwners.findIndex(o => o.kind === "osc11");
+		if (slot < 0) return;
+		const owner = this.#da1SentinelOwners[slot] as Da1SentinelOwner & { kind: "osc11" };
+		// Still owed its colour: it is not finished, and its own sentinel is
+		// what will end it.
+		if (this.#osc11Cycles.includes(owner.cycle)) return;
+		this.#da1SentinelOwners.splice(slot, 1);
+		this.#clearOsc11SentinelDeadline();
+		if (this.#osc11LiveCycle === owner.cycle) {
+			this.#osc11LiveCycle = undefined;
+			this.#osc11Pending = false;
+		}
+		this.#startQueuedOsc11Query();
+	}
+
+	/**
 	 * Record one more colour a retired cycle may still send. Plain data with no
 	 * deadline: a timer here would be another statement about waiting standing
 	 * in for proof that an answer cannot arrive, and every such deadline became
@@ -2299,9 +2329,10 @@ export class ProcessTerminal implements Terminal {
 	 * a terminal that stops answering altogether cannot leave a backlog that
 	 * swallows answers for ever — at the price named in {@link OSC11_MAX_CLAIMS}.
 	 *
-	 * Sentinel claims are not recorded here. One is raised only where a claim
-	 * has just taken a colour, because that is the only evidence that a
-	 * sentinel without a question is on its way.
+	 * Sentinel claims are not recorded here; they have their own two sources,
+	 * both of them evidence that a sentinel without a live question is coming —
+	 * a claim that has just taken a colour, and a marker retired after its
+	 * colour had already arrived. See {@link ProcessTerminal.#addOsc11SentinelClaim}.
 	 */
 	#addOsc11ReplyClaim(): void {
 		this.#osc11ReplyClaims = Math.min(this.#osc11ReplyClaims + 1, OSC11_MAX_CLAIMS);

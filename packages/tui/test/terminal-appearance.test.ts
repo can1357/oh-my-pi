@@ -324,10 +324,9 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		// however promptly the terminal answers.
 		//
 		// The cycle below did receive its colour, so the sentinel it is owed is
-		// demonstrably outstanding and is still accounted for after the marker
-		// goes. That costs the next cycle its own sentinel once — it falls back
-		// to its deadline — and then the queue is level again. Bounded, which is
-		// the whole claim: not offset for good.
+		// still accounted for after the marker goes. The next cycle's own
+		// sentinel pays that debt — and must not inherit one, or every later
+		// refresh waits out a deadline for the rest of the session.
 		vi.useFakeTimers();
 		const { terminal, queryCount } = setupTerminal();
 
@@ -342,17 +341,15 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		// Long enough that the marker has stopped expecting anything.
 		vi.advanceTimersByTime(10_000);
 
-		// The next cycle's sentinel settles what the retired one was owed, so it
-		// resolves on its own deadline rather than at once.
+		// Each later cycle completes at once: the debt is paid by the first
+		// sentinel to arrive and is not passed on.
 		const before = queryCount();
-		expect(terminal.refreshAppearance?.(42)).toBe(42);
-		expect(queryCount()).toBe(before + 1);
-		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
-		process.stdin.emit("data", "\x1b[?1;2c");
-		expect(terminal.refreshAppearance?.(43)).toBe(43);
-		expect(queryCount()).toBe(before + 1);
-		vi.advanceTimersByTime(5_000);
-		expect(queryCount()).toBe(before + 2);
+		for (let token = 42; token <= 45; token++) {
+			expect(terminal.refreshAppearance?.(token)).toBe(token);
+			expect(queryCount()).toBe(before + (token - 41));
+			process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+			process.stdin.emit("data", "\x1b[?1;2c");
+		}
 
 		terminal.stop();
 	});
