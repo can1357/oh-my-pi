@@ -2,15 +2,18 @@
  * Counts the requests that actually reach the wire when a connection dies,
  * driving the real provider loops under a real `AgentSession` against a local
  * TCP server — `anthropic-messages`, whose client retries ten times of its
- * own, and the fetch route (`openai-completions`), where `fetchWithRetry`
- * replays six times and the pre-output retry runs that cycle twice.
+ * own and reports how often it did, and the fetch route (`openai-completions`),
+ * where `fetchWithRetry` replays six times, the pre-output retry runs that
+ * cycle twice, and nothing reports a count.
  *
  * The session-level retry tests script a mock stream, so they see one request
  * per turn attempt and cannot see the provider's own retry budget at all. That
  * blind spot is exactly what let a change multiply whole provider loops: the
  * Anthropic provider retries up to ten times on its own while nothing has
  * streamed, so a chain hold that fires on a contentless failure runs those ten
- * again. These tests pin the request counts on both sides of that line.
+ * again, and a hold that reads streamed content as "made once" repeats a 503
+ * that `fetchWithRetry` already replayed. These tests pin the request counts
+ * on both sides of that line.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
@@ -29,8 +32,18 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
-/** How the stub answers one request. */
-type WireScript = "cutBeforeHeaders" | "cutAfterReasoning" | "ok";
+/**
+ * How the stub answers one request. The first three speak Anthropic's SSE, the
+ * `openai*` ones the chat-completions SSE, and `status503` either: an
+ * overload with `retry-after: 0`, which `fetchWithRetry` replays on its own.
+ */
+type WireScript =
+	| "cutBeforeHeaders"
+	| "cutAfterReasoning"
+	| "ok"
+	| "status503"
+	| "openaiInbandCut"
+	| "openaiReasoningCut";
 
 function resolveKey(apiKey: ApiKey | undefined): string {
 	const resolved = typeof apiKey === "function" ? apiKey({ lastChance: false, error: undefined }) : apiKey;
@@ -76,6 +89,21 @@ const COMPLETE_TURN = [
 	sse({ type: "message_stop" }),
 ].join("");
 
+function openaiFrame(body: Record<string, unknown>): string {
+	return `data: ${JSON.stringify(body)}\n\n`;
+}
+
+const OPENAI_REASONING = openaiFrame({
+	id: "chatcmpl_wire",
+	object: "chat.completion.chunk",
+	choices: [{ index: 0, delta: { role: "assistant", reasoning_content: "partial plan" }, finish_reason: null }],
+});
+
+/** A gateway's in-band report that its upstream died before any content: an HTTP 200 SSE body. */
+const OPENAI_INBAND_CUT = openaiFrame({ error: { message: "upstream closed the connection", type: "api_error" } });
+
+const OVERLOADED_BODY = JSON.stringify({ error: { message: "overloaded", type: "overloaded_error" } });
+
 interface Conn {
 	answered: boolean;
 	buf: string;
@@ -84,9 +112,12 @@ interface Conn {
 function startWireStub(script: (requestIndex: number) => WireScript): {
 	port: number;
 	requests: () => number;
+	/** Requests whose body named `model`. */
+	requestsFor: (model: string) => number;
 	stop: () => void;
 } {
 	let requests = 0;
+	const models: string[] = [];
 	const server = Bun.listen<Conn>({
 		hostname: "127.0.0.1",
 		port: 0,
@@ -103,6 +134,12 @@ function startWireStub(script: (requestIndex: number) => WireScript): {
 				const body = socket.data.buf.slice(headerEnd + 4);
 				if (lengthMatch && Buffer.byteLength(body) < Number(lengthMatch[1])) return;
 				socket.data.answered = true;
+				const parsed: unknown = JSON.parse(body);
+				models.push(
+					parsed && typeof parsed === "object" && "model" in parsed && typeof parsed.model === "string"
+						? parsed.model
+						: "",
+				);
 				const mode = script(requests++);
 				if (mode === "cutBeforeHeaders") {
 					socket.terminate();
@@ -116,8 +153,21 @@ function startWireStub(script: (requestIndex: number) => WireScript): {
 					socket.end();
 					return;
 				}
+				if (mode === "status503") {
+					socket.end(
+						`HTTP/1.1 503 Service Unavailable\r\ncontent-type: application/json\r\nretry-after: 0\r\ncontent-length: ${Buffer.byteLength(OVERLOADED_BODY)}\r\nconnection: close\r\n\r\n${OVERLOADED_BODY}`,
+					);
+					return;
+				}
+				if (mode === "openaiInbandCut") {
+					socket.end(
+						`HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: ${Buffer.byteLength(OPENAI_INBAND_CUT)}\r\nconnection: close\r\n\r\n${OPENAI_INBAND_CUT}`,
+					);
+					return;
+				}
+				const partial = mode === "openaiReasoningCut" ? OPENAI_REASONING : `${MESSAGE_START}${REASONING}`;
 				socket.write(
-					`HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: keep-alive\r\n\r\n${chunk(MESSAGE_START)}${chunk(REASONING)}`,
+					`HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: keep-alive\r\n\r\n${chunk(partial)}`,
 				);
 				socket.flush();
 				// Real delay on purpose: the cut has to reach the client *after* the
@@ -126,7 +176,12 @@ function startWireStub(script: (requestIndex: number) => WireScript): {
 			},
 		},
 	});
-	return { port: server.port, requests: () => requests, stop: () => server.stop(true) };
+	return {
+		port: server.port,
+		requests: () => requests,
+		requestsFor: model => models.filter(candidate => candidate === model).length,
+		stop: () => server.stop(true),
+	};
 }
 
 describe("wire retries reaching the provider", () => {
@@ -159,11 +214,19 @@ describe("wire retries reaching the provider", () => {
 	 * Runs one prompt on a real Anthropic stream pointed at the stub, with a
 	 * mocked fallback model so the chain hop is observable without a second
 	 * wire. Returns how many requests reached the stub before the fallback.
+	 *
+	 * `chainHead` puts a second Anthropic model, served by the same stub, at the
+	 * front of the chain, so a recovery can walk two wire-backed models before
+	 * the mocked one.
 	 */
-	async function run(script: (requestIndex: number) => WireScript): Promise<{
+	async function run(
+		script: (requestIndex: number) => WireScript,
+		options: { chainHead?: Model<"anthropic-messages">; maxRetries?: number } = {},
+	): Promise<{
 		requestsBeforeFallback: number | undefined;
 		totalWireRequests: number;
 		requestedModels: string[];
+		requestsFor: (model: string) => number;
 	}> {
 		const stub = startWireStub(script);
 		cleanups.push(() => stub.stop());
@@ -174,6 +237,9 @@ describe("wire retries reaching the provider", () => {
 		authStorage.keys.setRuntime("openai", "openai-test-key");
 		const primary = `${primaryModel.provider}/${primaryModel.id}`;
 		const fallback = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const chain = options.chainHead
+			? [`${options.chainHead.provider}/${options.chainHead.id}`, fallback]
+			: [fallback];
 
 		const requestedModels: string[] = [];
 		let requestsBeforeFallback: number | undefined;
@@ -183,25 +249,26 @@ describe("wire retries reaching the provider", () => {
 		const agent = new Agent({
 			getApiKey: requestedModel => modelRegistry.resolver(requestedModel, agent.sessionId),
 			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
-			streamFn: (requestedModel, context, options) => {
+			streamFn: (requestedModel, context, streamOptions) => {
 				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
 				if (requestedModel.provider === "anthropic") {
-					return streamAnthropic({ ...primaryModel, baseUrl: `http://127.0.0.1:${stub.port}` }, context, {
-						...options,
-						apiKey: resolveKey(options?.apiKey),
+					const wireModel = requestedModel as Model<"anthropic-messages">;
+					return streamAnthropic({ ...wireModel, baseUrl: `http://127.0.0.1:${stub.port}` }, context, {
+						...streamOptions,
+						apiKey: resolveKey(streamOptions?.apiKey),
 					});
 				}
 				requestsBeforeFallback ??= stub.requests();
-				return fallbackMock.stream(requestedModel, context, options);
+				return fallbackMock.stream(requestedModel, context, streamOptions);
 			},
 		});
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
 			"retry.maxDelayMs": 100,
-			"retry.maxRetries": 10,
+			"retry.maxRetries": options.maxRetries ?? 10,
 			"retry.modelFallback": true,
-			"retry.fallbackChains": { default: [fallback] },
+			"retry.fallbackChains": { default: chain },
 		});
 		settings.setModelRole("default", primary);
 		const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
@@ -212,7 +279,12 @@ describe("wire retries reaching the provider", () => {
 
 		await session.prompt("count the wire requests");
 		await session.waitForIdle();
-		return { requestsBeforeFallback, totalWireRequests: stub.requests(), requestedModels };
+		return {
+			requestsBeforeFallback,
+			totalWireRequests: stub.requests(),
+			requestedModels,
+			requestsFor: stub.requestsFor,
+		};
 	}
 
 	it("does not re-run the provider's own retry budget for a reset before headers", async () => {
@@ -247,14 +319,40 @@ describe("wire retries reaching the provider", () => {
 		expect(requestedModels).toEqual(["anthropic/claude-sonnet-4-5", "anthropic/claude-sonnet-4-5"]);
 	}, 60_000);
 
+	it("spends at most two held retries across the chain, not two per model", async () => {
+		// Two held retries on the primary spend the budget, and the chain's
+		// first entry — another Anthropic model on the same wire — gets a fresh
+		// budget. Its own cut after reasoning walks on at once: the recovery's two
+		// held retries are spent, so the chain does not wait a third time.
+		const chainHead = getBundledModel("anthropic", "claude-opus-4-5") as Model<"anthropic-messages">;
+		const { requestsBeforeFallback, requestedModels, requestsFor } = await run(() => "cutAfterReasoning", {
+			chainHead,
+			maxRetries: 2,
+		});
+
+		expect(requestsFor("claude-sonnet-4-5")).toBe(3);
+		expect(requestsFor(chainHead.id)).toBe(1);
+		expect(requestsBeforeFallback).toBe(4);
+		expect(requestedModels).toEqual([
+			"anthropic/claude-sonnet-4-5",
+			"anthropic/claude-sonnet-4-5",
+			"anthropic/claude-sonnet-4-5",
+			`anthropic/${chainHead.id}`,
+			"openai/gpt-5.5",
+		]);
+	}, 60_000);
+
 	/**
-	 * The same question on the fetch route. A reset before headers is replayed
-	 * by `fetchWithRetry` (six attempts) and that whole cycle again by the
-	 * pre-output provider retry, whatever the diagnostic says — the layer reads
-	 * no text. A hold on top of those twelve would make it thirty-six.
+	 * The same questions on the fetch route, where the provider reports no
+	 * replay count. A reset before headers is replayed by `fetchWithRetry` (six
+	 * attempts) and that whole cycle again by the pre-output provider retry,
+	 * whatever the diagnostic says — the layer reads no text. A hold on top of
+	 * those twelve would make it thirty-six.
 	 */
-	async function runFetchRoute(): Promise<{ requestsBeforeFallback: number | undefined; requestedModels: string[] }> {
-		const stub = startWireStub(() => "cutBeforeHeaders");
+	async function runFetchRoute(
+		script: (requestIndex: number) => WireScript = () => "cutBeforeHeaders",
+	): Promise<{ requestsBeforeFallback: number | undefined; requestedModels: string[] }> {
+		const stub = startWireStub(script);
 		cleanups.push(() => stub.stop());
 		// Its own credential store and registry: the runs above spend anthropic
 		// and openai credentials on a dead wire, and a provider those runs left
@@ -323,4 +421,25 @@ describe("wire retries reaching the provider", () => {
 		expect(requestsBeforeFallback).toBe(12);
 		expect(requestedModels).toEqual(["openai/gpt-4o", "anthropic/claude-sonnet-4-5"]);
 	}, 60_000);
+
+	it.each<[string, WireScript]>([
+		["an in-band cut that streamed nothing", "openaiInbandCut"],
+		["a chunked transfer cut after reasoning", "openaiReasoningCut"],
+	])(
+		"does not replay a 503 that fetchWithRetry already replayed, then %s",
+		async (_label, cut) => {
+			// `fetchWithRetry` replays the 503 on its own, and the replay is the one
+			// that dies. The message it surfaces carries no replay count, and either
+			// streamed content or a wording no provider loop retries — the two things
+			// that used to stand in for "made once". Two requests, then the chain;
+			// holding sent the pair three times.
+			const { requestsBeforeFallback, requestedModels } = await runFetchRoute(index =>
+				index % 2 === 0 ? "status503" : cut,
+			);
+
+			expect(requestsBeforeFallback).toBe(2);
+			expect(requestedModels).toEqual(["openai/gpt-4o", "anthropic/claude-sonnet-4-5"]);
+		},
+		60_000,
+	);
 });

@@ -1118,13 +1118,15 @@ describe("AgentSession retry delay cap", () => {
 					const apiKey = resolveInitialApiKey(options?.apiKey);
 					primaryKeys.push(apiKey);
 					if (primaryKeys.length === 1) {
-						// A first-attempt socket drop after streamed reasoning retries the
-						// same model, spending the one retry on account A without
-						// consulting the fallback chain.
+						// A first-attempt socket drop after streamed reasoning, on a request
+						// the provider reports it sent once, retries the same model,
+						// spending the one retry on account A without consulting the
+						// fallback chain.
 						mock.push({
 							content: [{ type: "thinking", thinking: "Partial reasoning." }],
 							stopReason: "error",
 							errorMessage: "The socket connection was closed unexpectedly",
+							providerReplays: 0,
 						});
 					} else if (apiKey === primaryKeys[0]) {
 						// A's usage report now shows its weekly window spent.

@@ -239,60 +239,6 @@ export function isCodexSteerRejection(message: { api?: Api; errorMessage?: strin
 }
 
 /**
- * Failure-event codes the Codex response loop replays on its own budget
- * before it ever surfaces the event (`openai-codex-responses`). Owned here
- * rather than beside that loop because turn recovery has to read the same
- * decision back off the persisted message text, and a second copy would
- * drift from the one the loop actually uses.
- */
-export const CODEX_RETRYABLE_EVENT_CODES: ReadonlySet<string> = new Set([
-	"model_error",
-	"server_error",
-	"internal_error",
-	// The native-lane steering rejection is replayable: the session stops
-	// steering first, so the replay cannot trip it again.
-	CODEX_NATIVE_LANE_STEER_REJECTED_CODE,
-]);
-
-/** Failure-event prose that same loop replays when the code says nothing. */
-export const CODEX_RETRYABLE_EVENT_MESSAGE =
-	/processing your request|retry your request|temporar(?:y|ily)|overloaded|service.?unavailable|internal error|server error/i;
-
-/** The `(code=…)` marker a provider's formatted failure event leaves behind, e.g. `(code=model_error)`. */
-const PROVIDER_FAILURE_EVENT_CODE_RE = /\bcode=([^,)\s]+)/;
-/** Every `code=…` assignment, for removing the machine token before prose is read. */
-const PROVIDER_FAILURE_EVENT_CODE_GLOBAL_RE = /\bcode=[^,)\s]+/g;
-
-/**
- * Whether a persisted failure-event message names a failure the provider's
- * own loop replayed before surfacing it.
- *
- * A provider that emits a structured failure event decides its replay from
- * the event, not from the prose around it, so the text alone cannot say
- * whether a request was made once. The marker says which event it was; this
- * answers whether that event is one the loop retries. A marker whose code and
- * prose the loop declines (`api_error` carrying `read ECONNRESET`) reached
- * the caller on its first and only request.
- *
- * The prose test runs with the `code=…` token removed, because the loop reads
- * the event's message field and this reads the sentence the two were
- * formatted into: left in, a code spelled `service_unavailable` or
- * `temporary_outage` would answer the prose question by itself and call a
- * wire death replayed.
- */
-export function isReplayedProviderFailureEventText(text: string): boolean {
-	const code = PROVIDER_FAILURE_EVENT_CODE_RE.exec(text)?.[1]?.trim().toLowerCase();
-	if (code === undefined) return false;
-	if (CODEX_RETRYABLE_EVENT_CODES.has(code)) return true;
-	const prose = text.replace(PROVIDER_FAILURE_EVENT_CODE_GLOBAL_RE, "");
-	return (
-		CODEX_RETRYABLE_EVENT_MESSAGE.test(prose) ||
-		PYTHON_HTTP2_STREAM_RESET_PATTERN.test(prose) ||
-		PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN.test(prose)
-	);
-}
-
-/**
  * Transport-failure wording that marks an error transient. Covers
  * diagnostics forwarded verbatim by gateways/proxies in other runtimes, e.g.
  * undici's "other side closed" and Go's `net.ErrClosed` ("use of closed
@@ -694,15 +640,22 @@ function isCapacityPressure(text: string, reason: RateLimitReason): boolean {
 }
 
 /**
- * Values of HTTP/2 frame fields. `stream_id:503` names a stream on the
- * connection, not a status code, but both capacity readers search for bare
- * `503`/`529` tokens (`parseRateLimitReason`, rate-limit.ts, and the pattern
- * above), so a Python h2 `<StreamReset stream_id:503, …>` would read as a
- * capacity refusal and veto the connection lane for a reset that never reached
- * a status line. Blank these fields' digits before capacity is judged; a status
- * token anywhere else in the sentence still counts.
+ * Values of HTTP/2 stream and frame fields. A stream number names a stream on
+ * the connection, not a status code, but both capacity readers search for bare
+ * `429`/`503`/`529` tokens (`parseRateLimitReason`, rate-limit.ts, and the
+ * pattern above), so a reset on stream 503 would read as a capacity refusal and
+ * veto the connection lane for a reset that never reached a status line. Blank
+ * these fields' digits before capacity is judged; a status token anywhere else
+ * in the sentence still counts. Spellings covered, each a diagnostic the lane
+ * reads:
+ *
+ * - Python h2: `<StreamReset stream_id:503, error_code:2, …>`, plus the
+ *   `last_stream_id`/`promised_stream_id` fields of its other frames;
+ * - Go `x/net/http2`: `stream error: stream ID 503; INTERNAL_ERROR` and the
+ *   GOAWAY sentence `… closed the connection; LastStreamID=503, ErrCode=…`.
  */
-const H2_FRAME_FIELD_VALUE_PATTERN = /\b(?:stream_id|last_stream_id|promised_stream_id|error_code)\s*[:=]\s*\d+/gi;
+const H2_FRAME_FIELD_VALUE_PATTERN =
+	/\b(?:stream_id|last_stream_id|promised_stream_id|error_code|laststreamid)\s*[:=]\s*\d+|\bstream\s+ID\s+\d+/gi;
 
 /**
  * Whether a diagnostic carries capacity or quota evidence — see
@@ -730,8 +683,10 @@ function hasCapacityEvidence(text: string, reason?: RateLimitReason): boolean {
  * `HTTP2StreamReset` token, and Go's `stream error: stream ID 7;
  * INTERNAL_ERROR` — each a stream the peer reset with no status line of its
  * own. `INTERNAL_ERROR` is matched only inside that `stream error:` frame, so
- * a model's own "internal error" prose is not a cut stream. A GOAWAY still
- * has no observed wording here and stays out.
+ * a model's own "internal error" prose is not a cut stream. Go's GOAWAY
+ * sentence (`http2: server sent GOAWAY and closed the connection;
+ * LastStreamID=1, …`) reaches the lane through `closed the connection`; it
+ * carries no status line either.
  */
 const CONNECTION_FAILURE_PATTERN =
 	/connection (?:closed|reset|aborted)|closed the connection|socket hang up|socket is closed|other side closed|use of closed network connection|reset before headers|premature close|incomplete chunked|transfer[ _-]?encoding\s*error|\bECONNRESET\b|\bEPIPE\b|HTTP2(?:StreamReset|RefusedStream)|\bNGHTTP2_(?:INTERNAL_ERROR|REFUSED_STREAM)\b|stream error:[^;]*;\s*(?:INTERNAL_ERROR|REFUSED_STREAM)\b/i;
@@ -1003,9 +958,15 @@ export function classify(error: unknown, api?: Api): number {
 	// capacity parse runs only for an error that still claims the lane.
 	let statusSeen: number | undefined;
 	const linkMessages: string[] = [];
+	// The errno arm below is decided after the walk, not on the link that
+	// carries the errno: the terminal status that governs it can sit on any
+	// link, including one deeper than `status()` reaches from there.
+	let wireErrnoSeen = false;
+	let terminalStatusSeen = false;
 	while (link !== undefined && link !== null) {
 		const linkStatus = status(link);
 		statusSeen ??= linkStatus;
+		if (isTerminalClientErrorStatus(linkStatus)) terminalStatusSeen = true;
 		if (typeof link === "object") {
 			if (seen.has(link)) break;
 			seen.add(link);
@@ -1021,18 +982,12 @@ export function classify(error: unknown, api?: Api): number {
 				}
 				// A runtime that reports the wire failure as an errno puts it in
 				// `code` and leaves the message generic ("fetch failed"), so the
-				// text predicates never see it. Gated by the same terminal-4xx
-				// window as the text arm in `classifyText`: a request the provider
-				// rejected as malformed or unentitled replays identically, whatever
-				// errno the socket carried on the way out, so neither bit is
-				// retriable there. The status gate for the lane itself still
-				// applies, via `withoutContradictedConnection` below.
-				if (
-					WIRE_FAILURE_CODE_PATTERN.test(link.code) &&
-					!isTerminalClientErrorStatus(linkStatus ?? governingTerminalStatus)
-				) {
-					kinds |= Flag.Connection | Flag.Transient;
-				}
+				// text predicates never see it. Gated, after the walk, by the same
+				// terminal-4xx window as the text arm in `classifyText`: a request
+				// the provider rejected as malformed or unentitled replays
+				// identically, whatever errno the socket carried on the way out,
+				// so neither bit is retriable there.
+				if (WIRE_FAILURE_CODE_PATTERN.test(link.code)) wireErrnoSeen = true;
 			}
 		}
 
@@ -1112,6 +1067,8 @@ export function classify(error: unknown, api?: Api): number {
 
 		link = typeof link === "object" && "cause" in link ? (link as { cause: unknown }).cause : undefined;
 	}
+
+	if (wireErrnoSeen && !terminalStatusSeen) kinds |= Flag.Connection | Flag.Transient;
 
 	if (kinds === 0) return status(error) ?? 0;
 	// Only an error still holding the lane pays for the capacity parse.
@@ -1286,13 +1243,17 @@ export function classifyMessage(message: {
 		// auto-retry would loop. Strip Transient so the recovery message surfaces immediately.
 		kinds &= ~Flag.Transient;
 	}
-	kinds = withoutContradictedConnection(
-		kinds,
-		currentStatus,
-		(kinds & Flag.Connection) !== 0 &&
-			classificationMessage !== undefined &&
-			hasCapacityEvidence(classificationMessage),
-	);
+	// The status the text states counts as much as the structured one, as it
+	// does for `classifyText` (`statusClean`): a persisted `Connection` that the
+	// message contradicts with `HTTP 400` must not survive because
+	// `errorStatus` is unset.
+	if ((kinds & Flag.Connection) !== 0) {
+		kinds = withoutContradictedConnection(
+			kinds,
+			currentStatus ?? (classificationMessage ? status({ message: classificationMessage }) : undefined),
+			classificationMessage !== undefined && hasCapacityEvidence(classificationMessage),
+		);
+	}
 	const id = kinds !== 0 ? create(kinds) : (statusFromId(textId) ?? statusFromId(existingId) ?? currentStatus ?? 0);
 
 	message.errorId = id;

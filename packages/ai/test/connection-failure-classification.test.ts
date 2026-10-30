@@ -123,6 +123,44 @@ describe("connection-failure classification", () => {
 		}
 	});
 
+	const WIRE_ERRNOS = ["ECONNRESET", "EPIPE", "ECONNABORTED", "UND_ERR_SOCKET"] as const;
+	const TERMINAL_STATUSES = [400, 401] as const;
+
+	/** `{ status, message }` behind `depth` plain `Error` wrappers. */
+	function behindWrappers(status: number, depth: number): unknown {
+		let cause: unknown = { status, message: "request failed" };
+		for (let i = 0; i < depth; i++) cause = new Error(`wrapper ${i}`, { cause });
+		return cause;
+	}
+
+	it.each(
+		WIRE_ERRNOS.flatMap(code => TERMINAL_STATUSES.flatMap(status => [0, 1, 3].map(depth => [code, status, depth]))),
+	)("keeps the errno %s off the retry lane over a terminal %d %d wrappers deep", (code, status, depth) => {
+		// The errno arm reads `code` on the outer error before the walk has
+		// reached the status, and `status()` stops at the third link. Gating that
+		// arm on the shallow reading made the wrapping depth decide whether a 400
+		// or a 401 auto-retries: the finalizer later found the status and dropped
+		// `Connection`, but the `Transient` the arm added with it stayed.
+		const error = Object.assign(new Error("generic failure", { cause: behindWrappers(status, depth) }), { code });
+
+		const id = AIError.classify(error);
+		expect(AIError.is(id, AIError.Flag.Connection)).toBe(false);
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(false);
+		expect(AIError.retriable(id)).toBe(false);
+	});
+
+	it("drops a persisted connection classification for a terminal status read from the message", () => {
+		// The status is in the text, not on `errorStatus`. The text classifier
+		// parses it; the finalizer was handed only the structured status and so
+		// kept a `Connection` the message itself contradicts.
+		const id = AIError.classifyMessage({
+			errorId: AIError.create(AIError.Flag.Connection | AIError.Flag.Transient),
+			errorMessage: "HTTP 400 Bad Request",
+		});
+
+		expect(AIError.is(id, AIError.Flag.Connection)).toBe(false);
+	});
+
 	it.each([
 		[
 			"a capacity wrapper over a wire-worded cause",
@@ -165,10 +203,27 @@ describe("connection-failure classification", () => {
 			true,
 		],
 		["a genuine 503 beside a stream reset", "503 Service Unavailable <StreamReset stream_id:1, error_code:2>", false],
-	])("reads %s correctly", (_label, errorMessage, connection) => {
-		// The capacity readers search for bare `503`/`529` tokens, which an h2
-		// frame field satisfies by accident: `stream_id:503` is a stream, not a
-		// refusal, and the reset it reports never reached a status line.
+		...[7, 429, 503, 529].map(id => [
+			`a Go h2 stream error on stream ${id}`,
+			`stream error: stream ID ${id}; INTERNAL_ERROR; received from peer`,
+			true,
+		]),
+		...[1, 429, 503, 529].map(id => [
+			`a Go h2 GOAWAY naming last stream ${id}`,
+			`http2: server sent GOAWAY and closed the connection; LastStreamID=${id}, ErrCode=NO_ERROR, debug=""`,
+			true,
+		]),
+		[
+			"a genuine 503 beside a Go h2 stream error",
+			"stream error: stream ID 503; INTERNAL_ERROR; received from peer: 503 Service Unavailable",
+			false,
+		],
+	] as [string, string, boolean][])("reads %s correctly", (_label, errorMessage, connection) => {
+		// The capacity readers search for bare `429`/`503`/`529` tokens, which an
+		// h2 stream number satisfies by accident: Python's `stream_id:503` and
+		// Go's `stream ID 503` / `LastStreamID=503` name a stream, not a refusal,
+		// and the reset they report never reached a status line. A status token
+		// elsewhere in the same diagnostic still counts.
 		expect(flagsOfMessage(errorMessage).connection).toBe(connection);
 	});
 
@@ -199,28 +254,5 @@ describe("connection-failure classification", () => {
 		// and these are the spellings turn recovery already treats as transport
 		// resets; a model's own "internal error" prose is not one.
 		expect(flagsOfMessage(errorMessage).connection).toBe(connection);
-	});
-
-	it.each([
-		// The shape `formatCodexFailure` persists: the event's message, then its
-		// machine metadata in parentheses.
-		["a code the Codex loop replays", "Codex error event: stream failed (code=model_error)", true],
-		[
-			"prose the Codex loop replays under a code it does not know",
-			"Codex error event: The server had an internal error (code=api_error)",
-			true,
-		],
-		["a wire death under a code the loop declines", "Codex error event: read ECONNRESET (code=api_error)", false],
-		[
-			"a wire death under a code whose own spelling reads as retryable prose",
-			"Codex error event: read ECONNRESET (code=service_unavailable)",
-			false,
-		],
-		["a message carrying no event marker", "read ECONNRESET", false],
-	])("reads %s correctly as replay provenance", (_label, errorMessage, replayed) => {
-		// Turn recovery reads this to tell a failure a provider loop already
-		// replayed from one it made a single request for; the marker alone says
-		// only which event it was, and the code token is not prose.
-		expect(AIError.isReplayedProviderFailureEventText(errorMessage)).toBe(replayed);
 	});
 });

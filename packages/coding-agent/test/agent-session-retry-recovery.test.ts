@@ -574,14 +574,15 @@ describe("AgentSession retry recovery", () => {
 		expect(sessionManager.buildSessionContext().messages.map(message => message.role)).toEqual(["user"]);
 	});
 	/**
-	 * Runs one prompt against a primary model with a single-entry fallback chain,
-	 * scripting each provider attempt in order. Returns the model each request
-	 * went to and the fallback switches the session announced.
+	 * Runs one prompt against a primary model with a fallback chain — one entry,
+	 * or two when `models.next` is given — scripting each provider attempt in
+	 * order. Returns the model each request went to and the fallback switches
+	 * the session announced.
 	 */
 	async function runFallbackChainRecovery(
 		responses: MockResponse[],
 		maxRetries = 2,
-		models: { primary: Model; fallback: Model } = {
+		models: { primary: Model; fallback: Model; next?: Model } = {
 			primary: getBundledModel("anthropic", "claude-sonnet-4-5"),
 			fallback: getBundledModel("openai", "gpt-5.5"),
 		},
@@ -594,12 +595,13 @@ describe("AgentSession retry recovery", () => {
 		sessionManager: SessionManager;
 		retryStartDelaysMs: number[];
 	}> {
-		const { primary: model, fallback: fallbackModel } = models;
+		const { primary: model, fallback: fallbackModel, next: nextModel } = models;
 		if (!model || !fallbackModel) {
 			throw new Error("Expected bundled primary and fallback test models to exist");
 		}
 		authStorage.keys.setRuntime(model.provider, `${model.provider}-test-key`);
 		authStorage.keys.setRuntime(fallbackModel.provider, `${fallbackModel.provider}-test-key`);
+		if (nextModel) authStorage.keys.setRuntime(nextModel.provider, `${nextModel.provider}-test-key`);
 		const primary = `${model.provider}/${model.id}`;
 		const fallback = `${fallbackModel.provider}/${fallbackModel.id}`;
 
@@ -619,7 +621,9 @@ describe("AgentSession retry recovery", () => {
 			"retry.maxDelayMs": retryDelays.maxDelayMs ?? 100,
 			"retry.maxRetries": maxRetries,
 			"retry.modelFallback": true,
-			"retry.fallbackChains": { default: [fallback] },
+			"retry.fallbackChains": {
+				default: nextModel ? [fallback, `${nextModel.provider}/${nextModel.id}`] : [fallback],
+			},
 		});
 		settings.setModelRole("default", primary);
 
@@ -641,16 +645,22 @@ describe("AgentSession retry recovery", () => {
 		return { primary, fallback, requestedModels, fallbackEvents, sessionManager, retryStartDelaysMs };
 	}
 
+	/**
+	 * A cut after reasoning streamed, on a request the provider reports it put
+	 * on the wire exactly once — the one shape that earns the same-model hold.
+	 */
 	const droppedAfterThinking: MockResponse = {
 		content: [{ type: "thinking", thinking: "partial plan for the edit" }],
 		stopReason: "error",
 		errorMessage: SOCKET_CLOSE_MID_STREAM,
+		providerReplays: 0,
 	};
 
 	it("retries a mid-stream socket drop on the same model before consulting the fallback chain", async () => {
-		// The transport died after the model had already emitted reasoning, so the
-		// failure says nothing about model health: the first attempt stays on the
-		// primary instead of switching to the fallback chain.
+		// The transport died after the model had already emitted reasoning, and
+		// the provider reports a single request, so the failure says nothing about
+		// model health: the first attempt stays on the primary instead of
+		// switching to the fallback chain.
 		const { primary, requestedModels, fallbackEvents, sessionManager } = await runFallbackChainRecovery([
 			droppedAfterThinking,
 			{ content: ["recovered on the same model"], stopReason: "stop" },
@@ -662,6 +672,73 @@ describe("AgentSession retry recovery", () => {
 		const errors = assistantEntries(sessionManager).filter(candidate => candidate.message.stopReason === "error");
 		expect(errors).toHaveLength(1);
 		expect(errors[0].message.retryRecovery).toMatchObject({ recovery: "plain", note: "error; retried" });
+	});
+
+	it.each<[string, MockResponse]>([
+		["reasoning streamed before the socket closed", { ...droppedAfterThinking, providerReplays: undefined }],
+		[
+			"a block opened and died before its first delta",
+			{ content: [{ type: "text", text: "" }], stopReason: "error", errorMessage: SOCKET_CLOSE_MID_STREAM },
+		],
+		[
+			"a cut chunked transfer after reasoning",
+			{
+				content: [{ type: "thinking", thinking: "partial plan for the edit" }],
+				stopReason: "error",
+				errorMessage: TRANSFER_ENCODING_CUT,
+			},
+		],
+		["a contentless diagnostic no provider loop retries", { stopReason: "error", errorMessage: "premature close" }],
+		[
+			"a contentless failure event whose code the Codex loop declines",
+			{ stopReason: "error", errorMessage: CODEX_UNREPLAYED_WIRE_EVENT },
+		],
+		[
+			"a contentless failure event whose code the Codex loop replays",
+			{ stopReason: "error", errorMessage: CODEX_REPLAYED_EVENT },
+		],
+	])("advances the fallback chain at once for an unreported wire failure: %s", async (_label, failure) => {
+		// A provider that does not report `providerReplays` has said nothing about
+		// how often the request went out, and nothing is not one. The OpenAI
+		// completions route is the measured case: `fetchWithRetry` replayed a 503,
+		// the replay then streamed and died, and the message it surfaced carries
+		// content, a wording no provider loop retries, and no count. Reading the
+		// content or the wording as "sent once" sent the identical body six times
+		// where the chain needed two.
+		const { primary, fallback, requestedModels, fallbackEvents } = await runFallbackChainRecovery([
+			failure,
+			{ content: ["recovered on fallback"], stopReason: "stop" },
+		]);
+
+		expect(requestedModels).toEqual([primary, fallback]);
+		expect(fallbackEvents).toHaveLength(1);
+	});
+
+	it("spends at most two held retries per recovery, across every model the chain tries", async () => {
+		// The hold is bounded by the recovery, not by the model: a fallback that
+		// the spent retry budget hands a fresh budget does not get two more held
+		// retries of its own. Without the bound every chain entry reached that way
+		// re-opens the hold, so the added delay grows with the length of the chain.
+		const next = getBundledModel("google", "gemini-2.5-flash");
+		const { primary, fallback, requestedModels } = await runFallbackChainRecovery(
+			[
+				droppedAfterThinking,
+				droppedAfterThinking,
+				droppedAfterThinking,
+				droppedAfterThinking,
+				{ content: ["recovered on the second fallback"], stopReason: "stop" },
+			],
+			2,
+			{
+				primary: getBundledModel("anthropic", "claude-sonnet-4-5"),
+				fallback: getBundledModel("openai", "gpt-5.5"),
+				next,
+			},
+		);
+
+		// Two held retries on the primary; its third failure spends the budget and
+		// walks to the first fallback, whose own failure walks on at once.
+		expect(requestedModels).toEqual([primary, primary, primary, fallback, `${next.provider}/${next.id}`]);
 	});
 
 	it("keeps a repeated wire failure on the same model for two retries, then consults the fallback chain", async () => {
@@ -690,13 +767,12 @@ describe("AgentSession retry recovery", () => {
 		expect(fallbackEvents).toHaveLength(1);
 	});
 
-	it("keeps the immediate fallback for a wire failure that streamed nothing", async () => {
-		// Nothing streamed means the layers below turn recovery have already
-		// replayed this request on their own budgets — up to eleven times on the
-		// Anthropic route. Holding the chain here would run those loops again,
-		// so the first attempt still switches.
+	it("keeps the immediate fallback for a wire failure the provider loop already replayed", async () => {
+		// Nothing streamed, so the Anthropic loop replayed this request on its own
+		// budget and says so: ten replays. Holding the chain here would run that
+		// loop again, so the first attempt still switches.
 		const { primary, fallback, requestedModels, fallbackEvents, sessionManager } = await runFallbackChainRecovery([
-			{ stopReason: "error", errorMessage: SOCKET_CLOSE_MID_STREAM },
+			{ stopReason: "error", errorMessage: SOCKET_CLOSE_MID_STREAM, providerReplays: 10 },
 			{ content: ["recovered on fallback"], stopReason: "stop" },
 		]);
 
@@ -710,7 +786,7 @@ describe("AgentSession retry recovery", () => {
 		// ten provider retries are spent; the wire wording rides in on the
 		// cause. The chain must not wait behind a request already replayed.
 		const { primary, fallback, requestedModels, fallbackEvents } = await runFallbackChainRecovery([
-			{ stopReason: "error", errorMessage: PROVIDER_CONNECTION_ERROR },
+			{ stopReason: "error", errorMessage: PROVIDER_CONNECTION_ERROR, providerReplays: 10 },
 			{ content: ["recovered on fallback"], stopReason: "stop" },
 		]);
 
@@ -722,12 +798,14 @@ describe("AgentSession retry recovery", () => {
 		// A gateway relaying SSE reports its own transfer-encoding diagnostic
 		// rather than the runtime's socket wording. Before this was classified
 		// the wording matched no transport pattern, so the turn advanced the
-		// chain on the first failure instead of replaying a route that works.
+		// chain on the first failure instead of replaying a route that works —
+		// even with the provider reporting it sent the request once.
 		const { primary, requestedModels, fallbackEvents, sessionManager } = await runFallbackChainRecovery([
 			{
 				content: [{ type: "thinking", thinking: "partial plan for the edit" }],
 				stopReason: "error",
 				errorMessage: TRANSFER_ENCODING_CUT,
+				providerReplays: 0,
 			},
 			{ content: ["recovered on the same model"], stopReason: "stop" },
 		]);
@@ -740,12 +818,13 @@ describe("AgentSession retry recovery", () => {
 	it("advances the fallback chain at once for a timeout that streamed reasoning", async () => {
 		// A held replay of a timeout costs a whole first-event window each, so
 		// the timeout exclusion must hold even where every other condition of
-		// the hold is met.
+		// the hold is met, a reported single request included.
 		const { primary, fallback, requestedModels, fallbackEvents } = await runFallbackChainRecovery([
 			{
 				content: [{ type: "thinking", thinking: "partial plan for the edit" }],
 				stopReason: "error",
 				errorMessage: ENVOY_CONNECTION_TIMEOUT,
+				providerReplays: 0,
 			},
 			{ content: ["recovered on fallback"], stopReason: "stop" },
 		]);
@@ -782,6 +861,7 @@ describe("AgentSession retry recovery", () => {
 					content: [{ type: "thinking", thinking: "partial plan for the edit" }],
 					stopReason: "error",
 					errorMessage: TRANSFER_ENCODING_CUT,
+					providerReplays: 0,
 				},
 				{ content: ["recovered on fallback"], stopReason: "stop" },
 			],
@@ -806,6 +886,7 @@ describe("AgentSession retry recovery", () => {
 				content: [{ type: "thinking", thinking: "partial plan for the edit" }],
 				stopReason: "error",
 				errorMessage: `${SOCKET_CLOSE_MID_STREAM} retry-after-ms=20000`,
+				providerReplays: 0,
 			},
 			{ content: ["recovered on fallback"], stopReason: "stop" },
 		]);
@@ -853,10 +934,9 @@ describe("AgentSession retry recovery", () => {
 	});
 
 	it("holds the chain on a reported zero whose wording a provider loop would retry", async () => {
-		// The wording stand-in exists to guess what the count states outright.
-		// Nothing streamed and the wording is one the loops below do replay, so
-		// the guess says "already replayed" — but the layer that would have done
-		// it reports that this request went out exactly once.
+		// Nothing streamed and the wording is one the loops below do replay, but
+		// the layer that would have done it reports that this request went out
+		// exactly once. The count decides, not the wording.
 		const { primary, requestedModels, fallbackEvents } = await runFallbackChainRecovery([
 			{ stopReason: "error", errorMessage: SOCKET_CLOSE_MID_STREAM, providerReplays: 0 },
 			{ content: ["recovered on the same model"], stopReason: "stop" },
@@ -864,20 +944,6 @@ describe("AgentSession retry recovery", () => {
 
 		expect(requestedModels).toEqual([primary, primary]);
 		expect(fallbackEvents).toEqual([]);
-	});
-
-	it("holds the chain when the stream opened a block and died before its first delta", async () => {
-		// `content_block_start` is where the Anthropic loop sets `firstTokenTime`
-		// and pushes the still-empty block, so a cut right after that frame is
-		// one no layer below replayed — even though the block carries no text.
-		const { primary, requestedModels, fallbackEvents, sessionManager } = await runFallbackChainRecovery([
-			{ content: [{ type: "text", text: "" }], stopReason: "error", errorMessage: SOCKET_CLOSE_MID_STREAM },
-			{ content: ["recovered on the same model"], stopReason: "stop" },
-		]);
-
-		expect(requestedModels).toEqual([primary, primary]);
-		expect(fallbackEvents).toEqual([]);
-		successfulAssistantEntry(sessionManager, "recovered on the same model");
 	});
 
 	it("holds the chain for an HTTP/2 peer reset that streamed reasoning", async () => {
@@ -888,6 +954,7 @@ describe("AgentSession retry recovery", () => {
 				content: [{ type: "thinking", thinking: "partial plan for the edit" }],
 				stopReason: "error",
 				errorMessage: HTTP2_STREAM_RESET,
+				providerReplays: 0,
 			},
 			{ content: ["recovered on the same model"], stopReason: "stop" },
 		]);
@@ -896,28 +963,22 @@ describe("AgentSession retry recovery", () => {
 		expect(fallbackEvents).toEqual([]);
 	});
 
-	it("holds the chain for a contentless failure event the provider loop declined to replay", async () => {
-		// `api_error` is not a code the Codex loop retries, and `read ECONNRESET`
-		// is not prose it retries either, so this request was made once.
+	it.each([7, 429, 503, 529])("holds the chain for a Go h2 stream error on stream %d", async streamId => {
+		// Go's `stream error: stream ID N` carries no status line; the stream
+		// number is not one. Read as a 429, 503 or 529 it vetoed the hold for
+		// those three stream numbers alone, on a failure otherwise identical to 7.
 		const { primary, requestedModels, fallbackEvents } = await runFallbackChainRecovery([
-			{ stopReason: "error", errorMessage: CODEX_UNREPLAYED_WIRE_EVENT },
+			{
+				content: [{ type: "thinking", thinking: "partial plan for the edit" }],
+				stopReason: "error",
+				errorMessage: `stream error: stream ID ${streamId}; INTERNAL_ERROR; received from peer`,
+				providerReplays: 0,
+			},
 			{ content: ["recovered on the same model"], stopReason: "stop" },
 		]);
 
 		expect(requestedModels).toEqual([primary, primary]);
 		expect(fallbackEvents).toEqual([]);
-	});
-
-	it("advances the chain for a contentless failure event the provider loop replayed", async () => {
-		// `model_error` is in that loop's retryable set, so the request has
-		// already been made several times; holding would run the loop again.
-		const { primary, fallback, requestedModels, fallbackEvents } = await runFallbackChainRecovery([
-			{ stopReason: "error", errorMessage: CODEX_REPLAYED_EVENT },
-			{ content: ["recovered on fallback"], stopReason: "stop" },
-		]);
-
-		expect(requestedModels).toEqual([primary, fallback]);
-		expect(fallbackEvents).toHaveLength(1);
 	});
 
 	it("advances the fallback chain at once for an account-policy denial worded as a wire failure", async () => {
@@ -928,6 +989,7 @@ describe("AgentSession retry recovery", () => {
 				content: [{ type: "thinking", thinking: "partial plan for the edit" }],
 				stopReason: "error",
 				errorMessage: "permission_error: socket is closed",
+				providerReplays: 0,
 			},
 			{ content: ["recovered on fallback"], stopReason: "stop" },
 		]);
@@ -944,32 +1006,8 @@ describe("AgentSession retry recovery", () => {
 				stopReason: "error",
 				stopDetails: { type: "refusal" },
 				errorMessage: "socket is closed",
+				providerReplays: 0,
 			},
-			{ content: ["recovered on fallback"], stopReason: "stop" },
-		]);
-
-		expect(requestedModels).toEqual([primary, fallback]);
-		expect(fallbackEvents).toHaveLength(1);
-	});
-
-	it("retries a cut that streamed nothing when no provider loop would have replayed it", async () => {
-		// `premature close` matches no transient transport pattern, so every
-		// provider loop declined it and this is its first and only request.
-		const { primary, requestedModels, fallbackEvents } = await runFallbackChainRecovery([
-			{ stopReason: "error", errorMessage: "premature close" },
-			{ content: ["recovered on the same model"], stopReason: "stop" },
-		]);
-
-		expect(requestedModels).toEqual([primary, primary]);
-		expect(fallbackEvents).toEqual([]);
-	});
-
-	it("keeps the immediate fallback for a provider failure event its own loop retries", async () => {
-		// Codex decides its replay from the event's code, not the prose, and
-		// retries up to five times while nothing has streamed; holding the chain
-		// on the wording would run that loop again.
-		const { primary, fallback, requestedModels, fallbackEvents } = await runFallbackChainRecovery([
-			{ stopReason: "error", errorMessage: "Codex error event: upstream closed the connection (code=model_error)" },
 			{ content: ["recovered on fallback"], stopReason: "stop" },
 		]);
 
@@ -987,9 +1025,9 @@ describe("AgentSession retry recovery", () => {
 		// provider's pre-output retry have already replayed the same model many
 		// times. The fourth carries none, but names a cap the replay re-hits
 		// while a chain entry may sit under a different one. None may hold the
-		// chain.
+		// chain, even on a reported single request.
 		const { primary, fallback, requestedModels, fallbackEvents } = await runFallbackChainRecovery([
-			{ stopReason: "error", errorMessage },
+			{ stopReason: "error", errorMessage, providerReplays: 0 },
 			{ content: ["recovered on fallback"], stopReason: "stop" },
 		]);
 
@@ -1014,8 +1052,10 @@ describe("AgentSession retry recovery", () => {
 			2,
 		);
 
-		// Three tries on the primary, the chain's one entry, its own held retry,
-		// then the spent budget ends the turn — eight scripted failures, five requests.
+		// Three tries on the primary (two of them held), the chain's one entry and
+		// one plain same-model retry on it — the saga spent its held retries on the
+		// primary — then the spent budget ends the turn: eight scripted failures,
+		// five requests.
 		expect(requestedModels).toEqual([primary, primary, primary, fallback, fallback]);
 	});
 
