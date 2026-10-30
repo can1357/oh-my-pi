@@ -1735,9 +1735,14 @@ export interface AutoLearnCaptureRunnerOptions {
 	createSessionId?: () => string;
 }
 
-/** A tool the host runs itself, never dispatching the call to the client: a refused copy could not stop it. */
-function hostRunsTool(model: Model, name: string): boolean {
-	return model.api === "anthropic-messages" && anthropicHostRunsTool(model as Model<"anthropic-messages">, name);
+/**
+ * A tool the host runs itself, never dispatching the call to the client: a refused copy could not stop it. `headers`
+ * are the model's resolved request headers (`resolveHeaders`), which can switch a host tool on.
+ */
+function hostRunsTool(model: Model, name: string, headers: Record<string, string> | undefined): boolean {
+	return (
+		model.api === "anthropic-messages" && anthropicHostRunsTool(model as Model<"anthropic-messages">, name, headers)
+	);
 }
 
 /** Build a private capture runner over a detached message snapshot and provider session. */
@@ -1749,6 +1754,9 @@ export function createAutoLearnCaptureRunner(
 		if (captureTools.length === 0 || signal?.aborted) return;
 		const captureModel = options.sourceAgent.state.model;
 		if (!captureModel) return;
+		// Configured headers live behind `resolveHeaders` until the stream resolves them; resolve them for the tool list.
+		const captureHeaders = await captureModel.resolveHeaders?.(signal);
+		const hostRuns = (name: string) => hostRunsTool(captureModel, name, captureHeaders);
 
 		const captureSessionId = options.createSessionId?.() ?? Bun.randomUUIDv7();
 		const captureProviderSessionState = new Map<string, ProviderSessionState>();
@@ -1788,7 +1796,7 @@ export function createAutoLearnCaptureRunner(
 				disableReasoning: options.sourceAgent.state.disableReasoning,
 				// A provider-executed tool is dropped instead: that costs the prefix only where the gateway search is on.
 				tools: captureToolList(
-					options.sourceAgent.state.tools.filter(tool => !hostRunsTool(captureModel, tool.name)),
+					options.sourceAgent.state.tools.filter(tool => !hostRuns(tool.name)),
 					captureTools,
 				),
 				messages: captureMessages,
@@ -1802,7 +1810,7 @@ export function createAutoLearnCaptureRunner(
 				options.sourceAgent.sessionId,
 			// The replayed history's `requestControls` declare tools the primary withdrew (Anthropic `tool_removal`);
 			// their sent definitions keep that declaration byte-identical. A host-run tool is never declared again.
-			sentToolDefinitions: options.sourceAgent.copySentToolDefinitions(name => !hostRunsTool(captureModel, name)),
+			sentToolDefinitions: options.sourceAgent.copySentToolDefinitions(name => !hostRuns(name)),
 			providerSessionState: captureProviderSessionState,
 			getApiKey: requestModel => options.sourceAgent.getApiKey?.(requestModel),
 			onPayload: options.onPayload,

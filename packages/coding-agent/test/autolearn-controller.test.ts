@@ -467,79 +467,91 @@ describe("isolated auto-learn capture", () => {
 		expect(new SentToolDefinitions().inactiveFor(replayed, learnWire)).toBeUndefined();
 	});
 
-	it("sends no tool the Umans gateway would run itself, active or re-declared, on the capture's wire", async () => {
-		const mock = createMockModel({ responses: [{ content: ["Primary answer."] }] });
-		const built = buildModel({
-			id: "claude-test",
-			name: "Umans test",
-			api: "anthropic-messages",
-			provider: "umans",
-			baseUrl: "https://api.code.umans.ai",
-			headers: { "X-Umans-Websearch-Provider": "native" },
-			reasoning: false,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 128_000,
-			maxTokens: 8_192,
-		});
-		// With declaration replay on, a withdrawn tool's sent definition would be declared again.
-		const umans = { ...built, compat: { ...built.compat, supportsMidConversationToolChanges: true } };
-		const webSearch = captureTool("web_search", "Search the web");
-		const readTool = captureTool("read", "Read files");
-		const learnTool = captureTool("learn", "Remember a fact");
-		// The primary sent all three, and its last response kept a declaration that names `web_search`.
-		const declaring: AssistantMessage = {
-			role: "assistant",
-			content: [{ type: "text", text: "Searched." }],
-			api: "anthropic-messages",
-			provider: "umans",
-			model: "claude-test",
-			usage: ZERO_USAGE,
-			stopReason: "stop",
-			timestamp: 2,
-			requestControls: {
-				messageIndex: 1,
-				tools: { declared: ["web_search", "read", "learn"], deferred: [], active: ["web_search", "read", "learn"] },
-			},
-		};
-		const sourceAgent = new Agent({
-			initialState: {
-				model: umans,
-				systemPrompt: ["Test"],
-				tools: [webSearch, readTool, learnTool],
-				messages: [{ role: "user", content: "Look it up", timestamp: 1 }, declaring],
-			},
-			convertToLlm,
-			streamFn: mock.stream,
-		});
-		await sourceAgent.prompt("Earlier task");
-		let requestBody = "";
-		const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
-			requestBody = requestBodyText(init) ?? "";
-			return new Response(
-				JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "x" } }),
-				{
-					status: 400,
-					headers: { "Content-Type": "application/json" },
+	for (const via of ["headers", "resolveHeaders"] as const) {
+		it(`sends no tool the Umans gateway would run itself, active or re-declared, on the capture's wire (${via})`, async () => {
+			const mock = createMockModel({ responses: [{ content: ["Primary answer."] }] });
+			const gateway = { "X-Umans-Websearch-Provider": "native" };
+			const built = buildModel({
+				id: "claude-test",
+				name: "Umans test",
+				api: "anthropic-messages",
+				provider: "umans",
+				baseUrl: "https://api.code.umans.ai",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 8_192,
+			});
+			// With declaration replay on, a withdrawn tool's sent definition would be declared again. The wire model is
+			// what the stream sends once it has resolved any `resolveHeaders`.
+			const wire = {
+				...built,
+				headers: gateway,
+				compat: { ...built.compat, supportsMidConversationToolChanges: true },
+			};
+			const umans = via === "headers" ? wire : { ...wire, headers: undefined, resolveHeaders: async () => gateway };
+			const webSearch = captureTool("web_search", "Search the web");
+			const readTool = captureTool("read", "Read files");
+			const learnTool = captureTool("learn", "Remember a fact");
+			// The primary sent all three, and its last response kept a declaration that names `web_search`.
+			const declaring: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "Searched." }],
+				api: "anthropic-messages",
+				provider: "umans",
+				model: "claude-test",
+				usage: ZERO_USAGE,
+				stopReason: "stop",
+				timestamp: 2,
+				requestControls: {
+					messageIndex: 1,
+					tools: {
+						declared: ["web_search", "read", "learn"],
+						deferred: [],
+						active: ["web_search", "read", "learn"],
+					},
 				},
-			);
-		}) as typeof fetch;
-		await createAutoLearnCaptureRunner({
-			sourceAgent,
-			captureTools: () => [learnTool],
-			createAgent: options =>
-				new Agent({
-					...options,
-					convertToLlm,
-					streamFn: (_requestModel, context, streamOptions) =>
-						streamAnthropic(umans, context, { ...streamOptions, apiKey: "test-key", fetch: fetchMock }),
-				}),
-		})("Capture");
+			};
+			const sourceAgent = new Agent({
+				initialState: {
+					model: umans,
+					systemPrompt: ["Test"],
+					tools: [webSearch, readTool, learnTool],
+					messages: [{ role: "user", content: "Look it up", timestamp: 1 }, declaring],
+				},
+				convertToLlm,
+				streamFn: mock.stream,
+			});
+			await sourceAgent.prompt("Earlier task");
+			let requestBody = "";
+			const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
+				requestBody = requestBodyText(init) ?? "";
+				return new Response(
+					JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "x" } }),
+					{
+						status: 400,
+						headers: { "Content-Type": "application/json" },
+					},
+				);
+			}) as typeof fetch;
+			await createAutoLearnCaptureRunner({
+				sourceAgent,
+				captureTools: () => [learnTool],
+				createAgent: options =>
+					new Agent({
+						...options,
+						convertToLlm,
+						streamFn: (_requestModel, context, streamOptions) =>
+							streamAnthropic(wire, context, { ...streamOptions, apiKey: "test-key", fetch: fetchMock }),
+					}),
+			})("Capture");
 
-		const tools = (JSON.parse(requestBody) as { tools?: { name: string }[] }).tools ?? [];
-		expect(tools.map(t => t.name)).toEqual(["_read", "_learn"]);
-		expect(requestBody).not.toContain("web_search");
-	});
+			const tools = (JSON.parse(requestBody) as { tools?: { name: string }[] }).tools ?? [];
+			expect(tools.map(t => t.name)).toEqual(["_read", "_learn"]);
+			expect(requestBody).not.toContain("web_search");
+		});
+	}
 
 	it("refuses a call to a non-capture tool without running any of its code", async () => {
 		const mock = createMockModel({
