@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import type { Stats } from "node:fs";
+import { constants as fsConstants, type Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Readable } from "node:stream";
@@ -382,27 +382,34 @@ async function readTextIfPresent(file: string): Promise<string> {
 	}
 }
 
-async function scanSessionLinesIfPresent(file: string, onLine: (line: Uint8Array) => void): Promise<void> {
+async function scanSessionLines(
+	source: ReadableStream<Uint8Array>,
+	compressed: boolean,
+	onLine: (line: Uint8Array) => void,
+): Promise<void> {
 	// readLines buffers at most the largest record, including malformed records.
 	const scan = async (stream: ReadableStream<Uint8Array>): Promise<void> => {
 		for await (const line of readLines(stream)) onLine(line);
 	};
+	if (!compressed) {
+		await scan(source);
+		return;
+	}
+	const gunzip = createGunzip();
+	await pipeline(source, gunzip, async (inflated: NodeJS.ReadableStream) => {
+		// Match the native stream's byte budget, not one arbitrary chunk or
+		// a default queue that counts each potentially large chunk as size 1.
+		await scan(
+			Readable.toWeb(inflated, {
+				strategy: new ByteLengthQueuingStrategy({ highWaterMark: gunzip.readableHighWaterMark }),
+			}),
+		);
+	});
+}
+
+async function scanSessionLinesIfPresent(file: string, onLine: (line: Uint8Array) => void): Promise<void> {
 	try {
-		const stream = Bun.file(file).stream();
-		if (file.endsWith(COMPRESSED_SESSION_SUFFIX)) {
-			const gunzip = createGunzip();
-			await pipeline(stream, gunzip, async (source: NodeJS.ReadableStream) => {
-				// Match the native stream's byte budget, not one arbitrary chunk or
-				// a default queue that counts each potentially large chunk as size 1.
-				await scan(
-					Readable.toWeb(source, {
-						strategy: new ByteLengthQueuingStrategy({ highWaterMark: gunzip.readableHighWaterMark }),
-					}),
-				);
-			});
-		} else {
-			await scan(stream);
-		}
+		await scanSessionLines(Bun.file(file).stream(), file.endsWith(COMPRESSED_SESSION_SUFFIX), onLine);
 	} catch (error) {
 		if (codeOf(error) === "ENOENT") return;
 		throw error;
@@ -456,8 +463,46 @@ const SESSION_LINK_HOPS = 32;
 /** What a walk found, and whether it could finish — see {@link blobHashesOnSessionPath}. */
 interface ReachableBlobs {
 	hashes: string[];
+	/** Where the walk ended, so a caller can check it against what it holds. */
+	real?: string;
 	/** Why the walk could not be completed, when it could not be. */
 	unresolved?: string;
+}
+
+/**
+ * Resolve a directory one component at a time, collecting the blob entries
+ * the path goes *through*.
+ *
+ * A link in the blob store can be a directory component as easily as a
+ * final one: `blobs/<hash>` pointing at a directory with a session below
+ * it. Deleting that entry breaks the session exactly as deleting the
+ * transcript would, so every component on the way is checked, and each
+ * prefix goes to `realpath` before the next component is attached — which
+ * is what makes `..` and a symlinked component mean what the kernel means
+ * by them.
+ */
+async function resolveThroughBlobs(
+	directory: string,
+	blobDir: Stats,
+): Promise<{ real?: string; hashes: string[]; unresolved?: string }> {
+	const hashes: string[] = [];
+	const parts = directory.split("/");
+	let prefix = parts[0] === "" ? "/" : parts[0] || ".";
+	for (const part of parts.slice(1)) {
+		if (part === "") continue;
+		const real = await fs.realpath(prefix).catch(() => undefined);
+		if (real === undefined) return { hashes, unresolved: `${prefix} could not be resolved` };
+		const holder = await statIfPresent(real);
+		if (!holder) return { hashes, unresolved: `${real} could not be read` };
+		if (holder.dev === blobDir.dev && holder.ino === blobDir.ino) {
+			const hash = part.match(BLOB_FILE_RE)?.[1]?.toLowerCase();
+			if (hash && BLOB_HASH_RE.test(hash)) hashes.push(hash);
+		}
+		prefix = real === "/" ? `/${part}` : `${real}/${part}`;
+	}
+	const real = await fs.realpath(prefix).catch(() => undefined);
+	if (real === undefined) return { hashes, unresolved: `${prefix} could not be resolved` };
+	return { real, hashes };
 }
 
 /**
@@ -474,43 +519,67 @@ interface ReachableBlobs {
  * the second takes the transcript and the blobs it referenced, both
  * reporting `errors: []`.
  *
- * Each hop is resolved the way the kernel resolves it: a relative target is
- * taken from the *physical* directory the link lives in, not from the
- * lexical one. `sessions/b -> ../offloaded` holding
- * `session.jsonl -> ../blobs/<hash>` is where the two answers differ — the
- * lexical one names `sessions/blobs/<hash>`, which does not exist, so the
- * blob on the real path was left unprotected and swept.
+ * **Nothing here normalises a path.** `path.resolve` and `path.join`
+ * collapse `..` before anything follows a link, which is not what the
+ * kernel does and was wrong in a new way in each of three rounds: `..`
+ * taken from the lexical parent, then `..` after a symlinked prefix, then a
+ * link used as a directory component. Every prefix goes to `realpath`
+ * instead, component by component, and only the final component — which
+ * cannot be a directory link — is ever attached by string.
+ *
+ * This is **not** a claim that the walk is equivalent to the kernel's own
+ * resolution. It is an enumeration of the entries a session is reachable
+ * through, done with the kernel's resolver rather than a reimplementation
+ * of it, and it is checked against the path the caller's open actually
+ * resolved: where the two disagree, the caller refuses. The authority is
+ * the descriptor, not this.
  *
  * Directories are compared by device and inode rather than by name, because
  * a symlinked agent directory, a symlinked blob directory or one reached
  * across a filesystem boundary gives the same physical directory a different
- * name. Where that identity cannot be established, or the walk cannot be
- * finished, this says so rather than answering: a sweep that cannot
- * establish something keeps.
+ * name.
+ *
+ * A path that cannot be resolved is a path whose blobs cannot be shown to
+ * be unreferenced, so this says so instead of answering, and the caller
+ * deletes nothing in that run.
  */
 async function blobHashesOnSessionPath(file: string, blobDir: Stats | undefined): Promise<ReachableBlobs> {
 	if (!blobDir) return { hashes: [], unresolved: `${file}: the blob directory could not be identified` };
 	const hashes: string[] = [];
-	let current = path.resolve(file);
+	let current = file;
 	for (let hop = 0; ; hop++) {
 		if (hop >= SESSION_LINK_HOPS) {
 			return { hashes, unresolved: `${file}: more than ${SESSION_LINK_HOPS} links deep` };
 		}
-		const holder = path.dirname(current);
+		// The kernel resolves the whole prefix — every symlinked component
+		// and every `..` between them, in the order it meets them — and the
+		// blob entries the path passes through are collected on the way.
+		const through = await resolveThroughBlobs(path.dirname(current), blobDir);
+		hashes.push(...through.hashes);
+		if (through.real === undefined) return { hashes, unresolved: `${file}: ${through.unresolved}` };
+		const holder = through.real;
 		const parent = await statIfPresent(holder);
-		if (parent?.dev === blobDir.dev && parent.ino === blobDir.ino) {
+		if (!parent) return { hashes, unresolved: `${file}: ${holder} could not be read` };
+		const entry = holder === "/" ? `/${path.basename(current)}` : `${holder}/${path.basename(current)}`;
+		if (parent.dev === blobDir.dev && parent.ino === blobDir.ino) {
 			const hash = path.basename(current).match(BLOB_FILE_RE)?.[1]?.toLowerCase();
 			if (hash && BLOB_HASH_RE.test(hash)) hashes.push(hash);
 		}
-		const target = await fs.readlink(current).catch(() => undefined);
-		if (target === undefined) return { hashes };
-		if (path.isAbsolute(target)) {
-			current = path.resolve(target);
-			continue;
+		let target: string;
+		try {
+			target = await fs.readlink(entry);
+		} catch (error) {
+			// Not a link, or nothing at that name: either way the path ends
+			// here. Anything else — a permission, an I/O failure — is a
+			// question this run could not answer.
+			const code = codeOf(error);
+			if (code === "EINVAL" || code === "ENOENT") return { hashes, real: entry };
+			return { hashes, unresolved: `${entry}: ${errorMessage(error)}` };
 		}
-		const physical = await fs.realpath(holder).catch(() => undefined);
-		if (physical === undefined) return { hashes, unresolved: `${file}: ${holder} could not be resolved` };
-		current = path.resolve(physical, target);
+		// Joined as text, never normalised: the next turn of the loop hands
+		// the whole of it, `..` and symlinked components alike, to
+		// `realpath`, one component at a time.
+		current = path.isAbsolute(target) ? target : `${holder}/${target}`;
 	}
 }
 
@@ -551,16 +620,60 @@ async function collectReferencedBlobHashes(
 	const unresolved: string[] = [];
 	if (!blobs) unresolved.push(`${blobDir}: the blob directory could not be identified`);
 	for (const file of files.values()) {
-		const reachable = await blobHashesOnSessionPath(file, blobs);
-		for (const hash of reachable.hashes) hashes.add(hash);
-		if (reachable.unresolved) unresolved.push(reachable.unresolved);
-		// Keep raw-text matching: recoverable malformed records can still own blobs.
-		await scanSessionLinesIfPresent(file, line => {
-			for (const match of decoder.decode(line).matchAll(BLOB_REF_RE)) {
-				const hash = match[1]?.toLowerCase();
-				if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
-			}
+		// Opened first, and everything after it is about the object this run
+		// holds rather than about the name it came from. `/proc/self/fd/<n>`
+		// is the path the kernel resolved at the moment of the open, taken
+		// atomically with it: a directory renamed away afterwards, or an
+		// alias swapped underneath, cannot change what is being read here,
+		// and the sweep is no longer deciding from a name it looked up twice.
+		const held = await fs.open(file, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK).catch(error => {
+			const code = codeOf(error);
+			// Nothing at that name, or a name that cannot be a session:
+			// there is no session here to protect.
+			if (code === "ENOENT" || code === "ENOTDIR" || code === "ENXIO") return undefined;
+			unresolved.push(`${file}: ${errorMessage(error)}`);
+			return undefined;
 		});
+		if (!held) continue;
+		try {
+			const real = await fs.readlink(`/proc/self/fd/${held.fd}`).catch(() => undefined);
+			const reachable = await blobHashesOnSessionPath(file, blobs);
+			for (const hash of reachable.hashes) hashes.add(hash);
+			if (reachable.unresolved) {
+				unresolved.push(reachable.unresolved);
+			} else if (real !== undefined && reachable.real !== undefined && real !== reachable.real) {
+				// The walk and the descriptor disagree, so the path moved
+				// while this run was reading it. Which answer is right is
+				// not the question: that it changed is enough to stop.
+				unresolved.push(`${file}: its path changed while the sweep was reading it (${real})`);
+			}
+			if (blobs && real !== undefined) {
+				const holder = await statIfPresent(path.dirname(real));
+				if (holder?.dev === blobs.dev && holder.ino === blobs.ino) {
+					const hash = path.basename(real).match(BLOB_FILE_RE)?.[1]?.toLowerCase();
+					if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
+				}
+			}
+			// Read through the descriptor, not reopened by name. Keep raw-text
+			// matching: recoverable malformed records can still own blobs.
+			await scanSessionLines(
+				Readable.toWeb(held.createReadStream({ autoClose: false })) as ReadableStream<Uint8Array>,
+				(real ?? file).endsWith(COMPRESSED_SESSION_SUFFIX),
+				line => {
+					for (const match of decoder.decode(line).matchAll(BLOB_REF_RE)) {
+						const hash = match[1]?.toLowerCase();
+						if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
+					}
+				},
+			);
+		} catch (error) {
+			// A decision taken is a decision reported: a read that fails here
+			// used to throw out of the whole command, so a caller asking for
+			// JSON got a stack trace instead of a refusal.
+			unresolved.push(`${file}: ${errorMessage(error)}`);
+		} finally {
+			await held.close().catch(() => undefined);
+		}
 	}
 	const standing = await statIfPresent(blobDir);
 	if (blobs && (standing?.dev !== blobs.dev || standing.ino !== blobs.ino)) {
@@ -733,7 +846,12 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 	const defaultRoots = [sessionsRoot, archiveSessionsRoot];
 	const exactSessionFiles = new Map<string, string>();
 	for (const file of await collectRegisteredSessionPaths(getCustomSessionFilesDir(options.agentDir))) {
-		if (!(await statIfPresent(file))?.isFile()) continue;
+		// `lstat`, and a failure is not an absence: a registered path that
+		// loops or cannot be read is a session this run cannot account for,
+		// and it is carried to the refusal below rather than thrown out of
+		// the command as a stack trace.
+		const standing = await fs.lstat(file).catch(() => undefined);
+		if (!standing?.isFile() && !standing?.isSymbolicLink()) continue;
 		exactSessionFiles.set(normalizePathForComparison(file), file);
 	}
 	for (const file of await collectBreadcrumbSessionFiles(getTerminalSessionsDir(options.agentDir))) {

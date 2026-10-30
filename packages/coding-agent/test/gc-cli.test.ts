@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Readable } from "node:stream";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
 import {
@@ -408,6 +409,85 @@ describe("runGcCommand blob sweep", () => {
 		expect(result.blobs?.deleted).toBeGreaterThan(0);
 		expect(await fs.readdir(blobs)).toEqual([]);
 	});
+	test("keeps a blob reached through a blob-named link used as a directory", async () => {
+		const blobs = getBlobsDir(root);
+		const innerHash = hashFor("inner-prefix");
+		const prefixHash = hashFor("prefix-link");
+		const inner = await writeBlob(root, innerHash, "inner");
+		const elsewhere = path.join(root, "offloaded-sessions");
+		await fs.mkdir(elsewhere, { recursive: true });
+		await Bun.write(
+			path.join(elsewhere, "prefixed.jsonl"),
+			`${JSON.stringify({ type: "message", ref: `blob:sha256:${innerHash}` })}\n`,
+		);
+		// The blob store entry is a directory component of the session's
+		// path, not its endpoint. Deleting it breaks the session just as
+		// completely.
+		await fs.symlink(elsewhere, path.join(blobs, prefixHash));
+		const sessions = path.join(getSessionsDir(root), "project");
+		await fs.mkdir(sessions, { recursive: true });
+		await fs.symlink(path.join(blobs, prefixHash, "prefixed.jsonl"), path.join(sessions, "prefixed.jsonl"));
+		const aged = new Date(Date.now() - 86_400_000);
+		await fs.lutimes(path.join(blobs, prefixHash), aged, aged);
+		await agePath(inner);
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect((await fs.lstat(path.join(blobs, prefixHash))).isSymbolicLink()).toBe(true);
+		expect(await Bun.file(inner).exists()).toBe(true);
+	});
+
+	test("reads the session it opened, not whatever the name means afterwards", async () => {
+		const outerHash = hashFor("outer-kept");
+		const decoyHash = hashFor("decoy-referenced");
+		const outer = await writeBlob(root, outerHash, "outer");
+		const decoy = await writeBlob(root, decoyHash, "decoy");
+		await agePath(outer);
+		await agePath(decoy);
+		const original = path.join(root, "external", "original");
+		await fs.mkdir(path.dirname(original), { recursive: true });
+		await Bun.write(original, `${JSON.stringify({ type: "message", ref: `blob:sha256:${outerHash}` })}\n`);
+		const offloaded = path.join(root, "offloaded");
+		await fs.mkdir(offloaded, { recursive: true });
+		await fs.symlink(path.join("..", "external", "original"), path.join(offloaded, "session.jsonl"));
+		const sessions = path.join(getSessionsDir(root), "project");
+		await fs.mkdir(sessions, { recursive: true });
+		await fs.symlink(path.join(offloaded, "session.jsonl"), path.join(sessions, "session.jsonl"));
+		// The directory is swapped for a replacement whose session refers to
+		// a different blob, after the sweep has opened the first one. A run
+		// that re-resolved the name would read the replacement and sweep the
+		// blob the session it actually opened refers to.
+		const replacement = path.join(root, "replacement");
+		await fs.mkdir(replacement, { recursive: true });
+		await Bun.write(
+			path.join(replacement, "session.jsonl"),
+			`${JSON.stringify({ type: "message", ref: `blob:sha256:${decoyHash}` })}\n`,
+		);
+		const realOpen = fs.open;
+		let swapped = false;
+		const open = spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
+			const handle = await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
+			if (!swapped && String(target).endsWith("session.jsonl")) {
+				swapped = true;
+				await fs.rename(offloaded, path.join(root, "offloaded-gone"));
+				await fs.rename(replacement, offloaded);
+			}
+			return handle;
+		}) as typeof fs.open);
+		let result: GcResult;
+		try {
+			result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+		} finally {
+			open.mockRestore();
+		}
+
+		// Either answer is defensible as long as the blob the opened session
+		// refers to survives; what must not happen is deleting it on the
+		// strength of a file this run never read.
+		expect(await Bun.file(outer).exists()).toBe(true);
+		expect(result.blobs?.errors.length ?? 0).toBeGreaterThan(0);
+	});
 
 	test("--apply keeps fresh unreferenced blobs out of sweep candidates", async () => {
 		const blob = await writeBlob(root, hashFor("fresh-orphan"), "fresh");
@@ -688,7 +768,7 @@ describe("runGcCommand blob sweep", () => {
 		expect(await Bun.file(orphan).exists()).toBe(false);
 	});
 
-	test("aborts blob deletion when a gzip archive fails after yielding valid references", async () => {
+	test("refuses to delete blobs when a gzip archive fails after yielding valid references", async () => {
 		const hash = hashFor("partial-archive-reference");
 		const referenced = await writeBlob(root, hash, "referenced");
 		const orphan = await writeBlob(root, hashFor("partial-archive-orphan"), "orphan");
@@ -698,43 +778,52 @@ describe("runGcCommand blob sweep", () => {
 		const bytes = gzipSync(`blob:sha256:${hash}\n${"{}\n".repeat(12 * 1024)}`);
 		await Bun.write(archive, bytes.subarray(0, -4));
 
-		await expect(runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } })).rejects.toThrow();
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		// The refusal is the command's answer, not an exception thrown past
+		// it: a caller that asked for JSON gets a result that says what was
+		// refused and why, and the exit status carries it.
+		expect(result.blobs?.deleted).toBe(0);
+		expect(result.blobs?.errors.join("\n")).toContain("no blob was deleted in this run");
 
 		expect(await Bun.file(referenced).exists()).toBe(true);
 		expect(await Bun.file(orphan).exists()).toBe(true);
 		expect(await Bun.file(path.join(root, "gc.lock")).exists()).toBe(false);
 	});
 
-	test("aborts blob deletion when a journal read fails after a complete record", async () => {
+	test("refuses to delete blobs when a journal read fails after a complete record", async () => {
 		const orphan = await writeBlob(root, hashFor("read-error-orphan"), "orphan");
 		await agePath(orphan);
 		const session = await writeSession(root, "project", "read-error", "complete");
-		const realFile = Bun.file.bind(Bun);
-		const fileSpy = spyOn(Bun, "file").mockImplementation((source, options) => {
-			const file = realFile(source as string, options);
-			if (source === session) {
-				file.stream = () => {
-					let yielded = false;
-					return new ReadableStream<Uint8Array<ArrayBuffer>>({
-						pull(controller) {
-							if (yielded) controller.error(Object.assign(new Error("journal read failed"), { code: "EIO" }));
-							else {
-								yielded = true;
-								controller.enqueue(new TextEncoder().encode("{}\n"));
-							}
-						},
-					});
-				};
-			}
-			return file;
-		});
+		// The sweep reads through the descriptor it holds, so the failure is
+		// injected there rather than at a reopen by name.
+		const realOpen = fs.open;
+		const fileSpy = spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
+			const handle = await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
+			if (String(target) !== session) return handle;
+			handle.createReadStream = (() => {
+				let yielded = false;
+				return new Readable({
+					read() {
+						if (yielded) this.destroy(Object.assign(new Error("journal read failed"), { code: "EIO" }));
+						else {
+							yielded = true;
+							this.push("{}\n");
+						}
+					},
+				});
+			}) as typeof handle.createReadStream;
+			return handle;
+		}) as typeof fs.open);
+		let result: GcResult;
 		try {
-			await expect(runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } })).rejects.toThrow(
-				"journal read failed",
-			);
+			result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
 		} finally {
 			fileSpy.mockRestore();
 		}
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect(result.blobs?.errors.join("\n")).toContain("journal read failed");
 
 		expect(await Bun.file(orphan).exists()).toBe(true);
 		expect(await Bun.file(path.join(root, "gc.lock")).exists()).toBe(false);
