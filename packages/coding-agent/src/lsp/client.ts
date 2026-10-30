@@ -1,7 +1,10 @@
+import * as os from "node:os";
 import * as path from "node:path";
 import { isEnoent, logger, postmortem, ptree, stableStringifyJson, untilAborted } from "@oh-my-pi/pi-utils";
 import { encodeMessageFrame, MessageFramer } from "../jsonrpc/message-framing";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
+import { resolveSyscallTarget } from "../tools/path-utils";
+import { findRepoRoot } from "../capability/fs";
 import { getConfig } from "./config";
 import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
@@ -84,15 +87,33 @@ const IDLE_CHECK_INTERVAL_MS = 60 * 1000;
 
 // Broker-shared server mode: language servers hosted by the per-project LSP mux
 // daemon, one per connection; a released server lingers for reuse while the mux runs.
-// Off by default so embedders and tests that drive getOrCreateClient directly
-// never touch the daemon broker; the SDK sets it from the `lsp.shared` setting at
-// session creation and on every later change. Only consulted at cold-start, so
-// running clients keep their transport.
-let sharedLspEnabled = false;
+// The newest hold decides; with none it is off, so embedders and tests that drive
+// getOrCreateClient directly never touch the daemon broker. Each process-binding SDK
+// session holds it from its `lsp.shared` setting until disposed, then hands it back to
+// the previous holder. Only consulted at cold-start, so running clients keep their transport.
+interface SharedLspHold {
+	enabled: boolean;
+}
+const sharedLspHolds: SharedLspHold[] = [];
 
-/** Enable or disable attaching to broker-shared language servers. */
-export function setSharedLspEnabled(enabled: boolean): void {
-	sharedLspEnabled = enabled;
+/** Whether a client cold start attaches to a broker-shared language server. */
+export function isSharedLspEnabled(): boolean {
+	return sharedLspHolds.at(-1)?.enabled ?? false;
+}
+
+/** Hold the shared-LSP mode at `enabled` until released; `set` follows later setting changes. */
+export function holdSharedLsp(enabled: boolean): { set(enabled: boolean): void; release(): void } {
+	const hold: SharedLspHold = { enabled };
+	sharedLspHolds.push(hold);
+	return {
+		set(next) {
+			hold.enabled = next;
+		},
+		release() {
+			const index = sharedLspHolds.indexOf(hold);
+			if (index !== -1) sharedLspHolds.splice(index, 1);
+		},
+	};
 }
 
 /**
@@ -186,9 +207,11 @@ export async function checkIdleClients(): Promise<void> {
 
 function startIdleChecker(): void {
 	if (idleCheckInterval) return;
-	idleCheckInterval = setInterval(() => {
-		void checkIdleClients();
-	}, IDLE_CHECK_INTERVAL_MS);
+	idleCheckInterval = logger.withoutContext(() =>
+		setInterval(() => {
+			void checkIdleClients();
+		}, IDLE_CHECK_INTERVAL_MS),
+	);
 }
 
 function stopIdleChecker(): void {
@@ -504,9 +527,14 @@ async function startMessageReader(client: LspClient): Promise<void> {
 								const params = message.params as { token: string | number; value?: { kind?: string } };
 								if (params.value?.kind === "begin") {
 									client.activeProgressTokens.add(params.token);
+									countFolderLoad(client, -1);
 								} else if (params.value?.kind === "end") {
 									client.activeProgressTokens.delete(params.token);
-									if (client.activeProgressTokens.size === 0) {
+									// After a folder add, only progress that began since ends the load.
+									if (
+										client.activeProgressTokens.size === 0 &&
+										!workspaceFolderStates.get(client)?.pendingLoads
+									) {
 										client.resolveProjectLoaded();
 									}
 								}
@@ -583,12 +611,138 @@ async function startMessageReader(client: LspClient): Promise<void> {
 	}
 }
 
+/** Workspace folders a client gained after `initialize`. */
+interface WorkspaceFolderState {
+	/**
+	 * Checkouts added to the workspace, as symlink-resolved paths, each with its
+	 * `didChangeWorkspaceFolders` delivery. A failed delivery removes its entry.
+	 */
+	added: Map<string, Promise<void>>;
+	/**
+	 * Folder-add notifications whose load has not begun: each progress `begin` after an
+	 * add starts one, and the project load stays pending while any is left.
+	 */
+	pendingLoads: number;
+	/** The last folder delivery; the next waits for it to settle. */
+	lastDelivery: Promise<void>;
+}
+
+const workspaceFolderStates = new WeakMap<LspClient, WorkspaceFolderState>();
+
+function workspaceFolder(folder: string): { uri: string; name: string } {
+	return { uri: fileToUri(folder), name: path.basename(folder) || "workspace" };
+}
+
 /**
- * Build the workspace folder list advertised to the server. Identical shape
- * for `initialize` params and `workspace/workspaceFolders` server requests.
+ * Build the workspace folder list advertised to the server: the client's root,
+ * then every checkout added since. Identical shape for `initialize` params and
+ * `workspace/workspaceFolders` server requests.
  */
 function currentWorkspaceFolders(client: LspClient): Array<{ uri: string; name: string }> {
-	return [{ uri: fileToUri(client.cwd), name: path.basename(client.cwd) || "workspace" }];
+	return [client.cwd, ...(workspaceFolderStates.get(client)?.added.keys() ?? [])].map(workspaceFolder);
+}
+
+function countFolderLoad(client: LspClient, delta: number): void {
+	const state = workspaceFolderStates.get(client);
+	if (state) state.pendingLoads = Math.max(0, state.pendingLoads + delta);
+}
+
+/** `filePath` with symlinks resolved, a missing tail kept; lexical when it cannot be resolved. */
+async function realPathOf(filePath: string): Promise<string> {
+	return (await resolveSyscallTarget(filePath, true)) ?? path.resolve(filePath);
+}
+
+/**
+ * The checkout to add to `client`'s workspace before it opens `filePath`: the one holding
+ * the file (symlinks resolved), when it is not the checkout holding the client's root. A
+ * server rooted at the session cwd never loads another checkout on its own (rust-analyzer
+ * finds no references there), nested worktrees and checkouts included. Only servers that
+ * accept `workspace/didChangeWorkspaceFolders` get one.
+ */
+async function workspaceFolderToAdd(client: LspClient, filePath: string): Promise<string | undefined> {
+	if (!client.serverCapabilities?.workspace?.workspaceFolders?.changeNotifications) return undefined;
+	const checkout = await findRepoRoot(path.dirname(await realPathOf(filePath)));
+	if (!checkout || checkout === (await findRepoRoot(await realPathOf(client.cwd)))) return undefined;
+	// A repository at or above the home directory (a dotfiles checkout) would have the
+	// server index everything under it.
+	if (isPathInsideWorkspace(await realPathOf(os.homedir()), checkout)) return undefined;
+	return checkout;
+}
+
+/**
+ * Add the checkouts holding `filePaths` to `client`'s workspace where the server would
+ * otherwise not load them ({@link workspaceFolderToAdd}), in one notification, and return
+ * once the server has them. Concurrent callers for one checkout share its delivery, which
+ * a caller's abort does not cancel. The server re-indexes, so the client's project-load
+ * wait covers that load too.
+ */
+export async function ensureWorkspaceFolders(
+	client: LspClient,
+	filePaths: readonly string[],
+	signal?: AbortSignal,
+): Promise<void> {
+	const wanted = new Set<string>();
+	for (const filePath of filePaths) {
+		throwIfAborted(signal);
+		const folder = await workspaceFolderToAdd(client, filePath);
+		if (folder) wanted.add(folder);
+	}
+	if (wanted.size === 0) return;
+	throwIfAborted(signal);
+	let state = workspaceFolderStates.get(client);
+	if (!state) {
+		state = { added: new Map(), pendingLoads: 0, lastDelivery: Promise.resolve() };
+		workspaceFolderStates.set(client, state);
+	}
+	const folders = state.added;
+	const missing = [...wanted].filter(folder => !folders.has(folder));
+	if (missing.length > 0) {
+		// One delivery at a time, so a failed write rolls back only its own add's load.
+		const current = state;
+		const delivery = current.lastDelivery.catch(() => {}).then(() => addWorkspaceFolders(client, missing, current));
+		delivery.catch(() => {});
+		current.lastDelivery = delivery;
+		for (const folder of missing) folders.set(folder, delivery);
+	}
+	await untilAborted(signal, Promise.all([...wanted].map(folder => folders.get(folder))));
+}
+
+/** {@link ensureWorkspaceFolders} for one file. */
+export function ensureWorkspaceFolder(client: LspClient, filePath: string, signal?: AbortSignal): Promise<void> {
+	return ensureWorkspaceFolders(client, [filePath], signal);
+}
+
+async function addWorkspaceFolders(
+	client: LspClient,
+	added: readonly string[],
+	state: WorkspaceFolderState,
+): Promise<void> {
+	const undoLoad = restartProjectLoad(client);
+	// Progress already running when the add arrives says nothing about the new folders.
+	state.pendingLoads++;
+	try {
+		await sendNotification(
+			client,
+			"workspace/didChangeWorkspaceFolders",
+			{ event: { added: added.map(workspaceFolder), removed: [] } },
+			AbortSignal.timeout(WATCHED_FILES_NOTIFY_TIMEOUT_MS),
+		);
+	} catch (err) {
+		for (const folder of added) state.added.delete(folder);
+		countFolderLoad(client, -1);
+		undoLoad();
+		throw err;
+	}
+	rustAnalyzerReadyClients.delete(client);
+}
+
+/** Whether a change to `filePath` concerns `client`: inside its root or a checkout added to it. */
+async function clientServesPath(client: LspClient, filePath: string): Promise<boolean> {
+	if (isPathInsideWorkspace(filePath, path.resolve(client.cwd))) return true;
+	const folders = workspaceFolderStates.get(client)?.added;
+	if (!folders?.size) return false;
+	const file = await realPathOf(filePath);
+	return [...folders.keys()].some(folder => isPathInsideWorkspace(file, folder));
 }
 
 /**
@@ -949,6 +1103,66 @@ async function waitForRustAnalyzerWorkspace(client: LspClient, signal?: AbortSig
 
 const PROJECT_LOAD_TIMEOUT_MS = 15_000;
 
+/**
+ * Extends a client's pending project-load wait for another load and returns the undo, or
+ * `undefined` once the wait has ended.
+ */
+const projectLoadExtenders = new WeakMap<LspClient, () => (() => void) | undefined>();
+
+/** A project-load wait that the server's progress, its exit, or {@link PROJECT_LOAD_TIMEOUT_MS} ends. */
+function createProjectLoad(): {
+	signal: Pick<LspClient, "projectLoaded" | "resolveProjectLoaded">;
+	extend: () => (() => void) | undefined;
+} {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	let settled = false;
+	const finish = () => {
+		clearTimeout(timeout);
+		settled = true;
+		resolve();
+	};
+	// Auto-resolve after timeout in case server doesn't use progress tokens
+	let deadline = Date.now() + PROJECT_LOAD_TIMEOUT_MS;
+	let timeout = setTimeout(finish, PROJECT_LOAD_TIMEOUT_MS);
+	const rearm = (at: number) => {
+		clearTimeout(timeout);
+		deadline = at;
+		timeout = setTimeout(finish, Math.max(0, at - Date.now()));
+	};
+	const extend = () => {
+		if (settled) return undefined;
+		const previous = deadline;
+		rearm(Date.now() + PROJECT_LOAD_TIMEOUT_MS);
+		return () => {
+			if (!settled) rearm(previous);
+		};
+	};
+	return { signal: { projectLoaded: promise, resolveProjectLoaded: finish }, extend };
+}
+
+/**
+ * Make `client`'s project-load wait cover a load the server just started: a wait still
+ * pending keeps its promise (callers already awaiting it see the new load end), an ended
+ * one is replaced. Returns the undo for a load that never started.
+ */
+function restartProjectLoad(client: LspClient): () => void {
+	const undo = projectLoadExtenders.get(client)?.() ?? startProjectLoad(client);
+	// However the load ends (its progress, the fallback timer, process exit), adds still
+	// counted as unstarted belong to it and must not hold up the next one.
+	client.projectLoaded.then(() => {
+		const state = workspaceFolderStates.get(client);
+		if (state) state.pendingLoads = 0;
+	});
+	return undo;
+}
+
+function startProjectLoad(client: LspClient): () => void {
+	const next = createProjectLoad();
+	Object.assign(client, next.signal);
+	projectLoadExtenders.set(client, next.extend);
+	return next.signal.resolveProjectLoaded;
+}
+
 /** Max time to wait for graceful LSP shutdown and process exit. */
 const SHUTDOWN_TIMEOUT_MS = 5_000;
 const EXIT_TIMEOUT_MS = 1_000;
@@ -1140,7 +1354,7 @@ export async function getOrCreateClient(
 		// already multiplexing this command. Any shared-path failure falls back
 		// to a private spawn so LSP never regresses on broker trouble.
 		let proc: LspTransport | null = null;
-		if (sharedLspEnabled && command === baseCommand) {
+		if (isSharedLspEnabled() && command === baseCommand) {
 			proc = await connectSharedLspTransport({ command, args, cwd, env, initializationOptions, signal });
 		}
 		proc ??= ptree.spawn([command, ...args], {
@@ -1149,18 +1363,7 @@ export async function getOrCreateClient(
 			env: env ? { ...Bun.env, ...env } : undefined,
 		});
 
-		let resolveProjectLoaded!: () => void;
-		const projectLoaded = new Promise<void>(resolve => {
-			resolveProjectLoaded = resolve;
-		});
-		// Auto-resolve after timeout in case server doesn't use progress tokens
-		const projectLoadTimeout = setTimeout(resolveProjectLoaded, PROJECT_LOAD_TIMEOUT_MS);
-		const originalResolve = resolveProjectLoaded;
-		resolveProjectLoaded = () => {
-			clearTimeout(projectLoadTimeout);
-			originalResolve();
-		};
-
+		const projectLoad = createProjectLoad();
 		const client: LspClient = {
 			name: key,
 			cwd,
@@ -1178,9 +1381,9 @@ export async function getOrCreateClient(
 			startedAt: Date.now(),
 			writeQueue: Promise.resolve(),
 			activeProgressTokens: new Set(),
-			projectLoaded,
-			resolveProjectLoaded,
+			...projectLoad.signal,
 		};
+		projectLoadExtenders.set(client, projectLoad.extend);
 
 		// Register crash recovery - remove client on process exit
 		proc.exited.then(() => {
@@ -1210,8 +1413,9 @@ export async function getOrCreateClient(
 			}
 		});
 
-		// Start background message reader
-		startMessageReader(client);
+		// Start background message reader. The client is shared by every session
+		// in the process, so its reader's records name none of them.
+		logger.withoutContext(() => startMessageReader(client));
 
 		try {
 			// Send initialize request
@@ -1423,6 +1627,7 @@ export async function ensureFileOpen(client: LspClient, filePath: string, signal
 			if (isEnoent(err)) return;
 			throw err;
 		}
+		await ensureWorkspaceFolder(client, filePath, signal);
 		const languageId = client.config.languageId ?? detectLanguageId(filePath);
 		throwIfAborted(signal);
 
@@ -1629,6 +1834,7 @@ export async function syncContent(
 			throwIfAborted(signal);
 			closeIdleFiles(client, signal);
 			// Open file with provided content instead of reading from disk
+			await ensureWorkspaceFolder(client, filePath, signal);
 			const languageId = client.config.languageId ?? detectLanguageId(filePath);
 			const version = (client.idleClosedFiles?.get(uri) ?? 0) + 1;
 			await sendNotification(
@@ -1745,8 +1951,9 @@ export async function notifyWorkspaceWatchedFiles(
 	const sendSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 	const results = await Promise.allSettled(
 		activeClients.map(async client => {
+			const served = await Promise.all(changes.map(change => clientServesPath(client, change.filePath)));
 			const clientChanges = changes
-				.filter(change => isPathInsideWorkspace(change.filePath, workspace))
+				.filter((_change, index) => served[index])
 				.map(change => {
 					const uri = fileToUri(change.filePath);
 					// Keep a report echoing the open document's version only while OMP's own
@@ -2038,6 +2245,46 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30000;
  *   to avoid leaking pending requests forever.
  */
 export async function sendRequest(
+	client: LspClient,
+	method: string,
+	params: unknown,
+	signal?: AbortSignal,
+	timeoutMs?: number,
+): Promise<unknown> {
+	const started = Date.now();
+	try {
+		return await sendRequestOnce(client, method, params, signal, timeoutMs);
+	} catch (err) {
+		// A server indexing a checkout added with didChangeWorkspaceFolders cancels
+		// requests with ContentModified (-32801); LSP asks clients to retry them. A
+		// command is never re-run: the server may have acted on it before cancelling.
+		const contentModified = err instanceof Error && err.message.startsWith("LSP error -32801");
+		if (!contentModified || method === "workspace/executeCommand" || !workspaceFolderStates.get(client)?.added.size) {
+			throw err;
+		}
+		// The retry spends what is left of the first attempt's budget, the default included.
+		const budget = timeoutMs ?? (signal ? undefined : DEFAULT_REQUEST_TIMEOUT_MS);
+		const deadline = budget === undefined ? undefined : started + budget;
+		const deadlineReached = Promise.withResolvers<void>();
+		const deadlineTimer =
+			deadline === undefined ? undefined : setTimeout(deadlineReached.resolve, Math.max(0, deadline - Date.now()));
+		try {
+			await untilAborted(signal, Promise.race([client.projectLoaded, deadlineReached.promise]));
+		} finally {
+			clearTimeout(deadlineTimer);
+		}
+		if (deadline !== undefined && Date.now() >= deadline) throw err;
+		return await sendRequestOnce(
+			client,
+			method,
+			params,
+			signal,
+			deadline === undefined ? undefined : deadline - Date.now(),
+		);
+	}
+}
+
+function sendRequestOnce(
 	client: LspClient,
 	method: string,
 	params: unknown,

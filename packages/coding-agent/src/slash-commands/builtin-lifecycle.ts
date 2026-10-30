@@ -1,5 +1,5 @@
 import { SEANCE_SLASH_COMMAND } from "./seance";
-import { clearSubmittedText, refuseImages, runWithDetachedDraft } from "./helpers/draft";
+import { clearSubmittedText, refuseImages, restoreDetachedDraft, runWithDetachedDraft } from "./helpers/draft";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
@@ -7,6 +7,7 @@ import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import { rebindMemoryBackendForCwd } from "../hindsight/backend";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
+import { continuesConversation } from "../modes/utils/conversation-position";
 import type { FreshSessionResult, HandoffResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
@@ -275,7 +276,30 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				runtime.ctx.showWarning(parsed.error);
 				return;
 			}
-			await runtime.ctx.handleCompactCommand(parsed.instructions, parsed.mode);
+			const { ctx } = runtime;
+			const origin = runtime.followUp;
+			// A switch still applying (or rolling back) decides which conversation is live; judge after it.
+			if (origin && ctx.session.isSessionTransitioning) await ctx.session.waitForSessionTransition();
+			if (origin && !continuesConversation(ctx.sessionManager, origin)) {
+				// Input hooks ran while the conversation changed: never compact one it was not sent in.
+				restoreDetachedDraft(ctx.editor, command.text, runtime.input?.images, runtime.input?.imageLinks);
+				ctx.showWarning("Conversation changed before /compact ran; returned it to the editor");
+				return;
+			}
+			if (origin && ctx.session.isStreaming) {
+				ctx.yieldCompaction = {
+					...origin,
+					text: command.text,
+					instructions: parsed.instructions,
+					mode: parsed.mode,
+				};
+				ctx.updatePendingMessagesDisplay();
+				ctx.showStatus("Queued compaction for when the agent yields");
+				// A prompt still in setup may bail without an agent run, and so without the settle that runs this.
+				ctx.runYieldCompaction();
+				return;
+			}
+			await ctx.handleCompactCommand(parsed.instructions, parsed.mode);
 		},
 	},
 	{

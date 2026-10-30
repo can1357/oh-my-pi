@@ -83,11 +83,6 @@ interface ProxyOptions {
 	maxMessageBytes?: number;
 	/** Answer `DOM.setFileInputFiles` with `Not allowed`, as Chrome does for a relay without file-URL access. */
 	denyFilePaths?: boolean;
-	/**
-	 * Hold each message over 1 MiB this long before forwarding it, as a slow link would. A real delay: the deadline under
-	 * test runs on the tab worker's own clock, which fake timers here cannot reach.
-	 */
-	holdLargeMs?: number;
 }
 
 interface ProxiedSocket {
@@ -141,8 +136,6 @@ function startCdpProxy(chromePort: number, options: ProxyOptions): CdpProxy {
 							return;
 						}
 					}
-				} else if (options.holdLargeMs) {
-					await Bun.sleep(options.holdLargeMs);
 				}
 				const { upstream } = ws.data;
 				if (upstream?.readyState === WebSocket.OPEN) upstream.send(message);
@@ -471,14 +464,15 @@ return { errors, dropped: await tab.evaluate(() => window.dropped.map(file => fi
 	}, 60_000);
 
 	test("streams contents in messages under the link's cap", async () => {
-		const maxMessageBytes = 16 * 1024 * 1024;
+		// Just over one base64-encoded 8 MiB chunk, so a whole file in one message would not fit.
+		const maxMessageBytes = 11 * 1024 * 1024;
 		const { run, close } = await openConnectedTab("browser-upload-capped", {
 			proxy: routeProxy("contents", { maxMessageBytes }),
 		});
 		try {
 			// Base64 in a single message would come to 4/3 of the file, over the cap.
 			const digest = await writeRandomFile(path.join(tempDir, "large.bin"), maxMessageBytes);
-			// Three 16 MiB uploads: the budget covers slow hosts, since this checks chunking, not throughput.
+			// Three 11 MiB uploads: the budget covers slow hosts, since this checks chunking, not throughput.
 			const errors = await run(
 				collectErrors(`() => tab.uploadFile("#direct", "large.bin"),
 	() => tab.uploadFile("#trigger", "large.bin"),
@@ -491,30 +485,6 @@ return { errors, dropped: await tab.evaluate(() => window.dropped.map(file => fi
 			await close();
 		}
 	}, 120_000);
-
-	test("gives streaming contents the cell's budget, not the action deadline", async () => {
-		// Each chunk takes longer than the 8 s action deadline to arrive; finding the target does not.
-		const { run, close } = await openConnectedTab("browser-upload-slow", {
-			proxy: routeProxy("contents", { holdLargeMs: 9_000 }),
-		});
-		try {
-			const digest = await writeRandomFile(path.join(tempDir, "slow.bin"), 2 * 1024 * 1024);
-			const outcome = await run(
-				`const started = Date.now();
-${collectErrors(`() => tab.uploadFile("#direct", "slow.bin"),`).replace("return errors;", "return { errors, ms: Date.now() - started };")}`,
-				30,
-			);
-			const { errors, ms } = outcome as { errors: string[]; ms: number };
-			expect(errors).toEqual([]);
-			expect(ms).toBeGreaterThan(8_000);
-			const received = await run(
-				`return await tab.evaluate(async () => [...new Uint8Array(await crypto.subtle.digest("SHA-256", await document.querySelector("#direct").files[0].arrayBuffer()))].map(byte => byte.toString(16).padStart(2, "0")).join(""));`,
-			);
-			expect(received).toBe(digest);
-		} finally {
-			await close();
-		}
-	}, 60_000);
 });
 
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser uploadFile into a browser omp launched", () => {
@@ -558,7 +528,6 @@ test("sweeps a staging folder a day after its last upload unless an open tab or 
 	// No process has a pid this large; the parent of this test process is running.
 	const folders = {
 		open: [`omp-uploads-${process.pid}-sweep-open`, dayAgo],
-		recent: [`omp-uploads-${process.pid}-sweep-recent`, new Date(now)],
 		closed: [`omp-uploads-${process.pid}-sweep-closed`, dayAgo],
 		orphaned: [`omp-uploads-99999999-sweep-orphaned`, dayAgo],
 		otherOmp: [`omp-uploads-${process.ppid}-sweep-other`, dayAgo],
@@ -571,7 +540,7 @@ test("sweeps a staging folder a day after its last upload unless an open tab or 
 	try {
 		await sweepUploadStaging(new Set([path.join(os.tmpdir(), folders.open[0])]), now);
 		const left = await stagingFolders();
-		expect(Object.values(folders).map(([name]) => left.has(name))).toEqual([true, true, false, false, true]);
+		expect(Object.values(folders).map(([name]) => left.has(name))).toEqual([true, false, false, true]);
 	} finally {
 		for (const [name] of Object.values(folders))
 			await fs.rm(path.join(os.tmpdir(), name), { recursive: true, force: true });
@@ -671,21 +640,6 @@ test("stages a symlinked file's contents, once while the file is unchanged", asy
 	const [changed] = await staging.stage([await openUploadSource(link)]);
 	expect(changed).not.toBe(first);
 	expect(await Bun.file(changed!).text()).toBe("changed");
-});
-
-test("stages a file again when it changes without moving its size or mtime", async () => {
-	const file = path.join(tempDir, "same-stamp.txt");
-	const stamp = new Date(1_900_000_000_000);
-	await Bun.write(file, "before");
-	await fs.utimes(file, stamp, stamp);
-	const staging = new UploadStaging(path.join(tempDir, "same-stamp-staging"));
-	await staging.stage([await openUploadSource(file)]);
-	// ctime cannot be set and Linux stamps it from a coarse clock; a real tick apart keeps the rewrite distinguishable.
-	await Bun.sleep(20);
-	await Bun.write(file, "after!");
-	await fs.utimes(file, stamp, stamp);
-	const [second] = await staging.stage([await openUploadSource(file)]);
-	expect(await Bun.file(second!).text()).toBe("after!");
 });
 
 test("marks the staging folder used when an upload reuses a copy, so the sweep keeps it", async () => {

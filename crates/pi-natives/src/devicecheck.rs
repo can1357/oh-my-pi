@@ -276,7 +276,7 @@ mod platform {
 		let (sender, receiver) = mpsc::sync_channel::<Completion>(1);
 		let sender = Box::into_raw(Box::new(sender));
 		let block = CompletionBlock {
-			isa: ptr::addr_of!(_NSConcreteStackBlock).cast::<c_void>(),
+			isa: (&raw const _NSConcreteStackBlock).cast::<c_void>(),
 			flags: BLOCK_HAS_SIGNATURE,
 			reserved: 0,
 			invoke: completion_invoke,

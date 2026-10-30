@@ -52,7 +52,11 @@ function makeCtx(isStreaming = false, messages: AgentMessage[] = []) {
 	// Mirrors the real contract: a pending submission is recorded as a local
 	// submission until its canonical user `message_start` lands.
 	const locallySubmittedUserSignatures = new Set<string>();
-	const sessionManager = { sessionId: "session-a", getSessionId: () => sessionManager.sessionId };
+	const sessionManager = {
+		sessionId: "session-a",
+		getSessionId: () => sessionManager.sessionId,
+		getLeafId: () => null,
+	};
 	const ctx = {
 		editor,
 		sessionManager,
@@ -141,6 +145,7 @@ describe("input controller — slash command history (#3148)", () => {
 		const { ctx, editor } = makeCtx();
 		ctx.sessionManager = {
 			getSessionId: () => sessionId,
+			getLeafId: () => null,
 		} as unknown as InteractiveModeContext["sessionManager"];
 		// `/hotkeys` rides the shared dispatch path; its handler stands in for `/new`,
 		// `/resume` or `/move`, which switch the conversation and the directory while they run.
@@ -171,6 +176,7 @@ describe("input controller — slash command history (#3148)", () => {
 		const { ctx, editor } = makeCtx();
 		ctx.sessionManager = {
 			getSessionId: () => sessionId,
+			getLeafId: () => null,
 		} as unknown as InteractiveModeContext["sessionManager"];
 		ctx.handleHotkeysCommand = () => {
 			sessionId = "destination-session";

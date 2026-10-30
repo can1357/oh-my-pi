@@ -146,6 +146,7 @@ function createStubInputControllerContext(opts: {
 		renderOptimisticSkillMessage,
 		reconcileOptimisticSkillMessage,
 		clearOptimisticSkillMessage,
+		sessionManager: { getSessionId: () => "session", getLeafId: () => null },
 	} as unknown as InteractiveModeContext;
 	const helpers = new UiHelpers(ctx);
 	ctx.queueCompactionMessage = (text, mode, images, options) =>

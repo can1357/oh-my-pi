@@ -244,7 +244,7 @@ impl ModeEngine for ReplaceEngine {
 			entries:  args
 				.new_string
 				.as_ref()
-				.map_or_else(Vec::new, |new_string| vec![(path.clone(), new_string.clone())]),
+				.map_or_default(|new_string| vec![(path.clone(), new_string.clone())]),
 			file_ops: Vec::new(),
 		}
 	}

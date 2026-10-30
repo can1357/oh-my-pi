@@ -41,6 +41,8 @@ const LF = new Uint8Array([0x0a]);
 const STREAM_LOAD_THRESHOLD_BYTES = 8 * 1024 * 1024;
 const STREAM_YIELD_BYTES = 1 * 1024 * 1024;
 const STREAM_YIELD_ENTRIES = 8_192;
+/** Initial parse window after a malformed record; see the recovery note in visitEntriesFromFileStream. */
+const RECOVERY_PARSE_WINDOW = 64 * 1024;
 const BLOB_READ_CONCURRENCY = 8;
 
 /**
@@ -300,12 +302,23 @@ export async function visitEntriesFromFileStream(
 			consumed += count;
 			buffer = buffer.subarray(count);
 		};
+		// parseChunk costs time proportional to its whole input even when it stops at
+		// the first bad line, so recovering line by line over the full buffer is
+		// quadratic. After a malformed record, parse a newline-cut window that grows
+		// while the input keeps parsing and resets on the next error.
+		let window = Number.POSITIVE_INFINITY;
 		while (buffer.length > 0 && !stopped) {
 			if (recordsSeen >= maxRecords) {
 				stopped = true;
 				break;
 			}
-			const { values, error, read, done } = Bun.JSONL.parseChunk(buffer);
+			let input = buffer;
+			if (window < buffer.length) {
+				const cut = buffer.indexOf(0x0a, window - 1);
+				if (cut !== -1) input = buffer.subarray(0, cut + 1);
+			}
+			const partial = input.length < buffer.length;
+			const { values, error, read, done } = Bun.JSONL.parseChunk(input);
 			for (const value of values) {
 				if (recordsSeen >= maxRecords) {
 					stopped = true;
@@ -345,6 +358,7 @@ export async function visitEntriesFromFileStream(
 				if (hasPayload(buffer, read, nextNewline)) options.onMalformedRecord?.();
 				recordsSeen++;
 				advance(nextNewline + 1);
+				window = RECOVERY_PARSE_WINDOW;
 				if (recordsSeen >= maxRecords) {
 					stopped = true;
 					break;
@@ -352,6 +366,11 @@ export async function visitEntriesFromFileStream(
 				continue;
 			}
 			if (read === 0) {
+				if (partial) {
+					// The record runs past the window, not past the buffered input.
+					window *= 2;
+					continue;
+				}
 				// Incomplete value awaiting more bytes. Once the input has ended nothing more
 				// is coming, so it is a truncated record (parseJsonlLenient counts it too).
 				if (endOfInput) {
@@ -363,9 +382,11 @@ export async function visitEntriesFromFileStream(
 			}
 			advance(read);
 			if (done) {
-				advance(buffer.length);
-				break;
+				// The parser reached the end of its input; whatever trails the last value is whitespace.
+				advance(input.length - read);
+				if (!partial) break;
 			}
+			if (partial) window *= 2;
 		}
 		sink.consume(consumed);
 	};

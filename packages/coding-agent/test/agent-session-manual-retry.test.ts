@@ -354,6 +354,106 @@ describe("AgentSession manual retry", () => {
 		expect(lastAgentMessage(session).content).toContainEqual({ type: "text", text: "done after replay" });
 	});
 
+	it("retries an aborted tool-call turn past a background-job result folded in after the interrupt", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		const toolSchema = type({ question: type("string") });
+		const executed: string[] = [];
+		const askTool: AgentTool<typeof toolSchema, { question: string }> = {
+			name: "ask",
+			label: "Ask",
+			description: "Ask tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params.question);
+				return { content: [{ type: "text", text: "answered" }], details: params };
+			},
+		};
+		const mock = createMockModel({ responses: [{ content: ["retried with job result"], stopReason: "stop" }] });
+		const zeroUsage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		// #17266: the user cancelled `ask`, then a background job finished while
+		// idle and its async-result was folded in behind the aborted boundary.
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [askTool],
+				messages: [
+					{ role: "user", content: "start the job, then ask me", timestamp: Date.now() },
+					{
+						role: "assistant",
+						content: [{ type: "toolCall", id: "call_ask", name: "ask", arguments: { question: "which?" } }],
+						api: model.api,
+						provider: model.provider,
+						model: model.id,
+						usage: zeroUsage,
+						stopReason: "toolUse",
+						timestamp: Date.now(),
+					},
+					{
+						role: "toolResult",
+						toolCallId: "call_ask",
+						toolName: "ask",
+						content: [{ type: "text", text: "Ask tool was cancelled by the user" }],
+						isError: true,
+						timestamp: Date.now(),
+					},
+					{
+						role: "assistant",
+						content: [{ type: "text", text: "" }],
+						api: model.api,
+						provider: model.provider,
+						model: model.id,
+						usage: zeroUsage,
+						stopReason: "aborted",
+						errorMessage: "Interrupted by user",
+						timestamp: Date.now(),
+					},
+					{
+						role: "custom",
+						customType: "async-result",
+						content: "Background job bg_1 finished: build ok",
+						display: true,
+						timestamp: Date.now(),
+					},
+				],
+			},
+			streamFn: mock.stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+			modelRegistry,
+		});
+		session.subscribe(() => {});
+
+		expect(session.hasAbortedToolCallTail).toBe(true);
+		await expect(session.retry()).resolves.toBe(true);
+		await session.waitForIdle();
+
+		// A tool replay would cut the job result out of history; the retry
+		// re-attempts the model call with the result still in context instead.
+		expect(executed).toEqual([]);
+		expect(mock.calls.length).toBe(1);
+		const messages = session.agent.state.messages;
+		expect(messages.map(message => message.role)).toEqual(["user", "assistant", "toolResult", "custom", "assistant"]);
+		const delivery = messages[3];
+		expect(delivery.role === "custom" ? delivery.customType : undefined).toBe("async-result");
+		expect(lastAgentMessage(session).content).toContainEqual({ type: "text", text: "retried with job result" });
+	});
+
 	it("retries a persisted failed turn after rebuilding provider context", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {
