@@ -35,12 +35,17 @@ import {
 	toolRenderName,
 } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TtsrNotificationComponent } from "@oh-my-pi/pi-tui/chat/ttsr-notification";
-import { createUsageRowBlock, TurnUsageTally, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
+import {
+	createUsageRowBlock,
+	TurnUsageTally,
+	turnElapsedMs,
+	type UsageRowBlock,
+} from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { getSymbolTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../modes/types";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
-import type { AgentSessionEvent } from "../../session/agent-session";
+import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
 import {
 	isSilentAbort,
 	isUserInvokedSkillPrompt,
@@ -61,6 +66,11 @@ import { recoverAskQuestions } from "../../tools/ask";
 import { previewLine, PREVIEW_LIMITS, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { writeDeviceDispatch } from "../../tools/resolve";
+import {
+	STEP_SUMMARY_CUSTOM_TYPE,
+	type StepSummaryEntryData,
+	StepSummarizer,
+} from "../../step-summary/step-summarizer";
 import { SpeechEnhancer } from "../../tts/speech-enhancer";
 import { vocalizer } from "../../tts/vocalizer";
 import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
@@ -87,6 +97,7 @@ import {
 	cfgDisplayCacheMissMarker,
 	cfgDisplayShowTokenUsage,
 	cfgDisplayShowTurnTime,
+	cfgDisplayStepSummaries,
 	cfgDisplaySmoothStreaming,
 	cfgErrorNotify,
 	cfgTerminalShowImages,
@@ -353,6 +364,17 @@ export class EventController {
 	// keeps working — the WeakSet makes the coalesced path speak each delta exactly
 	// once instead of twice.
 	#vocalizedMessageUpdates = new WeakSet<object>();
+	/**
+	 * Caption service for {@link #stepSummaryOwner}, built on its first captioned step
+	 * (`display.stepSummaries`) and rebuilt when the view moves to another session, so
+	 * credentials, secret obfuscation, and earlier-caption context never cross sessions.
+	 */
+	#stepSummarizer: StepSummarizer | undefined = undefined;
+	#stepSummaryOwner: AgentSession | undefined = undefined;
+	/** Usage rows awaiting their step's caption, by assistant-message timestamp; drained at `turn_end`. */
+	#uncaptionedUsageRows = new Map<number, UsageRowBlock>();
+	/** Latest user message text and the session it was sent in: the request step captions are written against. */
+	#stepRequest: { owner: AgentSession; text: string } | undefined = undefined;
 	static readonly #MESSAGE_UPDATE_COALESCE_MS = 33;
 
 	constructor(private ctx: InteractiveModeContext) {
@@ -495,6 +517,11 @@ export class EventController {
 		this.#streamingReveal.stop();
 		this.#toolArgsReveal.stop();
 		this.composerPrediction.cancel();
+		this.#stepSummarizer?.dispose();
+		this.#stepSummarizer = undefined;
+		this.#stepSummaryOwner = undefined;
+		this.#stepRequest = undefined;
+		this.#uncaptionedUsageRows.clear();
 		this.#setTerminalProgress(false);
 		for (const timer of this.#ircExpiryTimers.values()) {
 			clearTimeout(timer);
@@ -1557,6 +1584,7 @@ export class EventController {
 	 * sure the live buffer's trailing partial gets flushed.
 	 */
 	#handleTurnEnd(event: Extract<AgentSessionEvent, { type: "turn_end" }>): void {
+		this.#captionStep(event);
 		if (!cfgSpeechEnabled.get(settings)) return;
 		if (cfgSpeechMode.get(settings) !== "yield") {
 			vocalizer.flush();
@@ -1566,6 +1594,46 @@ export class EventController {
 		if (event.message.stopReason === "aborted") return; // interrupted: never speak the aborted partial
 		const text = extractTextContent(event.message);
 		if (text) vocalizer.speak(text);
+	}
+
+	/**
+	 * Caption a finished tool-calling step on its usage row and persist the
+	 * caption for replay. Fire-and-forget: the caption lands whenever the
+	 * request returns, and is dropped if the view moved to another session.
+	 */
+	#captionStep(event: Extract<AgentSessionEvent, { type: "turn_end" }>): void {
+		const message = event.message;
+		if (message.role !== "assistant") return;
+		const row = this.#uncaptionedUsageRows.get(message.timestamp);
+		this.#uncaptionedUsageRows.clear();
+		if (!row || message.stopReason === "aborted" || message.stopReason === "error") return;
+		if (!cfgDisplayStepSummaries.get(settings)) return;
+		const owner = this.ctx.viewSession;
+		if (!owner?.modelRegistry || !owner.agent) return;
+		if (this.#stepSummaryOwner !== owner) {
+			this.#stepSummarizer?.dispose();
+			this.#stepSummaryOwner = owner;
+			this.#stepSummarizer = new StepSummarizer({
+				settings: owner.settings,
+				registry: owner.modelRegistry,
+				sessionId: owner.sessionId,
+				metadataResolver: provider => owner.agent.metadataForProvider(provider),
+				obfuscator: () => owner.obfuscator,
+			});
+		}
+		const summarizer = this.#stepSummarizer;
+		if (!summarizer) return;
+		const sessionManager = owner.sessionManager;
+		const sessionFile = sessionManager.getSessionFile();
+		const request = this.#stepRequest?.owner === owner ? this.#stepRequest.text : undefined;
+		void summarizer.summarize({ message, toolResults: event.toolResults, request }).then(summary => {
+			if (!summary) return;
+			if (this.ctx.viewSession !== owner || owner.sessionManager.getSessionFile() !== sessionFile) return;
+			row.setSummary(summary);
+			this.ctx.ui.requestComponentRender(row);
+			const data: StepSummaryEntryData = { messageTimestamp: message.timestamp, summary };
+			sessionManager.appendCustomEntry(STEP_SUMMARY_CUSTOM_TYPE, data);
+		});
 	}
 
 	async #handleMessageUpdate(event: Extract<AgentSessionEvent, { type: "message_update" }>): Promise<void> {
@@ -1776,6 +1844,12 @@ export class EventController {
 			}
 		}
 		if (event.message.role === "user") {
+			const content = event.message.content;
+			const request =
+				typeof content === "string"
+					? content
+					: content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+			if (request.trim() && this.ctx.viewSession) this.#stepRequest = { owner: this.ctx.viewSession, text: request };
 			// Live steering stays listed until the agent appends it, which follows
 			// message_start: drop its Steering chip now.
 			this.ctx.updatePendingMessagesDisplay();
@@ -1929,15 +2003,15 @@ export class EventController {
 						false);
 				if (!usageAttached) {
 					this.#resetReadGroup();
-					this.ctx.chatContainer.addChild(
-						createUsageRowBlock(
-							event.message.usage,
-							event.message.duration,
-							event.message.ttft,
-							event.message.timestamp,
-							turnElapsed,
-						),
+					const row = createUsageRowBlock(
+						event.message.usage,
+						event.message.duration,
+						event.message.ttft,
+						event.message.timestamp,
+						turnElapsed,
 					);
+					if (cfgDisplayStepSummaries.get(settings)) this.#uncaptionedUsageRows.set(event.message.timestamp, row);
+					this.ctx.chatContainer.addChild(row);
 				}
 			}
 			if (displayMessage === event.message) {

@@ -8,6 +8,7 @@
 - Added opt-in `title.refreshAfterPrompts`: every N operator prompts, the judge model checks whether a generated session title still fits the conversation and regenerates it when it does not; user-set titles are never replaced ([#17443](https://github.com/can1357/oh-my-pi/pull/17443) by [@wolfiesch](https://github.com/wolfiesch))
 - Gateway rows discovered from `/v1/models` now keep the `reasoning_effort_map` and `reasoning_required` facts they advertise: a route that serves only low/high/max routes `medium` to `high` instead of the nearest lower tier, and a thinking-off request still sends a tier the route accepts ([#17395](https://github.com/can1357/oh-my-pi/pull/17395) by [@Maziar123](https://github.com/Maziar123))
 - Computer-use scripts can wait for a window opened by an action and read it in the same call with a window filter's optional `wait` ([#17391](https://github.com/can1357/oh-my-pi/pull/17391) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `display.stepSummaries`: each tool-calling step gets a one-line plain-English caption on its own line above the step's usage metrics (requires `display.showTokenUsage`). Captions come from the `summary` model role when set, else `tiny`, run after the step without delaying the agent, and persist in the session so resumed transcripts show them. Steps whose metrics fold into a compact read group are not captioned.
 
 ### Changed
 

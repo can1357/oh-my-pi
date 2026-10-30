@@ -108,8 +108,10 @@ import {
 	cfgDisplayCollapseCompacted,
 	cfgDisplayShowTokenUsage,
 	cfgDisplayShowTurnTime,
+	cfgDisplayStepSummaries,
 	cfgTerminalShowImages,
 } from "../settings";
+import { stepSummariesFromEntries } from "../../step-summary/step-summarizer";
 import { cfgReadToolResultPreview } from "../../tools/settings";
 
 interface RenderInitialMessagesOptions {
@@ -528,6 +530,9 @@ export class UiHelpers {
 		let pendingReadUsageCallIds: string[] | undefined;
 		let pendingUsageTurnElapsed: number | undefined;
 		let turnStartedAt: number | undefined;
+		const stepSummaries = cfgDisplayStepSummaries.get(this.ctx.settings)
+			? stepSummariesFromEntries(this.ctx.viewSession.sessionManager.getEntries())
+			: undefined;
 		const flushPendingUsage = () => {
 			if (!pendingUsage) return;
 			const usageAttached =
@@ -544,15 +549,16 @@ export class UiHelpers {
 			if (!usageAttached) {
 				readGroup?.seal();
 				readGroup = null;
-				this.ctx.chatContainer.addChild(
-					createUsageRowBlock(
-						pendingUsage,
-						pendingUsageDuration,
-						pendingUsageTtft,
-						pendingUsageTimestamp,
-						pendingUsageTurnElapsed,
-					),
+				const row = createUsageRowBlock(
+					pendingUsage,
+					pendingUsageDuration,
+					pendingUsageTtft,
+					pendingUsageTimestamp,
+					pendingUsageTurnElapsed,
 				);
+				const summary = pendingUsageTimestamp !== undefined ? stepSummaries?.get(pendingUsageTimestamp) : undefined;
+				if (summary) row.setSummary(summary);
+				this.ctx.chatContainer.addChild(row);
 			}
 			pendingUsage = undefined;
 			pendingUsageDuration = undefined;

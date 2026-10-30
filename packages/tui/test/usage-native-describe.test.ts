@@ -364,4 +364,33 @@ describe("createUsageRowBlock describe", () => {
 		expect(twentyFour.title).toBe("2026-01-01 18:05:09");
 		expect(shown(undefined).title).toBe("2026-01-01 18:05:09");
 	});
+
+	it("puts a late step summary on its own line above the unchanged metrics", () => {
+		const usage = {
+			input: 100,
+			output: 500,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 600,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const block = createUsageRowBlock(usage, 2000, undefined, new Date(2026, 0, 1, 18, 5, 9).getTime());
+		// Describe first so the caption has to replace a memoized node, as it does live.
+		const metrics = block.describe?.(cx);
+		if (!metrics) throw new Error("usage row did not describe");
+		const ansiMetrics = block.render(100).filter(line => line.trim() !== "");
+
+		block.setSummary("  Fixed the add operator in calc.py  ");
+		const captioned = block.describe?.(cx);
+		if (!captioned) throw new Error("usage row did not describe");
+		expect(captioned.k).toBe("col");
+		const [caption, row] = captioned.c ?? [];
+		expect(isNode(caption) && caption.p).toMatchObject({ spans: [{ t: "Fixed the add operator in calc.py" }] });
+		expect(row).toEqual(metrics);
+
+		const ansi = block.render(100).filter(line => line.trim() !== "");
+		expect(ansi).toHaveLength(ansiMetrics.length + 1);
+		expect(Bun.stripANSI(ansi[0] ?? "").trim()).toBe("Fixed the add operator in calc.py");
+		expect(ansi.slice(1)).toEqual(ansiMetrics);
+	});
 });

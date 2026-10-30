@@ -1,10 +1,11 @@
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import { Container } from "../tui";
 import { Spacer } from "../components/spacer";
+import { Text } from "../components/text";
 import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import { theme } from "../theme/theme";
 import { formatMetricRow, MetricRow, type MetricSpec } from "../components/metric";
-import { node, row, span, text } from "../native/describe";
+import { col, node, row, span, text } from "../native/describe";
 import type { DescribeContext, NativeChild, NativeNode } from "../native/node";
 
 /** Below this the rate is nonsense (cached/instant responses yield absurd tok/s). */
@@ -155,13 +156,18 @@ function usageRowSpecs(
 	return specs;
 }
 
-/** Per-turn usage block: a dim metric strip under the turn; natively a wrapping row with a `rate` for throughput. */
-class UsageRowBlock extends Container {
+/**
+ * Per-turn usage block: a dim metric strip under the turn; natively a wrapping row with a `rate` for throughput.
+ * A step summary (`display.stepSummaries`) lands later through {@link UsageRowBlock.setSummary} on its own line above the metrics.
+ */
+export class UsageRowBlock extends Container {
 	readonly #usage: Usage;
 	readonly #durationMs: number | undefined;
 	readonly #ttftMs: number | undefined;
 	readonly #timestamp: number | undefined;
 	readonly #turnElapsedMs: number | undefined;
+	readonly #metrics: MetricRow;
+	#summary: string | undefined;
 	#nativeNode: NativeNode | undefined;
 	/** The terminal's clock {@link #nativeNode} was described with. */
 	#nativeHour12: boolean | undefined;
@@ -173,22 +179,44 @@ class UsageRowBlock extends Container {
 		this.#ttftMs = ttftMs;
 		this.#timestamp = timestamp;
 		this.#turnElapsedMs = turnElapsedMs;
+		this.#metrics = new MetricRow(usageRowSpecs(usage, durationMs, ttftMs, timestamp, turnElapsedMs), {
+			separator: "  ",
+			overflow: "wrap",
+			paddingX: 1,
+			paddingY: 0,
+			style: text => theme.fg("dim", text),
+		});
 		this.addChild(new Spacer(1));
-		this.addChild(
-			new MetricRow(usageRowSpecs(usage, durationMs, ttftMs, timestamp, turnElapsedMs), {
-				separator: "  ",
-				overflow: "wrap",
-				paddingX: 1,
-				paddingY: 0,
-				style: text => theme.fg("dim", text),
-			}),
-		);
+		this.addChild(this.#metrics);
+	}
+
+	/** The step summary shown with this row, once one has landed. */
+	get summary(): string | undefined {
+		return this.#summary;
+	}
+
+	/**
+	 * Lead the row with a plain-English summary of the step above it. Natively it repaints in place,
+	 * even deep in scrollback; the ANSI strip gains a line above the metrics while still on screen.
+	 */
+	setSummary(summary: string): void {
+		const trimmed = summary.trim();
+		if (!trimmed || trimmed === this.#summary) return;
+		this.#summary = trimmed;
+		this.#nativeNode = undefined;
+		this.clear();
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(theme.fg("muted", trimmed), 1, 0));
+		this.addChild(this.#metrics);
+		this.invalidate();
 	}
 
 	/**
 	 * One quiet mono line (`18:02 · Δ 6.2s · in 18.4K · out 640 · cache 12K ·
 	 * ttft 0.9s · 96 tok/s`): worded metrics instead of the ANSI icons, the
-	 * full timestamp in the tooltip, and throughput as a `rate`.
+	 * full timestamp in the tooltip, and throughput as a `rate`. A step summary
+	 * sits on its own line above, so the metrics keep their column whether or
+	 * not a caption has landed.
 	 */
 	override describe(cx?: DescribeContext): NativeNode {
 		// The terminal's clock: the process locale doesn't reliably carry the user's 12/24-hour choice.
@@ -221,12 +249,15 @@ class UsageRowBlock extends Container {
 				node("rate", { value: Math.round(tokPerSec * 10) / 10, unit: "tok/s" }),
 			);
 		}
-		this.#nativeNode = row(children, {
+		const metrics = row(children, {
 			role: "omp.usage.turn",
 			gap: "none",
 			align: "baseline",
 			...(stamped ? { title: formatUsageTimestamp(timestamp, hour12) } : {}),
 		});
+		this.#nativeNode = this.#summary
+			? col([text([span(this.#summary, "muted")]), metrics], { role: "omp.usage.step", gap: "none" })
+			: metrics;
 		return this.#nativeNode;
 	}
 }
@@ -261,7 +292,7 @@ export function createUsageRowBlock(
 	ttftMs?: number,
 	timestamp?: number,
 	turnElapsedMs?: number,
-): Container {
+): UsageRowBlock {
 	const block = new UsageRowBlock(usage, durationMs, ttftMs, timestamp, turnElapsedMs);
 	usageRowBlocks.add(block);
 	return block;
