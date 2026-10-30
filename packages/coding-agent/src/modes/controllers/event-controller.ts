@@ -370,7 +370,12 @@ export class EventController {
 	#stepSummaryOwner: AgentSession | undefined = undefined;
 	/** Callbacks that caption a step's usage row (standalone or nested in a read group), by assistant-message timestamp; drained at `turn_end`. */
 	#uncaptionedUsageRows = new Map<number, (summary: StepSummary) => void>();
-	/** Latest user message text and the session it was sent in: the request step captions are written against. */
+	/**
+	 * The operator request the current run serves and the session it was sent in: step captions are written
+	 * against it. Agent-attributed `user` messages never set it; it is dropped when the run settles and when
+	 * a prompt without operator text (synthetic developer, `/skill:`) starts fresh work, so a caption never
+	 * describes an earlier task.
+	 */
 	#stepRequest: { owner: AgentSession; text: string } | undefined = undefined;
 	static readonly #MESSAGE_UPDATE_COALESCE_MS = 33;
 
@@ -1065,6 +1070,7 @@ export class EventController {
 		this.#turnStartedAt = undefined;
 		this.#turnUsage.reset();
 		this.#lastAgentEndAt = undefined;
+		this.#stepRequest = undefined;
 		this.#pinnedErrorComponent = undefined;
 		this.#pinnedErrorMessage = undefined;
 		this.#restorePinnedErrorInline = true;
@@ -1269,6 +1275,9 @@ export class EventController {
 			if (event.message.role === "custom" && isUserTurnInitiator(event.message)) {
 				this.#turnStartedAt = event.message.timestamp;
 				this.#turnUsage.reset();
+				// A collab peer's prompt is its own request; a `/skill:` prompt's text is the skill body, not the operator's words.
+				const request = isUserInvokedSkillPrompt(event.message) ? "" : textContent(event.message.content, "\n");
+				this.#stepRequest = request.trim() ? { owner: this.ctx.viewSession, text: request } : undefined;
 			}
 			const taskJobToast = isNativeRendering() ? nativeTaskJobToast(event.message) : undefined;
 			if (
@@ -1359,6 +1368,8 @@ export class EventController {
 				if (event.message.userInitiated) this.#turnStartedAt = event.message.timestamp;
 				else this.#turnStartedAt = undefined;
 				this.#turnUsage.reset();
+				// Neither carries operator text: captions go without a request rather than an earlier one.
+				this.#stepRequest = undefined;
 			}
 		} else if (event.message.role === "fileMention") {
 			this.#resetReadGroup();
@@ -1847,7 +1858,10 @@ export class EventController {
 				typeof content === "string"
 					? content
 					: content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
-			if (request.trim() && this.ctx.viewSession) this.#stepRequest = { owner: this.ctx.viewSession, text: request };
+			// An agent-attributed `user` message (advisor redirect) is not the operator's request.
+			if (event.message.attribution !== "agent" && request.trim() && this.ctx.viewSession) {
+				this.#stepRequest = { owner: this.ctx.viewSession, text: request };
+			}
 			// Live steering stays listed until the agent appends it, which follows
 			// message_start: drop its Steering chip now.
 			this.ctx.updatePendingMessagesDisplay();
@@ -2635,6 +2649,8 @@ export class EventController {
 		this.#setTerminalProgress(false);
 		this.ctx.statusLine.markActivityEnd();
 		this.#lastAgentEndAt = Date.now();
+		// The settled run's request is done: the next run captions against its own prompt, or none.
+		this.#stepRequest = undefined;
 		this.#streamingReveal.stop();
 		this.#toolArgsReveal.flushAll();
 		if (this.ctx.loadingAnimation) {

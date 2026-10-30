@@ -408,4 +408,40 @@ describe("createUsageRowBlock describe", () => {
 			],
 		});
 	});
+
+	it("strips escapes, controls, tabs, and line breaks from a caption and keeps it to one line", () => {
+		const usage = {
+			input: 100,
+			output: 500,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 600,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const block = createUsageRowBlock(usage, 2000, undefined, new Date(2026, 0, 1, 18, 5, 9).getTime());
+		const ansiMetrics = block.render(40).filter(line => line.trim() !== "");
+
+		block.setSummary({ text: `Fixed calc.py\x1b[2J\tand\x07 kept\r\noutput \ud800${"word ".repeat(60)}` });
+		const caption = block.summary?.text ?? "";
+		expect(caption.startsWith("Fixed calc.py and kept output word word")).toBe(true);
+		expect(caption).not.toMatch(/[\x00-\x1f\x7f-\x9f\ud800-\udfff]/);
+		expect(Bun.stringWidth(caption)).toBeLessThanOrEqual(120);
+		expect(caption.endsWith("…")).toBe(true);
+
+		const captioned = block.describe?.(cx);
+		const line = captioned?.c?.[0];
+		expect(isNode(line) && line.p).toMatchObject({
+			wrap: "none",
+			truncate: "end",
+			lines: 1,
+			spans: [{ t: "› " }, { t: caption, s: "muted em" }],
+		});
+
+		// A caption wider than the terminal still takes exactly one ANSI line above the metrics.
+		const ansi = block.render(40).filter(line => line.trim() !== "");
+		expect(ansi).toHaveLength(ansiMetrics.length + 1);
+		expect(ansi[0]).not.toContain("\x1b[2J");
+		expect(Bun.stringWidth(ansi[0] ?? "")).toBeLessThanOrEqual(40);
+		expect(ansi.slice(1)).toEqual(ansiMetrics);
+	});
 });

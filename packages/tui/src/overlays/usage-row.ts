@@ -1,10 +1,12 @@
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import { Container } from "../tui";
 import { Spacer } from "../components/spacer";
-import { Text } from "../components/text";
+import { TruncatedText } from "../components/truncated-text";
+import { sanitizeStatusText } from "../chrome/shared";
 import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import { theme } from "../theme/theme";
 import { formatMetricRow, MetricRow, type MetricSpec } from "../components/metric";
+import { truncateToWidth } from "../utils";
 import { col, node, row, span, text } from "../native/describe";
 import type { DescribeContext, NativeChild, NativeNode } from "../native/node";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
@@ -16,6 +18,8 @@ const MIN_DURATION_MS = 100;
 const STEP_SUMMARY_MARKER = "›";
 /** Marker for a step where only some tool calls failed: a dashed arrow, the partly-through form of {@link STEP_SUMMARY_MARKER}. */
 const PARTIAL_FAILURE_MARKER = "⇢";
+/** Widest caption kept, in cells: the summarizer's own cap, so only replayed or wide-glyph captions are cut here. */
+const STEP_SUMMARY_MAX_WIDTH = 120;
 
 /** How a captioned step went: `warning` when some of its tool calls failed, `error` when all did. */
 export type StepSummaryTone = "warning" | "error";
@@ -48,9 +52,12 @@ export function stepSummarySpans(summary: StepSummary): TspSpan[] {
 	return [span(`${glyph} `, color), span(summary.text, "muted em")];
 }
 
-/** A trimmed copy of `summary`; `undefined` when its caption is blank. */
+/**
+ * A display-safe copy of `summary`: ANSI, control characters, and lone surrogates stripped, tabs and line breaks
+ * folded into single spaces, and the caption cut to {@link STEP_SUMMARY_MAX_WIDTH} cells; `undefined` when blank.
+ */
 export function normalizeStepSummaryText(summary: StepSummary): StepSummary | undefined {
-	const text = summary.text.trim();
+	const text = truncateToWidth(sanitizeStatusText(summary.text), STEP_SUMMARY_MAX_WIDTH);
 	if (!text) return undefined;
 	return summary.tone ? { text, tone: summary.tone } : { text };
 }
@@ -255,7 +262,7 @@ export class UsageRowBlock extends Container {
 		this.#nativeNode = undefined;
 		this.clear();
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(formatStepSummary(next), 1, 0));
+		this.addChild(new TruncatedText(formatStepSummary(next), 1, 0));
 		this.addChild(this.#metrics);
 		this.invalidate();
 	}
@@ -305,7 +312,14 @@ export class UsageRowBlock extends Container {
 			...(stamped ? { title: formatUsageTimestamp(timestamp, hour12) } : {}),
 		});
 		this.#nativeNode = this.#summary
-			? col([text(stepSummarySpans(this.#summary)), metrics], { role: "omp.usage.step", gap: "none" })
+			? col(
+					[
+						// One clipped line, like the ANSI `TruncatedText`.
+						text(stepSummarySpans(this.#summary), { wrap: "none", truncate: "end", lines: 1 }),
+						metrics,
+					],
+					{ role: "omp.usage.step", gap: "none" },
+				)
 			: metrics;
 		return this.#nativeNode;
 	}

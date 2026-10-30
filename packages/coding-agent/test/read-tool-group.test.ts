@@ -186,6 +186,38 @@ describe("ReadToolGroupComponent", () => {
 		expect(native).not.toContain("Nobody owns this");
 	});
 
+	it("keeps a long caption on one clipped row in a narrow compact group", () => {
+		const component = new ReadToolGroupComponent();
+		const onePath = path.resolve("/tmp/one.ts");
+		const twoPath = path.resolve("/tmp/two.ts");
+		component.updateArgs({ path: onePath }, "read-one");
+		component.updateArgs({ path: twoPath }, "read-two");
+		component.updateResult({ content: [{ type: "text", text: "one" }] }, false, "read-one");
+		component.updateResult({ content: [{ type: "text", text: "two" }] }, false, "read-two");
+		const usage = {
+			input: 1111,
+			output: 11,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 1122,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const at = new Date(2026, 0, 2, 3, 4, 6).getTime();
+		component.attachUsage(["read-two"], usage, 1000, 500, at);
+		const caption = "Compared both modules\tand\x1b[2J found the parser drift in the second one";
+		expect(component.setUsageSummary(at, { text: caption })).toBe(true);
+
+		const rendered = component.render(40);
+		const lines = rendered.map(line => Bun.stripANSI(line));
+		const captionRows = lines.filter(line => line.includes("›"));
+		expect(captionRows).toHaveLength(1);
+		expect(captionRows[0]).toContain("› Compared both modules and");
+		expect(captionRows[0]?.trimEnd().endsWith("…")).toBe(true);
+		expect(lines.some(line => line.includes("parser drift"))).toBe(false);
+		expect(rendered.some(line => line.includes("\x1b[2J"))).toBe(false);
+		for (const line of rendered) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(40);
+	});
+
 	it("splits a single selector-delimited read argument into child rows", () => {
 		const component = new ReadToolGroupComponent();
 		const onePath = path.resolve("/tmp/one.ts");

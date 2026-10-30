@@ -3,6 +3,7 @@ import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import { type Component } from "../tui";
 import { Container } from "../tui";
 import { Text } from "../components/text";
+import { TruncatedText } from "../components/truncated-text";
 import { getLanguageFromPath, theme } from "../theme";
 import { parseLineRanges, selectorLineRanges } from "../tools/line-ranges";
 import {
@@ -16,7 +17,7 @@ import {
 import { PREVIEW_LIMITS, shortenPath } from "../render/render-utils";
 import { fileHyperlink, renderCodeCell, renderMarkdownCell } from "../render";
 import { wrapTreeLine } from "../render/hanging-wrap";
-import { wrapTextWithAnsi } from "../utils";
+import { truncateToWidth, wrapTextWithAnsi } from "../utils";
 import { canonicalizeMessage } from "./thinking-display";
 import { internalUrlSchemeSpec, splitUrlScheme } from "../tools/url-scheme-host";
 import type { ToolExecutionHandle } from "./tool-execution";
@@ -373,6 +374,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	#usageRows = new Map<string, ReadUsageRow>();
 	#usageBatchByToolCallId = new Map<string, string>();
 	#text: Text;
+	/** Step-caption lines in {@link #text}: clipped to one row instead of wrapped. */
+	#captionLines = new Set<string>();
 	#expanded = false;
 	#toolActivityVisible = true;
 	#showContentPreview: boolean;
@@ -927,7 +930,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		if (!usage.summary) return text([span(plainText(line), "dim")], { wrap: "word", key, role: "omp.usage" });
 		return col(
 			[
-				text(stepSummarySpans(usage.summary), { wrap: "word" }),
+				// One clipped line, like the ANSI caption rows.
+				text(stepSummarySpans(usage.summary), { wrap: "none", truncate: "end", lines: 1 }),
 				text([span(plainText(line), "dim")], { wrap: "word", role: "omp.usage" }),
 			],
 			{ key, role: "omp.usage.step", gap: "none" },
@@ -942,8 +946,12 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 		// Clear previous children and rebuild the summary and preview blocks.
 		this.clear();
-		this.#text = new Text("", 0, 0).setWrapLine(
-			(line, width) => wrapTreeLine(line, width, theme) ?? wrapTextWithAnsi(line, width),
+		const captionLines = new Set<string>();
+		this.#captionLines = captionLines;
+		this.#text = new Text("", 0, 0).setWrapLine((line, width) =>
+			captionLines.has(line)
+				? [truncateToWidth(line, width)]
+				: (wrapTreeLine(line, width, theme) ?? wrapTextWithAnsi(line, width)),
 		);
 
 		if (displayRows.length === 0) {
@@ -1110,7 +1118,11 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	#appendUsageRows(lines: string[], usageRows: ReadUsageRow[], prefix: string): void {
 		for (const usageRow of usageRows) {
-			if (usageRow.summary) lines.push(`${theme.fg("dim", prefix)}${formatStepSummary(usageRow.summary)}`);
+			if (usageRow.summary) {
+				const caption = `${theme.fg("dim", prefix)}${formatStepSummary(usageRow.summary)}`;
+				this.#captionLines.add(caption);
+				lines.push(caption);
+			}
 			lines.push(
 				theme.fg(
 					"dim",
@@ -1273,7 +1285,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	#addPreviewUsage(entry: ReadEntry): void {
 		const usageRow = this.#usageRows.get(entry.toolCallId);
 		if (!usageRow) return;
-		if (usageRow.summary) this.addChild(new Text(formatStepSummary(usageRow.summary), 3, 0));
+		if (usageRow.summary) this.addChild(new TruncatedText(formatStepSummary(usageRow.summary), 3, 0));
 		this.addChild(
 			new Text(
 				theme.fg(

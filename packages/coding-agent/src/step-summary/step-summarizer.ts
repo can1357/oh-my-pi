@@ -74,18 +74,106 @@ export interface StepSummarizerDeps {
 	obfuscator?: () => SecretObfuscator | undefined;
 }
 
-function clip(text: string, max: number): string {
-	const flat = text.replace(/\s+/g, " ").trim();
-	return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`;
+/**
+ * Characters read per character kept. Collapsing whitespace only shrinks text, so a window this many times
+ * the cap still yields the full head of anything but whitespace-padded input, and a huge request, thinking
+ * block, argument, or tool result is never scanned or copied whole.
+ */
+const READ_FACTOR = 4;
+
+/** The first `n` UTF-16 units of `text`, one fewer when the cut would split a surrogate pair. */
+function head(text: string, n: number): string {
+	if (text.length <= n) return text;
+	const code = text.charCodeAt(n - 1);
+	return text.slice(0, code >= 0xd800 && code <= 0xdbff ? n - 1 : n);
 }
 
-function resultText(result: ToolResultMessage): string {
+/** `text` on one line, cut to `max` characters with an ellipsis; reads at most `max * READ_FACTOR` of it. */
+function clip(text: string, max: number): string {
+	const window = max * READ_FACTOR;
+	const cut = text.length > window;
+	const flat = (cut ? head(text, window) : text).replace(/\s+/g, " ").trim();
+	return !cut && flat.length <= max ? flat : `${head(flat, max - 1)}…`;
+}
+
+/** {@link clip} of `parts` joined by `separator`, reading parts only until the window is full. */
+function clipParts(parts: Iterable<string>, separator: string, max: number): string {
+	const limit = max * READ_FACTOR + 1;
 	let out = "";
-	for (const block of result.content) {
-		if (block.type === "text") out += `${block.text}\n`;
-		else out += "[image]\n";
+	for (const part of parts) {
+		out += head(part, limit - out.length) + separator;
+		if (out.length >= limit) break;
 	}
-	return out;
+	return clip(out, max);
+}
+
+/**
+ * {@link clip} of the compact JSON of `value`, serializing only until the window is full: later array items
+ * and object members are never read, and a long string is cut before it is escaped. Members `JSON.stringify`
+ * drops are dropped here too; a cycle prints as `"[circular]"`.
+ */
+function clipJson(value: unknown, max: number): string {
+	const limit = max * READ_FACTOR + 1;
+	let out = "";
+	const open = new Set<object>();
+	// Members and items read, counting ones that write nothing (`undefined`, functions): bounds the walk itself.
+	let reads = limit;
+	const read = (): boolean => {
+		reads -= 1;
+		if (reads >= 0) return true;
+		if (reads === -1) out += "…";
+		return false;
+	};
+	// Each writer returns whether the window has room for more.
+	const write = (chunk: string): boolean => {
+		out += head(chunk, limit - out.length);
+		return out.length < limit;
+	};
+	const visit = (node: unknown): boolean => {
+		if (typeof node === "string") return write(JSON.stringify(head(node, limit - out.length)));
+		if (typeof node === "number") return write(Number.isFinite(node) ? String(node) : "null");
+		if (typeof node === "boolean" || typeof node === "bigint") return write(String(node));
+		if (node === null || typeof node !== "object") return write("null");
+		if (open.has(node)) return write('"[circular]"');
+		open.add(node);
+		let more: boolean;
+		if (Array.isArray(node)) {
+			more = write("[");
+			for (let i = 0; more && i < node.length; i++) more = read() && (i === 0 || write(",")) && visit(node[i]);
+			more &&= write("]");
+		} else {
+			more = write("{");
+			let first = true;
+			for (const key in node) {
+				more = read();
+				if (!more) break;
+				if (!Object.hasOwn(node, key)) continue;
+				const item: unknown = (node as Record<string, unknown>)[key];
+				if (item === undefined || typeof item === "function" || typeof item === "symbol") continue;
+				more = (first || write(",")) && write(`${JSON.stringify(head(key, limit - out.length))}:`) && visit(item);
+				first = false;
+				if (!more) break;
+			}
+			more &&= write("}");
+		}
+		open.delete(node);
+		return more;
+	};
+	visit(value ?? {});
+	return clip(out, max);
+}
+
+/** Text of each content block, `[image]` for an image; lazy so blocks past the budget are never read. */
+function* resultParts(result: ToolResultMessage): Generator<string> {
+	for (const block of result.content) yield block.type === "text" ? block.text : "[image]";
+}
+
+/** Thinking or reply text of each assistant block of that kind; lazy like {@link resultParts}. */
+function* blockTexts(content: AssistantMessage["content"], kind: "thinking" | "text"): Generator<string> {
+	for (const block of content) {
+		if (kind === "thinking" && block.type === "thinking") yield block.thinking;
+		else if (kind === "text" && block.type === "text") yield block.text;
+	}
 }
 
 /**
@@ -101,41 +189,45 @@ function replyText(content: AssistantMessage["content"]): string {
 
 /**
  * The bounded text a caption is written from, or `undefined` when the step
- * called no tools (its reply text already says what it did).
+ * called no tools (its reply text already says what it did). Every field is
+ * read only as far as its cap, and calls past the digest cap are not read.
  */
 export function buildStepDigest(input: StepSummaryInput, recent: readonly string[] = []): string | undefined {
-	const calls = input.message.content.filter(block => block.type === "toolCall");
-	if (calls.length === 0) return undefined;
+	const content = input.message.content;
+	if (!content.some(block => block.type === "toolCall")) return undefined;
 	const lines: string[] = [];
-	const request = input.request?.trim();
-	if (request) lines.push(`Request: ${clip(request, REQUEST_CHARS)}`);
-	if (recent.length > 0) lines.push(`Earlier steps: ${recent.join("; ")}`);
-	let thinking = "";
-	let said = "";
-	for (const block of input.message.content) {
-		if (block.type === "thinking") thinking += `${block.thinking} `;
-		else if (block.type === "text") said += `${block.text} `;
-	}
-	if (thinking.trim()) lines.push(`Thinking: ${clip(thinking, THINKING_CHARS)}`);
-	if (said.trim()) lines.push(`Said: ${clip(said, TEXT_CHARS)}`);
+	let size = 0;
+	const add = (line: string): void => {
+		lines.push(line);
+		size += line.length + 1;
+	};
+	const request = input.request ? clip(input.request, REQUEST_CHARS) : "";
+	if (request) add(`Request: ${request}`);
+	// The summarizer passes its last RECENT_SUMMARIES captions; clip anyway since the export takes any list.
+	const earlier = recent.slice(-RECENT_SUMMARIES).map(caption => clip(caption, MAX_SUMMARY_CHARS));
+	if (earlier.length > 0) add(`Earlier steps: ${earlier.join("; ")}`);
+	const thinking = clipParts(blockTexts(content, "thinking"), " ", THINKING_CHARS);
+	if (thinking) add(`Thinking: ${thinking}`);
+	const said = clipParts(blockTexts(content, "text"), " ", TEXT_CHARS);
+	if (said) add(`Said: ${said}`);
+	// Indexes ids only, one per call the step made; no result content is read here.
 	const results = new Map(input.toolResults.map(result => [result.toolCallId, result]));
-	calls.forEach((call, index) => {
-		const n = index + 1;
-		const intent = call.intent?.trim();
-		lines.push(
-			`Call ${n}: ${call.name}${intent ? `, for: ${clip(intent, 120)}` : ""} ${clip(JSON.stringify(call.arguments ?? {}), ARGS_CHARS)}`,
-		);
+	let n = 0;
+	for (const call of content) {
+		if (call.type !== "toolCall") continue;
+		if (size >= DIGEST_CHARS) break;
+		n += 1;
+		const intent = call.intent ? clip(call.intent, 120) : "";
+		add(`Call ${n}: ${call.name}${intent ? `, for: ${intent}` : ""} ${clipJson(call.arguments, ARGS_CHARS)}`);
 		const result = results.get(call.id);
-		if (result) {
-			lines.push(
-				`Result ${n}${result.isError ? " (error)" : ""}: ${clip(resultText(result), RESULT_CHARS) || "(empty)"}`,
-			);
-		} else {
-			lines.push(`Result ${n}: (none)`);
-		}
-	});
+		add(
+			result
+				? `Result ${n}${result.isError ? " (error)" : ""}: ${clipParts(resultParts(result), "\n", RESULT_CHARS) || "(empty)"}`
+				: `Result ${n}: (none)`,
+		);
+	}
 	const digest = lines.join("\n");
-	return digest.length <= DIGEST_CHARS ? digest : `${digest.slice(0, DIGEST_CHARS - 1)}…`;
+	return digest.length <= DIGEST_CHARS ? digest : `${head(digest, DIGEST_CHARS - 1)}…`;
 }
 
 function countOf(details: unknown, key: string): number | undefined {
