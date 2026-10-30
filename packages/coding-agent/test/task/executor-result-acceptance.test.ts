@@ -1018,7 +1018,7 @@ describe("runSubprocess result acceptance", () => {
 			session: harness.session,
 			status: "idle",
 		});
-		attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent, structured: false });
+		attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent });
 		const observer = harness.wakeObserver();
 		if (!observer) throw new Error("wake-turn observer was not registered");
 		// The parent's message reaches the idle child through the real bus and bridge, as a live send would.
@@ -1050,7 +1050,9 @@ describe("runSubprocess result acceptance", () => {
 			expect((await waiting).details?.jobs?.[0]).toMatchObject({
 				id: AGENT_ID,
 				status: "completed",
-				resultText: "mask path fixed too",
+				resultText: expect.stringContaining(
+					"SYSTEM WARNING: Structured subagent replied without calling yield.\n\nmask path fixed too",
+				),
 			});
 
 			// The job carried the answer: the child is not silent, and nothing is owed.
