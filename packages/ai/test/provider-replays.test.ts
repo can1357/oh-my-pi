@@ -2,8 +2,14 @@
  * `AssistantMessage.providerReplays` is the count recovery above a provider
  * reads to decide whether a failed request was already re-sent. It has to hold
  * every request the call made, not the rungs one layer happens to own: a replay
- * `fetchWithRetry` made under the provider, or an attempt that never opened, is
- * a request the model saw, and a caller that cannot see it replays it again.
+ * `fetchWithRetry` made under the provider, the uncompressed resend after a
+ * rejected compressed body, the Copilot identity resend, or an attempt that
+ * never opened, is a request the model saw, and a caller that cannot see it
+ * replays it again.
+ *
+ * The wire here is the runtime's own `fetch`, replaced for the test: that is
+ * the transport the count describes. A caller-supplied `fetch` is opaque to the
+ * count, and its own tests below expect `undefined`.
  */
 import { afterEach, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
@@ -11,8 +17,11 @@ import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { AnthropicMessagesClient, type AnthropicMessagesClientLike } from "@oh-my-pi/pi-ai/providers/anthropic-client";
 import { streamOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { getCodexProviderSessionState } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
+import { stream } from "@oh-my-pi/pi-ai/stream";
 import type { Context, FetchImpl, Model, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
+import { resetRequestCompressionForTesting } from "@oh-my-pi/pi-ai/utils/request-compression";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import * as piUtils from "@oh-my-pi/pi-utils";
 
 const { getAgentDir, setAgentDir, TempDir } = piUtils;
@@ -20,6 +29,7 @@ const originalAgentDir = getAgentDir();
 
 afterEach(() => {
 	vi.restoreAllMocks();
+	resetRequestCompressionForTesting();
 	setAgentDir(originalAgentDir);
 });
 
@@ -27,6 +37,22 @@ const context: Context = {
 	systemPrompt: ["You are a helpful assistant."],
 	messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
 };
+
+/** Above the 1 KiB floor, so `wrapFetchForRequestCompression` compresses the body. */
+const largeContext: Context = {
+	systemPrompt: ["You are a helpful assistant."],
+	messages: [{ role: "user", content: "a detailed prompt ".repeat(500), timestamp: Date.now() }],
+};
+
+/** Replaces the runtime's `fetch` — the wire under every wrapper a provider installs. */
+function serveRuntimeFetch(handler: (url: string, init: RequestInit | undefined) => Promise<Response>): void {
+	vi.spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request, init?: RequestInit) =>
+		handler(String(input instanceof Request ? input.url : input), init)) as typeof fetch);
+}
+
+function hasContentEncoding(init: RequestInit | undefined): boolean {
+	return new Headers(init?.headers).has("content-encoding");
+}
 
 function overloaded() {
 	return new Response(JSON.stringify({ error: { type: "overloaded_error", message: "overloaded" } }), {
@@ -82,8 +108,8 @@ it("counts a Codex replay that fetchWithRetry made before the attempt that strea
 	setAgentDir(tempDir.path());
 	vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 	let requests = 0;
-	const fetchMock = vi.fn(async (input: string | URL) => {
-		if (String(input) !== "https://chatgpt.com/backend-api/codex/responses") {
+	serveRuntimeFetch(async url => {
+		if (url !== "https://chatgpt.com/backend-api/codex/responses") {
 			return new Response("not found", { status: 404 });
 		}
 		requests += 1;
@@ -93,7 +119,6 @@ it("counts a Codex replay that fetchWithRetry made before the attempt that strea
 	const result = await streamOpenAICodexResponses(codexModel(), context, {
 		apiKey: codexToken(),
 		preferWebsockets: false,
-		fetch: fetchMock as FetchImpl,
 	}).result();
 
 	expect(requests).toBe(2);
@@ -110,8 +135,8 @@ it("counts a Codex replacement request that was refused on the way out", async (
 	setAgentDir(tempDir.path());
 	vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 	let requests = 0;
-	const fetchMock = vi.fn(async (input: string | URL) => {
-		if (String(input) !== "https://chatgpt.com/backend-api/codex/responses") {
+	serveRuntimeFetch(async url => {
+		if (url !== "https://chatgpt.com/backend-api/codex/responses") {
 			return new Response("not found", { status: 404 });
 		}
 		requests += 1;
@@ -131,12 +156,116 @@ it("counts a Codex replacement request that was refused on the way out", async (
 		preferWebsockets: false,
 		// One attempt per open, so every re-send is the provider loop's own.
 		codexSseMaxAttempts: 1,
-		fetch: fetchMock as FetchImpl,
 	}).result();
 
 	expect(result.stopReason).toBe("error");
 	expect(requests).toBeGreaterThan(1);
 	expect(result.providerReplays).toBe(requests - 1);
+	tempDir.removeSync();
+});
+
+it("counts the uncompressed resend after a Codex endpoint refused the compressed body", async () => {
+	// `wrapFetchForRequestCompression` resends a refused compressed body
+	// uncompressed, below `fetchWithRetry`. A counter above that wrapper saw one
+	// call and reported `0` for two requests.
+	const tempDir = TempDir.createSync("@pi-provider-replays-");
+	setAgentDir(tempDir.path());
+	vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+	const encodings: boolean[] = [];
+	serveRuntimeFetch(async (url, init) => {
+		if (url !== "https://chatgpt.com/backend-api/codex/responses") {
+			return new Response("not found", { status: 404 });
+		}
+		encodings.push(hasContentEncoding(init));
+		return hasContentEncoding(init)
+			? new Response("unsupported content encoding", { status: 415, headers: { "content-type": "text/plain" } })
+			: sseResponse(CODEX_THINKING_THEN_CUT);
+	});
+
+	const result = await streamOpenAICodexResponses(codexModel(), largeContext, {
+		apiKey: codexToken(),
+		preferWebsockets: false,
+	}).result();
+
+	expect(encodings).toEqual([true, false]);
+	expect(result.stopReason).toBe("error");
+	expect(result.providerReplays).toBe(1);
+	tempDir.removeSync();
+});
+
+it("reports nothing for a Codex call made through a caller-supplied fetch", async () => {
+	// The caller's `fetch` sits below the counter and may resend inside itself,
+	// so a count taken above it cannot say the request went out once.
+	const tempDir = TempDir.createSync("@pi-provider-replays-");
+	setAgentDir(tempDir.path());
+	vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+	let requests = 0;
+	const callerFetch: FetchImpl = async input => {
+		if (String(input) !== "https://chatgpt.com/backend-api/codex/responses") {
+			return new Response("not found", { status: 404 });
+		}
+		requests += 1;
+		return sseResponse(CODEX_THINKING_THEN_CUT);
+	};
+
+	const result = await streamOpenAICodexResponses(codexModel(), context, {
+		apiKey: codexToken(),
+		preferWebsockets: false,
+		fetch: callerFetch,
+	}).result();
+
+	expect(requests).toBe(1);
+	expect(result.stopReason).toBe("error");
+	expect(result.providerReplays).toBeUndefined();
+	tempDir.removeSync();
+});
+
+it("counts the uncompressed resend on the stream() path, where transportFetch issues the request", async () => {
+	// Sessions reach a provider through `stream()`, which hands it
+	// `transportFetch` as its `fetch`. That is the call every request is issued
+	// through, so it carries the counter; compression wraps it from above.
+	const tempDir = TempDir.createSync("@pi-provider-replays-");
+	setAgentDir(tempDir.path());
+	vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+	const encodings: boolean[] = [];
+	serveRuntimeFetch(async (url, init) => {
+		if (url !== "https://chatgpt.com/backend-api/codex/responses") {
+			return new Response("not found", { status: 404 });
+		}
+		encodings.push(hasContentEncoding(init));
+		return hasContentEncoding(init)
+			? new Response("unsupported content encoding", { status: 415, headers: { "content-type": "text/plain" } })
+			: sseResponse(CODEX_THINKING_THEN_CUT);
+	});
+
+	const result = await stream(codexModel(), largeContext, {
+		apiKey: codexToken(),
+		preferWebsockets: false,
+	}).result();
+
+	expect(encodings).toEqual([true, false]);
+	expect(result.stopReason).toBe("error");
+	expect(result.providerReplays).toBe(1);
+	tempDir.removeSync();
+});
+
+it("reports nothing on the stream() path when the caller supplied the fetch under transportFetch", async () => {
+	const tempDir = TempDir.createSync("@pi-provider-replays-");
+	setAgentDir(tempDir.path());
+	vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+	const callerFetch: FetchImpl = async input =>
+		String(input) === "https://chatgpt.com/backend-api/codex/responses"
+			? sseResponse(CODEX_THINKING_THEN_CUT)
+			: new Response("not found", { status: 404 });
+
+	const result = await stream(codexModel(), context, {
+		apiKey: codexToken(),
+		preferWebsockets: false,
+		fetch: callerFetch,
+	}).result();
+
+	expect(result.stopReason).toBe("error");
+	expect(result.providerReplays).toBeUndefined();
 	tempDir.removeSync();
 });
 
@@ -168,33 +297,85 @@ it("counts an Anthropic replay that preceded the attempt that streamed", async (
 	setAgentDir(tempDir.path());
 	vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 	let requests = 0;
-	const fetchMock = vi.fn(async () => {
+	serveRuntimeFetch(async () => {
 		requests += 1;
 		return requests === 1 ? overloaded() : sseResponse(ANTHROPIC_THINKING_THEN_CUT);
 	});
 
-	const model: Model<"anthropic-messages"> = buildModel({
-		id: "claude-sonnet-4-5",
-		name: "Claude Sonnet 4.5",
-		api: "anthropic-messages",
-		provider: "anthropic",
-		baseUrl: "https://api.anthropic.com",
-		reasoning: true,
-		input: ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 200_000,
-		maxTokens: 8_192,
-	});
-
-	const result = await streamAnthropic(model, context, {
+	const result = await streamAnthropic(anthropicModel(), context, {
 		apiKey: "test-key",
 		providerRetryWait: async () => {},
-		fetch: fetchMock as FetchImpl,
 	}).result();
 
 	expect(requests).toBe(2);
 	expect(result.stopReason).toBe("error");
 	expect(result.content.some(block => block.type === "thinking")).toBe(true);
+	expect(result.providerReplays).toBe(1);
+	tempDir.removeSync();
+});
+
+it("counts the uncompressed resend after Anthropic refused the compressed body", async () => {
+	// The resend happens inside `wrapFetchForRequestCompression`, below the
+	// client's own loop. A count taken at the client's attempts saw one request
+	// where the wire saw two, and the reported `0` earned a hold that repeated
+	// both.
+	const tempDir = TempDir.createSync("@pi-provider-replays-");
+	setAgentDir(tempDir.path());
+	vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+	const encodings: boolean[] = [];
+	serveRuntimeFetch(async (_url, init) => {
+		encodings.push(hasContentEncoding(init));
+		if (!hasContentEncoding(init)) return sseResponse(ANTHROPIC_THINKING_THEN_CUT);
+		return new Response(
+			JSON.stringify({
+				type: "error",
+				error: {
+					type: "invalid_request_error",
+					message: "Request body is not valid gzip.",
+					details: { error_code: "request_body_encoding_invalid" },
+				},
+			}),
+			{ status: 400, headers: { "content-type": "application/json" } },
+		);
+	});
+
+	const result = await streamAnthropic(anthropicModel(), largeContext, {
+		apiKey: "test-key",
+		providerRetryWait: async () => {},
+	}).result();
+
+	expect(encodings).toEqual([true, false]);
+	expect(result.stopReason).toBe("error");
+	expect(result.providerReplays).toBe(1);
+	tempDir.removeSync();
+});
+
+it("counts the Copilot identity resend under an Anthropic model", async () => {
+	// `wrapFetchForCopilotFallback` resends a denied chat identity as the
+	// Copilot CLI, below the client. The first call made two requests and
+	// reported `0`.
+	const tempDir = TempDir.createSync("@pi-provider-replays-");
+	setAgentDir(tempDir.path());
+	vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+	const identities: (string | null)[] = [];
+	serveRuntimeFetch(async (_url, init) => {
+		identities.push(new Headers(init?.headers).get("copilot-integration-id"));
+		return identities.length === 1
+			? new Response('{"error":{"message":"client identity denied"}}', {
+					status: 403,
+					headers: { "content-type": "application/json" },
+				})
+			: sseResponse(ANTHROPIC_THINKING_THEN_CUT);
+	});
+
+	const result = await streamAnthropic(
+		getBundledModel("github-copilot", "claude-opus-4.6") as Model<"anthropic-messages">,
+		context,
+		{ apiKey: "test-key", providerRetryWait: async () => {} },
+	).result();
+
+	expect(identities).toEqual(["copilot-chat", "copilot-developer-cli"]);
+	expect(result.stopReason).toBe("error");
 	expect(result.providerReplays).toBe(1);
 	tempDir.removeSync();
 });
@@ -234,57 +415,60 @@ const ANTHROPIC_EMPTY_STOP = [
 	.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
 	.join("");
 
-it("counts a caller-owned Anthropic client's attempts instead of claiming zero", async () => {
-	// A caller that brings its own client leaves this module no `fetch` to wrap,
-	// and the client's own budget is spent inside one call. Counting only this
-	// module's calls reported `0` after two requests, which recovery above reads
-	// as "nothing below replayed" and acts on.
+it.each<[string, () => AnthropicMessagesClientLike]>([
+	[
+		"its own AnthropicMessagesClient over its own fetch",
+		() =>
+			new AnthropicMessagesClient({
+				apiKey: "test-key",
+				baseURL: "https://api.anthropic.com",
+				fetch: (async () => sseResponse(ANTHROPIC_THINKING_THEN_CUT)) as FetchImpl,
+			}),
+	],
+	[
+		"a client of its own making",
+		() =>
+			({
+				messages: { create: async () => sseResponse(ANTHROPIC_THINKING_THEN_CUT) },
+			}) as unknown as AnthropicMessagesClientLike,
+	],
+])("reports nothing for a caller-owned Anthropic client: %s", async (_label, makeClient) => {
+	// The caller's client issues the requests through a transport this module
+	// cannot see into, so it cannot say how often a request went out. `0` would
+	// be a claim it cannot support.
 	const tempDir = TempDir.createSync("@pi-provider-replays-");
 	setAgentDir(tempDir.path());
 	vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
-	let requests = 0;
-	const client = new AnthropicMessagesClient({
-		apiKey: "test-key",
-		baseURL: "https://api.anthropic.com",
-		fetch: (async () => {
-			requests += 1;
-			return requests === 1 ? overloaded() : sseResponse(ANTHROPIC_THINKING_THEN_CUT);
-		}) as FetchImpl,
-	});
 
 	const result = await streamAnthropic(anthropicModel(), context, {
-		client,
+		client: makeClient(),
 		providerRetryWait: async () => {},
 	}).result();
 
-	expect(requests).toBe(2);
 	expect(result.stopReason).toBe("error");
-	expect(result.providerReplays).toBe(1);
+	expect(result.providerReplays).toBeUndefined();
 	tempDir.removeSync();
 });
 
-it("reports nothing when a caller-owned client never answers the attempt hook", async () => {
-	// A client that ignores the hook knows how often it replayed and this module
-	// does not. `undefined` says that; a `0` would be a claim it cannot support.
+it("reports nothing for an Anthropic call made through a caller-supplied fetch", async () => {
+	// A caller `fetch` sits below the counter: a resend inside it is invisible,
+	// so a single counted call through it is not evidence of a single request.
 	const tempDir = TempDir.createSync("@pi-provider-replays-");
 	setAgentDir(tempDir.path());
 	vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 	let requests = 0;
-	const silentClient = {
-		messages: {
-			create: async () => {
-				requests += 1;
-				return sseResponse(ANTHROPIC_THINKING_THEN_CUT);
-			},
-		},
-	} as unknown as AnthropicMessagesClientLike;
+	const callerFetch: FetchImpl = async () => {
+		requests += 1;
+		return sseResponse(ANTHROPIC_THINKING_THEN_CUT);
+	};
 
 	const result = await streamAnthropic(anthropicModel(), context, {
-		client: silentClient,
+		apiKey: "test-key",
 		providerRetryWait: async () => {},
+		fetch: callerFetch,
 	}).result();
 
-	expect(requests).toBeGreaterThan(0);
+	expect(requests).toBe(1);
 	expect(result.stopReason).toBe("error");
 	expect(result.providerReplays).toBeUndefined();
 	tempDir.removeSync();
@@ -297,7 +481,7 @@ it("carries the count on a successful Anthropic response the caller may discard"
 	setAgentDir(tempDir.path());
 	vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 	let requests = 0;
-	const fetchMock = vi.fn(async () => {
+	serveRuntimeFetch(async () => {
 		requests += 1;
 		return requests === 1 ? overloaded() : sseResponse(ANTHROPIC_EMPTY_STOP);
 	});
@@ -306,7 +490,6 @@ it("carries the count on a successful Anthropic response the caller may discard"
 		apiKey: "test-key",
 		acceptEmptyResponse: true,
 		providerRetryWait: async () => {},
-		fetch: fetchMock as FetchImpl,
 	}).result();
 
 	expect(requests).toBe(2);

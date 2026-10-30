@@ -574,15 +574,15 @@ describe("AgentSession retry recovery", () => {
 		expect(sessionManager.buildSessionContext().messages.map(message => message.role)).toEqual(["user"]);
 	});
 	/**
-	 * Runs one prompt against a primary model with a fallback chain — one entry,
-	 * or two when `models.next` is given — scripting each provider attempt in
+	 * Runs one prompt against a primary model with a fallback chain — `fallback`
+	 * first, then each of `models.rest` — scripting each provider attempt in
 	 * order. Returns the model each request went to and the fallback switches
 	 * the session announced.
 	 */
 	async function runFallbackChainRecovery(
 		responses: MockResponse[],
 		maxRetries = 2,
-		models: { primary: Model; fallback: Model; next?: Model } = {
+		models: { primary: Model; fallback: Model; rest?: Model[] } = {
 			primary: getBundledModel("anthropic", "claude-sonnet-4-5"),
 			fallback: getBundledModel("openai", "gpt-5.5"),
 		},
@@ -595,13 +595,13 @@ describe("AgentSession retry recovery", () => {
 		sessionManager: SessionManager;
 		retryStartDelaysMs: number[];
 	}> {
-		const { primary: model, fallback: fallbackModel, next: nextModel } = models;
+		const { primary: model, fallback: fallbackModel, rest = [] } = models;
 		if (!model || !fallbackModel) {
 			throw new Error("Expected bundled primary and fallback test models to exist");
 		}
 		authStorage.keys.setRuntime(model.provider, `${model.provider}-test-key`);
 		authStorage.keys.setRuntime(fallbackModel.provider, `${fallbackModel.provider}-test-key`);
-		if (nextModel) authStorage.keys.setRuntime(nextModel.provider, `${nextModel.provider}-test-key`);
+		for (const entry of rest) authStorage.keys.setRuntime(entry.provider, `${entry.provider}-test-key`);
 		const primary = `${model.provider}/${model.id}`;
 		const fallback = `${fallbackModel.provider}/${fallbackModel.id}`;
 
@@ -622,7 +622,7 @@ describe("AgentSession retry recovery", () => {
 			"retry.maxRetries": maxRetries,
 			"retry.modelFallback": true,
 			"retry.fallbackChains": {
-				default: nextModel ? [fallback, `${nextModel.provider}/${nextModel.id}`] : [fallback],
+				default: [fallback, ...rest.map(entry => `${entry.provider}/${entry.id}`)],
 			},
 		});
 		settings.setModelRole("default", primary);
@@ -732,13 +732,77 @@ describe("AgentSession retry recovery", () => {
 			{
 				primary: getBundledModel("anthropic", "claude-sonnet-4-5"),
 				fallback: getBundledModel("openai", "gpt-5.5"),
-				next,
+				rest: [next],
 			},
 		);
 
 		// Two held retries on the primary; its third failure spends the budget and
 		// walks to the first fallback, whose own failure walks on at once.
 		expect(requestedModels).toEqual([primary, primary, primary, fallback, `${next.provider}/${next.id}`]);
+	});
+
+	it("does not hold when the provider's retry hint is longer than the held window", async () => {
+		// The held sleep is bounded by the full-jitter window, `base × 2^(k-1)`
+		// for the k-th hold. A provider hint is never shortened, so a hint past
+		// that window means the hold cannot keep its bound: consult the chain.
+		// Honouring a 9 s hint twice slept 18 s on a feature promised under 1.5 s.
+		vi.spyOn(Math, "random").mockReturnValue(0.5);
+		const { primary, fallback, requestedModels, retryStartDelaysMs } = await runFallbackChainRecovery(
+			[
+				{ ...droppedAfterThinking, errorMessage: `${SOCKET_CLOSE_MID_STREAM} retry-after-ms=900` },
+				{ content: ["recovered on fallback"], stopReason: "stop" },
+			],
+			2,
+			undefined,
+			{ baseDelayMs: 500, maxDelayMs: 10_000 },
+		);
+
+		expect(requestedModels).toEqual([primary, fallback]);
+		expect(retryStartDelaysMs).toEqual([0]);
+	});
+
+	it("honours a provider hint that fits inside the held window", async () => {
+		vi.spyOn(Math, "random").mockReturnValue(0.5);
+		const { primary, requestedModels, retryStartDelaysMs } = await runFallbackChainRecovery(
+			[
+				{ ...droppedAfterThinking, errorMessage: `${SOCKET_CLOSE_MID_STREAM} retry-after-ms=400` },
+				{ content: ["recovered on the same model"], stopReason: "stop" },
+			],
+			2,
+			undefined,
+			{ baseDelayMs: 500, maxDelayMs: 10_000 },
+		);
+
+		expect(requestedModels).toEqual([primary, primary]);
+		expect(retryStartDelaysMs).toEqual([400]);
+	});
+
+	it("stops holding for the rest of the recovery once a held retry reports a replay", async () => {
+		// The held retry on the primary spent the provider's own budget and says
+		// so. A later model reached on a fresh retry budget must not hold again:
+		// that would let a second held call spend a second provider budget.
+		const models = {
+			primary: getBundledModel("anthropic", "claude-sonnet-4-5"),
+			fallback: getBundledModel("openai", "gpt-5.5"),
+			rest: [getBundledModel("google", "gemini-2.5-flash"), getBundledModel("openai", "gpt-4o")],
+		};
+		const [third, fourth] = models.rest.map(entry => `${entry.provider}/${entry.id}`);
+		const { primary, fallback, requestedModels } = await runFallbackChainRecovery(
+			[
+				droppedAfterThinking,
+				{ ...droppedAfterThinking, providerReplays: 10 },
+				droppedAfterThinking,
+				droppedAfterThinking,
+				{ content: ["recovered on the last fallback"], stopReason: "stop" },
+			],
+			2,
+			models,
+		);
+
+		// Held once on the primary; its held retry reports ten replays and walks
+		// on. The first fallback spends the budget; the second, on a fresh one,
+		// walks on at once instead of holding.
+		expect(requestedModels).toEqual([primary, primary, fallback, third, fourth]);
 	});
 
 	it("keeps a repeated wire failure on the same model for two retries, then consults the fallback chain", async () => {

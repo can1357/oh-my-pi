@@ -63,6 +63,7 @@ import {
 	type ActiveRetryFallbackState,
 	calculateFullJitterRetryDelayMs,
 	calculateRetryBackoffDelayMs,
+	cappedRetryBackoffMs,
 	findRetryFallbackCandidates,
 	formatRetryFallbackBaseSelector,
 	formatRetryFallbackSelector,
@@ -407,6 +408,12 @@ export class TurnRecovery {
 	 * switch or a fresh retry budget, so a chain walked on a spent budget does not re-open it.
 	 */
 	#connectionHoldsSpent = 0;
+	/**
+	 * Set once a failure after a held retry did not report going out exactly once: the held
+	 * call reached past the hold's bound (the provider replayed it below, or says nothing), so
+	 * the recovery holds no more. Reset only in `resolveRetry()`, like the count above.
+	 */
+	#connectionHoldClosed = false;
 	/** Per-model account walk allowance, snapshotted once and cleared when the retry saga ends. */
 	readonly #accountPolicyRotationsRemaining = new Map<string, number>();
 	#requestBodyReadTimeoutRecoveryPromptSequence: number | undefined;
@@ -902,6 +909,7 @@ export class TurnRecovery {
 	resolveRetry(): void {
 		this.#refusalWalkTried.clear();
 		this.#connectionHoldsSpent = 0;
+		this.#connectionHoldClosed = false;
 		this.#accountPolicyRotationsRemaining.clear();
 		if (this.#retryResolve) {
 			this.#retryResolve();
@@ -1795,19 +1803,28 @@ export class TurnRecovery {
 	 * content, a wording no provider loop retries, and no count, and reading
 	 * that as "sent once" sent the identical body six times where two were due.
 	 * The providers that report today are `anthropic`, `openai-codex-responses`
-	 * and `cursor` (and `empty-completion-retry`, which passes their count on);
-	 * every other provider walks the chain at once, as it does for any failure
-	 * the chain admits.
+	 * and `cursor` (and `empty-completion-retry`, which passes their count on),
+	 * each counting where its requests are issued, below every resend this
+	 * repository owns; through a caller-supplied client or `fetch` they report
+	 * nothing. Every other provider walks the chain at once, as it does for any
+	 * failure the chain admits.
 	 *
-	 * Bounded by {@link CONNECTION_FAILURE_CHAIN_HOLD_ATTEMPTS} held retries
-	 * across the whole saga — a fallback that a spent budget hands a fresh one
-	 * does not re-open the hold — each on one of the first two attempts of the
-	 * current budget. Each held retry waits a full-jitter backoff (`[0, min(base
-	 * × 2^(n-1), 8s))`), so clients sharing a failed upstream do not re-request
-	 * together: under 1.5s of added wait at the 500ms default. What the bound
-	 * cannot shorten is a held attempt itself: if the route goes down under it,
-	 * the provider's own loop retries it on that provider's budget, then reports
-	 * a non-zero count, which ends the hold. So at most one held attempt can
+	 * Bounded per recovery, not per model or per failure: at most
+	 * {@link CONNECTION_FAILURE_CHAIN_HOLD_ATTEMPTS} held retries in the whole
+	 * saga — a fallback that a spent budget hands a fresh one does not re-open
+	 * the hold — each on one of the first two attempts of the current budget.
+	 * The k-th held retry waits a full-jitter backoff inside `[0, min(base ×
+	 * 2^(k-1), 8s))`, so clients sharing a failed upstream do not re-request
+	 * together, and the caller declines the hold when the wait it would take —
+	 * a provider hint included, which is never shortened — falls outside that
+	 * window. Added sleep is therefore under 1.5s at the 500ms default base and
+	 * under 16s at any base.
+	 *
+	 * What the bound cannot shorten is a held call itself: if the route goes
+	 * down under it, the provider's own loop retries it on that provider's
+	 * budget. That call then reports a non-zero count, and any failure after a
+	 * hold that does not report going out once closes the hold for the rest of
+	 * the recovery ({@link #connectionHoldClosed}), so at most one held call can
 	 * spend a provider retry budget.
 	 *
 	 * Excluded on purpose:
@@ -1831,7 +1848,9 @@ export class TurnRecovery {
 	 */
 	#holdsChainForConnectionRetry(message: AssistantMessage, id: number, retryBudgetExhausted: boolean): boolean {
 		if (retryBudgetExhausted || this.#retryAttempt > CONNECTION_FAILURE_CHAIN_HOLD_ATTEMPTS) return false;
-		if (this.#connectionHoldsSpent >= CONNECTION_FAILURE_CHAIN_HOLD_ATTEMPTS) return false;
+		if (this.#connectionHoldClosed || this.#connectionHoldsSpent >= CONNECTION_FAILURE_CHAIN_HOLD_ATTEMPTS) {
+			return false;
+		}
 		if (message.stopReason !== "error" || !AIError.retriable(id)) return false;
 		if (this.#host.streamingEditAbortTriggered()) return false;
 		if (AIError.is(id, AIError.Flag.Timeout)) return false;
@@ -2737,14 +2756,21 @@ export class TurnRecovery {
 		const accountPolicyDenial = AIError.is(id, AIError.Flag.AccountPolicy);
 		const recordedUsageLimitOutcome = await this.#usageLimitOutcomes.get(message);
 		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
+		// A failure after a held retry that does not report going out once means
+		// the held call reached past the hold's bound, so the recovery stops
+		// holding — before the next model, reached on a fresh retry budget, can
+		// hold again and let a second held call spend a second provider budget.
+		if (this.#connectionHoldsSpent > 0 && message.providerReplays !== 0) this.#connectionHoldClosed = true;
+		const connectionHoldCandidate = this.#holdsChainForConnectionRetry(message, id, retryBudgetExhausted);
 		// A held wire failure takes full jitter, not the narrow band: a shared upstream
 		// failure can make many clients retry at once, so they must not replay in the
-		// same quarter-window.
-		const connectionHoldCandidate = this.#holdsChainForConnectionRetry(message, id, retryBudgetExhausted);
+		// same quarter-window. Indexed by the hold, not the attempt, so the window —
+		// and the sleep the hold may add — is fixed whatever attempt it lands on.
+		const heldRetryIndex = this.#connectionHoldsSpent + 1;
 		let delayMs = staleOpenAIResponsesReplayError
 			? 0
 			: connectionHoldCandidate
-				? calculateFullJitterRetryDelayMs(retrySettings.baseDelayMs, this.#retryAttempt)
+				? calculateFullJitterRetryDelayMs(retrySettings.baseDelayMs, heldRetryIndex)
 				: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
 		// Transient rate/concurrency caps stay on the same credential, but must
 		// honor their reason-specific windows. The default exponential base
@@ -3007,7 +3033,15 @@ export class TurnRecovery {
 		// credential switched — so holding would spend the chain's only consult on
 		// a retry the cap then refuses. Consult the chain instead; a switch zeroes
 		// the wait.
-		const connectionHold = connectionHoldCandidate && !exceedsDelayCap(sameModelDelayMs);
+		//
+		// Nor when the wait falls outside the held retry's own window. Full jitter
+		// stays inside it; a provider hint can be longer and is never shortened,
+		// so a hint past the window consults the chain rather than break the
+		// bound on the sleep a hold adds.
+		const connectionHold =
+			connectionHoldCandidate &&
+			sameModelDelayMs <= cappedRetryBackoffMs(retrySettings.baseDelayMs, heldRetryIndex) &&
+			!exceedsDelayCap(sameModelDelayMs);
 		if (connectionHold) this.#connectionHoldsSpent++;
 
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {

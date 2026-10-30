@@ -76,7 +76,7 @@ import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResp
 import { getHeadersFromError, getRetryAfterMsFromHeaders, type HeadersLike } from "../utils/retry-after";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { notifyRawSseEvent } from "../utils/sse-debug";
-import { countWireAttempts, createWireAttempts, providerReplaysFrom, type WireAttempts } from "../utils/wire-attempts";
+import { createWireAttempts, providerReplaysFrom, type WireAttempts, wireCountedFetch } from "../utils/wire-attempts";
 import { compactGrammarDefinition } from "./grammar";
 import {
 	type CodexLiteShapedBody,
@@ -759,8 +759,15 @@ interface CodexRequestContext {
 	requestMetadata?: CodexRequestMetadata;
 	transformedBody: RequestBody;
 	rawRequestDump: RawHttpRequestDump;
-	/** Wire requests this call has issued, counted at the request boundary. */
-	wireAttempts: WireAttempts;
+	/**
+	 * The `fetch` this call's SSE requests are issued through and the counter
+	 * riding on it (`wireCountedFetch`). Every wrapper this module adds sits
+	 * above it — `fetchWithRetry` and its replays, compression and its
+	 * uncompressed resend — so their requests are counted where they are sent.
+	 */
+	wire: { fetch: FetchImpl; attempts: WireAttempts };
+	/** `wire.attempts.count` when this call started; this call's share is what came after. */
+	wireStart: number;
 }
 
 interface CodexRequestSetup {
@@ -1450,6 +1457,7 @@ function createCodexRequestContext(
 		affinitySessionId: normalizeOpenAIPromptCacheKey(options?.parentSessionId),
 	});
 	transformedBody.client_metadata = requestMetadata.clientMetadata;
+	const wire = wireCountedFetch(options?.fetch);
 	return {
 		apiKey,
 		accountId,
@@ -1466,7 +1474,8 @@ function createCodexRequestContext(
 		codexClientVersion,
 		transformedBody,
 		rawRequestDump,
-		wireAttempts: createWireAttempts(),
+		wire,
+		wireStart: wire.attempts.count,
 	};
 }
 
@@ -1834,7 +1843,7 @@ async function openCodexWebSocketTransport(
 	// without ever attempting a websocket request, and counting it would report
 	// a replay to a concurrent call that made one request. From here the attempt
 	// is genuine, so a connection that fails to open still counts.
-	requestContext.wireAttempts.count += 1;
+	requestContext.wire.attempts.count += 1;
 	let websocketConnection = await getOrCreateCodexWebSocketConnection(
 		websocketState,
 		requestContext.turnState,
@@ -2010,13 +2019,7 @@ async function openCodexSseTransport(
 				requestSetup.firstEventTimeoutMs,
 				options?.codexSseMaxAttempts,
 				event => options?.onSseEvent?.(event, model),
-				// Under the counter, not beside it: `openCodexSseEventStream` hands
-				// this to `fetchWithRetry`, whose own 5xx and network-failure
-				// replays are otherwise invisible to every layer above.
-				countWireAttempts(
-					requestContext.wireAttempts,
-					wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
-				),
+				wrapFetchForRequestCompression(requestContext.wire.fetch, model),
 			),
 		);
 	};
@@ -2160,10 +2163,11 @@ async function handleCodexStreamFailure(context: CodexStreamFailureContext, erro
 	output.errorStatus = result.status;
 	output.errorId = result.id;
 	output.errorMessage = result.message;
-	// Always a number, 0 included: recovery above reads the absence of this
-	// field as "no layer here reports", so a failure that never reached the
-	// processor must still say what the wire saw.
-	output.providerReplays = providerReplaysFrom(context.requestContext.wireAttempts);
+	// A number, 0 included, whenever every attempt went through a transport
+	// this module owns: recovery above reads the absence of this field as "no
+	// layer here reports", so a failure that never reached the processor must
+	// still say what the wire saw. `undefined` after a caller-supplied `fetch`.
+	output.providerReplays = providerReplaysFrom(context.requestContext.wire.attempts, context.requestContext.wireStart);
 	output.duration = performance.now() - context.startTime;
 	if (context.firstTokenTime) {
 		output.ttft = context.firstTokenTime - context.startTime;
@@ -3385,7 +3389,8 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 							body: { model: model.id },
 						},
 						// No context means the failure predates the first request.
-						wireAttempts: createWireAttempts(),
+						wire: { fetch, attempts: createWireAttempts() },
+						wireStart: 0,
 					},
 					startTime,
 				} satisfies CodexStreamFailureContext);

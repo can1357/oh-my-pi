@@ -4,6 +4,7 @@ import { withInferenceUserAgent } from "../providers/inference-headers";
 import type { Api, FetchImpl, Model } from "../types";
 import { getProxyForProvider, withProxyInit } from "./proxy";
 import { createFetchRequestDebugSession, isRequestDebugEnabled } from "./request-debug";
+import { countWireAttempts, createWireAttempts, inheritWireAttempts } from "./wire-attempts";
 
 /** Stamped on a fetch already built by {@link transportFetch}. */
 const TRANSPORT_FETCH = Symbol("omp.transportFetch");
@@ -17,6 +18,12 @@ type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: true };
  * calls `fetchImpl` (or the model's default fetch) exactly once. Providers
  * never layer transport concerns themselves.
  *
+ * That single call is where the request is issued, so it is where the
+ * request is counted (`countWireAttempts`): every resend a provider or a
+ * wrapper above makes passes through here, and the counter rides on the
+ * returned fetch for the provider to read. A caller-supplied `fetchImpl` is
+ * opaque to the count — it may resend inside itself.
+ *
  * Idempotent: the built fetch is stamped and returned as-is on later passes.
  * `streamSimple` re-enters `stream`, and `streamSimpleRequest` re-enters itself
  * on auth retries, so without the stamp each entry point would add another
@@ -25,8 +32,11 @@ type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: true };
 export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefined): FetchImpl {
 	const given = fetchImpl as TransportFetch | undefined;
 	if (given?.[TRANSPORT_FETCH]) return given;
-	const base =
-		given ?? (model.provider === "anthropic" && model.api === "anthropic-messages" ? coworkFetch : globalThis.fetch);
+	const issue = countWireAttempts(
+		createWireAttempts(),
+		given ?? (model.provider === "anthropic" && model.api === "anthropic-messages" ? coworkFetch : globalThis.fetch),
+		given !== undefined,
+	);
 	const proxyUrl = getProxyForProvider(model.provider);
 
 	const fetch: TransportFetch = async (input, init) => {
@@ -37,13 +47,13 @@ export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefin
 		const extraCa = resolveExtraCa();
 		if (extraCa) init = withExtraCaInit(init, extraCa);
 		if (proxyUrl) init = withProxyInit(input, init, proxyUrl);
-		if (!isRequestDebugEnabled()) return base(input, init);
+		if (!isRequestDebugEnabled()) return issue(input, init);
 		const session = await createFetchRequestDebugSession(input, init);
-		return session.wrapResponse(await base(input, init));
+		return session.wrapResponse(await issue(input, init));
 	};
-	if (base.preconnect) fetch.preconnect = base.preconnect;
+	if (issue.preconnect) fetch.preconnect = issue.preconnect;
 	fetch[TRANSPORT_FETCH] = true;
-	return fetch;
+	return inheritWireAttempts(fetch, issue);
 }
 
 const dispatchOrigins = new Map<string, string>();

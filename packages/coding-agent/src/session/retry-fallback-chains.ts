@@ -89,8 +89,12 @@ export interface ServingModel {
 const RETRY_BACKOFF_MAX_DELAY_MS = 8_000;
 const RETRY_BACKOFF_JITTER_RATIO = 0.25;
 
-/** Exponential backoff for `attempt`, capped; the jitter policies below shape it. */
-function cappedRetryBackoffMs(baseDelayMs: number, attempt: number): number {
+/**
+ * Exponential backoff for `attempt`, capped at 8 s; the jitter policies below
+ * shape it. Also the window a full-jitter wait falls in, which is what a held
+ * retry's added sleep is bounded by.
+ */
+export function cappedRetryBackoffMs(baseDelayMs: number, attempt: number): number {
 	return Math.min(Math.max(0, baseDelayMs) * 2 ** Math.max(0, attempt - 1), RETRY_BACKOFF_MAX_DELAY_MS);
 }
 

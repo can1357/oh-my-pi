@@ -2780,7 +2780,9 @@ describe("openai-codex streaming", () => {
 		const token = `aaa.${payload}.bbb`;
 		let requestCount = 0;
 
-		const fetchMock = vi.fn(async (input: string | URL) => {
+		// The runtime's `fetch` is the wire; a caller-supplied one would make the
+		// count unknown.
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL) => {
 			const url = typeof input === "string" ? input : input.toString();
 			if (url !== "https://chatgpt.com/backend-api/codex/responses") {
 				return new Response("not found", { status: 404 });
@@ -2792,7 +2794,7 @@ describe("openai-codex streaming", () => {
 				`data: ${JSON.stringify({ type: "error", error: { code: "model_error", message: "upstream closed the connection" } })}`,
 			].join("\n\n")}\n\n`;
 			return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
-		});
+		}) as typeof fetch);
 
 		const model: Model<"openai-codex-responses"> = buildModel({
 			id: "gpt-5.1-codex",
@@ -2816,7 +2818,6 @@ describe("openai-codex streaming", () => {
 		const result = await streamOpenAICodexResponses(model, context, {
 			apiKey: token,
 			preferWebsockets: false,
-			fetch: fetchMock as FetchImpl,
 		}).result();
 
 		expect(fetchMock).toHaveBeenCalledTimes(6);

@@ -107,7 +107,7 @@ import { spillToDescription } from "../utils/schema/spill";
 import { createSdkStreamRequestOptions } from "../utils/sdk-stream-timeout";
 import { notifyRawSseEvent } from "../utils/sse-debug";
 import { isForcedToolChoice } from "../utils/tool-choice";
-import { createWireAttempts, providerReplaysFrom } from "../utils/wire-attempts";
+import { providerReplaysFrom, wireCountedFetch } from "../utils/wire-attempts";
 import {
 	AnthropicConnectionTimeoutError,
 	type AnthropicFetchOptions,
@@ -1829,23 +1829,22 @@ const streamAnthropicOnce = (
 		let rawRequestDump: RawHttpRequestDump | undefined;
 		let transportPayload: unknown;
 		let activeAbortTracker = createAbortSourceTracker(options?.signal);
-		// Request attempts this call spends, reported by the client at the moment
-		// it puts a request on the wire (`onRequestAttempt`). That boundary is
-		// the only one both sides can see: the client's own retry budget is spent
-		// inside a single `create` call, and a caller that supplies its own
-		// client leaves no fetch for this module to wrap.
-		const wireAttempts = createWireAttempts();
-		// Requests this module asked for. A client that ignores the hook leaves
-		// the two out of step, and an unreported attempt must read as unknown
-		// rather than as a request that went out once.
-		let clientRequests = 0;
+		// Request attempts this call spends, counted on the `fetch` the client
+		// issues them through (`wireCountedFetch`): `transportFetch` on the
+		// `stream()` path, else a counter over the runtime's `fetch`. Every
+		// wrapper `buildAnthropicClientOptions` adds sits above it —
+		// compression and its uncompressed resend, the cch rewriter, the
+		// Copilot identity resend — so their requests are counted too.
+		const wire = wireCountedFetch(options?.fetch);
+		const wireStart = wire.attempts.count;
 		/**
-		 * The count, or `undefined` when a client answered fewer attempts than
-		 * this module asked for — a caller-supplied client or transport that
-		 * ignores the hook knows how often it replayed and we do not.
+		 * The count, or `undefined` when the requests went through a transport
+		 * this module does not own — a caller-supplied client, or a transport
+		 * that builds its own — or through a caller-supplied `fetch`. Each knows
+		 * how often it replayed and this module does not.
 		 */
 		const reportedProviderReplays = (): number | undefined =>
-			clientRequests > 0 && wireAttempts.count >= clientRequests ? providerReplaysFrom(wireAttempts) : undefined;
+			transport || options?.client ? undefined : providerReplaysFrom(wire.attempts, wireStart);
 
 		const onSseEvent = options?.onSseEvent;
 		const rawSseObserver = onSseEvent ? (event: RawSseEvent) => onSseEvent(event, sourceModel) : undefined;
@@ -2193,7 +2192,7 @@ const streamAnthropicOnce = (
 						context.tools?.some(tool => ANTHROPIC_BUFFERED_INPUT_TOOLS.has(tool.name)) ?? false,
 					thinkingEnabled: options?.thinkingEnabled,
 					thinkingDisplay: options?.thinkingDisplay,
-					fetch: options?.fetch,
+					fetch: wire.fetch,
 					maxRetryDelayMs: options?.maxRetryDelayMs,
 					copilotCacheKey,
 					copilotCacheSnapshot: copilotCached ?? null,
@@ -2608,12 +2607,8 @@ const streamAnthropicOnce = (
 				const requestOptions = {
 					...createSdkStreamRequestOptions(requestSignal, requestTimeoutMs),
 					maxRetries: 0,
-					onRequestAttempt: () => {
-						wireAttempts.count += 1;
-					},
 					...(perRequestHeaders ? { headers: perRequestHeaders } : {}),
 				};
-				clientRequests += 1;
 				const anthropicRequest: unknown =
 					isOAuthToken && client.beta
 						? client.beta.messages.create({ ...params, stream: true }, requestOptions)

@@ -511,6 +511,35 @@ const STATUS_MESSAGE_PATTERNS = [
 	/(?:^|\s)(\d{3})\s+(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/,
 ] as const;
 
+/** A URL: its digits are a host, port, path or query, never the status of the response. */
+const URL_PATTERN = /\b[a-z][a-z\d+.-]*:\/\/[^\s"'<>]+/gi;
+/**
+ * The value of a field that names an identifier — `request_id=529`, Python
+ * h2's `stream_id:503` / `last_stream_id` / `error_code:2`, Go's
+ * `LastStreamID=503` — and Go's `stream ID 503`. Case-sensitive on purpose: the
+ * field must end in a separate `id` segment, so `invalid: 400` keeps its status.
+ */
+const ID_FIELD_VALUE_PATTERN =
+	/\b(?:[A-Za-z][\w.-]*?(?:_id|-id|_ID|-ID|Id|ID)|id|ID|error_code)\s*[:=]\s*\d+|\bstream\s+ID\s+\d+/g;
+/** Digits glued into an identifier or a path: `x-request-503-trace`, `/jobs/503/`, `gpt-503-preview`. */
+const GLUED_NUMBER_PATTERN = /(?<=[A-Za-z_\-/])\d+|\d+(?=[A-Za-z_\-/])/g;
+
+/**
+ * `text` with the digits that are diagnostic metadata removed: inside a URL,
+ * glued into an identifier or a path, or the value of an id field. Every reader
+ * that takes a bare number as an HTTP status, an auth rejection or a capacity
+ * refusal reads this instead, so `upstream closed the connection:
+ * https://gateway.invalid/jobs/503/result` stays a wire cut. A status the
+ * sentence states — `HTTP 503`, `status=529`, `503 Service Unavailable`,
+ * `(429)` — keeps its digits.
+ */
+function withoutMetadataNumbers(text: string): string {
+	return text
+		.replace(URL_PATTERN, url => url.replace(/\d+/g, ""))
+		.replace(ID_FIELD_VALUE_PATTERN, field => field.replace(/\d+/g, ""))
+		.replace(GLUED_NUMBER_PATTERN, "");
+}
+
 export function create(...flags: number[]): number {
 	let bits = 0;
 	for (const f of flags) bits |= f;
@@ -571,8 +600,9 @@ function statusInternal(error: unknown, depth: number): number | undefined {
 	if (error instanceof Error || (typeof error === "object" && error !== null && "message" in error)) {
 		const message = (error as { message: string }).message;
 		if (typeof message === "string") {
+			const text = withoutMetadataNumbers(message);
 			for (const pattern of STATUS_MESSAGE_PATTERNS) {
-				const match = pattern.exec(message);
+				const match = pattern.exec(text);
 				if (match) {
 					const code = parseInt(match[1], 10);
 					if (code >= 100 && code <= 599) return code;
@@ -640,30 +670,16 @@ function isCapacityPressure(text: string, reason: RateLimitReason): boolean {
 }
 
 /**
- * Values of HTTP/2 stream and frame fields. A stream number names a stream on
- * the connection, not a status code, but both capacity readers search for bare
- * `429`/`503`/`529` tokens (`parseRateLimitReason`, rate-limit.ts, and the
- * pattern above), so a reset on stream 503 would read as a capacity refusal and
- * veto the connection lane for a reset that never reached a status line. Blank
- * these fields' digits before capacity is judged; a status token anywhere else
- * in the sentence still counts. Spellings covered, each a diagnostic the lane
- * reads:
- *
- * - Python h2: `<StreamReset stream_id:503, error_code:2, …>`, plus the
- *   `last_stream_id`/`promised_stream_id` fields of its other frames;
- * - Go `x/net/http2`: `stream error: stream ID 503; INTERNAL_ERROR` and the
- *   GOAWAY sentence `… closed the connection; LastStreamID=503, ErrCode=…`.
- */
-const H2_FRAME_FIELD_VALUE_PATTERN =
-	/\b(?:stream_id|last_stream_id|promised_stream_id|error_code|laststreamid)\s*[:=]\s*\d+|\bstream\s+ID\s+\d+/gi;
-
-/**
  * Whether a diagnostic carries capacity or quota evidence — see
  * {@link isCapacityPressure}. Pass `reason` when the caller already parsed it;
- * it is re-parsed only when frame-field digits had to be blanked first.
+ * it is re-parsed only when metadata digits had to be blanked first
+ * ({@link withoutMetadataNumbers}): both capacity readers match bare
+ * `429`/`503`/`529` tokens (`parseRateLimitReason`, rate-limit.ts, and the
+ * pattern above), which a stream number, a URL or a request id satisfies by
+ * accident and vetoes the connection lane for a cut that reached no status line.
  */
 function hasCapacityEvidence(text: string, reason?: RateLimitReason): boolean {
-	const capacityText = text.replace(H2_FRAME_FIELD_VALUE_PATTERN, match => match.replace(/\d+/g, ""));
+	const capacityText = withoutMetadataNumbers(text);
 	if (capacityText === text) return isCapacityPressure(text, reason ?? parseRateLimitReason(text));
 	return isCapacityPressure(capacityText, parseRateLimitReason(capacityText));
 }
@@ -771,8 +787,9 @@ function isTimeoutText(text: string): boolean {
 	return TIMEOUT_PATTERN.test(text);
 }
 
+/** A `401`/`403` in a URL or an identifier is metadata, not a rejection ({@link withoutMetadataNumbers}). */
 function isAuthFailureText(text: string): boolean {
-	return AUTH_FAILURE_PATTERN.test(text);
+	return AUTH_FAILURE_PATTERN.test(withoutMetadataNumbers(text));
 }
 
 function isStaleResponsesText(text: string): boolean {
@@ -940,6 +957,42 @@ function classifyText(
 	return fallbackStatus ?? 0;
 }
 
+/** The message a cause-chain link carries: an `Error`'s, a string cause, a plain object's `message` or `errorMessage`. */
+function linkMessageOf(link: unknown): string | undefined {
+	if (link instanceof Error) return link.message;
+	if (typeof link === "string") return link;
+	if (typeof link !== "object" || link === null) return undefined;
+	if ("message" in link && typeof link.message === "string") return link.message;
+	if ("errorMessage" in link && typeof link.errorMessage === "string") return link.errorMessage;
+	return undefined;
+}
+
+/** A link's status: its structured fields ({@link status}), else the one its own message states. */
+function linkStatusOf(link: unknown, message: string | undefined): number | undefined {
+	return status(link) ?? (message !== undefined ? status({ message }) : undefined);
+}
+
+/**
+ * The first terminal 4xx anywhere in an error's cause chain, read from every
+ * representation a link can carry it in. It governs every link, above it as
+ * much as below, so neither the depth a status sits at nor the shape that
+ * carries it decides whether a rejected request retries.
+ */
+function chainTerminalStatus(error: unknown): number | undefined {
+	const seen = new Set<object>();
+	let link: unknown = error;
+	while (link !== undefined && link !== null) {
+		if (typeof link === "object") {
+			if (seen.has(link)) break;
+			seen.add(link);
+		}
+		const linkStatus = linkStatusOf(link, linkMessageOf(link));
+		if (isTerminalClientErrorStatus(linkStatus)) return linkStatus;
+		link = typeof link === "object" && "cause" in link ? (link as { cause: unknown }).cause : undefined;
+	}
+	return undefined;
+}
+
 export function classify(error: unknown, api?: Api): number {
 	let kinds = 0;
 	const seen = new Set<object>();
@@ -951,6 +1004,10 @@ export function classify(error: unknown, api?: Api): number {
 	// down so the terminal-4xx guard in classifyText sees it on the status-less
 	// cause.
 	let governingTerminalStatus: number | undefined;
+	// And one on any link below governs the links above it: the walk reaches a
+	// deep status only after it has classified the outer links, and the text
+	// and errno arms set `Transient` on those links. Read it first.
+	const terminalStatus = chainTerminalStatus(error);
 	// What the connection finalizer needs that no single link carries:
 	// `status(error)` alone stops at the third link (`statusInternal`, depth 2),
 	// and a capacity refusal on one link is invisible to the link that supplies
@@ -958,15 +1015,13 @@ export function classify(error: unknown, api?: Api): number {
 	// capacity parse runs only for an error that still claims the lane.
 	let statusSeen: number | undefined;
 	const linkMessages: string[] = [];
-	// The errno arm below is decided after the walk, not on the link that
-	// carries the errno: the terminal status that governs it can sit on any
-	// link, including one deeper than `status()` reaches from there.
+	// The errno arm below is decided after the walk, under the same chain-wide
+	// terminal-4xx gate as the text arm.
 	let wireErrnoSeen = false;
-	let terminalStatusSeen = false;
 	while (link !== undefined && link !== null) {
-		const linkStatus = status(link);
+		const linkMessage = linkMessageOf(link);
+		const linkStatus = linkStatusOf(link, linkMessage);
 		statusSeen ??= linkStatus;
-		if (isTerminalClientErrorStatus(linkStatus)) terminalStatusSeen = true;
 		if (typeof link === "object") {
 			if (seen.has(link)) break;
 			seen.add(link);
@@ -1047,28 +1102,20 @@ export function classify(error: unknown, api?: Api): number {
 			kinds |= linkKinds;
 		}
 
-		let linkMessage: string | undefined;
-		if (link instanceof Error) {
-			linkMessage = link.message;
-		} else if (typeof link === "string") {
-			linkMessage = link;
-		} else if (typeof link === "object") {
-			if ("message" in link && typeof link.message === "string") {
-				linkMessage = link.message;
-			} else if ("errorMessage" in link && typeof link.errorMessage === "string") {
-				linkMessage = link.errorMessage;
-			}
-		}
-
 		if (linkMessage !== undefined) linkMessages.push(linkMessage);
-		const textId = classifyText(linkMessage, linkStatus ?? governingTerminalStatus, causeTokenEvidence, api);
+		const textId = classifyText(
+			linkMessage,
+			linkStatus ?? governingTerminalStatus ?? terminalStatus,
+			causeTokenEvidence,
+			api,
+		);
 		kinds |= textId & KIND_MASK;
 		if (isTerminalClientErrorStatus(linkStatus)) governingTerminalStatus = linkStatus;
 
 		link = typeof link === "object" && "cause" in link ? (link as { cause: unknown }).cause : undefined;
 	}
 
-	if (wireErrnoSeen && !terminalStatusSeen) kinds |= Flag.Connection | Flag.Transient;
+	if (wireErrnoSeen && terminalStatus === undefined) kinds |= Flag.Connection | Flag.Transient;
 
 	if (kinds === 0) return status(error) ?? 0;
 	// Only an error still holding the lane pays for the capacity parse.

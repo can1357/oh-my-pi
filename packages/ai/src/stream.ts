@@ -74,6 +74,7 @@ import { applyGlyphCodec } from "./utils/glyph-codec";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
 import { withThinkingLoopGuard } from "./utils/thinking-loop";
 import { withTransportFetch } from "./utils/transport-fetch";
+import { inheritWireAttempts } from "./utils/wire-attempts";
 
 function isGoogleVertexAuthenticatedModel(model: Model<Api>): boolean {
 	return (
@@ -737,7 +738,12 @@ function createVertexAuthenticatedFetch(options: StreamOptions | undefined): Fet
 		}
 		return baseFetch(rewritten, { ...init, headers });
 	};
-	return Object.assign(vertexFetch, baseFetch.preconnect ? { preconnect: baseFetch.preconnect } : {});
+	// Requests (and the token fetch) go through `baseFetch`, which counts them;
+	// expose that counter so the provider can read its own call's attempts.
+	return inheritWireAttempts(
+		Object.assign(vertexFetch, baseFetch.preconnect ? { preconnect: baseFetch.preconnect } : {}),
+		baseFetch,
+	);
 }
 
 async function readVertexRequestBody(input: string | URL | Request, init: RequestInit | undefined): Promise<string> {

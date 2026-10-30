@@ -149,6 +149,68 @@ describe("connection-failure classification", () => {
 		expect(AIError.retriable(id)).toBe(false);
 	});
 
+	/** Every way a cause can state a terminal 400 or 401 that the classifier reads. */
+	const STATUS_CAUSES: [string, (status: number) => unknown][] = [
+		["a plain object's status", status => ({ status, message: "request failed" })],
+		["a plain object's statusCode", status => ({ statusCode: status, message: "request failed" })],
+		["a plain object's response.status", status => ({ response: { status }, message: "request failed" })],
+		["an Error's message", status => new Error(`HTTP ${status} Bad Request`)],
+		["a string cause", status => `HTTP ${status} Bad Request`],
+		["a plain object's errorMessage", status => ({ errorMessage: `HTTP ${status} Bad Request` })],
+	];
+
+	/** `cause` behind `depth` plain `Error` wrappers. */
+	function wrapped(cause: unknown, depth: number): unknown {
+		let link = cause;
+		for (let i = 0; i < depth; i++) link = new Error(`wrapper ${i}`, { cause: link });
+		return link;
+	}
+
+	it.each(
+		STATUS_CAUSES.flatMap(([label, make]) =>
+			TERMINAL_STATUSES.flatMap(status =>
+				[0, 3, 8, 30].flatMap(depth =>
+					[
+						["a generic errno", () => Object.assign(new Error("generic failure"), { code: "ECONNRESET" })],
+						[
+							"wire wording and its errno",
+							() => Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }),
+						],
+						["wire wording alone", () => new Error("socket hang up")],
+					].map(([outerLabel, makeOuter]) => [
+						outerLabel as string,
+						label,
+						status,
+						depth,
+						() => {
+							const outer = (makeOuter as () => Error)();
+							outer.cause = wrapped(make(status), depth);
+							return outer;
+						},
+					]),
+				),
+			),
+		) as [string, string, number, number, () => Error][],
+	)("keeps %s off the retry lane over %s %d, %d wrappers deep", (_outer, _cause, _status, _depth, build) => {
+		// A terminal 4xx anywhere in the chain governs the whole chain, whatever
+		// carries it and however deep: the text arm and the errno arm both used
+		// to set `Transient` from the outer link before the walk reached a status
+		// past `status()`'s third link, or one stated only in a cause's text.
+		const id = AIError.classify(build());
+		expect(AIError.is(id, AIError.Flag.Connection)).toBe(false);
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(false);
+		expect(AIError.retriable(id)).toBe(false);
+	});
+
+	it("still lets a deliberate 400 transient through when the status sits deep in the chain", () => {
+		// Fireworks' mid-generation NaN 400 replays successfully; the chain-wide
+		// status must keep feeding that special case, not only veto.
+		const error = new Error("Floating point NaN detected in generation", {
+			cause: wrapped({ status: 400, message: "request failed" }, 5),
+		});
+		expect(AIError.retriable(AIError.classify(error))).toBe(true);
+	});
+
 	it("drops a persisted connection classification for a terminal status read from the message", () => {
 		// The status is in the text, not on `errorStatus`. The text classifier
 		// parses it; the finalizer was handed only the structured status and so
@@ -225,6 +287,42 @@ describe("connection-failure classification", () => {
 		// and the reset they report never reached a status line. A status token
 		// elsewhere in the same diagnostic still counts.
 		expect(flagsOfMessage(errorMessage).connection).toBe(connection);
+	});
+
+	const WIRE = "upstream closed the connection";
+
+	it.each(
+		["400", "401", "403", "429", "503", "529"].flatMap(code => [
+			[`a URL path segment ${code}`, `${WIRE}: https://gateway.invalid/jobs/${code}/result`],
+			[`a URL query status=${code}`, `${WIRE}: https://gateway.invalid/poll?status=${code}`],
+			[`a URL port ${code}`, `${WIRE}: http://127.0.0.1:${code}/v1/messages`],
+			[`a bare path segment ${code}`, `${WIRE} while reading /v1/jobs/${code}/result`],
+			[`a header name segment ${code}`, `${WIRE}: x-request-${code}-trace=abc`],
+			[`an id field ${code}`, `${WIRE} (request_id=${code})`],
+			[`a model id with ${code}`, `${WIRE} for model gpt-${code}-preview`],
+		]),
+	)("keeps the connection lane and retry for %s", (_label, errorMessage) => {
+		// A number inside a URL, glued into an identifier or naming an id is
+		// metadata. Read as a bare status it made a wire cut a capacity refusal,
+		// an auth rejection or a terminal 400, and the session walked the chain
+		// (or stopped) after one request.
+		expect(flagsOfMessage(errorMessage)).toEqual({ connection: true, retriable: true });
+	});
+
+	it.each([
+		["a status line", `${WIRE}: HTTP 503`, false],
+		["a status field", `${WIRE} (status=529)`, false],
+		["a leading status", `503 Service Unavailable: ${WIRE}`, false],
+		["a parenthesised status", `${WIRE} (429)`, false],
+		["a status next to a URL", `${WIRE}: HTTP 503 from https://gateway.invalid/v1`, false],
+		["a status field next to an id", `${WIRE} status=503 request_id=7`, false],
+	] as [string, string, boolean][])("still reads explicit capacity in %s", (_label, errorMessage, connection) => {
+		expect(flagsOfMessage(errorMessage).connection).toBe(connection);
+	});
+
+	it("does not read a status from a URL query", () => {
+		expect(AIError.status(new Error(`${WIRE}: https://gateway.invalid/poll?status=400`))).toBeUndefined();
+		expect(AIError.status(new Error(`${WIRE}: status=400 at https://gateway.invalid/poll`))).toBe(400);
 	});
 
 	it("keeps a rejected credential off the connection lane", () => {

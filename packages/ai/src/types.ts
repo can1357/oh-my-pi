@@ -1332,24 +1332,28 @@ export interface AssistantMessage {
 	/**
 	 * Request attempts a layer below the caller made beyond the first, before
 	 * this message was produced; `0` when the request went out exactly once.
-	 * `undefined` means "nothing here reports", never "none" — a caller-owned
-	 * client or transport that does not answer the provider's attempt hook
-	 * knows how often it replayed and this message does not.
+	 * `undefined` means "unknown", never "none": the provider does not report,
+	 * or its requests went through a transport it cannot see into — a
+	 * caller-supplied client, or a caller-supplied `fetch`, which may resend
+	 * inside itself — and a count taken above that cannot say the request went
+	 * out once.
 	 *
-	 * Counted at the boundary the provider owns, before each request goes out,
-	 * so an attempt that never opens counts too. One counter runs for the whole
-	 * provider call, which is what makes it whole rather than a sum of rungs:
-	 * it covers the provider's own replays (a transport reopen, a transport
-	 * fallback, a checkpoint resume, rebuilt parameters, a client's own retry
-	 * budget) and the replays `fetchWithRetry` makes underneath them, which no
-	 * layer above that function can otherwise see.
+	 * Counted where each request is issued, before it goes out, so an attempt
+	 * that never opens counts too: on the `fetch` at the bottom of the
+	 * provider's stack (`transportFetch` on the `stream()` path), or at the
+	 * provider's own socket. Every resend this repository owns sits above that
+	 * counter and is counted by where it is — the provider's own replays (a
+	 * transport reopen, a transport fallback, a checkpoint resume, rebuilt
+	 * parameters, a client's own retry budget), the replays `fetchWithRetry`
+	 * makes, the uncompressed resend of a refused compressed body, the GitHub
+	 * Copilot identity resend.
 	 *
-	 * **Attempts, not HTTP requests.** Below that boundary one attempt may be
-	 * several HTTP requests — a redirect hop `fetch` follows, a caller-supplied
-	 * `fetch` that retries inside itself, a transport whose logical turn is
-	 * several RPCs (Cursor's `RunSSE` plus `BidiAppend`) — and those stay one
-	 * attempt. The question the count answers is whether a layer below already
-	 * replayed the request, and every rung that replays takes one attempt.
+	 * **Attempts, not HTTP requests.** Below the counter one attempt may still
+	 * be several HTTP requests — a redirect hop `fetch` follows, a transport
+	 * whose logical turn is several RPCs (Cursor's `RunSSE` plus `BidiAppend`)
+	 * — and those stay one attempt: neither is a second generation of the
+	 * request. The question the count answers is whether the request was sent
+	 * again.
 	 *
 	 * Recovery above the provider has to know that — replaying again multiplies
 	 * the work below. Streamed content cannot stand in for it: each loop stops

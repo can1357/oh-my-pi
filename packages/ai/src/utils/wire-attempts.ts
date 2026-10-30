@@ -1,67 +1,106 @@
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
 /**
- * Request attempts one logical provider call has made so far, as seen at the
- * boundary this repo owns.
+ * Request attempts one logical provider call has made, counted where the
+ * request is handed to a transport.
  *
- * Counted before the request goes out, so an attempt that fails to open counts
- * the same as one that answers. One counter lives for the whole call and
- * survives every recovery rung the provider owns (transport reopen, transport
- * fallback, checkpoint resume, rebuilt parameters, a client's own retry
- * budget), because each of those puts the request on the wire again.
+ * The counter lives on the bottom `fetch` of the provider's stack — the one
+ * every request is issued through — so every resend this repository owns sits
+ * above it: a provider's own rungs (transport reopen, transport fallback,
+ * checkpoint resume, rebuilt parameters, a client's retry budget),
+ * `fetchWithRetry`, the uncompressed resend of
+ * `wrapFetchForRequestCompression`, the identity resend of
+ * `wrapFetchForCopilotFallback`, and any wrapper added between a provider and
+ * the wire later. A resend is counted because of where the counter is, not
+ * because its author remembered to count it. Each attempt is counted before
+ * it goes out, so one that fails to open counts the same as one that answers.
  *
- * **Attempts, not HTTP requests.** The boundary is the call this repo makes,
- * and below it one attempt may be more or fewer HTTP requests than one:
+ * On the `stream()` path that bottom is `transportFetch`, which owns the
+ * counter; a provider called directly installs the counter over the runtime's
+ * `fetch` itself ({@link wireCountedFetch}). Either way a provider reads the
+ * count off the `fetch` it was handed: the number and the requests it counts
+ * are the same object.
  *
- * - a redirect hop is followed inside `fetch`, so a 307 is two HTTP requests
- *   and one attempt;
- * - a caller-supplied `fetch` that retries internally is opaque, so its extra
- *   requests are invisible here and the count stays at one attempt;
- * - a transport whose logical turn is several RPCs (Cursor sends `RunSSE` and
- *   `BidiAppend` for one run) counts the run, not the RPCs.
+ * **Attempts, not HTTP requests.** Below the counter there is only a transport
+ * that issues one request per call — the runtime's `fetch`, or `coworkFetch`
+ * — and that can still turn one attempt into more than one HTTP request: a
+ * redirect hop is followed inside `fetch`. A redirect is not a second
+ * generation of the same request.
  *
- * What the count is for is the question "did a layer below already replay
- * this request", and an attempt is the unit that answers it: every rung that
- * replays goes through one.
- *
- * The number a caller above the provider needs is
- * {@link providerReplaysFrom}: everything after the first attempt.
+ * **A caller-supplied `fetch` makes the count unknown.** It sits below the
+ * counter and may resend inside itself, so a count taken above it cannot say
+ * the request went out once: {@link providerReplaysFrom} reports `undefined`,
+ * never `0`.
  */
 export interface WireAttempts {
 	count: number;
+	/** An attempt went through a caller-supplied `fetch` the counter cannot see into. */
+	opaque: boolean;
 }
+
+const WIRE_ATTEMPTS = Symbol("omp.wireAttempts");
+
+type CountedFetch = FetchImpl & { [WIRE_ATTEMPTS]?: WireAttempts };
 
 export function createWireAttempts(): WireAttempts {
-	return { count: 0 };
+	return { count: 0, opaque: false };
 }
 
 /**
- * Attempts after the first, for `AssistantMessage.providerReplays`. A call
- * that never reached the wire reports `0`, which is the truth a caller needs:
- * nothing below replayed it.
+ * `base` with every call counted into `attempts` just before it is issued,
+ * and the counter stamped on the result so a provider handed it can read the
+ * count ({@link wireAttemptsOf}). `opaque` says `base` is a caller-supplied
+ * `fetch`: the first call through it makes the count unknown.
  */
-export function providerReplaysFrom(attempts: WireAttempts | undefined): number {
-	return Math.max(0, (attempts?.count ?? 0) - 1);
-}
-
-/**
- * Wraps a `fetch` so every call through it counts as one attempt.
- *
- * Installing the counter here rather than at each retry rung is what makes the
- * count complete on the fetch lane: `fetchWithRetry` replays a 5xx or a thrown
- * network failure on its own budget through this same implementation, and
- * those replays are invisible to every layer above it. Counting before the
- * call keeps an attempt that throws on the way out — a refused connection, a
- * rejected reopen — in the total.
- *
- * It sees calls, not HTTP requests: a redirect `fetch` follows and a
- * caller-supplied implementation that retries inside itself are both one call
- * here. Measured equal to counting immediately around the inner `fetchImpl`
- * across HTTP retry, synchronous throw, URL rebuilding and `prepareInit`.
- */
-export function countWireAttempts(attempts: WireAttempts, impl: FetchImpl): FetchImpl {
-	return (input, init) => {
+export function countWireAttempts(attempts: WireAttempts, base: FetchImpl, opaque: boolean): FetchImpl {
+	const counted: CountedFetch = (input, init) => {
 		attempts.count += 1;
-		return impl(input, init);
+		if (opaque) attempts.opaque = true;
+		return base(input, init);
 	};
+	if (base.preconnect) counted.preconnect = base.preconnect;
+	counted[WIRE_ATTEMPTS] = attempts;
+	return counted;
+}
+
+/** The counter on the `fetch` that issues this stack's requests, if it carries one. */
+export function wireAttemptsOf(fetchImpl: FetchImpl | undefined): WireAttempts | undefined {
+	return (fetchImpl as CountedFetch | undefined)?.[WIRE_ATTEMPTS];
+}
+
+/**
+ * Lets a wrapper that issues its requests through `base` expose `base`'s
+ * counter. Safe for any wrapper, resending or not: the count is still taken
+ * in `base`, below it.
+ */
+export function inheritWireAttempts<T extends FetchImpl>(wrapper: T, base: FetchImpl): T {
+	const attempts = wireAttemptsOf(base);
+	if (attempts) (wrapper as CountedFetch)[WIRE_ATTEMPTS] = attempts;
+	return wrapper;
+}
+
+/**
+ * The `fetch` a provider builds its wrapper stack on, and the counter its
+ * requests are counted into: `fetchImpl` itself when it already carries one
+ * (`transportFetch`), else `fetchImpl` — or the runtime's `fetch` — under a
+ * new counter. A provider reads its own share as the attempts made after it
+ * started ({@link providerReplaysFrom}), so a counter reused across an auth
+ * retry or a replay-safe wrapper's attempts is never charged twice.
+ */
+export function wireCountedFetch(fetchImpl: FetchImpl | undefined): { fetch: FetchImpl; attempts: WireAttempts } {
+	const existing = wireAttemptsOf(fetchImpl);
+	if (fetchImpl && existing) return { fetch: fetchImpl, attempts: existing };
+	const attempts = createWireAttempts();
+	return { fetch: countWireAttempts(attempts, fetchImpl ?? fetch, fetchImpl !== undefined), attempts };
+}
+
+/**
+ * Attempts after the first since `start`, for
+ * `AssistantMessage.providerReplays`, or `undefined` when an attempt went
+ * through a transport the counter cannot see into. A call that never reached
+ * the wire reports `0`, which is the truth a caller needs: nothing below
+ * replayed it.
+ */
+export function providerReplaysFrom(attempts: WireAttempts, start = 0): number | undefined {
+	return attempts.opaque ? undefined : Math.max(0, attempts.count - start - 1);
 }

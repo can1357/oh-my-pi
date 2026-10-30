@@ -33,17 +33,31 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 /**
- * How the stub answers one request. The first three speak Anthropic's SSE, the
- * `openai*` ones the chat-completions SSE, and `status503` either: an
+ * How the stub answers one request. The Anthropic ones speak Anthropic's SSE,
+ * the `openai*` ones the chat-completions SSE, and `status503` either: an
  * overload with `retry-after: 0`, which `fetchWithRetry` replays on its own.
+ * `encodingRejected` is the host's refusal of a compressed body, and
+ * `identityDenied` GitHub Copilot's refusal of a client identity.
  */
 type WireScript =
 	| "cutBeforeHeaders"
 	| "cutAfterReasoning"
+	| "cutAfterReasoningWithHint"
 	| "ok"
 	| "status503"
+	| "encodingRejected"
+	| "identityDenied"
 	| "openaiInbandCut"
 	| "openaiReasoningCut";
+
+/** What the stub saw of one request, for a script that answers by it. */
+interface WireRequest {
+	/** Requests this model has made so far, this one included. */
+	nth: number;
+	model: string;
+	encoding: string | undefined;
+	identity: string | undefined;
+}
 
 function resolveKey(apiKey: ApiKey | undefined): string {
 	const resolved = typeof apiKey === "function" ? apiKey({ lastChance: false, error: undefined }) : apiKey;
@@ -102,14 +116,35 @@ const OPENAI_REASONING = openaiFrame({
 /** A gateway's in-band report that its upstream died before any content: an HTTP 200 SSE body. */
 const OPENAI_INBAND_CUT = openaiFrame({ error: { message: "upstream closed the connection", type: "api_error" } });
 
+/** Reasoning, then the gateway reports its upstream cut and names a 900 ms wait. */
+const REASONING_THEN_CUT_WITH_HINT = `${MESSAGE_START}${REASONING}${sse({
+	type: "error",
+	error: { type: "api_error", message: "upstream closed the connection retry-after-ms=900" },
+})}`;
+
 const OVERLOADED_BODY = JSON.stringify({ error: { message: "overloaded", type: "overloaded_error" } });
+const ENCODING_REJECTED_BODY = JSON.stringify({
+	type: "error",
+	error: {
+		type: "invalid_request_error",
+		message: "Request body is not valid gzip.",
+		details: { error_code: "request_body_encoding_invalid" },
+	},
+});
+const IDENTITY_DENIED_BODY = '{"error":{"message":"client identity denied"}}';
 
 interface Conn {
 	answered: boolean;
-	buf: string;
+	buf: Buffer;
 }
 
-function startWireStub(script: (requestIndex: number) => WireScript): {
+function decodeBody(body: Buffer, encoding: string | undefined): string {
+	if (encoding === "gzip") return Buffer.from(Bun.gunzipSync(new Uint8Array(body))).toString("utf8");
+	if (encoding === "zstd") return Buffer.from(Bun.zstdDecompressSync(body)).toString("utf8");
+	return body.toString("utf8");
+}
+
+function startWireStub(script: (requestIndex: number, request: WireRequest) => WireScript): {
 	port: number;
 	requests: () => number;
 	/** Requests whose body named `model`. */
@@ -123,47 +158,51 @@ function startWireStub(script: (requestIndex: number) => WireScript): {
 		port: 0,
 		socket: {
 			open(socket) {
-				socket.data = { answered: false, buf: "" };
+				socket.data = { answered: false, buf: Buffer.alloc(0) };
 			},
 			data(socket, data) {
 				if (socket.data.answered) return;
-				socket.data.buf += data.toString("utf8");
+				socket.data.buf = Buffer.concat([socket.data.buf, Buffer.from(data)]);
 				const headerEnd = socket.data.buf.indexOf("\r\n\r\n");
 				if (headerEnd < 0) return;
-				const lengthMatch = /content-length:\s*(\d+)/i.exec(socket.data.buf.slice(0, headerEnd));
-				const body = socket.data.buf.slice(headerEnd + 4);
-				if (lengthMatch && Buffer.byteLength(body) < Number(lengthMatch[1])) return;
+				const head = socket.data.buf.subarray(0, headerEnd).toString("latin1");
+				const header = (name: string) => new RegExp(`^${name}:\\s*(.+?)\\s*$`, "im").exec(head)?.[1];
+				const length = Number(header("content-length") ?? 0);
+				const body = socket.data.buf.subarray(headerEnd + 4);
+				if (body.length < length) return;
 				socket.data.answered = true;
-				const parsed: unknown = JSON.parse(body);
-				models.push(
+				const encoding = header("content-encoding")?.toLowerCase();
+				const parsed: unknown = JSON.parse(decodeBody(body, encoding));
+				const model =
 					parsed && typeof parsed === "object" && "model" in parsed && typeof parsed.model === "string"
 						? parsed.model
-						: "",
-				);
-				const mode = script(requests++);
+						: "";
+				models.push(model);
+				const mode = script(requests++, {
+					nth: models.filter(candidate => candidate === model).length,
+					model,
+					encoding,
+					identity: header("copilot-integration-id"),
+				});
+				const respond = (status: string, contentType: string, payload: string) =>
+					socket.end(
+						`HTTP/1.1 ${status}\r\ncontent-type: ${contentType}\r\nretry-after: 0\r\ncontent-length: ${Buffer.byteLength(payload)}\r\nconnection: close\r\n\r\n${payload}`,
+					);
 				if (mode === "cutBeforeHeaders") {
 					socket.terminate();
 					return;
 				}
-				if (mode === "ok") {
-					socket.write(
-						`HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: ${Buffer.byteLength(COMPLETE_TURN)}\r\nconnection: close\r\n\r\n${COMPLETE_TURN}`,
-					);
-					socket.flush();
-					socket.end();
-					return;
+				if (mode === "ok") return void respond("200 OK", "text/event-stream", COMPLETE_TURN);
+				if (mode === "status503")
+					return void respond("503 Service Unavailable", "application/json", OVERLOADED_BODY);
+				if (mode === "encodingRejected") {
+					return void respond("400 Bad Request", "application/json", ENCODING_REJECTED_BODY);
 				}
-				if (mode === "status503") {
-					socket.end(
-						`HTTP/1.1 503 Service Unavailable\r\ncontent-type: application/json\r\nretry-after: 0\r\ncontent-length: ${Buffer.byteLength(OVERLOADED_BODY)}\r\nconnection: close\r\n\r\n${OVERLOADED_BODY}`,
-					);
-					return;
-				}
-				if (mode === "openaiInbandCut") {
-					socket.end(
-						`HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: ${Buffer.byteLength(OPENAI_INBAND_CUT)}\r\nconnection: close\r\n\r\n${OPENAI_INBAND_CUT}`,
-					);
-					return;
+				if (mode === "identityDenied")
+					return void respond("403 Forbidden", "application/json", IDENTITY_DENIED_BODY);
+				if (mode === "openaiInbandCut") return void respond("200 OK", "text/event-stream", OPENAI_INBAND_CUT);
+				if (mode === "cutAfterReasoningWithHint") {
+					return void respond("200 OK", "text/event-stream", REASONING_THEN_CUT_WITH_HINT);
 				}
 				const partial = mode === "openaiReasoningCut" ? OPENAI_REASONING : `${MESSAGE_START}${REASONING}`;
 				socket.write(
@@ -199,6 +238,9 @@ describe("wire retries reaching the provider", () => {
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@pi-wire-retry-");
 		vi.spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
+		// The registry is shared; a chain entry an earlier test walked off is
+		// left cooling down and would never be offered to the next test's chain.
+		modelRegistry.clearSuppressedSelectors();
 	});
 	afterEach(async () => {
 		for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
@@ -211,35 +253,53 @@ describe("wire retries reaching the provider", () => {
 	});
 
 	/**
-	 * Runs one prompt on a real Anthropic stream pointed at the stub, with a
-	 * mocked fallback model so the chain hop is observable without a second
-	 * wire. Returns how many requests reached the stub before the fallback.
+	 * Runs one prompt on a real Anthropic-messages stream pointed at the stub,
+	 * with a mocked fallback model at the end of the chain so the chain hop is
+	 * observable without another wire. Returns how many requests reached the
+	 * stub before the fallback, and the waits the session scheduled.
 	 *
-	 * `chainHead` puts a second Anthropic model, served by the same stub, at the
-	 * front of the chain, so a recovery can walk two wire-backed models before
-	 * the mocked one.
+	 * `chain` puts more Anthropic-messages models, served by the same stub,
+	 * ahead of the mocked one. `catalogUrl` keeps each model's real base URL —
+	 * request compression is scoped to the provider's own hosts — and routes the
+	 * runtime's `fetch` to the stub instead, one call for one call.
 	 */
 	async function run(
-		script: (requestIndex: number) => WireScript,
-		options: { chainHead?: Model<"anthropic-messages">; maxRetries?: number } = {},
+		script: (requestIndex: number, request: WireRequest) => WireScript,
+		options: {
+			primary?: Model<"anthropic-messages">;
+			chain?: Model<"anthropic-messages">[];
+			maxRetries?: number;
+			baseDelayMs?: number;
+			maxDelayMs?: number;
+			catalogUrl?: boolean;
+			prompt?: string;
+		} = {},
 	): Promise<{
 		requestsBeforeFallback: number | undefined;
 		totalWireRequests: number;
 		requestedModels: string[];
 		requestsFor: (model: string) => number;
+		retryDelaysMs: number[];
 	}> {
 		const stub = startWireStub(script);
 		cleanups.push(() => stub.stop());
-		// The catalog getter returns the wide union; this row's api is anthropic-messages.
-		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5") as Model<"anthropic-messages">;
+		const stubOrigin = `http://127.0.0.1:${stub.port}`;
+		if (options.catalogUrl) {
+			const runtimeFetch = globalThis.fetch.bind(globalThis);
+			vi.spyOn(globalThis, "fetch").mockImplementation(((input: string | URL | Request, init?: RequestInit) => {
+				const url = new URL(input instanceof Request ? input.url : String(input));
+				return runtimeFetch(`${stubOrigin}${url.pathname}${url.search}`, init);
+			}) as typeof fetch);
+		}
+		// The catalog getter returns the wide union; these rows' api is anthropic-messages.
+		const primaryModel =
+			options.primary ?? (getBundledModel("anthropic", "claude-sonnet-4-5") as Model<"anthropic-messages">);
+		const wireModels = [primaryModel, ...(options.chain ?? [])];
 		const fallbackModel = getBundledModel("openai", "gpt-5.5");
-		authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
+		for (const model of wireModels) authStorage.keys.setRuntime(model.provider, `${model.provider}-test-key`);
 		authStorage.keys.setRuntime("openai", "openai-test-key");
-		const primary = `${primaryModel.provider}/${primaryModel.id}`;
-		const fallback = `${fallbackModel.provider}/${fallbackModel.id}`;
-		const chain = options.chainHead
-			? [`${options.chainHead.provider}/${options.chainHead.id}`, fallback]
-			: [fallback];
+		const selector = (model: Model) => `${model.provider}/${model.id}`;
+		const chain = [...(options.chain ?? []).map(selector), selector(fallbackModel)];
 
 		const requestedModels: string[] = [];
 		let requestsBeforeFallback: number | undefined;
@@ -250,10 +310,10 @@ describe("wire retries reaching the provider", () => {
 			getApiKey: requestedModel => modelRegistry.resolver(requestedModel, agent.sessionId),
 			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
 			streamFn: (requestedModel, context, streamOptions) => {
-				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
-				if (requestedModel.provider === "anthropic") {
+				requestedModels.push(selector(requestedModel));
+				if (requestedModel.api === "anthropic-messages") {
 					const wireModel = requestedModel as Model<"anthropic-messages">;
-					return streamAnthropic({ ...wireModel, baseUrl: `http://127.0.0.1:${stub.port}` }, context, {
+					return streamAnthropic(options.catalogUrl ? wireModel : { ...wireModel, baseUrl: stubOrigin }, context, {
 						...streamOptions,
 						apiKey: resolveKey(streamOptions?.apiKey),
 					});
@@ -264,26 +324,31 @@ describe("wire retries reaching the provider", () => {
 		});
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
-			"retry.baseDelayMs": 5,
-			"retry.maxDelayMs": 100,
+			"retry.baseDelayMs": options.baseDelayMs ?? 5,
+			"retry.maxDelayMs": options.maxDelayMs ?? 100,
 			"retry.maxRetries": options.maxRetries ?? 10,
 			"retry.modelFallback": true,
 			"retry.fallbackChains": { default: chain },
 		});
-		settings.setModelRole("default", primary);
+		settings.setModelRole("default", selector(primaryModel));
 		const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
 		const session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
 		cleanups.push(() => sessionManager.close());
 		cleanups.push(() => session.dispose());
+		const retryDelaysMs: number[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryDelaysMs.push(event.delayMs);
+		});
 		mockSchedulerWaitWithClock();
 
-		await session.prompt("count the wire requests");
+		await session.prompt(options.prompt ?? "count the wire requests");
 		await session.waitForIdle();
 		return {
 			requestsBeforeFallback,
 			totalWireRequests: stub.requests(),
 			requestedModels,
 			requestsFor: stub.requestsFor,
+			retryDelaysMs,
 		};
 	}
 
@@ -326,7 +391,7 @@ describe("wire retries reaching the provider", () => {
 		// held retries are spent, so the chain does not wait a third time.
 		const chainHead = getBundledModel("anthropic", "claude-opus-4-5") as Model<"anthropic-messages">;
 		const { requestsBeforeFallback, requestedModels, requestsFor } = await run(() => "cutAfterReasoning", {
-			chainHead,
+			chain: [chainHead],
 			maxRetries: 2,
 		});
 
@@ -340,6 +405,72 @@ describe("wire retries reaching the provider", () => {
 			`anthropic/${chainHead.id}`,
 			"openai/gpt-5.5",
 		]);
+	}, 60_000);
+
+	it("does not hold after the Copilot identity resend, which the native fetch made", async () => {
+		// No fetch is supplied: the identity resend is the repository's own,
+		// inside `wrapFetchForCopilotFallback`. It used to sit below the count, so
+		// each failed call reported `0` for two requests and earned a hold — six
+		// identical bodies before the chain. Counted, the first call reports a
+		// replay and the chain is consulted at once.
+		const identities: (string | undefined)[] = [];
+		const { requestsBeforeFallback, requestedModels } = await run(
+			(_index, request) => {
+				identities.push(request.identity);
+				return request.identity === "copilot-chat" ? "identityDenied" : "cutAfterReasoning";
+			},
+			{ primary: getBundledModel("github-copilot", "claude-opus-4.6") as Model<"anthropic-messages"> },
+		);
+
+		expect(identities).toEqual(["copilot-chat", "copilot-developer-cli"]);
+		expect(requestsBeforeFallback).toBe(2);
+		expect(requestedModels).toEqual(["github-copilot/claude-opus-4.6", "openai/gpt-5.5"]);
+	}, 60_000);
+
+	it("does not hold after the uncompressed resend of a refused compressed body", async () => {
+		// The official API host gets a compressed body; a refusal is resent plain
+		// inside `wrapFetchForRequestCompression`, below the client's own loop.
+		const encodings: (string | undefined)[] = [];
+		const { requestsBeforeFallback, requestedModels } = await run(
+			(_index, request) => {
+				encodings.push(request.encoding);
+				return request.encoding ? "encodingRejected" : "cutAfterReasoning";
+			},
+			{ catalogUrl: true, prompt: "a detailed prompt ".repeat(500) },
+		);
+
+		expect(encodings.map(Boolean)).toEqual([true, false]);
+		expect(requestsBeforeFallback).toBe(2);
+		expect(requestedModels).toEqual(["anthropic/claude-sonnet-4-5", "openai/gpt-5.5"]);
+	}, 60_000);
+
+	it("does not sleep a provider hint longer than the held window", async () => {
+		// Each failure names a 900 ms wait at the 500 ms default base. Honouring it
+		// as a held retry broke the bound on the sleep a hold adds — twice is
+		// 1.8 s, and a 9 s hint was 18 s — so the chain is consulted instead.
+		const { requestsBeforeFallback, retryDelaysMs } = await run(() => "cutAfterReasoningWithHint", {
+			baseDelayMs: 500,
+			maxDelayMs: 10_000,
+		});
+
+		expect(requestsBeforeFallback).toBe(1);
+		expect(retryDelaysMs).toEqual([0]);
+	}, 60_000);
+
+	it("lets one held call spend a provider budget, not one per model the recovery reaches", async () => {
+		// Sonnet's first request is cut after reasoning and reports no replay, so
+		// it is held; the held call meets 503s, spends the provider's ten replays
+		// and reports them. Opus then spends the session budget, and Haiku starts
+		// on a fresh one. Holding Haiku spent another eleven-request budget.
+		const opus = getBundledModel("anthropic", "claude-opus-4-5") as Model<"anthropic-messages">;
+		const haiku = getBundledModel("anthropic", "claude-haiku-4-5") as Model<"anthropic-messages">;
+		const { requestsBeforeFallback, requestsFor } = await run(
+			(_index, request) => (request.nth === 1 || request.model === opus.id ? "cutAfterReasoning" : "status503"),
+			{ chain: [opus, haiku], maxRetries: 2 },
+		);
+
+		expect([requestsFor("claude-sonnet-4-5"), requestsFor(opus.id), requestsFor(haiku.id)]).toEqual([12, 1, 1]);
+		expect(requestsBeforeFallback).toBe(14);
 	}, 60_000);
 
 	/**
