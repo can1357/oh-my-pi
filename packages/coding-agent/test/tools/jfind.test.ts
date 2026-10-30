@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -7,6 +7,7 @@ import { tokenUsage } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { InternalUrlFilesystem } from "@oh-my-pi/pi-coding-agent/internal-urls/url-filesystem";
+import { ChainJudge } from "@oh-my-pi/pi-coding-agent/judgment";
 import { FindTool } from "@oh-my-pi/pi-coding-agent/tools/jfind";
 import { runCascade } from "@oh-my-pi/pi-coding-agent/tools/jfind/cascade";
 import { keywordsFromQuery } from "@oh-my-pi/pi-coding-agent/tools/jfind/keywords";
@@ -215,6 +216,10 @@ function stateOf(request: JudgmentRequest): Record<string, unknown> {
 }
 
 describe("jfind cascade", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
 	it("verifies only sketched passages, reports merged ranges, and runs waves in parallel", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-cascade-"));
 		try {
@@ -264,7 +269,8 @@ describe("jfind cascade", () => {
 			expect(verifyRequests).toHaveLength(1);
 			expect(Object.keys(verifyRequests[0]!.questions)).toEqual(["p00"]);
 			expect(result.stats.judged).toBe(72);
-			expect(result.stats.errors).toBe(0);
+			expect(result.stats.failed).toBe(0);
+			expect(result.coverage).toBe("complete");
 			expect(result.stats.failures).toEqual([]);
 			expect(judge.peak).toBeGreaterThan(1);
 		} finally {
@@ -290,12 +296,85 @@ describe("jfind cascade", () => {
 				includeHidden: false,
 			});
 			expect(result.hits.map(hit => hit.rel)).toEqual(["a.ts"]);
-			expect(result.stats.errors).toBe(1);
+			expect(result.stats.failed).toBe(1);
+			expect(result.coverage).toBe("partial");
 			expect(result.stats.failures).toEqual(["sketches: sketch backend down"]);
 		} finally {
 			await removeWithRetries(dir);
 		}
 	});
+
+	it("reports unavailable, not an empty result, when every judge request fails", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-cascade-down-"));
+		try {
+			await Bun.write(path.join(dir, "auth.ts"), "export function refreshToken() { return 1; }\n");
+			vi.spyOn(ChainJudge.prototype, "judge").mockRejectedValue(new Error("402 billing account rejected"));
+			const tool = new FindTool({
+				cwd: dir,
+				hasUI: false,
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+				settings: Settings.isolated({ "find.enabled": "on" }),
+				modelRegistry: {} as never,
+			});
+			const result = await tool.execute("x", { query: "token refresh", grep_keywords: ["refreshToken"] });
+			expect(result.isError).toBe(true);
+			expect(result.details?.coverage).toBe("unavailable");
+			expect(result.details?.stats.failed).toBe(result.details?.stats.requests);
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			expect(text).toStartWith('find unavailable for "token refresh"');
+			expect(text).not.toContain("no hits");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("keeps an empty result complete when the judge answered and nothing matched", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-cascade-empty-"));
+		try {
+			await Bun.write(path.join(dir, "a.ts"), "export const unrelated = 1;\n");
+			const result = await runCascade({
+				root: { path: dir, type: "directory" },
+				filesystem: urlFs(dir),
+				query: "token parsing",
+				extraKeywords: [],
+				judge: new FakeJudge(() => 0.05),
+				includeHidden: false,
+			});
+			expect(result.hits).toEqual([]);
+			expect(result.coverage).toBe("complete");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("counts unusable answers apart from failed requests", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-cascade-garbled-"));
+		try {
+			await Bun.write(path.join(dir, "a.ts"), "export function parseToken() { return 1; }\n");
+			const judge = new FakeJudge(request => {
+				const state = stateOf(request);
+				if ("tree" in state) return Number.NaN;
+				if ("files" in state) return new Error("sketch backend down");
+				return 0.7;
+			});
+			const result = await runCascade({
+				root: { path: dir, type: "directory" },
+				filesystem: urlFs(dir),
+				query: "token parsing",
+				extraKeywords: [],
+				judge,
+				includeHidden: false,
+			});
+			// One filename request answered with garbage, one sketch request threw, one verification succeeded.
+			expect(result.stats).toMatchObject({ requests: 3, failed: 1, unanswered: 1 });
+			expect(result.coverage).toBe("partial");
+			expect(result.hits.map(hit => hit.rel)).toEqual(["a.ts"]);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
 	it("resolves URL scopes in place and rejects unknown docs and range selectors before judging", async () => {
 		const filesystem = urlFs(process.cwd());
 		expect(await resolveSearchRoot(filesystem, "omp://", process.cwd())).toEqual({

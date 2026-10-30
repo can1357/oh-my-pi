@@ -317,12 +317,12 @@ export async function buildMemoryToolDeveloperInstructions(
 }
 
 /**
- * Clear all persisted memory state and generated artifacts.
+ * Clear the persisted memory state and generated artifacts of one project.
  */
 export async function clearMemoryData(agentDir: string, cwd: string): Promise<void> {
 	const db = openMemoryDb(getAgentDbPath(agentDir));
 	try {
-		clearMemoryDataInDb(db);
+		clearMemoryDataInDb(db, cwd);
 	} finally {
 		closeMemoryDb(db);
 	}
@@ -760,9 +760,19 @@ function extractPersistableMessages(payload: string): AgentMessage[] {
 		const maybeMessage = entry.message;
 		if (!maybeMessage || typeof maybeMessage !== "object") continue;
 		const message = maybeMessage as AgentMessage;
-		if (shouldPersistResponseItemForMemories(message)) {
+		if (!shouldPersistResponseItemForMemories(message)) continue;
+		if (message.role !== "assistant") {
 			messages.push(message);
+			continue;
 		}
+		const content = message.content.some(block => block.type === "thinking" || block.type === "redactedThinking")
+			? message.content.filter(block => block.type !== "thinking" && block.type !== "redactedThinking")
+			: message.content;
+		messages.push(
+			content === message.content && !message.providerPayload
+				? message
+				: { ...message, content, providerPayload: undefined },
+		);
 	}
 	return messages;
 }
@@ -896,9 +906,12 @@ async function runStage1Job(options: {
 						metadata: options.metadata,
 						maxTokens: Math.max(1024, Math.min(4096, Math.floor(modelMaxTokens * 0.2))),
 						reasoning: clampThinkingLevelForModel(model, Effort.Low),
+						// OpenAI chat-completions owns its transient retries in the HTTP
+						// transport; never restart that budget at the provider/oneshot layers.
+						maxHttpAttempts: model.api === "openai-completions" ? 3 : undefined,
 					},
 				),
-			{ provider: model.provider },
+			{ provider: model.provider, maxAttempts: model.api === "openai-completions" ? 1 : undefined },
 		);
 
 		if (response.stopReason === "error") {
@@ -1039,9 +1052,10 @@ async function runConsolidationModel(options: {
 					metadata: options.metadata,
 					maxTokens: 8192,
 					reasoning: clampThinkingLevelForModel(model, Effort.Medium),
+					maxHttpAttempts: model.api === "openai-completions" ? 3 : undefined,
 				},
 			),
-		{ provider: model.provider },
+		{ provider: model.provider, maxAttempts: model.api === "openai-completions" ? 1 : undefined },
 	);
 	if (response.stopReason === "error") {
 		throw new Error(response.errorMessage || "phase2 model error");

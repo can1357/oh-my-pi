@@ -1,15 +1,20 @@
 /**
  * Tool-approval prompt in the composer's place, presented like the ask
- * dialog: the approval title and its details over an action bar. Approving
- * takes a deliberate chord (`app.approval.approve`, Ctrl+Enter by default),
- * so an Enter typed for the composer as the prompt appears never approves a
- * call, and the chord itself only arms {@link APPROVE_ARM_MS} after mount: it
- * is also the follow-up key, pressed mid-run exactly when prompts appear.
- * Esc denies. With an {@link ApprovalDialogDraft}, every other key edits the
- * composer mounted beneath the dialog, so a message can steer the turn while
- * the call waits; an empty composer ignores Enter and arrows scroll the details.
- * The prompt stays a few rows so the composer keeps its room; with a full
- * prompt, the expand key (`app.tools.expand`) swaps it in, wrapped.
+ * dialog: the approval title and its details over a list of choices —
+ * optional grants (led by a toggle that keeps them across sessions), Approve,
+ * an optional "approve for this session", and Deny — and an action
+ * bar. The arrows move between the choices and Enter takes the highlighted
+ * one; `app.approval.approve` (Ctrl+Enter by default) approves this call
+ * outright and Esc denies. Enter and the approve chord only arm
+ * {@link APPROVE_ARM_MS} after mount, so a key meant for the composer (Enter,
+ * or the follow-up chord pressed mid-run) as the prompt appears never answers
+ * it. With an {@link ApprovalDialogDraft}, every other key edits the composer
+ * mounted beneath the dialog, so a message can deny the call and steer the
+ * turn instead: while the composer holds a draft, the arrows and Enter edit and
+ * send it, and the highlight sits on Deny, relabeled to say Enter sends.
+ * The prompt stays a few rows so the composer keeps its room; Page Up/Down
+ * scroll the details, and with a full prompt the expand key
+ * (`app.tools.expand`) swaps it in, wrapped.
  */
 import { type Component, Ellipsis, ScrollView, type TUI, truncateToWidth, wrapTextWithAnsi } from "../index";
 import { formatKeyHints, formatTooltipKey } from "../app-keybindings";
@@ -27,8 +32,8 @@ import {
 	matchesSelectPageUp,
 	matchesSelectUp,
 } from "../keybinding-matchers";
-import { col, node } from "../native/describe";
-import type { NativeNode, NativeUiEvent } from "../native/node";
+import { col, item, node } from "../native/describe";
+import { leafKey, type NativeNode, type NativeUiEvent } from "../native/node";
 import { actionBar, actionButton } from "../native/overlay";
 import { PREVIEW_LIMITS, sanitizeDisplayLines } from "../render/render-utils";
 import { theme } from "../theme/theme";
@@ -36,12 +41,30 @@ import { CountdownTimer } from "../chrome/countdown-timer";
 
 /** Detail rows shown before the rest scrolls, so the composer beneath keeps its room. */
 const MAX_DETAIL_ROWS: number = PREVIEW_LIMITS.COLLAPSED_ITEMS;
-/** The approve key is ignored this long after mount, so a follow-up sent as the prompt appears cannot approve it. */
+/** Enter and the approve key are ignored this long after mount, so a key sent as the prompt appears cannot answer it. */
 export const APPROVE_ARM_MS = 500;
+/** The Deny row while a composer draft holds Enter: sending it denies the call and steers the turn. */
+const DENY_AND_SEND_LABEL = "Deny and send message";
+
+/** `grant<N>` takes the Nth of {@link ApprovalDialogOptions.grants}; `remember` toggles their lifetime. */
+type ApprovalAnswer = "once" | "session" | "deny" | "remember" | `grant${number}`;
+
+interface ApprovalChoice {
+	readonly label: string;
+	readonly answer: ApprovalAnswer;
+}
 
 interface ApprovalDialogCallbacks {
 	onApprove(): void;
 	onDeny(): void;
+}
+
+/** A choice that approves the call and remembers more than it: a folder, or the exact target. */
+export interface ApprovalDialogGrant {
+	/** Label while the grant is remembered for this session. */
+	readonly label: string;
+	/** Label once the remember toggle keeps it across sessions. */
+	readonly alwaysLabel: string;
 }
 
 /** The composer mounted beneath the dialog: it receives every key the dialog does not own. */
@@ -65,6 +88,14 @@ interface ApprovalDialogOptions {
 	onTimeoutReset?: () => void;
 	/** Route typing to the composer instead of dropping it. */
 	draft?: ApprovalDialogDraft;
+	/** Offer to approve this and later like calls for the rest of the session, as the row between Approve and Deny. */
+	session?: { label: string; onApprove(): void };
+	/**
+	 * Grants to offer above Approve, led by a toggle that keeps them across sessions; Approve then
+	 * reads "Approve Once". `onGrant` gets the chosen grant and whether the toggle was on.
+	 */
+	grants?: readonly ApprovalDialogGrant[];
+	onGrant?(grant: ApprovalDialogGrant, always: boolean): void;
 }
 
 /** A prompt's detail rows: every line after the title, trailing blanks dropped. */
@@ -81,11 +112,19 @@ export class ApprovalDialogComponent implements Component {
 	#expanded = false;
 	readonly #panel: OverlayPanel;
 	readonly #body = new PanelRows();
+	readonly #choiceRows = new PanelRows();
 	readonly #footer = new PanelRows();
 	#scrollOffset = 0;
 	#bodyRows = MAX_DETAIL_ROWS;
+	/** In list order: the remember toggle and grants (when offered), Approve (highlighted on mount), the session row, Deny last. */
+	#choices: readonly ApprovalChoice[];
+	#choice = 0;
+	/** The remember toggle: grants are kept across sessions while it is on. */
+	#rememberAlways = false;
 	#closed = false;
 	#native: NativeNode | undefined;
+	/** Whether a draft held the keys when {@link #native} was described: it moves the highlight. */
+	#nativeDrafting = false;
 	readonly #armedAt = performance.now() + APPROVE_ARM_MS;
 	readonly #countdown: CountdownTimer | undefined;
 
@@ -101,9 +140,12 @@ export class ApprovalDialogComponent implements Component {
 		this.#summary = promptDetails(lines);
 		this.#full =
 			options.fullPrompt === undefined ? undefined : promptDetails(sanitizeDisplayLines(options.fullPrompt));
+		this.#choices = this.#buildChoices();
+		this.#choice = this.#choices.findIndex(choice => choice.answer === "once");
 		this.#panel = new OverlayPanel(title, "omp.overlay.approval");
 		this.#footer.setHeight(1);
 		this.#panel.addChild(this.#body);
+		this.#panel.addChild(this.#choiceRows);
 		this.#panel.addChild(new PanelDivider());
 		this.#panel.addChild(this.#footer);
 		if (options.timeout && options.timeout > 0) {
@@ -116,10 +158,37 @@ export class ApprovalDialogComponent implements Component {
 				},
 				() => {
 					options.onTimeout?.();
-					this.#finish(false);
+					this.#finish("deny");
 				},
 			);
 		}
+	}
+
+	#buildChoices(): ApprovalChoice[] {
+		const grants = this.options.grants ?? [];
+		const glyph = this.#rememberAlways ? theme.checkbox.checked : theme.checkbox.unchecked;
+		return [
+			...(grants.length > 0 ? [{ label: `${glyph} Remember across sessions`, answer: "remember" as const }] : []),
+			...grants.map((grant, index) => ({
+				label: this.#rememberAlways ? grant.alwaysLabel : grant.label,
+				answer: `grant${index}` as const,
+			})),
+			{ label: grants.length > 0 ? "Approve Once" : "Approve", answer: "once" },
+			...(this.options.session ? [{ label: this.options.session.label, answer: "session" as const }] : []),
+			{ label: "Deny", answer: "deny" },
+		];
+	}
+
+	/** Run a choice: the remember toggle flips the grants' lifetime in place, every other choice answers. */
+	#take(answer: ApprovalAnswer): void {
+		if (answer !== "remember") {
+			this.#finish(answer);
+			return;
+		}
+		this.#rememberAlways = !this.#rememberAlways;
+		this.#choices = this.#buildChoices();
+		this.#native = undefined;
+		this.options.tui?.requestRender();
 	}
 
 	invalidate(): void {
@@ -137,7 +206,7 @@ export class ApprovalDialogComponent implements Component {
 		if (this.#closed) return;
 		this.#restartCountdown();
 		if (matchesAppApprove(keyData)) {
-			if (performance.now() >= this.#armedAt) this.#finish(true);
+			if (performance.now() >= this.#armedAt) this.#finish("once");
 			return;
 		}
 		if (this.#full && matchesAppToolsExpand(keyData)) {
@@ -151,7 +220,7 @@ export class ApprovalDialogComponent implements Component {
 			return;
 		}
 		if (matchesSelectCancel(keyData)) {
-			this.#finish(false);
+			this.#finish("deny");
 			return;
 		}
 		if (draft?.hasDraft()) {
@@ -159,12 +228,22 @@ export class ApprovalDialogComponent implements Component {
 			return;
 		}
 		const page = Math.max(1, this.#bodyRows - 1);
-		if (matchesSelectUp(keyData)) this.#scroll(-1);
-		else if (matchesSelectDown(keyData)) this.#scroll(1);
+		if (matchesSelectUp(keyData)) this.#moveChoice(-1);
+		else if (matchesSelectDown(keyData)) this.#moveChoice(1);
 		else if (matchesSelectPageUp(keyData)) this.#scroll(-page);
 		else if (matchesSelectPageDown(keyData)) this.#scroll(page);
-		// An empty composer swallows Enter: it would otherwise submit nothing, or interrupt the run.
+		else if (getKeybindings().matches(keyData, "tui.select.confirm")) {
+			if (performance.now() >= this.#armedAt) this.#take(this.#choices[this.#choice]!.answer);
+		}
+		// Enter never reaches an empty composer: it would submit nothing, or interrupt the run.
 		else if (draft && !getKeybindings().matches(keyData, "tui.input.submit")) this.#editDraft(draft, keyData);
+	}
+
+	#moveChoice(delta: number): void {
+		const count = this.#choices.length;
+		this.#choice = (this.#choice + delta + count) % count;
+		this.#native = undefined;
+		this.options.tui?.requestRender();
 	}
 
 	#editDraft(draft: ApprovalDialogDraft, keyData: string): void {
@@ -225,18 +304,32 @@ export class ApprovalDialogComponent implements Component {
 			this.#body.setLines(lines);
 		}
 		this.#body.setHeight(rows);
-		this.#footer.setLines([theme.fg("dim", this.#footerHint(overflows))]);
+		const drafting = this.options.draft?.hasDraft() ?? false;
+		// While a draft holds Enter the highlight sits on Deny (sending the draft denies), else on the arrows' choice.
+		const shown = drafting ? this.#choices.length - 1 : this.#choice;
+		this.#choiceRows.setLines(
+			this.#choices.map((choice, index) => {
+				const label = drafting && choice.answer === "deny" ? DENY_AND_SEND_LABEL : choice.label;
+				if (index !== shown) return truncateToWidth(`  ${label}`, innerWidth, Ellipsis.Unicode);
+				const color = choice.answer === "deny" ? "error" : "accent";
+				const row = truncateToWidth(`${theme.nav.cursor} ${label}`, innerWidth, Ellipsis.Unicode);
+				return theme.bold(theme.fg(color, row));
+			}),
+		);
+		this.#footer.setLines([theme.fg("dim", this.#footerHint(overflows, drafting))]);
 		return this.#panel.render(width);
 	}
 
 	/**
 	 * In the dock, in the composer's place and framed as the composer is (an
 	 * `omp.editor.*` root role), like the ask dialog, rather than a card over
-	 * the transcript: the title, the details, then Details (with a full prompt),
-	 * Deny, and the primary Approve, whose keys show in their tooltips.
+	 * the transcript: the title, the details, the choices with the keyboard's
+	 * highlight (a click takes one), then Details (with a full prompt), Deny,
+	 * and the primary Approve, whose keys show in their tooltips.
 	 */
 	describe(): NativeNode {
-		if (this.#native) return this.#native;
+		const drafting = this.options.draft?.hasDraft() ?? false;
+		if (this.#native && this.#nativeDrafting === drafting) return this.#native;
 		const cancelKey = getKeybindings().getKeys("tui.select.cancel")[0];
 		const approveKey = appApproveKeys()[0];
 		const deny = actionButton("Deny", "deny", {
@@ -244,7 +337,7 @@ export class ApprovalDialogComponent implements Component {
 			tone: "error",
 			title: `Deny this call${cancelKey ? `  ${formatTooltipKey(cancelKey)}` : ""}`,
 		});
-		const approve = actionButton("Approve", "approve", {
+		const approve = actionButton(this.options.grants?.length ? "Approve Once" : "Approve", "approve", {
 			...(approveKey ? { keys: approveKey } : {}),
 			tone: "accent",
 			title: `Approve this call${approveKey ? `  ${formatTooltipKey(approveKey)}` : ""}`,
@@ -268,6 +361,15 @@ export class ApprovalDialogComponent implements Component {
 			);
 			children.push(node("col", { role: "omp.approval.details" }, rows, "details"));
 		}
+		const choices = this.#choices.map(choice =>
+			item(choice.answer, {
+				label: choice.label,
+				role: "omp.approval.choice",
+				tone: choice.answer === "deny" ? "error" : "accent",
+			}),
+		);
+		const selected = drafting ? "deny" : this.#choices[this.#choice]!.answer;
+		children.push(node("list", { selected, role: "omp.approval.choices" }, choices, "choices"));
 		// The countdown, when one runs, leads the bar like the ask dialog's.
 		children.push(
 			actionBar([...(this.#countdown ? [this.#countdown.describe()] : []), null, ...expand, deny, approve]),
@@ -275,15 +377,22 @@ export class ApprovalDialogComponent implements Component {
 		// Under the `omp.editor.ask` prefix: Tern's console layout sizes an ask's rows to the
 		// composer column by that prefix, where a bare `omp.editor.*` role spans the whole dock.
 		this.#native = col(children, { role: "omp.editor.ask.approval", gap: "md" });
+		this.#nativeDrafting = drafting;
 		return this.#native;
 	}
 
-	/** Deny, Approve, and Details run exactly what Esc, the approve key, and the expand key run. */
+	/** Deny, Approve, and Details run exactly what Esc, the approve key, and the expand key run; a click on a choice takes it. */
 	handleNativeEvent(event: NativeUiEvent): void {
-		if (this.#closed || event.type !== "action") return;
-		if (event.act === "approve") this.#finish(true);
-		else if (event.act === "deny") this.#finish(false);
-		else if (event.act === "expand") this.toggleDetails();
+		if (this.#closed) return;
+		if (event.type === "action") {
+			if (event.act === "approve") this.#finish("once");
+			else if (event.act === "deny") this.#finish("deny");
+			else if (event.act === "expand") this.toggleDetails();
+			return;
+		}
+		if ((event.type !== "select" && event.type !== "activate") || leafKey(event.key) !== "choices") return;
+		const choice = this.#choices.find(candidate => candidate.answer === event.item);
+		if (choice) this.#take(choice.answer);
 	}
 
 	/** Detail rows at `width`: one clipped row per detail, or wrapped rows once expanded. */
@@ -294,16 +403,16 @@ export class ApprovalDialogComponent implements Component {
 		return this.#details.flatMap(line => (line === "" ? [""] : wrapTextWithAnsi(theme.fg("accent", line), width)));
 	}
 
-	#footerHint(overflows: boolean): string {
+	#footerHint(overflows: boolean, drafting: boolean): string {
 		const approve = formatKeyHints(appApproveKeys());
 		const expand = this.#full
 			? ` · ${formatKeyHints([appToolsExpandKey()])} ${this.#expanded ? "less" : "details"}`
 			: "";
-		const hint = `${approve} approve · ${editorKey("tui.select.cancel")} deny${expand}`;
-		const draft = this.options.draft;
-		if (draft?.hasDraft()) return `${hint} · ${editorKey("tui.input.submit")} deny and send`;
-		const scroll = overflows ? ` · ${editorKeys("tui.select.up", "tui.select.down")} scroll` : "";
-		return `${hint}${scroll}${draft ? " · type to steer instead" : ""}`;
+		const keys = `${approve} approve · ${editorKey("tui.select.cancel")} deny${expand}`;
+		if (drafting) return `${editorKey("tui.input.submit")} deny and send · ${keys}`;
+		const choose = `${editorKeys("tui.select.up", "tui.select.down")} choose · ${editorKey("tui.select.confirm")} select`;
+		const scroll = overflows ? ` · ${editorKeys("tui.select.pageUp", "tui.select.pageDown")} scroll` : "";
+		return `${choose} · ${keys}${scroll}${this.options.draft ? " · type to deny and steer" : ""}`;
 	}
 
 	#scroll(delta: number): void {
@@ -311,11 +420,16 @@ export class ApprovalDialogComponent implements Component {
 		this.options.tui?.requestRender();
 	}
 
-	#finish(approved: boolean): void {
+	#finish(answer: ApprovalAnswer): void {
 		if (this.#closed) return;
 		this.#closed = true;
 		this.#countdown?.dispose();
-		if (approved) this.callbacks.onApprove();
-		else this.callbacks.onDeny();
+		if (answer === "once") this.callbacks.onApprove();
+		else if (answer === "session") this.options.session?.onApprove();
+		else if (answer.startsWith("grant")) {
+			const grant = this.options.grants?.[Number(answer.slice("grant".length))];
+			if (grant) this.options.onGrant?.(grant, this.#rememberAlways);
+			else this.callbacks.onDeny();
+		} else this.callbacks.onDeny();
 	}
 }

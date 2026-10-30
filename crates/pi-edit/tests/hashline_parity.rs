@@ -530,24 +530,18 @@ fn pure_format_input_and_streaming_contracts_cover_uncaptured_cases() {
 				.contains("Input header must be")
 		);
 	}
+	// A non-hex word where the tag belongs parses as an untagged section, so
+	// staging can answer with the current tag instead of a header error.
 	for input in [
 		"[src/a.ts#1A2]\nPUT 1-1:\n+after",
 		"[src/a.ts#1A2G]\nPUT 1-1:\n+after",
 		"[src/a.ts#1A2B5]\nPUT 1-1:\n+after",
+		"[Update File: src/a.ts#1A2G]\nPUT 1-1:\n+after",
 	] {
-		assert!(
-			Patch::parse(input, &SplitOptions::default())
-				.expect_err("rejects malformed snapshot tags")
-				.to_string()
-				.contains("Input header must be")
-		);
+		let patch = Patch::parse(input, &SplitOptions::default()).expect("placeholder tag parses");
+		assert_eq!(patch.sections[0].path, "src/a.ts", "{input}");
+		assert_eq!(patch.sections[0].file_hash, None, "{input}");
 	}
-	assert!(
-		Patch::parse("[Update File: src/a.ts#1A2G]\nPUT 1-1:\n+after", &SplitOptions::default())
-			.expect_err("rejects malformed snapshot tags even with apply_patch noise")
-			.to_string()
-			.contains("Input header must be")
-	);
 	let missing = Patch::parse("CUT 38-40", &SplitOptions::default())
 		.expect_err("reports bracket syntax with a 4-hex example when the header is missing")
 		.to_string();
@@ -562,7 +556,7 @@ fn pure_format_input_and_streaming_contracts_cover_uncaptured_cases() {
 #[test]
 fn hashline_inspection_matches_streaming_matcher_cases() {
 	let root = fixture("parity_streaming_matcher_paths.json");
-	let engine = engine_for(EditMode::Hashline, true, 0.95, false);
+	let engine = engine_for(EditMode::Hashline, true, 0.95, false, 512);
 	for case in root["cases"].as_array().expect("matcher cases") {
 		let name = case["name"].as_str().expect("matcher name");
 		let args = json!({ "input": case["input"].as_str().expect("matcher input") }).to_string();
@@ -1277,7 +1271,7 @@ fn hashline_streaming_preview_cases_preserve_partial_and_final_contracts() {
 	let batch = preview_for(&workspace, format!("{header_a}\nPUT 2-2:\n"), false);
 	assert!(batch.files.is_empty(), "{}", scenarios["empty-body"]);
 
-	let engine = engine_for(EditMode::Hashline, true, 0.95, false);
+	let engine = engine_for(EditMode::Hashline, true, 0.95, false, 512);
 	let digest_args =
 		json!({ "input": "[a.ts#AB12]\nPUT 1-2:\n+const x = 1;\n+const y = 2;\nCUT 5\n" })
 			.to_string();

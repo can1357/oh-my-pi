@@ -98,11 +98,9 @@ struct LimiterCursor<'collection> {
 
 impl LimiterCursor<'_> {
 	fn try_next(self, arg: Argument) -> Result<Argument, ExhaustedCommandSpace> {
-		if self.limiters.is_empty() {
-			Ok(arg)
-		} else {
-			let (current, remaining) = self.limiters.split_at_mut(1);
-			current[0].try_arg(arg, LimiterCursor { limiters: remaining })
+		match self.limiters.split_first_mut() {
+			None => Ok(arg),
+			Some((current, remaining)) => current.try_arg(arg, LimiterCursor { limiters: remaining }),
 		}
 	}
 }
@@ -610,7 +608,7 @@ impl ArgumentReader for WhitespaceDelimitedArgumentReader {
 		}
 
 		Ok(Some(Argument {
-			arg:  String::from_utf8_lossy(&result[..]).into_owned().into(),
+			arg:  String::from_utf8_lossy_owned(result).into(),
 			kind: if terminated_by_newline {
 				ArgumentKind::HardTerminated
 			} else {
@@ -665,7 +663,7 @@ impl ArgumentReader for ByteDelimitedArgumentReader {
 				continue;
 			}
 			return Ok(Some(Argument {
-				arg:  String::from_utf8_lossy(&result).into_owned().into(),
+				arg:  String::from_utf8_lossy_owned(result).into(),
 				kind: ArgumentKind::HardTerminated,
 			}));
 		}
@@ -1261,23 +1259,22 @@ mod tests {
 	}
 
 	#[cfg(unix)]
-	#[test]
-	fn oversized_environment_rejects_command_without_panicking() {
+	#[tokio::test]
+	async fn oversized_environment_rejects_command_without_panicking() {
 		let arg_max = unsafe { libc::sysconf(libc::_SC_ARG_MAX) } as usize;
 		// These short strings fit on their own, but their envp pointers do not.
-		let env: HashMap<OsString, OsString> = (0..arg_max / 20)
-			.map(|i| (format!("XARGS_{i:08}").into(), OsString::new()))
-			.collect();
-		let mut limiters = LimiterCollection::new();
-		limiters.add(MaxCharsCommandSizeLimiter::new_system(&env));
+		let exports: String = (0..arg_max / 20).map(|i| format!(" XARGS_{i:08}=")).collect();
+		let (code, stdout, stderr) = crate::host::run_script(
+			&format!("export{exports}; xargs /bin/echo"),
+			"x\n",
+			&std::env::temp_dir(),
+		)
+		.await;
+		assert_eq!(code, 1, "{stderr}");
+		assert_eq!(stdout, "");
 		assert!(
-			CommandBuilderOptions::new(
-				ExecAction::Command(vec!["/bin/echo".into()]),
-				limiters,
-				None,
-			)
-			.is_err(),
-			"an environment that exhausts ARG_MAX must reject the base command"
+			stderr.contains("Base command and environment are too large"),
+			"an environment that exhausts ARG_MAX must reject the base command: {stderr}"
 		);
 	}
 

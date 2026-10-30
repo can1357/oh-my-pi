@@ -85,11 +85,14 @@ async function dispatchExec(
 		requestContextTools?: McpToolDefinition[];
 		requestContextRules?: CursorRule[];
 		externalToolExecutor?: boolean;
+		/** Continue an assistant message an earlier frame already wrote to. */
+		output?: AssistantMessage;
+		state?: BlockState;
 	} = {},
 ): Promise<{ frames: AgentClientMessage[]; output: AssistantMessage; results: ToolResultMessage[] }> {
-	const output = cursorAssistantMessage();
+	const output = options.output ?? cursorAssistantMessage();
 	const stream = new AssistantMessageEventStream();
-	const state = newBlockState();
+	const state = options.state ?? newBlockState();
 	const written: Buffer[] = [];
 	const h2Request = {
 		write: (chunk: Buffer) => {
@@ -1689,6 +1692,40 @@ describe("Cursor modern exec frames: server-resolved tool calls leave a paired b
 		);
 
 		expect(output.content.filter(block => block.type === "toolCall")).toHaveLength(0);
+	});
+});
+
+describe("Cursor legacy read frame: re-dispatch", () => {
+	it("answers a re-sent frame for the same call without recording a second block", async () => {
+		// Issue #15749: after a parallel shell created the file, Cursor re-sent
+		// `readArgs` with the same `toolCallId` and a new `execId`. Recording it as
+		// a second call made every rebuilt history replay that id twice.
+		let reads = 0;
+		const handlers: CursorExecHandlers = {
+			async read() {
+				reads++;
+				return reads === 1 ? toolResult("not found", { isError: true }) : toolResult("hello");
+			},
+		};
+		const frame = (execId: string) =>
+			create(ExecServerMessageSchema, {
+				id: 1,
+				execId,
+				message: { case: "readArgs", value: create(ReadArgsSchema, { path: "/tmp/race.txt", toolCallId: "c1" }) },
+			});
+
+		const first = await dispatchExec(frame("exec-a"), { execHandlers: handlers });
+		const second = await dispatchExec(frame("exec-b"), {
+			execHandlers: handlers,
+			output: first.output,
+			state: newBlockState(),
+		});
+
+		const answer = soleResult(second.frames);
+		if (answer.case !== "readResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("success");
+		expect(second.output.content.filter(block => block.type === "toolCall").map(block => block.id)).toEqual(["c1"]);
+		expect(second.results.map(result => result.content)).toEqual([[{ type: "text", text: "hello" }]]);
 	});
 });
 

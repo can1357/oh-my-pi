@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [18.14.0] - 2026-10-29
+
+### Added
+
+- Added the TSP `json` kind for displaying raw JSON values as interactive, expandable trees in the terminal.
+- Added `TspEditorProps.typeahead` support so programs that cannot yet read input can preserve typed text, display it at the caret, and submit it when input becomes available.
+
+## [18.13.3] - 2026-10-28
+
+### Changed
+
+- Updated Bun engine requirement to ≥1.4.4
+
+### Removed
+
+- Removed `TspPalette` definition and `t` verb from the protocol specification
+
+## [18.12.3] - 2026-10-19
+
+### Added
+
+- Added `min`, `max` and dashed reference `marks` to bars/spark `chart` nodes, a `tone` per series column, and the common `hovercard` prop: a node tree Tern floats over the node while the pointer rests on it
+
 ## [18.10.2] - 2026-10-12
 
 ### Added

@@ -14,12 +14,16 @@ import { prompt, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import nativeDelegationTemplate from "../../prompts/tools/native-delegation.md" with { type: "text" };
 import {
+	approvalRestrictions,
 	denyError,
+	recordApprovalGrant,
 	requestApproval,
 	resolveApproval,
 	resolveApprovalFromContext,
+	sessionApprovalScope,
 	truncateForPrompt,
 } from "../../tools/approval";
+import { getApprovalGrants } from "../../tools/approval-cache";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
@@ -251,10 +255,25 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// runner is touched — an already-denied tool never emits `tool_call` — while the full gate below
 		// re-resolves against the (possibly revised) input so a handler cannot rewrite into a denied or
 		// newly prompt-gated command and have it run unapproved.
+		const approvalSettings = context?.settings ?? this.runner.sessionSettings;
 		const { approvalMode, userPolicies } = resolveApprovalFromContext(
-			context ?? (this.runner.sessionSettings ? { settings: this.runner.sessionSettings } : undefined),
+			context ?? (approvalSettings ? { settings: approvalSettings } : undefined),
 		);
-		const preResolved = resolveApproval(this.tool, approvalArgs(params, context), approvalMode, userPolicies);
+		// `always-ask-cached` grants for this conversation, shared by the pre-check, the full gate,
+		// and the record after an approval.
+		const approvalGrants =
+			approvalMode === "always-ask-cached"
+				? getApprovalGrants(approvalSettings?.getAgentDir(), this.runner.sessionId)
+				: undefined;
+		const restrictions = approvalRestrictions(approvalSettings, this.runner.cwd);
+		const preResolved = resolveApproval(
+			this.tool,
+			approvalArgs(params, context),
+			approvalMode,
+			userPolicies,
+			approvalGrants,
+			restrictions,
+		);
 		if (preResolved.policy === "deny") {
 			throw denyError(preResolved, this.tool.name);
 		}
@@ -326,7 +345,14 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// input that newly resolves to `deny` is caught here even though the original passed the
 		// short-circuit above.
 		const resolvedArgs = approvalArgs(effectiveParams, context);
-		const resolved = resolveApproval(this.tool, resolvedArgs, approvalMode, userPolicies);
+		const resolved = resolveApproval(
+			this.tool,
+			resolvedArgs,
+			approvalMode,
+			userPolicies,
+			approvalGrants,
+			restrictions,
+		);
 		context?.xdevTierResolved?.(resolved.tier);
 		if (resolved.policy === "deny") {
 			cancelPreflight();
@@ -334,20 +360,37 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		}
 		const pendingSafetyChecks = computerSafetyChecks(context);
 		// Outer approvals only cover the original input. `xd://` approval skips
-		// tier-only prompts while the same object flows through; ACP approval also
-		// satisfies explicit prompts, but compares against a deep snapshot because
-		// handlers can mutate the original argument object in place. Denies were
-		// enforced above, and provider safety checks remain independently required.
-		const explicitPrompt = resolved.override || Object.hasOwn(userPolicies, resolved.policyKey ?? this.tool.name);
-		const xdevBypass = context?.xdevApproved === true && effectiveParams === params;
+		// tier-only prompts, and an explicit prompt under the policy key the outer
+		// gate already asked about, while the same object flows through; ACP
+		// approval also satisfies explicit prompts, but compares against a deep
+		// snapshot because handlers can mutate the original argument object in
+		// place. Denies were enforced above, and provider safety checks remain
+		// independently required.
+		const policyKey = resolved.policyKey ?? this.tool.name;
+		const explicitPrompt =
+			resolved.override || (Object.hasOwn(userPolicies, policyKey) && policyKey !== context?.xdevPolicyKey);
+		const xdevBypass = context?.xdevPolicyKey !== undefined && effectiveParams === params;
 		const acpBypass =
 			context !== undefined &&
 			Object.hasOwn(context, "acpApprovedArgs") &&
 			Bun.deepEquals(effectiveParams, context.acpApprovedArgs);
+		// Only a prompt `always-ask-cached` itself raised can be remembered by target; provider safety
+		// checks are per-call, so they never offer a grant of any kind.
+		const grantable =
+			approvalGrants !== undefined &&
+			resolved.policy === "prompt" &&
+			resolved.source === "mode" &&
+			pendingSafetyChecks.length === 0;
+		const cacheTargets = grantable ? (this.tool.approvalCacheTargets?.(resolvedArgs)?.length ?? 0) > 0 : false;
+		// A prompt the approval mode raised can be approved for the rest of the session — unless the call
+		// can be remembered by target instead, which keeps the grant to what it touches.
+		const sessionScope =
+			pendingSafetyChecks.length === 0 && !cacheTargets ? sessionApprovalScope(resolved, this.tool.name) : undefined;
+		const sessionApproved = sessionScope !== undefined && this.runner.hasSessionApproval(sessionScope.key);
 		const approvalCheck = {
 			required:
 				pendingSafetyChecks.length > 0 ||
-				(resolved.policy === "prompt" && !acpBypass && (explicitPrompt || !xdevBypass)),
+				(resolved.policy === "prompt" && !acpBypass && !sessionApproved && (explicitPrompt || !xdevBypass)),
 			reason: resolved.reason,
 		};
 
@@ -397,6 +440,13 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 						`Tool "${this.tool.name}" has pending provider safety checks but no interactive UI is available.`,
 					);
 				}
+				if (resolved.source === "restriction") {
+					throw new Error(
+						`Tool "${this.tool.name}" requires approval but no interactive UI available.\n` +
+							`Reason: ${resolved.reason}\n` +
+							`A restricted folder (tools.restrictedFolders) asks in every approval mode.`,
+					);
+				}
 				throw new Error(
 					`Tool "${this.tool.name}" requires approval but no interactive UI available.\n` +
 						`Options:\n` +
@@ -411,7 +461,17 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				pendingSafetyChecks.length > 0 ? ["Provider safety checks:", ...safetyCheckLines(pendingSafetyChecks)] : [];
 			let approved: boolean;
 			try {
-				approved = await requestApproval(uiContext, this.tool, resolvedArgs, approvalCheck.reason, safetyAppendix);
+				const answer = await requestApproval(uiContext, this.tool, resolvedArgs, {
+					reason: approvalCheck.reason,
+					appendix: safetyAppendix,
+					sessionSubject: sessionScope?.subject,
+					grants: cacheTargets,
+				});
+				approved = answer !== "deny";
+				if (answer === "session" && sessionScope) this.runner.grantSessionApproval(sessionScope.key);
+				if (typeof answer === "object" && approvalGrants) {
+					recordApprovalGrant(this.tool, resolvedArgs, approvalGrants, resolved.tier, answer);
+				}
 			} catch (err) {
 				await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");
 				cancelPreflight();

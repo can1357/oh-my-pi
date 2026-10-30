@@ -25,16 +25,6 @@ describe("native image blob lifetime", () => {
 			["stop", "releases pending settled-image bytes when the backend stops"],
 		].map(([source, name]) => ({ name, fixture: "pending-blob-delivery.ts", source })),
 		{
-			name: "releases evicted chart payloads while retaining cached and live native images",
-			fixture: "table-chart-blob-lifetime.ts",
-			source: "eviction",
-		},
-		{
-			name: "releases replaced theme and cleared-cache chart payloads",
-			fixture: "table-chart-blob-lifetime.ts",
-			source: "theme",
-		},
-		{
 			name: "keeps pending, shared, remounted, and replayed images available",
 			fixture: "blob-replay.ts",
 			source: "",

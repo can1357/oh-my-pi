@@ -96,7 +96,7 @@ describe("completion probe cost persistence", () => {
 			startCompletionProbe({
 				session: () => session ?? null,
 				signal: controller.signal,
-				onEstimate: (percent, cost) => estimates.push({ percent, cost }),
+				onEstimate: ({ percent }, cost) => estimates.push({ percent, cost }),
 			});
 			vi.advanceTimersByTime(2 * 60_000);
 			await flushMicrotasks();

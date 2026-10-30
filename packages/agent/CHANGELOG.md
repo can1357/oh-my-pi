@@ -2,6 +2,118 @@
 
 ## [Unreleased]
 
+## [18.14.0] - 2026-10-29
+
+### Breaking Changes
+
+- Removed the Bun event-loop workaround utilities from `@oh-my-pi/pi-agent-core/utils/yield`; agent loops no longer insert cooperative sleeps while streaming or between tool calls.
+
+### Added
+
+- Added `AgentTool.approvalRestrictionPaths` so tools can report the paths they read, allowing restricted-folder approvals to cover those paths without remembering approval separately for each path.
+- Added `Agent.logContext`, which adds custom context fields to every log record written during an agent run.
+
+## [18.13.3] - 2026-10-28
+
+### Changed
+
+- Updated Bun engine requirement to ≥1.4.4
+
+### Fixed
+
+- Fixed chat-completions context estimates counting past thinking that the request drops (no reasoning replay), which triggered compaction far below the threshold ([#15797](https://github.com/can1357/oh-my-pi/issues/15797), [#17231](https://github.com/can1357/oh-my-pi/pull/17231) by [@ghisguth](https://github.com/ghisguth))
+
+## [18.13.2] - 2026-10-27
+
+### Added
+
+- `AgentTool` gained the optional `handlesToolInterrupt` flag: an interruptible tool that sets it (such as `wait`) still runs, without blocking, when a loop-owned interrupt is already queued, so it can drain the queued wake event instead of being skipped; user cancellation still skips it ([#17174](https://github.com/can1357/oh-my-pi/pull/17174) by [@alphastorm](https://github.com/alphastorm))
+
+## [18.13.1] - 2026-10-27
+
+### Added
+
+- Hosts can distinguish safely paused agents from turns still draining with `Agent.isPaused` ([#17073](https://github.com/can1357/oh-my-pi/pull/17073) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+
+## [18.13.0] - 2026-10-26
+
+### Added
+
+- Added `SummaryOptions.remotePromptCacheKey` and `remoteCompactionPolicyModel()` so remote compaction can carry a cache key gated against the request it actually sends ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
+
+### Changed
+
+- Remote compaction now sends cache and session headers for the endpoint and model the request actually uses, so a configured compaction override no longer inherits the live turn's routing ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
+- Aside providers (`AgentLoopConfig.getAsideMessages`, `Agent.setAsideMessageProvider`) now receive which boundary is polled, `"work"` after tool calls or `"stop"` at the end of a turn, so they can keep a message out of a finished turn ([#16583](https://github.com/can1357/oh-my-pi/pull/16583) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed `--max-time` values above about 596 hours (such as `600h`) aborting the first turn with "Deadline exceeded" right away ([#17054](https://github.com/can1357/oh-my-pi/pull/17054) by [@trukhinyuri](https://github.com/trukhinyuri))
+- Fixed repeated compaction on small or provider-capped context windows: compaction keeps only as much recent history as fits under the configured trigger, and no longer counts stale pre-compaction usage ([#16904](https://github.com/can1357/oh-my-pi/pull/16904) by [@eggpeat](https://github.com/eggpeat))
+- Fixed native compaction token estimates counting opaque encrypted-state bytes as conversation text ([#16904](https://github.com/can1357/oh-my-pi/pull/16904) by [@eggpeat](https://github.com/eggpeat))
+- Fixed split-turn compaction leaving `session.compacting` context out of the turn-prefix summary ([#16707](https://github.com/can1357/oh-my-pi/pull/16707) by [@integrITsolutions](https://github.com/integrITsolutions))
+- Fixed compaction failing as a whole, and discarding the completed summary, when the optional short summary fails or returns no answer; the compaction now completes without a short summary, and cancellation still cancels it ([#16942](https://github.com/can1357/oh-my-pi/pull/16942) by [@Mouriya-Emma](https://github.com/Mouriya-Emma))
+
+## [18.12.4] - 2026-10-20
+
+### Fixed
+
+- Enabled native compaction for supported Bedrock Claude models ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
+
+## [18.12.3] - 2026-10-19
+
+### Added
+
+- `AgentTool` gained the optional `approvalCacheTargets` hook, which the `always-ask-cached` approval mode uses to check and record per-file grants ([#16049](https://github.com/can1357/oh-my-pi/pull/16049) by [@Peribunt](https://github.com/Peribunt))
+
+### Changed
+
+- Tools with `lenientArgValidation` now receive unknown root arguments that their closed schema would otherwise drop, so they can reject them ([#16317](https://github.com/can1357/oh-my-pi/issues/16317))
+
+## [18.12.2] - 2026-10-18
+
+### Changed
+
+- The failed-tool-call correction sent to DeepSeek models now also covers chat-template tool-call tokens written out as text, not only malformed DSML ([#16216](https://github.com/can1357/oh-my-pi/pull/16216) by [@H4vC](https://github.com/H4vC))
+
+### Fixed
+
+- Fixed Ollama chat history estimates counting stripped native thinking and missing foreign thinking replayed as text, which skewed compaction after model switches ([#16164](https://github.com/can1357/oh-my-pi/issues/16164))
+
+## [18.12.0] - 2026-10-17
+
+### Fixed
+
+- Fixed Cursor turns failing with `PROVIDER_ERROR` when a follow-up (a finished background job, a late diagnostic, a reminder) arrived while the previous turn was still streaming ([#15821](https://github.com/can1357/oh-my-pi/pull/15821) by [@robfeldmann](https://github.com/robfeldmann))
+
+## [18.11.3] - 2026-10-16
+
+### Added
+
+- `prepareQueuedMessages` receives which queue (`steering` or `followUp`) a batch came from ([#16026](https://github.com/can1357/oh-my-pi/pull/16026))
+
+## [18.11.2] - 2026-10-16
+
+### Added
+
+- `agent_start` carries `resumedToolCallIds` when a continued run first executes the calls of an unpaired assistant tail
+
+### Fixed
+
+- Cancelling an `ask` after a background job finishes now reports the user cancellation instead of telling the model to retry a skipped tool ([#15985](https://github.com/can1357/oh-my-pi/issues/15985))
+
+## [18.11.1] - 2026-10-15
+
+### Added
+
+- `Tokenizer.countLatestTurn`: counts a message as the transcript's latest assistant turn, which an Anthropic Messages replay keeps byte-for-byte ([#15791](https://github.com/can1357/oh-my-pi/pull/15791) by [@will-bogusz](https://github.com/will-bogusz))
+- `Agent.prioritizeSteering`: moves given pending steering messages ahead of older ones so one-at-a-time delivery takes them first ([#15642](https://github.com/can1357/oh-my-pi/pull/15642))
+
+### Fixed
+
+- Fixed a Cursor tool call re-sent by the server persisting two results under one id; the re-run's result replaces the first ([#15749](https://github.com/can1357/oh-my-pi/issues/15749))
+- Fixed compaction keeping more recent history than `keepRecentTokens` when the latest Claude turn on the Anthropic Messages API ended its tool calls on `stop` or `length`: the replay keeps that turn's signed reasoning, but the cut point counted only its visible blocks ([#15791](https://github.com/can1357/oh-my-pi/pull/15791) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.11.0] - 2026-10-14
 
 ### Breaking Changes

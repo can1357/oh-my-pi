@@ -3,10 +3,10 @@
  *
  * Uses brush-core via native bindings for shell execution.
  */
-import { ExponentialYield } from "@oh-my-pi/pi-agent-core/utils/yield";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type MinimizerOptions,
+	type PipeStreams,
 	PtySession,
 	Shell,
 	type ShellFilesystem,
@@ -67,11 +67,28 @@ export interface BashExecutorOptions {
 	 */
 	filesystem?: ShellFilesystem;
 	/**
+	 * Receives a copy of every byte crossing the command's pipes in the
+	 * embedded shell (`proc://<id>/streams`). The user-shell paths ignore it.
+	 */
+	streams?: PipeStreams;
+	/**
 	 * Invoked once the embedded shell starts the command, with a probe of the
 	 * live pids it spawned (empty once the run ends). Not called on the
 	 * user-shell paths.
 	 */
 	onStart?: (pids: () => readonly number[]) => void;
+	/**
+	 * Invoked before the run when the session's persistent shell is busy with
+	 * another command, so this one runs in a one-shot shell instead: it sees
+	 * none of the session's shell state, and the state it sets is discarded.
+	 */
+	onSessionShellBusy?: () => void;
+	/**
+	 * Asked once the run settles: `false` means the agent session that owns
+	 * `sessionKey` was left (new, fork, switch, branch) while the command ran,
+	 * so the persistent shell it used is dropped instead of kept for a next call.
+	 */
+	isSessionCurrent?: () => boolean;
 	/** Artifact path/id for full output storage */
 	artifactPath?: string;
 	artifactId?: string;
@@ -94,6 +111,11 @@ export interface BashPtyOptions {
 	rows: number;
 	/** Receives raw PTY bytes (ANSI intact) for virtual-terminal rendering. */
 	onChunk: (chunk: string) => void;
+	/**
+	 * Receives a writer for the PTY's stdin once the command starts, so the user
+	 * can answer prompts (`read`, shell-startup questions). Writes after exit are dropped.
+	 */
+	onStdin?: (write: (data: string) => void) => void;
 }
 
 export interface BashResult {
@@ -493,6 +515,16 @@ async function executeUserShellPty(run: {
 			const clean = run.graphics.push(chunk);
 			if (clean) run.sink.push(clean.replace(/\r\n?/gu, "\n"));
 		},
+		err => {
+			if (err) return;
+			run.pty.onStdin?.(data => {
+				try {
+					session.write(data);
+				} catch {
+					// The command exited between the keystroke and the write.
+				}
+			});
+		},
 	);
 	if (result.timedOut) {
 		return {
@@ -676,6 +708,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	if (ownsPersistentSession) {
 		shellSessionsInUse.add(sessionKey);
 	}
+	if (sessionBusy) options?.onSessionShellBusy?.();
 	const userSignal = options?.signal;
 	const runAbortController = new AbortController();
 	let abortCleanupPromise: Promise<void> | undefined;
@@ -730,6 +763,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				timeoutMs: nativeTimeoutMs,
 				signal: runAbortController.signal,
 				filesystem: options?.filesystem,
+				streams: options?.streams,
 			},
 			(err, chunk) => {
 				if (!err) {
@@ -739,8 +773,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		);
 		options?.onStart?.(() => executionShell.pids());
 
-		const ey = new ExponentialYield();
-		const winner = await ey.race<
+		const winner = await Promise.race<
 			{ kind: "result"; result: ShellRunResult } | { kind: "timeout" } | { kind: "abort" }
 		>([
 			runPromise.then(result => ({ kind: "result" as const, result })),
@@ -858,9 +891,10 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		}
 		if (ownsPersistentSession) {
 			shellSessionsInUse.delete(sessionKey);
-			if (resetSession || options?.sessionKey?.includes(":async:")) {
-				// `:async:` keys are per-job (jobId is unique), so the Shell would
-				// otherwise stay in the process-global map forever after completion.
+			if (resetSession || options?.sessionKey?.includes(":async:") || options?.isSessionCurrent?.() === false) {
+				// `:async:` keys are per-job (jobId is unique), and a left session is
+				// never asked for again, so the Shell would otherwise stay in the
+				// process-global map forever after completion.
 				shellSessions.delete(sessionKey);
 				// Dropping the only reference to a per-call `:async:` Shell SIGKILLs
 				// any `nohup`/`&` children (kill-on-drop). If the command left a live

@@ -152,10 +152,7 @@ pub fn wrap_label(label: &str, width: usize) -> String {
 /// standalone zero-width clusters are omitted, because neither occupies the
 /// canvas cell that the renderer would reserve for it.
 pub fn normalize_label(label: &str) -> String {
-	let unquoted = label
-		.strip_prefix('"')
-		.and_then(|rest| rest.strip_suffix('"'))
-		.unwrap_or(label);
+	let unquoted = label.strip_circumfix('"', '"').unwrap_or(label);
 	let text = replace_tags(unquoted, &["br"], true, "\n");
 	let text = text.replace("\\n", "\n");
 	let text = replace_tags(&text, &["sub", "sup", "small", "mark"], false, "");
@@ -164,7 +161,7 @@ pub fn normalize_label(label: &str) -> String {
 	let text = strip_single_star_emphasis(&text);
 	let text = strip_paired_marker(&text, "~~");
 	let text = mermaid_codes_to_html(&text);
-	let text = html_escape::decode_html_entities(&text);
+	let text = remap_c1_controls(html_escape::decode_html_entities(&text));
 	let text = if text.contains(['\t', '\r', '\u{c}']) {
 		text.replace(['\t', '\r', '\u{c}'], " ")
 	} else {
@@ -189,6 +186,63 @@ pub fn normalize_label(label: &str) -> String {
 		offset += cluster.len();
 	}
 	text
+}
+
+/// Windows-1252 characters the HTML tokenizer substitutes for numeric
+/// references to C1 controls (`&#128;` is `€`), indexed by `code - 0x80`.
+/// `None` entries have no substitute and stay controls.
+const C1_REPLACEMENTS: [Option<char>; 32] = [
+	Some('\u{20AC}'),
+	None,
+	Some('\u{201A}'),
+	Some('\u{0192}'),
+	Some('\u{201E}'),
+	Some('\u{2026}'),
+	Some('\u{2020}'),
+	Some('\u{2021}'),
+	Some('\u{02C6}'),
+	Some('\u{2030}'),
+	Some('\u{0160}'),
+	Some('\u{2039}'),
+	Some('\u{0152}'),
+	None,
+	Some('\u{017D}'),
+	None,
+	None,
+	Some('\u{2018}'),
+	Some('\u{2019}'),
+	Some('\u{201C}'),
+	Some('\u{201D}'),
+	Some('\u{2022}'),
+	Some('\u{2013}'),
+	Some('\u{2014}'),
+	Some('\u{02DC}'),
+	Some('\u{2122}'),
+	Some('\u{0161}'),
+	Some('\u{203A}'),
+	Some('\u{0153}'),
+	None,
+	Some('\u{017E}'),
+	Some('\u{0178}'),
+];
+
+/// Apply the HTML tokenizer's C1 substitution that `html_escape` omits, so a
+/// legacy reference such as `&#128;` or `#128;` shows `€` rather than a C1
+/// control. Literal C1 controls in the source get the same mapping: none of
+/// them is printable, and the remaining unmapped ones are zero-width and are
+/// dropped with the other zero-width clusters.
+fn remap_c1_controls(text: Cow<'_, str>) -> Cow<'_, str> {
+	if !text.contains(|c: char| ('\u{80}'..='\u{9F}').contains(&c)) {
+		return text;
+	}
+	text
+		.chars()
+		.map(|c| match c {
+			'\u{80}'..='\u{9F}' => C1_REPLACEMENTS[c as usize - 0x80].unwrap_or(c),
+			_ => c,
+		})
+		.collect::<String>()
+		.into()
 }
 
 /// Rewrite Mermaid entity codes (`#\w+;`) as HTML character references:
@@ -406,6 +460,9 @@ mod tests {
 		// Retain emoji ZWJ.
 		assert_eq!(normalize_label("a&ZeroWidthSpace;b#8203;c"), "abc");
 		assert_eq!(normalize_label("👩‍💻\na"), "👩‍💻\na");
+		// Legacy C1 references take the browser's Windows-1252 substitutes;
+		// unmapped C1 controls are dropped instead of reaching the terminal.
+		assert_eq!(normalize_label("&#128;5 #150; &#x9F;&#x81;!"), "€5 – Ÿ!");
 		// Unknown names, controls, and unterminated codes stay verbatim.
 		assert_eq!(
 			normalize_label("step #1; #nope; #x2192; C# &bogus; &lt"),

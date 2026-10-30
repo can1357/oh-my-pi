@@ -282,9 +282,9 @@ fn block_header(bytes: u64, symbols: NumericSymbols) -> String {
 	let (mut q1000, mut q1024) = (bytes, bytes);
 	let (mut by_1000, mut by_1024);
 	loop {
-		by_1000 = q1000 % 1000 == 0;
+		by_1000 = q1000.is_multiple_of(1000);
 		q1000 /= 1000;
-		by_1024 = q1024 % 1024 == 0;
+		by_1024 = q1024.is_multiple_of(1024);
 		q1024 /= 1024;
 		if !(by_1000 && by_1024) {
 			break;
@@ -304,7 +304,7 @@ fn block_header(bytes: u64, symbols: NumericSymbols) -> String {
 		text.push('B');
 	}
 	if symbols.decimal_point != b'.' {
-		text = text.replace('.', char::from(symbols.decimal_point).encode_utf8(&mut [0; 4]));
+		text = text.replace('.', char::from(symbols.decimal_point).encode_utf8(&mut [0; char::MAX_LEN_UTF8]));
 	}
 	text
 }
@@ -485,7 +485,7 @@ fn unescape_octal(text: &str) -> String {
 			i += 1;
 		}
 	}
-	String::from_utf8_lossy(&out).into_owned()
+	String::from_utf8_lossy_owned(out)
 }
 
 /// Reads the mount table; `Err` carries the error text, if any, for GNU's
@@ -742,7 +742,7 @@ fn percent(v: &Values) -> Vec<u8> {
 		&& (sum < v.used) == v.negate_available
 	{
 		let u100 = v.used * 100;
-		pct = (u100 / sum + u64::from(u100 % sum != 0)) as f64;
+		pct = u100.div_ceil(sum) as f64;
 	} else {
 		let u = if v.negate_used {
 			-(v.used.wrapping_neg() as f64)
@@ -793,7 +793,7 @@ fn replace_problematic(cell: &[u8], tty: bool, utf8: bool) -> Vec<u8> {
 			if c.is_control() {
 				out.push(b'?');
 			} else {
-				let mut buf = [0; 4];
+				let mut buf = [0; char::MAX_LEN_UTF8];
 				out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
 			}
 		}
@@ -1648,7 +1648,7 @@ fn run_df(host: &mut Host, matches: &ArgMatches) -> Result<(), Early> {
 				|| !state.select.is_empty()
 				|| !state.exclude.is_empty();
 			let prefix = if fatal { "" } else { "Warning: " };
-			let suffix = error.map(|text| format!(": {text}")).unwrap_or_default();
+			let suffix = error.map_or_default(|text| format!(": {text}"));
 			host.error(format!("{prefix}cannot read table of mounted file systems{suffix}"), 1);
 			if fatal {
 				return Err(Early::Exit(1));
@@ -1758,6 +1758,13 @@ mod tests {
 		format!("df: {message}\nTry 'df --help' for more information.\n")
 	}
 
+	/// Mount point printed for the `/` operand: the root, or on Windows the
+	/// drive root holding the crate directory.
+	fn root_target() -> String {
+		let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+		crate_dir.ancestors().last().unwrap_or(crate_dir).to_string_lossy().into_owned()
+	}
+
 	#[test]
 	fn usage_errors_exit_one() {
 		for args in [
@@ -1850,7 +1857,7 @@ mod tests {
 		let (code, out, err) = run(&[], &["--output=target", "/nonexistent-df-operand", "/"]);
 		assert_eq!(code, 1);
 		assert_eq!(err, "df: /nonexistent-df-operand: No such file or directory\n");
-		assert_eq!(out, "Mounted on\n/\n");
+		assert_eq!(out, format!("Mounted on\n{}\n", root_target()));
 	}
 
 	#[test]
@@ -1878,8 +1885,9 @@ mod tests {
 		assert!(lines[0].starts_with("File Mounted on"), "{out}");
 		// Relative operands resolve against the shell's directory and print
 		// as given.
-		assert!(lines[1].starts_with("src  /"), "{out}");
-		assert_eq!(lines[2], "/    /");
+		let root = root_target();
+		assert!(lines[1].starts_with(&format!("src  {root}")), "{out}");
+		assert_eq!(lines[2], format!("/    {root}"));
 	}
 
 	#[test]
@@ -1944,9 +1952,11 @@ mod tests {
 	fn total_row_names_target_dash_when_source_is_shown() {
 		let (code, out, _) = run(&[], &["--total", "--output=source,target", "/"]);
 		assert_eq!(code, 0);
-		assert_eq!(out.lines().last(), Some("total          -"));
+		// The dash sits in the target column, after the source padding.
+		let target_column = out.lines().next().and_then(|header| header.find("Mounted on")).unwrap();
+		assert_eq!(out.lines().last(), Some(format!("{:<target_column$}-", "total").as_str()), "{out}");
 		let (_, out, _) = run(&[], &["--total", "--output=target", "/"]);
-		assert_eq!(out, "Mounted on\n/\ntotal\n");
+		assert_eq!(out, format!("Mounted on\n{}\ntotal\n", root_target()));
 	}
 
 	#[test]

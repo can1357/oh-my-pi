@@ -93,6 +93,50 @@ function installFatalCapture(): {
 }
 
 describe("WorkerCore", () => {
+	it("delivers a completion handle id after its creating cell finishes", async () => {
+		const harness = createWorkerHarness();
+		const snapshot = { cwd: process.cwd(), sessionId: `late-handle-${crypto.randomUUID()}`, localRoots: {} };
+		await initializeWorker(harness, snapshot);
+		const toolCall = waitForMessage(
+			harness,
+			message => message.type === "tool-call" && message.name === "__completion__",
+		);
+		const firstResult = waitForMessage(
+			harness,
+			message => message.type === "result" && message.runId === "create-handle",
+		);
+		try {
+			harness.send({
+				type: "run",
+				runId: "create-handle",
+				code: 'var lateHandle = completion("hi"); print("started");',
+				filename: "[create-handle].js",
+				snapshot,
+			});
+			const call = await toolCall;
+			expect(await firstResult).toMatchObject({ type: "result", ok: true });
+			if (call.type !== "tool-call") throw new Error("expected completion bridge call");
+			harness.send({ type: "tool-reply", id: call.id, reply: { ok: true, value: { id: "late-1" } } });
+
+			const text = waitForMessage(harness, message => message.type === "text" && message.runId === "read-handle");
+			const result = waitForMessage(
+				harness,
+				message => message.type === "result" && message.runId === "read-handle",
+			);
+			harness.send({
+				type: "run",
+				runId: "read-handle",
+				code: "print((await globalThis.lateHandle).id);",
+				filename: "[read-handle].js",
+				snapshot,
+			});
+			expect(await text).toMatchObject({ chunk: "late-1\n" });
+			expect(await result).toMatchObject({ ok: true });
+		} finally {
+			harness.send({ type: "close" });
+		}
+	});
+
 	it("re-init while a same-realm run is live does not crash the process", async () => {
 		const first = createWorkerHarness();
 		const second = createWorkerHarness();

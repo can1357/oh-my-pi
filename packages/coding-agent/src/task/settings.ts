@@ -31,8 +31,8 @@ export const cfgTaskIsolationEnabled = register({
 	ui: {
 		tab: "tasks",
 		group: "Isolation",
-		label: "Isolate Subagents",
-		description: "Run subagents in an isolated copy of the checkout and integrate their changes afterwards",
+		label: "Allow Isolated Subagents",
+		description: "Allow per-task isolation with `isolated: true`; tasks without it run in the shared checkout",
 	},
 });
 
@@ -249,6 +249,19 @@ export const cfgTaskBatch = register({
 		label: "Batch Task Calls",
 		description:
 			"Switch the task tool to its batch shape: one call carries { context, tasks[] } — one subagent per item, with an optional per-item agent (defaulting to the session spawn-policy agent), per-item isolation, and a required shared context prepended to every assignment. With async.enabled=true, each spawn runs as an independent background agent with the normal idle/parked lifecycle; otherwise the call blocks for merged results. Disable to restore the flat single-spawn schema.",
+	},
+});
+
+export const cfgTaskFile = register({
+	id: "task.file",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Task Instructions from Files",
+		description:
+			"Let the task tool read subagent instructions from a file (taskFile), recording its path and SHA-256.",
 	},
 });
 

@@ -360,6 +360,28 @@ test("the quick picker is an md sheet with the summary below and a task-model to
 	expect(picked).toEqual(["task:openai/gpt-5.6"]);
 });
 
+test("a select-only picker never marks models over the live context window", () => {
+	const small = model("demo", "tiny", { contextWindow: 1_000 });
+	const models = [...MODELS, small];
+	const picks: { selector: string; overContext: boolean }[] = [];
+	const picker = new ModelPickerComponent(
+		ui,
+		source({ default: "demo/demo" }, ["demo/demo"]),
+		{ ...registry(models), refreshIfStale: async () => false },
+		models.map(entry => ({ model: entry })),
+		{
+			onPick: (_model, selector, meta) => picks.push({ selector, overContext: meta.overContext }),
+			onCancel: () => {},
+		},
+		{ currentSelector: "demo/tiny", currentContextTokens: 50_000, selectOnly: true },
+	);
+	const rendered = picker.render(120).join("\n");
+	expect(rendered).not.toContain("context>");
+	expect(rendered).not.toContain("compacts with");
+	picker.handleNativeEvent({ type: "activate", key: "", item: "demo/tiny" });
+	expect(picks).toEqual([{ selector: "demo/tiny", overContext: false }]);
+});
+
 test("shows a non-default service tier's own speed aggregate", () => {
 	const perf = new Map([
 		["openai/gpt-5.6", { samples: 4, tps: 25, ttftMs: 500 }],

@@ -152,8 +152,19 @@ provider "openai" {
 			apply-patch-tool-type "freeform"
 		}
 	}
-	// First-party GPT-5.6 whole-request long-context tiers (>272K input).
-	models "daybreak-blue-latest" "gpt-5.6" "gpt-5.6-sol*" {
+	// First-party GPT-5.6 whole-request long-context tiers (>272K input): 2x
+	// input and cache rates, 1.5x output over the standard card.
+	models "gpt-5.6" "gpt-5.6-sol*" {
+		long-context-cost {
+			input-threshold 272000
+			input 8.0
+			output 30.0
+			cache-read 0.8
+			cache-write 10.0
+		}
+	}
+	// Daybreak Blue keeps the pre-2026-08-21 $5/$30 Sol base.
+	models "daybreak-blue-latest" {
 		long-context-cost {
 			input-threshold 272000
 			input 10.0
@@ -191,6 +202,16 @@ provider "openai" {
 			output 75.0
 			cache-read 2.0
 			cache-write 25.0
+		}
+	}
+	// GPT-6 Sol, GPT-6 Luna, and GPT-6.1 Terra use the same >272K whole-request
+	// multipliers as Astra. Derive the tier from each API card so upstream price
+	// changes carry through.
+	models "gpt-6-sol" "gpt-6-luna" "gpt-6.1-terra" {
+		long-context-cost {
+			input-threshold 272000
+			multiplier 2.0
+			output-multiplier 1.5
 		}
 	}
 	// API Ultrafast is 6x the standard card on both context tiers: GPT-6 Astra

@@ -264,6 +264,122 @@ mod tests {
 		assert!(!art.contains('\u{200b}'), "{art}");
 	}
 
+	#[test]
+	fn parallel_edges_keep_separate_routes_and_labels() {
+		let options = RenderOptions { color_mode: Some(ColorMode::None), ..RenderOptions::default() };
+		for source in [
+			"flowchart LR\nA -->|first label| B\nA -.->|second label| B",
+			"flowchart TD\nA -->|first label| B\nA -.->|second label| B",
+			"flowchart LR\nA -->|first label| B\nB -.->|second label| A",
+		] {
+			let art = render(source, &options).unwrap();
+			assert!(art.contains("first label") && art.contains("second label"), "{art}");
+		}
+
+		let is_arrowhead = |c: char| matches!(c, '►' | '◄' | '▲' | '▼');
+		for source in [
+			"flowchart LR\nA --> B\nA -.-> B",
+			// Same style and unlabeled: TD would otherwise bundle the pair.
+			"flowchart TD\nA --> B\nA --> B",
+			"flowchart LR\nA --> B\nB -.-> A",
+		] {
+			let art = render(source, &options).unwrap();
+			assert_eq!(art.chars().filter(|&c| is_arrowhead(c)).count(), 2, "{art}");
+			assert!(
+				art.lines()
+					.all(|line| line.chars().filter(|&c| is_arrowhead(c)).count() < 2),
+				"each edge must end on its own route:\n{art}"
+			);
+		}
+	}
+
+	/// A label on the sibling edge must not widen the source's border column,
+	/// or the side edge would start past the drawn border (#16730).
+	#[test]
+	fn side_edge_starts_on_border_when_sibling_label_spans_it() {
+		let options = RenderOptions { color_mode: Some(ColorMode::None), ..RenderOptions::default() };
+		let art =
+			render("flowchart LR\nC[Signed in?] -->|no| D[Cognito]\nC -->|yes| E[App]", &options)
+				.unwrap();
+		assert!(
+			art.lines()
+				.any(|line| line.contains("│ Signed in? ├─no─►│ Cognito │")),
+			"{art}"
+		);
+	}
+
+	/// #16773: a rerouted parallel edge keeps clear of the other edges at both
+	/// of its nodes, whatever the declaration order and layout direction.
+	#[test]
+	fn rerouted_parallel_edge_keeps_clear_of_sibling_edges() {
+		let options = RenderOptions { color_mode: Some(ColorMode::None), ..RenderOptions::default() };
+		let edges = [
+			"X[Client] --> A[Gateway]",
+			"A -->|first parallel| B[Service B]",
+			"B -->|branch a| D[Target D]",
+			"B -->|longer branch b| E[Target E]",
+			"A -->|forward request| C[Service C]",
+			"F[Caller] --> G[Proxy] --> C",
+			"A -.->|second parallel| B",
+		];
+		let source = |direction: &str, order: &[usize]| {
+			let lines: Vec<&str> = order.iter().map(|&i| edges[i]).collect();
+			format!("flowchart {direction}\n{}", lines.join("\n"))
+		};
+		let arrowheads = |art: &str| art.chars().filter(|c| "►◄▲▼".contains(*c)).count();
+		let labels =
+			["first parallel", "second parallel", "branch a", "longer branch b", "forward request"];
+
+		for direction in ["LR", "TD"] {
+			let art = render(&source(direction, &[0, 1, 2, 3, 4, 5, 6]), &options).unwrap();
+			// The parallel edge declared right after its twin, before the edges
+			// it has to avoid, routes the same.
+			let reordered = render(&source(direction, &[0, 1, 6, 2, 3, 4, 5]), &options).unwrap();
+			assert_eq!(art, reordered, "declaration order changed the {direction} layout");
+			for label in labels {
+				assert!(art.contains(label), "{direction}: {label} overwritten\n{art}");
+			}
+			assert_eq!(arrowheads(&art), 8, "{direction}: an arrowhead was overwritten\n{art}");
+		}
+
+		let lr = render(&source("LR", &[0, 1, 2, 3, 4, 5, 6]), &options).unwrap();
+		// Both parallel edges leave Gateway's top border with their own tee, and
+		// the solid sibling edges keep solid stems.
+		assert!(lr.contains("┌────┴─┴──┐"), "{lr}");
+		assert!(lr.contains("├─forward request►"), "{lr}");
+		assert!(lr.contains("▲ │"), "{lr}");
+		// TD moves stems by a row: the dotted edge's tee and arrowhead sit on a
+		// box side wall, not on a corner row.
+		let td = render(&source("TD", &[0, 1, 2, 3, 4, 5, 6]), &options).unwrap();
+		assert!(td.contains("first parallel────────┤"), "{td}");
+		assert!(td.contains("┄┄┄┄┤                 │"), "{td}");
+		assert!(td.contains("│◄┄"), "{td}");
+	}
+
+	/// A parallel edge whose only clear route runs outside the first row of
+	/// nodes takes that corridor instead of the sibling edge's port.
+	#[test]
+	fn parallel_edge_uses_outer_corridor_to_reach_a_free_port() {
+		let options = RenderOptions { color_mode: Some(ColorMode::None), ..RenderOptions::default() };
+		let art = render("flowchart LR\nA --> B\nB --> E\nA --> C\nA -.-> B", &options).unwrap();
+		// The dotted edge leaves A's top border; A --> C keeps A's bottom port
+		// and a solid stem.
+		assert!(art.lines().any(|line| line == "┌─┴─┐     ┌───┐     ┌───┐"), "{art}");
+		let below_a: Vec<&str> = art
+			.lines()
+			.skip_while(|line| !line.starts_with("└─┬─┘"))
+			.collect();
+		assert!(below_a.len() > 1 && below_a.iter().all(|line| !line.contains('┆')), "{art}");
+	}
+
+	/// A corridor reserved for parallel edges that no route uses adds no rows.
+	#[test]
+	fn unused_outer_corridor_adds_no_blank_rows() {
+		let options = RenderOptions { color_mode: Some(ColorMode::None), ..RenderOptions::default() };
+		let art = render("flowchart LR\nA --> B\nA -.-> B", &options).unwrap();
+		assert!(art.lines().next().is_some_and(|line| line.starts_with('┌')), "{art}");
+	}
+
 	/// One case of `fixtures/mermaid.json`: the exact output (or error
 	/// message) for a source and option set. Originally captured from the
 	/// TypeScript renderer; flowchart layouts have since been re-baselined

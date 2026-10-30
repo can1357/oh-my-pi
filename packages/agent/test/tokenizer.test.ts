@@ -1,8 +1,12 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import type { Api, AssistantMessage, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
 import { convertCodexResponsesMessages } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { convertMessages } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import type { OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import * as natives from "@oh-my-pi/pi-natives";
 import { Agent } from "../src/agent";
 import type { SessionMessageEntry } from "../src/compaction/entries";
@@ -200,6 +204,204 @@ describe("countMessage", () => {
 	});
 });
 
+// Ollama chat drops historical assistant thinking even when the stored turn
+// contains it; a false compaction floor can discard most of a usable window.
+describe("Ollama chat history estimate", () => {
+	const model = buildModel({
+		id: "deepseek-v4-flash",
+		name: "DeepSeek V4 Flash",
+		api: "ollama-chat",
+		provider: "ollama-cloud",
+		baseUrl: "https://ollama.com",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 8192,
+	});
+	const turn: AssistantMessage = {
+		role: "assistant",
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		content: [
+			{ type: "thinking", thinking: "r".repeat(8000), thinkingSignature: "s".repeat(8000) },
+			{ type: "text", text: "Done." },
+		],
+		usage: {
+			input: 10,
+			output: 4000,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 4010,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: 0,
+	};
+	test("counts foreign thinking demoted into visible Ollama text, without its native signature", () => {
+		const foreign: AssistantMessage = {
+			...turn,
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet",
+		};
+		const stripping = new Tokenizer(model);
+		const floor = { excludeEncryptedReasoning: true };
+		const estimate = stripping.countMessage(foreign, floor);
+		expect(estimate).toBeGreaterThan(1000);
+		expect(stripping.countMessage(foreign)).toBe(estimate);
+		const replaying = new Tokenizer({ ...model, compat: { ...model.compat, stripThinkingHistory: false } });
+		expect(replaying.countMessage(foreign, floor)).toBe(estimate);
+	});
+
+	test("counts only replayed content and recounts after the stripping policy changes", () => {
+		const visible = { ...turn, content: [{ type: "text", text: "Done." }] } satisfies AssistantMessage;
+		const agent = new Agent({ initialState: { model, systemPrompt: [], tools: [], messages: [] } });
+		const floor = { excludeEncryptedReasoning: true };
+		const visibleCount = agent.tokenizer.countMessage(visible);
+		expect(agent.tokenizer.countMessage(turn)).toBe(visibleCount);
+		expect(agent.tokenizer.countMessage(turn, floor)).toBe(visibleCount);
+
+		const replaying = { ...model, compat: { ...model.compat, stripThinkingHistory: false } };
+		expect(agent.tokenizer.countsAlike(replaying)).toBe(false);
+		agent.setModel(replaying);
+		expect(agent.tokenizer.countMessage(turn, floor)).toBeGreaterThan(visibleCount + 1000);
+		expect(agent.tokenizer.countMessage(turn)).toBeGreaterThan(agent.tokenizer.countMessage(turn, floor));
+		agent.setModel(model);
+		expect(agent.tokenizer.countMessage(turn, floor)).toBe(visibleCount);
+	});
+});
+
+// Contract: a chat-completions request without a reasoning slot drops the
+// model's own past thinking, so the context estimate (and the compaction
+// triggers built on it) must not count it; thinking the request carries still
+// counts (#15797).
+describe("chat-completions history estimate", () => {
+	const THINKING = "Let me reason about the call sites carefully. ".repeat(400);
+	const toolCall = { type: "toolCall", id: "call_1", name: "read", arguments: { path: "a.ts" } } as const;
+
+	function completionsModel(
+		id: string,
+		compat: Partial<OpenAICompat> & { replayReasoningContent: boolean },
+		reasoning = true,
+	): Model<"openai-completions"> {
+		return buildModel({
+			id,
+			name: id,
+			api: "openai-completions",
+			provider: "my-host",
+			baseUrl: "http://my-server.example:8000/v1",
+			reasoning,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 262_144,
+			maxTokens: 32_768,
+			compat: { thinkingFormat: "qwen-chat-template", ...compat },
+		});
+	}
+
+	function thinkingTurn(from: Model, thinkingSignature: string): AssistantMessage {
+		return {
+			role: "assistant",
+			content: [{ type: "thinking", thinking: THINKING, thinkingSignature }, toolCall],
+			api: from.api,
+			provider: from.provider,
+			model: from.id,
+			usage: {
+				input: 100,
+				output: 3_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 3_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 1,
+		};
+	}
+
+	const dropping = completionsModel("Qwen3.8-27B", { replayReasoningContent: false });
+	const replaying = completionsModel("Qwen3.8-27B", { replayReasoningContent: true });
+	const floor = { excludeEncryptedReasoning: true };
+	const toolCallOnly = new Tokenizer(dropping).countMessage({ ...thinkingTurn(dropping, "x"), content: [toolCall] });
+
+	test.each([
+		{ name: "replay off", model: dropping, carried: false },
+		{ name: "replay on", model: replaying, carried: true },
+		{
+			name: "replay only in the thinking view",
+			model: completionsModel("Qwen3.8-27B", {
+				replayReasoningContent: false,
+				whenThinking: { replayReasoningContent: true },
+			}),
+			carried: true,
+		},
+		{
+			name: "Mistral content parts",
+			model: completionsModel("Qwen3.8-27B", { replayReasoningContent: false, mistralReasoningContentParts: true }),
+			carried: true,
+		},
+		{
+			name: "thinking as text",
+			model: completionsModel("Qwen3.8-27B", { replayReasoningContent: false, requiresThinkingAsText: true }),
+			carried: true,
+		},
+		{
+			name: "reasoning content required for tool calls",
+			model: completionsModel("Qwen3.8-27B", {
+				replayReasoningContent: false,
+				requiresReasoningContentForToolCalls: true,
+			}),
+			carried: true,
+		},
+		{
+			name: "Z.AI on a reasoning model",
+			model: completionsModel("Qwen3.8-27B", { replayReasoningContent: false, thinkingFormat: "zai" }),
+			carried: true,
+		},
+		{
+			name: "Z.AI on a non-reasoning model",
+			model: completionsModel("Qwen3.8-27B", { replayReasoningContent: false, thinkingFormat: "zai" }, false),
+			carried: false,
+		},
+		// Another model's thinking reaches the request demoted to text.
+		{
+			name: "another model's turn",
+			model: dropping,
+			from: completionsModel("other-model", { replayReasoningContent: false }),
+			carried: true,
+		},
+		// LiteLLM replays a raw signature's thinking in `thinking_blocks`.
+		{ name: "a raw LiteLLM signature", model: dropping, signature: "EqQBCkgIARABGAIiQL", carried: true },
+	])("counts thinking only when a request carries it: $name", ({ model, from, signature, carried }) => {
+		const turn = thinkingTurn(from ?? model, signature ?? "reasoning_content");
+		const views = [model.compat, model.compat.whenThinking].filter(view => view !== undefined);
+		const messages = transformMessages([turn], model);
+		const sent = views.some(view =>
+			JSON.stringify(convertMessages(model, { messages }, view)).includes(THINKING.trim()),
+		);
+		expect(sent).toBe(carried);
+
+		const tokenizer = new Tokenizer(model);
+		if (carried) {
+			expect(tokenizer.countMessage(turn, floor)).toBeGreaterThan(toolCallOnly + 1000);
+		} else {
+			expect(tokenizer.countMessage(turn)).toBe(toolCallOnly);
+			expect(tokenizer.countMessage(turn, floor)).toBe(toolCallOnly);
+		}
+	});
+
+	test("recounts after the replay policy changes", () => {
+		const turn = thinkingTurn(dropping, "reasoning_content");
+		const agent = new Agent({ initialState: { model: dropping, systemPrompt: [], tools: [], messages: [] } });
+		expect(agent.tokenizer.countMessage(turn, floor)).toBe(toolCallOnly);
+		expect(agent.tokenizer.countsAlike(replaying)).toBe(false);
+		agent.setModel(replaying);
+		expect(agent.tokenizer.countMessage(turn, floor)).toBeGreaterThan(toolCallOnly + 1000);
+	});
+});
+
 // Contract: a replayed signed thinking block costs what the reading model bills
 // for it: Claude rebuilds the full reasoning from the signature and bills it at
 // the size the turn billed as output; other readers are charged the
@@ -309,6 +511,25 @@ describe("countMessage replayed thinking", () => {
 		const ranTools = signedTurn(opus, VISIBLE, SIGNATURE, "toolUse");
 		ranTools.content = [...ranTools.content, toolCall];
 		expect(tokenizer.countMessage(ranTools)).toBe(OUTPUT_TOKENS);
+	});
+
+	test("charges the reasoning of the latest turn that abandoned its tool calls on the Claude API only", () => {
+		// The Anthropic Messages replay keeps the latest assistant turn
+		// byte-for-byte, signatures included; Bedrock's Converse replay strips them.
+		const toolCall = { type: "toolCall", id: "call-1", name: "read", arguments: { path: "a.ts" } } as const;
+		for (const stop of ["stop", "length"] as const) {
+			const tokenizer = new Tokenizer(opus);
+			const turn = signedTurn(opus, VISIBLE, SIGNATURE, stop);
+			turn.content = [...turn.content, toolCall];
+			expect(tokenizer.countLatestTurn(turn)).toBe(OUTPUT_TOKENS);
+			// An older position, counted after it, still gets the stripped count.
+			expect(tokenizer.countMessage(turn)).toBe(tokenizer.countMessage(turn, { excludeEncryptedReasoning: true }));
+
+			const bedrock = new Tokenizer(bedrockOpus);
+			const bedrockTurn = signedTurn(bedrockOpus, VISIBLE, SIGNATURE, stop);
+			bedrockTurn.content = [...bedrockTurn.content, toolCall];
+			expect(bedrock.countLatestTurn(bedrockTurn)).toBe(bedrock.countMessage(bedrockTurn));
+		}
 	});
 
 	test("lowers a native Claude replay by the visible text a shake rewrite removes, after a reload too", () => {

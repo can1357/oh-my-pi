@@ -59,6 +59,10 @@ class "deepseek" {
 	on "alibaba-token-plan" "deepseek" {
 		supports-developer-role #false
 	}
+	// Replaces the provider-keyed leaked chat-template special-token strip.
+	on "nvidia" "deepseek" {
+		strip-deepseek-special-tokens #true
+	}
 	on "deepseek" "opencode-go" {
 		family "pro" {
 			max-tokens-field "max_tokens"
@@ -86,10 +90,11 @@ class "deepseek" {
 	}
 	// V4.1 Flash is natively multimodal (vision encoder + projector, image-text
 	// pre-training) but its release id carries no `vision` token to key on.
+	// The leading glob also covers publisher-namespaced ids (`ds/deepseek-flash`).
 	// Same priority as the V4.1 Flash carve-out: the OpenCode Go provider rule
 	// declares the same value for its `deepseek-flash` lane and would otherwise
 	// tie at equal rank.
-	models "deepseek-flash" priority=10 {
+	models "*deepseek-flash" priority=10 {
 		strip-image-input #false
 	}
 	// DSML is the model's own tool-call grammar, not a host quirk: any server
@@ -103,5 +108,36 @@ class "deepseek" {
 	// classify too coarsely to carry: `r1` also matches the R1 distills.
 	revision ">=4" {
 		portable-reasoning #true
+	}
+	// V4.1 Flash's vision config (patch 14, 3x3 merge, 1024-token cap, 544²
+	// floor). verified: OpenRouter billing matched it exactly on Fireworks and
+	// DeepInfra and within one token on Together, 256px to 4000px.
+	// Later Flash releases stay on their wire fallback until measured.
+	family "flash" {
+		revision ">=4.1 <4.2" {
+			image-tokenization {
+				regime "deepseek-patch"
+				verified #true
+				patch-size 14
+				downsample 3
+				max-tokens 1024
+				min-pixels 295936
+			}
+		}
+	}
+	// DeepSeek's API retired the V4.0 vision preview and serves its legacy id
+	// with the current Flash (api-docs.deepseek.com/guides/vision); hosts that
+	// still run the preview keep their fallback.
+	on "deepseek" {
+		models "deepseek-v4-flash-vision-exp" {
+			image-tokenization {
+				regime "deepseek-patch"
+				verified #true
+				patch-size 14
+				downsample 3
+				max-tokens 1024
+				min-pixels 295936
+			}
+		}
 	}
 }

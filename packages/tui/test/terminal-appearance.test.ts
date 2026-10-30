@@ -4,8 +4,10 @@ import { ProcessTerminal, type TerminalStartOptions } from "@oh-my-pi/pi-tui/ter
 import {
 	type CellDimensions,
 	getCellDimensions,
+	getTerminalBackgroundColor,
 	getTerminalInfo,
 	setCellDimensions,
+	setTerminalBackgroundColor,
 } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
 
@@ -43,18 +45,26 @@ function restoreEnv(key: string, original: string | undefined): void {
 }
 
 describe("ProcessTerminal OSC 11 appearance detection", () => {
+	let originalColorFgbg: string | undefined;
+	let originalZellij: string | undefined;
+
 	beforeEach(() => {
+		originalColorFgbg = Bun.env.COLORFGBG;
+		originalZellij = Bun.env.ZELLIJ;
 		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 		Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
 		Object.defineProperty(process.stdin, "setRawMode", { value: vi.fn(), configurable: true });
 		previousHeadless = setTerminalHeadless(false);
+		setTerminalBackgroundColor(undefined);
 		delete Bun.env.TMUX;
+		delete Bun.env.ZELLIJ;
 	});
 
 	afterEach(() => {
 		vi.useRealTimers();
 		vi.restoreAllMocks();
 		setTerminalHeadless(previousHeadless);
+		setTerminalBackgroundColor(undefined);
 		restoreProperty(process.stdin, "isTTY", stdinIsTtyDescriptor);
 		restoreProperty(process.stdout, "isTTY", stdoutIsTtyDescriptor);
 		restoreProperty(process.stdin, "setRawMode", stdinSetRawModeDescriptor);
@@ -64,12 +74,17 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		restoreEnv("WT_SESSION", originalWtSession);
 		restoreEnv("TERM_PROGRAM", originalTermProgram);
 		restoreEnv("TMUX", originalTmux);
+		restoreEnv("COLORFGBG", originalColorFgbg);
+		restoreEnv("ZELLIJ", originalZellij);
 	});
 
 	// conpty defaults false so kitty-flag assertions stay hermetic under WSL,
 	// where isConPTYHosted() would otherwise read the live WSL_* env. The two
 	// ConPTY cases opt in explicitly.
-	function setupTerminal({ conpty = false }: { conpty?: boolean } = {}) {
+	function setupTerminal({
+		conpty = false,
+		startOptions,
+	}: { conpty?: boolean; startOptions?: TerminalStartOptions } = {}) {
 		const writes: string[] = [];
 		const received: string[] = [];
 		vi.spyOn(process, "kill").mockReturnValue(true);
@@ -85,6 +100,8 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		terminal.start(
 			data => received.push(data),
 			() => {},
+			undefined,
+			startOptions,
 		);
 
 		const queryCount = () => writes.filter(w => w === "\x1b]11;?\x07").length;
@@ -222,6 +239,136 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		]);
 		expect(selfUnsubscribeCalls).toBe(1);
 		expect(changes).toEqual(["dark", "light"]);
+	});
+
+	it.each([
+		["0/0/0", 0x000000],
+		["f/ff/fff", 0xffffff],
+		["7/7f/7fff", 0x777f7f],
+		["8/80/8000", 0x888080],
+		["0/800/0080", 0x008000],
+	] as const)("retains rounded variable-width OSC 11 RGB %s before report callbacks", (rgb, expected) => {
+		const { terminal } = setupTerminal();
+		const reportedColors: number[] = [];
+		terminal.onAppearanceReport(() => reportedColors.push(getTerminalBackgroundColor()));
+		process.stdin.emit("data", `\x1b]11;rgb:${rgb}\x07`);
+		const background = getTerminalBackgroundColor();
+		terminal.stop();
+
+		expect(background).toBe(expected);
+		expect(reportedColors).toEqual([expected]);
+	});
+
+	it("retains later dark RGB changes without changing appearance callback semantics", () => {
+		const { terminal } = setupTerminal();
+		const changes: string[] = [];
+		const reportedColors: number[] = [];
+		terminal.onAppearanceChange(appearance => changes.push(appearance));
+		terminal.onAppearanceReport(() => reportedColors.push(getTerminalBackgroundColor()));
+		process.stdin.emit("data", "\x1b]11;rgb:1010/2020/3030\x07");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		terminal.refreshAppearance();
+		process.stdin.emit("data", "\x1b]11;rgb:2020/3030/4040\x07");
+		const background = getTerminalBackgroundColor();
+		terminal.stop();
+
+		expect(background).toBe(0x203040);
+		expect(reportedColors).toEqual([0x102030, 0x203040]);
+		expect(changes).toEqual(["dark"]);
+	});
+
+	it("drops the previous session's RGB on stop and restart without an OSC 11 response", () => {
+		Bun.env.COLORFGBG = "15;0";
+		const { terminal, received } = setupTerminal();
+		try {
+			process.stdin.emit("data", "\x1b]11;rgb:1111/2222/3333\x07");
+			expect(getTerminalBackgroundColor()).toBe(0x112233);
+
+			terminal.stop();
+			expect(getTerminalBackgroundColor()).toBe(0x000000);
+			terminal.start(
+				data => received.push(data),
+				() => {},
+			);
+			// The DA1 sentinel completes the unanswered query: consumers must use
+			// the environment fallback, not the previous session's OSC 11 RGB.
+			for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+			expect(getTerminalBackgroundColor()).toBe(0x000000);
+			expect(terminal.appearance).toBeUndefined();
+
+			terminal.refreshAppearance();
+			process.stdin.emit("data", "\x1b]11;rgb:4444/5555/6666\x07");
+			expect(getTerminalBackgroundColor()).toBe(0x445566);
+		} finally {
+			terminal.stop();
+		}
+	});
+
+	it("resets stale RGB before a deferred-input prepaint and accepts the fresh reply", () => {
+		Bun.env.COLORFGBG = "15;0";
+		setTerminalBackgroundColor(0x112233);
+		const { terminal, queryCount, writes } = setupTerminal({ startOptions: { deferInput: true } });
+		try {
+			expect(queryCount()).toBe(0);
+			expect(getTerminalBackgroundColor()).toBe(0x000000);
+			terminal.write("first paint");
+			expect(writes).toContain("first paint");
+			expect(getTerminalBackgroundColor()).toBe(0x000000);
+
+			terminal.enableInput();
+			expect(queryCount()).toBe(1);
+			process.stdin.emit("data", "\x1b]11;rgb:4444/5555/6666\x07");
+			expect(getTerminalBackgroundColor()).toBe(0x445566);
+		} finally {
+			terminal.stop();
+		}
+		expect(getTerminalBackgroundColor()).toBe(0x000000);
+	});
+
+	it("does not let an old terminal's stop erase the current owner's RGB", () => {
+		Bun.env.COLORFGBG = "15;0";
+		const { terminal: oldTerminal } = setupTerminal();
+		const terminal = new ProcessTerminal({ conpty: false });
+		try {
+			process.stdin.emit("data", "\x1b]11;rgb:1111/2222/3333\x07");
+			expect(getTerminalBackgroundColor()).toBe(0x112233);
+			terminal.start(
+				() => {},
+				() => {},
+				undefined,
+				{ deferInput: true },
+			);
+			expect(getTerminalBackgroundColor()).toBe(0x000000);
+			terminal.enableInput();
+			process.stdin.emit("data", "\x1b]11;rgb:4444/5555/6666\x07");
+			expect(getTerminalBackgroundColor()).toBe(0x445566);
+
+			oldTerminal.stop();
+			expect(getTerminalBackgroundColor()).toBe(0x445566);
+		} finally {
+			oldTerminal.stop();
+			terminal.stop();
+		}
+		expect(getTerminalBackgroundColor()).toBe(0x000000);
+	});
+
+	it("leaves the real owner's RGB intact when a headless terminal starts and stops", () => {
+		const { terminal } = setupTerminal();
+		try {
+			process.stdin.emit("data", "\x1b]11;rgb:1111/2222/3333\x07");
+			setTerminalHeadless(true);
+			const headlessTerminal = new ProcessTerminal({ conpty: false });
+			headlessTerminal.start(
+				() => {},
+				() => {},
+			);
+			expect(getTerminalBackgroundColor()).toBe(0x112233);
+			headlessTerminal.stop();
+			expect(getTerminalBackgroundColor()).toBe(0x112233);
+		} finally {
+			setTerminalHeadless(false);
+			terminal.stop();
+		}
 	});
 
 	it("replays already detected OSC 11 appearance to late subscribers", () => {

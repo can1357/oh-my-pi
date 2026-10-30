@@ -35,6 +35,9 @@ export interface SessionTitleSlotEntry {
 
 export const EPHEMERAL_MODEL_CHANGE_ROLE = "fallback";
 
+/** A prewalk or plan-yolo handoff: restored on resume, passed over when looking up the assigned role. */
+export const PREWALK_MODEL_CHANGE_ROLE = "prewalk";
+
 export interface SessionHeader {
 	type: "session";
 	version?: number; // v1 sessions don't have this
@@ -50,12 +53,24 @@ export interface SessionHeader {
 	 */
 	additionalDirectories?: string[];
 	parentSession?: string;
+	/**
+	 * Set, to the `parentSession` id, when this session is that same conversation
+	 * continued in a new file because it could not keep writing its own (another
+	 * live process held it, or the file changed under it). Resuming the parent
+	 * resumes the most recently active continuation instead. Forks never set it.
+	 */
+	continuationOf?: string;
 	/** Prior absolute JSONL locations recorded by successful session moves. */
 	previousSessionFiles?: string[];
 	/** Local-only provider prompt-cache identity inherited by exact-route full forks; omitted from shares and HTML. */
 	providerPromptCacheKey?: string;
 	/** Local-only Task candidate, gated by the actual request model's cache policy; omitted from shares and HTML. */
 	taskPromptCacheKey?: string;
+	/**
+	 * Source session file of a read-only seance fork. Its artifacts stay in the
+	 * source: `history://`, `artifact://`, and `agent://` read them from there.
+	 */
+	seanceSource?: string;
 }
 
 export interface NewSessionOptions {
@@ -63,7 +78,10 @@ export interface NewSessionOptions {
 	/** Provider prompt-cache identity to seed on the new session header. */
 	providerPromptCacheKey?: string;
 	taskPromptCacheKey?: string;
-	/** Skip flushing the current session and delete it instead of saving. */
+	/**
+	 * Skip flushing the current session and delete it instead of saving. The
+	 * successor starts lazy: no empty header is written until it has content.
+	 */
 	drop?: boolean;
 	/** Additional workspace directories to seed on the new session. */
 	additionalDirectories?: string[];
@@ -81,6 +99,14 @@ export interface SessionEntryBase {
 	 * (forks, branches, collab replicas) keep the original writer. Absent on older entries.
 	 */
 	runtime?: RuntimeIdentity;
+	/**
+	 * Active leaf at append time, for an entry written off the active branch (late usage,
+	 * a background bash result routed back to the branch it started on). The loader replays
+	 * it instead of treating this entry as the leaf, so resume keeps the branch the live
+	 * session was on. Absence keeps the ordinary last-entry semantics; null records a
+	 * cleared leaf.
+	 */
+	activeLeafId?: string | null;
 }
 
 export interface SessionMessageEntry extends SessionEntryBase {
@@ -100,8 +126,6 @@ export interface ModelUsageEntry extends SessionEntryBase {
 	usage: Usage;
 	stopReason: StopReason;
 	errorMessage?: string;
-	/** Active leaf at append time for late usage; absence keeps ordinary last-entry semantics. */
-	activeLeafId?: string | null;
 }
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {
@@ -332,9 +356,9 @@ export type SessionEntry =
 	| CredentialPinEntry
 	| ResetBoundaryEntry;
 
-/** Leaf selected when replaying one entry; late usage restores its captured active leaf. */
+/** Leaf selected when replaying one entry; an off-branch entry restores the active leaf captured at append time. */
 export function sessionEntryLeafId(entry: SessionEntry): string | null {
-	return entry.type === "model_usage" && entry.activeLeafId !== undefined ? entry.activeLeafId : entry.id;
+	return entry.activeLeafId !== undefined ? entry.activeLeafId : entry.id;
 }
 
 /** Newest entry that selects itself on replay; skips late-usage markers. */

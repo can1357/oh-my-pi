@@ -7,7 +7,7 @@ import { createRequire, isBuiltin } from "node:module";
 import * as path from "node:path";
 import * as url from "node:url";
 import type { ParseResult, ParserPlugin } from "@babel/parser";
-import { parse as parseBabel } from "@babel/parser";
+import type * as BabelParser from "@babel/parser";
 import {
 	getDbBusyTimeoutMs,
 	getLegacyPiExtensionCacheDbPath,
@@ -62,6 +62,8 @@ interface ExtensionSpecifierReference {
 }
 
 function parseExtensionSource(source: string, importerPath: string): ParseResult {
+	// Installing specifier hooks needs no parser; only a real source rewrite does.
+	const { parse: parseBabel }: typeof BabelParser = require("@babel/parser");
 	const extension = path.extname(importerPath).toLowerCase();
 	const plugins: ParserPlugin[] = ["decorators-legacy", "explicitResourceManagement"];
 	if (extension === ".ts" || extension === ".mts" || extension === ".cts" || extension === ".tsx") {
@@ -2728,8 +2730,13 @@ async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(
  * the entry) resolve exactly as they do under the original Pi runtime — no
  * temp-directory mirroring and no asset copying. Graph-scoped `onLoad` hooks
  * rewrite ESM/TS sources and expose evaluated CommonJS namespaces directly.
+ *
+ * Each call re-evaluates the module graph so an edited extension is picked up
+ * (`reload`, the default). With `reload: false` the entry and its relative
+ * imports keep their plain paths, so Bun evaluates them once per process and
+ * every importer shares them, as a native `import()` would.
  */
-export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown> {
+export async function loadLegacyPiModule(resolvedPath: string, options: { reload?: boolean } = {}): Promise<unknown> {
 	// Bun reports the realpath of a loaded module to `onLoad` and exposes it as
 	// `import.meta.url`. Resolve symlinks here too (macOS `/var`→`/private/var`,
 	// `bun link`/pnpm installs) so the rewrite filter matches the path Bun
@@ -2745,6 +2752,7 @@ export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown>
 		const entrySpecifier = isBundledVirtualSpecifier(entryRealPath)
 			? toImportSpecifier(entryRealPath)
 			: stripWindowsExtendedLengthPathPrefix(entryRealPath);
+		if (options.reload === false) return await import(entrySpecifier);
 		return await import(`${entrySpecifier}?mtime=${nextLegacyPiLoadTag()}`);
 	} finally {
 		// Drop whatever the initial import didn't consume: graph modules only

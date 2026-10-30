@@ -12,6 +12,10 @@
 //! non-UTF-8 flavors narrow ASCII runs 1:1). Steady state performs no
 //! per-call allocation beyond one scratch buffer for non-UTF-8 flavors.
 //!
+//! Counting goes through a per-thread [`PieceMemo`]: the merge-loop count
+//! of every 2..=15-byte piece the merge loop counts, so a repeat costs one
+//! probe instead of a merge run.
+//!
 //! Per-flavor native rank-table views (`HashMap<Box<[u16]>, u32>` etc.)
 //! were considered and measured out: with the ASCII narrow path, u16
 //! input already runs at 81-97% of the str path per codepoint (M4 Max,
@@ -21,9 +25,11 @@
 
 use std::{
 	borrow::Cow,
+	cell::RefCell,
 	cmp::Reverse,
 	collections::{BinaryHeap, HashMap},
 	hash::{BuildHasherDefault, Hash, Hasher},
+	sync::atomic::{AtomicU32, Ordering},
 };
 
 use crate::utok::{
@@ -42,14 +48,13 @@ impl Hasher for FxHasher {
 	fn write(&mut self, bytes: &[u8]) {
 		const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
 		let mut h = self.0;
-		let mut b = bytes;
-		while let Some(chunk) = b.first_chunk::<8>() {
-			h = (h.rotate_left(5) ^ u64::from_le_bytes(*chunk)).wrapping_mul(SEED);
-			b = &b[8..];
+		let (words, mut b) = bytes.as_chunks::<8>();
+		for &chunk in words {
+			h = (h.rotate_left(5) ^ u64::from_le_bytes(chunk)).wrapping_mul(SEED);
 		}
-		if let Some(chunk) = b.first_chunk::<4>() {
-			h = (h.rotate_left(5) ^ u64::from(u32::from_le_bytes(*chunk))).wrapping_mul(SEED);
-			b = &b[4..];
+		if let Some((&chunk, rest)) = b.split_first_chunk::<4>() {
+			h = (h.rotate_left(5) ^ u64::from(u32::from_le_bytes(chunk))).wrapping_mul(SEED);
+			b = rest;
 		}
 		for &byte in b {
 			h = (h.rotate_left(5) ^ u64::from(byte)).wrapping_mul(SEED);
@@ -116,6 +121,67 @@ fn pack(key: &[u8]) -> Option<ShortKey> {
 	Some(ShortKey([v as u32, (v >> 32) as u32, (v >> 64) as u32, (v >> 96) as u32]))
 }
 
+/// Per-thread memo of merge-loop counts for 2..=15-byte pieces: the dynamic
+/// piece cache of [toks](https://github.com/actual-computer/toks)
+/// (`docs/kernels.md` §6). Pieces the vocabulary misses were 6-22% of the
+/// pieces of English prose, omp's TypeScript and its Markdown docs, and
+/// 64-84% of them repeated within the same text; a hit costs one probe
+/// where the merge run costs a rank lookup per pair and per merge.
+///
+/// Direct-mapped, overwrite on fill, 16 Ki slots (384 KiB a thread). A slot
+/// holds the merge count of its key under one table, named by
+/// [`RankTable::id`] (0 marks an empty slot); that count depends only on
+/// the key bytes and the table, so an entry stays exact across calls,
+/// inputs and UTF flavors.
+pub struct PieceMemo {
+	slots: Box<[MemoSlot; Self::SLOTS]>,
+}
+
+#[derive(Clone, Copy)]
+struct MemoSlot {
+	key:   ShortKey,
+	table: u32,
+	count: u32,
+}
+
+thread_local! {
+	static MEMO: RefCell<PieceMemo> = RefCell::new(PieceMemo::new());
+}
+
+impl PieceMemo {
+	const BITS: u32 = 14;
+	const SLOTS: usize = 1 << Self::BITS;
+
+	fn new() -> Self {
+		let empty = MemoSlot { key: ShortKey([0; 4]), table: 0, count: 0 };
+		Self {
+			slots: vec![empty; Self::SLOTS]
+				.into_boxed_slice()
+				.try_into()
+				.unwrap_or_else(|_| unreachable!()),
+		}
+	}
+
+	/// Run `f` with this thread's memo.
+	pub fn with<R>(f: impl FnOnce(&mut Self) -> R) -> R {
+		MEMO.with_borrow_mut(f)
+	}
+
+	#[inline]
+	#[allow(clippy::cast_possible_truncation, reason = "keeps the top BITS bits of the hash")]
+	fn slot(&mut self, key: ShortKey, table: u32) -> &mut MemoSlot {
+		let [w0, w1, w2, w3] = key.0;
+		let lo = u64::from(w0) | u64::from(w1) << 32;
+		let hi = u64::from(w2) | u64::from(w3) << 32;
+		let hash = (lo ^ hi.rotate_left(29) ^ u64::from(table).rotate_left(47))
+			.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+		&mut self.slots[(hash >> (64 - Self::BITS)) as usize]
+	}
+}
+
+/// Source of [`RankTable::id`]s; 0 is [`PieceMemo`]'s empty slot.
+static NEXT_TABLE_ID: AtomicU32 = AtomicU32::new(1);
+
 /// Token bytes → rank map decoded from a UTOK1 blob.
 ///
 /// Split by key length into three stores, matching the merge loop's
@@ -138,6 +204,8 @@ pub struct RankTable {
 	long:              FxMap,
 	/// Longest token in bytes; callers may use it to bound scans.
 	pub max_token_len: usize,
+	/// This table's name in [`PieceMemo`] slots.
+	id:                u32,
 }
 
 impl RankTable {
@@ -156,9 +224,9 @@ impl RankTable {
 		let raw = zstd::decode_all(zst).expect("utoken: zstd decode failed");
 		let mut p = &raw[..];
 		assert_eq!(&p[..6], b"UTOK1\n", "utoken: bad magic");
-		p = &p[6..];
-		let n = u32::from_le_bytes(p[..4].try_into().unwrap()) as usize;
-		p = &p[4..];
+		let (&n, rest) = p[6..].split_first_chunk::<4>().unwrap();
+		let n = u32::from_le_bytes(n) as usize;
+		p = rest;
 		// Size `short` to its real population: dead slots and pair/long
 		// tokens would otherwise round a sparse table up a power of two. A
 		// sparse subset table (Jev's base set: 49k short tokens over 200k
@@ -190,7 +258,8 @@ impl RankTable {
 			}
 		}
 		assert!(p.is_empty(), "utoken: trailing bytes in UTOK1 blob");
-		Self { pairs, short, long, max_token_len }
+		let id = NEXT_TABLE_ID.fetch_add(1, Ordering::Relaxed);
+		Self { pairs, short, long, max_token_len, id }
 	}
 
 	/// Rank of an exact token byte sequence, if present.
@@ -229,16 +298,14 @@ impl RankTable {
 	}
 
 	/// Token count of one pre-tokenized piece without materializing ids.
-	pub fn count_piece(&self, piece: &[u8]) -> u32 {
+	pub fn count_piece(&self, piece: &[u8], memo: &mut PieceMemo) -> u32 {
 		if piece.is_empty() {
 			return 0;
 		}
 		if self.rank(piece).is_some() {
 			return 1;
 		}
-		let mut n = 0u32;
-		Self::merge(piece, |p| self.rank(p).unwrap_or(u32::MAX), |_, _| n += 1);
-		n
+		self.count_merged(piece, memo)
 	}
 
 	/// Token count of `piece` from the merge loop alone: unlike
@@ -246,10 +313,27 @@ impl RankTable {
 	/// short-circuited, so entries the merges cannot reach stay split. Jev
 	/// resolves whole pieces against a separate vocabulary and uses its
 	/// base table only for merging.
-	pub fn count_merged(&self, piece: &[u8]) -> u32 {
+	pub fn count_merged(&self, piece: &[u8], memo: &mut PieceMemo) -> u32 {
 		if piece.is_empty() {
 			return 0;
 		}
+		let Some(key) = (2..=SHORT_MAX)
+			.contains(&piece.len())
+			.then(|| pack(piece))
+			.flatten()
+		else {
+			return self.merge_count(piece);
+		};
+		let slot = memo.slot(key, self.id);
+		if slot.table == self.id && slot.key == key {
+			return slot.count;
+		}
+		let count = self.merge_count(piece);
+		*slot = MemoSlot { key, table: self.id, count };
+		count
+	}
+
+	fn merge_count(&self, piece: &[u8]) -> u32 {
 		let mut n = 0u32;
 		Self::merge(piece, |p| self.rank(p).unwrap_or(u32::MAX), |_, _| n += 1);
 		n
@@ -268,8 +352,8 @@ impl RankTable {
 		// the rank of the pair formed after a merge at the end.
 		let mut parts: Vec<(usize, u32)> = Vec::with_capacity(piece.len() + 1);
 		let mut min_rank: (u32, usize) = (u32::MAX, usize::MAX);
-		for i in 0..piece.len() - 1 {
-			let rank = rank_of(&piece[i..i + 2]);
+		for (i, pair) in piece.array_windows::<2>().enumerate() {
+			let rank = rank_of(pair);
 			if rank < min_rank.0 {
 				min_rank = (rank, i);
 			}
@@ -304,8 +388,8 @@ impl RankTable {
 				}
 			}
 		}
-		for w in parts.windows(2) {
-			emit(w[0].0, w[1].0);
+		for &[(start, _), (end, _)] in parts.array_windows() {
+			emit(start, end);
 		}
 	}
 
@@ -325,10 +409,10 @@ impl RankTable {
 		let mut prev: Vec<usize> = (0..len).map(|s| s.checked_sub(1).unwrap_or(NONE)).collect();
 		let mut rank = vec![u32::MAX; len];
 		let mut heap = BinaryHeap::with_capacity(len);
-		for s in 0..len - 1 {
-			rank[s] = rank_of(&piece[s..s + 2]);
-			if rank[s] != u32::MAX {
-				heap.push(Reverse((rank[s], s)));
+		for ((s, pair), slot) in piece.array_windows::<2>().enumerate().zip(&mut rank) {
+			*slot = rank_of(pair);
+			if *slot != u32::MAX {
+				heap.push(Reverse((*slot, s)));
 			}
 		}
 		let pair_rank = |next: &[usize], s: usize| -> u32 {
@@ -373,17 +457,14 @@ fn read_token<'a>(p: &mut &'a [u8]) -> &'a [u8] {
 	let mut len = 0usize;
 	let mut shift = 0;
 	loop {
-		let b = p[0];
-		*p = &p[1..];
+		let &b = p.split_off_first().unwrap();
 		len |= ((b & 0x7f) as usize) << shift;
 		if b < 0x80 {
 			break;
 		}
 		shift += 7;
 	}
-	let (key, rest) = p.split_at(len);
-	*p = rest;
-	key
+	p.split_off(..len).unwrap()
 }
 
 /// A full BPE tokenizer: piece splitter + rank table + family flags.
@@ -402,9 +483,13 @@ pub struct BpeEncoding {
 
 impl BpeEncoding {
 	pub fn count<U: Unit>(&self, units: &[U]) -> u32 {
-		let mut n = 0u32;
-		for_each_piece(&self.splitter, self.nfc, units, &mut |p| n += self.table.count_piece(p));
-		n
+		PieceMemo::with(|memo| {
+			let mut n = 0u32;
+			for_each_piece(&self.splitter, self.nfc, units, &mut |p| {
+				n += self.table.count_piece(p, memo);
+			});
+			n
+		})
 	}
 
 	pub fn encode<U: Unit>(&self, units: &[U]) -> Vec<u32> {
@@ -477,7 +562,7 @@ fn piece_bytes<'a, U: Unit>(piece: &'a [U], buf: &'a mut Vec<u8>) -> &'a [u8] {
 		} else {
 			let (c, n) = U::decode(piece, i);
 			i += n;
-			let mut tmp = [0u8; 4];
+			let mut tmp = [0u8; char::MAX_LEN_UTF8];
 			buf.extend_from_slice(c.encode_utf8(&mut tmp).as_bytes());
 		}
 	}
@@ -512,4 +597,29 @@ fn nfc_quick<U: Unit>(units: &[U]) -> bool {
 		}
 	}
 	xutf::is_nfc_codepoints(Cps(units, 0))
+}
+
+#[cfg(test)]
+mod memo_tests {
+	use super::*;
+
+	/// The table check is the only guard against another table's entry in
+	/// the probed slot: the table id also feeds the slot hash, so two tables
+	/// rarely share a slot for one key, and only a planted entry reaches it.
+	#[test]
+	fn other_tables_entry_in_the_probed_slot_is_recounted() {
+		let table = RankTable {
+			pairs:         vec![u32::MAX; 65536].into_boxed_slice().try_into().unwrap(),
+			short:         HashMap::default(),
+			long:          FxMap::default(),
+			max_token_len: 1,
+			id:            7,
+		};
+		let key = pack(b"abab").unwrap();
+		let mut memo = PieceMemo::new();
+		*memo.slot(key, 7) = MemoSlot { key, table: 8, count: 999 };
+		// No merges: four single-byte tokens.
+		assert_eq!(table.count_merged(b"abab", &mut memo), 4);
+		assert_eq!(table.count_merged(b"abab", &mut memo), 4);
+	}
 }

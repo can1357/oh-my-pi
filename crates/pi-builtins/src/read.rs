@@ -683,6 +683,13 @@ impl ReadCommand {
 		}
 		#[cfg(not(target_family = "wasm"))]
 		{
+			// Seekable input cannot depend on a producer queued on this runtime.
+			// A builtin already on a blocking worker (an owned-shell pipeline stage
+			// or async job) leaves the runtime workers free for that producer, and
+			// offloading again would hold this worker while queueing another one.
+			if reader.source.reads_ahead() || brush_core::commands::builtin_on_blocking_worker() {
+				return read_line_with_reader(&mut reader, &config, &is_cancelled);
+			}
 			tokio::task::spawn_blocking(move || read_line_with_reader(&mut reader, &config, &is_cancelled))
 				.await
 				.map_err(ErrorKind::ThreadingError)?

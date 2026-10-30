@@ -3,6 +3,8 @@ import * as path from "node:path";
 import { afterAll, describe, expect, it } from "bun:test";
 import { type Api, type FetchImpl, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { factoryDroidRegistry } from "@oh-my-pi/pi-catalog/compat/factory-droid";
+import { buildFactoryDroidModel } from "@oh-my-pi/pi-catalog/discovery";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -337,6 +339,69 @@ describe("imageGenTool catalog routing", () => {
 		expect(result.details?.model).toBe("gemini-selected-image");
 	});
 
+	it("generates through a Factory Droid image model chosen for the image role", async () => {
+		const factory = factoryDroidRegistry()
+			.filter(({ spec }) => spec.id === "kimi-k3" || spec.id === "gpt-image-2.5-sunburst")
+			.map(entry => buildModel(buildFactoryDroidModel(entry)));
+		const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			requests.push({ url: input.toString(), body: JSON.parse(String(init?.body)) });
+			return imageResponse();
+		};
+		const ctx = createContext({
+			models: factory,
+			settings: Settings.isolated({ modelRoles: { image: "factory-droid/gpt-image-2.5-sunburst" } }),
+			fetch: fetchMock,
+			activeModel: factory.find(model => model.id === "kimi-k3"),
+		});
+
+		const result = await imageGenTool.execute("factory", { subject: "a lighthouse" }, undefined, ctx);
+		collectPaths(result);
+
+		expect(requests.map(request => request.url)).toEqual(["https://api.factory.ai/api/llm/o/v1/images/generations"]);
+		expect(requests[0].body.model).toBe("gpt-image-2.5-sunburst");
+		expect(result.details?.provider).toBe("factory-droid");
+		expect(result.details?.imageCount).toBe(1);
+	});
+
+	describe("Factory Droid image models at the end of the image defaults", () => {
+		const factory = factoryDroidRegistry()
+			.filter(({ spec }) => spec.id === "kimi-k3" || buildModel(spec).kind === "image")
+			.map(entry => buildModel(buildFactoryDroidModel(entry)));
+		const xai = catalogModel("xai", "grok-imagine-image", "openai-images");
+		const FACTORY_GENERATE = "https://api.factory.ai/api/llm/o/v1/images/generations";
+		const XAI_GENERATE = "https://xai.example/v1/images/generations";
+
+		/** Run the tool once with every image request succeeding; returns the requested URLs and the result. */
+		async function run(models: Model<Api>[]) {
+			const urls: string[] = [];
+			const ctx = createContext({
+				models,
+				settings: Settings.isolated(),
+				fetch: async input => {
+					urls.push(input.toString());
+					return imageResponse();
+				},
+				activeModel: factory.find(model => model.id === "kimi-k3"),
+			});
+			const result = await imageGenTool.execute("default", { subject: "a lighthouse" }, undefined, ctx);
+			collectPaths(result);
+			return { urls, result };
+		}
+
+		it("generates with only a Factory login, starting from the CLI's preferred model", async () => {
+			const { urls, result } = await run(factory);
+			expect(urls).toEqual([FACTORY_GENERATE]);
+			expect(result?.details?.model).toBe("gpt-image-2.5-sunburst");
+		});
+
+		it("keeps another default image provider ahead of Factory", async () => {
+			const { urls, result } = await run([...factory, xai]);
+			expect(urls).toEqual([XAI_GENERATE]);
+			expect(result?.details?.provider).toBe("xai");
+		});
+	});
+
 	it("falls back to the selected Antigravity id when discovery advertises no image model", async () => {
 		const model = catalogModel("google-antigravity", "gemini-selected-image", "google-gemini-cli");
 		const requestBodies: Array<Record<string, unknown>> = [];
@@ -505,6 +570,39 @@ describe("imageGenTool catalog routing", () => {
 		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 		expect(text).toContain("Model: gpt-image-2-codex (catalog entry openai-codex/gpt-image-2)");
 		expect(text).toContain("(1774x887, quality low)");
+	});
+
+	it("spells the requested shape into the Codex prompt because the backend ignores the size field", async () => {
+		const image = catalogModel("openai-codex", "gpt-image-2", "openai-codex-responses");
+		const carrier = catalogModel("openai-codex", "gpt-5.5", "openai-codex-responses", "chat");
+		const requests: Record<string, unknown>[] = [];
+		const fetchMock: FetchImpl = async (_input, init) => {
+			requests.push(JSON.parse(String(init?.body)));
+			const event = {
+				type: "response.completed",
+				response: { output: [{ type: "image_generation_call", result: WEBP_DATA }] },
+			};
+			return new Response(`data: ${JSON.stringify(event)}\n\n`, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		};
+		const settings = Settings.isolated({ modelRoles: { image: "openai-codex/gpt-image-2" } });
+		const ctx = createContext({ models: [image, carrier], settings, fetch: fetchMock });
+
+		for (const params of [{ aspect_ratio: "3:2" as const }, { image_size: "1024x1536" as const }]) {
+			collectPaths(await imageGenTool.execute("codex-shape", { subject: "apple", ...params }, undefined, ctx));
+		}
+
+		const sent = requests.map(body => {
+			const input = body.input as Array<{ content: Array<{ text?: string }> }>;
+			const tools = body.tools as Array<{ size?: string }>;
+			return { text: input[0]?.content[0]?.text, size: tools[0]?.size };
+		});
+		expect(sent).toEqual([
+			{ text: "apple.\n\nOutput format: landscape image, 3:2 aspect ratio.", size: "1536x1024" },
+			{ text: "apple.\n\nOutput format: portrait image, 1024x1536 pixels.", size: "1024x1536" },
+		]);
 	});
 
 	it.skipIf(process.platform === "win32")(

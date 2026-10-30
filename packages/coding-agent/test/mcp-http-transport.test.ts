@@ -3,6 +3,8 @@ import { connectToServer } from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { MCPTransportError } from "@oh-my-pi/pi-coding-agent/mcp/errors";
 import { analyzeAuthError } from "@oh-my-pi/pi-coding-agent/mcp/oauth-discovery";
 import { HttpTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/http";
+import type { JsonRpcRequest } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import type { MCPProgress } from "@oh-my-pi/pi-tui/tools/mcp";
 import { postmortem } from "@oh-my-pi/pi-utils";
 
 const encoder = new TextEncoder();
@@ -52,6 +54,174 @@ async function withPendingGuard<T>(promise: Promise<T>, label: string): Promise<
 		}),
 	]);
 }
+
+describe("MCP Streamable HTTP request progress", () => {
+	it("routes pre-result SSE progress but only fans out malformed, unknown, and post-result frames", async () => {
+		let sent: JsonRpcRequest | undefined;
+		server = Bun.serve({
+			port: 0,
+			async fetch(req) {
+				sent = (await req.json()) as JsonRpcRequest;
+				const token = (sent.params?._meta as Record<string, unknown> | undefined)?.progressToken;
+				const notification = (progressToken: unknown, progress: unknown) => ({
+					jsonrpc: "2.0",
+					method: "notifications/progress",
+					params: { progressToken, progress, total: 3, message: "fetching" },
+				});
+				const messages = [
+					notification(String(token), 99),
+					notification(token, "invalid"),
+					notification(token, 1),
+					{ jsonrpc: "2.0", id: sent.id, result: { done: true } },
+					notification(token, 2),
+				];
+				return new Response(
+					`data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":${JSON.stringify(token)},"progress":1e309}}\n\n` +
+						`data: ${JSON.stringify(messages)}\n\n`,
+					{ headers: { "Content-Type": "text/event-stream" } },
+				);
+			},
+		});
+		const transport = await connectedTransport(300);
+		const updates: MCPProgress[] = [];
+		const notifications: unknown[] = [];
+		transport.onNotification = (method, params) => {
+			if (method === "notifications/progress") notifications.push(params);
+		};
+		try {
+			const args = Object.freeze({ query: "unchanged" });
+			const meta = Object.freeze({ trace: "keep", progressToken: "replace" });
+			const result = await transport.request(
+				"tools/call",
+				{ name: "search", arguments: args, _meta: meta },
+				{
+					onProgress: progress => updates.push(progress),
+				},
+			);
+
+			expect(result).toEqual({ done: true });
+			expect(sent?.params?._meta).toEqual({ trace: "keep", progressToken: sent?.id });
+			expect(sent?.params?.arguments).toEqual(args);
+			expect(meta).toEqual({ trace: "keep", progressToken: "replace" });
+			expect(updates).toEqual([{ progress: 1, total: 3, message: "fetching" }]);
+			expect(notifications).toHaveLength(5);
+			expect(notifications).toContainEqual(expect.objectContaining({ progress: 2 }));
+		} finally {
+			await transport.close();
+		}
+	});
+
+	it("routes GET-listener progress during a pending POST and stops after settlement", async () => {
+		let stream: ReadableStreamDefaultController<Uint8Array> | undefined;
+		let token: unknown;
+		const release = Promise.withResolvers<void>();
+		server = Bun.serve({
+			port: 0,
+			async fetch(req) {
+				if (req.method === "GET") {
+					return new Response(
+						new ReadableStream<Uint8Array>({
+							start(controller) {
+								stream = controller;
+								controller.enqueue(encoder.encode(": connected\n\n"));
+							},
+						}),
+						{ headers: { "Content-Type": "text/event-stream" } },
+					);
+				}
+				const body = (await req.json()) as JsonRpcRequest;
+				token = (body.params?._meta as Record<string, unknown> | undefined)?.progressToken;
+				stream?.enqueue(
+					encoder.encode(
+						`data: ${JSON.stringify({
+							jsonrpc: "2.0",
+							method: "notifications/progress",
+							params: { progressToken: token, progress: 1 },
+						})}\n\n`,
+					),
+				);
+				await release.promise;
+				return Response.json({ jsonrpc: "2.0", id: body.id, result: {} });
+			},
+		});
+		const transport = await connectedTransport(300);
+		const progressReceived = Promise.withResolvers<void>();
+		const lateReceived = Promise.withResolvers<void>();
+		const updates: MCPProgress[] = [];
+		transport.onNotification = (_method, params) => {
+			if ((params as Record<string, unknown>).progress === 2) lateReceived.resolve();
+		};
+		try {
+			await transport.startSSEListener();
+			const pending = transport.request(
+				"tools/call",
+				{},
+				{
+					onProgress: progress => {
+						updates.push(progress);
+						progressReceived.resolve();
+					},
+				},
+			);
+			const receivedWhilePending = await Promise.race([
+				progressReceived.promise.then(() => true),
+				Bun.sleep(150).then(() => false),
+			]);
+			release.resolve();
+			await pending;
+			expect(receivedWhilePending).toBe(true);
+			expect(updates).toEqual([{ progress: 1 }]);
+			stream?.enqueue(
+				encoder.encode(
+					`data: ${JSON.stringify({
+						jsonrpc: "2.0",
+						method: "notifications/progress",
+						params: { progressToken: token, progress: 2 },
+					})}\n\n`,
+				),
+			);
+			await withPendingGuard(lateReceived.promise, "late GET progress fanout");
+			expect(updates).toEqual([{ progress: 1 }]);
+		} finally {
+			release.resolve();
+			await transport.close();
+		}
+	});
+
+	it("allocates a new progress token for an HTTP auth retry", async () => {
+		const ids: (string | number)[] = [];
+		const tokens: unknown[] = [];
+		server = Bun.serve({
+			port: 0,
+			async fetch(req) {
+				const body = (await req.json()) as JsonRpcRequest;
+				ids.push(body.id);
+				tokens.push((body.params?._meta as Record<string, unknown> | undefined)?.progressToken);
+				if (ids.length === 1) return new Response("expired", { status: 401 });
+				return new Response(
+					`data: ${JSON.stringify([
+						{ jsonrpc: "2.0", method: "notifications/progress", params: { progressToken: ids[0], progress: 99 } },
+						{ jsonrpc: "2.0", method: "notifications/progress", params: { progressToken: body.id, progress: 1 } },
+						{ jsonrpc: "2.0", id: body.id, result: {} },
+					])}\n\n`,
+					{ headers: { "Content-Type": "text/event-stream" } },
+				);
+			},
+		});
+		const transport = await connectedTransport(300);
+		transport.onAuthError = async () => ({ Authorization: "Bearer refreshed" });
+		const updates: MCPProgress[] = [];
+		try {
+			await transport.request("tools/call", {}, { onProgress: progress => updates.push(progress) });
+			expect(ids).toHaveLength(2);
+			expect(ids[0]).not.toBe(ids[1]);
+			expect(tokens).toEqual(ids);
+			expect(updates).toEqual([{ progress: 1 }]);
+		} finally {
+			await transport.close();
+		}
+	});
+});
 
 describe("MCP Streamable HTTP initialization", () => {
 	it("sends initialized before opening the optional GET SSE stream", async () => {
@@ -147,7 +317,37 @@ describe("MCP Streamable HTTP initialization", () => {
 });
 
 describe("MCP Streamable HTTP failure diagnostics", () => {
-	it("classifies an abrupt socket reset without leaking Bun fetch advice", async () => {
+	it("does not replay an accepted JSON response whose body is cut short", async () => {
+		const tcp = Bun.listen({
+			hostname: "127.0.0.1",
+			port: 0,
+			socket: {
+				data(socket) {
+					socket.end(
+						'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n{"jsonrpc":"2.0",',
+					);
+				},
+			},
+		});
+		const transport = new HttpTransport({
+			type: "http",
+			url: `http://127.0.0.1:${tcp.port}/mcp`,
+			timeout: GUARD_TIMEOUT_MS,
+		});
+		try {
+			await transport.connect();
+			await expect(transport.request("tools/list")).rejects.toMatchObject({
+				transport: "http",
+				stage: "decode",
+				retryable: false,
+			});
+		} finally {
+			await transport.close();
+			tcp.stop(true);
+		}
+	});
+
+	it("classifies a reset after connecting as non-replayable without leaking Bun fetch advice", async () => {
 		const tcp = Bun.listen({
 			hostname: "127.0.0.1",
 			port: 0,
@@ -174,7 +374,7 @@ describe("MCP Streamable HTTP failure diagnostics", () => {
 				transport: "http",
 				stage: "send",
 				failure: "reset",
-				retryable: true,
+				retryable: false,
 				code: "ECONNRESET",
 			});
 			expect(error.message).not.toContain("verbose");

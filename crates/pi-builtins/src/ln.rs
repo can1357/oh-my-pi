@@ -14,7 +14,7 @@ use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use pi_vfs::{
 	BlockingFs, CanonicalizeOptions, MissingHandling, ResolveMode, SymlinkKind, child_path,
-	file_name, join_path, normalize_lexically, parent_path, relative_path,
+	file_name, is_virtual_path, join_path, normalize_lexically, parent_path, relative_path,
 };
 use thiserror::Error;
 use uucore::{
@@ -64,7 +64,7 @@ enum LnError {
 	#[error("extra operand {}\nTry '{} --help' for more information.", _0.quote(), _1)]
 	ExtraOperand(OsString, String),
 
-	#[error("{}: hard link not allowed for directory", _0.to_string_lossy())]
+	#[error("{}: hard link not allowed for directory", _0.display())]
 	FailedToCreateHardLinkDir(PathBuf),
 
 	#[error("{0}")]
@@ -432,11 +432,7 @@ fn link_files_in_dir(
 
 		linked_destinations.insert(targetpath.clone());
 	}
-	if all_successful {
-		Ok(())
-	} else {
-		Err(LnError::SomeLinksFailed.into())
-	}
+	all_successful.ok_or_else(|| LnError::SomeLinksFailed.into())
 }
 
 /// Physical canonicalization that tolerates missing components (`-m`).
@@ -490,19 +486,38 @@ fn is_same_entry(filesystem: &BlockingFs, src: &Path, dst: &Path) -> bool {
 	}
 }
 
+/// The text a symbolic link to `src` stores at `dst_fs`.
+///
+/// The operating system resolves a host symlink and cannot read a URL, so a
+/// URL source that aliases a host file is stored as that file's path. Every
+/// other source is stored as spelled.
+fn symlink_target<'a>(filesystem: &BlockingFs, src: &'a Path, dst_fs: &Path) -> Cow<'a, Path> {
+	if is_virtual_path(src)
+		&& filesystem.is_native_local(dst_fs)
+		&& let Ok(Some(backing)) = filesystem.backing_path(src)
+	{
+		return backing.into();
+	}
+	src.into()
+}
+
 fn link(host: &mut Host, src: &Path, dst: &Path, settings: &Settings) -> LnResult<()> {
 	let mut backup = None;
-	let source: Cow<'_, Path> = if settings.relative {
-		relative_target(host, src, dst)
-	} else {
-		src.into()
-	};
-
-	// Resolve both filesystem operands, but never resolve `source`: it is the
-	// text stored inside a symbolic link.
+	// Resolve both filesystem operands, but never resolve `source` against the
+	// shell: it is the text stored inside a symbolic link.
 	let filesystem = host.fs().clone();
 	let src_fs = host.resolve(src);
 	let dst_fs = host.resolve(dst);
+	let target = if settings.symbolic {
+		symlink_target(&filesystem, src, &dst_fs)
+	} else {
+		src.into()
+	};
+	let source: Cow<'_, Path> = if settings.relative {
+		relative_target(host, &target, dst)
+	} else {
+		Cow::Borrowed(&*target)
+	};
 
 	if filesystem.is_symlink(&dst_fs) || filesystem.exists(&dst_fs) {
 		// Probe numbered backups from the resolved destination.
@@ -541,7 +556,7 @@ fn link(host: &mut Host, src: &Path, dst: &Path, settings: &Settings) -> LnResul
 	}
 
 	let res: LnResult<()> = if settings.symbolic {
-		make_symlink(host, &source, &dst_fs).map_err(|e| {
+		make_symlink(host, &source, &target, &dst_fs).map_err(|e| {
 			LnError::Message(format!(
 				"failed to create symbolic link {}: {}",
 				dst.quote(),
@@ -596,19 +611,22 @@ fn link(host: &mut Host, src: &Path, dst: &Path, settings: &Settings) -> LnResul
 	Ok(())
 }
 
-/// Creates the symbolic link `link` holding the literal text `target`.
-fn make_symlink(host: &Host, target: &Path, link: &Path) -> io::Result<()> {
+/// Creates the symbolic link `link` holding the literal text `text`, which
+/// names `target` (the same path before `-r` made it relative).
+fn make_symlink(host: &Host, text: &Path, target: &Path, link: &Path) -> io::Result<()> {
 	// Windows needs the link kind up front; it follows the target as named
-	// from the shell working directory.
+	// from the shell working directory, never the `-r` text, which is
+	// relative to the link's directory.
 	#[cfg(windows)]
 	let kind = if host.fs().is_dir(host.resolve(target)) {
 		SymlinkKind::Dir
 	} else {
 		SymlinkKind::File
 	};
+	// Other platforms pick the kind when the link is followed.
 	#[cfg(not(windows))]
-	let kind = SymlinkKind::Auto;
-	host.fs().symlink_with(target, link, kind)
+	let (kind, _) = (SymlinkKind::Auto, target);
+	host.fs().symlink_with(text, link, kind)
 }
 
 #[cfg(test)]
@@ -642,6 +660,25 @@ mod tests {
 		let (code, stdout, stderr) = run_in(root.clone(), &["-s", "../a", "b"]);
 		assert_eq!((code, stdout.as_str(), stderr.as_str()), (0, "", ""));
 		assert_eq!(fs::read_link(root.join("b")).unwrap(), PathBuf::from("../a"));
+	}
+
+	/// `-r` text is relative to the link's directory; the Windows link kind
+	/// must come from the target itself, or a directory gets a file link.
+	#[cfg(windows)]
+	#[test]
+	fn relative_symlink_to_directory_from_another_directory_is_a_directory_link() {
+		let (_dir, root) = canonical_tempdir();
+		fs::create_dir_all(root.join("dir")).unwrap();
+		fs::write(root.join("dir/file"), b"payload").unwrap();
+		fs::create_dir(root.join("sub")).unwrap();
+		if let Err(err) = std::os::windows::fs::symlink_dir("dir", root.join("probe")) {
+			// Creating symlinks needs Developer Mode or the symlink privilege.
+			eprintln!("skipping: cannot create directory symlink: {err}");
+			return;
+		}
+		let (code, stdout, stderr) = run_in(root.clone(), &["-sr", "dir", "sub/link"]);
+		assert_eq!((code, stdout.as_str(), stderr.as_str()), (0, "", ""));
+		assert_eq!(fs::read(root.join("sub/link/file")).unwrap(), b"payload");
 	}
 
 	#[cfg(unix)]

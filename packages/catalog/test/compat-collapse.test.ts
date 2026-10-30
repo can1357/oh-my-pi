@@ -476,6 +476,29 @@ describe("collapseVariants with a reviewed table", () => {
 		expect(deduped).toEqual(once);
 	});
 
+	it("keeps every routed member's Antigravity wire profile on the collapsed row", () => {
+		const profiled = (id: string, modelEnum: string) =>
+			memberSpec(id, { antigravityWireProfiles: { [id]: { modelEnum, thinkingBudget: 1000 } } });
+		const fresh = collapseVariants(
+			[profiled("gemini-3.5-flash-extra-low", "M1"), profiled("gemini-3.5-flash-low", "M2")],
+			{ table: antigravityTable },
+		);
+		expect(fresh[0]?.antigravityWireProfiles).toEqual({
+			"gemini-3.5-flash-extra-low": { modelEnum: "M1", thinkingBudget: 1000 },
+			"gemini-3.5-flash-low": { modelEnum: "M2", thinkingBudget: 1000 },
+		});
+
+		// A collapsed snapshot that predates profiles takes the live members' own.
+		const snapshot = collapseVariants(FLASH_TRIPLET(), { table: antigravityTable });
+		const merged = collapseVariants([...snapshot, profiled("gemini-3-flash-agent", "M3")], {
+			table: antigravityTable,
+		});
+		expect(merged).toHaveLength(1);
+		expect(merged[0]?.antigravityWireProfiles).toEqual({
+			"gemini-3-flash-agent": { modelEnum: "M3", thinkingBudget: 1000 },
+		});
+	});
+
 	it("keeps gemini-cli flash on the level transport with the original routing", () => {
 		const out = collapseVariants(FLASH_TRIPLET(), { table: geminiCliTable });
 		const flash = out.find(m => m.id === "gemini-3.5-flash");
@@ -1613,6 +1636,33 @@ describe("antigravity discovery collapsing", () => {
 		});
 	});
 
+	it("sends the Cloud Code Assist project in the discovery body only when known", async () => {
+		const bodies: unknown[] = [];
+		const recordingFetcher = Object.assign(
+			(input: string | URL | Request, init?: RequestInit) => {
+				if (String(input).includes(":fetchAvailableModels")) bodies.push(JSON.parse(String(init?.body)));
+				return Promise.resolve(new Response(JSON.stringify(payload), { status: 200 }));
+			},
+			{ preconnect: fetch.preconnect },
+		);
+
+		await fetchAntigravityDiscoveryModels({
+			token: "t",
+			endpoint: "https://cca.test",
+			projectId: "p-1",
+			userAgent: "test",
+			fetcher: recordingFetcher,
+		});
+		await fetchAntigravityDiscoveryModels({
+			token: "t",
+			endpoint: "https://cca.test",
+			userAgent: "test",
+			fetcher: recordingFetcher,
+		});
+
+		expect(bodies).toEqual([{ project: "p-1" }, {}]);
+	});
+
 	it("discovers Gemini models through Antigravity before provisioning Cloud Code Assist", async () => {
 		const requestedUrls: string[] = [];
 		const geminiCliFetcher = Object.assign(
@@ -1667,6 +1717,38 @@ describe("antigravity discovery collapsing", () => {
 		expect(discoveryUrl).toBeDefined();
 		expect(discoveryUrl).toContain(ANTIGRAVITY_PRIMARY_ENDPOINT);
 		expect(models?.[0]?.baseUrl).toBe(ANTIGRAVITY_PRIMARY_ENDPOINT);
+	});
+
+	it("drops roster rows the backend marks disabled", async () => {
+		// Antigravity lists unservable models with `disabled: true`, a
+		// `MODEL_PLACEHOLDER_*` enum and `tagTitle: "Unavailable"` (e.g.
+		// `gemini-4-argon-disabled` on accounts without Argon); requesting one
+		// answers "Cloud Code Assist API error (404): Requested entity was not found."
+		const fetcher = Object.assign(
+			(input: string | URL | Request, _init?: RequestInit) =>
+				Promise.resolve(
+					String(input).includes(":fetchAvailableModels")
+						? Response.json({
+								models: {
+									"gemini-4-argon-disabled": {
+										displayName: "Gemini 4 Argon",
+										disabled: true,
+										tagTitle: "Unavailable",
+										model: "MODEL_PLACEHOLDER_M421",
+										supportsThinking: true,
+									},
+									"gemini-3.1-flash-lite": { displayName: "Gemini 3.1 Flash Lite", supportsThinking: true },
+								},
+							})
+						: new Response("version: 2.19.1\n"),
+				),
+			{ preconnect: fetch.preconnect },
+		);
+
+		const models = (await fetchAntigravityDiscoveryModels({ token: "t", fetcher }))?.models;
+
+		expect(models?.some(model => model.id.includes("argon"))).toBe(false);
+		expect(models?.some(model => model.id === "gemini-3.1-flash-lite")).toBe(true);
 	});
 
 	it("drops bundled rows the account roster does not serve, and keeps them when discovery fails", async () => {

@@ -416,6 +416,43 @@ describe("SessionManager + indexed backend durability", () => {
 		expect(body).toContain("second turn");
 	});
 
+	// The size-check conflict after pruning is covered against the real backend in
+	// sql-session-storage-manager.test.ts.
+	it("recovers IndexedSessionStorage after a rejected deferred publish", async () => {
+		const { backend, storage, manager } = await makeManager();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("expected a session file");
+
+		manager.appendMessage(assistantMessage("seed reply"));
+		manager.appendMessage({ role: "user", content: "before rewrite", timestamp: Date.now() });
+		await manager.flush();
+		await storage.drain();
+
+		const hold = Promise.withResolvers<void>();
+		backend.holdNextWrite = hold;
+		const rewritePublished = manager.rewriteEntries();
+		await backend.writeHeld.promise;
+		backend.failWrites = 1;
+		manager.appendMessage({ role: "user", content: "fenced append", timestamp: Date.now() });
+		manager.appendMessage({ role: "user", content: "after fenced append", timestamp: Date.now() });
+		hold.resolve();
+		await rewritePublished.catch(() => {});
+		await manager.flush().catch(() => {});
+		await storage.drain().catch(() => {});
+
+		manager.appendMessage({ role: "user", content: "later turn 1", timestamp: Date.now() });
+		manager.appendMessage({ role: "user", content: "later turn 2", timestamp: Date.now() });
+		await manager.flush().catch(() => {});
+		await storage.drain().catch(() => {});
+
+		const body = backend.files.get(sessionFile) ?? "";
+		for (const turn of ["fenced append", "after fenced append", "later turn 1", "later turn 2"]) {
+			expect(body).toContain(turn);
+		}
+		expect(manager.captureState().expectedDiskSize).toBe(Buffer.byteLength(body, "utf8"));
+		await manager.close();
+	});
+
 	// A maintenance rewrite holds the fence while its publish is on the wire, so
 	// an append made then is persisted only by a synchronous full rewrite. When
 	// that rewrite fails, its successor (parented to it) must not reach the

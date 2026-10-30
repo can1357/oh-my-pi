@@ -90,7 +90,9 @@ export function cursorRawReadPath(readPath: string): string {
 	if (chunks.some(chunk => chunk.toLowerCase() === "raw")) return readPath;
 	if (piReadPathHasRange(readPath)) {
 		const last = chunks.pop()!;
-		return `${chunks.join(":")}:raw:${last}`;
+		// Beside `raw` a bare `N` is that one line; the range-only `N` meant "from N".
+		const range = /^L?\d+$/i.test(last) ? `${last}-` : last;
+		return `${chunks.join(":")}:raw:${range}`;
 	}
 	return `${readPath}:raw`;
 }
@@ -207,6 +209,25 @@ export function piTimeout(timeout: number | undefined): number | undefined {
 export function shellTimeoutSeconds(timeoutMs: number | undefined): number | undefined {
 	if (!timeoutMs || timeoutMs <= 0) return undefined;
 	return Math.max(1, Math.round(timeoutMs / 1000));
+}
+
+/** The bash tool's deadline when its `timeout` is omitted. */
+const BASH_DEFAULT_DEADLINE_SECONDS = 300;
+
+/**
+ * The bash-tool kill deadline, in seconds, for a Cursor `ShellArgs`/`ShellStreamArgs` frame.
+ *
+ * Cursor's `timeout` carries the model's `block_until_ms`, which Cursor's Shell tool documents as
+ * how long to block before moving the command to the background, not as a kill deadline; the kill
+ * deadline is `hard_timeout`. Without one, a short wait (`block_until_ms: 5000` on a build) must not
+ * kill the command: the deadline stays the bash default (`undefined`), raised to the wait only when
+ * the wait is longer.
+ */
+export function shellDeadlineSeconds(args: { timeout: number; hardTimeout?: number }): number | undefined {
+	const hardSeconds = shellTimeoutSeconds(args.hardTimeout);
+	if (hardSeconds !== undefined) return hardSeconds;
+	const waitSeconds = shellTimeoutSeconds(args.timeout);
+	return waitSeconds !== undefined && waitSeconds > BASH_DEFAULT_DEADLINE_SECONDS ? waitSeconds : undefined;
 }
 
 /**

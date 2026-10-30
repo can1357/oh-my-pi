@@ -20,7 +20,10 @@ import {
 	withAuth,
 } from "@oh-my-pi/pi-ai";
 import { buildAnthropicSystemBlocks, wrapFetchForCch } from "@oh-my-pi/pi-ai/providers/anthropic";
-import { compareRevision, parseRevision } from "@oh-my-pi/pi-catalog/identity";
+import {
+	anthropicApiVersionAcceptsSamplingParams,
+	resolveAnthropicApiVersion,
+} from "@oh-my-pi/pi-catalog/compat/anthropic";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { AnthropicApiResponse, AnthropicCitation } from "../../../web/search/types";
 import type { SearchCitation, SearchResponse, SearchSource } from "../types";
@@ -29,22 +32,6 @@ import { formatQuery, parseSearchQuery, type QuerySyntax, type StructuredQuery }
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
-
-function hasSamplingRestrictions(model: Model<Api>): boolean {
-	const identity = model.identity;
-	if (identity.class !== "anthropic" || identity.revision === undefined) return false;
-	const revision = parseRevision(identity.revision);
-	const floor = parseRevision(identity.family === "opus" ? "4.7" : "5");
-	return (
-		revision !== undefined &&
-		floor !== undefined &&
-		(identity.family === "opus" ||
-			identity.family === "sonnet" ||
-			identity.family === "fable" ||
-			identity.family === "mythos") &&
-		compareRevision(revision, floor) >= 0
-	);
-}
 
 const DEFAULT_MAX_TOKENS = 4096;
 const WEB_SEARCH_TOOL_NAME = "web_search";
@@ -181,8 +168,15 @@ async function callSearch(
 		body.metadata = { user_id: metadataUserId };
 	}
 
-	// Opus 4.7+, Sonnet 5+, and Fable/Mythos 5 reject sampling parameters with a 400.
-	if (temperature !== undefined && !hasSamplingRestrictions(model)) {
+	// Sampling restrictions come from the resolved catalog policy; API version
+	// 2026-10-21 also rejects sampling parameters for otherwise compatible models.
+	if (
+		temperature !== undefined &&
+		(model.compat === undefined ||
+			!("supportsSamplingParams" in model.compat) ||
+			model.compat.supportsSamplingParams !== false) &&
+		anthropicApiVersionAcceptsSamplingParams(resolveAnthropicApiVersion(auth.baseUrl))
+	) {
 		body.temperature = temperature;
 	}
 
@@ -256,12 +250,16 @@ function parsePageAge(pageAge: string | null | undefined): number | undefined {
  * @returns Normalized response with answer, sources, citations, and usage
  */
 function parseResponse(response: AnthropicApiResponse): SearchResponse {
-	const answerParts: string[] = [];
+	// Citations split continuous text into adjacent text blocks; insert a paragraph
+	// break only when non-empty text resumes after a non-text block.
+	let answer = "";
+	let previousWasText = false;
 	const searchQueries: string[] = [];
 	const sources: SearchSource[] = [];
 	const citations: SearchCitation[] = [];
 
 	for (const block of response.content) {
+		if (block.type !== "text") previousWasText = false;
 		if (
 			block.type === "server_tool_use" &&
 			block.name &&
@@ -286,7 +284,9 @@ function parseResponse(response: AnthropicApiResponse): SearchResponse {
 			}
 		} else if (block.type === "text" && block.text) {
 			// Synthesized answer with citations
-			answerParts.push(block.text);
+			if (answer && !previousWasText) answer += "\n\n";
+			answer += block.text;
+			previousWasText = true;
 			if (block.citations) {
 				for (const c of block.citations as AnthropicCitation[]) {
 					citations.push({
@@ -301,7 +301,7 @@ function parseResponse(response: AnthropicApiResponse): SearchResponse {
 
 	return {
 		provider: "anthropic",
-		answer: answerParts.join("\n\n") || undefined,
+		answer: answer || undefined,
 		sources,
 		citations: citations.length > 0 ? citations : undefined,
 		searchQueries: searchQueries.length > 0 ? searchQueries : undefined,

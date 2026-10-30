@@ -5,7 +5,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { ADVISOR_TRANSCRIPT_FILENAME, isAdvisorTranscriptName } from "../advisor/transcript-recorder";
 import { resolveExplicitModelRole } from "../config/model-resolver";
 import { assistantTurnProducedOutput } from "../session/messages";
-import { EPHEMERAL_MODEL_CHANGE_ROLE } from "../session/session-entries";
+import { EPHEMERAL_MODEL_CHANGE_ROLE, PREWALK_MODEL_CHANGE_ROLE } from "../session/session-entries";
 import { visitEntriesFromFileStream } from "../session/session-loader";
 import { loadBundledAgents } from "../task/agents";
 import { isReadOnlyAgent } from "../task/read-only-policy";
@@ -13,6 +13,7 @@ import { persistedVibeChildIds } from "../vibe/lifecycle";
 import {
 	type AgentHistorySummary,
 	type AgentMetricsSummary,
+	type AgentRef,
 	type AgentRegistry,
 	MAIN_AGENT_ID,
 } from "./agent-registry";
@@ -42,6 +43,20 @@ interface PersistedTranscript {
 	sessionFile: string;
 	createdAt?: number;
 	lastActivity?: number;
+}
+
+/** Size and mtime of a transcript when a ref's history was last read from it; an unchanged transcript is not read again. */
+const historyStamps = new WeakMap<AgentRef, string>();
+
+async function transcriptStamp(sessionFile: string): Promise<string | undefined> {
+	try {
+		const stat = await fs.promises.stat(sessionFile);
+		return `${stat.size}:${stat.mtimeMs}`;
+	} catch (error) {
+		// A vanished transcript reads as empty history, as before.
+		if (isFilesystemError(error)) throw error;
+		return undefined;
+	}
 }
 
 function recordOf(value: unknown): Record<string, unknown> | undefined {
@@ -167,23 +182,25 @@ async function readPersistedAgentHistory(
 				if (!id) return;
 				const parentId = typeof record.parentId === "string" ? record.parentId : undefined;
 				parents.set(id, parentId);
-				leafId = id;
+				// Same replay rule as `sessionEntryLeafId`: an entry written off the active
+				// branch (late usage, a routed bash result) restores the leaf it captured
+				// instead of becoming the leaf itself.
+				if (typeof record.activeLeafId === "string") {
+					leafId = record.activeLeafId;
+				} else if (record.activeLeafId === null) {
+					leafId = undefined;
+				} else {
+					leafId = id;
+					selfSelectedLeafId = id;
+				}
 				const parsedTimestamp = timestampOf(record.timestamp);
 				if (parsedTimestamp !== undefined) leafTimestamp = parsedTimestamp;
 				if (record.type === "model_usage") {
 					const usage = recordOf(record.usage);
 					const cost = recordOf(usage?.cost);
 					directCost += finiteNumber(cost?.total);
-					if (typeof record.activeLeafId === "string") {
-						leafId = record.activeLeafId;
-					} else if (record.activeLeafId === null) {
-						leafId = undefined;
-					} else {
-						selfSelectedLeafId = id;
-					}
 					return;
 				}
-				selfSelectedLeafId = id;
 				if (record.type === "model_change" && typeof record.model === "string") {
 					modelChangeById.set(id, {
 						model: record.model,
@@ -250,7 +267,11 @@ async function readPersistedAgentHistory(
 		const modelChange = modelChangeById.get(id);
 		if (modelChange) {
 			latestModelChange ??= modelChange;
-			if (modelChange.role && modelChange.role !== EPHEMERAL_MODEL_CHANGE_ROLE) {
+			if (
+				modelChange.role &&
+				modelChange.role !== EPHEMERAL_MODEL_CHANGE_ROLE &&
+				modelChange.role !== PREWALK_MODEL_CHANGE_ROLE
+			) {
 				modelRole ??= modelChange.role;
 			}
 			// The transition that installed the serving model: it carries the
@@ -349,7 +370,11 @@ async function readPersistedAgentMetadata(
 				}
 				if (record.type === "model_change") {
 					if (typeof record.model === "string") history.resolvedModel = record.model;
-					if (typeof record.role === "string" && record.role !== EPHEMERAL_MODEL_CHANGE_ROLE) {
+					if (
+						typeof record.role === "string" &&
+						record.role !== EPHEMERAL_MODEL_CHANGE_ROLE &&
+						record.role !== PREWALK_MODEL_CHANGE_ROLE
+					) {
 						history.modelRole = record.role;
 					}
 					if (typeof record.resolvedModelIsFallback === "boolean") {
@@ -657,15 +682,16 @@ export async function registerPersistedSubagents(
 	const shouldContinue = options.shouldContinue ?? (() => true);
 	const hydrateHistory = options.hydrateHistory ?? true;
 	if (!shouldContinue()) return;
-	const vibeOwnedIds = await readPersistedVibeChildIds(sessionFile, shouldContinue);
-	if (!shouldContinue()) return;
+	// The main transcript can be large: read it once, and only for a transcript the registry does not hold yet.
+	let vibeOwnedIds: Promise<Set<string>> | undefined;
+	const vibeOwned = () => (vibeOwnedIds ??= readPersistedVibeChildIds(sessionFile, shouldContinue));
 	const root = sessionFile.slice(0, -6);
 	const transcripts: PersistedTranscript[] = [];
 	await registerPersistedSubagentsFromDir(
 		registry,
 		root,
 		undefined,
-		vibeOwnedIds,
+		vibeOwned,
 		transcripts,
 		shouldContinue,
 		sessionFile,
@@ -679,9 +705,15 @@ export async function registerPersistedSubagents(
 			const index = nextTranscript++;
 			const transcript = transcripts[index];
 			if (!transcript) return;
+			const ref = registry.get(transcript.id);
+			if (!ref || ref.sessionFile !== transcript.sessionFile) continue;
+			const stamp = await transcriptStamp(transcript.sessionFile);
+			if (stamp !== undefined && historyStamps.get(ref) === stamp) continue;
 			const history = await readPersistedAgentHistory(transcript, shouldContinue);
 			if (!shouldContinue()) return;
-			registry.setHistory(transcript.id, history, transcript.sessionFile);
+			if (registry.setHistory(transcript.id, history, transcript.sessionFile) && stamp !== undefined) {
+				historyStamps.set(ref, stamp);
+			}
 		}
 	});
 	await Promise.all(workers);
@@ -691,7 +723,7 @@ async function registerPersistedSubagentsFromDir(
 	registry: AgentRegistry,
 	dir: string,
 	parentId: string | undefined,
-	vibeOwnedIds: ReadonlySet<string>,
+	vibeOwned: () => Promise<ReadonlySet<string>>,
 	transcripts: PersistedTranscript[],
 	shouldContinue: () => boolean,
 	rootSessionFile: string,
@@ -774,7 +806,7 @@ async function registerPersistedSubagentsFromDir(
 		}
 		const id = entry.name.slice(0, -6);
 		const existing = registry.get(id);
-		if (vibeOwnedIds.has(id) && existing?.sessionFile !== sessionFile) continue;
+		if (existing?.sessionFile !== sessionFile && (await vibeOwned()).has(id)) continue;
 		let tombstoned = false;
 		try {
 			await fs.promises.access(getAgentTombstonePath(sessionFile));
@@ -851,7 +883,7 @@ async function registerPersistedSubagentsFromDir(
 				registry,
 				path.join(dir, id),
 				id,
-				vibeOwnedIds,
+				vibeOwned,
 				transcripts,
 				shouldContinue,
 				rootSessionFile,

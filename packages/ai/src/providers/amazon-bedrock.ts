@@ -1,10 +1,12 @@
 /**
- * Amazon Bedrock Converse Stream provider.
+ * Amazon Bedrock chat transport.
  *
- * Talks directly to `bedrock-runtime.{region}.amazonaws.com` over HTTPS with
- * SigV4 signing and decodes the `application/vnd.amazon.eventstream` response.
- * No `@aws-sdk/*`, no `@smithy/*`, no `proxy-agent`. Proxies are honored via
- * Bun's native `HTTPS_PROXY` support.
+ * Ordinary requests use Converse Stream; server compaction uses the
+ * Anthropic Messages format over Bedrock's InvokeModelWithResponseStream API.
+ * Both call `bedrock-runtime.{region}.amazonaws.com` directly over HTTPS with
+ * shared credential resolution and SigV4 signing. The normal path decodes
+ * `application/vnd.amazon.eventstream`; no AWS SDK, Smithy, or proxy-agent
+ * dependency is required. Bun's native `HTTPS_PROXY` support is honored.
  *
  * A `models.yml` `baseUrl` is the request origin verbatim (VPC endpoint, gateway, …);
  * only AWS's own regional host is re-pointed at the resolved region. SigV4 unaffected.
@@ -44,13 +46,18 @@ import {
 } from "../utils/block-symbols";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
-import { armPreResponseTimeout, getStreamFirstEventTimeoutMs } from "../utils/idle-iterator";
+import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs } from "../utils/idle-iterator";
 import { toolWireSchema } from "../utils/schema/wire";
 import { invalidateAwsCredentialCache, resolveAwsCredentials } from "./aws-credentials";
 import { decodeEventStream } from "./aws-eventstream";
 import { signRequest } from "./aws-sigv4";
-import { isThinkingPrefixBindingError } from "./anthropic";
+import { isThinkingPrefixBindingError, logDroppedThinking, streamBedrockAnthropicCompaction } from "./anthropic";
+import type { AnthropicMessagesClientLike, AnthropicRequestOptions } from "./anthropic-client";
+import { supportsBedrockConverseCompaction } from "./anthropic-compaction";
+import { isAnthropicNarrationSignature } from "./anthropic-signature";
+import type { MessageCreateParams, MessageCreateParamsStreaming, RawMessageStreamEvent } from "./anthropic-wire";
 import { parseAnthropicInputTransformations, THINKING_BINDING_CONTROLS_BETA } from "./anthropic-wire";
+import { fitBedrockAnthropicPayload } from "./bedrock-anthropic";
 import { isBedrockRequestMetadataValue } from "./bedrock-request-metadata";
 import { transformMessages } from "./transform-messages";
 
@@ -66,11 +73,12 @@ const SIGNER_OWNED_HEADERS = new Set(["host", "x-amz-date", "x-amz-content-sha25
 // body, so a caller value would be signed but not sent, and AWS rejects the
 // mismatch.
 const BEDROCK_RESERVED_HEADERS = new Set(["content-type", "accept", "authorization", "content-length"]);
+const BEDROCK_INTERLEAVED_THINKING_BETA = "interleaved-thinking-2025-05-14";
 
 /**
- * HTTP status for a ConverseStream in-stream failure, keyed by lowercased
- * exception shape name. Exception and error frames ride inside an HTTP 200
- * event stream, so the shape name in `:exception-type` / `:error-code` is the
+ * HTTP status for an in-stream failure, keyed by lowercased exception shape
+ * name. Exception and error frames ride inside an HTTP 200 event stream,
+ * so the shape name in `:exception-type` / `:error-code` is the
  * only evidence of what actually failed upstream. Values come from the
  * bedrock-runtime service model (the same source the AWS SDKs deserialize
  * against): without them every in-stream failure would be stamped 400, which
@@ -156,6 +164,161 @@ export interface BedrockOptions extends StreamOptions {
 
 function resolveBearerToken(options: BedrockOptions): string | undefined {
 	return resolveAwsBearerToken(options.apiKey, options.bearerToken);
+}
+
+/**
+ * Request origin. `baseUrl` is the origin verbatim, path prefix (and query, for
+ * gateways that authenticate via a query parameter) included, so a gateway
+ * mounted under a path works. AWS's own host is re-pointed: the catalog can't
+ * know the region.
+ */
+function resolveBedrockBaseUrl(model: Model<"bedrock-converse-stream">, region: string): URL {
+	const base = new URL(model.baseUrl || `https://bedrock-runtime.${region}.amazonaws.com`);
+	if (AWS_REGIONAL_BEDROCK_HOST.test(base.host)) base.host = `bedrock-runtime.${region}.amazonaws.com`;
+	return base;
+}
+
+/** Bedrock Runtime operation, named by its URL suffix under `/model/<id>/`. */
+type BedrockRequestEndpoint = "converse-stream" | "invoke-with-response-stream";
+
+function resolveBedrockRequestUrl(
+	model: Model<"bedrock-converse-stream">,
+	base: URL,
+	endpoint: BedrockRequestEndpoint,
+): { urlPath: string; url: string } {
+	const urlPath = `${base.pathname.replace(/\/+$/, "")}/model/${encodeURIComponent(model.id)}/${endpoint}`;
+	return { urlPath, url: `${base.origin}${urlPath}${base.search}` };
+}
+
+/**
+ * Sign and send one Bedrock Runtime request. A non-OK InvokeModel response's
+ * body is read under the same pre-response deadline, so a stalled error body
+ * cannot hang the caller.
+ */
+async function sendBedrockRequest(
+	model: Model<"bedrock-converse-stream">,
+	options: BedrockOptions,
+	region: string,
+	base: URL,
+	input: unknown,
+	endpoint: BedrockRequestEndpoint,
+	signal: AbortSignal | undefined = options.signal,
+): Promise<{ response: Response; responseBody?: string }> {
+	const host = base.host;
+	const { urlPath, url } = resolveBedrockRequestUrl(model, base, endpoint);
+	const query = base.search.slice(1) || undefined;
+	// Caller headers are merged BEFORE signing, so SigV4 covers them and they
+	// reach the wire; tracing/attribution headers (including those set by a
+	// `before_provider_headers` extension) work here as on every other provider.
+	// `model.headers` first, `options.headers` second: `StreamOptions.headers` is
+	// documented as merged ON TOP of model-defined headers.
+	//
+	// The signer's OWN headers are dropped first, and that is load-bearing:
+	// `signRequest` lets a caller value overwrite `host`/`x-amz-*` in the map it
+	// signs, but always RETURNS the generated ones, which `requestHeaders` below
+	// puts on the wire. A caller supplying any of them would sign one set of
+	// values and send another, and Bedrock would reject every request.
+	// Names the request sets itself are dropped too: keeping a caller
+	// `Content-Type` beside the fixed `content-type` leaves TWO object keys, which
+	// SigV4 signs as one value while fetch joins both into a single comma-joined
+	// wire header, so AWS validates different bytes than were signed.
+	const callerHeaders: Record<string, string> = {};
+	for (const source of [model.headers, options.headers]) {
+		for (const [name, value] of Object.entries(source ?? {})) {
+			const field = name.toLowerCase();
+			if (SIGNER_OWNED_HEADERS.has(field) || BEDROCK_RESERVED_HEADERS.has(field)) continue;
+			callerHeaders[field] = value;
+		}
+	}
+	// SigV4 never signs `user-agent` (UNSIGNABLE in aws-sigv4.ts), so this default
+	// cannot break the signature. Without it Bun's fetch sends `Bun/<version>`,
+	// and that is what CloudTrail records for every request.
+	callerHeaders["user-agent"] ??= USER_AGENT;
+	// Content-type and accept stay last: the eventstream framing is not the caller's to change.
+	const headers: Record<string, string> = {
+		...callerHeaders,
+		"content-type": "application/json",
+		accept: "application/vnd.amazon.eventstream",
+	};
+	if (endpoint === "invoke-with-response-stream") {
+		headers["x-amzn-bedrock-accept"] = "application/json";
+		if (options.guardrailIdentifier) {
+			headers["x-amzn-bedrock-guardrailidentifier"] = options.guardrailIdentifier;
+			headers["x-amzn-bedrock-guardrailversion"] = options.guardrailVersion ?? "DRAFT";
+			if (options.guardrailTrace) headers["x-amzn-bedrock-guardrailtrace"] = options.guardrailTrace.toUpperCase();
+		}
+		const requestMetadata = sanitizeRequestMetadata(
+			model.requestMetadata || options.requestMetadata
+				? { ...model.requestMetadata, ...options.requestMetadata }
+				: undefined,
+		);
+		if (requestMetadata) headers["x-amzn-bedrock-request-metadata"] = JSON.stringify(requestMetadata);
+	}
+	const body = new TextEncoder().encode(JSON.stringify(input));
+	const bearerToken = resolveBearerToken(options);
+	let requestHeaders: Record<string, string>;
+	if (bearerToken) {
+		requestHeaders = { ...headers, Authorization: `Bearer ${bearerToken}` };
+	} else {
+		let credentials: { accessKeyId: string; secretAccessKey: string; sessionToken?: string };
+		if ($flag("AWS_BEDROCK_SKIP_AUTH")) {
+			credentials = { accessKeyId: "dummy-access-key", secretAccessKey: "dummy-secret-key" };
+		} else {
+			credentials = await resolveAwsCredentials({
+				profile: options.profile,
+				region,
+				signal,
+				fetch: options.fetch,
+			});
+		}
+		const signed = await signRequest({
+			method: "POST",
+			host,
+			path: urlPath,
+			query,
+			body,
+			region,
+			service: "bedrock",
+			credentials,
+			headers,
+		});
+		requestHeaders = { ...headers, ...signed };
+	}
+	// Bun's native fetch ceiling is disabled (`timeout: false`) so configurable
+	// watchdogs govern slow-prefill streams (issue #2422). Direct callers that
+	// bypass `register-builtins` (which installs the iterator-level first-event
+	// watchdog) still need this pre-response timer, otherwise an endpoint that
+	// accepts the POST and never sends headers would hang forever. Converse keeps
+	// the global default; a compaction request summarizes a whole history before
+	// streaming, so it waits as long as the model's idle window allows.
+	const firstEventTimeoutMs =
+		options.streamFirstEventTimeoutMs ??
+		(endpoint === "converse-stream"
+			? getStreamFirstEventTimeoutMs()
+			: getStreamFirstEventTimeoutMs(
+					options.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs(model.compat.streamIdleTimeoutMs),
+				));
+	const watchdog = armPreResponseTimeout(signal, firstEventTimeoutMs);
+	let response: Response;
+	let responseBody: string | undefined;
+	try {
+		response = await fetchWithRetry(url, {
+			method: "POST",
+			headers: requestHeaders,
+			body,
+			signal: watchdog.signal,
+			fetch: options.fetch,
+			timeout: false,
+		});
+		if (!response.ok && endpoint === "invoke-with-response-stream")
+			responseBody = await response.text().catch(() => "");
+	} finally {
+		// Cleared once headers (or a finite error body) arrive: an absolute
+		// deadline would keep aborting an actively streaming body. Stream
+		// liveness belongs to the event iterator's idle watchdog.
+		watchdog.clear();
+	}
+	return { response, responseBody };
 }
 
 function inferRegionFromBedrockArn(modelId: string): string | undefined {
@@ -408,11 +571,233 @@ function sanitizeRequestMetadata(raw: unknown): Record<string, string> | undefin
 	return kept > 0 ? out : undefined;
 }
 
+/** Shared across events: every payload decode is a complete, non-streaming call. */
+const PAYLOAD_DECODER = new TextDecoder();
+type BedrockAnthropicStreamEvent = RawMessageStreamEvent | { type: "ping" };
+
+const ANTHROPIC_STREAM_EVENT_TYPES: Record<string, true> = {
+	message_start: true,
+	content_block_start: true,
+	content_block_delta: true,
+	content_block_stop: true,
+	message_delta: true,
+	message_stop: true,
+};
+
+function isAnthropicStreamEvent(value: unknown): value is RawMessageStreamEvent {
+	return isRecord(value) && typeof value.type === "string" && Object.hasOwn(ANTHROPIC_STREAM_EVENT_TYPES, value.type);
+}
+
+/**
+ * Anthropic Messages stream events carried in InvokeModelWithResponseStream
+ * `chunk` frames (base64 event JSON). Exception frames throw with the status
+ * their AWS shape maps to; a stream that ends before `message_stop` is truncated.
+ */
+async function* decodeBedrockAnthropicEvents(
+	body: ReadableStream<Uint8Array>,
+): AsyncGenerator<BedrockAnthropicStreamEvent> {
+	for await (const frame of decodeEventStream(body)) {
+		const messageType = frame.headers[":message-type"];
+		if (messageType === "exception") {
+			const code = frame.headers[":exception-type"] || "Exception";
+			const payload = safeParsePayload(frame.payload);
+			const message =
+				isRecord(payload) && typeof payload.message === "string"
+					? payload.message
+					: PAYLOAD_DECODER.decode(frame.payload);
+			throw new AIError.BedrockApiError(`${code}: ${message}`, bedrockStreamExceptionStatus(code), { code });
+		}
+		if (messageType === "error") {
+			const code = frame.headers[":error-code"] || "UnknownError";
+			const message = frame.headers[":error-message"] || PAYLOAD_DECODER.decode(frame.payload);
+			throw new AIError.BedrockApiError(`${code}: ${message}`, bedrockStreamExceptionStatus(code), { code });
+		}
+		const eventType = frame.headers[":event-type"];
+		if (messageType !== "event") continue;
+		if (eventType === "ping") {
+			yield { type: "ping" };
+			continue;
+		}
+		if (eventType !== "chunk") continue;
+		const chunk = safeParsePayload(frame.payload);
+		if (!isRecord(chunk) || typeof chunk.bytes !== "string") {
+			throw new AIError.AnthropicStreamEnvelopeError(
+				"Bedrock stream chunk did not contain encoded Anthropic event bytes",
+			);
+		}
+		let event: unknown;
+		try {
+			event = JSON.parse(PAYLOAD_DECODER.decode(Buffer.from(chunk.bytes, "base64")));
+		} catch (error) {
+			throw new AIError.AnthropicStreamEnvelopeError(
+				`Bedrock stream chunk contained invalid Anthropic event JSON: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		if (isRecord(event) && event.type === "ping") {
+			yield { type: "ping" };
+			continue;
+		}
+		if (!isRecord(event) || typeof event.type !== "string") {
+			throw new AIError.AnthropicStreamEnvelopeError(
+				"Bedrock stream chunk contained an invalid Anthropic event envelope",
+			);
+		}
+		if (!isAnthropicStreamEvent(event)) continue;
+		yield event;
+		if (event.type === "message_stop") return;
+	}
+	throw new AIError.AnthropicStreamEnvelopeError("Bedrock InvokeModelWithResponseStream ended before message_stop");
+}
+
+async function prepareBedrockAnthropicCompactionRequest(
+	model: Model<"bedrock-converse-stream">,
+	options: BedrockOptions,
+	base: URL,
+	params: MessageCreateParamsStreaming,
+	betas: readonly string[],
+): Promise<{ payload: unknown; rawRequestDump: RawHttpRequestDump }> {
+	const { anthropic_beta: bodyBetas, ...requestFields } = params;
+	const body: Record<string, unknown> = { ...requestFields };
+	delete body.model;
+	delete body.stream;
+	let payload: unknown = {
+		...body,
+		anthropic_version: "bedrock-2023-05-31",
+		anthropic_beta: Array.from(
+			new Set([
+				...betas,
+				...(params.thinking !== undefined &&
+				"block_binding" in params.thinking &&
+				params.thinking.block_binding !== undefined
+					? [THINKING_BINDING_CONTROLS_BETA]
+					: []),
+				...(options.reasoning !== undefined &&
+				options.interleavedThinking &&
+				model.thinking?.mode !== "anthropic-adaptive" &&
+				model.thinking?.mode !== "effort"
+					? [BEDROCK_INTERLEAVED_THINKING_BETA]
+					: []),
+				...(bodyBetas ?? []),
+			]),
+		),
+	};
+	const replacement = await options.onPayload?.(payload, model);
+	if (replacement !== undefined) payload = replacement;
+	fitBedrockAnthropicPayload(payload);
+	const { url } = resolveBedrockRequestUrl(model, base, "invoke-with-response-stream");
+	return {
+		payload,
+		rawRequestDump: {
+			provider: model.provider,
+			api: model.api,
+			model: model.id,
+			method: "POST",
+			url,
+			body: payload,
+		},
+	};
+}
+
+function createBedrockAnthropicCompactionClient(
+	model: Model<"bedrock-converse-stream">,
+	options: BedrockOptions,
+	region: string,
+	base: URL,
+	getPayload: () => unknown,
+): AnthropicMessagesClientLike {
+	return {
+		messages: {
+			create(_params: MessageCreateParams, requestOptions?: AnthropicRequestOptions) {
+				return {
+					withResponse: async () => {
+						const input = getPayload();
+						if (input === undefined) {
+							throw new AIError.AnthropicStreamEnvelopeError("Bedrock compaction request body was not prepared");
+						}
+						const sent = await sendBedrockRequest(
+							model,
+							options,
+							region,
+							base,
+							input,
+							"invoke-with-response-stream",
+							requestOptions?.signal ?? options.signal,
+						);
+						if (!sent.response.ok) {
+							if (
+								!resolveBearerToken(options) &&
+								(sent.response.status === 401 || sent.response.status === 403)
+							) {
+								invalidateAwsCredentialCache({ profile: options.profile, region });
+							}
+							throw new AIError.BedrockApiError(
+								`Bedrock HTTP ${sent.response.status}: ${(sent.responseBody ?? "").slice(0, 1000)}`,
+								sent.response.status,
+								{ headers: sent.response.headers },
+							);
+						}
+						if (!sent.response.body) {
+							throw new AIError.BedrockApiError("Bedrock response has no body", sent.response.status);
+						}
+						return {
+							data: decodeBedrockAnthropicEvents(sent.response.body),
+							response: sent.response,
+							request_id:
+								sent.response.headers.get("x-amzn-requestid") ?? sent.response.headers.get("x-amzn-request-id"),
+						};
+					},
+				};
+			},
+		},
+	};
+}
+
 export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 	model: Model<"bedrock-converse-stream">,
 	context: Context,
 	options: BedrockOptions,
 ): AssistantMessageEventStream => {
+	if (options.anthropicCompaction !== undefined && supportsBedrockConverseCompaction(model)) {
+		let requestLocation: { region: string; base: URL } | undefined;
+		const getRequestLocation = (): { region: string; base: URL } => {
+			if (!requestLocation) {
+				const region = resolveBedrockRegion(model.id, options);
+				requestLocation = { region, base: resolveBedrockBaseUrl(model, region) };
+			}
+			return requestLocation;
+		};
+		return streamBedrockAnthropicCompaction(
+			model,
+			context,
+			options,
+			(params, betas) => {
+				const { base } = getRequestLocation();
+				return prepareBedrockAnthropicCompactionRequest(model, options, base, params, betas);
+			},
+			getPayload => {
+				const { region, base } = getRequestLocation();
+				return createBedrockAnthropicCompactionClient(model, options, region, base, getPayload);
+			},
+			anthropicOptions => {
+				const reasoning = options.reasoning;
+				const reasoningLevel = reasoning === undefined ? undefined : requireSupportedEffort(model, reasoning);
+				const effort = reasoning === undefined ? undefined : mapEffortToAnthropicAdaptiveEffort(model, reasoning);
+				const thinkingBudgetTokens =
+					reasoningLevel !== undefined &&
+					model.thinking?.mode !== "anthropic-adaptive" &&
+					model.thinking?.mode !== "effort"
+						? (options.thinkingBudgets?.[reasoningLevel] ?? DEFAULT_BEDROCK_THINKING_BUDGETS[reasoningLevel])
+						: undefined;
+				return {
+					...anthropicOptions,
+					thinkingEnabled: reasoning !== undefined,
+					...(effort !== undefined ? { effort } : {}),
+					...(thinkingBudgetTokens !== undefined ? { thinkingBudgetTokens } : {}),
+				};
+			},
+			options.reasoning === undefined ? buildAdditionalModelRequestFields(model, options) : undefined,
+		);
+	}
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
@@ -443,6 +828,9 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 		const region = resolveBedrockRegion(model.id, options);
 
 		try {
+			const base = resolveBedrockBaseUrl(model, region);
+			const bearerToken = resolveBearerToken(options);
+
 			const cacheRetention = resolveCacheRetention(options.cacheRetention);
 			const promptCachePolicy = resolvePromptCachePolicy(model, cacheRetention);
 			const convertedMessages = convertMessages(context, model, promptCachePolicy);
@@ -500,124 +888,18 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			// raw dump so the inspector shows exactly what was sent.
 			commandInput = { ...commandInput, requestMetadata: sanitizeRequestMetadata(commandInput.requestMetadata) };
 
-			// `baseUrl` is the origin verbatim, path prefix (and query, for gateways
-			// that authenticate via a query parameter) included, so a gateway mounted
-			// under a path works. AWS's own host is re-pointed: the catalog can't know the region.
-			const base = new URL(model.baseUrl || `https://bedrock-runtime.${region}.amazonaws.com`);
-			if (AWS_REGIONAL_BEDROCK_HOST.test(base.host)) base.host = `bedrock-runtime.${region}.amazonaws.com`;
-			const host = base.host;
-			const urlPath = `${base.pathname.replace(/\/+$/, "")}/model/${encodeURIComponent(model.id)}/converse-stream`;
-			const query = base.search.slice(1) || undefined;
-			const url = `${base.origin}${urlPath}${base.search}`;
-
-			// Caller headers are merged BEFORE signing, so SigV4 covers them and they
-			// reach the wire. Bedrock built its header map from scratch and ignored
-			// `options.headers` entirely, so tracing/attribution headers set by a
-			// caller (or by a `before_provider_headers` extension) were silently
-			// dropped here while working on every other provider. Content-type and
-			// accept stay last: the eventstream framing is not the caller's to change.
-			//
-			// The signer's OWN headers are dropped first, and that is load-bearing:
-			// `signRequest` lets a caller value overwrite `host`/`x-amz-*` in the map
-			// it signs, but always RETURNS the generated ones, which `requestHeaders`
-			// below then puts on the wire. A caller supplying any of them would sign
-			// one set of values and send another, and Bedrock would reject every
-			// request with a signature mismatch.
-			// Lower-cased, and names the request sets itself are dropped. Keeping a
-			// caller `Content-Type` beside the fixed `content-type` leaves TWO object
-			// keys: SigV4 signs one value while fetch canonicalizes both into a single
-			// comma-joined wire header, so AWS validates different bytes than were
-			// signed and rejects the request.
-			const callerHeaders: Record<string, string> = {};
-			// `model.headers` first, `options.headers` second: `StreamOptions.headers` is
-			// documented (types.ts:431-435) as merged ON TOP of model-defined headers.
-			// Both pass the same filter, so a config-authored `Host`/`Content-Type`
-			// cannot desync the signature either.
-			for (const source of [model.headers, options?.headers]) {
-				for (const [name, value] of Object.entries(source ?? {})) {
-					const field = name.toLowerCase();
-					if (SIGNER_OWNED_HEADERS.has(field) || BEDROCK_RESERVED_HEADERS.has(field)) continue;
-					callerHeaders[field] = value;
-				}
-			}
-			// SigV4 never signs `user-agent` (UNSIGNABLE in aws-sigv4.ts:42-58), so this
-			// default cannot break the signature. Without it Bun's fetch sends
-			// `Bun/<version>`, and that is what CloudTrail records for every request.
-			callerHeaders["user-agent"] ??= USER_AGENT;
-			const baseHeaders: Record<string, string> = {
-				...callerHeaders,
-				"content-type": "application/json",
-				accept: "application/vnd.amazon.eventstream",
-			};
-			const bearerToken = resolveBearerToken(options);
-			// Bun's native fetch ceiling is disabled below (`timeout: false`) so
-			// configurable watchdogs govern slow-prefill streams (issue #2422).
-			// Direct callers that bypass `register-builtins` (which installs the
-			// iterator-level first-event watchdog) still need a pre-response
-			// timer, otherwise a Bedrock/proxy that accepts the POST and never
-			// sends headers would hang forever.
-			const firstEventTimeoutMs = options.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs();
-			// Clear the pre-response timer the instant headers arrive (below): an
-			// absolute `AbortSignal.timeout` would keep aborting the actively
-			// streaming body, not just a stalled time-to-first-byte (issue #2422).
-			const sendRequest = async (input: ConverseStreamRequest): Promise<Response> => {
-				const bodyText = JSON.stringify(input);
-				const body = new TextEncoder().encode(bodyText);
-				let requestHeaders: Record<string, string>;
-				if (bearerToken) {
-					requestHeaders = { ...baseHeaders, Authorization: `Bearer ${bearerToken}` };
-				} else {
-					let credentials: { accessKeyId: string; secretAccessKey: string; sessionToken?: string };
-					if ($flag("AWS_BEDROCK_SKIP_AUTH")) {
-						credentials = { accessKeyId: "dummy-access-key", secretAccessKey: "dummy-secret-key" };
-					} else {
-						credentials = await resolveAwsCredentials({
-							profile: options.profile,
-							region,
-							signal: options.signal,
-							fetch: options.fetch,
-						});
-					}
-					const signed = await signRequest({
-						method: "POST",
-						host,
-						path: urlPath,
-						query,
-						body,
-						region,
-						service: "bedrock",
-						credentials,
-						headers: baseHeaders,
-					});
-					requestHeaders = { ...baseHeaders, ...signed };
-				}
+			let prefixBindingRetryAttempted = false;
+			let response: Response;
+			while (true) {
 				rawRequestDump = {
 					provider: model.provider,
 					api: output.api,
 					model: model.id,
 					method: "POST",
-					url,
-					body: input,
+					url: resolveBedrockRequestUrl(model, base, "converse-stream").url,
+					body: commandInput,
 				};
-				const watchdog = armPreResponseTimeout(options.signal, firstEventTimeoutMs);
-				try {
-					return await fetchWithRetry(url, {
-						method: "POST",
-						headers: requestHeaders,
-						body,
-						signal: watchdog.signal,
-						fetch: options.fetch,
-						timeout: false,
-					});
-				} finally {
-					watchdog.clear();
-				}
-			};
-
-			let prefixBindingRetryAttempted = false;
-			let response: Response;
-			while (true) {
-				response = await sendRequest(commandInput);
+				({ response } = await sendBedrockRequest(model, options, region, base, commandInput, "converse-stream"));
 				if (response.ok) break;
 				if (!bearerToken && (response.status === 401 || response.status === 403)) {
 					// Stale cached credentials (e.g. rotated session keys in ~/.aws/credentials) —
@@ -729,13 +1011,13 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 						const transformations = parseAnthropicInputTransformations(responseFields?.input_transformations);
 						if (transformations.length > 0) {
 							output.inputTransformations = transformations;
-							for (const transformation of transformations) {
-								if (transformation.reason !== "prefix_binding_mismatch") continue;
-								logger.warn("bedrock: dropped thinking block after conversation prefix changed", {
-									model: model.id,
-									path: transformation.path,
-								});
-							}
+							logDroppedThinking(
+								"bedrock",
+								model.id,
+								transformations
+									.filter(transformation => transformation.reason === "prefix_binding_mismatch")
+									.map(transformation => transformation.path),
+							);
 						}
 						// A sentinel-only request must never surface a tool-use stop:
 						// no real tool exists for the agent to dispatch.
@@ -823,9 +1105,6 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 
 	return stream;
 };
-
-/** Shared across events: every payload decode is a complete, non-streaming call. */
-const PAYLOAD_DECODER = new TextDecoder();
 
 function safeParsePayload(payload: Uint8Array): unknown {
 	if (payload.length === 0) return {};
@@ -977,6 +1256,8 @@ function handleContentBlockStop(
 			stream.push({ type: "text_end", contentIndex: index, content: block.text, partial: output });
 			break;
 		case "thinking":
+			// Claude on Bedrock carries Anthropic's signature format, narration kind included.
+			if (block.thinkingSignature && isAnthropicNarrationSignature(block.thinkingSignature)) block.narration = true;
 			stream.push({ type: "thinking_end", contentIndex: index, content: block.thinking, partial: output });
 			break;
 		case "toolCall":
@@ -1087,7 +1368,7 @@ function convertMessages(
 	promptCachePolicy: BedrockPromptCachePolicy,
 ): WireMessage[] {
 	const result: WireMessage[] = [];
-	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
+	const transformedMessages = transformMessages(context.messages, model, id => normalizeToolCallId(id));
 
 	for (let i = 0; i < transformedMessages.length; i++) {
 		const m = transformedMessages[i];
@@ -1335,6 +1616,15 @@ function applyBedrockThinkingBinding(
 	return result;
 }
 
+const DEFAULT_BEDROCK_THINKING_BUDGETS: Record<Effort, number> = {
+	minimal: 1024,
+	low: 2048,
+	medium: 8192,
+	high: 16384,
+	xhigh: 32768,
+	max: 32768,
+};
+
 function buildAdditionalModelRequestFields(
 	model: Model<"bedrock-converse-stream">,
 	options: BedrockOptions,
@@ -1376,15 +1666,7 @@ function buildAdditionalModelRequestFields(
 	}
 
 	const level = requireSupportedEffort(model, reasoning);
-	const defaultBudgets: Record<Effort, number> = {
-		minimal: 1024,
-		low: 2048,
-		medium: 8192,
-		high: 16384,
-		xhigh: 32768,
-		max: 32768,
-	};
-	const budget = options.thinkingBudgets?.[level] ?? defaultBudgets[level];
+	const budget = options.thinkingBudgets?.[level] ?? DEFAULT_BEDROCK_THINKING_BUDGETS[level];
 
 	const result: Record<string, unknown> = {
 		thinking: {
@@ -1395,7 +1677,7 @@ function buildAdditionalModelRequestFields(
 	};
 
 	if (options.interleavedThinking) {
-		result.anthropic_beta = ["interleaved-thinking-2025-05-14"];
+		result.anthropic_beta = [BEDROCK_INTERLEAVED_THINKING_BETA];
 	}
 
 	return result;

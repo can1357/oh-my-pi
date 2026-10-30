@@ -688,11 +688,12 @@ impl Run<'_> {
 	/// uutils' splitter also expands `$VAR` and `${VAR:-default}` and reports
 	/// positions; GNU accepts neither form, so this follows GNU.
 	fn build_argv(&mut self, string: &[u8]) -> Result<Vec<Vec<u8>>, Exit> {
-		fn start_arg(args: &mut Vec<Vec<u8>>, sep: &mut bool) {
+		fn start_arg<'a>(args: &'a mut Vec<Vec<u8>>, sep: &mut bool) -> &'a mut Vec<u8> {
 			if *sep {
-				args.push(Vec::new());
 				*sep = false;
+				return args.push_mut(Vec::new());
 			}
+			args.last_mut().expect("started")
 		}
 
 		let mut args: Vec<Vec<u8>> = Vec::new();
@@ -762,9 +763,9 @@ impl Run<'_> {
 					let name = String::from_utf8_lossy(name).into_owned();
 					match self.host.var(&name).map(str::to_owned) {
 						Some(value) => {
-							start_arg(&mut args, &mut sep);
+							let arg = start_arg(&mut args, &mut sep);
 							self.vmsg(&format!("expanding ${{{name}}} into {}\n", value.quote()));
-							args.last_mut().expect("started").extend(value.as_bytes());
+							arg.extend(value.as_bytes());
 						},
 						None => self.vmsg(&format!("replacing ${{{name}}} with empty string\n")),
 					}
@@ -774,8 +775,7 @@ impl Run<'_> {
 				},
 				_ => {},
 			}
-			start_arg(&mut args, &mut sep);
-			args.last_mut().expect("started").push(newc);
+			start_arg(&mut args, &mut sep).push(newc);
 			i += 1;
 		}
 		if dq || sq {
@@ -1406,9 +1406,9 @@ mod tests {
 
 	#[tokio::test]
 	async fn assignments_reach_builtin_commands() {
-		let (code, out, _) = sh("env FOO=bar env | /usr/bin/grep '^FOO='").await;
+		let (code, out, _) = sh("env FOO=bar env | grep '^FOO='").await;
 		assert_eq!((code, out.as_str()), (0, "FOO=bar\n"));
-		let (code, out, _) = sh("export X=1; env -u X env | /usr/bin/grep -c '^X=' ; true").await;
+		let (code, out, _) = sh("export X=1; env -u X env | grep -c '^X=' ; true").await;
 		assert_eq!((code, out.as_str()), (0, "0\n"));
 	}
 
@@ -1539,8 +1539,10 @@ mod tests {
 		assert_eq!(err, "");
 		assert_eq!(code, 0);
 		assert_eq!(out, format!("{}\n{}\n", target.display(), dir.path().display()));
-		// As `chdir` does, -C leaves PWD as it was.
-		let (code, out, _) = sh_in("env -C sub env | /usr/bin/grep '^PWD='", dir.path()).await;
+		// As `chdir` does, -C leaves PWD as it was. Literal style: a Windows
+		// path's backslashes would otherwise print shell-quoted.
+		let script = "export QUOTING_STYLE=literal; env -C sub env | grep '^PWD='";
+		let (code, out, _) = sh_in(script, dir.path()).await;
 		assert_eq!((code, out), (0, format!("PWD={}\n", dir.path().display())));
 	}
 

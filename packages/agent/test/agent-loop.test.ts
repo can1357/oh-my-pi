@@ -3333,6 +3333,73 @@ describe("agentLoop with AgentMessage", () => {
 		).toBe(true);
 	});
 
+	it("preserves a cancelled ask result when a background completion was queued while it waited", async () => {
+		const controller = new AbortController();
+		const peeked = Promise.withResolvers<void>();
+		let abortedBeforeCancel = true;
+		const toolSchema = type({});
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "ask",
+			label: "Ask",
+			description: "Waits for the user's answer",
+			parameters: toolSchema,
+			async execute(_toolCallId, _params, signal) {
+				await peeked.promise;
+				const tick = Promise.withResolvers<void>();
+				setImmediate(tick.resolve);
+				await tick.promise;
+				abortedBeforeCancel = signal?.aborted === true;
+				controller.abort();
+				throw new Error("Ask tool was cancelled by the user");
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [{ content: [{ type: "toolCall", id: "tool-1", name: "ask", arguments: {} }] }],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			hasBackgroundCompletions: () => {
+				peeked.resolve();
+				return true;
+			},
+		};
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop(
+			[createUserMessage("start")],
+			context,
+			config,
+			controller.signal,
+			mock.stream,
+		)) {
+			events.push(event);
+		}
+		const result = events.find(
+			(event): event is Extract<AgentEvent, { type: "tool_execution_end" }> => event.type === "tool_execution_end",
+		);
+		const persistedResult = events.find(
+			(event): event is Extract<AgentEvent, { type: "message_end" }> =>
+				event.type === "message_end" && event.message.role === "toolResult",
+		);
+		expect(abortedBeforeCancel).toBe(false);
+		expect(result?.isError).toBe(true);
+		expect(result && toolResultText(result.result)).toBe("Ask tool was cancelled by the user");
+		expect(result?.result.details).not.toHaveProperty("__interrupted");
+		expect(persistedResult?.message.role === "toolResult" && toolResultText(persistedResult.message)).toBe(
+			"Ask tool was cancelled by the user",
+		);
+		expect(events.filter(event => event.type === "tool_execution_end")).toHaveLength(1);
+		expect(
+			events.some(
+				event =>
+					event.type === "message_end" &&
+					event.message.role === "assistant" &&
+					event.message.stopReason === "aborted",
+			),
+		).toBe(true);
+	});
+
 	it("leaves the cooperative steering signal down for a queued background completion", async () => {
 		const toolSchema = type({});
 		let drained = false;
@@ -7059,6 +7126,43 @@ describe("agentLoop passive additionalContext", () => {
 		expect(finalMessage.stopReason).toBe("aborted");
 		expect(finalMessage.errorMessage).toBe("Deadline exceeded");
 	});
+
+	it("does not abort the turn when the deadline lies beyond the 32-bit timer range", async () => {
+		const context: AgentContext = {
+			systemPrompt: ["You are helpful."],
+			messages: [],
+			tools: [],
+		};
+		const config: AgentLoopConfig = {
+			model: createMockModel().model,
+			convertToLlm: identityConverter,
+			// `--max-time 600h`: a single setTimeout of this length overflows and fires in ~1 ms
+			deadline: Date.now() + 600 * 60 * 60 * 1000,
+		};
+		let providerSignalAborted = false;
+		const stream = agentLoop([createUserMessage("Wait")], context, config, undefined, (_model, _context, options) => {
+			options?.signal?.addEventListener("abort", () => {
+				providerSignalAborted = true;
+			});
+			const events = new AssistantMessageEventStream();
+			// Real delay on purpose: the overflowed platform timer must get the chance to fire first.
+			void Bun.sleep(50).then(() => {
+				events.push({
+					type: "done",
+					reason: "stop",
+					message: createAssistantMessage([{ type: "text", text: "done" }]),
+				});
+			});
+			return events;
+		});
+
+		const messages = await stream.result();
+
+		expect(providerSignalAborted).toBe(false);
+		const finalMessage = messages[messages.length - 1];
+		if (finalMessage.role !== "assistant") throw new Error("Expected assistant message");
+		expect(finalMessage.stopReason).toBe("stop");
+	});
 });
 
 describe("agentLoop streaming snapshots", () => {
@@ -7276,8 +7380,8 @@ describe("agentLoop streaming snapshots", () => {
 		// partial immediately before its push (the mutate-then-push stream
 		// contract). The producer advances in lockstep with the consumer — one
 		// step per observed assistant event — so each snapshot sees exactly the
-		// deltas delivered so far even when the loop parks in `yieldIfDue()`; a
-		// free-running timer producer would race ahead during that sleep.
+		// deltas delivered so far; a free-running timer producer could race
+		// ahead of the consumer.
 		const partial = createAssistantMessage([], "stop");
 		let advance = (): void => {};
 		const streamFn = () => {

@@ -1,5 +1,4 @@
 import * as path from "node:path";
-import { pathToFileURL } from "node:url";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import { type Component } from "../tui";
 import { Container } from "../tui";
@@ -22,7 +21,7 @@ import { canonicalizeMessage } from "./thinking-display";
 import { internalUrlSchemeSpec, splitUrlScheme } from "../tools/url-scheme-host";
 import type { ToolExecutionHandle } from "./tool-execution";
 import { formatUsageRow } from "../overlays/usage-row";
-import { formatCount } from "@oh-my-pi/pi-utils";
+import { formatCount, sanitizeText, sanitizeTextDeep } from "@oh-my-pi/pi-utils";
 import type { TspCardStatus, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { NativeToolHead } from "../tools/renderer";
 import { card, code, keyed, md, node, span, text, withHidden } from "../native/describe";
@@ -188,9 +187,12 @@ const READ_STATUS_RANK: Record<ReadEntry["status"], number> = {
 	error: 3,
 };
 
-function getDisplayReadTargets(details: ReadToolDetails | undefined): ReadDisplayPathSpec[] | undefined {
+function getDisplayReadTargets(
+	details: ReadToolDetails | undefined,
+	rawDetails: ReadToolDetails | undefined,
+): ReadDisplayPathSpec[] | undefined {
 	if (!Array.isArray(details?.displayReadTargets)) return undefined;
-	const links = Array.isArray(details.displayReadTargetLinks) ? details.displayReadTargetLinks : undefined;
+	const links = Array.isArray(rawDetails?.displayReadTargetLinks) ? rawDetails.displayReadTargetLinks : undefined;
 	const targets: ReadDisplayPathSpec[] = [];
 	details.displayReadTargets.forEach((raw, index) => {
 		if (typeof raw !== "string") return;
@@ -437,12 +439,14 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		if (!toolCallId) return;
 		const rawPath =
 			typeof args.file_path === "string" ? args.file_path : typeof args.path === "string" ? args.path : "";
+		const displayPath = sanitizeText(rawPath);
 		const entry: ReadEntry = this.#entries.get(toolCallId) ?? {
 			toolCallId,
-			path: rawPath,
+			path: displayPath,
 			status: "pending",
 		};
-		entry.path = rawPath;
+		entry.path = displayPath;
+		entry.linkPath = path.isAbsolute(rawPath) ? rawPath : undefined;
 		entry.raw = args.raw === true;
 		this.#entries.set(toolCallId, entry);
 		this.#updateDisplay();
@@ -484,12 +488,15 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		if (!entry) return;
 		if (isPartial) return;
 		this.#blockVersion++;
-		const details = result.details as ReadToolDetails | undefined;
+		// `details` can contain raw file text and filesystem paths. Keep the
+		// latter for links while only the sanitized copy supplies display labels.
+		const rawDetails = result.details as ReadToolDetails | undefined;
+		const details = sanitizeTextDeep(rawDetails) as ReadToolDetails | undefined;
 		const suffixResolution = getSuffixResolution(details);
-		const displayPaths = getDisplayReadTargets(details);
-		entry.linkPath = readResultLinkPath(details);
+		const displayPaths = getDisplayReadTargets(details, rawDetails);
+		entry.linkPath = readResultLinkPath(rawDetails) ?? entry.linkPath;
 		if (suffixResolution) {
-			entry.path = displayPathWithSuffixResolution(entry.path, suffixResolution);
+			entry.path = sanitizeText(displayPathWithSuffixResolution(entry.path, suffixResolution));
 			entry.correctedFrom = suffixResolution.from;
 			entry.displayPaths = undefined;
 		} else {
@@ -753,7 +760,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			lines.slice(0, shown).join("\n"),
 			entry.codeStartLine ?? firstSelectorLine(split.sel) ?? 1,
 			entry.codeLineNumbers?.slice(0, shown),
-			getLanguageFromPath(split.path),
+			split.path,
 		);
 		const hidden = lines.length - shown;
 		if (hidden > 0) {
@@ -828,7 +835,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 						previewsMarkdown(entry)
 							? md(entry.contentText ?? "")
 							: code(entry.contentText ?? "", {
-									lang: getLanguageFromPath(split.path),
+									path: split.path,
 									start: entry.codeStartLine,
 									numbers: true,
 									wrap: true,
@@ -868,7 +875,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		const linkPath = linkPathForTargets(row.targets);
 		const spans: TspSpan[] = [];
 		if (filePath) {
-			const href = linkPath && path.isAbsolute(linkPath) ? pathToFileURL(linkPath).href : undefined;
+			const href = linkPath ? fileHref(linkPath) : undefined;
 			spans.push(span(filePath, "path", href ? { href } : undefined));
 		} else {
 			spans.push(span("…", "toolOutput"));

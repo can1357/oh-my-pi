@@ -27,6 +27,7 @@ import {
 import { isTaskToolDetails, type StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
+import { hasAnnotationDraftsSync } from "../extensibility/custom-commands/bundled/annotate/draft-store";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
 import type { CompactionMethod } from "./compaction-methods";
@@ -56,6 +57,8 @@ import {
 	CURRENT_SESSION_VERSION,
 	type CustomEntry,
 	type CustomMessageEntry,
+	EPHEMERAL_MODEL_CHANGE_ROLE,
+	PREWALK_MODEL_CHANGE_ROLE,
 	type FileEntry,
 	type LabelEntry,
 	type ModeChangeEntry,
@@ -82,9 +85,12 @@ import { currentRuntimeIdentity, type RuntimeIdentity } from "./runtime-identity
 import {
 	filterSessionsForPicker,
 	findMostRecentNonEmptySession,
+	findRecentSessionContinuation,
+	findSessionContinuation,
 	isEmptySession,
 	listAllSessions,
 	listSessions,
+	type SessionContinuation,
 	type SessionInfo,
 } from "./session-listing";
 import {
@@ -751,6 +757,7 @@ export type ReadonlySessionManager = Pick<
 	| "getSessionFile"
 	| "getSessionName"
 	| "getArtifactsDir"
+	| "ensureOnDisk"
 	| "getArtifactManager"
 	| "allocateArtifactPath"
 	| "saveArtifact"
@@ -784,6 +791,8 @@ interface SessionManagerStateSnapshot {
 	durable: { count: number; size: number } | undefined;
 	draftOnlySessionCleanupArmed: boolean;
 	fallbackRuntimeOnly: boolean;
+	/** Stashed sibling family candidate; moveTo drops it, so a rollback must restore it. */
+	taskSiblingCandidate: string | undefined;
 	header: SessionHeader;
 	entries: SessionEntry[];
 }
@@ -1045,6 +1054,12 @@ export class SessionManager {
 	readonly #blobs: BlobStore;
 
 	#sessionId = "";
+	/**
+	 * Parent-derived sibling family candidate stashed by the Task executor once
+	 * the child session exists. Session-scoped and non-persisted: the header
+	 * never sees it, and forks, moves, and new-session resets start without it.
+	 */
+	#taskSiblingCandidate: string | undefined;
 	#sessionName: string | undefined;
 	#titleSource: SessionTitleSource | undefined;
 	#titleRevision = 0;
@@ -1203,12 +1218,14 @@ export class SessionManager {
 
 	private constructor(cwd: string, sessionDir: string, persist: boolean, storage: SessionStorage) {
 		this.#cwd = cwd;
-		this.#sessionDir = sessionDir;
+		// Absolute, so session files (and `PI_SESSION_FILE` in bash and eval) stay
+		// valid after a command changes directory: `--session-dir` may be relative.
+		this.#sessionDir = sessionDir ? path.resolve(sessionDir) : sessionDir;
 		this.#persist = persist;
 		this.#storage = storage;
 		this.#blobs = new BlobStore(getBlobsDir());
 
-		if (persist && sessionDir) this.#storage.ensureDirSync(sessionDir);
+		if (persist && sessionDir) this.#storage.ensureDirSync(this.#sessionDir);
 	}
 
 	#rememberBreadcrumb(cwd: string, sessionFile: string, fresh = false): void {
@@ -1571,8 +1588,10 @@ export class SessionManager {
 	 * sibling file. It gets a new session id whose header points back through
 	 * `parentSession` and keeps the provider prompt-cache key, as {@link fork}
 	 * does, so resume-by-id, the title index, and the picker never see two
-	 * files for one id. Nothing durable exists there yet: the caller publishes
-	 * the whole transcript once and appends incrementally after that.
+	 * files for one id. Unlike a fork it also records `continuationOf`, so a
+	 * later resume of the old file follows the conversation here (see
+	 * `findSessionContinuation`). Nothing durable exists there yet: the caller
+	 * publishes the whole transcript once and appends incrementally after that.
 	 *
 	 * The artifact copy runs in the background so a move never blocks the turn
 	 * loop on a large artifacts directory; the sibling's artifact manager waits
@@ -1584,12 +1603,25 @@ export class SessionManager {
 		const previousSessionId = this.#sessionId;
 		const timestamp = nowIso();
 		this.#sessionId = mintSessionId();
+		this.#taskSiblingCandidate = undefined;
 		const to = path.join(path.dirname(from), `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
+		// The marker goes before the carried-over fields: the session listing
+		// reads only the first 4 KB of a file, and a header grows with them.
+		const {
+			type: _type,
+			id: _id,
+			timestamp: _timestamp,
+			parentSession: _parent,
+			continuationOf: _of,
+			...carried
+		} = this.#header;
 		this.#header = {
-			...this.#header,
+			type: "session",
 			id: this.#sessionId,
 			timestamp,
 			parentSession: previousSessionId,
+			continuationOf: previousSessionId,
+			...carried,
 			providerPromptCacheKey: SessionManager.getInheritedProviderPromptCacheKey(this.#header),
 		};
 		this.#closeWriterEventually();
@@ -2047,8 +2079,10 @@ export class SessionManager {
 				}
 			}
 			if (this.#storage.defersSyncPublish) {
-				// The publish is only queued: record nothing until the backend
-				// confirms (hV-oB). A racing rewrite still carries the last
+				this.#fileIsCurrent = false;
+				this.#rewriteRequired = true;
+				// The publish is only queued: record nothing and stay non-current
+				// until the backend confirms (hV-oB). A racing rewrite still carries the last
 				// confirmed token, so the store's queue-time size check fail-fasts
 				// it instead of queueing a second provisional publish behind the
 				// unconfirmed one; a racing append finds the store's size past the
@@ -2128,8 +2162,8 @@ export class SessionManager {
 	 * the writer close and the full-file replace, and loops on
 	 * `#atomicRewriteDirty` so any fenced append that lands during the rewrite
 	 * is captured before the task resolves. Returns `false` when the disk epoch
-	 * moved (a superseding synchronous rewrite has taken over) so callers skip
-	 * their post-publish state updates.
+	 * moved so callers skip current-marking updates; a body that landed before
+	 * that change still advances the durable byte record after readback.
 	 */
 	async #runFencedAtomicRewrite(epoch: number): Promise<boolean> {
 		if (this.#released) return false;
@@ -2178,7 +2212,16 @@ export class SessionManager {
 						throw error;
 					}
 				}
-				if (this.#diskEpoch !== epoch) return false;
+				if (this.#diskEpoch !== epoch) {
+					try {
+						if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
+							this.#recordPublish(body.stamp, body.bytes);
+						}
+					} catch {
+						// A superseding rewrite owns the durability record when its body cannot be read back.
+					}
+					return false;
+				}
 				this.#recordPublish(body.stamp, body.bytes);
 			} while (this.#atomicRewriteDirty);
 			return true;
@@ -2481,6 +2524,7 @@ export class SessionManager {
 			this.#storage.ensureDirSync(this.#sessionDir);
 		}
 		this.#sessionId = mintSessionId();
+		this.#taskSiblingCandidate = undefined;
 		this.#sessionName = undefined;
 		this.#titleSource = undefined;
 		this.#titleUpdatedAt = "";
@@ -2580,7 +2624,8 @@ export class SessionManager {
 		if (batch?.collecting) batch.entryIds.add(entry.id);
 		if (batch && !batch.collecting) {
 			batch.externalLeafChanged = true;
-			batch.externalLeafId = entry.id;
+			// An off-branch entry replays to the leaf it captured, not to itself.
+			batch.externalLeafId = sessionEntryLeafId(entry);
 		}
 		this.#appendToSessionFile(entry);
 		if (batch) batch.deferredNotifications.push(entry);
@@ -2599,8 +2644,8 @@ export class SessionManager {
 		const retained = this.#entries.filter(entry => !batch.entryIds.has(entry.id));
 		for (const entry of retained) {
 			entry.parentId = retainedAncestor(entry.parentId);
-			// A late-usage marker captured a staged leaf; keep it pointing at a surviving entry.
-			if (entry.type === "model_usage" && typeof entry.activeLeafId === "string") {
+			// An off-branch entry captured a staged leaf; keep it pointing at a surviving entry.
+			if (typeof entry.activeLeafId === "string") {
 				entry.activeLeafId = retainedAncestor(entry.activeLeafId);
 			}
 		}
@@ -2665,6 +2710,7 @@ export class SessionManager {
 		this.#artifactManager = new ArtifactManager(
 			sessionFile.slice(0, -JSONL_SUFFIX_LENGTH),
 			pendingCopy?.sessionFile === sessionFile ? pendingCopy.done : undefined,
+			this.getSeanceSourceArtifactsDir() ?? undefined,
 		);
 		this.#artifactManagerSessionFile = sessionFile;
 		return this.#artifactManager;
@@ -2716,6 +2762,7 @@ export class SessionManager {
 					: undefined,
 			draftOnlySessionCleanupArmed: this.#draftOnlySessionCleanupArmed,
 			fallbackRuntimeOnly: this.#fallbackRuntimeOnly,
+			taskSiblingCandidate: this.#taskSiblingCandidate,
 			// Entries are snapshotted by reference (switch/reload replaces the
 			// array wholesale). The header is cloned: moveTo mutates it in place
 			// (cwd, additionalDirectories), so a by-reference capture would let
@@ -2761,6 +2808,8 @@ export class SessionManager {
 		this.#forceFileCreation = snapshot.onDisk;
 		this.#draftOnlySessionCleanupArmed = snapshot.draftOnlySessionCleanupArmed;
 		this.#fallbackRuntimeOnly = snapshot.fallbackRuntimeOnly;
+		// A completed moveTo drops the stash, so a rollback restores it here.
+		this.#taskSiblingCandidate = snapshot.taskSiblingCandidate;
 		this.#applyEntries(snapshot.header, [...snapshot.entries]);
 		// The copy holds the same entries in the same order, so the file still
 		// holds the snapshot's durable prefix of it.
@@ -2783,11 +2832,12 @@ export class SessionManager {
 	/**
 	 * Undo a {@link moveTo} using a {@link captureState} snapshot: rename the
 	 * session and artifacts back into the captured bucket, then restore the
-	 * captured metadata (cwd, header, additionalDirectories). The captured
-	 * header is persisted after relocation so a fresh open of the source
-	 * session sees the pre-move metadata, including workspace roots the move
-	 * filtered out. Rollbacks must not re-enter forward-move hooks, so this
-	 * bypasses AgentSession entirely. If the rename-back itself fails, the
+	 * captured metadata (cwd, header, additionalDirectories) and the stashed
+	 * sibling candidate the forward move dropped. The captured header is
+	 * persisted after relocation so a fresh open of the source session sees the
+	 * pre-move metadata, including workspace roots the move filtered out.
+	 * Rollbacks must not re-enter forward-move hooks, so this bypasses
+	 * AgentSession entirely. If the rename-back itself fails, the
 	 * manager stays pointed at the actual moved file (restoring the snapshot
 	 * would split the transcript across a recreated source and the stranded
 	 * target) and the error names where the session file actually lives.
@@ -2920,10 +2970,17 @@ export class SessionManager {
 	}
 
 	/**
-	 * Start a new session and persist its header before returning.
+	 * Start a new session and persist its header before returning, except for a
+	 * `drop` (/delete) successor.
 	 *
 	 * The durable empty boundary prevents a later process on another terminal
-	 * from selecting the previous conversation as the most recent session.
+	 * from selecting the previous conversation as the most recent session. The
+	 * drop path does not need it: the fresh terminal breadcrumb already pins
+	 * this terminal to the successor, and if deleting the predecessor failed,
+	 * that surviving non-empty transcript is the correct resume target.
+	 * Materializing the successor there would only leave a zero-turn stub
+	 * behind when the user quits, so it keeps the ordinary lazy gate and writes
+	 * once it has content.
 	 *
 	 * Entries the previous session's file is missing are appended first. When
 	 * that fails, this rejects with the failure and switches nothing; calling
@@ -2960,7 +3017,7 @@ export class SessionManager {
 		if (failure !== undefined && !abandoning) throw failure;
 		this.#refusedSessionSwitch = undefined;
 		const sessionFile = this.#resetToNewSession(options);
-		await this.ensureOnDisk();
+		if (options?.drop !== true) await this.ensureOnDisk();
 		return sessionFile;
 	}
 
@@ -3143,6 +3200,7 @@ export class SessionManager {
 
 		const timestamp = nowIso();
 		this.#sessionId = mintSessionId();
+		this.#taskSiblingCandidate = undefined;
 		this.#sessionFile = path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
 		this.#expectedDiskSize = null;
 		this.#durable = undefined;
@@ -3358,6 +3416,12 @@ export class SessionManager {
 			this.#cwd = resolvedCwd;
 			this.#sessionDir = nextSessionDir;
 			this.#header.cwd = resolvedCwd;
+			// The stash is scoped to the conversation's pre-move state: a completed
+			// move must not let a later opted-in request promote it. Refusals and
+			// the internal rollback rethrow above, and the no-op early return never
+			// relocates, so all three keep it; a caller undoing this completed move
+			// through rollbackMove() re-derives it from the captureState() snapshot.
+			this.clearTaskSiblingCandidate();
 			// Clear only after the rename has landed. If the move threw,
 			// keep the flag so the next relocation retries.
 			this.#fallbackRuntimeOnly = false;
@@ -3618,7 +3682,10 @@ export class SessionManager {
 		// must skip this opportunistic cleanup rather than risk data loss.
 		if (!this.#storage.deleteSessionWithArtifactsIf) return;
 		try {
+			const artifactsDir = this.getArtifactsDir();
 			const deleted = await this.#storage.deleteSessionWithArtifactsIf(sessionFile, content => {
+				// An `/annotate` draft is work in progress the session must keep.
+				if (artifactsDir && hasAnnotationDraftsSync(artifactsDir, this.#header.id)) return false;
 				const onDisk = parseSessionContent(content);
 				return (
 					!onDisk.invalidHeader &&
@@ -3944,9 +4011,30 @@ export class SessionManager {
 		return !!this.#sessionFile && this.#storage.existsSync(this.#sessionFile);
 	}
 
+	/**
+	 * {@link isSessionOnDisk}, counting only what the backing store has
+	 * confirmed. Remote storage publishes asynchronously, so a hint printed
+	 * just before the process exits must not count a write still in flight:
+	 * the exit aborts it and `--resume <id>` would find nothing. A deferring
+	 * store without `existsConfirmedSync` cannot vouch for its writes, so it
+	 * reports false.
+	 */
+	isSessionConfirmedOnDisk(): boolean {
+		const sessionFile = this.#sessionFile;
+		if (!sessionFile) return false;
+		const storage = this.#storage;
+		if (storage.existsConfirmedSync) return storage.existsConfirmedSync(sessionFile);
+		return !storage.defersSyncPublish && storage.existsSync(sessionFile);
+	}
+
 	getArtifactsDir(): string | null {
 		if (this.#adoptedArtifactManager) return this.#adoptedArtifactManager.dir;
 		return artifactsDirectoryFor(this.#sessionFile);
+	}
+
+	/** Source artifacts a seance fork reads in place; null for ordinary sessions. */
+	getSeanceSourceArtifactsDir(): string | null {
+		return artifactsDirectoryFor(this.#header?.seanceSource);
 	}
 
 	adoptArtifactManager(manager: ArtifactManager): void {
@@ -3976,6 +4064,15 @@ export class SessionManager {
 
 	async getArtifactPath(id: string): Promise<string | null> {
 		return (await this.#artifactManagerForSession()?.getPath(id)) ?? null;
+	}
+
+	/**
+	 * Content of a spill artifact kept in memory by a non-persistent session.
+	 * Null for unknown ids and for file-backed sessions, whose artifacts resolve
+	 * through {@link getArtifactPath}.
+	 */
+	getArtifactContent(id: string): string | null {
+		return this.#inMemoryArtifacts?.get(id) ?? null;
 	}
 
 	async saveDraft(text: string): Promise<void> {
@@ -4144,6 +4241,50 @@ export class SessionManager {
 	}
 
 	/**
+	 * Rename a session file that is not loaded in this process, e.g. from the
+	 * resume picker. Returns the title as stored (the session canonicalizes
+	 * it), or null when the rename did not happen.
+	 *
+	 * The cross-process ownership lease is claimed before the transcript is
+	 * loaded and held until the write is done. Claiming first is what makes
+	 * the rename safe: another process appending between our load and our
+	 * write would leave us parenting the title entry to a stale leaf, so the
+	 * reopened session followed the older branch and hid the other process's
+	 * turn. Holding the lease from before the load keeps the loaded leaf
+	 * stable until the title is written.
+	 */
+	static async renameSessionTitle(
+		sessionPath: string,
+		title: string,
+		options?: { cwd?: string },
+	): Promise<string | null> {
+		const storage = new FileSessionStorage();
+		// The header id is what the lease is keyed on; a null claim means
+		// another live process owns the session, so leave it alone.
+		const sessionId = await readSessionHeaderId(sessionPath);
+		if (!sessionId) return null;
+		const probe = storage.claimSession(sessionId, sessionPath);
+		if (!probe) return null;
+		let manager: SessionManager | undefined;
+		try {
+			manager = await SessionManager.open(sessionPath, undefined, storage, {
+				initialCwd: options?.cwd,
+				suppressBreadcrumb: true,
+				throwIfMissing: true,
+			});
+			if (manager.getSessionFile() !== sessionPath) return null;
+			if (!(await manager.setSessionName(title, "user"))) return null;
+			return manager.getSessionName() ?? null;
+		} finally {
+			try {
+				await manager?.close();
+			} finally {
+				probe();
+			}
+		}
+	}
+
+	/**
 	 * Journal an idle recap for this session in history.db. Recaps never enter
 	 * the session file or LLM context; in-memory sessions are not journaled.
 	 */
@@ -4193,6 +4334,11 @@ export class SessionManager {
 	/**
 	 * Append to a non-active branch without changing the current leaf.
 	 * Used by work that retains ownership of a branch across tree navigation.
+	 *
+	 * The entry records the active leaf it interrupted (`activeLeafId`) so a
+	 * reload replays the same leaf instead of adopting this off-branch tail.
+	 * Pass `preserveActiveLeaf: false` when the caller selects the new entry as
+	 * the leaf instead (a re-answered `ask`).
 	 */
 	appendMessageToBranch(
 		message:
@@ -4203,6 +4349,7 @@ export class SessionManager {
 			| PythonExecutionMessage
 			| FileMentionMessage,
 		parentId: string | null,
+		options?: { preserveActiveLeaf?: boolean },
 	): string {
 		if (parentId !== null && !this.#index.has(parentId)) throw new Error(`Entry ${parentId} not found`);
 		const activeLeafId = this.#index.leafId();
@@ -4213,12 +4360,13 @@ export class SessionManager {
 			timestamp: nowIso(),
 			runtime: currentRuntimeIdentity(),
 			message,
+			...(options?.preserveActiveLeaf === false ? {} : { activeLeafId }),
 		};
-		// The leaf is restored below, so the entry never joins the active branch;
-		// keep it out of any branch view already handed out.
+		// The entry never joins the active branch; keep it out of any branch view
+		// already handed out. Recording `activeLeafId` leaves the index's leaf on
+		// the active branch, as the in-memory contract requires.
 		this.#index.detachBranchView();
 		this.#recordEntry(entry);
-		this.#index.setLeaf(activeLeafId);
 		return entry.id;
 	}
 
@@ -4480,13 +4628,35 @@ export class SessionManager {
 
 	/**
 	 * The most recent model role on the current branch, or undefined when no
-	 * model change has been recorded.
+	 * model change has been recorded. `skipEphemeral` passes over temporary
+	 * switches (retry fallback hops, prewalk, context promotion), returning the
+	 * role the session was last assigned.
 	 */
-	getLastModelChangeRole(): string | undefined {
+	getLastModelChangeRole(options?: { skipEphemeral?: boolean }): string | undefined {
 		const branch = this.getBranch();
 		for (let index = branch.length - 1; index >= 0; index--) {
 			const entry = branch[index];
-			if (entry.type === "model_change") return entry.role ?? "default";
+			if (entry.type !== "model_change") continue;
+			const role = entry.role ?? "default";
+			if (options?.skipEphemeral && (role === EPHEMERAL_MODEL_CHANGE_ROLE || role === PREWALK_MODEL_CHANGE_ROLE)) {
+				continue;
+			}
+			return role;
+		}
+		return undefined;
+	}
+
+	/**
+	 * The newest model change on the current branch when it selected a model for
+	 * this session only (`temporary`, or a prewalk handoff); undefined when the
+	 * newest change assigned a role, was a retry fallback hop, or none was recorded.
+	 */
+	getSessionLocalModelChange(): ModelChangeEntry | undefined {
+		const branch = this.getBranch();
+		for (let index = branch.length - 1; index >= 0; index--) {
+			const entry = branch[index];
+			if (entry.type !== "model_change") continue;
+			return entry.role === "temporary" || entry.role === PREWALK_MODEL_CHANGE_ROLE ? entry : undefined;
 		}
 		return undefined;
 	}
@@ -4581,6 +4751,27 @@ export class SessionManager {
 		if (!this.#persist || !this.#sessionFile || !this.#shouldHaveSessionFile()) return;
 		this.#rewriteRequired = true;
 		await this.#rewriteAtomically();
+	}
+
+	/**
+	 * Stash the parent-derived sibling family candidate without touching the
+	 * header. Unlike {@link setTaskPromptCacheKey} this is neither persisted nor
+	 * carried into forks, moves, or new-session resets, so a fresh identity
+	 * starts without it while the per-request policy gate still decides whether
+	 * this session's requests consume it.
+	 */
+	setTaskSiblingCandidate(key: string): void {
+		this.#taskSiblingCandidate = key;
+	}
+
+	/** Stashed sibling family candidate; consumed only when the request model opts in. */
+	getTaskSiblingCandidate(): string | undefined {
+		return this.#taskSiblingCandidate;
+	}
+
+	/** Drop the stash: a committed switch to a different session adopts that session's identity. */
+	clearTaskSiblingCandidate(): void {
+		this.#taskSiblingCandidate = undefined;
 	}
 
 	/** All session entries (excludes header). Returns a shallow copy. */
@@ -4721,15 +4912,12 @@ export class SessionManager {
 		if (branchPath.length === 0) throw new Error(`Entry ${leafId} not found`);
 
 		// Drop label entries from the path; recreate them fresh from the resolved map.
-		// Every kept entry lies on the forked path, so a late-usage leaf marker no longer applies.
+		// Every kept entry lies on the forked path, so a late-usage or off-branch leaf
+		// marker no longer applies.
 		const entriesToKeep: SessionEntry[] = [];
 		for (const entry of branchPath) {
 			if (entry.type === "label") continue;
-			entriesToKeep.push(
-				entry.type === "model_usage" && entry.activeLeafId !== undefined
-					? { ...entry, activeLeafId: undefined }
-					: entry,
-			);
+			entriesToKeep.push(entry.activeLeafId === undefined ? entry : { ...entry, activeLeafId: undefined });
 		}
 		const keptIds = new Set(entriesToKeep.map(entry => entry.id));
 		const labelsToCarry: Array<{ targetId: string; label: string }> = [];
@@ -4772,6 +4960,7 @@ export class SessionManager {
 		this.#header = header;
 		this.#entries = [...entriesToKeep, ...labels];
 		this.#sessionId = newSessionId;
+		this.#taskSiblingCandidate = undefined;
 		this.#sessionName = header.title;
 		this.#titleSource = header.titleSource;
 		this.#titleUpdatedAt = timestamp;
@@ -4852,6 +5041,12 @@ export class SessionManager {
 	 * auto-named `<timestamp>_<id>.jsonl` in `sessionDir`). Artifacts are copied
 	 * recursively by default; nested agents that deliberately share their parent's
 	 * artifact root may disable this with `copyArtifacts: false`.
+	 *
+	 * `seance` creates a read-only consult fork instead: artifacts stay in the
+	 * source (the header's `seanceSource` points lookups at them), inherited
+	 * workspace roots are dropped, and the source's `session_init` contracts
+	 * become inert `source_session_init` custom entries so revival never
+	 * mistakes them for the fork's own.
 	 */
 	static async forkFrom(
 		sourcePath: string,
@@ -4864,6 +5059,7 @@ export class SessionManager {
 			sessionFile?: string;
 			resetInheritedCost?: boolean;
 			repairInterruptedTail?: boolean;
+			seance?: boolean;
 		},
 	): Promise<SessionManager> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
@@ -4896,9 +5092,15 @@ export class SessionManager {
 		);
 		manager.#header.title = sourceHeader?.title;
 		manager.#header.titleSource = sourceHeader?.titleSource;
-		manager.#additionalDirectories = (sourceHeader?.additionalDirectories ?? []).filter(d => d !== path.resolve(cwd));
+		manager.#additionalDirectories = options?.seance
+			? []
+			: (sourceHeader?.additionalDirectories ?? []).filter(d => d !== path.resolve(cwd));
 		manager.#header.additionalDirectories =
 			manager.#additionalDirectories.length > 0 ? manager.#additionalDirectories : undefined;
+		if (options?.seance) {
+			manager.#header.seanceSource = path.resolve(sourcePath);
+			SessionManager.#neutralizeSessionInits(history);
+		}
 		manager.#sessionName = manager.#header.title;
 		manager.#titleSource = manager.#header.titleSource;
 		manager.#titleUpdatedAt = nowIso();
@@ -4912,10 +5114,27 @@ export class SessionManager {
 		}
 		manager.#forceFileCreation = true;
 		await manager.#rewriteAtomically();
-		if (options?.copyArtifacts !== false) {
+		if (!options?.seance && options?.copyArtifacts !== false) {
 			await copySessionArtifacts(sourcePath, manager.#sessionFile!);
 		}
 		return manager;
+	}
+
+	/** Replace inherited `session_init` entries, in place, with inert custom entries keeping the same tree position. */
+	static #neutralizeSessionInits(history: SessionEntry[]): void {
+		for (let index = 0; index < history.length; index++) {
+			const entry = history[index]!;
+			if (entry.type !== "session_init") continue;
+			const neutralized: CustomEntry = {
+				type: "custom",
+				customType: "source_session_init",
+				id: entry.id,
+				parentId: entry.parentId,
+				timestamp: entry.timestamp,
+				data: entry,
+			};
+			history[index] = neutralized;
+		}
 	}
 
 	/**
@@ -5082,6 +5301,7 @@ export class SessionManager {
 	): Promise<{
 		cwd: string;
 		init: PersistedSessionInit | null;
+		seanceSource?: string;
 	} | null> {
 		let header: SessionHeader | undefined;
 		const initEntries: FileEntry[] = [];
@@ -5100,13 +5320,30 @@ export class SessionManager {
 		}
 		// A missing, empty, or invalid file has no usable session.
 		if (!header) return null;
-		return { cwd: header.cwd ?? getProjectDir(), init: extractSessionInit(initEntries) };
+		return {
+			cwd: header.cwd ?? getProjectDir(),
+			init: extractSessionInit(initEntries),
+			seanceSource: header.seanceSource,
+		};
 	}
-	/** Continue the most recent session, or create a new one if none exists. */
+	/**
+	 * Continue the most recent session, or create a new one if none exists.
+	 *
+	 * When the chosen session's conversation went on in another file (it moved
+	 * off its file; see `findSessionContinuation`), this opens the copy to
+	 * resume instead and reports it to `onSessionContinuation`. The session the
+	 * terminal's record of its last session names was chosen, as a file named
+	 * to `--resume` is, so it is kept when it has turns its continuation lacks
+	 * ({@link findSessionContinuation}). Without that record the pick goes by
+	 * file time, and a process writes its exit record or an idle cache refresh
+	 * long after its last turn, so the pick can be any copy
+	 * ({@link findRecentSessionContinuation}).
+	 */
 	static async continueRecent(
 		cwd: string,
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
+		options: { onSessionContinuation?: (continuation: SessionContinuation) => void } = {},
 	): Promise<SessionManager> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
 		const resolvedCwd = path.resolve(cwd);
@@ -5179,11 +5416,17 @@ export class SessionManager {
 					// Anchor at the gone breadcrumb cwd so the moveTo below relocates the
 					// session: open() now falls back to the launch cwd for a missing
 					// recorded cwd, which would no-op moveTo when it equals `cwd`.
-					const manager = await SessionManager.open(breadcrumb.sessionFile, undefined, storage, {
-						initialCwd: breadcrumbCwd,
-					});
+					// The breadcrumb names this session, as a file named to `--resume` is named.
+					const continuation = await findSessionContinuation(breadcrumb.sessionFile, storage);
+					const manager = await SessionManager.open(
+						continuation?.session.path ?? breadcrumb.sessionFile,
+						undefined,
+						storage,
+						{ initialCwd: breadcrumbCwd },
+					);
 					try {
 						await manager.moveTo(cwd, sessionDir);
+						if (continuation) options.onSessionContinuation?.(continuation);
 						return manager;
 					} catch (err) {
 						if (!(err instanceof SessionMoveRefusedError)) throw err;
@@ -5208,6 +5451,16 @@ export class SessionManager {
 		}
 
 		if (chosenSession === undefined) chosenSession = await findMostRecentNonEmptySession(dir, storage);
+		if (chosenSession) {
+			const fromBreadcrumb = !!breadcrumb && path.resolve(chosenSession) === path.resolve(breadcrumb.sessionFile);
+			const continuation = fromBreadcrumb
+				? await findSessionContinuation(chosenSession, storage)
+				: await findRecentSessionContinuation(chosenSession, storage);
+			if (continuation) {
+				options.onSessionContinuation?.(continuation);
+				chosenSession = continuation.session.path;
+			}
+		}
 
 		const manager = new SessionManager(cwd, dir, true, storage);
 		if (chosenSession) await manager.setSessionFile(chosenSession);
@@ -5246,25 +5499,29 @@ export class SessionManager {
 	}
 
 	/**
-	 * Picker-facing project list: pinned sessions first, untitled empties
-	 * dropped. Titled empties stay — a title is user intent worth resuming.
-	 * Includes the same folder in the repository's other git worktrees, so a
-	 * session `/wt` moved stays reachable from the checkout it left.
+	 * Picker-facing project list in recency order (the picker floats pins),
+	 * untitled empties dropped. Titled empties stay — a title is user intent worth resuming.
+	 * By default includes the same folder in the repository's other git worktrees,
+	 * so a session `/wt` moved stays reachable from the checkout it left.
+	 * The directory scope limits the picker to its own session bucket.
 	 */
 	static async listForPicker(
 		cwd: string,
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
+		worktreeScope: "directory" | "repo" = "repo",
 	): Promise<SessionInfo[]> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
-		const [pinned, siblingDirs] = await Promise.all([loadPinnedSessionIds(), worktreeSessionDirs(cwd, dir)]);
-		return sortPinnedFirst(filterSessionsForPicker(await listSessions(dir, storage, siblingDirs), pinned), pinned);
+		const [pinned, siblingDirs] = await Promise.all([
+			loadPinnedSessionIds(),
+			worktreeScope === "repo" ? worktreeSessionDirs(cwd, dir) : [],
+		]);
+		return filterSessionsForPicker(await listSessions(dir, storage, siblingDirs), pinned);
 	}
 
 	/** Picker-facing cross-project list, same empty-session rule as {@link listForPicker}. */
 	static async listAllForPicker(storage: SessionStorage = new FileSessionStorage()): Promise<SessionInfo[]> {
-		const pinned = await loadPinnedSessionIds();
-		return sortPinnedFirst(filterSessionsForPicker(await listAllSessions(storage), pinned), pinned);
+		return filterSessionsForPicker(await listAllSessions(storage), await loadPinnedSessionIds());
 	}
 }
 

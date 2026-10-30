@@ -56,7 +56,7 @@ export type TextPredictRequest =
 	  }
 	/** Ingest history rows newer than each open engine's cursor. */
 	| { id: number; op: "sync" }
-	/** Persist and exit (a client found a daemon from another omp version). */
+	/** Persist and exit (a client found a daemon from an older omp version). */
 	| { id: number; op: "shutdown" };
 
 /** Daemon → client response. */

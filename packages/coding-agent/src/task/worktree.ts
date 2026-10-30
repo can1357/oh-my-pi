@@ -69,10 +69,31 @@ export function getGitNoIndexNullPath(): string {
 	return GIT_NO_INDEX_NULL_PATH;
 }
 
-/** Find nested git repositories (non-submodule) under the given root. */
-async function discoverNestedRepos(repoRoot: string): Promise<string[]> {
+/** Real path of the git common dir owning `dir`, or `undefined` outside any repo. */
+async function realCommonDir(dir: string): Promise<string | undefined> {
+	const commonDir = vcs.gitInfo(dir)?.commonDir;
+	if (!commonDir) return undefined;
+	// git writes realpath'd admin pointers; match them across symlinked
+	// prefixes (macOS /var -> /private/var).
+	return fs.realpath(commonDir).catch(() => path.resolve(commonDir));
+}
+
+/**
+ * Find nested git repositories (non-submodule) under `repoRoot`.
+ *
+ * A directory whose common dir belongs to one of `ownRepos` is a linked
+ * worktree of the same repository, not a nested repo, and is skipped with
+ * everything under it. A copied isolation carries every in-tree linked
+ * worktree (e.g. gitignored `.claude/worktrees/*`) whose `.git` pointer still
+ * targets the source checkout's admin dir; baselining each one re-hashes its
+ * whole tree against a foreign index and froze the host (#16068).
+ */
+async function discoverNestedRepos(repoRoot: string, ownRepos: readonly string[]): Promise<string[]> {
 	// Get submodule paths so we can exclude them
 	const submodulePaths = new Set(await vcs.requireGit(repoRoot).submodulePaths());
+	const ownCommonDirs = new Set(
+		(await Promise.all(ownRepos.map(realCommonDir))).filter((dir): dir is string => dir !== undefined),
+	);
 
 	// Find all .git dirs/files that aren't the root or known submodules
 	const result: string[] = [];
@@ -96,6 +117,8 @@ async function discoverNestedRepos(repoRoot: string): Promise<string[]> {
 				hasGit = true;
 			} catch {}
 			if (hasGit && !submodulePaths.has(rel)) {
+				const commonDir = await realCommonDir(full);
+				if (commonDir && ownCommonDirs.has(commonDir)) continue;
 				result.push(rel);
 				// Don't recurse into nested repos — they manage their own tree
 				continue;
@@ -263,14 +286,17 @@ async function writeSyntheticTree(
  * Capture the baseline of `repoRoot` and every nested repo under it. Each repo
  * baseline may buffer at most `budgetBytes` of uncommitted content (the
  * isolation-snapshot budget, {@link ISOLATION_BASELINE_MAX_CONTENT_BYTES}).
+ * Linked worktrees of any repo in `ownRepos` are not nested repos (see
+ * {@link discoverNestedRepos}).
  */
 export async function captureBaseline(
 	repoRoot: string,
 	budgetBytes: number = ISOLATION_BASELINE_MAX_CONTENT_BYTES,
+	ownRepos: readonly string[] = [repoRoot],
 ): Promise<WorktreeBaseline> {
 	const [root, nestedPaths] = await Promise.all([
 		captureRepoBaseline(repoRoot, budgetBytes),
-		discoverNestedRepos(repoRoot),
+		discoverNestedRepos(repoRoot, ownRepos),
 	]);
 	const nested = await Promise.all(
 		nestedPaths.map(async relativePath => ({
@@ -289,13 +315,16 @@ export async function captureBaseline(
  * own state is the only exact baseline: a baseline read from the live parent
  * before or after the copy also absorbs whatever other agents or merges wrote
  * in between, and that drift would surface as this task's changes.
+ *
+ * Copied linked worktrees may point at either the isolation's or the parent's
+ * admin dir, so both count as the root repository.
  */
 export async function captureIsolationBaseline(
 	isolationDir: string,
 	repoRoot: string,
 	budgetBytes: number = ISOLATION_BASELINE_MAX_CONTENT_BYTES,
 ): Promise<WorktreeBaseline> {
-	const { root, nested } = await captureBaseline(isolationDir, budgetBytes);
+	const { root, nested } = await captureBaseline(isolationDir, budgetBytes, [isolationDir, repoRoot]);
 	return {
 		root: { ...root, repoRoot },
 		nested: nested.map(({ relativePath, baseline }) => ({
@@ -369,19 +398,33 @@ export interface DeltaPatchResult {
 	nestedPatches: NestedRepoPatch[];
 }
 
+async function hasGitEntry(dir: string): Promise<boolean> {
+	try {
+		await fs.lstat(path.join(dir, ".git"));
+		return true;
+	} catch (error) {
+		if (isEnoent(error)) return false;
+		throw error;
+	}
+}
+
 export async function captureDeltaPatch(isolationDir: string, baseline: WorktreeBaseline): Promise<DeltaPatchResult> {
 	// Synthetic tree construction may read a new gitlink commit before the
 	// root patch exists. Keep isolation-local objects in the source ODB first;
-	// this does not change its refs, HEAD, or index.
-	for (const relativePath of await vcs.requireGit(baseline.root.repoRoot).submodulePaths()) {
+	// this does not change its refs, HEAD, or index. Submodules added inside
+	// the isolation have no source checkout or `modules/<name>` admin dir (a
+	// patch apply never creates one), so their objects go to the source root
+	// ODB — the only store that survives isolation cleanup.
+	const sourceRoot = baseline.root.repoRoot;
+	const relativePaths = new Set([
+		...(await vcs.requireGit(sourceRoot).submodulePaths()),
+		...(await vcs.requireGit(isolationDir).submodulePaths()),
+	]);
+	for (const relativePath of relativePaths) {
 		const isolatedDir = path.join(isolationDir, relativePath);
-		try {
-			await fs.lstat(path.join(isolatedDir, ".git"));
-		} catch (error) {
-			if (isEnoent(error)) continue;
-			throw error;
-		}
-		await vcs.copyGitObjects(isolatedDir, path.join(baseline.root.repoRoot, relativePath));
+		const sourceDir = path.join(sourceRoot, relativePath);
+		if (!(await hasGitEntry(isolatedDir))) continue;
+		await vcs.copyGitObjects(isolatedDir, (await hasGitEntry(sourceDir)) ? sourceDir : sourceRoot);
 	}
 	const rootPatch = await captureRepoDeltaPatch(isolationDir, baseline.root, baseline.root.repoRoot);
 	const nestedPatches: NestedRepoPatch[] = [];
@@ -831,9 +874,19 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 
 	for (const commitSha of agentCommits) {
 		const taskStatePatch = await diffTreeOrEmpty(isolationRepo, dirtyBaselineTree, `${commitSha}^{tree}`);
-		const currentFilteredTree = await writeSyntheticTree(opts.repoRoot, baselineSha, [taskStatePatch], {
-			threeWay: true,
-		});
+		// The delta is captured against `HEAD + baseline WIP`, so synthesise the
+		// filtered tree through `patchTree` with that WIP context: hunks that
+		// touch WIP paths — including deletions of untracked WIP the agent never
+		// committed — replay against the WIP state and are rewound afterwards
+		// instead of failing against the clean baseline tree with
+		// "patch does not apply: … does not exist".
+		const currentFilteredTree = await patchTree(
+			opts.repoRoot,
+			baselineSha,
+			opts.taskId,
+			taskStatePatch,
+			opts.baseline.root,
+		);
 		const commitPatchText = await diffTreeOrEmpty(repo, previousFilteredTree, currentFilteredTree);
 		if (commitPatchText.trim()) {
 			const details = await isolationRepo.commitDetails(commitSha);
@@ -860,10 +913,17 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 		return commitPatch(opts.repoRoot, tip, opts.taskId, opts.rootPatch, msg, undefined, opts.baseline.root);
 	}
 	// Reconstruct the final HEAD-derived tree with the same dirty-side blobs
-	// and 3-way synthesis used above; anything left is uncommitted work.
-	const finalFilteredTree = await writeSyntheticTree(opts.repoRoot, baselineSha, [opts.rootPatch], {
-		threeWay: true,
-	});
+	// and 3-way synthesis used above; anything left is uncommitted work. The
+	// same WIP context applies: `rootPatch` is captured against `HEAD + WIP`,
+	// so synthesise through `patchTree` or hunks touching WIP paths fail on the
+	// clean baseline tree ("patch does not apply: … does not exist").
+	const finalFilteredTree = await patchTree(
+		opts.repoRoot,
+		baselineSha,
+		opts.taskId,
+		opts.rootPatch,
+		opts.baseline.root,
+	);
 	const leftoverPatch = await diffTreeOrEmpty(repo, previousFilteredTree, finalFilteredTree);
 	if (!leftoverPatch.trim()) return tip;
 	const msg = (opts.commitMessage && (await opts.commitMessage(leftoverPatch))) || opts.fallbackMessage;

@@ -13,6 +13,8 @@ import {
 	setDisabledProviders,
 } from "@oh-my-pi/pi-coding-agent/capability";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentCompactionThresholdOverride } from "@oh-my-pi/pi-coding-agent/config/compaction-threshold";
 import type { BeforeSubagentSpawnEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
@@ -24,6 +26,7 @@ import * as planHandoff from "@oh-my-pi/pi-coding-agent/plan-mode/plan-handoff";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { createEvalCustomTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
@@ -59,6 +62,7 @@ function session(
 		cwd?: string;
 		settings?: Settings;
 		planMode?: boolean;
+		parentSpawns?: string;
 		outputSchema?: unknown;
 		maxDepth?: number;
 		isolationEnabled?: boolean;
@@ -90,7 +94,7 @@ function session(
 					: {}),
 			}),
 		getSessionFile: () => null,
-		getSessionSpawns: () => "*",
+		getSessionSpawns: () => options.parentSpawns ?? "*",
 		getSessionAgents: () => options.sessionAgents ?? [],
 		getPlanModeState: () => (options.planMode ? { enabled: true } : undefined),
 	} as unknown as ToolSession;
@@ -211,6 +215,102 @@ describe("structured subagent primitive", () => {
 		inheritedSession.outputSchemaMode = "strict";
 		const inherited = await resolveEffectiveSubagentPolicy(request({ session: inheritedSession }));
 		expect(inherited.schema).toMatchObject({ source: "session", mode: "strict", outputSchemaOverridesAgent: false });
+	});
+
+	it("uses saved seance models in active-role/default order and honors an explicit available override", async () => {
+		const seanceAgent = getBundledAgent("seance");
+		if (!seanceAgent) throw new Error("Expected the bundled seance agent");
+		mockDiscovery(seanceAgent);
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-seance-policy-"));
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage);
+		const cwd = path.join(tempDir, "project");
+		const sourceFile = path.join(tempDir, "sessions", "source.jsonl");
+		await fs.mkdir(path.dirname(sourceFile), { recursive: true });
+		await Bun.write(
+			sourceFile,
+			`${[
+				{ type: "session", version: 3, id: "saved-source", timestamp: "2026-10-01T00:00:00.000Z", cwd },
+				{
+					type: "model_change",
+					id: "default-model",
+					parentId: null,
+					timestamp: "2026-10-01T00:00:01.000Z",
+					model: "anthropic/claude-sonnet-4-5",
+					role: "default",
+				},
+				{
+					type: "model_change",
+					id: "active-model",
+					parentId: "default-model",
+					timestamp: "2026-10-01T00:00:02.000Z",
+					model: "anthropic/claude-sonnet-4-6",
+					role: "fast",
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		const caller = Object.assign(session({ cwd }), { modelRegistry });
+		try {
+			const saved = await resolveEffectiveSubagentPolicy(
+				request({ session: caller, agent: "seance", sourceSession: sourceFile }),
+			);
+			expect(saved.preparedSession?.fork.sourceFile).toBe(sourceFile);
+
+			expect(saved.modelOverride).toEqual(["anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4-5"]);
+			expect(saved.enableLsp).toBe(false);
+			expect(saved.enableIrc).toBe(false);
+
+			const overridden = await resolveEffectiveSubagentPolicy(
+				request({
+					session: caller,
+					agent: "seance",
+					sourceSession: sourceFile,
+					model: "anthropic/claude-sonnet-4-5",
+				}),
+			);
+			expect(overridden.modelOverride).toEqual(["anthropic/claude-sonnet-4-5"]);
+		} finally {
+			authStorage.close();
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("fails closed when the source has no saved model or an explicit model is unavailable", async () => {
+		const seanceAgent = getBundledAgent("seance");
+		if (!seanceAgent) throw new Error("Expected the bundled seance agent");
+		mockDiscovery(seanceAgent);
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-seance-model-fail-"));
+		const authStorage = await AuthStorage.create(":memory:");
+		const modelRegistry = new ModelRegistry(authStorage);
+		const cwd = path.join(tempDir, "project");
+		const sourceFile = path.join(tempDir, "sessions", "no-model.jsonl");
+		await fs.mkdir(path.dirname(sourceFile), { recursive: true });
+		await Bun.write(
+			sourceFile,
+			`${JSON.stringify({ type: "session", version: 3, id: "no-model-source", timestamp: "2026-10-01T00:00:00.000Z", cwd })}\n`,
+		);
+		const caller = Object.assign(session({ cwd }), { modelRegistry });
+		try {
+			await expect(
+				resolveEffectiveSubagentPolicy(request({ session: caller, agent: "seance", sourceSession: sourceFile })),
+			).rejects.toThrow("The source session has no saved model.");
+			await expect(
+				resolveEffectiveSubagentPolicy(
+					request({
+						session: caller,
+						agent: "seance",
+						sourceSession: sourceFile,
+						model: "missing-provider/missing-model",
+					}),
+				),
+			).rejects.toThrow("No available saved model can serve this source.");
+		} finally {
+			authStorage.close();
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	it("gives task and eval invocations identical blocked-agent preflight errors", async () => {
@@ -380,6 +480,25 @@ describe("structured subagent primitive", () => {
 
 		expect(dispatched[0]?.inheritedSessionAgents).toEqual([inheritedAgent]);
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+	it("holds the parent on an inline child until it settles, but not on a detached one", async () => {
+		mockDiscovery();
+		const awaits = AgentRegistry.global().awaits;
+		const heldDuringRun: boolean[] = [];
+		const childIds: string[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			childIds.push(options.id);
+			heldDuringRun.push(awaits.blocksOn("Main", options.id, Date.now()));
+			return result();
+		});
+
+		const inline = await runStructuredSubagent(request({ detached: false, retainArtifacts: true }));
+		const detached = await runStructuredSubagent(request({ detached: true, retainArtifacts: true }));
+
+		expect(heldDuringRun).toEqual([true, false]);
+		expect(awaits.blocksOn("Main", childIds[0]!, 0)).toBe(false);
+		await fs.rm(inline.artifactsDir, { recursive: true, force: true });
+		await fs.rm(detached.artifactsDir, { recursive: true, force: true });
 	});
 	it("propagates a custom thinking-suffixed role alias through policy, dispatch, and settlement", async () => {
 		const customAgent = { ...AGENT, model: ["@reviewer:high"] };
@@ -629,6 +748,157 @@ describe("structured subagent primitive", () => {
 			);
 		}
 		expect(dispatch).not.toHaveBeenCalled();
+	});
+
+	it("returns a prose answer in one turn when structured task results are disabled", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-unstructured-forwarding-"));
+		const cwd = path.join(root, "project");
+		await fs.mkdir(cwd, { recursive: true });
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorage.keys.setRuntime("mock", "test-key");
+		const sourceId = "structured-subagent-unstructured-regression";
+		registerMockApi(sourceId);
+		const report = "The direct answer is complete without a yield call.";
+		const model = createMockModel({
+			id: "structured-subagent-unstructured",
+			handler: () => ({ content: [report] }),
+		});
+		const modelRegistry = new ModelRegistry(authStorage, path.join(root, "models.yml"));
+		const find = modelRegistry.find.bind(modelRegistry);
+		modelRegistry.find = (provider, id) => (provider === "mock" && id === model.id ? model : find(provider, id));
+		modelRegistry.getAvailable = () => [model];
+		mockDiscovery({
+			...AGENT,
+			tools: ["read", "yield"],
+			model: [`mock/${model.id}`],
+		});
+		const parentSession = Object.assign(session({ cwd }), {
+			authStorage,
+			modelRegistry,
+			restrictToolNames: true,
+			enableMCP: false,
+			enableLsp: false,
+			enableIrc: false,
+		});
+		const agentId = "UnstructuredForwarding";
+		let artifactsDir: string | undefined;
+
+		try {
+			const settled = await runStructuredSubagent(
+				request({
+					session: parentSession,
+					structured: false,
+					identity: { id: agentId },
+					keepAlive: false,
+				}),
+			);
+			artifactsDir = settled.artifactsDir;
+
+			expect(model.calls).toHaveLength(1);
+			expect(model.calls[0]?.context.tools?.some(tool => tool.name === "yield") ?? false).toBe(false);
+			expect(settled.result.exitCode).toBe(0);
+			expect(settled.result.output).toBe(report);
+			expect(settled.result.structuredOutput).toBeUndefined();
+		} finally {
+			const ref = AgentRegistry.global().get(agentId);
+			try {
+				await ref?.session?.dispose();
+			} finally {
+				try {
+					AgentRegistry.global().unregister(agentId);
+					if (artifactsDir) await fs.rm(artifactsDir, { recursive: true, force: true });
+				} finally {
+					unregisterCustomApis(sourceId);
+					authStorage.close();
+					await fs.rm(root, { recursive: true, force: true });
+				}
+			}
+		}
+	});
+
+	it("runs the remaining permitted scout when a plan-mode task omits its agent", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-plan-default-scout-"));
+		const cwd = path.join(root, "project");
+		await fs.mkdir(cwd, { recursive: true });
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorage.keys.setRuntime("mock", "test-key");
+		const sourceId = "plan-default-scout-regression";
+		registerMockApi(sourceId);
+		const agentId = "PlanModeDefaultScout";
+		let artifactDir: string | undefined;
+		try {
+			const report = "The permitted plan-mode scout returned this answer.";
+			const model = createMockModel({
+				id: "plan-default-scout",
+				handler: () => ({ content: [report] }),
+			});
+			const modelRegistry = new ModelRegistry(authStorage, path.join(root, "models.yml"));
+			const find = modelRegistry.find.bind(modelRegistry);
+			modelRegistry.find = (provider, id) => (provider === "mock" && id === model.id ? model : find(provider, id));
+			modelRegistry.getAvailable = () => [model];
+			const seanceAgent = getBundledAgent("seance");
+			const scoutAgent = getBundledAgent("scout");
+			if (!seanceAgent || !scoutAgent) throw new Error("Expected bundled seance and scout agents");
+			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+				agents: [
+					seanceAgent,
+					{
+						...scoutAgent,
+						model: [`mock/${model.id}`],
+						tools: ["read", "yield"],
+					},
+				],
+				projectAgentsDir: null,
+			});
+			const settings = Settings.isolated({
+				"task.maxRecursionDepth": 2,
+				"task.isolation.enabled": false,
+				"task.batch": false,
+				"task.structured": false,
+				"task.enableLsp": false,
+				"task.completionProbe": false,
+				"compaction.enabled": false,
+				"retry.enabled": false,
+				"advisor.enabled": false,
+				"autolearn.enabled": false,
+				"todo.enabled": false,
+			});
+			const parentSession = Object.assign(session({ cwd, settings, planMode: true, parentSpawns: "seance,scout" }), {
+				authStorage,
+				modelRegistry,
+				restrictToolNames: true,
+				enableMCP: false,
+				enableLsp: false,
+				enableIrc: false,
+			});
+			const task = await TaskTool.create(parentSession);
+			const result = await task.execute("plan-default-scout", {
+				name: agentId,
+				task: "Return the plan-mode scout answer.",
+				solutionSpace: "The requested agent choice is a single permitted alternative.",
+			});
+
+			artifactDir = AgentRegistry.global().get(agentId)?.sessionFile
+				? path.dirname(AgentRegistry.global().get(agentId)!.sessionFile!)
+				: undefined;
+			expect(result.details?.results).toHaveLength(1);
+			expect(result.details?.results[0]?.agent).toBe("scout");
+			expect(result.content.map(part => (part.type === "text" ? part.text : "")).join("\n")).toContain(report);
+		} finally {
+			const ref = AgentRegistry.global().get(agentId);
+			try {
+				await ref?.session?.dispose();
+			} finally {
+				try {
+					AgentRegistry.global().unregister(agentId);
+					if (artifactDir) await fs.rm(artifactDir, { recursive: true, force: true });
+				} finally {
+					unregisterCustomApis(sourceId);
+					authStorage.close();
+					await fs.rm(root, { recursive: true, force: true });
+				}
+			}
+		}
 	});
 
 	it("does not return unavailable structured metadata without an effective schema", async () => {

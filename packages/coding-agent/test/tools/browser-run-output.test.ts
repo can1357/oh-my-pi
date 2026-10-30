@@ -7,31 +7,25 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
 import type { ElementHandle } from "puppeteer-core";
 
-// Regression coverage for the invisible-output failure mode: `display("string")`,
-// `console.log`, and `print` reach the runtime as `onText` chunks, which the browser
+// Regression coverage for the invisible-output failure mode: `console.log` and
+// `print` reach the runtime as `onText` chunks, which the browser
 // embedders used to route to the debug log only — the tool result showed a bare
 // "Ran code on tab" while the displayed text vanished.
 describe("browser run output — stream text reaches the tool result", () => {
 	it("surfaces buffered stream text as a display entry on finish", () => {
 		const output = new RunOutput();
-		output.pushText("plain string via display()\n");
+		output.pushText("plain string via print()\n");
 		output.pushText("console.log line\n");
 
-		expect(output.finish()).toEqual([{ type: "text", text: "plain string via display()\nconsole.log line" }]);
+		expect(output.finish()).toEqual([{ type: "text", text: "plain string via print()\nconsole.log line" }]);
 	});
 
-	it("keeps stream text ordered around display() payloads", () => {
+	it("adds nothing for views, whose text is already in the stream", () => {
 		const output = new RunOutput();
-		output.pushText("before\n");
-		output.pushDisplay({ type: "json", data: { a: 1 } });
-		output.pushText("after\n");
+		output.pushText("{ a: 1 }\n");
+		output.pushDisplay({ type: "view", text: "{ a: 1 }\n", view: { kind: "json", value: { a: 1 } } });
 
-		const entries = output.finish();
-		expect(entries.map(e => (e.type === "text" ? e.text : e.type))).toEqual([
-			"before",
-			JSON.stringify({ a: 1 }, null, 2),
-			"after",
-		]);
+		expect(output.finish()).toEqual([{ type: "text", text: "{ a: 1 }" }]);
 	});
 
 	it("flushes pending text before pre-built entries (screenshot captions) and emits images verbatim", () => {
@@ -57,11 +51,9 @@ describe("browser run output — stream text reaches the tool result", () => {
 // was a live failure.
 describe("browser handle enrichment — fill()", () => {
 	it("adds a fill() that clears the current value before typing", async () => {
-		const calls: string[] = [];
 		const node = { value: "old", focused: false };
 		const stub = {
-			evaluate: async (fn: (el: unknown) => unknown) => {
-				calls.push("evaluate");
+			evaluate: async (fn: (el: unknown) => unknown) =>
 				fn({
 					get value() {
 						return node.value;
@@ -73,17 +65,20 @@ describe("browser handle enrichment — fill()", () => {
 						node.focused = true;
 					},
 					matches: () => false,
-				});
-			},
-			type: async (text: string) => {
-				calls.push("type");
-				node.value += text;
+				}),
+			frame: {
+				page: () => ({
+					keyboard: {
+						type: async (text: string) => {
+							node.value += text;
+						},
+					},
+				}),
 			},
 		} as unknown as ElementHandle;
 
 		await toActionableHandle(stub).fill("fresh");
 
-		expect(calls).toEqual(["evaluate", "evaluate", "type"]);
 		expect(node.focused).toBe(true);
 		expect(node.value).toBe("fresh");
 	});
@@ -239,7 +234,7 @@ describe("browser handle enrichment — guarded actions", () => {
 	it("runs the guarded fill as a single op without re-entering the wrapped type()", async () => {
 		const node = { value: "old", focused: false };
 		const stub = {
-			evaluate: async (fn: (el: unknown) => unknown) => {
+			evaluate: async (fn: (el: unknown) => unknown) =>
 				fn({
 					get value() {
 						return node.value;
@@ -251,8 +246,7 @@ describe("browser handle enrichment — guarded actions", () => {
 						node.focused = true;
 					},
 					matches: () => false,
-				});
-			},
+				}),
 			type: async () => {},
 			frame: {
 				page: () => ({

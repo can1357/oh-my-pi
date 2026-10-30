@@ -222,6 +222,27 @@ describe("read tool column truncation vs hashline snapshot", () => {
 		expect(await fs.readFile(filePath, "utf8")).toBe(original.replace("fourth", "FOURTH"));
 	});
 
+	it("rejects a block PUT or CUT whose interior holds a column-cut line", async () => {
+		const filePath = path.join(tmpDir, "block.ts");
+		const longLine = `note: ${"abcdefghij".repeat(80)} END-OF-LINE-TAIL`;
+		const original = `function f() {\n\tconst x = "${longLine}";\n\treturn x;\n}\n`;
+		await fs.writeFile(filePath, original);
+		const session = createSession(tmpDir);
+		cfgToolsOutputMaxColumns.set(session.settings, 768);
+		const readText = textOutput(await new ReadTool(session).execute("read-block", { path: filePath }));
+		const { header } = extractHeader(readText);
+		const shownLine = readText
+			.split("\n")
+			.find(line => line.startsWith("2:"))!
+			.slice(2, -1);
+		const editTool = new EditTool(session, "hashline");
+		for (const body of [`PUT 1*:\n+function f() {\n+${shownLine}\n+\treturn x.trim();\n+}\n`, "CUT 1*\n"]) {
+			const result = await editTool.execute("edit-block", { input: `${header}\n${body}` });
+			expect(textOutput(result)).toContain("block.ts:2:raw");
+			expect(await fs.readFile(filePath, "utf8")).toBe(original);
+		}
+	});
+
 	it("marks a line seen when column capping is disabled", async () => {
 		const filePath = path.join(tmpDir, "uncapped.txt");
 		const longLine = `note: ${"abcdefghij".repeat(80)} END-OF-LINE-TAIL`;

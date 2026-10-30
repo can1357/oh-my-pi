@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
+import { Agent } from "@oh-my-pi/pi-agent-core";
 import { stripVTControlCharacters } from "node:util";
 import { type Component, Container, isFocusable, type OverlayOptions, setKeybindings } from "@oh-my-pi/pi-tui";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -42,8 +43,10 @@ function makeHarness() {
 	};
 	const showOverlay = vi.fn(() => fakeHandle);
 	let uiContext: ExtensionUIContext | undefined;
-	const steering: string[] = [];
-	const sessionListeners = new Set<(event: { type: string; steering?: string[] }) => void>();
+	// A real agent-core queue: approvals track and reorder its steering messages.
+	const agent = new Agent();
+	const steeringChips = () =>
+		agent.peekSteeringQueue().map(message => (message.role === "user" ? String(message.content) : ""));
 	const ctx = {
 		editor,
 		ui: {
@@ -55,12 +58,12 @@ function makeHarness() {
 		},
 		editorContainer,
 		session: {
+			agent,
 			extensionRunner: undefined,
 			setUsageFallbackConfirmer: vi.fn(),
-			getQueuedMessages: () => ({ steering: [...steering], followUp: [], liveSteered: 0 }),
+			getQueuedMessages: () => ({ steering: steeringChips(), followUp: [], liveSteered: 0 }),
 			subscribe(listener: (event: { type: string; steering?: string[] }) => void) {
-				sessionListeners.add(listener);
-				return () => sessionListeners.delete(listener);
+				return agent.onQueueChange(() => listener({ type: "queue_update", steering: steeringChips() }));
 			},
 		},
 		setToolUIContext(context: ExtensionUIContext, hasUI: boolean): void {
@@ -69,6 +72,7 @@ function makeHarness() {
 		},
 		addAutocompleteProvider,
 		syncComposerShape: vi.fn(),
+		syncExtensionLinks: vi.fn(),
 		showStatus: vi.fn(),
 	} as unknown as InteractiveModeContext;
 
@@ -86,15 +90,14 @@ function makeHarness() {
 		controller,
 		inputController: (readText: () => Promise<string>) =>
 			new InputController(ctx, { readImage: async () => null, readText }),
-		/** Queue a user steer the way the session does: append, then emit `queue_update`. */
+		agent,
+		/** Queue a user steer the way the session does: the agent queue grows and notifies. */
 		queueSteer(text: string): void {
-			steering.push(text);
-			for (const listener of sessionListeners) listener({ type: "queue_update", steering: [...steering] });
+			agent.steer({ role: "user", content: text, timestamp: Date.now() });
 		},
 		/** Deliver the queued steering at the batch boundary: the queue empties. */
 		deliverSteering(): void {
-			steering.length = 0;
-			for (const listener of sessionListeners) listener({ type: "queue_update", steering: [] });
+			agent.clearSteeringQueue();
 		},
 		handleInput(data: string): void {
 			if (!focused?.handleInput) throw new Error("Expected a focused input component");
@@ -321,6 +324,35 @@ describe("ExtensionUiController editor UI", () => {
 		expect(harness.editorContainer.children).toEqual([harness.editor]);
 	});
 
+	it("lets up/down take the ask from a populated prompt and restores the untouched draft", async () => {
+		const harness = makeHarness();
+		harness.editor.setText("half typed prompt");
+		const questions: ExtensionAskDialogQuestion[] = [
+			{ id: "confirm", question: "Continue?", options: [{ label: "Yes" }, { label: "No" }] },
+		];
+
+		const pending = harness.controller.showAskDialog(questions);
+		const ask = harness.editorContainer.children[0];
+		expect(ask).toBeInstanceOf(AskDialogComponent);
+		ask?.render?.(80);
+		expect(harness.editor.focused).toBe(true);
+
+		// Down hands the keyboard to the ask without touching the draft; the next
+		// Down moves to "No", and typing/Enter now answer instead of editing.
+		ask?.handleInput?.("\x1b[B");
+		const rendered = stripVTControlCharacters(ask?.render?.(80).join("\n") ?? "");
+		expect(rendered).not.toContain("typing edits your prompt");
+		expect(harness.editor.focused).toBe(false);
+		ask?.handleInput?.("\x1b[B");
+		ask?.handleInput?.("\r");
+		expect(harness.editor.getText()).toBe("half typed prompt");
+		const result = await pending;
+		expect(result?.kind === "submit" ? result.results[0]?.selectedOptions : undefined).toEqual(["No"]);
+		expect(harness.editorContainer.children).toEqual([harness.editor]);
+		expect(harness.getFocused()).toBe(harness.editor);
+		expect(harness.editor.getText()).toBe("half typed prompt");
+	});
+
 	it("does not fire editor-slot shortcuts that would orphan the ask dialog (#6738)", () => {
 		const harness = makeHarness();
 		harness.editor.setText("draft in progress");
@@ -532,6 +564,29 @@ describe("ExtensionUiController tool approval", () => {
 		compact: "Allow tool: bash\nCommand: rm -rf build",
 	};
 
+	it("lists the choices over a live composer: with it empty, the arrows and Enter take the session approval", async () => {
+		const now = vi.spyOn(performance, "now").mockReturnValue(1_000);
+		try {
+			const harness = makeHarness();
+			const pending = harness.controller.showCollabAwareApproval({
+				...prompt,
+				session: "Approve bash for this session",
+			});
+			const [dialog] = harness.editorContainer.children;
+			expect(harness.editorContainer.children).toEqual([dialog, harness.editor]);
+			// The composer's cursor stays visible: typing there steers instead.
+			expect(harness.editor.focused).toBe(true);
+			now.mockReturnValue(2_000);
+			harness.handleInput("\x1b[B");
+			harness.handleInput("\r");
+			expect(await pending).toBe("session");
+			expect(harness.editorContainer.children).toEqual([harness.editor]);
+			expect(harness.getFocused()).toBe(harness.editor);
+		} finally {
+			now.mockRestore();
+		}
+	});
+
 	it("lets the composer steer while a call waits: the queued message denies the call", async () => {
 		const harness = makeHarness();
 		// A steer queued before the prompt appeared does not answer it.
@@ -540,13 +595,13 @@ describe("ExtensionUiController tool approval", () => {
 		const pending = harness.controller.showCollabAwareApproval(prompt);
 		const [dialog] = harness.editorContainer.children;
 		expect(harness.editorContainer.children).toEqual([dialog, harness.editor]);
-		// Enter on an empty composer is swallowed: the dialog stays up (settling unmounts it synchronously).
+		// An Enter as the prompt appears is ignored: the dialog stays up (settling unmounts it synchronously).
 		harness.handleInput("\r");
 		expect(harness.editorContainer.children).toEqual([dialog, harness.editor]);
 		for (const key of "keep the build dir") harness.handleInput(key);
 		expect(harness.editor.getText()).toBe("keep the build dir");
 		harness.handleInput("\r");
-		expect(await pending).toBe(false);
+		expect(await pending).toBe("deny");
 		expect(harness.editorContainer.children).toEqual([harness.editor]);
 		expect(harness.getFocused()).toBe(harness.editor);
 	});
@@ -558,8 +613,8 @@ describe("ExtensionUiController tool approval", () => {
 		const second = harness.controller.showCollabAwareApproval({ ...prompt, full: "Allow tool: write" });
 		for (const key of "stop") harness.handleInput(key);
 		harness.handleInput("\r");
-		expect(await first).toBe(false);
-		expect(await second).toBe(false);
+		expect(await first).toBe("deny");
+		expect(await second).toBe("deny");
 		expect(harness.editorContainer.children).toEqual([harness.editor]);
 	});
 
@@ -569,11 +624,40 @@ describe("ExtensionUiController tool approval", () => {
 		const first = harness.controller.showCollabAwareApproval(prompt);
 		for (const key of "stop") harness.handleInput(key);
 		harness.handleInput("\r");
-		expect(await first).toBe(false);
+		expect(await first).toBe("deny");
 		// An exclusive call asks only after the denied one settled; the steer is still queued.
-		expect(await harness.controller.showCollabAwareApproval(prompt)).toBe(false);
+		expect(await harness.controller.showCollabAwareApproval(prompt)).toBe("deny");
 		// Delivered at the batch boundary: the next turn's approvals ask again.
 		harness.deliverSteering();
+		void harness.controller.showCollabAwareApproval(prompt);
+		expect(harness.editorContainer.children).toHaveLength(2);
+	});
+
+	it("delivers the steer that denied the call ahead of an older queued one", async () => {
+		const harness = makeHarness();
+		harness.queueSteer("earlier message");
+		harness.editor.onSubmit = text => harness.queueSteer(text);
+		const pending = harness.controller.showCollabAwareApproval(prompt);
+		for (const key of "keep the build dir") harness.handleInput(key);
+		harness.handleInput("\r");
+		expect(await pending).toBe("deny");
+		// One-at-a-time delivery takes the head at the batch boundary.
+		expect(harness.agent.peekSteeringQueue().map(message => message.role === "user" && message.content)).toEqual([
+			"keep the build dir",
+			"earlier message",
+		]);
+	});
+
+	it("an equal-looking steer queued after the denying one was delivered does not answer a new prompt", async () => {
+		const harness = makeHarness();
+		harness.editor.onSubmit = text => harness.queueSteer(text);
+		const first = harness.controller.showCollabAwareApproval(prompt);
+		for (const key of "[Image]") harness.handleInput(key);
+		harness.handleInput("\r");
+		expect(await first).toBe("deny");
+		harness.deliverSteering();
+		// A later turn's steer with the same chip text predates the next prompt.
+		harness.queueSteer("[Image]");
 		void harness.controller.showCollabAwareApproval(prompt);
 		expect(harness.editorContainer.children).toHaveLength(2);
 	});

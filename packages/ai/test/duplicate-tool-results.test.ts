@@ -861,7 +861,7 @@ describe("Composite Tool-Call Id Pairing", () => {
 			makeToolResult("call_A|fc_RESULT", "205 tools found", 3),
 		];
 
-		const transformed = transformMessages(messages, anthropicTarget, normalizeToolCallId);
+		const transformed = transformMessages(messages, anthropicTarget, id => normalizeToolCallId(id));
 
 		expect(hasSynthetic(transformed)).toBe(false);
 		const callIds = transformed
@@ -905,7 +905,7 @@ describe("Composite Tool-Call Id Pairing", () => {
 			makeToolResult("call_A|fc_RESULT", "205 tools found", 3),
 		];
 
-		const transformed = transformMessages(messages, anthropicTarget, normalizeToolCallId);
+		const transformed = transformMessages(messages, anthropicTarget, id => normalizeToolCallId(id));
 
 		expect(hasSynthetic(transformed)).toBe(false);
 		const callIds = transformed

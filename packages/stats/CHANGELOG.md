@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+## [18.14.0] - 2026-10-29
+
+### Changed
+
+- Improved `omp stats` session synchronization performance by approximately 2–5× on large histories. The first sync after upgrading may take up to a minute while the stats database is optimized.
+
+### Fixed
+
+- Fixed `/stats` and `omp stats` failing when another dashboard was syncing sessions or the configured port was already in use; busy dashboards are now reused, and a free port is selected when necessary.
+
+## [18.13.3] - 2026-10-28
+
+### Changed
+
+- Updated Bun engine requirement to ≥1.4.4
+
+## [18.12.0] - 2026-10-17
+
+### Fixed
+
+- Fixed usage stats pricing Google Antigravity and MiniMax Token Plan models at $0 when their catalog rows carry no price; they now use the catalog's pricing peer, as `xai-oauth` already did ([#16092](https://github.com/can1357/oh-my-pi/pull/16092) by [@H4vC](https://github.com/H4vC))
+
 ## [18.11.0] - 2026-10-14
 
 ### Fixed

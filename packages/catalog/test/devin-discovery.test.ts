@@ -1,4 +1,7 @@
-import { beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { FetchImpl } from "@oh-my-pi/pi-utils";
 // Import from source, not the package specifier: the workspace `node_modules`
 // copy resolves to the primary checkout, not this worktree.
@@ -24,6 +27,8 @@ import {
 import { create, fromBinary, toBinary } from "../src/discovery/protobuf";
 import { Effort } from "../src/effort";
 import { providerEntry } from "../src/compat/providers";
+import { readModelCache, writeModelCache } from "../src/model-cache";
+import { resolveProviderModels } from "../src/model-manager";
 import { calculateUncachedInputCost, getTimeBasedPricingPeriod } from "../src/models";
 import { devinModelManagerOptions } from "../src/provider-models/special";
 import type { Api, Model, ModelSpec, ThinkingConfig } from "../src/types";
@@ -43,6 +48,8 @@ interface ConfigInit {
 	harnessUids?: string[];
 	/** `ClientModelConfig.maxTokens` — the context window. */
 	contextWindow?: number;
+	/** `ModelInfo.maxTokens` — where current catalogs carry the context window. */
+	modelInfoContextWindow?: number;
 	maxOutputTokens?: number;
 	features?: {
 		supportsThinking?: boolean;
@@ -150,6 +157,7 @@ function config(init: ConfigInit): ClientModelConfig {
 						modelUid: init.uid,
 						displayOption: init.displayOption ?? DisplayOption.UNSPECIFIED,
 						maxOutputTokens: init.maxOutputTokens ?? 64_000,
+						maxTokens: init.modelInfoContextWindow ?? 0,
 						isModelRouter: init.isModelRouter ?? false,
 						harnessUids: init.harnessUids ?? [],
 						...(init.features !== undefined ? { modelFeatures: create(ModelFeaturesSchema, init.features) } : {}),
@@ -333,6 +341,12 @@ const FIXTURE_CONFIGS: readonly ClientModelConfig[] = [
 		features: { supportsThinking: true, supportsToolCalls: true },
 	}),
 	config({
+		uid: "info-context",
+		label: "Info Context",
+		contextWindow: 0,
+		modelInfoContextWindow: 1_048_576,
+	}),
+	config({
 		uid: "priced-model",
 		label: "Priced Model",
 		features: {
@@ -380,6 +394,28 @@ const FIXTURE_CONFIGS: readonly ClientModelConfig[] = [
 let models: ModelSpec<"devin-agent">[];
 let requestMetadata: Metadata | undefined;
 
+/** Unprefixed Devin session token, as OMP's own Devin login stores it. */
+const SESSION_TOKEN = "header.payload.signature";
+
+function captureDiscoveryKey(): { fetch: FetchImpl; keys: string[] } {
+	const keys: string[] = [];
+	const payload = toBinary(
+		GetCliModelConfigsResponseSchema,
+		create(GetCliModelConfigsResponseSchema, { clientModelConfigs: [config({ uid: "swe-2-high" })] }),
+	);
+	return {
+		keys,
+		fetch: async (_input, init) => {
+			const metadata = fromBinary(
+				GetCliModelConfigsRequestSchema,
+				new Uint8Array(init?.body as Uint8Array),
+			).metadata;
+			keys.push(metadata?.apiKey ?? "");
+			return new Response(payload, { status: 200, headers: { "content-type": "application/proto" } });
+		},
+	};
+}
+
 beforeAll(async () => {
 	const payload = toBinary(
 		GetCliModelConfigsResponseSchema,
@@ -390,7 +426,7 @@ beforeAll(async () => {
 		requestMetadata = fromBinary(GetCliModelConfigsRequestSchema, new Uint8Array(body)).metadata;
 		return new Response(payload, { status: 200, headers: { "content-type": "application/proto" } });
 	};
-	const fetched = await fetchDevinModels({ apiKey: "fixture-token", fetch: fetchImpl });
+	const fetched = await fetchDevinModels({ apiKey: SESSION_TOKEN, fetch: fetchImpl });
 	if (fetched === null) {
 		throw new Error("expected the fixture transport to yield devin models");
 	}
@@ -428,43 +464,40 @@ describe("devin native discovery request", () => {
 			7 as DisplayOption,
 			DISPLAY_OPTION_NORMAL,
 		]);
-		expect(requestMetadata?.apiKey).toBe("devin-session-token$fixture-token");
+		expect(requestMetadata?.apiKey).toBe(`devin-session-token$${SESSION_TOKEN}`);
 	});
 
-	it("falls back to the legacy Windsurf identity when native discovery returns only the seed", async () => {
-		const nativePayload = toBinary(
+	it("sends legacy Windsurf keys bare and never doubles the session-token prefix", async () => {
+		// The Devin CLI sends stored keys verbatim: legacy `sk-ws-` keys are
+		// rejected with the prefix and accepted without it.
+		const legacy = captureDiscoveryKey();
+		expect(await fetchDevinModels({ apiKey: "sk-ws-01-legacy", fetch: legacy.fetch })).not.toBeNull();
+		const prefixed = captureDiscoveryKey();
+		await fetchDevinModels({ apiKey: `devin-session-token$${SESSION_TOKEN}`, fetch: prefixed.fetch });
+		expect([...legacy.keys, ...prefixed.keys]).toEqual(["sk-ws-01-legacy", `devin-session-token$${SESSION_TOKEN}`]);
+	});
+
+	it("makes one native request and keeps the seed when it yields only seed models", async () => {
+		// A seed-only answer is a real catalog, not a signal to retry under
+		// another client identity.
+		const payload = toBinary(
 			GetCliModelConfigsResponseSchema,
 			create(GetCliModelConfigsResponseSchema, {
 				clientModelConfigs: [config({ uid: "swe-1-6" }), config({ uid: "swe-1-6-fast" })],
 			}),
 		);
-		const legacyPayload = toBinary(
-			GetCliModelConfigsResponseSchema,
-			create(GetCliModelConfigsResponseSchema, {
-				clientModelConfigs: [
-					config({ uid: "swe-1-6" }),
-					config({ uid: "swe-1-6-fast" }),
-					config({ uid: "glm-5-2" }),
-				],
-			}),
-		);
-		const requests: Metadata[] = [];
+		const identities: string[] = [];
 		const fetchImpl: FetchImpl = async (_input, init) => {
 			const metadata = fromBinary(
 				GetCliModelConfigsRequestSchema,
 				new Uint8Array(init?.body as Uint8Array),
 			).metadata;
-			if (metadata === undefined) throw new Error("expected discovery metadata");
-			requests.push(metadata);
-			const payload = metadata.ideName === "windsurf" ? legacyPayload : nativePayload;
+			identities.push(metadata?.ideName ?? "");
 			return new Response(payload, { status: 200, headers: { "content-type": "application/proto" } });
 		};
-
-		const discovered = await fetchDevinModels({ apiKey: "legacy-key", fetch: fetchImpl });
-
-		expect(discovered?.map(entry => entry.id)).toEqual(["glm-5-2", "swe-1-6", "swe-1-6-fast"]);
-		expect(requests.map(metadata => metadata.ideName)).toEqual(["chisel", "windsurf"]);
-		expect(requests[1]?.apiKey).toBe("legacy-key");
+		const discovered = await fetchDevinModels({ apiKey: "sk-ws-01-legacy", fetch: fetchImpl });
+		expect(discovered?.map(entry => entry.id)).toEqual(["swe-1-6", "swe-1-6-fast"]);
+		expect(identities).toEqual(["chisel"]);
 	});
 
 	it("treats an empty-but-200 catalog as failed discovery so the seed survives", async () => {
@@ -474,7 +507,7 @@ describe("devin native discovery request", () => {
 		);
 		const fetchImpl: FetchImpl = async () =>
 			new Response(emptyPayload, { status: 200, headers: { "content-type": "application/proto" } });
-		expect(await fetchDevinModels({ apiKey: "fixture-token", fetch: fetchImpl })).toBeNull();
+		expect(await fetchDevinModels({ apiKey: SESSION_TOKEN, fetch: fetchImpl })).toBeNull();
 	});
 
 	it("treats a catalog with no usable configs as failed discovery so the seed survives", async () => {
@@ -486,7 +519,58 @@ describe("devin native discovery request", () => {
 		);
 		const fetchImpl: FetchImpl = async () =>
 			new Response(filteredPayload, { status: 200, headers: { "content-type": "application/proto" } });
-		expect(await fetchDevinModels({ apiKey: "fixture-token", fetch: fetchImpl })).toBeNull();
+		expect(await fetchDevinModels({ apiKey: SESSION_TOKEN, fetch: fetchImpl })).toBeNull();
+	});
+
+	describe("default request timeout", () => {
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
+		// `GetCliModelConfigs` routinely takes 7-15s before sending headers; a
+		// shorter default silently drops discovery back to the seed models.
+		function slowCatalog() {
+			const payload = toBinary(
+				GetCliModelConfigsResponseSchema,
+				create(GetCliModelConfigsResponseSchema, {
+					clientModelConfigs: [config({ uid: "swe-1-6" }), config({ uid: "swe-1-6-fast" })],
+				}),
+			);
+			let signal: AbortSignal | undefined;
+			const headers = Promise.withResolvers<Response>();
+			const fetchImpl: FetchImpl = (_input, init) => {
+				signal = init?.signal ?? undefined;
+				signal?.addEventListener("abort", () => headers.reject(signal?.reason));
+				return headers.promise;
+			};
+			return {
+				fetch: fetchImpl,
+				signal: () => signal,
+				respond: () =>
+					headers.resolve(
+						new Response(payload, { status: 200, headers: { "content-type": "application/proto" } }),
+					),
+			};
+		}
+
+		it("keeps waiting for a catalog whose headers arrive after 5s", async () => {
+			vi.useFakeTimers();
+			const catalog = slowCatalog();
+			const pending = fetchDevinModels({ apiKey: SESSION_TOKEN, fetch: catalog.fetch });
+			vi.advanceTimersByTime(14_999);
+			expect(catalog.signal()?.aborted).toBe(false);
+			catalog.respond();
+			expect((await pending)?.map(entry => entry.id)).toEqual(["swe-1-6", "swe-1-6-fast"]);
+		});
+
+		it("gives up at 15s and reports failed discovery", async () => {
+			vi.useFakeTimers();
+			const catalog = slowCatalog();
+			const pending = fetchDevinModels({ apiKey: SESSION_TOKEN, fetch: catalog.fetch });
+			vi.advanceTimersByTime(15_000);
+			expect(catalog.signal()?.aborted).toBe(true);
+			expect(await pending).toBeNull();
+		});
 	});
 });
 
@@ -559,7 +643,7 @@ describe("devin native display filtering", () => {
 			create(GetCliModelConfigsResponseSchema, { clientModelConfigs: configs }),
 		);
 		const fetched = await fetchDevinModels({
-			apiKey: "fixture-token",
+			apiKey: SESSION_TOKEN,
 			fetch: async () => new Response(payload, { status: 200, headers: { "content-type": "application/proto" } }),
 		});
 		const find = (id: string) => fetched?.find(entry => entry.id === id);
@@ -602,6 +686,10 @@ describe("devin server metadata normalization", () => {
 		expect(longOutput.maxTokens).toBe(128_000);
 		expect(longOutput.contextWindow).toBe(1_000_000);
 		expect(longOutput.reasoning).toBe(true);
+	});
+
+	it("takes the context window from modelInfo.maxTokens when the config leaves its own unset", () => {
+		expect(model("info-context").contextWindow).toBe(1_048_576);
 	});
 
 	it("reads costs, parallel tool support and image support from server metadata", () => {
@@ -776,6 +864,54 @@ describe("devin catalog seed", () => {
 			"https://cascade.internal",
 			"https://cascade.internal",
 		]);
+	});
+
+	it("refetches a catalog cached before context windows came from modelInfo", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-devin-context-cache-"));
+		const scratchDbPath = path.join(tempDir, "scratch.db");
+		const cacheDbPath = path.join(tempDir, "models.db");
+		try {
+			const payload = toBinary(
+				GetCliModelConfigsResponseSchema,
+				create(GetCliModelConfigsResponseSchema, {
+					clientModelConfigs: [
+						config({ uid: "info-context", contextWindow: 0, modelInfoContextWindow: 1_048_576 }),
+					],
+				}),
+			);
+			let fetches = 0;
+			const options = devinModelManagerOptions({
+				apiKey: "fixture-token",
+				fetch: async () => {
+					fetches++;
+					return new Response(payload, { status: 200, headers: { "content-type": "application/proto" } });
+				},
+			});
+			const cacheProviderId = options.cacheProviderId;
+			if (!cacheProviderId) throw new Error("Devin cache provider id is missing");
+			// Discover once into a scratch cache for the row and its fingerprint.
+			const online = await resolveProviderModels({ ...options, cacheDbPath: scratchDbPath }, "online");
+			const current = online.models.find(model => model.id === "info-context");
+			const written = readModelCache(cacheProviderId, Number.POSITIVE_INFINITY, Date.now, scratchDbPath);
+			if (!current || !written) throw new Error("Devin discovery wrote no cache");
+			// The fresh authoritative cache a release reading only
+			// `ClientModelConfig.maxTokens` left behind: the row holds the 200K fallback.
+			writeModelCache(
+				"devin:models-v2",
+				Date.now(),
+				[{ ...current, contextWindow: 200_000 }],
+				true,
+				written.staticFingerprint,
+				cacheDbPath,
+			);
+			fetches = 0;
+
+			const upgraded = await resolveProviderModels({ ...options, cacheDbPath }, "online-if-uncached");
+			expect(fetches).toBe(1);
+			expect(upgraded.models.find(model => model.id === "info-context")?.contextWindow).toBe(1_048_576);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 });
 

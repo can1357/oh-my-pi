@@ -43,6 +43,7 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 	beforeAll(async () => {
 		authStorage = await AuthStorage.create(":memory:");
 		authStorage.keys.setRuntime("anthropic", "test-key");
+		authStorage.keys.setRuntime("venice", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
@@ -512,6 +513,24 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 		expect(active?.warning).toContain(IMAGE_REMEDY_FRAGMENT);
 	});
 
+	it("identifies irreducible fixed context instead of blaming tool output", async () => {
+		await createSession({ frameCount: SEEDED_FRAME_COUNT });
+		session.agent.setSystemPrompt(["fixed instructions ".repeat(40_000)]);
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		vi.spyOn(session, "shake").mockResolvedValue({
+			mode: "elide",
+			toolResultsDropped: 0,
+			blocksDropped: 0,
+			tokensFreed: 0,
+		});
+		const notices = collectNotices();
+		await triggerMaintenance();
+		const warning = notices.find(n => n.source === NOTICE_SOURCE && n.message.includes("fixed context"));
+		expect(warning?.message).toContain("compaction.modelThresholds");
+		expect(warning?.message).not.toContain("clear large tool output");
+	});
+
 	it("bails when the kept tail plus fixed context leaves no frame budget", async () => {
 		// Codex review on #6362 (round 5): a tail just under the recovery band
 		// still cannot coexist with the fixed context + a minimum rebuilt
@@ -647,6 +666,26 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 
 		// Text-only model: no frame re-render; existing tiers still run and the
 		// existing dead-end warning is preserved.
+		expect(compactSpy).not.toHaveBeenCalled();
+		expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: RESCUE_SHAKE_CONFIG }));
+		const noProgress = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes(NO_PROGRESS_FRAGMENT));
+		expect(noProgress.length).toBe(1);
+	});
+
+	it("skips the frame rescue when the active model's wire strips image input", async () => {
+		// Declares image input, so only the wire predicate tells it apart from a vision model.
+		await createSession({ frameCount: SEEDED_FRAME_COUNT, model: getBundledModel("venice", "deepseek-v4-1-flash") });
+		vi.spyOn(session.agent, "prompt").mockResolvedValue();
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 190000, contextWindow: 200000, percent: 95 });
+		const shakeSpy = vi
+			.spyOn(session, "shake")
+			.mockResolvedValue({ mode: "elide", toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 });
+		const compactSpy = vi.spyOn(snapcompact, "compact");
+
+		const notices = collectNotices();
+		await triggerMaintenance();
+
 		expect(compactSpy).not.toHaveBeenCalled();
 		expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: RESCUE_SHAKE_CONFIG }));
 		const noProgress = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes(NO_PROGRESS_FRAGMENT));

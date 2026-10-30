@@ -180,9 +180,11 @@ export function truncateToWidth(
 	pad?: boolean | null,
 ): string {
 	maxWidth = Math.max(0, maxWidth | 0);
-	// Fast path: every UTF-16 unit is at most 3 cells wide, so a string whose
-	// `length * 3` already fits within `safeWidth` cannot need truncation.
-	if (!pad && text.length * 3 <= maxWidth) {
+	// Fast path: every UTF-16 unit is at most 3 cells wide, so a plain string
+	// whose `length * 3` already fits within `maxWidth` cannot need truncation.
+	// OSC 66 spans are excluded because their display width is metadata-driven,
+	// not proportional to their UTF-16 length.
+	if (!pad && !text.includes("\x1b]66") && text.length * 3 <= maxWidth) {
 		return text;
 	}
 	return nativeTruncateToWidth(

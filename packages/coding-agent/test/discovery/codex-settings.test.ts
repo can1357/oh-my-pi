@@ -10,6 +10,7 @@ import {
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { cfgPersonality } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 describe("Codex config.toml settings", () => {
@@ -33,6 +34,8 @@ describe("Codex config.toml settings", () => {
 	afterEach(async () => {
 		clearFsCache();
 		resetSettingsForTest();
+		// `Settings.init` opened `<agentDir>/agent.db`; Windows cannot delete it while open.
+		AgentStorage.close();
 		vi.restoreAllMocks();
 		if (originalHome === undefined) delete process.env.HOME;
 		else process.env.HOME = originalHome;

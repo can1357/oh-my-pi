@@ -1,5 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { carriesReasoning } from "@oh-my-pi/pi-catalog/compat/reasoning-carry";
+import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { renderDemotedThinking } from "../dialect/demotion";
 import type {
 	Api,
@@ -36,6 +38,18 @@ const enum ToolCallStatus {
  * MUST not push a normalized id past this bound.
  */
 export const MAX_TOOL_CALL_ID_LENGTH = 64;
+
+/** Replace unsupported tool-call ID characters and cap the result for strict replay providers. */
+export function normalizeToolCallId(id: string, maxLength = MAX_TOOL_CALL_ID_LENGTH): string {
+	return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, maxLength);
+}
+
+const TOOL_CALL_ID_PATTERN = new RegExp(`^[a-zA-Z0-9_-]{1,${MAX_TOOL_CALL_ID_LENGTH}}$`);
+
+/** Whether `id` already satisfies the strict 1–64 `[a-zA-Z0-9_-]` tool-call ID contract. */
+export function isValidToolCallId(id: string): boolean {
+	return TOOL_CALL_ID_PATTERN.test(id);
+}
 
 /**
  * OpenAI Responses-family APIs mint composite tool ids (`call_id|item_id`);
@@ -333,35 +347,54 @@ function deduplicateToolCallIds(
 	return { messages: transformed, realToolResultsById, validToolUseIds };
 }
 
+/** Default for providers without an authored tool-name policy and native OpenAI Responses history. */
 const MAX_TOOL_CALL_NAME_LENGTH = 128;
-const TOOL_CALL_NAME_SEPARATOR_RE = /[\s\p{Cc}]/u;
+const STRICT_TOOL_CALL_NAME_RE = /^[a-zA-Z0-9_-]+$/;
+const GOOGLE_TOOL_CALL_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_.:-]*$/;
+/** Any character some provider accepts in a declared tool name, for checks with no target. */
+const ANY_PROVIDER_TOOL_CALL_NAME_RE = /^[a-zA-Z0-9_.:-]+$/;
 
 /**
- * Whether a tool-call name cannot belong to any declared tool: missing, empty,
- * longer than OpenAI's 128-character replay limit, or containing whitespace or
- * control characters (tool schemas never allow them; their presence means the
- * name slot carries invocation text).
+ * Charset and length a tool-call name must meet to replay to `model`. Without a
+ * target, a name passes when any provider could declare it.
  */
-export function isMalformedToolCallName(name: unknown): boolean {
-	return (
-		typeof name !== "string" ||
-		name.length === 0 ||
-		name.length > MAX_TOOL_CALL_NAME_LENGTH ||
-		TOOL_CALL_NAME_SEPARATOR_RE.test(name)
-	);
+function toolCallNameLimits(model: Model | undefined): { allowedName: RegExp; maxLength: number } {
+	if (!model) return { allowedName: ANY_PROVIDER_TOOL_CALL_NAME_RE, maxLength: MAX_TOOL_CALL_NAME_LENGTH };
+	const policy = resolveCatalogPolicy(model);
+	return {
+		allowedName: policy.toolCallNameCharset === "google" ? GOOGLE_TOOL_CALL_NAME_RE : STRICT_TOOL_CALL_NAME_RE,
+		maxLength:
+			typeof policy.toolCallNameMaxLength === "number" ? policy.toolCallNameMaxLength : MAX_TOOL_CALL_NAME_LENGTH,
+	};
+}
+
+/**
+ * Whether a tool-call name cannot be replayed to the target: missing, empty,
+ * longer than its declaration limit, or containing a character outside its
+ * declaration charset. Models emit such names when the name slot carries
+ * invocation text (whitespace, NULs) or an invented internal URL (`proc://*`).
+ *
+ * Without a target, use the OpenAI Responses native-history constraints.
+ */
+export function isMalformedToolCallName(
+	name: unknown,
+	allowedName = STRICT_TOOL_CALL_NAME_RE,
+	maxLength = MAX_TOOL_CALL_NAME_LENGTH,
+): boolean {
+	return typeof name !== "string" || name.length > maxLength || !allowedName.test(name);
 }
 
 function isMalformedToolCallId(id: string | undefined): boolean {
 	return !id || id.trim().length === 0;
 }
 
-function isMalformedToolCall(block: { id: string; name: string }): boolean {
-	return isMalformedToolCallId(block.id) || isMalformedToolCallName(block.name);
+function isMalformedToolCall(block: { id: string; name: string }, allowedName: RegExp, maxLength: number): boolean {
+	return isMalformedToolCallId(block.id) || isMalformedToolCallName(block.name, allowedName, maxLength);
 }
 
 /**
  * Drop assistant `toolCall` blocks with an empty / whitespace-only `id` or a `name`
- * no provider could have declared (see {@link isMalformedToolCallName}),
+ * the target provider cannot declare (see {@link isMalformedToolCallName}),
  * the `toolResult` messages they point at, and any assistant turn that has no
  * replayable content left.
  *
@@ -380,16 +413,17 @@ function isMalformedToolCall(block: { id: string; name: string }): boolean {
  * 128 characters with `string_above_max_length`.
  *
  * Run before any other transform so the rest of the pipeline never sees a
- * malformed call. Idempotent: a re-run on an already-sanitized list returns
- * the input untouched. Provider-agnostic — any wire model could surface this.
+ * malformed call. Idempotent for the same target: a re-run on an already-sanitized
+ * list returns the input untouched.
  */
-function sanitizeMalformedToolCalls(messages: Message[]): Message[] {
+function sanitizeMalformedToolCalls(messages: Message[], model: Model): Message[] {
+	const { allowedName, maxLength } = toolCallNameLimits(model);
 	// Fast path: skip the rewrite entirely when nothing is malformed.
 	let hasMalformed = false;
 	outer: for (const msg of messages) {
 		if (msg.role !== "assistant") continue;
 		for (const block of msg.content) {
-			if (block.type === "toolCall" && isMalformedToolCall(block)) {
+			if (block.type === "toolCall" && isMalformedToolCall(block, allowedName, maxLength)) {
 				hasMalformed = true;
 				break outer;
 			}
@@ -415,7 +449,7 @@ function sanitizeMalformedToolCalls(messages: Message[]): Message[] {
 			const filtered: AssistantMessage["content"] = [];
 			for (const block of msg.content) {
 				if (block.type === "toolCall") {
-					const malformed = isMalformedToolCall(block);
+					const malformed = isMalformedToolCall(block, allowedName, maxLength);
 					const queue = dropQueues.get(block.id);
 					if (queue) queue.push(malformed);
 					else dropQueues.set(block.id, [malformed]);
@@ -452,18 +486,45 @@ export function shouldDropTruncatedThinkingOnlyAssistant(msg: AssistantMessage):
 	return isTruncatedStop && !msg.content.some(block => block.type === "toolCall" || block.type === "text");
 }
 
-function getLatestSurvivingAssistantIndex(messages: readonly Message[]): number {
+/**
+ * Whether `msg` reaches a replay as an assistant turn, so it can be the latest
+ * surviving one: {@link sanitizeMalformedToolCalls} drops its malformed tool
+ * calls, then {@link shouldDropTruncatedThinkingOnlyAssistant} a truncated
+ * turn left with no text and no tool call. On an already sanitized list this
+ * is `!shouldDropTruncatedThinkingOnlyAssistant(msg)`. Pass the target `model`
+ * to apply its tool-name limits; without one, any provider-declarable name survives.
+ */
+export function isSurvivingAssistant(msg: AssistantMessage, model?: Model): boolean {
+	const isTruncatedStop = msg.stopReason === "length" || msg.stopReason === "error" || msg.stopReason === "aborted";
+	if (msg.content.length === 0) return !isTruncatedStop;
+	const { allowedName, maxLength } = toolCallNameLimits(model);
+	return msg.content.some(block =>
+		block.type === "toolCall"
+			? !isMalformedToolCall(block, allowedName, maxLength)
+			: !isTruncatedStop || block.type === "text",
+	);
+}
+
+function getLatestSurvivingAssistantIndex(messages: readonly Message[], model: Model): number {
 	for (let index = messages.length - 1; index >= 0; index -= 1) {
 		const msg = messages[index]!;
-		if (msg.role === "assistant" && !shouldDropTruncatedThinkingOnlyAssistant(msg)) {
+		if (msg.role === "assistant" && isSurvivingAssistant(msg, model)) {
 			return index;
 		}
 	}
 	return -1;
 }
 
-function isAnthropicMessagesModel(model: Model): model is Model<"anthropic-messages"> {
+export function isAnthropicMessagesModel(model: Model): model is Model<"anthropic-messages"> {
 	return model.api === "anthropic-messages";
+}
+
+/** Whether `turn` came from `model` itself: its own turns replay their native reasoning unchanged. */
+export function isSameModelTurn(
+	turn: Pick<AssistantMessage, "provider" | "api" | "model">,
+	model: Pick<Model, "provider" | "api" | "id">,
+): boolean {
+	return turn.provider === model.provider && turn.api === model.api && turn.model === model.id;
 }
 
 /**
@@ -481,6 +542,31 @@ function targetReadsForeignThinking(model: Model, compat: Model["compat"]): bool
 	if (!("thinkingFormat" in compat)) return false;
 	if (compat.requiresThinkingAsText) return false;
 	return model.reasoning && compat.thinkingFormat === "zai";
+}
+
+/**
+ * Whether chat completions (`convertMessages`) writes the model's own past
+ * thinking under `compat`: as Mistral content parts, demoted text, or a
+ * reasoning field. Otherwise it drops it.
+ */
+export function completionsSendsOwnThinking(
+	model: { reasoning?: boolean },
+	compat: Pick<
+		ResolvedOpenAICompat,
+		| "mistralReasoningContentParts"
+		| "requiresThinkingAsText"
+		| "requiresReasoningContentForToolCalls"
+		| "thinkingFormat"
+		| "replayReasoningContent"
+	>,
+): boolean {
+	return Boolean(
+		compat.mistralReasoningContentParts ||
+		compat.requiresThinkingAsText ||
+		compat.requiresReasoningContentForToolCalls ||
+		(compat.thinkingFormat === "zai" && model.reasoning) ||
+		compat.replayReasoningContent,
+	);
 }
 
 /**
@@ -505,13 +591,7 @@ function targetReplaysPlaintextReasoning(model: Model, compat: Model["compat"]):
 	if (!("requiresReasoningContentForToolCalls" in compat)) return false;
 	switch (model.api) {
 		case "openai-completions":
-			return (
-				!compat.requiresThinkingAsText &&
-				(compat.mistralReasoningContentParts === true ||
-					compat.requiresReasoningContentForToolCalls ||
-					compat.thinkingFormat === "zai" ||
-					compat.replayReasoningContent)
-			);
+			return !compat.requiresThinkingAsText && completionsSendsOwnThinking(model, compat);
 		case "openrouter":
 			return !compat.filterReasoningHistory && compat.requiresReasoningContentForToolCalls;
 		case "openai-responses":
@@ -524,12 +604,6 @@ function targetReplaysPlaintextReasoning(model: Model, compat: Model["compat"]):
 	}
 }
 
-const ANTHROPIC_TOOL_CALL_ID_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
-
-function isValidAnthropicToolCallId(id: string): boolean {
-	return ANTHROPIC_TOOL_CALL_ID_PATTERN.test(id);
-}
-
 function fallbackAnthropicToolCallId(originalId: string): string {
 	return `toolu_${Bun.hash(originalId).toString(36)}`;
 }
@@ -538,12 +612,11 @@ function normalizeAnthropicTargetToolCallId<TApi extends Api>(
 	id: string,
 	model: Model<TApi>,
 	source: AssistantMessage,
-	normalizeToolCallId?: (id: string, model: Model<TApi>, source: AssistantMessage) => string,
+	normalizeId?: (id: string, model: Model<TApi>, source: AssistantMessage) => string,
 ): string {
-	if (isValidAnthropicToolCallId(id)) return id;
-	const normalized =
-		normalizeToolCallId?.(id, model, source) ?? id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, MAX_TOOL_CALL_ID_LENGTH);
-	if (isValidAnthropicToolCallId(normalized)) return normalized;
+	if (isValidToolCallId(id)) return id;
+	const normalized = normalizeId?.(id, model, source) ?? normalizeToolCallId(id);
+	if (isValidToolCallId(normalized)) return normalized;
 	return fallbackAnthropicToolCallId(id);
 }
 
@@ -771,11 +844,10 @@ export function transformMessages<TApi extends Api>(
 	// block errors from LLM providers (e.g. invalid_prompt).
 	messages = redactSensitiveCredentialsInMessages(messages);
 
-	// Drop assistant `toolCall` blocks with empty/whitespace `id` or `name`
+	// Drop assistant `toolCall` blocks whose id or name the target cannot replay
 	// (and their matched `toolResult` messages) before anything else looks at
-	// the history. Replays of these would 400 every provider — see
-	// `sanitizeMalformedToolCalls`.
-	messages = sanitizeMalformedToolCalls(messages);
+	// the history. Replaying them would 400 the target provider.
+	messages = sanitizeMalformedToolCalls(messages, model);
 
 	// Build a map of original tool call IDs to normalized IDs
 	const toolCallIdMap = new Map<string, string>();
@@ -786,7 +858,7 @@ export function transformMessages<TApi extends Api>(
 	// Completions ids pair by raw equality and must never be canonicalized).
 	const responsesCompositeIdMap = new Map<string, string>();
 
-	const latestSurvivingAssistantIndex = getLatestSurvivingAssistantIndex(messages);
+	const latestSurvivingAssistantIndex = getLatestSurvivingAssistantIndex(messages, model);
 	const invalidBoundThinkingAssistantIndexes = new Set<number>();
 	if (model.thinking?.prefixBinding) {
 		let latestRewriteAt: number | undefined;
@@ -839,10 +911,7 @@ export function transformMessages<TApi extends Api>(
 		// Assistant messages need transformation check
 		if (msg.role === "assistant") {
 			const assistantMsg = msg as AssistantMessage;
-			const isSameModel =
-				assistantMsg.provider === model.provider &&
-				assistantMsg.api === model.api &&
-				assistantMsg.model === model.id;
+			const isSameModel = isSameModelTurn(assistantMsg, model);
 			// The same model on another host (or another id of the same model):
 			// its full plaintext reasoning replays natively where the target has
 			// a native slot, exactly as the target replays its own turns. Errored

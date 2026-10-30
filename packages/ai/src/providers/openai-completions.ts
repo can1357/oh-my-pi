@@ -34,7 +34,7 @@ import type {
 	ToolChoice,
 	ToolResultMessage,
 } from "../types";
-import { normalizeSystemPrompts, resolveCacheRetention } from "../utils";
+import { normalizeSystemPrompts, normalizeToolCallId, resolveCacheRetention } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
 import { isDemotedThinking, kStreamingLastParseLen } from "../utils/block-symbols";
 import { hasVisibleAssistantContent, withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
@@ -48,6 +48,7 @@ import {
 } from "../utils/idle-iterator";
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
+import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import {
 	adaptSchemaForStrict,
 	findStrictToolSchemaViolation,
@@ -88,6 +89,7 @@ import {
 } from "./openai-reasoning-fallback";
 import { servedModelFromOpenRouterReasoning } from "./anthropic-signature";
 import { resolveCopilotRequestIdentity, wrapFetchForCopilotFallback } from "./github-copilot-headers";
+import { getNativeFinishReasonError } from "./native-finish-reason";
 import {
 	applyChatCompletionsReasoningParams,
 	applyChatCompletionsToolStream,
@@ -111,6 +113,7 @@ import {
 	type OpenAIRequestSetup,
 	type OpenAIStrictToolsState,
 	parseAzureDeploymentNameMap,
+	readOpenRouterRawMetadata,
 	resolveOpenAICompatPolicy,
 	resolveOpenAICompletionsOutputClamp,
 	resolveOpenAIOutputTokenParam,
@@ -118,7 +121,7 @@ import {
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
 } from "./openai-shared";
-import { transformMessages } from "./transform-messages";
+import { completionsSendsOwnThinking, transformMessages } from "./transform-messages";
 import {
 	isOpenAICompletionsVisionSupported,
 	joinTextWithImagePlaceholder,
@@ -126,6 +129,8 @@ import {
 } from "./vision-guard";
 
 export { applyOpenRouterRoutingVariant } from "./openai-shared";
+
+const OPENAI_TOOL_CALL_ID_MAX_LENGTH = 40;
 
 type OpenAICompletionsReasoningField = NonNullable<ResolvedOpenAICompat["reasoningContentField"]>;
 
@@ -137,11 +142,19 @@ type OpenAICompletionsChoiceUsage = ChatCompletionChunk.Choice & {
 	usage?: unknown;
 };
 
+type OpenAICompletionsRepetitionChoice = ChatCompletionChunk.Choice & {
+	stop_reason?: unknown;
+};
+
+type OpenAICompletionsNativeFinishChoice = ChatCompletionChunk.Choice & {
+	native_finish_reason?: unknown;
+};
+
 type OpenAICompletionsDeltaWithReasoningDetails = ChatCompletionChunk.Choice["delta"] & {
 	reasoning_details?: unknown;
 };
 
-type GeminiMessageThoughtSignatureField = "thinking_signature" | "thought_signature";
+type GeminiMessageThoughtSignatureField = "thinking_signature" | "thought_signature" | "reasoning_signature";
 
 type GeminiMessageThoughtSignature = {
 	field: GeminiMessageThoughtSignatureField;
@@ -163,6 +176,7 @@ const GEMINI_THOUGHT_SIGNATURE_NAMESPACES: readonly GeminiThoughtSignatureNamesp
 const GEMINI_MESSAGE_THOUGHT_SIGNATURE_FIELDS: readonly GeminiMessageThoughtSignatureField[] = [
 	"thinking_signature",
 	"thought_signature",
+	"reasoning_signature",
 ];
 
 function getGeminiThoughtSignatureExtraContent(value: unknown): GeminiThoughtSignatureExtraContent | undefined {
@@ -199,9 +213,10 @@ function parseStoredThoughtSignature(thoughtSignature: string | undefined): unkn
 
 // A single tool-call turn on an OpenAI-compatible Gemini wire can carry two
 // independent signatures: a per-call one (`extra_content.google|vertex` or an
-// encrypted `reasoning_details` entry) and a message-level `thinking_signature`
-// / `thought_signature`. Both are stashed together on the originating tool
-// call's `thoughtSignature` so persistence and replay preserve each field.
+// encrypted `reasoning_details` entry) and a message-level signature
+// (`thinking_signature`, `thought_signature`, or `reasoning_signature`).
+// Both are stashed together on the originating tool call's `thoughtSignature`
+// so persistence and replay preserve each field.
 // `perCall` holds the raw extra_content object or reasoning detail; `message`
 // holds the message-level signature in its wire shape.
 type StoredGeminiSignature = {
@@ -258,6 +273,23 @@ function getLiteLLMThinkingBlocksDelta(delta: object): unknown[] | undefined {
 	return Array.isArray(mirrored) && mirrored.length > 0 ? mirrored : undefined;
 }
 
+/** `thinkingSignature` marking thinking decoded from Mistral typed content parts. */
+const MISTRAL_CONTENT_PARTS_SIGNATURE = "mistral-content-parts";
+
+/**
+ * Whether a thinking block's signature is a raw LiteLLM (Anthropic) one, not a
+ * reasoning field name or the Mistral content-parts marker.
+ */
+export function isLiteLLMThinkingSignature(signature: string | undefined): signature is string {
+	return (
+		!!signature &&
+		signature !== "reasoning_content" &&
+		signature !== "reasoning" &&
+		signature !== "reasoning_text" &&
+		signature !== MISTRAL_CONTENT_PARTS_SIGNATURE
+	);
+}
+
 /**
  * Rebuilds LiteLLM `thinking_blocks` from a stored assistant turn. Thinking
  * blocks parsed from `thinking_blocks` keep the raw Anthropic signature as
@@ -271,14 +303,7 @@ function encodeLiteLLMThinkingBlocks(content: AssistantMessage["content"]): Lite
 	for (const block of content) {
 		if (block.type === "thinking") {
 			const signature = block.thinkingSignature;
-			if (
-				!signature ||
-				signature === "reasoning_content" ||
-				signature === "reasoning" ||
-				signature === "reasoning_text"
-			) {
-				continue;
-			}
+			if (!isLiteLLMThinkingSignature(signature)) continue;
 			blocks.push({ type: "thinking", thinking: block.thinking, signature });
 		} else if (block.type === "redactedThinking") {
 			blocks.push({ type: "redacted_thinking", data: block.data });
@@ -794,7 +819,6 @@ const streamOpenAICompletionsOnce = (
 	(async () => {
 		const startTime = performance.now();
 		let firstTokenTime: number | undefined;
-		const policy = resolveOpenAICompatForRequest(model, options, Boolean(context.tools?.length));
 
 		const output: AssistantMessage = createInitialResponsesAssistantMessage(model.api, model.provider, model.id);
 		let rawRequestDump: RawHttpRequestDump | undefined;
@@ -836,6 +860,7 @@ const streamOpenAICompletionsOnce = (
 		let finishOpenBlocksOnError: () => void = () => {};
 
 		try {
+			const policy = resolveOpenAICompatForRequest(model, options, Boolean(context.tools?.length));
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const idleTimeoutFallbackMs = model.compat.streamIdleTimeoutMs;
 			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs(idleTimeoutFallbackMs);
@@ -844,6 +869,7 @@ const streamOpenAICompletionsOnce = (
 				getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs, model.compat.streamFirstEventTimeoutMs);
 			const requestTimeoutMs =
 				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
+			const promptCacheSessionId = getOpenAIPromptCacheKey(options);
 			const {
 				copilotPremiumRequests,
 				baseUrl,
@@ -858,8 +884,11 @@ const streamOpenAICompletionsOnce = (
 				apiKey,
 				options?.headers,
 				options?.initiatorOverride,
-				getOpenAIPromptCacheKey(options),
+				promptCacheSessionId,
 				options?.sessionId,
+				// The family affinity key rides only an explicit prompt-cache
+				// identity; the sessionId-derived cache-id fallback never does.
+				options?.promptCacheKey ? promptCacheSessionId : undefined,
 			);
 			const premiumRequestsTotal = copilotPremiumRequests;
 			let appliedStrictTools = false;
@@ -927,8 +956,9 @@ const streamOpenAICompletionsOnce = (
 						headers: headersWithTimeout,
 						body: params,
 						signal: requestSignal,
+						maxAttempts: options?.maxHttpAttempts,
 						fetch: wrapFetchForCopilotFallback(
-							options?.fetch,
+							wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
 							model.provider === "github-copilot",
 							resolveCopilotRequestIdentity(options?.headers),
 							copilotCacheKey,
@@ -1316,6 +1346,9 @@ const streamOpenAICompletionsOnce = (
 			let streamFinishedAt: number | undefined;
 			let sawUsagePayload = false;
 			let awaitTrailingUsageDetails = false;
+			/** Server-declared repetition stop; classified after the finalization sweep. */
+			let repetitionStop: string | undefined;
+			let nativeFinishError: string | undefined;
 			const applyUsagePayload = (rawUsage: object): void => {
 				output.usage = parseChunkUsage(
 					rawUsage,
@@ -1403,7 +1436,25 @@ const streamOpenAICompletionsOnce = (
 					}
 				}
 
-				if (choice.finish_reason) {
+				// A server-declared repetition stop completes the response, so it takes
+				// the same terminal bookkeeping a `finish_reason` chunk would. The
+				// classification itself is deferred to just before the error checks
+				// below: `output.content` is not final until the block sweep has run.
+				// Latched: a trailing frame without the signal must not clear the one
+				// an earlier chunk carried.
+				repetitionStop ??= detectRepetitionStop(choice);
+				if (repetitionStop) streamFinishedAt ??= Date.now();
+
+				// Gateways may normalize an upstream failure to stop/tool_calls. Latch
+				// the explicit native failure so trailing finishes cannot revive it.
+				nativeFinishError ??= getNativeFinishReasonError(
+					(choice as OpenAICompletionsNativeFinishChoice).native_finish_reason,
+				);
+				if (nativeFinishError) {
+					output.stopReason = "error";
+					output.errorMessage = nativeFinishError;
+					streamFinishedAt ??= Date.now();
+				} else if (choice.finish_reason) {
 					const finishReasonResult = mapStopReason(choice.finish_reason);
 					output.stopReason = finishReasonResult.stopReason;
 					if (finishReasonResult.errorMessage) {
@@ -1467,7 +1518,7 @@ const streamOpenAICompletionsOnce = (
 							if (part?.type === "thinking" && Array.isArray(part.thinking)) {
 								for (const inner of part.thinking as Array<{ type?: unknown; text?: unknown } | null>) {
 									if (inner?.type === "text" && typeof inner.text === "string" && inner.text.length > 0) {
-										appendThinkingDelta(inner.text, "mistral-content-parts");
+										appendThinkingDelta(inner.text, MISTRAL_CONTENT_PARTS_SIGNATURE);
 										suppressHealedThinking = true;
 									}
 								}
@@ -1758,6 +1809,27 @@ const streamOpenAICompletionsOnce = (
 			if (output.stopReason === "aborted") {
 				throw new AIError.AbortError();
 			}
+
+			// Checked before the generic `stopReason === "error"` throw so the flagged
+			// error is the one that reaches `AIError.finalize` — that call rebuilds
+			// `errorId` from the thrown error, so assigning the flag to `output` here
+			// would be overwritten. The partial output is dropped rather than
+			// committed or replayed into the retry; the guard's own loop error does
+			// the same, because degenerate reasoning is replay garbage (#12525).
+			if (repetitionStop) {
+				output.content = [];
+				// The sweep above already closed every block. Clear the handle so the
+				// catch's `finishOpenBlocksOnError` does not re-emit a `thinking_end`
+				// against an index that no longer exists in the emptied content array.
+				currentBlock = undefined;
+				throw AIError.attach(
+					new AIError.ProviderResponseError(`Provider reported a repetition stop: ${repetitionStop}`, {
+						provider: model.provider,
+						kind: "runtime",
+					}),
+					AIError.create(AIError.Flag.ThinkingLoop),
+				);
+			}
 			if (output.stopReason === "error") {
 				throw new AIError.ProviderResponseError(output.errorMessage || "Provider returned an error stop reason", {
 					provider: model.provider,
@@ -1790,7 +1862,7 @@ const streamOpenAICompletionsOnce = (
 			output.errorId = result.id;
 			output.errorMessage = result.message;
 			// Some providers via OpenRouter include extra details here.
-			const rawMetadata = (error as { error?: { metadata?: { raw?: string } } })?.error?.metadata?.raw;
+			const rawMetadata = readOpenRouterRawMetadata(capturedErrorResponse);
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
@@ -1825,7 +1897,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (mo
 	const resolvedModel = resolveOpenAICompletionsCompat(model);
 	return withReplaySafeStreamRetry(resolvedModel, context, options, streamOpenAICompletionsOnce, {
 		retryEmptyCompletion: true,
-		retryProviderErrors: true,
+		retryProviderErrors: options?.maxHttpAttempts === undefined,
 		maxProviderErrorRetries: 1,
 	});
 };
@@ -1838,6 +1910,7 @@ function createRequestSetup(
 	initiatorOverride?: MessageAttribution,
 	promptCacheSessionId?: string,
 	sessionId?: string,
+	promptCacheAffinityKey?: string,
 ): OpenAIRequestSetup & { baseUrl: string } {
 	const apiVersion = $env.AZURE_OPENAI_API_VERSION || "2024-10-21";
 	const deploymentName = parseAzureDeploymentNameMap($env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP).get(model.id) ?? model.id;
@@ -1847,6 +1920,7 @@ function createRequestSetup(
 		initiatorOverride,
 		promptCacheSessionId,
 		sessionId,
+		promptCacheAffinityKey,
 		messages: context.messages,
 		defaultBaseUrl: "https://api.openai.com/v1",
 		// Provider auth/header overlay: Kimi-code hosts require shared client
@@ -1961,6 +2035,12 @@ function applyOpenAIChatCompletionsPromptCachePolicy(
 			);
 		}
 		return;
+	}
+
+	if (promptCache.ttl === "12h") {
+		throw new AIError.ConfigurationError(
+			`OpenAI 12h prompt caching is only available on the Responses API; ${model.provider}/${model.id} uses Chat Completions.`,
+		);
 	}
 
 	params.prompt_cache_key = promptCacheKey;
@@ -2264,10 +2344,13 @@ export function parseChunkUsage(
 function maybeAddAnthropicCacheControl(compat: ResolvedOpenAICompat, messages: ChatCompletionMessageParam[]): void {
 	if (compat.cacheControlFormat !== "anthropic") return;
 	// Anthropic-style caching requires cache_control on a text part. Add a breakpoint
-	// on the last user/assistant message (walking backwards until we find text content).
+	// on the last message with text content so the cached prefix advances every
+	// request. Tool results count: during a tool loop the request tail is
+	// assistant(tool_calls) + tool, and anchoring on the turn's user message
+	// would re-send every in-turn tool result uncached.
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
-		if (msg.role !== "user" && msg.role !== "assistant" && msg.role !== "developer") continue;
+		if (msg.role !== "user" && msg.role !== "assistant" && msg.role !== "developer" && msg.role !== "tool") continue;
 
 		const content = msg.content;
 		if (typeof content === "string") {
@@ -2293,6 +2376,25 @@ function maybeAddAnthropicCacheControl(compat: ResolvedOpenAICompat, messages: C
 	}
 }
 
+/**
+ * Whether every chat-completions request to `model` drops the thinking text of
+ * its own prior turns: neither the base compat nor its `whenThinking` view
+ * sends it. Blocks with a raw LiteLLM signature ({@link isLiteLLMThinkingSignature})
+ * still replay in `thinking_blocks`.
+ */
+export function completionsDropsOwnThinking(
+	model: { api?: string; reasoning?: boolean; compat?: Model["compat"] } | null | undefined,
+): boolean {
+	if (model?.api !== "openai-completions" || !model.compat) return false;
+	const compat = model.compat as ResolvedOpenAICompat;
+	// A row without a resolved replay flag can't tell; counting the thinking never undercounts.
+	if (!("replayReasoningContent" in compat)) return false;
+	return (
+		!completionsSendsOwnThinking(model, compat) &&
+		(compat.whenThinking === undefined || !completionsSendsOwnThinking(model, compat.whenThinking))
+	);
+}
+
 export function convertMessages(
 	model: Model<"openai-completions">,
 	context: Context,
@@ -2303,10 +2405,10 @@ export function convertMessages(
 	const maxNormalizedToolCallIdLength = compat.requiresMistralToolIds
 		? 9
 		: compat.usesOpenAIToolCallIdLimit
-			? 40
+			? OPENAI_TOOL_CALL_ID_MAX_LENGTH
 			: undefined;
 	const duplicateToolCallIdSuffixPrefix = compat.requiresMistralToolIds ? "dup" : undefined;
-	const normalizeToolCallId = (id: string, source?: AssistantMessage): string => {
+	const normalizeCompletionsToolCallId = (id: string, source?: AssistantMessage): string => {
 		if (compat.requiresMistralToolIds) return normalizeMistralToolId(id, true);
 
 		const isSameModelSource =
@@ -2319,16 +2421,17 @@ export function convertMessages(
 		// Chat Completions IDs are provider-issued opaque correlation tokens.
 		if (!isSameModelSource && id.includes("|")) {
 			const [callId] = id.split("|");
-			return callId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 40);
+			return normalizeToolCallId(callId, OPENAI_TOOL_CALL_ID_MAX_LENGTH);
 		}
 
-		if (compat.usesOpenAIToolCallIdLimit) return id.length > 40 ? id.slice(0, 40) : id;
+		if (compat.usesOpenAIToolCallIdLimit)
+			return id.length > OPENAI_TOOL_CALL_ID_MAX_LENGTH ? id.slice(0, OPENAI_TOOL_CALL_ID_MAX_LENGTH) : id;
 		return id;
 	};
 	const transformedMessages = transformMessages(
 		context.messages,
 		model,
-		(id, _target, source) => normalizeToolCallId(id, source),
+		(id, _target, source) => normalizeCompletionsToolCallId(id, source),
 		maxNormalizedToolCallIdLength,
 		duplicateToolCallIdSuffixPrefix,
 		compat,
@@ -2361,7 +2464,7 @@ export function convertMessages(
 	};
 
 	const ensureToolCallId = (rawId: string, seed: string, source?: AssistantMessage): string => {
-		const normalized = normalizeToolCallId(rawId, source);
+		const normalized = normalizeCompletionsToolCallId(rawId, source);
 		if (normalized.trim().length > 0) return normalized;
 		return generateFallbackToolCallId(seed);
 	};
@@ -2890,6 +2993,36 @@ function convertTools(
 
 const EMPTY_OLLAMA_LENGTH_COMPLETION_MESSAGE =
 	"Model returned no content: prompt filled the context window; raise Ollama num_ctx or shorten the prompt.";
+
+/**
+ * Detect a server-declared repetition stop on a streamed choice.
+ *
+ * vLLM and other OpenAI-compatible servers report a generation that degenerated
+ * into repetition as a terminal signal rather than a content pattern OMP can
+ * see: `finish_reason: "repetition"`, and/or `stop_reason: "repetition_detected"`.
+ * The `stop_reason` form arrives alongside an ordinary `finish_reason: "stop"`,
+ * or with no `finish_reason` at all, so it has to be read independently of it —
+ * otherwise the signal is either masked by the clean finish or never seen.
+ *
+ * Returns the raw values for the diagnostic message, or `undefined` when the
+ * choice carries no repetition signal.
+ */
+function detectRepetitionStop(choice: ChatCompletionChunk.Choice): string | undefined {
+	const finishReason: string | null | undefined = choice.finish_reason;
+	const stopReason = (choice as OpenAICompletionsRepetitionChoice).stop_reason;
+	const namesRepetition = (value: string): boolean => {
+		const lower = value.toLowerCase();
+		return lower === "repetition" || lower === "repetition_detected";
+	};
+	const flagged =
+		(typeof finishReason === "string" && namesRepetition(finishReason)) ||
+		(typeof stopReason === "string" && namesRepetition(stopReason));
+	if (!flagged) return undefined;
+	const parts: string[] = [];
+	if (typeof finishReason === "string" && finishReason.length > 0) parts.push(`finish_reason=${finishReason}`);
+	if (typeof stopReason === "string" && stopReason.length > 0) parts.push(`stop_reason=${stopReason}`);
+	return parts.join(" ") || "repetition";
+}
 
 function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | string): {
 	stopReason: StopReason;

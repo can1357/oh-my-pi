@@ -1262,6 +1262,30 @@ export class MCPManager {
 	}
 
 	/**
+	 * Replace a stored server definition in place — used when its credentials
+	 * were refreshed outside the manager (e.g. `/mcp reauth` wrote a fresh
+	 * url-keyed credential row and the next auth resolution must pick it up).
+	 *
+	 * Updates both the stored definition and any live connection's `config`
+	 * ({@link reconnectServer} prefers the live connection's copy over the
+	 * stored map), and forgets any lost-server retry schedule so the next
+	 * reconnect uses the new definition instead of re-arming the stale one.
+	 *
+	 * Returns the in-flight reconnection for the server, if one was pending:
+	 * it captured the old definition and aborts on its next identity check.
+	 * Callers that intend to reconnect must await it first, or
+	 * {@link reconnectServer} merely joins the dying attempt instead of
+	 * starting a fresh one against the new definition.
+	 */
+	updateServerConfig(name: string, config: MCPServerConfig): Promise<MCPServerConnection | null> | undefined {
+		this.#serverConfigs.set(name, config);
+		const connection = this.#connections.get(name);
+		if (connection) connection.config = config;
+		this.#forgetLostServer(name);
+		return this.#pendingReconnections.get(name);
+	}
+
+	/**
 	 * Wait for a connection to complete (or fail).
 	 */
 	async waitForConnection(name: string): Promise<MCPServerConnection> {

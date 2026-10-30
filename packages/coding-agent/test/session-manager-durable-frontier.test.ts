@@ -1483,27 +1483,32 @@ describe("a dropped session file on memory and indexed storage (C8)", () => {
 	);
 
 	it.each(windowWrites)(
-		"counts as gone on indexed storage when its remove deleted the session row and then failed, with $write in the window (C4)",
+		"keeps the session on indexed storage, unconfirmed, and reports the next write as a conflict instead of recreating it, when its remove deleted the session row and then failed with $write in the window (C4)",
 		async ({ run }) => {
 			const { backend, storage, manager, sessionFile } = await indexedSession();
+			const errors: Error[] = [];
+			manager.onPersistenceError(error => errors.push(error));
 			const held = backend.holdNextRemove("after-first-path");
 			const drop = manager.dropSession(sessionFile);
 			await held.started;
-			const writesBefore = backend.writes.get(sessionFile) ?? 0;
 			await run(manager);
 			held.release();
 			await expect(drop).rejects.toThrow("EIO");
-			expect(manager.getSessionFile()).toBeUndefined();
-			manager.appendMessage(userTurn("after the failed delete"));
-			await manager.flush();
-			const next = await manager.newSession();
-			manager.appendMessage(assistantMessage("in the new session"));
-			await manager.flush();
-			await manager.close();
-			await storage.drain();
+			// The failed remove restores the index entry, marked unconfirmed: the session
+			// survives the failure instead of reading as deleted.
+			expect(manager.getSessionFile()).toBe(sessionFile);
+			expect(storage.existsSync(sessionFile)).toBe(true);
+			expect(manager.isSessionConfirmedOnDisk()).toBe(false);
 
-			expect(next).not.toBe(sessionFile);
-			expect(backend.writes.get(sessionFile) ?? 0).toBe(writesBefore);
+			// The next write is a size-checked full publish. The row it would replace is
+			// gone, so it reports the conflict instead of recreating the file over an
+			// unknown state.
+			manager.appendMessage(userTurn("after the failed delete"));
+			await expect(manager.flush()).rejects.toBeInstanceOf(SessionWriteConflictError);
+			await storage.drain().catch(() => undefined);
+
+			expect(errors.map(error => error.constructor)).toContain(SessionWriteConflictError);
+			expect(manager.isSessionConfirmedOnDisk()).toBe(false);
 			expect(backend.files.has(sessionFile)).toBe(false);
 		},
 	);
@@ -1600,15 +1605,13 @@ describe("a dropped session file on memory and indexed storage (C8)", () => {
 		expect(userTurnsOf(reopened.getBranch())).toEqual(["before", "missed"]);
 	});
 
-	it("keeps saving on indexed storage after its remove failed with the session row intact and the readback of it failed (C1, C4)", async () => {
+	it("keeps saving on indexed storage after its remove failed with the session row intact and nothing written meanwhile (C1, C4)", async () => {
 		const { backend, storage, manager, sessionFile } = await indexedSession();
 		const held = backend.holdNextRemove("before-remove");
 		const drop = manager.dropSession(sessionFile);
 		await held.started;
-		backend.failNextRead = true;
 		held.release();
 		await expect(drop).rejects.toThrow("EIO");
-		expect(backend.failNextRead).toBe(false);
 		expect(manager.getSessionFile()).toBe(sessionFile);
 
 		manager.appendMessage(userTurn("after the failed delete"));
@@ -1619,23 +1622,26 @@ describe("a dropped session file on memory and indexed storage (C8)", () => {
 		expect(userTurnsOf(reopened.getBranch())).toEqual(["before", "after the failed delete"]);
 	});
 
-	it("reports the next turn's failure instead of writing a headerless row when its remove deleted the session row and the readback of it failed (C2)", async () => {
+	it("keeps the session unconfirmed and reports the next turn as a conflict instead of writing a headerless row, when its remove deleted the session row and failed with nothing written meanwhile (C2)", async () => {
 		const { backend, storage, manager, sessionFile } = await indexedSession();
 		const errors: Error[] = [];
 		manager.onPersistenceError(error => errors.push(error));
 		const held = backend.holdNextRemove("after-first-path");
 		const drop = manager.dropSession(sessionFile);
 		await held.started;
-		backend.failNextRead = true;
 		held.release();
 		await expect(drop).rejects.toThrow("EIO");
-		expect(backend.failNextRead).toBe(false);
+		// The failed remove restores the entry marked unconfirmed: still listed, not reported as stored.
+		expect(manager.getSessionFile()).toBe(sessionFile);
+		expect(storage.existsSync(sessionFile)).toBe(true);
+		expect(manager.isSessionConfirmedOnDisk()).toBe(false);
 
 		manager.appendMessage(userTurn("after the failed delete"));
 		await expect(manager.flush()).rejects.toBeInstanceOf(SessionWriteConflictError);
 		await storage.drain().catch(() => undefined);
 
 		expect(errors.map(error => error.constructor)).toContain(SessionWriteConflictError);
+		expect(manager.isSessionConfirmedOnDisk()).toBe(false);
 		expect(backend.files.has(sessionFile)).toBe(false);
 	});
 });

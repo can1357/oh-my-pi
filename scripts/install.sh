@@ -22,7 +22,7 @@ BUILD_URL="${PI_BUILD_URL:-https://build.stencil.so}"
 while [ "${BUILD_URL%/}" != "$BUILD_URL" ]; do
     BUILD_URL="${BUILD_URL%/}"
 done
-MIN_BUN_VERSION="1.3.14"
+MIN_BUN_VERSION="1.4.4"
 
 # Parse arguments
 MODE=""

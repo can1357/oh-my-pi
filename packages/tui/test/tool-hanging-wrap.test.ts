@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import { ReadToolGroupComponent } from "../src/chat/read-tool-group";
 import { ToolExecutionComponent } from "../src/chat/tool-execution";
 import { renderCodeCell } from "../src/render/code-cell";
+import { PREVIEW_LIMITS, previewWindowRows } from "../src/render/render-utils";
 import { askToolRenderer } from "../src/tools/ask";
 import { editToolRenderer } from "../src/tools/edit";
 import { renderResult as renderLspResult } from "../src/tools/lsp";
@@ -79,6 +80,22 @@ describe("prefixed tool rows", () => {
 		expect(changed).toBeGreaterThan(0);
 		expect(rows[changed + 1]).toMatch(/^│\s+│/);
 		expect(rows[changed + 1]).toContain("after");
+	});
+
+	it("caps a streaming Edit tail by its gutter-hung rows", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const budget = Math.min(PREVIEW_LIMITS.EXPANDED_LINES, previewWindowRows());
+		// Each raw line fits two generic rows at the inner width but three once its
+		// content wraps beside the five-column gutter.
+		const diff = Array.from({ length: 20 }, (_, i) => `+${i + 10}|${"x".repeat(108)}`).join("\n");
+		const rows = plain(
+			editToolRenderer
+				.renderCall({ path: "src/example.ts", previewDiff: diff }, { expanded: false, isPartial: true }, theme)
+				.render(width),
+		);
+		const diffRows = rows.filter(row => /^│[\s+\-\d]*│x/.test(row));
+		expect(diffRows.length).toBeGreaterThan(0);
+		expect(diffRows.length).toBeLessThanOrEqual(budget);
 	});
 
 	it("follows Todo tree connectors across wrapped task labels", async () => {

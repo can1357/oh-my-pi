@@ -44,7 +44,7 @@
    "name": "rejects a hashless head/tail insert — the tag is required on every section",
    "files": {"a.txt": "a\nb\n"},
    "args": {"input": "[a.txt]\nPUT <1:\n+head"},
-   "expect": {"error": "snapshot tag", "writes": 0}
+   "expect": {"error": "the header needs this file's current tag, #", "writes": 0}
   },
   {
    "name": "rejects a tagged edit whose target file does not exist (create with write instead)",

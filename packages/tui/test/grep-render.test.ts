@@ -15,7 +15,7 @@ afterEach(() => {
 });
 
 describe("grepToolRenderer", () => {
-	it("indents inline grep output and avoids accent-colored success headers", async () => {
+	it("starts grep output at the tool column and avoids accent-colored success headers", async () => {
 		const theme = await getThemeByName("dark");
 		expect(theme).toBeDefined();
 		const uiTheme = theme!;
@@ -33,7 +33,8 @@ describe("grepToolRenderer", () => {
 			.render(240);
 		const plainLines = sanitizeText(renderedLines.join("\n")).split("\n");
 
-		expect(plainLines.every(line => line.startsWith(" "))).toBe(true);
+		// Same left edge as every other tool row (read, todo, framed cards).
+		expect(plainLines[0]).not.toStartWith(" ");
 		expect(renderedLines[0]).not.toContain(uiTheme.fg("accent", uiTheme.symbol("icon.search")));
 		expect(renderedLines[0]).not.toContain(uiTheme.fg("accent", "Search"));
 	});
@@ -141,6 +142,110 @@ describe("grepToolRenderer", () => {
 		expect(uris.filter(uri => uri === fileUri)).toHaveLength(2);
 	});
 
+	it("links sanitized grouped headers and matches to the original control-byte filename and cwd", async () => {
+		applyHyperlinkSetting("always");
+		const theme = await getThemeByName("dark");
+		expect(theme).toBeDefined();
+		const control = "\x1b[?1049h";
+		const cwd = `/tmp/grep${control}-project`;
+		const searchPath = path.join(cwd, "src");
+		const file = `src/fi${control}xture.ts`;
+		const filename = path.join(cwd, file);
+		const displayContent = ["# src/", `## fi${control}xture.ts#abcd`, "*12│needle"].join("\n");
+		const rawDetails = {
+			cwd,
+			searchPath,
+			scopePath: "src",
+			files: [file],
+			matchCount: 1,
+			fileCount: 1,
+			displayContent,
+		};
+		const result = {
+			content: [{ type: "text", text: "" }],
+			details: {
+				...rawDetails,
+				cwd: sanitizeText(cwd),
+				searchPath: sanitizeText(searchPath),
+				files: [sanitizeText(file)],
+				displayContent: sanitizeText(displayContent),
+			},
+		};
+		const rendered = grepToolRenderer
+			.renderResult(result, { expanded: true, isPartial: false, renderContext: { rawDetails } }, theme!, {
+				pattern: "needle",
+			})
+			.render(240)
+			.join("\n");
+		const uris = extractLinkUris(rendered);
+		expect(uris.filter(uri => uri === url.pathToFileURL(filename).href)).toHaveLength(2);
+		expect(uris).toContain(url.pathToFileURL(searchPath).href);
+		expect(rendered).not.toContain(control);
+		expect(sanitizeText(rendered)).toContain("fixture.ts");
+	});
+
+	it("retains the original single-file and URL display targets after detail sanitization", async () => {
+		applyHyperlinkSetting("always");
+		const theme = await getThemeByName("dark");
+		expect(theme).toBeDefined();
+		const control = "\x1b[?1003h";
+		const filename = `/tmp/grep/file${control}.ts`;
+		const singleDetails = {
+			matchCount: 1,
+			fileCount: 1,
+			searchPath: filename,
+			scopePath: `file${control}.ts`,
+			files: [filename],
+			displayContent: "*7│needle",
+		};
+		const single = grepToolRenderer
+			.renderResult(
+				{
+					content: [{ type: "text", text: "" }],
+					details: {
+						...singleDetails,
+						searchPath: sanitizeText(filename),
+						scopePath: sanitizeText(singleDetails.scopePath),
+						files: [sanitizeText(filename)],
+					},
+				},
+				{ expanded: true, isPartial: false, renderContext: { rawDetails: singleDetails } },
+				theme!,
+				{ pattern: "needle" },
+			)
+			.render(240)
+			.join("\n");
+		expect(extractLinkUris(single)).toEqual([url.pathToFileURL(filename).href, url.pathToFileURL(filename).href]);
+		expect(single).not.toContain(control);
+
+		const label = `local://fixture${control}.ts`;
+		const displayContent = [`# ${label}`, "*4│needle"].join("\n");
+		const urlDetails = {
+			matchCount: 1,
+			fileCount: 1,
+			displayTargets: { [label]: filename },
+			displayContent,
+		};
+		const linked = grepToolRenderer
+			.renderResult(
+				{
+					content: [{ type: "text", text: "" }],
+					details: {
+						...urlDetails,
+						displayContent: sanitizeText(displayContent),
+						displayTargets: { [label]: sanitizeText(filename) },
+					},
+				},
+				{ expanded: true, isPartial: false, renderContext: { rawDetails: urlDetails } },
+				theme!,
+				{ pattern: "needle" },
+			)
+			.render(240)
+			.join("\n");
+		expect(extractLinkUris(linked)).toEqual([url.pathToFileURL(filename).href, url.pathToFileURL(filename).href]);
+		expect(linked).not.toContain(control);
+	});
+
 	it("links single-file code-frame lines to the searched file", async () => {
 		applyHyperlinkSetting("always");
 		const theme = await getThemeByName("dark");
@@ -217,5 +322,33 @@ describe("grepToolRenderer", () => {
 		// Collapsed compacts to match lines only — no context.
 		expect(collapsedBody.some(line => line.includes("context before"))).toBe(false);
 		expect(collapsedBody.some(line => line.includes("more matches"))).toBe(true);
+	});
+
+	it("wraps a long-pattern header so the match summary stays visible", async () => {
+		const uiTheme = (await getThemeByName("dark"))!;
+		const pattern = Array.from({ length: 20 }, (_, i) => `alternative${i}`).join("|");
+		const longLine = `const value = "${"x".repeat(200)}";`;
+		const result = {
+			content: [{ type: "text", text: "" }],
+			details: {
+				matchCount: 8,
+				fileCount: 3,
+				truncated: true,
+				displayContent: ["# src/a.ts", `*12│${longLine}`].join("\n"),
+			},
+		};
+		const width = 80;
+
+		for (const expanded of [false, true]) {
+			const lines = grepToolRenderer
+				.renderResult(result as never, { expanded, isPartial: false }, uiTheme, { pattern })
+				.render(width);
+			const plain = sanitizeText(lines.join("\n"));
+			expect(plain).toContain("8 matches · 3 files · truncated");
+			expect(lines.every(line => Bun.stringWidth(line) <= width)).toBe(true);
+			// Body rows stay single-row truncated: the long match line is clipped, not wrapped.
+			expect(plain).not.toContain("x".repeat(200));
+			expect(plain.split("\n").filter(line => line.includes("12│"))).toHaveLength(1);
+		}
 	});
 });

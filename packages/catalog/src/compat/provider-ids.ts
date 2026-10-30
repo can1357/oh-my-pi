@@ -39,6 +39,7 @@ export type KnownProvider =
 	| "groq"
 	| "helmcode"
 	| "huggingface"
+	| "inception"
 	| "kilo"
 	| "kimi-code"
 	| "litellm"

@@ -172,8 +172,7 @@ impl Utility for Dd {
 		let operands: Vec<OsString> = self
 			.matches
 			.get_many::<OsString>(OPERANDS)
-			.map(|values| values.cloned().collect())
-			.unwrap_or_default();
+			.map_or_default(|values| values.cloned().collect());
 		let settings = match parse_operands(host, &operands) {
 			Ok(settings) => settings,
 			Err(code) => return code,
@@ -753,7 +752,15 @@ fn open_flags(flags: u32, input: bool) -> i32 {
 		let _ = input;
 		open
 	}
-	#[cfg(not(unix))]
+	// POSIX opens a directory for reading and fails the first read (EISDIR);
+	// Win32 refuses to open one at all unless asked for backup semantics.
+	#[cfg(windows)]
+	{
+		use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+		let _ = flags;
+		if input { FILE_FLAG_BACKUP_SEMANTICS as i32 } else { 0 }
+	}
+	#[cfg(not(any(unix, windows)))]
 	{
 		let _ = (flags, input);
 		0
@@ -768,13 +775,10 @@ fn try_zeroed(len: usize) -> Option<Vec<u8>> {
 	}
 	let layout = std::alloc::Layout::array::<u8>(len).ok()?;
 	// SAFETY: `layout` has a non-zero size.
-	let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
-	if ptr.is_null() {
-		return None;
-	}
+	let ptr = std::ptr::NonNull::new(unsafe { std::alloc::alloc_zeroed(layout) })?;
 	// SAFETY: `ptr` came from the global allocator with the layout of `len`
 	// bytes, all initialized (zeroed); capacity equals that allocation.
-	Some(unsafe { Vec::from_raw_parts(ptr, len, len) })
+	Some(unsafe { Vec::from_parts(ptr, len, len) })
 }
 
 // ---------------------------------------------------------------------------
@@ -1093,7 +1097,20 @@ impl<'h> Copier<'h> {
 
 	fn read_input(&mut self, buf: &mut [u8]) -> io::Result<usize> {
 		match self.input.as_mut() {
-			Some(file) => file.read(buf),
+			Some(file) => {
+				let result = file.read(buf);
+				// Reading a directory handle fails with ERROR_INVALID_FUNCTION
+				// ("Incorrect function"); POSIX reports EISDIR.
+				#[cfg(windows)]
+				if let Err(error) = &result
+					&& error.raw_os_error()
+						== Some(windows_sys::Win32::Foundation::ERROR_INVALID_FUNCTION as i32)
+					&& file.metadata().is_ok_and(|meta| meta.is_dir())
+				{
+					return Err(pi_vfs::is_a_directory());
+				}
+				result
+			},
 			None => self.host.stdin.read(buf),
 		}
 	}
@@ -1733,8 +1750,8 @@ impl Copier<'_> {
 			len -= 1;
 			self.saved_byte = Some(ibuf[from + len]);
 		}
-		for pair in ibuf[from..from + len].chunks_exact_mut(2) {
-			pair.swap(0, 1);
+		for [a, b] in ibuf[from..from + len].as_chunks_mut::<2>().0 {
+			std::mem::swap(a, b);
 		}
 		(from, len)
 	}
@@ -2371,7 +2388,7 @@ mod tests {
 		let (_dir, root) = tempdir();
 		let outcome = run(&["if=."], b"", &root);
 		assert_eq!(outcome.code, 1);
-		assert!(outcome.err.starts_with("dd: error reading '.': "), "{}", outcome.err);
+		assert!(outcome.err.starts_with("dd: error reading '.': Is a directory\n"), "{}", outcome.err);
 		assert!(outcome.stats().ends_with("0+0 records in\n0+0 records out\n0 bytes copied, T, R\n"));
 	}
 

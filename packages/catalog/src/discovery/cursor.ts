@@ -1,5 +1,6 @@
 import * as http2 from "node:http2";
 import { type } from "@oh-my-pi/omptype";
+import { slugify } from "@oh-my-pi/pi-utils";
 import { collapseVariants, type EffortVariantFamily, reviewedVariantFamilyId } from "../compat/collapse";
 import { compareRevision, parseRevision } from "../compat/revision";
 import { resolveCatalogAxes, resolveModelPolicy } from "../compat/resolve";
@@ -515,15 +516,9 @@ function resolveRichCursorCardCost(
 function resolveCursorCardAxes(slug: string): { patch?: ModelCost; fallback?: ModelCost } {
 	const axes = resolveCatalogAxes({
 		id: slug,
-		name: slug,
 		api: "cursor-agent",
 		provider: "cursor",
-		baseUrl: CURSOR_DEFAULT_BASE_URL,
 		reasoning: false,
-		input: ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: DEFAULT_CONTEXT_WINDOW,
-		maxTokens: DEFAULT_MAX_TOKENS,
 	});
 	// Dated cards ride along as a schedule, so a lane priced from a sibling
 	// slug's card (whose own id no rule matches) still changes price on time.
@@ -693,8 +688,8 @@ function cursorLaneId(
 ): string {
 	const suffixes: string[] = [];
 	for (const parameter of parameters) {
-		const id = sanitizeCursorLanePart(parameter.id);
-		const value = sanitizeCursorLanePart(parameter.value);
+		const id = slugify(parameter.id);
+		const value = slugify(parameter.value);
 		// Boolean lanes are named by their `true` side regardless of variant
 		// order: Cursor lists `composer-2.5`'s Fast variant first, and treating
 		// that as the default would hand the bare id to the Fast route.
@@ -741,13 +736,6 @@ function reviewedCursorLaneId(entries: readonly NormalizedRichVariant[], claimed
 	if (familyId === undefined || claimed.has(familyId)) return undefined;
 	claimed.add(familyId);
 	return familyId;
-}
-
-function sanitizeCursorLanePart(value: string): string {
-	return value
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "");
 }
 
 function cursorLaneName(details: AvailableModelsResponse_ModelDetails, laneId: string, baseId: string): string {
