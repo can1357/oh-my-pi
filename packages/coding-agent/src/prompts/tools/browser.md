@@ -53,7 +53,7 @@ Application modes:
 - Tern tabs: input is trusted native mouse/keyboard events at element centres; `tab.evaluate` runs in the page world. Console, `requests`, `route`, and HAR cover the page's `fetch`/XHR plus navigation responses only (no images/scripts/styles; `route` accepts only `resourceType` `fetch`/`xhr`); request bodies exist only for the current document. Frames inside CSS-scaled/rotated elements cannot be driven. `emulate` supports viewport/device, userAgent, colorScheme, credentials, geolocation, locale, offline (JS-visible); timezone, headers, any reducedMotion, CPU and network throttling throw. Clipboard helpers use the system clipboard. `pdf` supports only `path`. `a11y` covers the main frame; `webmcp*` throw; `loadState` restores storage for the current origin only. `traceStart`/`traceStop`/`profileStart`/`profileStop` are unsupported; raw `page`/`browser` in `tab.run` are a Puppeteer-like subset (`goto`, `evaluate`, `content`, `$`, `$$`, `locator`, waits, `screenshot`, `keyboard`, `mouse`, `cookies`).
 - Closing releases the managed tab and closes tabs omp opened in the relay. It never closes borrowed relay tabs, CDP-attached pages, or adopted Tern blocks. `kill: true` terminates only applications spawned by this process, never reused browser processes.
 - Idle tabs auto-freeze at turn settle (animated pages stop burning CPU/GPU) and unfreeze on next use; tabs idle past the idle-close timeout are closed. Pass `persist: true` on `open` to keep a tab live across turns (e.g. multi-step login); `browser.close` still releases explicitly.
- </instruction>
+  </instruction>
 
 <examples>
 ```javascript
@@ -71,6 +71,7 @@ await tab.id(observed["elements"][0]["id"]).click()
 title = await tab.run("return await tab.title();", timeout=30)
 await tab.close()
 ```
+
 </examples>
 
 <critical>

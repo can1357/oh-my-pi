@@ -1,6 +1,7 @@
 STOP: In NEXT reply, before further exploration, write complete plan. Enough known; do not defer.
 
 Plan first; explicit, comprehensive; reference for remainder:
+
 - Remaining execution-order steps: exact files, symbols, commands, checks.
 - Risks, edge cases; verify each landed: specific commands, expected outputs. NEVER modify tests or verification assets to pass checks.
 - Already done, brief; prevent repetition.

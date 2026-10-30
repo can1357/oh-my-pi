@@ -13,6 +13,7 @@ import { resolveSessionFileArg } from "@oh-my-pi/pi-coding-agent/cli/session-arg
 import { exportFromFile } from "@oh-my-pi/pi-coding-agent/export/html";
 import {
 	getArchivedSessionsDir,
+	materializeSessionFile,
 	type RestoredSession,
 	restoreArchivedSession,
 } from "@oh-my-pi/pi-coding-agent/session/session-archive";
@@ -725,8 +726,7 @@ test("an artifact tree that cannot be dropped leaves the archive complete, not d
 
 		// The removal could not be finished, and the report names that rather
 		// than claiming the tree was kept whole.
-		expect(result.archive?.errors.join("\n")).toContain("was partly given up");
-		expect(result.archive?.errors.join("\n")).toContain("brings it back");
+		expect(result.archive?.errors.join("\n")).toContain("was kept:");
 		// The session is recoverable: the archive holds the transcript and the tree.
 		expect(await Bun.file(archiveFile).exists()).toBe(true);
 		expect(await Bun.file(path.join(archiveFile.slice(0, -".jsonl.gz".length), "sub.jsonl")).text()).toContain(
@@ -2252,6 +2252,123 @@ test("a reclaim whose removal fails part-way names what it had already removed",
 	expect(result.reclaim?.reclaimed).toBe(0);
 	expect(result.reclaim?.partiallyRemoved).toEqual([path.join(liveArtifacts, "a.log")]);
 	expect(collectGcErrors(result).join("\n")).toContain("was partly given up");
-	expect(renderGcText(result)).toContain("reclaim removed before it refused:");
+	expect(renderGcText(result)).toContain("reclaim removed before it stopped:");
 	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+test("an ordinary nested tree is reclaimed whole, with nothing injected", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	await Bun.write(path.join(liveArtifacts, "child", "only.log"), "NESTED");
+	await Bun.write(path.join(liveArtifacts, "z.log"), "LAST");
+	await archiveEverything();
+	await restoreArchivedSession(archiveFile, root);
+
+	const result = await runGcCommand({
+		flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+	});
+
+	// No injected error, no owner, nothing unusual — a nested tree is the
+	// ordinary shape, and removing a directory before its children made every
+	// one of them delete its files and then fail.
+	expect(result.reclaim?.errors).toEqual([]);
+	expect(result.reclaim?.reclaimed).toBe(1);
+	expect(collectGcErrors(result)).toEqual([]);
+	expect(await Bun.file(sessionFile).exists()).toBe(false);
+	expect(await fs.readdir(liveArtifacts).catch(() => undefined)).toBeUndefined();
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("a reclaim preview reports what applying would refuse", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "ARTIFACT");
+	await archiveEverything();
+	await restoreArchivedSession(archiveFile, root);
+	const lease = tryAcquireSessionLease(SESSION_ID);
+	expect(lease).not.toBeNull();
+
+	let owned: GcResult;
+	try {
+		owned = await runGcCommand({ flags: { agentDir: root, reclaim: archiveFile, json: true } });
+	} finally {
+		lease?.release();
+	}
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "DIVERGED");
+	const diverged = await runGcCommand({ flags: { agentDir: root, reclaim: archiveFile, json: true } });
+
+	// A preview that exits 0 with an empty stderr tells a script the run will
+	// work. Both of these would refuse.
+	expect(collectGcErrors(owned).join("\n")).toContain("owns");
+	expect(collectGcErrors(diverged).join("\n")).toContain("would be kept");
+	expect(await Bun.file(sessionFile).exists()).toBe(true);
+	expect(await Bun.file(path.join(liveArtifacts, "tool.log")).text()).toBe("DIVERGED");
+});
+
+test("a reclaim that removed nothing does not say it gave anything up", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	await archiveEverything();
+	await restoreArchivedSession(archiveFile, root);
+
+	const realUnlink = fs.unlink;
+	const unlink = spyOn(fs, "unlink").mockImplementation(async target => {
+		if (String(target).endsWith("a.log")) throw Object.assign(new Error("EIO: injected"), { code: "EIO" });
+		return await realUnlink(target);
+	});
+	let result: GcResult;
+	try {
+		result = await runGcCommand({
+			flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+		});
+	} finally {
+		unlink.mockRestore();
+	}
+
+	// The very first removal failed, so nothing was given up and the report
+	// must not borrow the wording for a run that gave up part of a tree.
+	expect(result.reclaim?.partiallyRemoved ?? []).toEqual([]);
+	expect(collectGcErrors(result).join("\n")).toContain("was kept:");
+	expect(collectGcErrors(result).join("\n")).not.toContain("partly given up");
+	expect(await Bun.file(path.join(liveArtifacts, "a.log")).text()).toBe("FIRST");
+});
+
+test("a reclaim's recovery instruction can be copied literally with --agent-dir", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	await Bun.write(path.join(liveArtifacts, "z.log"), "LAST");
+	await archiveEverything();
+	await restoreArchivedSession(archiveFile, root);
+
+	const realUnlink = fs.unlink;
+	const unlink = spyOn(fs, "unlink").mockImplementation(async target => {
+		if (String(target).endsWith("z.log")) throw Object.assign(new Error("EIO: injected"), { code: "EIO" });
+		return await realUnlink(target);
+	});
+	let result: GcResult;
+	try {
+		result = await runGcCommand({
+			flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+		});
+	} finally {
+		unlink.mockRestore();
+	}
+
+	// Copied as printed, it has to reach this agent directory rather than the
+	// default one.
+	expect(collectGcErrors(result).join("\n")).toContain(`--agent-dir ${root}`);
+});
+
+test("resuming a session whose artifacts are still archived finishes the restore", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "sub.jsonl"), "SUBAGENT TRANSCRIPT\n");
+	await archiveEverything();
+	// What a kill between publishing the transcript and carrying the tree
+	// home leaves: the live transcript back, the artifacts still archived.
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+
+	const materialized = await materializeSessionFile(sessionFile, root);
+
+	// Opening it as if it were whole would give a session with its subagent
+	// transcripts missing and nothing said.
+	expect(materialized).toBe(sessionFile);
+	expect(await Bun.file(path.join(liveArtifacts, "sub.jsonl")).text()).toBe("SUBAGENT TRANSCRIPT\n");
 });

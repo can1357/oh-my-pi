@@ -11,10 +11,14 @@ For changelog targets: MUST call propose_changelog.
 {{/if}}
 
 {{#if existing_changelog_entries}}
+
 ## Existing Unreleased Changelog Entries
+
 May remove listed entries via propose_changelog `deletions`.
 {{#each existing_changelog_entries}}
+
 ### {{path}}
+
 {{#each sections}}
 {{name}}:
 {{#list items prefix="- " join="\n"}}{{this}}{{/list}}

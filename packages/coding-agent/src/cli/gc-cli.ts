@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
-import type { Stats } from "node:fs";
+import { constants as fsConstants, type Stats } from "node:fs";
 import * as path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -42,6 +42,7 @@ import {
 	isArchivedSessionPath,
 	listArchivedSessionFiles,
 	archivedHandleIsHeldBy,
+	archivedHandleIsPrefixOfLive,
 	isSamePath,
 	liveSessionPathForArchive,
 	restoreArchivedSessionLocked,
@@ -306,6 +307,8 @@ interface ResolvedGcOptions {
 	apply: boolean;
 	json: boolean;
 	agentDir: string;
+	/** Whether `--agent-dir` was named, so an instruction this prints can be copied literally. */
+	agentDirWasGiven: boolean;
 	runBlobs: boolean;
 	runArchive: boolean;
 	runWal: boolean;
@@ -402,6 +405,7 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 		apply: flags.apply === true,
 		json: flags.json === true,
 		agentDir,
+		agentDirWasGiven: flags.agentDir !== undefined,
 		forwardOnly: flags.forwardOnly === true,
 		restoreTarget: flags.restore?.trim(),
 		reclaimTarget: flags.reclaim?.trim(),
@@ -1082,11 +1086,12 @@ async function gzipSessionFile(source: string, destination: string, supersedes?:
 			// and refusing would make a restored session unarchivable the moment
 			// it takes another turn.
 			//
-			// Proved again here, by reading the file rather than its name. An
-			// inode comparison cannot see a replacement written in place, and
-			// the earlier proof was taken before the gzip temp existed, so it
-			// is an observation about bytes that may since have changed. What
-			// survives this is only the gap between the read and the rename.
+			// Proved again here, by reading the file rather than its name,
+			// through the very descriptor this check opened. An inode
+			// comparison cannot see a replacement written in place, and the
+			// earlier proof was taken before the gzip temp existed, so it is
+			// an observation about bytes that may since have changed. What
+			// survives is the gap between this read and the rename.
 			const archived = await fs.open(destination, "r").catch(error => {
 				if (codeOf(error) === "ENOENT") return undefined;
 				throw error;
@@ -1094,9 +1099,11 @@ async function gzipSessionFile(source: string, destination: string, supersedes?:
 			const changed = `${destination} changed while it was being archived; run \`omp gc --archive\` again`;
 			if (!archived) throw new Error(changed);
 			try {
+				if (!(await archivedHandleIsPrefixOfLive(archived, source))) throw new Error(changed);
 				const standing = await archived.stat();
+				const named = await statIfPresent(destination);
+				if (!named || named.dev !== standing.dev || named.ino !== standing.ino) throw new Error(changed);
 				if (standing.dev !== supersedes.dev || standing.ino !== supersedes.ino) throw new Error(changed);
-				if (!(await archiveIsPrefixOfLive(destination, source))) throw new Error(changed);
 			} finally {
 				await archived.close();
 			}
@@ -1213,16 +1220,28 @@ async function publishArtifactIntoArchive(
 		// looked at it. Dropping the name first leaves the archive's own name
 		// on the data.
 		await fs.rm(tempPath, { force: true });
-		await fs.copyFile(source, tempPath);
-		// The identity of the file this run staged. Stating the name later
-		// would adopt whatever replaced it, and the rollback would then delete
-		// the new canonical entry as if this run had put it there.
-		const staged = await fs.lstat(tempPath);
+		// `COPYFILE_EXCL`, so the file this run stages is one it created: the
+		// copy fails rather than writing into something that appeared at the
+		// name. The identity then comes from a descriptor on that file, not
+		// from stating the name afterwards, and it is confirmed again before
+		// anything is published — so a temp replaced in between is refused
+		// rather than adopted as this run's creation and deleted by a later
+		// rollback.
+		await fs.copyFile(source, tempPath, fsConstants.COPYFILE_EXCL);
+		const stagedHandle = await fs.open(tempPath, "r");
+		const staged = await stagedHandle.stat();
+		await stagedHandle.close();
+		const stagedIsOurs = async (): Promise<boolean> => {
+			const standing = await fs.lstat(tempPath).catch(() => undefined);
+			return standing?.dev === staged.dev && standing.ino === staged.ino;
+		};
+		const stagedChanged = `${tempPath} was replaced while ${source} was being archived; run \`omp gc --archive\` again`;
 		const archived = await fs.open(destination, "r").catch(error => {
 			if (codeOf(error) === "ENOENT") return undefined;
 			throw error;
 		});
 		if (!archived) {
+			if (!(await stagedIsOurs())) throw new Error(stagedChanged);
 			await fs.link(tempPath, destination);
 			state.created.push({ path: destination, dev: staged.dev, ino: staged.ino });
 			return;
@@ -1255,18 +1274,20 @@ async function publishArtifactIntoArchive(
 			// copy — means the longer replaces the shorter, which loses nothing
 			// because the shorter is inside it.
 			if (verified.size === (await fs.stat(tempPath)).size) return;
-			// The name is settled first and the content last, so the content
-			// proof is the final thing before the rename. An inode comparison
-			// cannot see a file updated in place; reading it through the
-			// descriptor that was examined can. What survives is the gap
-			// between that read and the rename itself.
+			// The content is read first, through the descriptor that was
+			// examined, and the name is settled last — so a file replaced
+			// after the content read is caught by the inode comparison rather
+			// than overwritten, and one updated in place, which no inode
+			// comparison can see, is caught by the read. What survives is the
+			// gap between the last of them and the rename.
+			if (!(await archivedHandleIsHeldBy(archived, verified, tempPath))) {
+				throw new Error(`${destination} changed while it was being archived; run \`omp gc --archive\` again`);
+			}
 			const standing = await statIfPresent(destination);
 			if (!standing || standing.dev !== verified.dev || standing.ino !== verified.ino) {
 				throw new Error(`${destination} changed while it was being archived; run \`omp gc --archive\` again`);
 			}
-			if (!(await archivedHandleIsHeldBy(archived, verified, tempPath))) {
-				throw new Error(`${destination} changed while it was being archived; run \`omp gc --archive\` again`);
-			}
+			if (!(await stagedIsOurs())) throw new Error(stagedChanged);
 			await fs.rename(tempPath, destination);
 		} finally {
 			await archived.close();
@@ -1388,8 +1409,11 @@ async function proveLiveTreeIsArchived(
 		for (const entry of (await fs.readdir(source)).sort()) {
 			await proveLiveTreeIsArchived(path.join(source, entry), path.join(destination, entry), sourceRoot, proven);
 		}
-		// Deepest first when the removal walks it back.
-		proven.directories.unshift(source);
+		// Appended after its children, so the list reads deepest first and a
+		// directory is empty by the time the removal reaches it. Prepending
+		// put the root in front of its own children, which made every nested
+		// tree delete its files and then fail `rmdir` with `ENOTEMPTY`.
+		proven.directories.push(source);
 		return;
 	}
 	if (!stat.isFile()) {
@@ -2069,21 +2093,27 @@ export function renderText(result: GcResult): string {
 	}
 	if (result.reclaim) {
 		const reclaim = result.reclaim;
+		const partial = reclaim.partiallyRemoved ?? [];
 		if (reclaim.reclaimed > 0 && reclaim.sessionPath) {
 			lines.push(`reclaim: gave up ${reclaim.sessionPath}; the session is now only in ${reclaim.archivePath}`);
+		} else if (partial.length > 0) {
+			// Neither "gave up nothing" nor "kept the tree" is true once part
+			// of it is gone, and printing both is how a reader stops believing
+			// either. One line, saying what happened.
+			lines.push(
+				`reclaim: gave up ${partial.length} of ${reclaim.sessionPath ?? reclaim.query} and then stopped; the archive holds all of it`,
+			);
 		} else {
 			// A refusal has to read as one. Reporting only what was given up
-			// lets a run that deleted nothing — or deleted part of a tree and
-			// stopped — print the same line as a run that worked.
+			// lets a run that deleted nothing print the same line as a run
+			// that worked.
 			const verb = result.apply ? "gave up nothing" : "would give up nothing";
 			lines.push(`reclaim: ${verb} for "${reclaim.query}"`);
 		}
-		if (reclaim.keptArtifactTree !== undefined) {
+		if (reclaim.keptArtifactTree !== undefined && partial.length === 0) {
 			lines.push(`reclaim kept the live artifact tree: ${reclaim.keptArtifactTree}`);
 		}
-		for (const removed of reclaim.partiallyRemoved ?? []) {
-			lines.push(`reclaim removed before it refused: ${removed}`);
-		}
+		for (const removed of partial) lines.push(`reclaim removed before it stopped: ${removed}`);
 		if (reclaim.errors.length > 0) lines.push(`reclaim errors: ${reclaim.errors.length}`);
 	}
 	if (result.compress) {
@@ -2264,11 +2294,37 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 	const keepTree = async (): Promise<void> => {
 		if (await pathExists(liveArtifacts)) result.keptArtifactTree = liveArtifacts;
 	};
+	const restoreCommand = `omp gc --restore ${path.basename(archiveFile, ".jsonl.gz")} --apply${
+		options.agentDirWasGiven ? ` --agent-dir ${options.agentDir}` : ""
+	}`;
 	if (!options.apply) {
-		// Say now what applying would refuse, without taking anything.
+		// A preview that reports nothing is a preview nobody can act on, and
+		// its exit status is how a script learns the difference. Everything
+		// applying would refuse for is checked here too, short of taking the
+		// leases: the owner is probed and released, and the tree is proved.
+		const session = await readSessionInfo(sessionPath).catch(() => undefined);
+		const probe = session ? await tryAcquireSessionTreeLeases(session, await collectSessionFiles(session)) : null;
+		if (probe) for (const held of probe.leases) held.release();
+		if (!session) {
+			result.errors.push(`${sessionPath} is not a session file`);
+		} else if (!probe) {
+			result.errors.push(
+				`a running process owns ${sessionPath} or one of its subagent sessions; close it and reclaim again`,
+			);
+		}
 		if (!(await holdsLive())) {
 			await keepTree();
 			result.errors.push(notACopy());
+			return result;
+		}
+		if (await pathExists(liveArtifacts)) {
+			const preview = { files: [] as string[], directories: [] as string[] };
+			try {
+				await proveLiveTreeIsArchived(liveArtifacts, archiveArtifacts, liveArtifacts, preview);
+			} catch (error) {
+				await keepTree();
+				result.errors.push(`${liveArtifacts} would be kept: ${errorMessage(error)}`);
+			}
 		}
 		return result;
 	}
@@ -2283,7 +2339,15 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 		result.errors.push(`${sessionPath} is not a session file`);
 		return result;
 	}
-	const tree = await tryAcquireSessionTreeLeases(session, await collectSessionFiles(session)).catch(() => null);
+	const tree = await (async () => {
+		// Awaited inside, so an enumeration failure becomes this function's
+		// answer rather than escaping past the result the caller renders.
+		try {
+			return await tryAcquireSessionTreeLeases(session, await collectSessionFiles(session));
+		} catch {
+			return null;
+		}
+	})();
 	if (!tree) {
 		await keepTree();
 		result.errors.push(
@@ -2324,8 +2388,11 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 			result.partiallyRemoved = removed;
 			await keepTree();
 			result.errors.push(
-				`${sessionPath} was partly given up and then could not be finished: ${errorMessage(error)}. ` +
-					`The archive holds all of it — \`omp gc --restore ${path.basename(archiveFile, ".jsonl.gz")} --apply\` brings it back`,
+				removed.length === 0
+					? `${sessionPath} was kept: ${errorMessage(error)}`
+					: `${sessionPath} was partly given up and then could not be finished: ${errorMessage(error)}. ` +
+							`The archive holds everything that was proved before it stopped — \`${restoreCommand}\` brings that back; ` +
+							`a subagent session that joined while this ran and wrote after its file was proved is not in it`,
 			);
 			return result;
 		}

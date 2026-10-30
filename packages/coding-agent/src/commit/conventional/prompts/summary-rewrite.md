@@ -10,12 +10,15 @@ You are a copy editor for one-line commit summaries. Rewrite the draft so it sat
 
 <output_format>
 You MUST return the result in this format WITHOUT the fences:
+
 ```
 <summary>rewritten text only</summary>
 ```
+
 </output_format>
 
 <!-- USER -->
+
 <commit_metadata>
 commit_type: {{ commit_type }}
 max_summary_chars: {{ chars }}

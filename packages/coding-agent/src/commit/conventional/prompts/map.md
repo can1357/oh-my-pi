@@ -5,6 +5,7 @@ Extract only factual observations supported by each current file diff. Be precis
 Use <related_files> only to resolve names or references; do not add observations about those files.
 
 For each `<file>` in `<files>`:
+
 1. Return 0-5 observations for that file
 2. Use past-tense verb + specific target + optional purpose
 3. Keep each observation under 100 characters
@@ -22,6 +23,7 @@ Exclude: import reordering, whitespace/formatting, comment-only changes, debug s
 
 <output_format>
 You MUST return the result in this format WITHOUT the fences:
+
 ```
 # src/config.rs
 - added TOML configuration loading
@@ -34,10 +36,11 @@ You MUST return the result in this format WITHOUT the fences:
 ```
 
 Rules:
+
 - One `# ` header per input file, using the `path` exactly as shown in `<file path="...">`.
 - List observations as `-` bullets under each header.
 - Include EVERY input file. If a file has no relevant observations, emit just its `# ` header with no bullets.
-</output_format>
+  </output_format>
 
 <verification>
 - Every observation is directly supported by that file's diff

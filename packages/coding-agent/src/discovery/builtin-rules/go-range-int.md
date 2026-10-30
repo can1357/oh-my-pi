@@ -3,7 +3,7 @@ description: "Use for i := range n instead of the C-style for i := 0; i < n; i++
 interruptMode: never
 scope: "tool:edit(*.go), tool:write(*.go)"
 astCondition:
-  - "for $I := 0; $I < $N; $I++ { $$$BODY }"
+   - "for $I := 0; $I < $N; $I++ { $$$BODY }"
 ---
 
 Go 1.22: `for` ranges integers. For `i := 0; i < n; i++`, prefer `for i := range n`; if index unused, `for range n`.

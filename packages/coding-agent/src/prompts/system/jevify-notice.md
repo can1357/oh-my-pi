@@ -86,13 +86,18 @@ const QUESTIONS = {
 			unrelated: "No hunk relates to the stated refactor.",
 		},
 	},
-	logic: { type: "bool", instructions: "Does any hunk change runtime behavior outside the refactor's subsystem (not renames/imports/types)?" },
+	logic: {
+		type: "bool",
+		instructions:
+			"Does any hunk change runtime behavior outside the refactor's subsystem (not renames/imports/types)?",
+	},
 };
 const CAP = 24_000;
 // Build `states` with this kernel's tools (glob/read/…), one entry per unit:
 // { [file]: { file, subject: SUBJECT, diff: diff.slice(0, CAP) } }
 const batch = await judgeBatch(states, QUESTIONS, { intent: `jevify ${SHA}` });
-const verdicts = {}, failures = {};
+const verdicts = {},
+	failures = {};
 while (Object.keys(verdicts).length + Object.keys(failures).length < batch.total) {
 	for (const [key, item] of await batch.drain({ timeout: 30 })) {
 		if (item.error !== undefined) failures[key] = item.error;

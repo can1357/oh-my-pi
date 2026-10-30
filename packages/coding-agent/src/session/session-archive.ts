@@ -56,6 +56,14 @@ export function liveSessionPathForArchive(archiveFile: string, agentDir?: string
 	return path.join(getSessionsDir(agentDir), relative.slice(0, -".gz".length));
 }
 
+/** The archived transcript a live session path would be stored as, if one is there. */
+export function archivedSessionPathForLive(sessionFile: string, agentDir?: string): string | undefined {
+	if (!sessionFile.endsWith(SESSION_SUFFIX)) return undefined;
+	const relative = path.relative(getSessionsDir(agentDir), sessionFile);
+	if (relative.startsWith("..") || path.isAbsolute(relative)) return undefined;
+	return path.join(getArchivedSessionsDir(agentDir), `${relative}.gz`);
+}
+
 /**
  * Every archived transcript, as absolute paths, newest session first. Buckets
  * and the archive root itself are commonly symlinks onto another filesystem,
@@ -828,6 +836,31 @@ export async function archiveIsPrefixOfLive(archiveFile: string, sessionPath: st
 }
 
 /**
+ * Whether the live transcript at `livePath` holds everything the already-open
+ * archived transcript has.
+ *
+ * The archive phase asks this immediately before it replaces an archived
+ * transcript with a longer one, and it has to be an answer about the file it
+ * examined rather than about whatever the name points at by then — so the
+ * gzip stream is read from the caller's descriptor, positionally, not
+ * reopened by path.
+ */
+export async function archivedHandleIsPrefixOfLive(archived: fs.FileHandle, livePath: string): Promise<boolean> {
+	const live = await fs.open(livePath, "r");
+	try {
+		let holds = false;
+		await pipeline(bytesOfHandle(archived), createGunzip(), async (source: NodeJS.ReadableStream) => {
+			holds = await sourceIsPrefixOfDestination(source as AsyncIterable<Uint8Array>, live, true);
+		});
+		return holds;
+	} catch {
+		return false;
+	} finally {
+		await live.close();
+	}
+}
+
+/**
  * Whether the file at `candidatePath` holds every byte the already-open
  * `archived` handle has, and is not that same file.
  *
@@ -1135,18 +1168,33 @@ export async function restoreArchivedSession(archiveFile: string, agentDir?: str
  * has to understand `.jsonl.gz`, and none of them silently drops the
  * subagent transcripts and tool output stored beside it.
  *
+ * A live transcript with an archive still beside it is the same case wearing
+ * a different path: a run killed between publishing the transcript and
+ * carrying the tree home leaves exactly that, and resume-by-id then resolves
+ * to the live file. Opening it as if it were whole breaks this change's own
+ * resumability contract — the session comes up with its subagent transcripts
+ * and tool output missing and nothing said — so the restore is finished here
+ * too.
+ *
  * A restore that could not bring the artifact tree back fails here rather
  * than handing out a transcript whose artifacts are still in the archive:
  * the live transcript wins every later id lookup, so an unreported half
  * restore is one nothing would retry.
  */
 export async function materializeSessionFile(sessionFile: string, agentDir?: string): Promise<string> {
-	if (!isArchivedSessionPath(sessionFile)) return sessionFile;
-	const restored = await restoreArchivedSession(sessionFile, agentDir);
+	let archived: string | undefined;
+	if (isArchivedSessionPath(sessionFile)) {
+		archived = sessionFile;
+	} else {
+		const candidate = archivedSessionPathForLive(sessionFile, agentDir);
+		if (candidate !== undefined && (await statIfPresent(candidate))) archived = candidate;
+	}
+	if (archived === undefined) return sessionFile;
+	const restored = await restoreArchivedSession(archived, agentDir);
 	if (restored.notRestored.length > 0) {
 		const stem = path.basename(restored.sessionPath, SESSION_SUFFIX);
 		throw new Error(
-			`Restored the transcript of "${sessionFile}" to ${restored.sessionPath}, but could not restore ${restored.notRestored.join("; ")}. ` +
+			`Restored the transcript of "${archived}" to ${restored.sessionPath}, but could not restore ${restored.notRestored.join("; ")}. ` +
 				`The archive is kept; \`omp gc --restore ${stem.slice(stem.lastIndexOf("_") + 1) || stem} --apply\` retries it once the path is clear.`,
 		);
 	}

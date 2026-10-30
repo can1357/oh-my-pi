@@ -45,15 +45,17 @@ await tool.<name>(args) — session tool; `args` is its parameter object
 {{else}}
 <namespaces>
 More globals; `read` the linked docs before first use:
+
 - `judge`, `{{#if py}}judge_batch{{else}}judgeBatch{{/if}}`, `completion`: classification, bulk judgment, model calls → `xd://eval/judge`
 - `%load`{{#if py}}, `%pip`{{/if}}{{#if js}}, `%bun add`{{/if}}, `budget`{{#if evalTools}}, `@tool`/`tool(fn)`{{/if}}: setup, installs, utilities → `xd://eval/helpers`
-{{#if spawns}}
+  {{#if spawns}}
 - `agent`, `workpool`: background subagents, DAG waves → `xd://eval/agents`
-{{/if}}
-{{#each preludes}}
+  {{/if}}
+  {{#each preludes}}
 - `{{name}}`: {{summary}} → `xd://eval/{{name}}`
 {{/each}}
-</namespaces>
+  </namespaces>
+
 {{#each inlinePreludes}}
 
 <{{name}}>

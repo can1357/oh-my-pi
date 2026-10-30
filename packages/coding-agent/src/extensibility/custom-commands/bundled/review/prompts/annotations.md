@@ -19,6 +19,7 @@ Use these annotations as review notes; they are not independently validated find
 {{else}}
 
 ### {{pathLabel}} — file
+
 {{/if}}
 
 Path: `{{path}}`

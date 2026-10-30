@@ -4,6 +4,7 @@ Your last turn stopped during a streamed `edit` call: the harness's final patch 
 Preview error: {{diagnostic}}
 
 Act on the error now instead of re-sending the same payload:
+
 - Read the target file again so line anchors match its current content.
 - Then re-issue the edit with corrected anchors, or use `write` when the change is large.
 

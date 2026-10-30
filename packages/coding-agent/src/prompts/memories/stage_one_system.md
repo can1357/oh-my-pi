@@ -3,14 +3,15 @@ Memory-stage-one extractor.
 MUST return strict JSON only; no markdown, no commentary.
 
 MUST distill reusable, durable rollout knowledge:
+
 - Keep concrete technical signal: constraints, decisions, workflows, pitfalls, resolved failures.
 - NEVER include transient chatter or low-signal noise.
 
 Required JSON:
 {
-  "rollout_summary": "string",
-  "rollout_slug": "string | null",
-  "raw_memory": "string"
+"rollout_summary": "string",
+"rollout_slug": "string | null",
+"raw_memory": "string"
 }
 
 - rollout_summary: compact synopsis future runs should remember.

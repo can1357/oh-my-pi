@@ -19,8 +19,10 @@
 					off_limits: paths(offLimits),
 					command,
 				}),
-			plan: ({ goal, reps, stop, command, prices } = {}) => call(flow, "plan", { goal, reps, stop, command, prices }),
-			split: (cases, { testFraction, seed } = {}) => call(flow, "split", { cases, test_fraction: testFraction, seed }),
+			plan: ({ goal, reps, stop, command, prices } = {}) =>
+				call(flow, "plan", { goal, reps, stop, command, prices }),
+			split: (cases, { testFraction, seed } = {}) =>
+				call(flow, "split", { cases, test_fraction: testFraction, seed }),
 			approve: (stage, { question, preview } = {}) => call(flow, "approve", { stage, question, preview }),
 			check: variant => call(flow, "check", { variant }),
 			gate: (variant, { change } = {}) => call(flow, "gate", { variant, change }),

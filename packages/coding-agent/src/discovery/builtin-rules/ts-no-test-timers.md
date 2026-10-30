@@ -1,9 +1,9 @@
 ---
 description: Do not use real timers (Bun.sleep, setTimeout, setInterval) in tests — drive time with fake timers instead
 condition:
-  - "Bun\\.sleep\\("
-  - "\\bsetInterval\\("
-  - "\\bsetTimeout\\("
+   - "Bun\\.sleep\\("
+   - "\\bsetInterval\\("
+   - "\\bsetTimeout\\("
 scope: "tool:edit(*.test.ts), tool:write(*.test.ts)"
 interruptMode: never
 ---

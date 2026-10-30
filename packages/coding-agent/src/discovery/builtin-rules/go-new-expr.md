@@ -3,8 +3,8 @@ description: "Use new(expr) for pointer-to-value helpers instead of `func ptr[T 
 interruptMode: never
 scope: "tool:edit(*.go), tool:write(*.go)"
 astCondition:
-  - "func $F($V $T) *$T { return &$V }"
-  - "func $F[$$$TP]($V $T) *$T { return &$V }"
+   - "func $F($V $T) *$T { return &$V }"
+   - "func $F[$$$TP]($V $T) *$T { return &$V }"
 ---
 
 Go 1.26: `new(expr)` allocates, stores `expr`, returns `*T`; replaces pointer-value helpers and `x := v; p := &x`.

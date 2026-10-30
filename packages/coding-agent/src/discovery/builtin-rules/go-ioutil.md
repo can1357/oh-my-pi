@@ -9,16 +9,16 @@ interruptMode: never
 
 ## Mapping
 
-|io/ioutil|Replacement|
-|---|---|
-|`ioutil.ReadAll`|`io.ReadAll`|
-|`ioutil.ReadFile`|`os.ReadFile`|
-|`ioutil.WriteFile`|`os.WriteFile`|
-|`ioutil.ReadDir`|`os.ReadDir`|
-|`ioutil.TempFile`|`os.CreateTemp`|
-|`ioutil.TempDir`|`os.MkdirTemp`|
-|`ioutil.NopCloser`|`io.NopCloser`|
-|`ioutil.Discard`|`io.Discard`|
+| io/ioutil          | Replacement     |
+| ------------------ | --------------- |
+| `ioutil.ReadAll`   | `io.ReadAll`    |
+| `ioutil.ReadFile`  | `os.ReadFile`   |
+| `ioutil.WriteFile` | `os.WriteFile`  |
+| `ioutil.ReadDir`   | `os.ReadDir`    |
+| `ioutil.TempFile`  | `os.CreateTemp` |
+| `ioutil.TempDir`   | `os.MkdirTemp`  |
+| `ioutil.NopCloser` | `io.NopCloser`  |
+| `ioutil.Discard`   | `io.Discard`    |
 
 ## Migration
 

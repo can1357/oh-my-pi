@@ -1,8 +1,8 @@
 ---
 description: "Never use isRecord"
 condition:
-  - "\\bfunction\\s+isRecord(?:\\s*<[^>]*>)?\\s*\\("
-  - "\\b(?:const|let|var)\\s+isRecord\\b\\s*(?::[\\s\\S]{0,300}?)?=\\s*(?:async\\s+)?(?:function\\b|(?:<[^>\\n]*>\\s*)?(?:\\([^)]*\\)|[A-Za-z_$][\\w$]*)\\s*(?::[\\s\\S]{0,300}?)?=>)"
+   - "\\bfunction\\s+isRecord(?:\\s*<[^>]*>)?\\s*\\("
+   - "\\b(?:const|let|var)\\s+isRecord\\b\\s*(?::[\\s\\S]{0,300}?)?=\\s*(?:async\\s+)?(?:function\\b|(?:<[^>\\n]*>\\s*)?(?:\\([^)]*\\)|[A-Za-z_$][\\w$]*)\\s*(?::[\\s\\S]{0,300}?)?=>)"
 scope: "tool:edit(*.{ts,tsx,mts,cts}), tool:write(*.{ts,tsx,mts,cts})"
 interruptMode: never
 ---
@@ -39,8 +39,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	value !== null && typeof value === "object";
+const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object";
 ```
 
 ## Exceptions
