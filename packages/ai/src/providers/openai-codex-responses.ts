@@ -1392,7 +1392,7 @@ function createCodexRequestContext(
 	}
 
 	const accountId = getCodexAccountId(apiKey);
-	applyCodexAccessPrograms(transformedBody, model, accountId);
+	applyCodexAccessPrograms(transformedBody, model, accountId, options?.codexAccessPrograms);
 	const baseUrl = model.baseUrl || CODEX_BASE_URL;
 	const url = resolveCodexResponsesUrl(baseUrl);
 

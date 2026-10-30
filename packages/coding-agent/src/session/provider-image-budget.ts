@@ -11,6 +11,7 @@ import type {
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import { reachesBudgetedHost } from "@oh-my-pi/pi-ai";
+import { adoptFactoryReplay, toGeminiTools } from "@oh-my-pi/pi-ai/providers/factory-droid/gemini";
 import { decodeDataUri } from "@oh-my-pi/pi-ai/providers/openai-data-uri";
 import { resolveFactoryDroidPolicy } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 import { resolveInlineImageByteBudget, resolveRequestBodyByteLimit } from "@oh-my-pi/pi-catalog/compat/request-size";
@@ -121,6 +122,8 @@ interface ImageBudgetState {
 	metadataWire: boolean;
 	/** Messages whose images the byte clamp must not evict. */
 	kept?: ReadonlySet<Message>;
+	/** Where set, accrues the text bytes evicted computer screenshots send instead ({@link clampToolResultMessage}). */
+	fallbackTextBytes?: number;
 }
 
 function needsImageDrop(state: ImageBudgetState): boolean {
@@ -163,10 +166,17 @@ function clampDeveloperMessage(message: DeveloperMessage, state: ImageBudgetStat
 }
 
 /**
+ * Most characters of an evicted computer result's text a metadata-screenshot route sends: without its screenshot the
+ * Responses wire folds the result into a note truncated to this length (`appendResponsesToolResultMessages`,
+ * `repairOrphanResponsesToolOutputs` in openai-shared.ts).
+ */
+const COMPUTER_FALLBACK_TEXT_CHARS = 16_000;
+
+/**
  * Where the route sends a computer result's metadata screenshot, the result is that one image, never its content:
  * evicting it drops the metadata (and the unsent content images), and the result goes out as its remaining text, as
- * for an unreadable screenshot in {@link dropUnreadableContextImages}. Elsewhere the content is what is sent and
- * clamped, and the unsent metadata stays.
+ * for an unreadable screenshot in {@link dropUnreadableContextImages}; the bytes of that newly sent text accrue to
+ * `state.fallbackTextBytes`. Elsewhere the content is what is sent and clamped, and the unsent metadata stays.
  */
 function clampToolResultMessage(message: ToolResultMessage, state: ImageBudgetState): ToolResultMessage {
 	if (!needsImageDrop(state)) return message;
@@ -180,6 +190,14 @@ function clampToolResultMessage(message: ToolResultMessage, state: ImageBudgetSt
 	if (state.remainingDrops > 0) state.remainingDrops--;
 	state.inlineBytes -= bytes;
 	const text = message.content.filter(part => part.type === "text");
+	if (state.fallbackTextBytes !== undefined) {
+		const sent = text
+			.map(part => part.text)
+			.join("\n")
+			.slice(0, COMPUTER_FALLBACK_TEXT_CHARS);
+		// The note's prefix, call id and truncation marker.
+		state.fallbackTextBytes += Buffer.byteLength(JSON.stringify(sent)) + 256;
+	}
 	return { ...message, content: text.length > 0 ? text : [IMAGE_OMISSION], providerMetadata: undefined };
 }
 
@@ -257,7 +275,94 @@ function newestImageMessages(
 }
 
 /**
- * Drops oldest inline image blocks so their base64 fits the deployment's request-body budget.
+ * `content` as measured for the request bytes around its images: each image's base64 emptied and, where
+ * `stringArguments` (the Responses and Chat Completions wires), each tool call's arguments as the JSON string that
+ * wire sends, whose quotes and backslashes the body escapes again. The Anthropic and Gemini wires send an object.
+ */
+function measuredContent<T extends { type: string }>(content: readonly T[], stringArguments: boolean): readonly T[] {
+	if (!content.some(part => part.type === "image" || (stringArguments && part.type === "toolCall"))) return content;
+	return content.map(part => {
+		if (part.type === "image") return { ...part, data: "" };
+		if (stringArguments && part.type === "toolCall" && "arguments" in part)
+			return { ...part, arguments: JSON.stringify(part.arguments) };
+		return part;
+	});
+}
+
+/**
+ * UTF-8 bytes `context` puts in the request body around its inline images. Text, tools and the system prompt ride in
+ * the same body as the images; they are measured with every image's base64 emptied, so the cost follows the text
+ * rather than the images. Never sent: tool-result `details` (UI-only), another provider's native payload (assistant
+ * turns, compaction summaries), an assistant's Responses or Cursor history from another model, which those wires
+ * replay only on the model that produced it, and inactive tool definitions anywhere but the Anthropic wire, the only
+ * one that re-declares them. A same-model Responses turn goes out as its native items or as its rebuilt content, never
+ * both: the larger is charged. Factory's Gemini wire is measured as it sends: tool schemas dereferenced, and replay
+ * reasoning settled by {@link adoptFactoryReplay}. A computer result carries its screenshot twice and sends one copy
+ * (sentScreenshotBytes); where that is the metadata copy, none of its content is sent.
+ */
+function otherRequestBytes(context: Context, model: Model, metadataWire: boolean): number {
+	// Factory Droid replays a turn on its upstream wire, and records the turn under that wire's api.
+	const factory = model.api === "factory-droid-agent" ? (model as Model<"factory-droid-agent">) : undefined;
+	const replayApi = factory ? resolveFactoryDroidPolicy(factory)?.wire : model.api;
+	const gemini = replayApi === "google-generate" ? factory : undefined;
+	const stringArguments =
+		replayApi === "openai-responses" ||
+		replayApi === "azure-openai-responses" ||
+		replayApi === "openai-codex-responses" ||
+		replayApi === "openai-completions";
+	const messages = context.messages.map(original => {
+		const message = gemini ? adoptFactoryReplay(original, gemini) : original;
+		if (message.role === "toolResult") {
+			const metadata = message.providerMetadata;
+			if (!metadata || sentScreenshotBytes(message, metadataWire) === undefined) {
+				return {
+					...message,
+					content: measuredContent(message.content, stringArguments),
+					details: undefined,
+					providerMetadata: undefined,
+				};
+			}
+			const screenshot =
+				metadata.screenshot.image_url === undefined
+					? metadata.screenshot
+					: { ...metadata.screenshot, image_url: "" };
+			return { ...message, details: undefined, content: [], providerMetadata: { ...metadata, screenshot } };
+		}
+		const content = Array.isArray(message.content)
+			? measuredContent(message.content, stringArguments)
+			: message.content;
+		const payload = message.providerPayload;
+		if (!payload) return { ...message, content };
+		const owner =
+			message.role === "assistant" ? message.provider : "provider" in payload ? payload.provider : undefined;
+		if (owner !== undefined && owner !== model.provider) return { ...message, content, providerPayload: undefined };
+		if (
+			message.role !== "assistant" ||
+			(payload.type !== "openaiResponsesHistory" && payload.type !== "cursorHistory")
+		) {
+			return { ...message, content };
+		}
+		if (message.api !== replayApi || message.model !== model.id) {
+			return { ...message, content, providerPayload: undefined };
+		}
+		if (payload.type !== "openaiResponsesHistory") return { ...message, content };
+		return Buffer.byteLength(JSON.stringify(payload)) > Buffer.byteLength(JSON.stringify(content))
+			? { ...message, content: [] }
+			: { ...message, content, providerPayload: undefined };
+	});
+	return Buffer.byteLength(
+		JSON.stringify({
+			...context,
+			messages,
+			tools: gemini ? toGeminiTools(context.tools) : context.tools,
+			inactiveTools: replayApi === "anthropic-messages" ? context.inactiveTools : undefined,
+		}),
+	);
+}
+
+/**
+ * Drops oldest inline image blocks so their base64 fits the deployment's request-body budget: its inline-image byte
+ * budget and, where the host sets a `request-body-byte-limit`, what the request's other bytes leave of that limit.
  * Runs after URL/provider-file decoration: blocks the provider receives as references carry no inline bytes.
  */
 export function clampProviderContextImageBytes(context: Context, model: Model): Context {
@@ -267,40 +372,38 @@ export function clampProviderContextImageBytes(context: Context, model: Model): 
 	if (byteBudget === undefined) return context;
 	const metadataWire = sendsComputerScreenshotMetadata(model);
 	let inlineBytes = 0;
-	// Assistant images are model outputs no serializer replays (see countImages): never charged or reserved.
-	let unsentBytes = 0;
+	// Assistant images are model outputs no serializer replays (see countImages): never charged.
 	for (const message of context.messages) {
-		if (message.role !== "assistant") {
-			inlineBytes += sentImageBytes(message, model, metadataWire);
-			continue;
-		}
-		for (const part of message.content) {
-			if (part.type === "image") unsentBytes += part.data.length;
-		}
+		if (message.role !== "assistant") inlineBytes += sentImageBytes(message, model, metadataWire);
 	}
-	if (inlineBytes <= byteBudget) return context;
+	if (inlineBytes === 0) return context;
 	const bodyLimit = resolveRequestBodyByteLimit(model, budgetedHost);
-	// Text, tools and the system prompt ride in the same body, as UTF-8: only what they leave may hold protected
-	// images. Base64 is ASCII, so its characters are its bytes. Never sent: tool-result `details` (UI-only) and
-	// another provider's native payload (assistant turns, compaction summaries), which this request does not replay.
-	// A computer result carries its screenshot twice and sends one copy (sentScreenshotBytes); where that is the
-	// metadata copy, none of its content is sent.
-	const wire = context.messages.map(message => {
-		if (message.role === "toolResult") {
-			return sentScreenshotBytes(message, metadataWire) === undefined
-				? { ...message, details: undefined, providerMetadata: undefined }
-				: { ...message, details: undefined, content: [] };
-		}
-		const payload = message.providerPayload;
-		if (!payload) return message;
-		const owner =
-			message.role === "assistant" ? message.provider : "provider" in payload ? payload.provider : undefined;
-		return owner !== undefined && owner !== model.provider ? { ...message, providerPayload: undefined } : message;
-	});
-	const otherBytes = Buffer.byteLength(JSON.stringify({ ...context, messages: wire })) - inlineBytes - unsentBytes;
-	const imageRoom = bodyLimit === undefined ? undefined : bodyLimit - REQUEST_ENVELOPE_BYTES - otherBytes;
-	const kept = newestImageMessages(context, model, metadataWire, imageRoom);
-	return clampImages(context, { remainingDrops: 0, inlineBytes, byteBudget, model, metadataWire, kept });
+	if (bodyLimit === undefined) {
+		if (inlineBytes <= byteBudget) return context;
+		return clampImages(context, { remainingDrops: 0, inlineBytes, byteBudget, model, metadataWire });
+	}
+	// Only what the other bytes leave of the body limit may hold images, whatever the image budget allows.
+	let imageRoom = bodyLimit - REQUEST_ENVELOPE_BYTES - otherRequestBytes(context, model, metadataWire);
+	let clamped = context;
+	for (;;) {
+		const budget = Math.min(byteBudget, imageRoom);
+		if (inlineBytes <= budget) return clamped;
+		const kept = newestImageMessages(clamped, model, metadataWire, imageRoom);
+		const state: ImageBudgetState = {
+			remainingDrops: 0,
+			inlineBytes,
+			byteBudget: budget,
+			model,
+			metadataWire,
+			kept,
+			fallbackTextBytes: 0,
+		};
+		clamped = clampImages(clamped, state);
+		// Text that evicted computer screenshots send instead shrinks the room: evict again while it crowds the rest.
+		if (!state.fallbackTextBytes) return clamped;
+		imageRoom -= state.fallbackTextBytes;
+		inlineBytes = state.inlineBytes;
+	}
 }
 
 /**
