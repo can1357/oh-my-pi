@@ -913,6 +913,15 @@ export class ForkSourceNotFoundError extends Error {
 }
 
 /**
+ * Room a whole-file session rewrite must leave beyond the file itself, up to this much: a rewrite
+ * builds every entry's line in memory before writing, which for a long session costs gigabytes, so it
+ * is refused before that when the volume cannot hold the result.
+ */
+const REWRITE_FREE_SPACE_RESERVE_BYTES = 256 * 1024 * 1024;
+/** Below this a rewrite's body is small enough that only the write itself decides. */
+const REWRITE_GUARD_MIN_BYTES = 4 * 1024 * 1024;
+
+/**
  * Stores and navigates an append-only conversation journal.
  *
  * A session is a JSONL file: one header line followed by entries. Entries form a
@@ -1010,6 +1019,15 @@ export class SessionManager {
 	#diskTail: Promise<void> = Promise.resolve();
 	#diskFailure: Error | undefined;
 	#diskFailureLogged = false;
+	/**
+	 * Entries whose plain append failed on a full volume, oldest first, while the file was otherwise
+	 * current. The writer rolled each partial line back, so the next write appends just these lines
+	 * instead of rewriting the whole file, which for a long session costs gigabytes of memory exactly
+	 * when the disk, and so swap, has none to spare.
+	 */
+	#unappendedTail: SessionEntry[] = [];
+	/** The latest title slot update a queued title change still owes the file, applied once the queue lands. */
+	#pendingTitleUpdate: SessionTitleUpdate | undefined;
 	/** FIFO reservation for atomic batches and authoritative recovery. */
 	#atomicPersistenceTail: Promise<void> = Promise.resolve();
 	/** Observer notifications withheld until their entries are proven durable. */
@@ -1101,6 +1119,9 @@ export class SessionManager {
 	#clearDiskError(): void {
 		this.#diskFailure = undefined;
 		this.#diskFailureLogged = false;
+		// Lines still queued for an append belong to a file a switch, move or rewrite has moved past:
+		// the next write restores them with the rest of the session through a full rewrite.
+		if (this.#unappendedTail.length > 0) this.#abandonUnappendedTail();
 	}
 
 	/**
@@ -1405,6 +1426,121 @@ export class SessionManager {
 		if (writer) void writer.close().catch(() => undefined);
 	}
 
+	/** Leave tail mode: the queued entries stay in memory and the next write restores them in full. */
+	#abandonUnappendedTail(): void {
+		this.#unappendedTail = [];
+		this.#pendingTitleUpdate = undefined;
+		this.#fileIsCurrent = false;
+		this.#rewriteRequired = true;
+	}
+
+	/** An append the volume refused for space; the file writer has already rolled its partial bytes back. */
+	#isFullVolumeAppendFailure(error: unknown): boolean {
+		return (
+			isFsError(error) &&
+			(error.code === "ENOSPC" || error.code === "EDQUOT") &&
+			!this.#storage.defersSyncPublish &&
+			this.#storage instanceof FileSessionStorage
+		);
+	}
+
+	/**
+	 * Append the queued lines a full volume refused, oldest first. Returns false while the volume is
+	 * still full: what landed is recorded and the rest stays queued. Returns true once every line has
+	 * landed, or once the file's state no longer allows plain appends and tail mode was abandoned for
+	 * a full rewrite.
+	 */
+	#appendUnappendedTail(): boolean {
+		if (
+			this.#sessionFileRelocating ||
+			(this.#atomicRewriteFenceEpoch !== null && this.#atomicRewriteFenceEpoch === this.#diskEpoch) ||
+			!this.#fileIsCurrent ||
+			this.#rewriteRequired ||
+			this.#sessionOwnedElsewhere()
+		) {
+			this.#abandonUnappendedTail();
+			return true;
+		}
+		try {
+			const writer = this.#appendWriter();
+			if (!writer.appendSync) {
+				this.#abandonUnappendedTail();
+				return true;
+			}
+			while (this.#unappendedTail.length > 0) {
+				const line = this.#lineFor(this.#unappendedTail[0]!);
+				writer.appendSync(line);
+				this.#recordDurableAppend(line);
+				this.#unappendedTail.shift();
+			}
+		} catch (err) {
+			this.#noteDiskFailure(err);
+			if (this.#isFullVolumeAppendFailure(err)) {
+				this.#closeWriterEventually();
+				return false;
+			}
+			this.#abandonUnappendedTail();
+			return true;
+		}
+		this.#clearDiskError();
+		const titleUpdate = this.#pendingTitleUpdate;
+		this.#pendingTitleUpdate = undefined;
+		const sessionFile = this.#sessionFile;
+		// A file without a title slot (an older session) takes its title from the entry alone: a slot
+		// write there would overwrite its first line.
+		if (titleUpdate && sessionFile && this.#hasTitleSlot && !this.#entriesReleased) {
+			void this.#scheduleDiskWork(
+				async () => {
+					if (this.#sessionFile === sessionFile && this.#hasTitleSlot) {
+						await this.#storage.updateSessionTitle(sessionFile, titleUpdate);
+					}
+				},
+				{ ignorePriorError: true, ignoreEpoch: true },
+			).catch(() => undefined);
+		}
+		return true;
+	}
+
+	/** Best effort before the file changes hands or is closed: queued lines land if there is room now. */
+	#drainUnappendedTail(): void {
+		if (this.#unappendedTail.length > 0 && !this.#entriesReleased) this.#appendUnappendedTail();
+	}
+
+	/**
+	 * Refuse a whole-file rewrite the session volume cannot hold, before its body is built: building it
+	 * costs memory in proportion to the whole session, and on a full disk the write would fail anyway.
+	 */
+	#assertRoomForRewrite(targetPath: string): void {
+		if (!(this.#storage instanceof FileSessionStorage)) return;
+		let size = this.#expectedDiskSize;
+		if (size === null) {
+			try {
+				size = fs.statSync(targetPath).size;
+			} catch {
+				// A file not written yet (a new session, a fork) is left to the write itself.
+				return;
+			}
+		}
+		if (size < REWRITE_GUARD_MIN_BYTES) return;
+		let free: number;
+		try {
+			const stats = fs.statfsSync(path.dirname(targetPath));
+			const blocks = process.getuid?.() === 0 ? stats.bfree : stats.bavail;
+			free = Number(blocks) * Number(stats.bsize);
+		} catch {
+			// No reading of the volume: the write itself decides, as before.
+			return;
+		}
+		const needed = size + Math.min(REWRITE_FREE_SPACE_RESERVE_BYTES, size);
+		if (free >= needed) return;
+		throw Object.assign(
+			new Error(
+				`ENOSPC: no space left on device, a full rewrite of ${path.basename(targetPath)} needs ${needed} bytes free and ${free} are`,
+			),
+			{ code: "ENOSPC" },
+		);
+	}
+
 	async #closeWriterHandle(): Promise<void> {
 		const writer = this.#writer;
 		if (!writer) return;
@@ -1534,6 +1670,7 @@ export class SessionManager {
 			sessionFile === this.#sessionFile && this.#sessionOwnedElsewhere()
 				? this.#moveOffSessionFile("open-elsewhere")
 				: sessionFile;
+		this.#assertRoomForRewrite(target);
 		const body = this.#serializeBody();
 		const options = { expectedSize: this.#expectedDiskSize, commitGuard };
 		try {
@@ -1561,7 +1698,7 @@ export class SessionManager {
 				throw this.#latchIndeterminate(operationError, recoveryErrors);
 			}
 		}
-		this.#recordFullRewrite(body.bytes);
+		this.#recordFullRewrite(body);
 	}
 
 	#appendWriter(): SessionStorageWriter {
@@ -1583,8 +1720,16 @@ export class SessionManager {
 		this.#expectedDiskSize = (this.#expectedDiskSize ?? 0) + Buffer.byteLength(line, "utf8");
 	}
 
-	#recordFullRewrite(bytes: number): void {
+	#recordFullRewrite({ bytes, stamp }: Pick<SessionFileBody, "bytes" | "stamp">): void {
 		this.#expectedDiskSize = bytes;
+		// A durable full body supersedes the queued lines it already holds.
+		if (this.#unappendedTail.length > 0) {
+			this.#unappendedTail = this.#unappendedTail.filter(entry => {
+				const index = stamp.entries.lastIndexOf(entry);
+				return index < 0 || index >= stamp.entryCount;
+			});
+			if (this.#unappendedTail.length === 0) this.#pendingTitleUpdate = undefined;
+		}
 	}
 
 	/**
@@ -1696,6 +1841,7 @@ export class SessionManager {
 
 		try {
 			if (this.#sessionOwnedElsewhere()) targetPath = this.#moveOffSessionFile("open-elsewhere");
+			this.#assertRoomForRewrite(targetPath);
 			let body = this.#serializeBody();
 			this.#diskEpoch++;
 			this.#diskTail = Promise.resolve();
@@ -1732,7 +1878,7 @@ export class SessionManager {
 					// A newer deferred publish owns the durability record now;
 					// this body is no longer on the backend, so record nothing.
 					if (generation !== this.#deferredPublishGen) return;
-					this.#recordFullRewrite(bytes);
+					this.#recordFullRewrite({ bytes, stamp });
 					const entries = this.#entries;
 					const bodyIsCurrent =
 						stamp.entries === entries &&
@@ -1761,7 +1907,7 @@ export class SessionManager {
 				});
 				return;
 			}
-			this.#recordFullRewrite(body.bytes);
+			this.#recordFullRewrite(body);
 			// Only mark the manager current when writing the active session path.
 			// Mid-move writes update the live relocation path; `#sessionFile` is
 			// still the pre-repoint source until moveTo repoints it.
@@ -1831,6 +1977,7 @@ export class SessionManager {
 				const sessionFile = this.#sessionFile;
 				if (!sessionFile) return false;
 				if (this.#diskEpoch !== epoch) return false;
+				this.#assertRoomForRewrite(sessionFile);
 				const body = this.#serializeBody();
 				const options = {
 					expectedSize: this.#expectedDiskSize,
@@ -1849,7 +1996,7 @@ export class SessionManager {
 					}
 					try {
 						if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
-							this.#recordFullRewrite(body.bytes);
+							this.#recordFullRewrite(body);
 						}
 					} catch {
 						// Preserve the publish error when durable state cannot be read back.
@@ -1859,14 +2006,14 @@ export class SessionManager {
 				if (this.#diskEpoch !== epoch) {
 					try {
 						if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
-							this.#recordFullRewrite(body.bytes);
+							this.#recordFullRewrite(body);
 						}
 					} catch {
 						// A superseding rewrite owns the durability record when its body cannot be read back.
 					}
 					return false;
 				}
-				this.#recordFullRewrite(body.bytes);
+				this.#recordFullRewrite(body);
 			} while (this.#atomicRewriteDirty);
 			return true;
 		} finally {
@@ -1886,6 +2033,11 @@ export class SessionManager {
 			this.#fileIsCurrent = false;
 			this.#rewriteRequired = true;
 			this.#atomicRewriteDirty = true;
+			return;
+		}
+		if (this.#unappendedTail.length > 0 && !this.#appendUnappendedTail()) {
+			// The volume is still full: this entry waits behind the queued ones.
+			this.#unappendedTail.push(entry);
 			return;
 		}
 		if (this.#diskFailure) {
@@ -1983,6 +2135,13 @@ export class SessionManager {
 					});
 			}
 		} catch (err) {
+			if (this.#isFullVolumeAppendFailure(err)) {
+				// The writer rolled the partial line back: retry just the missing lines on the next write.
+				this.#closeWriterEventually();
+				this.#unappendedTail.push(entry);
+				this.#noteDiskFailure(err);
+				return;
+			}
 			this.#fileIsCurrent = false;
 			this.#rewriteRequired = true;
 			this.#noteDiskFailure(err);
@@ -1991,9 +2150,16 @@ export class SessionManager {
 
 	async #persistTitleChangeEntry(entry: TitleChangeEntry, update: SessionTitleUpdate): Promise<void> {
 		if (!this.#persist || !this.#sessionFile) return;
+		if (this.#diskFailure && this.#hasTitleSlot && this.#unappendedTail.length > 0 && !this.#appendUnappendedTail()) {
+			// Still full: the title change waits behind the queued lines, and its slot update with it.
+			this.#unappendedTail.push(entry);
+			this.#pendingTitleUpdate = update;
+			throw this.#diskFailure;
+		}
 		if (this.#diskFailure) {
-			this.#fileIsCurrent = false;
-			this.#rewriteRequired = true;
+			// Any other failure, and a file without a title slot (only a whole-file rewrite adds one),
+			// recovers through a whole-file rewrite.
+			this.#abandonUnappendedTail();
 			this.#rewriteSynchronously();
 			if (this.#diskFailure) throw this.#diskFailure;
 			return;
@@ -2031,12 +2197,21 @@ export class SessionManager {
 				if (this.#released) return;
 				const sessionFile = this.#sessionFile;
 				if (!sessionFile) return;
+				let appended = false;
 				try {
 					await this.#appendWriter().append(line);
 					this.#recordDurableAppend(line);
+					appended = true;
 					await this.#storage.updateSessionTitle(sessionFile, update);
 					if (this.#diskEpoch === epoch) this.#fileIsCurrent = true;
-				} catch {
+				} catch (err) {
+					if (!appended && this.#isFullVolumeAppendFailure(err)) {
+						// The writer rolled the line back: it waits for room with its slot update.
+						this.#closeWriterEventually();
+						this.#unappendedTail.push(entry);
+						this.#pendingTitleUpdate = update;
+						throw this.#noteDiskFailure(err);
+					}
 					if (!(await this.#runFencedAtomicRewrite(epoch))) return;
 					this.#clearDiskError();
 					this.#fileIsCurrent = true;
@@ -2291,8 +2466,8 @@ export class SessionManager {
 			hasTitleSlot: this.#hasTitleSlot,
 			sessionFile: this.#sessionFile,
 			expectedDiskSize: this.#expectedDiskSize,
-			onDisk: this.#fileIsCurrent,
-			needsRewrite: this.#rewriteRequired,
+			onDisk: this.#fileIsCurrent && this.#unappendedTail.length === 0,
+			needsRewrite: this.#rewriteRequired || this.#unappendedTail.length > 0,
 			draftOnlySessionCleanupArmed: this.#draftOnlySessionCleanupArmed,
 			fallbackRuntimeOnly: this.#fallbackRuntimeOnly,
 			taskSiblingCandidate: this.#taskSiblingCandidate,
@@ -2404,6 +2579,7 @@ export class SessionManager {
 		loadedSession?: SessionLoadResult,
 		options?: { throwIfMissing?: boolean; newSession?: NewSessionOptions },
 	): Promise<void> {
+		this.#drainUnappendedTail();
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
 		this.#draftOnlySessionCleanupArmed = false;
@@ -2503,6 +2679,7 @@ export class SessionManager {
 	 * once it has content.
 	 */
 	async newSession(options?: NewSessionOptions): Promise<string | undefined> {
+		this.#drainUnappendedTail();
 		await this.#drainAndCloseWriter();
 		const sessionFile = this.#resetToNewSession(options);
 		if (options?.drop !== true) await this.ensureOnDisk();
@@ -2528,6 +2705,7 @@ export class SessionManager {
 
 		const oldSessionFile = this.#sessionFile;
 		const parentSessionId = this.#sessionId;
+		this.#drainUnappendedTail();
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
 		this.#reconcileSessionDirForFallback();
@@ -2788,7 +2966,8 @@ export class SessionManager {
 	async ensureOnDisk(): Promise<void> {
 		if (!this.#persist || !this.#sessionFile) return;
 		this.#forceFileCreation = true;
-		if (this.#fileIsCurrent && !this.#rewriteRequired) return;
+		this.#drainUnappendedTail();
+		if (this.#fileIsCurrent && !this.#rewriteRequired && this.#unappendedTail.length === 0) return;
 		await this.#rewriteAtomically();
 	}
 
@@ -2905,6 +3084,7 @@ export class SessionManager {
 	/** Flush pending writes. Call before switching sessions or on shutdown. */
 	async flush(): Promise<void> {
 		if (!this.#persist || !this.#sessionFile) return;
+		this.#drainUnappendedTail();
 		await this.#scheduleDiskWork(async () => {
 			if (this.#writer?.isOpen()) await this.#writer.flush();
 		});
@@ -2926,6 +3106,7 @@ export class SessionManager {
 	flushSync(): void {
 		if (!this.#persist || !this.#sessionFile) return;
 		if (this.#atomicEntryBatch) throw new Error("Cannot synchronously flush during an atomic session batch.");
+		this.#drainUnappendedTail();
 		if (this.#diskFailure) throw this.#diskFailure;
 		if (this.#fileIsCurrent && !this.#rewriteRequired) {
 			this.#writer?.flushSync?.();
@@ -2992,22 +3173,27 @@ export class SessionManager {
 	/** Flush, then close the append writer. */
 	async close(): Promise<void> {
 		if (!this.#persist) return;
-		// Closing gives up this process's ownership claim; a later write reclaims it.
-		const claim = this.#sessionClaim;
-		claim?.release?.();
-		if (claim) claim.release = undefined;
-		// A prior `flushSync` can self-conflict with this manager's own
-		// unconfirmed deferred publish; drain despite the latch so that
-		// publish can still confirm before we give up on the transcript.
-		await this.#scheduleDiskWork(
-			async () => {
-				const hadWriter = this.#writer !== undefined;
-				await this.#closeWriterHandle();
-				if (hadWriter || (this.#sessionFile && this.#storage.existsSync(this.#sessionFile)))
-					this.#fileIsCurrent = true;
-			},
-			{ ignorePriorError: true },
-		);
+		try {
+			// A prior `flushSync` can self-conflict with this manager's own
+			// unconfirmed deferred publish; drain despite the latch so that
+			// publish can still confirm before we give up on the transcript.
+			await this.#scheduleDiskWork(
+				async () => {
+					this.#drainUnappendedTail();
+					const hadWriter = this.#writer !== undefined;
+					await this.#closeWriterHandle();
+					if (hadWriter || (this.#sessionFile && this.#storage.existsSync(this.#sessionFile)))
+						this.#fileIsCurrent = true;
+				},
+				{ ignorePriorError: true },
+			);
+		} finally {
+			// Closing gives up this process's ownership claim; a later write reclaims it. Released
+			// after the queued lines land, since landing them claims the file again.
+			const claim = this.#sessionClaim;
+			claim?.release?.();
+			if (claim) claim.release = undefined;
+		}
 		await this.#pendingArtifactCopy?.done;
 		await this.#dropIfEmptyAndNoDraft();
 		// Wait for any queued backing writes (IndexedSessionStorage per-path
@@ -3086,6 +3272,8 @@ export class SessionManager {
 		this.#index.clear();
 		this.#inMemoryArtifacts = null;
 		this.#closeWriterEventually();
+		this.#unappendedTail = [];
+		this.#pendingTitleUpdate = undefined;
 		this.#entriesReleased = true;
 	}
 
