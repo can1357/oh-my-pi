@@ -128,7 +128,7 @@ export const cfgMnemopiAutoRetain = register({
 export const cfgMnemopiPolyphonicRecall = register({
 	id: "mnemopi.polyphonicRecall",
 	type: "boolean",
-	default: false,
+	default: true,
 	ui: {
 		tab: "memory",
 		group: "Mnemopi",

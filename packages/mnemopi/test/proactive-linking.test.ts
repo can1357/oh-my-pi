@@ -139,8 +139,8 @@ describe("proactive memory linking", () => {
 		}
 	});
 
-	it("lets the environment variable override instance configuration", () => {
-		process.env.MNEMOPI_PROACTIVE_LINKING = "0";
+	it("lets the environment variable, as a word, override instance configuration", () => {
+		process.env.MNEMOPI_PROACTIVE_LINKING = "off";
 		const disabledByEnv = new BeamMemory({
 			sessionId: "proactive-env-off",
 			dbPath: ":memory:",
@@ -156,7 +156,7 @@ describe("proactive memory linking", () => {
 					importance: 0.8,
 				},
 			);
-			process.env.MNEMOPI_PROACTIVE_LINKING = "1";
+			process.env.MNEMOPI_PROACTIVE_LINKING = "on";
 			const enabledByEnv = new BeamMemory({
 				sessionId: "proactive-env-on",
 				dbPath: ":memory:",
