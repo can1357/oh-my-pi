@@ -185,7 +185,7 @@ function createConverseHarness(usage: Usage, deferTerminal = false) {
 				},
 			},
 		},
-		() => true,
+		() => undefined,
 	);
 	return {
 		warmer,
@@ -345,7 +345,7 @@ function createMessagesHarness(provider: "amazon-bedrock" | "bedrock-mantle", ba
 					: {}),
 			},
 		},
-		() => true,
+		() => undefined,
 	);
 	return { warmer, model, capture, refreshEnded: refreshEnded.promise };
 }
@@ -478,7 +478,7 @@ describe("cache warmer provider replay behavior", () => {
 			getMode: () => "streaming",
 		});
 		warmers.add(warmer);
-		warmer.start({ model, context: CONTEXT, options: { reasoning: Effort.High } }, () => true);
+		warmer.start({ model, context: CONTEXT, options: { reasoning: Effort.High } }, () => undefined);
 		expect(warmer.status).toMatchObject({ state: "inactive", reason: "request cannot be replayed safely" });
 		expect(streamCalls).toBe(0);
 	});
