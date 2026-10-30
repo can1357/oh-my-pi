@@ -131,6 +131,119 @@ async function loadClaudeModelHistory(models: string[]): Promise<SessionManager>
 }
 
 describe("ClaudeSessionStore", () => {
+	it.each(["projects", ".projects"])(
+		"lists the title sidecar in %s without replacing the first prompt",
+		async container => {
+			const { info, store } = await createClaudeFixture();
+			let sessionPath = info.path;
+			if (container === ".projects") {
+				const root = path.join(tempRoot, ".claude");
+				await fs.rename(path.join(root, "projects"), path.join(root, ".projects"));
+				sessionPath = path.join(
+					root,
+					".projects",
+					path.basename(path.dirname(info.path)),
+					path.basename(info.path),
+				);
+			}
+			await Bun.write(
+				path.join(path.dirname(sessionPath), info.id, "custom-title.json"),
+				JSON.stringify({ customTitle: "변경된 제목 🐈" }),
+			);
+
+			const listed = (await store.list()).find(item => item.id === info.id);
+			expect(listed?.title).toBe("변경된 제목 🐈");
+			expect(listed?.firstMessage).toBe("First prompt");
+			expect(listed?.path).toBe(sessionPath);
+			if (!listed) throw new Error("sidecar fixture was not listed");
+
+			// The transcript still carries an older custom-title record ("Imported Claude") from before
+			// the rename; the sidecar is the current name, so importing the listed row must keep it.
+			const manager = await store.load(listed);
+			expect(manager.getSessionName()).toBe("변경된 제목 🐈");
+			expect(manager.titleSource).toBe("user");
+		},
+	);
+
+	it.each(["{", "null", "{}", '{"customTitle":42}', '{"customTitle":""}', '{"customTitle":"   "}'])(
+		"keeps a session with an invalid title sidecar (%s) in the list",
+		async contents => {
+			const { info, store } = await createClaudeFixture();
+			await Bun.write(path.join(path.dirname(info.path), info.id, "custom-title.json"), contents);
+
+			const listed = (await store.list()).find(item => item.id === info.id);
+			expect(listed).toBeDefined();
+			expect(listed?.title).toBeUndefined();
+			expect(listed?.firstMessage).toBe("First prompt");
+		},
+	);
+
+	it.each([
+		["no title record", []],
+		[
+			"only an ai-title record",
+			[{ type: "ai-title", aiTitle: "Generated name", sessionId: "11111111-1111-4111-8111-111111111111" }],
+		],
+	])("imports a sidecar title as the user's name when the transcript has %s", async (_label, extraRecords) => {
+		const root = path.join(tempRoot, ".claude");
+		const cwd = path.join(tempRoot, "sidecar-only");
+		const id = "11111111-1111-4111-8111-111111111111";
+		const transcript = path.join(root, "projects", encodeProjectDir(cwd), `${id}.jsonl`);
+		await writeJsonl(transcript, [
+			{
+				type: "user",
+				uuid: "u",
+				parentUuid: null,
+				timestamp: "2026-01-01T00:00:00.000Z",
+				cwd,
+				message: { content: "First prompt" },
+			},
+			...extraRecords,
+		]);
+		await Bun.write(
+			path.join(path.dirname(transcript), id, "custom-title.json"),
+			JSON.stringify({ customTitle: "Renamed session" }),
+		);
+		const store = new ClaudeSessionStore(root);
+		const info = (await store.list()).find(item => item.id === id);
+		if (!info) throw new Error("sidecar fixture was not listed");
+
+		const manager = await store.load(info);
+		expect(manager.getSessionName()).toBe("Renamed session");
+		expect(manager.titleSource).toBe("user");
+	});
+
+	it("sanitizes a sidecar title so the picker row and the imported name match", async () => {
+		const { info, store } = await createClaudeFixture();
+		// A pasted multi-line name with a tab and an ANSI colour sequence.
+		const raw = "Renamed\nsession\twith \x1b[31mcolour\x1b[0m  ";
+		await Bun.write(
+			path.join(path.dirname(info.path), info.id, "custom-title.json"),
+			JSON.stringify({ customTitle: raw }),
+		);
+
+		const listed = (await store.list()).find(item => item.id === info.id);
+		if (!listed) throw new Error("sidecar fixture was not listed");
+		expect(listed.title).toBe("Renamed session with colour");
+
+		const manager = await store.load(listed);
+		expect(manager.getSessionName()).toBe(listed.title);
+	});
+
+	it("reflects sidecar updates and removal when listing again", async () => {
+		const { info, store } = await createClaudeFixture();
+		const sidecar = path.join(path.dirname(info.path), info.id, "custom-title.json");
+		expect((await store.list())[0]?.title).toBeUndefined();
+
+		await Bun.write(sidecar, JSON.stringify({ customTitle: "First name" }));
+		expect((await store.list())[0]?.title).toBe("First name");
+		await Bun.write(sidecar, JSON.stringify({ customTitle: "Renamed" }));
+		expect((await store.list())[0]?.title).toBe("Renamed");
+		await fs.rm(sidecar);
+		expect((await store.list())[0]?.title).toBeUndefined();
+		expect((await store.list())[0]?.firstMessage).toBe("First prompt");
+	});
+
 	it("lists an unindexed session at the cwd its transcript recorded", async () => {
 		const root = path.join(tempRoot, ".claude");
 		const cwd = path.join(tempRoot, "my-project.dir");
