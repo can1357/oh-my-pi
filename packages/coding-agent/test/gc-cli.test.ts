@@ -872,7 +872,8 @@ describe("runGcCommand session staging sweep", () => {
 		expect(await Bun.file(inFlight).exists()).toBe(true);
 		// The same run staged and published its own archive through that directory.
 		expect(await Bun.file(path.join(archiveSessions, "cold.jsonl.gz")).exists()).toBe(true);
-		expect(await Bun.file(cold).exists()).toBe(false);
+		// Archiving copies and keeps the live copy; `--reclaim` gives it up.
+		expect(await Bun.file(cold).exists()).toBe(true);
 	});
 });
 
@@ -904,7 +905,7 @@ describe("runGcCommand cold-session archive", () => {
 
 		expect(result.archive?.archived).toBe(1);
 		expect(result.archive?.skippedActive).toBe(2);
-		expect(await Bun.file(archiveMe).exists()).toBe(false);
+		expect(await Bun.file(archiveMe).exists()).toBe(true);
 		expect(await Bun.file(archived).exists()).toBe(true);
 		expect(new Uint8Array(gunzipSync(await Bun.file(archived).bytes()))).toEqual(original);
 		expect(await Bun.file(path.join(archived.slice(0, -".jsonl.gz".length), "0.bash.log")).exists()).toBe(true);
@@ -960,7 +961,7 @@ describe("runGcCommand cold-session archive", () => {
 		expect(await Bun.file(path.join(root, "gc.lock")).exists()).toBe(false);
 	});
 
-	test("restores byte-identical journal bytes when moving artifacts fails after compression", async () => {
+	test("keeps the live session whole when copying its artifacts fails", async () => {
 		const session = await writeSession(root, "project", "rollback", "complete");
 		const header = JSON.stringify({
 			type: "session",
@@ -1002,88 +1003,13 @@ describe("runGcCommand cold-session archive", () => {
 
 		expect(result.archive?.archived).toBe(0);
 		expect(result.archive?.errors).toEqual([`${session}: artifact move failed`]);
+		// Nothing is given up by archiving, so a failure part-way leaves the
+		// live session exactly as it was and a partial archive beside it for a
+		// later run to supersede.
 		expect(await Bun.file(session).bytes()).toEqual(original);
 		expect(await Bun.file(path.join(artifacts, "0.bash.log")).text()).toBe("retained artifact");
-		expect(await fs.readdir(archiveDir)).toEqual([]);
+		expect((await fs.readdir(archiveDir)).sort()).toEqual(["rollback.jsonl.gz"]);
 		expect((await fs.readdir(path.dirname(session))).sort()).toEqual(["rollback", "rollback.jsonl"]);
-	});
-
-	test("does not publish a partial restored journal when rollback gzip validation fails", async () => {
-		const session = await writeSession(root, "project", "rollback-corrupt", "complete", {
-			blobRef: "界".repeat(12 * 1024),
-			ageDays: 90,
-		});
-		const artifacts = session.slice(0, -".jsonl".length);
-		await Bun.write(path.join(artifacts, "0.bash.log"), "retained artifact");
-		const archive = path.join(root, "archive", "sessions", "project", "rollback-corrupt.jsonl.gz");
-		const cpSpy = spyOn(fs, "copyFile").mockImplementation(async source => {
-			if (!String(source).startsWith(artifacts)) throw new Error(`unexpected copy of ${String(source)}`);
-			const bytes = await Bun.file(archive).bytes();
-			await Bun.write(archive, bytes.subarray(0, -4));
-			throw new Error("artifact move failed");
-		});
-		let result: GcResult;
-		try {
-			result = await runGcCommand({
-				flags: {
-					agentDir: root,
-					archive: true,
-					forwardOnly: true,
-					apply: true,
-					coldArchiveAfterDays: 0,
-					retainNewestGlobal: 0,
-					retainNewestPerCwd: 0,
-				},
-			});
-		} finally {
-			cpSpy.mockRestore();
-		}
-
-		expect(result.archive?.archived).toBe(0);
-		expect(result.archive?.errors).toEqual([`${session}: artifact move failed`]);
-		expect(await Bun.file(session).exists()).toBe(false);
-		expect(await Bun.file(archive).exists()).toBe(true);
-		expect(await Bun.file(path.join(artifacts, "0.bash.log")).text()).toBe("retained artifact");
-		expect(await fs.readdir(path.dirname(session))).toEqual(["rollback-corrupt"]);
-	});
-
-	test("does not publish a partial restored journal when the rollback destination fails", async () => {
-		const session = await writeSession(root, "project", "rollback-write", "complete", { ageDays: 90 });
-		const original = await Bun.file(session).bytes();
-		const artifacts = session.slice(0, -".jsonl".length);
-		await Bun.write(path.join(artifacts, "0.bash.log"), "retained artifact");
-		const archive = path.join(root, "archive", "sessions", "project", "rollback-write.jsonl.gz");
-		const link = fs.link.bind(fs);
-		const renameSpy = spyOn(fs, "link").mockImplementation(async (source, destination) => {
-			if (String(destination) === session) throw new Error("rollback publish failed");
-			await link(source, destination);
-		});
-		const cpSpy = spyOn(fs, "copyFile").mockImplementation(async () => {
-			throw new Error("artifact move failed");
-		});
-		let result: GcResult;
-		try {
-			result = await runGcCommand({
-				flags: {
-					agentDir: root,
-					archive: true,
-					forwardOnly: true,
-					apply: true,
-					coldArchiveAfterDays: 0,
-					retainNewestGlobal: 0,
-					retainNewestPerCwd: 0,
-				},
-			});
-		} finally {
-			cpSpy.mockRestore();
-			renameSpy.mockRestore();
-		}
-
-		expect(result.archive?.archived).toBe(0);
-		expect(result.archive?.errors).toEqual([`${session}: artifact move failed`]);
-		expect(await Bun.file(session).exists()).toBe(false);
-		expect(new Uint8Array(gunzipSync(await Bun.file(archive).bytes()))).toEqual(original);
-		expect(await fs.readdir(path.dirname(session))).toEqual(["rollback-write"]);
 	});
 
 	test("skips archiving parent sessions with live nested sessions", async () => {
@@ -1168,7 +1094,7 @@ describe("runGcCommand cold-session archive", () => {
 
 		expect(result.archive?.archived).toBe(1);
 		expect(result.archive?.errors).toEqual([]);
-		expect(await Bun.file(session).exists()).toBe(false);
+		expect(await Bun.file(session).exists()).toBe(true);
 		expect(await Bun.file(path.join(root, "archive", "sessions", "project", "archive-me.jsonl.gz")).exists()).toBe(
 			true,
 		);

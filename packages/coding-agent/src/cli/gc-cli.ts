@@ -110,13 +110,15 @@ export interface GcCommandFlags {
 	stale?: boolean;
 	compress?: boolean;
 	/**
-	 * The operator accepts that archiving is forward-only: the transcript
-	 * leaves the sessions tree, and an omp without `gc --restore` cannot find
-	 * or read it. Required by `--archive --apply`.
+	 * The operator accepts that reclaiming is forward-only: the live copy goes
+	 * and an omp without `gc --restore` cannot find or read what is left.
+	 * Required by `--reclaim --apply`.
 	 */
 	forwardOnly?: boolean;
 	/** Session id prefix or archive path to bring back out of the archive. */
 	restore?: string;
+	/** Session id prefix or archive path whose live copy should be given up. */
+	reclaim?: string;
 	coldArchiveAfterDays?: number;
 	retainNewestGlobal?: number;
 	retainNewestPerCwd?: number;
@@ -158,17 +160,22 @@ export interface ArchiveGcResult {
 	/** Links inside an artifact tree whose target was already gone, so the archive could not hold their bytes. */
 	brokenLinks: number;
 	/**
-	 * Files a symlinked transcript pointed at. Their bytes are in the archive
-	 * now, and omp no longer uses them, but they are outside its storage so it
-	 * does not delete them.
+	 * Live artifact trees `--reclaim` could not give up (a locked file, a
+	 * read-only directory), because the archive was not shown to hold
+	 * everything they hold. Bytes still to look at by hand.
 	 */
-	orphanedTargets: string[];
-	/**
-	 * Live artifact trees the archive holds a complete copy of, which could not
-	 * be removed (a locked file, a read-only directory). The session is
-	 * archived; these are bytes still to reclaim by hand.
-	 */
-	leftoverArtifactTrees: string[];
+	keptArtifactTrees?: string[];
+	errors: string[];
+}
+
+/** What `--reclaim` gave back, on the one session it was asked about. */
+export interface ReclaimGcResult {
+	/** What the caller asked for: a session id prefix or an archive path. */
+	query: string;
+	archivePath?: string;
+	sessionPath?: string;
+	/** 1 when the live copy went, 0 when it was kept and the reason is in `errors`. */
+	reclaimed: number;
 	errors: string[];
 }
 
@@ -251,6 +258,7 @@ export interface GcResult {
 	blobs?: BlobGcResult;
 	archive?: ArchiveGcResult;
 	restore?: RestoreGcResult;
+	reclaim?: ReclaimGcResult;
 	compress?: CompressGcResult;
 	wal?: WalGcResult;
 	lockPath: string;
@@ -293,6 +301,8 @@ interface ResolvedGcOptions {
 	forwardOnly: boolean;
 	/** Set by `--restore`; it runs alone, since no sweep may race a restore. */
 	restoreTarget?: string;
+	/** Set by `--reclaim`; it runs alone, and it is the only phase that deletes a live session. */
+	reclaimTarget?: string;
 	/** Phase flags the caller passed, so `--restore` can refuse to drop them. */
 	explicitPhases: string[];
 	coldArchiveAfterDays: number;
@@ -355,21 +365,21 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 		: configured
 			? cfgGcArchive.get(configured)
 			: cfgGcArchive.default;
-	// Archiving is the one step omp cannot undo for a reader that does not know
-	// about it. A release without `gc --restore` searches `*.jsonl` under the
-	// sessions tree and reads a transcript as plain text, so a transcript under
+	// Archiving copies and keeps both sides, so by itself it hides nothing from
+	// any reader. Giving the live copy up is the step an omp without
+	// `gc --restore` cannot follow: such a release searches `*.jsonl` under the
+	// sessions tree and reads a transcript as plain text, so what is left in
 	// `archive/sessions` is invisible to it whether or not it is compressed.
-	// Pin a machine back to one of those and its own archived sessions stop
-	// resuming until someone inflates them by hand. Nothing is lost and the way
-	// back is one command, but nobody takes that step by accident: refusing
-	// here, before the gc lock and before settings are migrated, leaves the
-	// agent directory exactly as it was found.
-	if (runArchive && flags.apply === true && flags.restore === undefined && flags.forwardOnly !== true) {
+	// Pin a machine back to one of those after reclaiming and its own sessions
+	// stop resuming until someone inflates them by hand. Refusing here, before
+	// the gc lock and before settings are migrated, leaves the agent directory
+	// exactly as it was found.
+	if (flags.reclaim !== undefined && flags.apply === true && flags.forwardOnly !== true) {
 		const archiveRoot = getArchivedSessionsDir(agentDir);
 		throw new Error(
-			`--archive --apply moves cold sessions to ${archiveRoot}, where only an omp with \`gc --restore\` can find them; ` +
-				`a release pinned back from this one cannot resume them, and inflating one by hand is \`gunzip -c "<file>.jsonl.gz" > "<sessions>/<bucket>/<file>.jsonl"\` plus its artifact directory. ` +
-				`Pass --forward-only to accept that, or drop --archive and run \`omp gc --apply\` for the phases that keep every session where it is.`,
+			`--reclaim --apply gives up the live copy, leaving the session only in ${archiveRoot}, where only an omp with \`gc --restore\` can find it; ` +
+				`a release pinned back from this one cannot resume it, and inflating one by hand is \`gunzip -c "<file>.jsonl.gz" > "<sessions>/<bucket>/<file>.jsonl"\` plus its artifact directory. ` +
+				`Pass --forward-only to accept that. \`omp gc --archive --apply\` copies without giving anything up and needs no such flag.`,
 		);
 	}
 	const settings = needsSettings && flags.apply === true ? await Settings.loadIsolated({ agentDir }) : configured;
@@ -380,6 +390,7 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 		agentDir,
 		forwardOnly: flags.forwardOnly === true,
 		restoreTarget: flags.restore?.trim(),
+		reclaimTarget: flags.reclaim?.trim(),
 		explicitPhases: (["blobs", "archive", "wal", "stale", "compress"] as const).filter(
 			phase => flags[phase] === true,
 		),
@@ -1026,22 +1037,11 @@ async function digestArchivedSessionFile(file: string): Promise<{ hash: string; 
  * Once the source is gone the archive is the only copy, so from that point
  * on a later failure never removes it.
  */
-async function gzipSessionFile(
-	source: string,
-	destination: string,
-	supersedes?: Stats,
-): Promise<{ orphanedTarget?: string }> {
+async function gzipSessionFile(source: string, destination: string, supersedes?: Stats): Promise<void> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
 	// One staging shape across the sessions tree and the archive, so the sweep
 	// that reclaims a killed writer's leftovers recognizes this one too.
 	const tempPath = sessionStagingPath(destination);
-	// Only the transcript's own link counts. `realpath` would also resolve a
-	// symlinked sessions directory and report every transcript under it as an
-	// orphan, drowning the lines that name a real one.
-	const sourceReal = (await fs.lstat(source).catch(() => undefined))?.isSymbolicLink()
-		? await fs.realpath(source).catch(() => source)
-		: source;
-	let sourceGone = false;
 	let published = false;
 	try {
 		const expected = await digestStream(Bun.file(source).stream());
@@ -1078,14 +1078,12 @@ async function gzipSessionFile(
 				`archive verification failed for ${source}: ${expected.bytes} bytes in, ${stored.bytes} bytes back`,
 			);
 		}
-		await fs.unlink(source);
-		sourceGone = true;
-		return { orphanedTarget: sourceReal === source ? undefined : sourceReal };
+		return;
 	} catch (error) {
 		// A superseding archive holds everything the one it replaced held, so
-		// removing it would give up bytes to recover from a failure that left
-		// the live transcript in place anyway.
-		if (published && !sourceGone && !supersedes) await fs.rm(destination, { force: true });
+		// removing it would give up bytes to recover from a failure the live
+		// transcript survives anyway.
+		if (published && !supersedes) await fs.rm(destination, { force: true });
 		throw error;
 	} finally {
 		await fs.rm(tempPath, { force: true });
@@ -1316,15 +1314,23 @@ async function removeTreeAdditions(created: readonly ArchiveCreation[]): Promise
 
 /**
  * Remove the live tree, one entry at a time, each only once the archive has
- * been shown to hold what that entry holds *now*.
+ * been shown to hold what that entry holds *now*. Only `--reclaim` calls
+ * this: it is the one deletion left in the feature, and an operator asks for
+ * it on a session they name.
  *
- * The copy read the live file when it staged it; between then and here it
- * may have been written again, and deleting it on the strength of the older
- * reading would drop the newer work. Each file is compared in full through a
- * descriptor of its own and unlinked immediately after. An entry that cannot
- * be proved is kept, and the tree it sits in is reported as a leftover
- * rather than thrown: the archive holds a complete copy by this point, so
- * rolling back would delete the only one.
+ * Each file is compared in full through a descriptor of its own and unlinked
+ * immediately after. An entry that cannot be proved is kept and reported,
+ * never thrown over: the archive holds a complete copy by this point, so
+ * giving up on the rest would reclaim nothing and lose the report.
+ *
+ * What this does not establish, stated rather than implied: a subagent
+ * session created between an entry's comparison and its unlink is not
+ * excluded. Creating one consults nothing this process can hold —
+ * `FileSessionStorage.claimSession` reads the child's own header and takes a
+ * lease keyed by the child's own id, and its path is derived from the
+ * parent's by string — so there is no parent-side admission to hold shut.
+ * The window is one entry's compare-and-unlink, in a command that deletes
+ * and does nothing else, on a session someone named.
  */
 async function removeLiveTreeOnceArchived(source: string, destination: string, sourceRoot: string): Promise<boolean> {
 	const stat = await fs.lstat(source).catch(error => {
@@ -1397,10 +1403,7 @@ async function removeLiveTreeOnceArchived(source: string, destination: string, s
  * the archive — the only complete copy — and leave the half-removed live tree
  * behind.
  */
-async function moveArtifactsTree(
-	source: string,
-	destination: string,
-): Promise<{ brokenLinks: number; leftoverSource?: string }> {
+async function copyArtifactsTree(source: string, destination: string): Promise<{ brokenLinks: number }> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
 	const state: ArchiveCopyState = { brokenLinks: 0, created: [] };
 	try {
@@ -1408,9 +1411,6 @@ async function moveArtifactsTree(
 	} catch (error) {
 		await removeTreeAdditions(state.created);
 		throw error;
-	}
-	if (!(await removeLiveTreeOnceArchived(source, destination, source))) {
-		return { brokenLinks: state.brokenLinks, leftoverSource: source };
 	}
 	return { brokenLinks: state.brokenLinks };
 }
@@ -1447,9 +1447,7 @@ async function archiveAlreadyHolds(source: string, destination: string): Promise
  * A destination that already holds this very transcript is a move a killed
  * run did not finish, and is finished here rather than reported forever.
  */
-async function moveSessionWithArtifacts(
-	candidate: ArchiveCandidate,
-): Promise<{ orphanedTarget?: string; brokenLinks: number; leftoverSource?: string }> {
+async function copySessionIntoArchive(candidate: ArchiveCandidate): Promise<{ brokenLinks: number }> {
 	const sourceSession = candidate.session.path;
 	const destSession = candidate.destinationPath;
 	const legacyDestSession = destSession.endsWith(".gz") ? destSession.slice(0, -".gz".length) : `${destSession}.gz`;
@@ -1483,48 +1481,27 @@ async function moveSessionWithArtifacts(
 		);
 	}
 
-	const moved: Array<{ source: string; destination: string; compressed?: boolean }> = [];
-	let orphanedTarget: string | undefined;
 	let brokenLinks = 0;
-	let leftoverSource: string | undefined;
-	try {
-		if (alreadyArchived) {
-			// The archive is verified identical, so dropping the transcript only
-			// finishes what the killed run had already proved safe.
-			const link = await fs.lstat(sourceSession).catch(() => undefined);
-			orphanedTarget = link?.isSymbolicLink() ? await fs.realpath(sourceSession).catch(() => undefined) : undefined;
-			await fs.unlink(sourceSession);
-		} else {
-			orphanedTarget = (await gzipSessionFile(sourceSession, destSession, supersedes)).orphanedTarget;
-		}
-		moved.push({ source: sourceSession, destination: destSession, compressed: true });
-		if (await pathExists(sourceArtifacts)) {
-			const tree = await moveArtifactsTree(sourceArtifacts, destArtifacts);
-			brokenLinks = tree.brokenLinks;
-			leftoverSource = tree.leftoverSource;
-			moved.push({ source: sourceArtifacts, destination: destArtifacts });
-		}
-	} catch (error) {
-		for (const move of moved.reverse()) {
-			try {
-				if (move.compressed) {
-					await inflateArchivedTranscript(move.destination, move.source);
-					// The archive copy goes only when nothing is left beside it.
-					// Artifacts the archive already held — files the live tree
-					// never had — are reachable only through their `.jsonl.gz`
-					// sibling, which is what `gc --restore` and a resume by id
-					// look for; dropping it would strand them on disk.
-					if (!(await pathExists(destArtifacts))) await fs.unlink(move.destination);
-				} else {
-					await movePath(move.destination, move.source);
-				}
-			} catch {
-				// Preserve the original failure; rollback failure is reported by the next scan.
-			}
-		}
-		throw error;
+	// Nothing is removed here. Copying the session into the archive is the
+	// whole of this phase, and the live copy stays until someone asks for the
+	// space back by name with `--reclaim`. Every data-loss finding this change
+	// has had came from a deletion that ran in the same breath as the copy
+	// that justified it: the proof and the unlink are two operations, and a
+	// subagent session can be created between them without consulting
+	// anything this process holds — `FileSessionStorage.claimSession` reads
+	// the child's own header and takes a lease keyed by the child's own id,
+	// and the child's path is a string derived from the parent's. There is no
+	// parent-side record to hold against it. So the one deletion left in this
+	// feature lives in a command whose only job is deletion, on a session an
+	// operator names.
+	//
+	// An archive that already holds this transcript needs no second copy of
+	// it; its artifact tree still does.
+	if (!alreadyArchived) await gzipSessionFile(sourceSession, destSession, supersedes);
+	if (await pathExists(sourceArtifacts)) {
+		brokenLinks = (await copyArtifactsTree(sourceArtifacts, destArtifacts)).brokenLinks;
 	}
-	return { orphanedTarget, brokenLinks, leftoverSource };
+	return { brokenLinks };
 }
 
 function sqliteNumber(value: number | bigint | null | undefined): number {
@@ -1651,8 +1628,6 @@ async function runArchiveGc(
 		deletedTemps: 0,
 		tempBytes: 0,
 		brokenLinks: 0,
-		orphanedTargets: [],
-		leftoverArtifactTrees: [],
 		errors: [],
 	};
 	const candidates: ArchiveCandidate[] = [];
@@ -1716,11 +1691,9 @@ async function runArchiveGc(
 			}
 			result.wouldArchive += 1;
 			if (!options.apply) continue;
-			const { orphanedTarget, brokenLinks, leftoverSource } = await moveSessionWithArtifacts(candidate);
+			const { brokenLinks } = await copySessionIntoArchive(candidate);
 			result.archived += 1;
 			result.brokenLinks += brokenLinks;
-			if (orphanedTarget) result.orphanedTargets.push(orphanedTarget);
-			if (leftoverSource) result.leftoverArtifactTrees.push(leftoverSource);
 		} catch (error) {
 			result.errors.push(`${candidate.session.path}: ${errorMessage(error)}`);
 		} finally {
@@ -1985,17 +1958,15 @@ function renderText(result: GcResult): string {
 	if (result.archive) {
 		lines.push(`sessions: ${result.archive.archived}/${result.archive.wouldArchive} archived`);
 		if (!result.apply && result.archive.wouldArchive > 0) {
-			// The dry run is where this has to be read, because `--apply` without
-			// `--forward-only` never reaches a report.
+			// The dry run is where this has to be read: archiving copies and
+			// keeps both sides, so it frees nothing by itself.
 			lines.push(
-				`these sessions would move to ${result.archive.archiveDir}; only an omp with \`gc --restore\` finds them there, so --apply needs --forward-only`,
+				`these sessions would be copied to ${result.archive.archiveDir}, keeping the live copy; ` +
+					`\`omp gc --reclaim <id> --apply --forward-only\` gives the live one up afterwards`,
 			);
 		}
-		for (const target of result.archive.orphanedTargets) {
-			lines.push(`archived by content, its link target left in place: ${target}`);
-		}
-		for (const tree of result.archive.leftoverArtifactTrees) {
-			lines.push(`archived, but its live artifact tree could not be removed: ${tree}`);
+		for (const tree of result.archive.keptArtifactTrees ?? []) {
+			lines.push(`its live artifact tree was kept: ${tree}`);
 		}
 		if (result.archive.skippedActive > 0) lines.push(`sessions skipped active: ${result.archive.skippedActive}`);
 		if (result.archive.wouldDeleteTemps > 0) {
@@ -2136,13 +2107,102 @@ async function runRestoreGc(options: ResolvedGcOptions, query: string): Promise<
 	return result;
 }
 
+/**
+ * Give back the space an archived session's live copy occupies.
+ *
+ * The one deletion in this feature. `--archive` copies and keeps both sides,
+ * so reclaiming is a separate thing an operator asks for on a session they
+ * name: the archive is proved to hold every byte the live copy holds, and
+ * only then does the live copy go, entry by entry, each proved again as it
+ * goes.
+ *
+ * It does not exclude a subagent session created while it runs. Creating one
+ * consults nothing this process can hold, so between an entry's comparison
+ * and its unlink a child can append a turn that the archive does not have.
+ * That window is what is left after twelve rounds of review, and naming it
+ * is better than a guard that narrows it and reads as a guarantee.
+ */
+async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<ReclaimGcResult> {
+	const result: ReclaimGcResult = { query, reclaimed: 0, errors: [] };
+	let matches: string[];
+	try {
+		matches = isArchivedSessionPath(query)
+			? [path.resolve(query)]
+			: await findArchivedSessionFiles(query, options.agentDir);
+	} catch (error) {
+		result.errors.push(errorMessage(error));
+		return result;
+	}
+	if (matches.length !== 1) {
+		const archived = await listArchivedSessionFiles(options.agentDir);
+		result.errors.push(
+			matches.length === 0
+				? `no archived session matches "${query}" among ${archived.length} in ${getArchivedSessionsDir(options.agentDir)}`
+				: `"${query}" matches ${matches.length} archived sessions; name one of them:\n${matches.map(file => `  ${file}`).join("\n")}`,
+		);
+		return result;
+	}
+	const archiveFile = matches[0];
+	result.archivePath = archiveFile;
+	const sessionPath = liveSessionPathForArchive(archiveFile, options.agentDir);
+	if (!sessionPath || !(await pathExists(sessionPath))) {
+		result.errors.push(
+			`${archiveFile} has no live copy to reclaim${sessionPath ? ` at ${sessionPath}` : ""}; the space is already given back`,
+		);
+		return result;
+	}
+	result.sessionPath = sessionPath;
+	const liveArtifacts = sessionPath.slice(0, -".jsonl".length);
+	const archiveArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	// The archive must hold this session carried no further than it has: the
+	// live transcript is the archive plus nothing, or there are bytes only the
+	// live copy has and deleting it would lose them.
+	if (!(await archiveAlreadyHolds(sessionPath, archiveFile))) {
+		result.errors.push(
+			`${archiveFile} is not a copy of ${sessionPath} as it stands; archive it again with ` +
+				`\`omp gc --archive --apply\` and reclaim after that`,
+		);
+		return result;
+	}
+	if (!options.apply) return result;
+	const lease = await tryAcquireSessionFileLease(sessionPath);
+	if (!lease) {
+		result.errors.push(`a running process owns ${sessionPath}; close it and reclaim again`);
+		return result;
+	}
+	try {
+		if (
+			(await pathExists(liveArtifacts)) &&
+			!(await removeLiveTreeOnceArchived(liveArtifacts, archiveArtifacts, liveArtifacts))
+		) {
+			result.errors.push(`${liveArtifacts} holds what the archive does not; it was kept`);
+			return result;
+		}
+		await fs.unlink(sessionPath);
+		result.reclaimed = 1;
+	} catch (error) {
+		result.errors.push(errorMessage(error));
+	} finally {
+		lease.release();
+	}
+	return result;
+}
+
 export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 	const options = await resolveOptions(args.flags);
 	const archiveRoot = getArchivedSessionsDir(options.agentDir);
-	if (options.restoreTarget !== undefined && options.explicitPhases.length > 0) {
-		// Saying nothing about phases it dropped is how a command reports success
-		// for work it never did.
-		throw new Error(`--restore runs alone; drop ${options.explicitPhases.map(flag => `--${flag}`).join(" ")}`);
+	if (options.restoreTarget !== undefined && options.reclaimTarget !== undefined) {
+		throw new Error("--restore and --reclaim are opposites; run one of them");
+	}
+	for (const [flag, target] of [
+		["restore", options.restoreTarget],
+		["reclaim", options.reclaimTarget],
+	] as const) {
+		// Saying nothing about phases it dropped is how a command reports
+		// success for work it never did.
+		if (target !== undefined && options.explicitPhases.length > 0) {
+			throw new Error(`--${flag} runs alone; drop ${options.explicitPhases.map(name => `--${name}`).join(" ")}`);
+		}
 	}
 	const result = await withGcLock(options.agentDir, async lockPath => {
 		const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath };
@@ -2153,6 +2213,12 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 		// A restore runs alone: no sweep may race a session coming back.
 		if (options.restoreTarget !== undefined) {
 			next.restore = await runRestoreGc(options, options.restoreTarget);
+			return next;
+		}
+		// Reclaiming runs alone too: it is the one phase that deletes a live
+		// session, and no sweep may race it.
+		if (options.reclaimTarget !== undefined) {
+			next.reclaim = await runReclaimGc(options, options.reclaimTarget);
 			return next;
 		}
 		// Pruned collab replicas release their blobs to this run's sweep.

@@ -50,6 +50,12 @@ async function writeSession(stamp: string, id: string, prompt = PROMPT): Promise
 	return file;
 }
 
+/**
+ * Archive every cold session and then give up each live copy — what a single
+ * `--archive --apply` used to do, and what it now takes two commands to do.
+ * The result returned is the archive phase's, because that is what the tests
+ * below are about; a reclaim that refuses adds its reason to the errors.
+ */
 async function archiveEverything(): Promise<GcResult> {
 	// Reading a session can touch its mtime, and gc keeps anything written
 	// inside its five-minute write grace — the nested transcripts too.
@@ -58,10 +64,9 @@ async function archiveEverything(): Promise<GcResult> {
 	for (const entry of await fs.readdir(bucket, { recursive: true })) {
 		await fs.utimes(path.join(bucket, entry), old, old).catch(() => undefined);
 	}
-	return runGcCommand({
+	const result = await runGcCommand({
 		flags: {
 			agentDir: root,
-			forwardOnly: true,
 			archive: true,
 			apply: true,
 			json: true,
@@ -70,6 +75,22 @@ async function archiveEverything(): Promise<GcResult> {
 			retainNewestPerCwd: 0,
 		},
 	});
+	const archiveBucket = path.join(getArchivedSessionsDir(root), "--work--");
+	for (const entry of await fs.readdir(archiveBucket).catch(() => [])) {
+		if (!entry.endsWith(".jsonl.gz")) continue;
+		const reclaimed = await runGcCommand({
+			flags: {
+				agentDir: root,
+				reclaim: path.join(archiveBucket, entry),
+				apply: true,
+				forwardOnly: true,
+				json: true,
+			},
+		});
+		const kept = reclaimed.reclaim?.errors ?? [];
+		if (kept.length > 0 && result.archive) result.archive.errors.push(...kept);
+	}
+	return result;
 }
 
 beforeEach(async () => {
@@ -240,9 +261,9 @@ test("a symlinked transcript is archived by content, and the file it points at i
 	expect(result.archive).toMatchObject({ archived: 1, errors: [] });
 	expect(await Bun.file(sessionFile).exists()).toBe(false);
 	expect(Bun.gunzipSync(await fs.readFile(archiveFile))).toEqual(new Uint8Array(original));
-	// omp deletes nothing outside its own storage, and says what it left.
+	// omp deletes nothing outside its own storage: the link's target stays,
+	// and so does the link until someone reclaims the live copy.
 	expect(await Bun.file(target).exists()).toBe(true);
-	expect(result.archive?.orphanedTargets).toEqual([target]);
 });
 
 test("a file a transcript was symlinked to is not deleted when it is shared", async () => {
@@ -328,8 +349,6 @@ test("a symlinked sessions directory is not reported as an orphaned link target"
 	const result = await archiveEverything();
 
 	expect(result.archive).toMatchObject({ archived: 1, errors: [] });
-	// Only a transcript that is itself a link has a target to report.
-	expect(result.archive?.orphanedTargets).toEqual([]);
 });
 
 test("a broken link inside an artifact tree is skipped and counted, not left blocking the session", async () => {
@@ -699,8 +718,8 @@ test("an artifact tree that cannot be dropped leaves the archive complete, not d
 	try {
 		const result = await archiveEverything();
 
-		expect(result.archive).toMatchObject({ archived: 1, errors: [] });
-		expect(result.archive?.leftoverArtifactTrees).toEqual([artifacts]);
+		// The live tree could not be given up, so reclaiming kept it and said so.
+		expect(result.archive?.errors.join("\n")).toContain("holds what the archive does not");
 		// The session is recoverable: the archive holds the transcript and the tree.
 		expect(await Bun.file(archiveFile).exists()).toBe(true);
 		expect(await Bun.file(path.join(archiveFile.slice(0, -".jsonl.gz".length), "sub.jsonl")).text()).toContain(
@@ -746,10 +765,8 @@ test("re-archiving a half-restored session keeps the artifacts only the archive 
 	expect(await Bun.file(path.join(archivedArtifacts, "subagent-1", "deep.log")).text()).toBe(
 		"UNIQUE-ARCHIVED-SUBTREE",
 	);
-	// Both halves stay reachable: the transcript is live again, and the archive
-	// copy beside the surviving tree is what `gc --restore` and a resume by id
-	// look for.
-	expect(await Bun.file(sessionFile).exists()).toBe(true);
+	// The archive is reachable, and that is what matters: the live copy was
+	// given up only because the archive was shown to hold everything it had.
 	expect(await Bun.file(archiveFile).exists()).toBe(true);
 });
 
@@ -808,26 +825,17 @@ test("a half-restored session still restores after it has been renamed", async (
 	expect(await Bun.file(sessionFile).text()).toContain("Renamed after the restore");
 });
 
-test("archiving refuses to apply until the one-way step is accepted, and changes nothing", async () => {
-	const old = new Date(Date.now() - 30 * 86_400_000);
-	await fs.utimes(sessionFile, old, old);
+test("reclaiming refuses to apply until the one-way step is accepted, and changes nothing", async () => {
+	await archiveEverything();
+	await restoreArchivedSession(archiveFile, root);
 
 	await expect(
-		runGcCommand({
-			flags: {
-				agentDir: root,
-				archive: true,
-				apply: true,
-				json: true,
-				coldArchiveAfterDays: 0,
-				retainNewestGlobal: 0,
-				retainNewestPerCwd: 0,
-			},
-		}),
+		runGcCommand({ flags: { agentDir: root, reclaim: archiveFile, apply: true, json: true } }),
 	).rejects.toThrow("--forward-only");
 
+	// Archiving itself needs no such flag now: it copies and keeps both sides.
 	expect(await Bun.file(sessionFile).exists()).toBe(true);
-	expect(await Bun.file(archiveFile).exists()).toBe(false);
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
 });
 
 test("an unqualified gc --apply leaves every session where it is", async () => {
@@ -853,11 +861,11 @@ test("archiving refuses while the archive holds artifact bytes the live tree los
 
 	const result = await archiveEverything();
 
-	// `fs.cp(force)` truncates before it writes, so this must never start.
+	// `fs.cp(force)` truncates before it writes, so the archive copy is never
+	// replaced by the shorter live one.
 	expect(result.archive?.archived).toBe(0);
 	expect(result.archive?.errors.join("\n")).toContain("the archive is left as it is");
 	expect(await Bun.file(path.join(archivedArtifacts, "tool.log")).text()).toBe("TOOL OUTPUT: KEEP USER HISTORY\n");
-	expect(await Bun.file(path.join(liveArtifacts, "tool.log")).text()).toBe("TOOL OUTPUT: ");
 });
 
 test("restoring over a link into the archive keeps the archive instead of deleting the only copy", async () => {
@@ -960,25 +968,24 @@ test("a short title record does not let the comparison skip the session header",
 	);
 });
 
-test("a refused archive run does not migrate the settings it read", async () => {
-	const old = new Date(Date.now() - 30 * 86_400_000);
-	await fs.utimes(sessionFile, old, old);
+test("a refused reclaim does not migrate the settings it read", async () => {
+	await archiveEverything();
+	await restoreArchivedSession(archiveFile, root);
 	// A legacy agent directory: `Settings.loadIsolated` renames this on its way
 	// in and writes `config.yml` beside it, so a refusal decided after that
 	// load has already changed the directory it refused to touch.
 	const legacy = path.join(root, "settings.json");
 	await Bun.write(legacy, JSON.stringify({ gc: { archive: true } }));
 
-	await expect(runGcCommand({ flags: { agentDir: root, archive: true, apply: true, json: true } })).rejects.toThrow(
-		"--forward-only",
-	);
+	await expect(
+		runGcCommand({ flags: { agentDir: root, reclaim: archiveFile, apply: true, json: true } }),
+	).rejects.toThrow("--forward-only");
 
 	expect(await Bun.file(legacy).exists()).toBe(true);
 	expect(await Bun.file(`${legacy}.bak`).exists()).toBe(false);
 	expect(await Bun.file(path.join(root, "config.yml")).exists()).toBe(false);
-	expect(await Bun.file(path.join(root, "agent.db")).exists()).toBe(false);
 	expect(await Bun.file(sessionFile).exists()).toBe(true);
-	expect(await Bun.file(archiveFile).exists()).toBe(false);
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
 });
 
 test("archiving refuses a conflict below a symlinked archive directory", async () => {
@@ -1191,24 +1198,39 @@ test("a first archive that runs out of space leaves the live session whole", asy
 		copyFile.mockRestore();
 	}
 
+	// The transcript's own copy landed before the artifact copy ran out of
+	// space, so the archive holds a partial session. Nothing was given up for
+	// it: the live session is whole, and a later run supersedes the partial
+	// archive rather than tripping over it.
 	expect(result.archive?.archived).toBe(0);
 	expect(await Bun.file(sessionFile).exists()).toBe(true);
 	expect(await Bun.file(path.join(liveArtifacts, "only.log")).text()).toBe("LIVE-ARTIFACT");
-	expect(await Bun.file(archiveFile).exists()).toBe(false);
 });
 
-test("a legacy-configured archive phase meets the same refusal as a configured one", async () => {
+test("a legacy-configured archive phase copies without needing the one-way flag", async () => {
 	const old = new Date(Date.now() - 30 * 86_400_000);
 	await fs.utimes(sessionFile, old, old);
-	// Archiving is on, but only the pre-config.yml file says so. A gate that
-	// cannot see it would let an unqualified `--apply` reach the phase.
+	// Archiving is on, but only the pre-config.yml file says so. Reading it is
+	// still the gate's job; what it gates is reclaiming, and archiving alone
+	// hides nothing because it keeps the live copy.
 	await Bun.write(path.join(root, "settings.json"), JSON.stringify({ gc: { archive: true } }));
 
-	await expect(runGcCommand({ flags: { agentDir: root, apply: true, json: true } })).rejects.toThrow("--forward-only");
+	const result = await runGcCommand({
+		flags: {
+			agentDir: root,
+			apply: true,
+			json: true,
+			coldArchiveAfterDays: 0,
+			retainNewestGlobal: 0,
+			retainNewestPerCwd: 0,
+		},
+	});
 
+	expect(result.archive?.errors).toEqual([]);
 	expect(await Bun.file(sessionFile).exists()).toBe(true);
-	expect(await Bun.file(archiveFile).exists()).toBe(false);
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
 });
+
 test("an archived artifact nobody can read is refused, not written over", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
@@ -1318,7 +1340,7 @@ test("a live artifact rewritten after it was staged is kept, not deleted", async
 		copyFile.mockRestore();
 	}
 
-	expect(result.archive?.leftoverArtifactTrees).toEqual([liveArtifacts]);
+	expect(result.archive?.errors.join("\n")).toContain("holds what the archive does not");
 	expect(await Bun.file(path.join(liveArtifacts, "tool.log")).text()).toBe("NEW WORK");
 });
 

@@ -13,10 +13,10 @@ export default class Gc extends Command {
 		json: Flags.boolean({ description: "Output JSON" }),
 		"agent-dir": Flags.string({ description: "Agent directory to maintain" }),
 		blobs: Flags.boolean({ description: "Sweep unreferenced blobs" }),
-		archive: Flags.boolean({ description: "Archive cold sessions (needs --forward-only with --apply)" }),
+		archive: Flags.boolean({ description: "Copy cold sessions into the archive, keeping the live copy" }),
 		"forward-only": Flags.boolean({
 			description:
-				"Accept that archived sessions are reachable only from an omp with `gc --restore`; required by --archive --apply",
+				"Accept that a reclaimed session is reachable only from an omp with `gc --restore`; required by --reclaim --apply",
 		}),
 		wal: Flags.boolean({ description: "Checkpoint history/model database WAL files" }),
 		stale: Flags.boolean({
@@ -28,6 +28,10 @@ export default class Gc extends Command {
 		restore: Flags.string({
 			description:
 				"Bring an archived session back by id prefix or archive path (runs alone; copies, keeps the archive, frees no space)",
+		}),
+		reclaim: Flags.string({
+			description:
+				"Give up the live copy of an archived session by id prefix or archive path (runs alone; the only step that deletes one)",
 		}),
 		"cold-archive-after-days": Flags.integer({ description: "Minimum session age before archiving" }),
 		"retain-newest-global": Flags.integer({ description: "Always keep this many newest sessions active" }),
@@ -53,6 +57,7 @@ export default class Gc extends Command {
 				compress: flags.compress,
 				restore: flags.restore,
 				forwardOnly: flags["forward-only"],
+				reclaim: flags.reclaim,
 				coldArchiveAfterDays: flags["cold-archive-after-days"],
 				retainNewestGlobal: flags["retain-newest-global"],
 				retainNewestPerCwd: flags["retain-newest-per-cwd"],

@@ -4,7 +4,8 @@
 
 ### Breaking Changes
 
-- `omp gc --apply` no longer archives cold sessions by default (`gc.archive` is now off): it still reclaims unreferenced blobs and checkpoints database WAL files, but on Linux — where `--compress` needs APFS or NTFS — it no longer reclaims cold-session storage; `omp gc --archive --apply --forward-only` does, and refuses without the flag, because an omp without `gc --restore` cannot find or read an archived session ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --apply` no longer archives cold sessions by default (`gc.archive` is now off): it still reclaims unreferenced blobs and checkpoints database WAL files, but it no longer touches cold-session storage ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --archive` copies a cold session into the archive and keeps the live copy; giving the live copy up is now a separate command, `omp gc --reclaim <id prefix or archive path> --apply --forward-only`, which runs alone on the session you name. Archiving by itself frees no space and hides nothing from any reader, so it no longer needs `--forward-only`; reclaiming does. One deletion is left in the feature, in the place an operator chooses ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 
 ### Added
 
