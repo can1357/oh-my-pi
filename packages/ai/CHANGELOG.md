@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Forced `tool_choice` rejections (HTTP 400) now downgrade to automatic tool selection and retry once instead of failing the turn, on Anthropic, OpenAI Completions and OpenAI Responses ([#13248](https://github.com/can1357/oh-my-pi/pull/13248) by [@jwaldrip](https://github.com/jwaldrip)).
 ### Added
 
 - Added `waitForSibling` to `RotateCredentialOptions`; set it to `false` to skip the short sibling-unblock wait in `limits.rotate()` while still blocking the failed credential ([#17439](https://github.com/can1357/oh-my-pi/pull/17439) by [@wolfiesch](https://github.com/wolfiesch))
