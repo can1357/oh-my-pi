@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import { type AssistantMessageEventStream, clearCustomApis, getCustomApi } from "@oh-my-pi/pi-ai";
-import { getOAuthProvider } from "@oh-my-pi/pi-ai/oauth";
+import { getOAuthProviderEntry } from "@oh-my-pi/pi-ai/oauth";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveModelCacheProviderId, resolveOllamaModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
@@ -339,12 +339,12 @@ describe("ModelRegistry runtime source cleanup", () => {
 			sourceId,
 		);
 
-		expect(getOAuthProvider("runtime-provider")).toBeDefined();
+		expect(getOAuthProviderEntry("runtime-provider")?.provider).toBeDefined();
 		registry.unregisterProvider("runtime-provider");
 
 		expect(registry.find("runtime-provider", "runtime-model")).toBeUndefined();
 		expect(registry.authStorage.keys.source("runtime-provider") !== undefined).toBe(false);
-		expect(getOAuthProvider("runtime-provider")).toBeUndefined();
+		expect(getOAuthProviderEntry("runtime-provider")?.provider).toBeUndefined();
 		expect(registry.find("peer-provider", "peer-model")).toBeDefined();
 	});
 });

@@ -126,17 +126,16 @@ export function unregisterOAuthProvider(id: string, gate?: ProviderCallGate): vo
 /**
  * The registration in force for a custom OAuth provider ID: the newest one whose session is still
  * live. Calls into its provider go through {@link callThroughGate} with its `gate`.
+ *
+ * This is the only way to reach a registered provider, deliberately. A registration's `id` and
+ * `sourceId` belong to THIS registry — a provider may expose an `id` of its own, through a
+ * getter it alone controls, that disagrees with the name it was registered under — and the
+ * author's object is handed back untouched, so the two cannot be read from one value. Returning
+ * the entry keeps the registry's name and the author's object each saying only what it knows.
  */
 export function getOAuthProviderEntry(id: OAuthProviderId): OAuthProviderRegistration | undefined {
 	const registrations = customOAuthProviders.get(id);
 	return registrations ? selectLiveRegistration(registrations) : undefined;
-}
-
-/**
- * Get a custom OAuth provider by ID: the object its live registration was given, unchanged.
- */
-export function getOAuthProvider(id: OAuthProviderId): CustomOAuthProvider | undefined {
-	return getOAuthProviderEntry(id)?.provider;
 }
 
 /**
