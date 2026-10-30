@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { $ } from "bun";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { Usage } from "@oh-my-pi/pi-ai";
@@ -64,6 +65,16 @@ async function createSessionWithArtifacts(root: string): Promise<{
 async function loadHistory(file: string): Promise<SessionEntry[]> {
 	const entries = await loadEntriesFromFile(file);
 	return entries.filter((entry): entry is SessionEntry => entry.type !== "session");
+}
+
+async function createGitRepository(root: string, name: string): Promise<string> {
+	const repository = path.join(root, name);
+	await fs.mkdir(repository, { recursive: true });
+	await $`git init -q`.cwd(repository).quiet();
+	await $`git -c user.name=Test -c user.email=test@example.com commit -q --allow-empty -m init`
+		.cwd(repository)
+		.quiet();
+	return repository;
 }
 
 describe("SessionManager.forkFrom", () => {
@@ -1075,5 +1086,142 @@ describe("SessionManager.forkFrom", () => {
 		expect(forkedEntries.some(entry => entry.type === "message" && isSyntheticToolResultMessage(entry.message))).toBe(
 			false,
 		);
+	});
+	it("records roots for a full fork and retains creation provenance after relocation", async () => {
+		using tempDir = TempDir.createSync("@omp-session-repository-fork-");
+		const repository = await createGitRepository(tempDir.path(), "repository");
+		const storage = new FileSessionStorage();
+		const session = SessionManager.create(repository, path.join(tempDir.path(), "sessions"), storage);
+		session.appendMessage({ role: "user", content: "source", timestamp: 1 });
+		await session.flush();
+
+		const roots = {
+			sessionWorktreeRoot: repository,
+			primaryWorktreeRoot: repository,
+		};
+		expect(session.getHeader()?.repository).toEqual(roots);
+		const forked = await session.fork();
+		expect(forked).toBeDefined();
+		expect(session.getHeader()?.repository).toEqual(roots);
+
+		const relocated = path.join(tempDir.path(), "relocated");
+		await fs.mkdir(relocated);
+		const relocatedSessionDir = path.join(tempDir.path(), "relocated-sessions");
+		await session.moveTo(relocated, relocatedSessionDir);
+		expect(session.getHeader()?.cwd).toBe(relocated);
+		expect(session.getHeader()?.repository).toEqual(roots);
+
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("expected forked session file");
+		await session.close();
+		const reopened = await SessionManager.open(sessionFile, relocatedSessionDir, storage, {
+			suppressBreadcrumb: true,
+		});
+		expect(reopened.getHeader()?.repository).toEqual(roots);
+		await reopened.close();
+	});
+	it("records repository roots when starting a new session", async () => {
+		using tempDir = TempDir.createSync("@omp-session-new-repository-");
+		const repository = await createGitRepository(tempDir.path(), "repository");
+		const session = SessionManager.create(
+			repository,
+			path.join(tempDir.path(), "sessions"),
+			new FileSessionStorage(),
+		);
+		await session.newSession();
+		expect(session.getHeader()?.repository).toEqual({
+			sessionWorktreeRoot: repository,
+			primaryWorktreeRoot: repository,
+		});
+		await session.close();
+	});
+
+	it("records destination roots for cross-repository forks and omits them for non-Git forks", async () => {
+		using tempDir = TempDir.createSync("@omp-session-repository-cross-fork-");
+		const sourceRepository = await createGitRepository(tempDir.path(), "source");
+		const destinationRepository = await createGitRepository(tempDir.path(), "destination");
+		const plainDirectory = path.join(tempDir.path(), "plain");
+		await fs.mkdir(plainDirectory);
+		const storage = new FileSessionStorage();
+		const source = SessionManager.create(sourceRepository, path.join(tempDir.path(), "source-sessions"), storage);
+		source.appendMessage({ role: "user", content: "source", timestamp: 1 });
+		await source.ensureOnDisk();
+		const sourceFile = source.getSessionFile();
+		if (!sourceFile) throw new Error("expected source session file");
+		expect(source.getHeader()?.repository).toEqual({
+			sessionWorktreeRoot: sourceRepository,
+			primaryWorktreeRoot: sourceRepository,
+		});
+		await source.close();
+
+		const destinationSessionDir = path.join(tempDir.path(), "destination-sessions");
+		const destinationFork = await SessionManager.forkFrom(
+			sourceFile,
+			destinationRepository,
+			destinationSessionDir,
+			storage,
+			{ suppressBreadcrumb: true },
+		);
+		const destinationFile = destinationFork.getSessionFile();
+		if (!destinationFile) throw new Error("expected destination fork file");
+		await destinationFork.close();
+		const reopenedDestination = await SessionManager.open(destinationFile, destinationSessionDir, storage, {
+			suppressBreadcrumb: true,
+		});
+		expect(reopenedDestination.getHeader()?.repository).toEqual({
+			sessionWorktreeRoot: destinationRepository,
+			primaryWorktreeRoot: destinationRepository,
+		});
+		await reopenedDestination.close();
+
+		const plainSessionDir = path.join(tempDir.path(), "plain-sessions");
+		const plainFork = await SessionManager.forkFrom(sourceFile, plainDirectory, plainSessionDir, storage, {
+			suppressBreadcrumb: true,
+		});
+		expect(plainFork.getHeader()?.repository).toBeUndefined();
+		await plainFork.close();
+	});
+
+	it("records repository roots through direct empty-file creation", async () => {
+		using tempDir = TempDir.createSync("@omp-session-empty-file-repository-");
+		const repository = await createGitRepository(tempDir.path(), "repository");
+		const storage = new MemorySessionStorage();
+		const file = SessionManager.createEmptySessionFile(repository, storage);
+		const entries = await loadEntriesFromFile(file, storage);
+		const header = entries.find(entry => entry.type === "session");
+		if (!header || header.type !== "session") throw new Error("expected session header");
+		expect(header.repository).toEqual({
+			sessionWorktreeRoot: repository,
+			primaryWorktreeRoot: repository,
+		});
+
+		const reopened = await SessionManager.open(file, path.dirname(file), storage, { suppressBreadcrumb: true });
+		expect(reopened.getHeader()?.repository).toEqual({
+			sessionWorktreeRoot: repository,
+			primaryWorktreeRoot: repository,
+		});
+		await reopened.close();
+	});
+
+	it("records repository roots through direct branched-session creation", async () => {
+		using tempDir = TempDir.createSync("@omp-session-branch-repository-");
+		const repository = await createGitRepository(tempDir.path(), "repository");
+		const storage = new FileSessionStorage();
+		const session = SessionManager.create(repository, path.join(tempDir.path(), "sessions"), storage);
+		session.appendMessage({ role: "user", content: "branch", timestamp: 1 });
+		await session.flush();
+		const leaf = session.getBranch().at(-1);
+		if (!leaf) throw new Error("expected branch leaf");
+
+		const branchFile = session.createBranchedSession(leaf.id);
+		if (!branchFile) throw new Error("expected branched session file");
+		const entries = await loadEntriesFromFile(branchFile, storage);
+		const header = entries.find(entry => entry.type === "session");
+		if (!header || header.type !== "session") throw new Error("expected session header");
+		expect(header.repository).toEqual({
+			sessionWorktreeRoot: repository,
+			primaryWorktreeRoot: repository,
+		});
+		await session.close();
 	});
 });

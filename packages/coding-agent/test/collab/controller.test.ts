@@ -742,7 +742,7 @@ describe("interactive collaboration startup", () => {
 		expect(local.collabHost?.sessionId).toBe(local.sessionManager.getSessionId());
 	});
 
-	it("does not release a replica when the void resume wrapper silently cancels restoration", async () => {
+	it("does not release a replica when the resume wrapper cancels restoration", async () => {
 		const { local, remote, localFile } = await prepareGuestMode();
 		const guest = new CollabGuestLink(local);
 		await guest.join(remote.link);
@@ -751,7 +751,7 @@ describe("interactive collaboration startup", () => {
 		spyOn(local, "showError").mockImplementation(message => reported.resolve(message));
 		try {
 			await remote.stop("host goodbye");
-			expect(await reported.promise).toContain("Local session restoration was cancelled");
+			expect(await reported.promise).toContain("Failed to switch to resumed session.");
 			await expect(guest.leave("left")).rejects.toThrow("Local session restoration was cancelled");
 			local.collabController.autoStart();
 			await local.collabController.idle();
