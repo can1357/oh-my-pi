@@ -385,12 +385,14 @@ describe("createUsageRowBlock describe", () => {
 		if (!captioned) throw new Error("usage row did not describe");
 		expect(captioned.k).toBe("col");
 		const [caption, row] = captioned.c ?? [];
-		expect(isNode(caption) && caption.p).toMatchObject({ spans: [{ t: "Fixed the add operator in calc.py" }] });
+		expect(isNode(caption) && caption.p).toMatchObject({
+			spans: expect.arrayContaining([{ t: "Fixed the add operator in calc.py", s: "muted em" }]),
+		});
 		expect(row).toEqual(metrics);
 
 		const ansi = block.render(100).filter(line => line.trim() !== "");
 		expect(ansi).toHaveLength(ansiMetrics.length + 1);
-		expect(Bun.stripANSI(ansi[0] ?? "").trim()).toBe("Fixed the add operator in calc.py");
+		expect(Bun.stripANSI(ansi[0] ?? "").trim()).toBe("› Fixed the add operator in calc.py");
 		expect(ansi.slice(1)).toEqual(ansiMetrics);
 	});
 });

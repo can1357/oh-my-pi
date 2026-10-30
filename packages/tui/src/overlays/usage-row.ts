@@ -11,6 +11,9 @@ import type { DescribeContext, NativeChild, NativeNode } from "../native/node";
 /** Below this the rate is nonsense (cached/instant responses yield absurd tok/s). */
 const MIN_DURATION_MS = 100;
 
+/** Leads a step summary in the accent color so the italic caption reads apart from transcript prose. */
+const STEP_SUMMARY_MARKER = "›";
+
 /** Local ISO date with a wall-clock time; only the hour cycle follows the terminal. */
 function formatUsageTimestamp(ms: number, hour12 = false): string {
 	const d = new Date(ms);
@@ -206,7 +209,9 @@ export class UsageRowBlock extends Container {
 		this.#nativeNode = undefined;
 		this.clear();
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("muted", trimmed), 1, 0));
+		this.addChild(
+			new Text(`${theme.fg("accent", STEP_SUMMARY_MARKER)} ${theme.italic(theme.fg("muted", trimmed))}`, 1, 0),
+		);
 		this.addChild(this.#metrics);
 		this.invalidate();
 	}
@@ -256,7 +261,10 @@ export class UsageRowBlock extends Container {
 			...(stamped ? { title: formatUsageTimestamp(timestamp, hour12) } : {}),
 		});
 		this.#nativeNode = this.#summary
-			? col([text([span(this.#summary, "muted")]), metrics], { role: "omp.usage.step", gap: "none" })
+			? col([text([span(`${STEP_SUMMARY_MARKER} `, "accent"), span(this.#summary, "muted em")]), metrics], {
+					role: "omp.usage.step",
+					gap: "none",
+				})
 			: metrics;
 		return this.#nativeNode;
 	}
