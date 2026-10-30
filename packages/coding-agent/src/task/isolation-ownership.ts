@@ -295,6 +295,12 @@ export async function decideIsolationReclaim(baseDir: string): Promise<Isolation
 	if (typeof decoded !== "object" || decoded === null) {
 		return { reclaimable: false, reason: "owner marker unreadable (not an object)" };
 	}
+	// Asked before the retired shortcut: a directory its owner finished with
+	// can still hold a writer that has not, and "retired" is a statement about
+	// the owner alone.
+	if (await hasUnfinishedWriter(baseDir)) {
+		return { reclaimable: false, reason: "a live writer may still be saving into it" };
+	}
 	if ("retired" in decoded && decoded.retired === true) {
 		return { reclaimable: true, reason: "task-isolation leftover (retired by its owner)" };
 	}

@@ -38,6 +38,8 @@ const TASK_ISOLATION_DIR_DIGEST_CHARS = 9;
 const TASK_ISOLATION_MOUNT_DIR = "m";
 /** How long an in-place teardown holds the lock for a backend stop before leaving it to reclamation. */
 const SANDBOX_STOP_MAX_WAIT_MS = 10_000;
+/** How long a teardown holds the lock to capture before it refuses to delete. */
+const SANDBOX_CAPTURE_MAX_WAIT_MS = 120_000;
 const GIT_NETWORK_TIMEOUT_MS = 30 * 60 * 1000;
 type IsoBackendKind = natives.IsoBackendKind;
 async function diffTreeOrEmpty(repo: VcsGitRepo, base: string, head: string): Promise<string> {
@@ -813,12 +815,26 @@ async function settleAbandonedStop(
  *   copy. A mount the backend still holds refuses the rename (`EBUSY`); that
  *   teardown keeps the lock instead, which blocks the materialisation rather
  *   than racing it.
- * - only then are the backend stop and the removal run.
+ * - `capture` — writing this run's patch, and its branch — runs *here*, under
+ *   that same lock, immediately before the removal. Capture and the authority
+ *   to delete have to be one span: every ordering where they were not left a
+ *   window in which something was admitted, replaced or cleaned between them,
+ *   and the work written in that window went with the directory. Nothing can
+ *   take the lock between the two, and a party that wants it waits and then
+ *   fails, which is the right answer.
+ * - the capture is bounded, and the bound **refuses**: when it cannot be
+ *   completed the workspace is kept and said so, because a workspace that
+ *   survives costs disk and a log line while a lost patch costs a user's work.
+ * - only then are the directory retired, the backend stopped and the removal
+ *   run.
  *
  * A handle with no generation predates claims (a fixture's hand-built handle)
  * and keeps the old unconditional behaviour.
  */
-export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
+export async function cleanupIsolation(
+	handle: IsolationHandle,
+	options: { capture?: () => Promise<void> } = {},
+): Promise<void> {
 	// baseDir is the parent of the merged directory, resolved to the directory
 	// itself: a lock on an alias of this path excludes nobody.
 	const baseDir = await resolveSandboxIdentity(path.dirname(handle.mergedDir));
@@ -845,7 +861,7 @@ export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
 		// deciding still counts. The owner keeps the teardown; the last user to
 		// leave runs it. See `isolation-lease`.
 		if (
-			await deferTeardownWhileLeased(handle.mergedDir, async () => await cleanupIsolation(handle), {
+			await deferTeardownWhileLeased(handle.mergedDir, async () => await cleanupIsolation(handle, options), {
 				generation: handle.generation,
 			})
 		) {
@@ -860,6 +876,31 @@ export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
 				mergedDir: handle.mergedDir,
 			});
 			return;
+		}
+		// The last thing before the directory goes, and still under the lock
+		// that authorises its going. A capture that cannot finish inside its
+		// bound refuses the deletion rather than releasing it.
+		if (options.capture) {
+			const captured = await Promise.race([
+				options
+					.capture()
+					.then(() => true)
+					.catch(error => {
+						logger.warn("isolation capture failed; keeping the workspace", {
+							mergedDir: handle.mergedDir,
+							error: error instanceof Error ? error.message : String(error),
+						});
+						return false;
+					}),
+				scheduler.wait(SANDBOX_CAPTURE_MAX_WAIT_MS).then(() => false),
+			]);
+			if (!captured) {
+				logger.warn("isolation workspace kept: its work could not be captured before removal", {
+					mergedDir: handle.mergedDir,
+					waitedMs: SANDBOX_CAPTURE_MAX_WAIT_MS,
+				});
+				return;
+			}
 		}
 		const candidate = `${baseDir}.retiring-${handle.generation ?? Snowflake.next()}`;
 		try {

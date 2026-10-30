@@ -1220,6 +1220,51 @@ describe("detachGitDir", () => {
 		}
 	});
 
+	it("keeps a workspace whose capture cannot be completed, and captures under the lock before removing", async () => {
+		// Capture and the authority to delete are one span: a capture that
+		// cannot finish refuses the deletion rather than releasing it, because
+		// a surviving workspace costs disk while a lost patch costs work.
+		const { wt } = await makeLinkedWorktree();
+		vi.spyOn(natives, "isoResolve").mockResolvedValue({
+			kind: natives.IsoBackendKind.Rcopy,
+			candidates: [natives.IsoBackendKind.Rcopy],
+			fellBack: false,
+			reason: undefined,
+		});
+		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-capture-lock-"));
+		tempDirs.push(worktreeBase);
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(worktreeBase);
+		try {
+			const refused = await ensureIsolation(wt, "capture-refuses");
+			const data = path.join(refused.mergedDir, "work.txt");
+			await fs.writeFile(data, "the user's work\n");
+			await cleanupIsolation(refused, {
+				capture: async () => {
+					throw new Error("capture failed");
+				},
+			});
+			expect(await Bun.file(data).exists()).toBe(true);
+
+			// A capture that completes runs while the lock is still held, and
+			// the removal follows it.
+			let lockedDuringCapture = false;
+			await cleanupIsolation(refused, {
+				capture: async () => {
+					lockedDuringCapture =
+						tryAcquireFileLock(await resolveSandboxIdentity(path.dirname(refused.mergedDir))) === null;
+				},
+			});
+			expect(lockedDuringCapture).toBe(true);
+			expect(await Bun.file(data).exists()).toBe(false);
+		} finally {
+			setWorktreesDir(undefined);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		}
+	});
+
 	it("refuses to materialise over a sandbox a live session is leasing", async () => {
 		// Taking the slot destroys what is in it. A live lease belongs to a
 		// session whose cwd and whose files would go with the directory.

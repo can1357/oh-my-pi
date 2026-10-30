@@ -407,19 +407,20 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		baseReleasePromise ??= opts.baseOptions.onRelease?.() ?? Promise.resolve();
 		return baseReleasePromise;
 	};
+	/**
+	 * Release what the caller held and tear the workspace down, handing the
+	 * teardown this run's capture so it runs under the lock that authorises the
+	 * removal. Memoised, because the caller's release must run once — but a
+	 * teardown deferred to a late departure re-enters `cleanupIsolation`
+	 * directly, since a memoised promise that has already resolved would report
+	 * a removal that never happened.
+	 */
 	const cleanupHandle = (): Promise<void> => {
 		cleanupPromise ??= (async () => {
 			await releaseBase();
-			if (handle && !retainWorkspace) await cleanupIsolation(handle);
+			if (handle && !retainWorkspace) await cleanupIsolation(handle, { capture });
 		})();
 		return cleanupPromise;
-	};
-	const captureAndCleanup = async (): Promise<void> => {
-		try {
-			await capture();
-		} finally {
-			await cleanupHandle();
-		}
 	};
 	/** Write this run's patch, and its branch, from the sandbox as it stands. */
 	const capture = async (): Promise<void> => {
@@ -499,6 +500,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			// unknown later moment leaves that result with no patch and no
 			// branch for work the child really did.
 			await capture();
+			const sandbox = handle;
 			// Someone is still working in the sandbox — a nested child that
 			// inherited this cwd, a session another process opened in it. The
 			// removal waits for them, and so does a second capture, or
@@ -506,9 +508,13 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			// Registered before anything is decided and *not* withdrawn here:
 			// this path holds no lock, so a user admitted between a look and
 			// the cleanup below would otherwise depart with nothing registered
-			// to capture its work. `cleanupIsolation` takes the lock, and
-			// honours or withdraws the registration there.
-			armTeardown(handle.mergedDir, captureAndCleanup, { generation: handle.generation });
+			// to capture its work. The registration is the same teardown the
+			// cleanup runs — capture under the sandbox lock, then removal — so
+			// a late departure gets the same guarantee, and it re-enters
+			// `cleanupIsolation` rather than the memoised handle cleanup.
+			armTeardown(handle.mergedDir, async () => await cleanupIsolation(sandbox, { capture }), {
+				generation: handle.generation,
+			});
 			await cleanupHandle();
 		})();
 		return releasePromise;
