@@ -9,7 +9,7 @@ import {
 	findTrailingSlashCommandStart,
 	isDirectoryCompletionValue,
 	midPromptSkillTokenMatches,
-	SKILL_NAMESPACE,
+	isCommandNamespaceRow,
 } from "../autocomplete";
 import { BracketedPasteHandler, decodeReencodedPasteControls } from "../bracketed-paste";
 import { canonicalKeyId, getKeybindings, type KeybindingsManager } from "../keybindings";
@@ -2197,7 +2197,7 @@ export class Editor implements Component, Focusable {
 					findLeadingSlashCommandStart(this.#autocompletePrefix) !== null &&
 					this.#isInSubmittedSlashCommandContext() &&
 					!this.#selectedCompletionIsPath() &&
-					!this.#selectedCompletionIsSkillNamespace()
+					!this.#selectedCompletionIsCommandNamespace()
 				) {
 					const selected = this.#autocompleteList.getSelectedItem();
 					// Check for stale autocomplete state while an async refresh is pending
@@ -2387,10 +2387,10 @@ export class Editor implements Component, Focusable {
 					this.#autocompleteProvider?.trySyncSlashCompletion
 				) {
 					const syncResult = this.#autocompleteProvider.trySyncSlashCompletion(textBeforeCursor);
-					// The collapsed `/skill:` namespace row is not a runnable command; Enter submits
+					// A collapsed namespace row (`/skill:`, `/snippet:`) is not a runnable command; Enter submits
 					// immediately after applying, so only a real command may be completed here, and
 					// only one whose name matches: a description-only hit would run an unrelated command.
-					const selected = syncResult?.items.find(item => item.value !== SKILL_NAMESPACE);
+					const selected = syncResult?.items.find(item => !isCommandNamespaceRow(item.value));
 					if (syncResult && selected && !selected.descriptionMatch) {
 						// Invalidate any pending async autocomplete so its stale results are discarded
 						this.#autocompleteRequestId += 1;
@@ -4956,12 +4956,12 @@ export class Editor implements Component, Focusable {
 		return selected.value.startsWith("/") || selected.value.startsWith('"');
 	}
 	/**
-	 * Whether the current popup selection is the collapsed `/skill:` namespace
-	 * row. Accepting it expands the namespace (insert `/skill:`, reopen the
-	 * popup) instead of submitting, since the bare namespace is not a command.
+	 * Whether the current popup selection is a collapsed namespace row (`/skill:`,
+	 * `/snippet:`). Accepting it expands the namespace (insert `/<prefix>`, reopen
+	 * the popup) instead of submitting, since the bare namespace is not a command.
 	 */
-	#selectedCompletionIsSkillNamespace(): boolean {
-		return this.#autocompleteList?.getSelectedItem()?.value === SKILL_NAMESPACE;
+	#selectedCompletionIsCommandNamespace(): boolean {
+		return isCommandNamespaceRow(this.#autocompleteList?.getSelectedItem()?.value);
 	}
 
 	/**
@@ -5004,7 +5004,8 @@ export class Editor implements Component, Focusable {
 		const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol).trimStart();
 		return (
 			this.#isInSubmittedSlashCommandContext() &&
-			(/^\/\S+ $/.test(textBeforeCursor) || textBeforeCursor === `/${SKILL_NAMESPACE}`)
+			(/^\/\S+ $/.test(textBeforeCursor) ||
+				(textBeforeCursor.startsWith("/") && isCommandNamespaceRow(textBeforeCursor.slice(1))))
 		);
 	}
 

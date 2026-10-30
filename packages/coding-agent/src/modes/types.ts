@@ -574,6 +574,8 @@ export interface InteractiveModeContext {
 	): Promise<CompactionOutcome>;
 	openInBrowser(urlOrPath: string): void;
 	refreshSlashCommandState(cwd?: string): Promise<void>;
+	/** Re-discover prompt templates (snippets) from disk and refresh their `/snippet:<name>` autocomplete. */
+	refreshPromptTemplates(): Promise<void>;
 	/** Reload session skills and derived `/skill:<name>` commands. */
 	refreshSkillState(): Promise<void>;
 	applyCwdChange(newCwd: string): Promise<boolean>;
@@ -584,6 +586,8 @@ export interface InteractiveModeContext {
 	showUsageDashboard(reports: UsageReport[]): void;
 	showAdvisorConfigure(): void;
 	showHistorySearch(): void;
+	/** Fuzzy-pick a saved snippet and insert it into the editor at the cursor. */
+	showSnippetPicker(): Promise<void>;
 	showExtensionsDashboard(): void;
 	showAgentsDashboard(): void;
 	/** Open the fullscreen git UI, optionally pinned to a revision (`/git <rev>`). */

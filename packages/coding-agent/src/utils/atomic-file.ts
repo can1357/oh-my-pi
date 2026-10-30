@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { hasFsCode, isEexist, isEnoent, logger, toError } from "@oh-my-pi/pi-utils";
 
 /**
@@ -70,7 +71,8 @@ async function replaceAfterWindowsRenameFailure(
  * carries a secret.
  */
 export async function writeFileAtomically(filePath: string, content: string, mode: number = 0o600): Promise<void> {
-	const tempPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+	// Independent basename leaves room for destinations near the filesystem's component limit.
+	const tempPath = path.join(path.dirname(filePath), `.atomic-${crypto.randomUUID()}.tmp`);
 	let removeTemp = false;
 	try {
 		const handle = await fs.promises.open(tempPath, "wx", mode);

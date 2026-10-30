@@ -1162,6 +1162,34 @@ describe("Editor Enter handler sync slash completion", () => {
 		expect(submitted?.trimEnd()).toBe("/skill:security-scan");
 	});
 
+	it("expands the /snippet: namespace row on Enter instead of submitting it as a command", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider(
+				[
+					{ name: "snippet:hello", description: "Say hello (user)" },
+					{ name: "model", description: "Switch model" },
+				],
+				"/tmp",
+			),
+		);
+		let submitted: string | undefined;
+		editor.onSubmit = text => {
+			submitted = text;
+		};
+
+		for (const ch of "/snip") editor.handleInput(ch);
+		await untilAutocompleteShown(editor);
+		editor.handleInput("\r");
+
+		expect(submitted).toBeUndefined();
+		expect(editor.getText()).toBe("/snippet:");
+
+		await untilAutocompleteShown(editor);
+		editor.handleInput("\t");
+		expect(editor.getText()).toBe("/snippet:hello ");
+	});
+
 	it("accepts a bare mid-prompt skill slash with Tab without replacing prose", async () => {
 		const editor = createSkillEditor();
 

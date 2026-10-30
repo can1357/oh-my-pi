@@ -305,6 +305,34 @@ describe("CombinedAutocompleteProvider", () => {
 			expect(result?.items.map(item => item.value)).toEqual(["skill:humanizer", "skill:reviewer"]);
 		});
 
+		it("collapses snippets into their own snippet: row beside the skill: row, independently", async () => {
+			const provider = new CombinedAutocompleteProvider(
+				[
+					{ name: "skill:humanizer", description: "Remove signs of AI writing" },
+					{ name: "snippet:hello", description: "Say hello (user)" },
+					{ name: "snippet:testing", description: "Testing (user)" },
+					{ name: "model", description: "Switch model" },
+				],
+				"/tmp",
+			);
+
+			const all = await provider.getSuggestions(["/"], 0, 1);
+			expect(all?.items.map(item => item.value)).toEqual(["skill:", "snippet:", "model"]);
+			expect(all?.items.find(item => item.value === "snippet:")?.description).toBe("2 snippets");
+
+			// `/snip` approaches only the snippet namespace: no skills, no snippets, just the row.
+			const approaching = await provider.getSuggestions(["/snip"], 0, "/snip".length);
+			expect(approaching?.items.map(item => item.value)).toEqual(["snippet:"]);
+
+			// Entering the namespace lists its snippets; the skill row stays collapsed away.
+			const entered = await provider.getSuggestions(["/snippet:"], 0, "/snippet:".length);
+			expect(entered?.items.map(item => item.value)).toEqual(["snippet:hello", "snippet:testing"]);
+
+			// A bare name still surfaces the snippet without typing the namespace.
+			const bare = await provider.getSuggestions(["/testing"], 0, "/testing".length);
+			expect(bare?.items.map(item => item.value)).toEqual(["snippet:testing"]);
+		});
+
 		it("completes the namespace row without a trailing space so completion can continue", () => {
 			const provider = new CombinedAutocompleteProvider([], "/tmp");
 

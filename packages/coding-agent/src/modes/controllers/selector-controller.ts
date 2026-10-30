@@ -35,6 +35,7 @@ import {
 	saveModelPreset,
 } from "../../config/model-presets";
 import { resolveAdvisorRoleSelection, resolveModelRoleValue } from "../../config/model-resolver";
+import { buildSnippetChoices, NO_SNIPPETS_MESSAGE } from "../../config/snippets";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { getRoleInfo } from "../../config/model-roles";
 import { settings } from "../../config/settings";
@@ -592,6 +593,31 @@ export class SelectorController {
 			component.setOnRequestRender(() => this.ctx.ui.requestRender());
 			return { component, focus: component };
 		});
+	}
+
+	async showSnippetPicker(reservedCommands: ReadonlySet<string>): Promise<void> {
+		await this.ctx.refreshPromptTemplates();
+		const { line, col } = this.ctx.editor.getCursor();
+		const lines = this.ctx.editor.getLines();
+		// A focused subagent view and a collab guest both reject slash-prefixed drafts, so there the body is inserted.
+		const atDraftStart =
+			!this.ctx.focusedAgentId &&
+			!this.ctx.collabGuest &&
+			lines.slice(0, line).every(l => l === "") &&
+			(lines[line] ?? "").slice(0, col) === "";
+		const choices = buildSnippetChoices(this.ctx.session.promptTemplates, { atDraftStart, reservedCommands });
+		if (choices.length === 0) {
+			this.ctx.showStatus(NO_SNIPPETS_MESSAGE);
+			return;
+		}
+		const picked = await this.ctx.showHookSelector(
+			"Insert snippet",
+			choices.map(({ label, description }) => ({ label, description })),
+		);
+		const choice = choices.find(c => c.label === picked);
+		if (!choice) return;
+		this.ctx.editor.insertText(choice.insertText);
+		this.ctx.ui.requestRender();
 	}
 
 	/**

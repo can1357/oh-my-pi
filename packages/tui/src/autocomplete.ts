@@ -412,18 +412,17 @@ function buildSlashCommandCompletions(
 				};
 				let best: (AutocompleteItem & { score: number; usage: number }) | undefined;
 
-				const isSkillCommand = name.startsWith(SKILL_NAMESPACE);
-				// Skills are matched by their bare name as well as the full
-				// `skill:` name so a broken-out or mid-prompt skill ranks at
-				// prefix strength (`/batch` → `skill:batch`) instead of a weak
-				// full-name fuzzy hit.
+				const namespace = commandNamespaceOf(name);
+				// Namespaced commands (`skill:`, `snippet:`) are matched by their bare name as
+				// well as the full name so a broken-out or mid-prompt entry ranks at prefix
+				// strength (`/batch` → `skill:batch`) instead of a weak full-name fuzzy hit.
 				const nameScore =
-					lowerPrefix.length === 0 && isSkillCommand
+					lowerPrefix.length === 0 && namespace
 						? 950
-						: isSkillCommand
+						: namespace
 							? Math.max(
 									scoreCommandTextMatch(lowerPrefix, name.toLowerCase()),
-									skillBareNameBreakoutTier(lowerPrefix, name.slice(SKILL_NAMESPACE.length).toLowerCase()),
+									bareNameBreakoutTier(lowerPrefix, name.slice(namespace.length).toLowerCase()),
 								)
 							: scoreCommandTextMatch(lowerPrefix, name.toLowerCase());
 				const lowerDesc = staticDesc.toLowerCase();
@@ -493,6 +492,21 @@ function hasPromptTextBeforeSlash(
 
 export const SKILL_NAMESPACE = "skill:";
 
+/**
+ * Command-name namespaces: their commands collapse into one `/<prefix>` row until the typed
+ * prefix commits to the namespace, but still break out on a bare-name match.
+ */
+const COMMAND_NAMESPACES = [SKILL_NAMESPACE, "snippet:"] as const;
+
+function commandNamespaceOf(name: string): string | undefined {
+	return COMMAND_NAMESPACES.find(prefix => name.startsWith(prefix));
+}
+
+/** Whether `value` is a collapsed namespace row (`skill:`), which is not itself a runnable command. */
+export function isCommandNamespaceRow(value: string | undefined): boolean {
+	return COMMAND_NAMESPACES.some(prefix => prefix === value);
+}
+
 /** Exact/leading-prefix tier for ordinary command names and aliases. */
 function commandBreakoutTier(lowerPrefix: string, lowerTarget: string): number {
 	if (lowerPrefix === lowerTarget) return 1000;
@@ -505,7 +519,7 @@ function commandBreakoutTier(lowerPrefix: string, lowerTarget: string): number {
  * This stays allocation-free on the hot path: it scans segment boundaries
  * in-place and never materializes split/slice arrays.
  */
-function skillBareNameBreakoutTier(lowerPrefix: string, lowerBareName: string): number {
+function bareNameBreakoutTier(lowerPrefix: string, lowerBareName: string): number {
 	if (lowerPrefix.length === 0) return 0;
 	if (lowerPrefix === lowerBareName) return 1000;
 	if (lowerBareName.startsWith(lowerPrefix)) return 900;
@@ -531,55 +545,65 @@ function skillBareNameBreakoutTier(lowerPrefix: string, lowerBareName: string): 
 }
 
 /**
- * Collapse `skill:*` commands into a single `/skill:` namespace row while the
- * typed prefix has not committed to the namespace. A lone group entry (shown
- * only while the prefix is still a prefix of `skill:`) keeps the `/` popup
- * readable. A skill breaks out of the group only when its bare name matches
- * the prefix at the beginning of the name or a hyphen-delimited segment, at a
- * strictly stronger tier than every non-skill command name and alias. Ordinary
- * commands keep exact/leading-prefix tiers only; a tie keeps the popup
- * command-only, and fuzzy-only skill hits never surface. Accepting the group
- * inserts `/skill:` without a trailing space so the reopened popup expands to
- * the individual skills.
+ * Highest exact/leading-prefix tier any ordinary (non-namespaced) command name or alias reaches.
+ * A namespaced command breaks out of its collapsed row only when it beats this.
  */
-function collapseSkillNamespace(commands: CommandEntry[], lowerPrefix: string): CommandEntry[] {
-	if (lowerPrefix.startsWith(SKILL_NAMESPACE)) return commands;
-	const approachesNamespace = SKILL_NAMESPACE.startsWith(lowerPrefix);
-	let commandTier = 0;
-	if (!approachesNamespace) {
-		for (const cmd of commands) {
-			const name = getCommandName(cmd);
-			if (!name || name.startsWith(SKILL_NAMESPACE)) continue;
-			commandTier = Math.max(commandTier, commandBreakoutTier(lowerPrefix, name.toLowerCase()));
-			for (const alias of getCommandAliases(cmd)) {
-				commandTier = Math.max(commandTier, commandBreakoutTier(lowerPrefix, alias.toLowerCase()));
-			}
-			if (commandTier === 1000) break;
-		}
-	}
-	let skillCount = 0;
-	let skillIcon: string | undefined;
-	let skillIconName: string | undefined;
-	const rest = commands.filter(cmd => {
+function ordinaryCommandTier(commands: CommandEntry[], lowerPrefix: string): number {
+	let tier = 0;
+	for (const cmd of commands) {
 		const name = getCommandName(cmd);
-		if (!name?.startsWith(SKILL_NAMESPACE)) return true;
-		skillCount += 1;
-		skillIcon ??= cmd.icon;
-		skillIconName ??= cmd.iconName;
-		return (
-			!approachesNamespace &&
-			skillBareNameBreakoutTier(lowerPrefix, name.slice(SKILL_NAMESPACE.length).toLowerCase()) > commandTier
-		);
-	});
-	if (skillCount === 0) return commands;
-	if (!SKILL_NAMESPACE.startsWith(lowerPrefix)) return rest;
-	rest.push({
-		name: SKILL_NAMESPACE,
-		description: `${skillCount} skill${skillCount === 1 ? "" : "s"}`,
-		...(skillIcon && { icon: skillIcon }),
-		...(skillIconName && { iconName: skillIconName }),
-	});
-	return rest;
+		if (!name || commandNamespaceOf(name)) continue;
+		tier = Math.max(tier, commandBreakoutTier(lowerPrefix, name.toLowerCase()));
+		for (const alias of getCommandAliases(cmd)) {
+			tier = Math.max(tier, commandBreakoutTier(lowerPrefix, alias.toLowerCase()));
+		}
+		if (tier === 1000) break;
+	}
+	return tier;
+}
+
+/**
+ * Collapse each namespace's commands (`skill:*`, `snippet:*`) into a single `/<prefix>` row while
+ * the typed prefix has not committed to that namespace. A lone group entry (shown only while the
+ * prefix is still a prefix of the namespace) keeps the `/` popup readable. A namespaced command
+ * breaks out of the group only when its bare name matches the prefix at the beginning of the name
+ * or a hyphen-delimited segment, at a strictly stronger tier than every non-namespaced command
+ * name and alias. Ordinary commands keep exact/leading-prefix tiers only; a tie keeps the popup
+ * command-only, and fuzzy-only namespaced hits never surface. Accepting the group inserts
+ * `/<prefix>` without a trailing space so the reopened popup expands to the individual entries.
+ */
+function collapseCommandNamespaces(commands: CommandEntry[], lowerPrefix: string): CommandEntry[] {
+	const commandTier = ordinaryCommandTier(commands, lowerPrefix);
+	let result = commands;
+	for (const prefix of COMMAND_NAMESPACES) {
+		if (lowerPrefix.startsWith(prefix)) continue;
+		const approachesNamespace = prefix.startsWith(lowerPrefix);
+		let count = 0;
+		let icon: string | undefined;
+		let iconName: string | undefined;
+		const rest = result.filter(cmd => {
+			const name = getCommandName(cmd);
+			if (!name?.startsWith(prefix)) return true;
+			count += 1;
+			icon ??= cmd.icon;
+			iconName ??= cmd.iconName;
+			return (
+				!approachesNamespace &&
+				bareNameBreakoutTier(lowerPrefix, name.slice(prefix.length).toLowerCase()) > commandTier
+			);
+		});
+		if (count === 0) continue;
+		if (approachesNamespace) {
+			rest.push({
+				name: prefix,
+				description: `${count} ${prefix.slice(0, -1)}${count === 1 ? "" : "s"}`,
+				...(icon && { icon }),
+				...(iconName && { iconName }),
+			});
+		}
+		result = rest;
+	}
+	return result;
 }
 
 /**
@@ -605,7 +629,7 @@ export function midPromptSkillTokenMatches(lowerToken: string, name: string, des
 	}
 	return (
 		lowerName.startsWith(SKILL_NAMESPACE) &&
-		skillBareNameBreakoutTier(lowerToken, lowerName.slice(SKILL_NAMESPACE.length)) > 0
+		bareNameBreakoutTier(lowerToken, lowerName.slice(SKILL_NAMESPACE.length)) > 0
 	);
 }
 
@@ -698,7 +722,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				const matches = isMidPromptSkillLookup
 					? buildMidPromptSkillCompletions(this.#commands, lowerPrefix)
 					: buildSlashCommandCompletions(
-							collapseSkillNamespace(this.#commands, lowerPrefix),
+							collapseCommandNamespaces(this.#commands, lowerPrefix),
 							lowerPrefix,
 							this.#commandUsage,
 						);
@@ -874,8 +898,8 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				const beforeSlash = currentLine.slice(0, leadingSlashStart);
 				// The collapsed `/skill:` namespace row completes to the namespace
 				// itself: no trailing space, so completion continues with the
-				// individual skills instead of finishing a command token.
-				const insert = item.value === SKILL_NAMESPACE ? `/${item.value}` : `/${item.value} `;
+				// individual entries instead of finishing a command token.
+				const insert = isCommandNamespaceRow(item.value) ? `/${item.value}` : `/${item.value} `;
 				const newLine = `${beforeSlash}${insert}${afterCursor}`;
 				const newLines = [...lines];
 				newLines[cursorLine] = newLine;
@@ -1346,7 +1370,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 
 		const lowerPrefix = commandText.slice(1).toLowerCase();
 		const matches = buildSlashCommandCompletions(
-			collapseSkillNamespace(this.#commands, lowerPrefix),
+			collapseCommandNamespaces(this.#commands, lowerPrefix),
 			lowerPrefix,
 			this.#commandUsage,
 		);
