@@ -1286,6 +1286,7 @@ export class VibeSessionRegistry {
 		return {
 			cwd: session.cwd,
 			costGate: session.costGate,
+			sessionStorage: session.sessionManager?.getStorage?.(),
 			agent: record.agent,
 			task: message,
 			assignment: message,

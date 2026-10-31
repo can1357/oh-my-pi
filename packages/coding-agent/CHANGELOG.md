@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Sessions can live in Postgres/MySQL/SQLite instead of local files: setting `SESSIONS_DB_URL` (and optional `SESSIONS_DB_TABLE`) routes every create, resume, fork, and picker path through one shared SQL-backed storage; unset, sessions stay on local files exactly as before. `scripts/import-sessions-to-sql.ts` (`--dry-run`, `--limit N`) imports existing `~/.omp/agent/sessions` JSONL into it ([#17426](https://github.com/can1357/oh-my-pi/pull/17426) by [@zachbornheimer](https://github.com/zachbornheimer))
+- Added `OMP_SESSION_PATH_PREFIX_ALIAS` (`<localPrefix>=<storagePrefix>`) so a machine mirroring the canonical machine's directory layout under a different home reads and writes the same SQL session rows ([#17426](https://github.com/can1357/oh-my-pi/pull/17426) by [@zachbornheimer](https://github.com/zachbornheimer))
+
 ### Changed
 
 - Viewing a subagent or returning to the main session no longer posts a "Viewing agent …" / "Returned to main session" status (a popup in Tern); the status line and Tern's composer already show which agent is in view

@@ -13,6 +13,7 @@ import { resolveSessionLeafId, type SessionEntry } from "../session/session-entr
 import { FileSessionStorage, type SessionStorage } from "../session/session-storage";
 import { SessionManager, type PersistedSessionInit } from "../session/session-manager";
 import { loadSessionFile } from "../session/session-loader";
+import { resolveSessionStorage } from "../session/session-storage-env";
 import type { ModelRegistry } from "../config/model-registry";
 import type { TaskItem, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../tools";
@@ -242,6 +243,7 @@ export async function prepareSeance(context: {
 		cwd: context.session.cwd,
 		sessionDirHint: sessionFile ? path.dirname(sessionFile) : undefined,
 		artifactsDirHint: context.session.getArtifactsDir?.() ?? undefined,
+		storage: context.session.sessionManager?.getStorage?.() ?? (await resolveSessionStorage()),
 	});
 	const modelRegistry = context.session.modelRegistry;
 	if (!modelRegistry) throw new Error("Seance cannot resolve a model in this session.");

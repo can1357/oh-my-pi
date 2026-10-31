@@ -16,6 +16,7 @@ import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
 import { SessionManager } from "../session/session-manager";
+import { resolveSessionStorage } from "../session/session-storage-env";
 import { createSecurityAuthResolver, selectSecurityAuth } from "./auth";
 import type {
 	SecurityCoverage,
@@ -595,7 +596,11 @@ export class SecurityCoordinator {
 				throw new Error(`Security scan model is unavailable: ${plan.model.provider}/${plan.model.modelId}`);
 			const sessionsDirectory = path.join(store.projectDirectory, "sessions");
 			await fs.mkdir(sessionsDirectory, { recursive: true, mode: 0o700 });
-			const sessionManager = SessionManager.create(executionTarget.cwd, sessionsDirectory);
+			const sessionManager = SessionManager.create(
+				executionTarget.cwd,
+				sessionsDirectory,
+				await resolveSessionStorage(),
+			);
 			const publicationTool = createSecurityPublicationTool({
 				plan,
 				scanId: record.snapshot.scanId,
