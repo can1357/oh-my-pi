@@ -584,17 +584,17 @@ export class EditTool implements AgentTool<TInput> {
 				prev: file.oldText,
 				next: file.newText,
 			};
+			try {
+				await record?.(snapshot);
+			} catch {
+				// Blackbox recording is diagnostic only.
+			}
 			if (extractUriScheme(snapshot.path) === "ssh") {
 				// Auto-repair uses a local filesystem writethrough callback.
 				notes.push(
 					`Warning: ${snapshot.path} no longer parses after this edit. The change was applied; re-read the edited region and fix the syntax, or revert if unintended.`,
 				);
 				continue;
-			}
-			try {
-				await record?.(snapshot);
-			} catch {
-				// Blackbox recording is diagnostic only.
 			}
 			const display = path.relative(this.session.cwd, snapshot.path) || snapshot.path;
 			let repaired: EditAutoRepairOutcome | undefined;

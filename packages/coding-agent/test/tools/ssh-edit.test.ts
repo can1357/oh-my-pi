@@ -3,16 +3,18 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
-import { ShellFsFileType } from "@oh-my-pi/pi-natives";
+import { ShellFsFileType, ShellFsOp } from "@oh-my-pi/pi-natives";
 import * as capability from "../../src/capability";
 import { Settings } from "../../src/config/settings";
 import { EditTool, getEditStore } from "../../src/edit";
 import * as autoRepair from "../../src/edit/auto-repair";
+import { InternalUrlFilesystem } from "../../src/internal-urls/url-filesystem";
 import { createLspWritethrough, flushLspWritethroughBatch } from "../../src/lsp";
 import * as lspConfig from "../../src/lsp/config";
 import type { LinterClient, ServerConfig } from "../../src/lsp/types";
 import type { ToolSession } from "../../src/tools";
 import { ReadTool } from "../../src/tools/read";
+import { GrepTool } from "../../src/tools/grep";
 import * as fileTransfer from "../../src/ssh/file-transfer";
 
 const URL = "ssh://oracle/tmp/edit-repro.txt";
@@ -101,9 +103,17 @@ describe("SSH read/edit snapshots (#12125)", () => {
 		expect(remoteText).toBe(`${bom}first line`);
 	});
 
-	it("warns about remote syntax regressions without using local auto-repair", async () => {
+	it("records remote syntax regressions and warns without using local auto-repair", async () => {
+		await using agentDir = await TempDir.create("@omp-ssh-blackbox-");
+		session.settings = await Settings.loadIsolated({
+			cwd: session.cwd,
+			agentDir: agentDir.path(),
+			inMemory: true,
+			overrides: { "edit.blackbox.enabled": true },
+		});
 		const sourceUrl = URL.replace(".txt", ".ts");
 		remoteText = "const value = 1;\n";
+		const original = remoteText;
 		const repair = vi.spyOn(autoRepair, "attemptEditAutoRepair");
 		const edited = await new EditTool(session, "replace").execute("edit", {
 			path: sourceUrl,
@@ -114,6 +124,16 @@ describe("SSH read/edit snapshots (#12125)", () => {
 		expect(remoteText).toBe("const value = ;\n");
 		expect(textOf(edited)).toContain("no longer parses");
 		expect(repair).not.toHaveBeenCalled();
+		const lines = (await Bun.file(agentDir.join("edit-blackbox.jsonl")).text()).trim().split("\n");
+		expect(lines.map(line => JSON.parse(line))).toEqual([
+			{
+				prev: original,
+				new: remoteText,
+				model: "unknown",
+				variant: "replace",
+				arg: { path: sourceUrl, old_string: "1", new_string: "" },
+			},
+		]);
 	});
 
 	it("refuses changed remote anchors without overwriting the external change", async () => {
@@ -127,8 +147,28 @@ describe("SSH read/edit snapshots (#12125)", () => {
 		expect(fileTransfer.writeRemoteFile).not.toHaveBeenCalled();
 	});
 
-	it("shows BOM-free numbered/raw text and preserves BOM/CRLF on a first-line edit", async () => {
+	it("keeps BOM out of read/search/virtual views and preserves BOM/CRLF on a first-line edit", async () => {
 		remoteText = "\uFEFFalpha\r\nbeta\r\n";
+		const filesystem = new InternalUrlFilesystem({ context: { cwd: session.cwd }, tier: "exec" });
+		const opened = await filesystem.handle({
+			op: ShellFsOp.Open,
+			path: URL,
+			open: { read: true, write: false, append: false, truncate: false, create: false, createNew: false },
+		});
+		expect(opened.error).toBeUndefined();
+		try {
+			const viewed = await filesystem.handle({
+				op: ShellFsOp.Read,
+				handle: opened.handle,
+				offset: 0n,
+				length: 1024,
+			});
+			expect(viewed.data).toEqual(new TextEncoder().encode("alpha\r\nbeta\r\n"));
+		} finally {
+			await filesystem.handle({ op: ShellFsOp.Close, handle: opened.handle });
+		}
+		const matches = await new GrepTool(session).execute("grep-bom", { path: URL, pattern: "^alpha" });
+		expect(matches.details?.files).toContain(URL);
 		const read = new ReadTool(session);
 		const raw = await read.execute("raw", { path: `${URL}:raw` });
 		expect(textOf(raw)).toBe("alpha\r\nbeta\r\n");
@@ -313,7 +353,7 @@ describe("SSH read/edit snapshots (#12125)", () => {
 		expect(fileTransfer.writeRemoteFile).not.toHaveBeenCalled();
 	});
 
-	it("keeps SSH edits at exec approval and refuses them in plan mode", async () => {
+	it("refuses SSH edits in plan mode without writing to the remote file", async () => {
 		session.getPlanModeState = () => ({ enabled: true, planFilePath: "local://PLAN.md" });
 		const tool = new EditTool(session, "replace");
 		const args = { path: URL, old_string: "beta", new_string: "BETA" };
