@@ -8,7 +8,7 @@ import { consolidateToEpisodic, extractAndStoreFacts, storeExtractedFactCategori
 import { factRecall } from "@oh-my-pi/pi-mnemopi/core/beam/recall";
 import { initBeam } from "@oh-my-pi/pi-mnemopi/core/beam/schema";
 import { sourceMemoryScope } from "@oh-my-pi/pi-mnemopi/core/beam/fact-scope";
-import { get } from "@oh-my-pi/pi-mnemopi/core/beam/store";
+import { get, updateWorking } from "@oh-my-pi/pi-mnemopi/core/beam/store";
 import { EpisodicGraph } from "@oh-my-pi/pi-mnemopi/core/episodic-graph";
 import {
 	hasPendingFactsScopeMigration as hasPendingMigration,
@@ -327,6 +327,71 @@ describe("E7 facts scope migration", () => {
 				beamC.close();
 			}
 			expect(get(beamA, factId)).not.toBeNull();
+		} finally {
+			beamA.close();
+		}
+	});
+
+	it("updateWorking retires the edited source's extracted facts", () => {
+		const dbPath = tempDb();
+		const beamA = new BeamMemory({ sessionId: "session-a", dbPath });
+		try {
+			beamA.db.run(
+				"INSERT INTO working_memory (id, content, session_id, scope) VALUES ('wm-edit', 'old text', 'session-a', 'global')",
+			);
+			storeFactStrings(beamA, ["I use the quorum relay for tokens"], 0, "wm-edit");
+			const beamB = new BeamMemory({ sessionId: "session-b", dbPath });
+			try {
+				const before = factRecall(beamB, "quorum", 10);
+				expect(before.some(result => result.content.includes("quorum"))).toBe(true);
+			} finally {
+				beamB.close();
+			}
+
+			const updated = updateWorking(beamA, "wm-edit", "completely different text");
+			expect(updated).toBe(true);
+
+			const beamC = new BeamMemory({ sessionId: "session-b", dbPath });
+			try {
+				const after = factRecall(beamC, "quorum", 10);
+				expect(after.some(result => result.content.includes("quorum"))).toBe(false);
+			} finally {
+				beamC.close();
+			}
+		} finally {
+			beamA.close();
+		}
+	});
+
+	it("get-by-id hides a fact when the same id exists privately in the other tier", () => {
+		const dbPath = tempDb();
+		const beamA = new BeamMemory({ sessionId: "session-a", dbPath });
+		try {
+			beamA.db.run(
+				"INSERT INTO working_memory (id, content, session_id, scope) VALUES ('wm-dual', 'g', 'session-a', 'global')",
+			);
+			beamA.db.run(
+				"INSERT INTO episodic_memory (id, content, session_id, scope) VALUES ('wm-dual', 'e', 'session-b', 'session')",
+			);
+			storeFactStrings(beamA, ["I use the quorum relay for tokens"], 0, "wm-dual");
+			const factId = (beamA.db
+				.query("SELECT fact_id FROM facts WHERE source_msg_id = 'wm-dual'")
+				.get() as { fact_id: string }).fact_id;
+			// The same conservative rule applies in factRecall, so no session that
+			// cannot see the private episode row resolves the fact — including
+			// session-a, which only owns the global working row.
+			const beamC = new BeamMemory({ sessionId: "session-c", dbPath });
+			try {
+				expect(get(beamC, factId)).toBeNull();
+			} finally {
+				beamC.close();
+			}
+			const beamD = new BeamMemory({ sessionId: "session-b", dbPath });
+			try {
+				expect(get(beamD, factId)).not.toBeNull();
+			} finally {
+				beamD.close();
+			}
 		} finally {
 			beamA.close();
 		}

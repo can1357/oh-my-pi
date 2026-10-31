@@ -732,6 +732,14 @@ export function updateWorking(
 		params.push(importance);
 	}
 	if (assignments.length === 0) return false;
+	// Capture the old content BEFORE the UPDATE: an actual content change is
+	// what invalidates the source's derived facts, and the post-update value
+	// would compare equal to the new one.
+	const oldContent = content !== null
+		? (beam.db
+				.prepare("SELECT content FROM working_memory WHERE id = ? AND session_id = ?")
+				.get(memoryId, beam.sessionId) as { content: string } | null)
+		: null;
 	params.push(memoryId, beam.sessionId);
 	const result = beam.db.run(
 		`UPDATE working_memory SET ${assignments.join(", ")} WHERE id = ? AND session_id = ?`,
@@ -739,7 +747,21 @@ export function updateWorking(
 	);
 	if (result.changes > 0) {
 		invalidateCaches(beam);
-		if (content !== null) scheduleEmbedding(beam, [{ memoryId, content }]);
+		if (content !== null) {
+			// An edited source no longer supports what was extracted from its old
+			// content: retire the source's fact and graph derivatives so they
+			// cannot outlive the statement that produced them (the next
+			// extraction pass re-derives facts from the new content). Skipped
+			// when the content is unchanged so no-op updates keep derivatives.
+			if (oldContent == null || oldContent.content !== content) {
+				beam.db.run("DELETE FROM facts WHERE source_msg_id = ?", [memoryId]);
+				for (const table of ["memoria_facts", "memoria_kg", "memoria_timelines", "memoria_preferences", "memoria_instructions"]) {
+					beam.db.run(`DELETE FROM ${table} WHERE source_memory_id = ?`, [memoryId]);
+				}
+				beam.db.run("DELETE FROM triples WHERE source = ?", [memoryId]);
+			}
+			scheduleEmbedding(beam, [{ memoryId, content }]);
+		}
 	}
 	return result.changes > 0;
 }
@@ -790,15 +812,17 @@ function getFact(beam: BeamMemoryState, memoryId: string): Row | null {
 	const sourceId = typeof fact.source_msg_id === "string" ? fact.source_msg_id : "";
 	if (sourceId.length > 0) {
 		type SourceRow = { superseded_by: string | null; valid_until: string | null; session_id: string | null; scope: string | null };
-		// bun:sqlite get() returns null (not undefined) for a missing row, so
-		// both lookups need nullish checks.
-		let source = beam.db.prepare("SELECT superseded_by, valid_until, session_id, scope FROM working_memory WHERE id = ?").get(sourceId) as SourceRow | null;
-		if (source == null) {
-			source = beam.db.prepare("SELECT superseded_by, valid_until, session_id, scope FROM episodic_memory WHERE id = ?").get(sourceId) as SourceRow | null;
-		}
-		if (source != null) {
+		// bun:sqlite get() returns null (not undefined) for a missing row.
+		// The tiers' primary keys are independent, so the same id can exist in
+		// both; probe both conservatively (mirrors factVisibilityWhere) — a
+		// visible row in one tier must not mask a retired or private row in
+		// the other.
+		const wmSource = beam.db.prepare("SELECT superseded_by, valid_until, session_id, scope FROM working_memory WHERE id = ?").get(sourceId) as SourceRow | null;
+		const epSource = beam.db.prepare("SELECT superseded_by, valid_until, session_id, scope FROM episodic_memory WHERE id = ?").get(sourceId) as SourceRow | null;
+		const now = toUtcIso(new Date());
+		for (const source of [wmSource, epSource]) {
+			if (source == null) continue;
 			if (source.superseded_by != null) return null;
-			const now = toUtcIso(new Date());
 			if (source.valid_until != null && source.valid_until <= now) return null;
 			if (source.session_id !== beam.sessionId && source.scope !== "global") return null;
 		}
