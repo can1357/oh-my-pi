@@ -454,7 +454,8 @@ function copySuggestions(value: Suggestions | null, at: string): Suggestions | n
 /**
  * `signal`, as an extension's provider is handed it: a signal of its own that aborts with the
  * caller's, inside `scope` — so a listener the provider adds runs as its session's work, and not
- * at all once that session has gone. `release` stops following the caller.
+ * at all once that session has gone — and with a copy of the caller's reason, which is the
+ * editor's own object. `release` stops following the caller.
  */
 function scopedSignal(
 	signal: AbortSignal | undefined,
@@ -463,11 +464,22 @@ function scopedSignal(
 	if (signal === undefined) return { signal: undefined, release() {} };
 	const controller = new AbortController();
 	const abort = (): void => {
-		if (scope.live) scope.run(() => controller.abort(signal.reason));
+		if (scope.live) scope.run(() => controller.abort(copiedReason(signal.reason)));
 	};
 	if (signal.aborted) abort();
 	else signal.addEventListener("abort", abort, { once: true });
 	return { signal: controller.signal, release: () => signal.removeEventListener("abort", abort) };
+}
+
+/** An abort reason as an extension is handed it: a structured copy, or, for one that cannot be
+ *  copied (it holds a function), an `AbortError` of its own carrying the reason's message. */
+function copiedReason(reason: unknown): unknown {
+	try {
+		return structuredClone(reason);
+	} catch {
+		const message = reason instanceof Error ? reason.message : "The operation was aborted";
+		return new DOMException(message, "AbortError");
+	}
 }
 
 /**

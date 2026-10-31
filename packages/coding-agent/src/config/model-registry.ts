@@ -70,7 +70,11 @@ import {
 	type ProviderCallGate,
 	selectLiveRegistration,
 } from "@oh-my-pi/pi-ai/auth/provider-gate";
-import { claimProviderRegistrationOwner, providerCallGate } from "../extensibility/extensions/callback-ownership";
+import {
+	claimProviderRegistrationOwner,
+	providerCallGate,
+	sameRegistrant,
+} from "../extensibility/extensions/callback-ownership";
 import {
 	type AuthorDataSchema,
 	type AuthorDataSite,
@@ -4260,25 +4264,40 @@ export class ModelRegistry {
 	/**
 	 * Remove one extension-registered provider and restore its static models.
 	 *
-	 * `callbackOwner` is the session withdrawing it. Several sessions can hold a registration for
+	 * `callbackOwner` is who is withdrawing it. Several sessions can hold a registration for
 	 * one provider name — a subagent that rebound its parent's extensions does — so a withdrawal
-	 * takes away only the caller's own registration, from every registry it was installed into
+	 * takes away only the caller's own registrations, from every registry they were installed into
 	 * (custom API, OAuth, usage), and folds what this registry holds for the provider again from
-	 * the live registrations left. Without an owner, every registration for the name goes, which
-	 * is what a host teardown means.
+	 * the live registrations left. By default those are every registration the caller's extension
+	 * made (`"registrant"`): at load and in any of its sessions, which is what `pi.unregisterProvider`
+	 * means. With `"session"`, only the registration that one session made, which is what its end
+	 * means: the extension's load-time registration stays. Without an owner, every registration for
+	 * the name goes, which is what a host teardown means.
 	 */
-	unregisterProvider(providerName: string, callbackOwner?: ExtensionCallbackOwner): void {
+	unregisterProvider(
+		providerName: string,
+		callbackOwner?: ExtensionCallbackOwner,
+		scope: "registrant" | "session" = "registrant",
+	): void {
 		const entries = this.#runtimeRegistrations.get(providerName) ?? [];
 		const discoveryBefore = this.#discoveryInForce(providerName);
 		let remaining: RuntimeProviderRegistration[];
 		if (callbackOwner) {
 			const gate = providerCallGate(callbackOwner);
+			const withdrawn = (registration: RuntimeProviderRegistration): boolean =>
+				scope === "session" ? registration.gate === gate : sameRegistrant(registration.gate, gate);
+			// Each gate whose registrations go: OAuth and usage are keyed by it.
+			const gates = new Set<ProviderCallGate>([gate]);
 			for (const registration of entries) {
-				if (registration.gate === gate) this.#withdrawCustomApis(providerName, registration);
+				if (!withdrawn(registration)) continue;
+				this.#withdrawCustomApis(providerName, registration);
+				if (registration.gate) gates.add(registration.gate);
 			}
-			unregisterOAuthProvider(providerName, gate);
-			this.authStorage.usage.removeRegistration(providerName, gate);
-			remaining = entries.filter(registration => registration.gate !== gate);
+			for (const withdrawnGate of gates) {
+				unregisterOAuthProvider(providerName, withdrawnGate);
+				this.authStorage.usage.removeRegistration(providerName, withdrawnGate);
+			}
+			remaining = entries.filter(registration => !withdrawn(registration));
 		} else {
 			for (const registration of entries) this.#withdrawCustomApis(providerName, registration);
 			unregisterOAuthProvider(providerName);

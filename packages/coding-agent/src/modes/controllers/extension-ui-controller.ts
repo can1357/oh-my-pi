@@ -1401,6 +1401,12 @@ export class ExtensionUiController {
 					else if (scope.live) scope.run(() => c.dispose?.());
 					return;
 				}
+				// A component that arrives after its session has gone is refused before anything of the
+				// dialog's runs again: its `overlayOptions` and `onHandle` are that session's code too.
+				if (scope && !scope.live) {
+					fail(new DOMException("Extension session retired", "AbortError"));
+					return;
+				}
 				component = c;
 				if (scope) {
 					// What still reaches it outside the admission while the session is live (the overlay

@@ -66,7 +66,7 @@ import { createExtensionModelQuery } from "./model-api";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import { extensionLinkClicksAvailable } from "@oh-my-pi/pi-tui/render/extension-links";
-import type { ToolRendererScope } from "@oh-my-pi/pi-tui/tools/renderer-scope";
+import { pinInputScope, type ToolRendererScope } from "@oh-my-pi/pi-tui/tools/renderer-scope";
 import type {
 	AfterProviderResponseEvent,
 	AssistantMessageRewriteEvent,
@@ -85,6 +85,7 @@ import type {
 	ContextUsage,
 	Extension,
 	ExtensionActions,
+	ExtensionCallbackOwner,
 	ExtensionAgentIdentity,
 	ExtensionAnnotationsAPI,
 	ExtensionAnnotationsFactory,
@@ -622,12 +623,15 @@ export class ExtensionRunner {
 	#pinnedScopes = new WeakMap<ExtensionSessionGeneration, ToolRendererScope>();
 	/** The host services a context hands this session's extensions (`context-surfaces.ts`), each
 	 *  made once per host object, so every context hands the same one. */
-	#handedSessionManager: ExtensionSessionManager | undefined;
-	#handedModelRegistry: ExtensionModelRegistry | undefined;
+	#handedSessionManager = new WeakMap<ExtensionCallbackOwner, ExtensionSessionManager>();
+	#handedModelRegistry = new WeakMap<ExtensionCallbackOwner, ExtensionModelRegistry>();
 	#handedLocalProtocolOptions: LocalProtocolOptions | undefined;
-	readonly #handedUI = new WeakMap<ExtensionUIContext, ExtensionUIContext>();
-	readonly #handedMemory = new WeakMap<MemoryRuntimeContext, MemoryRuntimeContext>();
-	readonly #handedSessionModes = new WeakMap<ExtensionSessionModes, ExtensionSessionModes>();
+	readonly #handedUI = new WeakMap<ExtensionCallbackOwner, WeakMap<ExtensionUIContext, ExtensionUIContext>>();
+	readonly #handedMemory = new WeakMap<ExtensionCallbackOwner, WeakMap<MemoryRuntimeContext, MemoryRuntimeContext>>();
+	readonly #handedSessionModes = new WeakMap<
+		ExtensionCallbackOwner,
+		WeakMap<ExtensionSessionModes, ExtensionSessionModes>
+	>();
 	/**
 	 * Buffer for `credential_disabled` events received via {@link emitCredentialDisabled}
 	 * before {@link initialize} has run. Drained through {@link emit} once initialize sets
@@ -963,9 +967,16 @@ export class ExtensionRunner {
 		// with a direct registration, and that is the path a real SDK extension takes: without
 		// this the registry would have no owner to ask before calling the provider, and a
 		// withdrawal would take away a sibling session's registration along with this one's.
+		// A provider registered while a session runs is that session's (`forAcceptance`), and comes
+		// out of the registry when the session ends; one registered at load serves every session.
 		this.runtime.registerProvider = (name, config, sourceId) => {
-			this.modelRegistry.registerProvider(name, config, sourceId, this.runtime);
+			const accepting = this.runtime.forAcceptance?.();
+			const session = accepting !== undefined && accepting !== this.runtime ? accepting : undefined;
+			this.modelRegistry.registerProvider(name, config, sourceId, session ?? this.runtime);
+			session?.whenSessionEnds?.(() => this.modelRegistry.unregisterProvider(name, session, "session"));
 		};
+		// A withdrawal is the extension's: every registration of the name it made, at load or in any
+		// of its sessions.
 		this.runtime.unregisterProvider = name => {
 			this.modelRegistry.unregisterProvider(name, this.runtime);
 		};
@@ -1164,14 +1175,38 @@ export class ExtensionRunner {
 
 	/** `ui` as this session's extensions are handed it (`handUIContext`): this runner's own UI in
 	 *  every context it creates, and a UI another host lends a handler (a focused subagent's
-	 *  transcript, a tool's `onSession`). One per UI object. */
-	handedUIContext(ui: ExtensionUIContext): ExtensionUIContext {
-		let handed = this.#handedUI.get(ui);
+	 *  transcript, a tool's `onSession`). One per UI object and session: the session is the one
+	 *  served now — or the admitted call's on this stack — and the facade is that session's alone
+	 *  (`ExtensionCallbackOwner.forSession`), so a `ctx.ui` a session held is refused once it has
+	 *  gone, even while the runtime serves the next session. */
+	handedUIContext(ui: ExtensionUIContext, session: ExtensionCallbackOwner = this.#sessionOwner()): ExtensionUIContext {
+		let bySession = this.#handedUI.get(session);
+		if (!bySession) {
+			bySession = new WeakMap();
+			this.#handedUI.set(session, bySession);
+		}
+		let handed = bySession.get(ui);
 		if (!handed) {
-			handed = handUIContext(ui, this.runtime, this.rendererScope);
-			this.#handedUI.set(ui, handed);
+			handed = handUIContext(ui, session, pinInputScope(this.rendererScope));
+			bySession.set(ui, handed);
 		}
 		return handed;
+	}
+
+	/** This runtime as the session served now (`forSession`), or the runtime itself for one with no
+	 *  sessions of its own. A facade made for it stays that session's. */
+	#sessionOwner(): ExtensionCallbackOwner {
+		return this.runtime.forSession?.() ?? this.runtime;
+	}
+
+	/** The value `cache` holds for `session`, made by `make` the first time it is asked for. */
+	#onceFor<V>(cache: WeakMap<ExtensionCallbackOwner, V>, session: ExtensionCallbackOwner, make: () => V): V {
+		let value = cache.get(session);
+		if (value === undefined) {
+			value = make();
+			cache.set(session, value);
+		}
+		return value;
 	}
 
 	hasUI(): boolean {
@@ -1740,13 +1775,15 @@ export class ExtensionRunner {
 	 * it owns those invocations: refused once the session is retired (a `pi.on` handler stored
 	 * before disposal must not run after it, however the dispatch reaches it), counted while it
 	 * runs, and executed inside the acceptance scope so a subscription the callback makes is
-	 * attributed to this session rather than to whoever is on the stack.
+	 * attributed to this session rather than to whoever is on the stack. It is entered as the
+	 * session's admitted work (`runOwned`), so what the callback registers, and what its
+	 * continuations do after the session has gone, belong to that session.
 	 */
 	runScoped<T>(fn: () => T): T | undefined {
 		const owner = this.#scopeOwner;
 		if (!owner) return withActiveSettings(this.settings, fn);
 		if (owner.isRetired) return undefined;
-		return extensionCallbackScope.run(owner, () => owner.trackCallback(withActiveSettings(this.settings, fn)));
+		return owner.runOwned(() => withActiveSettings(this.settings, fn));
 	}
 
 	/**
@@ -1853,16 +1890,24 @@ export class ExtensionRunner {
 		// as the host does now. What is captured here is captured on purpose: `model`, `delegation`
 		// and `agent` are what this one call was made with.
 		const runner = this;
+		// The session this context is made for: its facades are that session's, so a context a
+		// session saved is refused once it has gone, even while the runtime serves the next one.
+		const session = this.#sessionOwner();
 		const getModel = model ? () => model : () => this.#getModel();
 		const sendUserMessage = (text: string, options?: SendUserMessageOptions): void =>
 			this.runtime.sendUserMessage(text, options);
 		const getSessionModes = () => this.#sessionModes;
 		const handSessionModesOnce = (modes: ExtensionSessionModes | undefined): ExtensionSessionModes | undefined => {
 			if (!modes) return undefined;
-			let handed = this.#handedSessionModes.get(modes);
+			let bySession = this.#handedSessionModes.get(session);
+			if (!bySession) {
+				bySession = new WeakMap();
+				this.#handedSessionModes.set(session, bySession);
+			}
+			let handed = bySession.get(modes);
 			if (!handed) {
-				handed = handSessionModes(modes, this.runtime);
-				this.#handedSessionModes.set(modes, handed);
+				handed = handSessionModes(modes, session);
+				bySession.set(modes, handed);
 			}
 			return handed;
 		};
@@ -1872,7 +1917,7 @@ export class ExtensionRunner {
 			// approval prompt, the registry's rows and credentials, the history — so an extension
 			// is never handed them.
 			get ui() {
-				return runner.handedUIContext(runner.#uiContext);
+				return runner.handedUIContext(runner.#uiContext, session);
 			},
 			get mode() {
 				return runner.#mode;
@@ -1884,7 +1929,7 @@ export class ExtensionRunner {
 			// hands over here outlives the command that made the call. Owned at acceptance, like
 			// everything the `pi` surface takes.
 			compact: instructionsOrOptions =>
-				this.#compactFn(ownAcceptedCallbacks(instructionsOrOptions, this.runtime) as typeof instructionsOrOptions),
+				this.#compactFn(ownAcceptedCallbacks(instructionsOrOptions, session) as typeof instructionsOrOptions),
 			getAsyncJobSnapshot: () => copyHostData(this.#getAsyncJobSnapshotFn()),
 			get hasUI() {
 				return runner.hasUI();
@@ -1892,8 +1937,12 @@ export class ExtensionRunner {
 			get cwd() {
 				return runner.cwd;
 			},
-			sessionManager: (this.#handedSessionManager ??= handSessionManager(this.sessionManager, this.runtime)),
-			modelRegistry: (this.#handedModelRegistry ??= handModelRegistry(this.modelRegistry, this.runtime)),
+			sessionManager: this.#onceFor(this.#handedSessionManager, session, () =>
+				handSessionManager(this.sessionManager, session),
+			),
+			modelRegistry: this.#onceFor(this.#handedModelRegistry, session, () =>
+				handModelRegistry(this.modelRegistry, session),
+			),
 			isProjectTrusted: () => true,
 			agent,
 			// A copy on every read, as `ctx.models` hands them (`handHostModel`): the host keeps building
@@ -1960,10 +2009,15 @@ export class ExtensionRunner {
 			get memory() {
 				const memory = runner.#getMemoryFn?.();
 				if (!memory) return undefined;
-				let handed = runner.#handedMemory.get(memory);
+				let bySession = runner.#handedMemory.get(session);
+				if (!bySession) {
+					bySession = new WeakMap();
+					runner.#handedMemory.set(session, bySession);
+				}
+				let handed = bySession.get(memory);
 				if (!handed) {
-					handed = handMemory(memory, runner.runtime);
-					runner.#handedMemory.set(memory, handed);
+					handed = handMemory(memory, session);
+					bySession.set(memory, handed);
 				}
 				return handed;
 			},

@@ -46,6 +46,7 @@ import {
 	pinInputScope,
 	retireGoneInputScopes,
 	type ToolRendererScope,
+	toolRendererScope,
 	whenInputScopeGone,
 } from "@oh-my-pi/pi-tui/tools/renderer-scope";
 import type { ApiKeyResolverModel, ApiKeyResolverOptions } from "../../config/api-key-resolver";
@@ -619,6 +620,34 @@ const OVERLAY_OPTIONS = fieldsOf<OverlayOptions>({
 
 const INERT_OVERLAY: OverlayHandle = { hide() {}, setHidden() {}, isHidden: () => true };
 
+/** The host's overlay handle as a session's dialog is handed it: hiding it is always allowed, and
+ *  showing it again only while that session is live. The host's object is never handed. */
+function handOverlayHandle(handle: OverlayHandle, session: ToolRendererScope): OverlayHandle {
+	const handed: Decided<OverlayHandle> = {
+		hide: () => handle.hide(),
+		setHidden: hidden => {
+			if (hidden === true) handle.setHidden(true);
+			else if (session.live) handle.setHidden(false);
+		},
+		isHidden: () => handle.isHidden(),
+	};
+	return handed;
+}
+
+/** A factory pinned to one session crossing another session's `ctx.ui`: live while both are, run
+ *  in the scope of the session whose code it is. */
+function bothScopes(outer: ToolRendererScope, inner: ToolRendererScope): ToolRendererScope {
+	return {
+		get live() {
+			return outer.live && inner.live;
+		},
+		run<T>(call: () => T): T {
+			if (!outer.live) throw new Error("Extension session retired; its renderers are no longer callable");
+			return inner.run(call);
+		},
+	};
+}
+
 /** What a session's input listener answered, read inside its scope: whether it consumed the key,
  *  and the text it passes on in its place. */
 function copyListenerResult(result: unknown): InputListenerResult {
@@ -1153,12 +1182,18 @@ export function handUIContext(
 	 *  already serves the next one, since a factory one session registered is that session's — and
 	 *  carrying that scope for the host that mounts or drives what it returns. `hand` turns what the
 	 *  host passes into what the factory is handed — the TUI, the theme, the keybindings, the
-	 *  provider it wraps, each as the session's own — before the factory runs. */
+	 *  provider it wraps, each as the session's own — before the factory runs.
+	 *
+	 *  A factory another session's `ctx.ui` already pinned keeps that lifetime as it crosses this
+	 *  one: it runs, and what it returns takes input, only while both sessions are live, in the
+	 *  scope of the session whose code it is. Rewrapping never transfers a component's ownership. */
 	const scoped = <F extends (...args: never[]) => unknown>(
 		factory: F,
 		hand: (...args: Parameters<F>) => Parameters<F>,
 	): F => {
-		const session = pinInputScope(scope);
+		const own = pinInputScope(scope);
+		const inner = toolRendererScope(factory);
+		const session = inner === undefined || inner === own ? own : bothScopes(own, inner);
 		const run = (...args: Parameters<F>): unknown => {
 			if (!session.live) return undefined;
 			const handed = hand(...args);
@@ -1250,8 +1285,12 @@ export function handUIContext(
 		setFooter: factory => ui.setFooter(optionalScoped(factory, component)),
 		setHeader: factory => ui.setHeader(optionalScoped(factory, component)),
 		setTitle: title => ui.setTitle(text(owner, title)),
-		custom: (factory, options) =>
-			ui.custom(
+		custom: (factory, options) => {
+			// The dialog belongs to the session that opens it: its option callbacks run as that
+			// session's work and do nothing once it has gone, even while the runtime serves the next.
+			const session = owner.forSession?.() ?? owner;
+			const sessionScope = pinInputScope(scope);
+			return ui.custom(
 				scoped(factory, (tui, theme, keybindings, done) => [
 					handedTUI(tui),
 					handedTheme(theme),
@@ -1260,7 +1299,7 @@ export function handUIContext(
 				]),
 				options === undefined
 					? undefined
-					: copiedIn(owner, () => {
+					: copiedIn(session, () => {
 							const copy = snapshotAuthorData(
 								options,
 								CUSTOM_OPTIONS,
@@ -1268,11 +1307,12 @@ export function handUIContext(
 								new Map(),
 							) as ExtensionCustomOptions;
 							const overlayOptions = copy.overlayOptions;
+							const onHandle = owned(session, copy.onHandle);
 							return {
 								...copy,
 								overlayOptions:
 									typeof overlayOptions === "function"
-										? owned(owner, () =>
+										? owned(session, () =>
 												snapshotAuthorData(
 													overlayOptions(),
 													DATA,
@@ -1286,11 +1326,14 @@ export function handUIContext(
 												site(subject, "options.overlayOptions"),
 												new Map(),
 											),
-								onHandle: owned(owner, copy.onHandle),
+								// The overlay's handle is the host's: the dialog is handed one of its own.
+								onHandle:
+									onHandle && ((handle: OverlayHandle) => onHandle(handOverlayHandle(handle, sessionScope))),
 								signal: followSignal(copy.signal, subject, "options.signal"),
 							} as ExtensionCustomOptions;
 						}),
-			),
+			);
+		},
 		setEditorText: value => ui.setEditorText(text(owner, value)),
 		pasteToEditor: value => ui.pasteToEditor(text(owner, value)),
 		getEditorText: () => ui.getEditorText(),

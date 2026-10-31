@@ -567,7 +567,7 @@ describe("R23-3: a projected resolver's abort listener runs as its session's wor
 		return listening;
 	}
 
-	test("an abort during the call reaches the resolver's listener as its session's work, with the caller's reason", async () => {
+	test("an abort during the call reaches the resolver's listener as its session's work, with a copy of the caller's reason", async () => {
 		const { runtime } = owner();
 		const entered = Promise.withResolvers<void>();
 		const ran: Array<{ inside: boolean; retired: boolean; reason: unknown }> = [];
@@ -604,7 +604,10 @@ describe("R23-3: a projected resolver's abort listener runs as its session's wor
 		await expect(pending).resolves.toEqual({ "x-aborted": "true" });
 		expect(ran).toHaveLength(1);
 		expect(ran[0]).toMatchObject({ inside: true, retired: false });
-		expect(ran[0]!.reason).toBe(reason);
+		// The reason is the caller's own object, which it reads again after the abort: a copy crosses.
+		expect(ran[0]!.reason).not.toBe(reason);
+		expect(ran[0]!.reason).toBeInstanceOf(Error);
+		expect((ran[0]!.reason as Error).message).toBe("caller aborted");
 	});
 
 	test("once the call is over and its session gone, an abort reaches no resolver listener", async () => {

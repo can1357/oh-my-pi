@@ -501,32 +501,265 @@ export class HandedSignals {
  * nearest of the language's own error classes it extends (`TypeError`, `RangeError`, `Error`): a
  * host's error class is the host's code, and its prototype's getters and methods reach whatever
  * made it. An `AbortSignal` is handed as the counterpart `signals` admits for it, or, when the
- * call hands none, as a signal of its own that follows it. A function is behavior, not data,
+ * call hands none, as a signal of its own that follows it, aborting with a copy of its reason —
+ * the reason is the caller's own object, which it reads again after the abort. A function is behavior, not data,
  * wherever it sits — a field of a record or of an instance, an array element, a map's key or
  * value, a set's member, an error's property: a bound method or an arrow function reaches the
  * private state of whatever made it. It is dropped, as the session file drops it when the host
  * persists the same record (an array keeps the slot, `undefined`). Symbol-keyed host markers stay
  * with the host, as `structuredClone` leaves them.
  *
- * The walk is bounded at {@link HOST_DATA_DEPTH_LIMIT} levels: an object nested deeper refuses the
- * whole copy with a `RangeError` naming the bound, rather than answering a value that looks
- * complete and is not. Cycles are copied as cycles, but a getter can answer a fresh object on every
- * read, and no identity check ends that walk; the bound does, at the same depth whatever the stack.
- * Real host data nests nowhere near it.
+ * The copy is iterative, so how deeply the data nests does not matter: a session tree that grows
+ * two levels with every entry is copied whole however long the conversation has run. What is
+ * bounded is how many objects one copy makes ({@link HOST_DATA_NODE_LIMIT}): a getter can answer
+ * a fresh object on every read, and no identity check ends that walk. Past the bound the copy
+ * throws a `RangeError` naming it, rather than answering a value that looks complete and is not.
+ * Cycles are copied as cycles.
  */
 export function copyHostData<T>(value: T, signals?: HandedSignals): T {
-	return copyHostValue(value, new Map(), signals, false, 0) as T;
+	return new HostCopier(signals).copy(value) as T;
 }
 
-/** How deep host data handed to an extension may nest ({@link copyHostData}). */
-export const HOST_DATA_DEPTH_LIMIT = 512;
+/** How many objects one copy of host data handed to an extension may make ({@link copyHostData}).
+ *  Chosen here, not derived: an order of magnitude above the largest session this host keeps — a
+ *  long session's tree or message list is some hundred thousand objects — and small enough that a
+ *  walk that would never end is stopped in well under a second. */
+export const HOST_DATA_NODE_LIMIT = 1_000_000;
 
-function checkHostDepth(depth: number): void {
-	if (depth > HOST_DATA_DEPTH_LIMIT) {
-		throw new RangeError(
-			`Host data handed to an extension nests deeper than ${HOST_DATA_DEPTH_LIMIT} levels; it is not handed over in part`,
-		);
+/** What a copy answers for a function it leaves out, so a record or a map drops the entry and an
+ *  array keeps the slot as `undefined`. */
+const DROPPED: unique symbol = Symbol("dropped");
+
+/**
+ * One copy of host data, made without recursion: each object is copied shallowly — its copy made
+ * and recorded at once, so a cycle finds it — and filling it in is queued, so no chain of nested
+ * objects deepens the call stack. Every object copied counts against {@link HOST_DATA_NODE_LIMIT}.
+ */
+class HostCopier {
+	readonly #signals: HandedSignals | undefined;
+	/** What a function found in the data becomes: dropped, unless the copy hands callbacks in. */
+	readonly #onFunction: ((fn: Function) => unknown) | undefined;
+	/** Copies made as data (own enumerable fields) and as read (`readableKeys`), by original. */
+	readonly #copies = new Map<object, unknown>();
+	readonly #readCopies = new Map<object, unknown>();
+	/** Copies made by a declared shape, by shape and original. */
+	readonly #declaredCopies = new Map<AuthorDataSchema, Map<object, unknown>>();
+	readonly #work: Array<() => void> = [];
+	#objects = 0;
+
+	constructor(signals?: HandedSignals, onFunction?: (fn: Function) => unknown) {
+		this.#signals = signals;
+		this.#onFunction = onFunction;
 	}
+
+	/** `value`, copied completely. */
+	copy(value: unknown): unknown {
+		const copied = this.value(value, false);
+		this.finish();
+		return copied;
+	}
+
+	/** Fills in every copy queued so far. */
+	finish(): void {
+		for (let fill = this.#work.pop(); fill !== undefined; fill = this.#work.pop()) fill();
+	}
+
+	#count(): void {
+		if (++this.#objects > HOST_DATA_NODE_LIMIT) {
+			throw new RangeError(
+				`Host data handed to an extension holds more than ${HOST_DATA_NODE_LIMIT} objects; it is not handed over in part`,
+			);
+		}
+	}
+
+	/** The copy of `value`, made shallowly; what it holds is filled in by {@link finish}. `byRead`
+	 *  reads an object as the host reads it (`readableKeys`) rather than by its own enumerable
+	 *  fields. */
+	value(value: unknown, byRead: boolean): unknown {
+		const child = this.#child(value, byRead);
+		return child === DROPPED ? undefined : child;
+	}
+
+	/** The copy of one value found in the data, or {@link DROPPED} for a function the copy leaves
+	 *  out: a function is behavior, not data, unless this copy hands callbacks in. */
+	#child(value: unknown, byRead: boolean): unknown {
+		if (typeof value === "function") return this.#onFunction ? this.#onFunction(value) : DROPPED;
+		if (typeof value !== "object" || value === null) return value;
+		const copies = byRead ? this.#readCopies : this.#copies;
+		const known = copies.get(value);
+		if (known !== undefined) return known;
+		this.#count();
+		const record = <C>(copy: C): C => {
+			copies.set(value, copy);
+			return copy;
+		};
+		if (value instanceof AbortSignal) {
+			return record(this.#signals ? this.#signals.admit(value) : followWithCopiedReason(value));
+		}
+		const builtIn = copyBuiltInData(value);
+		if (builtIn !== undefined) return record(builtIn);
+		if (types.isRegExp(value)) return record(new RegExp(value));
+		if (value instanceof URL) return record(new URL(value.href));
+		if (value instanceof URLSearchParams) return record(new URLSearchParams(value));
+		if (Array.isArray(value)) {
+			const copy: unknown[] = record([]);
+			this.#work.push(() => {
+				for (let index = 0; index < value.length; index++) copy[index] = this.value(value[index], byRead);
+			});
+			return copy;
+		}
+		if (types.isMap(value)) {
+			const copy = record(new Map<unknown, unknown>());
+			this.#work.push(() => {
+				for (const [key, item] of value) {
+					const keyCopy = this.#child(key, byRead);
+					const itemCopy = this.#child(item, byRead);
+					if (keyCopy === DROPPED || itemCopy === DROPPED) continue;
+					copy.set(keyCopy, itemCopy);
+				}
+			});
+			return copy;
+		}
+		if (types.isSet(value)) {
+			const copy = record(new Set<unknown>());
+			this.#work.push(() => {
+				for (const item of value) {
+					const itemCopy = this.#child(item, byRead);
+					if (itemCopy !== DROPPED) copy.add(itemCopy);
+				}
+			});
+			return copy;
+		}
+		// `DOMException` is no native error to the engine's check, but it is the platform's error class.
+		if (types.isNativeError(value) || value instanceof DOMException) return this.#error(value, record, byRead);
+		const copy: Record<string, unknown> = record({});
+		this.#work.push(() => {
+			for (const key of byRead ? readableKeys(value) : Object.keys(value)) {
+				const item = this.#child(Reflect.get(value, key), byRead);
+				if (item === DROPPED) continue;
+				// Assigning an own `__proto__` key would set the copy's prototype; defined, it stays data.
+				if (key === "__proto__") {
+					Object.defineProperty(copy, key, { value: item, enumerable: true, writable: true, configurable: true });
+				} else {
+					copy[key] = item;
+				}
+			}
+		});
+		return copy;
+	}
+
+	#error(value: object, record: <C>(copy: C) => C, byRead: boolean): Error {
+		// Read as the host reads them: a host error class may answer them from its prototype. An
+		// error is a report of a failure, so a property whose read itself fails is left out: the
+		// exception that read throws is the host's own object, and must not be what crosses.
+		const name: unknown = readQuietly(value, "name");
+		const message: unknown = readQuietly(value, "message");
+		const domException = value instanceof DOMException;
+		const copy = record(
+			builtInErrorOf(value)(typeof message === "string" ? message : "", typeof name === "string" ? name : "Error"),
+		);
+		const define = (key: string, item: unknown, enumerable: boolean): void => {
+			Object.defineProperty(copy, key, { value: item, enumerable, writable: true, configurable: true });
+		};
+		this.#work.push(() => {
+			for (const key of Object.getOwnPropertyNames(value)) {
+				// A `DOMException`'s name, message and code are its brand's, set by its constructor.
+				if (domException && (key === "name" || key === "message" || key === "code")) continue;
+				const item = this.#child(readQuietly(value, key), byRead);
+				if (item === DROPPED) continue;
+				define(key, item, Object.getOwnPropertyDescriptor(value, key)?.enumerable === true);
+			}
+			if (domException) return;
+			// What a host error class answers from its prototype is kept as data on the copy.
+			if (typeof name === "string" && !Object.hasOwn(copy, "name") && name !== copy.name)
+				define("name", name, false);
+			const code: unknown = readQuietly(value, "code");
+			if ((typeof code === "string" || typeof code === "number") && !Object.hasOwn(copy, "code")) {
+				define("code", code, false);
+			}
+		});
+		return copy;
+	}
+
+	/**
+	 * The copy of host data by the schema of what it is declared to be: a known shape field by
+	 * field, read the way a field read reads it — so a class's getter and an inherited field arrive
+	 * as the host sees them, which a copy of own enumerable fields would miss — and an open value as
+	 * data read the same way. The host's counterpart of `snapshotAuthorData`, without its refusal of
+	 * functions: this is the host's data, not an author's. Shallow, as {@link value} is.
+	 */
+	declared(value: unknown, schema: AuthorDataSchema): unknown {
+		if (typeof value !== "object" || value === null) return value;
+		if (schema.kind === "data" || schema.kind === "callback") return this.value(value, true);
+		if (schema.kind === "items" ? !Array.isArray(value) : Array.isArray(value)) return this.value(value, true);
+		let copies = this.#declaredCopies.get(schema);
+		if (!copies) {
+			copies = new Map();
+			this.#declaredCopies.set(schema, copies);
+		}
+		const known = copies.get(value);
+		if (known !== undefined) return known;
+		if (schema.kind === "items") {
+			const source = value as unknown[];
+			this.#count();
+			const copy: unknown[] = [];
+			copies.set(value, copy);
+			this.#work.push(() => {
+				for (let index = 0; index < source.length; index++)
+					copy[index] = this.declared(source[index], schema.items);
+			});
+			return copy;
+		}
+		let fields: AuthorDataFields["fields"] | undefined;
+		let tag: unknown;
+		if (schema.kind === "variants") {
+			tag = Reflect.get(value, schema.by);
+			const variant = schema.variants.get(tag);
+			if (!variant) return this.value(value, true);
+			fields = variant.fields;
+		} else if (schema.kind === "fields") {
+			fields = schema.fields;
+		}
+		this.#count();
+		const copy: Record<PropertyKey, unknown> = {};
+		copies.set(value, copy);
+		if (schema.kind === "variants" && tag !== undefined) copy[schema.by] = tag;
+		this.#work.push(() => {
+			if (fields) {
+				for (const [field, fieldSchema] of fields) {
+					const item = this.declared(Reflect.get(value, field), fieldSchema);
+					if (item !== undefined) copy[field] = item;
+				}
+				return;
+			}
+			if (schema.kind !== "entries") return;
+			for (const key of Object.keys(value)) {
+				const item = this.declared(Reflect.get(value, key), schema.entries);
+				// Assigning an own `__proto__` key would set the copy's prototype; defined, it stays data.
+				Object.defineProperty(copy, key, { value: item, enumerable: true, writable: true, configurable: true });
+			}
+		});
+		return copy;
+	}
+}
+
+/** A signal of the copy's own that follows `signal`, aborting with a copy of its reason: the
+ *  reason is the caller's own object, which it may read again after the abort. */
+function followWithCopiedReason(signal: AbortSignal): AbortSignal {
+	const controller = new AbortController();
+	const reason = (): unknown => {
+		try {
+			return copyHostData(signal.reason);
+		} catch {
+			return new Error("The operation was aborted");
+		}
+	};
+	if (signal.aborted) {
+		controller.abort(reason());
+	} else {
+		signal.addEventListener("abort", () => controller.abort(reason()), { once: true });
+	}
+	return controller.signal;
 }
 
 /**
@@ -543,12 +776,12 @@ function checkHostDepth(depth: number): void {
  * same way all the way down: the host reads a value there by property access, so an object held
  * there arrives with what its accessors answer — its own, enumerable or not, and its classes' —
  * not as the `{}` its own enumerable fields would make. A getter that throws throws here, as it
- * does when the host reads the model. The walk is bounded as {@link copyHostData}'s is. A
+ * does when the host reads the model. The copy is bounded as {@link copyHostData}'s is. A
  * `resolveHeaders` is the host's code, not data: the copy's calls it on the host's model, with a
  * signal of the host's own that follows the one the extension passes, and answers a copy.
  */
 export function handHostModel(model: Model<Api>): Model<Api> {
-	const copies = new Map<AuthorDataSchema, Map<object, unknown>>();
+	const copier = new HostCopier();
 	const copy: Record<PropertyKey, unknown> = {};
 	for (const [field, schema] of MODEL_ROW.fields) {
 		const value: unknown = Reflect.get(model, field);
@@ -556,73 +789,12 @@ export function handHostModel(model: Model<Api>): Model<Api> {
 		copy[field] =
 			field === "resolveHeaders" && typeof value === "function"
 				? handHostResolver(value, model)
-				: copyHostDeclared(value, schema, copies, 1);
+				: copier.declared(value, schema);
 	}
+	copier.finish();
 	// Built from every field `Model` declares (`MODEL_ROW` is checked against it), so it is one.
 	const handed = copy as unknown as Model<Api>;
 	return handed;
-}
-
-/**
- * Host data copied by the schema of what it is declared to be: a known shape field by field, read
- * the way a field read reads it — so a class's getter and an inherited field arrive as the host
- * sees them, which a copy of own enumerable fields would miss — and an open value as data read the
- * same way ({@link copyHostRead}). The host's counterpart of `snapshotAuthorData`, without its
- * refusal of functions: this is the host's data, not an author's.
- */
-function copyHostDeclared(
-	value: unknown,
-	schema: AuthorDataSchema,
-	copies: Map<AuthorDataSchema, Map<object, unknown>>,
-	depth: number,
-): unknown {
-	if (typeof value !== "object" || value === null) return value;
-	checkHostDepth(depth);
-	if (schema.kind === "data" || schema.kind === "callback") return copyHostRead(value, depth);
-	let copied = copies.get(schema);
-	if (!copied) {
-		copied = new Map();
-		copies.set(schema, copied);
-	}
-	const known = copied.get(value);
-	if (known !== undefined) return known;
-	if (schema.kind === "items") {
-		if (!Array.isArray(value)) return copyHostRead(value, depth);
-		const copy: unknown[] = [];
-		copied.set(value, copy);
-		for (let index = 0; index < value.length; index++)
-			copy[index] = copyHostDeclared(value[index], schema.items, copies, depth + 1);
-		return copy;
-	}
-	if (Array.isArray(value)) return copyHostRead(value, depth);
-	const copy: Record<PropertyKey, unknown> = {};
-	copied.set(value, copy);
-	const copyFields = (fields: AuthorDataFields["fields"]): void => {
-		for (const [field, fieldSchema] of fields) {
-			const item = copyHostDeclared(Reflect.get(value, field), fieldSchema, copies, depth + 1);
-			if (item !== undefined) copy[field] = item;
-		}
-	};
-	switch (schema.kind) {
-		case "fields":
-			copyFields(schema.fields);
-			return copy;
-		case "variants": {
-			const tag: unknown = Reflect.get(value, schema.by);
-			const variant = schema.variants.get(tag);
-			if (!variant) return copyHostRead(value, depth);
-			if (tag !== undefined) copy[schema.by] = tag;
-			copyFields(variant.fields);
-			return copy;
-		}
-		case "entries":
-			for (const key of Object.keys(value)) {
-				const item = copyHostDeclared(Reflect.get(value, key), schema.entries, copies, depth + 1);
-				// Assigning an own `__proto__` key would set the copy's prototype; defined, it stays data.
-				Object.defineProperty(copy, key, { value: item, enumerable: true, writable: true, configurable: true });
-			}
-			return copy;
-	}
 }
 
 function handHostResolver(resolver: Function, model: Model<Api>): NonNullable<Model<Api>["resolveHeaders"]> {
@@ -631,17 +803,6 @@ function handHostResolver(resolver: Function, model: Model<Api>): NonNullable<Mo
 		const headers: Record<string, string> | undefined = await Reflect.apply(resolver, model, [followed]);
 		return copyHostData(headers);
 	};
-}
-
-/**
- * Host data copied as {@link copyHostData} copies it, except that an object is read as the host
- * reads it: what each property a read answers for holds — its own, enumerable or not, accessors
- * included, and the getters and inherited data fields of its classes. For a value the host reads
- * by property access — a model's open fields — where a copy of own enumerable fields alone would
- * hand an extension less than the host itself sees.
- */
-function copyHostRead(value: unknown, depth: number): unknown {
-	return copyHostValue(value, new Map(), undefined, true, depth);
 }
 
 /** The keys a property read of `value` answers for: its own string-keyed properties, enumerable
@@ -705,115 +866,6 @@ function readQuietly(source: object, key: string): unknown {
 	} catch {
 		return undefined;
 	}
-}
-
-function copyHostValue(
-	value: unknown,
-	copies: Map<object, unknown>,
-	signals: HandedSignals | undefined,
-	byRead: boolean,
-	depth: number,
-): unknown {
-	if (typeof value === "function") return undefined;
-	if (typeof value !== "object" || value === null) return value;
-	const known = copies.get(value);
-	if (known !== undefined) return known;
-	checkHostDepth(depth);
-	const next = (item: unknown): unknown => copyHostValue(item, copies, signals, byRead, depth + 1);
-	if (value instanceof AbortSignal) {
-		const admitted = signals ? signals.admit(value) : AbortSignal.any([value]);
-		copies.set(value, admitted);
-		return admitted;
-	}
-	const builtIn = copyBuiltInData(value);
-	if (builtIn !== undefined) {
-		copies.set(value, builtIn);
-		return builtIn;
-	}
-	if (types.isRegExp(value)) {
-		const copy = new RegExp(value);
-		copies.set(value, copy);
-		return copy;
-	}
-	if (value instanceof URL) {
-		const copy = new URL(value.href);
-		copies.set(value, copy);
-		return copy;
-	}
-	if (value instanceof URLSearchParams) {
-		const copy = new URLSearchParams(value);
-		copies.set(value, copy);
-		return copy;
-	}
-	if (Array.isArray(value)) {
-		const copy: unknown[] = [];
-		copies.set(value, copy);
-		for (let index = 0; index < value.length; index++) copy[index] = next(value[index]);
-		return copy;
-	}
-	if (types.isMap(value)) {
-		const copy = new Map<unknown, unknown>();
-		copies.set(value, copy);
-		for (const [key, item] of value) {
-			if (typeof key === "function" || typeof item === "function") continue;
-			copy.set(next(key), next(item));
-		}
-		return copy;
-	}
-	if (types.isSet(value)) {
-		const copy = new Set<unknown>();
-		copies.set(value, copy);
-		for (const item of value) if (typeof item !== "function") copy.add(next(item));
-		return copy;
-	}
-	// `DOMException` is no native error to the engine's check, but it is the platform's error class.
-	if (types.isNativeError(value) || value instanceof DOMException) {
-		// Read as the host reads them: a host error class may answer them from its prototype. An
-		// error is a report of a failure, so a property whose read itself fails is left out: the
-		// exception that read throws is the host's own object, and must not be what crosses.
-		const name: unknown = readQuietly(value, "name");
-		const message: unknown = readQuietly(value, "message");
-		const domException = value instanceof DOMException;
-		const copy = builtInErrorOf(value)(
-			typeof message === "string" ? message : "",
-			typeof name === "string" ? name : "Error",
-		);
-		copies.set(value, copy);
-		const define = (key: string, item: unknown, enumerable: boolean): void => {
-			Object.defineProperty(copy, key, { value: item, enumerable, writable: true, configurable: true });
-		};
-		for (const key of Object.getOwnPropertyNames(value)) {
-			// A `DOMException`'s name, message and code are its brand's, set by its constructor.
-			if (domException && (key === "name" || key === "message" || key === "code")) continue;
-			const raw: unknown = readQuietly(value, key);
-			if (typeof raw === "function") continue;
-			define(key, next(raw), Object.getOwnPropertyDescriptor(value, key)?.enumerable === true);
-		}
-		if (!domException) {
-			// What a host error class answers from its prototype is kept as data on the copy.
-			if (typeof name === "string" && !Object.hasOwn(copy, "name") && name !== copy.name)
-				define("name", name, false);
-			const code: unknown = readQuietly(value, "code");
-			if ((typeof code === "string" || typeof code === "number") && !Object.hasOwn(copy, "code")) {
-				define("code", code, false);
-			}
-		}
-		return copy;
-	}
-	const copy: Record<string, unknown> = {};
-	copies.set(value, copy);
-	for (const key of byRead ? readableKeys(value) : Object.keys(value)) {
-		const raw: unknown = Reflect.get(value, key);
-		if (typeof raw === "function") continue;
-		const item = next(raw);
-		// Assigning an own `__proto__` key would set the copy's prototype; defined, it stays data.
-		if (key === "__proto__") {
-			Object.defineProperty(copy, key, { value: item, enumerable: true, writable: true, configurable: true });
-		} else {
-			copy[key] = item;
-		}
-	}
-	return copy;
 }
 
 /** What admitting one field of a registered tool knows: whose it is and where it is kept. */
@@ -1089,32 +1141,19 @@ function rebuildOmpErrors(out: OmpErrors): OmpErrors {
  * emitted node holding a schema's default), so without the copy the extension would keep them;
  * and what the callback answers becomes part of the host's output, so it is the host's own copy.
  */
-function handInCallbacks(value: unknown, depth: number): unknown {
-	if (typeof value === "function") {
-		const callback = value;
-		return (...args: unknown[]): unknown =>
-			copyHostData(
-				Reflect.apply(
-					callback,
-					undefined,
-					args.map(arg => copyHostData(arg)),
+function handInCallbacks(value: unknown): unknown {
+	return new HostCopier(
+		undefined,
+		callback =>
+			(...args: unknown[]): unknown =>
+				copyHostData(
+					Reflect.apply(
+						callback,
+						undefined,
+						args.map(arg => copyHostData(arg)),
+					),
 				),
-			);
-	}
-	if (typeof value !== "object" || value === null) return value;
-	checkHostDepth(depth);
-	if (Array.isArray(value)) return Array.from(value, item => handInCallbacks(item, depth + 1));
-	const copy: Record<string, unknown> = {};
-	for (const key of Object.keys(value)) {
-		// Assigning an own `__proto__` key would set the copy's prototype; defined, it stays data.
-		Object.defineProperty(copy, key, {
-			value: handInCallbacks(Reflect.get(value, key), depth + 1),
-			enumerable: true,
-			writable: true,
-			configurable: true,
-		});
-	}
-	return copy;
+	).copy(value);
 }
 
 /** Runs a call into host code for an extension: what it throws is thrown as a copy
@@ -1162,7 +1201,7 @@ export function handHostSchema(schema: Function): Function {
 	const handed = Object.freeze(
 		Object.assign((data: unknown): unknown => check(data), {
 			toJsonSchema: (options?: unknown): unknown => {
-				const handedOptions = options === undefined ? [] : [handInCallbacks(options, 0)];
+				const handedOptions = options === undefined ? [] : [handInCallbacks(options)];
 				return fromHost(() => {
 					const toJsonSchema: unknown = Reflect.get(schema, "toJsonSchema");
 					if (typeof toJsonSchema !== "function")

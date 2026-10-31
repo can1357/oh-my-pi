@@ -66,6 +66,21 @@ Important constraint from `loader.ts`:
 - `pi.exec()` is directly available during load; provider registration is queued until session setup
 - child sessions reuse imported factories but bind fresh APIs and extension registrations; module-level variables remain shared across those sessions
 
+What you register, and when, decides how long it lasts:
+
+- What your factory registers at load — tools, commands, handlers, shortcuts, flags, renderers,
+  file fallbacks, link schemes, composer shapes, providers — serves every session the runtime
+  serves, even when the extension is loaded while a session is running.
+- What you register while a session is running — from a handler, a command, a tool, a timer —
+  belongs to that session: it runs as that session's work, and it is **withdrawn when that
+  session ends**. A tool registered from session A's handler is absent in session B, not listed
+  and doing nothing; a registration that replaced a load-time one of the same name gives it back.
+  To have it in B, register it again from B. A session that has ended can register nothing: the
+  call throws.
+- A `ctx` you keep — its `ui`, `sessionManager`, `modelRegistry`, `memory` and `sessionModes` — is
+  its session's, and refuses once that session has ended, even while the runtime serves the next
+  one. A `ctx.setTimeout`/`ctx.setInterval` callback belongs to the session that scheduled it.
+
 ## Quick start
 
 ```ts
@@ -284,12 +299,12 @@ error arrives as a new error of the language's own class it extends (`TypeError`
 `name`, `message` and `code`, never as an instance of the host's error class — so copying it again
 gives the same error. A function is behavior, not data, wherever it sits — a field of a record
 or of an instance, an array element, a map's key or value, a set's member, an error's property —
-and is dropped, as the session file drops it (an array keeps the slot, `undefined`). Data nested
-more than 512 levels deep is not handed over at all: the copy throws a `RangeError` saying so,
-rather than handing you a value that looks complete and is not; a hook whose event cannot be
-copied is reported as failed. One value is handed as itself: an `AbortSignal` you receive is a
-signal of your own, but its `reason` is the caller's own object, so the cancellation surface
-below can tell you why.
+and is dropped, as the session file drops it (an array keeps the slot, `undefined`). The copy is
+made without recursion, so how deeply the data nests does not matter — a long session's tree is
+copied whole. What is bounded is how many objects one copy makes: past one million, the copy
+throws a `RangeError` saying so, rather than handing you a value that looks complete and is not;
+a hook whose event cannot be copied is reported as failed. An `AbortSignal` you receive is a
+signal of your own, and when it aborts its `reason` is a copy of the caller's.
 
 The callables a surface declares are handed on purpose by that surface, not found in data. A
 tool's callable schema in `getAllTools()` (`ToolInfo.parameters`) is a frozen schema of your own:
@@ -341,8 +356,9 @@ receiver is handed changes nothing that executes** — to change an input, retur
 
 The `signal` a tool's `execute` receives, and the one a `session_stop`,
 `session_before_compact` or `session_before_tree` hook receives, is your session's own: already
-aborted if the caller's was, aborting with the caller's reason in the same turn, and no longer
-following the caller once the call ends. Its `reason` is the caller's own object, not a copy.
+aborted if the caller's was, aborting with a copy of the caller's reason in the same turn, and no
+longer following the caller once the call ends. The caller's reason is the host's own object,
+which it reads again after the abort, so you are handed a copy of it.
 
 Your `streamSimple` and `stream` receive copies of the model, the context and the options.
 Tool parameters arrive as the JSON Schema that goes on the wire, not as the host's live schema

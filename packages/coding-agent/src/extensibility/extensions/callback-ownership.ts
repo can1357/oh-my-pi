@@ -1,4 +1,5 @@
 import type { AdmittedWorkKind, ProviderCallGate } from "@oh-my-pi/pi-ai/auth/provider-gate";
+import { copyHostData } from "./boundary-data";
 import type { ExtensionCallbackOwner } from "./types";
 
 /**
@@ -171,11 +172,18 @@ export function claimProviderRegistrationOwner(
 }
 
 const gatesByOwner = new WeakMap<ExtensionCallbackOwner, ProviderCallGate>();
+/** Each gate's registrant: the runtime whose session it belongs to. */
+const registrantOfGate = new WeakMap<ProviderCallGate, ExtensionCallbackOwner>();
 
-/** The lifetime a registry hands to the provider entries this session registered. Reads the
- *  owner's state live rather than a snapshot — retirement happens between registration and call
- *  — and is the SAME object every time for one session, because the registries use it to tell
- *  one session's entries from another's when a registration is replaced or withdrawn. */
+/**
+ * The lifetime a registry hands to the provider entries an owner registered: the owner given —
+ * the runtime itself for what an extension factory registered at load, live for each session it
+ * serves in turn, or one session's owner (`ExtensionCallbackOwner.forSession`) for what that
+ * session registered, retired with it and never live again. It reads the owner's state live —
+ * retirement happens between registration and call — and is the SAME object every time for one
+ * owner, because the registries use it to tell one owner's entries from another's. What it hands
+ * the session (`hand`) is a copy.
+ */
 export function providerCallGate(owner: ExtensionCallbackOwner): ProviderCallGate {
 	const existing = gatesByOwner.get(owner);
 	if (existing) return existing;
@@ -184,7 +192,17 @@ export function providerCallGate(owner: ExtensionCallbackOwner): ProviderCallGat
 			return owner.isRetired;
 		},
 		run: <R>(call: () => R, kind?: AdmittedWorkKind): R => owner.runOwned(call, kind),
+		hand: <T>(value: T): T => copyHostData(value),
 	};
 	gatesByOwner.set(owner, gate);
+	registrantOfGate.set(gate, owner.registrant ?? owner);
 	return gate;
+}
+
+/** Whether two gates are one registrant's: the same runtime, whichever of its sessions each
+ *  belongs to. A withdrawal takes away the registrant's registrations, as it did when one gate
+ *  served every session; only liveness is per session. */
+export function sameRegistrant(left: ProviderCallGate | undefined, right: ProviderCallGate | undefined): boolean {
+	if (left === undefined || right === undefined) return left === right;
+	return left === right || (registrantOfGate.has(left) && registrantOfGate.get(left) === registrantOfGate.get(right));
 }

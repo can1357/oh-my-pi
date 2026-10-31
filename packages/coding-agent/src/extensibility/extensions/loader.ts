@@ -1,6 +1,7 @@
 /**
  * Extension loader - loads TypeScript extension modules using native Bun import.
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import type * as fs1 from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -218,10 +219,17 @@ function streamCompletion(produced: unknown): Promise<unknown> {
  *
  *  A lease exists before its session starts: it is the session the runtime will serve next, live
  *  until that session's last holder releases it. So whatever is pinned to it before the session
- *  begins ends with that session, and no lease is ever live again once it has retired. */
+ *  begins ends with that session, and no lease is ever live again once it has retired.
+ *
+ *  What the session registered is withdrawn when it retires ({@link whenRetired}): a tool, a
+ *  command, a handler that belongs to a session that has gone is not left listed and inert. */
 class ExtensionCallbackLease implements ExtensionSessionGeneration {
 	#holders = 0;
 	#started = false;
+	/** What to withdraw when this session retires, in registration order; run newest first, so a
+	 *  registration that replaced an earlier one of the same session restores it before that one
+	 *  is withdrawn in turn. */
+	#withdrawals: Array<() => void> = [];
 
 	join(): void {
 		this.#holders++;
@@ -230,12 +238,48 @@ class ExtensionCallbackLease implements ExtensionSessionGeneration {
 
 	release(): void {
 		if (this.#holders > 0) this.#holders--;
+		if (!this.isRetired) return;
+		const withdrawals = this.#withdrawals.splice(0).reverse();
+		for (const withdraw of withdrawals) {
+			try {
+				withdraw();
+			} catch (error) {
+				logger.warn("Withdrawing a retired extension session's registration failed", { error: String(error) });
+			}
+		}
+	}
+
+	/** Registers what to withdraw when this session retires. A session that has already retired
+	 *  registers nothing: its registration is refused before it is made (`ConcreteExtensionAPI`). */
+	whenRetired(withdraw: () => void): void {
+		if (this.isRetired) {
+			withdraw();
+			return;
+		}
+		this.#withdrawals.push(withdraw);
+	}
+
+	/** Whether a session has claimed it: before then, it is only the session to come. */
+	get started(): boolean {
+		return this.#started;
 	}
 
 	get isRetired(): boolean {
 		return this.#started && this.#holders === 0;
 	}
 }
+
+/** The admitted call on this stack: which runtime admitted it, as which session's work. Set by
+ *  every entry into extension code ({@link ExtensionRuntime}'s owned callbacks and `runOwned`), so
+ *  what extension code accepts or does — a callback it hands back, a timer, a subscription, a
+ *  facade call — is attributed to the session the code is running for, even when it runs on after
+ *  the runtime has gone on to serve another (a continuation, a timer it set). `lease` is absent
+ *  while an extension factory runs (`ExtensionRuntime.runLoading`): what it accepts then, and what
+ *  code it set going accepts later, is the runtime's, serving each session in turn. */
+const admittedSession = new AsyncLocalStorage<{
+	readonly runtime: ExtensionRuntime;
+	readonly lease: ExtensionCallbackLease | undefined;
+}>();
 
 /**
  * Extension runtime with throwing stubs for action methods.
@@ -312,8 +356,46 @@ export class ExtensionRuntime implements IExtensionRuntime {
 		};
 	}
 
+	/** The session the admitted call on this stack runs for, when it is this runtime's and not its
+	 *  loading. */
+	#sessionHere(): ExtensionCallbackLease | undefined {
+		const here = admittedSession.getStore();
+		return here?.runtime === this ? here.lease : undefined;
+	}
+
+	/** Whether the code on this stack is this runtime's loading ({@link runLoading}). */
+	#loadingHere(): boolean {
+		const here = admittedSession.getStore();
+		return here?.runtime === this && here.lease === undefined;
+	}
+
+	/** Runs an extension factory as this runtime's loading: what it registers — and what code it
+	 *  set going registers later — belongs to the runtime and serves each session in turn, even
+	 *  when the extension is loaded while a session is running. */
+	runLoading<T>(call: () => T): T {
+		return admittedSession.run({ runtime: this, lease: undefined }, call);
+	}
+
+	/** The session a gate checks: the admitted call's on this stack, else the one served now. */
+	#leaseNow(): ExtensionCallbackLease {
+		return this.#sessionHere() ?? this.#lease;
+	}
+
+	/** The session a callback accepted now belongs to: the admitted call's on this stack, else the
+	 *  one a session holds now. While an extension factory runs ({@link runLoading}), and before
+	 *  any session has claimed the runtime, there is none: what is accepted then is the runtime's,
+	 *  live for each session it serves in turn. */
+	#acceptingLease(): ExtensionCallbackLease | undefined {
+		if (this.#loadingHere()) return undefined;
+		const lease = this.#sessionHere() ?? this.#lease;
+		return lease.started ? lease : undefined;
+	}
+
+	/** Whether the session a gate checks here has gone: the admitted call's on this stack, so code
+	 *  of a session that has gone is refused even after the runtime serves another, else the
+	 *  session served now. */
 	get isRetired(): boolean {
-		return this.#lease.isRetired;
+		return this.#leaseNow().isRetired;
 	}
 
 	/**
@@ -321,24 +403,89 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	 * first — as an object of its own: retired once that session's last holder has released it,
 	 * and never live again; the next session gets another. What one session leaves behind is
 	 * pinned to it (`ExtensionRunner.rendererScope`'s `pin`), so reusing the runtime cannot revive
-	 * it, and something pinned before the first session began ends with that session.
+	 * it, and something pinned before the first session began ends with that session. Inside an
+	 * admitted call it is that call's session.
 	 */
 	get sessionGeneration(): ExtensionSessionGeneration {
-		return this.#lease;
+		return this.#leaseNow();
 	}
 
-	/** Wraps a callback this session accepts. The wrapper refuses once the last session hold has
-	 *  been released, and owns the lifetime of what it returns. */
+	readonly #sessionOwners = new WeakMap<ExtensionCallbackLease, ExtensionCallbackOwner>();
+
+	/**
+	 * This runtime as one session's owner: every gate it has — `isRetired`, `ownCallback`,
+	 * `runOwned` — reads that session alone, so a facade or a provider gate made for it stays
+	 * that session's when the runtime goes on to serve the next. The session is the admitted
+	 * call's on this stack, else the one served now (before any, the one to come). One object
+	 * per session.
+	 */
+	forSession(): ExtensionCallbackOwner {
+		return this.#ownerFor(this.#leaseNow());
+	}
+
+	/** This runtime as the owner of what is accepted now ({@link #acceptingLease}): one session's
+	 *  ({@link forSession}), or the runtime itself for what an extension factory accepts at load. */
+	forAcceptance(): ExtensionCallbackOwner {
+		const lease = this.#acceptingLease();
+		return lease ? this.#ownerFor(lease) : this;
+	}
+
+	#ownerFor(lease: ExtensionCallbackLease): ExtensionCallbackOwner {
+		let owner = this.#sessionOwners.get(lease);
+		if (!owner) {
+			const runtime = this;
+			const view: ExtensionCallbackOwner = {
+				beginSession: () => runtime.beginSession(),
+				get isRetired() {
+					return lease.isRetired;
+				},
+				get sessionGeneration() {
+					return lease;
+				},
+				ownCallback: fn => runtime.#own(fn, lease),
+				runOwned: (call, kind) => runtime.#runOwned(call, kind, lease),
+				trackCallback: result => runtime.trackCallback(result),
+				hasPendingCallbacks: () => runtime.hasPendingCallbacks(),
+				waitForPendingCallbacks: () => runtime.waitForPendingCallbacks(),
+				whenCallbacksChange: () => runtime.whenCallbacksChange(),
+				forSession: () => view,
+				forAcceptance: () => view,
+				registrant: runtime,
+				whenSessionEnds: withdraw => lease.whenRetired(withdraw),
+			};
+			owner = view;
+			this.#sessionOwners.set(lease, owner);
+		}
+		return owner;
+	}
+
+	/** Wraps a callback this session accepts. It belongs to the session it is accepted for
+	 *  ({@link #acceptingLease}), refuses once that session's last hold has been released — even if
+	 *  the runtime serves another session by then — and owns the lifetime of what it returns. A
+	 *  callback an extension factory accepted at load is the runtime's, live for each session. */
 	ownCallback<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R | undefined {
+		return this.#own(fn, this.#acceptingLease());
+	}
+
+	#own<A extends unknown[], R>(
+		fn: (...args: A) => R,
+		pinned: ExtensionCallbackLease | undefined,
+	): (...args: A) => R | undefined {
 		const owner = this;
 		// A regular function, not an arrow: a facility may invoke a callback with a receiver
 		// (`definition.execute.call(tool, …)`), and dropping `this` silently breaks it.
 		return function (this: unknown, ...args: A): R | undefined {
-			if (owner.isRetired) return undefined;
+			const lease = pinned ?? owner.#lease;
+			if (lease.isRetired) return undefined;
 			// Re-entered so a subscription this callback makes (`pi.events.on` from inside a
 			// handler) is attributed to this session, not to whoever is on the stack.
-			return extensionCallbackScope.run(owner, () => owner.trackCallback(fn.apply(this, args)));
+			return owner.#enter(lease, () => owner.trackCallback(fn.apply(this, args)));
 		};
+	}
+
+	/** Runs `call` as `lease`'s admitted work on this stack. */
+	#enter<T>(lease: ExtensionCallbackLease, call: () => T): T {
+		return admittedSession.run({ runtime: this, lease }, () => extensionCallbackScope.run(this, call));
 	}
 
 	/**
@@ -392,11 +539,16 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	 * a producer is held open until the producer it resolves has finished, not merely until the
 	 * promise settles — and if that producer reports no completion, the refusal reaches the
 	 * caller through the promise it is awaiting rather than settling quietly on a promise only
-	 * this object watches.
+	 * this object watches. The call runs as the admitted call's session on this stack, else the
+	 * session served now, and is refused once that session has gone.
 	 */
 	runOwned<R>(call: () => R, kind: AdmittedWorkKind = "value"): R {
-		if (this.isRetired) throw new Error("Extension session retired; its callbacks are no longer callable");
-		return extensionCallbackScope.run(this, () => {
+		return this.#runOwned(call, kind, this.#leaseNow());
+	}
+
+	#runOwned<R>(call: () => R, kind: AdmittedWorkKind = "value", lease: ExtensionCallbackLease): R {
+		if (lease.isRetired) throw new Error("Extension session retired; its callbacks are no longer callable");
+		return this.#enter(lease, () => {
 			const produced = call();
 			if (kind !== "stream") return this.trackCallback(produced);
 			const then = thenOf(produced);
@@ -606,33 +758,103 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		return this.runtime.whenCallbacksChange();
 	}
 
+	get sessionGeneration(): ExtensionSessionGeneration | undefined {
+		return this.runtime.sessionGeneration;
+	}
+
+	forSession(): ExtensionCallbackOwner {
+		return this.runtime.forSession?.() ?? this;
+	}
+
+	forAcceptance(): ExtensionCallbackOwner {
+		return this.runtime.forAcceptance?.() ?? this;
+	}
+
+	/**
+	 * The session a registration made now belongs to. One an extension factory makes at load, before
+	 * any session has claimed the runtime, belongs to the runtime and serves each session in turn:
+	 * `undefined`. One made while a session is running — from a handler, a command, a timer — is
+	 * that session's (`forAcceptance`): its callbacks run as that session's work, and the
+	 * registration is withdrawn when that session ends ({@link #listFor}, {@link #setFor}), so the
+	 * next session sees a true picture rather than a tool that answers nothing. A session that has
+	 * already ended registers nothing.
+	 */
+	#registeringSession(): ExtensionCallbackOwner | undefined {
+		const owner = this.runtime.forAcceptance?.();
+		if (owner === undefined || owner === this.runtime) return undefined;
+		if (owner.isRetired) {
+			throw new Error(
+				`Extension ${this.extension.path}: its session has ended, so it can no longer register anything`,
+			);
+		}
+		return owner;
+	}
+
+	/** A callback this API registers, as the host keeps it: owned by the session it belongs to, so
+	 *  it runs as that session's work. A callback registered at load is kept as it is. */
+	#registered<F>(session: ExtensionCallbackOwner | undefined, callback: F): F {
+		if (session === undefined || typeof callback !== "function") return callback;
+		return session.ownCallback(callback as (...args: unknown[]) => unknown) as F;
+	}
+
+	/** Adds `value` to `list`, and takes it out again when `session` ends. */
+	#listFor<T>(session: ExtensionCallbackOwner | undefined, list: T[], value: T): void {
+		list.push(value);
+		session?.whenSessionEnds?.(() => {
+			const index = list.lastIndexOf(value);
+			if (index !== -1) list.splice(index, 1);
+		});
+	}
+
+	/** Sets `key` to `value` in `map`, and, when `session` ends, puts back what it replaced — unless
+	 *  a later registration has replaced it in turn. */
+	#setFor<K, V>(session: ExtensionCallbackOwner | undefined, map: Map<K, V>, key: K, value: V): void {
+		const replaced = map.has(key);
+		const previous = map.get(key);
+		map.set(key, value);
+		session?.whenSessionEnds?.(() => {
+			if (map.get(key) !== value) return;
+			if (replaced) map.set(key, previous as V);
+			else map.delete(key);
+		});
+	}
+
 	on<F extends HandlerFn>(event: string, handler: F): void {
-		const list = this.extension.handlers.get(event) ?? [];
-		list.push(handler);
-		this.extension.handlers.set(event, list);
+		const session = this.#registeringSession();
+		let list = this.extension.handlers.get(event);
+		if (!list) {
+			list = [];
+			this.extension.handlers.set(event, list);
+		}
+		this.#listFor(session, list, this.#registered(session, handler));
 	}
 
 	/** Keeps the host's copy of the definition (`admitToolDefinition`), taken here, inside the
 	 *  registering call: everything the host later reads off a registered tool — its description
 	 *  for a request, its approval answers, the environment its `shellEnv` gives a shell — is read
-	 *  from that copy, never from the extension's object. */
+	 *  from that copy, never from the extension's object. A tool registered while a session runs is
+	 *  that session's: its callbacks run as that session's work, and it is withdrawn when the
+	 *  session ends. */
 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void {
-		const definition = admitToolDefinition(tool, this.runtime, this.extension.path);
+		const session = this.#registeringSession();
+		const definition = admitToolDefinition(tool, session ?? this.runtime, this.extension.path);
 		const registered = {
 			definition,
 			extensionPath: this.extension.path,
 			sourceInfo: extensionToolSourceInfo(definition, this.extension.resolvedPath),
 		};
-		this.extension.tools.set(definition.name, registered);
+		this.#setFor(session, this.extension.tools, definition.name, registered);
 		for (const listener of this.extension.toolRegistrationListeners ?? []) listener(definition.name);
 	}
 
 	registerFileWriteFallback(handler: FileWriteFallbackHandler): void {
-		this.extension.fileWriteFallbackHandlers.push(handler);
+		const session = this.#registeringSession();
+		this.#listFor(session, this.extension.fileWriteFallbackHandlers, this.#registered(session, handler));
 	}
 
 	registerFileDeleteFallback(handler: FileDeleteFallbackHandler): void {
-		this.extension.fileDeleteFallbackHandlers.push(handler);
+		const session = this.#registeringSession();
+		this.#listFor(session, this.extension.fileDeleteFallbackHandlers, this.#registered(session, handler));
 	}
 
 	registerCommand(
@@ -643,7 +865,13 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			handler: RegisteredCommand["handler"];
 		},
 	): void {
-		this.extension.commands.set(name, { name, ...options });
+		const session = this.#registeringSession();
+		this.#setFor(session, this.extension.commands, name, {
+			name,
+			...options,
+			getArgumentCompletions: this.#registered(session, options.getArgumentCompletions),
+			handler: this.#registered(session, options.handler),
+		});
 	}
 
 	setLabel(label: string): void {
@@ -657,25 +885,39 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			handler: (ctx: ExtensionContext) => Promise<void> | void;
 		},
 	): void {
-		this.extension.shortcuts.set(shortcut, { shortcut, extensionPath: this.extension.path, ...options });
+		const session = this.#registeringSession();
+		this.#setFor(session, this.extension.shortcuts, shortcut, {
+			shortcut,
+			extensionPath: this.extension.path,
+			...options,
+			handler: this.#registered(session, options.handler),
+		});
 	}
 
 	registerFlag(
 		name: string,
 		options: { description?: string; type: "boolean" | "string"; default?: boolean | string },
 	): void {
-		this.extension.flags.set(name, { name, extensionPath: this.extension.path, ...options });
+		const session = this.#registeringSession();
+		this.#setFor(session, this.extension.flags, name, { name, extensionPath: this.extension.path, ...options });
 		if (options.default !== undefined) {
-			this.runtime.flagValues.set(name, options.default);
+			this.#setFor(session, this.runtime.flagValues, name, options.default);
 		}
 	}
 
 	registerMessageRenderer<T>(customType: string, renderer: MessageRenderer<T>): void {
-		this.extension.messageRenderers.set(customType, renderer as MessageRenderer);
+		const session = this.#registeringSession();
+		this.#setFor(
+			session,
+			this.extension.messageRenderers,
+			customType,
+			this.#registered(session, renderer as MessageRenderer),
+		);
 	}
 
 	registerAssistantThinkingRenderer(renderer: AssistantThinkingRenderer): void {
-		this.extension.assistantThinkingRenderers.push(renderer);
+		const session = this.#registeringSession();
+		this.#listFor(session, this.extension.assistantThinkingRenderers, this.#registered(session, renderer));
 	}
 
 	registerAssistantTextRenderer(renderer: AssistantTextRenderer): void {
@@ -684,7 +926,8 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 				`registerAssistantTextRenderer expects a function, got ${typeof renderer} (extension ${this.extension.path})`,
 			);
 		}
-		this.extension.assistantTextRenderers.push(renderer);
+		const session = this.#registeringSession();
+		this.#listFor(session, this.extension.assistantTextRenderers, this.#registered(session, renderer));
 	}
 
 	registerLinkScheme(scheme: string): void {
@@ -698,7 +941,9 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		if (STANDARD_LINK_SCHEMES[normalized] === true || InternalUrlRouter.instance().isBuiltin(normalized)) {
 			throw new Error(`registerLinkScheme: "${scheme}" is reserved for standard or omp-internal links`);
 		}
-		if (!this.extension.linkSchemes.includes(normalized)) this.extension.linkSchemes.push(normalized);
+		const session = this.#registeringSession();
+		if (!this.extension.linkSchemes.includes(normalized))
+			this.#listFor(session, this.extension.linkSchemes, normalized);
 	}
 
 	registerComposerShape(definition: ComposerShapeDefinition): void {
@@ -712,7 +957,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		if (isBuiltinComposerStyle(id)) {
 			throw new Error(`Cannot replace built-in composer shape "${id}"`);
 		}
-		this.extension.composerShapes.set(id, definition);
+		this.#setFor(this.#registeringSession(), this.extension.composerShapes, id, definition);
 	}
 
 	getFlag(name: string): boolean | string | undefined {
@@ -833,8 +1078,10 @@ async function runExtensionFactory(
 
 	try {
 		// Scoped so a `pi.events.on` during registration is attributed to THIS session, which a
-		// bus shared between sessions cannot work out for itself.
-		await extensionCallbackScope.run(runtime, () => factory(api));
+		// bus shared between sessions cannot work out for itself. Run as the runtime's loading, so
+		// what the factory registers serves every session even when it is loaded during one.
+		const run = () => extensionCallbackScope.run(runtime, () => factory(api));
+		await (runtime instanceof ExtensionRuntime ? runtime.runLoading(run) : run());
 	} catch (error) {
 		const discarded = runtime.pendingProviderRegistrations.filter(
 			registration => !providerRegistrationCheckpoint.includes(registration),

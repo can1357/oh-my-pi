@@ -7,6 +7,7 @@
  * asked for, not once when the context was made.
  */
 import { afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { types } from "node:util";
 import { OmpErrors, type as schemaOf } from "@oh-my-pi/omptype";
@@ -16,7 +17,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	copyHostData,
-	HOST_DATA_DEPTH_LIMIT,
+	HOST_DATA_NODE_LIMIT,
 	handHostModel,
 	handHostSchema,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/boundary-data";
@@ -41,7 +42,14 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus, extensionCallbackScope } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { type AutocompleteProvider, type Component, Container, type OverlayFocusOwner, TUI } from "@oh-my-pi/pi-tui";
+import {
+	type AutocompleteProvider,
+	type Component,
+	Container,
+	type OverlayFocusOwner,
+	type OverlayHandle,
+	TUI,
+} from "@oh-my-pi/pi-tui";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { getEditorTheme, initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { bindInputScope } from "@oh-my-pi/pi-tui/tools/renderer-scope";
@@ -586,11 +594,13 @@ describe("data the host hands an extension", () => {
 		});
 	});
 
-	test("data nested past the bound is refused with a depth error, never handed over shortened", () => {
+	test("data is copied whole however deeply it nests, and a walk that never ends is refused at the object budget", () => {
 		interface Link {
 			next?: Link;
 			leaf?: string;
 		}
+		// Deeper than any recursion would survive: a session tree grows two levels per entry.
+		const DEPTH = 100_000;
 		const chain = (links: number): Link => {
 			let node: Link = { leaf: "needed-leaf" };
 			for (let index = 0; index < links; index++) node = { next: node };
@@ -619,26 +629,28 @@ describe("data the host hands an extension", () => {
 				return freshEachRead();
 			},
 		});
-		const expected = `Host data handed to an extension nests deeper than ${HOST_DATA_DEPTH_LIMIT} levels; it is not handed over in part`;
+		const cyclic: Record<string, unknown> = { name: "cycle" };
+		cyclic.self = cyclic;
+		const copiedCycle = copyHostData(cyclic);
+		const expected = `Host data handed to an extension holds more than ${HOST_DATA_NODE_LIMIT} objects; it is not handed over in part`;
 
-		// Within the bound the copy is whole; past it nothing is handed over.
-		expect(leafOf(copyHostData(chain(HOST_DATA_DEPTH_LIMIT - 1)))).toBe("needed-leaf");
 		expect({
-			deepJson: refusal(() => copyHostData(JSON.parse(JSON.stringify(chain(600))))),
-			freshEachRead: refusal(() => copyHostData({ root: freshEachRead() })),
-			modelOpenField: refusal(() =>
-				handHostModel({ id: "m", requestMetadata: { tree: chain(600) } } as unknown as Model),
+			data: leafOf(copyHostData(chain(DEPTH))),
+			// The declared type of `requestMetadata` is a string record; this one holds a tree.
+			modelOpenField: leafOf(
+				(
+					handHostModel({ id: "m", requestMetadata: { tree: chain(DEPTH) } } as unknown as Model)
+						.requestMetadata as unknown as { tree: Link }
+				).tree,
 			),
+			schema: leafOf((handHostSchema(schemaOf("unknown")) as (data: unknown) => Link)(chain(DEPTH))),
+			cycleKept: copiedCycle.self === copiedCycle && copiedCycle !== cyclic,
+		}).toEqual({ data: "needed-leaf", modelOpenField: "needed-leaf", schema: "needed-leaf", cycleKept: true });
+		expect({
+			freshEachRead: refusal(() => copyHostData({ root: freshEachRead() })),
 			modelGetter: refusal(() => handHostModel({ id: "m", kindConfig: new Node() } as unknown as Model)),
-			schema: refusal(() => (handHostSchema(schemaOf("unknown")) as (data: unknown) => unknown)(chain(600))),
-		}).toEqual({
-			deepJson: expected,
-			freshEachRead: expected,
-			modelOpenField: expected,
-			modelGetter: expected,
-			schema: expected,
-		});
-	});
+		}).toEqual({ freshEachRead: expected, modelGetter: expected });
+	}, 60_000); // Two walks of a million objects each, measured on a loaded machine.
 
 	test("a host schema's JSON Schema fallback is handed copies, and an exception it throws is a copy", () => {
 		const defaults = { value: "original" };
@@ -1219,6 +1231,141 @@ describe("what a session's ctx.ui writes, once the session has gone", () => {
 	});
 });
 
+/** A self-signed certificate for 127.0.0.1, made with the system's `openssl`. */
+function selfSignedCertificate(dir: string): { cert: string; key: string } {
+	const keyPath = path.join(dir, "key.pem");
+	const certPath = path.join(dir, "cert.pem");
+	const made = Bun.spawnSync(
+		[
+			"openssl",
+			"req",
+			"-x509",
+			"-newkey",
+			"rsa:2048",
+			"-nodes",
+			"-keyout",
+			keyPath,
+			"-out",
+			certPath,
+			"-days",
+			"1",
+			"-subj",
+			"/CN=127.0.0.1",
+			"-addext",
+			"subjectAltName=IP:127.0.0.1",
+		],
+		{ stdout: "ignore", stderr: "pipe" },
+	);
+	if (made.exitCode !== 0) throw new Error(`openssl failed: ${made.stderr.toString()}`);
+	return { cert: fs.readFileSync(certPath, "utf8"), key: fs.readFileSync(keyPath, "utf8") };
+}
+
+describe("a dialog whose session has gone, measured at loopback endpoints over HTTP and TLS", () => {
+	test("a late component runs neither overlayOptions nor onHandle and sends nothing; a live one does both", async () => {
+		const h = await interactiveSession();
+		const certificate = selfSignedCertificate(h.dir.path());
+		const requests: string[] = [];
+		const record = (request: Request): Response => {
+			requests.push(`${new URL(request.url).protocol}${new URL(request.url).pathname}`);
+			return new Response("ok");
+		};
+		const http = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: record });
+		const https = Bun.serve({ hostname: "127.0.0.1", port: 0, tls: certificate, fetch: record });
+		cleanups.push(() => {
+			http.stop(true);
+			https.stop(true);
+		});
+		const calls: string[] = [];
+		const sent: Promise<unknown>[] = [];
+		const send = (kind: string): void => {
+			calls.push(kind);
+			const headers = { authorization: "Bearer canary" };
+			sent.push(fetch(`http://127.0.0.1:${http.port}/${kind}`, { headers }));
+			sent.push(fetch(`https://127.0.0.1:${https.port}/${kind}`, { headers, tls: { ca: certificate.cert } }));
+		};
+		const hostHandles: OverlayHandle[] = [];
+		const showOverlay = h.mode.ui.showOverlay.bind(h.mode.ui);
+		const spy = spyOn(h.mode.ui, "showOverlay").mockImplementation((component, options) => {
+			const handle = showOverlay(component, options);
+			hostHandles.push(handle);
+			return handle;
+		});
+		cleanups.push(() => spy.mockRestore());
+		const component = (name: string): Component => ({ render: () => [name], invalidate() {} });
+
+		// The control: a live dialog's callbacks run, and reach both endpoints.
+		let handedHandle: OverlayHandle | undefined;
+		let closeLive = (): void => {};
+		const live = h.ui
+			.custom<void>(
+				(_tui, _theme, _keybindings, done) => {
+					closeLive = () => done();
+					return component("live");
+				},
+				{
+					overlay: true,
+					overlayOptions: () => {
+						send("live-options");
+						return { anchor: "center" };
+					},
+					onHandle: handle => {
+						handedHandle = handle;
+						send("live-handle");
+					},
+				},
+			)
+			.catch(error => String(error));
+		await settle();
+		await Promise.all(sent);
+		const liveRequests = [...requests].sort();
+		closeLive();
+		await live;
+
+		// The late component: its session is disposed and the runner serves the next before it arrives.
+		const gate = Promise.withResolvers<Component>();
+		const late = h.ui
+			.custom<void>(() => gate.promise, {
+				overlay: true,
+				overlayOptions: () => {
+					send("late-options");
+					return { anchor: "center" };
+				},
+				onHandle: () => send("late-handle"),
+			})
+			.catch(error => String(error));
+		await h.session.dispose();
+		const next = new AgentSession({
+			agent: new Agent({
+				initialState: { model: h.session.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			}),
+			sessionManager: SessionManager.inMemory(h.dir.path()),
+			settings: Settings.isolated(),
+			modelRegistry: h.session.modelRegistry,
+			extensionRunner: h.runner,
+		});
+		cleanups.push(() => next.dispose());
+		gate.resolve(component("late"));
+		await settle();
+		h.mode.ui.renderNow();
+		const outcome = await late;
+		await Promise.all(sent);
+
+		expect({
+			liveRequests,
+			handedHost: hostHandles.includes(handedHandle as OverlayHandle),
+			lateCalls: calls.filter(call => call.startsWith("late")),
+			lateRequests: requests.filter(request => request.includes("/late")),
+			outcome,
+		}).toEqual({
+			liveRequests: ["http:/live-handle", "http:/live-options", "https:/live-handle", "https:/live-options"],
+			handedHost: false,
+			lateCalls: [],
+			lateRequests: [],
+			outcome: "AbortError: Extension session retired",
+		});
+	});
+});
+
 describe("what a session mounted, when its runtime goes on to serve the next session", () => {
 	test("a widget its controller mounted stays inert, and sends nothing, at a loopback endpoint", async () => {
 		const h = await interactiveSession();
@@ -1393,6 +1540,69 @@ describe("a component a session shows, measured at a loopback endpoint", () => {
 			requestsAfterDispose: requests.length - before,
 			stillUp: h.mode.ui.overlayStack.some(entry => entry.component === reused),
 		}).toEqual({ upWhileLive: true, drewWhileLive: true, requestsAfterDispose: 0, stillUp: false });
+	});
+});
+
+describe("a dialog factory that crosses another session's ctx.ui", () => {
+	/** A second session's runtime and runner, live until the test ends or `release` is called. */
+	function secondSession() {
+		const owner = new ExtensionRuntime();
+		const release = owner.beginSession();
+		cleanups.push(release);
+		// Only the UI surface is exercised; nothing here reaches the registry.
+		const runner = new ExtensionRunner([], owner, process.cwd(), SessionManager.inMemory(), {} as ModelRegistry);
+		return { owner, release, scope: runner.rendererScope };
+	}
+
+	/** Opens a dialog through `ui`, lets `retire` end one of the two sessions, then delivers its
+	 *  component late, and reports what of the dialog ran and what was drawn. */
+	async function lateDialog(
+		h: Awaited<ReturnType<typeof controllerHost>>,
+		ui: ExtensionUIContext,
+		retire: () => void,
+	) {
+		const gate = Promise.withResolvers<Component>();
+		const calls: string[] = [];
+		let draws = 0;
+		const pending = ui
+			.custom<void>(() => gate.promise, {
+				overlay: true,
+				overlayOptions: () => {
+					calls.push("options");
+					return { anchor: "center" };
+				},
+				onHandle: () => void calls.push("handle"),
+			})
+			.catch(error => String(error));
+		retire();
+		gate.resolve({
+			render: () => {
+				draws++;
+				return ["late"];
+			},
+			invalidate() {},
+		});
+		await settle();
+		h.tui.renderNow();
+		const outcome = await pending;
+		return { calls, draws, outcome, overlays: h.tui.overlayStack.length };
+	}
+
+	const refused = { calls: [], draws: 0, outcome: "AbortError: Extension session retired", overlays: 0 };
+
+	test("opened through a second session's ui, it is refused once that caller's session has gone", async () => {
+		const h = await controllerHost();
+		const caller = secondSession();
+		// The caller's ui wraps the host-side one: the factory crosses the caller's pin first.
+		const ui = handUIContext(h.ui, caller.owner, caller.scope);
+		expect(await lateDialog(h, ui, caller.release)).toEqual(refused);
+	});
+
+	test("opened through a second session's ui, it is refused once the host-side session has gone", async () => {
+		const h = await controllerHost();
+		const caller = secondSession();
+		const ui = handUIContext(h.ui, caller.owner, caller.scope);
+		expect(await lateDialog(h, ui, h.release)).toEqual(refused);
 	});
 });
 

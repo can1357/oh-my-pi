@@ -46,6 +46,10 @@ export interface ProviderCallGate {
 	 *  if the session retired between selection and the call, and refuses a `stream` whose
 	 *  producer reports no completion. */
 	run<R>(call: () => R, kind?: AdmittedWorkKind): R;
+	/** A host value as that session is handed it: a copy, so what the author keeps is never the
+	 *  host's own object (an abort `reason` the host reads again after the abort). Absent, the
+	 *  value is handed as it is. */
+	hand?<T>(value: T): T;
 }
 
 /** A runtime registration and the session lifetime it belongs to. A host registration has no
@@ -87,8 +91,9 @@ export function callThroughGate<R>(
  * `controller.abort()`, in the caller's async context: Bun's `EventTarget` does not carry the
  * context from `addEventListener`. Handed the caller's own, the listener would run outside the
  * session that owns it — and once the call is over, even after that session has gone. This one
- * aborts inside the admission, with the caller's reason, so the listeners on it run as the
- * session's work, and it stops following the caller's at the call's terminal.
+ * aborts inside the admission, with a copy of the caller's reason (`ProviderCallGate.hand`), so the
+ * listeners on it run as the session's work and what they keep is not the host's own object, and
+ * it stops following the caller's at the call's terminal.
  *
  * It says what the caller's says wherever the author can look. Already aborted, it is aborted
  * before the author is called. Otherwise one listener added just before the call forwards the
@@ -123,11 +128,17 @@ export class AdmittedSignal {
 		if (this.#admitted) return this.#admitted;
 		const controller = new AbortController();
 		this.#admitted = controller.signal;
+		// The reason is handed as the session's own copy: the caller's object is the host's, which
+		// it reads again after the abort (the text it persists for the turn).
+		const reason = (): unknown => {
+			const hand = this.#gate?.hand;
+			return hand ? hand(caller.reason) : caller.reason;
+		};
 		if (caller.aborted) {
-			controller.abort(caller.reason);
+			controller.abort(reason());
 		} else {
 			const admission = AsyncLocalStorage.snapshot();
-			const forward = () => admission(() => controller.abort(caller.reason));
+			const forward = () => admission(() => controller.abort(reason()));
 			this.#forward = forward;
 			caller.addEventListener("abort", forward, { once: true });
 		}

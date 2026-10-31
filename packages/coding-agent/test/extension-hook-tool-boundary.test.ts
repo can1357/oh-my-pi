@@ -2084,7 +2084,7 @@ describe("abort signals handed to hooks and tools", () => {
 	}
 
 	for (const route of ["hook", "tool"] as const) {
-		it(`${route}: an abort reaches the listener inside the admission, with the caller's reason, in the same turn`, async () => {
+		it(`${route}: an abort reaches the listener inside the admission, with a copy of the caller's reason, in the same turn`, async () => {
 			const seen: Array<Read & { reason: unknown }> = [];
 			const entered = Promise.withResolvers<void>();
 			const finish = Promise.withResolvers<void>();
@@ -2112,10 +2112,11 @@ describe("abort signals handed to hooks and tools", () => {
 			await pending.catch(() => undefined);
 			expect(inTheSameTurn).toBe(1);
 			expect(seen).toEqual([{ inside: true, retired: false, reason }]);
-			expect(seen[0]?.reason).toBe(reason);
+			// The reason is the caller's own object, which it reads again after the abort: a copy crosses.
+			expect(seen[0]?.reason).not.toBe(reason);
 		});
 
-		it(`${route}: a caller already aborted reaches the author aborted, with the same reason`, async () => {
+		it(`${route}: a caller already aborted reaches the author aborted, with a copy of its reason`, async () => {
 			const caller = new AbortController();
 			const reason = { why: "before the call" };
 			caller.abort(reason);
@@ -2125,7 +2126,7 @@ describe("abort signals handed to hooks and tools", () => {
 			});
 			await call(caller.signal).catch(() => undefined);
 			expect(observed).toEqual({ aborted: true, reason, callers: false });
-			expect(observed?.reason).toBe(reason);
+			expect(observed?.reason).not.toBe(reason);
 		});
 
 		it(`${route}: stops following the caller's signal at the call's terminal, so a listener never outlives it`, async () => {

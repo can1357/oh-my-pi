@@ -2445,6 +2445,21 @@ export interface ExtensionCallbackOwner {
 	waitForPendingCallbacks(): Promise<void>;
 	/** Settles on the next add or remove, for a caller that must not sample. */
 	whenCallbacksChange(): Promise<void>;
+	/** This surface as one session's owner — the admitted call's session on this stack, else the one
+	 *  served now — whose gates read that session alone, so a facade or gate made for it stays its
+	 *  own when the surface goes on to serve the next. Optional for an embedder's runtime, which
+	 *  then has one lifetime for every session. */
+	forSession?(): ExtensionCallbackOwner;
+	/** This surface as the owner of what is accepted now: the accepting call's session, or the
+	 *  surface itself for what an extension factory accepts at load (live for each session). */
+	forAcceptance?(): ExtensionCallbackOwner;
+	/** For a session's owner ({@link forSession}), the surface it is a session of: who registered
+	 *  what it registers, whichever of its sessions did. */
+	readonly registrant?: ExtensionCallbackOwner;
+	/** For a session's owner ({@link forSession}), registers what to withdraw when that session
+	 *  retires: a registration it made comes out of the host's lists then, rather than staying
+	 *  listed and doing nothing. */
+	whenSessionEnds?(withdraw: () => void): void;
 }
 
 /** One session's hold on an extension runtime ({@link ExtensionCallbackOwner.sessionGeneration}):
