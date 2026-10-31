@@ -61,7 +61,9 @@ import {
 	liveSessionPathForArchive,
 	restoreArchivedSessionLocked,
 	artifactRestoreConflicts,
+	quarantineStagingRecord,
 	type StagingGround,
+	type StagingQuarantine,
 } from "../session/session-archive";
 import { codeOf, statIfPresent, withGcLock } from "../session/gc-lock";
 import { readSessionHeaderId } from "../session/session-loader";
@@ -129,6 +131,8 @@ export interface GcCommandFlags {
 	restore?: string;
 	/** Session id prefix or archive path whose live copy should be given up. */
 	reclaim?: string;
+	/** A staging record a killed gc run left: it and the directory it names move into quarantine. */
+	quarantine?: string;
 	coldArchiveAfterDays?: number;
 	retainNewestGlobal?: number;
 	retainNewestPerCwd?: number;
@@ -276,6 +280,7 @@ export interface GcResult {
 	archive?: ArchiveGcResult;
 	restore?: RestoreGcResult;
 	reclaim?: ReclaimGcResult;
+	quarantine?: StagingQuarantine;
 	compress?: CompressGcResult;
 	wal?: WalGcResult;
 	lockPath: string;
@@ -326,6 +331,8 @@ interface ResolvedGcOptions {
 	restoreTarget?: string;
 	/** Set by `--reclaim`; it runs alone, and it is the only phase that deletes a live session. */
 	reclaimTarget?: string;
+	/** Set by `--quarantine`; it runs alone. */
+	quarantineTarget?: string;
 	/** Phase flags the caller passed, so `--restore` can refuse to drop them. */
 	explicitPhases: string[];
 	coldArchiveAfterDays: number;
@@ -359,6 +366,19 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 	// blobs for a command that asked for a restore.
 	if (flags.restore !== undefined && flags.restore.trim() === "") {
 		throw new Error("--restore needs a session id or the path of a file in the archive");
+	}
+	if (flags.quarantine !== undefined) {
+		if (flags.quarantine.trim() === "") {
+			throw new Error("--quarantine needs a staging record: its file name in <agentDir>/gc-staging, or its path");
+		}
+		const alongside = [
+			...(flags.restore !== undefined ? ["--restore"] : []),
+			...(flags.reclaim !== undefined ? ["--reclaim"] : []),
+			...(["blobs", "archive", "wal", "stale", "compress"] as const)
+				.filter(phase => flags[phase] === true)
+				.map(phase => `--${phase}`),
+		];
+		if (alongside.length > 0) throw new Error(`--quarantine runs alone; run ${alongside.join(", ")} separately`);
 	}
 	const selected =
 		flags.blobs === true ||
@@ -415,6 +435,7 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 		forwardOnly: flags.forwardOnly === true,
 		restoreTarget: flags.restore?.trim(),
 		reclaimTarget: flags.reclaim?.trim(),
+		quarantineTarget: flags.quarantine?.trim(),
 		explicitPhases: (["blobs", "archive", "wal", "stale", "compress"] as const).filter(
 			phase => flags[phase] === true,
 		),
@@ -458,6 +479,7 @@ export function collectGcErrors(result: GcResult): string[] {
 		...(result.blobs?.errors ?? []).map(error => `blobs: ${error}`),
 		...(result.archive?.errors ?? []).map(error => `archive: ${error}`),
 		...(result.restore?.errors ?? []).map(error => `restore: ${error}`),
+		...(result.quarantine?.errors ?? []).map(error => `quarantine: ${error}`),
 		...(result.reclaim?.errors ?? []).map(error => `reclaim: ${error}`),
 		...(result.compress?.errors ?? []).map(error => `compress: ${error}`),
 	];
@@ -2462,6 +2484,13 @@ export function renderText(result: GcResult): string {
 		}
 		if (result.archive.errors.length > 0) lines.push(`session errors: ${result.archive.errors.length}`);
 	}
+	if (result.quarantine) {
+		const quarantine = result.quarantine;
+		if (quarantine.quarantine && quarantine.errors.length === 0) {
+			const what = [quarantine.directory, quarantine.record].filter(Boolean).join(" and ");
+			lines.push(`quarantine: ${quarantine.moved ? "moved" : "would move"} ${what} into ${quarantine.quarantine}`);
+		}
+	}
 	if (result.restore) {
 		const restore = result.restore;
 		if (restore.sessionPath) {
@@ -2932,6 +2961,12 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 	}
 	const result = await withGcLock(options.agentDir, async lockPath => {
 		const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath };
+		// Moving a staging record into quarantine runs alone as well: a restore
+		// or an archive run could otherwise be staging into the very directory.
+		if (options.quarantineTarget !== undefined) {
+			next.quarantine = await quarantineStagingRecord(options.agentDir, options.quarantineTarget, options.apply);
+			return next;
+		}
 		// A restore runs alone: no sweep may race a session coming back.
 		if (options.restoreTarget !== undefined) {
 			next.restore = await runRestoreGc(options, options.restoreTarget);

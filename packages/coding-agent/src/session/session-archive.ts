@@ -1511,28 +1511,768 @@ export async function stagingResidueUnder(
 
 /**
  * What is said about a directory a staging record makes a restore leave in
- * the archive, and how to recover. It never advises removing the directory:
- * a record is not proof a run made it. The recovery for one a killed gc run
- * left is the one a review ran on a genuine killed archive: the directory,
- * then its record, moved into one new directory outside both session trees,
- * then the restore run again — which then finishes, with the partial stage
- * kept where it was put and none of it carried home. Moving the record alone
- * would turn the directory into an artifact the restore carries home.
+ * the archive, and what to do about it. It never advises removing the
+ * directory: a record is not proof a run made it.
  */
-export function stagingResidueNote(dir: string, record: string): string {
-	const aside = path.join(path.dirname(path.dirname(record)), "gc-quarantine", path.basename(record, ".json"));
-	const move =
-		`mkdir -p ${shellQuote(path.dirname(aside))} && mkdir ${shellQuote(aside)} && ` +
-		`mv ${shellQuote(dir)} ${shellQuote(aside)}/ && mv ${shellQuote(record)} ${shellQuote(aside)}/`;
+export function stagingResidueNote(dir: string, record: string, agentDirSuffix: string): string {
 	return (
 		`${dir} is named by the staging record ${record}, so a restore leaves it in the archive, where it is, and does not finish. ` +
-		`If a killed gc run left it: 1. stop any gc run and any use of this session; 2. look at the record and the directory; ` +
-		`3. move the directory into a new directory outside both session trees; 4. move the record into the same directory — ` +
-		`for example \`${move}\`, where the second \`mkdir\` stops it if that directory already exists — and leave ` +
-		`the restore's \`.restoring\` record where it is; 5. run the same restore again. Moving the record without the directory ` +
-		`makes the restore carry the directory home as an artifact. If no gc run made the directory, move only the record out ` +
-		`of ${path.dirname(record)} and restore again`
+		`If a killed gc run left it, stop any activity for this session, look at the record and the directory, then move both ` +
+		`out of the session trees with \`omp gc --quarantine ${shellQuote(path.basename(record))} --apply${agentDirSuffix}\` ` +
+		`and restore again. If no gc run made it, move only the record out of ${path.dirname(record)} and restore again`
 	);
+}
+
+/** What `gc --quarantine` found, and moved or would move. */
+export interface StagingQuarantine {
+	record: string;
+	/** The staging directory the record names, when it is still there. */
+	directory?: string;
+	/** Where the record and its directory go, or went. */
+	quarantine?: string;
+	moved: boolean;
+	errors: string[];
+}
+
+/**
+ * `target`'s real path as it would resolve now: the real path of its nearest
+ * existing ancestor with the missing rest appended.
+ */
+async function resolvedPath(target: string): Promise<{ real: string; existing: string }> {
+	const rest: string[] = [];
+	let at = target;
+	for (;;) {
+		try {
+			return { real: path.join(await fs.realpath(at), ...rest.reverse()), existing: at };
+		} catch (error) {
+			const parent = path.dirname(at);
+			if (!isEnoent(error) || parent === at) throw error;
+			rest.push(path.basename(at));
+			at = parent;
+		}
+	}
+}
+
+/** A staging record's bytes and what they say, read from a regular file. */
+async function readRecordFile(file: string): Promise<{ bytes: Buffer; entry: StagingRecord }> {
+	const handle = await openRegularFile(file);
+	if (!handle) throw new Error("it is not a regular file");
+	try {
+		const bytes = await handle.readFile();
+		return { bytes, entry: parseStagingRecord(bytes.toString("utf8")) };
+	} finally {
+		await handle.close().catch(() => undefined);
+	}
+}
+
+/** A device and inode, as a run records them. */
+type Identity = { dev: number; ino: number };
+
+/** The identity of the directory at `at`, or null when no directory is there. */
+async function directoryIdentity(at: string): Promise<Identity | null> {
+	const standing = await fs.lstat(at).catch(() => undefined);
+	return standing?.isDirectory() ? { dev: standing.dev, ino: standing.ino } : null;
+}
+
+/** The name, in a quarantine's destination, of the statement that it finished. */
+function statementName(recordName: string): string {
+	return `${path.basename(recordName, ".json")}.quarantined`;
+}
+
+/**
+ * The statement a quarantine writes beside the record's copy once the
+ * directory has left its tree — moved by this command, or already gone —
+ * and before it removes the ledger entry: what a retry with no ledger record
+ * reads instead of working out from what is on disk now whether a move
+ * happened, which nothing on disk afterwards can show. It names what it
+ * finished: the record, and what then stood at the stage's name in the
+ * destination — the directory, by device and inode, or null when nothing
+ * did. A retry believes it only of the same thing at that name, and not
+ * while the run's directory is still at its old name: the one the record
+ * recorded, or, for a record written before its run took the inodes, any
+ * directory there, unless the statement names a different directory. So
+ * a statement written while the directory was still in its tree is not
+ * believed, and one written by anything else has to name, exactly, what is
+ * at the stage's name.
+ */
+function finishedStatement(recordName: string, directory: Identity | null): { name: string; bytes: Buffer } {
+	return {
+		name: statementName(recordName),
+		bytes: Buffer.from(`${JSON.stringify({ finished: recordName, directory })}\n`),
+	};
+}
+
+/** What a statement says, when `text` is exactly a whole statement that `recordName`'s quarantine finished. */
+function parseStatement(text: string, recordName: string): { directory: Identity | null } | undefined {
+	let said: unknown;
+	try {
+		said = JSON.parse(text);
+	} catch {
+		return undefined;
+	}
+	if (typeof said !== "object" || said === null || !("directory" in said)) return undefined;
+	let directory: Identity | null;
+	try {
+		directory = said.directory === null ? null : (parseIdentity(said.directory) ?? null);
+	} catch {
+		return undefined;
+	}
+	// Exactly the bytes a run writes, so no other spelling passes for one.
+	return text === finishedStatement(recordName, directory).bytes.toString("utf8") ? { directory } : undefined;
+}
+
+/** What stands at a statement's name: nothing, a whole statement, the start of one, or something else. */
+type StatementFound =
+	| { kind: "none" }
+	| { kind: "whole"; directory: Identity | null }
+	| { kind: "part" }
+	| { kind: "other" };
+
+/** What one place a quarantine of a record uses holds, read with no ledger record to go by. */
+interface QuarantinePlace {
+	destination: string;
+	/** Every path in it. */
+	paths: string[];
+	/** Why it could not be listed, when it could not. */
+	unreadable?: string;
+	/** The record, when a whole copy of it is a regular file at its name there. */
+	copy?: StagingRecord;
+	/** What stands at the name of the statement that this record's quarantine finished. */
+	statement: StatementFound;
+	/** The staging directory a part copy there begins by naming, when enough of it was copied to read that. */
+	partNames?: string;
+}
+
+/** The text of the regular file at `at`, or undefined when it is not one or cannot be read. */
+async function readRegularText(at: string): Promise<string | undefined> {
+	// The entry itself: a link to a file elsewhere is not a file here.
+	if (!(await fs.lstat(at).catch(() => undefined))?.isFile()) return undefined;
+	const handle = await openRegularFile(at).catch(() => undefined);
+	if (!handle) return undefined;
+	try {
+		return await handle.readFile("utf8");
+	} catch {
+		return undefined;
+	} finally {
+		await handle.close().catch(() => undefined);
+	}
+}
+
+/** What `destination` holds for the record named `recordName`, or undefined when it holds nothing. */
+async function readQuarantinePlace(destination: string, recordName: string): Promise<QuarantinePlace | undefined> {
+	let names: string[];
+	try {
+		names = await fs.readdir(destination);
+	} catch (error) {
+		if (isEnoent(error)) return undefined;
+		return { destination, paths: [], unreadable: errorText(error), statement: { kind: "none" } };
+	}
+	if (names.length === 0) return undefined;
+	const place: QuarantinePlace = {
+		destination,
+		paths: names.map(name => path.join(destination, name)),
+		statement: { kind: "none" },
+	};
+	const text = await readRegularText(path.join(destination, recordName));
+	if (text !== undefined) {
+		try {
+			place.copy = parseStagingRecord(text);
+		} catch {
+			// A run writes a record with its directory first, so a copy stopped
+			// part-way often names it already.
+			const quoted = /^\{\s*"dir"\s*:\s*("(?:[^"\\]|\\.)*")/.exec(text)?.[1];
+			try {
+				if (quoted !== undefined) place.partNames = JSON.parse(quoted) as string;
+			} catch {}
+		}
+	}
+	const statementAt = path.join(destination, statementName(recordName));
+	if (!(await fs.lstat(statementAt).catch(() => undefined))) return place;
+	const said = await readRegularText(statementAt);
+	const whole = said === undefined ? undefined : parseStatement(said, recordName);
+	if (whole) {
+		place.statement = { kind: "whole", directory: whole.directory };
+		return place;
+	}
+	// The start of the statement this quarantine would write now: what a run
+	// stopped while writing it leaves.
+	const expected =
+		place.copy &&
+		finishedStatement(
+			recordName,
+			await directoryIdentity(path.join(destination, path.basename(place.copy.dir))),
+		).bytes.toString("utf8");
+	const part =
+		said === "" ||
+		(said !== undefined && expected !== undefined && said.length < expected.length && expected.startsWith(said));
+	place.statement = { kind: part ? "part" : "other" };
+	return place;
+}
+
+/** Where a staging directory left in its tree with no ledger record ends up, and what to do about it. */
+const UNRECORDED_STAGE_WARNING =
+	`with no record in the ledger, a restore takes it for an artifact and carries it home, partial file and all; ` +
+	`look for it in the session trees — a directory named \`.<file name>.<16 hexadecimal digits>.tmp\` — and move it ` +
+	`out by hand to keep it out`;
+
+/**
+ * Answer `gc --quarantine` for a record no longer in the ledger, from what
+ * `places` — every place a quarantine of it uses that holds anything — hold.
+ *
+ * Done only when a place holds a whole copy of the record and the statement
+ * that its quarantine finished — see {@link finishedStatement} — and what the
+ * statement names is so: the destination lies outside both session trees,
+ * the run's directory is not still at its old name, and what stands at the
+ * stage's name is what the statement names — that directory, or nothing.
+ * What stands beside the copy is never taken for a move by itself; it can
+ * only show that a statement is not true of it. Anything short of that is
+ * refused, saying what is there and how to finish, naming every place that
+ * holds anything — one place named of two sends a reader looking in the
+ * wrong one — and saying that a staging directory still in its tree with no
+ * record in the ledger is one a restore takes for an artifact and carries
+ * home: quarantine is where that is decided, and restore cannot tell such a
+ * directory from an artifact of the same shape.
+ */
+async function settleWithoutLedgerRecord(
+	result: StagingQuarantine,
+	ledger: string,
+	roots: readonly string[],
+	places: readonly QuarantinePlace[],
+): Promise<StagingQuarantine> {
+	const { record } = result;
+	const refuse = (why: string): StagingQuarantine => {
+		result.errors.push(why);
+		return result;
+	};
+	const holding = (among: readonly QuarantinePlace[]): string =>
+		among
+			.map(place =>
+				place.unreadable !== undefined
+					? `${place.destination} could not be read (${place.unreadable})`
+					: `${place.destination} holds ${place.paths.join(", ")}`,
+			)
+			.join("; ");
+	if (places.length === 0) {
+		return refuse(
+			`${record} is not a staging record in ${ledger}, and no place a quarantine of it uses holds anything. If a gc run ` +
+				`wrote it and its staging directory is still where the killed run left it, ${UNRECORDED_STAGE_WARNING}`,
+		);
+	}
+	const first =
+		places.find(place => place.copy !== undefined && place.statement.kind === "whole") ??
+		places.find(place => place.copy !== undefined);
+	if (first) {
+		const copied = first.copy!;
+		const said = first.statement;
+		const copy = path.join(first.destination, path.basename(record));
+		const statementAt = path.join(first.destination, statementName(path.basename(record)));
+		const stageAt = path.join(first.destination, path.basename(copied.dir));
+		const others = places.filter(place => place !== first);
+		const elsewhere = others.length > 0 ? ` Also: ${holding(others)}.` : "";
+		result.quarantine = first.destination;
+		// Every answer, the one that reads a statement included: a finished
+		// move says nothing about where its destination resolves now.
+		const resolved = await resolvedPath(first.destination).catch(() => undefined);
+		if (resolved && roots.some(root => isWithin(root, resolved.real) || isWithin(resolved.real, root))) {
+			const held =
+				said.kind === "whole" ? "a copy of it and the statement that its quarantine finished" : "a copy of it";
+			return refuse(
+				`${record} is not in ${ledger}, and ${first.destination}, which holds ${held}, resolves to ${resolved.real}, ` +
+					`inside a session tree, so nothing there is taken for a quarantine: what stands beside that copy may be the ` +
+					`staging directory itself, in a session tree, and ${UNRECORDED_STAGE_WARNING}. To quarantine it, make ` +
+					`${first.destination} a directory of its own outside the session trees, put a copy of ${copy} back at ` +
+					`${record}, and run the same command again.${elsewhere}`,
+			);
+		}
+		const left = await checkRecordedGround(copied, roots);
+		// A record written before its run took the inodes cannot tell the
+		// run's directory from a later one at the same name; a statement that
+		// names the directory it moved can, since one directory is not at two
+		// names unless something aliases it there.
+		const named = said.kind === "whole" ? said.directory : null;
+		const atOldName = left.kind === "intent" && named !== null ? await directoryIdentity(copied.dir) : null;
+		const another =
+			atOldName !== null && named !== null && (atOldName.dev !== named.dev || atOldName.ino !== named.ino);
+		if ((left.kind === "minted" || left.kind === "intent") && !another) {
+			result.directory = copied.dir;
+			if (said.kind === "whole") {
+				// No run writes a statement before the directory has left its
+				// tree, so this one is not true of what is there.
+				return refuse(
+					`${record} is not in ${ledger}, and ${statementAt} says its quarantine finished, but the directory the record ` +
+						`names, ${copied.dir}, is still where the gc run left it. This command writes that statement only once the ` +
+						`directory has left its tree, so the statement is not true of it, and no quarantine of it finished. Until a ` +
+						`record names it again, a restore takes that directory for an artifact and carries it home. To quarantine ` +
+						`it, move ${statementAt} out of ${first.destination}, copy ${copy} back to ${record}, and run the same command ` +
+						`again.${elsewhere}`,
+				);
+			}
+			// Stopped between the record and the directory, or the directory
+			// shown in the destination under an alias; and an archive run
+			// keeps the ledger entry of a directory still in its tree, so
+			// something else removed it. Anything at the statement's name has
+			// to go first: a run refuses to move a directory while it is there.
+			const occupied =
+				said.kind === "none"
+					? ""
+					: ` Something already stands at ${statementAt}, where this command writes the statement that it ` +
+						`finished${said.kind === "part" ? ": the start of a statement;" : ", and it is not this record's statement;"} ` +
+						`no run wrote it while the directory was still in its tree, and this command writes over nothing, so look ` +
+						`at it and move it out of ${first.destination} first.`;
+			return refuse(
+				`${record} is not in ${ledger}, but ${copy} holds a copy of it, and the directory it names, ${copied.dir}, ` +
+					`is still where the gc run left it: this command copied the record and stopped before it moved the directory, ` +
+					`and something other than gc has since removed the record from the ledger, since a gc run keeps the ledger ` +
+					`entry of a directory still in its tree. Until a record names it again, a restore takes that directory for ` +
+					`an artifact and carries it home.${occupied} To finish the quarantine, copy ${copy} back to ${record} and run ` +
+					`the same command again.${elsewhere}`,
+			);
+		}
+		const there = await fs.lstat(stageAt).catch(() => undefined);
+		if (said.kind === "whole") {
+			// The statement names what stood at the stage's name when it was
+			// written: a directory, by identity, or nothing, for a quarantine
+			// that moved only the record. It is believed only of the same.
+			const same =
+				named === null
+					? there === undefined
+					: there?.isDirectory() === true && there.dev === named.dev && there.ino === named.ino;
+			if (same) {
+				result.moved = true;
+				return result;
+			}
+			const stated =
+				named === null
+					? `nothing at ${stageAt}, since only the record moved`
+					: `the directory at ${stageAt} being device ${named.dev}, inode ${named.ino}`;
+			const now = !there
+				? "nothing is there now"
+				: there.isDirectory()
+					? `the directory there now is device ${there.dev}, inode ${there.ino}`
+					: "what is there now is not a directory";
+			return refuse(
+				`${record} is not in ${ledger}, and ${statementAt} says its quarantine finished with ${stated}, but ${now}. ` +
+					`So this does not report the quarantine finished: what is at that name is not what the statement names. ` +
+					`Nothing reads ${first.destination}; look at what it holds. If the staging directory the record names, ` +
+					`${copied.dir}, is somewhere in a session tree, ${UNRECORDED_STAGE_WARNING}.${elsewhere}`,
+			);
+		}
+		const atStage = !there
+			? `nothing is at ${stageAt}`
+			: there.isDirectory()
+				? `a directory is at ${stageAt}`
+				: `something that is not a directory is at ${stageAt}`;
+		const atSource =
+			left.kind === "refused"
+				? `its old name could not be checked: ${left.note}`
+				: left.kind !== "gone"
+					? "another directory is at its old name"
+					: left.note !== undefined
+						? `something else is at its old name: ${left.note}`
+						: "nothing is at its old name";
+		if (said.kind === "other") {
+			return refuse(
+				`${record} is not in ${ledger}, and its quarantine did not finish: ${copy} holds a copy of the record, but what ` +
+					`stands at ${statementAt}, where this command writes the statement that it finished, is not that statement ` +
+					`for this record, and this command writes over nothing. Look at it and move it out of ${first.destination}; ` +
+					`then copy ${copy} back to ${record} and run the same command again, which takes up from what is on disk: ` +
+					`${atStage}, and ${atSource}. If the directory the record names, ${copied.dir}, is somewhere else in a ` +
+					`session tree, ${UNRECORDED_STAGE_WARNING}.${elsewhere}`,
+			);
+		}
+		const statementState =
+			said.kind === "part" ? "holds only the start of the statement it was writing" : "is not there";
+		return refuse(
+			`${record} is not in ${ledger}, and its quarantine did not finish: ${copy} holds a copy of the record, but ` +
+				`${statementAt}, where this command writes, as its last step before it removes the ledger entry, the statement ` +
+				`that it finished, ${statementState}. A gc run that applies its archive phase drops the ledger record of a ` +
+				`directory that has left its tree, so a quarantine stopped once the directory the record names, ${copied.dir}, ` +
+				`had left — by this command's own move, or because it was already gone when the quarantine began — and before ` +
+				`its statement was whole, followed by such a run, leaves exactly this. So does a ledger record removed by hand, ` +
+				`or a directory moved elsewhere. What is on disk now cannot tell these apart: ${atStage}, and ${atSource}. To ` +
+				`finish, copy ${copy} back to ` +
+				`${record} and run the same command again: it takes up from what is on disk, moving the directory if it is ` +
+				`at its old name and only the record if it is not. If that directory is somewhere else in a session tree, ` +
+				`${UNRECORDED_STAGE_WARNING}.${elsewhere}`,
+		);
+	}
+	// No whole copy anywhere: this command never leaves that itself.
+	const named: string[] = [];
+	for (const place of places) {
+		if (place.partNames === undefined) continue;
+		const standing = await fs.lstat(place.partNames).catch(() => undefined);
+		const real = await fs.realpath(place.partNames).catch(() => undefined);
+		const contained = real !== undefined && roots.some(root => isWithin(root, real) && real !== root);
+		if (standing?.isDirectory() && contained) named.push(place.partNames);
+	}
+	if (places.length === 1) result.quarantine = places[0].destination;
+	const source =
+		named.length > 0
+			? ` ${named.join(" and ")}, named by the start of a part copy of the record, is still in a session tree, and with ` +
+				`no record in the ledger a restore takes it for an artifact and carries it home, partial file and all; move it ` +
+				`out of the session trees by hand to keep it out.`
+			: ` If the staging directory the record named is still where the killed gc run left it, it is in none of these ` +
+				`places, and ${UNRECORDED_STAGE_WARNING}.`;
+	return refuse(
+		`${record} is not in ${ledger}, and no place a quarantine of this record uses holds a whole copy of it: ` +
+			`${holding(places)}. This command never leaves that itself: it moves the directory only once the record's copy ` +
+			`beside it is whole, and a gc run keeps the ledger entry until then, so something other than gc removed the ` +
+			`record or its copy. Nothing reads what those places hold; look at it, copy out anything you want to keep, and ` +
+			`remove it when you are done.${source}`,
+	);
+}
+
+/** How far a copy at a quarantine name has got, or why what stands there is none. */
+type RecordCopy = { held: "none" | "part" | "all" } | { refused: string };
+
+/**
+ * What stands at `at`, a name `gc --quarantine` writes in its destination —
+ * the record's copy, or the statement that the quarantine finished, `what`
+ * naming which — judged by what it is and what it holds, never by its name.
+ * It is this copy when it is nothing yet; a regular file holding exactly
+ * `bytes` — what a finished copy leaves, or the record's own inode linked
+ * there; or a regular file no other name holds, with fewer bytes, all of
+ * them how `bytes` begin — what a copy stopped part-way leaves. Anything
+ * else is refused, whoever put it there: an expected name is not evidence
+ * that what holds it is ours, and a record may stop a quarantine, never make
+ * it write over something. So is a part copy this user cannot write:
+ * finishing it needs that write, and asking first is what lets a preview,
+ * and `--apply` before anything moves, refuse what applying would fail at.
+ *
+ * With `finish`, a part copy is completed — the rest written after what it
+ * holds, through a descriptor that has to be on the very file just judged,
+ * at the length it was judged at — and the name is judged again, so what
+ * comes back says what the name holds now: every byte it held stays where it
+ * was, and no other name sees the write.
+ */
+async function recordCopyAt(at: string, bytes: Buffer, finish: boolean, what: string): Promise<RecordCopy> {
+	const standing = await fs.lstat(at).catch((error: unknown) => {
+		if (isEnoent(error)) return undefined;
+		throw error;
+	});
+	if (!standing) return { held: "none" };
+	const refused = { refused: `${at} is already there and is not a copy of ${what}` };
+	// The type comes from `lstat` before anything is opened: a symlink is
+	// refused whatever it points at, and opening a device can act on it.
+	if (!standing.isFile()) return refused;
+	const reader = await fs.open(at, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+	let judged: Stats;
+	let held: Buffer;
+	try {
+		judged = await reader.stat();
+		const same = judged.isFile() && judged.dev === standing.dev && judged.ino === standing.ino;
+		if (!same || judged.size > bytes.length) return refused;
+		held = await reader.readFile();
+	} finally {
+		await reader.close().catch(() => undefined);
+	}
+	if (held.equals(bytes)) return { held: "all" };
+	if (judged.nlink !== 1 || held.length >= bytes.length || !held.equals(bytes.subarray(0, held.length))) {
+		return refused;
+	}
+	if (!finish) {
+		try {
+			await fs.access(at, fsConstants.W_OK);
+		} catch (error) {
+			return {
+				refused: `${at} holds the start of ${what} but cannot be written to finish it: ${errorText(error)}`,
+			};
+		}
+		return { held: "part" };
+	}
+	const writer = await fs.open(at, fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+	try {
+		const now = await writer.stat();
+		if (now.dev !== judged.dev || now.ino !== judged.ino || now.size !== held.length || now.nlink !== 1) {
+			return refused;
+		}
+		for (let written = held.length; written < bytes.length;) {
+			written += (await writer.write(bytes, written, bytes.length - written, written)).bytesWritten;
+		}
+		await writer.sync();
+	} finally {
+		await writer.close().catch(() => undefined);
+	}
+	return await recordCopyAt(at, bytes, false, what);
+}
+
+/**
+ * Make `at` hold exactly `bytes`, writing over nothing: what stands there has
+ * to pass {@link recordCopyAt}. Nothing there is filled by `link` from
+ * `linkFrom` when one is given — `link` never replaces a name — or else, and
+ * when the link cannot reach, by a file created for it alone and synced; a
+ * part copy is finished in place. It counts only once read back whole.
+ * Returns why it could not, or undefined once it has.
+ */
+async function putExactly(at: string, bytes: Buffer, what: string, linkFrom?: string): Promise<string | undefined> {
+	const found = await recordCopyAt(at, bytes, false, what);
+	if ("refused" in found) return found.refused;
+	if (found.held === "none") {
+		let linked = false;
+		if (linkFrom !== undefined) {
+			try {
+				await fs.link(linkFrom, at);
+				linked = true;
+			} catch (error) {
+				// Another filesystem than the ledger's, or one without hard
+				// links: copied across instead, and the next run finishes the
+				// copy if this stops.
+				if (codeOf(error) === "EEXIST") throw error;
+			}
+		}
+		if (!linked) {
+			const handle = await fs.open(at, "wx", 0o600);
+			try {
+				await handle.writeFile(bytes);
+				await handle.sync();
+			} finally {
+				await handle.close().catch(() => undefined);
+			}
+		}
+	}
+	const written = await recordCopyAt(at, bytes, true, what);
+	if ("refused" in written) return written.refused;
+	if (written.held !== "all") return `${at} does not hold all of ${what}`;
+	return undefined;
+}
+
+/**
+ * Move a staging record and the directory it names out of the session trees,
+ * into `gc-quarantine/<record id>` beside the tree the directory's parent is
+ * in. Without `apply`, say what would move — and what would stop it.
+ *
+ * A restore then finds neither the record nor the directory and finishes,
+ * and whatever the directory held stays readable in quarantine. A record is
+ * acted on only when it is one a run of this feature could have written —
+ * see {@link parseStagingRecord} and {@link checkRecordedGround}.
+ *
+ * Short of another writer racing it there, nothing at the destination is
+ * written over, replaced or removed. The record goes first: by `link`, which
+ * never replaces a name, or — across filesystems, where a link cannot reach,
+ * or on one that has no hard links — by a copy created for it alone, and it
+ * is read back whole before anything else happens. Then the directory moves
+ * by `rename` onto a name nothing holds. Then the statement that the
+ * quarantine finished — see {@link finishedStatement} — is written beside
+ * the record. Then the record's ledger entry, the one thing this removes,
+ * goes. Whatever already has the record's name, or the statement's, in the
+ * destination has to pass {@link recordCopyAt}.
+ *
+ * The destination's real path, as it resolves through any link above it, has
+ * to lie outside both session trees, or nothing moves: a quarantine that
+ * resolved into a tree would put a partial stage where a restore carries it
+ * home. Every failure this can predict — a destination holding something
+ * else, at another name or at the record's or the statement's, a part copy
+ * that cannot be written to finish it, a directory that cannot be written, a
+ * directory move across filesystems — is checked before anything is made,
+ * the same way for a preview as for `--apply`, and checked again once the
+ * destination exists, before anything moves into it. A filesystem error
+ * after that can still stop `--apply` where the preview did not.
+ *
+ * The destination is decided from the directory's parent, which a move
+ * leaves in place, and while the ledger entry is there each run decides its
+ * next step from what is on disk — the record's copy none, part or all, the
+ * directory at its old name or not, the statement there or not — so a
+ * quarantine stopped anywhere is finished by the same command. A gc run
+ * whose archive phase applies keeps the ledger entry while the directory is
+ * at its old name, and drops it once the directory has left. So the one
+ * stop a retry cannot take up by itself is a stop after the directory has
+ * left its tree — by this command's move, or because it was already gone
+ * when the quarantine began — and before the statement is whole, followed by
+ * such a run: the record's copy is in the destination, but nothing says the
+ * quarantine finished, and nothing on disk can. That retry refuses and says
+ * to copy the record back to the ledger and run again, which then finishes
+ * from what is on disk. A retry that finds no ledger record is answered by
+ * {@link settleWithoutLedgerRecord}.
+ *
+ * The caller holds the gc lock, so no run is staging into the directory while
+ * it moves; the advice that names this command asks for activity on the
+ * session to stop. A process that writes into the destination after the last
+ * check — rebinding a directory above it, putting an empty directory at the
+ * directory's name, linking the part copy under another name, rewriting the
+ * ledger record during the copy — is outside what this guards.
+ */
+export async function quarantineStagingRecord(
+	agentDir: string,
+	query: string,
+	apply: boolean,
+): Promise<StagingQuarantine> {
+	const ledger = stagingLedgerDir(agentDir);
+	const record = path.isAbsolute(query)
+		? path.normalize(query)
+		: path.join(ledger, query.endsWith(".json") ? query : `${query}.json`);
+	const result: StagingQuarantine = { record, moved: false, errors: [] };
+	const refuse = (why: string): StagingQuarantine => {
+		result.errors.push(why);
+		return result;
+	};
+	if (path.dirname(record) !== ledger || !record.endsWith(".json")) {
+		return refuse(`${record} is not a staging record in ${ledger}`);
+	}
+	const id = path.basename(record, ".json");
+	const roots = await stagingRoots(agentDir);
+	const quarantineFor = (tree: string | undefined): string =>
+		path.join(tree === undefined ? agentDir : path.dirname(tree), "gc-quarantine", id);
+
+	const listed = await fs.lstat(record).catch(() => undefined);
+	if (!listed) {
+		// Already moved by an earlier run of this command, or never there.
+		const destinations = [...new Set([...roots, undefined].map(quarantineFor))];
+		const places = await Promise.all(destinations.map(at => readQuarantinePlace(at, path.basename(record))));
+		return await settleWithoutLedgerRecord(
+			result,
+			ledger,
+			roots,
+			places.filter(place => place !== undefined),
+		);
+	}
+	let bytes: Buffer;
+	let entry: StagingRecord;
+	try {
+		await assertPrivateLedger(ledger);
+		// The entry itself, not what it leads to: a run writes its record as a
+		// regular file, and a link to one would move as the link.
+		if (!listed.isFile()) throw new Error("it is not a regular file");
+		({ bytes, entry } = await readRecordFile(record));
+	} catch (error) {
+		return refuse(`${record} could not be read: ${errorText(error)}`);
+	}
+	const ground = await checkRecordedGround(entry, roots);
+	if (ground.kind === "refused") return refuse(ground.note);
+	const directoryPresent = ground.kind !== "gone";
+	const moved = path.basename(entry.dir);
+
+	const parent = await fs.realpath(path.dirname(entry.dir)).catch(() => undefined);
+	const destination = quarantineFor(parent === undefined ? undefined : roots.find(root => isWithin(root, parent)));
+	const recordInto = path.join(destination, path.basename(record));
+	const statementAt = path.join(destination, statementName(path.basename(record)));
+	// What the statement names: the directory at the stage's name in the
+	// destination when it is written, so it is read from there each time.
+	const statementNow = async (): Promise<Buffer> =>
+		finishedStatement(path.basename(record), await directoryIdentity(path.join(destination, moved))).bytes;
+	const ofRecord = "this record";
+	const ofStatement = "this quarantine's statement that it finished";
+	result.quarantine = destination;
+	if (directoryPresent) result.directory = entry.dir;
+
+	// Everything that would stop the move: run before anything is made, and
+	// again once the destination exists, before anything moves into it.
+	const obstacle = async (): Promise<string | undefined> => {
+		try {
+			const { real, existing } = await resolvedPath(destination);
+			if (roots.some(root => isWithin(root, real) || isWithin(real, root))) {
+				return `${destination} resolves to ${real}, inside a session tree, so nothing was moved; give it a directory of its own outside ${roots.join(" and ")}`;
+			}
+			const standing = await fs.lstat(destination).catch(() => undefined);
+			if (standing) {
+				if (!standing.isDirectory())
+					return `${destination} is already there and is not a directory, so nothing was moved`;
+				const names = await fs.readdir(destination);
+				const ours = [moved, path.basename(record), statementName(path.basename(record))];
+				const foreign = names.filter(name => !ours.includes(name));
+				if (foreign.length > 0) {
+					return `${destination} already holds ${foreign.join(", ")}, which no quarantine of this record put there, so nothing was moved`;
+				}
+				if (directoryPresent) {
+					// Either is written only once the directory has left its tree.
+					const early = [moved, statementName(path.basename(record))].filter(name => names.includes(name));
+					if (early.length > 0) {
+						return `${destination} already holds ${early.join(" and ")} while ${entry.dir} is still there, so nothing was moved`;
+					}
+				}
+				const copied = await recordCopyAt(recordInto, bytes, false, ofRecord);
+				if ("refused" in copied) return `${copied.refused}, so nothing was moved`;
+				if (!directoryPresent) {
+					const stated = await recordCopyAt(statementAt, await statementNow(), false, ofStatement);
+					if ("refused" in stated) {
+						return `${stated.refused}, so nothing was moved; look at it and move it out of ${destination}, then run the same command again`;
+					}
+				}
+			}
+			const writable = [existing, ledger, ...(directoryPresent ? [path.dirname(entry.dir), entry.dir] : [])];
+			for (const directory of writable) {
+				try {
+					await fs.access(directory, fsConstants.W_OK | fsConstants.X_OK);
+				} catch (error) {
+					return `${directory} cannot be written, so nothing was moved: ${errorText(error)}`;
+				}
+			}
+			if (directoryPresent) {
+				const [from, into] = await Promise.all([fs.stat(path.dirname(entry.dir)), fs.stat(existing)]);
+				if (from.dev !== into.dev) {
+					return `${entry.dir} and ${destination} are on different filesystems, so the directory cannot be moved by rename and nothing was moved`;
+				}
+			}
+			return undefined;
+		} catch (error) {
+			return `${destination} could not be checked, so nothing was moved: ${errorText(error)}`;
+		}
+	};
+	const before = await obstacle();
+	if (before) return refuse(before);
+	if (!apply) return result;
+
+	try {
+		await fs.mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+		await fs.mkdir(destination, { mode: 0o700 }).catch((error: unknown) => {
+			if (codeOf(error) !== "EEXIST") throw error;
+		});
+	} catch (error) {
+		return refuse(`${destination} could not be made, so nothing was moved: ${errorText(error)}`);
+	}
+	const made = await obstacle();
+	if (made) return refuse(made);
+	// The record first, read back whole — not assumed from the steps that put
+	// it there — and only then the directory, so the directory never leaves
+	// its tree without its whole record beside it.
+	try {
+		const why = await putExactly(recordInto, bytes, ofRecord, record);
+		if (why) {
+			return refuse(
+				`${why}, so the directory was not moved and ${record} was left in the ledger; look at both, then run the same command again`,
+			);
+		}
+	} catch (error) {
+		return refuse(
+			`${record} could not be copied into ${destination}: ${errorText(error)}, so the directory was not moved and ` +
+				`${record} was left in the ledger; look at both, then run the same command again`,
+		);
+	}
+	if (directoryPresent) {
+		try {
+			await fs.rename(entry.dir, path.join(destination, moved));
+		} catch (error) {
+			const across = codeOf(error) === "EXDEV" ? ", because they are on different filesystems" : "";
+			return refuse(
+				`${entry.dir} could not be moved into ${destination}${across}: ${errorText(error)}; its record is copied there ` +
+					`and still in ${ledger}, so run the same command again once that is fixed`,
+			);
+		}
+	}
+	// Then the statement that this quarantine finished, written now because
+	// nothing on disk later can show that the move above happened.
+	try {
+		const why = await putExactly(statementAt, await statementNow(), ofStatement);
+		if (why) {
+			return refuse(`${why}; ${record} is still in ${ledger}, so look at it, then run the same command again`);
+		}
+	} catch (error) {
+		return refuse(
+			`${statementAt} could not be written: ${errorText(error)}; ${record} is still in ${ledger}, so run the same ` +
+				`command again once that is fixed`,
+		);
+	}
+	// The ledger entry last: once it goes, the copy and the statement in the
+	// destination are what a retry finds.
+	try {
+		await fs.unlink(record);
+	} catch (error) {
+		return refuse(
+			`${record} could not be removed from ${ledger} once its copy, the directory and the statement were in ` +
+				`${destination}: ${errorText(error)}; run the same command again`,
+		);
+	}
+	result.moved = true;
+	return result;
 }
 
 /**
@@ -1597,7 +2337,7 @@ export async function artifactRestoreConflicts(
 		if (!stat) return;
 		const record = isResidue(source);
 		if (record !== undefined) {
-			conflicts.push(stagingResidueNote(source, record));
+			conflicts.push(stagingResidueNote(source, record, agentDirFlag(agentDir)));
 			return;
 		}
 		const existing = await fs.lstat(destination).catch(() => undefined);
@@ -2026,7 +2766,7 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 				// is named, the record stays down and the command fails. The
 				// directory stays in the archive, and nothing here suggests
 				// removing it.
-				for (const [dir, staging] of leftOut) notRestored.push(stagingResidueNote(dir, staging));
+				for (const [dir, staging] of leftOut) notRestored.push(stagingResidueNote(dir, staging, agentDirSuffix));
 				artifactsRestored = leftOut.length === 0;
 			} catch (error) {
 				notRestored.push(
