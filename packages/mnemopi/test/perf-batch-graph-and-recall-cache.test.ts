@@ -255,7 +255,6 @@ describe("performance optimizations: batched graph and recall cache", () => {
 		await recall(beam, "memory", 10, {
 			queryEmbedding: [1.0, 0.0, 0.0],
 			includeWorking: true,
-			includeEpisodic: true,
 			useSynonyms: false,
 		});
 		expect(beam.caches.embeddings?.has("wm_a")).toBe(true);
@@ -265,7 +264,6 @@ describe("performance optimizations: batched graph and recall cache", () => {
 		await recall(beam, "memory", 10, {
 			queryEmbedding: [0.0, 1.0, 0.0],
 			includeWorking: true,
-			includeEpisodic: true,
 			useSynonyms: false,
 		});
 		expect(beam.caches.embeddings?.has("wm_a")).toBe(true);

@@ -349,7 +349,7 @@ describe("session tree picker", () => {
 			expect(labelStyles()).toEqual(["accent strong", "success"]);
 			// `dark-terminal` paints `accent` and `success` the same green.
 			await setTheme("dark-terminal");
-			expect(labelStyles()).toEqual(["accent strong", "path"]);
+			expect(labelStyles()).toEqual(["accent strong", "statusLinePath"]);
 			await setTheme("dark-github");
 			expect(labelStyles()).toEqual(["accent strong", "success"]);
 		} finally {
