@@ -117,6 +117,13 @@ pub struct GrepOptions<'env> {
 	/// from exhausting the global `max_count` budget before other files are
 	/// reached.
 	pub max_count_per_file: Option<u32>,
+	/// Stop the directory walk after this many candidate files.
+	pub max_scan_files:     Option<u32>,
+	/// Stop before reading candidate files beyond this aggregate byte budget.
+	pub max_scan_bytes:     Option<u32>,
+	/// More `exclude` patterns, for files that are neither searched nor
+	/// counted toward `maxScanFiles` / `maxScanBytes`.
+	pub exclude_globs:      Option<Vec<String>>,
 	/// Abort signal for cancelling the operation.
 	pub signal:             Option<Unknown<'env>>,
 	/// Timeout in milliseconds for the operation.
@@ -329,6 +336,8 @@ struct GrepRequest {
 	offset:             u64,
 	max_count:          Option<u64>,
 	max_count_per_file: Option<u64>,
+	max_scan_files:     Option<u64>,
+	max_scan_bytes:     Option<u64>,
 	hidden:             bool,
 	gitignore:          bool,
 }
@@ -390,6 +399,8 @@ async fn grep_async(
 		offset: request.offset,
 		max_count: request.max_count,
 		max_count_per_file: request.max_count_per_file,
+		max_scan_files: request.max_scan_files,
+		max_scan_bytes: request.max_scan_bytes,
 		walk: pi_walker::walk::Options {
 			hidden: request.hidden,
 			gitignore: request.gitignore,
@@ -540,6 +551,9 @@ pub fn grep<'env>(
 		max_columns,
 		mode,
 		max_count_per_file,
+		max_scan_files,
+		max_scan_bytes,
+		exclude_globs,
 		timeout_ms,
 		signal,
 		filesystem,
@@ -562,7 +576,7 @@ pub fn grep<'env>(
 			.map(str::trim)
 			.filter(|value| !value.is_empty())
 			.map(str::to_owned),
-		exclude: exclude.unwrap_or_default(),
+		exclude: exclude.into_iter().chain(exclude_globs).flatten().collect(),
 		recursive: recursive.unwrap_or(true),
 		file_type: r#type,
 		mode,
@@ -572,6 +586,8 @@ pub fn grep<'env>(
 		offset: offset.map_or(0, u64::from),
 		max_count: max_count.map(u64::from),
 		max_count_per_file: max_count_per_file.map(u64::from),
+		max_scan_files: max_scan_files.map(u64::from),
+		max_scan_bytes: max_scan_bytes.map(u64::from),
 		hidden: hidden.unwrap_or(true),
 		gitignore: gitignore.unwrap_or(true),
 	};
