@@ -48,7 +48,7 @@ import { encodeTspJson, encodeTspMessage, type TspHello, TspReader, splitTspMess
 import type { DescribeContext, NativeChild, NativeNode, NativeSurface, NativeUiEvent } from "./node";
 import { NARROW_SHEET_COLS } from "./overlay";
 import { nativeComponentId, Reconciler } from "./reconcile";
-import { setNativeRendering } from "./state";
+import { setNativeButtons, setNativeRendering } from "./state";
 
 /** A visible TUI overlay, bottom to top. */
 export interface NativeOverlay {
@@ -199,9 +199,10 @@ function sameSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
  * Kinds newer than some Tern builds that answer `TERM_PROGRAM=tern`: used only
  * once the real `hello` lists them, so the optimistic start never emits a node
  * an older terminal cannot draw (`media`: files Tern loads by path; `json`:
- * raw JSON values Tern draws as its own tree).
+ * raw JSON values Tern draws as its own tree; `button`: omp's buttons, which
+ * older builds get as role-styled rows).
  */
-const UNASSUMED_KINDS: Partial<Record<TspKind, true>> = { media: true, json: true };
+const UNASSUMED_KINDS: Partial<Record<TspKind, true>> = { media: true, json: true, button: true };
 
 /**
  * The reply a v1 terminal is assumed to give before its real `hello` arrives
@@ -380,6 +381,7 @@ export class NativeBackend {
 		this.#close(this.#inline, keep);
 		this.#inline.doc?.close();
 		setNativeRendering(false);
+		setNativeButtons(false);
 		this.#useNerdSymbols(false);
 		this.#clearStallTimer();
 		// Replies no longer reach the backend: forget the queries outright.
@@ -539,6 +541,8 @@ export class NativeBackend {
 		this.#limit = hello.apc !== undefined && hello.apc > 0 ? hello.apc : TSP_DEFAULT_APC_LIMIT;
 		this.#credits = hello.credits !== undefined && hello.credits > 0 ? hello.credits : TSP_DEFAULT_CREDITS;
 		this.#cx = new NativeContext(hello, hello.cols ?? this.#cx.cols);
+		// A changed vocabulary re-describes every component (`confirm`).
+		setNativeButtons(this.#cx.supports("button"));
 		this.#sawResize = false;
 	}
 
