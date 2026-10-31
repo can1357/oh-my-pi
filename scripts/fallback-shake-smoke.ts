@@ -175,7 +175,13 @@ try {
 		],
 		{
 			cwd: temp.path(),
-			env: { ...process.env, HOME: temp.path(), PI_CODING_AGENT_DIR: agentDir, PI_CONFIG_DIR: ".omp" },
+			env: {
+				...process.env,
+				HOME: temp.path(),
+				PI_CODING_AGENT_DIR: agentDir,
+				PI_CONFIG_DIR: ".omp",
+				SESSIONS_DB_URL: "",
+			},
 			stdout: "pipe",
 			stderr: "pipe",
 			timeout: 45_000,

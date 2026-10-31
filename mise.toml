@@ -1,5 +1,9 @@
 [env]
-_.path = ["{{env.HOME}}/.local/share/mise/installs/bun/1.3.11/bin", "{{env.HOME}}/.cargo/bin"]
+_.path = [
+  "{{env.HOME}}/.local/share/mise/installs/bun/1.4.4/bin",
+  "{{env.HOME}}/.local/share/mise/installs/bun/1.3.11/bin",
+  "{{env.HOME}}/.cargo/bin",
+]
 
 [tasks."test:fallback-shake"]
 description = "Prove automatic fallback elides only older exchanges before the replacement request"
@@ -15,7 +19,7 @@ run = "bun scripts/fallback-shake-tests.ts packages/agent/test/shake.test.ts pac
 description = "Prepare locked dependencies and the host native addon for clean verification checkouts"
 depends = ["deps:omp"]
 run = '''
-export PATH="$HOME/.local/share/mise/installs/bun/1.3.11/bin:$HOME/.cargo/bin:$PATH"
+export PATH="$HOME/.local/share/mise/installs/bun/1.4.4/bin:$HOME/.local/share/mise/installs/bun/1.3.11/bin:$HOME/.cargo/bin:$PATH"
 if bun -e 'import "@oh-my-pi/pi-natives";' >/dev/null 2>&1; then
   exit 0
 fi
@@ -51,7 +55,7 @@ run = "bun --cwd=packages/coding-agent run build"
 [tasks."build:native"]
 description = "Build and probe the host native addon using the repository builder"
 run = '''
-export PATH="$HOME/.local/share/mise/installs/bun/1.3.11/bin:$HOME/.cargo/bin:$PATH"
+export PATH="$HOME/.local/share/mise/installs/bun/1.4.4/bin:$HOME/.local/share/mise/installs/bun/1.3.11/bin:$HOME/.cargo/bin:$PATH"
 if bun -e 'import "@oh-my-pi/pi-natives";' >/dev/null 2>&1; then
   exit 0
 fi
@@ -73,7 +77,7 @@ bun run build:native
 
 [tasks."deps:omp"]
 description = "Install the locked workspace dependencies"
-run = 'export PATH="$HOME/.local/share/mise/installs/bun/1.3.11/bin:$HOME/.cargo/bin:$PATH" && bun install --frozen-lockfile'
+run = 'export PATH="$HOME/.local/share/mise/installs/bun/1.4.4/bin:$HOME/.local/share/mise/installs/bun/1.3.11/bin:$HOME/.cargo/bin:$PATH" && bun install --frozen-lockfile'
 
 [tasks."install:omp"]
 description = "Install the locally built binary to the standard standalone installer directory"
