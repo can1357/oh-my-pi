@@ -216,7 +216,7 @@ import {
 import { createSessionTeardown, type SessionTeardown } from "./session-teardown";
 import { runProviderSetupWizard } from "./setup-wizard/lazy";
 import { sanitizeStatusText } from "./shared";
-import { invokeSkillCommandFromText, isKnownSkillCommand } from "./skill-command";
+import { type BuiltSkillCommandPrompt, invokeSkillCommandFromText, isKnownSkillCommand } from "./skill-command";
 import { clearMermaidCache } from "./theme/mermaid-cache";
 import { type ShimmerPalette, shimmerEnabled, shimmerText } from "./theme/shimmer";
 import type { Theme } from "./theme/theme";
@@ -1978,6 +1978,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			customType?: string;
 			display?: boolean;
 			streamingBehavior?: "steer" | "followUp";
+			skillPrompt?: BuiltSkillCommandPrompt;
 		},
 		options?: { preserveDraft?: boolean },
 	): SubmittedUserInput {
@@ -1988,6 +1989,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			customType: input.customType,
 			display: input.display,
 			streamingBehavior: input.streamingBehavior,
+			skillPrompt: input.skillPrompt,
 			cancelled: false,
 			started: false,
 		};
@@ -2030,9 +2032,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		const preserveDraft = this.#pendingSubmissionPreservesDraft;
 
 		submission.cancelled = true;
-		// A cancelled first item never starts a turn; unblock a queue-shorthand
-		// dispatch waiting on it so the rest still flush (issue #10802).
-		submission.onSettled?.();
 		this.#pendingSubmittedInput = undefined;
 		this.#pendingSubmissionPreservesDraft = false;
 		this.clearOptimisticUserMessage();
@@ -2051,6 +2050,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.editor.setText(submission.text);
 		}
 		this.updateEditorBorderColor();
+		submission.onSettled?.();
 		this.ui.requestRender();
 		return true;
 	}
@@ -2114,8 +2114,6 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#stopLoadingAnimation(true);
 			}
 		}
-		// Unblock a queue-shorthand dispatch waiting on this submission's turn to start
-		// (issue #10802). Idempotent — resolving an already-settled promise is a no-op.
 		input.onSettled?.();
 	}
 
@@ -5107,8 +5105,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	showError(message: string): void {
 		const submission = this.#pendingSubmittedInput;
 		this.#pendingSubmittedInput = undefined;
-		// Dispatch failed before a turn started; unblock a queue-shorthand dispatch
-		// waiting on this submission (issue #10802).
 		submission?.onSettled?.();
 		this.#pendingSubmissionPreservesDraft = false;
 		this.clearOptimisticUserMessage();

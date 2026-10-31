@@ -16,10 +16,9 @@ function makeCtx(isStreaming = false) {
 	const followUp = vi.fn(async (_text: string, _images?: ImageContent[]) => {});
 	const steer = vi.fn(async (_text: string, _images?: ImageContent[]) => {});
 	const prompt = vi.fn(async () => false);
-	// Mirror the run loop: accepting the submission dispatches its turn and settles
-	// it. Queue-shorthand awaits this settle before enqueuing the rest (#10802).
-	const onInputCallback = vi.fn((submission?: { onSettled?: () => void }) => {
-		submission?.onSettled?.();
+	// Mirror the run loop: admission queues the tail before the first turn runs.
+	const onInputCallback = vi.fn((submission?: { onAdmitted?: () => Promise<void> }) => {
+		void submission?.onAdmitted?.();
 	});
 	let text = "";
 	const editor = {

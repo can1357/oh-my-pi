@@ -7,6 +7,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext, SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -45,11 +46,17 @@ describe("queue shorthand on an idle mid-session (#10802)", () => {
 		tempDir.removeSync();
 	});
 
-	it("dispatches the first item and delivers the rest one-per-yield in order", async () => {
+	it("queues the full list before the first turn finishes, preserving FIFO with later input", async () => {
 		const contexts: Context[] = [];
+		const firstStarted = Promise.withResolvers<void>();
+		const finishFirst = Promise.withResolvers<void>();
 		const mock = createMockModel({
-			handler: (context: Context) => {
+			handler: async (context: Context) => {
 				contexts.push(context);
+				if (lastUserText(context) === "ITEM ONE") {
+					firstStarted.resolve();
+					await finishFirst.promise;
+				}
 				return { content: ["ok"], stopReason: "stop" };
 			},
 		});
@@ -99,23 +106,38 @@ describe("queue shorthand on an idle mid-session (#10802)", () => {
 				this.pendingImageLinks = [];
 			},
 		};
-		// Faithful stand-in for the interactive run loop: onInputCallback only
-		// resolves the input promise; the actual session.prompt() for the first item
-		// runs later (a queued microtask here), and the submission settles (as
-		// submitInteractiveInput's finally does) once that prompt has dispatched.
+		// The run loop submits asynchronously; admission must precede the provider
+		// request while completion still waits for the held response.
 		const runLoop = { session };
+		const submissionTurns: Promise<void>[] = [];
 		const onInputCallback = vi.fn((submission: SubmittedUserInput) => {
 			queueMicrotask(() => {
-				void (async () => {
-					try {
-						await runLoop.session.prompt(submission.text, {
-							images: submission.images,
-							streamingBehavior: submission.streamingBehavior,
-						});
-					} finally {
-						submission.onSettled?.();
-					}
-				})();
+				submissionTurns.push(
+					(async () => {
+						try {
+							const admission = {
+								onPromptAdmitted: submission.onAdmitted,
+								onPromptRejected: submission.onRejected,
+							};
+							if (submission.skillPrompt) {
+								await runLoop.session.promptCustomMessage(submission.skillPrompt.message, {
+									...submission.skillPrompt.options,
+									...admission,
+								});
+							} else {
+								await runLoop.session.prompt(submission.text, {
+									images: submission.images,
+									streamingBehavior: submission.streamingBehavior,
+									...admission,
+								});
+							}
+						} catch (error) {
+							ctx.showError(error instanceof Error ? error.message : String(error));
+						} finally {
+							submission.onSettled?.();
+						}
+					})(),
+				);
 			});
 		});
 
@@ -149,12 +171,73 @@ describe("queue shorthand on an idle mid-session (#10802)", () => {
 
 		const input = "=>\n1. ITEM ONE\n2. ITEM TWO\n3. ITEM THREE";
 		editor.setText(input);
-		await editor.onSubmit?.(input);
-
+		const submitting = editor.onSubmit?.(input);
+		await firstStarted.promise;
+		try {
+			expect(session.getQueuedMessages().followUp).toEqual(["ITEM TWO", "ITEM THREE"]);
+			await session.followUp("LATER");
+		} finally {
+			finishFirst.resolve();
+		}
+		await submitting;
 		await session.waitForIdle();
-
-		// The seed turn is contexts[0]; the three queued items follow in order.
-		const queued = contexts.slice(1).map(lastUserText);
-		expect(queued).toEqual(["ITEM ONE", "ITEM TWO", "ITEM THREE"]);
+		expect(contexts.slice(1).map(lastUserText)).toEqual(["ITEM ONE", "ITEM TWO", "ITEM THREE", "LATER"]);
+		await session.waitForIdle();
+		expect(session.isStreaming).toBe(false);
+		authStorage.removeRuntimeApiKey("mock");
+		const rejected = "=>\n1. REJECTED\n2. UNSENT";
+		editor.setText(rejected);
+		await editor.onSubmit?.(rejected);
+		await Promise.all(submissionTurns);
+		await session.waitForIdle();
+		expect(session.getQueuedMessages().followUp).toEqual([]);
+		expect(editor.getText()).toBe(rejected);
+		expect(contexts.slice(1).map(lastUserText)).toEqual(["ITEM ONE", "ITEM TWO", "ITEM THREE", "LATER"]);
+		onInputCallback.mockImplementationOnce(submission => {
+			submission.cancelled = true;
+			editor.setText(submission.text);
+			submission.onSettled?.();
+		});
+		const cancelled = "=>\n1. CANCELLED\n2. ALSO CANCELLED";
+		editor.setText(cancelled);
+		await editor.onSubmit?.(cancelled);
+		expect(editor.getText()).toBe(cancelled);
+		expect(session.getQueuedMessages().followUp).toEqual([]);
+		authStorage.setRuntimeApiKey("mock", "mock-test-key");
+		const skillPath = path.join(tempDir.path(), "sample.md");
+		await Bun.write(skillPath, "---\nname: sample\n---\nGrill the steak thoroughly.\n");
+		ctx.skillCommands.set("skill:sample", {
+			name: "sample",
+			description: "Grilling skill",
+			filePath: skillPath,
+			baseDir: tempDir.path(),
+			source: "test",
+		});
+		const beforeSkill = contexts.length;
+		const skillBatch = "=>\n1. /skill:sample\n2. AFTER SKILL";
+		editor.setText(skillBatch);
+		await editor.onSubmit?.(skillBatch);
+		await Promise.all(submissionTurns);
+		await session.waitForIdle();
+		expect(lastUserText(contexts[beforeSkill]!)).toContain("Grill the steak thoroughly.");
+		expect(lastUserText(contexts[beforeSkill + 1]!)).toBe("AFTER SKILL");
+		const beforeCompaction = contexts.length;
+		ctx.compactionQueuedMessages.push(
+			{ text: "COMPACT FIRST", mode: "steer" },
+			{ text: "COMPACT SECOND", mode: "steer" },
+			{ text: "COMPACT THIRD", mode: "followUp" },
+		);
+		const compactionCtx = {
+			...ctx,
+			isKnownSlashCommand: () => false,
+			recordLocalSubmission: () => () => {},
+		};
+		await new UiHelpers(compactionCtx).flushCompactionQueue({ willRetry: false });
+		await session.waitForIdle();
+		expect(contexts.slice(beforeCompaction).map(lastUserText)).toEqual([
+			"COMPACT FIRST",
+			"COMPACT SECOND",
+			"COMPACT THIRD",
+		]);
 	});
 });

@@ -345,6 +345,10 @@ export interface PromptOptions {
 	attribution?: MessageAttribution;
 	/** Skip pre-send compaction checks for this prompt. */
 	skipCompactionCheck?: boolean;
+	/** Called once the prompt owns a turn or its message has entered a queue. */
+	onPromptAdmitted?: () => void | Promise<void>;
+	/** Called when an admitted direct prompt fails before completion, before its turn settles. */
+	onPromptRejected?: () => void | Promise<void>;
 }
 
 /** Payload for {@link AgentSession.setPromptDropped}: a user prompt cancelled
@@ -365,6 +369,8 @@ export interface FollowUpOptions {
 	expandPromptTemplates?: boolean;
 	/** Explicit billing/initiator attribution. */
 	attribution?: MessageAttribution;
+	/** Called for each message placed on the follow-up queue, including hidden companions. */
+	onQueued?: (message: AgentMessage) => void;
 }
 
 /** Result from a handoff operation. */

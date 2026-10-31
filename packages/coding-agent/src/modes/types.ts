@@ -43,6 +43,7 @@ import type { RecentSession } from "./components/welcome";
 import type { EventController } from "./controllers/event-controller";
 import type { LoopLimitRuntime } from "./loop-limit";
 import type { OAuthManualInputManager } from "./oauth-manual-input";
+import type { BuiltSkillCommandPrompt } from "./skill-command";
 import type { Theme } from "./theme/theme";
 
 export type CompactionQueuedMessage = {
@@ -73,11 +74,15 @@ export type SubmittedUserInput = {
 	streamingBehavior?: "steer" | "followUp";
 	cancelled: boolean;
 	started: boolean;
-	/** Resolved once dispatch settles — the run loop's `session.prompt()` for this
-	 *  submission has started its turn (session now streaming), the submission was
-	 *  cancelled, or dispatch errored. Queue-shorthand (`->`/`=>`) awaits this before
-	 *  enqueuing the remaining follow-ups so their idle queue-drain cannot start a
-	 *  turn from item 2 before item 1 is in flight (issue #10802). */
+	/** Resolved skill invocation for the first item of an idle queue list. */
+	skillPrompt?: BuiltSkillCommandPrompt;
+	/** Called when the first prompt has reserved its place in the session; the
+	 * queue shorthand enqueues its remaining items before preflight continues. */
+	onAdmitted?: () => Promise<void>;
+	/** Called before a rejected first turn can drain its queued batch. */
+	onRejected?: () => Promise<void>;
+	/** Called on cancellation or completion without admission, releasing a
+	 * queue-shorthand submit waiting for its first item's place. */
 	onSettled?: () => void;
 };
 
@@ -319,6 +324,7 @@ export interface InteractiveModeContext {
 		customType?: string;
 		display?: boolean;
 		streamingBehavior?: "steer" | "followUp";
+		skillPrompt?: BuiltSkillCommandPrompt;
 	}): SubmittedUserInput;
 	cancelPendingSubmission(): boolean;
 	markPendingSubmissionStarted(input: SubmittedUserInput): boolean;

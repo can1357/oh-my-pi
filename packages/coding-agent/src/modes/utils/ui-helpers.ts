@@ -1208,43 +1208,75 @@ export class UiHelpers {
 				await this.#deliverQueuedMessage(message);
 			}
 
-			// First prompt is fire-and-forget — its rejection is funneled through
-			// `restoreQueue` rather than rethrown. Plain prompts use primitive
-			// recordLocalSubmission and dispose manually in the catch. Skill prompts
-			// are rebuilt as user-attributed custom messages so queued `/skill:` text
-			// is not sent as a literal prompt after compaction.
-			let promptPromise: Promise<unknown>;
-			if (isKnownSkillCommand(this.ctx, firstPrompt.text)) {
-				const built = await buildSkillCommandPrompt(
-					this.ctx,
-					firstPrompt.text,
-					firstPrompt.mode,
-					firstPrompt.images,
-				);
-				promptPromise = built
-					? this.ctx.session.promptCustomMessage(built.message, built.options).catch(restoreQueue)
-					: Promise.resolve();
-			} else {
-				const disposeFirstPrompt = this.ctx.recordLocalSubmission(
-					firstPrompt.text,
-					firstPrompt.images?.length ?? 0,
-				);
-				promptPromise = this.ctx.session
-					.prompt(firstPrompt.text, {
-						streamingBehavior: firstPrompt.mode === "followUp" ? "followUp" : "steer",
-						images: firstPrompt.images,
-					})
-					.catch((error: unknown) => {
-						disposeFirstPrompt();
-						restoreQueue(error);
-					});
-			}
+			// An unrelated turn may start while the first prompt is preprocessing.
+			// Wait for its admission as well as an agent start, so the tail cannot
+			// overtake it; if it queued into a running turn, its resolved prompt
+			// admits the tail without waiting for another start event.
+			const admitted = Promise.withResolvers<void>();
+			let firstAdmitted = false;
+			let agentStarted = false;
+			const onPromptAdmitted = () => {
+				firstAdmitted = true;
+				if (agentStarted) admitted.resolve();
+			};
+			const unsubscribe = this.ctx.session.subscribe(event => {
+				if (event.type === "agent_start") {
+					agentStarted = true;
+					if (firstAdmitted) admitted.resolve();
+				}
+			});
+			try {
+				// The first prompt remains fire-and-forget after admission; its rejection
+				// is funneled through restoreQueue rather than rethrown. Plain prompts
+				// dispose their local submission marker on rejection. Skill prompts
+				// are rebuilt as user-attributed custom messages.
+				let promptPromise: Promise<boolean>;
+				if (isKnownSkillCommand(this.ctx, firstPrompt.text)) {
+					const built = await buildSkillCommandPrompt(
+						this.ctx,
+						firstPrompt.text,
+						firstPrompt.mode,
+						firstPrompt.images,
+					);
+					promptPromise = built
+						? this.ctx.session.promptCustomMessage(built.message, { ...built.options, onPromptAdmitted }).then(
+								result => result !== false,
+								error => {
+									restoreQueue(error);
+									return false;
+								},
+							)
+						: Promise.resolve(false);
+				} else {
+					const disposeFirstPrompt = this.ctx.recordLocalSubmission(
+						firstPrompt.text,
+						firstPrompt.images?.length ?? 0,
+					);
+					promptPromise = this.ctx.session
+						.prompt(firstPrompt.text, {
+							streamingBehavior: firstPrompt.mode === "followUp" ? "followUp" : "steer",
+							images: firstPrompt.images,
+							onPromptAdmitted,
+						})
+						.then(
+							result => result !== false,
+							(error: unknown) => {
+								disposeFirstPrompt();
+								restoreQueue(error);
+								return false;
+							},
+						);
+				}
 
-			for (const message of rest) {
-				await this.#deliverQueuedMessage(message);
+				const firstDelivered = await Promise.race([admitted.promise.then(() => true), promptPromise]);
+				if (!firstDelivered) return;
+				for (const message of rest) {
+					await this.#deliverQueuedMessage(message);
+				}
+				this.ctx.updatePendingMessagesDisplay();
+			} finally {
+				unsubscribe();
 			}
-			this.ctx.updatePendingMessagesDisplay();
-			void promptPromise;
 		} catch (error) {
 			restoreQueue(error);
 		}

@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { type AutocompleteProvider, matchesKey, type PasteOptions, type SlashCommand } from "@oh-my-pi/pi-tui";
 import { isEnoent, logger, sanitizeText } from "@oh-my-pi/pi-utils";
@@ -1343,6 +1343,14 @@ export class InputController {
 			: images
 				? images.map(() => undefined)
 				: undefined;
+		const restoreOriginalDraft = () => {
+			this.ctx.editor.setText(originalDraft);
+			if (images) {
+				this.ctx.editor.pendingImages = images;
+				this.ctx.editor.pendingImageLinks = imageLinks ?? images.map(() => undefined);
+				this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
+			}
+		};
 		this.ctx.editor.clearDraft(options.historyText);
 
 		if (this.ctx.session.isCompacting) {
@@ -1364,29 +1372,10 @@ export class InputController {
 		}
 
 		const startImmediately = !this.ctx.session.isStreaming && this.ctx.session.queuedMessageCount === 0;
+		const batchQueued: AgentMessage[] = [];
 		let queuedCount = 0;
-		try {
-			if (startImmediately && this.ctx.onInputCallback) {
-				const first = messages[0] ?? "";
-				const dispatched = Promise.withResolvers<void>();
-				const submission = this.ctx.startPendingSubmission({
-					text: first,
-					images,
-					imageLinks,
-					streamingBehavior: "followUp",
-				});
-				submission.onSettled = dispatched.resolve;
-				this.ctx.onInputCallback(submission);
-				queuedCount = 1;
-				// onInputCallback only resolves the run loop's input promise; the
-				// session.prompt() for the first item runs later, so the session is still
-				// idle here. Enqueuing the remaining follow-ups now would let the idle
-				// queue-drain start a turn from item 2 before item 1 is in flight —
-				// inverting delivery order on a mid-session transcript (issue #10802).
-				// Wait until the first item's turn has actually started (or its dispatch
-				// settled) so the follow-ups queue behind a streaming session instead.
-				await dispatched.promise;
-			}
+		let admitted = false;
+		const enqueueRemaining = async () => {
 			while (queuedCount < messages.length) {
 				const message = messages[queuedCount] ?? "";
 				const queuedImages = queuedCount === 0 ? images : undefined;
@@ -1399,21 +1388,66 @@ export class InputController {
 								streamingBehavior: "followUp",
 							});
 						} else {
-							await this.ctx.session.followUp(message, queuedImages);
+							if (startImmediately) {
+								await this.ctx.session.followUp(message, queuedImages, {
+									onQueued: queued => batchQueued.push(queued),
+								});
+							} else {
+								await this.ctx.session.followUp(message, queuedImages);
+							}
 						}
 					},
 					{ imageCount: queuedImages?.length ?? 0 },
 				);
 				queuedCount++;
 			}
+		};
+		try {
+			if (startImmediately && this.ctx.onInputCallback) {
+				const skillPrompt = isKnownSkillCommand(this.ctx, messages[0] ?? "")
+					? await buildSkillCommandPrompt(this.ctx, messages[0] ?? "", "followUp", images)
+					: undefined;
+				const dispatched = Promise.withResolvers<void>();
+				const submission = this.ctx.startPendingSubmission({
+					text: messages[0] ?? "",
+					images,
+					imageLinks,
+					streamingBehavior: "followUp",
+					skillPrompt,
+				});
+				queuedCount = 1;
+				let queueError: unknown;
+				submission.onAdmitted = async () => {
+					admitted = true;
+					try {
+						await enqueueRemaining();
+					} catch (error) {
+						queueError = error;
+					} finally {
+						dispatched.resolve();
+					}
+				};
+				submission.onRejected = async () => {
+					this.ctx.session.dropQueuedMessages(batchQueued);
+					if (!this.ctx.editor.getText().trim()) {
+						restoreOriginalDraft();
+					}
+					this.ctx.updatePendingMessagesDisplay();
+				};
+				submission.onSettled = dispatched.resolve;
+				this.ctx.onInputCallback(submission);
+				await dispatched.promise;
+				if (!admitted) {
+					restoreOriginalDraft();
+					return;
+				}
+				if (queueError) throw queueError;
+			} else {
+				await enqueueRemaining();
+			}
 		} catch (error) {
 			if (queuedCount === 0) {
-				this.ctx.editor.setText(originalDraft);
-				if (images) {
-					this.ctx.editor.pendingImages = images;
-					this.ctx.editor.pendingImageLinks = imageLinks ?? images.map(() => undefined);
-					this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
-				}
+				restoreOriginalDraft();
 			} else {
 				const remaining = messages.slice(queuedCount);
 				const restored =

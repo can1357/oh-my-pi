@@ -5985,6 +5985,7 @@ export class AgentSession {
 				await this.#queueCustomMessage(notice, streamingBehavior);
 			}
 			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, submittedAt);
+			await options?.onPromptAdmitted?.();
 			return true;
 		}
 
@@ -6034,6 +6035,7 @@ export class AgentSession {
 				images: normalizedImages,
 				descriptionNotice: imageDescriptionNotice,
 			});
+			await options?.onPromptAdmitted?.();
 			return true;
 		}
 
@@ -6111,7 +6113,7 @@ export class AgentSession {
 	 */
 	async promptCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
-		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice"> & {
+		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted" | "onPromptRejected"> & {
 			queueChipText?: string;
 			queueOnly?: boolean;
 		},
@@ -6151,6 +6153,7 @@ export class AgentSession {
 				await this.#queueCustomMessage(notice, streamingBehavior);
 			}
 			await this.#queueCustomMessage(message, streamingBehavior, options.queueChipText);
+			await options.onPromptAdmitted?.();
 			return true;
 		}
 		if (this.isStreaming) {
@@ -6161,6 +6164,7 @@ export class AgentSession {
 				await this.#queueCustomMessage(notice, streamingBehavior);
 			}
 			await this.#queueCustomMessage(message, streamingBehavior, options?.queueChipText);
+			await options?.onPromptAdmitted?.();
 			return true;
 		}
 
@@ -6183,7 +6187,10 @@ export class AgentSession {
 	async #promptWithMessage(
 		message: AgentMessage,
 		expandedText: string,
-		options?: Pick<PromptOptions, "toolChoice" | "images" | "skipCompactionCheck"> & {
+		options?: Pick<
+			PromptOptions,
+			"toolChoice" | "images" | "skipCompactionCheck" | "onPromptAdmitted" | "onPromptRejected"
+		> & {
 			prependMessages?: AgentMessage[];
 			skipPostPromptRecoveryWait?: boolean;
 			acceptTerminalEmptyStop?: boolean;
@@ -6196,7 +6203,9 @@ export class AgentSession {
 		this.#beginInFlight();
 		const generation = this.#promptGeneration;
 		this.#promptSequence++;
+		let completed = false;
 		try {
+			await options?.onPromptAdmitted?.();
 			await this.#recovery.maybeRestoreRetryFallbackPrimary();
 			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
 			// Flush any pending bash messages before the new prompt
@@ -6420,12 +6429,17 @@ export class AgentSession {
 			if (!options?.skipPostPromptRecoveryWait) {
 				await this.#waitForPostPromptRecovery(generation);
 			}
+			completed = true;
 			return true;
 		} finally {
-			// The per-turn before_agent_start override lives only for this turn.
-			this.#tools.clearTurnSystemPromptOverride();
-			this.#usagePreflightReadyForNextModelCall = false;
-			this.#endInFlight();
+			try {
+				if (!completed) await options?.onPromptRejected?.();
+			} finally {
+				// The per-turn before_agent_start override lives only for this turn.
+				this.#tools.clearTurnSystemPromptOverride();
+				this.#usagePreflightReadyForNextModelCall = false;
+				this.#endInFlight();
+			}
 		}
 	}
 
@@ -6617,7 +6631,7 @@ export class AgentSession {
 		// from the operator's submission, not after the vision-model description.
 		const submittedAt = Date.now();
 		if (!options?.synthetic) {
-			await this.#queueUserMessage(expandedText, images, "followUp", submittedAt);
+			await this.#queueUserMessage(expandedText, images, "followUp", submittedAt, undefined, options?.onQueued);
 			return;
 		}
 		// Synthetic branch: agent-initiated hidden developer message. Bypass
@@ -6633,8 +6647,11 @@ export class AgentSession {
 			? await this.#buildImageDescriptionNotice(normalizedImages)
 			: undefined;
 		this.#allowQueuedMessageDrainRetry();
-		if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
-		this.agent.followUp({
+		if (imageDescriptionNotice) {
+			this.agent.followUp(imageDescriptionNotice);
+			options.onQueued?.(imageDescriptionNotice);
+		}
+		const queuedMessage: AgentMessage = {
 			role: "developer",
 			content,
 			attribution: options.attribution ?? "agent",
@@ -6643,7 +6660,9 @@ export class AgentSession {
 			// behind a busy turn): replay uses the marker to clear the preceding
 			// user's prompt anchor, matching the live agent_start clear.
 			synthetic: true,
-		});
+		};
+		this.agent.followUp(queuedMessage);
+		options.onQueued?.(queuedMessage);
 		this.#scheduleIdleQueueDrain();
 	}
 
@@ -6680,6 +6699,7 @@ export class AgentSession {
 		mode: "steer" | "followUp" | "aside",
 		timestamp?: number,
 		preprocessed?: { images: ImageContent[] | undefined; descriptionNotice: CustomMessage | undefined },
+		onQueued?: (message: AgentMessage) => void,
 	): Promise<void> {
 		// Captured before any await below so the aside branch can detect a
 		// newSession()/switchSession() that completed while normalization/vision
@@ -6725,14 +6745,22 @@ export class AgentSession {
 		}
 		this.#allowQueuedMessageDrainRetry();
 		if (mode === "followUp") {
-			for (const notice of videoAttachmentNotices) this.agent.followUp(notice);
-			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
-			this.agent.followUp({
+			for (const notice of videoAttachmentNotices) {
+				this.agent.followUp(notice);
+				onQueued?.(notice);
+			}
+			if (imageDescriptionNotice) {
+				this.agent.followUp(imageDescriptionNotice);
+				onQueued?.(imageDescriptionNotice);
+			}
+			const queuedMessage: AgentMessage = {
 				role: "user",
 				content,
 				attribution: "user",
 				timestamp: timestamp ?? Date.now(),
-			});
+			};
+			this.agent.followUp(queuedMessage);
+			onQueued?.(queuedMessage);
 		} else {
 			for (const notice of videoAttachmentNotices) this.agent.steer(notice);
 			if (imageDescriptionNotice) this.agent.steer(imageDescriptionNotice);
@@ -7208,6 +7236,18 @@ export class AgentSession {
 		this.agent.replaceQueues(steeringAll.filter(keep), followUpAll.filter(keep));
 		this.#reconcileQueuedMessageDrain();
 		return { steering, followUp };
+	}
+
+	/** Remove only records matching `messages` by object identity from the agent steering
+	 * and follow-up queues. Unrelated records retain their order; already-consumed records are unaffected. */
+	dropQueuedMessages(messages: readonly AgentMessage[]): void {
+		if (messages.length === 0) return;
+		const dropped = new Set(messages);
+		this.agent.replaceQueues(
+			this.agent.peekSteeringQueue().filter(message => !dropped.has(message)),
+			this.agent.peekFollowUpQueue().filter(message => !dropped.has(message)),
+		);
+		this.#reconcileQueuedMessageDrain();
 	}
 
 	/** Number of pending displayable messages (includes steering, follow-up, and next-turn messages).

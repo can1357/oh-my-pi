@@ -329,6 +329,9 @@ export async function submitInteractiveInput(
 		// background/continuation submits omit it and fall back to "followUp". The
 		// synthetic branch below opts out by design.
 		const streamingBehavior = input.streamingBehavior ?? ("followUp" as const);
+		const admission = input.onAdmitted
+			? { onPromptAdmitted: input.onAdmitted, onPromptRejected: input.onRejected }
+			: {};
 		// Continue shortcuts submit an already-started synthetic developer prompt with
 		// no optimistic user message.
 		if (!input.started && !mode.markPendingSubmissionStarted(input)) {
@@ -341,7 +344,7 @@ export async function submitInteractiveInput(
 				display: input.display ?? false,
 				attribution: "agent" as const,
 			};
-			await session.promptCustomMessage(message, { streamingBehavior });
+			await session.promptCustomMessage(message, { streamingBehavior, ...admission });
 		} else if (input.synthetic) {
 			// Synthetic continue shortcuts are hidden developer prompts. The streaming
 			// queue (#queueUserMessage) only carries user-attributed messages, so we do
@@ -354,8 +357,10 @@ export async function submitInteractiveInput(
 				expandPromptTemplates: false,
 				userInitiated: input.userInitiated,
 			});
+		} else if (input.skillPrompt) {
+			await session.promptCustomMessage(input.skillPrompt.message, { ...input.skillPrompt.options, ...admission });
 		} else {
-			await session.prompt(input.text, { images: input.images, streamingBehavior });
+			await session.prompt(input.text, { images: input.images, streamingBehavior, ...admission });
 		}
 	} catch (error: unknown) {
 		const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
