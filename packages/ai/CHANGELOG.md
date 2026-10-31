@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed fresh auth-broker snapshot caches retaining stale credentials: startup now revalidates through the configured client transport under one shared 500 ms deadline (or a supplied revalidation signal), falls back to cache for unavailable or slow brokers, and preserves 401/403 token-rejection errors ([#11073](https://github.com/can1357/oh-my-pi/pull/11073) by [@pedropaulovc](https://github.com/pedropaulovc)).
+
 ## [18.14.1] - 2026-10-31
 
 ### Added
@@ -60,9 +64,6 @@
 ### Changed
 
 - Updated Bun engine requirement to ≥1.4.4
-### Fixed
-
-- Fixed fresh auth-broker snapshot caches retaining stale credentials: startup now revalidates through the configured client transport under one shared 500 ms deadline (or a supplied revalidation signal), falls back to cache for unavailable or slow brokers, and preserves 401/403 token-rejection errors ([#11073](https://github.com/can1357/oh-my-pi/pull/11073) by [@pedropaulovc](https://github.com/pedropaulovc)).
 
 ## [18.13.2] - 2026-10-27
 
