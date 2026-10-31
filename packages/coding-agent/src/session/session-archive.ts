@@ -47,7 +47,6 @@ import { parseTitleSlotFromContent, parseTitleSlotLine } from "./session-title-s
 /** Suffix `gc --archive` gives a transcript it has compressed. */
 export const ARCHIVED_SESSION_SUFFIX = ".jsonl.gz";
 const SESSION_SUFFIX = ".jsonl";
-const ARCHIVED_BUCKET_GLOB = new Bun.Glob(`*${ARCHIVED_SESSION_SUFFIX}`);
 /** The longest name a directory entry may have on the filesystems omp runs on. */
 const NAME_MAX = 255;
 
@@ -323,8 +322,16 @@ export async function scanArchivedSessionFiles(
 		const dir = path.join(archiveRoot, bucket);
 		const found: string[] = [];
 		try {
-			for await (const name of ARCHIVED_BUCKET_GLOB.scan({ cwd: dir, followSymlinks: true })) {
-				found.push(path.join(dir, name));
+			// Not only regular files: an archived name that stands for a FIFO
+			// is still that session's name, and a restore of it by id should
+			// say what stands there, as opening it does, not that nothing
+			// matches. Nothing here opens it.
+			// `readdir`, not a glob: a glob lists only files and directories.
+			for (const name of await fs.readdir(dir)) {
+				if (!name.endsWith(ARCHIVED_SESSION_SUFFIX)) continue;
+				const entry = path.join(dir, name);
+				if ((await fs.stat(entry).catch(() => undefined))?.isDirectory()) continue;
+				found.push(entry);
 			}
 		} catch (error) {
 			if (isEnoent(error) || isPermissionError(error) || codeOf(error) === "ENOTDIR") {
@@ -1181,15 +1188,25 @@ async function copyEntryDereferenced(
 	if (!stat || isResidue(source)) return;
 	// Only absence is an empty slot: a look that fails says nothing about
 	// what is there, and a directory taken for new would be given the
-	// archive's mode.
+	// archive's mode. Said as a failed look, never as something standing there.
+	const unchecked = (error: unknown): Error =>
+		new Error(
+			`${destination} could not be checked against the archived ${source}, so whether it can be restored ` +
+				`there is not known: ${errorText(error)}`,
+			{ cause: error },
+		);
 	const existing = await fs.lstat(destination).catch((error: unknown) => {
 		if (isEnoent(error)) return undefined;
-		throw error;
+		throw unchecked(error);
 	});
 	if (stat.isDirectory()) {
 		// Through the link: a symlinked artifact directory is a directory the
 		// restore may merge into, the same way the archive phase walks one.
-		const live = existing ? await statIfPresent(destination) : undefined;
+		const live = existing
+			? await statIfPresent(destination).catch((error: unknown) => {
+					throw unchecked(error);
+				})
+			: undefined;
 		if (existing && !live?.isDirectory()) {
 			throw new Error(`${destination} is not a directory, so ${source} cannot be restored into it`);
 		}
@@ -1237,6 +1254,9 @@ async function copyEntryDereferenced(
 				// The fill names paths, so a writer that moved this directory
 				// away and put something else at its name while it was filled
 				// had files land there instead: said, not taken for a restore.
+				// This comparison only reports. It runs after the mode was set
+				// and decides nothing — not the mode, not any later step — since
+				// by the time it is read it is already stale.
 				const [mine, standing] = await Promise.all([held.stat(), fs.lstat(destination).catch(() => undefined)]);
 				if (!standing || standing.dev !== mine.dev || standing.ino !== mine.ino) {
 					throw new Error(

@@ -3975,6 +3975,7 @@ for (const [shape, method, kind, misread] of unlookable) {
 		// the failure as something else standing there or as a live owner.
 		const told = preview.restore?.errors.join("\n") ?? "";
 		expect(told).toContain(entry);
+		expect(told).toContain("could not be");
 		expect(told).toContain("EIO: injected");
 		expect(told).not.toContain(misread);
 		expect(told).not.toContain("a running process owns this session");
@@ -5832,9 +5833,10 @@ for (const apply of [false, true]) {
 			await writer.write(compressed);
 			await writer.close();
 			try {
-				// By its path, as the review did: a listing of the archive does not
-				// offer a FIFO, so asking by id would only say nothing matches.
-				const attempt = runGcCommand({ flags: { agentDir: root, restore: archiveFile, apply, json: true } }).then(
+				// By id, as a user asks — the listing offers a FIFO at an archived
+				// name, so a restore by id says what stands there, the same answer
+				// opening the session gives, not that nothing matches.
+				const attempt = runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply, json: true } }).then(
 					result => JSON.stringify(result),
 					(failure: unknown) => String(failure),
 				);
@@ -5850,6 +5852,7 @@ for (const apply of [false, true]) {
 				const { bytesRead } = await reader.read(left, 0, left.byteLength, null);
 				expect(bytesRead).toBe(compressed.byteLength);
 				expect(outcome).toContain("not a regular file");
+				expect(outcome).not.toContain("no archived session matches");
 				expect(await Bun.file(sessionFile).exists()).toBe(false);
 			} finally {
 				await reader.close();
