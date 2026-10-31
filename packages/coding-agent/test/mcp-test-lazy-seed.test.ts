@@ -14,6 +14,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "bu
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadAllMCPConfigs } from "@oh-my-pi/pi-coding-agent/mcp/config";
 import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
@@ -89,6 +90,8 @@ function createController(options: { toolsAfterReconnect?: boolean } = {}) {
 			pendingProviderId: undefined,
 			tryClaimInput: vi.fn(),
 		},
+		// `/mcp test` reads `mcp.enableProjectConfig` before it looks the server up.
+		settings: Settings.isolated(),
 		session: {
 			refreshMCPTools,
 			modelRegistry: { authStorage: undefined },
