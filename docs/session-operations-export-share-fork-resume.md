@@ -521,6 +521,8 @@ For compatibility, `--continue <full-UUID>` is normalized to `--resume <UUID>` w
 
 If implicit interactive auto-resume exhausts the saved models and model-fallback policy forbids substitution, startup closes the skipped session, warns, and starts a new session without its history or provider cache identity. It does not retry older transcripts or weaken restoration policy. When `--max-time` is set, the new session keeps the launch's original absolute deadline; time spent on the failed restore is not added back to the budget. Explicit `--continue`/`--resume`, runtime `/resume`, and headless/SDK hosts still fail closed under the same policy; an explicit model override remains an intentional way to restore the transcript with another model.
 
+`autoResume` applies to interactive runs only. A `--print` run, a run whose prompt arrived on piped stdin, and an explicit mode (`--mode`) start a fresh session instead of adopting the most recent one, because such a run is normally issued while that conversation is still live in another process — adopting it would put two writers on one transcript and replay the pending tool calls a resume carries in. Explicit `--continue` and `--resume` resume from any mode.
+
 This is startup-only behavior; there is no interactive `/continue` slash command.
 
 ## Restart
