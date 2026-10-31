@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use crate::{error, variables};
+use crate::variables;
 
 /// A cache of paths associated with names.
 #[derive(Clone, Default)]
@@ -37,15 +37,15 @@ impl PathCache {
 		self.cache.insert(name.into(), path);
 	}
 
-	/// Projects the cache into a shell value.
-	pub fn to_value(&self) -> Result<variables::ShellValue, error::Error> {
-		let pairs = self
-			.cache
-			.iter()
-			.map(|(k, v)| (Some(k.to_owned()), v.to_string_lossy().to_string()))
-			.collect::<Vec<_>>();
-
-		variables::ShellValue::associative_array_from_literals(variables::ArrayLiteral(pairs))
+	/// Projects the cache into a shell value: an associative array from each
+	/// name to its path.
+	pub fn to_value(&self) -> variables::ShellValue {
+		variables::ShellValue::AssociativeArray(
+			self.cache
+				.iter()
+				.map(|(name, path)| (name.to_owned(), path.to_string_lossy().to_string()))
+				.collect(),
+		)
 	}
 
 	/// Removes the path associated with the given name, if there is one.

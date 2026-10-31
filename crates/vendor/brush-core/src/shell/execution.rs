@@ -184,7 +184,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		source_info: &crate::SourceInfo,
 		params: &ExecutionParameters,
 	) -> Result<ExecutionResult, error::Error> {
-		let parse_result = self.parse_string(command);
+		let parse_result = self.parse_string_off_worker(command.into()).await?;
 		self
 			.run_parsed_result(parse_result, source_info, params)
 			.await

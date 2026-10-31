@@ -19,6 +19,72 @@ pub(crate) fn decode_line(line: Vec<u8>) -> String {
 	String::from_utf8_lossy_owned(line)
 }
 
+/// [`decode_line`] with a checkpoint before each stride of the line.
+///
+/// `from_utf8_lossy_owned` walks every byte of the line in one step, so a
+/// 64 MiB line held the worker for the whole of that walk before the divided
+/// assignment it feeds ever started — part of the 288 ms a `read -r` of a
+/// 64 MiB line was measured holding. This walks the same bytes a stride at a
+/// time, with a checkpoint before each.
+///
+/// A stride is cut where no character spans it, so dividing the walk decodes
+/// exactly what one pass over the whole line decodes, down to where the
+/// replacement characters of malformed input land.
+///
+/// It lives here, beside the plain decode, because `read` and `mapfile` are
+/// separately feature-gated: a helper in either one's module cannot serve the
+/// other, and both read a line that can be any length.
+///
+/// # Errors
+///
+/// Returns [`ErrorKind::Interrupted`] if the run is cancelled part way,
+/// discarding what had been decoded by then.
+pub(crate) async fn decode_line_in_strides(
+	params: &brush_core::ExecutionParameters,
+	line: Vec<u8>,
+) -> Result<String, brush_core::Error> {
+	// Below a stride there is nothing to divide, and the plain decode keeps
+	// the buffer it was given rather than copying it into a new one.
+	if line.len() <= brush_core::DIVIDE_COPY_ABOVE_BYTES {
+		return Ok(decode_line(line));
+	}
+
+	let mut decoded = String::with_capacity(line.len());
+	let mut budget = brush_core::ElementBudget::new();
+	let mut rest: &[u8] = &line;
+	while !rest.is_empty() {
+		let end = stride_end(rest);
+		let due = budget.charge(end);
+		if due > 0 {
+			brush_core::loop_checkpoints(params, due).await?;
+		}
+		let (stride, remaining) = rest.split_at(end);
+		decoded.push_str(&String::from_utf8_lossy(stride));
+		rest = remaining;
+	}
+
+	Ok(decoded)
+}
+
+/// How many bytes of `rest` the next stride covers: a stride, then forward
+/// over the continuation bytes of a character that began inside it.
+///
+/// A character is four bytes at most, so this moves the cut by at most three.
+/// Stray continuation bytes that are nobody's character are left where they
+/// are: `from_utf8_lossy` replaces each of them on its own, so a run of them
+/// decodes the same whether or not a stride ends inside it.
+fn stride_end(rest: &[u8]) -> usize {
+	if rest.len() <= brush_core::DIVIDE_COPY_ABOVE_BYTES {
+		return rest.len();
+	}
+	let limit = (brush_core::DIVIDE_COPY_ABOVE_BYTES + 3).min(rest.len());
+	let mut end = brush_core::DIVIDE_COPY_ABOVE_BYTES;
+	while end < limit && rest[end] & 0xC0 == 0x80 {
+		end += 1;
+	}
+	end
+}
+
 /// When a [`LineInput`] may read past the bytes it hands out.
 #[derive(Clone, Copy)]
 pub(crate) enum ReadAhead {

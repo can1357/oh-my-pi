@@ -5,7 +5,7 @@ use std::io::Write;
 use clap::builder::styling;
 pub use futures::future::BoxFuture;
 
-use crate::{BuiltinError, CommandArg, commands, error, extensions, results};
+use crate::{BuiltinError, CommandArg, commands, error, extensions, interp, results};
 
 /// Type of a function implementing a built-in command.
 ///
@@ -540,7 +540,8 @@ pub fn simple_builtin<B: SimpleCommand + Send + Sync, SE: extensions::ShellExten
 
 /// Returns a built-in command registration, given an implementation of the
 /// `Command` trait.
-pub fn builtin<B: Command + Send + Sync, SE: extensions::ShellExtensions>() -> Registration<SE> {
+pub fn builtin<B: Command + Send + Sync + 'static, SE: extensions::ShellExtensions>()
+-> Registration<SE> {
 	Registration {
 		execute_func:        exec_builtin::<B, SE>,
 		content_func:        get_builtin_content::<B>,
@@ -555,8 +556,10 @@ pub fn builtin<B: Command + Send + Sync, SE: extensions::ShellExtensions>() -> R
 /// Returns a built-in command registration, given an implementation of the
 /// `DeclarationCommand` trait. Used for select commands that can take parsed
 /// declarations as arguments.
-pub fn decl_builtin<B: DeclarationCommand + Send + Sync, SE: extensions::ShellExtensions>()
--> Registration<SE> {
+pub fn decl_builtin<
+	B: DeclarationCommand + Send + Sync + 'static,
+	SE: extensions::ShellExtensions,
+>() -> Registration<SE> {
 	Registration {
 		execute_func:        exec_declaration_builtin::<B, SE>,
 		content_func:        get_builtin_content::<B>,
@@ -621,24 +624,32 @@ async fn exec_simple_builtin_impl<
 	T::execute(context, plain_args)
 }
 
-fn exec_builtin<T: Command + Send + Sync, SE: extensions::ShellExtensions>(
+fn exec_builtin<T: Command + Send + Sync + 'static, SE: extensions::ShellExtensions>(
 	context: commands::ExecutionContext<'_, SE>,
 	args: Vec<CommandArg>,
 ) -> BoxFuture<'_, Result<results::ExecutionResult, error::Error>> {
 	Box::pin(async move { exec_builtin_impl::<T, SE>(context, args).await })
 }
 
-async fn exec_builtin_impl<T: Command + Send + Sync, SE: extensions::ShellExtensions>(
+async fn exec_builtin_impl<T: Command + Send + Sync + 'static, SE: extensions::ShellExtensions>(
 	context: commands::ExecutionContext<'_, SE>,
 	args: Vec<CommandArg>,
 ) -> Result<results::ExecutionResult, error::Error> {
-	let plain_args = args.into_iter().map(|arg| match arg {
-		CommandArg::String(s) => s,
-		CommandArg::Assignment(a) => a.to_string(),
-	});
+	let mut plain_args = Vec::with_capacity(args.len());
+	let mut budget = interp::ElementBudget::new();
+	for arg in args {
+		let due = budget.charge(0);
+		if due > 0 {
+			interp::loop_checkpoints(&context.params, due).await?;
+		}
+		plain_args.push(match arg {
+			CommandArg::String(s) => s,
+			// An assignment argument carries an expanded value.
+			CommandArg::Assignment(_) => commands::render_argument(&context.params, &arg).await?,
+		});
+	}
 
-	let result = T::new(plain_args);
-	let command = match result {
+	let command = match parse_builtin_args::<T>(plain_args).await? {
 		Ok(command) => command,
 		Err(e) => {
 			let _ = writeln!(context.stderr(), "{e}");
@@ -649,8 +660,45 @@ async fn exec_builtin_impl<T: Command + Send + Sync, SE: extensions::ShellExtens
 	call_builtin(command, context).await
 }
 
+/// Parses a builtin's arguments with `clap`, off the runtime's worker when
+/// they are more than one step of work.
+///
+/// `clap` is one synchronous call that walks every argument several times
+/// over — validating, splitting and copying it — and has no way to be
+/// divided from outside. `printf -v result '%s' "$huge"` and `. file "$huge"`
+/// with a 64 MiB argument each held the worker for about 52 ms inside that
+/// call alone, before the builtin itself started. Arguments within one step
+/// of an [`interp::ElementBudget`] — at most
+/// [`interp::ELEMENT_CHECKPOINT_STRIDE`] of them, holding at most
+/// [`interp::BYTE_CHECKPOINT_STRIDE`] bytes between them — are parsed where
+/// they are, which is every ordinary command line, and anything more on a
+/// blocking worker. The test reads at most that many lengths, so it is
+/// bounded itself. A builtin already on a blocking worker parses in place:
+/// it has no async worker to protect, and queueing for another blocking
+/// worker while holding one can exhaust the pool (see
+/// [`commands::builtin_on_blocking_worker`]).
+async fn parse_builtin_args<T: Command + Send + 'static>(
+	args: Vec<String>,
+) -> Result<Result<T, clap::Error>, error::Error> {
+	let one_step = args.len() <= interp::ELEMENT_CHECKPOINT_STRIDE
+		&& args
+			.iter()
+			.try_fold(0usize, |bytes, arg| {
+				Some(bytes + arg.len()).filter(|bytes| *bytes <= interp::BYTE_CHECKPOINT_STRIDE)
+			})
+			.is_some();
+	if one_step || commands::builtin_on_blocking_worker() {
+		return Ok(T::new(args));
+	}
+	match tokio::task::spawn_blocking(move || T::new(args)).await {
+		Ok(parsed) => Ok(parsed),
+		Err(join_error) if join_error.is_panic() => std::panic::resume_unwind(join_error.into_panic()),
+		Err(join_error) => Err(error::ErrorKind::ThreadingError(join_error).into()),
+	}
+}
+
 fn exec_declaration_builtin<
-	T: DeclarationCommand + Send + Sync,
+	T: DeclarationCommand + Send + Sync + 'static,
 	SE: extensions::ShellExtensions,
 >(
 	context: commands::ExecutionContext<'_, SE>,
@@ -660,7 +708,7 @@ fn exec_declaration_builtin<
 }
 
 async fn exec_declaration_builtin_impl<
-	T: DeclarationCommand + Send + Sync,
+	T: DeclarationCommand + Send + Sync + 'static,
 	SE: extensions::ShellExtensions,
 >(
 	context: commands::ExecutionContext<'_, SE>,
@@ -669,7 +717,12 @@ async fn exec_declaration_builtin_impl<
 	let mut options = vec![];
 	let mut declarations = vec![];
 
+	let mut budget = interp::ElementBudget::new();
 	for (i, arg) in args.into_iter().enumerate() {
+		let due = budget.charge(0);
+		if due > 0 {
+			interp::loop_checkpoints(&context.params, due).await?;
+		}
 		match arg {
 			CommandArg::String(s)
 				if i == 0 || (s.len() > 1 && (s.starts_with('-') || s.starts_with('+'))) =>
@@ -680,8 +733,7 @@ async fn exec_declaration_builtin_impl<
 		}
 	}
 
-	let result = T::new(options);
-	let mut command = match result {
+	let mut command = match parse_builtin_args::<T>(options).await? {
 		Ok(command) => command,
 		Err(e) => {
 			let _ = writeln!(context.stderr(), "{e}");
@@ -722,10 +774,13 @@ async fn call_builtin(
 	context: commands::ExecutionContext<'_, impl extensions::ShellExtensions>,
 ) -> Result<results::ExecutionResult, error::Error> {
 	let builtin_name = context.command_name.clone();
-	let result = command
-		.execute(context)
-		.await
-		.map_err(|e| error::ErrorKind::BuiltinError(Box::new(e), builtin_name))?;
+	let result = command.execute(context).await.map_err(|e| {
+		// `declare -i x=1+` ends a non-interactive Bash, as an assignment's
+		// arithmetic error does; wrapping the error must not change that.
+		let fatal = e.is_fatal();
+		let error = error::Error::from(error::ErrorKind::BuiltinError(Box::new(e), builtin_name));
+		if fatal { error.into_fatal() } else { error }
+	})?;
 
 	Ok(result)
 }

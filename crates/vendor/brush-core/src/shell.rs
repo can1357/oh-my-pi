@@ -172,13 +172,46 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
 
 impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
 	fn clone(&self) -> Self {
+		self.clone_with(self.env.clone(), self.args.clone())
+	}
+}
+
+impl<SE: extensions::ShellExtensions> Shell<SE> {
+	/// A subshell of this shell: a copy whose variables and positional
+	/// parameters are copied a stride at a time.
+	///
+	/// Those two are the parts of a shell whose size a script's data sets,
+	/// and [`Clone::clone`] copied them in one step: every pipeline stage,
+	/// command substitution and subshell of a shell holding a 64 MiB variable
+	/// held the worker 25.3 ms, and 136 ms under load, before it ran. The rest
+	/// is bounded by the script's own text or by the system.
+	///
+	/// # Errors
+	///
+	/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+	/// way, discarding the copy.
+	pub(crate) async fn clone_divided(
+		&self,
+		params: &crate::ExecutionParameters,
+	) -> Result<Self, error::Error> {
+		let env = self.env.clone_divided(params).await?;
+		let mut budget = crate::interp::ElementBudget::new();
+		let mut args = Vec::with_capacity(self.args.len());
+		for arg in &self.args {
+			args.push(crate::variables::clone_charged(params, &mut budget, arg).await?);
+		}
+		Ok(self.clone_with(env, args))
+	}
+
+	/// A copy of this shell holding `env` and `args` in place of its own.
+	fn clone_with(&self, env: ShellEnvironment, args: Vec<String>) -> Self {
 		Self {
 			error_formatter: self.error_formatter.clone(),
 			traps: self.traps.clone(),
 			open_files: self.open_files.clone(),
 			working_dir: self.working_dir.clone(),
 			filesystem: self.filesystem.clone(),
-			env: self.env.clone(),
+			env,
 			funcs: self.funcs.clone(),
 			options: self.options.clone(),
 			jobs: jobs::JobManager::new(),
@@ -188,7 +221,7 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
 			last_exit_status_change_count: self.last_exit_status_change_count,
 			last_pipeline_statuses: self.last_pipeline_statuses.clone(),
 			name: self.name.clone(),
-			args: self.args.clone(),
+			args,
 			version: self.version.clone(),
 			product_display_str: self.product_display_str.clone(),
 			call_stack: {
@@ -638,12 +671,18 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 	/// subshell) for running a builtin off the async runtime. The copy has an
 	/// empty job table: jobs own their processes, so they never leave this
 	/// shell. Adopt its final state with [`Self::settle_lease`]; if it is never
-	/// settled, this shell is unchanged.
-	pub(crate) fn lease(&self) -> Self {
-		let mut lease = self.clone();
+	/// settled, this shell is unchanged. The copy is made like a subshell's,
+	/// a stride at a time ([`Self::clone_divided`]).
+	///
+	/// # Errors
+	///
+	/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+	/// way, discarding the copy.
+	pub(crate) async fn lease(&self, params: &crate::ExecutionParameters) -> Result<Self, error::Error> {
+		let mut lease = self.clone_divided(params).await?;
 		lease.depth = self.depth;
 		lease.call_stack = self.call_stack.clone();
-		lease
+		Ok(lease)
 	}
 
 	/// Adopts the state a builtin left in a [`Self::lease`], keeping this

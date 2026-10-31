@@ -58,8 +58,16 @@ pub use commands::{CommandArg, ExecutionContext};
 pub use error::{BuiltinError, Error, ErrorKind};
 pub use extensions::ShellExtensions;
 pub use interp::{
-	ExecutionParameters, ExternalCommandInfo, ExternalCommandOutputMarker,
-	ExternalCommandOutputMarkers, ProcessGroupPolicy, SpawnObserver,
+	DIVIDE_COPY_ABOVE_BYTES, Due, ElementBudget, ExecutionParameters, ExternalCommandInfo,
+	ExternalCommandOutputMarker, ExternalCommandOutputMarkers, ProcessGroupPolicy, SpawnObserver,
+	// A builtin assigning a value the caller sized needs the same divided
+	// copy the interpreter uses: `read`'s line, `getopts`' positionals. A
+	// builtin that *builds* such a value — `read`'s field split, its decode of
+	// the bytes it just read — needs the loop budget as well, for the same
+	// reason the interpreter's own field splitting does.
+	clone_in_strides,
+	loop_checkpoints,
+	push_str_in_strides,
 };
 pub use parser::{SourcePosition, SourcePositionOffset, SourceSpan};
 pub use pipetap::{PipeMirror, PipeTap};
@@ -70,3 +78,5 @@ pub use shell::{
 };
 pub use sourceinfo::SourceInfo;
 pub use variables::{ShellValue, ShellVariable};
+/// A name a builtin is handed is text the caller expanded, of any length.
+pub use expansion::valid_variable_name_in_strides;

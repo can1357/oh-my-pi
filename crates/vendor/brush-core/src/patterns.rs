@@ -2,7 +2,7 @@
 
 use std::{collections::VecDeque, path::Path};
 
-use crate::{error, regex, sys, trace_categories};
+use crate::{error, interp, regex, sys, trace_categories};
 
 /// Represents a piece of a shell pattern.
 #[derive(Clone, Debug)]
@@ -72,9 +72,43 @@ fn is_empty_component(component: &PatternWord) -> bool {
 	component.iter().all(|piece| piece.as_str().is_empty())
 }
 
-/// Stops expansion with [`error::ErrorKind::Interrupted`] once the run is
-/// cancelled.
-fn ensure_not_cancelled(cancel: Option<&tokio_util::sync::CancellationToken>) -> Result<(), error::Error> {
+/// Cooperates with Tokio's scheduler at a traversal boundary, then stops
+/// expansion with [`error::ErrorKind::Interrupted`] once the run is cancelled.
+///
+/// On the native route every read below is synchronous, so a walk made only of
+/// them never returns `Pending` and the worker polling it never returns to the
+/// scheduler. The cancellation check alone cannot save that walk: the run's
+/// deadline and the task that sets `cancel` both need a worker of their own.
+/// Spending the cooperative budget first gives them one, and the thread's
+/// clock bounds how long the walk runs between yields, as
+/// `interp::loop_checkpoint` does for the interpreter's loops.
+async fn walk_checkpoint(
+	cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<(), error::Error> {
+	tokio::task::coop::consume_budget().await;
+	interp::yield_if_held_too_long().await;
+	ensure_not_cancelled(cancel)
+}
+
+/// [`walk_checkpoint`] for a step that is a whole byte stride of work, which
+/// reads the thread's clock every time: see `interp::stride_checkpoint`.
+///
+/// Spending only Tokio's budget, a 64 KiB stride yielded once per 8 MiB of
+/// a pattern; reading the clock once per sixteen strides, once per
+/// megabyte.
+async fn stride_checkpoint(
+	cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<(), error::Error> {
+	tokio::task::coop::consume_budget().await;
+	interp::yield_after_stride().await;
+	ensure_not_cancelled(cancel)
+}
+
+/// After the cooperative yield, so a cancellation raised while this task was
+/// parked is seen on the step that follows it.
+fn ensure_not_cancelled(
+	cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<(), error::Error> {
 	if cancel.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
 		return Err(error::ErrorKind::Interrupted.into());
 	}
@@ -240,14 +274,32 @@ impl Pattern {
 		// NoGlob, preserving the argument even when nullglob is enabled.
 		if self.pieces.is_empty() {
 			return Ok(PatternExpansionResult::NoGlob);
+		}
 
 		// Similarly, if we're *confident* the pattern doesn't require expansion,
-		// then we know there's a single expansion (before filtering).
-		} else if !self.pieces.iter().any(|piece| {
-			matches!(piece, PatternPiece::Pattern(_))
-				&& requires_expansion(piece.as_str(), self.enable_extended_globbing)
-		}) {
-			let concatenated: String = self.pieces.iter().map(|piece| piece.as_str()).collect();
+		// then we know there's a single expansion (before filtering). One piece
+		// can be a whole array element, so both the scan and the copy that
+		// follows it read every byte of one and are divided.
+		let mut needs_expansion = false;
+		for piece in &self.pieces {
+			if matches!(piece, PatternPiece::Pattern(_))
+				&& requires_expansion_divided(
+					piece.as_str(),
+					self.enable_extended_globbing,
+					options.cancel.as_ref(),
+				)
+				.await?
+			{
+				needs_expansion = true;
+				break;
+			}
+		}
+
+		if !needs_expansion {
+			let mut concatenated = String::new();
+			for piece in &self.pieces {
+				push_in_strides(&mut concatenated, piece.as_str(), options.cancel.as_ref()).await?;
+			}
 
 			return Ok(PatternExpansionResult::Expanded(vec![concatenated]));
 		}
@@ -357,16 +409,32 @@ impl Pattern {
 			components = kept;
 		}
 
+		// Whether each component is a glob. Past the first glob in a word the
+		// rest of it can still be any size, so these are read a stride at a
+		// time too.
+		let mut component_globbed = Vec::with_capacity(components.len());
+		for component in &components {
+			let mut globbed = false;
+			for piece in component {
+				if matches!(piece, PatternPiece::Pattern(_))
+					&& requires_expansion_divided(
+						piece.as_str(),
+						self.enable_extended_globbing,
+						options.cancel.as_ref(),
+					)
+					.await?
+				{
+					globbed = true;
+					break;
+				}
+			}
+			component_globbed.push(globbed);
+		}
+
 		// Under `globstar`, what each `**` component matches depends on what
 		// comes before and after it (see `GlobstarMode`); decide it before the
 		// loop consumes the components.
 		let last_index = components.len().saturating_sub(1);
-		let is_globbed = |component: &PatternWord| {
-			component.iter().any(|piece| {
-				matches!(piece, PatternPiece::Pattern(_))
-					&& requires_expansion(piece.as_str(), self.enable_extended_globbing)
-			})
-		};
 		// One slot per component, so the mode a `**` component gets cannot drift
 		// from the component the loop below is at.
 		let globstar_modes: Vec<Option<GlobstarMode>> = if options.globstar {
@@ -384,7 +452,7 @@ impl Pattern {
 						// `**` was spelled, with its slash only when no earlier
 						// component is a glob: `a1/**` gives `a1/`, `*/**` gives
 						// `a1`, `**/sub/**` gives `d1/sub`.
-						let globbed_base = components[..index].iter().any(is_globbed);
+						let globbed_base = component_globbed[..index].contains(&true);
 						GlobstarMode::Entries { globbed_base }
 					} else if is_empty_component(&components[index + 1]) {
 						// `**/` ends the pattern, or a slash follows it (`**//x`,
@@ -424,10 +492,7 @@ impl Pattern {
 		let mut unverified_suffix = false;
 		let mut trailing_slash = false;
 		for (index, component) in components.into_iter().enumerate() {
-			if !component.iter().any(|piece| {
-				matches!(piece, PatternPiece::Pattern(_))
-					&& requires_expansion(piece.as_str(), self.enable_extended_globbing)
-			}) {
+			if !component_globbed[index] {
 				let flattened = component
 					.iter()
 					.map(|piece| piece.as_str())
@@ -464,7 +529,7 @@ impl Pattern {
 			let current_paths = std::mem::take(&mut paths_so_far);
 			for current_path in current_paths {
 				// After a `**` walk this lists every directory it found again.
-				ensure_not_cancelled(options.cancel.as_ref())?;
+				walk_checkpoint(options.cancel.as_ref()).await?;
 				let subpattern = Self::from(&component)
 					.set_extended_globbing(self.enable_extended_globbing)
 					.set_case_insensitive(self.case_insensitive);
@@ -487,7 +552,7 @@ impl Pattern {
 					for entry in entries.filter_map(Result::ok) {
 						// One directory can hold millions of entries, and nothing
 						// here yields on the native route.
-						ensure_not_cancelled(options.cancel.as_ref())?;
+						walk_checkpoint(options.cancel.as_ref()).await?;
 						let file_name = entry.file_name();
 						let name = file_name.to_string_lossy();
 						if !allow_dot_files && name.starts_with('.') {
@@ -518,7 +583,7 @@ impl Pattern {
 			let mut existing = Vec::with_capacity(paths_so_far.len());
 			for path in paths_so_far {
 				// After a `**` walk this probes a path under every directory.
-				ensure_not_cancelled(options.cancel.as_ref())?;
+				walk_checkpoint(options.cancel.as_ref()).await?;
 				let probe = probe_path(fs, &path);
 				// `*/` follows symlinks like bash (a link to a directory
 				// matches); a named suffix only has to exist, dangling or not.
@@ -593,8 +658,8 @@ impl Pattern {
 	/// `**` or `**/`, only a base for components that follow.
 	///
 	/// Returns [`error::ErrorKind::Interrupted`] once `cancel` is cancelled: the
-	/// reads below are synchronous on the native route, so the walk never
-	/// yields and nothing else can stop it.
+	/// reads below are synchronous on the native route, so the walk only yields
+	/// where [`walk_checkpoint`] makes it.
 	async fn expand_globstar(
 		fs: &pi_vfs::Fs,
 		bases: Vec<std::path::PathBuf>,
@@ -608,7 +673,7 @@ impl Pattern {
 		for base in bases {
 			// Each base costs a synchronous probe on the native route, and a
 			// base that is not a directory never reaches the walk's check below.
-			ensure_not_cancelled(cancel)?;
+			walk_checkpoint(cancel).await?;
 			if !fs.is_dir(probe_path(fs, &base)).await {
 				continue;
 			}
@@ -629,7 +694,7 @@ impl Pattern {
 
 			let mut pending = vec![base];
 			while let Some(dir) = pending.pop() {
-				ensure_not_cancelled(cancel)?;
+				walk_checkpoint(cancel).await?;
 				let Ok(listing) = fs.read_dir(probe_path(fs, &dir)).await else {
 					continue;
 				};
@@ -637,7 +702,7 @@ impl Pattern {
 					// A single directory can hold millions of entries, and on the
 					// native route nothing below yields, so a timeout arriving
 					// during this loop is only seen if it is read here.
-					ensure_not_cancelled(cancel)?;
+					walk_checkpoint(cancel).await?;
 					let file_name = entry.file_name();
 					if !allow_dot_files && file_name.to_string_lossy().starts_with('.') {
 						continue;
@@ -752,11 +817,326 @@ impl Pattern {
 	}
 }
 
-/// Checks whether a string contains glob metacharacters that would trigger
-/// pathname expansion. Delegates to the pattern parser's grammar, which is
-/// the single source of truth for what constitutes a glob metacharacter.
-fn requires_expansion(s: &str, enable_extended_globbing: bool) -> bool {
-	brush_parser::pattern::pattern_has_glob_metacharacters(s, enable_extended_globbing)
+/// The checkpoint before `remaining` more bytes of a pattern are read or
+/// copied: [`stride_checkpoint`] while that is at least a whole stride, else
+/// [`walk_checkpoint`].
+///
+/// Every piece of every unquoted word comes through here, and a piece is
+/// usually a few bytes, which cost no more than one step of a walk. Reading
+/// the clock for each of them would cost a million-element expansion more than
+/// the reading bounds.
+async fn checkpoint_before(
+	remaining: usize,
+	cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<(), error::Error> {
+	if remaining >= interp::BYTE_CHECKPOINT_STRIDE {
+		stride_checkpoint(cancel).await
+	} else {
+		walk_checkpoint(cancel).await
+	}
+}
+
+/// Appends `text` to `out` a stride at a time, spending a checkpoint before
+/// each stride.
+///
+/// One pattern piece can be a whole array element; copying sixty-four
+/// megabytes of one in a single step is a stretch nothing can interrupt. See
+/// `interp::push_str_in_strides`, which does the same inside the expander.
+async fn push_in_strides(
+	out: &mut String,
+	text: &str,
+	cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<(), error::Error> {
+	out.reserve(text.len());
+	let mut rest = text;
+	loop {
+		checkpoint_before(rest.len(), cancel).await?;
+		if rest.len() <= interp::BYTE_CHECKPOINT_STRIDE {
+			out.push_str(rest);
+			return Ok(());
+		}
+		// A stride lands mid-character at most three bytes in.
+		let mut end = interp::BYTE_CHECKPOINT_STRIDE;
+		while !rest.is_char_boundary(end) {
+			end -= 1;
+		}
+		let (piece, remaining) = rest.split_at(end);
+		out.push_str(piece);
+		rest = remaining;
+	}
+}
+
+/// [`GlobScan`] over a string of any size, a byte stride at a time.
+///
+/// One array element can be a whole word. The pattern grammar decided this by
+/// reading every byte of it, at about 20 ns a byte and with nothing to yield:
+/// sixty-four megabytes of text with one unmatched `[` held a worker for
+/// 1.5 s. Filtering for the bytes that can begin a glob only put that off
+/// until the word held one.
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part way.
+async fn requires_expansion_divided(
+	s: &str,
+	enable_extended_globbing: bool,
+	cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<bool, error::Error> {
+	if s.len() <= interp::BYTE_CHECKPOINT_STRIDE && !may_hold_glob(s.as_bytes(), enable_extended_globbing)
+	{
+		return Ok(false);
+	}
+	let mut scan = GlobScan::new(enable_extended_globbing);
+	let mut end = 0usize;
+	loop {
+		checkpoint_before(s.len().saturating_sub(end), cancel).await?;
+		end = end.saturating_add(interp::BYTE_CHECKPOINT_STRIDE);
+		if let Some(found) = scan.read(s.as_bytes(), end) {
+			return Ok(found);
+		}
+	}
+}
+
+/// Whether a word holds any byte a glob could be built from.
+///
+/// Every word of every expansion reaches [`requires_expansion_divided`], and
+/// almost none of them is a pattern. [`GlobScan`] decides one in a few
+/// nanoseconds a byte, but the checkpoint in front of it is a clock reading
+/// and a budget charge, which on a million-element array copy measured
+/// **+7.0%** against the head before it. This answers the ordinary word in
+/// one pass of a byte comparison and spends nothing.
+///
+/// It only has to be conservative: a `yes` sends the word to the scan, which
+/// decides it exactly. Every glob the grammar recognises contains a `*`, a
+/// `?` or a `[`, and every extended one contains a `(`.
+///
+/// Bounded like every other scan here: a word longer than
+/// [`interp::BYTE_CHECKPOINT_STRIDE`] goes to the divided path whatever this
+/// says, so no word is read past one stride without a checkpoint.
+fn may_hold_glob(bytes: &[u8], extended: bool) -> bool {
+	bytes
+		.iter()
+		.any(|&byte| matches!(byte, b'*' | b'?' | b'[') || (extended && byte == b'('))
+}
+
+/// Decides what `brush_parser::pattern::pattern_has_glob_metacharacters`
+/// decides — whether a pattern holds a glob — reading it once, front to
+/// back, and able to stop and resume at any byte.
+///
+/// The grammar is a PEG with no memo, and a pattern can be any size. It reads
+/// every byte at about 20 ns a byte; it reads a bracket expression from each
+/// `[` to the end, again for every `[`, so 16 Ki of them took 11 s; and it
+/// retries nested extended globs from scratch, so 22 `@(` took 1.35 s, twice
+/// as long for each more. None of that can yield.
+///
+/// What the grammar decides comes down to three things about the characters
+/// it reaches reading from the start of the pattern, where it reads a
+/// backslash and the character after it as one:
+///
+/// - a `*` or a `?`;
+/// - a `[` whose bracket expression closes: after an optional `!` or `^`, at
+///   least one member, then a `]` that no member took. A member is a class
+///   (`[:alpha:]`), a range (`a-z`), a backslash and the character after it,
+///   or any other character but `]`;
+/// - with extended globbing, a `+(`, `@(` or `!(` and, after it, a `)`. The
+///   innermost such opener before that `)` closes there, unless a bracket
+///   expression between them closes first, which is the case above. (`?(`
+///   and `*(` are the first case already.)
+///
+/// Only the bracket case cannot be decided where it starts: whether it closes
+/// is known at its `]` or at the end. So each `[` reached starts a reading of
+/// members, and the readings run side by side, earliest byte first. Two that
+/// reach the same byte in the same state are the same reading from there on
+/// and merge; a member is at most eleven bytes, so only a handful are ever
+/// apart. `glob_scan_agrees_with_the_grammar` holds all of this to the
+/// grammar.
+struct GlobScan {
+	extended: bool,
+	/// The next character the grammar reaches from the start of the pattern.
+	top:      usize,
+	/// From where a `)` closes the earliest extended glob opened so far.
+	closes:   Option<usize>,
+	/// The bracket expressions still open.
+	brackets: Vec<BracketRead>,
+}
+
+/// Where one bracket expression has read its members to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct BracketRead {
+	/// The next member.
+	at:         usize,
+	/// Whether it has read one yet: `[]` and `[!]` do not close.
+	has_member: bool,
+	/// Whether it is just past its `[`, where `!` or `^` inverts it.
+	opening:    bool,
+}
+
+/// Bracket expression classes, as the grammar spells them. None is a prefix of
+/// another, so trying all of them is trying the grammar's first that fits.
+const BRACKET_CLASSES: [&[u8]; 12] = [
+	b"alnum", b"alpha", b"blank", b"cntrl", b"digit", b"graph", b"lower", b"print", b"punct",
+	b"space", b"upper", b"xdigit",
+];
+
+impl GlobScan {
+	const fn new(extended: bool) -> Self {
+		Self { extended, top: 0, closes: None, brackets: Vec::new() }
+	}
+
+	/// Reads `pattern` up to byte `end`: whether it holds a glob, once that is
+	/// decided, or `None` while it is not.
+	///
+	/// Every call must pass the same `pattern` and a larger `end`.
+	fn read(&mut self, pattern: &[u8], end: usize) -> Option<bool> {
+		loop {
+			// A bracket expression read to the end never closed.
+			self.brackets.retain(|read| read.at < pattern.len());
+			let top = (self.top < pattern.len()).then_some(self.top);
+			let bracket = self.brackets.iter().map(|read| read.at).min();
+			let at = match (top, bracket) {
+				(None, None) => return Some(false),
+				(Some(top), None) => top,
+				(None, Some(bracket)) => bracket,
+				(Some(top), Some(bracket)) => top.min(bracket),
+			};
+			if at >= end {
+				return None;
+			}
+			let found = if top == Some(at) {
+				self.read_top(pattern, end)
+			} else {
+				self.read_member(pattern, end, at)
+			};
+			if found {
+				return Some(true);
+			}
+		}
+	}
+
+	/// One step of the reading from the start: whether it found a glob.
+	fn read_top(&mut self, pattern: &[u8], end: usize) -> bool {
+		let at = self.top;
+		match pattern[at] {
+			b'\\' if at + 1 < pattern.len() => self.top = at + 1 + char_width(pattern[at + 1]),
+			b'*' | b'?' => return true,
+			b'[' => {
+				self.open(BracketRead { at: at + 1, has_member: false, opening: true });
+				self.top = at + 1;
+			},
+			b'+' | b'@' | b'!' if self.extended && pattern.get(at + 1) == Some(&b'(') => {
+				self.closes.get_or_insert(at + 2);
+				self.top = at + 2;
+			},
+			b')' if self.closes.is_some_and(|from| at >= from) => return true,
+			_ => {
+				// Nothing until the next byte that can matter here.
+				let (extended, closing) = (self.extended, self.closes.is_some());
+				let rest = &pattern[at + 1..end.min(pattern.len()).max(at + 1)];
+				let plain = rest
+					.iter()
+					.position(|&byte| match byte {
+						b'\\' | b'*' | b'?' | b'[' => true,
+						b'+' | b'@' | b'!' => extended,
+						b')' => closing,
+						_ => false,
+					})
+					.unwrap_or(rest.len());
+				self.top = at + 1 + plain;
+			},
+		}
+		false
+	}
+
+	/// One member of a bracket expression reading at `at`: whether that
+	/// expression closed.
+	fn read_member(&mut self, pattern: &[u8], end: usize, at: usize) -> bool {
+		let index = self.brackets.iter().position(|read| read.at == at).unwrap_or_default();
+		let read = self.brackets.swap_remove(index);
+		let next = if read.opening && matches!(pattern[at], b'!' | b'^') {
+			BracketRead { at: at + 1, has_member: false, opening: false }
+		} else if pattern[at] == b']' {
+			return read.has_member;
+		} else {
+			BracketRead { at: member_end(pattern, end, at), has_member: true, opening: false }
+		};
+		self.open(next);
+		false
+	}
+
+	/// Adds a reading unless one in the same state is already there.
+	fn open(&mut self, read: BracketRead) {
+		if !self.brackets.contains(&read) {
+			self.brackets.push(read);
+		}
+	}
+}
+
+/// Where the bracket expression member at `at` ends. `pattern[at]` is not `]`.
+///
+/// A run of plain characters is that many one-character members, read in one
+/// step up to `end`; the last before a `-` may begin a range, so the run stops
+/// short of it.
+fn member_end(pattern: &[u8], end: usize, at: usize) -> usize {
+	const fn plain(byte: u8) -> bool {
+		!matches!(byte, b'\\' | b'[' | b']' | b'-')
+	}
+
+	if let Some(rest) = pattern[at..].strip_prefix(b"[:") {
+		let class = BRACKET_CLASSES
+			.iter()
+			.find(|class| rest.strip_prefix(**class).is_some_and(|tail| tail.starts_with(b":]")));
+		if let Some(class) = class {
+			return at + 2 + class.len() + 2;
+		}
+	}
+	if plain(pattern[at]) {
+		let stop = end.min(pattern.len()).max(at + 1);
+		let run_end = at
+			+ 1 + pattern[at + 1..stop].iter().position(|&byte| !plain(byte)).unwrap_or(stop - at - 1);
+		if pattern.get(run_end) != Some(&b'-') {
+			return run_end;
+		}
+		let mut last = run_end - 1;
+		while last > at && is_continuation(pattern[last]) {
+			last -= 1;
+		}
+		if last > at {
+			return last;
+		}
+	}
+	let single = single_member_end(pattern, at).unwrap_or(at + 1);
+	if pattern.get(single) == Some(&b'-')
+		&& let Some(range_end) = single_member_end(pattern, single + 1)
+	{
+		return range_end;
+	}
+	single
+}
+
+/// Where a one-character member starting at `at` ends: a backslash and the
+/// character after it, or any character but `]`.
+fn single_member_end(pattern: &[u8], at: usize) -> Option<usize> {
+	match *pattern.get(at)? {
+		b']' => None,
+		b'\\' if at + 1 < pattern.len() => Some(at + 1 + char_width(pattern[at + 1])),
+		byte => Some(at + char_width(byte)),
+	}
+}
+
+/// How many bytes the UTF-8 character `byte` begins is. A byte in the middle
+/// of one counts as one: a reading stopped at a stride's end resumes there, and
+/// no byte of a multibyte character is one the grammar acts on.
+const fn char_width(byte: u8) -> usize {
+	match byte {
+		0xF0..=0xFF => 4,
+		0xE0..=0xEF => 3,
+		0xC0..=0xDF => 2,
+		_ => 1,
+	}
+}
+
+const fn is_continuation(byte: u8) -> bool {
+	byte & 0xC0 == 0x80
 }
 
 fn pattern_to_regex_str(
@@ -1162,16 +1542,122 @@ mod tests {
 		Ok(())
 	}
 
+	#[tokio::test]
+	async fn test_requires_expansion() -> Result<()> {
+		assert!(requires_expansion_divided("*", false, None).await?);
+		assert!(requires_expansion_divided("[abc]", false, None).await?);
+		assert!(!requires_expansion_divided("]", false, None).await?);
+		assert!(!requires_expansion_divided("hello", false, None).await?);
+		assert!(!requires_expansion_divided("@(a)", false, None).await?);
+		assert!(requires_expansion_divided("@(a)", true, None).await?);
+
+		// The divided form reads the same string in strides, so a pattern whose
+		// only metacharacter sits past the first one must still be found.
+		let text = "a".repeat(interp::BYTE_CHECKPOINT_STRIDE * 3);
+		let late = format!("{text}*");
+		assert!(requires_expansion_divided(&late, false, None).await?);
+		assert!(!requires_expansion_divided(&late[..late.len() - 1], false, None).await?);
+		// So must a bracket expression whose `]` is strides after its `[`, in
+		// a stride of its own, and one that never closes must not.
+		let wide = format!("[{text}]");
+		assert!(requires_expansion_divided(&wide, false, None).await?);
+		assert!(!requires_expansion_divided(&wide[..wide.len() - 1], false, None).await?);
+		assert!(!requires_expansion_divided(&wide[1..], false, None).await?);
+		assert!(requires_expansion_divided(&format!("{text}[a]"), false, None).await?);
+		assert!(!requires_expansion_divided(&format!("{text}[a"), false, None).await?);
+		// And an extended glob whose `)` is strides after its opener.
+		assert!(requires_expansion_divided(&format!("@({text})"), true, None).await?);
+		assert!(!requires_expansion_divided(&format!("@({text}"), true, None).await?);
+		Ok(())
+	}
+
+	/// [`GlobScan::read`] as [`requires_expansion_divided`] calls it, but
+	/// `stride` bytes at a time, so a reading stops and resumes everywhere.
+	fn scan_in_strides(pattern: &str, extended: bool, stride: usize) -> bool {
+		let mut scan = GlobScan::new(extended);
+		let mut end = 0usize;
+		loop {
+			end = end.saturating_add(stride);
+			if let Some(found) = scan.read(pattern.as_bytes(), end) {
+				return found;
+			}
+		}
+	}
+
+	/// The grammar decides what a glob is; the scan has to agree with it, read
+	/// whole or a byte at a time.
+	fn assert_agrees_with_the_grammar(pattern: &str) {
+		for extended in [false, true] {
+			let grammar = brush_parser::pattern::pattern_has_glob_metacharacters(pattern, extended);
+			// The cheap filter in front of the scan may only answer "no" where
+			// the grammar does: a false "no" would skip pathname expansion.
+			assert!(
+				may_hold_glob(pattern.as_bytes(), extended) || !grammar,
+				"{pattern:?}, extended globbing {extended}: the filter rejected a glob"
+			);
+			for stride in [1, 2, 3, 5, usize::MAX] {
+				assert_eq!(
+					scan_in_strides(pattern, extended, stride),
+					grammar,
+					"{pattern:?}, extended globbing {extended}, read {stride} bytes at a time"
+				);
+			}
+		}
+	}
+
 	#[test]
-	fn test_requires_expansion() {
-		// Delegates to the PEG grammar; thorough coverage is in brush-parser.
-		// Here we just verify the integration works.
-		assert!(requires_expansion("*", false));
-		assert!(requires_expansion("[abc]", false));
-		assert!(!requires_expansion("]", false));
-		assert!(!requires_expansion("hello", false));
-		assert!(!requires_expansion("@(a)", false));
-		assert!(requires_expansion("@(a)", true));
+	fn glob_scan_agrees_with_the_grammar() {
+		// Every character the grammar acts on, a class spelled whole and in
+		// parts, and characters of two and three bytes for strides to cut.
+		const TOKENS: [&str; 19] = [
+			"a", "é", "€", "*", "?", "[", "]", "!", "^", "-", "\\", "(", ")", "|", "@", "+",
+			"[:alpha:]", "[:", ":]",
+		];
+
+		// Every pattern of up to four of them.
+		let mut patterns = vec![String::new()];
+		for length in 0..=4 {
+			for pattern in &patterns {
+				assert_agrees_with_the_grammar(pattern);
+			}
+			if length < 4 {
+				patterns = patterns
+					.iter()
+					.flat_map(|pattern| TOKENS.iter().map(move |token| format!("{pattern}{token}")))
+					.collect();
+			}
+		}
+
+		// Longer ones drawn from a fixed seed, so a failure repeats.
+		let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+		let mut next = move || {
+			// splitmix64
+			state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+			let mut mixed = state;
+			mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+			mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+			usize::try_from((mixed ^ (mixed >> 31)) % 1024).unwrap_or_default()
+		};
+		for _ in 0..20_000 {
+			let tokens = 5 + next() % 20;
+			let pattern: String = (0..tokens).map(|_| TOKENS[next() % TOKENS.len()]).collect();
+			assert_agrees_with_the_grammar(&pattern);
+		}
+	}
+
+	/// Shapes the grammar takes far too long over to compare against: it reads
+	/// a bracket expression from every `[` to the end, and retries every nested
+	/// extended glob from scratch. The scan reads each once.
+	#[test]
+	fn glob_scan_is_linear_where_the_grammar_is_not() {
+		let brackets = "[".repeat(1 << 20);
+		assert!(!scan_in_strides(&brackets, false, interp::BYTE_CHECKPOINT_STRIDE));
+		assert!(scan_in_strides(&format!("{brackets}]"), false, interp::BYTE_CHECKPOINT_STRIDE));
+
+		let openers = "@(".repeat(1 << 16);
+		assert!(!scan_in_strides(&format!("{openers}x"), true, interp::BYTE_CHECKPOINT_STRIDE));
+		assert!(scan_in_strides(&format!("{openers}x)"), true, interp::BYTE_CHECKPOINT_STRIDE));
+		assert!(!scan_in_strides(&format!("{openers}x)"), false, interp::BYTE_CHECKPOINT_STRIDE));
 	}
 
 	/// Extracts the `Expanded` payload from a `PatternExpansionResult`,

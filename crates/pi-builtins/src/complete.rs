@@ -521,8 +521,10 @@ impl builtins::Command for CompGenCommand {
 		let token_to_complete = self.word.as_deref().unwrap_or_default();
 
 		// We unquote the token-to-be-completed before passing it to the completion
-		// system.
-		let unquoted_token = brush_parser::unquote_str(token_to_complete);
+		// system. The token is the caller's argument and has no bound, so the
+		// unquoting is divided: it reads the whole of it and writes it out again.
+		let unquoted_token =
+			completion::unquote_in_strides(&context.params, token_to_complete).await?;
 
 		let completion_context = completion::Context {
 			token_to_complete: unquoted_token.as_str(),

@@ -4,7 +4,7 @@ use std::borrow::Cow;
 
 use brush_parser::ast;
 
-use crate::{ExecutionParameters, Shell, env, expansion, extensions, variables};
+use crate::{ExecutionParameters, Shell, commands, env, expansion, extensions, interp};
 
 /// Maximum recursion depth for arithmetic variable dereference chains
 /// (e.g., a=b, b=c, c=a would cycle through variable dereferences).
@@ -49,6 +49,10 @@ pub enum EvalError {
 	/// Expression recursion level exceeded.
 	#[error("expression recursion level exceeded")]
 	RecursionLimitExceeded,
+
+	/// A parse handed to a blocking worker did not come back.
+	#[error("the expression's parse was abandoned")]
+	ParseAbandoned,
 }
 
 /// Trait implemented by arithmetic expressions that can be evaluated.
@@ -92,15 +96,26 @@ pub(crate) async fn expand_and_eval(
 	expr: &str,
 	trace_if_needed: bool,
 ) -> Result<i64, EvalError> {
-	// Per documentation, first shell-expand it.
+	// Per documentation, first shell-expand it — as the body of a double-quoted
+	// word, as Bash expands arithmetic: a single quote in it is a character
+	// no expression holds, so `$(( ' ' ))` and `x[' ']=v` are syntax errors as
+	// in Bash, while the double quotes of `$(( "1"+2 ))` are removed. Taking
+	// single quotes out first had turned `' '` into a blank expression, which
+	// is zero. The text can be any length, so the quoted copy is made in
+	// strides.
+	let mut quoted = String::with_capacity(expr.len() + 2);
+	quoted.push('"');
+	interp::push_str_in_strides(params, &mut quoted, expr)
+		.await
+		.map_err(|_e| EvalError::FailedToExpandExpression(String::new()))?;
+	quoted.push('"');
 	let options = expansion::ExpanderOptions { tilde_expand: false, ..Default::default() };
-	let expanded_self = expansion::basic_expand_word_with_options(shell, params, expr, &options)
+	let expanded_self = expansion::basic_expand_word_with_options(shell, params, &quoted, &options)
 		.await
 		.map_err(|_e| EvalError::FailedToExpandExpression(expr.to_owned()))?;
 
 	// Now parse.
-	let expr = brush_parser::arithmetic::parse(&expanded_self)
-		.map_err(|_e| EvalError::ParseError(expanded_self))?;
+	let expr = parse_expression(expanded_self).await?;
 
 	// Trace if applicable.
 	if trace_if_needed && shell.options().print_commands_and_arguments {
@@ -111,6 +126,49 @@ pub(crate) async fn expand_and_eval(
 
 	// Now evaluate.
 	expr.eval(shell)
+}
+
+/// Evaluates text that is expanded already as an arithmetic expression,
+/// without expanding it again: the value of a variable with the integer
+/// attribute, as Bash evaluates it. `declare -i x='$y'` is a syntax error in
+/// Bash, not the value of `y`, because the value was expanded once on its way
+/// to the assignment.
+///
+/// # Arguments
+///
+/// * `shell` - The shell to use for evaluation.
+/// * `value` - The expanded value to evaluate.
+pub async fn eval_expanded(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	value: String,
+) -> Result<i64, EvalError> {
+	parse_expression(value).await?.eval(shell)
+}
+
+/// Parses an expanded arithmetic expression, off the runtime's worker when it
+/// is longer than one step of work.
+///
+/// The parse is one call into a PEG with nothing inside that can yield, and
+/// its cached form copies and hashes the whole expression for its key and
+/// keeps it: `x=([$big]=v)` with 64 MiB of zeros held the worker for 155 ms
+/// in one poll, and 368 ms under load, once its subscript became arithmetic.
+/// An expression within a stride is parsed where it is, with the cache, which
+/// is every expression a script spells out; a longer one, which can only be
+/// generated, is parsed on a blocking worker without the cache, unless this
+/// is one already (see [`commands::builtin_on_blocking_worker`]).
+async fn parse_expression(expanded: String) -> Result<ast::ArithmeticExpr, EvalError> {
+	if expanded.len() <= interp::DIVIDE_COPY_ABOVE_BYTES || commands::builtin_on_blocking_worker() {
+		return brush_parser::arithmetic::parse(&expanded).map_err(|_e| EvalError::ParseError(expanded));
+	}
+	let parsed = tokio::task::spawn_blocking(move || {
+		brush_parser::arithmetic::parse_uncached(&expanded).map_err(|_e| EvalError::ParseError(expanded))
+	})
+	.await;
+	match parsed {
+		Ok(parsed) => parsed,
+		Err(join_error) if join_error.is_panic() => std::panic::resume_unwind(join_error.into_panic()),
+		Err(_) => Err(EvalError::ParseAbandoned),
+	}
 }
 
 /// Trait implemented by evaluatable arithmetic expressions.
@@ -369,9 +427,9 @@ fn assign(
 		ast::ArithmeticTarget::Variable(name) => {
 			shell
 				.env_mut()
-				.update_or_add(
+				.update_or_add_scalar(
 					name.as_str(),
-					variables::ShellValueLiteral::Scalar(value.to_string()),
+					value.to_string(),
 					|_| Ok(()),
 					env::EnvironmentLookup::Anywhere,
 					env::EnvironmentScope::Global,

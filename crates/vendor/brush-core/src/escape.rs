@@ -4,7 +4,10 @@ use std::borrow::Cow;
 
 use itertools::Itertools;
 
-use crate::{error, int_utils};
+use crate::{
+	error, int_utils,
+	interp::{self, ExecutionParameters},
+};
 
 /// Escape expansion mode.
 #[derive(Clone, Copy)]
@@ -316,6 +319,66 @@ pub(crate) fn quote<'a>(s: &'a str, options: &QuoteOptions) -> Cow<'a, str> {
 	}
 }
 
+/// [`quote`] with a checkpoint before each stride of the string, for a caller
+/// that holds a run which can be cancelled. The synchronous form above is for
+/// callers with no run to cancel.
+///
+/// Quoting a word reads it twice to decide and writes it once to do, so a
+/// word the size of a command line holds the worker three times over. A
+/// completion function's token is such a word.
+///
+/// Which path to take is decided on the length of the **input**. Deciding on
+/// the length of the quoted form would mean the quoting had already been paid
+/// for by the time the decision was made.
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+/// way, leaving the quoting unfinished and discarded.
+pub(crate) async fn quote_divided<'a>(
+	params: &ExecutionParameters,
+	s: &'a str,
+	options: &QuoteOptions,
+) -> Result<Cow<'a, str>, error::Error> {
+	if s.len() <= interp::DIVIDE_COPY_ABOVE_BYTES {
+		return Ok(quote(s, options));
+	}
+
+	let use_ansi_c_quotes = contains_in_strides(params, s, |c| {
+		needs_ansi_c_quoting(c) && (!options.avoid_ansi_c_quoting_newline || c != '\n')
+	})
+	.await?;
+
+	if use_ansi_c_quotes {
+		let mut quoted = String::with_capacity(s.len() + 3);
+		quoted.push_str("$'");
+		escape_in_strides(params, &mut quoted, s, ansi_c_quote_into).await?;
+		quoted.push('\'');
+		return Ok(quoted.into());
+	}
+
+	// `s` is longer than a stride, so the empty-string arm of the synchronous
+	// form cannot be reached here.
+	let use_default_quotes =
+		options.always_quote || contains_in_strides(params, s, needs_escaping).await?;
+
+	if !use_default_quotes {
+		return Ok(s.into());
+	}
+
+	match options.preferred_mode {
+		QuoteMode::BackslashEscape => backslash_escape_divided(params, s).await,
+		QuoteMode::SingleQuote => single_quote_divided(params, s).await,
+		QuoteMode::DoubleQuote => {
+			let mut quoted = String::with_capacity(s.len() + 2);
+			quoted.push('"');
+			escape_in_strides(params, &mut quoted, s, double_quote_into).await?;
+			quoted.push('"');
+			Ok(quoted.into())
+		},
+	}
+}
+
 /// Escape the given string, forcing quoting.
 ///
 /// # Arguments
@@ -326,6 +389,24 @@ pub fn force_quote(s: &str, mode: QuoteMode) -> String {
 	let options = QuoteOptions { always_quote: true, preferred_mode: mode, ..Default::default() };
 
 	quote(s, &options).to_string()
+}
+
+/// [`force_quote`] with a checkpoint before each stride of the string, for a
+/// caller holding a run that can be cancelled: `: "${big@A}"` quotes a value
+/// as long as the script made it, and held the worker 102 ms quoting 64 MiB
+/// in one step, 305 ms under load.
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+/// way, leaving the quoting unfinished and discarded.
+pub(crate) async fn force_quote_divided(
+	params: &ExecutionParameters,
+	s: &str,
+	mode: QuoteMode,
+) -> Result<String, error::Error> {
+	let options = QuoteOptions { always_quote: true, preferred_mode: mode, ..Default::default() };
+	Ok(quote_divided(params, s, &options).await?.into_owned())
 }
 
 /// Applies the given quoting mode to the provided string, only changing it if
@@ -341,6 +422,91 @@ pub fn quote_if_needed(s: &str, mode: QuoteMode) -> Cow<'_, str> {
 	quote(s, &options)
 }
 
+/// [`quote_if_needed`] with a checkpoint before each stride of the string,
+/// for a caller holding a run that can be cancelled. The synchronous form is
+/// for callers with no run to cancel.
+///
+/// Quoting a word reads it twice to decide and writes it once to do, so a
+/// word with no bound — a completion token, a line `mapfile` hands to its
+/// callback — holds the worker three times over. Which path is taken is
+/// decided on the length of the input: deciding on the length of the quoted
+/// form would mean the quoting had already been paid for.
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+/// way, leaving the quoting unfinished and discarded.
+pub async fn quote_if_needed_divided<'a>(
+	params: &ExecutionParameters,
+	s: &'a str,
+	mode: QuoteMode,
+) -> Result<Cow<'a, str>, error::Error> {
+	let options = QuoteOptions { always_quote: false, preferred_mode: mode, ..Default::default() };
+
+	quote_divided(params, s, &options).await
+}
+
+/// `str::contains` with a checkpoint before each
+/// [`interp::BYTE_CHECKPOINT_STRIDE`] of the string.
+///
+/// The predicate reads one character, so a stride of the string answers for
+/// those bytes exactly as the whole string would.
+async fn contains_in_strides(
+	params: &ExecutionParameters,
+	s: &str,
+	predicate: impl Fn(char) -> bool + Copy,
+) -> Result<bool, error::Error> {
+	let mut rest = s;
+	loop {
+		interp::stride_checkpoint(params).await?;
+		if rest.len() <= interp::BYTE_CHECKPOINT_STRIDE {
+			return Ok(rest.contains(predicate));
+		}
+		// A stride lands mid-character at most three bytes in.
+		let mut end = interp::BYTE_CHECKPOINT_STRIDE;
+		while !rest.is_char_boundary(end) {
+			end -= 1;
+		}
+		let (piece, remaining) = rest.split_at(end);
+		if piece.contains(predicate) {
+			return Ok(true);
+		}
+		rest = remaining;
+	}
+}
+
+/// Appends the escaped form of `s` to `out`, applying `escape_piece` to one
+/// stride at a time and spending a checkpoint before each.
+///
+/// Every escaper this serves decides one character at a time and writes a
+/// fixed expansion of it, so a stride produces exactly the output the whole
+/// string would have produced at those bytes. The opening and closing quotes
+/// belong to the caller for the same reason: they are the only part that is
+/// not a function of a single character.
+async fn escape_in_strides(
+	params: &ExecutionParameters,
+	out: &mut String,
+	s: &str,
+	escape_piece: impl Fn(&str, &mut String),
+) -> Result<(), error::Error> {
+	out.reserve(s.len());
+	let mut rest = s;
+	loop {
+		interp::stride_checkpoint(params).await?;
+		if rest.len() <= interp::BYTE_CHECKPOINT_STRIDE {
+			escape_piece(rest, out);
+			return Ok(());
+		}
+		let mut end = interp::BYTE_CHECKPOINT_STRIDE;
+		while !rest.is_char_boundary(end) {
+			end -= 1;
+		}
+		let (piece, remaining) = rest.split_at(end);
+		escape_piece(piece, out);
+		rest = remaining;
+	}
+}
+
 fn backslash_escape(s: &str) -> Cow<'_, str> {
 	if s.is_empty() {
 		// An empty string must be represented as '' to be a valid shell word.
@@ -349,13 +515,32 @@ fn backslash_escape(s: &str) -> Cow<'_, str> {
 		Cow::Borrowed(s)
 	} else {
 		let mut output = String::with_capacity(s.len());
-		for c in s.chars() {
-			if needs_escaping(c) {
-				output.push('\\');
-			}
-			output.push(c);
-		}
+		backslash_escape_into(s, &mut output);
 		Cow::Owned(output)
+	}
+}
+
+/// [`backslash_escape`] with the reading and the writing divided.
+async fn backslash_escape_divided<'a>(
+	params: &ExecutionParameters,
+	s: &'a str,
+) -> Result<Cow<'a, str>, error::Error> {
+	if !contains_in_strides(params, s, needs_escaping).await? {
+		return Ok(Cow::Borrowed(s));
+	}
+	let mut output = String::with_capacity(s.len());
+	escape_in_strides(params, &mut output, s, backslash_escape_into).await?;
+	Ok(Cow::Owned(output))
+}
+
+/// The body of [`backslash_escape`], as one character at a time, so that the
+/// divided form can run it on a stride.
+fn backslash_escape_into(s: &str, out: &mut String) {
+	for c in s.chars() {
+		if needs_escaping(c) {
+			out.push('\\');
+		}
+		out.push(c);
 	}
 }
 
@@ -389,50 +574,127 @@ fn single_quote(s: &str) -> Cow<'_, str> {
 	Cow::Owned(result)
 }
 
+/// [`single_quote`] with the copy of each part divided and the loop over the
+/// parts charged.
+///
+/// The parts are not strides of a fixed size: a word of a million apostrophes
+/// is a million empty parts, and a word with none is one part the length of
+/// the word. Charging steps as well as bytes covers both. Finding where a part
+/// ends is a search over it, so it is made a stride at a time too: `str::split`
+/// searched 64 MiB with no apostrophe in one call, which held the worker 30 ms
+/// under load for `${big@A}`.
+async fn single_quote_divided<'a>(
+	params: &ExecutionParameters,
+	s: &'a str,
+) -> Result<Cow<'a, str>, error::Error> {
+	let mut result = String::with_capacity(s.len());
+
+	let mut first = true;
+	let mut budget = interp::ElementBudget::new();
+	let mut rest = Some(s);
+	while let Some(text) = rest {
+		let quote_at = find_byte_in_strides(params, text, b'\'').await?;
+		let part = &text[..quote_at.unwrap_or(text.len())];
+		rest = quote_at.map(|at| &text[at + 1..]);
+
+		let long = part.len() > interp::DIVIDE_COPY_ABOVE_BYTES;
+		let due = budget.charge(if long { 0 } else { part.len() });
+		if due > 0 {
+			interp::loop_checkpoints(params, due).await?;
+		}
+
+		if first {
+			first = false;
+		} else {
+			result.push('\\');
+			result.push('\'');
+		}
+
+		if !part.is_empty() {
+			result.push('\'');
+			if long {
+				interp::push_str_in_strides(params, &mut result, part).await?;
+			} else {
+				result.push_str(part);
+			}
+			result.push('\'');
+		}
+	}
+
+	Ok(Cow::Owned(result))
+}
+
+/// Where `byte`, an ASCII byte, first occurs in `text`, searched a stride at a
+/// time with a checkpoint before every stride after the first, so that a
+/// search over a short text costs nothing more.
+async fn find_byte_in_strides(
+	params: &ExecutionParameters,
+	text: &str,
+	byte: u8,
+) -> Result<Option<usize>, error::Error> {
+	for (n, stride) in text.as_bytes().chunks(interp::BYTE_CHECKPOINT_STRIDE).enumerate() {
+		if n > 0 {
+			interp::stride_checkpoint(params).await?;
+		}
+		if let Some(at) = stride.iter().position(|candidate| *candidate == byte) {
+			return Ok(Some(n * interp::BYTE_CHECKPOINT_STRIDE + at));
+		}
+	}
+	Ok(None)
+}
+
 fn double_quote(s: &str) -> String {
 	let mut result = String::with_capacity(s.len());
 
 	result.push('"');
-
-	for c in s.chars() {
-		if matches!(c, '$' | '`' | '"' | '\\') {
-			result.push('\\');
-		}
-
-		result.push(c);
-	}
-
+	double_quote_into(s, &mut result);
 	result.push('"');
 
 	result
 }
 
+/// The body of [`double_quote`], without the quotes the caller writes, so
+/// that the divided form can run it on a stride.
+fn double_quote_into(s: &str, out: &mut String) {
+	for c in s.chars() {
+		if matches!(c, '$' | '`' | '"' | '\\') {
+			out.push('\\');
+		}
+
+		out.push(c);
+	}
+}
+
 fn ansi_c_quote(s: &str) -> String {
 	let mut result = String::with_capacity(s.len());
 	result.push_str("$'");
-
-	for c in s.chars() {
-		match c {
-			'\x07' => result.push_str("\\a"),
-			'\x08' => result.push_str("\\b"),
-			'\x1b' => result.push_str("\\E"),
-			'\x0c' => result.push_str("\\f"),
-			'\n' => result.push_str("\\n"),
-			'\r' => result.push_str("\\r"),
-			'\t' => result.push_str("\\t"),
-			'\x0b' => result.push_str("\\v"),
-			'\\' => result.push_str("\\\\"),
-			'\'' => result.push_str("\\'"),
-			c if needs_ansi_c_quoting(c) => {
-				result.push_str(std::format!("\\{:03o}", c as u8).as_str());
-			},
-			_ => result.push(c),
-		}
-	}
-
+	ansi_c_quote_into(s, &mut result);
 	result.push('\'');
 
 	result
+}
+
+/// The body of [`ansi_c_quote`], without the quotes the caller writes, so
+/// that the divided form can run it on a stride.
+fn ansi_c_quote_into(s: &str, out: &mut String) {
+	for c in s.chars() {
+		match c {
+			'\x07' => out.push_str("\\a"),
+			'\x08' => out.push_str("\\b"),
+			'\x1b' => out.push_str("\\E"),
+			'\x0c' => out.push_str("\\f"),
+			'\n' => out.push_str("\\n"),
+			'\r' => out.push_str("\\r"),
+			'\t' => out.push_str("\\t"),
+			'\x0b' => out.push_str("\\v"),
+			'\\' => out.push_str("\\\\"),
+			'\'' => out.push_str("\\'"),
+			c if needs_ansi_c_quoting(c) => {
+				out.push_str(std::format!("\\{:03o}", c as u8).as_str());
+			},
+			_ => out.push(c),
+		}
+	}
 }
 
 // Returns whether or not the given character needs to be escaped (or quoted) if

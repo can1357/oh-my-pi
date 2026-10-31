@@ -1350,21 +1350,37 @@ const fn is_quoting_char(c: char) -> bool {
 /// * `s` - The string to unquote.
 pub fn unquote_str(s: &str) -> String {
     let mut result = String::new();
-
     let mut in_escape = false;
+
+    unquote_str_into(s, &mut result, &mut in_escape);
+
+    result
+}
+
+/// Append `s`, with all the quoting removed, to `result`.
+///
+/// A caller that must not hold its thread for the length of the string reads
+/// it one piece at a time and carries `in_escape` from one piece to the next,
+/// so that a backslash at the end of a piece still escapes the first
+/// character of the piece after it.
+///
+/// # Arguments
+///
+/// * `s` - The string to unquote.
+/// * `result` - The string to append the unquoted text to.
+/// * `in_escape` - Whether the text read so far ended inside an escape.
+pub fn unquote_str_into(s: &str, result: &mut String, in_escape: &mut bool) {
     for c in s.chars() {
         match c {
-            c if in_escape => {
+            c if *in_escape => {
                 result.push(c);
-                in_escape = false;
+                *in_escape = false;
             }
-            '\\' => in_escape = true,
+            '\\' => *in_escape = true,
             c if is_quoting_char(c) => (),
             c => result.push(c),
         }
     }
-
-    result
 }
 
 #[cfg(test)]

@@ -8,10 +8,10 @@ use itertools::Itertools;
 use crate::{
 	ExecutionParameters, arithmetic,
 	arithmetic::ExpandAndEvaluate,
-	braceexpansion, commands, env, error, escape, extensions, patterns, prompt,
+	braceexpansion, commands, env, error, escape, extensions, interp, patterns, prompt,
 	shell::Shell,
 	sys, trace_categories,
-	variables::{self, ShellValue, ShellValueUnsetType, ShellVariable},
+	variables::{ShellValue, ShellValueUnsetType},
 };
 
 /// Options to customize the behavior of the word expander.
@@ -53,13 +53,6 @@ impl Default for Expansion {
 	}
 }
 
-impl From<Expansion> for String {
-	fn from(value: Expansion) -> Self {
-		// TODO(IFS): Use IFS instead for separator?
-		value.fields.into_iter().map(Self::from).join(" ")
-	}
-}
-
 impl From<String> for Expansion {
 	fn from(value: String) -> Self {
 		Self { fields: vec![WordField::from(value)], ..Self::default() }
@@ -97,6 +90,41 @@ impl Expansion {
 		}
 	}
 
+	/// Appends `next` as if its text directly followed this expansion's: its
+	/// first field joins this one's last, and the rest follow.
+	///
+	/// `next` can hold a field for every element of an array (`${name[@]}`),
+	/// and this runs after the expansion that made them has spent its last
+	/// checkpoint, so the fields placed spend one every
+	/// [`interp::ELEMENT_CHECKPOINT_STRIDE`]. A call that places none one at a
+	/// time (no fields, or nothing to join them onto, when they move over
+	/// whole) spends one too, being a step of its caller's loop over the pieces
+	/// of a word.
+	async fn coalesce(&mut self, next: Self, params: &ExecutionParameters) -> Result<(), error::Error> {
+		if self.fields.is_empty() || next.fields.is_empty() {
+			interp::loop_checkpoint(params).await?;
+			if self.fields.is_empty() {
+				self.fields = next.fields;
+			}
+		} else {
+			let mut budget = interp::ElementBudget::new();
+			for (index, field) in next.fields.into_iter().enumerate() {
+				// Joining onto the field before it copies that field's pieces.
+				let due = budget.charge(if index == 0 { field.len() } else { 0 });
+				if due > 0 {
+					interp::loop_checkpoints(params, due).await?;
+				}
+				join_or_push(&mut self.fields, index == 0, field.0);
+			}
+		}
+
+		// TODO(expansion): What if expansions have different concatenation values?
+		self.concatenate = next.concatenate;
+		self.from_array = next.from_array;
+
+		Ok(())
+	}
+
 	fn polymorphic_len(&self) -> usize {
 		if self.from_array {
 			self.fields.len()
@@ -105,21 +133,37 @@ impl Expansion {
 		}
 	}
 
-	fn polymorphic_subslice(&self, index: usize, end: usize) -> Self {
+	/// Returns elements `index..end` of an array's expansion, or characters
+	/// `index..end` of anything else.
+	///
+	/// An array's expansion has a field per element, so taking a range of them
+	/// spends a checkpoint every [`interp::ELEMENT_CHECKPOINT_STRIDE`] fields
+	/// up to the end of the range.
+	async fn polymorphic_subslice(
+		self,
+		index: usize,
+		end: usize,
+		params: &ExecutionParameters,
+	) -> Result<Self, error::Error> {
 		let len = end - index;
 
 		// If we came from an array, then interpret `index` and `end` as indices
 		// into the elements.
 		if self.from_array {
-			let actual_len = min(len, self.fields.len() - index);
-			let fields = self.fields[index..(index + actual_len)].to_vec();
+			let mut fields = Vec::with_capacity(min(len, self.fields.len() - index));
+			for (position, field) in self.fields.into_iter().enumerate().take(end) {
+				interp::element_checkpoint(params, position).await?;
+				if position >= index {
+					fields.push(field);
+				}
+			}
 
-			Self {
+			Ok(Self {
 				fields,
 				concatenate: self.concatenate,
 				undefined: self.undefined,
 				from_array: self.from_array,
-			}
+			})
 		} else {
 			// Otherwise, interpret `index` and `end` as indices into the string contents.
 			let mut fields = vec![];
@@ -185,12 +229,12 @@ impl Expansion {
 				}
 			}
 
-			Self {
+			Ok(Self {
 				fields,
 				concatenate: self.concatenate,
 				undefined: self.undefined,
 				from_array: self.from_array,
-			}
+			})
 		}
 	}
 }
@@ -206,6 +250,30 @@ impl WordField {
 	pub fn len(&self) -> usize {
 		self.0.iter().fold(0, |acc, piece| acc + piece.len())
 	}
+}
+
+/// Puts `pieces` at the end of `fields`: onto the last field when `join` is
+/// set and there is one, else as a field of their own.
+fn join_or_push(fields: &mut Vec<WordField>, join: bool, mut pieces: Vec<ExpansionPiece>) {
+	match fields.last_mut() {
+		Some(WordField(last)) if join => last.append(&mut pieces),
+		_ => fields.push(WordField(pieces)),
+	}
+}
+
+/// The expansion of one parameter's value: a copy of it, made in strides above
+/// one.
+///
+/// A value is as long as whatever was assigned to it. `"$big"`, `"$1"` and
+/// `"${a[0]}"` each copied a 64 MiB value in one `to_string`, holding the
+/// worker 24.6–25.9 ms, while `"${a[@]}"` already copied the same element in
+/// strides.
+async fn copied_value(params: &ExecutionParameters, value: &str) -> Result<Expansion, error::Error> {
+	Ok(Expansion::from(if value.len() > interp::DIVIDE_COPY_ABOVE_BYTES {
+		interp::clone_in_strides(params, value).await?
+	} else {
+		value.to_owned()
+	}))
 }
 
 impl From<WordField> for String {
@@ -398,6 +466,214 @@ pub(crate) async fn basic_expand_word_with_options(
 	expander.basic_expand_to_str(word_str.as_ref()).await
 }
 
+/// Whether `text` holds any of `chars`, spending a checkpoint before each
+/// stride of it.
+///
+/// `str::contains` over a word that a variable sized is a hold of its own: the
+/// short circuit in [`WordExpander::basic_expand`] reads a 16 MiB prompt end
+/// to end before it can decide there is nothing in it to expand.
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part way.
+async fn contains_any_in_strides(
+	params: &ExecutionParameters,
+	text: &str,
+	chars: &[char],
+) -> Result<bool, error::Error> {
+	let mut rest = text;
+	while !rest.is_empty() {
+		interp::stride_checkpoint(params).await?;
+		let mut end = rest.len().min(interp::BYTE_CHECKPOINT_STRIDE);
+		// A stride lands mid-character at most three bytes in.
+		while !rest.is_char_boundary(end) {
+			end -= 1;
+		}
+		let (piece, remaining) = rest.split_at(end);
+		if piece.contains(chars) {
+			return Ok(true);
+		}
+		rest = remaining;
+	}
+	Ok(false)
+}
+
+/// Parses `word` into its pieces a step at a time, spending a checkpoint
+/// before each step.
+///
+/// For a word above [`interp::DIVIDE_COPY_ABOVE_BYTES`]: such a word is not
+/// one anybody typed but one a variable made, a prompt above all, which is
+/// expanded before every command. The word grammar is a PEG that tries every
+/// other kind of piece at every character of a literal, so the whole parse of
+/// a 16 MiB prompt holds the worker for hundreds of milliseconds. A step
+/// covers one byte stride of the word or one element stride of pieces, and
+/// the pieces are the ones the whole parse gives.
+///
+/// The whole-word cache [`brush_parser::word::parse`] keeps is left to the
+/// ordinary word on purpose: its key is the word, so a word this long would be
+/// copied and hashed in one step on every expansion to look it up, and its
+/// pieces cloned out of it on every hit.
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part way,
+/// and the error [`brush_parser::word::parse`] gives for a word it cannot
+/// parse.
+async fn parse_word_in_strides(
+	params: &ExecutionParameters,
+	word: &str,
+	options: &brush_parser::ParserOptions,
+) -> Result<Vec<brush_parser::word::WordPieceWithSource>, error::Error> {
+	let mut parse = brush_parser::word::SteppedParse::new(word, options);
+	// A piece the grammar is handed is one call, and one that fails can read to
+	// the end of the word: the parse is abandoned rather than hand the grammar
+	// more than a stride, and the word is then parsed whole, off the worker.
+	parse.limit_grammar_reach(interp::BYTE_CHECKPOINT_STRIDE);
+	loop {
+		interp::stride_checkpoint(params).await?;
+		if !parse.step(interp::BYTE_CHECKPOINT_STRIDE, interp::ELEMENT_CHECKPOINT_STRIDE) {
+			break;
+		}
+	}
+	if parse.failed() {
+		return parse_whole_off_worker(params, word, options, brush_parser::word::parse_uncached).await;
+	}
+	Ok(parse.finish()?)
+}
+
+/// The whole parse of a long word that the stepped parse could not finish, on
+/// a blocking worker: one it found does not parse, or one with a piece that
+/// would have handed the grammar more than a stride.
+///
+/// The answer has to be the one the whole parse gives, so the stepped parse
+/// falls back to it: an error path pays one parse rather than reproducing the
+/// grammar's error values, and a piece the grammar reads whole is read by it
+/// in the whole word instead. That parse is one call into the grammar with
+/// nothing inside that can yield: a 16 MiB `PS1` that opens a quote and never
+/// closes it held the worker 375 ms in it, 630 ms under load, and a `$((\))`
+/// before 16 MiB 281 ms. So it runs on a blocking worker, unless this is one
+/// already (see [`commands::builtin_on_blocking_worker`]), from a copy of the
+/// word made in strides.
+async fn parse_whole_off_worker<T: Send + 'static>(
+	params: &ExecutionParameters,
+	word: &str,
+	options: &brush_parser::ParserOptions,
+	parse: fn(&str, &brush_parser::ParserOptions) -> Result<T, brush_parser::WordParseError>,
+) -> Result<T, error::Error> {
+	if commands::builtin_on_blocking_worker() {
+		return Ok(parse(word, options)?);
+	}
+	let word = interp::clone_in_strides(params, word).await?;
+	let options = options.clone();
+	match tokio::task::spawn_blocking(move || parse(&word, &options)).await {
+		Ok(parsed) => Ok(parsed?),
+		Err(join_error) if join_error.is_panic() => std::panic::resume_unwind(join_error.into_panic()),
+		Err(join_error) => Err(error::ErrorKind::ThreadingError(join_error).into()),
+	}
+}
+
+/// Parses `word` for brace expansion a step at a time, spending a checkpoint
+/// before each step: [`parse_word_in_strides`] for the brace grammar, which a
+/// long word reaches first whenever it holds a `{` and a `}`. The inner result
+/// is the one [`brush_parser::word::parse_brace_expansions`] gives.
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part way.
+async fn parse_brace_expansions_in_strides(
+	params: &ExecutionParameters,
+	word: &str,
+	options: &brush_parser::ParserOptions,
+) -> Result<
+	Result<Option<Vec<brush_parser::word::BraceExpressionOrText>>, brush_parser::WordParseError>,
+	error::Error,
+> {
+	let mut parse = brush_parser::word::SteppedBraceParse::new(word, options);
+	parse.limit_grammar_reach(interp::BYTE_CHECKPOINT_STRIDE);
+	loop {
+		interp::stride_checkpoint(params).await?;
+		if !parse.step(interp::BYTE_CHECKPOINT_STRIDE, interp::ELEMENT_CHECKPOINT_STRIDE) {
+			break;
+		}
+	}
+	if parse.needs_whole_parse() {
+		// The whole brace parse's error is the inner result, not the run's.
+		let whole = |word: &str, options: &brush_parser::ParserOptions| {
+			Ok(brush_parser::word::parse_brace_expansions(word, options))
+		};
+		return parse_whole_off_worker(params, word, options, whole).await;
+	}
+	Ok(parse.finish())
+}
+
+/// [`env::valid_variable_name`], spending a checkpoint before each stride of
+/// `name`.
+///
+/// Every character a name may hold is ASCII, so the test is made on bytes: a
+/// byte of a multi-byte character is never a letter, a digit or `_`.
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part way.
+pub async fn valid_variable_name_in_strides(
+	params: &ExecutionParameters,
+	name: &str,
+) -> Result<bool, error::Error> {
+	let bytes = name.as_bytes();
+	if !bytes.first().is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_') {
+		return Ok(false);
+	}
+	for stride in bytes.chunks(interp::BYTE_CHECKPOINT_STRIDE) {
+		interp::stride_checkpoint(params).await?;
+		if !stride.iter().all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_') {
+			return Ok(false);
+		}
+	}
+	Ok(true)
+}
+
+/// The variable [`env::ShellEnvironment::get`] finds for `name`, for a name
+/// above [`interp::DIVIDE_COPY_ABOVE_BYTES`].
+///
+/// `get` hashes the name once for every scope it looks in, which for a name of
+/// 16 MiB is milliseconds in one step. The names of the variables visible are
+/// compared with it instead: a name of another length is passed over without
+/// reading it, and one of the same length is compared a stride at a time.
+/// Visible means the innermost scope's variable of each name, which is the one
+/// `get` returns.
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part way.
+async fn variable_by_long_name<'e>(
+	params: &ExecutionParameters,
+	environment: &'e env::ShellEnvironment,
+	name: &str,
+) -> Result<Option<&'e crate::variables::ShellVariable>, error::Error> {
+	let candidates: Vec<_> = environment
+		.iter()
+		.filter(|(candidate, _)| candidate.len() == name.len())
+		.collect();
+	for (candidate, var) in candidates {
+		let mut same = true;
+		for (ours, theirs) in candidate
+			.as_bytes()
+			.chunks(interp::BYTE_CHECKPOINT_STRIDE)
+			.zip(name.as_bytes().chunks(interp::BYTE_CHECKPOINT_STRIDE))
+		{
+			interp::stride_checkpoint(params).await?;
+			if ours != theirs {
+				same = false;
+				break;
+			}
+		}
+		if same {
+			return Ok(Some(var));
+		}
+	}
+	Ok(None)
+}
+
 /// Apply tilde-expansion, parameter expansion, command substitution, and
 /// arithmetic expansion; then perform field splitting and pathname expansion on
 /// the result.
@@ -472,8 +748,14 @@ pub async fn assign_to_named_parameter(
 	let parser_options = shell.parser_options();
 	let mut expander = WordExpander::new(shell, params);
 	let parameter = brush_parser::word::parse_parameter(name, &parser_options)?;
-	expander.assign_to_parameter(&parameter, value).await
+	expander.assign_to_parameter(&parameter, value).await.map(|_| ())
 }
+
+/// How many characters and pieces field splitting walks between two
+/// checkpoints. A checkpoint costs nothing next to this many steps, and since
+/// the cooperative budget lasts 128 checkpoints the walk still yields every
+/// 32 Ki steps.
+const FIELD_SPLITTING_STRIDE: usize = 256;
 
 struct WordExpander<'a, SE: extensions::ShellExtensions> {
 	/// The shell in which to perform expansion.
@@ -541,7 +823,42 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 	/// Apply tilde-expansion, parameter expansion, command substitution, and
 	/// arithmetic expansion.
 	pub async fn basic_expand_to_str(&mut self, word: &str) -> Result<String, error::Error> {
-		Ok(String::from(self.basic_expand(word).await?))
+		let expansion = self.basic_expand(word).await?;
+		self.join_fields(expansion).await
+	}
+
+	/// Joins the fields of `expansion` into one string, separated by spaces.
+	///
+	/// `x="${name[@]}"` joins a field for every element of the array, after the
+	/// expansion has spent its last checkpoint, so the fields joined spend one
+	/// every [`interp::ELEMENT_CHECKPOINT_STRIDE`] — and a field larger than a
+	/// byte stride is copied in strides rather than merely charged for, since
+	/// one of them can be of any size.
+	async fn join_fields(&self, expansion: Expansion) -> Result<String, error::Error> {
+		let mut joined = String::new();
+		let mut budget = interp::ElementBudget::new();
+		for (index, field) in expansion.fields.into_iter().enumerate() {
+			let long = field.len() > interp::DIVIDE_COPY_ABOVE_BYTES;
+			if !long {
+				let due = budget.charge(field.len());
+				if due > 0 {
+					interp::loop_checkpoints(self.params, due).await?;
+				}
+			}
+			// TODO(IFS): Use IFS instead for separator?
+			if index > 0 {
+				joined.push(' ');
+			}
+			for piece in field.0 {
+				if long {
+					interp::push_str_in_strides(self.params, &mut joined, piece.as_str()).await?;
+				} else {
+					joined.push_str(piece.as_str());
+				}
+			}
+		}
+
+		Ok(joined)
 	}
 
 	async fn basic_expand_opt_pattern(
@@ -622,8 +939,21 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		} else {
 			&['$', '`', '\\', '\'', '\"', '~', '{']
 		};
-		if !word.contains(expansion_chars) {
-			return Ok(Expansion::from(ExpansionPiece::Splittable(word.to_owned())));
+		let expandable = if word.len() > interp::DIVIDE_COPY_ABOVE_BYTES {
+			contains_any_in_strides(self.params, word, expansion_chars).await?
+		} else {
+			word.contains(expansion_chars)
+		};
+		if !expandable {
+			// The word is its own expansion, and copying it is the whole of
+			// the work left: a prompt of 16 MiB reaches here with nothing in it
+			// to expand and copies all of it in one step.
+			let copied = if word.len() > interp::DIVIDE_COPY_ABOVE_BYTES {
+				interp::clone_in_strides(self.params, word).await?
+			} else {
+				word.to_owned()
+			};
+			return Ok(Expansion::from(ExpansionPiece::Splittable(copied)));
 		}
 
 		// Apply brace expansion first, before anything else (not applicable to
@@ -633,7 +963,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		// must expand — not only the first. Parsing the space-joined result as a
 		// single word left every element after the first with a literal leading
 		// `~` (issue #5819).
-		let brace_expanded_words = self.brace_expand_words(word)?;
+		let brace_expanded_words = self.brace_expand_words(word).await?;
 		if tracing::enabled!(target: trace_categories::EXPANSION, tracing::Level::DEBUG)
 			&& !(brace_expanded_words.len() == 1 && brace_expanded_words[0] == word)
 		{
@@ -643,10 +973,19 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		// Expand each brace element separately (tildes, parameters, command
 		// substitutions, arithmetic), separating elements with a splittable
 		// space so downstream field splitting yields one field per element.
-		let mut expansions = vec![];
+		// Each expansion coalesces into the result as it is made. That spends
+		// checkpoints of its own rather than leaning on this element's: one
+		// piece can stand for a field per element of an array, and by the time
+		// they are joined in, this element's checkpoint is far behind.
+		let mut coalesced = Expansion::default();
 		for (index, element) in brace_expanded_words.iter().enumerate() {
+			// A brace range sets this count, not the script: `{1..3000000}` is
+			// one word in, three million out, and every step below is ready on
+			// a native filesystem.
+			interp::loop_checkpoint(self.params).await?;
 			if index > 0 {
-				expansions.push(Expansion::from(ExpansionPiece::Splittable(String::from(" "))));
+				let separator = Expansion::from(ExpansionPiece::Splittable(String::from(" ")));
+				coalesced.coalesce(separator, self.params).await?;
 			}
 
 			let pieces = if self.heredoc_mode {
@@ -656,17 +995,17 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				self.heredoc_mode = false;
 
 				brush_parser::word::parse_heredoc(element.as_ref(), &self.parser_options)?
+			} else if element.len() > interp::DIVIDE_COPY_ABOVE_BYTES {
+				parse_word_in_strides(self.params, element.as_ref(), &self.parser_options).await?
 			} else {
 				brush_parser::word::parse(element.as_ref(), &self.parser_options)?
 			};
 
 			for piece in pieces {
 				let piece_expansion = self.expand_word_piece(piece.piece).await?;
-				expansions.push(piece_expansion);
+				coalesced.coalesce(piece_expansion, self.params).await?;
 			}
 		}
-
-		let coalesced = coalesce_expansions(expansions);
 
 		Ok(coalesced)
 	}
@@ -715,18 +1054,31 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 	///
 	/// Empty brace elements (e.g. from `{,b}`) are returned as a quoted empty
 	/// string (`""`) so they survive as empty fields, matching bash.
-	fn brace_expand_words(&self, word: &'a str) -> Result<Vec<Cow<'a, str>>, error::Error> {
+	///
+	/// The generator spends a checkpoint on each word it makes, so a range
+	/// such as `{1..3000000}` can be cancelled before the last one exists.
+	async fn brace_expand_words(&self, word: &'a str) -> Result<Vec<Cow<'a, str>>, error::Error> {
 		// We perform a non-authoritative check to see if the string *may* contain
 		// braces to expand. There may be false positives, but must be no false
 		// negatives.
-		if self.disable_brace_expansion
-			|| !self.shell.options().perform_brace_expansion
-			|| !may_contain_braces_to_expand(word)
-		{
+		if self.disable_brace_expansion || !self.shell.options().perform_brace_expansion {
+			return Ok(vec![word.into()]);
+		}
+		let long = word.len() > interp::DIVIDE_COPY_ABOVE_BYTES;
+		let may_contain_braces = if long {
+			may_contain_braces_to_expand_in_strides(self.params, word).await?
+		} else {
+			may_contain_braces_to_expand(word)
+		};
+		if !may_contain_braces {
 			return Ok(vec![word.into()]);
 		}
 
-		let parse_result = brush_parser::word::parse_brace_expansions(word, &self.parser_options);
+		let parse_result = if long {
+			parse_brace_expansions_in_strides(self.params, word, &self.parser_options).await?
+		} else {
+			brush_parser::word::parse_brace_expansions(word, &self.parser_options)
+		};
 		if parse_result.is_err() {
 			tracing::error!("failed to parse for brace expansion: {parse_result:?}");
 			return Ok(vec![word.into()]);
@@ -736,13 +1088,26 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		let Some(brace_expansion_pieces) = brace_expansion_pieces else {
 			return Ok(vec![word.into()]);
 		};
+		// With no brace expression in it, a word is one text piece, which the
+		// generator would copy back into the word in one step.
+		if long
+			&& !brace_expansion_pieces
+				.iter()
+				.any(|piece| matches!(piece, brush_parser::word::BraceExpressionOrText::Expr(_)))
+		{
+			return Ok(vec![word.into()]);
+		}
 
 		tracing::debug!(target: trace_categories::EXPANSION, "Brace expansion pieces: {brace_expansion_pieces:?}");
 
-		let words = braceexpansion::generate_and_combine_brace_expansions(brace_expansion_pieces)
-			.into_iter()
-			.map(|s| if s.is_empty() { Cow::Borrowed("\"\"") } else { Cow::Owned(s) })
-			.collect();
+		let words = braceexpansion::generate_and_combine_brace_expansions(
+			brace_expansion_pieces,
+			self.params,
+		)
+		.await?
+		.into_iter()
+		.map(|s| if s.is_empty() { Cow::Borrowed("\"\"") } else { Cow::Owned(s) })
+		.collect();
 
 		Ok(words)
 	}
@@ -750,8 +1115,8 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 	/// Convenience wrapper over [`Self::brace_expand_words`] that joins the
 	/// expanded elements back into a single space-separated string.
 	#[cfg(test)]
-	fn brace_expand_if_needed(&self, word: &'a str) -> Result<Cow<'a, str>, error::Error> {
-		let mut words = self.brace_expand_words(word)?;
+	async fn brace_expand_if_needed(&self, word: &'a str) -> Result<Cow<'a, str>, error::Error> {
+		let mut words = self.brace_expand_words(word).await?;
 		if words.len() == 1 {
 			Ok(words.remove(0))
 		} else {
@@ -770,13 +1135,28 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		let basic_expansion = self.basic_expand(word).await?;
 
 		// Then split.
-		let fields: Vec<WordField> = self.split_fields(basic_expansion);
+		let fields: Vec<WordField> = self.split_fields(basic_expansion).await?;
 
 		// Now expand pathnames if necessary. This also unquotes as a side effect.
 		let mut result = Vec::new();
+		let mut budget = interp::ElementBudget::new();
 		for field in fields {
+			// One field per brace element or array element; the unquoting below
+			// rewrites its text, and a field that globs spends the walk's own
+			// checkpoints while it does.
+			let due = budget.charge(field.len());
+			if due > 0 {
+				interp::loop_checkpoints(self.params, due).await?;
+			}
 			if self.disable_pathname_expansion || self.shell.options().disable_filename_globbing {
-				result.push(String::from(field));
+				// Only a field that cannot be unquoted in one step goes through
+				// the dividing path: calling an `async` function on every field
+				// of a million-element array costs more than the checkpoints.
+				result.push(if field.len() > interp::DIVIDE_COPY_ABOVE_BYTES {
+					self.unquote_in_strides(field).await?
+				} else {
+					String::from(field)
+				});
 			} else {
 				result.extend(self.expand_pathnames_in_field(field).await?);
 			}
@@ -785,19 +1165,37 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		Ok(result)
 	}
 
-	fn split_fields(&self, expansion: Expansion) -> Vec<WordField> {
+	/// Splits `expansion` into fields at the characters in IFS.
+	///
+	/// The text comes from run-time data, not the script, and a single field
+	/// can be any length, so the walk spends a checkpoint every
+	/// [`FIELD_SPLITTING_STRIDE`] characters and pieces rather than once per
+	/// field.
+	async fn split_fields(&self, expansion: Expansion) -> Result<Vec<WordField>, error::Error> {
 		let ifs = self.shell.ifs();
 
 		let mut fields: Vec<WordField> = vec![];
 		let mut current_field = WordField::new();
+		// Characters and pieces walked since the last checkpoint.
+		let mut steps = 0;
 
 		// Go through the fields we have so far.
 		for existing_field in expansion.fields {
 			for piece in existing_field.0 {
+				if steps == FIELD_SPLITTING_STRIDE {
+					steps = 0;
+					interp::loop_checkpoint(self.params).await?;
+				}
+				steps += 1;
 				match piece {
 					ExpansionPiece::Unsplittable(_) => current_field.0.push(piece),
 					ExpansionPiece::Splittable(s) => {
 						for c in s.chars() {
+							if steps == FIELD_SPLITTING_STRIDE {
+								steps = 0;
+								interp::loop_checkpoint(self.params).await?;
+							}
+							steps += 1;
 							if ifs.contains(c) {
 								if !current_field.0.is_empty() {
 									fields.push(std::mem::take(&mut current_field));
@@ -822,14 +1220,52 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			}
 		}
 
-		fields
+		Ok(fields)
+	}
+
+	/// Copies a field a stride at a time, keeping each piece's quoting.
+	///
+	/// A field holds one array element, or one brace element, and either can be
+	/// of any size; a single `clone` of one held the worker for the whole copy.
+	async fn clone_field_in_strides(&self, field: &WordField) -> Result<WordField, error::Error> {
+		let mut pieces = Vec::with_capacity(field.0.len());
+		for piece in &field.0 {
+			let text = interp::clone_in_strides(self.params, piece.as_str()).await?;
+			pieces.push(match piece {
+				ExpansionPiece::Splittable(_) => ExpansionPiece::Splittable(text),
+				ExpansionPiece::Unsplittable(_) => ExpansionPiece::Unsplittable(text),
+			});
+		}
+
+		Ok(WordField(pieces))
+	}
+
+	/// Joins a field's pieces into the string it stands for, a stride at a
+	/// time. `String::from(field)` does the same in one copy, which one array
+	/// element of any size turns into a stretch nothing can interrupt.
+	async fn unquote_in_strides(&self, field: WordField) -> Result<String, error::Error> {
+		let mut text = String::new();
+		for piece in &field.0 {
+			interp::push_str_in_strides(self.params, &mut text, piece.as_str()).await?;
+		}
+
+		Ok(text)
 	}
 
 	async fn expand_pathnames_in_field(
 		&self,
 		field: WordField,
 	) -> Result<Vec<String>, error::Error> {
-		let pattern = patterns::Pattern::from(field.clone())
+		// One field can be of any size, and `Pattern` needs its own copy while
+		// the field itself is still needed below. Only a copy too large to make
+		// in one step is divided; the `async` call to divide it costs more than
+		// the copy does for an ordinary field.
+		let copied = if field.len() > interp::DIVIDE_COPY_ABOVE_BYTES {
+			self.clone_field_in_strides(&field).await?
+		} else {
+			field.clone()
+		};
+		let pattern = patterns::Pattern::from(copied)
 			.set_extended_globbing(self.parser_options.enable_extended_globbing)
 			.set_case_insensitive(self.shell.options().case_insensitive_pathname_expansion);
 
@@ -861,7 +1297,12 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			if self.shell.options().expand_non_matching_patterns_to_null {
 				Ok(vec![])
 			} else {
-				Ok(vec![String::from(field)])
+				// As above: divided only when one step cannot do it.
+				Ok(vec![if field.len() > interp::DIVIDE_COPY_ABOVE_BYTES {
+					self.unquote_in_strides(field).await?
+				} else {
+					String::from(field)
+				}])
 			}
 		} else {
 			Ok(paths)
@@ -1025,6 +1466,11 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 
 	/// Helper function to process pieces within a double-quoted sequence.
 	/// This ensures proper handling of concatenation and field building.
+	///
+	/// One piece can stand for a field per element of an array
+	/// (`"${name[@]}"`), and quoting them comes after the expansion that made
+	/// them has spent its last checkpoint, so each field quoted spends one. A
+	/// piece with no fields spends one too, being a step of this loop.
 	async fn process_double_quoted_pieces(
 		&mut self,
 		pieces: Vec<brush_parser::word::WordPieceWithSource>,
@@ -1036,46 +1482,52 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			let Expansion { fields: this_fields, concatenate, .. } =
 				self.expand_word_piece(piece.piece).await?;
 
-			let fields_to_append = if concatenate {
-				#[expect(unstable_name_collisions)]
-				let mut concatenated: Vec<ExpansionPiece> = this_fields
-					.into_iter()
-					.map(|WordField(pieces)| {
-						pieces
-							.into_iter()
-							.map(|piece| piece.make_unsplittable())
-							.collect()
-					})
-					.intersperse(vec![ExpansionPiece::Unsplittable(concatenation_joiner.to_string())])
-					.flatten()
-					.collect();
+			if this_fields.is_empty() {
+				interp::loop_checkpoint(self.params).await?;
+			}
 
-				// If there were no pieces, make sure there's an empty string after
-				// concatenation.
-				if concatenated.is_empty() {
-					concatenated.push(ExpansionPiece::Splittable(String::new()));
+			// The piece's first field joins the field before it.
+			if concatenate {
+				// Every field, joined by IFS's first character, makes one quoted
+				// string; with no fields, an empty one.
+				let mut concatenated = String::new();
+				let mut budget = interp::ElementBudget::new();
+				for (index, field) in this_fields.into_iter().enumerate() {
+					// Every piece of the field is copied into `concatenated`, and
+					// one field can be of any size.
+					let long = field.len() > interp::DIVIDE_COPY_ABOVE_BYTES;
+					if !long {
+						let due = budget.charge(field.len());
+						if due > 0 {
+							interp::loop_checkpoints(self.params, due).await?;
+						}
+					}
+					let WordField(pieces) = field;
+					if index > 0 {
+						concatenated.push(concatenation_joiner);
+					}
+					for piece in pieces {
+						if long {
+							interp::push_str_in_strides(self.params, &mut concatenated, piece.as_str())
+								.await?;
+						} else {
+							concatenated.push_str(piece.as_str());
+						}
+					}
 				}
-
-				vec![WordField(concatenated)]
+				join_or_push(&mut fields, true, vec![ExpansionPiece::Unsplittable(concatenated)]);
 			} else {
-				this_fields
-			};
-
-			for (i, WordField(next_pieces)) in fields_to_append.into_iter().enumerate() {
-				// Flip to unsplittable.
-				let mut next_pieces: Vec<_> = next_pieces
-					.into_iter()
-					.map(|piece| piece.make_unsplittable())
-					.collect();
-
-				if i == 0
-					&& let Some(WordField(last_pieces)) = fields.last_mut()
-				{
-					last_pieces.append(&mut next_pieces);
-					continue;
+				let mut budget = interp::ElementBudget::new();
+				for (index, field) in this_fields.into_iter().enumerate() {
+					// The first field's pieces are copied onto the one before it.
+					let due = budget.charge(if index == 0 { field.len() } else { 0 });
+					if due > 0 {
+						interp::loop_checkpoints(self.params, due).await?;
+					}
+					let WordField(pieces) = field;
+					let pieces = pieces.into_iter().map(ExpansionPiece::make_unsplittable).collect();
+					join_or_push(&mut fields, index == 0, pieces);
 				}
-
-				fields.push(WordField(next_pieces));
 			}
 		}
 
@@ -1130,12 +1582,14 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 						ParameterState::DefinedEmptyString,
 					) => Ok(expanded_parameter),
 					_ => {
-						let expanded_default_value =
-							String::from(self.expand_parameter_word(default_value).await?);
-						self
-							.assign_to_parameter(&parameter, expanded_default_value.clone())
-							.await?;
-						Ok(Expansion::from(expanded_default_value))
+						let expanded_default_value = self.expand_parameter_word(default_value).await?;
+						let expanded_default_value = self.join_fields(expanded_default_value).await?;
+						// The default is whatever the word expanded to, so the
+						// copy the expansion keeps is divided.
+						let kept = interp::clone_in_strides(self.params, &expanded_default_value).await?;
+						let evaluated =
+							self.assign_to_parameter(&parameter, expanded_default_value).await?;
+						Ok(Expansion::from(evaluated.unwrap_or(kept)))
 					},
 				}
 			},
@@ -1215,7 +1669,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			} => {
 				let expanded_parameter = self.expand_parameter(&parameter, indirect).await?;
 				let expanded_pattern = self.basic_expand_opt_pattern(pattern).await?;
-				transform_expansion(expanded_parameter, async |s| {
+				transform_expansion(self.params, expanded_parameter, async |s| {
 					patterns::remove_smallest_matching_suffix(s.as_str(), expanded_pattern.as_ref())
 						.map(|s| s.to_owned())
 				})
@@ -1228,7 +1682,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			} => {
 				let expanded_parameter = self.expand_parameter(&parameter, indirect).await?;
 				let expanded_pattern = self.basic_expand_opt_pattern(pattern).await?;
-				transform_expansion(expanded_parameter, async |s| {
+				transform_expansion(self.params, expanded_parameter, async |s| {
 					patterns::remove_largest_matching_suffix(s.as_str(), expanded_pattern.as_ref())
 						.map(|s| s.to_owned())
 				})
@@ -1242,7 +1696,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				let expanded_parameter = self.expand_parameter(&parameter, indirect).await?;
 				let expanded_pattern = self.basic_expand_opt_pattern(pattern).await?;
 
-				transform_expansion(expanded_parameter, async |s| {
+				transform_expansion(self.params, expanded_parameter, async |s| {
 					patterns::remove_smallest_matching_prefix(s.as_str(), expanded_pattern.as_ref())
 						.map(|s| s.to_owned())
 				})
@@ -1256,7 +1710,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				let expanded_parameter = self.expand_parameter(&parameter, indirect).await?;
 				let expanded_pattern = self.basic_expand_opt_pattern(pattern).await?;
 
-				transform_expansion(expanded_parameter, async |s| {
+				transform_expansion(self.params, expanded_parameter, async |s| {
 					patterns::remove_largest_matching_prefix(s.as_str(), expanded_pattern.as_ref())
 						.map(|s| s.to_owned())
 				})
@@ -1312,42 +1766,79 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				};
 
 				#[expect(clippy::cast_sign_loss)]
-				Ok(expanded_parameter
-					.polymorphic_subslice(expanded_offset as usize, end_offset as usize))
+				expanded_parameter
+					.polymorphic_subslice(expanded_offset as usize, end_offset as usize, self.params)
+					.await
 			},
 			brush_parser::word::ParameterExpr::Transform {
 				parameter,
 				indirect,
 				op: ParameterTransformOp::ToAttributeFlags,
 			} => {
-				if let (_, _, Some(var)) = self
-					.try_resolve_parameter_to_variable(&parameter, indirect)
-					.await?
-				{
-					Ok(var.attribute_flags(self.shell).into())
-				} else {
-					Ok(String::new().into())
-				}
+				let (name, _) = self.try_resolve_parameter_to_variable(&parameter, indirect).await?;
+				let flags = name
+					.and_then(|name| {
+						self.shell.env().get(&name).map(|(_, var)| var.attribute_flags(self.shell))
+					})
+					.unwrap_or_default();
+				Ok(flags.into())
 			},
 			brush_parser::word::ParameterExpr::Transform {
 				parameter,
 				indirect,
 				op: ParameterTransformOp::ToAssignmentLogic,
 			} => {
-				if let (Some(name), index, Some(var)) = self
-					.try_resolve_parameter_to_variable(&parameter, indirect)
-					.await?
+				let (name, index) = self.try_resolve_parameter_to_variable(&parameter, indirect).await?;
+				if let Some(name) = name
+					&& let Some((_, var)) = self.shell.env().get(&name)
 				{
-					let assignable_value_str = var
-						.value()
-						.to_assignable_str(index.as_deref(), self.shell)?;
+					// A value is as long as the script made it, and quoting it
+					// and joining it to its name are each a pass over it:
+					// `: "${big@A}"` held the worker 102 ms on 64 MiB. A value,
+					// or the element an index names, is quoted and joined a
+					// stride at a time.
+					let value = var.value();
+					let quoted = match (value, index.as_deref()) {
+						(ShellValue::String(s), _) => Some(s.as_str().into()),
+						(ShellValue::IndexedArray(_) | ShellValue::AssociativeArray(_), Some(index)) => {
+							match value.get_at(index, self.shell) {
+								Ok(Some(element)) => Some(element),
+								_ => None,
+							}
+						},
+						_ => None,
+					};
+					let assignable_value_str = match quoted {
+						Some(text) => {
+							escape::force_quote_divided(self.params, &text, escape::QuoteMode::SingleQuote)
+								.await?
+						},
+						None if matches!(
+							value,
+							ShellValue::IndexedArray(_) | ShellValue::AssociativeArray(_)
+						) =>
+						{
+							if index.is_some() {
+								String::new()
+							} else {
+								value
+									.format_divided(
+										crate::variables::FormatStyle::DeclarePrint,
+										self.shell,
+										self.params,
+									)
+									.await?
+							}
+						},
+						None => value.to_assignable_str(index.as_deref(), self.shell)?,
+					};
 
 					let mut attr_str = var.attribute_flags(self.shell);
 					if attr_str.is_empty() {
 						attr_str.push('-');
 					}
 
-					match var.value() {
+					let text = match value {
                         ShellValue::IndexedArray(_)
                         | ShellValue::AssociativeArray(_)
                         // TODO(dynamic): confirm this
@@ -1357,19 +1848,15 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
                             } else {
                                 "="
                             };
-
-                            Ok(std::format!(
-                            "declare -{attr_str} {name}{equals_or_nothing}{assignable_value_str}"
-                        )
-                            .into())
+                            let head = std::format!("declare -{attr_str} {name}{equals_or_nothing}");
+                            joined_in_strides(self.params, &head, &assignable_value_str).await?
                         }
                         ShellValue::String(_) => {
-                            Ok(std::format!("{name}={assignable_value_str}").into())
+                            joined_in_strides(self.params, &std::format!("{name}="), &assignable_value_str).await?
                         }
-                        ShellValue::Unset(_) => {
-                            Ok(std::format!("declare -{attr_str} {name}").into())
-                        }
-                    }
+                        ShellValue::Unset(_) => std::format!("declare -{attr_str} {name}"),
+                    };
+					Ok(text.into())
 				} else {
 					Ok(String::new().into())
 				}
@@ -1384,7 +1871,14 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				//
 
 				let mut transformed_fields = vec![];
+				let mut budget = interp::ElementBudget::new();
 				for field in expanded_parameter.fields {
+					// `${name[@]…}` transforms one field per array element, and
+					// the transform rewrites its whole text.
+					let due = budget.charge(field.len());
+					if due > 0 {
+						interp::loop_checkpoints(self.params, due).await?;
+					}
 					let s = String::from(field);
 					let transformed = self.apply_transform_to(&op, s, came_from_undefined).await?;
 					transformed_fields.push(WordField::from(transformed));
@@ -1401,7 +1895,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				let expanded_parameter = self.expand_parameter(&parameter, indirect).await?;
 				let expanded_pattern = self.basic_expand_opt_pattern(pattern).await?;
 
-				transform_expansion(expanded_parameter, async |s| {
+				transform_expansion(self.params, expanded_parameter, async |s| {
 					Self::uppercase_first_char(s, expanded_pattern.as_ref())
 				})
 				.await
@@ -1410,7 +1904,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				let expanded_parameter = self.expand_parameter(&parameter, indirect).await?;
 				let expanded_pattern = self.basic_expand_opt_pattern(pattern).await?;
 
-				transform_expansion(expanded_parameter, async |s| {
+				transform_expansion(self.params, expanded_parameter, async |s| {
 					Self::uppercase_pattern(s.as_str(), expanded_pattern.as_ref())
 				})
 				.await
@@ -1419,7 +1913,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				let expanded_parameter = self.expand_parameter(&parameter, indirect).await?;
 				let expanded_pattern = self.basic_expand_opt_pattern(pattern).await?;
 
-				transform_expansion(expanded_parameter, async |s| {
+				transform_expansion(self.params, expanded_parameter, async |s| {
 					Self::lowercase_first_char(s, expanded_pattern.as_ref())
 				})
 				.await
@@ -1428,7 +1922,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				let expanded_parameter = self.expand_parameter(&parameter, indirect).await?;
 				let expanded_pattern = self.basic_expand_opt_pattern(pattern).await?;
 
-				transform_expansion(expanded_parameter, async |s| {
+				transform_expansion(self.params, expanded_parameter, async |s| {
 					Self::lowercase_pattern(s.as_str(), expanded_pattern.as_ref())
 				})
 				.await
@@ -1456,7 +1950,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 					matches!(match_kind, brush_parser::word::SubstringMatchKind::Suffix),
 				)?;
 
-				transform_expansion(expanded_parameter, async |s| {
+				transform_expansion(self.params, expanded_parameter, async |s| {
 					Ok(Self::replace_substring(
 						s.as_str(),
 						&regex,
@@ -1495,21 +1989,13 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				}
 			},
 			brush_parser::word::ParameterExpr::MemberKeys { variable_name, concatenate } => {
-				let keys = if let Some((_, var)) = self.shell.env().get(variable_name) {
-					var.value().element_keys(self.shell)
+				let fields = if let Some((_, var)) = self.shell.env().get(variable_name) {
+					self.element_fields(var.value(), true).await?
 				} else {
 					vec![]
 				};
 
-				Ok(Expansion {
-					fields: keys
-						.into_iter()
-						.map(|key| WordField(vec![ExpansionPiece::Splittable(key)]))
-						.collect(),
-					concatenate,
-					from_array: true,
-					undefined: false,
-				})
+				Ok(Expansion { fields, concatenate, from_array: true, undefined: false })
 			},
 		}
 	}
@@ -1518,7 +2004,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		&mut self,
 		parameter: &brush_parser::word::Parameter,
 		value: String,
-	) -> Result<(), error::Error> {
+	) -> Result<Option<String>, error::Error> {
 		let (variable_name, index) = match parameter {
 			brush_parser::word::Parameter::Named(name) => (name, None),
 			brush_parser::word::Parameter::NamedWithIndex { name, index } => {
@@ -1544,47 +2030,75 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			},
 		};
 
-		if let Some(index) = index {
-			self.shell.env_mut().update_or_add_array_element(
-				variable_name,
-				index,
-				value,
-				|_| Ok(()),
-				env::EnvironmentLookup::Anywhere,
-				env::EnvironmentScope::Global,
-			)
+		// A variable with the integer attribute takes the value's arithmetic
+		// value, as Bash gives it to `printf -v n 4*4` and `${n:=2+3}`, and
+		// that value is returned, since `${n:=2+3}` expands to it.
+		let integer =
+			self.shell.env().get(variable_name).is_some_and(|(_, var)| var.is_treated_as_integer());
+		let (value, evaluated) = if integer {
+			let value = crate::variables::integer_value(self.shell, value).await?;
+			(value.clone(), Some(value))
 		} else {
-			self.shell.env_mut().update_or_add(
-				variable_name,
-				variables::ShellValueLiteral::Scalar(value),
-				|_| Ok(()),
-				env::EnvironmentLookup::Anywhere,
-				env::EnvironmentScope::Global,
-			)
+			(value, None)
+		};
+
+		// Both of these assign a value the caller sized, and this is an
+		// `async` caller with execution parameters: it takes the divided
+		// route.
+		if let Some(index) = index {
+			self.shell
+				.env_mut()
+				.update_or_add_array_element_divided(
+					variable_name,
+					index,
+					value,
+					|_| Ok(()),
+					env::EnvironmentLookup::Anywhere,
+					env::EnvironmentScope::Global,
+					self.params,
+				)
+				.await?;
+		} else {
+			self.shell
+				.env_mut()
+				.update_or_add(
+					variable_name,
+					crate::variables::ShellValueLiteral::Scalar(value),
+					|_| Ok(()),
+					env::EnvironmentLookup::Anywhere,
+					env::EnvironmentScope::Global,
+					self.params,
+				)
+				.await?;
 		}
+		Ok(evaluated)
 	}
 
+	/// Returns the name of the variable `parameter` refers to, and the index it
+	/// names in it, if any.
+	///
+	/// Callers read the variable where it is stored: a copy of an array costs
+	/// a pass over every element.
 	async fn try_resolve_parameter_to_variable(
 		&mut self,
 		parameter: &brush_parser::word::Parameter,
 		indirect: bool,
-	) -> Result<(Option<String>, Option<String>, Option<ShellVariable>), error::Error> {
+	) -> Result<(Option<String>, Option<String>), error::Error> {
 		if !indirect {
-			Ok(self.try_resolve_parameter_to_variable_without_indirect(parameter))
+			Ok(Self::try_resolve_parameter_to_variable_without_indirect(parameter))
 		} else {
 			let expansion = self.expand_parameter(parameter, false).await?;
-			let parameter_str: String = expansion.into();
+			let parameter_str = self.join_fields(expansion).await?;
 			let inner_parameter =
 				brush_parser::word::parse_parameter(parameter_str.as_str(), &self.parser_options)?;
-			Ok(self.try_resolve_parameter_to_variable_without_indirect(&inner_parameter))
+			Ok(Self::try_resolve_parameter_to_variable_without_indirect(&inner_parameter))
 		}
 	}
 
 	fn try_resolve_parameter_to_variable_without_indirect(
-		&self,
 		parameter: &brush_parser::word::Parameter,
-	) -> (Option<String>, Option<String>, Option<ShellVariable>) {
-		let (name, index) = match parameter {
+	) -> (Option<String>, Option<String>) {
+		match parameter {
 			brush_parser::word::Parameter::Positional(_)
 			| brush_parser::word::Parameter::Special(_) => (None, None),
 			brush_parser::word::Parameter::Named(name) => (Some(name.to_owned()), Some("0".into())),
@@ -1594,13 +2108,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			brush_parser::word::Parameter::NamedWithAllIndices { name, concatenate: _concatenate } => {
 				(Some(name.to_owned()), None)
 			},
-		};
-
-		let var = name
-			.as_ref()
-			.and_then(|name| self.shell.env().get(name).map(|(_, var)| var.clone()));
-
-		(name, index, var)
+		}
 	}
 
 	fn undefined_expansion(
@@ -1649,7 +2157,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		if !indirect {
 			Ok(expansion)
 		} else {
-			let parameter_str: String = expansion.into();
+			let parameter_str = self.join_fields(expansion).await?;
 			let inner_parameter =
 				brush_parser::word::parse_parameter(parameter_str.as_str(), &self.parser_options)?;
 
@@ -1667,24 +2175,38 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		match parameter {
 			brush_parser::word::Parameter::Positional(p) => {
 				if *p == 0 {
-					Ok(self.expand_special_parameter(&brush_parser::word::SpecialParameter::ShellName))
+					self.expand_special_parameter(&brush_parser::word::SpecialParameter::ShellName).await
 				} else if let Some(parameter) = self.shell.current_shell_args().get((p - 1) as usize) {
-					Ok(Expansion::from(parameter.to_owned()))
+					copied_value(self.params, parameter).await
 				} else {
 					self.undefined_expansion(parameter, allow_unset_vars)
 				}
 			},
-			brush_parser::word::Parameter::Special(s) => Ok(self.expand_special_parameter(s)),
+			brush_parser::word::Parameter::Special(s) => self.expand_special_parameter(s).await,
 			brush_parser::word::Parameter::Named(n) => {
-				if !env::valid_variable_name(n.as_str()) {
-					Err(error::ErrorKind::BadSubstitution(n.clone()).into())
-				} else if let Some((_, var)) = self.shell.env().get(n) {
+				// A name is as long as the text after a `$` that a variable made:
+				// `$PWD` followed by 16 MiB of letters is one name.
+				let long = n.len() > interp::DIVIDE_COPY_ABOVE_BYTES;
+				let valid = if long {
+					valid_variable_name_in_strides(self.params, n).await?
+				} else {
+					env::valid_variable_name(n.as_str())
+				};
+				if !valid {
+					return Err(error::ErrorKind::BadSubstitution(n.clone()).into());
+				}
+				let var = if long {
+					variable_by_long_name(self.params, self.shell.env(), n).await?
+				} else {
+					self.shell.env().get(n).map(|(_, var)| var)
+				};
+				if let Some(var) = var {
 					if matches!(var.value(), ShellValue::Unset(_)) {
 						self.undefined_expansion(parameter, allow_unset_vars)
 					} else {
 						let value = var.value().try_get_cow_str(self.shell);
 						if let Some(value) = value {
-							Ok(Expansion::from(value.to_string()))
+							copied_value(self.params, &value).await
 						} else {
 							self.undefined_expansion(parameter, allow_unset_vars)
 						}
@@ -1714,32 +2236,60 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				if let Some((_, var)) = self.shell.env().get(name)
 					&& let Ok(Some(value)) = var.value().get_at(index_to_use.as_str(), self.shell)
 				{
-					Ok(Expansion::from(value.to_string()))
+					copied_value(self.params, &value).await
 				} else {
 					self.undefined_expansion(parameter, allow_unset_vars)
 				}
 			},
 			brush_parser::word::Parameter::NamedWithAllIndices { name, concatenate } => {
-				if let Some((_, var)) = self.shell.env().get(name) {
-					let values = var.value().element_values(self.shell);
-
-					Ok(Expansion {
-						fields:      values
-							.into_iter()
-							.map(|value| WordField(vec![ExpansionPiece::Splittable(value)]))
-							.collect(),
-						concatenate: *concatenate,
-						from_array:  true,
-						undefined:   false,
-					})
+				let fields = if let Some((_, var)) = self.shell.env().get(name) {
+					self.element_fields(var.value(), false).await?
 				} else {
-					Ok(Expansion {
-						fields:      vec![],
-						concatenate: *concatenate,
-						from_array:  true,
-						undefined:   false,
-					})
-				}
+					vec![]
+				};
+
+				Ok(Expansion { fields, concatenate: *concatenate, from_array: true, undefined: false })
+			},
+		}
+	}
+
+	/// One field per element of `value`, or per key when `keys` is set:
+	/// `${name[@]}` and `${!name[@]}`.
+	///
+	/// Each element is copied as its field is made, with a checkpoint: an
+	/// array can hold any number of elements, and copying them waits on
+	/// nothing. A dynamic value is resolved once, as
+	/// [`crate::ShellVariable::resolve_value`] does.
+	async fn element_fields(
+		&self,
+		value: &ShellValue,
+		keys: bool,
+	) -> Result<Vec<WordField>, error::Error> {
+		let resolved;
+		let value = if let ShellValue::Dynamic { getter, .. } = value {
+			resolved = getter(&*self.shell);
+			&resolved
+		} else {
+			value
+		};
+
+		match value {
+			ShellValue::Unset(_) | ShellValue::Dynamic { .. } => Ok(vec![]),
+			ShellValue::String(_) if keys => Ok(vec![WordField::from(String::from("0"))]),
+			ShellValue::String(s) => Ok(vec![WordField::from(
+				interp::clone_in_strides(self.params, s.as_str()).await?,
+			)]),
+			ShellValue::IndexedArray(array) if keys => {
+				fields_from(self.params, array.keys().map(u64::to_string)).await
+			},
+			ShellValue::IndexedArray(array) => {
+				fields_copied_from(self.params, array.values().map(String::as_str)).await
+			},
+			ShellValue::AssociativeArray(array) if keys => {
+				fields_copied_from(self.params, array.keys().map(String::as_str)).await
+			},
+			ShellValue::AssociativeArray(array) => {
+				fields_copied_from(self.params, array.values().map(String::as_str)).await
 			},
 		}
 	}
@@ -1760,19 +2310,18 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		Ok(index_to_use)
 	}
 
-	fn expand_special_parameter(
+	async fn expand_special_parameter(
 		&self,
 		parameter: &brush_parser::word::SpecialParameter,
-	) -> Expansion {
-		match parameter {
+	) -> Result<Expansion, error::Error> {
+		let expansion = match parameter {
 			brush_parser::word::SpecialParameter::AllPositionalParameters { concatenate } => {
-				let args = self.shell.current_shell_args().iter();
-
 				Expansion {
-					fields:      args
-						.into_iter()
-						.map(|param| WordField(vec![ExpansionPiece::Splittable(param.to_owned())]))
-						.collect(),
+					fields:      fields_copied_from(
+						self.params,
+						self.shell.current_shell_args().iter().map(String::as_str),
+					)
+					.await?,
 					concatenate: *concatenate,
 					from_array:  true,
 					undefined:   false,
@@ -1802,7 +2351,9 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 					.current_shell_name()
 					.map_or_else(String::new, |name| name.to_string()),
 			),
-		}
+		};
+
+		Ok(expansion)
 	}
 
 	async fn expand_arithmetic_expr(
@@ -1927,7 +2478,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				prompt::expand_prompt(self.shell, self.params, s).await
 			},
 			brush_parser::word::ParameterTransformOp::CapitalizeInitial => {
-				Ok(to_initial_capitals(s.as_str()))
+				to_initial_capitals_divided(self.params, &s).await
 			},
 			brush_parser::word::ParameterTransformOp::ExpandEscapeSequences => {
 				let (result, _) = escape::expand_backslash_escapes(
@@ -1944,18 +2495,34 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				} else {
 					// TODO(expansion): This isn't right for arrays.
 					// TODO(expansion): This doesn't honor 'separate_words'
-					Ok(escape::force_quote(s.as_str(), escape::QuoteMode::SingleQuote))
+					escape::force_quote_divided(self.params, s.as_str(), escape::QuoteMode::SingleQuote).await
 				}
 			},
 			brush_parser::word::ParameterTransformOp::Quoted => {
 				if came_from_undefined {
 					Ok(String::new())
 				} else {
-					Ok(escape::force_quote(s.as_str(), escape::QuoteMode::SingleQuote))
+					escape::force_quote_divided(self.params, s.as_str(), escape::QuoteMode::SingleQuote).await
 				}
 			},
-			brush_parser::word::ParameterTransformOp::ToLowerCase => Ok(s.to_lowercase()),
-			brush_parser::word::ParameterTransformOp::ToUpperCase => Ok(s.to_uppercase()),
+			// The attributes' own conversions, a stride at a time for a long
+			// value: `${big@U}` held the worker 25.9 ms on 64 MiB in one step.
+			brush_parser::word::ParameterTransformOp::ToLowerCase => {
+				crate::variables::ValueConverter::convert_divided(
+					crate::variables::ShellVariableUpdateTransform::Lowercase,
+					s,
+					self.params,
+				)
+				.await
+			},
+			brush_parser::word::ParameterTransformOp::ToUpperCase => {
+				crate::variables::ValueConverter::convert_divided(
+					crate::variables::ShellVariableUpdateTransform::Uppercase,
+					s,
+					self.params,
+				)
+				.await
+			},
 			brush_parser::word::ParameterTransformOp::ToAssignmentLogic
 			| brush_parser::word::ParameterTransformOp::ToAttributeFlags => {
 				unreachable!("covered in caller")
@@ -1964,47 +2531,101 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 	}
 }
 
-fn coalesce_expansions(expansions: Vec<Expansion>) -> Expansion {
-	expansions
-		.into_iter()
-		.fold(Expansion::default(), |mut acc, expansion| {
-			for (i, mut field) in expansion.fields.into_iter().enumerate() {
-				match acc.fields.last_mut() {
-					Some(last) if i == 0 => {
-						last.0.append(&mut field.0);
-					},
-					_ => acc.fields.push(field),
-				}
+/// `${name@u}`: each character after whitespace, and the first, in its
+/// uppercase form. The state between characters is one flag, carried from
+/// stride to stride, so a long value is converted a stride at a time with
+/// exactly the result of one pass.
+async fn to_initial_capitals_divided(params: &ExecutionParameters, s: &str) -> Result<String, error::Error> {
+	let mut result = String::with_capacity(s.len());
+	let mut capitalize_next = true;
+	let mut rest = s;
+	while !rest.is_empty() {
+		if s.len() > interp::DIVIDE_COPY_ABOVE_BYTES {
+			interp::stride_checkpoint(params).await?;
+		}
+		let mut end = rest.len().min(interp::BYTE_CHECKPOINT_STRIDE);
+		while !rest.is_char_boundary(end) {
+			end -= 1;
+		}
+		let (piece, remaining) = rest.split_at(end);
+		for c in piece.chars() {
+			if c.is_whitespace() {
+				capitalize_next = true;
+				result.push(c);
+			} else if capitalize_next {
+				result.extend(c.to_uppercase());
+				capitalize_next = false;
+			} else {
+				result.push(c);
 			}
-
-			// TODO(expansion): What if expansions have different concatenation values?
-			acc.concatenate = expansion.concatenate;
-			acc.from_array = expansion.from_array;
-
-			acc
-		})
+		}
+		rest = remaining;
+	}
+	Ok(result)
 }
 
-fn to_initial_capitals(s: &str) -> String {
-	let mut result = String::new();
-	let mut capitalize_next = true;
-
-	for c in s.chars() {
-		if c.is_whitespace() {
-			capitalize_next = true;
-			result.push(c);
-		} else if capitalize_next {
-			result.push_str(c.to_uppercase().to_string().as_str());
-			capitalize_next = false;
-		} else {
-			result.push(c);
+/// Makes a field of each of `values`: there is one for every element of an
+/// array or every positional parameter, and making one only moves a value the
+/// caller already owns, so they spend a checkpoint every
+/// [`interp::ELEMENT_CHECKPOINT_STRIDE`].
+///
+/// Use [`fields_copied_from`] where the values have to be copied out of
+/// something the shell owns; one of them can be of any size.
+async fn fields_from(
+	params: &ExecutionParameters,
+	values: impl Iterator<Item = String>,
+) -> Result<Vec<WordField>, error::Error> {
+	let mut fields = Vec::with_capacity(values.size_hint().0);
+	let mut budget = interp::ElementBudget::new();
+	for value in values {
+		let due = budget.charge(0);
+		if due > 0 {
+			interp::loop_checkpoints(params, due).await?;
 		}
+		fields.push(WordField::from(value));
 	}
 
-	result
+	Ok(fields)
+}
+
+/// Makes a field of a copy of each of `values`, dividing a copy too large to
+/// make in one step rather than only charging for it.
+async fn fields_copied_from<'a>(
+	params: &ExecutionParameters,
+	values: impl Iterator<Item = &'a str>,
+) -> Result<Vec<WordField>, error::Error> {
+	let mut fields = Vec::with_capacity(values.size_hint().0);
+	let mut budget = interp::ElementBudget::new();
+	for value in values {
+		if value.len() > interp::DIVIDE_COPY_ABOVE_BYTES {
+			fields.push(WordField::from(interp::clone_in_strides(params, value).await?));
+			continue;
+		}
+		let due = budget.charge(value.len());
+		if due > 0 {
+			interp::loop_checkpoints(params, due).await?;
+		}
+		fields.push(WordField::from(value.to_owned()));
+	}
+
+	Ok(fields)
+}
+
+/// `head` followed by `tail`, with `tail`, which can be any length, copied a
+/// stride at a time.
+async fn joined_in_strides(
+	params: &ExecutionParameters,
+	head: &str,
+	tail: &str,
+) -> Result<String, error::Error> {
+	let mut text = String::with_capacity(head.len() + tail.len());
+	text.push_str(head);
+	interp::push_str_in_strides(params, &mut text, tail).await?;
+	Ok(text)
 }
 
 async fn transform_expansion<F, FReturn>(
+	params: &ExecutionParameters,
 	expansion: Expansion,
 	mut f: F,
 ) -> Result<Expansion, error::Error>
@@ -2013,7 +2634,14 @@ where
 	FReturn: Future<Output = Result<String, error::Error>>,
 {
 	let mut transformed_fields = vec![];
+	let mut budget = interp::ElementBudget::new();
 	for field in expansion.fields {
+		// One field per array element when the parameter is an array, and the
+		// transform rewrites its whole text.
+		let due = budget.charge(field.len());
+		if due > 0 {
+			interp::loop_checkpoints(params, due).await?;
+		}
 		let transformed_field = WordField::from(f(String::from(field)).await?);
 		transformed_fields.push(transformed_field);
 	}
@@ -2027,31 +2655,79 @@ where
 }
 
 fn may_contain_braces_to_expand(s: &str) -> bool {
-	// This is a completely inaccurate but quick heuristic used to see if
-	// it's even worth properly parsing the string to find brace expressions.
-	// It's mostly used to avoid more expensive parsing just because we've
-	// encountered a brace used in a parameter expansion.
-	let mut last_was_unescaped_dollar_sign = false;
-	let mut last_was_escape = false;
-	let mut saw_opening_brace = false;
-	let mut saw_closing_brace = false;
-	for c in s.chars() {
-		if !last_was_unescaped_dollar_sign {
-			if c == '{' {
-				saw_opening_brace = true;
-			} else if c == '}' {
-				saw_closing_brace = true;
-				if saw_opening_brace {
-					return true;
+	let mut scan = BraceScan::default();
+	scan.found_in(s) || scan.verdict()
+}
+
+/// [`may_contain_braces_to_expand`], spending a checkpoint before each stride
+/// of `s`: the heuristic reads the whole of a word with no brace in it, and a
+/// prompt of 16 MiB is such a word.
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part way.
+async fn may_contain_braces_to_expand_in_strides(
+	params: &ExecutionParameters,
+	s: &str,
+) -> Result<bool, error::Error> {
+	let mut scan = BraceScan::default();
+	let mut rest = s;
+	while !rest.is_empty() {
+		interp::stride_checkpoint(params).await?;
+		let mut end = rest.len().min(interp::BYTE_CHECKPOINT_STRIDE);
+		// A stride lands mid-character at most three bytes in.
+		while !rest.is_char_boundary(end) {
+			end -= 1;
+		}
+		let (piece, remaining) = rest.split_at(end);
+		if scan.found_in(piece) {
+			return Ok(true);
+		}
+		rest = remaining;
+	}
+	Ok(scan.verdict())
+}
+
+/// What [`may_contain_braces_to_expand`] has seen so far, so that a word can be
+/// read in pieces.
+#[derive(Default)]
+struct BraceScan {
+	last_was_unescaped_dollar_sign: bool,
+	last_was_escape:                bool,
+	saw_opening_brace:              bool,
+	saw_closing_brace:              bool,
+}
+
+impl BraceScan {
+	/// Reads `s`, the text that follows whatever was read before, and returns
+	/// true as soon as it finds a closing brace after an opening one.
+	fn found_in(&mut self, s: &str) -> bool {
+		// This is a completely inaccurate but quick heuristic used to see if
+		// it's even worth properly parsing the string to find brace expressions.
+		// It's mostly used to avoid more expensive parsing just because we've
+		// encountered a brace used in a parameter expansion.
+		for c in s.chars() {
+			if !self.last_was_unescaped_dollar_sign {
+				if c == '{' {
+					self.saw_opening_brace = true;
+				} else if c == '}' {
+					self.saw_closing_brace = true;
+					if self.saw_opening_brace {
+						return true;
+					}
 				}
 			}
-		}
 
-		last_was_unescaped_dollar_sign = !last_was_escape && c == '$';
-		last_was_escape = c == '\\';
+			self.last_was_unescaped_dollar_sign = !self.last_was_escape && c == '$';
+			self.last_was_escape = c == '\\';
+		}
+		false
 	}
 
-	saw_opening_brace && saw_closing_brace
+	/// The answer for everything read, once it has all been read.
+	const fn verdict(&self) -> bool {
+		self.saw_opening_brace && self.saw_closing_brace
+	}
 }
 
 #[expect(clippy::panic_in_result_fn)]
@@ -2060,6 +2736,7 @@ mod tests {
 	use anyhow::Result;
 
 	use super::*;
+	use crate::ShellVariable;
 
 	#[tokio::test]
 	async fn test_full_expansion() -> Result<()> {
@@ -2153,14 +2830,14 @@ mod tests {
 		let params = shell.default_exec_params();
 		let expander = WordExpander::new(&mut shell, &params);
 
-		assert_eq!(expander.brace_expand_if_needed("abc")?, "abc");
-		assert_eq!(expander.brace_expand_if_needed("a{,b}d")?, "ad abd");
-		assert_eq!(expander.brace_expand_if_needed("a{b,c}d")?, "abd acd");
-		assert_eq!(expander.brace_expand_if_needed("a{1..3}d")?, "a1d a2d a3d");
-		assert_eq!(expander.brace_expand_if_needed(r#""{a,b}""#)?, r#""{a,b}""#);
-		assert_eq!(expander.brace_expand_if_needed("a{}b")?, "a{}b");
-		assert_eq!(expander.brace_expand_if_needed("a{ }b")?, "a{ }b");
-		assert_eq!(expander.brace_expand_if_needed("{a,b{1,2}}")?, "a b1 b2");
+		assert_eq!(expander.brace_expand_if_needed("abc").await?, "abc");
+		assert_eq!(expander.brace_expand_if_needed("a{,b}d").await?, "ad abd");
+		assert_eq!(expander.brace_expand_if_needed("a{b,c}d").await?, "abd acd");
+		assert_eq!(expander.brace_expand_if_needed("a{1..3}d").await?, "a1d a2d a3d");
+		assert_eq!(expander.brace_expand_if_needed(r#""{a,b}""#).await?, r#""{a,b}""#);
+		assert_eq!(expander.brace_expand_if_needed("a{}b").await?, "a{}b");
+		assert_eq!(expander.brace_expand_if_needed("a{ }b").await?, "a{ }b");
+		assert_eq!(expander.brace_expand_if_needed("{a,b{1,2}}").await?, "a b1 b2");
 
 		Ok(())
 	}
@@ -2205,7 +2882,7 @@ mod tests {
 			..Expansion::default()
 		};
 
-		let fields = expander.split_fields(expansion);
+		let fields = expander.split_fields(expansion).await?;
 
 		assert_eq!(fields, vec![
 			WordField(vec![ExpansionPiece::Unsplittable(String::from("A"))]),
@@ -2268,10 +2945,185 @@ mod tests {
 		Ok(())
 	}
 
-	#[test]
-	fn test_to_initial_capitals() {
-		assert_eq!(to_initial_capitals("ab bc cd"), String::from("Ab Bc Cd"));
-		assert_eq!(to_initial_capitals(" a "), String::from(" A "));
-		assert_eq!(to_initial_capitals(""), String::new());
+	/// A word long enough to take the stepped parse, with every kind of piece
+	/// in it and literal text longer than a stride on either side of them.
+	fn long_word_with_every_kind_of_piece() -> String {
+		let literal = "h".repeat(interp::DIVIDE_COPY_ABOVE_BYTES);
+		std::format!(
+			"$PWD{literal}\"{literal}$v ${{v}} `echo b` $(echo c)\"'{literal}'$'{literal}\\x41'\\$~:~\
+			 {literal}$((1+2))$[3]$\"g\"é"
+		)
+	}
+
+	#[tokio::test]
+	async fn a_long_word_parses_to_the_pieces_the_whole_parse_gives() -> Result<()> {
+		let shell = crate::shell::Shell::builder().build().await?;
+		let params = shell.default_exec_params();
+		let options = shell.parser_options();
+		let word = long_word_with_every_kind_of_piece();
+
+		let stepped = parse_word_in_strides(&params, &word, &options).await?;
+		let whole = brush_parser::word::parse(&word, &options)?;
+		// The pieces compare for equality only where the parser is built for
+		// its own tests or with `serde`.
+		assert_eq!(std::format!("{stepped:?}"), std::format!("{whole:?}"));
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn a_long_word_expands_to_the_text_the_whole_parse_gives() -> Result<()> {
+		let mut shell = crate::shell::Shell::builder().build().await?;
+		shell.env_mut().set_global("v", ShellVariable::new("val"))?;
+		let params = shell.default_exec_params();
+		let literal = "h".repeat(interp::DIVIDE_COPY_ABOVE_BYTES + 1);
+
+		let word = std::format!("{literal}\"$v ${{v}}\"'$v'$'\\x41'\\$\"{literal}\"$v");
+		let expanded = basic_expand_word(&mut shell, &params, &word).await?;
+		assert_eq!(expanded, std::format!("{literal}val val$vA${literal}val"));
+
+		Ok(())
+	}
+
+	/// `$` and a name of any length is one parameter; the variable it names is
+	/// found without hashing the name, and a variable whose name is the same
+	/// length and differs only at its end is not taken for it.
+	#[tokio::test]
+	async fn a_long_variable_name_finds_only_the_variable_it_names() -> Result<()> {
+		let mut shell = crate::shell::Shell::builder().build().await?;
+		let name = std::format!("PWD{}", "h".repeat(interp::DIVIDE_COPY_ABOVE_BYTES));
+		let near = std::format!("PWD{}x", "h".repeat(interp::DIVIDE_COPY_ABOVE_BYTES - 1));
+		shell.env_mut().set_global(near, ShellVariable::new("near"))?;
+		let params = shell.default_exec_params();
+		let word = std::format!("${name}/");
+
+		assert_eq!(basic_expand_word(&mut shell, &params, &word).await?, "/");
+		shell.env_mut().set_global(name.as_str(), ShellVariable::new("found"))?;
+		assert_eq!(basic_expand_word(&mut shell, &params, &word).await?, "found/");
+
+		Ok(())
+	}
+
+	/// Each loop over a long word spends a checkpoint, so a cancelled run stops
+	/// before it reaches the end of the word.
+	#[tokio::test]
+	async fn a_long_word_sees_the_run_cancellation() -> Result<()> {
+		let mut shell = crate::shell::Shell::builder().build().await?;
+		let name = "h".repeat(interp::DIVIDE_COPY_ABOVE_BYTES + 1024);
+		shell.env_mut().set_global(name.as_str(), ShellVariable::new("v"))?;
+		let options = shell.parser_options();
+		let mut params = shell.default_exec_params();
+		let cancel = tokio_util::sync::CancellationToken::new();
+		params.set_cancel_token(cancel.clone());
+		cancel.cancel();
+		let word = std::format!("${name}");
+
+		let interrupted = |err: &error::Error| matches!(err.kind(), error::ErrorKind::Interrupted);
+		let err = parse_word_in_strides(&params, &word, &options)
+			.await
+			.expect_err("the parse ignored the cancellation");
+		assert!(interrupted(&err), "unexpected error: {err}");
+		let err = may_contain_braces_to_expand_in_strides(&params, &word)
+			.await
+			.expect_err("the brace scan ignored the cancellation");
+		assert!(interrupted(&err), "unexpected error: {err}");
+		let err = valid_variable_name_in_strides(&params, &name)
+			.await
+			.expect_err("the name check ignored the cancellation");
+		assert!(interrupted(&err), "unexpected error: {err}");
+		let err = parse_brace_expansions_in_strides(&params, &word, &options)
+			.await
+			.expect_err("the brace parse ignored the cancellation");
+		assert!(interrupted(&err), "unexpected error: {err}");
+		let err = variable_by_long_name(&params, shell.env(), &name)
+			.await
+			.expect_err("the lookup ignored the cancellation");
+		assert!(interrupted(&err), "unexpected error: {err}");
+		let err = basic_expand_word(&mut shell, &params, &word)
+			.await
+			.expect_err("the expansion ignored the cancellation");
+		assert!(interrupted(&err), "unexpected error: {err}");
+
+		Ok(())
+	}
+
+	/// A long word with a brace expression in it expands to the words the whole
+	/// brace parse gives, and one whose braces match nothing is left whole.
+	#[tokio::test]
+	async fn a_long_word_brace_expands_to_what_the_whole_parse_gives() -> Result<()> {
+		let mut shell = crate::shell::Shell::builder().build().await?;
+		let params = shell.default_exec_params();
+		let options = shell.parser_options();
+		let literal = "h".repeat(interp::DIVIDE_COPY_ABOVE_BYTES);
+		let listed = std::format!("x{{a,{literal}}}{literal}\"{{c,d}}\"{{1..2}}");
+		let unmatched = std::format!("{{{literal}}}{literal}{{a}}");
+
+		let pieces = brush_parser::word::parse_brace_expansions(&listed, &options)?
+			.expect("the word has brace expressions");
+		let whole = braceexpansion::generate_and_combine_brace_expansions(pieces, &params).await?;
+		let expander = WordExpander::new(&mut shell, &params);
+		let stepped = expander.brace_expand_words(&listed).await?;
+		assert_eq!(stepped, whole);
+		assert_eq!(expander.brace_expand_words(&unmatched).await?, vec![unmatched.as_str()]);
+
+		Ok(())
+	}
+
+	/// The brace heuristic read a stride at a time gives the answer it gives
+	/// read whole, with the characters it remembers from one character to the
+	/// next on either side of a stride boundary.
+	#[tokio::test]
+	async fn the_brace_heuristic_in_strides_gives_the_same_answer() -> Result<()> {
+		let shell = crate::shell::Shell::builder().build().await?;
+		let params = shell.default_exec_params();
+		let cases = [
+			"${a}", "\\${a}", "\\\\${a}", "{a}", "}{", "{", "}", "a{b}c", "${a}{b}", "$${a}", "é{é}", "$é{}",
+			"h",
+		];
+		for shift in 0..4 {
+			let pad = "h".repeat(interp::BYTE_CHECKPOINT_STRIDE - shift);
+			for case in cases {
+				for word in [std::format!("{pad}{case}{pad}"), std::format!("{case}{pad}{pad}")] {
+					assert_eq!(
+						may_contain_braces_to_expand_in_strides(&params, &word).await?,
+						may_contain_braces_to_expand(&word),
+						"{case} at {shift}"
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_to_initial_capitals() -> Result<()> {
+		let params = ExecutionParameters::default();
+		assert_eq!(to_initial_capitals_divided(&params, "ab bc cd").await?, "Ab Bc Cd");
+		assert_eq!(to_initial_capitals_divided(&params, " a ").await?, " A ");
+		assert_eq!(to_initial_capitals_divided(&params, "").await?, "");
+		// A value longer than a stride, with whitespace and a character whose
+		// uppercase form is longer than it on each side of a stride's end,
+		// gives what one pass over it gives.
+		let pad = "x".repeat(interp::BYTE_CHECKPOINT_STRIDE - 2);
+		let long = std::format!("{pad} ß ﬃ \tß{pad}ß");
+		let one_pass: String = {
+			let mut out = String::new();
+			let mut next = true;
+			for c in long.chars() {
+				if c.is_whitespace() {
+					next = true;
+					out.push(c);
+				} else if next {
+					out.extend(c.to_uppercase());
+					next = false;
+				} else {
+					out.push(c);
+				}
+			}
+			out
+		};
+		assert_eq!(to_initial_capitals_divided(&params, &long).await?, one_pass);
+		Ok(())
 	}
 }

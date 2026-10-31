@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-	Shell, error, extensions,
+	ExecutionParameters, Shell, error, extensions,
 	variables::{self, ShellValue, ShellValueUnsetType, ShellVariable},
 };
 
@@ -103,6 +103,18 @@ impl Default for ShellEnvironment {
 	}
 }
 
+impl Drop for ShellEnvironment {
+	/// A subshell's environment is a copy of every variable it inherited, and
+	/// it is let go of when the subshell ends: `( : )` in a shell holding a
+	/// million-element array held the worker 28 ms, and 66 ms under load,
+	/// freeing that copy. So the variables are freed where that cannot hold
+	/// the worker ([`crate::variables::free_off_worker`]).
+	fn drop(&mut self) {
+		let elements = self.scopes.iter().map(|(_, map)| map.element_count()).sum();
+		crate::variables::free_off_worker(std::mem::take(&mut self.scopes), elements);
+	}
+}
+
 impl ShellEnvironment {
 	/// Returns a new shell environment.
 	pub fn new() -> Self {
@@ -111,6 +123,30 @@ impl ShellEnvironment {
 			export_variables_on_modification: false,
 			entry_count: 0,
 		}
+	}
+
+	/// A copy of this environment for a subshell, every variable copied with
+	/// [`ShellVariable::clone_divided`] under one budget, so that neither a
+	/// large value nor a great many small ones is copied in one step.
+	///
+	/// # Errors
+	///
+	/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+	/// way, discarding the copy.
+	pub(crate) async fn clone_divided(
+		&self,
+		params: &crate::ExecutionParameters,
+	) -> Result<Self, error::Error> {
+		let mut budget = crate::interp::ElementBudget::new();
+		let mut scopes = Vec::with_capacity(self.scopes.len());
+		for (scope, map) in &self.scopes {
+			scopes.push((*scope, map.clone_divided(params, &mut budget).await?));
+		}
+		Ok(Self {
+			scopes,
+			export_variables_on_modification: self.export_variables_on_modification,
+			entry_count: self.entry_count,
+		})
 	}
 
 	/// Pushes a new scope of the given type onto the environment's scope stack.
@@ -132,7 +168,13 @@ impl ShellEnvironment {
 		// TODO(env): Should we panic instead on failure? It's effectively a broken
 		// invariant.
 		match self.scopes.pop() {
-			Some((actual_scope_type, _)) if actual_scope_type == expected_scope_type => Ok(()),
+			Some((actual_scope_type, map)) if actual_scope_type == expected_scope_type => {
+				// A function's locals are freed when it returns, and one of
+				// them can be an array of any size.
+				let elements = map.element_count();
+				crate::variables::free_off_worker(map, elements);
+				Ok(())
+			},
 			Some((actual_scope_type, _)) => Err(
 				error::ErrorKind::UnexpectedScopeType {
 					expected: expected_scope_type,
@@ -464,6 +506,10 @@ impl ShellEnvironment {
 	/// Update a variable in the environment, or add it if it doesn't already
 	/// exist.
 	///
+	/// An array literal spends a checkpoint on each element (see
+	/// [`ShellVariable::assign`]); [`Self::update_or_add_scalar`] assigns a
+	/// scalar without a run.
+	///
 	/// # Arguments
 	///
 	/// * `name` - The name of the variable to update or add.
@@ -473,10 +519,57 @@ impl ShellEnvironment {
 	/// * `lookup_policy` - The policy to use when looking up the variable.
 	/// * `scope_if_creating` - The scope to create the variable in if it doesn't
 	///   already exist.
-	pub fn update_or_add<N: Into<String>>(
+	/// * `params` - The execution parameters of the run doing the update.
+	pub async fn update_or_add<N: Into<String>>(
 		&mut self,
 		name: N,
 		value: variables::ShellValueLiteral,
+		updater: impl Fn(&mut ShellVariable) -> Result<(), error::Error>,
+		lookup_policy: EnvironmentLookup,
+		scope_if_creating: EnvironmentScope,
+		params: &ExecutionParameters,
+	) -> Result<(), error::Error> {
+		let name = name.into();
+
+		let auto_export = self.export_variables_on_modification;
+		if let Some(var) = self.get_mut_using_policy(&name, lookup_policy) {
+			var.assign(value, false, params).await?;
+			if auto_export {
+				var.export();
+			}
+			updater(var)
+		} else {
+			let mut var = ShellVariable::new(ShellValue::Unset(ShellValueUnsetType::Untyped));
+			var.assign(value, false, params).await?;
+			if auto_export {
+				var.export();
+			}
+			updater(&mut var)?;
+
+			self.add(name, var, scope_if_creating)
+		}
+	}
+
+	/// Update a variable in the environment with a scalar, or add it if it
+	/// doesn't already exist.
+	///
+	/// Nothing in a scalar's assignment grows with how many elements the
+	/// variable holds (see [`ShellVariable::assign_scalar`]), so this takes no
+	/// run: arithmetic and the shell's own bookkeeping use it.
+	///
+	/// # Arguments
+	///
+	/// * `name` - The name of the variable to update or add.
+	/// * `value` - The value to assign to the variable.
+	/// * `updater` - A function to call to update the variable after assigning
+	///   the value.
+	/// * `lookup_policy` - The policy to use when looking up the variable.
+	/// * `scope_if_creating` - The scope to create the variable in if it doesn't
+	///   already exist.
+	pub fn update_or_add_scalar<N: Into<String>>(
+		&mut self,
+		name: N,
+		value: String,
 		updater: impl Fn(&mut ShellVariable) -> Result<(), error::Error>,
 		lookup_policy: EnvironmentLookup,
 		scope_if_creating: EnvironmentScope,
@@ -485,14 +578,14 @@ impl ShellEnvironment {
 
 		let auto_export = self.export_variables_on_modification;
 		if let Some(var) = self.get_mut_using_policy(&name, lookup_policy) {
-			var.assign(value, false)?;
+			var.assign_scalar(value, false)?;
 			if auto_export {
 				var.export();
 			}
 			updater(var)
 		} else {
 			let mut var = ShellVariable::new(ShellValue::Unset(ShellValueUnsetType::Untyped));
-			var.assign(value, false)?;
+			var.assign_scalar(value, false)?;
 			if auto_export {
 				var.export();
 			}
@@ -530,14 +623,40 @@ impl ShellEnvironment {
 			var.assign_at_index(index, value, false)?;
 			updater(var)
 		} else {
-			let mut var = ShellVariable::new(ShellValue::Unset(ShellValueUnsetType::Untyped));
-			var.assign(
-				variables::ShellValueLiteral::Array(variables::ArrayLiteral(vec![(
-					Some(index),
-					value,
-				)])),
-				false,
-			)?;
+			let mut var = ShellVariable::new(ShellValue::indexed_array_with_element(&index, value)?);
+			updater(&mut var)?;
+
+			self.add(name, var, scope_if_creating)
+		}
+	}
+
+	/// [`Self::update_or_add_array_element`] for a caller that has a run to
+	/// cancel.
+	///
+	/// One element can be any size, so its assignment is divided: see
+	/// [`ShellVariable::assign_at_index_divided`].
+	///
+	/// # Errors
+	///
+	/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+	/// way, leaving the variable as it was.
+	pub async fn update_or_add_array_element_divided<N: Into<String>>(
+		&mut self,
+		name: N,
+		index: String,
+		value: String,
+		updater: impl Fn(&mut ShellVariable) -> Result<(), error::Error>,
+		lookup_policy: EnvironmentLookup,
+		scope_if_creating: EnvironmentScope,
+		params: &ExecutionParameters,
+	) -> Result<(), error::Error> {
+		let name = name.into();
+
+		if let Some(var) = self.get_mut_using_policy(&name, lookup_policy) {
+			var.assign_at_index_divided(index, value, false, params).await?;
+			updater(var)
+		} else {
+			let mut var = ShellVariable::new(ShellValue::indexed_array_with_element(&index, value)?);
 			updater(&mut var)?;
 
 			self.add(name, var, scope_if_creating)
@@ -605,6 +724,28 @@ impl ShellVariableMap {
 	/// Returns an iterator over all the variables in the map.
 	pub fn iter(&self) -> impl Iterator<Item = (&String, &ShellVariable)> {
 		self.variables.iter()
+	}
+
+	/// How many allocations freeing this scope frees: each variable's name,
+	/// and each element of its value.
+	fn element_count(&self) -> usize {
+		self.variables.values().map(|variable| 1 + variable.value().element_count()).sum()
+	}
+
+	/// [`ShellEnvironment::clone_divided`] for one scope. The copy takes the
+	/// original's hasher, as `HashMap::clone` does.
+	async fn clone_divided(
+		&self,
+		params: &crate::ExecutionParameters,
+		budget: &mut crate::interp::ElementBudget,
+	) -> Result<Self, error::Error> {
+		let mut variables =
+			HashMap::with_capacity_and_hasher(self.variables.len(), self.variables.hasher().clone());
+		for (name, variable) in &self.variables {
+			let name = crate::variables::clone_charged(params, budget, name).await?;
+			variables.insert(name, variable.clone_divided(params, budget).await?);
+		}
+		Ok(Self { variables })
 	}
 
 	/// Tries to retrieve an immutable reference to the variable with the given
