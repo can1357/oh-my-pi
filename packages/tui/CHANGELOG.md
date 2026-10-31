@@ -1,9 +1,6 @@
 # Changelog
 
 ## [Unreleased]
-### Changed
-
-- Changed the TUI to do less work per render while edit previews stream and streamed assistant tables grow, so the terminal stays responsive through long tool output ([#15206](https://github.com/can1357/oh-my-pi/pull/15206) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
@@ -48,6 +45,7 @@
 - Added `isHighlightLanguage` and `createCodeFrameStyler` for renderers that highlight source lines in their file's language ([#17550](https://github.com/can1357/oh-my-pi/pull/17550) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
 ### Changed
+- Changed the TUI to do less work per render while edit previews stream and streamed assistant tables grow, so the terminal stays responsive through long tool output ([#15206](https://github.com/can1357/oh-my-pi/pull/15206) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Grep and read results with gaps between line runs now render in Tern as one code block that scrolls sideways as a whole, with `…` gap rows aligned in the line-number gutter
 - Tern builds that draw the `button` kind get omp's buttons as real buttons (pointer cursor, accessible pressed/disabled state, a disabled button's tooltip says why) and segmented controls as `tabs` `variant: "segmented"`; older Tern builds keep the role-styled rows
