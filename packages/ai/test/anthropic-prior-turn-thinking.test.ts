@@ -372,6 +372,97 @@ describe("Anthropic prior-turn thinking preservation (#2257, #2265)", () => {
 		});
 	});
 
+	describe("other models' reasoning past a credential or prefix boundary", () => {
+		const officialTarget = () =>
+			makeAnthropicModel({ provider: "anthropic", id: "claude-fable-5-1", baseUrl: "https://api.anthropic.com" });
+		const TARGET_CREDENTIAL = 3;
+		const OTHER_CREDENTIAL = 7;
+		const conversation = (assistant: AssistantMessage): Message[] => [
+			makeUser("Plan the migration"),
+			assistant,
+			makeUser("Continue"),
+		];
+		const codexTurn = makeAssistant(
+			[
+				{ type: "thinking", thinking: "codex private plan", thinkingSignature: '{"encrypted_content":"blob"}' },
+				{ type: "text", text: "Codex answer" },
+			],
+			{
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				model: "gpt-5.5",
+				stopReason: "stop",
+				credentialId: OTHER_CREDENTIAL,
+			},
+		);
+		const kimiTurn = (overrides: Partial<AssistantMessage>) =>
+			makeAssistant(
+				[
+					{ type: "thinking", thinking: "kimi private plan", thinkingSignature: "kimi-signature" },
+					{ type: "redactedThinking", data: "kimi-redacted" },
+					{ type: "text", text: "Kimi answer" },
+				],
+				{ provider: "kimi-code", model: "k3", stopReason: "stop", ...overrides },
+			);
+		const assistantBlocks = (
+			messages: Message[],
+			opts: Parameters<typeof convertAnthropicMessages>[3] = {},
+		): WireBlock[] => {
+			const params = convertAnthropicMessages(messages, officialTarget(), false, {
+				credentialId: TARGET_CREDENTIAL,
+				...opts,
+			});
+			const content = params.find(param => param.role === "assistant")?.content;
+			if (!Array.isArray(content)) throw new Error("expected assistant content blocks");
+			return content as WireBlock[];
+		};
+
+		it("replays another provider's reasoning under another credential as demoted text", () => {
+			const target = officialTarget();
+			expect(assistantBlocks(conversation(codexTurn))).toEqual([
+				{ type: "text", text: renderDemotedThinking(target.id, "codex private plan") },
+				{ type: "text", text: "Codex answer" },
+			]);
+			expect(assistantBlocks(conversation(kimiTurn({ credentialId: OTHER_CREDENTIAL })))).toEqual([
+				{ type: "text", text: renderDemotedThinking(target.id, "kimi private plan") },
+				{ type: "text", text: "Kimi answer" },
+			]);
+		});
+
+		it("replays another provider's reasoning from before a compaction as demoted text", () => {
+			const target = officialTarget();
+			const messages: Message[] = [
+				{ role: "user", content: "Compacted session summary", historyRewriteAt: 100, timestamp: 100 },
+				kimiTurn({ timestamp: 50 }),
+				makeUser("Continue"),
+			];
+			expect(assistantBlocks(messages)).toEqual([
+				{ type: "text", text: renderDemotedThinking(target.id, "kimi private plan") },
+				{ type: "text", text: "Kimi answer" },
+			]);
+		});
+
+		it("still drops Claude's reasoning from another provider under another credential", () => {
+			const claudeTurn = makeAssistant(
+				[
+					{ type: "thinking", thinking: "opus private plan", thinkingSignature: "sig_proxy" },
+					{ type: "text", text: "Opus answer" },
+				],
+				{ provider: "claude-proxy", model: "claude-opus-4-5", stopReason: "stop", credentialId: OTHER_CREDENTIAL },
+			);
+			expect(assistantBlocks(conversation(claudeTurn))).toEqual([{ type: "text", text: "Opus answer" }]);
+		});
+
+		it("leaves the restored reasoning out under omitDemotedReasoning", () => {
+			expect(assistantBlocks(conversation(codexTurn), { omitDemotedReasoning: true })).toEqual([
+				{ type: "text", text: "Codex answer" },
+			]);
+			expect(
+				assistantBlocks(conversation(kimiTurn({ credentialId: OTHER_CREDENTIAL })), { omitDemotedReasoning: true }),
+			).toEqual([{ type: "text", text: "Kimi answer" }]);
+		});
+	});
+
 	it("does not demote same-model official Anthropic unsigned thinking to text", () => {
 		// Same-model Anthropic replay is not a dialect transition. If a committed
 		// tool-use turn lacks a usable thinking signature, the native thinking block
