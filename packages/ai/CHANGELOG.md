@@ -14,6 +14,10 @@
 - Fixed Claude account-wide usage blocks outliving recovery when the account has no running 5-hour window: `/usage` answers `five_hour: null` with no `session` row, and healing and saved-reset clearing treated that as an incomplete report, so a stale block idled a healthy account until its weekly reset and could leave a turn with no account to switch to after a real 429 ([#18801](https://github.com/can1357/oh-my-pi/pull/18801) by [@baekjosh](https://github.com/baekjosh))
 - A usage-limited request now moves to another account whose old block live usage shows has lifted, instead of ending the turn because every other account looked blocked ([#18801](https://github.com/can1357/oh-my-pi/pull/18801))
 
+### Added
+
+- Added `omitDemotedReasoning` to `StreamOptions`: an Anthropic request leaves out other models' reasoning that it would otherwise replay as text, and a refused request reports how many such blocks it carried in `demotedReasoningBlocks` ([#10407](https://github.com/can1357/oh-my-pi/issues/10407))
+
 ### Fixed
 
 - Fixed concurrent OAuth requests rejected as `claude_code_version_too_old` failing instead of retrying with the required version ([#18651](https://github.com/can1357/oh-my-pi/issues/18651))

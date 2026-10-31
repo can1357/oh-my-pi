@@ -465,6 +465,7 @@ function streamMessagesWire(a: Attempt, inner: Model<"anthropic-messages">): Ass
 		// droid's Anthropic SDK client sends neither Claude Code header.
 		omitClaudeCodeAppHeaders: true,
 		anthropicPrefixMismatchBehavior: options?.anthropicPrefixMismatchBehavior,
+		omitDemotedReasoning: options?.omitDemotedReasoning,
 		anthropicCompaction: options?.anthropicCompaction,
 		userProfileId: options?.userProfileId,
 		metadata: options?.metadata,
