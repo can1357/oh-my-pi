@@ -5232,3 +5232,112 @@ for (const shape of [
 		expect(await Bun.file(ground.file).text()).toBe("PARTIAL STAGE");
 	});
 }
+
+/**
+ * How long a FIFO test waits before calling a run hung, and how long such a
+ * test may take in all. A real hang is unbounded, so a long window costs
+ * only the red runs; a short one called runs that were merely slow hung on a
+ * box at a load of 500, where a clean refusal can take seconds.
+ */
+const HANG_MS = 20_000;
+const FIFO_TEST_MS = 60_000;
+const PIPE_PAYLOAD = "UNIQUE USER INPUT WAITING IN A PIPE, 52 BYTES LONG.\n";
+
+/**
+ * A FIFO with `PIPE_PAYLOAD` waiting in it and its writer gone, and a reader
+ * of our own held open so that whatever a run does not take stays in the
+ * pipe: `left()` says what is still there.
+ */
+async function pipeHolding(fifo: string): Promise<{ left(): Promise<string>; close(): Promise<void> }> {
+	expect(await Bun.spawn(["mkfifo", fifo]).exited).toBe(0);
+	const reader = await fs.open(fifo, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+	const writer = await fs.open(fifo, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
+	await writer.write(PIPE_PAYLOAD);
+	await writer.close();
+	return {
+		async left(): Promise<string> {
+			const buffer = Buffer.alloc(4096);
+			const { bytesRead } = await reader.read(buffer, 0, buffer.byteLength, null);
+			return buffer.subarray(0, bytesRead).toString();
+		},
+		close: async () => await reader.close(),
+	};
+}
+
+// A FIFO at `gc.lock`, itself or through a link, with input waiting: every
+// gc command reads the lock before it does anything, when it cannot create
+// one, to see whether its holder is gone.
+const lockedCommands: [string, () => Promise<() => Promise<GcResult>>][] = [
+	["archive --apply", async () => () => archiveOnly()],
+	[
+		"reclaim (preview)",
+		async () => {
+			await archiveOnly();
+			return () => runGcCommand({ flags: { agentDir: root, reclaim: archiveFile, forwardOnly: true, json: true } });
+		},
+	],
+	[
+		"reclaim --apply",
+		async () => {
+			await archiveOnly();
+			return () =>
+				runGcCommand({
+					flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+				});
+		},
+	],
+	[
+		"restore --apply",
+		async () => {
+			await archiveEverything();
+			return () => runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+		},
+	],
+];
+for (const form of ["a FIFO", "a link to a FIFO"] as const) {
+	for (const [command, prepare] of lockedCommands) {
+		test(
+			`${command} neither waits on nor drains ${form} at gc.lock, and names it`,
+			async () => {
+				const lock = path.join(root, "gc.lock");
+				const run = await prepare();
+				const fifo = form === "a FIFO" ? lock : path.join(root, "outside-lock.fifo");
+				const pipe = await pipeHolding(fifo);
+				if (form === "a link to a FIFO") await fs.symlink(fifo, lock);
+				try {
+					const attempt = run().then(
+						() => "",
+						(failure: unknown) => String(failure),
+					);
+					// A real timer: a blocking open of a FIFO waits in the thread
+					// pool, where no fake clock reaches it.
+					const outcome = await Promise.race([attempt, Bun.sleep(HANG_MS).then(() => "hung" as const)]);
+					if (outcome === "hung") {
+						const writer = await fs.open(fifo, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
+						await writer.close();
+						await attempt;
+					}
+
+					expect(outcome).not.toBe("hung");
+					expect(await pipe.left()).toBe(PIPE_PAYLOAD);
+					expect(outcome).toContain(`${lock} is a FIFO, not a regular file`);
+					expect((await fs.lstat(lock)).isFIFO() || (await fs.lstat(lock)).isSymbolicLink()).toBe(true);
+					// The breaker lock it took to look is given back: the review saw
+					// `gc.lock.break` held for as long as the read hung.
+					expect(await fs.lstat(`${lock}.break`).catch(() => undefined)).toBeUndefined();
+					// Moved aside, as the message says, and the same command runs.
+					await fs.rename(lock, path.join(root, "gc.lock.aside"));
+					const again = await run().then(
+						() => "",
+						(failure: unknown) => String(failure),
+					);
+					expect(again).not.toContain("gc.lock");
+					expect(again).not.toContain("GC already running");
+				} finally {
+					await pipe.close();
+				}
+			},
+			FIFO_TEST_MS,
+		);
+	}
+}

@@ -11,8 +11,10 @@
  * grace, is broken under a sidecar `.break` lock so two cleaners cannot break
  * it at once.
  */
+import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { createExclusive, NotARegularFile, openRegularFile } from "./regular-file";
 
 const GC_LOCK_BREAKER_SUFFIX = ".break";
 const GC_LOCK_STALE_MS = 5 * 60_000;
@@ -83,15 +85,37 @@ function sameGcLockStat(left: Omit<GcLockSnapshot, "text">, right: Omit<GcLockSn
 	);
 }
 
+/**
+ * What the lock at `lockPath` holds, read through a descriptor checked to
+ * hold a regular file, or null when it is gone or changed while it was read.
+ * A FIFO, socket or device at the name — itself or through a link — is not
+ * read: reading a FIFO waits for a writer, or takes what was written to it
+ * for somebody else. It is refused instead, and the run with it, since
+ * whether another gc run holds the lock cannot then be told.
+ */
 async function readGcLockSnapshot(lockPath: string): Promise<GcLockSnapshot | null> {
 	const stat = await statIfPresent(lockPath);
 	if (!stat) return null;
 
-	let lockText = "";
+	let lockText: string;
+	let held: Stats;
 	try {
-		lockText = await Bun.file(lockPath).text();
+		const handle = await openRegularFile(lockPath);
+		if (!handle) return null;
+		try {
+			held = await handle.stat();
+			lockText = await handle.readFile("utf8");
+		} finally {
+			await handle.close().catch(() => undefined);
+		}
 	} catch (error) {
-		if (codeOf(error) === "ENOENT") return null;
+		if (error instanceof NotARegularFile) {
+			throw new Error(
+				`${error.message}. Whether another gc run holds the lock cannot be told from it, so nothing was done; ` +
+					`move ${lockPath} aside and run gc again`,
+				{ cause: error },
+			);
+		}
 		throw error;
 	}
 
@@ -99,7 +123,7 @@ async function readGcLockSnapshot(lockPath: string): Promise<GcLockSnapshot | nu
 	if (!afterStat) return null;
 	const before = gcLockStatSnapshot(stat);
 	const after = gcLockStatSnapshot(afterStat);
-	if (!sameGcLockStat(before, after)) return null;
+	if (!sameGcLockStat(before, after) || !sameGcLockStat(before, gcLockStatSnapshot(held))) return null;
 	return { ...after, text: lockText };
 }
 
@@ -139,7 +163,7 @@ async function removeStaleGcLock(lockPath: string): Promise<boolean> {
 
 async function openNewGcLock(lockPath: string): Promise<fs.FileHandle | null> {
 	try {
-		return await fs.open(lockPath, "wx");
+		return await createExclusive(lockPath, 0o666);
 	} catch (error) {
 		if (codeOf(error) === "EEXIST") return null;
 		throw error;
