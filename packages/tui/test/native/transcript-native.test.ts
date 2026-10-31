@@ -14,7 +14,11 @@ import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
 import { StrippedToolCallsPlaceholder } from "@oh-my-pi/pi-tui/chat/stripped-tool-calls-placeholder";
 import { stopSharedSpinnerTicker, ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import type { TranscriptEntryLike } from "@oh-my-pi/pi-tui/chat/transcript-entry";
-import { buildAsyncResultBlock, buildFileMentionBlock } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
+import {
+	buildAsyncResultBlock,
+	buildFileMentionBlock,
+	buildLaunchCompletionBlock,
+} from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 import { TodoReminderComponent } from "@oh-my-pi/pi-tui/chat/todo-reminder";
 import { TtsrNotificationComponent } from "@oh-my-pi/pi-tui/chat/ttsr-notification";
 import { CollapsedSyntheticMessageComponent, UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
@@ -97,6 +101,47 @@ function opsSince(h: TspHarness, frameCount: number): TspOp[] {
 }
 
 describe("native transcript", () => {
+	it("preserves semantic native completion notices for viewport-truncated terminal rows", async () => {
+		const block = buildLaunchCompletionBlock(
+			createCustomMessage(
+				"launch-completion",
+				"persisted completion",
+				true,
+				{
+					daemons: [
+						{
+							name: "worker",
+							id: "daemon-1",
+							createdAt: 1,
+							startedAt: 2,
+							exitedAt: 3,
+							restartCount: 0,
+							outputBytes: 0,
+							persist: false,
+							detached: false,
+							state: "failed",
+							exitCode: 58,
+							exitReason: "diagnostic ".repeat(200),
+						},
+					],
+				},
+				"2026",
+			),
+		);
+		const h = await startWith(h => h.tui.addChild(block));
+		const status = h.find(node => node.p?.role === "omp.status-block");
+		expect(status).toBeDefined();
+		const notice = h.find(node => node.p?.role === "omp.notice.error");
+		expect(notice?.k).toBe("row");
+		expect(notice?.c?.some(node => node.k === "icon" && node.p?.name === "error")).toBe(true);
+		const native = JSON.stringify(status);
+		expect(native).toContain("Supervised process failed");
+		expect(native).toContain("worker");
+		expect(native).toContain("exit 58");
+		expect(native).not.toContain("\\u001b");
+		expect(h.errors).toEqual([]);
+	});
+
 	it("streams assistant text as appends to one md node that stops streaming when final", async () => {
 		const component = new AssistantMessageComponent();
 		const h = await startWith(h => h.tui.addChild(component));
