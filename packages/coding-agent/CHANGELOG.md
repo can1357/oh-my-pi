@@ -1,8 +1,8 @@
 # Changelog
 
 ## [Unreleased]
-
 ### Fixed
+
 - Replaying a persisted bash execution now seeds the recorded output as the completed snapshot, so a resumed or rewound block shows every line it recorded instead of just the streaming tail ([#15326](https://github.com/can1357/oh-my-pi/pull/15326) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.14.1] - 2026-10-31
@@ -22,7 +22,6 @@
 - On the Anthropic API, the newest message now keeps all its images up to the 128 MB request limit, past the 120 MB image budget ([#17492](https://github.com/can1357/oh-my-pi/pull/17492) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
-- Replaying a persisted bash execution now seeds the recorded output as the completed snapshot, so a resumed or rewound block shows every line it recorded instead of just the streaming tail ([#15326](https://github.com/can1357/oh-my-pi/pull/15326) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed account-policy recovery repeatedly rotating through denied credentials instead of surfacing the error or using the configured model fallback, including unnecessary sibling-unblock waits after the account allowance is spent ([#17439](https://github.com/can1357/oh-my-pi/pull/17439) by [@wolfiesch](https://github.com/wolfiesch))
 - Startup prewalk now arms a later fallback candidate of the role named by prewalk.into when its first candidate is unavailable, matching /prewalk and /new ([#17373](https://github.com/can1357/oh-my-pi/pull/17373)).
