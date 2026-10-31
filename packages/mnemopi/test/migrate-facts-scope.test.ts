@@ -449,25 +449,33 @@ describe("E7 facts scope, writer paths", () => {
 		}
 	});
 
-	it("storeExtractedFactCategories honors the inherited scope", () => {
+	it("storeExtractedFactCategories inherits scope from a global source when omitted", () => {
 		const dbPath = tempDb();
-		const beam = new BeamMemory({ sessionId: "session-a", dbPath });
+		const beamA = new BeamMemory({ sessionId: "session-a", dbPath });
 		try {
+			beamA.db.run(
+				"INSERT INTO working_memory (id, content, session_id, scope) VALUES ('wm-1', 'src content', 'session-a', 'global')",
+			);
 			storeExtractedFactCategories(
-				beam,
-				{ facts: ["Quorum relay requires tokens"], instructions: [], preferences: [], timelines: [], kg: [] },
+				beamA,
+				{ facts: ["I use the quorum relay for tokens"], instructions: [], preferences: [], timelines: [], kg: [] },
 				0,
 				"wm-1",
-				0.7,
-				"session",
 			);
-			const rows = beam.db
+			const rows = beamA.db
 				.query("SELECT scope FROM facts WHERE source_msg_id = 'wm-1'")
 				.all() as { scope: string }[];
 			expect(rows.length).toBeGreaterThan(0);
-			for (const row of rows) expect(row.scope).toBe("session");
+			for (const row of rows) expect(row.scope).toBe("global");
+			const beamB = new BeamMemory({ sessionId: "session-b", dbPath });
+			try {
+				const results = factRecall(beamB, "quorum", 10);
+				expect(results.some(result => result.content.includes("quorum"))).toBe(true);
+			} finally {
+				beamB.close();
+			}
 		} finally {
-			beam.close();
+			beamA.close();
 		}
 	});
 
@@ -538,6 +546,35 @@ describe("E7 facts scope, review round 2", () => {
 			for (const row of rows) expect(row.scope).toBe("session");
 		} finally {
 			beam.close();
+		}
+	});
+
+	it("global facts hide cross-session when the source scope becomes NULL", () => {
+		const dbPath = tempDb();
+		const beamA = new BeamMemory({ sessionId: "session-a", dbPath });
+		try {
+			beamA.db.run(
+				"INSERT INTO working_memory (id, content, session_id, scope) VALUES ('wm-null', 'n content', 'session-a', 'global')",
+			);
+			storeFactStrings(beamA, ["I use the quorum relay for tokens"], 0, "wm-null");
+			const beamB = new BeamMemory({ sessionId: "session-b", dbPath });
+			try {
+				const before = factRecall(beamB, "quorum", 10);
+				expect(before.some(result => result.content.includes("quorum"))).toBe(true);
+			} finally {
+				beamB.close();
+			}
+
+			beamA.db.run("UPDATE working_memory SET scope = NULL WHERE id = 'wm-null'");
+			const beamC = new BeamMemory({ sessionId: "session-b", dbPath });
+			try {
+				const after = factRecall(beamC, "quorum", 10);
+				expect(after.some(result => result.content.includes("quorum"))).toBe(false);
+			} finally {
+				beamC.close();
+			}
+		} finally {
+			beamA.close();
 		}
 	});
 

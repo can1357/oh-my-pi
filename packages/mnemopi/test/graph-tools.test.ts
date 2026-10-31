@@ -200,6 +200,20 @@ describe("EpisodicGraph fact scope (e7)", () => {
 		confidence: 0.7,
 	});
 
+	it("leaves a private fact untouched when another session re-stores the same id with different content", () => {
+		withGraph(graph => {
+			graph.storeFact(fact("fact_clobber"), "mem_a", "session-a", "session");
+			graph.storeFact({ ...fact("fact_clobber"), subject: "Bob", object: "injected" }, "mem_b", "session-b", "session");
+			const row = graph.db
+				.query("SELECT session_id, subject, object, source_msg_id FROM facts WHERE fact_id = 'fact_clobber'")
+				.get() as { session_id: string; subject: string; object: string; source_msg_id: string };
+			expect(row.session_id).toBe("session-a");
+			expect(row.subject).toBe("Alice");
+			expect(row.object).toBe("engineer");
+			expect(row.source_msg_id).toBe("mem_a");
+		});
+	});
+
 	it("keeps the original owner when a session-scoped fact is re-stored from another session", () => {
 		withGraph(graph => {
 			graph.storeFact(fact("fact_owner"), "mem_owner", "session-a", "session");

@@ -433,12 +433,14 @@ export class EpisodicGraph {
 						WHEN facts.scope = 'global' THEN excluded.session_id
 						ELSE facts.session_id
 					END,
-					subject = excluded.subject,
-					predicate = excluded.predicate,
-					object = excluded.object,
-					timestamp = excluded.timestamp,
-					source_msg_id = excluded.source_msg_id,
-					confidence = excluded.confidence`,
+					-- A cross-session re-store of a non-global fact must not touch the
+					-- row at all: only the owner (or a global row) may refresh content.
+					subject = CASE WHEN facts.scope = 'global' OR facts.session_id = excluded.session_id THEN excluded.subject ELSE facts.subject END,
+					predicate = CASE WHEN facts.scope = 'global' OR facts.session_id = excluded.session_id THEN excluded.predicate ELSE facts.predicate END,
+					object = CASE WHEN facts.scope = 'global' OR facts.session_id = excluded.session_id THEN excluded.object ELSE facts.object END,
+					timestamp = CASE WHEN facts.scope = 'global' OR facts.session_id = excluded.session_id THEN excluded.timestamp ELSE facts.timestamp END,
+					source_msg_id = CASE WHEN facts.scope = 'global' OR facts.session_id = excluded.session_id THEN excluded.source_msg_id ELSE facts.source_msg_id END,
+					confidence = CASE WHEN facts.scope = 'global' OR facts.session_id = excluded.session_id THEN excluded.confidence ELSE facts.confidence END`,
 			[fact.id, sessionId, fact.subject, fact.predicate, fact.object, fact.timestamp, memoryId, fact.confidence, scope],
 		);
 	}

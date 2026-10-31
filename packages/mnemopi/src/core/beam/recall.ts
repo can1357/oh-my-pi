@@ -453,8 +453,10 @@ function factVisibilityWhere(beam: BeamMemoryState, tableAlias: string): { where
 	// was narrowed from global to session scope after extraction, the fact must
 	// stop being visible cross-session (or the narrowing would be silently
 	// defeated at the fact layer). Sources that no longer exist stay visible.
-	const sourceVisible = `NOT EXISTS (SELECT 1 FROM working_memory w WHERE w.id = ${prefix}source_msg_id AND NOT (w.session_id = ? OR w.scope = 'global'))`;
-	const episodeVisible = `NOT EXISTS (SELECT 1 FROM episodic_memory e WHERE e.id = ${prefix}source_msg_id AND NOT (e.session_id = ? OR e.scope = 'global'))`;
+	// COALESCE makes the check null-safe: a source row with a NULL scope or
+	// session_id is invisible to other sessions, same as any other private row.
+	const sourceVisible = `NOT EXISTS (SELECT 1 FROM working_memory w WHERE w.id = ${prefix}source_msg_id AND NOT (COALESCE(w.scope, 'session') = 'global' OR COALESCE(w.session_id, '') = ?))`;
+	const episodeVisible = `NOT EXISTS (SELECT 1 FROM episodic_memory e WHERE e.id = ${prefix}source_msg_id AND NOT (COALESCE(e.scope, 'session') = 'global' OR COALESCE(e.session_id, '') = ?))`;
 	return { where: `${scope} AND ${sourceSuperseded} AND ${episodeSuperseded} AND ${sourceVisible} AND ${episodeVisible}`, params: [beam.sessionId, nowIso(), nowIso(), beam.sessionId, beam.sessionId] };
 }
 
