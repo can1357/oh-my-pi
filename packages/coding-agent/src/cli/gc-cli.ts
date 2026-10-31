@@ -967,23 +967,53 @@ async function tryAcquireSessionFileLease(sessionFile: string): Promise<FileLock
 	}
 }
 
-async function listActiveSessions(sessionsRoot: string): Promise<SessionInfo[]> {
+/**
+ * The sessions below `sessionsRoot`, newest first, and what could not be read
+ * there. The session listing leaves out a directory or transcript it cannot
+ * read as it leaves out a file that is no session; a run that said nothing
+ * about them would report every session considered when some were not, so
+ * the header reader tells the two apart.
+ */
+async function listActiveSessions(sessionsRoot: string): Promise<{ sessions: SessionInfo[]; unread: string[] }> {
 	let entries: Array<{ name: string; isDirectory(): boolean }>;
 	try {
 		entries = await fs.readdir(sessionsRoot, { withFileTypes: true });
 	} catch (error) {
-		if (codeOf(error) === "ENOENT") return [];
+		if (codeOf(error) === "ENOENT") return { sessions: [], unread: [] };
 		throw error;
 	}
 
 	const storage = new FileSessionStorage();
 	const sessions: SessionInfo[] = [];
+	const unread: string[] = [];
 	for (const entry of entries) {
 		if (!entry.isDirectory()) continue;
-		sessions.push(...(await listSessionsReadOnly(path.join(sessionsRoot, entry.name), storage)));
+		const dir = path.join(sessionsRoot, entry.name);
+		const listed = await listSessionsReadOnly(dir, storage);
+		sessions.push(...listed);
+		let names: string[];
+		try {
+			names = await fs.readdir(dir);
+		} catch (error) {
+			if (codeOf(error) !== "ENOENT") {
+				unread.push(`${dir} could not be listed, so its sessions were not considered: ${errorMessage(error)}`);
+			}
+			continue;
+		}
+		const seen = new Set(listed.map(session => path.basename(session.path)));
+		for (const name of names) {
+			if (!name.endsWith(".jsonl") || seen.has(name)) continue;
+			const file = path.join(dir, name);
+			try {
+				if ((await readSessionHeaderId(file)) === undefined) continue;
+				unread.push(`${file} could not be read as a session, so it was not considered`);
+			} catch (error) {
+				unread.push(`${file} could not be read, so it was not considered: ${errorMessage(error)}`);
+			}
+		}
 	}
 	sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
-	return sessions;
+	return { sessions, unread };
 }
 
 async function listNestedSessionsReadOnly(artifactsRoot: string): Promise<SessionInfo[]> {
@@ -2195,7 +2225,7 @@ function sqliteNumber(value: number | bigint | null | undefined): number {
 
 async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Promise<ArchiveGcResult> {
 	const sessionsRoot = getSessionsDir(options.agentDir);
-	const sessions = await listActiveSessions(sessionsRoot);
+	const { sessions, unread } = await listActiveSessions(sessionsRoot);
 	const cutoffMs = Date.now() - options.coldArchiveAfterDays * DAY_MS;
 	const result: ArchiveGcResult = {
 		archiveDir: archiveRoot,
@@ -2206,7 +2236,7 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 		wouldArchive: 0,
 		archived: 0,
 		brokenLinks: 0,
-		errors: [],
+		errors: [...unread],
 	};
 	const candidates: ArchiveCandidate[] = [];
 	let inactiveSeen = 0;
@@ -2444,7 +2474,9 @@ async function runCompressGc(options: ResolvedGcOptions, archiveRoot: string): P
 			return result;
 		}
 	}
-	const sessions = await listActiveSessions(sessionsRoot);
+	// The compress phase is not one of the commands this listing's report is
+	// for; it keeps its old answer, which leaves an unreadable transcript out.
+	const { sessions } = await listActiveSessions(sessionsRoot);
 	result.scanned = sessions.length;
 	const cutoffMs = Date.now() - Math.max(options.compressAfterDays * DAY_MS, GC_WRITE_GRACE_MS);
 	for (const session of sessions) {

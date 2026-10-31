@@ -4462,6 +4462,26 @@ test("an archive run that cannot look at the name it superseded does not put the
 	expect(await Bun.file(destination).text()).toBe("FIRST APPENDED");
 });
 
+test.skipIf(process.getuid?.() === 0)(
+	"an archive run that cannot read a transcript says so, rather than leaving it out without a word",
+	async () => {
+		const old = new Date(Date.now() - 30 * 86_400_000);
+		await fs.utimes(sessionFile, old, old);
+		await fs.chmod(sessionFile, 0);
+		let result: GcResult;
+		try {
+			result = await archiveOnly();
+		} finally {
+			await fs.chmod(sessionFile, 0o600);
+		}
+
+		const told = result.archive?.errors.join("\n") ?? "";
+		expect(told).toContain(`${sessionFile} could not be read`);
+		expect(told).toContain("EACCES");
+		expect(await Bun.file(archiveFile).exists()).toBe(false);
+	},
+);
+
 test("re-archiving changes the mode of the archived transcript only, never what its name was rebound to", async () => {
 	await archiveOnly();
 	const unrelated = path.join(root, "private.txt");
