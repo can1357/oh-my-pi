@@ -42,6 +42,7 @@ import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import { toOpenCodeSessionToken } from "@oh-my-pi/pi-catalog/wire/opencode";
 import * as piUtils from "@oh-my-pi/pi-utils";
 
 const { isRecord } = piUtils;
@@ -1122,7 +1123,7 @@ describe("requestCompactionV2Streaming", () => {
 
 		// The catalog policy is on-api scoped: the caller must preserve model.api
 		// or the explicit family key is silently dropped from the gateway header.
-		expect(sessionHeaders).toEqual(["parent:task"]);
+		expect(sessionHeaders).toEqual([toOpenCodeSessionToken("parent:task")]);
 	});
 	test("keeps the child conversation id on the Go compaction request without an explicit cache key", async () => {
 		const model = makeOpenAiModel({
@@ -1148,7 +1149,7 @@ describe("requestCompactionV2Streaming", () => {
 
 		await requestCompactionV2Streaming(model, "test-key", request, undefined, { fetch: fetchMock });
 
-		expect(sessionHeaders).toEqual(["child-1"]);
+		expect(sessionHeaders).toEqual([toOpenCodeSessionToken("child-1")]);
 	});
 	test("keeps the child session header when a native Completions Go model compacts on an overridden Responses endpoint", async () => {
 		// deepseek-v4-pro is opted for shared caching only on its NATIVE
@@ -1190,7 +1191,7 @@ describe("requestCompactionV2Streaming", () => {
 
 		await requestCompactionV2Streaming(model, "test-key", request, undefined, { fetch: fetchMock });
 
-		expect(sessionHeaders).toEqual(["child-1"]);
+		expect(sessionHeaders).toEqual([toOpenCodeSessionToken("child-1")]);
 		expect(endpoints[0]?.endsWith("/responses")).toBe(true);
 	});
 	test("keeps the child session header when the remote compaction model override is an unverified id", async () => {
@@ -1230,7 +1231,7 @@ describe("requestCompactionV2Streaming", () => {
 		// Header and body must describe the same model: the override wins over
 		// both the active id and its stale requestModelId.
 		expect(sentModels).toEqual(["muse-spark-1.3"]);
-		expect(sessionHeaders).toEqual(["child-1"]);
+		expect(sessionHeaders).toEqual([toOpenCodeSessionToken("child-1")]);
 	});
 	test("shares the family affinity key when the remote compaction model override is opted in", async () => {
 		// The ACTIVE lane is the unverified standard Spark 1.3 id (stale
@@ -1267,7 +1268,7 @@ describe("requestCompactionV2Streaming", () => {
 		await requestCompactionV2Streaming(model, "test-key", request, undefined, { fetch: fetchMock });
 
 		expect(sentModels).toEqual(["muse-spark-1.3-contributor"]);
-		expect(sessionHeaders).toEqual(["parent:task"]);
+		expect(sessionHeaders).toEqual([toOpenCodeSessionToken("parent:task")]);
 	});
 	test("shares the family affinity key when a native Completions Go model compacts as an opted Responses override", async () => {
 		// deepseek-v4-pro is opted on its NATIVE openai-completions lane only;
@@ -1318,7 +1319,7 @@ describe("requestCompactionV2Streaming", () => {
 
 		expect(endpoints[0]?.endsWith("/responses")).toBe(true);
 		expect(sentModels).toEqual(["muse-spark-1.3-contributor"]);
-		expect(sessionHeaders).toEqual(["parent:task"]);
+		expect(sessionHeaders).toEqual([toOpenCodeSessionToken("parent:task")]);
 	});
 	test("resolves the family affinity key for a custom Go backend through its remote compaction model override", async () => {
 		// A credential-bearing custom provider declaring
@@ -1362,7 +1363,7 @@ describe("requestCompactionV2Streaming", () => {
 		await requestCompactionV2Streaming(model, "test-key", request, undefined, { fetch: fetchMock });
 
 		expect(sentModels).toEqual(["muse-spark-1.3-contributor"]);
-		expect(sessionHeaders).toEqual(["parent:task"]);
+		expect(sessionHeaders).toEqual([toOpenCodeSessionToken("parent:task")]);
 	});
 	test("keeps the child session header when a Go alias compacts under its own unverified id", async () => {
 		// The primary session's policy lookup resolves this alias through its
@@ -1398,7 +1399,7 @@ describe("requestCompactionV2Streaming", () => {
 
 		await requestCompactionV2Streaming(model, "test-key", request, undefined, { fetch: fetchMock });
 
-		expect(sessionHeaders).toEqual(["child-1"]);
+		expect(sessionHeaders).toEqual([toOpenCodeSessionToken("child-1")]);
 	});
 	test.each(["The socket connection was closed unexpectedly", "socket connection closed unexpectedly"] as const)(
 		"retries a transient socket closure: %s",
@@ -3399,7 +3400,7 @@ describe("compact() remote compaction failure handling", () => {
 		expect(requestedUrls.some(url => url.endsWith("/responses/compact"))).toBe(true);
 		expect(result.shortSummary).toBe("Remote compaction");
 		expect(completeSpy).not.toHaveBeenCalled();
-		expect(v1SessionHeader).toBe("parent:task");
+		expect(v1SessionHeader).toBe(toOpenCodeSessionToken("parent:task"));
 		expect(v1PromptCacheKey).toBe("parent:task");
 	});
 
@@ -3438,7 +3439,7 @@ describe("compact() remote compaction failure handling", () => {
 		});
 
 		// V2 (with its transient retries) and the V1 fallback all stay child-scoped.
-		expect(new Set(sessionHeaders)).toEqual(new Set(["child-1"]));
+		expect(new Set(sessionHeaders)).toEqual(new Set([toOpenCodeSessionToken("child-1")]));
 		expect(bodyKeys).not.toContain("parent:task");
 	});
 
