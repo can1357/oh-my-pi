@@ -654,6 +654,34 @@ describe("tool-owned dynamic approval declarations", () => {
 		expect(bashApproval("cd /tmp && ls -la /nope", settingsOverrides)).toBe("exec");
 	});
 
+	it("denies a command that another shell dialect or a here-doc body would hide from the tokenizer", () => {
+		// Each case runs the trailing `sudo whoami` in a real shell (probed with echo stand-ins in
+		// bash and dash). One lexer reading hides it behind a quote or a comment, so the deny rule
+		// has to be tried against every reading, and against each line when a here-doc may be present.
+		const settingsOverrides = { "bash.patterns": [{ match: "sudo *", approval: "deny" }] };
+		const denied = {
+			tier: "exec",
+			override: true,
+			policy: "deny",
+			reason: "Blocked by bash pattern: sudo *",
+		} as const;
+		for (const command of [
+			// ANSI-looking text in a here-doc body is payload, not a quote.
+			"cat <<EOF\n$'\\'\nEOF\nsudo whoami",
+			// A lone apostrophe in a here-doc body is literal.
+			"cat <<EOF\nit's a lone apostrophe\nEOF\nsudo whoami",
+			// dash has no ANSI-C quoting: this is a literal dollar and an ordinary quoted word.
+			"echo $'a\\'; sudo whoami",
+			// With extglob, bash reads @(#) as one glob word, so the hash starts no comment.
+			"echo @(#); sudo whoami",
+		]) {
+			expect(bashApproval(command, settingsOverrides)).toEqual(denied);
+		}
+
+		// A quoted mention of the command stays a single word in every reading.
+		expect(bashApproval('git commit -m "mention; sudo later"', settingsOverrides)).toBe("exec");
+	});
+
 	it("prompts when a dangerous segment matches a prompt rule in a compound line", () => {
 		const settingsOverrides = {
 			"bash.patterns": [{ match: "curl *", approval: "prompt" }],
