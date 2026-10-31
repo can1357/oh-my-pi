@@ -614,7 +614,7 @@ function sanitizeOpenAIResponsesHistoryItemForReplay(
 	if (item.type === "reasoning") {
 		return sanitizeOpenAIResponsesReasoningItemForReplay(item, preserveReasoningItemIds);
 	}
-	const { id: _id, ...sanitizedItem } = item;
+	const { id: _id, internal_chat_message_metadata_passthrough: _internalMetadata, ...sanitizedItem } = item;
 	if (item.type === "computer_call" && typeof item.id === "string") sanitizedItem.id = item.id;
 	if (item.type === "function_call") sanitizedItem.arguments = replayFunctionCallArguments(item);
 
