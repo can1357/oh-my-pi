@@ -9,6 +9,8 @@ import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-a
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
 	DateCwdReminderInjector,
+	type DateCwdReminderJournal,
+	type DateCwdReminderPlacement,
 	isDateCwdReminderControl,
 	renderDateCwdReminder,
 } from "@oh-my-pi/pi-coding-agent/session/date-cwd-reminder";
@@ -635,6 +637,89 @@ describe("date-cwd-reminder", () => {
 			expect(rolled.messages[4]?.content).toBe(`${renderDateCwdReminder("2026-08-15", "/work")}\n\nfork turn`);
 			expect(again.messages[3]?.content).toBe(rolled.messages[4]!.content);
 		});
+
+		describe("with a journal", () => {
+			const wireOf = (context: Context) =>
+				context.messages.map(message => JSON.stringify([message.role, message.content]));
+			const createJournal = () => {
+				const placements: DateCwdReminderPlacement[] = [];
+				const journal: DateCwdReminderJournal = {
+					load: () => placements,
+					record: placement => {
+						placements.push(placement);
+					},
+				};
+				return { placements, journal };
+			};
+
+			it("sends an earlier injector's turns with the reminders they were sent with", () => {
+				const { journal } = createJournal();
+				const first: Message = { role: "user", content: "first", timestamp: 1 };
+				const toolTurn = createAssistantMessage("calling a tool");
+				const toolResult: Message = {
+					role: "toolResult",
+					toolCallId: "call-1",
+					toolName: "read",
+					content: [{ type: "text", text: "notes" }],
+					isError: false,
+					timestamp: 3,
+				};
+				const earlier = new DateCwdReminderInjector(journal);
+				earlier.transform({ systemPrompt: ["system"], messages: [first] }, "2026-08-14", "/work");
+				// The date rolls over mid tool loop: the continuation carries it as a developer turn.
+				const sent = earlier.transform(
+					{ systemPrompt: ["system"], messages: [first, toolTurn, toolResult] },
+					"2026-08-15",
+					"/work",
+				);
+				const reply = createAssistantMessage("done");
+				const next: Message = { role: "user", content: "next", timestamp: 5 };
+
+				// A resumed session or a revived subagent: a new process, days later.
+				const resumed = new DateCwdReminderInjector(journal).transform(
+					{ systemPrompt: ["system"], messages: [first, toolTurn, toolResult, reply, next] },
+					"2026-08-17",
+					"/work",
+				);
+
+				expect(wireOf(resumed).slice(0, sent.messages.length)).toEqual(wireOf(sent));
+				expect(isDateCwdReminderControl(resumed.messages[3]!)).toBe(true);
+				expect(resumed.messages.at(-1)?.content).toBe(`${renderDateCwdReminder("2026-08-17", "/work")}\n\nnext`);
+			});
+
+			it("records each reminder it places once", () => {
+				const { placements, journal } = createJournal();
+				const injector = new DateCwdReminderInjector(journal);
+				const first: Message = { role: "user", content: "first", timestamp: 1 };
+				const second: Message = { role: "user", content: "second", timestamp: 3 };
+				injector.transform({ systemPrompt: ["system"], messages: [first] }, "2026-08-14", "/work");
+				injector.transform({ systemPrompt: ["system"], messages: [first] }, "2026-08-14", "/work");
+				injector.transform(
+					{ systemPrompt: ["system"], messages: [first, createAssistantMessage("a"), second] },
+					"2026-08-15",
+					"/work",
+				);
+
+				expect(placements).toEqual([
+					{ turn: "user:1:", reminder: renderDateCwdReminder("2026-08-14", "/work"), placement: "prefix" },
+					{ turn: "user:3:", reminder: renderDateCwdReminder("2026-08-15", "/work"), placement: "prefix" },
+				]);
+			});
+
+			it("dates the first turn today when the journal has no reminder for it", () => {
+				const { journal } = createJournal();
+				const out = new DateCwdReminderInjector(journal).transform(
+					{
+						systemPrompt: ["system"],
+						messages: [{ role: "user", content: "old", timestamp: 1 }, createAssistantMessage("a")],
+					},
+					"2026-08-17",
+					"/work",
+				);
+
+				expect(out.messages[0]?.content).toBe(`${renderDateCwdReminder("2026-08-17", "/work")}\n\nold`);
+			});
+		});
 	});
 });
 
@@ -1036,6 +1121,82 @@ describe("date-cwd reminder on the provider wire", () => {
 			]);
 			expect(wire[2]!.at(-1)).toBe(reminder);
 			expect(wire[3]!.filter(message => message === reminder)).toHaveLength(1);
+		} finally {
+			setSystemTime();
+			authStorage.close();
+		}
+	});
+
+	it("resends the first user turn with its own date when the session is reopened on a later day", async () => {
+		using tempDir = TempDir.createSync("@pi-date-cwd-reminder-");
+		const api = "test-date-cwd-reminder-reopen";
+		const contexts: Context[] = [];
+		registerCustomApi(api, (_model, context) => {
+			contexts.push(context);
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") });
+			});
+			return stream;
+		});
+		const model = buildModel({
+			id: "date-cwd-reminder-reopen",
+			name: "Date cwd reminder reopen",
+			api,
+			provider: "managed-primary",
+			baseUrl: "https://api.example.com/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		authStorage.keys.setRuntime(model.provider, "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		// A resumed session and a revived subagent both build a new session over the transcript.
+		const open = (sessionManager: SessionManager) =>
+			createAgentSession({
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				sessionManager,
+				authStorage,
+				modelRegistry,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				model,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+				taskDepth: 1,
+				agentId: "SubAgent",
+			});
+
+		try {
+			setSystemTime(new Date(2026, 7, 14, 10));
+			const { session: first } = await open(SessionManager.create(tempDir.path(), tempDir.join("sessions")));
+			const sessionFile = first.sessionManager.getSessionFile()!;
+			await first.sendUserMessage("first");
+			await first.dispose();
+
+			setSystemTime(new Date(2026, 7, 16, 10));
+			const { session: reopened } = await open(await SessionManager.open(sessionFile));
+			sessions.push(reopened);
+			await reopened.sendUserMessage("second");
+
+			expect(contexts).toHaveLength(2);
+			const wire = contexts.map(context =>
+				context.messages.map(message => JSON.stringify([message.role, message.content])),
+			);
+			expect(wire[1]!.slice(0, wire[0]!.length)).toEqual(wire[0]!);
+			expect(contexts[1]!.messages.at(-1)?.content).toEqual([
+				{ type: "text", text: renderDateCwdReminder("2026-08-16", normalizePromptPath(tempDir.path())) },
+				{ type: "text", text: "second" },
+			]);
 		} finally {
 			setSystemTime();
 			authStorage.close();

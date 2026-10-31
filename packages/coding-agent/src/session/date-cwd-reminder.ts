@@ -6,17 +6,60 @@
  * (#7404). The per-request date/cwd line used to live at the tail of the
  * system prompt (`project-prompt.md`), which invalidated the whole tool array
  * on every directory change or day rollover. It now rides on the first user
- * turn of each provider request instead: built at request time (never stored
- * in the session), deterministic per `(date, cwd)`, so the bytes are stable
- * for the lifetime of a session/day and refresh automatically at midnight.
+ * turn of each provider request instead: built at request time, deterministic
+ * per `(date, cwd)`, so the bytes are stable for the lifetime of a session/day
+ * and refresh automatically at midnight. Each placement is journaled in the
+ * session ({@link DATE_CWD_REMINDER_CUSTOM_TYPE}), so a resumed session or a
+ * revived subagent sends its earlier turns with the reminders they were sent
+ * with instead of today's.
  */
 import type { Context, Message, UserMessage } from "@oh-my-pi/pi-ai";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import dateCwdReminderTemplate from "../prompts/system/date-cwd-reminder.md" with { type: "text" };
+import type { SessionEntry } from "./session-entries";
 
 /** Renders the reminder text for the given local calendar date and cwd. */
 export function renderDateCwdReminder(date: string, cwd: string): string {
 	return prompt.render(dateCwdReminderTemplate, { date, cwd }).trim();
+}
+
+/** Session custom entry recording one reminder an injector placed. */
+export const DATE_CWD_REMINDER_CUSTOM_TYPE = "date-cwd-reminder";
+
+/** One reminder as sent: prepended to a user turn, or a developer turn placed after a turn. */
+export interface DateCwdReminderPlacement {
+	/** Key of the user turn the reminder prefixes, or of the turn the developer turn follows. */
+	turn: string;
+	reminder: string;
+	placement: "prefix" | "control";
+}
+
+/** Where an injector records the reminders it places, and reads back those an earlier injector placed. */
+export interface DateCwdReminderJournal {
+	/** Placements recorded on the session's current branch, oldest first. */
+	load(): readonly DateCwdReminderPlacement[];
+	record(placement: DateCwdReminderPlacement): void;
+}
+
+function placementOfEntry(entry: SessionEntry): DateCwdReminderPlacement | undefined {
+	if (entry.type !== "custom" || entry.customType !== DATE_CWD_REMINDER_CUSTOM_TYPE) return undefined;
+	const data = entry.data;
+	if (!isRecord(data) || typeof data.turn !== "string" || typeof data.reminder !== "string") return undefined;
+	if (data.placement !== "prefix" && data.placement !== "control") return undefined;
+	return { turn: data.turn, reminder: data.reminder, placement: data.placement };
+}
+
+/** A journal kept as custom entries on the session's branch: fork, branch switch and resume read the right set. */
+export function createSessionDateCwdReminderJournal(sessionManager: {
+	getBranchView(): readonly SessionEntry[];
+	appendCustomEntry(customType: string, data?: unknown): string;
+}): DateCwdReminderJournal {
+	return {
+		load: () => sessionManager.getBranchView().flatMap(entry => placementOfEntry(entry) ?? []),
+		record: placement => {
+			sessionManager.appendCustomEntry(DATE_CWD_REMINDER_CUSTOM_TYPE, placement);
+		},
+	};
 }
 
 function messageStartsWithReminder(message: UserMessage, reminder: string): boolean {
@@ -38,6 +81,12 @@ const reminderControls = new WeakSet<Message>();
 /** Whether `message` is a developer turn a {@link DateCwdReminderInjector} inserted. */
 export function isDateCwdReminderControl(message: Message): boolean {
 	return reminderControls.has(message);
+}
+
+function createReminderControl(reminder: string): Message {
+	const control: Message = { role: "developer", content: reminder, synthetic: true, timestamp: Date.now() };
+	reminderControls.add(control);
+	return control;
 }
 
 /** Trailing `#n` that tells apart turns of one request that would otherwise share a key. */
@@ -94,9 +143,18 @@ const MAX_ROOTS = 8;
  * for one conversation leaves the reminders of the others alone. Each advisor
  * has an injector of its own: two advisors can start their histories with turns
  * that share a key, so a root key alone cannot tell them apart.
+ *
+ * With a journal, every placement is recorded, and a conversation this injector
+ * has not served starts from the placements an earlier injector recorded for it
+ * (a resumed session, a revived subagent, a switched-in transcript).
  */
 export class DateCwdReminderInjector {
 	#states = new Map<string, RootState>();
+	readonly #journal: DateCwdReminderJournal | undefined;
+
+	constructor(journal?: DateCwdReminderJournal) {
+		this.#journal = journal;
+	}
 
 	/** Apply the current reminder while preserving all earlier injected bytes. */
 	transform(context: Context, date: string, cwd: string): Context {
@@ -250,7 +308,44 @@ export class DateCwdReminderInjector {
 			this.#states.delete(predecessor.root);
 		} else if (!state.injections.has(root) && !messageStartsWithReminder(firstUser, reminder)) {
 			state.injections.set(root, { reminder, source: firstUser, injected: injectReminder(firstUser, reminder) });
+			this.#journal?.record({ turn: root, reminder, placement: "prefix" });
 		}
+		return state;
+	}
+
+	/**
+	 * State for a conversation an earlier injector served, rebuilt from its journal:
+	 * each turn gets back the reminder it was sent with, and the turns up to the
+	 * last reply count as sent, so a changed reminder is appended after them.
+	 * Undefined when the journal holds no reminder for the first turn: a new
+	 * conversation, or a transcript from before reminders were journaled.
+	 */
+	#restoredRootState(
+		messages: Message[],
+		keys: string[],
+		counts: Map<string, number>,
+		root: string,
+	): RootState | undefined {
+		const placements = this.#journal?.load();
+		if (!placements?.some(placement => placement.turn === root && placement.placement === "prefix")) {
+			return undefined;
+		}
+		const indexOf = new Map(keys.map((key, index) => [key, index]));
+		const state: RootState = { reminder: undefined, injections: new Map(), controls: [], seen: new Set(), counts };
+		for (const { turn, reminder, placement } of placements) {
+			const index = indexOf.get(turn);
+			if (index === undefined) continue;
+			if (placement === "control") {
+				state.controls.push({ anchor: turn, message: createReminderControl(reminder) });
+				continue;
+			}
+			const source = messages[index]!;
+			if (source.role === "user")
+				state.injections.set(turn, { reminder, source, injected: injectReminder(source, reminder) });
+		}
+		const lastReply = messages.findLastIndex(message => message.role === "assistant");
+		for (let index = 0; index <= lastReply; index++) state.seen.add(keys[index]!);
+		state.reminder = this.#carriedReminder(state, keys);
 		return state;
 	}
 
@@ -293,7 +388,9 @@ export class DateCwdReminderInjector {
 			this.#followOrdinals(state, counts, false);
 			state.reminder = this.#carriedReminder(state, keys) ?? state.reminder;
 		} else {
-			state = this.#newRootState(keys, counts, root, firstUser, reminder);
+			state =
+				this.#restoredRootState(messages, keys, counts, root) ??
+				this.#newRootState(keys, counts, root, firstUser, reminder);
 		}
 		this.#activate(root, state);
 		if (state.reminder !== reminder) {
@@ -322,15 +419,10 @@ export class DateCwdReminderInjector {
 					source: message,
 					injected: injectReminder(message, reminder),
 				});
+				this.#journal?.record({ turn: keys[newUser]!, reminder, placement: "prefix" });
 			} else {
-				const control: Message = {
-					role: "developer",
-					content: reminder,
-					synthetic: true,
-					timestamp: Date.now(),
-				};
-				reminderControls.add(control);
-				state.controls.push({ anchor: keys.at(-1)!, message: control });
+				state.controls.push({ anchor: keys.at(-1)!, message: createReminderControl(reminder) });
+				this.#journal?.record({ turn: keys.at(-1)!, reminder, placement: "control" });
 			}
 			state.reminder = reminder;
 		}
