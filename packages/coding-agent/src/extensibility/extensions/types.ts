@@ -2435,12 +2435,22 @@ export interface ExtensionCallbackOwner {
 	beginSession(): () => void;
 	/** Whether no session holds this surface, so accepted callbacks are inert. */
 	readonly isRetired: boolean;
+	/** The session this surface serves now, retired once it has gone and never live again: what a
+	 *  session leaves behind is pinned to it, so the next session's claim does not revive it.
+	 *  Optional for an embedder's runtime; one without it has nothing pinned to a session. */
+	readonly sessionGeneration?: ExtensionSessionGeneration | undefined;
 	/** Whether any extension callback is executing. */
 	hasPendingCallbacks(): boolean;
 	/** Resolves once every callback executing now has returned. */
 	waitForPendingCallbacks(): Promise<void>;
 	/** Settles on the next add or remove, for a caller that must not sample. */
 	whenCallbacksChange(): Promise<void>;
+}
+
+/** One session's hold on an extension runtime ({@link ExtensionCallbackOwner.sessionGeneration}):
+ *  retired once the session has gone, and never live again. */
+export interface ExtensionSessionGeneration {
+	readonly isRetired: boolean;
 }
 
 /** Full runtime = state + actions, including host-compatible service-tier fallbacks. */

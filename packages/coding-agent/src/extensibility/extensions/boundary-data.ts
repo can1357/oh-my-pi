@@ -497,16 +497,31 @@ export class HandedSignals {
  * a regular expression and a URL are rebuilt from what they hold. An object of any other class is
  * copied as the data it holds, as `structuredClone` copies one: its own enumerable string-keyed
  * fields, onto a plain object, without its prototype's methods. An error is copied with its own
- * properties (`message`, `code`, `errno`) and keeps its class. An `AbortSignal` is handed as the
- * counterpart `signals` admits for it, or, when the call hands none, as a signal of its own that
- * follows it. A function is behavior, not data, wherever it sits — a field of a record or of an
- * instance, an array element, a map's key or value, a set's member, an error's property: a bound
- * method or an arrow function reaches the private state of whatever made it. It is dropped, as the
- * session file drops it when the host persists the same record (an array keeps the slot,
- * `undefined`). Symbol-keyed host markers stay with the host, as `structuredClone` leaves them.
+ * properties (`message`, `code`, `errno`) and its `name` and `message` as they read, onto the
+ * nearest of the language's own error classes it extends (`TypeError`, `RangeError`, `Error`): a
+ * host's error class is the host's code, and its prototype's getters and methods reach whatever
+ * made it. An `AbortSignal` is handed as the counterpart `signals` admits for it, or, when the
+ * call hands none, as a signal of its own that follows it. A function is behavior, not data,
+ * wherever it sits — a field of a record or of an instance, an array element, a map's key or
+ * value, a set's member, an error's property: a bound method or an arrow function reaches the
+ * private state of whatever made it. It is dropped, as the session file drops it when the host
+ * persists the same record (an array keeps the slot, `undefined`). Symbol-keyed host markers stay
+ * with the host, as `structuredClone` leaves them.
+ *
+ * The walk stops at {@link HOST_DATA_DEPTH_LIMIT} levels: an object nested deeper is left out, as
+ * a dropped function is (`undefined` in its place). Cycles are copied as cycles, but a getter can
+ * answer a fresh object on every read, and no identity check ends that walk; the bound does, at
+ * the same place whatever the stack, and real host data nests nowhere near it.
  */
 export function copyHostData<T>(value: T, signals?: HandedSignals): T {
-	return copyHostValue(value, new Map(), signals, false) as T;
+	return copyHostValue(value, new Map(), signals, false, 0) as T;
+}
+
+/** How deep host data handed to an extension is copied ({@link copyHostData}). */
+export const HOST_DATA_DEPTH_LIMIT = 512;
+
+function pastHostDepth(depth: number): boolean {
+	return depth > HOST_DATA_DEPTH_LIMIT;
 }
 
 /**
@@ -520,11 +535,12 @@ export function copyHostData<T>(value: T, signals?: HandedSignals): T {
  * shapes those fields declare in turn — its cost, its identity, its thinking — each read as the
  * host reads it (a class's getter or an inherited field included) and copied onto a plain object.
  * A field the type leaves open (`compat`, `kindConfig`, `headers`, `requestMetadata`) is read the
- * same way all the way down: the host reads a value there by property access, so an object a class
- * holds there arrives with what its getters answer, not as the `{}` its own fields would make. A
- * getter that throws throws here, as it does when the host reads the model. A `resolveHeaders` is
- * the host's code, not data: the copy's calls it on the host's model, with a signal of the host's
- * own that follows the one the extension passes, and answers a copy.
+ * same way all the way down: the host reads a value there by property access, so an object held
+ * there arrives with what its accessors answer — its own, enumerable or not, and its classes' —
+ * not as the `{}` its own enumerable fields would make. A getter that throws throws here, as it
+ * does when the host reads the model. The walk is bounded as {@link copyHostData}'s is. A
+ * `resolveHeaders` is the host's code, not data: the copy's calls it on the host's model, with a
+ * signal of the host's own that follows the one the extension passes, and answers a copy.
  */
 export function handHostModel(model: Model<Api>): Model<Api> {
 	const copies = new Map<AuthorDataSchema, Map<object, unknown>>();
@@ -535,7 +551,7 @@ export function handHostModel(model: Model<Api>): Model<Api> {
 		copy[field] =
 			field === "resolveHeaders" && typeof value === "function"
 				? handHostResolver(value, model)
-				: copyHostDeclared(value, schema, copies);
+				: copyHostDeclared(value, schema, copies, 1);
 	}
 	// Built from every field `Model` declares (`MODEL_ROW` is checked against it), so it is one.
 	const handed = copy as unknown as Model<Api>;
@@ -553,9 +569,11 @@ function copyHostDeclared(
 	value: unknown,
 	schema: AuthorDataSchema,
 	copies: Map<AuthorDataSchema, Map<object, unknown>>,
+	depth: number,
 ): unknown {
 	if (typeof value !== "object" || value === null) return value;
-	if (schema.kind === "data" || schema.kind === "callback") return copyHostRead(value);
+	if (pastHostDepth(depth)) return undefined;
+	if (schema.kind === "data" || schema.kind === "callback") return copyHostRead(value, depth);
 	let copied = copies.get(schema);
 	if (!copied) {
 		copied = new Map();
@@ -564,19 +582,19 @@ function copyHostDeclared(
 	const known = copied.get(value);
 	if (known !== undefined) return known;
 	if (schema.kind === "items") {
-		if (!Array.isArray(value)) return copyHostRead(value);
+		if (!Array.isArray(value)) return copyHostRead(value, depth);
 		const copy: unknown[] = [];
 		copied.set(value, copy);
 		for (let index = 0; index < value.length; index++)
-			copy[index] = copyHostDeclared(value[index], schema.items, copies);
+			copy[index] = copyHostDeclared(value[index], schema.items, copies, depth + 1);
 		return copy;
 	}
-	if (Array.isArray(value)) return copyHostRead(value);
+	if (Array.isArray(value)) return copyHostRead(value, depth);
 	const copy: Record<PropertyKey, unknown> = {};
 	copied.set(value, copy);
 	const copyFields = (fields: AuthorDataFields["fields"]): void => {
 		for (const [field, fieldSchema] of fields) {
-			const item = copyHostDeclared(Reflect.get(value, field), fieldSchema, copies);
+			const item = copyHostDeclared(Reflect.get(value, field), fieldSchema, copies, depth + 1);
 			if (item !== undefined) copy[field] = item;
 		}
 	};
@@ -587,14 +605,14 @@ function copyHostDeclared(
 		case "variants": {
 			const tag: unknown = Reflect.get(value, schema.by);
 			const variant = schema.variants.get(tag);
-			if (!variant) return copyHostRead(value);
+			if (!variant) return copyHostRead(value, depth);
 			if (tag !== undefined) copy[schema.by] = tag;
 			copyFields(variant.fields);
 			return copy;
 		}
 		case "entries":
 			for (const key of Object.keys(value)) {
-				const item = copyHostDeclared(Reflect.get(value, key), schema.entries, copies);
+				const item = copyHostDeclared(Reflect.get(value, key), schema.entries, copies, depth + 1);
 				// Assigning an own `__proto__` key would set the copy's prototype; defined, it stays data.
 				Object.defineProperty(copy, key, { value: item, enumerable: true, writable: true, configurable: true });
 			}
@@ -611,19 +629,20 @@ function handHostResolver(resolver: Function, model: Model<Api>): NonNullable<Mo
 }
 
 /**
- * Host data copied as {@link copyHostData} copies it, except that an object a class holds is read
- * as the host reads it: its own enumerable fields and what the getters and inherited data fields
- * of its classes answer. For a value the host reads by property access — a model's open fields —
- * where a copy of own fields alone would hand an extension less than the host itself sees.
+ * Host data copied as {@link copyHostData} copies it, except that an object is read as the host
+ * reads it: what each property a read answers for holds — its own, enumerable or not, accessors
+ * included, and the getters and inherited data fields of its classes. For a value the host reads
+ * by property access — a model's open fields — where a copy of own enumerable fields alone would
+ * hand an extension less than the host itself sees.
  */
-function copyHostRead(value: unknown): unknown {
-	return copyHostValue(value, new Map(), undefined, true);
+function copyHostRead(value: unknown, depth: number): unknown {
+	return copyHostValue(value, new Map(), undefined, true, depth);
 }
 
-/** The keys a field read of a class instance answers for: its own enumerable fields, then the
- *  getters and non-function data fields its classes define, nearest first. */
+/** The keys a property read of `value` answers for: its own string-keyed properties, enumerable
+ *  or not, then the getters and non-function data fields its classes define, nearest first. */
 function readableKeys(value: object): string[] {
-	const keys = new Set(Object.keys(value));
+	const keys = new Set(Object.getOwnPropertyNames(value));
 	for (
 		let prototype: object | null = Object.getPrototypeOf(value);
 		prototype !== null && prototype !== Object.prototype;
@@ -640,16 +659,47 @@ function readableKeys(value: object): string[] {
 	return [...keys];
 }
 
+/** The language's and the platform's own error classes' prototypes: an error copy is built on one
+ *  of these, whose members are the engine's, never on a host error class's. `DOMException` is the
+ *  platform's (an `AbortError` is one); its `name`, `message` and `code` are answered from the
+ *  original as own data, since its accessors read state a copy does not have. */
+const INTRINSIC_ERROR_PROTOTYPES: ReadonlySet<object> = new Set([
+	Error.prototype,
+	EvalError.prototype,
+	RangeError.prototype,
+	ReferenceError.prototype,
+	SyntaxError.prototype,
+	TypeError.prototype,
+	URIError.prototype,
+	AggregateError.prototype,
+	DOMException.prototype,
+]);
+
+/** The nearest of the language's own error prototypes `error` inherits from. */
+function intrinsicErrorPrototype(error: object): object {
+	for (
+		let prototype: object | null = Object.getPrototypeOf(error);
+		prototype !== null;
+		prototype = Object.getPrototypeOf(prototype)
+	) {
+		if (INTRINSIC_ERROR_PROTOTYPES.has(prototype)) return prototype;
+	}
+	return Error.prototype;
+}
+
 function copyHostValue(
 	value: unknown,
 	copies: Map<object, unknown>,
 	signals: HandedSignals | undefined,
 	byRead: boolean,
+	depth: number,
 ): unknown {
 	if (typeof value === "function") return undefined;
 	if (typeof value !== "object" || value === null) return value;
 	const known = copies.get(value);
 	if (known !== undefined) return known;
+	if (pastHostDepth(depth)) return undefined;
+	const next = (item: unknown): unknown => copyHostValue(item, copies, signals, byRead, depth + 1);
 	if (value instanceof AbortSignal) {
 		const admitted = signals ? signals.admit(value) : AbortSignal.any([value]);
 		copies.set(value, admitted);
@@ -678,8 +728,7 @@ function copyHostValue(
 	if (Array.isArray(value)) {
 		const copy: unknown[] = [];
 		copies.set(value, copy);
-		for (let index = 0; index < value.length; index++)
-			copy[index] = copyHostValue(value[index], copies, signals, byRead);
+		for (let index = 0; index < value.length; index++) copy[index] = next(value[index]);
 		return copy;
 	}
 	if (types.isMap(value)) {
@@ -687,40 +736,43 @@ function copyHostValue(
 		copies.set(value, copy);
 		for (const [key, item] of value) {
 			if (typeof key === "function" || typeof item === "function") continue;
-			copy.set(copyHostValue(key, copies, signals, byRead), copyHostValue(item, copies, signals, byRead));
+			copy.set(next(key), next(item));
 		}
 		return copy;
 	}
 	if (types.isSet(value)) {
 		const copy = new Set<unknown>();
 		copies.set(value, copy);
-		for (const item of value) if (typeof item !== "function") copy.add(copyHostValue(item, copies, signals, byRead));
+		for (const item of value) if (typeof item !== "function") copy.add(next(item));
 		return copy;
 	}
-	if (types.isNativeError(value)) {
-		const copy: object = Object.create(Object.getPrototypeOf(value));
+	// `DOMException` is no native error to the engine's check, but it is the platform's error class.
+	if (types.isNativeError(value) || value instanceof DOMException) {
+		const copy: object = Object.create(intrinsicErrorPrototype(value));
 		copies.set(value, copy);
+		const define = (key: string, item: unknown, enumerable: boolean): void => {
+			Object.defineProperty(copy, key, { value: item, enumerable, writable: true, configurable: true });
+		};
 		for (const key of Object.getOwnPropertyNames(value)) {
 			const raw: unknown = Reflect.get(value, key);
 			if (typeof raw === "function") continue;
-			Object.defineProperty(copy, key, {
-				value: copyHostValue(raw, copies, signals, byRead),
-				enumerable: Object.getOwnPropertyDescriptor(value, key)?.enumerable === true,
-				writable: true,
-				configurable: true,
-			});
+			define(key, next(raw), Object.getOwnPropertyDescriptor(value, key)?.enumerable === true);
+		}
+		// A host error class may answer its name and message from its prototype; the copy's
+		// prototype is the language's, so what they read is kept as data, as is a `code`.
+		for (const key of ["name", "message", "code"]) {
+			if (Object.hasOwn(copy, key)) continue;
+			const read: unknown = Reflect.get(value, key);
+			if ((typeof read === "string" || typeof read === "number") && key in value) define(key, read, false);
 		}
 		return copy;
 	}
 	const copy: Record<string, unknown> = {};
 	copies.set(value, copy);
-	const prototype: unknown = Object.getPrototypeOf(value);
-	const keys =
-		byRead && prototype !== Object.prototype && prototype !== null ? readableKeys(value) : Object.keys(value);
-	for (const key of keys) {
+	for (const key of byRead ? readableKeys(value) : Object.keys(value)) {
 		const raw: unknown = Reflect.get(value, key);
 		if (typeof raw === "function") continue;
-		const item = copyHostValue(raw, copies, signals, byRead);
+		const item = next(raw);
 		// Assigning an own `__proto__` key would set the copy's prototype; defined, it stays data.
 		if (key === "__proto__") {
 			Object.defineProperty(copy, key, { value: item, enumerable: true, writable: true, configurable: true });
@@ -980,11 +1032,53 @@ function admitCallableSchema(
  *  holds at least one failure. */
 function copySchemaAnswer(out: unknown, site: AuthorDataSite): unknown {
 	if (!(out instanceof OmpErrors)) return snapshotAuthorData(out, DATA, site, new Map());
+	return rebuildOmpErrors(out);
+}
+
+function rebuildOmpErrors(out: OmpErrors): OmpErrors {
 	return Array.from(
 		out,
 		entry =>
 			new OmpErrors(Array.from(entry.path), String(entry.expected), undefined, { message: String(entry.message) }),
 	).reduce((copy, failure) => copy.append(failure));
+}
+
+/** Each host schema handed out, so every read of one tool hands the same schema. */
+const handedHostSchemas = new WeakMap<Function, Function>();
+
+/**
+ * A callable schema the host holds — a built-in tool's, or the one a registered tool's admission
+ * made — as `pi.getAllTools()` hands it: a frozen schema of the extension's own with the members
+ * a schema is used through, each calling the host's. Calling it or its `assert` validates a copy
+ * of the value with the host's schema and answers a copy (a failure as `OmpErrors` rebuilt from
+ * each entry); `toJsonSchema` answers a copy of what the host's answers. The host's object is
+ * never handed: it is the one the host validates and builds requests with, and caches its wire
+ * schema on, so neither freezing it nor letting the extension set members on it is safe. Handed
+ * back to `pi.registerTool`, it is admitted as any callable schema is.
+ */
+export function handHostSchema(schema: Function): Function {
+	const known = handedHostSchemas.get(schema);
+	if (known) return known;
+	const check = (data: unknown): unknown => {
+		const out: unknown = Reflect.apply(schema, undefined, [copyHostData(data)]);
+		return out instanceof OmpErrors ? rebuildOmpErrors(out) : copyHostData(out);
+	};
+	const handed = Object.freeze(
+		Object.assign((data: unknown): unknown => check(data), {
+			toJsonSchema: (options?: unknown): unknown => {
+				const toJsonSchema: unknown = Reflect.get(schema, "toJsonSchema");
+				if (typeof toJsonSchema !== "function") throw new TypeError("This tool's schema has no JSON Schema form");
+				return copyHostData(Reflect.apply(toJsonSchema, schema, options === undefined ? [] : [options]));
+			},
+			assert: (data: unknown): unknown => {
+				const out = check(data);
+				if (out instanceof OmpErrors) out.throw();
+				return out;
+			},
+		}),
+	);
+	handedHostSchemas.set(schema, handed);
+	return handed;
 }
 
 /**

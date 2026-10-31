@@ -1263,7 +1263,10 @@ export class TUI extends Container {
 		// Focus never lands on an extension's component whose session has gone: it goes to what its
 		// host put in its place — through a chain of such, when one replaced another — or nowhere.
 		if (component !== null && isRetiredInputScope(component)) component = inputRecipient(component) ?? null;
-		const holder = this.#getKeyHolderOverlay();
+		// An overlay holding keys whose component's session has gone holds none: it is on its way
+		// down (`#retireGoneInputScopes`), and focus must not be sent back to it.
+		const keyHolder = this.#getKeyHolderOverlay();
+		const holder = keyHolder && !isRetiredInputScope(keyHolder.component) ? keyHolder : undefined;
 		if (holder && !isOverlayFocusTarget(holder.component, component)) {
 			if (
 				!withInputScope(holder.component, () => holder.component.handleInput) &&
@@ -3125,13 +3128,25 @@ export class TUI extends Container {
 
 	/**
 	 * Takes every extension component whose session has gone out of input and out of view
-	 * (`retireGoneInputScopes`), then makes sure focus is not left on one. A retirement restores
-	 * focus as its host decides, and a cascade can undo it: an inner overlay of a session closing
-	 * after its outer one hands focus back to the outer, already gone. Focus then goes to what took
-	 * that one's place, as {@link setFocus} would send it.
+	 * (`retireGoneInputScopes`), then makes sure nothing of one is left. The session that showed an
+	 * overlay settles it (`whenInputScopeGone`); the session that owns the component it holds may
+	 * be another, and once that one has gone the overlay comes down here too — whichever session
+	 * showed it, and whether or not it is still live. A retirement restores focus as its host
+	 * decides, and a cascade can undo it: an inner overlay of a session closing after its outer one
+	 * hands focus back to the outer, already gone. Focus then goes to what took that one's place, as
+	 * {@link setFocus} would send it.
 	 */
 	#retireGoneInputScopes(): void {
 		retireGoneInputScopes();
+		for (let index = this.overlayStack.length - 1; index >= 0; index--) {
+			const entry = this.overlayStack[index];
+			if (!entry || !isRetiredInputScope(entry.component)) continue;
+			this.overlayStack.splice(index, 1);
+			if (entry.component === this.#focusedComponent) {
+				this.setFocus(this.#getKeyHolderOverlay()?.component ?? entry.preFocus);
+			}
+			this.requestRender();
+		}
 		const focused = this.#focusedComponent;
 		if (focused !== null && isRetiredInputScope(focused)) this.setFocus(inputRecipient(focused) ?? null);
 	}

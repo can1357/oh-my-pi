@@ -8,11 +8,16 @@
  */
 import { afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import * as path from "node:path";
+import { OmpErrors, type as schemaOf } from "@oh-my-pi/omptype";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { copyHostData } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/boundary-data";
+import {
+	copyHostData,
+	HOST_DATA_DEPTH_LIMIT,
+	handHostModel,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/boundary-data";
 import {
 	handLocalProtocolOptions,
 	handTUI,
@@ -442,6 +447,127 @@ describe("data the host hands an extension", () => {
 		expect("retry" in copy.failure).toBe(false);
 	});
 
+	test("an error of a host class is copied onto the language's error class, its prototype's callables left behind", () => {
+		class HostState {
+			#value = "initial";
+			readonly write = (value: string): void => {
+				this.#value = value;
+			};
+			get value(): string {
+				return this.#value;
+			}
+		}
+		const state = new HostState();
+		class HostFailure extends TypeError {
+			get writer(): (value: string) => void {
+				return state.write;
+			}
+			override get name(): string {
+				return "HostFailure";
+			}
+		}
+		const copy = copyHostData({ error: new HostFailure("host failed") }).error;
+		const writer: unknown = Reflect.get(copy, "writer");
+		if (typeof writer === "function") writer("changed");
+
+		expect({
+			prototype: Object.getPrototypeOf(copy) === TypeError.prototype,
+			isTypeError: copy instanceof TypeError,
+			name: copy.name,
+			message: copy.message,
+			writer: typeof writer,
+			hostValue: state.value,
+		}).toEqual({
+			prototype: true,
+			isTypeError: true,
+			name: "HostFailure",
+			message: "host failed",
+			writer: "undefined",
+			hostValue: "initial",
+		});
+	});
+
+	test("an AbortError arrives as a DOMException copy, with its name, message and code", () => {
+		const original = new DOMException("stopped", "AbortError");
+		const copy = copyHostData({ error: original }).error;
+
+		expect({
+			distinct: copy !== original,
+			isDOMException: copy instanceof DOMException,
+			name: copy.name,
+			message: copy.message,
+			code: copy.code,
+		}).toEqual({ distinct: true, isDOMException: true, name: "AbortError", message: "stopped", code: 20 });
+	});
+
+	test("a model's open fields keep their own accessors, enumerable or not, and a throwing one throws", async () => {
+		const h = await interactiveSession();
+		const selected = h.session.model;
+		if (!selected) throw new Error("the session has no model");
+		const host: Model = selected;
+		const plain = { ...host.compat };
+		Object.defineProperty(plain, "supportsServerCompaction", { get: () => true, enumerable: false });
+		class Compat {}
+		const classBacked = new Compat();
+		Object.defineProperty(classBacked, "supportsServerCompaction", { get: () => true, enumerable: false });
+		const read = (compat: object): unknown =>
+			Reflect.get(
+				h.runner.createContext({ ...host, compat } as unknown as Model).model?.compat ?? {},
+				"supportsServerCompaction",
+			);
+		const throwing = {};
+		Object.defineProperty(throwing, "firstPartyProvider", {
+			get: () => {
+				throw new Error("host compat getter failed");
+			},
+			enumerable: false,
+		});
+		let thrown = "";
+		try {
+			read(throwing);
+		} catch (error) {
+			thrown = String(error);
+		}
+
+		expect({ plain: read(plain), classBacked: read(classBacked), thrown }).toEqual({
+			plain: true,
+			classBacked: true,
+			thrown: "Error: host compat getter failed",
+		});
+	});
+
+	test("a getter that answers a fresh object on every read is copied to a fixed depth, and the copy returns", () => {
+		class Node {
+			constructor(readonly depth: number) {}
+			get child(): Node {
+				return new Node(this.depth + 1);
+			}
+		}
+		const make = (): Record<string, unknown> => ({
+			get next() {
+				return make();
+			},
+		});
+		const depthOf = (value: unknown, key: string): number => {
+			let depth = 0;
+			for (let at = value; typeof at === "object" && at !== null; at = Reflect.get(at, key)) depth++;
+			return depth;
+		};
+		const plain = copyHostData({ root: make() });
+		const firstPlain = depthOf(plain, "next");
+		const secondPlain = depthOf(copyHostData({ root: make() }), "next");
+		// Only the field under test; `handHostModel` copies the fields a model has.
+		const model = { id: "m", kindConfig: new Node(0) } as unknown as Model;
+		const handed = handHostModel(model);
+		const modelDepth = depthOf(handed.kindConfig, "child");
+
+		expect({ samePlain: firstPlain === secondPlain, plainBounded: firstPlain <= HOST_DATA_DEPTH_LIMIT + 1 }).toEqual({
+			samePlain: true,
+			plainBounded: true,
+		});
+		expect(modelDepth > 0 && modelDepth <= HOST_DATA_DEPTH_LIMIT + 1).toBe(true);
+	});
+
 	test("a host tool's details reach a hook without the callables they held", async () => {
 		class HostState {
 			#value = "initial";
@@ -515,7 +641,9 @@ describe("data the host hands an extension", () => {
 			SessionManager.inMemory(),
 			{} as ModelRegistry,
 		);
-		const schema = Object.assign((value: unknown) => value, { toJsonSchema: () => ({ type: "object" }) });
+		// The host's own callable schema, as a built-in tool keeps it.
+		const schema = schemaOf({ value: "string" });
+		const hostWire = JSON.stringify(schema.toJsonSchema());
 		// A host may keep a tool's row in a class; the schema is read from the field that declares it.
 		class ToolRow {
 			readonly name = "host_tool";
@@ -527,6 +655,9 @@ describe("data the host hands an extension", () => {
 		const withTools = { ...host, getAllTools: () => [new ToolRow()] } as unknown as ExtensionActions;
 		runner.initialize(withTools, context, undefined, { ...runner.getUIContext() }, "rpc");
 		const tools = readTools?.() ?? [];
+		// The schema's declared type is the host's builder type; the test reads what was handed.
+		const handed = tools[0]?.parameters as unknown as typeof schema;
+		const poisoned = Reflect.set(handed, "toJsonSchema", () => ({ type: "poisoned" }));
 		let renders = 0;
 		const renderer = runner.getAssistantThinkingRenderers()[0];
 		if (!renderer) throw new Error("the thinking renderer was not registered");
@@ -535,8 +666,25 @@ describe("data the host hands an extension", () => {
 		release();
 		requestRender?.();
 
-		// Compared by identity only; the schema's type is the host's, not the test's.
-		expect(tools[0]?.parameters as unknown).toBe(schema);
+		expect({
+			isHostObject: (handed as unknown) === schema,
+			frozen: Object.isFrozen(handed),
+			poisoned,
+			sameOnEveryRead: (readTools?.()[0]?.parameters as unknown) === handed,
+			hostWireUnchanged: JSON.stringify(schema.toJsonSchema()) === hostWire,
+			handedWire: JSON.stringify(handed.toJsonSchema()) === hostWire,
+			validates: handed({ value: "ok" }),
+			rejects: handed({ value: 1 }) instanceof OmpErrors,
+		}).toEqual({
+			isHostObject: false,
+			frozen: true,
+			poisoned: false,
+			sameOnEveryRead: true,
+			hostWireUnchanged: true,
+			handedWire: true,
+			validates: { value: "ok" },
+			rejects: true,
+		});
 		expect({ rendersLive, rendersAfter: renders }).toEqual({ rendersLive: 1, rendersAfter: 1 });
 	});
 });
@@ -604,7 +752,11 @@ function focusHost() {
 		releases.push(release);
 		// Only the TUI surface is exercised; nothing here reaches the registry.
 		const runner = new ExtensionRunner([], owner, process.cwd(), SessionManager.inMemory(), {} as ModelRegistry);
-		return { release, tui: handTUI(tui, owner, runner.rendererScope) };
+		/** The next session on the same runtime and runner, as a host reusing them starts it. */
+		const next = (): void => {
+			releases.push(owner.beginSession());
+		};
+		return { release, next, tui: handTUI(tui, owner, runner.rendererScope) };
 	};
 	const focus = (): string | null => {
 		const focused = tui.getFocused();
@@ -753,6 +905,129 @@ describe("what a session focuses or shows", () => {
 			{ name: "shared", key: "b-key" },
 			{ name: "host", key: "host-again" },
 		]);
+	});
+
+	test("a component a gone session left focused, taken by the next with no key or frame between, hands focus back", () => {
+		const h = focusHost();
+		const a = h.session();
+		const b = h.session();
+		const shared = h.named("shared");
+		a.tui.setFocus(shared);
+		a.release();
+		b.tui.setFocus(shared);
+		h.tui.injectDebugInput("b-key");
+		b.release();
+		h.tui.renderNow();
+		const afterFrame = h.focus();
+		h.tui.injectDebugInput("host-key");
+
+		expect({ afterFrame, focus: h.focus() }).toEqual({ afterFrame: "host", focus: "host" });
+		expect(h.seen).toEqual([
+			{ name: "shared", key: "b-key" },
+			{ name: "host", key: "host-key" },
+		]);
+	});
+
+	test("an overlay one session shows comes down when the session that owns its component goes", () => {
+		const h = focusHost();
+		const owner = h.session();
+		const shower = h.session();
+		const dialog = h.named("dialog");
+		owner.tui.setFocus(dialog);
+		owner.tui.setFocus(null);
+		shower.tui.showOverlay(dialog);
+		h.tui.renderNow();
+		const upWhileLive = h.tui.overlayStack.length;
+		owner.release();
+		h.drawn.length = 0;
+		h.tui.renderNow();
+		h.tui.injectDebugInput("next");
+
+		expect({ upWhileLive, overlays: h.tui.overlayStack.length, drawn: h.drawn, focus: h.focus() }).toEqual({
+			upWhileLive: 1,
+			overlays: 0,
+			drawn: [],
+			focus: "host",
+		});
+		expect(h.seen).toEqual([{ name: "host", key: "next" }]);
+	});
+
+	test("an overlay a session left is not revived when its runtime starts the next session before a sweep", () => {
+		const h = focusHost();
+		const a = h.session();
+		const previous = h.named("previous");
+		a.tui.showOverlay(previous);
+		a.release();
+		// The runtime serves the next session before any key or frame has swept the last one.
+		a.next();
+		h.drawn.length = 0;
+		h.tui.renderNow();
+		h.tui.injectDebugInput("new-session-key");
+
+		expect({
+			overlays: h.tui.overlayStack.length,
+			drewPrevious: h.drawn.includes("previous"),
+			focus: h.focus(),
+		}).toEqual({ overlays: 0, drewPrevious: false, focus: "host" });
+		expect(h.seen).toEqual([{ name: "host", key: "new-session-key" }]);
+	});
+
+	test("the next session on a reused runtime shows its own overlay, and keeps it", () => {
+		const h = focusHost();
+		const a = h.session();
+		a.tui.showOverlay(h.named("old"));
+		a.release();
+		a.next();
+		a.tui.showOverlay(h.named("new"));
+		h.tui.renderNow();
+		h.tui.injectDebugInput("key");
+
+		expect(h.tui.overlayStack.map(entry => ("name" in entry.component ? entry.component.name : null))).toEqual([
+			"new",
+		]);
+		expect(h.seen).toEqual([{ name: "new", key: "key" }]);
+	});
+});
+
+describe("an overlay holding another session's component, measured at a loopback endpoint", () => {
+	test("once the component's session has gone, it draws nothing and sends nothing", async () => {
+		const h = focusHost();
+		const owner = h.session();
+		const shower = h.session();
+		const requests: string[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(request) {
+				requests.push(request.headers.get("authorization") ?? "");
+				return new Response("ok");
+			},
+		});
+		cleanups.push(() => server.stop(true));
+		const sent: Promise<unknown>[] = [];
+		const dialog = h.named("dialog", {
+			render: () => {
+				sent.push(fetch(`http://127.0.0.1:${server.port}/draw`, { headers: { authorization: "Bearer canary" } }));
+				return ["dialog"];
+			},
+		});
+		owner.tui.setFocus(dialog);
+		owner.tui.setFocus(null);
+		shower.tui.showOverlay(dialog);
+		h.tui.renderNow();
+		await Promise.all(sent);
+		const whileLive = requests.length;
+		owner.release();
+		h.tui.renderNow();
+		h.tui.injectDebugInput("x");
+		h.tui.renderNow();
+		await Promise.all(sent);
+
+		expect({
+			drewWhileLive: whileLive > 0,
+			afterOwnerGone: requests.length - whileLive,
+			stillUp: h.tui.overlayStack.length,
+		}).toEqual({ drewWhileLive: true, afterOwnerGone: 0, stillUp: 0 });
 	});
 });
 

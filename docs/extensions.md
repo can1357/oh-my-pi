@@ -269,21 +269,26 @@ fields `CompactOptions` does not declare.
 A model you are handed — `ctx.model`, `ctx.models.list()`/`current()`/`resolve()`, the rows
 `ctx.modelRegistry` answers with — is a copy of every field a model declares, and of every field
 of the shapes those declare (its cost, identity, thinking), read as the host reads them, whatever
-objects the host holds them in. Changing its `baseUrl` or `provider` changes nothing the host
-sends. Its `resolveHeaders` calls the host's own on the host's model. Pass it to `pi.setModel` to
-select it.
+objects the host holds them in. The fields the type leaves open (`compat`, `kindConfig`, `headers`,
+`requestMetadata`) are read the same way, own accessors included, enumerable or not. Changing its
+`baseUrl` or `provider` changes nothing the host sends. Its `resolveHeaders` calls the host's own
+on the host's model. Pass it to `pi.setModel` to select it.
 
 What `ctx` and `pi` read back — `getSystemPrompt()`, `getContextUsage()`, `getAsyncJobSnapshot()`,
 `getPendingPlanReview()`, `getActiveTools()`, `getAllTools()`, `getCommands()`,
 `getServiceTiers()` — and the events your hooks receive are copies of the host's data. A date, a
 map, a set, binary data, a regular expression and a URL arrive as themselves, copied; an object of
-any other class arrives as a plain object of its own enumerable fields, without its methods. A
-function is behavior, not data, wherever it sits — a field of a record or of an instance, an array
-element, a map's key or value, a set's member, an error's property — and is dropped, as the session
-file drops it (an array keeps the slot, `undefined`). The callables a surface declares are handed
-on purpose by that surface, not found in data: a tool's callable schema in `getAllTools()`
-(`ToolInfo.parameters`), and a thinking renderer's `requestRender`, which does nothing once your
-session has gone.
+any other class arrives as a plain object of its own enumerable fields, without its methods; an
+error arrives on the language's own error class it extends (`TypeError`, `Error`), with its own
+properties and its `name` and `message`, not on the host's error class. A function is behavior,
+not data, wherever it sits — a field of a record or of an instance, an array element, a map's key
+or value, a set's member, an error's property — and is dropped, as the session file drops it (an
+array keeps the slot, `undefined`). The copy stops 512 levels deep: anything nested deeper is left
+out the same way, so a getter that answers a fresh object on every read still copies to a finite
+value. The callables a surface declares are handed on purpose by that surface, not found in data:
+a tool's callable schema in `getAllTools()` (`ToolInfo.parameters`) is a frozen schema of your
+own — calling it, its `assert` and its `toJsonSchema` reach the host's, which you never hold — and
+a thinking renderer's `requestRender` does nothing once your session has gone.
 
 What a `ctx.ui` factory is handed besides its theme is the session's own, not the host's:
 
@@ -294,12 +299,15 @@ What a `ctx.ui` factory is handed besides its theme is the session's own, not th
   gone. A component you focus or show takes its keys inside your session, so an asynchronous
   `handleInput` is your session's work. Once the session has gone, every overlay it showed comes
   down before the next frame or key, whichever component it holds and however that component was
-  focused before; the TUI never focuses a component of a session that has gone, and focus goes
-  back to what the session last took it from — or to what took that one's place, when it was an
-  extension's too. `setFocus(null)` gives focus back the same way. `start` ends only a suspension
-  your session started. Members that steer the host's renderer, its input or its other components
-  — `children`, `addChild`, `injectDebugInput`, `getFocused`, `hideOverlay`, paint and frame
-  listeners, and the terminal's `write` — throw, naming the member.
+  focused before; so does any overlay holding a component your session focused, whichever session
+  showed it. The TUI never focuses a component of a session that has gone, and focus goes back to
+  what the session last took it from — or to what took that one's place, when it was an
+  extension's too. `setFocus(null)` gives focus back the same way. What a session leaves behind
+  belongs to it, not to the runtime: a host that starts the next session on the same runtime does
+  not bring it back. `start` ends only a suspension your session started. Members that steer the
+  host's renderer, its input or its other components — `children`, `addChild`,
+  `injectDebugInput`, `getFocused`, `hideOverlay`, paint and frame listeners, and the terminal's
+  `write` — throw, naming the member.
 - **The keybindings** a `custom` dialog or a `setEditorComponent` factory receives are a manager
   of your own built from a copy of the user's bindings; changing them changes only yours.
 - **The provider** an `addAutocompleteProvider` factory wraps is an object whose methods call the

@@ -26,6 +26,19 @@ export interface ToolRendererScope {
 	readonly live: boolean;
 	/** Runs `call` as the owner's work and returns its answer. Throws once the owner has gone. */
 	run<T>(call: () => T): T;
+	/**
+	 * The scope of the session the owner is serving now, which never becomes live again once that
+	 * session has gone. An owner may outlive its session — an extension runtime reused for the next
+	 * one — and answer `live` for whichever session holds it; what one session leaves behind (a
+	 * component bound to its input, an overlay it showed) belongs to that session, not to the next.
+	 * Absent for a scope that is already one session's, or one that never ends.
+	 */
+	pin?(): ToolRendererScope;
+}
+
+/** The scope `scope` stands for in the session it serves now ({@link ToolRendererScope.pin}). */
+export function pinInputScope(scope: ToolRendererScope): ToolRendererScope {
+	return scope.pin?.() ?? scope;
 }
 
 /** The scope `holder` — a tool, or a renderer function — names for its renderers
@@ -247,14 +260,22 @@ const scopeObligations = new Set<{ readonly scope: ToolRendererScope; readonly s
  * current editor. Its `ownsOverlayFocusTarget` hook is asked inside its scope (`tui.ts`
  * `isOverlayFocusTarget`), and a focus target it owns takes input in its scope
  * ({@link adoptInputScope}). Once the session has gone none of these reach it: the sweep below runs
- * before input is dispatched and before a frame is drawn, and takes it out first.
+ * before input is dispatched and before a frame is drawn, and takes it out first. The binding is
+ * the session's that is being served when it is made ({@link pinInputScope}): an owner reused for
+ * the next session does not bring it back.
  */
 export function bindInputScope(
 	component: Component,
 	scope: ToolRendererScope,
 	retire: () => Component | undefined,
 ): void {
-	inputScopes.set(component, { scope, retire, retired: false, successor: undefined, adopted: undefined });
+	inputScopes.set(component, {
+		scope: pinInputScope(scope),
+		retire,
+		retired: false,
+		successor: undefined,
+		adopted: undefined,
+	});
 	awaitingRetirement.add(component);
 }
 
@@ -285,10 +306,12 @@ export function adoptInputScope(target: Component, owner: Component): void {
  * retires the scope's components, before them, and once. A component is safe once its session has
  * gone only if nothing the host does can show, draw or focus it again, and a component's own
  * binding cannot promise that: the same component may be bound by one call and shown by another.
- * Answers what withdraws the obligation, for a host that settles it while the scope is live.
+ * Answers what withdraws the obligation, for a host that settles it while the scope is live. It is
+ * owed to the session being served when it is registered ({@link pinInputScope}), and settled once
+ * that session has gone even if its owner already serves the next.
  */
 export function whenInputScopeGone(scope: ToolRendererScope, settle: () => void): () => void {
-	const obligation = { scope, settle };
+	const obligation = { scope: pinInputScope(scope), settle };
 	scopeObligations.add(obligation);
 	return () => scopeObligations.delete(obligation);
 }

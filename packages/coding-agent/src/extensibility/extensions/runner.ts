@@ -47,6 +47,7 @@ import {
 	copyHostData,
 	HandedSignals,
 	handHostModel,
+	handHostSchema,
 } from "./boundary-data";
 import { providerCallGate } from "./callback-ownership";
 import { ManagedTimers } from "./managed-timers";
@@ -96,6 +97,7 @@ import type {
 	ExtensionFlag,
 	ExtensionMode,
 	ExtensionRuntime,
+	ExtensionSessionGeneration,
 	ExtensionSessionModes,
 	ExtensionShortcut,
 	ExtensionUIContext,
@@ -121,6 +123,7 @@ import type {
 	SessionStopEventResult,
 	ToolCallEvent,
 	ToolCallEventResult,
+	ToolInfo,
 	ToolRegistrationListener,
 	ToolResultEvent,
 	ToolResultEventResult,
@@ -615,6 +618,8 @@ export class ExtensionRunner {
 	#suspensionParent: ExtensionRunner | undefined;
 	/** {@link rendererScope}, made once it is first asked for. */
 	#rendererScope: ToolRendererScope | undefined;
+	/** {@link rendererScope}'s `pin`: one scope per session generation, made when first asked for. */
+	#pinnedScopes = new WeakMap<ExtensionSessionGeneration, ToolRendererScope>();
 	/** The host services a context hands this session's extensions (`context-surfaces.ts`), each
 	 *  made once per host object, so every context hands the same one. */
 	#handedSessionManager: ExtensionSessionManager | undefined;
@@ -920,15 +925,20 @@ export class ExtensionRunner {
 		this.runtime.appendEntry = actions.appendEntry;
 		this.runtime.getActiveTools = () => copyHostData(actions.getActiveTools());
 		// Each tool's `parameters` is the host's own (a registered tool's is the copy taken at
-		// registration), and the host validates against it. A callable schema is code, so a copy of
-		// the record drops it; it is handed deliberately, as itself — `ToolInfo.parameters` is the
-		// field that declares it — and a registered one is frozen.
+		// registration), and the host validates and builds requests against it. A JSON Schema is
+		// copied as data. A callable schema is code, so a copy of the record drops it; it is handed
+		// deliberately, as `ToolInfo.parameters` declares it, through a frozen schema of its own
+		// (`handHostSchema`) whose calls reach the host's: the host's object, a built-in tool's
+		// included, is never handed, so nothing the extension sets on what it holds reaches it.
 		this.runtime.getAllTools = () =>
 			actions.getAllTools().map(info => {
 				const parameters: unknown = info.parameters;
 				return {
 					...copyHostData(info),
-					parameters: typeof parameters === "function" ? info.parameters : copyHostData(info.parameters),
+					parameters:
+						typeof parameters === "function"
+							? (handHostSchema(parameters) as ToolInfo["parameters"])
+							: copyHostData(info.parameters),
 				};
 			});
 		this.runtime.setActiveTools = async toolNames => {
@@ -1744,11 +1754,39 @@ export class ExtensionRunner {
 	 * (`ToolRendererScope`, `@oh-my-pi/pi-tui/tools/renderer-scope`, which cannot import this
 	 * admission): {@link runScoped}, refused once the session has retired. One per runner. A
 	 * runner whose callbacks run as the host's own never retires.
+	 *
+	 * It answers for whichever session the runtime serves, so a runner reused for the next session
+	 * renders for that one. What a session leaves behind — a component bound to the TUI's input, an
+	 * overlay it showed — is pinned to that session instead (`pin`): one scope per session
+	 * generation (`ExtensionRuntime.sessionGeneration`), which never becomes live again once the
+	 * session has gone, so the next session's lease does not revive it before the TUI's sweep.
 	 */
 	get rendererScope(): ToolRendererScope {
 		if (this.#rendererScope) return this.#rendererScope;
 		const retired = (): boolean => this.#scopeOwner?.isRetired === true;
 		const runScoped = <T>(call: () => T): T | undefined => this.runScoped(call);
+		const pin = (): ToolRendererScope => {
+			const generation = this.#scopeOwner?.sessionGeneration;
+			// A runtime that has not been claimed yet, or never is, has no session to pin to.
+			if (generation === undefined) return scope;
+			let pinned = this.#pinnedScopes.get(generation);
+			if (!pinned) {
+				pinned = {
+					get live() {
+						return !generation.isRetired;
+					},
+					run<T>(call: () => T): T {
+						if (generation.isRetired) {
+							throw new Error("Extension session retired; its renderers are no longer callable");
+						}
+						// Not retired, so this generation is the runtime's current one and `runScoped` runs it.
+						return runScoped(call) as T;
+					},
+				};
+				this.#pinnedScopes.set(generation, pinned);
+			}
+			return pinned;
+		};
 		const scope: ToolRendererScope = {
 			get live() {
 				return !retired();
@@ -1758,6 +1796,7 @@ export class ExtensionRunner {
 				// Live, so `runScoped` runs `call` and answers what it returned.
 				return runScoped(call) as T;
 			},
+			pin,
 		};
 		this.#rendererScope = scope;
 		return scope;

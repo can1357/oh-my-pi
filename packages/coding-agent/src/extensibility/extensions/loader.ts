@@ -58,6 +58,7 @@ import type {
 	ExtensionContext,
 	ExtensionFactory,
 	ExtensionRuntime as IExtensionRuntime,
+	ExtensionSessionGeneration,
 	LoadExtensionsResult,
 	MessageRenderer,
 	PreparedExtension,
@@ -214,7 +215,7 @@ function streamCompletion(produced: unknown): Promise<unknown> {
  *  runtime release it together. Retirement belongs here rather than on the runtime because a
  *  runtime outlives the session that used it: the next session gets a new lease, and the
  *  callbacks an extension registered once are live again for it. */
-class ExtensionCallbackLease {
+class ExtensionCallbackLease implements ExtensionSessionGeneration {
 	#holders = 1;
 
 	join(): void {
@@ -308,6 +309,16 @@ export class ExtensionRuntime implements IExtensionRuntime {
 
 	get isRetired(): boolean {
 		return this.#lease?.isRetired === true;
+	}
+
+	/**
+	 * The session this runtime serves now, as an object of its own: retired once that session's
+	 * last holder has released it, and never live again — the next session gets another. What one
+	 * session leaves behind is pinned to it (`ExtensionRunner.rendererScope`'s `pin`), so reusing
+	 * the runtime cannot revive it. `undefined` before any session has claimed the runtime.
+	 */
+	get sessionGeneration(): ExtensionSessionGeneration | undefined {
+		return this.#lease;
 	}
 
 	/** Wraps a callback this session accepts. The wrapper refuses once the last session hold has
