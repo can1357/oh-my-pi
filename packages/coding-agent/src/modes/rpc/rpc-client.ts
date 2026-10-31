@@ -8,7 +8,7 @@ import { isPromise } from "node:util/types";
 import type { AgentEvent, AgentMessage, AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
-import { isRecord, ptree, readJsonl } from "@oh-my-pi/pi-utils";
+import { childProcessEnv, isRecord, ptree, readJsonl } from "@oh-my-pi/pi-utils";
 import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import type { FileSink } from "bun";
@@ -411,7 +411,7 @@ export class RpcClient {
 						: [...(this.options.command ?? ["bun", cliPath]), ...args],
 					{
 						cwd: this.options.cwd,
-						env: { ...Bun.env, ...this.options.env },
+						env: childProcessEnv(this.options.env),
 						stdin: "pipe",
 					},
 				);

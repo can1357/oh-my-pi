@@ -1,3 +1,4 @@
+import { childProcessEnv } from "@oh-my-pi/pi-utils";
 import { resolveExecutablePath } from "../../subprocess/worker-client";
 
 /** Exit code and captured output of one Bun package-manager invocation. */
@@ -19,7 +20,7 @@ export interface BunCliResult {
 export async function runBunCli(args: readonly string[], cwd: string): Promise<BunCliResult> {
 	const proc = Bun.spawn([resolveExecutablePath(), ...args], {
 		cwd,
-		env: { ...Bun.env, BUN_BE_BUN: "1" },
+		env: childProcessEnv({ BUN_BE_BUN: "1" }),
 		stdin: "ignore",
 		stdout: "pipe",
 		stderr: "pipe",

@@ -709,6 +709,8 @@ OMP initializes OTLP export only when at least one signal has an endpoint. Set `
 | `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`                                                                 | OpenTelemetry resource metadata                                                                 |
 | `OTEL_LOG_LEVEL`                                                                                                | Minimum exported OMP log level                                                                  |
 
+`OTEL_*` entries in omp's own `.env` files (agent dir, config root, home `.env`) configure omp only: they stay readable to omp's exporter but are removed from the environment of the programs omp runs (shell and PTY commands, subagent shells, LSP/DAP/MCP servers, plugin installers, direnv, and workers). A variable exported in the launching shell, or defined in the project `.env` (which has its own child-shell filtering), is unaffected by this rule. Spawns that pass no `env` get the real process environment, which never contains values omp loaded from `.env` files, so they are unaffected.
+
 Header values are percent-decoded, so encode spaces and the `,`/`=` delimiters:
 
 ```bash

@@ -8,6 +8,10 @@
 
 - Added `oklabDistance`, the perceptual distance between two hex colors ([#17520](https://github.com/can1357/oh-my-pi/pull/17520))
 
+### Added
+
+- Added `stripOmpEnvFileTelemetry` and `childProcessEnv`, which drop `OTEL_*` values omp loaded from its own `.env` files from a child process environment; `filterChildShellEnv` applies the same filter. ([#17685](https://github.com/can1357/oh-my-pi/pull/17685) by [@Flare576](https://github.com/Flare576))
+
 ## [18.14.1] - 2026-10-31
 
 ### Added

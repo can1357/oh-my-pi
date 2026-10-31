@@ -334,6 +334,110 @@ describe("stripGitRepoLocationEnv", () => {
 	});
 });
 
+describe("OTEL_* loaded from omp's own .env files", () => {
+	// The dotenv loader runs at module load, so each case needs a fresh process
+	// whose agent dir and HOME are temp dirs.
+	async function runProbe(shellEnv: Record<string, string>): Promise<{
+		bunEnv: Record<string, string | null>;
+		childEnv: Record<string, string | null>;
+		shellChildEnv: Record<string, string | null>;
+		spawned: Record<string, string>;
+	}> {
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-otel-home-"));
+		const agentDir = path.join(home, "agent");
+		const cwd = path.join(home, "project");
+		tempDirs.push(home);
+		fs.mkdirSync(agentDir);
+		fs.mkdirSync(cwd);
+		fs.writeFileSync(
+			path.join(agentDir, ".env"),
+			["OTEL_PROBE_AGENT=agent", "OTEL_PROBE_SHELL=agent-file", "PLAIN_PROBE_AGENT=plain"].join("\n"),
+		);
+		fs.writeFileSync(path.join(home, ".env"), "OTEL_PROBE_HOME=home\n");
+		const envModulePath = path.join(import.meta.dir, "..", "src", "env.ts");
+		const ptreeModulePath = path.join(import.meta.dir, "..", "src", "ptree.ts");
+		const names = ["OTEL_PROBE_AGENT", "OTEL_PROBE_HOME", "OTEL_PROBE_SHELL", "PLAIN_PROBE_AGENT"];
+		const script = [
+			`import { childProcessEnv, filterChildShellEnv } from ${JSON.stringify(envModulePath)};`,
+			`import * as ptree from ${JSON.stringify(ptreeModulePath)};`,
+			`const names = ${JSON.stringify(names)};`,
+			"const pick = (env) => Object.fromEntries(names.map(name => [name, env[name] ?? null]));",
+			"const spawned = await ptree.exec(['sh', '-c', 'env']);",
+			"const spawnedEnv = Object.fromEntries(spawned.stdout.split('\\n').filter(line => line.includes('=')).map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]));",
+			"process.stdout.write(JSON.stringify({",
+			"  bunEnv: pick(Bun.env),",
+			"  childEnv: pick(childProcessEnv()),",
+			`  shellChildEnv: pick(filterChildShellEnv(Bun.env, ${JSON.stringify(cwd)})),`,
+			"  spawned: Object.fromEntries(Object.entries(spawnedEnv).filter(([name]) => names.includes(name))),",
+			"}));",
+		].join("\n");
+		const proc = Bun.spawn([process.execPath, "--no-install", "--eval", script], {
+			cwd,
+			env: {
+				...process.env,
+				HOME: home,
+				USERPROFILE: home,
+				PI_CODING_AGENT_DIR: agentDir,
+				PI_PROFILE: undefined,
+				OTEL_PROBE_AGENT: undefined,
+				OTEL_PROBE_HOME: undefined,
+				OTEL_PROBE_SHELL: undefined,
+				PLAIN_PROBE_AGENT: undefined,
+				...shellEnv,
+			},
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		expect(exitCode, stderr).toBe(0);
+		return JSON.parse(stdout);
+	}
+
+	it.skipIf(process.platform === "win32")(
+		"keeps omp's own OTEL_* readable but out of child envs, and adds nothing to default ptree spawns",
+		async () => {
+			const result = await runProbe({});
+			// omp itself still reads everything it loaded.
+			expect(result.bunEnv).toEqual({
+				OTEL_PROBE_AGENT: "agent",
+				OTEL_PROBE_HOME: "home",
+				OTEL_PROBE_SHELL: "agent-file",
+				PLAIN_PROBE_AGENT: "plain",
+			});
+			const children = {
+				OTEL_PROBE_AGENT: null,
+				OTEL_PROBE_HOME: null,
+				OTEL_PROBE_SHELL: null,
+				PLAIN_PROBE_AGENT: "plain",
+			};
+			expect(result.childEnv).toEqual(children);
+			expect(result.shellChildEnv).toEqual(children);
+			// A default ptree spawn gets Bun's real environ, which never holds values
+			// omp loaded from .env files; the change must not widen that (it would hand
+			// every default child the whole agent .env, API keys included).
+			expect(result.spawned).toEqual({});
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"leaves a variable the user exported in the launching shell alone",
+		async () => {
+			// The loader only fills names that are unset, so the shell's value wins and
+			// is never recorded as omp-loaded; it stays visible to children.
+			const result = await runProbe({ OTEL_PROBE_SHELL: "from-shell" });
+			expect(result.bunEnv.OTEL_PROBE_SHELL).toBe("from-shell");
+			expect(result.childEnv.OTEL_PROBE_SHELL).toBe("from-shell");
+			expect(result.shellChildEnv.OTEL_PROBE_SHELL).toBe("from-shell");
+			expect(result.spawned.OTEL_PROBE_SHELL).toBe("from-shell");
+			expect(result.childEnv.OTEL_PROBE_AGENT).toBeNull();
+		},
+	);
+});
+
 describe("isBunTestRuntime", () => {
 	it("does not treat shared application env names as a test runner signal", async () => {
 		expect(await runRuntimeProbe({ NODE_ENV: "test", BUN_ENV: undefined, PI_TEST_RUNTIME: undefined })).toBe(false);

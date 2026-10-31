@@ -109,6 +109,47 @@ export function stripGitRepoLocationEnv(
 	}
 }
 
+/**
+ * `OTEL_*` values OMP itself loaded from its own (non-project) dotenv files: the
+ * agent dir, config root, and home `.env`. Those files configure OMP, so an
+ * `OTEL_*` entry there configures OMP's exporter (endpoint, auth headers,
+ * GenAI content capture) and must not flow into the programs the agent runs.
+ *
+ * Keyed by name with the loaded value. The loader only sets a name whose
+ * current value is empty/unset, so a variable the user exported in the launching
+ * shell is never recorded here, and neither is a project `.env` value (handled
+ * by {@link filterChildShellEnv}).
+ */
+const ompEnvFileTelemetry = new Map<string, string>();
+
+/**
+ * Removes the `OTEL_*` values OMP loaded from its own dotenv files from a copied
+ * child env in place. A name whose value differs from the loaded one (the caller
+ * or an extension set it explicitly) is kept. OMP's own telemetry keeps reading
+ * `Bun.env`, which is not touched.
+ */
+export function stripOmpEnvFileTelemetry(env: Record<string, string | undefined>): void {
+	for (const [name, value] of ompEnvFileTelemetry) {
+		if (env[name] === value) delete env[name];
+	}
+}
+
+/**
+ * A copy of the live environment for a child process: `Bun.env` without the
+ * values {@link stripOmpEnvFileTelemetry} removes, then `overlay` on top.
+ */
+export function childProcessEnv(overlay?: Record<string, string | undefined>): Record<string, string> {
+	const env = filterProcessEnv(Bun.env);
+	stripOmpEnvFileTelemetry(env);
+	if (overlay) {
+		for (const key in overlay) {
+			const value = overlay[key];
+			if (value !== undefined) env[key] = value;
+		}
+	}
+	return env;
+}
+
 // Bun autoloads the project's dotenv files into `process.env` before user code
 // runs — including inside `bun build --compile` binaries — so a snapshot of
 // `Bun.env` is only pre-dotenv when autoloading was explicitly disabled. Linux
@@ -238,6 +279,7 @@ function filterChildShellEnvInternal(
 	// Last, after dotenv merging: no source (inherited, launcher, or dotenv) may
 	// pin the child shell to the agent's own repository.
 	stripGitRepoLocationEnv(result);
+	stripOmpEnvFileTelemetry(result);
 	return result;
 }
 
@@ -304,6 +346,7 @@ for (const file of [projectEnv, agentEnv, piEnv, homeEnv]) {
 		if (!isMacosMallocStackLoggingEnvName(key) && !Bun.env[key]) {
 			Bun.env[key] = file[key];
 			if (file === projectEnv) projectEnvNamesLoadedByOmp.add(key);
+			else if (key.startsWith("OTEL_")) ompEnvFileTelemetry.set(key, file[key]);
 		}
 	}
 }

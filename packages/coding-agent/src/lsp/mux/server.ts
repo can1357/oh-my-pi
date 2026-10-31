@@ -1,5 +1,5 @@
 import { type IpcConnection, IpcServer } from "@oh-my-pi/pi-natives";
-import { isRecord, logger, postmortem, ptree, setProcessName } from "@oh-my-pi/pi-utils";
+import { childProcessEnv, isRecord, logger, postmortem, ptree, setProcessName } from "@oh-my-pi/pi-utils";
 import { encodeMessageFrame, MessageFramer } from "../../jsonrpc/message-framing";
 import type { LspJsonRpcId, LspJsonRpcNotification, LspJsonRpcRequest, LspJsonRpcResponse } from "../types";
 import {
@@ -104,7 +104,7 @@ class ServerInstance {
 		this.proc = ptree.spawn([params.command, ...params.args], {
 			cwd: params.cwd,
 			stdin: "pipe",
-			env: { ...Bun.env, ...params.env },
+			env: childProcessEnv(params.env),
 		});
 	}
 

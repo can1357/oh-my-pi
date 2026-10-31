@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getAgentDir, isEnoent, ptree, withFileLock, writeRuntimeManifest } from "@oh-my-pi/pi-utils";
+import { childProcessEnv, getAgentDir, isEnoent, ptree, withFileLock, writeRuntimeManifest } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { trackDownload } from "../../downloads/activity";
 import { resolveExecutablePath } from "../../subprocess/worker-client";
@@ -149,7 +149,7 @@ export async function installJsPackages(options: InstallJsPackagesOptions): Prom
 					// In a compiled distribution the resolved executable is omp.
 					// BUN_BE_BUN re-enters Bun's real package-manager
 					// CLI instead of recursively dispatching omp's command parser.
-					env: { ...Bun.env, BUN_BE_BUN: "1" },
+					env: childProcessEnv({ BUN_BE_BUN: "1" }),
 					signal: options.signal,
 					allowNonZero: true,
 					stderr: "full",

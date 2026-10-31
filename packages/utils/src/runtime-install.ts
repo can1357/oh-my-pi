@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as Module from "node:module";
 import * as path from "node:path";
+import { childProcessEnv } from "./env";
 import { withFileLock } from "./file-lock";
 import { isEexist, isEnoent } from "./fs-error";
 
@@ -420,7 +421,7 @@ async function runRuntimeInstall(runtimeDir: string): Promise<void> {
 	// `process.execPath` is plain bun in source/bundle mode and the compiled
 	// binary otherwise; BUN_BE_BUN makes the compiled binary act as bun.
 	const proc = Bun.spawn([process.execPath, "install", "--cwd", runtimeDir, "--production"], {
-		env: { ...Bun.env, BUN_BE_BUN: "1" },
+		env: childProcessEnv({ BUN_BE_BUN: "1" }),
 		stdout: "pipe",
 		stderr: "pipe",
 	});
