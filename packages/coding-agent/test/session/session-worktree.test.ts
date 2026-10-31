@@ -42,6 +42,9 @@ describe("decideWorktreeExit", () => {
 function git(cwd: string, ...args: string[]): string {
 	const r = Bun.spawnSync(["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", ...args], {
 		cwd,
+		// Machine-global hook runners (hk wraps `git` on some dev boxes) must not
+		// veto fixture commits; same hermetic env as commit-execute.test.ts.
+		env: { ...process.env, HOME: cwd, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
 		stdout: "pipe",
 		stderr: "pipe",
 	});
@@ -59,6 +62,7 @@ function worktreePaths(repo: string): string[] {
 function branchSha(repo: string, branch: string): string | null {
 	const r = Bun.spawnSync(["git", "rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], {
 		cwd: repo,
+		env: { ...process.env, HOME: repo, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
 		stdout: "pipe",
 	});
 	return r.exitCode === 0 ? r.stdout.toString().trim() : null;

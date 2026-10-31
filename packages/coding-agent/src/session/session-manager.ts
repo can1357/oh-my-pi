@@ -3216,6 +3216,11 @@ export class SessionManager {
 		return this.#sessionFile;
 	}
 
+	/** The session storage instance backing this manager. */
+	getStorage(): SessionStorage {
+		return this.#storage;
+	}
+
 	/**
 	 * Whether the current session has actually been materialized to durable
 	 * storage (the JSONL exists on disk / in the active storage backend).
@@ -4430,12 +4435,13 @@ export class SessionManager {
 		recordedCwd: string,
 		cwd: string,
 		sessionDir?: string,
+		storage: SessionStorage = new FileSessionStorage(),
 	): Promise<SessionManager> {
 		// Anchor at the missing recorded cwd: `open` otherwise falls back to the
 		// launch cwd, which would make the `moveTo` below a no-op whenever the move
 		// target equals it. moveTo never chdirs, so the stale cwd is only the
 		// relocation source, not a directory we enter.
-		const manager = await SessionManager.open(sessionPath, sessionDir, undefined, { initialCwd: recordedCwd });
+		const manager = await SessionManager.open(sessionPath, sessionDir, storage, { initialCwd: recordedCwd });
 		try {
 			await manager.moveTo(cwd, sessionDir);
 		} catch (error) {

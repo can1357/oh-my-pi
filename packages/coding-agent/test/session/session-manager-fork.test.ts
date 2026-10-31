@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
+import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { isSyntheticToolResultMessage } from "@oh-my-pi/pi-agent-core";
@@ -20,6 +21,8 @@ import {
 import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage, MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { SqlSessionStorage } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
+import { SQL } from "bun";
 import { getTerminalId } from "@oh-my-pi/pi-tui";
 import { isTaskToolDetails, type TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 import { getAgentDir, getTerminalSessionsDir, removeWithRetries, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
@@ -1076,4 +1079,69 @@ describe("SessionManager.forkFrom", () => {
 			false,
 		);
 	});
+
+	for (const { name, makeStorage } of [
+		{ name: "MemorySessionStorage", makeStorage: async () => new MemorySessionStorage() },
+		{
+			name: "SqlSessionStorage",
+			makeStorage: async () => SqlSessionStorage.create({ client: new SQL("sqlite::memory:") }),
+		},
+	]) {
+		it(`forks under ${name} without hitting ENOENT`, async () => {
+			const storage = await makeStorage();
+			const cwd = "/virtual/project";
+			const sessionDir = "/virtual/project/sessions";
+			const parent = SessionManager.create(cwd, sessionDir, storage);
+			parent.appendMessage({
+				role: "user",
+				content: "parent turn",
+				timestamp: 1,
+			});
+			parent.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "parent reply" }],
+				model: "mock-model",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { total: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				},
+				stopReason: "stop",
+				timestamp: 2,
+			});
+			await parent.flush();
+			await storage.drain?.();
+			const parentFile = parent.getSessionFile();
+			expect(parentFile).toBeDefined();
+			expect(nodeFs.existsSync(parentFile!)).toBe(false);
+
+			const forked = await SessionManager.forkFrom(parentFile!, cwd, sessionDir, storage, {
+				suppressBreadcrumb: true,
+				resetInheritedCost: true,
+			});
+			const forkedFile = forked.getSessionFile();
+			expect(forkedFile).toBeDefined();
+			expect(nodeFs.existsSync(forkedFile!)).toBe(false);
+			expect(await storage.exists(forkedFile!)).toBe(true);
+
+			const entries = forked.getEntries();
+			const userMsg = entries.find(e => e.type === "message" && e.message.role === "user");
+			expect(userMsg).toBeDefined();
+
+			forked.appendMessage({
+				role: "user",
+				content: "child turn",
+				timestamp: 3,
+			});
+			await forked.flush();
+			await storage.drain?.();
+			expect(await storage.readText(forkedFile!)).toContain("child turn");
+
+			await parent.close();
+			await forked.close();
+		});
+	}
 });

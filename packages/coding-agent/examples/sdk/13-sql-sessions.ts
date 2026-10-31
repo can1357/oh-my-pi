@@ -18,7 +18,12 @@
  * if you need those off-host too.
  */
 
-import { createAgentSession, SessionManager, SqlSessionStorage } from "@oh-my-pi/pi-coding-agent";
+import {
+	createAgentSession,
+	parseSessionPathPrefixAlias,
+	SessionManager,
+	SqlSessionStorage,
+} from "@oh-my-pi/pi-coding-agent";
 import { SQL } from "bun";
 
 // Pick one — Bun.SQL auto-detects the dialect from the URL scheme.
@@ -29,11 +34,27 @@ import { SQL } from "bun";
 //   sqlite::memory:                                // ephemeral
 const client = new SQL(process.env.SESSIONS_DB_URL ?? "sqlite::memory:");
 
+// Mirroring the same layout on a machine with a different absolute home
+// (a VPS `~/Developer` at `/home/zbornheimer` for the Mac's
+// `/Users/zbornheimer`)? `OMP_SESSION_PATH_PREFIX_ALIAS` rewrites every row
+// key between this machine's prefix and the canonical one, so both machines
+// read and write the same rows and no row is ever keyed twice:
+//
+//   OMP_SESSION_PATH_PREFIX_ALIAS=/home/zbornheimer=/Users/zbornheimer
+//
+// Format: "<localPrefix>=<storagePrefix>" (first `=` separates the sides) —
+// paths under localPrefix are stored under storagePrefix, and stored keys
+// under storagePrefix are surfaced back as localPrefix paths, so session-dir
+// listings still match. The CLI reads it only when SESSIONS_DB_URL is set;
+// unset keeps row keys verbatim. SDK callers pass the parsed alias directly:
+const pathAlias = parseSessionPathPrefixAlias(process.env.OMP_SESSION_PATH_PREFIX_ALIAS);
+
 // `create()` runs `CREATE TABLE IF NOT EXISTS` (with the right DDL for the
 // dialect) and warms the in-memory mirror with every existing row.
 const storage = await SqlSessionStorage.create({
 	client,
 	table: "omp_session_files", // optional, this is the default
+	pathAlias, // optional; undefined keeps row keys verbatim
 	// createTable: false,       // set if migrations are owned elsewhere
 });
 

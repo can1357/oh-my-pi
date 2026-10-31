@@ -1810,7 +1810,7 @@ export class SelectorController {
 				SessionManager.listForPicker(
 					this.ctx.sessionManager.getCwd(),
 					this.ctx.sessionManager.getSessionDir(),
-					undefined,
+					this.ctx.sessionManager.getStorage(),
 					cfgSessionWorktreeScope.get(this.ctx.settings),
 				),
 				loadPinnedSessionIds(),
@@ -1828,7 +1828,7 @@ export class SelectorController {
 								if (!(await this.#detachActiveSessionBeforeDeletion(session.path))) {
 									return false;
 								}
-								const storage = new FileSessionStorage();
+								const storage = this.ctx.sessionManager.getStorage();
 								try {
 									await storage.deleteSessionWithArtifacts(session.path);
 									return true;
@@ -1848,7 +1848,7 @@ export class SelectorController {
 									// row here pointing at the old path. Claim the
 									// lease up front and refuse while it is held by
 									// someone else.
-									const claim = new FileSessionStorage().claimSession(session.id, session.path);
+									const claim = this.ctx.sessionManager.getStorage().claimSession?.(session.id, session.path);
 									if (!claim) {
 										throw new Error(
 											"Failed to rename session: it is currently in use by another omp process",
@@ -1881,7 +1881,7 @@ export class SelectorController {
 							showCwd: true,
 						}),
 				historyMatcher,
-				loadAllSessions: () => SessionManager.listAllForPicker(),
+				loadAllSessions: () => SessionManager.listAllForPicker(this.ctx.sessionManager.getStorage()),
 				pinnedIds,
 				// Live getter so detach/newSession stays accurate; tolerant of partial
 				// contexts and in-memory sessions (undefined file means no marker).
@@ -2081,7 +2081,7 @@ export class SelectorController {
 		}
 
 		// Check if session file exists (may not exist for brand new sessions)
-		const storage = new FileSessionStorage();
+		const storage = this.ctx.sessionManager.getStorage();
 		const fileExists = await storage.exists(sessionFile);
 		if (!fileExists) {
 			this.ctx.showError("Session has not been saved yet");
