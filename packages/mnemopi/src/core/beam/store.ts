@@ -310,6 +310,16 @@ function proactiveLinkIfEnabled(
 }
 
 /**
+ * Fresh per-insert generation token for a working-memory row. Unlike
+ * created_at (one-second precision, preserved by force imports) and the
+ * rowid (reused after deletes), this value changes on every insert, so it
+ * distinguishes a delete + re-create even within the same second.
+ */
+function freshGeneration(): string {
+	return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+/**
  * Run the LLM fact extractor over freshly stored content and persist the
  * resulting facts. Best-effort: failures (no LLM, closed DB, malformed output)
  * are swallowed so they can never disrupt the synchronous `remember` that
@@ -319,7 +329,7 @@ async function runFactExtraction(
 	beam: BeamMemoryState,
 	memoryId: string,
 	content: string,
-	scheduled: { rowid: number; content: string; created_at: string | null } | null,
+	scheduled: { rowid: number; content: string; generation: string | null } | null,
 	scheduledScope: string,
 ): Promise<void> {
 	try {
@@ -327,28 +337,28 @@ async function runFactExtraction(
 		withLoopPhase("mnemopi.extract", () => {
 			if (countExtractedFactCategories(extracted) === 0) return;
 			// Discard stale results: the task is bound to the source row's
-			// incarnation at schedule time — the rowid generation, the stored
-			// content, and the immutable creation stamp (created_at, which no
-			// write path ever updates) — plus the inherited scope. A delete +
-			// re-create with the same content and scope (even reusing the same
-			// rowid) gets a fresh creation stamp, so the old incarnation's
-			// extraction cannot land on its replacement; an edit or re-scope
-			// changes content/scope directly. The mutable event timestamp is
-			// deliberately NOT part of the token: the duplicate-remember path
-			// refreshes it in place on identical content, which must not cancel
-			// a pending extraction. A null snapshot (source already trimmed
-			// before the task captured its version) is rejected outright. Facts
-			// otherwise inherit the scheduled scope, never wider than their
-			// source.
+			// incarnation at schedule time — the per-insert generation token,
+			// the rowid, the stored content, and the inherited scope. Every
+			// insert path writes a fresh generation value, so a delete +
+			// re-create with identical content and scope (even within the same
+			// second, where the rowid and the one-second-precision created_at
+			// can both be reused, and even a force import that preserves
+			// exported timestamps) fails the check; an edit or re-scope changes
+			// content/scope directly. In-place refreshes (duplicate remember,
+			// edit with identical content) keep the generation, so they do not
+			// cancel a pending extraction. A null snapshot (source already
+			// trimmed before the task captured its version) is rejected
+			// outright. Facts otherwise inherit the scheduled scope, never
+			// wider than their source.
 			const source = beam.db
-				.prepare("SELECT rowid, content, created_at, scope FROM working_memory WHERE id = ?")
-				.get(memoryId) as { rowid: number; content: string; created_at: string | null; scope: string | null } | null;
+				.prepare("SELECT rowid, content, generation, scope FROM working_memory WHERE id = ?")
+				.get(memoryId) as { rowid: number; content: string; generation: string | null; scope: string | null } | null;
 			if (
 				source == null ||
 				scheduled == null ||
 				source.rowid !== scheduled.rowid ||
 				source.content !== scheduled.content ||
-				source.created_at !== scheduled.created_at ||
+				source.generation !== scheduled.generation ||
 				(source.scope ?? "session") !== scheduledScope
 			) {
 				return;
@@ -374,15 +384,15 @@ function scheduleFactExtraction(beam: BeamMemoryState, memoryId: string, content
 	if (content.trim() === "") return;
 	const runtimeOptions = getMnemopiRuntimeOptions();
 	// Bind the task to the source row's incarnation at schedule time: the
-	// rowid generation, the stored content, the immutable creation stamp,
-	// and the inherited scope are captured now, and runFactExtraction
-	// discards the result if the source row no longer matches the whole
-	// token in the meantime (covers edits, re-scopes, and delete + re-create
-	// with identical content and scope, which reuses the rowid but gets a
-	// fresh creation stamp).
+	// per-insert generation token, the rowid, the stored content, and the
+	// inherited scope are captured now, and runFactExtraction discards the
+	// result if the source row no longer matches the whole token in the
+	// meantime (covers edits, re-scopes, and delete + re-create with
+	// identical content and scope — even within the same second, where the
+	// rowid and the one-second-precision created_at can both be reused).
 	const scheduled = beam.db
-		.prepare("SELECT rowid, content, created_at FROM working_memory WHERE id = ?")
-		.get(memoryId) as { rowid: number; content: string; created_at: string | null } | null;
+		.prepare("SELECT rowid, content, generation FROM working_memory WHERE id = ?")
+		.get(memoryId) as { rowid: number; content: string; generation: string | null } | null;
 	const scheduledScope = sourceMemoryScope(beam, memoryId);
 	const task = withMnemopiRuntimeOptions(runtimeOptions, () =>
 		runFactExtraction(beam, memoryId, content, scheduled, scheduledScope),
@@ -526,7 +536,9 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 				timestamp,
 				source,
 				validUntil,
-				scope,
+				// An omitted scope keeps the stored value (the variable above was
+				// defaulted to 'session', which would silently narrow a global source).
+				options.scope ?? null,
 				authorId,
 				authorType,
 				channelId,
@@ -547,6 +559,13 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 			metadata: metadata ?? undefined,
 		});
 		if (embedText !== content) scheduleEmbedding(beam, [{ memoryId: existingId, content: embedText }]);
+		// A duplicate write that explicitly re-scopes the row invalidates any
+		// pending extraction (its bound scope no longer matches); schedule the
+		// replacement under the updated scope. An omitted scope keeps the
+		// stored value, so the pending task remains valid.
+		if (options.extract === true && options.scope !== undefined) {
+			scheduleFactExtraction(beam, existingId, options.extractText ?? options.extract_text ?? content);
+		}
 		invalidateCaches(beam);
 		return existingId;
 	}
@@ -556,8 +575,8 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 		`
 			INSERT INTO working_memory
 			(id, content, embed_text, source, timestamp, session_id, importance, metadata_json, valid_until, scope,
-			 author_id, author_type, channel_id, veracity, memory_type, trust_tier)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 author_id, author_type, channel_id, veracity, memory_type, trust_tier, generation)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`,
 		[
 			memoryId,
@@ -576,6 +595,7 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 			veracity,
 			memoryType,
 			trustTier,
+			freshGeneration(),
 		],
 	);
 	addTemporalAnnotations(beam, memoryId, timestamp, source);
@@ -619,8 +639,8 @@ export function rememberBatch(
 		using statement = beam.db.prepare(`
 			INSERT INTO working_memory
 			(id, content, embed_text, source, timestamp, session_id, importance, metadata_json,
-			 author_id, author_type, channel_id, memory_type, veracity, trust_tier, scope)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 author_id, author_type, channel_id, memory_type, veracity, trust_tier, scope, generation)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`);
 		for (const item of items) {
 			const itemTimestamp = item.timestamp ?? timestamp;
@@ -650,6 +670,7 @@ export function rememberBatch(
 				itemVeracity,
 				trustTier,
 				item.scope ?? defaultScope,
+				freshGeneration(),
 			);
 			addTemporalAnnotations(beam, memoryId, itemTimestamp, source);
 			emitEvent(beam, "MEMORY_ADDED", {
@@ -1044,8 +1065,8 @@ export function importFromDict(beam: BeamMemoryState, data: Record<string, unkno
 				(id, content, source, timestamp, session_id, importance, metadata_json,
 				 valid_until, superseded_by, scope, recall_count, last_recalled, created_at,
 				 veracity, consolidated_at, memory_type, embed_text, author_id, author_type, channel_id,
-				 trust_tier, event_date, event_date_precision, temporal_tags)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				 trust_tier, event_date, event_date_precision, temporal_tags, generation)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			`,
 				[
 					id,
@@ -1072,6 +1093,7 @@ export function importFromDict(beam: BeamMemoryState, data: Record<string, unkno
 					sqlBinding(item.event_date, null),
 					sqlBinding(item.event_date_precision, "unknown"),
 					sqlBinding(item.temporal_tags, "[]"),
+					freshGeneration(),
 				],
 			);
 		}

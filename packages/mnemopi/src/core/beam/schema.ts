@@ -52,7 +52,8 @@ export function initBeam(db: Database): void {
 			event_date_precision TEXT DEFAULT 'unknown',
 			temporal_tags TEXT DEFAULT '[]',
 			corrected_by INTEGER DEFAULT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			generation TEXT DEFAULT NULL
 		)
 	`);
 
@@ -111,6 +112,11 @@ export function initBeam(db: Database): void {
 	addColumnIfMissing(db, "episodic_memory", "memory_type", "TEXT DEFAULT 'unknown'");
 	addColumnIfMissing(db, "episodic_memory", "binary_vector", "BLOB");
 	const consolidatedAtAdded = addColumnIfMissing(db, "working_memory", "consolidated_at", "TEXT");
+	// Per-insert generation token: created_at has one-second precision and force
+	// imports can preserve exported values, so it cannot distinguish a delete +
+	// re-create within the same second. Existing rows keep NULL; every insert
+	// path writes a fresh unique value.
+	addColumnIfMissing(db, "working_memory", "generation", "TEXT DEFAULT NULL");
 	if (consolidatedAtAdded) {
 		db.run("UPDATE working_memory SET consolidated_at = ? WHERE consolidated_at IS NULL", [new Date().toISOString()]);
 	}

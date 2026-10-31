@@ -473,6 +473,81 @@ describe("E7 facts scope migration", () => {
 		}
 	});
 
+	it("keeps NULL-owned source rows private to empty session ids", () => {
+		const beam = new BeamMemory({ sessionId: "", dbPath: tempDb() });
+		try {
+			// A restored row can retain a NULL owner; a caller built with an
+			// explicit empty session id must not be equated with the missing one.
+			beam.db.run(
+				"INSERT INTO working_memory (id, content, session_id, scope) VALUES ('wm-null-owner', 'src content', NULL, 'session')",
+			);
+			storeFactStrings(beam, ["Quorum relay needs a safeword passphrase"], 0, "wm-null-owner");
+			const results = factRecall(beam, "quorum relay safeword passphrase", 10);
+			expect(results.some(result => result.content.includes("safeword"))).toBe(false);
+		} finally {
+			beam.close();
+		}
+	});
+
+	it("re-scoped duplicate remember schedules a replacement extraction", async () => {
+		const memory = new Mnemopi({
+			sessionId: "session-a",
+			dbPath: tempDb(),
+			llm: { enabled: true, complete: async () => "The user uses the quorum relay for tokens" },
+		});
+		try {
+			const id = memory.remember("I use the quorum relay for tokens", { source: "test", scope: "global", extract: true });
+			expect(id).toBeTruthy();
+			// The duplicate write narrows the scope: the first pending task
+			// becomes stale, and the duplicate path must schedule the
+			// replacement under the updated scope so the memory does not end
+			// up with no facts.
+			const dup = memory.remember("I use the quorum relay for tokens", { source: "test", scope: "session", extract: true });
+			expect(dup).toBe(id);
+			await memory.flushExtractions();
+			const rows = memory.conn.query("SELECT fact_id, scope FROM facts WHERE source_msg_id = ?").all(id) as { fact_id: string; scope: string }[];
+			expect(rows.length).toBeGreaterThan(0);
+			expect(rows.every(row => row.scope === "session")).toBe(true);
+		} finally {
+			await memory.flushExtractions();
+			memory.close();
+		}
+	});
+
+	it("discards extraction when a force import recreates the row preserving timestamps", async () => {
+		const memory = new Mnemopi({
+			sessionId: "session-a",
+			dbPath: tempDb(),
+			llm: { enabled: true, complete: async () => "The user uses the quorum relay for tokens" },
+		});
+		try {
+			const id = memory.remember("same text both times", { source: "test", extract: true });
+			expect(id).toBeTruthy();
+			const orig = memory.beam.db
+				.prepare("SELECT created_at FROM working_memory WHERE id = ?")
+				.get(id) as { created_at: string };
+			memory.beam.db.run("DELETE FROM working_memory WHERE id = ?", [id]);
+			// Re-import the same row with the exported creation timestamp
+			// preserved: created_at (and even the rowid) can match the old
+			// incarnation, but the import must receive a fresh generation token.
+			importFromDict(
+				memory.beam,
+				{ working_memory: [{ id, content: "same text both times", session_id: "session-a", scope: "session", created_at: orig.created_at }] },
+				true,
+			);
+			const gen = memory.beam.db
+				.prepare("SELECT generation FROM working_memory WHERE id = ?")
+				.get(id) as { generation: string | null };
+			expect(gen.generation).not.toBeNull();
+			await memory.flushExtractions();
+			const rows = memory.conn.query("SELECT fact_id FROM facts WHERE source_msg_id = ?").all(id) as { fact_id: string }[];
+			expect(rows.length).toBe(0);
+		} finally {
+			await memory.flushExtractions();
+			memory.close();
+		}
+	});
+
 	it("discards extraction when the source row is forgotten and recreated identically", async () => {
 		const memory = new Mnemopi({
 			sessionId: "session-a",
@@ -482,14 +557,15 @@ describe("E7 facts scope migration", () => {
 		try {
 			const id = memory.remember("same text both times", { source: "test", extract: true });
 			expect(id).toBeTruthy();
-			// Forget the row while extraction is in flight and re-create it with
-			// identical content and scope but a different creation stamp (as a
-			// restore from another bank would): the immutable created_at
-			// generation marker must distinguish the new incarnation from the
-			// one the task bound to, even when the rowid is reused.
+			// Forget the row while extraction is in flight and re-create it
+			// within the same second: the rowid is reused, created_at has
+			// one-second precision, and the raw insert omits the generation
+			// column — only the per-insert generation token (NULL on the
+			// replacement vs a fresh value on the original) can distinguish the
+			// incarnations.
 			memory.beam.db.run("DELETE FROM working_memory WHERE id = ?", [id]);
 			memory.beam.db.run(
-				"INSERT INTO working_memory (id, content, session_id, scope, created_at) VALUES (?, 'same text both times', 'session-a', 'session', '2020-01-01 00:00:00')",
+				"INSERT INTO working_memory (id, content, session_id, scope) VALUES (?, 'same text both times', 'session-a', 'session')",
 				[id],
 			);
 			await memory.flushExtractions();
