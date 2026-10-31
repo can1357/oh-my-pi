@@ -822,4 +822,106 @@ describe("PolyphonicRecallEngine", () => {
 			closeQuietly(beam.db);
 		}
 	});
+
+	it("promotes singleton-CJK identifiers to primary terms and ranks TypeA型 above TypeA", () => {
+		const beam = makeBeam();
+		try {
+			beam.db.run(
+				`INSERT INTO memoria_facts
+					(session_id, message_idx, fact_type, key, value, context_snippet, importance, source_memory_id)
+					VALUES
+					(?, 0, 'entity', 'TypeA', 'Base ASCII model configuration', 'TypeA configuration', 0.95, 'wm-type-a'),
+					(?, 1, 'entity', 'TypeA型', 'Variant model with singleton CJK suffix', 'TypeA型 configuration', 0.95, 'wm-type-a-cjk')`,
+				[beam.sessionId, beam.sessionId],
+			);
+			const result = memoriaRetrieve(beam, "what is TypeA型", "IE", 1);
+			expect(result.ability).toBe("IE");
+			expect((result.results as Array<{ key?: string }>)[0]?.key).toBe("TypeA型");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("matches simplified Chinese copula questions like C语言是什么 in factVoice", () => {
+		const beam = makeBeam();
+		try {
+			const engine = new PolyphonicRecallEngine({
+				db: beam.db,
+				sessionId: beam.sessionId,
+				channelId: beam.channelId,
+			});
+			const timestamp = new Date().toISOString();
+			insertWorking(beam, "wm-c-lang-sim", "C语言是一种通用的编程语言", 0.9, timestamp);
+			beam.db.run(
+				`INSERT INTO consolidated_facts
+					(id, subject, predicate, object, confidence, mention_count, first_seen, last_seen, sources_json, veracity)
+					VALUES
+					('cf_c_lang_sim', 'C语言', '定义', '编程语言', 0.95, 2, ?, ?, ?, 'likely_true')`,
+				[timestamp, timestamp, JSON.stringify(["wm-c-lang-sim"])],
+			);
+			expect(engine.factVoice("C语言是什么").map(hit => hit.memoryId)).toContain("wm-c-lang-sim");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("downweights chronological timeline routing words so PostgreSQL wins at topK=1", () => {
+		const beam = makeBeam();
+		try {
+			beam.db.run(
+				`INSERT INTO memoria_timelines
+					(session_id, event_id, date, description, source_memory_id)
+					VALUES
+					(?, 1, '2020-01-01', 'General chronological sequence of events and order of releases', 'wm-chronological-generic'),
+					(?, 2, '2026-05-01', 'PostgreSQL cluster setup completed', 'wm-pg-cluster')`,
+				[beam.sessionId, beam.sessionId],
+			);
+			const result = memoriaRetrieve(beam, "PostgreSQL chronological", "TR", 1);
+			expect(result.ability).toBe("TR");
+			expect((result.results as Array<{ event_id?: number }>)[0]?.event_id).toBe(2);
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("excludes technical 最近 compounds from temporal routing and routes 最近公共祖先算法 to IE", () => {
+		const beam = makeBeam();
+		try {
+			const engine = seedPolyphonicFixture(beam);
+			expect(engine.temporalVoice("最近公共祖先算法")).toEqual([]);
+			expect(engine.temporalVoice("最近点对问题")).toEqual([]);
+
+			beam.db.run(
+				`INSERT INTO memoria_facts
+					(session_id, message_idx, fact_type, key, value, context_snippet, importance, source_memory_id)
+					VALUES
+					(?, 0, 'entity', '最近公共祖先算法', 'LCA 算法實作細節', '最近公共祖先算法說明', 0.95, 'wm-lca')`,
+				[beam.sessionId],
+			);
+			const result = memoriaRetrieve(beam, "最近公共祖先算法");
+			expect(result.ability).toBe("IE");
+			expect((result.results as Array<{ key?: string }>)[0]?.key).toBe("最近公共祖先算法");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("filters out were as a stopword in makeQuestionTokenGroups so subsequent terms are not dropped", () => {
+		const beam = makeBeam();
+		try {
+			beam.db.run(
+				`INSERT INTO memoria_facts
+					(session_id, message_idx, fact_type, key, value, context_snippet, importance, source_memory_id)
+					VALUES
+					(?, 0, 'entity', 'hyperdrive', 'Hyperdrive engine propulsion system', 'hyperdrive specifications', 0.95, 'wm-hyperdrive')`,
+				[beam.sessionId],
+			);
+			// Query with "were" plus multiple terms leading up to "hyperdrive"
+			const result = memoriaRetrieve(beam, "what were alpha beta gamma delta epsilon zeta eta hyperdrive", "IE", 1);
+			expect(result.ability).toBe("IE");
+			expect((result.results as Array<{ key?: string }>)[0]?.key).toBe("hyperdrive");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
 });

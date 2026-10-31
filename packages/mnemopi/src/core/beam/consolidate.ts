@@ -3,6 +3,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { polyphonicRecallEnabled } from "../../config";
 import { generateId, stableMemoryId } from "../../util/ids";
 import {
+	CJK_CHAR_RE,
 	CJK_CLAUSE_PARTICLE_RE,
 	CJK_PARTICLE_SPLIT_RE,
 	CJK_STOP_SEGMENTS,
@@ -13,6 +14,7 @@ import {
 	splitMixedScriptToken,
 	stripCjkQuestionAffixes,
 } from "../../util/regex";
+import { STOP_WORDS } from "../synonyms";
 import { aaakEncode } from "../aaak";
 import { REGEX_EXTRACTION_MAX_INPUT_CHARS } from "../entities";
 import { EpisodicGraph } from "../episodic-graph";
@@ -218,6 +220,7 @@ function makeQuestionTokenGroups(query: string): {
 	all: string[];
 } {
 	const stop = new Set([
+		...STOP_WORDS,
 		"a",
 		"an",
 		"and",
@@ -242,6 +245,7 @@ function makeQuestionTokenGroups(query: string): {
 		"the",
 		"to",
 		"was",
+		"were",
 		"what",
 		"when",
 		"where",
@@ -271,7 +275,8 @@ function makeQuestionTokenGroups(query: string): {
 		const token = rawToken.toLowerCase();
 		if (hasCjk(token)) {
 			const { nonCjk, cjkRuns } = splitMixedScriptToken(rawToken);
-			if (nonCjk.length > 0 && cjkRuns.length > 0) {
+			const hasAnyCjk = CJK_CHAR_RE.test(token);
+			if (nonCjk.length > 0 && hasAnyCjk) {
 				const strippedToken = stripCjkQuestionAffixes(token);
 				for (const clauseRaw of strippedToken.split(CJK_CLAUSE_PARTICLE_RE)) {
 					const clause = stripCjkQuestionAffixes(clauseRaw);
@@ -863,7 +868,7 @@ function classifyAbility(query: string): string {
 	const deadlineContextRe = /截止(?:日|日期|時間|时间|時限|时限|前|到|至|於|于|$)/u;
 	const nonDeadlineCutoffRe = /截止[頻频點点電壓压波長长區区]/u;
 	const isDeadline = deadlineContextRe.test(query) && !nonDeadlineCutoffRe.test(query);
-	const hasRecent = /最近(?![鄰邻])/u.test(query);
+	const hasRecent = /最近(?![鄰邻公共點点對对小大優优佳近親亲似])/u.test(query);
 	if (
 		isDeadline ||
 		hasRecent ||
@@ -1031,8 +1036,19 @@ function timelineRetrieve(beam: BeamMemoryState, query: string, topK: number): M
 	}
 	const genericTimelineWords = new Set([
 		"timeline",
+		"timelines",
 		"chronology",
+		"chronological",
+		"chronologically",
 		"history",
+		"historical",
+		"sequence",
+		"events",
+		"order",
+		"before",
+		"after",
+		"first",
+		"when",
 		"時間線",
 		"时間線",
 		"时间线",
@@ -1042,6 +1058,8 @@ function timelineRetrieve(beam: BeamMemoryState, query: string, topK: number): M
 		"历程",
 		"順序",
 		"顺序",
+		"先後",
+		"先后",
 	]);
 	const exactPrimarySet = new Set(exactPrimary);
 	for (const p of primary) {
