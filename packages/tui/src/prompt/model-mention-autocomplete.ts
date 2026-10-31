@@ -15,8 +15,13 @@ const MODEL_MENTION_CONTEXT_RE = /(?:^|\s)(\^[^\s]*)$/;
 const MAX_MODEL_MENTION_SUGGESTIONS = 20;
 const MAX_EFFORT_CANDIDATE_MODELS = 3;
 
-/** Supplies picker-ranked model candidates for the query after `^`. */
-export type ModelMentionCandidateSource = (query: string) => ReadonlyArray<ModelBrowserItem>;
+/**
+ * Supplies picker-ranked model candidates for the query after `^`. `availableModelIds`
+ * lists every available model's selector, in or out of the picker scope.
+ */
+export type ModelMentionCandidateSource = ((query: string) => ReadonlyArray<ModelBrowserItem>) & {
+	availableModelIds?: () => ReadonlySet<string>;
+};
 
 interface ModelBrowserModules {
 	SessionModelScopeCache: typeof SessionModelScopeCacheClass;
@@ -65,7 +70,11 @@ function mentionRows(query: string, candidates: ModelMentionCandidateSource): Au
 				}
 			}
 			const literalValues = new Set(literalRows.map(row => row.value));
-			return [...literalRows, ...levelRows.filter(row => !literalValues.has(row.value))];
+			const available = candidates.availableModelIds?.();
+			return [
+				...literalRows,
+				...levelRows.filter(row => !literalValues.has(row.value) && !available?.has(row.value)),
+			];
 		}
 	}
 	return candidates(query)
@@ -120,7 +129,7 @@ export function createModelMentionSource(host: {
 	let scopeCache: SessionModelScopeCacheClass | undefined;
 	let ranker: ModelItemRankerClass | undefined;
 	let rankerProviderOrder: readonly string[] | undefined;
-	return query => {
+	const rank = (query: string): ReadonlyArray<ModelBrowserItem> => {
 		const { SessionModelScopeCache, buildSearchAffinity, ModelItemRanker } = loadModelBrowser();
 		scopeCache ??= new SessionModelScopeCache(host.source, host.registry);
 		const scope = scopeCache.get(host.scopedModels());
@@ -136,4 +145,7 @@ export function createModelMentionSource(host: {
 		}
 		return ranker.rank(query);
 	};
+	return Object.assign(rank, {
+		availableModelIds: () => new Set(host.registry.getAvailable().map(model => `${model.provider}/${model.id}`)),
+	});
 }
