@@ -2,7 +2,9 @@
 	"extends": "../tsconfig.workspace.json",
 	"include": [
 		"src/client",
-		"test/errors-route-range.test.tsx"
+		"test/errors-route-range.test.tsx",
+		"test/context-ui.test.tsx",
+		"test/context-view-models.test.ts"
 	],
 	"compilerOptions": {
 		"jsx": "react-jsx",
@@ -18,4 +20,3 @@
 		]
 	}
 }
-

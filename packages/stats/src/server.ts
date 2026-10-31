@@ -17,6 +17,12 @@ import {
 	getTimeRangeConfig,
 	getToolDashboardStats,
 } from "./aggregator";
+import {
+	buildSessionContextResponse,
+	CONTEXT_ETAG_VERSION,
+	contextFingerprintForEtag,
+	getContextOverview,
+} from "./context";
 import { initDb } from "./db";
 import { decodeEmbeddedClientArchive, hasEmbeddedClientArchive } from "./embedded-client";
 import embeddedClientArchiveTxt from "./embedded-client.generated.txt";
@@ -39,6 +45,7 @@ import {
 	STATS_DASHBOARD_SECURITY_VERSION,
 } from "./port-conflict";
 import { getStatsByModel, getTimeSeries } from "./rollup";
+import type { TimeRange } from "./shared-types";
 import {
 	buildSessionTrace,
 	getTraceEntry,
@@ -187,6 +194,14 @@ export async function handleApi(req: Request): Promise<Response> {
 		return Response.json(stats);
 	}
 
+	if (path === "/api/context/overview") {
+		const contextRange = range ?? "24h";
+		if (!["1h", "24h", "7d", "30d", "90d"].includes(contextRange)) {
+			return Response.json({ error: "invalid range" }, { status: 400 });
+		}
+		return Response.json(await getContextOverview(contextRange as TimeRange));
+	}
+
 	if (path === "/api/stats/model-dashboard") {
 		const stats = await getModelDashboardStats(range);
 		return Response.json(stats);
@@ -310,6 +325,27 @@ export async function handleApi(req: Request): Promise<Response> {
 			const etag = `"${TRACE_ETAG_VERSION}:${trace.etag}"`;
 			if (clientEtag === etag) return new Response(null, { status: 304 });
 			return Response.json(trace, { headers: { ETag: etag } });
+		} catch (err) {
+			if (err instanceof TracePathError) return Response.json({ error: err.message }, { status: 400 });
+			if (isEnoent(err)) return Response.json({ error: "session not found" }, { status: 404 });
+			throw err;
+		}
+	}
+
+	if (path === "/api/session/context") {
+		const file = url.searchParams.get("file");
+		if (!file) return Response.json({ error: "file required" }, { status: 400 });
+		try {
+			const clientEtag = req.headers.get("if-none-match");
+			const fingerprint = clientEtag ? await contextFingerprintForEtag(file) : undefined;
+			if (fingerprint) {
+				const etag = `"${CONTEXT_ETAG_VERSION}:${fingerprint.etag}"`;
+				if (clientEtag === etag) return new Response(null, { status: 304, headers: { ETag: etag } });
+			}
+			const result = await buildSessionContextResponse(file, undefined, fingerprint);
+			const etag = `"${CONTEXT_ETAG_VERSION}:${result.etag}"`;
+			if (clientEtag === etag) return new Response(null, { status: 304, headers: { ETag: etag } });
+			return Response.json(result.timeline, { headers: { ETag: etag } });
 		} catch (err) {
 			if (err instanceof TracePathError) return Response.json({ error: err.message }, { status: 400 });
 			if (isEnoent(err)) return Response.json({ error: "session not found" }, { status: 404 });
