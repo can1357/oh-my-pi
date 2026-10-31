@@ -26,9 +26,10 @@ const AGENTS_MD_MAX_DEPTH: usize = 4;
 const AGENTS_MD_LIMIT: usize = 200;
 const MAX_ENTRIES: usize = 100_000;
 
-/// Directory names pruned during traversal. The TypeScript caller no longer has
-/// to plumb this list through; it lives here so a single source of truth
-/// governs what counts as a non-source directory in startup scans.
+/// Directory names pruned during traversal unless `pruneExcludedDirs` is
+/// false. The TypeScript caller no longer has to plumb this list through; it
+/// lives here so a single source of truth governs what counts as a non-source
+/// directory in startup scans.
 const EXCLUDED_DIRS: &[&str] = &[
 	"node_modules",
 	".git",
@@ -57,6 +58,11 @@ pub struct ListWorkspaceOptions<'env> {
 	pub hidden:                  Option<bool>,
 	/// Respect .gitignore files. Default: true.
 	pub gitignore:               Option<bool>,
+	/// Stop pruning dependency, VCS, build-output, and cache directory names
+	/// (`node_modules`, `.git`, `dist`, `target`, …). Hidden entries still
+	/// require `hidden: true`; ignored entries require `gitignore: false`.
+	/// Default: true.
+	pub prune_excluded_dirs:     Option<bool>,
 	/// Also surface AGENTS.md files in directories at depth 1..=4, even when
 	/// gitignore would otherwise hide the file. Walks deeper than `maxDepth`
 	/// to find them. Default: false.
@@ -102,6 +108,7 @@ struct WorkspaceConfig {
 	walk_max_depth:          usize,
 	include_hidden:          bool,
 	use_gitignore:           bool,
+	prune_excluded_dirs:     bool,
 	collect_agents_md:       bool,
 	report_directory_errors: bool,
 }
@@ -135,8 +142,8 @@ fn workspace_tree_options(config: &WorkspaceConfig) -> pi_walker::walk::TreeOpti
 	pi_walker::walk::TreeOptions {
 		hidden: config.include_hidden,
 		gitignore: config.use_gitignore,
-		skip_git: true,
-		skip_node_modules: true,
+		skip_git: config.prune_excluded_dirs,
+		skip_node_modules: config.prune_excluded_dirs,
 		follow: pi_walker::walk::Follow::Never,
 		detail: pi_walker::Detail::Full,
 		// Entries past `max_depth` are walked only to find AGENTS.md, so they need
@@ -160,7 +167,10 @@ fn is_file_or_file_symlink(path: &Path, file_type: FileType) -> bool {
 	}
 }
 
-fn is_excluded_workspace_entry(relative: &str, file_type: FileType) -> bool {
+/// Whether a walked entry is left out: `.DS_Store` always, and the
+/// [`EXCLUDED_DIRS`] directories (plus everything beneath them) when
+/// `prune_dirs` is set.
+fn is_excluded_workspace_entry(relative: &str, file_type: FileType, prune_dirs: bool) -> bool {
 	let mut components = relative
 		.split('/')
 		.filter(|component| !component.is_empty())
@@ -170,7 +180,9 @@ fn is_excluded_workspace_entry(relative: &str, file_type: FileType) -> bool {
 			return true;
 		}
 		let is_final_component = components.peek().is_none();
-		if EXCLUDED_DIR_SET.contains(component) && (!is_final_component || file_type == FileType::Dir)
+		if prune_dirs
+			&& EXCLUDED_DIR_SET.contains(component)
+			&& (!is_final_component || file_type == FileType::Dir)
 		{
 			return true;
 		}
@@ -215,7 +227,7 @@ async fn run_list_workspace(
 			pi_walker::walk::Event::Entry(entry) => {
 				let relative = String::from_utf8_lossy(entry.path);
 				let file_type = FileType::from(entry.file_type);
-				if is_excluded_workspace_entry(&relative, file_type) {
+				if is_excluded_workspace_entry(&relative, file_type, config.prune_excluded_dirs) {
 					true
 				} else {
 					if file_type == FileType::Dir {
@@ -296,6 +308,7 @@ pub fn list_workspace<'env>(
 		max_depth,
 		hidden,
 		gitignore,
+		prune_excluded_dirs,
 		collect_agents_md,
 		report_directory_errors,
 		timeout_ms,
@@ -326,6 +339,7 @@ pub fn list_workspace<'env>(
 			walk_max_depth,
 			include_hidden: hidden.unwrap_or(false),
 			use_gitignore: gitignore.unwrap_or(true),
+			prune_excluded_dirs: prune_excluded_dirs.unwrap_or(true),
 			collect_agents_md,
 			report_directory_errors,
 		})
