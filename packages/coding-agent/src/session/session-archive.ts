@@ -1758,59 +1758,58 @@ async function recordedStagingByPath(agentDir: string, root: string): Promise<Ma
  * recover. It never advises removing the directory: a record is not proof a
  * run made it. The recovery for one a killed gc run left is the one a review
  * ran on a genuine killed archive: the directory, then its record, moved
- * into one new directory outside both session trees, then the command run
- * again — which then finishes, with the partial stage kept where it was put
- * and none of it carried home. Moving the record alone would turn the
- * directory into an artifact gc carries.
+ * into one directory of their own outside both session trees, then the
+ * command run again — which then finishes, with the partial stage kept where
+ * it was put and none of it carried home. Moving the record alone would turn
+ * the directory into an artifact gc carries.
  *
- * The example command names every path by its real path as it resolves now,
- * so relinking the agent directory afterwards cannot redirect it. Before it
- * makes anything it checks that both directories it moves out of are
- * writable, and stops, saying which to fix, if one is not. It makes the new
- * directory with one plain `mkdir`, which fails on any name already there, a
- * link included. Then it resolves both session trees again by the names gc
- * uses for them and stops if the new directory lies inside either: a tree
- * moved or relinked between this message and the command is caught by the
- * command itself, not by a check that ran earlier. `realpath` resolves a tree
- * whose last part has been renamed away to the path it would have, and fails
- * — stopping the command — only when more than that is missing; containment
- * is decided on those canonical paths either way.
+ * The example command deletes nothing. Every deletion it once made — the
+ * empty directory taken back with `rmdir`, a partial copy taken back with
+ * `rm -rf` — went through a name, and a name resolved when the command runs
+ * can by then lead to somebody else's directory: a review swapped the new
+ * directory's name for a link to an unrelated directory between the move
+ * and the clean-up, and the clean-up deleted that directory's file. So
+ * nothing is taken back; the command is written to be run again instead,
+ * and continues from what it finds.
  *
- * Whatever stops it after the `mkdir`, it takes back what it did when it
- * can: the staging directory moved back if the record's move failed, then
- * the directory it made removed with `rmdir` once empty. A move onto
- * another filesystem is a copy and then a delete, so it can stop part-way —
- * out of space, an unreadable file — and leave a partial copy inside the new
- * directory. The command counts the staging directory's entries before the
- * move; if the move fails and they are all still there, the original is
- * whole and the partial copy is deleted, so that `rmdir` can work and the
- * identical command runs again once the cause is fixed. If entries are
- * missing, the copy finished and the delete did not, so the copy holds what
- * the original lost and is kept. Whenever it cannot take everything back —
- * that case, a move back that fails, an `rmdir` that fails — it says so:
- * everything that left the staging directory or its record is in the new
- * directory, and the identical command, run again, stops at its `mkdir`
- * until someone finishes by hand. It is not failure-atomic, and killed
- * part-way it says nothing. A writer that changes the trees, the directory
- * it made or either source between its checks and its moves is outside what
- * it guards: the checks and the moves name paths, so such a writer can
- * redirect a move or have `rmdir` take an empty directory it put there. It
- * runs in a subshell, so stopping does not close the shell it was pasted
- * into. When the agent directory already resolves into a session tree, no
- * command is given at all.
+ * It names every path by its real path as it resolves now, so relinking the
+ * agent directory afterwards cannot redirect it. It checks that both
+ * directories it moves out of are writable, and stops, saying which to fix,
+ * before it makes anything. It decides whether its directory's name lies
+ * inside either session tree — resolving the trees again by the names gc
+ * uses, so a tree moved or relinked since this message is caught — before
+ * it makes the directory; `realpath` resolves a tree whose last part has
+ * been renamed away to the path it would have, and stops the command only
+ * when more than that is missing. It makes the directory with `mkdir`, or
+ * takes the one an earlier run of it made: a directory, never a link. It
+ * then enters it, checks the directory it is now in — not the name — against
+ * the trees again, and does every move relative to that directory, so a
+ * name swapped after that check cannot redirect them. The staging directory,
+ * or what is left of it, goes in under a name nothing there has yet, and
+ * the record goes in only after that, under a name nothing there has yet:
+ * a record moved while any of its directory is still in a session tree
+ * would leave that directory to be carried home as an artifact, by a
+ * restore that exits 0 without having finished.
+ *
+ * A move onto another filesystem is a copy and then a delete, so it can stop
+ * part-way — out of space, a file it cannot read — and leave a partial copy
+ * behind, or a whole copy with part of the original not yet deleted. The
+ * command says so and stops; the copy stays where it is, and once the cause
+ * is fixed the identical command moves what is left under a new name. The
+ * same holds when it is killed part-way. A writer that changes the trees,
+ * the directory or either source between a check and a move is outside what
+ * it guards: the window it has is between `mkdir` and entering the
+ * directory, and between the last check and each move, and with nothing
+ * deleted, what such a writer can do is redirect a move, not destroy
+ * anything. It runs in a subshell, so stopping does not close the shell it
+ * was pasted into. When the agent directory already resolves into a session
+ * tree, no command is given at all.
  */
 export async function stagingResidueNote(dir: string, record: string, consequence: string): Promise<string> {
 	const agentDir = path.dirname(path.dirname(record));
 	const roots = await stagingRoots(agentDir);
 	const trees = roots.length > 0 ? roots.join(" and ") : "the sessions tree and the archive";
 	const realAgentDir = await fs.realpath(agentDir).catch(() => undefined);
-	const writable =
-		` If the command stops because a directory is not writable — it names the directory, usually ` +
-		`${path.dirname(dir)}, which holds the staging directory, or ${path.dirname(record)}, which holds the record — ` +
-		`make it writable with \`chmod u+w\` and run the printed command again. On a read-only mount, or for a file or ` +
-		`directory marked immutable, \`chmod\` does not help: that has to be undone first. The command is not ` +
-		`failure-atomic: if it cannot take back what it did it says so, and then, as when it is killed part-way, the ` +
-		`directory it made is left and the command stops at its \`mkdir\` until step 4 is finished without it.`;
 	let example: string;
 	let afterSteps = "";
 	if (realAgentDir !== undefined && !roots.some(root => isWithin(root, realAgentDir))) {
@@ -1819,25 +1818,36 @@ export async function stagingResidueNote(dir: string, record: string, consequenc
 		const realRecord = await fs.realpath(record).catch(() => record);
 		const checks = [getSessionsDir(agentDir), getArchivedSessionsDir(agentDir)].map(shellQuote).join(" ");
 		const sources = [path.dirname(realDir), path.dirname(realRecord)].map(shellQuote).join(" ");
-		const base = shellQuote(path.basename(realDir));
+		// A name nothing in the directory has yet: the given one, or it with a number.
+		const free = (variable: string, name: string): string =>
+			`${variable}=${name}; i=1; while [ -e "$${variable}" ] || [ -L "$${variable}" ]; do i=$((i+1)); ` +
+			`${variable}=${name}.$i; done`;
 		example =
-			`for example \`(d=${shellQuote(aside)}; s=${shellQuote(realDir)}; c=${shellQuote(realRecord)}; kept() { echo ` +
-			`"stopped part-way and could not take back all it did: everything that left $s or $c is in $d, so nothing ` +
-			`is lost; look at all three, and once the cause is fixed finish step 4 yourself, since this command stops ` +
-			`at its mkdir while $d is there" >&2; exit 1; }; back() { rmdir "$d" || kept; echo "nothing was moved: once the ` +
-			`cause is fixed, run this command again" >&2; exit 1; }; for p in ${sources}; do [ -w "$p" ] || { echo "$p ` +
-			`is not writable: make it writable with chmod u+w and run this command again" >&2; exit 1; }; done; ` +
-			`mkdir "$d" || exit 1; r=$(realpath "$d") || back; for t in ${checks}; do t=$(realpath "$t") || back; ` +
-			`case "$r/" in "$t"/*) echo "$r is inside the session tree $t" >&2; back;; esac; done; ` +
-			`n=$(find "$s" 2>/dev/null | wc -l); mv "$s" "$d"/ || { [ "$(find "$s" 2>/dev/null | wc -l)" = "$n" ] || ` +
-			`kept; chmod -R u+w "$d"/${base} 2>/dev/null; rm -rf "$d"/${base}; back; }; mv "$c" "$d"/ || { ` +
-			`mv "$d"/${base} "$s" || kept; back; })\`, where \`mkdir\` makes that directory new and stops if anything ` +
-			`already has its name, and the command checks first that both directories it moves out of are writable, ` +
-			`then checks the session trees again before it moves anything. A move onto another filesystem is a copy ` +
-			`and then a delete, so it can stop part-way; when the staging directory is then still whole, the command ` +
-			`deletes the partial copy it made, and it takes back the rest of what it did or, if it cannot, says what ` +
-			`it left where`;
-		afterSteps = writable;
+			`for example \`(d=${shellQuote(aside)}; s=${shellQuote(realDir)}; c=${shellQuote(realRecord)}; inside() { ` +
+			`for t in ${checks}; do t=$(realpath "$t") || exit 1; case "$1/" in "$t"/*) echo "$1 is inside the session ` +
+			`tree $t, so nothing was moved" >&2; exit 1;; esac; done; }; for p in ${sources}; do [ -w "$p" ] || { echo ` +
+			`"$p is not writable: make it writable with chmod u+w and run this command again" >&2; exit 1; }; done; ` +
+			`p=$(realpath "\${d%/*}") || exit 1; inside "$p/\${d##*/}"; [ -d "$d" ] && [ ! -L "$d" ] || mkdir "$d" || ` +
+			`exit 1; cd -P "$d" || exit 1; inside "$(pwd -P)"; if [ -e "$s" ] || [ -L "$s" ]; then ` +
+			`${free("n", shellQuote(path.basename(realDir)))}; mv "$s" "./$n" || { echo "the move of $s stopped part-way: ` +
+			`anything it copied is in $(pwd -P)/$n and the rest is still in $s; nothing was deleted, and once the cause ` +
+			`is fixed this command, run again, moves what is left under a new name" >&2; exit 1; }; fi; if [ -e "$c" ] ` +
+			`|| [ -L "$c" ]; then ${free("m", shellQuote(path.basename(realRecord)))}; mv "$c" "./$m" || { echo "$c ` +
+			`was not moved: once the cause is fixed, run this command again" >&2; exit 1; }; fi)\`, which checks that ` +
+			`both directories it moves out of are writable and that its directory is outside both session trees — by ` +
+			`name before it makes the directory, and again on the directory it has entered, before it moves anything — ` +
+			`then moves the staging directory, or what is left of it, in under a name nothing there has yet, and only ` +
+			`then the record, and deletes nothing`;
+		afterSteps =
+			` If the command stops because a directory is not writable — it names the directory, usually ` +
+			`${path.dirname(dir)}, which holds the staging directory, or ${path.dirname(record)}, which holds the record — ` +
+			`make it writable with \`chmod u+w\` and run the command again. On a read-only mount, or for a file or ` +
+			`directory marked immutable, \`chmod\` does not help: that has to be undone first. Whatever stops the command, ` +
+			`a kill part-way included, fix the cause and run the identical command again: it uses the directory it ` +
+			`already made and continues from what it finds. A move onto another filesystem is a copy and then a delete, ` +
+			`so it can stop part-way; the command then says so, what was copied stays in that directory under the name ` +
+			`it was given, and the next run moves what is left under a new name. The command never deletes anything; ` +
+			`once the restore has finished, what to keep of that directory is yours to decide.`;
 	} else {
 		example =
 			`no example is given here, because ${agentDir} resolves to ${realAgentDir ?? "a path that could not be read"}, ` +
@@ -1845,12 +1855,12 @@ export async function stagingResidueNote(dir: string, record: string, consequenc
 	}
 	return (
 		`${dir} is named by the staging record ${record}, ${consequence}. If a killed gc run left it: 1. stop any gc run ` +
-		`and any use of this session; 2. look at the record and the directory; 3. move the directory into a new directory ` +
-		`whose real path is outside both session trees, ${trees}; 4. move the record into the same directory — ${example} ` +
-		`— and leave any \`.restoring\` record where it is; 5. run the same command again, and if it then reports that a ` +
-		`\`.restoring\` record was there before it, look at that record and move it aside.${afterSteps} Moving the record ` +
-		`without the directory makes gc take the directory for an artifact. If no gc run made the directory, move only the ` +
-		`record out of ${path.dirname(record)} and run the same command again`
+		`and any use of this session; 2. look at the record and the directory; 3. move the directory into a directory ` +
+		`of their own whose real path is outside both session trees, ${trees}; 4. move the record into the same ` +
+		`directory — ${example} — and leave any \`.restoring\` record where it is; 5. run the same command again, and ` +
+		`if it then reports that a \`.restoring\` record was there before it, look at that record and move it ` +
+		`aside.${afterSteps} Moving the record without the directory makes gc take the directory for an artifact. If ` +
+		`no gc run made the directory, move only the record out of ${path.dirname(record)} and run the same command again`
 	);
 }
 
