@@ -102,7 +102,14 @@ describe("workpool model validation", () => {
 		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
 		const session = Object.assign(
 			makeSession({ "task.perCallModel": "eval", modelRoles: { review: "mock/mock-model" } }),
-			{ modelRegistry: { getAll: () => [approved, unapproved], getAvailable: () => [approved, unapproved] } },
+			{
+				modelRegistry: {
+					getAll: () => [approved, unapproved],
+					getAvailable: () => [approved, unapproved],
+					awaitBackgroundRefresh: async () => {},
+					isBackgroundRefreshPending: () => false,
+				},
+			},
 		);
 		await expect(
 			runEvalWorkpool({ op: "create", name: "denied", agent: "scout", model: "mock/unapproved" }, { session }),
@@ -114,9 +121,15 @@ describe("workpool model validation", () => {
 	});
 
 	for (const { mode, model, reason } of [
-		// The gate wins over the selector check, so an invalid selector still reports the disabled gate.
+		// The gate wins over selector validation, even for an invalid array shape.
 		{ mode: "off", model: "@smol", reason: /task\.perCallModel: off/ },
-		{ mode: "on", model: "@smol", reason: /invalid `model` value/ },
+		{ mode: "off", model: [42], reason: /task\.perCallModel: off/ },
+		{ mode: "on", model: " , ", reason: /invalid `model` value/ },
+		{ mode: "on", model: [], reason: /invalid `model` value/ },
+		{ mode: "on", model: ["p/valid", ""], reason: /invalid `model` value/ },
+		{ mode: "on", model: [42], reason: /invalid `model` value/ },
+		{ mode: "on", model: "@smol", reason: /has no modelRoles entry/ },
+		{ mode: "on", model: ["p/valid", "p/*"], reason: /invalid `model` value/ },
 	]) {
 		it(`rejects ${JSON.stringify(model)} under ${mode} before registering a pool`, async () => {
 			vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [SCOUT], projectAgentsDir: null });
@@ -128,16 +141,27 @@ describe("workpool model validation", () => {
 		});
 	}
 
-	// Losing the selector between bridge and pool would silently run workers on the agent's own model.
-	it("hands the pool selector to workers", async () => {
+	// Losing the selector between bridge and pool would run workers on the agent's own model.
+	it.each([
+		{ mode: "eval", model: "mock/small" },
+		{ mode: "on", model: "@smol" },
+		{ mode: "eval", model: ["@smol", "mock/small"] },
+	])("hands the pool selector to workers under $mode: $model", async ({ mode, model }) => {
 		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [SCOUT], projectAgentsDir: null });
 		const requested = Promise.withResolvers<unknown>();
 		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
 			requested.resolve(request.perCallModel);
 			throw new Error("stop after dispatch");
 		});
-		const session = makeSession({ "task.perCallModel": "eval", modelRoles: { smol: "p/small" } });
-		const model = "p/small";
+		const small = createMockModel({ id: "small" });
+		const session = Object.assign(makeSession({ "task.perCallModel": mode, modelRoles: { smol: "mock/small" } }), {
+			modelRegistry: {
+				getAll: () => [small],
+				getAvailable: () => [small],
+				awaitBackgroundRefresh: async () => {},
+				isBackgroundRefreshPending: () => false,
+			},
+		});
 		await runEvalWorkpool({ op: "create", name: "picked", agent: "scout", model }, { session });
 		await runEvalWorkpool({ op: "push", name: "picked", items: ["one"] }, { session });
 		expect(await requested.promise).toEqual(model);
