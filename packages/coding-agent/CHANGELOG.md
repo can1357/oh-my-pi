@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed MCP tool results dropping embedded binary resources: a supported image now reaches the model as an image block, and any other payload is saved under `local://` with its MIME type and size instead of only `[Resource: <uri>]` ([#14598](https://github.com/can1357/oh-my-pi/issues/14598), [#16451](https://github.com/can1357/oh-my-pi/pull/16451) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
@@ -70,7 +73,6 @@
 - Native judgments with a configured fallback now move to it after a 3-second candidate deadline (configurable with `judgment.attemptTimeoutMs`) and briefly skip the timed-out route; without a configured fallback a slow judge is never cut off or replaced ([#17465](https://github.com/can1357/oh-my-pi/pull/17465) by [@Xytronix](https://github.com/Xytronix)).
 
 ### Fixed
-- Fixed MCP tool results dropping embedded binary resources: a supported image now reaches the model as an image block, and any other payload is saved under `local://` with its MIME type and size instead of only `[Resource: <uri>]` ([#14598](https://github.com/can1357/oh-my-pi/issues/14598), [#16451](https://github.com/can1357/oh-my-pi/pull/16451) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed a `!` or `$` command run while the agent works floating over the composer in Tern, where expanding its output covered the conversation; it now sits at the end of the conversation
 - Fixed `out://` replies sent from an eval cell (`tool.write` to `out://`, or `tool.bash` with `> out://`) never appearing even though the write reported "Shown to the user."; they now draw as replies after the eval card, and are refused where nothing would show them (a backgrounded cell, a browser tab script)
