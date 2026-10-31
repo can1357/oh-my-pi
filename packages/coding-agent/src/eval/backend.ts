@@ -38,6 +38,11 @@ export interface ExecutorBackendExecOptions {
 	 * progress (e.g. `agent()` subagents) into the UI mid-execution.
 	 */
 	onStatus?: (event: EvalStatusEvent) => void;
+	/**
+	 * Shows the user what the cell's bridged tool calls send to `out://` (a `write` there, or bash
+	 * `> out://`). Throws to refuse a reply; absent, such calls fail instead of replying unseen.
+	 */
+	onReply?: (text: string) => void;
 }
 
 /** Result returned by a backend's execute(). */
