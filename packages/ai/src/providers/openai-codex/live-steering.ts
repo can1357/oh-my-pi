@@ -39,6 +39,8 @@ export interface CodexAcceptedSteer {
 export interface CodexSteerOutcome {
 	responseId: string | undefined;
 	accepted: CodexAcceptedSteer[];
+	/** A steer was submitted, whether or not the server accepted it. */
+	submitted: boolean;
 	/**
 	 * A submission ended without an acknowledgement, so the server may or may
 	 * not hold it. The caller must drop the socket rather than chain from it.
@@ -65,6 +67,7 @@ export class CodexSteerPump {
 	#responseId: string | undefined;
 	#run: Promise<void> | undefined;
 	#uncertain = false;
+	#submitted = false;
 
 	constructor(
 		source: LiveSteering,
@@ -92,7 +95,12 @@ export class CodexSteerPump {
 	async finish(): Promise<CodexSteerOutcome> {
 		this.#stop.abort();
 		await this.#run;
-		return { responseId: this.#responseId, accepted: this.#accepted, uncertain: this.#uncertain };
+		return {
+			responseId: this.#responseId,
+			accepted: this.#accepted,
+			submitted: this.#submitted,
+			uncertain: this.#uncertain,
+		};
 	}
 
 	async #loop(responseId: string): Promise<void> {
@@ -116,6 +124,7 @@ export class CodexSteerPump {
 				}
 				const sentAt = performance.now();
 				let ack: CodexSteerAck | undefined;
+				this.#submitted = true;
 				try {
 					ack = await withTimeout(this.#socket.steer(responseId, input), STEER_ACK_TIMEOUT_MS);
 				} catch (error) {
