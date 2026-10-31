@@ -23,6 +23,7 @@ export { OpenAIHttpError };
 import type { FetchImpl } from "../types";
 import type { CapturedHttpErrorResponse } from "./http-inspector";
 import { transportRetryBounds } from "./retry-after";
+import type { RetryWaitHook } from "./retry-wait";
 
 /**
  * Total attempts (initial + retries). Parity with the removed SDK clients'
@@ -80,6 +81,11 @@ export interface OpenAIStreamRequestInit {
 	 * longer ({@link transportRetryBounds}). Non-positive disables the bound.
 	 */
 	maxRetryDelayMs?: number;
+	/**
+	 * The caller's `StreamOptions.providerRetryWait`: every transport retry sleeps
+	 * through it, as every provider retry above the transport does.
+	 */
+	retryWait?: RetryWaitHook;
 	/** Optional caller-specific gate composed with shared transport retry exclusions. */
 	shouldRetryResponse?: (response: Response, bodyText: string) => boolean | Promise<boolean>;
 	/**
@@ -119,6 +125,7 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 			fetch: init.fetch,
 			maxAttempts: init.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
 			maxDelayMs: retryBounds.maxDelayMs,
+			retryWait: init.retryWait,
 			// A proxy concurrency-admission 429 (`rate_limit_type: max_parallel_requests`)
 			// surfaces immediately instead of being slept-and-retried here; session
 			// recovery owns its backoff/fallback (issue #8854). So does a refusal whose

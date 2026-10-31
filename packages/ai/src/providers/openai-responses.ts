@@ -829,6 +829,7 @@ const streamOpenAIResponsesOnce = (
 						body: requestParams,
 						signal: requestSignal,
 						maxRetryDelayMs: options?.maxRetryDelayMs,
+						retryWait: options?.providerRetryWait,
 						fetch: wrapFetchForCopilotFallback(
 							wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
 							model.provider === "github-copilot",
@@ -1223,10 +1224,11 @@ const streamOpenAIResponsesOnce = (
 						!abortTracker.wasCallerAbort() &&
 						transientStreamRetryAttempt < OPENAI_RESPONSES_MAX_TRANSIENT_STREAM_RETRIES &&
 						isRetryableOpenAIResponsesStreamFailure(streamFailure);
-					// A stated wait past the caller's cap surfaces the failure instead.
+					// The wait this attempt stated, its accepted response's headers
+					// included; a wait past the caller's cap surfaces the failure instead.
 					const retryDelayMs = canRetry
 						? resolveRetryDelayMs(
-								getStatedRetryAfterMs(model.provider, streamFailure),
+								getStatedRetryAfterMs(model.provider, streamFailure, { streamResponseHeaders }),
 								OPENAI_RESPONSES_TRANSIENT_STREAM_RETRY_DELAY_MS,
 								options?.maxRetryDelayMs,
 							)

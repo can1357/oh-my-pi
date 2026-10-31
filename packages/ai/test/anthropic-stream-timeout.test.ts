@@ -100,6 +100,15 @@ function createAnthropicSseResponse(text: string): Response {
 	});
 }
 
+/** An HTTP 200 whose stream fails before any output with an overload error event. */
+function createAnthropicOverloadedEventResponse(message: string, headers: Record<string, string> = {}): Response {
+	const event = { type: "error", error: { type: "overloaded_error", message } };
+	return new Response(`event: error\ndata: ${JSON.stringify(event)}\n\n`, {
+		status: 200,
+		headers: { "content-type": "text/event-stream", ...headers },
+	});
+}
+
 function createResponseClient(responses: Response[]): {
 	calls: { count: number };
 	client: AnthropicMessagesClientLike;
@@ -830,6 +839,53 @@ describe("anthropic retry-after cap (maxRetryDelayMs)", () => {
 		expect(calls.count).toBe(2);
 		expect(providerRetryWait).toHaveBeenCalledWith(30_000, undefined);
 		expect(result.stopReason).toBe("stop");
+	});
+
+	it("surfaces an HTTP 200 error event whose text states a wait over the cap after one request", async () => {
+		const { calls, client } = createResponseClient([
+			createAnthropicOverloadedEventResponse("Service temporarily unavailable. Please try again in 750ms."),
+			createAnthropicSseResponse("must not be requested"),
+		]);
+		const providerRetryWait = vi.fn(async () => {});
+
+		const result = await streamAnthropic(model, context, { client, providerRetryWait, maxRetryDelayMs: 10 }).result();
+
+		expect(calls.count).toBe(1);
+		expect(providerRetryWait).not.toHaveBeenCalled();
+		expect(result.stopReason).toBe("error");
+	});
+
+	it("waits the wait an HTTP 200 error event's text states when it fits the cap", async () => {
+		const { calls, client } = createResponseClient([
+			createAnthropicOverloadedEventResponse("Service temporarily unavailable. Please try again in 750ms."),
+			createAnthropicSseResponse("after the stated wait"),
+		]);
+		const providerRetryWait = vi.fn(async () => {});
+
+		const result = await streamAnthropic(model, context, {
+			client,
+			providerRetryWait,
+			maxRetryDelayMs: 1_000,
+		}).result();
+
+		expect(calls.count).toBe(2);
+		expect(providerRetryWait).toHaveBeenCalledWith(750, undefined);
+		expect(result.stopReason).toBe("stop");
+	});
+
+	it("surfaces an HTTP 200 error event whose wait only the response headers state, over the cap, after one request", async () => {
+		const { calls, client } = createResponseClient([
+			createAnthropicOverloadedEventResponse("Service temporarily unavailable", { "retry-after-ms": "750" }),
+			createAnthropicSseResponse("must not be requested"),
+		]);
+		const providerRetryWait = vi.fn(async () => {});
+
+		const result = await streamAnthropic(model, context, { client, providerRetryWait, maxRetryDelayMs: 10 }).result();
+
+		expect(calls.count).toBe(1);
+		expect(providerRetryWait).not.toHaveBeenCalled();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorRetryAfterMs).toBe(750);
 	});
 
 	it("honors retry headers from structurally compatible injected SDK errors", async () => {

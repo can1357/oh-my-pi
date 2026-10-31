@@ -992,6 +992,7 @@ const streamOpenAICompletionsOnce = (
 						signal: requestSignal,
 						maxAttempts: options?.maxHttpAttempts,
 						maxRetryDelayMs: options?.maxRetryDelayMs,
+						retryWait: options?.providerRetryWait,
 						fetch: wrapFetchForCopilotFallback(
 							wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
 							model.provider === "github-copilot",

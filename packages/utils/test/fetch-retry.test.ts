@@ -137,6 +137,46 @@ describe("fetchWithRetry", () => {
 		});
 	});
 
+	it("sleeps every retry through the caller's retryWait, with the stated wait and the request's signal", async () => {
+		const controller = new AbortController();
+		const waits: Array<{ delayMs: number; signal: AbortSignal | undefined }> = [];
+		let attempt = 0;
+		const response = await fetchWithRetry("https://example.invalid/retry-wait", {
+			fetch: async () => {
+				attempt += 1;
+				if (attempt === 1) return new Response("slow down", { status: 429, headers: { "retry-after": "0.05" } });
+				if (attempt === 2) throw new TypeError("connection reset");
+				return new Response("ok");
+			},
+			signal: controller.signal,
+			defaultDelayMs: 1_000,
+			retryWait: async (delayMs, signal) => {
+				waits.push({ delayMs, signal });
+			},
+		});
+
+		expect(await response.text()).toBe("ok");
+		expect(waits).toEqual([
+			{ delayMs: 50, signal: controller.signal },
+			{ delayMs: 1_000, signal: controller.signal },
+		]);
+	});
+
+	it("normalizes an abort during the caller's retryWait", async () => {
+		const controller = new AbortController();
+		const request = fetchWithRetry("https://example.invalid/retry-wait-abort", {
+			fetch: async () => new Response("retry", { status: 503 }),
+			signal: controller.signal,
+			maxAttempts: 2,
+			retryWait: async () => {
+				controller.abort();
+				throw new Error("cancelled");
+			},
+		});
+
+		await expect(request).rejects.toMatchObject({ name: "Error", message: "Request was aborted" });
+	});
+
 	it("keeps the rejected fetch error reachable as the wrapped error's cause", async () => {
 		const errno = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8080"), { code: "ECONNREFUSED" });
 		const fetchFailed = new TypeError("fetch failed", { cause: new AggregateError([errno]) });

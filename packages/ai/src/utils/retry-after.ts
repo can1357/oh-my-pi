@@ -165,16 +165,22 @@ export function getFailureRetryAfterMs(error: unknown, headers: FailureResponseH
 }
 
 /**
- * The wait a provider stated for a thrown failure: the longest of the error's
- * response headers and any retry hint in its message (the same text forms
- * session retry reads from a failed turn's `errorMessage`). `undefined` when it
- * stated none.
+ * The wait a provider stated for a thrown failure, for a provider's pre-output
+ * retry loop, read as every layer above reads the failed message
+ * ({@link providerRetryWaitMs}): the failed attempt's header wait
+ * ({@link getFailureRetryAfterMs}: the error's own headers, which include a
+ * protocol error event's structured headers, then the explicit wait the
+ * accepted response's headers name), with only the message's relative waits
+ * beside it; without a header wait, the message's text. A zone-less date in the
+ * text therefore never outranks a stated header wait. Pass the headers of the
+ * attempt being retried, the ones `AIError.finalize` reads for it.
  */
-export function getStatedRetryAfterMs(provider: string | undefined, error: unknown): number | undefined {
-	const headerMs = getRetryAfterMsFromHeaders(getHeadersFromError(error));
-	const textMs = error instanceof Error ? extractProviderRetryHint(provider, error.message) : undefined;
-	if (headerMs === undefined) return textMs;
-	return textMs === undefined ? headerMs : Math.max(headerMs, textMs);
+export function getStatedRetryAfterMs(
+	provider: string | undefined,
+	error: unknown,
+	headers: FailureResponseHeaders = {},
+): number | undefined {
+	return providerRetryWaitMs(provider, errorMessageText(error), getFailureRetryAfterMs(error, headers));
 }
 
 /** How a transport's own `fetchWithRetry` loop keeps to the caller's cap; see {@link transportRetryBounds}. */

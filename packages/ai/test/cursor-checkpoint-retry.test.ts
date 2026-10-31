@@ -392,8 +392,11 @@ function unavailableEndStreamFrame(wait: string): Buffer {
 	return frame;
 }
 
-/** Attempt one ends with a replay-safe stated-wait failure; any later attempt completes the turn. */
-async function runStatedWaitScenario(wait: string, maxRetryDelayMs: number) {
+/** Answers attempt one with `answerFirst`; any later attempt completes the turn. */
+async function runFirstAttemptScenario(
+	answerFirst: (providerStream: http2.ServerHttp2Stream) => void,
+	maxRetryDelayMs: number,
+) {
 	const sessions = new Set<http2.Http2Session>();
 	let requestCount = 0;
 	const server = http2.createServer();
@@ -404,14 +407,15 @@ async function runStatedWaitScenario(wait: string, maxRetryDelayMs: number) {
 	server.on("stream", (providerStream: http2.ServerHttp2Stream) => {
 		requestCount++;
 		let handled = false;
+		providerStream.on("error", () => {});
 		providerStream.on("data", () => {
 			if (handled) return;
 			handled = true;
-			providerStream.respond({ ":status": 200, "content-type": "application/connect+proto" });
 			if (requestCount === 1) {
-				providerStream.end(unavailableEndStreamFrame(wait));
+				answerFirst(providerStream);
 				return;
 			}
+			providerStream.respond({ ":status": 200, "content-type": "application/connect+proto" });
 			providerStream.end(Buffer.concat([textDeltaFrame("after wait"), turnEndedFrame()]));
 		});
 	});
@@ -438,8 +442,24 @@ async function runStatedWaitScenario(wait: string, maxRetryDelayMs: number) {
 	}
 }
 
+/** Attempt one ends with a replay-safe failure whose end-stream text states `wait`. */
+function answerStatedWait(wait: string) {
+	return (providerStream: http2.ServerHttp2Stream) => {
+		providerStream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+		providerStream.end(unavailableEndStreamFrame(wait));
+	};
+}
+
+/** Attempt one is refused with `status`, a 750 ms `retry-after-ms` and a Connect error JSON body. */
+function answerRefusal(status: number, body: Record<string, unknown>) {
+	return (providerStream: http2.ServerHttp2Stream) => {
+		providerStream.respond({ ":status": status, "content-type": "application/json", "retry-after-ms": "750" });
+		providerStream.end(JSON.stringify(body));
+	};
+}
+
 it("surfaces a failure whose stated wait exceeds maxRetryDelayMs after one request", async () => {
-	const { requestCount, delays, result } = await runStatedWaitScenario("9s", 1);
+	const { requestCount, delays, result } = await runFirstAttemptScenario(answerStatedWait("9s"), 1);
 
 	expect(requestCount).toBe(1);
 	expect(delays).toEqual([]);
@@ -448,10 +468,56 @@ it("surfaces a failure whose stated wait exceeds maxRetryDelayMs after one reque
 });
 
 it("waits a failure's stated wait when it outlasts the backoff within maxRetryDelayMs", async () => {
-	const { requestCount, delays, result } = await runStatedWaitScenario("0.8s", 1_000);
+	const { requestCount, delays, result } = await runFirstAttemptScenario(answerStatedWait("0.8s"), 1_000);
 
 	expect(requestCount).toBe(2);
 	expect(delays).toEqual([800]);
+	expect(result.stopReason).toBe("stop");
+	expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "after wait" })]);
+});
+
+it("surfaces an end-stream failure whose wait only the HTTP/2 200's headers state, over the cap, after one request", async () => {
+	const { requestCount, delays, result } = await runFirstAttemptScenario(providerStream => {
+		providerStream.respond({ ":status": 200, "content-type": "application/connect+proto", "retry-after-ms": "750" });
+		const frame = frameConnectMessage(
+			new TextEncoder().encode(
+				JSON.stringify({ error: { code: "unavailable", message: "Service temporarily unavailable" } }),
+			),
+		);
+		frame[0] = 0x02;
+		providerStream.end(frame);
+	}, 10);
+
+	expect(requestCount).toBe(1);
+	expect(delays).toEqual([]);
+	expect(result.stopReason).toBe("error");
+	expect(result.errorStatus).toBeUndefined();
+	expect(result.errorRetryAfterMs).toBe(750);
+});
+
+it("reads an HTTP/2 429's Connect error body as the failure, with its status and wait, after one request", async () => {
+	const { requestCount, delays, result } = await runFirstAttemptScenario(
+		answerRefusal(429, { code: "resource_exhausted", message: "Please try again in 750ms." }),
+		10,
+	);
+
+	expect(requestCount).toBe(1);
+	expect(delays).toEqual([]);
+	expect(result.stopReason).toBe("error");
+	expect(result.errorStatus).toBe(429);
+	expect(result.errorRetryAfterMs).toBe(750);
+	expect(result.errorMessage).toContain("resource_exhausted");
+	expect(result.errorMessage).toContain("Please try again in 750ms.");
+});
+
+it("retries an HTTP/2 503 whose Connect error body names no details, after its 750 ms wait", async () => {
+	const { requestCount, delays, result } = await runFirstAttemptScenario(
+		answerRefusal(503, { code: "unavailable", message: "busy" }),
+		1_000,
+	);
+
+	expect(requestCount).toBe(2);
+	expect(delays).toEqual([750]);
 	expect(result.stopReason).toBe("stop");
 	expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "after wait" })]);
 });

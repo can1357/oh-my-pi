@@ -580,10 +580,20 @@ describe("a later attempt never inherits an earlier attempt's accepted headers",
 	}, 30_000);
 
 	it("openai-responses: the transient-stream retry's 400 does not read the cut attempt's headers", async () => {
-		const { message, streamRequests } = await runAgainst(provider("openai-responses"), [
-			{ status: 200, headers: { "retry-after": "9" }, body: encoder.encode('data: {"type":"response.'), cut: true },
-			rejectedReply({ error: { message: "rejected", type: "invalid_request_error" } }),
-		]);
+		// The loop honours the cut attempt's 9 s wait before it retries, so the cap must allow it, as above.
+		const { message, streamRequests } = await runAgainst(
+			provider("openai-responses"),
+			[
+				{
+					status: 200,
+					headers: { "retry-after": "9" },
+					body: encoder.encode('data: {"type":"response.'),
+					cut: true,
+				},
+				rejectedReply({ error: { message: "rejected", type: "invalid_request_error" } }),
+			],
+			{ maxRetryDelayMs: 0 },
+		);
 
 		expect(streamRequests).toBe(2);
 		expect(message.errorStatus).toBe(400);
@@ -591,18 +601,23 @@ describe("a later attempt never inherits an earlier attempt's accepted headers",
 	}, 30_000);
 
 	it("openai-codex-responses: the provider-error retry's 400 does not read the first attempt's headers", async () => {
-		const { message, streamRequests } = await runAgainst(provider("openai-codex-responses (SSE)"), [
-			{
-				status: 200,
-				headers: { "retry-after": "9" },
-				body: sseFrames(
-					[{ type: "error", error: { code: "server_error", type: "server_error", message: "try again" } }],
-					true,
-				),
-				cut: false,
-			},
-			rejectedReply({ error: { message: "rejected", type: "invalid_request_error" } }),
-		]);
+		// The loop honours the first attempt's 9 s wait before it retries, so the cap must allow it, as above.
+		const { message, streamRequests } = await runAgainst(
+			provider("openai-codex-responses (SSE)"),
+			[
+				{
+					status: 200,
+					headers: { "retry-after": "9" },
+					body: sseFrames(
+						[{ type: "error", error: { code: "server_error", type: "server_error", message: "try again" } }],
+						true,
+					),
+					cut: false,
+				},
+				rejectedReply({ error: { message: "rejected", type: "invalid_request_error" } }),
+			],
+			{ maxRetryDelayMs: 0 },
+		);
 
 		expect(streamRequests).toBe(2);
 		expect(message.errorStatus).toBe(400);

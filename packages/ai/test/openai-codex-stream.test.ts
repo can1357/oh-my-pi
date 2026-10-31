@@ -2667,22 +2667,55 @@ describe("openai-codex streaming", () => {
 			`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 } } } })}`,
 		].join("\n\n")}\n\n`;
 
+		/** First request: an HTTP 200 whose stream carries `failure`, with `responseHeaders`; the next one succeeds. */
+		function failThenSucceed(failure: Record<string, unknown>, responseHeaders: Record<string, string> = {}) {
+			let requestCount = 0;
+			return vi.fn(async () => {
+				requestCount += 1;
+				const first = requestCount === 1;
+				return new Response(first ? `data: ${JSON.stringify(failure)}\n\n` : successSse, {
+					status: 200,
+					headers: { "content-type": "text/event-stream", ...(first ? responseHeaders : {}) },
+				});
+			});
+		}
+
 		/** First request fails with a retryable `server_error` event whose headers state the wait. */
 		function statedWaitFetch(retryAfter: string) {
-			let requestCount = 0;
-			const failureSse = `data: ${JSON.stringify({
+			return failThenSucceed({
 				type: "error",
 				status: 503,
 				error: { code: "server_error", message: "Upstream overloaded" },
 				headers: { "retry-after": retryAfter },
-			})}\n\n`;
-			return vi.fn(async () => {
-				requestCount += 1;
-				return new Response(requestCount === 1 ? failureSse : successSse, {
-					status: 200,
-					headers: { "content-type": "text/event-stream" },
-				});
 			});
+		}
+
+		/** First request: a retryable `response.failed` that names no wait; only the HTTP 200's headers state it. */
+		function headerWaitFetch(retryAfterMs: string) {
+			return failThenSucceed(
+				{
+					type: "response.failed",
+					response: {
+						status: "failed",
+						error: { code: "server_error", message: "Service temporarily unavailable" },
+					},
+				},
+				{ "retry-after-ms": retryAfterMs },
+			);
+		}
+
+		async function runWithCap(fetchMock: FetchImpl, maxRetryDelayMs: number) {
+			const tempDir = TempDir.createSync("@pi-codex-stream-");
+			setAgentDir(tempDir.path());
+			const providerRetryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
+			const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+			const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+				apiKey: createCodexTestToken(),
+				fetch: fetchMock,
+				maxRetryDelayMs,
+				providerRetryWait,
+			}).result();
+			return { result, providerRetryWait };
 		}
 
 		it("surfaces a failure whose Retry-After exceeds maxRetryDelayMs after one request", async () => {
@@ -2704,7 +2737,7 @@ describe("openai-codex streaming", () => {
 			expect(fetchMock).toHaveBeenCalledTimes(1);
 			expect(providerRetryWait).not.toHaveBeenCalled();
 			expect(result.stopReason).toBe("error");
-			expect(extractProviderRetryHint("openai-codex", result.errorMessage)).toBe(9_000);
+			expect(result.errorRetryAfterMs).toBe(9_000);
 		});
 
 		it("waits the stated Retry-After through providerRetryWait when it fits maxRetryDelayMs", async () => {
@@ -2725,6 +2758,53 @@ describe("openai-codex streaming", () => {
 			expect(fetchMock).toHaveBeenCalledTimes(2);
 			expect(providerRetryWait).toHaveBeenCalledTimes(1);
 			expect(providerRetryWait.mock.calls[0]?.[0]).toBe(800);
+			expect(result.stopReason).toBe("stop");
+			expect(result.content.find(block => block.type === "text")?.text).toBe("Hello after wait");
+		});
+
+		it("surfaces an in-band failure whose wait only the HTTP 200's headers state when it exceeds maxRetryDelayMs", async () => {
+			const fetchMock = headerWaitFetch("750");
+
+			const { result, providerRetryWait } = await runWithCap(fetchMock, 10);
+
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+			expect(providerRetryWait).not.toHaveBeenCalled();
+			expect(result.stopReason).toBe("error");
+			expect(result.errorRetryAfterMs).toBe(750);
+		});
+
+		it("waits the HTTP 200's header wait for an in-band failure when it fits maxRetryDelayMs", async () => {
+			const fetchMock = headerWaitFetch("750");
+
+			const { result, providerRetryWait } = await runWithCap(fetchMock, 1_000);
+
+			expect(fetchMock).toHaveBeenCalledTimes(2);
+			expect(providerRetryWait).toHaveBeenCalledTimes(1);
+			expect(providerRetryWait.mock.calls[0]?.[0]).toBe(750);
+			expect(result.stopReason).toBe("stop");
+		});
+
+		it("keeps a 750 ms header wait over a zone-less reset date eight hours out, and retries within a 1 s cap", async () => {
+			// A wall clock with no zone: read as UTC it is eight hours ahead, and only a
+			// fallback when nothing relative is stated. The header states 750 ms.
+			const resetAt = new Date(Date.now() + 8 * 3_600_000).toISOString().slice(0, 19).replace("T", " ");
+			const fetchMock = failThenSucceed({
+				type: "response.failed",
+				response: {
+					status: "failed",
+					error: {
+						code: "server_error",
+						message: `Service temporarily unavailable; reset at ${resetAt}`,
+						headers: { "retry-after-ms": "750" },
+					},
+				},
+			});
+
+			const { result, providerRetryWait } = await runWithCap(fetchMock, 1_000);
+
+			expect(fetchMock).toHaveBeenCalledTimes(2);
+			expect(providerRetryWait).toHaveBeenCalledTimes(1);
+			expect(providerRetryWait.mock.calls[0]?.[0]).toBe(750);
 			expect(result.stopReason).toBe("stop");
 			expect(result.content.find(block => block.type === "text")?.text).toBe("Hello after wait");
 		});

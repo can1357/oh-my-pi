@@ -18,7 +18,7 @@
 import * as AIError from "../error";
 import type { AssistantMessage, AssistantMessageEvent, Context, FetchImpl } from "../types";
 import { AssistantMessageEventStream } from "./event-stream";
-import { extractProviderRetryHint } from "./retry-after";
+import { providerRetryWaitMs } from "./retry-after";
 import { resolveRetryDelayMs, waitForRetry } from "./retry-wait";
 import { withWireCount } from "./wire-attempts";
 
@@ -196,13 +196,19 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 					new FinalizedProviderStreamError(failedMessage.errorMessage, failedMessage.errorStatus),
 				);
 
-			// Read the wait the failure stated the way session retry reads it; a
-			// wait past the caller's cap surfaces the failure instead.
+			// A provider error waits at least the wait its failed attempt stated, read
+			// as session retry reads it: the response headers' wait
+			// (`errorRetryAfterMs`) with the message's relative waits beside it, else
+			// the message's text. A wait past the caller's cap surfaces the failure.
 			const delayMs = retryEmpty
 				? EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** emptyRetries
 				: retryProviderError
 					? resolveRetryDelayMs(
-							extractProviderRetryHint(failedMessage?.provider, failedMessage?.errorMessage),
+							providerRetryWaitMs(
+								failedMessage?.provider,
+								failedMessage?.errorMessage,
+								failedMessage?.errorRetryAfterMs,
+							),
 							EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** providerErrorRetries,
 							options?.maxRetryDelayMs,
 						)

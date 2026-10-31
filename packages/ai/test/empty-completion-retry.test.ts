@@ -72,12 +72,17 @@ function contentAttempt(): AssistantMessageEventStream {
 	] as unknown as AssistantMessageEvent[]);
 }
 
-/** A pre-output 429 whose message carries the wait the provider stated, as `AIError.finalize` formats it. */
+/**
+ * A pre-output 429 whose response headers stated a wait: `AIError.finalize`
+ * sets it as `errorRetryAfterMs`. The message text names no wait, so the loop
+ * must read the structured field, not a hint appended to the text.
+ */
 function statedWaitErrorAttempt(retryAfterMs: number): AssistantMessageEventStream {
 	const message = assistant();
 	message.stopReason = "error";
 	message.errorStatus = 429;
-	message.errorMessage = `429 Too many requests retry-after-ms=${retryAfterMs}`;
+	message.errorMessage = "429 Too many requests";
+	message.errorRetryAfterMs = retryAfterMs;
 	return streamFromEvents([
 		{ type: "start", partial: message },
 		{ type: "error", reason: "error", error: message },
@@ -406,7 +411,7 @@ describe("withReplaySafeStreamRetry", () => {
 		expect(waits).toEqual([]);
 		expect(events.at(-1)?.type).toBe("error");
 		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toContain("retry-after-ms=9000");
+		expect(result.errorRetryAfterMs).toBe(9_000);
 	});
 
 	it("waits a provider error's stated wait when it outlasts the backoff within maxRetryDelayMs", async () => {

@@ -420,6 +420,14 @@ export interface FetchWithRetryOptions extends RequestInit {
 	 * number sets a custom ceiling in ms. Bare browser/Node fetch ignores it.
 	 */
 	timeout?: number | false;
+	/**
+	 * Sleeps every retry delay in place of the built-in timer, with the request's
+	 * `signal`: the caller's own retry-wait hook (a provider's
+	 * `providerRetryWait`), so transport retries are scheduled like every other
+	 * retry the caller makes. An abort during it still surfaces as
+	 * `"Request was aborted"`.
+	 */
+	retryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
 }
 
 const DEFAULT_MAX_DELAY_MS = 60_000;
@@ -446,6 +454,7 @@ export async function fetchWithRetry(
 		shouldRetryResponse,
 		fetch: fetchImpl = fetch,
 		timeout = false,
+		retryWait,
 		...baseInit
 	} = options;
 	const signal = baseInit.signal as AbortSignal | undefined;
@@ -473,7 +482,7 @@ export async function fetchWithRetry(
 			if (signal?.aborted) throw new Error("Request was aborted");
 			const wrapped = wrapNetworkError(error);
 			if (attempt + 1 >= maxAttempts) throw wrapped;
-			await waitForRetry(resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs), signal);
+			await waitForRetry(resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs), signal, retryWait);
 			continue;
 		}
 
@@ -489,7 +498,7 @@ export async function fetchWithRetry(
 		const delayMs = Math.min(hint ?? resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs), maxDelayMs);
 		// The retried response is discarded; release its unread tee branch.
 		if (!response.bodyUsed) response.body?.cancel().catch(() => {});
-		await waitForRetry(delayMs, signal);
+		await waitForRetry(delayMs, signal, retryWait);
 	}
 }
 
@@ -506,9 +515,14 @@ function mergeInit(base: RequestInit, overlay: RequestInit, timeout: number | fa
 	return merged;
 }
 
-async function waitForRetry(delayMs: number, signal: AbortSignal | undefined): Promise<void> {
+async function waitForRetry(
+	delayMs: number,
+	signal: AbortSignal | undefined,
+	retryWait: FetchWithRetryOptions["retryWait"],
+): Promise<void> {
 	try {
-		await scheduler.wait(delayMs, { signal });
+		if (retryWait) await retryWait(delayMs, signal);
+		else await scheduler.wait(delayMs, { signal });
 	} catch (error) {
 		if (signal?.aborted) throw new Error("Request was aborted");
 		throw error;

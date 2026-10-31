@@ -80,7 +80,7 @@ import {
 	type HeadersLike,
 	transportRetryBounds,
 } from "../utils/retry-after";
-import { resolveRetryDelayMs, waitForRetry } from "../utils/retry-wait";
+import { type RetryWaitHook, resolveRetryDelayMs, waitForRetry } from "../utils/retry-wait";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { notifyRawSseEvent } from "../utils/sse-debug";
 import { providerReplaysFrom, type WireAttempts, wireCountedFetch } from "../utils/wire-attempts";
@@ -2036,6 +2036,7 @@ async function openCodexSseTransport(
 				requestSetup.firstEventTimeoutMs,
 				options?.codexSseMaxAttempts,
 				options?.maxRetryDelayMs,
+				options?.providerRetryWait,
 				event => options?.onSseEvent?.(event, model),
 				wrapFetchForRequestCompression(requestContext.wire.fetch, model),
 				headers => {
@@ -3227,9 +3228,13 @@ class CodexStreamProcessor {
 		) {
 			return false;
 		}
-		// A stated wait past the caller's cap surfaces the failure instead.
+		// The wait this attempt stated: its error event's headers, else its
+		// accepted SSE response's (a WebSocket attempt has none). A wait past the
+		// caller's cap surfaces the failure instead.
 		const delayMs = resolveRetryDelayMs(
-			getStatedRetryAfterMs(this.model.provider, error),
+			getStatedRetryAfterMs(this.model.provider, error, {
+				streamResponseHeaders: this.requestContext.streamResponseHeaders,
+			}),
 			CODEX_RETRY_DELAY_MS * (this.runtime.providerRetryAttempt + 1),
 			this.options?.maxRetryDelayMs,
 		);
@@ -4697,6 +4702,8 @@ async function openCodexSseEventStream(
 	codexSseMaxAttempts: number | undefined,
 	/** The caller's `StreamOptions.maxRetryDelayMs`, which bounds this transport's retries ({@link transportRetryBounds}). */
 	maxRetryDelayMs: number | undefined,
+	/** The caller's `StreamOptions.providerRetryWait`, which every transport retry sleeps through. */
+	retryWait: RetryWaitHook | undefined,
 	onSseEvent?: OpenAICodexResponsesOptions["onSseEvent"],
 	fetchOverride?: FetchImpl,
 	/** Receives the accepted (2xx) response's headers the moment it arrives. */
@@ -4768,6 +4775,7 @@ async function openCodexSseEventStream(
 			maxAttempts: resolveCodexSseMaxAttempts(codexSseMaxAttempts),
 			defaultDelayMs: attempt => CODEX_RETRY_DELAY_MS * (attempt + 1),
 			maxDelayMs: retryBounds.maxDelayMs,
+			retryWait,
 			// A refusal whose headers name a longer wait than the caller's cap is
 			// surfaced at once, with that wait on the failed message.
 			shouldRetryResponse: response => !retryBounds.declines(response),

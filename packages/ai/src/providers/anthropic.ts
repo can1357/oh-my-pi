@@ -102,7 +102,7 @@ import {
 	parseAnthropicSlowModeHeaders,
 } from "./anthropic-slow-mode";
 import { notifyProviderResponse } from "../utils/provider-response";
-import { getFailureRetryAfterMs, getHeadersFromError } from "../utils/retry-after";
+import { getHeadersFromError, getStatedRetryAfterMs } from "../utils/retry-after";
 import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
 import { spillToDescription } from "../utils/schema/spill";
 import { createSdkStreamRequestOptions } from "../utils/sdk-stream-timeout";
@@ -3638,17 +3638,16 @@ const streamAnthropicOnce = (
 					}
 					providerRetryAttempt++;
 					const backoffDelayMs = calculateAnthropicRetryDelayMs(providerRetryAttempt - 1);
-					// Honor the server's retry hint (`retry-after-ms`/`retry-after`) on
-					// 429/529-style failures and on an accepted stream that failed after
-					// naming one: retrying sooner than the server asked is a guaranteed
-					// failure that just burns the retry budget. The same reader as the
-					// failed message's `errorRetryAfterMs`, so this cap and every layer
-					// above judge one wait. The wait is bounded by `maxRetryDelayMs` so a
-					// multi-hour `retry-after` cannot park the provider stream before
-					// higher-level recovery runs: an over-cap hint surfaces the original
-					// error immediately.
+					// Honor the wait the server stated, in its headers (`retry-after-ms`,
+					// `retry-after`, on a refusal or on an accepted stream that failed after
+					// naming one) or in the error's text: retrying sooner than the server
+					// asked is a guaranteed failure that just burns the retry budget. Read
+					// as every layer above reads the failed message. The wait is bounded by
+					// `maxRetryDelayMs` so a multi-hour `retry-after` cannot park the
+					// provider stream before higher-level recovery runs: an over-cap hint
+					// surfaces the original error immediately.
 					const delayMs = resolveRetryDelayMs(
-						getFailureRetryAfterMs(streamFailure, { streamResponseHeaders }),
+						getStatedRetryAfterMs(sourceModel.provider, streamFailure, { streamResponseHeaders }),
 						backoffDelayMs,
 						options?.maxRetryDelayMs,
 					);

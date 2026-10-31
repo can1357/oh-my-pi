@@ -263,6 +263,25 @@ function createInBandRateLimitResponse(wait: string): Response {
 	]);
 }
 
+/** An HTTP-200 stream that fails in-band before output; only its response headers state the wait. */
+function createHeaderWaitFailureResponse(retryAfterMs: string): Response {
+	const events = [
+		{ type: "response.created", response: { id: "resp_header_wait", status: "in_progress" } },
+		{
+			type: "response.failed",
+			response: {
+				id: "resp_header_wait",
+				status: "failed",
+				error: { code: "server_error", message: "Service temporarily unavailable" },
+			},
+		},
+	];
+	return new Response(`${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\n`, {
+		status: 200,
+		headers: { "content-type": "text/event-stream", "retry-after-ms": retryAfterMs },
+	});
+}
+
 async function collectEvents(stream: AssistantMessageEventStream): Promise<AssistantMessageEvent[]> {
 	const events: AssistantMessageEvent[] = [];
 	for await (const event of stream) events.push(event);
@@ -592,6 +611,53 @@ describe("OpenAI Responses transient stream retry", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(2);
 		expect(providerRetryWait).toHaveBeenCalledTimes(1);
 		expect(providerRetryWait.mock.calls[0]?.[0]).toBe(800);
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toMatchObject([{ type: "text", text: "Recovered" }]);
+	});
+
+	it("surfaces an in-band failure whose wait only the HTTP 200's headers state when it exceeds maxRetryDelayMs", async () => {
+		let attempts = 0;
+		const fetchMock = vi.fn(async () => {
+			attempts++;
+			return attempts === 1
+				? createHeaderWaitFailureResponse("750")
+				: createCompletedTextResponse("must not be requested", "resp_unreached");
+		}) as FetchImpl;
+		const providerRetryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
+
+		const result = await streamOpenAIResponses(model, context, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			maxRetryDelayMs: 10,
+			providerRetryWait,
+		}).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(providerRetryWait).not.toHaveBeenCalled();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorRetryAfterMs).toBe(750);
+	});
+
+	it("waits the HTTP 200's header wait for an in-band failure when it fits maxRetryDelayMs", async () => {
+		let attempts = 0;
+		const fetchMock = vi.fn(async () => {
+			attempts++;
+			return attempts === 1
+				? createHeaderWaitFailureResponse("750")
+				: createCompletedTextResponse("Recovered", "resp_recovered");
+		}) as FetchImpl;
+		const providerRetryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
+
+		const result = await streamOpenAIResponses(model, context, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			maxRetryDelayMs: 1_000,
+			providerRetryWait,
+		}).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(providerRetryWait).toHaveBeenCalledTimes(1);
+		expect(providerRetryWait.mock.calls[0]?.[0]).toBe(750);
 		expect(result.stopReason).toBe("stop");
 		expect(result.content).toMatchObject([{ type: "text", text: "Recovered" }]);
 	});
