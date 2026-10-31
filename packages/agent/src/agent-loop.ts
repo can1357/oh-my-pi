@@ -414,7 +414,11 @@ function snapshotAssistantContentBlock(block: AssistantContentBlock): AssistantC
 				// Providers mutate streaming arguments in place (owned-stream, GLM)
 				// as well as replacing them, so containers are always copied; the
 				// strings inside are immutable and shared, keeping the per-delta
-				// cost independent of the argument payload size.
+				// cost independent of the argument payload size. `StreamFn` is a
+				// public extension point whose only promise is the partial-JSON
+				// carrier symbol, so a producer is free to grow `arguments` in
+				// place — copying containers is what keeps the live tree from
+				// reaching snapshots it already emitted.
 				arguments: cloneJsonTree(block.arguments),
 				providerMetadata: snapshotToolCallProviderMetadata(block.providerMetadata),
 			};
@@ -2527,10 +2531,11 @@ async function streamAssistantResponse(
 								// READ-ONLY-CONSUMER INVARIANT: `message` and
 								// `assistantMessageEvent.partial` intentionally share one snapshot,
 								// and the snapshot is rebuilt incrementally — only the delta's
-								// block, open blocks, and newly appended blocks are deep-cloned;
-								// finalized blocks are carried over from the previous snapshot by
-								// reference (see `snapshotAssistantMessageIncremental`), so they are
-								// shared across ALL message_update snapshots of the turn.
+								// the delta's block, open blocks, and newly appended blocks are
+								// re-cloned; finalized blocks are carried over from the previous
+								// snapshot by reference (see
+								// `snapshotAssistantMessageIncremental`), so they are shared
+								// across ALL message_update snapshots of the turn.
 								// Consumers MUST treat both fields — and every content block inside
 								// them — as read-only: mutating a snapshot would corrupt every
 								// earlier and later snapshot of the turn, not just this one. In
