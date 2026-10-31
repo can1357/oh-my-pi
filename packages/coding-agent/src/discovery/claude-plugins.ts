@@ -16,12 +16,13 @@ import { type Skill, skillCapability } from "../capability/skill";
 import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
 import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult } from "../capability/types";
+import type { UnresolvedEnvReference } from "../mcp/types";
 import { legacyProviderAllowed } from "./agent-plugin-format";
 import {
 	discoverRuleFromMarkdown,
 	type ClaudePluginRoot,
 	createSourceMeta,
-	expandEnvVarsDeep,
+	expandEnvVarsInField,
 	listClaudePluginRoots,
 	loadFilesFromDir,
 	scanSkillsFromDir,
@@ -545,25 +546,20 @@ async function resolvePluginMCPConfig(root: ClaudePluginRoot): Promise<ResolvedM
  * values or substitute ambient variables). Values that contained no
  * placeholder keep the legacy indirection (bare env-name lookup and
  * `!command` execution) unresolved, so it only runs when the surviving
- * enabled server is actually connected.
+ * enabled server is actually connected. Placeholders with no value and no
+ * default are appended to `unresolved` (field `env.<KEY>`).
  */
 async function resolveMarketplaceEnv(
 	env: Record<string, string>,
-	rootPath: string,
+	rootEnv: Record<string, string>,
+	unresolved: UnresolvedEnvReference[],
 ): Promise<{ env: Record<string, string>; literalKeys: string[] }> {
 	// Null prototype: a `__proto__` env key must become an own property, not
 	// mutate the prototype chain (it would silently vanish before spawn).
 	const resolved: Record<string, string> = Object.create(null);
 	const literalKeys: string[] = [];
 	for (const [key, rawValue] of Object.entries(env)) {
-		// Feed the reserved plugin-root names through extraEnv: expansion then
-		// cannot consume an ambient CLAUDE_PLUGIN_ROOT/OMP_PLUGIN_ROOT, and
-		// the registered root inserted as the value is never re-scanned
-		// for `${...}`.
-		const final = expandEnvVarsDeep(rawValue, {
-			CLAUDE_PLUGIN_ROOT: rootPath,
-			OMP_PLUGIN_ROOT: rootPath,
-		}) as string;
+		const final = expandEnvVarsInField(rawValue, `env.${key}`, unresolved, { extraEnv: rootEnv });
 		if (final !== rawValue) literalKeys.push(key);
 		resolved[key] = final;
 	}
@@ -643,12 +639,11 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				continue;
 			}
 			const namespacedName = root.plugin ? `${root.plugin}:${serverName}` : serverName;
-			const substitutedCommand =
-				raw.command !== undefined ? substitutePluginRoot(raw.command, root.path) : undefined;
-			const substitutedCwd = raw.cwd !== undefined ? substitutePluginRoot(raw.cwd, root.path) : undefined;
-			// Root relative command/cwd at the plugin's config directory, not the
-			// session cwd (MCP stdio spawning resolves relative values there).
-			const rooted = resolvePluginStdioPaths({ command: substitutedCommand, cwd: substitutedCwd }, baseDir);
+			// Feed the reserved plugin-root names through extraEnv: expansion then
+			// cannot consume an ambient CLAUDE_PLUGIN_ROOT/OMP_PLUGIN_ROOT, and
+			// the registered root inserted as the value is never re-scanned
+			// for `${...}`.
+			const rootEnv = { CLAUDE_PLUGIN_ROOT: root.path, OMP_PLUGIN_ROOT: root.path };
 			// Malformed env (e.g. `"env": null` in a hand-edited marketplace JSON)
 			// must not throw inside resolveMarketplaceEnv: the capability loader
 			// catches at provider scope and would discard every marketplace
@@ -670,13 +665,36 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				);
 				timeout = undefined;
 			}
-			const resolvedEnv = raw.env !== undefined ? await resolveMarketplaceEnv(raw.env, root.path) : undefined;
+			const unresolvedEnv: UnresolvedEnvReference[] = [];
+			const resolvedEnv =
+				raw.env !== undefined ? await resolveMarketplaceEnv(raw.env, rootEnv, unresolvedEnv) : undefined;
+			// The child is spawned without a shell: a `${VAR}` in command/args
+			// unset in the environment takes the server's own env value (as the
+			// child receives it), and one with neither is recorded instead of
+			// reaching the child literally.
+			const processOptions = {
+				extraEnv: rootEnv,
+				ownEnv: resolvedEnv && { env: resolvedEnv.env, literalKeys: resolvedEnv.literalKeys },
+			};
+			const command =
+				raw.command !== undefined
+					? expandEnvVarsInField(raw.command, "command", unresolvedEnv, processOptions)
+					: undefined;
+			const args =
+				raw.args !== undefined ? expandEnvVarsInField(raw.args, "args", unresolvedEnv, processOptions) : undefined;
+			const substitutedCwd = raw.cwd !== undefined ? substitutePluginRoot(raw.cwd, root.path) : undefined;
+			// Root relative command/cwd at the plugin's config directory, not the
+			// session cwd (MCP stdio spawning resolves relative values there).
+			const rooted = resolvePluginStdioPaths({ command, cwd: substitutedCwd }, baseDir);
+			const url = raw.url !== undefined ? expandEnvVarsInField(raw.url, "url", unresolvedEnv) : undefined;
+			const headers =
+				raw.headers !== undefined ? expandEnvVarsInField(raw.headers, "headers", unresolvedEnv) : undefined;
 			const server: MCPServer = {
 				name: namespacedName,
 				...(raw.enabled !== undefined && { enabled: raw.enabled }),
 				...(timeout !== undefined && { timeout }),
 				...(rooted.command !== undefined && { command: rooted.command }),
-				...(raw.args !== undefined && { args: substitutePluginRoot(raw.args, root.path) }),
+				...(args !== undefined && { args }),
 				...(resolvedEnv !== undefined && { env: resolvedEnv.env }),
 				// Placeholder-expanded keys are final package data (literal);
 				// raw values keep legacy indirection, resolved by
@@ -686,11 +704,12 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 						envLiteralKeys: resolvedEnv.literalKeys,
 					}),
 				...(rooted.cwd !== undefined && { cwd: rooted.cwd }),
-				...(raw.url !== undefined && { url: expandEnvVarsDeep(raw.url) }),
-				...(raw.headers !== undefined && { headers: expandEnvVarsDeep(raw.headers) }),
+				...(url !== undefined && { url }),
+				...(headers !== undefined && { headers }),
 				...(raw.auth !== undefined && { auth: raw.auth }),
 				...(raw.oauth !== undefined && { oauth: raw.oauth }),
 				...(raw.type !== undefined && { transport: raw.type as MCPServer["transport"] }),
+				...(unresolvedEnv.length > 0 && { unresolvedEnv }),
 				_source: createSourceMeta(PROVIDER_ID, sourcePath, root.scope, root.origin),
 			};
 			items.push(server);

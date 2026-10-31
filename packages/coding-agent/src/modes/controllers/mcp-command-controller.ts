@@ -12,6 +12,7 @@ import type { SourceMeta } from "../../capability/types";
 import {
 	analyzeAuthError,
 	discoverOAuthEndpoints,
+	expandFileServerConfig,
 	fetchResourceMetadataScopes,
 	loadAllMCPConfigs,
 	MCPManager,
@@ -1357,7 +1358,7 @@ export class MCPCommandController {
 				return;
 			}
 
-			const { config } = found;
+			let { config } = found;
 			if (config.enabled === false) {
 				this.ctx.mcpTestEscapeHandlers.delete(handleEscape);
 				this.ctx.showError(`Server "${name}" is disabled. Run /mcp enable ${name} first.`);
@@ -1388,6 +1389,11 @@ export class MCPCommandController {
 			this.ctx.presentCommandOutput(hintBlock);
 			hintText = text;
 			hintShown = true;
+
+			// File entries still hold `${VAR}` placeholders: expand them as
+			// discovery does, refusing an unset one instead of connecting with the
+			// literal. A discovered entry is the manager's already-expanded config.
+			if (!found.discovered) config = expandFileServerConfig(name, config);
 
 			// Resolve auth config if needed
 			let resolvedConfig: MCPServerConfig;

@@ -10,7 +10,7 @@ import { registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
 import type { LoadContext, LoadResult } from "../capability/types";
-import { createSourceMeta, expandEnvVarsDeep, getProjectPath } from "./helpers";
+import { createSourceMeta, expandMCPServerEnv, getProjectPath } from "./helpers";
 
 const PROVIDER_ID = "vscode";
 const DISPLAY_NAME = "VS Code";
@@ -81,8 +81,8 @@ async function loadMCPConfig(
 
 		const raw = config as Record<string, unknown>;
 
-		// Expand environment variables
-		const expanded = expandEnvVarsDeep(raw);
+		// Expand environment variables; VS Code predefined variables stay literal.
+		const { server: expanded, unresolvedEnv } = expandMCPServerEnv(raw, { vscodePredefinedVariables: true });
 
 		const server: MCPServer = {
 			name,
@@ -99,6 +99,7 @@ async function loadMCPConfig(
 				? (expanded.transport as "stdio" | "sse" | "http")
 				: undefined,
 			timeout: typeof expanded.timeout === "number" ? expanded.timeout : undefined,
+			...(unresolvedEnv && { unresolvedEnv }),
 			_source: createSourceMeta(PROVIDER_ID, path, level),
 		};
 

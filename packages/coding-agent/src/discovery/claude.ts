@@ -26,7 +26,7 @@ import {
 	calculateDepth,
 	createSourceMeta,
 	discoverExtensionModulePaths,
-	expandEnvVarsDeep,
+	expandMCPServerEnv,
 	getExtensionNameFromPath,
 	loadFilesFromDir,
 	scanSkillsFromDir,
@@ -112,8 +112,8 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 		const json = tryParseJson<{ mcpServers?: Record<string, unknown> }>(content);
 		if (!json?.mcpServers) return [];
 
-		const mcpServers = expandEnvVarsDeep(json.mcpServers);
-		return Object.entries(mcpServers).map(([name, config]) => {
+		return Object.entries(json.mcpServers).map(([name, rawConfig]) => {
+			const { server: config, unresolvedEnv } = expandMCPServerEnv(rawConfig);
 			const serverConfig = config as Record<string, unknown>;
 			return {
 				name,
@@ -125,6 +125,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				url: serverConfig.url as string | undefined,
 				headers: serverConfig.headers as Record<string, string> | undefined,
 				transport: serverConfig.type as "stdio" | "sse" | "http" | undefined,
+				...(unresolvedEnv && { unresolvedEnv }),
 				_source: createSourceMeta(PROVIDER_ID, path, level),
 			};
 		});

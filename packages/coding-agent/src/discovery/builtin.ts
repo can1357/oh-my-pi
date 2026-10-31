@@ -28,7 +28,7 @@ import {
 	discoverRuleFromMarkdown,
 	createSourceMeta,
 	discoverExtensionModulePaths,
-	expandEnvVarsDeep,
+	expandMCPServerEnv,
 	getExtensionNameFromPath,
 	getProjectDiscoveryCeilings,
 	isForeignUserConfigRoot,
@@ -131,8 +131,8 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 		const data = tryParseJson<{ mcpServers?: Record<string, unknown> }>(content);
 		if (!data?.mcpServers) return result;
 
-		const expanded = expandEnvVarsDeep(data.mcpServers);
-		for (const [serverName, config] of Object.entries(expanded)) {
+		for (const [serverName, rawConfig] of Object.entries(data.mcpServers)) {
+			const { server: config, unresolvedEnv } = expandMCPServerEnv(rawConfig);
 			const serverConfig = config as Record<string, unknown>;
 
 			// Validate enabled: coerce string "true"/"false", warn on other types
@@ -225,6 +225,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 					  }
 					| undefined,
 				transport: serverConfig.type as "stdio" | "sse" | "http" | undefined,
+				...(unresolvedEnv && { unresolvedEnv }),
 				_source: createSourceMeta(PROVIDER_ID, path, level),
 			});
 		}

@@ -32,7 +32,7 @@ import { legacyProviderAllowed } from "./agent-plugin-format";
 import {
 	discoverRuleFromMarkdown,
 	createSourceMeta,
-	expandEnvVarsDeep,
+	expandMCPServerEnv,
 	loadFilesFromDir,
 	parseRequestIdFormat,
 	scanSkillsFromDir,
@@ -315,14 +315,13 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			logger.warn(`[omp-plugins] Invalid JSON in ${mcpPath}`);
 			continue;
 		}
-		const servers = expandEnvVarsDeep(parsed.mcpServers, {
-			CLAUDE_PLUGIN_ROOT: root.path,
-			OMP_PLUGIN_ROOT: root.path,
-		});
+		const servers = parsed.mcpServers;
 		if (!servers || typeof servers !== "object" || Array.isArray(servers)) continue;
+		const pluginEnv = { CLAUDE_PLUGIN_ROOT: root.path, OMP_PLUGIN_ROOT: root.path };
 
-		for (const [serverName, serverCfg] of Object.entries(servers)) {
-			if (!serverCfg || typeof serverCfg !== "object" || Array.isArray(serverCfg)) continue;
+		for (const [serverName, rawCfg] of Object.entries(servers)) {
+			if (!rawCfg || typeof rawCfg !== "object" || Array.isArray(rawCfg)) continue;
+			const { server: serverCfg, unresolvedEnv } = expandMCPServerEnv(rawCfg, { extraEnv: pluginEnv });
 			const cfg = serverCfg as RawMcpServer;
 			if (typeof cfg.command !== "string" && typeof cfg.url !== "string") {
 				warnings.push(`[omp-plugins] Skipping MCP server "${serverName}" in ${mcpPath}: missing command or url`);
@@ -361,6 +360,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				...(cfg.auth !== undefined && { auth: cfg.auth }),
 				...(cfg.oauth !== undefined && { oauth: cfg.oauth }),
 				...(cfg.type !== undefined && { transport: cfg.type }),
+				...(unresolvedEnv && { unresolvedEnv }),
 				_source: createSourceMeta(PROVIDER_ID, mcpPath, root.level),
 			});
 		}

@@ -1,6 +1,7 @@
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
 import { connectToServer, disconnectServer, listPrompts, listResources, listTools } from "../../mcp/client";
+import { expandFileServerConfig } from "../../mcp/config";
 import {
 	addMCPServer,
 	readDisabledServers,
@@ -204,12 +205,16 @@ function parseMcpSearchArgs(rest: string): ParsedMcpSearchArgs {
 	return { keyword, scope, limit, semantic };
 }
 
+/** Connect ad hoc to a server read from a config file; `config` is the raw file entry. */
 async function withPreparedMcpConnection<T>(
 	runtime: SlashCommandRuntime,
 	name: string,
 	config: MCPServerConfig,
 	fn: (connection: MCPServerConnection) => Promise<T>,
 ): Promise<T> {
+	// File entries still hold `${VAR}` placeholders; expand them as discovery
+	// does and refuse an unset one instead of connecting with the literal.
+	const expandedConfig = expandFileServerConfig(name, config);
 	let connection: MCPServerConnection | undefined;
 	try {
 		const manager = new MCPManager(runtime.cwd);
@@ -218,7 +223,7 @@ async function withPreparedMcpConnection<T>(
 		// Without this, `/mcp test|resources|prompts` silently fails for any
 		// server saved by the TUI/reauth path.
 		manager.setAuthStorage(runtime.session.modelRegistry.authStorage);
-		const resolvedConfig = await manager.prepareConfig(config);
+		const resolvedConfig = await manager.prepareConfig(expandedConfig);
 		connection = await connectToServer(name, resolvedConfig);
 		return await fn(connection);
 	} finally {

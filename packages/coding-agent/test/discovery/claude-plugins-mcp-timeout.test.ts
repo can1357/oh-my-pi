@@ -6,7 +6,7 @@ import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability
 import { enableProvider, loadCapability } from "@oh-my-pi/pi-coding-agent/capability";
 import type { MCPServer } from "@oh-my-pi/pi-coding-agent/capability/mcp";
 import { clearClaudePluginRootsCache } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
-import { loadAllMCPConfigs } from "@oh-my-pi/pi-coding-agent/mcp/config";
+import { loadAllMCPConfigs, validateServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/config";
 import { __resetDirsFromEnvForTests, logger, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import "@oh-my-pi/pi-coding-agent/discovery/claude-plugins";
 describe("Claude plugin MCP timeout compatibility", () => {
@@ -64,23 +64,21 @@ describe("Claude plugin MCP timeout compatibility", () => {
 	 * Returns the temp paths involved.
 	 */
 	async function installPluginWithTimeout(timeout: unknown): Promise<void> {
+		await installPluginServer({
+			type: "stdio",
+			timeout,
+			command: "npx",
+			args: ["--yes", "@sap-ux/fiori-mcp-server@latest", "fiori-mcp"],
+		});
+	}
+
+	/** Install a user-scope marketplace plugin whose `.mcp.json` declares `fiori-mcp` as `server`; returns its root. */
+	async function installPluginServer(server: Record<string, unknown>): Promise<string> {
 		const pluginPath = path.join(tempDir, "plugins", "sap-fiori-mcp-server");
 		const registryPath = path.join(tempDir, ".omp", "plugins", "installed_plugins.json");
 		await fs.mkdir(path.join(tempDir, ".omp", "plugins"), { recursive: true });
 		await fs.mkdir(pluginPath, { recursive: true });
-		await fs.writeFile(
-			path.join(pluginPath, ".mcp.json"),
-			JSON.stringify({
-				mcpServers: {
-					"fiori-mcp": {
-						type: "stdio",
-						timeout,
-						command: "npx",
-						args: ["--yes", "@sap-ux/fiori-mcp-server@latest", "fiori-mcp"],
-					},
-				},
-			}),
-		);
+		await fs.writeFile(path.join(pluginPath, ".mcp.json"), JSON.stringify({ mcpServers: { "fiori-mcp": server } }));
 		await fs.writeFile(
 			registryPath,
 			JSON.stringify({
@@ -92,6 +90,7 @@ describe("Claude plugin MCP timeout compatibility", () => {
 				},
 			}),
 		);
+		return pluginPath;
 	}
 
 	async function loadPluginServers(): Promise<{ items: MCPServer[]; warnings: string[] }> {
@@ -139,5 +138,36 @@ describe("Claude plugin MCP timeout compatibility", () => {
 		} finally {
 			warn.mockRestore();
 		}
+	});
+
+	describe("unset env placeholders in command/args", () => {
+		// Names no environment defines, so no test mutates them.
+		const UNSET = "OMP_CLAUDE_PLUGIN_TEST_UNSET_9D41B7";
+		const OWN_KEY = "OMP_CLAUDE_PLUGIN_TEST_OWN_KEY_9D41B7";
+		const placeholder = (name: string): string => `\${${name}}`;
+
+		test("records an unset args variable while plugin-root and own-env references substitute", async () => {
+			expect(Bun.env[UNSET]).toBeUndefined();
+			expect(Bun.env[OWN_KEY]).toBeUndefined();
+			const pluginPath = await installPluginServer({
+				type: "stdio",
+				command: `${placeholder("CLAUDE_PLUGIN_ROOT")}/bin/server`,
+				args: [`--root=${placeholder("OMP_PLUGIN_ROOT")}`, placeholder(UNSET), `--key=${placeholder(OWN_KEY)}`],
+				env: { [OWN_KEY]: "secret" },
+			});
+
+			const { items } = await loadPluginServers();
+			const server = items.find(i => i.name === "sap-fiori-mcp-server:fiori-mcp");
+			expect(server?.command).toBe(path.join(pluginPath, "bin", "server"));
+			expect(server?.args).toEqual([`--root=${pluginPath}`, placeholder(UNSET), "--key=secret"]);
+			expect(server?.unresolvedEnv).toEqual([{ variable: UNSET, field: "args[1]" }]);
+
+			const { configs } = await loadAllMCPConfigs(tempDir, { enableProjectConfig: false });
+			const config = configs["sap-fiori-mcp-server:fiori-mcp"];
+			expect(config).toBeDefined();
+			expect(validateServerConfig("sap-fiori-mcp-server:fiori-mcp", config!)).toContain(
+				`MCP server "sap-fiori-mcp-server:fiori-mcp": environment variable ${UNSET} is not set (referenced in args[1])`,
+			);
+		});
 	});
 });
