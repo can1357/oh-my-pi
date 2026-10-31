@@ -37,7 +37,7 @@ import { routeSgrMouseInput } from "../../mouse";
 import { col, compact, keyed, node, row, span, stableKey, text } from "../../native/describe";
 import { Memo } from "../../native/memo";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "../../native/node";
-import { actionButton } from "../../native/overlay";
+import { actionButton, iconButton, segmentedTabs } from "../../native/overlay";
 import { type Component, type OverlayHandle, TUI } from "../../tui";
 import { truncateToWidth, visibleWidth } from "../../utils";
 import { theme, warmHighlighter } from "../../theme/theme";
@@ -1039,35 +1039,28 @@ class GitTuiComponent implements Component {
 		} else {
 			left.push(text([span(this.#model.branch ?? "detached", "muted")], { role: "omp.app.git.path" }));
 		}
-		const iconButton = (name: string, act: string, title: string, on?: boolean): NativeNode =>
-			node(
-				"icon",
-				{ name, title, aria: title, role: on ? "omp.app.ibtn.set" : "omp.app.ibtn", actions: { click: act } },
-				undefined,
-				act,
-			);
+		const tool = (name: string, act: string, title: string, on?: boolean): NativeNode =>
+			iconButton(name, act, title, { key: act, on });
 		const right: NativeNode[] = [
 			row(
 				[
-					iconButton("chev-up", "prev-hunk", `Previous change (${formatTooltipKey("alt+up")})`),
-					iconButton("chev", "next-hunk", `Next change (${formatTooltipKey("alt+down")})`),
+					tool("chev-up", "prev-hunk", `Previous change (${formatTooltipKey("alt+up")})`),
+					tool("chev", "next-hunk", `Next change (${formatTooltipKey("alt+down")})`),
 				],
 				{ gap: "none", align: "center" },
 			),
-			node(
-				"tabs",
+			segmentedTabs(
 				{
 					items: VIEW_TABS.map(tab => ({ id: tab.id, label: tab.label })),
 					active: this.#pane.mode,
 					role: "omp.app.seg",
 				},
-				undefined,
 				"views",
 			),
 		];
 		if (!narrow) {
 			right.push(
-				iconButton(
+				tool(
 					"type",
 					"whitespace",
 					this.#whitespace === "off"
@@ -1077,7 +1070,7 @@ class GitTuiComponent implements Component {
 							: `Ignoring formatting and imports; show all (${formatTooltipKey("b")})`,
 					this.#whitespace !== "off",
 				),
-				iconButton("corner-down-right", "wrap", `Wrap lines (${formatTooltipKey("w")})`, this.#pane.wrap),
+				tool("corner-down-right", "wrap", `Wrap lines (${formatTooltipKey("w")})`, this.#pane.wrap),
 			);
 		}
 		if (file?.area === "unstaged" || file?.area === "staged") {
@@ -1089,8 +1082,8 @@ class GitTuiComponent implements Component {
 			);
 		}
 		right.push(
-			iconButton("keyboard", "help", `Keyboard shortcuts (${formatTooltipKey("?")})`),
-			iconButton("x", "close", `Close (${formatTooltipKey("q")})`),
+			tool("keyboard", "help", `Keyboard shortcuts (${formatTooltipKey("?")})`),
+			tool("x", "close", `Close (${formatTooltipKey("q")})`),
 		);
 		return keyed(
 			row(
