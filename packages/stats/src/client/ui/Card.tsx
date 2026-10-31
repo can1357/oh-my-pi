@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactNode } from "react";
+import type { ReactNode } from "react";
 
 export interface CardProps {
 	title?: ReactNode;
@@ -22,7 +22,7 @@ export function Card({ title, description, actions, flush, footer, className, in
 	return (
 		<section
 			className={className ? `card rise ${className}` : "card rise"}
-			style={index !== undefined ? ({ "--i": index } as CSSProperties) : undefined}
+			style={index !== undefined ? { "--i": index } : undefined}
 		>
 			{hasHeader && (
 				<header className="card-header">

@@ -6,6 +6,12 @@
 
 - Added `stderrSharesStdoutTerminal()`, which reports whether stderr is the terminal stdout writes to ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
 
+## [18.14.2] - 2026-10-31
+
+### Added
+
+- Added `oklabDistance`, the perceptual distance between two hex colors ([#17520](https://github.com/can1357/oh-my-pi/pull/17520))
+
 ## [18.14.1] - 2026-10-31
 
 ### Added

@@ -69,15 +69,19 @@ async function fixture() {
 describe("EventController reply writes", () => {
 	it("draws a streamed `write out://` as assistant prose once its path tells, never as a card", async () => {
 		const { ctx, controller, update, rendered } = await fixture();
-
+		// `toolcall_start` (no argument text yet) still streams; neither it nor `ou` tells a reply from a card.
+		await update(streamingWrite({}, ""));
 		await update(streamingWrite({ path: "ou" }, '{"path":"ou'));
-		expect(ctx.chatContainer.children.some(child => child instanceof ToolExecutionComponent)).toBe(false);
-		expect(ctx.chatContainer.children.some(child => child instanceof ReplyWriteComponent)).toBe(false);
+		expect(
+			ctx.chatContainer.children.filter(
+				child => child instanceof ToolExecutionComponent || child instanceof ReplyWriteComponent,
+			),
+		).toEqual([]);
 
 		await update(
 			streamingWrite(
-				{ path: "out://", content: "Short answer: **yes**" },
-				'{"path":"out://","content":"Short answer: **yes**',
+				{ path: "out://status.md", content: "Short answer: **yes**" },
+				'{"path":"out://status.md","content":"Short answer: **yes**',
 			),
 		);
 		const reply = ctx.chatContainer.children.find(child => child instanceof ReplyWriteComponent);
