@@ -156,7 +156,7 @@ describe("plan-yolo approval autosave", () => {
 			settings,
 			model: () => undefined,
 			configuredThinkingLevel: () => undefined,
-			restoreThinkingLevel: () => {},
+			invalidateAutomaticSelection: () => {},
 			resolveDefaultPrewalk: () => undefined,
 			resolveAutoPrewalkTarget: () => undefined,
 			classifyAutoPrewalk: async () => undefined,
@@ -165,6 +165,7 @@ describe("plan-yolo approval autosave", () => {
 			},
 			setModelTemporary: async (...args: unknown[]) => {
 				modelTemporaryCalls.push(args);
+				return true;
 			},
 			setActiveToolsByName: async () => {},
 			restoreNonMCPToolPresentation: async () => {},
@@ -212,6 +213,37 @@ describe("plan-yolo approval autosave", () => {
 			source: "plan-yolo",
 		});
 		expect(t.modelTemporaryCalls.length).toBe(1);
+	});
+
+	it("continues plan-yolo on the selected model when its automatic switch is superseded", async () => {
+		const cwd = makeCwd();
+		const t = setupPlanYolo(cwd, path.join(cwd, "artifacts"), Settings.isolated({}));
+		const selected = buildModel({ ...target, id: "selected-model" });
+		t.host.model = () => selected;
+		t.host.setModelTemporary = async () => false;
+		const steering: unknown[] = [];
+		t.host.agent.steer = message => {
+			steering.push(message);
+		};
+		const coordinator = new PrewalkCoordinator(t.host, { planYolo: { target } satisfies PlanYolo });
+		await coordinator.armPlanYoloIfNeeded();
+		await Bun.write(resolveLocalUrlToPath("local://auth-plan.md", t.localOptions), "# Plan\n\nYolo.\n");
+		const handler = t.getHandler();
+		if (!handler) throw new Error("expected a plan proposal handler");
+
+		const result = (await handler("auth")) as { content: Array<{ type: string; text: string }> };
+
+		expect(result.content[0]?.text).toBe(`Plan approved. Implementing now with ${selected.id}.`);
+		expect(t.notices.some(notice => notice.message.includes(`switched to ${target.provider}/${target.id}`))).toBe(
+			false,
+		);
+		expect(t.notices).toContainEqual({
+			level: "info",
+			message: `Plan-yolo: plan approved, continuing on ${selected.provider}/${selected.id} to implement "auth".`,
+			source: "plan-yolo",
+		});
+		expect(steering).toContainEqual(expect.objectContaining({ customType: "plan-yolo-handoff" }));
+		expect(t.host.getPlanModeState()).toBeUndefined();
 	});
 
 	it("warns the operator but still implements when autosave fails", async () => {

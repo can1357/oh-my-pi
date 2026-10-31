@@ -45,6 +45,7 @@ import {
 	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
 	parseConfiguredThinkingLevel,
+	prewalkWouldBeNoop,
 	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
 import { isAuthenticated, kNoAuth, type ModelRegistry } from "./model-registry";
@@ -210,6 +211,16 @@ export function formatModelStringWithRouting(model: Model<Api>): string {
 	const selector = formatModelString(model);
 	const upstream = getSingleUpstreamRoute(model);
 	return upstream ? `${selector}@${upstream}` : selector;
+}
+
+export function prewalkWouldBeNoopWithRouting(
+	current: Model<Api> | undefined,
+	currentLevel: ConfiguredThinkingLevel | undefined,
+	target: Model<Api>,
+	targetLevel: ConfiguredThinkingLevel | undefined,
+): boolean {
+	if (current && formatModelStringWithRouting(current) !== formatModelStringWithRouting(target)) return false;
+	return prewalkWouldBeNoop(current, currentLevel, target, targetLevel);
 }
 
 /** Restore a canonical model identity without interpreting any part of its id as a thinking selector. */
@@ -1762,7 +1773,17 @@ export function resolveSessionModelSelector(
 ): { model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
 	const parsed = parseSessionModelSelector(modelRegistry, selector);
 	if (!parsed) return undefined;
-	const model = modelRegistry.find(parsed.provider, parsed.id);
+	let model = modelRegistry.find(parsed.provider, parsed.id);
+	if (!model) {
+		const routing = splitUpstreamRouting(parsed.id);
+		if (routing) {
+			const base = modelRegistry.find(parsed.provider, routing.base);
+			if (base && supportsUpstreamRouting(base)) {
+				model =
+					getSingleUpstreamRoute(base) === routing.upstream ? base : applyUpstreamRouting(base, routing.upstream);
+			}
+		}
+	}
 	if (!model || !modelRegistry.hasConfiguredAuth(model)) return undefined;
 	return { model, thinkingLevel: parsed.thinkingLevel };
 }

@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { formatModelStringWithRouting } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
@@ -319,6 +320,42 @@ describe("runSubprocess per-agent prewalk", () => {
 		expect(result.exitCode).toBe(0);
 		expect(spy.mock.calls[0]?.[0]?.prewalk).toBeUndefined();
 	});
+
+	it.each(["google", "anthropic"])(
+		"resolves routed prewalk target @%s and suppresses only the identical starting route",
+		async upstream => {
+			const bundled = getBundledModel("openrouter", "anthropic/claude-sonnet-4.5");
+			if (!bundled) throw new Error("Expected bundled OpenRouter Sonnet");
+			const sourceSelector = "openrouter/anthropic/claude-sonnet-4.5@google";
+			const targetSelector = `openrouter/anthropic/claude-sonnet-4.5@${upstream}`;
+			const session = yieldEmittingSession(["read", "todo", "yield"]);
+			const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+			const result = await runSubprocess({
+				...baseOptions(`subagent-prewalk-route-${upstream}`, Settings.isolated()),
+				modelRegistry: createModelRegistry([bundled]),
+				agent: {
+					...baseAgent,
+					model: [sourceSelector],
+					prewalk: targetSelector,
+				},
+			});
+
+			expect(result.exitCode).toBe(0);
+			const forwarded = spy.mock.calls[0]?.[0];
+			expect(forwarded?.model).toBeDefined();
+			expect(formatModelStringWithRouting(forwarded!.model!)).toBe(sourceSelector);
+			if (upstream === "google") {
+				expect(forwarded?.prewalk).toBeUndefined();
+				expect(session.getActiveToolNames()).not.toContain("todo");
+			} else {
+				expect(forwarded?.prewalk).toBeDefined();
+				expect(formatModelStringWithRouting(forwarded!.prewalk!.target)).toBe(targetSelector);
+				expect(session.getActiveToolNames()).toContain("todo");
+			}
+		},
+	);
+
 	it("keeps the todo tool active for a prewalk-armed subagent (the todo gate needs it)", async () => {
 		const session = yieldEmittingSession(["read", "todo", "yield"]);
 		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));

@@ -160,7 +160,7 @@ describe("async speculative compaction", () => {
 			dropPersistedAssistantTurn: async () => undefined,
 			runRecoveryCompactionWithRollback: async () => ({ continuationScheduled: false }),
 			parseRetryAfterMsFromError: () => undefined,
-			setModelTemporary: async () => {},
+			setModelTemporary: async () => true,
 			abort: async () => {},
 			abortHandoff: () => {},
 		} as unknown as SessionMaintenanceHost;

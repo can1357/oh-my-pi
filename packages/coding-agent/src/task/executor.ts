@@ -25,6 +25,7 @@ import {
 import { type EditMode, getEditInputPaths } from "@oh-my-pi/pi-tui/tools/edit";
 import {
 	formatModelStringWithRouting,
+	prewalkWouldBeNoopWithRouting,
 	resolveAgentAdvisorRolePattern,
 	resolveAgentAdvisorSelection,
 	resolveAgentPrewalkPattern,
@@ -86,7 +87,6 @@ import {
 	assertModelSupportsEffortCeiling,
 	type ConfiguredThinkingLevel,
 	clampThinkingLevelToCeiling,
-	prewalkWouldBeNoop,
 	resolveTaskEffortLevel,
 	type TaskEffort,
 } from "@oh-my-pi/pi-tui/thinking";
@@ -4697,7 +4697,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						pattern: prewalkPattern,
 						warning: resolvedPrewalk.warning,
 					});
-				} else if (prewalkWouldBeNoop(model, effectiveThinkingLevel, target, resolvedPrewalk.thinkingLevel)) {
+				} else if (
+					prewalkWouldBeNoopWithRouting(model, effectiveThinkingLevel, target, resolvedPrewalk.thinkingLevel)
+				) {
 					// Same model AND same effective thinking level: switching would only
 					// inject the plan/checklist nudges for no gain — skip. An effort-only
 					// delta on the same model still arms (it is a real cheapening hand-off).

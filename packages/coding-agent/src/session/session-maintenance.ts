@@ -511,7 +511,7 @@ export interface SessionMaintenanceHost {
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
 		options?: { ephemeral?: boolean },
-	): Promise<void>;
+	): Promise<boolean>;
 	abort(options?: {
 		goalReason?: "interrupted" | "internal";
 		reason?: string;
@@ -3568,7 +3568,7 @@ export class SessionMaintenance {
 		if (!targetModel) return false;
 
 		try {
-			await this.#host.setModelTemporary(targetModel, undefined, { ephemeral: true });
+			if (!(await this.#host.setModelTemporary(targetModel, undefined, { ephemeral: true }))) return false;
 			logger.debug("Context promotion switched model on overflow", {
 				from: `${currentModel.provider}/${currentModel.id}`,
 				to: `${targetModel.provider}/${targetModel.id}`,

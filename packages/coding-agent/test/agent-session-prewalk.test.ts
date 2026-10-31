@@ -6,6 +6,7 @@ import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { formatModelStringWithRouting, parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { CustomToolAdapter } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/wrapper";
 import { DeferredMCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import { dispatchXdevTool, type XdevDispatch, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
@@ -1226,6 +1227,92 @@ describe("AgentSession prewalk", () => {
 				.messages.filter(message => message.role === "custom" && message.customType === "prewalk-plan"),
 		).toHaveLength(1);
 	});
+
+	function routedModel(upstream: string): Model {
+		const bundled = getBundledModel("openrouter", "anthropic/claude-sonnet-4.5");
+		if (!bundled) throw new Error("Expected bundled OpenRouter Sonnet");
+		const model = parseModelPattern(`openrouter/anthropic/claude-sonnet-4.5@${upstream}`, [bundled]).model;
+		if (!model) throw new Error(`Expected routed model for ${upstream}`);
+		return model;
+	}
+
+	it.each([Effort.Medium, undefined])(
+		"route-only prewalk switches Google to Anthropic after a todo-gated write with target effort %s",
+		async thinkingLevel => {
+			const primary = routedModel("google");
+			const target = routedModel("anthropic");
+			vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue("test-key");
+			vi.spyOn(modelRegistry, "hasConfiguredAuth").mockReturnValue(true);
+			const requested: string[] = [];
+			const mock = createMockModel({
+				responses: [
+					toolCall("before-todo", "write"),
+					toolCall("init-todo", "todo"),
+					toolCall("after-todo", "write"),
+					{ content: ["done"] },
+				],
+			});
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: {
+					model: primary,
+					systemPrompt: ["Test"],
+					tools: [todoTool as AgentTool, writeTool as AgentTool],
+					messages: [],
+					thinkingLevel: Effort.Medium,
+				},
+				convertToLlm,
+				streamFn: (model, context, options) => {
+					requested.push(formatModelStringWithRouting(model));
+					return mock.stream(model, context, options);
+				},
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				toolRegistry,
+				thinkingLevel: Effort.Medium,
+				prewalk: { target, thinkingLevel },
+			});
+
+			await session.prompt("do the task");
+
+			expect(requested).toEqual([
+				formatModelStringWithRouting(primary),
+				formatModelStringWithRouting(primary),
+				formatModelStringWithRouting(primary),
+				formatModelStringWithRouting(target),
+			]);
+			expect(formatModelStringWithRouting(session.model!)).toBe(formatModelStringWithRouting(target));
+			expect(session.thinkingLevel).toBe(Effort.Medium);
+		},
+	);
+
+	it.each(["arm", "restart"])(
+		"route-only %s rejects a different route and preserves the original arm",
+		async action => {
+			vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue("test-key");
+			vi.spyOn(modelRegistry, "hasConfiguredAuth").mockReturnValue(true);
+			const created = createLifecycleSession([], { armed: false });
+			const targetA = routedModel("google");
+			const targetB = routedModel("anthropic");
+			expect(created.session.armPrewalk(targetA, Effort.Medium)).toBe(true);
+			const originalArm = created.session.getPrewalkState();
+			const switchSource = vi.spyOn(created.session, "setModelTemporary");
+
+			if (action === "arm") {
+				expect(created.session.armPrewalk(targetB, Effort.Medium)).toBe(false);
+			} else {
+				expect(await created.session.restartPrewalk(targetB, Effort.Low, targetB, Effort.Medium)).toBe("rejected");
+			}
+			expect(switchSource).not.toHaveBeenCalled();
+			expect(created.session.model).toBe(created.primary);
+			expect(created.session.getPrewalkState()).toBe(originalArm);
+			expect(created.session.getPrewalkState()?.target).toBe(targetA);
+		},
+	);
 
 	it("armPrewalk rejects a same-model same-effort no-op", async () => {
 		const model = modelOrThrow("claude-sonnet-4-5");

@@ -4794,7 +4794,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		} else {
 			// Save initial model, thinking level, and service tier for new sessions so they can be restored on resume.
 			if (model) {
-				const initialModel = `${model.provider}/${model.id}`;
+				const initialModel = formatModelStringWithRouting(model);
 				sessionManager.appendModelChange(initialModel);
 				// A deferred pattern's own retry role follows the explicit default entry, as
 				// the task executor records it, so chain lookup prefers the pattern's chain

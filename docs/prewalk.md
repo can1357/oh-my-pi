@@ -47,9 +47,9 @@ At startup, OMP resolves the target with the normal model-role and model-matchin
 
 `--no-prewalk` cannot be combined with `--prewalk` or `--prewalk-into`. An explicit `--prewalk-into @default` resolves against the default role from before `--model` overrides it.
 
-`/new` starts a fresh cycle using `prewalk.enabled` and `prewalk.into`, rather than inheriting a consumed handoff or the previous todo gate. Startup flags (`--prewalk`, `--no-prewalk`, `--prewalk-into`) apply only to the startup session; `/new` always uses the configured setting. When prewalk is enabled, the new session restores the previous planning model and thinking level after a handoff unless a later selection replaced them. If the planning model can no longer be used (for example, its credentials were removed), `/new` warns and stays on the current model. Resuming an existing session does not automatically re-arm prewalk.
+`/new` starts a fresh cycle using `prewalk.enabled` and `prewalk.into`, rather than inheriting a consumed handoff or the previous todo gate. Startup flags (`--prewalk`, `--no-prewalk`, `--prewalk-into`) apply only to the startup session; `/new` always uses the configured setting. When prewalk is enabled, or after an automatic handoff in any `prewalk.auto` mode, the new session restores the previous planning model and thinking level unless a later selection replaced them. If the planning model can no longer be used (for example, its credentials were removed), `/new` warns and stays on the current model. Resuming an existing session does not automatically re-arm prewalk.
 
-Any model or thinking-level change made after the handoff counts as a replacement, including the switches plan mode makes on entry and exit. Automatic retry fallback, fallback restoration, and context promotion do not; if the session is back on the handoff model and thinking level when you run `/new`, it still restores the planning model.
+Any model or thinking-level change made after the handoff counts as a replacement, including the switches plan mode makes on entry and exit. Automatic retry fallback, fallback restoration, and context promotion do not; if the session is back on the handoff model and thinking level when you run `/new`, it still restores the planning model. Context promotion updates an automatic handoff's target, so `/new` also restores from that promoted model.
 
 ## Handoff trigger
 
@@ -59,7 +59,9 @@ OMP switches at the completed assistant-turn boundary containing the first eligi
 
 Calls to other tools do not trigger the handoff. A read-only `xd://` device request routed through `write`, such as LSP navigation, also does not count; only device operations classified as workspace writes or execution count.
 
-The switch is one-shot: after the handoff, prewalk disarms itself, removes the planning nudge, and steers the target with an implementation checklist. It changes the session's active model and optional thinking level without rewriting model-role assignments. A same-model handoff can still change thinking; when the model and effective thinking configuration already match, prewalk disarms without switching.
+The switch is one-shot: after the handoff, prewalk disarms itself, removes the planning nudge, and steers the target with an implementation checklist. It changes the session's active model and optional thinking level without rewriting model-role assignments. A same-model handoff can still change thinking; when the model, pinned upstream route, and effective thinking configuration already match, prewalk disarms without switching.
+
+Pinned upstream routes are saved with model selections, including the initial startup model and explicit selections made while opening another session, and preserved when resuming a session or reviving a parked subagent.
 
 The handoff is recorded in the session, so resuming it, restoring it with `--restore`, or reviving a parked subagent continues on the handoff model and thinking level instead of returning to the planning model. A retry fallback taken after the handoff supersedes it, as for any session-local model. A revived subagent does not arm its prewalk again while it is still on that target.
 
@@ -83,7 +85,7 @@ Run these slash commands without restarting OMP:
 
 After a handoff, `/prewalk restart` immediately returns the session to `from` and re-arms the handoff to `into`; omitted arguments use `prewalk.from` and `prewalk.into`. Arguments apply to that command only and are not remembered. Selectors are resolved when the command runs, so role reassignments take effect, and neither role's persisted configuration changes.
 
-If prewalk is already armed, `/prewalk` leaves the existing target in place. `/prewalk restart` also preserves a matching arm; if its existing target differs from the requested `into`, restart is rejected before changing the active model. To choose a different target at startup, use `--prewalk-into`.
+If prewalk is already armed, `/prewalk` leaves the existing target in place. `/prewalk restart` preserves a matching target and effort as a fresh handoff attempt, so an older switch cannot consume a successful restart. If another operation consumes, disarms, or replaces that arm while the planning model is being restored, restart is rejected rather than reporting an inactive arm as successful. A different existing target from the requested `into` rejects restart before changing the active model. To choose a different target at startup, use `--prewalk-into`.
 
 ## Auto-prewalk
 
@@ -98,11 +100,11 @@ prewalk:
 
 `prewalk.autoTarget` (default `@smol`) takes a model pattern or role, resolved with the normal role and model-matching rules, including authentication.
 
-| `prewalk.auto`  | Behavior                                                                                                                                                                                             |
-| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `off` (default) | No classification; nothing changes.                                                                                                                                                                  |
-| `suggest`       | Classifies each new task and reports the decision only. Never arms prewalk or switches models.                                                                                                       |
-| `on`            | Classifies each new task. When the judge is confident the task fits and the target resolves with a usable credential, arms a handoff from the active model to the target; otherwise nothing changes. |
+| `prewalk.auto` | Behavior |
+| --- | --- |
+| `off` (default) | No classification or new automatic handoff. |
+| `suggest` | Classifies each new task and reports the decision only. Never arms a new handoff. |
+| `on` | Classifies each new task. When the judge is confident the task fits and the target resolves with a usable credential, arms a handoff from the active model to the target; otherwise nothing changes. |
 
 Run `suggest` for a while to see how it judges your prompts, then set `auto: on`. To plan on a stronger model, make it your active (`@default`) model; auto-prewalk hands off from whatever you are on.
 
@@ -137,9 +139,25 @@ Under `on`, a confident decision shows the usual `Prewalk: armed for …` notice
 
 ### One task at a time
 
-An automatic handoff belongs to the task that armed it. When the next task starts, OMP returns to the model and thinking level that task planned on, then judges the new task, so a `primary` task is never left on the handoff target. `/new` does the same. An auto arm that its task never used is dropped at the next task, which is judged on its own.
+An automatic handoff belongs to the task that armed it. When the next task starts, OMP returns to the model and thinking level that task planned on, then judges the new task if the mode allows it, so a `primary` task is never left on the handoff target. `/new` does the same. This restoration happens in every mode, including after changing `prewalk.auto` to `suggest` or `off`, or running `/prewalk off`; that command does not restore the model immediately. Plan mode and session-level auto-prewalk suppression also block only new automatic routing: they do not cancel restoration of a handoff that already occurred. Context promotion preserves this return to the original planning model. An auto arm that its task never used is dropped at the next task, which is judged on its own.
 
-An explicit model or thinking-level selection after the handoff takes ownership: the session stays where you put it. Handoffs made by `/prewalk`, `--prewalk`, or `prewalk.enabled` are never restored by auto-prewalk.
+An automatic retry fallback to a different model or pinned upstream route supersedes the old handoff while that fallback remains active. A matching model, route, and thinking level still restores normally.
+
+An ephemeral fallback can become active while an earlier resume-eligible selection is still completing. That fallback does not cancel the earlier selection's resume record; only a newer resume-eligible model selection supersedes it.
+
+Receipt ownership transfers only when model assignment succeeds. Opening a saved session or reloading it gives that transcript its own receipt ownership; delayed completions from the outgoing transcript cannot journal into it. `/clear` keeps model-selection ownership while discarding queued conversation work. A rolled-back switch restores the original ownership, so selections made in the rejected session cannot suppress the original session's eligible receipt.
+
+`/new` inherits the active model, so an already-published selection can finish recording its routed selector in the new session. Selections still loading metadata or credentials are canceled before publication.
+
+Switching to a different saved session discards the outgoing task's automatic handoff without restoring its planning model into the opened session. A cancelled or failed switch keeps the outgoing task's restoration intact.
+
+An explicit model or thinking-level selection while an automatic handoff is armed, switching, or complete takes ownership: a pending automatic handoff is canceled, and a switch already loading metadata yields to the selection. Explicit model publication cancels the pending automatic handoff before notifying subscribers, without waiting for model-dependent setup to finish, so it cannot deliver an obsolete implementation checklist. If the model has already been published, a later effort selection is preserved, including one made by a subscriber while a stale switch re-clamps effort. A manual `/prewalk` arm made during the switch also survives. Handoffs made by `/prewalk`, `--prewalk`, or `prewalk.enabled` are never restored by auto-prewalk.
+
+If an explicit model pick supersedes a manual handoff while it is switching, that consumed arm is cleared: another edit/write cannot replay it, and the obsolete switch does not record a completed handoff for `/new` to restore. A replacement arm created during the switch is left intact.
+
+A selection made while that attempt loads model metadata can prevent publication. The consumed arm is still cleared rather than retried on the next edit/write; arm `/prewalk` again to request another handoff.
+
+Trying to cycle thinking on a model without effort selectors makes no selection and does not cancel an automatic handoff.
 
 ### What is classified
 
@@ -153,7 +171,7 @@ A follow-up such as `do that` or `continue` cannot be judged alone, so the judge
 
 A negative, direct, or sub-threshold decision, or a classifier error, leaves the model, thinking level, and prewalk exactly as they were.
 
-A pending prewalk from `/prewalk`, `prewalk.enabled`, or `--prewalk` is never replaced, retargeted, or reclassified. `/prewalk off` and `--no-prewalk` keep auto-prewalk out of the session (for `--no-prewalk`, the startup session) until `/new`, and neither switches models. An explicit `/prewalk` or `/prewalk restart` takes over a pending auto arm, which then behaves like a manual one.
+A pending prewalk from `/prewalk`, `prewalk.enabled`, or `--prewalk` is never replaced, retargeted, or reclassified. `/prewalk off` and `--no-prewalk` keep auto-prewalk out of the session (for `--no-prewalk`, the startup session) until `/new`, and neither switches models. An explicit `/prewalk` takes over a pending auto arm, even when the requested target or effort differs; a matching `/prewalk restart` also takes manual ownership.
 
 ### Failure behavior
 
