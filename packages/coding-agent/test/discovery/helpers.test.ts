@@ -4,8 +4,36 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { clearCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
 import type { LoadContext } from "@oh-my-pi/pi-coding-agent/capability/types";
-import { loadFilesFromDir } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { loadFilesFromDir, parseBoolean, parseMcpBooleanField } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { parseFrontmatter, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+
+describe("parseBoolean", () => {
+	test("accepts real booleans and true/false strings by default", () => {
+		expect(parseBoolean(true)).toBe(true);
+		expect(parseBoolean("false")).toBe(false);
+		expect(parseBoolean("yes")).toBeUndefined();
+	});
+
+	// PR #9793 review: `parseMcpBooleanField` duplicated this function's
+	// boolean/trim/case-fold handling just to add "1"/"0"; the numeric option
+	// lets MCP callers opt into those forms through the same implementation
+	// instead of a second copy that can drift from it.
+	test("accepts numeric string forms only when requested", () => {
+		expect(parseBoolean("1", { numeric: true })).toBe(true);
+		expect(parseBoolean("0", { numeric: true })).toBe(false);
+		expect(parseBoolean("1")).toBeUndefined();
+	});
+});
+
+describe("parseMcpBooleanField", () => {
+	test("delegates to parseBoolean with numeric forms enabled", () => {
+		expect(parseMcpBooleanField(true)).toBe(true);
+		expect(parseMcpBooleanField("true")).toBe(true);
+		expect(parseMcpBooleanField("1")).toBe(true);
+		expect(parseMcpBooleanField("0")).toBe(false);
+		expect(parseMcpBooleanField("yes")).toBeUndefined();
+	});
+});
 
 describe("parseFrontmatter", () => {
 	const parse = (content: string) => parseFrontmatter(content, { source: "tests:frontmatter", level: "off" });

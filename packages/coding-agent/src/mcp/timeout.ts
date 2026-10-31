@@ -1,6 +1,6 @@
 import { logger } from "@oh-my-pi/pi-utils";
 
-const DEFAULT_MCP_TIMEOUT_MS = 30_000;
+export const DEFAULT_MCP_TIMEOUT_MS = 30_000;
 const MCP_TIMEOUT_ENV = "OMP_MCP_TIMEOUT_MS";
 const DEFAULT_MCP_STARTUP_TIMEOUT_MS = 250;
 const MCP_STARTUP_TIMEOUT_ENV = "OMP_MCP_STARTUP_TIMEOUT_MS";

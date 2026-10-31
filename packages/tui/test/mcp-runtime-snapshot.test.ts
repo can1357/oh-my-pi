@@ -133,6 +133,21 @@ describe("snapshotMcpRuntime", () => {
 		expect(snap.command).toBe("/usr/bin/shadowed-github");
 	});
 
+	test("a disconnected server with registered tools is not listed as unavailable", () => {
+		// A dormant lazy server: no connection, its cached tools registered as
+		// deferred entries that connect on first use.
+		const dormant: MCPRuntimeSource = {
+			getConnectionStatus: () => "disconnected",
+			getConnection: () => undefined,
+			getTools: () => [{ mcpServerName: "github", mcpToolName: "search_code", description: "Search code." }],
+		};
+		const snap = snapshotMcpRuntime(server(), dormant);
+		expect(snap.health).toBe("disconnected");
+		expect(formatMcpListHint(snap)).not.toBe("unavailable");
+		expect(formatMcpListHint(snap)).toContain("1 tool");
+		expect(formatMcpListHint(snapshotMcpRuntime(server(), sourceFor("disconnected")))).toBe("unavailable");
+	});
+
 	test("infers http from url when transport is omitted", () => {
 		expect(inferMcpTransport({ name: "remote", url: "https://example.test/mcp", _source: source })).toBe("http");
 		expect(inferMcpTransport({ type: "sse", url: "https://example.test/sse" })).toBe("sse");
