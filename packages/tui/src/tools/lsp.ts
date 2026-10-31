@@ -12,7 +12,7 @@ import type { NativeToolHead, NativeToolView, RenderResultOptions, ToolRenderer,
 import type { Component } from "../tui";
 import { Text } from "../components/text";
 import { getLanguageFromPath } from "../lang-from-path";
-import { highlightCode as highlightThemeCode, type Theme } from "../theme/theme";
+import { highlightCode as highlightThemeCode, isHighlightLanguage, type Theme } from "../theme/theme";
 import {
 	formatCount,
 	formatExpandHint,
@@ -615,6 +615,13 @@ function renderSymbols(symbolsMatch: RegExpMatchArray, lines: string[], expanded
 	};
 
 	const topLevelCount = symbols.filter(s => s.indent === 0).length;
+	// The glyph keeps the accent; the name and signature read as code in the file's language.
+	const lang = getLanguageFromPath(fileName);
+	const symbolName = (name: string): string => {
+		const plain = replaceTabs(name);
+		if (!isHighlightLanguage(lang)) return theme.fg("accent", plain);
+		return highlightThemeCode(plain, lang, theme)[0] ?? plain;
+	};
 
 	if (expanded) {
 		let output = `${icon} ${theme.fg("dim", `in ${fileName}`)}`;
@@ -626,7 +633,7 @@ function renderSymbols(symbolsMatch: RegExpMatchArray, lines: string[], expanded
 			const symIsLast = isLast[i];
 			const branch = symIsLast ? theme.tree.last : theme.tree.branch;
 			const detailPrefix = symIsLast ? "   " : `${theme.tree.vertical}  `;
-			output += `\n${prefix}${theme.fg("dim", branch)} ${theme.fg("accent", sym.icon)} ${theme.fg("accent", sym.name)}`;
+			output += `\n${prefix}${theme.fg("dim", branch)} ${theme.fg("accent", sym.icon)} ${symbolName(sym.name)}`;
 			output += `\n${prefix}${theme.fg("dim", detailPrefix)}${theme.fg("muted", `line ${sym.line}`)}`;
 		}
 		return output.split("\n");
@@ -641,7 +648,7 @@ function renderSymbols(symbolsMatch: RegExpMatchArray, lines: string[], expanded
 		const sym = topLevel[i];
 		const isLast = i === topLevel.length - 1 && topLevelCount <= 3;
 		const branch = isLast ? theme.tree.last : theme.tree.branch;
-		output += `\n ${theme.fg("dim", branch)} ${theme.fg("accent", sym.icon)} ${theme.fg("accent", sym.name)} ${theme.fg(
+		output += `\n ${theme.fg("dim", branch)} ${theme.fg("accent", sym.icon)} ${symbolName(sym.name)} ${theme.fg(
 			"muted",
 			`line ${sym.line}`,
 		)}`;

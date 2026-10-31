@@ -4,6 +4,9 @@ import { buildPathTree, isUrlLikePath, type PathTreeInput, walkPathTree } from "
 import type { TspTone } from "@oh-my-pi/pi-wire";
 import { code, col, keyed, span, text } from "../native/describe";
 import type { NativeNode } from "../native/node";
+import { getLanguageFromPath } from "../lang-from-path";
+import { replaceTabs } from "../render/render-utils";
+import { highlightCode, isHighlightLanguage, type Theme, type ThemeColor } from "../theme/theme";
 import { formatHashlineHeader } from "./hashline-format";
 import { fileRow } from "./native-view";
 
@@ -264,6 +267,117 @@ export function groupLineIndicesByBlank(rawLines: readonly string[]): number[][]
 		if (current.length > 0) groups.push(current);
 	}
 	return groups;
+}
+
+// =============================================================================
+// Code frames highlighted in their file's language (TUI renderers)
+// =============================================================================
+
+/** A code-frame row split after its rule: the gutter (match marker, line number, rule) and the source line. */
+interface CodeFrameRow {
+	gutter: string;
+	source: string;
+}
+
+/**
+ * Draw the code-frame rows of consecutive source lines: each gutter in
+ * `color`, the sources highlighted in `lang` as one run, so a multi-line
+ * string or comment keeps its colors. Without a language the sources take
+ * `color` too.
+ */
+function renderCodeFrameRun(
+	rows: readonly CodeFrameRow[],
+	lang: string | undefined,
+	color: ThemeColor,
+	theme: Theme,
+): string[] {
+	const sources = rows.map(row => replaceTabs(row.source));
+	const highlighted = isHighlightLanguage(lang) ? highlightCode(sources.join("\n"), lang, theme) : undefined;
+	return rows.map((row, index) => {
+		const source = highlighted?.[index] ?? theme.fg(color, sources[index]!);
+		return `${theme.fg(color, row.gutter)}${source}`;
+	});
+}
+
+/** A numbered code-frame row of search output, with its line number. */
+interface NumberedCodeFrame {
+	row: CodeFrameRow;
+	n: number;
+}
+
+function parseNumberedCodeFrame(line: string): NumberedCodeFrame | undefined {
+	const match = GROUPED_NUMBERED_LINE_RE.exec(line);
+	if (!match) return undefined;
+	const source = match[3]!;
+	return { row: { gutter: line.slice(0, line.length - source.length), source }, n: Number(match[2]) };
+}
+
+/** The file a grouped file header names, without its suffix and hashline tag: `## a.ts#3f2a (2)` → `a.ts`. */
+function groupedHeaderName(line: string): string {
+	const rest = GROUPED_HEADER_RE.exec(line)?.[2]?.trimEnd() ?? "";
+	return rest.replace(HEADER_SUFFIX_RE, "").replace(HEADER_HASH_TAG_RE, "");
+}
+
+/**
+ * Styled code-frame rows of grouped search output, highlighted in each owning
+ * file's language. A run of consecutive line numbers in one file highlights
+ * together on its first request; a gap row, a jump in line numbers or another
+ * file starts a new run. Rows without a numbered code frame (headers, gap rows,
+ * notes) return undefined, for the caller to style.
+ */
+export function createCodeFrameStyler(
+	lines: readonly string[],
+	contexts: readonly GroupedLineContext[],
+	color: ThemeColor,
+	theme: Theme,
+): (index: number) => string | undefined {
+	// Each body row's language: its owning file's, from the resolved path or else its file header's name.
+	const langs: (string | undefined)[] = [];
+	let headerLang: string | undefined;
+	for (let index = 0; index < lines.length; index++) {
+		const ctx = contexts[index]!;
+		if (ctx.kind === "content") {
+			langs.push(ctx.filePath ? getLanguageFromPath(ctx.filePath) : headerLang);
+			continue;
+		}
+		headerLang =
+			ctx.kind === "file" && !ctx.isUrl ? getLanguageFromPath(groupedHeaderName(lines[index]!)) : undefined;
+		langs.push(undefined);
+	}
+
+	const frames: (NumberedCodeFrame | null)[] = [];
+	const frameAt = (index: number): NumberedCodeFrame | null => {
+		let frame = frames[index];
+		if (frame === undefined) {
+			frame = contexts[index]!.kind === "content" ? (parseNumberedCodeFrame(lines[index]!) ?? null) : null;
+			frames[index] = frame;
+		}
+		return frame;
+	};
+	// Whether the row at `index` continues the run of the row above it.
+	const continuesRun = (index: number): boolean => {
+		if (index <= 0 || langs[index] !== langs[index - 1]) return false;
+		const frame = frameAt(index);
+		const above = frameAt(index - 1);
+		return frame !== null && above !== null && frame.n === above.n + 1;
+	};
+
+	const styled: string[] = [];
+	return index => {
+		if (frameAt(index) === null) return undefined;
+		const cached = styled[index];
+		if (cached !== undefined) return cached;
+		let start = index;
+		while (continuesRun(start)) start--;
+		let end = index + 1;
+		while (end < lines.length && continuesRun(end)) end++;
+		const runRows: CodeFrameRow[] = [];
+		for (let row = start; row < end; row++) runRows.push(frameAt(row)!.row);
+		renderCodeFrameRun(runRows, langs[index], color, theme).forEach((row, offset) => {
+			styled[start + offset] = row;
+		});
+		return styled[index];
+	};
 }
 
 // =============================================================================
