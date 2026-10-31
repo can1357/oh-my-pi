@@ -200,6 +200,18 @@ describe("EpisodicGraph fact scope (e7)", () => {
 		confidence: 0.7,
 	});
 
+	it("keeps the original owner when a session-scoped fact is re-stored from another session", () => {
+		withGraph(graph => {
+			graph.storeFact(fact("fact_owner"), "mem_owner", "session-a", "session");
+			graph.storeFact(fact("fact_owner"), "mem_owner", "session-b", "session");
+			const row = graph.db
+				.query("SELECT session_id, scope FROM facts WHERE fact_id = 'fact_owner'")
+				.get() as { session_id: string; scope: string };
+			expect(row.session_id).toBe("session-a");
+			expect(row.scope).toBe("session");
+		});
+	});
+
 	it("stores fresh facts with global scope and keeps the scope of re-stored facts", () => {
 		withGraph(graph => {
 			graph.storeFact(fact("fact_scope_new"), "mem_scope_1", "test");

@@ -1,6 +1,8 @@
 import type { Database } from "bun:sqlite";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
+
 import { closeQuietly, type DatabasePath, openDatabase } from "../../db";
+import { backupDatabase } from "./database-backup";
 
 /**
  * E7: add the missing `scope` column to the `facts` table.
@@ -29,14 +31,12 @@ export const FACTS_SCOPE_COLUMN = "scope";
 export const FACTS_SCOPE_DEFAULT = "session";
 export const FACTS_SCOPE_GLOBAL = "global";
 
-export interface MigrationOptions {
+export interface FactsScopeMigrationOptions {
 	readonly dbPath: DatabasePath;
 	readonly dryRun?: boolean;
 	readonly backup?: boolean;
 	readonly logFn?: (line: string) => void;
 }
-
-type SerializableDatabase = Database & { serialize(): Uint8Array };
 
 interface ColumnInfoRow {
 	name: string;
@@ -51,23 +51,13 @@ function factColumns(db: Database): string[] {
 	return rows.map(row => row.name);
 }
 
-export function hasPendingMigration(db: Database): boolean {
+export function hasPendingFactsScopeMigration(db: Database): boolean {
 	if (!hasTable(db, "facts")) return false;
 	return !factColumns(db).includes(FACTS_SCOPE_COLUMN);
 }
 
-function copyDatabase(source: DatabasePath, destination: string): void {
-	let db: Database | null = null;
-	try {
-		db = openDatabase(source, { create: false, readwrite: false, pragmas: false });
-		writeFileSync(destination, (db as SerializableDatabase).serialize());
-	} finally {
-		closeQuietly(db);
-	}
-}
-
-export function migrate(
-	dbPathOrOptions: DatabasePath | MigrationOptions,
+export function migrateFactsScope(
+	dbPathOrOptions: DatabasePath | FactsScopeMigrationOptions,
 	dryRun = false,
 	backup = true,
 	logFn: (line: string) => void = console.log,
@@ -89,7 +79,7 @@ export function migrate(
 	let pending = false;
 	let columns: string[] = [];
 	try {
-		pending = hasPendingMigration(db);
+		pending = hasPendingFactsScopeMigration(db);
 		columns = hasTable(db, "facts") ? factColumns(db) : [];
 	} finally {
 		closeQuietly(db);
@@ -109,7 +99,7 @@ export function migrate(
 		const backupPath = `${dbPath}.pre_e7_backup`;
 		if (existsSync(backupPath)) effectiveLog(`Backup already exists at ${backupPath}; leaving as-is.`);
 		else {
-			copyDatabase(dbPath, backupPath);
+			backupDatabase(dbPath, backupPath);
 			effectiveLog(`Backup written to ${backupPath}`);
 		}
 	}
@@ -118,7 +108,7 @@ export function migrate(
 	try {
 		db.run("BEGIN IMMEDIATE");
 		try {
-			if (!hasPendingMigration(db)) {
+			if (!hasPendingFactsScopeMigration(db)) {
 				db.run("ROLLBACK");
 				effectiveLog("Nothing to migrate (facts.scope appeared between probe and lock).");
 				return 0;

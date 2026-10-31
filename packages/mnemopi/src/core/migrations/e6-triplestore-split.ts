@@ -1,6 +1,8 @@
 import type { Database } from "bun:sqlite";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
+
 import { closeQuietly, type DatabasePath, openDatabase } from "../../db";
+import { backupDatabase } from "./database-backup";
 
 export const ANNOTATION_KINDS = ["mentions", "fact", "occurred_on", "has_source"] as const;
 export type AnnotationKind = (typeof ANNOTATION_KINDS)[number];
@@ -15,8 +17,6 @@ export interface MigrationOptions {
 export interface PendingConnection {
 	query<T = unknown>(sql: string): { get(...params: unknown[]): T | null };
 }
-type SerializableDatabase = Database & { serialize(): Uint8Array };
-
 interface TripleCandidateRow {
 	id: number;
 	subject: string;
@@ -38,16 +38,6 @@ function placeholders(count: number): string {
 
 function hasTable(db: Database, name: string): boolean {
 	return db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== null;
-}
-
-function copyDatabase(source: DatabasePath, destination: string): void {
-	let db: Database | null = null;
-	try {
-		db = openDatabase(source, { create: false, readwrite: false, pragmas: false });
-		writeFileSync(destination, (db as SerializableDatabase).serialize());
-	} finally {
-		closeQuietly(db);
-	}
 }
 
 function initAnnotations(db: Database): void {
@@ -186,7 +176,7 @@ export function migrate(
 		const backupPath = `${dbPath}.pre_e6_backup`;
 		if (existsSync(backupPath)) effectiveLog(`Backup already exists at ${backupPath}; leaving as-is.`);
 		else {
-			copyDatabase(dbPath, backupPath);
+			backupDatabase(dbPath, backupPath);
 			effectiveLog(`Backup written to ${backupPath}`);
 		}
 	}

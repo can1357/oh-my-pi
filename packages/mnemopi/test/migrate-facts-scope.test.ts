@@ -9,7 +9,10 @@ import { factRecall } from "@oh-my-pi/pi-mnemopi/core/beam/recall";
 import { initBeam } from "@oh-my-pi/pi-mnemopi/core/beam/schema";
 import { sourceMemoryScope } from "@oh-my-pi/pi-mnemopi/core/beam/store";
 import { EpisodicGraph } from "@oh-my-pi/pi-mnemopi/core/episodic-graph";
-import { hasPendingMigration, migrate } from "@oh-my-pi/pi-mnemopi/core/migrations/e7-facts-scope";
+import {
+	hasPendingFactsScopeMigration as hasPendingMigration,
+	migrateFactsScope as migrate,
+} from "@oh-my-pi/pi-mnemopi/core/migrations/e7-facts-scope";
 // The exports map exposes the barrel file via its explicit path ("./*" -> "./src/*.ts");
 // the directory shorthand is not a valid subpath, so import the index file directly.
 import * as migrationsBarrel from "@oh-my-pi/pi-mnemopi/core/migrations/index";
