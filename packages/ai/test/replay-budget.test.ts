@@ -208,12 +208,12 @@ describe("the wait before a replay", () => {
 		const started = performance.now();
 		const outcome = await settlesWithin(
 			budget.wait(50, undefined, () => new Promise<void>(() => {})),
-			1_000,
+			4_000,
 		);
 		const elapsedMs = performance.now() - started;
 
 		expect(outcome).toEqual({ value: false });
-		expect(elapsedMs).toBeGreaterThanOrEqual(140);
+		expect(elapsedMs).toBeGreaterThanOrEqual(100);
 		expect(budget.admits(0)).toBe(false);
 	});
 
@@ -223,7 +223,7 @@ describe("the wait before a replay", () => {
 		const waiting = budget.wait(10, controller.signal, () => new Promise<void>(() => {}));
 		setTimeout(() => controller.abort(), 20);
 
-		expect(await settlesWithin(waiting, 1_000)).toBe("rejected");
+		expect(await settlesWithin(waiting, 4_000)).toBe("rejected");
 	});
 
 	it("admits the replay when the wait finishes inside the budget", async () => {

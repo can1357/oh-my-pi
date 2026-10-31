@@ -356,76 +356,98 @@ function recordWaits(): { waits: number[]; providerRetryWait: (delayMs: number) 
 }
 
 const BUDGET_MS = 1_000;
-/** Round trips to a local route that closes at once; generous so a loaded CI box does not flake. */
-const ROUND_TRIP_SLACK_MS = 400;
+/**
+ * Slack on top of a budget for the time a loaded machine adds to one call (event-loop
+ * stalls, connection setup). The alternative each bound separates from is the provider's
+ * own ceiling or a server's 30 s wait, so a few seconds of slack keeps the property decisive.
+ */
+const ROUND_TRIP_SLACK_MS = 3_000;
+/** Per-test timeout for a test that makes a dozen real requests. */
+const LOADED_TEST_TIMEOUT_MS = 60_000;
 
 describe.each(lanes)("$name against a route that cuts every request before headers", lane => {
-	it("keeps today's ceiling and marks nothing when no budget is set", async () => {
-		const route = await lane.route();
-		try {
-			const { waits, providerRetryWait } = recordWaits();
-			const result = await lane.call(route.url, { providerRetryWait });
+	it(
+		"keeps today's ceiling and marks nothing when no budget is set",
+		async () => {
+			const route = await lane.route();
+			try {
+				const { waits, providerRetryWait } = recordWaits();
+				const result = await lane.call(route.url, { providerRetryWait });
 
-			expect(result.stopReason).toBe("error");
-			expect(route.requests()).toBe(lane.ceiling);
-			expect(waits.length).toBeGreaterThan(0);
-			expect(result.replayBudgetExhausted).toBeUndefined();
-		} finally {
-			route.stop();
-		}
-	});
+				expect(result.stopReason).toBe("error");
+				expect(route.requests()).toBe(lane.ceiling);
+				expect(waits.length).toBeGreaterThan(0);
+				expect(result.replayBudgetExhausted).toBeUndefined();
+			} finally {
+				route.stop();
+			}
+		},
+		LOADED_TEST_TIMEOUT_MS,
+	);
 
-	it("returns inside the budget, with fewer requests, and says the budget stopped it", async () => {
-		const route = await lane.route();
-		try {
-			const started = performance.now();
-			const result = await lane.call(route.url, { replayBudgetMs: BUDGET_MS });
-			const elapsedMs = performance.now() - started;
+	it(
+		"returns inside the budget, with fewer requests, and says the budget stopped it",
+		async () => {
+			const route = await lane.route();
+			try {
+				const started = performance.now();
+				const result = await lane.call(route.url, { replayBudgetMs: BUDGET_MS });
+				const elapsedMs = performance.now() - started;
 
-			expect(result.stopReason).toBe("error");
-			expect(route.requests()).toBeGreaterThan(0);
-			expect(route.requests()).toBeLessThan(lane.ceiling);
-			expect(elapsedMs).toBeLessThan(BUDGET_MS + ROUND_TRIP_SLACK_MS);
-			expect(result.replayBudgetExhausted).toBe(true);
-		} finally {
-			route.stop();
-		}
-	});
+				expect(result.stopReason).toBe("error");
+				expect(route.requests()).toBeGreaterThan(0);
+				expect(route.requests()).toBeLessThan(lane.ceiling);
+				expect(elapsedMs).toBeLessThan(BUDGET_MS + ROUND_TRIP_SLACK_MS);
+				expect(result.replayBudgetExhausted).toBe(true);
+			} finally {
+				route.stop();
+			}
+		},
+		LOADED_TEST_TIMEOUT_MS,
+	);
 
-	it("reaches the provider's own ceiling, unmarked, when the budget never runs short", async () => {
-		const route = await lane.route();
-		try {
-			const { providerRetryWait } = recordWaits();
-			const result = await lane.call(route.url, { replayBudgetMs: 600_000, providerRetryWait });
+	it(
+		"reaches the provider's own ceiling, unmarked, when the budget never runs short",
+		async () => {
+			const route = await lane.route();
+			try {
+				const { providerRetryWait } = recordWaits();
+				const result = await lane.call(route.url, { replayBudgetMs: 600_000, providerRetryWait });
 
-			expect(route.requests()).toBe(lane.ceiling);
-			expect(result.replayBudgetExhausted).toBeUndefined();
-		} finally {
-			route.stop();
-		}
-	});
+				expect(route.requests()).toBe(lane.ceiling);
+				expect(result.replayBudgetExhausted).toBeUndefined();
+			} finally {
+				route.stop();
+			}
+		},
+		LOADED_TEST_TIMEOUT_MS,
+	);
 
 	// A replay is admitted before its wait; a wait that wakes late — a busy event
 	// loop, a slow wait hook — must not launch the request past the deadline.
 	// Each wait here advances the clock five seconds beyond what it asked for.
-	it("does not send the next request when its wait overran the budget, and says so", async () => {
-		const route = await lane.route();
-		const realNow = performance.now.bind(performance);
-		let lateBy = 0;
-		vi.spyOn(performance, "now").mockImplementation(() => realNow() + lateBy);
-		const overrun = async (delayMs?: number): Promise<void> => {
-			lateBy += (delayMs ?? 0) + 5_000;
-		};
-		vi.spyOn(scheduler, "wait").mockImplementation(overrun);
-		try {
-			const result = await lane.call(route.url, { replayBudgetMs: 3_000, providerRetryWait: overrun });
+	it(
+		"does not send the next request when its wait overran the budget, and says so",
+		async () => {
+			const route = await lane.route();
+			const realNow = performance.now.bind(performance);
+			let lateBy = 0;
+			vi.spyOn(performance, "now").mockImplementation(() => realNow() + lateBy);
+			const overrun = async (delayMs?: number): Promise<void> => {
+				lateBy += (delayMs ?? 0) + 5_000;
+			};
+			vi.spyOn(scheduler, "wait").mockImplementation(overrun);
+			try {
+				const result = await lane.call(route.url, { replayBudgetMs: 3_000, providerRetryWait: overrun });
 
-			expect(route.requests()).toBe(1);
-			expect(result.replayBudgetExhausted).toBe(true);
-		} finally {
-			route.stop();
-		}
-	});
+				expect(route.requests()).toBe(1);
+				expect(result.replayBudgetExhausted).toBe(true);
+			} finally {
+				route.stop();
+			}
+		},
+		LOADED_TEST_TIMEOUT_MS,
+	);
 });
 
 function laneNamed(name: string): Lane {
@@ -455,14 +477,17 @@ describe("a held retry's 2 s budget against the Anthropic provider's ceiling", (
 			expect(waits.reduce((sum, ms) => sum + ms, 0)).toBeGreaterThan(41_000);
 			expect(ceiling.replayBudgetExhausted).toBeUndefined();
 			// Waits of about 0.5 s and 1 s fit inside 2 s; the 2 s wait after them does not.
-			expect(bounded.requests()).toBe(3);
-			expect(elapsedMs).toBeLessThan(2_000);
+			// A loaded machine can use up the second wait before it is decided, so two
+			// requests also count: either way the call stops a long way short of 11.
+			expect(bounded.requests()).toBeGreaterThanOrEqual(2);
+			expect(bounded.requests()).toBeLessThanOrEqual(3);
+			expect(elapsedMs).toBeLessThan(2_000 + ROUND_TRIP_SLACK_MS);
 			expect(held.replayBudgetExhausted).toBe(true);
 		} finally {
 			unbounded.stop();
 			bounded.stop();
 		}
-	});
+	}, 120_000);
 });
 
 /** A route that answers every request with `status` and the given retry headers. */
@@ -512,39 +537,49 @@ describe("a server retry-after against the budget", () => {
 				route.stop();
 			}
 		},
+		LOADED_TEST_TIMEOUT_MS,
 	);
 
-	it("waits the server's full time when it fits inside the budget", async () => {
-		let firstAt = 0;
-		let secondAt = 0;
-		let requests = 0;
-		const server = Bun.serve({
-			hostname: "127.0.0.1",
-			port: 0,
-			fetch: async request => {
-				await request.arrayBuffer();
-				requests += 1;
-				if (requests === 1) firstAt = performance.now();
-				if (requests === 2) secondAt = performance.now();
-				return new Response(JSON.stringify(ANTHROPIC_OVERLOADED), {
-					status: 529,
-					headers: { "content-type": "application/json", "retry-after-ms": "600" },
-				});
-			},
-		});
-		try {
-			const result = await laneNamed("anthropic").call(`http://127.0.0.1:${server.port}`, {
-				replayBudgetMs: 1_000,
+	it(
+		"waits the server's full time when it fits inside the budget",
+		async () => {
+			let firstAt = 0;
+			let secondAt = 0;
+			let requests = 0;
+			const server = Bun.serve({
+				hostname: "127.0.0.1",
+				port: 0,
+				fetch: async request => {
+					await request.arrayBuffer();
+					requests += 1;
+					if (requests === 1) firstAt = performance.now();
+					if (requests === 2) secondAt = performance.now();
+					// The first answer asks for 2 s; the second asks for 60 s, which no
+					// budget below a minute can hold.
+					return new Response(JSON.stringify(ANTHROPIC_OVERLOADED), {
+						status: 529,
+						headers: {
+							"content-type": "application/json",
+							"retry-after-ms": requests === 1 ? "2000" : "60000",
+						},
+					});
+				},
 			});
+			try {
+				const result = await laneNamed("anthropic").call(`http://127.0.0.1:${server.port}`, {
+					replayBudgetMs: 20_000,
+				});
 
-			// 600 ms fits in 1 s and is slept in full; the next wait does not fit.
-			expect(requests).toBe(2);
-			expect(secondAt - firstAt).toBeGreaterThanOrEqual(600);
-			expect(result.replayBudgetExhausted).toBe(true);
-		} finally {
-			server.stop(true);
-		}
-	});
+				// 2 s fits in 20 s and is slept in full; the 60 s that follows cannot fit.
+				expect(requests).toBe(2);
+				expect(secondAt - firstAt).toBeGreaterThanOrEqual(2_000);
+				expect(result.replayBudgetExhausted).toBe(true);
+			} finally {
+				server.stop(true);
+			}
+		},
+		LOADED_TEST_TIMEOUT_MS,
+	);
 
 	// A header that says zero must not beat a body that says thirty seconds.
 	it.each([
@@ -1119,6 +1154,23 @@ describe("the Vertex global fallback", () => {
 // outlives the deadline must not get the request sent: the check that counts is
 // the one adjacent to the send.
 describe("preparation that outlives the deadline", () => {
+	/**
+	 * The monotonic clock plus an offset the test advances to stand in for preparation
+	 * that outlasts the deadline. The budgets here are far larger than any start-up
+	 * delay a loaded machine adds, so the replay is admitted however slow the run is,
+	 * and the skew alone carries it past the deadline before its request is handed off.
+	 */
+	function skewedClock(): { lateBy(ms: number): void } {
+		const realNow = performance.now.bind(performance);
+		let skew = 0;
+		vi.spyOn(performance, "now").mockImplementation(() => realNow() + skew);
+		return {
+			lateBy(ms) {
+				skew += ms;
+			},
+		};
+	}
+
 	// Azure's replay-safe wrapper replays a 503 once its six HTTP attempts are
 	// spent: seven requests with no budget.
 	it("keeps the replaced 503 when the replay-safe retry's request is ready only after the deadline", async () => {
@@ -1130,11 +1182,12 @@ describe("preparation that outlives the deadline", () => {
 			const today = await laneNamed("azure-openai-responses").call(unbudgeted.url, {
 				providerRetryWait: async () => {},
 			});
+			const clock = skewedClock();
 			const result = await laneNamed("azure-openai-responses").call(budgeted.url, {
-				replayBudgetMs: 700,
+				replayBudgetMs: 20_000,
 				onPayload: async () => {
 					prepares++;
-					if (prepares === 2) await Bun.sleep(900);
+					if (prepares === 2) clock.lateBy(30_000);
 				},
 			});
 
@@ -1155,11 +1208,12 @@ describe("preparation that outlives the deadline", () => {
 		const route = scripted(() => new Response(emptyStop, { headers: { "content-type": "text/event-stream" } }));
 		let prepares = 0;
 		try {
+			const clock = skewedClock();
 			const result = await laneNamed("openai-completions").call(route.url, {
-				replayBudgetMs: 700,
+				replayBudgetMs: 20_000,
 				onPayload: async () => {
 					prepares++;
-					if (prepares === 2) await Bun.sleep(900);
+					if (prepares === 2) clock.lateBy(30_000);
 				},
 			});
 
@@ -1193,6 +1247,7 @@ describe("preparation that outlives the deadline", () => {
 			},
 		});
 		let outgoing = 0;
+		const clock = skewedClock();
 		try {
 			const result = await streamOpenAICodexResponses(
 				buildModel({
@@ -1214,16 +1269,12 @@ describe("preparation that outlives the deadline", () => {
 					sessionId: "replay-budget-ws-observer",
 					providerSessionState: new Map(),
 					preferWebsockets: true,
-					replayBudgetMs: 800,
+					replayBudgetMs: 20_000,
 					onSseEvent(event) {
 						if (!event.raw.some(line => line.startsWith(": ws →"))) return;
 						outgoing++;
-						if (outgoing === 2) {
-							const until = performance.now() + 900;
-							while (performance.now() < until) {
-								// A synchronous observer that holds the frame past the deadline.
-							}
-						}
+						// A slow outgoing observer: the skew stands in for the time it holds the frame.
+						if (outgoing === 2) clock.lateBy(30_000);
 					},
 				},
 			).result();

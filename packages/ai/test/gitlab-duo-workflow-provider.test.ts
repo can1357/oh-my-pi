@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -1374,6 +1374,12 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 	// replaced stands, marked.
 	it("does not write the startRequest frame of an admitted restart whose create outlasted the budget", async () => {
 		let createCount = 0;
+		// The monotonic clock plus an offset the restart's create advances: the budget is
+		// far larger than a loaded machine's start-up delay, so the restart is admitted
+		// however slow the run is, and the skew alone carries it past the deadline.
+		let skew = 0;
+		const realNow = performance.now.bind(performance);
+		const clock = vi.spyOn(performance, "now").mockImplementation(() => realNow() + skew);
 		const fetchImpl: FetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
 			const url = String(input);
 			if (url.includes("/api/graphql")) {
@@ -1393,8 +1399,8 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 			if (url.includes("/api/v4/ai/duo_workflows/workflows/")) return Response.json({});
 			if (url.includes("/api/v4/ai/duo_workflows/workflows") && init?.method === "POST") {
 				createCount++;
-				// The restart's create is slow: it ends after the 700 ms budget.
-				if (createCount === 2) await Bun.sleep(900);
+				// The restart's create outlasts the budget: the skew is its duration.
+				if (createCount === 2) skew += 30_000;
 				return Response.json({ id: `workflow-${createCount}` });
 			}
 			return new Response("{}", { status: 404 });
@@ -1427,13 +1433,18 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 			return socket;
 		};
 
-		const result = await streamGitLabDuoWorkflow(model, context, {
-			apiKey: "[REDACTED]",
-			rootNamespaceId: "gid://gitlab/Group/1",
-			fetch: fetchImpl,
-			webSocketFactory,
-			replayBudgetMs: 700,
-		}).result();
+		let result: Awaited<ReturnType<ReturnType<typeof streamGitLabDuoWorkflow>["result"]>>;
+		try {
+			result = await streamGitLabDuoWorkflow(model, context, {
+				apiKey: "[REDACTED]",
+				rootNamespaceId: "gid://gitlab/Group/1",
+				fetch: fetchImpl,
+				webSocketFactory,
+				replayBudgetMs: 20_000,
+			}).result();
+		} finally {
+			clock.mockRestore();
+		}
 
 		expect(createCount).toBe(2);
 		expect(sockets).toHaveLength(2);

@@ -7,7 +7,7 @@
  * Each budgeted case has an unset control, because the budget changes nothing
  * for a caller that does not set it.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { clearCopilotIntegrationCache } from "@oh-my-pi/pi-ai/providers/github-copilot-headers";
 import {
@@ -63,7 +63,25 @@ function failure(status: number, message: string, headers: Record<string, string
 	);
 }
 
+/**
+ * The monotonic clock plus an offset a test advances to stand in for a dependency that
+ * outlasts the deadline. The budgets that use it are far larger than any start-up delay
+ * a loaded machine adds, so a replay is admitted however slow the run is, and the skew
+ * alone carries it past the deadline before its request is handed off.
+ */
+function skewedClock(): { lateBy(ms: number): void } {
+	const realNow = performance.now.bind(performance);
+	let skew = 0;
+	vi.spyOn(performance, "now").mockImplementation(() => realNow() + skew);
+	return {
+		lateBy(ms) {
+			skew += ms;
+		},
+	};
+}
+
 afterEach(() => {
+	vi.restoreAllMocks();
 	resetRequestCompressionForTesting();
 	clearCopilotIntegrationCache();
 	clearGitLabDuoDirectAccessCache();
@@ -98,12 +116,13 @@ describe("a token fetch between the decision and the inference request", () => {
 		process.env.GOOGLE_VERTEX_LOCATION = "global";
 		__resetVertexTokenCache();
 		let tokens = 0;
+		const clock = replayBudgetMs === undefined ? undefined : skewedClock();
 		let inference = 0;
 		const server = route(async (_n, path) => {
 			if (path === "/token") {
 				tokens++;
-				// The refresh before the replay is slow: it crosses the budget.
-				if (tokens === 2) await scheduler.wait(1_500);
+				// The refresh before the replay outlasts the budget: the skew is its duration.
+				if (tokens === 2) clock?.lateBy(30_000);
 				return Response.json({ access_token: "vertex-test-token", expires_in: 3600 });
 			}
 			inference++;
@@ -134,7 +153,7 @@ describe("a token fetch between the decision and the inference request", () => {
 	}
 
 	it("keeps Vertex Claude's replay checked until its inference request, past a slow token refresh", async () => {
-		const { tokens, inference, result } = await vertexCall(1_200);
+		const { tokens, inference, result } = await vertexCall(20_000);
 
 		expect(tokens).toBe(2);
 		expect(inference).toBe(1);
@@ -155,6 +174,7 @@ describe("a token fetch between the decision and the inference request", () => {
 		let tokens = 0;
 		let inference = 0;
 		let prepares = 0;
+		const clock = skewedClock();
 		const server = route(async (_n, path) => {
 			if (path === "/token") {
 				tokens++;
@@ -166,9 +186,9 @@ describe("a token fetch between the decision and the inference request", () => {
 		try {
 			const result = await streamSimple(model, context, {
 				apiKey: async ctx => (ctx.error === undefined ? "first-key" : "second-key"),
-				replayBudgetMs: 700,
+				replayBudgetMs: 20_000,
 				onPayload: async () => {
-					if (++prepares === 2) await scheduler.wait(900);
+					if (++prepares === 2) clock.lateBy(30_000);
 				},
 				fetch: (input, init) =>
 					fetch(server.url + (String(input).includes("/direct_access") ? "/token" : "/inference"), init),
