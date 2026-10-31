@@ -114,6 +114,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"nonMessageTokens",
 		"historyRewriteTokensRemoved",
 		"elidedOutputTokens",
+		"demotedReasoningBlocks",
 		"compactionEpoch",
 		"lastMessageTimestamp",
 		"historyRewriteAt",

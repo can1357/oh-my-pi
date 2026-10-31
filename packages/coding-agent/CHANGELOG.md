@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a Claude turn ending in `Refusal (reasoning_extraction)` because it carried another model's reasoning as text: the turn is now retried once without that reasoning, and the session stops sending it to Claude ([#7241](https://github.com/can1357/oh-my-pi/issues/7241))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

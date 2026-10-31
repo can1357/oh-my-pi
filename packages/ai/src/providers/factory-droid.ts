@@ -474,6 +474,7 @@ function streamMessagesWire(a: Attempt, inner: Model<"anthropic-messages">): Ass
 		// its WorkOS bearer token in Authorization.
 		isOAuth: false,
 		anthropicPrefixMismatchBehavior: options?.anthropicPrefixMismatchBehavior,
+		omitDemotedReasoning: options?.omitDemotedReasoning,
 		anthropicCompaction: options?.anthropicCompaction,
 		userProfileId: options?.userProfileId,
 		metadata: options?.metadata,
