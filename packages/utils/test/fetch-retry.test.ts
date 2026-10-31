@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import {
 	extractRetryHint,
 	fetchWithRetry,
@@ -7,6 +7,10 @@ import {
 	longestRetryHint,
 	RetryRefusedError,
 } from "@oh-my-pi/pi-utils/fetch-retry";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 /** Await a rejection and narrow it to `Error` without asserting a shape. */
 async function rejectionOf(promise: Promise<unknown>): Promise<Error> {
@@ -423,6 +427,71 @@ describe("longestRetryHint", () => {
 	it("takes the longer of the headers and the body", () => {
 		expect(longestRetryHint(new Headers({ "retry-after-ms": "30000" }), "Please retry in 1ms")).toBe(30_000);
 		expect(longestRetryHint(new Headers({ "retry-after-ms": "0" }), "Please retry in 30s")).toBe(30_000);
+	});
+
+	// `retry-after: <HTTP date>` in text. The three forms RFC 9110 names are read,
+	// the zone-less asctime form as GMT: a machine in another zone would otherwise
+	// read the same text as a different instant.
+	describe("an HTTP date in the body", () => {
+		const at = Date.UTC(2026, 9, 31, 12, 0, 0);
+		const imf = (ms: number): string => new Date(ms).toUTCString();
+		const rfc850 = (ms: number): string => {
+			const date = new Date(ms);
+			const day = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][date.getUTCDay()];
+			const month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][
+				date.getUTCMonth()
+			];
+			const pad = (value: number): string => String(value).padStart(2, "0");
+			return `${day}, ${pad(date.getUTCDate())}-${month}-${String(date.getUTCFullYear()).slice(2)} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())} GMT`;
+		};
+		const asctime = (ms: number): string =>
+			imf(ms).replace(
+				/^(\w{3}), (\d{2}) (\w{3}) (\d{4}) (\S+) GMT$/,
+				(_match, day, date, month, year, time) => `${day} ${month} ${Number(date)} ${time} ${year}`,
+			);
+
+		// A zone whose offset is not zero, so a zone-less date read as local time
+		// names a different instant than the same text read as GMT.
+		const savedZone = process.env.TZ;
+		beforeEach(() => {
+			process.env.TZ = "America/New_York";
+		});
+		afterEach(() => {
+			if (savedZone === undefined) delete process.env.TZ;
+			else process.env.TZ = savedZone;
+		});
+
+		it.each([
+			["IMF-fixdate", imf],
+			["RFC 850", rfc850],
+			["asctime, read as GMT", asctime],
+		])("reads %s", (_name, format) => {
+			vi.spyOn(Date, "now").mockReturnValue(at);
+			expect(longestRetryHint(undefined, `retry-after: ${format(at + 30_000)}`)).toBe(30_000);
+		});
+
+		it("beats a short delta beside it, in either order", () => {
+			vi.spyOn(Date, "now").mockReturnValue(at);
+			expect(longestRetryHint(undefined, `retry-after: ${imf(at + 30_000)}; Please retry in 1ms`)).toBe(30_000);
+			expect(longestRetryHint(undefined, `Please retry in 1ms; retry-after=${imf(at + 30_000)}`)).toBe(30_000);
+		});
+
+		it("reads a past date as an immediate retry", () => {
+			vi.spyOn(Date, "now").mockReturnValue(at);
+			expect(longestRetryHint(undefined, `retry-after: ${imf(at - 60_000)}`)).toBe(0);
+		});
+
+		it("is read in a header the same way as in text", () => {
+			vi.spyOn(Date, "now").mockReturnValue(at);
+			expect(longestRetryHint(new Headers({ "retry-after": asctime(at + 30_000) }))).toBe(30_000);
+		});
+
+		// The retry loop without a gate keeps today's reading: a date in text names no
+		// wait there, so the default backoff applies.
+		it("is still not read without a gate", () => {
+			vi.spyOn(Date, "now").mockReturnValue(at);
+			expect(extractRetryHint(undefined, `retry-after: ${imf(at + 30_000)}`)).toBeUndefined();
+		});
 	});
 
 	it("names no wait when nothing names one", () => {

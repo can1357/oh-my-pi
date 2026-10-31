@@ -88,13 +88,38 @@ describe("the transport handoff", () => {
 		expect(() => budget.handoff()).not.toThrow();
 	});
 
-	it("checks the deadline before a connection opens without consuming the arm", () => {
+	it("checks the deadline at a checkpoint without consuming the replay", () => {
 		const clock = fakeClock();
 		const budget = budgetOf(100);
 		budget.admits(0);
-		budget.connecting();
+		budget.checkpoint();
 		clock.advance(150);
 		expect(() => budget.handoff()).toThrow(RetryRefusedError);
+	});
+
+	it("refuses at a checkpoint once an armed replay's deadline has passed, carrying what it replaces", () => {
+		const clock = fakeClock();
+		const budget = budgetOf(100);
+		const replaced = new Error("503 overloaded");
+		budget.admits(0);
+		budget.arm(replaced);
+		clock.advance(150);
+
+		let refusal: unknown;
+		try {
+			budget.checkpoint();
+		} catch (error) {
+			refusal = error;
+		}
+
+		expect(restoreReplaced(refusal)).toBe(replaced);
+	});
+
+	it("lets an unarmed request through a checkpoint after the deadline", () => {
+		const clock = fakeClock();
+		const budget = budgetOf(100);
+		clock.advance(500);
+		expect(() => budget.checkpoint()).not.toThrow();
 	});
 
 	it("gates a fetch once, however many layers ask", async () => {
@@ -108,6 +133,60 @@ describe("the transport handoff", () => {
 		expect(budget.gateFetch(gated)).toBe(gated);
 		await gated("https://example.test");
 		expect(calls).toBe(1);
+	});
+
+	// The replay's own request is the one the provider sends through its gate.
+	// Whatever passes a checkpoint on the way (a token fetch, an inner library
+	// wrapper) must leave the replay armed for it.
+	it("keeps the replay armed through a request that passes a checkpoint, and refuses the request behind it", async () => {
+		const clock = fakeClock();
+		const budget = budgetOf(100);
+		const replaced = new Error("503 overloaded");
+		const sent: string[] = [];
+		// The provider's fetch: a token fetch, then the inference request.
+		const inner: FetchImpl = async input => {
+			budget.checkpoint();
+			sent.push(`token ${String(input)}`);
+			clock.advance(150);
+			budget.checkpoint();
+			sent.push(`inference ${String(input)}`);
+			return new Response("ok");
+		};
+		budget.admits(0);
+		budget.arm(replaced);
+
+		let refusal: unknown;
+		try {
+			await budget.gateFetch(inner)("https://example.test");
+		} catch (error) {
+			refusal = error;
+		}
+
+		expect(sent).toEqual(["token https://example.test"]);
+		expect(restoreReplaced(refusal)).toBe(replaced);
+	});
+
+	it("releases the replay once the call it gates settles, so the attempt's later requests pass", async () => {
+		const clock = fakeClock();
+		const budget = budgetOf(100);
+		budget.admits(0);
+		await budget.gateFetch(async () => new Response("ok"))("https://example.test");
+		clock.advance(500);
+		expect(() => budget.checkpoint()).not.toThrow();
+		expect(() => budget.handoff()).not.toThrow();
+	});
+
+	it("releases the replay when the call it gates fails", async () => {
+		const clock = fakeClock();
+		const budget = budgetOf(100);
+		budget.admits(0);
+		await expect(
+			budget.gateFetch(async () => {
+				throw new Error("socket hang up");
+			})("https://example.test"),
+		).rejects.toThrow("socket hang up");
+		clock.advance(500);
+		expect(() => budget.checkpoint()).not.toThrow();
 	});
 });
 
@@ -159,6 +238,23 @@ describe("the wait before a replay", () => {
 		const waits: number[] = [];
 		expect(await budget.wait(500, undefined, async ms => void waits.push(ms))).toBe(false);
 		expect(waits).toEqual([]);
+	});
+
+	it("replayAfterDelay arms a replay whose named wait fits, and carries what it replaces", async () => {
+		const clock = fakeClock();
+		const budget = budgetOf(1_000);
+		const replaced = new Error("503");
+		expect(await budget.replayAfterDelay(100, replaced, undefined, async ms => void clock.advance(ms))).toBe(true);
+		clock.advance(2_000);
+		expect(() => budget.checkpoint()).toThrow(RetryRefusedError);
+	});
+
+	it("replayAfterDelay refuses a named wait that would end past the budget, without waiting", async () => {
+		const budget = budgetOf(1_000);
+		const waits: number[] = [];
+		expect(await budget.replayAfterDelay(30_000, undefined, undefined, async ms => void waits.push(ms))).toBe(false);
+		expect(waits).toEqual([]);
+		expect(budget.admits(0)).toBe(false);
 	});
 });
 

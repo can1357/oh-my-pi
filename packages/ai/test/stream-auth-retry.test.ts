@@ -1087,4 +1087,61 @@ describe("streamSimple resolver auth retry under a replay budget", () => {
 		expect(result.errorMessage).toContain("401");
 		expect(result.replayBudgetExhausted).toBe(true);
 	});
+
+	// A provider can throw the rejection instead of reporting it as an error
+	// event; its wait is then on the error's own response headers, with no text.
+	describe("a thrown 401 whose only wait is in its headers", () => {
+		function registerThrowingApi(keys: unknown[]): void {
+			registerCustomApi(
+				API,
+				(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+					pushKey(keys, options);
+					const stream = new AssistantMessageEventStream();
+					queueMicrotask(() =>
+						keys.length === 1
+							? stream.fail(
+									Object.assign(new Error("401 authentication_error"), {
+										status: 401,
+										headers: new Headers({ "retry-after": "30" }),
+									}),
+								)
+							: ok(stream),
+					);
+					return stream;
+				},
+				SOURCE_ID,
+			);
+		}
+
+		async function call(replayBudgetMs: number | undefined): Promise<{ keys: unknown[]; message: AssistantMessage }> {
+			const keys: unknown[] = [];
+			registerThrowingApi(keys);
+			const stream = streamSimple(model(), context, {
+				apiKey: async ctx => (ctx.error === undefined ? "old-key" : "refresh-key"),
+				...(replayBudgetMs === undefined ? {} : { replayBudgetMs }),
+			});
+			let thrown: unknown;
+			try {
+				for await (const _event of stream) {
+					// drain
+				}
+			} catch (error) {
+				thrown = error;
+			}
+			return { keys, message: thrown === undefined ? await stream.result() : assistantError(String(thrown)) };
+		}
+
+		it("does not retry inside the server's 30 s window against a 2 s budget", async () => {
+			const { keys } = await call(2_000);
+
+			expect(keys).toEqual(["old-key"]);
+		});
+
+		it("retries with the next credential when no budget is set", async () => {
+			const { keys, message } = await call(undefined);
+
+			expect(keys).toEqual(["old-key", "refresh-key"]);
+			expect(message.stopReason).toBe("stop");
+		});
+	});
 });

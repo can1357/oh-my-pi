@@ -12,7 +12,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ANTHROPIC_THINKING, mapAnthropicToolChoice } from "../stream";
 import type { Context, Model, ModelSpec, SimpleStreamOptions, ThinkingControlMode } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { inheritReplayBudget } from "../utils/replay-budget";
+import { inheritReplayBudget, withReplayBudget } from "../utils/replay-budget";
 import { createProviderErrorMessage } from "./error-message";
 import { streamAnthropic, streamOpenAICompletions } from "./register-builtins";
 
@@ -49,6 +49,8 @@ export function streamOpenAIAnthropicShim(
 	config: OpenAIAnthropicShimConfig,
 ): AssistantMessageEventStream {
 	const stream = new AssistantMessageEventStream();
+	// The replay budget's clock starts at this call; the delegate inherits it.
+	if (options) options = withReplayBudget(options);
 	const format = options?.format ?? config.defaultFormat;
 	// The resolver form of `apiKey` is resolved upstream in `streamSimple`;
 	// this shim only ever receives a static bearer string.

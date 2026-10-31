@@ -73,7 +73,13 @@ import { AssistantMessageEventStream } from "./utils/event-stream";
 import { applyGlyphCodec } from "./utils/glyph-codec";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
 import { withThinkingLoopGuard } from "./utils/thinking-loop";
-import { inheritReplayBudget, ReplayBudget, type ReplayArm, withReplayBudget } from "./utils/replay-budget";
+import {
+	inheritReplayBudget,
+	longestServerWaitMs,
+	ReplayBudget,
+	type ReplayArm,
+	withReplayBudget,
+} from "./utils/replay-budget";
 import { withTransportFetch } from "./utils/transport-fetch";
 
 function isGoogleVertexAuthenticatedModel(model: Model<Api>): boolean {
@@ -831,6 +837,9 @@ export function stream<TApi extends Api>(
 	context: Context,
 	options?: OptionsForApi<TApi>,
 ): AssistantMessageEventStream {
+	// The replay budget's clock starts here, before header resolution or a wait
+	// for an in-flight slot: a dependency must not delay the caller's deadline.
+	if (options) options = withReplayBudget(options);
 	if (model.resolveHeaders) {
 		return withResolvedModelHeaders(model, options?.signal, resolvedModel => stream(resolvedModel, context, options));
 	}
@@ -1388,10 +1397,27 @@ function streamSimpleRequest<TApi extends Api>(
 				);
 				if (nextKey === undefined) break;
 				// Another credential re-sends the request: a replay. Under a budget it
-				// must still begin inside it, and its first request is checked again
-				// at handoff; refused either way, the failure in hand stands, marked.
-				if (replayBudget && !replayBudget.admits(0)) break;
-				const arm = replayBudget?.arm(undefined);
+				// must still begin inside it after the longest wait the failure names,
+				// and its request is checked again when it is sent; refused either way,
+				// the failure in hand stands, marked.
+				let arm: ReplayArm | undefined;
+				if (replayBudget) {
+					// `failure.error` carries the failure's text (a buffered provider
+					// failure's message includes the server's named wait) and, for a
+					// thrown failure, its response headers.
+					const serverWaitMs = longestServerWaitMs(failure.error) ?? 0;
+					if (
+						!(await replayBudget.replayAfterDelay(
+							serverWaitMs,
+							undefined,
+							signal,
+							requestOptions.providerRetryWait,
+						))
+					) {
+						break;
+					}
+					arm = replayBudget.arm(undefined);
+				}
 				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity, arm);
 				if (arm) replayBudget?.disarm(arm);
 				if (next === "refused") break;

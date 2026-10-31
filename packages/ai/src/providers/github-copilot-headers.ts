@@ -6,8 +6,9 @@ import {
 	parseGitHubCopilotApiKey,
 } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
-import { $env, findRetryRefusal, logger } from "@oh-my-pi/pi-utils";
+import { $env, findRetryRefusal, logger, longestRetryHint } from "@oh-my-pi/pi-utils";
 import type { FetchImpl, Message } from "../types";
+import type { ReplayBudget } from "../utils/replay-budget";
 /**
  * Infer whether the current request to Copilot is user-initiated or agent-initiated.
  * Accepts `unknown[]` because providers may pass pre-converted message shapes.
@@ -201,10 +202,11 @@ export function wrapFetchForCopilotFallback(
 	cacheSnapshot?: string | null,
 	/**
 	 * The call's replay budget (`StreamOptions.replayBudgetMs`). The identity
-	 * retry is a further request: refused — before it is sent, or by the
-	 * transport's handoff check — it returns the denial as it came.
+	 * retry is a further request: it waits the longest wait the denial names
+	 * when that fits the budget, and refused — before it is sent, or by the
+	 * transport's check — it returns the denial as it came.
 	 */
-	retryGate?: (delayMs: number) => boolean,
+	replayBudget?: ReplayBudget,
 ): FetchImpl {
 	const inner = base ?? fetch;
 	if (!enabled) return inner;
@@ -220,15 +222,20 @@ export function wrapFetchForCopilotFallback(
 		const response = await inner(input, init);
 		/**
 		 * Resends with `headers` after `response` was denied. Under a budget the
-		 * denial stays readable until the resend clears the transport's handoff
-		 * check; `undefined` when the check refused it.
+		 * resend must fit, the denial's named wait included, and the denial stays
+		 * readable until the resend clears the transport's check; `undefined`
+		 * when the budget refused it.
 		 */
 		const resendAfterDenial = async (headers: Headers): Promise<Response | undefined> => {
-			if (!retryGate) {
+			if (!replayBudget) {
 				try {
 					await response.arrayBuffer();
 				} catch {}
 				return inner(input, { ...init, headers });
+			}
+			const serverWaitMs = longestRetryHint(response, await response.clone().text()) ?? 0;
+			if (!(await replayBudget.replayAfterDelay(serverWaitMs, undefined, init?.signal ?? undefined, undefined))) {
+				return undefined;
 			}
 			let retry: Response;
 			try {
@@ -248,7 +255,6 @@ export function wrapFetchForCopilotFallback(
 		const outgoingId = outgoing.get("Copilot-Integration-Id");
 		if (outgoingId === COPILOT_CHAT_INTEGRATION_ID) {
 			if (await isCopilotIdentityDenied(response)) {
-				if (retryGate && !retryGate(0)) return response;
 				logger.warn(
 					`GitHub Copilot chat identity denied (HTTP ${response.status}); retrying once as the Copilot CLI`,
 				);
@@ -267,7 +273,6 @@ export function wrapFetchForCopilotFallback(
 		if (outgoingId === cliIntegrationId && cacheKey) {
 			if (cachedBeforeRequest !== cliIntegrationId) return response;
 			if (await isCopilotIdentityDenied(response)) {
-				if (retryGate && !retryGate(0)) return response;
 				logger.warn(
 					`GitHub Copilot CLI identity denied (HTTP ${response.status}); retrying once as ${COPILOT_CHAT_INTEGRATION_ID}`,
 				);

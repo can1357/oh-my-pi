@@ -1908,7 +1908,7 @@ async function openCodexWebSocketTransport(
 	const onOwned = () => {
 		if (websocketState.acceptedSteering === steered) websocketState.acceptedSteering = undefined;
 	};
-	replayBudget?.connecting();
+	replayBudget?.checkpoint();
 	let websocketConnection = await getOrCreateCodexWebSocketConnection(
 		websocketState,
 		requestContext.turnState,
@@ -1956,7 +1956,7 @@ async function openCodexWebSocketTransport(
 			websocketState.connection = undefined;
 			resetCodexWebSocketAppendState(websocketState);
 			chainedBody = requestContext.transformedBody;
-			replayBudget?.connecting();
+			replayBudget?.checkpoint();
 			websocketConnection = await getOrCreateCodexWebSocketConnection(
 				websocketState,
 				requestContext.turnState,
@@ -2095,7 +2095,7 @@ async function openCodexSseTransport(
 				wrapFetchForRequestCompression(
 					gateFetch(requestContext.replayBudget, options?.fetch ?? fetch),
 					model,
-					requestContext.replayBudget?.admits,
+					requestContext.replayBudget,
 				),
 				requestContext.replayBudget,
 				replayOf,

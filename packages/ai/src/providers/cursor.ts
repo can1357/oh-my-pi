@@ -1498,13 +1498,13 @@ function streamCursorWithWireMode(
 			if (transportMode === "http2") {
 				const proxyUrl = getProxyForUrl(model.provider, new URL(baseUrl));
 				let client: http2.ClientHttp2Session;
-				replayBudget?.connecting();
+				replayBudget?.checkpoint();
 				if (proxyUrl) {
 					const tlsSocket = await connectProxiedSocket(proxyUrl, baseUrl, {
 						signal: options?.signal,
 						timeoutMs: CURSOR_PROXY_TUNNEL_TIMEOUT_MS,
 					});
-					replayBudget?.connecting();
+					replayBudget?.checkpoint();
 					client = http2.connect(baseUrl, {
 						createConnection: () => tlsSocket,
 					});

@@ -15,6 +15,7 @@ import {
 } from "@oh-my-pi/pi-ai/providers/github-copilot-headers";
 import { COPILOT_CHAT_INTEGRATION_ID } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import type { Message } from "@oh-my-pi/pi-ai/types";
+import { ReplayBudget } from "@oh-my-pi/pi-ai/utils/replay-budget";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 describe("inferCopilotInitiator", () => {
@@ -448,24 +449,54 @@ describe("wrapFetchForCopilotFallback", () => {
 
 	// The identity retry is a second request inside one call: a caller's replay
 	// budget that it ignored would be spent without anyone above knowing.
-	it("returns the denial instead of retrying when the call's replay budget refuses", async () => {
+	it("returns the denial instead of retrying when the call's replay budget is spent", async () => {
 		const denied = new Response("{}", { status: 403 });
 		const fetchMock = vi.fn(async () => denied);
-		const asked: number[] = [];
 		const wrapped = wrapFetchForCopilotFallback(
 			fetchMock as unknown as typeof fetch,
 			true,
 			undefined,
 			undefined,
 			undefined,
-			delayMs => {
-				asked.push(delayMs);
-				return false;
-			},
+			ReplayBudget.from(0),
 		);
 		await expect(wrapped(...chatRequest())).resolves.toBe(denied);
 		expect(fetchMock).toHaveBeenCalledTimes(1);
-		expect(asked).toEqual([0]);
+	});
+
+	// A server that named a wait on the denial is not retried sooner.
+	it("returns the denial when the server's named wait does not fit the budget", async () => {
+		const denied = new Response("{}", { status: 403, headers: { "retry-after": "30" } });
+		const fetchMock = vi.fn(async () => denied);
+		const wrapped = wrapFetchForCopilotFallback(
+			fetchMock as unknown as typeof fetch,
+			true,
+			undefined,
+			undefined,
+			undefined,
+			ReplayBudget.from(2_000),
+		);
+		await expect(wrapped(...chatRequest())).resolves.toBe(denied);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("retries once as the Copilot CLI when a budget is set and the denial names no wait", async () => {
+		const seen: (string | null)[] = [];
+		const fetchMock = vi.fn(async (_input: unknown, init?: RequestInit) => {
+			seen.push(new Headers(init?.headers).get("Copilot-Integration-Id"));
+			return new Response("{}", { status: seen.length === 1 ? 403 : 200 });
+		});
+		const wrapped = wrapFetchForCopilotFallback(
+			fetchMock as unknown as typeof fetch,
+			true,
+			undefined,
+			undefined,
+			undefined,
+			ReplayBudget.from(60_000),
+		);
+		const result = await wrapped(...chatRequest());
+		expect(result.status).toBe(200);
+		expect(seen).toEqual([COPILOT_CHAT_INTEGRATION_ID, "copilot-developer-cli"]);
 	});
 
 	it("retries a chat-default 400 model_not_supported once as the Copilot CLI", async () => {

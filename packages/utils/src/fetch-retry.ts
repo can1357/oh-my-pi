@@ -30,6 +30,12 @@ const RETRY_AFTER_MS_BODY_PATTERN = /\bretry-after-ms\s*[:=]\s*([0-9]+)\b/i;
 // Legacy text forms: "retry-after: 30" / "retry-after=<HTTP date>" and the
 // `x-ratelimit-reset[-ms]` counters folded into a message.
 const RETRY_AFTER_BODY_PATTERN = /retry-after\s*[:=]\s*([^\s,;]+)/i;
+// `retry-after: <HTTP date>` in text: the three forms RFC 9110 names (IMF-fixdate,
+// the obsolete RFC 850 form, ANSI C asctime). The delta pattern above stops at the
+// first space or comma, so it cannot capture a date; only the budget reading
+// (`longestRetryHint`) uses this, so the retry loop without a gate reads as before.
+const RETRY_AFTER_DATE_BODY_PATTERN =
+	/retry-after\s*[:=]\s*((?:[A-Za-z]{3,9},\s+\d{1,2}[ -][A-Za-z]{3}[ -]\d{2,4}\s+\d{2}:\d{2}:\d{2}|[A-Za-z]{3}\s+[A-Za-z]{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})(?:\s+(?:GMT|UTC))?)/i;
 const RESET_MS_BODY_PATTERN = /x-ratelimit-reset-ms\s*[:=]\s*(\d+)/i;
 const RESET_BODY_PATTERN = /x-ratelimit-reset\s*[:=]\s*(\d+)/i;
 
@@ -162,8 +168,8 @@ function headerRetryHints(headers: Headers): number[] {
 	read("retry-after", value => {
 		const seconds = Number(value);
 		if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
-		const dateMs = Date.parse(value);
-		return Number.isNaN(dateMs) ? undefined : Math.max(0, dateMs - Date.now());
+		const dateMs = httpDateMs(value);
+		return dateMs === undefined ? undefined : Math.max(0, dateMs - Date.now());
 	});
 	read("x-ratelimit-reset-ms", value => resetCounterMs(Number(value), 1));
 	read("x-ratelimit-reset", value => resetCounterMs(Number(value), 1000));
@@ -172,6 +178,17 @@ function headerRetryHints(headers: Headers): number[] {
 		return seconds === undefined ? undefined : seconds * 1000;
 	});
 	return hints;
+}
+
+/**
+ * The instant an HTTP date names, in ms since the epoch, or `undefined` when
+ * `value` is not a date. HTTP dates are GMT: the asctime form carries no zone
+ * and would otherwise be read in the machine's local zone.
+ */
+function httpDateMs(value: string): number | undefined {
+	const text = value.trim();
+	const ms = Date.parse(/(?:GMT|UTC|Z|[+-]\d{2}:?\d{2})$/i.test(text) ? text : `${text} GMT`);
+	return Number.isNaN(ms) ? undefined : ms;
 }
 
 function nonNegative(value: number): number | undefined {
@@ -316,6 +333,12 @@ function bodyRetryHint(
 		} else {
 			const dateMs = Date.parse(value);
 			if (!Number.isNaN(dateMs)) considerClamped(dateMs - Date.now());
+		}
+	}
+	if (everyOccurrence) {
+		for (const dateMatch of occurrences(RETRY_AFTER_DATE_BODY_PATTERN, body, true)) {
+			const dateMs = httpDateMs(dateMatch[1]!);
+			if (dateMs !== undefined) considerClamped(dateMs - Date.now());
 		}
 	}
 

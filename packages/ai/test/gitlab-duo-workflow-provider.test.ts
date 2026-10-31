@@ -1298,6 +1298,151 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 		expect(result.replayBudgetExhausted).toBe(true);
 	});
 
+	// The step-limit restart creates a fresh workflow that replays the turn like
+	// any other restart: a spent replay budget keeps the failed run, marked, and
+	// creates no second workflow and writes no second startRequest.
+	it("does not restart on a fresh workflow at the step limit once the replay budget is spent", async () => {
+		let createCount = 0;
+		const fetchImpl: FetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
+			const url = String(input);
+			if (url.includes("/api/graphql")) {
+				return Response.json({
+					data: {
+						aiChatAvailableModels: {
+							defaultModel: { name: "Claude", ref: "claude_sonnet_4_6_vertex" },
+							selectableModels: [],
+							pinnedModel: null,
+						},
+					},
+				});
+			}
+			if (url.includes("/api/v4/ai/duo_workflows/direct_access")) {
+				return Response.json({ gitlab_rails: { token: "rails-token" } });
+			}
+			if (url.includes("/api/v4/ai/duo_workflows/workflows/")) return Response.json({});
+			if (url.includes("/api/v4/ai/duo_workflows/workflows") && init?.method === "POST") {
+				createCount++;
+				return Response.json({ id: `workflow-${createCount}` });
+			}
+			return new Response("{}", { status: 404 });
+		};
+		const sockets: GitLabDuoWorkflowWebSocketLike[] = [];
+		const startFrames: string[] = [];
+		const webSocketFactory: GitLabDuoWorkflowWebSocketFactory = () => {
+			const socket: GitLabDuoWorkflowWebSocketLike = {
+				onopen: null,
+				onmessage: null,
+				onerror: null,
+				onclose: null,
+				send(data: string) {
+					if (data.includes("startRequest")) startFrames.push(data);
+				},
+				close() {},
+			};
+			sockets.push(socket);
+			queueMicrotask(() => {
+				socket.onopen?.(new Event("open"));
+				socket.onmessage?.(
+					new MessageEvent("message", {
+						data: JSON.stringify({
+							status: "FAILED",
+							error: "The workflow reached its maximum step limit and could not complete. Please try again with a more focused goal.",
+						}),
+					}),
+				);
+			});
+			return socket;
+		};
+
+		const result = await streamGitLabDuoWorkflow(model, context, {
+			apiKey: "[REDACTED]",
+			rootNamespaceId: "gid://gitlab/Group/1",
+			fetch: fetchImpl,
+			webSocketFactory,
+			replayBudgetMs: 0,
+		}).result();
+
+		expect(createCount).toBe(1);
+		expect(sockets).toHaveLength(1);
+		expect(startFrames).toHaveLength(1);
+		expect(result.replayBudgetExhausted).toBe(true);
+	});
+
+	// A restart admitted inside the budget whose workflow create outlasts it: the
+	// replay's own request is the startRequest frame, checked when it is written.
+	// The new socket opens, the frame is refused, and the run it would have
+	// replaced stands, marked.
+	it("does not write the startRequest frame of an admitted restart whose create outlasted the budget", async () => {
+		let createCount = 0;
+		const fetchImpl: FetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
+			const url = String(input);
+			if (url.includes("/api/graphql")) {
+				return Response.json({
+					data: {
+						aiChatAvailableModels: {
+							defaultModel: { name: "Claude", ref: "claude_sonnet_4_6_vertex" },
+							selectableModels: [],
+							pinnedModel: null,
+						},
+					},
+				});
+			}
+			if (url.includes("/api/v4/ai/duo_workflows/direct_access")) {
+				return Response.json({ gitlab_rails: { token: "rails-token" } });
+			}
+			if (url.includes("/api/v4/ai/duo_workflows/workflows/")) return Response.json({});
+			if (url.includes("/api/v4/ai/duo_workflows/workflows") && init?.method === "POST") {
+				createCount++;
+				// The restart's create is slow: it ends after the 700 ms budget.
+				if (createCount === 2) await Bun.sleep(900);
+				return Response.json({ id: `workflow-${createCount}` });
+			}
+			return new Response("{}", { status: 404 });
+		};
+		const sockets: GitLabDuoWorkflowWebSocketLike[] = [];
+		const startFrames: string[] = [];
+		const webSocketFactory: GitLabDuoWorkflowWebSocketFactory = () => {
+			const socket: GitLabDuoWorkflowWebSocketLike = {
+				onopen: null,
+				onmessage: null,
+				onerror: null,
+				onclose: null,
+				send(data: string) {
+					if (data.includes("startRequest")) startFrames.push(data);
+				},
+				close() {},
+			};
+			sockets.push(socket);
+			queueMicrotask(() => {
+				socket.onopen?.(new Event("open"));
+				socket.onmessage?.(
+					new MessageEvent("message", {
+						data: JSON.stringify({
+							status: "FAILED",
+							error: "There was an error processing your request in the Duo Agent Platform, please contact support if the issue persists.",
+						}),
+					}),
+				);
+			});
+			return socket;
+		};
+
+		const result = await streamGitLabDuoWorkflow(model, context, {
+			apiKey: "[REDACTED]",
+			rootNamespaceId: "gid://gitlab/Group/1",
+			fetch: fetchImpl,
+			webSocketFactory,
+			replayBudgetMs: 700,
+		}).result();
+
+		expect(createCount).toBe(2);
+		expect(sockets).toHaveLength(2);
+		expect(startFrames).toHaveLength(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("There was an error processing your request");
+		expect(result.replayBudgetExhausted).toBe(true);
+	});
+
 	it("surfaces the generic processing error after the bounded retry is exhausted", async () => {
 		let createCount = 0;
 		const fetchImpl: FetchImpl = async (input: string | URL | Request, init?: RequestInit) => {

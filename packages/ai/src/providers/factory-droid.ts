@@ -34,7 +34,7 @@ import type {
 } from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { inheritReplayBudget } from "../utils/replay-budget";
+import { inheritReplayBudget, withReplayBudget } from "../utils/replay-budget";
 import { type AnthropicOptions, shouldStripThinkingHistory } from "./anthropic";
 import { mapStainlessArch, mapStainlessOs } from "./anthropic-headers";
 import { createProviderErrorMessage } from "./error-message";
@@ -664,6 +664,8 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 	options?: FactoryDroidOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
+	// The replay budget's clock starts at this call; every delegate inherits it.
+	if (options) options = withReplayBudget(options);
 
 	(async () => {
 		// Sole credential path: the OMP-stored WorkOS session from `/login

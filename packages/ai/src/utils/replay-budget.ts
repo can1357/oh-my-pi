@@ -5,8 +5,8 @@ import { getHeadersFromError } from "./retry-after";
 import { type RetryWaitHook, waitForRetry } from "./retry-wait";
 
 /**
- * A replay admitted by a {@link ReplayBudget} whose request has not yet been
- * handed to the transport. `refused` is set when the deadline passed first.
+ * A replay admitted by a {@link ReplayBudget} whose own request has not yet
+ * been handed to the transport. `refused` is set when the deadline passed first.
  */
 export interface ReplayArm {
 	readonly replaced: unknown;
@@ -27,30 +27,38 @@ interface ReplayBudgetCarrier {
 
 /**
  * One streaming call's {@link StreamOptions.replayBudgetMs}, measured on the
- * monotonic clock from the start of the call.
+ * monotonic clock from the start of the call: every public entry point
+ * establishes it before any awaited work, so no dependency can delay its start.
  *
  * A replay goes through three steps, each of which can refuse it:
  * 1. a rung decides to replay and asks {@link admits} with the wait ahead of
  *    it — the server's longest named wait included ({@link delayFor});
  * 2. the wait itself runs through {@link wait}, raced against the deadline and
  *    the caller's signal;
- * 3. the transport handoff — the call into `fetch` ({@link gateFetch}), the
- *    WebSocket write, the HTTP/2 stream open — calls {@link handoff}, which
- *    refuses an admitted replay whose deadline passed while it was prepared.
+ * 3. the replay's own request is checked at the moment it is handed to the
+ *    transport.
  *
- * Step 3 is what makes the deadline hold against work between the decision
- * and the send: payload hooks, signing, compression, diagnostics. A refusal
- * there throws a `RetryRefusedError` carrying the failure the replay would have
- * replaced ({@link arm}); the layer that admitted the replay answers with that
- * failure ({@link restoreReplaced}). What the transport does with a request
- * after the handoff — a caller-supplied `fetch` that queues it, a socket that
- * buffers it — is outside the budget's reach.
+ * An admission arms the replay, and the arm stays held until the replay's own
+ * request has been sent: the provider's send gate ({@link gateFetch}) releases
+ * it when that call settles, and an explicit transport site (the HTTP/2 stream
+ * open, the WebSocket frame write) consumes it with {@link handoff}. Until
+ * then every request that passes a checkpoint is checked against the deadline
+ * — the provider's send gate, the innermost transport fetch
+ * ({@link checkpoint}), a connection being opened — and none of them releases
+ * the arm. So a token fetch or a library wrapper that runs between the
+ * decision and the send neither spends the replay's check nor stands in for
+ * it: the request that reaches the transport last is still checked.
  *
- * The budget governs replays, not the requests inside one attempt: the
- * handoff gate only checks a request an admission armed, so a token fetch or
- * an append that belongs to an attempt already on the wire goes out. A replay
- * begins when its first request is handed off. A refusal latches for the rest
- * of the call.
+ * A refusal throws a `RetryRefusedError` carrying the failure the replay would
+ * have replaced ({@link arm}); the layer that admitted the replay answers with
+ * that failure ({@link restoreReplaced}). What the transport does with a
+ * request after the handoff — a caller-supplied `fetch` that queues it, a
+ * socket that buffers it — is outside the budget's reach.
+ *
+ * Requests made while no replay is armed — the call's first attempt, and
+ * requests a replay makes after its own request was sent (a streaming append,
+ * a diagnostic lookup) — are not checked. A refusal latches for the rest of the
+ * call.
  */
 export class ReplayBudget {
 	readonly #deadline: number;
@@ -89,8 +97,8 @@ export class ReplayBudget {
 
 	/**
 	 * Whether a replay that starts after waiting `delayMs` begins inside the
-	 * budget. An admission arms the next transport handoff, which checks the
-	 * deadline again. A refusal latches: every later replay in the call is
+	 * budget. An admission arms the replay, so its request is checked again
+	 * when it is sent. A refusal latches: every later replay in the call is
 	 * refused too. Bound, so it can be handed to `fetchWithRetry` as its
 	 * `retryGate`.
 	 */
@@ -104,8 +112,8 @@ export class ReplayBudget {
 	};
 
 	/**
-	 * Names the failure the next handed-off request replaces. A refusal at that
-	 * handoff throws a `RetryRefusedError` carrying it.
+	 * Names the failure the armed replay replaces. A refusal before the
+	 * replay's request is sent throws a `RetryRefusedError` carrying it.
 	 */
 	arm(replaced: unknown): ReplayArm {
 		const arm: ReplayArm = { replaced, refused: false };
@@ -113,34 +121,34 @@ export class ReplayBudget {
 		return arm;
 	}
 
-	/** Drops `arm` when no request consumed it. */
+	/** Drops `arm` when it is still held. */
 	disarm(arm: ReplayArm): void {
 		if (this.#arm === arm) this.#arm = undefined;
 	}
 
 	/**
-	 * Called immediately before a request is handed to the transport. An
-	 * admitted replay is checked once more and consumed; a request no admission
-	 * armed — the call's first, or one inside an attempt — passes.
+	 * Checks an armed replay against the deadline without releasing it. For a
+	 * request that may not be the replay's own (a token fetch, an inner library
+	 * wrapper, the innermost transport fetch) and before opening a connection:
+	 * refused, it throws; passed, the replay's own send is still checked later.
+	 */
+	readonly checkpoint = (): void => {
+		const arm = this.#arm;
+		if (arm === undefined || (!this.#refused && performance.now() < this.#deadline)) return;
+		this.#arm = undefined;
+		this.#refuseArm(arm);
+	};
+
+	/**
+	 * Called by an explicit transport site immediately before it sends the
+	 * replay's own request (an HTTP/2 stream open, a WebSocket frame): checks
+	 * the armed replay and consumes it, so the attempt's later requests pass.
 	 */
 	readonly handoff = (): void => {
 		const arm = this.#arm;
 		if (arm === undefined) return;
 		this.#arm = undefined;
 		if (!this.#refused && performance.now() < this.#deadline) return;
-		this.#refuseArm(arm);
-	};
-
-	/**
-	 * Called before opening a connection for a request (a WebSocket handshake,
-	 * an HTTP/2 session, a proxy tunnel): refuses an admitted replay whose
-	 * deadline passed, without consuming it, so the request's own
-	 * {@link handoff} is still checked.
-	 */
-	readonly connecting = (): void => {
-		const arm = this.#arm;
-		if (arm === undefined || (!this.#refused && performance.now() < this.#deadline)) return;
-		this.#arm = undefined;
 		this.#refuseArm(arm);
 	};
 
@@ -151,23 +159,26 @@ export class ReplayBudget {
 	}
 
 	/**
-	 * `base`, with {@link handoff} run immediately before every request it is
-	 * handed. A fetch this budget already gates innermost is returned as it is.
+	 * The provider's send gate around `base`, the fetch its own request goes
+	 * through: a {@link checkpoint} immediately before each call, and once the
+	 * call settles the replay armed when it began is released — that request
+	 * was the replay's own. A fetch this budget already gates is returned as it
+	 * is.
 	 */
 	gateFetch(base: FetchImpl): FetchImpl {
 		if (this.#gated.has(base)) return base;
 		const gated: FetchImpl = async (input, init) => {
-			this.handoff();
-			return base(input, init);
+			this.checkpoint();
+			const armed = this.#arm;
+			try {
+				return await base(input, init);
+			} finally {
+				if (armed !== undefined && this.#arm === armed) this.#arm = undefined;
+			}
 		};
 		if (base.preconnect) gated.preconnect = base.preconnect;
 		this.#gated.add(gated);
 		return gated;
-	}
-
-	/** Records that `fetch` runs this budget's handoff gate innermost, so {@link gateFetch} leaves it as it is. */
-	covers(fetch: FetchImpl): void {
-		this.#gated.add(fetch);
 	}
 
 	/** The wait a replay of `failure` must take: its own backoff, or the server's longest named wait. */
@@ -218,10 +229,23 @@ export class ReplayBudget {
 		signal: AbortSignal | undefined,
 		hook: RetryWaitHook | undefined,
 	): Promise<boolean> {
-		const delayMs = this.delayFor(failure, ownDelayMs);
+		return this.replayAfterDelay(this.delayFor(failure, ownDelayMs), failure, signal, hook);
+	}
+
+	/**
+	 * {@link replayAfter} for a caller that already knows the wait: admits a
+	 * replay of `replaced` after `delayMs`, waits it out raced against the
+	 * deadline and `signal`, and arms the replay. `false` when any step refuses.
+	 */
+	async replayAfterDelay(
+		delayMs: number,
+		replaced: unknown,
+		signal: AbortSignal | undefined,
+		hook: RetryWaitHook | undefined,
+	): Promise<boolean> {
 		if (!this.admits(delayMs)) return false;
 		if (delayMs > 0 && !(await this.wait(delayMs, signal, hook))) return false;
-		this.arm(failure);
+		this.arm(replaced);
 		return true;
 	}
 

@@ -990,8 +990,12 @@ const HTTP_LANES = lanes.filter(lane => lane.name !== "cursor");
 interface HintScenario {
 	name: string;
 	headers?: Record<string, string>;
-	message?: string;
+	/** The failure's text; a function builds it when the test runs, for a time-relative HTTP date. */
+	message?: string | (() => string);
 }
+
+/** An HTTP date 30 s ahead of now: inside the transport's own cap, so only the caller's budget stops it. */
+const dateIn30s = (): string => new Date(Date.now() + 30_000).toUTCString();
 
 // Every wait the server names counts, however many there are and whatever
 // malformed or shorter hint sits beside them: a retry sent inside a window the
@@ -1009,11 +1013,14 @@ describe.each<HintScenario>([
 	{ name: "a malformed phrase before a valid one", message: "Please retry in ...s. Please retry in 30s." },
 	{ name: "two different phrases", message: "Please retry in 1ms; try again in 30s" },
 	{ name: "a malformed header beside a valid one", headers: { "retry-after-ms": "bad", "retry-after": "30" } },
+	{ name: "an HTTP date beside a short phrase", message: () => `retry-after: ${dateIn30s()}; Please retry in 1ms` },
+	{ name: "an HTTP date alone", message: () => `retry-after=${dateIn30s()}` },
 ])("a retryable failure naming $name", ({ headers, message }) => {
 	it.each(HTTP_LANES.map(lane => [lane.name, lane] as const))(
 		"%s ends the call on the 30 s wait against a 2 s budget",
 		async (_name, lane) => {
-			const route = scripted(n => (n === 1 ? failure(503, headers, message) : failure(400)));
+			const text = typeof message === "function" ? message() : message;
+			const route = scripted(n => (n === 1 ? failure(503, headers, text) : failure(400)));
 			try {
 				const result = await lane.call(route.url, { replayBudgetMs: 2_000 });
 

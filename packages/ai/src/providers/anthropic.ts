@@ -4001,11 +4001,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 	// Compression sits beneath the cch rewriter, which must hash the uncompressed
 	// body. Catalog rules scope it to verified hosts (official API, Copilot), so
 	// proxies pass through.
-	const baseFetch = wrapFetchForRequestCompression(
-		gateFetch(replayBudget, args.fetch ?? fetch),
-		model,
-		replayBudget?.admits,
-	);
+	const baseFetch = wrapFetchForRequestCompression(gateFetch(replayBudget, args.fetch ?? fetch), model, replayBudget);
 	// Only OAuth requests inject the CC billing header; no API-key request can ever
 	// contain it, so there is no need to install the rewriter for those.
 	const cchFetch = oauthToken ? wrapFetchForCch(baseFetch) : baseFetch;
@@ -4054,7 +4050,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 				resolveCopilotRequestIdentity(headers),
 				copilotCacheKey ?? getCopilotIntegrationCacheKey(apiKey, baseUrl),
 				copilotCacheSnapshot,
-				replayBudget?.admits,
+				replayBudget,
 			),
 			fetchOptions,
 		};

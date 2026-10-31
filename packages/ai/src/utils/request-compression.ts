@@ -5,8 +5,9 @@ import {
 	type RequestCompressionPolicy,
 	resolveRequestCompression,
 } from "@oh-my-pi/pi-catalog/compat/request-compression";
-import { $flag, findRetryRefusal, logger } from "@oh-my-pi/pi-utils";
+import { $flag, findRetryRefusal, logger, longestRetryHint } from "@oh-my-pi/pi-utils";
 import type { FetchImpl, Model } from "../types";
+import type { ReplayBudget } from "./replay-budget";
 
 const gzip = promisify(zlib.gzip);
 
@@ -132,15 +133,12 @@ async function suspectEncodingRejection(
  * recurs uncompressed with the same status and a non-JSON body, that status
  * stops being re-checked for the host.
  *
- * `retryGate` is the call's replay budget (`StreamOptions.replayBudgetMs`): the
- * resend is a further request, so a refusal — before it is sent, or by the
- * transport's handoff check — returns the rejection as it came.
+ * `replayBudget` is the call's replay budget (`StreamOptions.replayBudgetMs`):
+ * the resend is a further request, so it waits the longest wait the rejection
+ * names when that fits the budget, and a refusal — before it is sent, or by
+ * the transport's check — returns the rejection as it came.
  */
-export function wrapFetchForRequestCompression(
-	base: FetchImpl,
-	model: Model,
-	retryGate?: (delayMs: number) => boolean,
-): FetchImpl {
+export function wrapFetchForRequestCompression(base: FetchImpl, model: Model, replayBudget?: ReplayBudget): FetchImpl {
 	const wrapped: FetchImpl = async (input, init) => {
 		const body = init?.body;
 		const url = requestUrl(input);
@@ -181,15 +179,19 @@ export function wrapFetchForRequestCompression(
 		if (!suspect) return response;
 		const refusal = `${origin} ${response.status}`;
 		if (suspect === "proxy" && encodingUnrelatedRefusals.has(refusal)) return response;
-		if (retryGate && !retryGate(0)) return response;
 
 		let plain: Response;
-		if (!retryGate) {
+		if (!replayBudget) {
 			await response.body?.cancel().catch(() => {});
 			plain = await base(input, init);
 		} else {
+			// A server that named a wait on the rejection is not resent to sooner.
+			const serverWaitMs = longestRetryHint(response, await bodyText(response)) ?? 0;
+			if (!(await replayBudget.replayAfterDelay(serverWaitMs, undefined, init?.signal ?? undefined, undefined))) {
+				return response;
+			}
 			// Under a budget the rejection stays readable until the resend clears
-			// the transport's handoff check, so a refusal there can hand it back.
+			// the transport's check, so a refusal there can hand it back.
 			try {
 				plain = await base(input, init);
 			} catch (error) {

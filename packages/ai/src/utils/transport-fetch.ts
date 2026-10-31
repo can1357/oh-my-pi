@@ -18,10 +18,12 @@ type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: true };
  * calls `fetchImpl` (or the model's default fetch) exactly once. Providers
  * never layer transport concerns themselves.
  *
- * With a `replayBudget`, its handoff gate runs immediately before that one
- * call — after the debug recording and every other step — so a replay whose
- * deadline passed while it was prepared is refused at the last moment the
- * library holds the request.
+ * With a `replayBudget`, its checkpoint runs immediately before that one
+ * call — after the debug recording and every other step — so an armed replay
+ * whose deadline passed while it was prepared is refused at the last moment
+ * the library holds the request. The checkpoint never releases the replay:
+ * a token fetch made through this fetch cannot stand in for the replay's own
+ * request, which the provider's send gate releases.
  *
  * Idempotent: the built fetch is stamped and returned as-is on later passes.
  * `streamSimple` re-enters `stream`, and `streamSimpleRequest` re-enters itself
@@ -37,7 +39,7 @@ export function transportFetch(
 	if (given?.[TRANSPORT_FETCH]) return given;
 	const base =
 		given ?? (model.provider === "anthropic" && model.api === "anthropic-messages" ? coworkFetch : globalThis.fetch);
-	const send = replayBudget ? replayBudget.gateFetch(base) : base;
+	const checkpoint = replayBudget?.checkpoint;
 	const proxyUrl = getProxyForProvider(model.provider);
 
 	const fetch: TransportFetch = async (input, init) => {
@@ -48,13 +50,16 @@ export function transportFetch(
 		const extraCa = resolveExtraCa();
 		if (extraCa) init = withExtraCaInit(init, extraCa);
 		if (proxyUrl) init = withProxyInit(input, init, proxyUrl);
-		if (!isRequestDebugEnabled()) return send(input, init);
+		if (!isRequestDebugEnabled()) {
+			checkpoint?.();
+			return base(input, init);
+		}
 		const session = await createFetchRequestDebugSession(input, init);
-		return session.wrapResponse(await send(input, init));
+		checkpoint?.();
+		return session.wrapResponse(await base(input, init));
 	};
 	if (base.preconnect) fetch.preconnect = base.preconnect;
 	fetch[TRANSPORT_FETCH] = true;
-	replayBudget?.covers(fetch);
 	return fetch;
 }
 

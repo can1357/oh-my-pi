@@ -5,7 +5,7 @@ import * as AIError from "../error";
 import { ANTHROPIC_THINKING, mapAnthropicToolChoice } from "../stream";
 import type { Api, Context, FetchImpl, Model, ModelSpec, SimpleStreamOptions } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { inheritReplayBudget } from "../utils/replay-budget";
+import { inheritReplayBudget, withReplayBudget } from "../utils/replay-budget";
 import { createProviderErrorMessage } from "./error-message";
 import type { OpenAICompletionsOptions } from "./openai-completions";
 import type { OpenAIResponsesOptions } from "./openai-responses";
@@ -94,6 +94,9 @@ export function streamGitLabDuo(
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
 	const stream = new AssistantMessageEventStream();
+	// The replay budget's clock starts at this call, not after the token fetch
+	// below: the delegate inherits this one budget.
+	if (options) options = withReplayBudget(options);
 
 	(async () => {
 		try {
