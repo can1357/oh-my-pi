@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed prewalk continuing a finished read-only task forever: only the first post-plan tool turn and later `todo` transitions now re-arm the continuation, so answers that alternate with read-only tool results end the run instead of buying another "Continue task now" ([#6174](https://github.com/can1357/oh-my-pi/issues/6174), [#17545](https://github.com/can1357/oh-my-pi/pull/17545) by [@ee-](https://github.com/ee-)).
+- Reduced repeated prewalk continuations after read-only tool calls; successful `todo` calls can still re-arm the continuation ([#6174](https://github.com/can1357/oh-my-pi/issues/6174), [#17545](https://github.com/can1357/oh-my-pi/pull/17545) by [@ee-](https://github.com/ee-)).
 
 ## [18.14.1] - 2026-10-31
 

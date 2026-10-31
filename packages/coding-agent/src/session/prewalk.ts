@@ -126,7 +126,6 @@ export class PrewalkCoordinator {
 	#prewalk: Prewalk | undefined;
 	#planInjected = false;
 	#continuePending = false;
-	/** Whether this arm already spent its one continuation after the planning nudge (issue #6174). */
 	#continueIssued = false;
 	#todoSeen = false;
 	#planYolo: PlanYolo | undefined;
@@ -251,11 +250,11 @@ export class PrewalkCoordinator {
 	}
 
 	/**
-	 * Starts a new user task under `prewalk.auto: on`. An auto handoff belongs to the task that armed it, so the
-	 * session returns to that task's planning model unless a later explicit selection took ownership. An auto arm
-	 * the previous task never used is dropped so this task is judged on its own. Manual and configured arms stay.
+	 * Starts a new user task. Manual and configured arms stay, but get a fresh continuation.
+	 * An auto handoff restores the source model unless an explicit selection took ownership; an unused auto arm is dropped.
 	 */
 	async beginAutoTask(): Promise<void> {
+		this.#continueIssued = false;
 		if (this.#autoMode() !== "on") return;
 		if (this.#autoArm && this.#autoArm === this.#prewalk) {
 			this.#scrubPlanNudge(undefined, true);
@@ -331,13 +330,7 @@ export class PrewalkCoordinator {
 		if (todoProgress) this.#todoSeen = true;
 
 		const hasToolResults = context.toolResults.length > 0;
-		// The plan nudge asks for prose, so the first tool turn must earn one
-		// continuation or a planned reply ends the run before the handoff
-		// (#5551). After that, only a todo transition re-earns it: with every
-		// tool turn re-arming, a read-only task alternated tool results and prose
-		// forever, each completed answer buying the next "continue" (#6174,
-		// #16385). Read-only work can still cross one boundary; the second prose
-		// reply ends the run for the user instead of inventing more work.
+		// Preserve the plan-to-todo handoff without re-arming on every read-only turn.
 		if (hasToolResults && this.#planInjected && (!this.#continueIssued || todoProgress)) {
 			this.#continuePending = true;
 		} else if (!hasToolResults && this.#continuePending) {

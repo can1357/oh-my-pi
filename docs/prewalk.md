@@ -59,7 +59,7 @@ OMP switches at the completed assistant-turn boundary containing the first eligi
 
 Calls to other tools do not trigger the handoff. A read-only `xd://` device request routed through `write`, such as LSP navigation, also does not count; only device operations classified as workspace writes or execution count.
 
-While the handoff stays pending, OMP bridges at most one text-only reply: the planning nudge invites a prose plan, and that reply would otherwise end the run before the first edit. A later successful `todo` call—the handoff gate's own transition—re-earns one more bridge. Read-only work that alternates tool results and answers therefore ends after that single continuation instead of repeating it, and `/prewalk off` cancels a pending one.
+While awaiting handoff, prewalk can continue after a text-only reply so a prose plan does not end the run. After that continuation, only a successful `todo` call re-arms it; other tool results alone do not. A new top-level user task also restores the continuation.
 
 The switch is one-shot: after the handoff, prewalk disarms itself, removes the planning nudge, and steers the target with an implementation checklist. It changes the session's active model and optional thinking level without rewriting model-role assignments. A same-model handoff can still change thinking; when the model and effective thinking configuration already match, prewalk disarms without switching.
 
