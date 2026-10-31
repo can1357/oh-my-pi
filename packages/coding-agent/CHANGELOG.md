@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed daemon broker idle shutdown closing newly accepted clients before authentication under load; unauthenticated sockets now close after the client authentication timeout.
+- Fixed supervised image tunnels rejecting a published URL when the child exits between the startup log read and exit check; each tunnel child now uses a private temporary log directory.
+
 ## [18.14.1] - 2026-10-31
 
 ### Added
