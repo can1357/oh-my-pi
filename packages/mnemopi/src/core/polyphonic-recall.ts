@@ -450,11 +450,7 @@ export class PolyphonicRecallEngine {
 			const cached = cache.get(row.memory_id);
 			if (cached === undefined) continue;
 			if (cached.rawJson === row.embedding_json) {
-				if (
-					cached.values.length === queryUnit.length &&
-					cached.norm > 0 &&
-					!countedHitIds.has(row.memory_id)
-				) {
+				if (cached.values.length === queryUnit.length && cached.norm > 0 && !countedHitIds.has(row.memory_id)) {
 					countedHitIds.add(row.memory_id);
 					admittedEntries++;
 					admittedBytes += cached.byteSize;

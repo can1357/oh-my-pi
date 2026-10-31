@@ -24,14 +24,14 @@ each render the provider receives the current `ViewportSize` and returns a
 
 ```ts
 interface HistoryBatch {
-  readonly id: number;
-  readonly rows: readonly string[];
-  readonly kind?: "append" | "replay";
+	readonly id: number;
+	readonly rows: readonly string[];
+	readonly kind?: "append" | "replay";
 }
 
 interface TerminalFramePlan {
-  readonly history?: HistoryBatch;
-  readonly viewport: readonly string[];
+	readonly history?: HistoryBatch;
+	readonly viewport: readonly string[];
 }
 ```
 
@@ -182,19 +182,28 @@ is live the nerd symbol preset is forced process-locally, and icon glyphs are
 sent as `icon` spans. The first row paint waits
 up to 300 ms for the probe. Direct Tern sessions optimistically open a surface
 immediately and fall back to rows if the terminal does not confirm it. Such a
-session needs raw input from the start, so a `deferInput` start holds the
-keystrokes meant for the component focused at start instead of leaving the tty
-cooked; a dialog that takes focus meanwhile (a startup hook's select or confirm)
-gets its input live, and the hold survives the TUI stop/start of an external
-editor opened from such a dialog. A swapped-in custom editor inherits the hold
-through `Composer.setEditor()` (`TUI.replaceHeldFocus()`), so its keys queue
-behind the held ones, and it keeps the startup submit gate. The cell-size reply
-is still consumed on arrival, and the sixel probe is skipped on a TSP terminal,
-so no probe listener sees held keys. `InteractiveMode.init()` calls
-`TUI.releaseHeldInput()` after startup hooks, mode reconcile, draft restore and
-every session subscription, just before lifting the submit gate: held keys edit
-the restored draft instead of racing it, a startup shortcut acts on the final,
-observed session, and a held Enter is still ignored. Ctrl+C/Ctrl+D release the
+session needs raw input from the start, so a `deferInput` start does not leave
+the tty cooked. The kernel echo that shows typing on other terminals while the
+module graph loads comes from Tern instead: the composer's `editor` node
+carries `typeahead: true` (`Editor.nativeTypeahead`, set by `Composer.start`),
+and Tern keeps the text typed into it, draws it at the caret, and writes it to
+the pty as typed once the prop clears, or ahead of the first key it does not
+keep. Typing that reaches omp during startup (from such a flush, or a Tern
+without typeahead) splits in the TUI: plain typing (printable text, Backspace)
+edits the component focused at start live; the first other key (a shortcut,
+Enter, an arrow, a paste) and every key after it are held, in typing order. A
+dialog that takes focus meanwhile (a startup hook's select or confirm) gets its
+input live, and the hold survives the TUI stop/start of an external editor
+opened from such a dialog. A swapped-in custom editor inherits the hold and
+the typeahead through `Composer.setEditor()` (`TUI.replaceHeldFocus()`), so
+its keys queue behind the held ones, and it keeps the startup submit gate. The
+cell-size reply is still consumed on arrival, and the sixel probe is skipped
+on a TSP terminal, so no probe listener sees held keys. `InteractiveMode.init()`
+calls `Composer.releaseHeldInput()` after startup hooks, mode reconcile, draft
+restore and every session subscription, just before lifting the submit gate:
+`typeahead` clears so Tern sends what it kept, a restored draft goes before
+the text typed during startup, a startup shortcut acts on the final, observed
+session, and a held Enter is still ignored. Ctrl+C/Ctrl+D release the TUI's
 queue early. The
 debug socket's `doc` op returns the reference document
 (every sent frame applied by `native/apply.ts`), and `tsp` returns recent frames.
@@ -219,7 +228,7 @@ A terminal that sees `"send"` and a ready composer may submit a supplied prompt
 with an `e` message:
 
 ```json
-{"ev":"send","sf":"s:1","id":"k.line/input","text":"First line\nSecond line"}
+{ "ev": "send", "sf": "s:1", "id": "k.line/input", "text": "First line\nSecond line" }
 ```
 
 `sf` must name a live surface and `id` its editable composer node (the

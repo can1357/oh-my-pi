@@ -174,6 +174,29 @@ describe("eval tool description", () => {
 		expect(tool.description).not.toContain("xd://eval/fixture");
 		expect(tool.docTopics().fixture).toBeUndefined();
 	});
+
+	it("inlines a prelude's documentation when it asks to, without the link", () => {
+		const prelude: EvalPreludeDefinition = {
+			name: "fixture",
+			documentation: "Fixture summary line.\n\nINLINE PRELUDE DOCUMENTATION",
+			inlineDocumentation: true,
+			javascript: "",
+			python: "",
+			exports: [],
+			async invoke() {
+				return { content: [] };
+			},
+		};
+		const tool = new EvalTool(makeSession({ preludes: () => [prelude] }));
+		expect(tool.description).toContain("<fixture>");
+		expect(tool.description).toContain("INLINE PRELUDE DOCUMENTATION");
+		expect(tool.description).not.toContain("xd://eval/fixture");
+		expect(tool.docTopics().fixture).toContain("INLINE PRELUDE DOCUMENTATION");
+		const withoutRead = new EvalTool(makeSession({ preludes: () => [prelude], readActive: false }));
+		expect(withoutRead.description.split("INLINE PRELUDE DOCUMENTATION")).toHaveLength(2);
+		expect(withoutRead.description).not.toContain("<fixture>");
+		expect(withoutRead.description).not.toContain("xd://eval/fixture");
+	});
 });
 
 describe("eval tool dynamic schema", () => {

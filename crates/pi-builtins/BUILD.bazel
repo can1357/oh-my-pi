@@ -11,7 +11,11 @@ rust_library(
     name = "pi-builtins",
     srcs = glob(["src/**/*.rs"]),
     aliases = aliases(),
-    compile_data = glob(["src/*.txt"]),
+    compile_data = glob([
+        "src/*.txt",
+        # `include_bytes!` wire captures for the rsync sender tests.
+        "src/rsync/sender/testdata/*",
+    ]),
     crate_features = [
         "base",
         "builtin.alias",
@@ -67,6 +71,7 @@ rust_library(
         "builtin.unalias",
         "builtin.unset",
         "builtin.wait",
+        "util.ast-grep",
         "util.b2sum",
         "util.base32",
         "util.base64",
@@ -121,6 +126,7 @@ rust_library(
         "util.rg",
         "util.rm",
         "util.rmdir",
+        "util.rsync",
         "util.sed",
         "util.seq",
         "util.sha1sum",
@@ -156,11 +162,13 @@ rust_library(
     proc_macro_deps = all_crate_deps(proc_macro = True),
     version = "0.2.0",
     deps = all_crate_deps(normal = True) + [
+        "//crates/pi-ast",
+        "//crates/pi-walker",
         "//crates/pi-iso",
         "//crates/pi-vfs",
-        "//crates/pi-walker",
         "//crates/vendor/brush-core",
         "//crates/vendor/brush-parser",
+        "//crates/vendor/grep-searcher",
     ],
 )
 
@@ -169,5 +177,5 @@ rust_test(
     crate = ":pi-builtins",
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro_dev = True),
-    deps = all_crate_deps(normal_dev = True),
+    deps = all_crate_deps(normal_dev = True) + ["//crates/vendor/grep-searcher"],
 )

@@ -28,8 +28,9 @@ thread_local! {
 	static BUILTIN_ON_BLOCKING_WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Whether the calling builtin runs on a Tokio blocking worker (owned-shell
-/// pipeline stages and async jobs, or virtual-file builtins). Synchronous I/O
+/// Whether the calling builtin runs on a Tokio blocking worker (synchronous
+/// builtins in owned-shell pipeline stages and async jobs, or on virtual
+/// files; `async_io` builtins run as tasks). Synchronous I/O
 /// there cannot starve the async runtime, so a builtin must not offload it to
 /// another blocking worker: holding this one while queueing that can exhaust
 /// a bounded blocking pool and leave every nested read waiting forever.
@@ -669,16 +670,34 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 		args: Vec<CommandArg>,
 	) -> ExecutionSpawnResult {
 		let last_arg = Self::take_last_arg(&args);
-		let join_handle = tokio::task::spawn_blocking(move || {
-			let cmd_context = ExecutionContext { shell: &mut shell, command_name, params };
 
-			let result = block_on_builtin(execute_builtin_command(&builtin, cmd_context, args));
+		// An `async_io` builtin never blocks a worker, so it runs as a plain task.
+		// Every other builtin does synchronous descriptor I/O: it runs on a
+		// blocking worker, driven to completion there, so that I/O cannot starve
+		// the async runtime.
+		let join_handle = if builtin.async_io {
+			tokio::spawn(async move {
+				let cmd_context = ExecutionContext { shell: &mut shell, command_name, params };
 
-			// Update $_ after command execution.
-			shell.update_last_arg_variable(last_arg);
+				let result = execute_builtin_command(&builtin, cmd_context, args).await;
 
-			result
-		});
+				// Update $_ after command execution.
+				shell.update_last_arg_variable(last_arg);
+
+				result
+			})
+		} else {
+			tokio::task::spawn_blocking(move || {
+				let cmd_context = ExecutionContext { shell: &mut shell, command_name, params };
+
+				let result = block_on_builtin(execute_builtin_command(&builtin, cmd_context, args));
+
+				// Update $_ after command execution.
+				shell.update_last_arg_variable(last_arg);
+
+				result
+			})
+		};
 
 		ExecutionSpawnResult::StartedTask(join_handle)
 	}
@@ -691,8 +710,8 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 		let mut shell = self.shell;
 		let last_arg = Self::take_last_arg(&self.args);
 
-		let result = if sees_virtual_files {
-			// Builtins do synchronous I/O on their descriptors. A virtual file's
+		let result = if sees_virtual_files && !builtin.async_io {
+			// Synchronous builtins do blocking I/O on their descriptors. A virtual file's
 			// synchronous I/O awaits its provider, which must not happen on an
 			// async runtime thread (a current-thread runtime would have nothing
 			// left to drive the provider). Run the builtin on a blocking worker

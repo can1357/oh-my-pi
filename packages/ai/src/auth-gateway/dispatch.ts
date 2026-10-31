@@ -19,7 +19,24 @@ import { extractProviderRetryHint } from "../utils/retry-after";
 import type { AuthGatewayClientScope } from "./clients";
 import type { AuthGatewayServerOptions } from "./types";
 
-export type ModelResolver = (modelId: string) => Model<Api> | undefined;
+/** What a route knows about a request beyond the model id it names. */
+export interface ModelResolveOptions {
+	/**
+	 * The api the route's wire format speaks natively (`anthropic-messages` for
+	 * `/v1/messages`). A bare id served by several equally ranked providers
+	 * prefers a model on this api.
+	 */
+	api?: Api;
+	/**
+	 * Models the caller may use. A bare id resolves to its best candidate this
+	 * admits; a refused `provider/id` resolves to nothing, never to another
+	 * provider's bare id spelled the same way.
+	 */
+	accepts?: (model: Model<Api>) => boolean;
+}
+
+/** Resolves a client-requested model id, `provider/id` or bare `id`, to the model a route dispatches to. */
+export type ModelResolver = (modelId: string, options?: ModelResolveOptions) => Model<Api> | undefined;
 
 /** What the gateway's routes need, whatever transport carries the requests. */
 export interface AuthGatewayRouteOptions {
@@ -171,7 +188,10 @@ async function refreshGatewayApiKeyAfterAuthError(
 			apiKey: oldKey,
 			signal,
 		});
-		logger.debug("auth-gateway retrying provider request after usage-limit block", {
+		const outcome = switched
+			? "auth-gateway retrying provider request after usage-limit block"
+			: "auth-gateway usage-limit block, returning the error without retry";
+		logger.debug(outcome, {
 			format,
 			provider,
 			peer,

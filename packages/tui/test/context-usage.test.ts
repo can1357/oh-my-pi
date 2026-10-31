@@ -10,6 +10,7 @@ import { type } from "@oh-my-pi/omptype";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
+import { normalizeTools } from "@oh-my-pi/pi-agent-core/agent-loop";
 import {
 	compactionContextTokens,
 	DEFAULT_COMPACTION_SETTINGS,
@@ -96,7 +97,7 @@ describe("estimateToolSchemaTokens", () => {
 		expect(reads).toBe(2);
 	});
 
-	it("separates array, tokenizer, and source-revision cache keys", () => {
+	it("separates array, tokenizer, source-revision, and prune-mode cache keys", () => {
 		let reads = 0;
 		const tool = {
 			name: "dynamic",
@@ -107,16 +108,59 @@ describe("estimateToolSchemaTokens", () => {
 			parameters: {},
 		};
 		const tools = [tool];
-		estimateToolSchemaTokens(tools, tokenizer, 1);
-		estimateToolSchemaTokens(tools, tokenizer, 1);
+		estimateToolSchemaTokens(tools, tokenizer, { sourceRevision: 1 });
+		estimateToolSchemaTokens(tools, tokenizer, { sourceRevision: 1 });
 		expect(reads).toBe(1);
 
-		estimateToolSchemaTokens(tools, tokenizer, 2);
+		estimateToolSchemaTokens(tools, tokenizer, { sourceRevision: 2 });
 		expect(reads).toBe(2);
-		estimateToolSchemaTokens([...tools], tokenizer, 2);
+		estimateToolSchemaTokens([...tools], tokenizer, { sourceRevision: 2 });
 		expect(reads).toBe(3);
-		estimateToolSchemaTokens(tools, new Tokenizer(), 2);
+		estimateToolSchemaTokens(tools, new Tokenizer(), { sourceRevision: 2 });
 		expect(reads).toBe(4);
+		const full = estimateToolSchemaTokens(tools, tokenizer, { sourceRevision: 2 });
+		expect(estimateToolSchemaTokens(tools, tokenizer, { sourceRevision: 2, pruneDescriptions: true })).toBeLessThan(
+			full,
+		);
+	});
+});
+
+describe("pruned tool description accounting", () => {
+	// With the catalog inlined into the system prompt, normalizeTools ships each
+	// tool as its name plus the description-stripped schema. Counting the full
+	// specs again double-counts every description (issue #17329).
+	const tools = [
+		{
+			name: "grep",
+			description: `Search files by regex. ${"Supports globs, context lines, and multiline patterns. ".repeat(20)}`,
+			parameters: type({
+				"pattern /** regular expression to search for */": "string",
+				"path? /** file or directory to search */": "string",
+			}),
+			examples: [{ caption: "Find TODOs", call: { pattern: "TODO", path: "src" } }],
+		},
+	];
+	const prunedWireTokens = tokenizer.countTokens(
+		(normalizeTools(tools as never, { injectIntent: false, pruneDescriptions: true }) ?? []).flatMap(tool =>
+			[tool.name, tool.description, JSON.stringify(tool.parameters)].filter(part => part !== ""),
+		),
+	);
+
+	it("counts the pruned wire specs while the agent prunes, and the full specs otherwise", () => {
+		const systemPrompt = ["You are an assistant."];
+		let prune = true;
+		const agent = { state: { tools }, prunesToolDescriptions: () => prune };
+		const session: NonMessageTokenSource = { systemPrompt, agent };
+		const pruned = computeNonMessageBreakdown(session, tokenizer).toolsTokens;
+		expect(pruned).toBe(prunedWireTokens);
+		expect(computeNonMessageTokens(session, tokenizer)).toBe(tokenizer.countTokens(systemPrompt) + pruned);
+
+		// A model or dialect switch flips pruning on the live agent without replacing the roster.
+		prune = false;
+		const full = computeNonMessageBreakdown(session, tokenizer).toolsTokens;
+		expect(full).toBe(estimateToolSchemaTokens(tools as never, tokenizer));
+		expect(full).toBeGreaterThan(pruned);
+		expect(computeNonMessageTokens(session, tokenizer)).toBe(tokenizer.countTokens(systemPrompt) + full);
 	});
 });
 

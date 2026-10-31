@@ -55,6 +55,7 @@ import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import { CACHE_WARMING_MODES } from "../../session/cache-warmer";
 import { findMostRecentNonEmptySession, findRecentSessionContinuation } from "../../session/session-listing";
+import { probeSessionLeases } from "../../session/session-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
@@ -433,6 +434,7 @@ const BACKGROUND_COMMANDS: ReadonlySet<string> = new Set<RpcCommand["type"]>([
 	"bash",
 	"predict_word",
 	"live_start",
+	"live_connect",
 	"btw_cancel",
 	"abort_branch_summary",
 ]);
@@ -451,14 +453,14 @@ const BACKGROUND_COMMANDS: ReadonlySet<string> = new Set<RpcCommand["type"]>([
  * while a shell command runs, or `abort` (and `steer`/`follow_up`/`get_state`)
  * while a `prompt` or `steer_subagent` is still admitting. `predict_word` is
  * backgrounded too, so a cold prediction engine never stalls the command queue
- * behind a keystroke. `live_start` and `dictation_start` respond only when
- * recording, so they are backgrounded and their stop commands can cancel them.
+ * behind a keystroke. `live_start`, `live_connect` and `dictation_start` respond only once
+ * connected or recording, so they are backgrounded and their stop commands can cancel them.
  * Response correlation is preserved via each command's `id`; ordering across
  * concurrent commands is not guaranteed and clients MUST match on `id`.
  *
  * @returns `undefined` when the frame was routed to a side-channel handler
  *   (extension UI response, host tool/URI frames) or dispatched in the
- *   background (`bash`, `predict_word`, `live_start`, `dictation_start`, `prompt`, `steer`, `follow_up`, `steer_subagent`). Otherwise a promise that
+ *   background (`bash`, `predict_word`, `live_start`, `live_connect`, `dictation_start`, `prompt`, `steer`, `follow_up`, `steer_subagent`). Otherwise a promise that
  *   resolves once the response for the command has been emitted via `output`.
  *   Errors from `handleCommand` on a command dispatched inline propagate; the
  *   caller is expected to wrap them.
@@ -1566,6 +1568,14 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			return () => {};
 		}
 
+		rerenderMessage(): void {
+			// No transcript is drawn in RPC mode
+		}
+
+		getLinkClicksAvailable(): boolean {
+			return false;
+		}
+
 		notify(message: string, type?: "info" | "warning" | "error"): void {
 			// Fire and forget - no response needed
 			this.output({
@@ -2360,18 +2370,24 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				return success(id, "set_host_tools", { toolNames: tools.map(tool => tool.name) });
 			}
 
-			case "live_start": {
-				if (dictationBridge.active) return error(id, "live_start", "End dictation before starting live voice");
+			case "live_start":
+			case "live_connect": {
+				const sdpOffer = command.type === "live_connect" ? command.sdpOffer : undefined;
+				// The frame is untyped input: without an offer, live_connect would open the host microphone.
+				if (command.type === "live_connect" && (typeof sdpOffer !== "string" || !sdpOffer.trim())) {
+					return error(id, command.type, "live_connect requires a non-empty sdpOffer");
+				}
+				if (dictationBridge.active) return error(id, command.type, "End dictation before starting live voice");
 				if (sessionChangesInProgress > 0 || shutdownState.requested)
-					return error(id, "live_start", "Session is changing or shutting down");
+					return error(id, command.type, "Session is changing or shutting down");
 				try {
 					return success(
 						id,
-						"live_start",
-						await liveBridge.start({ voice: command.voice, instructions: command.instructions }),
+						command.type,
+						await liveBridge.start({ voice: command.voice, instructions: command.instructions, sdpOffer }),
 					);
 				} catch (err) {
-					return error(id, "live_start", err instanceof Error ? err.message : String(err));
+					return error(id, command.type, err instanceof Error ? err.message : String(err));
 				}
 			}
 
@@ -2630,6 +2646,14 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			case "get_session_stats": {
 				const stats = session.getSessionStats();
 				return success(id, "get_session_stats", stats);
+			}
+
+			case "get_session_lease": {
+				const { sessionIds } = command;
+				if (!Array.isArray(sessionIds) || !sessionIds.every(sessionId => typeof sessionId === "string")) {
+					return error(id, "get_session_lease", "sessionIds must be an array of strings");
+				}
+				return success(id, "get_session_lease", probeSessionLeases(sessionIds));
 			}
 
 			case "export_html": {

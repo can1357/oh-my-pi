@@ -1,6 +1,7 @@
     (function() {
       'use strict';
 
+      const marked = new globalThis.ompMarkdown.Marked();
       const THEME_STORAGE_KEY = 'omp-export-theme';
       const themeSelect = document.getElementById('theme-select');
       let themePreference = 'auto';
@@ -33,11 +34,10 @@
       // The entire app lives in bootSession(); its body keeps the original
       // one-level indentation to avoid a whole-file reindent.
       function bootSession(data) {
-      const { header, entries, leafId: defaultLeafId, systemPrompt, tools, subSessions } = data;
-
-      // Session render context: scopes entry lookups and tool-view host
-      // wiring to one transcript (main session or an embedded subagent).
-      const mainSctx = { entries, prefix: '', idPrefix: 'entry-' };
+      const { systemPrompt, tools, subSessions, trace } = data;
+      let { header, entries } = data;
+      let activeSessionKey = '';
+      let sessionContext = { entries, prefix: '', idPrefix: 'entry-' };
 
       // ============================================================
       // URL PARAMETER HANDLING
@@ -51,7 +51,7 @@
       const urlLeafId = urlParams.get('leafId');
       const urlTargetId = urlParams.get('targetId');
       // Use URL leafId if provided, otherwise fall back to session default
-      const leafId = urlLeafId || defaultLeafId;
+      let leafId = urlLeafId || data.leafId;
 
       // ============================================================
       // DATA STRUCTURES
@@ -59,39 +59,35 @@
 
       // Entry lookup by ID
       const byId = new Map();
-      for (const entry of entries) {
-        byId.set(entry.id, entry);
-      }
-
-      // Tool call lookup (toolCallId -> {name, arguments})
       const toolCallMap = new Map();
-      for (const entry of entries) {
-        if (entry.type === 'message' && entry.message.role === 'assistant') {
+      const labelMap = new Map();
+
+      function indexSession() {
+        byId.clear();
+        toolCallMap.clear();
+        labelMap.clear();
+        for (const entry of entries) {
+          byId.set(entry.id, entry);
+          if (entry.type === 'label' && entry.targetId && entry.label) {
+            labelMap.set(entry.targetId, entry.label);
+          }
+          if (entry.type !== 'message' || entry.message.role !== 'assistant') continue;
           const content = entry.message.content;
-          if (Array.isArray(content)) {
-            for (let blockIndex = 0; blockIndex < content.length; blockIndex++) {
-              const block = content[blockIndex];
-              if (block.type === 'toolCall') {
-                toolCallMap.set(block.id, {
-                  name: block.name,
-                  arguments: block.arguments,
-                  entryId: entry.id,
-                  blockIndex,
-                });
-              }
+          if (!Array.isArray(content)) continue;
+          for (let blockIndex = 0; blockIndex < content.length; blockIndex++) {
+            const block = content[blockIndex];
+            if (block.type === 'toolCall') {
+              toolCallMap.set(block.id, {
+                name: block.name,
+                arguments: block.arguments,
+                entryId: entry.id,
+                blockIndex,
+              });
             }
           }
         }
       }
-
-      // Label lookup (entryId -> label string)
-      // Labels are stored in 'label' entries that reference their target via targetId
-      const labelMap = new Map();
-      for (const entry of entries) {
-        if (entry.type === 'label' && entry.targetId && entry.label) {
-          labelMap.set(entry.targetId, entry.label);
-        }
-      }
+      indexSession();
 
       // ============================================================
       // TREE DATA PREPARATION (no DOM, pure data)
@@ -605,7 +601,7 @@
           rows.push({
             flatNode,
             assistantText: normalized,
-            anchorId: assistantBlockDomId(entry.id, textBlockIndex, mainSctx),
+            anchorId: assistantBlockDomId(entry.id, textBlockIndex, sessionContext),
             navigationId,
             showLabel: isFirstAssistantRow,
             timelineId: entry.id,
@@ -625,7 +621,7 @@
               navigationId = entry.id;
               continue;
             }
-            const anchorId = assistantBlockDomId(entry.id, blockIndex, mainSctx);
+            const anchorId = assistantBlockDomId(entry.id, blockIndex, sessionContext);
             const resultNode = toolResultNodes.get(block.id);
             if (resultNode) {
               navigationId = resultNode.node.entry.id;
@@ -688,7 +684,7 @@
             let anchorId;
             if (entry.type === 'message' && entry.message.role === 'toolResult') {
               const toolCall = toolCallMap.get(entry.message.toolCallId);
-              if (toolCall) anchorId = assistantBlockDomId(toolCall.entryId, toolCall.blockIndex, mainSctx);
+              if (toolCall) anchorId = assistantBlockDomId(toolCall.entryId, toolCall.blockIndex, sessionContext);
             }
             rows.push({ flatNode, anchorId, navigationId: entry.id });
           }
@@ -916,8 +912,8 @@
       // TOOL CALL RENDERING
       // ============================================================
       //
-      // Tool calls render through the bundled <omp-tool-view> web component
-      // (tool-views.generated.js — the same React renderers collab-web uses).
+      // Tool calls use the hosted viewer's <omp-tool-view> web component,
+      // shared with collab-web.
       // Payloads are handed over via a global store keyed by data-key, which
       // survives innerHTML serialization and cloneNode round trips.
 
@@ -941,15 +937,8 @@
         return '<omp-tool-view class="tool-execution ' + statusClass + '" id="' + blockId + '" data-key="' + key + '" open></omp-tool-view>';
       }
 
-      // ============================================================
-      // SUB-SESSION OVERLAY
-      // ============================================================
-      //
-      // Task tool cards expose agent chips (wired through the payload `host`
-      // above); clicking one opens that subagent's transcript in a stacked
-      // overlay. Keys are slash-joined agent ids relative to the main
-      // session: top-level agent 'ToolAsk', its child 'ToolAsk/Helper'.
-
+      // Session destinations share the transcript tree and renderer. Only one
+      // transcript is mounted, so entry IDs may repeat across agents safely.
       function joinKey(prefix, id) {
         return prefix ? prefix + '/' + id : id;
       }
@@ -958,179 +947,98 @@
         return subSessions ? subSessions[joinKey(prefix, id)] : undefined;
       }
 
-      // Render context per sub-session (entries scoped to that transcript).
-      const subSctxCache = new Map();
-      function getSubSctx(key) {
-        let sctx = subSctxCache.get(key);
-        if (!sctx) {
-          sctx = {
-            entries: subSessions[key].entries,
-            prefix: key,
-            idPrefix: 'sub-' + key.replace(/[^A-Za-z0-9_-]/g, '_') + '-entry-',
-          };
-          subSctxCache.set(key, sctx);
-        }
-        return sctx;
+      const sessionPositions = new Map();
+
+      function sessionUrl(key) {
+        const url = new URL(window.location.href);
+        if (key) url.searchParams.set('session', key);
+        else url.searchParams.delete('session');
+        url.searchParams.delete('leafId');
+        url.searchParams.delete('targetId');
+        return url;
       }
 
-      /**
-       * Root-to-leaf path through an arbitrary entry list (subagent
-       * transcripts are linear chains; same parent-walk as getPath).
-       */
-      function getPathIn(entryList, targetId) {
-        const map = new Map();
-        for (const e of entryList) map.set(e.id, e);
-        let current = targetId ? map.get(targetId) : undefined;
-        if (!current && entryList.length > 0) current = entryList[entryList.length - 1];
-        const path = [];
-        while (current) {
-          path.unshift(current);
-          if (!current.parentId || current.parentId === current.id) break;
-          current = map.get(current.parentId);
-        }
-        return path;
+      function updateLocation() {
+        const url = sessionUrl(activeSessionKey);
+        if (currentLeafId) url.searchParams.set('leafId', currentLeafId);
+        if (currentTargetId) url.searchParams.set('targetId', currentTargetId);
+        if (currentView === 'trace') url.searchParams.set('view', 'trace');
+        else url.searchParams.delete('view');
+        if (timelineOpen) url.searchParams.set('timeline', 'open');
+        else url.searchParams.delete('timeline');
+        try { history.replaceState(null, '', url); } catch {}
       }
 
-      const overlayStack = [];               // slash-joined keys, root-first chain
-      const subSessionBodyCache = new Map(); // key -> rendered body element
-      let subOverlayEl = null;
-      let subOverlayLastFocus = null;
-
-      function ensureSubOverlay() {
-        if (subOverlayEl) return subOverlayEl;
-        subOverlayEl = document.createElement('div');
-        subOverlayEl.id = 'subsession-overlay';
-        subOverlayEl.innerHTML = `
-          <div class="subsession-backdrop"></div>
-          <div class="subsession-panel" role="dialog" aria-modal="true" aria-label="Subagent session" tabindex="-1">
-            <div class="subsession-header">
-              <nav class="subsession-breadcrumb" aria-label="Subagent breadcrumb"></nav>
-              <button type="button" class="subsession-close" title="Close (Esc)" aria-label="Close subagent view">&times;</button>
-            </div>
-            <div class="subsession-meta"></div>
-            <div class="subsession-body"></div>
-          </div>`;
-        subOverlayEl.querySelector('.subsession-backdrop').addEventListener('click', popSubSession);
-        subOverlayEl.querySelector('.subsession-close').addEventListener('click', closeAllSubSessions);
-        document.body.appendChild(subOverlayEl);
-        return subOverlayEl;
+      function renderSessionList() {
+        const list = document.getElementById('session-list');
+        list.replaceChildren();
+        const sessions = [['', { agentId: 'Main session', entries: data.entries }], ...Object.entries(subSessions || {})];
+        document.getElementById('session-count').textContent = sessions.length;
+        for (const [key, session] of sessions) {
+          const link = document.createElement('a');
+          link.className = 'session-link';
+          link.href = sessionUrl(key).href;
+          link.dataset.session = key;
+          link.style.setProperty('--depth', Math.min(key ? key.split('/').length : 0, 6));
+          link.title = key || 'Main session';
+          const name = document.createElement('span');
+          name.className = 'session-name';
+          name.textContent = session.agentId;
+          const meta = document.createElement('span');
+          meta.className = 'session-meta';
+          meta.textContent = session.aborted ? 'Stopped' : String(session.entries.filter(e => e.type === 'message').length);
+          link.append(name, meta);
+          link.addEventListener('click', event => {
+            if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+            event.preventDefault();
+            switchSession(key);
+            setView('transcript');
+            closeSidebar();
+          });
+          list.appendChild(link);
+        }
       }
 
-      function buildSubSessionBody(key) {
-        let body = subSessionBodyCache.get(key);
-        if (body) return body;
-        const sub = subSessions[key];
-        const sctx = getSubSctx(key);
-        body = document.createElement('div');
-        body.className = 'subsession-messages';
-        for (const entry of getPathIn(sub.entries, sub.leafId)) {
-          const node = renderEntryToNode(entry, sctx);
-          if (node) body.appendChild(node);
+      function switchSession(key, targetId = null, requestedLeafId = null) {
+        const session = key ? subSessions?.[key] : data;
+        if (!session) return;
+        sessionPositions.set(activeSessionKey, { leafId: currentLeafId, scrollTop: document.getElementById('content').scrollTop });
+        activeSessionKey = key;
+        header = session.header;
+        entries = session.entries;
+        leafId = session.leafId || entries.at(-1)?.id || null;
+        sessionContext = { entries, prefix: key, idPrefix: 'entry-' };
+        indexSession();
+        entryCache.clear();
+        TOOL_VIEW_DATA.clear();
+        globalStats = computeStats(entries);
+        treeRendered = false;
+        searchQuery = '';
+        searchInput.value = '';
+        const saved = sessionPositions.get(key);
+        const requested = requestedLeafId || saved?.leafId || leafId;
+        let destination = byId.has(requested) ? requested : leafId;
+        let anchorId = null;
+        // Tool results render inside their originating assistant card.
+        const target = byId.get(targetId);
+        if (target?.type === 'message' && target.message.role === 'toolResult') {
+          const call = toolCallMap.get(target.message.toolCallId);
+          if (call) anchorId = assistantBlockDomId(call.entryId, call.blockIndex, sessionContext);
         }
-        if (!body.firstChild) {
-          const empty = document.createElement('div');
-          empty.className = 'subsession-empty';
-          empty.textContent = '(no renderable entries)';
-          body.appendChild(empty);
-        }
-        subSessionBodyCache.set(key, body);
-        return body;
-      }
-
-      function subSessionMetaText(key) {
-        const sub = subSessions[key];
-        const stats = computeStats(sub.entries);
-        const parts = [];
-        if (stats.models.length > 0) parts.push(stats.models.join(', '));
-        parts.push(sub.entries.length + (sub.entries.length === 1 ? ' entry' : ' entries'));
-        return parts.join(' · ');
-      }
-
-      function renderSubOverlay() {
-        const key = overlayStack[overlayStack.length - 1];
-        const el = ensureSubOverlay();
-
-        const crumbs = el.querySelector('.subsession-breadcrumb');
-        crumbs.innerHTML = '';
-        const segments = key.split('/');
-        for (let i = 0; i < segments.length; i++) {
-          if (i > 0) {
-            const sep = document.createElement('span');
-            sep.className = 'subsession-crumb-sep';
-            sep.textContent = '›';
-            crumbs.appendChild(sep);
-          }
-          if (i === segments.length - 1) {
-            const span = document.createElement('span');
-            span.className = 'subsession-crumb current';
-            span.textContent = segments[i];
-            crumbs.appendChild(span);
-          } else {
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.className = 'subsession-crumb';
-            btn.textContent = segments[i];
-            const ancestorKey = segments.slice(0, i + 1).join('/');
-            btn.addEventListener('click', () => popSubSessionTo(ancestorKey));
-            crumbs.appendChild(btn);
-          }
-        }
-
-        el.querySelector('.subsession-meta').textContent = subSessionMetaText(key);
-
-        const bodyHost = el.querySelector('.subsession-body');
-        bodyHost.innerHTML = '';
-        bodyHost.appendChild(buildSubSessionBody(key));
-        bodyHost.scrollTop = 0;
-
-        el.classList.add('open');
-        el.querySelector('.subsession-panel').focus();
+        if (targetId && byId.has(targetId) && !buildActivePathIds(destination).has(targetId)) destination = targetId;
+        navigateTo(destination, targetId ? 'target' : 'none', targetId, anchorId);
+        if (!targetId) document.getElementById('content').scrollTop = saved?.scrollTop || 0;
+        document.querySelectorAll('.session-link').forEach(link => {
+          if (link.dataset.session === key) link.setAttribute('aria-current', 'page');
+          else link.removeAttribute('aria-current');
+        });
+        updateLocation();
       }
 
       function openSubSession(key) {
-        if (!subSessions || !subSessions[key]) return;
-        if (overlayStack.length === 0) {
-          subOverlayLastFocus = document.activeElement;
-        }
-        overlayStack.push(key);
-        renderSubOverlay();
-      }
-
-      function popSubSession() {
-        if (overlayStack.length === 0) return;
-        overlayStack.pop();
-        if (overlayStack.length === 0) {
-          hideSubOverlay();
-        } else {
-          renderSubOverlay();
-        }
-      }
-
-      function popSubSessionTo(key) {
-        // Rebuild the chain root..key (the stack is always a prefix chain).
-        const segments = key.split('/');
-        overlayStack.length = 0;
-        for (let i = 1; i <= segments.length; i++) {
-          overlayStack.push(segments.slice(0, i).join('/'));
-        }
-        renderSubOverlay();
-      }
-
-      function closeAllSubSessions() {
-        if (overlayStack.length === 0) return;
-        overlayStack.length = 0;
-        hideSubOverlay();
-      }
-
-      function hideSubOverlay() {
-        if (subOverlayEl) {
-          subOverlayEl.classList.remove('open');
-          subOverlayEl.querySelector('.subsession-body').innerHTML = '';
-        }
-        if (subOverlayLastFocus && typeof subOverlayLastFocus.focus === 'function') {
-          subOverlayLastFocus.focus();
-        }
-        subOverlayLastFocus = null;
+        switchSession(key);
+        setView('transcript');
+        closeSidebar();
       }
 
 
@@ -1151,6 +1059,7 @@
         const params = new URLSearchParams();
         params.set('leafId', currentLeafId);
         params.set('targetId', entryId);
+        if (activeSessionKey) params.set('session', activeSessionKey);
 
         // If we have an injected base URL (iframe context), use it directly
         if (baseUrlMeta) {
@@ -1412,9 +1321,11 @@
         return { userMessages, developerMessages, assistantMessages, toolResults, customMessages, compactions, branchSummaries, toolCalls, tokens, cost, models: Array.from(models) };
       }
 
-      const globalStats = computeStats(entries);
+      let globalStats = computeStats(entries);
 
       function renderHeader() {
+        const title = header?.title || (activeSessionKey ? subSessions[activeSessionKey].agentId : 'Session transcript');
+        document.title = `${title} · omp`;
         const totalCost = globalStats.cost.input + globalStats.cost.output + globalStats.cost.cacheRead + globalStats.cost.cacheWrite;
 
         const tokenParts = [];
@@ -1434,11 +1345,12 @@
 
         let html = `
           <div class="header">
-            <h1>Session: ${escapeHtml(header?.id || 'unknown')}</h1>
-            <div class="help-bar">T toggle thinking · O toggle tools</div>
+            <div class="session-eyebrow">${escapeHtml(activeSessionKey || 'Main session')}</div>
+            <h1>${escapeHtml(title)}</h1>
+            <div class="help-bar">${escapeHtml(shortenPath(header?.cwd || ''))} · T thinking · O tool output</div>
             <div class="header-info">
               <div class="info-item"><span class="info-label">Date:</span><span class="info-value">${header?.timestamp ? new Date(header.timestamp).toLocaleString() : 'unknown'}</span></div>
-              <div class="info-item"><span class="info-label">Models:</span><span class="info-value">${globalStats.models.join(', ') || 'unknown'}</span></div>
+              <div class="info-item"><span class="info-label">Models:</span><span class="info-value">${escapeHtml(globalStats.models.join(', ') || 'unknown')}</span></div>
               <div class="info-item"><span class="info-label">Messages:</span><span class="info-value">${msgParts.join(', ') || '0'}</span></div>
               <div class="info-item"><span class="info-label">Tool Calls:</span><span class="info-value">${globalStats.toolCalls}</span></div>
               <div class="info-item"><span class="info-label">Tokens:</span><span class="info-value">${tokenParts.join(' ') || '0'}</span></div>
@@ -1446,14 +1358,14 @@
             </div>
           </div>`;
 
-        if (systemPrompt) {
+        if (!activeSessionKey && systemPrompt) {
           html += `<div class="system-prompt">
             <div class="system-prompt-header">System Prompt</div>
             <div class="system-prompt-content">${escapeHtml(systemPrompt)}</div>
           </div>`;
         }
 
-        if (tools && tools.length > 0) {
+        if (!activeSessionKey && tools && tools.length > 0) {
           const namesHtml = tools.map(t => `<span class="tool-name-chip">${escapeHtml(t.name)}</span>`).join('');
           const fullHtml = tools.map(t => `<div class="tool-item"><span class="tool-item-name">${escapeHtml(t.name)}</span> - <span class="tool-item-desc">${escapeHtml(t.description)}</span></div>`).join('');
           html += `<div class="tools-list collapsed" onclick="this.classList.toggle('collapsed')">
@@ -1474,10 +1386,7 @@
       const entryCache = new Map();
 
       function renderEntryToNode(entry, sctx) {
-        // Cache main-session nodes only; sub-session bodies are cached whole
-        // per key in subSessionBodyCache, so each entry renders once anyway.
-        const cacheable = sctx.prefix === '';
-        if (cacheable && entryCache.has(entry.id)) {
+        if (entryCache.has(entry.id)) {
           return entryCache.get(entry.id).cloneNode(true);
         }
 
@@ -1490,18 +1399,20 @@
         const node = template.content.firstElementChild;
 
         // Cache the node
-        if (cacheable && node) {
+        if (node) {
           entryCache.set(entry.id, node.cloneNode(true));
         }
         return node;
       }
 
       function navigateTo(targetId, scrollMode = 'target', scrollToEntryId = null, scrollTargetDomId = null) {
+        setView('transcript');
         const leafChanged = currentLeafId !== targetId;
         currentLeafId = targetId;
         currentTargetId = scrollToEntryId || targetId;
         currentTargetAnchorId = scrollTargetDomId;
         const path = getPath(targetId);
+        updateLocation();
 
         if (leafChanged) {
           forceTreeRerender();
@@ -1515,8 +1426,9 @@
         const messagesEl = document.getElementById('messages');
         const fragment = document.createDocumentFragment();
 
+        const renderContext = sessionContext;
         for (const entry of path) {
-          const node = renderEntryToNode(entry, mainSctx);
+          const node = renderEntryToNode(entry, sessionContext);
           if (node) {
             fragment.appendChild(node);
           }
@@ -1524,6 +1436,12 @@
 
         messagesEl.innerHTML = '';
         messagesEl.appendChild(fragment);
+        if (!messagesEl.firstChild) {
+          const empty = document.createElement('p');
+          empty.className = 'empty-session';
+          empty.textContent = 'This session has no transcript messages.';
+          messagesEl.appendChild(empty);
+        }
 
         // Attach click handlers for copy-link buttons
         messagesEl.querySelectorAll('.copy-link-btn').forEach(btn => {
@@ -1542,7 +1460,8 @@
             content.scrollTop = content.scrollHeight;
           } else if (scrollMode === 'target') {
             const scrollTargetId = scrollToEntryId || targetId;
-            const targetEl = document.getElementById(scrollTargetDomId || `entry-${scrollTargetId}`);
+            if (sessionContext !== renderContext) return;
+            const targetEl = document.getElementById(scrollTargetDomId || `${renderContext.idPrefix}${scrollTargetId}`);
             if (targetEl) {
               targetEl.scrollIntoView({ block: 'center' });
               if (scrollToEntryId) {
@@ -1628,7 +1547,7 @@
       const overlay = document.getElementById('sidebar-overlay');
       const hamburger = document.getElementById('hamburger');
       const sidebarResizer = document.getElementById('sidebar-resizer');
-      const SIDEBAR_WIDTH_STORAGE_KEY = 'pi-share:v1:sidebar-width';
+      const SIDEBAR_WIDTH_STORAGE_KEY = 'omp-export:sidebar-width';
       const MIN_CONTENT_WIDTH = 320;
 
       function isMobileLayout() {
@@ -1723,8 +1642,8 @@
 
         sidebarResizer.addEventListener('dblclick', () => {
           if (isMobileLayout()) return;
-          applySidebarWidth(400);
-          saveSidebarWidth(400);
+          applySidebarWidth(280);
+          saveSidebarWidth(280);
         });
 
         window.addEventListener('resize', () => {
@@ -1777,9 +1696,15 @@
       // Keyboard shortcuts
       document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') {
-          if (overlayStack.length > 0) {
-            e.preventDefault();
-            popSubSession();
+          if (e.defaultPrevented || e.composedPath().some(node => node.tagName === 'OMP-SESSION-TRACE')) return;
+          if (e.target?.matches('input, textarea, [contenteditable="true"]')) return;
+          if (currentView === 'trace' || timelineOpen) {
+            setView('transcript');
+            setTimelineOpen(false);
+            return;
+          }
+          if (sidebar.classList.contains('open')) {
+            closeSidebar();
             return;
           }
           searchInput.value = '';
@@ -1791,6 +1716,7 @@
           // so the chord can't fire on a user's letter input. Avoid Ctrl/Cmd-based
           // chords entirely — every major browser reserves Ctrl+T (new tab) and
           // Ctrl+O (open file), so the shortcut would never reach the page.
+          if (e.defaultPrevented || e.composedPath().some(node => node.tagName === 'OMP-SESSION-TRACE')) return;
           const t = e.target;
           const editable =
             t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
@@ -1802,18 +1728,60 @@
         }
       });
 
-      // Initial render
-      // If URL has targetId, scroll to that specific message; otherwise stay at top
-      if (leafId) {
-        if (urlTargetId && byId.has(urlTargetId)) {
-          navigateTo(leafId, 'target', urlTargetId);
-        } else {
-          navigateTo(leafId, 'none');
-        }
-      } else if (entries.length > 0) {
-        // Fallback: use last entry if no leafId
-        navigateTo(entries[entries.length - 1].id, 'none');
+      // The same embedded snapshot drives both transcript navigation and trace inspection.
+      const tracePanel = document.getElementById('trace-panel');
+      const traceBody = document.getElementById('trace-body');
+      const traceElement = document.querySelector('omp-session-trace');
+      const timelineToggle = document.getElementById('timeline-toggle');
+      const traceExpand = document.getElementById('trace-expand');
+      let currentView = 'transcript';
+      let timelineOpen = urlParams.get('timeline') === 'open';
+
+      function setTimelineOpen(open) {
+        timelineOpen = open;
+        traceBody.hidden = currentView !== 'trace' && !open;
+        timelineToggle.setAttribute('aria-expanded', String(!traceBody.hidden));
+        updateLocation();
       }
+
+      function setView(view) {
+        currentView = trace && view === 'trace' ? 'trace' : 'transcript';
+        const full = currentView === 'trace';
+        document.getElementById('content').hidden = full;
+        document.getElementById('workspace').classList.toggle('trace-view', full);
+        document.getElementById('transcript-tab').setAttribute('aria-pressed', String(!full));
+        document.getElementById('trace-tab').setAttribute('aria-pressed', String(full));
+        traceElement.setAttribute('view', full ? 'full' : 'timeline');
+        traceExpand.textContent = full ? 'Back to transcript' : 'Open trace view';
+        timelineToggle.disabled = full;
+        setTimelineOpen(timelineOpen);
+      }
+
+      if (trace) {
+        traceElement.sessionData = data;
+        tracePanel.hidden = false;
+        document.getElementById('trace-tab').hidden = false;
+        document.getElementById('trace-summary').textContent =
+          `${trace.summary.requests} calls · ${trace.summary.toolCalls} tools · ${trace.summary.subagents} agents`;
+      }
+      timelineToggle.addEventListener('click', () => setTimelineOpen(!timelineOpen));
+      traceExpand.addEventListener('click', () => setView(currentView === 'trace' ? 'transcript' : 'trace'));
+      document.getElementById('transcript-tab').addEventListener('click', () => setView('transcript'));
+      document.getElementById('trace-tab').addEventListener('click', () => setView('trace'));
+      document.getElementById('home-link').addEventListener('click', event => {
+        event.preventDefault();
+        switchSession('');
+        setView('transcript');
+      });
+      traceElement.addEventListener('trace-navigate', event => {
+        const { trackId, entryId } = event.detail;
+        setView('transcript');
+        switchSession(trackId === 'main' ? '' : trackId, entryId);
+      });
+
+      renderSessionList();
+      switchSession(subSessions?.[urlParams.get('session')] ? urlParams.get('session') : '', urlTargetId, urlLeafId);
+      setView(urlParams.get('view'));
       } // end bootSession
 
       function showLoadError(err) {
