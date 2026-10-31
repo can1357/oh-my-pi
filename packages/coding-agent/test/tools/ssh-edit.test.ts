@@ -182,13 +182,19 @@ describe("SSH read/edit snapshots (#12125)", () => {
 		expect(remoteText).toBe("\uFEFFALPHA\r\nbeta\r\n");
 	});
 
-	it.each(["replace", "hashline"] as const)("keeps %s previews offline without false edit failures", async mode => {
+	it.each([
+		["replace", "apply"],
+		["hashline", "apply"],
+		["hashline", "cancel"],
+	] as const)("keeps %s previews offline before %s", async (mode, action) => {
 		const tool = new EditTool(session, mode);
+		const header =
+			mode === "hashline" ? `[${URL}#${getEditStore(session).recordSnapshot(URL, remoteText, [1, 2, 3])}]` : "";
 		const params =
 			mode === "replace"
 				? { path: URL, old_string: "beta", new_string: "BETA" }
 				: {
-						input: `[${URL}#${getEditStore(session).recordSnapshot(URL, remoteText, [1, 2, 3])}]\nPUT 2.=2:\n+BETA`,
+						input: `${header}\nPUT 2.=2:\n+BETA`,
 					};
 		const preview = Promise.withResolvers<void>();
 		const previewErrors: string[] = [];
@@ -212,7 +218,7 @@ describe("SSH read/edit snapshots (#12125)", () => {
 			expect(readRemote).not.toHaveBeenCalled();
 			expect(writeRemote).not.toHaveBeenCalled();
 			expect(previewErrors).toEqual([]);
-			if (mode === "hashline") return; // Exercise cancellation in finally.
+			if (action === "cancel") return; // Exercise cancellation in finally.
 			remoteText = "delta\nbeta\ngamma\n";
 			const signal = new AbortController().signal;
 			const edited = await tool.execute("stream", params, signal);
@@ -220,6 +226,11 @@ describe("SSH read/edit snapshots (#12125)", () => {
 			expect(remoteText).toBe("delta\nBETA\ngamma\n");
 			expect(readRemote.mock.calls.at(-1)?.[2].signal).toBe(signal);
 			expect(writeRemote.mock.calls[0]?.[3].signal).toBe(signal);
+			if (mode === "hashline") {
+				const after = await new ReadTool(session).execute("read-after-preview", { path: URL });
+				expect(headerOf(after)).not.toBe(header);
+				expect(textOf(after)).toContain("2:BETA");
+			}
 		} finally {
 			stream.cancel();
 		}
