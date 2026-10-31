@@ -341,7 +341,7 @@ export async function inflateArchivedBytes(file: string): Promise<Uint8Array> {
  * `link`, not `rename`: a transcript only comes out of the archive onto a
  * path nothing holds, so a file that appeared there in the meantime is
  * someone's work. `EEXIST` says so instead of writing over it. What the link
- * left at that name is read back by {@link publishedIsStaged}.
+ * left at that name is read back by {@link checkPublished}.
  */
 export async function inflateArchivedTranscript(
 	source: string,
@@ -359,7 +359,14 @@ export async function inflateArchivedTranscript(
 	const ground = await mintStagingGround(destination, ledger, mode);
 	try {
 		await ground.handle.chmod(mode);
-		const written = await inflateIntoHandleWithDigest(Bun.file(source).stream(), ground.handle);
+		// Only a failed read of the archive says anything about the archive:
+		// what goes wrong publishing the transcript afterwards is reported as
+		// itself, never as a damaged archive.
+		const written = await inflateIntoHandleWithDigest(Bun.file(source).stream(), ground.handle).catch(
+			(error: unknown) => {
+				throw archiveReadError(source, error);
+			},
+		);
 		const landed = await fs.lstat(ground.file).catch((error: unknown) => {
 			if (isEnoent(error)) return undefined;
 			throw error;
@@ -368,12 +375,13 @@ export async function inflateArchivedTranscript(
 			throw new Error(`${ground.file} was replaced while the transcript was being written`);
 		}
 		await fs.link(ground.file, destination);
-		if (!(await publishedIsStaged(destination, ground.created, holdsCopied(written)))) {
-			throw new Error(`${destination} is not the transcript this restore wrote, so it was left as it is`);
+		const check = await checkPublished(destination, ground.created, holdsCopied(written));
+		if (!check.staged) {
+			throw new Error(
+				`${notStagedMessage(destination, "the transcript this restore wrote", check)}, so it was left as it is`,
+			);
 		}
 		return written.size;
-	} catch (error) {
-		throw archiveReadError(source, error);
 	} finally {
 		try {
 			const note = await removeStagingGround(ground);
@@ -687,6 +695,13 @@ export async function openRegularFile(file: string): Promise<fs.FileHandle | und
 }
 
 /**
+ * What {@link checkPublished} found at a publication's name: the very file
+ * this run staged; something verifiably other than it; or, with
+ * `unverified` saying why, nothing at all, because a look failed.
+ */
+export type PublicationCheck = { staged: true } | { staged: false; unverified?: string };
+
+/**
  * Whether the entry a publication left at `destination` is the very file
  * this run staged, holding what this run wrote.
  *
@@ -710,29 +725,54 @@ export async function openRegularFile(file: string): Promise<fs.FileHandle | und
  * reporting a publication whose name, when this run last looked, held
  * somebody else's file, or whose bytes, when this run read them, were not
  * what it wrote.
+ *
+ * Anything short of staged leaves a caller to withdraw or put back what it
+ * published, so a look that fails is never taken for staged. Nor is it taken
+ * for something else standing there: it comes back `unverified`, and the
+ * caller says the publication could not be checked — see
+ * {@link notStagedMessage} — rather than that the name holds another file.
  */
-export async function publishedIsStaged(
+export async function checkPublished(
 	destination: string,
 	staged: Stats,
 	holds: (published: fs.FileHandle) => Promise<boolean>,
-): Promise<boolean> {
+): Promise<PublicationCheck> {
 	const isStaged = (entry: Stats | undefined): boolean =>
 		entry?.isFile() === true && entry.dev === staged.dev && entry.ino === staged.ino;
-	const published = await openRegularFile(destination).catch(() => undefined);
-	if (!published) return false;
+	const named = async (): Promise<Stats | undefined> =>
+		await fs.lstat(destination).catch((error: unknown) => {
+			if (isEnoent(error)) return undefined;
+			throw error;
+		});
+	const other: PublicationCheck = { staged: false };
 	try {
-		if (!isStaged(await published.stat())) return false;
-		if (!isStaged(await fs.lstat(destination).catch(() => undefined))) return false;
-		if (!(await holds(published))) return false;
-	} catch {
-		return false;
-	} finally {
-		await published.close().catch(() => undefined);
+		const published = await openRegularFile(destination);
+		if (!published) return other;
+		try {
+			if (!isStaged(await published.stat())) return other;
+			if (!isStaged(await named())) return other;
+			if (!(await holds(published))) return other;
+		} finally {
+			await published.close().catch(() => undefined);
+		}
+		return isStaged(await named()) ? { staged: true } : other;
+	} catch (error) {
+		return { staged: false, unverified: errorText(error) };
 	}
-	return isStaged(await fs.lstat(destination).catch(() => undefined));
 }
 
-/** A `holds` for {@link publishedIsStaged}: exactly the bytes a copy wrote. */
+/**
+ * What a caller says when {@link checkPublished} did not find its file
+ * staged: that `subject` is not `is` ("the transcript this restore wrote"),
+ * or, when a look failed, that whether it is could not be checked, and why.
+ */
+export function notStagedMessage(subject: string, is: string, check: { unverified?: string }): string {
+	return check.unverified === undefined
+		? `${subject} is not ${is}`
+		: `whether ${subject} is ${is} could not be checked (${check.unverified})`;
+}
+
+/** A `holds` for {@link checkPublished}: exactly the bytes a copy wrote. */
 export function holdsCopied(written: CopiedBytes): (published: fs.FileHandle) => Promise<boolean> {
 	return async published => {
 		const back = await digestOfHandle(published);
@@ -1153,8 +1193,11 @@ async function copyEntryDereferenced(
 		// over it without anyone asking. `EEXIST` sends this entry down the
 		// "already holds something else" road on the next attempt instead.
 		await fs.link(ground.file, destination);
-		if (!(await publishedIsStaged(destination, ground.created, holdsCopied(written)))) {
-			throw new Error(`${destination} is not the copy of ${source} this restore wrote, so it was left as it is`);
+		const check = await checkPublished(destination, ground.created, holdsCopied(written));
+		if (!check.staged) {
+			throw new Error(
+				`${notStagedMessage(destination, `the copy of ${source} this restore wrote`, check)}, so it was left as it is`,
+			);
 		}
 	} finally {
 		try {

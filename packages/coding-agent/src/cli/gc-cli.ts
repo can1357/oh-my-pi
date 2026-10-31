@@ -26,12 +26,7 @@ import { Settings } from "../config/settings";
 import type { Setting } from "../config/registry";
 
 import { BLOB_HASH_RE, BLOB_STAGING_RE, blobStagingPath } from "../session/blob-store";
-import {
-	listSessionsReadOnly,
-	readSessionInfo,
-	type SessionInfo,
-	type SessionStatus,
-} from "../session/session-listing";
+import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { parseTerminalBreadcrumb } from "../session/session-paths";
 import {
 	archiveIsPrefixOfLive,
@@ -50,7 +45,8 @@ import {
 	archivedPathsWithoutLiveCopies,
 	holdsCopied,
 	mintStagingGround,
-	publishedIsStaged,
+	checkPublished,
+	notStagedMessage,
 	surveyRecordedStagingGrounds,
 	removeStagingGround,
 	stagingLedgerDir,
@@ -72,7 +68,7 @@ import {
 	type StagingQuarantine,
 } from "../session/session-archive";
 import { codeOf, statIfPresent, withGcLock } from "../session/gc-lock";
-import { readSessionHeaderId } from "../session/session-loader";
+import { readSessionHeaderId, readSessionHeaderIdFromHandle } from "../session/session-loader";
 import { FileSessionStorage, tryAcquireSessionLease } from "../session/session-storage";
 import {
 	type CompressCandidate,
@@ -1005,7 +1001,7 @@ async function listActiveSessions(sessionsRoot: string): Promise<{ sessions: Ses
 			if (!name.endsWith(".jsonl") || seen.has(name)) continue;
 			const file = path.join(dir, name);
 			try {
-				if ((await readSessionHeaderId(file)) === undefined) continue;
+				if ((await readRegularSessionHeaderId(file)) === undefined) continue;
 				unread.push(`${file} could not be read as a session, so it was not considered`);
 			} catch (error) {
 				unread.push(`${file} could not be read, so it was not considered: ${errorMessage(error)}`);
@@ -1014,6 +1010,23 @@ async function listActiveSessions(sessionsRoot: string): Promise<{ sessions: Ses
 	}
 	sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
 	return { sessions, unread };
+}
+
+/**
+ * The session id in the header of the regular file at `file`; undefined when
+ * nothing is there, what is there is not a regular file, or it carries no
+ * session header. Opened non-blocking and judged by what the descriptor
+ * holds, so a FIFO at a transcript's name — or put there after a look at the
+ * name — is never waited on. A read that fails throws.
+ */
+async function readRegularSessionHeaderId(file: string): Promise<string | undefined> {
+	const handle = await openRegularFile(file);
+	if (!handle) return undefined;
+	try {
+		return await readSessionHeaderIdFromHandle(handle);
+	} finally {
+		await handle.close().catch(() => undefined);
+	}
 }
 
 async function listNestedSessionsReadOnly(artifactsRoot: string): Promise<SessionInfo[]> {
@@ -1098,7 +1111,7 @@ async function digestArchivedSessionFile(file: string): Promise<{ hash: string; 
 }
 
 /**
- * A `holds` for {@link publishedIsStaged}: the published archive inflates to
+ * A `holds` for {@link checkPublished}: the published archive inflates to
  * exactly `expected`, the digest of the transcript it was compressed from.
  *
  * Read positionally, not through a read stream: a stream over a `FileHandle`
@@ -1172,7 +1185,7 @@ async function compared(comparison: Promise<boolean>, one: string, other: string
  * archive that turns out not to be what was compressed costs a retry and
  * nothing else. A run that reports success must not be holding an archive
  * that is somebody else's file, which is what the read-back is for — see
- * {@link publishedIsStaged}.
+ * {@link checkPublished}.
  *
  * A transcript can be a symlink, as `FileSessionStorage.listFilesSync`
  * already treats one as a transcript like any other. The compressed archive
@@ -1252,10 +1265,11 @@ async function gzipSessionFile(
 			await fs.link(ground.file, destination);
 			linked = true;
 		}
-		if (!(await publishedIsStaged(destination, ground.created, inflatesTo(expected)))) {
+		const check = await checkPublished(destination, ground.created, inflatesTo(expected));
+		if (!check.staged) {
 			throw new Error(
-				`${destination} is not the archive this run wrote for ${source}, so ${source} was not archived; ` +
-					`run \`omp gc --archive\` again`,
+				`${notStagedMessage(destination, `the archive this run wrote for ${source}`, check)}, so ${source} was ` +
+					`not archived; run \`omp gc --archive\` again`,
 			);
 		}
 		// The mode once more, from the descriptor the bytes were read through,
@@ -1361,7 +1375,7 @@ async function noteCreation(target: string, state: ArchiveCopyState): Promise<vo
  * open throughout, and an unlinked inode is still readable through a
  * descriptor. It goes back the way everything else is written here — a
  * stage of this run's own, digested as it is copied, published, and read
- * back by {@link publishedIsStaged}. A put-back that does not read back is
+ * back by {@link checkPublished}. A put-back that does not read back is
  * reported as that; what stands at the name then is left as it is.
  */
 async function putArchivedCopyBack(
@@ -1376,10 +1390,11 @@ async function putArchivedCopyBack(
 		const written = await copyHandleWithDigest(archived, ground.handle);
 		await ground.handle.chmod(mode & 0o7777);
 		await fs.rename(ground.file, destination);
-		if (!(await publishedIsStaged(destination, ground.created, holdsCopied(written)))) {
+		const check = await checkPublished(destination, ground.created, holdsCopied(written));
+		if (!check.staged) {
 			throw new Error(
-				`${destination} could not be put back: what stands at that name is not the copy this run wrote back, ` +
-					`so it was left as it is`,
+				`${destination} could not be put back: ` +
+					`${notStagedMessage("what stands at that name", "the copy this run wrote back", check)}, so it was left as it is`,
 			);
 		}
 	} finally {
@@ -1467,7 +1482,7 @@ async function publishArtifactIntoArchive(
 		// The proof was about a descriptor; the publication is about a name,
 		// and `link` and `rename` take whatever the name points at when they
 		// run. So what the publication left at the name is read back — see
-		// {@link publishedIsStaged} for each step and what it rules out.
+		// {@link checkPublished} for each step and what it rules out.
 		//
 		// The limit, stated rather than engineered past: a process that can
 		// write the destination's directory can rebind the name after the
@@ -1483,10 +1498,10 @@ async function publishArtifactIntoArchive(
 				`${tempPath} is no longer the file this run staged there, so it was left alone and ${source} was ` +
 					`not archived; run \`omp gc --archive\` again`,
 			);
-		const notPublished = (): Error =>
+		const notPublished = (check: { unverified?: string }): Error =>
 			new Error(
-				`${destination} is not the copy of ${source} this run wrote, so ${source} was not archived; ` +
-					`run \`omp gc --archive\` again`,
+				`${notStagedMessage(destination, `the copy of ${source} this run wrote`, check)}, so ${source} was not ` +
+					`archived; run \`omp gc --archive\` again`,
 			);
 		const archived = await fs.open(destination, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK).catch(error => {
 			if (codeOf(error) === "ENOENT") return undefined;
@@ -1498,10 +1513,11 @@ async function publishArtifactIntoArchive(
 		if (!archived) {
 			if (!(await stagedIsStillOurs())) throw rebound();
 			await fs.link(tempPath, destination);
-			if (!(await publishedIsStaged(destination, held, holdsCopied(copied)))) {
+			const linkedCheck = await checkPublished(destination, held, holdsCopied(copied));
+			if (!linkedCheck.staged) {
 				const note = await withdrawLinkedPublication(destination, tempPath);
 				if (note) state.notes.push(note);
-				throw notPublished();
+				throw notPublished(linkedCheck);
 			}
 			await ground.handle.chmod(await liveMode());
 			state.created.push({ path: destination, dev: held.dev, ino: held.ino });
@@ -1544,7 +1560,8 @@ async function publishArtifactIntoArchive(
 			}
 			if (!(await stagedIsStillOurs())) throw rebound();
 			await fs.rename(tempPath, destination);
-			if (!(await publishedIsStaged(destination, held, holdsCopied(copied)))) {
+			const check = await checkPublished(destination, held, holdsCopied(copied));
+			if (!check.staged) {
 				// A rename replaces, so the shorter archived copy is already
 				// gone from that name — and it is still here, in the
 				// descriptor this run has held open throughout. It goes back
@@ -1555,14 +1572,14 @@ async function publishArtifactIntoArchive(
 					now = await fs.lstat(destination).catch(absentOnly);
 				} catch (error) {
 					throw new Error(
-						`${notPublished().message}; the shorter copy the archive held at ${destination} was not put back, ` +
+						`${notPublished(check).message}; the shorter copy the archive held at ${destination} was not put back, ` +
 							`because what that name holds could not be checked: ${errorMessage(error)}. ${source}, which ` +
 							`began with those bytes when this run copied it, is kept`,
 					);
 				}
 				if (now && (now.dev !== held.dev || now.ino !== held.ino)) {
 					throw new Error(
-						`${notPublished().message}; the shorter copy the archive held at ${destination} was not put back, ` +
+						`${notPublished(check).message}; the shorter copy the archive held at ${destination} was not put back, ` +
 							`because that name now holds something this run did not put there. ${source}, which began ` +
 							`with those bytes when this run copied it, is kept`,
 					);
@@ -1570,9 +1587,9 @@ async function publishArtifactIntoArchive(
 				try {
 					await putArchivedCopyBack(archived, destination, verified.mode, state.ledger, state.notes);
 				} catch (error) {
-					throw new Error(`${notPublished().message}; ${errorMessage(error)}`);
+					throw new Error(`${notPublished(check).message}; ${errorMessage(error)}`);
 				}
-				throw notPublished();
+				throw notPublished(check);
 			}
 			await ground.handle.chmod(await liveMode());
 		} finally {
@@ -2112,9 +2129,17 @@ async function copyArtifactsTree(
 async function archiveAlreadyHolds(source: string, destination: string): Promise<boolean> {
 	if (!(await fs.lstat(destination).catch(absentOnly))?.isFile()) return false;
 	const holds = async (): Promise<boolean> => {
-		const live = await digestStream(Bun.file(source).stream());
-		const stored = await digestArchivedSessionFile(destination);
-		return live.hash === stored.hash;
+		// Read through a non-blocking descriptor: a FIFO at the live name is
+		// not waited on, and is no transcript the archive could hold.
+		const handle = await openRegularFile(source);
+		if (!handle) throw new Error(`${source} is not a regular file`);
+		try {
+			const live = await digestStream(bytesOfHandle(handle));
+			const stored = await digestArchivedSessionFile(destination);
+			return live.hash === stored.hash;
+		} finally {
+			await handle.close().catch(() => undefined);
+		}
 	};
 	return await compared(holds(), destination, source);
 }
@@ -2332,7 +2357,7 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
  * A walk that stopped at the link would archive a session out from under its
  * live writer.
  */
-async function collectSessionFiles(session: SessionInfo): Promise<string[]> {
+async function collectSessionFiles(session: Pick<SessionInfo, "path">): Promise<string[]> {
 	const artifactsDir = sessionArtifactsPath(session.path);
 	const files = [session.path];
 	try {
@@ -2410,7 +2435,10 @@ async function leaseTranscripts(tree: SessionTreeLeases, files: readonly string[
  * so far released, when any of them is live; throws, with every lease
  * released, when one cannot be probed.
  */
-async function tryAcquireSessionTreeLeases(session: SessionInfo, files: string[]): Promise<SessionTreeLeases | null> {
+async function tryAcquireSessionTreeLeases(
+	session: Pick<SessionInfo, "path">,
+	files: string[],
+): Promise<SessionTreeLeases | null> {
 	const tree: SessionTreeLeases = { leases: [], leasedIds: new Set(), transcripts: new Set([session.path]) };
 	const release = (): void => {
 		for (const held of tree.leases) held.release();
@@ -2926,27 +2954,25 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 	// An enumeration that fails says nothing about who owns the session, and
 	// reporting it as an owner sends the reader to close a process that does
 	// not exist. Both halves are named for what they are.
-	const sessionTree = async (session: SessionInfo): Promise<{ files?: string[]; failure?: string }> => {
+	const sessionTree = async (session: Pick<SessionInfo, "path">): Promise<{ files?: string[]; failure?: string }> => {
 		try {
 			return { files: await collectSessionFiles(session) };
 		} catch (error) {
 			return { failure: `${sessionPath} and its subagent sessions could not be listed: ${errorMessage(error)}` };
 		}
 	};
-	// The session listing answers the same for a transcript it could not read
-	// as for a file that is not a session; the header reader tells them apart,
-	// so a transcript nobody could read is not called "not a session file".
-	const readTheSession = async (): Promise<{ session?: SessionInfo; failure?: string }> => {
-		const session = await readSessionInfo(sessionPath);
-		if (session) return { session };
+	// Whether the live transcript is a session, read once through a
+	// non-blocking descriptor: a FIFO at its name is not waited on, and a
+	// transcript nobody could read is not called "not a session file".
+	const readTheSession = async (): Promise<{ session?: Pick<SessionInfo, "path">; failure?: string }> => {
 		try {
-			if ((await readSessionHeaderId(sessionPath)) === undefined) {
+			if ((await readRegularSessionHeaderId(sessionPath)) === undefined) {
 				return { failure: `${sessionPath} is not a session file` };
 			}
 		} catch (error) {
 			return { failure: `${sessionPath} could not be read: ${errorMessage(error)}` };
 		}
-		return { failure: `${sessionPath} could not be read as a session` };
+		return { session: { path: sessionPath } };
 	};
 	// A session a live process owns is reported and kept, whenever it joined.
 	// The transcripts are the files the walk compared: a link or a device
@@ -2986,8 +3012,10 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 		}
 		if (probe) for (const held of probe.leases) held.release();
 		if (failure) {
+			// Applying stops here too; nothing past this reads a session.
 			result.errors.push(failure);
 			await keepTree();
+			return result;
 		} else if (listed?.failure) {
 			result.errors.push(listed.failure);
 			await keepTree();

@@ -3694,6 +3694,52 @@ for (const apply of [false, true]) {
 	}, 15_000);
 }
 
+/**
+ * `run`, or "hung" when it is still waiting on the FIFO at `fifo` after a
+ * real five seconds — then given a writer, so it can finish and release the
+ * gc lock before the next test.
+ */
+async function unlessHungOn<T>(fifo: string, run: Promise<T>): Promise<T | "hung"> {
+	// A real timer: a blocking open on a FIFO waits in the thread pool, where
+	// no fake clock reaches it. A passing run resolves first and pays nothing.
+	const outcome = await Promise.race([run, Bun.sleep(5_000).then(() => "hung" as const)]);
+	if (outcome === "hung") {
+		const writer = await fs.open(fifo, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
+		await writer.close();
+		await run.catch(() => undefined);
+	}
+	return outcome;
+}
+
+test("an archive run is not held up by a FIFO named like a transcript, and archives the session beside it", async () => {
+	const fifo = path.join(getSessionsDir(root), "--other--", "other.jsonl");
+	await fs.mkdir(path.dirname(fifo), { recursive: true });
+	expect(await Bun.spawn(["mkfifo", fifo]).exited).toBe(0);
+
+	const outcome = await unlessHungOn(fifo, archiveOnly());
+
+	expect(outcome).not.toBe("hung");
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+	expect((await fs.lstat(fifo)).isFIFO()).toBe(true);
+}, 15_000);
+
+for (const apply of [false, true]) {
+	test(`a reclaim is not held up by a FIFO at the live transcript's name (${apply ? "apply" : "preview"})`, async () => {
+		await archiveOnly();
+		await fs.unlink(sessionFile);
+		expect(await Bun.spawn(["mkfifo", sessionFile]).exited).toBe(0);
+
+		const outcome = await unlessHungOn(
+			sessionFile,
+			runGcCommand({ flags: { agentDir: root, reclaim: archiveFile, apply, forwardOnly: true, json: true } }),
+		);
+
+		expect(outcome).not.toBe("hung");
+		if (outcome !== "hung") expect(outcome.reclaim?.errors.length).toBeGreaterThan(0);
+		expect((await fs.lstat(sessionFile)).isFIFO()).toBe(true);
+	}, 15_000);
+}
+
 test("a private transcript stays private through archive, reclaim and restore", async () => {
 	await fs.chmod(sessionFile, 0o600);
 
@@ -3787,16 +3833,20 @@ test("a restore preview reports a FIFO where an archived artifact belongs", asyn
 });
 
 /**
- * Make `fs[method]` fail with an injected EIO on exactly `at`, or on every
- * path `at` matches, until restored: a look that fails, which says nothing
- * about what is there.
+ * Make `fs[method]` fail with an injected `code` (EIO unless named) on
+ * exactly `at`, or on every path `at` matches, until restored: a look that
+ * fails, which says nothing about what is there.
  */
-function failWithEio(method: "lstat" | "realpath" | "stat" | "open", at: string | ((target: string) => boolean)) {
+function failWithEio(
+	method: "lstat" | "realpath" | "stat" | "open",
+	at: string | ((target: string) => boolean),
+	code = "EIO",
+) {
 	const matches = typeof at === "string" ? (target: string) => target === at : at;
 	const real = fs[method] as (...args: unknown[]) => Promise<unknown>;
 	return spyOn(fs, method).mockImplementation((async (target: string, ...rest: unknown[]) => {
 		if (matches(String(target))) {
-			throw Object.assign(new Error(`EIO: injected, ${method} ${target}`), { code: "EIO" });
+			throw Object.assign(new Error(`${code}: injected, ${method} ${target}`), { code });
 		}
 		return await real(target, ...rest);
 	}) as never);
@@ -4134,6 +4184,136 @@ test("an archive run whose second look at the archive it supersedes fails does n
 	expect(told).toContain("EIO: injected");
 	expect(told).toContain("could not be compared");
 	expect((await fs.readFile(archiveFile)).equals(before)).toBe(true);
+});
+
+/**
+ * Once `fs[publish]` has put a file at a name `at` matches, fail every open
+ * of that name with `code`: a publication that cannot be read back, which
+ * says nothing about what the name holds.
+ */
+function failReadBackOf(publish: "link" | "rename", at: (target: string) => boolean, code = "EIO") {
+	let published = false;
+	const realPublish = fs[publish];
+	const publishing = spyOn(fs, publish).mockImplementation((async (from: string, to: string) => {
+		await realPublish(from, to);
+		if (at(String(to))) published = true;
+	}) as never);
+	const open = failWithEio("open", target => published && at(target), code);
+	return {
+		restore(): void {
+			publishing.mockRestore();
+			open.mockRestore();
+		},
+	};
+}
+
+for (const code of ["EACCES", "EIO", "ESTALE"] as const) {
+	test(`a restore that cannot read back the transcript it published (${code}) says so, not that it is another file or the archive is damaged`, async () => {
+		const original = await Bun.file(sessionFile).text();
+		await archiveEverything();
+		const broken = failReadBackOf("link", target => target === sessionFile, code);
+		let failure: unknown;
+		try {
+			await restoreArchivedSession(archiveFile, root);
+		} catch (error) {
+			failure = error;
+		} finally {
+			broken.restore();
+		}
+
+		const told = String(failure);
+		expect(told).not.toContain("is not the transcript");
+		expect(told).not.toContain("damaged");
+		expect(told).toContain(`whether ${sessionFile} is the transcript this restore wrote could not be checked`);
+		expect(told).toContain(`${code}: injected`);
+		// What it published is the transcript, whole: only the look failed.
+		expect(await Bun.file(sessionFile).text()).toBe(original);
+	});
+}
+
+test("a restore that cannot read back an artifact it published says so, not that it is another file", async () => {
+	const live = path.join(sessionFile.slice(0, -".jsonl".length), "a.log");
+	await Bun.write(live, "HELLO");
+	await archiveEverything();
+	const broken = failReadBackOf("link", target => target === live);
+	let told = "";
+	try {
+		told = (await restoreArchivedSession(archiveFile, root)).notRestored.join("\n");
+	} catch (error) {
+		told = String(error);
+	} finally {
+		broken.restore();
+	}
+
+	expect(told).not.toContain("is not the copy of");
+	expect(told).toContain(`whether ${live} is the copy of`);
+	expect(told).toContain("could not be checked");
+	expect(told).toContain("EIO: injected");
+	expect(await Bun.file(live).text()).toBe("HELLO");
+});
+
+test("an archive run that cannot read back the archive it published says so, not that it is another file", async () => {
+	const broken = failReadBackOf("link", target => target === archiveFile);
+	let result: GcResult;
+	try {
+		result = await archiveOnly();
+	} finally {
+		broken.restore();
+	}
+
+	const told = result.archive?.errors.join("\n") ?? "";
+	expect(told).not.toContain("is not the archive this run wrote");
+	expect(told).toContain(
+		`whether ${archiveFile} is the archive this run wrote for ${sessionFile} could not be checked`,
+	);
+	expect(told).toContain("EIO: injected");
+	expect(await Bun.file(sessionFile).exists()).toBe(true);
+});
+
+test("an archive run that cannot read back an artifact it published says so, not that it is another file", async () => {
+	const live = path.join(sessionFile.slice(0, -".jsonl".length), "a.log");
+	await Bun.write(live, "HELLO");
+	const destination = path.join(archiveFile.slice(0, -".jsonl.gz".length), "a.log");
+	const broken = failReadBackOf("link", target => target === destination);
+	let result: GcResult;
+	try {
+		result = await archiveOnly();
+	} finally {
+		broken.restore();
+	}
+
+	const told = result.archive?.errors.join("\n") ?? "";
+	expect(told).not.toContain("is not the copy of");
+	expect(told).toContain(`whether ${destination} is the copy of ${live} this run wrote could not be checked`);
+	expect(told).toContain("EIO: injected");
+	expect(await Bun.file(live).text()).toBe("HELLO");
+});
+
+test("an archive run that cannot read back a superseding copy, nor the shorter one it puts back, says so for both", async () => {
+	const live = path.join(sessionFile.slice(0, -".jsonl".length), "a.log");
+	await Bun.write(live, "FIRST");
+	await archiveOnly();
+	await Bun.write(live, "FIRST APPENDED");
+	const destination = path.join(archiveFile.slice(0, -".jsonl.gz".length), "a.log");
+	// Every open of the archived name after the longer copy is renamed over
+	// it fails; looks by name still work, so the put-back runs, and its own
+	// read-back fails the same way.
+	const broken = failReadBackOf("rename", target => target === destination);
+	let result: GcResult;
+	try {
+		result = await archiveOnly();
+	} finally {
+		broken.restore();
+	}
+
+	const told = result.archive?.errors.join("\n") ?? "";
+	expect(told).not.toContain("is not the copy of");
+	expect(told).not.toContain("is not the copy this run wrote back");
+	expect(told).toContain(`whether ${destination} is the copy of ${live} this run wrote could not be checked`);
+	expect(told).toContain("whether what stands at that name is the copy this run wrote back could not be checked");
+	expect(told).toContain("EIO: injected");
+	// The recovery is unchanged: the shorter copy went back over this run's.
+	expect(await Bun.file(destination).text()).toBe("FIRST");
 });
 
 // The command layer: each of these is a sentence `omp gc` printed about a file
