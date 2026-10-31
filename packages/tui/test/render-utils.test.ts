@@ -6,6 +6,7 @@ import * as natives from "@oh-my-pi/pi-natives/path";
 import { KeybindingsManager, setKeyHintPlatform } from "@oh-my-pi/pi-tui/app-keybindings";
 import { getThemeByName, initTheme, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import {
+	capPreviewLines,
 	dedupeParseErrors,
 	expandKeyHint,
 	formatCodeFrameLine,
@@ -267,6 +268,57 @@ describe("shortenPath", () => {
 		expect(shortenPath(String.raw`C:\Users\me\projects\demo`, "C:\\Users\\me\\")).toBe("~/projects/demo");
 		expect(shortenPath("/home/me/projects/demo", "/home/me/")).toBe("~/projects/demo");
 		expect(shortenPath("/home/me2/demo", "/home/me/")).toBe("/home/me2/demo");
+	});
+
+	it("shortens closing-delimited homes without matching longer path components", () => {
+		const home = "/Users/alice";
+		expect(shortenEmbeddedPaths(`{"cwd":"${home}","next":1}`, home)).toBe('{"cwd":"~","next":1}');
+		expect(shortenEmbeddedPaths(`{"cwd":"${home}.backup","next":1}`, home)).toBe(`{"cwd":"${home}.backup","next":1}`);
+		expect(shortenEmbeddedPaths(`prefix${home}/report`, home)).toBe(`prefix${home}/report`);
+	});
+
+	it("preserves every URI verbatim so link targets never change", () => {
+		const home = "/home/alice";
+		const uris = [
+			`file://${home}/x`,
+			`file://localhost${home}/x`,
+			`FILE://${home}/x`,
+			`https://example.com${home}/report`,
+			`vscode://file${home}/report`,
+		];
+
+		for (const uri of uris) expect(shortenEmbeddedPaths(`open ${uri} now`, home)).toBe(`open ${uri} now`);
+		expect(shortenEmbeddedPaths(`[log](file://${home}/x) at ${home}/x`, home)).toBe(`[log](file://${home}/x) at ~/x`);
+	});
+
+	it("keeps URI authorities intact for a UNC home while shortening the bare UNC path", () => {
+		const home = String.raw`\\server\share`;
+		const text = "see file://server/share/x, https://server/share/x and smb://server/share/y";
+
+		expect(shortenEmbeddedPaths(text, home)).toBe(text);
+		expect(shortenEmbeddedPaths(String.raw`see \\server\share\x`, home)).toBe("see ~/x");
+	});
+
+	it("preserves Windows drive file URIs while shortening the bare drive path", () => {
+		const home = String.raw`C:\Users\me`;
+		expect(shortenEmbeddedPaths(String.raw`file:///C:/Users/me/a.log C:\Users\me\a.log`, home)).toBe(
+			"file:///C:/Users/me/a.log ~/a.log",
+		);
+	});
+
+	it("leaves relative and non-root spellings of the home path alone", () => {
+		const home = "/home/alice";
+		for (const prefix of [".", "..", "~", "foo/", "@"]) {
+			const text = `${prefix}${home}/report`;
+			expect(shortenEmbeddedPaths(text, home)).toBe(text);
+		}
+	});
+
+	it("shortens homes delimited by colons in PATH lists and path:line locations", () => {
+		const home = "/home/alice";
+		expect(shortenEmbeddedPaths(`PATH=/usr/bin:${home}:${home}/bin:/opt`, home)).toBe("PATH=/usr/bin:~:~/bin:/opt");
+		expect(shortenEmbeddedPaths(`${home}:12: error`, home)).toBe("~:12: error");
+		expect(shortenEmbeddedPaths(`/home/alice2:${home}2/bin`, home)).toBe(`/home/alice2:${home}2/bin`);
 	});
 });
 
@@ -663,5 +715,49 @@ describe("sanitizeDisplayWarnings", () => {
 		const displayed = sanitizeDisplayWarnings(["warning ".repeat(TRUNCATE_LENGTHS.LONG)]);
 
 		expect(Bun.stringWidth(displayed[0])).toBeLessThanOrEqual(TRUNCATE_LENGTHS.LONG);
+	});
+});
+
+describe("capPreviewLines byte cap", () => {
+	const plainTheme = {
+		fg: (_color: unknown, text: string) => text,
+		format: { bracketLeft: "[", bracketRight: "]" },
+	} as unknown as Theme;
+
+	it("drops earlier max-width lines so the collapsed window stays within maxBytes", () => {
+		// Twelve rows exceed the ten-row cap, and their 6 KB payload also exceeds
+		// the byte cap. Keep the four newest rows, counting every omitted row.
+		const lines = Array.from(
+			{ length: 12 },
+			(_, index) => `\x1b[2m${String(index).padStart(3, "0")}${"x".repeat(497)}\x1b[0m`,
+		);
+		const capped = capPreviewLines(lines, plainTheme, { max: 10, maxBytes: 2_000, expandHint: false });
+
+		expect(capped[0]).toBe("… 8 earlier lines");
+		expect(capped.slice(1)).toEqual(lines.slice(8));
+		const visibleBytes = capped.slice(1).reduce((sum, line) => sum + Buffer.byteLength(Bun.stripANSI(line)), 0);
+		expect(visibleBytes).toBeLessThanOrEqual(2_000);
+	});
+
+	it("leaves short output alone and keeps the newest line even when it alone exceeds the cap", () => {
+		const short = ["one", "two", "three"];
+		expect(capPreviewLines(short, plainTheme, { max: 10, maxBytes: 2_000 })).toBe(short);
+
+		const huge = ["old", "y".repeat(3_000)];
+		const capped = capPreviewLines(huge, plainTheme, { max: 10, maxBytes: 2_000, expandHint: false });
+		expect(capped).toEqual(["… 1 earlier line", huge[1]!]);
+	});
+
+	it("counts visible bytes, not ANSI styling, and multi-byte characters by UTF-8 length", () => {
+		// 4 rows of 300 visible bytes = 1.2 KB of text; the escape codes around
+		// them must not count, and the 3-byte glyph rows must.
+		const styled = Array.from({ length: 4 }, () => `\x1b[38;5;240m${"a".repeat(300)}\x1b[0m`);
+		expect(capPreviewLines(styled, plainTheme, { max: 10, maxBytes: 1_200 })).toBe(styled);
+
+		const wide = Array.from({ length: 4 }, () => "€".repeat(300));
+		const capped = capPreviewLines(wide, plainTheme, { max: 10, maxBytes: 1_200, expandHint: false });
+		expect(capped[0]).toBe("… 3 earlier lines");
+		expect(capped).toHaveLength(2);
+		expect(capPreviewLines(wide, plainTheme, { max: 2, maxBytes: 1_200, expanded: true })).toEqual(wide);
 	});
 });

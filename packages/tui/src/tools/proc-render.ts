@@ -5,6 +5,7 @@ import {
 	formatBadge,
 	formatDuration,
 	formatErrorDetail,
+	formatMoreItems,
 	formatStatusIcon,
 	PREVIEW_LIMITS,
 	TRUNCATE_LENGTHS,
@@ -16,9 +17,15 @@ import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import { ansi, compact, node, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
 import { errorText, noteText, toolHead } from "./native-view";
-import type { AgentActivitySnapshot, CoordinationDetails, JobSnapshot } from "./wait";
+import type {
+	AgentActivitySnapshot,
+	CoordinationDetails,
+	JobRetuneOutcome,
+	JobRetuneStatus,
+	JobSnapshot,
+} from "./wait";
 import type { IrcDeliveryReceipt } from "./irc";
-import type { DaemonSnapshot } from "./daemon";
+import { displayDaemonExitReason, type DaemonMonitorWatcher, type DaemonSnapshot } from "./daemon";
 import { styleTerminalRow } from "./terminal-output";
 import { card, type CardToolResult as ToolResult, firstText, safe } from "./result-card";
 
@@ -28,16 +35,27 @@ export interface ProcReadDetails {
 	daemons?: DaemonSnapshot[];
 	job?: JobSnapshot;
 	daemon?: DaemonSnapshot;
+	/** Live output monitors; absent when the broker predates watcher reporting. */
+	monitors?: DaemonMonitorWatcher[];
 	log?: string;
 	terminalRows?: string[];
 }
 
 export type ProcWriteDetails =
 	| CoordinationDetails
-	| { action: "stop" | "stdin" | "mode"; daemon: DaemonSnapshot; input?: string; mode?: string };
+	| {
+			action: "stop" | "stdin" | "mode" | "progress";
+			daemon: DaemonSnapshot;
+			input?: string;
+			mode?: string;
+			/** `progress`: monitor delivery mode this write resulted in. */
+			progress?: "wake" | "ambient" | "off";
+			/** `progress` off: whether an active monitor was actually detached. */
+			detached?: boolean;
+	  };
 
 /** Process operation selected by a write URL, independent of its content. */
-export type ProcWriteAction = "stdin" | "mode" | "kill";
+export type ProcWriteAction = "stdin" | "mode" | "kill" | "progress";
 
 function preview(body: string, expanded: boolean, theme: Theme, tone: "dim" | "toolOutput" = "dim"): string[] {
 	if (!body.trim()) return [];
@@ -122,12 +140,68 @@ function daemonMeta(daemon: DaemonSnapshot, theme: Theme): string[] {
 				: "warning";
 	const meta = [theme.fg(stateColor, daemon.state)];
 	if (daemon.pid !== undefined) meta.push(`pid ${daemon.pid}`);
+	if (daemon.exitCode !== undefined) meta.push(`exit ${daemon.exitCode}`);
 	meta.push(
 		`${daemon.exitedAt === undefined ? "up" : "ran"} ${formatDuration(Math.max(0, (daemon.exitedAt ?? Date.now()) - daemon.startedAt))}`,
 	);
 	if (daemon.detached) meta.push("detached");
 	else if (daemon.persist) meta.push("persistent");
 	return meta;
+}
+
+/** Keep runtime diagnostics visible independently of terminal output or lifecycle state. */
+function daemonReasonText(daemon: DaemonSnapshot): string | undefined {
+	const reason = displayDaemonExitReason(daemon.exitReason);
+	return reason ? `Reason: ${truncateToWidth(reason, TRUNCATE_LENGTHS.LINE)}` : undefined;
+}
+
+function daemonReasonLine(daemon: DaemonSnapshot, theme: Theme): string | undefined {
+	const reason = daemonReasonText(daemon);
+	return reason ? theme.fg("error", reason) : undefined;
+}
+
+/** Indented `↳ watched by owner · mode · age · state` row under a service line; owner ids are sanitized like any display text. */
+function watcherRow(watcher: DaemonMonitorWatcher, daemon: DaemonSnapshot, theme: Theme): string {
+	const owner = truncateToWidth(safe(watcher.owner), TRUNCATE_LENGTHS.TITLE);
+	const facts = [theme.fg("accent", watcher.delivery ?? "unknown mode")];
+	if (watcher.since !== undefined) facts.push(`${formatDuration(Math.max(0, Date.now() - watcher.since))} ago`);
+	if (!watcher.connected) facts.push(theme.fg("warning", "disconnected"));
+	if (watcher.daemonId === undefined) facts.push(theme.fg("muted", "awaiting start"));
+	else if (watcher.daemonId !== daemon.id) facts.push(theme.fg("warning", "previous incarnation"));
+	return `  ${theme.fg("dim", "↳ watched by")} ${owner} ${theme.fg("dim", facts.join(theme.sep.dot))}`;
+}
+
+const RETUNE_TONE: Record<JobRetuneStatus, "success" | "accent" | "warning"> = {
+	retuned: "success",
+	unchanged: "accent",
+	not_found: "warning",
+	not_running: "warning",
+	unmonitored: "warning",
+	suppressed: "warning",
+};
+
+/**
+ * Compact per-id retune text. The model-facing explanation of each status lives
+ * in the write result text; duplicating those sentences here would put two
+ * copies of the same copy in two packages and blow past a feed row's width.
+ */
+function jobRetuneText(outcome: JobRetuneOutcome): string {
+	const id = safe(outcome.id);
+	const mode = outcome.progress ? safe(outcome.progress) : "?";
+	switch (outcome.status) {
+		case "retuned":
+			return `${id} → ${mode}`;
+		case "unchanged":
+			return `${id} already ${mode}`;
+		case "not_found":
+			return `${id} not your job`;
+		case "not_running":
+			return `${id} already settled`;
+		case "unmonitored":
+			return `${id} launched without progress`;
+		case "suppressed":
+			return `${id} withheld by a wait`;
+	}
 }
 
 function jobRow(job: JobSnapshot, theme: Theme): string {
@@ -141,7 +215,8 @@ function jobRow(job: JobSnapshot, theme: Theme): string {
 					: "done",
 		theme,
 	);
-	return `${icon} ${formatBadge(job.type, job.status === "failed" ? "error" : job.status === "cancelled" ? "warning" : "accent", theme)} ${theme.fg("toolOutput", safe(job.id))} ${theme.fg("dim", safe(job.label))} ${theme.fg("dim", formatDuration(job.durationMs))}`;
+	const progress = job.progress ? ` ${formatBadge(safe(job.progress), "accent", theme)}` : "";
+	return `${icon} ${formatBadge(job.type, job.status === "failed" ? "error" : job.status === "cancelled" ? "warning" : "accent", theme)} ${theme.fg("toolOutput", safe(job.id))}${progress} ${theme.fg("dim", safe(job.label))} ${theme.fg("dim", formatDuration(job.durationMs))}`;
 }
 
 /** Render live and completed process writes with the URL-selected operation. */
@@ -157,17 +232,45 @@ export function renderProcWrite(
 	return card((_width, expanded) => {
 		const title = `Proc ${action} ${safe(id || "…")}`;
 		const daemon = details && "daemon" in details ? details.daemon : undefined;
+		const reason = daemon ? daemonReasonLine(daemon, theme) : undefined;
+		const retuned = details && "op" in details && details.op === "monitor" ? (details.retuned ?? []) : [];
+		const meta = daemon
+			? daemonMeta(daemon, theme)
+			: (action === "mode" || action === "progress") && content
+				? [safe(content)]
+				: [];
+		if (daemon && details && "action" in details && details.action === "progress") {
+			// wake/ambient/off/no-op must be distinguishable at a glance; details carry the authoritative state.
+			meta.unshift(
+				details.progress === "off"
+					? theme.fg("muted", details.detached === false ? "no active monitor" : "monitor off")
+					: theme.fg("accent", `monitor ${safe(details.progress ?? content ?? "")}`),
+			);
+		}
 		const header = renderStatusLine(
 			{
 				icon:
-					result === undefined ? "pending" : result.isError ? "error" : action === "kill" ? "aborted" : "success",
+					result === undefined
+						? "pending"
+						: result.isError ||
+							  daemon?.state === "failed" ||
+							  (daemon?.exitCode !== undefined && daemon.exitCode !== 0)
+							? retuned.length > 0
+								? "warning"
+								: "error"
+							: action === "kill"
+								? "aborted"
+								: "success",
 				title,
-				meta: daemon ? daemonMeta(daemon, theme) : action === "mode" && content ? [safe(content)] : [],
+				meta,
 			},
 			theme,
 		);
-		if (result?.isError) return [header, formatErrorDetail(firstText(result) || "Process operation failed.", theme)];
-		const lines = [header];
+		if (retuned.length > 0)
+			return [header, ...retuned.map(outcome => theme.fg(RETUNE_TONE[outcome.status], jobRetuneText(outcome)))];
+		const lines = reason ? [header, reason] : [header];
+		if (result?.isError)
+			return [...lines, formatErrorDetail(firstText(result) || "Process operation failed.", theme)];
 		if (content && action === "stdin") lines.push(...preview(content, expanded, theme));
 		if (details && "op" in details && details.op === "cancel") {
 			const jobs = details.jobs ?? [];
@@ -202,15 +305,29 @@ export function renderProcRead(
 	return card((_width, expanded) => {
 		const title = id ? `Proc ${safe(id)}` : "Proc jobs & services";
 		const daemon = details?.daemon;
+		const reason = daemon ? daemonReasonLine(daemon, theme) : undefined;
 		const header = renderStatusLine(
 			{
-				icon: result === undefined ? "pending" : result.isError ? "error" : "info",
+				icon:
+					result === undefined
+						? "pending"
+						: result.isError ||
+							  daemon?.state === "failed" ||
+							  (daemon?.exitCode !== undefined && daemon.exitCode !== 0)
+							? "error"
+							: "info",
 				title,
 				meta: daemon ? daemonMeta(daemon, theme) : [],
 			},
 			theme,
 		);
-		if (result?.isError) return [header, formatErrorDetail(firstText(result) || "Process read failed.", theme)];
+		if (result?.isError) {
+			return [
+				header,
+				...(reason ? [reason] : []),
+				formatErrorDetail(firstText(result) || "Process read failed.", theme),
+			];
+		}
 		if (!result) return [header];
 		if (details?.job)
 			return [
@@ -233,7 +350,8 @@ export function renderProcRead(
 						`  ${styleTerminalRow(truncateToWidth(safe(line), TRUNCATE_LENGTHS.LINE, Ellipsis.Unicode), theme.fg("toolOutput", ""))}`,
 				);
 			if (output.length > limit) visible.unshift(theme.fg("dim", `  … ${output.length - limit} earlier lines`));
-			return [header, ...visible];
+			const watchers = details.monitors?.map(watcher => watcherRow(watcher, daemon, theme)) ?? [];
+			return [header, ...(reason ? [reason] : []), ...watchers, ...visible];
 		}
 		if (id && !details?.jobs && !details?.daemons && !details?.agents) {
 			return [header, ...preview(firstText(result), expanded, theme, "toolOutput")];
@@ -247,11 +365,23 @@ export function renderProcRead(
 			...(agents.length ? [`${agents.length} agents`] : []),
 		];
 		const listHeader = renderStatusLine({ icon: "info", title, meta }, theme);
-		const items = [
+		const items: Array<{ label: string | string[] }> = [
 			...jobs.map(job => ({ label: jobRow(job, theme) })),
-			...services.map(service => ({
-				label: `${formatBadge("service", "accent", theme)} ${theme.fg("toolOutput", safe(service.name))} ${formatBadge(service.state, service.state === "failed" ? "error" : service.state === "ready" || service.state === "running" ? "success" : "warning", theme)} ${daemonMeta(service, theme).slice(1).join(theme.sep.dot)}`,
-			})),
+			...services.map(service => {
+				const reason = daemonReasonLine(service, theme);
+				const watchers = (details?.monitors ?? []).filter(watcher => watcher.name === service.name);
+				const shownWatchers = expanded ? watchers : watchers.slice(0, PREVIEW_LIMITS.COLLAPSED_LINES);
+				return {
+					label: [
+						`${formatBadge("service", "accent", theme)} ${theme.fg("toolOutput", safe(service.name))} ${formatBadge(service.state, service.state === "failed" ? "error" : service.state === "ready" || service.state === "running" ? "success" : "warning", theme)} ${daemonMeta(service, theme).slice(1).join(theme.sep.dot)}`,
+						...(reason ? [reason] : []),
+						...shownWatchers.map(watcher => watcherRow(watcher, service, theme)),
+						...(watchers.length > shownWatchers.length
+							? [theme.fg("dim", `  ${formatMoreItems(watchers.length - shownWatchers.length, "watcher")}`)]
+							: []),
+					],
+				};
+			}),
 			...agents.map(agent => ({
 				label: `${formatBadge("agent", agent.live ? "accent" : "warning", theme)} ${theme.fg("toolOutput", safe(agent.id))} ${theme.fg("dim", formatDuration(agent.ageMs))}`,
 			})),
@@ -263,6 +393,7 @@ export function renderProcRead(
 					items,
 					expanded,
 					maxCollapsed: PREVIEW_LIMITS.COLLAPSED_ITEMS,
+					maxCollapsedLines: PREVIEW_LIMITS.COLLAPSED_ITEMS * 2 + 1,
 					itemType: "process",
 					renderItem: item => item.label,
 				},
@@ -280,12 +411,17 @@ export function renderProcRead(
 function daemonMetaText(daemon: DaemonSnapshot): string {
 	const meta: string[] = [daemon.state];
 	if (daemon.pid !== undefined) meta.push(`pid ${daemon.pid}`);
+	if (daemon.exitCode !== undefined) meta.push(`exit ${daemon.exitCode}`);
 	meta.push(
 		`${daemon.exitedAt === undefined ? "up" : "ran"} ${formatDuration(Math.max(0, (daemon.exitedAt ?? Date.now()) - daemon.startedAt))}`,
 	);
 	if (daemon.detached) meta.push("detached");
 	else if (daemon.persist) meta.push("persistent");
 	return meta.join(" · ");
+}
+
+function daemonFailed(daemon: DaemonSnapshot): boolean {
+	return daemon.state === "failed" || (daemon.exitCode !== undefined && daemon.exitCode !== 0);
 }
 
 function jobTone(status: JobSnapshot["status"]): TspTone {
@@ -302,13 +438,43 @@ function jobItem(job: JobSnapshot, badge?: { text: string; tone: TspTone }): Nat
 	return node(
 		"item",
 		{
-			label: [span(job.type, "accent"), span(" "), span(safe(job.id), "toolOutput")],
+			label: compact([
+				span(job.type, "accent"),
+				span(" "),
+				span(safe(job.id), "toolOutput"),
+				job.progress && span(` ${safe(job.progress)}`, "accent"),
+			]),
 			detail: [span(safe(job.label), "muted")],
 			value: badge ? [span(badge.text, badge.tone)] : [span(formatDuration(job.durationMs), "muted")],
 			tone: badge?.tone ?? jobTone(job.status),
 		},
 		undefined,
 		job.id,
+	);
+}
+
+/** Native `↳ watched by owner` item under a service, mirroring {@link watcherRow}. */
+function watcherItem(watcher: DaemonMonitorWatcher, daemon: DaemonSnapshot): NativeNode {
+	const previousIncarnation = watcher.daemonId !== undefined && watcher.daemonId !== daemon.id;
+	const detail: TspSpan[] = [span(watcher.delivery ?? "unknown mode", "accent")];
+	if (watcher.since !== undefined) {
+		detail.push(span(` · ${formatDuration(Math.max(0, Date.now() - watcher.since))} ago`, "muted"));
+	}
+	if (!watcher.connected) detail.push(span(" · disconnected", "warning"));
+	if (watcher.daemonId === undefined) detail.push(span(" · awaiting start", "muted"));
+	else if (previousIncarnation) detail.push(span(" · previous incarnation", "warning"));
+	return node(
+		"item",
+		{
+			label: [
+				span("↳ watched by ", "muted"),
+				span(truncateToWidth(safe(watcher.owner), TRUNCATE_LENGTHS.TITLE), "toolOutput"),
+			],
+			detail,
+			tone: !watcher.connected || previousIncarnation ? "warning" : undefined,
+		},
+		undefined,
+		`monitor:${watcher.name}:${watcher.id}`,
 	);
 }
 
@@ -372,7 +538,7 @@ export function describeAgentWrite(
 	return { head, tone: error ? "error" : undefined, body: children };
 }
 
-/** TSP view of a `proc://` write (stdin, mode change, kill). */
+/** TSP view of a `proc://` write (stdin, mode change, progress retune, kill). */
 export function describeProcWrite(
 	id: string,
 	action: ProcWriteAction,
@@ -381,15 +547,61 @@ export function describeProcWrite(
 	details: ProcWriteDetails | undefined,
 ): NativeToolView {
 	const daemon = details && "daemon" in details ? details.daemon : undefined;
+	const progressWrite =
+		daemon && details && "action" in details && details.action === "progress" ? details : undefined;
+	const retuned = details && "op" in details && details.op === "monitor" ? (details.retuned ?? []) : [];
 	const head = toolHead(
 		`Proc ${action}`,
 		span(safe(id || "…"), "accent"),
-		daemon ? daemonMetaText(daemon) : action === "mode" && content ? safe(content) : undefined,
+		// wake/ambient/off/no-op must be distinguishable at a glance; details carry the authoritative state.
+		progressWrite &&
+			(progressWrite.progress === "off"
+				? span(progressWrite.detached === false ? "no active monitor" : "monitor off", "muted")
+				: span(`monitor ${safe(progressWrite.progress ?? content ?? "")}`, "accent")),
+		daemon
+			? daemonMetaText(daemon)
+			: (action === "mode" || action === "progress") && content
+				? safe(content)
+				: undefined,
 	);
-	if (result?.isError) {
-		return { head, tone: "error", body: [errorText(firstText(result) || "Process operation failed.")] };
+	if (retuned.length > 0) {
+		return {
+			head,
+			tone: result?.isError ? "warning" : undefined,
+			body: [
+				node(
+					"list",
+					{ role: "omp.tool.proc.retuned" },
+					retuned.map(outcome =>
+						node(
+							"item",
+							{
+								label: [span(jobRetuneText(outcome), RETUNE_TONE[outcome.status])],
+								tone: RETUNE_TONE[outcome.status],
+							},
+							undefined,
+							outcome.id,
+						),
+					),
+				),
+			],
+		};
 	}
-	const body = compact<NativeChild>([content && action === "stdin" ? quotedPreview(content) : undefined]);
+	const reason = daemon ? daemonReasonText(daemon) : undefined;
+	if (result?.isError) {
+		return {
+			head,
+			tone: "error",
+			body: compact([
+				reason ? errorText(reason) : undefined,
+				errorText(firstText(result) || "Process operation failed."),
+			]),
+		};
+	}
+	const body = compact<NativeChild>([
+		reason ? errorText(reason) : undefined,
+		content && action === "stdin" ? quotedPreview(content) : undefined,
+	]);
 	if (details && "op" in details && details.op === "cancel") {
 		const jobs = details.jobs ?? [];
 		body.push(
@@ -414,7 +626,12 @@ export function describeProcWrite(
 			),
 		);
 	}
-	return { head, tone: result !== undefined && action === "kill" ? "warning" : undefined, body };
+	return {
+		head,
+		tone:
+			daemon && daemonFailed(daemon) ? "error" : result !== undefined && action === "kill" ? "warning" : undefined,
+		body,
+	};
 }
 
 /** TSP view of a `proc://` read: job/service detail, logs, or the process table. */
@@ -426,8 +643,14 @@ export function describeProcRead(
 	const daemon = details?.daemon;
 	const title = id ? "Proc" : "Proc jobs & services";
 	const head = toolHead(title, id ? span(safe(id), "accent") : undefined, daemon ? daemonMetaText(daemon) : undefined);
+	const reason = daemon ? daemonReasonText(daemon) : undefined;
+	const daemonReason = reason ? errorText(reason) : undefined;
 	if (result?.isError) {
-		return { head, tone: "error", body: [errorText(firstText(result) || "Process read failed.")] };
+		return {
+			head,
+			tone: "error",
+			body: compact([daemonReason, errorText(firstText(result) || "Process read failed.")]),
+		};
 	}
 	if (!result) return { head };
 	if (details?.job) {
@@ -442,7 +665,21 @@ export function describeProcRead(
 	}
 	if (daemon) {
 		const output = details.terminalRows?.join("\n") ?? details.log ?? "";
-		return { head, body: [ansi(output, { follow: daemon.exitedAt === undefined, role: "omp.tool.proc.log" })] };
+		const monitors = details.monitors ?? [];
+		return {
+			head,
+			tone: daemonFailed(daemon) ? "error" : undefined,
+			body: compact<NativeChild>([
+				daemonReason,
+				monitors.length > 0 &&
+					node(
+						"list",
+						{ role: "omp.tool.proc.monitors" },
+						monitors.map(watcher => watcherItem(watcher, daemon)),
+					),
+				ansi(output, { follow: daemon.exitedAt === undefined, role: "omp.tool.proc.log" }),
+			]),
+		};
 	}
 	if (id && !details?.jobs && !details?.daemons && !details?.agents) {
 		return { head, body: compact<NativeChild>([quotedPreview(firstText(result), "toolOutput")]) };
@@ -452,23 +689,32 @@ export function describeProcRead(
 	const agents = details?.agents ?? [];
 	const items: NativeNode[] = [
 		...jobs.map(job => jobItem(job)),
-		...services.map(service =>
-			node(
-				"item",
-				{
-					label: [span("service", "accent"), span(" "), span(safe(service.name), "toolOutput")],
-					detail: [span(daemonMetaText(service), "muted")],
-					tone:
-						service.state === "failed"
-							? "error"
-							: service.state === "ready" || service.state === "running"
-								? "success"
-								: "warning",
-				},
-				undefined,
-				`service:${service.name}`,
-			),
-		),
+		...services.flatMap(service => {
+			const reason = daemonReasonText(service);
+			return [
+				node(
+					"item",
+					{
+						label: [span("service", "accent"), span(" "), span(safe(service.name), "toolOutput")],
+						detail: compact([
+							span(daemonMetaText(service), "muted"),
+							reason ? span(` · ${reason}`, "error") : undefined,
+						]),
+						tone:
+							service.state === "failed"
+								? "error"
+								: service.state === "ready" || service.state === "running"
+									? "success"
+									: "warning",
+					},
+					undefined,
+					`service:${service.name}`,
+				),
+				...(details?.monitors ?? [])
+					.filter(watcher => watcher.name === service.name)
+					.map(watcher => watcherItem(watcher, service)),
+			];
+		}),
 		...agents.map(agent =>
 			node(
 				"item",

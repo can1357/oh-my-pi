@@ -1,5 +1,6 @@
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { Text } from "../components/text";
+import { TruncatedText } from "../components/truncated-text";
 import { col } from "../native/describe";
 import type { NativeNode } from "../native/node";
 import { type ThemeColor, theme } from "../theme";
@@ -27,6 +28,8 @@ export interface TranscriptStatusNative {
 export interface TranscriptStatusRow {
 	readonly parts: readonly (TranscriptStatusPart | undefined)[];
 	readonly indent?: number;
+	/** Terminal row wrapping; omitted preserves the default wrapped rendering. */
+	readonly overflow?: "wrap" | "truncate";
 	readonly native: TranscriptStatusNative;
 }
 
@@ -42,7 +45,11 @@ export class TranscriptStatusBlock extends TranscriptBlock {
 		super();
 		for (const row of rows) {
 			const styled = row.parts.flatMap(part => (part ? [theme.fg(part.color, part.text)] : []));
-			this.addChild(new Text(styled.join(" "), row.indent ?? 1, 0));
+			this.addChild(
+				row.overflow === "truncate"
+					? new TruncatedText(styled.join(" "), row.indent ?? 1, 0)
+					: new Text(styled.join(" "), row.indent ?? 1, 0),
+			);
 		}
 		this.#native = col(
 			rows.map(({ native }) => noticeRow(native.tone, native.message, { icon: native.icon })),
