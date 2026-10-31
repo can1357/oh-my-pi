@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
+import * as path from "node:path";
 import type { Api, AssistantMessage, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
+import { adoptFactoryReplay } from "@oh-my-pi/pi-ai/providers/factory-droid/gemini";
 import { convertCodexResponsesMessages } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { convertMessages } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
@@ -91,6 +93,32 @@ describe("countTokens with modes", () => {
 		const claude = new Tokenizer({ tokenizer: "claude-v47" });
 		const generic = new Tokenizer({});
 		expect(claude.countTokens("hello world", "strict")).not.toBe(generic.countTokens("hello world", "strict"));
+	});
+
+	test("counts a model without a known tokenizer family in o200k_base outside the test env", async () => {
+		// Addresses and ids, as in reverse-engineering sessions: a bytes/4 guess counts about half of it.
+		const text = "0x1a6ba80e4 1914F733-4AF2-3AD7-9061-CA21FFC33841 initWithString: ".repeat(50);
+		const child = Bun.spawn(
+			[
+				process.execPath,
+				"-e",
+				`import { Tokenizer } from ${JSON.stringify(path.join(import.meta.dir, "../src/tokenizer"))};
+				process.stdout.write(String(new Tokenizer({}).countTokens(${JSON.stringify(text)})));`,
+			],
+			{ env: { ...process.env, NODE_ENV: "production" }, stdout: "pipe" },
+		);
+		const counted = Number(await new Response(child.stdout).text());
+		expect(await child.exited).toBe(0);
+		expect(counted).toBe(natives.countTokens(text, natives.Encoding.O200kBase));
+		expect(counted).toBeGreaterThan(Buffer.byteLength(text) / 3);
+	});
+
+	test("counts GPT-4 in cl100k_base, not the o200k_base default", () => {
+		const gpt4 = getBundledModel("openai", "gpt-4");
+		const text = "Привет, как дела? Сегодня хорошая погода.";
+		const counted = new Tokenizer(gpt4).countTokens(text, "strict");
+		expect(counted).toBe(natives.countTokens(text, natives.Encoding.Cl100kBase));
+		expect(counted).toBeGreaterThan(natives.countTokens(text, natives.Encoding.O200kBase));
 	});
 
 	test("counts current fragment values without merging boundaries or retaining mutable arrays", () => {
@@ -567,6 +595,41 @@ describe("countMessage replayed thinking", () => {
 		const model = reader("google", "gemini-3-pro-preview");
 		expect(new Tokenizer(model).countMessage(signedTurn(model, VISIBLE, SIGNATURE))).toBe(VISIBLE_TOKENS + 1000);
 	});
+
+	// The signature is charged exactly when the request encoder keeps it: what
+	// `transformMessages` (after Factory's Gemini adoption pass) leaves on the turn.
+	function keptSignature(model: Model, turn: AssistantMessage): boolean {
+		const history =
+			model.api === "factory-droid-agent"
+				? [adoptFactoryReplay(turn, model as Model<"factory-droid-agent">)]
+				: [turn];
+		return transformMessages(history, model).some(
+			message =>
+				message.role === "assistant" &&
+				message.content.some(block => block.type === "thinking" && block.thinkingSignature === SIGNATURE),
+		);
+	}
+	const gemini = reader("google", "gemini-3-pro-preview");
+	const factoryGemini = { ...gemini, api: "factory-droid-agent", provider: "factory-droid" } as Model;
+	const glm = getBundledModel("zai", "glm-5.3") as Model;
+	test.each([
+		["a Claude turn to Gemini", gemini, reader("anthropic", "claude-opus-5-5"), false],
+		["another Gemini model's turn to Gemini", gemini, reader("google", "gemini-3-flash-preview"), false],
+		["Factory Gemini's own turn", factoryGemini, { ...factoryGemini, api: "google-generative-ai" }, true],
+		["a Gemini CLI turn to Factory Gemini", factoryGemini, { ...gemini, api: "google-gemini-cli" }, true],
+		["another GLM's turn to a compatible Anthropic endpoint", glm, getBundledModel("zai", "glm-5.2") as Model, true],
+		[
+			"a MiniMax turn to a compatible Anthropic endpoint",
+			glm,
+			getBundledModel("minimax", "MiniMax-M3") as Model,
+			true,
+		],
+	] as const)("charges the signature of %s only when the request keeps it", (_case, model, from, kept) => {
+		const turn = signedTurn(from, VISIBLE, SIGNATURE);
+		expect(keptSignature(model, turn)).toBe(kept);
+		expect(new Tokenizer(model).countMessage(turn)).toBe(VISIBLE_TOKENS + (kept ? 1000 : 0));
+		expect(new Tokenizer(model).countMessage(turn, { excludeEncryptedReasoning: true })).toBe(VISIBLE_TOKENS);
+	});
 });
 
 // Contract: an assistant turn's native Responses history replays its reasoning
@@ -718,11 +781,14 @@ describe("replayed Responses reasoning", () => {
 		// The reasoning item still goes on the wire, so the turn is not free.
 		expect(wireReasoning(unreported)).toBe(1);
 		const tokenizer = new Tokenizer(sol);
-		// Its only price is the ciphertext, counted as a reader that re-encodes the turn counts it.
-		const reencoding = new Tokenizer(otherCodex);
-		expect(tokenizer.countMessage(unreported)).toBe(reencoding.countMessage(unreported));
-		expect(tokenizer.countMessage(unreported)).toBeGreaterThan(visibleTokens(tokenizer));
+		// Its only price is the ciphertext, counted as text.
+		expect(tokenizer.countMessage(unreported)).toBe(
+			visibleTokens(tokenizer) + tokenizer.countTokens(JSON.stringify(reasoningItem)),
+		);
 		expect(tokenizer.countMessage(unreported, floored)).toBe(visibleTokens(tokenizer));
+		// Another model re-encodes the turn without its reasoning: neither price applies.
+		const reencoding = new Tokenizer(otherCodex);
+		expect(reencoding.countMessage(unreported)).toBe(visibleTokens(reencoding));
 	});
 
 	test("follows a cold Responses session, which rebuilds encrypted reasoning out of the request", async () => {

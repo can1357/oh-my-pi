@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `models.yml` accepts `tokenizer: cl100k` on a custom model or override ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

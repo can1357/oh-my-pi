@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `dropsForeignReasoningPayload(turn, model)`, which tells whether `transformMessages` certainly strips a turn's thinking signatures and redacted thinking on the way to `model` ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Fixed
 
 - Fixed Codex conversation replay failing with an unknown `internal_chat_message_metadata_passthrough.content_token_count` parameter by omitting backend-internal response metadata from replayed input ([#17590](https://github.com/can1357/oh-my-pi/pull/17590) by [@briankeefe](https://github.com/briankeefe)).

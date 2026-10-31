@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- GPT-3.5 and GPT-4 (Turbo) resolve the `cl100k` tokenizer, so their context estimates count in cl100k_base rather than the o200k_base default for models without one ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.14.2] - 2026-10-31
 
 ### Breaking Changes

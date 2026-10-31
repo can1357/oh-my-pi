@@ -4,6 +4,7 @@ import { ollamaChatDropsOwnThinking } from "@oh-my-pi/pi-ai/providers/ollama";
 import { completionsDropsOwnThinking, isLiteLLMThinkingSignature } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { isColdReplayableResponsesTurn } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import {
+	dropsForeignReasoningPayload,
 	isSameModelTurn,
 	shouldDropTruncatedThinkingOnlyAssistant,
 } from "@oh-my-pi/pi-ai/providers/transform-messages";
@@ -22,7 +23,6 @@ import { base64ImageSize, estimateImageTokens, type ImageDetail, type ImageSize 
 import type { AgentMessage } from "./types";
 
 const testEnv = Bun.env.NODE_ENV === "test";
-const accurate = process.env.PI_TOKENIZER_ACCURATE === "1" && !testEnv;
 
 const NATIVE_ENCODING: Record<ModelTokenizer, natives.Encoding> = {
 	"claude-v3": natives.Encoding.ClaudeV3,
@@ -33,6 +33,7 @@ const NATIVE_ENCODING: Record<ModelTokenizer, natives.Encoding> = {
 	"deepseek-v3": natives.Encoding.DeepSeekV3,
 	"kimi-k2": natives.Encoding.KimiK2,
 	glm5: natives.Encoding.Glm5,
+	cl100k: natives.Encoding.Cl100kBase,
 	o200k: natives.Encoding.O200kBase,
 };
 
@@ -77,13 +78,12 @@ export interface TokenizerOptions {
 }
 
 /**
- * `strict` always tries an exact native count (the catalog-resolved tokenizer
- * when known, o200k_base otherwise), falling back to the byte upper bound when
- * the loaded addon does not recognize that encoding. `approximate` and
- * `upperbound` prefer the same exact count for known tokenizer families or
- * when `PI_TOKENIZER_ACCURATE=1` is set; otherwise they use a cheap heuristic:
- * `approximate` a bytes/4 guess, `upperbound` the raw byte length (never
- * undercounts).
+ * Every mode counts with the native tokenizer: the catalog-resolved family
+ * when known, o200k_base otherwise. They differ only in the fallback when the
+ * loaded addon does not recognize that encoding: `strict` and `upperbound`
+ * the raw byte length (never undercounts), `approximate` a bytes/4 guess.
+ * Tests (`NODE_ENV=test`) skip the native count outside `strict` and use that
+ * fallback.
  */
 export type TokenCountMode = "strict" | "approximate" | "upperbound";
 
@@ -205,8 +205,8 @@ interface MessageEstimate {
  * when the model's encoding, image or thinking-replay pricing, replay
  * identity or native-history replay state changes); one-shot flows construct
  * their own for the model that will be billed. Known tokenizer families use
- * exact native counts; unknown models keep the fast byte estimate (or o200k
- * when `PI_TOKENIZER_ACCURATE=1`).
+ * exact native counts; other models are counted in o200k_base, which bills
+ * unknown readers closer than a bytes/4 guess.
  */
 export class Tokenizer {
 	readonly #encoding: natives.Encoding | null;
@@ -269,11 +269,8 @@ export class Tokenizer {
 	}
 
 	countTokens(text: string | string[], mode: TokenCountMode = "approximate"): number {
-		if (mode === "strict") return countTokensNat(text, this.#encoding, mode, this.#nativeCounts).tokens;
-		if (!testEnv && this.#encoding !== null)
-			return countTokensNat(text, this.#encoding, mode, this.#nativeCounts).tokens;
-		if (accurate) return countTokensNat(text, undefined, mode, this.#nativeCounts).tokens;
-		return sumFragments(text, mode === "upperbound" ? byteLength : byteEstimate);
+		if (testEnv && mode !== "strict") return sumFragments(text, mode === "upperbound" ? byteLength : byteEstimate);
+		return countTokensNat(text, this.#encoding, mode, this.#nativeCounts).tokens;
 	}
 
 	/**
@@ -363,6 +360,18 @@ export class Tokenizer {
 			message.provider === reader.provider &&
 			(message.model === reader.id || this.#readsDeploymentSignatures)
 		);
+	}
+
+	/**
+	 * Whether `message`'s opaque reasoning payload (thinking signatures, redacted
+	 * thinking) may reach this reader: everything except what `transformMessages`
+	 * certainly strips from another model's turn. Without a replay reader (no
+	 * model, or a `filterReasoningHistory` target) every payload is charged,
+	 * which overcounts a filtering reader's foreign turns.
+	 */
+	#receivesReasoningPayload(message: AssistantMessage): boolean {
+		const reader = this.#reasoningReader;
+		return reader === undefined || !dropsForeignReasoningPayload(message, reader);
 	}
 
 	/**
@@ -468,15 +477,17 @@ export class Tokenizer {
 						fragments.push(block.thinking);
 						// Providers charge for the opaque signature/reasoning payload that
 						// rides alongside the thinking text (OpenAI Responses encrypted
-						// reasoning items, Gemini thought signatures). A reader billing at
-						// `output` size (Claude) charges the reasoning, priced below, not
-						// these bytes. The compaction floor excludes it (its local byte size
-						// diverges from provider billing).
+						// reasoning items, Gemini thought signatures) wherever it survives
+						// replay; `transformMessages` strips another model's on most wires.
+						// A reader billing at `output` size (Claude) charges the reasoning,
+						// priced below, not these bytes. The compaction floor excludes it
+						// (its local byte size diverges from provider billing).
 						if (
 							block.thinkingSignature &&
 							!excludeEncryptedReasoning &&
 							signaturesPriced &&
-							typeof replayedReasoning !== "number"
+							typeof replayedReasoning !== "number" &&
+							this.#receivesReasoningPayload(message)
 						) {
 							fragments.push(block.thinkingSignature);
 						}
@@ -485,10 +496,13 @@ export class Tokenizer {
 						fragments.push(block.name);
 						fragments.push(stringifyJson(block.arguments) ?? "null");
 					} else if (block.type === "redactedThinking") {
-						// Encrypted reasoning blob the provider still bills for on replay;
-						// excluded from the compaction floor for the same reason as above.
+						// Encrypted reasoning blob the provider still bills for wherever it
+						// survives replay, as above; excluded from the compaction floor for
+						// the same reason.
 						signedReasoning = true;
-						if (!excludeEncryptedReasoning && signaturesPriced) fragments.push(block.data);
+						if (!excludeEncryptedReasoning && signaturesPriced && this.#receivesReasoningPayload(message)) {
+							fragments.push(block.data);
+						}
 					} else if (block.type === "anthropicServerTool") {
 						// Native Anthropic server-tool call/result replayed verbatim on the
 						// wire (server_tool_use input and opaque result content). The provider
