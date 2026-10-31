@@ -39,6 +39,7 @@ async function createHost(initializeUi: boolean) {
 		syncComposerShape() {},
 		syncExtensionLinks() {},
 		session: {
+			getAgentId: () => undefined,
 			extensionRunner: runner,
 			get isStreaming() {
 				return state.streaming;

@@ -142,6 +142,22 @@ export class ExtensionRuntime implements IExtensionRuntime {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
 
+	agentsList(): never {
+		throw new ExtensionRuntimeNotInitializedError();
+	}
+
+	agentsGet(): never {
+		throw new ExtensionRuntimeNotInitializedError();
+	}
+
+	agentsEnsureLive(): Promise<never> {
+		throw new ExtensionRuntimeNotInitializedError();
+	}
+
+	agentsPrompt(): Promise<never> {
+		throw new ExtensionRuntimeNotInitializedError();
+	}
+
 	setLabel(): void {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
@@ -211,6 +227,14 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	get pi() {
 		return getCodingAgentApi();
 	}
+
+	readonly agents = {
+		list: () => this.runtime.agentsList(),
+		get: (id: string) => this.runtime.agentsGet(id),
+		ensureLive: (id: string, options?: { parentSessionFile?: string }) => this.runtime.agentsEnsureLive(id, options),
+		prompt: (id: string, text: string, options?: { deliverAs?: "steer" | "followUp" }) =>
+			this.runtime.agentsPrompt(id, text, options),
+	};
 
 	constructor(
 		private readonly extension: Extension,
@@ -352,6 +376,22 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 
 	appendEntry(customType: string, data?: unknown): void {
 		this.runtime.appendEntry(customType, data);
+	}
+
+	agentsList() {
+		return this.runtime.agentsList();
+	}
+
+	agentsGet(id: string) {
+		return this.runtime.agentsGet(id);
+	}
+
+	agentsEnsureLive(id: string, options?: { parentSessionFile?: string }) {
+		return this.runtime.agentsEnsureLive(id, options);
+	}
+
+	agentsPrompt(id: string, text: string, options?: { deliverAs?: "steer" | "followUp" }) {
+		return this.runtime.agentsPrompt(id, text, options);
 	}
 
 	exec(command: string, args: string[], options?: ExecOptions) {

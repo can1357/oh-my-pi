@@ -215,6 +215,11 @@ class FakeAgentSession {
 		};
 	}
 
+	/** `#configureExtensions` scopes the extension agents API to this id; the fake has none. */
+	getAgentId(): string | undefined {
+		return undefined;
+	}
+
 	getAvailableModels(): Model[] {
 		return this.models;
 	}
