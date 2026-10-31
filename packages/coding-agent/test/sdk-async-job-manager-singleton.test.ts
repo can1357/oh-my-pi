@@ -7,7 +7,7 @@ import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
-import type { AsyncJobSnapshot } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSession, AsyncJobSnapshot } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -61,6 +61,90 @@ describe("AsyncJobManager ownership across concurrent top-level sessions", () =>
 		});
 		return session;
 	}
+
+	/** A subagent under `root`, started as the task executor starts one: it uses the root's job manager. */
+	async function spawnSubagent(root: AgentSession) {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-async-subagent-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const cwd = path.join(tempDir, "project");
+		fs.mkdirSync(cwd, { recursive: true });
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir: path.join(tempDir, "agent"),
+			settings: Settings.isolated(),
+			parentTaskPrefix: "0-Sub",
+			taskDepth: 1,
+			agentId: "0-Sub",
+			asyncJobManager: root.asyncJobManager,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			modelRegistry: sharedModelRegistry,
+		});
+		return session;
+	}
+
+	/** Registers `count` background jobs owned by `session`'s agent that run until `release` settles. */
+	function registerHeldJobs(session: AgentSession, ownerId: string, count: number, release: Promise<void>): string[] {
+		const manager = session.asyncJobManager!;
+		const ids: string[] = [];
+		for (let i = 0; i < count; i++) {
+			ids.push(
+				manager.register(
+					"bash",
+					`sleep 300 (${ownerId} ${i})`,
+					async () => {
+						await release;
+						return "done";
+					},
+					{ ownerId },
+				),
+			);
+		}
+		return ids;
+	}
+
+	it("runs 101 background jobs between a root session with async.maxJobs 0 and a subagent under it", async () => {
+		const root = await spawnTopLevelSession({ "async.maxJobs": 0 });
+		const subagent = await spawnSubagent(root);
+		const release = Promise.withResolvers<void>();
+		try {
+			expect(subagent.asyncJobManager).toBe(root.asyncJobManager!);
+			const ids = [
+				...registerHeldJobs(root, "Main", 50, release.promise),
+				...registerHeldJobs(subagent, "0-Sub", 51, release.promise),
+			];
+			expect(root.asyncJobManager!.getRunningJobs().map(job => job.id)).toEqual(ids);
+		} finally {
+			release.resolve();
+			await root.asyncJobManager!.waitForAll();
+			await subagent.dispose();
+			await root.dispose();
+		}
+	}, 60000);
+
+	it("still refuses the 101st background job of a root session and its subagent at the async.maxJobs default", async () => {
+		const root = await spawnTopLevelSession();
+		const subagent = await spawnSubagent(root);
+		const release = Promise.withResolvers<void>();
+		try {
+			registerHeldJobs(root, "Main", 50, release.promise);
+			registerHeldJobs(subagent, "0-Sub", 50, release.promise);
+			expect(() => registerHeldJobs(subagent, "0-Sub", 1, release.promise)).toThrow(
+				"Background job limit reached (100)",
+			);
+			expect(root.asyncJobManager!.getRunningJobs()).toHaveLength(100);
+		} finally {
+			release.resolve();
+			await root.asyncJobManager!.waitForAll();
+			await subagent.dispose();
+			await root.dispose();
+		}
+	}, 60000);
 
 	it("does not cancel the primary session's running jobs when a secondary session disposes", async () => {
 		const primary = await spawnTopLevelSession();
