@@ -15,7 +15,7 @@ import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 export const TREE_FILTER_MODES = ["default", "no-tools", "user-only", "labeled-only", "all"] as const;
 /** Session-tree display filter. */
 export type TreeFilterMode = (typeof TREE_FILTER_MODES)[number];
-import { theme } from "../theme/theme";
+import { getThemeEpoch, theme } from "../theme/theme";
 import {
 	matchesAppInterrupt,
 	matchesSelectDown,
@@ -170,10 +170,45 @@ function stripSystemWrapperTags(content: string): string {
 /** Per-message cap on text folded into the tree search index. */
 const SEARCH_TEXT_LIMIT = 200;
 
-/** One theme-colored piece of an entry's display text. */
+/**
+ * One theme-colored piece of an entry's display text. `strong` sets bold weight
+ * so user turns stand apart from assistant turns even in themes whose `accent`
+ * and `success` share a hue (e.g. `dark-terminal`).
+ */
 interface EntryPart {
 	t: string;
 	s?: ThemeColor;
+	strong?: boolean;
+}
+
+/**
+ * Native span token for a theme color. Terminals style the semantic tokens
+ * (`path`, `accent`, …) but not every theme color name, so colors with a
+ * semantic twin are sent as that token.
+ */
+function nativeToken(color: ThemeColor): string {
+	return color === "statusLinePath" ? "path" : color;
+}
+
+/** An entry part as a native span: its theme color, plus `strong` when bold. */
+function partSpan(part: EntryPart): TspSpan {
+	const value = treeRowText(part.t);
+	const color = part.s && nativeToken(part.s);
+	if (!part.strong) return span(value, color);
+	return span(value, color ? `${color} strong` : "strong");
+}
+
+/**
+ * The `assistant:` label color: `success`, unless the theme paints it the same as
+ * the `user:` label's `accent` (`dark-terminal`, `*-poimandres`). Then the path
+ * color, a hue terminals can render natively, and `muted` if that matches too.
+ */
+function assistantLabelColor(): ThemeColor {
+	const accent = theme.getColorHex("accent").toLowerCase();
+	for (const color of ["success", "statusLinePath"] as const) {
+		if (theme.getColorHex(color).toLowerCase() !== accent) return color;
+	}
+	return "muted";
 }
 
 /** A cached native tree item and the inputs it was built from. */
@@ -239,6 +274,8 @@ class TreeList implements Component {
 		| undefined;
 	/** Bumped on every label edit: labels are item badges. */
 	#labelVersion = 0;
+	/** Theme epoch the native item caches were built under: labels bake in theme-dependent colors. */
+	#nativeThemeEpoch = getThemeEpoch();
 	#pickerItems:
 		| { rows: readonly TreeRow<TreeSelectorNode, string>[]; labels: number; items: TspPickerItem[] }
 		| undefined;
@@ -708,6 +745,7 @@ class TreeList implements Component {
 	 * only `order` (the visible entries) and the selection.
 	 */
 	pickerView(): TreePickerView {
+		this.#syncNativeTheme();
 		const allRows = this.#tree.allRows;
 		if (this.#pickerItems?.rows !== allRows || this.#pickerItems.labels !== this.#labelVersion) {
 			// Real branch points get a disclosure; linear chains stay flat at their head's depth.
@@ -739,7 +777,7 @@ class TreeList implements Component {
 	#pickerItem(row: TreeRow<TreeSelectorNode, string>, open: boolean): TspPickerItem {
 		const item = row.item;
 		const entry = item.entry;
-		const label = this.#entryParts(item).map(part => span(treeRowText(part.t), part.s));
+		const label = this.#entryParts(item).map(partSpan);
 		let kind: TspPickerItem["node"] = "marker";
 		let role: string | undefined;
 		if (isUserRequestEntry(entry)) {
@@ -808,6 +846,7 @@ class TreeList implements Component {
 	 * instead of drawn tree connectors.
 	 */
 	describeList(): NativeNode {
+		this.#syncNativeTheme();
 		const rows = this.#tree.rows;
 		let items = this.#itemsNative;
 		if (items?.rows !== rows) {
@@ -857,6 +896,19 @@ class TreeList implements Component {
 		];
 	}
 
+	/**
+	 * Drop native items built under another theme: {@link assistantLabelColor}
+	 * picks the `assistant:` hue from the active palette when an item is built.
+	 */
+	#syncNativeTheme(): void {
+		const epoch = getThemeEpoch();
+		if (epoch === this.#nativeThemeEpoch) return;
+		this.#nativeThemeEpoch = epoch;
+		this.#pickerItems = undefined;
+		this.#itemsNative = undefined;
+		this.#itemCache.clear();
+	}
+
 	#describeRow(row: TreeRow<TreeSelectorNode, string>): NativeNode {
 		const item = row.item;
 		const branch = row.parentKey !== undefined && row.siblingCount > 1;
@@ -865,9 +917,7 @@ class TreeList implements Component {
 		const label: TspSpan[] = [];
 		if (this.#activePathIds.has(row.key)) label.push(span(`${theme.md.bullet} `, "accent"));
 		if (item.label) label.push(span(`[${treeRowText(item.label)}] `, "warning"));
-		for (const part of this.#entryParts(item)) {
-			label.push(span(treeRowText(part.t), part.s));
-		}
+		for (const part of this.#entryParts(item)) label.push(partSpan(part));
 		const described = node("item", { label, icon: branch ? "branch" : undefined }, undefined, row.key);
 		this.#itemCache.set(row.key, { label: item.label, branch, node: described });
 		return described;
@@ -1056,8 +1106,11 @@ class TreeList implements Component {
 	#getEntryDisplayText(node: TreeSelectorNode, isSelected: boolean): string {
 		let result = "";
 		for (const part of this.#entryParts(node)) {
-			const value = treeRowText(part.t);
-			result += part.s ? theme.fg(part.s, value) : value;
+			let value = treeRowText(part.t);
+			if (part.s) value = theme.fg(part.s, value);
+			// A selected row is bolded whole; nested bold would close it early.
+			if (part.strong && !isSelected) value = theme.bold(value);
+			result += value;
 		}
 		return isSelected ? theme.bold(result) : result;
 	}
@@ -1074,7 +1127,10 @@ class TreeList implements Component {
 				if (role === "user") {
 					const msgWithContent = msg as { content?: unknown };
 					const content = normalize(this.#extractContent(msgWithContent.content));
-					return [{ t: "user: ", s: "accent" }, { t: content }];
+					return [
+						{ t: "user: ", s: "accent", strong: true },
+						{ t: content, s: "accent", strong: true },
+					];
 				}
 				if (role === "developer") {
 					const msgWithContent = msg as { content?: unknown };
@@ -1086,15 +1142,10 @@ class TreeList implements Component {
 				}
 				if (role === "assistant") {
 					const presentation = resolveAssistantErrorPresentation(msg);
-					if (presentation.kind === "compact-recovered") {
-						return [
-							{ t: "assistant: ", s: "success" },
-							{ t: presentation.text, s: "dim" },
-						];
-					}
+					const head: EntryPart = { t: "assistant: ", s: assistantLabelColor() };
+					if (presentation.kind === "compact-recovered") return [head, { t: presentation.text, s: "dim" }];
 					const msgWithContent = msg as { content?: unknown; stopReason?: string; errorMessage?: string };
 					const textContent = normalize(this.#extractContent(msgWithContent.content));
-					const head: EntryPart = { t: "assistant: ", s: "success" };
 					if (textContent) return [head, { t: textContent }];
 					if (presentation.kind === "full") {
 						return [head, { t: normalize(presentation.text).slice(0, 80), s: "error" }];
@@ -1121,7 +1172,10 @@ class TreeList implements Component {
 					return [{ t: label, s: "customMessageLabel" }, { t: normalize(text) }];
 				}
 				const content = stripSystemWrapperTags(this.#joinTextContent(entry.content));
-				return [{ t: `[${entry.customType}]: `, s: "customMessageLabel" }, { t: normalize(content) }];
+				return [
+					{ t: `[${entry.customType}]: `, s: "customMessageLabel" },
+					{ t: normalize(content), s: "muted" },
+				];
 			}
 			case "compaction": {
 				const tokens = Math.round(entry.tokensBefore / 1000);
