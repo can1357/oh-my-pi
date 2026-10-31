@@ -1820,7 +1820,7 @@ export interface ExtensionAgentsApi {
 	 */
 	get(id: string): ExtensionAgentInfo | undefined;
 	/**
-	 * Revive a parked/idle agent to a live session, resolving `id` as {@link get}
+	 * Revive a parked, idle or killed (`aborted`) agent to a live session, resolving `id` as {@link get}
 	 * does (preferring agents under `parentSessionFile` when that is this
 	 * session's own transcript). When `parentSessionFile` is this session's own
 	 * current transcript and `id` resolves to no visible agent, or only to one

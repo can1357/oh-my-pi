@@ -380,7 +380,8 @@ export class AgentLifecycleManager {
 	 * {@link PersistedSubagentReviverFactory} (ACP hosts several concurrent
 	 * top-level sessions, each with its own ambient auth/model/settings) supply
 	 * a reviver scoped to this single call instead. It takes precedence over
-	 * the global factory and is never persisted onto the manager.
+	 * the global factory, for reopening a killed ref as well as for the cold
+	 * revive, and is never persisted onto the manager.
 	 */
 	async ensureLive(
 		id: string,
@@ -413,7 +414,7 @@ export class AgentLifecycleManager {
 				`Unknown agent "${id}" — it was never registered or has been released. If a transcript exists, read history://${id}.`,
 			);
 		}
-		if (ref.status === "aborted") ref = await this.#reopen(id, ref);
+		if (ref.status === "aborted") ref = await this.#reopen(id, ref, coldRevive?.reviverFactory);
 		// A revive attaches its session before it finishes initializing it: join the revive rather
 		// than hand out a session whose extensions have not re-registered their tools yet.
 		const inflight = this.#revivals.get(id);
@@ -432,13 +433,14 @@ export class AgentLifecycleManager {
 	/**
 	 * Turn a killed ref into a fresh `parked` generation on the same transcript
 	 * and drop its kill marker, so the cold-revive path can rebuild it. Probes the
-	 * persisted factory first: a transcript nothing can revive stays killed.
-	 * Concurrent calls for the same killed ref share one reopen.
+	 * call-scoped reviver, else the persisted factory, first: a transcript nothing
+	 * can revive stays killed. Concurrent calls for the same killed ref share one
+	 * reopen.
 	 */
-	async #reopen(id: string, killed: AgentRef): Promise<AgentRef> {
+	async #reopen(id: string, killed: AgentRef, reviverFactory?: PersistedSubagentReviverFactory): Promise<AgentRef> {
 		const inflight = this.#reopens.get(id);
 		if (inflight?.ref === killed) return inflight.promise;
-		const pending: ReopeningAgent = { ref: killed, promise: this.#reopenKilled(id, killed) };
+		const pending: ReopeningAgent = { ref: killed, promise: this.#reopenKilled(id, killed, reviverFactory) };
 		this.#reopens.set(id, pending);
 		try {
 			return await pending.promise;
@@ -447,10 +449,14 @@ export class AgentLifecycleManager {
 		}
 	}
 
-	async #reopenKilled(id: string, killed: AgentRef): Promise<AgentRef> {
+	async #reopenKilled(
+		id: string,
+		killed: AgentRef,
+		reviverFactory?: PersistedSubagentReviverFactory,
+	): Promise<AgentRef> {
 		const sessionFile = killed.sessionFile;
 		if (!sessionFile) throw new Error(`Agent "${id}" was killed and has no transcript to resume from.`);
-		const factory = this.#persistedReviverFactory;
+		const factory = reviverFactory ?? this.#persistedReviverFactory;
 		if (!factory) {
 			throw new Error(
 				`Agent "${id}" was killed and cannot be revived (no reviver registered). Read history://${id} for what it did.`,
