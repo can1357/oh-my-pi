@@ -98,21 +98,29 @@ What you register, and when, decides how long it lasts:
   `ctx.modelRegistry.resolver()` makes, a model's `resolveHeaders`, the disposer
   `ui.onTerminalInput()` returns, a `localProtocolOptions` member — is your session's call and
   refuses once it has ended, wherever you call it from; anything else it answers with is a copy or
-  an object of your own. What answers from the context itself still answers: `agent` (a copy of
-  the identity the host supplied), `clearTimer`, and `mode` and `hasUI`, which once the session
-  has ended answer what they did when the context was made, not what the host was rebound to.
+  an object of your own. An answer that arrives later is checked again when it arrives: a call
+  your session made while it was live — `getApiKeyForProvider()`, a dialog, `compact()` — rejects,
+  saying the session has ended, if the session has ended by the time the host answers, rather than
+  handing you what the host worked out afterwards. A live call still starting when its session ends
+  is ended by the host, since nobody is left to end it. What answers from the context itself still
+  answers: `agent` (a copy of the identity the host supplied), `clearTimer`, and `mode` and
+  `hasUI`, which once the session has ended answer what they did when the context was made, not
+  what the host was rebound to.
   `ctx.setTimeout`/`ctx.setInterval` refuse too, and a callback scheduled while the session was
   live belongs to that session, whichever session the runtime serves when it fires. A host call
   that fails reaches you as a copy of its failure, never the host's own exception.
 - What your session set on the host's UI — a footer, a header, the working message, a status, the
-  title, a widget, an editor — is taken back when the session ends, unless another session has set
-  it since. You need not clear it yourself, and a `ctx` kept past the end cannot.
+  title, a widget, an editor, a suspension of the TUI (`stop`) — is taken back when the session
+  ends, unless another session has set it since. You need not clear it yourself, and a `ctx` kept
+  past the end cannot: a `custom()` dialog's `done` does nothing once the session that opened it has
+  ended (the host closes the dialog itself), and neither does the TUI's `start`.
 - Drawing is the one thing that works for whoever holds it, whenever: the theme (`ctx.ui.theme`,
   and the one a renderer or a `ctx.ui` factory is handed) and the TUI's drawing members, its frame
   facts, `terminal.rows`/`columns` and image budget still reach the host's renderer after your
   session has ended — they ask for a frame or format a string, and change nothing else — and so
   does a live call's `stop()`, so a call your session started can always be ended. Their failures
-  reach you as copies too.
+  reach you as copies too. Starting the renderer is not drawing, and finishing a dialog is not
+  either: both act on the host, so both stop with the session.
 
 ## Quick start
 
@@ -364,7 +372,8 @@ What a `ctx.ui` factory is handed besides its theme is the session's own, not th
   belongs to it, not to the runtime — a factory it handed `ctx.ui`, a widget, editor or dialog
   the host mounted from one, a component it focused or showed, a listener it added — so a host that
   starts the next session on the same runtime does not bring any of it back, even before the
-  next frame. `start` ends only a suspension your session started. Members that steer the
+  next frame. `start` ends only a suspension your session started, and only while it is live; a
+  suspension still in place when the session ends is ended by the host. Members that steer the
   host's renderer, its input or its other components — `children`, `addChild`,
   `injectDebugInput`, `getFocused`, `hideOverlay`, paint and frame listeners, and the terminal's
   `write` — throw, naming the member.

@@ -10,9 +10,11 @@ import * as path from "node:path";
 import { Type } from "@oh-my-pi/omptype/typebox";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { handSessionFacade } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/boundary-data";
+import { handAnnotations, handMemory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/context-surfaces";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type {
+	AnnotationSubmitRequest,
 	ExtensionActions,
 	ExtensionAgentIdentity,
 	ExtensionAPI,
@@ -888,6 +890,34 @@ describe("a session's work under way", () => {
 });
 
 describe("a live call a session starts", () => {
+	test("a call still starting when its session ends is ended by the host, and the session is refused its handle", async () => {
+		const h = await reusedRuntime(() => {});
+		const connecting = Promise.withResolvers<void>();
+		cleanups.push(() => connecting.resolve());
+		let stops = 0;
+		const [host, context] = actions();
+		h.runner.initialize(
+			host,
+			{
+				...context,
+				startLive: async () => {
+					await connecting.promise;
+					return { sdpAnswer: "answer", voice: "alloy", stop: async () => void stops++ };
+				},
+			},
+			undefined,
+			{ ...h.runner.getUIContext() },
+			"tui",
+		);
+		const endA = h.session();
+		const starting = outcome(() => h.runner.createContext().startLive?.({ sdpOffer: "offer" }));
+		endA();
+		h.session();
+		connecting.resolve();
+
+		expect({ handle: await starting, stops }).toEqual({ handle: REFUSED, stops: 1 });
+	});
+
 	test("hands the host copies and the session's callbacks, and its stop works after the session ends", async () => {
 		let kept: ExtensionContext | undefined;
 		const h = await reusedRuntime(pi => {
@@ -985,7 +1015,7 @@ const REFUSED = expect.stringContaining("Extension session retired");
 const bearer = (resolved: unknown): unknown =>
 	typeof resolved === "string" ? resolved : (resolved as { apiKey?: string } | undefined)?.apiKey;
 
-describe("a model argument a ctx member is handed", () => {
+describe("an argument a ctx member is handed", () => {
 	test("that is not a model is refused, naming the argument, not failing inside the copy", async () => {
 		const h = await reusedRuntime(() => {});
 		h.session();
@@ -1001,6 +1031,48 @@ describe("a model argument a ctx member is handed", () => {
 			"threw: Error: ctx.modelRegistry: model is not a model object (got null).",
 			"threw: Error: ctx.modelRegistry: model is not a model object (got string).",
 		]);
+	});
+
+	test("an annotations request is copied in: the host reads the copy, never the extension's object after its session has gone", async () => {
+		const owner = new ExtensionRuntime();
+		const endA = owner.beginSession();
+		const proceed = Promise.withResolvers<void>();
+		cleanups.push(() => proceed.resolve());
+		const seen: unknown[] = [];
+		// As the bundled host does: it reads the source, awaits, then reads the notes.
+		const host = {
+			submit: async (request: AnnotationSubmitRequest) => {
+				seen.push(request.source);
+				await proceed.promise;
+				seen.push(request.notes);
+				return { kind: "text", text: "", delivered: false };
+			},
+			open: async () => undefined,
+		};
+		const annotations = handAnnotations(host as never, owner.forSession());
+		let ended = false;
+		const ranAfterEnd: string[] = [];
+		const request = {
+			get source() {
+				if (ended) ranAfterEnd.push("source");
+				return { kind: "text", text: ended ? "unchecked" : "checked" };
+			},
+			get notes() {
+				if (ended) ranAfterEnd.push("notes");
+				return [{ note: ended ? "unchecked" : "checked" }];
+			},
+		};
+		const submitting = outcome(() => annotations.submit(request as never));
+		endA();
+		ended = true;
+		cleanups.push(owner.beginSession());
+		proceed.resolve();
+		await submitting;
+
+		expect({ ranAfterEnd, seen }).toEqual({
+			ranAfterEnd: [],
+			seen: [{ kind: "text", text: "checked" }, [{ note: "checked" }]],
+		});
 	});
 });
 
@@ -1057,6 +1129,56 @@ describe("what a ctx member hands back", () => {
 		const late = await outcome(() => kept());
 
 		expect({ live, late, reads }).toEqual({ live: { "X-Canary": "A" }, late: REFUSED, reads: 0 });
+	});
+
+	test("an answer that settles after its session has gone is refused: a credential admitted while live is not the next session's", async () => {
+		const h = await reusedRuntime(() => {});
+		const hold = Promise.withResolvers<void>();
+		cleanups.push(() => hold.resolve());
+		const credential = h.registry.getApiKeyWithCredentialForProvider.bind(h.registry);
+		let started = 0;
+		const spy = spyOn(h.registry, "getApiKeyWithCredentialForProvider").mockImplementation(((
+			...args: Parameters<typeof credential>
+		) => {
+			started++;
+			// Held at the registry's own credential method, so the answer is computed after the session ends.
+			return hold.promise.then(() => credential(...args));
+		}) as typeof credential);
+		cleanups.push(() => spy.mockRestore());
+		const endA = h.session();
+		h.auth.keys.setRuntime("anthropic", "canary-A");
+		const pending = outcome(() => h.runner.createContext().modelRegistry.getApiKeyForProvider("anthropic"));
+		endA();
+		h.session();
+		h.auth.keys.setRuntime("anthropic", "canary-B");
+		hold.resolve();
+
+		expect({ started, late: await pending }).toEqual({ started: 1, late: REFUSED });
+	});
+
+	test("an answer that settles after its session has gone is refused before it is copied: no host getter runs", async () => {
+		const owner = new ExtensionRuntime();
+		const endA = owner.beginSession();
+		const hold = Promise.withResolvers<object>();
+		const memory = handMemory(
+			{ status: () => hold.promise, search: async () => [], save: async () => undefined } as never,
+			owner.forSession(),
+		);
+		const pending = outcome(() => memory.status());
+		let reads = 0;
+		endA();
+		cleanups.push(owner.beginSession());
+		hold.resolve(
+			Object.defineProperty({}, "state", {
+				enumerable: true,
+				get() {
+					reads++;
+					return "the next session's";
+				},
+			}),
+		);
+
+		expect({ late: await pending, reads }).toEqual({ late: REFUSED, reads: 0 });
 	});
 
 	test("the disposer a UI member answers with is the session's call, refused once it has gone", async () => {
@@ -1262,6 +1384,35 @@ describe("a session facade (handSessionFacade)", () => {
 			assigned: undefined,
 		});
 	});
+
+	test("chains on what the runtime resolved, never on a `then` the answer supplies itself", async () => {
+		const owner = new ExtensionRuntime();
+		const endA = owner.beginSession();
+		let writes = 0;
+		const host = {
+			credential: "host",
+			write() {
+				writes++;
+			},
+		};
+		// A Proxy over a native promise, and a native promise with an own `then`: each describes itself.
+		const proxied = new Proxy(Promise.resolve("resolved"), {
+			get: (target, key) => (key === "then" ? () => host : Reflect.get(target, key, target)),
+		});
+		const ownThen = Object.assign(Promise.resolve("resolved"), { then: () => host });
+		const facade = handSessionFacade({ proxied: () => proxied, ownThen: () => ownThen }, owner.forSession());
+		const fromProxy: unknown = facade.proxied();
+		const fromOwnThen = await facade.ownThen();
+		endA();
+		cleanups.push(owner.beginSession());
+		if (fromProxy === host) host.write();
+
+		expect({ proxy: fromProxy === host, fromOwnThen, writes }).toEqual({
+			proxy: false,
+			fromOwnThen: "resolved",
+			writes: 0,
+		});
+	});
 });
 
 describe("what a session set on the host's UI", () => {
@@ -1321,31 +1472,52 @@ describe("what a session set on the host's UI", () => {
 		});
 	});
 
-	test("is left alone when another session set the slot since", async () => {
-		const state: Record<string, unknown> = {};
-		let ui: ExtensionUIContext | undefined;
-		const runtimes = await Promise.all(
-			["A", "B"].map(name =>
-				reusedRuntime(pi => {
-					pi.on("session_start", (_event, ctx) => {
-						ctx.ui.setStatus("shared", `${name}'s status`);
-					});
-				}),
-			),
-		);
-		const [a, b] = runtimes;
-		if (!a || !b) throw new Error("two runtimes were not made");
-		for (const { runner } of runtimes) {
-			ui ??= recordingUI(runner.getUIContext(), state);
-			const [host, context] = actions();
-			runner.initialize(host, context, undefined, ui, "tui");
-		}
-		const endA = a.session();
-		await a.runner.emit({ type: "session_start" });
-		b.session();
-		await b.runner.emit({ type: "session_start" });
-		endA();
+	test("is left alone when another session set the slot since, whatever wrapper each runner holds the host's UI through", async () => {
+		/** Two runners over one host UI, as the SDK builds them: each sets a user-wait tracker before
+		 *  `initialize` (`sdk.ts`), so each holds the UI through a wrapper of its own (`trackUserWaits`).
+		 *  Also each through an embedder's own transparent Proxy, and both through the same object. */
+		const shippedShape = async (shape: "tracked" | "proxied" | "bare") => {
+			const state: Record<string, unknown> = {};
+			const runtimes = await Promise.all(
+				["A", "B"].map(name =>
+					reusedRuntime(pi => {
+						pi.on("session_start", (_event, ctx) => {
+							ctx.ui.setStatus("shared", `${name}'s status`);
+							ctx.ui.setFooter(() => ({ render: () => [name], invalidate() {} }));
+						});
+					}),
+				),
+			);
+			const [a, b] = runtimes;
+			if (!a || !b) throw new Error("two runtimes were not made");
+			const ui = recordingUI(a.runner.getUIContext(), state);
+			for (const { runner } of runtimes) {
+				if (shape === "tracked") runner.setUserWaitTracker(dialog => dialog());
+				const [host, context] = actions();
+				runner.initialize(host, context, undefined, shape === "proxied" ? new Proxy(ui, {}) : ui, "tui");
+			}
+			const endA = a.session();
+			await a.runner.emit({ type: "session_start" });
+			b.session();
+			await b.runner.emit({ type: "session_start" });
+			const footerOf = () => (typeof state.footer === "function" ? "set" : String(state.footer));
+			const footerBefore = footerOf();
+			endA();
+			return {
+				wrappersDiffer: a.runner.getUIContext() !== b.runner.getUIContext(),
+				status: state["status:shared"],
+				footer: { before: footerBefore, after: footerOf() },
+			};
+		};
 
-		expect(state["status:shared"]).toBe("B's status");
+		expect({
+			tracked: await shippedShape("tracked"),
+			proxied: await shippedShape("proxied"),
+			bare: await shippedShape("bare"),
+		}).toEqual({
+			tracked: { wrappersDiffer: true, status: "B's status", footer: { before: "set", after: "set" } },
+			proxied: { wrappersDiffer: true, status: "B's status", footer: { before: "set", after: "set" } },
+			bare: { wrappersDiffer: false, status: "B's status", footer: { before: "set", after: "set" } },
+		});
 	});
 });

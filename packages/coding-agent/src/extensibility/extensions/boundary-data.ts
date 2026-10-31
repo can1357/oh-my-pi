@@ -538,12 +538,17 @@ function copiedFailure(error: unknown): unknown {
 	}
 }
 
+/** The runtime's own `then`, taken before any value could replace it: what the boundary chains
+ *  on a promise with, never a `then` the promise itself (or a Proxy over one) supplies. */
+const nativeThen = Promise.prototype.then;
+
 /**
  * Runs one call into the host for an extension, and hands its failure over as a copy
  * ({@link copiedFailure}) — thrown synchronously or by a returned promise's rejection — never the
  * host's own exception, which may hold the host's callables. What it answers is the caller's to
  * copy. A copy is taken around the host call itself: copying only what the call returned leaves
- * the failure it raised before returning.
+ * the failure it raised before returning. Only a promise the runtime made is chained on, and with
+ * the runtime's own `then`.
  */
 export function fromHostCall<T>(call: () => T): T {
 	let result: T;
@@ -552,10 +557,13 @@ export function fromHostCall<T>(call: () => T): T {
 	} catch (error) {
 		throw copiedFailure(error);
 	}
-	if (result instanceof Promise) {
-		return result.catch((error: unknown) => {
-			throw copiedFailure(error);
-		}) as T;
+	if (types.isPromise(result)) {
+		return Reflect.apply(nativeThen, result, [
+			undefined,
+			(error: unknown) => {
+				throw copiedFailure(error);
+			},
+		]) as T;
 	}
 	return result;
 }
@@ -655,7 +663,12 @@ export function isImmutableData(value: object): boolean {
  * - a function — a resolver the registry made, a disposer the host returned — as a callable that
  *   calls it through `call`: a session's member answers with a function that is that session's
  *   call too, refused once it has gone, its failure a copy, what it answers crossing by this rule;
- * - a promise, as a promise of what it settles with, crossing by this rule;
+ * - a promise the runtime made, as a promise of what it settles with, which crosses at exit as it
+ *   did at entry: through `call` again, so an answer that settles once its session has gone — a
+ *   credential the registry resolved against the next session's state, a host object whose getter
+ *   would run — is refused before anything of it is read, and a rejection is a copy. The boundary
+ *   chains with the runtime's own `then` ({@link nativeThen}), so a value that only says it is a
+ *   promise — a `then` of its own, a Proxy over a promise — is not one, and is data like any other;
  * - anything else, as a copy ({@link copyHostData}) in which what the boundary hands as it is
  *   stays itself.
  */
@@ -663,7 +676,15 @@ function crossing(value: unknown, call: HostCall): unknown {
 	if (value === null || (typeof value !== "object" && typeof value !== "function")) return value;
 	if (handedAsIs.has(value)) return value;
 	if (typeof value === "function") return hostCallable(value, call, call);
-	if (value instanceof Promise) return value.then(settled => crossing(settled, call));
+	if (types.isPromise(value)) {
+		return Reflect.apply(nativeThen, value, [
+			(settled: unknown) => call(() => crossing(settled, call)),
+			(failure: unknown) =>
+				call(() => {
+					throw failure;
+				}),
+		]);
+	}
 	if (isImmutableData(value)) return value;
 	return new HostCopier(undefined, undefined, true).copy(value);
 }
@@ -764,10 +785,12 @@ function handFacade<T extends object>(facade: T, call: HostCall | undefined, ans
  * ({@link sessionHostCall}) — a method's call, a getter's read and a setter's write alike — so what
  * refuses once the session has gone is the member, never whichever argument it happens to copy. A
  * member taking `undefined`, or nothing, is refused as surely as one taking a string. What a member
- * answers is handed by {@link crossing}: a function it answers with is the session's call too, and
- * an object a copy, unless the boundary made it to be handed. `answers` names the members that call
- * no host: they answer from what the facade was made with, or are facades of their own that refuse
- * member by member, and what they answer crosses by the same rule.
+ * answers is handed by {@link crossing}: a function it answers with is the session's call too, an
+ * object a copy, unless the boundary made it to be handed, and an answer that settles later is
+ * gated again when it settles — admitted while the session was live, it is refused if the session
+ * has gone by then, rather than handed what the host computed afterwards. `answers` names the
+ * members that call no host: they answer from what the facade was made with, or are facades of
+ * their own that refuse member by member, and what they answer crosses by the same rule.
  */
 export function handSessionFacade<T extends object>(
 	facade: T,
@@ -1095,12 +1118,13 @@ function handHostResolver(
 ): NonNullable<Model<Api>["resolveHeaders"]> {
 	return handAsIs(async (signal?: AbortSignal) => {
 		const followed = signal === undefined ? undefined : AbortSignal.any([signal]);
-		// The resolver is the host's code: refused once the session `call` answers for has gone, and
-		// what it throws, synchronously or by rejecting, is the host's object and crosses as a copy.
-		const headers = await call((): Promise<Record<string, string> | undefined> | Record<string, string> | undefined =>
-			Reflect.apply(resolver, model, [followed]),
-		);
-		return copyHostData(headers);
+		// The resolver is the host's code: refused once the session `call` answers for has gone, what
+		// it throws is the host's object and crosses as a copy, and what it answers crosses by the one
+		// rule ({@link crossing}) — at exit too, so headers resolved after the session has gone are not
+		// its answer.
+		return call(() => crossing(Reflect.apply(resolver, model, [followed]), call)) as Promise<
+			Record<string, string> | undefined
+		>;
 	});
 }
 

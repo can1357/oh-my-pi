@@ -18,9 +18,11 @@
  * is on the call and on everything the call answers: a member is the session's host call, refused
  * once the session has gone; what it answers crosses by one rule (`crossing`), so a function it
  * answers with — a credential resolver, a disposer — is the session's call too, and an object is a
- * copy unless the boundary built it to be handed (a facade, a model copy). A member here returns
- * what the host answered and leaves the copy to the helper; one that forgets hands a copy, never
- * the host's object. The helper refuses, by name, a member it cannot gate.
+ * copy unless the boundary built it to be handed (a facade, a model copy). An answer that arrives
+ * later — a promise the runtime made — is gated again when it arrives: admitted while the session
+ * was live, it is refused if the session has gone by then. A member here returns what the host
+ * answered and leaves the copy to the helper; one that forgets hands a copy, never the host's
+ * object. The helper refuses, by name, a member it cannot gate.
  *
  * Every member of a surface's type is listed (`Decided`), so a member added to the type does not
  * compile until someone says what an extension gets. `ctx.modelRegistry` and the session's
@@ -31,6 +33,10 @@
  * after the session has gone (`handHostFacade`), as the cleanup a session may still owe does (a
  * live call's `stop`, an overlay's `hide`). Their failures are copies and what they answer crosses
  * by the same rule; what they reach is the process-wide renderer, which nothing of them changes.
+ * Each exception is as narrow as its reason. A value handed as it is (`handAsIs`) carries no right
+ * to act: a dialog's `done` hands its value back as it is, and finishes the dialog only while the
+ * session is live; starting the renderer (`start`) is an action, not drawing, and stops with the
+ * session, which ends the session's own suspension itself.
  *
  * A callback the extension hands a UI member is its code, run by the host later: a dialog's
  * callbacks are owned (`ownCallback`); a component factory, an autocomplete factory and a
@@ -72,6 +78,7 @@ import type { ReadonlySessionManager } from "../../session/session-manager";
 import { type AuthorDataSite, CALLBACK, DATA, fieldsOf, snapshotAuthorData } from "./author-data";
 import {
 	copyHostData,
+	fromHostCall,
 	handAsIs,
 	handHostFacade,
 	handHostModel,
@@ -80,6 +87,7 @@ import {
 	sessionCall,
 } from "./boundary-data";
 import { copyHandedModel } from "./compact-handler";
+import { hostUIOf } from "./user-wait";
 import type {
 	ExtensionAgentIdentity,
 	ExtensionAnnotationsAPI,
@@ -533,15 +541,18 @@ export function handAgentIdentity(agent: ExtensionAgentIdentity): ExtensionAgent
 /**
  * `ctx.annotations` as a session hands it: an object of its own whose members call the host's, as
  * the session's host calls, what they answer a copy. The host's object is never handed: it is the
- * host's, which the host may keep and drive itself.
+ * host's, which the host may keep and drive itself. The request is copied in, inside the
+ * admission, as every other surface's argument is: the host reads its source, awaits, then reads
+ * its notes, and must read what it checked — never the extension's object, after its session.
  */
 export function handAnnotations(
 	annotations: ExtensionAnnotationsAPI,
 	owner: ExtensionCallbackOwner,
 ): ExtensionAnnotationsAPI {
+	const subject = "ctx.annotations";
 	const handed: Decided<ExtensionAnnotationsAPI> = {
-		submit: async request => annotations.submit(request),
-		open: async request => annotations.open(request),
+		submit: async request => annotations.submit(data(owner, request, subject, "request")),
+		open: async request => annotations.open(data(owner, request, subject, "request")),
 	};
 	return handSessionFacade(handed, owner);
 }
@@ -553,7 +564,9 @@ export function handAnnotations(
  * extension's to do once its session has gone too: its own peer going away is the only signal the
  * host gets, and a call left open keeps the host's visualizer up for whoever comes next. So the
  * live session is a facade that answers whenever it is called ({@link handHostFacade}), and a
- * failure of `stop` crosses as a copy.
+ * failure of `stop` crosses as a copy. A session that ends while its call is still starting is
+ * refused the handle (the answer is gated when it settles, `handSessionFacade`), so nobody would be
+ * left to end the call: the host ends it then.
  */
 export function handLiveStart(
 	startLive: NonNullable<ExtensionContext["startLive"]>,
@@ -586,6 +599,7 @@ export function handLiveStart(
 			};
 		});
 		const live = await startLive(handed);
+		if (owner.isRetired) await fromHostCall(() => live.stop());
 		const session: Decided<ExtensionLiveSession> = {
 			sdpAnswer: String(live.sdpAnswer),
 			voice: String(live.voice),
@@ -829,9 +843,11 @@ const handedTUIs = new WeakMap<ToolRendererScope, WeakMap<TUI, TUI>>();
  *   is live and running in it: a listener is taken off the TUI at the first key after the scope
  *   has gone and is never called again; a component the session focuses or shows takes input in
  *   its scope (`bindInputScope`), and once the scope has gone an overlay is taken down and focus
- *   goes back to what the session took it from. A suspension (`stop`) is made only
- *   while the scope is live, and only the session's own suspension can be ended (`start`), at any
- *   time, so a session that went while suspended does not leave the host stopped;
+ *   goes back to what the session took it from. A suspension (`stop`) is made, and ended (`start`),
+ *   only while the scope is live, and only the session's own; it is the session's state on the
+ *   host, as what it sets on the UI is, so the host ends it when the session ends (`whenSessionEnds`)
+ *   and the renderer is not left stopped. Starting the renderer is an action, not drawing: once the
+ *   session has gone, `start` does nothing;
  * - everything that steers the host's renderer, its input, its screen and its other components —
  *   its children, its listeners for paints and frames, its debug input — is withheld.
  */
@@ -856,6 +872,13 @@ export function handTUI(tui: TUI, owner: ExtensionCallbackOwner, scope: ToolRend
 	 *  they hold and whoever bound it, even when the runtime already serves the next session. */
 	const overlaysBySession = new Map<ToolRendererScope, Set<OverlayHandle>>();
 	let suspended = false;
+	/** Whether the session's end has been asked to end its suspension: asked once, whatever it does. */
+	let resumesAtEnd = false;
+	const resume = (): void => {
+		if (!suspended) return;
+		suspended = false;
+		tui.start();
+	};
 	/** What had focus outside the session: a component the session took focus with stands for what
 	 *  it took focus from. */
 	const outsideSession = (component: Component | null): Component | undefined =>
@@ -1010,11 +1033,12 @@ export function handTUI(tui: TUI, owner: ExtensionCallbackOwner, scope: ToolRend
 			if (!scope.live || suspended) return;
 			suspended = true;
 			tui.stop();
+			if (resumesAtEnd) return;
+			resumesAtEnd = true;
+			owner.whenSessionEnds?.(resume);
 		},
 		start: () => {
-			if (!suspended) return;
-			suspended = false;
-			tui.start();
+			if (scope.live) resume();
 		},
 		get children(): Component[] {
 			return refuse("children");
@@ -1312,8 +1336,28 @@ function editorFactoriesOf(owner: ExtensionCallbackOwner): WeakMap<object, Edito
 }
 
 /** Which session holds each slot of a host's UI it set — a footer, a status key, the title — by
- *  the host's UI: the last session to set the slot through any of the facades over that UI. */
-const uiSlotsHeld = new WeakMap<ExtensionUIContext, Map<string, ExtensionCallbackOwner>>();
+ *  that host UI ({@link hostUIKey}): the last session to set the slot through any facade over it,
+ *  whichever wrapper its runner holds the UI through. */
+const uiSlotsHeld = new WeakMap<object, Map<string, ExtensionCallbackOwner>>();
+
+/** Where a host UI carries the key its slots are held under ({@link hostUIKey}). */
+const HOST_UI_KEY = Symbol("omp.extension.hostUIKey");
+
+/**
+ * The one key for the host's UI behind `ui`, whatever wraps it. Each runner holds the host's UI
+ * through a wrapper of its own (`trackUserWaits`, one per runner and per tool context), and two
+ * sessions on two runners write to the same host UI through two wrappers, so the wrapper's identity
+ * cannot say which UI a slot is on. The key is defined on the UI through `ui`: a wrapper that
+ * forwards to the host's object — `trackUserWaits`, a transparent Proxy an embedder makes — defines
+ * it there, and every wrapper over that object reads the same key. A host UI that cannot take the
+ * key (a frozen one) is keyed by the UI `trackUserWaits` wrapped ({@link hostUIOf}).
+ */
+function hostUIKey(ui: ExtensionUIContext): object {
+	const known: unknown = Reflect.get(ui, HOST_UI_KEY);
+	if (typeof known === "object" && known !== null) return known;
+	const key = {};
+	return Reflect.defineProperty(ui, HOST_UI_KEY, { value: key }) ? key : hostUIOf(ui);
+}
 
 /**
  * The UI as an extension's context hands it. The host's approval prompts go through its own UI
@@ -1394,10 +1438,11 @@ export function handUIContext(
 	/** Each editor factory this session installed, by the wrapper the host holds: what
 	 *  `getEditorComponent` hands back, through whichever of the session's facades asks. */
 	const editorFactories = editorFactoriesOf(owner);
-	let slots = uiSlotsHeld.get(ui);
+	const hostUI = hostUIKey(ui);
+	let slots = uiSlotsHeld.get(hostUI);
 	if (!slots) {
 		slots = new Map();
-		uiSlotsHeld.set(ui, slots);
+		uiSlotsHeld.set(hostUI, slots);
 	}
 	const held = slots;
 	/** The slots this facade takes back when its session ends: one withdrawal each. */
@@ -1525,8 +1570,13 @@ export function handUIContext(
 					handedTheme(theme),
 					handKeybindings(keybindings),
 					// What the dialog is done with is the extension's own, and `custom()` hands it back
-					// as it is rather than as a copy.
-					result => done(handAsIs(result)),
+					// as it is rather than as a copy. That exception is for the value, not for the right
+					// to act: finishing the dialog is the host resetting its editor, focus and frame, so it
+					// happens only while the session that opened the dialog is live. Once it has gone the
+					// host closes the dialog itself (`showHookCustom`), and `done` does nothing.
+					result => {
+						if (sessionScope.live) done(handAsIs(result));
+					},
 				]),
 				options === undefined
 					? undefined

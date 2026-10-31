@@ -57,7 +57,7 @@ import {
 import { getComposerStyle } from "@oh-my-pi/pi-tui/components/composer/registry";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { getEditorTheme, initTheme, theme } from "@oh-my-pi/pi-tui/theme";
-import { bindInputScope, SafeToolRendererComponent } from "@oh-my-pi/pi-tui/tools/renderer-scope";
+import { bindInputScope, pinInputScope, SafeToolRendererComponent } from "@oh-my-pi/pi-tui/tools/renderer-scope";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 
@@ -1772,7 +1772,8 @@ describe("a dialog whose session has gone, measured at loopback endpoints over H
 			handedHost: false,
 			lateCalls: [],
 			lateRequests: [],
-			outcome: "AbortError: Extension session retired",
+			// The host's own abort arrives after the session has gone, so the boundary's refusal is the answer.
+			outcome: "Error: Extension session retired; its callbacks are no longer callable",
 		});
 	});
 });
@@ -1999,7 +2000,13 @@ describe("a dialog factory that crosses another session's ctx.ui", () => {
 		return { calls, draws, outcome, overlays: h.tui.overlayStack.length };
 	}
 
-	const refused = { calls: [], draws: 0, outcome: "AbortError: Extension session retired", overlays: 0 };
+	// The host's abort arrives after the session has gone, so the boundary's refusal is the answer.
+	const refused = {
+		calls: [],
+		draws: 0,
+		outcome: "Error: Extension session retired; its callbacks are no longer callable",
+		overlays: 0,
+	};
 
 	test("opened through a second session's ui, it is refused once that caller's session has gone", async () => {
 		const h = await controllerHost();
@@ -2298,6 +2305,62 @@ describe("a handed context reads what the host can change when it is asked for",
 			writer: typeof writer,
 			state,
 		}).toEqual({ same: false, message: "host theme failed", writer: "undefined", state: "safe" });
+	});
+
+	test("a TUI suspension a session made is ended when the session ends, and a kept `start` does nothing after", () => {
+		const owner = new ExtensionRuntime();
+		const endA = owner.beginSession();
+		const runner = new ExtensionRunner([], owner, process.cwd(), SessionManager.inMemory(), {} as ModelRegistry);
+		const calls: string[] = [];
+		const host = { stop: () => void calls.push("stop"), start: () => void calls.push("start") } as unknown as TUI;
+		const scope = pinInputScope(runner.rendererScope);
+		const live = handTUI(host, owner.forSession(), scope);
+		live.stop();
+		live.start();
+		const whileLive = calls.splice(0);
+		live.stop();
+		const suspended = calls.splice(0);
+		endA();
+		const atEnd = calls.splice(0);
+		cleanups.push(owner.beginSession());
+		live.start();
+		live.stop();
+
+		expect({ whileLive, suspended, atEnd, afterwards: calls }).toEqual({
+			whileLive: ["stop", "start"],
+			suspended: ["stop"],
+			atEnd: ["start"],
+			afterwards: [],
+		});
+	});
+
+	test("a `custom()` dialog's done finishes it on the host only while the session that opened it is live", () => {
+		const owner = new ExtensionRuntime();
+		const endA = owner.beginSession();
+		const runner = new ExtensionRunner([], owner, process.cwd(), SessionManager.inMemory(), {} as ModelRegistry);
+		const finished: unknown[] = [];
+		const host: ExtensionUIContext = {
+			...runner.getUIContext(),
+			custom: factory => {
+				factory(undefined as never, undefined as never, undefined as never, result => void finished.push(result));
+				return new Promise(() => {});
+			},
+		};
+		const ui = handUIContext(host, owner.forSession(), pinInputScope(runner.rendererScope));
+		const dones: Array<(result: string) => void> = [];
+		for (let dialog = 0; dialog < 2; dialog++) {
+			void ui.custom<string>((_tui, _theme, _keybindings, done) => {
+				dones.push(done);
+				return { render: () => [], invalidate() {} };
+			});
+		}
+		const value = { mine: true };
+		dones[0]?.(value as never);
+		endA();
+		cleanups.push(owner.beginSession());
+		dones[1]?.("after the session ended");
+
+		expect({ finished, sameValue: finished[0] === value }).toEqual({ finished: [value], sameValue: true });
 	});
 
 	test("the no-UI object every runner starts with is frozen: nothing holding it changes it for another", () => {
