@@ -931,6 +931,7 @@ export class CollabGuestLink {
 	#clearTransientUi(): void {
 		this.#clearUiRequests();
 		clearGuestTransientStatus(this.#ctx);
+		this.#ctx.pendingShellContainer.clear();
 		this.#ctx.pendingMessagesContainer.clear();
 		this.#ctx.compactionQueuedMessages = [];
 		this.#ctx.streamingComponent = undefined;

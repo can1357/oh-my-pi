@@ -2,9 +2,17 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed `thinkingLoopGuard` from compat records; `thinking-loop-guard` is now a catalog axis that applies on every host, with `"semantic"` for Gemini, DeepSeek, and Grok and `"off"` for Claude
+
 ### Added
 
 - Added TokenRhythm (`tokenrhythm`) as a provider: `/login tokenrhythm` with an API key, the live `/v1/models` roster, and per-family reasoning controls verified against the host (DeepSeek V4 toggle plus low/high/max; Qwen and Seed toggle; GLM, Kimi, LongCat, MiniMax and MiMo always on with no disable field) ([#16053](https://github.com/can1357/oh-my-pi/pull/16053) by [@openvictory](https://github.com/openvictory))
+
+### Fixed
+
+- Fixed GitHub Copilot Claude 5.x base models (`claude-opus-5`, `claude-opus-5.5`, `claude-sonnet-5`, `claude-sonnet-5.5`) reporting the 1M window of their `-1m` variants once the model list was read from cache; discovered limits now survive cached reads instead of reverting to bundled values ([#17481](https://github.com/can1357/oh-my-pi/issues/17481))
 
 ## [18.14.1] - 2026-10-31
 

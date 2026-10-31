@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `listWorkspace({ pruneExcludedDirs: false })` to stop pruning standard dependency/build directory names; hidden directories such as `.git` also require `hidden: true` ([#17539](https://github.com/can1357/oh-my-pi/issues/17539))
+
 ## [18.14.1] - 2026-10-31
 
 ### Added
