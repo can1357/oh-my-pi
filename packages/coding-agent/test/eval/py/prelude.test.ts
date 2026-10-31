@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import { describe, expect, it } from "bun:test";
 import { $which, TempDir } from "@oh-my-pi/pi-utils";
+import { artifactRequestOf } from "../../../src/eval/artifact-wire";
 import { PYTHON_PRELUDE } from "../../../src/eval/py/prelude";
 import { artifactReadBridge } from "../../helpers/artifact-read-bridge";
 const pythonPath = Bun.env.PYTHON ?? ($which("python3") ? "python3" : "python");
@@ -193,6 +194,52 @@ describe("python prelude", () => {
 				session: "test-session",
 			},
 		]);
+	});
+
+	it("sends only artifact requests the host's wire parser accepts whole", async () => {
+		// The kernel writes these requests by hand, where no compiler checks them
+		// against the wire's types: this is what keeps the two in step.
+		using artifacts = TempDir.createSync("@omp-py-prelude-wire-");
+		await Bun.write(artifacts.join("12.eval.log"), "twelve\n");
+		await Bun.write(artifacts.join("13.eval.log"), "thirteen\n");
+		const { stdout, stderr, requests } = await runWithReadBridge(
+			[
+				// `answer`, then `release` after the read.
+				`print(repr(read("artifact://12")))`,
+				// `answer` about another object than the name reaches now, so `take`.
+				`print(repr(read("artifact://13")))`,
+				// `locate`: the path goes on to the read tool with its selector.
+				`print(repr(read("artifact://12:1-1")))`,
+			].join("\n"),
+			{ PI_EVAL_LOCAL_ROOTS: JSON.stringify({ artifact: artifacts.path() }) },
+			async (args, name) => {
+				if (name === "read") return { text: `read tool: ${args.path}` };
+				const asked = args as unknown as { op: string; id?: string };
+				if (asked.op === "release") return null;
+				const id = asked.op === "take" ? "13" : asked.id;
+				const file = artifacts.join(`${id}.eval.log`);
+				const stat = fs.statSync(file, { bigint: true });
+				const inode = id === "13" ? "0" : String(stat.ino);
+				const details = { path: file, device: String(stat.dev), inode };
+				if (asked.op === "take") return { text: file, details: { ...details, text: "held thirteen\n" } };
+				if (asked.op === "locate") return { text: file, details };
+				return { text: file, details: { ...details, file: `pin-${id}` } };
+			},
+		);
+
+		expect(stderr).toBe("");
+		expect(stdout).toBe(`'twelve\\n'\n'held thirteen\\n'\n'read tool: ${artifacts.join("12.eval.log")}:1-1'\n`);
+		const sent = requests
+			.map(request => request as { name?: string; args: Record<string, unknown> })
+			.filter(request => request.name === "__artifacts_ready__")
+			.map(request => request.args);
+		expect(sent.map(args => args.op)).toEqual(["answer", "release", "answer", "take", "locate"]);
+		// Whole: nothing required missing, nothing the kernel sends dropped
+		// except the `null` it sends for a token it does not have.
+		for (const args of sent) {
+			const present = Object.fromEntries(Object.entries(args).filter(([, value]) => value !== null));
+			expect(artifactRequestOf(args)).toEqual(present);
+		}
 	});
 
 	it("reads an artifact another session holds in full, however large, through the read tool", async () => {
