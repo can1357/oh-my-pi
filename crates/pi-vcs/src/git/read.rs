@@ -749,7 +749,22 @@ impl GitRepo {
 
 	/// List index paths, or untracked paths when `others` is true.
 	pub fn ls_files(&self, others: bool, exclude_standard: bool) -> Result<Vec<String>> {
-		self.ls_files_at_paths(others, exclude_standard, &BTreeSet::new())
+		Ok(self
+			.ls_files_at_paths(others, exclude_standard, &BTreeSet::new())?
+			.0)
+	}
+
+	/// [`Self::ls_files`], with the directories git reported it could not read.
+	///
+	/// Empty when git walked everything, or when the in-process walk answered
+	/// (it reaches what it can open and fails otherwise, rather than warning).
+	pub fn ls_files_with_warnings(
+		&self,
+		others: bool,
+		exclude_standard: bool,
+	) -> Result<(Vec<String>, Vec<String>)> {
+		let (paths, warnings) = self.ls_files_at_paths(others, exclude_standard, &BTreeSet::new())?;
+		Ok((paths, unreadable_directories(&warnings)))
 	}
 
 	/// Untracked listing (`others`) is a whole-worktree walk, the same shape
@@ -767,7 +782,7 @@ impl GitRepo {
 		others: bool,
 		exclude_standard: bool,
 		paths: &BTreeSet<String>,
-	) -> Result<Vec<String>> {
+	) -> Result<(Vec<String>, String)> {
 		if self.is_reftable() || others {
 			let mut args = vec!["ls-files".to_owned(), "-z".to_owned()];
 			if others {
@@ -787,11 +802,11 @@ impl GitRepo {
 			} else {
 				super::cli::SYNC_TIMEOUT
 			};
-			match cli_text_owned_capped(self.root(), &args, timeout, path_list_capture_limit()) {
+			match cli_text_and_warnings_capped(self.root(), &args, timeout, path_list_capture_limit()) {
 				// The subprocess capture is capped, and this output is the
 				// return value rather than a diagnostic: a short list would
 				// silently hide paths, so re-run the walk in-process. Reftable
-				Ok(text) if super::cli::is_truncated(&text) => {
+				Ok((text, _)) if super::cli::is_truncated(&text) => {
 					if self.is_reftable() {
 						return Err(Error::backend(
 							"git ls-files",
@@ -799,12 +814,14 @@ impl GitRepo {
 						));
 					}
 				},
-				Ok(text) => {
-					return Ok(text
-						.split('\0')
-						.filter(|path| !path.is_empty())
-						.map(str::to_owned)
-						.collect());
+				Ok((text, warnings)) => {
+					return Ok((
+						text.split('\0')
+							.filter(|path| !path.is_empty())
+							.map(str::to_owned)
+							.collect(),
+						warnings,
+					));
 				},
 				Err(err) if self.is_reftable() || !super::cli::prefers_in_process(&err) => {
 					return Err(err);
@@ -826,7 +843,7 @@ impl GitRepo {
 				.collect();
 			out.sort();
 			out.dedup();
-			return Ok(out);
+			return Ok((out, String::new()));
 		}
 		let repo = self.gix()?;
 		let mut platform = status_with_fresh_index(&repo, "git ls-files")?
@@ -857,7 +874,9 @@ impl GitRepo {
 			}
 		}
 		out.sort();
-		Ok(out)
+		// The in-process walk reaches what it can open and fails otherwise, so
+		// it has no warnings to report.
+		Ok((out, String::new()))
 	}
 
 	/// List recursive blob paths in a tree, optionally filtered by pathspec-like
@@ -1136,9 +1155,48 @@ fn cli_text_owned_capped(
 	timeout: std::time::Duration,
 	limit: usize,
 ) -> Result<String> {
-	Ok(super::cli::run_sync_capped(cwd, args, timeout, limit)?
-		.into_checked(args)?
-		.stdout)
+	Ok(cli_text_and_warnings_capped(cwd, args, timeout, limit)?.0)
+}
+
+/// [`cli_text_owned_capped`], keeping what the command said on stderr.
+///
+/// `git ls-files --others` reports a directory it could not open as a warning
+/// and exits 0, so the listing alone cannot say whether it is complete. The
+/// warning is the only record of what git did not look at, and a caller that
+/// deletes a workspace on the strength of that listing needs it. It is
+/// parseable because this module runs git with `LC_MESSAGES=C`.
+fn cli_text_and_warnings_capped(
+	cwd: &Path,
+	args: &[String],
+	timeout: std::time::Duration,
+	limit: usize,
+) -> Result<(String, String)> {
+	let output = super::cli::run_sync_capped(cwd, args, timeout, limit)?;
+	let warnings = output.stderr.clone();
+	Ok((output.into_checked(args)?.stdout, warnings))
+}
+
+/// The directories a `git ls-files` run reported it could not open.
+///
+/// Only that warning: git's stderr also carries traces, access warnings for
+/// individual files it did read, and anything a hook printed, and treating
+/// every line as an unread directory refused healthy captures. The form is
+/// fixed because this module forces `LC_MESSAGES=C`.
+fn unreadable_directories(stderr: &str) -> Vec<String> {
+	let mut out = Vec::new();
+	for line in stderr.lines() {
+		let Some(rest) = line.strip_prefix("warning: could not open directory '") else {
+			continue;
+		};
+		let Some(end) = rest.rfind("':") else { continue };
+		let name = rest[..end].trim_end_matches('/');
+		if !name.is_empty() {
+			out.push(name.to_owned());
+		}
+	}
+	out.sort();
+	out.dedup();
+	out
 }
 
 /// Retention cap for path-list captures.

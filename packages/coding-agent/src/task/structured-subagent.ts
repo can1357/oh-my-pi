@@ -28,6 +28,8 @@ import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.m
 import isolationRecoveryHintTemplate from "../prompts/tools/isolation-recovery-hint.md" with { type: "text" };
 import salvagedChildHintTemplate from "../prompts/tools/salvaged-child-hint.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { createReleaseHold, type ReleaseHold } from "../utils/release-hold";
+import { leaseIsolationWorkspace } from "./isolation-lease";
 import type { TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../irc/messaging";
@@ -157,6 +159,15 @@ export interface StructuredSubagentRequest {
 	maxRuntimeMs?: number;
 	/** Kernel-defined tools explicitly exposed to this child. */
 	customTools?: CustomTool[];
+	/**
+	 * Releases what the caller holds on the child's behalf — the retained eval
+	 * kernel its {@link customTools} run on, say. Run once the child can no
+	 * longer call them: at the end of its *lifecycle* for a kept-alive agent,
+	 * which stays wakeable (IRC, `agent://<id>`) long after this call returns,
+	 * and at the end of the run for one that does not. Never run twice, and
+	 * never skipped: a run that fails before the child exists runs it here.
+	 */
+	onRelease?: () => void | Promise<void>;
 	/** Workpool items accepted by the child yield tool during this turn. */
 	workPoolYieldItems?: WorkPoolYieldItem[];
 	signal?: AbortSignal;
@@ -577,11 +588,33 @@ function resolveAutoloadSkills(session: ToolSession, agent: AgentDefinition) {
 	return { skills, autoloadSkills };
 }
 
+/**
+ * One release for the child's lifecycle out of the caller's and this module's.
+ * Each runs at most once, and the first one's failure never skips the second.
+ *
+ * The result is a {@link ReleaseHold} whose claim reaches the caller's hold:
+ * whatever takes this composed release over owns both, and the boundary that
+ * created the caller's hold reads that off its own object.
+ */
+function composeLifecycleRelease(
+	callerRelease: ReleaseHold | undefined,
+	artifactsRelease: (() => Promise<void>) | undefined,
+): ReleaseHold | undefined {
+	if (!callerRelease) return artifactsRelease ? createReleaseHold(artifactsRelease) : undefined;
+	if (!artifactsRelease) return callerRelease;
+	return createReleaseHold(async () => {
+		const settled = await Promise.allSettled([callerRelease(), artifactsRelease()]);
+		const failure = settled.find(result => result.status === "rejected");
+		if (failure?.status === "rejected") throw failure.reason;
+	}, callerRelease.claim);
+}
+
 function buildExecutorOptions(
 	request: StructuredSubagentRequest,
 	policy: EffectiveSubagentPolicy,
 	lease: ArtifactLease,
 	id: string,
+	callerRelease: ReleaseHold | undefined,
 ): ExecutorOptions {
 	const { session } = request;
 	const preparedSession = policy.preparedSession;
@@ -671,13 +704,15 @@ function buildExecutorOptions(
 		parentArtifactManager: preparedSession ? undefined : (session.getArtifactManager?.() ?? undefined),
 		parentHindsightSessionState: session.getHindsightSessionState?.(),
 		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
-		onRelease:
+		onRelease: composeLifecycleRelease(
+			callerRelease,
 			preparedSession !== undefined && lease.temporary
 				? async () => {
 						await fs.rm(lease.artifactsDir, { recursive: true, force: true });
 						lease.unregister?.();
 					}
 				: undefined,
+		),
 		parentTelemetry: session.getTelemetry?.(),
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 		parentPromptCacheKey: session.getPromptCacheKey?.(),
@@ -823,8 +858,45 @@ function describeSalvagedWork(result: SingleResult): string {
 /**
  * Execute a validated subagent. Preflight errors occur before any artifact
  * lease or child dispatch; callers keep responsibility for their result text.
+ *
+ * {@link StructuredSubagentRequest.onRelease} runs exactly once. Rather than
+ * declaring the handover at dispatch — which is earlier than the child exists,
+ * so a spawn cancelled before its first turn or an isolation workspace that
+ * could not be created would strand it — this boundary asks on the way out
+ * whether the hold is still owed. It is, unless something that will certainly
+ * end has taken it over.
+ *
+ * The question is put to the {@link ReleaseHold} itself, not to a lifecycle
+ * manager looked up by id. A manager can be mid-release (the adoption already
+ * dropped, the captured release not yet run), torn down and replaced between
+ * the adoption and this line, or have had a concurrent operation rewrite its
+ * bookkeeping; none of that can reach the one object both parties hold.
  */
 export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
+	// A child that inherits its parent's cwd runs in a sandbox it did not
+	// materialise and does not own. Holding it keeps the owner's teardown
+	// waiting for this child rather than deleting the workspace under it; the
+	// hold ends where everything else this child holds ends.
+	const workspace = await leaseIsolationWorkspace(request.session.cwd);
+	const callerRelease = request.onRelease;
+	const hold = createReleaseHold(async () => {
+		try {
+			await callerRelease?.();
+		} finally {
+			await workspace();
+		}
+	});
+	try {
+		return await runStructuredSubagentDispatch(request, hold);
+	} finally {
+		if (hold.isOwed()) await hold();
+	}
+}
+
+async function runStructuredSubagentDispatch(
+	request: StructuredSubagentRequest,
+	onRelease: ReleaseHold | undefined,
+): Promise<StructuredSubagentResult> {
 	const policy = await applySpawnHook(request, await resolveEffectiveSubagentPolicy(request));
 	const lease = await leaseArtifacts(request.session, request.invocationKind);
 	let changesApplied: boolean | null = null;
@@ -848,7 +920,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			label: request.identity?.label ?? (request.invocationKind === "eval" ? "EvalAgent" : undefined),
 		});
 		if (policy.preparedSession === undefined) await refreshSkillsForAutoload(request.session, policy.agent);
-		const baseOptions = buildExecutorOptions(request, policy, lease, id);
+		const baseOptions = buildExecutorOptions(request, policy, lease, id, onRelease);
 		baseOptions.onCleanupDeferred = completion => {
 			deferredCleanup = completion;
 		};

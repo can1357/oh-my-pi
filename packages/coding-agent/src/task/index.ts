@@ -58,7 +58,7 @@ import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { AgentRegistry, isResumable } from "../registry/agent-registry";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
-import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
+import { borrowEvalToolKernels, createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
@@ -1864,6 +1864,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const context = this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined;
 		let latestProgress: AgentProgress | undefined;
 		try {
+			// Inside the try: a failed describe (kernel gone between preflight and
+			// spawn, unknown tool, abort) is this spawn's `Task execution failed`
+			// result, not a rejection out of a `SpawnRun`.
+			const evalToolDescriptors = params.tools?.length
+				? await describeEvalTools(this.session, params.tools, signal)
+				: undefined;
 			const execution = await runStructuredSubagent({
 				session: this.session,
 				invocationKind: "task",
@@ -1875,14 +1881,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...this.#resultParams(params),
 				...this.#effortParams(params),
 				solutionSpace: params.solutionSpace,
-				...(params.tools?.length
-					? {
-							customTools: createEvalCustomTools(
-								this.session,
-								await describeEvalTools(this.session, params.tools, signal),
-							),
-						}
-					: {}),
+				...(evalToolDescriptors ? { customTools: createEvalCustomTools(this.session, evalToolDescriptors) } : {}),
 				// `name` is the spawn handle: keep it for id allocation when this
 				// path did not pre-reserve one. Do not treat it as a HUD description.
 				identity: { id: preAllocatedId, label: params.name },
@@ -1917,6 +1916,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						},
 					});
 				},
+				// Last, and taken last: a task child defaults to kept-alive, so it
+				// can still call these tools on this session's kernel on a revived
+				// turn long after this run. The hold ends with the child, and
+				// nothing between here and the call can throw and strand it.
+				...(evalToolDescriptors ? { onRelease: borrowEvalToolKernels(this.session, evalToolDescriptors) } : {}),
 			});
 			return this.#buildResultPayload(
 				{ ...execution.result, ...taskFileMetadata },

@@ -10,11 +10,14 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	disposeAllKernelSessions,
+	disposeKernelSessionsByOwner,
 	executePython,
 	executePythonWithKernel,
+	type PythonExecutorOptions,
 } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import { PythonKernel } from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import { filterEnv, resolvePythonRuntime } from "@oh-my-pi/pi-coding-agent/eval/py/runtime";
+import { setSupersededKernelGraceMs } from "@oh-my-pi/pi-coding-agent/eval/superseded-reclaim";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const SHOULD_RUN = Bun.env.PI_PYTHON_INTEGRATION === "1";
@@ -97,6 +100,25 @@ function isRunning(pid: number): boolean {
 	return state !== "" && !state.startsWith("Z");
 }
 
+/** Runs one cell on a retained kernel and returns the operating-system pid of its runner. */
+async function runnerPid(options: PythonExecutorOptions): Promise<number> {
+	const result = await executePython("import os; print(os.getpid())", options);
+	expect(result.exitCode).toBe(0);
+	const pid = Number(result.output.trim());
+	expect(Number.isInteger(pid)).toBe(true);
+	return pid;
+}
+
+/** Polls until `pid` is gone, so the wait ends on the event rather than a fixed delay. */
+async function waitForExit(pid: number, budgetMs: number): Promise<boolean> {
+	const deadline = Date.now() + budgetMs;
+	while (isRunning(pid)) {
+		if (Date.now() >= deadline) return false;
+		await Bun.sleep(25);
+	}
+	return true;
+}
+
 /** Runs `code`, cancels it once the installer prints `installer-pids:<pid>,<pid>`, and returns those pids. */
 async function cancelInstall(kernel: PythonKernel, code: string): Promise<number[]> {
 	const ac = new AbortController();
@@ -119,6 +141,7 @@ async function cancelInstall(kernel: PythonKernel, code: string): Promise<number
 
 describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 	afterEach(async () => {
+		setSupersededKernelGraceMs();
 		await disposeAllKernelSessions();
 	});
 
@@ -150,6 +173,130 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		expect(next.output.trim()).toBe("42");
 		expect(await Bun.file(path.join(tempDir.path(), "effects.txt")).text()).toBe("once\n");
 	}, 30_000);
+
+	it("ends the runner a session leaves behind when its next cell runs in another directory", async () => {
+		// Real timer on purpose: the grace is the behaviour under test, shortened
+		// so the test watches a real reclaim instead of waiting two minutes.
+		setSupersededKernelGraceMs(100);
+		using firstDir = TempDir.createSync("@python-runner-superseded-a-");
+		using secondDir = TempDir.createSync("@python-runner-superseded-b-");
+		const options = {
+			sessionId: "superseded-kernel",
+			kernelOwnerId: "agent-session:superseded",
+			kernelMode: "session" as const,
+			timeoutMs: 10_000,
+		};
+		const first = await runnerPid({ ...options, cwd: firstDir.path() });
+		const second = await runnerPid({ ...options, cwd: secondDir.path(), reset: true });
+
+		expect(second).not.toBe(first);
+		expect(await waitForExit(first, 10_000)).toBe(true);
+		expect(isRunning(second)).toBe(true);
+	}, 40_000);
+
+	it("keeps the runner and its namespace when the session returns inside the grace", async () => {
+		using firstDir = TempDir.createSync("@python-runner-roundtrip-a-");
+		using secondDir = TempDir.createSync("@python-runner-roundtrip-b-");
+		const options = {
+			sessionId: "roundtrip-kernel",
+			kernelOwnerId: "agent-session:roundtrip",
+			kernelMode: "session" as const,
+			timeoutMs: 10_000,
+		};
+		const first = await runnerPid({ ...options, cwd: firstDir.path() });
+		await executePython("round_trip_marker = 'kept'", { ...options, cwd: firstDir.path() });
+		await runnerPid({ ...options, cwd: secondDir.path() });
+
+		const back = await executePython("import os; print(os.getpid(), round_trip_marker)", {
+			...options,
+			cwd: firstDir.path(),
+		});
+		expect(back.exitCode).toBe(0);
+		expect(back.output.trim()).toBe(`${first} kept`);
+	}, 60_000);
+
+	it("keeps a superseded runner alive while it is still executing a cell", async () => {
+		setSupersededKernelGraceMs(100);
+		using firstDir = TempDir.createSync("@python-runner-busy-a-");
+		using secondDir = TempDir.createSync("@python-runner-busy-b-");
+		const options = {
+			sessionId: "busy-kernel",
+			kernelOwnerId: "agent-session:busy",
+			kernelMode: "session" as const,
+			timeoutMs: 30_000,
+		};
+		const first = await runnerPid({ ...options, cwd: firstDir.path() });
+		const running = Promise.withResolvers<void>();
+		const slow = executePython("print('slow started', flush=True)\nimport time\ntime.sleep(6)\nprint('slow done')", {
+			...options,
+			cwd: firstDir.path(),
+			onChunk: chunk => {
+				if (chunk.includes("slow started")) running.resolve();
+			},
+		});
+		await running.promise;
+
+		const second = await runnerPid({ ...options, cwd: secondDir.path() });
+		expect(second).not.toBe(first);
+		expect(isRunning(first)).toBe(true);
+
+		const slowResult = await slow;
+		expect(slowResult.exitCode).toBe(0);
+		expect(slowResult.output).toContain("slow done");
+	}, 60_000);
+
+	it("keeps a runner a second agent still holds when the first moves to another directory", async () => {
+		setSupersededKernelGraceMs(100);
+		using firstDir = TempDir.createSync("@python-runner-shared-a-");
+		using secondDir = TempDir.createSync("@python-runner-shared-b-");
+		const shared = {
+			sessionId: "shared-kernel",
+			kernelMode: "session" as const,
+			timeoutMs: 10_000,
+			cwd: firstDir.path(),
+		};
+		const first = await runnerPid({ ...shared, kernelOwnerId: "agent-session:one" });
+		await executePython("shared_marker = 'kept'", { ...shared, kernelOwnerId: "agent-session:two" });
+
+		const second = await runnerPid({
+			...shared,
+			cwd: secondDir.path(),
+			kernelOwnerId: "agent-session:one",
+		});
+		expect(second).not.toBe(first);
+
+		// The co-owner's next cell proves the kernel survived: a reclaimed one
+		// would answer from a fresh runner with a new pid and no marker.
+		const kept = await executePython("import os; print(os.getpid(), shared_marker)", {
+			...shared,
+			kernelOwnerId: "agent-session:two",
+		});
+		expect(kept.exitCode).toBe(0);
+		expect(kept.output.trim()).toBe(`${first} kept`);
+	}, 40_000);
+
+	it("ends a runner two agents shared once the one that armed it is disposed", async () => {
+		setSupersededKernelGraceMs(100);
+		using sharedDir = TempDir.createSync("@python-runner-co-owner-a-");
+		using oneDir = TempDir.createSync("@python-runner-co-owner-b-");
+		using twoDir = TempDir.createSync("@python-runner-co-owner-c-");
+		const shared = {
+			sessionId: "co-owned-kernel",
+			kernelMode: "session" as const,
+			timeoutMs: 10_000,
+			cwd: sharedDir.path(),
+		};
+		const first = await runnerPid({ ...shared, kernelOwnerId: "agent-session:co-one" });
+		expect(await runnerPid({ ...shared, kernelOwnerId: "agent-session:co-two" })).toBe(first);
+		await runnerPid({ ...shared, cwd: oneDir.path(), kernelOwnerId: "agent-session:co-one" });
+		await runnerPid({ ...shared, cwd: twoDir.path(), kernelOwnerId: "agent-session:co-two" });
+
+		// The disposal drops this agent's registration from the shared runner
+		// and cancels its grace. The agent still registered left for another
+		// directory earlier and never comes back to start a new one.
+		await disposeKernelSessionsByOwner("agent-session:co-two");
+		expect(await waitForExit(first, 10_000)).toBe(true);
+	}, 40_000);
 
 	it("streams stdout chunks as they are produced", async () => {
 		using tempDir = TempDir.createSync("@python-runner-stream-");
