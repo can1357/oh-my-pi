@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Existing memory banks can now migrate to fact scoping (on next open, or via the `e7` migration).
+
+### Fixed
+
+- Newly extracted facts are now recallable across sessions when their source memory is, completing the fact-scoping support the recall path already shipped.
+
 ## [18.13.3] - 2026-10-28
 
 ### Changed
@@ -121,13 +129,6 @@
 
 - Fixed an explicitly invalidated memory still being returned by an identical repeat query until the recall cache expired.
 - Fixed recall continuing to serve a stale, pre-embedding ranking for up to an hour after background embeddings finished, when the enhanced recall cache is enabled.
-### Added
-
-- Added the `e7` facts scope migration (`core/migrations/e7-facts-scope.ts`), which adds `scope TEXT DEFAULT 'session'` to the `facts` table on existing banks. It is idempotent (guarded by `PRAGMA table_info(facts)`), supports dry-run and backup, and its dry run opens the bank read-only so a rehearsal changes nothing. In the migrations barrels it is exported under unique names (`migrateFactsScope`, `hasPendingFactsScopeMigration`) so `e6`'s `migrate` / `hasPendingMigration` stay importable.
-
-### Fixed
-
-- Shipped the `facts.scope` column that beam recall already probes for (`factsHaveScopeColumn` / `factVisibilityWhere` in `core/beam/recall.ts`) but that the schema never created, so extracted facts were permanently same-session-only. `initBeam` now adds the column idempotently on open; newly extracted durable facts inherit the source memory's scope (`'global'` by default, so they are recallable across sessions; consolidations keep their episode's scope), and re-stored facts keep their existing scope. Pre-existing fact rows keep the `session` default — no retroactive widening.
 
 ## [18.0.11] - 2026-08-29
 

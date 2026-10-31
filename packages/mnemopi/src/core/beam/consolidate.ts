@@ -474,7 +474,12 @@ function timelineDate(description: string): string | null {
  * — consolidation is the explicit "settle and compress" step where the graph
  * is supposed to gain edges.
  */
-function ingestIntoEpisodicGraph(beam: BeamMemoryState, memoryId: string, summary: string): void {
+function ingestIntoEpisodicGraph(
+	beam: BeamMemoryState,
+	memoryId: string,
+	summary: string,
+	scope = "global",
+): void {
 	try {
 		const graph =
 			beam.episodicGraph instanceof EpisodicGraph
@@ -484,6 +489,7 @@ function ingestIntoEpisodicGraph(beam: BeamMemoryState, memoryId: string, summar
 			sessionId: sourceSession(beam),
 			linkExisting: true,
 			extractEntities: true,
+			scope,
 		});
 	} catch {
 		// Graph enrichment is best-effort and never blocks consolidation.
@@ -528,9 +534,10 @@ export function consolidateToEpisodic(
 		],
 	);
 	// Facts inherit the episode's scope: a session-scoped summary keeps its
-	// extracted facts session-scoped (no silent cross-session widening).
+	// extracted facts session-scoped (no silent cross-session widening), in
+	// both the beam extractor and the graph ingestion below.
 	extractAndStoreFacts(beam, summary, 0, memoryId, scope);
-	ingestIntoEpisodicGraph(beam, memoryId, summary);
+	ingestIntoEpisodicGraph(beam, memoryId, summary, scope);
 	scheduleEmbedding(beam, [{ memoryId, content: summary }]);
 	emitEvent(beam, "MEMORY_CONSOLIDATED", memoryId, summary, source, importance, {
 		summary_of: [...sourceWmIds],

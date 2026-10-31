@@ -4,9 +4,11 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BeamMemory } from "@oh-my-pi/pi-mnemopi/core/beam";
-import { consolidateToEpisodic, storeFactStrings } from "@oh-my-pi/pi-mnemopi/core/beam/consolidate";
+import { consolidateToEpisodic, storeExtractedFactCategories, storeFactStrings } from "@oh-my-pi/pi-mnemopi/core/beam/consolidate";
 import { factRecall } from "@oh-my-pi/pi-mnemopi/core/beam/recall";
 import { initBeam } from "@oh-my-pi/pi-mnemopi/core/beam/schema";
+import { sourceMemoryScope } from "@oh-my-pi/pi-mnemopi/core/beam/store";
+import { EpisodicGraph } from "@oh-my-pi/pi-mnemopi/core/episodic-graph";
 import { hasPendingMigration, migrate } from "@oh-my-pi/pi-mnemopi/core/migrations/e7-facts-scope";
 // The exports map exposes the barrel file via its explicit path ("./*" -> "./src/*.ts");
 // the directory shorthand is not a valid subpath, so import the index file directly.
@@ -324,6 +326,98 @@ describe("E7 facts scope recall, end to end", () => {
 			expect(own.some(result => result.id === "fact-old")).toBe(true);
 		} finally {
 			beamA.close();
+		}
+	});
+});
+describe("E7 facts scope, writer paths", () => {
+	it("sourceMemoryScope inherits the stored memory's scope", () => {
+		const dbPath = tempDb();
+		const beam = new BeamMemory({ sessionId: "session-a", dbPath });
+		try {
+			beam.db.run(
+				"INSERT INTO working_memory (id, content, session_id, scope) VALUES ('wm-s', 's content', 'session-a', 'session')",
+			);
+			beam.db.run(
+				"INSERT INTO working_memory (id, content, session_id, scope) VALUES ('wm-g', 'g content', 'session-a', 'global')",
+			);
+			expect(sourceMemoryScope(beam, "wm-s")).toBe("session");
+			expect(sourceMemoryScope(beam, "wm-g")).toBe("global");
+			expect(sourceMemoryScope(beam, "wm-missing")).toBe("session");
+		} finally {
+			beam.close();
+		}
+	});
+
+	it("storeExtractedFactCategories honors the inherited scope", () => {
+		const dbPath = tempDb();
+		const beam = new BeamMemory({ sessionId: "session-a", dbPath });
+		try {
+			storeExtractedFactCategories(
+				beam,
+				{ facts: ["Quorum relay requires tokens"], instructions: [], preferences: [], timelines: [], kg: [] },
+				0,
+				"wm-1",
+				0.7,
+				"session",
+			);
+			const rows = beam.db
+				.query("SELECT scope FROM facts WHERE source_msg_id = 'wm-1'")
+				.all() as { scope: string }[];
+			expect(rows.length).toBeGreaterThan(0);
+			for (const row of rows) expect(row.scope).toBe("session");
+		} finally {
+			beam.close();
+		}
+	});
+
+	it("keeps graph-ingested facts from a session consolidation session-scoped", () => {
+		const dbPath = tempDb();
+		const beamA = new BeamMemory({ sessionId: "session-a", dbPath });
+		try {
+			consolidateToEpisodic(beamA, "Alice uses secret vault", ["wm-9"], "test", 0.6, {
+				scope: "session",
+			});
+			const rows = beamA.db.query("SELECT scope FROM facts").all() as { scope: string }[];
+			expect(rows.length).toBeGreaterThan(0);
+			for (const row of rows) expect(row.scope).toBe("session");
+		} finally {
+			beamA.close();
+		}
+
+		const beamB = new BeamMemory({ sessionId: "session-b", dbPath });
+		try {
+			const cross = factRecall(beamB, "secret vault Alice", 10);
+			expect(cross.some(result => result.content.includes("secret vault"))).toBe(false);
+		} finally {
+			beamB.close();
+		}
+	});
+
+	it("keeps fts_facts fresh when a fact is re-stored with new content", () => {
+		const dbPath = tempDb();
+		const beam = new BeamMemory({ sessionId: "session-a", dbPath });
+		try {
+			const graph = new EpisodicGraph({ db: beam.db, dbPath });
+			const fact = {
+				id: "fact-fts-1",
+				subject: "relay",
+				predicate: "uses",
+				object: "vaultword",
+				timestamp: "2026-01-01T00:00:00.000Z",
+				confidence: 0.7,
+			};
+			graph.storeFact(fact, "m-fts", "session-a");
+			graph.storeFact({ ...fact, object: "safeword" }, "m-fts", "session-a");
+			const stale = beam.db
+				.query("SELECT count(*) AS n FROM fts_facts WHERE fts_facts MATCH 'vaultword'")
+				.get() as { n: number };
+			const fresh = beam.db
+				.query("SELECT count(*) AS n FROM fts_facts WHERE fts_facts MATCH 'safeword'")
+				.get() as { n: number };
+			expect(stale.n).toBe(0);
+			expect(fresh.n).toBe(1);
+		} finally {
+			beam.close();
 		}
 	});
 });

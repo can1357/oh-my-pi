@@ -50,6 +50,7 @@ export interface IngestOptions {
 	readonly linkExisting?: boolean;
 	readonly minLinkScore?: number;
 	readonly extractEntities?: boolean;
+	readonly scope?: string;
 }
 
 export interface IngestResult {
@@ -409,15 +410,15 @@ export class EpisodicGraph {
 		const row = this.db.query("SELECT * FROM gists WHERE id = ?").get(id) as GistRow | null;
 		return row === null ? null : rowToGist(row);
 	}
-	storeFact(fact: Fact, memoryId: string, sessionId = "default"): void {
-		// Fresh facts are stored with scope='global' so they stay recallable
-		// across sessions. Re-stored facts refresh their data but KEEP their
-		// existing scope — replacing the row with a forced 'global' would
-		// retroactively widen pre-existing session-scoped rows.
+	storeFact(fact: Fact, memoryId: string, sessionId = "default", scope = "global"): void {
+		// Fresh facts are stored with the given scope (default 'global').
+		// Re-stored facts refresh their data but KEEP their existing scope —
+		// replacing the row with a forced scope would retroactively widen or
+		// narrow pre-existing rows.
 		this.db.run(
 			`INSERT INTO facts
 				(fact_id, session_id, subject, predicate, object, timestamp, source_msg_id, confidence, scope)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'global')
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT(fact_id) DO UPDATE SET
 					session_id = excluded.session_id,
 					subject = excluded.subject,
@@ -426,7 +427,7 @@ export class EpisodicGraph {
 					timestamp = excluded.timestamp,
 					source_msg_id = excluded.source_msg_id,
 					confidence = excluded.confidence`,
-			[fact.id, sessionId, fact.subject, fact.predicate, fact.object, fact.timestamp, memoryId, fact.confidence],
+			[fact.id, sessionId, fact.subject, fact.predicate, fact.object, fact.timestamp, memoryId, fact.confidence, scope],
 		);
 	}
 	getFact(id: string): Fact | null {
@@ -540,6 +541,7 @@ export class EpisodicGraph {
 		const linkExisting = options.linkExisting ?? true;
 		const minLinkScore = options.minLinkScore ?? DEFAULT_LINK_THRESHOLD;
 		const extractEntities = options.extractEntities ?? true;
+		const scope = options.scope ?? "global";
 		const gist = this.extractGist(content, memoryId);
 		const facts = extractEntities ? this.extractFacts(content, memoryId) : [];
 		// One transaction for every gist/fact/edge write: autocommitted, each
@@ -556,7 +558,7 @@ export class EpisodicGraph {
 			edges.push(gistEdge);
 
 			for (const fact of facts) {
-				this.storeFact(fact, memoryId, sessionId);
+				this.storeFact(fact, memoryId, sessionId, scope);
 				const edge = {
 					source: gist.id,
 					target: fact.id,

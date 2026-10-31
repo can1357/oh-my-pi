@@ -206,6 +206,12 @@ describe("EpisodicGraph fact scope (e7)", () => {
 			const first = graph.db.query("SELECT scope FROM facts WHERE fact_id = 'fact_scope_new'").get() as { scope: string };
 			expect(first.scope).toBe("global");
 
+			graph.storeFact(fact("fact_scope_arg"), "mem_scope_3", "test", "session");
+			const argScope = graph.db
+				.query("SELECT scope FROM facts WHERE fact_id = 'fact_scope_arg'")
+				.get() as { scope: string };
+			expect(argScope.scope).toBe("session");
+
 			graph.db.run("UPDATE facts SET scope = 'session' WHERE fact_id = 'fact_scope_new'");
 			graph.storeFact(fact("fact_scope_new"), "mem_scope_1", "test");
 			const row = graph.db

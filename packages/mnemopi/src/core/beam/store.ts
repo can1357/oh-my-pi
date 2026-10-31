@@ -292,6 +292,7 @@ function proactiveLinkIfEnabled(
 			sessionId: beam.sessionId,
 			linkExisting: true,
 			extractEntities,
+			scope: sourceMemoryScope(beam, memoryId),
 		});
 	} catch {
 		// Proactive graph enrichment must never block durable memory storage.
@@ -309,12 +310,29 @@ async function runFactExtraction(beam: BeamMemoryState, memoryId: string, conten
 		const extracted = await extractFactCategoriesSafe(content);
 		withLoopPhase("mnemopi.extract", () => {
 			if (countExtractedFactCategories(extracted) === 0) return;
-			storeExtractedFactCategories(beam, extracted, 0, memoryId);
+			// Facts inherit the stored memory's scope (never wider than their
+			// source), so a session-scoped remember() does not leak extracted
+			// facts into other sessions.
+			storeExtractedFactCategories(beam, extracted, 0, memoryId, 0.7, sourceMemoryScope(beam, memoryId));
 			invalidateCaches(beam);
 		});
 	} catch {
 		// Background fact extraction is best-effort and never surfaces to the caller.
 	}
+}
+
+/**
+ * The scope that facts derived from a stored memory should inherit: facts are
+ * never more visible than the memory they were extracted from. A missing
+ * source row (forgotten before the async extraction ran) falls back to the
+ * conservative 'session'.
+ */
+export function sourceMemoryScope(beam: BeamMemoryState, memoryId: string): string {
+	const row = beam.db.query("SELECT scope FROM working_memory WHERE id = ?").get(memoryId) as
+		| { scope: string | null }
+		| null;
+	const scope = row?.scope;
+	return typeof scope === "string" && scope.length > 0 ? scope : "session";
 }
 
 /**
