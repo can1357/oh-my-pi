@@ -6,7 +6,11 @@ import { clearClaudePluginRootsCache } from "@oh-my-pi/pi-coding-agent/discovery
 import { discoverCustomToolPaths, loadCustomTools } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/loader";
 import { discoverAndLoadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { __closeExtensionParseCacheForTests } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
-import { __resetDirsFromEnvForTests, getPluginsDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import {
+	getAllPluginExtensionPaths,
+	getAllPluginToolPaths,
+} from "@oh-my-pi/pi-coding-agent/extensibility/plugins/loader";
+import { __resetDirsFromEnvForTests, getPluginsDir, removeWithRetries } from "@oh-my-pi/pi-utils";
 
 // A plugin's `bin` directories go on PATH under the plugin's installed path,
 // never its realpath, before any of its modules evaluates. A plugins root that
@@ -37,9 +41,12 @@ describe.skipIf(process.platform === "win32")("plugin bin directories on PATH", 
 		cwd = path.join(root, "cwd");
 		await fs.mkdir(path.join(home, ".omp"), { recursive: true });
 		await fs.mkdir(cwd, { recursive: true });
-		for (const key of xdgVars) delete process.env[key];
+		// Only environment changes, so the restore below is exact: no XDG roots, no
+		// Claude config override, no profile, and the agent dir in the temp home.
+		for (const key of [...xdgVars, "CLAUDE_CONFIG_DIR", "OMP_PROFILE", "PI_PROFILE"]) delete process.env[key];
+		process.env.PI_CODING_AGENT_DIR = path.join(home, ".omp", "agent");
 		spyOn(os, "homedir").mockReturnValue(home);
-		setAgentDir(path.join(home, ".omp", "agent"));
+		__resetDirsFromEnvForTests();
 		pluginsDir = getPluginsDir();
 		if (pluginsDir !== path.join(home, ".omp", "plugins")) {
 			throw new Error(`plugin isolation failed: getPluginsDir() resolved to ${pluginsDir}`);
@@ -47,8 +54,7 @@ describe.skipIf(process.platform === "win32")("plugin bin directories on PATH", 
 	});
 
 	afterEach(async () => {
-		// Put back exactly the environment the case started with (setAgentDir writes
-		// PI_CODING_AGENT_DIR and clears the profile variables), then rebuild the
+		// Put back exactly the environment the case started with, then rebuild the
 		// directory and profile state from it.
 		for (const key of Object.keys(process.env)) {
 			if (!(key in originalEnv)) delete process.env[key];
@@ -240,5 +246,24 @@ export default function () {}
 		expect(result.extensions.map(extension => extension.path)).toEqual([explicit]);
 		expect(probeAtLoad("ambient")).toBeUndefined();
 		expect(process.env.PATH).toBe(BASE_PATH);
+	});
+
+	test("an SDK caller that selects plugin paths itself gets the directories on PATH", async () => {
+		await writeBinPlugin(path.join(pluginsDir, "node_modules", "preload"), "preload", {
+			extensions: ["module.js"],
+			tools: "module.js",
+		});
+		await declare(["preload"]);
+
+		// What a caller passing preloadedExtensionPaths / preloadedCustomToolPaths selects.
+		const selected = [...(await getAllPluginExtensionPaths(cwd)), ...(await getAllPluginToolPaths(cwd))];
+
+		expect(selected).toEqual([
+			path.join(pluginsDir, "node_modules", "preload", "module.js"),
+			path.join(pluginsDir, "node_modules", "preload", "module.js"),
+		]);
+		expect(process.env.PATH).toBe(
+			[path.join(pluginsDir, "node_modules", "preload", "bin"), BASE_PATH].join(path.delimiter),
+		);
 	});
 });

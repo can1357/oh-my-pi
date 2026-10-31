@@ -16,7 +16,7 @@ import { type CustomTool, loadCapability } from "../../discovery";
 import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
 import type { HookUIContext } from "../../extensibility/hooks/types";
-import { getAllPluginToolPaths, getEnabledPlugins, prependPluginBinDirs } from "../../extensibility/plugins/loader";
+import { getAllPluginToolPaths } from "../../extensibility/plugins/loader";
 import { loadLegacyPiModule } from "../plugins/legacy-pi-compat";
 // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
 import * as PiCodingAgent from "../../index";
@@ -293,7 +293,6 @@ export async function discoverCustomToolPaths(
 
 	// 2. Plugin tools: ~/.omp/plugins/node_modules/*/. Selecting them puts the
 	// plugins' `bin` directories on PATH before any tool module is imported.
-	prependPluginBinDirs(await getEnabledPlugins(cwd));
 	for (const pluginPath of await getAllPluginToolPaths(cwd)) {
 		addPath(pluginPath, { provider: "plugin", providerName: "Plugin", level: "user" });
 	}

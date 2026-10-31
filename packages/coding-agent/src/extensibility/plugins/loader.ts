@@ -474,10 +474,12 @@ export function prependPluginBinDirs(plugins: readonly InstalledPlugin[]): void 
 // =============================================================================
 
 /**
- * Get all tool paths from all enabled plugins.
+ * Get all tool paths from all enabled plugins, for loading: the plugins' `bin`
+ * directories go on PATH here, before any returned module can be imported.
  */
 export async function getAllPluginToolPaths(cwd: string): Promise<string[]> {
 	const plugins = await getEnabledPlugins(cwd);
+	prependPluginBinDirs(plugins);
 	const paths: string[] = [];
 
 	for (const plugin of plugins) {
@@ -516,10 +518,13 @@ export async function getAllPluginCommandPaths(cwd: string): Promise<string[]> {
 }
 
 /**
- * Get all extension module paths from all enabled plugins.
+ * Get all extension module paths from all enabled plugins, for loading: the
+ * plugins' `bin` directories go on PATH here, before any returned module can
+ * be imported.
  */
 export async function getAllPluginExtensionPaths(cwd: string): Promise<string[]> {
 	const plugins = await getEnabledPlugins(cwd);
+	prependPluginBinDirs(plugins);
 	const paths: string[] = [];
 
 	for (const plugin of plugins) {

@@ -36,7 +36,7 @@ import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
 import { resolveExtensionDirectory } from "./directory-resolution";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
-import { getAllPluginExtensionPaths, getEnabledPlugins, prependPluginBinDirs } from "../plugins/loader";
+import { getAllPluginExtensionPaths } from "../plugins/loader";
 
 import { resolvePath, withHostGuard } from "../utils";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
@@ -613,8 +613,8 @@ async function discoverHooksInPackageRoot(root: string): Promise<string[]> {
  * binding factories. Hot path on session startup — the scan walks native
  * `.omp`/`.pi` extension capabilities, JS/TS hook factories, the
  * installed-plugin tree, and any configured paths. Selecting the installed
- * plugins also puts their manifest `bin` directories on PATH, so they are
- * there before any of the selected modules is imported.
+ * plugins' extension paths also puts their manifest `bin` directories on PATH
+ * (`getAllPluginExtensionPaths`), before any selected module is imported.
  *
  * The root session imports these paths once and forwards prepared factories to
  * subagents. Each child rebinds fresh Extension instances to its OWN
@@ -695,11 +695,9 @@ export async function discoverExtensionPaths(
 		}
 	}
 
-	// 3. Installed plugins: the session's plugin set for this cwd. Their `bin`
-	// directories go on PATH here, where the set is chosen, so an explicit-only
-	// session adds none and a subagent reusing these paths adds no other cwd's.
+	// 3. Discover extension entry points from installed plugins; selecting them
+	// puts their `bin` directories on PATH. An explicit-only session skips it.
 	if (ambient) {
-		prependPluginBinDirs(await getEnabledPlugins(cwd));
 		await addPaths(await getAllPluginExtensionPaths(cwd));
 	}
 
