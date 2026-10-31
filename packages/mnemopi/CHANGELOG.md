@@ -6,6 +6,8 @@
 
 - Faster polyphonic memory recall when scoring stored embeddings across turns ([#16994](https://github.com/can1357/oh-my-pi/pull/16994) by [@GTanger](https://github.com/GTanger))
 
+## [18.14.2] - 2026-10-31
+
 ### Fixed
 
 - Fixed heuristic episodic facts storing word fragments (`Drafting is active.` → `ctive`), truncated multiword objects, or nothing for `has an …` sentences ([#17511](https://github.com/can1357/oh-my-pi/issues/17511))
