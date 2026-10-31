@@ -29,7 +29,9 @@ use crate::{
 	exec,
 	fs::{Detail, Dir, File, FileInfo, FileType, Fs, Session},
 	glob::Selector,
-	walk::{self, Action, Entry, Event, Follow, Order, Tree, TreeOptions, WalkError, Worker},
+	walk::{
+		self, Action, Entry, Event, Follow, Order, ScanBudget, Tree, TreeOptions, WalkError, Worker,
+	},
 };
 
 /// Largest batch sent to the sink.
@@ -522,6 +524,7 @@ struct Shared {
 	filter:    PathFilter,
 	opts:      GrepOptions,
 	halt:      Arc<AtomicBool>,
+	budget:    Option<ScanBudget>,
 }
 
 /// A search worker's state, kept across the files it searches.
@@ -535,6 +538,23 @@ impl Shared {
 
 	fn halted(&self) -> bool {
 		self.halt.load(Ordering::Relaxed)
+	}
+
+	/// Counts a kept file toward the scan budget; `false` once it is spent.
+	/// A file of unknown size counts as a full read window.
+	fn admit(&self, size: Option<u64>) -> bool {
+		self
+			.budget
+			.as_ref()
+			.is_none_or(|budget| budget.admit(size.unwrap_or(MAX_FILE_BYTES)))
+	}
+
+	/// Fails the search when the scan budget was spent.
+	fn check_budget(&self) -> Result<(), GrepError> {
+		match &self.budget {
+			Some(budget) if budget.exceeded() => Err(GrepError::ScanLimit),
+			_ => Ok(()),
+		}
 	}
 }
 
@@ -585,11 +605,11 @@ pub async fn grep(fs: &Fs, root: &Path, mut opts: GrepOptions) -> Result<GrepRes
 		types:   opts.file_type.as_deref().and_then(TypeFilter::new),
 	};
 	let mut session = fs.session();
-	let file_type = session
+	let root_info = session
 		.stat(root, true)
 		.await
-		.map_err(GrepError::NotFound)?
-		.file_type;
+		.map_err(GrepError::NotFound)?;
+	let file_type = root_info.file_type;
 	let content = opts.mode == Mode::Content;
 	let mut params = ScanParams {
 		content,
@@ -638,10 +658,14 @@ pub async fn grep(fs: &Fs, root: &Path, mut opts: GrepOptions) -> Result<GrepRes
 		fs: fs.clone(),
 		root: root.to_path_buf(),
 		filter,
+		budget: ScanBudget::new(opts.max_scan_files, opts.max_scan_bytes),
 		opts,
 		halt,
 	});
 	if file_type == Some(FileType::File) {
+		if !shared.admit(Some(root_info.size)) {
+			return Err(GrepError::ScanLimit);
+		}
 		// Its own task: a streamed native file is searched by a synchronous
 		// reader, so this future stays free to be dropped (raising the halt
 		// flag the reader checks) while it runs.
@@ -673,7 +697,11 @@ pub async fn grep(fs: &Fs, root: &Path, mut opts: GrepOptions) -> Result<GrepRes
 			.as_ref()
 			.is_some_and(Selector::mentions_node_modules),
 		follow_links: false,
-		detail: Detail::Minimal,
+		detail: if shared.budget.as_ref().is_some_and(ScanBudget::counts_bytes) {
+			Detail::Full
+		} else {
+			Detail::Minimal
+		},
 		max_depth: shared.filter.scope.as_ref().and_then(Selector::max_depth),
 		workers: shared.opts.walk.workers,
 		cache: shared.opts.walk.cache,
@@ -752,6 +780,9 @@ impl walk::Sink for SearchSink {
 				}
 			},
 			FileType::File if self.shared.filter.keeps_file(entry.path, entry.name()) => {
+				if !self.shared.admit(entry.size) {
+					return Action::Stop;
+				}
 				out.push(Candidate { rel: entry.path.to_vec() });
 				Action::Continue
 			},
@@ -877,6 +908,7 @@ async fn unbounded(
 			}
 		}
 	}
+	shared.check_budget()?;
 	if sink.is_some() {
 		streamed.files_searched = searched;
 		streamed.skipped_oversized = oversized;
@@ -963,6 +995,9 @@ fn candidates(
 					Some(Event::Entry(entry)) => match entry.file_type {
 						FileType::Dir if shared.filter.prunes_dir(entry.path) => Step::Prune,
 						FileType::File if shared.filter.keeps_file(entry.path, entry.name()) => {
+							if !shared.admit(entry.size) {
+								return None;
+							}
 							Step::Candidate(entry.path.to_vec())
 						},
 						_ => Step::Other,
@@ -1006,6 +1041,7 @@ async fn budgeted(
 			Follow::Roots
 		},
 		order: Order::Paths,
+		detail: wopts.detail,
 		max_depth: wopts.max_depth,
 		same_file_system: wopts.same_file_system,
 		..TreeOptions::default()
@@ -1039,6 +1075,11 @@ async fn budgeted(
 		&& let Some(error) = failure.lock().take()
 	{
 		return Err(GrepError::Walk(error));
+	}
+	// Results arrive in candidate order, so a settled budget used only
+	// candidates admitted before the scan cap was crossed.
+	if !budget.settled {
+		shared.check_budget()?;
 	}
 	let deferred = std::mem::take(&mut budget.deferred);
 	if !budget.settled && !deferred.is_empty() {

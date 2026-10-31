@@ -21,12 +21,12 @@
 //! }).await?;
 //! ```
 
-use std::{cmp::Ordering, fmt, path::Path};
+use std::{cmp::Ordering, fmt, path::Path, sync::Arc};
 
 use crate::{
 	fs::{Detail, FileType, Fs},
 	pattern::{Glob, PatternError},
-	walk::{self, Action, Entry, WalkError},
+	walk::{self, Action, Entry, ScanBudget, WalkError},
 };
 
 /// A compiled path glob in pi's dialect.
@@ -165,6 +165,16 @@ pub struct GlobOptions {
 	pub sort_by_mtime:        bool,
 	/// Descend into `node_modules`; `None` does so when the pattern names it.
 	pub include_node_modules: Option<bool>,
+	/// Fail with [`GlobError::ScanLimit`] instead of inspecting more than
+	/// this many entries (every entry the walk visits, matching or not).
+	pub max_scan_entries:     Option<u64>,
+	/// Fail with [`GlobError::ScanLimit`] once the visited regular files
+	/// would add up to more than this many bytes.
+	pub max_scan_bytes:       Option<u64>,
+	/// [`Selector::exclude`] patterns: matching entries are neither returned
+	/// nor counted toward the scan caps, and a matched directory is not
+	/// entered.
+	pub exclude:              Vec<String>,
 	/// Traversal: `hidden`, `gitignore`, `follow_links`, `cache`, `workers`
 	/// are honoured; `.git` is always pruned, and detail, depth, and
 	/// `node_modules` pruning follow the pattern and the options above.
@@ -192,6 +202,14 @@ pub enum GlobError {
 	Pattern(PatternError),
 	/// The walk failed.
 	Walk(WalkError),
+	/// The walk visited more than `max_scan_entries` entries or
+	/// `max_scan_bytes` bytes.
+	ScanLimit {
+		/// The entry cap (`u64::MAX` when unset).
+		max_entries: u64,
+		/// The byte cap (`u64::MAX` when unset).
+		max_bytes:   u64,
+	},
 }
 
 impl fmt::Display for GlobError {
@@ -199,6 +217,11 @@ impl fmt::Display for GlobError {
 		match self {
 			Self::Pattern(err) => write!(f, "Invalid glob pattern: {err}"),
 			Self::Walk(err) => err.fmt(f),
+			Self::ScanLimit { max_entries, max_bytes } => write!(
+				f,
+				"scan limit reached ({max_entries} entries or {max_bytes} file bytes); narrow the \
+				 search path"
+			),
 		}
 	}
 }
@@ -208,13 +231,14 @@ impl std::error::Error for GlobError {}
 /// Finds the entries below `root` matching `opts.pattern`.
 ///
 /// # Errors
-/// A malformed pattern or an unreadable root.
+/// A malformed pattern, an unreadable root, or a crossed scan cap.
 pub async fn glob(fs: &Fs, root: &Path, opts: &GlobOptions) -> Result<Vec<GlobMatch>, GlobError> {
 	let pattern = match opts.pattern.trim() {
 		"" => "*",
 		pattern => pattern,
 	};
 	let selector = Selector::new(pattern, opts.recursive).map_err(GlobError::Pattern)?;
+	let exclude = Selector::exclude(&opts.exclude).map_err(GlobError::Pattern)?;
 	if opts.max_results == Some(0) {
 		return Ok(Vec::new());
 	}
@@ -222,10 +246,11 @@ pub async fn glob(fs: &Fs, root: &Path, opts: &GlobOptions) -> Result<Vec<GlobMa
 		(Some(a), Some(b)) => Some(a.min(b)),
 		(a, b) => a.or(b),
 	};
+	let budget = ScanBudget::new(opts.max_scan_entries, opts.max_scan_bytes).map(Arc::new);
 	let wopts = walk::Options {
 		skip_git: true,
 		skip_node_modules: !opts.include_node_modules.unwrap_or(selector.node_modules),
-		detail: if opts.sort_by_mtime {
+		detail: if opts.sort_by_mtime || budget.as_ref().is_some_and(|b| b.counts_bytes()) {
 			Detail::Full
 		} else {
 			Detail::Minimal
@@ -234,7 +259,17 @@ pub async fn glob(fs: &Fs, root: &Path, opts: &GlobOptions) -> Result<Vec<GlobMa
 		..opts.walk.clone()
 	};
 	let file_type = opts.file_type;
+	let counted = budget.clone();
 	let entries = walk::collect(fs, root, &wopts, !opts.sort_by_mtime, move |_, entry| {
+		if exclude.as_ref().is_some_and(|ex| ex.matches(entry.path)) {
+			return Action::SkipDir;
+		}
+		if counted
+			.as_ref()
+			.is_some_and(|budget| !budget.admit(entry.size.unwrap_or(0)))
+		{
+			return Action::Stop;
+		}
 		if selector.matches(entry.path) && wanted(file_type, entry) {
 			return Action::Continue;
 		}
@@ -246,6 +281,12 @@ pub async fn glob(fs: &Fs, root: &Path, opts: &GlobOptions) -> Result<Vec<GlobMa
 	})
 	.await
 	.map_err(GlobError::Walk)?;
+	if budget.is_some_and(|budget| budget.exceeded()) {
+		return Err(GlobError::ScanLimit {
+			max_entries: opts.max_scan_entries.unwrap_or(u64::MAX),
+			max_bytes:   opts.max_scan_bytes.unwrap_or(u64::MAX),
+		});
+	}
 
 	let mut order: Vec<Entry<'_>> = entries.iter().collect();
 	if let Some(filter) = file_type.filter(|&filter| filter != FileType::Symlink) {
@@ -566,6 +607,66 @@ mod tests {
 				run(dir.path(), &GlobOptions { max_results: Some(limit), ..sorted.clone() }).await;
 			assert_eq!(paths(&top), paths(&all)[..limit], "limit {limit}");
 		}
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn bounded_glob_stops_a_large_tree_with_an_actionable_error() {
+		let dir = TempDir::new();
+		for index in 0..128 {
+			dir.write(&format!("{index:03}.txt"));
+		}
+		let mut opts = GlobOptions {
+			max_results: Some(10),
+			max_scan_entries: Some(32),
+			max_scan_bytes: Some(1024),
+			..options("*.txt")
+		};
+		opts.walk.cache = true;
+		let Err(error) = glob(&Fs::native(), dir.path(), &opts).await else {
+			panic!("glob must stop when the scan cap is crossed");
+		};
+		assert!(matches!(error, GlobError::ScanLimit { .. }), "{error}");
+		assert!(error.to_string().contains("narrow the search path"), "got: {error}");
+		// Without a byte cap the walk stays minimal and may list from the cache;
+		// a cached listing must not evade the entry cap.
+		let entries_only = GlobOptions { max_scan_bytes: None, ..opts };
+		for _ in 0..2 {
+			let found = glob(&Fs::native(), dir.path(), &entries_only).await;
+			assert!(matches!(found, Err(GlobError::ScanLimit { .. })), "{found:?}");
+		}
+
+		let small = TempDir::new();
+		for name in ["a.txt", "b.txt", "c.txt"] {
+			small.write(name);
+		}
+		let capped =
+			GlobOptions { max_scan_entries: Some(8), max_scan_bytes: Some(8 * 6), ..options("*") };
+		assert_eq!(paths(&run(small.path(), &capped).await), ["a.txt", "b.txt", "c.txt"]);
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn excluded_entries_do_not_spend_the_scan_budget() {
+		let dir = TempDir::new();
+		for index in 0..64 {
+			dir.write(&format!("blob{index:02}.bin"));
+		}
+		for name in ["a.txt", "b.txt", "c.txt"] {
+			dir.write(name);
+		}
+		let capped = |exclude: Vec<String>| GlobOptions {
+			file_type: Some(FileType::File),
+			max_scan_entries: Some(8),
+			max_scan_bytes: Some(1024),
+			exclude,
+			..options("*")
+		};
+		let unfiltered = glob(&Fs::native(), dir.path(), &capped(Vec::new())).await;
+		assert!(
+			matches!(unfiltered, Err(GlobError::ScanLimit { .. })),
+			"unfiltered scan must cross the entry cap"
+		);
+		let found = run(dir.path(), &capped(vec!["**/*.bin".to_owned()])).await;
+		assert_eq!(paths(&found), ["a.txt", "b.txt", "c.txt"]);
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
