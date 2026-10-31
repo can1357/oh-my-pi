@@ -1103,6 +1103,19 @@ async function withdrawLinkedPublication(destination: string, stage: string): Pr
 }
 
 /**
+ * The answer of a comparison of `one` with `other`. A read that fails during
+ * it is no answer either way: it is thrown again naming both files, never
+ * taken for "they differ", which is the diagnosis a reader would then act on.
+ */
+async function compared(comparison: Promise<boolean>, one: string, other: string): Promise<boolean> {
+	try {
+		return await comparison;
+	} catch (error) {
+		throw new Error(`${one} could not be compared with ${other}: ${errorMessage(error)}`, { cause: error });
+	}
+}
+
+/**
  * Compress `source` into `destination` and prove what landed there.
  *
  * The archive is a copy: the live transcript stays where it is, so an
@@ -1171,7 +1184,9 @@ async function gzipSessionFile(
 			const changed = `${destination} changed while it was being archived; run \`omp gc --archive\` again`;
 			if (!archived) throw new Error(changed);
 			try {
-				if (!(await archivedHandleIsPrefixOfLive(archived, source))) throw new Error(changed);
+				if (!(await compared(archivedHandleIsPrefixOfLive(archived, source), destination, source))) {
+					throw new Error(changed);
+				}
 				const standing = await archived.stat();
 				const named = await statIfPresent(destination);
 				if (!named || named.dev !== standing.dev || named.ino !== standing.ino) throw new Error(changed);
@@ -1734,7 +1749,7 @@ async function proveEntryStillGoes(entry: ProvenEntry): Promise<void> {
 		if (!now.isFile() || !sameIdentity(identityFrom(now), entry)) {
 			throw new Error(`${entry.path} is no longer the file this run proved; it was kept`);
 		}
-		if (!(await archivedHandleIsHeldBy(live, now, entry.destination))) {
+		if (!(await compared(archivedHandleIsHeldBy(live, now, entry.destination), entry.path, entry.destination))) {
 			throw new Error(`${entry.path} holds what ${entry.destination} does not; it was kept`);
 		}
 	} finally {
@@ -1922,7 +1937,7 @@ async function proveLiveTreeIsArchived(
 		if (!(await survivesSourceRemoval(destination, sourceRoot))) {
 			throw new Error(`${destination} is not an independent archived copy of ${source}`);
 		}
-		if (!(await archivedHandleIsHeldBy(live, liveStat, destination))) {
+		if (!(await compared(archivedHandleIsHeldBy(live, liveStat, destination), source, destination))) {
 			throw new Error(`${source} holds what ${destination} does not`);
 		}
 	} finally {
@@ -2071,8 +2086,13 @@ async function copySessionIntoArchive(candidate: ArchiveCandidate): Promise<{ br
 	const supersedes =
 		(await pathExists(destSession)) &&
 		!alreadyArchived &&
-		(await fs.lstat(destSession).catch(() => undefined))?.isFile() &&
-		(await archiveIsPrefixOfLive(destSession, sourceSession))
+		(
+			await fs.lstat(destSession).catch((error: unknown) => {
+				if (codeOf(error) === "ENOENT") return undefined;
+				throw error;
+			})
+		)?.isFile() &&
+		(await compared(archiveIsPrefixOfLive(destSession, sourceSession), destSession, sourceSession))
 			? await statIfPresent(destSession)
 			: undefined;
 	if ((await pathExists(destSession)) && !alreadyArchived && !supersedes) {
@@ -2683,7 +2703,17 @@ async function runRestoreGc(options: ResolvedGcOptions, query: string): Promise<
 			// the artifact tree did not, and the live file is this very session
 			// carried on. Refusing here would report an error for an operation
 			// that applying performs.
-			if (!(await archiveIsPrefixOfLive(archiveFile, sessionPath))) {
+			let carried: boolean;
+			try {
+				carried = await archiveIsPrefixOfLive(archiveFile, sessionPath);
+			} catch (error) {
+				result.errors.push(
+					`${sessionPath} could not be compared with ${archiveFile}, so whether it is this session carried on is ` +
+						`not known: ${errorMessage(error)}`,
+				);
+				return result;
+			}
+			if (!carried) {
 				result.errors.push(`a different session file already exists at ${sessionPath}; nothing would be restored`);
 				return result;
 			}

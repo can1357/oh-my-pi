@@ -3967,6 +3967,152 @@ test("an archive run that cannot resolve a live artifact tree does not archive a
 	expect(result.archive?.errors.join("\n")).toContain(`${liveArtifacts} could not be resolved`);
 });
 
+/**
+ * Make every positional read through a handle opened on a path `at` matches
+ * fail with `code`, after the open itself succeeds: a comparison that gets
+ * its file and then cannot read it.
+ */
+function failReadsOf(at: string | ((target: string, flags: unknown) => boolean), code = "EIO") {
+	const matches = typeof at === "string" ? (target: string) => target === at : at;
+	const realOpen = fs.open;
+	return spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
+		const handle = await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
+		if (!matches(String(target), rest[0])) return handle;
+		handle.read = (async () => {
+			throw Object.assign(new Error(`${code}: injected, read ${target}`), { code });
+		}) as typeof handle.read;
+		return handle;
+	}) as typeof fs.open);
+}
+
+for (const code of ["EACCES", "EIO", "ESTALE"] as const) {
+	test(`a reclaim whose read of an archived artifact fails with ${code} reports that failure, not different bytes`, async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		await Bun.write(path.join(liveArtifacts, "a.log"), "HELLO");
+		await archiveOnly();
+		const archived = path.join(archiveFile.slice(0, -".jsonl.gz".length), "a.log");
+		const broken = failReadsOf(archived, code);
+		let result: GcResult;
+		try {
+			result = await runGcCommand({
+				flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+			});
+		} finally {
+			broken.mockRestore();
+		}
+
+		const told = result.reclaim?.errors.join("\n") ?? "";
+		expect(told).not.toContain("holds what");
+		expect(told).toContain(`${code}: injected`);
+		expect(told).toContain("could not be compared");
+		expect(await Bun.file(path.join(liveArtifacts, "a.log")).text()).toBe("HELLO");
+		expect(await Bun.file(archived).text()).toBe("HELLO");
+	});
+}
+
+test("a restore preview that cannot read the live transcript does not call it a different session", async () => {
+	await archiveEverything();
+	await halfRestore();
+	const broken = failReadsOf(sessionFile);
+	let preview: GcResult;
+	try {
+		preview = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, json: true } });
+	} finally {
+		broken.mockRestore();
+	}
+
+	const told = preview.restore?.errors.join("\n") ?? "";
+	expect(told).not.toContain("a different session file");
+	expect(told).toContain("EIO: injected");
+	expect(told).toContain(`${sessionFile} could not be compared`);
+});
+
+test.skipIf(process.getuid?.() === 0)(
+	"a restore that cannot read the archive does not call the live transcript a different session, nor its owner live",
+	async () => {
+		await archiveEverything();
+		await halfRestore();
+		await fs.chmod(archiveFile, 0);
+		let restored: GcResult;
+		try {
+			restored = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+		} finally {
+			await fs.chmod(archiveFile, 0o644);
+		}
+
+		const told = restored.restore?.errors.join("\n") ?? "";
+		expect(told).not.toContain("a different session file");
+		expect(told).not.toContain("a running process owns");
+		expect(told).toContain("EACCES");
+	},
+);
+
+test("a restore whose look for owners fails says so, not that a running process owns the session", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	await archiveEverything();
+	// Every file in either artifact tree is opened for the session header it
+	// may carry; this one cannot be read.
+	const broken = failReadsOf(path.join(archiveFile.slice(0, -".jsonl.gz".length), "a.log"));
+	let restored: GcResult;
+	try {
+		restored = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+	} finally {
+		broken.mockRestore();
+	}
+
+	const told = restored.restore?.errors.join("\n") ?? "";
+	expect(told).not.toContain("a running process owns");
+	expect(told).toContain("EIO: injected");
+	expect(told).toContain("could not be checked");
+	expect(await Bun.file(sessionFile).exists()).toBe(false);
+});
+
+/** A session archived once and then carried on, so the archive holds an earlier part of it. */
+async function archivedThenAdvanced(): Promise<Buffer> {
+	await archiveOnly();
+	await Bun.write(sessionFile, `${await Bun.file(sessionFile).text()}${JSON.stringify({ type: "later" })}\n`);
+	return await fs.readFile(archiveFile);
+}
+
+test("an archive run that cannot read the live transcript does not call the archive a different session", async () => {
+	const before = await archivedThenAdvanced();
+	// Through a descriptor, the way the comparison reads it; the ownership
+	// probe before it reads the header by other means.
+	const broken = failReadsOf((target, flags) => target === sessionFile && typeof flags === "number");
+	let result: GcResult;
+	try {
+		result = await archiveOnly();
+	} finally {
+		broken.mockRestore();
+	}
+
+	const told = result.archive?.errors.join("\n") ?? "";
+	expect(told).not.toContain("holds a different session");
+	expect(told).toContain("EIO: injected");
+	expect(told).toContain("could not be compared");
+	expect((await fs.readFile(archiveFile)).equals(before)).toBe(true);
+});
+
+test("an archive run whose second look at the archive it supersedes fails does not say the archive changed", async () => {
+	const before = await archivedThenAdvanced();
+	// The archive is read by name the first time, and through a descriptor
+	// the second, just before the longer copy replaces it.
+	const broken = failReadsOf((target, flags) => target === archiveFile && typeof flags === "number");
+	let result: GcResult;
+	try {
+		result = await archiveOnly();
+	} finally {
+		broken.mockRestore();
+	}
+
+	const told = result.archive?.errors.join("\n") ?? "";
+	expect(told).not.toContain("changed while it was being archived");
+	expect(told).toContain("EIO: injected");
+	expect(told).toContain("could not be compared");
+	expect((await fs.readFile(archiveFile)).equals(before)).toBe(true);
+});
+
 test("re-archiving changes the mode of the archived transcript only, never what its name was rebound to", async () => {
 	await archiveOnly();
 	const unrelated = path.join(root, "private.txt");
@@ -5476,7 +5622,9 @@ for (const [shape, mode] of unlistable) {
 				expect(told).toContain("carries it home");
 			}
 			// The record and the stage were there all along.
-			expect(await Bun.file(path.join(destination, path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
+			expect(await Bun.file(path.join(destination, path.basename(ground.dir), "b.log")).text()).toBe(
+				"PARTIAL STAGE",
+			);
 			const listable = await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } });
 			expect(listable.quarantine?.errors.join("\n")).toContain(`copy ${copy} back to ${ground.record}`);
 		},
