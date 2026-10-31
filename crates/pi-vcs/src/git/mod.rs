@@ -98,10 +98,22 @@ impl GitRepo {
 				.unwrap_or(&self.info.common_dir)
 				.to_owned();
 		}
-		if self.is_linked_worktree() {
-			return self.info.common_dir.clone();
+		// A common dir that is not literally `.git` is a relocated git dir —
+		// a submodule's internal store (`<super>/.git/modules/<name>`) or a
+		// `--separate-git-dir` checkout — whether reached directly or through
+		// one of its linked worktrees. Prefer its explicit `core.worktree`
+		// pointer, the indirection git itself follows. `--separate-git-dir`
+		// alone (with no further override) writes no `core.worktree`, so a
+		// direct access has no way to recover its own checkout path from the
+		// common dir's config, and neither does a linked worktree of it —
+		// both resolve to the common dir path itself, matching what `git
+		// worktree list` itself reports for that checkout, so they still
+		// agree. Bare repositories carry no `core.worktree` either, so their
+		// worktrees keep collapsing on the shared common dir the same way.
+		if let Some(worktree) = configured_worktree(&self.info.common_dir) {
+			return worktree;
 		}
-		self.info.repo_root.clone()
+		self.info.common_dir.clone()
 	}
 
 	/// Linked-worktree metadata, or `None` for the primary checkout.
@@ -241,8 +253,9 @@ fn resolve_info(
 		return Ok(None);
 	}
 	let common_dir = resolve_common_dir(&git_dir);
+	// Bytes, not a `String`: git does not require a config file to be UTF-8.
 	let is_reftable =
-		read_optional(&common_dir.join("config")).is_some_and(|config| config_has_reftable(&config));
+		std::fs::read(common_dir.join("config")).is_ok_and(|config| config_has_reftable(&config));
 	Ok(Some(GitRepoInfo {
 		repo_root: repo_root.to_owned(),
 		git_entry_path: git_entry.to_owned(),
@@ -279,6 +292,36 @@ fn read_optional(path: &Path) -> Option<String> {
 	std::fs::read_to_string(path).ok()
 }
 
+/// Resolve a git dir's explicit `core.worktree` override to an absolute
+/// path — the mechanism `git submodule` and `git init --separate-git-dir`
+/// both use to point a git dir at a work tree that is not its own parent
+/// directory. `None` when unset, the ordinary case.
+///
+/// The key comes from the files git's own repository setup reads for the
+/// main worktree: the git dir's `config`, then its `config.worktree` when
+/// `extensions.worktreeConfig` is on, which is where `git sparse-checkout
+/// init` moves the key. Git follows neither file's `include.path` for this
+/// key, so neither does this. The files go through gitoxide's config
+/// parser, which opens no repository, so discovery stays a filesystem walk.
+fn configured_worktree(git_dir: &Path) -> Option<PathBuf> {
+	use gix::bstr::ByteSlice as _;
+
+	let read = |name: &str, source: gix::config::Source| {
+		gix::config::File::from_path_no_includes(git_dir.join(name), source).ok()
+	};
+	let config = read("config", gix::config::Source::Local)?;
+	let worktree_config = matches!(config.boolean("extensions.worktreeConfig"), Some(Ok(true)))
+		.then(|| read("config.worktree", gix::config::Source::Worktree))
+		.flatten();
+	let worktree = worktree_config
+		.as_ref()
+		.and_then(|file| file.string("core.worktree"))
+		.or_else(|| config.string("core.worktree"))
+		.filter(|worktree| !worktree.is_empty())?;
+	// A relative value is relative to the git dir; `join` keeps an absolute one.
+	Some(normalize_path(&git_dir.join(worktree.to_path_lossy())))
+}
+
 /// Lexically normalize `.`/`..` segments without touching the filesystem, so
 /// relative `gitdir`/`commondir` pointers resolve the same way git does.
 pub(crate) fn normalize_path(path: &Path) -> PathBuf {
@@ -310,53 +353,25 @@ pub(crate) fn relative_prefix(root: &Path, dir: &Path) -> Option<String> {
 	Some(prefix)
 }
 
-/// Whether a git config file selects the reftable ref storage.
-///
-/// Minimal INI scan of `[extensions] refstorage`, honoring quoted values and
-/// `;`/`#` comments outside quotes — enough to classify a repo without a full
-/// config parser (reftable repos never reach gitoxide, so its parser is not
-/// available for them by construction).
-fn config_has_reftable(content: &str) -> bool {
-	let mut in_extensions = false;
-	for line in content.lines() {
-		let line = strip_config_comment(line);
-		let line = line.trim();
-		if let Some(section) = line.strip_circumfix('[', ']') {
-			in_extensions = section.trim().eq_ignore_ascii_case("extensions");
-			continue;
-		}
-		if !in_extensions {
-			continue;
-		}
-		let Some((key, value)) = line.split_once('=') else {
-			continue;
-		};
-		if !key.trim().eq_ignore_ascii_case("refstorage") {
-			continue;
-		}
-		let mut value = value.trim();
-		if let Some(inner) = value.strip_circumfix('"', '"') {
-			value = inner.trim();
-		}
-		let value = value.to_ascii_lowercase();
-		if value == "reftable" || value.starts_with("reftable:") {
-			return true;
-		}
-	}
-	false
-}
-
-/// Truncate a config line at the first `;`/`#` outside double quotes.
-fn strip_config_comment(line: &str) -> &str {
-	let mut in_quotes = false;
-	for (index, ch) in line.char_indices() {
-		match ch {
-			'"' => in_quotes = !in_quotes,
-			';' | '#' if !in_quotes => return &line[..index],
-			_ => {},
-		}
-	}
-	line
+/// Whether a git config file selects the reftable ref storage:
+/// `extensions.refStorage` is `reftable` or a `reftable:` URI, last value
+/// wins, as git reads it. The file goes through gitoxide's config parser,
+/// which opens no repository: a reftable repository never reaches a gitoxide
+/// repository open.
+fn config_has_reftable(config: &[u8]) -> bool {
+	let Ok(config) = gix::config::File::from_bytes_no_includes(
+		config,
+		gix::config::file::Metadata::from(gix::config::Source::Local),
+		gix::config::file::init::Options { lossy: true, ..Default::default() },
+	) else {
+		return false;
+	};
+	config.string("extensions.refStorage").is_some_and(|value| {
+		value.eq_ignore_ascii_case(b"reftable")
+			|| value
+				.get(..b"reftable:".len())
+				.is_some_and(|scheme| scheme.eq_ignore_ascii_case(b"reftable:"))
+	})
 }
 
 #[cfg(test)]
@@ -376,11 +391,67 @@ mod tests {
 
 	#[test]
 	fn reftable_detection_honors_quotes_and_comments() {
-		assert!(config_has_reftable("[extensions]\n\trefStorage = reftable\n"));
-		assert!(config_has_reftable("[extensions]\nrefstorage = \"reftable\" ; comment\n"));
-		assert!(!config_has_reftable("[extensions]\nrefstorage = files\n"));
-		assert!(!config_has_reftable("[core]\nrefstorage = reftable\n"));
-		assert!(!config_has_reftable("[extensions]\n# refstorage = reftable\n"));
+		assert!(config_has_reftable(b"[extensions]\n\trefStorage = reftable\n"));
+		assert!(config_has_reftable(b"[extensions]\nrefstorage = \"reftable\" ; comment\n"));
+		assert!(config_has_reftable(b"[extensions]\n\trefStorage = reftable:/var/refs\n"));
+		assert!(!config_has_reftable(b"[extensions]\nrefstorage = files\n"));
+		assert!(!config_has_reftable(b"[core]\nrefstorage = reftable\n"));
+		assert!(!config_has_reftable(b"[extensions \"x\"]\nrefstorage = reftable\n"));
+		assert!(!config_has_reftable(b"[extensions]\n# refstorage = reftable\n"));
+	}
+
+	// Each `reftable_detection_matches_git_*` config below is one for which git
+	// 2.43's `git config --file <config> --get extensions.refStorage` prints
+	// the value the assertion expects.
+
+	#[test]
+	fn reftable_detection_matches_git_for_a_key_on_the_header_line() {
+		assert!(config_has_reftable(b"[extensions] refStorage = reftable\n"));
+	}
+
+	#[test]
+	fn reftable_detection_matches_git_after_a_utf8_bom() {
+		assert!(config_has_reftable(b"\xef\xbb\xbf[extensions]\n\trefStorage = reftable\n"));
+	}
+
+	#[test]
+	fn reftable_detection_matches_git_for_a_continued_value() {
+		assert!(config_has_reftable(b"[extensions]\n\trefStorage = reft\\\nable\n"));
+	}
+
+	#[test]
+	fn reftable_detection_matches_git_for_a_value_quoted_in_part() {
+		assert!(config_has_reftable(b"[extensions]\n\trefStorage = reft\"able\"\n"));
+	}
+
+	#[test]
+	fn reftable_detection_matches_git_for_a_config_that_is_not_utf8() {
+		assert!(config_has_reftable(
+			b"[extensions]\n\trefStorage = reftable\n[user]\n\tname = Ren\xe9\n"
+		));
+	}
+
+	#[test]
+	fn reftable_detection_matches_git_for_a_repeated_key() {
+		// Git keeps the last value: `files`.
+		assert!(!config_has_reftable(
+			b"[extensions]\n\trefStorage = reftable\n\trefStorage = files\n"
+		));
+	}
+
+	#[test]
+	fn discovery_reads_reftable_from_a_config_that_is_not_utf8() {
+		let temp = tempfile::tempdir().unwrap();
+		let git_dir = temp.path().join(".git");
+		fs::create_dir_all(&git_dir).unwrap();
+		fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+		fs::write(
+			git_dir.join("config"),
+			b"[extensions]\n\trefStorage = reftable\n[user]\n\tname = Ren\xe9\n",
+		)
+		.unwrap();
+		let info = discover_info(temp.path()).unwrap().expect("repository");
+		assert!(info.is_reftable);
 	}
 
 	#[test]
@@ -562,5 +633,234 @@ mod tests {
 				opened.head_id().expect("HEAD resolves");
 			}
 		}
+	}
+
+	/// `configured_worktree()` of a submodule-shaped git dir,
+	/// `<temp>/super/.git/modules/sub`, whose `config` holds `config` and whose
+	/// `config.worktree` holds `worktree_config` when given. The result comes
+	/// back relative to `<temp>`, so `../../../x` in a config reads `super/x`.
+	fn worktree_from(config: &str, worktree_config: Option<&str>) -> Option<PathBuf> {
+		let temp = tempfile::tempdir().unwrap();
+		let git_dir = temp.path().join("super/.git/modules/sub");
+		fs::create_dir_all(&git_dir).unwrap();
+		fs::write(git_dir.join("config"), config).unwrap();
+		if let Some(worktree_config) = worktree_config {
+			fs::write(git_dir.join("config.worktree"), worktree_config).unwrap();
+		}
+		let worktree = configured_worktree(&git_dir)?;
+		Some(
+			worktree
+				.strip_prefix(temp.path())
+				.map_or_else(|_| worktree.clone(), Path::to_path_buf),
+		)
+	}
+
+	#[test]
+	fn core_worktree_resolves_relative_to_the_git_dir() {
+		// Exactly what `git submodule add` writes for a checkout at `super/sub`.
+		assert_eq!(
+			worktree_from("[core]\n\tbare = false\n\tworktree = ../../../sub\n", None),
+			Some(PathBuf::from("super/sub"))
+		);
+		assert_eq!(worktree_from("[core]\n\tbare = false\n", None), None);
+		#[cfg(unix)]
+		assert_eq!(
+			worktree_from("[core]\n\tworktree = /elsewhere/main\n", None),
+			Some(PathBuf::from("/elsewhere/main"))
+		);
+	}
+
+	#[test]
+	fn core_worktree_repeated_key_honors_last_occurrence() {
+		// Git itself applies a repeated scalar key in file order, last wins —
+		// `git config --get core.worktree` on this exact text returns the
+		// second value.
+		assert_eq!(
+			worktree_from("[core]\n\tworktree = ../../../wrong\n\tworktree = ../../../main\n", None),
+			Some(PathBuf::from("super/main"))
+		);
+	}
+
+	#[test]
+	fn core_worktree_ignores_a_core_subsection() {
+		// `[core "x"]` is section `core.x`, not `core`.
+		assert_eq!(worktree_from("[core \"x\"]\n\tworktree = ../../../main\n", None), None);
+	}
+
+	#[test]
+	fn core_worktree_recognizes_section_header_with_trailing_hash_comment() {
+		// Git accepts a comment after a section header's closing `]` on the
+		// same line. A relocated git directory (submodule, `--separate-git-dir`)
+		// whose `config` was hand-edited or written with such a comment must
+		// still have its `core.worktree` recognized, or the resolver falls back
+		// to the common dir and a linked worktree derives a different Mnemopi
+		// bank root than direct access to the same checkout.
+		assert_eq!(
+			worktree_from("[core] # relocated by git-submodule\n\tworktree = ../../../main\n", None),
+			Some(PathBuf::from("super/main"))
+		);
+	}
+
+	#[test]
+	fn core_worktree_recognizes_section_header_with_trailing_semicolon_comment() {
+		// Same as the `#` case above, but with git's other valid inline-comment
+		// marker.
+		assert_eq!(
+			worktree_from("[core]; relocated by git-submodule\n\tworktree = ../../../main\n", None),
+			Some(PathBuf::from("super/main"))
+		);
+	}
+
+	#[test]
+	fn core_worktree_recognizes_a_key_on_the_section_header_line() {
+		// A key may follow the header on its own line: git 2.43's `git config
+		// --file <config> --get core.worktree` returns the value for this text.
+		assert_eq!(
+			worktree_from("[core] worktree = ../../../main\n", None),
+			Some(PathBuf::from("super/main"))
+		);
+	}
+
+	#[test]
+	fn core_worktree_decodes_quoted_escapes() {
+		// A submodule checkout named `sub"quote` produces this literal text
+		// (verified against real git 2.43): the quote is escaped, and the
+		// backslash preceding it must not survive into the resolved path.
+		assert_eq!(
+			worktree_from("[core]\n\tworktree = \"../../../sub\\\"quote\"\n", None),
+			Some(PathBuf::from(r#"super/sub"quote"#))
+		);
+	}
+
+	#[test]
+	fn core_worktree_decodes_unquoted_escapes() {
+		// Git 2.43 writes exactly this unquoted form for a submodule checkout
+		// named `sub"quote`: the embedded quote is backslash-escaped without
+		// wrapping the whole value in quotes, so escape decoding must not be
+		// gated on the value being fully quoted.
+		assert_eq!(
+			worktree_from("[core]\n\tworktree = ../../../sub\\\"quote\n", None),
+			Some(PathBuf::from(r#"super/sub"quote"#))
+		);
+	}
+
+	#[test]
+	fn core_worktree_skips_a_leading_utf8_bom() {
+		// Git skips a UTF-8 byte-order mark at the start of a config file, so
+		// `git config --file <config> --get core.worktree` returns the value
+		// for this text. Without skipping it the first `[core]` header goes
+		// unrecognized and `primary_root()` falls back to the common dir.
+		assert_eq!(
+			worktree_from("\u{feff}[core]\n\tworktree = ../../../main\n", None),
+			Some(PathBuf::from("super/main"))
+		);
+	}
+
+	#[test]
+	fn core_worktree_joins_backslash_continued_lines() {
+		// A backslash at the end of a line continues the value on the next
+		// line, inside or outside quotes. Git 2.43's `git config --file
+		// <config> --get core.worktree` returns `../../../main` for both texts;
+		// a truncated `../../../ma` would point `primary_root()` at a path that
+		// does not exist.
+		assert_eq!(
+			worktree_from("[core]\n\tworktree = ../../../ma\\\nin\n", None),
+			Some(PathBuf::from("super/main"))
+		);
+		assert_eq!(
+			worktree_from("[core]\n\tworktree = \"../../../ma\\\nin\" # note\n", None),
+			Some(PathBuf::from("super/main"))
+		);
+	}
+
+	#[test]
+	fn core_worktree_reads_config_worktree_only_under_the_worktree_config_extension() {
+		// Git's repository setup reads `config.worktree` after `config` only
+		// when `extensions.worktreeConfig` is on: `git --git-dir=<dir>
+		// rev-parse --show-toplevel` (git 2.43) reports `b` for the first two
+		// layouts and `a` for the third.
+		let moved = "[core]\n\tworktree = ../../../b\n";
+		assert_eq!(
+			worktree_from("[extensions]\n\tworktreeConfig = true\n", Some(moved)),
+			Some(PathBuf::from("super/b"))
+		);
+		assert_eq!(
+			worktree_from(
+				"[core]\n\tworktree = ../../../a\n[extensions]\n\tworktreeConfig = true\n",
+				Some(moved)
+			),
+			Some(PathBuf::from("super/b"))
+		);
+		assert_eq!(
+			worktree_from("[core]\n\tworktree = ../../../a\n", Some(moved)),
+			Some(PathBuf::from("super/a"))
+		);
+	}
+
+	/// Canonical `primary_root()` of the checkout containing `dir`.
+	fn canonical_primary_root(dir: &Path) -> PathBuf {
+		let repo = GitRepo::discover(dir).unwrap().expect("checkout");
+		fs::canonicalize(repo.primary_root()).unwrap()
+	}
+
+	#[test]
+	fn primary_root_of_a_submodule_and_its_worktree_survives_sparse_checkout() {
+		let temp = tempfile::tempdir().unwrap();
+		let source = temp.path().join("source");
+		let superproject = temp.path().join("super");
+		for repo in [&source, &superproject] {
+			fs::create_dir_all(repo).unwrap();
+			run_git(repo, &["init", "-q", "-b", "main"]);
+			run_git(repo, &["config", "user.name", "VCS Test"]);
+			run_git(repo, &["config", "user.email", "vcs@example.com"]);
+			run_git(repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+		}
+		run_git(&superproject, &[
+			"-c",
+			"protocol.file.allow=always",
+			"submodule",
+			"add",
+			"-q",
+			source.to_str().unwrap(),
+			"sub",
+		]);
+		let submodule = superproject.join("sub");
+		let worktree = temp.path().join("sub-wt");
+		run_git(&submodule, &["worktree", "add", "-q", "-b", "wt", worktree.to_str().unwrap()]);
+		let expected = fs::canonicalize(&submodule).unwrap();
+		assert_eq!(canonical_primary_root(&submodule), expected);
+		assert_eq!(canonical_primary_root(&worktree), expected);
+
+		// Git 2.36+ moves `core.worktree` into `config.worktree` here and turns
+		// on `extensions.worktreeConfig`; the checkout must not resolve to the
+		// internal `.git/modules/sub` store afterwards.
+		run_git(&submodule, &["sparse-checkout", "init", "--cone"]);
+		assert_eq!(canonical_primary_root(&submodule), expected);
+		assert_eq!(canonical_primary_root(&worktree), expected);
+	}
+
+	#[test]
+	fn primary_root_of_a_separate_git_dir_checkout_matches_its_worktree() {
+		// `--separate-git-dir` writes no `core.worktree`, so both resolve to
+		// the git dir, the root `git worktree list` reports first.
+		let temp = tempfile::tempdir().unwrap();
+		let checkout = temp.path().join("sep");
+		let git_dir = temp.path().join("sep.git");
+		run_git(temp.path(), &[
+			"init",
+			"-q",
+			"-b",
+			"main",
+			&format!("--separate-git-dir={}", git_dir.display()),
+			checkout.to_str().unwrap(),
+		]);
+		run_git(&checkout, &["config", "user.name", "VCS Test"]);
+		run_git(&checkout, &["config", "user.email", "vcs@example.com"]);
+		run_git(&checkout, &["commit", "-q", "--allow-empty", "-m", "init"]);
+		let worktree = temp.path().join("sep-wt");
+		run_git(&checkout, &["worktree", "add", "-q", "-b", "wt", worktree.to_str().unwrap()]);
+		let expected = fs::canonicalize(&git_dir).unwrap();
+		assert_eq!(canonical_primary_root(&checkout), expected);
+		assert_eq!(canonical_primary_root(&worktree), expected);
 	}
 }
