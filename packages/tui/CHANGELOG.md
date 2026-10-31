@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `onPredictionShown` and `onPredictionAccepted` editor hooks, called when a render paints the inline prediction and when Right inserts it ([#17187](https://github.com/can1357/oh-my-pi/issues/17187))
+- Added `onPredictionShown` and `onPredictionAccepted` editor hooks, called when a render paints the inline prediction and when Right inserts it ([#17187](https://github.com/can1357/oh-my-pi/issues/17187), [#17557](https://github.com/can1357/oh-my-pi/pull/17557) by [@wolfiesch](https://github.com/wolfiesch))
 
 ## [18.14.1] - 2026-10-31
 
