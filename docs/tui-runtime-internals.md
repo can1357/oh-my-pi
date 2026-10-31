@@ -51,12 +51,12 @@ complete copy.
 Even for a saved session, only persisted messages survive the cap: errors,
 warnings and other notices older than the capped rows are not kept anywhere.
 
-A head that progressive append emitted in full retires without its separator,
-so the next batch on any path that writes a row opens with a blank; so does a
-capped batch that leaves out the rest of a partly emitted frontier head. The
-frame that writes a fresh flush batch comes from a second, display-order pass
-whenever the first one saw images, so the image budget demotes the oldest images
-rather than the newest.
+A head that progressive append emitted in full, or whose rows a pressure split
+committed in full, retires without its separator, so the next batch on any path
+that writes a row opens with a blank; so does a capped batch that leaves out the
+rest of a partly emitted or split frontier head. The frame that writes a fresh
+flush batch comes from a second, display-order pass whenever the first one saw
+images, so the image budget demotes the oldest images rather than the newest.
 
 A handoff stop that resumes with `start()` (`TUI.stop({ resuming: true })`:
 suspend, external editors) keeps the full flush, except while a fullscreen

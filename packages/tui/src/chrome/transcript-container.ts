@@ -273,8 +273,9 @@ export class TranscriptContainer extends Container {
 	#frontier = 0;
 	/**
 	 * The entry whose rows end native scrollback without the blank that follows
-	 * a block: a head progressive append emitted into. A batch that writes a
-	 * row from any other entry opens with that blank.
+	 * a block: a head that a progressive append emitted into, or whose head rows
+	 * a split committed. A batch that writes a row from any other entry opens
+	 * with that blank.
 	 */
 	#openEntry: TranscriptEntry | undefined;
 	#nextBatchId = 1;
@@ -1012,14 +1013,16 @@ export class TranscriptContainer extends Container {
 			this.#frontier = offered.end;
 			const head = offered.split ? this.#entries[offered.end] : undefined;
 			if (head !== undefined) head.split = offered.split;
-			// A batch that wrote a row ends with the blank after its last block.
-			if (offered.batch.rows.length > 0) this.#openEntry = undefined;
+			// A batch that wrote a row ends with the blank after its last block,
+			// or inside the block whose head rows it split off.
+			if (head !== undefined) this.#openEntry = head;
+			else if (offered.batch.rows.length > 0) this.#openEntry = undefined;
 		} else {
 			this.#releaseCommittedRenderCaches();
 			// A replay rewrites the committed ledger with every separator, then
-			// the head's emitted rows.
+			// the head's committed split or emitted rows.
 			const head = this.#entries[this.#frontier];
-			this.#openEntry = head !== undefined && head.emitted > 0 ? head : undefined;
+			this.#openEntry = head !== undefined && (head.split !== undefined || head.emitted > 0) ? head : undefined;
 		}
 		this.#offered = undefined;
 		if (this.#replayRequested) this.#startReplay();

@@ -1258,6 +1258,60 @@ describe("TranscriptContainer", () => {
 		expect([...emitted.rows, ...batch.rows]).toEqual(["a0", "a1", "a2", "", ...newest, ""]);
 	});
 
+	it("an exit flush that leaves out a split head separates it from the next block", () => {
+		for (const replayed of [false, true]) {
+			const transcript = new TranscriptContainer();
+			const head = Array.from({ length: 8 }, (_, i) => `a${i}`);
+			transcript.addChild(new Block(head, true));
+			transcript.addChild(new Block(["t0"], true));
+			// Room 4: the tail and its separator leave two of the head's rows live,
+			// so pressure commits the other six and the head stays split.
+			const split = transcript.peekFinalizedBatch(80, 4)!;
+			expect(split.rows).toEqual(head.slice(0, 6));
+			transcript.acknowledgeFinalizedBatch(split.id);
+			let written = [...split.rows];
+			if (replayed) {
+				// A replay rewrites scrollback, ending with the split head's rows again.
+				transcript.beginReplay();
+				const replay = transcript.peekReplayBatch(80)!;
+				transcript.acknowledgeFinalizedBatch(replay.id);
+				written = [...replay.rows];
+			}
+			const tail = Array.from({ length: 6 }, (_, i) => `b${i}`);
+			transcript.addChild(new Block(tail, true));
+			// The head's two live rows do not fit in 10, so the batch opens with the blank it owes.
+			const batch = transcript.peekFlushBatch(80, 10)!;
+			expect(batch.rows.length).toBeLessThanOrEqual(10);
+			expect([...written, ...batch.rows]).toEqual([...head.slice(0, 6), "", "t0", "", ...tail, ""]);
+		}
+	});
+
+	it("keeps the blank a split head owes once its committed rows cover it", () => {
+		for (const path of ["pressure", "flush", "capped flush"] as const) {
+			const transcript = new TranscriptContainer();
+			const rows = Array.from({ length: 8 }, (_, i) => `a${i}`);
+			const head = new Block(rows, true);
+			transcript.addChild(head);
+			transcript.addChild(new Block(["t0"], true));
+			const split = transcript.peekFinalizedBatch(80, 4)!;
+			transcript.acknowledgeFinalizedBatch(split.id);
+			// The head shrinks to its committed rows, so it retires without a batch
+			// and without the blank that follows a block.
+			head.finalize(rows.slice(0, 6));
+			const written = [...split.rows];
+			for (let batches = 0; batches < 5; batches++) {
+				const batch =
+					path === "pressure"
+						? transcript.peekFinalizedBatch(80, 0)
+						: transcript.peekFlushBatch(80, path === "flush" ? undefined : 10);
+				if (batch === undefined) break;
+				written.push(...batch.rows);
+				transcript.acknowledgeFinalizedBatch(batch.id);
+			}
+			expect(written).toEqual([...rows.slice(0, 6), "", "t0", ""]);
+		}
+	});
+
 	it("an exit flush still stops at the first block that is not settled", () => {
 		const transcript = new TranscriptContainer();
 		transcript.addChild(new Block(["a0", "a1", "a2"], true));
