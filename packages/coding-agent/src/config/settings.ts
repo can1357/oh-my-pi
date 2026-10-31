@@ -1985,11 +1985,19 @@ export class Settings {
 		return this;
 	}
 
-	/** Legacy `settings.json` as migrated raw settings, or empty when there is none to read. */
+	/**
+	 * Legacy `settings.json` as migrated raw settings, or empty when there is none to read.
+	 * Opened non-blocking and required to be a regular file before anything is read: a FIFO at
+	 * that name would otherwise block the open until a writer came, and this read runs before
+	 * `omp gc` takes its lock.
+	 */
 	async #readLegacySettingsJson(): Promise<RawSettings> {
 		const settingsJsonPath = path.join(this.#agentDir, "settings.json");
+		let handle: fs.promises.FileHandle | undefined;
 		try {
-			const parsed: unknown = JSONC.parse(await Bun.file(settingsJsonPath).text());
+			handle = await fs.promises.open(settingsJsonPath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+			if (!(await handle.stat()).isFile()) throw new Error(`${settingsJsonPath} is not a regular file`);
+			const parsed: unknown = JSONC.parse(await handle.readFile("utf8"));
 			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
 				return this.#migrateRawSettings(parsed as RawSettings);
 			}
@@ -2001,6 +2009,8 @@ export class Settings {
 					error: String(error),
 				});
 			}
+		} finally {
+			await handle?.close().catch(() => undefined);
 		}
 		return {};
 	}

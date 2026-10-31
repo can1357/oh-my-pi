@@ -1782,28 +1782,40 @@ async function recordedStagingByPath(agentDir: string, root: string): Promise<Ma
  * been renamed away to the path it would have, and stops the command only
  * when more than that is missing. It makes the directory with `mkdir`, or
  * takes the one an earlier run of it made: a directory, never a link. It
- * then enters it, checks the directory it is now in — not the name — against
- * the trees again, and does every move relative to that directory, so a
- * name swapped after that check cannot redirect them. The staging directory,
- * or what is left of it, goes in under a name nothing there has yet, and
- * the record goes in only after that, under a name nothing there has yet:
- * a record moved while any of its directory is still in a session tree
- * would leave that directory to be carried home as an artifact, by a
+ * then enters it and checks the directory it is now in — not the name —
+ * against the trees again.
+ *
+ * It names no destination for a move. A move onto a named child — `mv src
+ * dir/name` — goes into whatever that name resolves to when `mv` runs, and
+ * a review planted a link to a live artifact tree at the free name the
+ * command had just checked, which carried the stage into the live session.
+ * Instead each run that has anything left to move makes a new numbered
+ * directory with `mkdir`, which fails on any name already there, enters it,
+ * requires the directory it is in to be that one, and moves with `mv -n src
+ * ./`: the only target is the directory the shell holds, and the name inside
+ * it is the source's own. `-n` refuses to replace anything; GNU `mv` then
+ * exits 1 and busybox `mv` exits 0, so neither exit status is trusted, and
+ * each move is checked afterwards — the source gone — before the next. The
+ * staging directory, or what is left of it, goes first and the record only
+ * after it: a record moved while any of its directory is still in a session
+ * tree would leave that directory to be carried home as an artifact, by a
  * restore that exits 0 without having finished.
  *
  * A move onto another filesystem is a copy and then a delete, so it can stop
- * part-way — out of space, a file it cannot read — and leave a partial copy
- * behind, or a whole copy with part of the original not yet deleted. The
- * command says so and stops; the copy stays where it is, and once the cause
- * is fixed the identical command moves what is left under a new name. The
- * same holds when it is killed part-way. A writer that changes the trees,
- * the directory or either source between a check and a move is outside what
- * it guards: the window it has is between `mkdir` and entering the
- * directory, and between the last check and each move, and with nothing
- * deleted, what such a writer can do is redirect a move, not destroy
- * anything. It runs in a subshell, so stopping does not close the shell it
- * was pasted into. When the agent directory already resolves into a session
- * tree, no command is given at all.
+ * part-way — out of space, a file it cannot read — and leave a partial copy,
+ * or a whole copy with part of the original not yet deleted. Each file is
+ * whole in at least one of the two places, since the delete starts only
+ * once the copy has finished. The command says so and stops; the copy stays
+ * where it is, and once the cause is fixed the identical command moves what
+ * is left into the next numbered directory, beside it. The same holds when
+ * it is killed part-way. A writer that changes the trees, the directory or
+ * either source between a check and a move is outside what it guards: it
+ * can have a different source moved in, or the directory itself moved, but
+ * with nothing deleted and no named destination it cannot make the command
+ * destroy anything or move into a place it did not check. It runs in a
+ * subshell, so stopping does not close the shell it was pasted into. When
+ * the agent directory already resolves into a session tree, no command is
+ * given at all.
  */
 export async function stagingResidueNote(dir: string, record: string, consequence: string): Promise<string> {
 	const agentDir = path.dirname(path.dirname(record));
@@ -1818,36 +1830,36 @@ export async function stagingResidueNote(dir: string, record: string, consequenc
 		const realRecord = await fs.realpath(record).catch(() => record);
 		const checks = [getSessionsDir(agentDir), getArchivedSessionsDir(agentDir)].map(shellQuote).join(" ");
 		const sources = [path.dirname(realDir), path.dirname(realRecord)].map(shellQuote).join(" ");
-		// A name nothing in the directory has yet: the given one, or it with a number.
-		const free = (variable: string, name: string): string =>
-			`${variable}=${name}; i=1; while [ -e "$${variable}" ] || [ -L "$${variable}" ]; do i=$((i+1)); ` +
-			`${variable}=${name}.$i; done`;
 		example =
 			`for example \`(d=${shellQuote(aside)}; s=${shellQuote(realDir)}; c=${shellQuote(realRecord)}; inside() { ` +
 			`for t in ${checks}; do t=$(realpath "$t") || exit 1; case "$1/" in "$t"/*) echo "$1 is inside the session ` +
-			`tree $t, so nothing was moved" >&2; exit 1;; esac; done; }; for p in ${sources}; do [ -w "$p" ] || { echo ` +
-			`"$p is not writable: make it writable with chmod u+w and run this command again" >&2; exit 1; }; done; ` +
+			`tree $t, so nothing was moved" >&2; exit 1;; esac; done; }; there() { [ -e "$1" ] || [ -L "$1" ]; }; ` +
+			`there "$s" || there "$c" || exit 0; for p in ${sources}; do [ -w "$p" ] || { echo "$p is not writable: ` +
+			`make it writable with chmod u+w and run this command again" >&2; exit 1; }; done; ` +
 			`p=$(realpath "\${d%/*}") || exit 1; inside "$p/\${d##*/}"; [ -d "$d" ] && [ ! -L "$d" ] || mkdir "$d" || ` +
-			`exit 1; cd -P "$d" || exit 1; inside "$(pwd -P)"; if [ -e "$s" ] || [ -L "$s" ]; then ` +
-			`${free("n", shellQuote(path.basename(realDir)))}; mv "$s" "./$n" || { echo "the move of $s stopped part-way: ` +
-			`anything it copied is in $(pwd -P)/$n and the rest is still in $s; nothing was deleted, and once the cause ` +
-			`is fixed this command, run again, moves what is left under a new name" >&2; exit 1; }; fi; if [ -e "$c" ] ` +
-			`|| [ -L "$c" ]; then ${free("m", shellQuote(path.basename(realRecord)))}; mv "$c" "./$m" || { echo "$c ` +
-			`was not moved: once the cause is fixed, run this command again" >&2; exit 1; }; fi)\`, which checks that ` +
-			`both directories it moves out of are writable and that its directory is outside both session trees — by ` +
-			`name before it makes the directory, and again on the directory it has entered, before it moves anything — ` +
-			`then moves the staging directory, or what is left of it, in under a name nothing there has yet, and only ` +
-			`then the record, and deletes nothing`;
+			`exit 1; cd -P "$d" || exit 1; r=$(pwd -P); inside "$r"; k=1; while there "./$k"; do k=$((k+1)); done; ` +
+			`mkdir "./$k" || exit 1; cd -P "./$k" || exit 1; [ "$(pwd -P)" = "$r/$k" ] || { echo "$r/$k is not the ` +
+			`directory this command just made, so nothing was moved" >&2; exit 1; }; if there "$s"; then mv -n "$s" ./; ` +
+			`there "$s" && { echo "the move of $s did not finish — it stopped part-way, or something already had its ` +
+			`name in $r/$k: anything it copied is in $r/$k and the rest is still in $s; nothing was deleted, and once ` +
+			`the cause is fixed this command, run again, moves what is left into a new directory beside it" >&2; exit 1; ` +
+			`}; fi; if there "$c"; then mv -n "$c" ./; there "$c" && { echo "$c was not moved: once the cause is ` +
+			`fixed, run this command again" >&2; exit 1; }; fi; exit 0)\`, which checks that both directories it moves ` +
+			`out of are writable and that ` +
+			`its directory is outside both session trees — by name before it makes the directory, and again on the ` +
+			`directory it has entered — then, in a new numbered directory inside it that it has just made and entered, ` +
+			`moves the staging directory, or what is left of it, and only then the record, checking after each move ` +
+			`that it happened, and deletes nothing`;
 		afterSteps =
 			` If the command stops because a directory is not writable — it names the directory, usually ` +
 			`${path.dirname(dir)}, which holds the staging directory, or ${path.dirname(record)}, which holds the record — ` +
 			`make it writable with \`chmod u+w\` and run the command again. On a read-only mount, or for a file or ` +
 			`directory marked immutable, \`chmod\` does not help: that has to be undone first. Whatever stops the command, ` +
-			`a kill part-way included, fix the cause and run the identical command again: it uses the directory it ` +
-			`already made and continues from what it finds. A move onto another filesystem is a copy and then a delete, ` +
-			`so it can stop part-way; the command then says so, what was copied stays in that directory under the name ` +
-			`it was given, and the next run moves what is left under a new name. The command never deletes anything; ` +
-			`once the restore has finished, what to keep of that directory is yours to decide.`;
+			`a kill part-way included, fix the cause and run the identical command again: it continues from what it ` +
+			`finds, and once nothing is left to move it exits 0 and does nothing. A move onto another filesystem is a ` +
+			`copy and then a delete, so it can stop part-way; the command then says so, what was copied stays where it ` +
+			`was put, and the next run moves what is left into a new numbered directory beside it. The command never ` +
+			`deletes anything; once the restore has finished, what to keep of ${aside} is yours to decide.`;
 	} else {
 		example =
 			`no example is given here, because ${agentDir} resolves to ${realAgentDir ?? "a path that could not be read"}, ` +
@@ -1908,32 +1920,66 @@ export async function archivedPathsWithoutLiveCopies(archiveFile: string, sessio
 }
 
 /**
- * What restoring `archiveFile` would refuse in its artifact tree, without
- * writing anything: each live destination that already holds something
- * other than the archived entry, or a prefix of it — the same questions
- * {@link copyEntryDereferenced} asks before it publishes.
+ * What restoring `archiveFile` would do in its artifact tree, without
+ * writing anything, in one walk so the two answers cannot disagree:
+ * `conflicts`, each live destination that already holds something other than
+ * the archived entry or a prefix of it — the same questions
+ * {@link copyEntryDereferenced} asks before it publishes — and each recorded
+ * staging directory, which a restore leaves where it is; and `missing`, each
+ * archived entry the live tree lacks that applying would bring home, as a
+ * name relative to the artifact tree, a missing directory named once. An
+ * entry applying could not publish because the directory it would stage in
+ * is not writable is a conflict, not missing: a preview that promised it
+ * would be promising what it has not checked it can do.
  */
-export async function artifactRestoreConflicts(
+export async function artifactRestorePreview(
 	archiveFile: string,
 	sessionFile: string,
 	agentDir: string,
-): Promise<string[]> {
+): Promise<{ conflicts: string[]; missing: string[] }> {
 	const archiveArtifacts = archiveFile.slice(0, -ARCHIVED_SESSION_SUFFIX.length);
 	const liveArtifacts = sessionFile.slice(0, -SESSION_SUFFIX.length);
+	const conflicts: string[] = [];
+	const missing: string[] = [];
 	// A killed restore stages in the live tree, so its residue is there, and
 	// it stops a restore whether or not the archive still has a tree to carry.
-	const liveResidue = async (): Promise<string[]> => {
-		const notes: string[] = [];
+	const liveResidue = async (): Promise<void> => {
 		for (const { dir, record } of await recordedStagingIn(agentDir, liveArtifacts)) {
-			notes.push(await stagingResidueNote(dir, record, LIVE_RESIDUE));
+			conflicts.push(await stagingResidueNote(dir, record, LIVE_RESIDUE));
 		}
-		return notes;
 	};
-	if (!(await statIfPresent(archiveArtifacts))) return await liveResidue();
+	if (!(await statIfPresent(archiveArtifacts))) {
+		await liveResidue();
+		return { conflicts, missing };
+	}
 	const archiveRoot = await fs.realpath(archiveArtifacts);
 	const isResidue = await stagingResidueUnder(agentDir, archiveArtifacts);
-	const conflicts: string[] = [];
-	const visit = async (source: string, destination: string): Promise<void> => {
+	// The directory a restore would stage `destination` in — its parent, or,
+	// when that is not there yet, the nearest one there to make it in — when
+	// that directory cannot be written, or undefined when it can.
+	const unwritableFor = async (destination: string): Promise<string | undefined> => {
+		let dir = path.dirname(destination);
+		while (!(await statIfPresent(dir)) && path.dirname(dir) !== dir) dir = path.dirname(dir);
+		return (await fs.access(dir, fsConstants.W_OK | fsConstants.X_OK).then(
+			() => true,
+			() => false,
+		))
+			? undefined
+			: dir;
+	};
+	// Something the live tree lacks, if applying could write it there.
+	const lacks = async (source: string, destination: string): Promise<void> => {
+		const blocked = await unwritableFor(destination);
+		if (blocked !== undefined) {
+			conflicts.push(
+				`${blocked} is not writable, so the archived ${source} could not be restored into it: make it writable ` +
+					`with \`chmod u+w\` and run the same command again`,
+			);
+			return;
+		}
+		missing.push(path.relative(liveArtifacts, destination));
+	};
+	const visit = async (source: string, destination: string, under: boolean): Promise<void> => {
 		const stat = await fs.stat(source).catch(error => {
 			if (isEnoent(error)) return undefined;
 			throw error;
@@ -1975,13 +2021,22 @@ export async function artifactRestoreConflicts(
 					conflicts.push(`${destination} is not a directory, so ${source} could not be restored into it`);
 					return;
 				}
+			} else if (!under && destination !== liveArtifacts) {
+				await lacks(source, destination);
 			}
+			// Walked even when the live directory is missing, named once above,
+			// so a recorded stage inside it is still reported as left out.
+			const missingHere = under || (!existing && destination !== liveArtifacts);
 			for (const entry of (await fs.readdir(source)).sort()) {
-				await visit(path.join(source, entry), path.join(destination, entry));
+				await visit(path.join(source, entry), path.join(destination, entry), missingHere);
 			}
 			return;
 		}
-		if (!stat.isFile() || !existing) return;
+		if (!stat.isFile()) return;
+		if (!existing) {
+			if (!under) await lacks(source, destination);
+			return;
+		}
 		let live: fs.FileHandle | undefined;
 		try {
 			live = await openRegularFile(destination);
@@ -2002,9 +2057,9 @@ export async function artifactRestoreConflicts(
 			`${destination} already holds something else, so the archived ${source} would be left in the archive`,
 		);
 	};
-	await visit(archiveArtifacts, liveArtifacts);
-	conflicts.push(...(await liveResidue()));
-	return conflicts;
+	await visit(archiveArtifacts, liveArtifacts, false);
+	await liveResidue();
+	return { conflicts, missing: missing.sort() };
 }
 
 /** The owner set as one comparable value, so a membership change is visible. */

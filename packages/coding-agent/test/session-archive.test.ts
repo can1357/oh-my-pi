@@ -497,7 +497,9 @@ test("a broken link inside an artifact tree is skipped and counted, not left blo
 	expect(await Bun.file(path.join(archiveFile.slice(0, -".jsonl.gz".length), "kept.txt")).text()).toBe("kept");
 	// The archive could not hold it, so giving up the live tree would lose it.
 	expect(reclaimed.reclaim?.reclaimed).toBe(0);
-	expect(reclaimed.reclaim?.errors.join("\n")).toContain(`${dangling} is a link the archive holds no copy for`);
+	expect(reclaimed.reclaim?.errors.join("\n")).toContain(
+		`${dangling} is a symbolic link, which a reclaim does not give up`,
+	);
 	expect((await fs.lstat(dangling)).isSymbolicLink()).toBe(true);
 });
 
@@ -1384,6 +1386,27 @@ test("a legacy-configured archive phase copies without needing the one-way flag"
 	expect(await Bun.file(sessionFile).exists()).toBe(true);
 	expect(await Bun.file(archiveFile).exists()).toBe(true);
 });
+
+test("a FIFO where the legacy settings.json belongs is not waited on before gc runs", async () => {
+	// What the read-only settings view looks at when there is no config.yml:
+	// a FIFO there blocked the open until a writer came, before gc took its
+	// lock, and the command printed nothing.
+	const legacy = path.join(root, "settings.json");
+	expect(await Bun.spawn(["mkfifo", legacy]).exited).toBe(0);
+
+	const run = runGcCommand({ flags: { agentDir: root, json: true } });
+	// A real timer, for the same reason as the transcript FIFO tests: the
+	// defect is a blocking open, which no fake clock reaches.
+	const outcome = await Promise.race([run, Bun.sleep(5_000).then(() => "hung" as const)]);
+	if (outcome === "hung") {
+		const writer = await fs.open(legacy, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
+		await writer.close();
+		await run.catch(() => undefined);
+	}
+
+	expect(outcome).not.toBe("hung");
+	expect((await fs.lstat(legacy)).isFIFO()).toBe(true);
+}, 15_000);
 
 test("an archived artifact nobody can read is refused, not written over", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
@@ -3178,27 +3201,22 @@ test("a reclaim holds the lease of every transcript it removes until the file is
 	expect(claimable).toBe(false);
 });
 
-test("a link replaced by a file after the reclaim walked past it is kept", async () => {
+test("a link a reclaim would once have replaced by a file is kept and named, and nothing is unlinked", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
 	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
 	await Bun.write(path.join(liveArtifacts, "b.log"), "SECOND");
 	await archiveEverything();
 	await restoreArchivedSession(archiveFile, root);
-	// A link has nothing to compare: what the walk proved is the entry, so
-	// that is what has to still stand at the name when it goes.
+	// A link onto the archive's own copy: the walk refuses it before anything
+	// goes, so the replacement this test once raced against never happens.
 	await fs.rm(path.join(liveArtifacts, "b.log"));
 	await fs.symlink(path.join(archivedArtifacts, "b.log"), path.join(liveArtifacts, "b.log"));
-
+	const unlinked: string[] = [];
 	const realUnlink = fs.unlink;
-	let replaced = false;
 	const unlink = spyOn(fs, "unlink").mockImplementation(async target => {
+		unlinked.push(String(target));
 		await realUnlink(target);
-		if (!replaced && String(target) === path.join(liveArtifacts, "a.log")) {
-			replaced = true;
-			await realUnlink(path.join(liveArtifacts, "b.log"));
-			await Bun.write(path.join(liveArtifacts, "b.log"), "UNIQUE TURN");
-		}
 	});
 	let result: GcResult;
 	try {
@@ -3209,9 +3227,14 @@ test("a link replaced by a file after the reclaim walked past it is kept", async
 		unlink.mockRestore();
 	}
 
-	expect(replaced).toBe(true);
+	// The gc lock's own file goes as the run ends; nothing of the session does.
+	expect(unlinked.filter(gone => gone === sessionFile || gone.startsWith(`${liveArtifacts}${path.sep}`))).toEqual([]);
 	expect(result.reclaim?.reclaimed).toBe(0);
-	expect(await Bun.file(path.join(liveArtifacts, "b.log")).text()).toBe("UNIQUE TURN");
+	expect(result.reclaim?.errors.join("\n")).toContain(
+		`${path.join(liveArtifacts, "b.log")} is a symbolic link, which a reclaim does not give up`,
+	);
+	expect(await fs.readlink(path.join(liveArtifacts, "b.log"))).toBe(path.join(archivedArtifacts, "b.log"));
+	expect(await Bun.file(sessionFile).exists()).toBe(true);
 });
 
 for (const site of ["an archived artifact", "an archived transcript", "a restored transcript", "a restored artifact"]) {
@@ -3598,46 +3621,13 @@ test("a reclaim keeps a file whose mode changed after it was proved", async () =
 	expect((await fs.stat(b)).mode & 0o777).toBe(0o600);
 });
 
-test("a link replaced while the reclaim was reading it is kept", async () => {
-	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
-	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
-	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
-	await Bun.write(path.join(liveArtifacts, "b.log"), "SECOND");
-	await archiveEverything();
-	await restoreArchivedSession(archiveFile, root);
-	const link = path.join(liveArtifacts, "b.log");
-	await fs.rm(link);
-	await fs.symlink(path.join(archivedArtifacts, "b.log"), link);
-
-	// Replaced between the walk's `lstat` and its `readlink`: an identity
-	// put together from the two would describe the replacement.
-	const elsewhere = path.join(root, "elsewhere.log");
-	const realReadlink = fs.readlink;
-	let replaced = false;
-	const readlink = spyOn(fs, "readlink").mockImplementation((async (target: string, ...rest: unknown[]) => {
-		if (!replaced && String(target) === link) {
-			replaced = true;
-			await fs.unlink(link);
-			await fs.symlink(elsewhere, link);
-		}
-		return await (realReadlink as (...args: unknown[]) => Promise<string>)(target, ...rest);
-	}) as typeof fs.readlink);
-	let result: GcResult;
-	try {
-		result = await runGcCommand({
-			flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
-		});
-	} finally {
-		readlink.mockRestore();
-	}
-
-	expect(replaced).toBe(true);
-	expect(result.reclaim?.reclaimed).toBe(0);
-	expect(await fs.readlink(link)).toBe(elsewhere);
-});
-
-for (const shape of ["a different link", "a FIFO"] as const) {
-	test(`a link replaced by ${shape} after the reclaim walked past it is kept`, async () => {
+// The other three of the replacements above — a link replaced by a
+// different link or a FIFO after the walk, or while it was being read — each
+// assumed the reclaim would come to remove the link. It never does now: the
+// walk refuses it, so nothing is unlinked and the replacement has nothing to
+// race.
+for (const shape of ["a different link", "a FIFO", "a link while it was being read"] as const) {
+	test(`a link a reclaim would once have replaced by ${shape} is kept and named, and nothing is unlinked`, async () => {
 		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 		const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
 		await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
@@ -3647,20 +3637,11 @@ for (const shape of ["a different link", "a FIFO"] as const) {
 		const link = path.join(liveArtifacts, "b.log");
 		await fs.rm(link);
 		await fs.symlink(path.join(archivedArtifacts, "b.log"), link);
-
-		// The replacement can come back on the inode the link just freed, so
-		// only its kind and, for a link, its target tell the two apart.
-		const elsewhere = path.join(root, "elsewhere.log");
+		const unlinked: string[] = [];
 		const realUnlink = fs.unlink;
-		let replaced = false;
 		const unlink = spyOn(fs, "unlink").mockImplementation(async target => {
+			unlinked.push(String(target));
 			await realUnlink(target);
-			if (!replaced && String(target) === path.join(liveArtifacts, "a.log")) {
-				replaced = true;
-				await realUnlink(link);
-				if (shape === "a FIFO") expect(await Bun.spawn(["mkfifo", link]).exited).toBe(0);
-				else await fs.symlink(elsewhere, link);
-			}
 		});
 		let result: GcResult;
 		try {
@@ -3671,11 +3652,17 @@ for (const shape of ["a different link", "a FIFO"] as const) {
 			unlink.mockRestore();
 		}
 
-		expect(replaced).toBe(true);
+		// The gc lock's own file goes as the run ends; nothing of the session does.
+		expect(unlinked.filter(gone => gone === sessionFile || gone.startsWith(`${liveArtifacts}${path.sep}`))).toEqual(
+			[],
+		);
 		expect(result.reclaim?.reclaimed).toBe(0);
-		const standing = await fs.lstat(link);
-		if (shape === "a FIFO") expect(standing.isFIFO()).toBe(true);
-		else expect(await fs.readlink(link)).toBe(elsewhere);
+		expect(result.reclaim?.errors.join("\n")).toContain(
+			`${link} is a symbolic link, which a reclaim does not give up`,
+		);
+		expect(await fs.readlink(link)).toBe(path.join(archivedArtifacts, "b.log"));
+		expect(await Bun.file(path.join(liveArtifacts, "a.log")).text()).toBe("FIRST");
+		expect(await Bun.file(sessionFile).exists()).toBe(true);
 	});
 }
 
@@ -4190,8 +4177,10 @@ test("the restore's advice for a killed run's recorded stage, followed as writte
 	const aside = path.join(root, `gc-quarantine-${path.basename(ground.record, ".json")}`);
 
 	expect(await Bun.spawn(["sh", "-c", move!]).exited).toBe(0);
-	expect(await Bun.file(path.join(aside, path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
-	expect(await Bun.file(path.join(aside, path.basename(ground.record))).exists()).toBe(true);
+	// Into a numbered directory of its own, made by this run.
+	expect(await fs.readdir(aside)).toEqual(["1"]);
+	expect(await Bun.file(path.join(aside, "1", path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
+	expect(await Bun.file(path.join(aside, "1", path.basename(ground.record))).exists()).toBe(true);
 	// Where it landed, by real path, not by name.
 	const landed = await fs.realpath(aside);
 	for (const tree of [getArchivedSessionsDir(root), path.join(root, "sessions")]) {
@@ -4200,8 +4189,11 @@ test("the restore's advice for a killed run's recorded stage, followed as writte
 	}
 	// Run again, it finds nothing left to move, moves nothing, and says nothing is wrong.
 	expect(await Bun.spawn(["sh", "-c", move!]).exited).toBe(0);
-	expect((await fs.readdir(aside)).sort()).toEqual([path.basename(ground.dir), path.basename(ground.record)].sort());
-	expect(await Bun.file(path.join(aside, path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
+	expect(await fs.readdir(aside)).toEqual(["1"]);
+	expect((await fs.readdir(path.join(aside, "1"))).sort()).toEqual(
+		[path.basename(ground.dir), path.basename(ground.record)].sort(),
+	);
+	expect(await Bun.file(path.join(aside, "1", path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
 
 	await finishAfterRecovery();
 	expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
@@ -4582,7 +4574,7 @@ test("the printed command stops, moving nothing, when a session tree has moved t
 	const aside = path.join(await fs.realpath(root), `gc-quarantine-${path.basename(ground.record, ".json")}`);
 	expect(await fs.lstat(aside).catch(() => undefined)).toBeUndefined();
 	expect(await Bun.spawn(["sh", "-c", move!]).exited).toBe(0);
-	expect(await Bun.file(path.join(aside, path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
+	expect(await Bun.file(path.join(aside, "1", path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
 });
 
 /** The printed recovery command from a refused restore's message; the refusal keeps the restore record. */
@@ -4635,8 +4627,9 @@ for (const where of [
 
 			expect(first.exit).not.toBe(0);
 			if (where === "the staging directory itself") {
-				expect(first.said).toContain(`the move of ${await fs.realpath(ground.dir)} stopped part-way`);
-				expect(await fs.readdir(aside)).toEqual([]);
+				expect(first.said).toContain(`the move of ${await fs.realpath(ground.dir)} did not finish`);
+				expect(first.said).toContain("nothing was deleted");
+				expect(await fs.readdir(path.join(aside, "1"))).toEqual([]);
 			} else {
 				expect(first.said).toContain(`${await fs.realpath(locked)} is not writable`);
 				expect(await fs.lstat(aside).catch(() => undefined)).toBeUndefined();
@@ -4646,8 +4639,10 @@ for (const where of [
 			expect(await Bun.file(restoreRecordPath(archiveFile)).exists()).toBe(true);
 
 			expect((await runPrinted(move)).exit).toBe(0);
-			expect(await Bun.file(path.join(aside, path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
-			expect(await Bun.file(path.join(aside, path.basename(ground.record))).exists()).toBe(true);
+			// A stop after its numbered directory was made leaves it, empty; the next run takes the next number.
+			const landed = path.join(aside, where === "the staging directory itself" ? "2" : "1");
+			expect(await Bun.file(path.join(landed, path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
+			expect(await Bun.file(path.join(landed, path.basename(ground.record))).exists()).toBe(true);
 			await finishAfterRecovery();
 			expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
 		},
@@ -4672,10 +4667,10 @@ test("the printed command, stopped after moving the staging directory, moves the
 
 	expect(first.exit).not.toBe(0);
 	expect(first.said).toContain(`${await fs.realpath(ground.record)} was not moved`);
-	expect(await Bun.file(path.join(aside, path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
+	expect(await Bun.file(path.join(aside, "1", path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
 	expect(await Bun.file(ground.record).exists()).toBe(true);
 	expect((await runPrinted(move)).exit).toBe(0);
-	expect(await Bun.file(path.join(aside, path.basename(ground.record))).exists()).toBe(true);
+	expect(await Bun.file(path.join(aside, "2", path.basename(ground.record))).exists()).toBe(true);
 	expect(await Bun.file(ground.record).exists()).toBe(false);
 	await finishAfterRecovery();
 	expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
@@ -4690,7 +4685,7 @@ test("the printed command, killed after moving the staging directory, finishes w
 	// An `mv` that moves the staging directory and then kills the shell running the command.
 	await Bun.write(
 		path.join(bin, "mv"),
-		`#!/bin/sh\nif [ "$1" = ${JSON.stringify(await fs.realpath(ground.dir))} ]; then ${Bun.which("mv")!} "$@"; kill -KILL $PPID; exit 0; fi\nexec ${Bun.which("mv")!} "$@"\n`,
+		`#!/bin/sh\nfor a in "$@"; do [ "$a" = ${JSON.stringify(await fs.realpath(ground.dir))} ] && { ${Bun.which("mv")!} "$@"; kill -KILL $PPID; exit 0; }; done\nexec ${Bun.which("mv")!} "$@"\n`,
 	);
 	await fs.chmod(path.join(bin, "mv"), 0o755);
 
@@ -4699,28 +4694,65 @@ test("the printed command, killed after moving the staging directory, finishes w
 	expect(await Bun.file(ground.record).exists()).toBe(true);
 	expect((await runPrinted(move)).exit).toBe(0);
 
-	expect(await Bun.file(path.join(aside, path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
-	expect(await Bun.file(path.join(aside, path.basename(ground.record))).exists()).toBe(true);
+	expect(await Bun.file(path.join(aside, "1", path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
+	expect(await Bun.file(path.join(aside, "2", path.basename(ground.record))).exists()).toBe(true);
 	await finishAfterRecovery();
 	expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
 });
 
-test("the printed command, finding its directory already holding names it wants, moves in under new names and writes over nothing", async () => {
+test("the printed command, finding its directory already holding a numbered directory, takes the next number and writes over nothing", async () => {
 	const { ground } = await archivedWithKilledStage();
 	const move = await printedCommand();
 	const aside = path.join(await fs.realpath(root), `gc-quarantine-${path.basename(ground.record, ".json")}`);
 	const stageName = path.basename(ground.dir);
 	const recordName = path.basename(ground.record);
-	await Bun.write(path.join(aside, stageName, "b.log"), "ALREADY THERE");
-	await Bun.write(path.join(aside, recordName), "ALREADY THERE");
+	await Bun.write(path.join(aside, "1", stageName, "b.log"), "ALREADY THERE");
+	await Bun.write(path.join(aside, "1", recordName), "ALREADY THERE");
 
 	expect((await runPrinted(move)).exit).toBe(0);
 
-	expect(await Bun.file(path.join(aside, stageName, "b.log")).text()).toBe("ALREADY THERE");
-	expect(await Bun.file(path.join(aside, recordName)).text()).toBe("ALREADY THERE");
-	expect(await Bun.file(path.join(aside, `${stageName}.2`, "b.log")).text()).toBe("PARTIAL STAGE");
-	expect(await Bun.file(path.join(aside, `${recordName}.2`)).exists()).toBe(true);
+	expect(await Bun.file(path.join(aside, "1", stageName, "b.log")).text()).toBe("ALREADY THERE");
+	expect(await Bun.file(path.join(aside, "1", recordName)).text()).toBe("ALREADY THERE");
+	expect(await Bun.file(path.join(aside, "2", stageName, "b.log")).text()).toBe("PARTIAL STAGE");
+	expect(await Bun.file(path.join(aside, "2", recordName)).exists()).toBe(true);
 });
+
+// The second review's planted link: a link to a session tree put, just
+// before the move, at the name the staging directory would take. The
+// command names no destination — it moves into the directory it holds,
+// under the source's own name — so `mv -n` meets the link and declines to
+// replace it. GNU `mv` then exits 1 and busybox `mv` exits 0, which is why
+// the command checks the source is gone rather than trusting either: it
+// stops, says so, and nothing reaches the session tree.
+const busybox = Bun.which("busybox");
+for (const mover of ["GNU mv", "busybox mv"] as const) {
+	test.skipIf(mover === "busybox mv" && !busybox)(
+		`the printed command, meeting a link planted where the staging directory would land, moves nothing into it (${mover})`,
+		async () => {
+			const { ground } = await archivedWithKilledStage();
+			const move = await printedCommand();
+			const sessions = path.join(root, "sessions");
+			const before = (await fs.readdir(sessions, { recursive: true })).sort();
+			const real = await fs.realpath(ground.dir);
+			const bin = path.join(root, "planting-bin");
+			await fs.mkdir(bin);
+			const run = mover === "busybox mv" ? `${busybox} mv` : Bun.which("mv")!;
+			await Bun.write(
+				path.join(bin, "mv"),
+				`#!/bin/sh\nfor a in "$@"; do [ "$a" = ${JSON.stringify(real)} ] && ln -s ${JSON.stringify(sessions)} ./${JSON.stringify(path.basename(real))}; done\nexec ${run} "$@"\n`,
+			);
+			await fs.chmod(path.join(bin, "mv"), 0o755);
+
+			const first = await runPrinted(move, { PATH: `${bin}:${process.env.PATH ?? ""}` });
+
+			expect(first.exit).not.toBe(0);
+			expect(first.said).toContain(`the move of ${real} did not finish`);
+			expect(await Bun.file(ground.file).text()).toBe("PARTIAL STAGE");
+			expect(await Bun.file(ground.record).exists()).toBe(true);
+			expect((await fs.readdir(sessions, { recursive: true })).sort()).toEqual(before);
+		},
+	);
+}
 
 // The review's destination switch: between the failed move and whatever
 // comes next, the new directory is renamed away and its name pointed at an
@@ -4738,7 +4770,7 @@ test("the printed command deletes nothing when its directory's name is switched 
 	await fs.mkdir(bin);
 	await Bun.write(
 		path.join(bin, "mv"),
-		`#!/bin/sh\nif [ "$1" = ${JSON.stringify(await fs.realpath(ground.dir))} ]; then echo "mv: injected failure" >&2; ${Bun.which("mv")!} ${JSON.stringify(aside)} ${JSON.stringify(saved)}; ln -s ${JSON.stringify(unrelated)} ${JSON.stringify(aside)}; exit 1; fi\nexec ${Bun.which("mv")!} "$@"\n`,
+		`#!/bin/sh\nfor a in "$@"; do [ "$a" = ${JSON.stringify(await fs.realpath(ground.dir))} ] && { echo "mv: injected failure" >&2; ${Bun.which("mv")!} ${JSON.stringify(aside)} ${JSON.stringify(saved)}; ln -s ${JSON.stringify(unrelated)} ${JSON.stringify(aside)}; exit 1; }; done\nexec ${Bun.which("mv")!} "$@"\n`,
 	);
 	await fs.chmod(path.join(bin, "mv"), 0o755);
 
@@ -4746,6 +4778,7 @@ test("the printed command deletes nothing when its directory's name is switched 
 	const second = await runPrinted(move);
 
 	expect(first.exit).not.toBe(0);
+	expect(first.said).toContain("injected failure");
 	expect(second.exit).not.toBe(0);
 	expect(await Bun.file(path.join(unrelated, path.basename(ground.dir), "priceless")).text()).toBe("USER FILE");
 	expect(await fs.readdir(unrelated)).toEqual([path.basename(ground.dir)]);
@@ -4807,18 +4840,18 @@ for (const failure of ["an unreadable file", "a write the kernel refuses part-wa
 				}
 
 				expect(first.exit).not.toBe(0);
-				expect(first.said).toContain(`the move of ${await fs.realpath(ground.dir)} stopped part-way`);
+				expect(first.said).toContain(`the move of ${await fs.realpath(ground.dir)} did not finish`);
 				expect(first.said).toContain("nothing was deleted");
 				// The partial copy is there, as the message says, and the original whole.
-				expect((await fs.lstat(path.join(aside, name))).isDirectory()).toBe(true);
+				expect((await fs.lstat(path.join(aside, "1", name))).isDirectory()).toBe(true);
 				expect(await Bun.file(ground.file).bytes()).toEqual(before);
 				expect(await Bun.file(ground.record).exists()).toBe(true);
 
 				const second = await runPrinted(move);
 				expect(second.exit).toBe(0);
-				expect(await Bun.file(path.join(aside, `${name}.2`, "b.log")).bytes()).toEqual(before);
-				expect((await fs.lstat(path.join(aside, name))).isDirectory()).toBe(true);
-				expect(await Bun.file(path.join(aside, path.basename(ground.record))).exists()).toBe(true);
+				expect(await Bun.file(path.join(aside, "2", name, "b.log")).bytes()).toEqual(before);
+				expect((await fs.lstat(path.join(aside, "1", name))).isDirectory()).toBe(true);
+				expect(await Bun.file(path.join(aside, "2", path.basename(ground.record))).exists()).toBe(true);
 				await finishAfterRecovery();
 				expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
 			} finally {
@@ -4857,7 +4890,7 @@ for (const writer of [
 				const move = await printedCommand();
 				const aside = path.join(await fs.realpath(root), `gc-quarantine-${path.basename(ground.record, ".json")}`);
 				const name = path.basename(ground.dir);
-				lockedDirs.push(locked, path.join(aside, name, "locked"));
+				lockedDirs.push(locked, path.join(aside, "1", name, "locked"));
 				const real = await fs.realpath(ground.dir);
 				let env: Record<string, string> | undefined;
 				if (writer) {
@@ -4869,7 +4902,7 @@ for (const writer of [
 					await fs.mkdir(bin);
 					await Bun.write(
 						path.join(bin, "mv"),
-						`#!/bin/sh\nif [ "$1" = ${JSON.stringify(real)} ]; then ${Bun.which("mv")!} "$@"; moved=$?; ${write}; exit $moved; fi\nexec ${Bun.which("mv")!} "$@"\n`,
+						`#!/bin/sh\nfor a in "$@"; do [ "$a" = ${JSON.stringify(real)} ] && { ${Bun.which("mv")!} "$@"; moved=$?; ${write}; exit $moved; }; done\nexec ${Bun.which("mv")!} "$@"\n`,
 					);
 					await fs.chmod(path.join(bin, "mv"), 0o755);
 					env = { PATH: `${bin}:${process.env.PATH ?? ""}` };
@@ -4878,11 +4911,11 @@ for (const writer of [
 				const first = await runPrinted(move, env);
 
 				expect(first.exit).not.toBe(0);
-				expect(first.said).toContain(`the move of ${real} stopped part-way`);
-				expect(first.said).toContain("run again, moves what is left under a new name");
+				expect(first.said).toContain(`the move of ${real} did not finish`);
+				expect(first.said).toContain("run again, moves what is left into a new directory beside it");
 				// The whole copy is in the new directory; what the delete could not take, and the record, where they were.
-				expect(await Bun.file(path.join(aside, name, "b.log")).text()).toBe("PARTIAL STAGE");
-				expect(await Bun.file(path.join(aside, name, "locked", "kept")).text()).toBe("LEFT IN THE ORIGINAL");
+				expect(await Bun.file(path.join(aside, "1", name, "b.log")).text()).toBe("PARTIAL STAGE");
+				expect(await Bun.file(path.join(aside, "1", name, "locked", "kept")).text()).toBe("LEFT IN THE ORIGINAL");
 				expect(await Bun.file(path.join(locked, "kept")).text()).toBe("LEFT IN THE ORIGINAL");
 				expect(await Bun.file(ground.record).exists()).toBe(true);
 
@@ -4890,15 +4923,15 @@ for (const writer of [
 				await fs.chmod(locked, 0o700);
 				expect((await runPrinted(move)).exit).toBe(0);
 
-				expect(await Bun.file(path.join(aside, `${name}.2`, "locked", "kept")).text()).toBe("LEFT IN THE ORIGINAL");
+				expect(await Bun.file(path.join(aside, "2", name, "locked", "kept")).text()).toBe("LEFT IN THE ORIGINAL");
 				if (writer === "adds an entry of its own") {
-					expect(await Bun.file(path.join(aside, `${name}.2`, "intruder")).text()).toBe("INTRUDER");
+					expect(await Bun.file(path.join(aside, "2", name, "intruder")).text()).toBe("INTRUDER");
 				}
 				if (writer === "puts other bytes under the name the delete took") {
-					expect(await Bun.file(path.join(aside, `${name}.2`, "b.log")).text()).toBe("OTHER");
+					expect(await Bun.file(path.join(aside, "2", name, "b.log")).text()).toBe("OTHER");
 				}
-				expect(await Bun.file(path.join(aside, name, "b.log")).text()).toBe("PARTIAL STAGE");
-				expect(await Bun.file(path.join(aside, path.basename(ground.record))).exists()).toBe(true);
+				expect(await Bun.file(path.join(aside, "1", name, "b.log")).text()).toBe("PARTIAL STAGE");
+				expect(await Bun.file(path.join(aside, "2", path.basename(ground.record))).exists()).toBe(true);
 				expect(await fs.lstat(ground.dir).catch(() => undefined)).toBeUndefined();
 				await finishAfterRecovery();
 				expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
@@ -4934,8 +4967,8 @@ test("the printed command moves the stage where it said, though the agent direct
 	expect(await Bun.spawn(["sh", "-c", move!]).exited).toBe(0);
 
 	const aside = path.join(realAgent, "gc-quarantine-1");
-	expect(await Bun.file(path.join(aside, path.basename(stage), "b.log")).text()).toBe("PARTIAL STAGE");
-	expect(await Bun.file(path.join(aside, "1.json")).exists()).toBe(true);
+	expect(await Bun.file(path.join(aside, "1", path.basename(stage), "b.log")).text()).toBe("PARTIAL STAGE");
+	expect(await Bun.file(path.join(aside, "1", "1.json")).exists()).toBe(true);
 	expect(await fs.readdir(path.join(elsewhere, "archive", "sessions"))).toEqual([]);
 });
 
@@ -4959,33 +4992,53 @@ async function finishAfterRecovery(): Promise<void> {
 	expect(finished.restore?.errors).toEqual([]);
 }
 
-// The review's symlink reclaim: the archive copies a link by following it,
-// so a reclaim may give up the link's name only once the archive holds what
-// it leads to. A link that leads nowhere was counted in `brokenLinks` and
-// not copied; a link made after the archive was never copied; a directory a
-// link leads to that gained a file after the archive has a file no copy has.
-for (const shape of [
+// A reclaim gives up no symbolic link in the artifact tree. What a link
+// leads to is outside the tree and its leases, so it can change after any
+// proof of it — the review added a child to a linked directory, and rebound
+// a hop of a chain, after the proof and before the `unlink` — and a reference
+// cannot be archived, only what it led to at one moment. So every shape keeps
+// the tree and names the link, whether or not the archive holds what it led
+// to, and nothing of the tree or what it leads to is touched.
+const linkShapes = [
 	"leads nowhere",
 	"was made after the archive",
 	"leads to a directory that gained a file after the archive",
-] as const) {
-	test(`a reclaim keeps the live tree when a link in it ${shape}, in its preview as in applying`, async () => {
+	"leads to a file the archive holds",
+	"leads to a directory the archive holds",
+	"leads through a second link to a directory the archive holds",
+	"leads to a file inside the tree",
+	"leads to the archived copy itself",
+] as const;
+for (const shape of linkShapes) {
+	test(`a reclaim keeps the live tree and names the link when a link in it ${shape}, in its preview as in applying`, async () => {
 		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
 		const outside = path.join(root, "outside");
 		await Bun.write(path.join(outside, "target.log"), "TARGET");
 		await Bun.write(path.join(outside, "dir", "one.log"), "ONE");
+		await fs.symlink(path.join(outside, "dir"), path.join(outside, "hop"));
 		await Bun.write(path.join(liveArtifacts, "plain.log"), "PLAIN");
 		const link = path.join(liveArtifacts, "the.link");
-		if (shape === "leads nowhere") await fs.symlink(path.join(outside, "missing.log"), link);
-		if (shape === "leads to a directory that gained a file after the archive") {
-			await fs.symlink(path.join(outside, "dir"), link);
-		}
+		const before: Record<(typeof linkShapes)[number], string | undefined> = {
+			"leads nowhere": path.join(outside, "missing.log"),
+			"was made after the archive": undefined,
+			"leads to a directory that gained a file after the archive": path.join(outside, "dir"),
+			"leads to a file the archive holds": path.join(outside, "target.log"),
+			"leads to a directory the archive holds": path.join(outside, "dir"),
+			"leads through a second link to a directory the archive holds": path.join(outside, "hop"),
+			"leads to a file inside the tree": "plain.log",
+			"leads to the archived copy itself": undefined,
+		};
+		if (before[shape] !== undefined) await fs.symlink(before[shape]!, link);
 		const archived = await archiveOnly();
 		expect(archived.archive).toMatchObject({ archived: 1, brokenLinks: shape === "leads nowhere" ? 1 : 0 });
 		if (shape === "was made after the archive") await fs.symlink(path.join(outside, "target.log"), link);
+		if (shape === "leads to the archived copy itself")
+			await fs.symlink(path.join(archivedArtifacts, "plain.log"), link);
 		if (shape === "leads to a directory that gained a file after the archive") {
 			await Bun.write(path.join(outside, "dir", "two.log"), "TWO");
 		}
+		const target = await fs.readlink(link);
 
 		const preview = await runGcCommand({
 			flags: { agentDir: root, reclaim: archiveFile, forwardOnly: true, json: true },
@@ -4996,40 +5049,114 @@ for (const shape of [
 
 		expect(preview.reclaim?.wouldReclaim).toBeUndefined();
 		expect(reclaimed.reclaim?.reclaimed).toBe(0);
+		expect(reclaimed.reclaim?.partiallyRemoved ?? []).toEqual([]);
+		expect(reclaimed.reclaim?.keptArtifactTree).toBe(liveArtifacts);
 		for (const run of [preview, reclaimed]) {
-			expect(run.reclaim?.errors.join("\n")).toContain(`${link} is a link the archive holds no copy for`);
+			const said = run.reclaim?.errors.join("\n") ?? "";
+			expect(said).toContain(`${link} is a symbolic link, which a reclaim does not give up`);
+			expect(said).toContain("move the link out of the tree");
 		}
-		expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+		expect(await fs.readlink(link)).toBe(target);
 		expect(await Bun.file(path.join(liveArtifacts, "plain.log")).text()).toBe("PLAIN");
 		expect(await Bun.file(sessionFile).exists()).toBe(true);
+		expect(await Bun.file(path.join(outside, "target.log")).text()).toBe("TARGET");
+		expect(await Bun.file(path.join(outside, "dir", "one.log")).text()).toBe("ONE");
 	});
 }
 
-test("a reclaim gives up a link once the archive holds what it leads to, and leaves what it leads to alone", async () => {
+// The message's one step, done as it says: the link moved out of the tree,
+// then the same reclaim again. The link keeps leading where it led, and the
+// archive's copy of what it led to comes back as regular files.
+test("a reclaim that kept a link finishes once the link is moved out of the tree, as its message says", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	const outside = path.join(root, "outside");
-	await Bun.write(path.join(outside, "target.log"), "TARGET");
 	await Bun.write(path.join(outside, "dir", "one.log"), "ONE");
 	await Bun.write(path.join(liveArtifacts, "plain.log"), "PLAIN");
-	await fs.symlink(path.join(outside, "target.log"), path.join(liveArtifacts, "file.link"));
-	await fs.symlink(path.join(outside, "dir"), path.join(liveArtifacts, "dir.link"));
+	const link = path.join(liveArtifacts, "dir.link");
+	await fs.symlink(path.join(outside, "dir"), link);
 	await archiveOnly();
+	const reclaim = { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true };
+	expect((await runGcCommand({ flags: reclaim })).reclaim?.reclaimed).toBe(0);
 
-	const reclaimed = await runGcCommand({
-		flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
-	});
+	const movedTo = path.join(root, "dir.link");
+	await fs.rename(link, movedTo);
+	const reclaimed = await runGcCommand({ flags: reclaim });
 
 	expect(reclaimed.reclaim).toMatchObject({ reclaimed: 1, errors: [] });
 	expect(await fs.lstat(liveArtifacts).catch(() => undefined)).toBeUndefined();
-	expect(await Bun.file(path.join(outside, "target.log")).text()).toBe("TARGET");
-	expect(await Bun.file(path.join(outside, "dir", "one.log")).text()).toBe("ONE");
-	// What the archive held comes back as regular files.
+	expect(await Bun.file(path.join(movedTo, "one.log")).text()).toBe("ONE");
 	const restored = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
 	expect(restored.restore?.errors).toEqual([]);
-	expect((await fs.lstat(path.join(liveArtifacts, "file.link"))).isFile()).toBe(true);
-	expect(await Bun.file(path.join(liveArtifacts, "file.link")).text()).toBe("TARGET");
+	expect((await fs.lstat(path.join(liveArtifacts, "dir.link"))).isDirectory()).toBe(true);
 	expect(await Bun.file(path.join(liveArtifacts, "dir.link", "one.log")).text()).toBe("ONE");
 });
+
+// The second review's contradiction: a recorded stage in the archived tree
+// was listed as something applying would bring back, while the same preview
+// said applying leaves it in the archive. Applying restores the ordinary
+// missing artifact and leaves the stage; the list says the same.
+test("a restore preview does not list a recorded staging directory among what applying brings back", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	await Bun.write(path.join(liveArtifacts, "z.log"), "LAST");
+	await archiveOnly();
+	await fs.rm(path.join(liveArtifacts, "z.log"));
+	const ground = await mintStagingGround(path.join(archivedArtifacts, "b.log"), stagingLedgerDir(root));
+	await ground.handle.writeFile("PARTIAL STAGE");
+	await ground.handle.close();
+
+	const preview = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, json: true } });
+	const applied = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+
+	expect(preview.restore?.missingArtifacts).toEqual(["z.log"]);
+	expect(preview.restore?.errors.join("\n")).toContain(ground.dir);
+	expect(applied.restore?.errors.join("\n")).toContain(ground.dir);
+	expect(await Bun.file(path.join(liveArtifacts, "z.log")).text()).toBe("LAST");
+	expect(await fs.lstat(path.join(liveArtifacts, path.basename(ground.dir))).catch(() => undefined)).toBeUndefined();
+	expect(await Bun.file(ground.file).text()).toBe("PARTIAL STAGE");
+});
+
+// The third review's two: a dangling link where an archived file belongs is
+// absent to `stat`, so a separate presence walk listed it as coming back
+// while the conflict walk said it would be left; and a directory the restore
+// would stage in that cannot be written was promised too. One walk answers
+// both, and an entry applying could not publish is a refusal, not a promise.
+for (const shape of ["a dangling link stands at its name", "the directory it would land in is not writable"] as const) {
+	test.skipIf(shape === "the directory it would land in is not writable" && process.getuid?.() === 0)(
+		`a restore preview does not promise an archived file applying would refuse, when ${shape}`,
+		async () => {
+			const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+			await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+			await Bun.write(path.join(liveArtifacts, "b.log"), "SECOND");
+			await archiveOnly();
+			await fs.rm(path.join(liveArtifacts, "b.log"));
+			if (shape === "a dangling link stands at its name") {
+				await fs.symlink(path.join(root, "gone.log"), path.join(liveArtifacts, "b.log"));
+			} else {
+				await fs.chmod(liveArtifacts, 0o500);
+			}
+			let preview: GcResult;
+			let applied: GcResult;
+			try {
+				preview = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, json: true } });
+				applied = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+			} finally {
+				await fs.chmod(liveArtifacts, 0o755);
+			}
+
+			expect(preview.restore?.missingArtifacts).toEqual([]);
+			expect(preview.restore?.errors.join("\n")).toContain(
+				shape === "a dangling link stands at its name"
+					? `${path.join(liveArtifacts, "b.log")} already holds something else`
+					: `${liveArtifacts} is not writable`,
+			);
+			// Applying agrees: it does not bring the file back, and says so.
+			expect(applied.restore?.errors.length).toBeGreaterThan(0);
+			expect(await Bun.file(path.join(liveArtifacts, "a.log")).text()).toBe("FIRST");
+		},
+	);
+}
 
 // A live transcript over part of its tree — what a reclaim killed part-way
 // through its tree left before the transcript went first, and what removing
