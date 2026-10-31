@@ -968,15 +968,17 @@ export class Settings {
 
 	/**
 	 * Registry plumbing behind `Setting.setMember`: adds (`member`) or removes `item` in list `setting`
-	 * of the global layer, seeded from the default when that layer has no list, so the persisted list
-	 * changes by that item only; otherwise like a global {@link writeValue}.
+	 * of the global layer, seeded from the default (empty for an unset default) when that layer has no
+	 * list, so the persisted list changes by that item only; otherwise like a global {@link writeValue}.
 	 *
 	 * @throws Error when `setting` is not a list or the resulting list fails its `items`/`validate` check.
 	 */
 	writeMember(setting: AnySetting, item: string, { member }: { member: boolean }): void {
 		if (setting.type !== "array") throw new Error(`Setting ${setting.id} is not a list`);
 		const list = getByPath(this.#global, setting.segments);
-		const base: readonly unknown[] = Array.isArray(list) ? list : (setting.default as readonly unknown[]);
+		const base: readonly unknown[] = Array.isArray(list)
+			? list
+			: ((setting.default as readonly unknown[] | undefined) ?? []);
 		const present = base.includes(item);
 		if (present === member && !this.#softPins.has(setting)) return;
 		let next = [...base];

@@ -140,6 +140,31 @@ describe("config CLI schema coverage", () => {
 		expect(parsed.value).toEqual(["claude-opus-4-6", "gpt-5.3-codex"]);
 	});
 
+	// Unset follows the catalog's server-side fallback chain; `[]` sends none.
+	it("gets an unset list setting as unset, not as the explicit empty list", async () => {
+		// Ambient overlays would join the layers under test.
+		const previousConfigFiles = process.env.PI_CONFIG_FILES;
+		delete process.env.PI_CONFIG_FILES;
+		try {
+			const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+			const key = "providers.anthropic.serverSideFallbackModels";
+			const get = async (): Promise<{ value?: unknown }> => {
+				await runConfigCommand({ action: "get", key, flags: { json: true } });
+				return JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]));
+			};
+
+			const unset = await get();
+			await runConfigCommand({ action: "set", key, value: "[]", flags: { json: true } });
+			const empty = await get();
+
+			expect(Object.hasOwn(unset, "value")).toBe(false);
+			expect(empty.value).toEqual([]);
+		} finally {
+			if (previousConfigFiles === undefined) delete process.env.PI_CONFIG_FILES;
+			else process.env.PI_CONFIG_FILES = previousConfigFiles;
+		}
+	});
+
 	it("rejects unknown status line segment ids", async () => {
 		vi.spyOn(console, "log").mockImplementation(() => {});
 		vi.spyOn(console, "error").mockImplementation(() => {});
