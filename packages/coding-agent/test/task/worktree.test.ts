@@ -1453,6 +1453,32 @@ describe("a capture that could not read everything", () => {
 		}
 	});
 
+	it("raises when git could not open a directory, instead of reporting an empty patch", async () => {
+		// `git ls-files --others` skips a directory it cannot open, warns on
+		// stderr and exits 0, and the binding returns only the array — so a
+		// short listing arrives as a complete one, the capture names nothing,
+		// and the teardown removed the workspace with the only copy in it.
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		const baseline = await captureBaseline(repo);
+		const locked = path.join(repo, "locked");
+		await fs.mkdir(locked);
+		await fs.writeFile(path.join(locked, "only-copy.txt"), "work nobody else has\n");
+		await fs.chmod(locked, 0o000);
+
+		try {
+			await expect(captureDeltaPatch(repo, baseline)).rejects.toThrow(/Could not list/);
+		} finally {
+			await fs.chmod(locked, 0o700);
+		}
+		// Still there, because the capture refused rather than reporting none.
+		expect(await Bun.file(path.join(locked, "only-copy.txt")).exists()).toBe(true);
+	});
+
 	it("captures a readable untracked file in the same shape", async () => {
 		const repo = await createGitRepo();
 		await runGit(repo, ["config", "user.email", "src@example.com"]);

@@ -26,13 +26,9 @@
  *   the run, so its lease carries the owner's agent id and the owner ignores
  *   it; a nested child's does not and is honoured.
  */
-// `watch` is a notification channel, not a read: it answers "something
-// changed", never "nothing is there", so it cannot produce the absence this
-// subsystem's rule is about. Its own failure is handled where it is used.
-import { type FSWatcher, watch } from "node:fs";
+import { type FSWatcher, watch } from "./isolation-fs";
 import * as fs from "./isolation-fs";
 import * as path from "node:path";
-import { scheduler } from "node:timers/promises";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import {
 	withSandboxLock,
@@ -550,12 +546,7 @@ async function runPendingTeardownIfIdle(baseDir: string): Promise<void> {
 }
 
 /** One serialised attempt: if nobody holds the sandbox, run what its owner left to do. */
-async function settleIfIdle(
-	mergedDir: string,
-	workspace: LeasedWorkspace,
-	baseDir: string,
-	confirming = false,
-): Promise<void> {
+async function settleIfIdle(mergedDir: string, workspace: LeasedWorkspace, baseDir: string): Promise<void> {
 	if (workspace.pendingTeardown === undefined) return;
 	// Taking the registration is done under the sandbox lock, so a watch or a
 	// poll cannot start the teardown beside a caller that is deciding the same
@@ -564,102 +555,83 @@ async function settleIfIdle(
 	// a writer listing — share the hold instead of queueing behind it. Taking
 	// the lock raw here and re-entering through the wrapper deadlocked against
 	// this very call.
-	const pending = await withSandboxLock(
-		baseDir,
-		"settle",
-		async (): Promise<(() => Promise<void>) | undefined | "confirm"> => {
-			if (workspace.pendingTeardown === undefined) return undefined;
-			// The owner's own session counts as much as anyone else's. Excluding it
-			// let a teardown delete the workspace its own child was still writing
-			// in; the run's result no longer depends on that exclusion, because the
-			// capture at release has already happened by the time this runs.
-			const leases = await readHolders(path.join(baseDir, ISOLATION_LEASE_DIR));
-			if (leases.anyLive) {
-				// Somebody else arrived after a writer record let this process
-				// unreference its wait: the work is this process's to do, so the
-				// references come back. A lease that is only *ours* is different —
-				// waiting for ourselves is not a reason to keep the process alive,
-				// and a retained self-lease kept a finished program from exiting.
-				// Re-read the writer records, and under this same hold: publication
-				// takes this lock, so a record queued at the moment of the listing
-				// used to land just after it and the owner exited without capturing
-				// it. Under the lock there is no "just after".
-				const writersNow = await readHolders(path.join(baseDir, ISOLATION_UNFINISHED_DIR));
-				// Intents are read *after* every other listing this decision waits
-				// for, and nothing is awaited between reading them and acting on
-				// them. Read first, they are a snapshot of who had announced
-				// themselves before the awaits that followed, and a contender that
-				// announced during those awaits was invisible — which is how an
-				// owner exited with a foreign write still queued.
-				const intents = await readHolders(path.join(baseDir, ISOLATION_INTENT_DIR));
-				if (
-					leases.allOurs &&
-					!leases.unknown &&
-					writersNow.allOurs &&
-					!writersNow.unknown &&
-					intents.allOurs &&
-					!intents.unknown
-				) {
-					workspace.poll?.unref?.();
-					workspace.watcher?.unref?.();
-				} else {
-					workspace.poll?.ref?.();
-					workspace.watcher?.ref?.();
-				}
-				return undefined;
-			}
-			// A writer that gave up its lease but has not finished is still a user:
-			// its record going away is the event this is waiting for just as much
-			// as the last lease going away.
-			const writers = await readHolders(path.join(baseDir, ISOLATION_UNFINISHED_DIR));
-			// Last, for the same reason as above.
+	const pending = await withSandboxLock(baseDir, "settle", async (): Promise<(() => Promise<void>) | undefined> => {
+		if (workspace.pendingTeardown === undefined) return undefined;
+		// The owner's own session counts as much as anyone else's. Excluding it
+		// let a teardown delete the workspace its own child was still writing
+		// in; the run's result no longer depends on that exclusion, because the
+		// capture at release has already happened by the time this runs.
+		const leases = await readHolders(path.join(baseDir, ISOLATION_LEASE_DIR));
+		if (leases.anyLive) {
+			// Somebody else arrived after a writer record let this process
+			// unreference its wait: the work is this process's to do, so the
+			// references come back. A lease that is only *ours* is different —
+			// waiting for ourselves is not a reason to keep the process alive,
+			// and a retained self-lease kept a finished program from exiting.
+			// Re-read the writer records, and under this same hold: publication
+			// takes this lock, so a record queued at the moment of the listing
+			// used to land just after it and the owner exited without capturing
+			// it. Under the lock there is no "just after".
+			const writersNow = await readHolders(path.join(baseDir, ISOLATION_UNFINISHED_DIR));
+			// Intents are read *after* every other listing this decision waits
+			// for, and nothing is awaited between reading them and acting on
+			// them. Read first, they are a snapshot of who had announced
+			// themselves before the awaits that followed, and a contender that
+			// announced during those awaits was invisible — which is how an
+			// owner exited with a foreign write still queued.
 			const intents = await readHolders(path.join(baseDir, ISOLATION_INTENT_DIR));
-			if (writers.anyLive || intents.anyLive) {
-				// Our own record is kept until this process exits, so waiting for it
-				// must not keep this process alive: the record is on disk and
-				// reclamation takes the workspace afterwards. A *foreign* writer's
-				// record is different — it will go while this process can still do
-				// the final capture, and exiting early leaves that work uncaptured.
-				// The arrival branch needs the same answer: a foreign party on its
-				// way in is a reason to stay, whether or not its record has landed.
-				if (writers.allOurs && !writers.unknown && intents.allOurs && !intents.unknown) {
-					workspace.poll?.unref?.();
-					workspace.watcher?.unref?.();
-				} else {
-					workspace.poll?.ref?.();
-					workspace.watcher?.ref?.();
-				}
-				return undefined;
-			}
-			// Nothing is here and nothing is on its way — asked once more, with no
-			// await since, because the teardown this returns is irreversible.
-			const arriving = await readHolders(path.join(baseDir, ISOLATION_INTENT_DIR));
-			if (arriving.anyLive) {
+			if (
+				leases.allOurs &&
+				!leases.unknown &&
+				writersNow.allOurs &&
+				!writersNow.unknown &&
+				intents.allOurs &&
+				!intents.unknown
+			) {
+				workspace.poll?.unref?.();
+				workspace.watcher?.unref?.();
+			} else {
 				workspace.poll?.ref?.();
 				workspace.watcher?.ref?.();
-				return undefined;
 			}
-			if (!confirming) {
-				// Decided once, then again with the lock really released in
-				// between. A writer that announced its intent while this listing
-				// was in flight is, by then, blocked on this very lock: dropping
-				// it lets that writer publish, and the second pass sees the record
-				// it wrote. A decision taken without ever letting the queue move
-				// cannot see the party waiting behind it.
-				return "confirm";
+			return undefined;
+		}
+		// A writer that gave up its lease but has not finished is still a user:
+		// its record going away is the event this is waiting for just as much
+		// as the last lease going away.
+		const writers = await readHolders(path.join(baseDir, ISOLATION_UNFINISHED_DIR));
+		// Last, for the same reason as above.
+		const intents = await readHolders(path.join(baseDir, ISOLATION_INTENT_DIR));
+		if (writers.anyLive || intents.anyLive) {
+			// Our own record is kept until this process exits, so waiting for it
+			// must not keep this process alive: the record is on disk and
+			// reclamation takes the workspace afterwards. A *foreign* writer's
+			// record is different — it will go while this process can still do
+			// the final capture, and exiting early leaves that work uncaptured.
+			// The arrival branch needs the same answer: a foreign party on its
+			// way in is a reason to stay, whether or not its record has landed.
+			if (writers.allOurs && !writers.unknown && intents.allOurs && !intents.unknown) {
+				workspace.poll?.unref?.();
+				workspace.watcher?.unref?.();
+			} else {
+				workspace.poll?.ref?.();
+				workspace.watcher?.ref?.();
 			}
-			const owed = workspace.pendingTeardown;
-			workspace.pendingTeardown = undefined;
-			disarmTeardownWatch(workspace);
-			return owed;
-		},
-	);
-	if (pending === "confirm") {
-		// Outside any hold, so a queued acquirer runs before the second pass.
-		await scheduler.wait(0);
-		await settleIfIdle(mergedDir, workspace, baseDir, true);
-		return;
-	}
+			return undefined;
+		}
+		// Nothing is here and nothing is on its way — asked once more, with no
+		// await since, because the teardown this returns is irreversible.
+		const arriving = await readHolders(path.join(baseDir, ISOLATION_INTENT_DIR));
+		if (arriving.anyLive) {
+			workspace.poll?.ref?.();
+			workspace.watcher?.ref?.();
+			return undefined;
+		}
+		const owed = workspace.pendingTeardown;
+		workspace.pendingTeardown = undefined;
+		disarmTeardownWatch(workspace);
+		return owed;
+	});
 	// Outside the hold: the teardown takes this lock itself, and running it
 	// from inside would be the same self-deadlock in another place.
 	if (pending === undefined) return;

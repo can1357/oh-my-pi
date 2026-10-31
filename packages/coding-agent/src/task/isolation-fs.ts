@@ -10,6 +10,7 @@
  * of the module graph rather than of the text.
  */
 
+import { type FSWatcher, watch as nodeWatch } from "node:fs";
 import * as fs from "node:fs/promises";
 
 export {
@@ -42,6 +43,19 @@ export const rm = ((...args: Parameters<typeof fs.rm>) => fs.rm(...args)) as typ
 export const cp = ((...args: Parameters<typeof fs.cp>) => fs.cp(...args)) as typeof fs.cp;
 /** Write a file's whole contents. */
 export const writeFile = ((...args: Parameters<typeof fs.writeFile>) => fs.writeFile(...args)) as typeof fs.writeFile;
+
+/**
+ * Watch a directory.
+ *
+ * A notification channel, not a read: it answers "something changed", never
+ * "nothing is there", so it cannot manufacture the absence this subsystem's
+ * rule is about. It lives here so the modules that decide deletions need no
+ * `node:fs` import of their own — that import carries `promises` and every
+ * `*Sync` read with it, which made banning only `node:fs/promises` a bypass
+ * one identifier wide.
+ */
+export const watch = nodeWatch;
+export type { FSWatcher };
 
 /** Write a file's whole contents, creating parent directories. */
 export async function writeFileDeep(file: string, contents: string): Promise<void> {

@@ -55,13 +55,14 @@ const NOT_THIS_SUBSYSTEM = new Set([
 	"src/utils/repo-lock.ts",
 ]);
 
-const FS_MODULES = new Set(["node:fs/promises", "fs/promises"]);
-
 /**
- * `node:fs`'s `watch` is a notification channel, not a read: it answers
- * "something changed", never "nothing is there". Importing it is allowed; its
- * promise-based reads are what `FS_MODULES` keeps out.
+ * Every filesystem module, `node:fs` included.
+ *
+ * Allowing `node:fs` for `watch` was a bypass one identifier wide: it
+ * re-exports the same `promises` object and every `*Sync` read. `watch` now
+ * lives behind the surface, so nothing here needs it.
  */
+const FS_MODULES = new Set(["node:fs", "node:fs/promises", "fs", "fs/promises", "node:fs/promises/index"]);
 
 interface Graph {
 	/** Files reachable from the entry points by relative import. */
@@ -111,11 +112,15 @@ describe("the isolation path's filesystem surface", () => {
 		expect(fsImporters.filter(file => !SURFACE.has(file)).sort()).toEqual([]);
 	});
 
-	it("reaches no `Bun` file API either", async () => {
-		// The other door into the filesystem, and the one `Bun.file().stat()`
-		// came through. `Bun.write` is a write and is allowed; a read is not.
+	it("names no `Bun` API that reads the filesystem, however it is spelled", async () => {
+		// The other door in. Matching `Bun.file` by line let `const runtime =
+		// Bun; runtime.file(…)` and `new Bun.Glob("*").scan(…)` through, so
+		// the reference itself is what is checked: any mention of the `Bun`
+		// global outside the allowed list below. Those are the ones that do
+		// not read a path.
 		const root = path.resolve(import.meta.dir, "../..");
 		const { reachable } = await walkIsolationGraph(root);
+		const ALLOWED = /\bBun\s*\.\s*(hash|sleep|nanoseconds|which|version|revision)\b/;
 		const offences: string[] = [];
 		for (const file of reachable) {
 			if (SURFACE.has(file)) continue;
@@ -123,11 +128,44 @@ describe("the isolation path's filesystem surface", () => {
 			source.split("\n").forEach((line, index) => {
 				const code = line.trimStart();
 				if (code.startsWith("*") || code.startsWith("//")) return;
-				if (/\bBun\s*\.\s*file\b/.test(line)) offences.push(`${file}:${index + 1}: ${line.trim()}`);
+				if (!/\bBun\b/.test(line)) return;
+				if (ALLOWED.test(line)) return;
+				offences.push(`${file}:${index + 1}: ${line.trim()}`);
 			});
 		}
 
 		expect(offences).toEqual([]);
+	});
+
+	it("imports a fixed set of symbols from the workspace packages", async () => {
+		// The walk follows relative imports; it does not enter
+		// `@oh-my-pi/pi-utils`, whose file APIs serve the whole repository and
+		// are not isolation decisions. That leaves one route a reviewer found:
+		// add a reading helper there and call it from here. So the symbols
+		// these modules take from workspace packages are pinned, and a new one
+		// has to be added to this list — which is a diff somebody defends,
+		// not a silent import.
+		const root = path.resolve(import.meta.dir, "../..");
+		const transpiler = new Bun.Transpiler({ loader: "ts" });
+		const seen = new Set<string>();
+		for (const file of ENTRY_POINTS) {
+			const source = await fs.readFile(path.join(root, file), "utf8");
+			for (const line of source.split("\n")) {
+				const match = /^import\s+(?:type\s+)?\{?([^}]*)\}?\s+from\s+"(@oh-my-pi\/[^"]+)"/.exec(line.trim());
+				if (match) for (const name of match[1].split(",")) seen.add(`${match[2]}:${name.trim()}`);
+			}
+			// Parsed as well as scanned, so a multiline import is counted.
+			for (const entry of transpiler.scan(source).imports) {
+				if (entry.path.startsWith("@oh-my-pi/")) seen.add(`package:${entry.path}`);
+			}
+		}
+
+		// Pinned: three names that take a path and return one, and no reader.
+		expect([...seen].filter(name => /lookup|read|stat|file|dir/i.test(name)).sort()).toEqual([
+			"@oh-my-pi/pi-utils:acquireFileLock",
+			"@oh-my-pi/pi-utils:getWorktreeDir",
+			"@oh-my-pi/pi-utils:getWorktreesDir",
+		]);
 	});
 
 	it("keeps three answers, with `unknown` carrying its reason", async () => {

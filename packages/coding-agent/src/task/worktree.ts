@@ -452,12 +452,52 @@ export async function captureIsolationBaseline(
 	};
 }
 
+/**
+ * Raise unless every directory of this working tree can be listed.
+ *
+ * `git ls-files --others` **skips a directory it cannot open**, warns on
+ * stderr and exits 0, and the native binding returns only the array, so a
+ * short listing arrives as a complete one. The capture can name a file whose
+ * own diff failed; it cannot name a file git never mentioned, and the teardown
+ * then removed the workspace holding the only copy of it.
+ *
+ * So the absence is caught where it is manufactured. The same walk already
+ * runs when the baseline is taken — a tree with an unlistable directory
+ * cannot start an isolated run at all — so this adds no failure that the entry
+ * condition did not already impose, and it adds it at the moment that
+ * authorises a delete.
+ */
+async function assertTreeListable(root: string): Promise<void> {
+	const walk = async (dir: string): Promise<void> => {
+		const listing = await fs.readdirTypedLookup(dir);
+		if (listing.kind === "absent") return;
+		if (listing.kind === "unknown") {
+			throw new IsolationCaptureIncompleteError(
+				`Could not list ${dir}, so this capture cannot say what is in it: ${listing.reason}`,
+				[dir],
+			);
+		}
+		for (const entry of listing.value) {
+			if (!entry.isDirectory()) continue;
+			if (entry.name === ".git" || entry.name === "node_modules") continue;
+			const full = path.join(dir, entry.name);
+			// A nested repo captures itself, with this same check.
+			if ((await fs.lstatLookup(path.join(full, ".git"))).kind === "found") continue;
+			await walk(full);
+		}
+	};
+	await walk(root);
+}
+
 async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRepoDir = repoDir): Promise<string> {
 	const repo = vcs.requireGit(repoDir);
 	const objectRepo = objectRepoDir === repoDir ? repo : vcs.requireGit(objectRepoDir);
 	const currentHead = (await repo.headSha()) ?? "";
 	const currentStaged = await repo.diffText({ binary: true, cached: true });
 	const currentUnstaged = await repo.diffText({ binary: true });
+	// Before asking git what is here: its answer silently omits what it could
+	// not open, and this patch is what the teardown deletes on.
+	await assertTreeListable(repoDir);
 	const currentUntracked = await repo.lsFiles(true, true);
 	const currentUntracked_ = await captureUntrackedPatch(repoDir, currentUntracked, repo);
 	if (currentUntracked_.unread.length > 0) {
