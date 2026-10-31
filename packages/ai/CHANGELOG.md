@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed OpenAI Codex sessions failing every request with `Unknown parameter: 'input[N].internal_chat_message_metadata_passthrough.content_token_count'` after the backend annotated an assistant message; server-only item metadata is no longer replayed
+- Fixed OpenAI Codex sessions failing every request with `Unknown parameter: 'input[N].internal_chat_message_metadata_passthrough.content_token_count'` after the backend annotated an assistant message; server-only item metadata is no longer replayed ([#17593](https://github.com/can1357/oh-my-pi/pull/17593) by [@H4vC](https://github.com/H4vC))
 
 ## [18.14.2] - 2026-10-31
 
