@@ -9579,7 +9579,8 @@ export class AgentSession implements SettingsScope {
 			this.#queuedMessageRawText.set(userMessage, rawText);
 			// Queuing the message announces it on the steering-arrival channel
 			// (#announceSteeringArrivals), so a dialog waiting on the person ends
-			// its wait before the streaming boundary poll runs.
+			// its wait before the streaming boundary poll runs. A reader of that
+			// channel checks each message for itself (#steeringArrivalController).
 			this.agent.steer(userMessage);
 		}
 		// The optional call skips building the group when no caller asked for it.
@@ -9647,6 +9648,12 @@ export class AgentSession implements SettingsScope {
 	 * dialog is open ends the wait and is injected at the next batch boundary
 	 * instead of sitting behind the dialog until the person answers. A fire while
 	 * no listener is parked is a no-op (the fresh controller replaces the old).
+	 *
+	 * The channel announces only a person's messages, but a reader must still
+	 * check each message itself, as `superviseUserSteering` does: an admitted
+	 * group also carries the hidden companions queued before the message, which
+	 * are not the person's text, and by the time the reader wakes a message may
+	 * have left the queue. The signal says only that a person's message arrived.
 	 */
 	#steeringArrivalController = new AbortController();
 	/** Steering messages already announced on the arrival channel; a requeued one is not announced again. */
