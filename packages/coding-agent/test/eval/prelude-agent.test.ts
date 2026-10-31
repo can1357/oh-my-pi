@@ -308,6 +308,24 @@ describe("eval js read() URI delegation", () => {
 	});
 });
 
+describe("eval js workpool model selection", () => {
+	it("sends an exact selector through the shipped workpool helper", async () => {
+		const calls: Array<{ name: string; args: unknown }> = [];
+		const sandbox = loadPrelude(async (name, args) => {
+			calls.push({ name, args });
+			return { name: "chosen", agent: "scout", limit: 2 };
+		});
+		const create = sandbox.workpool as (agent: string, options: Record<string, unknown>) => Promise<unknown>;
+		await create("scout", { name: "chosen", model: "p/chosen:high" });
+		expect(calls).toEqual([
+			{
+				name: "__workpool__",
+				args: { op: "create", agent: "scout", name: "chosen", model: "p/chosen:high" },
+			},
+		]);
+	});
+});
+
 describe("eval js output() options (issue #17455)", () => {
 	afterEach(() => {
 		AgentRegistry.resetGlobalForTests();

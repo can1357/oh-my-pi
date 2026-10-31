@@ -2,9 +2,19 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Codex conversation replay failing with an unknown `internal_chat_message_metadata_passthrough.content_token_count` parameter by omitting backend-internal response metadata from replayed input ([#17590](https://github.com/can1357/oh-my-pi/pull/17590) by [@briankeefe](https://github.com/briankeefe)).
+
+## [18.14.2] - 2026-10-31
+
 ### Breaking Changes
 
 - Replaced `isLoopGuardedModel` with `loopGuardLevel`, which returns `"off"`, `"exact"`, or `"semantic"` from the model's `thinking-loop-guard` catalog rule
+
+### Added
+
+- Added `disableServerSideFallback` to `FactoryDroidOptions` and `SimpleStreamOptions`: a Factory Droid request leaves out the server-side refusal fallback chain and fails, before any of its content is streamed, if another model answers it ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 
@@ -2281,63 +2291,4 @@
 - Fixed an issue where malformed tool-call JSON from local Ollama or llama.cpp models was incorrectly retried as generic 500 errors, now surfacing a clear recovery message.
 - Fixed a race condition in OAuth callback flows where abort signals triggered before the callback listener was registered were ignored.
 
-## [16.2.7] - 2026-06-30
-
-### Added
-
-- Added service tier support for Google Gemini and Vertex AI, including model-specific service tier configurations via ServiceTierByFamily.
-- Added Google Vertex AI Interactions API support for Gemini 3+ models by default, with automatic fallback to :streamGenerateContent and a useInteractionsApi: false option to force standard generation.
-- Added support for explicit Vertex bearer access tokens via GOOGLE_CLOUD_ACCESS_TOKEN or CLOUDSDK_AUTH_ACCESS_TOKEN environment variables.
-
-### Changed
-
-- Updated service tier logic to use per-provider configurations instead of global scopes.
-- Refactored priority request billing and accounting to better align with specific provider capabilities.
-- Updated API key resolution precedence so explicit environment variables (e.g., GEMINI_API_KEY) override stored or broker-migrated static API keys, while deliberate OAuth logins still take highest precedence.
-
-### Fixed
-
-- Improved Vertex AI reliability by automatically falling back to global endpoints on 404 errors.
-- Fixed safety setting application for Google Vertex AI models.
-- Fixed Kimi Code's Anthropic-compatible request path to keep thinking enabled and downgrade forced tool choice for Kimi K2.7 Code title generation.
-- Fixed leaked reasoning fences (such as ```thinking or <think>) across all providers by splitting them into structured thinking blocks during streaming.
-- Fixed Codex requests failing with unsupported all_turns errors on older models (gpt-5.1 and gpt-5.3) by gating the reasoning.context: "all_turns" default to gpt-5.4+ models.
-
-## [16.2.6] - 2026-06-29
-
-### Fixed
-
-- Fixed Antigravity usage reporting to correctly infer daily and weekly quota windows from unlabeled reset-only rows, preventing Cloud Code Assist payloads from collapsing these counters into the default category.
-
-## [16.2.5] - 2026-06-28
-
-### Fixed
-
-- Fixed Google and Cloud Code Assist streams that end without a finish reason (dropped connections or truncated responses) being treated as fatal; they are now classified as transient so the coding agent automatically retries.
-
-## [16.2.4] - 2026-06-28
-
-### Added
-
-- Enabled freeform tool patch support for Azure OpenAI and Codex models
-
-### Fixed
-
-- Fixed usage reporting for Antigravity and Z.AI to correctly surface and preserve distinct quota windows (daily, weekly, monthly) instead of collapsing or duplicating them
-- Fixed an issue where `/usage show` returned "No usage data available" when using a custom proxy base URL for Codex
-- Fixed OpenAI stream read errors being incorrectly classified as non-transient, enabling the coding agent to automatically retry after recoverable stream failures
-
-## [16.2.3] - 2026-06-28
-
-### Changed
-
-- Enabled automatic removal of leaked reasoning tags for all models
-- Prevented reasoning text duplication when models emit both structured and inline thinking
-- Defaulted reasoning context to all turns for all Codex requests.
-
-### Fixed
-
-- Enabled freeform tool patch support for Azure OpenAI and Codex models.
-- Fixed an issue where the `/usage show` command returned "No usage data available" when using a custom proxy base URL for Codex.
-
-Older entries are archived in [packages/ai/CHANGELOG.md@cef4a452836c](https://github.com/can1357/oh-my-pi/blob/cef4a452836c7a8d547dd14470c34c9ed2dbb5f8/packages/ai/CHANGELOG.md).
+Older entries are archived in [packages/ai/CHANGELOG.md@7dc0d0325754](https://github.com/can1357/oh-my-pi/blob/7dc0d0325754955b01c15b64b220b2cf27e670db/packages/ai/CHANGELOG.md).
