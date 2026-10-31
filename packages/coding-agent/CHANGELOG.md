@@ -1,3 +1,5 @@
+<!-- markdownlint-disable MD024 -- release sections repeat Added/Changed/Fixed -->
+
 # Changelog
 
 ## [Unreleased]
