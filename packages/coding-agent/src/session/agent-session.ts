@@ -8662,8 +8662,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * @throws {AgentBusyError} when another turn claims the session between the interrupt and the continuation.
 	 * @throws {Error} when there is no conversation to resume.
 	 */
-	async resume(): Promise<void> {
-		if (!this.isStreaming) return this.#resumeIdle();
+	async resume(options?: { onAccepted?: () => void }): Promise<void> {
+		if (!this.isStreaming) return this.#resumeIdle(undefined, options?.onAccepted);
 		// waitForIdle() reads a pending unwind as busy. Hold one from the interrupt
 		// until the continuation is live, so a host driving this session to a result
 		// (the subagent executor) never mistakes the gap for the end of the run.
@@ -8676,8 +8676,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const queued = this.hasInterruptibleInput;
 			await this.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: queued });
 			// Interrupt-and-send: the abort's own drain resumes the run with the queued input.
-			if (queued) return;
-			await this.#resumeIdle(() => void this.#waitForPromptDispatchLive().then(release));
+			if (queued) {
+				options?.onAccepted?.();
+				return;
+			}
+			await this.#resumeIdle(() => void this.#waitForPromptDispatchLive().then(release), options?.onAccepted);
 		} finally {
 			release();
 		}
@@ -8686,9 +8689,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/**
 	 * {@link resume} on an idle session. `onAdmitted` fires once the directive
 	 * prompt claims the session; the bare resume schedules its continuation
-	 * before returning.
+	 * before returning. `onAccepted` fires once the continuation is handed to the agent.
 	 */
-	async #resumeIdle(onAdmitted?: () => void): Promise<void> {
+	async #resumeIdle(onAdmitted?: () => void, onAccepted?: () => void): Promise<void> {
 		const prompt = this.#recovery.prepareResume();
 		if (!prompt) {
 			// A handoff or full compaction can leave only the summary: it carries the
@@ -8707,6 +8710,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				userInitiated: true,
 				expandPromptTemplates: false,
 				onPromptAdmitted: onAdmitted,
+				onAccepted,
 			});
 			return;
 		}
@@ -8714,6 +8718,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#todo.resetCycle();
 		this.#resetPromptMaintenanceState();
 		this.#scheduleAgentContinue({ source: "manual-continue", turnRecords: [prompt] });
+		onAccepted?.();
 	}
 
 	/**
