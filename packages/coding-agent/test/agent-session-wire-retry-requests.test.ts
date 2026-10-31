@@ -149,10 +149,13 @@ function startWireStub(script: (requestIndex: number, request: WireRequest) => W
 	requests: () => number;
 	/** Requests whose body named `model`. */
 	requestsFor: (model: string) => number;
+	/** Cut every stream that has sent its partial body and waits for the client to read it. */
+	releaseCuts: () => void;
 	stop: () => void;
 } {
 	let requests = 0;
 	const models: string[] = [];
+	const pendingCuts: (() => void)[] = [];
 	const server = Bun.listen<Conn>({
 		hostname: "127.0.0.1",
 		port: 0,
@@ -209,9 +212,18 @@ function startWireStub(script: (requestIndex: number, request: WireRequest) => W
 					`HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: keep-alive\r\n\r\n${chunk(partial)}`,
 				);
 				socket.flush();
-				// Real delay on purpose: the cut has to reach the client *after* the
-				// partial body, and only the kernel's own flush orders those two.
-				setTimeout(() => socket.terminate(), 20);
+				// The cut must reach the client after the partial body. A reset that
+				// lands before the client has read the body makes the kernel drop
+				// that body, so the cut would look like one before any output, and a
+				// fixed delay lost that race under load. The harness releases the cut
+				// once the session has seen the reasoning (`releaseCuts`); the timer
+				// only keeps a run that never surfaces reasoning from hanging.
+				const cut = () => socket.terminate();
+				pendingCuts.push(cut);
+				setTimeout(() => {
+					const index = pendingCuts.indexOf(cut);
+					if (index >= 0) pendingCuts.splice(index, 1)[0]!();
+				}, 2_000);
 			},
 		},
 	});
@@ -219,6 +231,9 @@ function startWireStub(script: (requestIndex: number, request: WireRequest) => W
 		port: server.port,
 		requests: () => requests,
 		requestsFor: model => models.filter(candidate => candidate === model).length,
+		releaseCuts: () => {
+			for (const cut of pendingCuts.splice(0)) cut();
+		},
 		stop: () => server.stop(true),
 	};
 }
@@ -338,6 +353,8 @@ describe("wire retries reaching the provider", () => {
 		const retryDelaysMs: number[] = [];
 		session.subscribe(event => {
 			if (event.type === "auto_retry_start") retryDelaysMs.push(event.delayMs);
+			if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_delta")
+				stub.releaseCuts();
 		});
 		mockSchedulerWaitWithClock();
 
@@ -536,6 +553,10 @@ describe("wire retries reaching the provider", () => {
 		const session = new AgentSession({ agent, sessionManager, settings, modelRegistry: routeRegistry });
 		cleanups.push(() => sessionManager.close());
 		cleanups.push(() => session.dispose());
+		session.subscribe(event => {
+			if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_delta")
+				stub.releaseCuts();
+		});
 		mockSchedulerWaitWithClock();
 
 		await session.prompt("count the wire requests");
