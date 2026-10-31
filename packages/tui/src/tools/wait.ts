@@ -11,6 +11,7 @@ import {
 	formatBadge,
 	formatDuration,
 	formatEmptyMessage,
+	formatExpandHint,
 	formatFeedModelBadge,
 	formatStatusIcon,
 	getPreviewLines,
@@ -22,6 +23,7 @@ import {
 	cappedHeadLines,
 	createCachedComponent,
 	type ConfiguredThinkingLevel,
+	wrapTextWithAnsi,
 } from "../render/render-utils";
 import type { StructuredSubagentOutput } from "./task";
 import { describeJobTiles, type JobTile, type JobWidgetView, renderJobTileLines } from "./job-widget";
@@ -645,7 +647,6 @@ function jobsRenderResult(
 // =============================================================================
 
 const BODY_LINES_COLLAPSED = 2;
-const BODY_LINES_EXPANDED = 12;
 const BODY_LINE_WIDTH = 100;
 
 function ircGlyph(theme: Theme): string {
@@ -665,6 +666,7 @@ function bodyLines(
 	body: string,
 	expanded: boolean,
 	theme: Theme,
+	width: number,
 	options: {
 		indent?: string;
 		tone?: "dim" | "toolOutput";
@@ -673,19 +675,31 @@ function bodyLines(
 ): string[] {
 	const indent = options.indent ?? "";
 	const tone = options.tone ?? "toolOutput";
-	const max = expanded ? BODY_LINES_EXPANDED : (options.collapsedLines ?? BODY_LINES_COLLAPSED);
-	const preview = cappedHeadLines(
-		body.split("\n").filter(line => line.trim()),
-		max,
-	);
 	const quote = theme.fg("dim", theme.md.quoteBorder);
-	const lines = preview.lines.map(
-		line =>
-			`${indent}${quote} ${theme.fg(tone, replaceTabs(truncateToWidth(line.trim(), BODY_LINE_WIDTH, Ellipsis.Unicode)))}`,
-	);
-	const hidden = preview.hidden;
-	if (hidden > 0) {
-		lines.push(`${indent}${quote} ${theme.fg("dim", `… +${hidden} more ${hidden === 1 ? "line" : "lines"}`)}`);
+	const source = body.split("\n").filter(line => line.trim());
+	// Expanded keeps its own, larger budget: a body with thousands of lines would
+	// otherwise push the transcript off the screen.
+	const limit = expanded ? PREVIEW_LIMITS.EXPANDED_LINES : (options.collapsedLines ?? BODY_LINES_COLLAPSED);
+	const shown = cappedHeadLines(source, limit).lines;
+	const hidden = source.length - shown.length;
+	const contentWidth = Math.max(1, width - visibleWidth(indent) - 2);
+	let cut = false;
+	const lines: string[] = [];
+	for (const line of shown) {
+		const text = replaceTabs(line.trim());
+		// Expanded: soft-wrap to the card width so a long single-line message
+		// shows in full instead of being cut at BODY_LINE_WIDTH.
+		if (expanded) {
+			for (const row of wrapTextWithAnsi(text, contentWidth)) lines.push(`${indent}${quote} ${theme.fg(tone, row)}`);
+			continue;
+		}
+		cut ||= visibleWidth(text) > BODY_LINE_WIDTH;
+		lines.push(`${indent}${quote} ${theme.fg(tone, truncateToWidth(text, BODY_LINE_WIDTH, Ellipsis.Unicode))}`);
+	}
+	if (hidden > 0 || cut) {
+		const hint = formatExpandHint(theme, expanded, true);
+		const marker = hidden > 0 ? `… +${hidden} more ${hidden === 1 ? "line" : "lines"}` : "…";
+		lines.push(`${indent}${quote} ${theme.fg("dim", `${marker}${hint ? ` ${hint}` : ""}`)}`);
 	}
 	return lines;
 }
@@ -731,7 +745,7 @@ export function createIrcMessageCard(
 		const lines = [renderStatusLine({ iconOverride: ircGlyph(uiTheme), title, meta }, uiTheme)];
 		if (body.trim()) {
 			lines.push(
-				...bodyLines(body, expanded, uiTheme, {
+				...bodyLines(body, expanded, uiTheme, width, {
 					indent: "  ",
 					collapsedLines: 3,
 				}),
@@ -921,7 +935,7 @@ export const waitToolRenderer = {
 						},
 						uiTheme,
 					),
-					...bodyLines(waited.body, expanded, uiTheme, { indent: "  " }),
+					...bodyLines(waited.body, expanded, uiTheme, width, { indent: "  " }),
 				].map(line => truncateToWidth(line, width, Ellipsis.Unicode)),
 		);
 	},
