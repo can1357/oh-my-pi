@@ -765,6 +765,73 @@ describe("terminal launch dispatcher", () => {
 		expect(calls).toEqual([]);
 	});
 
+	it("places a Herdr pane through herdr-app when the terminal carries herdr-core identity", async () => {
+		const command = ["omp", "--fork", "/sessions/s.jsonl"];
+		const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t1", HC_TERMINAL_SOCKET: "/tmp/hc.sock" }, [
+			{ stdout: '{"terminal_id":"t9"}', exitCode: 0 },
+		]);
+		const result = await launch({
+			multiplexer: "herdr",
+			placement: "pane",
+			command,
+			cwd: "/repo",
+			direction: "down",
+		});
+
+		expect(result).toEqual({ multiplexer: "herdr", placement: "pane", id: "t9" });
+		expect(calls).toEqual([
+			{
+				argv: ["herdr-app", "do", "pane.split", "--direction", "down", "--argv", JSON.stringify(command)],
+				cwd: "/repo",
+				env: undefined,
+			},
+		]);
+	});
+
+	it("places a Herdr tab through herdr-app with the session cwd and label", async () => {
+		const command = ["omp", "--fork", "/sessions/s.jsonl"];
+		const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t1" }, [{ stdout: '{"tab_id":"tb1"}', exitCode: 0 }]);
+		const result = await launch({ multiplexer: "herdr", placement: "window", command, cwd: "/repo", label: "fork" });
+
+		expect(result).toEqual({ multiplexer: "herdr", placement: "window", id: "tb1" });
+		expect(calls[0]!.argv).toEqual([
+			"herdr-app",
+			"do",
+			"tab.new",
+			"--folder",
+			"/repo",
+			"--argv",
+			JSON.stringify(command),
+			"--name",
+			"fork",
+		]);
+	});
+
+	it("falls back to hc run when no herdr-app window answers", async () => {
+		const command = ["omp", "--fork", "/sessions/s.jsonl"];
+		const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t1" }, [
+			{ stdout: "", exitCode: 1 },
+			{ stdout: '{"address":"t9"}', exitCode: 0 },
+		]);
+		const result = await launch({ multiplexer: "herdr", placement: "pane", command, cwd: "/repo" });
+
+		expect(result.multiplexer).toBe("herdr");
+		expect(result.placement).toBe("pane");
+		expect(result.warning).toContain("hc run");
+		expect(calls).toHaveLength(2);
+		expect(calls[1]!.argv).toEqual(["hc", "run", "--bg", "--cwd", "/repo", ...command]);
+	});
+
+	it("rejects herdr-core placement when herdr-app and hc both fail", async () => {
+		const { launch } = createHarness({ HC_TERMINAL_ID: "t1" }, [
+			{ stdout: "", exitCode: 1 },
+			{ stdout: "", exitCode: 3 },
+		]);
+		await expect(launch({ multiplexer: "herdr", placement: "pane", command: ["omp"], cwd: "/repo" })).rejects.toThrow(
+			"hc run",
+		);
+	});
+
 	it("preserves Unicode argv and pane cwd through ASCII-only CMUX shell input", async () => {
 		// Canonical path: the child reports its realpath cwd (macOS tmpdir sits behind /var -> /private/var).
 		const tempRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "cmux-unicode-")));

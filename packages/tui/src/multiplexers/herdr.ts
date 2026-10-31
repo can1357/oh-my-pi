@@ -12,13 +12,18 @@ const HERDR_USAGE_TOKENS: Record<string, true> = { help: true, "--help": true, "
 export const herdrMultiplexer = {
 	id: "herdr",
 	precedence: "session",
-	sessionEnvKeys: ["HERDR_ENV", "HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID"],
+	sessionEnvKeys: ["HERDR_ENV", "HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID", "HC_TERMINAL_ID"],
 	ownsScreenGrid: true,
 	isInside(env: NodeJS.ProcessEnv = Bun.env): boolean {
 		// Identity vars survive env-sanitizing launchers that drop HERDR_ENV.
 		// Client-only socket, binary, session, and config overrides are not proof
 		// that this process runs inside a pane.
-		return env.HERDR_ENV === "1" || Boolean(env.HERDR_PANE_ID || env.HERDR_TAB_ID || env.HERDR_WORKSPACE_ID);
+		// HC_TERMINAL_ID is the herdr-core (herdr-app desktop) equivalent: it is
+		// set only inside terminals herdr-core runs, so it proves the same.
+		return (
+			env.HERDR_ENV === "1" ||
+			Boolean(env.HERDR_PANE_ID || env.HERDR_TAB_ID || env.HERDR_WORKSPACE_ID || env.HC_TERMINAL_ID)
+		);
 	},
 	/**
 	 * Herdr multiplexes panes like tmux but swallows bare OSC 9 / OSC 99 and has
