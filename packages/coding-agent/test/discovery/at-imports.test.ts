@@ -3,7 +3,11 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
-import { expandAtImports, MAX_AT_IMPORT_DEPTH, MAX_AT_IMPORT_EXPANSIONS } from "@oh-my-pi/pi-coding-agent/discovery/at-imports";
+import {
+	expandAtImports,
+	MAX_AT_IMPORT_DEPTH,
+	MAX_AT_IMPORT_EXPANSIONS,
+} from "@oh-my-pi/pi-coding-agent/discovery/at-imports";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 /**
@@ -135,12 +139,33 @@ describe("expandAtImports", () => {
 
 	test("caps total repeated include expansions", async () => {
 		await writeFile("leaf.md", "LEAF\n");
-		const root = await writeFile("root.md", Array.from({ length: MAX_AT_IMPORT_EXPANSIONS + 20 }, () => "@leaf.md").join("\n"));
+		const root = await writeFile(
+			"root.md",
+			Array.from({ length: MAX_AT_IMPORT_EXPANSIONS + 20 }, () => "@leaf.md").join("\n"),
+		);
 
 		const expanded = await expandAtImports(await fs.readFile(root, "utf8"), root);
 
 		expect(expanded.split("LEAF").length - 1).toBe(MAX_AT_IMPORT_EXPANSIONS);
 		expect(expanded).toContain("@leaf.md");
+	});
+
+	test("caps nested fan-out with one shared budget", async () => {
+		// Reviewer's shape: each level includes the next file four times.
+		// A per-level budget reset would emit 4^5 leaves and no residual token.
+		const fanOut = 4;
+		for (let level = 1; level <= MAX_AT_IMPORT_DEPTH; level++) {
+			await writeFile(`f${level}.md`, Array.from({ length: fanOut }, () => `@f${level + 1}.md`).join("\n"));
+		}
+		await writeFile(`f${MAX_AT_IMPORT_DEPTH + 1}.md`, "LEAF\n");
+
+		const root = path.join(tmp, "f1.md");
+		const expanded = await expandAtImports(await fs.readFile(root, "utf8"), root);
+		const leaves = expanded.split("LEAF").length - 1;
+
+		expect(leaves).toBeLessThanOrEqual(MAX_AT_IMPORT_EXPANSIONS);
+		expect(leaves).toBeLessThan(fanOut ** MAX_AT_IMPORT_DEPTH);
+		expect(expanded).toContain("@f");
 	});
 
 	test("expands a shared include reached through two different files", async () => {
