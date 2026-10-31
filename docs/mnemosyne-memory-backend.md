@@ -88,11 +88,14 @@ The combined project-plus-global behavior lives in the wrapper. The `@oh-my-pi/p
 
 The resolved primary project root mirrors the Hindsight backend's `projectLabel` (`hindsight/bank.ts`), so both backends collapse the same repository layouts to one location:
 
-1. A plain git checkout resolves to itself.
+1. A plain git checkout, or any directory inside it, resolves to the checkout root.
 2. A linked git worktree (`git worktree add`) resolves to the primary checkout's common `.git` directory's parent, via the native `vcs.repo()` discovery's `primaryRoot()`.
 3. A colocated Jujutsu workspace (`jj workspace add --colocate`, the default when the parent workspace is colocated) is implemented by jj as a real git worktree, so case 2 already covers it.
 4. A non-colocated Jujutsu workspace (no `.git` at all) resolves through the shared jj store — which `jj workspace add` points at the primary workspace's repo — via the same `vcs.repo()` discovery.
-5. A directory outside any git or jj repository resolves to itself, unchanged.
+5. A git directory stored outside its work tree (a submodule's `.git/modules/<name>`, or `git init --separate-git-dir`) resolves to the work tree its `core.worktree` setting names. Without that setting (a plain `--separate-git-dir` checkout), it resolves to the git directory itself. Direct access and every linked worktree of that checkout get the same root.
+6. A directory outside any git or jj repository resolves to itself.
+
+The resolved root is then canonicalized with `realpath`, so a directory reached through a symlink derives the same bank as its real path.
 
 Every linked worktree or workspace of one repository therefore derives the same per-project bank, matching how `per-project`/`per-project-tagged` already behave for Hindsight.
 
@@ -101,7 +104,6 @@ Every linked worktree or workspace of one repository therefore derives the same 
 Before this change, `per-project`/`per-project-tagged` derived the project bank from the raw working directory alone, so each git worktree or jj workspace of one repository had its own isolated bank. Existing installs therefore have one legacy bank per worktree/workspace, named from that worktree's own path, instead of one shared bank named from the primary checkout.
 
 No bank is renamed or merged automatically — `BankManager.renameBank` refuses when the destination bank already exists, which the primary checkout's bank normally does, so an automatic rename/merge across every worktree cannot be done safely in general. Instead, the existing legacy-bank rescue (`extendRecallWithLegacyBanks`, originally added for #2412) already widens recall to include any sibling bank under `<dbDir>/banks/` whose `working_memory` rows are all tagged with the active cwd, so old per-worktree banks keep showing up in recall from the worktree they were written from. New writes go to the new shared, primary-root-derived bank. There is no supported way to force every worktree's old memories into the new shared bank immediately: `BankManager` exposes only create/delete/list/rename, rename refuses when the destination already exists (as the primary checkout's bank normally does), and there is no bank-merge operation. Leaving the old banks in place for the legacy-bank rescue above to surface is the safe default; consolidating them sooner would require a bank-merge capability this release does not have.
-
 
 ## Recall previews and full-row reads
 
