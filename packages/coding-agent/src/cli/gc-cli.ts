@@ -210,6 +210,14 @@ export interface RestoreGcResult {
 	artifactsRestored: boolean;
 	/** What restoring the transcript does not bring back, in words a caller can print. */
 	notRestored: string[];
+	/**
+	 * In a preview, the archived artifact entries the live tree lacks, which
+	 * applying would bring home — relative to the artifact tree, a missing
+	 * directory named once. A live transcript over part of its tree is a
+	 * session that opens short, and a preview that said nothing about it
+	 * reported nothing to do.
+	 */
+	missingArtifacts?: string[];
 	errors: string[];
 }
 
@@ -1726,10 +1734,10 @@ async function proveEntryStillGoes(entry: ProvenEntry): Promise<void> {
 }
 
 /**
- * The same for the session's own transcript, which goes last: the name still
+ * The same for the session's own transcript, which goes first: the name still
  * holds the entry the reclaim proved under its lease, and what it holds, read
  * through a descriptor opened now, is still exactly what the archive inflates
- * to. A transcript somebody put at the name while the tree was being removed
+ * to. A transcript somebody put at the name while the tree was being proved
  * fails one of the two whichever way it got there — moved in beside the
  * original, or created on the inode the original freed.
  */
@@ -1876,14 +1884,16 @@ async function proveLiveTreeIsArchived(
 					`hold, so the live tree was kept; move it out of the tree to give this session's live copy up`,
 			);
 		}
-		// A link the copy resolved rather than carried: its own name is all
-		// there is to drop, and there is nothing to compare. What is recorded
-		// is one look at it, and it has to be the entry the walk just found —
-		// a file put in its place would go uncompared.
+		// A link the copy resolved rather than carried. What is recorded is
+		// one look at it, and it has to be the entry the walk just found — a
+		// file put in its place would go uncompared. Its name is all a reclaim
+		// gives up, and only once the archive is shown to hold what it points
+		// to: the reason a FIFO keeps the tree holds for a link with no copy.
 		const seen = await lookAt(source);
 		if (!seen || !sameIdentity({ ...seen, target: undefined }, identityFrom(stat))) {
 			throw new Error(`${source} changed while this run was looking at it; it was kept`);
 		}
+		await proveLinkTargetIsArchived(source, source, destination, sourceRoot);
 		proven.files.push({ path: source, destination, ...seen, compared: false });
 		return;
 	}
@@ -1918,6 +1928,76 @@ async function proveLiveTreeIsArchived(
 		throw new Error(`${source} is no longer the file this run proved; it was kept`);
 	}
 	proven.files.push({ path: source, destination, ...proved, compared: true });
+}
+
+/**
+ * Prove the archive holds what a link in the live tree leads to, collecting
+ * nothing under it for removal: a reclaim gives up the link's name, and what
+ * it points to stays where it is. The archive copied the link by following
+ * it — a file as a file, a directory as the tree below it, a link inside
+ * that followed again — so that is what has to be there, each file compared
+ * the way any live file is. A link that leads nowhere was counted in
+ * `brokenLinks` and not copied, a link made after the archive has no copy
+ * at all, and a FIFO, socket or device it leads to is not copied either:
+ * for any of them, giving up the name would remove something no copy has,
+ * so the live tree is kept, as it is for a FIFO in the tree itself.
+ *
+ * `entry` is the path being proved, through the link; `link` is the link
+ * the reclaim would remove, named in every refusal.
+ */
+async function proveLinkTargetIsArchived(
+	link: string,
+	entry: string,
+	destination: string,
+	sourceRoot: string,
+): Promise<void> {
+	const noCopy = (why: string): Error =>
+		new Error(
+			`${link} is a link the archive holds no copy for: ${why}; the live tree was kept — move the link out of ` +
+				`the tree to give this session's live copy up`,
+		);
+	const stat = await fs.stat(entry).catch(error => {
+		if (codeOf(error) === "ENOENT") return undefined;
+		throw error;
+	});
+	if (!stat) throw noCopy(entry === link ? "what it points to is gone" : `${entry} leads nowhere`);
+	if (stat.isDirectory()) {
+		if (!(await fs.lstat(destination).catch(() => undefined))?.isDirectory()) {
+			throw noCopy(`${destination} is not a directory holding what ${entry} holds`);
+		}
+		for (const name of (await fs.readdir(entry)).sort()) {
+			await proveLinkTargetIsArchived(link, path.join(entry, name), path.join(destination, name), sourceRoot);
+		}
+		return;
+	}
+	if (!stat.isFile()) {
+		throw noCopy(
+			`${entry} is ${stat.isFIFO() ? "a FIFO" : stat.isSocket() ? "a socket" : "a device"}, which the archive cannot hold`,
+		);
+	}
+	const live = await fs.open(entry, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK).catch(error => {
+		if (codeOf(error) === "ENOENT") return undefined;
+		throw error;
+	});
+	if (!live) throw noCopy(`${entry} leads nowhere`);
+	try {
+		const liveStat = await live.stat();
+		if (!liveStat.isFile()) throw noCopy(`${entry} is not a file the archive can hold`);
+		if (!(await survivesSourceRemoval(destination, sourceRoot))) {
+			throw noCopy(`${destination} is not an independent archived copy of ${entry}`);
+		}
+		const archived = await fs.lstat(destination).catch(() => undefined);
+		// A link onto the archived copy itself leads to that copy; its name is
+		// all that goes, and the copy stays where it is.
+		const isTheCopy = archived?.isFile() === true && archived.dev === liveStat.dev && archived.ino === liveStat.ino;
+		if (!isTheCopy && !(await archivedHandleIsHeldBy(live, liveStat, destination))) {
+			throw noCopy(`${entry} holds what ${destination} does not`);
+		}
+		const wider = await archivedModeWider(entry, liveStat, destination);
+		if (wider) throw new Error(wider);
+	} finally {
+		await live.close();
+	}
 }
 
 /**
@@ -2514,6 +2594,13 @@ export function renderText(result: GcResult): string {
 			const artifacts = restore.artifactsRestored ? " with its artifacts" : "";
 			lines.push(`restore: ${verb} ${restore.archivePath} to ${restore.sessionPath}${artifacts}`);
 		}
+		const missing = restore.missingArtifacts ?? [];
+		if (missing.length > 0) {
+			lines.push(
+				`restore: would bring back ${missing.length} artifact ${missing.length === 1 ? "entry" : "entries"} the live ` +
+					`tree lacks (${missing[0]}${missing.length > 1 ? ", …" : ""})`,
+			);
+		}
 		for (const note of restore.notRestored) lines.push(`not restored: ${note}`);
 		if (restore.errors.length > 0) lines.push(`restore errors: ${restore.errors.length}`);
 	}
@@ -2656,6 +2743,19 @@ async function runRestoreGc(options: ResolvedGcOptions, query: string): Promise<
 			);
 			return result;
 		}
+		// What applying would bring home, and what it would refuse.
+		const preview = async (): Promise<RestoreGcResult> => {
+			result.sessionPath = sessionPath;
+			const conflicts = await previewArtifactConflicts(archiveFile, sessionPath, options.agentDir);
+			result.errors.push(...conflicts);
+			result.notRestored.push(...conflicts);
+			try {
+				result.missingArtifacts = await archivedPathsWithoutLiveCopies(archiveFile, sessionPath);
+			} catch (error) {
+				result.errors.push(`the artifact tree could not be compared with the archive: ${errorMessage(error)}`);
+			}
+			return result;
+		};
 		if (await pathExists(sessionPath)) {
 			// `--apply` finishes an interrupted restore: the transcript landed,
 			// the artifact tree did not, and the live file is this very session
@@ -2665,11 +2765,7 @@ async function runRestoreGc(options: ResolvedGcOptions, query: string): Promise<
 				result.errors.push(`a different session file already exists at ${sessionPath}; nothing would be restored`);
 				return result;
 			}
-			result.sessionPath = sessionPath;
-			const conflicts = await previewArtifactConflicts(archiveFile, sessionPath, options.agentDir);
-			result.errors.push(...conflicts);
-			result.notRestored.push(...conflicts);
-			return result;
+			return await preview();
 		}
 		try {
 			// A dry run that cannot read the archive must say so, not promise a
@@ -2679,11 +2775,7 @@ async function runRestoreGc(options: ResolvedGcOptions, query: string): Promise<
 			result.errors.push(`${archiveFile} cannot be read: ${errorMessage(error)}`);
 			return result;
 		}
-		result.sessionPath = sessionPath;
-		const conflicts = await previewArtifactConflicts(archiveFile, sessionPath, options.agentDir);
-		result.errors.push(...conflicts);
-		result.notRestored.push(...conflicts);
-		return result;
+		return await preview();
 	}
 	try {
 		// This command already holds the gc lock for the whole run.
@@ -2915,9 +3007,8 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 			result.errors.push(notACopy());
 			return result;
 		}
-		// The root goes last, after every entry below it, so it is taken as
-		// the entry proved here and checked again as it goes, the way the
-		// entries are: a name rebound while the tree was being removed is
+		// The root is taken as the entry proved here and checked again as it
+		// goes, the way the entries are: a name rebound while this ran is
 		// somebody else's transcript.
 		const root = await lookAt(sessionPath);
 		if (!root) {
@@ -2952,14 +3043,25 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 		}
 		const removed: string[] = [];
 		try {
-			await removeProvenLiveTree(proven, removed);
+			// The transcript first, then the tree. A session with no live
+			// transcript is one the archive holds: resuming or opening it
+			// takes the restore route, which brings the archived tree home
+			// over whatever of the live one is left, and a `--restore` preview
+			// says so. With the tree going first, a run killed or failing part
+			// of the way through it left a live transcript over part of a
+			// tree, and the session opened short with nothing said — a
+			// reclaim writes no record of being unfinished the way an archive
+			// and a restore do, so the order is that record.
 			await proveTranscriptStillGoes(sessionPath, root, archiveFile);
 			await fs.unlink(sessionPath);
+			removed.push(sessionPath);
+			await removeProvenLiveTree(proven, removed);
 		} catch (error) {
 			// The removal itself failed part-way. What went is named, because
-			// the live tree is no longer whole and saying it was kept would be
+			// the live copy is no longer whole and saying it was kept would be
 			// false; the archive holds every file that went, as it was proved,
-			// and `omp gc --restore` brings it back.
+			// and `omp gc --restore` brings it back — as does opening the
+			// session, once its transcript is among what went.
 			result.partiallyRemoved = removed;
 			await keepTree();
 			result.errors.push(
