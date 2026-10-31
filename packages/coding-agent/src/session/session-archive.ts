@@ -147,15 +147,24 @@ export function moveAsidePermission(record: string): string {
  * What is said about a regular file that stood at a restore record's name
  * before this run: an earlier restore's record, or anything else — what it
  * holds is no evidence either way. It is left, and while it is there the
- * session is treated as unfinished.
+ * session is treated as unfinished: resuming it, `omp render` and anything
+ * else that opens it first finishes the restore, and so refuse too.
  */
 export function restoreRecordLeftNote(record: string): string {
 	return (
 		`${record} was there before this run — an earlier restore's record of being unfinished, or something else — and a ` +
 		`restore removes only the record it created in the same run, so it was left; while it is there this session is treated as ` +
-		`unfinished: look at it, and once the session holds everything, move it aside. ${moveAsidePermission(record)}`
+		`unfinished, and it does not open: resuming it, \`omp render\` and anything else that opens it refuse as gc does. ` +
+		`Look at it, and once the session holds everything, move it aside. ${moveAsidePermission(record)}`
 	);
 }
+
+/** The start of what is said when the directory a restore record lives in refuses a change to it. */
+function recordDirectoryNotWritable(record: string, error: unknown): string {
+	return `${path.dirname(record)} is not writable (${errorText(error)})`;
+}
+
+const isPermissionError = (error: unknown): boolean => codeOf(error) === "EACCES" || codeOf(error) === "EPERM";
 
 /** The restore record this run made, held through the descriptor it was made with. */
 interface OwnRestoreRecord {
@@ -170,8 +179,12 @@ interface OwnRestoreRecord {
  * something already has the name. It is created exclusively — `O_CREAT |
  * O_EXCL`, which neither follows a link nor opens what is there — and its
  * identity is taken from the descriptor it was created through, so what this
- * run later rewrites or removes is the file it made, never one that has the
- * name by then.
+ * run later rewrites is the file it made, never one that has the name by
+ * then, and what it removes is decided by that identity
+ * ({@link dropOwnRestoreRecord} says where a name still decides). An error
+ * after the create and before the write leaves an empty record, which, not
+ * being taken down by this run, needs the same move aside as any record a
+ * run left.
  */
 async function createRestoreRecord(record: string, text: string): Promise<OwnRestoreRecord | undefined> {
 	await fs.mkdir(path.dirname(record), { recursive: true });
@@ -180,6 +193,12 @@ async function createRestoreRecord(record: string, text: string): Promise<OwnRes
 		handle = await createExclusive(record, 0o600);
 	} catch (error) {
 		if (codeOf(error) === "EEXIST") return undefined;
+		if (isPermissionError(error)) {
+			throw new Error(
+				`${recordDirectoryNotWritable(record, error)}, so the restore could not make ${record} and restored nothing: ` +
+					`make it writable with \`chmod u+w\` and run the same command again`,
+			);
+		}
 		throw error;
 	}
 	try {
@@ -202,9 +221,23 @@ async function rewriteOwnRestoreRecord(own: OwnRestoreRecord, text: string): Pro
  * Take this run's record down, or say why what has its name was left. The
  * name is first renamed to one only this run knows, which moves exactly what
  * has the name at that moment; that is removed only when it is the file this
- * run created, by the identity taken at creation. Anything else is put back
- * under its name with `link`, which replaces nothing, or, where that cannot
- * be done, left where the rename put it and named.
+ * run created, by the identity taken at creation. The comparison runs while
+ * this run still holds the descriptor it created the record through, so that
+ * inode cannot have been handed out again to a file someone put at the name:
+ * an inode is freed only once its last link and its last open descriptor are
+ * gone. Anything else is put back under its name with `link`, which replaces
+ * nothing, or, where that cannot be done, left where the rename put it and
+ * named. A directory that refuses the change is named, with what to do.
+ *
+ * The rename and the `unlink` still name paths — no system call removes a
+ * file by its inode — so a writer with access to this directory is outside
+ * what this guards: a file it puts at the aside name just before the rename
+ * is replaced, and one it puts there between the comparison and the
+ * `unlink` is removed. The aside name carries 64 random bits and the
+ * `unlink` follows the comparison at once, which narrows that window and
+ * does not close it. Linux's `renameat2` with `RENAME_NOREPLACE` would
+ * refuse the first case, keeping both files; Node has no binding for it,
+ * and it would leave the second.
  */
 async function dropOwnRestoreRecord(own: OwnRestoreRecord): Promise<string | undefined> {
 	const aside = `${own.path}.${randomBytes(8).toString("hex")}.leaving`;
@@ -214,11 +247,26 @@ async function dropOwnRestoreRecord(own: OwnRestoreRecord): Promise<string | und
 		// Gone already: nothing has the name, which is what a finished
 		// restore leaves.
 		if (isEnoent(error)) return undefined;
+		if (isPermissionError(error)) {
+			return (
+				`${recordDirectoryNotWritable(own.path, error)}, so this restore could not take down its record ${own.path}, ` +
+				`though everything else came home. While it is there the session is treated as unfinished and does not open: ` +
+				`make the directory writable with \`chmod u+w\`, then look at the record and move it aside`
+			);
+		}
 		throw error;
 	}
 	const moved = await fs.lstat(aside);
 	if (moved.dev === own.dev && moved.ino === own.ino) {
-		await fs.unlink(aside);
+		try {
+			await fs.unlink(aside);
+		} catch (error) {
+			if (!isPermissionError(error)) throw error;
+			return (
+				`${recordDirectoryNotWritable(aside, error)}, so this restore's own record, already moved out of the way to ` +
+				`${aside}, could not be removed: make the directory writable with \`chmod u+w\` and move that file aside`
+			);
+		}
 		return undefined;
 	}
 	const replaced = `${own.path} held something other than the record this restore wrote`;
