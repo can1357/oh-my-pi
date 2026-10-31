@@ -4,9 +4,9 @@
 
 ### Performance
 
-- Batched episodic graph frontier traversal in `findRelatedMemories` and hoisted entity extraction queries in `ingestMemory` to eliminate $O(N)$ redundant queries per ingested memory.
-- Added composite index `idx_cf_spo` on `consolidated_facts(subject, predicate, object)` and expression/composite indexes on `facts` and `graph_edges`.
-- Cached parsed embeddings and precomputed norms in `vectorSimilarities` invalidated by SQLite `data_version` to avoid repeated JSON parsing on recall.
+- Batched episodic graph frontier traversal in `findRelatedMemories` (1 query per depth level) and hoisted entity extraction queries in `ingestMemory` to eliminate $O(N)$ redundant queries per ingested memory.
+- Added composite index `idx_cf_spo` on `consolidated_facts(subject, predicate, object)` to accelerate subject/predicate/object lookups during veracity consolidation.
+- Cached parsed embeddings and precomputed norms on `beam.caches` in `vectorSimilarities` using content fingerprints to avoid repeated JSON parsing and norm computation on recall.
 
 ## [18.13.3] - 2026-10-28
 

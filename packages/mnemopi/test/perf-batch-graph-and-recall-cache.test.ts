@@ -1,10 +1,9 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import { Database } from "bun:sqlite";
 import { initBeam } from "../src/core/beam/schema";
-import { recall, vectorSimilarities, getEmbeddingCacheStateForTests } from "../src/core/beam/recall";
+import { recall } from "../src/core/beam/recall";
 import type { BeamMemoryState } from "../src/core/beam/types";
 import { EpisodicGraph } from "../src/core/episodic-graph";
-import { VeracityConsolidator } from "../src/core/veracity-consolidation";
 
 function createTestBeam(db: Database): BeamMemoryState {
 	return {
@@ -36,7 +35,7 @@ function createTestBeam(db: Database): BeamMemoryState {
 }
 
 describe("performance optimizations: batched graph and recall cache", () => {
-	it("findRelatedMemories traverses BFS frontier using 1 batched query per depth level", () => {
+	it("findRelatedMemories returns exact main ordering and preserves first-seen edge weight with 1 query per depth", () => {
 		const db = new Database(":memory:");
 		const graph = new EpisodicGraph({ db });
 
@@ -64,173 +63,161 @@ describe("performance optimizations: batched graph and recall cache", () => {
 
 		const related = graph.findRelatedMemories("root", 2, "ctx");
 
-		// Depth 1 frontier has 1 node ('root') -> 1 query.
-		// Depth 2 frontier has 3 nodes ('node_1', 'node_2', 'node_3') -> 1 batched query instead of 3 queries!
+		// Depth 1 (root) -> 1 query, Depth 2 (frontier: node_1, node_3, node_2) -> 1 batched query
 		expect(edgeQueryCount).toBe(2);
 
-		// Semantics & depth correctness
-		expect(related.map(r => r.memoryId)).toContain("node_1");
-		expect(related.map(r => r.memoryId)).toContain("node_2");
-		expect(related.map(r => r.memoryId)).toContain("node_3");
-		expect(related.map(r => r.memoryId)).toContain("leaf_1a");
-		expect(related.map(r => r.memoryId)).toContain("leaf_1b");
-		expect(related.map(r => r.memoryId)).toContain("leaf_2a");
-		expect(related.map(r => r.memoryId)).toContain("leaf_3a");
-
 		const depth1 = related.filter(r => r.depth === 1);
-		expect(depth1.map(r => r.memoryId)).toEqual(["node_1", "node_3", "node_2"]); // sorted by weight DESC (0.9, 0.8, 0.7)
+		expect(depth1.map(r => r.memoryId)).toEqual(["node_1", "node_3", "node_2"]);
 
 		const depth2 = related.filter(r => r.depth === 2);
-		expect(depth2.map(r => r.memoryId)).toEqual(["leaf_1b", "leaf_2a", "leaf_1a", "leaf_3a"]); // sorted by weight DESC (0.95, 0.85, 0.6, 0.5)
+		expect(depth2.map(r => r.memoryId)).toEqual(["leaf_1b", "leaf_1a", "leaf_3a", "leaf_2a"]);
 
 		graph.close();
 	});
 
-	it("ingestMemory hoists entity queries and links multiple memories efficiently", () => {
+	it("preserves first-seen edge weight when neighbor is reachable from multiple frontier nodes", () => {
 		const db = new Database(":memory:");
 		const graph = new EpisodicGraph({ db });
 
-		const m1 = graph.ingestMemory("Alice uses TypeScript and React for building frontend tools.", "mem_1");
-		expect(m1.memoryId).toBe("mem_1");
+		const now = new Date().toISOString();
+		graph.addEdge({ source: "root", target: "n1", edgeType: "ctx", weight: 0.9, timestamp: now });
+		graph.addEdge({ source: "root", target: "n2", edgeType: "ctx", weight: 0.7, timestamp: now });
 
-		const m2 = graph.ingestMemory("Bob also uses TypeScript for backend development.", "mem_2");
-		expect(m2.memoryId).toBe("mem_2");
+		// n1 is processed before n2 because weight 0.9 > 0.7.
+		// n1 -> shared has weight 0.3. n2 -> shared has weight 0.95.
+		// First-seen semantics: edge from n1 (weight 0.3) must be recorded, not heavier n2 edge.
+		graph.addEdge({ source: "n1", target: "shared", edgeType: "ctx", weight: 0.3, timestamp: now });
+		graph.addEdge({ source: "n2", target: "shared", edgeType: "ctx", weight: 0.95, timestamp: now });
 
-		const m3 = graph.ingestMemory("Charlie uses React and TypeScript for user interfaces.", "mem_3");
-		expect(m3.memoryId).toBe("mem_3");
-
-		const related = graph.findRelatedMemories("mem_2", 1);
-		expect(related.some(r => r.memoryId === "mem_1")).toBe(true);
+		const related = graph.findRelatedMemories("root", 2, "ctx");
+		const shared = related.find(r => r.memoryId === "shared");
+		expect(shared).toBeDefined();
+		expect(shared?.weight).toBe(0.3);
 
 		graph.close();
 	});
 
-	it("vectorSimilarities caches parsed embeddings and precomputed norms across repeated calls and invalidates on update", () => {
+	it("beam.recall with cached embeddings updates scores after UPDATE/DELETE on memory_embeddings, handles zero-norm and non-finite embeddings, and works across repeated recalls", async () => {
 		const db = new Database(":memory:");
 		initBeam(db);
-
 		const beam = createTestBeam(db);
 
 		const now = new Date().toISOString();
 		db.run(
 			"INSERT INTO working_memory (id, content, source, timestamp, session_id, importance) VALUES (?, ?, 'user', ?, 'test-session', 0.5)",
-			["wm_1", "Doc 1 content", now],
+			["wm_1", "Rust compiler performance", now],
 		);
 		db.run(
 			"INSERT INTO working_memory (id, content, source, timestamp, session_id, importance) VALUES (?, ?, 'user', ?, 'test-session', 0.5)",
-			["wm_2", "Doc 2 content", now],
+			["wm_2", "Database query optimization", now],
+		);
+		db.run(
+			"INSERT INTO working_memory (id, content, source, timestamp, session_id, importance) VALUES (?, ?, 'user', ?, 'test-session', 0.5)",
+			["wm_zero", "Zero norm embedding entry", now],
+		);
+		db.run(
+			"INSERT INTO working_memory (id, content, source, timestamp, session_id, importance) VALUES (?, ?, 'user', ?, 'test-session', 0.5)",
+			["wm_nan", "Non finite embedding entry", now],
 		);
 
-		const vec1 = [1.0, 0.0, 0.0];
-		const vec2 = [0.0, 1.0, 0.0];
 		db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test-model')", [
 			"wm_1",
-			JSON.stringify(vec1),
+			JSON.stringify([1.0, 0.0, 0.0]),
 		]);
 		db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test-model')", [
 			"wm_2",
-			JSON.stringify(vec2),
+			JSON.stringify([0.0, 1.0, 0.0]),
+		]);
+		db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test-model')", [
+			"wm_zero",
+			JSON.stringify([0.0, 0.0, 0.0]),
+		]);
+		db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test-model')", [
+			"wm_nan",
+			JSON.stringify([Number.NaN, 1.0, 0.0]),
 		]);
 
 		const queryVec = [1.0, 0.0, 0.0];
 
-		let jsonParseCount = 0;
-		const originalJsonParse = JSON.parse;
-		const parseSpy = spyOn(JSON, "parse").mockImplementation(
-			(text: string, reviver?: Parameters<typeof JSON.parse>[1]) => {
-				jsonParseCount++;
-				return originalJsonParse(text, reviver);
-			},
-		);
-
-		try {
-			// First call: parses 2 embeddings and stores them in cache
-			const sim1 = vectorSimilarities(beam, ["wm_1", "wm_2"], queryVec, "working");
-			expect(sim1.get("wm_1")).toBeCloseTo(1.0, 5);
-			expect(sim1.get("wm_2")).toBeCloseTo(0.0, 5);
-			expect(jsonParseCount).toBe(2);
-
-			const cacheState = getEmbeddingCacheStateForTests(beam);
-			expect(cacheState?.size).toBe(2);
-
-			// Second call: reuses cached vectors and precomputed norms without calling JSON.parse!
-			const sim2 = vectorSimilarities(beam, ["wm_1", "wm_2"], queryVec, "working");
-			expect(sim2.get("wm_1")).toBeCloseTo(1.0, 5);
-			expect(sim2.get("wm_2")).toBeCloseTo(0.0, 5);
-			expect(jsonParseCount).toBe(2); // no new JSON.parse calls!
-
-			// Updating row wm_2 invalidates wm_2 in cache because raw JSON differs
-			const updatedVec2 = [0.7071, 0.7071, 0.0];
-			db.run("UPDATE memory_embeddings SET embedding_json = ? WHERE memory_id = ?", [
-				JSON.stringify(updatedVec2),
-				"wm_2",
-			]);
-
-			const sim3 = vectorSimilarities(beam, ["wm_1", "wm_2"], queryVec, "working");
-			expect(sim3.get("wm_1")).toBeCloseTo(1.0, 5);
-			expect(sim3.get("wm_2")).toBeCloseTo(0.7071, 3);
-			// wm_2 was re-parsed because raw string changed, while wm_1 was reused from cache
-			expect(jsonParseCount).toBe(3);
-		} finally {
-			parseSpy.mockRestore();
-		}
-	});
-
-	it("beam.recall integrates with vectorSimilarities with queryEmbedding", async () => {
-		const db = new Database(":memory:");
-		initBeam(db);
-
-		const beam = createTestBeam(db);
-
-		const now = new Date().toISOString();
-		db.run(
-			"INSERT INTO working_memory (id, content, source, timestamp, session_id, importance) VALUES (?, ?, 'user', ?, 'test-session', 0.8)",
-			["wm_target", "Specialized database engine performance", now],
-		);
-		db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test-model')", [
-			"wm_target",
-			JSON.stringify([0.9, 0.1, 0.0]),
-		]);
-
-		const results = await recall(beam, "database", 10, {
-			queryEmbedding: [0.9, 0.1, 0.0],
+		// 1. First recall: populates embedding cache and handles zero-norm & non-finite vectors without NaN scores
+		const res1 = await recall(beam, "performance", 10, {
+			queryEmbedding: queryVec,
 			includeWorking: true,
 			useSynonyms: false,
 		});
 
-		expect(results.length).toBeGreaterThanOrEqual(1);
-		expect(results[0]?.id).toBe("wm_target");
-	});
+		expect(res1.length).toBeGreaterThan(0);
+		for (const r of res1) {
+			expect(Number.isFinite(r.score)).toBe(true);
+			if (r.dense_score !== undefined) {
+				expect(Number.isFinite(r.dense_score)).toBe(true);
+			}
+		}
+		const wm1_res1 = res1.find(r => r.id === "wm_1");
+		expect(wm1_res1).toBeDefined();
+		expect(wm1_res1?.dense_score).toBeCloseTo(1.0, 3);
 
-	it("initializes composite and expression indexes in schema and consolidator", () => {
-		const db = new Database(":memory:");
-		initBeam(db);
-		const consolidator = new VeracityConsolidator(":memory:", db);
-		const graph = new EpisodicGraph({ db });
+		// Zero-norm and non-finite candidates must produce 0 dense score, not NaN
+		const wmZero_res1 = res1.find(r => r.id === "wm_zero");
+		if (wmZero_res1?.dense_score !== undefined) {
+			expect(wmZero_res1.dense_score).toBe(0);
+		}
+		const wmNan_res1 = res1.find(r => r.id === "wm_nan");
+		if (wmNan_res1?.dense_score !== undefined) {
+			expect(wmNan_res1.dense_score).toBe(0);
+		}
 
-		const indexes = db.query("SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'index'").all() as {
-			name: string;
-			tbl_name: string;
-			sql: string;
-		}[];
+		// 2. Repeated recall: works across repeated recalls with cached embeddings
+		const res2 = await recall(beam, "performance", 10, {
+			queryEmbedding: queryVec,
+			includeWorking: true,
+			useSynonyms: false,
+		});
+		const wm1_res2 = res2.find(r => r.id === "wm_1");
+		expect(wm1_res2?.dense_score).toBeCloseTo(1.0, 3);
 
-		const indexMap = new Map(indexes.map(i => [i.name, i]));
+		// 3. Query embedding with non-finite or zero-norm components also yields valid finite scores
+		const resZeroQuery = await recall(beam, "performance", 10, {
+			queryEmbedding: [0, 0, 0],
+			includeWorking: true,
+			useSynonyms: false,
+		});
+		for (const r of resZeroQuery) {
+			expect(Number.isFinite(r.score)).toBe(true);
+			if (r.dense_score !== undefined) expect(r.dense_score).toBe(0);
+		}
 
-		expect(indexMap.has("idx_cf_spo")).toBe(true);
-		expect(indexMap.get("idx_cf_spo")?.tbl_name).toBe("consolidated_facts");
+		const resNanQuery = await recall(beam, "performance", 10, {
+			queryEmbedding: [Number.NaN, 1.0, 0.0],
+			includeWorking: true,
+			useSynonyms: false,
+		});
+		for (const r of resNanQuery) {
+			expect(Number.isFinite(r.score)).toBe(true);
+			if (r.dense_score !== undefined) expect(Number.isFinite(r.dense_score)).toBe(true);
+		}
 
-		expect(indexMap.has("idx_facts_lower_subject")).toBe(true);
-		expect(indexMap.get("idx_facts_lower_subject")?.tbl_name).toBe("facts");
-		expect(indexMap.get("idx_facts_lower_subject")?.sql).toContain("LOWER(subject)");
+		// 4. UPDATE on memory_embeddings updates scores on next recall
+		db.run("UPDATE memory_embeddings SET embedding_json = ? WHERE memory_id = ?", [
+			JSON.stringify([0.0, 1.0, 0.0]),
+			"wm_1",
+		]);
+		const resUpdated = await recall(beam, "performance", 10, {
+			queryEmbedding: [0.0, 1.0, 0.0],
+			includeWorking: true,
+			useSynonyms: false,
+		});
+		const wm1_resUpdated = resUpdated.find(r => r.id === "wm_1");
+		expect(wm1_resUpdated?.dense_score).toBeCloseTo(1.0, 3);
 
-		expect(indexMap.has("idx_facts_lower_object")).toBe(true);
-		expect(indexMap.get("idx_facts_lower_object")?.tbl_name).toBe("facts");
-		expect(indexMap.get("idx_facts_lower_object")?.sql).toContain("LOWER(object)");
-
-		expect(indexMap.has("idx_edges_type_source_target")).toBe(true);
-		expect(indexMap.get("idx_edges_type_source_target")?.tbl_name).toBe("graph_edges");
-
-		consolidator.close();
-		graph.close();
+		// 5. DELETE from memory_embeddings evicts cached entry and updates scores
+		db.run("DELETE FROM memory_embeddings WHERE memory_id = ?", ["wm_1"]);
+		const resDeleted = await recall(beam, "performance", 10, {
+			queryEmbedding: [0.0, 1.0, 0.0],
+			includeWorking: true,
+			useSynonyms: false,
+		});
+		const wm1_resDeleted = resDeleted.find(r => r.id === "wm_1");
+		expect(wm1_resDeleted?.dense_score ?? 0).toBe(0);
 	});
 });

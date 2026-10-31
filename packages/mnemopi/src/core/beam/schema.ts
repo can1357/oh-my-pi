@@ -359,8 +359,6 @@ export function initBeam(db: Database): void {
 		"CREATE INDEX IF NOT EXISTS idx_facts_session ON facts(session_id)",
 		"CREATE INDEX IF NOT EXISTS idx_facts_subject ON facts(subject)",
 		"CREATE INDEX IF NOT EXISTS idx_facts_source ON facts(source_msg_id)",
-		"CREATE INDEX IF NOT EXISTS idx_facts_lower_subject ON facts(LOWER(subject))",
-		"CREATE INDEX IF NOT EXISTS idx_facts_lower_object ON facts(LOWER(object))",
 	]);
 	db.run(`
 		CREATE VIRTUAL TABLE IF NOT EXISTS fts_facts USING fts5(
@@ -424,24 +422,5 @@ export function initBeam(db: Database): void {
 		"CREATE INDEX IF NOT EXISTS idx_triples_predicate ON triples(predicate)",
 		"CREATE INDEX IF NOT EXISTS idx_triples_object ON triples(object)",
 		"CREATE INDEX IF NOT EXISTS idx_triples_valid_from ON triples(valid_from)",
-	]);
-
-	db.run(`
-		CREATE TABLE IF NOT EXISTS graph_edges (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			source TEXT NOT NULL,
-			target TEXT NOT NULL,
-			edge_type TEXT NOT NULL,
-			weight REAL DEFAULT 1.0,
-			timestamp TEXT,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			UNIQUE(source, target, edge_type)
-		)
-	`);
-	runAll(db, [
-		"CREATE INDEX IF NOT EXISTS idx_edges_source ON graph_edges(source)",
-		"CREATE INDEX IF NOT EXISTS idx_edges_target ON graph_edges(target)",
-		"CREATE INDEX IF NOT EXISTS idx_edges_type ON graph_edges(edge_type)",
-		"CREATE INDEX IF NOT EXISTS idx_edges_type_source_target ON graph_edges(edge_type, source, target)",
 	]);
 }

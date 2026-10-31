@@ -208,12 +208,17 @@ function clampWeight(weight: number): number {
 	return weight;
 }
 
-function lowerSet(values: readonly (string | null)[]): Set<string> {
+function normalizeEntity(value: string | null | undefined): string | null {
+	if (value == null) return null;
+	const normalized = value.trim().toLocaleLowerCase();
+	return normalized.length > 0 ? normalized : null;
+}
+
+function lowerSet(values: readonly (string | null | undefined)[]): Set<string> {
 	const out = new Set<string>();
 	for (const value of values) {
-		if (value === null) continue;
-		const normalized = value.trim().toLocaleLowerCase();
-		if (normalized.length > 0) out.add(normalized);
+		const norm = normalizeEntity(value);
+		if (norm !== null) out.add(norm);
 	}
 	return out;
 }
@@ -316,8 +321,6 @@ export class EpisodicGraph {
 		this.db.run("CREATE INDEX IF NOT EXISTS idx_facts_predicate ON facts(predicate)");
 		this.db.run("CREATE INDEX IF NOT EXISTS idx_facts_object ON facts(object)");
 		this.db.run("CREATE INDEX IF NOT EXISTS idx_facts_source_msg ON facts(source_msg_id)");
-		this.db.run("CREATE INDEX IF NOT EXISTS idx_facts_lower_subject ON facts(LOWER(subject))");
-		this.db.run("CREATE INDEX IF NOT EXISTS idx_facts_lower_object ON facts(LOWER(object))");
 		this.db.run(`
 			CREATE TABLE IF NOT EXISTS graph_edges (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -333,7 +336,6 @@ export class EpisodicGraph {
 		this.db.run("CREATE INDEX IF NOT EXISTS idx_edges_source ON graph_edges(source)");
 		this.db.run("CREATE INDEX IF NOT EXISTS idx_edges_target ON graph_edges(target)");
 		this.db.run("CREATE INDEX IF NOT EXISTS idx_edges_type ON graph_edges(edge_type)");
-		this.db.run("CREATE INDEX IF NOT EXISTS idx_edges_type_source_target ON graph_edges(edge_type, source, target)");
 	}
 
 	extractGist(content: string, memoryId: string): Gist {
@@ -451,17 +453,25 @@ export class EpisodicGraph {
 			if (currentLevel.size === 0) break;
 			const nextLevel = new Set<string>();
 			const edges = this.findEdgesTouching([...currentLevel], edgeType, threshold);
+			const edgesByNode = new Map<string, GraphEdge[]>();
+			for (const mem of currentLevel) edgesByNode.set(mem, []);
 			for (const edge of edges) {
-				const neighbor = currentLevel.has(edge.source) ? edge.target : edge.source;
-				if (seen.has(neighbor)) continue;
-				seen.add(neighbor);
-				nextLevel.add(neighbor);
-				results.push({
-					memoryId: neighbor,
-					edgeType: edge.edgeType,
-					weight: edge.weight,
-					depth: hop,
-				});
+				edgesByNode.get(edge.source)?.push(edge);
+				if (edge.target !== edge.source) edgesByNode.get(edge.target)?.push(edge);
+			}
+			for (const mem of currentLevel) {
+				for (const edge of edgesByNode.get(mem) ?? []) {
+					const neighbor = edge.source === mem ? edge.target : edge.source;
+					if (seen.has(neighbor)) continue;
+					seen.add(neighbor);
+					nextLevel.add(neighbor);
+					results.push({
+						memoryId: neighbor,
+						edgeType: edge.edgeType,
+						weight: edge.weight,
+						depth: hop,
+					});
+				}
 			}
 			currentLevel = nextLevel;
 		}
@@ -714,38 +724,19 @@ export class EpisodicGraph {
 		return [...ids];
 	}
 
-	private memoryContent(memoryId: string, now: string): string {
-		try {
-			const working = this.db
-				.query(`SELECT content FROM working_memory WHERE id = ? AND ${LIVE_MEMORY_SQL}`)
-				.get(memoryId, now) as {
-				content: string;
-			} | null;
-			if (working !== null) return working.content;
-		} catch {
-			// Standalone EpisodicGraph users may not have Beam tables.
+	private forEachChunk<T>(
+		items: readonly string[],
+		fn: (chunk: readonly string[], placeholders: string) => T[],
+		chunkSize = 500,
+	): T[] {
+		if (items.length === 0) return [];
+		const result: T[] = [];
+		for (let i = 0; i < items.length; i += chunkSize) {
+			const chunk = items.slice(i, i + chunkSize);
+			const placeholders = chunk.map(() => "?").join(", ");
+			result.push(...fn(chunk, placeholders));
 		}
-		try {
-			const episodic = this.db
-				.query(`SELECT content FROM episodic_memory WHERE id = ? AND ${LIVE_MEMORY_SQL}`)
-				.get(memoryId, now) as {
-				content: string;
-			} | null;
-			if (episodic !== null) return episodic.content;
-		} catch {
-			// Fall through to graph-local gist text.
-		}
-		const gist = this.db.query("SELECT text FROM gists WHERE memory_id = ?").get(memoryId) as {
-			text: string;
-		} | null;
-		return gist?.text ?? "";
-	}
-
-	private entityOverlapScore(sourceMemoryId: string, targetMemoryId: string): number {
-		const sets = this.entitySetsForMemories([sourceMemoryId, targetMemoryId]);
-		const left = sets.get(sourceMemoryId) ?? new Set();
-		const right = sets.get(targetMemoryId) ?? new Set();
-		return Math.round(overlapScore(left, right) * 1000) / 1000;
+		return result;
 	}
 
 	private entitySetsForMemories(memoryIds: readonly string[]): Map<string, Set<string>> {
@@ -754,25 +745,20 @@ export class EpisodicGraph {
 		for (const id of memoryIds) {
 			result.set(id, new Set());
 		}
-		const chunkSize = 500;
-		for (let i = 0; i < memoryIds.length; i += chunkSize) {
-			const chunk = memoryIds.slice(i, i + chunkSize);
-			const placeholders = chunk.map(() => "?").join(", ");
-			const rows = this.db
-				.query(`SELECT source_msg_id, subject, object FROM facts WHERE source_msg_id IN (${placeholders})`)
-				.all(...chunk) as (FactRow & { source_msg_id: string })[];
-			for (const row of rows) {
-				const set = result.get(row.source_msg_id);
-				if (set) {
-					if (row.subject) {
-						const norm = row.subject.trim().toLocaleLowerCase();
-						if (norm.length > 0) set.add(norm);
-					}
-					if (row.object) {
-						const norm = row.object.trim().toLocaleLowerCase();
-						if (norm.length > 0) set.add(norm);
-					}
-				}
+		const rows = this.forEachChunk(
+			memoryIds,
+			(chunk, placeholders) =>
+				this.db
+					.query(`SELECT source_msg_id, subject, object FROM facts WHERE source_msg_id IN (${placeholders})`)
+					.all(...chunk) as (FactRow & { source_msg_id: string })[],
+		);
+		for (const row of rows) {
+			const set = result.get(row.source_msg_id);
+			if (set) {
+				const s = normalizeEntity(row.subject);
+				if (s !== null) set.add(s);
+				const o = normalizeEntity(row.object);
+				if (o !== null) set.add(o);
 			}
 		}
 		return result;
@@ -783,37 +769,37 @@ export class EpisodicGraph {
 		if (memoryIds.length === 0) return contentMap;
 
 		const remaining = new Set(memoryIds);
-		const chunkSize = 500;
 
 		try {
-			for (let i = 0; i < memoryIds.length; i += chunkSize) {
-				const chunk = memoryIds.slice(i, i + chunkSize);
-				const placeholders = chunk.map(() => "?").join(", ");
-				const rows = this.db
-					.query(`SELECT id, content FROM working_memory WHERE id IN (${placeholders}) AND ${LIVE_MEMORY_SQL}`)
-					.all(...chunk, now) as { id: string; content: string }[];
-				for (const row of rows) {
-					contentMap.set(row.id, row.content);
-					remaining.delete(row.id);
-				}
+			const rows = this.forEachChunk(
+				[...remaining],
+				(chunk, placeholders) =>
+					this.db
+						.query(`SELECT id, content FROM working_memory WHERE id IN (${placeholders}) AND ${LIVE_MEMORY_SQL}`)
+						.all(...chunk, now) as { id: string; content: string }[],
+			);
+			for (const row of rows) {
+				contentMap.set(row.id, row.content);
+				remaining.delete(row.id);
 			}
 		} catch {
 			// Standalone EpisodicGraph users may not have Beam tables.
 		}
 
 		if (remaining.size > 0) {
-			const remainingIds = [...remaining];
 			try {
-				for (let i = 0; i < remainingIds.length; i += chunkSize) {
-					const chunk = remainingIds.slice(i, i + chunkSize);
-					const placeholders = chunk.map(() => "?").join(", ");
-					const rows = this.db
-						.query(`SELECT id, content FROM episodic_memory WHERE id IN (${placeholders}) AND ${LIVE_MEMORY_SQL}`)
-						.all(...chunk, now) as { id: string; content: string }[];
-					for (const row of rows) {
-						contentMap.set(row.id, row.content);
-						remaining.delete(row.id);
-					}
+				const rows = this.forEachChunk(
+					[...remaining],
+					(chunk, placeholders) =>
+						this.db
+							.query(
+								`SELECT id, content FROM episodic_memory WHERE id IN (${placeholders}) AND ${LIVE_MEMORY_SQL}`,
+							)
+							.all(...chunk, now) as { id: string; content: string }[],
+				);
+				for (const row of rows) {
+					contentMap.set(row.id, row.content);
+					remaining.delete(row.id);
 				}
 			} catch {
 				// Fall through to graph-local gist text.
@@ -821,17 +807,16 @@ export class EpisodicGraph {
 		}
 
 		if (remaining.size > 0) {
-			const remainingIds = [...remaining];
-			for (let i = 0; i < remainingIds.length; i += chunkSize) {
-				const chunk = remainingIds.slice(i, i + chunkSize);
-				const placeholders = chunk.map(() => "?").join(", ");
-				const rows = this.db
-					.query(`SELECT memory_id, text FROM gists WHERE memory_id IN (${placeholders})`)
-					.all(...chunk) as { memory_id: string; text: string }[];
-				for (const row of rows) {
-					contentMap.set(row.memory_id, row.text);
-					remaining.delete(row.memory_id);
-				}
+			const rows = this.forEachChunk(
+				[...remaining],
+				(chunk, placeholders) =>
+					this.db
+						.query(`SELECT memory_id, text FROM gists WHERE memory_id IN (${placeholders})`)
+						.all(...chunk) as { memory_id: string; text: string }[],
+			);
+			for (const row of rows) {
+				contentMap.set(row.memory_id, row.text);
+				remaining.delete(row.memory_id);
 			}
 		}
 
