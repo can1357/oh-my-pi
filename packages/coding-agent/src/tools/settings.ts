@@ -984,7 +984,7 @@ export const cfgAsyncMaxJobs = register({
 		group: "Execution",
 		label: "Max Background Jobs",
 		description:
-			"Maximum background jobs running at once in a session and all its subagents: async bash, async tasks and eval agents (0 or less = no limit)",
+			"Maximum background jobs running at once in a session and all its subagents (0 or less = no limit). Counts running async tasks (not tasks still waiting for a task.maxConcurrency slot), async bash, eval agent() handles and workpool() batches, and blocking bash and eval calls that can auto-background, from their start; at the cap such a call runs untracked in the foreground instead",
 	},
 });
 
