@@ -1,5 +1,5 @@
 import { retryResetTimezoneOffsetFor } from "@oh-my-pi/pi-catalog/compat/behavior";
-import { extractRetryHint } from "@oh-my-pi/pi-utils";
+import { extractRetryHint, longestRetryHint } from "@oh-my-pi/pi-utils";
 
 export type HeadersLike = Headers | Record<string, string | undefined> | undefined | null;
 
@@ -10,6 +10,23 @@ export function extractProviderRetryHint(
 ): number | undefined {
 	const naiveResetTimezoneOffset = provider === undefined ? undefined : retryResetTimezoneOffsetFor(provider);
 	return extractRetryHint(undefined, message, { naiveResetTimezoneOffset });
+}
+
+/**
+ * The longest wait `message` names, across every occurrence of every hint
+ * phrase — {@link longestRetryHint} with the provider's catalog-declared
+ * timestamp timezone. `retry-after-ms=200 retry-after-ms=9000` is 9 s here,
+ * where {@link extractProviderRetryHint} stops at the first occurrence and
+ * reads 200 ms. A caller that decides whether a retry can wait at all — turn
+ * recovery's held retry, which declines a hint longer than its window — needs
+ * this reading: a retry inside a window the server said is closed fails again.
+ */
+export function longestProviderRetryHint(
+	provider: string | undefined,
+	message: string | undefined,
+): number | undefined {
+	const naiveResetTimezoneOffset = provider === undefined ? undefined : retryResetTimezoneOffsetFor(provider);
+	return longestRetryHint(undefined, message, { naiveResetTimezoneOffset });
 }
 
 const RETRY_AFTER_HINT = "retry-after-ms=";

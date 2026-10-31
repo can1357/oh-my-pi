@@ -364,6 +364,97 @@ describe("connection-failure classification", () => {
 		expect(AIError.is(AIError.classify(new Error(errorMessage)), AIError.Flag.Connection)).toBe(false);
 	});
 
+	/** Every time unit spelling the classifier must read as a unit, glued and spaced. */
+	const TIME_UNITS = [
+		"ns",
+		"nanoseconds",
+		"us",
+		"µs",
+		"μs",
+		"microseconds",
+		"ms",
+		"milliseconds",
+		"s",
+		"sec",
+		"seconds",
+		"m",
+		"min",
+		"minutes",
+		"h",
+		"hours",
+		"d",
+		"days",
+	];
+	const ROLE_STATUSES = [400, 401, 403, 429, 500, 503, 529];
+
+	it.each(
+		ROLE_STATUSES.flatMap(n =>
+			TIME_UNITS.flatMap(unit => [`after ${n} ${unit}`, `after ${n}${unit}`, `after ${n}.5 ${unit}`]),
+		),
+	)("reads a number with a time unit as a duration: %s", suffix => {
+		// The unit decides the number's role, whatever surrounds it: a duration is
+		// never a status, so it neither takes the cut off the connection lane nor
+		// stops the retry.
+		const error = new Error(`read ECONNRESET ${suffix}`);
+		const id = AIError.classify(error);
+		expect(AIError.is(id, AIError.Flag.Connection)).toBe(true);
+		expect(AIError.retriable(id)).toBe(true);
+		expect(AIError.status(error)).toBeUndefined();
+	});
+
+	it.each(
+		ROLE_STATUSES.flatMap(n => [
+			`elapsed: ${n}`,
+			`duration: ${n}`,
+			`latency: ${n}`,
+			`timeout = ${n}`,
+			`elapsed_ms="${n}"`,
+			`elapsed_ms='${n}'`,
+			`latency_ns=${n}`,
+			`waitSeconds: ${n}`,
+			`"retry_after": "${n}"`,
+			`https://gateway.invalid/poll?elapsed=${n}us`,
+			`https://gateway.invalid/poll?delay=${n}%20ns`,
+		]),
+	)("reads a time-named field as a duration, quoted or not: %s", suffix => {
+		const error = new Error(`read ECONNRESET ${suffix}`);
+		const id = AIError.classify(error);
+		expect(AIError.is(id, AIError.Flag.Connection)).toBe(true);
+		expect(AIError.retriable(id)).toBe(true);
+		expect(AIError.status(error)).toBeUndefined();
+	});
+
+	it.each(
+		ROLE_STATUSES.flatMap(status =>
+			[`after 401 ns; HTTP ${status}`, `elapsed_ms="503"; HTTP ${status}`, `HTTP ${status} after 2.5 s`].map(
+				text => [status, text],
+			),
+		) as [number, string][],
+	)("classifies a status beside a duration as the status alone: HTTP %d in %s", (status, text) => {
+		// The duration is removed, never the status: the message classifies the
+		// way `read ECONNRESET HTTP <status>` does.
+		const withDuration = new Error(`read ECONNRESET ${text}`);
+		const alone = new Error(`read ECONNRESET HTTP ${status}`);
+		expect(AIError.classify(withDuration)).toBe(AIError.classify(alone));
+		expect(AIError.status(withDuration)).toBe(status);
+	});
+
+	it.each([
+		["a status line", "503 Service Unavailable", 503],
+		["a status after a prose colon", "upstream closed the connection: 503 Service Unavailable", 503],
+		["a status glued into CJK prose", "服务器返回503错误", undefined],
+	] as [string, string, number | undefined][])(
+		"keeps a status that is not a duration: %s",
+		(_label, text, expected) => {
+			// `503 Service` is not `503 s`, a plain word before a colon is prose, and
+			// CJK glues the status to its words without making it an identifier.
+			expect(AIError.status(new Error(text))).toBe(expected);
+			expect(AIError.is(AIError.classify(new Error(`read ECONNRESET ${text}`)), AIError.Flag.Connection)).toBe(
+				false,
+			);
+		},
+	);
+
 	it("keeps a rejected credential off the connection lane", () => {
 		// The far side answered and refused the credential; replaying it holds the
 		// session on a route that refuses it again, and the hold reads only the

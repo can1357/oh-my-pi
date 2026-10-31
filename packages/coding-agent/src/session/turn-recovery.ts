@@ -20,7 +20,7 @@ import type {
 import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { shouldDropTruncatedThinkingOnlyAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
-import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { longestProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-credit";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
@@ -305,6 +305,8 @@ export interface TurnRecoveryHost {
 		delayMs?: number;
 		generation?: number;
 		shouldContinue?: () => boolean;
+		/** Called when the continuation is skipped instead of run (e.g. `shouldContinue` returned `false`). */
+		onSkip?: () => void;
 		onError?: (error: unknown) => void;
 	}): void;
 	waitForSessionMessagePersistence(message: AssistantMessage): Promise<void>;
@@ -397,6 +399,21 @@ export class TurnRecovery {
 	#retryAbortController: AbortController | undefined;
 	#retryAttempt = 0;
 	/**
+	 * The prompt generation in which `abortRetry()` cancelled the saga ({@link #isRetryCancelled}).
+	 * A property of the recovery, not of the moment it arrived: every point where the saga is
+	 * about to act on a retry — after each wait it awaits, after it announces the retry, when
+	 * the scheduled continuation fires, and when a later failure in the saga asks for another
+	 * retry — reads it and ends the saga as cancelled. A request already on the wire is not
+	 * aborted (that is `session.abort()`); if it fails, the saga ends instead of retrying it.
+	 *
+	 * A saga can be cut without closing — `session.abort()` aborts the request, and a turn an
+	 * extension starts skips the per-prompt reset — so the next turn's saga must not start out
+	 * cancelled: a session abort does not mark it (`abortRetry()` skips the mark while the abort
+	 * is in progress), and the mark is keyed to the prompt generation it was made in. Also reset
+	 * with the saga (`resolveRetry()`) and by a new prompt.
+	 */
+	#retryCancelledGeneration: number | undefined;
+	/**
 	 * Selectors a classifier refusal has already moved off in the current retry saga; see the walk
 	 * bound below. Cleared in `resolveRetry()`, which every end of a saga goes through (an answer,
 	 * the exhausted budget, a cancelled wait, an abort), so no turn inherits another turn's walk.
@@ -405,8 +422,8 @@ export class TurnRecovery {
 	/**
 	 * Held retries the current saga has spent; see {@link CONNECTION_FAILURE_CHAIN_HOLD_ATTEMPTS}.
 	 * Reset when the saga ends (`resolveRetry()`) and when a new prompt starts, never by a
-	 * model switch, a credential switch, a fresh retry budget or `abortRetry()` with a retried
-	 * request in flight, so nothing a still-running recovery does re-opens it.
+	 * model switch, a credential switch or a fresh retry budget, so nothing a still-running
+	 * recovery does re-opens it.
 	 */
 	#connectionHoldsSpent = 0;
 	/**
@@ -576,6 +593,7 @@ export class TurnRecovery {
 		// a close (its retried request superseded before it settled).
 		this.#connectionHoldsSpent = 0;
 		this.#connectionHoldClosed = false;
+		this.#retryCancelledGeneration = undefined;
 	}
 
 	/** Sets whether one terminal empty stop is accepted for the current prompt. */
@@ -914,6 +932,7 @@ export class TurnRecovery {
 	resolveRetry(): void {
 		this.#connectionHoldsSpent = 0;
 		this.#connectionHoldClosed = false;
+		this.#retryCancelledGeneration = undefined;
 		this.#releaseRetry();
 	}
 
@@ -1837,8 +1856,8 @@ export class TurnRecovery {
 	 * hold that does not report going out once closes the hold for the rest of
 	 * the recovery ({@link #connectionHoldClosed}), so at most one held call can
 	 * spend a provider retry budget. The recovery's hold state ends only with the
-	 * recovery: `abortRetry()` with a retried request already in flight does not
-	 * end it, because that request's failure still continues the recovery.
+	 * recovery, and `abortRetry()` ends the recovery from whatever moment it is
+	 * called (see {@link #isRetryCancelled}), so no cancelled recovery holds again.
 	 *
 	 * Excluded on purpose:
 	 * - capacity (429, 529, overloaded, a usage limit) — the replay re-hits the
@@ -2681,11 +2700,12 @@ export class TurnRecovery {
 	}
 
 	#parseRetryAfterMsFromError(errorMessage: string): number | undefined {
-		// Single call into the provider-aware parser: it merges every supported
-		// form (account resets, retry-after-ms, legacy retry-after /
-		// x-ratelimit-reset text) by longest-wins, so a shorter reset phrase
-		// can never shadow a longer retry signal carried in the same message.
-		return extractProviderRetryHint(this.#host.model()?.provider, errorMessage);
+		// The longest wait the message names, across every form (account resets,
+		// retry-after-ms, legacy retry-after / x-ratelimit-reset text) and every
+		// occurrence of each: `retry-after-ms=200 retry-after-ms=9000` is 9 s, so
+		// a held retry declines it rather than resending inside a window the
+		// server said is closed.
+		return longestProviderRetryHint(this.#host.model()?.provider, errorMessage);
 	}
 
 	/**
@@ -2726,6 +2746,9 @@ export class TurnRecovery {
 		// not a retry loop, so it runs even when the user disabled retries: it switches
 		// the model once and lets the base turn proceed.
 		if (!retrySettings.enabled && !options?.fireworksFastFallback) return false;
+		// `abortRetry()` landed while the retried request was on the wire; that
+		// request failed, and the cancelled saga ends here instead of retrying it.
+		if (this.#isRetryCancelled()) return this.#endCancelledRetry();
 		const classifierRefusal = this.isClassifierRefusal(message);
 
 		const generation = this.#host.promptGeneration();
@@ -2860,6 +2883,9 @@ export class TurnRecovery {
 					if (this.#retryAbortController === resetAbortController) this.#retryAbortController = undefined;
 				}
 			}
+			// A reset read that settled as `abortRetry()` landed: the wait was not
+			// aborted, but the saga was.
+			if (this.#isRetryCancelled()) return this.#endCancelledRetry();
 			if (rotated || restored) {
 				switchedCredential = true;
 				delayMs = 0;
@@ -2964,6 +2990,9 @@ export class TurnRecovery {
 			} finally {
 				if (this.#retryAbortController === rotateAbortController) this.#retryAbortController = undefined;
 			}
+			// A rotation that resolved as `abortRetry()` landed has already switched
+			// the credential; the retry it would carry is still cancelled.
+			if (this.#isRetryCancelled()) return this.#endCancelledRetry();
 			if (switchedCredential) delayMs = 0;
 		}
 		// A thinking-loop abort is not a provider failure — it is the loop guard
@@ -3207,6 +3236,9 @@ export class TurnRecovery {
 		}
 
 		await this.#recordPendingRetryError(message, id, { switchedCredential, switchedModel, delayMs });
+		// Cancelled while the chain was consulted or the attempt recorded: do not
+		// announce a retry that will not run.
+		if (this.#isRetryCancelled()) return this.#endCancelledRetry();
 
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_start",
@@ -3216,7 +3248,9 @@ export class TurnRecovery {
 			errorMessage,
 			errorId: message.errorId,
 		});
-		if (this.#host.abortInProgress() || this.#host.promptGeneration() !== generation) {
+		// `abortRetry()` from an `auto_retry_start` listener runs before any wait is
+		// installed for it to abort; the saga still reads it here.
+		if (this.#host.abortInProgress() || this.#host.promptGeneration() !== generation || this.#isRetryCancelled()) {
 			return this.#endCancelledRetry();
 		}
 
@@ -3252,6 +3286,9 @@ export class TurnRecovery {
 		if (this.#retryAbortController === retryAbortController) {
 			this.#retryAbortController = undefined;
 		}
+		// A zero-length sleep never sees its signal, and a call can land between
+		// the sleep's end and this line.
+		if (this.#isRetryCancelled()) return this.#endCancelledRetry();
 
 		// The identity-keyed removal above can miss when a context rebuild
 		// recreated the failed turn's message object between settle and retry
@@ -3274,7 +3311,18 @@ export class TurnRecovery {
 			source: "automatic-retry",
 			delayMs: 1,
 			generation,
-			shouldContinue: () => this.#retryAttempt > 0,
+			// The continuation fires a tick later; a cancellation in between skips it
+			// and closes the saga instead of sending the request.
+			shouldContinue: () => this.#retryAttempt > 0 && !this.#isRetryCancelled(),
+			onSkip: () => {
+				if (this.#isRetryCancelled() && this.#retryAttempt > 0) {
+					void this.#endCancelledRetry().catch(failure =>
+						logger.error("Closing a cancelled retry saga threw", {
+							error: failure instanceof Error ? failure.message : String(failure),
+						}),
+					);
+				}
+			},
 			onError: error =>
 				void this.#failRetryAfterLocalContinueError(message, error).catch(failure =>
 					logger.error("Closing a retry saga after a failed local continuation threw", {
@@ -3286,7 +3334,7 @@ export class TurnRecovery {
 		return true;
 	}
 
-	/** Closes a retry saga whose credential wait or backoff sleep was aborted. */
+	/** Closes a retry saga that `abortRetry()` cancelled, or whose credential wait or backoff sleep was aborted. */
 	async #endCancelledRetry(): Promise<false> {
 		const attempt = this.#retryAttempt;
 		this.#retryAttempt = 0;
@@ -3392,20 +3440,36 @@ export class TurnRecovery {
 	}
 
 	/**
-	 * Cancel in-progress retry.
+	 * Cancel the retry saga in progress, from whatever moment it is called.
 	 *
-	 * A pending wait (the backoff sleep, a credential wait) is aborted, and its
-	 * catch ends the saga through `#endCancelledRetry`, which clears the hold
-	 * too. With a retried request already in flight there is no wait to cancel:
-	 * that request's outcome still settles the saga — its failure continues the
-	 * recovery — so the hold state (the held retries spent, the closed hold)
-	 * outlives this call. Clearing it here forgot a replay that request was about
-	 * to report, and the next model reached on a fresh budget held again. The
-	 * saga's end and the next prompt clear it.
+	 * Marks the saga cancelled ({@link #isRetryCancelled}) and aborts the wait it
+	 * may be in. Whichever point the saga reaches next ends it as cancelled: the
+	 * aborted wait, the check after a wait that settled anyway (a credential
+	 * rotation that resolved as the call landed), the check after `auto_retry_start`
+	 * is announced, the scheduled continuation, or — with the retried request
+	 * already on the wire — that request's failure. The request itself is not
+	 * aborted; if it succeeds, the turn simply completes.
+	 *
+	 * Outside a saga there is nothing to cancel, and nothing is remembered for the
+	 * next one. The hold state is left to the saga's end, which clears it.
 	 */
 	abortRetry(): void {
+		// `session.abort()` calls this as part of aborting everything; the abort
+		// itself ends the saga (every decision point reads `abortInProgress()`), and
+		// a mark made here would outlive it into the next turn's saga.
+		if (!this.#host.abortInProgress() && (this.#retryAttempt > 0 || this.#retryPromise !== undefined)) {
+			this.#retryCancelledGeneration = this.#host.promptGeneration();
+		}
 		this.#retryAbortController?.abort();
 		this.#releaseRetry();
+	}
+
+	/** Whether `abortRetry()` cancelled the saga running in the current prompt generation. */
+	#isRetryCancelled(): boolean {
+		return (
+			this.#retryCancelledGeneration !== undefined &&
+			this.#retryCancelledGeneration === this.#host.promptGeneration()
+		);
 	}
 
 	async #promptAgentWithIdleRetry(

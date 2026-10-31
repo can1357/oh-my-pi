@@ -744,6 +744,28 @@ describe("AgentSession retry recovery", () => {
 		expect(requestedModels).toEqual([primary, primary, primary, fallback, `${next.provider}/${next.id}`]);
 	});
 
+	it.each([
+		["two retry-after-ms values", "retry-after-ms=200 retry-after-ms=9000"],
+		["two try-again durations", "try again in 200ms; try again in 9000ms"],
+	])("declines the hold for the longest of %s, not the first", async (_label, hints) => {
+		// The wait that counts is the longest the message names: a resend inside
+		// a window the server said is closed fails again. Reading the first
+		// occurrence held 250 ms and resent where the 9 s hint should decline.
+		vi.spyOn(Math, "random").mockReturnValue(0.5);
+		const { primary, fallback, requestedModels, retryStartDelaysMs } = await runFallbackChainRecovery(
+			[
+				{ ...droppedAfterThinking, errorMessage: `${SOCKET_CLOSE_MID_STREAM} ${hints}` },
+				{ content: ["recovered on fallback"], stopReason: "stop" },
+			],
+			2,
+			undefined,
+			{ baseDelayMs: 500, maxDelayMs: 20_000 },
+		);
+
+		expect(requestedModels).toEqual([primary, fallback]);
+		expect(retryStartDelaysMs).toEqual([0]);
+	});
+
 	it("does not hold when the provider's retry hint is longer than the held window", async () => {
 		// The held sleep is bounded by the full-jitter window, `base × 2^(k-1)`
 		// for the k-th hold. A provider hint is never shortened, so a hint past
@@ -812,20 +834,25 @@ describe("AgentSession retry recovery", () => {
 		);
 	});
 
-	it("keeps the closed hold when abortRetry() lands while the held request reports its replays", async () => {
-		// `abortRetry()` (public, and RPC `abort_retry`) with the held request
-		// already in flight has no wait to cancel; that request's failure still
-		// continues the recovery. Clearing the hold state there forgot the ten
-		// replays it reported, and the model the chain reached on a fresh budget
-		// held again: a second held call spending a second provider budget.
+	it.each([
+		["from an auto_retry_start listener, before any wait is installed", "retry-start", 1],
+		["at the fallback switch, before the switched request is sent", "fallback-applied", 2],
+		["while the held request is on the wire, as it reports its replays", "replay-report", 2],
+	] as const)("ends the recovery when abortRetry() lands %s", async (_label, moment, requestsSent) => {
+		// Cancellation is a property of the recovery, not of the moment: whichever
+		// point the saga reaches next — the check after it announces a retry, the
+		// one after a wait, or the failure of a request already on the wire —
+		// ends it as cancelled. Read only at the backoff sleep, a call from an
+		// `auto_retry_start` listener let 14 more requests through, and a call
+		// as the held request reported its replays let the chain run on.
 		const models = {
 			primary: getBundledModel("anthropic", "claude-sonnet-4-5"),
 			fallback: getBundledModel("openai", "gpt-5.5"),
 			rest: [getBundledModel("google", "gemini-2.5-flash"), getBundledModel("openai", "gpt-4o")],
 		};
-		const [third, fourth] = models.rest.map(entry => `${entry.provider}/${entry.id}`);
 		let aborted = false;
-		const { primary, fallback, requestedModels } = await runFallbackChainRecovery(
+		const retryEnds: (string | undefined)[] = [];
+		const { requestedModels } = await runFallbackChainRecovery(
 			[
 				droppedAfterThinking,
 				{ ...droppedAfterThinking, providerReplays: 10 },
@@ -837,22 +864,46 @@ describe("AgentSession retry recovery", () => {
 			models,
 			{},
 			(session, agent) => {
+				const cancel = () => {
+					if (aborted) return;
+					aborted = true;
+					session.abortRetry();
+				};
+				session.subscribe(event => {
+					if (event.type === "auto_retry_end") retryEnds.push(event.finalError);
+					if (moment === "retry-start" && event.type === "auto_retry_start") cancel();
+					if (moment === "fallback-applied" && event.type === "retry_fallback_applied") cancel();
+				});
 				agent.subscribe(event => {
 					if (
-						!aborted &&
+						moment === "replay-report" &&
 						event.type === "message_end" &&
 						event.message.role === "assistant" &&
 						(event.message.providerReplays ?? 0) > 0
 					) {
-						aborted = true;
-						session.abortRetry();
+						cancel();
 					}
 				});
 			},
 		);
 
 		expect(aborted).toBe(true);
-		expect(requestedModels).toEqual([primary, primary, fallback, third, fourth]);
+		expect(requestedModels).toHaveLength(requestsSent);
+		expect(retryEnds).toEqual(["Retry cancelled"]);
+	});
+
+	it("remembers nothing from an abortRetry() made with no retry in progress", async () => {
+		// Outside a saga there is nothing to cancel; the next recovery must not
+		// start out cancelled.
+		const { primary, requestedModels } = await runFallbackChainRecovery(
+			[droppedAfterThinking, { content: ["recovered on the same model"], stopReason: "stop" }],
+			2,
+			undefined,
+			{},
+			session => session.abortRetry(),
+		);
+
+		expect(requestedModels).toEqual([primary, primary]);
 	});
 
 	it("stops holding for the rest of the recovery once a held retry reports a replay", async () => {

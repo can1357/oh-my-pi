@@ -1830,8 +1830,8 @@ const streamAnthropicOnce = (
 		let transportPayload: unknown;
 		let activeAbortTracker = createAbortSourceTracker(options?.signal);
 		// Request attempts, counted on the `fetch` the client issues them through
-		// (`wireCountedFetch`): the request's own counter — `transportFetch` on
-		// the `stream()` path, `withWireCount` at `streamAnthropic` otherwise —
+		// (`wireCountedFetch`): the request's own counter — `withRequestTransport`
+		// on the `stream()` path, `withWireCount` at `streamAnthropic` otherwise —
 		// shared by every call that sends this request again with the same
 		// options (an authentication retry, an empty-completion retry). Every
 		// wrapper `buildAnthropicClientOptions` adds sits above it — compression

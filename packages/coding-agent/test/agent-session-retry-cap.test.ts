@@ -2590,6 +2590,68 @@ describe("AgentSession retry delay cap", () => {
 		expect(lastAssistant(session).errorMessage).toContain(modelDenial);
 	});
 
+	it("ends the saga when abortRetry() lands as an account rotation resolves", async () => {
+		// The rotation resolved and switched the credential; the cancellation came
+		// as it did, with no wait left to abort. The saga reads it after the
+		// rotation and sends nothing on the second account. Read only on an
+		// aborted wait, the retry went out with the identical body.
+		const primaryModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!primaryModel) throw new Error("Expected bundled primary test model to exist");
+		const providerSessionId = "rotation-settles-as-cancelled";
+		mockSchedulerWaitWithClock();
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "api_key", key: "cancel-policy-A" },
+			{ type: "api_key", key: "cancel-policy-B" },
+		]);
+		registerMockApi(RETRY_CAP_MOCK_API_SOURCE);
+		const requestedKeys: string[] = [];
+		const primaryMock = createMockModel({
+			id: primaryModel.id,
+			provider: primaryModel.provider,
+			handler: (_context, options) => {
+				requestedKeys.push(resolveInitialApiKey(options?.apiKey));
+				return { stopReason: "error", errorMessage: CYBER_POLICY_ERROR };
+			},
+		});
+		const agent = new Agent({
+			getApiKey: model => modelRegistry.getApiKey(model, providerSessionId),
+			sessionId: providerSessionId,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (_model, context, options) => aiStream.streamSimple(primaryMock.model, context, options),
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"retry.maxRetries": 2,
+				"retry.modelFallback": false,
+			}),
+			modelRegistry,
+			providerSessionId,
+		});
+		const retryEnds: (string | undefined)[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_end") retryEnds.push(event.finalError);
+		});
+		const realRotate = authStorage.limits.rotate.bind(authStorage.limits);
+		const rotations: boolean[] = [];
+		vi.spyOn(authStorage.limits, "rotate").mockImplementation(async (...args) => {
+			const result = await realRotate(...args);
+			rotations.push(result.switched);
+			session?.abortRetry();
+			return result;
+		});
+
+		await session.prompt("Cancel as the account rotation resolves");
+		await session.waitForIdle();
+
+		expect(rotations).toEqual([true]);
+		expect(requestedKeys).toHaveLength(1);
+		expect(retryEnds).toEqual(["Retry cancelled"]);
+		expect(session.isRetrying).toBe(false);
+	});
+
 	it("tries sibling Codex accounts before advisor model fallback on cyber-policy denials", async () => {
 		const mainModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const advisorModel = getBundledModel("openai-codex", "gpt-5.6-sol");

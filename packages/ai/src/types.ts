@@ -1347,7 +1347,7 @@ export interface AssistantMessage {
 	 *
 	 * Counted where each request is issued, before it goes out, so an attempt
 	 * that never opens counts too: on the `fetch` at the bottom of the
-	 * provider's stack (`transportFetch` on the `stream()` path), or at the
+	 * provider's stack (the request's counted transport on the `stream()` path), or at the
 	 * provider's own socket. Every resend this repository owns sits above that
 	 * counter and is counted by where it is — the provider's own replays (a
 	 * transport reopen, a transport fallback, a checkpoint resume, rebuilt

@@ -15,19 +15,20 @@ import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
  * because its author remembered to count it. Each attempt is counted before
  * it goes out, so one that fails to open counts the same as one that answers.
  *
- * **How long.** One counter per logical request, not per provider call. It
- * rides on the `fetch` in the request's options, so every layer that sends the
- * request again by calling the provider again with the same options — the
- * authentication retry in `streamSimple`, a replay-safe stream wrapper, the
- * thinking-loop guard — reaches the same counter. A provider reports what the
+ * **How long.** One counter per logical request, not per provider call and not
+ * per transport. It rides on the `fetch` in the request's options, so every
+ * layer that sends the request again by calling the provider again with the
+ * same options — the authentication retry in `streamSimple`, a replay-safe
+ * stream wrapper — reaches the same counter, while a new call starts a new one
+ * even when it is handed the same built transport. A provider reports what the
  * counter holds ({@link providerReplaysFrom}), never its own share, so no layer
  * above has to add anything up and no layer can forget to.
  *
- * On the `stream()` path the counter is created by `transportFetch`; a
- * provider called directly creates it at its outermost entry
- * ({@link withWireCount}). Either way a provider reads the count off the
- * `fetch` it was handed: the number and the requests it counts are the same
- * object.
+ * On the `stream()` path the counter is created per logical request by
+ * `withRequestTransport`, over that request's transport; a provider called
+ * directly creates it at its outermost entry ({@link withWireCount}). Either
+ * way a provider reads the count off the `fetch` it was handed: the number and
+ * the requests it counts are the same object.
  *
  * **Attempts, not HTTP requests.** Below the counter there is only a transport
  * that issues one request per call — the runtime's `fetch`, or `coworkFetch`
@@ -85,9 +86,8 @@ export function wireAttemptsOf(fetchImpl: FetchImpl | undefined): WireAttempts |
 
 /**
  * Stamps `uncounted` as the sibling of the counted `fetch` that issues the same
- * way without counting: what a transport that adds its own per-call concerns
- * above the counter (`transportFetch`) offers for requests that are not model
- * attempts.
+ * way without counting: what the request's counted transport
+ * (`withRequestTransport`) offers for requests that are not model attempts.
  */
 export function withUncountedSibling<T extends FetchImpl>(counted: T, uncounted: FetchImpl): T {
 	(counted as CountedFetch)[UNCOUNTED_FETCH] = uncounted;
@@ -118,7 +118,7 @@ export function inheritWireAttempts<T extends FetchImpl>(wrapper: T, base: Fetch
 /**
  * The `fetch` a provider builds its wrapper stack on, and the counter its
  * requests are counted into: `fetchImpl` itself when it already carries one —
- * the request's counter, created by `transportFetch` or by
+ * the request's counter, created by `withRequestTransport` or by
  * {@link withWireCount} — else `fetchImpl`, or the runtime's `fetch`, under a
  * new one.
  */

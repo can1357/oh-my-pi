@@ -73,7 +73,7 @@ import { AssistantMessageEventStream } from "./utils/event-stream";
 import { applyGlyphCodec } from "./utils/glyph-codec";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
 import { withThinkingLoopGuard } from "./utils/thinking-loop";
-import { withTransportFetch } from "./utils/transport-fetch";
+import { withRequestTransport } from "./utils/transport-fetch";
 import { inheritWireAttempts, uncountedFetchOf } from "./utils/wire-attempts";
 
 function isGoogleVertexAuthenticatedModel(model: Model<Api>): boolean {
@@ -867,7 +867,7 @@ function streamDispatch<TApi extends Api>(
 ): AssistantMessageEventStream {
 	const requestOptions = withSupportedSamplingParams(
 		model,
-		withTransportFetch(model, (options || {}) as StreamOptions),
+		withRequestTransport(model, (options || {}) as StreamOptions),
 	) as OptionsForApi<TApi>;
 	assertExplicitOpenAIResponsesPromptCacheSupport(model, requestOptions);
 
@@ -1231,7 +1231,7 @@ function streamSimpleRequest<TApi extends Api>(
 ): AssistantMessageEventStream {
 	const requestOptions = withSupportedSamplingParams(
 		model,
-		withTransportFetch(model, (options || {}) as SimpleStreamOptions),
+		withRequestTransport(model, (options || {}) as SimpleStreamOptions),
 	);
 
 	const apiKeyResolver = isApiKeyResolver(requestOptions?.apiKey) ? requestOptions.apiKey : undefined;

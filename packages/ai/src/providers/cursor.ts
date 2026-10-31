@@ -1198,9 +1198,9 @@ function streamCursorWithWireMode(
 	(async () => {
 		const retryContext = timing?.retry;
 		const transportMode = timing?.transport ?? (options?.transport === "http1" ? "http1" : "http2");
-		// The request's counter when the options carry one (`transportFetch` on the
-		// `stream()` path), so a call the authentication retry makes again adds to
-		// the same count; Cursor counts at its own socket into it either way.
+		// The request's counter when the options carry one (`withRequestTransport`
+		// on the `stream()` path), so a call the authentication retry makes again
+		// adds to the same count; Cursor counts at its own socket into it either way.
 		const wireAttempts = timing?.wireAttempts ?? wireAttemptsOf(options?.fetch) ?? createWireAttempts();
 		let startTime = timing?.startTime ?? performance.now();
 		let firstTokenTime = retryContext?.firstTokenTime;

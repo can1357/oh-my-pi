@@ -20,7 +20,9 @@ import { streamOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-cod
 import { getCodexProviderSessionState } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
 import { stream, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context, FetchImpl, Model, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
+import { withReplaySafeStreamRetry } from "@oh-my-pi/pi-ai/utils/empty-completion-retry";
 import { resetRequestCompressionForTesting } from "@oh-my-pi/pi-ai/utils/request-compression";
+import { transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import * as piUtils from "@oh-my-pi/pi-utils";
@@ -568,6 +570,65 @@ it("counts the attempts an empty-completion retry discarded on the stream() path
 function localAnthropicModel(): Model<"anthropic-messages"> {
 	return { ...anthropicModel(), baseUrl: "http://anthropic.invalid" };
 }
+
+it("starts a new count for each call that reuses one built transport", async () => {
+	// A transport is built once and handed to many calls; the count belongs to
+	// the call. Kept on the transport, the second call reported the first
+	// call's request as its own replay: [0, 1] for one request each.
+	const tempDir = TempDir.createSync("@pi-provider-replays-");
+	setAgentDir(tempDir.path());
+	vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+	const hashes: string[] = [];
+	serveRuntimeFetch(async (_url, init) => {
+		hashes.push(bodyHash(init));
+		return sseResponse(ANTHROPIC_THINKING_THEN_CUT);
+	});
+	const model = localAnthropicModel();
+	const shared = transportFetch(model, undefined);
+	const ask = (content: string) =>
+		stream(
+			model,
+			{ ...context, messages: [{ role: "user", content, timestamp: Date.now() }] },
+			{ apiKey: "test-key", providerRetryWait: async () => {}, fetch: shared },
+		).result();
+
+	const first = await ask("first prompt");
+	const second = await ask("second prompt");
+
+	expect(hashes).toHaveLength(2);
+	expect(new Set(hashes).size).toBe(2);
+	expect([first.providerReplays, second.providerReplays]).toEqual([0, 0]);
+	tempDir.removeSync();
+});
+
+it("keeps one count when a replay-safe wrapper calls stream() again", async () => {
+	// The wrapper's counted fetch reaches `stream()`, whose transport keeps that
+	// counter instead of treating it as a caller's opaque fetch: two requests of
+	// one body report one replay, not unknown.
+	const tempDir = TempDir.createSync("@pi-provider-replays-");
+	setAgentDir(tempDir.path());
+	vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+	let requests = 0;
+	serveRuntimeFetch(async () => {
+		requests += 1;
+		return sseResponse(requests === 1 ? ANTHROPIC_EMPTY_STOP : ANTHROPIC_THINKING_THEN_CUT);
+	});
+	const model = localAnthropicModel();
+
+	const result = await withReplaySafeStreamRetry(
+		model,
+		context,
+		{ apiKey: "test-key", providerRetryWait: async () => {}, acceptEmptyResponse: false },
+		(attemptModel, attemptContext, attemptOptions) =>
+			stream(attemptModel, attemptContext, { ...attemptOptions, acceptEmptyResponse: true }),
+		{ retryEmptyCompletion: true },
+	).result();
+
+	expect(requests).toBe(2);
+	expect(result.stopReason).toBe("error");
+	expect(result.providerReplays).toBe(1);
+	tempDir.removeSync();
+});
 
 it("does not count the Vertex OAuth token request as an attempt at the model request", async () => {
 	// The token is minted over the same transport as the model request. Counted

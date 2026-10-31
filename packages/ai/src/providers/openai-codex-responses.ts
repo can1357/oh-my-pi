@@ -761,8 +761,8 @@ interface CodexRequestContext {
 	rawRequestDump: RawHttpRequestDump;
 	/**
 	 * The `fetch` this request's SSE attempts are issued through and the
-	 * request's counter riding on it (`wireCountedFetch`): `transportFetch`'s on
-	 * the `stream()` path, shared with every re-entry that sends the request
+	 * request's counter riding on it (`wireCountedFetch`): `withRequestTransport`'s
+	 * on the `stream()` path, shared with every re-entry that sends the request
 	 * again (an authentication retry). Every wrapper this module adds sits above
 	 * it — `fetchWithRetry` and its replays, compression and its uncompressed
 	 * resend — so their requests are counted where they are sent.
