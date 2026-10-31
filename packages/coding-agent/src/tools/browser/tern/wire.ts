@@ -8,8 +8,9 @@
  * `{"id":N,KIND:ANSWER}` correlated by `id`, where ANSWER is `{"ok": result}`
  * or `{"error": {"kind", "message"}}`:
  * - `browser`: Tern's browser op protocol, REQUEST `{"op": …}`.
- * - `fork`: REQUEST `{"block":P,"dir":"right"|"down"}` opens `omp --fork` of
- *   pane P's session in a new pane beside it; result `{"block":M}`.
+ * - `fork`: REQUEST `{"block":P}` opens `omp --fork` of pane P's session in a new pane beside
+ *   it; result `{"block":M}`. The pane is Tern's placement, not the caller's: a `/fork` that
+ *   wants a tab moves M there afterwards.
  *
  * Members and message kinds either side does not know are skipped, so the
  * protocol does not tie omp to a Tern build. A Tern from before it cannot read
@@ -205,12 +206,10 @@ export interface TernRequestOptions {
 	onLateAnswer?: (value: unknown) => void;
 }
 
-/** A `fork` request: open `omp --fork` of pane `block`'s session in a new pane beside it. */
+/** A `fork` request: open `omp --fork` of pane `block`'s session in a pane beside it. */
 export interface TernForkRequest {
 	/** The pane whose omp session to fork (`TERN_PANE`). */
 	block: number;
-	/** Where the new pane goes (Tern's default: `right`). */
-	dir?: "right" | "down";
 }
 
 interface PendingOp {

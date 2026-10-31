@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `/fork` in a Tern pane leaving the original tab in front after it moved the fork into a tab of its own, so the forked session opened out of sight; the fork's tab is now selected ([#17596](https://github.com/can1357/oh-my-pi/pull/17596) by [@iacore](https://github.com/iacore))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
