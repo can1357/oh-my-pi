@@ -325,7 +325,13 @@ const PRUNE_IDLE_FLUSH_MS = 90 * 60_000;
 
 /** Match the per-turn prune protect window: keep the agent's working context intact. */
 const SHAKE_TIER_PROTECT_TOKENS = DEFAULT_PRUNE_CONFIG.protectTokens;
-/** Each cache rewrite must reclaim this share of the trigger; also the hysteresis between passes. */
+/**
+ * A pass rewrites the prompt cache from the first elided entry, so it must
+ * reclaim this share of the trigger at the tier threshold. The share grows
+ * with the inverse of the headroom left below the trigger: close to it,
+ * compaction comes before a rewrite could pay for itself. Also the
+ * hysteresis between passes.
+ */
 const SHAKE_TIER_MIN_SAVINGS_SHARE = 0.1;
 
 interface ShakeTierDue {
@@ -2764,14 +2770,15 @@ export class SessionMaintenance {
 		if (shouldCompact(contextTokens, contextWindow, settings)) return undefined;
 		const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
 		const tierTokens = Math.floor((thresholdTokens * percent) / 100);
-		if (contextTokens < tierTokens) return undefined;
+		if (contextTokens < tierTokens || contextTokens >= thresholdTokens) return undefined;
+		const headroomScale = (thresholdTokens - tierTokens) / (thresholdTokens - contextTokens);
 		return {
 			config: {
 				...DEFAULT_SHAKE_CONFIG,
 				protectTokens: Math.max(DEFAULT_SHAKE_CONFIG.protectTokens, SHAKE_TIER_PROTECT_TOKENS),
 				minSavings: Math.max(
 					DEFAULT_SHAKE_CONFIG.minSavings,
-					Math.floor(thresholdTokens * SHAKE_TIER_MIN_SAVINGS_SHARE),
+					Math.floor(thresholdTokens * SHAKE_TIER_MIN_SAVINGS_SHARE * headroomScale),
 				),
 			},
 			tierTokens,

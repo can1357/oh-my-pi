@@ -17,8 +17,10 @@ import {
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
-const THRESHOLD_TOKENS = 170_000;
+const THRESHOLD_TOKENS = 400_000;
 const TIER_TOKENS = THRESHOLD_TOKENS / 2;
+/** Just above the tier, where the savings floor is about 10% of the threshold. */
+const NEAR_TIER_TOKENS = TIER_TOKENS + 1_000;
 
 function usage(input = 0): AssistantMessage["usage"] {
 	return {
@@ -49,8 +51,10 @@ describe("automatic shake below the compaction threshold", () => {
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("Expected claude-sonnet-4-5 model");
+		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!bundled) throw new Error("Expected claude-sonnet-4-5 model");
+		// Room below the trigger for three phases, each pushing older results out of the protect window.
+		const model = { ...bundled, contextWindow: 1_000_000 };
 		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		settings = Settings.isolated({
 			"compaction.enabled": true,
@@ -136,8 +140,8 @@ describe("automatic shake below the compaction threshold", () => {
 
 	function seedFirstPhase(): { old1: string; old2: string; tail: UserMessage } {
 		sessionManager.appendMessage({ role: "user", content: "Inspect the workspace.", timestamp: ++timestamp });
-		const old1 = textOfTokens(10_000, "first");
-		const old2 = textOfTokens(10_000, "second");
+		const old1 = textOfTokens(22_000, "first");
+		const old2 = textOfTokens(22_000, "second");
 		seedToolTurn("old-1", old1);
 		seedToolTurn("old-2", old2);
 		const tail = seedTail("tail-one");
@@ -188,7 +192,7 @@ describe("automatic shake below the compaction threshold", () => {
 		const { old1, old2, tail } = seedFirstPhase();
 		const tailBefore = structuredClone(tail.content);
 
-		await trigger(100_000);
+		await trigger(NEAR_TIER_TOKENS);
 
 		const artifactId = expectShaken("old-1");
 		expect(expectShaken("old-2")).toBe(artifactId);
@@ -210,26 +214,26 @@ describe("automatic shake below the compaction threshold", () => {
 			},
 		]);
 		expect(compact).not.toHaveBeenCalled();
-		expect(session.getContextUsage()?.tokens).toBeLessThan(100_000);
+		expect(session.getContextUsage()?.tokens).toBeLessThan(NEAR_TIER_TOKENS);
 
 		const mid = textOfTokens(6_000, "middle");
 		seedToolTurn("mid-1", mid);
 		seedTail("tail-two");
 		adoptSeededMessages();
 
-		await trigger(100_000);
+		await trigger(NEAR_TIER_TOKENS);
 
 		expect(textOfResult(result("mid-1"))).toBe(mid);
 		expect(result("mid-1").prunedAt).toBeUndefined();
 		expect(starts()).toHaveLength(1);
 		expect(ends()).toHaveLength(1);
 
-		seedToolTurn("new-1", textOfTokens(13_000, "newest"));
+		seedToolTurn("new-1", textOfTokens(38_000, "newest"));
 		seedTail("tail-three");
 		adoptSeededMessages();
 		expect(session.agent.tokenizer.countMessages(session.agent.state.messages)).toBeLessThan(THRESHOLD_TOKENS);
 
-		await trigger(100_000);
+		await trigger(NEAR_TIER_TOKENS);
 
 		expectShaken("mid-1");
 		expectShaken("new-1");
@@ -239,11 +243,33 @@ describe("automatic shake below the compaction threshold", () => {
 		expect(compact).not.toHaveBeenCalled();
 	});
 
+	it("requires a larger saving the closer context is to the compaction threshold", async () => {
+		enableTier();
+		const compact = vi.spyOn(compactionModule, "compact");
+		const { old1, old2 } = seedFirstPhase();
+
+		// About 44K tokens are eligible. 10K below the threshold the floor is
+		// 10% of it scaled by (threshold - tier) / headroom: 40K × 200K / 10K.
+		await trigger(THRESHOLD_TOKENS - 10_000);
+
+		expect(textOfResult(result("old-1"))).toBe(old1);
+		expect(textOfResult(result("old-2"))).toBe(old2);
+		expect(starts()).toHaveLength(0);
+		expect(ends()).toHaveLength(0);
+
+		await trigger(NEAR_TIER_TOKENS);
+
+		expectShaken("old-1");
+		expectShaken("old-2");
+		expect(starts()).toHaveLength(1);
+		expect(compact).not.toHaveBeenCalled();
+	});
+
 	it("leaves old results unchanged below the compaction threshold by default", async () => {
 		const compact = vi.spyOn(compactionModule, "compact");
 		const { old1, old2 } = seedFirstPhase();
 
-		await trigger(100_000);
+		await trigger(NEAR_TIER_TOKENS);
 
 		expect(textOfResult(result("old-1"))).toBe(old1);
 		expect(textOfResult(result("old-2"))).toBe(old2);
@@ -258,7 +284,7 @@ describe("automatic shake below the compaction threshold", () => {
 		const compact = vi.spyOn(compactionModule, "compact");
 		const { old1, old2 } = seedFirstPhase();
 
-		await trigger(100_000);
+		await trigger(NEAR_TIER_TOKENS);
 
 		expect(textOfResult(result("old-1"))).toBe(old1);
 		expect(textOfResult(result("old-2"))).toBe(old2);
@@ -290,7 +316,7 @@ describe("automatic shake below the compaction threshold", () => {
 				{
 					content: [{ type: "toolCall", id: "call-noop", name: "noop", arguments: {} }],
 					stopReason: "toolUse",
-					usage: { cacheRead: 100_000 },
+					usage: { cacheRead: NEAR_TIER_TOKENS },
 				},
 				{ content: ["done"], stopReason: "stop", usage: { cacheRead: 1_000 } },
 			],
