@@ -1303,6 +1303,45 @@ describe("MarketplaceManager", () => {
 			]);
 		});
 
+		describe("Agent Plugins root plugin.json (§5.1)", () => {
+			// A package shipping both the standard root manifest and a Claude manifest.
+			async function writeStandardManifest(fields: Record<string, unknown>): Promise<void> {
+				await Bun.write(
+					path.join(mktDir, "plugins", "hello-plugin", "plugin.json"),
+					JSON.stringify({
+						$schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+						name: "hello-plugin",
+						...fields,
+					}),
+				);
+			}
+
+			it("takes the version from the standard root manifest over .claude-plugin/plugin.json", async () => {
+				await writeStandardManifest({ version: "2.0.0" });
+				await ctx.manager.addMarketplace(mktDir);
+
+				const entry = await ctx.manager.installPlugin("hello-plugin", "test-marketplace");
+
+				expect(entry.version).toBe("2.0.0");
+				expect(await ctx.manager.checkForUpdates()).toEqual([]);
+			});
+
+			it("never fills a version the standard root manifest omits from a sibling package file", async () => {
+				await writeStandardManifest({});
+				await ctx.manager.addMarketplace(mktDir);
+
+				// .claude-plugin/plugin.json and package.json both say 1.0.0; neither may supply it.
+				await setCatalogEntryVersion(undefined);
+				const unversioned = await ctx.manager.installPlugin("hello-plugin", "test-marketplace");
+				expect(unversioned.version).toBe("0.0.0");
+
+				// The catalog entry sits outside the package and still applies.
+				await setCatalogEntryVersion("3.0.0");
+				const versioned = await ctx.manager.installPlugin("hello-plugin", "test-marketplace", { force: true });
+				expect(versioned.version).toBe("3.0.0");
+			});
+		});
+
 		it("checkForUpdates returns empty when up to date", async () => {
 			await ctx.manager.addMarketplace(mktDir);
 			await ctx.manager.installPlugin("hello-plugin", "test-marketplace");

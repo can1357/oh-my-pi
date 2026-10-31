@@ -10,7 +10,9 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { isEnoent, logger, pathIsWithin } from "@oh-my-pi/pi-utils";
+import { isEnoent, isRecord, logger, pathIsWithin } from "@oh-my-pi/pi-utils";
+import { readFile } from "../../../capability/fs";
+import { readAgentPluginRootStatus } from "../../../discovery/agent-plugin-format";
 import { expandTilde } from "../../../tools/path-utils";
 import { linkPluginDirectory } from "../directory-link";
 import { normalizePluginRuntimeConfig, writePluginRuntimeConfig } from "../runtime-config";
@@ -595,10 +597,15 @@ export class MarketplaceManager {
 	/**
 	 * Resolve the version a catalog entry publishes, so install and {@link checkForUpdates}
 	 * agree. Relative sources (files in the marketplace clone) use Claude Code's precedence:
-	 * 1. Plugin manifest (`.claude-plugin/plugin.json`, then Agent Plugins root `plugin.json`)
+	 * 1. Plugin manifest (`.claude-plugin/plugin.json`, then a root `plugin.json`)
 	 * 2. Catalog entry `version`
 	 * 3. `package.json` version
 	 * 4. Pinned git SHA from the source definition (truncated to 7 chars)
+	 *
+	 * A root claiming the Agent Plugins standard owns its core fields (§5.1): only its root
+	 * `plugin.json` counts as the manifest, and no sibling file (`.claude-plugin/plugin.json`,
+	 * `package.json`) fills a version it omits; the catalog entry and git SHA sit outside the
+	 * package and still apply.
 	 *
 	 * Remote sources are readable only after cloning, so an update check sees the catalog
 	 * entry alone (`pluginDir` undefined): installs put the entry's version first and checks
@@ -613,20 +620,35 @@ export class MarketplaceManager {
 		if (!pluginDir) return undefined;
 		const readVersion = async (file: string): Promise<string | undefined> => {
 			try {
-				const content = await Bun.file(path.join(pluginDir, file)).json();
-				return typeof content?.version === "string" && content.version ? content.version : undefined;
+				const raw = await readFile(path.join(pluginDir, file), { cache: false });
+				if (raw === null) return undefined;
+				const content: unknown = JSON.parse(raw);
+				return isRecord(content) && typeof content.version === "string" && content.version
+					? content.version
+					: undefined;
 			} catch {
 				// Missing or invalid — try next source
 				return undefined;
 			}
 		};
 
-		const manifestVersion =
-			(await readVersion(path.join(".claude-plugin", "plugin.json"))) ?? (await readVersion("plugin.json"));
+		// Read from disk, not the discovery caches: the marketplace clone is rewritten in
+		// place by updates within one process. A fatally invalid standard root has no
+		// manifest version.
+		const standard = await readAgentPluginRootStatus(pluginDir);
+		let manifestVersion: string | undefined;
+		if (standard.kind === "standard") {
+			manifestVersion = standard.manifest.version;
+		} else if (standard.kind === "none") {
+			manifestVersion =
+				(await readVersion(path.join(".claude-plugin", "plugin.json"))) ?? (await readVersion("plugin.json"));
+		}
 		if (manifestVersion) return manifestVersion;
 		if (entry.version) return entry.version;
-		const packageVersion = await readVersion("package.json");
-		if (packageVersion) return packageVersion;
+		if (standard.kind === "none") {
+			const packageVersion = await readVersion("package.json");
+			if (packageVersion) return packageVersion;
+		}
 		if (typeof entry.source === "object" && "sha" in entry.source && entry.source.sha) {
 			return entry.source.sha.slice(0, 7);
 		}

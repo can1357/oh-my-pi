@@ -649,6 +649,9 @@
 - Fixed `omp --restore` and `/retry` reporting nothing to retry for a turn cut off by a process exit in a session that had used `eval`; the interrupted turn now continues ([#16195](https://github.com/can1357/oh-my-pi/issues/16195))
 - Fixed session loading on Windows treating a session path with a regular-file component as a missing session (an empty session) instead of rejecting it with `ENOTDIR` like POSIX does ([#16145](https://github.com/can1357/oh-my-pi/pull/16145) by [@jchanghong023](https://github.com/jchanghong023))
 - Fixed models from extension providers listed in `enabledModels` or `--models` missing from `/model`, the Ctrl+P cycle and the startup model scope notice until the background catalog refresh finished ([#16096](https://github.com/can1357/oh-my-pi/pull/16096) by [@skipper019](https://github.com/skipper019))
+- Fixed Agent Plugins packages taking their marketplace install version from `.claude-plugin/plugin.json` or `package.json`, or their `--plugin-dir` name from `.claude-plugin/plugin.json`; only the standard root `plugin.json` supplies them now ([#16179](https://github.com/can1357/oh-my-pi/pull/16179) by [@sonsu-lee](https://github.com/sonsu-lee))
+- Fixed Agent Plugins packages with a fatally invalid `plugin.json` contributing extensions, tools, task agents, or LSP/DAP config, including after same-path reinstalls; repaired packages become discoverable again on refresh ([#16179](https://github.com/can1357/oh-my-pi/pull/16179) by [@sonsu-lee](https://github.com/sonsu-lee))
+- Fixed plugin discovery and marketplace install/update checks hanging when a package's `plugin.json` is a FIFO or other special file ([#16179](https://github.com/can1357/oh-my-pi/pull/16179) by [@sonsu-lee](https://github.com/sonsu-lee))
 
 ## [18.12.1] - 2026-10-17
 
