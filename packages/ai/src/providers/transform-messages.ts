@@ -7,6 +7,7 @@ import type {
 	Api,
 	AssistantMessage,
 	DeveloperMessage,
+	KnownApi,
 	Message,
 	Model,
 	ToolCall,
@@ -528,12 +529,12 @@ export function isSameModelTurn(
 }
 
 /**
- * APIs whose encoder runs {@link transformMessages} against the target model
- * itself, so {@link isSameModelTurn} decides what replays. Agent proxies
- * (Factory, Cursor, Devin, GitLab Duo) and extension APIs encode through an
- * inner model or their own path instead.
+ * Whether an API's encoder runs {@link transformMessages} against the target
+ * model itself, so {@link isSameModelTurn} decides what replays. Agent proxies
+ * encode through an inner model or their own path; extension APIs are not
+ * listed and count as `false`. Exhaustive, so a new API must decide.
  */
-const DIRECT_REPLAY_APIS: Partial<Record<Api, true>> = {
+const DIRECT_REPLAY_APIS: Record<KnownApi, boolean> = {
 	"openai-completions": true,
 	"openai-responses": true,
 	openrouter: true,
@@ -546,6 +547,10 @@ const DIRECT_REPLAY_APIS: Partial<Record<Api, true>> = {
 	"google-vertex": true,
 	"ollama-chat": true,
 	"apple-foundation-models": true,
+	"cursor-agent": false,
+	"factory-droid-agent": false,
+	"gitlab-duo-agent": false,
+	"devin-agent": false,
 };
 
 /**
@@ -559,7 +564,7 @@ export function dropsForeignReasoningPayload(
 	turn: Pick<AssistantMessage, "provider" | "api" | "model">,
 	model: Pick<Model, "provider" | "api" | "id">,
 ): boolean {
-	if (DIRECT_REPLAY_APIS[model.api] !== true) return false;
+	if ((DIRECT_REPLAY_APIS as Partial<Record<Api, boolean>>)[model.api] !== true) return false;
 	if (model.api === "anthropic-messages" && turn.api === "anthropic-messages") return false;
 	return !isSameModelTurn(turn, model);
 }
