@@ -29,11 +29,12 @@ import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
-import type { ToolRendererScope } from "@oh-my-pi/pi-tui/tools/renderer-scope";
-import { copyHostData, copyToolResult, copyToolView } from "./boundary-data";
+import { pinInputScope, type ToolRendererScope } from "@oh-my-pi/pi-tui/tools/renderer-scope";
+import { copyHostData, copyToolResult, copyToolView, registeredToolOwner } from "./boundary-data";
+import { providerCallGate } from "./callback-ownership";
 import { handTheme } from "./context-surfaces";
 import type { ExtensionRunner } from "./runner";
-import type { ExtensionAgentIdentity, RegisteredTool, ToolCallEventResult } from "./types";
+import type { ExtensionAgentIdentity, ExtensionCallbackOwner, RegisteredTool, ToolCallEventResult } from "./types";
 
 /**
  * Second `renderCall` argument that satisfies both the omp and the upstream-pi
@@ -63,6 +64,29 @@ function renderOptionsWithTheme<T extends object>(options: T, theme: Theme): T &
 			return bound;
 		},
 	}) as T & Theme;
+}
+
+/**
+ * The scope a tool another owner registered draws in, as a host mounting what it returns uses it
+ * (`SafeToolRendererComponent`): live while both the executing runner's scope and the tool's owner
+ * are, and running in the owner's admission inside the runner's. Pinned, it is the pair of the
+ * runner's current session and the owner's (`forSession`), so a component the tool returned in one
+ * of its owner's sessions draws nothing once that session has gone, whatever the runner serves.
+ */
+function ownedRendererScope(runnerScope: ToolRendererScope, owner: ExtensionCallbackOwner): ToolRendererScope {
+	const pair = (outer: ToolRendererScope, inner: ExtensionCallbackOwner): ToolRendererScope => ({
+		get live() {
+			return outer.live && !inner.isRetired;
+		},
+		run<T>(call: () => T): T {
+			if (inner.isRetired) throw new Error("Extension session retired; its renderers are no longer callable");
+			return outer.run(() => inner.runOwned(call));
+		},
+	});
+	const scope = pair(runnerScope, owner);
+	return Object.assign(scope, {
+		pin: () => pair(pinInputScope(runnerScope), owner.forSession?.() ?? owner),
+	});
 }
 
 /**
@@ -106,7 +130,15 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 		const { definition, extensionPath } = registeredTool;
 		const name = definition.name;
 		this.loadMode = defaultLoadModeForToolName(name, definition.loadMode);
-		this.rendererScope = runner.rendererScope;
+		// A tool belongs to whoever registered it — a session, or the runtime whose factory loaded
+		// it — and this runner may be another runtime's, executing it for its own session. What the
+		// tool does is its owner's work, then: run, cancelled and drawn in its owner's admission,
+		// inside this runner's, so nothing of it outlives either, and its abort listener and the
+		// components it returns answer to its owner's lifetime, not to the executing session's.
+		const owner = registeredToolOwner(definition);
+		this.#owner = owner !== undefined && owner !== runner.callbackOwner ? owner : undefined;
+		this.rendererScope = this.#owner ? ownedRendererScope(runner.rendererScope, this.#owner) : runner.rendererScope;
+		const scoped = <T>(call: () => T): T | undefined => this.#scoped(call);
 
 		// Only define render methods when the underlying definition provides them.
 		// If these exist unconditionally on the prototype, ToolExecutionComponent
@@ -115,7 +147,7 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 		const { renderCall, renderResult, describeCall, describeResult } = definition;
 		if (renderCall) {
 			this.renderCall = (args: any, options: any, theme: any) =>
-				runner.runScoped(() =>
+				scoped(() =>
 					renderCall(
 						copyHostData(args),
 						renderOptionsWithTheme(copyHostData(options), handTheme(theme)),
@@ -125,7 +157,7 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 		}
 		if (renderResult) {
 			this.renderResult = (result: any, options: any, theme: any, args?: any) =>
-				runner.runScoped(() =>
+				scoped(() =>
 					renderResult(
 						copyHostData(result),
 						{ expanded: options.expanded, isPartial: options.isPartial, spinnerFrame: options.spinnerFrame },
@@ -136,7 +168,7 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 		}
 		if (describeCall) {
 			this.describeCall = (args, options) =>
-				runner.runScoped(() =>
+				scoped(() =>
 					copyToolView(
 						describeCall(copyHostData(args), copyHostData(options)),
 						name,
@@ -147,7 +179,7 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 		}
 		if (describeResult) {
 			this.describeResult = (result, options, args) =>
-				runner.runScoped(() =>
+				scoped(() =>
 					copyToolView(
 						describeResult(copyHostData(result), copyHostData(options), copyHostData(args)),
 						name,
@@ -156,6 +188,17 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 					),
 				);
 		}
+	}
+
+	/** The tool's owner when it is not this runner's own runtime ({@link registeredToolOwner}). */
+	readonly #owner: ExtensionCallbackOwner | undefined;
+
+	/** Runs `call` in this runner's admission and, for a tool another owner registered, in that
+	 *  owner's inside it; nothing once either has gone. */
+	#scoped<T>(call: () => T): T | undefined {
+		const owner = this.#owner;
+		if (!owner) return this.runner.runScoped(call);
+		return this.runner.runScoped(() => (owner.isRetired ? undefined : owner.runOwned(call)));
 	}
 
 	/**
@@ -179,32 +222,40 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 	) {
 		const { definition, extensionPath } = this.registeredTool;
 		const name = definition.name;
-		const handedSignal = new AdmittedSignal(this.runner.callbackGate, signal);
-		try {
-			// Bind the extension context to this tool's own name so `ctx.invokeTool` delegates to the
-			// native built-in of the same name (present only when this tool re-registers a built-in).
-			// The wrapper's own context, abort signal, and progress callback are inherited by the
-			// delegated call, so a bare `ctx.invokeTool(params)` keeps the caller's
-			// `toolCall`/provider metadata (write/edit LSP batching, computer safety acknowledgement),
-			// stops when the outer call is aborted, and still streams native progress. Those are host
-			// calls, so they follow the caller's own signal.
-			const result = await definition.execute(
-				toolCallId,
-				copyHostData(params),
-				handedSignal.admit(),
-				onUpdate &&
-					(partial => onUpdate(copyToolResult(partial, name, extensionPath, "onUpdate() partial result"))),
-				this.runner.createContext(undefined, {
-					toolName: name,
-					context,
-					signal,
-					onUpdate,
-				}),
-			);
-			return copyToolResult(result, name, extensionPath, "execute() result");
-		} finally {
-			handedSignal.release();
-		}
+		const owner = this.#owner;
+		const call = async () => {
+			// Admitted inside the owner's admission, so the abort the caller's signal carries in runs
+			// as the owner's work: a listener the tool installs answers to the session that
+			// registered it, never to the one executing it or to the session after.
+			const handedSignal = new AdmittedSignal(owner ? providerCallGate(owner) : this.runner.callbackGate, signal);
+			try {
+				// Bind the extension context to this tool's own name so `ctx.invokeTool` delegates to the
+				// native built-in of the same name (present only when this tool re-registers a built-in).
+				// The wrapper's own context, abort signal, and progress callback are inherited by the
+				// delegated call, so a bare `ctx.invokeTool(params)` keeps the caller's
+				// `toolCall`/provider metadata (write/edit LSP batching, computer safety acknowledgement),
+				// stops when the outer call is aborted, and still streams native progress. Those are host
+				// calls, so they follow the caller's own signal.
+				const result = await definition.execute(
+					toolCallId,
+					copyHostData(params),
+					handedSignal.admit(),
+					onUpdate &&
+						(partial => onUpdate(copyToolResult(partial, name, extensionPath, "onUpdate() partial result"))),
+					this.runner.createContext(undefined, {
+						toolName: name,
+						context,
+						signal,
+						onUpdate,
+					}),
+				);
+				return copyToolResult(result, name, extensionPath, "execute() result");
+			} finally {
+				handedSignal.release();
+			}
+		};
+		// An owner that has gone refuses through the definition itself, which says why.
+		return owner && !owner.isRetired ? await owner.runOwned(call) : await call();
 	}
 }
 

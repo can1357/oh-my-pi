@@ -36,6 +36,7 @@ import type {
 	ExtensionContextActions,
 	ExtensionUIContext,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { RegisteredToolAdapter } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -52,9 +53,10 @@ import {
 	type OverlayHandle,
 	TUI,
 } from "@oh-my-pi/pi-tui";
+import { getComposerStyle } from "@oh-my-pi/pi-tui/components/composer/registry";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { getEditorTheme, initTheme, theme } from "@oh-my-pi/pi-tui/theme";
-import { bindInputScope } from "@oh-my-pi/pi-tui/tools/renderer-scope";
+import { bindInputScope, SafeToolRendererComponent } from "@oh-my-pi/pi-tui/tools/renderer-scope";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 
@@ -1232,6 +1234,237 @@ describe("what a session focuses or shows", () => {
 	});
 });
 
+describe("the host's composer shapes follow a session's registrations", () => {
+	for (const trigger of ["add", "withdraw"] as const) {
+		test(`one ${trigger === "add" ? "addition" : "withdrawal"} reinstalls the shapes once, through the real controller`, async () => {
+			const h = await interactiveSession();
+			let api: ExtensionAPI | undefined;
+			const extension = await loadExtensionFromFactory(
+				pi => {
+					api = pi;
+				},
+				h.dir.path(),
+				new EventBus(),
+				h.owner,
+				"composer-host",
+			);
+			await h.runner.addExtensions([extension]);
+			const shape = (id: string) => ({ label: id, style: { ...getComposerStyle("box"), id } });
+			if (trigger === "withdraw") h.owner.runOwned(() => api?.registerComposerShape(shape("session-shape")));
+			let syncs = 0;
+			// A runaway resubscription would never end; stop it at a count no single change can reach.
+			const sync = spyOn(h.mode, "syncComposerShape").mockImplementation(() => {
+				if (++syncs > 20) throw new Error("composer synchronisation did not terminate");
+			});
+			cleanups.push(() => sync.mockRestore());
+			h.mode.initializeHookRunner(h.runner.getUIContext(), false);
+			syncs = 0;
+			let thrown: unknown;
+			try {
+				if (trigger === "add") h.owner.runOwned(() => api?.registerComposerShape(shape("session-shape")));
+				else await h.session.dispose({ drainTimeoutMs: 40 });
+			} catch (error) {
+				thrown = error;
+			}
+
+			expect({ syncs, thrown }).toEqual({ syncs: 1, thrown: undefined });
+		});
+	}
+});
+
+describe("a tool another runtime's session registered, run by this one", () => {
+	test("is cancelled and drawn as its owner's work: nothing of it runs for the session after its owner", async () => {
+		const runtime = () => {
+			const owner = new ExtensionRuntime();
+			const releases: Array<() => void> = [];
+			cleanups.push(() => {
+				for (const release of releases) release();
+			});
+			return {
+				owner,
+				begin: (): (() => void) => {
+					const release = owner.beginSession();
+					releases.push(release);
+					return release;
+				},
+			};
+		};
+		const a = runtime();
+		const b = runtime();
+		let apiA: ExtensionAPI | undefined;
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				apiA = pi;
+			},
+			process.cwd(),
+			new EventBus(),
+			a.owner,
+			"owner-a",
+		);
+		// Only the tool and its renderer are exercised; nothing here reaches the registry.
+		const runnerA = new ExtensionRunner(
+			[extension],
+			a.owner,
+			process.cwd(),
+			SessionManager.inMemory(),
+			{} as ModelRegistry,
+		);
+		const runnerB = new ExtensionRunner([], b.owner, process.cwd(), SessionManager.inMemory(), {} as ModelRegistry);
+		const endA = a.begin();
+		b.begin();
+		const entered = Promise.withResolvers<void>();
+		const finished = Promise.withResolvers<void>();
+		let outcome = "not called";
+		let drawings = 0;
+		a.owner.runOwned(() =>
+			apiA?.registerTool({
+				name: "a-tool",
+				label: "a-tool",
+				description: "A's tool",
+				parameters: schemaOf({}),
+				execute: async (_id, _params, signal) => {
+					signal?.addEventListener(
+						"abort",
+						() => {
+							try {
+								apiA?.registerTool({
+									name: "from-abort",
+									label: "from-abort",
+									description: "late",
+									parameters: schemaOf({}),
+									execute: async () => ({ content: [] }),
+								});
+								outcome = "registered";
+							} catch (error) {
+								outcome = String(error);
+							}
+							finished.resolve();
+						},
+						{ once: true },
+					);
+					entered.resolve();
+					await finished.promise;
+					return { content: [{ type: "text", text: "cancelled" }] };
+				},
+				// The renderer's return type is the host's component; this one only counts its drawings.
+				renderCall: (() => ({
+					render: () => {
+						drawings++;
+						return ["A component"];
+					},
+					invalidate() {},
+				})) as never,
+			}),
+		);
+		const registered = runnerA.getRegisteredTool("a-tool");
+		if (!registered) throw new Error("A's tool was not registered");
+		// The host hands A's tool to B's runner, which executes it for B's session.
+		const adapter = new RegisteredToolAdapter(registered, runnerB);
+		const caller = new AbortController();
+		const executing = runnerB.runScoped(() => adapter.execute("B-call", {}, caller.signal));
+		await entered.promise;
+		const component = adapter.renderCall?.({}, {} as never, theme);
+		if (!component) throw new Error("A's renderer returned nothing");
+		const mounted = new SafeToolRendererComponent(
+			"a-tool",
+			"call",
+			component,
+			() => ({ render: () => ["fallback"], invalidate() {} }),
+			adapter.rendererScope,
+		);
+		const live = mounted.render(80);
+		endA();
+		// A's runtime starts its next session, C, before B's caller aborts.
+		a.begin();
+		caller.abort(new Error("B stopped the call"));
+		await executing;
+		const after = mounted.render(80);
+
+		expect({
+			outcome,
+			registeredInC: runnerA.getRegisteredTool("from-abort") !== undefined,
+			live,
+			after,
+			drawings,
+		}).toEqual({
+			outcome: expect.stringContaining("its session has ended"),
+			registeredInC: false,
+			live: ["A component"],
+			after: ["fallback"],
+			drawings: 1,
+		});
+	});
+});
+
+describe("a host getter or resolver that throws", () => {
+	test("fails the extension's read with a copy, taken around the host call itself", async () => {
+		const owner = new ExtensionRuntime();
+		cleanups.push(owner.beginSession());
+		let state = "safe";
+		const failure = Object.assign(new TypeError("host call failed"), {
+			write: () => {
+				state = "changed after retirement";
+			},
+		});
+		const sessionManager = SessionManager.inMemory();
+		// The host's own record fails to read.
+		Object.defineProperty(sessionManager, "getLeafEntry", {
+			value: () => {
+				throw failure;
+			},
+		});
+		// Only the model reads and the history are exercised; nothing here reaches the registry.
+		const runner = new ExtensionRunner([], owner, process.cwd(), sessionManager, {} as ModelRegistry);
+		const [host, context] = actions(() => {
+			throw failure;
+		});
+		runner.initialize(host, context, undefined, { ...runner.getUIContext() }, "rpc");
+		const resolving = (mode: "sync" | "async") =>
+			({
+				id: "m",
+				provider: "p",
+				resolveHeaders:
+					mode === "sync"
+						? () => {
+								throw failure;
+							}
+						: async () => {
+								throw failure;
+							},
+			}) as unknown as Model;
+		const routes: Array<[string, () => unknown]> = [
+			["ctx.model", () => runner.createContext().model],
+			["ctx.models.current()", () => runner.createContext().models.current()],
+			["resolveHeaders, thrown", () => runner.createContext(resolving("sync")).model?.resolveHeaders?.()],
+			["resolveHeaders, rejected", () => runner.createContext(resolving("async")).model?.resolveHeaders?.()],
+			["sessionManager.getLeafEntry()", () => runner.createContext().sessionManager.getLeafEntry()],
+		];
+		const outcomes: Record<string, unknown> = {};
+		for (const [route, read] of routes) {
+			let caught: unknown;
+			try {
+				await read();
+			} catch (error) {
+				caught = error;
+			}
+			const write: unknown = caught instanceof Error ? Reflect.get(caught, "write") : undefined;
+			if (typeof write === "function") write();
+			outcomes[route] = {
+				failed: caught instanceof TypeError,
+				same: caught === failure,
+				message: caught instanceof Error ? caught.message : undefined,
+				write: typeof write,
+			};
+		}
+		const detached = { failed: true, same: false, message: "host call failed", write: "undefined" };
+
+		expect({ outcomes, state }).toEqual({
+			outcomes: Object.fromEntries(routes.map(([route]) => [route, detached])),
+			state: "safe",
+		});
+	});
+});
+
 describe("what a session's ctx.ui writes, once the session has gone", () => {
 	test("string members reach the host while it is live, and nothing once it has gone", () => {
 		const owner = new ExtensionRuntime();
@@ -1344,6 +1577,43 @@ describe("what a session's ctx.ui writes, once the session has gone", () => {
 			hostObject: (readBack as unknown) === (stored as unknown),
 			hostsAfterReplace: ui.getEditorComponent(),
 		}).toEqual({ own: true, hostObject: false, hostsAfterReplace: undefined });
+	});
+
+	test("reading the editor back through another of the session's facades hands the same factory", async () => {
+		const owner = new ExtensionRuntime();
+		cleanups.push(owner.beginSession());
+		// Only the UI surface is exercised; nothing here reaches the registry.
+		const runner = new ExtensionRunner([], owner, process.cwd(), SessionManager.inMemory(), {} as ModelRegistry);
+		let stored: ReturnType<ExtensionUIContext["getEditorComponent"]>;
+		// The host hands one session several UI objects (a dialog's, a link activation's), all
+		// drawing into the one editor.
+		const hostUI = (): ExtensionUIContext => ({
+			...runner.getUIContext(),
+			setEditorComponent: factory => {
+				stored = factory;
+			},
+			getEditorComponent: () => stored,
+		});
+		const [host, context] = actions(() => undefined);
+		runner.initialize(host, context, undefined, hostUI(), "tui");
+		const own = () => new CustomEditor(getEditorTheme());
+		runner.createContext().ui.setEditorComponent(own);
+		const throughDispatch = runner.createContext().ui.getEditorComponent();
+		const throughDialog = runner.handedUIContext(hostUI()).getEditorComponent();
+		// Another session's facade on the same host reads none of it.
+		const other = new ExtensionRuntime();
+		cleanups.push(other.beginSession());
+		const throughOtherSession = handUIContext(
+			hostUI(),
+			other.forSession(),
+			runner.rendererScope,
+		).getEditorComponent();
+
+		expect({
+			throughDispatch: throughDispatch === own,
+			throughDialog: throughDialog === own,
+			throughOtherSession,
+		}).toEqual({ throughDispatch: true, throughDialog: true, throughOtherSession: undefined });
 	});
 
 	test("an editor factory is handed a copy of the editor theme, so its writes stay its own", async () => {
@@ -1907,14 +2177,30 @@ describe("a handed context reads what the host can change when it is asked for",
 		expect(seen).toEqual({ askDialog: "function", approve: "function" });
 	});
 
-	test("`local://` options follow a host that replaces an answer", () => {
+	test("`local://` options follow a host that replaces an answer, and refuse once the session has gone", () => {
+		const owner = new ExtensionRuntime();
+		const end = owner.beginSession();
+		cleanups.push(end);
 		const options = { getArtifactsDir: () => "/old-artifacts", getSessionId: () => "old-id" };
-		const handed = handLocalProtocolOptions(options);
+		const handed = handLocalProtocolOptions(options, owner.forSession());
 		options.getArtifactsDir = () => "/new-artifacts";
 		options.getSessionId = () => "new-id";
+		const live = { dir: handed.getArtifactsDir?.(), id: handed.getSessionId?.() };
+		const getSessionId = handed.getSessionId;
+		end();
+		// The next session is live; the options stay the session's that has gone.
+		cleanups.push(owner.beginSession());
+		let afterwards: unknown;
+		try {
+			afterwards = getSessionId?.();
+		} catch (error) {
+			afterwards = String(error);
+		}
 
-		expect(handed.getArtifactsDir?.()).toBe("/new-artifacts");
-		expect(handed.getSessionId?.()).toBe("new-id");
+		expect({ live, afterwards }).toEqual({
+			live: { dir: "/new-artifacts", id: "new-id" },
+			afterwards: expect.stringContaining("Extension session retired"),
+		});
 	});
 
 	test("a saved context sees the ui, the mode and the model the host has now", async () => {

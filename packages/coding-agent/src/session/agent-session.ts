@@ -161,9 +161,10 @@ import type {
 	TreePreparation,
 } from "../extensibility/extensions";
 import { emitSessionShutdownEvent, TOP_LEVEL_AGENT, UNAVAILABLE_ANNOTATIONS } from "../extensibility/extensions";
-import { copyHostData, handHostModel } from "../extensibility/extensions/boundary-data";
+import { copyHostData, handHostModel, handSessionFacade } from "../extensibility/extensions/boundary-data";
 import { runExtensionCompact } from "../extensibility/extensions/compact-handler";
 import {
+	CONTEXT_ANSWERS,
 	type ExtensionModelRegistry,
 	type ExtensionSessionManager,
 	handLocalProtocolOptions,
@@ -174,7 +175,7 @@ import { extensionEventFromSessionEvent } from "../extensibility/extensions/life
 import { ExtensionRuntime } from "../extensibility/extensions/loader";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
-import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
+import type { CompactOptions, ContextUsage, ExtensionSessionGeneration } from "../extensibility/extensions/types";
 import type { CustomCommandContext } from "../extensibility/custom-commands/types";
 import { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
 import {
@@ -612,9 +613,10 @@ const cfgWorkspacePromptInputs = combine({
 const PLAN_MODE_REMINDER_MAX = 3;
 const POST_PROMPT_DRAIN_TIMEOUT_MS = 5_000;
 
-/** The surfaces a session built without a runner hands author code, and the release of the claim
- *  that owns them. */
+/** The surfaces a session built without a runner hands author code, the owner they belong to, and
+ *  the release of that owner's claim. */
 interface RunnerlessSurfaces {
+	readonly owner: ExtensionRuntime;
 	readonly release: () => void;
 	readonly sessionManager: ExtensionSessionManager;
 	readonly modelRegistry: ExtensionModelRegistry;
@@ -1169,6 +1171,9 @@ export class AgentSession implements SettingsScope {
 	 *  when no claim was taken — so disposal can neither release twice nor release a hold this
 	 *  session never took from a sibling that is still alive. */
 	#releaseExtensionCallbacks: (() => void) | undefined;
+	/** The extension session the claim joined: whose work this session's disposal waits for, and
+	 *  never the work a session before it left running on a runner it reuses. */
+	#extensionSession: ExtensionSessionGeneration | undefined;
 	/** What a session built without a runner hands author code — a custom command
 	 *  (`#createCommandContext`), a custom tool called without the loop's context — and the release
 	 *  of the claim that owns it, taken on first use (`#runnerlessSurfacesClaimed`). */
@@ -3084,6 +3089,7 @@ export class AgentSession implements SettingsScope {
 		// duck-typed partial runner is a supported host shape, and a runner that cannot be
 		// claimed is never released either.
 		this.#releaseExtensionCallbacks = config.extensionRunner?.claimExtensionCallbacks?.();
+		this.#extensionSession = config.extensionRunner?.callbackOwner?.sessionGeneration;
 	}
 
 	/** Registers teardown to run when this session is disposed (e.g. handle listeners bound to it). */
@@ -6805,7 +6811,7 @@ export class AgentSession implements SettingsScope {
 				// pass, so that asking cannot fail the disposal.
 				if (
 					typeof this.#extensionRunner?.hasPendingHandlerWork === "function" &&
-					this.#extensionRunner.hasPendingHandlerWork()
+					this.#extensionRunner.hasPendingHandlerWork(this.#extensionSession)
 				) {
 					logger.warn(
 						"Extension work outlived the dispose drain; its account pools are lifted only when it ends",
@@ -6848,7 +6854,7 @@ export class AgentSession implements SettingsScope {
 			await this.#drainInFlightEventHandlers();
 			await this.#drainExtensionNotifications();
 			if (typeof this.#extensionRunner?.waitForPendingHandlerWork === "function") {
-				await this.#extensionRunner.waitForPendingHandlerWork();
+				await this.#extensionRunner.waitForPendingHandlerWork(this.#extensionSession);
 			}
 		} while (this.#hasLiveSessionWork());
 	}
@@ -6871,7 +6877,7 @@ export class AgentSession implements SettingsScope {
 			this.#inFlightEventHandlers.size > 0 ||
 			this.#drainingExtensionEvents ||
 			(typeof this.#extensionRunner?.hasPendingHandlerWork === "function" &&
-				this.#extensionRunner.hasPendingHandlerWork())
+				this.#extensionRunner.hasPendingHandlerWork(this.#extensionSession))
 		);
 	}
 
@@ -9541,84 +9547,97 @@ export class AgentSession implements SettingsScope {
 		// from its registry, its history and its model after the command returns. Their owner is a
 		// claim this session takes on first use and releases at dispose.
 		const surfaces = this.#runnerlessSurfacesClaimed();
+		const owner = surfaces.owner;
 		const getModel = (): Model | undefined => this.model ?? undefined;
 		const sessionManager = this.sessionManager;
-		return {
-			// Fixed: a session without a runner has no UI, now or later.
-			ui: noOpUIContext,
-			mode: "print",
-			hasUI: false,
-			// Read when asked for, as a runner's context does: a relocation moves the session's cwd.
-			get cwd() {
-				return sessionManager.getCwd();
-			},
-			sessionManager: surfaces.sessionManager,
-			modelRegistry: surfaces.modelRegistry,
-			localProtocolOptions: surfaces.localProtocolOptions,
-			isProjectTrusted: () => true,
-			// Used only when the session has no extension runner. `createAgentSession` always builds
-			// one (carrying the real identity), so only hand-constructed sessions land here.
-			agent: TOP_LEVEL_AGENT,
+		// Every member that calls this session is the owner's host call, as a runner's context's
+		// are: refused once the session is disposed — `shutdown` included, which would otherwise exit
+		// the process from a command kept past disposal.
+		return handSessionFacade<ExtensionCommandContext>(
+			{
+				// Fixed: a session without a runner has no UI, now or later.
+				ui: noOpUIContext,
+				mode: "print",
+				hasUI: false,
+				// Read when asked for, as a runner's context does: a relocation moves the session's cwd.
+				get cwd() {
+					return sessionManager.getCwd();
+				},
+				sessionManager: surfaces.sessionManager,
+				modelRegistry: surfaces.modelRegistry,
+				localProtocolOptions: surfaces.localProtocolOptions,
+				isProjectTrusted: () => true,
+				// Used only when the session has no extension runner. `createAgentSession` always builds
+				// one (carrying the real identity), so only hand-constructed sessions land here.
+				agent: TOP_LEVEL_AGENT,
 
-			get model() {
-				const model = getModel();
-				return model && handHostModel(model);
+				// The host's getter may throw: its failure crosses as a copy (`handSessionFacade`), as the
+				// model does.
+				get model() {
+					const model = getModel();
+					return model && handHostModel(model);
+				},
+				models: createExtensionModelQuery(this.#modelRegistry, this.settings, getModel, owner),
+				isIdle: () => !this.isStreaming,
+				abort: () => {
+					void this.abort();
+				},
+				hasPendingMessages: () => this.queuedMessageCount > 0,
+				shutdown: () => {
+					// Await the idempotent dispose() before exiting so the browser
+					// reaper and other bounded teardown complete — a fire-and-forget
+					// `void this.dispose()` raced process.exit() and could leave an
+					// OMP-owned Chromium alive (#5643).
+					void this.dispose().finally(() => process.exit(0));
+				},
+				resolvePlanReview: () => false,
+				getPendingPlanReview: () => undefined,
+				openPlanReview: async () => false,
+				// What a read answers with is a copy, as a runner's context hands it.
+				getContextUsage: () => copyHostData(this.getContextUsage()),
+				getAsyncJobSnapshot: () => copyHostData(this.getAsyncJobSnapshot()),
+				waitForIdle: () => this.waitForIdle(),
+				newSession: async options => {
+					const success = await this.newSession({ parentSession: options?.parentSession });
+					if (!success) {
+						return { cancelled: true };
+					}
+					if (options?.setup) {
+						await options.setup(this.sessionManager);
+					}
+					return { cancelled: false };
+				},
+				branch: async entryId => {
+					const result = await this.branch(entryId);
+					return { cancelled: result.cancelled };
+				},
+				navigateTree: async (targetId, options) => {
+					const result = await this.navigateTree(targetId, { summarize: options?.summarize });
+					return { cancelled: result.cancelled };
+				},
+				compact: instructionsOrOptions => runExtensionCompact(this, instructionsOrOptions),
+				switchSession: async sessionPath => {
+					const success = await this.switchSession(sessionPath);
+					return { cancelled: !success };
+				},
+				reload: async () => {
+					await this.reload();
+				},
+				getSystemPrompt: () => copyHostData(this.systemPrompt),
+				runEphemeralTurn: async args => copyHostData(await this.runEphemeralTurn(args)),
+				// The SDK always builds a runner (which receives the annotations factory); this runner-less
+				// context only exists for directly constructed sessions, which have no `/annotate` wiring.
+				annotations: UNAVAILABLE_ANNOTATIONS,
+				// Owned by this session: inert once it is disposed, as a runner's context's timers are.
+				setInterval: (callback, ms, ...args) =>
+					this.#fallbackTimers().setInterval(owner.ownCallback(callback), ms, ...args),
+				setTimeout: (callback, ms, ...args) =>
+					this.#fallbackTimers().setTimeout(owner.ownCallback(callback), ms, ...args),
+				clearTimer: timer => this.#fallbackTimers().clear(timer),
 			},
-			models: createExtensionModelQuery(this.#modelRegistry, this.settings, getModel),
-			isIdle: () => !this.isStreaming,
-			abort: () => {
-				void this.abort();
-			},
-			hasPendingMessages: () => this.queuedMessageCount > 0,
-			shutdown: () => {
-				// Await the idempotent dispose() before exiting so the browser
-				// reaper and other bounded teardown complete — a fire-and-forget
-				// `void this.dispose()` raced process.exit() and could leave an
-				// OMP-owned Chromium alive (#5643).
-				void this.dispose().finally(() => process.exit(0));
-			},
-			resolvePlanReview: () => false,
-			getPendingPlanReview: () => undefined,
-			openPlanReview: async () => false,
-			// What a read answers with is a copy, as a runner's context hands it.
-			getContextUsage: () => copyHostData(this.getContextUsage()),
-			getAsyncJobSnapshot: () => copyHostData(this.getAsyncJobSnapshot()),
-			waitForIdle: () => this.waitForIdle(),
-			newSession: async options => {
-				const success = await this.newSession({ parentSession: options?.parentSession });
-				if (!success) {
-					return { cancelled: true };
-				}
-				if (options?.setup) {
-					await options.setup(this.sessionManager);
-				}
-				return { cancelled: false };
-			},
-			branch: async entryId => {
-				const result = await this.branch(entryId);
-				return { cancelled: result.cancelled };
-			},
-			navigateTree: async (targetId, options) => {
-				const result = await this.navigateTree(targetId, { summarize: options?.summarize });
-				return { cancelled: result.cancelled };
-			},
-			compact: instructionsOrOptions => runExtensionCompact(this, instructionsOrOptions),
-			switchSession: async sessionPath => {
-				const success = await this.switchSession(sessionPath);
-				return { cancelled: !success };
-			},
-			reload: async () => {
-				await this.reload();
-			},
-			getSystemPrompt: () => copyHostData(this.systemPrompt),
-			runEphemeralTurn: async args => copyHostData(await this.runEphemeralTurn(args)),
-			// The SDK always builds a runner (which receives the annotations factory); this runner-less
-			// context only exists for directly constructed sessions, which have no `/annotate` wiring.
-			annotations: UNAVAILABLE_ANNOTATIONS,
-			setInterval: (callback, ms, ...args) => this.#fallbackTimers().setInterval(callback, ms, ...args),
-			setTimeout: (callback, ms, ...args) => this.#fallbackTimers().setTimeout(callback, ms, ...args),
-			clearTimer: timer => this.#fallbackTimers().clear(timer),
-		};
+			owner,
+			CONTEXT_ANSWERS,
+		);
 	}
 
 	/** The surfaces a session built without a runner hands author code, owned by a claim taken on
@@ -9630,10 +9649,11 @@ export class AgentSession implements SettingsScope {
 		const release = owner.beginSession();
 		if (this.#isDisposed) release();
 		this.#runnerlessSurfaces = {
+			owner,
 			release,
 			sessionManager: handSessionManager(this.sessionManager, owner),
 			modelRegistry: handModelRegistry(this.#modelRegistry, owner),
-			localProtocolOptions: handLocalProtocolOptions(this.#localProtocolOptions()),
+			localProtocolOptions: handLocalProtocolOptions(this.#localProtocolOptions(), owner),
 		};
 		return this.#runnerlessSurfaces;
 	}

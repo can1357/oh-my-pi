@@ -2443,10 +2443,12 @@ export interface ExtensionCallbackOwner {
 	 *  session leaves behind is pinned to it, so the next session's claim does not revive it.
 	 *  Optional for an embedder's runtime; one without it has nothing pinned to a session. */
 	readonly sessionGeneration?: ExtensionSessionGeneration | undefined;
-	/** Whether any extension callback is executing. */
-	hasPendingCallbacks(): boolean;
-	/** Resolves once every callback executing now has returned. */
-	waitForPendingCallbacks(): Promise<void>;
+	/** Whether extension work of `session` — by default the session a gate checks here — is under
+	 *  way. Work a session before it left running is that session's, not this one's. */
+	hasPendingCallbacks(session?: ExtensionSessionGeneration): boolean;
+	/** Resolves once every callback `session` (as {@link hasPendingCallbacks} names it) has under
+	 *  way now has returned. */
+	waitForPendingCallbacks(session?: ExtensionSessionGeneration): Promise<void>;
 	/** Settles on the next add or remove, for a caller that must not sample. */
 	whenCallbacksChange(): Promise<void>;
 	/** This surface as one session's owner — the admitted call's session on this stack, else the one

@@ -77,15 +77,27 @@ What you register, and when, decides how long it lasts:
   and doing nothing; a registration that replaced a load-time one of the same name gives it back.
   To have it in B, register it again from B. Whatever the host still holds of it — a tool's
   `execute` and renderers, a composer shape it is drawing — answers for that session alone: once the
-  session has ended `execute` fails, saying so, and a shape draws as the built-in `box`. A flag's
-  value goes with its declaration, whatever it was set to. A session that has ended can register
-  nothing, nor unregister a provider: the call throws.
+  session has ended `execute` fails, saying so, and a shape draws as the built-in `box`. A tool
+  stays its registering session's when another session's runner executes it: its cancellation
+  and the components its renderers return run as that session's work and stop when it ends. A
+  flag's value goes with its declaration, whatever it was set to. A session that has ended can
+  register nothing, nor unregister a provider: the call throws.
 - A dispatch already under way when its session ends runs to its end: the handlers after the one
   that was running still run, and their result still reaches the host. A callback that session
-  registered refuses on its own.
-- A `ctx` you keep — its `ui`, `sessionManager`, `modelRegistry`, `memory` and `sessionModes` — is
-  its session's, and refuses once that session has ended, even while the runtime serves the next
-  one. A `ctx.setTimeout`/`ctx.setInterval` callback belongs to the session that scheduled it.
+  registered refuses on its own. A dispatch that begins after its session has ended — one a
+  finishing handler starts included — runs nothing, and each handler it skips is reported through
+  `onError`. The work a session has under way holds that session's disposal, not the next
+  session's.
+- A `ctx` you keep is its session's, and refuses once that session has ended, even while the
+  runtime serves the next one and whichever host the runner is bound to by then. Every member that
+  calls the host refuses — `abort`, `shutdown`, `compact`, `cwd`, `model`, `isIdle`, the members
+  of its `ui`, `sessionManager`, `modelRegistry`, `models`, `memory`, `sessionModes` and
+  `localProtocolOptions` — however it is called: `ctx.ui.setFooter(undefined)` refuses as
+  `ctx.ui.setFooter(factory)` does, and `ctx.ui.getEditorText()` answers nothing about the next
+  session. What answers from the context itself (`mode`, `hasUI`, `agent`, `clearTimer`) still
+  answers. `ctx.setTimeout`/`ctx.setInterval` refuse too, and a callback scheduled while the
+  session was live belongs to that session, whichever session the runtime serves when it fires.
+  A host call that fails reaches you as a copy of its failure, never the host's own exception.
 
 ## Quick start
 
@@ -611,7 +623,7 @@ await peer.setRemoteDescription({ type: "answer", sdp: live.sdpAnswer });
 
 The promise resolves once the call is signaled and its control socket is open; apply `sdpAnswer` right away. It rejects without a non-empty `sdpOffer` and while another live session is active. `voice` and `instructions` work as for RPC `live_start`. The peer does its own echo cancellation and mute: the TUI mute key only moves the phase to `muted`, so silence the peer's microphone track while that phase lasts. omp reports no audio levels and no `speaking` phase for these calls. `onEnd` is called exactly once, including when the call fails to start (before the promise rejects). Observer callbacks that throw are logged and do not end the call.
 
-omp has no media peer for these calls, so it cannot tell when yours goes away. Call `live.stop()` when the peer disconnects (`connectionstatechange` to `failed` or `closed`, or your relay socket closing); otherwise the call stays open and the TUI keeps the live visualizer up.
+omp has no media peer for these calls, so it cannot tell when yours goes away. Call `live.stop()` when the peer disconnects (`connectionstatechange` to `failed` or `closed`, or your relay socket closing); otherwise the call stays open and the TUI keeps the live visualizer up. `stop()` keeps working after your session has ended, so a call your session started can always be ended. The options are copied when you call `startLive`, and `onPhase`, `onTranscript` and `onEnd` run as your session's work, handed copies of what omp reports, and do nothing once it has ended.
 
 Whoever holds the peer steers this session by voice, including delegated work that runs tools, so authenticate the page or relay that hands you the offer.
 

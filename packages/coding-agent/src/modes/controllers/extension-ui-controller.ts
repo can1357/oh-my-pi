@@ -23,6 +23,7 @@ import type {
 	ExtensionContextActions,
 	ExtensionCustomOptions,
 	ExtensionError,
+	ExtensionRunner,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionUISelectItem,
@@ -144,22 +145,39 @@ export class ExtensionUiController {
 	constructor(private ctx: InteractiveModeContext) {}
 
 	#syncExtensionComposerShapes(): void {
-		this.disposeComposerShapes();
 		const runner = this.ctx.session.extensionRunner;
-		for (const definition of runner?.getComposerShapes() ?? []) {
+		// A shape a session registers is installed, and one its end withdraws is taken out of the
+		// host's registries, so the selector and the drawn prompt show what is registered now. One
+		// subscription per runner, kept while shapes are reinstalled: a reinstall never subscribes
+		// again, so one change is one reinstall.
+		if (runner !== this.#composerShapeRunner) {
+			this.#composerShapeSubscription?.();
+			this.#composerShapeRunner = runner;
+			this.#composerShapeSubscription = runner?.onComposerShapesChanged(() => this.#installComposerShapes());
+		}
+		this.#installComposerShapes();
+	}
+
+	/** Installs the runner's composer shapes in place of the ones installed before. */
+	#installComposerShapes(): void {
+		for (const dispose of this.#composerShapeDisposers.splice(0)) dispose();
+		for (const definition of this.#composerShapeRunner?.getComposerShapes() ?? []) {
 			this.#composerShapeDisposers.push(installExtensionComposerShape(definition));
 		}
-		// A shape a session registers is installed, and one its end withdraws is taken out of the
-		// host's registries, so the selector and the drawn prompt show what is registered now.
-		if (runner)
-			this.#composerShapeDisposers.push(runner.onComposerShapesChanged(() => this.#syncExtensionComposerShapes()));
 		this.ctx.syncComposerShape();
 		this.ctx.syncExtensionLinks();
 	}
 
+	/** The runner whose composer shape changes this controller follows, and how it stops. */
+	#composerShapeRunner: ExtensionRunner | undefined;
+	#composerShapeSubscription: (() => void) | undefined;
+
 	/** Remove extension-owned composer styles from the process registries, and stop following the
 	 *  runner's changes to them. */
 	disposeComposerShapes(): void {
+		this.#composerShapeSubscription?.();
+		this.#composerShapeSubscription = undefined;
+		this.#composerShapeRunner = undefined;
 		for (const dispose of this.#composerShapeDisposers.splice(0)) dispose();
 	}
 

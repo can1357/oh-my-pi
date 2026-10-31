@@ -15,36 +15,42 @@ import type { Api, Model } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../../config/model-resolver";
 import type { Settings } from "../../config/settings";
-import { handHostModel } from "./boundary-data";
-import type { ExtensionModelQuery } from "./types";
+import { handHostModel, handSessionFacade } from "./boundary-data";
+import type { ExtensionCallbackOwner, ExtensionModelQuery } from "./types";
 
 /**
- * Build the `ctx.models` facade. `getModel` is read lazily so `current()` always
- * reflects the live session model (it can change mid-session via `/model`).
+ * Build the `ctx.models` facade for one session (`owner`). `getModel` is read lazily so `current()`
+ * always reflects the live session model (it can change mid-session via `/model`).
  */
 export function createExtensionModelQuery(
 	modelRegistry: ModelRegistry,
 	settings: Settings | undefined,
 	getModel: () => Model | undefined,
+	owner: ExtensionCallbackOwner,
 ): ExtensionModelQuery {
-	return {
-		list: () => modelRegistry.getAvailable().map(handHostModel),
-		current: () => {
-			const model = getModel();
-			return model && handHostModel(model);
+	// Each member reads the host — the registry, the session's model getter — as that session's
+	// host call: refused once it has gone, and a failure there crosses as a copy.
+	return handSessionFacade(
+		{
+			list: () => modelRegistry.getAvailable().map(handHostModel),
+			current: () => {
+				const model = getModel();
+				return model && handHostModel(model);
+			},
+			// resolveModelRoleValue expands a role alias (`@slow`) to its full configured
+			// priority list and tries each pattern — the same path core selection uses — so a
+			// fallback model lower in the list still resolves. Plain model strings pass through
+			// as a single pattern.
+			resolve: (spec: string): Model<Api> | undefined => {
+				const model = resolveModelRoleValue(spec, modelRegistry.getAvailable(), {
+					settings,
+					matchPreferences: getModelMatchPreferences(settings),
+				}).model;
+				return model && handHostModel(model);
+			},
+			family: (model: Model<Api>): string =>
+				model.identity.class === "unknown" ? model.provider.toLowerCase() : model.identity.class,
 		},
-		// resolveModelRoleValue expands a role alias (`@slow`) to its full configured
-		// priority list and tries each pattern — the same path core selection uses — so a
-		// fallback model lower in the list still resolves. Plain model strings pass through
-		// as a single pattern.
-		resolve: (spec: string): Model<Api> | undefined => {
-			const model = resolveModelRoleValue(spec, modelRegistry.getAvailable(), {
-				settings,
-				matchPreferences: getModelMatchPreferences(settings),
-			}).model;
-			return model && handHostModel(model);
-		},
-		family: (model: Model<Api>): string =>
-			model.identity.class === "unknown" ? model.provider.toLowerCase() : model.identity.class,
-	};
+		owner,
+	);
 }

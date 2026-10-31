@@ -539,6 +539,95 @@ function copiedFailure(error: unknown): unknown {
 }
 
 /**
+ * Runs one call into the host for an extension, and hands its failure over as a copy
+ * ({@link copiedFailure}) — thrown synchronously or by a returned promise's rejection — never the
+ * host's own exception, which may hold the host's callables. What it answers is the caller's to
+ * copy. A copy is taken around the host call itself: copying only what the call returned leaves
+ * the failure it raised before returning.
+ */
+export function fromHostCall<T>(call: () => T): T {
+	let result: T;
+	try {
+		result = call();
+	} catch (error) {
+		throw copiedFailure(error);
+	}
+	if (result instanceof Promise) {
+		return result.catch((error: unknown) => {
+			throw copiedFailure(error);
+		}) as T;
+	}
+	return result;
+}
+
+/** The constructor of every `async` function, so a facade can tell which of its members answer
+ *  with a promise: an async member refuses by rejecting, as every other failure of it does. */
+const AsyncFunction: unknown = Object.getPrototypeOf(async () => {}).constructor;
+
+/** What a session's admission is asked to run when only its answer is wanted: nothing. */
+const ADMISSION_ONLY = (): undefined => undefined;
+
+/**
+ * Runs one host call for a session's facade: refused once that session has gone — even while its
+ * runtime serves the next, and inside a dispatch it is finishing — with the refusal every other
+ * call of that session meets (the owner's own `runOwned`), and its failure handed over as a copy
+ * ({@link fromHostCall}). The host call itself runs outside the admission: it is the host's work,
+ * which the session neither holds open nor owns. An owner with no admission of its own (an
+ * embedder's runtime whose callbacks run as the host's) refuses nothing.
+ */
+export function sessionHostCall<T>(owner: ExtensionCallbackOwner, call: () => T): T {
+	if (typeof owner.runOwned === "function") owner.runOwned(ADMISSION_ONLY);
+	return fromHostCall(call);
+}
+
+/**
+ * A session's facade over the host: every member is a host call that session makes
+ * ({@link sessionHostCall}) — a method's call and a getter's read alike, and a function a getter
+ * answers with when it is called later — so what refuses once the session has gone is the member,
+ * never whichever argument it happens to copy. A member taking `undefined`, or nothing, is refused
+ * as surely as one taking a string. `answers` names the members that call no host: they answer
+ * from what the facade was made with, or are facades of their own that refuse member by member.
+ */
+export function handSessionFacade<T extends object>(
+	facade: T,
+	owner: ExtensionCallbackOwner,
+	answers: ReadonlySet<PropertyKey> = new Set(),
+): T {
+	const admitted = <R>(fn: Function, receiver: unknown, args: unknown[]): R =>
+		fn instanceof (AsyncFunction as FunctionConstructor)
+			? ((async () => sessionHostCall(owner, () => Reflect.apply(fn, receiver, args)))() as R)
+			: sessionHostCall(owner, () => Reflect.apply(fn, receiver, args) as R);
+	for (const key of Reflect.ownKeys(facade)) {
+		if (answers.has(key)) continue;
+		const descriptor = Object.getOwnPropertyDescriptor(facade, key);
+		if (!descriptor?.configurable) continue;
+		const method: unknown = descriptor.value;
+		if (typeof method === "function") {
+			Object.defineProperty(facade, key, {
+				...descriptor,
+				value(this: unknown, ...args: unknown[]): unknown {
+					return admitted(method, this, args);
+				},
+			});
+		} else if (descriptor.get) {
+			const get = descriptor.get;
+			Object.defineProperty(facade, key, {
+				...descriptor,
+				get(this: unknown): unknown {
+					const value: unknown = admitted(get, this, []);
+					return typeof value === "function"
+						? function (this: unknown, ...args: unknown[]): unknown {
+								return admitted(value, this, args);
+							}
+						: value;
+				},
+			});
+		}
+	}
+	return facade;
+}
+
+/**
  * How many objects one copy of host data handed to an extension may make ({@link copyHostData}).
  * Chosen here, not derived, and set against what real payloads measure (round 49 of #17402):
  * a session tree costs about 20 objects per turn, so about 50,000 turns reach it; the bundled
@@ -830,7 +919,12 @@ export function handHostModel(model: Model<Api>): Model<Api> {
 function handHostResolver(resolver: Function, model: Model<Api>): NonNullable<Model<Api>["resolveHeaders"]> {
 	return async signal => {
 		const followed = signal === undefined ? undefined : AbortSignal.any([signal]);
-		const headers: Record<string, string> | undefined = await Reflect.apply(resolver, model, [followed]);
+		// The resolver is the host's code: what it throws, synchronously or by rejecting, is the
+		// host's object, and crosses as a copy.
+		const headers = await fromHostCall(
+			(): Promise<Record<string, string> | undefined> | Record<string, string> | undefined =>
+				Reflect.apply(resolver, model, [followed]),
+		);
 		return copyHostData(headers);
 	};
 }
@@ -1041,7 +1135,22 @@ export function admitToolDefinition<T extends ToolDefinition<any, any>>(
 			admitted[field] = snapshotAuthorData(value, DATA, registrationSite(subject, field), copies);
 		}
 	}
+	admittedToolOwners.set(admitted, owner);
 	return admitted as T;
+}
+
+/** The owner each admitted tool definition was registered under ({@link admitToolDefinition}). */
+const admittedToolOwners = new WeakMap<object, ExtensionCallbackOwner>();
+
+/**
+ * Who a registered tool belongs to: the session that registered it, or the runtime whose factory
+ * registered it at load. A host that runs the tool for another runtime's session — a definition
+ * handed across — still runs it, cancels it and draws what it returns as this owner's work, so
+ * nothing of the tool answers to the executing session's lifetime instead. `undefined` for a
+ * definition this admission did not make.
+ */
+export function registeredToolOwner(definition: object): ExtensionCallbackOwner | undefined {
+	return admittedToolOwners.get(definition);
 }
 
 /**

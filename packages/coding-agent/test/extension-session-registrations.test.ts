@@ -14,6 +14,7 @@ import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensi
 import type {
 	ExtensionActions,
 	ExtensionAPI,
+	ExtensionCommandContextActions,
 	ExtensionContext,
 	ExtensionContextActions,
 	ExtensionUIContext,
@@ -545,5 +546,424 @@ describe("a provider", () => {
 		]);
 		expect(h.registry.find("b-provider", "b-model")).toBeDefined();
 		expect(h.registry.find("late", "late-model")).toBeUndefined();
+	});
+});
+
+/** `source`, with every function it has — its own and its prototype chain's — recorded at the host
+ *  under `label` when it is called: what reaches the host is counted there, not inferred from
+ *  whether a member threw. */
+function watched<T extends object>(source: T, label: string, reached: string[]): T {
+	return new Proxy(source, {
+		get(target, key) {
+			const value: unknown = Reflect.get(target, key, target);
+			if (typeof value !== "function" || typeof key !== "string") return value;
+			return (...args: unknown[]) => {
+				reached.push(`${label}.${key}`);
+				return Reflect.apply(value, target, args);
+			};
+		},
+	});
+}
+
+/** A reused runtime whose every host service is watched: the actions, the context and command
+ *  actions with their optional members, the UI, the history, the registry, the memory backend,
+ *  the `local://` options, the job snapshot and the annotations factory. */
+async function watchedRuntime(factory: (pi: ExtensionAPI) => void) {
+	const dir = TempDir.createSync("@session-registrations-watched-");
+	const auth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
+	const reached: string[] = [];
+	const registry = watched(new ModelRegistry(auth, path.join(dir.path(), "models.json")), "registry", reached);
+	const sessionManager = watched(SessionManager.inMemory(dir.path()), "sessionManager", reached);
+	const runtime = new ExtensionRuntime();
+	const extension = await loadExtensionFromFactory(factory, dir.path(), new EventBus(), runtime, "watched");
+	const runner = new ExtensionRunner(
+		[extension],
+		runtime,
+		dir.path(),
+		sessionManager,
+		registry,
+		() =>
+			watched(
+				{ status: async () => ({}), search: async () => [], save: async () => ({}) },
+				"memory",
+				reached,
+			) as never,
+		undefined,
+		watched({ getArtifactsDir: () => dir.path(), getSessionId: () => "id" }, "localProtocol", reached),
+		watched({ snapshot: () => null }, "jobs", reached).snapshot,
+		undefined,
+		(_getContext, sendUserMessage) =>
+			watched(
+				{ submit: async () => sendUserMessage("annotated"), open: async () => undefined },
+				"annotations",
+				reached,
+			) as never,
+	);
+	const [host] = actions();
+	const hostActions = watched(host, "actions", reached);
+	const contextActions = watched(
+		{
+			...actions()[1],
+			resolvePlanReview: () => false,
+			getPendingPlanReview: () => undefined,
+			openPlanReview: async () => false,
+			sessionModes: { getState: () => ({}) as never, set: async () => ({}) as never },
+			runEphemeralTurn: async () => ({}) as never,
+			startLive: async () => ({ sdpAnswer: "answer", voice: "voice", stop: async () => {} }),
+		} satisfies ExtensionContextActions,
+		"ctx",
+		reached,
+	);
+	const commandActions = watched(
+		{
+			getContextUsage: () => undefined,
+			waitForIdle: async () => {},
+			newSession: async () => ({ cancelled: false }),
+			branch: async () => ({ cancelled: false }),
+			navigateTree: async () => ({ cancelled: false }),
+			compact: async () => {},
+			switchSession: async () => ({ cancelled: false }),
+			reload: async () => {},
+		} satisfies ExtensionCommandContextActions,
+		"command",
+		reached,
+	);
+	const ui = watched({ ...runner.getUIContext() }, "ui", reached);
+	runner.initialize(hostActions, contextActions, commandActions, ui, "tui");
+	const releases: Array<() => void> = [];
+	cleanups.push(() => {
+		for (const release of releases) release();
+		auth.close();
+		dir.removeSync();
+	});
+	const session = (): (() => void) => {
+		const release = runtime.beginSession();
+		releases.push(release);
+		return release;
+	};
+	return { runtime, runner, reached, session, hostActions, contextActions, commandActions };
+}
+
+/** Calls every function member of `target` with no arguments, and reads every getter, to `depth`
+ *  levels through what the members answer — the facades a context hands included. */
+async function callEverything(target: object, depth: number, seen = new Set<object>()): Promise<void> {
+	if (depth === 0 || seen.has(target)) return;
+	seen.add(target);
+	const keys = new Set<string>();
+	for (let at: object | null = target; at !== null && at !== Object.prototype; at = Object.getPrototypeOf(at)) {
+		for (const key of Object.getOwnPropertyNames(at)) if (key !== "constructor") keys.add(key);
+	}
+	for (const key of keys) {
+		let value: unknown;
+		try {
+			value = Reflect.get(target, key, target);
+		} catch {
+			continue;
+		}
+		if (typeof value === "function") {
+			try {
+				value = await Reflect.apply(value, target, []);
+			} catch {
+				continue;
+			}
+		}
+		if (typeof value === "object" && value !== null) await callEverything(value, depth - 1, seen);
+	}
+}
+
+describe("a ctx a session kept, once that session has gone", () => {
+	test("reaches no host service through any member, the undefined call of one that installs or clears included", async () => {
+		let kept: ExtensionContext | undefined;
+		const h = await watchedRuntime(pi => {
+			pi.on("session_start", (_event, ctx) => {
+				kept = ctx;
+			});
+		});
+		const endA = h.session();
+		await h.runner.emit({ type: "session_start" });
+		const command = h.runner.createCommandContext();
+		if (!kept) throw new Error("session_start did not run");
+		// While the session is live these reach the host: what is watched is the host itself.
+		h.reached.length = 0;
+		kept.abort();
+		kept.ui.getEditorText();
+		kept.sessionManager.getEntries();
+		kept.models.current();
+		const live = [...h.reached];
+		endA();
+		// The next session is live, on the same runtime and runner.
+		h.session();
+		h.reached.length = 0;
+		await callEverything(kept, 4);
+		await callEverything(command, 4);
+		// Real time on purpose: a timer that slipped through would be a real one.
+		await Bun.sleep(40);
+
+		expect({ live, afterwards: h.reached }).toEqual({
+			live: ["ctx.abort", "ui.getEditorText", "sessionManager.getEntries", "ctx.getModel"],
+			afterwards: [],
+		});
+	});
+
+	test("drives neither host once `initialize` has bound the runner to the next one", async () => {
+		let kept: ExtensionContext | undefined;
+		const h = await watchedRuntime(pi => {
+			pi.on("session_start", (_event, ctx) => {
+				kept = ctx;
+			});
+		});
+		const endA = h.session();
+		await h.runner.emit({ type: "session_start" });
+		endA();
+		h.session();
+		const next: string[] = [];
+		const nextContext = watched({ ...actions()[1] }, "next.ctx", next);
+		const nextUI = watched({ ...h.runner.getUIContext() }, "next.ui", next);
+		h.runner.initialize(watched(actions()[0], "next.actions", next), nextContext, undefined, nextUI, "tui");
+		h.reached.length = 0;
+		const outcomes = [
+			() => kept?.abort(),
+			() => kept?.shutdown(),
+			() => kept?.compact(),
+			() => kept?.ui.setFooter(undefined),
+			() => kept?.ui.setEditorComponent(undefined),
+			() => kept?.ui.setWorkingMessage(undefined),
+		].map(call => {
+			try {
+				call();
+				return "ran";
+			} catch (error) {
+				return String(error);
+			}
+		});
+
+		expect({ outcomes, first: h.reached, next }).toEqual({
+			outcomes: Array(6).fill(expect.stringContaining("Extension session retired")),
+			first: [],
+			next: [],
+		});
+	});
+
+	test("schedules no timer: refused, and nothing fires while the next session is live", async () => {
+		let kept: ExtensionContext | undefined;
+		const h = await reusedRuntime(pi => {
+			pi.on("session_start", (_event, ctx) => {
+				kept = ctx;
+			});
+		});
+		const endA = h.session();
+		await h.runner.emit({ type: "session_start" });
+		endA();
+		h.session();
+		let fired = 0;
+		const scheduling = [
+			() => kept?.setTimeout(() => void fired++, 5),
+			() => kept?.setInterval(() => void fired++, 5),
+		].map(schedule => {
+			try {
+				schedule();
+				return "scheduled";
+			} catch (error) {
+				return String(error);
+			}
+		});
+		// Real time on purpose: the managed timers are real ones.
+		await Bun.sleep(60);
+		h.runner.clearManagedTimers();
+
+		expect({ scheduling, fired }).toEqual({
+			scheduling: Array(2).fill(expect.stringContaining("Extension session retired")),
+			fired: 0,
+		});
+	});
+
+	test("a timer it scheduled while live does nothing once it has gone, though the next session is live", async () => {
+		let kept: ExtensionContext | undefined;
+		const h = await reusedRuntime(pi => {
+			pi.on("session_start", (_event, ctx) => {
+				kept = ctx;
+			});
+		});
+		const endA = h.session();
+		await h.runner.emit({ type: "session_start" });
+		let fired = 0;
+		// Scheduled from outside any admission, while A is live: the timer is A's, whoever calls.
+		kept?.setTimeout(() => void fired++, 30);
+		endA();
+		h.session();
+		await Bun.sleep(80);
+		h.runner.clearManagedTimers();
+
+		expect(fired).toBe(0);
+	});
+});
+
+describe("a dispatch a finishing handler starts", () => {
+	test("runs nothing, and says so through onError for each handler it skips", async () => {
+		const seen: string[] = [];
+		const errors: Array<{ event: string; error: string }> = [];
+		// Bound once the runtime exists; the handler reads them when it runs.
+		const bound: { end?: () => void; runner?: ExtensionRunner } = {};
+		let nested: unknown = "not started";
+		const h = await reusedRuntime(pi => {
+			pi.on("session_stop", async () => {
+				seen.push("outer-1");
+				bound.end?.();
+				await Promise.resolve();
+				// Still finishing the session's dispatch, it starts another, as host code it calls would.
+				nested = await bound.runner?.emitSessionStop({
+					...({} as Omit<SessionStopEvent, "type" | "signal">),
+					signal: new AbortController().signal,
+				});
+				return undefined;
+			});
+			pi.on("session_stop", () => {
+				seen.push("outer-2");
+				return undefined;
+			});
+		});
+		bound.runner = h.runner;
+		h.runner.onError(error => void errors.push({ event: error.event, error: error.error }));
+		bound.end = h.session();
+		await h.runner.emitSessionStop({
+			...({} as Omit<SessionStopEvent, "type" | "signal">),
+			signal: new AbortController().signal,
+		});
+
+		expect({ seen, nested, errors }).toEqual({
+			seen: ["outer-1", "outer-2"],
+			nested: undefined,
+			errors: Array(2).fill({ event: "session_stop", error: expect.stringContaining("had ended before it began") }),
+		});
+	});
+});
+
+describe("a session's work under way", () => {
+	test("holds that session's disposal, and not the next session's", async () => {
+		const proceed = Promise.withResolvers<void>();
+		const entered = Promise.withResolvers<void>();
+		// Bound once the runtime exists; the handler reads them when it runs.
+		const bound: { endA?: () => void; beginB?: () => () => void } = {};
+		let endB: (() => void) | undefined;
+		const h = await reusedRuntime(pi => {
+			pi.on("session_start", async () => {
+				bound.endA?.();
+				endB = bound.beginB?.();
+				entered.resolve();
+				await proceed.promise;
+			});
+		});
+		bound.endA = h.session();
+		const a = h.runtime.sessionGeneration;
+		bound.beginB = () => h.session();
+		const dispatch = h.runner.emit({ type: "session_start" });
+		await entered.promise;
+		const b = h.runtime.sessionGeneration;
+		// B, which did nothing, ends while A's dispatch is still running.
+		endB?.();
+		let bDrained = false;
+		const bWait = h.runner.waitForPendingHandlerWork(b).then(() => {
+			bDrained = true;
+		});
+		await Bun.sleep(20);
+		const during = {
+			bDrained,
+			bPending: h.runner.hasPendingHandlerWork(b),
+			aPending: h.runner.hasPendingHandlerWork(a),
+			bCallbacks: h.runtime.hasPendingCallbacks(b),
+			aCallbacks: h.runtime.hasPendingCallbacks(a),
+		};
+		proceed.resolve();
+		await dispatch;
+		await bWait;
+		await h.runner.waitForPendingHandlerWork(a);
+
+		expect({ during, aAfter: h.runner.hasPendingHandlerWork(a) }).toEqual({
+			during: { bDrained: true, bPending: false, aPending: true, bCallbacks: false, aCallbacks: true },
+			aAfter: false,
+		});
+	});
+});
+
+describe("a live call a session starts", () => {
+	test("hands the host copies and the session's callbacks, and its stop works after the session ends", async () => {
+		let kept: ExtensionContext | undefined;
+		const h = await reusedRuntime(pi => {
+			pi.on("session_start", (_event, ctx) => {
+				kept = ctx;
+			});
+		});
+		let handed: Parameters<NonNullable<ExtensionContextActions["startLive"]>>[0] | undefined;
+		let stops = 0;
+		const [host, context] = actions();
+		h.runner.initialize(
+			host,
+			{
+				...context,
+				startLive: async options => {
+					handed = options;
+					return { sdpAnswer: "answer", voice: "alloy", stop: async () => void stops++ };
+				},
+			},
+			undefined,
+			{ ...h.runner.getUIContext() },
+			"tui",
+		);
+		const endA = h.session();
+		await h.runner.emit({ type: "session_start" });
+		const phases: string[] = [];
+		const options = { sdpOffer: "offer", onPhase: (phase: string) => void phases.push(phase) };
+		const live = await kept?.startLive?.(options as never);
+		handed?.onPhase?.("listening");
+		endA();
+		h.session();
+		handed?.onPhase?.("working");
+		await live?.stop();
+
+		expect({
+			sameOptions: (handed as unknown) === options,
+			sameCallback: (handed?.onPhase as unknown) === options.onPhase,
+			phases,
+			live: live && { sdpAnswer: live.sdpAnswer, voice: live.voice },
+			stops,
+		}).toEqual({
+			sameOptions: false,
+			sameCallback: false,
+			phases: ["listening"],
+			live: { sdpAnswer: "answer", voice: "alloy" },
+			stops: 1,
+		});
+	});
+});
+
+describe("a tool call's additional-context channel", () => {
+	test("is the context's own: it hands the call a string, and refuses once the session has gone", async () => {
+		const h = await reusedRuntime(() => {});
+		const endA = h.session();
+		const reported: unknown[] = [];
+		const addAdditionalContext = (text: string) => void reported.push(text);
+		const ctx = h.runner.createContext(undefined, {
+			toolName: "custom-tool",
+			context: { addAdditionalContext } as never,
+		});
+		ctx.addAdditionalContext?.({ toString: () => "converted" } as never);
+		endA();
+		h.session();
+		let refused = "ran";
+		try {
+			ctx.addAdditionalContext?.("after");
+		} catch (error) {
+			refused = String(error);
+		}
+
+		expect({
+			hostFunction: (ctx.addAdditionalContext as unknown) === addAdditionalContext,
+			reported,
+			refused,
+		}).toEqual({
+			hostFunction: false,
+			reported: ["converted"],
+			refused: expect.stringContaining("Extension session retired"),
+		});
 	});
 });

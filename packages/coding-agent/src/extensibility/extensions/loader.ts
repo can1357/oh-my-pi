@@ -230,6 +230,9 @@ class ExtensionCallbackLease implements ExtensionSessionGeneration {
 	 *  registration that replaced an earlier one of the same session restores it before that one
 	 *  is withdrawn in turn. */
 	#withdrawals: Array<() => void> = [];
+	/** This session's extension work under way: what its disposal waits for, and nothing another
+	 *  session started — sessions sharing the runtime at once share the lease, and so this. */
+	readonly pending = new Set<Promise<unknown>>();
 
 	join(): void {
 		this.#holders++;
@@ -266,6 +269,14 @@ class ExtensionCallbackLease implements ExtensionSessionGeneration {
 
 	get isRetired(): boolean {
 		return this.#started && this.#holders === 0;
+	}
+}
+
+/** Resolves once every piece of `lease`'s work under way has settled, work it started meanwhile
+ *  included. */
+async function waitForWork(lease: ExtensionCallbackLease): Promise<void> {
+	while (lease.pending.size > 0) {
+		await Promise.all(lease.pending);
 	}
 }
 
@@ -310,8 +321,11 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	 * reopen the hole — and it REFUSES to run once the last session hold has been released,
 	 * because a callback that should not have been entered cannot be fixed by reporting that it
 	 * was.
+	 *
+	 * What a callback is doing while it runs is counted as the work of the session it runs for
+	 * (`ExtensionCallbackLease.pending`), so a session's disposal waits for its own work and never
+	 * for what a session before it left running.
 	 */
-	readonly #pendingCallbacks = new Set<Promise<unknown>>();
 	#callbacksChanged: PromiseWithResolvers<void> | undefined;
 	/**
 	 * The session this runtime's callbacks belong to: the one holding them, or the one it will
@@ -445,9 +459,9 @@ export class ExtensionRuntime implements IExtensionRuntime {
 				ownCallback: fn => runtime.#own(fn, lease),
 				runOwned: (call, kind) => runtime.#runOwned(call, kind, lease),
 				finishOwned: call => runtime.#runOwned(call, "value", lease, true),
-				trackCallback: result => runtime.trackCallback(result),
-				hasPendingCallbacks: () => runtime.hasPendingCallbacks(),
-				waitForPendingCallbacks: () => runtime.waitForPendingCallbacks(),
+				trackCallback: result => runtime.#track(result, lease),
+				hasPendingCallbacks: () => lease.pending.size > 0,
+				waitForPendingCallbacks: () => waitForWork(lease),
 				whenCallbacksChange: () => runtime.whenCallbacksChange(),
 				forSession: () => view,
 				forAcceptance: () => view,
@@ -480,7 +494,7 @@ export class ExtensionRuntime implements IExtensionRuntime {
 			if (lease.isRetired) return undefined;
 			// Re-entered so a subscription this callback makes (`pi.events.on` from inside a
 			// handler) is attributed to this session, not to whoever is on the stack.
-			return owner.#enter(lease, () => owner.trackCallback(fn.apply(this, args)));
+			return owner.#enter(lease, () => owner.#track(fn.apply(this, args), lease));
 		};
 	}
 
@@ -508,21 +522,26 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	 * wrong in both directions — see {@link AdmittedWorkKind}.
 	 */
 	trackCallback<T>(result: T): T {
+		return this.#track(result, this.#leaseNow());
+	}
+
+	/** {@link trackCallback}, as `lease`'s work. */
+	#track<T>(result: T, lease: ExtensionCallbackLease): T {
 		const then = thenOf(result);
 		if (!then) return result;
 		const adopted = adopt(result, then);
-		this.#watch(adopted);
+		this.#watch(adopted, lease);
 		return adopted as T;
 	}
 
-	/** Holds this session open until `work` — a promise {@link adopt} returned — settles, however it
-	 *  settles. */
-	#watch(work: Promise<unknown>): void {
+	/** Holds `lease`'s session open until `work` — a promise {@link adopt} returned — settles,
+	 *  however it settles. */
+	#watch(work: Promise<unknown>, lease: ExtensionCallbackLease): void {
 		const settled: Promise<undefined> = Reflect.apply(promiseThen, work, [() => undefined, () => undefined]);
-		this.#pendingCallbacks.add(settled);
+		lease.pending.add(settled);
 		this.#notifyCallbacksChanged();
 		void settled.finally(() => {
-			this.#pendingCallbacks.delete(settled);
+			lease.pending.delete(settled);
 			this.#notifyCallbacksChanged();
 		});
 	}
@@ -560,35 +579,40 @@ export class ExtensionRuntime implements IExtensionRuntime {
 		}
 		return this.#enter(lease, () => {
 			const produced = call();
-			if (kind !== "stream") return this.trackCallback(produced);
+			if (kind !== "stream") return this.#track(produced, lease);
 			const then = thenOf(produced);
 			if (then) {
 				const resolved: Promise<unknown> = Reflect.apply(promiseThen, adopt(produced, then), [
 					(value: unknown) => {
 						// Throws here on a malformed producer, so the caller's await rejects.
-						this.#watch(streamCompletion(value));
+						this.#watch(streamCompletion(value), lease);
 						return value;
 					},
 				]);
-				this.#watch(resolved);
+				this.#watch(resolved, lease);
 				return resolved as R;
 			}
-			this.#watch(streamCompletion(produced));
+			this.#watch(streamCompletion(produced), lease);
 			// The producer itself is handed back untouched: the caller consumes the stream.
 			return produced;
 		});
 	}
 
-	/** Whether any extension callback is executing. */
-	hasPendingCallbacks(): boolean {
-		return this.#pendingCallbacks.size > 0;
+	/** Whether extension work of `session` — by default the admitted call's on this stack, else the
+	 *  one served now — is under way. Work another session left running is not this one's. */
+	hasPendingCallbacks(session?: ExtensionSessionGeneration): boolean {
+		return this.#leaseOf(session).pending.size > 0;
 	}
 
-	/** Resolves once every extension callback executing now has returned. */
-	async waitForPendingCallbacks(): Promise<void> {
-		while (this.#pendingCallbacks.size > 0) {
-			await Promise.all(this.#pendingCallbacks);
-		}
+	/** Resolves once every extension callback `session` (as {@link hasPendingCallbacks} names it)
+	 *  has under way now has returned. */
+	waitForPendingCallbacks(session?: ExtensionSessionGeneration): Promise<void> {
+		return waitForWork(this.#leaseOf(session));
+	}
+
+	/** The lease `session` names, when it is one of this runtime's, else the session a gate checks. */
+	#leaseOf(session: ExtensionSessionGeneration | undefined): ExtensionCallbackLease {
+		return session instanceof ExtensionCallbackLease ? session : this.#leaseNow();
 	}
 
 	/** Settles on the next add or remove, so a caller can wait for a change instead of sampling. */
@@ -756,12 +780,12 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		return this.runtime.trackCallback(result);
 	}
 
-	hasPendingCallbacks(): boolean {
-		return this.runtime.hasPendingCallbacks();
+	hasPendingCallbacks(session?: ExtensionSessionGeneration): boolean {
+		return this.runtime.hasPendingCallbacks(session);
 	}
 
-	waitForPendingCallbacks(): Promise<void> {
-		return this.runtime.waitForPendingCallbacks();
+	waitForPendingCallbacks(session?: ExtensionSessionGeneration): Promise<void> {
+		return this.runtime.waitForPendingCallbacks(session);
 	}
 
 	whenCallbacksChange(): Promise<void> {
@@ -990,7 +1014,9 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		// A host that installed this extension's shapes reinstalls them: a shape a session adds is
 		// drawable, and one its end withdraws leaves the host's registries.
 		const changed = (): void => {
-			for (const listener of this.extension.composerShapeListeners ?? []) listener();
+			// A fixed snapshot: a listener that subscribes again while it runs is told of the next
+			// change, not of this one a second time.
+			for (const listener of Array.from(this.extension.composerShapeListeners ?? [])) listener();
 		};
 		this.#setFor(
 			session,

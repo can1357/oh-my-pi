@@ -14,7 +14,7 @@ import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
 import type { ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/extensions";
 import { type EvalPreludeDefinition, evalPreludeSummary } from "../eval/preludes";
 import { isEvalBridgeToolCallable } from "../eval/tool-bridge-policy";
-import { handHostModel } from "../extensibility/extensions/boundary-data";
+import { fromHostCall, handHostModel } from "../extensibility/extensions/boundary-data";
 import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
 import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "../extensibility/skills";
 import { type LocalProtocolOptions } from "../internal-urls";
@@ -464,7 +464,8 @@ export class SessionTools {
 		return {
 			...host.customToolSurfaces(),
 			get model() {
-				const model = host.model();
+				// The host's getter may throw: its failure crosses as a copy, as the model does.
+				const model = fromHostCall(() => host.model());
 				return model && handHostModel(model);
 			},
 			isIdle: () => !host.isStreaming(),

@@ -56,11 +56,13 @@ import type { MemoryRuntimeContext } from "../../memory-backend";
 import type { ArtifactManager } from "../../session/artifacts";
 import type { ReadonlySessionManager } from "../../session/session-manager";
 import { type AuthorDataSite, CALLBACK, DATA, fieldsOf, snapshotAuthorData } from "./author-data";
-import { copyHostData, handHostModel } from "./boundary-data";
+import { copyHostData, fromHostCall, handHostModel, handSessionFacade, sessionHostCall } from "./boundary-data";
 import { copyHandedModel } from "./compact-handler";
 import type {
 	ExtensionCallbackOwner,
+	ExtensionContext,
 	ExtensionCustomOptions,
+	ExtensionLiveStartOptions,
 	ExtensionSessionModes,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
@@ -291,7 +293,8 @@ export function handModelRegistry(registry: ModelRegistry, owner: ExtensionCallb
 		isUsingOAuth: row => registry.isUsingOAuth(model(row)),
 		isSelectorSuppressed: selector => registry.isSelectorSuppressed(text(owner, selector)),
 	};
-	return handed;
+	// Every member is the session's host call: refused once it has gone, its failure a copy.
+	return handSessionFacade(handed, owner);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -330,7 +333,7 @@ function handArtifactManager(manager: ArtifactManager, owner: ExtensionCallbackO
 		listFiles: async () => copyHostData(await manager.listFiles()),
 		getPath: id => manager.getPath(text(owner, id)),
 	};
-	return handed;
+	return handSessionFacade(handed, owner);
 }
 
 /** The session's history, as an extension's context hands it ({@link ExtensionSessionManager}):
@@ -372,7 +375,8 @@ export function handSessionManager(
 		putBlobSync: (blob, options) =>
 			copyHostData(session.putBlobSync(bytes(blob), data(owner, options, subject, "options"))),
 	};
-	return handed;
+	// Every member is the session's host call: refused once it has gone, its failure a copy.
+	return handSessionFacade(handed, owner);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -381,14 +385,19 @@ export function handSessionManager(
 
 /** `local://` as the host resolves it for this session; the extension calls the host's own
  *  answers and cannot change them. Each member is read from the host's options when asked for,
- *  so a host that swaps one later is followed; a member the extension assigns replaces it on this
- *  object only. */
-export function handLocalProtocolOptions(options: LocalProtocolOptions): LocalProtocolOptions {
+ *  so a host that swaps one later is followed, and calling it is the session's host call, refused
+ *  once the session has gone; a member the extension assigns replaces it on this object only. */
+export function handLocalProtocolOptions(
+	options: LocalProtocolOptions,
+	owner: ExtensionCallbackOwner,
+): LocalProtocolOptions {
 	const assigned = new Map<keyof LocalProtocolOptions, unknown>();
 	const member = <K extends keyof LocalProtocolOptions>(key: K): LocalProtocolOptions[K] => {
 		if (assigned.has(key)) return assigned.get(key) as LocalProtocolOptions[K];
 		const host = options[key];
-		return host && ((() => Reflect.apply(host, options, [])) as LocalProtocolOptions[K]);
+		return (
+			host && ((() => sessionHostCall(owner, () => Reflect.apply(host, options, []))) as LocalProtocolOptions[K])
+		);
 	};
 	const handed: Decided<LocalProtocolOptions> = {
 		get getArtifactsDir() {
@@ -430,7 +439,7 @@ export function handMemory(memory: MemoryRuntimeContext, owner: ExtensionCallbac
 		save: async input =>
 			copyHostData(await memory.save(typeof input === "string" ? input : data(owner, input, subject, "input"))),
 	};
-	return handed;
+	return handSessionFacade(handed, owner);
 }
 
 /** The session's built-in mode controls. */
@@ -439,7 +448,80 @@ export function handSessionModes(modes: ExtensionSessionModes, owner: ExtensionC
 		getState: () => copyHostData(modes.getState()),
 		set: async request => copyHostData(await modes.set(data(owner, request, "ctx.sessionModes", "request"))),
 	};
-	return handed;
+	return handSessionFacade(handed, owner);
+}
+
+// ---------------------------------------------------------------------------------------------
+// ctx itself
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The members of a context that call no host: they answer from the context itself — what it was
+ * made with, the runner's fixed facts — or are facades of their own that refuse member by member,
+ * or clear what the extension itself scheduled (`clearTimer`). Every other member is the context's
+ * session's host call ({@link handSessionFacade}), refused once that session has gone: `abort`,
+ * `shutdown`, `compact`, every read of the live session's state (`cwd`, `model`, `isIdle`),
+ * `setTimeout`. A member added to the context is a host call until it is listed here, so the
+ * default is the one that refuses.
+ */
+export const CONTEXT_ANSWERS: ReadonlySet<PropertyKey> = new Set<keyof ExtensionContext>([
+	"ui",
+	"mode",
+	"hasUI",
+	"agent",
+	"isProjectTrusted",
+	"sessionManager",
+	"modelRegistry",
+	"models",
+	"sessionModes",
+	"localProtocolOptions",
+	"clearTimer",
+]);
+
+/**
+ * `ctx.startLive` as a session hands it: the options cross as the strings they name and the
+ * session's callbacks — inert once it has gone, each handed copies of what the host reports — and
+ * the live session comes back as its strings and a `stop`. Ending the call it started stays the
+ * extension's to do once its session has gone too: its own peer going away is the only signal the
+ * host gets, and a call left open keeps the host's visualizer up for whoever comes next.
+ */
+export function handLiveStart(
+	startLive: NonNullable<ExtensionContext["startLive"]>,
+	owner: ExtensionCallbackOwner,
+): NonNullable<ExtensionContext["startLive"]> {
+	const subject = "ctx.startLive";
+	return async options => {
+		const handed = copiedIn(owner, (): ExtensionLiveStartOptions => {
+			const read = (key: keyof ExtensionLiveStartOptions): unknown => Reflect.get(options, key);
+			const optional = (key: "voice" | "instructions"): string | undefined => {
+				const value = read(key);
+				return value === undefined ? undefined : String(value);
+			};
+			const callback = <F extends (...args: never[]) => void>(
+				key: "onPhase" | "onTranscript" | "onEnd",
+			): F | undefined => {
+				const value = read(key);
+				if (value === undefined) return undefined;
+				if (typeof value !== "function") throw new Error(`${subject}: options.${key} is not a function.`);
+				const run = owner.ownCallback(value as (...args: unknown[]) => unknown);
+				return ((...args: unknown[]) => run(...args.map(arg => copyHostData(arg)))) as unknown as F;
+			};
+			return {
+				sdpOffer: String(read("sdpOffer")),
+				voice: optional("voice"),
+				instructions: optional("instructions"),
+				onPhase: callback("onPhase"),
+				onTranscript: callback("onTranscript"),
+				onEnd: callback("onEnd"),
+			};
+		});
+		const live = await startLive(handed);
+		return {
+			sdpAnswer: String(live.sdpAnswer),
+			voice: String(live.voice),
+			stop: () => fromHostCall(() => live.stop()),
+		};
+	};
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1145,6 +1227,22 @@ export function handAutocompleteProvider(
 	return handed;
 }
 
+type EditorFactory = NonNullable<ReturnType<ExtensionUIContext["getEditorComponent"]>>;
+
+/** Each session's editor factories, by the wrapper the host holds. Keyed on the session, not on a
+ *  facade: the host hands one session several `ui` objects (a dialog's, a link activation's), and a
+ *  factory the session installed through one is its own read back through any of them. */
+const editorFactoriesBySession = new WeakMap<ExtensionCallbackOwner, WeakMap<object, EditorFactory>>();
+
+function editorFactoriesOf(owner: ExtensionCallbackOwner): WeakMap<object, EditorFactory> {
+	let factories = editorFactoriesBySession.get(owner);
+	if (!factories) {
+		factories = new WeakMap();
+		editorFactoriesBySession.set(owner, factories);
+	}
+	return factories;
+}
+
 /**
  * The UI as an extension's context hands it. The host's approval prompts go through its own UI
  * object, never this one, so nothing an extension does to what it was handed decides an approval.
@@ -1209,9 +1307,15 @@ export function handUIContext(
 	const handedTheme = (theme: Theme): Theme => (theme === undefined ? theme : handTheme(theme));
 	/** A widget's, a footer's and a header's factory: the TUI and the theme, each the session's. */
 	const component = (tui: TUI, theme: Theme): [TUI, Theme] => [handedTUI(tui), handedTheme(theme)];
-	/** Each editor factory this facade installed, by the wrapper the host holds: what
-	 *  `getEditorComponent` hands back. */
-	const editorFactories = new WeakMap<object, NonNullable<ReturnType<ExtensionUIContext["getEditorComponent"]>>>();
+	/** What a member installing a callback is handed: a function, or the member refuses rather than
+	 *  install something the host fails on when it calls it. */
+	const callable = <F>(value: F, member: string): F => {
+		if (typeof value !== "function") throw new Error(`${subject}: ${member} takes a function.`);
+		return value;
+	};
+	/** Each editor factory this session installed, by the wrapper the host holds: what
+	 *  `getEditorComponent` hands back, through whichever of the session's facades asks. */
+	const editorFactories = editorFactoriesOf(owner);
 	const handed: Decided<ExtensionUIContext> = {
 		get timeoutStartsOnPresentation() {
 			return ui.timeoutStartsOnPresentation;
@@ -1262,19 +1366,21 @@ export function handUIContext(
 		},
 		notify: (message, type) =>
 			ui.notify(text(owner, message), type === undefined ? undefined : data(owner, type, subject, "type")),
-		onTerminalInput: handler =>
-			ui.onTerminalInput(
+		onTerminalInput: handler => {
+			const listener = callable(handler, "onTerminalInput()");
+			return ui.onTerminalInput(
 				scoped(
 					((input: string) =>
 						snapshotAuthorData(
-							handler(input),
+							listener(input),
 							DATA,
 							site(subject, "onTerminalInput() result"),
 							new Map(),
 						)) as typeof handler,
 					input => [input],
 				),
-			),
+			);
+		},
 		rerenderMessage: timestamp => ui.rerenderMessage(copiedIn(owner, () => Number(timestamp))),
 		getLinkClicksAvailable: () => ui.getLinkClicksAvailable(),
 		setStatus: (key, value) => ui.setStatus(text(owner, key), optionalText(owner, value)),
@@ -1294,7 +1400,7 @@ export function handUIContext(
 			const session = owner.forSession?.() ?? owner;
 			const sessionScope = pinInputScope(scope);
 			return ui.custom(
-				scoped(factory, (tui, theme, keybindings, done) => [
+				scoped(callable(factory, "custom()"), (tui, theme, keybindings, done) => [
 					handedTUI(tui),
 					handedTheme(theme),
 					handKeybindings(keybindings),
@@ -1350,7 +1456,11 @@ export function handUIContext(
 				),
 			),
 		addAutocompleteProvider: factory =>
-			ui.addAutocompleteProvider(scoped(factory, provider => [handAutocompleteProvider(provider, owner)])),
+			ui.addAutocompleteProvider(
+				scoped(callable(factory, "addAutocompleteProvider()"), provider => [
+					handAutocompleteProvider(provider, owner),
+				]),
+			),
 		setEditorComponent: factory => {
 			// The editor theme is the host's — its symbols, spinner frames included, are module
 			// state the next editor reads — so the factory is handed a copy, as `handTheme` copies.
@@ -1362,13 +1472,12 @@ export function handUIContext(
 			if (installed && factory) editorFactories.set(installed, factory);
 			ui.setEditorComponent(installed);
 		},
-		// What the host installed is its own object — the wrapper this facade made, or another
+		// What the host installed is its own object — the wrapper this session made, or another
 		// extension's, or the host's. An extension reads back only the factory it installed itself.
-		getEditorComponent: () =>
-			copiedIn(owner, () => {
-				const current = ui.getEditorComponent();
-				return current === undefined ? undefined : editorFactories.get(current);
-			}),
+		getEditorComponent: () => {
+			const current = ui.getEditorComponent();
+			return current === undefined ? undefined : editorFactories.get(current);
+		},
 		get theme() {
 			return handTheme(ui.theme);
 		},
@@ -1394,5 +1503,8 @@ export function handUIContext(
 		// Expanding redraws every tool block in the live transcript: a session that has gone does not.
 		setToolsExpanded: expanded => ui.setToolsExpanded(copiedIn(owner, () => expanded === true)),
 	};
-	return handed;
+	// Every member is the session's host call, refused once it has gone: the one clearing what it
+	// installed (`setFooter(undefined)`) and the one reading what the user types now
+	// (`getEditorText()`) as surely as the one writing a string.
+	return handSessionFacade(handed, owner);
 }
