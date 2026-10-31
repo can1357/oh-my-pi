@@ -141,7 +141,7 @@ export async function openLocalFileInEditor(ctx: InteractiveModeContext, target?
 
 	let exitCode: number;
 	try {
-		ctx.ui.stop();
+		ctx.ui.stop({ resuming: true });
 		exitCode = await openEditorOnPath(editorCmd, chosen.path);
 	} catch (error) {
 		ctx.showWarning(`Failed to open external editor: ${showErrorMessage(error)}`);

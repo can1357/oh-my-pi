@@ -417,7 +417,7 @@ export class TodoCommandController {
 		const initialMarkdown =
 			current.length > 0 ? phasesToMarkdown(current) : "# Todos\n- [ ] (replace this with your tasks)\n";
 
-		this.ctx.ui.stop();
+		this.ctx.ui.stop({ resuming: true });
 		try {
 			const result = await openInEditor(editorCmd, initialMarkdown, { extension: ".todo.md" });
 			if (result === null) {
