@@ -362,7 +362,13 @@ export async function retainIsolationWorkspace(
 			if (claim.kind === "unknown") {
 				return { dir: isolationDir, sidecarOk: false, location: "unknown" };
 			}
-			if (claim.kind === "claimed" && claim.generation !== generation) {
+			// Three ways this path is not this run's workspace, and `retiring`
+			// is the one that was falling through to the rename. A teardown in
+			// progress owns that path: moving its marker left its backend stop
+			// running on a name a successor then took, and the successor was
+			// deleted by that continuation. "Not claimed by me" is the
+			// condition, not "claimed by somebody else".
+			if (claim.kind !== "claimed" || claim.generation !== generation) {
 				const sibling = await findRetainedSibling(baseDir, generation);
 				if (sibling.kind === "unknown") return { dir: isolationDir, sidecarOk: false, location: "unknown" };
 				if (sibling.kind === "absent") return { dir: isolationDir, sidecarOk: false, location: "gone" };
@@ -773,6 +779,32 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				});
 			}
 		}
+		/**
+		 * Run the teardown here, where this function can still speak, and fold
+		 * its capture failure into the result. The teardown's capture is the
+		 * last one and it keeps the workspace when it fails; left to the
+		 * `finally`, that failure reached a log while the caller got exit 0,
+		 * earlier artifacts, no error and no path to the only copy.
+		 */
+		const reportingFinalCapture = async (artifacts: SingleResult): Promise<SingleResult> => {
+			if (!releasePromise && !lifecycleOwnsRelease && !deferredCleanup && !retainWorkspace) {
+				await cleanupHandle();
+			}
+			if (finalCaptureError === undefined) return artifacts;
+			retainWorkspace = true;
+			const kept = await retainIsolationWorkspace(isolationDir, isolationBackend, handle?.generation);
+			return {
+				...artifacts,
+				error: renderIsolationError({
+					kind: "patch-capture-failed",
+					message: finalCaptureError instanceof Error ? finalCaptureError.message : String(finalCaptureError),
+					retainedDir: kept.dir,
+					sidecarMissing: !kept.sidecarOk,
+					retainedGone: kept.location === "gone",
+					retainedUnknown: kept.location === "unknown",
+				}),
+			};
+		};
 		if (releasePromise) {
 			// The child's own teardown already ran the release — a refused
 			// adoption ends the child inside `runSubprocess` — so the capture and
@@ -781,7 +813,9 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			// workspace, for work that was in fact captured: hand back what the
 			// release wrote.
 			await releasePromise;
-			const released = rememberAgentArtifacts({ ...result, ...(releasedCapture ?? {}) });
+			const released = await reportingFinalCapture(
+				rememberAgentArtifacts({ ...result, ...(releasedCapture ?? {}) }),
+			);
 			if (releaseCaptureError === undefined) return released;
 			// The workspace is kept by the locked capture that refused; name it,
 			// because it holds the only copy of what could not be captured.
@@ -859,13 +893,15 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 					opts.agentId,
 					commitResult?.nestedPatches ?? [],
 				);
-				return rememberAgentArtifacts({
-					...result,
-					branchName: commitResult?.branchName,
-					branchBaseSha: commitResult?.baseSha,
-					nestedPatches: commitResult?.nestedPatches,
-					nestedPatchPaths,
-				});
+				return await reportingFinalCapture(
+					rememberAgentArtifacts({
+						...result,
+						branchName: commitResult?.branchName,
+						branchBaseSha: commitResult?.baseSha,
+						nestedPatches: commitResult?.nestedPatches,
+						nestedPatchPaths,
+					}),
+				);
 			} catch (persistErr) {
 				retainWorkspace = true;
 				const retained = await retainIsolationWorkspace(isolationDir, isolationBackend, handle?.generation);
@@ -889,30 +925,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			try {
 				const capture = await writeIsolationPatch(isolationDir, baseline, opts.artifactsDir, opts.agentId);
 				handedOff = capture.fingerprint;
-				const artifacts = rememberAgentArtifacts({ ...result, ...capture.artifacts });
-				// The teardown runs here rather than in the `finally`, for the
-				// one shape where this function can still speak: its capture is
-				// the last one, and when it fails the workspace is kept. Left
-				// to the `finally`, that failure reached a log and the caller
-				// got exit 0 with an earlier patch, no error and no path to the
-				// only copy of what was not captured.
-				if (!releasePromise && !lifecycleOwnsRelease && !deferredCleanup && !retainWorkspace) {
-					await cleanupHandle();
-				}
-				if (finalCaptureError === undefined) return artifacts;
-				retainWorkspace = true;
-				const kept = await retainIsolationWorkspace(isolationDir, isolationBackend, handle?.generation);
-				return {
-					...artifacts,
-					error: renderIsolationError({
-						kind: "patch-capture-failed",
-						message: finalCaptureError instanceof Error ? finalCaptureError.message : String(finalCaptureError),
-						retainedDir: kept.dir,
-						sidecarMissing: !kept.sidecarOk,
-						retainedGone: kept.location === "gone",
-						retainedUnknown: kept.location === "unknown",
-					}),
-				};
+				return await reportingFinalCapture(rememberAgentArtifacts({ ...result, ...capture.artifacts }));
 			} catch (patchErr) {
 				retainWorkspace = true;
 				const retained = await retainIsolationWorkspace(isolationDir, isolationBackend, handle?.generation);

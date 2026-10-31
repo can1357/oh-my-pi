@@ -115,8 +115,12 @@ async function walkIsolationGraph(root: string): Promise<Graph> {
 	const resolve = async (from: string, specifier: string): Promise<string | undefined> => {
 		if (!specifier.startsWith(".")) return undefined;
 		const base = path.join(path.dirname(path.join(root, from)), specifier);
-		for (const candidate of [`${base}.ts`, path.join(base, "index.ts"), base]) {
-			if (!candidate.endsWith(".ts")) continue;
+		// A `./helper.js` specifier is the TypeScript spelling of `helper.ts`,
+		// and a real `.js` file is a module like any other: following only
+		// `.ts` let a read sit one `.js` extension away.
+		const withoutJs = base.replace(/\.js$/, "");
+		for (const candidate of [`${withoutJs}.ts`, `${base}.ts`, path.join(base, "index.ts"), base, `${withoutJs}.js`]) {
+			if (!candidate.endsWith(".ts") && !candidate.endsWith(".js")) continue;
 			if (await Bun.file(candidate).exists()) return path.relative(root, candidate);
 		}
 		return undefined;
@@ -161,6 +165,24 @@ describe("the isolation path's filesystem surface", () => {
 			const source = code(await fs.readFile(path.join(root, file), "utf8"));
 			source.split("\n").forEach((line, index) => {
 				if (/\bBun\b/.test(line)) offences.push(`${file}:${index + 1}: ${line.trim()}`);
+			});
+		}
+
+		expect(offences.sort()).toEqual([]);
+	});
+
+	it("loads nothing through `require`, which an import graph cannot see", async () => {
+		// `require('node:fs/promises')` is not an import and never appears in a
+		// scan of them. This subsystem is ESM, so the rule is the module
+		// system rather than the module: no `require` at all.
+		const root = path.resolve(import.meta.dir, "../..");
+		const { reachable } = await walkIsolationGraph(root);
+		const offences: string[] = [];
+		for (const file of reachable) {
+			if (SURFACE.has(file)) continue;
+			const source = code(await fs.readFile(path.join(root, file), "utf8"));
+			source.split("\n").forEach((line, index) => {
+				if (/\b(require|createRequire)\s*\(/.test(line)) offences.push(`${file}:${index + 1}: ${line.trim()}`);
 			});
 		}
 

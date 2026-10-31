@@ -687,8 +687,18 @@ export async function acquireSandboxLockWithNotice(baseDir: string, purpose: str
 		const handle: SandboxLockHandle = {
 			baseDir,
 			release: () => {
-				// Idempotent: a caller that hands this handle to a continuation
-				// and a `finally` that also releases must not unlock twice.
+				// Idempotent **after a release that worked**: a caller that
+				// hands this handle to a continuation and a `finally` that
+				// also releases must not unlock twice.
+				//
+				// Deliberately not idempotent after one that threw. The flag
+				// is set only once the unlock has succeeded, so a retry calls
+				// the native release again — which is the behaviour a caller
+				// needs, because a throw leaves it unknown whether the lock
+				// was dropped, and treating the attempt as done would strand
+				// it for the life of the process. The measured consequence is
+				// a second native call on that path, and that is the trade:
+				// one extra call against a lock nobody can release.
 				if (released) return;
 				// Marked released only once the lock really is: a native
 				// release that threw left the wrapper saying "not held" while
