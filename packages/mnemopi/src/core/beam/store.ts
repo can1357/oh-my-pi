@@ -7,8 +7,10 @@ import {
 	redactMemorySecrets,
 	redactMemoryTextFields,
 	sanitizeContent,
+	sanitizeMemoryRow,
 	sanitizeMetadataRecord,
 	sanitizeTextField,
+	sanitizeTimestamp,
 } from "../content-sanitizer";
 import { currentEmbeddingModel, embeddingsDisabled } from "../embeddings";
 import { EpisodicGraph } from "../episodic-graph";
@@ -444,7 +446,7 @@ export function remember(beam: BeamMemoryState, rawContent: string, rawOptions: 
 	const options = redactMemoryTextFields(rawOptions, true);
 	const source = options.source ?? "conversation";
 	const importance = options.importance ?? 0.5;
-	const timestamp = options.timestamp ?? toUtcIso();
+	const timestamp = sanitizeTimestamp(options.timestamp, toUtcIso());
 	const scope = options.scope ?? "session";
 	const veracity = clampVeracity(options.veracity);
 	const trustTier = normalizeTrustTier(options.trustTier, source);
@@ -582,7 +584,7 @@ export function rememberBatch(
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`);
 		for (const item of items) {
-			const itemTimestamp = item.timestamp ?? timestamp;
+			const itemTimestamp = sanitizeTimestamp(item.timestamp, timestamp);
 			const memoryId = generateId(item.content, new Date(itemTimestamp));
 			ids.push(memoryId);
 			const source = item.source ?? "conversation";
@@ -652,7 +654,7 @@ export function getContext(beam: BeamMemoryState, limit = 10): Row[] {
 			timestamp DESC
 		LIMIT ?
 	`);
-	return (statement.all(beam.sessionId, now, limit) as Row[]).map(rowToDict);
+	return (statement.all(beam.sessionId, now, limit) as Row[]).map(row => sanitizeMemoryRow(rowToDict(row)));
 }
 
 export function invalidate(beam: BeamMemoryState, memoryId: string, replacementId: string | null = null): boolean {
@@ -769,7 +771,8 @@ export function get(beam: BeamMemoryState, memoryId: string): Row | null {
 		WHERE id = ?
 	`);
 	const working = workingStatement.get(memoryId) as Row | null | undefined;
-	if (working != null) return { ...working, metadata: working.metadata_json, memory_store: "working" };
+	if (working != null)
+		return sanitizeMemoryRow({ ...working, metadata: working.metadata_json, memory_store: "working" });
 
 	using episodicStatement = beam.db.prepare(`
 		SELECT id, content, source, timestamp, session_id,
@@ -778,9 +781,11 @@ export function get(beam: BeamMemoryState, memoryId: string): Row | null {
 		WHERE id = ? AND (session_id = ? OR scope = 'global')
 	`);
 	const episodic = episodicStatement.get(memoryId, beam.sessionId) as Row | null | undefined;
-	if (episodic != null) return { ...episodic, metadata: episodic.metadata_json, memory_store: "episodic" };
+	if (episodic != null)
+		return sanitizeMemoryRow({ ...episodic, metadata: episodic.metadata_json, memory_store: "episodic" });
 
-	return getFact(beam, memoryId);
+	const fact = getFact(beam, memoryId);
+	return fact != null ? sanitizeMemoryRow(fact) : null;
 }
 
 /**
@@ -862,7 +867,7 @@ export function scratchpadRead(beam: BeamMemoryState): Row[] {
 	`);
 	return (
 		statement.all(beam.sessionId, Number.isFinite(SCRATCHPAD_MAX_ITEMS) ? SCRATCHPAD_MAX_ITEMS : 1000) as Row[]
-	).map(rowToDict);
+	).map(row => sanitizeMemoryRow(rowToDict(row)));
 }
 
 export function scratchpadClear(beam: BeamMemoryState): void {
