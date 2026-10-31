@@ -12,17 +12,33 @@ pub fn parse(input: &str) -> Result<ast::ArithmeticExpr, error::WordParseError> 
     cacheable_parse(input.to_owned())
 }
 
+/// Parses an arithmetic expression without the cache behind [`parse`].
+///
+/// The cache's key is the whole expression, so an expression of many
+/// megabytes would be copied and hashed to look it up and then kept. A
+/// caller that parses one that long, which can only be generated text, uses
+/// this instead.
+///
+/// # Arguments
+///
+/// * `input` - The arithmetic expression to parse, in string form.
+pub fn parse_uncached(input: &str) -> Result<ast::ArithmeticExpr, error::WordParseError> {
+    arithmetic::full_expression(input)
+        .map_err(|e| error::WordParseError::ArithmeticExpression(e.into()))
+}
+
 #[cached::proc_macro::cached(size = 64, result = true)]
 fn cacheable_parse(input: String) -> Result<ast::ArithmeticExpr, error::WordParseError> {
     tracing::debug!(target: "arithmetic", "parsing arithmetic expression: '{input}'");
-    arithmetic::full_expression(input.as_str())
-        .map_err(|e| error::WordParseError::ArithmeticExpression(e.into()))
+    parse_uncached(input.as_str())
 }
 
 peg::parser! {
     grammar arithmetic() for str {
+        // An expression with nothing in it but blanks is zero, as an empty
+        // one is: Bash evaluates `$(( ))` and the subscript of `[' ']=v` to 0.
         pub(crate) rule full_expression() -> ast::ArithmeticExpr =
-            ![_] { ast::ArithmeticExpr::Literal(0) } /
+            _ ![_] { ast::ArithmeticExpr::Literal(0) } /
             _ e:expression() _ { e }
 
         pub(crate) rule expression() -> ast::ArithmeticExpr = precedence!{
@@ -108,27 +124,30 @@ peg::parser! {
             radix:decimal_literal() "#" s:$(['0'..='9' | 'a'..='z' | 'A'..='Z' | '@' | '_']+) {?
                 parse_shell_literal_number(s, radix.cast_unsigned())
             } /
-            // Hex literal
+            // Hex literal. With no digits it is zero, as `$((0x))` is in Bash.
             "0" ['x' | 'X'] s:$(['0'..='9' | 'a'..='f' | 'A'..='F']*) {?
-                i64::from_str_radix(s, 16).or(Err("i64"))
+                parse_shell_literal_number(s, 16)
             } /
-            // Octal literal
+            // Octal literal. An `8` is taken so that `08` is refused as Bash
+            // refuses it, rather than read as `0` followed by `8`.
             s:$("0" ['0'..='8']*) {?
-                i64::from_str_radix(s, 8).or(Err("i64"))
+                parse_shell_literal_number(s, 8)
             } /
             // Decimal literal
             decimal_literal()
 
         rule decimal_literal() -> i64 =
             s:$(['1'..='9'] ['0'..='9']*) {?
-                // Parse as u64 first, then cast to i64. This handles values like
-                // 9223372036854775808 (i64::MAX + 1) which is needed for INT64_MIN
-                // when preceded by unary minus: -(9223372036854775808) wraps to i64::MIN.
-                s.parse::<u64>().map(|v| v.cast_signed()).or(Err("i64"))
+                parse_shell_literal_number(s, 10)
             }
     }
 }
 
+/// The value of the digits `s` in `radix`, as Bash computes it: each digit
+/// multiplies what came before by the radix and adds itself, in 64 bits that
+/// wrap. A literal too long for 64 bits is not refused: Bash evaluates
+/// `18446744073709551616` to `0`, and `9223372036854775808` to the most
+/// negative value, which `-9223372036854775808` needs.
 fn parse_shell_literal_number(s: &str, radix: u64) -> Result<i64, &'static str> {
     if !(2..=64).contains(&radix) {
         return Err("invalid base");
@@ -168,4 +187,62 @@ fn parse_shell_literal_number(s: &str, radix: u64) -> Result<i64, &'static str> 
     }
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+
+    use super::*;
+
+    fn value(input: &str) -> Result<i64> {
+        match parse_uncached(input)? {
+            ast::ArithmeticExpr::Literal(value) => Ok(value),
+            ast::ArithmeticExpr::UnaryOp(ast::UnaryOperator::UnaryMinus, operand) => match *operand {
+                ast::ArithmeticExpr::Literal(value) => Ok(value.wrapping_neg()),
+                other => anyhow::bail!("{input}: not a negated literal: {other:?}"),
+            },
+            other => anyhow::bail!("{input}: not a literal: {other:?}"),
+        }
+    }
+
+    /// Each value is what Bash 5.2 prints for `echo $((input))`.
+    #[test]
+    fn literals_wrap_as_bash_evaluates_them() -> Result<()> {
+        for (input, expected) in [
+            ("18446744073709551616", 0),
+            ("18446744073709551617", 1),
+            ("9223372036854775808", i64::MIN),
+            ("-9223372036854775808", i64::MIN),
+            ("99999999999999999999", 7_766_279_631_452_241_919),
+            ("0x10000000000000000", 0),
+            ("0X1F", 31),
+            ("0x", 0),
+            ("077777777777777777777777", -1),
+            ("077", 63),
+            ("64#zzzzzzzzzzzzzzzz", 4_099_276_460_824_344_803),
+        ] {
+            anyhow::ensure!(value(input)? == expected, "{input}");
+        }
+        Ok(())
+    }
+
+    /// `$(( ))`, `$((   ))` and the subscript of `[' ']=v` are zero in Bash.
+    #[test]
+    fn a_blank_expression_is_zero() -> Result<()> {
+        for input in ["", " ", "   ", "\t\n "] {
+            anyhow::ensure!(value(input)? == 0, "{input:?}");
+        }
+        Ok(())
+    }
+
+    /// Bash refuses these: `value too great for base` and `invalid integer
+    /// constant`.
+    #[test]
+    fn literals_bash_refuses_are_refused() -> Result<()> {
+        for input in ["08", "2#", "019"] {
+            anyhow::ensure!(parse_uncached(input).is_err(), "{input}");
+        }
+        Ok(())
+    }
 }

@@ -391,6 +391,24 @@ pub fn force_quote(s: &str, mode: QuoteMode) -> String {
 	quote(s, &options).to_string()
 }
 
+/// [`force_quote`] with a checkpoint before each stride of the string, for a
+/// caller holding a run that can be cancelled: `: "${big@A}"` quotes a value
+/// as long as the script made it, and held the worker 102 ms quoting 64 MiB
+/// in one step, 305 ms under load.
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+/// way, leaving the quoting unfinished and discarded.
+pub(crate) async fn force_quote_divided(
+	params: &ExecutionParameters,
+	s: &str,
+	mode: QuoteMode,
+) -> Result<String, error::Error> {
+	let options = QuoteOptions { always_quote: true, preferred_mode: mode, ..Default::default() };
+	Ok(quote_divided(params, s, &options).await?.into_owned())
+}
+
 /// Applies the given quoting mode to the provided string, only changing it if
 /// required.
 ///
@@ -561,7 +579,10 @@ fn single_quote(s: &str) -> Cow<'_, str> {
 ///
 /// The parts are not strides of a fixed size: a word of a million apostrophes
 /// is a million empty parts, and a word with none is one part the length of
-/// the word. Charging steps as well as bytes covers both.
+/// the word. Charging steps as well as bytes covers both. Finding where a part
+/// ends is a search over it, so it is made a stride at a time too: `str::split`
+/// searched 64 MiB with no apostrophe in one call, which held the worker 30 ms
+/// under load for `${big@A}`.
 async fn single_quote_divided<'a>(
 	params: &ExecutionParameters,
 	s: &'a str,
@@ -570,7 +591,12 @@ async fn single_quote_divided<'a>(
 
 	let mut first = true;
 	let mut budget = interp::ElementBudget::new();
-	for part in s.split('\'') {
+	let mut rest = Some(s);
+	while let Some(text) = rest {
+		let quote_at = find_byte_in_strides(params, text, b'\'').await?;
+		let part = &text[..quote_at.unwrap_or(text.len())];
+		rest = quote_at.map(|at| &text[at + 1..]);
+
 		let long = part.len() > interp::DIVIDE_COPY_ABOVE_BYTES;
 		let due = budget.charge(if long { 0 } else { part.len() });
 		if due > 0 {
@@ -596,6 +622,25 @@ async fn single_quote_divided<'a>(
 	}
 
 	Ok(Cow::Owned(result))
+}
+
+/// Where `byte`, an ASCII byte, first occurs in `text`, searched a stride at a
+/// time with a checkpoint before every stride after the first, so that a
+/// search over a short text costs nothing more.
+async fn find_byte_in_strides(
+	params: &ExecutionParameters,
+	text: &str,
+	byte: u8,
+) -> Result<Option<usize>, error::Error> {
+	for (n, stride) in text.as_bytes().chunks(interp::BYTE_CHECKPOINT_STRIDE).enumerate() {
+		if n > 0 {
+			interp::stride_checkpoint(params).await?;
+		}
+		if let Some(at) = stride.iter().position(|candidate| *candidate == byte) {
+			return Ok(Some(n * interp::BYTE_CHECKPOINT_STRIDE + at));
+		}
+	}
+	Ok(None)
 }
 
 fn double_quote(s: &str) -> String {

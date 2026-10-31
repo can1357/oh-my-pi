@@ -271,6 +271,11 @@ pub enum ErrorKind {
 	#[error("{0}: bad array subscript")]
 	BadArraySubscript(String),
 
+	/// An indexed array literal's element names `@` or `*` as its subscript,
+	/// which Bash refuses and skips. Holds the whole `[subscript]=value` word.
+	#[error("{0}: cannot assign to non-numeric index")]
+	NonNumericIndex(String),
+
 	/// Unhandled key code.
 	#[error("unhandled key code: {0:?}")]
 	UnhandledKeyCode(Vec<u8>),
@@ -365,11 +370,23 @@ pub trait BuiltinError: std::error::Error + ConvertibleToExitCode + Send + Sync 
 	fn as_io_error(&self) -> Option<&std::io::Error> {
 		None
 	}
+
+	/// Whether the error ends a non-interactive shell, as Bash's expansion
+	/// and arithmetic errors do. The builtin's error is wrapped in
+	/// [`ErrorKind::BuiltinError`], and this is what keeps that wrapping from
+	/// turning a fatal error into an ordinary failed status.
+	fn is_fatal(&self) -> bool {
+		false
+	}
 }
 
 impl BuiltinError for Error {
 	fn as_io_error(&self) -> Option<&std::io::Error> {
 		self.as_io_error()
+	}
+
+	fn is_fatal(&self) -> bool {
+		self.fatal
 	}
 }
 

@@ -103,6 +103,18 @@ impl Default for ShellEnvironment {
 	}
 }
 
+impl Drop for ShellEnvironment {
+	/// A subshell's environment is a copy of every variable it inherited, and
+	/// it is let go of when the subshell ends: `( : )` in a shell holding a
+	/// million-element array held the worker 28 ms, and 66 ms under load,
+	/// freeing that copy. So the variables are freed where that cannot hold
+	/// the worker ([`crate::variables::free_off_worker`]).
+	fn drop(&mut self) {
+		let elements = self.scopes.iter().map(|(_, map)| map.element_count()).sum();
+		crate::variables::free_off_worker(std::mem::take(&mut self.scopes), elements);
+	}
+}
+
 impl ShellEnvironment {
 	/// Returns a new shell environment.
 	pub fn new() -> Self {
@@ -156,7 +168,13 @@ impl ShellEnvironment {
 		// TODO(env): Should we panic instead on failure? It's effectively a broken
 		// invariant.
 		match self.scopes.pop() {
-			Some((actual_scope_type, _)) if actual_scope_type == expected_scope_type => Ok(()),
+			Some((actual_scope_type, map)) if actual_scope_type == expected_scope_type => {
+				// A function's locals are freed when it returns, and one of
+				// them can be an array of any size.
+				let elements = map.element_count();
+				crate::variables::free_off_worker(map, elements);
+				Ok(())
+			},
 			Some((actual_scope_type, _)) => Err(
 				error::ErrorKind::UnexpectedScopeType {
 					expected: expected_scope_type,
@@ -706,6 +724,12 @@ impl ShellVariableMap {
 	/// Returns an iterator over all the variables in the map.
 	pub fn iter(&self) -> impl Iterator<Item = (&String, &ShellVariable)> {
 		self.variables.iter()
+	}
+
+	/// How many allocations freeing this scope frees: each variable's name,
+	/// and each element of its value.
+	fn element_count(&self) -> usize {
+		self.variables.values().map(|variable| 1 + variable.value().element_count()).sum()
 	}
 
 	/// [`ShellEnvironment::clone_divided`] for one scope. The copy takes the

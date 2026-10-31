@@ -104,34 +104,41 @@ impl ExportCommand {
 					},
 				};
 
+				// What the variable written makes of the value: where an indexed
+				// literal counts its subscripts from — an empty array, since the
+				// assignment below replaces the value; an associative array's
+				// are keys — and whether it has the integer attribute, which
+				// makes its values arithmetic (`declare -i g; export g=3*3` is
+				// `9`).
+				let (start, integer) =
+					match context.shell.env().get_using_policy(name, EnvironmentLookup::Anywhere) {
+						Some(var) => (
+							var.takes_indexes().then(|| var.indexed_literal_start(false)),
+							var.is_treated_as_integer(),
+						),
+						None => (Some(0), false),
+					};
+
 				// `Word::flatten` is a clone of the whole word, and
 				// `export BIG="$big"` lets the caller size it: the copy that
 				// feeds the divided write has to be divided as well, or the
 				// hold simply moves one line earlier.
 				let value = match &assignment.value {
-					ast::AssignmentValue::Scalar(s) => variables::ShellValueLiteral::Scalar(
-						brush_core::clone_in_strides(&context.params, s.as_ref()).await?,
-					),
+					ast::AssignmentValue::Scalar(s) => {
+						let value = brush_core::clone_in_strides(&context.params, s.as_ref()).await?;
+						variables::ShellValueLiteral::Scalar(if integer {
+							variables::integer_value(context.shell, value).await?
+						} else {
+							value
+						})
+					},
 					ast::AssignmentValue::Array(a) => {
 						let (literal, keyed) =
 							variables::ArrayLiteral::from_assignment_elements(a, &context.params).await?;
-						// The assignment below replaces the value, so an indexed
-						// literal counts its subscripts from an empty array; an
-						// associative array's are keys. Only a literal that names
-						// a subscript asks.
-						let start = if keyed {
-							match context.shell.env().get_using_policy(name, EnvironmentLookup::Anywhere) {
-								Some(var) => var.takes_indexes().then(|| var.indexed_literal_start(false)),
-								None => Some(0),
-							}
+						let literal = if keyed || integer {
+							literal.evaluate_elements(context.shell, &context.params, start, integer).await?
 						} else {
-							None
-						};
-						let literal = match start {
-							Some(start) => {
-								literal.evaluate_subscripts(context.shell, &context.params, start).await?
-							},
-							None => literal,
+							literal
 						};
 						variables::ShellValueLiteral::Array(literal)
 					},

@@ -554,6 +554,21 @@ fn parse_whole(
         .map_err(|err| error::WordParseError::Word(word.to_owned(), err.into()))
 }
 
+/// Parses `word` as [`parse`] does, without its cache: for a caller that
+/// parses a word too long to be worth caching, as [`SteppedParse`]'s caller
+/// does for the error of a word that does not parse.
+///
+/// # Arguments
+///
+/// * `word` - The word to parse.
+/// * `options` - The parser options to use.
+pub fn parse_uncached(
+    word: &str,
+    options: &ParserOptions,
+) -> Result<Vec<WordPieceWithSource>, error::WordParseError> {
+    parse_whole(word, options)
+}
+
 /// Parses a word a step at a time, to exactly the pieces [`parse`] gives it.
 ///
 /// [`parse`] is one call of a PEG that, before it starts, matches the whole input once for a
@@ -603,6 +618,11 @@ pub struct SteppedParse<'a> {
     closers: [CloserMemo; 3],
     /// How many bytes the steps taken so far have read.
     read: usize,
+    /// The most of the word, from where a piece starts, that the grammar may be handed. Past
+    /// it the parse is abandoned rather than hand it over: see [`Self::limit_grammar_reach`].
+    grammar_reach: usize,
+    /// Whether a piece would have handed the grammar more than [`Self::grammar_reach`].
+    abandoned: std::cell::Cell<bool>,
     progress: Progress,
 }
 
@@ -715,6 +735,8 @@ impl<'a> SteppedParse<'a> {
             unclosed_backquote: None,
             closers: [NO_CLOSER_KNOWN; 3],
             read: 0,
+            grammar_reach: usize::MAX,
+            abandoned: std::cell::Cell::new(false),
             progress: Progress::Running,
         }
     }
@@ -741,8 +763,41 @@ impl<'a> SteppedParse<'a> {
             unclosed_backquote: None,
             closers: [NO_CLOSER_KNOWN; 3],
             read: 0,
+            grammar_reach: usize::MAX,
+            abandoned: std::cell::Cell::new(false),
             progress: Progress::Running,
         }
+    }
+
+    /// Abandons the parse rather than hand the grammar a piece with more than `bytes` of the
+    /// word from where the piece starts.
+    ///
+    /// A piece the grammar is handed is parsed in one call, and a piece that fails can read
+    /// to the end of the word before it does: a `$((\))` followed by 16 MiB took 281 ms in one
+    /// step, and a `$(case …)` prompt of 16 MiB that parses 174 ms. Literal text, quoted text
+    /// and names never reach the grammar, so a word made of those is still parsed a step at a
+    /// time. A word that would hand the grammar more is [`Self::abandoned`], and its caller
+    /// parses it whole ([`parse_uncached`]) where that cannot hold its thread, which gives
+    /// what this would have given.
+    pub const fn limit_grammar_reach(&mut self, bytes: usize) {
+        self.grammar_reach = bytes;
+    }
+
+    /// Whether the parse was abandoned at a piece past the reach [`Self::limit_grammar_reach`]
+    /// set. An abandoned parse is also [`Self::failed`].
+    #[must_use]
+    pub const fn abandoned(&self) -> bool {
+        self.abandoned.get()
+    }
+
+    /// Whether the grammar may be handed the piece at `at`, marking the parse abandoned if
+    /// not.
+    fn within_reach(&self, at: usize) -> bool {
+        if self.word.len().saturating_sub(at) > self.grammar_reach {
+            self.abandoned.set(true);
+            return false;
+        }
+        true
     }
 
     /// Takes the next step, and returns whether there are steps left to take.
@@ -770,6 +825,11 @@ impl<'a> SteppedParse<'a> {
                 Ok(count) => made += count,
                 Err(Failed) => self.progress = Progress::Failed,
             }
+            // What the step made past an abandoned piece is not what the grammar would have
+            // made of it, so the parse ends there and its caller parses the whole word.
+            if self.abandoned.get() {
+                self.progress = Progress::Failed;
+            }
         }
         self.progress == Progress::Running
     }
@@ -778,6 +838,14 @@ impl<'a> SteppedParse<'a> {
     /// next step starts.
     fn cursor(&self) -> usize {
         self.search.map_or(self.at, |search| search.scan)
+    }
+
+    /// Whether a step failed, so that [`Self::finish`] would parse the whole word for its
+    /// error. A caller that must not hold its thread for that parse can run
+    /// [`parse_uncached`] where it may.
+    #[must_use]
+    pub const fn failed(&self) -> bool {
+        matches!(self.progress, Progress::Failed)
     }
 
     /// Takes whatever steps are left, and returns what [`parse`] returns for the word.
@@ -1301,7 +1369,10 @@ impl<'a> SteppedParse<'a> {
 
     /// Tries the tilde prefix a word can start with, and returns how many pieces that made.
     fn tilde_prefix(&mut self) -> usize {
-        if !self.options.tilde_expansion_at_word_start || !self.word.starts_with('~') {
+        if !self.options.tilde_expansion_at_word_start
+            || !self.word.starts_with('~')
+            || !self.within_reach(0)
+        {
             return 0;
         }
         match expansion_parser::tilde_expr_prefix_at_word_start(self.word, self.options) {
@@ -1311,12 +1382,18 @@ impl<'a> SteppedParse<'a> {
     }
 
     fn grammar_piece_at(&self, at: usize) -> Option<WordPieceWithSource> {
+        if !self.within_reach(at) {
+            return None;
+        }
         expansion_parser::word_piece_at(self.word, self.options, at)
             .ok()
             .flatten()
     }
 
     fn dollar_sign_piece_at(&self, at: usize) -> Option<WordPieceWithSource> {
+        if !self.within_reach(at) {
+            return None;
+        }
         expansion_parser::dollar_sign_word_piece_at(self.word, self.options, at)
             .ok()
             .flatten()
@@ -1329,7 +1406,7 @@ impl<'a> SteppedParse<'a> {
             .checked_sub(1)
             .and_then(|before| self.word.as_bytes().get(before))
             == Some(&b':');
-        if !self.options.tilde_expansion_after_colon || !after_colon {
+        if !self.options.tilde_expansion_after_colon || !after_colon || !self.within_reach(at) {
             return None;
         }
         expansion_parser::tilde_expr_after_colon_at(self.word, self.options, at)
@@ -1377,6 +1454,11 @@ pub struct SteppedBraceParse<'a> {
     result: Option<Vec<BraceExpressionOrText>>,
     /// Whether the pieces outside every brace expression ended short of the word.
     fell_short: bool,
+    /// What [`SteppedParse::limit_grammar_reach`] sets for each word piece, and for the
+    /// sequence tried at a `{`.
+    grammar_reach: usize,
+    /// Whether a word piece or a sequence would have handed the grammar more than that.
+    abandoned: bool,
 }
 
 /// A run of `brace_expansion_piece`s: the pieces made, and the text the next one continues.
@@ -1423,7 +1505,24 @@ impl<'a> SteppedBraceParse<'a> {
             done: false,
             result: None,
             fell_short: false,
+            grammar_reach: usize::MAX,
+            abandoned: false,
         }
+    }
+
+    /// [`SteppedParse::limit_grammar_reach`] for every word piece the brace parse skips, and
+    /// for the sequence it tries at a `{`.
+    pub const fn limit_grammar_reach(&mut self, bytes: usize) {
+        self.grammar_reach = bytes;
+    }
+
+    /// Whether [`Self::finish`] would parse the whole word: the parse was abandoned at a
+    /// piece past that reach, or the pieces outside every brace expression ended short of
+    /// the word, which is an error the whole parse gives. A caller that must not hold its
+    /// thread parses it with [`parse_brace_expansions`] where it may.
+    #[must_use]
+    pub const fn needs_whole_parse(&self) -> bool {
+        self.abandoned || self.fell_short
     }
 
     /// Takes the next step, and returns whether there are steps left to take.
@@ -1449,7 +1548,7 @@ impl<'a> SteppedBraceParse<'a> {
         mut self,
     ) -> Result<Option<Vec<BraceExpressionOrText>>, error::WordParseError> {
         while self.step(usize::MAX, usize::MAX) {}
-        if self.fell_short {
+        if self.fell_short || self.abandoned {
             return parse_brace_expansions(self.word, self.options);
         }
         Ok(self.result)
@@ -1468,7 +1567,8 @@ impl<'a> SteppedBraceParse<'a> {
                 Some(b',' | b'}') if !self.frames.is_empty() => return (1, self.end_member(at)),
                 Some(_) => {
                     let stops: &'static [u8] = if self.frames.is_empty() { b"{" } else { b"{,}" };
-                    let piece = SteppedParse::one_piece_at(self.word, self.options, at, stops);
+                    let mut piece = SteppedParse::one_piece_at(self.word, self.options, at, stops);
+                    piece.limit_grammar_reach(self.grammar_reach);
                     self.piece = Some((piece, at));
                 }
             }
@@ -1486,6 +1586,11 @@ impl<'a> SteppedBraceParse<'a> {
         let before = piece.read;
         piece.step(bytes, pieces);
         let read = piece.read - before;
+        if piece.abandoned() {
+            self.abandoned = true;
+            self.done = true;
+            return (read, 0);
+        }
         match piece.progress {
             Progress::Running => {
                 let end = piece.at;
@@ -1598,6 +1703,20 @@ impl<'a> SteppedBraceParse<'a> {
         let Some(start) = self.frames.last().map(|frame| frame.start) else {
             return;
         };
+        // A sequence reads only signs, digits and dots after its `{`, besides single
+        // characters, so how far the grammar reads is that run: past the reach the parse is
+        // abandoned, as at a word piece. The scan stops one byte past the reach.
+        let run = self.word.as_bytes().get(start + 1..).map_or(0, |rest| {
+            rest.iter()
+                .take(self.grammar_reach.saturating_add(1))
+                .take_while(|byte| byte.is_ascii_digit() || matches!(byte, b'-' | b'.'))
+                .count()
+        });
+        if run > self.grammar_reach {
+            self.abandoned = true;
+            self.done = true;
+            return;
+        }
         match expansion_parser::brace_sequence_at(self.word, self.options, start) {
             Ok(Some((sequence, end))) => self.matched(vec![sequence], end),
             _ => self.no_match(),

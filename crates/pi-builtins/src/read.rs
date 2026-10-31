@@ -181,13 +181,19 @@ async fn assign_input_to_variables(
 	variable_names: &[String],
 	params: &brush_core::ExecutionParameters,
 ) -> Result<(), brush_core::Error> {
+	// A variable with the integer attribute takes each value's arithmetic
+	// value, as Bash gives it: `declare -i n; read n <<< 2+3` leaves `5`.
 	if let Some(array_variable) = array_variable {
 		let literal_fields = build_array_fields(input_line, ifs, skip_ifs_splitting, params).await?;
+		let mut literal = variables::ArrayLiteral(literal_fields);
+		if shell.env().get(array_variable).is_some_and(|(_, var)| var.is_treated_as_integer()) {
+			literal = literal.evaluate_elements(shell, params, None, true).await?;
+		}
 		shell
 			.env_mut()
 			.update_or_add(
 				array_variable,
-				variables::ShellValueLiteral::Array(variables::ArrayLiteral(literal_fields)),
+				variables::ShellValueLiteral::Array(literal),
 				|_| Ok(()),
 				env::EnvironmentLookup::Anywhere,
 				env::EnvironmentScope::Global,
@@ -207,6 +213,7 @@ async fn assign_input_to_variables(
 			input_line.unwrap_or_default(),
 		)
 		.await?;
+		let reply = variables::value_for_variable(shell, "REPLY", reply).await?;
 		shell
 			.env_mut()
 			.update_or_add(
@@ -254,6 +261,7 @@ async fn assign_to_named_variables(
 			fields.pop_front().unwrap_or_default()
 		};
 
+		let value = variables::value_for_variable(shell, name, value).await?;
 		shell
 			.env_mut()
 			.update_or_add(

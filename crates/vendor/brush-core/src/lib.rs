@@ -78,3 +78,5 @@ pub use shell::{
 };
 pub use sourceinfo::SourceInfo;
 pub use variables::{ShellValue, ShellVariable};
+/// A name a builtin is handed is text the caller expanded, of any length.
+pub use expansion::valid_variable_name_in_strides;

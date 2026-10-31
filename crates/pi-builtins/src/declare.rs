@@ -1,4 +1,4 @@
-use std::{io::Write, sync::LazyLock};
+use std::io::Write;
 
 use brush_core::{
 	ErrorKind, ExecutionResult, builtins,
@@ -135,7 +135,7 @@ impl builtins::Command for DeclareCommand {
 		if !self.declarations.is_empty() {
 			for declaration in &self.declarations {
 				if self.print && !matches!(verb, DeclareVerb::Readonly) {
-					if !self.try_display_declaration(&context, declaration, verb)? {
+					if !self.try_display_declaration(&context, declaration, verb).await? {
 						result = ExecutionResult::general_error();
 					}
 				} else {
@@ -147,7 +147,7 @@ impl builtins::Command for DeclareCommand {
 		} else {
 			// Display matching declarations from the variable environment.
 			if !self.function_names_only && !self.function_names_or_defs_only {
-				self.display_matching_env_declarations(&context, verb)?;
+				self.display_matching_env_declarations(&context, verb).await?;
 			}
 
 			// Do the same for functions.
@@ -163,7 +163,7 @@ impl builtins::Command for DeclareCommand {
 }
 
 impl DeclareCommand {
-	fn try_display_declaration(
+	async fn try_display_declaration(
 		&self,
 		context: &brush_core::ExecutionContext<'_, impl brush_core::ShellExtensions>,
 		declaration: &brush_core::CommandArg,
@@ -205,18 +205,20 @@ impl DeclareCommand {
 				cs.push('-');
 			}
 
-			let resolved_value = variable.resolve_value(context.shell);
-			let separator_str = if matches!(resolved_value, ShellValue::Unset(_)) {
+			let resolved_value = variable.value_in_place(context.shell);
+			let separator_str = if matches!(resolved_value.as_ref(), ShellValue::Unset(_)) {
 				""
 			} else {
 				"="
 			};
 
-			writeln!(
-				context.stdout(),
-				"declare -{cs} {name}{separator_str}{}",
-				resolved_value.format(variables::FormatStyle::DeclarePrint, context.shell)?
-			)?;
+			// A value is as long as the script made it, and an array holds any
+			// number of elements: `declare -p` of a million of them held the
+			// worker 156 ms formatting them in one loop.
+			let formatted = resolved_value
+				.format_divided(variables::FormatStyle::DeclarePrint, context.shell, &context.params)
+				.await?;
+			write_declaration(context, &format!("declare -{cs} {name}{separator_str}"), &formatted).await?;
 
 			Ok(true)
 		} else {
@@ -237,7 +239,7 @@ impl DeclareCommand {
 				&& !self.create_global);
 
 		if self.function_names_or_defs_only || self.function_names_only {
-			return self.try_display_declaration(context, declaration, verb);
+			return self.try_display_declaration(context, declaration, verb).await;
 		}
 
 		// Extract the variable name and the initial value being assigned (if any).
@@ -254,8 +256,16 @@ impl DeclareCommand {
 		}
 
 		// Make sure it's a valid name.
-		if !env::valid_variable_name(name.as_str()) {
-			writeln!(context.stderr(), "{}: {name}: not a valid variable name", context.command_name)?;
+		let valid = if name.len() > brush_core::DIVIDE_COPY_ABOVE_BYTES {
+			brush_core::valid_variable_name_in_strides(&context.params, &name).await?
+		} else {
+			env::valid_variable_name(name.as_str())
+		};
+		if !valid {
+			// The name is the text the caller expanded, `declare "$big"`.
+			let head = format!("{}: ", context.command_name);
+			write_line_in_strides(&context.params, context.stderr(), &head, &name, ": not a valid variable name\n")
+				.await?;
 			return Ok(false);
 		}
 
@@ -284,13 +294,15 @@ impl DeclareCommand {
 			// We append if the declaration included an explicit index.
 			let append = assigned_index.is_some();
 			let start = var.takes_indexes().then(|| var.indexed_literal_start(append));
-			let (initial_value, refused) = Self::index_subscripts(
+			let integer = var.is_treated_as_integer();
+			let (initial_value, refused) = Self::evaluate_value(
 				context,
 				&name,
 				assigned_index.as_deref(),
 				initial_value,
 				keyed,
 				start,
+				integer,
 			)
 			.await?;
 
@@ -340,13 +352,15 @@ impl DeclareCommand {
 			self.apply_attributes_before_update(&mut var)?;
 
 			let start = var.takes_indexes().then(|| var.indexed_literal_start(false));
-			let (initial_value, refused) = Self::index_subscripts(
+			let integer = var.is_treated_as_integer();
+			let (initial_value, refused) = Self::evaluate_value(
 				context,
 				&name,
 				assigned_index.as_deref(),
 				initial_value,
 				keyed,
 				start,
+				integer,
 			)
 			.await?;
 			if let Some(initial_value) = initial_value {
@@ -372,59 +386,77 @@ impl DeclareCommand {
 		Ok(!refused)
 	}
 
-	/// Gives a declaration's array value the indexes Bash gives it, when it
-	/// names a subscript and the variable's subscripts are indexes (`start`
-	/// is where they count from; `None` for an associative array's keys).
+	/// Evaluates a declaration's value as Bash does for the variable it
+	/// declares: its subscripts, when it names any and the variable's
+	/// subscripts are indexes (`start` is where they count from; `None` for an
+	/// associative array's keys), and its values, when the variable has the
+	/// integer attribute once this declaration's attributes are applied
+	/// (`integer`: `declare -i x=3+4` is `7`, `declare +i x=3+4` is `3+4`).
 	///
 	/// A literal's elements are evaluated and refused as an assignment's are
-	/// ([`ArrayLiteral::evaluate_subscripts`]). `name[subscript]=value`
+	/// ([`ArrayLiteral::evaluate_elements`]). `name[subscript]=value`
 	/// (`element`) is one element, and a subscript of it that names no element
 	/// is refused as Bash refuses it: `name[subscript]: bad array subscript`,
 	/// and the declaration fails, though the variable is still declared an
 	/// array. Returns the value to assign and whether it was refused.
-	async fn index_subscripts(
+	async fn evaluate_value(
 		context: &mut brush_core::ExecutionContext<'_, impl brush_core::ShellExtensions>,
 		name: &str,
 		element: Option<&str>,
 		value: Option<ShellValueLiteral>,
 		keyed: bool,
 		start: Option<u64>,
+		integer: bool,
 	) -> Result<(Option<ShellValueLiteral>, bool), brush_core::Error> {
-		let Some(start) = start.filter(|_| keyed) else {
-			return Ok((value, false));
-		};
 		let literal = match value {
-			Some(ShellValueLiteral::Array(literal)) => literal,
+			Some(ShellValueLiteral::Scalar(value)) if integer => {
+				let value = variables::integer_value(context.shell, value).await?;
+				return Ok((Some(ShellValueLiteral::Scalar(value)), false));
+			},
+			Some(ShellValueLiteral::Array(literal)) if keyed || integer => literal,
 			other => return Ok((other, false)),
 		};
 
 		let Some(subscript) = element else {
 			let literal = literal
-				.evaluate_subscripts(context.shell, &context.params, start)
+				.evaluate_elements(context.shell, &context.params, start, integer)
 				.await?;
 			return Ok((Some(ShellValueLiteral::Array(literal)), false));
 		};
 
 		let mut elements = literal.0;
-		match variables::evaluate_index_subscript(context.shell, &context.params, subscript, start)
-			.await?
-		{
-			Some(index) => {
-				if let Some((key, _)) = elements.first_mut() {
-					*key = Some(index.to_string());
-				}
-				Ok((Some(ShellValueLiteral::Array(ArrayLiteral(elements))), false))
+		let index = match start {
+			Some(start) => {
+				variables::evaluate_index_subscript(context.shell, &context.params, subscript, start)
+					.await?
 			},
-			None => {
-				let word = format!("{name}[{subscript}]");
-				let refusal = brush_core::Error::from(ErrorKind::BadArraySubscript(word));
-				let mut stderr = context.params.stderr(context.shell);
-				let _ = context.shell.display_error(&mut stderr, &refusal).await;
-				// Nothing is assigned, but an empty literal still makes the
-				// variable the array its declaration names.
-				Ok((Some(ShellValueLiteral::Array(ArrayLiteral(Vec::new()))), true))
-			},
+			// An associative array's key is the subscript as it stands.
+			None => None,
+		};
+		if start.is_some() && index.is_none() {
+			// The subscript is text the caller expanded, of any length, so the
+			// message is written a stride at a time rather than built.
+			let mut stderr = context.params.stderr(context.shell);
+			context
+				.shell
+				.display_error_around(&mut stderr, &context.params, ErrorKind::BadArraySubscript, &[
+					name, "[", subscript, "]",
+				])
+				.await?;
+			// Nothing is assigned, but an empty literal still makes the
+			// variable the array its declaration names.
+			return Ok((Some(ShellValueLiteral::Array(ArrayLiteral(Vec::new()))), true));
 		}
+		if let Some((key, value)) = elements.first_mut() {
+			if let Some(index) = index {
+				*key = Some(index.to_string());
+			}
+			// The value after its subscript, as in a literal.
+			if integer {
+				*value = variables::integer_value(context.shell, std::mem::take(value)).await?;
+			}
+		}
+		Ok((Some(ShellValueLiteral::Array(ArrayLiteral(elements))), false))
 	}
 
 	/// The name a declaration declares, the subscript it assigns at
@@ -447,38 +479,14 @@ impl DeclareCommand {
 				// We need to handle the case of someone invoking `declare array[index]`.
 				// In such case, we ignore the index and treat it as a declaration of
 				// the array.
-				#[allow(
-					clippy::unwrap_in_result,
-					clippy::unwrap_used,
-					reason = "regex is valid and should not fail"
-				)]
-				static ARRAY_AND_INDEX_RE: LazyLock<fancy_regex::Regex> =
-					LazyLock::new(|| fancy_regex::Regex::new(r"^(.*?)\[(.*?)\]$").unwrap());
-
+				//
 				// Every copy below is of text the caller expanded —
 				// `declare "$big"`, `declare "a[$big]=$big"` — so each takes
-				// the divided copy rather than `to_owned`. The bounds come out
-				// of the captures first, so nothing borrowed from the regex is
-				// held across a checkpoint.
-				let bounds = ARRAY_AND_INDEX_RE.captures(s)?.map(|captures| {
-					(
-						captures.get(1).map(|m| (m.start(), m.end())),
-						captures.get(2).map(|m| (m.start(), m.end())),
-					)
-				});
-
-				if let Some((matched_name, matched_index)) = bounds {
-					let (start, end) = matched_name.ok_or_else(|| {
-						brush_core::ErrorKind::InternalError("declaration parse error".into())
-					})?;
-					name = brush_core::clone_in_strides(params, &s[start..end]).await?;
-
-					assigned_index = match matched_index {
-						Some((start, end)) => {
-							Some(brush_core::clone_in_strides(params, &s[start..end]).await?)
-						},
-						None => None,
-					};
+				// the divided copy rather than `to_owned`, and so does the split.
+				if let Some(open) = array_and_index_split(params, s).await? {
+					name = brush_core::clone_in_strides(params, &s[..open]).await?;
+					assigned_index =
+						Some(brush_core::clone_in_strides(params, &s[open + 1..s.len() - 1]).await?);
 					name_is_array = true;
 				} else {
 					name = brush_core::clone_in_strides(params, s).await?;
@@ -534,7 +542,7 @@ impl DeclareCommand {
 		Ok((name, assigned_index, initial_value, name_is_array, keyed))
 	}
 
-	fn display_matching_env_declarations(
+	async fn display_matching_env_declarations(
 		&self,
 		context: &brush_core::ExecutionContext<'_, impl brush_core::ShellExtensions>,
 		verb: DeclareVerb,
@@ -546,7 +554,7 @@ impl DeclareCommand {
 
 		// We start by excluding all variables that are not enumerable.
 		#[expect(clippy::type_complexity)]
-		let mut filters: Vec<Box<dyn Fn((&String, &ShellVariable)) -> bool>> =
+		let mut filters: Vec<Box<dyn Fn((&String, &ShellVariable)) -> bool + Send + Sync>> =
 			vec![Box::new(|(_, v)| v.is_enumerable())];
 
 		// Add filters depending on verb.
@@ -623,21 +631,18 @@ impl DeclareCommand {
 					"="
 				};
 
-				writeln!(
-					context.stdout(),
-					"declare -{cs} {name}{separator_str}{}",
-					variable
-						.value()
-						.format(variables::FormatStyle::DeclarePrint, context.shell)?
-				)?;
+				// Formatted in steps: one variable can be an array of any size.
+				let formatted = variable
+					.value()
+					.format_divided(variables::FormatStyle::DeclarePrint, context.shell, &context.params)
+					.await?;
+				write_declaration(context, &format!("declare -{cs} {name}{separator_str}"), &formatted).await?;
 			} else {
-				writeln!(
-					context.stdout(),
-					"{name}={}",
-					variable
-						.value()
-						.format(variables::FormatStyle::Basic, context.shell)?
-				)?;
+				let formatted = variable
+					.value()
+					.format_divided(variables::FormatStyle::Basic, context.shell, &context.params)
+					.await?;
+				write_declaration(context, &format!("{name}="), &formatted).await?;
 			}
 		}
 
@@ -736,6 +741,75 @@ impl DeclareCommand {
 	}
 }
 
+/// Writes one line of `declare`'s output, `head` and then `formatted`, which
+/// is as long as the variable it shows, a stride at a time.
+///
+/// Writing to a file copies into the page cache inside the system call, and
+/// the formatted text of a million-element array is about 20 MiB: one
+/// `writeln!` of it was one step.
+async fn write_declaration(
+	context: &brush_core::ExecutionContext<'_, impl brush_core::ShellExtensions>,
+	head: &str,
+	formatted: &str,
+) -> Result<(), brush_core::Error> {
+	write_line_in_strides(&context.params, context.stdout(), head, formatted, "\n").await
+}
+
+/// Writes `head`, `body` a stride at a time, and `tail` to `out`: a line whose
+/// middle is text of any length, such as a value or the name a caller
+/// expanded.
+async fn write_line_in_strides(
+	params: &brush_core::ExecutionParameters,
+	mut out: impl Write + Send,
+	head: &str,
+	body: &str,
+	tail: &str,
+) -> Result<(), brush_core::Error> {
+	out.write_all(head.as_bytes())?;
+	let mut budget = brush_core::ElementBudget::new();
+	for stride in body.as_bytes().chunks(brush_core::DIVIDE_COPY_ABOVE_BYTES) {
+		let due = budget.charge(stride.len());
+		if due > 0 {
+			brush_core::loop_checkpoints(params, due).await?;
+		}
+		out.write_all(stride)?;
+	}
+	out.write_all(tail.as_bytes())?;
+	Ok(())
+}
+
+/// Where `s` splits into `name[index]`, as `^(.*?)\[(.*?)\]$` splits it: at
+/// its first `[`, when it ends in `]` and holds no newline, since `.` takes
+/// any character but a newline and both groups together with the brackets
+/// cover the whole of it.
+///
+/// The declaration is text the caller expanded, `declare "$big"`, so it is
+/// read a stride at a time; the regex read 64 MiB in one call.
+async fn array_and_index_split(
+	params: &brush_core::ExecutionParameters,
+	s: &str,
+) -> Result<Option<usize>, brush_core::Error> {
+	if !s.ends_with(']') {
+		return Ok(None);
+	}
+	const STRIDE: usize = 64 * 1024;
+	let mut first_open = None;
+	let mut budget = brush_core::ElementBudget::new();
+	for (n, stride) in s.as_bytes().chunks(STRIDE).enumerate() {
+		let due = budget.charge(stride.len());
+		if due > 0 {
+			brush_core::loop_checkpoints(params, due).await?;
+		}
+		if stride.contains(&b'\n') {
+			return Ok(None);
+		}
+		if first_open.is_none() {
+			first_open = stride.iter().position(|byte| *byte == b'[').map(|at| n * STRIDE + at);
+		}
+	}
+	Ok(first_open)
+}
+
 #[cfg(test)]
 mod tests {
 	//! Array subscripts in declarations, against what Bash 5.2 printed for
@@ -750,13 +824,13 @@ mod tests {
 		run_script(script, "", &std::env::temp_dir()).await
 	}
 
-	struct Case {
-		script: &'static str,
-		stdout: &'static str,
-		stderr: &'static str,
+	struct Case<'a> {
+		script: &'a str,
+		stdout: &'a str,
+		stderr: &'a str,
 	}
 
-	async fn differences(cases: &[Case]) -> Vec<String> {
+	async fn differences(cases: &[Case<'_>]) -> Vec<String> {
 		let mut differences = Vec::new();
 		for &Case { script, stdout, stderr } in cases {
 			let (status, out, err) = sh(script).await;
@@ -854,7 +928,7 @@ mod tests {
 				stderr: "error: [-1]=z: bad array subscript\n",
 			},
 			Case {
-				script: "declare -ai n=([1+1]=7); declare -p n",
+				script: "declare -ai n=([1+1]=3+4); declare -p n",
 				stdout: "declare -ai n=([2]=\"7\")\n",
 				stderr: "",
 			},
@@ -928,5 +1002,193 @@ mod tests {
 			(status, out.as_str(), err.as_str()),
 			(0, "st=1 b=2\ndeclare -a a=()\n", "error: a[-1]: bad array subscript\n")
 		);
+	}
+
+	/// Two subscripts Bash accepts and an earlier head refused with an
+	/// arithmetic error, through every route that assigns a literal: a blank
+	/// subscript is `0`, and a literal too long for 64 bits wraps, so
+	/// `18446744073709551616` is `0`. Expected text is Bash 5.2's.
+	#[tokio::test]
+	async fn blank_and_overflowing_subscripts_are_what_bash_makes_them() {
+		let expected = |flags: &str| format!("declare -{flags} x=([0]=\"7\" [1]=\"tail\")\n");
+		let mut cases = Vec::new();
+		for subscript in ["' '", "18446744073709551616"] {
+			for (route, flags) in [
+				("x=(10 20); x=([{s}]=7 tail); declare -p x", "a"),
+				("x=(); x+=([{s}]=7 tail); declare -p x", "a"),
+				("x=(10 20); declare x=([{s}]=7 tail); declare -p x", "a"),
+				("x=(10 20); export x=([{s}]=7 tail); declare -p x", "ax"),
+				("readonly x=([{s}]=7 tail); declare -p x", "ar"),
+				("f() { local x=([{s}]=7 tail); declare -p x; }; f", "a"),
+			] {
+				cases.push((route.replace("{s}", subscript), expected(flags)));
+			}
+		}
+		let cases: Vec<Case<'_>> = cases
+			.iter()
+			.map(|(script, stdout)| Case { script, stdout, stderr: "" })
+			.collect();
+		let differences = differences(&cases).await;
+		assert!(differences.is_empty(), "{}", differences.join("\n"));
+	}
+
+	/// A variable with the integer attribute takes the arithmetic value of
+	/// what it is given, by every route that writes it, as Bash does. Each
+	/// expected text is Bash 5.2's.
+	#[tokio::test]
+	async fn an_integer_variable_evaluates_what_it_is_given() {
+		let cases = [
+			Case {
+				script: "declare -i y=3+4; declare -p y",
+				stdout: "declare -i y=\"7\"\n",
+				stderr: "",
+			},
+			Case {
+				script: "i=0; declare -ia z=([i++]=i++ [i++]=i++); declare -p z i",
+				stdout: "declare -ai z=([0]=\"1\" [2]=\"3\")\ndeclare -- i=\"4\"\n",
+				stderr: "",
+			},
+			Case {
+				script: "i=0; declare -ia z; z+=([i++]=i++ [i++]=i++); declare -p z i",
+				stdout: "declare -ai z=([0]=\"1\" [2]=\"3\")\ndeclare -- i=\"4\"\n",
+				stderr: "",
+			},
+			Case {
+				script: "i=0; declare -ia a; a[i++]=i++; declare -p a i",
+				stdout: "declare -ai a=([0]=\"1\")\ndeclare -- i=\"2\"\n",
+				stderr: "",
+			},
+			Case {
+				script: "y=5; declare -i x; x='y*2'; echo $x; x+=y; echo $x; x+='3*3'; echo $x",
+				stdout: "10\n15\n24\n",
+				stderr: "",
+			},
+			Case {
+				script: "declare -ia b; b[1+1]=3+4; b+=(1+1); declare -ia c=([1]=5); c[1]+=2; \
+				         declare -p b c",
+				stdout: "declare -ai b=([2]=\"7\" [3]=\"2\")\ndeclare -ai c=([1]=\"7\")\n",
+				stderr: "",
+			},
+			Case {
+				script: "declare -i s; s=(1+1 2+2); declare -p s",
+				stdout: "declare -ai s=([0]=\"2\" [1]=\"4\")\n",
+				stderr: "",
+			},
+			Case {
+				script: "declare -iA m=([k]=1+1); m[j]+=2*3; echo ${m[k]} ${m[j]}",
+				stdout: "2 6\n",
+				stderr: "",
+			},
+			Case {
+				script: "declare -i e='' f=' '; declare -p e f",
+				stdout: "declare -i e=\"0\"\ndeclare -i f=\"0\"\n",
+				stderr: "",
+			},
+			Case {
+				script: "declare -i x; declare +i x=3+4; declare -p x; declare -i y=2; declare y=1+1; \
+				         declare -p y",
+				stdout: "declare -- x=\"3+4\"\ndeclare -i y=\"2\"\n",
+				stderr: "",
+			},
+			Case {
+				script: "declare -i z; z=010; echo $z; z=0x1f; echo $z; z=99999999999999999999; echo $z",
+				stdout: "8\n31\n7766279631452241919\n",
+				stderr: "",
+			},
+			Case {
+				script: "declare -i g; export g=3*3; echo $g; f() { local -i v=2**10; echo $v; }; f",
+				stdout: "9\n1024\n",
+				stderr: "",
+			},
+			Case {
+				script: "declare -i n; read n <<< '2+3'; echo $n; printf -v n %s '4*4'; echo $n; \
+				         for n in 1+1; do echo $n; done; unset n; declare -i n; echo ${n:=2+3} $n",
+				stdout: "5\n16\n2\n5 5\n",
+				stderr: "",
+			},
+			Case {
+				script: "declare -ia r; read -a r <<< '1+1 2+2'; declare -p r; declare -i REPLY; \
+				         read <<< '3*3'; echo $REPLY",
+				stdout: "declare -ai r=([0]=\"2\" [1]=\"4\")\n9\n",
+				stderr: "",
+			},
+		];
+		let differences = differences(&cases).await;
+		assert!(differences.is_empty(), "{}", differences.join("\n"));
+	}
+
+	/// A value that is not an expression, and a subscript whose arithmetic
+	/// fails, end the script as Bash's syntax and division errors do, through
+	/// `declare` as through the assignment, rather than storing zero. Bash
+	/// 5.2 prints nothing on stdout and exits `1` for each.
+	#[tokio::test]
+	async fn a_failed_value_or_subscript_ends_the_script() {
+		for script in [
+			"declare -i x; x=1+\necho after",
+			"declare -i x=1+\necho after",
+			"declare -i x; x='$y'\necho after",
+			"x=(1); declare x=([1/0]=1)\necho after",
+			"x=([1/0]=1)\necho after",
+			"x=(1); x[-5]=v\necho after",
+			"x=(1); x[@]=v\necho after",
+			"x=(1); x[' ']=7\necho after",
+		] {
+			let (status, out, _) = sh(script).await;
+			assert_eq!((status, out.as_str()), (1, ""), "{script}");
+		}
+	}
+
+	/// Arithmetic text keeps its single quotes as Bash keeps them, so a
+	/// single-quoted operand is a syntax error, while double quotes are
+	/// removed and a blank expression is zero. Bash 5.2 prints `3` and `0`,
+	/// and nothing for the single-quoted operand.
+	#[tokio::test]
+	async fn arithmetic_text_keeps_its_single_quotes() {
+		let (status, out, _) = sh("echo $(( \"1\"+2 )); echo $(( \" \" ))").await;
+		assert_eq!((status, out.as_str()), (0, "3\n0\n"));
+		let (status, out, _) = sh("echo $(( ' ' ))").await;
+		assert_eq!((status, out.as_str()), (1, ""));
+	}
+
+	/// `@` and `*` name every element: a literal's `[@]=v` is refused with
+	/// Bash's message and skipped, the rest of the literal assigned, by every
+	/// route; `declare x[@]=v` fails that declaration. Expected text is Bash
+	/// 5.2's, with brush's `error: ` prefix.
+	#[tokio::test]
+	async fn every_element_subscripts_are_refused_like_bash() {
+		let cases = [
+			Case {
+				script: "x=([@]=1 b c); echo st=$?; declare -p x",
+				stdout: "st=0\ndeclare -a x=([0]=\"b\" [1]=\"c\")\n",
+				stderr: "error: [@]=1: cannot assign to non-numeric index\n",
+			},
+			Case {
+				script: "x=(old); x=([*]=1 b); declare -p x",
+				stdout: "declare -a x=([0]=\"b\")\n",
+				stderr: "error: [*]=1: cannot assign to non-numeric index\n",
+			},
+			Case {
+				script: "x=(o); declare x=([@]=1 b); echo st=$?; declare -p x",
+				stdout: "st=0\ndeclare -a x=([0]=\"b\")\n",
+				stderr: "error: [@]=1: cannot assign to non-numeric index\n",
+			},
+			Case {
+				script: "x=(o); x+=([@]=1 b); declare -p x",
+				stdout: "declare -a x=([0]=\"o\" [1]=\"b\")\n",
+				stderr: "error: [@]=1: cannot assign to non-numeric index\n",
+			},
+			Case {
+				script: "x=(o); declare x[@]=1; echo st=$?; declare -p x",
+				stdout: "st=1\ndeclare -a x=([0]=\"o\")\n",
+				stderr: "error: x[@]: bad array subscript\n",
+			},
+			Case {
+				script: "declare -A m=([@]=1); echo ${m[@]}",
+				stdout: "1\n",
+				stderr: "",
+			},
+		];
+		let differences = differences(&cases).await;
+		assert!(differences.is_empty(), "{}", differences.join("\n"));
 	}
 }

@@ -736,44 +736,48 @@ impl ElementBudget {
 	/// copy two megabytes would otherwise spend 64 and yield none.
 	#[inline]
 	pub const fn charge(&mut self, bytes: usize) -> Due {
-		let first = self.steps == 0;
+		let entry = self.steps == 0;
 		self.steps += 1;
 		self.bytes = self.bytes.saturating_add(bytes);
-		let placed = first || self.steps % ELEMENT_CHECKPOINT_STRIDE == 0;
-		let mut strides = 0;
+		let mut timed = (!entry && self.steps % ELEMENT_CHECKPOINT_STRIDE == 0) as usize;
 		if self.bytes >= BYTE_CHECKPOINT_STRIDE {
-			strides = self.bytes / BYTE_CHECKPOINT_STRIDE;
+			timed += self.bytes / BYTE_CHECKPOINT_STRIDE;
 			self.bytes %= BYTE_CHECKPOINT_STRIDE;
 		}
-		Due { placed, strides }
+		Due { entry, timed }
 	}
 }
 
 /// The checkpoints one step of a loop owes, as [`ElementBudget::charge`]
 /// counts them. It compares with a number as the count of them.
 ///
-/// The two causes are kept apart because they want different clocks. One
-/// owed for the step's place in the loop stands for
-/// [`ELEMENT_CHECKPOINT_STRIDE`] cheap steps, and reads the thread's clock one
-/// time in sixteen like any [`loop_checkpoint`]. One owed for bytes stands for
-/// a whole [`BYTE_CHECKPOINT_STRIDE`] of work and reads it every time, like a
-/// [`stride_checkpoint`]. A count alone could not tell them apart: only a
-/// count above one read the clock every time, so the step that owes exactly
-/// one stride amortised its reading. `read` charges 64 KiB a step and owes
-/// exactly that, and sixteen strides of byte-at-a-time decoding between two
-/// readings held the worker 5.4 ms against a 1 ms bound.
+/// The causes are kept apart because they want different clocks. **The one a
+/// loop owes on entering** is its cancellation check, and a loop of one step
+/// owes it too: it reads the thread's clock one time in sixteen, like any
+/// [`loop_checkpoint`]. Reading it every time made every element that copies
+/// through a budget of its own pay a system call, `CLOCK_THREAD_CPUTIME_ID`
+/// not being a vDSO clock on Linux: copying a million-element array three
+/// times became 30% slower and rendering a short `BASH_COMMAND` went from 176
+/// to 642 ns. **The ones owed later** stand for
+/// [`ELEMENT_CHECKPOINT_STRIDE`] steps or a [`BYTE_CHECKPOINT_STRIDE`] of
+/// bytes, so the budget has already amortised them, and each reads the clock.
+/// Reading those one time in sixteen as well put 4,096 steps between readings,
+/// and a step that allocates is cheap only on a quiet machine: under load,
+/// `${seed[@]@U}` over a million fields held the worker 4.6–5.1 ms in three
+/// trials of five; and `read`, which owes one per 64 KiB, held it 5.4 ms quiet
+/// with sixteen strides of decoding between readings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[must_use]
 pub struct Due {
-	/// The first step, or an [`ELEMENT_CHECKPOINT_STRIDE`]-th one.
-	placed:  bool,
-	/// The [`BYTE_CHECKPOINT_STRIDE`]s of bytes the step completed.
-	strides: usize,
+	/// The loop's first step.
+	entry: bool,
+	/// The checkpoints owed for steps and bytes since the last one.
+	timed: usize,
 }
 
 impl Due {
 	const fn count(self) -> usize {
-		self.placed as usize + self.strides
+		self.entry as usize + self.timed
 	}
 }
 
@@ -790,11 +794,11 @@ impl PartialOrd<usize> for Due {
 }
 
 /// Spends the checkpoints [`ElementBudget::charge`] found due: every one of
-/// them a [`stride_checkpoint`] if the step owed any for its bytes, else the
-/// one [`loop_checkpoint`] its place in the loop owed.
+/// them a [`stride_checkpoint`] if any was owed for steps or bytes, else the
+/// one [`loop_checkpoint`] a loop owes on entering.
 pub async fn loop_checkpoints(params: &ExecutionParameters, due: Due) -> Result<(), error::Error> {
-	if due.strides == 0 {
-		return if due.placed { loop_checkpoint(params).await } else { Ok(()) };
+	if due.timed == 0 {
+		return if due.entry { loop_checkpoint(params).await } else { Ok(()) };
 	}
 	for _ in 0..due.count() {
 		stride_checkpoint(params).await?;
@@ -1851,7 +1855,11 @@ impl Execute for ast::ForClauseCommand {
 			// array and can be any size, and this caller has the execution
 			// parameters, so it takes the divided route: an uppercase
 			// attribute on the loop variable held the worker 85.0 ms on a
-			// 64 MiB element through the synchronous one.
+			// 64 MiB element through the synchronous one. A loop variable
+			// with the integer attribute takes the arithmetic value, as in
+			// Bash: `declare -i n; for n in 1+1` gives `2`.
+			let value =
+				crate::variables::value_for_variable(shell, &self.variable_name, value).await?;
 			shell
 				.env_mut()
 				.update_or_add(
@@ -2501,7 +2509,8 @@ async fn apply_assignment(
 	creation_scope: EnvironmentScope,
 ) -> Result<(), error::Error> {
 	// Figure out if we are trying to assign to a variable or assign to an element
-	// of an existing array.
+	// of an existing array. The subscript is kept as written: an index is
+	// expanded once, as arithmetic, below, and a key as a word.
 	let mut array_index;
 	let variable_name = match &assignment.name {
 		ast::AssignmentName::VariableName(name) => {
@@ -2509,8 +2518,7 @@ async fn apply_assignment(
 			name
 		},
 		ast::AssignmentName::ArrayElementName(name, index) => {
-			let expanded = expansion::basic_expand_word(shell, params, index).await?;
-			array_index = Some(expanded);
+			array_index = Some(index.clone());
 			name
 		},
 	};
@@ -2563,30 +2571,46 @@ async fn apply_assignment(
 			.await;
 	}
 
-	// Only an assignment with a subscript asks what its subscripts are. An
-	// element goes into the array as it stands, so its subscript counts back
-	// from there whether or not it appends; a literal replaces the array
+	// What the variable written makes of the assignment: where its subscripts
+	// count from, if they are indexes, and whether its values are arithmetic.
+	// An element goes into the array as it stands, so its subscript counts
+	// back from there whether or not it appends; a literal replaces the array
 	// unless it appends.
-	let index_start = if array_index.is_some() || keyed {
-		let append = assignment.append || array_index.is_some();
-		assignment_index_start(shell, variable_name, required_scope, append)
-	} else {
-		None
-	};
-	if let Some(start) = index_start {
-		if let Some(idx) = &array_index {
+	let append = assignment.append || array_index.is_some();
+	let (index_start, integer) =
+		assignment_destination(shell, variable_name, required_scope, append);
+	match (&array_index, index_start) {
+		// An index is arithmetic text, expanded once by its evaluation, with
+		// its single quotes kept as Bash keeps them: `x[' ']=v` is a syntax
+		// error, where taking the quotes out first had made it index `0`.
+		(Some(idx), Some(start)) => {
 			let Some(index) =
 				crate::variables::evaluate_index_subscript(shell, params, idx, start).await?
 			else {
+				// Bash ends a non-interactive shell here, as it does for the
+				// arithmetic error a subscript can raise: `x[-5]=v` and `x[@]=v`.
 				let word = std::format!("{variable_name}[{idx}]");
-				return Err(error::ErrorKind::BadArraySubscript(word).into());
+				return Err(error::Error::from(error::ErrorKind::BadArraySubscript(word)).into_fatal());
 			};
 			array_index = Some(index.to_string());
-		} else if let ShellValueLiteral::Array(literal) = new_value {
-			new_value =
-				ShellValueLiteral::Array(literal.evaluate_subscripts(shell, params, start).await?);
-		}
+		},
+		// A key of an associative array is a word.
+		(Some(idx), None) => {
+			array_index = Some(expansion::basic_expand_word(shell, params, idx).await?);
+		},
+		(None, _) => {},
 	}
+	new_value = match new_value {
+		// The value after the subscript, the order Bash's side effects show:
+		// `a[i++]=i++` assigns `1` at `0`.
+		ShellValueLiteral::Scalar(value) if integer => {
+			ShellValueLiteral::Scalar(crate::variables::integer_value(shell, value).await?)
+		},
+		ShellValueLiteral::Array(literal) if keyed || integer => ShellValueLiteral::Array(
+			literal.evaluate_elements(shell, params, index_start, integer).await?,
+		),
+		other => other,
+	};
 
 	// Read option before taking mutable borrow on env.
 	let export_variables_on_modification = shell.options().export_variables_on_modification;
@@ -2656,25 +2680,27 @@ async fn apply_assignment(
 	shell.env_mut().add(variable_name, new_var, creation_scope)
 }
 
-/// What an assignment's subscripts are: `None` when the variable it writes is
-/// an associative array, whose subscripts are keys, and otherwise indexes,
-/// counted back from one past the largest index of the array the assignment
-/// starts from ([`ShellVariable::indexed_literal_start`]).
+/// What the variable an assignment writes makes of it: where its subscripts
+/// count from — `None` when it is an associative array, whose subscripts are
+/// keys, and otherwise one past the largest index of the array the
+/// assignment starts from ([`ShellVariable::indexed_literal_start`]) — and
+/// whether it has the integer attribute, which makes its values arithmetic.
 ///
 /// The variable written is the one found, unless the assignment needs a
 /// scope it is not in; then [`apply_assignment`] makes a new one, which
-/// starts empty.
-fn assignment_index_start(
+/// starts empty and with no attributes.
+fn assignment_destination(
 	shell: &Shell<impl extensions::ShellExtensions>,
 	name: &str,
 	required_scope: Option<EnvironmentScope>,
 	append: bool,
-) -> Option<u64> {
+) -> (Option<u64>, bool) {
 	match shell.env().get(name) {
-		Some((scope, var)) if required_scope.is_none_or(|required| scope == required) => {
-			var.takes_indexes().then(|| var.indexed_literal_start(append))
-		},
-		_ => Some(0),
+		Some((scope, var)) if required_scope.is_none_or(|required| scope == required) => (
+			var.takes_indexes().then(|| var.indexed_literal_start(append)),
+			var.is_treated_as_integer(),
+		),
+		_ => (Some(0), false),
 	}
 }
 

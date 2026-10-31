@@ -345,12 +345,10 @@ pub async fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtension
 	// Each argument is scanned for a virtual path and then copied by
 	// `Command::arg` into the string the operating system takes, both in one
 	// step per argument, so the loop between them is charged. The step itself
-	// is left whole on purpose: every platform caps an argument the process
-	// can be started with (Linux `MAX_ARG_STRLEN`, 128 KiB on 4 KiB pages;
-	// macOS `ARG_MAX`, 1 MiB for all of them; Windows, 32,767 characters of
-	// command line), so the only argument whose step is long is one the spawn
-	// will refuse. A 64 MiB argument spent 28.4 ms in `Command::arg` before
-	// that refusal.
+	// is bounded: an argument longer than the operating system takes has been
+	// refused before this with the spawn's own error (see
+	// `exceeds_exec_limit`), and the longest Linux takes, 131,071 bytes,
+	// copies in 5 µs.
 	let mut budget = interp::ElementBudget::new();
 	for arg in args {
 		let arg = arg.as_ref();
@@ -1038,6 +1036,18 @@ pub(crate) async fn execute_external_command(
 	let new_pg = matches!(context.params.process_group_policy, ProcessGroupPolicy::NewProcessGroup);
 	let session_action = child_session_action(new_pg, child_stdin_is_terminal, in_pipeline);
 
+	// An argument or exported value longer than the operating system starts a
+	// process with is refused by the spawn with `E2BIG` — but only after
+	// `Command::arg` or `Command::env` has copied it, in one step: a 64 MiB
+	// argument held the worker 33.4 ms there, 197.5 ms under load, before the
+	// refusal. So the refusal is reached first, from the lengths alone, and
+	// it is the spawn's own: the same error, marker and status.
+	#[cfg(unix)]
+	if exceeds_exec_limit(&context, cmd_args.as_slice()).await? {
+		let marker_output = prepare_output_markers(&context, executable_path, cmd_args.as_slice());
+		return spawn_failed(context, marker_output, io::Error::from_raw_os_error(libc::E2BIG));
+	}
+
 	// Compose the std::process::Command that encapsulates what we want to launch.
 	// argv[0] defaults to context.command_name (the user-facing name of the
 	// command) unless the caller specified an explicit override.
@@ -1160,29 +1170,90 @@ pub(crate) async fn execute_external_command(
 			}
 			Ok(ExecutionSpawnResult::StartedProcess(child_process))
 		},
-		Err(spawn_err) => {
-			if let Some((mut output, markers)) = marker_output.take() {
-				let _ = write_completion_marker(&mut output, &markers, 127);
-			}
-
-			if context.shell.options().interactive {
-				sys::terminal::move_self_to_foreground()?;
-			}
-
-			if spawn_err.kind() == std::io::ErrorKind::NotFound {
-				if !context.shell.working_dir().exists() {
-					Err(
-						error::ErrorKind::WorkingDirMissing(context.shell.working_dir().to_owned())
-							.into(),
-					)
-				} else {
-					Err(error::ErrorKind::CommandNotFound(context.command_name).into())
-				}
-			} else {
-				Err(error::ErrorKind::FailedToExecuteCommand(context.command_name, spawn_err).into())
-			}
-		},
+		Err(spawn_err) => spawn_failed(context, marker_output, spawn_err),
 	}
+}
+
+/// What a failed spawn reports: the completion marker with status 127, the
+/// terminal taken back by an interactive shell, and the error.
+fn spawn_failed(
+	context: ExecutionContext<'_, impl extensions::ShellExtensions>,
+	marker_output: Option<(openfiles::OpenFile, ExternalCommandOutputMarkers)>,
+	spawn_err: io::Error,
+) -> Result<ExecutionSpawnResult, error::Error> {
+	if let Some((mut output, markers)) = marker_output {
+		let _ = write_completion_marker(&mut output, &markers, 127);
+	}
+
+	if context.shell.options().interactive {
+		sys::terminal::move_self_to_foreground()?;
+	}
+
+	if spawn_err.kind() == std::io::ErrorKind::NotFound {
+		if !context.shell.working_dir().exists() {
+			Err(error::ErrorKind::WorkingDirMissing(context.shell.working_dir().to_owned()).into())
+		} else {
+			Err(error::ErrorKind::CommandNotFound(context.command_name).into())
+		}
+	} else {
+		Err(error::ErrorKind::FailedToExecuteCommand(context.command_name, spawn_err).into())
+	}
+}
+
+/// The longest string the operating system starts a process with, as an
+/// argument or as a `NAME=value` of its environment.
+///
+/// Linux caps each one at `MAX_ARG_STRLEN`, thirty-two pages with its
+/// terminating NUL: 131,071 bytes on 4 KiB pages, which the gate machine
+/// accepts, where it refuses 131,072 with `E2BIG`. Elsewhere one string
+/// longer than `ARG_MAX`, the cap on all of them together, cannot fit
+/// either.
+#[cfg(unix)]
+fn longest_exec_string() -> Option<usize> {
+	#[cfg(target_os = "linux")]
+	{
+		// SAFETY: `sysconf` reads a configuration value and has no
+		// preconditions.
+		let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+		usize::try_from(page).ok().map(|page| page * 32 - 1)
+	}
+	#[cfg(not(target_os = "linux"))]
+	{
+		// SAFETY: as above.
+		let max = unsafe { libc::sysconf(libc::_SC_ARG_MAX) };
+		usize::try_from(max).ok()
+	}
+}
+
+/// Whether an argument, or an exported variable as the child's environment
+/// would hold it, is longer than [`longest_exec_string`]. Reads lengths only,
+/// a checkpoint's worth of them a step.
+#[cfg(unix)]
+async fn exceeds_exec_limit(
+	context: &ExecutionContext<'_, impl extensions::ShellExtensions>,
+	args: &[&String],
+) -> Result<bool, error::Error> {
+	let Some(longest) = longest_exec_string() else {
+		return Ok(false);
+	};
+	let mut budget = interp::ElementBudget::new();
+	for arg in args {
+		let due = budget.charge(0);
+		if due > 0 {
+			interp::loop_checkpoints(&context.params, due).await?;
+		}
+		if arg.len() > longest {
+			return Ok(true);
+		}
+	}
+	for (name, variable) in context.shell.env().iter_exported() {
+		if variable.value().is_set()
+			&& name.len() + 1 + variable.value().to_cow_str(context.shell).len() > longest
+		{
+			return Ok(true);
+		}
+	}
+	Ok(false)
 }
 
 fn prepare_output_markers<SE: extensions::ShellExtensions>(
@@ -1357,7 +1428,7 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
 	// pipe that this same task then drains is what let `$(<file)` take the
 	// runtime: the write parks a thread until the drain makes room, and the
 	// drain cannot run while a worker is parked. See `openfiles::copy_async`.
-	let parse_result = subshell.parse_string(s);
+	let parse_result = subshell.parse_string_off_worker(s).await?;
 	if let Ok(program) = &parse_result
 		&& let Some(redir) = try_unwrap_bare_input_redir_program(program)
 	{

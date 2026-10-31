@@ -1530,22 +1530,94 @@ mod regression {
 		/// made that copy in one step: each pipeline stage, command
 		/// substitution and `( … )` of a shell holding a 64 MiB variable held
 		/// the worker 25.3 ms before it ran anything. A million-element array
-		/// is the many-small-values shape of the same copy; its window closes
-		/// inside the subshell, because freeing a million elements when the
-		/// subshell ends is the destructor's step that no checkpoint can
-		/// enter, the limit this pull request states for every large free.
+		/// is the many-small-values shape of the same copy, and of the free
+		/// when the subshell ends, which held the worker 28 ms; that window
+		/// closes after the free.
 		#[test]
 		fn subshells_of_a_large_environment_yield_throughout() {
 			let cases: [(&str, fn(&mut Shell<DefaultShellExtensions>)); 4] = [
 				("x=$open; y=$( x=1 ); closed=$close", one_huge),
 				("x=$open; ( x=1 ); closed=$close", one_huge),
 				("x=$open; f() { x=1; }; f | f; closed=$close", one_huge),
-				("x=$open; ( closed=$close )", seeded),
+				("x=$open; ( x=1 ); closed=$close", seeded),
 			];
 
 			for (command, prepare) in cases {
 				assert_yields_throughout(command, prepare);
 			}
+		}
+
+		/// Replacing a million-element array frees it, one allocator call an
+		/// element and nothing a checkpoint can enter: `huge=()` held the
+		/// worker 19.5 ms in one poll. The free is off the worker now, so the
+		/// window holds almost no work, which [`assert_yields_throughout`]
+		/// refuses as a case that cannot fail. This one can, and the second
+		/// half shows it: the same free made in place holds the worker past
+		/// the bound.
+		#[test]
+		fn replacing_a_large_array_frees_it_off_the_worker() {
+			let command = "x=$open; seed=(); closed=$close";
+			let holds = longest_hold(command, seeded);
+			eprintln!("HOLD {command}: {holds}");
+			assert!(holds.succeeded, "{command}: the run succeeded");
+			assert!(yields_throughout(&holds), "{command}: {holds}");
+
+			let _serial = lock(&MEASURED_RUN);
+			settle_the_allocator();
+			let values: BTreeMap<u64, String> =
+				(0..ARRAY_ELEMENTS).map(|index| (index, format!("v{index}"))).collect();
+			let before = reading();
+			drop(values);
+			let after = reading();
+			let held = (after.cpu - before.cpu).saturating_sub(after.in_allocator - before.in_allocator);
+			eprintln!("FREE in place: {held:?}");
+			assert!(held > LONGEST_ALLOWED_HOLD, "freeing in place held the worker only {held:?}");
+		}
+
+		/// `zeros`: 64 MiB of `0`, and `n`, a variable with the integer
+		/// attribute.
+		fn zeros_and_an_integer(shell: &mut Shell<DefaultShellExtensions>) {
+			let zeros = ShellVariable::new(ShellValue::String("0".repeat(ONE_HUGE_ELEMENT_BYTES)));
+			shell.env_mut().set_global("zeros", zeros).expect("zeros");
+			let mut n = ShellVariable::new(ShellValue::String(String::from("0")));
+			n.treat_as_integer();
+			shell.env_mut().set_global("n", n).expect("n");
+		}
+
+		/// Arithmetic over generated text is one parse of all of it: a
+		/// literal's subscript of 64 MiB of zeros held the worker 155 ms once
+		/// subscripts became arithmetic, and the value of an integer variable
+		/// is the same parse.
+		#[test]
+		fn arithmetic_on_long_text_yields_throughout() {
+			let cases: [(&str, fn(&mut Shell<DefaultShellExtensions>)); 3] = [
+				("x=([$open$zeros]=v); closed=$close; [[ ${x[0]} == v ]]", zeros_and_an_integer),
+				("x[$open$zeros]=v; closed=$close; [[ ${x[0]} == v ]]", zeros_and_an_integer),
+				("n=$open$zeros; closed=$close; [[ $n == 0 ]]", zeros_and_an_integer),
+			];
+
+			for (command, prepare) in cases {
+				assert_yields_throughout(command, prepare);
+			}
+		}
+
+		/// A long word that does not parse falls back to one whole parse, so
+		/// that its error is the whole parse's: a 16 MiB `PS1` that opens a
+		/// quote and never closes it held the worker 375 ms in that parse.
+		#[test]
+		fn a_prompt_that_does_not_parse_yields_throughout() {
+			let _serial = lock(&MEASURED_RUN);
+			settle_the_allocator();
+			let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+			runtime.block_on(async {
+				let mut shell = Shell::builder().build().await.expect("shell");
+				let spec = format!("\"{}", "h".repeat(16 << 20));
+				shell.env_mut().set_global("PS1", ShellVariable::new(ShellValue::String(spec))).expect("PS1");
+				let (prompt, longest) = longest_poll(shell.compose_prompt()).await;
+				eprintln!("PROMPT unclosed quote: longest_poll={longest:?}");
+				assert!(prompt.is_err(), "the prompt does not parse");
+				assert!(longest <= LONGEST_ALLOWED_HOLD, "held the worker {longest:?}");
+			});
 		}
 
 		/// The longest single poll `future` takes, outside the allocator

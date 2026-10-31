@@ -774,10 +774,13 @@ async fn call_builtin(
 	context: commands::ExecutionContext<'_, impl extensions::ShellExtensions>,
 ) -> Result<results::ExecutionResult, error::Error> {
 	let builtin_name = context.command_name.clone();
-	let result = command
-		.execute(context)
-		.await
-		.map_err(|e| error::ErrorKind::BuiltinError(Box::new(e), builtin_name))?;
+	let result = command.execute(context).await.map_err(|e| {
+		// `declare -i x=1+` ends a non-interactive Bash, as an assignment's
+		// arithmetic error does; wrapping the error must not change that.
+		let fatal = e.is_fatal();
+		let error = error::Error::from(error::ErrorKind::BuiltinError(Box::new(e), builtin_name));
+		if fatal { error.into_fatal() } else { error }
+	})?;
 
 	Ok(result)
 }
