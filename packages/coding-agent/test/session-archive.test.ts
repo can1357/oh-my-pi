@@ -3720,6 +3720,9 @@ test("an archive run is not held up by a FIFO named like a transcript, and archi
 
 	expect(outcome).not.toBe("hung");
 	expect(await Bun.file(archiveFile).exists()).toBe(true);
+	// Left out, and said so.
+	if (outcome !== "hung")
+		expect(outcome.archive?.errors.join("\n")).toContain(`${fifo} is a FIFO, not a regular file`);
 	expect((await fs.lstat(fifo)).isFIFO()).toBe(true);
 }, 15_000);
 
@@ -3739,6 +3742,145 @@ for (const apply of [false, true]) {
 		expect((await fs.lstat(sessionFile)).isFIFO()).toBe(true);
 	}, 15_000);
 }
+
+/**
+ * A FIFO outside the session tree with `payload` waiting in it and its
+ * writer gone, and a reader of our own held open so that whatever a run
+ * does not take stays in the pipe: `left()` says what is still there.
+ */
+interface HeldPipe {
+	/** What is still waiting in the pipe. */
+	left(): Promise<string>;
+	close(): Promise<void>;
+}
+
+async function pipeHolding(fifo: string, payload: string): Promise<HeldPipe> {
+	expect(await Bun.spawn(["mkfifo", fifo]).exited).toBe(0);
+	const reader = await fs.open(fifo, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+	const writer = await fs.open(fifo, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
+	await writer.write(payload);
+	await writer.close();
+	return {
+		async left(): Promise<string> {
+			const buffer = Buffer.alloc(4096);
+			const { bytesRead } = await reader.read(buffer, 0, buffer.byteLength, null);
+			return buffer.subarray(0, bytesRead).toString();
+		},
+		close: async () => await reader.close(),
+	};
+}
+
+const PIPE_PAYLOAD = "UNIQUE USER INPUT WAITING IN A PIPE, 52 BYTES LONG.\n";
+
+// `notes.jsonl` is the review's own shape: named like a transcript, so it is
+// also among the files the archive run checks for subagent sessions.
+for (const name of ["pipe", "notes.jsonl"]) {
+	test(`an archive run neither waits on nor drains a FIFO an artifact links to, and names it (${name})`, async () => {
+		const link = path.join(sessionFile.slice(0, -".jsonl".length), name);
+		await fs.mkdir(path.dirname(link), { recursive: true });
+		const fifo = path.join(root, "outside.fifo");
+		const pipe = await pipeHolding(fifo, PIPE_PAYLOAD);
+		await fs.symlink(fifo, link);
+		try {
+			const outcome = await unlessHungOn(fifo, archiveOnly());
+
+			expect(outcome).not.toBe("hung");
+			expect(await pipe.left()).toBe(PIPE_PAYLOAD);
+			if (outcome !== "hung") expect(outcome.archive?.errors.join("\n")).toContain(`${link} links to a FIFO`);
+			expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+		} finally {
+			await pipe.close();
+		}
+	}, 15_000);
+}
+
+test("a blob sweep neither waits on nor drains a FIFO a transcript's name links to", async () => {
+	const link = path.join(sessionFile.slice(0, -".jsonl".length), "notes.jsonl");
+	await fs.mkdir(path.dirname(link), { recursive: true });
+	const fifo = path.join(root, "outside.fifo");
+	const pipe = await pipeHolding(fifo, PIPE_PAYLOAD);
+	await fs.symlink(fifo, link);
+	try {
+		const outcome = await unlessHungOn(
+			fifo,
+			runGcCommand({ flags: { agentDir: root, blobs: true, apply: true, json: true } }),
+		);
+
+		expect(outcome).not.toBe("hung");
+		expect(await pipe.left()).toBe(PIPE_PAYLOAD);
+		if (outcome !== "hung") expect(outcome.blobs?.errors).toEqual([]);
+	} finally {
+		await pipe.close();
+	}
+}, 15_000);
+
+for (const apply of [false, true]) {
+	test(`a reclaim neither waits on nor drains a FIFO an artifact links to, and keeps the link (${apply ? "apply" : "preview"})`, async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		await Bun.write(path.join(liveArtifacts, "a.log"), "HELLO");
+		await archiveOnly();
+		const link = path.join(liveArtifacts, "pipe");
+		const fifo = path.join(root, "outside.fifo");
+		const pipe = await pipeHolding(fifo, PIPE_PAYLOAD);
+		await fs.symlink(fifo, link);
+		try {
+			const outcome = await unlessHungOn(
+				fifo,
+				runGcCommand({ flags: { agentDir: root, reclaim: archiveFile, apply, forwardOnly: true, json: true } }),
+			);
+
+			expect(outcome).not.toBe("hung");
+			expect(await pipe.left()).toBe(PIPE_PAYLOAD);
+			if (outcome !== "hung") {
+				expect(outcome.reclaim?.reclaimed ?? 0).toBe(0);
+				expect(outcome.reclaim?.errors.join("\n")).toContain(`${link} links to a FIFO`);
+			}
+			expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+			expect(await Bun.file(sessionFile).exists()).toBe(true);
+		} finally {
+			await pipe.close();
+		}
+	}, 15_000);
+}
+
+test("an archive run names a FIFO in an artifact tree, which it leaves out", async () => {
+	const fifo = path.join(sessionFile.slice(0, -".jsonl".length), "pipe");
+	await fs.mkdir(path.dirname(fifo), { recursive: true });
+	expect(await Bun.spawn(["mkfifo", fifo]).exited).toBe(0);
+
+	const outcome = await unlessHungOn(fifo, archiveOnly());
+
+	expect(outcome).not.toBe("hung");
+	if (outcome !== "hung") expect(outcome.archive?.errors.join("\n")).toContain(`${fifo} is a FIFO`);
+}, 15_000);
+
+test("an archive run whose artifact is replaced by a FIFO after it was found neither waits on nor drains it", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const artifact = path.join(liveArtifacts, "sub.jsonl");
+	await Bun.write(artifact, sessionBody(sessionId("sub-1"), "nested", root));
+	// The first open of the artifact finds a FIFO with input waiting where
+	// the file was found: the name changed after every look at it.
+	let swapped: HeldPipe | undefined;
+	let swapping = false;
+	const realOpen = fs.open;
+	spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
+		if (!swapping && String(target) === artifact) {
+			swapping = true;
+			await fs.unlink(artifact);
+			swapped = await pipeHolding(artifact, PIPE_PAYLOAD);
+		}
+		return await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
+	}) as typeof fs.open);
+	try {
+		const outcome = await unlessHungOn(artifact, archiveOnly());
+
+		expect(outcome).not.toBe("hung");
+		expect(swapped).toBeDefined();
+		expect(await swapped?.left()).toBe(PIPE_PAYLOAD);
+	} finally {
+		await swapped?.close();
+	}
+}, 15_000);
 
 test("a private transcript stays private through archive, reclaim and restore", async () => {
 	await fs.chmod(sessionFile, 0o600);
@@ -4148,10 +4290,11 @@ async function archivedThenAdvanced(): Promise<Buffer> {
 	return await fs.readFile(archiveFile);
 }
 
-test("an archive run that cannot read the live transcript does not call the archive a different session", async () => {
+test("an archive run that cannot read the live transcript says so, and does not call the archive a different session", async () => {
 	const before = await archivedThenAdvanced();
-	// Through a descriptor, the way the comparison reads it; the ownership
-	// probe before it reads the header by other means.
+	// Every read through a descriptor on the live transcript fails. The
+	// session listing reads it that way first, so the run reports it there,
+	// as a transcript it could not read, before any comparison is made.
 	const broken = failReadsOf((target, flags) => target === sessionFile && typeof flags === "number");
 	let result: GcResult;
 	try {
@@ -4163,7 +4306,7 @@ test("an archive run that cannot read the live transcript does not call the arch
 	const told = result.archive?.errors.join("\n") ?? "";
 	expect(told).not.toContain("holds a different session");
 	expect(told).toContain("EIO: injected");
-	expect(told).toContain("could not be compared");
+	expect(told).toContain(`${sessionFile} could not be read`);
 	expect((await fs.readFile(archiveFile)).equals(before)).toBe(true);
 });
 

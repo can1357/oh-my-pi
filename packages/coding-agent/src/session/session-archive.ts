@@ -27,6 +27,7 @@ import { createGunzip } from "node:zlib";
 import { getAgentDir, getSessionsDir, isEnoent, type FileLockHandle } from "@oh-my-pi/pi-utils";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { codeOf, statIfPresent, withGcLock } from "./gc-lock";
+import { absentFile, createExclusive, NotARegularFile, notRegularAsAbsent, openRegularFile } from "./regular-file";
 import { SESSION_TITLE_SLOT_BYTES } from "./session-entries";
 import { readSessionHeaderIdFromHandle, sessionHeaderIdFromBytes } from "./session-loader";
 import { SESSION_STAGING_RE, sessionStagingPath, tryAcquireSessionLease } from "./session-storage";
@@ -176,7 +177,7 @@ async function createRestoreRecord(record: string, text: string): Promise<OwnRes
 	await fs.mkdir(path.dirname(record), { recursive: true });
 	let handle: fs.FileHandle;
 	try {
-		handle = await fs.open(record, "wx", 0o600);
+		handle = await createExclusive(record, 0o600);
 	} catch (error) {
 		if (codeOf(error) === "EEXIST") return undefined;
 		throw error;
@@ -290,6 +291,8 @@ export interface RestoredSession {
  * damaged archive and callers test it with `isEnoent`.
  */
 export function archiveReadError(file: string, cause: unknown): unknown {
+	// A name that is not a regular file says so itself, and is no damage.
+	if (cause instanceof NotARegularFile) return cause;
 	// zlib failures carry a `Z_`-prefixed code; an errno is the filesystem's.
 	if (cause instanceof Error && "code" in cause && /^E[A-Z]+$/.test(String(cause.code))) return cause;
 	const stem = path.basename(file, ARCHIVED_SESSION_SUFFIX);
@@ -311,7 +314,7 @@ export async function inflateArchivedBytes(file: string): Promise<Uint8Array> {
 	const chunks: Uint8Array[] = [];
 	let length = 0;
 	try {
-		await pipeline(Bun.file(file).stream(), createGunzip(), async (source: NodeJS.ReadableStream) => {
+		await pipeline(bytesOfRegularFile(file), createGunzip(), async (source: NodeJS.ReadableStream) => {
 			for await (const chunk of source as AsyncIterable<Uint8Array>) {
 				chunks.push(chunk);
 				length += chunk.byteLength;
@@ -362,7 +365,7 @@ export async function inflateArchivedTranscript(
 		// Only a failed read of the archive says anything about the archive:
 		// what goes wrong publishing the transcript afterwards is reported as
 		// itself, never as a damaged archive.
-		const written = await inflateIntoHandleWithDigest(Bun.file(source).stream(), ground.handle).catch(
+		const written = await inflateIntoHandleWithDigest(bytesOfRegularFile(source), ground.handle).catch(
 			(error: unknown) => {
 				throw archiveReadError(source, error);
 			},
@@ -649,12 +652,12 @@ export async function digestOfHandle(handle: fs.FileHandle): Promise<CopiedBytes
  * back as something else.
  */
 export async function inflateIntoHandleWithDigest(
-	source: ReadableStream<Uint8Array>,
+	source: AsyncIterable<Uint8Array>,
 	destination: fs.FileHandle,
 ): Promise<CopiedBytes> {
 	const hasher = new Bun.CryptoHasher("sha256");
 	let size = 0;
-	await pipeline(source as AsyncIterable<Uint8Array>, createGunzip(), async (inflated: NodeJS.ReadableStream) => {
+	await pipeline(source, createGunzip(), async (inflated: NodeJS.ReadableStream) => {
 		for await (const chunk of inflated as AsyncIterable<Uint8Array>) {
 			hasher.update(chunk);
 			for (let written = 0; written < chunk.byteLength;) {
@@ -673,25 +676,20 @@ export async function handleBeginsWith(whole: fs.FileHandle, prefix: fs.FileHand
 }
 
 /**
- * A descriptor on `file` only when `file` is a regular file.
- *
- * Non-blocking, because an ordinary read-only open of a FIFO waits for a
- * writer that may never come: the live tree is the user's, anything can be
- * at a path in it, and a resume that hangs on one is worse than a resume
- * that refuses. The check is `fstat` on what was opened, not `lstat` on the
- * name, so the answer is about the file the descriptor holds.
+ * Everything the regular file at `file` holds, read through a descriptor
+ * {@link openRegularFile} checked — the archive's own files included, since
+ * the archive is a tree like any other and anything can stand in it. ENOENT
+ * when nothing is there, as a read by name gave; {@link NotARegularFile}
+ * when anything but a regular file is.
  */
-export async function openRegularFile(file: string): Promise<fs.FileHandle | undefined> {
-	const handle = await fs.open(file, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK).catch(error => {
-		if (isEnoent(error)) return undefined;
-		// A FIFO with no writer, or a device nobody is driving.
-		if (codeOf(error) === "ENXIO") return undefined;
-		throw error;
-	});
-	if (!handle) return undefined;
-	if ((await handle.stat()).isFile()) return handle;
-	await handle.close().catch(() => undefined);
-	return undefined;
+export async function* bytesOfRegularFile(file: string): AsyncGenerator<Uint8Array> {
+	const handle = await openRegularFile(file);
+	if (!handle) throw absentFile(file);
+	try {
+		yield* bytesOfHandle(handle);
+	} finally {
+		await handle.close().catch(() => undefined);
+	}
 }
 
 /**
@@ -746,7 +744,8 @@ export async function checkPublished(
 		});
 	const other: PublicationCheck = { staged: false };
 	try {
-		const published = await openRegularFile(destination);
+		// Anything but a regular file at the name is verifiably not the staged file.
+		const published = await openRegularFile(destination).catch(notRegularAsAbsent);
 		if (!published) return other;
 		try {
 			if (!isStaged(await published.stat())) return other;
@@ -1056,7 +1055,8 @@ async function assertLiveTreeHoldsArchive(
 	}
 	// A link or a device: neither was carried home, and neither is an artifact.
 	if (!stat.isFile()) return;
-	const live = await openRegularFile(destination);
+	// What stands at the live name, if not a regular file, does not hold it.
+	const live = await openRegularFile(destination).catch(notRegularAsAbsent);
 	try {
 		const liveStat = await live?.stat();
 		if (!live || !liveStat?.isFile()) {
@@ -1065,7 +1065,7 @@ async function assertLiveTreeHoldsArchive(
 		if (!(await survivesRemovalOf(destination, liveStat, stat, archiveRoot))) {
 			throw new Error(`${destination} is the archived ${source} itself, not a second copy of it`);
 		}
-		if (!(await sourceIsPrefixOfDestination(Bun.file(source).stream(), live, false))) {
+		if (!(await sourceIsPrefixOfDestination(bytesOfRegularFile(source), live, false))) {
 			throw new Error(`${destination} does not hold what the archived ${source} holds`);
 		}
 	} finally {
@@ -1155,7 +1155,8 @@ async function copyEntryDereferenced(
 	}
 	if (!stat.isFile()) return;
 	if (existing) {
-		const live = await openRegularFile(destination);
+		// Anything but a regular file at the name already holds something else.
+		const live = await openRegularFile(destination).catch(notRegularAsAbsent);
 		try {
 			if (live) {
 				const target = await live.stat();
@@ -1165,7 +1166,7 @@ async function copyEntryDereferenced(
 							`the archive is kept — give the live tree a file of its own and restore again`,
 					);
 				}
-				if (await sourceIsPrefixOfDestination(Bun.file(source).stream(), live, false)) return;
+				if (await sourceIsPrefixOfDestination(bytesOfRegularFile(source), live, false)) return;
 			}
 		} finally {
 			await live?.close();
@@ -1180,7 +1181,8 @@ async function copyEntryDereferenced(
 	// live tree if this run is killed before removing it.
 	const ground = await mintStagingGround(destination, ledger, stat.mode & 0o7777);
 	try {
-		const archived = await fs.open(source, "r");
+		const archived = await openRegularFile(source);
+		if (!archived) throw absentFile(source);
 		let written: CopiedBytes;
 		try {
 			written = await copyHandleWithDigest(archived, ground.handle);
@@ -1362,7 +1364,7 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 		let created: Stats | undefined;
 		try {
 			const minted = await fs.lstat(dir);
-			handle = await fs.open(file, "wx+", mode);
+			handle = await createExclusive(file, mode, true);
 			created = await handle.stat();
 			const recorded: StagingRecord = {
 				...intent,
@@ -1532,10 +1534,10 @@ async function readStagingRecords(
 			continue;
 		}
 		try {
-			// Non-blocking and regular files only: a FIFO among the records
-			// must refuse, not wait for a writer that never comes.
+			// Regular files only, through a descriptor: a FIFO among the
+			// records refuses, rather than being waited on or drained.
 			const handle = await openRegularFile(record);
-			if (!handle) throw new Error("it is not a regular file");
+			if (!handle) throw absentFile(record);
 			let text: string;
 			try {
 				text = await handle.readFile("utf8");
@@ -1807,7 +1809,7 @@ async function resolvedPath(target: string): Promise<{ real: string; existing: s
 /** A staging record's bytes and what they say, read from a regular file. */
 async function readRecordFile(file: string): Promise<{ bytes: Buffer; entry: StagingRecord }> {
 	const handle = await openRegularFile(file);
-	if (!handle) throw new Error("it is not a regular file");
+	if (!handle) throw absentFile(file);
 	try {
 		const bytes = await handle.readFile();
 		return { bytes, entry: parseStagingRecord(bytes.toString("utf8")) };
@@ -2047,7 +2049,8 @@ async function recordCopyAt(at: string, bytes: Buffer, finish: boolean, what: st
 	// The type comes from `lstat` before anything is opened: a symlink is
 	// refused whatever it points at, and opening a device can act on it.
 	if (!standing.isFile()) return refused;
-	const reader = await fs.open(at, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+	const reader = await openRegularFile(at, { noFollow: true }).catch(notRegularAsAbsent);
+	if (!reader) return refused;
 	let judged: Stats;
 	let held: Buffer;
 	try {
@@ -2072,7 +2075,8 @@ async function recordCopyAt(at: string, bytes: Buffer, finish: boolean, what: st
 		}
 		return { held: "part" };
 	}
-	const writer = await fs.open(at, fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+	const writer = await openRegularFile(at, { write: true, noFollow: true });
+	if (!writer) throw absentFile(at);
 	try {
 		const now = await writer.stat();
 		if (now.dev !== judged.dev || now.ino !== judged.ino || now.size !== held.length || now.nlink !== 1) {
@@ -2113,7 +2117,7 @@ async function putExactly(at: string, bytes: Buffer, what: string, linkFrom?: st
 			}
 		}
 		if (!linked) {
-			const handle = await fs.open(at, "wx", 0o600);
+			const handle = await createExclusive(at, 0o600);
 			try {
 				await handle.writeFile(bytes);
 				await handle.sync();
@@ -2487,11 +2491,12 @@ export async function artifactRestoreConflicts(
 		if (!stat.isFile() || !existing) return;
 		let live: fs.FileHandle | undefined;
 		try {
-			live = await openRegularFile(destination);
+			// Anything but a regular file at the name already holds something else.
+			live = await openRegularFile(destination).catch(notRegularAsAbsent);
 			if (
 				live &&
 				(await survivesRemovalOf(destination, await live.stat(), stat, archiveRoot)) &&
-				(await sourceIsPrefixOfDestination(Bun.file(source).stream(), live, false))
+				(await sourceIsPrefixOfDestination(bytesOfRegularFile(source), live, false))
 			) {
 				return;
 			}
@@ -2530,16 +2535,17 @@ async function ownerSignature(owners: () => Promise<(string | undefined)[]>): Pr
  * different session.
  */
 export async function archiveIsPrefixOfLive(archiveFile: string, sessionPath: string): Promise<boolean> {
-	// Non-blocking, so a FIFO at the live name is a refusal rather than a hang.
+	// Non-blocking, so a FIFO at the live name is a refusal rather than a hang,
+	// and one that names it: it is no session for the archive to be part of.
 	const live = await openRegularFile(sessionPath);
 	if (!live) return false;
 	try {
 		let holds = false;
-		await pipeline(Bun.file(archiveFile).stream(), createGunzip(), async (source: NodeJS.ReadableStream) => {
+		await pipeline(bytesOfRegularFile(archiveFile), createGunzip(), async (source: NodeJS.ReadableStream) => {
 			holds = await sourceIsPrefixOfDestination(source as AsyncIterable<Uint8Array>, live, true);
 		});
 		if (holds) return true;
-		await pipeline(Bun.file(archiveFile).stream(), createGunzip(), async (source: NodeJS.ReadableStream) => {
+		await pipeline(bytesOfRegularFile(archiveFile), createGunzip(), async (source: NodeJS.ReadableStream) => {
 			holds = await recordsAreCarried(linesOf(source as AsyncIterable<Uint8Array>), linesOfHandle(live));
 		});
 		return holds;
@@ -2667,7 +2673,7 @@ async function inflateArchivedHeaderId(archiveFile: string): Promise<string | un
 	const head: Uint8Array[] = [];
 	let bytes = 0;
 	try {
-		await pipeline(Bun.file(archiveFile).stream(), createGunzip(), async (source: NodeJS.ReadableStream) => {
+		await pipeline(bytesOfRegularFile(archiveFile), createGunzip(), async (source: NodeJS.ReadableStream) => {
 			for await (const chunk of source as AsyncIterable<Uint8Array>) {
 				if (bytes >= ARCHIVED_HEADER_READ_LIMIT) continue;
 				head.push(chunk);
@@ -2824,12 +2830,15 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 	const stagingAgentDir = agentDir ?? getAgentDir();
 	const ledger = stagingLedgerDir(stagingAgentDir);
 	// Read through a non-blocking descriptor: a FIFO at the live transcript's
-	// name, or anywhere in either tree, owns nothing and must not hang this.
+	// name, or anywhere in either tree, owns nothing and must not hang this —
+	// the restore's walk names it, as the artifact it cannot carry.
 	const headerId = async (file: string): Promise<string | undefined> => {
-		const handle = await openRegularFile(file).catch(error => {
-			if (codeOf(error) === "ENOTDIR") return undefined;
-			throw error;
-		});
+		const handle = await openRegularFile(file)
+			.catch(notRegularAsAbsent)
+			.catch(error => {
+				if (codeOf(error) === "ENOTDIR") return undefined;
+				throw error;
+			});
 		if (!handle) return undefined;
 		try {
 			return await readSessionHeaderIdFromHandle(handle);

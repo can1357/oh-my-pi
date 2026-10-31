@@ -57,5 +57,77 @@
 		"**/*.mjs",
 		"**/*.cjs",
 		"**/*.d.ts"
+	],
+	"overrides": [
+		{
+			"files": ["packages/coding-agent/src/cli/gc-cli.ts", "packages/coding-agent/src/session/session-archive.ts"],
+			"rules": {
+				"eslint/no-restricted-properties": [
+					"error",
+					{
+						"object": "Bun",
+						"property": "file",
+						"message": "gc opens a file in a session tree only through openRegularFile (session/regular-file.ts): a name can stand for a FIFO, which a read by name waits on or drains."
+					},
+					{
+						"object": "fs",
+						"property": "open",
+						"message": "Use openRegularFile or createExclusive (session/regular-file.ts): an open by name can block on, or read from, a FIFO."
+					},
+					{
+						"object": "fs",
+						"property": "readFile",
+						"message": "Use openRegularFile (session/regular-file.ts) and read the descriptor."
+					},
+					{
+						"object": "fs",
+						"property": "copyFile",
+						"message": "Use openRegularFile (session/regular-file.ts) and copy the descriptor: copyFile reads the source by name."
+					},
+					{
+						"object": "fs",
+						"property": "createReadStream",
+						"message": "Use openRegularFile (session/regular-file.ts) and read the descriptor."
+					}
+				],
+				"eslint/no-restricted-imports": [
+					"error",
+					{
+						"paths": [
+							{
+								"name": "../session/session-loader",
+								"importNames": ["readSessionHeaderId"],
+								"message": "readSessionHeaderId opens by name; open with openRegularFile and use readSessionHeaderIdFromHandle."
+							},
+							{
+								"name": "./session-loader",
+								"importNames": ["readSessionHeaderId"],
+								"message": "readSessionHeaderId opens by name; open with openRegularFile and use readSessionHeaderIdFromHandle."
+							},
+							{
+								"name": "../session/session-listing",
+								"importNames": ["readSessionInfo"],
+								"message": "readSessionInfo reads by name; list with RegularFileSessionStorage."
+							},
+							{
+								"name": "../session/session-storage",
+								"importNames": ["FileSessionStorage"],
+								"message": "FileSessionStorage reads by name; use RegularFileSessionStorage (session/gc-session-storage.ts)."
+							},
+							{
+								"name": "./session-storage",
+								"importNames": ["FileSessionStorage"],
+								"message": "FileSessionStorage reads by name; use RegularFileSessionStorage (session/gc-session-storage.ts)."
+							},
+							{
+								"name": "@oh-my-pi/pi-utils",
+								"importNames": ["peekFile", "peekFileSync", "peekFileTail", "peekFileEnds"],
+								"message": "peekFile opens by name; open with openRegularFile and read the descriptor."
+							}
+						]
+					}
+				]
+			}
+		}
 	]
 }

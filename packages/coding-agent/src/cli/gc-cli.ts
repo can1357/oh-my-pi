@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
-import { constants as fsConstants, type Stats } from "node:fs";
+import type { Stats } from "node:fs";
 import * as path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -39,6 +39,7 @@ import {
 	agentDirFlag,
 	archivedHandleIsHeldBy,
 	bytesOfHandle,
+	bytesOfRegularFile,
 	copyHandleWithDigest,
 	digestOfHandle,
 	handleBeginsWith,
@@ -54,7 +55,6 @@ import {
 	shellQuote,
 	archivedHandleIsPrefixOfLive,
 	isSamePath,
-	openRegularFile,
 	liveSessionPathForArchive,
 	restoreArchivedSessionLocked,
 	artifactRestoreConflicts,
@@ -68,8 +68,10 @@ import {
 	type StagingQuarantine,
 } from "../session/session-archive";
 import { codeOf, statIfPresent, withGcLock } from "../session/gc-lock";
-import { readSessionHeaderId, readSessionHeaderIdFromHandle } from "../session/session-loader";
-import { FileSessionStorage, tryAcquireSessionLease } from "../session/session-storage";
+import { RegularFileSessionStorage } from "../session/gc-session-storage";
+import { absentFile, kindOf, NotARegularFile, notRegularAsAbsent, openRegularFile } from "../session/regular-file";
+import { readSessionHeaderIdFromHandle } from "../session/session-loader";
+import { tryAcquireSessionLease } from "../session/session-storage";
 import {
 	type CompressCandidate,
 	type CompressMethod,
@@ -503,11 +505,12 @@ async function pathExists(target: string): Promise<boolean> {
 
 /** Small registry/breadcrumb marker files; a missing file reads as empty. */
 async function readTextIfPresent(file: string): Promise<string> {
+	const handle = await openRegularFile(file);
+	if (!handle) return "";
 	try {
-		return await Bun.file(file).text();
-	} catch (error) {
-		if (codeOf(error) === "ENOENT") return "";
-		throw error;
+		return await handle.readFile("utf8");
+	} finally {
+		await handle.close().catch(() => undefined);
 	}
 }
 
@@ -517,7 +520,9 @@ async function scanSessionLinesIfPresent(file: string, onLine: (line: Uint8Array
 		for await (const line of readLines(stream)) onLine(line);
 	};
 	try {
-		const stream = Bun.file(file).stream();
+		// Read through a descriptor that holds a regular file: a transcript's
+		// name standing for a FIFO is refused, never waited on or drained.
+		const stream = Readable.toWeb(Readable.from(bytesOfRegularFile(file))) as ReadableStream<Uint8Array>;
 		if (file.endsWith(COMPRESSED_SESSION_SUFFIX)) {
 			const gunzip = createGunzip();
 			await pipeline(stream, gunzip, async (source: NodeJS.ReadableStream) => {
@@ -592,6 +597,11 @@ async function collectReferencedBlobHashes(sessionRoots: string[], exactSessionF
 				const hash = match[1]?.toLowerCase();
 				if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
 			}
+		}).catch((error: unknown) => {
+			// A transcript's name that stands for a FIFO, a socket or a device
+			// holds no transcript, so it keeps no blob; it is not read, and the
+			// sweep goes on with the files that do.
+			notRegularAsAbsent(error);
 		});
 	}
 	return hashes;
@@ -956,7 +966,7 @@ async function runStaleGc(options: ResolvedGcOptions): Promise<StaleGcResult> {
  */
 async function tryAcquireSessionFileLease(sessionFile: string): Promise<FileLockHandle | null | undefined> {
 	try {
-		const sessionId = await readSessionHeaderId(sessionFile);
+		const sessionId = await readRegularSessionHeaderId(sessionFile);
 		return sessionId === undefined ? undefined : tryAcquireSessionLease(sessionId);
 	} catch {
 		return null;
@@ -979,7 +989,7 @@ async function listActiveSessions(sessionsRoot: string): Promise<{ sessions: Ses
 		throw error;
 	}
 
-	const storage = new FileSessionStorage();
+	const storage = new RegularFileSessionStorage();
 	const sessions: SessionInfo[] = [];
 	const unread: string[] = [];
 	for (const entry of entries) {
@@ -1004,7 +1014,12 @@ async function listActiveSessions(sessionsRoot: string): Promise<{ sessions: Ses
 				if ((await readRegularSessionHeaderId(file)) === undefined) continue;
 				unread.push(`${file} could not be read as a session, so it was not considered`);
 			} catch (error) {
-				unread.push(`${file} could not be read, so it was not considered: ${errorMessage(error)}`);
+				// One that is not a regular file is named as that, in its own words.
+				unread.push(
+					error instanceof NotARegularFile
+						? `${error.message}, and it was not considered`
+						: `${file} could not be read, so it was not considered: ${errorMessage(error)}`,
+				);
 			}
 		}
 	}
@@ -1014,10 +1029,10 @@ async function listActiveSessions(sessionsRoot: string): Promise<{ sessions: Ses
 
 /**
  * The session id in the header of the regular file at `file`; undefined when
- * nothing is there, what is there is not a regular file, or it carries no
- * session header. Opened non-blocking and judged by what the descriptor
- * holds, so a FIFO at a transcript's name — or put there after a look at the
- * name — is never waited on. A read that fails throws.
+ * nothing is there or it carries no session header. Opened through
+ * {@link openRegularFile}, so a FIFO at a transcript's name — or put there
+ * after a look at the name — is never waited on: it throws
+ * {@link NotARegularFile}, as a read that fails throws its own error.
  */
 async function readRegularSessionHeaderId(file: string): Promise<string | undefined> {
 	const handle = await openRegularFile(file);
@@ -1032,7 +1047,7 @@ async function readRegularSessionHeaderId(file: string): Promise<string | undefi
 async function listNestedSessionsReadOnly(artifactsRoot: string): Promise<SessionInfo[]> {
 	const files = await collectJsonlFiles(artifactsRoot);
 	const dirs = [...new Set(files.map(file => path.dirname(file)))].sort();
-	const storage = new FileSessionStorage();
+	const storage = new RegularFileSessionStorage();
 	const sessions: SessionInfo[] = [];
 	for (const dir of dirs) sessions.push(...(await listSessionsReadOnly(dir, storage)));
 	sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
@@ -1100,7 +1115,7 @@ function absentOnly(error: unknown): undefined {
 async function digestArchivedSessionFile(file: string): Promise<{ hash: string; bytes: number }> {
 	let digest: { hash: string; bytes: number } | undefined;
 	try {
-		await pipeline(Bun.file(file).stream(), createGunzip(), async (source: NodeJS.ReadableStream) => {
+		await pipeline(bytesOfRegularFile(file), createGunzip(), async (source: NodeJS.ReadableStream) => {
 			digest = await digestStream(source as AsyncIterable<Uint8Array>);
 		});
 	} catch (error) {
@@ -1205,7 +1220,7 @@ async function gzipSessionFile(
 	// meanwhile is not what this run archives, so it lends the archive
 	// nothing — its permissions least of all.
 	const live = await openRegularFile(source);
-	if (!live) throw new Error(`${source} is not a regular file, so it was not archived`);
+	if (!live) throw absentFile(source);
 	let ground: StagingGround;
 	try {
 		// A directory of this run's own minting, recorded so a later restore
@@ -1240,10 +1255,8 @@ async function gzipSessionFile(
 			// earlier proof was taken before the stage existed, so it is an
 			// observation about bytes that may since have changed. What
 			// survives is the gap between this read and the rename.
-			const archived = await fs.open(destination, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK).catch(error => {
-				if (codeOf(error) === "ENOENT") return undefined;
-				throw error;
-			});
+			// Anything but a regular file at the archived name has changed.
+			const archived = await openRegularFile(destination).catch(notRegularAsAbsent);
 			const changed = `${destination} changed while it was being archived; run \`omp gc --archive\` again`;
 			if (!archived) throw new Error(changed);
 			try {
@@ -1276,7 +1289,7 @@ async function gzipSessionFile(
 		// now that the archived name has been opened and checked, and set
 		// through a descriptor proved to hold the very inode just published —
 		// never through a name, which could by now be somebody else's file.
-		const published = await openRegularFile(destination);
+		const published = await openRegularFile(destination).catch(notRegularAsAbsent);
 		const notOurs = (): Error =>
 			new Error(`${destination} is not the archive this run wrote for ${source}, so ${source} was not archived`);
 		if (!published) throw notOurs();
@@ -1465,7 +1478,8 @@ async function publishArtifactIntoArchive(
 		return (await live.stat()).mode & 0o7777;
 	};
 	try {
-		live = await fs.open(source, "r");
+		live = await openRegularFile(source);
+		if (!live) throw absentFile(source);
 		const copied = await copyHandleWithDigest(live, ground.handle);
 		// `open` applies the umask; the archived copy keeps the live file's
 		// own permissions, so a deliberately private artifact stays private.
@@ -1503,11 +1517,10 @@ async function publishArtifactIntoArchive(
 				`${notStagedMessage(destination, `the copy of ${source} this run wrote`, check)}, so ${source} was not ` +
 					`archived; run \`omp gc --archive\` again`,
 			);
-		const archived = await fs.open(destination, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK).catch(error => {
-			if (codeOf(error) === "ENOENT") return undefined;
-			// A readerless FIFO at the archived name: something is there, and
-			// only absence may be read as an empty slot.
-			if (codeOf(error) === "ENXIO") throw conflict();
+		const archived = await openRegularFile(destination).catch(error => {
+			// A FIFO, a socket or a device at the archived name: something is
+			// there, and only absence may be read as an empty slot.
+			if (error instanceof NotARegularFile) throw conflict();
 			throw error;
 		});
 		if (!archived) {
@@ -1658,7 +1671,17 @@ async function copyArtifactEntryIntoArchive(
 		}
 		return;
 	}
-	if (!stat.isFile()) return;
+	if (!stat.isFile()) {
+		// A FIFO, a socket or a device, here or at the end of a link: the
+		// archive cannot hold one, and reading it would take what is written to
+		// it from whoever it was written for. It is left out and said so; a
+		// reclaim keeps the live tree while it is there.
+		state.notes.push(
+			`${source} ${(await fs.lstat(source).catch(absentOnly))?.isSymbolicLink() ? "links to" : "is"} ${kindOf(stat)}, ` +
+				`which the archive cannot hold, so it was left out of the archive and not read`,
+		);
+		return;
+	}
 	await publishArtifactIntoArchive(source, stat, destination, sourceRoot, state);
 }
 
@@ -1812,8 +1835,11 @@ async function proveEntryStillGoes(entry: ProvenEntry): Promise<void> {
 		}
 		return;
 	}
-	const live = await fs.open(entry.path, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK).catch(error => {
-		if (codeOf(error) === "ENOENT") return undefined;
+	const live = await openRegularFile(entry.path).catch(error => {
+		// Anything but a regular file at the name is not the file proved.
+		if (error instanceof NotARegularFile) {
+			throw new Error(`${entry.path} is no longer the file this run proved; it was kept`);
+		}
 		throw error;
 	});
 	if (!live) return;
@@ -1849,7 +1875,7 @@ async function proveTranscriptStillGoes(
 ): Promise<void> {
 	const kept = (): Error => new Error(`${sessionPath} is no longer the transcript this run proved; it was kept`);
 	if ((await standsAsProved(sessionPath, proved)) !== true) throw kept();
-	const live = await openRegularFile(sessionPath);
+	const live = await openRegularFile(sessionPath).catch(notRegularAsAbsent);
 	if (!live) throw kept();
 	try {
 		const [now, archived] = await Promise.all([
@@ -1901,9 +1927,9 @@ async function carryLiveModeToArchive(live: string, archived: string): Promise<v
 	const changed = (): Error =>
 		new Error(`${archived} changed while it was being archived; run \`omp gc --archive\` again`);
 	const liveHandle = await openRegularFile(live);
-	if (!liveHandle) throw new Error(`${live} is no longer a regular file, so it was not archived`);
+	if (!liveHandle) throw new Error(`${live} is gone, so it was not archived`);
 	try {
-		const archivedHandle = await openRegularFile(archived);
+		const archivedHandle = await openRegularFile(archived).catch(notRegularAsAbsent);
 		if (!archivedHandle) throw changed();
 		try {
 			const held = await archivedHandle.stat();
@@ -1981,8 +2007,19 @@ async function proveLiveTreeIsArchived(
 		// giving up the live tree would remove something no copy has.
 		if (!stat.isSymbolicLink()) {
 			throw new Error(
-				`${source} is ${stat.isFIFO() ? "a FIFO" : stat.isSocket() ? "a socket" : "a device"}, which the archive cannot ` +
-					`hold, so the live tree was kept; move it out of the tree to give this session's live copy up`,
+				`${source} is ${kindOf(stat)}, which the archive cannot hold, so the live tree was kept; move it out of the ` +
+					`tree to give this session's live copy up`,
+			);
+		}
+		// What the link names, by a look that opens nothing: a link to a FIFO,
+		// a socket or a device carried nothing into the archive, so dropping
+		// it would give up something no copy has. A link to a file or a
+		// directory, or to nothing at all, gives up only its own name.
+		const target = await fs.stat(source).catch(absentOnly);
+		if (target && !target.isFile() && !target.isDirectory()) {
+			throw new Error(
+				`${source} links to ${kindOf(target)}, which the archive cannot hold, so the live tree was kept; move it ` +
+					`out of the tree to give this session's live copy up`,
 			);
 		}
 		// A link the copy resolved rather than carried: its own name is all
@@ -1996,12 +2033,10 @@ async function proveLiveTreeIsArchived(
 		proven.files.push({ path: source, destination, ...seen, compared: false });
 		return;
 	}
-	const live = await fs.open(source, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK).catch(error => {
-		// Only absence is nothing. Anything else says what is there could not
-		// be read, which is not the same as the archive holding it.
-		if (codeOf(error) === "ENOENT") return undefined;
-		throw error;
-	});
+	// Only absence is nothing. A name that is not a regular file throws, in its
+	// own words; any other look that fails says what is there could not be
+	// read, which is not the same as the archive holding it.
+	const live = await openRegularFile(source);
 	if (!live) return;
 	let liveStat: Stats;
 	try {
@@ -2132,7 +2167,7 @@ async function archiveAlreadyHolds(source: string, destination: string): Promise
 		// Read through a non-blocking descriptor: a FIFO at the live name is
 		// not waited on, and is no transcript the archive could hold.
 		const handle = await openRegularFile(source);
-		if (!handle) throw new Error(`${source} is not a regular file`);
+		if (!handle) throw absentFile(source);
 		try {
 			const live = await digestStream(bytesOfHandle(handle));
 			const stored = await digestArchivedSessionFile(destination);
@@ -2383,9 +2418,21 @@ async function collectSessionFiles(session: Pick<SessionInfo, "path">): Promise<
  * whitespace; other binary and plain-text artifacts cost one small read.
  */
 async function readArtifactSessionId(file: string): Promise<string | undefined> {
-	const prefix = (await Bun.file(file).slice(0, HEADER_SNIFF_BYTES).text()).replace(/^[ \t\r\n]+/, "");
-	if (prefix !== "" && prefix[0] !== "{") return undefined;
-	return readSessionHeaderId(file);
+	// Through a descriptor that holds a regular file: an artifact that is, or
+	// links to, a FIFO, a socket or a device is no transcript, and reading it
+	// would wait on it or take what is written to it. It owns nothing here;
+	// the copy and the reclaim name it, as what the archive cannot hold.
+	const handle = await openRegularFile(file).catch(notRegularAsAbsent);
+	if (!handle) return undefined;
+	try {
+		const sniff = Buffer.allocUnsafe(HEADER_SNIFF_BYTES);
+		const { bytesRead } = await handle.read(sniff, 0, sniff.byteLength, 0);
+		const prefix = new TextDecoder().decode(sniff.subarray(0, bytesRead)).replace(/^[ \t\r\n]+/, "");
+		if (prefix !== "" && prefix[0] !== "{") return undefined;
+		return await readSessionHeaderIdFromHandle(handle);
+	} finally {
+		await handle.close().catch(() => undefined);
+	}
 }
 
 /** The ownership leases a run holds over a session tree. */
