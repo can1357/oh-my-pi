@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `assertModelSupportsEffortCeiling()`, which throws when a model has no supported thinking effort at or below a `task.maxEffort` ceiling ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
 - Added `iconButton()`, `quietButton()` and `segmentedTabs()` to `native/overlay`, and `disabled`, `busy` and `icon` options to `actionButton()`
 - Added `nativeTail` to `Composer.setRuntimeChildren` options: containers whose children continue the native surface's `main` after the transcript instead of riding in the dock
 - Added `isHighlightLanguage` and `createCodeFrameStyler` for renderers that highlight source lines in their file's language ([#17550](https://github.com/can1357/oh-my-pi/pull/17550) by [@JustasMasiulis](https://github.com/JustasMasiulis))

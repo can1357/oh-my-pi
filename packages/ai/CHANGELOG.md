@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `disableServerSideFallback` to `FactoryDroidOptions` and `SimpleStreamOptions`: a Factory Droid request leaves out the server-side refusal fallback chain and fails, before any of its content is streamed, if another model answers it ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
 ### Breaking Changes
 
 - Replaced `isLoopGuardedModel` with `loopGuardLevel`, which returns `"off"`, `"exact"`, or `"semantic"` from the model's `thinking-loop-guard` catalog rule

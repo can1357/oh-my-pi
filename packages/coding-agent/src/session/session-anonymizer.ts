@@ -78,6 +78,7 @@ const FIELD_RULES: Record<string, Rule> = {
 	...fields("num", [
 		"version",
 		"resolvedModelIsFallback",
+		"perCallModel",
 		"display",
 		"synthetic",
 		"steering",
@@ -205,6 +206,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"role",
 		"titleSource",
 		"thinkingLevel",
+		"perCallThinkingLevel",
 		"configured",
 		"serviceTier",
 		"purpose",
@@ -252,6 +254,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"provider",
 		"model",
 		"resolvedModel",
+		"perCallModelIdentity",
 		"upstreamProvider",
 		"upstreamModel",
 		"advisor",
