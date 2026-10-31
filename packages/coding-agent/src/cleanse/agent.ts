@@ -3,6 +3,8 @@ import { ModelRegistry } from "../config/model-registry";
 import { formatModelString, resolveCliModel } from "../config/model-resolver";
 import { Settings } from "../config/settings";
 import { IrcBus } from "../irc/bus";
+import { holdSharedLsp } from "../lsp/client";
+import { cfgLspShared } from "../lsp/settings";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { discoverAuthStorage } from "../sdk";
 import { SessionManager } from "../session/session-manager";
@@ -123,6 +125,9 @@ export async function createCleanseAgentRuntime(options: {
 	let closed = false;
 	/** Live worker number → reserved registry agent id, for follow-up steering. */
 	const workerAgentIds = new Map<number, string>();
+	// Cleanse workers are all subagents, and only a session that binds process state
+	// holds the process-wide shared-LSP mode, so the runtime holds it for them until closed.
+	const sharedLsp = holdSharedLsp(cfgLspShared.get(settings));
 
 	return {
 		model: modelDisplay,
@@ -213,6 +218,7 @@ export async function createCleanseAgentRuntime(options: {
 		async close(result?: CleanseLoopResult): Promise<void> {
 			if (closed) return;
 			closed = true;
+			sharedLsp.release();
 			sessionManager.appendCustomEntry("cleanse", {
 				status: result?.status ?? "interrupted",
 				workers: result?.workers ?? 0,

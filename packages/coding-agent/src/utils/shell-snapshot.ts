@@ -9,10 +9,24 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getSafeProjectCwd, logger, postmortem } from "@oh-my-pi/pi-utils";
+import { quotePosixArgument } from "./shell-quote";
 import fnEnvHelper from "./shell-snapshot-fn-env.sh" with { type: "text" };
 
-const cachedSnapshotPaths = new Map<string, string>();
+interface SnapshotFailure {
+	/** rc file `mtime:size` when the attempt failed; a change re-arms creation. */
+	rcStamp: string;
+	/** Hash of the environment the rc ran with; a different environment re-arms creation. */
+	envStamp: number | bigint;
+	retryAt: number;
+}
+
+/** Snapshot path per shell; re-checked for existence on every hit. */
+const cachedSnapshots = new Map<string, string>();
+const inflightSnapshots = new Map<string, Promise<string | null>>();
+const failedSnapshots = new Map<string, SnapshotFailure>();
 const SNAPSHOT_TIMEOUT_MS = 2_000;
+/** A failed (slow or broken rc) snapshot is retried after this long unless the rc file or environment changes first. */
+const SNAPSHOT_FAILURE_RETRY_MS = 60_000;
 
 /**
  * Characters that force brush's primitive alias expander down a path it does
@@ -104,11 +118,15 @@ function getShellConfigFile(shell: string, env: Record<string, string | undefine
 function generateSnapshotScript(shell: string, snapshotPath: string, rcFile: string): string {
 	const hasRcFile = fs.existsSync(rcFile);
 	const isZsh = shell.includes("zsh");
-	const commonToolsRegex =
-		"^(ls|dir|vdir|cat|head|tail|less|more|grep|egrep|fgrep|rg|find|fd|locate|sed|awk|perl|cp|mv|rm|mkdir|rmdir|touch|chmod|chown|ln|pwd|readlink|stat|cut|sort|uniq|xargs|tee|tr|basename|dirname)$";
+	// Core tools whose user functions/aliases are dropped so the agent always runs
+	// the real binaries. Bare alternation: each filter supplies its own anchors.
+	const commonTools =
+		"ls|dir|vdir|cat|head|tail|less|more|grep|egrep|fgrep|rg|find|fd|locate|sed|awk|perl|cp|mv|rm|mkdir|rmdir|touch|chmod|chown|ln|pwd|readlink|stat|cut|sort|uniq|xargs|tee|tr|basename|dirname";
+	const commonFunctionRegex = `^(${commonTools})$`;
+	// bash's `alias` prints `alias NAME=...`; zsh's prints `NAME=...`.
+	const commonAliasRegex = `^(alias )?(${commonTools})=`;
 
-	// Escape the snapshot path for shell
-	const escapedPath = snapshotPath.replace(/'/g, "'\\''");
+	const quotedPath = quotePosixArgument(snapshotPath);
 
 	// Function extraction differs between bash and zsh. Each form prints function
 	// bodies on stdout so we can both persist them AND scan their bodies for
@@ -117,13 +135,13 @@ function generateSnapshotScript(shell: string, snapshotPath: string, rcFile: str
 		? `# Force autoload all functions first
 typeset -f > /dev/null 2>&1
 # Get user function names - filter system/private ones
-typeset +f 2>/dev/null | grep -vE '^(_|__)' | grep -vE '${commonToolsRegex}' | while read func; do
+typeset +f 2>/dev/null | grep -vE '^(_|__)' | grep -vE '${commonFunctionRegex}' | while read func; do
    typeset -f "$func" 2>/dev/null
 done`
 		: `# Force autoload all functions first
 declare -f > /dev/null 2>&1
 # Get user function names - filter system/private ones
-declare -F 2>/dev/null | cut -d' ' -f3 | grep -vE '^(_|__)' | grep -vE '${commonToolsRegex}' | while read func; do
+declare -F 2>/dev/null | cut -d' ' -f3 | grep -vE '^(_|__)' | grep -vE '${commonFunctionRegex}' | while read func; do
    declare -f "$func" 2>/dev/null
 done`;
 
@@ -141,7 +159,7 @@ echo "shopt -s expand_aliases" >> "$SNAPSHOT_FILE"
 `;
 
 	return `
-SNAPSHOT_FILE='${escapedPath}'
+SNAPSHOT_FILE=${quotedPath}
 
 # Snapshot may inline env-var values referenced by captured functions (#3470).
 # Defence in depth: (a) JS caller pre-creates the file at 0600 so the shell's
@@ -189,9 +207,9 @@ ${optionsScript}
 echo "# Aliases" >> "$SNAPSHOT_FILE"
 # Filter out winpty aliases on Windows to avoid "stdin is not a tty" errors
 if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]]; then
-   alias 2>/dev/null | grep -v "='winpty " | grep -vE '^alias (${commonToolsRegex})=' | sed 's/^alias //g' | sed 's/^/alias -- /' | head -n 1000 >> "$SNAPSHOT_FILE"
+   alias 2>/dev/null | grep -v "='winpty " | grep -vE '${commonAliasRegex}' | sed 's/^alias //g' | sed 's/^/alias -- /' | head -n 1000 >> "$SNAPSHOT_FILE"
 else
-   alias 2>/dev/null | grep -vE '^alias (${commonToolsRegex})=' | sed 's/^alias //g' | sed 's/^/alias -- /' | head -n 1000 >> "$SNAPSHOT_FILE"
+   alias 2>/dev/null | grep -vE '${commonAliasRegex}' | sed 's/^alias //g' | sed 's/^/alias -- /' | head -n 1000 >> "$SNAPSHOT_FILE"
 fi
 
 # Export PATH
@@ -205,9 +223,23 @@ fi
 `.trim();
 }
 
+function rcFileStamp(rcFile: string): string {
+	try {
+		const stat = fs.statSync(rcFile);
+		return `${stat.mtimeMs}:${stat.size}`;
+	} catch {
+		return "missing";
+	}
+}
+
 /**
  * Create a shell snapshot, caching the result.
  * Returns the path to the snapshot file, or null if creation failed.
+ *
+ * Concurrent callers share one in-flight creation. A failure is remembered
+ * for {@link SNAPSHOT_FAILURE_RETRY_MS} (or until the rc file or the
+ * environment changes), so a slow or broken rc costs one spawn instead of one
+ * per bash call.
  *
  * `timeoutMs` is configurable so callers exercising failure handling do not
  * have to wait out the production startup budget.
@@ -217,23 +249,60 @@ export async function getOrCreateSnapshot(
 	env: Record<string, string | undefined>,
 	timeoutMs = SNAPSHOT_TIMEOUT_MS,
 ): Promise<string | null> {
-	const cacheKey = shell;
-	// Return cached snapshot if valid
-	const cached = cachedSnapshotPaths.get(cacheKey);
-	if (cached && fs.existsSync(cached)) {
-		return cached;
-	}
-	if (cached) {
-		cachedSnapshotPaths.delete(cacheKey);
-	}
-
 	// Skip on Windows (no .bashrc in standard location)
 	if (process.platform === "win32") {
 		return null;
 	}
 
-	const rcFile = getShellConfigFile(shell, env);
+	const cacheKey = shell;
+	const cached = cachedSnapshots.get(cacheKey);
+	if (cached) {
+		// A cleaned-up snapshot must be recreated, never handed to the shell.
+		if (fs.existsSync(cached)) return cached;
+		cachedSnapshots.delete(cacheKey);
+	}
 
+	const inflight = inflightSnapshots.get(cacheKey);
+	if (inflight) return inflight;
+
+	const rcFile = getShellConfigFile(shell, env);
+	const failure = failedSnapshots.get(cacheKey);
+	if (failure) {
+		if (
+			performance.now() < failure.retryAt &&
+			rcFileStamp(rcFile) === failure.rcStamp &&
+			Bun.hash(JSON.stringify(env)) === failure.envStamp
+		) {
+			return null;
+		}
+		failedSnapshots.delete(cacheKey);
+	}
+
+	// Snapshot creation is best-effort: an unexpected throw counts as a failure.
+	const attempt = createSnapshot(shell, env, rcFile, timeoutMs).catch(() => null);
+	const creation = attempt.then(snapshotPath => {
+		inflightSnapshots.delete(cacheKey);
+		if (snapshotPath) {
+			cachedSnapshots.set(cacheKey, snapshotPath);
+		} else {
+			failedSnapshots.set(cacheKey, {
+				rcStamp: rcFileStamp(rcFile),
+				envStamp: Bun.hash(JSON.stringify(env)),
+				retryAt: performance.now() + SNAPSHOT_FAILURE_RETRY_MS,
+			});
+		}
+		return snapshotPath;
+	});
+	inflightSnapshots.set(cacheKey, creation);
+	return creation;
+}
+
+async function createSnapshot(
+	shell: string,
+	env: Record<string, string | undefined>,
+	rcFile: string,
+	timeoutMs: number,
+): Promise<string | null> {
 	// Snapshot dir is per-uid. `os.tmpdir()` is shared between accounts on Linux and
 	// this dir is 0700 because the script may inline env-var values referenced by
 	// captured functions (#3470), so a single shared name hands the first account an
@@ -304,7 +373,6 @@ export async function getOrCreateSnapshot(
 				// best-effort
 			}
 			scrubSnapshotInPlace(snapshotPath);
-			cachedSnapshotPaths.set(cacheKey, snapshotPath);
 			succeeded = true;
 			return snapshotPath;
 		}
@@ -324,8 +392,8 @@ export async function getOrCreateSnapshot(
 }
 
 postmortem.register("shell-snapshot", () => {
-	for (const snapshotPath of cachedSnapshotPaths.values()) {
+	for (const snapshotPath of cachedSnapshots.values()) {
 		fs.unlinkSync(snapshotPath);
 	}
-	cachedSnapshotPaths.clear();
+	cachedSnapshots.clear();
 });

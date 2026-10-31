@@ -178,6 +178,34 @@ describe("ast_grep parse errors", () => {
 		}
 	});
 
+	it("skips unknown and extensionless files unless a language is explicitly selected", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-grep-file-filter-"));
+		try {
+			for (const name of ["source.ts", "notes.unsupported", "extensionless"]) {
+				await Bun.write(path.join(tempDir, name), "console.log(1);\n");
+			}
+			const tools = await createTools(createTestSession(tempDir), ["ast_grep"]);
+			const tool = tools.find(entry => entry.name === "ast_grep")!;
+
+			const inferred = await tool.execute("ast-grep-inferred", {
+				pat: "console.log($X)",
+				path: tempDir,
+			});
+			expect(inferred.details).toMatchObject({ matchCount: 1, files: ["source.ts"] });
+
+			const explicit = await tool.execute("ast-grep-explicit", {
+				pat: "console.log($X)",
+				path: tempDir,
+				lang: "ts",
+			});
+			expect(explicit.details).toMatchObject({ matchCount: 3 });
+			const details = explicit.details as { files: string[] };
+			expect([...details.files].sort()).toEqual(["extensionless", "notes.unsupported", "source.ts"]);
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
 	it("honors an explicit C++ language for ambiguous headers", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-grep-cpp-header-"));
 		try {

@@ -117,10 +117,8 @@ fn check_fixture(fixture: &Fixture, cfg: &MinimizerConfig) -> Result<(), String>
 		problems.push(format!("snapshot mismatch:\n{}", diff_excerpt(expected, minimized)));
 	}
 
-	if problems.is_empty() {
-		Ok(())
-	} else {
-		Err(format!(
+	problems.is_empty().ok_or_else(|| {
+		format!(
 			"[{}] cmd={:?} exit={} raw={} B min={} B ratio={:.1}%\n  - {}",
 			fixture.name,
 			fixture.command,
@@ -129,8 +127,8 @@ fn check_fixture(fixture: &Fixture, cfg: &MinimizerConfig) -> Result<(), String>
 			min_len,
 			ratio * 100.0,
 			problems.join("\n  - ")
-		))
-	}
+		)
+	})
 }
 
 /// Render a short, line-oriented diff excerpt (first divergence plus a little

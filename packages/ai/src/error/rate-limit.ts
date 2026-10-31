@@ -78,15 +78,17 @@ const ACCOUNT_SCOPED_403_PATTERN =
 	/\b(?:overall|account|organization|team|workspace)\b[^\n]{0,40}\b(?:message |request )?rate.?limit\b|\byour\b[^\n]{0,30}\b(?:limit )?will reset\b/i;
 // Simplified Chinese account-quota exhaustion phrasing. Zhipu Coding Plan
 // returns e.g. "429 已达到 5 小时的使用上限。您的限额将在 2026-08-06 20:06:00 重置。"
-// (type=1308) when the 5h window is spent; other CN providers use 额度已用完 /
+// (type=1308) when the 5h window is spent; MiniMax CN returns
+// "当前已达到 Token Plan 用量上限。…" (2067); other CN providers use 额度已用完 /
 // 配额已耗尽 / 余额不足. These are persistent account-local caps that must
 // rotate to a sibling credential, not transient rate limits, so they are
 // matched before the RATE_LIMIT_EXCEEDED branch. The 上限 arm is anchored on
-// the 使用 token: a rate/concurrency cap phrased as 每分钟请求数已达上限 /
-// 并发请求数已达上限 / 速率达到上限 (no 使用) must NOT match, or it would burn a
-// healthy sibling credential as a false quota. "速率限制" is absent for the
-// same reason.
-const CN_QUOTA_EXHAUSTED_PATTERN = /使用.{0,30}?上限|(?:额度|配额)已?(?:用|耗)(?:完|尽)|限额.{0,30}重置|余额不足/;
+// the 使用 / 用量 tokens: a rate/concurrency cap phrased as 每分钟请求数已达上限 /
+// 并发请求数已达上限 / 速率达到上限 (neither token) must NOT match, or it would
+// burn a healthy sibling credential as a false quota. "速率限制" is absent for
+// the same reason.
+const CN_QUOTA_EXHAUSTED_PATTERN =
+	/(?:使用|用量).{0,30}?上限|(?:额度|配额)已?(?:用|耗)(?:完|尽)|限额.{0,30}重置|余额不足/;
 // Simplified Chinese rate/concurrency caps can contain both 使用 and 上限, but
 // remain transient rather than account quota exhaustion.
 const CN_TRANSIENT_CAP_PATTERN =
@@ -128,6 +130,8 @@ const TPM_RPM_THROTTLE_PATTERN =
 	/\b(?:tpm|rpm)\b[^\n]{0,40}\b(?:exhaust\w*|exceed\w*|limit\w*|throttl\w*|reach\w*)\b|\b(?:exhaust\w*|exceed\w*|limit\w*|throttl\w*|reach\w*)\b[^\n]{0,40}\b(?:tpm|rpm)\b|\bRateLimitExceeded\.(?:Endpoint)?(?:TPM|RPM)\w*/i;
 
 const GOOGLE_RPC_ERROR_INFO_TYPE = "type.googleapis.com/google.rpc.ErrorInfo";
+const GOOGLE_RPC_QUOTA_FAILURE_TYPE = "type.googleapis.com/google.rpc.QuotaFailure";
+const GOOGLE_RPC_RETRY_INFO_TYPE = "type.googleapis.com/google.rpc.RetryInfo";
 const ANTIGRAVITY_MODEL_QUOTA_PATTERN = /\bexhausted your capacity on this model\b/i;
 const LONG_RATE_LIMIT_DELAY_MS = 5 * 60 * 1000;
 
@@ -162,11 +166,18 @@ function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | 
 	}
 	if (!Array.isArray(error.details)) return undefined;
 
+	// 1. ErrorInfo details take first precedence for terminal quota/capacity reasons,
+	// while a generic RATE_LIMIT_EXCEEDED is held until QuotaFailure is checked so a
+	// co-reported daily cap or zero-entitlement violation still rotates credentials.
+	let sawGenericRateLimitInfo = false;
 	for (const value of error.details) {
 		const detail = asRecord(value);
 		if (detail?.["@type"] !== GOOGLE_RPC_ERROR_INFO_TYPE || typeof detail.reason !== "string") continue;
 		const reason = detail.reason.trim().toUpperCase();
 		switch (reason) {
+			case "MODEL_CAPACITY_EXHAUSTED":
+			case "MODEL_CAPACITY_EXCEEDED":
+				return "MODEL_CAPACITY_EXHAUSTED";
 			case "QUOTA_EXHAUSTED":
 				return "QUOTA_EXHAUSTED";
 			case "INSUFFICIENT_G1_CREDITS_BALANCE":
@@ -176,16 +187,69 @@ function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | 
 			case "RATE_LIMIT_EXCEEDED": {
 				// Cloud Code Assist also uses this reason for an account's
 				// per-model quota, even when that quota resets within seconds.
-				if (typeof error.message === "string" && ANTIGRAVITY_MODEL_QUOTA_PATTERN.test(error.message)) {
+				if (
+					(typeof error.message === "string" && ANTIGRAVITY_MODEL_QUOTA_PATTERN.test(error.message)) ||
+					ANTIGRAVITY_MODEL_QUOTA_PATTERN.test(errorMessage)
+				) {
 					return "QUOTA_EXHAUSTED";
 				}
-				const retryDelayMs = extractRetryHint(undefined, errorMessage);
-				return retryDelayMs !== undefined && retryDelayMs >= LONG_RATE_LIMIT_DELAY_MS
-					? "QUOTA_EXHAUSTED"
-					: "RATE_LIMIT_EXCEEDED";
+				sawGenericRateLimitInfo = true;
+				break;
 			}
 		}
 	}
+
+	// 2. QuotaFailure details take second precedence.
+	// Inspect all violations before returning a short-window transient verdict so
+	// any daily cap or zero-entitlement quotaValue ("0") dominates.
+	let sawShortWindowViolation = false;
+	for (const value of error.details) {
+		const detail = asRecord(value);
+		if (detail?.["@type"] !== GOOGLE_RPC_QUOTA_FAILURE_TYPE || !Array.isArray(detail.violations)) continue;
+		for (const v of detail.violations) {
+			const violation = asRecord(v);
+			const quotaValue = violation?.quotaValue;
+			if (
+				(typeof quotaValue === "string" || typeof quotaValue === "number") &&
+				/^\s*0+(?:\.0+)?\s*$/.test(String(quotaValue))
+			) {
+				return "QUOTA_EXHAUSTED";
+			}
+			const quotaId = typeof violation?.quotaId === "string" ? violation.quotaId.toLowerCase() : "";
+			const quotaMetric = typeof violation?.quotaMetric === "string" ? violation.quotaMetric.toLowerCase() : "";
+			const combined = `${quotaId} ${quotaMetric}`;
+			if (combined.includes("perday") || combined.includes("daily") || combined.includes("per_day")) {
+				return "QUOTA_EXHAUSTED";
+			}
+			if (
+				combined.includes("perminute") ||
+				combined.includes("per_minute") ||
+				combined.includes("persecond") ||
+				combined.includes("per_second") ||
+				combined.includes("per100seconds") ||
+				combined.includes("per_100_seconds")
+			) {
+				sawShortWindowViolation = true;
+			}
+		}
+	}
+	if (sawShortWindowViolation || sawGenericRateLimitInfo) {
+		const retryDelayMs = extractRetryHint(undefined, errorMessage);
+		return retryDelayMs !== undefined && retryDelayMs >= LONG_RATE_LIMIT_DELAY_MS
+			? "QUOTA_EXHAUSTED"
+			: "RATE_LIMIT_EXCEEDED";
+	}
+
+	// 3. Standalone RetryInfo when neither ErrorInfo nor QuotaFailure returned a verdict
+	for (const value of error.details) {
+		const detail = asRecord(value);
+		if (detail?.["@type"] !== GOOGLE_RPC_RETRY_INFO_TYPE) continue;
+		const retryDelayMs = extractRetryHint(undefined, errorMessage);
+		if (retryDelayMs !== undefined) {
+			return retryDelayMs >= LONG_RATE_LIMIT_DELAY_MS ? "QUOTA_EXHAUSTED" : "RATE_LIMIT_EXCEEDED";
+		}
+	}
+
 	return undefined;
 }
 

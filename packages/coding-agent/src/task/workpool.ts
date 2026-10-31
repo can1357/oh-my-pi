@@ -1,4 +1,4 @@
-import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import workpoolBatchTemplate from "../prompts/tools/workpool-batch.md" with { type: "text" };
 import workpoolTurnResultTemplate from "../prompts/tools/workpool-turn-result.md" with { type: "text" };
@@ -89,8 +89,6 @@ export interface WorkPoolPeekResult {
 /** Resolved policy and optional shared context used to create a pool. */
 export interface WorkPoolCreateOptions {
 	name: string;
-	/** Raw selector applied to each worker at creation, never to follow-up turns. */
-	model?: string | string[];
 	policy: EffectiveSubagentPolicy;
 	context?: string;
 	customTools?: CustomTool[];
@@ -101,6 +99,7 @@ interface TurnOutcome {
 	output: string;
 	error?: string;
 	aborted?: boolean;
+	extractedToolData?: Record<string, unknown[]>;
 	abortReason?: string;
 }
 
@@ -112,7 +111,6 @@ export class WorkPool {
 	readonly ownerId: string;
 	readonly session: ToolSession;
 	readonly policy: EffectiveSubagentPolicy;
-	readonly #model?: string | string[];
 	readonly context?: string;
 	readonly customTools: CustomTool[];
 	readonly freshAgents: boolean;
@@ -135,7 +133,6 @@ export class WorkPool {
 		this.ownerId = session.getAgentId?.() ?? MAIN_AGENT_ID;
 		this.session = session;
 		this.policy = options.policy;
-		this.#model = Array.isArray(options.model) ? [...options.model] : options.model;
 		this.context = options.context;
 		this.customTools = options.customTools ?? [];
 		this.freshAgents = cfgEvalWorkpoolFreshAgents.get(session.settings);
@@ -388,7 +385,6 @@ export class WorkPool {
 							assignment: message,
 							...(this.context ? { context: this.context } : {}),
 							agent: this.policy.agentName,
-							...(this.#model !== undefined ? { model: this.#model } : {}),
 							identity: { id: agent.id },
 							customTools: this.customTools,
 							outputSchema,
@@ -442,7 +438,15 @@ export class WorkPool {
 	async #finishTurn(agent: WorkPoolAgent, batch: WorkPoolBatch, result: TurnOutcome): Promise<void> {
 		batch.status = result.aborted ? "cancelled" : result.exitCode !== 0 || result.error ? "failed" : "completed";
 		batch.output = result.output;
-		for (const item of batch.items) item.status = batch.status;
+		const failedItems = new Set<string>();
+		for (const yielded of result.extractedToolData?.yield ?? []) {
+			if (!isRecord(yielded) || yielded.status !== "success" || typeof yielded.error !== "string") continue;
+			if (Array.isArray(yielded.type) && yielded.type.length === 1 && typeof yielded.type[0] === "string") {
+				failedItems.add(yielded.type[0]);
+			}
+		}
+		for (const item of batch.items)
+			item.status = batch.status === "completed" && failedItems.has(item.id) ? "failed" : batch.status;
 		agent.turns++;
 		agent.jobId = undefined;
 		const ref = AgentRegistry.global().get(agent.id);

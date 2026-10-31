@@ -1,19 +1,15 @@
 import { describe, expect, it } from "bun:test";
-import type { TspSpan } from "@oh-my-pi/pi-wire";
 import type { NativeChild, NativeNode } from "../src/native/node";
-import { bashToolRenderer } from "../src/tools/bash";
 import { editToolRenderer } from "../src/tools/edit";
 import { grepToolRenderer } from "../src/tools/grep";
 import { readToolRenderer } from "../src/tools/read";
+import { writeToolRenderer } from "../src/tools/write";
+import { describeCodeCell } from "../src/render/code-cell";
+import { theme } from "../src/theme/theme";
 import { getNativeBlob } from "../src/native/blobs";
 import type { RenderResultOptions } from "../src/tools/renderer";
 
-const pending: RenderResultOptions = { expanded: false, isPartial: true };
 const done: RenderResultOptions = { expanded: false, isPartial: false };
-
-function headText(head: string | readonly TspSpan[] | undefined): string {
-	return typeof head === "string" ? head : (head ?? []).map(s => s.t).join("");
-}
 
 function isNode(child: NativeChild): child is NativeNode {
 	return "k" in child;
@@ -30,19 +26,6 @@ function collect(children: readonly NativeChild[] | undefined, kind: string): Na
 }
 
 describe("core tool native views", () => {
-	it("shows the streamed bash command once, in the head, with its partial-JSON env", () => {
-		const view = bashToolRenderer.describeCall(
-			{ command: "make test", __partialJson: '{"env":{"CI":"1"},"command":"make test' },
-			pending,
-		);
-		const command = headText(view.tool?.target);
-		expect(view.tool?.targetKind).toBe("command");
-		expect(command).toContain('CI="1"');
-		expect(command).toContain("make test");
-		expect(command).not.toContain("\x1b");
-		expect(collect(view.body, "code")).toHaveLength(0);
-	});
-
 	it("describes an edit result as a path-headed tool over a headerless diff", () => {
 		const compactDiff = " 4|keep\n-5|old\n+5|new";
 		const view = editToolRenderer.describeResult(
@@ -62,8 +45,8 @@ describe("core tool native views", () => {
 			path?: string;
 			lang?: string;
 		};
-		expect(props.path).toBeUndefined();
-		expect(props.lang).toBe("typescript");
+		expect(props.path).toBe("/tmp/a.ts");
+		expect(props.lang).toBeUndefined();
 		expect(props.hunks?.[0]?.oldStart).toBe(4);
 		expect(props.hunks?.[0]?.newStart).toBe(4);
 		expect(props.hunks?.[0]?.lines.map(line => line[0])).toEqual([" ", "-", "+"]);
@@ -102,5 +85,20 @@ describe("core tool native views", () => {
 		expect(blocks.map(b => b.start)).toEqual([9, 40]);
 		expect(blocks[0]!.text).toBe("ctx\nhit here\nafter");
 		expect(blocks.flatMap(b => (b.marks ?? []).map(m => m.line))).toEqual([10, 40]);
+	});
+
+	it("wraps long lines of read, write, and code-cell source as their ANSI renderers do (#15823)", () => {
+		const long = `const x = "${"y".repeat(300)}";`;
+		const read = readToolRenderer.describeResult({ content: [{ type: "text", text: long }] }, done, { path: "a.ts" });
+		const write = writeToolRenderer.describeResult?.({ content: [{ type: "text", text: "ok" }] }, done, {
+			path: "a.ts",
+			content: long,
+		});
+		const cell = describeCodeCell({ code: long, language: "ts", codeStartLine: 1 }, theme);
+		for (const children of [read.body, write?.body, [cell]]) {
+			const blocks = collect(children, "code");
+			expect(blocks).toHaveLength(1);
+			expect(blocks[0]!.p).toMatchObject({ text: long, wrap: true });
+		}
 	});
 });

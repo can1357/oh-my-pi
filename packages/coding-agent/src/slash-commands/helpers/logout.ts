@@ -68,9 +68,13 @@ function oauthMatchesActiveIdentity(
 			return true;
 		}
 	}
+	// When both sides carry an email it decides: Codex Team seats share an
+	// account id and Antigravity accounts share one Google project.
+	if (activeIdentity.email !== undefined && credential.email !== undefined) {
+		return credential.email === activeIdentity.email;
+	}
 	return (
 		(activeIdentity.accountId !== undefined && credential.accountId === activeIdentity.accountId) ||
-		(activeIdentity.email !== undefined && credential.email === activeIdentity.email) ||
 		(activeIdentity.projectId !== undefined && credential.projectId === activeIdentity.projectId)
 	);
 }

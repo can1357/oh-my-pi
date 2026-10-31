@@ -1,10 +1,14 @@
+import * as path from "node:path";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { HighlightStream } from "@oh-my-pi/pi-natives";
 import type { Component } from "../tui";
+import { fencedCode } from "../components/markdown";
 import { Text } from "../components/text";
 import { getLanguageFromPath } from "../lang-from-path";
 import { createHighlightStream, highlightCode, type Theme } from "../theme/theme";
 import { fileHyperlink, renderStatusLine } from "../render";
 import { framedToolCard } from "../render/tool-card";
+import { wrapPrefixedLine } from "../render/hanging-wrap";
 import {
 	cachedRenderedString,
 	createRenderedStringCache,
@@ -31,8 +35,7 @@ import {
 	type ProcWriteDetails,
 } from "./proc-render";
 import type { TspTone } from "@oh-my-pi/pi-wire";
-import { code, compact, node, span } from "../native/describe";
-import { registerNativeBlob } from "../native/blobs";
+import { code, compact, md, node, span } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
 import { diagnosticsBadge, diagnosticsSection, displayPath, errorText, fileHref, resultText } from "./native-view";
 import { describeCfgWrite, renderCfgWrite, type CfgWriteDetails } from "./cfg-render";
@@ -45,6 +48,7 @@ import type {
 	RenderResultOptions,
 	ToolActivityContext,
 	ToolActivitySummary,
+	ToolFigure,
 	ToolRenderer,
 } from "./renderer";
 import { splitUrlScheme } from "./url-scheme-host";
@@ -91,8 +95,31 @@ interface WriteRenderArgs {
 const WRITE_PREVIEW_LINES = 6;
 /** Collapsed native write body: the first lines of the file (§7.3). */
 const NATIVE_WRITE_PREVIEW = { lines: 8 } as const;
-/** Tallest rendered SVG preview, in lines; collapsed, the card shows just the picture. */
-const NATIVE_SVG_PREVIEW_LINES = 16;
+/**
+ * Collapsed clamp of a write drawn as a figure: Tern's model figure (its head
+ * over a 320px stage) clears the clamp's fade at 16px lines.
+ */
+const NATIVE_FIGURE_PREVIEW_LINES = 26;
+
+/**
+ * Fence language per extension of a written file that transcripts draw as a
+ * figure, as they draw that fence in assistant text: svg and mermaid, plus
+ * the 3D formats only Tern draws (stencil-markdown's model fences).
+ */
+const FIGURE_FENCES: Readonly<Record<string, string>> = {
+	svg: "svg",
+	mmd: "mermaid",
+	mermaid: "mermaid",
+	obj: "obj",
+	ply: "ply",
+	wrl: "wrl",
+	vrml: "vrml",
+	x3dv: "x3dv",
+	stl: "stl",
+	gltf: "gltf",
+	usda: "usda",
+	usd: "usd",
+};
 
 /** A write tool result as the renderer receives it. */
 interface WriteResult {
@@ -101,26 +128,48 @@ interface WriteResult {
 	isError?: boolean;
 }
 
-/** Cached SVG preview node on its result, so the content is encoded and hashed once per write. */
-const kSvgPreview = Symbol("write.svgPreview");
-
-interface TaggedWriteResult extends WriteResult {
-	[kSvgPreview]?: { content: string; node: NativeNode };
+/**
+ * The fence a file write draws as while its content streams and after: its
+ * extension names a figure language and it has content, closed once the args
+ * are final. None for URL-card writes, or after an error.
+ */
+function writeFigure(
+	args: WriteRenderArgs | undefined,
+	result: WriteResult | undefined,
+	options: RenderResultOptions,
+): ToolFigure | undefined {
+	if (result?.isError || result?.details?.xdev) return undefined;
+	const rawPath =
+		typeof args?.file_path === "string" ? args.file_path : typeof args?.path === "string" ? args.path : "";
+	const lang = FIGURE_FENCES[path.extname(rawPath).slice(1).toLowerCase()];
+	const content = args?.content;
+	if (!lang || typeof content !== "string" || !/\S/.test(content) || writeUrlCard(rawPath, result?.details)) {
+		return undefined;
+	}
+	return {
+		lang,
+		source: content.includes("\r") ? content.replace(/\r/g, "") : content,
+		closed: result !== undefined || options.argsComplete === true,
+	};
 }
 
-/** Native `image` node drawing written SVG `content`, cached on `result`. */
-function describeSvgPreview(result: TaggedWriteResult, content: string, alt: string): NativeNode {
-	const cached = result[kSvgPreview];
-	if (cached?.content === content) return cached.node;
-	const blob = registerNativeBlob(new TextEncoder().encode(content), "image/svg+xml");
-	const preview = node("image", {
-		blob,
-		alt,
-		role: "omp.tool.write.image",
-		max: { h: `${NATIVE_SVG_PREVIEW_LINES}lines` },
-	});
-	result[kSvgPreview] = { content, node: preview };
-	return preview;
+/**
+ * The `md` node drawing a figure write as its fence draws in a reply: open
+ * and streaming while the content arrives. A mermaid figure waits for the
+ * fence to close, as Tern shows an open one as code, which the source is.
+ */
+function describeFigure(figure: ToolFigure | undefined): NativeNode | undefined {
+	if (!figure || (figure.lang === "mermaid" && !figure.closed)) return undefined;
+	const text = fencedCode(figure.lang, figure.source, { open: !figure.closed });
+	return { ...md(text, { role: "omp.tool.write.figure", stream: !figure.closed }), key: "figure" };
+}
+
+/**
+ * The written content as numbered code, highlighted by Tern from the file's path,
+ * keyed so it keeps its node as the figure above it comes and goes.
+ */
+function describeSource(rawPath: string, content: string): NativeNode {
+	return { ...code(content, { path: rawPath || undefined, numbers: true, wrap: true }), key: "source" };
 }
 
 function countLines(text: string): number {
@@ -343,6 +392,15 @@ function formatStreamingContent(
 	return `${bodyText}${spinner}${uiTheme.fg("dim", `… (streaming)`)}`;
 }
 
+function wrapWritePreviewRows(lines: string[], width: number): string[] {
+	return lines.flatMap(line => {
+		const gutter = /^(\x1b\[[0-9;]*m)( *\d+ )(\x1b\[[0-9;]*m)(.*)$/.exec(line);
+		if (!gutter) return line;
+		const prefix = `${gutter[1]}${gutter[2]}${gutter[3]}`;
+		return wrapPrefixedLine(prefix, " ".repeat(Bun.stringWidth(gutter[2]!)), gutter[4] ?? "", width);
+	});
+}
+
 function renderContentPreview(
 	content: string,
 	expanded: boolean,
@@ -379,6 +437,8 @@ function renderContentPreview(
 /** Render context for the write tool: resolves an `xd://`-mounted tool so its live renderer drives device dispatch previews. */
 export interface WriteRenderContext {
 	resolveXdevMounted?: (name: string) => XdevMountedRenderer | undefined;
+	/** Original result metadata used only for filesystem link targets. */
+	rawDetails?: unknown;
 }
 
 /** Process id and operation named by the text after `proc://`. */
@@ -495,6 +555,15 @@ function describeWriteUrl(
 	}
 }
 
+function writeResolvedPath(rawDetails: unknown, fallback: string | undefined): string | undefined {
+	return rawDetails !== null &&
+		typeof rawDetails === "object" &&
+		"resolvedPath" in rawDetails &&
+		typeof rawDetails.resolvedPath === "string"
+		? rawDetails.resolvedPath
+		: fallback;
+}
+
 /** Native write head shared by the call and result: `Write · path · 22 lines`, executable/diagnostics chips. */
 function writeToolHead(
 	rawPath: string,
@@ -508,7 +577,7 @@ function writeToolHead(
 	if (diagnostics) badges.push(diagnostics);
 	return {
 		title: "Write",
-		target: rawPath ? displayPath(rawPath) : undefined,
+		target: rawPath ? sanitizeText(displayPath(rawPath)) : undefined,
 		targetKind: "path",
 		href: fileHref(details?.resolvedPath),
 		meta: lineCount > 0 ? [`${lineCount} line${lineCount === 1 ? "" : "s"}`] : undefined,
@@ -566,7 +635,7 @@ export const writeToolRenderer = {
 			if (xdev.name === REPORT_ISSUE_DEVICE_NAME) return renderReportIssueDeviceCall(args.content, uiTheme);
 			return renderXdevCall(xdev.name, args.content, options, uiTheme, options.renderContext?.resolveXdevMounted);
 		}
-		const filePath = shortenPath(rawPath);
+		const filePath = sanitizeText(shortenPath(rawPath));
 		const lang = rawPath ? (getLanguageFromPath(rawPath) ?? "text") : "text";
 		const langIcon = uiTheme.fg("muted", uiTheme.getLangIcon(lang));
 		const styledPath = filePath ? uiTheme.fg("accent", filePath) : uiTheme.fg("toolOutput", "…");
@@ -592,40 +661,49 @@ export const writeToolRenderer = {
 		// back to the normalizing stringify.
 		const content = typeof args.content === "string" ? args.content : normalizeDisplayText(args.content);
 		const streamingCache = createRenderedStringCache();
-		return framedToolCard(uiTheme, () => {
-			const body = content
-				? formatStreamingContent(
-						content,
-						Boolean(options?.expanded),
-						lang,
-						uiTheme,
-						options?.spinnerFrame,
-						streamingCache,
-						// `options` is the ToolExecutionComponent's persistent
-						// render-state object — a stable identity across reveal ticks
-						// that keys the incremental preview state. `argsComplete`
-						// flushes the trailing line through the highlighter once.
-						options,
-						options?.argsComplete,
-					)
-				: "";
-			const bodyLines = body ? body.split("\n") : [];
-			while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
-			return {
-				header,
-				sections: bodyLines.length > 0 ? [{ content: bodyLines }] : [],
-				phase: "pending",
-				borderColor: "borderMuted",
-			};
-		});
+		return framedToolCard(
+			uiTheme,
+			({ contentWidth }) => {
+				const body = content
+					? formatStreamingContent(
+							content,
+							Boolean(options?.expanded),
+							lang,
+							uiTheme,
+							options?.spinnerFrame,
+							streamingCache,
+							// `options` is the ToolExecutionComponent's persistent
+							// render-state object — a stable identity across reveal ticks
+							// that keys the incremental preview state. `argsComplete`
+							// flushes the trailing line through the highlighter once.
+							options,
+							options?.argsComplete,
+						)
+					: "";
+				const bodyLines = body ? body.split("\n") : [];
+				while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
+				return {
+					header,
+					sections: bodyLines.length > 0 ? [{ content: wrapWritePreviewRows(bodyLines, contentWidth) }] : [],
+					phase: "pending",
+					borderColor: "borderMuted",
+				};
+			},
+			// The highlighted body in `streamingCache` does not depend on width, and re-highlighting every committed
+			// card on each resize replay costs seconds; only the incremental highlighter state goes.
+			{ onReleaseRenderCaches: () => delete options?.[writeStreamingPreviewStateKey] },
+		);
 	},
 
 	renderResult(
 		result: WriteResult,
-		options: RenderResultOptions & { renderContext?: WriteRenderContext },
+		options: RenderResultOptions & WriteStreamingPreviewStateCarrier & { renderContext?: WriteRenderContext },
 		uiTheme: Theme,
 		args?: WriteRenderArgs,
 	): Component {
+		// Write merges call and result, so this builder runs once per display rebuild after the result arrives and the
+		// call card never renders again: its incremental highlighter state is dead from here on.
+		delete options[writeStreamingPreviewStateKey];
 		const cardPath =
 			typeof args?.path === "string" ? args.path : typeof args?.file_path === "string" ? args.file_path : "";
 		const routed = writeUrlCard(cardPath, result.details);
@@ -641,14 +719,14 @@ export const writeToolRenderer = {
 		}
 		const rawPath =
 			typeof args?.file_path === "string" ? args.file_path : typeof args?.path === "string" ? args.path : "";
-		const filePath = shortenPath(rawPath);
+		const filePath = sanitizeText(shortenPath(rawPath));
 		const fileContent = normalizeDisplayText(args?.content);
 		const lang = rawPath ? getLanguageFromPath(rawPath) : undefined;
 		const langIcon = uiTheme.fg("muted", uiTheme.getLangIcon(lang));
 		// The header shows the cwd-relative path but links to the absolute path the
 		// write resolved to (args.path may be relative, which would yield a broken
 		// `file://` URI). Falls back to plain text when the result lacks a path.
-		const linkTarget = result.details?.resolvedPath;
+		const linkTarget = writeResolvedPath(options.renderContext?.rawDetails, result.details?.resolvedPath);
 		const styledPath = filePath ? uiTheme.fg("accent", filePath) : uiTheme.fg("toolOutput", "…");
 		const pathDisplay = filePath && linkTarget ? fileHyperlink(linkTarget, styledPath) : styledPath;
 
@@ -687,36 +765,41 @@ export const writeToolRenderer = {
 		const diagnostics = result.details?.diagnostics;
 
 		const previewCache = createRenderedStringCache();
-		return framedToolCard(uiTheme, () => {
-			const { expanded } = options;
-			let body = renderContentPreview(fileContent, expanded, lang, uiTheme, previewCache);
-			if (isPartial && progressText) {
-				const safeProgressText = truncateToWidth(
-					replaceTabs(progressText),
-					TRUNCATE_LENGTHS.LINE,
-					Ellipsis.Unicode,
-				);
-				body = `${uiTheme.fg("muted", safeProgressText)}${body ? `\n${body}` : ""}`;
-			}
-			if (!isPartial && diagnostics) {
-				const diagText = formatDiagnostics(diagnostics, expanded, uiTheme, fp =>
-					uiTheme.getLangIcon(getLanguageFromPath(fp)),
-				);
-				if (diagText.trim()) {
-					const diagLines = diagText.split("\n");
-					const firstNonEmpty = diagLines.findIndex(line => line.trim());
-					if (firstNonEmpty >= 0) body += `\n${diagLines.slice(firstNonEmpty).join("\n")}`;
+		return framedToolCard(
+			uiTheme,
+			({ contentWidth }) => {
+				const { expanded } = options;
+				let body = renderContentPreview(fileContent, expanded, lang, uiTheme, previewCache);
+				if (isPartial && progressText) {
+					const safeProgressText = truncateToWidth(
+						replaceTabs(progressText),
+						TRUNCATE_LENGTHS.LINE,
+						Ellipsis.Unicode,
+					);
+					body = `${uiTheme.fg("muted", safeProgressText)}${body ? `\n${body}` : ""}`;
 				}
-			}
-			const bodyLines = body.split("\n");
-			while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
-			return {
-				header,
-				sections: bodyLines.length > 0 ? [{ content: bodyLines }] : [],
-				phase: isPartial ? "partial" : "success",
-				borderColor: "borderMuted",
-			};
-		});
+				if (!isPartial && diagnostics) {
+					const diagText = formatDiagnostics(diagnostics, expanded, uiTheme, fp =>
+						uiTheme.getLangIcon(getLanguageFromPath(fp)),
+					);
+					if (diagText.trim()) {
+						const diagLines = diagText.split("\n");
+						const firstNonEmpty = diagLines.findIndex(line => line.trim());
+						if (firstNonEmpty >= 0) body += `\n${diagLines.slice(firstNonEmpty).join("\n")}`;
+					}
+				}
+				const bodyLines = body.split("\n");
+				while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
+				return {
+					header,
+					sections: bodyLines.length > 0 ? [{ content: wrapWritePreviewRows(bodyLines, contentWidth) }] : [],
+					phase: isPartial ? "partial" : "success",
+					borderColor: "borderMuted",
+				};
+			},
+			// No release hook: `previewCache` holds the width-independent highlighted preview, which resize replay
+			// would otherwise re-highlight for every committed card.
+		);
 	},
 	describeCall(
 		args: WriteRenderArgs,
@@ -739,17 +822,12 @@ export const writeToolRenderer = {
 			return describeXdevCall(xdev.name, args.content, options, options.renderContext?.resolveXdevMounted);
 		}
 		const content = normalizeDisplayText(args.content);
+		// A figure write draws as it arrives, over its streaming source.
+		const figure = writeFigure(args, undefined, options);
 		return {
 			tool: writeToolHead(rawPath, content),
-			body: content
-				? [
-						code(content, {
-							lang: rawPath ? getLanguageFromPath(rawPath) : undefined,
-							numbers: true,
-						}),
-					]
-				: [],
-			preview: NATIVE_WRITE_PREVIEW,
+			body: content ? compact([describeFigure(figure), describeSource(rawPath, content)]) : [],
+			preview: figure ? { lines: NATIVE_FIGURE_PREVIEW_LINES } : NATIVE_WRITE_PREVIEW,
 		};
 	},
 
@@ -771,27 +849,25 @@ export const writeToolRenderer = {
 		const diagnostics = isPartial ? undefined : result.details?.diagnostics;
 		const tool = writeToolHead(rawPath, fileContent, {
 			madeExecutable: !isPartial && result.details?.madeExecutable === true,
-			resolvedPath: result.details?.resolvedPath,
+			resolvedPath: writeResolvedPath(options.renderContext?.rawDetails, result.details?.resolvedPath),
 			diagnostics,
 		});
 		if (result.isError) return { tool, tone: "error", body: [errorText(resultText(result))] };
 		const progressText = resultText(result);
-		// A finished SVG write leads with the drawing; its source follows below the collapsed clamp.
-		const svg = !isPartial && fileContent.trim().length > 0 && rawPath.toLowerCase().endsWith(".svg");
+		// A figure write leads with the drawing, drawn as its fence in a reply;
+		// its source follows below the collapsed clamp.
+		const figure = writeFigure(args, result, options);
 		const body = compact<NativeChild>([
 			isPartial &&
 				progressText.length > 0 &&
 				node("text", { spans: [span(progressText, "muted")], truncate: "end" }),
-			svg && describeSvgPreview(result, fileContent, displayPath(rawPath)),
-			fileContent.length > 0 &&
-				code(fileContent, {
-					lang: rawPath ? getLanguageFromPath(rawPath) : undefined,
-					numbers: true,
-				}),
+			describeFigure(figure),
+			fileContent.length > 0 && describeSource(rawPath, fileContent),
 			diagnosticsSection(diagnostics),
 		]);
-		return { tool, body, preview: svg ? { lines: NATIVE_SVG_PREVIEW_LINES } : NATIVE_WRITE_PREVIEW };
+		return { tool, body, preview: figure ? { lines: NATIVE_FIGURE_PREVIEW_LINES } : NATIVE_WRITE_PREVIEW };
 	},
+	figure: writeFigure,
 	mergeCallAndResult: true,
 	// The collapsed pending preview follows the streaming edge with a tail
 	// window once the content outgrows it (`… (N earlier lines)` + last rows);

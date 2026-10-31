@@ -1534,6 +1534,7 @@ unsafe extern "C" fn finalizer<Data, T: Finalizer<RustType = Data> + AsRef<[Data
 ) {
   let data = unsafe { *Box::from_raw(finalize_hint as *mut T) };
   drop(data);
+  crate::bindgen_runtime::external_released();
 }
 
 unsafe extern "C" fn finalize_slice<Data>(
@@ -1547,6 +1548,7 @@ unsafe extern "C" fn finalize_slice<Data>(
     return;
   }
   unsafe { Vec::from_raw_parts(finalize_data as *mut Data, length, capacity) };
+  crate::bindgen_runtime::external_released();
 }
 
 impl_typed_array!(Int8Array, i8, TypedArrayType::Int8);

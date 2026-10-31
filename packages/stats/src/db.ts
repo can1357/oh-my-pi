@@ -1,16 +1,19 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import type { ServiceTier, Usage } from "@oh-my-pi/pi-ai";
+import { pricingPeerFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import {
 	calculateUncachedInputCost,
 	calculateUsageCost,
 	type GeneratedProvider,
 	getBundledModel,
+	hasRecurringTariff,
 } from "@oh-my-pi/pi-catalog/models";
 import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
-import { getConfigRootDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
+import { getConfigRootDir, getStatsDbPath, VERSION } from "@oh-my-pi/pi-utils";
+import { ChunkedInsert } from "./chunked-insert";
 import { classifyAgentType, type ParseSessionResult, type SessionParserState } from "./parser";
-import { ensureRollupSchema } from "./rollup";
+import { ensureRollupSchema, getDailyActivityFromRollup } from "./rollup";
 import type {
 	AgentType,
 	DailyActivityPoint,
@@ -109,6 +112,13 @@ const COST_REINGEST_BACKFILL_KEY = "messages_cost_reingest_v1";
 // above is already spent for them — without this one, every historical row
 // keeps `cost_unpriced = 0` and unknown scheduled spend reports as free.
 const COST_UNPRICED_BACKFILL_KEY = "messages_cost_unpriced_v1";
+// Rows predating the `cost_no_cache_input` column are NULL; ingest always
+// writes a value, so one pass settles the column for good.
+const NO_CACHE_INPUT_BACKFILL_KEY = "cost_no_cache_input_v1";
+// Zero-cost rows are repriced from the bundled catalog once per release (the
+// value stored is the version that ran it), since only a catalog update can
+// price a model it could not price before.
+const CATALOG_COST_BACKFILL_KEY = "catalog_cost_backfill";
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
@@ -126,11 +136,22 @@ export async function initDb(): Promise<Database> {
 	// https://github.com/can1357/oh-my-pi/issues/2421.
 	db.run("PRAGMA busy_timeout = 5000");
 	db.run("PRAGMA journal_mode = WAL");
+	// The database is a derived cache of the transcripts, so WAL's NORMAL sync
+	// (fsync only at checkpoints) is safe: a crash can drop the newest batches,
+	// which the next sync re-ingests from their unchanged cursors. Rarer, larger
+	// checkpoints cut the F_FULLFSYNC stalls macOS pays per checkpoint. The
+	// statement journal and temp b-tree every trigger-carrying insert opens stay
+	// in memory instead of a temp file, and a 64 MiB page cache (default 8 MiB)
+	// keeps more index pages of a multi-GB database resident between batches.
+	db.run("PRAGMA synchronous = NORMAL");
+	db.run("PRAGMA temp_store = MEMORY");
+	db.run("PRAGMA cache_size = -65536");
+	db.run("PRAGMA wal_autocheckpoint = 16384");
 
 	// Whether `messages` predates this init — drives the one-time agent_type
 	// backfill below, so it must be sampled before CREATE TABLE adds the table.
 	const messagesTableExisted =
-		db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages'").get() !== undefined;
+		db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages'").get() !== undefined;
 
 	// Create tables
 	db.run(`
@@ -165,11 +186,17 @@ export async function initDb(): Promise<Database> {
 			UNIQUE(session_file, entry_id)
 		);
 
-		CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
-		CREATE INDEX IF NOT EXISTS idx_messages_entry_timestamp ON messages(entry_id, timestamp);
+		-- Fork-guard identity lookups key on (entry_id, timestamp). Time-first
+		-- keeps one transcript's rows in a few neighbouring leaves; entry-first
+		-- scattered every insert, delete and lookup across the whole index. The
+		-- composite also serves every timestamp range scan.
+		DROP INDEX IF EXISTS idx_messages_timestamp;
+		DROP INDEX IF EXISTS idx_messages_entry_timestamp;
+		CREATE INDEX IF NOT EXISTS idx_messages_timestamp_entry ON messages(timestamp, entry_id);
 		CREATE INDEX IF NOT EXISTS idx_messages_model ON messages(model);
 		CREATE INDEX IF NOT EXISTS idx_messages_folder ON messages(folder);
-		CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_file);
+		-- UNIQUE(session_file, entry_id) already indexes session_file lookups.
+		DROP INDEX IF EXISTS idx_messages_session;
 		CREATE INDEX IF NOT EXISTS idx_messages_timestamp_model_provider ON messages(timestamp, model, provider);
 		CREATE INDEX IF NOT EXISTS idx_messages_timestamp_folder ON messages(timestamp, folder);
 		CREATE INDEX IF NOT EXISTS idx_messages_stop_reason_timestamp ON messages(stop_reason, timestamp);
@@ -202,8 +229,9 @@ export async function initDb(): Promise<Database> {
 			UNIQUE(session_file, entry_id)
 		);
 
-		CREATE INDEX IF NOT EXISTS idx_user_messages_timestamp ON user_messages(timestamp);
-		CREATE INDEX IF NOT EXISTS idx_user_messages_entry_timestamp ON user_messages(entry_id, timestamp);
+		DROP INDEX IF EXISTS idx_user_messages_timestamp;
+		DROP INDEX IF EXISTS idx_user_messages_entry_timestamp;
+		CREATE INDEX IF NOT EXISTS idx_user_messages_timestamp_entry ON user_messages(timestamp, entry_id);
 		CREATE INDEX IF NOT EXISTS idx_user_messages_timestamp_model ON user_messages(timestamp, model, provider);
 
 		-- Judge verdicts keyed by prose hash: identical messages share one verdict,
@@ -235,8 +263,9 @@ export async function initDb(): Promise<Database> {
 			UNIQUE(session_file, tool_call_id)
 		);
 
-		CREATE INDEX IF NOT EXISTS idx_tool_calls_timestamp ON tool_calls(timestamp);
-		CREATE INDEX IF NOT EXISTS idx_tool_calls_entry_timestamp ON tool_calls(entry_id, timestamp);
+		DROP INDEX IF EXISTS idx_tool_calls_timestamp;
+		DROP INDEX IF EXISTS idx_tool_calls_entry_timestamp;
+		CREATE INDEX IF NOT EXISTS idx_tool_calls_timestamp_entry ON tool_calls(timestamp, entry_id);
 		CREATE INDEX IF NOT EXISTS idx_tool_calls_tool_timestamp ON tool_calls(tool_name, timestamp);
 
 		CREATE TABLE IF NOT EXISTS meta (
@@ -245,11 +274,11 @@ export async function initDb(): Promise<Database> {
 		);
 	`);
 
-	const offsetColumns = db.prepare("PRAGMA table_info(file_offsets)").all() as { name: string }[];
+	const offsetColumns = db.query("PRAGMA table_info(file_offsets)").all() as { name: string }[];
 	if (!offsetColumns.some(column => column.name === "parser_state")) {
 		db.run("ALTER TABLE file_offsets ADD COLUMN parser_state TEXT");
 	}
-	const messageColumns = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
+	const messageColumns = db.query("PRAGMA table_info(messages)").all() as { name: string }[];
 	if (!messageColumns.some(column => column.name === "premium_requests")) {
 		db.run("ALTER TABLE messages ADD COLUMN premium_requests REAL NOT NULL DEFAULT 0");
 	}
@@ -266,7 +295,6 @@ export async function initDb(): Promise<Database> {
 	if (!messageColumns.some(column => column.name === "cost_unpriced")) {
 		db.run("ALTER TABLE messages ADD COLUMN cost_unpriced INTEGER NOT NULL DEFAULT 0");
 	}
-	db.run("UPDATE messages SET premium_requests = 0 WHERE premium_requests IS NULL");
 	// Token-usage-by-agent: each message is classified main / subagent / advisor
 	// from its transcript path. A brand-new table gets the column from CREATE
 	// TABLE and the parser labels rows at insert time; a pre-existing table gets
@@ -282,7 +310,7 @@ export async function initDb(): Promise<Database> {
 	// sentinel write (process killed in between) still reclassifies on the next
 	// init instead of silently leaving every row as the 'main' default. A
 	// brand-new empty table has nothing to reclassify, so it settles COMPLETE.
-	db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)").run(
+	db.query("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)").run(
 		AGENT_TYPE_BACKFILL_KEY,
 		messagesTableExisted ? BACKFILL_PENDING : BACKFILL_COMPLETE,
 	);
@@ -307,7 +335,7 @@ export async function initDb(): Promise<Database> {
 	//   v7 -> v8: `no-op` compounds no longer count as negation; recovered
 	//             measured false negatives: `:(` emoticons -> anguish,
 	//             `why (would|did) you` -> blame, `makes no sense` -> negation.
-	const userMessageColumns = db.prepare("PRAGMA table_info(user_messages)").all() as {
+	const userMessageColumns = db.query("PRAGMA table_info(user_messages)").all() as {
 		name: string;
 	}[];
 	const hasStaleColumn =
@@ -340,7 +368,7 @@ export async function initDb(): Promise<Database> {
 				prose_hash TEXT NOT NULL DEFAULT '',
 				UNIQUE(session_file, entry_id)
 			);
-			CREATE INDEX IF NOT EXISTS idx_user_messages_timestamp ON user_messages(timestamp);
+			CREATE INDEX IF NOT EXISTS idx_user_messages_timestamp_entry ON user_messages(timestamp, entry_id);
 			CREATE INDEX IF NOT EXISTS idx_user_messages_timestamp_model ON user_messages(timestamp, model, provider);
 		`);
 	} else if (!userMessageColumns.some(column => column.name === "prose")) {
@@ -379,9 +407,16 @@ function getCatalogCost(provider: string, modelId: string): ModelCost | null {
 		return primaryCost;
 	}
 
-	const fallbackProvider = provider === "openai-codex" ? "openai" : provider === "xai-oauth" ? "xai" : null;
-	if (fallbackProvider) {
-		const fallbackCost = getBundledModelCost(fallbackProvider, modelId);
+	// openai-codex has no catalog pricing-peer row (its bundled rows carry
+	// their own prices); keep its first-party fallback here.
+	const peer = pricingPeerFor(provider, modelId);
+	const fallbacks = peer
+		? peer.peers.map(peerProvider => [peerProvider, peer.peerId] as const)
+		: provider === "openai-codex"
+			? [["openai", modelId] as const]
+			: [];
+	for (const [fallbackProvider, fallbackId] of fallbacks) {
+		const fallbackCost = getBundledModelCost(fallbackProvider, fallbackId);
 		if (fallbackCost && hasBillableCost(fallbackCost)) {
 			return fallbackCost;
 		}
@@ -457,9 +492,11 @@ function resolveStoredCost(stats: MessageStatsInput): ResolvedCost {
 	const storedCost = raw ? normalizeUsageCost(raw) : undefined;
 	const catalogCost = getCatalogCost(stats.provider, stats.model);
 
-	// Scheduled prices are frozen per request, including explicitly free usage.
-	// Preserve legacy zero-cost subscription correction for unscheduled models.
-	if (storedCost && Number.isFinite(storedCost.total) && (storedCost.total !== 0 || catalogCost?.timeBased)) {
+	// Recurring-tariff prices are frozen per request, including explicitly free
+	// usage. Preserve legacy zero-cost subscription correction for other models;
+	// dated rate cards reprice it at the card for the request's timestamp.
+	const recurring = catalogCost?.timeBased !== undefined && hasRecurringTariff(catalogCost.timeBased);
+	if (storedCost && Number.isFinite(storedCost.total) && (storedCost.total !== 0 || recurring)) {
 		return { cost: storedCost, unpriced: false };
 	}
 
@@ -500,17 +537,20 @@ function calculateNoCacheInputCost(
 }
 
 function backfillMissingCatalogCosts(database: Database): void {
+	const ran = database.query("SELECT value FROM meta WHERE key = ?").get(CATALOG_COST_BACKFILL_KEY) as
+		| { value: string }
+		| undefined;
+	if (ran?.value === VERSION) return;
+	const markRan = database.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
 	const rows = database
-		.prepare(`
+		.query(`
 			SELECT id, provider, model, timestamp, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
 			FROM messages
 			WHERE cost_total = 0 AND total_tokens > 0
 		`)
 		.all() as CostBackfillRow[];
 
-	if (rows.length === 0) return;
-
-	const update = database.prepare(`
+	const update = database.query(`
 		UPDATE messages
 		SET cost_input = ?, cost_output = ?, cost_cache_read = ?, cost_cache_write = ?, cost_total = ?
 		WHERE id = ?
@@ -519,12 +559,14 @@ function backfillMissingCatalogCosts(database: Database): void {
 	const applyBackfill = database.transaction(() => {
 		for (const row of rows) {
 			// A stored zero cannot distinguish missing historical prices from an
-			// explicitly free request. Never reprice recorded scheduled usage: a
-			// zero ingested for a scheduled card is permanent, because this
+			// explicitly free request. Never reprice recorded recurring-tariff
+			// usage: a zero ingested for such a card is permanent, because this
 			// backfill skips those rows. Re-parsing the session file is the only
 			// repair, and it works only once the entry's absent `cost` reaches
 			// `resolveStoredCost` as absence rather than as a synthesized zero.
-			if (getCatalogCost(row.provider, row.model)?.timeBased) continue;
+			// Dated rate cards need the row's timestamp to pick their card.
+			const schedule = getCatalogCost(row.provider, row.model)?.timeBased;
+			if (schedule && (hasRecurringTariff(schedule) || !hasRequestTimestamp(row.timestamp))) continue;
 			const cost = calculateCatalogCost(
 				row.provider,
 				row.model,
@@ -541,22 +583,27 @@ function backfillMissingCatalogCosts(database: Database): void {
 
 			update.run(cost.input, cost.output, cost.cacheRead, cost.cacheWrite, cost.total, row.id);
 		}
+		markRan.run(CATALOG_COST_BACKFILL_KEY, VERSION);
 	});
 
 	applyBackfill();
 }
 
 function backfillNoCacheInputCosts(database: Database): void {
+	const row = database.query("SELECT value FROM meta WHERE key = ?").get(NO_CACHE_INPUT_BACKFILL_KEY) as
+		| { value: string }
+		| undefined;
+	if (row?.value === BACKFILL_COMPLETE) return;
+	const markComplete = database.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
 	const rows = database
-		.prepare(`
+		.query(`
 			SELECT id, provider, model, timestamp, input_tokens, cache_read_tokens, cache_write_tokens
 			FROM messages
 			WHERE cost_no_cache_input IS NULL
 		`)
 		.all() as NoCacheInputCostBackfillRow[];
-	if (rows.length === 0) return;
 
-	const update = database.prepare("UPDATE messages SET cost_no_cache_input = ? WHERE id = ?");
+	const update = database.query("UPDATE messages SET cost_no_cache_input = ? WHERE id = ?");
 	const applyBackfill = database.transaction(() => {
 		for (const row of rows) {
 			const cost = calculateNoCacheInputCost(
@@ -572,6 +619,7 @@ function backfillNoCacheInputCosts(database: Database): void {
 			);
 			update.run(cost ?? 0, row.id);
 		}
+		markComplete.run(NO_CACHE_INPUT_BACKFILL_KEY, BACKFILL_COMPLETE);
 	});
 	applyBackfill();
 }
@@ -646,6 +694,17 @@ export function setFileOffset(
 	stmt.run(sessionFile, offset, lastModified, parserState ? JSON.stringify(parserState) : null);
 }
 
+/**
+ * Run `fn` atomically: inline when the caller already holds a transaction,
+ * otherwise in a fresh one. Nesting `db.transaction` would open a savepoint,
+ * which copies every page the batch touches into the statement journal; each
+ * statement end then rewinds that ever-growing journal, so a long batch
+ * degrades quadratically.
+ */
+function atomically<T>(database: Database, fn: () => T): T {
+	return database.inTransaction ? fn() : database.transaction(fn)();
+}
+
 /** Parsed transcript queued by the sync loop for an atomic database batch. */
 export interface ParsedSession {
 	sessionFile: string;
@@ -662,18 +721,24 @@ function* parsedRows<T>(
 	for (const result of results) yield* select(result);
 }
 
-/** Commit distinct transcripts' rows, reconciliation state, and cursors together; failure rolls back the batch. */
+/**
+ * Commit distinct transcripts' rows, reconciliation state, and cursors together; failure rolls back the batch.
+ * `changes` counts stored rows inserted, updated or deleted (cursor bookkeeping excluded), so callers can
+ * tell a batch that changed nothing.
+ */
 export function applySessionParseResults(sessions: ParsedSession[]): {
 	processed: number;
 	files: number;
 	reconcile: boolean;
+	changes: number;
 } {
-	if (!db) return { processed: 0, files: 0, reconcile: false };
+	if (!db) return { processed: 0, files: 0, reconcile: false, changes: 0 };
 	const database = db;
 	return database.transaction(() => {
 		let processed = 0;
 		let files = 0;
 		let reconcile = false;
+		let changes = 0;
 		const writes: ParseSessionResult[] = [];
 		for (const { sessionFile, result, rebuild, replay } of sessions) {
 			const parserState = result.parserState;
@@ -758,27 +823,34 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
 					if (absentMessages.size > 0 || absentUsers.size > 0 || absentTools.size > 0) {
 						reconcile = true;
 						for (const id of absentMessages) {
-							database
+							changes += database
 								.query("DELETE FROM messages WHERE session_file = ? AND entry_id = ?")
-								.run(sessionFile, id);
+								.run(sessionFile, id).changes;
 						}
 						for (const id of absentUsers) {
-							database
+							changes += database
 								.query("DELETE FROM user_messages WHERE session_file = ? AND entry_id = ?")
-								.run(sessionFile, id);
+								.run(sessionFile, id).changes;
 						}
 						for (const id of absentTools) {
-							database
+							changes += database
 								.query("DELETE FROM tool_calls WHERE session_file = ? AND tool_call_id = ?")
-								.run(sessionFile, id);
+								.run(sessionFile, id).changes;
 						}
 					}
 				}
 				if (replace) {
-					if (messages.length > 0) database.query("DELETE FROM messages WHERE session_file = ?").run(sessionFile);
-					if (users.length > 0)
-						database.query("DELETE FROM user_messages WHERE session_file = ?").run(sessionFile);
-					if (tools.length > 0) database.query("DELETE FROM tool_calls WHERE session_file = ?").run(sessionFile);
+					if (messages.length > 0) {
+						changes += database.query("DELETE FROM messages WHERE session_file = ?").run(sessionFile).changes;
+					}
+					if (users.length > 0) {
+						changes += database
+							.query("DELETE FROM user_messages WHERE session_file = ?")
+							.run(sessionFile).changes;
+					}
+					if (tools.length > 0) {
+						changes += database.query("DELETE FROM tool_calls WHERE session_file = ?").run(sessionFile).changes;
+					}
 				}
 			}
 			writes.push(rows);
@@ -787,11 +859,12 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
 			if (count > 0) files++;
 		}
 		// Remove replaced rows before choosing new fork owners, then write each table once per batch.
-		insertMessageStats(parsedRows(writes, result => result.stats));
-		insertUserMessageStats(parsedRows(writes, result => result.userStats));
-		updateUserMessageLinks(parsedRows(writes, result => result.userLinks));
-		insertToolCalls(parsedRows(writes, result => result.toolCalls));
-		updateToolResults(parsedRows(writes, result => result.toolResults));
+		changes +=
+			insertMessageStats(parsedRows(writes, result => result.stats)) +
+			insertUserMessageStats(parsedRows(writes, result => result.userStats)) +
+			updateUserMessageLinks(parsedRows(writes, result => result.userLinks)) +
+			insertToolCalls(parsedRows(writes, result => result.toolCalls)) +
+			updateToolResults(parsedRows(writes, result => result.toolResults));
 		for (const { sessionFile, result } of sessions) {
 			if (result.parserState) {
 				setFileOffset(sessionFile, result.newOffset, result.parserState.mtimeMs, result.parserState);
@@ -800,16 +873,26 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
 		if (reconcile) {
 			database.query("INSERT OR REPLACE INTO meta (key, value) VALUES ('session_reconciliation', 'pending')").run();
 		}
-		return { processed, files, reconcile };
+		return { processed, files, reconcile, changes };
 	})();
 }
 
+/**
+ * SQLite `PRAGMA data_version` of the open connection, or null before
+ * {@link initDb}. It moves only when another connection (another omp process)
+ * commits, so a caller can detect foreign writes without scanning.
+ */
+export function getDataVersion(): number | null {
+	if (!db) return null;
+	return db.query<{ data_version: number }, []>("PRAGMA data_version").get()?.data_version ?? null;
+}
+
 export function prepareSessionSync(): boolean {
-	return Boolean(db?.prepare("SELECT 1 FROM meta WHERE key = 'session_reconciliation'").get());
+	return Boolean(db?.query("SELECT 1 FROM meta WHERE key = 'session_reconciliation'").get());
 }
 
 export function completeSessionSync(reconcile: boolean): void {
-	if (!reconcile) db?.prepare("DELETE FROM meta WHERE key = 'session_reconciliation'").run();
+	if (!reconcile) db?.query("DELETE FROM meta WHERE key = 'session_reconciliation'").run();
 }
 
 /**
@@ -821,7 +904,7 @@ export function completeSessionSync(reconcile: boolean): void {
  * `provider`, token counts, and `responseId`. The `UNIQUE(session_file,
  * entry_id)` constraint alone keys each row by file, so without the guard
  * below the same provider request would land twice and inflate every
- * aggregate. The `WHERE NOT EXISTS` clause skips inserts whose
+ * aggregate. The {@link ChunkedInsert} fork guard skips inserts whose
  * `(entry_id, timestamp)` already exists under a different `session_file` —
  * first-write-wins across the lineage. Same-file re-syncs still hit the
  * `ON CONFLICT(session_file, entry_id)` upsert below, which re-derives the
@@ -830,21 +913,39 @@ export function completeSessionSync(reconcile: boolean): void {
  */
 export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 	if (!db) return 0;
-
-	const stmt = db.query(`
-		INSERT INTO messages (
-			session_file, entry_id, folder, model, provider, api, timestamp,
-			duration, ttft, stop_reason, error_message,
-			input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, premium_requests,
-			cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total, cost_no_cache_input,
-			cost_unpriced, agent_type, service_tier
-		)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-		WHERE NOT EXISTS (
-			SELECT 1 FROM messages
-			WHERE entry_id = ? AND timestamp = ? AND session_file <> ?
-		)
-		ON CONFLICT(session_file, entry_id) DO UPDATE SET
+	const writer = new ChunkedInsert(db, {
+		verb: "INSERT",
+		table: "messages",
+		columns: [
+			"session_file",
+			"entry_id",
+			"folder",
+			"model",
+			"provider",
+			"api",
+			"timestamp",
+			"duration",
+			"ttft",
+			"stop_reason",
+			"error_message",
+			"input_tokens",
+			"output_tokens",
+			"cache_read_tokens",
+			"cache_write_tokens",
+			"total_tokens",
+			"premium_requests",
+			"cost_input",
+			"cost_output",
+			"cost_cache_read",
+			"cost_cache_write",
+			"cost_total",
+			"cost_no_cache_input",
+			"cost_unpriced",
+			"agent_type",
+			"service_tier",
+		],
+		identity: ["entry_id", "timestamp"],
+		upsert: `ON CONFLICT(session_file, entry_id) DO UPDATE SET
 			premium_requests = MAX(messages.premium_requests, excluded.premium_requests),
 			cost_input = excluded.cost_input,
 			cost_output = excluded.cost_output,
@@ -853,53 +954,47 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 			cost_total = excluded.cost_total,
 			cost_no_cache_input = excluded.cost_no_cache_input,
 			cost_unpriced = excluded.cost_unpriced,
-			service_tier = excluded.service_tier
-	`);
-
-	let inserted = 0;
-	const insert = db.transaction(() => {
+			service_tier = excluded.service_tier`,
+	});
+	return atomically(db, () => {
 		for (const s of stats) {
 			const { cost, unpriced } = resolveStoredCost(s);
 			const noCacheInputCost = calculateNoCacheInputCost(s.provider, s.model, s.usage, s.timestamp) ?? 0;
-			const result = stmt.run(
+			writer.add(
 				s.sessionFile,
-				s.entryId,
-				s.folder,
-				s.model,
-				s.provider,
-				s.api,
-				s.timestamp,
-				s.duration,
-				s.ttft,
-				s.stopReason,
-				s.errorMessage,
-				s.usage.input,
-				s.usage.output,
-				s.usage.cacheRead,
-				s.usage.cacheWrite,
-				s.usage.totalTokens,
-				s.usage.premiumRequests ?? 0,
-				cost.input,
-				cost.output,
-				cost.cacheRead,
-				cost.cacheWrite,
-				cost.total,
-				noCacheInputCost,
-				unpriced ? 1 : 0,
-				s.agentType,
-				s.serviceTier ?? null,
-				// `WHERE NOT EXISTS` binds: skip when a different session_file
-				// already holds this (entry_id, timestamp).
-				s.entryId,
-				s.timestamp,
-				s.sessionFile,
+				[s.entryId, s.timestamp],
+				[
+					s.sessionFile,
+					s.entryId,
+					s.folder,
+					s.model,
+					s.provider,
+					s.api,
+					s.timestamp,
+					s.duration,
+					s.ttft,
+					s.stopReason,
+					s.errorMessage,
+					s.usage.input,
+					s.usage.output,
+					s.usage.cacheRead,
+					s.usage.cacheWrite,
+					s.usage.totalTokens,
+					s.usage.premiumRequests ?? 0,
+					cost.input,
+					cost.output,
+					cost.cacheRead,
+					cost.cacheWrite,
+					cost.total,
+					noCacheInputCost,
+					unpriced ? 1 : 0,
+					s.agentType,
+					s.serviceTier ?? null,
+				],
 			);
-			if (result.changes > 0) inserted++;
 		}
+		return writer.finish();
 	});
-
-	insert();
-	return inserted;
 }
 
 /**
@@ -907,7 +1002,7 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
  */
 export function getMessageCount(): number {
 	if (!db) return 0;
-	const stmt = db.prepare("SELECT COUNT(*) as count FROM messages");
+	const stmt = db.query("SELECT COUNT(*) as count FROM messages");
 	const row = stmt.get() as { count: number };
 	return row.count;
 }
@@ -959,7 +1054,7 @@ function rowToMessageStats(row: any): MessageStats {
 
 export function getRecentRequests(limit = 100): MessageStats[] {
 	if (!db) return [];
-	const stmt = db.prepare(`
+	const stmt = db.query(`
 		SELECT * FROM messages 
 		ORDER BY timestamp DESC 
 		LIMIT ?
@@ -970,7 +1065,7 @@ export function getRecentRequests(limit = 100): MessageStats[] {
 export function getRecentErrors(limit = 100, cutoff?: number | null): MessageStats[] {
 	if (!db) return [];
 	const hasCutoff = cutoff !== undefined && cutoff !== null;
-	const stmt = db.prepare(`
+	const stmt = db.query(`
 		SELECT * FROM messages
 		WHERE stop_reason = 'error'
 		${hasCutoff ? "AND timestamp >= ?" : ""}
@@ -983,7 +1078,7 @@ export function getRecentErrors(limit = 100, cutoff?: number | null): MessageSta
 
 export function getMessageById(id: number): MessageStats | null {
 	if (!db) return null;
-	const stmt = db.prepare("SELECT * FROM messages WHERE id = ?");
+	const stmt = db.query("SELECT * FROM messages WHERE id = ?");
 	const row = stmt.get(id);
 	return row ? rowToMessageStats(row) : null;
 }
@@ -992,12 +1087,15 @@ export function getMessageById(id: number): MessageStats | null {
  * Self-initializing (opens the stats DB on first use) so the coding-agent TUI
  * can query without the dashboard server's init flow. Days use the machine's
  * timezone — this is a localhost tool, same rationale as
- * {@link getProviderHourlyBurn}.
+ * {@link getProviderHourlyBurn}. Reads the hourly rollup, falling back to the
+ * raw rows while its rebuild backlog is too large for exact reads.
  */
 export async function getDailyActivity(days = 371): Promise<DailyActivityPoint[]> {
 	const database = await initDb();
 	const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-	const stmt = database.prepare(`
+	const rolled = getDailyActivityFromRollup(cutoff);
+	if (rolled) return rolled;
+	const stmt = database.query(`
 		SELECT
 			date(timestamp / 1000, 'unixepoch', 'localtime') as day,
 			SUM(cost_total) as cost,
@@ -1065,7 +1163,7 @@ export async function getDailyActivity(days = 371): Promise<DailyActivityPoint[]
  * Existing `messages` rows are unaffected - `INSERT OR IGNORE` keeps them.
  */
 function backfillUserMessages(database: Database): void {
-	const row = database.prepare("SELECT value FROM meta WHERE key = ?").get(USER_MESSAGES_BACKFILL_KEY) as
+	const row = database.query("SELECT value FROM meta WHERE key = ?").get(USER_MESSAGES_BACKFILL_KEY) as
 		| { value: string }
 		| undefined;
 	if (!shouldResetBackfill(row?.value)) return;
@@ -1073,7 +1171,7 @@ function backfillUserMessages(database: Database): void {
 	database.run("DELETE FROM user_messages");
 	database.run("DELETE FROM file_offsets");
 	database
-		.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+		.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
 		.run(USER_MESSAGES_BACKFILL_KEY, BACKFILL_PENDING);
 }
 
@@ -1086,7 +1184,7 @@ function backfillUserMessages(database: Database): void {
  * written here prevents re-wiping on subsequent inits.
  */
 function backfillToolCalls(database: Database): void {
-	const row = database.prepare("SELECT value FROM meta WHERE key = ?").get(TOOL_CALLS_BACKFILL_KEY) as
+	const row = database.query("SELECT value FROM meta WHERE key = ?").get(TOOL_CALLS_BACKFILL_KEY) as
 		| { value: string }
 		| undefined;
 	if (!shouldResetBackfill(row?.value)) return;
@@ -1094,7 +1192,7 @@ function backfillToolCalls(database: Database): void {
 	database.run("DELETE FROM tool_calls");
 	database.run("DELETE FROM file_offsets");
 	database
-		.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+		.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
 		.run(TOOL_CALLS_BACKFILL_KEY, BACKFILL_PENDING);
 }
 
@@ -1110,14 +1208,14 @@ function backfillToolCalls(database: Database): void {
  * offset reset is safe. Same sentinel protocol as {@link backfillToolCalls}.
  */
 function backfillReingestCosts(database: Database): void {
-	const row = database.prepare("SELECT value FROM meta WHERE key = ?").get(COST_REINGEST_BACKFILL_KEY) as
+	const row = database.query("SELECT value FROM meta WHERE key = ?").get(COST_REINGEST_BACKFILL_KEY) as
 		| { value: string }
 		| undefined;
 	if (!shouldResetBackfill(row?.value)) return;
 
 	database.run("DELETE FROM file_offsets");
 	database
-		.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+		.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
 		.run(COST_REINGEST_BACKFILL_KEY, BACKFILL_PENDING);
 }
 
@@ -1131,14 +1229,14 @@ function backfillReingestCosts(database: Database): void {
  * absence as absence. Same sentinel protocol as {@link backfillReingestCosts}.
  */
 function backfillUnpricedCosts(database: Database): void {
-	const row = database.prepare("SELECT value FROM meta WHERE key = ?").get(COST_UNPRICED_BACKFILL_KEY) as
+	const row = database.query("SELECT value FROM meta WHERE key = ?").get(COST_UNPRICED_BACKFILL_KEY) as
 		| { value: string }
 		| undefined;
 	if (!shouldResetBackfill(row?.value)) return;
 
 	database.run("DELETE FROM file_offsets");
 	database
-		.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+		.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
 		.run(COST_UNPRICED_BACKFILL_KEY, BACKFILL_PENDING);
 }
 
@@ -1152,16 +1250,16 @@ function backfillUnpricedCosts(database: Database): void {
  * interrupted run rolls back and retries on the next init.
  */
 function backfillAgentType(database: Database): void {
-	const row = database.prepare("SELECT value FROM meta WHERE key = ?").get(AGENT_TYPE_BACKFILL_KEY) as
+	const row = database.query("SELECT value FROM meta WHERE key = ?").get(AGENT_TYPE_BACKFILL_KEY) as
 		| { value: string }
 		| undefined;
 	if (row?.value !== BACKFILL_PENDING) return;
 
-	const sessionFiles = database.prepare("SELECT DISTINCT session_file FROM messages").all() as {
+	const sessionFiles = database.query("SELECT DISTINCT session_file FROM messages").all() as {
 		session_file: string;
 	}[];
-	const update = database.prepare("UPDATE messages SET agent_type = ? WHERE session_file = ?");
-	const markComplete = database.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
+	const update = database.query("UPDATE messages SET agent_type = ? WHERE session_file = ?");
+	const markComplete = database.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
 	const apply = database.transaction(() => {
 		for (const { session_file } of sessionFiles) {
 			const agentType = classifyAgentType(session_file);
@@ -1189,12 +1287,12 @@ function backfillAgentType(database: Database): void {
  * retries on the next init.
  */
 function backfillForkDuplicates(database: Database): void {
-	const row = database.prepare("SELECT value FROM meta WHERE key = ?").get(FORK_DEDUPE_KEY) as
+	const row = database.query("SELECT value FROM meta WHERE key = ?").get(FORK_DEDUPE_KEY) as
 		| { value: string }
 		| undefined;
 	if (row?.value === BACKFILL_COMPLETE) return;
 
-	const markComplete = database.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
+	const markComplete = database.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
 	const apply = database.transaction(() => {
 		database.run(`
 			DELETE FROM messages
@@ -1222,14 +1320,14 @@ function backfillForkDuplicates(database: Database): void {
  * sentinel row in `meta`.
  */
 function repairUserMessageLinks(database: Database): void {
-	const row = database.prepare("SELECT value FROM meta WHERE key = ?").get(USER_MESSAGE_LINKS_REPAIR_KEY) as
+	const row = database.query("SELECT value FROM meta WHERE key = ?").get(USER_MESSAGE_LINKS_REPAIR_KEY) as
 		| { value: string }
 		| undefined;
 	if (!shouldResetBackfill(row?.value)) return;
 
 	database.run("DELETE FROM file_offsets");
 	database
-		.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+		.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
 		.run(USER_MESSAGE_LINKS_REPAIR_KEY, BACKFILL_PENDING);
 }
 
@@ -1244,14 +1342,14 @@ function repairUserMessageLinks(database: Database): void {
  * column. Idempotent: gated by a sentinel row in `meta`.
  */
 function backfillPriorityPremiumRequests(database: Database): void {
-	const row = database.prepare("SELECT value FROM meta WHERE key = ?").get(PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY) as
+	const row = database.query("SELECT value FROM meta WHERE key = ?").get(PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY) as
 		| { value: string }
 		| undefined;
 	if (!shouldResetBackfill(row?.value)) return;
 
 	database.run("DELETE FROM file_offsets");
 	database
-		.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+		.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
 		.run(PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY, BACKFILL_PENDING);
 }
 
@@ -1260,7 +1358,7 @@ function backfillPriorityPremiumRequests(database: Database): void {
  */
 export function markSessionBackfillsComplete(): void {
 	if (!db) return;
-	const markComplete = db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
+	const markComplete = db.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
 	const apply = db.transaction(() => {
 		for (const key of [
 			USER_MESSAGES_BACKFILL_KEY,
@@ -1278,57 +1376,62 @@ export function markSessionBackfillsComplete(): void {
 
 /**
  * Insert user-message stats. Idempotent via UNIQUE(session_file, entry_id).
- * The `WHERE NOT EXISTS` clause matches {@link insertMessageStats}: forks
- * copy user entries verbatim into the child JSONL, so the same
- * `(entry_id, timestamp)` must not land twice across different session files.
+ * The fork guard matches {@link insertMessageStats}: forks copy user entries
+ * verbatim into the child JSONL, so the same `(entry_id, timestamp)` must not
+ * land twice across different session files.
  */
 export function insertUserMessageStats(stats: Iterable<UserMessageStats>): number {
 	if (!db) return 0;
-
-	const stmt = db.query(`
-		INSERT OR IGNORE INTO user_messages (
-			session_file, entry_id, folder, timestamp, model, provider,
-			chars, words, yelling, profanity, anguish,
-			negation, repetition, blame, prose, prose_hash
-		)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-		WHERE NOT EXISTS (
-			SELECT 1 FROM user_messages
-			WHERE entry_id = ? AND timestamp = ? AND session_file <> ?
-		)
-	`);
-
-	let inserted = 0;
-	const insert = db.transaction(() => {
-		for (const s of stats) {
-			const result = stmt.run(
-				s.sessionFile,
-				s.entryId,
-				s.folder,
-				s.timestamp,
-				s.model,
-				s.provider,
-				s.chars,
-				s.words,
-				s.yelling,
-				s.profanity,
-				s.anguish,
-				s.negation,
-				s.repetition,
-				s.blame,
-				s.prose,
-				s.proseHash,
-				// `WHERE NOT EXISTS` binds: skip when a different session_file
-				// already holds this (entry_id, timestamp).
-				s.entryId,
-				s.timestamp,
-				s.sessionFile,
-			);
-			if (result.changes > 0) inserted++;
-		}
+	const writer = new ChunkedInsert(db, {
+		verb: "INSERT OR IGNORE",
+		table: "user_messages",
+		columns: [
+			"session_file",
+			"entry_id",
+			"folder",
+			"timestamp",
+			"model",
+			"provider",
+			"chars",
+			"words",
+			"yelling",
+			"profanity",
+			"anguish",
+			"negation",
+			"repetition",
+			"blame",
+			"prose",
+			"prose_hash",
+		],
+		identity: ["entry_id", "timestamp"],
 	});
-	insert();
-	return inserted;
+	return atomically(db, () => {
+		for (const s of stats) {
+			writer.add(
+				s.sessionFile,
+				[s.entryId, s.timestamp],
+				[
+					s.sessionFile,
+					s.entryId,
+					s.folder,
+					s.timestamp,
+					s.model,
+					s.provider,
+					s.chars,
+					s.words,
+					s.yelling,
+					s.profanity,
+					s.anguish,
+					s.negation,
+					s.repetition,
+					s.blame,
+					s.prose,
+					s.proseHash,
+				],
+			);
+		}
+		return writer.finish();
+	});
 }
 
 /**
@@ -1349,13 +1452,12 @@ export function updateUserMessageLinks(links: Iterable<UserMessageLink>): number
 	`);
 
 	let updated = 0;
-	const apply = db.transaction(() => {
+	atomically(db, () => {
 		for (const link of links) {
 			const result = stmt.run(link.model, link.provider, link.sessionFile, link.entryId);
 			if (result.changes > 0) updated++;
 		}
 	});
-	apply();
 	return updated;
 }
 
@@ -1437,7 +1539,7 @@ function toFrustrationCounts(row: FrustrationCountsRow | undefined): Frustration
 export function getFrustrationOverall(cutoff?: number | null): FrustrationCounts {
 	if (!db) return toFrustrationCounts(undefined);
 	const hasCutoff = hasRangeCutoff(cutoff);
-	const stmt = db.prepare(`
+	const stmt = db.query(`
 		SELECT ${FRUSTRATION_COUNTS_SQL}
 		FROM user_messages u
 		LEFT JOIN frustration_verdicts v ON v.prose_hash = u.prose_hash
@@ -1454,7 +1556,7 @@ export function getFrustrationOverall(cutoff?: number | null): FrustrationCounts
 export function getFrustrationByModel(cutoff?: number | null): FrustrationModelRow[] {
 	if (!db) return [];
 	const hasCutoff = hasRangeCutoff(cutoff);
-	const stmt = db.prepare(`
+	const stmt = db.query(`
 		SELECT u.model AS model, u.provider AS provider, MIN(u.timestamp) AS first_seen, ${FRUSTRATION_COUNTS_SQL}
 		FROM user_messages u
 		LEFT JOIN frustration_verdicts v ON v.prose_hash = u.prose_hash
@@ -1485,7 +1587,7 @@ function pendingProseSql(hasCutoff: boolean): string {
 export function getPendingFrustrationProse(cutoff?: number | null): PendingProse[] {
 	if (!db) return [];
 	const hasCutoff = hasRangeCutoff(cutoff);
-	const stmt = db.prepare(pendingProseSql(hasCutoff));
+	const stmt = db.query(pendingProseSql(hasCutoff));
 	return (hasCutoff ? stmt.all(cutoff) : stmt.all()) as PendingProse[];
 }
 
@@ -1493,7 +1595,7 @@ export function getPendingFrustrationProse(cutoff?: number | null): PendingProse
 export function getPendingFrustrationTotals(cutoff?: number | null): { messages: number; chars: number } {
 	if (!db) return { messages: 0, chars: 0 };
 	const hasCutoff = hasRangeCutoff(cutoff);
-	const stmt = db.prepare(
+	const stmt = db.query(
 		`SELECT COUNT(*) AS messages, COALESCE(SUM(LENGTH(prose)), 0) AS chars FROM (${pendingProseSql(hasCutoff)})`,
 	);
 	const row = (hasCutoff ? stmt.get(cutoff) : stmt.get()) as { messages: number; chars: number } | undefined;
@@ -1519,7 +1621,7 @@ export function upsertFrustrationVerdicts(verdicts: readonly FrustrationVerdict[
 
 /**
  * Insert tool-call rows. Idempotent via UNIQUE(session_file, tool_call_id);
- * the `WHERE NOT EXISTS` guard mirrors {@link insertMessageStats}: forked
+ * the fork guard mirrors {@link insertMessageStats}: forked
  * sessions deep-copy assistant entries (same `entry_id`, `timestamp`, and
  * tool-call ids under a new file), so first-write-wins across the lineage
  * keeps aggregates from double counting. Keyed on the assistant entry
@@ -1528,46 +1630,50 @@ export function upsertFrustrationVerdicts(verdicts: readonly FrustrationVerdict[
  */
 export function insertToolCalls(calls: Iterable<ToolCallStats>): number {
 	if (!db) return 0;
-
-	const stmt = db.query(`
-		INSERT OR IGNORE INTO tool_calls (
-			session_file, entry_id, tool_call_id, folder, tool_name,
-			model, provider, timestamp, agent_type, calls_in_turn, args_chars
-		)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-		WHERE NOT EXISTS (
-			SELECT 1 FROM tool_calls
-			WHERE entry_id = ? AND timestamp = ? AND tool_call_id = ? AND session_file <> ?
-		)
-	`);
-
-	let inserted = 0;
-	const insert = db.transaction(() => {
-		for (const c of calls) {
-			const result = stmt.run(
-				c.sessionFile,
-				c.entryId,
-				c.toolCallId,
-				c.folder,
-				c.toolName,
-				c.model,
-				c.provider,
-				c.timestamp,
-				c.agentType,
-				c.callsInTurn,
-				c.argsChars,
-				// `WHERE NOT EXISTS` binds: skip when a different session_file
-				// already holds this (entry_id, timestamp, tool_call_id).
-				c.entryId,
-				c.timestamp,
-				c.toolCallId,
-				c.sessionFile,
-			);
-			if (result.changes > 0) inserted++;
-		}
+	const writer = new ChunkedInsert(db, {
+		verb: "INSERT OR IGNORE",
+		table: "tool_calls",
+		columns: [
+			"session_file",
+			"entry_id",
+			"tool_call_id",
+			"folder",
+			"tool_name",
+			"model",
+			"provider",
+			"timestamp",
+			"agent_type",
+			"calls_in_turn",
+			"args_chars",
+			"result_chars",
+			"is_error",
+		],
+		identity: ["entry_id", "timestamp", "tool_call_id"],
 	});
-	insert();
-	return inserted;
+	return atomically(db, () => {
+		for (const c of calls) {
+			writer.add(
+				c.sessionFile,
+				[c.entryId, c.timestamp, c.toolCallId],
+				[
+					c.sessionFile,
+					c.entryId,
+					c.toolCallId,
+					c.folder,
+					c.toolName,
+					c.model,
+					c.provider,
+					c.timestamp,
+					c.agentType,
+					c.callsInTurn,
+					c.argsChars,
+					c.resultChars ?? null,
+					c.isError === undefined ? null : c.isError ? 1 : 0,
+				],
+			);
+		}
+		return writer.finish();
+	});
 }
 
 /**
@@ -1587,12 +1693,11 @@ export function updateToolResults(links: Iterable<ToolResultLink>): number {
 	`);
 
 	let updated = 0;
-	const apply = db.transaction(() => {
+	atomically(db, () => {
 		for (const link of links) {
 			const result = stmt.run(link.resultChars, link.isError ? 1 : 0, link.sessionFile, link.toolCallId);
 			updated += result.changes;
 		}
 	});
-	apply();
 	return updated;
 }

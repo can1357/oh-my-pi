@@ -22,6 +22,7 @@ import {
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { create, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { $env, logger } from "@oh-my-pi/pi-utils";
+import { frameConnectMessage } from "../connect-frame";
 
 const NOT_IMPLEMENTED_SUFFIX = "not implemented by this client";
 
@@ -34,15 +35,6 @@ interface CursorInteractionWriter {
 
 type InteractionQueryCase = NonNullable<InteractionQuery["query"]["case"]>;
 type InteractionResult = Exclude<InteractionResponse["result"], { case: undefined; value?: undefined }>;
-
-/** Wrap one Connect-protocol message: 1 flag byte + 4-byte big-endian length + payload. */
-export function frameConnectMessage(data: Uint8Array, flags = 0): Buffer {
-	const frame = Buffer.alloc(5 + data.length);
-	frame[0] = flags;
-	frame.writeUInt32BE(data.length, 1);
-	frame.set(data, 5);
-	return frame;
-}
 
 function isProtoUnknownField(value: unknown): value is ProtoUnknownField {
 	if (!value || typeof value !== "object") return false;

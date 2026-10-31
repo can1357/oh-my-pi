@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import {
 	decodeTernReply,
 	isTernUnavailable,
-	TernBrowserError,
+	TernError,
 	TernFrameReader,
 	TernSocketClient,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/wire";
@@ -41,7 +41,11 @@ describe("TernSocketClient", () => {
 	});
 
 	it("skips members and message kinds it does not know and rejects frames that are not answers", () => {
-		expect(decodeTernReply(jsonPayload({ welcome: { version: 99 } }))).toEqual({ type: "welcome" });
+		expect(decodeTernReply(jsonPayload({ welcome: { version: 99 } }))).toEqual({ type: "welcome", ops: [] });
+		expect(decodeTernReply(jsonPayload({ welcome: { ops: ["browser", 7, "fork"] } }))).toEqual({
+			type: "welcome",
+			ops: ["browser", "fork"],
+		});
 		expect(decodeTernReply(jsonPayload({ id: 3, output: {} }))).toEqual({ type: "other" });
 		expect(decodeTernReply(jsonPayload({ id: 3, browser: { ok: 1 }, extra: true }))).toEqual({
 			type: "browser",
@@ -62,18 +66,18 @@ describe("TernSocketClient", () => {
 					return error;
 				}
 			})();
-			expect(failure).toBeInstanceOf(TernBrowserError);
-			expect((failure as TernBrowserError).kind).toBe("protocol");
+			expect(failure).toBeInstanceOf(TernError);
+			expect((failure as TernError).kind).toBe("protocol");
 		}
 	});
 
-	it("turns an error envelope into a TernBrowserError carrying its kind", async () => {
+	it("turns an error envelope into a TernError carrying its kind", async () => {
 		daemon = await startFakeDaemon(() => ({ error: { kind: "no_window", message: "no Tern window is open" } }));
 		client = new TernSocketClient({ socketPath: daemon.socketPath });
 		const failure = await client.request({ op: "open" }).catch((error: unknown) => error);
-		expect(failure).toBeInstanceOf(TernBrowserError);
-		expect((failure as TernBrowserError).kind).toBe("no_window");
-		expect((failure as TernBrowserError).message).toContain("no Tern window is open");
+		expect(failure).toBeInstanceOf(TernError);
+		expect((failure as TernError).kind).toBe("no_window");
+		expect((failure as TernError).message).toContain("no Tern window is open");
 		expect(isTernUnavailable(failure)).toBe(true);
 	});
 
@@ -81,9 +85,9 @@ describe("TernSocketClient", () => {
 		daemon = await startFakeDaemon(() => ({ ok: {} }), { hangUp: true });
 		client = new TernSocketClient({ socketPath: daemon.socketPath });
 		const failure = await client.connect().catch((error: unknown) => error);
-		expect(failure).toBeInstanceOf(TernBrowserError);
-		expect((failure as TernBrowserError).kind).toBe("connect");
-		expect((failure as TernBrowserError).message).toContain("without omp's JSON protocol");
+		expect(failure).toBeInstanceOf(TernError);
+		expect((failure as TernError).kind).toBe("connect");
+		expect((failure as TernError).message).toContain("without omp's JSON protocol");
 		expect(isTernUnavailable(failure)).toBe(true);
 	});
 
@@ -91,7 +95,7 @@ describe("TernSocketClient", () => {
 		client = new TernSocketClient({ socketPath: "/tmp/omp-tern-missing-daemon.sock" });
 		const failure = await client.connect().catch((error: unknown) => error);
 		expect(isTernUnavailable(failure)).toBe(true);
-		expect((failure as TernBrowserError).kind).toBe("connect");
+		expect((failure as TernError).kind).toBe("connect");
 	});
 
 	it("rejects an op whose fields are not JSON without leaving it pending", async () => {
@@ -100,7 +104,7 @@ describe("TernSocketClient", () => {
 		const cyclic: Record<string, unknown> = { op: "eval" };
 		cyclic.self = cyclic;
 		const failure = await client.request(cyclic, { timeoutMs: 20 }).catch((error: unknown) => error);
-		expect((failure as TernBrowserError).kind).toBe("invalid");
+		expect((failure as TernError).kind).toBe("invalid");
 		expect(daemon.requests).toHaveLength(0);
 		// The connection stays usable.
 		expect(await client.request({ op: "state" })).toBe("fine");
@@ -136,11 +140,41 @@ describe("TernSocketClient", () => {
 		expect(reader.push(both).map(payload => [...payload])).toEqual([[1, 2], [3]]);
 	});
 
+	it("reports fork unsupported by a Tern whose welcome lists no ops", async () => {
+		daemon = await startFakeDaemon(() => ({ ok: {} }));
+		client = new TernSocketClient({ socketPath: daemon.socketPath });
+		await client.connect();
+		expect(client.supports("fork")).toBe(false);
+	});
+
+	it("sends a fork to a Tern that lists it and resolves the new pane's block", async () => {
+		daemon = await startFakeDaemon(() => ({ ok: {} }), {
+			welcome: { ops: ["browser", "fork"] },
+			fork: () => ({ ok: { block: 9 } }),
+		});
+		client = new TernSocketClient({ socketPath: daemon.socketPath });
+		await client.connect();
+		expect(client.supports("fork")).toBe(true);
+		expect(await client.fork({ block: 5 })).toBe(9);
+		expect(daemon.forks).toEqual([{ id: 1, op: { block: 5 } }]);
+	});
+
+	it("turns a fork error answer into a TernError carrying its kind", async () => {
+		daemon = await startFakeDaemon(() => ({ ok: {} }), {
+			welcome: { ops: ["browser", "fork"] },
+			fork: () => ({ error: { kind: "not_agent", message: "block 5 reported no session file" } }),
+		});
+		client = new TernSocketClient({ socketPath: daemon.socketPath });
+		const failure = await client.fork({ block: 5 }).catch((error: unknown) => error);
+		expect(failure).toBeInstanceOf(TernError);
+		expect((failure as TernError).kind).toBe("not_agent");
+	});
+
 	it("rejects pending ops on close, on timeout and on abort", async () => {
 		daemon = await startFakeDaemon(() => null);
 		client = new TernSocketClient({ socketPath: daemon.socketPath });
 		const timedOut = await client.request({ op: "state" }, { timeoutMs: 30 }).catch((error: unknown) => error);
-		expect((timedOut as TernBrowserError).kind).toBe("timeout");
+		expect((timedOut as TernError).kind).toBe("timeout");
 		const aborter = new AbortController();
 		const aborted = client.request({ op: "state" }, { signal: aborter.signal }).catch((error: unknown) => error);
 		aborter.abort(new Error("stop"));
@@ -148,7 +182,7 @@ describe("TernSocketClient", () => {
 		const pending = client.request({ op: "state" }).catch((error: unknown) => error);
 		client.close();
 		const closed = await pending;
-		expect((closed as TernBrowserError).kind).toBe("closed");
+		expect((closed as TernError).kind).toBe("closed");
 		expect(isTernUnavailable(closed)).toBe(false);
 	});
 });

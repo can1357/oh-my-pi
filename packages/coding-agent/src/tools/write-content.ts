@@ -10,6 +10,15 @@ import type { ToolSession } from "./index";
 import { formatPathRelativeToCwd } from "./path-utils";
 
 const LOOSE_HASHLINE_HEADER_RE = /^\s*\[[^#\r\n]+#[^ \t\r\n]*\]\s*$/;
+/**
+ * The first non-empty row, past leading whitespace (JS `\s` plus U+0085, a
+ * superset of the native `\s`/`trim`), starts with a character no hashline
+ * prefix, file header, loose header or read metadata row can start with.
+ * Native stripping only fires when every content row is prefixed, and this
+ * row is then a plain content row that also is not the loose header — so the
+ * content cannot change.
+ */
+const PLAIN_FIRST_ROW_RE = /^\n*(?:[^\S\n]|\u0085)*[^\s\u0085[>+*\-.…\p{Nd}]/u;
 
 /**
  * `stripHashlinePrefixes(lines).join("\n")`, or `undefined` when that equals `text`
@@ -34,6 +43,10 @@ function joinStrippedLines(lines: string[], text?: string): string | undefined {
  * line-number prefixes (for example legacy or malformed hashline echoes).
  */
 function stripWriteContentWithPotentialLooseHeader(content: string): { text: string; stripped: boolean } {
+	// Lone surrogates still take the native path: its UTF-8 round trip rewrites them.
+	if (PLAIN_FIRST_ROW_RE.test(content) && content.isWellFormed()) {
+		return { text: content, stripped: false };
+	}
 	const lines = content.split("\n");
 	const cleanedText = joinStrippedLines(lines, content);
 	if (cleanedText !== undefined) {

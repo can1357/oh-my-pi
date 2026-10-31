@@ -56,9 +56,20 @@ interface WordQuery extends WordCompletionQuery {
 
 /** Editor text before the word starting at `start`, truncated to its last {@link BEFORE_LIMIT} code units. */
 function textBefore(lines: readonly string[], cursorLine: number, start: number): string {
-	let text = (lines[cursorLine] ?? "").slice(0, start);
-	for (let line = cursorLine - 1; line >= 0 && text.length < BEFORE_LIMIT; line--) {
-		text = `${lines[line] ?? ""}\n${text}`;
+	const head = (lines[cursorLine] ?? "").slice(0, start);
+	// Find the first line the capped tail reaches, then join once.
+	let length = head.length;
+	let first = cursorLine;
+	while (first > 0 && length < BEFORE_LIMIT) {
+		first--;
+		length += (lines[first] ?? "").length + 1;
+	}
+	let text = head;
+	if (first < cursorLine) {
+		const parts: string[] = [];
+		for (let line = first; line < cursorLine; line++) parts.push(lines[line] ?? "");
+		parts.push(head);
+		text = parts.join("\n");
 	}
 	if (text.length <= BEFORE_LIMIT) return text;
 	let cut = text.length - BEFORE_LIMIT;
@@ -111,6 +122,16 @@ export class WordCompletionProvider implements EditorTextAssistProvider {
 	#lastShown: { before: string; word: string } | undefined;
 	/** What the last `getWordCompletion` returned, so a fetch repaints only when it changes that. */
 	#displayed: { key: string; suffix: string | null } | undefined;
+	/** Last {@link #query} input snapshot (lines are copied: the editor mutates its array in place). */
+	#queryMemo:
+		| {
+				method: WordCompletionMethod;
+				lines: readonly string[];
+				cursorLine: number;
+				cursorCol: number;
+				query: WordQuery | undefined;
+		  }
+		| undefined;
 
 	/** Invoked when an asynchronous answer changes the rendered ghost text. */
 	onUpdate: (() => void) | undefined;
@@ -171,11 +192,23 @@ export class WordCompletionProvider implements EditorTextAssistProvider {
 
 	#query(lines: readonly string[], cursorLine: number, cursorCol: number): WordQuery | undefined {
 		if (this.#method === "off") return undefined;
+		// Rendering asks every frame; reuse the answer until the buffer, caret, or engine changes.
+		const memo = this.#queryMemo;
+		if (
+			memo?.method === this.#method &&
+			memo.cursorLine === cursorLine &&
+			memo.cursorCol === cursorCol &&
+			memo.lines.length === lines.length &&
+			memo.lines.every((line, index) => line === lines[index])
+		) {
+			return memo.query;
+		}
 		const query = wordCompletionQuery(lines, cursorLine, cursorCol, this.#prose);
-		if (!query) return undefined;
 		// The method keeps a request still in flight for the previous engine from
 		// shadowing the same word state on the new one.
-		return { key: `${this.#method}\u0000${query.prefix}\u0000${query.before}`, ...query };
+		const result = query && { key: `${this.#method}\u0000${query.prefix}\u0000${query.before}`, ...query };
+		this.#queryMemo = { method: this.#method, lines: lines.slice(), cursorLine, cursorCol, query: result };
+		return result;
 	}
 
 	#project(query: WordQuery): string | null {

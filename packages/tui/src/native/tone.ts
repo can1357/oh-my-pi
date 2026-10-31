@@ -50,6 +50,28 @@ export function backgroundChrome(bg: ThemeBg | undefined): BackgroundChrome {
 	}
 }
 
+/** The omp theme colour an ANSI renderer draws a TSP tone with (the inverse of {@link colorTone}). */
+export function toneColor(tone: TspTone): ThemeColor {
+	switch (tone) {
+		case "neutral":
+			return "text";
+		case "accent":
+		case "info":
+			return "accent";
+		case "success":
+			return "success";
+		case "warning":
+		case "pending":
+			return "warning";
+		case "error":
+			return "error";
+		case "muted":
+			return "muted";
+		case "user":
+			return "customMessageLabel";
+	}
+}
+
 /**
  * Tone of an omp colour used as a severity or border colour; undefined for
  * colours that carry no tone (callers pick their own fallback).

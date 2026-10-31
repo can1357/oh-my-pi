@@ -13,11 +13,11 @@
  * places it 1:1: any resampling, even 0.99×, blurs every glyph edge.
  */
 import { rasterizeSvg } from "@oh-my-pi/pi-natives";
-import { logger } from "@oh-my-pi/pi-utils";
+import { hexToOklch, hueDistance, logger, oklchCusp, oklchToHex } from "@oh-my-pi/pi-utils";
 import { Image, type ImageBudget, imageMaxColumns } from "../components/image";
-import type { Markdown } from "../components/markdown";
+import { fencedCode, type Markdown } from "../components/markdown";
 import { type CellDimensions, getCellDimensions, getImageDimensions } from "../terminal-capabilities";
-import { getThemeEpoch, type ThemeColor, theme } from "../theme";
+import { ensureThemeSync, getThemeEpoch, type ThemeColor, theme } from "../theme";
 import type { Component } from "../tui";
 import { closePartialSvg, prepareSvg } from "./svg-source";
 
@@ -30,7 +30,10 @@ const MAX_EDGE_PX = 4096;
 /** Share of the terminal's rows one figure may fill, so it fits on screen whole. */
 const MAX_VIEWPORT_SHARE = 0.8;
 
-/** Foreground theme colors behind the figure tokens (`var(--name)`); `surface` is the selection background. */
+/**
+ * Foreground theme colors behind the figure tokens (`var(--name)`); `surface`
+ * is the selection background and `c1`…`c6` come from {@link seriesColors}.
+ */
 const PALETTE: Readonly<Record<string, ThemeColor>> = {
 	fg: "text",
 	muted: "muted",
@@ -39,19 +42,54 @@ const PALETTE: Readonly<Record<string, ThemeColor>> = {
 	success: "success",
 	warning: "warning",
 	error: "error",
-	c1: "syntaxKeyword",
-	c2: "syntaxString",
-	c3: "syntaxFunction",
-	c4: "syntaxType",
-	c5: "syntaxNumber",
-	c6: "syntaxVariable",
 };
+
+/** Hue families (OKLCH degrees) the series colors draw from: blue, orange, green, purple, pink, teal. */
+const SERIES_HUES = [255, 55, 145, 305, 0, 200];
+/** Gold, for a sixth series when the accent's hue crowds out two families. */
+const RESERVE_HUE = 90;
+/** Least hue distance between a family and the accent's hue for both to lead series. */
+const MIN_SERIES_HUE_GAP = 30;
+/** Chroma below which the accent reads as gray and blue leads instead. */
+const MIN_ACCENT_CHROMA = 0.04;
+/** Lightness band of series colors: deep enough for labels on light surfaces, bright enough on dark ones. */
+const SERIES_LIGHTNESS = { light: [0.52, 0.66], dark: [0.68, 0.82] } as const;
+/** Chroma ceiling: vivid, not neon. */
+const SERIES_CHROMA = 0.19;
 
 /** The active theme's color per figure token, for resolving a figure with `prepareSvg`. */
 export function svgFigurePalette(): Record<string, string> {
+	ensureThemeSync();
 	const palette: Record<string, string> = { surface: theme.getBgHex("selectedBg") };
 	for (const token in PALETTE) palette[token] = theme.getColorHex(PALETTE[token]!);
+	seriesColors(palette.accent!, theme.isLight).forEach((color, at) => {
+		palette[`c${at + 1}`] = color;
+	});
 	return palette;
+}
+
+/**
+ * Six series colors of even visual weight, in the manner of Apple's system
+ * palette: led by the theme accent's hue (blue when the accent is gray), each
+ * next hue the family farthest from those already taken. Every hue sits at
+ * its gamut cusp clamped into the theme's {@link SERIES_LIGHTNESS} band, so
+ * orange stays orange and blue stays deep.
+ */
+function seriesColors(accent: string, light: boolean): string[] {
+	const { c, h } = hexToOklch(accent);
+	const lead = c >= MIN_ACCENT_CHROMA ? h : SERIES_HUES[0]!;
+	const hues = [lead];
+	const pool = SERIES_HUES.filter(hue => hueDistance(hue, lead) >= MIN_SERIES_HUE_GAP);
+	while (pool.length > 0) {
+		const gaps = pool.map(hue => Math.min(...hues.map(taken => hueDistance(hue, taken))));
+		hues.push(pool.splice(gaps.indexOf(Math.max(...gaps)), 1)[0]!);
+	}
+	if (hues.length < 6) hues.push(RESERVE_HUE);
+	const [low, high] = SERIES_LIGHTNESS[light ? "light" : "dark"];
+	return hues.slice(0, 6).map(hue => {
+		const cusp = oklchCusp(hue);
+		return oklchToHex({ l: Math.min(high, Math.max(low, cusp.l)), c: Math.min(SERIES_CHROMA, cusp.c), h: hue });
+	});
 }
 
 let figuresEnabled = true;
@@ -75,6 +113,11 @@ export interface SvgFigureOptions {
 	markdown?: (text: string) => Markdown;
 	/** Shared inline-image budget; superseded rasters are released from it. */
 	budget?: ImageBudget;
+	/**
+	 * Rows the figure may fill, fallback code included, read on every render;
+	 * zero hides it. Unset or `undefined` takes a share of the terminal viewport.
+	 */
+	maxRows?: () => number | undefined;
 	/** The figure's rows changed outside a text update: a raster landed or rendering fell back to code. */
 	onChange: () => void;
 }
@@ -111,12 +154,15 @@ interface Attempt {
 
 let nextFigureId = 0;
 
-/** Cells a figure rendered at `width` may fill: the image's width, a share of the viewport, and the raster edge cap. */
-function limitsFor(width: number, cell: CellDimensions): Limits {
-	const viewportRows = Math.floor((process.stdout.rows || 24) * MAX_VIEWPORT_SHARE);
+/** Cells a figure rendered at `width` may fill: the image's width, the caller's row ceiling (or a share of the viewport), and the raster edge cap. */
+function limitsFor(
+	width: number,
+	cell: CellDimensions,
+	maxRows = Math.floor((process.stdout.rows || 24) * MAX_VIEWPORT_SHARE),
+): Limits {
 	return {
 		columns: Math.min(imageMaxColumns(width), Math.floor(MAX_EDGE_PX / cell.widthPx)),
-		rows: Math.max(1, Math.min(viewportRows, Math.floor(MAX_EDGE_PX / cell.heightPx))),
+		rows: Math.max(1, Math.min(maxRows, Math.floor(MAX_EDGE_PX / cell.heightPx))),
 	};
 }
 
@@ -140,10 +186,18 @@ export class SvgFigure implements Component {
 	/** Last render width; rasters wait for the first render to know their room. */
 	#width: number | undefined;
 	#image: { raster: Raster; component: Image } | undefined;
-	#fallback: { source: string; md: Markdown } | undefined;
+	#fallback:
+		| {
+				source: string;
+				md: Markdown;
+				/** `rows` cut to a ceiling, kept so unchanged frames return the same array. */
+				clip?: { of: readonly string[]; rows: readonly string[] };
+		  }
+		| undefined;
 	#placeholder: readonly string[] | undefined;
 
 	constructor(options: SvgFigureOptions) {
+		ensureThemeSync();
 		this.#options = options;
 	}
 
@@ -164,21 +218,34 @@ export class SvgFigure implements Component {
 
 	/** Whether the final source still waits for its raster (or for failing to render). */
 	get pending(): boolean {
-		return this.#final && this.#raster?.source !== this.#source && this.#failed !== this.#source;
+		return (
+			this.#maxRows() !== 0 && this.#final && this.#raster?.source !== this.#source && this.#failed !== this.#source
+		);
+	}
+
+	/** The caller's row ceiling, if any; a surface shorter than its chrome leaves none. */
+	#maxRows(): number | undefined {
+		const rows = this.#options.maxRows?.();
+		return rows === undefined ? undefined : Math.max(0, Math.floor(rows));
 	}
 
 	render(width: number): readonly string[] {
 		// Width, cell size and theme are render-time inputs; a change re-rasterizes.
 		this.#width = width;
 		this.#schedule();
-		if (this.#failed === this.#source) return this.#fallbackRows(width);
+		const maxRows = this.#maxRows();
+		if (maxRows === 0) return [];
+		if (this.#failed === this.#source) return this.#fallbackRows(width, maxRows);
 		const raster = this.#raster;
 		if (!raster) {
 			if (!this.#options.markdown) return [];
 			this.#placeholder ??= [` ${theme.fg("dim", "Drawing SVG…")}`];
 			return this.#placeholder;
 		}
-		return this.#imageFor(raster).render(width);
+		const rows = this.#imageFor(raster, maxRows).render(width);
+		// A SIXEL band is six pixels whole: cells shorter than that reserve more
+		// rows than the ceiling, and a cut band would draw nothing anyway.
+		return maxRows !== undefined && rows.length > maxRows ? [] : rows;
 	}
 
 	invalidate(): void {
@@ -208,7 +275,7 @@ export class SvgFigure implements Component {
 		const attempt = this.#attempt;
 		if (this.#failed === this.#source) return false;
 		const cell = getCellDimensions();
-		const limits = limitsFor(width, cell);
+		const limits = limitsFor(width, cell, this.#maxRows());
 		return (
 			attempt === undefined ||
 			attempt.source !== this.#source ||
@@ -241,6 +308,7 @@ export class SvgFigure implements Component {
 	#schedule(): void {
 		const width = this.#width;
 		if (this.#disposed || this.#rasterizing || width === undefined) return;
+		if (this.#maxRows() === 0) return;
 		if (this.#final && this.#timer) {
 			clearTimeout(this.#timer);
 			this.#timer = undefined;
@@ -263,7 +331,7 @@ export class SvgFigure implements Component {
 		const attempt: Attempt = {
 			source: this.#source,
 			cell,
-			limits: limitsFor(width, cell),
+			limits: limitsFor(width, cell, this.#maxRows()),
 			themeEpoch: getThemeEpoch(),
 			final: this.#final,
 		};
@@ -325,13 +393,17 @@ export class SvgFigure implements Component {
 	/**
 	 * The image for `raster` over the whole cells it was padded to. At the
 	 * cell size and room it was drawn for that box is its pixels exactly; a
-	 * raster outdated by a resize is scaled by {@link Image} until its redraw lands.
+	 * raster outdated by a resize is scaled by {@link Image} until its redraw
+	 * lands. A caller's ceiling (`maxRows`) refits the shown image at once.
 	 */
-	#imageFor(raster: Raster): Image {
+	#imageFor(raster: Raster, maxRows = Number.POSITIVE_INFINITY): Image {
 		const current = this.#image;
-		if (current?.raster === raster) return current.component;
 		const columns = raster.widthPx / raster.cell.widthPx;
-		const rows = raster.heightPx / raster.cell.heightPx;
+		const rows = Math.min(raster.heightPx / raster.cell.heightPx, maxRows);
+		if (current?.raster === raster) {
+			current.component.setMaxHeightCells(rows);
+			return current.component;
+		}
 		const component = new Image(
 			raster.data,
 			"image/png",
@@ -351,14 +423,18 @@ export class SvgFigure implements Component {
 	}
 
 	/** The source as the fenced code block it was written as, fenced longer than any backtick run inside. */
-	#fallbackRows(width: number): readonly string[] {
+	#fallbackRows(width: number, maxRows?: number): readonly string[] {
 		const source = this.#source;
 		if (!this.#options.markdown) return [];
 		if (this.#fallback?.source !== source) {
-			const longest = Math.max(2, ...(source.match(/`+/g) ?? []).map(run => run.length));
-			const fence = "`".repeat(longest + 1);
-			this.#fallback = { source, md: this.#options.markdown(`${fence}svg\n${source.trimEnd()}\n${fence}`) };
+			this.#fallback = { source, md: this.#options.markdown(fencedCode("svg", source)) };
 		}
-		return this.#fallback.md.render(width);
+		const fallback = this.#fallback;
+		const rows = fallback.md.render(width);
+		if (maxRows === undefined || rows.length <= maxRows) return rows;
+		if (fallback.clip?.of !== rows || fallback.clip.rows.length !== maxRows) {
+			fallback.clip = { of: rows, rows: rows.slice(0, maxRows) };
+		}
+		return fallback.clip.rows;
 	}
 }

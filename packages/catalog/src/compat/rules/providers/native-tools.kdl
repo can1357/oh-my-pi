@@ -1,4 +1,7 @@
 // Cursor always exposes server-owned native operations, even with an empty tool catalog.
 on-api "cursor-agent" {
 	requires-native-tools #true
+	// MCP schemas live in Cursor's server-side catalog and enter model context
+	// only when dynamically selected, not as a fixed cost on every turn.
+	tool-schemas-in-context #false
 }

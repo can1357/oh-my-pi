@@ -59,6 +59,9 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 			// Keep import.meta.resolve in bundled dependencies valid under bytecode.
 			format: "esm",
 			bytecode: true,
+			splitting: true,
+			// Discovery entry chunks can share a hash; include their source names to avoid collisions.
+			naming: { chunk: "chunks/[name]-[hash].[ext]" },
 			minify: {
 				identifiers: options.minifyIdentifiers ?? false,
 				keepNames: true,

@@ -131,6 +131,9 @@ export function magicKeywordRanges(text: string): { from: number; to: number }[]
 	return ranges.sort((a, b) => a.from - b.from);
 }
 
+/** Last {@link hasMagicKeyword} answer: the live editor asks once per layout segment with the same buffer. */
+let lastProbe: { text: string; registry: readonly RegisteredKeyword[]; found: boolean } | undefined;
+
 /**
  * Cheap test for "does this text contain any registered keyword as standalone
  * prose?". Short-circuits on a substring probe before paying for the
@@ -138,8 +141,14 @@ export function magicKeywordRanges(text: string): { from: number; to: number }[]
  * `String#includes` per word. Used by the live editor to gate the shimmer timer.
  */
 export function hasMagicKeyword(text: string): boolean {
+	if (lastProbe?.text === text && lastProbe.registry === registry) return lastProbe.found;
+	let found = false;
 	for (const keyword of registry) {
-		if (text.includes(keyword.word) && containsMagicKeyword(text, keyword.word)) return true;
+		if (text.includes(keyword.word) && containsMagicKeyword(text, keyword.word)) {
+			found = true;
+			break;
+		}
 	}
-	return false;
+	lastProbe = { text, registry, found };
+	return found;
 }

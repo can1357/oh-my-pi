@@ -9,16 +9,17 @@ import type { Theme } from "../theme/theme";
 import {
 	currentResults,
 	findBaselineMetric,
+	findBaselineResult,
 	findBaselineRunNumber,
 	findBaselineSecondary,
 	formatElapsed,
 	isBetter,
 } from "./autoresearch-data";
-import { formatNum, type ExperimentResult, type ExperimentState } from "../tools/autoresearch";
-import type { TspSpan, TspTableColumn, TspText } from "@oh-my-pi/pi-wire";
+import { fmtNum, formatNum, type ExperimentResult, type ExperimentState } from "../tools/autoresearch";
+import type { TspScrollBy, TspSpan, TspTableColumn, TspText } from "@oh-my-pi/pi-wire";
 import { card, col, elapsed, keyed, node, row, span, text } from "../native/describe";
-import type { DescribeContext, NativeNode } from "../native/node";
-import { hintsRow } from "../native/overlay";
+import type { DescribeContext, NativeNode, NativeScroll, NativeUiEvent } from "../native/node";
+import { actionBar, actionButton, hintsRow } from "../native/overlay";
 import { Memo } from "../native/memo";
 import { isNativeRendering } from "../native/state";
 
@@ -147,11 +148,13 @@ export function createDashboardController(): DashboardController {
 					}
 
 					let scrollView: ScrollView | undefined;
+					/** Natively the terminal scrolls the sheet body: bumped per scroll key. */
+					let scroll: NativeScroll | undefined;
 					const native = new Memo();
 					return {
-						/** A glass sheet titled by the experiment (the panels' sheet style); the body is borderless. */
+						/** A glass sheet titled by the experiment; what it is follows, muted. */
 						get nativeOverlay() {
-							return { role: "omp.overlay.autoresearch", head: describeTitle(runtime), size: "lg" as const };
+							return { role: "omp.overlay.autoresearch", head: describeSheetHead(runtime), size: "lg" as const };
 						},
 						describe(cx: DescribeContext): NativeNode {
 							const state = runtime.state;
@@ -159,6 +162,7 @@ export function createDashboardController(): DashboardController {
 							return native.get(
 								[
 									chart,
+									scroll,
 									state,
 									state.results.length,
 									state.results.at(-1),
@@ -171,29 +175,9 @@ export function createDashboardController(): DashboardController {
 									runtime.runningExperiment,
 								],
 								() => {
-									const running = runtime.runningExperiment;
-									const children: NativeNode[] = describeDashboard(runtime, 0, chart);
-									if (running) {
-										children.push(
-											row(
-												[
-													node("spinner", { label: [span("running", "warning")], tone: "warning" }),
-													elapsed(Date.now() - running.startedAt),
-													text([span(replaceTabs(running.command), "warning")], { truncate: "end" }),
-												],
-												{ gap: "sm" },
-											),
-										);
-									}
-									children.push(
-										hintsRow([
-											{ keys: ["up", "down", "j", "k"], label: "scroll" },
-											{ keys: ["pageUp", "pageDown"], label: "page" },
-											{ keys: ["g", "shift+g"], label: "top/bottom" },
-											{ keys: ["escape"], label: "close" },
-										]),
-									);
-									return col(children, { gap: "md", role: "omp.app.autoresearch" });
+									const children = describeSheet(runtime, chart);
+									children.push(actionBar([null, actionButton("Close", "close", { keys: "escape" })]));
+									return { ...col(children, { gap: "md", role: "omp.app.autoresearch" }), scroll };
 								},
 							);
 						},
@@ -214,24 +198,36 @@ export function createDashboardController(): DashboardController {
 							scrollView.setHeight(viewportRows);
 							return [header, ...scrollView.render(width), renderOverlayFooter(width, theme)];
 						},
+						/** The Close button runs Esc's path. */
+						handleNativeEvent(event: NativeUiEvent): void {
+							if (event.type === "action" && event.act === "close") done(undefined);
+						},
 						handleInput(data: string): void {
 							if (matchesKey(data, "escape") || matchesKey(data, "esc") || data === "q") {
 								done(undefined);
 								return;
 							}
+							let by: TspScrollBy | undefined;
 							if (matchesKey(data, "up") || matchesKey(data, "k")) {
+								by = "line-up";
 								scrollView?.scroll(-1);
 							} else if (matchesKey(data, "down") || matchesKey(data, "j")) {
+								by = "line-down";
 								scrollView?.scroll(1);
 							} else if (matchesKey(data, "pageUp")) {
+								by = "page-up";
 								scrollView?.page(-1);
 							} else if (matchesKey(data, "pageDown")) {
+								by = "page-down";
 								scrollView?.page(1);
 							} else if (data === "g") {
+								by = "start";
 								scrollView?.scrollToTop();
 							} else if (data === "G") {
+								by = "end";
 								scrollView?.scrollToBottom();
 							}
+							if (by) scroll = { by, n: (scroll?.n ?? 0) + 1 };
 							tui.requestRender();
 						},
 						invalidate(): void {},
@@ -507,6 +503,427 @@ function describeDashboard(runtime: AutoresearchDashboardRuntime, maxRows: numbe
 	}
 	children.push(node("table", { cols, rows, role: "omp.autoresearch.runs" }, undefined, "runs"));
 	return [keyed(col(children, { gap: "sm" }), "dashboard")];
+}
+
+// -- native sheet --------------------------------------------------------------
+
+/** Sheet head: the experiment's name, then what the sheet is. */
+function describeSheetHead(runtime: AutoresearchDashboardRuntime): TspSpan[] {
+	const name = runtime.state.name?.trim();
+	return name ? [span(replaceTabs(name)), span(" · Autoresearch", "muted")] : [span("Autoresearch")];
+}
+
+const STATUS_LABEL: Record<ExperimentResult["status"], string> = {
+	keep: "kept",
+	discard: "discarded",
+	crash: "crashed",
+	checks_failed: "checks failed",
+};
+
+const STATUS_TOKEN: Record<ExperimentResult["status"], string> = {
+	keep: "success",
+	discard: "dim",
+	crash: "error",
+	checks_failed: "error",
+};
+
+/** Fraction digits (0–2) that show every value exactly, so numbers that sit together align. */
+function fractionDigits(values: readonly number[]): number {
+	let digits = 0;
+	for (const value of values) {
+		while (digits < 2 && Math.abs(Math.round(value * 10 ** digits) - value * 10 ** digits) > 1e-6) digits += 1;
+	}
+	return digits;
+}
+
+/** A metric split into its number and unit, so the unit can sit a step quieter. */
+function metricSpans(value: number, unit: string, digits: number, numberStyle?: string): TspSpan[] {
+	const spans = [span(fmtNum(value, digits), numberStyle)];
+	if (unit) spans.push(span(unit, "muted"));
+	return spans;
+}
+
+/** Signed change from `base` to `value` in percent (`−12.4%`), or null when there is nothing to compare. */
+function percentChange(value: number, base: number | null | undefined): string | null {
+	if (base === null || base === undefined || base === 0 || value === base) return null;
+	const delta = ((value - base) / base) * 100;
+	return `${delta > 0 ? "+" : "−"}${Math.abs(delta).toFixed(1)}%`;
+}
+
+/** What the sheet's mode says, with the span token it reads in. */
+function modeLabel(runtime: AutoresearchDashboardRuntime): [label: string, token: string] {
+	const status = renderModeStatus(runtime, runtime.state);
+	switch (status) {
+		case "mode on":
+			return ["Mode on", "success"];
+		case "baseline pending":
+			return ["Baseline pending", "warning"];
+		case "segment complete":
+			return ["Segment complete", "muted"];
+		default:
+			return ["Mode off", "muted"];
+	}
+}
+
+/**
+ * The overlay's body: the goal and setup, the headline numbers (best,
+ * baseline, confidence, runs), what is happening now, the metric per run and
+ * the runs newest first. Empty segments explain what comes next instead.
+ */
+function describeSheet(runtime: AutoresearchDashboardRuntime, chart: boolean): NativeNode[] {
+	const state = runtime.state;
+	const current = currentResults(state.results, state.currentSegment);
+	const archived = state.results.length - current.length;
+	const children: NativeNode[] = [describeIntro(runtime, archived > 0)];
+	const now = describeNow(runtime);
+	if (now) children.push(now);
+	if (current.length === 0) {
+		children.push(describeEmpty(runtime, archived));
+		return children;
+	}
+	children.push(describeStats(runtime, current));
+	const indexed = state.results
+		.map((result, index) => ({ result, index }))
+		.filter(({ result }) => result.segment === state.currentSegment);
+	if (chart && indexed.length >= 2) children.push(describeTrend(runtime, indexed));
+	children.push(describeRuns(runtime, indexed));
+	if (archived > 0) {
+		children.push(
+			keyed(
+				text([span(`${archived} ${archived === 1 ? "run" : "runs"} archived from earlier segments`)], {
+					role: "omp.autoresearch.note",
+				}),
+				"archived",
+			),
+		);
+	}
+	return children;
+}
+
+/** The goal as a sentence, then one quiet line of setup: mode, metric and direction, segment, branch. */
+function describeIntro(runtime: AutoresearchDashboardRuntime, segmented: boolean): NativeNode {
+	const state = runtime.state;
+	const children: NativeNode[] = [];
+	const goal = state.goal?.trim();
+	if (goal) children.push(keyed(text(replaceTabs(goal), { wrap: "word", role: "omp.autoresearch.goal" }), "goal"));
+	const [mode, modeToken] = modeLabel(runtime);
+	const meta: TspSpan[] = [
+		span("● ", modeToken),
+		span(mode),
+		span("  ·  "),
+		span(state.metricName, "mono"),
+		span(`, ${state.bestDirection} is better`),
+	];
+	if (segmented) meta.push(span("  ·  "), span(`Segment ${state.currentSegment + 1}`));
+	if (state.maxExperiments !== null) meta.push(span("  ·  "), span(`${state.maxExperiments} runs per segment`));
+	if (state.branch) meta.push(span("  ·  "), span(replaceTabs(state.branch), "mono"));
+	children.push(keyed(text(meta, { truncate: "end", role: "omp.autoresearch.meta" }), "meta"));
+	return keyed(col(children, { gap: "xs", role: "omp.autoresearch.intro" }), "intro");
+}
+
+/** What is happening right now: a benchmark running, or a finished run waiting to be logged. */
+function describeNow(runtime: AutoresearchDashboardRuntime): NativeNode | undefined {
+	const state = runtime.state;
+	const running = runtime.runningExperiment;
+	if (running) {
+		return keyed(
+			row(
+				[
+					node("spinner", { label: [span("Running")], tone: "pending" }),
+					elapsed(Date.now() - running.startedAt),
+					text([span(replaceTabs(running.command), "mono")], {
+						truncate: "end",
+						role: "omp.autoresearch.command",
+					}),
+				],
+				{ gap: "sm", align: "center", role: "omp.autoresearch.running", tone: "pending" },
+			),
+			"now",
+		);
+	}
+	const pending = runtime.lastRunSummary;
+	if (!pending) return undefined;
+	const result: TspSpan[] = [span(`Run #${pending.runNumber} ${pending.passed ? "passed" : "failed"}`, "strong")];
+	if (pending.parsedPrimary !== null) {
+		result.push(
+			span(`  ·  ${state.metricName} `),
+			...metricSpans(pending.parsedPrimary, state.metricUnit, fractionDigits([pending.parsedPrimary]), "mono"),
+		);
+	}
+	return keyed(
+		row(
+			[
+				text(result, { truncate: "end" }),
+				text([span("Log it with "), span("log_experiment", "mono"), span(" before the next run")], {
+					truncate: "end",
+					role: "omp.autoresearch.next",
+				}),
+			],
+			{ gap: "md", align: "center", role: "omp.autoresearch.pending", tone: "warning" },
+		),
+		"now",
+	);
+}
+
+/** No runs in this segment yet: what the dashboard is waiting for. */
+function describeEmpty(runtime: AutoresearchDashboardRuntime, archived: number): NativeNode {
+	const [title, detail] = runtime.lastRunSummary
+		? ["Waiting for the first log", "Log the finished run to set this segment's baseline."]
+		: runtime.runningExperiment
+			? ["Measuring the baseline", "Every later run is compared with this first one."]
+			: runtime.autoresearchMode
+				? [
+						"No baseline yet",
+						"Run the benchmark once and log it as the baseline. Every later run is compared with it.",
+					]
+				: ["No experiments logged yet", "Turn autoresearch mode on to start measuring."];
+	const children: NativeNode[] = [
+		text([span(title)], { role: "omp.autoresearch.empty.title" }),
+		text([span(detail)], { wrap: "word", role: "omp.autoresearch.empty.detail" }),
+	];
+	if (archived > 0) {
+		children.push(
+			text([span(`${archived} ${archived === 1 ? "run" : "runs"} archived from earlier segments`)], {
+				role: "omp.autoresearch.note",
+			}),
+		);
+	}
+	return keyed(col(children, { gap: "xs", align: "center", role: "omp.autoresearch.empty" }), "empty");
+}
+
+/** One headline number: a label, the value, and one line saying what it means. */
+function stat(key: string, label: string, value: TspSpan[], detail: NativeNode[]): NativeNode {
+	return keyed(
+		col(
+			[
+				text(label, { role: "omp.autoresearch.stat.k" }),
+				text(value, { wrap: "none", truncate: "end", role: "omp.autoresearch.stat.v" }),
+				...detail,
+			],
+			{ role: "omp.autoresearch.stat" },
+		),
+		key,
+	);
+}
+
+function statDetail(spans: TspSpan[]): NativeNode {
+	return text(spans, { truncate: "end", role: "omp.autoresearch.stat.sub" });
+}
+
+/** Best, baseline, confidence and the run tally, then the secondary metrics at the best run. */
+function describeStats(runtime: AutoresearchDashboardRuntime, current: readonly ExperimentResult[]): NativeNode {
+	const state = runtime.state;
+	const unit = state.metricUnit;
+	const best = findBestResult(state);
+	const baseline = findBaselineMetric(state.results, state.currentSegment);
+	const baselineRun = findBaselineRunNumber(state.results, state.currentSegment);
+	const baselineResult = current.find(result => result.status === "keep" && !result.flagged);
+	const counts = statusCounts(current);
+	const digits = fractionDigits(
+		[best?.result.metric, baseline].filter((value): value is number => value !== undefined && value !== null),
+	);
+	const tiles: NativeNode[] = [];
+
+	if (best) {
+		const run = best.result.runNumber ?? best.index + 1;
+		const change = percentChange(best.result.metric, baseline);
+		const better = baseline !== null && isBetter(best.result.metric, baseline, state.bestDirection);
+		tiles.push(
+			stat("best", "Best", metricSpans(best.result.metric, unit, digits), [
+				statDetail(
+					change
+						? [span(change, better ? "success" : "error"), span(` vs baseline · run #${run}`)]
+						: [span(`The baseline · run #${run}`)],
+				),
+			]),
+		);
+	} else {
+		tiles.push(stat("best", "Best", [span("—", "muted")], [statDetail([span("No kept run yet")])]));
+	}
+
+	const baselineDetail: TspSpan[] = [];
+	if (baselineRun !== null) baselineDetail.push(span(`Run #${baselineRun}`));
+	if (baselineResult?.commit) baselineDetail.push(span(" · "), span(baselineResult.commit.slice(0, 7), "mono"));
+	tiles.push(
+		stat("baseline", "Baseline", baseline === null ? [span("—", "muted")] : metricSpans(baseline, unit, digits), [
+			statDetail(baselineDetail.length > 0 ? baselineDetail : [span("Not logged yet")]),
+		]),
+	);
+
+	const confidence = state.confidence;
+	tiles.push(
+		stat(
+			"confidence",
+			"Confidence",
+			confidence === null
+				? [span("—", "muted")]
+				: [span(confidence.toFixed(1), confidenceToken(confidence)), span("×", "muted")],
+			[
+				statDetail([
+					span(
+						confidence === null
+							? "Needs three runs and a gain"
+							: confidence >= 2
+								? "Gain is clear of run noise"
+								: confidence >= 1
+									? "Gain is near run noise"
+									: "Gain is within run noise",
+					),
+				]),
+			],
+		),
+	);
+
+	const total = Math.max(state.maxExperiments ?? 0, current.length);
+	const failed = counts.crash + counts.checks_failed;
+	const tally: TspSpan[] = [span(`${counts.keep} kept · ${counts.discard} discarded`)];
+	if (failed > 0) tally.push(span(" · "), span(`${failed} failed`, "error"));
+	tiles.push(
+		stat(
+			"runs",
+			"Runs",
+			state.maxExperiments !== null
+				? [span(String(current.length)), span(` / ${state.maxExperiments}`, "muted")]
+				: [span(String(current.length))],
+			[
+				node("meter", {
+					value: current.length / total,
+					parts: [
+						{ value: counts.keep / total, token: "success", label: `${counts.keep} kept` },
+						{ value: counts.discard / total, token: "muted", label: `${counts.discard} discarded` },
+						{
+							value: failed / total,
+							token: "error",
+							label: `${counts.crash} crashed · ${counts.checks_failed} checks failed`,
+						},
+					],
+					size: "sm",
+					role: "omp.autoresearch.tally",
+				}),
+				statDetail(tally),
+			],
+		),
+	);
+
+	const children: NativeNode[] = [row(tiles, { role: "omp.autoresearch.stats" })];
+	if (best && state.secondaryMetrics.length > 0) {
+		const baselineSecondary = findBaselineSecondary(state.results, state.currentSegment, state.secondaryMetrics);
+		const spans: TspSpan[] = [];
+		for (const metric of state.secondaryMetrics) {
+			const value = best.result.metrics[metric.name];
+			if (value === undefined) continue;
+			spans.push(span(spans.length === 0 ? "At best  " : "   ·   "));
+			spans.push(
+				span(`${metric.name} `, "mono muted"),
+				...metricSpans(value, metric.unit, fractionDigits([value]), "mono"),
+			);
+			const change = percentChange(value, baselineSecondary[metric.name]);
+			if (change) spans.push(span(` ${change}`, "mono"));
+		}
+		if (spans.length > 0) {
+			children.push(keyed(text(spans, { truncate: "end", role: "omp.autoresearch.secondary" }), "secondary"));
+		}
+	}
+	return keyed(col(children, { role: "omp.autoresearch.summary" }), "summary");
+}
+
+/** The primary metric per run, in run order. */
+function describeTrend(
+	runtime: AutoresearchDashboardRuntime,
+	indexed: readonly { result: ExperimentResult; index: number }[],
+): NativeNode {
+	const state = runtime.state;
+	return node(
+		"chart",
+		{
+			kind: "bars",
+			series: indexed.map(({ result, index }) => {
+				const run = result.runNumber ?? index + 1;
+				return {
+					label: `#${run}`,
+					value: result.metric,
+					title: `#${run} ${STATUS_LABEL[result.status]} · ${formatNum(result.metric, state.metricUnit)} · ${replaceTabs(result.description)}`,
+				};
+			}),
+			token: "accent",
+			summary: [span(`${state.metricName} per run, ${state.bestDirection} is better`)],
+			size: "md",
+			role: "omp.autoresearch.trend",
+		},
+		undefined,
+		"trend",
+	);
+}
+
+/** Every run of the segment, newest first: outcome, metric and its change from the baseline, commit, what changed. */
+function describeRuns(
+	runtime: AutoresearchDashboardRuntime,
+	indexed: readonly { result: ExperimentResult; index: number }[],
+): NativeNode {
+	const state = runtime.state;
+	const baseline = findBaselineResult(state.results, state.currentSegment);
+	const best = findBestResult(state);
+	// Cells carry bare numbers at one precision per column; the unit goes in the head unless the name says it.
+	const head = (name: string, unit: string): TspSpan[] =>
+		unit && !name.toLowerCase().endsWith(`_${unit.toLowerCase()}`)
+			? [span(name, "mono"), span(` ${unit}`, "muted")]
+			: [span(name, "mono")];
+	const measured = indexed.filter(({ result }) => result.status !== "crash").map(({ result }) => result);
+	const metricDigits = fractionDigits(measured.map(result => result.metric));
+	const secondaryDigits = state.secondaryMetrics.map(metric =>
+		fractionDigits(
+			measured.map(result => result.metrics[metric.name]).filter((value): value is number => value !== undefined),
+		),
+	);
+	const cols: TspTableColumn[] = [
+		{ id: "run", head: "#", align: "end", priority: 3 },
+		{ id: "status", head: "Outcome", priority: 4 },
+		{ id: "metric", head: head(state.metricName, state.metricUnit), align: "end", priority: 5 },
+		{ id: "change", head: "vs baseline", align: "end", priority: 4 },
+		...state.secondaryMetrics.map((metric, index): TspTableColumn => ({
+			id: `secondary${index}`,
+			head: head(metric.name, metric.unit),
+			align: "end",
+			priority: 1,
+		})),
+		{ id: "commit", head: "Commit", priority: 2 },
+		{ id: "description", head: "Change", truncate: "end", grow: 1, priority: 3 },
+	];
+	const rows = indexed
+		.slice()
+		.reverse()
+		.map(({ result, index }) => {
+			const isBest = best?.index === index;
+			const isBaseline = result === baseline;
+			const crashed = result.status === "crash";
+			const change = isBaseline || crashed ? null : percentChange(result.metric, baseline?.metric);
+			const better = baseline !== null && isBetter(result.metric, baseline.metric, state.bestDirection);
+			const cells: Record<string, TspText> = {
+				run: [span(String(result.runNumber ?? index + 1), "mono")],
+				status: isBest
+					? [span("● ", "success"), span("best", "strong")]
+					: [span("● ", STATUS_TOKEN[result.status]), span(STATUS_LABEL[result.status])],
+				metric: crashed
+					? [span("—", "muted")]
+					: [span(fmtNum(result.metric, metricDigits), isBest ? "mono strong" : "mono")],
+				change: isBaseline
+					? [span("baseline", "muted")]
+					: change
+						? [span(change, `mono ${result.status === "keep" ? (better ? "success" : "error") : "muted"}`)]
+						: [span("—", "muted")],
+				commit: [span(result.commit ? result.commit.slice(0, 7) : "—", result.commit ? "mono" : "muted")],
+				description: [span(replaceTabs(result.description))],
+			};
+			state.secondaryMetrics.forEach((metric, metricIndex) => {
+				const value = result.metrics[metric.name];
+				cells[`secondary${metricIndex}`] =
+					value === undefined
+						? [span("—", "muted")]
+						: [span(fmtNum(value, secondaryDigits[metricIndex] ?? 0), "mono")];
+			});
+			return { id: String(index), cells };
+		});
+	return node("table", { cols, rows, role: "omp.autoresearch.runs" }, undefined, "runs");
 }
 
 function statusCounts(results: readonly ExperimentResult[]): Record<ExperimentResult["status"], number> {

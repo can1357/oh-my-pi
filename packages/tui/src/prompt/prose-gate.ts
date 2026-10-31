@@ -1,4 +1,5 @@
 import { maskNonProse } from "./markdown-prose";
+import type { TypingWord } from "./typing-word";
 
 /**
  * Client-side gates shared by the prose assistants (macOS typo/autocorrect and
@@ -19,6 +20,8 @@ export interface SpellingDecorationContext {
 	lines: readonly string[];
 	line: number;
 	startCol: number;
+	/** The word being typed: typo marks touching it wait until the caret leaves it. */
+	typing?: TypingWord | undefined;
 }
 
 function tokenAt(text: string, start: number, end: number): string {

@@ -183,7 +183,74 @@ export function getSymbolTheme(): SymbolTheme {
 
 let cachedMarkdownTheme: MarkdownTheme | undefined;
 let cachedMarkdownThemeRef: Theme | undefined;
+const cacheableMarkdownThemes = new WeakMap<
+	MarkdownTheme,
+	{
+		theme: Theme;
+		fields: ReadonlyArray<readonly [PropertyKey, unknown]>;
+		symbolFields: ReadonlyArray<readonly [PropertyKey, unknown]>;
+		symbolValues: string;
+	}
+>();
+const linkTargetSnapshots = new WeakMap<ReadonlyMap<string, string>, ReadonlyMap<string, string>>();
 let markdownMermaidRendering = true;
+
+function ownFields(object: object): ReadonlyArray<readonly [PropertyKey, unknown]> {
+	return Reflect.ownKeys(object).map(key => [key, Object.getOwnPropertyDescriptor(object, key)?.value]);
+}
+
+function hasUnchangedOwnFields(object: object, fields: ReadonlyArray<readonly [PropertyKey, unknown]>): boolean {
+	if (Reflect.ownKeys(object).length !== fields.length) return false;
+	return fields.every(([key, value]) => {
+		const descriptor = Object.getOwnPropertyDescriptor(object, key);
+		return descriptor !== undefined && "value" in descriptor && descriptor.value === value;
+	});
+}
+
+/** Only themes assembled here have stable callbacks and private link state. */
+export function canCacheMarkdownListItems(candidate: MarkdownTheme): boolean {
+	const registered = cacheableMarkdownThemes.get(candidate);
+	if (registered === undefined || registered.theme !== theme || candidate.symbols === undefined) return false;
+	if (!hasUnchangedOwnFields(candidate, registered.fields)) return false;
+	if (!hasUnchangedOwnFields(candidate.symbols, registered.symbolFields)) return false;
+	try {
+		return JSON.stringify(candidate.symbols) === registered.symbolValues;
+	} catch {
+		return false;
+	}
+}
+
+function registerCacheableMarkdownTheme(markdownTheme: MarkdownTheme): void {
+	if (markdownTheme.symbols === undefined) return;
+	cacheableMarkdownThemes.set(markdownTheme, {
+		theme,
+		fields: ownFields(markdownTheme),
+		symbolFields: ownFields(markdownTheme.symbols),
+		symbolValues: JSON.stringify(markdownTheme.symbols),
+	});
+}
+
+export function getMarkdownThemeWithLinkTargets(targets: ReadonlyMap<string, string>): MarkdownTheme {
+	const base = getMarkdownTheme();
+	let snapshot = linkTargetSnapshots.get(targets);
+	let matches = snapshot?.size === targets.size;
+	if (matches && snapshot !== undefined) {
+		for (const [href, target] of targets) {
+			if (snapshot.get(href) !== target) {
+				matches = false;
+				break;
+			}
+		}
+	}
+	if (snapshot === undefined || !matches) {
+		snapshot = new Map(targets);
+		linkTargetSnapshots.set(targets, snapshot);
+	}
+	const stableSnapshot = snapshot;
+	const linked: MarkdownTheme = { ...base, resolveLink: href => stableSnapshot.get(href) };
+	if (canCacheMarkdownListItems(base)) registerCacheableMarkdownTheme(linked);
+	return linked;
+}
 
 export function setMarkdownMermaidRendering(enabled: boolean): void {
 	if (markdownMermaidRendering === enabled) return;
@@ -247,6 +314,7 @@ export function getMarkdownTheme(): MarkdownTheme {
 	};
 	cachedMarkdownTheme = markdownTheme;
 	cachedMarkdownThemeRef = theme;
+	registerCacheableMarkdownTheme(markdownTheme);
 	return markdownTheme;
 }
 

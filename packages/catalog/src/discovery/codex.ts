@@ -69,7 +69,6 @@ const codexModelEntrySchema = type({
 	"priority?": "unknown",
 	"prefer_websockets?": "unknown",
 	"use_responses_lite?": "unknown",
-	"tool_mode?": "unknown",
 	"available_access_programs?": "unknown",
 	"service_tiers?": "unknown",
 });
@@ -114,12 +113,11 @@ export interface CodexModelDiscoveryResult {
 	models: ModelSpec<"openai-codex-responses">[];
 	etag?: string;
 	/**
-	 * Set when the backend rejected the credential itself (401/403, e.g.
-	 * `token_revoked`); `models` is empty. A definitive per-account denial,
-	 * unlike the `null` result for transport/parse failures, so multi-account
-	 * discovery can skip the account instead of aborting.
+	 * A definitive per-account denial (401/403 auth, 402 payment). `models` is
+	 * empty; unlike transport/parse failures, sibling accounts can still supply
+	 * an authoritative catalog.
 	 */
-	rejectedStatus?: 401 | 403;
+	rejectedStatus?: 401 | 402 | 403;
 }
 
 /**
@@ -149,7 +147,7 @@ export async function fetchCodexModels(options: CodexModelDiscoveryOptions): Pro
 			continue;
 		}
 
-		if (response.status === 401 || response.status === 403) {
+		if (response.status === 401 || response.status === 402 || response.status === 403) {
 			return { models: [], rejectedStatus: response.status };
 		}
 		if (!response.ok) {
@@ -302,7 +300,6 @@ interface ParsedCodexModelEntry {
 	input: ("text" | "image")[];
 	preferWebsockets: boolean;
 	useResponsesLite: boolean;
-	toolMode: boolean;
 	priority: number;
 	/** Advertised tier ids; `undefined` when the entry has no `service_tiers` array. */
 	serviceTiers: string[] | undefined;
@@ -356,7 +353,6 @@ function parseCodexModelEntry(entry: unknown): ParsedCodexModelEntry | null {
 		input: normalizeInputModalities(payload.input_modalities),
 		preferWebsockets: toBoolean(payload.prefer_websockets) === true,
 		useResponsesLite: toBoolean(payload.use_responses_lite) === true,
-		toolMode: payload.tool_mode === "code_mode_only",
 		priority: toFiniteNumber(payload.priority) ?? Number.MAX_SAFE_INTEGER,
 		serviceTiers,
 	};
@@ -422,7 +418,6 @@ function buildNormalizedCodexModel(
 			maxTokens,
 			...(parsed.preferWebsockets ? { preferWebsockets: true } : {}),
 			...(parsed.useResponsesLite ? { useResponsesLite: true } : {}),
-			...(parsed.toolMode ? { toolMode: "code_mode_only" as const } : {}),
 			...(parsed.serviceTiers !== undefined ? { serviceTiers: parsed.serviceTiers } : {}),
 			...(parsed.priority !== Number.MAX_SAFE_INTEGER ? { priority: parsed.priority } : {}),
 		},

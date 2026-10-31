@@ -14,16 +14,18 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { rmSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import "./setup";
-import { cmdRemember } from "@oh-my-pi/pi-mnemopi/cli";
+import { cmdRemember, withMemory } from "@oh-my-pi/pi-mnemopi/cli";
 import { BeamMemory } from "@oh-my-pi/pi-mnemopi/core/beam";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
 import {
 	type ResolvedMnemopiRuntimeOptions,
 	withMnemopiRuntimeOptions,
 } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
+import { withBeam } from "@oh-my-pi/pi-mnemopi/mcp";
 
 interface EmbeddingRow {
 	readonly memory_id: string;
@@ -253,6 +255,108 @@ describe("issue #1832 — embedding write/read coverage", () => {
 		} finally {
 			fresh.close();
 			rmSync(dbPath, { force: true });
+		}
+	});
+
+	it("drains pending embeddings before close even when the CLI handler throws", async () => {
+		// Regression for #15804: `withMemory` (the wrapper behind `mnemopi store`)
+		// only drained on the success path, so a handler that called remember() and
+		// then threw closed the SQLite handle before the in-flight embed() committed
+		// and the memory_embeddings row was silently dropped. This goes through the
+		// exported wrapper with an OWNED file-backed DB so the invariant is pinned on
+		// the CLI path too, not just on flushExtractions() itself.
+		const { provider, calls } = fakeProvider();
+		const dataDir = `${tmpdir()}/mnemopi-15804-cli-${randomBytes(6).toString("hex")}`;
+		mkdirSync(dataDir, { recursive: true });
+		const dbPath = join(dataDir, "mnemopi.db");
+		const runtimeOptions: ResolvedMnemopiRuntimeOptions = {
+			embeddings: { provider },
+		};
+
+		let thrown: unknown;
+		await withMnemopiRuntimeOptions(runtimeOptions, async () => {
+			try {
+				await withMemory({ dbPath }, async memory => {
+					memory.remember("alpha cli throw-path regression", { source: "test", importance: 0.5 });
+					throw new Error("simulated CLI handler failure");
+				});
+			} catch (error) {
+				thrown = error;
+			}
+		});
+		// The CLI reports a handler failure to the user, so `withMemory` must
+		// rethrow; assert that first, before the persistence check below.
+		expect(thrown).toBeInstanceOf(Error);
+		expect((thrown as Error).message).toBe("simulated CLI handler failure");
+
+		// Re-open as a separate session to verify the embedding survived the throw.
+		const fresh = new BeamMemory({ dbPath });
+		try {
+			const rows = fresh.db.query("SELECT memory_id, embedding_json FROM memory_embeddings").all() as {
+				memory_id: string;
+				embedding_json: string;
+			}[];
+			expect(rows).toHaveLength(1);
+			expect(JSON.parse(rows[0]?.embedding_json ?? "[]")).toEqual([1, 0, 0, 0]);
+			expect(calls()).toBeGreaterThanOrEqual(1);
+		} finally {
+			fresh.close();
+			rmSync(dataDir, { recursive: true, force: true });
+		}
+	});
+
+	it("drains pending embeddings before close even when the MCP handler throws", async () => {
+		// Regression for #15804: withBeam's flushExtractions() must run in a finally
+		// block so that a throw from the handler still drains before close. Without
+		// this, a throwing MCP remember handler would silently drop the embedding row.
+		const { provider, calls } = fakeProvider();
+		const dataDir = `${tmpdir()}/mnemopi-15804-${randomBytes(6).toString("hex")}`;
+		mkdirSync(dataDir, { recursive: true });
+		const dbPath = join(dataDir, "mnemopi.db");
+		const runtimeOptions: ResolvedMnemopiRuntimeOptions = {
+			embeddings: { provider },
+		};
+
+		const originalDataDir = process.env.MNEMOPI_DATA_DIR;
+		process.env.MNEMOPI_DATA_DIR = dataDir;
+		let thrown: unknown;
+		try {
+			await withMnemopiRuntimeOptions(runtimeOptions, async () => {
+				try {
+					await withBeam({ bank: "default" }, async beam => {
+						beam.remember("alpha throw-path regression", { source: "test", importance: 0.5 });
+						throw new Error("simulated handler failure");
+					});
+				} catch (error) {
+					thrown = error;
+				}
+			});
+		} finally {
+			if (originalDataDir === undefined) {
+				delete process.env.MNEMOPI_DATA_DIR;
+			} else {
+				process.env.MNEMOPI_DATA_DIR = originalDataDir;
+			}
+		}
+		// MCP reports handler failures to the client through isError, which depends
+		// on withBeam PROPAGATING the rejection. Assert that first: without it a
+		// wrapper that swallows the failure still passes the persistence check.
+		expect(thrown).toBeInstanceOf(Error);
+		expect((thrown as Error).message).toBe("simulated handler failure");
+
+		// Re-open as a separate session to verify the embedding survived the throw.
+		const fresh = new BeamMemory({ dbPath });
+		try {
+			const rows = fresh.db.query("SELECT memory_id, embedding_json FROM memory_embeddings").all() as {
+				memory_id: string;
+				embedding_json: string;
+			}[];
+			expect(rows).toHaveLength(1);
+			expect(JSON.parse(rows[0]?.embedding_json ?? "[]")).toEqual([1, 0, 0, 0]);
+			expect(calls()).toBeGreaterThanOrEqual(1);
+		} finally {
+			fresh.close();
+			rmSync(dataDir, { recursive: true, force: true });
 		}
 	});
 

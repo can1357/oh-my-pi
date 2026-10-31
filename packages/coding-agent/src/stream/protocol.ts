@@ -2,7 +2,7 @@
  * Local protocol between an interactive session and the `omp stream` process
  * in the same working directory.
  *
- * Transport: newline-delimited JSON over the Unix socket / named pipe at
+ * Transport: newline-delimited JSON over the native IPC endpoint at
  * {@link streamSocketEndpoint}. The streamer assigns each connected session a
  * wire pane id and forwards the session's frames as `StreamPaneFrame`s; the
  * session never learns about other panes or the stream server.
@@ -43,10 +43,8 @@ export type StreamStreamerFrame =
 	| { t: "chat"; msg: StreamChatMessage }
 	| { t: "bye"; reason: string };
 
-/** Encode one frame for the newline-delimited socket. */
-export function encodeStreamFrame(frame: StreamSessionFrame | StreamStreamerFrame): string {
-	return `${JSON.stringify(frame)}\n`;
-}
+/** Longest line the streamer accepts from a session; a peer exceeding it is dropped. */
+export const MAX_LOCAL_LINE_BYTES = 4 * 1024 * 1024;
 
 /**
  * Apply one screen frame to a materialized screen. Shared by the streamer's

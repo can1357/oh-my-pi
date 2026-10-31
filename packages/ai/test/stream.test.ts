@@ -6,7 +6,8 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { __resetVertexTokenCache } from "@oh-my-pi/pi-ai/providers/google-auth";
-import { complete, getEnvApiKey, stream } from "@oh-my-pi/pi-ai/stream";
+import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
+import { complete, stream } from "@oh-my-pi/pi-ai/stream";
 import type { Api, Context, ImageContent, Model, OptionsForApi, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -1350,8 +1351,8 @@ describe("Generate E2E Tests", () => {
 		);
 	});
 
-	describe("Anthropic OAuth Provider (claude-sonnet-4-20250514)", () => {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-20250514");
+	describe("Anthropic OAuth Provider (claude-sonnet-4-5-20250929)", () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5-20250929");
 
 		it.skipIf(!anthropicOAuthToken)(
 			"should complete basic text generation",

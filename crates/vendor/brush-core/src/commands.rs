@@ -2,7 +2,7 @@
 
 use std::{
 	borrow::Cow,
-	ffi::OsStr,
+	ffi::{OsStr, OsString},
 	fmt::Display,
 	io::{self, Write},
 	path::{Path, PathBuf},
@@ -23,6 +23,33 @@ use crate::{
 	results::{ExecutionSpawnResult, ExecutionWaitResult},
 	sys, trace_categories, traps, variables,
 };
+
+thread_local! {
+	static BUILTIN_ON_BLOCKING_WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the calling builtin runs on a Tokio blocking worker (synchronous
+/// builtins in owned-shell pipeline stages and async jobs, or on virtual
+/// files; `async_io` builtins run as tasks). Synchronous I/O
+/// there cannot starve the async runtime, so a builtin must not offload it to
+/// another blocking worker: holding this one while queueing that can exhaust
+/// a bounded blocking pool and leave every nested read waiting forever.
+pub fn builtin_on_blocking_worker() -> bool {
+	BUILTIN_ON_BLOCKING_WORKER.with(std::cell::Cell::get)
+}
+
+/// Drives a builtin to completion on the current blocking worker, marking the
+/// thread for [`builtin_on_blocking_worker`] while it runs.
+fn block_on_builtin<F: Future>(future: F) -> F::Output {
+	struct Restore(bool);
+	impl Drop for Restore {
+		fn drop(&mut self) {
+			BUILTIN_ON_BLOCKING_WORKER.with(|flag| flag.set(self.0));
+		}
+	}
+	let _restore = Restore(BUILTIN_ON_BLOCKING_WORKER.with(|flag| flag.replace(true)));
+	tokio::runtime::Handle::current().block_on(future)
+}
 
 /// Encapsulates the result of waiting for a command to complete.
 pub enum CommandWaitResult {
@@ -172,6 +199,71 @@ impl<SE: extensions::ShellExtensions> std::ops::DerefMut for ShellForCommand<'_,
 	}
 }
 
+/// The host path a file-backed virtual path aliases, if any.
+///
+/// External processes have no view of the shell's virtual filesystem, so a
+/// `scheme://` path handed to one means nothing there. File-backed schemes
+/// (`skill://`, `local://`, `artifact://`, …) alias a real file and resolve to
+/// it; rendered ones (`omp://`, `history://`) and schemes no provider serves
+/// alias nothing and keep their virtual spelling. A provider error (an unknown
+/// skill, a path escaping its root) is the command's error: the child would
+/// only fail later on a URL it cannot open.
+async fn host_path(filesystem: &pi_vfs::Fs, path: &Path) -> Result<Option<PathBuf>, error::Error> {
+	if filesystem.is_native() || !pi_vfs::is_virtual_path(path) {
+		return Ok(None);
+	}
+	filesystem.backing_path(path).await.map_err(|err| {
+		error::ErrorKind::ExternalCommandVirtualPathUnresolved(path.to_owned(), err).into()
+	})
+}
+
+/// `arg` rewritten to the host path it names, if it names one.
+///
+/// Both the bare spelling (`skill://example-skill/tool.py`) and the
+/// attached-value spelling (`--index=skill://example-skill/data`) translate.
+/// Anything the filesystem does not route to a backing file is left exactly as
+/// it was written, so `https://…`, `s3://…`, and ordinary words reach the
+/// child untouched. A bare scheme root (`local://`) is far likelier a search
+/// pattern or message text than a directory, so it stays literal too.
+async fn host_arg(filesystem: &pi_vfs::Fs, arg: &OsStr) -> Result<Option<OsString>, error::Error> {
+	let Some(text) = arg.to_str() else {
+		return Ok(None);
+	};
+	if !text.contains("://") {
+		return Ok(None);
+	}
+	if pi_vfs::is_virtual_path(Path::new(text)) {
+		if is_url_root(text) {
+			return Ok(None);
+		}
+		return Ok(host_path(filesystem, Path::new(text))
+			.await?
+			.map(PathBuf::into_os_string));
+	}
+	let Some((name, value)) = text.split_once('=') else {
+		return Ok(None);
+	};
+	// Only an option name may carry an attached URL. A URL of its own that
+	// happens to embed one in a query string (`https://host/cb?next=local://x`)
+	// is one opaque string to the program receiving it.
+	if name.contains("://") || is_url_root(value) {
+		return Ok(None);
+	}
+	let Some(host) = host_path(filesystem, Path::new(value)).await? else {
+		return Ok(None);
+	};
+	let mut rewritten = OsString::from(name);
+	rewritten.push("=");
+	rewritten.push(host);
+	Ok(Some(rewritten))
+}
+
+/// Whether `text` is a URL naming nothing below its scheme (`local://`).
+fn is_url_root(text: &str) -> bool {
+	pi_vfs::url_scheme(Path::new(text))
+		.is_some_and(|scheme| text[scheme.len() + 3..].trim_matches('/').is_empty())
+}
+
 /// Composes a `std::process::Command` to execute the given command.
 /// Appropriately configures the command name and arguments, redirections,
 /// injected file descriptors, environment variables, etc.
@@ -187,39 +279,76 @@ impl<SE: extensions::ShellExtensions> std::ops::DerefMut for ShellForCommand<'_,
 ///   environment; if false, the command will inherit environment variables
 ///   marked as exported in the provided `Shell`.
 #[allow(unused_variables, reason = "argv0 is only used on unix platforms")]
-pub fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtensions>(
+pub async fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtensions>(
 	context: &ExecutionContext<'_, SE>,
 	command_name: &str,
 	argv0: &str,
 	args: &[S],
 	empty_env: bool,
 ) -> Result<std::process::Command, error::Error> {
-	// The operating system can only start native programs in native
-	// directories; virtual paths exist solely inside this process.
+	// The operating system has no view of this process's virtual filesystem: a
+	// child can only start in a native directory and only run a native program.
+	// A file-backed scheme aliases a real file, so the program, the arguments
+	// and the working directory are handed to the child as those files; a
+	// scheme backed by nothing is still refused.
 	let filesystem = context.shell.filesystem();
 	let working_dir = context.shell.working_dir();
-	if !filesystem.is_native_local(working_dir) {
-		return Err(error::ErrorKind::ExternalCommandInVirtualWorkingDir(
-			context.command_name.clone(),
-			working_dir.to_owned(),
-		)
-		.into());
-	}
+	let spawn_dir = match host_path(filesystem, working_dir).await? {
+		Some(backing) => {
+			// A child may write anywhere under its working directory, so it must
+			// not start in one the shell itself refuses to mutate (`skill://`,
+			// `artifact://`). Arguments still translate: those name single files
+			// the program was asked to use.
+			match filesystem.access(working_dir, false, true, false).await {
+				Ok(()) => backing,
+				Err(err) if err.kind() == io::ErrorKind::ReadOnlyFilesystem => {
+					return Err(error::ErrorKind::ExternalCommandInReadOnlyWorkingDir(
+						context.command_name.clone(),
+						working_dir.to_owned(),
+					)
+					.into());
+				},
+				Err(err) => {
+					return Err(error::ErrorKind::ExternalCommandVirtualPathUnresolved(
+						working_dir.to_owned(),
+						err,
+					)
+					.into());
+				},
+			}
+		},
+		None if filesystem.is_native_local(working_dir) => working_dir.to_owned(),
+		None => {
+			return Err(error::ErrorKind::ExternalCommandInVirtualWorkingDir(
+				context.command_name.clone(),
+				working_dir.to_owned(),
+			)
+			.into());
+		},
+	};
+	let mut program = PathBuf::from(command_name);
 	if sys::fs::contains_path_separator(command_name) {
-		let program = context.shell.absolute_path(Path::new(command_name));
-		if !filesystem.is_native_local(&program) {
-			return Err(error::ErrorKind::ExternalCommandIsVirtual(program).into());
+		let spelled = context.shell.absolute_path(Path::new(command_name));
+		if !filesystem.is_native_local(&spelled) {
+			program = host_path(filesystem, &spelled)
+				.await?
+				.ok_or_else(|| error::ErrorKind::ExternalCommandIsVirtual(spelled))?;
 		}
 	}
 
-	let mut cmd = std::process::Command::new(command_name);
+	let mut cmd = std::process::Command::new(&program);
 
 	// Override argv[0].
 	// NOTE: Not supported on all platforms.
 	cmd.arg0(argv0);
 
-	// Pass through args.
-	cmd.args(args);
+	for arg in args {
+		let arg = arg.as_ref();
+		match host_arg(filesystem, arg).await? {
+			Some(rewritten) => cmd.arg(rewritten),
+			None => cmd.arg(arg),
+		};
+	}
 
 	// Apply `ulimit` overrides to the child only; the host keeps its own limits.
 	#[cfg(unix)]
@@ -248,8 +377,8 @@ pub fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtensions>(
 		}
 	}
 
-	// Use the shell's current working dir.
-	cmd.current_dir(context.shell.working_dir());
+	// Use the shell's current working dir, as the host spells it.
+	cmd.current_dir(&spawn_dir);
 
 	// Start with a clear environment.
 	cmd.env_clear();
@@ -264,8 +393,16 @@ pub fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtensions>(
 				cmd.env(k.as_str(), v.value().to_cow_str(context.shell).as_ref());
 			}
 		}
-		// Set _ to the resolved command path for external commands.
-		cmd.env("_", command_name);
+		// A child started in the directory a URL aliases must not be told its
+		// working directory is the URL: anything reading `PWD` directly would
+		// disagree with its own `getcwd()`. The shell's own `$PWD` keeps the
+		// URL spelling; only the child's environment is corrected.
+		if spawn_dir != working_dir {
+			cmd.env("PWD", &spawn_dir);
+		}
+		// Set _ to the resolved command path for external commands, as the host
+		// spells it when the program was a URL.
+		cmd.env("_", &program);
 	}
 
 	// Add in exported functions.
@@ -469,7 +606,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 			};
 
 			if let Some(path) = path {
-				self.execute_via_external(&path)
+				self.execute_via_external(&path).await
 			} else {
 				// Bash updates $_ even when the command is not found, so mirror
 				// that here before reporting the error.
@@ -484,7 +621,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 			}
 		} else {
 			let command_name = PathBuf::from(self.command_name.clone());
-			self.execute_via_external(command_name.as_path())
+			self.execute_via_external(command_name.as_path()).await
 		}
 	}
 
@@ -504,9 +641,11 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 	}
 
 	async fn execute_via_builtin(
-		self,
+		mut self,
 		builtin: builtins::Registration<SE>,
 	) -> Result<ExecutionSpawnResult, error::Error> {
+		// Only an external command's child can make deferred redirections.
+		interp::materialize_deferred_redirects(&self.shell, &mut self.params).await?;
 		match self.shell {
 			ShellForCommand::OwnedShell { target, .. } => {
 				Ok(Self::execute_via_builtin_in_owned_shell(
@@ -531,17 +670,34 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 		args: Vec<CommandArg>,
 	) -> ExecutionSpawnResult {
 		let last_arg = Self::take_last_arg(&args);
-		let join_handle = tokio::task::spawn_blocking(move || {
-			let cmd_context = ExecutionContext { shell: &mut shell, command_name, params };
 
-			let rt = tokio::runtime::Handle::current();
-			let result = rt.block_on(execute_builtin_command(&builtin, cmd_context, args));
+		// An `async_io` builtin never blocks a worker, so it runs as a plain task.
+		// Every other builtin does synchronous descriptor I/O: it runs on a
+		// blocking worker, driven to completion there, so that I/O cannot starve
+		// the async runtime.
+		let join_handle = if builtin.async_io {
+			tokio::spawn(async move {
+				let cmd_context = ExecutionContext { shell: &mut shell, command_name, params };
 
-			// Update $_ after command execution.
-			shell.update_last_arg_variable(last_arg);
+				let result = execute_builtin_command(&builtin, cmd_context, args).await;
 
-			result
-		});
+				// Update $_ after command execution.
+				shell.update_last_arg_variable(last_arg);
+
+				result
+			})
+		} else {
+			tokio::task::spawn_blocking(move || {
+				let cmd_context = ExecutionContext { shell: &mut shell, command_name, params };
+
+				let result = block_on_builtin(execute_builtin_command(&builtin, cmd_context, args));
+
+				// Update $_ after command execution.
+				shell.update_last_arg_variable(last_arg);
+
+				result
+			})
+		};
 
 		ExecutionSpawnResult::StartedTask(join_handle)
 	}
@@ -554,8 +710,8 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 		let mut shell = self.shell;
 		let last_arg = Self::take_last_arg(&self.args);
 
-		let result = if sees_virtual_files {
-			// Builtins do synchronous I/O on their descriptors. A virtual file's
+		let result = if sees_virtual_files && !builtin.async_io {
+			// Synchronous builtins do blocking I/O on their descriptors. A virtual file's
 			// synchronous I/O awaits its provider, which must not happen on an
 			// async runtime thread (a current-thread runtime would have nothing
 			// left to drive the provider). Run the builtin on a blocking worker
@@ -572,11 +728,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 			let join_handle = tokio::task::spawn_blocking(move || {
 				let mut lease = lease;
 				let cmd_context = ExecutionContext { shell: &mut lease, command_name, params };
-				let result = tokio::runtime::Handle::current().block_on(execute_builtin_command(
-					&builtin,
-					cmd_context,
-					args,
-				));
+				let result = block_on_builtin(execute_builtin_command(&builtin, cmd_context, args));
 				(lease, result)
 			});
 			match join_handle.await {
@@ -612,9 +764,11 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 	}
 
 	async fn execute_via_function(
-		self,
+		mut self,
 		func_registration: functions::Registration,
 	) -> Result<ExecutionSpawnResult, error::Error> {
+		// Only an external command's child can make deferred redirections.
+		interp::materialize_deferred_redirects(&self.shell, &mut self.params).await?;
 		let mut params = self.params;
 		params.disable_command_output_marking();
 
@@ -671,7 +825,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 		}
 	}
 
-	fn execute_via_external(self, path: &Path) -> Result<ExecutionSpawnResult, error::Error> {
+	async fn execute_via_external(self, path: &Path) -> Result<ExecutionSpawnResult, error::Error> {
 		let mut shell = self.shell;
 		let last_arg = Self::take_last_arg(&self.args);
 
@@ -689,7 +843,8 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 			self.process_group_id,
 			self.argv0.as_deref(),
 			&self.args[1..],
-		);
+		)
+		.await;
 
 		// Update $_ after command execution.
 		shell.update_last_arg_variable(last_arg);
@@ -702,7 +857,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 	}
 }
 
-pub(crate) fn execute_external_command(
+pub(crate) async fn execute_external_command(
 	context: ExecutionContext<'_, impl extensions::ShellExtensions>,
 	executable_path: &str,
 	in_pipeline: bool,
@@ -723,10 +878,13 @@ pub(crate) fn execute_external_command(
 		.collect::<Vec<_>>();
 
 	// Before we lose ownership of the open files, figure out if stdin will be a
-	// terminal.
-	let child_stdin_is_terminal = context
-		.try_fd(openfiles::OpenFiles::STDIN_FD)
-		.is_some_and(|f| f.is_terminal());
+	// terminal. A deferred redirection of fd 0 is made in the child before the
+	// command runs (see `interp::DeferredRedirect`), so what this process holds
+	// there, which can still be its terminal, is not the command's input.
+	let child_stdin_is_terminal = !context.params.sets_deferred(openfiles::OpenFiles::STDIN_FD)
+		&& context
+			.try_fd(openfiles::OpenFiles::STDIN_FD)
+			.is_some_and(|f| f.is_terminal());
 
 	// Figure out if we should be setting up a new process group.
 	let new_pg = matches!(context.params.process_group_policy, ProcessGroupPolicy::NewProcessGroup);
@@ -737,13 +895,26 @@ pub(crate) fn execute_external_command(
 	// command) unless the caller specified an explicit override.
 	let argv0 = argv0_override.unwrap_or(context.command_name.as_str());
 	#[allow(unused_mut, reason = "only mutated on unix platforms")]
-	let mut cmd = compose_std_command(
-		&context,
-		executable_path,
-		argv0,
-		cmd_args.as_slice(),
-		false, /* empty environment? */
-	)?;
+	let mut cmd = if context.params.deferred_redirects().is_empty() {
+		compose_std_command(
+			&context,
+			executable_path,
+			argv0,
+			cmd_args.as_slice(),
+			false, /* empty environment? */
+		)
+		.await?
+	} else {
+		// Redirections to a FIFO left for the child (see
+		// `interp::DeferredRedirect`): `/bin/sh` makes them and then execs the
+		// command in place, so the pid the shell tracks is the command's. Its
+		// argv[0] is then the resolved path.
+		let script = interp::deferred_redirect_script(context.params.deferred_redirects());
+		let mut trampoline_args = vec!["-c".to_owned(), script, "sh".to_owned()];
+		trampoline_args.push(executable_path.to_owned());
+		trampoline_args.extend(cmd_args.iter().map(|arg| (*arg).clone()));
+		compose_std_command(&context, "/bin/sh", "sh", trampoline_args.as_slice(), false).await?
+	};
 	let mut marker_output = prepare_output_markers(&context, executable_path, cmd_args.as_slice());
 
 

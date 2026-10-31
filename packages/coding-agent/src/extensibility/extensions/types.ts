@@ -14,6 +14,7 @@ import {
 	type ExtensionWidgetContent,
 	type MessageRenderer,
 	type AssistantThinkingRenderer,
+	type AssistantTextRenderer,
 } from "@oh-my-pi/pi-tui/chat/extension-types";
 export {
 	type ExtensionUiComponent,
@@ -23,6 +24,8 @@ export {
 	type MessageRenderer,
 	type AssistantThinkingRenderContext,
 	type AssistantThinkingRenderer,
+	type AssistantTextRenderContext,
+	type AssistantTextRenderer,
 } from "@oh-my-pi/pi-tui/chat/extension-types";
 import type { type as ArkType } from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
@@ -37,6 +40,9 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ContextUsage } from "@oh-my-pi/pi-tui/status-line/types";
+import type { LoopConditionConfig } from "@oh-my-pi/pi-tui/status-line/loop";
+import type { LivePhase } from "@oh-my-pi/pi-tui/apps/live-visualizer";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type {
 	Api,
 	AssistantMessage,
@@ -70,14 +76,17 @@ import type {
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
 import type { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
+import type { CodeReviewAnnotation, TextReviewAnnotation } from "@oh-my-pi/pi-tui/overlays/annotation-types";
 export type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { EditToolDetails } from "@oh-my-pi/pi-tui/tools/edit";
 import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
+import type { LiveTranscript } from "../../live/controller";
 import type { ExecOptions, ExecResult } from "../../exec/exec";
 import type * as PiCodingAgent from "../../index";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
+import type { LoopLimitConfig } from "../../modes/loop-limit";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
@@ -135,6 +144,7 @@ import type {
 	TurnStartEvent,
 } from "../shared-events";
 import type { SlashCommandInfo } from "../slash-commands";
+import type { TerminalLaunchRequest, TerminalLaunchResult } from "../../subprocess/terminal-launch";
 
 export type { OverlayHandle, OverlayOptions } from "@oh-my-pi/pi-tui";
 export type { AppKeybinding, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -203,6 +213,13 @@ export interface ExtensionUIDialogOptions {
 	onTimeoutStart?: () => void;
 	/** Invoked when user input resets a UI-managed timeout countdown */
 	onTimeoutReset?: () => void;
+	/**
+	 * Host hint to mask entered characters in `input` dialogs.
+	 * Enforced by the interactive TUI (masked as bullets), forwarded on RPC `input`
+	 * requests for hosts that honor it, and rejected (`undefined`) in ACP mode where
+	 * form elicitation does not support secret masking.
+	 */
+	secret?: boolean;
 	/** Initial cursor position for select dialogs (0-indexed) */
 	initialIndex?: number;
 	/** Render an outlined list for select dialogs */
@@ -254,6 +271,39 @@ export interface ExtensionCustomOptions {
 /** Wrap the current autocomplete provider with additional behavior (pi-compatible). */
 export type AutocompleteProviderFactory = (current: AutocompleteProvider) => AutocompleteProvider;
 
+/** The renderings of a tool-approval prompt passed to `ExtensionUIContext.approve()`. */
+export interface ExtensionApprovalPrompt {
+	full: string;
+	compact: string;
+	/** Label of the "approve for this session" choice; absent when the call must be approved each time. */
+	session?: string;
+	/**
+	 * Grants an `always-ask-cached` prompt can remember, in display order; absent otherwise. A host
+	 * that does not render them still answers `once`/`session`/`deny`.
+	 */
+	grants?: readonly ExtensionApprovalGrant[];
+}
+
+/** One remembered-approval choice of an `always-ask-cached` prompt. */
+export interface ExtensionApprovalGrant {
+	/** `folder`: the directory around the call, its own entries only; `target`: the exact file or URL. */
+	scope: "folder" | "target";
+	/** Label of the choice remembered for this session, e.g. `Approve Directory: ~/src`. */
+	label: string;
+	/** Label of the same choice remembered across sessions, e.g. `Always Approve Directory: ~/src`. */
+	alwaysLabel: string;
+}
+
+/**
+ * An answer to `ExtensionUIContext.approve()`: this call only, later like calls this session too,
+ * one of the prompt's {@link ExtensionApprovalPrompt.grants} (`always`: across sessions), or no.
+ */
+export type ExtensionApprovalAnswer =
+	| "once"
+	| "session"
+	| "deny"
+	| { grant: ExtensionApprovalGrant["scope"]; always: boolean };
+
 /**
  * UI context for extensions to request interactive UI.
  * Each mode (interactive, RPC, print) provides its own implementation.
@@ -266,6 +316,8 @@ export type AutocompleteProviderFactory = (current: AutocompleteProvider) => Aut
 export interface ExtensionUIContext {
 	/** True when selector timeouts start only after the dialog is presented. */
 	timeoutStartsOnPresentation?: boolean;
+	/** True when pasteToEditor updates a local or remote composer; absent means unsupported. */
+	supportsEditor?: boolean;
 	/** Show a selector and return the selected label, even when an option also includes a description. */
 	select(
 		title: string,
@@ -275,6 +327,8 @@ export interface ExtensionUIContext {
 
 	/** Show a confirmation dialog. */
 	confirm(title: string, message: string, dialogOptions?: ExtensionUIDialogOptions): Promise<boolean>;
+	/** Create a pane or multiplexer group and run an argv command when the TUI host supports it. */
+	openTerminal?(request: TerminalLaunchRequest): Promise<TerminalLaunchResult>;
 
 	/** Show a text input dialog. */
 	input(title: string, placeholder?: string, dialogOptions?: ExtensionUIDialogOptions): Promise<string | undefined>;
@@ -285,11 +339,39 @@ export interface ExtensionUIContext {
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<ExtensionAskDialogResult | undefined>;
 
+	/**
+	 * Show a tool-approval prompt; anything but an explicit approval is `deny`, `session` only when
+	 * the prompt offers it, and a grant only one the prompt lists. Each prompt is a title line then
+	 * details: `compact` summarizes the tool's own details (command, path, content) to one row for a
+	 * host with little room, `full` keeps them whole. Absent: callers fall back to a `select`.
+	 */
+	approve?(
+		prompt: ExtensionApprovalPrompt,
+		dialogOptions?: ExtensionUIDialogOptions,
+	): Promise<ExtensionApprovalAnswer>;
+
 	/** Show a notification to the user. */
 	notify(message: string, type?: "info" | "warning" | "error"): void;
 
 	/** Listen to raw terminal input (interactive mode only). Returns an unsubscribe function. */
 	onTerminalInput(handler: TerminalInputHandler): () => void;
+
+	/**
+	 * Draw the assistant reply sent at `timestamp` (`message.timestamp`) again, re-running the
+	 * assistant text renderers, e.g. after a click changed what they return. Interactive mode only,
+	 * and only while `extensionRenderers.assistantText` is on; a no-op elsewhere.
+	 */
+	rerenderMessage(timestamp: number): void;
+
+	/**
+	 * True while a link whose scheme an extension registered can be picked to raise `link_activate`:
+	 * interactive mode in a plain terminal with `extensionRenderers.assistantText` on, and either the
+	 * link-hint key (`app.links.hint`, Alt+O by default) bound or `tui.mouse` on. Changing the setting,
+	 * or `tui.mouse` while the hint key is unbound, redraws the transcript and re-runs the assistant
+	 * text renderers, so a renderer can read this on each call, e.g. to show content inline instead of
+	 * behind a link nobody can pick. False everywhere else.
+	 */
+	getLinkClicksAvailable(): boolean;
 
 	/** Set status text in the footer/status bar. Pass undefined to clear. */
 	setStatus(key: string, text: string | undefined): void;
@@ -360,6 +442,9 @@ export interface ExtensionUIContext {
 	setEditorComponent(
 		factory: ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => CustomEditor) | undefined,
 	): void;
+
+	/** Get the current custom editor factory, if one has been installed. */
+	getEditorComponent(): ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => CustomEditor) | undefined;
 
 	/** Get the current theme for styling. */
 	readonly theme: Theme;
@@ -482,6 +567,182 @@ export interface ExtensionAgentIdentity {
 	parentId?: string;
 }
 
+/** Text an annotation run targets; `file` paths resolve against the live session cwd. */
+export type AnnotationTextSource =
+	| { kind: "text"; text: string; label?: string }
+	| { kind: "file"; path: string }
+	/** The latest non-empty assistant reply on the active branch. */
+	| { kind: "last" };
+
+/** A diff an annotation run targets, frozen once before notes are matched or the overlay opens. */
+export type AnnotationDiffSource =
+	/** A git-format patch supplied by the caller. */
+	| { kind: "diff"; diff: string; label?: string }
+	/** Staged + unstaged (or jj working-copy) changes in the live session cwd. */
+	| { kind: "uncommitted" }
+	/** A GitHub PR or GitLab MR: `https://github.com/owner/repo/pull/N`, `pr://owner/repo/N`, `https://<host>/<group>/<project>/-/merge_requests/N`, or `mr://<host>/<group>/<project>/N/diff`. */
+	| { kind: "pr"; ref: string };
+
+export type AnnotationSource = AnnotationTextSource | AnnotationDiffSource;
+
+/**
+ * A note on a text source: whole-source when `line` is omitted, else one 1-based source line.
+ * `quote` pins the expected line text; when it differs from the current line, the note rejects.
+ */
+export interface AnnotationTextNote {
+	note: string;
+	line?: number;
+	quote?: string;
+}
+
+/**
+ * A note on a diff source: whole-file when `line` is omitted. `line` is a line number on
+ * `side` (default `"new"`; use `"old"` for removed lines); `occurrence` picks among repeated
+ * sections for the same path (default 1). `rawLine` pins the expected diff row including its
+ * `+`/`-`/space prefix; when it differs from the matched row, the note rejects.
+ */
+export interface AnnotationDiffNote {
+	path: string;
+	note: string;
+	line?: number;
+	side?: "old" | "new";
+	occurrence?: number;
+	rawLine?: string;
+}
+
+/**
+ * Where the built feedback goes. `"auto"` pastes into the composer when the interactive TUI
+ * editor is available and the text is not an LLM review request; otherwise it sends.
+ * `"paste"` and `"send"` force one channel (`"send"` uses `pi.sendUserMessage` semantics and
+ * queues as a follow-up while the agent is streaming); `"none"` only returns the text.
+ */
+export type AnnotationDelivery = "auto" | "paste" | "send" | "none";
+
+interface AnnotationRequestBase {
+	deliver?: AnnotationDelivery;
+}
+
+/** Diff-only options: `review` builds the full `/review` request; `focus` adds review focus text. */
+interface AnnotationDiffRequestOptions {
+	review?: boolean;
+	focus?: string;
+}
+
+/** Text sources never build an LLM review request, so the diff-only options are rejected. */
+interface AnnotationTextRequestOptions {
+	review?: never;
+	focus?: never;
+}
+
+export type AnnotationSubmitRequest =
+	| (AnnotationRequestBase &
+			AnnotationTextRequestOptions & { source: AnnotationTextSource; notes: AnnotationTextNote[] })
+	| (AnnotationRequestBase &
+			AnnotationDiffRequestOptions & {
+				source: AnnotationDiffSource;
+				notes: AnnotationDiffNote[];
+			});
+
+export type AnnotationOpenRequest =
+	| (AnnotationRequestBase & AnnotationTextRequestOptions & { source: AnnotationTextSource })
+	| (AnnotationRequestBase & Pick<AnnotationDiffRequestOptions, "focus"> & { source: AnnotationDiffSource });
+
+interface AnnotationResultBase {
+	/** Feedback exactly as `/annotate` renders it; undefined when there was nothing to report. */
+	text: string | undefined;
+	/** Channel the text went to; `"none"` when it was only returned. */
+	delivered: "paste" | "send" | "none";
+}
+
+/** Result for a text source (`text`, `file`, `last`). */
+export interface AnnotationTextResult extends AnnotationResultBase {
+	kind: "text";
+	review: false;
+	/** Normalized notes: line notes carry the quoted source line. */
+	annotations: TextReviewAnnotation[];
+	/**
+	 * Set only by `open` when the operator replaced the source through the external editor
+	 * inside the overlay; `text` and `annotations` refer to this edited text, not the original.
+	 */
+	editedText?: string;
+}
+
+/** Result for a diff source (`diff`, `uncommitted`, `pr`). */
+export interface AnnotationDiffResult extends AnnotationResultBase {
+	kind: "diff";
+	/** Whether `text` is an LLM review request rather than pasteable notes. */
+	review: boolean;
+	/** Normalized notes: line notes carry the matched diff row. */
+	annotations: CodeReviewAnnotation[];
+}
+
+/** Discriminated by `kind`, which follows the request source. */
+export type AnnotationResult = AnnotationTextResult | AnnotationDiffResult;
+
+/**
+ * `/annotate` as an API. `submit` turns caller-supplied notes into the same feedback without UI;
+ * `open` mounts the annotation overlay on a caller-chosen source (`mode === "tui"` only) and
+ * resolves with the operator's notes, or undefined when dismissed.
+ * Both reject when a source cannot be read or a note does not match its source.
+ */
+export interface ExtensionAnnotationsAPI {
+	submit(request: AnnotationSubmitRequest): Promise<AnnotationResult>;
+	open(request: AnnotationOpenRequest): Promise<AnnotationResult | undefined>;
+}
+
+/**
+ * Builds `ctx.annotations` for one context. `getContext` is read per call so the API sees the
+ * receiving context's live cwd and UI; the host injects the implementation.
+ */
+export type ExtensionAnnotationsFactory = (
+	getContext: () => ExtensionContext,
+	sendUserMessage: (text: string, options?: SendUserMessageOptions) => void,
+) => ExtensionAnnotationsAPI;
+
+/** Options for {@link ExtensionContext.startLive}. */
+export interface ExtensionLiveStartOptions {
+	/**
+	 * SDP offer from the extension's own WebRTC peer, e.g. a browser `RTCPeerConnection` with one
+	 * sendrecv Opus audio track and an `oai-events` data channel. That peer carries all audio;
+	 * the host opens no microphone or speaker.
+	 */
+	sdpOffer: string;
+	/** Realtime voice; defaults to the `live.voice` setting. */
+	voice?: string;
+	/**
+	 * Handlebars template replacing the bundled live instructions, rendered with
+	 * `{ username, firstName }` like the bundled prompt.
+	 */
+	instructions?: string;
+	/**
+	 * Phase changes (`connecting`, `listening`, `working`, `muted`, `error`). `muted` is a request:
+	 * the host has no track to mute, so silence the peer's microphone track until the next phase.
+	 */
+	onPhase?(phase: LivePhase): void;
+	/** Streaming and final transcripts of both sides of the conversation. */
+	onTranscript?(transcript: LiveTranscript): void;
+	/**
+	 * Called exactly once when the session ends, with the failure that ended it if any. A start
+	 * that fails to connect calls it too, before `startLive` rejects.
+	 */
+	onEnd?(error?: Error): void;
+}
+
+/** A live voice session started by {@link ExtensionContext.startLive}. */
+export interface ExtensionLiveSession {
+	/** SDP answer to apply to the extension's peer. */
+	sdpAnswer: string;
+	/** Voice in use. */
+	voice: string;
+	/**
+	 * Ends the session; resolves once it has stopped. Safe to call repeatedly. The host has no media
+	 * peer, so it never sees the extension's peer go away: call this when that peer disconnects
+	 * (`connectionstatechange` to `failed` or `closed`, or the relay socket closing). Until then the
+	 * call stays open and the TUI keeps its live visualizer up.
+	 */
+	stop(): Promise<void>;
+}
+
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
@@ -515,6 +776,38 @@ export interface ExtensionContext {
 	hasPendingMessages(): boolean;
 	/** Gracefully shutdown and exit. */
 	shutdown(): void;
+	/**
+	 * Answer the open interactive plan review as if the operator picked `choice` in it.
+	 * `refine` needs non-empty `input.feedback`, which is sent as the next planning prompt.
+	 * `save` writes the plan under its default file name without the path prompt.
+	 * Approvals execute the plan as it is when picked (in-overlay edits, else the plan
+	 * file), which may differ from the `planContent` that `plan_review_requested` reported.
+	 * `input.role` selects an approval's execution tier, matched against `plan_review_requested`'s
+	 * `tiers` by role name; without it the approval runs on the tier selected in the
+	 * overlay's model slider. `role` applies only to approvals (`execute`, `compact`, `keep`).
+	 * False when that review is not open, the choice is disabled or missing its feedback,
+	 * `input.role` names no selectable tier or accompanies a non-approval choice, or the
+	 * mode has no plan review.
+	 */
+	resolvePlanReview(reviewId: string, choice: PlanReviewChoice, input?: { feedback?: string; role?: string }): boolean;
+	/**
+	 * The open interactive plan review still awaiting an answer, as `plan_review_requested` reported it,
+	 * or `undefined`. Lets an extension that loaded or reconnected after the event answer the review.
+	 */
+	getPendingPlanReview(): PlanReviewRequestedEvent | undefined;
+	/**
+	 * Open the interactive plan review on the newest plan file, like `/plan-review`, while the
+	 * session is idle. True once a review is awaiting an answer (an already-open review is kept,
+	 * not replaced), without waiting for a choice. False, without aborting anything or showing
+	 * warnings, when plan mode is inactive, the agent is streaming or compacting, or no non-empty
+	 * plan file exists.
+	 */
+	openPlanReview(): Promise<boolean>;
+	/**
+	 * Query and control the built-in plan, vibe, goal, and loop modes. Interactive (TUI) sessions
+	 * only: `undefined` in print, JSON, RPC, and ACP modes and in subagents.
+	 */
+	sessionModes?: ExtensionSessionModes;
 	/** Identity of the agent this session runs: the top-level session or a subagent. */
 	agent: ExtensionAgentIdentity;
 	/**
@@ -535,8 +828,17 @@ export interface ExtensionContext {
 	 * Optional for compatibility with hosts that do not provide side turns.
 	 */
 	runEphemeralTurn?(options: EphemeralTurnOptions): Promise<EphemeralTurnResult>;
+	/**
+	 * Start a Codex live voice session bound to this session, like `/live`, but with audio on the
+	 * extension's own WebRTC peer (for example a browser on another device). Delegated work runs as
+	 * normal turns of this session. Rejects while another live session is active.
+	 * Optional: present only in hosts that run live sessions (currently interactive mode).
+	 */
+	startLive?(options: ExtensionLiveStartOptions): Promise<ExtensionLiveSession>;
 	/** Structured memory runtime for status/search/save across the configured backend. */
 	memory?: MemoryRuntimeContext;
+	/** `/annotate` as an API: build or collect annotation feedback on text and diffs. */
+	annotations: ExtensionAnnotationsAPI;
 	/**
 	 * Schedule a repeating callback whose throws are contained. Unlike raw
 	 * `setInterval`, a synchronous throw or rejected promise from `callback` is
@@ -689,6 +991,9 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	/** Tool approval tier. Defaults to `"exec"` when omitted.
 	 *  `"read"`: read-only operations. `"write"`: mutations. `"exec"`: code execution. */
 	approval?: ToolApproval;
+	/** Exact targets an approval mode may remember for this call (`always-ask-cached`), one key per
+	 *  target, derived from the call's args. Omit it and approvals are never remembered per target. */
+	approvalCacheTargets?: (args: unknown) => readonly string[] | undefined;
 	/** Structured-output strict grammar opt-in/out. `false` is meaningful: OpenAI-family
 	 *  serializers preserve an explicit `strict: false` on the wire (#4336/#4340). */
 	strict?: boolean;
@@ -696,6 +1001,8 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	mcpServerName?: string;
 	/** Original MCP tool name for discovery/search metadata. */
 	mcpToolName?: string;
+	/** MCP read-only annotation, independent of the approval tier. */
+	mcpReadOnlyHint?: boolean;
 	/** Previous public name when a rename changed minting. Forwarded through
 	 *  RegisteredToolAdapter so approval falls back to legacy `deny`/`prompt`. */
 	legacyName?: string;
@@ -771,6 +1078,14 @@ export interface ToolInfo {
 	parameters: TSchema;
 	promptGuidelines?: string[];
 	sourceInfo: SourceInfo;
+	/** MCP server name (as configured) when this tool fronts an MCP server. */
+	mcpServerName?: string;
+	/** Original MCP tool name, before `mcp__<server>_<tool>` minting. */
+	mcpToolName?: string;
+	/** The MCP tool's `annotations.readOnlyHint`, when it declared one. Lets an
+	 *  extension tell a read-only MCP call from one that changes things (e.g.
+	 *  to allow only read-only tools in a restricted turn). */
+	mcpReadOnlyHint?: boolean;
 }
 
 // ============================================================================
@@ -841,9 +1156,14 @@ export interface AfterProviderResponseEvent extends ProviderResponseMetadata {
 	type: "after_provider_response";
 }
 
-/** Fired before an ordinary prompt or an actually dequeued user-containing batch reaches the provider. */
+/**
+ * Fired before an ordinary prompt or an actually dequeued user-containing batch reaches the provider
+ * (`reason: "prompt"`), and once with an empty `prompt` when a parked subagent is revived
+ * (`reason: "revive"`, result discarded).
+ */
 export interface BeforeAgentStartEvent {
 	type: "before_agent_start";
+	reason: "prompt" | "revive";
 	/** Already-transformed text; queued batches join user messages with two newlines, excluding agent companions. */
 	prompt: string;
 	/** Already-normalized user images in delivery order. */
@@ -1000,6 +1320,24 @@ export interface McpNotificationEvent {
 }
 
 // ============================================================================
+// Link Activation Events
+// ============================================================================
+
+/**
+ * The user picked a link whose scheme this extension registered with `pi.registerLinkScheme()`,
+ * by its hint tag or a click. Interactive mode only; delivered to the owning extension only, and
+ * run without the event-handler timeout, like a command. The URL is untrusted: the model can write
+ * such a link with any URL behind any label, so validate it like user input.
+ */
+export interface LinkActivateEvent {
+	type: "link_activate";
+	/** The link's full URL as drawn, e.g. `cc-stretch:open/1792/0/2`. Untrusted. */
+	url: string;
+	/** The registered scheme the URL uses, lowercase and without `:`. */
+	scheme: string;
+}
+
+// ============================================================================
 // User Bash Events
 // ============================================================================
 
@@ -1061,6 +1399,102 @@ export interface ToolApprovalResolvedEvent {
 	toolName: string;
 	approved: boolean;
 	reason?: string;
+}
+
+/** Stable ids for the interactive plan review's choices; labels may change (keep's label carries a token count). */
+export type PlanReviewChoice = "execute" | "compact" | "keep" | "refine" | "save";
+/** A choice as displayed in the interactive plan review, delivered in display order by `plan_review_requested`. */
+export interface PlanReviewOption {
+	id: PlanReviewChoice;
+	label: string;
+	disabled: boolean;
+}
+/** An execution tier selectable in the plan review's model slider; pass `role` back as `input.role` to `ctx.resolvePlanReview`. */
+export interface PlanReviewTier {
+	role: string;
+	provider: string;
+	model: string;
+	/** Thinking level the role's configured model pins (a `provider/model:high` suffix); absent when it inherits. */
+	thinkingLevel?: ConfiguredThinkingLevel;
+}
+
+/**
+ * The interactive plan review opened (interactive mode only). Resolve it with `ctx.resolvePlanReview`.
+ * `plan_review_resolved` waits until every handler of this event returns, so handlers should hand
+ * long work (a remote round-trip, a dialog) off rather than await it.
+ */
+export interface PlanReviewRequestedEvent {
+	type: "plan_review_requested";
+	reviewId: string;
+	sessionId: string;
+	title: string;
+	planFilePath: string;
+	planContent: string;
+	options: PlanReviewOption[];
+	/** Execution tiers in slider order (not selection order); omitted when fewer than two resolve. */
+	tiers?: PlanReviewTier[];
+}
+/**
+ * The plan review closed: a choice, or `undefined` when it was dismissed or cancelled (session switch,
+ * replacement review, shutdown). `by` is `"extension"` only for a choice made via `ctx.resolvePlanReview`.
+ */
+export interface PlanReviewResolvedEvent {
+	type: "plan_review_resolved";
+	reviewId: string;
+	sessionId: string;
+	choice: PlanReviewChoice | undefined;
+	by: "local" | "extension";
+}
+
+/**
+ * An explicit, idempotent mode transition. Requesting a state that already holds succeeds with
+ * `changed: false`. No transition submits a prompt; send one separately (e.g. `pi.sendUserMessage`).
+ * Plan `exit` leaves plan mode fully without approving the plan or deleting its draft. Loop `prompt`
+ * sets the text repeated after each turn ends (otherwise the user's next typed prompt); on an active
+ * loop it replaces that text, and on a paused loop `enter` resumes it.
+ */
+export type SessionModeRequest =
+	| { mode: "plan" | "vibe"; action: "enter" | "exit" }
+	| { mode: "goal"; action: "enter"; objective: string; tokenBudget?: number }
+	| { mode: "goal"; action: "pause" | "resume" | "drop" }
+	| { mode: "loop"; action: "enter"; prompt?: string; limit?: LoopLimitConfig; condition?: LoopConditionConfig }
+	| { mode: "loop"; action: "exit" };
+
+/** Detached snapshot of the built-in session modes. `paused` states come from the slash commands or a goal pause. */
+export interface SessionModeState {
+	plan: { status: "inactive" | "active" | "paused"; planFilePath?: string };
+	vibe: { status: "inactive" | "active" };
+	goal: { status: "inactive" | "active" | "paused"; objective?: string; tokenBudget?: number };
+	loop: { status: "inactive" | "active" | "paused" };
+}
+
+/**
+ * Outcome of `ctx.sessionModes.set()`. `busy`: a turn, compaction, or another mode transition is
+ * running, the session is still restoring its saved modes (startup or a session switch), or a
+ * completed goal is still being torn down — retry once idle. `conflict`: another mode blocks this one
+ * (exit it first). `disabled`: a setting gates it (`extensionHandlers.modeControl`, `plan.enabled`,
+ * `goal.enabled`). `invalid_request`: malformed or not applicable now.
+ */
+export type SessionModeResult =
+	| { ok: true; changed: boolean; state: SessionModeState }
+	| {
+			ok: false;
+			code: "busy" | "conflict" | "disabled" | "invalid_request";
+			message: string;
+			state: SessionModeState;
+	  };
+
+/** Direct built-in mode control, without slash commands or dialogs. */
+export interface ExtensionSessionModes {
+	getState(): SessionModeState;
+	set(request: SessionModeRequest): Promise<SessionModeResult>;
+}
+
+/** A built-in session mode changed, from any source: `ctx.sessionModes`, a slash command, a tool, or session restore. */
+export interface ModeChangedEvent {
+	type: "mode_changed";
+	previous: SessionModeState;
+	state: SessionModeState;
 }
 
 interface ToolCallEventBase {
@@ -1233,13 +1667,17 @@ export type ExtensionEvent =
 	| GoalUpdatedEvent
 	| CredentialDisabledEvent
 	| McpNotificationEvent
+	| LinkActivateEvent
 	| UserBashEvent
 	| UserPythonEvent
 	| InputEvent
 	| ToolCallEvent
 	| ToolResultEvent
 	| ToolApprovalRequestedEvent
-	| ToolApprovalResolvedEvent;
+	| ToolApprovalResolvedEvent
+	| PlanReviewRequestedEvent
+	| PlanReviewResolvedEvent
+	| ModeChangedEvent;
 
 // ============================================================================
 // Event Results
@@ -1442,11 +1880,15 @@ export interface ExtensionAPI {
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;
 	on(event: "tool_approval_requested", handler: ExtensionHandler<ToolApprovalRequestedEvent>): void;
 	on(event: "tool_approval_resolved", handler: ExtensionHandler<ToolApprovalResolvedEvent>): void;
+	on(event: "plan_review_requested", handler: ExtensionHandler<PlanReviewRequestedEvent>): void;
+	on(event: "plan_review_resolved", handler: ExtensionHandler<PlanReviewResolvedEvent>): void;
+	on(event: "mode_changed", handler: ExtensionHandler<ModeChangedEvent>): void;
 	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;
 	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
 	on(event: "user_python", handler: ExtensionHandler<UserPythonEvent, UserPythonEventResult>): void;
 	on(event: "mcp_notification", handler: ExtensionHandler<McpNotificationEvent>): void;
+	on(event: "link_activate", handler: ExtensionHandler<LinkActivateEvent>): void;
 
 	// =========================================================================
 	// Tool Registration
@@ -1562,6 +2004,26 @@ export interface ExtensionAPI {
 	registerAssistantThinkingRenderer(renderer: AssistantThinkingRenderer): void;
 
 	/**
+	 * Register a display-only transform for assistant text blocks: it returns the markdown to draw.
+	 * Called with the full text so far each time a streaming update is drawn (replies skip the
+	 * smooth-streaming reveal while renderers are active) and once more when the text is final.
+	 * The session, exports and model context keep the original text. Interactive mode only, and
+	 * only while the `extensionRenderers.assistantText` setting is on.
+	 */
+	registerAssistantTextRenderer(renderer: AssistantTextRenderer): void;
+
+	/**
+	 * Claim a link scheme (e.g. `"cc-stretch"` for `cc-stretch:…` links). In a plain terminal,
+	 * Markdown links using it draw without the ` (url)` suffix and are never handed to the terminal
+	 * or browser to open; picking one (its `app.links.hint` tag, or a click with `tui.mouse` on)
+	 * raises `link_activate` for this extension. Tern's native view draws them as its own links and
+	 * does not route their clicks back. Interactive mode only, and only while the
+	 * `extensionRenderers.assistantText` setting is on. Throws for an invalid scheme (fewer than two
+	 * characters, or not URL scheme syntax) or a reserved one (`http`, `https`, `file`, `mailto`, …).
+	 */
+	registerLinkScheme(scheme: string): void;
+
+	/**
 	 * Register a composer shape for the interactive editor.
 	 *
 	 * Registration happens during extension load. Built-in ids cannot be
@@ -1596,7 +2058,7 @@ export interface ExtensionAPI {
 
 	/** Send a user prompt: idle starts a turn; streaming queues as steer unless deliverAs is set.
 	 *  `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight tool
-	 *  batch while streaming; idle still starts a turn. */
+	 *  batch while streaming, except that it ends a running interruptible `wait`; idle still starts a turn. */
 	sendUserMessage(content: string | (TextContent | ImageContent)[], options?: SendUserMessageOptions): void;
 
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
@@ -1827,13 +2289,13 @@ export type SendMessageHandler = <T = unknown>(
 	 * When paired with `triggerTurn: true` during prompt teardown, the session schedules
 	 * an internal continuation without surfacing the message in the editable pending queue.
 	 * `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight
-	 * tool batch; idle starts a turn regardless of `triggerTurn` (plan mode folds into context).
+	 * tool batch, except that it ends a running interruptible `wait`; idle starts a turn regardless of `triggerTurn` (plan mode folds into context).
 	 */
 	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" | "aside" },
 ) => void;
 
 /** `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight tool
- *  batch while streaming; idle still starts a turn. */
+ *  batch while streaming, except that it ends a running interruptible `wait`; idle still starts a turn. */
 export type SendUserMessageHandler = (
 	content: string | (TextContent | ImageContent)[],
 	options?: SendUserMessageOptions,
@@ -1896,10 +2358,19 @@ export interface ExtensionContextActions {
 	abort: () => void;
 	hasPendingMessages: () => boolean;
 	shutdown: () => void;
+	resolvePlanReview?: (
+		reviewId: string,
+		choice: PlanReviewChoice,
+		input?: { feedback?: string; role?: string },
+	) => boolean;
+	getPendingPlanReview?: () => PlanReviewRequestedEvent | undefined;
+	openPlanReview?: () => Promise<boolean>;
+	sessionModes?: ExtensionSessionModes;
 	getContextUsage: () => ContextUsage | undefined;
 	compact: (instructionsOrOptions?: string | CompactOptions) => Promise<void>;
 	getSystemPrompt: () => string[];
 	runEphemeralTurn?: (options: EphemeralTurnOptions) => Promise<EphemeralTurnResult>;
+	startLive?: (options: ExtensionLiveStartOptions) => Promise<ExtensionLiveSession>;
 }
 
 /** Actions for ExtensionCommandContext (ctx.* in command handlers). */
@@ -1932,6 +2403,9 @@ export interface Extension {
 	tools: Map<string, RegisteredTool<any, any>>;
 	toolRegistrationListeners?: Set<ToolRegistrationListener>;
 	assistantThinkingRenderers: AssistantThinkingRenderer[];
+	assistantTextRenderers: AssistantTextRenderer[];
+	/** Link schemes claimed with `registerLinkScheme`, lowercase. */
+	linkSchemes: string[];
 	fileWriteFallbackHandlers: FileWriteFallbackHandler[];
 	fileDeleteFallbackHandlers: FileDeleteFallbackHandler[];
 	messageRenderers: Map<string, MessageRenderer>;
@@ -1939,6 +2413,8 @@ export interface Extension {
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
+	/** Set once the extension calls `registerProvider`; providers feed startup model resolution. */
+	registersProviders?: boolean;
 }
 
 /**

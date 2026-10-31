@@ -21,6 +21,7 @@ import {
 	type Component,
 	Ellipsis,
 	Editor,
+	getWidthConfigEpoch,
 	Markdown,
 	type MarkdownTheme,
 	matchesKey,
@@ -32,7 +33,7 @@ import {
 } from "../index";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { sanitizeStatusText } from "../chrome/shared";
-import { getEditorTheme, getMarkdownTheme, theme } from "../theme/theme";
+import { getEditorTheme, getMarkdownTheme, getThemeEpoch, theme } from "../theme/theme";
 import {
 	matchesAppExternalEditor,
 	matchesSelectCancel,
@@ -76,6 +77,8 @@ const SIDEBAR_MIN_TOTAL_WIDTH = 64;
 const SIDEBAR_MIN_BODY_WIDTH = 40;
 /** Persisted line-context cap; render-time captions clamp again to the viewport. */
 const MAX_ANNOTATION_CONTEXT_WIDTH = 120;
+/** Oldest delete/annotate undo snapshots are dropped past this depth (each holds the full plan text). */
+const MAX_UNDO_ENTRIES = 100;
 
 type Focus = "toc" | "body" | "actions";
 
@@ -148,6 +151,78 @@ interface UndoEntry {
 	deleted: string[];
 }
 
+/** Concatenated plan body rows and their anchors, reused while every render input is unchanged. */
+interface BodyLayout {
+	width: number;
+	annotationRev: number;
+	themeEpoch: number;
+	widthEpoch: number;
+	/** Each section's `Markdown.render` result the layout was built from (compared by identity). */
+	rendered: readonly (readonly string[])[];
+	lines: readonly string[];
+	anchors: BodyRowAnchor[];
+	offsets: number[];
+}
+
+/** Line contexts per rendered-lines array; `Markdown.render` returns a stable array per (text, width). */
+const lineContextCache = new WeakMap<readonly string[], readonly LineAnchorContext[]>();
+/** Match keys per context list, so resolving several annotations normalizes each row once. */
+const normalizedContextCache = new WeakMap<readonly LineAnchorContext[], readonly string[]>();
+
+function lineContexts(rendered: readonly string[]): readonly LineAnchorContext[] {
+	let contexts = lineContextCache.get(rendered);
+	if (!contexts) {
+		contexts = rendered.map(line => {
+			const sanitized = sanitizeStatusText(line);
+			const truncated = visibleWidth(sanitized) > MAX_ANNOTATION_CONTEXT_WIDTH;
+			const text = truncateToWidth(sanitized, MAX_ANNOTATION_CONTEXT_WIDTH, Ellipsis.Unicode);
+			return { text: text || "(blank line)", truncated };
+		});
+		lineContextCache.set(rendered, contexts);
+	}
+	return contexts;
+}
+
+function normalizeLineContext(context: LineAnchorContext): string {
+	const normalized = sanitizeStatusText(context.text).replace(/\s+/g, " ").trim();
+	return context.truncated && normalized.endsWith("…") ? normalized.slice(0, -1) : normalized;
+}
+
+/** Row in `contexts` nearest `storedRow` whose text matches the stored context, or -1. */
+function resolveLineRow(
+	storedRow: number,
+	storedContext: LineAnchorContext,
+	contexts: readonly LineAnchorContext[],
+): number {
+	if (contexts.length === 0) return -1;
+	const targetRow = Math.max(0, Math.floor(storedRow));
+	const normalizedStoredContext = normalizeLineContext(storedContext);
+	if (!normalizedStoredContext) return -1;
+	let normalizedContexts = normalizedContextCache.get(contexts);
+	if (!normalizedContexts) {
+		normalizedContexts = contexts.map(normalizeLineContext);
+		normalizedContextCache.set(contexts, normalizedContexts);
+	}
+	let best = -1;
+	let bestDistance = Number.POSITIVE_INFINITY;
+	for (let row = 0; row < normalizedContexts.length; row++) {
+		const normalizedContext = normalizedContexts[row]!;
+		if (
+			normalizedContext !== normalizedStoredContext &&
+			!normalizedContext.includes(normalizedStoredContext) &&
+			!normalizedStoredContext.includes(normalizedContext)
+		) {
+			continue;
+		}
+		const distance = Math.abs(row - targetRow);
+		if (distance < bestDistance) {
+			best = row;
+			bestDistance = distance;
+		}
+	}
+	return best;
+}
+
 export interface PlanReviewOverlayCallbacks {
 	/** Invoked with the chosen option label (never a disabled one). */
 	onPick: (label: string) => void;
@@ -181,6 +256,8 @@ export interface PlanReviewOverlayOptions {
 	slider?: HookSelectorSlider;
 	/** Display label for the external-editor key, surfaced in the footer help. */
 	externalEditorLabel?: string;
+	/** The external editor's name ("Notepad", "nvim") for the native Edit button; `$EDITOR` when unset. */
+	externalEditorName?: string;
 	/** Serializable annotations restored into this overlay instance. */
 	annotationState?: PlanReviewAnnotationState;
 }
@@ -199,6 +276,10 @@ export class PlanReviewOverlay implements Component {
 	#sectionOffsets: number[] = [];
 	/** Rendered body row to underlying plan row; callouts retain their owner's anchor. */
 	#bodyRowAnchors: BodyRowAnchor[] = [];
+	/** Memoized {@link #buildBody} result. */
+	#bodyLayout: BodyLayout | undefined;
+	/** Lines last handed to the scroll view; unchanged layouts skip the copy and keep its render cache. */
+	#scrollLines: readonly string[] | undefined;
 	#undo: UndoEntry[] = [];
 	/** Titles of sections deleted in the overlay, surfaced as Refine feedback. */
 	#deleted: string[] = [];
@@ -207,6 +288,7 @@ export class PlanReviewOverlay implements Component {
 	#disabled: Set<number>;
 	#helpSuffix: string | undefined;
 	#externalEditorLabel: string | undefined;
+	#externalEditorName: string | undefined;
 	#promptTitle: string | undefined;
 	#selectedIndex: number;
 	#slider: HookSelectorSlider | undefined;
@@ -275,6 +357,7 @@ export class PlanReviewOverlay implements Component {
 		);
 		this.#helpSuffix = options.helpText;
 		this.#externalEditorLabel = options.externalEditorLabel;
+		this.#externalEditorName = options.externalEditorName;
 		this.#promptTitle = options.promptTitle;
 		this.#selectedIndex = this.#coerceIndex(options.initialIndex ?? 0);
 		if (options.slider && options.slider.segments.length > 0) {
@@ -444,8 +527,8 @@ export class PlanReviewOverlay implements Component {
 			) {
 				continue;
 			}
-			const contexts = section.md.render(MAX_ANNOTATION_CONTEXT_WIDTH).map(line => this.#lineContext(line));
-			const row = this.#resolveLineRow(
+			const contexts = lineContexts(section.md.render(MAX_ANNOTATION_CONTEXT_WIDTH));
+			const row = resolveLineRow(
 				entry.target.row,
 				{ text: entry.target.context, truncated: entry.target.contextTruncated === true },
 				contexts,
@@ -525,6 +608,22 @@ export class PlanReviewOverlay implements Component {
 		if (next === this.#sliderIndex) return;
 		this.#sliderIndex = next;
 		slider.onChange?.(next);
+	}
+
+	/** Synchronize an external tier pick with the displayed slider before committing. */
+	setSliderIndex(index: number): void {
+		if (this.#committed || !this.#slider) return;
+		this.#moveSlider(index - this.#sliderIndex);
+	}
+
+	/** Commit an external answer through the same input-locking path as Enter; false when nothing was committed. */
+	selectOption(label: string): boolean {
+		if (this.#committed) return false;
+		const index = this.#options.indexOf(label);
+		if (index < 0 || this.#disabled.has(index)) return false;
+		this.#selectedIndex = index;
+		this.#confirmSelection();
+		return this.#committed;
 	}
 
 	#confirmSelection(): void {
@@ -866,6 +965,7 @@ export class PlanReviewOverlay implements Component {
 	}
 
 	#pushUndo(): void {
+		if (this.#undo.length >= MAX_UNDO_ENTRIES) this.#undo.shift();
 		this.#undo.push({
 			text: joinPlanSections(this.#sections),
 			annotations: this.#sections.map(section =>
@@ -959,7 +1059,7 @@ export class PlanReviewOverlay implements Component {
 			seenRows.add(candidate.row);
 			sectionAnchors.push({ text: candidate.context, truncated: candidate.contextTruncated });
 		}
-		const resolvedRow = this.#resolveLineRow(
+		const resolvedRow = resolveLineRow(
 			annotation.target.row,
 			{ text: annotation.target.context, truncated: annotation.target.contextTruncated },
 			sectionAnchors,
@@ -1187,23 +1287,64 @@ export class PlanReviewOverlay implements Component {
 
 	#layoutBody(lines: readonly string[], height: number): void {
 		this.#captureScrollProgress();
-		this.#scrollView.setLines(lines);
+		if (lines !== this.#scrollLines) {
+			this.#scrollView.setLines(lines);
+			this.#scrollLines = lines;
+		}
 		this.#scrollView.setHeight(height);
 		const maxOffset = this.#scrollView.getMaxScrollOffset();
 		if (maxOffset > 0) this.#scrollView.setScrollOffset(Math.round(this.#scrollProgress * maxOffset));
 	}
 
-	/** Build the concatenated body lines and map each rendered row back to a plan anchor. */
-	#buildBody(bodyContentWidth: number): string[] {
+	/**
+	 * Build the concatenated body lines and map each rendered row back to a plan
+	 * anchor. Memoized on width, annotation revision, theme/width epochs and each
+	 * section's rendered-lines identity, so steady frames and scrolling reuse it.
+	 */
+	#buildBody(bodyContentWidth: number): readonly string[] {
+		const themeEpoch = getThemeEpoch();
+		const widthEpoch = getWidthConfigEpoch();
+		const cached = this.#bodyLayout;
+		if (
+			cached?.width === bodyContentWidth &&
+			cached.annotationRev === this.#annotationRev &&
+			cached.themeEpoch === themeEpoch &&
+			cached.widthEpoch === widthEpoch &&
+			cached.rendered.length === this.#sections.length &&
+			this.#sections.every((section, i) => section.md.render(bodyContentWidth) === cached.rendered[i])
+		) {
+			this.#sectionOffsets = cached.offsets;
+			this.#bodyRowAnchors = cached.anchors;
+			return cached.lines;
+		}
 		const lines: string[] = [];
 		const anchors: BodyRowAnchor[] = [];
+		const renderedSections: (readonly string[])[] = [];
 		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		const offsets: number[] = new Array(this.#sections.length);
 		for (let sectionIndex = 0; sectionIndex < this.#sections.length; sectionIndex++) {
 			const section = this.#sections[sectionIndex]!;
 			offsets[sectionIndex] = lines.length;
 			const rendered = section.md.render(bodyContentWidth);
-			const contexts = rendered.map(line => this.#lineContext(line));
+			renderedSections.push(rendered);
+			const contexts = lineContexts(rendered);
+			// Resolve each note's row once; notes on one row keep their array order.
+			let notesByRow: Map<number, string[]> | undefined;
+			for (const annotation of section.annotations) {
+				const annotationRow =
+					annotation.target.kind === "section"
+						? 0
+						: resolveLineRow(
+								annotation.target.row,
+								{ text: annotation.target.context, truncated: annotation.target.contextTruncated },
+								contexts,
+							);
+				if (annotationRow < 0) continue;
+				notesByRow ??= new Map();
+				const notes = notesByRow.get(annotationRow);
+				if (notes) notes.push(annotation.note);
+				else notesByRow.set(annotationRow, [annotation.note]);
+			}
 			for (let row = 0; row < rendered.length; row++) {
 				const context = contexts[row]!;
 				const anchor = {
@@ -1214,67 +1355,24 @@ export class PlanReviewOverlay implements Component {
 				};
 				lines.push(rendered[row]!);
 				anchors.push(anchor);
-				for (const annotation of section.annotations) {
-					const annotationRow =
-						annotation.target.kind === "section"
-							? 0
-							: this.#resolveLineRow(
-									annotation.target.row,
-									{
-										text: annotation.target.context,
-										truncated: annotation.target.contextTruncated,
-									},
-									contexts,
-								);
-					if (annotationRow === row) {
-						this.#appendAnnotationCallout(lines, anchors, annotation.note, anchor, bodyContentWidth);
-					}
-				}
+				const notes = notesByRow?.get(row);
+				if (!notes) continue;
+				for (const note of notes) this.#appendAnnotationCallout(lines, anchors, note, anchor, bodyContentWidth);
 			}
 		}
 		this.#sectionOffsets = offsets;
 		this.#bodyRowAnchors = anchors;
-		return lines;
-	}
-
-	#lineContext(line: string): LineAnchorContext {
-		const sanitized = sanitizeStatusText(line);
-		const truncated = visibleWidth(sanitized) > MAX_ANNOTATION_CONTEXT_WIDTH;
-		const text = truncateToWidth(sanitized, MAX_ANNOTATION_CONTEXT_WIDTH, Ellipsis.Unicode);
-		return { text: text || "(blank line)", truncated };
-	}
-
-	#resolveLineRow(
-		storedRow: number,
-		storedContext: LineAnchorContext,
-		contexts: readonly LineAnchorContext[],
-	): number {
-		if (contexts.length === 0) return -1;
-		const targetRow = Math.max(0, Math.floor(storedRow));
-		const normalize = (context: LineAnchorContext): string => {
-			const normalized = sanitizeStatusText(context.text).replace(/\s+/g, " ").trim();
-			return context.truncated && normalized.endsWith("…") ? normalized.slice(0, -1) : normalized;
+		this.#bodyLayout = {
+			width: bodyContentWidth,
+			annotationRev: this.#annotationRev,
+			themeEpoch,
+			widthEpoch,
+			rendered: renderedSections,
+			lines,
+			anchors,
+			offsets,
 		};
-		const normalizedStoredContext = normalize(storedContext);
-		if (!normalizedStoredContext) return -1;
-		let best = -1;
-		let bestDistance = Number.POSITIVE_INFINITY;
-		for (let row = 0; row < contexts.length; row++) {
-			const normalizedContext = normalize(contexts[row]!);
-			if (
-				normalizedContext !== normalizedStoredContext &&
-				!normalizedContext.includes(normalizedStoredContext) &&
-				!normalizedStoredContext.includes(normalizedContext)
-			) {
-				continue;
-			}
-			const distance = Math.abs(row - targetRow);
-			if (distance < bestDistance) {
-				best = row;
-				bestDistance = distance;
-			}
-		}
-		return best;
+		return lines;
 	}
 
 	#appendAnnotationCallout(
@@ -1529,7 +1627,7 @@ export class PlanReviewOverlay implements Component {
 		return this.#nativeRoot;
 	}
 
-	/** Head tools: Copy `c` and the external editor, mirroring their keys. */
+	/** Head tools: Copy `c`, the external editor and Cancel, mirroring their keys. */
 	#describeTools(): NativeNode | undefined {
 		if (this.#committed) return undefined;
 		const buttons: NativeNode[] = [];
@@ -1538,7 +1636,19 @@ export class PlanReviewOverlay implements Component {
 		// Unbound: the button still mirrors the callback, without a keycap.
 		const editorKeyId = getKeybindings().getKeys("app.editor.external")[0];
 		if (this.callbacks.onExternalEditor) {
-			buttons.push(actionButton("Edit in $EDITOR", "externalEditor", editorKeyId ? { keys: editorKeyId } : {}));
+			buttons.push(
+				actionButton(
+					`Edit in ${this.#externalEditorName ?? "$EDITOR"}`,
+					"externalEditor",
+					editorKeyId ? { keys: editorKeyId } : {},
+				),
+			);
+		}
+		// Cancel the review the way the cancel key does; while annotating that key
+		// only leaves the draft/chooser, so the button is hidden there.
+		if (!this.#annotating && !this.#annotationChooser) {
+			const cancelKeyId = getKeybindings().getKeys("tui.select.cancel")[0];
+			buttons.push(actionButton("Cancel", "cancel", cancelKeyId ? { keys: cancelKeyId } : {}));
 		}
 		if (buttons.length === 0) return undefined;
 		return node("row", { role: "omp.plan.tools", gap: "sm", align: "center", justify: "end" }, buttons, "tools");
@@ -1547,12 +1657,15 @@ export class PlanReviewOverlay implements Component {
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (this.#committed) return;
 		if (event.type === "action") {
-			// Head tools run exactly what `c` and the external-editor key run.
+			// Head tools run exactly what `c`, the external-editor key and Esc run.
 			if (this.#annotating || this.#annotationChooser) return;
 			if (event.act === "copyPlan" && this.callbacks.onCopyPlan) {
 				void this.callbacks.onCopyPlan(joinPlanSections(this.#sections));
 			} else if (event.act === "externalEditor") {
 				this.callbacks.onExternalEditor?.();
+			} else if (event.act === "cancel") {
+				this.#committed = true;
+				this.callbacks.onCancel();
 			}
 			return;
 		}
@@ -1651,7 +1764,8 @@ export class PlanReviewOverlay implements Component {
 			"tabs",
 		);
 		const track: NativeChild[] = slider.caption ? [text([span(slider.caption, "dim")]), tabs] : [tabs];
-		const out = [keyed(rowNode(track, { gap: "sm", align: "center" }), "slider")];
+		// A role of its own: Tern's sheet lets only the role-less split row (Contents + body) shrink and scroll.
+		const out = [keyed(rowNode(track, { role: "omp.plan.slider", gap: "sm", align: "center" }), "slider")];
 		const detail = slider.segments[this.#sliderIndex]?.detail;
 		if (detail) out.push(keyed(text([span("↳ ", "dim"), span(detail, "muted")], { wrap: "word" }), "sliderDetail"));
 		return out;

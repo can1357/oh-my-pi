@@ -17,7 +17,7 @@ export const stateDefs = {
 	CacheWarmingMode: "'off' | 'streaming' | 'idle'",
 	MessageUpdates: doc(
 		"'full' | 'delta'",
-		"`set_event_filter` projection: `delta` drops the accumulated snapshots from `message_update`.",
+		"`set_event_filter` projection: `delta` replaces the accumulated snapshots with the block a start/end event touches.",
 	),
 	TodoStatus: "'pending' | 'in_progress' | 'completed' | 'abandoned' | 'blocked'",
 	GoalOp: "'get' | 'create' | 'resume' | 'pause' | 'drop'",
@@ -40,7 +40,17 @@ export const stateDefs = {
 	TodoPhase: { name: "string", tasks: "TodoItem[]" },
 	ContextUsage: { tokens: "number.integer", contextWindow: "number.integer", percent: "number" },
 	QueuedMessagesState: doc(
-		{ steering: "string[]", followUp: "string[]" },
+		{
+			steering: "string[]",
+			followUp: "string[]",
+			liveSteered: absentAs(
+				doc(
+					"number.integer",
+					"Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them.",
+				),
+				0,
+			),
+		},
 		"Displayable queue-chip text for pending user-authored messages; accepted verbatim by `remove_queued_message`.",
 	),
 	ToolDescriptor: { name: "string", description: "string", "parameters?": "unknown", "examples?": "unknown[]" },
@@ -127,7 +137,7 @@ export const stateDefs = {
 			doc("boolean", "Idle with nothing queued or pending; same predicate as `session_settled`."),
 			false,
 		),
-		queuedMessages: absentAs("QueuedMessagesState", { steering: [], followUp: [] }),
+		queuedMessages: absentAs("QueuedMessagesState", { steering: [], followUp: [], liveSteered: 0 }),
 		todoPhases: absentAs("TodoPhase[]", []),
 		systemPrompt: absentAs(doc("string[]", "System prompt sections, for session dumps."), []),
 		dumpTools: absentAs("ToolDescriptor[]", []),
@@ -159,6 +169,7 @@ export const stateDefs = {
 		tokensBefore: "number.integer",
 		"details?": "unknown",
 		"preserveData?": JSON_OBJECT,
+		"providerReplayThroughEntryId?": "string",
 	},
 	ModelCycleResult: { model: "ModelInfo", "thinkingLevel?": "ThinkingLevel", isScoped: "boolean" },
 	ThinkingLevelCycleResult: { level: "Effort" },
@@ -197,6 +208,14 @@ export const stateDefs = {
 	),
 	BranchMessage: { entryId: "string", text: "string" },
 	BranchResult: { text: "string", cancelled: "boolean" },
+	NavigateTreeResult: {
+		cancelled: "boolean",
+		"aborted?": doc("boolean", "Only ever `true`: `abort_branch_summary` stopped the summary; nothing moved."),
+		"editorText?": doc(
+			"string",
+			"The target was a user message: its text, for the editor; the leaf moved to its parent.",
+		),
+	},
 	TokenUsage: {
 		input: "number.integer",
 		output: "number.integer",
@@ -219,6 +238,7 @@ export const stateDefs = {
 		cost: "number",
 		"credits?": "SessionCredits",
 		"routedModels?": "Record<string, number>",
+		"editRejections?": doc("Record<string, number>", "Failed edits by the engine's `errorKind`."),
 		"contextUsage?": "ContextUsage",
 	},
 	MessagesPage: {
@@ -273,6 +293,7 @@ export const stateDefs = {
 	BtwHistoryTurn: doc(
 		{
 			question: "string",
+			"images?": doc("ImageContent[]", "Images attached to the question."),
 			answer: "string",
 			status: "BtwStatus",
 			createdAt: "number.integer",
@@ -284,6 +305,7 @@ export const stateDefs = {
 	BtwHistoryRecord: doc(
 		{
 			question: "string",
+			"images?": doc("ImageContent[]", "Images attached to the question."),
 			answer: "string",
 			status: "BtwStatus",
 			createdAt: "number.integer",

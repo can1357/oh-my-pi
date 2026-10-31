@@ -2,7 +2,6 @@ import * as fs from "node:fs/promises";
 import http2 from "node:http2";
 import { cursorModelParameters } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { isCursorMaxModeWireId } from "@oh-my-pi/pi-catalog/compat/collapse";
-import { scheduler } from "node:timers/promises";
 import { classifyModel, collapseVariantId } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import type {
 	ConversationStep,
@@ -183,6 +182,7 @@ import {
 	sanitizeText,
 } from "@oh-my-pi/pi-utils";
 import { classifyJsonPrefix } from "@oh-my-pi/pi-utils/json-parse";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import * as AIError from "../error";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import type {
@@ -192,6 +192,7 @@ import type {
 	CursorExecHandlerResult,
 	CursorExecHandlers,
 	CursorExecPairing,
+	CursorHistoryPayload,
 	CursorMcpCall,
 	CursorShellStreamCallbacks,
 	CursorTodoSnapshot,
@@ -201,6 +202,7 @@ import type {
 	ImageContent,
 	Message,
 	Model,
+	ProviderSessionState,
 	StreamFunction,
 	StreamOptions,
 	TextContent,
@@ -214,6 +216,7 @@ import { normalizeSystemPrompts, normalizeToolCallId } from "../utils";
 import {
 	type CursorExecResolvedCarrier,
 	clearStreamingPartialJson,
+	isCursorExecResolved,
 	kCursorExecResolved,
 	kStreamingBlockIndex,
 	kStreamingBlockKind,
@@ -225,8 +228,10 @@ import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { connectProxiedSocket, getProxyForUrl, wrapFetchForProxy } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
+import { waitForRetry } from "../utils/retry-wait";
 import { sanitizeSchemaForCursor, toolWireSchema } from "../utils/schema";
 import { formatConnectEndStreamError, hasRetryableCursorErrorDetail } from "./connect-error-detail";
+import { CONNECT_END_STREAM_FLAG, ConnectFrameDecoder, frameConnectMessage } from "./connect-frame";
 import mcpExternalHandoffMessage from "./cursor-external-tool-handoff.md" with { type: "text" };
 import {
 	buildMcpStateResult,
@@ -258,9 +263,9 @@ import {
 	piReadDisplayPath,
 	piReadPathHasRange,
 	piTimeout,
-	shellTimeoutSeconds,
+	shellDeadlineSeconds,
 } from "./cursor/exec-modern";
-import { frameConnectMessage, handleInteractionQuery, protoUnknownFields } from "./cursor/interaction-query";
+import { handleInteractionQuery, protoUnknownFields } from "./cursor/interaction-query";
 
 export const CURSOR_API_URL = CURSOR_DEFAULT_BASE_URL;
 export { CURSOR_CLIENT_VERSION };
@@ -326,6 +331,46 @@ function sanitizeCursorCallerHeaders(headers: Record<string, string> | undefined
 	return sanitized;
 }
 
+/**
+ * Header the Cursor backend reads to limit a run's built-in toolset to the
+ * listed agent proto tool names: `ToolCall` oneof field names, comma-joined, as
+ * Cursor's own SDK sends them for its `tools` option.
+ */
+const CURSOR_ALLOWED_TOOLS_HEADER = "x-cursor-agent-allowed-tools";
+
+/**
+ * The toolset of a run whose tools an external executor owns: MCP calls, and
+ * the MCP catalog lookup Cursor serves itself. A native tool's exec frame can
+ * only be answered by running the tool where the files are, which the gateway
+ * cannot do; answered "Tool not available", its call still reached the client,
+ * in Cursor's argument shape (StrReplace as `edit { path, stream_content }`).
+ * An MCP call reaches the client under the client's own tool name and schema,
+ * is handed off, and its result comes back with the next request. The MCP
+ * resource and auth tools stay out: no MCP server stands behind the gateway.
+ */
+const CURSOR_EXTERNAL_EXECUTOR_ALLOWED_TOOLS = "mcp_tool_call,get_mcp_tools_tool_call";
+
+/**
+ * How long a run that handed an external executor its calls stays parked,
+ * stream open and exec frames unanswered, for the client's next request to
+ * bring the results (`CursorParkedRun`). Past it the run is cancelled; a late
+ * request rebuilds the turn from its history like any other. Long enough for
+ * a test suite, build or subagent to finish: a request that does not continue
+ * the run, the session's eviction and the transport ending all release it
+ * sooner, so only an abandoned session waits this out.
+ */
+const CURSOR_RELAY_IDLE_TIMEOUT_MS = 30 * 60_000;
+
+/** `providerSessionState` entry holding the session's parked run. */
+const CURSOR_RELAY_SESSION_STATE_KEY = "cursor-agent-relay";
+
+/**
+ * How long Cursor may stay quiet on held calls, without listing their step,
+ * before they are handed to the client anyway: it can wait on one call's
+ * result before streaming the step's next call and its listing.
+ */
+const CURSOR_RELAY_QUIET_MS = 1_000;
+
 const CURSOR_PROXY_TUNNEL_TIMEOUT_MS = 30_000;
 
 /**
@@ -345,12 +390,34 @@ function isCursorModelNotFound(error: unknown): boolean {
 	);
 }
 
+/**
+ * Failures that, before any token, mean the wire conversation is poisoned
+ * rather than the account: a bare gRPC `resource_exhausted` (#8345), or the
+ * structured PROVIDER_ERROR every resume of a turn cut mid-stream draws (#15830).
+ */
+function isCursorConversationRejected(error: unknown, message: string): boolean {
+	return (
+		(error instanceof AIError.ProviderHttpError && error.code === "PROVIDER_ERROR") ||
+		RESOURCE_EXHAUSTED_PATTERN.test(message)
+	);
+}
+
 const CURSOR_MAX_STREAM_RETRIES = 5;
 const CURSOR_RETRY_BASE_DELAY_MS = 500;
 const NOT_IMPLEMENTED = `Not implemented by this client`;
 
-const conversationStateCache = new Map<string, ConversationStateStructure>();
-const conversationBlobStores = new Map<string, Map<string, Uint8Array>>();
+/**
+ * Per-conversation checkpoint and the blob store its blob refs point into, kept
+ * in one entry so they are always evicted together. Bounded: each blob store
+ * holds the serialized history, and an evicted conversation rebuilds from
+ * `context` exactly like the first request after a restart.
+ */
+interface CursorConversationEntry {
+	state: ConversationStateStructure | undefined;
+	blobs: Map<string, Uint8Array>;
+}
+const CURSOR_CONVERSATION_CACHE_MAX = 128;
+const cursorConversations = new LRUCache<string, CursorConversationEntry>({ max: CURSOR_CONVERSATION_CACHE_MAX });
 const warnedCursorKimiK3ReplayMessages = new Set<string>();
 /**
  * Base conversation id → rotated wire id (#8345). Cursor's backend can pin a
@@ -370,7 +437,14 @@ export interface CursorOptions extends StreamOptions {
 	conversationId?: string;
 	execHandlers?: CursorExecHandlers;
 	onToolResult?: CursorToolResultHandler;
-	/** Treat unhandled MCP calls as accepted handoffs to an external executor. */
+	/**
+	 * The caller's client runs every tool (auth-gateway). Cursor is limited to
+	 * MCP calls, every context tool is advertised as one, and a turn that hands
+	 * the client a call stops with `toolUse`. With a `providerSessionState` to
+	 * park in, the run stays open for the next request to answer its calls
+	 * in-band (`CursorParkedRun`); without one, each call is handed off and
+	 * Cursor told its result comes with the next request.
+	 */
 	externalToolExecutor?: boolean;
 	/** Wire model id selected after thinking-effort routing (`resolveWireModelId`). */
 	wireModelId?: string;
@@ -383,6 +457,7 @@ type CursorWireMode = "normalized" | "discovered";
 interface CursorRetryContext {
 	attempt: number;
 	originalRequestId: string;
+	requestIds: string[];
 	checkpoint?: ConversationStateStructure;
 	checkpointHash?: string;
 	noProgressResumes: number;
@@ -392,7 +467,86 @@ interface CursorRetryContext {
 	baseConversationId: string;
 	conversationId: string;
 	blobStore: Map<string, Uint8Array>;
+	turnRecords: CursorTurnRecordState;
 	firstTokenTime?: number;
+	/** Output tokens a relayed run's earlier responses reported (`CursorRelayState.reportedOutput`). */
+	relayReportedOutput?: number;
+}
+
+/** What one turn's server records stand for, as the turn sent it, across its retries. */
+interface CursorTurnRecordState {
+	/** Hash of the opening user message when the turn started. */
+	userHash: number | bigint;
+	/** The wire route of the turn's first request. */
+	wireRoute: string | undefined;
+	/** A retry went out on another route; its checkpoint mixes records from both. */
+	mixedRoutes: boolean;
+	/** Results the host stored for this turn's calls, by call id. */
+	stored: Map<string, ToolResultMessage>;
+	/** Hash of each result as the server saw it, taken before the host ran. */
+	given: Map<string, number | bigint>;
+	/**
+	 * The turn parked for an external executor's results (`CursorParkedRun`),
+	 * so it reached the client as several assistant messages and its records
+	 * stand for all of them: none may be replayed from them.
+	 */
+	relayed: boolean;
+}
+
+/** An external executor's MCP call whose exec frame waits for the client's result. */
+interface CursorHeldCall {
+	execMsg: ExecServerMessage;
+	mcpCall: CursorMcpCall;
+}
+
+/** What a parked run takes over from the request that resumes it. */
+interface CursorRelayResumption {
+	context: Context;
+	options: CursorOptions;
+	stream: AssistantMessageEventStream;
+	results: ReadonlyMap<string, ToolResultMessage>;
+}
+
+/**
+ * A run of an external executor (auth-gateway) parked between two requests of
+ * its client. It handed the client one step's calls and kept their exec frames
+ * open; the client's next request resumes it when that request ends on exactly
+ * those calls' results, which are answered in-band, and the run streams on into
+ * the new response as a run with a local bridge would. Anything else closes it:
+ * the request then rebuilds the turn from its history. Kept in the session's
+ * `providerSessionState`, so the host's eviction and shutdown close it too.
+ */
+interface CursorParkedRun extends ProviderSessionState {
+	/** The run's continuation as this request's response, or `undefined` when the request does not continue it. */
+	resume(
+		model: Model<"cursor-agent">,
+		context: Context,
+		options: CursorOptions | undefined,
+	): AssistantMessageEventStream | undefined;
+}
+
+/** A relayed run's bookkeeping for the step whose calls it is handing the client. */
+interface CursorRelayState {
+	/** The session's provider state, where the run parks. */
+	readonly states: Map<string, ProviderSessionState>;
+	/** MCP exec frames held unanswered, by call id. */
+	readonly held: Map<string, CursorHeldCall>;
+	/** `ToolRequestsListedUpdate.call_count`: every call the model made in the step. */
+	listed: number | undefined;
+	/** Calls of the step Cursor serves itself, which send no exec frame. */
+	served: number;
+	/** Calls of the step already answered in-band, before the step was listed. */
+	answered: number;
+	/** Hands the held calls off when Cursor goes quiet on them before listing the step. */
+	quietTimer: NodeJS.Timeout | undefined;
+	/** Settles once Cursor waits on the held calls. */
+	handedOff: PromiseWithResolvers<"handedOff">;
+	/** Frames that arrived while parked, for the response that resumes the run. */
+	backlog: AgentServerMessage[] | undefined;
+	/** Output tokens the run's earlier responses already reported. */
+	reportedOutput: number;
+	/** The run's `TurnEndedUpdate` counted its output tokens, which span every response. */
+	turnOutputReported: boolean;
 }
 
 interface CursorStreamTiming {
@@ -418,9 +572,9 @@ interface CursorGrpcRequest {
 interface CursorTransportRequest extends CursorGrpcRequest {
 	/** Exact discovery id eligible for a retry because the normalized effort payload was serialized unchanged. */
 	fallbackWireModelId?: string;
+	/** The wire route this request selected; server records replay only on it. */
+	wireRoute: string;
 }
-
-const CONNECT_END_STREAM_FLAG = 0b00000010;
 
 interface CursorLogEntry {
 	ts: number;
@@ -601,7 +755,7 @@ function classifyCursorStructuredError(structured: CursorStructuredError): Error
 	if (code === 21) return new AIError.AbortError(fullMessage);
 	const status = CURSOR_ERROR_STATUS[code];
 	if (status !== undefined) return new AIError.ProviderHttpError(fullMessage, status, { code: name });
-	if (retryable === true || CURSOR_RETRYABLE_ERROR_CODES.has(code)) {
+	if (retryable === true || (retryable === undefined && CURSOR_RETRYABLE_ERROR_CODES.has(code))) {
 		return new AIError.ProviderHttpError(fullMessage, 503, { code: name });
 	}
 	return new AIError.ProviderHttpError(fullMessage, 400, { code: name });
@@ -1000,6 +1154,27 @@ function omitTypeName(record: Record<string, unknown>): Record<string, unknown> 
 	return rest;
 }
 
+/** The assistant message one response of a Cursor run fills. */
+function createCursorOutput(model: Model<"cursor-agent">, timestamp: number): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [],
+		api: "cursor-agent" as Api,
+		provider: model.provider,
+		model: model.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp,
+	};
+}
+
 function streamCursorWithWireMode(
 	model: Model<"cursor-agent">,
 	context: Context,
@@ -1007,33 +1182,18 @@ function streamCursorWithWireMode(
 	wireMode: CursorWireMode,
 	timing?: CursorStreamTiming,
 ): AssistantMessageEventStream {
-	const stream = new AssistantMessageEventStream();
+	// A relayed run outlives its first response: `context`, `options`, `stream`
+	// and `output` (and the response timings) belong to the request currently
+	// receiving it, and move to the request that resumes it (`CursorParkedRun`).
+	let stream = new AssistantMessageEventStream();
 
 	(async () => {
 		const retryContext = timing?.retry;
 		const transportMode = timing?.transport ?? (options?.transport === "http1" ? "http1" : "http2");
-		const startTime = timing?.startTime ?? performance.now();
+		let startTime = timing?.startTime ?? performance.now();
 		let firstTokenTime = retryContext?.firstTokenTime;
 
-		const output: AssistantMessage =
-			retryContext?.output ??
-			({
-				role: "assistant",
-				content: [],
-				api: "cursor-agent" as Api,
-				provider: model.provider,
-				model: model.id,
-				usage: {
-					input: 0,
-					output: 0,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: 0,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				},
-				stopReason: "stop",
-				timestamp: timing?.timestamp ?? Date.now(),
-			} satisfies AssistantMessage);
+		let output = retryContext?.output ?? createCursorOutput(model, timing?.timestamp ?? Date.now());
 
 		// Declared outside the `try` because BOTH exits must drain it: an exec
 		// handler decoded from the last chunk can still be running when the
@@ -1051,20 +1211,24 @@ function streamCursorWithWireMode(
 		// Once aborted, the Agent finalizes from the abort error and discards
 		// late results regardless, so skipping the rest of the drain loses
 		// nothing that could still be delivered.
-		let abortSettled: Promise<void> | undefined;
 		const drainInFlightDispatches = async (): Promise<void> => {
 			const signal = options?.signal;
-			while (inFlightDispatches.size > 0) {
-				if (signal?.aborted) return;
-				const settled = Promise.all(inFlightDispatches);
-				if (!signal) {
-					await settled;
-					continue;
+			if (!signal) {
+				while (inFlightDispatches.size > 0) await Promise.all(inFlightDispatches);
+				return;
+			}
+			if (inFlightDispatches.size === 0 || signal.aborted) return;
+			const { promise: aborted, resolve } = Promise.withResolvers<void>();
+			const onAbort = (): void => resolve();
+			signal.addEventListener("abort", onAbort, { once: true });
+			try {
+				while (inFlightDispatches.size > 0 && !signal.aborted) {
+					await Promise.race([Promise.all(inFlightDispatches), aborted]);
 				}
-				abortSettled ??= new Promise<void>(resolve =>
-					signal.addEventListener("abort", () => resolve(), { once: true }),
-				);
-				await Promise.race([settled, abortSettled]);
+			} finally {
+				// The request signal outlives this stream (it spans the agent's tool
+				// loop); a lingering listener would pin this request's whole scope.
+				signal.removeEventListener("abort", onAbort);
 			}
 		};
 
@@ -1075,11 +1239,18 @@ function streamCursorWithWireMode(
 		const h2Completion = Promise.withResolvers<void>();
 		let h2Settled = false;
 		let sawTurnEnded = false;
+		// After the final step's `stepCompleted`, only a repeat checkpoint and the
+		// `turnEnded` usage frame follow.
+		let stepCompletedIsLatest = false;
 		let endStreamError: Error | null = null;
 		let progressVersion = 0;
 		let latestCheckpointProgressVersion = -1;
 		let latestCheckpoint: ConversationStateStructure | undefined;
 		let latestCheckpointTerminal = false;
+		// Whether the latest checkpoint covers everything the turn produced: only
+		// such a checkpoint's records may stand for the completed turn, since a
+		// stale one would replay a partial turn under the full turn's digest.
+		let checkpointCoversTurn = false;
 		// Blocks the discovered-id retry once the turn produced observable output or
 		// ran a side effect (streamed content/tool call, exec bridge, permission
 		// reply). Pure keepalive heartbeats never set it, so a `not_found` that
@@ -1101,6 +1272,20 @@ function streamCursorWithWireMode(
 				return;
 			}
 			if (!sawTurnEnded) {
+				// A stream cut after the final step lost only usage and a repeat
+				// checkpoint, so the turn is complete. The final step ends on answer
+				// text; a step that ended on tool calls, or left one open, may be
+				// followed by another step and is still treated as truncated.
+				if (
+					stepCompletedIsLatest &&
+					output.content.at(-1)?.type === "text" &&
+					openBlockState?.currentToolCall === null &&
+					openBlockState.openToolCalls.size === 0
+				) {
+					logger.debug("cursor stream ended after stepCompleted without turnEnded", { model: model.id });
+					h2Completion.resolve();
+					return;
+				}
 				h2Completion.reject(
 					new AIError.ProviderResponseError("Cursor stream ended before turnEnded", {
 						kind: "incomplete-stream",
@@ -1119,6 +1304,94 @@ function streamCursorWithWireMode(
 		let serializedFallbackWireModelId: string | undefined;
 		let activeBlobStore: Map<string, Uint8Array> | undefined;
 		let originalRequestId: string | undefined;
+		// Every request id this turn has sent: the server stamps its user record
+		// with whichever request opened the run a checkpoint continues.
+		let turnRequestIds = retryContext?.requestIds ?? [];
+		// Removed in `finally`: the request signal outlives this stream, and a
+		// listener left on it would retain this request's scope (request bytes,
+		// output, blob store) until the caller's whole prompt ends.
+		let onTransportAbort: (() => void) | undefined;
+		// A call without conversation/session id mints a one-off conversation that
+		// no later request can address; its cache entries are released at the end.
+		const ephemeralConversation =
+			!retryContext && options?.conversationId === undefined && options?.sessionId === undefined;
+		// Whether an earlier request already opened this conversation. A session
+		// id minted per call (e.g. by `streamSimple`) never has one.
+		let knownConversation = retryContext !== undefined;
+		// The turn's server records stand for the opening user message and tool
+		// results as the server saw them; they are captured only while what the
+		// host keeps still matches. Hashed now, before anything awaits, since a
+		// host may edit either in place while the turn runs. Server-owned tools
+		// report results without awaiting them, so each one is tracked with the
+		// dispatches and drained before the turn is captured.
+		const turnRecords: CursorTurnRecordState = retryContext?.turnRecords ?? {
+			userHash: hashCursorUserMessage(context.messages[findLastUserMessageIndex(context.messages)]),
+			wireRoute: undefined,
+			mixedRoutes: false,
+			stored: new Map(),
+			given: new Map(),
+			relayed: false,
+		};
+		const hostOnToolResult = options?.onToolResult;
+		const onToolResult: CursorToolResultHandler | undefined = hostOnToolResult
+			? result => {
+					turnRecords.given.set(result.toolCallId, hashCursorToolResult(result));
+					const persisted = (async () => {
+						const stored = (await hostOnToolResult(result)) ?? result;
+						turnRecords.stored.set(stored.toolCallId, stored);
+						return stored;
+					})();
+					const settled = persisted.then(
+						() => {},
+						() => {},
+					);
+					inFlightDispatches.add(settled);
+					void settled.finally(() => inFlightDispatches.delete(settled));
+					return persisted;
+				}
+			: undefined;
+		// An external executor's run parks between its client's requests when the
+		// session can hold it (`CursorParkedRun`). Not on RunSSE, whose transport
+		// is bound to the first request's signal.
+		const relay: CursorRelayState | undefined =
+			options?.externalToolExecutor && options.providerSessionState && transportMode === "http2"
+				? {
+						states: options.providerSessionState,
+						held: new Map(),
+						listed: undefined,
+						served: 0,
+						answered: 0,
+						quietTimer: undefined,
+						handedOff: Promise.withResolvers(),
+						backlog: undefined,
+						reportedOutput: retryContext?.relayReportedOutput ?? 0,
+						turnOutputReported: false,
+					}
+				: undefined;
+		// A step is listed once its calls have streamed. Cursor can also run a
+		// step's calls one at a time, sending the next exec frame (and the
+		// listing) only after the previous call is answered, so held calls are
+		// handed off when Cursor goes quiet on them too; calls answered that way
+		// count toward the step's listing.
+		const handOffWhenListed = (): void => {
+			if (!relay) return;
+			clearTimeout(relay.quietTimer);
+			relay.quietTimer = undefined;
+			if (relay.listed !== undefined && relay.held.size + relay.served + relay.answered >= relay.listed) {
+				if (relay.held.size > 0) {
+					relay.handedOff.resolve("handedOff");
+					return;
+				}
+				// Cursor served the whole step itself.
+				relay.listed = undefined;
+				relay.served = 0;
+				relay.answered = 0;
+			}
+			if (relay.held.size > 0) {
+				const { handedOff } = relay;
+				relay.quietTimer = setTimeout(() => handedOff.resolve("handedOff"), CURSOR_RELAY_QUIET_MS);
+			}
+		};
 		try {
 			const apiKey = options?.apiKey;
 			if (!apiKey) {
@@ -1135,12 +1408,13 @@ function streamCursorWithWireMode(
 			// and result, so the turn resumes where it stopped instead of replaying
 			// the last user message.
 			const rotatedFresh = retryContext ? false : freshRotatedConversationIds.has(conversationId);
-			activeBlobStore =
-				retryContext?.blobStore ?? conversationBlobStores.get(conversationId) ?? new Map<string, Uint8Array>();
+			const cachedConversation = cursorConversations.get(conversationId);
+			if (cachedConversation) knownConversation = true;
+			activeBlobStore = retryContext?.blobStore ?? cachedConversation?.blobs ?? new Map<string, Uint8Array>();
 			const blobStore = activeBlobStore;
-			conversationBlobStores.set(conversationId, blobStore);
-			const cachedState =
-				retryContext?.checkpoint ?? (rotatedFresh ? undefined : conversationStateCache.get(conversationId));
+			const conversationEntry: CursorConversationEntry = { state: cachedConversation?.state, blobs: blobStore };
+			cursorConversations.set(conversationId, conversationEntry);
+			const cachedState = retryContext?.checkpoint ?? (rotatedFresh ? undefined : cachedConversation?.state);
 			const builtRequest = await buildGrpcRequestForWireMode(
 				model,
 				context,
@@ -1155,10 +1429,15 @@ function streamCursorWithWireMode(
 			);
 			const { requestBytes, conversationState } = builtRequest;
 			serializedFallbackWireModelId = builtRequest.fallbackWireModelId;
-			conversationStateCache.set(conversationId, conversationState);
+			// A retry resumes the checkpoint its earlier requests wrote, so every
+			// request of the turn must share the first one's route.
+			turnRecords.wireRoute ??= builtRequest.wireRoute;
+			if (builtRequest.wireRoute !== turnRecords.wireRoute) turnRecords.mixedRoutes = true;
+			conversationEntry.state = conversationState;
 			const requestContextTools = buildMcpToolDefinitions(
 				context.tools,
 				model.requiresCursorToolSchemaProjection === true,
+				options?.externalToolExecutor === true,
 			);
 			const requestContextRules = buildCursorRequestContextRules(context.systemPrompt);
 
@@ -1166,6 +1445,7 @@ function streamCursorWithWireMode(
 			const requestPath = transportMode === "http2" ? CURSOR_RUN_PATH : CURSOR_RUN_SSE_PATH;
 			const requestId = crypto.randomUUID();
 			originalRequestId = retryContext?.originalRequestId ?? requestId;
+			turnRequestIds = [...turnRequestIds, requestId];
 			const callerHeaders = sanitizeCursorCallerHeaders(options?.headers);
 			const sharedRequestHeaders = {
 				...callerHeaders,
@@ -1176,6 +1456,9 @@ function streamCursorWithWireMode(
 				"connect-protocol-version": "1",
 				"x-request-id": requestId,
 				...(retryContext ? { "x-original-request-id": originalRequestId } : undefined),
+				...(options?.externalToolExecutor
+					? { [CURSOR_ALLOWED_TOOLS_HEADER]: CURSOR_EXTERNAL_EXECUTOR_ALLOWED_TOOLS }
+					: undefined),
 			};
 			const requestHeaders =
 				transportMode === "http2"
@@ -1227,12 +1510,13 @@ function streamCursorWithWireMode(
 
 			if (!retryContext) stream.push({ type: "start", partial: output });
 
-			let pendingBuffer: Buffer = Buffer.alloc(0);
+			const frameDecoder = new ConnectFrameDecoder();
 			const previousState = retryContext?.blockState;
 			let currentTextBlock = previousState?.currentTextBlock ?? null;
 			let currentThinkingBlock = previousState?.currentThinkingBlock ?? null;
 			let currentToolCall = previousState?.currentToolCall ?? null;
 			const resolvedMcpToolCallIds = previousState?.resolvedMcpToolCallIds ?? new Set<string>();
+			const handedOffToolCallIds = previousState?.handedOffToolCallIds ?? new Set<string>();
 			usageState = retryContext?.usageState ?? { sawTokenDelta: false };
 
 			const state: BlockState = {
@@ -1247,6 +1531,8 @@ function streamCursorWithWireMode(
 				},
 				openToolCalls: previousState?.openToolCalls ?? new Map<string, ToolCallState>(),
 				resolvedMcpToolCallIds,
+				handedOffToolCallIds,
+				unheldExternalCalls: previousState?.unheldExternalCalls ?? (relay ? new Map() : undefined),
 				get firstTokenTime() {
 					return firstTokenTime;
 				},
@@ -1263,12 +1549,19 @@ function streamCursorWithWireMode(
 					if (!firstTokenTime) firstTokenTime = performance.now();
 				},
 				onTodoSnapshot: options?.execHandlers?.todoSync?.bind(options.execHandlers),
-				onToolResult: options?.onToolResult,
+				onToolResult,
+				holdExternalCall: relay
+					? (execMsg, mcpCall) => {
+							relay.held.set(mcpCall.toolCallId, { execMsg, mcpCall });
+							handOffWhenListed();
+						}
+					: undefined,
 			};
 			openBlockState = state;
 
 			const onConversationCheckpoint = (checkpoint: ConversationStateStructure) => {
-				conversationStateCache.set(conversationId!, checkpoint);
+				conversationEntry.state = checkpoint;
+				cursorConversations.set(conversationId!, conversationEntry);
 			};
 
 			// Client replies that carry a local result (exec output, exec control,
@@ -1281,6 +1574,7 @@ function streamCursorWithWireMode(
 			const resultWriter: CursorMessageWriter = {
 				write(frame) {
 					progressVersion++;
+					checkpointCoversTurn = false;
 					resultTransport.write(frame);
 				},
 			};
@@ -1293,24 +1587,64 @@ function streamCursorWithWireMode(
 				);
 			});
 
+			// Dispatch is fire-and-forget so the socket keeps draining while a
+			// handler runs, but the promise is tracked: `done` must not be
+			// pushed while an exec handler is still resolving, or the Agent
+			// drains its Cursor result buffer before the handler reserved its
+			// entry and the call is left unpaired. Awaited after
+			// `h2Completion` below.
+			const dispatchServerMessage = (serverMessage: AgentServerMessage): void => {
+				// A relayed run keeps count of the step it is handing off as each
+				// frame reaches the response: on arrival, or when the run resumes
+				// for a frame that arrived while it was parked.
+				const interaction =
+					serverMessage.message.case === "interactionUpdate" ? serverMessage.message.value : undefined;
+				if (relay && interaction) {
+					if (interaction.message.case === "toolRequestsListed") {
+						relay.listed = interaction.message.value.callCount;
+						handOffWhenListed();
+					} else if (
+						interaction.message.case === "toolCallStarted" &&
+						interaction.message.value.toolCall !== undefined &&
+						!selectMcpCall(interaction.message.value.toolCall)
+					) {
+						relay.served++;
+						handOffWhenListed();
+					} else if (interaction.message.case === "turnEnded") {
+						relay.turnOutputReported = (interaction.message.value.outputTokens ?? 0n) > 0n;
+					} else if (interaction.message.case !== "heartbeat" && relay.quietTimer !== undefined) {
+						// Cursor is still streaming the step: not waiting on the held calls yet.
+						handOffWhenListed();
+					}
+				}
+				const dispatch = handleServerMessage(
+					serverMessage,
+					output,
+					stream,
+					state,
+					blobStore,
+					serverMessage.message.case === "kvServerMessage" ? runTransport! : resultWriter,
+					options?.execHandlers,
+					onToolResult,
+					usageState!,
+					requestContextTools,
+					requestContextRules,
+					onConversationCheckpoint,
+					options?.externalToolExecutor,
+				).catch(error => {
+					log("error", "handleServerMessage", { error: String(error) });
+				});
+				inFlightDispatches.add(dispatch);
+				void dispatch.finally(() => inFlightDispatches.delete(dispatch));
+			};
+
 			runTransport.onData((chunk: Buffer) => {
 				if (debugResponseLogPromise) {
 					void debugResponseLogPromise.then(log => {
 						log?.write(chunk);
 					});
 				}
-				// Steady state drains fully per chunk; alias a fresh transport chunk
-				// instead of copying it through Buffer.concat (see aws-eventstream.ts).
-				pendingBuffer = pendingBuffer.length === 0 ? chunk : Buffer.concat([pendingBuffer, chunk]);
-
-				while (pendingBuffer.length >= 5) {
-					const flags = pendingBuffer[0];
-					const msgLen = pendingBuffer.readUInt32BE(1);
-					if (pendingBuffer.length < 5 + msgLen) break;
-
-					const messageBytes = pendingBuffer.subarray(5, 5 + msgLen);
-					pendingBuffer = pendingBuffer.subarray(5 + msgLen);
-
+				for (const { flags, payload: messageBytes } of frameDecoder.decode(chunk)) {
 					if (flags & CONNECT_END_STREAM_FLAG) {
 						const endError = parseConnectEndStream(messageBytes);
 						if (endError) {
@@ -1337,38 +1671,46 @@ function streamCursorWithWireMode(
 							sawProgressOrSideEffect = true;
 							progressVersion++;
 						}
+						if (interactionCase === "stepCompleted") {
+							stepCompletedIsLatest = true;
+						} else if (
+							interactionCase !== "heartbeat" &&
+							serverMessage.message.case !== "conversationCheckpointUpdate" &&
+							serverMessage.message.case !== "kvServerMessage"
+						) {
+							stepCompletedIsLatest = false;
+						}
 						if (serverMessage.message.case === "conversationCheckpointUpdate") {
 							latestCheckpoint = serverMessage.message.value;
 							latestCheckpointProgressVersion = progressVersion;
 							latestCheckpointTerminal = sawTurnEnded;
-							conversationStateCache.set(conversationId!, latestCheckpoint);
+							checkpointCoversTurn = true;
+							conversationEntry.state = latestCheckpoint;
+							cursorConversations.set(conversationId!, conversationEntry);
+						} else if (
+							// Blob traffic, keepalives, usage and step/turn ends add nothing
+							// the turn's records hold; any other frame may.
+							serverMessage.message.case !== "kvServerMessage" &&
+							interactionCase !== "heartbeat" &&
+							interactionCase !== "tokenDelta" &&
+							interactionCase !== "stepCompleted" &&
+							interactionCase !== "turnEnded"
+						) {
+							checkpointCoversTurn = false;
 						}
 						const isTurnEnded = interactionCase === "turnEnded";
-						// Dispatch is fire-and-forget so the socket keeps draining while a
-						// handler runs, but the promise is tracked: `done` must not be
-						// pushed while an exec handler is still resolving, or the Agent
-						// drains its Cursor result buffer before the handler reserved its
-						// entry and the call is left unpaired. Awaited after
-						// `h2Completion` below.
-						const dispatch = handleServerMessage(
-							serverMessage,
-							output,
-							stream,
-							state,
-							blobStore,
-							serverMessage.message.case === "kvServerMessage" ? runTransport! : resultWriter,
-							options?.execHandlers,
-							options?.onToolResult,
-							usageState!,
-							requestContextTools,
-							requestContextRules,
-							onConversationCheckpoint,
-							options?.externalToolExecutor,
-						).catch(error => {
-							log("error", "handleServerMessage", { error: String(error) });
-						});
-						inFlightDispatches.add(dispatch);
-						void dispatch.finally(() => inFlightDispatches.delete(dispatch));
+						// A parked run's response has ended: what Cursor sends meanwhile
+						// belongs to the response that resumes it, which replays it. Blob
+						// requests and keepalives are answered on the spot.
+						if (
+							relay?.backlog &&
+							serverMessage.message.case !== "kvServerMessage" &&
+							interactionCase !== "heartbeat"
+						) {
+							relay.backlog.push(serverMessage);
+						} else {
+							dispatchServerMessage(serverMessage);
+						}
 
 						// Application completion is not protocol success; wait for a clean transport end.
 						if (isTurnEnded) {
@@ -1422,17 +1764,145 @@ function streamCursorWithWireMode(
 				void closeDebugLog().finally(() => settleH2(mapped));
 			});
 
-			if (options?.signal) {
-				options.signal.addEventListener("abort", () => {
-					runTransport?.close();
-					void closeDebugLog().finally(() => {
-						settleH2(new AIError.AbortError());
-					});
+			const abortTransport = () => {
+				runTransport?.close();
+				void closeDebugLog().finally(() => {
+					settleH2(new AIError.AbortError());
 				});
-			}
+			};
+			onTransportAbort = abortTransport;
+			options?.signal?.addEventListener("abort", abortTransport, { once: true });
 
 			runTransport.write(frameConnectMessage(requestBytes));
 			heartbeatTimer = setInterval(sendHeartbeat, 5000);
+			if (relay) {
+				const transportSettled = h2Completion.promise.then(
+					() => "settled" as const,
+					() => "settled" as const,
+				);
+				// End this response on the step's calls and park the run, stream open
+				// and exec frames unanswered, until the request bringing the results
+				// resumes it. `false` once the run is given up while parked: its last
+				// response is complete and `finally` closes the transport.
+				const parkUntilResumed = async (): Promise<boolean> => {
+					await drainInFlightDispatches();
+					endCurrentTextBlock(output, stream, state);
+					endCurrentThinkingBlock(output, stream, state);
+					// The held calls went out whole as their exec frames were held
+					// (`streamUnheldExternalCall`), and go out only once: a late
+					// announcement must not reopen one in a later response. A call
+					// announced without its exec frame never reached this response, and
+					// stays open into the one that resumes the run, as does a call
+					// Cursor serves itself that is still running.
+					for (const callId of relay.held.keys()) handedOffToolCallIds.add(callId);
+					const carried = [...new Set([...state.openToolCalls.values(), state.currentToolCall])].filter(
+						(call): call is ToolCallState => call !== null && output.content.includes(call),
+					);
+					output.content = output.content.filter(block => !carried.some(call => call === block));
+					turnRecords.relayed = true;
+					relay.reportedOutput += output.usage.output;
+					output.stopReason = "toolUse";
+					calculateCost(model, output.usage, output.timestamp);
+					output.duration = performance.now() - startTime;
+					if (firstTokenTime) output.ttft = firstTokenTime - startTime;
+					// The run outlives this request: its end, the client dropping the
+					// finished response included, must not cancel the run.
+					options?.signal?.removeEventListener("abort", abortTransport);
+					relay.backlog = [];
+
+					const wireModelId = options?.wireModelId;
+					const conversationKey = options?.conversationId ?? options?.sessionId;
+					const resumed = Promise.withResolvers<CursorRelayResumption | undefined>();
+					let unparked = false;
+					const unpark = (resumption: CursorRelayResumption | undefined): void => {
+						unparked = true;
+						resumed.resolve(resumption);
+					};
+					const parked: CursorParkedRun = {
+						close: () => unpark(undefined),
+						resume: (nextModel, nextContext, nextOptions) => {
+							const results = collectRelayedResults(nextContext.messages, relay.held);
+							const mismatch =
+								unparked || h2Settled || nextOptions?.signal?.aborted
+									? "ended"
+									: !nextOptions?.externalToolExecutor ||
+										  nextModel.id !== model.id ||
+										  nextOptions.wireModelId !== wireModelId ||
+										  (nextOptions.conversationId ?? nextOptions.sessionId) !== conversationKey
+										? "route"
+										: results === undefined
+											? "results"
+											: undefined;
+							if (mismatch !== undefined || !nextOptions || !results) {
+								log("relay", "mismatch", { mismatch, last: nextContext.messages.at(-1)?.role });
+								return undefined;
+							}
+							const nextStream = new AssistantMessageEventStream();
+							unpark({ context: nextContext, options: nextOptions, stream: nextStream, results });
+							return nextStream;
+						},
+					};
+					relay.states.get(CURSOR_RELAY_SESSION_STATE_KEY)?.close();
+					relay.states.set(CURSOR_RELAY_SESSION_STATE_KEY, parked);
+					const idleTimer = setTimeout(parked.close, CURSOR_RELAY_IDLE_TIMEOUT_MS);
+					log("relay", "parked", { calls: [...relay.held.keys()] });
+					// Parked before the response ends, so the request it prompts finds the run.
+					stream.push({ type: "done", reason: "toolUse", message: output });
+					stream.end();
+
+					const resumption = await Promise.race([resumed.promise, transportSettled.then(() => undefined)]);
+					clearTimeout(idleTimer);
+					if (relay.states.get(CURSOR_RELAY_SESSION_STATE_KEY) === parked) {
+						relay.states.delete(CURSOR_RELAY_SESSION_STATE_KEY);
+					}
+					if (!resumption) {
+						log("relay", "closed", { transportSettled: h2Settled });
+						return false;
+					}
+					({ context, options, stream } = resumption);
+					output = createCursorOutput(model, Date.now());
+					startTime = performance.now();
+					firstTokenTime = undefined;
+					stream.push({ type: "start", partial: output });
+					// The streamed calls left open at the handoff carry on in this response.
+					for (const call of carried) {
+						call[kStreamingBlockIndex] = output.content.length;
+						output.content.push(call);
+						stream.push({ type: "toolcall_start", contentIndex: call[kStreamingBlockIndex], partial: output });
+					}
+					if (options.signal?.aborted) abortTransport();
+					else options.signal?.addEventListener("abort", abortTransport, { once: true });
+					for (const [callId, { execMsg, mcpCall }] of relay.held) {
+						const result = resumption.results.get(callId)!;
+						sendExecClientMessage(
+							resultWriter,
+							execMsg,
+							"mcpResult",
+							buildMcpResultFromToolResult(mcpCall, result),
+						);
+					}
+					log("relay", "resumed", { calls: [...relay.held.keys()], backlog: relay.backlog.length });
+					const stepListed =
+						relay.listed !== undefined && relay.held.size + relay.served + relay.answered >= relay.listed;
+					relay.answered = stepListed ? 0 : relay.answered + relay.held.size;
+					if (stepListed) {
+						relay.listed = undefined;
+						relay.served = 0;
+					}
+					relay.held.clear();
+					relay.handedOff = Promise.withResolvers();
+					const backlog = relay.backlog;
+					relay.backlog = undefined;
+					for (const message of backlog) dispatchServerMessage(message);
+					return true;
+				};
+				while ((await Promise.race([transportSettled, relay.handedOff.promise])) === "handedOff") {
+					clearTimeout(relay.quietTimer);
+					relay.quietTimer = undefined;
+					if (!(await parkUntilResumed())) return;
+				}
+				clearTimeout(relay.quietTimer);
+			}
 			await h2Completion.promise;
 			if (conversationId && baseConversationId && conversationId !== baseConversationId) {
 				successfulRotatedConversationIds.add(conversationId);
@@ -1448,8 +1918,62 @@ function streamCursorWithWireMode(
 
 			endCurrentTextBlock(output, stream, state);
 			endCurrentThinkingBlock(output, stream, state);
+			// A call the server never completed gets its result from the flush, which
+			// no checkpoint holds. An MCP call the exec channel already answered, with
+			// its arguments complete, leaves the turn as checkpointed.
+			const flushChangesTurn = [...state.openToolCalls.values(), state.currentToolCall].some(
+				call =>
+					call !== null &&
+					!(
+						call[kStreamingBlockKind] === "mcp" &&
+						call[kCursorExecResolved] &&
+						call[kStreamingPartialJson] === undefined
+					),
+			);
+			if (flushChangesTurn) checkpointCoversTurn = false;
 			flushOpenToolCalls(output, stream, state);
+			// Results that flush and server-owned tools reported are still settling
+			// through the host; the digest must see them as the host stored them.
+			await drainInFlightDispatches();
+			// A call handed to an external executor is still owed its result, which
+			// comes with the next request. The turn stops for the client to run it,
+			// however Cursor's model wound up its side after the handoff.
+			if (
+				options?.externalToolExecutor &&
+				output.stopReason === "stop" &&
+				output.content.some(block => block.type === "toolCall" && !isCursorExecResolved(block))
+			) {
+				output.stopReason = "toolUse";
+			}
+			// The records hold the user message and results as the server saw them,
+			// written on one route; a host edit to either, in place or not, must not
+			// be undone by sending them back, nor may a retry's route change relabel
+			// them. A relayed turn's records stand for more than this message.
+			const userMessage = context.messages[findLastUserMessageIndex(context.messages)];
+			let keptAsSent =
+				hashCursorUserMessage(userMessage) === turnRecords.userHash &&
+				!turnRecords.mixedRoutes &&
+				!turnRecords.relayed;
+			for (const [callId, stored] of turnRecords.stored) {
+				if (hashCursorToolResult(stored) !== turnRecords.given.get(callId)) keptAsSent = false;
+			}
+			output.providerPayload =
+				checkpointCoversTurn && latestCheckpoint && keptAsSent
+					? captureCursorHistoryPayload(latestCheckpoint, blobStore, turnRequestIds, {
+							wireRoute: builtRequest.wireRoute,
+							userMessage,
+							content: output.content,
+							toolResults: turnRecords.stored,
+						})
+					: undefined;
 
+			// The turn-end counters cover every response a relayed run streamed
+			// into, and the earlier ones already reported their output.
+			if (relay?.turnOutputReported && relay.reportedOutput > 0) {
+				const usage = output.usage;
+				usage.output = Math.max(usage.output - relay.reportedOutput, 0);
+				usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+			}
 			calculateCost(model, output.usage, output.timestamp);
 
 			output.duration = performance.now() - startTime;
@@ -1461,6 +1985,7 @@ function streamCursorWithWireMode(
 			});
 			stream.end();
 		} catch (caughtError) {
+			if (relay) clearTimeout(relay.quietTimer);
 			let error = caughtError;
 			const h2Unavailable = transportMode === "http2" && isHttp2Unavailable(error);
 			if (
@@ -1488,6 +2013,7 @@ function streamCursorWithWireMode(
 					retry: {
 						attempt: retryContext?.attempt ?? 0,
 						originalRequestId,
+						requestIds: turnRequestIds,
 						checkpoint: retryContext?.checkpoint,
 						checkpointHash: retryContext?.checkpointHash,
 						noProgressResumes: retryContext?.noProgressResumes ?? 0,
@@ -1497,6 +2023,7 @@ function streamCursorWithWireMode(
 						baseConversationId,
 						conversationId,
 						blobStore: activeBlobStore,
+						turnRecords,
 						firstTokenTime,
 					},
 				});
@@ -1610,11 +2137,7 @@ function streamCursorWithWireMode(
 				});
 				let retryDelayCompleted = false;
 				try {
-					if (options?.providerRetryWait) {
-						await options.providerRetryWait(delayMs, options.signal);
-					} else {
-						await scheduler.wait(delayMs, { signal: options?.signal });
-					}
+					await waitForRetry(options?.providerRetryWait, delayMs, options?.signal);
 					retryDelayCompleted = !options?.signal?.aborted;
 				} catch (waitError) {
 					error = waitError;
@@ -1627,6 +2150,7 @@ function streamCursorWithWireMode(
 						retry: {
 							attempt: retryAttempt + 1,
 							originalRequestId: retryOriginalRequestId,
+							requestIds: turnRequestIds,
 							checkpoint: retryCheckpoint,
 							checkpointHash,
 							noProgressResumes,
@@ -1636,7 +2160,9 @@ function streamCursorWithWireMode(
 							baseConversationId: retryBaseConversationId,
 							conversationId: retryConversationId,
 							blobStore: retryBlobStore,
+							turnRecords,
 							firstTokenTime,
+							relayReportedOutput: relay?.reportedOutput,
 						},
 					});
 					stream.forwardLocalWorkFrom(retryStream);
@@ -1667,37 +2193,49 @@ function streamCursorWithWireMode(
 				flushOpenToolCalls(output, stream, openBlockState);
 			}
 			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal });
-			// #8345: a server-side per-conversation rejection surfaces as a bare
-			// resource_exhausted with zero tokens — the conversation is poisoned,
-			// not the account. Rotate the wire id and rebuild from `context` on
-			// the next attempt (the caller's retry loop). Do not migrate cached
-			// side-state: pendingToolCalls from a mid-turn checkpoint re-poison
-			// the new id. One rotation per failure streak; a new rotation is
-			// allowed only after the current rotated id completed a turn.
+			// #8345/#15830: a server-side per-conversation rejection (a bare
+			// resource_exhausted, or PROVIDER_ERROR after a mid-turn cut) with zero
+			// tokens means the conversation is poisoned, not the account. Rotate
+			// the wire id and rebuild from `context` on the next attempt (the
+			// caller's retry loop). Do not migrate cached side-state:
+			// pendingToolCalls from a mid-turn checkpoint re-poison the new id.
+			// One rotation per failure streak; a new rotation is allowed only
+			// after the current rotated id completed a turn.
 			const currentRotated =
 				baseConversationId === undefined ? undefined : rotatedConversationIds.get(baseConversationId);
 			const canRotate = currentRotated === undefined || successfulRotatedConversationIds.has(currentRotated);
+			let rotatedRejection = false;
 			if (
 				conversationId !== undefined &&
 				baseConversationId !== undefined &&
 				usageState !== undefined &&
 				!usageState.sawTokenDelta &&
-				RESOURCE_EXHAUSTED_PATTERN.test(result.message) &&
+				isCursorConversationRejected(error, result.message) &&
 				canRotate
 			) {
 				const rotated = crypto.randomUUID();
 				if (currentRotated) successfulRotatedConversationIds.delete(currentRotated);
 				rotatedConversationIds.set(baseConversationId, rotated);
 				freshRotatedConversationIds.add(rotated);
+				// The poisoned id is never addressed again; release its side state.
+				cursorConversations.delete(conversationId);
 				logger.debug("cursor conversation rotated", {
 					base: baseConversationId,
 					from: conversationId,
 					to: rotated,
 				});
+				// Only a conversation an earlier request opened can be poisoned. A
+				// first request's rejection is real, and a caller retrying without a
+				// stable id would never reach the rotated one; keep Cursor's verdict.
+				rotatedRejection = knownConversation;
 			}
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
-			output.errorId = result.id;
+			// The rejection is non-retriable on the poisoned id, but the fresh id
+			// is a different request. Mark this one attempt transient so the
+			// caller's retry loop actually rebuilds on the rotated id; if that id
+			// rejects too, `canRotate` is false and the original status surfaces.
+			output.errorId = rotatedRejection ? AIError.create(AIError.Flag.Transient) : result.id;
 			if (error instanceof ConnectEndStreamError) {
 				output.errorClassificationMessage = result.message;
 				output.errorMessage = error.diagnosticMessage;
@@ -1717,15 +2255,70 @@ function streamCursorWithWireMode(
 			}
 			runTransport?.close();
 			h2Client?.close();
+			if (onTransportAbort) options?.signal?.removeEventListener("abort", onTransportAbort);
+			if (ephemeralConversation && baseConversationId !== undefined) {
+				const rotated = rotatedConversationIds.get(baseConversationId);
+				for (const id of [baseConversationId, rotated]) {
+					if (id === undefined) continue;
+					cursorConversations.delete(id);
+					successfulRotatedConversationIds.delete(id);
+					freshRotatedConversationIds.delete(id);
+				}
+				rotatedConversationIds.delete(baseConversationId);
+			}
 		}
 	})();
 
 	return stream;
 }
 
+/**
+ * The results a request brings for a parked run's held calls, by call id, or
+ * `undefined` when the request does not continue the run: its history must end
+ * on an assistant message followed by exactly one result for each held call.
+ */
+function collectRelayedResults(
+	messages: readonly Message[],
+	held: ReadonlyMap<string, CursorHeldCall>,
+): Map<string, ToolResultMessage> | undefined {
+	const results = new Map<string, ToolResultMessage>();
+	let index = messages.length - 1;
+	for (; index >= 0; index--) {
+		const message = messages[index];
+		if (message.role !== "toolResult") break;
+		if (!held.has(message.toolCallId) || results.has(message.toolCallId)) return undefined;
+		results.set(message.toolCallId, message);
+	}
+	if (results.size !== held.size || messages[index]?.role !== "assistant") return undefined;
+	return results;
+}
+
+/**
+ * Continue the session's parked run (`CursorParkedRun`) when this request
+ * brings the results of the calls it handed the client. A parked run the
+ * request does not continue is cancelled, and the request goes out as a new
+ * run that rebuilds the turn from its history.
+ */
+function resumeParkedCursorRun(
+	model: Model<"cursor-agent">,
+	context: Context,
+	options: CursorOptions | undefined,
+): AssistantMessageEventStream | undefined {
+	const states = options?.providerSessionState;
+	const parked = states?.get(CURSOR_RELAY_SESSION_STATE_KEY) as CursorParkedRun | undefined;
+	if (!states || !parked) return undefined;
+	states.delete(CURSOR_RELAY_SESSION_STATE_KEY);
+	const resumed = parked.resume(model, context, options);
+	if (!resumed) {
+		log("relay", "superseded");
+		parked.close();
+	}
+	return resumed;
+}
+
 /** Streams a Cursor Agent turn, retrying a discovered effort id when its normalized wire id is unavailable. */
 export const streamCursor: StreamFunction<"cursor-agent"> = (model, context, options) =>
-	streamCursorWithWireMode(model, context, options, "normalized");
+	resumeParkedCursorRun(model, context, options) ?? streamCursorWithWireMode(model, context, options, "normalized");
 
 export type ToolCallState = ToolCall & {
 	[kStreamingBlockIndex]: number;
@@ -1735,6 +2328,19 @@ export type ToolCallState = ToolCall & {
 	[kStreamingEnvelopeId]?: string;
 	[kCursorExecResolved]?: true;
 };
+
+/**
+ * Content index of a streamed block. Blocks are stamped with their index on
+ * push and Cursor never reorders `output.content`, so this is O(1) per delta;
+ * the identity check keeps a foreign block resolvable.
+ */
+function streamedBlockIndex(
+	output: AssistantMessage,
+	block: AssistantMessage["content"][number] & { [kStreamingBlockIndex]: number },
+): number {
+	const index = block[kStreamingBlockIndex];
+	return output.content[index] === block ? index : output.content.indexOf(block);
+}
 
 export interface BlockState {
 	currentTextBlock: (TextContent & { [kStreamingBlockIndex]: number }) | null;
@@ -1753,6 +2359,22 @@ export interface BlockState {
 	openToolCalls: Map<string, ToolCallState>;
 	/** MCP call IDs synthesized from exec frames before their redundant streamed block arrives. */
 	resolvedMcpToolCallIds: Set<string>;
+	/**
+	 * Calls a relayed run handed its client in an earlier response
+	 * (`CursorParkedRun`). Each response fills its own message, so a streamed
+	 * announcement that trails the handoff must not open the call again there.
+	 * Optional so existing test harnesses stay valid.
+	 */
+	handedOffToolCallIds?: Set<string>;
+	/**
+	 * MCP calls a relayed run (`CursorParkedRun`) has seen announced but holds
+	 * no exec frame for, by call id. A streaming client runs every call it is
+	 * sent and a streamed event cannot be taken back, while a response may hand
+	 * the client only held calls; so a call stays off the stream and out of the
+	 * message until its exec frame is held (`streamUnheldExternalCall`).
+	 * Set only for a relayed run.
+	 */
+	unheldExternalCalls?: Map<string, ToolCallState>;
 	/**
 	 * Native `editToolCall` (StrReplace) ids whose materialization `readArgs` /
 	 * `writeArgs` must stay raw and must not synthesize extra transcript blocks.
@@ -1777,6 +2399,12 @@ export interface BlockState {
 	 * matching result and every transcript rebuild strips it as dangling.
 	 */
 	onToolResult?: CursorToolResultHandler;
+	/**
+	 * Keep an external executor's MCP exec frame open instead of handing the
+	 * call off: a relayed run answers it in-band once the client's next request
+	 * brings the result (`CursorParkedRun`).
+	 */
+	holdExternalCall?: (execMsg: ExecServerMessage, call: CursorMcpCall) => void;
 }
 
 function markCursorExecResolved(block: CursorExecResolvedCarrier): void {
@@ -2495,7 +3123,7 @@ async function handleExecServerMessage(
 			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "bash", {
 				command: args.command,
 				cwd: args.workingDirectory || undefined,
-				timeout: shellTimeoutSeconds(args.timeout),
+				timeout: shellDeadlineSeconds(args),
 			});
 			const { execResult } = await resolveExecHandler(
 				args,
@@ -2516,7 +3144,7 @@ async function handleExecServerMessage(
 			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "bash", {
 				command: args.command,
 				cwd: args.workingDirectory || undefined,
-				timeout: shellTimeoutSeconds(args.timeout),
+				timeout: shellDeadlineSeconds(args),
 			});
 			await handleShellStreamArgs(args, execMsg, runTransport, execHandlers, onToolResult);
 			return;
@@ -2627,6 +3255,8 @@ async function handleExecServerMessage(
 			// `stop`, so the client never saw the call it was meant to execute.
 			const externalHandoff = externalToolExecutor && !execHandlers?.mcp;
 			if (execHandlers?.mcp || externalHandoff) {
+				const unheld = state.unheldExternalCalls?.get(mcpCall.toolCallId);
+				if (unheld) streamHeldExternalCall(output, stream, state, unheld, mcpCall.args);
 				const existingBlock = output.content.find(
 					block => block.type === "toolCall" && block.id === mcpCall.toolCallId,
 				);
@@ -2644,6 +3274,12 @@ async function handleExecServerMessage(
 					);
 					if (!externalHandoff) state.resolvedMcpToolCallIds.add(mcpCall.toolCallId);
 				}
+			}
+			// A relayed run leaves the frame open and answers it with the client's
+			// own result, which its next request brings (`CursorParkedRun`).
+			if (externalHandoff && state.holdExternalCall) {
+				state.holdExternalCall(execMsg, mcpCall);
+				return;
 			}
 			const { execResult } = await resolveExecHandler(
 				mcpCall,
@@ -2994,7 +3630,7 @@ async function handleExecServerMessage(
 			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "bash", {
 				command: args.command,
 				cwd: args.workingDirectory || undefined,
-				timeout: shellTimeoutSeconds(args.timeout),
+				timeout: shellDeadlineSeconds(args),
 			});
 			const { execResult } = await resolveExecHandler(
 				normalizedArgs,
@@ -4430,13 +5066,13 @@ function isExecOwnedToolCall(toolCall: { tool?: { case?: string } } | undefined)
  * so reparsing unconditionally would erase the arguments of every such block
  * caught open by a truncated stream.
  *
- * Server-owned blocks are also paired here. `connect-scm` and `todo` are
- * stamped {@link kCursorExecResolved} the moment they open, so `agent-loop.ts`
- * synthesizes no placeholder for them and only their `toolCallCompleted` frame
- * pairs a result. A transport that closes before that frame would leave the
- * call unpaired, and `buildSessionContext` strips a dangling call from every
- * rebuilt transcript — the interaction disappears. An interrupted result is
- * emitted instead.
+ * Server-owned blocks are also paired here. `connect-scm`, `todo` and
+ * `web-fetch` are stamped {@link kCursorExecResolved} the moment they open,
+ * so `agent-loop.ts` synthesizes no placeholder for them and only their
+ * `toolCallCompleted` frame pairs a result. A transport that closes before
+ * that frame would leave the call unpaired, and `buildSessionContext` strips
+ * a dangling call from every rebuilt transcript — the interaction disappears.
+ * An interrupted result is emitted instead.
  *
  * MCP blocks are excluded even when resolved: the exec dispatch that marked
  * them owns their result, and `drainInFlightDispatches` awaits it before this
@@ -4450,14 +5086,16 @@ export function flushOpenToolCalls(
 	const openBlocks = new Set<ToolCallState>(state.openToolCalls.values());
 	if (state.currentToolCall) openBlocks.add(state.currentToolCall);
 	for (const block of openBlocks) {
-		const idx = output.content.indexOf(block);
+		// A call a relayed run kept back goes out first, as it streamed.
+		if (state.unheldExternalCalls?.has(block.id)) streamUnheldExternalCall(output, stream, state, block);
+		const idx = streamedBlockIndex(output, block);
 		const partialJson = block[kStreamingPartialJson];
 		if (partialJson !== undefined) {
 			block.arguments = parseToolCallArguments(partialJson);
 			clearStreamingPartialJson(block);
 		}
 		const kind = block[kStreamingBlockKind];
-		if (kind === "connect-scm" || kind === "todo" || kind === "cursor-edit") {
+		if (kind === "connect-scm" || kind === "todo" || kind === "cursor-edit" || kind === "web-fetch") {
 			if (!(kind === "cursor-edit" && state.pairedEditToolCallIds?.has(block.id))) {
 				state.onToolResult?.({
 					role: "toolResult",
@@ -4857,7 +5495,7 @@ export function mergeCursorMcpToolCallArgs(
 function endCurrentTextBlock(output: AssistantMessage, stream: AssistantMessageEventStream, state: BlockState): void {
 	const block = state.currentTextBlock;
 	if (!block) return;
-	const idx = output.content.indexOf(block);
+	const idx = streamedBlockIndex(output, block);
 	stream.push({
 		type: "text_end",
 		contentIndex: idx,
@@ -4874,7 +5512,7 @@ function endCurrentThinkingBlock(
 ): void {
 	const block = state.currentThinkingBlock;
 	if (!block) return;
-	const idx = output.content.indexOf(block);
+	const idx = streamedBlockIndex(output, block);
 	stream.push({
 		type: "thinking_end",
 		contentIndex: idx,
@@ -4903,6 +5541,13 @@ function endCurrentThinkingBlock(
  * call handed to an external executor is only a handoff while the marker is
  * absent, and the consumer that runs it needs a runnable block.
  *
+ * A frame whose `toolCallId` already has a block in `output` is the server
+ * re-dispatching that call (a new `execId`, e.g. a `read` re-sent once a
+ * parallel shell created the file). It adds no block: a second block with the
+ * same id makes every rebuilt history replay the call twice, which Cursor
+ * rejects (issue #15749). The re-run's result supersedes the first one in the
+ * host's result buffer.
+ *
  * Exported for tests to exercise ordering with adjacent text/thinking blocks.
  */
 export function synthesizeCursorExecToolCall(
@@ -4914,6 +5559,7 @@ export function synthesizeCursorExecToolCall(
 	args: Record<string, unknown>,
 	{ executed = true }: { executed?: boolean } = {},
 ): void {
+	if (output.content.some(block => block.type === "toolCall" && block.id === toolCallId)) return;
 	endCurrentTextBlock(output, stream, state);
 	endCurrentThinkingBlock(output, stream, state);
 	// Exec-frame translators often write `optional: value || undefined`. A
@@ -4932,6 +5578,50 @@ export function synthesizeCursorExecToolCall(
 	const idx = output.content.length - 1;
 	stream.push({ type: "toolcall_start", contentIndex: idx, partial: output });
 	stream.push({ type: "toolcall_end", contentIndex: idx, toolCall: block, partial: output });
+}
+
+/**
+ * Put an MCP call a relayed run kept back (`BlockState.unheldExternalCalls`)
+ * on the stream as it would have streamed: its announcement, then the
+ * argument text it has so far as one delta.
+ */
+function streamUnheldExternalCall(
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+	state: BlockState,
+	block: ToolCallState,
+): void {
+	state.unheldExternalCalls?.delete(block.id);
+	endCurrentTextBlock(output, stream, state);
+	endCurrentThinkingBlock(output, stream, state);
+	block[kStreamingBlockIndex] = output.content.length;
+	output.content.push(block);
+	const contentIndex = block[kStreamingBlockIndex];
+	stream.push({ type: "toolcall_start", contentIndex, partial: output });
+	const delta = block[kStreamingPartialJson] ?? JSON.stringify(block.arguments);
+	stream.push({ type: "toolcall_delta", contentIndex, delta, partial: output });
+}
+
+/**
+ * Stream a kept-back MCP call once its exec frame, which the run holds, has
+ * arrived: whole, on the arguments that frame carries complete. What streamed
+ * can stop short of them, since the call's completion frame only follows its
+ * result.
+ */
+function streamHeldExternalCall(
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+	state: BlockState,
+	block: ToolCallState,
+	execArgs: Record<string, unknown>,
+): void {
+	const partial = block[kStreamingPartialJson];
+	const streamed = partial === undefined ? block.arguments : parseToolCallArguments(partial);
+	block.arguments = "__parseError" in streamed ? execArgs : mergeCursorMcpToolCallArgs(streamed, execArgs);
+	clearStreamingPartialJson(block);
+	streamUnheldExternalCall(output, stream, state, block);
+	stream.push({ type: "toolcall_end", contentIndex: block[kStreamingBlockIndex], toolCall: block, partial: output });
+	releaseStreamedCall(state, block);
 }
 
 /**
@@ -4996,7 +5686,7 @@ export function processInteractionUpdate(
 			stream.push({ type: "text_start", contentIndex: output.content.length - 1, partial: output });
 		}
 		state.currentTextBlock!.text += delta;
-		const idx = output.content.indexOf(state.currentTextBlock!);
+		const idx = streamedBlockIndex(output, state.currentTextBlock!);
 		stream.push({ type: "text_delta", contentIndex: idx, delta, partial: output });
 	} else if (updateCase === "thinkingDelta") {
 		state.setFirstTokenTime();
@@ -5012,7 +5702,7 @@ export function processInteractionUpdate(
 			stream.push({ type: "thinking_start", contentIndex: output.content.length - 1, partial: output });
 		}
 		state.currentThinkingBlock!.thinking += delta;
-		const idx = output.content.indexOf(state.currentThinkingBlock!);
+		const idx = streamedBlockIndex(output, state.currentThinkingBlock!);
 		stream.push({ type: "thinking_delta", contentIndex: idx, delta, partial: output });
 	} else if (updateCase === "thinkingCompleted") {
 		endCurrentThinkingBlock(output, stream, state);
@@ -5065,9 +5755,14 @@ export function processInteractionUpdate(
 				state.resolvedMcpToolCallIds.delete(id);
 				// The exec channel may have emitted this block first — executed
 				// (marked resolved) or handed to an external executor (deliberately
-				// unmarked). Either way the call is already in the transcript, so a
-				// second block for the same id would duplicate it.
-				if (output.content.some(block => block.type === "toolCall" && block.id === id)) {
+				// unmarked) — or a relayed run may be keeping it back. Either way the
+				// call already has its block, and a second one for the same id would
+				// duplicate it.
+				if (
+					state.handedOffToolCallIds?.has(id) ||
+					state.unheldExternalCalls?.has(id) ||
+					output.content.some(block => block.type === "toolCall" && block.id === id)
+				) {
 					return;
 				}
 				const block: ToolCallState = {
@@ -5082,8 +5777,13 @@ export function processInteractionUpdate(
 					[kStreamingBlockKind]: "mcp",
 					[kStreamingEnvelopeId]: update.message.value.callId || undefined,
 				};
-				output.content.push(block);
 				retainStreamedCall(state, block, update.message.value.callId);
+				// A relayed run streams the call once its exec frame is held.
+				if (state.unheldExternalCalls) {
+					state.unheldExternalCalls.set(id, block);
+					return;
+				}
+				output.content.push(block);
 				stream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });
 				return;
 			}
@@ -5150,7 +5850,7 @@ export function processInteractionUpdate(
 			if (target?.[kStreamingBlockKind] === "cursor-edit") {
 				const current = stringToolArg(target.arguments, "stream_content") ?? "";
 				target.arguments = { ...target.arguments, stream_content: current + editDelta };
-				const idx = output.content.indexOf(target);
+				const idx = streamedBlockIndex(output, target);
 				stream.push({ type: "toolcall_delta", contentIndex: idx, delta: editDelta, partial: output });
 				return;
 			}
@@ -5180,7 +5880,9 @@ export function processInteractionUpdate(
 				target.arguments = throttled.value;
 				target[kStreamingLastParseLen] = throttled.parsedLen;
 			}
-			const idx = output.content.indexOf(target);
+			// Kept back with its announcement (`BlockState.unheldExternalCalls`).
+			if (state.unheldExternalCalls?.has(target.id)) return;
+			const idx = streamedBlockIndex(output, target);
 			stream.push({ type: "toolcall_delta", contentIndex: idx, delta: chunk, partial: output });
 		}
 	} else if (updateCase === "toolCallCompleted") {
@@ -5195,6 +5897,9 @@ export function processInteractionUpdate(
 		if (settled) {
 			const toolCall = update.message.value.toolCall;
 			if (settled[kStreamingBlockKind] === "mcp") {
+				// Cursor settled a kept-back call without asking for its result: it
+				// goes out as it streamed, and closes like any streamed call.
+				if (state.unheldExternalCalls?.has(settled.id)) streamUnheldExternalCall(output, stream, state, settled);
 				// Authoritative full parse of the accumulated argument buffer; the delta
 				// path throttles mid-stream parses, so `arguments` may lag the buffer.
 				const partial = settled[kStreamingPartialJson];
@@ -5319,7 +6024,7 @@ export function processInteractionUpdate(
 					});
 				}
 			}
-			const idx = output.content.indexOf(settled);
+			const idx = streamedBlockIndex(output, settled);
 			clearStreamingPartialJson(settled);
 			stream.push({ type: "toolcall_end", contentIndex: idx, toolCall: settled, partial: output });
 			releaseStreamedCall(state, settled);
@@ -5410,11 +6115,169 @@ function readCursorBlob(blobStore: Map<string, Uint8Array>, blobId: Uint8Array):
 	return data;
 }
 
+/** How the server's record of a run's user message begins; it carries the run's request id. */
+const CURSOR_USER_RECORD_PREFIX = '{"role":"user"';
+const cursorRecordDecoder = new TextDecoder("utf-8", { ignoreBOM: true });
+
+/** What a turn's server records stand for; replay requires all of it unchanged. */
+interface CursorTurnBinding {
+	/** The wire route (requested model, details id, max mode, parameters) the records were written under. */
+	wireRoute: string;
+	/** The user message that opened the turn. */
+	userMessage: Message | undefined;
+	content: AssistantMessage["content"];
+	toolResults: ReadonlyMap<string, ToolResultMessage>;
+}
+
+/** Chains `Bun.hash` over message parts from `seed`, without copying them. */
+function hashCursorParts(
+	parts: string | readonly (TextContent | ImageContent)[],
+	seed: number | bigint,
+): number | bigint {
+	if (typeof parts === "string") return Bun.hash(parts, seed);
+	let hash = seed;
+	for (const item of parts) {
+		hash = Bun.hash(item.type, hash);
+		if (item.type === "text") hash = Bun.hash(item.text, hash);
+		else hash = Bun.hash(item.data, Bun.hash(item.mimeType, hash));
+	}
+	return hash;
+}
+
+/** Hash of a tool result's error state and content, chained from `seed`. */
+function hashCursorToolResult(result: ToolResultMessage, seed: number | bigint = 0): number | bigint {
+	return hashCursorParts(result.content, Bun.hash(result.isError ? "error" : "ok", seed));
+}
+
+/** Hash of the user or developer message that opened a turn, chained from `seed`. */
+function hashCursorUserMessage(message: Message | undefined, seed: number | bigint = 0): number | bigint {
+	return message?.role === "user" || message?.role === "developer" ? hashCursorParts(message.content, seed) : seed;
+}
+
+/** The wire route a Run request selects: requested model, its details id, max mode and parameters. */
+function cursorWireRoute(
+	requested: { modelId: string; maxMode?: boolean; parameters: readonly { id: string; value: string }[] } | undefined,
+	details: { modelId: string; maxMode?: boolean } | undefined,
+): string {
+	return JSON.stringify([
+		requested?.modelId,
+		details?.modelId,
+		requested?.maxMode === true,
+		details?.maxMode === true,
+		requested?.parameters.map(parameter => [parameter.id, parameter.value]) ?? [],
+	]);
+}
+
+/** Hash of a blob-id list's bytes in order; taken before `onPayload`, it survives the hook mutating the ids. */
+function hashCursorBlobIds(ids: readonly Uint8Array[]): number | bigint {
+	let hash: number | bigint = ids.length;
+	for (const id of ids) hash = Bun.hash(id, hash);
+	return hash;
+}
+
+/**
+ * Digest of an assistant turn as its server records stand for it: the user
+ * message that opened it, its content, and the result persisted for each call.
+ * Pruning, snapcompact, secret redaction or an edit changes it, and the turn
+ * then rebuilds from content. Each field seeds the next one's hash, so no copy
+ * of the turn is built.
+ */
+function cursorTurnDigest({ userMessage, content, toolResults }: Omit<CursorTurnBinding, "wireRoute">): string {
+	let digest = hashCursorUserMessage(userMessage);
+	for (const block of content) {
+		digest = Bun.hash(block.type, digest);
+		if (block.type === "text") digest = Bun.hash(block.text, digest);
+		else if (block.type === "thinking") digest = Bun.hash(block.thinking, digest);
+		else if (block.type === "toolCall") {
+			digest = Bun.hash(JSON.stringify(block.arguments), Bun.hash(block.name, Bun.hash(block.id, digest)));
+			const result = toolResults.get(block.id);
+			digest = result === undefined ? Bun.hash("unpaired", digest) : hashCursorToolResult(result, digest);
+		}
+	}
+	return digest.toString(36);
+}
+
+/**
+ * The records Cursor wrote for this turn: the checkpoint's `rootPromptMessagesJson`
+ * entries after the user message the server recorded for one of this turn's
+ * requests. Undefined when that message is not found, a record's bytes are
+ * missing, or a record does not round-trip through UTF-8 text unchanged.
+ */
+function captureCursorHistoryPayload(
+	checkpoint: ConversationStateStructure,
+	blobStore: Map<string, Uint8Array>,
+	requestIds: readonly string[],
+	binding: CursorTurnBinding,
+): CursorHistoryPayload | undefined {
+	const stamps = requestIds.map(id => `"requestId":"${id}"`);
+	const records: string[] = [];
+	for (let index = checkpoint.rootPromptMessagesJson.length - 1; index >= 0; index--) {
+		const bytes = blobStore.get(Buffer.from(checkpoint.rootPromptMessagesJson[index]).toString("hex"));
+		if (!bytes) return undefined;
+		const record = cursorRecordDecoder.decode(bytes);
+		if (record.startsWith(CURSOR_USER_RECORD_PREFIX) && stamps.some(stamp => record.includes(stamp))) {
+			if (records.length === 0) return undefined;
+			log("info", "capturedServerRecords", { count: records.length });
+			return {
+				type: "cursorHistory",
+				wireRoute: binding.wireRoute,
+				digest: cursorTurnDigest(binding),
+				records: records.reverse(),
+			};
+		}
+		if (!Buffer.from(record).equals(bytes)) return undefined;
+		records.push(record);
+	}
+	return undefined;
+}
+
+interface CursorRecordReplay {
+	records: Uint8Array[];
+	/** Calls whose results the records already carry. */
+	toolCallIds: string[];
+}
+
+/**
+ * Assistant turns that go back as their server records, by message index: turns
+ * the target model produced on the same wire route whose opening user message,
+ * content and paired results still match the digest taken when they were recorded.
+ */
+function resolveCursorRecordReplays(
+	messages: Message[],
+	activeUserMessageIndex: number,
+	provider: string,
+	modelId: string | undefined,
+	wireRoute: string,
+	{ toolResults }: CursorToolHistory,
+): Map<number, CursorRecordReplay> {
+	const historyEnd = activeUserMessageIndex >= 0 ? activeUserMessageIndex : messages.length;
+	const replays = new Map<number, CursorRecordReplay>();
+	let userMessage: Message | undefined;
+	for (let index = 0; index < historyEnd; index++) {
+		const msg = messages[index];
+		if (msg.role === "user" || msg.role === "developer") userMessage = msg;
+		if (msg.role !== "assistant" || msg.providerPayload?.type !== "cursorHistory") continue;
+		if (msg.api !== "cursor-agent" || msg.provider !== provider || msg.model !== modelId) continue;
+		if (msg.providerPayload.wireRoute !== wireRoute) continue;
+		if (cursorTurnDigest({ userMessage, content: msg.content, toolResults }) !== msg.providerPayload.digest) {
+			continue;
+		}
+		replays.set(index, {
+			records: msg.providerPayload.records.map(record => new TextEncoder().encode(record)),
+			toolCallIds: msg.content.flatMap(block =>
+				block.type === "toolCall" && toolResults.has(block.id) ? [block.id] : [],
+			),
+		});
+	}
+	return replays;
+}
+
 /**
  * Cursor AgentService reconstructs the model prompt from `requestContext.rules`,
  * not from the client-supplied `rootPromptMessagesJson` system blobs. Map each
  * OMP system-prompt entry to a global CursorRule so always-apply rules survive
- * that reconstruction.
+ * that reconstruction. The server only does this while the root carries no
+ * history; later turns rely on {@link buildCursorRulesEntryJson}.
  */
 export function buildCursorRequestContextRules(systemPrompt: readonly string[] | undefined): CursorRule[] {
 	return normalizeSystemPrompts(systemPrompt).map((content, index) =>
@@ -5459,12 +6322,17 @@ function isJsonValue(value: unknown): value is JsonValue {
 export function buildMcpToolDefinitions(
 	tools: Tool[] | undefined,
 	requiresCursorToolSchemaProjection = false,
+	externalToolExecutor = false,
 ): McpToolDefinition[] {
 	if (!tools || tools.length === 0) {
 		return [];
 	}
 
-	const advertisedTools = tools.filter(tool => !CURSOR_NATIVE_TOOL_NAMES.has(tool.name));
+	// An external executor's run drives no tool natively
+	// (`CURSOR_EXTERNAL_EXECUTOR_ALLOWED_TOOLS`), so every tool goes out as MCP.
+	const advertisedTools = externalToolExecutor
+		? tools
+		: tools.filter(tool => !CURSOR_NATIVE_TOOL_NAMES.has(tool.name));
 	if (advertisedTools.length === 0) {
 		return [];
 	}
@@ -5476,7 +6344,8 @@ export function buildMcpToolDefinitions(
 	// devices are advertised — otherwise a staged preview can never be resolved
 	// and the SoftToolRequirement('write') escalation aborts the turn.
 	const writeTool = tools.find(tool => tool.name === "write");
-	const forwarded = writeTool ? [...advertisedTools, writeTool] : advertisedTools;
+	const forwarded =
+		writeTool && !advertisedTools.includes(writeTool) ? [...advertisedTools, writeTool] : advertisedTools;
 
 	return forwarded.map(tool => {
 		const wireSchema = toolWireSchema(tool);
@@ -5566,6 +6435,7 @@ type CursorRootPromptAssistantContentPart =
 	  }
 	| { type: "tool-call"; toolCallId: string; toolName: string; args: Record<string, unknown> };
 
+/** Kimi K3 turns without replayable server records rebuild their reasoning from content. */
 function canReplayCursorThinking(msg: AssistantMessage, targetModelId: string | undefined): boolean {
 	return (
 		targetModelId !== undefined &&
@@ -5588,12 +6458,20 @@ interface CursorAssistantStep {
  * the text and reasoning that followed each result; a round ends at a call
  * followed by anything other than another call. Consecutive calls stay in one
  * round — they were issued together. Hidden reasoning still marks a boundary.
+ * A call id repeated within the message — a re-dispatched exec frame recorded
+ * before issue #15749 was fixed — is issued once; Cursor rejects a history that
+ * repeats it.
  */
 function buildCursorAssistantSteps(msg: AssistantMessage, targetModelId: string | undefined): CursorAssistantStep[] {
 	const steps: CursorAssistantStep[] = [];
 	let step: CursorAssistantStep = { content: [], callIds: [] };
 	const replayThinking = canReplayCursorThinking(msg, targetModelId);
+	const issuedCallIds = new Set<string>();
 	for (const item of msg.content) {
+		if (item.type === "toolCall") {
+			if (issuedCallIds.has(item.id)) continue;
+			issuedCallIds.add(item.id);
+		}
 		if (item.type !== "toolCall" && step.callIds.length > 0) {
 			steps.push(step);
 			step = { content: [], callIds: [] };
@@ -5633,6 +6511,7 @@ function assertCursorKimiK3HistoryReplayable(
 	messages: Message[],
 	activeUserMessageIndex: number,
 	targetModelId: string | undefined,
+	replays: ReadonlyMap<number, CursorRecordReplay>,
 ): void {
 	if (!targetModelId || classifyModel("cursor", targetModelId).family !== "k3") return;
 	const historyEnd = activeUserMessageIndex >= 0 ? activeUserMessageIndex : messages.length;
@@ -5652,7 +6531,7 @@ function assertCursorKimiK3HistoryReplayable(
 			);
 		}
 		const hasThinking = msg.content.some(item => item.type === "thinking" && item.thinking.length > 0);
-		if (hasThinking) continue;
+		if (hasThinking || replays.has(i)) continue;
 		const warningKey = `${msg.api}\0${msg.provider}\0${msg.model}\0${msg.timestamp}`;
 		if (warnedCursorKimiK3ReplayMessages.has(warningKey)) continue;
 		missingThinkingTurns.push(assistantTurn);
@@ -5709,7 +6588,27 @@ export function buildCursorSystemPromptJsons(systemPrompt: readonly string[] | u
 	return systemPrompts.map(content => JSON.stringify({ role: "system", content }));
 }
 
-function collectCursorToolHistory(messages: Message[], historyEnd: number) {
+/**
+ * The `<rules>` user entry Cursor's server builds from `requestContext.rules` on a
+ * history-less root. On a history-bearing root the server replaces the system
+ * entries with its own prompt and keeps the client's history verbatim without
+ * rebuilding this entry, so the client carries it (as the native CLI does) right
+ * after the system entries. Undefined when there is no system prompt (#17059).
+ */
+function buildCursorRulesEntryJson(systemPrompt: readonly string[] | undefined): string | undefined {
+	const systemPrompts = normalizeSystemPrompts(systemPrompt);
+	if (systemPrompts.length === 0) return undefined;
+	return JSON.stringify({ role: "user", content: `<rules>\n${systemPrompts.join("\n\n")}\n</rules>` });
+}
+
+/** Tool results before the history end by call id, and the ids of calls the history issued. */
+interface CursorToolHistory {
+	toolResults: Map<string, ToolResultMessage>;
+	pairedToolCallIds: Set<string>;
+}
+
+function collectCursorToolHistory(messages: Message[], activeUserMessageIndex: number): CursorToolHistory {
+	const historyEnd = activeUserMessageIndex >= 0 ? activeUserMessageIndex : messages.length;
 	const toolResults = new Map<string, ToolResultMessage>();
 	const pairedToolCallIds = new Set<string>();
 	for (let index = 0; index < historyEnd; index++) {
@@ -5734,12 +6633,13 @@ function buildRootPromptMessagesJson(
 	messages: Message[],
 	systemPromptIds: Uint8Array[],
 	blobStore: Map<string, Uint8Array>,
-	activeUserMessageIndex = findLastUserMessageIndex(messages),
-	targetModelId?: string,
+	activeUserMessageIndex: number,
+	targetModelId: string | undefined,
+	replays: ReadonlyMap<number, CursorRecordReplay>,
+	{ toolResults, pairedToolCallIds }: CursorToolHistory,
 ): Uint8Array[] {
-	assertCursorKimiK3HistoryReplayable(messages, activeUserMessageIndex, targetModelId);
+	assertCursorKimiK3HistoryReplayable(messages, activeUserMessageIndex, targetModelId, replays);
 	const historyEnd = activeUserMessageIndex >= 0 ? activeUserMessageIndex : messages.length;
-	const { toolResults, pairedToolCallIds } = collectCursorToolHistory(messages, historyEnd);
 	const entries: Uint8Array[] = [...systemPromptIds];
 	const pushJson = (obj: unknown) => {
 		const bytes = new TextEncoder().encode(JSON.stringify(obj));
@@ -5775,6 +6675,12 @@ function buildRootPromptMessagesJson(
 			if (content.length === 0) continue;
 			pushJson({ role: "user", content });
 		} else if (msg.role === "assistant") {
+			const replay = replays.get(i);
+			if (replay) {
+				for (const record of replay.records) entries.push(storeCursorBlob(blobStore, record));
+				for (const toolCallId of replay.toolCallIds) emittedResults.add(toolCallId);
+				continue;
+			}
 			const steps = buildCursorAssistantSteps(msg, targetModelId);
 			for (const [stepIndex, step] of steps.entries()) {
 				pushJson({ role: "assistant", content: step.content });
@@ -5801,7 +6707,14 @@ function buildRootPromptMessagesJson(
 				});
 				continue;
 			}
-			pushToolResult(msg);
+			// A re-dispatched call recorded two results in the same batch; the
+			// re-run's answer is the one the model saw.
+			let result = msg;
+			for (let j = i + 1; j < historyEnd && messages[j].role === "toolResult"; j++) {
+				const later = messages[j];
+				if (later.role === "toolResult" && later.toolCallId === msg.toolCallId) result = later;
+			}
+			pushToolResult(result);
 		}
 	}
 
@@ -5919,12 +6832,12 @@ function createCursorToolCallStep(toolCall: ToolCall, result: ToolResultMessage 
 function buildConversationTurns(
 	messages: Message[],
 	blobStore: Map<string, Uint8Array>,
-	activeUserMessageIndex = findLastUserMessageIndex(messages),
-	targetModelId?: string,
+	activeUserMessageIndex: number,
+	targetModelId: string | undefined,
+	replays: ReadonlyMap<number, CursorRecordReplay>,
+	{ toolResults, pairedToolCallIds }: CursorToolHistory,
 ): Uint8Array[] {
 	const turns: Uint8Array[] = [];
-	const historyEnd = activeUserMessageIndex >= 0 ? activeUserMessageIndex : messages.length;
-	const { toolResults, pairedToolCallIds } = collectCursorToolHistory(messages, historyEnd);
 
 	let i = 0;
 	while (i < messages.length) {
@@ -5953,6 +6866,8 @@ function buildConversationTurns(
 		while (i < messages.length && messages[i].role !== "user" && messages[i].role !== "developer") {
 			const stepMsg = messages[i];
 			if (stepMsg.role === "assistant") {
+				// Mirrors `buildCursorAssistantSteps`: a repeated call id is issued once.
+				const issuedCallIds = new Set<string>();
 				for (const item of stepMsg.content) {
 					let step: ConversationStep;
 					if (item.type === "text") {
@@ -5964,10 +6879,11 @@ function buildConversationTurns(
 							},
 						});
 					} else if (item.type === "thinking") {
-						// Same guard as root-prompt replay: only same-model Cursor K3
-						// thinking is replayed, so foreign/hidden reasoning never leaks
-						// into Cursor's turn history as native thinking.
-						if (!item.thinking || !canReplayCursorThinking(stepMsg, targetModelId)) continue;
+						// Thinking goes into Cursor's turn history only where the root
+						// prompt replays it: server records, or same-model K3 content.
+						if (!item.thinking || !(replays.has(i) || canReplayCursorThinking(stepMsg, targetModelId))) {
+							continue;
+						}
 						step = create(ConversationStepSchema, {
 							message: {
 								case: "thinkingMessage",
@@ -5975,6 +6891,8 @@ function buildConversationTurns(
 							},
 						});
 					} else if (item.type === "toolCall") {
+						if (issuedCallIds.has(item.id)) continue;
+						issuedCallIds.add(item.id);
 						step = createCursorToolCallStep(item, toolResults.get(item.id));
 					} else {
 						continue;
@@ -6020,16 +6938,28 @@ export function buildCursorHistoryForTest(
 	turnStepMessagesJson: JsonValue[][];
 } {
 	const blobStore = new Map<string, Uint8Array>();
+	const toolHistory = collectCursorToolHistory(messages, activeUserMessageIndex);
+	// Server records replay only on a resolved wire route, which this helper does not build: every turn rebuilds.
+	const replays = new Map<number, CursorRecordReplay>();
 	const rootPromptMessagesJson = buildRootPromptMessagesJson(
 		messages,
 		[],
 		blobStore,
 		activeUserMessageIndex,
 		targetModelId,
+		replays,
+		toolHistory,
 	).map(blobId => JSON.parse(new TextDecoder().decode(readCursorBlob(blobStore, blobId))));
 	const turnUserMessagesJson: JsonValue[] = [];
 	const turnStepMessagesJson: JsonValue[][] = [];
-	for (const turnBlobId of buildConversationTurns(messages, blobStore, activeUserMessageIndex, targetModelId)) {
+	for (const turnBlobId of buildConversationTurns(
+		messages,
+		blobStore,
+		activeUserMessageIndex,
+		targetModelId,
+		replays,
+		toolHistory,
+	)) {
 		const turn = fromBinary(ConversationTurnStructureSchema, readCursorBlob(blobStore, turnBlobId));
 		if (turn.turn.case !== "agentConversationTurn") {
 			continue;
@@ -6262,14 +7192,6 @@ async function buildGrpcRequestForWireMode(
 					},
 	});
 
-	const conversationState =
-		state.resume && state.conversationState
-			? // A checkpoint resume sends the checkpoint verbatim (native CLI parity):
-				// its turns hold the partial turn the server resumes from, which
-				// `context.messages` cannot rebuild.
-				state.conversationState
-			: buildCursorConversationState(model, context, state, blobStore, systemPromptIds, historyEndIndex);
-
 	const {
 		modelId: wireModelId,
 		modelDetailsId: wireModelDetailsId,
@@ -6288,6 +7210,19 @@ async function buildGrpcRequestForWireMode(
 		maxMode: cursorMaxMode,
 		parameters: wireParameters,
 	});
+	const builtRoute = cursorWireRoute(requestedModel, modelDetails);
+
+	const built =
+		state.resume && state.conversationState
+			? // A checkpoint resume sends the checkpoint verbatim (native CLI parity):
+				// its turns hold the partial turn the server resumes from, which
+				// `context.messages` cannot rebuild.
+				{ conversationState: state.conversationState, replayed: false }
+			: buildCursorConversationState(model, context, state, blobStore, systemPromptIds, historyEndIndex, builtRoute);
+	const { conversationState } = built;
+	// Fingerprints of the history as built, to tell which field the hook below edited.
+	const builtRootHash = built.replayed ? hashCursorBlobIds(conversationState.rootPromptMessagesJson) : undefined;
+	const builtTurnsHash = built.replayed ? hashCursorBlobIds(conversationState.turns) : undefined;
 
 	let runRequest = create(AgentRunRequestSchema, {
 		conversationState,
@@ -6308,6 +7243,29 @@ async function buildGrpcRequestForWireMode(
 	// Tools are sent later via requestContext (exec handshake)
 	const replacementRequest = await options?.onPayload?.(runRequest, model);
 	if (replacementRequest !== undefined) runRequest = replacementRequest as typeof runRequest;
+
+	// Server records replay only on the route that wrote them, and the hook may
+	// have changed it. A history field the hook left as built then goes out
+	// rebuilt for the sent route; a field it edited is its own.
+	const wireRoute = cursorWireRoute(runRequest.requestedModel, runRequest.modelDetails);
+	const sentState = runRequest.conversationState;
+	if (built.replayed && wireRoute !== builtRoute && sentState !== undefined) {
+		const rootAsBuilt = hashCursorBlobIds(sentState.rootPromptMessagesJson) === builtRootHash;
+		const turnsAsBuilt = hashCursorBlobIds(sentState.turns) === builtTurnsHash;
+		if (rootAsBuilt || turnsAsBuilt) {
+			const rebuilt = buildCursorConversationState(
+				model,
+				context,
+				state,
+				blobStore,
+				systemPromptIds,
+				historyEndIndex,
+				wireRoute,
+			).conversationState;
+			if (rootAsBuilt) sentState.rootPromptMessagesJson = rebuilt.rootPromptMessagesJson;
+			if (turnsAsBuilt) sentState.turns = rebuilt.turns;
+		}
+	}
 
 	const discoveredWireModelId = options?.wireModelId ?? model.requestModelId ?? model.id;
 	const serializedParameters = runRequest.requestedModel?.parameters;
@@ -6345,12 +7303,13 @@ async function buildGrpcRequestForWireMode(
 		detail: detail || undefined,
 	});
 
-	return { requestBytes, blobStore, conversationState, fallbackWireModelId };
+	return { requestBytes, blobStore, conversationState, fallbackWireModelId, wireRoute };
 }
 
 /**
  * Rebuilds `rootPromptMessagesJson` and `turns` from `context.messages` over
- * the cached non-history side fields (todos, file states, summaries, …).
+ * the cached non-history side fields (todos, file states, summaries, …), with
+ * this model's own turns sent back as the records its server wrote for them.
  */
 function buildCursorConversationState(
 	model: Model<"cursor-agent">,
@@ -6359,10 +7318,26 @@ function buildCursorConversationState(
 	blobStore: Map<string, Uint8Array>,
 	systemPromptIds: Uint8Array[],
 	historyEndIndex: number,
-): ConversationStateStructure {
+	wireRoute: string,
+): { conversationState: ConversationStateStructure; replayed: boolean } {
+	const toolHistory = collectCursorToolHistory(context.messages, historyEndIndex);
+	const replays = resolveCursorRecordReplays(
+		context.messages,
+		historyEndIndex,
+		model.provider,
+		model.id,
+		wireRoute,
+		toolHistory,
+	);
+	if (replays.size > 0) {
+		log("info", "replayedServerRecords", {
+			turns: replays.size,
+			records: [...replays.values()].reduce((count, replay) => count + replay.records.length, 0),
+		});
+	}
 	// Build conversation turns from prior messages, excluding only the active user message
 	// when the request is sending one. Resume actions must preserve trailing tool results.
-	const turns = buildConversationTurns(context.messages, blobStore, historyEndIndex, model.id);
+	const turns = buildConversationTurns(context.messages, blobStore, historyEndIndex, model.id, replays, toolHistory);
 
 	// Build `rootPromptMessagesJson` from prior messages. Cursor's server uses this
 	// field (not `turns[]`) to construct the actual model prompt; if we only send the
@@ -6374,7 +7349,21 @@ function buildCursorConversationState(
 		blobStore,
 		historyEndIndex,
 		model.id,
+		replays,
+		toolHistory,
 	);
+	// The server builds its `<rules>` entry from `requestContext.rules` only for a
+	// history-less root; with history it would drop the system prompt entirely.
+	if (rootPromptMessagesJson.length > systemPromptIds.length) {
+		const rulesEntry = buildCursorRulesEntryJson(context.systemPrompt);
+		if (rulesEntry) {
+			rootPromptMessagesJson.splice(
+				systemPromptIds.length,
+				0,
+				storeCursorBlob(blobStore, new TextEncoder().encode(rulesEntry)),
+			);
+		}
+	}
 
 	// Preserve cached non-history state fields (todos, file states, summaries, etc.)
 	// when the system prompt is unchanged; otherwise start fresh.
@@ -6400,14 +7389,17 @@ function buildCursorConversationState(
 					readPaths: [],
 				});
 
-	// Always override `rootPromptMessagesJson` and `turns` with content freshly built from
-	// `context.messages`. The server-echoed checkpoint replaces historical user entries
-	// with empty placeholders, so we cannot rely on the cached `rootPromptMessagesJson`.
-	return create(ConversationStateStructureSchema, {
-		...baseState,
-		rootPromptMessagesJson,
-		turns,
-	});
+	// Always override `rootPromptMessagesJson` and `turns` with history built from
+	// `context.messages`: compaction, edits and branches rewrite it, and the cached
+	// checkpoint reflects none of them.
+	return {
+		conversationState: create(ConversationStateStructureSchema, {
+			...baseState,
+			rootPromptMessagesJson,
+			turns,
+		}),
+		replayed: replays.size > 0,
+	};
 }
 
 /** Builds the normalized Cursor Run request used by transport callers and request inspection hooks. */

@@ -4,9 +4,9 @@ import { applyOpenAIResponsesServiceTierCost } from "@oh-my-pi/pi-ai/providers/o
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 // The standard (non-Codex) Responses path bills the tier OpenAI actually served:
-// flex is half price, priority (Fast mode) is 2x, and ultrafast is 6x on the one
-// model with a published ultrafast price. A tier with no table entry stays at 1x
-// rather than an invented multiplier.
+// flex is half price, priority (Fast mode) is 2x, and ultrafast is 6x on the
+// models with a published ultrafast price (GPT-6 Astra, GPT-6.1 Sol). A tier
+// with no table entry stays at 1x rather than an invented multiplier.
 function usage(): AssistantMessage["usage"] {
 	return {
 		input: 1,
@@ -34,14 +34,14 @@ function model(id: string) {
 }
 
 describe("standard OpenAI Responses service-tier cost", () => {
-	it("bills ultrafast at the model's published 6x premium", () => {
-		const astra = model("gpt-6-astra");
-		expect(astra.serviceTierCost).toEqual({ ultrafast: 6 });
+	it.each(["gpt-6-astra", "gpt-6.1-sol"])("bills %s ultrafast at its published 6x premium", id => {
+		const ultrafastModel = model(id);
+		expect(ultrafastModel.serviceTierCost).toEqual({ ultrafast: 6 });
 
 		const billed = usage();
 		// The returned tier is what the caller records on the message, so a
 		// downgraded turn cannot be attributed to the requested tier.
-		expect(applyOpenAIResponsesServiceTierCost(astra, billed, "ultrafast", "ultrafast")).toBe("ultrafast");
+		expect(applyOpenAIResponsesServiceTierCost(ultrafastModel, billed, "ultrafast", "ultrafast")).toBe("ultrafast");
 		expect(billed.premiumRequests).toBe(1);
 		expect(billed.cost.input).toBeCloseTo(0.00006);
 		expect(billed.cost.output).toBeCloseTo(0.0003);

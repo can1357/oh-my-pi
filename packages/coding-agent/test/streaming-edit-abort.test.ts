@@ -29,6 +29,7 @@ function createGuard(
 		model: () => undefined,
 		isDisposed: () => false,
 		promptGeneration: () => 0,
+		promptSequence: () => 0,
 		emitNotice() {},
 		schedulePostPromptTask() {},
 		discardAssistantTurn() {},

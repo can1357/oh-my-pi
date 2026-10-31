@@ -8,6 +8,7 @@
  * with token byte length as tiebreak; equal cross-class or cross-family ranks
  * throw unless classification is `lenient` (discovery normalization).
  */
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { Effort } from "../effort";
 import { globMatch } from "./cascade";
 import { formatRevision, parseRevisionPrefix } from "./revision";
@@ -433,8 +434,8 @@ export function stripThinkingVariantSuffix(model: string): string | undefined {
  * @throws AmbiguousIdentityError on equal-rank cross-class, cross-family, or
  * reviewed-pattern matches unless `opts.lenient`.
  */
-const classifyMemo = new Map<string, ModelIdentity>();
-const CLASSIFY_MEMO_MAX = 4096;
+// LRU sized above the bundled catalog so catalog-wide passes stay hot (a full `clear()` thrashed them).
+const classifyMemo = new LRUCache<string, ModelIdentity>({ max: 16384 });
 
 function classifyMemoKey(provider: string, modelId: string, lenient: boolean): string {
 	return `${provider.length}:${provider}${modelId.length}:${modelId}${lenient ? 1 : 0}`;
@@ -446,7 +447,6 @@ export function classifyModel(provider: string, modelId: string, opts?: Classify
 		const cached = classifyMemo.get(key);
 		if (cached !== undefined) return { ...cached };
 		const identity = classifyModelUncached(provider, modelId, opts);
-		if (classifyMemo.size >= CLASSIFY_MEMO_MAX) classifyMemo.clear();
 		classifyMemo.set(key, Object.freeze(identity));
 		return { ...identity };
 	}
