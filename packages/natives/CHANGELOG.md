@@ -6,6 +6,12 @@
 
 - Fixed a `git status` that exceeded its deadline leaving a stale `.git/index.lock` behind, which made every later git or jj write in that worktree fail until the lock was deleted by hand ([#13405](https://github.com/can1357/oh-my-pi/pull/13405) by [@sjawhar](https://github.com/sjawhar)).
 
+## [18.14.2] - 2026-10-31
+
+### Added
+
+- Added `listWorkspace({ pruneExcludedDirs: false })` to stop pruning standard dependency/build directory names; hidden directories such as `.git` also require `hidden: true` ([#17539](https://github.com/can1357/oh-my-pi/issues/17539))
+
 ## [18.14.1] - 2026-10-31
 
 ### Added
