@@ -101,6 +101,14 @@ export interface ReadToolDetails {
 	 * delimited part has no linkable fs path. Lets the TUI hyperlink each grouped row the same way a standalone read row is.
 	 */
 	displayReadTargetLinks?: Array<string | null>;
+	/** Full skill instruction reads advertise their source fingerprint so later identical reads can return a stub while that result remains in context. */
+	skillRead?: {
+		sourcePath: string;
+		contentHash: string;
+		readAt: number;
+		url: string;
+		full: true;
+	};
 }
 
 // Parsing also recognizes incomplete counts to explain their errors; path splitting

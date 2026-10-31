@@ -202,6 +202,73 @@ export const SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
 /** LF byte, scanned natively to find line boundaries in a buffered file. */
 const LF_BYTE = 0x0a;
 
+interface SkillReadPreparation {
+	canonicalUrl: string;
+	fullUrl: string;
+	forceFull: boolean;
+	sourcePath: string;
+	contentHash: string;
+	previousReadAt?: number;
+}
+
+function splitSkillReadQuery(url: string): { canonicalUrl: string; fullUrl: string; forceFull: boolean } | undefined {
+	if (extractUriScheme(url) !== "skill") return undefined;
+	const fragmentAt = url.indexOf("#");
+	const withoutFragment = fragmentAt === -1 ? url : url.slice(0, fragmentAt);
+	const queryAt = withoutFragment.indexOf("?");
+	const canonicalUrl = queryAt === -1 ? withoutFragment : withoutFragment.slice(0, queryAt);
+	const query = queryAt === -1 ? "" : withoutFragment.slice(queryAt + 1);
+	const forceFull = query.split("&").some(part => {
+		const key = part.includes("=") ? part.slice(0, part.indexOf("=")) : part;
+		try {
+			return decodeURIComponent(key.replaceAll("+", " ")) === "full";
+		} catch {
+			return key === "full";
+		}
+	});
+	return { canonicalUrl, fullUrl: `${canonicalUrl}?full`, forceFull };
+}
+
+function sha256Hex(bytes: Uint8Array): string {
+	const hasher = new Bun.CryptoHasher("sha256");
+	hasher.update(bytes);
+	return hasher.digest("hex");
+}
+
+function formatSkillReadTime(timestamp: number): string {
+	const date = new Date(timestamp);
+	return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+function findMatchingSkillRead(
+	messages: ToolSession["messages"] | undefined,
+	sourcePath: string,
+	contentHash: string,
+): number | undefined {
+	if (!messages) return undefined;
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (message?.role !== "toolResult" || message.toolName !== "read" || message.isError) continue;
+		// Pruned/shaken results keep their details but no longer carry the text.
+		if (message.prunedAt !== undefined) continue;
+		const marker = (message.details as ReadToolDetails | undefined)?.skillRead;
+		if (
+			marker?.full === true &&
+			marker.sourcePath === sourcePath &&
+			marker.contentHash === contentHash &&
+			Number.isFinite(marker.readAt)
+		) {
+			return marker.readAt;
+		}
+	}
+	return undefined;
+}
+
+function isRegisteredSkillInstructionPath(skills: ToolSession["skills"] | undefined, sourcePath: string): boolean {
+	const resolvedSourcePath = path.resolve(sourcePath);
+	return skills?.some(skill => path.resolve(skill.filePath) === resolvedSourcePath) ?? false;
+}
+
 /**
  * Whole-file bytes plus every view the local text read path consumes,
  * materialized exactly once.
@@ -1221,6 +1288,33 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			: undefined;
 	}
 
+	async #prepareSkillRead(url: string, sourcePath: string): Promise<SkillReadPreparation | undefined> {
+		const split = splitSkillReadQuery(url);
+		if (!split) return undefined;
+		if (!isRegisteredSkillInstructionPath(this.session.skills, sourcePath)) return undefined;
+		const bytes = await fs.readFile(sourcePath);
+		const contentHash = sha256Hex(bytes);
+		return {
+			...split,
+			sourcePath,
+			contentHash,
+			previousReadAt: findMatchingSkillRead(this.session.messages, sourcePath, contentHash),
+		};
+	}
+
+	#buildUnchangedSkillReadResult(preparation: SkillReadPreparation): AgentToolResult<ReadToolDetails> | undefined {
+		if (preparation.forceFull || preparation.previousReadAt === undefined) return undefined;
+		const readAt = formatSkillReadTime(preparation.previousReadAt);
+		const text = `${preparation.canonicalUrl} unchanged since your read at ${readAt} (still in context above); read ${preparation.fullUrl} to get it again`;
+		return toolResult<ReadToolDetails>({
+			resolvedPath: preparation.sourcePath,
+			contentType: "text/markdown",
+		})
+			.text(text)
+			.sourceInternal(preparation.canonicalUrl)
+			.done();
+	}
+
 	async #tryReadDelimitedPaths(
 		readPath: string,
 		signal: AbortSignal | undefined,
@@ -1866,6 +1960,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				toolContext,
 			});
 		}
+		const skillRead =
+			located.sel === undefined && question === undefined
+				? await this.#prepareSkillRead(located.url, located.path)
+				: undefined;
+		const unchangedSkillRead = skillRead ? this.#buildUnchangedSkillReadResult(skillRead) : undefined;
+		if (unchangedSkillRead) return unchangedSkillRead;
 		// A located URL reads its backing file through the filesystem pipeline (images, `:img`,
 		// `?q=`, archives, sqlite, streaming, paging) while the URL stays the read's identity.
 		const result = await this.#readFilesystemPath(located.path, {
@@ -1887,6 +1987,16 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			// The TUI falls back to this block when no structured display content exists.
 			if (firstText) firstText.text = `${provenance}\n${firstText.text}`;
 			else result.content.unshift({ type: "text", text: provenance });
+		}
+		// Only a read that put the whole file in context may later be stubbed; a truncated page did not.
+		if (skillRead && !details.truncation && !details.meta?.truncation) {
+			details.skillRead = {
+				sourcePath: skillRead.sourcePath,
+				contentHash: skillRead.contentHash,
+				readAt: Date.now(),
+				url: skillRead.canonicalUrl,
+				full: true,
+			};
 		}
 		return { ...result, details };
 	}
