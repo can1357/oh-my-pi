@@ -218,8 +218,7 @@ export class CustomToolLoader {
 }
 
 /**
- * Load all tools from configuration. Installed plugins' manifest `bin`
- * directories go on PATH first, before any tool module evaluates.
+ * Load all tools from configuration.
  * @param pathsWithSources - Array of tool paths with optional source metadata
  * @param cwd - Current working directory for resolving relative paths
  * @param builtInToolNames - Names of built-in tools to check for conflicts
@@ -235,7 +234,6 @@ export async function loadCustomTools(
 		reject?(reason: string): Promise<AgentToolResult<unknown> | undefined>;
 	}) => void,
 ) {
-	prependPluginBinDirs(await getEnabledPlugins(cwd));
 	const loader = new CustomToolLoader(PiCodingAgent, cwd, builtInToolNames, pushPendingAction);
 	await loader.load(pathsWithSources);
 	return {
@@ -293,7 +291,9 @@ export async function discoverCustomToolPaths(
 		});
 	}
 
-	// 2. Plugin tools: ~/.omp/plugins/node_modules/*/
+	// 2. Plugin tools: ~/.omp/plugins/node_modules/*/. Selecting them puts the
+	// plugins' `bin` directories on PATH before any tool module is imported.
+	prependPluginBinDirs(await getEnabledPlugins(cwd));
 	for (const pluginPath of await getAllPluginToolPaths(cwd)) {
 		addPath(pluginPath, { provider: "plugin", providerName: "Plugin", level: "user" });
 	}

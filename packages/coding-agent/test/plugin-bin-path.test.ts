@@ -6,7 +6,7 @@ import { clearClaudePluginRootsCache } from "@oh-my-pi/pi-coding-agent/discovery
 import { discoverCustomToolPaths, loadCustomTools } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/loader";
 import { discoverAndLoadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { __closeExtensionParseCacheForTests } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
-import { getAgentDir, getPluginsDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, getPluginsDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
 // A plugin's `bin` directories go on PATH under the plugin's installed path,
 // never its realpath, before any of its modules evaluates. A plugins root that
@@ -23,26 +23,21 @@ const BASE_PATH = ["/usr/bin", "/bin"].join(path.delimiter);
 const xdgVars = ["XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"] as const;
 
 describe.skipIf(process.platform === "win32")("plugin bin directories on PATH", () => {
-	const originalAgentDir = getAgentDir();
-	const originalXdg = new Map<string, string | undefined>();
-	let originalPath: string | undefined;
+	let originalEnv: Record<string, string | undefined> = {};
 	let root = "";
 	let home = "";
 	let cwd = "";
 	let pluginsDir = "";
 
 	beforeEach(async () => {
-		originalPath = process.env.PATH;
+		originalEnv = { ...process.env };
 		process.env.PATH = BASE_PATH;
 		root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "omp-plugin-bin-")));
 		home = path.join(root, "home");
 		cwd = path.join(root, "cwd");
 		await fs.mkdir(path.join(home, ".omp"), { recursive: true });
 		await fs.mkdir(cwd, { recursive: true });
-		for (const key of xdgVars) {
-			originalXdg.set(key, process.env[key]);
-			delete process.env[key];
-		}
+		for (const key of xdgVars) delete process.env[key];
 		spyOn(os, "homedir").mockReturnValue(home);
 		setAgentDir(path.join(home, ".omp", "agent"));
 		pluginsDir = getPluginsDir();
@@ -52,15 +47,21 @@ describe.skipIf(process.platform === "win32")("plugin bin directories on PATH", 
 	});
 
 	afterEach(async () => {
-		if (originalPath === undefined) delete process.env.PATH;
-		else process.env.PATH = originalPath;
-		spyOn(os, "homedir").mockRestore();
-		for (const [key, value] of originalXdg) {
+		// Put back exactly the environment the case started with (setAgentDir writes
+		// PI_CODING_AGENT_DIR and clears the profile variables), then rebuild the
+		// directory and profile state from it.
+		for (const key of Object.keys(process.env)) {
+			if (!(key in originalEnv)) delete process.env[key];
+		}
+		for (const [key, value] of Object.entries(originalEnv)) {
 			if (value === undefined) delete process.env[key];
 			else process.env[key] = value;
 		}
-		originalXdg.clear();
-		setAgentDir(originalAgentDir);
+		spyOn(os, "homedir").mockRestore();
+		__resetDirsFromEnvForTests();
+		for (const key of Object.keys(globalThis)) {
+			if (key.startsWith("__ompBinProbe_")) delete (globalThis as Record<string, unknown>)[key];
+		}
 		clearClaudePluginRootsCache();
 		__closeExtensionParseCacheForTests();
 		await removeWithRetries(root);
@@ -226,5 +227,18 @@ export default function () {}
 			[`${d}/usr/bin${d}`, `${bin}${d}${d}/usr/bin${d}`],
 			[undefined, bin],
 		]);
+	});
+
+	test("an explicit-only extension load adds no ambient plugin's directories", async () => {
+		await writeBinPlugin(path.join(pluginsDir, "node_modules", "ambient"), "ambient", { extensions: ["module.js"] });
+		await declare(["ambient"]);
+		const explicit = path.join(root, "explicit.js");
+		await Bun.write(explicit, "export default function () {}\n");
+
+		const result = await discoverAndLoadExtensions([explicit], cwd, undefined, undefined, { ambient: false });
+
+		expect(result.extensions.map(extension => extension.path)).toEqual([explicit]);
+		expect(probeAtLoad("ambient")).toBeUndefined();
+		expect(process.env.PATH).toBe(BASE_PATH);
 	});
 });

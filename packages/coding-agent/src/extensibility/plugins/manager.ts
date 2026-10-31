@@ -19,7 +19,7 @@ import { runBunCli } from "./bun-cli";
 import { refreshBunGitCache } from "./bun-git-cache";
 import { linkPluginDirectory } from "./directory-link";
 import { type GitSource, parseGitUrl } from "./git-url";
-import { resolvePluginManifestEntries } from "./loader";
+import { prependPluginBinDirs, resolvePluginManifestEntries } from "./loader";
 import { getInstalledPluginsRegistryPath, readInstalledPluginsRegistry } from "./marketplace/registry";
 import { parsePluginId } from "./marketplace/types";
 import { extractPackageName, parsePluginSpec } from "./parser";
@@ -470,6 +470,8 @@ export class PluginManager {
 		}
 
 		if (loadable.length > 0) {
+			// The candidate's own `bin` directories, as a session loading it would have them.
+			prependPluginBinDirs([plugin]);
 			const result = await loadExtensions(loadable, this.#cwd);
 			for (const failure of result.errors) {
 				errors.push(`${failure.path}: ${failure.error}`);

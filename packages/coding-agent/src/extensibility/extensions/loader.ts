@@ -524,8 +524,6 @@ export async function loadExtensionFromFactory(
 /**
  * Load extensions from paths.
  *
- * Installed plugins' manifest `bin` directories go on PATH first, so they are
- * there before any extension module evaluates, whichever route reached here.
  * Module import (the dominant cold-start cost — file I/O plus module
  * evaluation) runs concurrently across extensions; factory binding then runs
  * sequentially in the original path order, so registration semantics
@@ -537,7 +535,6 @@ export async function loadExtensions(
 	eventBus?: EventBus,
 	runtime?: IExtensionRuntime,
 ): Promise<LoadExtensionsResult> {
-	prependPluginBinDirs(await getEnabledPlugins(cwd));
 	const preparedExtensions = await Promise.all(paths.map(extPath => importExtensionModule(extPath, cwd)));
 	return bindPreparedExtensions(preparedExtensions, cwd, eventBus, runtime);
 }
@@ -615,7 +612,9 @@ async function discoverHooksInPackageRoot(root: string): Promise<string[]> {
  * Discover absolute paths of extensions to load, without importing or
  * binding factories. Hot path on session startup — the scan walks native
  * `.omp`/`.pi` extension capabilities, JS/TS hook factories, the
- * installed-plugin tree, and any configured paths.
+ * installed-plugin tree, and any configured paths. Selecting the installed
+ * plugins also puts their manifest `bin` directories on PATH, so they are
+ * there before any of the selected modules is imported.
  *
  * The root session imports these paths once and forwards prepared factories to
  * subagents. Each child rebinds fresh Extension instances to its OWN
@@ -696,8 +695,11 @@ export async function discoverExtensionPaths(
 		}
 	}
 
-	// 3. Discover extension entry points from installed plugins.
+	// 3. Installed plugins: the session's plugin set for this cwd. Their `bin`
+	// directories go on PATH here, where the set is chosen, so an explicit-only
+	// session adds none and a subagent reusing these paths adds no other cwd's.
 	if (ambient) {
+		prependPluginBinDirs(await getEnabledPlugins(cwd));
 		await addPaths(await getAllPluginExtensionPaths(cwd));
 	}
 
