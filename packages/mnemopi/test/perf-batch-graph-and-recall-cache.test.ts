@@ -252,22 +252,30 @@ describe("performance optimizations: batched graph and recall cache", () => {
 			JSON.stringify([0.0, 1.0, 0.0]),
 		]);
 
+		const wmVecJson = JSON.stringify([1.0, 0.0, 0.0]);
+		const ep1VecJson = JSON.stringify([0.8, 0.6, 0.0]);
+		const ep2VecJson = JSON.stringify([0.0, 1.0, 0.0]);
+
 		await recall(beam, "memory", 10, {
 			queryEmbedding: [1.0, 0.0, 0.0],
 			includeWorking: true,
 			useSynonyms: false,
 		});
-		expect(beam.caches.embeddings?.has("wm_a")).toBe(true);
-		expect(beam.caches.embeddings?.has("ep_1")).toBe(true);
-		expect(beam.caches.embeddings?.has("ep_2")).toBe(true);
 
-		await recall(beam, "memory", 10, {
-			queryEmbedding: [0.0, 1.0, 0.0],
-			includeWorking: true,
-			useSynonyms: false,
-		});
-		expect(beam.caches.embeddings?.has("wm_a")).toBe(true);
-		expect(beam.caches.embeddings?.has("ep_1")).toBe(true);
-		expect(beam.caches.embeddings?.has("ep_2")).toBe(true);
+		const parseSpy = spyOn(JSON, "parse");
+		try {
+			const warmRes = await recall(beam, "memory", 10, {
+				queryEmbedding: [0.0, 1.0, 0.0],
+				includeWorking: true,
+				useSynonyms: false,
+			});
+			expect(warmRes.find(r => r.id === "ep_2")?.dense_score).toBeCloseTo(1.0, 3);
+			const parsedEmbeddingInputs = parseSpy.mock.calls
+				.map(call => call[0])
+				.filter(arg => arg === wmVecJson || arg === ep1VecJson || arg === ep2VecJson);
+			expect(parsedEmbeddingInputs).toEqual([]);
+		} finally {
+			parseSpy.mockRestore();
+		}
 	});
 });
