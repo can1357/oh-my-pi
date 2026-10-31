@@ -73,7 +73,13 @@ import {
 import { getProxyForUrl } from "../utils/proxy";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
-import { getHeadersFromError, getRetryAfterMsFromHeaders, type HeadersLike } from "../utils/retry-after";
+import {
+	getHeadersFromError,
+	getRetryAfterMsFromHeaders,
+	getStatedRetryAfterMs,
+	type HeadersLike,
+} from "../utils/retry-after";
+import { resolveRetryDelayMs, waitForRetry } from "../utils/retry-wait";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { notifyRawSseEvent } from "../utils/sse-debug";
 import { compactGrammarDefinition } from "./grammar";
@@ -3181,6 +3187,13 @@ class CodexStreamProcessor {
 		) {
 			return false;
 		}
+		// A stated wait past the caller's cap surfaces the failure instead.
+		const delayMs = resolveRetryDelayMs(
+			getStatedRetryAfterMs(this.model.provider, error),
+			CODEX_RETRY_DELAY_MS * (this.runtime.providerRetryAttempt + 1),
+			this.options?.maxRetryDelayMs,
+		);
+		if (delayMs === undefined) return false;
 
 		// A leading `output_item.added` already pushed a `*_start` for the (empty)
 		// open block; balance it with the matching end before the reset+replay so
@@ -3208,9 +3221,7 @@ class CodexStreamProcessor {
 		if (this.requestSetup.requestAbortController.signal.aborted) {
 			this.requestSetup = createRequestSetup(this.options);
 		}
-		await scheduler.wait(CODEX_RETRY_DELAY_MS * this.runtime.providerRetryAttempt, {
-			signal: this.requestSetup.requestSignal,
-		});
+		await waitForRetry(this.options?.providerRetryWait, delayMs, this.requestSetup.requestSignal);
 
 		if (this.runtime.transport === "websocket" && websocketState) {
 			await this.#reopenWebSocketStream(websocketState);

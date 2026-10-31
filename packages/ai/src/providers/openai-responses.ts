@@ -40,7 +40,8 @@ import {
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
-import { waitForRetry } from "../utils/retry-wait";
+import { getStatedRetryAfterMs } from "../utils/retry-after";
+import { resolveRetryDelayMs, waitForRetry } from "../utils/retry-wait";
 import {
 	adaptSchemaForStrict,
 	findStrictToolSchemaViolation,
@@ -1214,7 +1215,15 @@ const streamOpenAIResponsesOnce = (
 						!abortTracker.wasCallerAbort() &&
 						transientStreamRetryAttempt < OPENAI_RESPONSES_MAX_TRANSIENT_STREAM_RETRIES &&
 						isRetryableOpenAIResponsesStreamFailure(streamFailure);
-					if (!canRetry) {
+					// A stated wait past the caller's cap surfaces the failure instead.
+					const retryDelayMs = canRetry
+						? resolveRetryDelayMs(
+								getStatedRetryAfterMs(model.provider, streamFailure),
+								OPENAI_RESPONSES_TRANSIENT_STREAM_RETRY_DELAY_MS,
+								options?.maxRetryDelayMs,
+							)
+						: undefined;
+					if (retryDelayMs === undefined) {
 						forwardAttemptEvents();
 						throw streamFailure;
 					}
@@ -1243,11 +1252,7 @@ const streamOpenAIResponsesOnce = (
 					firstTokenTime = undefined;
 					nativeOutputItems.length = 0;
 
-					await waitForRetry(
-						options?.providerRetryWait,
-						OPENAI_RESPONSES_TRANSIENT_STREAM_RETRY_DELAY_MS,
-						options?.signal,
-					);
+					await waitForRetry(options?.providerRetryWait, retryDelayMs, options?.signal);
 					if (abortTracker.wasCallerAbort()) throw new AIError.AbortError();
 					openaiStream = await openResponsesStreamWithFallbacks();
 				}

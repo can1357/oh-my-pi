@@ -11,12 +11,15 @@
  *
  * Empty-completion retries remain opt-in because a normal empty stop can be a
  * valid provider result. Transient-error retries use the shared provider error
- * classifier and are separately bounded by the caller's policy.
+ * classifier, are separately bounded by the caller's policy, and wait at least
+ * as long as the provider stated (a stated wait past `maxRetryDelayMs` surfaces
+ * the failure instead).
  */
 import * as AIError from "../error";
 import type { AssistantMessage, AssistantMessageEvent, Context } from "../types";
 import { AssistantMessageEventStream } from "./event-stream";
-import { waitForRetry } from "./retry-wait";
+import { extractProviderRetryHint } from "./retry-after";
+import { resolveRetryDelayMs, waitForRetry } from "./retry-wait";
 
 export const MAX_EMPTY_COMPLETION_RETRIES = 2;
 export const EMPTY_COMPLETION_BASE_DELAY_MS = 500;
@@ -61,6 +64,7 @@ interface StreamRetryOptions {
 	signal?: AbortSignal;
 	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
 	acceptEmptyResponse?: boolean;
+	maxRetryDelayMs?: number;
 }
 
 /** Controls which replay-safe provider results may issue a fresh request. */
@@ -163,8 +167,14 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				delayMs = EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** emptyRetries;
 				emptyRetries++;
 			} else if (retryProviderError) {
-				delayMs = EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** providerErrorRetries;
-				providerErrorRetries++;
+				// Read the wait the failure stated the way session retry reads it; a
+				// wait past the caller's cap surfaces the failure instead.
+				delayMs = resolveRetryDelayMs(
+					extractProviderRetryHint(failedMessage?.provider, failedMessage?.errorMessage),
+					EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** providerErrorRetries,
+					options?.maxRetryDelayMs,
+				);
+				if (delayMs !== undefined) providerErrorRetries++;
 			}
 
 			if (delayMs !== undefined && !signal?.aborted) {

@@ -361,3 +361,118 @@ describe("OpenAI-family mid-stream socket-close retry", () => {
 		expect(result.content.find(block => block.type === "thinking")?.thinking).toBe("deliberating");
 	});
 });
+
+/** A proxy concurrency-admission 429: the transport surfaces it at once, so the stated wait reaches the provider retry. */
+function concurrencyRejection(retryAfter: string): Response {
+	return new Response(
+		JSON.stringify({
+			error: {
+				message: "Max parallel request limit reached",
+				type: "rate_limit_error",
+				rate_limit_type: "max_parallel_requests",
+			},
+		}),
+		{
+			status: 429,
+			headers: {
+				"content-type": "application/json",
+				"retry-after": retryAfter,
+				rate_limit_type: "max_parallel_requests",
+			},
+		},
+	);
+}
+
+describe("OpenAI-family provider-error retry honors the server-stated wait", () => {
+	it("surfaces an OpenAI Completions 429 whose Retry-After exceeds maxRetryDelayMs after one request", async () => {
+		let requests = 0;
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			requests++;
+			return requests === 1 ? concurrencyRejection("9") : completedCompletionsSse("must not be requested");
+		});
+		const providerRetryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
+
+		const result = await streamOpenAICompletions(completionsModel, context, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			maxRetryDelayMs: 1,
+			providerRetryWait,
+		}).result();
+
+		expect(requests).toBe(1);
+		expect(providerRetryWait).not.toHaveBeenCalled();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(429);
+		expect(result.errorMessage).toContain("retry-after-ms=9000");
+	});
+
+	it("retries an OpenAI Completions 429 after its Retry-After when the wait fits maxRetryDelayMs", async () => {
+		let requests = 0;
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			requests++;
+			return requests === 1 ? concurrencyRejection("0.8") : completedCompletionsSse("completions recovered");
+		});
+		const providerRetryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
+
+		const result = await streamOpenAICompletions(completionsModel, context, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			maxRetryDelayMs: 1_000,
+			providerRetryWait,
+		}).result();
+
+		expect(requests).toBe(2);
+		expect(providerRetryWait).toHaveBeenCalledTimes(1);
+		expect(providerRetryWait.mock.calls[0]?.[0]).toBe(800);
+		expect(result.stopReason).toBe("stop");
+		expect(result.content.find(block => block.type === "text")?.text).toBe("completions recovered");
+	});
+
+	it("surfaces an Azure Responses 429 whose Retry-After exceeds maxRetryDelayMs after one request", async () => {
+		let requests = 0;
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			requests++;
+			return requests === 1 ? concurrencyRejection("9") : completedResponsesSse("must not be requested");
+		});
+		const providerRetryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
+
+		const result = await streamAzureOpenAIResponses(azureModel, context, {
+			apiKey: "test-key",
+			azureBaseUrl: azureModel.baseUrl,
+			azureApiVersion: "v1",
+			fetch: fetchMock,
+			maxRetryDelayMs: 1,
+			providerRetryWait,
+		}).result();
+
+		expect(requests).toBe(1);
+		expect(providerRetryWait).not.toHaveBeenCalled();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(429);
+		expect(result.errorMessage).toContain("retry-after-ms=9000");
+	});
+
+	it("retries an Azure Responses 429 after its Retry-After when the wait fits maxRetryDelayMs", async () => {
+		let requests = 0;
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			requests++;
+			return requests === 1 ? concurrencyRejection("0.8") : completedResponsesSse("azure recovered");
+		});
+		const providerRetryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
+
+		const result = await streamAzureOpenAIResponses(azureModel, context, {
+			apiKey: "test-key",
+			azureBaseUrl: azureModel.baseUrl,
+			azureApiVersion: "v1",
+			fetch: fetchMock,
+			maxRetryDelayMs: 1_000,
+			providerRetryWait,
+		}).result();
+
+		expect(requests).toBe(2);
+		expect(providerRetryWait).toHaveBeenCalledTimes(1);
+		expect(providerRetryWait.mock.calls[0]?.[0]).toBe(800);
+		expect(result.stopReason).toBe("stop");
+		expect(result.content.find(block => block.type === "text")?.text).toBe("azure recovered");
+	});
+});

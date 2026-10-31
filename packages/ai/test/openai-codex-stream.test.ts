@@ -2656,6 +2656,78 @@ describe("openai-codex streaming", () => {
 		expect(result.content.find(block => block.type === "text")?.text).toBe("Hello after retry");
 	});
 
+	describe("provider-error retry honors the server-stated wait", () => {
+		const successSse = `${[
+			`data: ${JSON.stringify({ type: "response.output_item.added", item: { type: "message", id: "msg_retry", role: "assistant", status: "in_progress", content: [] } })}`,
+			`data: ${JSON.stringify({ type: "response.content_part.added", part: { type: "output_text", text: "" } })}`,
+			`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "Hello after wait" })}`,
+			`data: ${JSON.stringify({ type: "response.output_item.done", item: { type: "message", id: "msg_retry", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Hello after wait" }] } })}`,
+			`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 } } } })}`,
+		].join("\n\n")}\n\n`;
+
+		/** First request fails with a retryable `server_error` event whose headers state the wait. */
+		function statedWaitFetch(retryAfter: string) {
+			let requestCount = 0;
+			const failureSse = `data: ${JSON.stringify({
+				type: "error",
+				status: 503,
+				error: { code: "server_error", message: "Upstream overloaded" },
+				headers: { "retry-after": retryAfter },
+			})}\n\n`;
+			return vi.fn(async () => {
+				requestCount += 1;
+				return new Response(requestCount === 1 ? failureSse : successSse, {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				});
+			});
+		}
+
+		it("surfaces a failure whose Retry-After exceeds maxRetryDelayMs after one request", async () => {
+			const tempDir = TempDir.createSync("@pi-codex-stream-");
+			setAgentDir(tempDir.path());
+			// Before the fix this loop slept on `scheduler.wait` for its whole retry budget; keep that instant.
+			vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			const fetchMock = statedWaitFetch("9");
+			const providerRetryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
+			const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+
+			const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+				apiKey: createCodexTestToken(),
+				fetch: fetchMock,
+				maxRetryDelayMs: 1,
+				providerRetryWait,
+			}).result();
+
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+			expect(providerRetryWait).not.toHaveBeenCalled();
+			expect(result.stopReason).toBe("error");
+			expect(extractProviderRetryHint("openai-codex", result.errorMessage)).toBe(9_000);
+		});
+
+		it("waits the stated Retry-After through providerRetryWait when it fits maxRetryDelayMs", async () => {
+			const tempDir = TempDir.createSync("@pi-codex-stream-");
+			setAgentDir(tempDir.path());
+			vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			const fetchMock = statedWaitFetch("0.8");
+			const providerRetryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
+			const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+
+			const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+				apiKey: createCodexTestToken(),
+				fetch: fetchMock,
+				maxRetryDelayMs: 1_000,
+				providerRetryWait,
+			}).result();
+
+			expect(fetchMock).toHaveBeenCalledTimes(2);
+			expect(providerRetryWait).toHaveBeenCalledTimes(1);
+			expect(providerRetryWait.mock.calls[0]?.[0]).toBe(800);
+			expect(result.stopReason).toBe("stop");
+			expect(result.content.find(block => block.type === "text")?.text).toBe("Hello after wait");
+		});
+	});
+
 	it("stops reading SSE responses after a terminal response event", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());

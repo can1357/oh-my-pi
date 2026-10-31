@@ -12,6 +12,19 @@ export function extractProviderRetryHint(
 	return extractRetryHint(undefined, message, { naiveResetTimezoneOffset });
 }
 
+/**
+ * The wait a provider stated for a thrown failure: the longest of the error's
+ * response headers and any retry hint in its message (the same text forms
+ * session retry reads from a failed turn's `errorMessage`). `undefined` when it
+ * stated none.
+ */
+export function getStatedRetryAfterMs(provider: string | undefined, error: unknown): number | undefined {
+	const headerMs = getRetryAfterMsFromHeaders(getHeadersFromError(error));
+	const textMs = error instanceof Error ? extractProviderRetryHint(provider, error.message) : undefined;
+	if (headerMs === undefined) return textMs;
+	return textMs === undefined ? headerMs : Math.max(headerMs, textMs);
+}
+
 const RETRY_AFTER_HINT = "retry-after-ms=";
 
 export function formatErrorMessageWithRetryAfter(error: unknown, headers?: HeadersLike): string {

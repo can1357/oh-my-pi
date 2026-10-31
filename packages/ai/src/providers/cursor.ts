@@ -228,7 +228,8 @@ import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { connectProxiedSocket, getProxyForUrl, wrapFetchForProxy } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
-import { waitForRetry } from "../utils/retry-wait";
+import { getStatedRetryAfterMs } from "../utils/retry-after";
+import { DEFAULT_MAX_RETRY_DELAY_MS, resolveRetryDelayMs, waitForRetry } from "../utils/retry-wait";
 import { sanitizeSchemaForCursor, toolWireSchema } from "../utils/schema";
 import { formatConnectEndStreamError, hasRetryableCursorErrorDetail } from "./connect-error-detail";
 import { CONNECT_END_STREAM_FLAG, ConnectFrameDecoder, frameConnectMessage } from "./connect-frame";
@@ -2105,8 +2106,15 @@ function streamCursorWithWireMode(
 				noProgressResumes <= 2 &&
 				(AIError.isProviderRetryableError(error) ||
 					(error instanceof AIError.ProviderResponseError && error.kind === "incomplete-stream"));
+			const uncappedDelayMs = CURSOR_RETRY_BASE_DELAY_MS * 2 ** retryAttempt;
+			const maxRetryDelayMs = options?.maxRetryDelayMs ?? DEFAULT_MAX_RETRY_DELAY_MS;
+			const backoffDelayMs = maxRetryDelayMs > 0 ? Math.min(uncappedDelayMs, maxRetryDelayMs) : uncappedDelayMs;
+			// A stated wait past the caller's cap surfaces the failure instead.
+			const retryDelayMs = canRetryFromCheckpoint
+				? resolveRetryDelayMs(getStatedRetryAfterMs(model.provider, error), backoffDelayMs, maxRetryDelayMs)
+				: undefined;
 			if (
-				canRetryFromCheckpoint &&
+				retryDelayMs !== undefined &&
 				openBlockState !== undefined &&
 				usageState !== undefined &&
 				baseConversationId !== undefined &&
@@ -2127,17 +2135,14 @@ function streamCursorWithWireMode(
 				runTransport?.close();
 				h2Client?.close();
 
-				const uncappedDelayMs = CURSOR_RETRY_BASE_DELAY_MS * 2 ** retryAttempt;
-				const maxRetryDelayMs = options?.maxRetryDelayMs ?? 60_000;
-				const delayMs = maxRetryDelayMs > 0 ? Math.min(uncappedDelayMs, maxRetryDelayMs) : uncappedDelayMs;
 				logger.debug("cursor stream retrying", {
 					attempt: retryAttempt + 1,
 					checkpoint: checkpointHash,
-					delayMs,
+					delayMs: retryDelayMs,
 				});
 				let retryDelayCompleted = false;
 				try {
-					await waitForRetry(options?.providerRetryWait, delayMs, options?.signal);
+					await waitForRetry(options?.providerRetryWait, retryDelayMs, options?.signal);
 					retryDelayCompleted = !options?.signal?.aborted;
 				} catch (waitError) {
 					error = waitError;

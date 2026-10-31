@@ -299,3 +299,80 @@ it("does not resume from a checkpoint while the exec handler is still running at
 	expect(requestCount).toBe(1);
 	expect(result.stopReason).toBe("error");
 });
+
+/** A Connect end-stream frame carrying a transient error whose message states the wait. */
+function unavailableEndStreamFrame(wait: string): Buffer {
+	const frame = frameConnectMessage(
+		new TextEncoder().encode(
+			JSON.stringify({
+				error: { code: "unavailable", message: `Service temporarily unavailable. Please try again in ${wait}.` },
+			}),
+		),
+	);
+	frame[0] = 0x02;
+	return frame;
+}
+
+/** Attempt one ends with a replay-safe stated-wait failure; any later attempt completes the turn. */
+async function runStatedWaitScenario(wait: string, maxRetryDelayMs: number) {
+	const sessions = new Set<http2.Http2Session>();
+	let requestCount = 0;
+	const server = http2.createServer();
+	server.on("session", session => {
+		sessions.add(session);
+		session.on("close", () => sessions.delete(session));
+	});
+	server.on("stream", (providerStream: http2.ServerHttp2Stream) => {
+		requestCount++;
+		let handled = false;
+		providerStream.on("data", () => {
+			if (handled) return;
+			handled = true;
+			providerStream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+			if (requestCount === 1) {
+				providerStream.end(unavailableEndStreamFrame(wait));
+				return;
+			}
+			providerStream.end(Buffer.concat([textDeltaFrame("after wait"), turnEndedFrame()]));
+		});
+	});
+	const listening = Promise.withResolvers<void>();
+	server.once("error", listening.reject);
+	server.listen(0, "127.0.0.1", listening.resolve);
+	await listening.promise;
+	const address = server.address();
+	if (!address || typeof address === "string") throw new Error("expected HTTP/2 fixture server address");
+
+	try {
+		const delays: number[] = [];
+		const result = await streamCursor(makeModel(`http://127.0.0.1:${address.port}`), context, {
+			apiKey: "test-token",
+			maxRetryDelayMs,
+			providerRetryWait: async delayMs => {
+				delays.push(delayMs);
+			},
+		}).result();
+		return { requestCount, delays, result };
+	} finally {
+		for (const session of sessions) session.destroy();
+		server.close();
+	}
+}
+
+it("surfaces a failure whose stated wait exceeds maxRetryDelayMs after one request", async () => {
+	const { requestCount, delays, result } = await runStatedWaitScenario("9s", 1);
+
+	expect(requestCount).toBe(1);
+	expect(delays).toEqual([]);
+	expect(result.stopReason).toBe("error");
+	expect(result.errorMessage).toContain("Please try again in 9s");
+});
+
+it("waits a failure's stated wait when it outlasts the backoff within maxRetryDelayMs", async () => {
+	const { requestCount, delays, result } = await runStatedWaitScenario("0.8s", 1_000);
+
+	expect(requestCount).toBe(2);
+	expect(delays).toEqual([800]);
+	expect(result.stopReason).toBe("stop");
+	expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "after wait" })]);
+});

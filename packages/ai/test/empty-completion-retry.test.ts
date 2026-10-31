@@ -71,6 +71,18 @@ function contentAttempt(): AssistantMessageEventStream {
 	] as unknown as AssistantMessageEvent[]);
 }
 
+/** A pre-output 429 whose message carries the wait the provider stated, as `AIError.finalize` formats it. */
+function statedWaitErrorAttempt(retryAfterMs: number): AssistantMessageEventStream {
+	const message = assistant();
+	message.stopReason = "error";
+	message.errorStatus = 429;
+	message.errorMessage = `429 Too many requests retry-after-ms=${retryAfterMs}`;
+	return streamFromEvents([
+		{ type: "start", partial: message },
+		{ type: "error", reason: "error", error: message },
+	]);
+}
+
 async function drain(stream: AssistantMessageEventStream): Promise<AssistantMessageEvent[]> {
 	const events: AssistantMessageEvent[] = [];
 	for await (const event of stream) events.push(event);
@@ -369,6 +381,51 @@ describe("withReplaySafeStreamRetry", () => {
 
 		expect(attempts).toBe(2);
 		expect(events.filter(event => event.type === "start")).toHaveLength(1);
+		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+	});
+
+	it("surfaces a provider error whose stated wait exceeds maxRetryDelayMs without retrying", async () => {
+		let attempts = 0;
+		const waits: number[] = [];
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ maxRetryDelayMs: 1, providerRetryWait: async (ms: number) => void waits.push(ms) },
+			() => {
+				attempts++;
+				return attempts > 1 ? contentAttempt() : statedWaitErrorAttempt(9_000);
+			},
+			{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+		);
+
+		const events = await drain(stream);
+		const result = await stream.result();
+
+		expect(attempts).toBe(1);
+		expect(waits).toEqual([]);
+		expect(events.at(-1)?.type).toBe("error");
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("retry-after-ms=9000");
+	});
+
+	it("waits a provider error's stated wait when it outlasts the backoff within maxRetryDelayMs", async () => {
+		let attempts = 0;
+		const waits: number[] = [];
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ maxRetryDelayMs: 1_000, providerRetryWait: async (ms: number) => void waits.push(ms) },
+			() => {
+				attempts++;
+				return attempts > 1 ? contentAttempt() : statedWaitErrorAttempt(800);
+			},
+			{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+		);
+
+		const result = await stream.result();
+
+		expect(attempts).toBe(2);
+		expect(waits).toEqual([800]);
 		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
 	});
 

@@ -252,6 +252,17 @@ function parseBody(init: RequestInit | undefined): Record<string, unknown> {
 	return JSON.parse(String(init?.body)) as Record<string, unknown>;
 }
 
+/** An HTTP-200 stream that fails in-band with a rate limit whose message states the wait. */
+function createInBandRateLimitResponse(wait: string): Response {
+	return createSseResponse([
+		{ type: "response.created", response: { id: "resp_rate_limited", status: "in_progress" } },
+		{
+			type: "error",
+			error: { code: "rate_limit_exceeded", message: `Rate limit exceeded. Please try again in ${wait}.` },
+		},
+	]);
+}
+
 async function collectEvents(stream: AssistantMessageEventStream): Promise<AssistantMessageEvent[]> {
 	const events: AssistantMessageEvent[] = [];
 	for await (const event of stream) events.push(event);
@@ -536,6 +547,53 @@ describe("OpenAI Responses transient stream retry", () => {
 
 		expect(fetchMock).toHaveBeenCalledTimes(2);
 		expect(result.stopReason).toBe("error");
+	});
+
+	it("surfaces a stream failure whose stated wait exceeds maxRetryDelayMs after one request", async () => {
+		let attempts = 0;
+		const fetchMock = vi.fn(async () => {
+			attempts++;
+			return attempts === 1
+				? createInBandRateLimitResponse("9s")
+				: createCompletedTextResponse("must not be requested", "resp_unreached");
+		}) as FetchImpl;
+		const providerRetryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
+
+		const result = await streamOpenAIResponses(model, context, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			maxRetryDelayMs: 1,
+			providerRetryWait,
+		}).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(providerRetryWait).not.toHaveBeenCalled();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("Please try again in 9s");
+	});
+
+	it("waits a stream failure's stated wait when it outlasts the backoff within maxRetryDelayMs", async () => {
+		let attempts = 0;
+		const fetchMock = vi.fn(async () => {
+			attempts++;
+			return attempts === 1
+				? createInBandRateLimitResponse("0.8s")
+				: createCompletedTextResponse("Recovered", "resp_recovered");
+		}) as FetchImpl;
+		const providerRetryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
+
+		const result = await streamOpenAIResponses(model, context, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			maxRetryDelayMs: 1_000,
+			providerRetryWait,
+		}).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(providerRetryWait).toHaveBeenCalledTimes(1);
+		expect(providerRetryWait.mock.calls[0]?.[0]).toBe(800);
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toMatchObject([{ type: "text", text: "Recovered" }]);
 	});
 
 	it("honors caller abort during the retry wait", async () => {

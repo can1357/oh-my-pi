@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the pre-output retries of OpenAI Completions, Azure OpenAI Responses, OpenAI Responses, Codex, and Cursor streams ignoring the wait the server stated: a retry now waits at least the stated `Retry-After` or retry hint, and a stated wait above `maxRetryDelayMs` surfaces the failure at once instead of retrying. Codex's provider-error retry now also sleeps through `providerRetryWait`.
+
 ## [18.14.1] - 2026-10-31
 
 ### Added
