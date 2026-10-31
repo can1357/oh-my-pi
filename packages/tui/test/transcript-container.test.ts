@@ -201,34 +201,30 @@ describe("TranscriptContainer row split", () => {
 		expect(transcript.blockStates()).toEqual(["settled", "settled"]);
 	});
 
-	// An inline image: three reserved rows, then the row that draws it upward over them.
-	const imageBlock = (): Block =>
-		new Block(
-			[
-				"above 1",
-				"above 2",
-				"\x1b[0m",
-				"\x1b[0m",
-				"\x1b[0m",
-				"\x1b7\x1b[3A\x1b]1337;File=inline=1;width=10;height=4:AAAA\x07\x1b8",
-				"below 1",
-				"below 2",
-			],
-			true,
-		);
+	// The row of a four-row inline image that draws it upward over its three reserved rows.
+	const imageRows = {
+		[ImageProtocol.Iterm2]: "\x1b7\x1b[3A\x1b]1337;File=inline=1;width=10;height=4:AAAA\x07\x1b8",
+		[ImageProtocol.Kitty]: "\x1b7\x1b[3A\x1b_Ga=p,q=2,C=1,i=7,c=10,r=4\x1b\\\x1b8",
+		[ImageProtocol.Sixel]: "\x1b7\x1b[3A\x1bPq#0~\x1b\\\x1b8",
+	};
+	// A Kitty image without a budget id carries its data inline instead (`a=T`).
+	const kittyInlineRow = "\x1b7\x1b[3A\x1b_Ga=T,f=100,q=2,C=1,c=10,r=4;AAAA\x1b\\\x1b8";
+	const imageBlock = (imageRow: string = imageRows[ImageProtocol.Iterm2]): Block =>
+		new Block(["above 1", "above 2", "\x1b[0m", "\x1b[0m", "\x1b[0m", imageRow, "below 1", "below 2"], true);
 
-	for (const [protocol, committed] of [
-		// iTerm2 cannot draw part of an image, so it goes to scrollback whole.
-		[ImageProtocol.Iterm2, 6],
-		// Kitty draws the visible part, so the cut stays where the screen ends.
-		[ImageProtocol.Kitty, 3],
+	for (const [name, protocol, committed] of [
+		// iTerm2 and Kitty cannot put part of an image into scrollback, so it goes there whole.
+		["iTerm2", ImageProtocol.Iterm2, 6],
+		["Kitty", ImageProtocol.Kitty, 6],
+		// SIXEL crops its raster to the rows that stay, so the cut stays where the screen ends.
+		["SIXEL", ImageProtocol.Sixel, 3],
 	] as const) {
-		it(`moves a split that would cut an inline image below it only where the terminal cannot draw part of it (${protocol})`, () => {
+		it(`moves a split that would cut an inline image below it unless the terminal crops the image (${name})`, () => {
 			const previous = TERMINAL.imageProtocol;
 			setTerminalImageProtocol(protocol);
 			try {
 				const transcript = new TranscriptContainer();
-				transcript.addChild(imageBlock());
+				transcript.addChild(imageBlock(imageRows[protocol]));
 				transcript.addChild(new Block(["tail"], true));
 				// Room 7: the tail and its separator leave 5 rows of the block live, a cut after row 3.
 				const batch = transcript.peekFinalizedBatch(40, 7)!;
@@ -258,43 +254,80 @@ describe("TranscriptContainer row split", () => {
 		}
 	});
 
-	it("keeps an archived whole image in scrollback when the width changes", () => {
-		const previous = TERMINAL.imageProtocol;
-		setTerminalImageProtocol(ImageProtocol.Iterm2);
-		try {
-			const transcript = new TranscriptContainer();
-			transcript.addChild(imageBlock());
-			transcript.addChild(new Block(["tail"], true));
-			const head = transcript.peekFinalizedBatch(40, 7)!;
-			expect(head.rows.length).toBe(6);
-			transcript.acknowledgeFinalizedBatch(head.id);
-			// The image rows hold no text, so a resize must not relocate the seam above them.
-			const rest = transcript.peekFlushBatch(50)!.rows;
-			expect(rest.some(row => TERMINAL.isImageLine(row))).toBe(false);
-			expect(rest).toContain("below 1");
-		} finally {
-			setTerminalImageProtocol(previous);
-		}
-	});
+	for (const [name, protocol, imageRowAt] of [
+		[
+			"iTerm2",
+			ImageProtocol.Iterm2,
+			(columns: number) => `\x1b7\x1b[3A\x1b]1337;File=inline=1;width=${columns};height=4:AAAA\x07\x1b8`,
+		],
+		[
+			"Kitty",
+			ImageProtocol.Kitty,
+			(columns: number) => `\x1b7\x1b[3A\x1b_Ga=p,q=2,C=1,i=7,c=${columns},r=4\x1b\\\x1b8`,
+		],
+		[
+			"Kitty a=T",
+			ImageProtocol.Kitty,
+			(columns: number) => `\x1b7\x1b[3A\x1b_Ga=T,f=100,q=2,C=1,c=${columns},r=4;AAAA\x1b\\\x1b8`,
+		],
+	] as const) {
+		it(`keeps an archived whole image in scrollback when a width change resizes it (${name})`, () => {
+			const previous = TERMINAL.imageProtocol;
+			setTerminalImageProtocol(protocol);
+			try {
+				// Like an Image, the row sizes the picture to the width it renders at.
+				const block: Component = {
+					render: width => [
+						"above 1",
+						"above 2",
+						"\x1b[0m",
+						"\x1b[0m",
+						"\x1b[0m",
+						imageRowAt(width - 2),
+						"below 1",
+						"below 2",
+					],
+				};
+				const transcript = new TranscriptContainer();
+				transcript.addChild(block);
+				transcript.addChild(new Block(["tail"], true));
+				const head = transcript.peekFinalizedBatch(40, 7)!;
+				expect(head.rows.length).toBe(6);
+				transcript.acknowledgeFinalizedBatch(head.id);
+				// The image rows hold no text, so a resize must not relocate the seam above them.
+				const rest = transcript.peekFlushBatch(30)!.rows;
+				expect(rest.some(row => TERMINAL.isImageLine(row))).toBe(false);
+				expect(rest).toContain("below 1");
+			} finally {
+				setTerminalImageProtocol(previous);
+			}
+		});
+	}
 
-	it("keeps a replacement image live when the archived one is swapped before a width change", () => {
-		const previous = TERMINAL.imageProtocol;
-		setTerminalImageProtocol(ImageProtocol.Iterm2);
-		try {
-			const block = imageBlock();
-			const transcript = new TranscriptContainer();
-			transcript.addChild(block);
-			transcript.addChild(new Block(["tail"], true));
-			const head = transcript.peekFinalizedBatch(40, 7)!;
-			transcript.acknowledgeFinalizedBatch(head.id);
-			// A parked tool card redraws a different image over the archived one.
-			block.finalize(block.render().map(row => row.replace(":AAAA", ":BBBB")));
-			const rest = transcript.peekFlushBatch(50)!.rows;
-			expect(rest.some(row => row.includes(":BBBB"))).toBe(true);
-		} finally {
-			setTerminalImageProtocol(previous);
-		}
-	});
+	for (const [name, protocol, imageRow, original, replacement] of [
+		["iTerm2", ImageProtocol.Iterm2, imageRows[ImageProtocol.Iterm2], ":AAAA", ":BBBB"],
+		["Kitty", ImageProtocol.Kitty, imageRows[ImageProtocol.Kitty], "i=7,", "i=8,"],
+		["Kitty a=T", ImageProtocol.Kitty, kittyInlineRow, ";AAAA", ";BBBB"],
+	] as const) {
+		it(`keeps a replacement image live when the archived one is swapped before a width change (${name})`, () => {
+			const previous = TERMINAL.imageProtocol;
+			setTerminalImageProtocol(protocol);
+			try {
+				const block = imageBlock(imageRow);
+				const transcript = new TranscriptContainer();
+				transcript.addChild(block);
+				transcript.addChild(new Block(["tail"], true));
+				const head = transcript.peekFinalizedBatch(40, 7)!;
+				transcript.acknowledgeFinalizedBatch(head.id);
+				// A parked tool card redraws a different image over the archived one.
+				block.finalize(block.render().map(row => row.replace(original, replacement)));
+				const rest = transcript.peekFlushBatch(50)!.rows;
+				expect(rest.some(row => row.includes(replacement))).toBe(true);
+			} finally {
+				setTerminalImageProtocol(previous);
+			}
+		});
+	}
 
 	it("keeps a row inserted above the archived image live across a width change", () => {
 		const previous = TERMINAL.imageProtocol;

@@ -7,6 +7,11 @@
 ### Added
 
 - Added a `maxRows` callback to `FigureMarkdown`, `SvgFigure` and `TableChartFigure` so surfaces shorter than the screen can fit their figures; zero hides a figure without delaying transcript completion ([#15661](https://github.com/can1357/oh-my-pi/issues/15661), [#15853](https://github.com/can1357/oh-my-pi/pull/15853) by [@KunoLu](https://github.com/KunoLu))
+- Added `imagePayload()`, which identifies the image an iTerm2 or Kitty image line draws regardless of its size; `iterm2ImagePayload()` is deprecated in its favor ([#17320](https://github.com/can1357/oh-my-pi/pull/17320) by [@Sandvoxel](https://github.com/Sandvoxel))
+
+### Fixed
+
+- Fixed charts and other inline images in WezTerm and Warp keeping only their bottom row in scrollback once they scrolled off the top of the screen ([#17320](https://github.com/can1357/oh-my-pi/pull/17320) by [@Sandvoxel](https://github.com/Sandvoxel))
 
 ### Fixed
 

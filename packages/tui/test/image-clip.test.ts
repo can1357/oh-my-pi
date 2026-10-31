@@ -6,6 +6,7 @@ import {
 	encodeKittyPlacementLine,
 	getCellDimensions,
 	ImageProtocol,
+	imagePayload,
 	parseKittyDirectPlacementLine,
 	setCellDimensions,
 	TERMINAL,
@@ -96,6 +97,21 @@ describe("kitty direct-placement wire format", () => {
 		// Only the last row visible: no cursor movement, bottom slice only.
 		expect(encodeKittyPlacementLine({ ...base, placementId: 3, screenRow: 0 })).toBe(
 			"\x1b_Ga=p,q=2,C=1,i=7,p=3,c=4,r=1,y=50,h=10\x1b\\",
+		);
+	});
+
+	it("identifies a placement by its image whether it is whole, clipped, or tmux-wrapped", () => {
+		const base = { imageId: 7, columns: 4, rows: 6, imageHeightPx: 60 };
+		const payloads = [9, 3, 0].map(screenRow =>
+			imagePayload(encodeKittyPlacementLine({ ...base, placementId: 1, screenRow })),
+		);
+		payloads.push(
+			imagePayload(`\x1b7\x1b[3A${wrapTmuxPassthrough("\x1b_Ga=p,q=2,C=1,i=7,p=1,c=4,r=4,y=20,h=40\x1b\\")}\x1b8`),
+		);
+		expect(new Set(payloads).size).toBe(1);
+		// Another image keeps its own identity, so a replacement is never taken for the archived one.
+		expect(imagePayload(encodeKittyPlacementLine({ ...base, imageId: 8, placementId: 1, screenRow: 3 }))).not.toBe(
+			payloads[0],
 		);
 	});
 });
