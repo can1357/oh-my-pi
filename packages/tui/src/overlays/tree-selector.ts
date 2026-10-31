@@ -177,10 +177,9 @@ interface EntryPart {
 	strong?: boolean;
 }
 
-/** An entry part as a native span. Terminals style the semantic `path` token, not `statusLinePath`. */
+/** An entry part as a native span. */
 function partSpan(part: EntryPart): TspSpan {
-	const color = part.s === "statusLinePath" ? "path" : part.s;
-	const style = part.strong ? (color ? `${color} strong` : "strong") : color;
+	const style = part.strong ? (part.s ? `${part.s} strong` : "strong") : part.s;
 	return span(treeRowText(part.t), style);
 }
 

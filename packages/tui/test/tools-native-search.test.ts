@@ -41,7 +41,9 @@ function plain(text: TspText | undefined): string {
 	return typeof text === "string" ? text : (text ?? []).map(s => s.t).join("");
 }
 
-function codeProps(children: readonly NativeChild[] | undefined): { start?: number; text?: string }[] {
+function codeProps(
+	children: readonly NativeChild[] | undefined,
+): { start?: number; nums?: readonly number[]; text?: string; marks?: readonly { line: number }[] }[] {
 	return collect(children, n => n.k === "code").flatMap(n => (n.k === "code" && n.p ? [n.p] : []));
 }
 
@@ -78,12 +80,18 @@ describe("grep native view", () => {
 		expect(small.inline).toBe(true);
 	});
 
-	it("splits non-adjacent match lines into numbered runs with a gap row between", () => {
+	it("keeps non-adjacent match lines in one block numbered by their real lines", () => {
 		const view = grepToolRenderer.describeResult(result, expanded, { pattern: "hit" });
 		const first = collect(view.body, n => role(n) === "omp.tool.search.file")[0]!;
-		expect(codeStarts(first.c)).toEqual([9, 40]);
 		const kinds = (first.c ?? []).filter(isNode).map(n => n.k);
-		expect(kinds).toEqual(["row", "code", "text", "code"]);
+		expect(kinds).toEqual(["row", "code"]);
+		const [props] = codeProps(first.c);
+		expect(props).toMatchObject({ text: "ctx\nhit\nfar", nums: [9, 10, 40] });
+		expect(props!.start).toBeUndefined();
+		expect(props!.marks?.map(m => m.line)).toEqual([10, 40]);
+		// Contiguous files keep `start` and send no `nums`.
+		const second = collect(view.body, n => role(n) === "omp.tool.search.file")[1]!;
+		expect(codeProps(second.c)).toEqual([expect.objectContaining({ start: 1, nums: undefined })]);
 	});
 
 	it("puts a single-file search, which prints no header, under that file's row", () => {
@@ -99,8 +107,8 @@ describe("grep native view", () => {
 		const body = (view.body ?? []).filter(isNode);
 		expect(body.map(role)).toEqual(["omp.tool.search.file"]);
 		const kinds = (body[0]!.c ?? []).filter(isNode).map(n => n.k);
-		expect(kinds).toEqual(["row", "code", "text", "code"]);
-		expect(codeStarts(body[0]!.c)).toEqual([9, 40]);
+		expect(kinds).toEqual(["row", "code"]);
+		expect(codeProps(body[0]!.c).map(p => p.nums)).toEqual([[9, 10, 40]]);
 	});
 });
 
@@ -122,7 +130,7 @@ describe("read native view", () => {
 			collapsed,
 			{ path: "src/x.ts:4-5,90" },
 		);
-		expect(codeStarts(view.body)).toEqual([4, 90]);
+		expect(codeProps(view.body)).toEqual([expect.objectContaining({ text: "a\nb\nz", nums: [4, 5, 90] })]);
 	});
 
 	it("puts a read error's message in the head, not only behind the disclosure", () => {
