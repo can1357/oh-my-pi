@@ -4652,6 +4652,28 @@ test("a killed restore's live stage is named, in the preview as in applying, whe
 	expect(await fs.readdir(liveArtifacts)).toContain(path.basename(ground.dir));
 });
 
+test("a quarantine of a stage in a session tree that lies inside the other tree goes beside the outer one, outside both", async () => {
+	// The archive tree linked to the agent directory, so the sessions tree,
+	// where a killed restore stages, lies inside it. Beside the sessions tree
+	// is inside the archive tree; beside the archive tree is outside both.
+	const agentDir = path.join(root, "nest", "agent");
+	await fs.mkdir(path.join(agentDir, "sessions", "x"), { recursive: true });
+	await fs.mkdir(path.join(agentDir, "archive"), { recursive: true });
+	await fs.symlink(agentDir, path.join(agentDir, "archive", "sessions"));
+	const ground = await mintStagingGround(path.join(agentDir, "sessions", "x", "b.log"), stagingLedgerDir(agentDir));
+	await ground.handle.writeFile("PARTIAL STAGE");
+	await ground.handle.close();
+	const record = path.basename(ground.record);
+
+	const moved = await runGcCommand({ flags: { agentDir, quarantine: record, apply: true, json: true } });
+
+	expect(moved.quarantine?.errors).toEqual([]);
+	expect(moved.quarantine?.moved).toBe(true);
+	const quarantine = moved.quarantine?.quarantine ?? "";
+	expect(quarantine).toBe(path.join(root, "nest", "gc-quarantine", path.basename(record, ".json")));
+	expect(await Bun.file(path.join(quarantine, path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
+});
+
 test("the quarantine the advice names moves nothing when the agent directory is relinked after the message", async () => {
 	const realAgent = path.join(root, "agent-real");
 	const link = path.join(root, "agent-link");

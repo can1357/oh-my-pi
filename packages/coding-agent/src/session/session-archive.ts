@@ -2195,11 +2195,16 @@ export async function quarantineStagingRecord(
 
 	// A parent that is gone takes its whole tree with it, and the quarantine
 	// goes beside the agent directory; one that cannot be resolved says
-	// nothing about where it belongs.
+	// nothing about where it belongs. When one tree resolves inside the other
+	// — a sessions tree linked to the agent directory, say — the quarantine
+	// goes beside the outer one, whichever is listed first: beside the inner
+	// one is inside the outer.
 	let tree: string | undefined;
 	try {
 		const parent = await fs.realpath(path.dirname(entry.dir));
-		tree = roots.find(root => isWithin(root, parent));
+		for (const root of roots) {
+			if (isWithin(root, parent) && (tree === undefined || isWithin(root, tree))) tree = root;
+		}
 	} catch (error) {
 		if (!isEnoent(error)) {
 			return refuse(
