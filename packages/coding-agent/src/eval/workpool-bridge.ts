@@ -1,6 +1,6 @@
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { borrowEvalToolKernels, createEvalCustomTools, describeEvalTools } from "../task/eval-tools";
-import { resolveEffectiveSubagentPolicy } from "../task/structured-subagent";
+import { invalidModelSelectorReason, resolveEffectiveSubagentPolicy } from "../task/structured-subagent";
 import { type WorkPoolPeekResult, type WorkPoolStatus, WorkPoolRegistry } from "../task/workpool";
 import type { ToolSession } from "../tools";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -73,6 +73,12 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 		const requestedName = optionalString(record, "name");
 		const context = optionalString(record, "context");
 		const tools = optionalTools(record);
+		const modelProblem = invalidModelSelectorReason(record.model, "workpool()", {
+			settings: options.session.settings,
+			invocationKind: "eval",
+		});
+		if (modelProblem) throw new ToolError(modelProblem);
+		const model = typeof record.model === "string" ? record.model : undefined;
 		if (tools?.length && options.session.getPlanModeState?.()?.enabled === true) {
 			throw new ToolError("Eval-defined tools are unavailable in plan mode.");
 		}
@@ -81,6 +87,7 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 			invocationKind: "eval",
 			assignment: `Create workpool ${requestedName ?? agent ?? "worker"}`,
 			...(agent ? { agent } : {}),
+			...(model !== undefined ? { perCallModel: model } : {}),
 		});
 		const descriptors = tools?.length ? await describeEvalTools(options.session, tools, options.signal) : [];
 		const customTools = descriptors.length > 0 ? createEvalCustomTools(options.session, descriptors) : [];
@@ -100,6 +107,7 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 		const pool = registry.create(options.session, {
 			name,
 			policy,
+			...(model !== undefined ? { model } : {}),
 			...(context ? { context } : {}),
 			customTools,
 			borrowKernels: () => borrowEvalToolKernels(options.session, descriptors),

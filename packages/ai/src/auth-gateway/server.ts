@@ -354,6 +354,7 @@ async function handleFormatEndpoint(
 	let parsed: ParsedFormatRequest;
 	try {
 		parsed = route.module.parseRequest(body, req.headers);
+		if (route.module === openaiChat) openaiChat.adoptReplayedGeminiSignatures(parsed.context, model);
 	} catch (error) {
 		if (controller.signal.aborted) return clientClosedResponse(route);
 		const message = error instanceof Error ? error.message : String(error);
