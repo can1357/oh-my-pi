@@ -348,7 +348,10 @@ export async function inflateArchivedTranscript(
 	try {
 		await ground.handle.chmod(mode);
 		const written = await inflateIntoHandleWithDigest(Bun.file(source).stream(), ground.handle);
-		const landed = await fs.lstat(ground.file).catch(() => undefined);
+		const landed = await fs.lstat(ground.file).catch((error: unknown) => {
+			if (isEnoent(error)) return undefined;
+			throw error;
+		});
 		if (landed?.dev !== ground.created.dev || landed.ino !== ground.created.ino) {
 			throw new Error(`${ground.file} was replaced while the transcript was being written`);
 		}
@@ -940,7 +943,11 @@ function isWithin(root: string, target: string): boolean {
  * the session.
  */
 async function survivesRemovalOf(destination: string, destinationStat: Stats, source: Stats, archiveRoot: string) {
-	const real = await fs.realpath(destination).catch(() => undefined);
+	const real = await fs.realpath(destination).catch((error: unknown) => {
+		// Gone since it was opened: not a copy that survives anything.
+		if (isEnoent(error)) return undefined;
+		throw error;
+	});
 	if (real === undefined || isWithin(archiveRoot, real)) return false;
 	return !(destinationStat.dev === source.dev && destinationStat.ino === source.ino);
 }
@@ -1054,7 +1061,13 @@ async function copyEntryDereferenced(
 		throw error;
 	});
 	if (!stat || isResidue(source)) return;
-	const existing = await fs.lstat(destination).catch(() => undefined);
+	// Only absence is an empty slot: a look that fails says nothing about
+	// what is there, and a directory taken for new would be given the
+	// archive's mode.
+	const existing = await fs.lstat(destination).catch((error: unknown) => {
+		if (isEnoent(error)) return undefined;
+		throw error;
+	});
 	if (stat.isDirectory()) {
 		// Through the link: a symlinked artifact directory is a directory the
 		// restore may merge into, the same way the archive phase walks one.
@@ -1399,8 +1412,6 @@ export async function removeStagingGround(ground: StagingGround): Promise<string
 export interface StagingSurvey {
 	/** Recorded staging directories still standing, left by runs that are gone. */
 	residue: string[];
-	/** What the files staged in them held. */
-	bytes: number;
 	notes: string[];
 }
 
@@ -1497,7 +1508,13 @@ type RecordedGround =
 	/** Nothing of that run's stands at the name any more. */
 	| { kind: "gone"; note?: string }
 	/** A record no run of this feature could have written. */
-	| { kind: "refused"; note: string };
+	| { kind: "refused"; note: string }
+	/**
+	 * What the record names could not be looked at, so whether it is the
+	 * run's directory cannot be told: never taken for gone, nor for refused —
+	 * which would let a restore carry it home as an artifact.
+	 */
+	| { kind: "unknown"; note: string };
 
 /**
  * Check a record against what a run could have minted, before anything acts
@@ -1518,9 +1535,15 @@ async function checkRecordedGround(entry: StagingRecord, roots: readonly string[
 		standing = await fs.lstat(entry.dir);
 	} catch (error) {
 		if (isEnoent(error)) return { kind: "gone" };
-		return { kind: "refused", note: `${entry.dir} could not be read, so it was left as it is: ${errorText(error)}` };
+		return { kind: "unknown", note: `${entry.dir} could not be read, so it was left as it is: ${errorText(error)}` };
 	}
-	const real = await fs.realpath(entry.dir).catch(() => undefined);
+	const real = await fs.realpath(entry.dir).catch((error: unknown) => {
+		if (isEnoent(error)) return undefined;
+		return { failed: errorText(error) };
+	});
+	if (typeof real === "object") {
+		return { kind: "unknown", note: `${entry.dir} could not be resolved, so it was left as it is: ${real.failed}` };
+	}
 	const contained = real !== undefined && roots.some(root => isWithin(root, real) && real !== root);
 	if (!contained) {
 		return {
@@ -1538,12 +1561,22 @@ async function checkRecordedGround(entry: StagingRecord, roots: readonly string[
 	return { kind: "minted" };
 }
 
-/** The real paths a staging directory may sit inside: the sessions tree and the archive. */
+/**
+ * The real paths a staging directory may sit inside: the sessions tree and
+ * the archive. A tree not made yet holds nothing; one that cannot be resolved
+ * throws, since dropping it would read every directory in it as outside.
+ */
 async function stagingRoots(agentDir: string): Promise<string[]> {
 	const roots: string[] = [];
 	for (const root of [getSessionsDir(agentDir), getArchivedSessionsDir(agentDir)]) {
-		const real = await fs.realpath(root).catch(() => undefined);
-		if (real !== undefined) roots.push(real);
+		try {
+			roots.push(await fs.realpath(root));
+		} catch (error) {
+			if (isEnoent(error)) continue;
+			throw new Error(
+				`${root} could not be resolved (${errorText(error)}), so staging ground in it cannot be told from anything else`,
+			);
+		}
 	}
 	return roots;
 }
@@ -1562,17 +1595,23 @@ async function stagingRoots(agentDir: string): Promise<string[]> {
  * reported and kept — see {@link checkRecordedGround}.
  */
 export async function surveyRecordedStagingGrounds(agentDir: string, apply: boolean): Promise<StagingSurvey> {
-	const result: StagingSurvey = { residue: [], bytes: 0, notes: [] };
+	const result: StagingSurvey = { residue: [], notes: [] };
 	const { records, parts, failure } = await readStagingRecords(agentDir);
 	if (failure) {
 		result.notes.push(failure);
 		return result;
 	}
 	if (apply) for (const part of parts) await fs.rm(part, { force: true }).catch(() => undefined);
-	const roots = await stagingRoots(agentDir);
+	let roots: string[];
+	try {
+		roots = await stagingRoots(agentDir);
+	} catch (error) {
+		result.notes.push(errorText(error));
+		return result;
+	}
 	for (const { path: record, entry } of records) {
 		const ground = await checkRecordedGround(entry, roots);
-		if (ground.kind === "refused") {
+		if (ground.kind === "refused" || ground.kind === "unknown") {
 			result.notes.push(ground.note);
 			continue;
 		}
@@ -1582,10 +1621,6 @@ export async function surveyRecordedStagingGrounds(agentDir: string, apply: bool
 			continue;
 		}
 		result.residue.push(entry.dir);
-		const staged = await fs.lstat(entry.file).catch(() => undefined);
-		if (entry.identity && staged?.dev === entry.identity.dev && staged.ino === entry.identity.ino) {
-			result.bytes += staged.size;
-		}
 	}
 	return result;
 }
@@ -1601,7 +1636,8 @@ export async function surveyRecordedStagingGrounds(agentDir: string, apply: bool
  * minted inside it.
  *
  * Throws when the ledger cannot be read or holds a record that cannot be
- * parsed: without it, residue and artifact cannot be told apart, and a walk
+ * parsed, and when `root`, or a directory a record names, cannot be looked
+ * at: without it, residue and artifact cannot be told apart, and a walk
  * that carried on would publish a partial file as one or skip an artifact as
  * the other.
  */
@@ -1629,16 +1665,26 @@ async function recordedStagingByPath(agentDir: string, root: string): Promise<Ma
 	const { records, failure } = await readStagingRecords(agentDir);
 	if (failure) throw new Error(`${failure}; staging residue cannot be told from artifacts, so nothing was carried`);
 	if (records.length === 0) return residue;
-	const realRoot = await fs.realpath(root).catch(() => undefined);
+	const unknown = (what: string): Error =>
+		new Error(`${what}; staging residue cannot be told from artifacts, so nothing was carried`);
+	const realRoot = await fs.realpath(root).catch((error: unknown) => {
+		// A tree not made yet holds no residue.
+		if (isEnoent(error)) return undefined;
+		throw unknown(`${root} could not be resolved (${errorText(error)})`);
+	});
 	if (realRoot === undefined) return residue;
 	const roots = await stagingRoots(agentDir);
 	for (const { path: record, entry } of records) {
 		// A record written before its run made the directory names one that
 		// run may have made; leaving it out of the live tree is all a record
 		// can do, so it is enough that the name and the place check out.
-		const kind = (await checkRecordedGround(entry, roots)).kind;
-		if (kind !== "minted" && kind !== "intent") continue;
-		const real = await fs.realpath(entry.dir).catch(() => undefined);
+		const ground = await checkRecordedGround(entry, roots);
+		if (ground.kind === "unknown") throw unknown(ground.note);
+		if (ground.kind !== "minted" && ground.kind !== "intent") continue;
+		const real = await fs.realpath(entry.dir).catch((error: unknown) => {
+			if (isEnoent(error)) return undefined;
+			throw unknown(`${entry.dir} could not be resolved (${errorText(error)})`);
+		});
 		if (real === undefined) continue;
 		const relative = path.relative(realRoot, real);
 		if (relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative)) residue.set(relative, record);
@@ -1787,11 +1833,37 @@ export async function artifactRestoreConflicts(
 			conflicts.push(await stagingResidueNote(source, record, ARCHIVED_RESIDUE));
 			return;
 		}
-		const existing = await fs.lstat(destination).catch(() => undefined);
+		// A look that fails says nothing about what is there: it is reported as
+		// that, never read as an empty slot or as something else standing there.
+		const unchecked = (error: unknown): void => {
+			conflicts.push(
+				`${destination} could not be checked against the archived ${source}, so whether it can be restored ` +
+					`there is not known: ${errorText(error)}`,
+			);
+		};
+		let existing: Stats | undefined;
+		try {
+			existing = await fs.lstat(destination).catch((error: unknown) => {
+				if (isEnoent(error)) return undefined;
+				throw error;
+			});
+		} catch (error) {
+			unchecked(error);
+			return;
+		}
 		if (stat.isDirectory()) {
-			if (existing && !(await statIfPresent(destination).catch(() => undefined))?.isDirectory()) {
-				conflicts.push(`${destination} is not a directory, so ${source} could not be restored into it`);
-				return;
+			if (existing) {
+				let live: Stats | undefined;
+				try {
+					live = await statIfPresent(destination);
+				} catch (error) {
+					unchecked(error);
+					return;
+				}
+				if (!live?.isDirectory()) {
+					conflicts.push(`${destination} is not a directory, so ${source} could not be restored into it`);
+					return;
+				}
 			}
 			for (const entry of (await fs.readdir(source)).sort()) {
 				await visit(path.join(source, entry), path.join(destination, entry));
@@ -1799,8 +1871,9 @@ export async function artifactRestoreConflicts(
 			return;
 		}
 		if (!stat.isFile() || !existing) return;
-		const live = await openRegularFile(destination).catch(() => undefined);
+		let live: fs.FileHandle | undefined;
 		try {
+			live = await openRegularFile(destination);
 			if (
 				live &&
 				(await survivesRemovalOf(destination, await live.stat(), stat, archiveRoot)) &&
@@ -1808,6 +1881,9 @@ export async function artifactRestoreConflicts(
 			) {
 				return;
 			}
+		} catch (error) {
+			unchecked(error);
+			return;
 		} finally {
 			await live?.close().catch(() => undefined);
 		}
@@ -1908,7 +1984,7 @@ export async function archivedHandleIsHeldBy(
 	candidatePath: string,
 	transcript = false,
 ): Promise<boolean> {
-	const candidate = await openRegularFile(candidatePath).catch(() => undefined);
+	const candidate = await openRegularFile(candidatePath);
 	if (!candidate) return false;
 	try {
 		const candidateStat = await candidate.stat();

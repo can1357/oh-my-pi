@@ -3778,6 +3778,210 @@ test("a restore preview reports a FIFO where an archived artifact belongs", asyn
 	expect(preview.restore?.errors.join("\n")).toContain(path.join(liveArtifacts, "a.log"));
 });
 
+/**
+ * Make `fs[method]` fail with an injected EIO on exactly `at`, or on every
+ * path `at` matches, until restored: a look that fails, which says nothing
+ * about what is there.
+ */
+function failWithEio(method: "lstat" | "realpath" | "stat" | "open", at: string | ((target: string) => boolean)) {
+	const matches = typeof at === "string" ? (target: string) => target === at : at;
+	const real = fs[method] as (...args: unknown[]) => Promise<unknown>;
+	return spyOn(fs, method).mockImplementation((async (target: string, ...rest: unknown[]) => {
+		if (matches(String(target))) {
+			throw Object.assign(new Error(`EIO: injected, ${method} ${target}`), { code: "EIO" });
+		}
+		return await real(target, ...rest);
+	}) as never);
+}
+
+test("a restore that cannot check the transcript it staged reports that failure, not a replaced file or a damaged archive", async () => {
+	await archiveEverything();
+	const staged = failWithEio(
+		"lstat",
+		target => isStagedFile(target) && target.endsWith(`${path.sep}${path.basename(sessionFile)}`),
+	);
+	let failure: unknown;
+	try {
+		await restoreArchivedSession(archiveFile, root);
+	} catch (error) {
+		failure = error;
+	} finally {
+		staged.mockRestore();
+	}
+
+	expect(String(failure)).toContain("EIO: injected");
+	expect(String(failure)).not.toContain("was replaced");
+	expect(String(failure)).not.toContain("damaged");
+	expect(await Bun.file(sessionFile).exists()).toBe(false);
+});
+
+test("a restore that cannot check a live artifact directory leaves its mode alone and says why", async () => {
+	const artifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(artifacts, "sub.jsonl"), sessionBody(sessionId("sub-1"), "nested", root));
+	await fs.chmod(artifacts, 0o755);
+	await archiveEverything();
+	// A directory the live tree already holds, tightened against other local users.
+	await fs.mkdir(artifacts, { recursive: true });
+	await fs.chmod(artifacts, 0o700);
+	const broken = failWithEio("lstat", artifacts);
+	let restored: RestoredSession;
+	try {
+		restored = await restoreArchivedSession(archiveFile, root);
+	} finally {
+		broken.mockRestore();
+	}
+
+	expect((await fs.stat(artifacts)).mode & 0o777).toBe(0o700);
+	expect(restored.notRestored.join("\n")).toContain("EIO: injected");
+});
+
+test("a restore that cannot resolve a live artifact says so, not that it is the archived file itself", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	await archiveEverything();
+	// What an interrupted restore leaves: the transcript and this artifact home.
+	await halfRestore();
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	const broken = failWithEio("realpath", path.join(liveArtifacts, "a.log"));
+	let restored: RestoredSession;
+	try {
+		restored = await restoreArchivedSession(archiveFile, root);
+	} finally {
+		broken.mockRestore();
+	}
+
+	const told = restored.notRestored.join("\n");
+	expect(told).toContain("EIO: injected");
+	expect(told).not.toContain("itself");
+});
+
+test("a restore that cannot resolve the archive does not carry a recorded stage home as an artifact", async () => {
+	const { ground, liveArtifacts } = await archivedWithKilledStage();
+	const broken = failWithEio("realpath", getArchivedSessionsDir(root));
+	let restored: GcResult;
+	try {
+		restored = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+	} finally {
+		broken.mockRestore();
+	}
+
+	expect(await fs.readdir(liveArtifacts).catch(() => [])).not.toContain(path.basename(ground.dir));
+	expect(restored.restore?.errors.join("\n")).toContain(`${getArchivedSessionsDir(root)} could not be resolved`);
+	expect(await Bun.file(ground.file).text()).toBe("PARTIAL STAGE");
+});
+
+test("an archive run that cannot resolve the archive says so, not that a recorded stage is outside it", async () => {
+	await archivedWithKilledStage();
+	const broken = failWithEio("realpath", getArchivedSessionsDir(root));
+	let result: GcResult;
+	try {
+		result = await archiveOnly();
+	} finally {
+		broken.mockRestore();
+	}
+
+	const told = result.archive?.errors.join("\n") ?? "";
+	expect(told).toContain(`${getArchivedSessionsDir(root)} could not be resolved`);
+	expect(told).toContain("EIO: injected");
+	expect(told).not.toContain("outside the sessions and archive trees");
+});
+
+// The restore preview, one failed look at a time: each is reported as a look
+// that failed, never read as an empty slot or as something else standing there.
+const unlookable: [string, "lstat" | "stat" | "open", "file" | "directory", string][] = [
+	["the name cannot be checked", "lstat", "file", "already holds something else"],
+	["the directory cannot be followed", "stat", "directory", "is not a directory"],
+	["the file cannot be opened", "open", "file", "already holds something else"],
+];
+for (const [shape, method, kind, misread] of unlookable) {
+	test(`a restore preview reports a live artifact it cannot look at when ${shape}`, async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		const entry = path.join(liveArtifacts, kind === "file" ? "a.log" : "nested");
+		await Bun.write(kind === "file" ? entry : path.join(entry, "b.log"), "FIRST");
+		await archiveEverything();
+		await Bun.write(kind === "file" ? entry : path.join(entry, "b.log"), "FIRST");
+		const broken = failWithEio(method, entry);
+		let preview: GcResult;
+		try {
+			preview = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, json: true } });
+		} finally {
+			broken.mockRestore();
+		}
+
+		const told = preview.restore?.errors.join("\n") ?? "";
+		expect(told).toContain(`${entry} could not be checked`);
+		expect(told).toContain("EIO: injected");
+		expect(told).not.toContain(misread);
+	});
+}
+
+test("a reclaim that cannot open an archived artifact reports that failure, not different bytes", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	await archiveOnly();
+	const broken = failWithEio("open", path.join(archiveFile.slice(0, -".jsonl.gz".length), "a.log"));
+	let result: GcResult;
+	try {
+		result = await runGcCommand({
+			flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+		});
+	} finally {
+		broken.mockRestore();
+	}
+
+	const told = result.reclaim?.errors.join("\n") ?? "";
+	expect(told).toContain("EIO: injected");
+	expect(told).not.toContain("does not");
+	expect(await Bun.file(path.join(liveArtifacts, "a.log")).text()).toBe("FIRST");
+});
+
+test("a restore that cannot resolve a recorded stage does not carry it home as an artifact", async () => {
+	const { ground, liveArtifacts } = await archivedWithKilledStage();
+	const broken = failWithEio("realpath", ground.dir);
+	let restored: GcResult;
+	try {
+		restored = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+	} finally {
+		broken.mockRestore();
+	}
+
+	expect(await fs.readdir(liveArtifacts).catch(() => [])).not.toContain(path.basename(ground.dir));
+	expect(restored.restore?.errors.join("\n")).toContain(`${ground.dir} could not be resolved`);
+	expect(await Bun.file(ground.file).text()).toBe("PARTIAL STAGE");
+});
+
+test("a restore whose second look at a recorded stage fails does not carry it home as an artifact", async () => {
+	const { ground, liveArtifacts } = await archivedWithKilledStage();
+	// The record is checked first, then the directory resolved again for its
+	// path under the tree: only that second look fails.
+	let looks = 0;
+	const broken = failWithEio("realpath", target => target === ground.dir && ++looks === 2);
+	let restored: GcResult;
+	try {
+		restored = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+	} finally {
+		broken.mockRestore();
+	}
+
+	expect(await fs.readdir(liveArtifacts).catch(() => [])).not.toContain(path.basename(ground.dir));
+	expect(restored.restore?.errors.join("\n")).toContain(`${ground.dir} could not be resolved`);
+});
+
+test("an archive run that cannot resolve a live artifact tree does not archive a killed restore's stage in it", async () => {
+	const { ground, liveArtifacts } = await restoredWithKilledLiveStage();
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	const broken = failWithEio("realpath", liveArtifacts);
+	let result: GcResult;
+	try {
+		result = await archiveOnly();
+	} finally {
+		broken.mockRestore();
+	}
+
+	expect(await fs.readdir(archivedArtifacts)).not.toContain(path.basename(ground.dir));
+	expect(result.archive?.errors.join("\n")).toContain(`${liveArtifacts} could not be resolved`);
+});
+
 test("re-archiving changes the mode of the archived transcript only, never what its name was rebound to", async () => {
 	await archiveOnly();
 	const unrelated = path.join(root, "private.txt");
