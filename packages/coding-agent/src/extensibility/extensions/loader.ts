@@ -36,7 +36,7 @@ import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
 import { resolveExtensionDirectory } from "./directory-resolution";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
-import { getAllPluginExtensionPaths } from "../plugins/loader";
+import { getAllPluginExtensionPaths, getEnabledPlugins, prependPluginBinDirs } from "../plugins/loader";
 
 import { resolvePath, withHostGuard } from "../utils";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
@@ -612,7 +612,8 @@ async function discoverHooksInPackageRoot(root: string): Promise<string[]> {
  * Discover absolute paths of extensions to load, without importing or
  * binding factories. Hot path on session startup — the scan walks native
  * `.omp`/`.pi` extension capabilities, JS/TS hook factories, the
- * installed-plugin tree, and any configured paths.
+ * installed-plugin tree, and any configured paths. Ambient discovery also puts
+ * the installed plugins' manifest `bin` directories on PATH.
  *
  * The root session imports these paths once and forwards prepared factories to
  * subagents. Each child rebinds fresh Extension instances to its OWN
@@ -693,8 +694,10 @@ export async function discoverExtensionPaths(
 		}
 	}
 
-	// 3. Discover extension entry points from installed plugins.
+	// 3. Installed plugins: put their `bin` directories on PATH before any of
+	// their modules loads, then discover their extension entry points.
 	if (ambient) {
+		prependPluginBinDirs(await getEnabledPlugins(cwd));
 		await addPaths(await getAllPluginExtensionPaths(cwd));
 	}
 

@@ -136,6 +136,19 @@ Multiple entry points are supported:
 
 Installed-plugin manifest entries may be `.ts`, `.js`, `.mjs`, or `.cjs`; a manifest entry naming a directory resolves `index.ts`, `index.js`, `index.mjs`, or `index.cjs`. Automatic scanning of native/configured extension directories remains limited to `.ts` and `.js`.
 
+An installed plugin that ships commands for the agent's shell declares their directory with `bin` instead of adding itself to `PATH`:
+
+```json
+{
+  "omp": {
+    "extensions": ["./dist/main.js"],
+    "bin": ["./bin"]
+  }
+}
+```
+
+omp puts the directory at the front of `PATH` under the plugin's installed path before the plugin's modules load. Do not build that entry from `import.meta.url` or `__dirname`: a module's location is its realpath, and when a symlinked plugins root (a dotfiles link, a marketplace upgrade) is re-pointed and the old target removed, a running session loses every command on a realpath entry.
+
 ## Registering commands
 
 ```ts

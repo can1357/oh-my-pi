@@ -2,7 +2,8 @@
  * Plugin loader - discovers and loads manifest entry points from installed plugins.
  *
  * Reads enabled plugins from the runtime config and loads their
- * tools/hooks/extensions/commands based on manifest entries and enabled features.
+ * tools/hooks/extensions/commands based on manifest entries and enabled features,
+ * and puts their `bin` directories on PATH.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -420,6 +421,50 @@ export function resolvePluginCommandPaths(plugin: InstalledPlugin): string[] {
 
 export function resolvePluginExtensionPaths(plugin: InstalledPlugin): string[] {
 	return resolvePluginPaths(plugin, "extensions");
+}
+
+// =============================================================================
+// PATH
+// =============================================================================
+
+/**
+ * Put the manifest `bin` directories of `plugins` at the front of `PATH`.
+ *
+ * Each entry is the plugin's installed path (`<plugins root>/node_modules/<name>/<bin>`), never
+ * its realpath. The session and every process it starts keep this PATH, while a symlinked
+ * plugins root (a dotfiles link, a versioned deployment's `current` link, a marketplace install
+ * re-pointed at a new cache directory on upgrade) can be moved and its old target removed under
+ * them: the installed path follows the link, the realpath goes with the old target.
+ *
+ * The realpath is the identity: two names for one directory add one entry, the first. A
+ * directory whose installed path is already on PATH is not added again; an inherited entry that
+ * names its realpath does not count, since that is the entry that goes stale. Entries that are
+ * not directories add nothing. Entries stay for the life of the process.
+ */
+export function prependPluginBinDirs(plugins: readonly InstalledPlugin[]): void {
+	const inherited = process.env.PATH ?? "";
+	const present = new Set(inherited.split(path.delimiter));
+	const identities = new Set<string>();
+	const added: string[] = [];
+	for (const plugin of plugins) {
+		const declared: unknown = plugin.manifest.bin;
+		for (const entry of Array.isArray(declared) ? declared : [declared]) {
+			if (typeof entry !== "string" || entry.length === 0) continue;
+			const dir = path.join(plugin.path, entry);
+			let identity: string;
+			try {
+				identity = fs.realpathSync(dir);
+				if (!fs.statSync(identity).isDirectory()) continue;
+			} catch {
+				continue;
+			}
+			if (identities.has(identity)) continue;
+			identities.add(identity);
+			if (!present.has(dir)) added.push(dir);
+		}
+	}
+	if (added.length === 0) return;
+	process.env.PATH = inherited ? [...added, inherited].join(path.delimiter) : added.join(path.delimiter);
 }
 
 // =============================================================================
