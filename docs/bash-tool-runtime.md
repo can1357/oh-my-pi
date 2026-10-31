@@ -173,9 +173,11 @@ The per-command child environment is then built by `buildNonInteractiveEnv()` (`
 
 - pagers disabled (`PAGER=cat`, `GIT_PAGER=cat`, … and `LESS=FRX`),
 - editor prompts disabled (`GIT_EDITOR=true`, `EDITOR=true`, `VISUAL=true`),
-- terminal/credential prompts reduced (`TERM=dumb`, `GIT_TERMINAL_PROMPT=0`, `SSH_ASKPASS` set to the resolved `false` executable or `"false"`, `NO_COLOR=1`, `CI=true` unless `PI_BASH_NO_CI`/`CLAUDE_BASH_NO_CI` is set),
+- terminal/credential prompts reduced (`TERM=dumb`, `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never` for Git Credential Manager GUI prompts, `SSH_ASKPASS` set to the resolved `false` executable or `"false"`, `NO_COLOR=1`, `CI=true` unless `PI_BASH_NO_CI`/`CLAUDE_BASH_NO_CI` is set),
 - package-manager/tooling automation flags for non-interactive behavior (npm/pnpm/yarn/pip/cargo/terraform/gh, …),
 - on Windows, UTF-8 locale/codepage defaults are added when absent.
+
+A `sequence.editor` from git config files outranks `GIT_EDITOR` and would block `git rebase -i`, so `buildSequenceEditorConfigEnv()` appends `sequence.editor=true` as env-provided git config (`GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`) after the entries the shell starts with (the host env overlaid with the settings shell `env`). An explicit `git -c sequence.editor=…` or inline `GIT_SEQUENCE_EDITOR` still wins; the entry is skipped when the inherited `GIT_CONFIG_COUNT` is malformed or an entry already sets `sequence.editor`. It is added where a shell starts, never per command: in the persistent native shell's session env, so the shell's own `export GIT_CONFIG_*` and per-command `GIT_CONFIG_*` from the caller or direnv replace it, and in the spawn env of each user-shell PTY run, after that run's caller and direnv entries.
 
 ## Streaming and cancellation
 

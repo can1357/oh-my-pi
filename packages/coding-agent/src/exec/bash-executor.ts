@@ -25,7 +25,7 @@ import { quotePosixArgv } from "../utils/shell-quote";
 import { getOrCreateSnapshot } from "../utils/shell-snapshot";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import { loadDirenvEnv } from "./direnv";
-import { buildNonInteractiveEnv } from "./non-interactive-env";
+import { buildNonInteractiveEnv, buildSequenceEditorConfigEnv } from "./non-interactive-env";
 
 import {
 	cfgBashDirenv,
@@ -463,7 +463,9 @@ function resolveUserShellConfig(settings: Settings, baseConfig: ShellConfig): Sh
 /**
  * Env for the user-shell PTY path: keep the non-interactive guards (pagers,
  * editors, credential prompts) but restore color — the PTY makes stdout a
- * TTY, so TERM/NO_COLOR/CI are all that keep tools monochrome.
+ * TTY, so TERM/NO_COLOR/CI are all that keep tools monochrome. Each PTY run
+ * starts a fresh shell, so its git `sequence.editor` override is appended
+ * after the git config entries this env and the host env carry.
  */
 function buildUserShellPtyEnv(
 	shellEnv: Record<string, string>,
@@ -472,7 +474,7 @@ function buildUserShellPtyEnv(
 	const env: Record<string, string> = { ...shellEnv, ...commandEnv, TERM: "xterm-256color" };
 	delete env.NO_COLOR;
 	delete env.CI;
-	return env;
+	return { ...env, ...buildSequenceEditorConfigEnv(env) };
 }
 
 /**
@@ -679,8 +681,16 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	}
 
 	// The embedded shell reads its builtin switches from the session env; a
-	// different env also keys a separate persistent session.
-	const sessionEnv = options?.gitGuard ? { ...shellEnv, PI_GIT_GUARD: "1" } : shellEnv;
+	// different env also keys a separate persistent session. The git
+	// `sequence.editor` override is session-level, not per-command: the
+	// per-command env is overlaid on every run, so it would clobber the
+	// shell's own `export GIT_CONFIG_*`; at session level, those exports (and
+	// any per-command GIT_CONFIG_* from the caller or direnv) replace it.
+	const sessionEnv = {
+		...shellEnv,
+		...(options?.gitGuard ? { PI_GIT_GUARD: "1" } : undefined),
+		...buildSequenceEditorConfigEnv(shellEnv),
+	};
 	const shellOptions = {
 		sessionEnv,
 		snapshotPath: snapshotPath ?? undefined,

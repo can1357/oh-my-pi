@@ -88,16 +88,10 @@ impl Review {
 					.iter_exported()
 					.any(|(name, _)| is_git_repo_location_var(name)),
 			// Configuration passed through the environment (`GIT_CONFIG_COUNT`)
-			// may turn on `submodule.recurse`.
+			// may set `submodule.recurse`, above the repository's own.
 			recurse:    recurse_option(invocation.sub, invocation.args)
 				.or(invocation.recurse)
-				.or_else(|| {
-					shell
-						.env()
-						.iter_exported()
-						.any(|(name, _)| name == "GIT_CONFIG_COUNT")
-						.then_some(true)
-				}),
+				.or_else(|| env_config_recurse(shell)),
 			command:    args.join(" "),
 		}))
 	}
@@ -303,6 +297,23 @@ fn recurses(repo: &GitRepo, option: Option<bool>) -> bool {
 		},
 		Err(_) => true,
 	})
+}
+
+/// `submodule.recurse` as the configuration exported through the environment
+/// (`GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>`, `GIT_CONFIG_VALUE_<n>`) sets it,
+/// the last entry winning; `None` when no entry does. Entries git cannot read
+/// count as on.
+fn env_config_recurse<SE: ShellExtensions>(shell: &Shell<SE>) -> Option<bool> {
+	let Some(entries) = super::env_config(shell) else {
+		return Some(true);
+	};
+	entries
+		.iter()
+		.rev()
+		.find(|(key, _)| key.eq_ignore_ascii_case("submodule.recurse"))
+		.map(|(_, value)| {
+			!matches!(value.to_ascii_lowercase().as_str(), "" | "false" | "no" | "off" | "0")
+		})
 }
 
 /// Why `stash <op>` of `entry` (`stash@{0}` when `None`; every entry for
@@ -1493,6 +1504,28 @@ mod tests {
 		);
 
 		let (code, output) = guarded(&worktree, "git reset -q --hard --no-recurse-submodules").await;
+		assert_eq!(code, Some(0), "{output}");
+		assert_eq!(
+			(read(&worktree), read(&worktree.join("lib"))),
+			("tracked\n".to_owned(), "mine\n".to_owned())
+		);
+
+		// Environment configuration overrides the repository's, and only its
+		// `submodule.recurse` entries decide recursion.
+		std::fs::write(worktree.join("tracked.txt"), "top\n").expect("edit top");
+		let config = "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=Submodule.Recurse \
+		              GIT_CONFIG_VALUE_0=off; git reset -q --hard";
+		let (code, output) = guarded(&worktree, config).await;
+		assert_eq!(code, Some(0), "{output}");
+		assert_eq!(
+			(read(&worktree), read(&worktree.join("lib"))),
+			("tracked\n".to_owned(), "mine\n".to_owned())
+		);
+		git(&repo, &["config", "--unset", "submodule.recurse"]);
+		std::fs::write(worktree.join("tracked.txt"), "top\n").expect("edit top");
+		let config = "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=sequence.editor \
+		              GIT_CONFIG_VALUE_0=true; git reset -q --hard";
+		let (code, output) = guarded(&worktree, config).await;
 		assert_eq!(code, Some(0), "{output}");
 		assert_eq!(
 			(read(&worktree), read(&worktree.join("lib"))),

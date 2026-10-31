@@ -2,7 +2,11 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { buildNonInteractiveEnv, NON_INTERACTIVE_ENV } from "@oh-my-pi/pi-coding-agent/exec/non-interactive-env";
+import {
+	buildNonInteractiveEnv,
+	buildSequenceEditorConfigEnv,
+	NON_INTERACTIVE_ENV,
+} from "@oh-my-pi/pi-coding-agent/exec/non-interactive-env";
 
 describe("buildNonInteractiveEnv", () => {
 	it("defaults Windows child-process encoding to UTF-8 when inherited env is unset", () => {
@@ -68,6 +72,20 @@ describe("buildNonInteractiveEnv", () => {
 		});
 
 		expect(await proc.exited).toBe(1);
+	});
+
+	it("appends its git config entry after inherited GIT_CONFIG_* entries", () => {
+		const env = buildSequenceEditorConfigEnv(
+			undefined,
+			{ GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "foo.bar", GIT_CONFIG_VALUE_0: "baz" },
+			"linux",
+		);
+
+		expect(env).toEqual({
+			GIT_CONFIG_COUNT: "2",
+			GIT_CONFIG_KEY_1: "sequence.editor",
+			GIT_CONFIG_VALUE_1: "true",
+		});
 	});
 
 	it("injects clap-compatible CI=true by default", () => {

@@ -30,13 +30,14 @@
 mod guard;
 
 use std::{
+	collections::BTreeMap,
 	io::{self, Write as _},
 	path::{Path, PathBuf},
 };
 
 use brush_core::{
 	CommandArg, Error, ErrorKind, ExecutionContext, ExecutionParameters, ExecutionResult, Shell,
-	ShellExtensions,
+	ShellExtensions, ShellValue,
 	builtins::{self, Registration},
 	commands::{ShellForCommand, SimpleCommand},
 	openfiles::OpenFiles,
@@ -625,14 +626,74 @@ async fn run_git<SE: ShellExtensions>(
 }
 
 /// Whether the command environment points git at another repository or
-/// injects config; the in-process path reads neither.
+/// injects config; the in-process path reads neither. Exported entries
+/// (`GIT_CONFIG_COUNT`, …) that set only [`INERT_ENV_CONFIG`] keys inject
+/// nothing it would read.
 fn git_env_redirected<SE: ShellExtensions>(shell: &Shell<SE>) -> bool {
 	shell.env().iter_exported().any(|(name, _)| {
 		is_git_repo_location_var(name)
-			|| name
+			|| (name
 				.get(..10)
 				.is_some_and(|prefix| prefix.eq_ignore_ascii_case("GIT_CONFIG"))
+				&& !is_env_config_entry(name))
+	}) || env_config(shell).is_none_or(|entries| {
+		entries.iter().any(|(key, _)| {
+			!INERT_ENV_CONFIG
+				.iter()
+				.any(|inert| key.eq_ignore_ascii_case(inert))
+		})
 	})
+}
+
+/// Config keys that change no repository state the in-process path reads or
+/// writes: the coding agent exports `sequence.editor` to every command.
+const INERT_ENV_CONFIG: [&str; 1] = ["sequence.editor"];
+
+/// The `(key, value)` entries git reads from `GIT_CONFIG_COUNT`,
+/// `GIT_CONFIG_KEY_<n>`, and `GIT_CONFIG_VALUE_<n>`, in order; none without a
+/// count. `None` when git cannot read them: a count that is not a number, or
+/// an entry missing or not a string.
+fn env_config<SE: ShellExtensions>(shell: &Shell<SE>) -> Option<Vec<(&str, &str)>> {
+	let (mut count, mut keys, mut values) = (None, BTreeMap::new(), BTreeMap::new());
+	for (name, var) in shell.env().iter_exported() {
+		let value = match var.value() {
+			ShellValue::String(value) => Some(value.as_str()),
+			_ => None,
+		};
+		if name == "GIT_CONFIG_COUNT" {
+			count = Some(value);
+		} else if let Some(index) = env_config_index(name, "GIT_CONFIG_KEY_") {
+			keys.insert(index, value);
+		} else if let Some(index) = env_config_index(name, "GIT_CONFIG_VALUE_") {
+			values.insert(index, value);
+		}
+	}
+	let Some(count) = count else {
+		return Some(Vec::new());
+	};
+	let count: usize = count?.parse().ok()?;
+	// Collecting the present entries bounds the work by the environment rather
+	// than by `count`; git fails on any missing one.
+	let entries = keys
+		.range(..count)
+		.map(|(index, key)| Some(((*key)?, (*values.get(index)?)?)))
+		.collect::<Option<Vec<_>>>()?;
+	(entries.len() == count).then_some(entries)
+}
+
+/// Whether `name` is `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>`, or
+/// `GIT_CONFIG_VALUE_<n>`, spelled as git reads them.
+fn is_env_config_entry(name: &str) -> bool {
+	name == "GIT_CONFIG_COUNT"
+		|| env_config_index(name, "GIT_CONFIG_KEY_").is_some()
+		|| env_config_index(name, "GIT_CONFIG_VALUE_").is_some()
+}
+
+/// The `<n>` of a `<prefix><n>` variable, spelled as git spells it.
+fn env_config_index(name: &str, prefix: &str) -> Option<usize> {
+	let digits = name.strip_prefix(prefix)?;
+	let index: usize = digits.parse().ok()?;
+	(index.to_string() == digits).then_some(index)
 }
 
 /// Whether git creates a branch from `start` without upstream tracking,
@@ -989,5 +1050,34 @@ mod tests {
 		let (code, output) = run(&repo, "git worktree add ../again main").await;
 		assert_eq!(code, Some(128));
 		assert!(output.contains("fatal: 'main' is already used by worktree"), "{output}");
+	}
+
+	/// Exported configuration that sets only keys the in-process path never
+	/// reads (the coding agent's `sequence.editor`) keeps it; any other key
+	/// hands the command to git.
+	#[cfg(target_os = "macos")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn worktree_add_keeps_in_process_path_under_inert_env_config() {
+		let (_temp, repo) = fixture();
+		let parent = repo.parent().expect("parent").to_owned();
+		let (code, output) = run(
+			&repo,
+			"export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=sequence.editor GIT_CONFIG_VALUE_0=true; git \
+			 worktree add ../inert",
+		)
+		.await;
+		assert_eq!(code, Some(0), "{output}");
+		assert_cloned(&parent.join("inert"));
+
+		let (code, output) = run(
+			&repo,
+			"export GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=sequence.editor GIT_CONFIG_VALUE_0=true \
+			 GIT_CONFIG_KEY_1=color.ui GIT_CONFIG_VALUE_1=never; git worktree add ../configured",
+		)
+		.await;
+		assert_eq!(code, Some(0), "{output}");
+		let configured = parent.join("configured");
+		assert!(configured.join("tracked.txt").exists(), "git checked out the worktree");
+		assert!(!configured.join("cache/blob").exists(), "git never copies ignored files");
 	}
 }

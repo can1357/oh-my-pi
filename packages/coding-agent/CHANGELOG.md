@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Bash commands no longer hang on `git rebase -i` when a `sequence.editor` is set in git config files (an explicit `git -c sequence.editor=…` or inline `GIT_SEQUENCE_EDITOR` still wins), or on Git Credential Manager GUI/browser sign-in prompts ([#17452](https://github.com/can1357/oh-my-pi/pull/17452) by [@wolfiesch](https://github.com/wolfiesch))
+- With `bash.gitGuard` on, `git reset --hard`, `git checkout -- <path>` and `git restore` are no longer refused in repositories with submodules just because git config is passed through the environment ([#17452](https://github.com/can1357/oh-my-pi/pull/17452) by [@wolfiesch](https://github.com/wolfiesch))
+
 ## [18.14.1] - 2026-10-31
 
 ### Added
