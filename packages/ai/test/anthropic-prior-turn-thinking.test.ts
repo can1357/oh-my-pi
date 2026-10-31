@@ -453,6 +453,24 @@ describe("Anthropic prior-turn thinking preservation (#2257, #2265)", () => {
 			expect(assistantBlocks(conversation(claudeTurn))).toEqual([{ type: "text", text: "Opus answer" }]);
 		});
 
+		it("drops the reasoning of a model the catalog classes as Claude for its provider", () => {
+			// The catalog classes this distill by its Claude teacher on nanogpt, though its id names Gemma.
+			const distillTurn = makeAssistant(
+				[
+					{ type: "thinking", thinking: "distill private plan" },
+					{ type: "text", text: "Distill answer" },
+				],
+				{
+					api: "openai-completions",
+					provider: "nanogpt",
+					model: "Gemma-4-31B-Claude-4.6-Opus-Reasoning-Distilled",
+					stopReason: "stop",
+					credentialId: OTHER_CREDENTIAL,
+				},
+			);
+			expect(assistantBlocks(conversation(distillTurn))).toEqual([{ type: "text", text: "Distill answer" }]);
+		});
+
 		it("leaves the restored reasoning out under omitDemotedReasoning", () => {
 			expect(assistantBlocks(conversation(codexTurn), { omitDemotedReasoning: true })).toEqual([
 				{ type: "text", text: "Codex answer" },
