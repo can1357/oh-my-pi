@@ -261,6 +261,15 @@ describe("native prompt-cache chip", () => {
 		expect(chip!.title).toContain("re-sends up to ~320K");
 	});
 
+	it("names a rotated provider cache session as the reason, with the whole prompt re-sent", () => {
+		setNativeRendering(true);
+		const rekeyed: PromptCacheStatus = { ...COLD_MODEL, reason: { kind: "cache-key" } };
+		const chip = cacheChip(cacheStatusLine(CACHE_SETTINGS, () => rekeyed));
+		expect(chip!.spans!.map(part => part.t).join("")).toEndWith(" not cached");
+		expect(chip!.title).toContain("re-sends ~320K uncached");
+		expect(JSON.stringify(chip!.hovercard)).toContain("provider cache session changed");
+	});
+
 	it("has no chip when the session reports no prompt-cache status", () => {
 		setNativeRendering(true);
 		expect(cacheChip(cacheStatusLine(CACHE_SETTINGS, () => undefined))).toBeUndefined();

@@ -750,6 +750,29 @@ interface PromptCacheShape {
 	tools: string;
 	systemPrompt: number | bigint;
 	retention: string;
+	/** OpenAI `prompt_cache_key` the request routes by; undefined for a provider that sends none. */
+	cacheKey: string | undefined;
+}
+
+/**
+ * Whether `model`'s requests carry the OpenAI prompt-cache key (the provider session id when no key is
+ * pinned), which routes them to their cache: another key reads none of the old entry.
+ */
+function sendsPromptCacheKey(model: Model): boolean {
+	switch (model.api) {
+		case "openai-responses":
+		case "openai-codex-responses":
+		case "azure-openai-responses":
+			return true;
+		case "openai-completions":
+			return (
+				model.compat !== undefined &&
+				"supportsPromptCacheKey" in model.compat &&
+				model.compat.supportsPromptCacheKey === true
+			);
+		default:
+			return false;
+	}
 }
 
 /** What a branch says about the prompt cache its newest cached reply left. */
@@ -1200,6 +1223,8 @@ export class AgentSession implements SettingsScope {
 	#scoutAllowedBySpawnPolicy = true;
 	#providerSessionId: string | undefined;
 	#freshProviderSessionId: string | undefined;
+	/** When {@link #freshProviderSessionId} was last rotated; replies before it went out under another prompt-cache key. */
+	#freshProviderSessionAt = 0;
 	/** OAuth account pools enforced on this session's key lookups; lifted on dispose. */
 	#accountPoolScope: SessionAccountPoolScope | undefined;
 	#inheritedProviderPromptCacheKey: string | undefined;
@@ -1407,7 +1432,7 @@ export class AgentSession implements SettingsScope {
 	#synchronouslyTerminatedYieldToolCallIds = new Set<string>();
 	#providerSessionState = new Map<string, ProviderSessionState>();
 	readonly #cacheWarmer: CacheWarmer | undefined;
-	/** Session the warmer was last armed for: its confirmed entry describes no other transcript. */
+	/** Transcript the warmer was last armed for: its confirmed entry describes no other transcript. */
 	#promptCacheArmSessionId: string | undefined;
 	/** {@link #promptCacheShape} for the inputs it was last built from. */
 	#promptCacheShapeMemo:
@@ -5998,8 +6023,9 @@ export class AgentSession implements SettingsScope {
 		if (!warmer) return () => {};
 		// The warmer keeps its confirmed entry across requests until a response
 		// replaces it; another transcript's entry says nothing about this one.
-		if (this.#promptCacheArmSessionId !== this.sessionId) warmer.cancel();
-		const armMessages = this.messages;
+		if (this.#promptCacheArmSessionId !== this.sessionManager.getSessionId()) warmer.cancel();
+		// A copy: `/clear` truncates the live array in place, which an alias would follow.
+		const armMessages = this.messages.slice();
 		const armedAt = Date.now();
 		const retentionSetting = cfgProvidersCacheRetention.get(this.settings);
 		const warmingOptions = {
@@ -6007,7 +6033,7 @@ export class AgentSession implements SettingsScope {
 			cacheRetention: options.cacheRetention ?? (retentionSetting === "auto" ? undefined : retentionSetting),
 		};
 		const armShape = this.#promptCacheShape(model);
-		this.#promptCacheArmSessionId = this.sessionId;
+		this.#promptCacheArmSessionId = this.sessionManager.getSessionId();
 		return warmer.start({ model, context, options: warmingOptions }, () =>
 			this.#promptCacheChange(armShape, armMessages, armedAt),
 		);
@@ -6031,6 +6057,7 @@ export class AgentSession implements SettingsScope {
 		if (next.tools !== arm.tools) return { kind: "tools" };
 		if (next.systemPrompt !== arm.systemPrompt) return { kind: "system-prompt" };
 		if (next.retention !== arm.retention) return { kind: "retention" };
+		if (next.cacheKey !== arm.cacheKey) return { kind: "cache-key" };
 		// The armed request must still be a prefix of the live messages by
 		// entry identity: appends are fine (tool results mid-run), but a
 		// rewrite, shallow array copy with new objects, compaction, branch,
@@ -6058,6 +6085,10 @@ export class AgentSession implements SettingsScope {
 		const { tools, systemPrompt } = this.agent.state;
 		const thinkingLevel = this.thinkingLevel;
 		const retention = cfgProvidersCacheRetention.get(this.settings);
+		const cacheKey =
+			model !== undefined && sendsPromptCacheKey(model)
+				? (this.getPromptCacheKeyForModel(model) ?? this.agent.sessionId)
+				: undefined;
 		const memo = this.#promptCacheShapeMemo;
 		if (
 			memo !== undefined &&
@@ -6065,7 +6096,8 @@ export class AgentSession implements SettingsScope {
 			memo.tools === tools &&
 			memo.systemPrompt === systemPrompt &&
 			memo.shape.thinkingLevel === thinkingLevel &&
-			memo.shape.retention === retention
+			memo.shape.retention === retention &&
+			memo.shape.cacheKey === cacheKey
 		) {
 			return memo.shape;
 		}
@@ -6077,6 +6109,7 @@ export class AgentSession implements SettingsScope {
 			tools: JSON.stringify(tools.map(tool => [tool.name, tool.description, tool.parameters])),
 			systemPrompt: Bun.hash(JSON.stringify(systemPrompt)),
 			retention,
+			cacheKey,
 		};
 		this.#promptCacheShapeMemo = { model, tools, systemPrompt, shape };
 		return shape;
@@ -6092,7 +6125,8 @@ export class AgentSession implements SettingsScope {
 	getPromptCacheStatus(nowMs = Date.now(), nextTokens?: number): PromptCacheStatus | undefined {
 		const warmer = this.#cacheWarmer;
 		if (!warmer) return undefined;
-		const confirmed = this.#promptCacheArmSessionId === this.sessionId ? warmer.confirmedEntry : undefined;
+		const confirmed =
+			this.#promptCacheArmSessionId === this.sessionManager.getSessionId() ? warmer.confirmedEntry : undefined;
 		const change = confirmed?.change;
 		// A replaced transcript (rewind, branch switch, reload) no longer extends the
 		// armed request; the branch now on screen says what its own replies cached.
@@ -6128,12 +6162,16 @@ export class AgentSession implements SettingsScope {
 		);
 		if (!model) return undefined;
 		const retention = cfgProvidersCacheRetention.get(this.settings);
+		const isOAuth = model.api === "anthropic-messages" && this.#modelRegistry.isUsingOAuth(model);
 		const requestedTier = resolvePromptCacheTier(
 			model,
 			{ cacheRetention: retention === "auto" ? undefined : retention },
-			model.api === "anthropic-messages" && this.#modelRegistry.isUsingOAuth(model),
+			isOAuth,
 		);
-		const tier = observedPromptCacheTier(reply.usage) ?? requestedTier;
+		// A reply that used the cache wrote some tier even when the next request asks for none; a provider
+		// that reports no split (Codex) wrote the default one.
+		const tier =
+			observedPromptCacheTier(reply.usage) ?? requestedTier ?? resolvePromptCacheTier(model, undefined, isOAuth);
 		if (tier === undefined) return undefined;
 		const seconds = model.promptCache?.[tier];
 		const current = this.model;
@@ -6143,6 +6181,14 @@ export class AgentSession implements SettingsScope {
 		} else if (requestedTier !== tier) {
 			// The next request asks for another tier, or for no caching at all.
 			change = { kind: "retention" };
+		} else if (
+			sendsPromptCacheKey(model) &&
+			this.#freshProviderSessionId !== undefined &&
+			this.getPromptCacheKeyForModel(model) === undefined &&
+			reply.timestamp < this.#freshProviderSessionAt
+		) {
+			// `/fresh` rotated the provider session the reply's prompt-cache key fell back to.
+			change = { kind: "cache-key" };
 		} else if (observed.compacted) {
 			change = { kind: "compaction" };
 		} else if (observed.promptDigest !== undefined && observed.promptDigest !== this.#tools.currentPromptDigest()) {
@@ -6790,6 +6836,7 @@ export class AgentSession implements SettingsScope {
 		const closedProviderSessions = this.#providerSessionState.size;
 		this.#closeAllProviderSessions("fresh session");
 		this.#freshProviderSessionId = Bun.randomUUIDv7();
+		this.#freshProviderSessionAt = Date.now();
 		this.#syncAgentSessionId();
 		this.#memory.rekeyForCurrentSessionId();
 		this.agent.appendOnlyContext?.invalidateForModelChange();
@@ -6873,6 +6920,7 @@ export class AgentSession implements SettingsScope {
 		// context we just dropped (mirrors freshSession()).
 		this.#closeAllProviderSessions("reset context");
 		this.#freshProviderSessionId = Bun.randomUUIDv7();
+		this.#freshProviderSessionAt = Date.now();
 		this.#syncAgentSessionId();
 		this.#memory.rekeyForCurrentSessionId();
 		this.agent.appendOnlyContext?.invalidateForModelChange();
