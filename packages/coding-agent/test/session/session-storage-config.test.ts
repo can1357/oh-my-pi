@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resolveResumeTarget } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage, setDefaultSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import {
@@ -103,6 +104,35 @@ describe("resolveSessionStorage", () => {
 		expect(listed.map(session => session.path)).toEqual([sessionFile]);
 		// The file tree never saw this session.
 		expect(new FileSessionStorage().existsSync(sessionFile)).toBe(false);
+	});
+
+	it("--resume <id> finds a session the default SQL storage holds", async () => {
+		const dsnFile = await writeDsnFile("sqlite::memory:\n");
+		const settings = Settings.isolated({ "session.storage": "sql", "session.sql.dsnFile": dsnFile });
+		const storage = await resolveSessionStorage({ settings, env: {} });
+		setDefaultSessionStorage(storage);
+		const sessionDir = "/sessions/proj";
+		const manager = SessionManager.create("/cwd", sessionDir);
+		manager.appendMessage({
+			role: "assistant",
+			provider: "anthropic",
+			model: "claude-3-7-sonnet",
+			content: [{ type: "text", text: "resume me" }],
+			usage: fakeUsage(3, 2),
+			api: "anthropic-messages",
+			stopReason: "stop",
+			timestamp: Date.now(),
+		});
+		const sessionFile = manager.getSessionFile();
+		const sessionId = manager.getSessionId();
+		await manager.flush();
+		await storage.drain();
+		await manager.close();
+
+		// `omp --resume <id>` and `/resume <id>` resolve through resolveResumeTarget.
+		const target = await resolveResumeTarget(sessionId.slice(0, 8), "/cwd", sessionDir);
+		expect(target?.session.path).toBe(sessionFile);
+		expect(target?.continuation).toBeUndefined();
 	});
 
 	it("OMP_SESSION_STORAGE and OMP_SESSION_SQL_DSN_FILE override the settings", async () => {

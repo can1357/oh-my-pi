@@ -392,4 +392,17 @@ describe("collectSubSessions under session.storage: sql", () => {
 
 		expect(Object.keys(subs).sort()).toEqual(["", ".", "Scout"]);
 	});
+
+	test("applies the file rules to the table and reads the storage the options name", async () => {
+		// The default is files again: only `options.storage` can reach the table.
+		setDefaultSessionStorage(new FileSessionStorage());
+		await storage.writeText(path.join(root, "main/Alpha.jsonl"), sessionJsonl("alpha", ["a1"]));
+		await storage.writeText(path.join(root, "main/__advisor.jsonl"), sessionJsonl("adv", ["v1"]));
+
+		expect(Object.keys(await collectSubSessions(mainFile))).toEqual([]);
+		expect(Object.keys(await collectSubSessions(mainFile, { storage }))).toEqual(["Alpha"]);
+		const withAdvisors = await collectSubSessions(mainFile, { storage, includeAdvisors: true });
+		expect(Object.keys(withAdvisors).sort()).toEqual(["Alpha", "__advisor"]);
+		expect(withAdvisors.__advisor).toMatchObject({ agentId: "__advisor", leafId: "v1", aborted: false });
+	});
 });
