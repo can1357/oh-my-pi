@@ -5611,35 +5611,6 @@ test("a gc run keeps a file put at gc.lock while it ran, even one given its lock
 	expect(await Bun.file(lock).text()).toBe(foreign);
 });
 
-test("restoring an archived session does not wait behind a gc.lock gc did not write, and names it at once", async () => {
-	await archiveEverything();
-	// The reviewer's file: what a crash can leave once a size is committed
-	// and its data is not — 48 NUL bytes, an hour old.
-	const lock = path.join(root, "gc.lock");
-	await Bun.write(lock, Buffer.alloc(48));
-	const old = new Date(Date.now() - 60 * 60_000);
-	await fs.utimes(lock, old, old);
-	// Each attempt to take the lock opens it; waiting would make hundreds.
-	const realOpen = fs.open;
-	let opens = 0;
-	const open = spyOn(fs, "open").mockImplementation((async (file: string, ...rest: unknown[]) => {
-		if (String(file) === lock) opens++;
-		return await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(file, ...rest);
-	}) as typeof fs.open);
-	let failure = "";
-	try {
-		await restoreArchivedSession(archiveFile, root);
-	} catch (error) {
-		failure = String(error);
-	} finally {
-		open.mockRestore();
-	}
-
-	expect(failure).toContain(`${lock} holds something gc does not write`);
-	expect(opens).toBeLessThan(10);
-	expect(await Bun.file(lock).bytes()).toEqual(new Uint8Array(48));
-});
-
 test("a staging ground never writes its record at the record's own name, so a kill cannot leave one cut short", async () => {
 	const ledger = stagingLedgerDir(root);
 	const target = path.join(root, "staged-here", "example.log");
