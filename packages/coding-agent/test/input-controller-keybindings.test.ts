@@ -1664,6 +1664,52 @@ describe("InputController global tool-output expand (ctrl+o)", () => {
 });
 
 describe("Ctrl+S prompt stash", () => {
+	for (const [mode, handler] of [
+		["plan", "handlePlanModeCommand"],
+		["vibe", "handleVibeModeCommand"],
+		["goal", "handleGoalModeCommand"],
+		["guided-goal", "handleGuidedGoalCommand"],
+	] as const) {
+		for (const accept of [false, true]) {
+			it(`keeps a rich stash separate when /${mode} dispatch rejects ${accept ? "after" : "before"} acceptance`, async () => {
+				const { ctx, editor, customHandlers, spies } = await createContext();
+				const controller = new InputController(ctx);
+				controller.setupKeyHandlers();
+				controller.setupEditorSubmitHandler();
+				const saved: ImageContent = { type: "image", data: "c2F2ZWQ=", mimeType: "image/png" };
+				const submitted: ImageContent = { type: "image", data: "c2VudA==", mimeType: "image/png" };
+				editor.setText("saved [Image #1]");
+				editor.pendingImages = [saved];
+				editor.pendingImageLinks = ["file:///saved.png"];
+				customHandlers.get("ctrl+s")?.();
+				let dispatched = false;
+				Object.assign(ctx, {
+					[handler]: async (_text: string | undefined, input?: { onAccepted?: () => void }) => {
+						dispatched = true;
+						if (accept) input?.onAccepted?.();
+						throw new Error("mode dispatch failed");
+					},
+				});
+				editor.pendingImages = [submitted];
+				editor.pendingImageLinks = ["file:///submitted.png"];
+				const command = `/${mode} objective [Image #1]`;
+				await editor.onSubmit?.(command);
+				expect(dispatched).toBe(true);
+				expect(spies.showError).toHaveBeenCalledWith("mode dispatch failed");
+				expect(editor.getText()).toBe(accept ? "saved [Image #1]" : command);
+				expect(editor.pendingImages).toEqual(accept ? [saved] : [submitted]);
+				expect(editor.pendingImageLinks).toEqual(accept ? ["file:///saved.png"] : ["file:///submitted.png"]);
+				if (!accept) {
+					editor.clearDraft();
+					customHandlers.get("ctrl+s")?.();
+					expect(editor.getText()).toBe("saved [Image #1]");
+					expect(editor.pendingImages).toEqual([saved]);
+					expect(editor.pendingImageLinks).toEqual(["file:///saved.png"]);
+				}
+			});
+		}
+	}
+
 	for (const path of [
 		"idle Enter",
 		"streaming Enter",
