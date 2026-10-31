@@ -9,6 +9,7 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 // Pins the fix for the "raw 401 surfaced as Compaction failed:" bug.
@@ -23,9 +24,9 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 // into the UI.
 //
 // `generateHandoff` is the cheapest vehicle (one LLM call). The same
-// `createSummarizationError` helper backs all four summarizer throw
-// sites in `packages/agent/src/compaction/compaction.ts`, so verifying
-// one site is sufficient to lock the contract.
+// `createSummarizationError` helper backs every provider-error throw site
+// in `packages/agent/src/compaction/compaction.ts`, so verifying one
+// site is sufficient to lock that contract.
 
 function makeAssistantStop(content: AssistantMessage["content"]): AssistantMessage {
 	return {
@@ -69,6 +70,16 @@ function makeAssistantError(errorStatus: number | undefined, errorMessage: strin
 	};
 }
 
+function makeAssistantLength(content: AssistantMessage["content"]): AssistantMessage {
+	return {
+		...makeAssistantStop(content),
+		stopReason: "length",
+		errorStatus: 401,
+		errorId: AIError.create(AIError.Flag.AuthFailed),
+		errorMessage: "auth_unavailable",
+	};
+}
+
 function getAnthropicModel(): Model {
 	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 	if (!model) throw new Error("Expected built-in anthropic/claude-sonnet-4-5 to exist");
@@ -99,6 +110,15 @@ function makePreparation(overrides: Partial<CompactionPreparation> = {}): Compac
 		settings: { ...DEFAULT_COMPACTION_SETTINGS, remoteEnabled: false },
 		...overrides,
 	};
+}
+
+/** A length stop is local: the error carries no stale provider status, so it never reads as an auth failure. */
+function expectIncompleteSummaryError(error: unknown, prefix: string): void {
+	expect(error).toBeInstanceOf(Error);
+	const e = error as Error & { status?: number };
+	expect(e.message).toBe(`${prefix}: model output ended incomplete (stopReason: length)`);
+	expect(e.status).toBeUndefined();
+	expect(AIError.is(AIError.classify(e.message), AIError.Flag.AuthFailed)).toBe(false);
 }
 
 afterEach(() => {
@@ -138,7 +158,7 @@ describe("compaction error-status propagation", () => {
 		expect(error).toBeInstanceOf(Error);
 		const e = error as Error & { status?: number };
 		expect(e.status).toBe(403);
-		expect(e.message).toMatch(/Summarization failed|Short summary failed|Turn prefix summarization failed/);
+		expect(e.message).toMatch(/Summarization failed|Turn prefix summarization failed/);
 	});
 
 	test("missing errorStatus does not attach .status (preserves auth_unavailable regex path)", async () => {
@@ -157,5 +177,34 @@ describe("compaction error-status propagation", () => {
 		// upstream regex on `auth_unavailable` is the load-bearing detector.
 		expect(e.status).toBeUndefined();
 		expect(e.message).toContain("auth_unavailable");
+	});
+});
+
+describe("incomplete local summaries", () => {
+	test("compact rejects a full summary that hit the output limit without another call", async () => {
+		const completeImpl = vi.fn(async () => makeAssistantLength([{ type: "text", text: "The remaining work is to" }]));
+		const error = await compact(
+			makePreparation({ isSplitTurn: false, turnPrefixMessages: [] }),
+			getAnthropicModel(),
+			"key",
+			undefined,
+			undefined,
+			{ completeImpl },
+		).catch((caught: unknown) => caught);
+
+		expectIncompleteSummaryError(error, "Summarization failed");
+		expect(completeImpl).toHaveBeenCalledTimes(1);
+	});
+
+	test("compact rejects a split-turn prefix summary that hit the output limit", async () => {
+		const prefixPrompt = "MUST summarize prefix for retained suffix:";
+		const error = await compact(makePreparation(), getAnthropicModel(), "key", undefined, undefined, {
+			completeImpl: async (_model, ctx) =>
+				JSON.stringify(ctx.messages).includes(prefixPrompt)
+					? makeAssistantLength([{ type: "thinking", thinking: "Preparing the summary" }])
+					: makeAssistantStop([{ type: "text", text: "Complete history summary." }]),
+		}).catch((caught: unknown) => caught);
+
+		expectIncompleteSummaryError(error, "Turn prefix summarization failed");
 	});
 });

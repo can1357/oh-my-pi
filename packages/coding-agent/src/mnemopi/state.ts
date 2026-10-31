@@ -674,7 +674,7 @@ export class MnemopiSessionState {
 		return true;
 	}
 
-	async recallForCompaction(messages: AgentMessage[]): Promise<string | undefined> {
+	async recallForCompaction(messages: AgentMessage[], signal?: AbortSignal): Promise<string | undefined> {
 		const flat = withLoopPhase("mnemopi.recall", () => flattenAgentMessages(messages));
 		const lastUser = flat.findLast(message => message.role === "user");
 		if (!lastUser) return undefined;
@@ -682,7 +682,7 @@ export class MnemopiSessionState {
 			const query = composeRecallQuery(lastUser.content, flat, this.config.recallContextTurns);
 			return truncateRecallQuery(query, lastUser.content, this.config.recallMaxQueryChars);
 		});
-		return await this.recallForContext(truncated);
+		return await this.recallForContext(truncated, signal);
 	}
 
 	async maybeRetainOnAgentEnd(_messages: AgentMessage[]): Promise<void> {

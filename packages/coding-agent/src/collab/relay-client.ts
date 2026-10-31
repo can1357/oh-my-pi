@@ -84,6 +84,8 @@ interface PendingSend {
 	preparedEnvelope?: Uint8Array;
 	/** Next batch frame, pulled right after a write so an exhausted batch leaves the head at once. */
 	head?: CollabFrame | string;
+	/** Supersession key from {@link CollabSocket.sendLatest}; a newer send under it cancels this one while queued. */
+	key?: string;
 }
 
 export interface CollabSocketOptions {
@@ -196,12 +198,42 @@ export class CollabSocket {
 	 * second `JSON.stringify`.
 	 */
 	send(frame: CollabFrame | EncodedFrame, targetPeer = 0): void {
+		this.#sendOne(frame, targetPeer);
+	}
+
+	/**
+	 * Queue a broadcast frame that supersedes every frame still waiting under the
+	 * same `key`, for cumulative snapshots where only the newest matters — the
+	 * host's streaming `message_update` carries the whole message so far. Bounds
+	 * the queue by live keys instead of by emitted frames, so a stream that
+	 * outpaces the uplink does not hit the admission cap and end the room (#16956).
+	 *
+	 * The queue head is never superseded: it may already be sealing or waiting on
+	 * backpressure, and cancelling it on every newer frame would starve the guest
+	 * of updates for as long as the stream outpaces the drain. Survivors keep
+	 * emission order: the newest frame is appended, never moved ahead of frames
+	 * queued before it.
+	 */
+	sendLatest(key: string, frame: CollabFrame | EncodedFrame): void {
+		const head = this.#pendingSends[0];
+		this.#discardWhere(pending => pending !== head && pending.key === key);
+		this.#sendOne(frame, 0, key);
+	}
+
+	#sendOne(frame: CollabFrame | EncodedFrame, targetPeer: number, key?: string): void {
 		if (this.#closed) return;
 		try {
 			const serialized = typeof frame === "string" ? frame : JSON.stringify(frame);
 			const prepared = Promise.withResolvers<void>();
 			this.#sendChain = Promise.all([this.#sendChain, prepared.promise]).then(() => {});
-			this.#enqueueSend([serialized].values(), targetPeer, Buffer.byteLength(serialized), prepared.resolve, true);
+			this.#enqueueSend(
+				[serialized].values(),
+				targetPeer,
+				Buffer.byteLength(serialized),
+				prepared.resolve,
+				true,
+				key,
+			);
 		} catch (err) {
 			this.#failFatal(`could not serialize collab frame: ${String(err)}; rejoin to resync`);
 		}
@@ -278,6 +310,7 @@ export class CollabSocket {
 		bytes: number,
 		onPrepared?: () => void,
 		eager = false,
+		key?: string,
 	): void {
 		// The queue invariant, enforced in one place: targeted work is only ever
 		// admitted for a peer still being served. A batch queued for a peer that has
@@ -294,7 +327,7 @@ export class CollabSocket {
 			this.#failOverload();
 			return;
 		}
-		this.#pendingSends.push({ frames, targetPeer, bytes, cancelled: false, eager, onPrepared });
+		this.#pendingSends.push({ frames, targetPeer, bytes, cancelled: false, eager, onPrepared, key });
 		this.#pendingSendBytes += bytes;
 		this.#pumpSends();
 	}

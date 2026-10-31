@@ -36,7 +36,7 @@
  */
 import { buildModel } from "../build";
 import { Effort, THINKING_EFFORTS } from "../effort";
-import type { Api, Model, ModelSpec, Provider, ThinkingConfig } from "../types";
+import type { AntigravityModelWireProfile, Api, Model, ModelSpec, Provider, ThinkingConfig } from "../types";
 import { resolveModelPolicy } from "./resolve";
 import { parseRevision, parseRevisionConstraint, type RevisionTerm, revisionSatisfies } from "./revision";
 import { collapseVariantId, collapseVocabulary, stripThinkingVariantSuffix } from "./taxonomy";
@@ -758,6 +758,31 @@ export function isCursorMaxModeWireId(wireModelId: string): boolean {
 }
 
 /**
+ * Whether `wireModelId` is one tier of a reviewed `provider` family that serves
+ * different efforts from distinct sibling SKUs (`-low`/`-medium`/`-high`), so
+ * the SKU, not the effort, fixes the thinking strength. Decided from the
+ * declared family routes, not a collapsed row's routing: an account roster
+ * listing one tier collapses to a row routing every effort to it, yet that SKU
+ * still advertises its own fixed thinking. Families routing every effort to
+ * one `-thinking` SKU keep the effort's own budget or level.
+ */
+export function isReviewedTierVariantWireId(provider: string, wireModelId: string): boolean {
+	const table = reviewedCollapseTable(provider);
+	if (table === undefined) return false;
+	const id = wireModelId.trim();
+	const family =
+		table.families.find(candidate => candidate.members.includes(id)) ??
+		(table.templates === undefined ? undefined : templateFamilyFor(table.templates, id));
+	if (family === undefined) return false;
+	const tiers = new Set<string>();
+	for (const key of VARIANT_ROUTING_KEYS) {
+		const target = family.routing[key];
+		if (key !== "off" && target !== undefined) tiers.add(target);
+	}
+	return tiers.size > 1 && tiers.has(id);
+}
+
+/**
  * Recover Cursor's max-mode marker for a bundled collapsed row. The bundled
  * snapshot may contain only the logical row, but its effort routing still
  * records the wire ids, so {@link isCursorMaxModeWireId} preserves the
@@ -817,6 +842,37 @@ function reconcileCursorMaxMode<TSpec extends VariantSpecLike>(spec: TSpec, memb
 		...(lifts ? { cursorMaxMode: true } : {}),
 		...(routes === undefined ? {} : { cursorMaxModeRoutes: { ...spec.cursorMaxModeRoutes, ...routes } }),
 	};
+}
+
+/**
+ * Union the members' discovered Antigravity wire profiles, keyed by each
+ * member's own wire id, so the collapsed row keeps the request constants of
+ * every SKU it routes to (`...firstMember` alone keeps only the first tier's).
+ * Returns `undefined` when no member carries a profile.
+ */
+function antigravityWireProfilesOf<TSpec extends VariantSpecLike>(
+	memberSpecs: readonly TSpec[],
+): Record<string, AntigravityModelWireProfile> | undefined {
+	let profiles: Record<string, AntigravityModelWireProfile> | undefined;
+	for (const member of memberSpecs) {
+		if (member.antigravityWireProfiles === undefined) continue;
+		profiles = { ...profiles, ...member.antigravityWireProfiles };
+	}
+	return profiles;
+}
+
+/**
+ * Merge live members' wire profiles over an already-collapsed snapshot, which
+ * froze them (or none) when it was written. Returns `spec` by reference when no
+ * member carries a profile.
+ */
+function reconcileAntigravityWireProfiles<TSpec extends VariantSpecLike>(
+	spec: TSpec,
+	memberSpecs: readonly TSpec[],
+): TSpec {
+	const profiles = antigravityWireProfilesOf(memberSpecs);
+	if (profiles === undefined) return spec;
+	return { ...spec, antigravityWireProfiles: { ...spec.antigravityWireProfiles, ...profiles } };
 }
 
 /**
@@ -890,7 +946,10 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 			// lowest tier.
 			replacement.set(
 				family.id,
-				reconcileCursorMaxMode(reconcileDefaultMember(reconciled, family, new Set(rawPresent)), memberSpecs),
+				reconcileAntigravityWireProfiles(
+					reconcileCursorMaxMode(reconcileDefaultMember(reconciled, family, new Set(rawPresent)), memberSpecs),
+					memberSpecs,
+				),
 			);
 			continue;
 		}
@@ -937,6 +996,7 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 		// which tier needed it, so the members' own markers are kept per wire id.
 		const cursorMaxMode = memberSpecs.some(spec => spec.cursorMaxMode === true) ? true : undefined;
 		const cursorMaxModeRoutes = cursorMaxModeRoutesOf(firstMember.provider, memberSpecs);
+		const antigravityWireProfiles = antigravityWireProfilesOf(memberSpecs);
 		const collapsed: TSpec = {
 			...firstMember,
 			id: family.id,
@@ -947,6 +1007,7 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 			maxTokens: maxOrNull(memberSpecs.map(spec => spec.maxTokens)),
 			...(cursorMaxMode === undefined ? {} : { cursorMaxMode }),
 			...(cursorMaxModeRoutes === undefined ? {} : { cursorMaxModeRoutes }),
+			...(antigravityWireProfiles === undefined ? {} : { antigravityWireProfiles }),
 		};
 		if (memberSpecs.some(spec => spec.isProviderDefault === true)) {
 			collapsed.isProviderDefault = true;

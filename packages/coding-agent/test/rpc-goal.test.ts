@@ -6,13 +6,12 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import { RpcGoalController, type RpcGoalSession } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-goal";
 import {
-	isRpcSessionSettled,
 	RpcSessionSettleWatcher,
-	type RpcSettleSession,
 	watchedScheduledTurnProbe,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-session-settle";
 import type { RpcSessionState } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { isSessionSettled, type SessionSettleState } from "@oh-my-pi/pi-coding-agent/session/session-settle";
 import type { GoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
 import { removeWithRetries, withTimeout } from "@oh-my-pi/pi-utils";
 
@@ -245,6 +244,28 @@ describe("RPC goal command", () => {
 		expect(fresh.dumpTools?.map(tool => tool.name)).not.toContain("goal");
 	}, 30_000);
 
+	/** Records every prompt_result by id; `statusOf` resolves once that prompt's result has arrived. */
+	function watchPromptResults(rpc: RpcClient) {
+		const results = new Map<string, string>();
+		const waiters = new Map<string, PromiseWithResolvers<string>>();
+		const unsubscribe = rpc.onPromptResult(result => {
+			if (!result.id) return;
+			results.set(result.id, result.status);
+			waiters.get(result.id)?.resolve(result.status);
+		});
+		const statusOf = (id: string): Promise<string> => {
+			const status = results.get(id);
+			if (status !== undefined) return Promise.resolve(status);
+			let waiter = waiters.get(id);
+			if (!waiter) {
+				waiter = Promise.withResolvers<string>();
+				waiters.set(id, waiter);
+			}
+			return waiter.promise;
+		};
+		return { results, statusOf, unsubscribe };
+	}
+
 	async function branchAt(rpc: RpcClient, text: string): Promise<void> {
 		const entry = (await rpc.getBranchMessages()).find(message => message.text === text);
 		if (!entry) throw new Error(`No branch message "${text}"`);
@@ -299,10 +320,7 @@ describe("RPC goal command", () => {
 
 	test("an extension session change aborts the detached run's prompt; the command's own result is unaffected", async () => {
 		const rpc = await start({ continuation: false, script: "slow" });
-		const results = new Map<string, string>();
-		const unsubscribe = rpc.onPromptResult(result => {
-			if (result.id) results.set(result.id, result.status);
-		});
+		const { results, statusOf, unsubscribe } = watchPromptResults(rpc);
 		const started = Promise.withResolvers<void>();
 		const unsubscribeEvents = rpc.onEvent(event => {
 			if (event.type === "agent_start") started.resolve();
@@ -313,14 +331,9 @@ describe("RPC goal command", () => {
 			// The command then starts a run of its own in the new session.
 			await rpc.promptAndWait("/goaltest-new-session hello from the new session");
 			// The detached run never yields; its prompt must still be closed, as aborted.
-			await withTimeout(
-				(async () => {
-					while (!results.has(first)) await Bun.sleep(20);
-				})(),
-				10_000,
-				"The detached run's prompt was never reported",
+			expect(await withTimeout(statusOf(first), 10_000, "The detached run's prompt was never reported")).toBe(
+				"aborted",
 			);
-			expect(results.get(first)).toBe("aborted");
 			const state = await rpc.getState();
 			expect(state.isSettled).toBe(true);
 		} finally {
@@ -332,10 +345,7 @@ describe("RPC goal command", () => {
 
 	test("an extension navigation during a live run leaves that run's prompt to complete normally", async () => {
 		const rpc = await start({ continuation: false, script: "slow" });
-		const results = new Map<string, string>();
-		const unsubscribe = rpc.onPromptResult(result => {
-			if (result.id) results.set(result.id, result.status);
-		});
+		const { results, statusOf, unsubscribe } = watchPromptResults(rpc);
 		const started = Promise.withResolvers<void>();
 		const unsubscribeEvents = rpc.onEvent(event => {
 			if (event.type === "agent_start") started.resolve();
@@ -346,26 +356,18 @@ describe("RPC goal command", () => {
 			// Navigation does not stop the run, so it must not close the run's prompt.
 			await rpc.promptAndWait("/goaltest-navigate-here");
 			expect(results.has(first)).toBe(false);
-			await withTimeout(
-				(async () => {
-					while (!results.has(first)) await Bun.sleep(50);
-				})(),
-				20_000,
-				"The running prompt was never reported",
-			);
-			expect(results.get(first)).toBe("completed");
+			// The run is still live after the navigation; let its stalled turn finish.
+			await rpc.promptAndWait("/goaltest-release");
+			expect(await withTimeout(statusOf(first), 10_000, "The running prompt was never reported")).toBe("completed");
 		} finally {
 			unsubscribe();
 			unsubscribeEvents();
 		}
-	}, 40_000);
+	}, 30_000);
 
 	test("an extension reload detaches the live run and closes its prompt as aborted", async () => {
 		const rpc = await start({ continuation: false, script: "slow", persist: true });
-		const results = new Map<string, string>();
-		const unsubscribe = rpc.onPromptResult(result => {
-			if (result.id) results.set(result.id, result.status);
-		});
+		const { statusOf, unsubscribe } = watchPromptResults(rpc);
 		const started = Promise.withResolvers<void>();
 		const unsubscribeEvents = rpc.onEvent(event => {
 			if (event.type === "agent_start") started.resolve();
@@ -374,14 +376,9 @@ describe("RPC goal command", () => {
 			const first = await rpc.prompt("first, stalls");
 			await withTimeout(started.promise, 10_000, "First run never started");
 			await rpc.promptAndWait("/goaltest-reload");
-			await withTimeout(
-				(async () => {
-					while (!results.has(first)) await Bun.sleep(20);
-				})(),
-				5_000,
-				"The detached run's prompt was never reported",
+			expect(await withTimeout(statusOf(first), 5_000, "The detached run's prompt was never reported")).toBe(
+				"aborted",
 			);
-			expect(results.get(first)).toBe("aborted");
 			expect((await rpc.getState()).isSettled).toBe(true);
 		} finally {
 			unsubscribe();
@@ -783,12 +780,12 @@ describe("RpcGoalController continuation gate", () => {
 		ref.watcher = watcher;
 		await controller.beginSessionChange();
 		await controller.handle({ op: "create", objective: "held during the change" });
-		expect(isRpcSessionSettled(session as unknown as RpcSettleSession, probe)).toBe(false);
+		expect(isSessionSettled(session as unknown as SessionSettleState, probe)).toBe(false);
 		// The change switches away, so the held turn is abandoned and nothing will run.
 		transcript.id = "t2";
 		await controller.endSessionChange();
 		await watcher.check();
-		expect(isRpcSessionSettled(session as unknown as RpcSettleSession, probe)).toBe(true);
+		expect(isSessionSettled(session as unknown as SessionSettleState, probe)).toBe(true);
 		expect(frames).toEqual(["session_settled"]);
 	});
 

@@ -37,6 +37,8 @@ export interface RenderResultOptions {
 	cancelled?: boolean;
 	/** The native host shows files by path (`cx.supports("media")`). Native describe hooks only. */
 	media?: boolean;
+	/** The native host draws raw JSON values (`cx.supports("json")`). Native describe hooks only. */
+	json?: boolean;
 }
 
 /** Render options for a result, plus the tool-specific context the transcript threads through. */

@@ -1,5 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { TspKind } from "@oh-my-pi/pi-wire";
+import { Container, Text } from "@oh-my-pi/pi-tui";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { describeWorkingRow, type WorkingRowSpec } from "@oh-my-pi/pi-tui/components/loader";
 import { SelectList } from "@oh-my-pi/pi-tui/components/select-list";
 import type { DescribeContext, NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
@@ -527,6 +529,43 @@ describe("native autocomplete list", () => {
 	});
 });
 
+describe("native composer startup typeahead", () => {
+	const field = (composer: Composer) => nodes(composer.editor.describe(cx)).find(n => n.k === "editor");
+
+	it("asks Tern to keep typing from a deferred-input start until startup releases the held input", () => {
+		setNativeRendering(true);
+		const composer = new Composer({
+			terminal: new VirtualTerminal(80, 24),
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+		});
+		composer.start({ deferInput: true });
+		try {
+			expect(field(composer)?.p).toMatchObject({ typeahead: true });
+			// An editor swapped in during startup (an extension's) keeps asking.
+			composer.setEditor(new CustomEditor(getEditorTheme()));
+			expect(field(composer)?.p).toMatchObject({ typeahead: true });
+			composer.releaseHeldInput();
+			expect(field(composer)?.p).toMatchObject({ typeahead: undefined });
+		} finally {
+			composer.stop();
+		}
+	});
+
+	it("never asks after an ordinary start", () => {
+		setNativeRendering(true);
+		const composer = new Composer({
+			terminal: new VirtualTerminal(80, 24),
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+		});
+		composer.start();
+		try {
+			expect(field(composer)?.p).toMatchObject({ typeahead: undefined });
+		} finally {
+			composer.stop();
+		}
+	});
+});
+
 describe("native composer without a status strip", () => {
 	it("docks no status bar; the composer carries model, effort, context and usage", () => {
 		setNativeRendering(true);
@@ -603,5 +642,39 @@ describe("native composer without a status strip", () => {
 		editor.composerFacts = line;
 		editor.handleNativeEvent({ type: "action", key: "bar/model", act: "status.model", mods: [] });
 		expect(actions).toEqual(["status.model"]);
+	});
+});
+
+describe("native surface tail", () => {
+	it("flows deferred output after the transcript, not in the dock, and keeps its place moving in", () => {
+		setNativeRendering(true);
+		const composer = new Composer({
+			terminal: new VirtualTerminal(80, 24),
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+		});
+		composer.start();
+		try {
+			const transcript = new TranscriptContainer();
+			const answer = new Text("answer", 0, 0);
+			transcript.addChild(answer);
+			const deferred = new Container();
+			const run = new Text("$ git worktree list", 0, 0);
+			deferred.addChild(run);
+			const queued = new Container();
+			composer.setRuntimeChildren([transcript, deferred, queued], { nativeTail: [deferred] });
+
+			const live = composer.describeSurface();
+			expect(live.main.slice(-2)).toEqual([answer, run]);
+			expect(live.dock).toEqual([queued]);
+
+			// The next prompt flushes it into the transcript: same block, same place.
+			deferred.removeChild(run);
+			transcript.addChild(run);
+			const flushed = composer.describeSurface();
+			expect(flushed.main.slice(-2)).toEqual([answer, run]);
+			expect(flushed.main).toHaveLength(live.main.length);
+		} finally {
+			composer.stop();
+		}
 	});
 });

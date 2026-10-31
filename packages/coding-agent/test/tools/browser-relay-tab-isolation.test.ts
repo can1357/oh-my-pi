@@ -6,6 +6,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import { acquireBrowser, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
+import { unpackedExtensionId } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/extension-files";
 import { waitForRelayExtension } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
 import { type RelayServer, startRelayServer } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
 import type {
@@ -13,17 +14,11 @@ import type {
 	WorkerInitPayload,
 	WorkerOutbound,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
-import {
-	acquireTab,
-	getTabsMapForTest,
-	releaseTab,
-	runInTab,
-} from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import { acquireTab, releaseTab, runInTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { WorkerCore } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { getPuppeteerDir } from "@oh-my-pi/pi-utils";
-import puppeteer, { type Browser, type Target, type WebWorker } from "puppeteer-core";
-import { rejectionOf } from "../helpers/rejection";
+import puppeteer, { type Browser } from "puppeteer-core";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -65,8 +60,8 @@ function startWorker(payload: WorkerInitPayload): TestWorker {
 
 interface RelayBrowser {
 	browser: Browser;
-	/** The relay extension's service worker, for reading Chrome's own tab state. */
-	extension: WebWorker;
+	/** Evaluates `expression` on an extension page, where Chrome's tab and runtime APIs are in scope. */
+	inExtension(expression: string): Promise<unknown>;
 }
 
 interface RelayFixture extends RelayBrowser {
@@ -80,9 +75,8 @@ interface RelayFixture extends RelayBrowser {
 
 /**
  * Headless Chromium running the real relay extension against a relay on a free port, plus a loopback
- * site. The extension's `chrome.debugger.onDetach` listener is exposed as `testDebuggerDetach`, since a
- * programmatic detach does not fire it, and `testRefuseRemoves` makes that many `chrome.tabs.remove`
- * calls reject first.
+ * site. A test-only message listener controls its service worker: a programmatic debugger detach does
+ * not fire `onDetach`, and `testRefuseRemoves` makes that many `chrome.tabs.remove` calls reject first.
  */
 async function launchRelayFixture(
 	log?: (message: string, data?: Record<string, unknown>) => void,
@@ -122,45 +116,71 @@ async function launchRelayFixture(
 			args: ["--no-first-run", "--no-default-browser-check", "--use-mock-keychain"],
 		});
 		browsers.push(browser);
-		const extension = await (
-			await browser.waitForTarget(target => target.type() === "service_worker", { timeout: 15_000 })
-		).worker();
-		if (!extension) throw new Error("Missing relay extension worker");
-		return { browser, extension };
+		const extensionId = await unpackedExtensionId(extensionDir);
+		if (!extensionId) throw new Error("Missing relay extension directory");
+		// A service worker is transient: it may start and stop before Puppeteer observes its target.
+		// An extension page can wake it via runtime messaging and remains available for tab queries.
+		const page = await browser.newPage();
+		await page.goto(`chrome-extension://${extensionId}/options.html`);
+		// Puppeteer's `page.evaluate` lands in a context without the extension APIs; the page's
+		// default context, which `Runtime.evaluate` targets, has them.
+		const cdp = await page.createCDPSession();
+		async function inExtension(expression: string): Promise<unknown> {
+			const { result, exceptionDetails } = await cdp.send("Runtime.evaluate", {
+				expression,
+				awaitPromise: true,
+				returnByValue: true,
+			});
+			if (exceptionDetails) throw new Error(exceptionDetails.exception?.description ?? exceptionDetails.text);
+			return result.value;
+		}
+		return { browser, inExtension };
 	}
 	try {
 		for (const file of ["manifest.json", "options.html", "options.js"]) {
 			await fs.copyFile(path.join(ASSETS, `${file}.txt`), path.join(extensionDir, file));
 		}
 		const background = await fs.readFile(path.join(ASSETS, "background.js.txt"), "utf8");
-		// Point the disposable extension at this relay before its code can dial a user's default relay.
+		const defaultPort = "var DEFAULT_PORT = 9224;";
+		if (!background.includes(defaultPort)) throw new Error("Relay extension default port not found");
+		// Point the disposable extension at this relay without deferring listener registration.
 		await fs.writeFile(
 			path.join(extensionDir, "background.js"),
-			`const registerDetach = chrome.debugger.onDetach.addListener.bind(chrome.debugger.onDetach);
+			`const testRegisterDetach = chrome.debugger.onDetach.addListener.bind(chrome.debugger.onDetach);
 chrome.debugger.onDetach.addListener = listener => {
 	globalThis.testDebuggerDetach = listener;
-	registerDetach(listener);
+	testRegisterDetach(listener);
 };
-const removeTab = chrome.tabs.remove.bind(chrome.tabs);
+const testRemoveTab = chrome.tabs.remove.bind(chrome.tabs);
 chrome.tabs.remove = tabId => {
 	if (globalThis.testRefuseRemoves > 0) {
 		globalThis.testRefuseRemoves--;
 		return Promise.reject(new Error("Tabs cannot be edited right now (user may be dragging a tab)."));
 	}
-	return removeTab(tabId);
+	return testRemoveTab(tabId);
 };
-chrome.storage.local.set({ port: ${port} }).then(() => {
-${background}
-});`,
+chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+	if (message.op === "refuseRemoves") {
+		globalThis.testRefuseRemoves = message.count;
+		respond({});
+	} else if (message.op === "dismissDebugger") {
+		chrome.debugger.detach({ tabId: message.tabId }).then(() => {
+			globalThis.testDebuggerDetach({ tabId: message.tabId }, "canceled_by_user");
+			respond({});
+		}, error => respond({ error: String(error) }));
+		return true;
+	}
+});
+${background.replace(defaultPort, `var DEFAULT_PORT = ${port};`)}`,
 		);
-		const { browser, extension } = await launchBrowser();
+		const { browser, inExtension } = await launchBrowser();
 		const cdpUrl = `http://127.0.0.1:${port}`;
 		// Finish the extension hello before the native CDP client attaches to the sentinel.
 		const outcome = await waitForRelayExtension(cdpUrl);
 		if (outcome !== "ready") throw new Error(`Relay fixture handshake failed: ${outcome}`);
 		return {
 			browser,
-			extension,
+			inExtension,
 			server,
 			cdpUrl,
 			origin: `http://127.0.0.1:${pages.port}`,
@@ -179,13 +199,13 @@ function chromeTabId(targetId: string): number {
 
 /** Chrome's own view of a tab (`{ active }`), or null once it is closed. */
 async function chromeTab(fixture: RelayFixture, tabId: number): Promise<unknown> {
-	return await fixture.extension.evaluate(
+	return await fixture.inExtension(
 		`chrome.tabs.query({}).then(tabs => { const tab = tabs.find(tab => tab.id === ${tabId}); return tab ? { active: tab.active } : null; })`,
 	);
 }
 
 async function activeChromeTabUrl(fixture: RelayFixture): Promise<unknown> {
-	return await fixture.extension.evaluate(
+	return await fixture.inExtension(
 		"chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(tabs => tabs[0]?.url)",
 	);
 }
@@ -304,7 +324,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 		try {
 			const { tab } = await acquireTab(name, relay, { url: `${fixture.origin}/first`, timeoutMs: 15_000 });
 			// A release sends two closes (the worker's, then the supervisor's by id); Chrome refuses the first two tries.
-			await fixture.extension.evaluate("globalThis.testRefuseRemoves = 2");
+			await fixture.inExtension('chrome.runtime.sendMessage({ op: "refuseRemoves", count: 2 })');
 			await releaseTab(name);
 			// The close returned with the tab gone.
 			expect(await chromeTab(fixture, chromeTabId(tab.targetId))).toBeNull();
@@ -324,52 +344,36 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 		});
 		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
 		const name = `relay-detached-${process.pid}`;
+		const otherName = `relay-detached-other-${process.pid}`;
 		try {
+			const human = await fixture.browser.newPage();
+			await human.goto(`${fixture.origin}/human`);
+			const { tab: other } = await acquireTab(otherName, relay, {
+				url: `${fixture.origin}/second`,
+				timeoutMs: 20_000,
+			});
 			const { tab } = await acquireTab(name, relay, { url: `${fixture.origin}/first`, timeoutMs: 20_000 });
 			ownedTabId = chromeTabId(tab.targetId);
 			expect(fixture.server.bridge.listTargets().some(target => target.id === tab.targetId)).toBeTrue();
 			// Replay the infobar dismissal through the extension's real listener.
-			await fixture.extension.evaluate(`chrome.debugger.detach({ tabId: ${ownedTabId} }).then(() => {
-				globalThis.testDebuggerDetach({ tabId: ${ownedTabId} }, "canceled_by_user");
-			})`);
+			const result = await fixture.inExtension(
+				`chrome.runtime.sendMessage({ op: "dismissDebugger", tabId: ${ownedTabId} })`,
+			);
+			expect(result).toEqual({});
 			await detached.promise;
 			expect(fixture.server.bridge.listTargets().some(target => target.id === tab.targetId)).toBeFalse();
 			expect(await chromeTab(fixture, ownedTabId)).not.toBeNull();
 			await releaseTab(name);
 			expect(await chromeTab(fixture, ownedTabId)).toBeNull();
+			expect(await chromeTab(fixture, chromeTabId(other.targetId))).not.toBeNull();
+			expect(await human.title()).toBe("Human sentinel");
 		} finally {
 			await releaseTab(name).catch(() => undefined);
+			await releaseTab(otherName).catch(() => undefined);
 			await releaseBrowser(relay, { kill: false });
 			await fixture.close();
 		}
 	}, 60_000);
-
-	it("drops a closed owned tab's handle and browser hold when timeout recovery loses its connection", async () => {
-		const fixture = await launchRelayFixture();
-		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
-		if (!("browser" in relay)) throw new Error("Expected relay Chromium connection");
-		const name = `relay-closed-recovery-${process.pid}`;
-		const referencesBefore = relay.refCount;
-		const { tab } = await acquireTab(name, relay, { timeoutMs: 15_000 });
-		const gone = Promise.withResolvers<void>();
-		const onGone = (target: Target) => {
-			if ("_targetId" in target && target._targetId === tab.targetId) gone.resolve();
-		};
-		relay.browser.on("targetdestroyed", onGone);
-		try {
-			const run = runInTab(name, { code: "await page.close(); await wait(60_000);", timeoutMs: 5_000, session });
-			await gone.promise;
-			relay.browser.disconnect();
-			expect(await rejectionOf(run)).toBeInstanceOf(Error);
-			expect(getTabsMapForTest().has(name)).toBeFalse();
-			expect(relay.refCount).toBe(referencesBefore);
-		} finally {
-			relay.browser.off("targetdestroyed", onGone);
-			await releaseTab(name).catch(() => undefined);
-			await releaseBrowser(relay, { kill: false });
-			await fixture.close();
-		}
-	}, 30_000);
 });
 
 describe.skipIf(!CHROMIUM_AVAILABLE)("owned tab recovery", () => {

@@ -202,10 +202,10 @@ fn current_layout() -> CoreResult<Option<(u32, Vec<u32>)>> {
 		_ => return Err(failed(&format!("helper exited with {status}"))),
 	}
 	let bytes = std::fs::read(&output).map_err(|error| failed(&error))?;
-	let (Some(header), Some(data)) = (bytes.get(..4), bytes.get(4..)) else {
+	let Some((&header, data)) = bytes.split_first_chunk::<4>() else {
 		return Err(failed(&"helper output is truncated"));
 	};
-	let keyboard_type = u32::from_le_bytes(header.try_into().expect("four header bytes"));
+	let keyboard_type = u32::from_le_bytes(header);
 	let mut layout = vec![0u32; data.len().div_ceil(4)];
 	for (word, chunk) in layout.iter_mut().zip(data.chunks(4)) {
 		let mut bytes = [0u8; 4];
@@ -300,7 +300,7 @@ mod tests {
 		let slot = CachedKeymap::default();
 		let reads = std::cell::Cell::new(0);
 		let read = || {
-			reads.set(reads.get() + 1);
+			reads.update(|v| v + 1);
 			Ok(Some(Keymap::build(translate)))
 		};
 		let start = Instant::now();

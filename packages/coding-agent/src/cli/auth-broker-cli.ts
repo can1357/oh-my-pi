@@ -124,7 +124,7 @@ export function refreshBrokerOAuthCredential(
 	}
 	// Non-MCP rows: same per-provider path AuthStorage would take by default
 	// (the serve process registers no custom OAuth providers).
-	return refreshOAuthToken(provider as OAuthProvider, credential);
+	return refreshOAuthToken(provider as OAuthProvider, credential, signal);
 }
 
 /** The `omp auth-broker serve` vault: tokens refresh in this process through {@link refreshBrokerOAuthCredential}. */

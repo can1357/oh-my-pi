@@ -1,4 +1,5 @@
-import { gunzipSync, gzipSync } from "node:zlib";
+import { promisify } from "node:util";
+import { gunzipSync, gzip } from "node:zlib";
 
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import {
@@ -53,6 +54,7 @@ import { normalizeSystemPrompts } from "../utils";
 import { isDemotedThinking } from "../utils/block-symbols";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { MIN_COMPRESSED_BODY_BYTES } from "../utils/request-compression";
 import { normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
 import {
 	CONNECT_COMPRESSED_FLAG,
@@ -82,6 +84,9 @@ export interface DevinOptions extends StreamOptions {
 const CHAT_MESSAGE_PATH = "/exa.api_server_pb.ApiServerService/GetChatMessage";
 const DEVIN_ASSIGN_MODEL_PATH = "/exa.api_server_pb.ApiServerService/AssignModel";
 const DEVIN_AUTH_PATH = "/exa.auth_pb.AuthService/GetUserJwt";
+
+/** Off the event loop: a synchronous gzip stalls the TUI on a multi-MB transcript. */
+const gzipAsync = promisify(gzip);
 
 /**
  * Cascade forwards replayed tool-call ids to the backend serving the chat model;
@@ -267,21 +272,25 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			const replacementRequest = await options?.onPayload?.(request, model);
 			if (replacementRequest !== undefined) request = replacementRequest as typeof request;
 			const reqBytes = toBinary(GetChatMessageRequestSchema, request);
-			const gz = gzipSync(reqBytes);
+			// A small request goes out plain and without `connect-content-encoding`,
+			// so no server sees an encoding it never has to decode.
+			const compress = reqBytes.byteLength >= MIN_COMPRESSED_BODY_BYTES;
+			const chatBody = compress ? await gzipAsync(reqBytes) : reqBytes;
+			const compressedBytes = compress ? chatBody.byteLength : undefined;
 			logger.debug("devin: sending chat request", {
 				model: model.id,
 				tools: context.tools?.length ?? 0,
 				requestBytes: reqBytes.byteLength,
-				compressedBytes: gz.byteLength,
+				compressedBytes,
 			});
-			const frame = frameConnectMessage(gz, CONNECT_COMPRESSED_FLAG);
+			const frame = frameConnectMessage(chatBody, compress ? CONNECT_COMPRESSED_FLAG : 0);
 
 			const response = await fetchImpl(chatBaseUrl + CHAT_MESSAGE_PATH, {
 				method: "POST",
 				headers: {
 					"content-type": "application/connect+proto",
 					"connect-protocol-version": "1",
-					"connect-content-encoding": "gzip",
+					...(compress ? { "connect-content-encoding": "gzip" } : {}),
 					"accept-encoding": "identity",
 					"user-agent": "connect-go/1.18.1 (go1.26.3)",
 					"connect-accept-encoding": "gzip",
@@ -335,7 +344,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 								...(trailerError.detail ? { detail: trailerError.detail } : {}),
 								rawTrailer: trailerError.raw,
 								requestBytes: reqBytes.byteLength,
-								compressedBytes: gz.byteLength,
+								compressedBytes,
 								tools: context.tools?.length ?? 0,
 								messages: context.messages.length,
 								hadOutput: firstTokenTime !== undefined,
@@ -380,7 +389,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 										model: model.id,
 										historyBytes,
 										requestBytes: reqBytes.byteLength,
-										compressedBytes: gz.byteLength,
+										compressedBytes,
 									});
 								}
 							}

@@ -3,6 +3,8 @@
 //! Covers command output that is not already handled by the package-manager,
 //! test-runner, or lint filters.
 
+use std::fmt::NumBuffer;
+
 use crate::minimizer::{MinimizerCtx, MinimizerOutput, primitives};
 
 const SUPPORTED_TOOLS: &[&str] = &["next", "prettier", "prisma"];
@@ -220,7 +222,7 @@ fn filter_prettier(input: &str, exit_code: i32) -> String {
 		}
 		if errors.len() > 20 {
 			out.push_str("[…");
-			out.push_str(&(errors.len() - 20).to_string());
+			out.push_str((errors.len() - 20).format_into(&mut NumBuffer::new()));
 			out.push_str(" errors elided…]\n");
 		}
 		return out;
@@ -234,7 +236,7 @@ fn filter_prettier(input: &str, exit_code: i32) -> String {
 			return "Prettier: no formatting issues\n".to_string();
 		}
 		out.push_str("Prettier: ");
-		out.push_str(&files.len().to_string());
+		out.push_str(files.len().format_into(&mut NumBuffer::new()));
 		out.push_str(" file(s) need formatting\n");
 		push_file_list(&mut out, &files, 30);
 		return out;
@@ -242,7 +244,7 @@ fn filter_prettier(input: &str, exit_code: i32) -> String {
 
 	if saw_write || !files.is_empty() {
 		out.push_str("Prettier: ");
-		out.push_str(&files.len().to_string());
+		out.push_str(files.len().format_into(&mut NumBuffer::new()));
 		out.push_str(" file(s) written\n");
 		push_file_list(&mut out, &files, 30);
 		return out;
@@ -399,7 +401,7 @@ fn push_file_list(out: &mut String, files: &[String], limit: usize) {
 	}
 	if files.len() > limit {
 		out.push_str("[…");
-		out.push_str(&(files.len() - limit).to_string());
+		out.push_str((files.len() - limit).format_into(&mut NumBuffer::new()));
 		out.push_str(" files elided…]\n");
 	}
 }

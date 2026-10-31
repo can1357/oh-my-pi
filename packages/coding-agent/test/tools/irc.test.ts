@@ -693,6 +693,15 @@ describe("IRC", () => {
 				["0-B", "d-2"],
 			]);
 		});
+
+		it("does not relay a turn woken only by a progress note back to its sender", async () => {
+			const sender = makeFakeSession();
+			registry.register({ id: "0-C", displayName: "task", kind: "sub", status: "idle", session: sender.session });
+			const peer = registerIdleSubagent("0-A");
+			peer.wake([incoming("p-1", "0-C", { progress: true })]);
+			await peer.settled();
+			expect(sender.delivered).toEqual([]);
+		});
 	});
 
 	describe("AgentSession.deliverIrcMessage", () => {
