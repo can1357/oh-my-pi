@@ -91,6 +91,7 @@ function createHarness(): Harness {
 	const messages: AgentMessage[] = [];
 	const sessionMock = {
 		isStreaming: false,
+		getAgentId: () => undefined,
 		messages,
 		extensionRunner: fakeRunner,
 		/**

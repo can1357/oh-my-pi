@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
-import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import {
+	AgentLifecycleManager,
+	type PersistedSubagentReviverFactory,
+} from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -855,6 +858,73 @@ describe("AgentLifecycleManager", () => {
 		expect(registry.get("Refused-Sub")).toBe(killed);
 		expect(killed.status).toBe("aborted");
 		expect(await Bun.file(`${workerSessionFile}.tombstone`).exists()).toBe(true);
+	});
+
+	it("ensureLive reopens a killed or aborted agent through a call-scoped reviver when no global factory is set", async () => {
+		using tempDir = TempDir.createSync("@omp-lifecycle-reopen-scoped-");
+		// ACP installs no global factory; its sessions pass their own reviver per call.
+		const killedFile = path.join(tempDir.path(), "Scoped-Killed.jsonl");
+		const abortedFile = path.join(tempDir.path(), "Scoped-Aborted.jsonl");
+		await Bun.write(killedFile, "");
+		await Bun.write(abortedFile, "");
+		const killed = registry.register({
+			id: "Scoped-Killed",
+			displayName: "task",
+			kind: "sub",
+			parentId: MAIN_AGENT_ID,
+			session: makeSessionStub().session,
+			sessionFile: killedFile,
+			status: "running",
+		});
+		expect(await lifecycle.release("Scoped-Killed", killed, { tombstone: true })).toBe(true);
+		// An aborted row with no kill marker, as a persisted scan or a hard-aborted run leaves it.
+		const aborted = registry.register({
+			id: "Scoped-Aborted",
+			displayName: "task",
+			kind: "sub",
+			parentId: MAIN_AGENT_ID,
+			session: null,
+			sessionFile: abortedFile,
+			status: "aborted",
+		});
+
+		const factoryCalls: string[] = [];
+		const revived = new Map<string, AgentSession>();
+		const reviverFactory: PersistedSubagentReviverFactory = async ref => {
+			factoryCalls.push(ref.id);
+			return async () => {
+				const session = makeSessionStub().session;
+				revived.set(ref.id, session);
+				return session;
+			};
+		};
+
+		for (const [id, terminal] of [
+			["Scoped-Killed", killed],
+			["Scoped-Aborted", aborted],
+		] as const) {
+			const session = await lifecycle.ensureLive(id, { reviverFactory, idleTtlMs: 0 });
+			expect(session).toBe(revived.get(id)!);
+			const live = registry.get(id);
+			expect(live).not.toBe(terminal);
+			expect(live).toMatchObject({ status: "idle", session });
+		}
+		// The reopen probe and the cold revive both used the call-scoped reviver.
+		expect(factoryCalls).toEqual(["Scoped-Killed", "Scoped-Killed", "Scoped-Aborted", "Scoped-Aborted"]);
+		expect(await Bun.file(`${killedFile}.tombstone`).exists()).toBe(false);
+
+		// The call-scoped reviver is never kept on the manager.
+		const otherFile = path.join(tempDir.path(), "Scoped-Other.jsonl");
+		await Bun.write(otherFile, "");
+		registry.register({
+			id: "Scoped-Other",
+			displayName: "task",
+			kind: "sub",
+			session: null,
+			sessionFile: otherFile,
+			status: "aborted",
+		});
+		await expect(lifecycle.ensureLive("Scoped-Other")).rejects.toThrow(/cannot be revived.*no reviver registered/);
 	});
 
 	it("publishes an aborted status only after the session is detached", async () => {
