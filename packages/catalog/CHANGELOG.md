@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed an Antigravity version lookup that a streaming call's replay budget (`StreamOptions.replayBudgetMs`) refused counting as a failed lookup and holding back every caller's version lookups for ten minutes
+
+## [18.14.2] - 2026-10-31
+
 ### Breaking Changes
 
 - Removed `thinkingLoopGuard` from compat records; `thinking-loop-guard` is now a catalog axis that applies on every host, with `"semantic"` for Gemini, DeepSeek, and Grok and `"off"` for Claude
@@ -9,7 +15,6 @@
 ### Fixed
 
 - Fixed GitHub Copilot Claude 5.x base models (`claude-opus-5`, `claude-opus-5.5`, `claude-sonnet-5`, `claude-sonnet-5.5`) reporting the 1M window of their `-1m` variants once the model list was read from cache; discovered limits now survive cached reads instead of reverting to bundled values ([#17481](https://github.com/can1357/oh-my-pi/issues/17481))
-- Fixed an Antigravity version lookup that a streaming call's replay budget (`StreamOptions.replayBudgetMs`) refused counting as a failed lookup and holding back every caller's version lookups for ten minutes
 
 ## [18.14.1] - 2026-10-31
 

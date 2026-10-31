@@ -4,7 +4,14 @@
 
 ### Added
 
+- Recorded a failed request's server retry wait in a new `error_retry_after_ms` column, read from `errorRetryAfterMs`, and showed it beside the error in the errors and requests views and the span drawer; `error_message` keeps the raw text, so grouping by error text is unchanged
+
+## [18.14.2] - 2026-10-31
+
+### Added
+
 - Added `setStatsCloseHandler`: while a host sets one, the dashboard shows a Close button in its top bar and closes on Esc or Ctrl+C (with no text selected), for hosts that show it in place of their terminal
+
 ### Fixed
 
 - Fixed tool error rates counting skipped tool calls that were explicitly marked as not executed ([#17463](https://github.com/can1357/oh-my-pi/pull/17463) by [@Xytronix](https://github.com/Xytronix)).

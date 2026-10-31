@@ -743,6 +743,37 @@ describe("a number's role is decided by a rule, not a list", () => {
 		},
 	);
 
+	// A status comes first: a number a status introducer names is a status,
+	// whatever word follows it, in every script the unit rule reaches.
+	// Glued only in the scripts that write no space between words; a Latin
+	// word glued to the number (`HTTP 503ms`) is no status line the reader knows.
+	const STATUS_INTRODUCERS = ["HTTP", "HTTP/1.1", "status", "status code:", "error:"];
+	it.each(UNITS.map((unit, index) => [unit, STATUS_NUMBERS[index % STATUS_NUMBERS.length]] as const))(
+		"keeps the status before %s after %d when a status introducer names it",
+		(unit, number) => {
+			const tails = /^[\x20-\x7e]+$/.test(unit) ? [` ${unit}`] : [` ${unit}`, unit];
+			for (const introducer of STATUS_INTRODUCERS) {
+				for (const tail of tails) {
+					const text = `read ECONNRESET; ${introducer} ${number}${tail}`;
+					expect({ text, connection: bareFlags(text).connection }).toEqual({ text, connection: false });
+				}
+			}
+		},
+	);
+
+	it.each([
+		// Words after a status that a unit reading once swallowed.
+		["read ECONNRESET; HTTP 401 时请重新登录", 401],
+		["read ECONNRESET; HTTP 503 時は再試行してください", 503],
+		["read ECONNRESET; HTTP 401 PS: credentials rejected", 401],
+		["read ECONNRESET; HTTP 401 인증초기화 실패", 401],
+		["read ECONNRESET; HTTP 403 ms-graph denied", 403],
+		["read ECONNRESET; status: 429 分钟后再试", 429],
+	] as [string, number][])("keeps the status in %s", (text, status) => {
+		expect(AIError.status(new Error(text))).toBe(status);
+		expect(bareFlags(text).connection).toBe(false);
+	});
+
 	it.each([
 		// An SI symbol plus `s` that is an everyday word is not taken for a unit.
 		["HTTP 503 as expected", 503],
@@ -792,6 +823,39 @@ describe("a number's role is decided by a rule, not a list", () => {
 		"terminated; killed by SIGSEGV",
 	])("reads a reason after terminated as a reason: %s", text => {
 		expect(bareFlags(text).connection).toBe(false);
+	});
+
+	// The key states a reason when any word of it does, in any separator style
+	// and position, and whatever its value.
+	const CAUSE_WORDS = ["reason", "cause", "signal", "policy", "termination"];
+	const COMPOUND_KEYS = CAUSE_WORDS.flatMap(word => {
+		const cap = word[0]!.toUpperCase() + word.slice(1);
+		return [
+			`${word}_code`,
+			`${word}-code`,
+			`${word}.code`,
+			`${word}Code`,
+			`${cap}Code`,
+			`${word.toUpperCase()}_CODE`,
+			`stop_${word}`,
+			`stop${cap}`,
+			`process_${word}_number`,
+			`process${cap}Number`,
+		];
+	});
+	it.each([
+		...COMPOUND_KEYS,
+		"reason_code",
+		"reason.code",
+		"terminationReasonCode",
+		"cause_code",
+		"signal_number",
+		"exit_status_code",
+		"processExitSignal",
+	])("reads %s=9 after terminated as a reason", key => {
+		for (const text of [`terminated; ${key}=9`, `terminated (${key}: 9)`, `terminated; ${key}="9"`]) {
+			expect({ text, connection: bareFlags(text).connection }).toEqual({ text, connection: false });
+		}
 	});
 
 	it.each([

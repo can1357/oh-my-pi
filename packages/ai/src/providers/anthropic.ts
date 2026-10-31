@@ -88,6 +88,7 @@ import {
 	kStreamingPartialJson,
 } from "../utils/block-symbols";
 import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
+import { withErrorEventHeaders } from "../utils/error-event-headers";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import {
@@ -996,14 +997,19 @@ function createAnthropicSseStreamError(data: string, midMessage: boolean): Error
 			: data,
 		{ provider: "anthropic", kind: "output" },
 	);
+	// A relay that already committed its 200 (the omp auth gateway) states the
+	// upstream's retry wait as the error object's structured `headers`.
 	if (!midMessage || !AIError.isProviderRetryableError(rejection)) {
-		return rejection;
+		return withErrorEventHeaders(rejection, parsed?.error);
 	}
 	const fields = [errorType ? `type=${errorType}` : undefined, errorCode ? `code=${errorCode}` : undefined]
 		.filter(field => field !== undefined)
 		.join(" ");
-	return new AIError.AnthropicStreamEnvelopeError(
-		`error frame received before message_stop${fields ? ` (${fields})` : ""}: ${message ?? data}`,
+	return withErrorEventHeaders(
+		new AIError.AnthropicStreamEnvelopeError(
+			`error frame received before message_stop${fields ? ` (${fields})` : ""}: ${message ?? data}`,
+		),
+		parsed?.error,
 	);
 }
 

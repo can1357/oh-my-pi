@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The transcript and the retry notice show the server's retry wait from the structured `errorRetryAfterMs`, `retryAfterMs` and `finalRetryAfterMs` fields; an error with no structured wait shows none
+
 ## [18.13.3] - 2026-10-28
 
 ### Changed

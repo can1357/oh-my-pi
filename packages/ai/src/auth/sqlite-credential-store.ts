@@ -79,7 +79,10 @@ type CredentialBlockRow = {
 	credential_id: number;
 	provider_key: string;
 	block_scope: string;
+	/** The deadline a reader gets: the stored one, at most a week after the row's write. */
 	blocked_until_ms: number;
+	/** The deadline as stored, before that bound. */
+	stored_until_ms: number;
 	updated_at: number;
 };
 
@@ -426,6 +429,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#deleteCredentialBlocksStmt: Statement;
 	#deleteCredentialBlockStmt: Statement;
 	#deleteExpiredCredentialBlocksStmt: Statement;
+	#repairOverlongCredentialBlocksStmt: Statement;
 	/** Wall-clock time of the last expired-block sweep; throttles read-path sweeps. */
 	#lastCredentialBlockSweepMs = Number.NEGATIVE_INFINITY;
 	#acquireCredentialRefreshLeaseStmt: Statement;
@@ -515,22 +519,25 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		// `MAX_HINTED_BLOCK_MS` after the row was written. Writes are capped
 		// already (`CredentialBlocks.mark`/`upsert`); this bounds rows an older
 		// version wrote with no ceiling, so a credential it blocked for years is
-		// released a week after that write, with no migration rewriting the row.
-		// `updated_at` is the write time floored to the second, so the bound
-		// starts at the end of that second and never cuts a capped write short.
+		// released a week after that write. `updated_at` is the write time floored
+		// to the second, so the bound starts at the end of that second and never
+		// cuts a capped write short. A read that finds a stored deadline past its
+		// bound repairs the table (`#repairOverlongCredentialBlocks`), so a later
+		// write's fresh `updated_at` — a new block, or the legacy Codex mirror
+		// trigger copying a deadline between rows — cannot restart the week.
 		// Built here, not at module scope: `./blocks` imports this module.
 		const bound = (alias: string) => `(${alias}updated_at + 1) * 1000 + ${MAX_HINTED_BLOCK_MS}`;
 		const deadline = `MIN(blocked_until_ms, ${bound("")})`;
 		this.#getCredentialBlockStmt = this.#db.prepare(
-			`SELECT ${deadline} AS blocked_until_ms, updated_at FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = ? AND block_scope = ? AND ${deadline} > ?`,
+			`SELECT ${deadline} AS blocked_until_ms, blocked_until_ms AS stored_until_ms, updated_at FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = ? AND block_scope = ? AND ${deadline} > ?`,
 		);
 		this.#listCredentialBlockScopesStmt = this.#db.prepare(
-			`SELECT block_scope, ${deadline} AS blocked_until_ms FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = ? AND ${deadline} > ?`,
+			`SELECT block_scope, ${deadline} AS blocked_until_ms, blocked_until_ms AS stored_until_ms FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = ? AND ${deadline} > ?`,
 		);
 		// One statement for any number of ids: `json_each` keeps the caller's id
 		// order (`ids.key`) and the per-credential provider/scope order.
 		this.#listCredentialBlocksStmt = this.#db.prepare(
-			`SELECT b.credential_id, b.provider_key, b.block_scope, MIN(b.blocked_until_ms, ${bound("b.")}) AS blocked_until_ms, b.updated_at
+			`SELECT b.credential_id, b.provider_key, b.block_scope, MIN(b.blocked_until_ms, ${bound("b.")}) AS blocked_until_ms, b.blocked_until_ms AS stored_until_ms, b.updated_at
 			FROM json_each(?) AS ids
 			JOIN auth_credential_blocks AS b ON b.credential_id = ids.value
 			WHERE MIN(b.blocked_until_ms, ${bound("b.")}) > ?
@@ -552,6 +559,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		);
 		this.#deleteExpiredCredentialBlocksStmt = this.#db.prepare(
 			`DELETE FROM auth_credential_blocks WHERE ${deadline} <= ?`,
+		);
+		this.#repairOverlongCredentialBlocksStmt = this.#db.prepare(
+			`UPDATE auth_credential_blocks SET blocked_until_ms = ${bound("")} WHERE blocked_until_ms > ${bound("")}`,
 		);
 		this.#acquireCredentialRefreshLeaseStmt = this.#db.prepare(
 			`INSERT INTO auth_credential_refresh_leases (credential_id, owner, expires_at_ms, updated_at)
@@ -1655,16 +1665,18 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		}
 		this.#sweepExpiredCredentialBlocks();
 		const row = this.#getCredentialBlockStmt.get(credentialId, providerKey, blockScope, Date.now()) as
-			| { blocked_until_ms?: number; updated_at?: number }
+			| Pick<CredentialBlockRow, "blocked_until_ms" | "stored_until_ms" | "updated_at">
 			| undefined;
+		if (row && row.stored_until_ms > row.blocked_until_ms) this.#repairOverlongCredentialBlocksOnRead();
 		return typeof row?.blocked_until_ms === "number" ? row.blocked_until_ms : undefined;
 	}
 
 	getCredentialBlockScopes(credentialId: number, providerKey: string): Map<string, number> {
 		this.#sweepExpiredCredentialBlocks();
 		const rows = this.#listCredentialBlockScopesStmt.all(credentialId, providerKey, Date.now()) as Array<
-			Pick<CredentialBlockRow, "block_scope" | "blocked_until_ms">
+			Pick<CredentialBlockRow, "block_scope" | "blocked_until_ms" | "stored_until_ms">
 		>;
+		if (rows.some(row => row.stored_until_ms > row.blocked_until_ms)) this.#repairOverlongCredentialBlocksOnRead();
 		const hidesLegacyShared = providerKey === LEGACY_CODEX_BLOCK_PROVIDER_KEY;
 		const scopes = new Map<string, number>();
 		for (const row of rows) {
@@ -1743,8 +1755,38 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		// Stamp wall-clock time first: callers may pass a future `nowMs`, and a
 		// failed sweep must not be retried by every following read.
 		this.#lastCredentialBlockSweepMs = Date.now();
+		this.#repairOverlongCredentialBlocks();
 		this.#deleteExpiredCredentialBlocksStmt.run(nowMs);
 		this.#pruneCredentialBlockReconcileAfter(nowMs);
+	}
+
+	/**
+	 * Store every deadline later than a week after its row's write as that
+	 * bound, so it holds a fixed deadline from then on. Reads already bound each
+	 * row by its own `updated_at`, but a later write refreshes that: a new block
+	 * on the row (`MAX` keeps the far deadline), or the legacy Codex mirror
+	 * triggers copying `shared` onto the meter rows. Without this, each such
+	 * write would restart the week. Runs on every sweep, and at once when a read
+	 * finds such a row. The mirror triggers can copy a deadline back onto a row
+	 * already repaired, so it repeats until a pass changes nothing.
+	 */
+	#repairOverlongCredentialBlocks(): void {
+		const repair = this.#db.transaction(() => {
+			for (let pass = 0; pass < 4; pass++) {
+				const { changes } = this.#repairOverlongCredentialBlocksStmt.run() as { changes: number };
+				if (changes === 0) return;
+			}
+		});
+		repair.immediate();
+	}
+
+	/** {@link #repairOverlongCredentialBlocks} from a read path: a busy write lock postpones it, never fails the read. */
+	#repairOverlongCredentialBlocksOnRead(): void {
+		try {
+			this.#repairOverlongCredentialBlocks();
+		} catch (err) {
+			if (!isSqliteBusyError(err)) throw err;
+		}
 	}
 
 	#pruneCredentialBlockReconcileAfter(nowMs: number): void {
@@ -1776,6 +1818,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			LEGACY_CODEX_BLOCK_PROVIDER_KEY,
 			LEGACY_CODEX_BLOCK_SCOPE,
 		) as CredentialBlockRow[];
+		if (rows.some(row => row.stored_until_ms > row.blocked_until_ms)) this.#repairOverlongCredentialBlocksOnRead();
 		return rows.map(row => ({
 			credentialId: row.credential_id,
 			providerKey: row.provider_key,
@@ -2164,6 +2207,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#deleteCredentialBlocksStmt.finalize();
 		this.#deleteCredentialBlockStmt.finalize();
 		this.#deleteExpiredCredentialBlocksStmt.finalize();
+		this.#repairOverlongCredentialBlocksStmt.finalize();
 		this.#insertUsageHistoryStmt.finalize();
 		this.#lastUsageHistoryStmt.finalize();
 		this.#listUsageHistoryStmt.finalize();

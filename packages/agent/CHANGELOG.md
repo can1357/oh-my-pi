@@ -2,14 +2,21 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `streamProxy` now keeps every outcome field a terminal `done` / `error` frame carries (`ProxyTerminalFields`): `errorStatus`, `errorId`, `providerReplays`, `errorRetryAfterMs` and any other `AssistantMessage` field except the client's own, where before it kept only the error text, usage and content. A replay count, a status and the header retry wait therefore reach recovery through a proxy; a non-2xx proxy response's own `Retry-After` / `retry-after-ms` headers set the wait too, and the error a failed compaction step throws carries it, so the compaction retry waits for it ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- Fixed OpenAI remote compaction (`/responses/compact`) replaying backend-only `internal_chat_message_metadata_passthrough` metadata that Codex rejects as an unknown parameter ([#17590](https://github.com/can1357/oh-my-pi/pull/17590) by [@briankeefe](https://github.com/briankeefe))
+- `streamProxy` now forwards `replayBudgetMs`, so the server that runs a proxied call keeps its replays inside the caller's budget
+- A failed turn built from a thrown error keeps the error's structured retry wait as `errorRetryAfterMs`, the agent loop clears it with the other error fields when it salvages a turn, and a tool result built from a failed turn's error shows the wait to the model without writing it into any stored error field
+
+## [18.14.2] - 2026-10-31
+
 ### Added
 
 - The soft steering signal a tool sees as `toolCall.steeringSignal` now aborts with the source of the queued message (`"user"`, `"irc"`, …) as its `reason`, so a tool can yield only to the sources it should ([#17537](https://github.com/can1357/oh-my-pi/issues/17537))
 
 ### Fixed
 
-- `streamProxy` keeps a failure's header retry wait as `errorRetryAfterMs`, from the terminal `error` frame's new `errorRetryAfterMs` field or a non-2xx proxy response's own `Retry-After` / `retry-after-ms` headers; the error a failed compaction step throws carries it too, so the compaction retry waits for it ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
-- Long tool-call intents no longer block tool execution when intent tracing is enabled ([#13140](https://github.com/can1357/oh-my-pi/issues/13140)).
 - Reject incomplete local compaction, turn-prefix, handoff, and branch summaries ending with `stopReason: "length"` instead of using truncated text as complete context. Omit incomplete display-only short summaries without discarding a completed full summary ([#17499](https://github.com/can1357/oh-my-pi/pull/17499) by [@Xytronix](https://github.com/Xytronix)).
 
 ## [18.14.1] - 2026-10-31

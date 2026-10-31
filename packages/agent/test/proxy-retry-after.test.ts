@@ -8,8 +8,11 @@
  * one-shot retry whose cap is shorter than the wait.
  */
 import { afterEach, describe, expect, it } from "bun:test";
+import * as http from "node:http";
+import type { Socket } from "node:net";
 import { streamProxy } from "@oh-my-pi/pi-agent-core/proxy";
 import { type AssistantMessage, type Context, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { providerRetryWaitMs } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
@@ -177,5 +180,193 @@ describe("streamProxy — the failed attempt's header retry wait", () => {
 
 		expect(message.errorRetryAfterMs).toBeUndefined();
 		expect(providerRetryWaitMs("anthropic", message.errorMessage, message.errorRetryAfterMs)).toBe(200);
+	});
+});
+
+/**
+ * A real `node:http` proxy that accepts (`200`) with `headers`, sends the start
+ * of a stream with no terminal frame, then destroys the socket: the cut a
+ * provider reports with its accepted response's explicit wait.
+ */
+async function startCuttingProxy(headers: Record<string, string>): Promise<ProxyServer> {
+	let requests = 0;
+	const sockets = new Set<Socket>();
+	const body = [
+		{ type: "start" },
+		{ type: "text_start", contentIndex: 0 },
+		{ type: "text_delta", contentIndex: 0, delta: "partial answer" },
+	]
+		.map(frame => `data: ${JSON.stringify(frame)}\n\n`)
+		.join("");
+	const server = http.createServer((request, response) => {
+		request.resume();
+		request.on("end", () => {
+			requests++;
+			response.writeHead(200, { "content-type": "text/event-stream", ...headers });
+			response.write(body, () => request.socket.destroy());
+		});
+	});
+	server.on("connection", socket => {
+		sockets.add(socket);
+		socket.on("close", () => sockets.delete(socket));
+	});
+	const { promise: listening, resolve } = Promise.withResolvers<void>();
+	server.listen(0, "127.0.0.1", resolve);
+	await listening;
+	const address = server.address();
+	if (address === null || typeof address === "string") throw new Error("expected a TCP proxy address");
+	const proxy = {
+		url: `http://127.0.0.1:${address.port}`,
+		requests: () => requests,
+		stop: () => {
+			for (const socket of sockets) socket.destroy();
+			server.close();
+		},
+	};
+	servers.push(proxy);
+	return proxy;
+}
+
+describe("streamProxy — a stream the proxy cut after accepting it", () => {
+	it.each<[string, Record<string, string>]>([
+		["Retry-After: 9", { "retry-after": "9" }],
+		["retry-after-ms: 9000", { "retry-after-ms": "9000" }],
+	])("reads the accepted response's %s", async (_label, headers) => {
+		const proxy = await startCuttingProxy(headers);
+
+		const message = await runProxy(proxy);
+
+		expect(message.stopReason).toBe("error");
+		expect(message.errorRetryAfterMs).toBe(9000);
+		expect(proxy.requests()).toBe(1);
+	});
+
+	it("never reads an accepted response's x-ratelimit-reset as a wait", async () => {
+		const proxy = await startCuttingProxy({ "x-ratelimit-reset-ms": "9000", "x-ratelimit-reset": "9" });
+
+		const message = await runProxy(proxy);
+
+		expect(message.stopReason).toBe("error");
+		expect(message.errorRetryAfterMs).toBeUndefined();
+	});
+
+	it("leaves the wait unset when the accepted response named none", async () => {
+		const proxy = await startCuttingProxy({});
+
+		const message = await runProxy(proxy);
+
+		expect(message.stopReason).toBe("error");
+		expect(message.errorRetryAfterMs).toBeUndefined();
+	});
+});
+
+/**
+ * The rebuild must keep every outcome field the proxy's terminal frame sends,
+ * not only the ones it happens to name: `errorStatus` decides whether a cut is
+ * a status failure, `errorId` carries the provider's classification, and
+ * `providerReplays` is how recovery and a replay budget learn that a request
+ * already went out more than once.
+ */
+describe("streamProxy — every outcome field on the terminal frame", () => {
+	it("keeps a failed turn's status, classification, replay count and other outcome fields", async () => {
+		const errorId = AIError.classify(new Error("read ECONNRESET"));
+		const proxy = startProxy(() =>
+			sse([
+				{ type: "start" },
+				{
+					type: "error",
+					reason: "error",
+					errorMessage: "read ECONNRESET",
+					errorStatus: 429,
+					errorId,
+					providerReplays: 0,
+					errorClassificationMessage: "read ECONNRESET",
+					disabledFeatures: ["priority"],
+					duration: 12.5,
+					usage,
+				},
+			]),
+		);
+
+		const message = await runProxy(proxy);
+
+		expect(message.errorStatus).toBe(429);
+		expect(message.errorId).toBe(errorId);
+		expect(message.providerReplays).toBe(0);
+		expect(message.errorClassificationMessage).toBe("read ECONNRESET");
+		expect(message.disabledFeatures).toEqual(["priority"]);
+		expect(message.duration).toBe(12.5);
+		// A consumer: the upstream's 429 keeps this cut off the connection lane.
+		expect(AIError.is(AIError.classifyMessage(message), AIError.Flag.Connection)).toBe(false);
+	});
+
+	it("keeps a finished turn's replay count and other outcome fields", async () => {
+		const proxy = startProxy(() =>
+			sse([
+				{ type: "start" },
+				{
+					type: "done",
+					reason: "stop",
+					providerReplays: 2,
+					duration: 40,
+					ttft: 7,
+					usage,
+					content: [{ type: "text", text: "ok" }],
+				},
+			]),
+		);
+
+		const message = await runProxy(proxy);
+
+		expect(message.stopReason).toBe("stop");
+		expect(message.providerReplays).toBe(2);
+		expect(message.duration).toBe(40);
+		expect(message.ttft).toBe(7);
+	});
+
+	it.each<[string, Record<string, unknown>]>([
+		["a status that is a string", { errorStatus: "429" }],
+		["a status outside 100-599", { errorStatus: 42 }],
+		["a negative replay count", { providerReplays: -1 }],
+		["a fractional replay count", { providerReplays: 1.5 }],
+		["a classification that is a string", { errorId: "7" }],
+	])("drops %s", async (_label, fields) => {
+		const proxy = startProxy(() =>
+			sse([
+				{ type: "start" },
+				{ type: "error", reason: "error", errorMessage: "read ECONNRESET", usage, ...fields },
+			]),
+		);
+
+		const message = await runProxy(proxy);
+
+		for (const key of Object.keys(fields)) expect(message[key as keyof AssistantMessage]).toBeUndefined();
+	});
+
+	it("keeps the identity the client asked for, whatever the frame says", async () => {
+		const proxy = startProxy(() =>
+			sse([
+				{ type: "start" },
+				{
+					type: "error",
+					reason: "error",
+					errorMessage: "read ECONNRESET",
+					role: "user",
+					model: "another-model",
+					provider: "another-provider",
+					api: "openai-completions",
+					timestamp: 1,
+					usage,
+				},
+			]),
+		);
+
+		const message = await runProxy(proxy);
+
+		expect(message.role).toBe("assistant");
+		expect(message.model).toBe(model.id);
+		expect(message.provider).toBe(model.provider);
+		expect(message.api).toBe(model.api);
+		expect(message.timestamp).not.toBe(1);
 	});
 });

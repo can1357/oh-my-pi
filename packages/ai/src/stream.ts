@@ -2433,6 +2433,7 @@ function mapOptionsForApi<TApi extends Api>(
 				maxTokens: options?.maxTokens,
 				reasoning,
 				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
+				disableServerSideFallback: options?.disableServerSideFallback,
 				hideThinkingSummary: options?.hideThinkingSummary,
 				textVerbosity: options?.textVerbosity,
 				serviceTier: options?.serviceTier,

@@ -2,16 +2,35 @@
 
 ## [Unreleased]
 
-### Breaking Changes
-
-- Replaced `isLoopGuardedModel` with `loopGuardLevel`, which returns `"off"`, `"exact"`, or `"semantic"` from the model's `thinking-loop-guard` catalog rule
-
 ### Added
 
 - `AIError.Flag.Connection` marks a failure that died on the wire with no HTTP status and no capacity signal — a cut stream, a closed socket, a truncated chunked transfer — so callers can tell it apart from a 429, a 529 or an overload ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
 - `AssistantMessage` from `anthropic`, `openai-codex-responses` or `cursor` now reports `providerReplays`: how many times the request was sent beyond the first, counted where each request is issued — on the logical request's own counted transport on the `stream()` path — so every resend above it is included: the provider's own replays, its client's retry budget, `fetchWithRetry`, the uncompressed resend of a refused compressed body, the GitHub Copilot identity resend, and the calls `streamSimple`'s authentication retry and the empty-completion retry make again with the same request. Each call starts a new count, even when callers hand every call the same built `transportFetch`. Recovery above the provider reads it so as not to replay a request a layer below already replayed. The Vertex OAuth token request is not counted, a redirect hop and a transport whose turn is several RPCs stay one attempt, and a request made through a caller-supplied client or `fetch`, which may resend inside itself, leaves the field `undefined` rather than claiming zero ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
 - Added `longestProviderRetryHint` (`utils/retry-after`), the longest wait an error message names across every occurrence of every retry hint, for checks that can only decline a retry; it must not set a wait or a block ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
 - Added `StreamOptions.replayBudgetMs`, a wall-clock budget from the start of a streaming call for every replay it makes after a failure (backoff retries, pre-response HTTP retries, transport re-sends and reconnects, empty-response retries, thinking-loop re-samples, retries with another credential, endpoint switches, fresh GitLab Duo workflows, stored-result read-backs, corrected resends), shared by every call nested in it. The deadline starts when the caller's call starts, before any header resolution, token fetch or in-flight wait. A replay must be admitted, its wait is raced against the deadline and the caller's signal, and its own request is checked again when it is handed to the transport; a token fetch or library wrapper that runs in between cannot spend that check, and a refusal it catches refuses again. Each replay's check belongs to the send that carries it, so a newer replay cannot release or displace it. A wait that would end past the budget, the longest wait the server named included (headers, body, HTTP dates), ends the call at once, and `AssistantMessage.replayBudgetExhausted` reports that the budget stopped it. A refused call returns the failure its replay would have replaced, also when the refusal meets a token fetch or credential probe (Vertex metadata, AWS instance role or SSO refresh); a refusal inside a token or credential resolution that concurrent calls share fails only the call it belongs to
+
+### Fixed
+
+- A wire failure a runtime reports only as an errno on `err.code` (`ECONNRESET`, `EPIPE`, `ECONNABORTED`, undici's `UND_ERR_SOCKET`) while leaving the message generic is now classified as a retryable connection failure instead of going unrecognised, unless a 4xx rejection other than 408 or 429 sits anywhere in its cause chain, however deep ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- A 4xx rejection other than 408 or 429 anywhere in an error's cause chain now keeps the whole error from retrying, however deep it sits and whether a structured field or a cause's own text (a string cause, `{ errorMessage }`) states it; before, a transport phrase on an outer link could mark the error retryable when the status sat past the third link or only in a cause's text ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- A number whose role is metadata is no longer read as an HTTP status, an auth rejection, a transient status or a capacity refusal. A status comes first: a number a status introducer names (`HTTP 401`, `HTTP/1.1 503`, `status: 429`, `error: 503`) is a status whatever word follows it (`HTTP 401 时请重新登录`, `HTTP 401 PS:`), as are `status=529`, `503 Service Unavailable` and `(429)`. Otherwise a duration is any quantity followed by a unit of time: a second with any SI prefix, by name or symbol (`picoseconds`, `nano-second`, `fs`, `psec`, `nanos`), minutes through years, and Chinese, Japanese and Korean units, including any prefix glued to `秒` (`納秒`, `ミリ秒`) and the SI loanwords Korean writes before `초` (`피코초`); the value of a time-named field (`elapsed: 503`, `retry-after-ms=529`) is one too. A host is metadata with or without a port (`[::1]`, `2001:db8::503`, `127.1:401`), and so are a size or token count, a stream number, a number inside a URL, one glued into an identifier, and the value of a field whose key names neither a status nor a cause (`request_id=529`, `host=localhost`). A field whose key states a reason in any of its words (`reason_code`, `terminationReasonCode`, `signal_number`, `exit_code`) is a reason whatever its value. undici's bare `terminated` is a cut stream when followed only by metadata or undici's own cause (`terminated (Body Timeout Error)`); a reason after it keeps it off the connection lane, whatever its digits (`terminated; signal=9`, `reason_code=9`, `SIGKILL-9`, `(content policy violation)`) ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- `AssistantMessage.errorRetryAfterMs` carries the failed response's header retry wait, set from the response object by every provider that finalises its errors through `AIError.finalize` (which returns it as `retryAfterMs`). Each header set is read for its own wait (a refusing response's, then the error's own, then an accepted stream's), so a set that names none no longer hides one the next names; within a set, an explicit `retry-after-ms` or `Retry-After` outranks an `x-ratelimit-reset[-ms]` window reset, which counts only when nothing tells the client to wait. Credential blocks, usage-limit marks, one-shot retries and session retries take it over any date the message text states, and the longer of it and the text's relative waits (`providerRetryWaitMs`), so a body's 200 ms no longer hides a header's 9 s. No reader takes a header's wait from the text any more: `formatErrorMessageWithRetryAfter` and `appendRetryAfterHint` still show it for the reader, and a body that ends in `retry-after-ms=<n>` is read like any other body, at its first wait. `RotateCredentialOptions.retryAfterMs` passes the structured wait when the error is given as text ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- No credential block lasts more than seven days after it was written, whoever states the deadline: a message, a header or a usage report's reset (`MAX_HINTED_BLOCK_MS`); a `NaN` wait gets the default block. Before, any finite number was stored: a far-epoch `x-ratelimit-reset`, a 309-digit `retry-after-ms=` or a usage report's reset a century out blocked a credential for good. A block an older version or an older broker stored past that, in the local store, a broker snapshot or the legacy Codex `shared` mirror, ends a week after its write and is stored as that deadline, so a later write cannot restart the week; an older broker's row is repaired the same way ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- A failure that arrives inside a successful stream, as an in-band error event or a cut, now keeps that response's `Retry-After` or `retry-after-ms` as `errorRetryAfterMs`, so the server's wait is no longer lost when it answered 200 before failing; a window reset (`x-ratelimit-reset`) on such a response is not read as a wait. The wait also survives auth-gateway error responses (as `retry-after-ms` and `Retry-After` headers; a streamed chat route holds its status line until the upstream accepts, up to 10 s, and a failure after that carries the wait in band as the error object's `headers: { "retry-after-ms" }`, which omp's Anthropic, OpenAI Completions and OpenAI Responses clients now read), the pi-native failure frame and `streamSimple`'s credential rotation. OpenAI Completions, OpenAI Responses, Azure and Codex no longer retry a 429 whose stated wait exceeds `maxRetryDelayMs`: a 9 s `Retry-After` against a 1 ms cap made 6 requests ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- Fixed Codex conversation replay failing with an unknown `internal_chat_message_metadata_passthrough.content_token_count` parameter by omitting backend-internal response metadata from replayed input ([#17590](https://github.com/can1357/oh-my-pi/pull/17590) by [@briankeefe](https://github.com/briankeefe)).
+- The server's retry wait is no longer written into an error message (` retry-after-ms=<n>`). It travels only as `AssistantMessage.errorRetryAfterMs` (and, on an `Error` rebuilt from a failed message, as its `retry-after-ms` header), and a display renders it as the last step before a person reads it (`assistantErrorText`, `withRetryWait`, `errorText`). Several readers had mistaken the appended digits for an HTTP status: the error classifier, `isProviderRetryableError`, `isDefinitiveOAuthFailure` and the legacy pi-ai shim's `isRetryableAssistantError` read a wait of 401, 403, 429, 500, 502, 503 or 504 ms as an auth failure, a dead grant or a transient error. This follows #17396's rule that no reader takes the header's wait from the text: the copy that rule kept in the text for people now appears only where a person reads it. Messages persisted before this change keep the text they were shown with; nothing re-classifies them. `appendRetryAfterHint` and `formatErrorMessageWithRetryAfter` are removed; `errorMessageText` is the plain message
+- Fixed every `Retry-After` reader (the error message's wait, the Anthropic client's retries, the Claude usage poll) reading the header its own way with `Date.parse` or `parseFloat`; they now share `parseRetryAfter` from `@oh-my-pi/pi-utils` and differ only in their own caps and floors. A date's leading digits or a value like `30abc` is no longer read as seconds
+- Fixed a retry with another credential under `StreamOptions.replayBudgetMs` waiting out a sibling credential's short block (up to 5 s) before the budget was asked: the rotation now asks the budget for that wait and skips it when it would end past the deadline (the failed credential is still blocked), and a caller-supplied credential resolver still running at the deadline no longer holds the call
+
+## [18.14.2] - 2026-10-31
+
+### Breaking Changes
+
+- Replaced `isLoopGuardedModel` with `loopGuardLevel`, which returns `"off"`, `"exact"`, or `"semantic"` from the model's `thinking-loop-guard` catalog rule
+
+### Added
+
+- Added `disableServerSideFallback` to `FactoryDroidOptions` and `SimpleStreamOptions`: a Factory Droid request leaves out the server-side refusal fallback chain and fails, before any of its content is streamed, if another model answers it ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 
@@ -29,16 +48,6 @@
 - Fixed the `omp auth-gateway` Responses endpoint rejecting documented null values for temperature, `top_p`, output limits, reasoning, and reasoning summaries ([#17466](https://github.com/can1357/oh-my-pi/pull/17466) by [@Xytronix](https://github.com/Xytronix)).
 - Fixed provider HTTP errors printing the response body twice when the thrown error already carried it, including responses with a retry header ([#17503](https://github.com/can1357/oh-my-pi/pull/17503) by [@metaphoric-dev](https://github.com/metaphoric-dev))
 - Fixed Gemini tool calls through the `omp auth-gateway` chat-completions endpoint failing on the next turn: the gateway now returns each call's thought signature in `extra_content` and replays the one a client sends back ([#17509](https://github.com/can1357/oh-my-pi/pull/17509) by [@justdoGIT](https://github.com/justdoGIT))
-- A wire failure a runtime reports only as an errno on `err.code` (`ECONNRESET`, `EPIPE`, `ECONNABORTED`, undici's `UND_ERR_SOCKET`) while leaving the message generic is now classified as a retryable connection failure instead of going unrecognised, unless a 4xx rejection other than 408 or 429 sits anywhere in its cause chain, however deep ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
-- A 4xx rejection other than 408 or 429 anywhere in an error's cause chain now keeps the whole error from retrying, however deep it sits and whether a structured field or a cause's own text (a string cause, `{ errorMessage }`) states it; before, a transport phrase on an outer link could mark the error retryable when the status sat past the third link or only in a cause's text ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
-- A number whose role is metadata is no longer read as an HTTP status, an auth rejection, a transient status or a capacity refusal. A duration is any quantity followed by a unit of time: a second with any SI prefix, by name or symbol (`picoseconds`, `nano-second`, `fs`, `psec`, `nanos`), minutes through years, and Chinese, Japanese and Korean units, including any prefix glued to `秒` (`納秒`, `ミリ秒`) and the SI loanwords Korean writes before `초` (`피코초`); the value of a time-named field (`elapsed: 503`, `retry-after-ms=529`) is one too. A host is metadata with or without a port (`[::1]`, `2001:db8::503`, `127.1:401`), and so are a size or token count, a stream number, a number inside a URL, one glued into an identifier, and the value of a field whose key names neither a status nor a cause (`request_id=529`, `host=localhost`). A status the message states (`HTTP 503`, `status=529`, `error=503`, `503 Service Unavailable`) still is. undici's bare `terminated` is a cut stream when followed only by metadata or undici's own cause (`terminated (Body Timeout Error)`); a reason after it keeps it off the connection lane, whatever its digits (`terminated; signal=9`, `reason=policy_v2`, `SIGKILL-9`, `(content policy violation)`) ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
-- `AssistantMessage.errorRetryAfterMs` carries the failed response's header retry wait (`retry-after-ms`, `Retry-After`, `x-ratelimit-reset[-ms]`), set from the response object by every provider that finalises its errors through `AIError.finalize` (which returns it as `retryAfterMs`). Credential blocks, usage-limit marks, one-shot retries and session retries take the longer of it and the first wait the message text names (`providerRetryWaitMs`), so a body's 200 ms no longer hides a header's 9 s. No reader takes a header's wait from the text any more, and a body that ends in `retry-after-ms=<n>` is read like any other body, at its first wait. `RotateCredentialOptions.retryAfterMs` passes the structured wait when the error is given as text ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
-- No credential block lasts more than seven days from when it is written (`MAX_HINTED_BLOCK_MS`), whoever states the deadline: a message, a header or a usage report's reset; a `NaN` wait gets the default block. Before, any finite number was stored: a far-epoch `x-ratelimit-reset`, a 309-digit `retry-after-ms=` or a usage report's reset a century out blocked a credential for good ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
-- A credential that an older version blocked for longer than a week is released a week after that block was written ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
-- A failure that arrives inside a successful stream, as an in-band error event or a cut, now keeps that response's `Retry-After` or `retry-after-ms` as `errorRetryAfterMs`, so the server's wait is no longer lost when it answered 200 before failing; a window reset (`x-ratelimit-reset`) on such a response is not read as a wait. The wait also survives auth-gateway error responses (as `retry-after-ms` and `Retry-After` headers; a streamed chat route now holds its status line until the upstream accepts, up to 10 s), the pi-native failure frame and `streamSimple`'s credential rotation. OpenAI Completions, OpenAI Responses, Azure and Codex no longer retry a 429 whose stated wait exceeds `maxRetryDelayMs`: a 9 s `Retry-After` against a 1 ms cap made 6 requests ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
-- The server's retry wait is no longer written into an error message (` retry-after-ms=<n>`). It travels only as `AssistantMessage.errorRetryAfterMs` (and, on an `Error` rebuilt from a failed message, as its `retry-after-ms` header), and a display renders it as the last step before a person reads it (`assistantErrorText`, `withRetryWait`, `errorText`). Several readers had mistaken the appended digits for an HTTP status: the error classifier, `isProviderRetryableError`, `isDefinitiveOAuthFailure` and the legacy pi-ai shim's `isRetryableAssistantError` read a wait of 401, 403, 429, 500, 502, 503 or 504 ms as an auth failure, a dead grant or a transient error. This follows #17396's rule that no reader takes the header's wait from the text: the copy that rule kept in the text for people now appears only where a person reads it. Messages persisted before this change keep the text they were shown with; nothing re-classifies them. `appendRetryAfterHint` and `formatErrorMessageWithRetryAfter` are removed; `errorMessageText` is the plain message
-- Fixed every `Retry-After` reader (the error message's wait, the Anthropic client's retries, the Claude usage poll) reading the header its own way with `Date.parse` or `parseFloat`; they now share `parseRetryAfter` from `@oh-my-pi/pi-utils` and differ only in their own caps and floors. A date's leading digits or a value like `30abc` is no longer read as seconds
-- Fixed a retry with another credential under `StreamOptions.replayBudgetMs` waiting out a sibling credential's short block (up to 5 s) before the budget was asked: the rotation now asks the budget for that wait and skips it when it would end past the deadline (the failed credential is still blocked), and a caller-supplied credential resolver still running at the deadline no longer holds the call
 
 ## [18.14.1] - 2026-10-31
 
@@ -2298,63 +2307,4 @@
 - Fixed an issue where malformed tool-call JSON from local Ollama or llama.cpp models was incorrectly retried as generic 500 errors, now surfacing a clear recovery message.
 - Fixed a race condition in OAuth callback flows where abort signals triggered before the callback listener was registered were ignored.
 
-## [16.2.7] - 2026-06-30
-
-### Added
-
-- Added service tier support for Google Gemini and Vertex AI, including model-specific service tier configurations via ServiceTierByFamily.
-- Added Google Vertex AI Interactions API support for Gemini 3+ models by default, with automatic fallback to :streamGenerateContent and a useInteractionsApi: false option to force standard generation.
-- Added support for explicit Vertex bearer access tokens via GOOGLE_CLOUD_ACCESS_TOKEN or CLOUDSDK_AUTH_ACCESS_TOKEN environment variables.
-
-### Changed
-
-- Updated service tier logic to use per-provider configurations instead of global scopes.
-- Refactored priority request billing and accounting to better align with specific provider capabilities.
-- Updated API key resolution precedence so explicit environment variables (e.g., GEMINI_API_KEY) override stored or broker-migrated static API keys, while deliberate OAuth logins still take highest precedence.
-
-### Fixed
-
-- Improved Vertex AI reliability by automatically falling back to global endpoints on 404 errors.
-- Fixed safety setting application for Google Vertex AI models.
-- Fixed Kimi Code's Anthropic-compatible request path to keep thinking enabled and downgrade forced tool choice for Kimi K2.7 Code title generation.
-- Fixed leaked reasoning fences (such as ```thinking or <think>) across all providers by splitting them into structured thinking blocks during streaming.
-- Fixed Codex requests failing with unsupported all_turns errors on older models (gpt-5.1 and gpt-5.3) by gating the reasoning.context: "all_turns" default to gpt-5.4+ models.
-
-## [16.2.6] - 2026-06-29
-
-### Fixed
-
-- Fixed Antigravity usage reporting to correctly infer daily and weekly quota windows from unlabeled reset-only rows, preventing Cloud Code Assist payloads from collapsing these counters into the default category.
-
-## [16.2.5] - 2026-06-28
-
-### Fixed
-
-- Fixed Google and Cloud Code Assist streams that end without a finish reason (dropped connections or truncated responses) being treated as fatal; they are now classified as transient so the coding agent automatically retries.
-
-## [16.2.4] - 2026-06-28
-
-### Added
-
-- Enabled freeform tool patch support for Azure OpenAI and Codex models
-
-### Fixed
-
-- Fixed usage reporting for Antigravity and Z.AI to correctly surface and preserve distinct quota windows (daily, weekly, monthly) instead of collapsing or duplicating them
-- Fixed an issue where `/usage show` returned "No usage data available" when using a custom proxy base URL for Codex
-- Fixed OpenAI stream read errors being incorrectly classified as non-transient, enabling the coding agent to automatically retry after recoverable stream failures
-
-## [16.2.3] - 2026-06-28
-
-### Changed
-
-- Enabled automatic removal of leaked reasoning tags for all models
-- Prevented reasoning text duplication when models emit both structured and inline thinking
-- Defaulted reasoning context to all turns for all Codex requests.
-
-### Fixed
-
-- Enabled freeform tool patch support for Azure OpenAI and Codex models.
-- Fixed an issue where the `/usage show` command returned "No usage data available" when using a custom proxy base URL for Codex.
-
-Older entries are archived in [packages/ai/CHANGELOG.md@cef4a452836c](https://github.com/can1357/oh-my-pi/blob/cef4a452836c7a8d547dd14470c34c9ed2dbb5f8/packages/ai/CHANGELOG.md).
+Older entries are archived in [packages/ai/CHANGELOG.md@7dc0d0325754](https://github.com/can1357/oh-my-pi/blob/7dc0d0325754955b01c15b64b220b2cf27e670db/packages/ai/CHANGELOG.md).

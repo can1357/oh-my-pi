@@ -170,6 +170,7 @@ export async function finalizeErrorMessage(
 	const message = captured
 		? mergeCapturedBody(errorMessageText(error), captured, capturedErrorResponse?.status)
 		: errorMessageText(error);
+
 	return appendRawHttpRequestDumpFor400(message, error, rawRequestDump);
 }
 

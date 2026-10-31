@@ -39,6 +39,7 @@ import { normalizeSystemPrompts, normalizeToolCallId, resolveCacheRetention } fr
 import { createAbortSourceTracker } from "../utils/abort";
 import { isDemotedThinking, kStreamingLastParseLen } from "../utils/block-symbols";
 import { hasVisibleAssistantContent, withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
+import { withErrorEventHeaders } from "../utils/error-event-headers";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import {
@@ -1461,10 +1462,12 @@ const streamOpenAICompletionsOnce = (
 				// synthesized message is never opaque, so an unreadable body cannot burn
 				// a credential. Envelopes that are not a recognised throttle return
 				// `undefined` and keep their pre-existing handling.
-				const inBand = AIError.createInBandProviderError(chunk);
-				if (inBand) throw inBand;
-				const streamError = createOpenAICompletionsStreamError(chunk, model.provider);
-				if (streamError) throw streamError;
+				// A relay that already committed its 200 (the omp auth gateway)
+				// states the upstream's retry wait as the error object's structured
+				// `headers`; the thrown error carries them for `finalize`.
+				const inBand =
+					AIError.createInBandProviderError(chunk) ?? createOpenAICompletionsStreamError(chunk, model.provider);
+				if (inBand) throw withErrorEventHeaders(inBand, Reflect.get(chunk, "error"));
 
 				// OpenAI documents ChatCompletionChunk.id as the unique chat completion identifier,
 				// and each chunk in a streamed completion carries the same id.
