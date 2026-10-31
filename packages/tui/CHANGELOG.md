@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added goal-objective update previews with terminal-safe objective text.
+- Added goal-objective update previews with terminal-safe objective text ([#17556](https://github.com/can1357/oh-my-pi/pull/17556) by [@wtfsayo](https://github.com/wtfsayo)).
 
 ## [18.14.1] - 2026-10-31
 

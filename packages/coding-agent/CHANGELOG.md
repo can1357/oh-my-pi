@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added opt-in model edits to the active goal objective through `goal.modelObjectiveUpdates` (`disabled`, `confirm`, or `on-request`), preserving the goal's budget and progress; the default remains `disabled`.
+- Added opt-in model edits to the active goal objective through `goal.modelObjectiveUpdates` (`disabled`, `confirm`, or `on-request`), preserving the goal's budget and progress; the default remains `disabled` ([#17556](https://github.com/can1357/oh-my-pi/pull/17556) by [@wtfsayo](https://github.com/wtfsayo)).
 
 ## [18.14.1] - 2026-10-31
 
