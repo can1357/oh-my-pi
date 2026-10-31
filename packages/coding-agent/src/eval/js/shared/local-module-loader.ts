@@ -33,6 +33,7 @@ export class LocalModuleLoader {
 	#linkChain: Promise<void> = Promise.resolve();
 
 	constructor(sessionId: string) {
+		// model-request: none — makes the process global the context eval modules link against; this sends nothing, and their fetches go through the global the request hold wraps.
 		this.#context = vm.createContext(globalThis);
 		this.#sessionTag = Bun.hash(sessionId).toString(16);
 	}

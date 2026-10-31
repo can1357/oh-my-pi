@@ -5,7 +5,7 @@ import {
 	type GitLabDuoWorkflowNamespaceSelection,
 } from "@oh-my-pi/pi-catalog/discovery/gitlab-duo-workflow";
 import * as AIError from "../error";
-import { admitSend, gatedFetch } from "../request-hold";
+import { admitSend, bindSendAdmission, cutIfHeldBeforeResponse, gatedFetch } from "../request-hold";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import type {
 	Api,
@@ -2048,11 +2048,13 @@ export function runGitLabDuoWorkflowSocket(
 			error => settle("closed", error),
 		);
 	};
-	// A held scope sends no frame (see `request-hold.ts`): each send checks the hold with no await
-	// before it. Refused, the frame is never sent: the refusal ends this turn when it rejects (at once in
-	// shared work, when the scope ends while held).
+	// A held scope sends no frame (see `request-hold.ts`): each send asks the hold of the request that
+	// opened this socket, and the sender's own, with nothing between the answer and the send. Refused,
+	// the frame is never sent: the refusal ends this turn when it rejects (at once in shared work, when
+	// the scope ends while held).
+	const admit = bindSendAdmission();
 	const send = (frame: unknown): void => {
-		const refusal = admitSend(options.signal);
+		const refusal = admit(options.signal);
 		if (refusal) {
 			void refusal.catch(error => {
 				close();
@@ -2062,6 +2064,7 @@ export function runGitLabDuoWorkflowSocket(
 		}
 		ws.send(JSON.stringify(frame));
 	};
+	let releaseHoldCut = (): void => {};
 	if (replayMessages && replayMessages.length > 0) {
 		ws.onopen = null;
 		void (async () => {
@@ -2109,7 +2112,15 @@ export function runGitLabDuoWorkflowSocket(
 		const responses = Array.isArray(resumeResponse) ? resumeResponse : [resumeResponse];
 		for (const response of responses) send(response);
 	} else {
+		// A fresh socket: its upgrade was admitted when the socket was created, but the request lands
+		// only after the handshake. A hold that begins before the socket opens cuts it, like any request
+		// still waiting for its response (see `request-hold.ts`).
+		releaseHoldCut = cutIfHeldBeforeResponse(reason => {
+			close();
+			settle("closed", reason);
+		});
 		ws.onopen = () => {
+			releaseHoldCut();
 			traceGitLabDuoWorkflow("websocket.open", {
 				workflowId: startPayload.workflowID,
 				workflowDefinition: startPayload.workflowDefinition,
@@ -2124,6 +2135,7 @@ export function runGitLabDuoWorkflowSocket(
 	}
 	resetIdleTimer();
 	return promise.finally(() => {
+		releaseHoldCut();
 		clearIdleTimer();
 		options.signal?.removeEventListener("abort", abort);
 	});

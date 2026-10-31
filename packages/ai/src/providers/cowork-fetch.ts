@@ -4,7 +4,7 @@ import * as stream from "node:stream";
 import * as tls from "node:tls";
 import * as zlib from "node:zlib";
 import { logger } from "@oh-my-pi/pi-utils";
-import { admitSend, gatedFetch } from "../request-hold";
+import { admitSend, cutIfHeldBeforeResponse, gatedFetch } from "../request-hold";
 import type { FetchImpl } from "../types";
 
 /** `host/path` for logging; query strings can carry keys. */
@@ -198,8 +198,10 @@ async function sendCoworkRequest(
 	const tlsOptions = resolveTlsOptions(url, init.tls);
 	const headers = buildOrderedHeaders(url, sourceHeaders, body);
 	const result = Promise.withResolvers<Response>();
+	let releaseHoldCut = (): void => {};
 	const release = (): void => {
 		signal?.removeEventListener("abort", abort);
+		releaseHoldCut();
 	};
 	const abort = (): void => {
 		const reason = signal?.reason;
@@ -215,6 +217,9 @@ async function sendCoworkRequest(
 	const refusal = admitSend(signal);
 	if (refusal) await refusal;
 	signal?.addEventListener("abort", abort, { once: true });
+	// The request's bytes go out only after the TLS handshake: a hold that begins before the response
+	// arrives cuts the request, like any request still waiting for its response (see `request-hold.ts`).
+	releaseHoldCut = cutIfHeldBeforeResponse(reason => request?.destroy(reason));
 	// model-request: transport stream — the Anthropic stream's Cowork-profiled HTTPS request.
 	const request = https.request(
 		{
@@ -228,6 +233,7 @@ async function sendCoworkRequest(
 			...tlsOptions,
 		},
 		message => {
+			releaseHoldCut();
 			message.once("close", release);
 			const status = message.statusCode ?? 0;
 			if (status >= 400) {

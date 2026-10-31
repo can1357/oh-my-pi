@@ -18,6 +18,11 @@ export class SharedFlight<T> {
 	#done = false;
 	/** Settles, never rejecting, once the work has settled. */
 	readonly settled: Promise<void>;
+	/**
+	 * Settles, never rejecting, with the work's failure once it fails, or `undefined` once it succeeds.
+	 * A caller that stopped waiting can still learn what the work found (a provider's answer, say).
+	 */
+	readonly failure: Promise<unknown>;
 
 	private constructor(work: (signal: AbortSignal) => Promise<T>) {
 		// The work starts on the next microtask, once the caller that started the flight has joined it: a
@@ -30,6 +35,10 @@ export class SharedFlight<T> {
 			this.#done = true;
 		};
 		this.settled = this.#promise.then(done, done);
+		this.failure = this.#promise.then(
+			() => undefined,
+			(error: unknown) => error ?? new Error("shared work failed"),
+		);
 	}
 
 	/**

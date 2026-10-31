@@ -1,5 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
-import { SharedStartHeldError } from "@oh-my-pi/pi-utils/request-hold-scope";
+import { isRequestRefusal } from "@oh-my-pi/pi-utils/request-hold-scope";
 import * as AIError from "../error";
 import { getOAuthApiKey, getOAuthProvider } from "../registry/oauth";
 import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
@@ -83,6 +83,30 @@ export interface CredentialSelectorDeps {
 	usage: UsageService;
 	refresher: OAuthRefresher;
 	strategies: RankingStrategyResolver;
+}
+
+/** A cancellation, which is no answer from a provider: an error named `AbortError` that carries no HTTP status. */
+function isCancellation(error: unknown): boolean {
+	return error instanceof Error && error.name === "AbortError" && AIError.status(error) === undefined;
+}
+
+/**
+ * Whether a refresh failed for this caller because it stopped waiting (the hold refused a held caller,
+ * or the caller's signal aborted and the failure is that abort), rather than with an answer from the
+ * provider. The error decides, not the signal alone: a 429 or a dead grant the provider gave before
+ * the caller left is still that answer, and still blocks or disables the credential. One the shared
+ * refresh gets after the caller left is applied when it lands (`#applyAnswerAfterCallerLeft`).
+ */
+function failedForCaller(error: unknown, signal: AbortSignal | undefined): boolean {
+	if (isRequestRefusal(error)) return true;
+	if (!signal?.aborted) return false;
+	for (let current = error, depth = 0; current !== undefined && depth < 8; depth++) {
+		if (current === signal.reason) return true;
+		if (!(current instanceof Error)) return false;
+		if (isCancellation(current)) return true;
+		current = current.cause;
+	}
+	return false;
 }
 
 /** Picks which stored credential serves a request: ordering, usage ranking, OAuth refresh ladder. */
@@ -854,7 +878,8 @@ export class CredentialSelector {
 				} catch (error) {
 					// The caller leaving, or a held caller refused the shared refresh, says nothing about the
 					// credential, so it is neither blocked nor disabled for every other session.
-					if (options?.signal?.aborted || error instanceof SharedStartHeldError) {
+					if (failedForCaller(error, options?.signal)) {
+						this.#applyAnswerAfterCallerLeft(provider, providerKey, credentialId, candidate.selection, error);
 						preflightFailures.add(candidate);
 						return;
 					}
@@ -1197,7 +1222,10 @@ export class CredentialSelector {
 		} catch (error) {
 			// The caller leaving, or a held caller refused the shared refresh, says nothing about the
 			// credential, so it is neither blocked nor disabled for every other session.
-			if (options?.signal?.aborted || error instanceof SharedStartHeldError) return undefined;
+			if (failedForCaller(error, options?.signal)) {
+				this.#applyAnswerAfterCallerLeft(provider, providerKey, credentialId, selection, error);
+				return undefined;
+			}
 			const errorMsg = String(error);
 			// Only remove credentials for definitive auth failures
 			// Keep credentials for transient errors (network, 5xx) and block temporarily
@@ -1240,5 +1268,46 @@ export class CredentialSelector {
 		}
 
 		return undefined;
+	}
+
+	/**
+	 * A caller that left a shared refresh says nothing about the credential, but the refresh goes on
+	 * without it, and the answer it gets from the provider still counts: a rate limit blocks the
+	 * credential, a dead grant disables it, once that answer lands. Its own cancellation (every caller
+	 * left) or a hold refusal is no answer.
+	 */
+	#applyAnswerAfterCallerLeft(
+		provider: string,
+		providerKey: string,
+		credentialId: number | undefined,
+		selection: OAuthSelection,
+		error: unknown,
+	): void {
+		if (credentialId === undefined || !(error instanceof AIError.SharedWorkLeftError)) return;
+		const attempted = selection.credential;
+		void error.sharedFailure
+			.then(async failure => {
+				if (failure === undefined || failedForCaller(failure, undefined) || isCancellation(failure)) return;
+				const index = this.#deps.pool.entries(provider).findIndex(entry => entry.id === credentialId);
+				if (index === -1) return;
+				const errorMsg = String(failure);
+				if (AIError.isDefinitiveOAuthFailure(errorMsg)) {
+					await this.#deps.refresher.disableDefinitiveFailure(provider, credentialId, attempted, index, errorMsg);
+					return;
+				}
+				this.#deps.blocks.mark(
+					provider,
+					providerKey,
+					index,
+					Date.now() + OAUTH_REFRESH_FAILURE_BACKOFF_MS,
+					AUTH_BLOCK_SCOPE,
+				);
+			})
+			.catch((applyError: unknown) => {
+				logger.debug("OAuth refresh answer after its caller left was not recorded", {
+					provider,
+					error: String(applyError),
+				});
+			});
 	}
 }

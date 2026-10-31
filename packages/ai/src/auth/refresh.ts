@@ -921,7 +921,10 @@ export class OAuthRefresher {
 				return this.#refreshSingleFlight(provider, credential, credentialId, signal, reason, rejectedAccess);
 			}
 			if (existing) {
-				const joined = await existing.join(signal, () => new AIError.AbortError("credential refresh aborted"));
+				const joined = await existing.join(
+					signal,
+					() => new AIError.SharedWorkLeftError("credential refresh aborted", existing.failure),
+				);
 				// A refresh started for another request may adopt the very token this
 				// request was refused with; refresh again instead of returning it.
 				if (rejectedAccess === undefined || joined.access !== rejectedAccess) return joined;
@@ -962,7 +965,7 @@ export class OAuthRefresher {
 		);
 		if (flight instanceof Promise) return flight;
 		this.#oauthCredentialRefreshInFlight.set(credentialId, flight);
-		return flight.join(signal, () => new AIError.AbortError("credential refresh aborted"));
+		return flight.join(signal, () => new AIError.SharedWorkLeftError("credential refresh aborted", flight.failure));
 	}
 
 	async #refreshOAuthCredentialUnshared(
@@ -1110,7 +1113,10 @@ export class OAuthRefresher {
 			return this.refreshById(id, signal, options);
 		}
 		if (existing) {
-			const joined = await existing.join(signal, () => new AIError.AbortError("credential refresh aborted"));
+			const joined = await existing.join(
+				signal,
+				() => new AIError.SharedWorkLeftError("credential refresh aborted", existing.failure),
+			);
 			// A refresh that started earlier can land on the very token this caller's
 			// request was refused with; that is no recovery, so refresh again.
 			if (
@@ -1154,7 +1160,7 @@ export class OAuthRefresher {
 		);
 		if (flight instanceof Promise) return flight;
 		this.#oauthRefreshInFlight.set(id, flight);
-		return flight.join(signal, () => new AIError.AbortError("credential refresh aborted"));
+		return flight.join(signal, () => new AIError.SharedWorkLeftError("credential refresh aborted", flight.failure));
 	}
 
 	async #forceRefreshCredentialByIdUnshared(

@@ -219,6 +219,7 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		await import("@oh-my-pi/omp-stats/sync-worker");
 		const handler = scope.onmessage;
 		if (handler && handler !== buffer) {
+			// model-request: none — replays buffered messages to the stats worker's handler with the worker scope as `this`; sends nothing.
 			for (const event of pending) handler.call(scope, event);
 		}
 		return true;

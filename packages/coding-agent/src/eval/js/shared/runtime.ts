@@ -353,8 +353,10 @@ export class JsRuntime {
 		this.#activateGlobals("snapshot user globals");
 		const values: Record<string, unknown> = {};
 		const snapshotState = { nodes: 0, bytes: 0, seen: new Set<object>() };
+		// model-request: none — lists the global's own names to snapshot user globals; the listing sends nothing.
 		for (const key of Object.getOwnPropertyNames(globalThis)) {
 			if (this.#ownedGlobalKeys.has(key) || this.#initialGlobalKeys.has(key)) continue;
+			// model-request: none — reads a user global's descriptor to copy its value; the read sends nothing.
 			const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
 			if (!descriptor || !("value" in descriptor)) continue;
 			const copied = copyShadowValue(descriptor.value, 0, snapshotState);
@@ -397,6 +399,7 @@ export class JsRuntime {
 			localRoots: () => this.#als.getStore()?.localRoots ?? this.#localRoots,
 			emitStatus: event => this.#activeHooks("emitStatus")?.onDisplay({ type: "status", event }),
 		});
+		// model-request: none — records the global's names before the runtime installs its helpers; the listing sends nothing.
 		this.#initialGlobalKeys = new Set(Object.getOwnPropertyNames(globalThis));
 		this.#install(opts.extraGlobals);
 	}
@@ -739,6 +742,7 @@ export class JsRuntime {
 			this.#ownGlobal(key);
 		}
 
+		// model-request: none — installs the eval runtime's helpers and the caller's extra globals onto the global object; the install sends nothing.
 		Object.assign(globalThis, injected, extraGlobals ?? {});
 		// Prelude assigns console bridge + short aliases (`read`, `write`, `tool`, `print`, ...)
 		// onto globalThis. Must run after helpers are in place.

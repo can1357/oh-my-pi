@@ -30,6 +30,20 @@ export class RequestHeldError extends AbortError {
 	}
 }
 
+/**
+ * A caller stopped waiting for shared work (a credential refresh) that goes on without it.
+ * `sharedFailure` settles, never rejecting, with the work's own failure if it fails, or `undefined`:
+ * a provider's answer the work receives after the caller left is still that answer, and whoever
+ * records answers (a rate-limit block, a dead grant) can still act on it.
+ */
+export class SharedWorkLeftError extends AbortError {
+	readonly sharedFailure: Promise<unknown>;
+	constructor(message: string, sharedFailure: Promise<unknown>) {
+		super(message);
+		this.sharedFailure = sharedFailure;
+	}
+}
+
 /** A model request made in shared work: that work belongs to no caller, so nothing would end the request. */
 export class OwnerlessRequestError extends Error {
 	constructor() {

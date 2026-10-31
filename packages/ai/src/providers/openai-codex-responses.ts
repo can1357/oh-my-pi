@@ -27,7 +27,7 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import * as AIError from "../error";
 import { parseToolCallArguments, replayableToolCallArguments } from "../utils/tool-call-arguments";
 import { getEnvApiKey } from "../env-api-key";
-import { admitSend, gatedFetch } from "../request-hold";
+import { admitSend, bindSendAdmission, cutIfHeldBeforeResponse, gatedFetch } from "../request-hold";
 import type {
 	Api,
 	AssistantMessage,
@@ -3858,6 +3858,8 @@ class CodexWebSocketConnection {
 	#connectPromise?: Promise<void>;
 	#activeRequest = false;
 	#streamObserver?: (event: RawSseEvent) => void;
+	/** The hold of the request streaming on this socket, bound when it took the socket; see `#admitSend`. */
+	#requestAdmission?: (signal?: AbortSignal) => Promise<never> | undefined;
 	#heartbeatInterval: NodeJS.Timeout | undefined;
 	#removePongListener?: () => void;
 	#handshakeHeaders?: Headers;
@@ -3985,6 +3987,7 @@ class CodexWebSocketConnection {
 				timeout = undefined;
 			}
 			if (signal) signal.removeEventListener("abort", onAbort);
+			releaseHoldCut();
 		};
 		const onAbort = () => {
 			if (!settled) {
@@ -3994,6 +3997,16 @@ class CodexWebSocketConnection {
 			}
 			this.close("aborted");
 		};
+		// The upgrade lands only after the handshake: a hold that begins before the socket opens cuts it,
+		// like any request still waiting for its response (see `request-hold.ts`).
+		const releaseHoldCut = cutIfHeldBeforeResponse(reason => {
+			if (!settled) {
+				settled = true;
+				clearPending();
+				reject(reason);
+			}
+			this.close("held");
+		});
 		if (signal) {
 			if (signal.aborted) {
 				onAbort();
@@ -4113,6 +4126,7 @@ class CodexWebSocketConnection {
 			throw new CodexWebSocketTransportError(`request was aborted`, { cause: signal.reason });
 		}
 		this.#activeRequest = true;
+		this.#requestAdmission = bindSendAdmission();
 		onOwned?.();
 		this.#streamObserver = onSseEvent;
 		// Drain any non-error frames left over from a prior request before sending.
@@ -4156,10 +4170,10 @@ class CodexWebSocketConnection {
 					: undefined;
 
 				const requestPayload = JSON.stringify(request);
-				// A held scope sends no frame (see `request-hold.ts`): checked with no await before the send
-				// below, so a hold that began during this request's setup still stops it.
-				const refusal = admitSend(signal);
+				// A held scope sends no frame (see `request-hold.ts`), and is not reported as sending one.
+				const refusal = this.#admitSend(signal);
 				if (refusal) await refusal;
+				// The outbound observer runs caller code, which can begin the owner's disposal.
 				notifyCodexWebSocketOutbound(onSseEvent, request, requestPayload);
 				// Re-check liveness: the debug-session await above can outlive the socket.
 				// Preserve the abort cause: onAbort already queued a caused error, but this
@@ -4173,6 +4187,9 @@ class CodexWebSocketConnection {
 					}
 					throw new CodexWebSocketTransportError(`websocket connection is unavailable`);
 				}
+				// So the hold is asked again after every observer, with nothing between the answer and the send.
+				const lateRefusal = this.#admitSend(signal);
+				if (lateRefusal) await lateRefusal;
 				try {
 					socket.send(requestPayload);
 				} catch (error) {
@@ -4299,6 +4316,7 @@ class CodexWebSocketConnection {
 			}
 		} finally {
 			this.#activeRequest = false;
+			this.#requestAdmission = undefined;
 			this.#streamObserver = undefined;
 			this.#attachSteerIds = undefined;
 			if (signal) {
@@ -4315,20 +4333,25 @@ class CodexWebSocketConnection {
 	 * on this socket. Resolves on the server's acknowledgement.
 	 */
 	steer(previousResponseId: string, input: InputItem[]): Promise<CodexSteerAck> {
-		// Steering adds input to a response, so a held scope sends none (see `request-hold.ts`). The
-		// refusal of a held scope never resolves; it rejects when the scope ends.
-		const refusal = admitSend();
+		const event = { type: "response.steer", previous_response_id: previousResponseId, input };
+		const payload = JSON.stringify(event);
+		// Steering adds input to the response streaming on this socket, so it asks that request's hold
+		// (see `request-hold.ts`), whoever steers. The refusal of a held scope never resolves; it rejects
+		// when the scope ends. A held scope is not reported as sending a steer.
+		const refusal = this.#admitSend();
 		if (refusal) return refusal;
+		// The observer runs caller code, which can begin the owner's disposal.
+		notifyCodexWebSocketOutbound(this.#streamObserver, event, payload);
 		const socket = this.#socket;
 		if (!socket || socket.readyState !== WebSocket.OPEN) {
 			return Promise.reject(new CodexWebSocketTransportError(`websocket connection is unavailable`));
 		}
-		const event = { type: "response.steer", previous_response_id: previousResponseId, input };
-		const payload = JSON.stringify(event);
+		// So the hold is asked again after the observer, with nothing between the answer and the send.
+		const lateRefusal = this.#admitSend();
+		if (lateRefusal) return lateRefusal;
 		const { promise, resolve, reject } = Promise.withResolvers<CodexSteerAck>();
 		const waiter: CodexSteerWaiter = { previousResponseId, resolve, reject };
 		this.#steerWaiters.push(waiter);
-		notifyCodexWebSocketOutbound(this.#streamObserver, event, payload);
 		try {
 			socket.send(payload);
 		} catch (error) {
@@ -4340,6 +4363,14 @@ class CodexWebSocketConnection {
 			);
 		}
 		return promise;
+	}
+
+	/**
+	 * Admission for a frame on this socket: the hold of the request streaming on it (bound when it took
+	 * the socket), and the sender's own (see `bindSendAdmission`).
+	 */
+	#admitSend(signal?: AbortSignal): Promise<never> | undefined {
+		return this.#requestAdmission ? this.#requestAdmission(signal) : admitSend(signal);
 	}
 
 	/** True when the server failed to commit any of the accepted steering `ids`. */

@@ -383,6 +383,8 @@ describe("an OAuth refresh", () => {
 	let credentialId: number;
 	/** The status the token endpoint answers with. */
 	let tokenStatus: number;
+	/** Runs once the token endpoint's answer has been read, before the refresh acts on it. */
+	let afterTokenAnswer: () => void;
 	const tokenPosts = () => token.requests.filter(request => request.path === "/token").length;
 
 	async function storeCredential(expires: number): Promise<void> {
@@ -401,6 +403,7 @@ describe("an OAuth refresh", () => {
 
 	beforeEach(async () => {
 		tokenStatus = 200;
+		afterTokenAnswer = () => {};
 		token = site(
 			() =>
 				tokenStatus === 200
@@ -417,6 +420,7 @@ describe("an OAuth refresh", () => {
 			},
 			async refreshToken(credentials, signal) {
 				const response = await fetch(`${token.url}/token`, { method: "POST", body: credentials.refresh, signal });
+				afterTokenAnswer();
 				if (!response.ok) throw new Error(`token endpoint answered ${response.status}`);
 				const { access } = (await response.json()) as { access: string };
 				return { ...credentials, access, refresh: "next-refresh", expires: Date.now() + HOUR };
@@ -546,6 +550,57 @@ describe("an OAuth refresh", () => {
 			failed: undefined,
 			blocks: 1,
 			tokenPosts: 1,
+		});
+	});
+
+	it("that the provider rate-limited still backs the credential off when its caller left after the answer", async () => {
+		// The caller's signal aborts after the provider's 429 was read, before the refresh raises it, so
+		// the caller's own wait ends first. The answer is still the provider's: the credential is blocked.
+		tokenStatus = 429;
+		await storeCredential(Date.now() - 1_000);
+		const caller = new AbortController();
+		afterTokenAnswer = () => caller.abort();
+		const failed = await storage.keys.get(PROVIDER, "first-session", { signal: caller.signal });
+		// The caller returned at once; the refresh it left records the provider's answer as it lands.
+		for (let tick = 0; tick < 100 && storage.blocks.list([credentialId]).length === 0; tick++) await Bun.sleep(10);
+
+		expect({ failed, blocks: storage.blocks.list([credentialId]).length, tokenPosts: tokenPosts() }).toEqual({
+			failed: undefined,
+			blocks: 1,
+			tokenPosts: 1,
+		});
+	});
+
+	it("that the provider refused as a dead grant still disables the credential when its caller left after the answer", async () => {
+		// A 401 from the token endpoint is a dead grant; the caller's signal aborts after it was read.
+		tokenStatus = 401;
+		await storeCredential(Date.now() - 1_000);
+		const caller = new AbortController();
+		afterTokenAnswer = () => caller.abort();
+		const failed = await storage.keys.get(PROVIDER, "first-session", { signal: caller.signal });
+		for (let tick = 0; tick < 100 && storage.credentials.has(PROVIDER); tick++) await Bun.sleep(10);
+
+		expect({ failed, stillStored: storage.credentials.has(PROVIDER), tokenPosts: tokenPosts() }).toEqual({
+			failed: undefined,
+			stillStored: false,
+			tokenPosts: 1,
+		});
+	});
+
+	it("whose caller left before the provider answered leaves the credential unblocked (control)", async () => {
+		await storeCredential(Date.now() - 1_000);
+		peerHoldsLease();
+		const caller = new AbortController();
+		const pending = settle(storage.keys.get(PROVIDER, "first-session", { signal: caller.signal }));
+		await Bun.sleep(100);
+		caller.abort();
+		await pending;
+		// Long enough for a block recorded late, once the abandoned refresh settles, to show.
+		await Bun.sleep(150);
+
+		expect({ blocks: storage.blocks.list([credentialId]).length, tokenPosts: tokenPosts() }).toEqual({
+			blocks: 0,
+			tokenPosts: 0,
 		});
 	});
 });

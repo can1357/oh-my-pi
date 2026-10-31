@@ -117,6 +117,65 @@ export function admitSharedStart(signal?: AbortSignal): Promise<never> | undefin
 	return refuseWhileHeld(scope!, signal, cause => new SharedStartHeldError(cause));
 }
 
+/** The refusal of a network send (not a model request) made from a held scope. */
+export class NetworkSendHeldError extends Error {
+	constructor(cause: unknown) {
+		super("Network request held: its owner began disposing", { cause });
+		this.name = "AbortError";
+		markRequestRefusal(this);
+	}
+}
+
+/**
+ * Asked synchronously right before code outside the transport packages opens a connection that is
+ * not a `fetch` (an HTTP/2 session, a raw socket): the hold's backstop wraps only the global fetch,
+ * so any other transport asks itself. Returns `undefined` when the caller may connect now; it must
+ * then connect in the same turn, with nothing between the answer and the connection. A held caller
+ * gets a promise that never resolves and rejects (with a refusal, see {@link isRequestRefusal}) once
+ * `signal` or any scope around the caller ends. Shared work may connect: its requests belong to no
+ * caller (a model request made in it is refused by pi-ai's own gate).
+ *
+ * The only call-site pattern: `const refusal = admitNetworkSend(signal); if (refusal) await refusal;`
+ * immediately followed by the connection, then {@link cutIfHeldBefore} until its response begins.
+ */
+export function admitNetworkSend(signal?: AbortSignal): Promise<never> | undefined {
+	const scope = currentRequestHoldScope();
+	if (!isRequestHoldScopeHeld(scope)) return undefined;
+	return refuseWhileHeld(scope!, signal, cause => new NetworkSendHeldError(cause));
+}
+
+/**
+ * Call `cut` if the hold of the caller's scope (or of a scope around it) begins before the returned
+ * release is called. A connection admitted now sends its bytes later (after a TCP or TLS handshake, a
+ * WebSocket upgrade, a proxy tunnel); the caller registers this right after the admission and releases
+ * once the response has begun, so a request still waiting for its response when the hold begins is cut
+ * instead of landing. A hold that already began when this is called cuts on the next microtask, once
+ * the caller has finished setting the request up. Outside every scope no hold can begin later.
+ */
+export function cutIfHeldBefore(cut: () => void): () => void {
+	const scope = currentRequestHoldScope();
+	if (!scope) return () => {};
+	const holds: AbortSignal[] = [];
+	for (let current: RequestHoldScope | undefined = scope; current; current = current.parent) holds.push(current.held);
+	let released = false;
+	const release = (): void => {
+		if (released) return;
+		released = true;
+		for (const held of holds) held.removeEventListener("abort", onHold);
+	};
+	const onHold = (): void => {
+		if (released) return;
+		release();
+		cut();
+	};
+	if (holds.some(held => held.aborted)) {
+		queueMicrotask(onHold);
+		return release;
+	}
+	for (const held of holds) held.addEventListener("abort", onHold, { once: true });
+	return release;
+}
+
 /**
  * Run `fn` outside every hold scope, for work that one caller starts but every caller shares: a token
  * or credential refresh, a discovery lookup. Started inside a held caller's scope, such work would be

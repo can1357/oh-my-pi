@@ -11,13 +11,19 @@
  * one still waiting for its response when the hold begins is aborted, and a retry of it waits held.
  *
  * The guarantee lives where the library hands a request to a transport. Every transport site in
- * pi-ai and pi-agent-core asks {@link admitSend} in the same turn it sends, with no await between,
- * whatever `globalThis.fetch` is at the time: a fetch through {@link gatedFetch} (each provider's
- * requests, its retries included, and the fetch handed to an SDK client), `coworkFetch`'s
- * `node:https` request, Cursor's HTTP/2 connection and request, the proxy tunnel's connection, and
- * the Codex and GitLab Duo WebSockets' opens and frames. {@link withAuth}, {@link withOAuthAccess}
- * and the streaming driver ({@link stream}) also check before they resolve a credential, so a held
- * caller never starts a credential refresh.
+ * pi-ai and pi-agent-core asks {@link admitSend} immediately before it sends, with nothing between
+ * the answer and the send (no await, and no caller code such as an outbound observer, which could
+ * begin the owner's disposal), whatever `globalThis.fetch` is at the time: a fetch through
+ * {@link gatedFetch} (each provider's requests, its retries included, and the fetch handed to an SDK
+ * client), `coworkFetch`'s `node:https` request, Cursor's HTTP/2 connection and every frame on its
+ * run stream, the proxy tunnel's connection, and the Codex and GitLab Duo WebSockets' opens and
+ * frames. A frame on a connection already open asks the hold of the request that opened it as well
+ * as the writer's own ({@link bindSendAdmission}). A request admitted before the hold whose bytes
+ * land later (after a TLS handshake, a WebSocket upgrade, a proxy tunnel) is cut if the hold begins
+ * first ({@link cutIfHeldBeforeResponse}). {@link withAuth}, {@link withOAuthAccess} and the
+ * streaming driver ({@link stream}) also check before they resolve a credential, so a held caller
+ * never starts a credential refresh. Code outside pi-ai that opens such a connection asks
+ * `admitNetworkSend` (`@oh-my-pi/pi-utils`), as Cursor's model discovery does.
  *
  * Work one caller starts but every caller shares (a token refresh, a discovery lookup) runs as shared
  * work, `runOutsideRequestHold` (`@oh-my-pi/pi-utils`), so a held caller never holds it for the
@@ -40,6 +46,7 @@
  */
 import {
 	currentRequestHoldScope,
+	cutIfHeldBefore,
 	isRequestHoldScopeHeld,
 	type RequestHoldScope,
 	refuseWhileHeld,
@@ -86,18 +93,39 @@ function refuseHeld(scope: RequestHoldScope, signal: AbortSignal | undefined): P
 
 /**
  * Asked synchronously right before a transport sends. Returns `undefined` when the caller may send
- * now; it must then send in the same turn, with no await between. In a held scope it returns a
- * promise that never resolves and rejects once `signal` or any scope around the caller ends; in
- * shared work, a promise that rejects at once with {@link OwnerlessRequestError}.
+ * now; it must then send in the same turn, with nothing between the answer and the send: no await,
+ * and no call into code the library does not own (an observer, a hook, a callback), since that code
+ * can begin the owner's disposal. In a held scope it returns a promise that never resolves and rejects
+ * once `signal` or any scope around the caller ends; in shared work, a promise that rejects at once
+ * with {@link OwnerlessRequestError}.
  *
  * The only call-site pattern: `const refusal = admitSend(signal); if (refusal) await refusal;`
+ * immediately followed by the send.
  */
 export function admitSend(signal?: AbortSignal): Promise<never> | undefined {
-	const store = requestHoldScopes.getStore();
+	return admitIn(requestHoldScopes.getStore(), signal);
+}
+
+function admitIn(
+	store: RequestHoldScope | typeof SHARED_WORK | undefined,
+	signal: AbortSignal | undefined,
+): Promise<never> | undefined {
 	if (store === undefined) return undefined;
 	if (store === SHARED_WORK) return Promise.reject(new OwnerlessRequestError());
 	if (!isRequestHoldScopeHeld(store)) return undefined;
 	return refuseHeld(store, signal);
+}
+
+/**
+ * Admission for the later sends on a connection opened here: a frame on an open stream or socket (a
+ * tool result, a heartbeat, a steer) belongs to the request that opened it, whatever async context
+ * writes it. Bind when the connection opens; each call of the returned function answers like
+ * {@link admitSend}, refusing when either the opening scope or the writer's own is held, and must be
+ * followed by its send in the same way.
+ */
+export function bindSendAdmission(): (signal?: AbortSignal) => Promise<never> | undefined {
+	const opened = requestHoldScopes.getStore();
+	return signal => admitIn(opened, signal) ?? admitSend(signal);
 }
 
 /**
@@ -135,11 +163,27 @@ function requestSignal(input: string | URL | Request, init: RequestInit | undefi
 }
 
 /**
- * Call `send` now, with a signal that also aborts if the hold engages before its response arrives.
- * A fetch beneath that defers its own send past the hold's start then sends nothing; a response that
- * has begun is not cut, since the link is dropped once the response promise settles. The cut is no
- * refusal: a retry of the request asks the hold again and waits like any other held request, so the
- * job it belongs to stays alive, held, until its owner decides.
+ * Call `cut` with an {@link AbortError} if the hold of the caller's scope (or of a scope around it)
+ * begins before the returned release is called (`cutIfHeldBefore` in `@oh-my-pi/pi-utils`). A
+ * transport admitted by {@link admitSend} writes its bytes later than the admission (after a TCP or
+ * TLS handshake, a WebSocket upgrade, a proxy tunnel): it calls this right after the admission and
+ * releases once its response has begun, so a request still waiting for its response when the hold
+ * begins is cut instead of landing. A hold that already began when this is called (caller code ran
+ * between the admission and here, a socket factory say) cuts on the next microtask. The cut is no
+ * refusal: a retry asks the hold again and waits like any other held request, so the job it belongs
+ * to stays alive, held, until its owner decides.
+ */
+export function cutIfHeldBeforeResponse(cut: (reason: AbortError) => void): () => void {
+	return cutIfHeldBefore(() =>
+		cut(new AbortError("Provider request held: its owner began disposing before its response arrived")),
+	);
+}
+
+/**
+ * Call `send` now, with a signal that also aborts if the hold engages before its response arrives
+ * ({@link cutIfHeldBeforeResponse}). A fetch beneath that defers its own send past the hold's start
+ * then sends nothing; a response that has begun is not cut, since the link is dropped once the
+ * response promise settles.
  */
 function sendUntilHeld(
 	send: FetchImpl,
@@ -147,18 +191,10 @@ function sendUntilHeld(
 	init: RequestInit | undefined,
 	signal: AbortSignal | undefined,
 ): Promise<Response> {
-	const scope = currentRequestHoldScope();
 	// Outside every scope no hold can engage later: the scope is fixed by the caller's async context.
-	if (!scope) return send(input, init);
+	if (!currentRequestHoldScope()) return send(input, init);
 	const cut = new AbortController();
-	const holds: AbortSignal[] = [];
-	for (let current: RequestHoldScope | undefined = scope; current; current = current.parent) holds.push(current.held);
-	const onHold = (): void =>
-		cut.abort(new AbortError("Provider request held: its owner began disposing before its response arrived"));
-	for (const held of holds) held.addEventListener("abort", onHold, { once: true });
-	const release = (): void => {
-		for (const held of holds) held.removeEventListener("abort", onHold);
-	};
+	const release = cutIfHeldBeforeResponse(reason => cut.abort(reason));
 	let response: Promise<Response>;
 	try {
 		response = send(input, { ...init, signal: signal ? AbortSignal.any([signal, cut.signal]) : cut.signal });

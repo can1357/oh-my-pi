@@ -2,7 +2,7 @@ import * as net from "node:net";
 import * as tls from "node:tls";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { AbortError } from "../error/abort";
-import { admitSend } from "../request-hold";
+import { admitSend, cutIfHeldBeforeResponse } from "../request-hold";
 import { StreamTimeoutError, ValidationError } from "../error/validation";
 import type { FetchImpl } from "../types";
 
@@ -317,12 +317,14 @@ export async function connectProxiedSocket(
 	let timeout: NodeJS.Timeout | undefined;
 	let responseData = "";
 	let settled = false;
+	let releaseHoldCut = (): void => {};
 
 	const cleanup = (): void => {
 		if (timeout) {
 			clearTimeout(timeout);
 			timeout = undefined;
 		}
+		releaseHoldCut();
 		options?.signal?.removeEventListener("abort", onAbort);
 		rawSocket?.off("error", onRawError);
 		rawSocket?.off(readyEvent, onProxyReady);
@@ -436,6 +438,9 @@ export async function connectProxiedSocket(
 			});
 	rawSocket.once("error", onRawError);
 	rawSocket.once(readyEvent, onProxyReady);
+	// The CONNECT request goes out once the proxy accepts the connection: a hold that begins before the
+	// tunnel is ready cuts it, like any request still waiting for its response (see `request-hold.ts`).
+	releaseHoldCut = cutIfHeldBeforeResponse(reason => rejectOnce(reason));
 	options?.signal?.addEventListener("abort", onAbort, { once: true });
 	if (options?.timeoutMs !== undefined && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0) {
 		const timeoutMs = Math.trunc(options.timeoutMs);

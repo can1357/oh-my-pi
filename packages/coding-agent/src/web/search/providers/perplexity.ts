@@ -728,6 +728,7 @@ async function callPerplexityAsk(
 	if (filters.beforeDate) requestParams.search_before_date_filter = filters.beforeDate;
 	if (filters.languageFilter) requestParams.search_language_filter = filters.languageFilter;
 
+	const requestSignal = withHardTimeout(params.signal, params.timeoutMs);
 	const requestInit = {
 		method: "POST",
 		headers,
@@ -735,7 +736,6 @@ async function callPerplexityAsk(
 			query_str: effectiveQuery,
 			params: requestParams,
 		}),
-		signal: withHardTimeout(params.signal, params.timeoutMs),
 	};
 
 	// The consumer ask endpoint intermittently drops the socket before sending an
@@ -745,11 +745,11 @@ async function callPerplexityAsk(
 	let response: Response;
 	try {
 		// model-request: turn — Perplexity's answer, a model request made by the web_search tool call with its signal.
-		response = await (params.fetch ?? fetch)(PERPLEXITY_OAUTH_ASK_URL, requestInit);
+		response = await (params.fetch ?? fetch)(PERPLEXITY_OAUTH_ASK_URL, { ...requestInit, signal: requestSignal });
 	} catch (error) {
 		if (params.signal?.aborted) throw error;
 		// model-request: turn — Perplexity's answer, retried once, with the web_search tool call's signal.
-		response = await (params.fetch ?? fetch)(PERPLEXITY_OAUTH_ASK_URL, requestInit);
+		response = await (params.fetch ?? fetch)(PERPLEXITY_OAUTH_ASK_URL, { ...requestInit, signal: requestSignal });
 	}
 
 	if (!response.ok) {

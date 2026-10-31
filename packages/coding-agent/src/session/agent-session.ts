@@ -12940,6 +12940,7 @@ export class AgentSession implements SettingsScope {
 		// inference and queueing output nobody reads. Abort the request ourselves when
 		// we stop consuming it, without touching the caller's signal.
 		const streamAbort = new AbortController();
+		const requestSignal = AbortSignal.any([signal, streamAbort.signal]);
 		const sideSessionId = args.conversationKey
 			? `${cacheSessionId}:side:conversation:${args.conversationKey}`
 			: `${cacheSessionId}:side:${Snowflake.next()}`;
@@ -12967,7 +12968,7 @@ export class AgentSession implements SettingsScope {
 				hideThinkingSummary: this.agent.hideThinkingSummary,
 				serviceTier: this.#models.effectiveServiceTier(model),
 				maxTokens: args.maxTokens,
-				signal: AbortSignal.any([signal, streamAbort.signal]),
+				signal: requestSignal,
 			},
 			model.provider,
 		);
@@ -12980,7 +12981,7 @@ export class AgentSession implements SettingsScope {
 		assertEphemeralTurnReady();
 		try {
 			// model-request: session — the side request's signal, joined to the session's disposal signal above.
-			const stream = await this.#sideStreamFn(model, context, options);
+			const stream = await this.#sideStreamFn(model, context, { ...options, signal: requestSignal });
 			for await (const event of stream) {
 				if (event.type === "text_delta") {
 					providerReplyText += event.delta;

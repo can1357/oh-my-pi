@@ -630,6 +630,7 @@ export class ClaudeMessagesProxy {
 
 	#openMitmTunnel(socket: net.Socket, target: ConnectTarget, rest: Buffer): void {
 		const clientTls = this.#track(
+			// model-request: no-session — the server side of the claude-trace proxy's TLS tunnel, wrapping the traced CLI's own inbound connection; no session exists in this command.
 			new tls.TLSSocket(socket, {
 				isServer: true,
 				cert: CLAUDE_TRACE_DEBUG_CERT,

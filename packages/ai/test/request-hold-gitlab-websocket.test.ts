@@ -1,8 +1,9 @@
 /**
  * The GitLab Duo workflow transport sends nothing over its WebSocket in a held scope: it opens no
- * socket, sends no `startRequest` when a socket it opened before the hold opens, and returns no tool
- * result on a socket a previous turn preserved. WebSocket traffic never passes through the global
- * fetch the hold wraps, so the transport checks the hold itself, right before each send.
+ * socket, cuts a socket it created whose hold began before it opened (its upgrade would land after
+ * the handshake), and returns no tool result on a socket a previous turn preserved. WebSocket traffic
+ * never passes through the global fetch the hold wraps, so the transport checks the hold itself, right
+ * before each send.
  *
  * The server is a real loopback WebSocket over `wss` on `localhost` (`helpers/loopback-tls.ts`), as a
  * production GitLab host serves `https`, and each case counts what it receives. The socket is opened
@@ -194,20 +195,21 @@ describe("the GitLab Duo WebSocket transport in a hold scope", () => {
 		expect({ upgrades, frames }).toEqual({ upgrades: 0, frames: [] });
 	});
 
-	it("sends no startRequest once the hold began after its socket was created", async () => {
+	it("cuts a socket whose hold began after it was created, before it opened: no upgrade, no startRequest", async () => {
 		const pending = turn(context, {
 			webSocketFactory: (url, options) => {
 				const socket = new WebSocket(url, {
 					headers: options.headers,
 				}) as unknown as GitLabDuoWorkflowWebSocketLike;
-				// The socket is not open yet; the startRequest is sent when it opens.
+				// The socket is not open yet: its upgrade lands only after the handshake, and its
+				// startRequest is sent when it opens.
 				held.abort();
 				return socket;
 			},
 		});
 		await Bun.sleep(150);
 
-		expect({ upgrades, frames }).toEqual({ upgrades: 1, frames: [] });
+		expect({ upgrades, frames }).toEqual({ upgrades: 0, frames: [] });
 
 		await cancel(pending);
 		expect(frames).toEqual([]);

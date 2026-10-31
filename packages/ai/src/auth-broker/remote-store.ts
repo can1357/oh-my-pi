@@ -1608,7 +1608,10 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 
 	#flushObservedUsage(): Promise<void> {
 		// The batch holds every session's usage, so its sends belong to none of them: chained outside
-		// whichever caller's provider-request hold scheduled the flush.
+		// whichever caller's provider-request hold scheduled the flush. Deliberately no `admitSharedStart`:
+		// a held caller that recorded usage (a response that began before its hold) must not hold or drop
+		// the live sessions' usage in the same batch. The send is accounting for spend already incurred,
+		// to the auth broker, never a model request.
 		// The tail never rejects, so one failed send cannot stall every later flush.
 		this.#observedUsageFlush = runOutsideRequestHold(() =>
 			this.#observedUsageFlush

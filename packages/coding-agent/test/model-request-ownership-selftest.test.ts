@@ -1,9 +1,10 @@
 /**
  * The ownership checker rejects each form of an unowned or uncancelled model request. Each case adds
  * one file to a small fixture tree (a coding agent depending on pi-ai and pi-agent-core) and runs the
- * real checker over it. The attack cases are the forms round-ten reviews found it accepting, and the
- * forms earlier rounds found; the control cases pin what a correct declaration looks like, so the
- * attacks cannot pass by the fixture being broken.
+ * real checker over it. The attack cases are the forms the round-ten, twelve and fourteen reviews
+ * found it accepting (round fourteen's 19 kept as the reviewer wrote them), and the forms earlier
+ * rounds found; the control cases pin what a correct declaration looks like, so the attacks cannot
+ * pass by the fixture being broken.
  *
  * What it cannot catch, by design: a cancellation that is present but the wrong one (a fresh,
  * unrelated controller). The request-count disposal tests cover that.
@@ -52,6 +53,19 @@ const GATE_MODULE = [
 	"}",
 ].join("\n");
 
+/** The prelude of a round-fourteen reviewer attack: an owner whose signal has already aborted. */
+const R14_PRELUDE = 'const url = "https://localhost:1";\nconst owner = new AbortController();\nowner.abort();\n';
+const R14_DECLARED = "// model-request: session — claims the aborted owner signal.\n";
+
+/** One round-fourteen attack, as its reviewer wrote it, in the attack file. */
+function r14(name: string, source: string): { name: string; files: Record<string, string>; passes: boolean } {
+	return {
+		name: `round 14: ${name}`,
+		files: { "coding-agent/src/zz.ts": `${R14_PRELUDE}${source}\nexport {};\n` },
+		passes: false,
+	};
+}
+
 /** Each case: the files it adds, and whether the checker must pass (a control) or fail (an attack). */
 const CASES: ReadonlyArray<{ name: string; files: Readonly<Record<string, string>>; passes: boolean }> = [
 	// Controls.
@@ -64,9 +78,9 @@ const CASES: ReadonlyArray<{ name: string; files: Readonly<Record<string, string
 		passes: true,
 	},
 	{
-		name: "options built by a helper that is given the signal",
+		name: "options built by a helper, with the signal restated at the call",
 		files: {
-			"coding-agent/src/ok.ts": `${IMPORT}declare function prepare<T>(o: T): T;\nexport function go(m: unknown, c: unknown, owner: AbortController) {\n\t// model-request: session — the fixture session's signal.\n\treturn completeSimple(m, c, prepare({ signal: owner.signal }));\n}\n`,
+			"coding-agent/src/ok.ts": `${IMPORT}declare function prepare<T>(o: T): T;\nexport function go(m: unknown, c: unknown, owner: AbortController) {\n\t// model-request: session — the fixture session's signal.\n\treturn completeSimple(m, c, { ...prepare({ retries: 2 }), signal: owner.signal });\n}\n`,
 		},
 		passes: true,
 	},
@@ -393,9 +407,17 @@ const CASES: ReadonlyArray<{ name: string; files: Readonly<Record<string, string
 		passes: true,
 	},
 	{
-		name: "options from a helper whose argument holds a signal a call returns",
+		name: "options from a helper, with a joined signal restated at the call",
 		files: {
-			"coding-agent/src/ok.ts": `${IMPORT}declare function prepare<T>(o: T): T;\nexport function go(m: unknown, c: unknown, owner: AbortController, stop: AbortController) {\n\t// model-request: session — the fixture session's signal, joined to a local stop.\n\treturn completeSimple(m, c, prepare({ signal: AbortSignal.any([owner.signal, stop.signal]) }));\n}\n`,
+			"coding-agent/src/ok.ts": `${IMPORT}declare function prepare<T>(o: T): T;\nexport function go(m: unknown, c: unknown, owner: AbortController, stop: AbortController) {\n\t// model-request: session — the fixture session's signal, joined to a local stop.\n\treturn completeSimple(m, c, { ...prepare({}), signal: AbortSignal.any([owner.signal, stop.signal]) });\n}\n`,
+		},
+		passes: true,
+	},
+	{
+		name: "a credentialed HTTP/2 send that asks the hold first",
+		files: {
+			"coding-agent/src/ok.ts":
+				'import * as http2 from "node:http2";\nimport { admitNetworkSend } from "@oh-my-pi/pi-utils/request-hold-scope";\nexport async function go(url: string, apiKey: string) {\n\tconst refusal = admitNetworkSend();\n\tif (refusal) await refusal;\n\t// model-request: none — the fixture lists models, a catalog read; asks the hold above.\n\tconst client = http2.connect(url);\n\treturn client.request({ authorization: `Bearer ${apiKey}` });\n}\n',
 		},
 		passes: true,
 	},
@@ -507,6 +529,137 @@ const CASES: ReadonlyArray<{ name: string; files: Readonly<Record<string, string
 			"ai/src/request-hold.ts": GATE_MODULE,
 			"coding-agent/src/zz.ts":
 				'import { gatedFetch } from "@oh-my-pi/pi-ai";\nexport function go() {\n\t// model-request: session — the fixture claims a session owner but passes no signal.\n\tconst send = gatedFetch();\n\treturn send("https://api.test", { method: "POST" });\n}\n',
+		},
+		passes: false,
+	},
+	// Round fourteen's first review: 19 shapes, 13 of which the round-thirteen checker accepted, 12 of
+	// those sending an HTTPS request with an aborted owner. Kept as the reviewer wrote them.
+	r14(
+		"Object.assign over the options",
+		"const opts = { signal: owner.signal };\nObject.assign(opts, { signal: undefined });\n" +
+			R14_DECLARED +
+			"await fetch(url, opts);",
+	),
+	r14(
+		"a write through an alias",
+		"const opts = { signal: owner.signal };\nconst alias = opts;\nalias.signal = undefined;\n" +
+			R14_DECLARED +
+			"await fetch(url, opts);",
+	),
+	r14(
+		"Reflect.set on the options",
+		'const opts = { signal: owner.signal };\nReflect.set(opts, "signal", undefined);\n' +
+			R14_DECLARED +
+			"await fetch(url, opts);",
+	),
+	r14(
+		"Object.defineProperty on the options",
+		'const opts = { signal: owner.signal };\nObject.defineProperty(opts, "signal", { value: undefined });\n' +
+			R14_DECLARED +
+			"await fetch(url, opts);",
+	),
+	r14(
+		"a helper that writes its parameter",
+		"function discard(x) {\n\tx.signal = undefined;\n\treturn x;\n}\nconst opts = { signal: owner.signal };\n" +
+			R14_DECLARED +
+			"await fetch(url, discard(opts));",
+	),
+	r14(
+		"a helper with a branch that drops the options",
+		"function prepare(x) {\n\tif (Date.now() > 0) return {};\n\treturn x;\n}\n" +
+			R14_DECLARED +
+			"await fetch(url, prepare({ signal: owner.signal }));",
+	),
+	r14("a void signal", R14_DECLARED + "await fetch(url, { signal: void owner.signal });"),
+	r14("a comma signal", R14_DECLARED + "await fetch(url, { signal: (owner.signal, undefined) });"),
+	r14("a logical signal", R14_DECLARED + "await fetch(url, { signal: owner.signal && undefined });"),
+	r14(
+		"a destructured shadow",
+		"const { signal: stale } = owner;\nconst opts = { signal: undefined };\n" +
+			R14_DECLARED +
+			"await fetch(url, { signal: opts.signal ?? undefined });",
+	),
+	r14(
+		"an argument array written after it was built",
+		"const args = [url, { signal: owner.signal }];\nargs[1] = {};\n" + R14_DECLARED + "await fetch(...args);",
+	),
+	r14(
+		"Object.assign building the options",
+		R14_DECLARED + "await fetch(url, Object.assign({ signal: owner.signal }, { signal: undefined }));",
+	),
+	r14("fetch returned from a function", "function factory() {\n\treturn globalThis.fetch;\n}\nawait factory()(url);"),
+	r14(
+		"fetch from the global's property descriptor",
+		'const f = Object.getOwnPropertyDescriptor(globalThis, "fetch").value;\nawait f(url);',
+	),
+	r14("Bun.fetch", "await Bun.fetch(url);"),
+	r14(
+		"https from process.getBuiltinModule",
+		'await new Promise((resolve, reject) => {\n\tconst h = process.getBuiltinModule("node:https");\n\tconst q = h.get(url, r => {\n\t\tr.resume();\n\t\tr.on("end", resolve);\n\t});\n\tq.on("error", reject);\n});',
+	),
+	r14(
+		"a require of a computed module name",
+		'const name = "node:" + "https";\nconst https = require(name);\nhttps.request(url).end();',
+	),
+	r14(
+		"a net.Socket constructed and connected",
+		'import { Socket } from "node:net";\nnew Socket().connect(443, "localhost");',
+	),
+	r14(
+		"fetch from Reflect's property descriptor",
+		'const f = Reflect.getOwnPropertyDescriptor(globalThis, "fetch").value;\nawait f(url);',
+	),
+	// Round fourteen's second review: a declaration the code contradicts, and the gaps round thirteen declared.
+	{
+		name: "a credentialed HTTP/2 send declared not a model request",
+		files: {
+			"coding-agent/src/zz.ts":
+				'import * as http2 from "node:http2";\nexport function go(url: string, apiKey: string) {\n\t// model-request: none — claims no model request.\n\tconst client = http2.connect(url);\n\treturn client.request({ authorization: `Bearer ${apiKey}` });\n}\n',
+		},
+		passes: false,
+	},
+	{
+		name: "a fetch whose catch falls back to an ungated HTTP/2 send",
+		files: {
+			"coding-agent/src/zz.ts":
+				'import * as http2 from "node:http2";\nfunction viaHttp2(url: string, apiKey: string) {\n\t// model-request: none — the fixture lists models, a catalog read.\n\tconst client = http2.connect(url);\n\tclient.request({ "x-api-key": apiKey }).end();\n}\nexport async function go(url: string, apiKey: string) {\n\ttry {\n\t\t// model-request: none — the fixture lists models, a catalog read.\n\t\treturn await fetch(url, { headers: { "x-api-key": apiKey } });\n\t} catch {\n\t\treturn viaHttp2(url, apiKey);\n\t}\n}\n',
+		},
+		passes: false,
+	},
+	{
+		name: "a credentialed request on an HTTP/2 session already open",
+		files: {
+			"coding-agent/src/zz.ts":
+				'import * as http2 from "node:http2";\n// model-request: none — opens the fixture session once, at load.\nconst client = http2.connect("https://api.test");\nexport function go(token: string) {\n\treturn client.request({ authorization: `Bearer ${token}` });\n}\n',
+		},
+		passes: false,
+	},
+	{
+		name: "gatedFetch through a namespace import",
+		files: {
+			"ai/src/request-hold.ts": GATE_MODULE,
+			"coding-agent/src/zz.ts":
+				'import * as hold from "@oh-my-pi/pi-ai";\nhold.gatedFetch()("https://api.test", { method: "POST" });\n',
+		},
+		passes: false,
+	},
+	{
+		name: "a require of a source file with no extension",
+		files: {
+			"coding-agent/src/zz.ts": 'require("./payload");\n',
+			"coding-agent/src/payload": 'fetch("https://api.test");\n',
+		},
+		passes: false,
+	},
+	{
+		name: "Bun handed on whole",
+		files: { "coding-agent/src/zz.ts": 'const b = Bun;\nb.fetch("https://api.test");\n' },
+		passes: false,
+	},
+	{
+		name: "options from a helper the walk cannot read, the signal only inside it",
+		files: {
+			"coding-agent/src/zz.ts": `${IMPORT}declare function prepare<T>(o: T): T;\nexport function go(m: unknown, c: unknown, owner: AbortController) {\n\t// model-request: session — the fixture session's signal.\n\treturn completeSimple(m, c, prepare({ signal: owner.signal }));\n}\n`,
 		},
 		passes: false,
 	},

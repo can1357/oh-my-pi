@@ -73,6 +73,7 @@
  * To add a request that outlives disposal, write `// model-request: outlives-disposal — <why>` above
  * the line that creates it. A site with no declaration fails here, with its location.
  */
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { parse } from "@babel/parser";
 
@@ -80,8 +81,9 @@ import { parse } from "@babel/parser";
 let PACKAGES_DIR = "";
 const ROOT_PACKAGE = "@oh-my-pi/pi-coding-agent";
 /** Every source file in a package; {@link isProductFile} drops tests, dependencies and build output. */
-const SOURCE_GLOB = "**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs,es6,es}";
-const SOURCE_EXTENSION = /^\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|es6|es)$/;
+const SOURCE_GLOB_EXTENSIONS = ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "es6", "es"] as const;
+const SOURCE_GLOB = `**/*.{${SOURCE_GLOB_EXTENSIONS.join(",")}}`;
+const SOURCE_EXTENSION = new RegExp(`^\\.(${SOURCE_GLOB_EXTENSIONS.join("|")})$`);
 /** Files Bun loads as data rather than code: importing one runs nothing. */
 const DATA_FILE = /\.(json|jsonc|json5|toml|ya?ml|txt|md|html?|css|svg|png|jpe?g|gif|webp|ico|wasm|node|wav|mp3)$/i;
 
@@ -180,6 +182,74 @@ const GLOBAL_OBJECTS = new Set(["globalThis", "window", "self", "global"]);
  * call of it is a network site like a `fetch` value, its result's calls checked for a signal.
  */
 const GATE = { pkg: "@oh-my-pi/pi-ai", file: "ai/src/request-hold.ts", name: "gatedFetch" };
+
+/**
+ * Members of `Bun` known to open no outbound connection. `Bun.connect` and `Bun.fetch` are sites like
+ * their Node and global kin; any other member (`Bun.SQL`, `Bun.redis`, `Bun.s3`, a member added
+ * later) is a site to declare, so the list fails closed. Child processes (`spawn`, `$`) are not
+ * counted, like `node:child_process`: the request hold does not reach them, which the pull request
+ * declares. `serve` and `listen` accept inbound connections only.
+ */
+const BUN_SAFE_MEMBERS: ReadonlySet<string> = new Set([
+	"file",
+	"env",
+	"write",
+	"hash",
+	"sleep",
+	"sleepSync",
+	"nanoseconds",
+	"stringWidth",
+	"spawn",
+	"spawnSync",
+	"$",
+	"deepEquals",
+	"Glob",
+	"SHA1",
+	"SHA256",
+	"sha",
+	"CryptoHasher",
+	"Image",
+	"randomUUIDv7",
+	"stripANSI",
+	"wrapAnsi",
+	"serve",
+	"listen",
+	"resolveSync",
+	"gc",
+	"argv",
+	"main",
+	"color",
+	"JSONL",
+	"JSON5",
+	"TOML",
+	"YAML",
+	"semver",
+	"which",
+	"build",
+	"isMainThread",
+	"version",
+	"revision",
+	"stdin",
+	"stdout",
+	"stderr",
+	"plugin",
+	"inspect",
+	"gzipSync",
+	"gunzipSync",
+	"zstdCompress",
+	"zstdCompressSync",
+	"zstdDecompress",
+	"zstdDecompressSync",
+	"Archive",
+	"Transpiler",
+	"fileURLToPath",
+	"pathToFileURL",
+	"escapeHTML",
+	"peek",
+	"password",
+	"enableANSIColors",
+	"embeddedFiles",
+]);
 
 const OWNERS = new Set([
 	"session",
@@ -473,11 +543,99 @@ type Binding =
 	| { kind: "builtin"; module: string };
 
 /**
- * Node modules that open network connections or threads, and the functions of each that do: a
- * `worker_threads` `Worker` has globals of its own, which the request hold does not reach.
+ * Node modules that open network connections or threads. Every member of one is a site unless it is
+ * listed in {@link NODE_SAFE_MEMBERS} as opening nothing (a constant, a type check, an inbound server,
+ * a helper), so a member the list does not know (`new net.Socket()`, `dgram.createSocket`) fails closed.
+ * A `worker_threads` `Worker` has globals of its own, which the request hold does not reach.
  */
-const NODE_NETWORK_MODULE = /^(?:node:)?(http|https|http2|net|tls|worker_threads)$/;
-const NODE_NETWORK_FUNCTIONS = ["request", "get", "connect", "createConnection", "Worker"] as const;
+const NODE_NETWORK_MODULE = /^(?:node:)?(http|https|http2|net|tls|dgram|worker_threads)$/;
+const NODE_SAFE_MEMBERS: Readonly<Record<string, ReadonlySet<string>>> = {
+	http: new Set([
+		"STATUS_CODES",
+		"METHODS",
+		"Agent",
+		"globalAgent",
+		"createServer",
+		"Server",
+		"maxHeaderSize",
+		"validateHeaderName",
+		"validateHeaderValue",
+		"IncomingMessage",
+		"ServerResponse",
+		"OutgoingMessage",
+	]),
+	https: new Set(["Agent", "globalAgent", "createServer", "Server"]),
+	http2: new Set([
+		"constants",
+		"createServer",
+		"createSecureServer",
+		"getDefaultSettings",
+		"getPackedSettings",
+		"getUnpackedSettings",
+		"sensitiveHeaders",
+		"Http2ServerRequest",
+		"Http2ServerResponse",
+	]),
+	net: new Set([
+		"isIP",
+		"isIPv4",
+		"isIPv6",
+		"createServer",
+		"Server",
+		"BlockList",
+		"SocketAddress",
+		"getDefaultAutoSelectFamily",
+		"setDefaultAutoSelectFamily",
+	]),
+	tls: new Set([
+		"createServer",
+		"Server",
+		"createSecureContext",
+		"SecureContext",
+		"checkServerIdentity",
+		"getCiphers",
+		"rootCertificates",
+		"getCACertificates",
+		"setDefaultCACertificates",
+		"DEFAULT_CIPHERS",
+		"DEFAULT_ECDH_CURVE",
+		"DEFAULT_MIN_VERSION",
+		"DEFAULT_MAX_VERSION",
+		"CLIENT_RENEG_LIMIT",
+		"CLIENT_RENEG_WINDOW",
+	]),
+	dgram: new Set([]),
+	worker_threads: new Set([
+		"parentPort",
+		"isMainThread",
+		"workerData",
+		"threadId",
+		"MessageChannel",
+		"MessagePort",
+		"BroadcastChannel",
+		"receiveMessageOnPort",
+		"markAsUntransferable",
+		"isMarkedAsUntransferable",
+		"moveMessagePortToContext",
+		"resourceLimits",
+		"SHARE_ENV",
+		"setEnvironmentData",
+		"getEnvironmentData",
+		"postMessageToThread",
+	]),
+};
+
+/** Whether `member` of network module `module` can open something: anything not known to open nothing. */
+function isNetworkMember(module: string, member: string): boolean {
+	return member !== "default" && !NODE_SAFE_MEMBERS[module]?.has(member);
+}
+
+/** The constructor of network module member `module.member`, registered on first use; a socket takes no signal. */
+function networkConstructor(module: string, member: string): string {
+	const id = `net:${module}.${member}`;
+	addConstructor(id, `${module}.${member}`, NONE);
+	return id;
+}
 
 class Graph {
 	readonly #files: ReadonlyMap<string, SourceFile>;
@@ -600,8 +758,8 @@ class Graph {
 						continue;
 					}
 					const imported = nameOf(child(specifier, "imported")) ?? local;
-					if ((NODE_NETWORK_FUNCTIONS as readonly string[]).includes(imported)) {
-						map.set(local, { kind: "constructor", id: `net:${builtin}.${imported}` });
+					if (isNetworkMember(builtin, imported)) {
+						map.set(local, { kind: "constructor", id: networkConstructor(builtin, imported) });
 					}
 				}
 				continue;
@@ -641,8 +799,8 @@ class Graph {
 				for (const property of id?.type === "ObjectPattern" ? children(id, "properties") : []) {
 					const key = nameOf(child(property, "key"));
 					const local = nameOf(child(property, "value"));
-					if (key && local && (NODE_NETWORK_FUNCTIONS as readonly string[]).includes(key)) {
-						map.set(local, { kind: "constructor", id: `net:${builtin}.${key}` });
+					if (key && local && isNetworkMember(builtin, key)) {
+						map.set(local, { kind: "constructor", id: networkConstructor(builtin, key) });
 					}
 				}
 				return;
@@ -816,6 +974,12 @@ function locallyBound(name: string, ancestors: readonly Node[], file: SourceFile
 	return declares(child(file.ast, "program") ?? file.ast);
 }
 
+/** Whether `node` is the operand of `typeof` (a presence check, which reaches nothing). */
+function isTypeofOperand(node: Node, ancestors: readonly Node[]): boolean {
+	const { parent } = outerUse(node, ancestors);
+	return parent?.type === "UnaryExpression" && parent.operator === "typeof";
+}
+
 /** The expression a use stands for, through transparent wrappers, and its parent. */
 function outerUse(node: Node, ancestors: readonly Node[]): { expr: Node; parent: Node | undefined; chain: Node[] } {
 	let expr = node;
@@ -936,44 +1100,55 @@ function sitesIn(file: SourceFile, graph: Graph, hindsightMethods: ReadonlySet<s
 				return;
 			}
 		}
-		// `Reflect.get(globalThis, "fetch")`.
-		if (node.type === "CallExpression") {
-			const callee = unwrap(child(node, "callee"));
-			const [target, keyNode] = children(node, "arguments");
-			if (
-				callee?.type === "MemberExpression" &&
-				nameOf(child(callee, "object")) === "Reflect" &&
-				memberName(callee) === "get" &&
-				isGlobalObject(target, ancestors, file)
-			) {
-				const key = resolveString(keyNode, ancestors);
+		// The global object handed to a call: `Reflect.get(globalThis, "fetch")`,
+		// `Object.getOwnPropertyDescriptor(globalThis, "fetch").value`, `Object.values(globalThis)`. The call
+		// can read any member, so it is a site unless the key after the object names something other than a
+		// network global: `Reflect.get(globalThis, "Bun")` reads no network global.
+		if (node.type === "CallExpression" || node.type === "NewExpression") {
+			const args = children(node, "arguments");
+			const at = args.findIndex(argument => isGlobalObject(argument, ancestors, file));
+			if (at !== -1) {
+				const key = resolveString(args[at + 1], ancestors);
 				if (typeof key === "string" && Object.hasOwn(NETWORK_GLOBALS, key)) {
 					sites.push(makeSite(file, byId.get(`global:${key}`)!, node, ancestors));
 					return;
 				}
-				if (key === undefined) {
+				if (typeof key !== "string") {
 					const unresolved = addConstructor(`global:${file.key}:[…]`, "globalThis[…]", { kind: "unknown" });
 					sites.push({ ...makeSite(file, unresolved, node, ancestors), use: "unresolved" });
 					return;
 				}
 			}
 		}
-		// Node network modules (`https.request`, `http2.connect`, `net.connect`, …) and `Bun.connect`:
-		// network sites in every package, like the globals.
+		// Node network modules (every member not known to open nothing: `https.request`, `http2.connect`,
+		// `new net.Socket()`, …), `process.getBuiltinModule` of one, and Bun's members other than those
+		// known to open nothing: network sites in every package, like the globals.
 		if (node.type === "Identifier" && isValueUse(node, ancestors)) {
 			const binding = bindings.get(node.name as string);
 			if (binding?.kind === "constructor" && binding.id.startsWith("net:")) {
 				sites.push(makeSite(file, byId.get(binding.id)!, node, ancestors));
 				return;
 			}
+			// `Bun` handed on whole (`const b = Bun`, `const { fetch } = Bun`, `f(Bun)`): any member can be reached.
+			if (node.name === "Bun" && !locallyBound("Bun", ancestors, file) && !isTypeofOperand(node, ancestors)) {
+				const { expr, parent: outer } = outerUse(node, ancestors);
+				const memberObject = /MemberExpression$/.test(outer?.type ?? "") && outer?.object === expr;
+				// `"sleepSync" in Bun` tests for a member; it reaches nothing.
+				const presence = outer?.type === "BinaryExpression" && outer.operator === "in" && outer.right === expr;
+				if (!memberObject && !presence) {
+					const unresolved = addConstructor(`net:bun:${file.key}:value`, "Bun", { kind: "unknown" });
+					sites.push({ ...makeSite(file, unresolved, node, ancestors), use: "unresolved" });
+					return;
+				}
+			}
 		}
-		if (/MemberExpression$/.test(node.type)) {
+		if (/MemberExpression$/.test(node.type) && !ancestors.some(ancestor => TYPE_LEVEL.test(ancestor.type))) {
 			const object = unwrap(child(node, "object"));
 			const property = memberName(node);
 			const binding = object?.type === "Identifier" ? bindings.get(object.name as string) : undefined;
 			if (binding?.kind === "builtin") {
-				if (property && (NODE_NETWORK_FUNCTIONS as readonly string[]).includes(property)) {
-					sites.push(makeSite(file, byId.get(`net:${binding.module}.${property}`)!, node, ancestors));
+				if (property && isNetworkMember(binding.module, property)) {
+					sites.push(makeSite(file, byId.get(networkConstructor(binding.module, property))!, node, ancestors));
 					return;
 				}
 				if (property === undefined) {
@@ -982,14 +1157,51 @@ function sitesIn(file: SourceFile, graph: Graph, hindsightMethods: ReadonlySet<s
 					return;
 				}
 			}
+			// `requestHold.gatedFetch(…)` through a namespace import of pi-ai or of its request-hold module.
 			if (
-				nameOf(object) === "Bun" &&
-				property === "connect" &&
-				!locallyBound("Bun", ancestors, file) &&
-				!ancestors.some(ancestor => TYPE_LEVEL.test(ancestor.type))
+				binding?.kind === "namespace" &&
+				property === GATE.name &&
+				((binding.module?.kind === "transport" && binding.module.pkg === GATE.pkg) ||
+					(binding.module?.kind === "file" && binding.module.key === GATE.file))
 			) {
-				sites.push(makeSite(file, byId.get("net:bun.connect")!, node, ancestors));
+				sites.push(makeSite(file, byId.get(`net:${GATE.name}`)!, node, ancestors));
 				return;
+			}
+			if (nameOf(object) === "Bun" && !locallyBound("Bun", ancestors, file)) {
+				if (property === "connect" || property === "fetch") {
+					sites.push(makeSite(file, byId.get(`net:bun.${property}`)!, node, ancestors));
+					return;
+				}
+				if (property === undefined || !BUN_SAFE_MEMBERS.has(property)) {
+					const id = `net:bun.${property ?? `${file.key}:[…]`}`;
+					const unresolved = addConstructor(id, `Bun.${property ?? "[…]"}`, { kind: "unknown" });
+					sites.push({ ...makeSite(file, unresolved, node, ancestors), use: "unresolved" });
+					return;
+				}
+			}
+		}
+		// `process.getBuiltinModule("node:https")`: a network module reached without an import.
+		if (node.type === "CallExpression") {
+			const callee = unwrap(child(node, "callee"));
+			if (
+				callee?.type === "MemberExpression" &&
+				nameOf(child(callee, "object")) === "process" &&
+				memberName(callee) === "getBuiltinModule"
+			) {
+				const spec = resolveString(children(node, "arguments")[0], ancestors);
+				const module = typeof spec === "string" ? NODE_NETWORK_MODULE.exec(spec)?.[1] : undefined;
+				if (spec === undefined || module) {
+					const id = `net:${file.key}:getBuiltinModule(${typeof spec === "string" ? spec : "…"})`;
+					const unresolved = addConstructor(
+						id,
+						`process.getBuiltinModule(${typeof spec === "string" ? spec : "…"})`,
+						{
+							kind: "unknown",
+						},
+					);
+					sites.push({ ...makeSite(file, unresolved, node, ancestors), use: "unresolved" });
+					return;
+				}
 			}
 		}
 		// `gatedFetch(options.fetch)`: the transport's send, a network site in every package.
@@ -1110,9 +1322,10 @@ function sitesIn(file: SourceFile, graph: Graph, hindsightMethods: ReadonlySet<s
 /**
  * The specifier of a relative import, export-from, `import()` or `require()` of a file the walk
  * cannot parse: one whose extension is neither a source extension it parses nor data (`./x.coffee`;
- * `require` runs an unknown extension as JavaScript). Type-only imports and imports with a `type`
- * attribute load nothing that runs. A source file outside the walk (a test helper a script
- * imports) is excluded by the same rule that excludes tests, not reported here.
+ * `require` runs an unknown extension as JavaScript), or a bare file with no extension (`./payload`)
+ * that no source file shadows. Type-only imports and imports with a `type` attribute load nothing
+ * that runs. A source file outside the walk (a test helper a script imports) is excluded by the same
+ * rule that excludes tests, not reported here.
  */
 function unparsedImport(node: Node, file: SourceFile, graph: Graph): string | undefined {
 	let specifier: string | undefined;
@@ -1136,9 +1349,16 @@ function unparsedImport(node: Node, file: SourceFile, graph: Graph): string | un
 		specifier = requiredModule(node);
 	}
 	if (!specifier?.startsWith(".") || DATA_FILE.test(specifier)) return undefined;
+	if (graph.module(file, specifier) !== undefined) return undefined;
 	const extension = path.posix.extname(specifier);
-	if (extension === "" || SOURCE_EXTENSION.test(extension)) return undefined;
-	return graph.module(file, specifier) === undefined ? specifier : undefined;
+	if (SOURCE_EXTENSION.test(extension)) return undefined;
+	if (extension === "") {
+		// `./x` resolves to `./x.ts`, `./x/index.ts`, … before a bare `./x`: only a bare file nothing shadows runs.
+		const target = path.join(PACKAGES_DIR, path.posix.dirname(file.key), specifier);
+		if (!fs.existsSync(target) || fs.statSync(target).isDirectory()) return undefined;
+		if (SOURCE_GLOB_EXTENSIONS.some(ext => fs.existsSync(`${target}.${ext}`))) return undefined;
+	}
+	return specifier;
 }
 
 /** A member's name: `x.name`, `x.#name` or `x["name"]`; undefined for a key computed at run time. */
@@ -1152,45 +1372,34 @@ function memberName(node: Node): string | undefined {
 	return undefined;
 }
 
-/** Per file, the local names that hold the global object (`const g = globalThis`, transitively). */
-const globalObjectLocalsCache = new WeakMap<SourceFile, Set<string>>();
-
-function globalObjectLocals(file: SourceFile): Set<string> {
-	const cached = globalObjectLocalsCache.get(file);
-	if (cached) return cached;
-	const locals = new Set<string>();
-	if (/=\s*\(?\s*(globalThis|window|self|global)\b/.test(file.text)) {
-		const declarators: Array<{ name: string; init: string }> = [];
-		walk(file.ast, node => {
-			if (node.type !== "VariableDeclarator") return;
-			const name = nameOf(child(node, "id"));
-			const init = nameOf(unwrap(child(node, "init")));
-			if (name && init) declarators.push({ name, init });
-		});
-		for (let changed = true; changed;) {
-			changed = false;
-			for (const { name, init } of declarators) {
-				if (!locals.has(name) && (GLOBAL_OBJECTS.has(init) || locals.has(init))) {
-					locals.add(name);
-					changed = true;
-				}
-			}
-		}
-	}
-	globalObjectLocalsCache.set(file, locals);
-	return locals;
-}
-
 /**
  * Whether `node` is the global object: `globalThis` (or `window`, `self`, `global`) not shadowed by a
- * local, or a local holding it (`const g = globalThis`; matched by name in the file).
+ * local, or a local that holds it, resolved by scope (`const g = globalThis`, transitively, or a
+ * later `g = globalThis`). A local of the same name elsewhere in the file (a page function's `const
+ * page = window`) is another variable.
  */
-function isGlobalObject(node: Node | undefined, ancestors: readonly Node[], file: SourceFile): boolean {
+function isGlobalObject(node: Node | undefined, ancestors: readonly Node[], file: SourceFile, depth = 0): boolean {
 	const value = unwrap(node);
 	if (value?.type !== "Identifier") return false;
 	const name = value.name as string;
-	if (GLOBAL_OBJECTS.has(name)) return !locallyBound(name, ancestors, file);
-	return globalObjectLocals(file).has(name);
+	if (GLOBAL_OBJECTS.has(name) && !locallyBound(name, ancestors, file)) return true;
+	if (depth > 4 || !mayAliasGlobalObject(file)) return false;
+	const declared = localDeclaration(name, ancestors);
+	if (!declared || declared.param || declared.initProp) return false;
+	const values = [declared.init, ...assignmentsTo(name, declared.scope)];
+	return values.some(held => held !== undefined && isGlobalObject(held, ancestors, file, depth + 1));
+}
+
+/** Per file, whether any local may hold the global object at all (a cheap text test before resolving by scope). */
+const aliasesGlobalObject = new WeakMap<SourceFile, boolean>();
+
+function mayAliasGlobalObject(file: SourceFile): boolean {
+	let aliases = aliasesGlobalObject.get(file);
+	if (aliases === undefined) {
+		aliases = /=\s*\(?\s*(globalThis|window|self|global)\b/.test(file.text);
+		aliasesGlobalObject.set(file, aliases);
+	}
+	return aliases;
 }
 
 /**
@@ -1433,6 +1642,156 @@ function mutationsOf(name: string, prop: string, scope: Node): { values: Node[];
 	return { values, erased };
 }
 
+const LOOP = /^(For|ForIn|ForOf|While|DoWhile)Statement$/;
+const PATTERN = /^(ObjectPattern|ArrayPattern|ObjectProperty|AssignmentPattern|RestElement)$/;
+
+/** Whether `expr` (its ancestors `chain`) is written: an assignment, update or deletion target, also inside a pattern. */
+function isWriteTarget(expr: Node, chain: readonly Node[]): boolean {
+	let current = expr;
+	for (let index = chain.length - 1; index >= 0; index--) {
+		const holder = chain[index];
+		if (holder.type === "AssignmentExpression") return holder.left === current;
+		if (holder.type === "UpdateExpression") return true;
+		if (holder.type === "UnaryExpression") return holder.operator === "delete";
+		if (/^For(In|Of)Statement$/.test(holder.type)) return holder.left === current;
+		if (!PATTERN.test(holder.type) || (holder.type === "AssignmentPattern" && holder.left !== current)) return false;
+		current = holder;
+	}
+	return false;
+}
+
+/**
+ * The first reference to local `name` in `scope`, other than `use`, that may change what it holds or
+ * hand it where the walk cannot follow before `use` reads it; undefined when there is none. A
+ * container the walk traces a signal through must stay where the walk sees it, so this is a list of
+ * what is allowed, and everything else is refused whatever its shape: an alias, an argument to any
+ * call it cannot read (`Object.assign`, `Reflect.set`, a method, an import), a method called on it, a
+ * write inside its `head` property. Allowed: a read of a property; a write of a property other than
+ * `head` (with `head` set), since a write of `head` itself is traced as a value; a copy (`{ ...name }`,
+ * `[...name]`); a test of its truthiness or identity; a write of the whole binding (traced as a
+ * value); an argument to a local function whose parameter in turn passes this check; a reference on a
+ * path that leaves the function before `use` (a block ending in `return` or `throw`); and any
+ * reference after `use` that no enclosing loop or hoisted function can run first. `head` undefined:
+ * the whole container is what is passed (an argument array), so any write through it is refused.
+ */
+function escapeOf(
+	name: string,
+	scope: Node,
+	scopeAncestors: readonly Node[],
+	use: Node,
+	head: string | undefined,
+	depth = 0,
+): string | undefined {
+	let found: string | undefined;
+	const useStart = (use.start as number | undefined) ?? 0;
+	const useEnd = (use.end as number | undefined) ?? Number.POSITIVE_INFINITY;
+	const contains = (holder: Node): boolean => (holder.start as number) <= useStart && useEnd <= (holder.end as number);
+	walk(
+		scope,
+		(node, ancestors) => {
+			if (found || node === use || node.type !== "Identifier" || node.name !== name) return;
+			if (!isValueUse(node, ancestors)) return;
+			// A binding of the same name in a nested scope is another variable.
+			if (localDeclaration(name, ancestors)?.scope !== scope) return;
+			const below = ancestors.slice(ancestors.indexOf(scope) + 1);
+			// A closure created after `use` cannot run before it; a hoisted function declaration, or a loop
+			// around both, can.
+			const runsFirst =
+				below.some(holder => holder.type === "FunctionDeclaration") ||
+				below.some(holder => LOOP.test(holder.type) && contains(holder));
+			if ((node.start as number) >= useEnd && !runsFirst) return;
+			// A path that leaves the function first never reaches `use`: a `return` or `throw` around the
+			// reference, or a block that ends in one.
+			const exits = below.some((holder, index) => {
+				if (contains(holder) || below.slice(0, index).some(isFunctionLike)) return false;
+				if (holder.type === "ReturnStatement" || holder.type === "ThrowStatement") return true;
+				if (holder.type !== "BlockStatement") return false;
+				const last = children(holder, "body").at(-1);
+				return last?.type === "ReturnStatement" || last?.type === "ThrowStatement";
+			});
+			if (exits) return;
+			visit(node, ancestors);
+		},
+		[...scopeAncestors],
+	);
+	return found;
+
+	function visit(node: Node, ancestors: readonly Node[]): void {
+		const line = node.loc?.start.line ?? 0;
+		const { expr, parent, chain } = outerUse(node, ancestors);
+		// Reads of its truthiness or identity, which reach nothing it holds: `typeof name`, `!name`,
+		// `name === x`, `if (name)`, `name ? a : b`, and `name && x` (whose value is `name` only when falsy).
+		if (parent?.type === "UnaryExpression" && /^(typeof|!|void)$/.test(parent.operator as string)) return;
+		if (parent?.type === "BinaryExpression" && /^(===|!==|==|!=|instanceof|in)$/.test(parent.operator as string))
+			return;
+		if (/^(If|While|DoWhile)Statement$/.test(parent?.type ?? "") && parent?.test === expr) return;
+		if (parent?.type === "ConditionalExpression" && parent.test === expr) return;
+		if (parent?.type === "LogicalExpression" && parent.operator === "&&" && parent.left === expr) return;
+		// `name = other`: a write of the whole binding, traced as a value (`assignmentsTo`).
+		if (isWriteTarget(expr, chain)) return;
+		if (parent?.type === "SpreadElement" && /^(Object|Array)Expression$/.test(chain.at(-2)?.type ?? "")) return;
+		if (/MemberExpression$/.test(parent?.type ?? "") && parent?.object === expr) {
+			const key = parent.computed ? resolveString(child(parent, "property"), ancestors) : memberName(parent);
+			const { expr: member, parent: memberParent, chain: memberChain } = outerUse(parent, chain.slice(0, -1));
+			if (
+				memberParent &&
+				/^(Call|OptionalCall|New)Expression$/.test(memberParent.type) &&
+				memberParent.callee === member
+			) {
+				found = `a method is called on \`${name}\` (line ${line}), which may change what it holds`;
+				return;
+			}
+			// Whether the chain from this read on (`name.k`, `name.k.x`, …) ends in a write.
+			let top = member;
+			let topChain = memberChain;
+			let nested = false;
+			while (topChain.at(-1) && /MemberExpression$/.test(topChain.at(-1)!.type) && topChain.at(-1)!.object === top) {
+				nested = true;
+				({ expr: top, chain: topChain } = outerUse(topChain.at(-1)!, topChain.slice(0, -1)));
+			}
+			if (!isWriteTarget(top, topChain)) return;
+			if (head !== undefined && typeof key === "string" && key !== head) return;
+			if (head !== undefined && key === head && !nested) return;
+			found = `\`${name}\` is written through (line ${line}) before the request`;
+			return;
+		}
+		// An argument to a local function: allowed when its parameter passes this check in turn.
+		if (parent && /^(Call|OptionalCall)Expression$/.test(parent.type) && parent.callee !== expr && depth < 4) {
+			const callee = unwrap(child(parent, "callee"));
+			const fn =
+				callee?.type === "Identifier" ? resolveLocalFunction(callee.name as string, chain.slice(0, -1)) : undefined;
+			const index = children(parent, "arguments").indexOf(expr);
+			const param = fn && index !== -1 ? children(fn, "params")[index] : undefined;
+			const paramNode = param?.type === "AssignmentPattern" ? child(param, "left") : param;
+			if (
+				paramNode?.type === "ObjectPattern" &&
+				!children(paramNode, "properties").some(p => p.type === "RestElement")
+			)
+				return;
+			const fnAncestors = fn ? ancestorsOf(fn, chain) : undefined;
+			if (fn && fnAncestors && paramNode?.type === "Identifier") {
+				const paramName = paramNode.name as string;
+				const inner = escapeOf(paramName, fn, fnAncestors, fn, head, depth + 1);
+				const written = head !== undefined ? mutationsOf(paramName, head, fn) : { values: [] as Node[] };
+				if (!inner && !written.erased && written.values.length === 0) return;
+			}
+		}
+		const what =
+			parent && /^(Call|OptionalCall|New)Expression$/.test(parent.type)
+				? "handed to a call"
+				: parent?.type === "VariableDeclarator" || parent?.type === "AssignmentExpression"
+					? "aliased"
+					: "handed on";
+		found = `\`${name}\` is ${what} (line ${line}) before the request, so the walk cannot tell what it holds; build the options at the call`;
+	}
+}
+
+/** The ancestors of `scope`, itself one of `ancestors`. */
+function scopeAncestors(scope: Node, ancestors: readonly Node[]): readonly Node[] {
+	const index = ancestors.indexOf(scope);
+	return index === -1 ? [] : ancestors.slice(0, index);
+}
+
 /**
  * What a traced value supplies. `sources` names the expressions the signal comes from; `opaque` when
  * the walk could not look inside (a parameter, a property read), which it trusts only where the
@@ -1522,7 +1881,11 @@ function returnsOf(fn: Node, fnAncestors: readonly Node[]): Array<{ node: Node |
 	return returns;
 }
 
-/** Trace the value(s) a local function returns, its parameters standing for `args`. */
+/**
+ * Trace the value(s) a local function returns, its parameters standing for `args`. Every return
+ * must carry the signal: a branch that returns an object without it (`return {}`) fails, since that
+ * branch is a request without one.
+ */
 function supplyFromFunction(
 	fn: Node,
 	args: readonly Node[],
@@ -1537,14 +1900,16 @@ function supplyFromFunction(
 	const inner: Substitution = { fn, args, ancestors: callAncestors, outer: subst };
 	const returns = returnsOf(fn, fnAncestors);
 	if (returns.length === 0) return { missing: "the helper returns nothing", explicit: true };
-	return combine(
-		returns.map(entry =>
-			entry.node
-				? supply({ node: entry.node, prop }, entry.ancestors, depth + 1, inner, inOptions)
-				: { missing: "the helper returns nothing", explicit: true as const },
-		),
-		"the helper's result",
+	const supplies = returns.map(entry =>
+		entry.node
+			? supply({ node: entry.node, prop }, entry.ancestors, depth + 1, inner, inOptions)
+			: { missing: "the helper returns nothing", explicit: true as const },
 	);
+	const lacking = supplies.find(entry => "missing" in entry);
+	if (lacking && "missing" in lacking) {
+		return { missing: `a return of the helper passes none: ${lacking.missing}`, explicit: true };
+	}
+	return combine(supplies, "the helper's result");
 }
 
 /**
@@ -1592,8 +1957,21 @@ function supply(source: Source, ancestors: readonly Node[], depth = 0, subst?: S
 	if (node.type === "Identifier" && node.name !== "undefined") {
 		const name = node.name as string;
 		const declared = localDeclaration(name, ancestors);
+		// Options the walk looks into must stay where it sees them: refuse a container that is handed on,
+		// aliased or written through before the request reads it (`escapeOf`).
+		const key = source.prop?.split(".")[0];
+		const container = inOptions && key !== undefined && !declared?.initProp && !declared?.param?.prop;
 		if (declared?.param && subst && declared.param.fn === subst.fn) {
-			// A helper's parameter: the caller's argument at that position.
+			// A helper's parameter: the caller's argument at that position, unless the helper changes it.
+			if (container) {
+				const escaped = escapeOf(name, declared.scope, scopeAncestors(declared.scope, ancestors), node, key);
+				if (escaped) return { missing: `in the helper, ${escaped}`, explicit: true };
+				const written = mutationsOf(name, key, declared.scope);
+				if (written.erased) return { missing: `in the helper, ${written.erased}`, explicit: true };
+				if (written.values.length > 0) {
+					return { missing: `the helper writes \`${name}.${key}\` before the request`, explicit: true };
+				}
+			}
 			const arg = subst.args[declared.param.index];
 			const prop = joinProp(declared.param.prop, source.prop);
 			if (!arg)
@@ -1603,6 +1981,10 @@ function supply(source: Source, ancestors: readonly Node[], depth = 0, subst?: S
 		}
 		if (!declared) {
 			return source.prop ? { sources: [{ node, prop: source.prop }], opaque: true } : { sources: [{ node }] };
+		}
+		if (container) {
+			const escaped = escapeOf(name, declared.scope, scopeAncestors(declared.scope, ancestors), node, key);
+			if (escaped) return { missing: escaped, explicit: true };
 		}
 		const candidates: Supply[] = [];
 		if (declared.param) {
@@ -1656,20 +2038,12 @@ function supply(source: Source, ancestors: readonly Node[], depth = 0, subst?: S
 		const args = children(node, "arguments");
 		if (local) return supplyFromFunction(local, args, ancestors, source.prop, depth, subst, inOptions);
 		if (inOptions && source.prop) {
-			// Options built by a helper the walk cannot read: accept only a signal visible in its arguments.
+			// Options built by a helper the walk cannot read (a method, an import, `Object.assign`): whatever
+			// its arguments hold, the helper decides what it returns, so the signal must be restated at the
+			// call, after the helper's result: `{ ...helper(…), signal }`.
 			const helper = callee?.type === "MemberExpression" ? memberName(callee) : nameOf(callee);
-			for (const arg of args) {
-				if (/signal$/i.test((arg.type === "MemberExpression" ? memberName(arg) : nameOf(arg)) ?? "")) {
-					return { sources: [{ node: arg }] };
-				}
-				const traced = supply({ node: arg, prop: source.prop }, ancestors, depth + 1, subst, inOptions);
-				if ("missing" in traced && traced.explicit) return traced;
-				// Accepted when the argument visibly holds the property, whatever value it holds there; an
-				// argument the walk cannot see into (a parameter) is no evidence.
-				if ("sources" in traced && (!traced.opaque || traced.sources.every(found => !found.prop))) return traced;
-			}
 			return {
-				missing: `the options come from \`${helper ?? "a call"}(…)\`, whose arguments show no \`${source.prop}\`; pass it in the options themselves`,
+				missing: `the options come from \`${helper ?? "a call"}(…)\`, which the walk cannot read; restate \`${source.prop}\` at the call: \`{ ...${helper ?? "helper"}(…), ${source.prop.split(".")[0]} }\``,
 				explicit: true,
 			};
 		}
@@ -1785,6 +2159,18 @@ function expandArguments(args: readonly Node[], ancestors: readonly Node[]): Nod
 			const declared = localDeclaration(target.name as string, ancestors);
 			if (!declared?.init || declared.initProp || declared.param) return undefined;
 			if (assignmentsTo(target.name as string, declared.scope).length > 0) return undefined;
+			// `args[1] = {}`, `args.push(…)`, `mutate(args)`: the array must hold what it was built with.
+			if (
+				escapeOf(
+					target.name as string,
+					declared.scope,
+					scopeAncestors(declared.scope, ancestors),
+					target,
+					undefined,
+				)
+			) {
+				return undefined;
+			}
 			target = unwrap(declared.init);
 		}
 		if (target?.type !== "ArrayExpression") return undefined;
@@ -2069,6 +2455,60 @@ function optionsOfCheckedCall(site: Site, checked: ReadonlySet<Node>): boolean {
 	return false;
 }
 
+/** Names and header values that carry a credential: `apiKey`, `accessToken`, `"authorization"`, `Bearer …`. */
+const CREDENTIAL_NAME =
+	/^(api_?key|apikey|access_?token|refresh_?token|id_?token|auth_?token|session_?token|bearer_?token|bearer|authorization|credentials?|secret|client_?secret|password|cookie|token)$/i;
+const CREDENTIAL_HEADER = /^(authorization|proxy-authorization|x-api-key|api-key|cookie|x-goog-api-key)$/i;
+
+/**
+ * Whether a site is a send the request hold's fetch backstop does not see: a Node network module, a
+ * `Bun` member, a WebSocket or EventSource. (`fetch` and `gatedFetch` go through the hold.)
+ */
+function unbackstopped(site: Site): boolean {
+	const id = site.constructor.id;
+	if (id === `net:${GATE.name}`) return false;
+	return id.startsWith("net:") || id === "global:WebSocket" || id === "global:EventSource";
+}
+
+/** The function (or file) a site's request is made in. */
+function enclosingScope(site: Site): Node {
+	return site.ancestors.findLast(isFunctionLike) ?? child(site.file.ast, "program") ?? site.file.ast;
+}
+
+/** The first credential the code around a site handles (a name or a header), with its line; undefined when none. */
+function credentialNear(site: Site): string | undefined {
+	let found: string | undefined;
+	walk(enclosingScope(site), node => {
+		if (found) return;
+		const line = node.loc?.start.line ?? 0;
+		if (node.type === "Identifier" && CREDENTIAL_NAME.test(node.name as string))
+			found = `\`${node.name}\`, line ${line}`;
+		if (node.type === "StringLiteral" || node.type === "TemplateElement") {
+			const text = String(
+				node.type === "StringLiteral" ? node.value : ((node.value as { raw?: string })?.raw ?? ""),
+			);
+			if (CREDENTIAL_HEADER.test(text) || /\bBearer\s/.test(text)) found = `"${text.slice(0, 32)}", line ${line}`;
+		}
+	});
+	return found;
+}
+
+/** Calls that ask the request hold right before a send: pi-ai's `admitSend`, pi-utils' `admitNetworkSend`, a bound admission. */
+const HOLD_ADMISSION = /^(#?admitSend|admitNetworkSend|admitProviderRequest|admit)$/;
+
+/** Whether the function a site is in asks the request hold before the site. */
+function gatedBefore(site: Site): boolean {
+	const start = (site.node.start as number | undefined) ?? 0;
+	let gated = false;
+	walk(enclosingScope(site), node => {
+		if (gated || !/^(Call|OptionalCall)Expression$/.test(node.type) || ((node.start as number) ?? 0) >= start) return;
+		const callee = unwrap(child(node, "callee"));
+		const name = callee?.type === "MemberExpression" ? memberName(callee) : nameOf(callee);
+		if (name && HOLD_ADMISSION.test(name)) gated = true;
+	});
+	return gated;
+}
+
 /**
  * Whether a socket a site opens (`new WebSocket(…)`, `Reflect.construct(WebSocket, …)`) is stored in
  * a local binding that an abort listener on a signal closes, in the same function:
@@ -2266,10 +2706,8 @@ export async function checkModelRequestOwnership(packagesDir: string): Promise<O
 		for (const [name, signal] of Object.entries(primitives)) addConstructor(`fn:${file}:${name}`, name, signal);
 	}
 	for (const [name, signal] of Object.entries(NETWORK_GLOBALS)) addConstructor(`global:${name}`, name, signal);
-	for (const module of ["http", "https", "http2", "net", "tls", "worker_threads"]) {
-		for (const name of NODE_NETWORK_FUNCTIONS) addConstructor(`net:${module}.${name}`, `${module}.${name}`, NONE);
-	}
 	addConstructor("net:bun.connect", "Bun.connect", NONE);
+	addConstructor("net:bun.fetch", "Bun.fetch", opt(1));
 	addConstructor(`net:${GATE.name}`, GATE.name, opt(1));
 	const methods = await hindsightMethods(files);
 	if (files.has(HINDSIGHT.file) && !["recall", "retain", "retainBatch", "reflect"].every(name => methods.has(name))) {
@@ -2405,6 +2843,18 @@ export async function checkModelRequestOwnership(packagesDir: string): Promise<O
 						`${where}: "caller ${name}": the signal does not come from ${name}'s parameters; name the one it does, as "caller ${name}(<parameter>.signal)"`,
 					);
 				}
+			}
+		}
+		// A credential on a transport the hold's fetch backstop does not see must ask the hold itself, whatever
+		// the declaration says: a declaration is checked against the code, not taken at its word. Exempt only
+		// lifetimes that are decisions in themselves: outside any session, outliving disposal on purpose, or
+		// governed by the extension boundary.
+		if (unbackstopped(site) && !["no-session", "outlives-disposal", "extension"].includes(site.owner)) {
+			const credential = credentialNear(site);
+			if (credential && !gatedBefore(site)) {
+				problems.push(
+					`${where}: this send carries a credential (${credential}) on a transport the request hold's fetch backstop does not see, and nothing asks the hold first; call \`admitSend\` (pi-ai) or \`admitNetworkSend\` (pi-utils) before it, or declare its lifetime ("no-session", "outlives-disposal") — "${site.owner}" does not cover it`,
+				);
 			}
 		}
 		if (site.use === "unresolved") continue;
