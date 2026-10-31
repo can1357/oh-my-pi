@@ -50,10 +50,11 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { isEmbeddedImageContent } from "@oh-my-pi/pi-ai/images/shared";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { normalizeModelContextImages } from "../utils/image-loading";
 import { type FittedImage, fitImage } from "../utils/image-resize";
 import type { ModelRegistry } from "../config/model-registry";
+import { cfgJudgmentAttemptTimeoutMs } from "../config/model-settings";
 import { formatModelStringWithRouting, resolveRoleChain, type RoleChainCandidate } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
 import type { Settings } from "../config/settings";
@@ -114,6 +115,11 @@ interface JudgmentAttempt extends Omit<JudgmentUsage, "purpose"> {
 	cachedQuestions?: number;
 }
 
+interface PreparedImages {
+	images: ImageContent[];
+	fitted?: FittedImage[];
+}
+
 /** Session journal surface that records off-transcript model cost; journal-only managers omit it. */
 export type JudgmentUsageLedger = Pick<SessionManager, "appendModelUsage" | "getSessionId" | "getLeafId">;
 
@@ -150,6 +156,8 @@ const LOCAL_REASONING_MAX_TOKENS = 1024;
  * credential-rotation round trip before reaching the next candidate.
  */
 const CANDIDATE_REJECTION_COOLDOWN_MS = 5 * 60 * 1000;
+/** A transient hang should not consume the next judgment's budget in the same session. */
+const CANDIDATE_TIMEOUT_COOLDOWN_MS = 30_000;
 /**
  * How long a resolved role chain is reused. Resolution filters the full
  * catalog (thousands of models) synchronously — milliseconds per call, which a
@@ -160,10 +168,12 @@ const CANDIDATE_REJECTION_COOLDOWN_MS = 5 * 60 * 1000;
 const CANDIDATE_TTL_MS = 1_000;
 /** Skip-until timestamps keyed by routed model identity, carried by the registry that produced the rejection. */
 const kRejections = Symbol("judgment.rejections");
+const kTimeouts = Symbol("judgment.timeouts");
 /** Last resolved judge role chain, carried by the registry it was drawn from. */
 const kRoleChain = Symbol("judgment.roleChain");
 interface RegistryWithRejections extends ModelRegistry {
 	[kRejections]?: Map<string, number>;
+	[kTimeouts]?: Map<string, number>;
 	[kRoleChain]?: {
 		settings: Settings;
 		revision: number;
@@ -369,6 +379,8 @@ export class ChainJudge implements Judge {
 	readonly #telemetry: AgentTelemetry | undefined;
 	/** Text-judgment candidates memoized per resolved chain; image candidates depend on each request's images. */
 	#candidates: { chain: RoleChainCandidate[]; list: RoleChainCandidate[] } | undefined;
+	/** Without a session id, cooldowns belong to this judge, not every anonymous caller of the registry. */
+	#anonymousTimeouts: Map<string, number> | undefined;
 
 	constructor(deps: JudgeDeps) {
 		this.#deps = deps;
@@ -390,22 +402,23 @@ export class ChainJudge implements Judge {
 		}
 		checkBoxQuestions(request);
 		return this.#withCandidate(
-			async (candidateJudge, kind, model) => {
-				if (kind === "local" || requestImages.length === 0) return candidateJudge.judge(request, options);
-				const fitted = kind === "native" ? await fitNativeImages(model, requestImages) : undefined;
-				const images = fitted
-					? fitted.map(fit => fit.image)
-					: ((await normalizeModelContextImages([...requestImages], { model })) ?? []);
-				const signal = options.signal;
-				if (signal?.aborted) {
-					const reason = signal.reason;
-					throw reason instanceof Error ? reason : new AIError.AbortError("judgment aborted");
-				}
-				const result = await candidateJudge.judge({ ...request, images }, options);
-				return fitted ? sourceBoxes(request.questions, result, fitted) : result;
+			async (candidateJudge, _kind, _model, prepared) => {
+				if (!prepared) return candidateJudge.judge(request, options);
+				const result = await candidateJudge.judge({ ...request, images: prepared.images }, options);
+				return prepared.fitted ? sourceBoxes(request.questions, result, prepared.fitted) : result;
 			},
 			options,
 			request,
+			requestImages.length === 0
+				? undefined
+				: async (model, kind) => {
+						if (kind === "local") return undefined;
+						const fitted = kind === "native" ? await fitNativeImages(model, requestImages) : undefined;
+						const images = fitted
+							? fitted.map(fit => fit.image)
+							: ((await normalizeModelContextImages([...requestImages], { model })) ?? []);
+						return { images, fitted };
+					},
 		);
 	}
 
@@ -424,22 +437,32 @@ export class ChainJudge implements Judge {
 
 	/** Run `run` against each candidate able to answer `request` (any candidate when omitted) until one succeeds. */
 	async #withCandidate<T>(
-		run: (judge: Judge, kind: JudgeKind, model: Model) => Promise<T>,
+		run: (judge: Judge, kind: JudgeKind, model: Model, prepared?: PreparedImages) => Promise<T>,
 		options: JudgeOptions,
 		request?: JudgmentRequest,
+		prepare?: (model: Model, kind: JudgeKind) => Promise<PreparedImages | undefined>,
 	): Promise<T> {
 		const requiresImages = (request?.images?.length ?? 0) > 0;
 		const signal = options.signal;
+		const timeoutMs = cfgJudgmentAttemptTimeoutMs.get(this.#deps.settings);
 		let lastFailure: string | undefined;
 		let lastUnavailable: string | undefined;
 		let compatibleCandidate = false;
 		let unsupportedCandidate = false;
 		const candidates = this.#resolveCandidates(request);
 		const rejections = this.#rejections();
-		for (const candidate of candidates) {
+		const timeouts = this.#timeouts();
+		// A slow judge only gives way to a fallback the user configured: the per-attempt deadline and the
+		// timed-out-route skip apply while an explicit candidate remains, and a timeout never hands the work
+		// to an implicit (priority-default or session) candidate.
+		const lastExplicitIndex = candidates.findLastIndex(candidate => candidate.explicit);
+		let timedOutBefore = false;
+		for (const [index, candidate] of candidates.entries()) {
 			if (signal?.aborted) {
 				throw signal.reason instanceof Error ? signal.reason : new AIError.AbortError("judgment aborted");
 			}
+			if (timedOutBefore && !candidate.explicit) continue;
+			const configuredFallbackRemains = index < lastExplicitIndex;
 			const identity = formatModelStringWithRouting(candidate.model);
 			const skippedUntil = rejections.get(identity);
 			if (skippedUntil !== undefined) {
@@ -449,10 +472,22 @@ export class ChainJudge implements Judge {
 				}
 				rejections.delete(identity);
 			}
+			const timeoutKey = `${this.#deps.sessionId ?? ""}\0${identity}`;
+			if (configuredFallbackRemains && (timeouts.get(timeoutKey) ?? 0) > Date.now()) {
+				lastUnavailable = `${identity} timed out recently`;
+				timedOutBefore = true;
+				continue;
+			}
 			// Outside the candidate's failure handling: a refusal ends the judgment.
 			this.#deps.costGate?.admit();
+			const kind = kindOf(candidate);
+			let timeout: AbortSignal | undefined;
 			try {
-				const judge = await this.#createJudge(candidate, signal);
+				// Image fitting is local work, not evidence that a provider route has stalled.
+				const prepared = prepare ? await untilAborted(signal, () => prepare(candidate.model, kind)) : undefined;
+				timeout = kind === "native" && configuredFallbackRemains ? AbortSignal.timeout(timeoutMs) : undefined;
+				const candidateSignal = timeout ? (signal ? AbortSignal.any([signal, timeout]) : timeout) : signal;
+				const judge = await untilAborted(candidateSignal, () => this.#createJudge(candidate, candidateSignal));
 				if (!judge) {
 					lastUnavailable = `no API key for ${candidate.model.provider}/${candidate.model.id}`;
 					continue;
@@ -463,20 +498,30 @@ export class ChainJudge implements Judge {
 					continue;
 				}
 				compatibleCandidate = true;
-				return await run(judge, kindOf(candidate), candidate.model);
+				return await untilAborted(candidateSignal, () => run(judge, kind, candidate.model, prepared));
 			} catch (error) {
 				if (signal?.aborted) {
 					throw signal.reason instanceof Error ? signal.reason : new AIError.AbortError("judgment aborted");
 				}
-				if (isAbortOrTimeout(error)) throw error;
+				const timedOut =
+					timeout !== undefined && (timeout.aborted || (error instanceof Error && error.name === "TimeoutError"));
+				if (!timedOut && isAbortOrTimeout(error)) throw error;
 				const rejected = isAccountRejection(error);
 				if (rejected) rejections.set(identity, Date.now() + CANDIDATE_REJECTION_COOLDOWN_MS);
+				if (timedOut) {
+					timeouts.set(timeoutKey, Date.now() + CANDIDATE_TIMEOUT_COOLDOWN_MS);
+					timedOutBefore = true;
+				}
 				lastFailure = error instanceof Error ? error.message : String(error);
 				logger.warn("judgment candidate failed", {
 					candidate: identity,
 					status: AIError.status(error),
 					error: lastFailure,
-					skippedForMs: rejected ? CANDIDATE_REJECTION_COOLDOWN_MS : undefined,
+					skippedForMs: rejected
+						? CANDIDATE_REJECTION_COOLDOWN_MS
+						: timedOut
+							? CANDIDATE_TIMEOUT_COOLDOWN_MS
+							: undefined,
 				});
 			}
 		}
@@ -520,6 +565,19 @@ export class ChainJudge implements Judge {
 		return (registry[kRejections] ??= new Map());
 	}
 
+	#timeouts(): Map<string, number> {
+		const registry: RegistryWithRejections = this.#deps.registry;
+		const timeouts =
+			this.#deps.sessionId === undefined
+				? (this.#anonymousTimeouts ??= new Map())
+				: (registry[kTimeouts] ??= new Map());
+		const now = Date.now();
+		for (const [identity, expiresAt] of timeouts) {
+			if (expiresAt <= now) timeouts.delete(identity);
+		}
+		return timeouts;
+	}
+
 	#resolveCandidates(request?: JudgmentRequest): RoleChainCandidate[] {
 		const { settings, registry, sessionModel } = this.#deps;
 		const { roleChain, list: chain } = cachedJudgeRoleChain(settings, registry);
@@ -545,7 +603,10 @@ export class ChainJudge implements Judge {
 		if (isJudgmentApi(model.api)) {
 			const headers = await this.#deps.registry.resolveModelHeaders(model, signal);
 			const judge = createNativeJudge(model, { apiKey, headers });
-			return nativeJudge(judge, model, this.#deps.cache, attempt => this.#report(attempt));
+			return withCandidateSignal(
+				nativeJudge(judge, model, this.#deps.cache, attempt => this.#report(attempt)),
+				signal,
+			);
 		}
 		// Resolve metadata after getApiKey so the session-sticky credential is recorded first.
 		const metadata = this.#deps.metadataResolver?.(model.provider);
@@ -598,6 +659,25 @@ class LocalTextBackend implements TextBackend {
 		if (!text) throw new Error(`judgment: local model ${this.model} returned no output`);
 		return { text };
 	}
+}
+
+/** Bind native transport cancellation even when a withCandidate callback omits its call options. */
+function withCandidateSignal(judge: Judge, parent: AbortSignal | undefined): Judge {
+	return {
+		label: judge.label,
+		...(judge.supportsImages === undefined ? {} : { supportsImages: judge.supportsImages }),
+		async judge<Q extends Questions>(
+			request: JudgmentRequest<Q>,
+			options?: JudgeOptions,
+		): Promise<JudgmentResult<Q>> {
+			const signal = parent
+				? options?.signal && options.signal !== parent
+					? AbortSignal.any([parent, options.signal])
+					: parent
+				: options?.signal;
+			return judge.judge(request, { ...options, signal });
+		},
+	};
 }
 
 /**
