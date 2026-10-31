@@ -1639,7 +1639,8 @@ export class ModelRegistry {
 				this.#internedStaticModels.delete(key);
 			}
 		}
-		this.#providerLookupSnapshots.delete(providerName);
+		// Lookup snapshots are keyed by the normalized provider id (see #modelsForProviderLookup).
+		this.#providerLookupSnapshots.delete(providerName.trim().toLowerCase());
 	}
 
 	/** A modifier runs only for a provider holding OAuth credentials; without one it cannot touch the catalog. */
