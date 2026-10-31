@@ -384,31 +384,16 @@ pub(crate) fn read_at(h: &Handle, buf: &mut [u8], off: u64) -> io::Result<usize>
 
 pub(crate) fn stat(s: &mut Scratch, path: &Path, follow: bool) -> io::Result<FileInfo> {
 	if !follow || !path.is_absolute() {
-		let meta = if follow {
-			std::fs::metadata(path)?
-		} else {
-			std::fs::symlink_metadata(path)?
-		};
-		let attrs = meta.file_attributes();
-		let file_type = if attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-			FileType::Symlink
-		} else if attrs & FILE_ATTRIBUTE_DIRECTORY != 0 {
-			FileType::Dir
-		} else {
-			FileType::File
-		};
-		let mtime = filetime_nanos(meta.last_write_time() as i64);
-		return Ok(FileInfo {
-			file_type: Some(file_type),
-			size:      if file_type == FileType::File {
-				meta.file_size()
-			} else {
-				0
-			},
-			stamp:     Stamp { dev: 0, ino: meta.creation_time(), mtime, ctime: mtime },
-		});
+		return stat_win32(path, follow);
 	}
-	let bytes = path.as_os_str().as_encoded_bytes();
+	// The NT layer takes names as spelled; Win32 rewriting (`/`, `.`/`..`,
+	// trailing dots and spaces) must happen first, as `std::fs` does.
+	let normalized;
+	let mut bytes = path.as_os_str().as_encoded_bytes();
+	if !bytes.starts_with(br"\\?\") && needs_win32_normalizing(bytes) {
+		normalized = std::path::absolute(path)?;
+		bytes = normalized.as_os_str().as_encoded_bytes();
+	}
 	s.wname.clear();
 	let rest = if let Some(rest) = bytes.strip_prefix(br"\\?\") {
 		push_wide(&mut s.wname, br"\??\");
@@ -445,7 +430,51 @@ pub(crate) fn stat(s: &mut Scratch, path: &Path, follow: bool) -> io::Result<Fil
 	if status < 0 {
 		return Err(nt_error(status));
 	}
+	// The attribute query describes a reparse point (symlink, junction)
+	// itself, not its target.
+	if info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return stat_win32(path, true);
+	}
 	Ok(info_of(&info))
+}
+
+/// [`stat`] through `std::fs`, which follows reparse points when `follow`.
+fn stat_win32(path: &Path, follow: bool) -> io::Result<FileInfo> {
+	let meta = if follow {
+		std::fs::metadata(path)?
+	} else {
+		std::fs::symlink_metadata(path)?
+	};
+	let attrs = meta.file_attributes();
+	let file_type = if attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		FileType::Symlink
+	} else if attrs & FILE_ATTRIBUTE_DIRECTORY != 0 {
+		FileType::Dir
+	} else {
+		FileType::File
+	};
+	let mtime = filetime_nanos(meta.last_write_time() as i64);
+	Ok(FileInfo {
+		file_type: Some(file_type),
+		size:      if file_type == FileType::File {
+			meta.file_size()
+		} else {
+			0
+		},
+		stamp:     Stamp { dev: 0, ino: meta.creation_time(), mtime, ctime: mtime },
+	})
+}
+
+/// Whether `GetFullPathNameW` would rewrite a non-verbatim path: `/`
+/// separators, empty components, `.`/`..` components, or a component
+/// ending in a dot or space.
+fn needs_win32_normalizing(bytes: &[u8]) -> bool {
+	let body = bytes.strip_prefix(br"\\").unwrap_or(bytes);
+	body.contains(&b'/')
+		|| body.windows(2).any(|pair| pair == br"\\")
+		|| body
+			.split(|&b| b == b'\\')
+			.any(|part| matches!(part.last(), Some(b'.' | b' ')))
 }
 
 pub(crate) fn stat_dir(h: &Handle) -> io::Result<Stamp> {

@@ -6,6 +6,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { logger, toError } from "@oh-my-pi/pi-utils";
 import { replaceFileAtomically } from "../utils/atomic-file";
 
 /**
@@ -56,7 +57,10 @@ export async function writeArtifact(path: string, content: string): Promise<numb
 		await file.slice(0, Math.min(expectedBytes, 1)).arrayBuffer();
 		await replaceFileAtomically(tempPath, path);
 	} catch (error) {
-		await fs.rm(tempPath, { force: true });
+		// Best-effort cleanup: the write or publication error is the one to report.
+		await fs.rm(tempPath, { force: true }).catch(cleanupError => {
+			logger.warn("Failed to remove staged artifact", { tempPath, error: toError(cleanupError).message });
+		});
 		throw error;
 	}
 	return expectedBytes;
