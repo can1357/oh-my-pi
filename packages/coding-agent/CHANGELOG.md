@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed a message you type while `ask` waits being ignored when an agent card, peer message or aside reached the turn first; your message now closes the dialog and is read before the earlier messages. An agent-authored steer no longer closes an ACP permission request
+- Fixed a message you type while `ask` waits being ignored when an agent card, peer message or aside reached the turn first; your message now closes the dialog and is read before the earlier messages. An agent-authored steer no longer closes an ACP permission request ([#17585](https://github.com/can1357/oh-my-pi/pull/17585) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.2] - 2026-10-31
 
