@@ -2237,47 +2237,44 @@ describe("anthropic stream envelope handling", () => {
 		},
 		{ type: "message_stop" },
 	];
+	/** A client that refuses every request, recording each request body it was sent. */
+	const refusingClient = (sent: string[]): AnthropicMessagesClientLike => ({
+		messages: {
+			create(params) {
+				sent.push(JSON.stringify(params));
+				return createMockRequest(reasoningExtractionRefusal);
+			},
+		},
+	});
 
 	it("reports the other models' reasoning a refused request replayed as text", async () => {
-		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(
-			() => createMockRequest(reasoningExtractionRefusal) as never,
-		);
-		let sentPayload = "";
+		const sent: string[] = [];
 		const result = await streamAnthropic(model, crossModelReasoningContext(), {
-			apiKey: "sk-ant-test",
-			onPayload: payload => {
-				sentPayload = JSON.stringify(payload);
-				return undefined;
-			},
+			client: refusingClient(sent),
 		}).result();
 
-		expect(sentPayload).toContain("gemini private plan");
-		expect(sentPayload).toContain("kimi private plan");
-		expect(sentPayload).toContain("opus unsigned note");
+		expect(sent).toHaveLength(1);
+		expect(sent[0]).toContain("gemini private plan");
+		expect(sent[0]).toContain("kimi private plan");
+		expect(sent[0]).toContain("opus unsigned note");
 		expect(result.errorMessage).toBe("Refusal (reasoning_extraction)");
 		expect(result.demotedReasoningBlocks).toBe(2);
 	});
 
 	it("leaves other models' reasoning out under omitDemotedReasoning and keeps a turn's own", async () => {
-		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(
-			() => createMockRequest(reasoningExtractionRefusal) as never,
-		);
-		let sentPayload = "";
+		const sent: string[] = [];
 		const result = await streamAnthropic(model, crossModelReasoningContext(), {
-			apiKey: "sk-ant-test",
+			client: refusingClient(sent),
 			omitDemotedReasoning: true,
-			onPayload: payload => {
-				sentPayload = JSON.stringify(payload);
-				return undefined;
-			},
 		}).result();
 
-		expect(sentPayload).not.toContain("gemini private plan");
-		expect(sentPayload).not.toContain("kimi private plan");
-		expect(sentPayload).toContain("Gemini answer");
-		expect(sentPayload).toContain("Kimi answer");
-		expect(sentPayload).toContain("opus signed plan");
-		expect(sentPayload).toContain("opus unsigned note");
+		expect(sent).toHaveLength(1);
+		expect(sent[0]).not.toContain("gemini private plan");
+		expect(sent[0]).not.toContain("kimi private plan");
+		expect(sent[0]).toContain("Gemini answer");
+		expect(sent[0]).toContain("Kimi answer");
+		expect(sent[0]).toContain("opus signed plan");
+		expect(sent[0]).toContain("opus unsigned note");
 		expect(result.stopReason).toBe("error");
 		expect(result.demotedReasoningBlocks).toBeUndefined();
 	});

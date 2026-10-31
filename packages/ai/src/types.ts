@@ -1362,7 +1362,7 @@ export interface AssistantMessage {
 	providerPayload?: ProviderPayload;
 	/** In-memory fallback credit handle attached when a refusal response carries a fallback credit token. */
 	fallbackCreditHandle?: AnthropicFallbackCreditHandle;
-	/** In-memory count of other models' reasoning blocks a refused request replayed as text. */
+	/** On a refusal: how many of other models' reasoning blocks the refused request replayed as text. */
 	demotedReasoningBlocks?: number;
 	timestamp: number; // Unix timestamp in milliseconds
 	duration?: number; // Request duration in milliseconds

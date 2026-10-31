@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { carriesReasoning } from "@oh-my-pi/pi-catalog/compat/reasoning-carry";
-import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
+import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { renderDemotedThinking } from "../dialect/demotion";
 import type {
@@ -986,7 +986,8 @@ export function transformMessages<TApi extends Api>(
 			const keepsBoundThinking =
 				thinkingBound &&
 				assistantMsg.provider !== model.provider &&
-				preferredDialect(assistantMsg.upstreamModel ?? assistantMsg.model) !== "anthropic";
+				classifyModel(assistantMsg.provider, assistantMsg.upstreamModel ?? assistantMsg.model, { lenient: true })
+					.class !== "anthropic";
 			const signingAnthropicInvolved = isOfficialAnthropicSource || isSigningAnthropicTarget;
 			// Compatible Anthropic-messages reasoning targets that accept
 			// unsigned thinking natively (Z.AI, DeepSeek, the generic

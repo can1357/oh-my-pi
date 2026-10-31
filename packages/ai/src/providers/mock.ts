@@ -90,7 +90,7 @@ export interface MockResponse {
 	stopDetails?: StopDetails | null;
 	/** In-memory fallback credit handle attached when a refusal response carries a fallback credit token. */
 	fallbackCreditHandle?: AnthropicFallbackCreditHandle;
-	/** In-memory count of other models' reasoning blocks the refused request replayed as text. */
+	/** On a refusal: how many of other models' reasoning blocks the refused request replayed as text. */
 	demotedReasoningBlocks?: number;
 	/** Error text paired with an explicit `"error"` stop reason. */
 	errorMessage?: string;
