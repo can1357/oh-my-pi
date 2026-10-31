@@ -1103,7 +1103,8 @@ export class ModelRegistry {
 				this.#internedStaticModels.delete(key);
 			}
 		}
-		this.#providerLookupSnapshots.delete(providerName);
+		// Lookup snapshots are keyed by the normalized provider id (see #modelsForProviderLookup).
+		this.#providerLookupSnapshots.delete(providerName.trim().toLowerCase());
 	}
 
 	/**
