@@ -367,10 +367,7 @@ export class OAuthRefresher {
 		this.#armShutdownDrain();
 		const settled = () => {
 			this.#pendingRefreshes.delete(pending);
-			if (this.#pendingRefreshes.size === 0 && !this.#shuttingDown) {
-				this.#cancelRefreshCleanup?.();
-				this.#cancelRefreshCleanup = undefined;
-			}
+			if (this.#pendingRefreshes.size === 0 && !this.#shuttingDown) this.#disarmShutdownDrain();
 		};
 		void pending.then(settled, settled);
 		return pending;
@@ -389,10 +386,39 @@ export class OAuthRefresher {
 		});
 	}
 
+	#disarmShutdownDrain(): void {
+		this.#cancelRefreshCleanup?.();
+		this.#cancelRefreshCleanup = undefined;
+	}
+
 	async #drainRefreshes(): Promise<void> {
 		this.#shuttingDown = true;
 		// Work tracked while draining (a lease hand-back a returning caller left behind) is waited for too.
 		while (this.#pendingRefreshes.size > 0) await Promise.allSettled(this.#pendingRefreshes);
+	}
+
+	/**
+	 * Stop admitting refreshes, then run `closeStore` once tracked work settles:
+	 * a token exchange already under way, its save, a lease hand-back. Runs it at
+	 * once when nothing is in flight. Closing the store under that work would
+	 * lose a refresh token the provider already rotated. Called by
+	 * {@link AuthStorage.close} and {@link AuthStorage.replaceStore}.
+	 */
+	close(closeStore: () => void): void {
+		this.#shuttingDown = true;
+		if (this.#pendingRefreshes.size === 0) {
+			this.#disarmShutdownDrain();
+			closeStore();
+			return;
+		}
+		void this.#drainRefreshes().then(() => {
+			this.#disarmShutdownDrain();
+			try {
+				closeStore();
+			} catch (error) {
+				logger.warn("Credential store close after OAuth refresh drain failed", { error: String(error) });
+			}
+		});
 	}
 
 	async #refreshStored<T extends OAuthCredential = OAuthCredential>(
