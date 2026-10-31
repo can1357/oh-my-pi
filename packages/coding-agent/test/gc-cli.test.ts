@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { randomBytes } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -37,8 +38,17 @@ let stdoutSpy: { mockRestore(): void } | undefined;
 let stderrSpy: { mockRestore(): void } | undefined;
 let settingsState: SettingsTestState | undefined;
 const originalExitCode = process.exitCode;
+// A session's lease is an abstract socket named by its id, and on Linux that
+// name is shared by the whole machine; gc takes the lease of every session
+// it archives or reclaims, subagent sessions included. Every session id
+// these tests write starts with a part made fresh for each test, so another
+// run of this file, or an earlier test still finishing in this one, does not
+// hold the lease a test needs.
+let testPrefix = "";
+const sessionId = (name: string): string => `${testPrefix}-${name}`;
 
 beforeEach(async () => {
+	testPrefix = randomBytes(4).toString("hex");
 	settingsState = beginSettingsTest();
 	root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-gc-"));
 	writes = [];
@@ -82,7 +92,13 @@ async function writeSession(
 	await fs.mkdir(sessionDir, { recursive: true });
 	const file = path.join(sessionDir, `${options.filename ?? id}.jsonl`);
 	const lines = [
-		JSON.stringify({ type: "session", version: 3, id, timestamp: "2026-01-01T00:00:00.000Z", cwd: "/tmp" }),
+		JSON.stringify({
+			type: "session",
+			version: 3,
+			id: sessionId(id),
+			timestamp: "2026-01-01T00:00:00.000Z",
+			cwd: "/tmp",
+		}),
 	];
 	if (options.blobRef) {
 		lines.push(JSON.stringify({ type: "message", message: { role: "user", content: options.blobRef } }));
@@ -275,7 +291,12 @@ describe("runGcCommand blob sweep", () => {
 		await Bun.write(
 			path.join(sessionDir, "lost.jsonl.1234567890.bak"),
 			[
-				JSON.stringify({ type: "session", version: 3, id: "lost", timestamp: "2026-01-01T00:00:00.000Z" }),
+				JSON.stringify({
+					type: "session",
+					version: 3,
+					id: sessionId("lost"),
+					timestamp: "2026-01-01T00:00:00.000Z",
+				}),
 				JSON.stringify({ type: "message", message: { role: "user", content: `blob:sha256:${referencedHash}` } }),
 				"",
 			].join("\n"),
@@ -305,7 +326,12 @@ describe("runGcCommand blob sweep", () => {
 		await Bun.write(
 			externalFile,
 			[
-				JSON.stringify({ type: "session", version: 3, id: "work", timestamp: "2026-01-01T00:00:00.000Z" }),
+				JSON.stringify({
+					type: "session",
+					version: 3,
+					id: sessionId("work"),
+					timestamp: "2026-01-01T00:00:00.000Z",
+				}),
 				JSON.stringify({ type: "message", message: { role: "user", content: `blob:sha256:${referencedHash}` } }),
 				"",
 			].join("\n"),
@@ -340,7 +366,12 @@ describe("runGcCommand blob sweep", () => {
 		await Bun.write(
 			externalFile,
 			[
-				JSON.stringify({ type: "session", version: 3, id: "work", timestamp: "2026-01-01T00:00:00.000Z" }),
+				JSON.stringify({
+					type: "session",
+					version: 3,
+					id: sessionId("work"),
+					timestamp: "2026-01-01T00:00:00.000Z",
+				}),
 				JSON.stringify({ type: "message", message: { role: "user", content: `blob:sha256:${referencedHash}` } }),
 				"",
 			].join("\n"),
@@ -379,7 +410,12 @@ describe("runGcCommand blob sweep", () => {
 			await Bun.write(
 				sessionFile,
 				[
-					JSON.stringify({ type: "session", version: 3, id: "other", timestamp: "2026-01-01T00:00:00.000Z" }),
+					JSON.stringify({
+						type: "session",
+						version: 3,
+						id: sessionId("other"),
+						timestamp: "2026-01-01T00:00:00.000Z",
+					}),
 					JSON.stringify({ type: "message", message: { role: "user", content: `blob:sha256:${referencedHash}` } }),
 					"",
 				].join("\n"),
@@ -937,7 +973,7 @@ describe("runGcCommand cold-session archive", () => {
 		const header = JSON.stringify({
 			type: "session",
 			version: 3,
-			id: "rollback",
+			id: sessionId("rollback"),
 			timestamp: "2026-01-01T00:00:00.000Z",
 			cwd: "/tmp",
 		});
@@ -996,7 +1032,12 @@ describe("runGcCommand cold-session archive", () => {
 		await Bun.write(
 			nested,
 			[
-				JSON.stringify({ type: "session", version: 3, id: "Tan-nested", timestamp: "2026-01-01T00:00:00.000Z" }),
+				JSON.stringify({
+					type: "session",
+					version: 3,
+					id: sessionId("Tan-nested"),
+					timestamp: "2026-01-01T00:00:00.000Z",
+				}),
 				JSON.stringify({ type: "message", message: { role: "user", content: "waiting" } }),
 				"",
 			].join("\n"),
@@ -1185,7 +1226,7 @@ describe("runGcCommand cold-session archive", () => {
 		const backup = path.join(sessionDir, "lost.jsonl.1234567890.bak");
 		await Bun.write(
 			backup,
-			`${JSON.stringify({ type: "session", version: 3, id: "lost", timestamp: "2026-01-01T00:00:00.000Z" })}\n`,
+			`${JSON.stringify({ type: "session", version: 3, id: sessionId("lost"), timestamp: "2026-01-01T00:00:00.000Z" })}\n`,
 		);
 
 		const result = await runGcCommand({ flags: { agentDir: root, archive: true } });
@@ -1556,7 +1597,7 @@ describe("runGcCommand session compression", () => {
 		// Unique per run: the lease is machine-wide.
 		const heldId = Bun.randomUUIDv7();
 		const held = await writeIdleSession(heldId);
-		const release = new FileSessionStorage().claimSession(heldId, held.file);
+		const release = new FileSessionStorage().claimSession(sessionId(heldId), held.file);
 		if (!release) throw new Error("Expected to claim the session lease");
 		const targets = [recent.file, recent.artifact, held.file, held.artifact];
 		const before = await Promise.all(targets.map(snapshot));
