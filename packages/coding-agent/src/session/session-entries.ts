@@ -8,6 +8,7 @@ import type {
 	Usage,
 } from "@oh-my-pi/pi-ai";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { CompactionMethod } from "./compaction-methods";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { RetryFallbackRole } from "./retry-fallback-chains";
@@ -282,6 +283,12 @@ export interface SessionInitEntry extends SessionEntryBase {
 	modelRole?: string;
 	/** Initially resolved provider/model selector for historical display. */
 	resolvedModel?: string;
+	/** The model came from a per-call `model`; cold revival re-checks it against the current operator grants. */
+	perCallModel?: boolean;
+	/** Exact canonical provider/id[@upstream] identity, without a thinking suffix; required for per-call revival. */
+	perCallModelIdentity?: string;
+	/** Configured thinking selector, or null when unset; required for per-call revival. */
+	perCallThinkingLevel?: ConfiguredThinkingLevel | null;
 	/** Subagent's `subagent:<id>` retry fallback role as installed at spawn; cold revival reinstalls it. Absent when none was installed or on older files. */
 	retryFallback?: RetryFallbackRole;
 	/** Whether the agent definition is read-only, allowing an exact zero-LoC attribution. */
