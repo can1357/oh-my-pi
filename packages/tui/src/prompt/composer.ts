@@ -105,6 +105,13 @@ export interface RuntimeChildrenOptions {
 	 */
 	readonly nativeDock?: readonly Component[];
 	/**
+	 * Below-transcript containers whose children continue `main` on a TSP
+	 * terminal, one block each after the transcript's, instead of riding in the
+	 * dock: output on its way into the transcript (shell runs deferred until the
+	 * next prompt) reads as its tail, and keeps its block when it moves in.
+	 */
+	readonly nativeTail?: readonly Container[];
+	/**
 	 * Below-transcript roots the user opens and closes (the editor surface that
 	 * drafts and dialogs swap into, docked reports). Their rows never become
 	 * part of the post-run chrome floor, so collapsing them refills the screen.
@@ -260,6 +267,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#headerAfter: readonly Component[] = [];
 	#runtimeChildren: readonly Component[] = [];
 	#nativeDock: readonly Component[] | undefined;
+	#nativeTail: readonly Container[] = [];
 	/** Cache-driven status line shown until {@link setStatusComponent} mounts the session's. */
 	#startupStatus: StatusLineComponent | undefined;
 	#runtimeMounted = false;
@@ -655,10 +663,11 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	/**
 	 * Describe the whole surface for a TSP terminal. `main` is the flowing
 	 * document: the header (welcome, extras) and every transcript block as its
-	 * own component child. `dock` is the live chrome below the transcript in
-	 * render order: pending messages, HUDs, the working row, the editor and the
-	 * status line. There is no history/viewport split: retirement, resize
-	 * replay and hover bands are ANSI concerns.
+	 * own component child, then the children of the
+	 * {@link RuntimeChildrenOptions.nativeTail} roots. `dock` is the live chrome
+	 * below the transcript in render order: pending messages, HUDs, the working
+	 * row, the editor and the status line. There is no history/viewport split:
+	 * retirement, resize replay and hover bands are ANSI concerns.
 	 */
 	describeSurface(): NativeSurface {
 		if (!this.#started || this.#stopped) return this.#nativeSurface;
@@ -675,7 +684,9 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 			} else {
 				const transcript = roots[transcriptIndex] as TranscriptContainer;
 				main.push(...roots.slice(0, transcriptIndex), ...transcript.nativeBlocks());
-				dock.push(...(this.#nativeDock ?? roots.slice(transcriptIndex + 1)));
+				for (const root of this.#nativeTail) main.push(...root.children);
+				const tail: readonly Component[] = this.#nativeTail;
+				dock.push(...(this.#nativeDock ?? roots.slice(transcriptIndex + 1).filter(root => !tail.includes(root))));
 			}
 		}
 		const previous = this.#nativeSurface;
@@ -1267,6 +1278,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		this.#chromeFloorPromoted = false;
 		this.#resetIdleChrome();
 		this.#nativeDock = options.nativeDock;
+		this.#nativeTail = options.nativeTail ?? [];
 		this.#transientChrome = new Set(options.transientChrome);
 		this.#selfClearingChrome = new Set(options.selfClearingChrome);
 		this.#transientFloor = undefined;
