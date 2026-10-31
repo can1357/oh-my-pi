@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the `/agents` mouse-hover highlight covering only part of a row; it now fills the full row width, including rows truncated with an ellipsis ([#17562](https://github.com/can1357/oh-my-pi/pull/17562) by [@wolfiesch](https://github.com/wolfiesch))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
