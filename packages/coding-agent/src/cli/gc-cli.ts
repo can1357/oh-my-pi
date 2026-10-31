@@ -62,6 +62,10 @@ import {
 	restoreArchivedSessionLocked,
 	artifactRestoreConflicts,
 	quarantineStagingRecord,
+	dropRestoreRecord,
+	restoreRecordRefusal,
+	stagingResidueNote,
+	stagingResidueUnder,
 	type StagingGround,
 	type StagingQuarantine,
 } from "../session/session-archive";
@@ -1245,6 +1249,13 @@ interface ArchiveCopyState {
 	ledger: string;
 	/** What this copy left alone because it was no longer its own to remove. */
 	notes: string[];
+	/**
+	 * The record naming an entry of the live tree as a killed run's staging
+	 * directory, when one does. Such a directory is not an artifact: it is
+	 * left where it is, uncopied, and `gc --archive` lists it under
+	 * `stagingResidue`.
+	 */
+	residue: (entry: string) => string | undefined;
 }
 
 /**
@@ -1521,6 +1532,7 @@ async function copyArtifactEntryIntoArchive(
 	sourceRoot: string,
 	state: ArchiveCopyState,
 ): Promise<void> {
+	if (state.residue(source) !== undefined) return;
 	const stat = await fs.stat(source).catch(error => {
 		// A link whose target is already gone: one of them must not make a
 		// session unarchivable forever.
@@ -1839,6 +1851,7 @@ async function proveLiveTreeIsArchived(
 	destination: string,
 	sourceRoot: string,
 	proven: { files: ProvenEntry[]; directories: string[] },
+	residue: (entry: string) => string | undefined,
 ): Promise<void> {
 	const stat = await fs.lstat(source).catch(error => {
 		if (codeOf(error) === "ENOENT") return undefined;
@@ -1846,8 +1859,27 @@ async function proveLiveTreeIsArchived(
 	});
 	if (!stat) return;
 	if (stat.isDirectory()) {
+		// A killed restore's stage, which the archive does not take: giving
+		// up the live tree would remove it, and its record would then name
+		// nothing a later run could find.
+		const record = residue(source);
+		if (record !== undefined) {
+			throw new Error(
+				stagingResidueNote(
+					source,
+					record,
+					"in the live artifact tree, where a killed restore leaves its stage, so a reclaim keeps it and the tree it is in",
+				),
+			);
+		}
 		for (const entry of (await fs.readdir(source)).sort()) {
-			await proveLiveTreeIsArchived(path.join(source, entry), path.join(destination, entry), sourceRoot, proven);
+			await proveLiveTreeIsArchived(
+				path.join(source, entry),
+				path.join(destination, entry),
+				sourceRoot,
+				proven,
+				residue,
+			);
 		}
 		// Appended after its children, so the list reads deepest first and a
 		// directory is empty by the time the removal reaches it. Prepending
@@ -1857,10 +1889,18 @@ async function proveLiveTreeIsArchived(
 		return;
 	}
 	if (!stat.isFile()) {
-		// A link the copy resolved rather than carried, or a device: its own
-		// name is all there is to drop, and there is nothing to compare. What
-		// is recorded is one look at it, and it has to be the entry the walk
-		// just found — a file put in its place would go uncompared.
+		// A FIFO, a socket or a device: the archive holds nothing for it, so
+		// giving up the live tree would remove something no copy has.
+		if (!stat.isSymbolicLink()) {
+			throw new Error(
+				`${source} is ${stat.isFIFO() ? "a FIFO" : stat.isSocket() ? "a socket" : "a device"}, which the archive cannot ` +
+					`hold, so the live tree was kept; move it out of the tree to give this session's live copy up`,
+			);
+		}
+		// A link the copy resolved rather than carried: its own name is all
+		// there is to drop, and there is nothing to compare. What is recorded
+		// is one look at it, and it has to be the entry the walk just found —
+		// a file put in its place would go uncompared.
 		const seen = await lookAt(source);
 		if (!seen || !sameIdentity({ ...seen, target: undefined }, identityFrom(stat))) {
 			throw new Error(`${source} changed while this run was looking at it; it was kept`);
@@ -1971,7 +2011,8 @@ async function copyArtifactsTree(
 	ledger: string,
 ): Promise<{ brokenLinks: number; notes: string[] }> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
-	const state: ArchiveCopyState = { brokenLinks: 0, created: [], recovery, ledger, notes: [] };
+	const residue = await stagingResidueUnder(path.dirname(ledger), source);
+	const state: ArchiveCopyState = { brokenLinks: 0, created: [], recovery, ledger, notes: [], residue };
 	try {
 		await copyArtifactEntryIntoArchive(source, destination, source, state);
 	} catch (error) {
@@ -2083,7 +2124,11 @@ async function copySessionIntoArchive(candidate: ArchiveCandidate): Promise<{ br
 	if (await pathExists(record)) {
 		const outstanding = await archivedPathsWithoutLiveCopies(destSession, sourceSession);
 		if (outstanding.length === 0) {
-			await fs.rm(record, { force: true });
+			try {
+				await dropRestoreRecord(record);
+			} catch (error) {
+				notes.push(errorMessage(error));
+			}
 		} else {
 			notes.push(
 				`${sourceSession} is still missing ${outstanding.length} of the entries the archive holds ` +
@@ -2563,18 +2608,29 @@ export function renderText(result: GcResult): string {
 }
 
 /**
- * What `--restore --apply` would refuse in the artifact tree, for the
- * preview to say first. A preview that checks only the transcript exits 0
- * over a destination that applying then reports.
+ * What `--restore --apply` would refuse, for the preview to say first: what
+ * stands at the restore record's name, and conflicts in the artifact tree. A
+ * preview that checks only the transcript exits 0 over a refusal applying
+ * then reports.
  */
 async function previewArtifactConflicts(archiveFile: string, sessionPath: string, agentDir: string): Promise<string[]> {
+	const refusals: string[] = [];
 	try {
-		return (await artifactRestoreConflicts(archiveFile, sessionPath, agentDir)).map(
-			conflict => `the artifact tree would not be restored whole: ${conflict}`,
+		const record = await restoreRecordRefusal(restoreRecordPath(archiveFile));
+		if (record) refusals.push(record);
+	} catch (error) {
+		refusals.push(`${restoreRecordPath(archiveFile)} could not be looked at: ${errorMessage(error)}`);
+	}
+	try {
+		refusals.push(
+			...(await artifactRestoreConflicts(archiveFile, sessionPath, agentDir)).map(
+				conflict => `the artifact tree would not be restored whole: ${conflict}`,
+			),
 		);
 	} catch (error) {
-		return [`the artifact tree could not be checked: ${errorMessage(error)}`];
+		refusals.push(`the artifact tree could not be checked: ${errorMessage(error)}`);
 	}
+	return refusals;
 }
 
 /**
@@ -2659,7 +2715,7 @@ async function runRestoreGc(options: ResolvedGcOptions, query: string): Promise<
 		result.artifactsRestored = restored.artifactsRestored;
 		// An artifact tree left behind — a conflict, or a recorded staging
 		// directory it left out — is a half-restored session, not a note.
-		result.errors.push(...restored.notRestored.map(note => `could not restore ${note}`));
+		result.errors.push(...restored.notRestored);
 		result.notRestored.push(...restored.notRestored);
 	} catch (error) {
 		result.errors.push(errorMessage(error));
@@ -2824,7 +2880,8 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 		if (await pathExists(liveArtifacts)) {
 			const preview = { files: [] as ProvenEntry[], directories: [] as string[] };
 			try {
-				await proveLiveTreeIsArchived(liveArtifacts, archiveArtifacts, liveArtifacts, preview);
+				const residue = await stagingResidueUnder(options.agentDir, liveArtifacts);
+				await proveLiveTreeIsArchived(liveArtifacts, archiveArtifacts, liveArtifacts, preview, residue);
 				const probed: SessionTreeLeases = { leases: [], leasedIds: new Set(), transcripts: new Set() };
 				const kept = await leaseProvedTranscripts(probed, preview);
 				for (const held of probed.leases) held.release();
@@ -2896,7 +2953,8 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 		const proven = { files: [] as ProvenEntry[], directories: [] as string[] };
 		if (await pathExists(liveArtifacts)) {
 			try {
-				await proveLiveTreeIsArchived(liveArtifacts, archiveArtifacts, liveArtifacts, proven);
+				const residue = await stagingResidueUnder(options.agentDir, liveArtifacts);
+				await proveLiveTreeIsArchived(liveArtifacts, archiveArtifacts, liveArtifacts, proven, residue);
 			} catch (error) {
 				await keepTree();
 				result.errors.push(`${liveArtifacts} was kept: ${errorMessage(error)}`);

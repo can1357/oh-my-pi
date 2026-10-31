@@ -13,6 +13,7 @@ import {
 import { resolveSessionFileArg } from "@oh-my-pi/pi-coding-agent/cli/session-arg";
 import { exportFromFile } from "@oh-my-pi/pi-coding-agent/export/html";
 import {
+	ARCHIVED_RESIDUE,
 	getArchivedSessionsDir,
 	materializeSessionFile,
 	mintStagingGround,
@@ -22,6 +23,7 @@ import {
 	type StagingGround,
 	restoreRecordPath,
 	stagingLedgerDir,
+	stagingResidueNote,
 } from "@oh-my-pi/pi-coding-agent/session/session-archive";
 import { withGcLock } from "@oh-my-pi/pi-coding-agent/session/gc-lock";
 import { resolveResumableSession, resolveResumeTarget } from "@oh-my-pi/pi-coding-agent/session/session-listing";
@@ -3007,17 +3009,20 @@ test("re-archiving an incompletely restored session keeps the record and says wh
 
 test("a restore whose record cannot be written releases the leases it took", async () => {
 	await archiveEverything();
-	const realWriteFile = fs.writeFile;
-	const writeFile = spyOn(fs, "writeFile").mockImplementation((async (target: string, ...rest: unknown[]) => {
-		if (String(target).endsWith(".restoring")) {
+	// The record is written into a file made for it, then renamed into place;
+	// the failure is injected where that file is made.
+	const record = restoreRecordPath(archiveFile);
+	const realOpen = fs.open;
+	const open = spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
+		if (String(target).startsWith(`${record}.`) && rest[0] === "wx") {
 			throw Object.assign(new Error("ENOSPC: injected"), { code: "ENOSPC" });
 		}
-		return await (realWriteFile as (...args: unknown[]) => Promise<void>)(target, ...rest);
-	}) as typeof fs.writeFile);
+		return await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
+	}) as typeof fs.open);
 	try {
 		await expect(restoreArchivedSession(archiveFile, root)).rejects.toThrow("ENOSPC");
 	} finally {
-		writeFile.mockRestore();
+		open.mockRestore();
 	}
 
 	// A lease held past the failure makes every later attempt report that a
@@ -4014,6 +4019,159 @@ for (const obstacle of ["a destination holding something else", "a destination p
 	});
 }
 
+test("the restore's advice names the quarantine, which moves the stage outside both trees when the agent directory resolves into a session tree", async () => {
+	const base = path.join(root, "nest");
+	const agentDir = path.join(base, "agent");
+	await fs.mkdir(path.join(agentDir, "archive", "sessions", "x"), { recursive: true });
+	await fs.symlink(base, path.join(agentDir, "sessions"));
+	const ground = await mintStagingGround(
+		path.join(agentDir, "archive", "sessions", "x", "b.log"),
+		stagingLedgerDir(agentDir),
+	);
+	await ground.handle.writeFile("PARTIAL STAGE");
+	await ground.handle.close();
+	const record = path.basename(ground.record);
+
+	const advice = stagingResidueNote(ground.dir, ground.record, ARCHIVED_RESIDUE);
+	expect(advice).toContain(`omp gc --quarantine ${record} --apply --agent-dir ${agentDir}`);
+	const moved = await runGcCommand({ flags: { agentDir, quarantine: record, apply: true, json: true } });
+
+	expect(moved.quarantine?.errors).toEqual([]);
+	expect(moved.quarantine?.moved).toBe(true);
+	const quarantine = moved.quarantine?.quarantine ?? "";
+	expect(await Bun.file(path.join(quarantine, path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
+	// Where it landed, by real path: outside both trees, the nested one included.
+	const landed = await fs.realpath(quarantine);
+	for (const tree of [path.join(agentDir, "sessions"), path.join(agentDir, "archive", "sessions")]) {
+		const real = await fs.realpath(tree);
+		expect(landed === real || landed.startsWith(`${real}${path.sep}`)).toBe(false);
+	}
+});
+
+// What a restore killed while it staged leaves: its recorded stage, part
+// written, in the live artifact tree, where every restore stages.
+async function restoredWithKilledLiveStage(): Promise<{ ground: StagingGround; liveArtifacts: string }> {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	await archiveEverything();
+	const first = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+	expect(first.restore?.errors).toEqual([]);
+	const ground = await mintStagingGround(path.join(liveArtifacts, "b.log"), stagingLedgerDir(root));
+	await ground.handle.writeFile("PARTIAL STAGE");
+	await ground.handle.close();
+	return { ground, liveArtifacts };
+}
+
+test("a killed restore's recorded stage in the live tree makes the restore say so, with the recovery, in its preview as in applying", async () => {
+	const { ground, liveArtifacts } = await restoredWithKilledLiveStage();
+
+	const preview = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, json: true } });
+	const retried = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+
+	for (const run of [preview, retried]) {
+		const told = run.restore?.errors.join("\n") ?? "";
+		expect(told).toContain(ground.dir);
+		expect(told).toContain(`--quarantine ${path.basename(ground.record)} --apply`);
+	}
+	expect(retried.restore?.errors.join("\n")).not.toContain("could not restore");
+	expect(await Bun.file(restoreRecordPath(archiveFile)).exists()).toBe(true);
+
+	// The step the advice gives.
+	const moved = await runGcCommand({
+		flags: { agentDir: root, quarantine: path.basename(ground.record), apply: true, json: true },
+	});
+	expect(moved.quarantine?.errors).toEqual([]);
+	expect(moved.quarantine?.moved).toBe(true);
+	const finished = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+	expect(finished.restore?.errors).toEqual([]);
+	expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
+	expect(await Bun.file(restoreRecordPath(archiveFile)).exists()).toBe(false);
+});
+
+test("a killed restore's recorded stage in the live tree is not archived, and a reclaim keeps it, naming it", async () => {
+	const { ground, liveArtifacts } = await restoredWithKilledLiveStage();
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+
+	// The reviews' sequence on from there, with nothing removed or forged:
+	// an ordinary archive run, a reclaim, and a restore.
+	await archiveOnly();
+	expect(await fs.readdir(archivedArtifacts)).not.toContain(path.basename(ground.dir));
+	const reclaimed = await runGcCommand({
+		flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+	});
+	const restored = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+
+	expect(reclaimed.reclaim?.reclaimed).toBe(0);
+	expect(reclaimed.reclaim?.errors.join("\n")).toContain(ground.dir);
+	expect(reclaimed.reclaim?.errors.join("\n")).toContain(`--quarantine ${path.basename(ground.record)} --apply`);
+	expect(await Bun.file(ground.file).text()).toBe("PARTIAL STAGE");
+	expect(await Bun.file(ground.record).exists()).toBe(true);
+	expect(restored.restore?.errors.join("\n")).toContain(ground.dir);
+	expect((await fs.readdir(liveArtifacts)).sort()).toEqual(["a.log", path.basename(ground.dir)].sort());
+});
+
+for (const occupant of [
+	"a symlink to somebody's file",
+	"a FIFO",
+	"a directory",
+	"a file of somebody's notes",
+	"a read-only file of somebody's notes",
+] as const) {
+	test(`a restore refuses ${occupant} at its record's name, in its preview as in applying, and writes nothing through it`, async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+		await archiveEverything();
+		const record = restoreRecordPath(archiveFile);
+		const precious = path.join(root, "precious");
+		await Bun.write(precious, "ONLY COPY OF IRREPLACEABLE USER DATA");
+		if (occupant === "a symlink to somebody's file") await fs.symlink(precious, record);
+		else if (occupant === "a FIFO") expect(await Bun.spawn(["mkfifo", record]).exited).toBe(0);
+		else if (occupant === "a directory") await fs.mkdir(record);
+		else {
+			// The name being a restore record's says nothing about what holds it.
+			await fs.link(precious, record);
+			if (occupant === "a read-only file of somebody's notes") await fs.chmod(record, 0o400);
+		}
+		const before = await fs.lstat(record);
+
+		const preview = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, json: true } });
+		const applied = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+
+		for (const run of [preview, applied]) expect(run.restore?.errors.join("\n")).toContain(record);
+		const after = await fs.lstat(record);
+		expect([after.ino, after.mode]).toEqual([before.ino, before.mode]);
+		expect(await Bun.file(precious).text()).toBe("ONLY COPY OF IRREPLACEABLE USER DATA");
+		expect(await Bun.file(sessionFile).exists()).toBe(false);
+	});
+}
+
+test("a reclaim keeps a live tree holding a FIFO the archive could not hold", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	const pipe = path.join(liveArtifacts, "pipe");
+	expect(await Bun.spawn(["mkfifo", pipe]).exited).toBe(0);
+	await archiveOnly();
+
+	const reclaimed = await runGcCommand({
+		flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+	});
+
+	expect(reclaimed.reclaim?.reclaimed).toBe(0);
+	expect(reclaimed.reclaim?.errors.join("\n")).toContain(pipe);
+	expect((await fs.lstat(pipe)).isFIFO()).toBe(true);
+	expect(await Bun.file(sessionFile).exists()).toBe(true);
+});
+
+test("a staging record naming a relative path is not one a gc run wrote", async () => {
+	const { ground, liveArtifacts } = await archivedWithKilledStage();
+	const entry = JSON.parse(await Bun.file(ground.record).text());
+	await Bun.write(ground.record, JSON.stringify({ ...entry, dir: path.relative(process.cwd(), entry.dir) }));
+
+	const restored = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+
+	expect(restored.restore?.errors.join("\n")).toContain(`${ground.record} could not be read`);
+	expect(await fs.stat(path.join(liveArtifacts, path.basename(ground.dir))).catch(() => undefined)).toBeUndefined();
+});
 for (const shape of [
 	"a file identity without a directory identity",
 	"a directory identity without a file identity",
