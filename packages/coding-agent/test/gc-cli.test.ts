@@ -1,8 +1,10 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { constants as fsConstants, type Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Readable } from "node:stream";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
 import {
@@ -12,11 +14,16 @@ import {
 } from "@oh-my-pi/pi-coding-agent/cli/gc-auto-compress";
 import { type GcResult, runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
 import * as gcCompress from "@oh-my-pi/pi-coding-agent/cli/gc-compress";
+import { GC_BLOBS_WARNING } from "@oh-my-pi/pi-coding-agent/cli/gc-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { BlobStore, blobStagingPath } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { FileSessionStorage, sessionStagingPath } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import {
+	FileSessionStorage,
+	sessionStagingPath,
+	tryAcquireSessionLease,
+} from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import {
 	getAgentDir,
 	getBlobsDir,
@@ -176,6 +183,849 @@ describe("runGcCommand blob sweep", () => {
 		expect(result.blobs?.deleted).toBe(1);
 		expect(await Bun.file(orphan).exists()).toBe(false);
 		expect(await Bun.file(referenced).exists()).toBe(true);
+	});
+	test("refuses to reclaim any blob while a session is reachable through a symlink", async () => {
+		const referencedHash = hashFor("referenced");
+		const orphanHash = hashFor("orphan");
+		const referenced = await writeBlob(root, referencedHash, "referenced");
+		const orphan = await writeBlob(root, orphanHash, "orphan");
+		await agePath(referenced);
+		await agePath(orphan);
+		// A transcript kept elsewhere and linked into the sessions tree.
+		// Reclaiming blobs means proving which files are reachable as
+		// sessions, and that proof is not available through a link, so the
+		// whole phase refuses rather than guessing — including for the
+		// orphan, which this run can no longer show is unreferenced.
+		const elsewhere = path.join(root, "elsewhere");
+		await fs.mkdir(elsewhere, { recursive: true });
+		const offloaded = await writeSession(root, "project", "linked", "complete", {
+			blobRef: `blob:sha256:${referencedHash}`,
+		});
+		const moved = path.join(elsewhere, path.basename(offloaded));
+		await fs.rename(offloaded, moved);
+		await fs.symlink(moved, offloaded);
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect(result.blobs?.errors.join("\n")).toContain("reachable as a session through a symlink");
+		expect(await Bun.file(referenced).exists()).toBe(true);
+		expect(await Bun.file(orphan).exists()).toBe(true);
+	});
+	test("reads a compressed transcript by its bytes, whatever its name is", async () => {
+		const innerHash = hashFor("compressed-inner");
+		const inner = await writeBlob(root, innerHash, "inner");
+		const orphan = await writeBlob(root, hashFor("compressed-orphan"), "orphan");
+		await agePath(inner);
+		await agePath(orphan);
+		// A compressed transcript stored under a content-addressed name has
+		// no `.jsonl.gz` suffix to read. Deciding the format from the name
+		// parsed it as plain text, saw none of its references and swept the
+		// blob it owns; the first two bytes say what it is.
+		const externalDir = path.join(root, "external-sessions");
+		await fs.mkdir(externalDir, { recursive: true });
+		const transcript = path.join(externalDir, hashFor("compressed-transcript"));
+		await Bun.write(
+			transcript,
+			gzipSync(`${JSON.stringify({ type: "message", ref: `blob:sha256:${innerHash}` })}\n`),
+		);
+		const registryDir = getCustomSessionFilesDir(root);
+		await fs.mkdir(registryDir, { recursive: true });
+		await Bun.write(path.join(registryDir, "session-1"), transcript);
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.deleted).toBe(1);
+		expect(await Bun.file(inner).exists()).toBe(true);
+		expect(await Bun.file(orphan).exists()).toBe(false);
+	});
+
+	test("refuses to reclaim when it cannot read back what the kernel opened", async () => {
+		const orphan = await writeBlob(root, hashFor("unknowable-orphan"), "orphan");
+		await agePath(orphan);
+		await writeSession(root, "project", "plain", "complete");
+
+		// Without `/proc/self/fd` this run cannot say which file it holds,
+		// and a sweep that cannot say that has nothing to reclaim on.
+		const realReadlink = fs.readlink;
+		const readlink = spyOn(fs, "readlink").mockImplementation((async (target: string, ...rest: unknown[]) => {
+			if (String(target).startsWith("/proc/self/fd/")) {
+				throw Object.assign(new Error("ENOSYS: injected"), { code: "ENOSYS" });
+			}
+			return await (realReadlink as (...args: unknown[]) => Promise<string>)(target, ...rest);
+		}) as typeof fs.readlink);
+		let result: GcResult;
+		try {
+			result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+		} finally {
+			readlink.mockRestore();
+		}
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect(result.blobs?.errors.join("\n")).toContain("could not establish how it was reached");
+		expect(await Bun.file(orphan).exists()).toBe(true);
+	});
+	for (const [order, aliasName] of [
+		["before", "a-alias.jsonl"],
+		["after", "z-alias.jsonl"],
+	] as const) {
+		test(`sees an aliased session whichever way it sorts (${order})`, async () => {
+			const referencedHash = hashFor("alias-referenced");
+			const referenced = await writeBlob(root, referencedHash, "referenced");
+			const orphan = await writeBlob(root, hashFor("alias-orphan"), "orphan");
+			await agePath(referenced);
+			await agePath(orphan);
+			const direct = await writeSession(root, "project", "m-direct", "complete", {
+				blobRef: `blob:sha256:${referencedHash}`,
+			});
+			// A second name for the same session, through the blob store.
+			// Collapsing the two names before opening them dropped one of
+			// them — and with it the check that would have refused — and
+			// which one survived depended on the sort order.
+			const hop = path.join(getBlobsDir(root), hashFor("alias-hop"));
+			await fs.symlink(direct, hop);
+			await fs.symlink(hop, path.join(path.dirname(direct), aliasName));
+			const aged = new Date(Date.now() - 86_400_000);
+			await fs.lutimes(hop, aged, aged);
+
+			const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+			expect(result.blobs?.deleted).toBe(0);
+			expect(result.blobs?.errors.join("\n")).toContain("reachable as a session through a symlink");
+			expect(await Bun.file(referenced).exists()).toBe(true);
+			expect(await Bun.file(orphan).exists()).toBe(true);
+			expect((await fs.lstat(hop)).isSymbolicLink()).toBe(true);
+		});
+	}
+	test("does not let one name source collapse another's entry", async () => {
+		const referencedHash = hashFor("merge-referenced");
+		const referenced = await writeBlob(root, referencedHash, "referenced");
+		const orphan = await writeBlob(root, hashFor("merge-orphan"), "orphan");
+		await agePath(referenced);
+		await agePath(orphan);
+		// One physical transcript with two names from two sources: the
+		// registry records it through a symlinked directory inside the blob
+		// store, the breadcrumb names the file directly. Merging the sources
+		// under a normalised key let the breadcrumb overwrite the registry's
+		// entry, and the route that would have been refused was gone before
+		// any check ran.
+		const external = path.join(root, "external-sessions");
+		await fs.mkdir(external, { recursive: true });
+		const transcript = path.join(external, "current.jsonl");
+		await Bun.write(transcript, `${JSON.stringify({ type: "message", ref: `blob:sha256:${referencedHash}` })}\n`);
+		const linkedDir = path.join(getBlobsDir(root), hashFor("merge-dir"));
+		await fs.symlink(external, linkedDir);
+		const aged = new Date(Date.now() - 86_400_000);
+		await fs.lutimes(linkedDir, aged, aged);
+		const registryDir = getCustomSessionFilesDir(root);
+		await fs.mkdir(registryDir, { recursive: true });
+		await Bun.write(path.join(registryDir, "session-1"), path.join(linkedDir, "current.jsonl"));
+		const crumbDir = getTerminalSessionsDir(root);
+		await fs.mkdir(crumbDir, { recursive: true });
+		await Bun.write(path.join(crumbDir, "tty-1"), `${external}\ncurrent.jsonl\n`);
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect(result.blobs?.errors.join("\n")).toContain("reachable as a session through a symlink");
+		expect(await Bun.file(referenced).exists()).toBe(true);
+		expect(await Bun.file(orphan).exists()).toBe(true);
+		expect((await fs.lstat(linkedDir)).isSymbolicLink()).toBe(true);
+	});
+
+	test("still holds each session's lease while it deletes", async () => {
+		const orphan = await writeBlob(root, hashFor("held-orphan"), "orphan");
+		await agePath(orphan);
+		const session = await writeSession(root, "project", "held", "complete");
+		const header: unknown = JSON.parse((await Bun.file(session).text()).split("\n")[0] ?? "{}");
+		const sessionId =
+			header && typeof header === "object" && "id" in header && typeof header.id === "string" ? header.id : "";
+		expect(sessionId).not.toBe("");
+
+		// A lease taken and given back is a question about a moment that has
+		// passed: the writer it is about starts between the release and the
+		// deletion and adds a reference to a blob this run has already judged
+		// unreferenced. So the lease has to still be held here.
+		let heldDuringDeletion: boolean | undefined;
+		const realUnlink = fs.unlink;
+		const unlink = spyOn(fs, "unlink").mockImplementation(async target => {
+			if (heldDuringDeletion === undefined) {
+				const contender = tryAcquireSessionLease(sessionId);
+				heldDuringDeletion = contender === null;
+				contender?.release();
+			}
+			return await realUnlink(target);
+		});
+		try {
+			await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+		} finally {
+			unlink.mockRestore();
+		}
+
+		expect(heldDuringDeletion).toBe(true);
+		// And released afterwards, so the next writer is not locked out.
+		const after = tryAcquireSessionLease(sessionId);
+		expect(after).not.toBeNull();
+		after?.release();
+	});
+	test("deletes nothing when a session appears while it is deciding", async () => {
+		const orphan = await writeBlob(root, hashFor("fork-orphan"), "orphan");
+		await agePath(orphan);
+		await writeSession(root, "project", "parent", "complete");
+		// A session created after collection cannot be covered by a lease
+		// taken at collection: `forkFrom` gives the new journal the parent's
+		// blob references, and a manager whose session was collected moves
+		// to a sibling by design. No symlink, nothing hostile — the set of
+		// sessions simply is not a snapshot.
+		const realReaddir = fs.readdir;
+		let forked = false;
+		const readdir = spyOn(fs, "readdir").mockImplementation((async (target: string, ...rest: unknown[]) => {
+			if (!forked && String(target) === getBlobsDir(root)) {
+				forked = true;
+				await Bun.write(
+					path.join(getSessionsDir(root), "project", "forked.jsonl"),
+					`${JSON.stringify({ type: "message", ref: `blob:sha256:${hashFor("fork-orphan")}` })}\n`,
+				);
+			}
+			return await (realReaddir as (...args: unknown[]) => Promise<unknown>)(target, ...rest);
+		}) as typeof fs.readdir);
+		let result: GcResult;
+		try {
+			result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+		} finally {
+			readdir.mockRestore();
+		}
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect(result.blobs?.errors.join("\n")).toContain("appeared while the sweep was deciding");
+		expect(await Bun.file(orphan).exists()).toBe(true);
+	});
+
+	test("deletes nothing when a collected session grows while it is deciding", async () => {
+		const orphan = await writeBlob(root, hashFor("grow-orphan"), "orphan");
+		await agePath(orphan);
+		const session = await writeSession(root, "project", "growing", "complete");
+		// The same room, changed rather than added to: an append after the
+		// read can carry a reference to a blob this run has already judged
+		// unreferenced.
+		const realReaddir = fs.readdir;
+		let appended = false;
+		const readdir = spyOn(fs, "readdir").mockImplementation((async (target: string, ...rest: unknown[]) => {
+			if (!appended && String(target) === getBlobsDir(root)) {
+				appended = true;
+				await fs.appendFile(
+					session,
+					`${JSON.stringify({ type: "message", ref: `blob:sha256:${hashFor("grow-orphan")}` })}\n`,
+				);
+			}
+			return await (realReaddir as (...args: unknown[]) => Promise<unknown>)(target, ...rest);
+		}) as typeof fs.readdir);
+		let result: GcResult;
+		try {
+			result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+		} finally {
+			readdir.mockRestore();
+		}
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect(result.blobs?.errors.join("\n")).toContain("changed while the sweep was deciding");
+		expect(await Bun.file(orphan).exists()).toBe(true);
+	});
+
+	for (const [source, place] of [
+		["the registry", "registry"],
+		["the breadcrumbs", "breadcrumbs"],
+	] as const) {
+		test(`does not collapse two names within ${source}`, async () => {
+			const referencedHash = hashFor(`within-${place}-referenced`);
+			const referenced = await writeBlob(root, referencedHash, "referenced");
+			const orphan = await writeBlob(root, hashFor(`within-${place}-orphan`), "orphan");
+			await agePath(referenced);
+			await agePath(orphan);
+			const external = path.join(root, `external-${place}`);
+			await fs.mkdir(external, { recursive: true });
+			const transcript = path.join(external, "current.jsonl");
+			await Bun.write(transcript, `${JSON.stringify({ type: "message", ref: `blob:sha256:${referencedHash}` })}\n`);
+			// Two entries in one source naming one physical file by two
+			// routes. Collapsing them inside the source is the same defect as
+			// collapsing them across sources: the route that would have been
+			// refused goes with the entry that loses.
+			const linkedDir = path.join(getBlobsDir(root), hashFor(`within-${place}-dir`));
+			await fs.symlink(external, linkedDir);
+			const aged = new Date(Date.now() - 86_400_000);
+			await fs.lutimes(linkedDir, aged, aged);
+			const linkedName = path.join(linkedDir, "current.jsonl");
+			if (place === "registry") {
+				const registryDir = getCustomSessionFilesDir(root);
+				await fs.mkdir(registryDir, { recursive: true });
+				await Bun.write(path.join(registryDir, "a-direct"), transcript);
+				await Bun.write(path.join(registryDir, "z-linked"), linkedName);
+			} else {
+				const crumbDir = getTerminalSessionsDir(root);
+				await fs.mkdir(crumbDir, { recursive: true });
+				await Bun.write(path.join(crumbDir, "tty-a"), `${external}\ncurrent.jsonl\n`);
+				await Bun.write(path.join(crumbDir, "tty-z"), `${linkedDir}\ncurrent.jsonl\n`);
+			}
+
+			const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+			expect(result.blobs?.deleted).toBe(0);
+			expect(result.blobs?.errors.join("\n")).toContain("reachable as a session through a symlink");
+			expect(await Bun.file(referenced).exists()).toBe(true);
+			expect(await Bun.file(orphan).exists()).toBe(true);
+			expect((await fs.lstat(linkedDir)).isSymbolicLink()).toBe(true);
+		});
+	}
+	test("refuses to reclaim while a running process owns a session", async () => {
+		const orphan = await writeBlob(root, hashFor("owned-orphan"), "orphan");
+		await agePath(orphan);
+		const session = await writeSession(root, "project", "owned", "complete");
+		const header: unknown = JSON.parse((await Bun.file(session).text()).split("\n")[0] ?? "{}");
+		const sessionId =
+			header && typeof header === "object" && "id" in header && typeof header.id === "string" ? header.id : "";
+		expect(sessionId).not.toBe("");
+		// A descriptor freezes the file's identity, not its bytes: omp's own
+		// writer truncates in place to roll back a failed append and
+		// rewrites the title slot through `r+`, so an ordinary concurrent
+		// session can change what this run already read. The lease is what
+		// says somebody is writing.
+		const lease = tryAcquireSessionLease(sessionId);
+		expect(lease).not.toBeNull();
+		let result: GcResult;
+		try {
+			result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+		} finally {
+			lease?.release();
+		}
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect(result.blobs?.errors.join("\n")).toContain("owned by a running process");
+		expect(await Bun.file(orphan).exists()).toBe(true);
+	});
+	for (const [route, flags] of [
+		["the flag", { blobs: true }],
+		["a configured sweep", {}],
+	] as const) {
+		test(`warns that reclamation needs a quiescent machine (${route})`, async () => {
+			await writeBlob(root, hashFor(`warn-${route.length}`), "orphan");
+			if (route === "a configured sweep") {
+				await fs.mkdir(path.join(root, "config"), { recursive: true });
+				await Bun.write(path.join(root, "settings.json"), JSON.stringify({ gc: { blobs: true } }));
+			}
+
+			const written: string[] = [];
+			const stdout = spyOn(process.stdout, "write").mockImplementation(chunk => {
+				written.push(String(chunk));
+				return true;
+			});
+			let result: GcResult;
+			try {
+				result = await runGcCommand({ flags: { agentDir: root, ...flags, apply: true } });
+			} finally {
+				stdout.mockRestore();
+			}
+			const text = written.join("");
+
+			// A configured sweep is the one nobody typed, and a JSON caller is
+			// the one who automated it, so both routes carry the same string
+			// from the same place.
+			expect(result.blobs).toBeDefined();
+			expect(result.warnings?.join("\n")).toContain(GC_BLOBS_WARNING);
+			expect(text).toContain("Quiescent machines only");
+			expect(text).toContain("Stop every session writer first");
+			expect(text).toContain("omp gc --wal --apply");
+		});
+	}
+	for (const json of [false, true]) {
+		test(`says what it deleted when a later phase fails (${json ? "json" : "text"})`, async () => {
+			const orphan = await writeBlob(root, hashFor(`late-fail-${json}`), "orphan");
+			await agePath(orphan);
+			// A database for the checkpoint phase to reach.
+			await fs.mkdir(path.dirname(getHistoryDbPath(root)), { recursive: true });
+			const db = new Database(getHistoryDbPath(root), { create: true });
+			db.run("PRAGMA journal_mode = WAL");
+			db.run("CREATE TABLE IF NOT EXISTS t (x INTEGER)");
+			db.run("INSERT INTO t (x) VALUES (1)");
+			db.close();
+
+			const written: string[] = [];
+			const errors: string[] = [];
+			const stdout = spyOn(process.stdout, "write").mockImplementation(chunk => {
+				written.push(String(chunk));
+				return true;
+			});
+			const stderr = spyOn(process.stderr, "write").mockImplementation(chunk => {
+				errors.push(String(chunk));
+				return true;
+			});
+			// The write-ahead checkpoint fails the way a busy reader makes it
+			// fail — after reclamation has already deleted something.
+			const realPrepare = Database.prototype.prepare;
+			const query = spyOn(Database.prototype, "prepare").mockImplementation(function (
+				this: Database,
+				sql: string,
+				...rest: unknown[]
+			) {
+				if (sql.includes("wal_checkpoint")) throw new Error("database is locked");
+				return (realPrepare as (...args: unknown[]) => unknown).call(this, sql, ...rest);
+			} as typeof Database.prototype.prepare);
+			let failure: unknown;
+			try {
+				await runGcCommand({ flags: { agentDir: root, blobs: true, wal: true, apply: true, json } }).catch(
+					error => {
+						failure = error;
+					},
+				);
+			} finally {
+				query.mockRestore();
+				stderr.mockRestore();
+				stdout.mockRestore();
+			}
+
+			// Exit 1 and silence, after deleting something, is the worst
+			// output this command can produce: the warning goes out before
+			// the deletion, and what the run did survives the failure.
+			expect(failure).toBeDefined();
+			expect(errors.join("")).toContain(GC_BLOBS_WARNING);
+			expect(await Bun.file(orphan).exists()).toBe(false);
+			const text = written.join("");
+			expect(text).toContain(json ? '"deleted": 1' : "blobs: 1/1 files");
+			expect(text).toContain(json ? GC_BLOBS_WARNING : "warning: blobs:");
+		});
+	}
+	test("does not delete while the warning is still queued", async () => {
+		const orphan = await writeBlob(root, hashFor("backpressure-orphan"), "orphan");
+		await agePath(orphan);
+		const referencedHash = hashFor("backpressure-referenced");
+		const referenced = await writeBlob(root, referencedHash, "referenced");
+		await agePath(referenced);
+		await writeSession(root, "project", "live", "complete", { blobRef: `blob:sha256:${referencedHash}` });
+
+		// A real pipe, really full. Mocking the write cannot show this: the
+		// defect is that the bytes sit in a userspace buffer while the run
+		// goes on to delete, so the test has to make the kernel refuse them.
+		const fifo = path.join(root, "stderr.fifo");
+		await Bun.spawn(["mkfifo", fifo]).exited;
+		const reader = await fs.open(fifo, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+		const writer = await fs.open(fifo, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
+		const block = Buffer.alloc(4096, 0x50);
+		let prefilled = 0;
+		for (;;) {
+			try {
+				prefilled += (await writer.write(block)).bytesWritten;
+			} catch {
+				break;
+			}
+		}
+		expect(prefilled).toBeGreaterThan(0);
+
+		const child = Bun.spawn(
+			[process.execPath, path.join(import.meta.dir, "..", "src", "cli.ts"), "gc", "--blobs", "--apply"],
+			{
+				env: { ...process.env, PI_CODING_AGENT_DIR: root, NO_COLOR: "1" },
+				stdout: "pipe",
+				stderr: writer.fd,
+			},
+		);
+		try {
+			// While the warning cannot be delivered, nothing may go.
+			await Bun.sleep(3_000);
+			expect(await Bun.file(orphan).exists()).toBe(true);
+
+			// Drained: the warning arrives, and only then the deletion.
+			const drained: Buffer[] = [];
+			const sink = Buffer.alloc(65_536);
+			for (;;) {
+				try {
+					const read = await reader.read(sink, 0, sink.length);
+					if (read.bytesRead === 0) break;
+					drained.push(Buffer.from(sink.subarray(0, read.bytesRead)));
+				} catch {
+					break;
+				}
+			}
+			expect(await child.exited).toBe(0);
+			for (;;) {
+				try {
+					const read = await reader.read(sink, 0, sink.length);
+					if (read.bytesRead === 0) break;
+					drained.push(Buffer.from(sink.subarray(0, read.bytesRead)));
+				} catch {
+					break;
+				}
+			}
+			expect(Buffer.concat(drained).toString().slice(prefilled)).toContain("Quiescent machines only");
+			expect(await Bun.file(orphan).exists()).toBe(false);
+			expect(await Bun.file(referenced).exists()).toBe(true);
+		} finally {
+			child.kill();
+			await child.exited;
+			await writer.close();
+			await reader.close();
+		}
+	}, 60_000);
+	test("reads a transcript a breadcrumb registers while it is listing", async () => {
+		const referencedHash = hashFor("late-crumb-referenced");
+		const referenced = await writeBlob(root, referencedHash, "referenced");
+		await agePath(referenced);
+		const external = path.join(root, "external-sessions");
+		await fs.mkdir(external, { recursive: true });
+		const transcript = path.join(external, "registered.jsonl");
+		await Bun.write(transcript, `${JSON.stringify({ type: "message", ref: `blob:sha256:${referencedHash}` })}\n`);
+		// The breadcrumb appears between gathering the exact paths and the
+		// baseline listing. Gathering them separately put the name in both
+		// censuses and in neither comparison, so the transcript was never
+		// opened and its blob went while it stayed registered and readable.
+		const crumbDir = getTerminalSessionsDir(root);
+		await fs.mkdir(crumbDir, { recursive: true });
+		const realReaddir = fs.readdir;
+		let crumbReads = 0;
+		const readdir = spyOn(fs, "readdir").mockImplementation((async (target: string, ...rest: unknown[]) => {
+			// After the run has gathered the exact paths and before its
+			// baseline listing reads them again: the window where a name can
+			// land in both censuses and in neither comparison.
+			if (String(target) === crumbDir && ++crumbReads === 2) {
+				await Bun.write(path.join(crumbDir, "tty-1"), `${external}\nregistered.jsonl\n`);
+			}
+			return await (realReaddir as (...args: unknown[]) => Promise<unknown>)(target, ...rest);
+		}) as typeof fs.readdir);
+		let result: GcResult;
+		try {
+			result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+		} finally {
+			readdir.mockRestore();
+		}
+
+		// Either answer is defensible — read it, or refuse because the tree
+		// changed — but the blob a registered, readable transcript refers to
+		// may not go with no error at all.
+		expect(result.blobs?.deleted).toBe(0);
+		expect(await Bun.file(referenced).exists()).toBe(true);
+	});
+
+	for (const [shape, build] of [
+		[
+			"a journal and its backup",
+			async (dir: string, body: string) => {
+				await Bun.write(path.join(dir, "twin.jsonl"), body);
+				await Bun.write(path.join(dir, "twin.jsonl.1.bak"), body);
+			},
+		],
+		[
+			"two hard links to one journal",
+			async (dir: string, body: string) => {
+				await Bun.write(path.join(dir, "twin.jsonl"), body);
+				await fs.link(path.join(dir, "twin.jsonl"), path.join(dir, "twin-link.jsonl"));
+			},
+		],
+	] as const) {
+		test(`does not mistake its own lease for another process (${shape})`, async () => {
+			const referencedHash = hashFor(`self-${shape.length}-referenced`);
+			const referenced = await writeBlob(root, referencedHash, "referenced");
+			const orphan = await writeBlob(root, hashFor(`self-${shape.length}-orphan`), "orphan");
+			await agePath(referenced);
+			await agePath(orphan);
+			const dir = path.join(getSessionsDir(root), "project");
+			await fs.mkdir(dir, { recursive: true });
+			// Two names, one session id. Claiming per name made this run's
+			// second claim collide with its own first and report a running
+			// owner on a tree where nothing was running.
+			const header = JSON.stringify({ id: "01a18630-42ae-7117-ba7c-029b1eee0f5a", type: "session" });
+			const body = JSON.stringify({ type: "message", ref: `blob:sha256:${referencedHash}` });
+			await build(dir, `${header}\n${body}\n`);
+
+			const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+			expect(result.blobs?.errors.join("\n")).not.toContain("owned by a running process");
+			expect(result.blobs?.deleted).toBe(1);
+			expect(await Bun.file(referenced).exists()).toBe(true);
+			expect(await Bun.file(orphan).exists()).toBe(false);
+		});
+	}
+	test("keeps a blob that is itself a transcript linked into the sessions tree", async () => {
+		const innerHash = hashFor("inner");
+		const inner = await writeBlob(root, innerHash, "inner");
+		await agePath(inner);
+		// A transcript stored in its own content-addressed blob file and linked
+		// into the sessions tree: one file with two names, and the one under
+		// `blobs/` is the only real one. Sweeping it leaves a broken link, and
+		// the blobs it references go unreferenced on the next run.
+		const session = await writeSession(root, "project", "linked-target", "complete", {
+			blobRef: `blob:sha256:${innerHash}`,
+		});
+		const transcript = await Bun.file(session).bytes();
+		const transcriptHash = hashFor("transcript-as-blob");
+		const asBlob = path.join(getBlobsDir(root), transcriptHash);
+		await Bun.write(asBlob, transcript);
+		await fs.rm(session);
+		await fs.symlink(asBlob, session);
+		await agePath(asBlob);
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect(await Bun.file(asBlob).exists()).toBe(true);
+		expect(await Bun.file(inner).exists()).toBe(true);
+		expect((await fs.lstat(session)).isSymbolicLink()).toBe(true);
+	});
+
+	test("keeps a blob referenced by a linked recoverable backup", async () => {
+		const referencedHash = hashFor("referenced");
+		const referenced = await writeBlob(root, referencedHash, "referenced");
+		await agePath(referenced);
+		// A `.bak` the writer leaves for recovery, kept elsewhere and linked
+		// in — and one under a linked directory. `listFilesSync` finds both,
+		// so the sweep's own walk has to as well.
+		const elsewhere = path.join(root, "elsewhere");
+		await fs.mkdir(elsewhere, { recursive: true });
+		const backup = path.join(elsewhere, "linked.jsonl.1.bak");
+		await Bun.write(backup, `${JSON.stringify({ type: "message", ref: `blob:sha256:${referencedHash}` })}\n`);
+		const sessions = path.join(getSessionsDir(root), "project");
+		await fs.mkdir(sessions, { recursive: true });
+		await fs.symlink(backup, path.join(sessions, "linked.jsonl.1.bak"));
+		await fs.symlink(elsewhere, path.join(sessions, "linked-dir"));
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect(await Bun.file(referenced).exists()).toBe(true);
+	});
+	test("keeps a transcript blob reached through a symlinked blob directory", async () => {
+		const innerHash = hashFor("inner-alias");
+		const inner = await writeBlob(root, innerHash, "inner");
+		const session = await writeSession(root, "project", "aliased", "complete", {
+			blobRef: `blob:sha256:${innerHash}`,
+		});
+		const transcript = await Bun.file(session).bytes();
+		// The blob store itself reached under another name: the same physical
+		// directory compares unequal to itself as a string, which used to
+		// make every blob on a session's path invisible again.
+		const elsewhere = path.join(root, "elsewhere-blobs");
+		await fs.rename(getBlobsDir(root), elsewhere);
+		await fs.symlink(elsewhere, getBlobsDir(root));
+		const transcriptHash = hashFor("transcript-aliased");
+		const asBlob = path.join(elsewhere, transcriptHash);
+		await Bun.write(asBlob, transcript);
+		await fs.rm(session);
+		await fs.symlink(asBlob, session);
+		await agePath(asBlob);
+		await agePath(path.join(elsewhere, innerHash));
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect(await Bun.file(asBlob).exists()).toBe(true);
+		expect(await Bun.file(inner.replace(getBlobsDir(root), elsewhere)).exists()).toBe(true);
+		expect((await fs.lstat(session)).isSymbolicLink()).toBe(true);
+	});
+
+	test("keeps every blob on the path a session is reachable through", async () => {
+		const innerHash = hashFor("inner-chain");
+		const transcriptHash = hashFor("transcript-chain");
+		const firstHop = hashFor("first-hop");
+		const secondHop = hashFor("second-hop");
+		const blobs = getBlobsDir(root);
+		const session = await writeSession(root, "project", "chained", "complete", {
+			blobRef: `blob:sha256:${innerHash}`,
+		});
+		const inner = await writeBlob(root, innerHash, "inner");
+		const transcript = path.join(blobs, transcriptHash);
+		await Bun.write(transcript, await Bun.file(session).bytes());
+		// session → second hop → first hop → the transcript blob. Each hop is
+		// a file in the blob directory, so a sweep that takes one of them
+		// breaks the session as thoroughly as taking the endpoint.
+		await fs.symlink(transcript, path.join(blobs, firstHop));
+		await fs.symlink(path.join(blobs, firstHop), path.join(blobs, secondHop));
+		await fs.rm(session);
+		await fs.symlink(path.join(blobs, secondHop), session);
+		for (const file of [transcript, path.join(blobs, firstHop), path.join(blobs, secondHop), inner]) {
+			await agePath(file);
+		}
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect(await Bun.file(session).text()).toContain(innerHash);
+		expect(await Bun.file(inner).exists()).toBe(true);
+	});
+	test("keeps a blob a relative link reaches through a linked directory", async () => {
+		const innerHash = hashFor("inner-relative");
+		const transcriptHash = hashFor("transcript-relative");
+		const blobs = getBlobsDir(root);
+		const inner = await writeBlob(root, innerHash, "inner");
+		const session = await writeSession(root, "project", "relative", "complete", {
+			blobRef: `blob:sha256:${innerHash}`,
+		});
+		const transcript = path.join(blobs, transcriptHash);
+		await Bun.write(transcript, await Bun.file(session).bytes());
+		await fs.rm(session);
+		// `sessions/project` reached through a link, holding a session whose
+		// own link is relative: the kernel takes `../blobs/<hash>` from the
+		// directory the link physically lives in, and anything that applies
+		// `..` to the lexical parent names a path that does not exist.
+		const offloaded = path.join(root, "offloaded");
+		await fs.mkdir(offloaded, { recursive: true });
+		await fs.symlink(path.join("..", "blobs", transcriptHash), path.join(offloaded, "relative.jsonl"));
+		await fs.rm(path.dirname(session), { recursive: true });
+		await fs.symlink(path.join("..", "offloaded"), path.dirname(session));
+		for (const file of [transcript, inner]) await agePath(file);
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect(await Bun.file(transcript).exists()).toBe(true);
+		expect(await Bun.file(inner).exists()).toBe(true);
+	});
+
+	test("deletes nothing when a session's path cannot be followed to the end", async () => {
+		const orphan = await writeBlob(root, hashFor("orphan"), "orphan");
+		await agePath(orphan);
+		const blobs = getBlobsDir(root);
+		// A chain deeper than the walk follows. "I could not follow this" is
+		// not "there is nothing there", so the run keeps everything and says
+		// why.
+		let previous = path.join(blobs, hashFor("deep-end"));
+		await Bun.write(previous, "deep");
+		for (let hop = 0; hop < 34; hop++) {
+			const link = path.join(blobs, hashFor(`deep-${hop}`));
+			await fs.symlink(previous, link);
+			previous = link;
+		}
+		const sessions = path.join(getSessionsDir(root), "project");
+		await fs.mkdir(sessions, { recursive: true });
+		await fs.symlink(previous, path.join(sessions, "deep.jsonl"));
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect(result.blobs?.errors.join("\n")).toContain("no blob was deleted in this run");
+		expect(await Bun.file(orphan).exists()).toBe(true);
+	});
+
+	test("deletes nothing when the blob directory stops being the one it was reading", async () => {
+		const orphan = await writeBlob(root, hashFor("orphan"), "orphan");
+		await agePath(orphan);
+		await writeSession(root, "project", "plain", "complete");
+
+		// The identity every comparison rested on, taken away underneath it.
+		const realStat = fs.stat.bind(fs);
+		let seen = 0;
+		const stat = spyOn(fs, "stat").mockImplementation((async (target: string, ...rest: unknown[]) => {
+			const answer = await (realStat as (...args: unknown[]) => Promise<Stats>)(target, ...rest);
+			if (String(target) === getBlobsDir(root) && seen++ > 0) {
+				return { ...answer, ino: answer.ino + 1 } as unknown as Stats;
+			}
+			return answer;
+		}) as typeof fs.stat);
+		let result: GcResult;
+		try {
+			result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+		} finally {
+			stat.mockRestore();
+		}
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect(result.blobs?.errors.join("\n")).toContain("identity changed");
+		expect(await Bun.file(orphan).exists()).toBe(true);
+	});
+
+	test("leaves no staging link behind when the last link to a blob goes", async () => {
+		const hash = hashFor("linked-orphan");
+		const target = path.join(root, "elsewhere-blob");
+		await Bun.write(target, "orphan");
+		const blobs = getBlobsDir(root);
+		await fs.mkdir(blobs, { recursive: true });
+		// The canonical blob is itself a link; its target is gone by the time
+		// the sweep looks, which used to drop the renamed link from the
+		// removal list and strand it for every later run.
+		await fs.symlink(target, path.join(blobs, hash));
+		await fs.rm(target);
+		const aged = new Date(Date.now() - 86_400_000);
+		await fs.lutimes(path.join(blobs, hash), aged, aged);
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.deleted).toBeGreaterThan(0);
+		expect(await fs.readdir(blobs)).toEqual([]);
+	});
+	test("keeps a blob reached through a blob-named link used as a directory", async () => {
+		const blobs = getBlobsDir(root);
+		const innerHash = hashFor("inner-prefix");
+		const prefixHash = hashFor("prefix-link");
+		const inner = await writeBlob(root, innerHash, "inner");
+		const elsewhere = path.join(root, "offloaded-sessions");
+		await fs.mkdir(elsewhere, { recursive: true });
+		await Bun.write(
+			path.join(elsewhere, "prefixed.jsonl"),
+			`${JSON.stringify({ type: "message", ref: `blob:sha256:${innerHash}` })}\n`,
+		);
+		// The blob store entry is a directory component of the session's
+		// path, not its endpoint. Deleting it breaks the session just as
+		// completely.
+		await fs.symlink(elsewhere, path.join(blobs, prefixHash));
+		const sessions = path.join(getSessionsDir(root), "project");
+		await fs.mkdir(sessions, { recursive: true });
+		await fs.symlink(path.join(blobs, prefixHash, "prefixed.jsonl"), path.join(sessions, "prefixed.jsonl"));
+		const aged = new Date(Date.now() - 86_400_000);
+		await fs.lutimes(path.join(blobs, prefixHash), aged, aged);
+		await agePath(inner);
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect((await fs.lstat(path.join(blobs, prefixHash))).isSymbolicLink()).toBe(true);
+		expect(await Bun.file(inner).exists()).toBe(true);
+	});
+
+	test("reads the session it opened, not whatever the name means afterwards", async () => {
+		const outerHash = hashFor("outer-kept");
+		const decoyHash = hashFor("decoy-referenced");
+		const outer = await writeBlob(root, outerHash, "outer");
+		const decoy = await writeBlob(root, decoyHash, "decoy");
+		await agePath(outer);
+		await agePath(decoy);
+		const original = path.join(root, "external", "original");
+		await fs.mkdir(path.dirname(original), { recursive: true });
+		await Bun.write(original, `${JSON.stringify({ type: "message", ref: `blob:sha256:${outerHash}` })}\n`);
+		const offloaded = path.join(root, "offloaded");
+		await fs.mkdir(offloaded, { recursive: true });
+		await fs.symlink(path.join("..", "external", "original"), path.join(offloaded, "session.jsonl"));
+		const sessions = path.join(getSessionsDir(root), "project");
+		await fs.mkdir(sessions, { recursive: true });
+		await fs.symlink(path.join(offloaded, "session.jsonl"), path.join(sessions, "session.jsonl"));
+		// The directory is swapped for a replacement whose session refers to
+		// a different blob, after the sweep has opened the first one. A run
+		// that re-resolved the name would read the replacement and sweep the
+		// blob the session it actually opened refers to.
+		const replacement = path.join(root, "replacement");
+		await fs.mkdir(replacement, { recursive: true });
+		await Bun.write(
+			path.join(replacement, "session.jsonl"),
+			`${JSON.stringify({ type: "message", ref: `blob:sha256:${decoyHash}` })}\n`,
+		);
+		const realOpen = fs.open;
+		let swapped = false;
+		const open = spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
+			const handle = await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
+			if (!swapped && String(target).endsWith("session.jsonl")) {
+				swapped = true;
+				await fs.rename(offloaded, path.join(root, "offloaded-gone"));
+				await fs.rename(replacement, offloaded);
+			}
+			return handle;
+		}) as typeof fs.open);
+		let result: GcResult;
+		try {
+			result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+		} finally {
+			open.mockRestore();
+		}
+
+		// Either answer is defensible as long as the blob the opened session
+		// refers to survives; what must not happen is deleting it on the
+		// strength of a file this run never read.
+		expect(await Bun.file(outer).exists()).toBe(true);
+		expect(result.blobs?.errors.length ?? 0).toBeGreaterThan(0);
 	});
 
 	test("--apply keeps fresh unreferenced blobs out of sweep candidates", async () => {
@@ -457,7 +1307,7 @@ describe("runGcCommand blob sweep", () => {
 		expect(await Bun.file(orphan).exists()).toBe(false);
 	});
 
-	test("aborts blob deletion when a gzip archive fails after yielding valid references", async () => {
+	test("refuses to delete blobs when a gzip archive fails after yielding valid references", async () => {
 		const hash = hashFor("partial-archive-reference");
 		const referenced = await writeBlob(root, hash, "referenced");
 		const orphan = await writeBlob(root, hashFor("partial-archive-orphan"), "orphan");
@@ -467,43 +1317,52 @@ describe("runGcCommand blob sweep", () => {
 		const bytes = gzipSync(`blob:sha256:${hash}\n${"{}\n".repeat(12 * 1024)}`);
 		await Bun.write(archive, bytes.subarray(0, -4));
 
-		await expect(runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } })).rejects.toThrow();
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		// The refusal is the command's answer, not an exception thrown past
+		// it: a caller that asked for JSON gets a result that says what was
+		// refused and why, and the exit status carries it.
+		expect(result.blobs?.deleted).toBe(0);
+		expect(result.blobs?.errors.join("\n")).toContain("no blob was deleted in this run");
 
 		expect(await Bun.file(referenced).exists()).toBe(true);
 		expect(await Bun.file(orphan).exists()).toBe(true);
 		expect(await Bun.file(path.join(root, "gc.lock")).exists()).toBe(false);
 	});
 
-	test("aborts blob deletion when a journal read fails after a complete record", async () => {
+	test("refuses to delete blobs when a journal read fails after a complete record", async () => {
 		const orphan = await writeBlob(root, hashFor("read-error-orphan"), "orphan");
 		await agePath(orphan);
 		const session = await writeSession(root, "project", "read-error", "complete");
-		const realFile = Bun.file.bind(Bun);
-		const fileSpy = spyOn(Bun, "file").mockImplementation((source, options) => {
-			const file = realFile(source as string, options);
-			if (source === session) {
-				file.stream = () => {
-					let yielded = false;
-					return new ReadableStream<Uint8Array<ArrayBuffer>>({
-						pull(controller) {
-							if (yielded) controller.error(Object.assign(new Error("journal read failed"), { code: "EIO" }));
-							else {
-								yielded = true;
-								controller.enqueue(new TextEncoder().encode("{}\n"));
-							}
-						},
-					});
-				};
-			}
-			return file;
-		});
+		// The sweep reads through the descriptor it holds, so the failure is
+		// injected there rather than at a reopen by name.
+		const realOpen = fs.open;
+		const fileSpy = spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
+			const handle = await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
+			if (String(target) !== session) return handle;
+			handle.createReadStream = (() => {
+				let yielded = false;
+				return new Readable({
+					read() {
+						if (yielded) this.destroy(Object.assign(new Error("journal read failed"), { code: "EIO" }));
+						else {
+							yielded = true;
+							this.push("{}\n");
+						}
+					},
+				});
+			}) as typeof handle.createReadStream;
+			return handle;
+		}) as typeof fs.open);
+		let result: GcResult;
 		try {
-			await expect(runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } })).rejects.toThrow(
-				"journal read failed",
-			);
+			result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
 		} finally {
 			fileSpy.mockRestore();
 		}
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect(result.blobs?.errors.join("\n")).toContain("journal read failed");
 
 		expect(await Bun.file(orphan).exists()).toBe(true);
 		expect(await Bun.file(path.join(root, "gc.lock")).exists()).toBe(false);
@@ -871,6 +1730,25 @@ describe("runGcCommand cold-session archive", () => {
 		expect(await Bun.file(keepRecent).exists()).toBe(true);
 		expect(await Bun.file(pending).exists()).toBe(true);
 		expect(await Bun.file(interrupted).exists()).toBe(true);
+	});
+	test("an unqualified apply neither archives nor reclaims", async () => {
+		const cold = await writeSession(root, "project", "cold", "complete", { ageDays: 90 });
+		const orphan = await writeBlob(root, hashFor("orphan"), "orphan");
+		await agePath(orphan);
+
+		// No phase flag, so the run takes its phases from settings — where
+		// archiving is off, because nothing in this release can read what it
+		// leaves in `archive/sessions`, and blob reclamation is off, because
+		// deciding that a blob is unreferenced cannot be made sound while
+		// sessions are being written. What is left cannot delete a session's
+		// data at all.
+		const result = await runGcCommand({ flags: { agentDir: root, apply: true } });
+
+		expect(result.archive).toBeUndefined();
+		expect(result.blobs).toBeUndefined();
+		expect(await Bun.file(cold).exists()).toBe(true);
+		expect(await Bun.file(orphan).exists()).toBe(true);
+		expect(await Bun.file(path.join(root, "archive", "sessions", "project", "cold.jsonl.gz")).exists()).toBe(false);
 	});
 
 	test("keeps the source journal when compression encounters a read error", async () => {

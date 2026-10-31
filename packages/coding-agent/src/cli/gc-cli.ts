@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { constants as fsConstants, type Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Readable } from "node:stream";
@@ -42,6 +43,7 @@ import {
 } from "./gc-compress";
 import {
 	cfgGcArchive,
+	GC_BLOBS_WARNING,
 	cfgGcBlobs,
 	cfgGcColdArchiveAfterDays,
 	cfgGcCompress,
@@ -193,6 +195,13 @@ export interface GcResult {
 	compress?: CompressGcResult;
 	wal?: WalGcResult;
 	lockPath: string;
+	/**
+	 * What a reader has to be told, in the result rather than only in the
+	 * rendering of it. The text output held the only copy, so every JSON
+	 * route reclaimed silently — and a JSON consumer is exactly the caller
+	 * who automated this.
+	 */
+	warnings?: string[];
 }
 
 interface BlobCandidate {
@@ -381,93 +390,322 @@ async function readTextIfPresent(file: string): Promise<string> {
 	}
 }
 
-async function scanSessionLinesIfPresent(file: string, onLine: (line: Uint8Array) => void): Promise<void> {
+async function scanSessionLines(
+	source: ReadableStream<Uint8Array>,
+	compressed: boolean,
+	onLine: (line: Uint8Array) => void,
+): Promise<void> {
 	// readLines buffers at most the largest record, including malformed records.
 	const scan = async (stream: ReadableStream<Uint8Array>): Promise<void> => {
 		for await (const line of readLines(stream)) onLine(line);
 	};
+	if (!compressed) {
+		await scan(source);
+		return;
+	}
+	const gunzip = createGunzip();
+	await pipeline(source, gunzip, async (inflated: NodeJS.ReadableStream) => {
+		// Match the native stream's byte budget, not one arbitrary chunk or
+		// a default queue that counts each potentially large chunk as size 1.
+		await scan(
+			Readable.toWeb(inflated, {
+				strategy: new ByteLengthQueuingStrategy({ highWaterMark: gunzip.readableHighWaterMark }),
+			}),
+		);
+	});
+}
+
+async function scanSessionLinesIfPresent(file: string, onLine: (line: Uint8Array) => void): Promise<void> {
 	try {
-		const stream = Bun.file(file).stream();
-		if (file.endsWith(COMPRESSED_SESSION_SUFFIX)) {
-			const gunzip = createGunzip();
-			await pipeline(stream, gunzip, async (source: NodeJS.ReadableStream) => {
-				// Match the native stream's byte budget, not one arbitrary chunk or
-				// a default queue that counts each potentially large chunk as size 1.
-				await scan(
-					Readable.toWeb(source, {
-						strategy: new ByteLengthQueuingStrategy({ highWaterMark: gunzip.readableHighWaterMark }),
-					}),
-				);
-			});
-		} else {
-			await scan(stream);
-		}
+		await scanSessionLines(Bun.file(file).stream(), file.endsWith(COMPRESSED_SESSION_SUFFIX), onLine);
 	} catch (error) {
 		if (codeOf(error) === "ENOENT") return;
 		throw error;
 	}
 }
 
-async function collectJsonlFiles(root: string): Promise<string[]> {
+/**
+ * Every transcript below `root`, links followed.
+ *
+ * `followSymlinks` because a transcript placed in a session directory as a
+ * symlink is a transcript like any other — `FileSessionStorage.listFilesSync`
+ * already treats one that way — and a blob it references must not be swept
+ * as unreferenced because this walk could not see the file that references
+ * it.
+ */
+async function scanSessionTree(glob: Bun.Glob, root: string): Promise<string[]> {
 	try {
-		const files = await Array.fromAsync(JSONL_GLOB.scan(root), name => path.join(root, name));
+		const files = await Array.fromAsync(glob.scan({ cwd: root, followSymlinks: true }), name =>
+			path.join(root, name),
+		);
 		files.sort();
 		return files;
 	} catch (error) {
 		if (codeOf(error) === "ENOENT") return [];
 		throw error;
 	}
+}
+
+async function collectJsonlFiles(root: string): Promise<string[]> {
+	return await scanSessionTree(JSONL_GLOB, root);
 }
 
 async function collectCompressedJsonlFiles(root: string): Promise<string[]> {
-	try {
-		const files = await Array.fromAsync(JSONL_GZ_GLOB.scan(root), name => path.join(root, name));
-		files.sort();
-		return files;
-	} catch (error) {
-		if (codeOf(error) === "ENOENT") return [];
-		throw error;
-	}
+	return await scanSessionTree(JSONL_GZ_GLOB, root);
 }
 
 async function collectBackupJsonlFiles(root: string): Promise<string[]> {
+	return await scanSessionTree(JSONL_BACKUP_GLOB, root);
+}
+
+/**
+ * Every name the sweep would treat as a session, with what stands at it.
+ *
+ * Holding a lease for each session this run collected says nothing about a
+ * session that did not exist when it collected them. `SessionManager.forkFrom`
+ * creates one with a journal that carries the parent's blob references, and
+ * a manager whose session was collected moves to a sibling by design — both
+ * put a live reference to a blob this run has already judged unreferenced,
+ * with no symlink and nothing hostile involved. The same is true of
+ * artifacts: `session-manager.ts:178-200` copies a child's `.jsonl` into the
+ * tree without claiming that child's lease.
+ *
+ * There is no door to hold here, so this is a way to notice that the room
+ * changed: take it twice, once when the sessions are read and once when the
+ * candidate set is final, and refuse the whole phase if a name appeared,
+ * vanished, or changed in identity, size or modification time. No lock, so
+ * nothing here stops a session being created.
+ *
+ * It is not a guarantee and it is not free. A change undone again before
+ * the second listing passes it, and so does one that leaves name, size and
+ * modification time equal — at one-second timestamp granularity an ordinary
+ * rewrite can. It costs two full walks of the sessions tree on top of the
+ * reference walk, measured 5.785 seconds apart on a tree of 8,001 sessions.
+ * It narrows the window; it does not close it, which is why reclamation is
+ * opt-in.
+ */
+async function sessionTreeCensus(
+	sessionRoots: string[],
+	agentDir: string,
+): Promise<{ entries?: Map<string, string>; unresolved?: string }> {
 	try {
-		const files = await Array.fromAsync(JSONL_BACKUP_GLOB.scan(root), name => path.join(root, name));
-		files.sort();
-		return files;
+		const names = new Set<string>();
+		for (const root of sessionRoots) {
+			for (const file of [
+				...(await collectJsonlFiles(root)),
+				...(await collectCompressedJsonlFiles(root)),
+				...(await collectBackupJsonlFiles(root)),
+			]) {
+				names.add(file);
+			}
+		}
+		for (const file of await collectRegisteredSessionPaths(getCustomSessionFilesDir(agentDir))) names.add(file);
+		for (const file of await collectBreadcrumbSessionFiles(getTerminalSessionsDir(agentDir))) names.add(file);
+		const entries = new Map<string, string>();
+		for (const name of [...names].sort()) {
+			const standing = await fs.lstat(name).catch(() => undefined);
+			// `lstat`, so a name that is a link is described as a link, and
+			// size and modification time, so an append to a collected
+			// session counts as a change even though its identity has not.
+			entries.set(
+				name,
+				standing
+					? `${standing.dev}:${standing.ino}:${standing.size}:${standing.mtimeMs}:${standing.isSymbolicLink()}`
+					: "absent",
+			);
+		}
+		return { entries };
 	} catch (error) {
-		if (codeOf(error) === "ENOENT") return [];
-		throw error;
+		return { unresolved: `the sessions tree could not be listed: ${errorMessage(error)}` };
 	}
 }
 
-async function collectReferencedBlobHashes(sessionRoots: string[], exactSessionFiles: string[]): Promise<Set<string>> {
-	const files = new Map<string, string>();
+/** The first way `after` differs from `before`, or undefined when it does not. */
+function censusChange(before: Map<string, string>, after: Map<string, string>): string | undefined {
+	for (const [name, standing] of after) {
+		const was = before.get(name);
+		if (was === undefined) return `${name} appeared while the sweep was deciding`;
+		if (was !== standing) return `${name} changed while the sweep was deciding`;
+	}
+	for (const name of before.keys()) {
+		if (!after.has(name)) return `${name} went while the sweep was deciding`;
+	}
+	return undefined;
+}
+
+/**
+ * Blob hashes every session file below these roots refers to, read through
+ * descriptors this run holds.
+ *
+ * Reclaiming a blob means proving no session refers to it. That proof needs
+ * to know which files are reachable as sessions, and when a route to one
+ * runs through a symlink the proof is not available: the entries on that
+ * route are themselves files the sweep may consider, the route can change
+ * between any two of its own syscalls, and five successive rounds of review
+ * each found a new arrangement a careful resolver got wrong — `..` from the
+ * lexical parent, `..` after a symlinked prefix, a link used as a directory
+ * component, a blob entry behind one of those, and a directory swapped
+ * after the open. Each fix was right about the arrangement in front of it.
+ *
+ * So this does not resolve such a tree; it refuses to reclaim in one. A
+ * session whose opened path differs from the name it was collected under
+ * was reached through a link — one comparison per session rather than an
+ * enumeration of every route — and the whole blob phase then deletes
+ * nothing and says why. Every other phase still runs.
+ *
+ * Not being able to learn what the kernel opened is the same answer: if
+ * `/proc/self/fd` cannot be read, this run does not know what it holds.
+ *
+ * Lifting the restriction needs a mechanism that makes the proof available
+ * — writers participating, a quarantine a reader restores from — not
+ * another arrangement handled. Until then the command says what it cannot
+ * show rather than guessing, and reclamation is opt-in, because what it
+ * cannot show includes the ordinary case: a tree with no links refuses
+ * when a session is owned or unreadable, but a session rewritten in place
+ * while this runs — same name, same size, same modification time, which a
+ * one-second clock makes commonplace — is not seen, and that run exits 0
+ * having deleted a blob the session still refers to.
+ *
+ * The ownership lease is likewise narrower than it sounds: it is taken for
+ * sessions whose header id can be read, so a compressed transcript or one
+ * with no header is read, counted and reclaimed against without a lease
+ * being held for it at all.
+ */
+async function collectReferencedBlobHashes(
+	sessionNames: string[],
+	blobDir: string,
+): Promise<{ hashes: Set<string>; unresolved: string[]; leases: FileLockHandle[] }> {
+	// The names come from the census, so the set this reads is exactly the
+	// set that is compared afterwards. They are deduplicated as text and no
+	// further: a key that resolved symlinks dropped an alias before anything
+	// opened it, and the guard that would have refused over that alias never
+	// ran. Two names that turn out to be one file collapse below, on the
+	// identity of the file this run holds, which is the only reason two
+	// entries should ever be one.
+	const names = new Set<string>(sessionNames);
 	const decoder = new TextDecoder();
-	for (const root of sessionRoots) {
-		for (const file of [
-			...(await collectJsonlFiles(root)),
-			...(await collectCompressedJsonlFiles(root)),
-			...(await collectBackupJsonlFiles(root)),
-		]) {
-			files.set(normalizePathForComparison(file), file);
+
+	const blobDirAtStart = await statIfPresent(blobDir);
+	const hashes = new Set<string>();
+	const unresolved: string[] = [];
+	const read = new Set<string>();
+	// Held, not probed: released by the caller once the deletions are done.
+	const leases: FileLockHandle[] = [];
+	/** Session ids this run already holds, so it cannot collide with itself. */
+	const leasedIds = new Set<string>();
+	for (const file of names) {
+		// Opened first, and what this run trusts afterwards is the identity
+		// of the object it holds. Not the pathname: `/proc/self/fd/<n>` is
+		// read *after* the open and resolves when the `readlink` runs, so a
+		// rename in between changes what it reports. It is a signal about
+		// how this name was reached, never a snapshot of it, and nothing
+		// here is built on it being one.
+		const held = await fs.open(file, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK).catch(error => {
+			const code = codeOf(error);
+			// Nothing at that name, or a name that cannot be a session:
+			// there is no session here to protect.
+			if (code === "ENOENT" || code === "ENOTDIR" || code === "ENXIO") return undefined;
+			unresolved.push(`${file}: ${errorMessage(error)}`);
+			return undefined;
+		});
+		if (!held) continue;
+		try {
+			// Three independent answers to "was this name reached through a
+			// link", any one of which refuses. One of them failing is a
+			// refusal too: a check that could not run is not a check that
+			// passed, which is how an unreadable `/proc` quietly turned the
+			// comparison off and the sweep went on deleting.
+			const named = await fs.lstat(file).catch(() => undefined);
+			const resolved = await fs.realpath(file).catch(() => undefined);
+			const opened = await fs.readlink(`/proc/self/fd/${held.fd}`).catch(() => undefined);
+			const lexical = path.resolve(file);
+			if (!named || resolved === undefined || opened === undefined) {
+				unresolved.push(
+					`${file}: this run could not establish how it was reached, so the blobs on that route ` +
+						`cannot be shown to be unreferenced`,
+				);
+			} else if (named.isSymbolicLink() || resolved !== lexical || opened !== lexical) {
+				unresolved.push(
+					`${file} is reachable as a session through a symlink (${opened}), and reclaiming blobs cannot ` +
+						`prove which of them lie on that route`,
+				);
+			}
+			// Identity first, lease second. Taking a lease per *name* made
+			// this run collide with itself: a journal and its backup, two
+			// hard links to one journal, or two files carrying one header id
+			// each had their session claimed twice, and the second claim —
+			// blocked by the first, which is this very run — was reported as
+			// another running process. Three quiet trees with no writer at
+			// all refused that way.
+			const identity = await held.stat();
+			const key = `${identity.dev}:${identity.ino}`;
+			if (read.has(key)) continue;
+			read.add(key);
+			// A descriptor freezes the file's identity, not its bytes. A
+			// writer that owns this session can truncate it and put the same
+			// text back between this read and the candidate scan — and omp's
+			// own writer does rewrite in place: `FileSessionStorage` rolls a
+			// failed append back with `ftruncateSync` on its own handle, and
+			// `updateSessionTitle` writes the title slot at offset zero
+			// through `r+`. Taking the lease and giving it straight back
+			// proves nothing either: the writer simply starts between the
+			// release and the deletion. So the lease is taken here and held
+			// until the deletions are done — once per session id, because a
+			// second file carrying the same id is this run's own claim
+			// looking back at it.
+			const sessionId = await readSessionHeaderId(file).catch(() => undefined);
+			if (sessionId !== undefined && !leasedIds.has(sessionId)) {
+				const lease = tryAcquireSessionLease(sessionId);
+				if (lease === null) {
+					unresolved.push(
+						`${file} is owned by a running process, so its references cannot be read as settled; ` +
+							`close it and run \`omp gc --blobs --apply\` again`,
+					);
+					continue;
+				}
+				leasedIds.add(sessionId);
+				leases.push(lease);
+			}
+			// The format comes from the bytes, not from the name. A
+			// compressed transcript at a blob-hash name has no suffix to
+			// read, and parsing it as plain text saw none of its references
+			// and swept the blobs it owned. Deciding a file's format from
+			// its name is the same mistake as deciding its identity that
+			// way, and this run is holding the file anyway.
+			const magic = Buffer.allocUnsafe(2);
+			const { bytesRead } = await held.read(magic, 0, 2, 0);
+			const compressed = bytesRead === 2 && magic[0] === 0x1f && magic[1] === 0x8b;
+			// Read through the descriptor, not reopened by name. Keep raw-text
+			// matching: recoverable malformed records can still own blobs.
+			await scanSessionLines(
+				Readable.toWeb(held.createReadStream({ autoClose: false, start: 0 })) as ReadableStream<Uint8Array>,
+				compressed,
+				line => {
+					for (const match of decoder.decode(line).matchAll(BLOB_REF_RE)) {
+						const hash = match[1]?.toLowerCase();
+						if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
+					}
+				},
+			);
+		} catch (error) {
+			// A decision taken is a decision reported: a read that fails here
+			// used to throw out of the whole command, so a caller asking for
+			// JSON got a stack trace instead of a refusal.
+			unresolved.push(`${file}: ${errorMessage(error)}`);
+		} finally {
+			await held.close().catch(() => undefined);
 		}
 	}
-	for (const file of exactSessionFiles) {
-		files.set(normalizePathForComparison(file), file);
+	// The blob directory this run was deciding about, asked again now that
+	// the reading is done: one replaced mid-run, or one whose inode numbers
+	// are not stable, makes the candidate scan an answer about a different
+	// directory.
+	const standing = await statIfPresent(blobDir);
+	if (!standing) unresolved.push(`${blobDir}: the blob directory could not be identified`);
+	else if (standing.dev !== blobDirAtStart?.dev || standing.ino !== blobDirAtStart.ino) {
+		unresolved.push(`${blobDir}: its identity changed while the sweep was reading`);
 	}
-
-	const hashes = new Set<string>();
-	for (const file of files.values()) {
-		// Keep raw-text matching: recoverable malformed records can still own blobs.
-		await scanSessionLinesIfPresent(file, line => {
-			for (const match of decoder.decode(line).matchAll(BLOB_REF_RE)) {
-				const hash = match[1]?.toLowerCase();
-				if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
-			}
-		});
-	}
-	return hashes;
+	return { hashes, unresolved, leases };
 }
 
 /**
@@ -483,14 +721,19 @@ async function collectRegisteredSessionPaths(registryDir: string): Promise<strin
 		if (codeOf(error) === "ENOENT") return [];
 		throw error;
 	}
-	const files = new Map<string, string>();
+	// Deduplicated as text and no further. A map keyed by the
+	// symlink-resolving comparison let two markers that name one physical
+	// file through different routes collapse to one entry, and the route
+	// that would have been refused went with the entry that lost — the same
+	// defect as the merge of sources, one level in. Two names become one
+	// only after they are opened and found to be one file.
+	const files = new Set<string>();
 	for (const entry of entries) {
 		const recorded = (await readTextIfPresent(path.join(registryDir, entry))).trim();
 		if (!recorded) continue;
-		const sessionFile = path.resolve(recorded);
-		files.set(normalizePathForComparison(sessionFile), sessionFile);
+		files.add(path.resolve(recorded));
 	}
-	return [...files.values()];
+	return [...files];
 }
 
 /**
@@ -507,17 +750,17 @@ async function collectBreadcrumbSessionFiles(breadcrumbDir: string): Promise<str
 		if (codeOf(error) === "ENOENT") return [];
 		throw error;
 	}
-	const files = new Map<string, string>();
+	// As above: names collapse here only when they are the same text.
+	const files = new Set<string>();
 	for (const entry of entries) {
 		const text = await readTextIfPresent(path.join(breadcrumbDir, entry));
 		const lines = text.split("\n");
 		const breadcrumbCwd = lines[0]?.trim();
 		const recordedSessionFile = lines[1]?.trim();
 		if (!breadcrumbCwd || !recordedSessionFile) continue;
-		const sessionFile = path.resolve(breadcrumbCwd, recordedSessionFile);
-		files.set(normalizePathForComparison(sessionFile), sessionFile);
+		files.add(path.resolve(breadcrumbCwd, recordedSessionFile));
 	}
-	return [...files.values()];
+	return [...files];
 }
 
 async function collectBlobCandidates(blobDir: string): Promise<BlobScan> {
@@ -536,9 +779,14 @@ async function collectBlobCandidates(blobDir: string): Promise<BlobScan> {
 		const hash = isStaging ? undefined : entry.match(BLOB_FILE_RE)?.[1];
 		if (!isStaging && !hash) continue;
 		const file = path.join(blobDir, entry);
-		const stat = await statIfPresent(file);
+		// `lstat`: these are entries in gc's own store, and the question is
+		// what is at the name rather than what it leads to. Following them
+		// threw `ELOOP` out of the whole sweep on a looping blob-named link,
+		// and read a link whose target had gone as nothing being there —
+		// which is how a `.HASH.…tmp` link outlived every later run.
+		const stat = await fs.lstat(file).catch(() => undefined);
 		if (!stat) continue;
-		if (!stat.isFile()) continue;
+		if (!stat.isFile() && !stat.isSymbolicLink()) continue;
 		if (!hash) {
 			staging.push({ path: file, bytes: stat.size, mtimeMs: stat.mtimeMs });
 			continue;
@@ -588,8 +836,14 @@ async function deleteBlobCandidate(
 				return false;
 			}
 		}
-		const stat = await statIfPresent(moved);
-		if (stat && stat.mtimeMs > deleteBeforeMs) {
+		// `lstat`, not `stat`: a canonical blob that is itself a symlink has a
+		// target that may already be gone, and asking about the target then
+		// says "nothing is there" about an entry that is very much there. The
+		// renamed link was dropped from the removal list on that answer and
+		// every later sweep skipped it, leaving `.HASH.…tmp` links behind for
+		// good.
+		const stat = await fs.lstat(moved).catch(() => undefined);
+		if (stat?.isFile() && stat.mtimeMs > deleteBeforeMs) {
 			await restoreReusedBlob(moved, canonical, result);
 			return false;
 		}
@@ -621,42 +875,81 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 	const blobDir = getBlobsDir(options.agentDir);
 	const sessionsRoot = getSessionsDir(options.agentDir);
 	const defaultRoots = [sessionsRoot, archiveSessionsRoot];
-	const exactSessionFiles = new Map<string, string>();
-	for (const file of await collectRegisteredSessionPaths(getCustomSessionFilesDir(options.agentDir))) {
-		if (!(await statIfPresent(file))?.isFile()) continue;
-		exactSessionFiles.set(normalizePathForComparison(file), file);
-	}
-	for (const file of await collectBreadcrumbSessionFiles(getTerminalSessionsDir(options.agentDir))) {
-		exactSessionFiles.set(normalizePathForComparison(file), file);
-	}
-	const referenced = await collectReferencedBlobHashes(defaultRoots, [...exactSessionFiles.values()]);
-	const { candidates, staging } = await collectBlobCandidates(blobDir);
-	const result: BlobGcResult = {
-		referenced: referenced.size,
-		candidates: candidates.length,
-		wouldDelete: 0,
-		deleted: 0,
-		bytes: 0,
-		errors: [],
-	};
+	// The baseline census *is* the source set. Gathering the registry and
+	// breadcrumb names separately beforehand left a name that appeared
+	// between the two steps in both censuses and in neither comparison, so a
+	// terminal breadcrumb registering an existing external transcript made
+	// that transcript invisible: never opened, never counted, its blob
+	// deleted while it stayed registered and readable. One listing answers
+	// both questions, so the thing compared is the thing read.
+	const before = await sessionTreeCensus(defaultRoots, options.agentDir);
+	const referenced = await collectReferencedBlobHashes([...(before.entries?.keys() ?? [])], blobDir);
+	// Every session whose header id could be read is still held, and the
+	// decision about which blobs are unreferenced and the deletions that act
+	// on it happen inside that hold: a lease taken and given back is only a
+	// question about a moment that has passed, since a writer starting
+	// between the release and the deletion adds a reference to a blob this
+	// run has already judged unreferenced. A compressed or headerless
+	// transcript has no id to lease by, so it is read and counted with
+	// nothing held for it — one of the reasons this phase is opt-in.
+	try {
+		const { candidates, staging } = await collectBlobCandidates(blobDir);
+		const result: BlobGcResult = {
+			referenced: referenced.hashes.size,
+			candidates: candidates.length,
+			wouldDelete: 0,
+			deleted: 0,
+			bytes: 0,
+			errors: [],
+		};
+		// A sweep that could not finish reading keeps. Every refusal above is a
+		// reading this run knows is incomplete — a path it could not follow, a
+		// blob directory it could not identify or one that stopped being the
+		// directory it had been comparing against — and deleting on the strength
+		// of an incomplete reading is how an unreferenced-looking blob turns out
+		// to have been a session.
+		if (referenced.unresolved.length > 0) {
+			for (const reason of referenced.unresolved) {
+				result.errors.push(`${reason}; no blob was deleted in this run`);
+			}
+			return result;
+		}
+		// The candidate set is final and nothing has been removed yet, so this
+		// is the moment to ask whether the room changed. A session that did
+		// not exist when the leases were taken cannot be held by one, and
+		// `forkFrom` gives a new session the parent's references while a
+		// manager that finds its own session collected moves to a sibling —
+		// ordinary omp behaviour, no symlink, nothing hostile. Artifacts go
+		// the same way: `session-manager.ts:178-200` copies a child's
+		// transcript into the tree without claiming that child's lease.
+		const after = await sessionTreeCensus(defaultRoots, options.agentDir);
+		const change = before.entries && after.entries ? censusChange(before.entries, after.entries) : undefined;
+		const unlisted = before.unresolved ?? after.unresolved;
+		if (unlisted || change) {
+			result.errors.push(`${unlisted ?? change}; no blob was deleted in this run`);
+			return result;
+		}
 
-	const deleteBeforeMs = Date.now() - GC_WRITE_GRACE_MS;
-	for (const candidate of candidates) {
-		if (referenced.has(candidate.hash)) continue;
-		if (candidate.mtimeMs > deleteBeforeMs) continue;
-		if (options.apply && !(await deleteBlobCandidate(candidate, deleteBeforeMs, result))) continue;
-		result.wouldDelete += candidate.paths.length;
-		result.bytes += candidate.bytes;
+		const deleteBeforeMs = Date.now() - GC_WRITE_GRACE_MS;
+		for (const candidate of candidates) {
+			if (referenced.hashes.has(candidate.hash)) continue;
+			if (candidate.mtimeMs > deleteBeforeMs) continue;
+			if (options.apply && !(await deleteBlobCandidate(candidate, deleteBeforeMs, result))) continue;
+			result.wouldDelete += candidate.paths.length;
+			result.bytes += candidate.bytes;
+		}
+		// A live write renames its staging file away within milliseconds; one past
+		// the grace was left by a killed or crashed writer and nothing will claim it.
+		for (const file of staging) {
+			if (file.mtimeMs > deleteBeforeMs) continue;
+			result.wouldDelete += 1;
+			result.bytes += file.bytes;
+			if (options.apply) await unlinkBlobFile(file.path, result);
+		}
+		return result;
+	} finally {
+		for (const lease of referenced.leases) lease.release();
 	}
-	// A live write renames its staging file away within milliseconds; one past
-	// the grace was left by a killed or crashed writer and nothing will claim it.
-	for (const file of staging) {
-		if (file.mtimeMs > deleteBeforeMs) continue;
-		result.wouldDelete += 1;
-		result.bytes += file.bytes;
-		if (options.apply) await unlinkBlobFile(file.path, result);
-	}
-	return result;
 }
 
 interface StaleCandidate {
@@ -2330,28 +2623,88 @@ function renderText(result: GcResult): string {
 		const state = result.wal.checkpointed ? "checkpointed" : "checkpoint dry-run";
 		lines.push(`wal: ${state}, ${formatBytes(result.wal.walBytes)} across ${result.wal.databases.length} dbs`);
 	}
+	// From the result, so text and JSON say the same thing from one source.
+	for (const warning of result.warnings ?? []) lines.push(`warning: ${warning}`);
 	return `${lines.join("\n")}\n`;
+}
+
+/**
+ * Put `text` on stderr and wait until the kernel has it.
+ *
+ * `process.stderr.write` returns false when the pipe is full and keeps the
+ * bytes in a userspace buffer, so a run that carried straight on could
+ * delete a blob and then be killed with the warning never delivered —
+ * measured at one unlinked blob and zero warning bytes. Awaiting the drain
+ * is what makes "before the deletion" a fact about the reader rather than
+ * about the order of two statements.
+ *
+ * A write that fails is the same answer as a write that cannot finish:
+ * nothing is deleted. `/dev/full` and a broken pipe already end the run
+ * before the blob phase, and that is the behaviour being kept. Not a
+ * closed descriptor 2, though: Bun replaces an inherited closed stderr
+ * with `/dev/null` before any of this runs, so the write succeeds and the
+ * run carries on — an operator who sends the warning to `/dev/null` is
+ * suppressing a diagnostic on purpose, and this does not try to outvote
+ * them.
+ */
+async function writeWarningBeforeDeleting(text: string): Promise<void> {
+	const { promise, resolve, reject } = Promise.withResolvers<void>();
+	// `true` means the stream handed the bytes straight to the kernel:
+	// nothing is queued, so there is nothing to wait for. `false` means they
+	// are sitting in a userspace buffer, which is the case this exists for —
+	// wait for the write callback, or for the drain that says the buffer has
+	// emptied, whichever the host delivers.
+	const accepted = process.stderr.write(text, error => (error ? reject(error) : resolve()));
+	if (accepted) return;
+	process.stderr.once("drain", resolve);
+	process.stderr.once("error", reject);
+	await promise;
 }
 
 export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 	const options = await resolveOptions(args.flags);
 	const archiveRoot = getArchivedSessionsDir(options.agentDir);
-	const result = await withGcLock(options.agentDir, async lockPath => {
-		const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath };
-		// Stale cleanup may prune a missing first-save target's registry marker.
-		const registeredSessionPaths = options.runArchive
-			? await collectRegisteredSessionPaths(getCustomSessionFilesDir(options.agentDir))
-			: [];
-		// Pruned collab replicas release their blobs to this run's sweep.
-		if (options.runStale) next.stale = await runStaleGc(options);
-		if (options.runBlobs) next.blobs = await runBlobGc(options, archiveRoot);
-		if (options.runArchive) next.archive = await runArchiveGc(options, archiveRoot, registeredSessionPaths);
-		if (options.runCompress) next.compress = await runCompressGc(options, archiveRoot);
-		if (options.runWal) next.wal = await runWalGc(options);
-		return next;
-	});
-
-	const output = options.json ? `${JSON.stringify(result, null, 2)}\n` : renderText(result);
-	process.stdout.write(output);
-	return result;
+	// Built outside the lock so a phase that throws after an earlier one
+	// deleted something still has somewhere to say what was done.
+	const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath: "" };
+	const report = (): void => {
+		process.stdout.write(options.json ? `${JSON.stringify(next, null, 2)}\n` : renderText(next));
+	};
+	try {
+		await withGcLock(options.agentDir, async lockPath => {
+			next.lockPath = lockPath;
+			// Stale cleanup may prune a missing first-save target's registry marker.
+			const registeredSessionPaths = options.runArchive
+				? await collectRegisteredSessionPaths(getCustomSessionFilesDir(options.agentDir))
+				: [];
+			// Pruned collab replicas release their blobs to this run's sweep.
+			if (options.runStale) next.stale = await runStaleGc(options);
+			if (options.runBlobs) {
+				// On the result, so the JSON route carries it too: the
+				// renderer held the only copy and `--json` bypasses it.
+				next.warnings = [...(next.warnings ?? []), `blobs: ${GC_BLOBS_WARNING}`];
+				// And delivered *before* anything is deleted, which means
+				// waiting for the write to drain rather than queueing it:
+				// `write` returns false when the pipe is full, and the bytes
+				// then sit in a buffer the process can be killed with — one
+				// blob unlinked, zero warning bytes delivered. A warning
+				// that arrives only when every later phase succeeds is a
+				// receipt, and the reader who most needs it is the one whose
+				// run then failed.
+				if (options.apply) await writeWarningBeforeDeleting(`warning: blobs: ${GC_BLOBS_WARNING}\n`);
+				next.blobs = await runBlobGc(options, archiveRoot);
+			}
+			if (options.runArchive) next.archive = await runArchiveGc(options, archiveRoot, registeredSessionPaths);
+			if (options.runCompress) next.compress = await runCompressGc(options, archiveRoot);
+			if (options.runWal) next.wal = await runWalGc(options);
+			return next;
+		});
+	} catch (error) {
+		// What the run did before it failed, on the same stream and in the
+		// same shape as a run that did not.
+		report();
+		throw error;
+	}
+	report();
+	return next;
 }
