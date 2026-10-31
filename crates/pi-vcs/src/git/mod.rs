@@ -301,18 +301,19 @@ fn read_optional(path: &Path) -> Option<String> {
 /// main worktree: the git dir's `config`, then its `config.worktree` when
 /// `extensions.worktreeConfig` is on, which is where `git sparse-checkout
 /// init` moves the key. Git follows neither file's `include.path` for this
-/// key, so neither does this. The files go through gitoxide's config
-/// parser, which opens no repository, so discovery stays a filesystem walk.
+/// key, so neither does this.
 fn configured_worktree(git_dir: &Path) -> Option<PathBuf> {
 	use gix::bstr::ByteSlice as _;
 
-	let read = |name: &str, source: gix::config::Source| {
-		gix::config::File::from_path_no_includes(git_dir.join(name), source).ok()
-	};
-	let config = read("config", gix::config::Source::Local)?;
-	let worktree_config = matches!(config.boolean("extensions.worktreeConfig"), Some(Ok(true)))
-		.then(|| read("config.worktree", gix::config::Source::Worktree))
-		.flatten();
+	let config_bytes = std::fs::read(git_dir.join("config")).ok()?;
+	let config = parse_config_naming(&config_bytes, b"worktree", gix::config::Source::Local)?;
+	let worktree_config_bytes =
+		matches!(config.boolean("extensions.worktreeConfig"), Some(Ok(true)))
+			.then(|| std::fs::read(git_dir.join("config.worktree")).ok())
+			.flatten();
+	let worktree_config = worktree_config_bytes
+		.as_deref()
+		.and_then(|bytes| parse_config_naming(bytes, b"worktree", gix::config::Source::Worktree));
 	let worktree = worktree_config
 		.as_ref()
 		.and_then(|file| file.string("core.worktree"))
@@ -320,6 +321,49 @@ fn configured_worktree(git_dir: &Path) -> Option<PathBuf> {
 		.filter(|worktree| !worktree.is_empty())?;
 	// A relative value is relative to the git dir; `join` keeps an absolute one.
 	Some(normalize_path(&git_dir.join(worktree.to_path_lossy())))
+}
+
+/// `config` parsed with gitoxide's config parser, which opens no repository,
+/// or `None` when it does not parse or `config_mentions` finds no `name` in
+/// it. Skipping the parse keeps discovery cheap: the parser builds every
+/// section, which made discovery about 4x slower on a 42 KB config. The
+/// check only filters; a config that mentions `name`, even in a comment, is
+/// parsed and the parse decides.
+fn parse_config_naming<'a>(
+	config: &'a [u8],
+	name: &[u8],
+	source: gix::config::Source,
+) -> Option<gix::config::File<'a>> {
+	if !config_mentions(config, name) {
+		return None;
+	}
+	gix::config::File::from_bytes_no_includes(
+		config,
+		gix::config::file::Metadata::from(source),
+		gix::config::file::init::Options { lossy: true, ..Default::default() },
+	)
+	.ok()
+}
+
+/// Whether the raw bytes of a config contain `name` in any ASCII letter
+/// case. Git never escapes a key name or splits one across lines, and folds
+/// its case in ASCII only, so a config for which this is false cannot set a
+/// key whose name contains `name`.
+fn config_mentions(config: &[u8], name: &[u8]) -> bool {
+	use gix::bstr::ByteSlice as _;
+
+	let first = [name[0].to_ascii_lowercase(), name[0].to_ascii_uppercase()];
+	let mut rest = config;
+	while let Some(at) = rest.find_byteset(first) {
+		if rest[at..]
+			.get(..name.len())
+			.is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+		{
+			return true;
+		}
+		rest = &rest[at + 1..];
+	}
+	false
 }
 
 /// Lexically normalize `.`/`..` segments without touching the filesystem, so
@@ -355,15 +399,10 @@ pub(crate) fn relative_prefix(root: &Path, dir: &Path) -> Option<String> {
 
 /// Whether a git config file selects the reftable ref storage:
 /// `extensions.refStorage` is `reftable` or a `reftable:` URI, last value
-/// wins, as git reads it. The file goes through gitoxide's config parser,
-/// which opens no repository: a reftable repository never reaches a gitoxide
-/// repository open.
+/// wins, as git reads it. A reftable repository never reaches a gitoxide
+/// repository open; `parse_config_naming` opens none.
 fn config_has_reftable(config: &[u8]) -> bool {
-	let Ok(config) = gix::config::File::from_bytes_no_includes(
-		config,
-		gix::config::file::Metadata::from(gix::config::Source::Local),
-		gix::config::file::init::Options { lossy: true, ..Default::default() },
-	) else {
+	let Some(config) = parse_config_naming(config, b"refstorage", gix::config::Source::Local) else {
 		return false;
 	};
 	config.string("extensions.refStorage").is_some_and(|value| {
@@ -452,6 +491,33 @@ mod tests {
 		.unwrap();
 		let info = discover_info(temp.path()).unwrap().expect("repository");
 		assert!(info.is_reftable);
+	}
+
+	#[test]
+	fn config_mentions_folds_ascii_case_only_over_raw_bytes() {
+		assert!(config_mentions(b"[extensions]\n\tREFSTORAGE = reftable\n", b"refstorage"));
+		assert!(config_mentions(b"[user]\n\tname = Ren\xe9\n\trefStorage", b"refstorage"));
+		assert!(!config_mentions(b"[extensions]\n\tobjectFormat = sha1\n", b"refstorage"));
+		assert!(!config_mentions(b"[extensions]\n\trefStorag", b"refstorage"));
+		// U+017F (long s) folds to `s` in Unicode but not in ASCII, as git folds.
+		assert!(!config_mentions(
+			"[extensions]\n\trefſtorage = reftable\n".as_bytes(),
+			b"refstorage"
+		));
+	}
+
+	#[test]
+	fn reftable_detection_folds_section_and_key_case() {
+		// Git 2.43 prints `reftable` for this text.
+		assert!(config_has_reftable(b"[EXTENSIONS]\n\tREFSTORAGE = reftable\n"));
+	}
+
+	#[test]
+	fn reftable_detection_parses_a_config_that_names_the_key_only_in_a_comment() {
+		// The byte check passes, so the parse answers: git prints nothing here.
+		let config = b"# refStorage = reftable\n[extensions]\n\tobjectFormat = sha1\n";
+		assert!(config_mentions(config, b"refstorage"));
+		assert!(!config_has_reftable(config));
 	}
 
 	#[test]
@@ -685,6 +751,23 @@ mod tests {
 	fn core_worktree_ignores_a_core_subsection() {
 		// `[core "x"]` is section `core.x`, not `core`.
 		assert_eq!(worktree_from("[core \"x\"]\n\tworktree = ../../../main\n", None), None);
+	}
+
+	#[test]
+	fn core_worktree_folds_section_and_key_case() {
+		// Git 2.43 prints `../../../main` for this text.
+		assert_eq!(
+			worktree_from("[CORE]\n\tWORKTREE = ../../../main\n", None),
+			Some(PathBuf::from("super/main"))
+		);
+	}
+
+	#[test]
+	fn core_worktree_parses_a_config_that_names_the_key_only_in_a_comment() {
+		// The byte check passes, so the parse answers: no `core.worktree`.
+		let config = "# worktree = ../../../main\n[core]\n\tbare = false\n";
+		assert!(config_mentions(config.as_bytes(), b"worktree"));
+		assert_eq!(worktree_from(config, None), None);
 	}
 
 	#[test]
