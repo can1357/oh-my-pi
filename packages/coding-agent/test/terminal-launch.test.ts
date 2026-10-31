@@ -765,71 +765,185 @@ describe("terminal launch dispatcher", () => {
 		expect(calls).toEqual([]);
 	});
 
-	it("places a Herdr pane through herdr-app when the terminal carries herdr-core identity", async () => {
+	describe("Herdr desktop (herdr-core) placement", () => {
+		// The invoking terminal t1 sits in a background tab of a non-selected space; the
+		// window's selection (s1/p-focused) is where its actions land by default.
+		const listing = JSON.stringify({
+			spaces: [
+				{
+					id: "s1",
+					active: true,
+					tabs: [{ id: "tb1", active: true, terminals: [{ terminal: "t9", pane: "p-focused" }] }],
+				},
+				{
+					id: "s2",
+					active: false,
+					tabs: [
+						{ id: "tb2", active: true, terminals: [{ terminal: "t2", pane: "p-other" }] },
+						{ id: "tb3", active: false, terminals: [{ terminal: "t1", pane: "p-origin" }] },
+					],
+				},
+			],
+		});
 		const command = ["omp", "--fork", "/sessions/s.jsonl"];
-		const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t1", HC_TERMINAL_SOCKET: "/tmp/hc.sock" }, [
-			{ stdout: '{"terminal_id":"t9"}', exitCode: 0 },
-		]);
-		const result = await launch({
-			multiplexer: "herdr",
-			placement: "pane",
-			command,
-			cwd: "/repo",
-			direction: "down",
+
+		it("splits the invoking terminal's pane, not the window's focused one", async () => {
+			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t1" }, [
+				{ stdout: listing, exitCode: 0 },
+				{ stdout: '{"pane":"p-new","terminal":"t10"}', exitCode: 0 },
+			]);
+			const result = await launch({
+				multiplexer: "herdr",
+				placement: "pane",
+				command,
+				cwd: "/repo",
+				direction: "down",
+			});
+
+			expect(result).toEqual({ multiplexer: "herdr", placement: "pane", id: "p-new" });
+			expect(calls.map(call => call.argv.slice(0, 7))).toEqual([
+				["herdr-app", "ls"],
+				["herdr-app", "do", "pane.split", "--direction", "down", "--pane", "p-origin"],
+			]);
 		});
 
-		expect(result).toEqual({ multiplexer: "herdr", placement: "pane", id: "t9" });
-		expect(calls).toEqual([
-			{
-				argv: ["herdr-app", "do", "pane.split", "--direction", "down", "--argv", JSON.stringify(command)],
+		// The pane wrapper runs under /bin/sh; Herdr is POSIX-only.
+		it.skipIf(process.platform === "win32")("starts a pane child in the requested cwd with exact argv", async () => {
+			const tempRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "herdr-core-cwd-")));
+			try {
+				const cwd = path.join(tempRoot, "session cwd Ω");
+				await fs.mkdir(cwd);
+				const recorder = path.join(tempRoot, "recorder.js");
+				await Bun.write(
+					recorder,
+					'process.stdout.write(JSON.stringify({ cwd: process.cwd(), argv: process.argv.slice(2) }) + "\\n");\n',
+				);
+				const args = ["-n", "", "it's 'quoted'", "$(printf injected) * $HOME", "line\nbreak"];
+				const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t1" }, [
+					{ stdout: listing, exitCode: 0 },
+					{ stdout: '{"pane":"p-new","terminal":"t10"}', exitCode: 0 },
+				]);
+				await launch({
+					multiplexer: "herdr",
+					placement: "pane",
+					command: [process.execPath, recorder, ...args],
+					cwd,
+				});
+
+				const split = calls[1]!.argv;
+				const childArgv = JSON.parse(split[split.indexOf("--argv") + 1]!) as string[];
+				// Run the child as the window would, from the split pane's own (different) folder.
+				const executed = await processCli(childArgv, tempRoot);
+				expect(executed.exitCode).toBe(0);
+				expect(JSON.parse(executed.stdout)).toEqual({ cwd, argv: args });
+			} finally {
+				await fs.rm(tempRoot, { recursive: true, force: true });
+			}
+		});
+
+		it("opens a tab in the invoking terminal's space with the session cwd and label", async () => {
+			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t1" }, [
+				{ stdout: listing, exitCode: 0 },
+				{ stdout: '{"space":"s2","tab":"tb-new","terminal":"t10"}', exitCode: 0 },
+			]);
+			const result = await launch({
+				multiplexer: "herdr",
+				placement: "window",
+				command,
 				cwd: "/repo",
-				env: undefined,
-			},
-		]);
-	});
+				label: "fork",
+			});
 
-	it("places a Herdr tab through herdr-app with the session cwd and label", async () => {
-		const command = ["omp", "--fork", "/sessions/s.jsonl"];
-		const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t1" }, [{ stdout: '{"tab_id":"tb1"}', exitCode: 0 }]);
-		const result = await launch({ multiplexer: "herdr", placement: "window", command, cwd: "/repo", label: "fork" });
+			expect(result).toEqual({ multiplexer: "herdr", placement: "window", id: "tb-new" });
+			expect(calls[1]!.argv).toEqual([
+				"herdr-app",
+				"do",
+				"tab.new",
+				"--space",
+				"s2",
+				"--folder",
+				"/repo",
+				"--argv",
+				JSON.stringify(command),
+				"--name",
+				"fork",
+			]);
+		});
 
-		expect(result).toEqual({ multiplexer: "herdr", placement: "window", id: "tb1" });
-		expect(calls[0]!.argv).toEqual([
-			"herdr-app",
-			"do",
-			"tab.new",
-			"--folder",
-			"/repo",
-			"--argv",
-			JSON.stringify(command),
-			"--name",
-			"fork",
-		]);
-	});
+		it("honors an explicit target without consulting the window", async () => {
+			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t1" }, [
+				{ stdout: '{"space":"s9","tab":"tb-new","terminal":"t10"}', exitCode: 0 },
+			]);
+			await launch({ multiplexer: "herdr", placement: "window", command, cwd: "/repo", target: "s9" });
 
-	it("falls back to hc run when no herdr-app window answers", async () => {
-		const command = ["omp", "--fork", "/sessions/s.jsonl"];
-		const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t1" }, [
-			{ stdout: "", exitCode: 1 },
-			{ stdout: '{"address":"t9"}', exitCode: 0 },
-		]);
-		const result = await launch({ multiplexer: "herdr", placement: "pane", command, cwd: "/repo" });
+			expect(calls).toHaveLength(1);
+			expect(calls[0]!.argv.slice(0, 5)).toEqual(["herdr-app", "do", "tab.new", "--space", "s9"]);
+		});
 
-		expect(result.multiplexer).toBe("herdr");
-		expect(result.placement).toBe("pane");
-		expect(result.warning).toContain("hc run");
-		expect(calls).toHaveLength(2);
-		expect(calls[1]!.argv).toEqual(["hc", "run", "--bg", "--cwd", "/repo", ...command]);
-	});
+		it("returns focus to the invoking pane when focus is false", async () => {
+			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t1" }, [
+				{ stdout: listing, exitCode: 0 },
+				{ stdout: '{"space":"s2","tab":"tb-new","terminal":"t10"}', exitCode: 0 },
+				{ stdout: '{"ok":true}', exitCode: 0 },
+			]);
+			const result = await launch({
+				multiplexer: "herdr",
+				placement: "window",
+				command,
+				cwd: "/repo",
+				focus: false,
+			});
 
-	it("rejects herdr-core placement when herdr-app and hc both fail", async () => {
-		const { launch } = createHarness({ HC_TERMINAL_ID: "t1" }, [
-			{ stdout: "", exitCode: 1 },
-			{ stdout: "", exitCode: 3 },
-		]);
-		await expect(launch({ multiplexer: "herdr", placement: "pane", command: ["omp"], cwd: "/repo" })).rejects.toThrow(
-			"hc run",
-		);
+			expect(result.warning).toBeUndefined();
+			expect(calls[2]!.argv).toEqual(["herdr-app", "do", "pane.focus", "--pane", "p-origin"]);
+		});
+
+		it("leaves focus to the window when focus is not false", async () => {
+			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t1" }, [
+				{ stdout: listing, exitCode: 0 },
+				{ stdout: '{"pane":"p-new","terminal":"t10"}', exitCode: 0 },
+			]);
+			await launch({ multiplexer: "herdr", placement: "pane", command, cwd: "/repo", focus: true });
+
+			expect(calls).toHaveLength(2);
+		});
+
+		it("reports a failed refocus without failing the launched child", async () => {
+			const { launch } = createHarness({ HC_TERMINAL_ID: "t1" }, [
+				{ stdout: listing, exitCode: 0 },
+				{ stdout: '{"pane":"p-new","terminal":"t10"}', exitCode: 0 },
+				{ stdout: '{"error":"no pane"}', exitCode: 1 },
+			]);
+			const result = await launch({ multiplexer: "herdr", placement: "pane", command, cwd: "/repo", focus: false });
+
+			expect(result.id).toBe("p-new");
+			expect(result.warning).toContain("focus");
+		});
+
+		it("surfaces a failed placement without starting the child elsewhere", async () => {
+			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t1" }, [
+				{ stdout: listing, exitCode: 0 },
+				{ stdout: '{"error":"no pane \\"p-origin\\""}', exitCode: 1 },
+			]);
+			await expect(launch({ multiplexer: "herdr", placement: "pane", command, cwd: "/repo" })).rejects.toThrow(
+				"pane split failed",
+			);
+			expect(calls).toHaveLength(2);
+		});
+
+		it("creates nothing when the window cannot be listed or does not show the terminal", async () => {
+			const closed = createHarness({ HC_TERMINAL_ID: "t1" }, [{ stdout: "", exitCode: 1 }]);
+			await expect(
+				closed.launch({ multiplexer: "herdr", placement: "pane", command, cwd: "/repo" }),
+			).rejects.toThrow("ls failed");
+			expect(closed.calls).toHaveLength(1);
+
+			const parked = createHarness({ HC_TERMINAL_ID: "t-parked" }, [{ stdout: listing, exitCode: 0 }]);
+			await expect(
+				parked.launch({ multiplexer: "herdr", placement: "window", command, cwd: "/repo" }),
+			).rejects.toThrow("no pane for terminal t-parked");
+			expect(parked.calls).toHaveLength(1);
+		});
 	});
 
 	it("preserves Unicode argv and pane cwd through ASCII-only CMUX shell input", async () => {

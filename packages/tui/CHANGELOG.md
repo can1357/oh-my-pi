@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Terminals hosted by the Herdr desktop app (herdr-core, identified by `HC_TERMINAL_ID`) are now recognized as Herdr sessions ([#17525](https://github.com/can1357/oh-my-pi/pull/17525) by [@alanszhang](https://github.com/alanszhang))
+
 ## [18.14.1] - 2026-10-31
 
 ### Added

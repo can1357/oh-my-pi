@@ -78,71 +78,86 @@ async function launchInNewSurface(
 }
 
 /**
- * herdr-app (desktop) terminals run in herdr-core and carry HC_* identity vars
- * instead of the Herdr TUI's HERDR_* pane vars, and the TUI's `herdr pane|tab`
- * CLI cannot place surfaces in the app's window. Placement goes through the
- * window API (`herdr-app do`), which runs the child argv directly — no typed
- * shell input, so the exact command survives any shell grammar. With no window
- * open, `hc run --bg` still starts the child as a terminal of this one.
+ * herdr-app (desktop) terminals run in herdr-core and carry `HC_TERMINAL_ID` instead of the
+ * Herdr TUI's HERDR_* pane vars, and the TUI's `herdr pane|tab` CLI cannot place surfaces in the
+ * app's window. Placement goes through the window API (`herdr-app do`), which runs the child argv
+ * directly — no typed shell input, so the exact command survives any shell grammar.
+ *
+ * The window's actions default to the focused pane/space, which need not be the invoking
+ * terminal's, so the destination is the explicit target or else resolved from `HC_TERMINAL_ID`.
  */
 async function launchHerdrCore(
 	request: TerminalLaunchRequest,
+	terminalId: string,
 	runCli: TerminalLaunchCliRunner,
 ): Promise<TerminalLaunchResult> {
-	const argvJson = JSON.stringify(request.command);
-	const operation = request.placement === "pane" ? "pane split" : "tab create";
-	const appArgv =
-		request.placement === "pane"
-			? ["herdr-app", "do", "pane.split", "--direction", request.direction ?? "right", "--argv", argvJson]
-			: [
-					"herdr-app",
-					"do",
-					"tab.new",
-					"--folder",
-					request.cwd,
-					"--argv",
-					argvJson,
-					...(request.label ? ["--name", request.label] : []),
-				];
-	try {
-		const stdout = await runStep(request, operation, appArgv, request.cwd, runCli);
-		return { multiplexer: "herdr", placement: request.placement, id: herdrCoreSurfaceId(stdout) };
-	} catch {
-		// No window answered (app closed or CLI unavailable); the core can still
-		// run the child as a terminal of this one, shown on attach or keep.
-		await runStep(
-			request,
-			"hc run",
-			["hc", "run", "--bg", "--cwd", request.cwd, ...request.command],
-			request.cwd,
-			runCli,
-		);
-		return {
-			multiplexer: "herdr",
-			placement: request.placement,
-			warning: "herdr-app accepted no launch; started the fork with `hc run --bg` instead.",
-		};
+	let origin: HerdrCoreOrigin | undefined;
+	const resolveOrigin = async () => {
+		origin ??= await findHerdrCoreOrigin(request, terminalId, runCli);
+		return origin;
+	};
+
+	let appArgv: string[];
+	if (request.placement === "pane") {
+		const pane = request.target ?? (await resolveOrigin()).pane;
+		// `pane.split` takes no folder: the new terminal starts in the split pane's. Enter
+		// request.cwd from argv instead; positional parameters keep cwd and command exact.
+		const command = ["/bin/sh", "-c", 'cd -- "$1" && shift && "$@"', "omp-fork", request.cwd, ...request.command];
+		appArgv = ["herdr-app", "do", "pane.split", "--direction", request.direction ?? "right", "--pane", pane];
+		appArgv.push("--argv", JSON.stringify(command));
+	} else {
+		const space = request.target ?? (await resolveOrigin()).space;
+		appArgv = ["herdr-app", "do", "tab.new", "--space", space, "--folder", request.cwd];
+		appArgv.push("--argv", JSON.stringify(request.command));
+		if (request.label) appArgv.push("--name", request.label);
 	}
+	// The new pane/tab takes focus; resolve where focus returns before anything is created.
+	const returnFocusTo = request.focus === false ? (await resolveOrigin()).pane : undefined;
+
+	const operation = request.placement === "pane" ? "pane split" : "tab create";
+	const created = parseJson(request, operation, await runStep(request, operation, appArgv, request.cwd, runCli));
+	const id = nestedString(created, request.placement === "pane" ? "pane" : "tab");
+	if (!id) throw launchError(request, operation, `herdr-app ${operation} returned no ID.`);
+	const result: TerminalLaunchResult = { multiplexer: "herdr", placement: request.placement, id };
+	if (returnFocusTo) {
+		const refocused = await runCli(["herdr-app", "do", "pane.focus", "--pane", returnFocusTo], request.cwd).catch(
+			() => undefined,
+		);
+		// The child is already running: report the focus miss rather than fail its launch.
+		if (refocused?.exitCode !== 0) result.warning = "Herdr kept focus on the new surface.";
+	}
+	return result;
 }
 
-/** `herdr-app do` prints the created object as JSON; lift the first id field it carries. */
-function herdrCoreSurfaceId(stdout: string): string | undefined {
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(stdout);
-	} catch {
-		return undefined;
-	}
-	const stack: unknown[] = [parsed];
-	while (stack.length > 0) {
-		const value = stack.pop();
-		if (typeof value !== "object" || value === null) continue;
-		for (const [key, entry] of Object.entries(value)) {
-			if (typeof entry === "string" && /(?:^|_)(?:terminal|tab|pane|surface|space)_?id$/i.test(key)) return entry;
-			if (typeof entry === "object" && entry !== null) stack.push(entry);
+interface HerdrCoreOrigin {
+	pane: string;
+	space: string;
+}
+
+/** The slice of `herdr-app ls` that maps a terminal to its pane and space; every field is unverified input. */
+interface HerdrCoreListing {
+	spaces?: { id?: unknown; tabs?: { terminals?: { terminal?: unknown; pane?: unknown }[] }[] }[];
+}
+
+/** Finds the pane and space showing the invoking terminal in the window's `ls`. */
+async function findHerdrCoreOrigin(
+	request: TerminalLaunchRequest,
+	terminalId: string,
+	runCli: TerminalLaunchCliRunner,
+): Promise<HerdrCoreOrigin> {
+	const stdout = await runStep(request, "ls", ["herdr-app", "ls"], request.cwd, runCli);
+	const listing = parseJson(request, "ls", stdout) as HerdrCoreListing;
+	for (const space of Array.isArray(listing.spaces) ? listing.spaces : []) {
+		for (const tab of Array.isArray(space?.tabs) ? space.tabs : []) {
+			for (const terminal of Array.isArray(tab?.terminals) ? tab.terminals : []) {
+				if (terminal?.terminal !== terminalId) continue;
+				if (typeof terminal.pane === "string" && typeof space.id === "string") {
+					return { pane: terminal.pane, space: space.id };
+				}
+			}
 		}
 	}
-	return undefined;
+	throw launchError(request, "target", `Herdr shows no pane for terminal ${terminalId}.`);
 }
 
 const launchHerdr: TerminalLaunchBackend<"herdr", typeof capabilities> = async (
@@ -155,13 +170,8 @@ const launchHerdr: TerminalLaunchBackend<"herdr", typeof capabilities> = async (
 	if (!hasTerminalMultiplexerSession("herdr", env)) {
 		throw launchError(request, "capability", "Herdr launch requires an active Herdr pane or workspace.");
 	}
-	if (
-		!env.HERDR_PANE_ID &&
-		!env.HERDR_TAB_ID &&
-		!env.HERDR_WORKSPACE_ID &&
-		(env.HC_TERMINAL_ID || env.HC_TERMINAL_SOCKET)
-	) {
-		return launchHerdrCore(request, runCli);
+	if (!env.HERDR_PANE_ID && !env.HERDR_TAB_ID && !env.HERDR_WORKSPACE_ID && env.HC_TERMINAL_ID) {
+		return launchHerdrCore(request, env.HC_TERMINAL_ID, runCli);
 	}
 	const focusArgs = request.focus === undefined ? [] : [request.focus ? "--focus" : "--no-focus"];
 	if (request.placement === "pane") {
