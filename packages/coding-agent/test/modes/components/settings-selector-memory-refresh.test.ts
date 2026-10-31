@@ -177,6 +177,7 @@ describe("settings memory page and search", () => {
 describe("settings goal objective updates", () => {
 	it("selects confirmation, trusted user requests, and disabled permissions from the goal setting submenu", () => {
 		const comp = createSelector();
+
 		comp.type("goal objective updates");
 		comp.press("enter");
 		const options = settingsScreen(comp);

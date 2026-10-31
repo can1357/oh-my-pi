@@ -25,9 +25,11 @@ function createHarness(goal: Partial<Goal> = {}) {
 			...goal,
 		},
 	};
+
 	let sessionId = "original-session";
 	let usage: GoalTokenUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 	const settings = Settings.isolated();
+
 	const runtime = new GoalRuntime({
 		getState: () => state,
 		setState: next => {
@@ -39,6 +41,7 @@ function createHarness(goal: Partial<Goal> = {}) {
 		sendHiddenMessage: async () => {},
 		now: () => 100,
 	});
+
 	const toolSession: ToolSession = {
 		cwd: "/tmp/goal-objective-update",
 		hasUI: false,
@@ -49,7 +52,9 @@ function createHarness(goal: Partial<Goal> = {}) {
 		getGoalModeState: () => state,
 		getGoalRuntime: () => runtime,
 	};
+
 	const tool = new GoalTool(toolSession);
+
 	return {
 		tool,
 		runtime,
@@ -69,6 +74,7 @@ function createHarness(goal: Partial<Goal> = {}) {
 function confirmationContext(confirm: ExtensionUIContext["confirm"]): AgentToolContext {
 	const approve: NonNullable<ExtensionUIContext["approve"]> = async (proposal, options) =>
 		(await confirm("Update goal objective?", proposal.full, options)) ? "once" : "deny";
+
 	// This tool reads only the UI and approval flags from the execution context.
 	return { hasUI: true, ui: { approve }, autoApprove: true } as AgentToolContext;
 }
@@ -85,6 +91,7 @@ describe("model goal objective updates", () => {
 		const harness = createHarness({ status: "budget-limited", tokenBudget: 30 });
 		cfgGoalModelObjectiveUpdates.set(harness.settings, "on-request");
 		const before = harness.state();
+
 		if (!before) throw new Error("expected goal fixture");
 		await harness.update("  Audit <release> & report  ");
 		expect(harness.state()).toEqual({
@@ -110,10 +117,13 @@ describe("model goal objective updates", () => {
 		const harness = createHarness();
 		cfgGoalModelObjectiveUpdates.set(harness.settings, "confirm");
 		const requests: string[] = [];
+
 		const confirm = vi.fn<ExtensionUIContext["confirm"]>(async (_title, message) => {
 			requests.push(message);
+
 			return true;
 		});
+
 		const context = confirmationContext(confirm);
 		await harness.update("Audit the release", context);
 		await harness.update("Audit and publish the release", context);
@@ -145,10 +155,12 @@ describe("model goal objective updates", () => {
 		cfgGoalModelObjectiveUpdates.set(harness.settings, "confirm");
 		const before = harness.state();
 		const select: ExtensionUIContext["select"] = async () => "Approve";
+
 		const context = {
 			hasUI: true,
 			ui: { select },
 		} as AgentToolContext;
+
 		await expect(harness.update("Publish the release", context)).rejects.toThrow(/no interactive.*UI/);
 		expect(harness.state()).toEqual(before);
 	});
@@ -183,6 +195,7 @@ describe("model goal objective updates", () => {
 				"Audit the release",
 				confirmationContext(async () => {
 					cfgGoalModelObjectiveUpdates.set(harness.settings, "disabled");
+
 					return true;
 				}),
 			),
@@ -219,6 +232,7 @@ describe("model goal objective updates", () => {
 				"Audit the release",
 				confirmationContext(async () => {
 					harness.switchSession();
+
 					return true;
 				}),
 			),
@@ -234,6 +248,7 @@ describe("model goal objective updates", () => {
 				"Publish the release",
 				confirmationContext(async () => {
 					const current = harness.state()?.goal;
+
 					if (!current) throw new Error("expected goal fixture");
 					await harness.runtime.updateGoalObjective(
 						{
@@ -243,6 +258,7 @@ describe("model goal objective updates", () => {
 						},
 						() => {},
 					);
+
 					return true;
 				}),
 			),
@@ -260,6 +276,7 @@ describe("model goal objective updates", () => {
 				"Audit the release",
 				confirmationContext(async () => {
 					controller.abort();
+
 					return true;
 				}),
 				controller.signal,
@@ -271,6 +288,7 @@ describe("model goal objective updates", () => {
 				"Audit the release",
 				confirmationContext(async () => {
 					cfgGoalEnabled.set(harness.settings, false);
+
 					return true;
 				}),
 			),

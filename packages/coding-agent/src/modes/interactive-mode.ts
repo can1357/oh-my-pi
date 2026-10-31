@@ -2694,6 +2694,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				const latestState = this.session.getGoalModeState();
 				if (!latestState?.enabled || latestState.goal.status !== "active") return;
 				const prompt = this.session.goalRuntime.buildContinuationPrompt();
+
 				if (!prompt) return;
 				this.#pendingGoalContinuationTurns++;
 				this.onInputCallback(
