@@ -1438,9 +1438,20 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 		const record = path.join(ledger, `${Snowflake.next()}.json`);
 		const part = `${record}${STAGING_RECORD_PART}`;
 		const intent: StagingRecord = { dir, file };
-		// Created afresh, like the replacement below: a name already taken
-		// throws EEXIST and keeps whatever holds it.
-		const written = [await writeExclusive(record, JSON.stringify(intent), 0o600)];
+		// Written whole under the part name, then linked into place: a run
+		// killed during the write leaves a part, which no run reads as a
+		// record, never a record cut short — which no run could tell from a
+		// damaged one. Created afresh, and `link` refuses a name already
+		// taken: either way EEXIST, and whatever holds the name is kept.
+		let written: FileIdentity[];
+		try {
+			written = [await writeExclusive(part, JSON.stringify(intent), 0o600)];
+		} catch (error) {
+			if (codeOf(error) !== "EEXIST") throw error;
+			throw new Error(`${errorText(error)}; ${part} is not a record this run wrote, so it was left as it is`, {
+				cause: error,
+			});
+		}
 		// What this attempt wrote to the ledger, and only that, by the
 		// identities it captured: at either name, anything else is kept and
 		// named — whatever it is called, it is not this run's to remove.
@@ -1454,6 +1465,16 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 		};
 		const failed = (error: unknown, note: string): Error =>
 			new Error(`${error instanceof Error ? error.message : String(error)}; ${note}`, { cause: error });
+		try {
+			await fs.link(part, record);
+			// The part name goes, for the replacement below; the record keeps
+			// the file under its own name.
+			const left = await removeOwnFile(part, written, "the record this run wrote");
+			if (left) throw new Error(left);
+		} catch (error) {
+			const note = await unrecord();
+			throw note ? failed(error, note) : error;
+		}
 		try {
 			await fs.mkdir(dir, { mode: 0o700 });
 		} catch (error) {
@@ -1650,6 +1671,23 @@ async function readStagingRecords(
 				text = await handle.readFile("utf8");
 			} finally {
 				await handle.close().catch(() => undefined);
+			}
+			try {
+				JSON.parse(text);
+			} catch (error) {
+				// Not JSON at all: cut short. The first version of a record goes
+				// to a part name and is linked whole into place, so no run of
+				// this version leaves one; an earlier one killed while it wrote
+				// a record's first version did, before it made any staging
+				// directory. A well-formed record that is not one a run writes
+				// names something, and gets no such advice: it stops below.
+				return {
+					...found,
+					failure:
+						`${record} does not hold a staging record (${errorText(error)}). A gc run of an earlier version ` +
+						`killed while it wrote a record leaves one cut short like this, and made no staging directory ` +
+						`before it; look at it, move it out of ${ledger}, and run the same command again`,
+				};
 			}
 			found.records.push({ path: record, entry: parseStagingRecord(text) });
 		} catch (error) {
