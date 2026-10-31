@@ -3,6 +3,7 @@ import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createEvalCustomTools, describeEvalTools } from "../task/eval-tools";
 import {
 	invalidModelSelectorReason,
+	isPerCallModelShape,
 	normalizeModelSelector,
 	resolveEffectiveSubagentPolicy,
 } from "../task/structured-subagent";
@@ -80,8 +81,8 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 			invocationKind: "eval",
 		});
 		if (modelProblem) throw new ToolError(modelProblem);
-		// `record.model` is untyped here; only a string survives the selector check above.
-		const perCallModel = typeof model === "string" ? model : undefined;
+		// `record.model` is untyped here; only one selector or a list survives the selector check above.
+		const perCallModel = isPerCallModelShape(model) ? model : undefined;
 		if (tools?.length && options.session.getPlanModeState?.()?.enabled === true) {
 			throw new ToolError("Eval-defined tools are unavailable in plan mode.");
 		}

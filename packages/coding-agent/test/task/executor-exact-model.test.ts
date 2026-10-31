@@ -30,15 +30,17 @@ const perCallSettings = (model: Model, extra: Record<string, unknown> = {}) =>
 const cleanups: (() => Promise<void>)[] = [];
 let runs = 0;
 
-/** Runs a bundled `worker` on `perCallModel` through the real executor, with `model` as the only registry entry. */
+/** Runs a bundled `worker` through the real executor against the supplied catalog. */
 async function runWorker(options: {
 	model: Model;
-	perCallModel: string;
+	models?: Model[];
+	perCallModel: string | string[];
 	settings?: Settings;
 	assignment?: string;
 	setup?: (modelRegistry: ModelRegistry) => void;
 }) {
 	const { model } = options;
+	const models = options.models ?? [model];
 	const run = ++runs;
 	const sourceId = `executor-exact-model-${run}`;
 	const agentId = `ExactModel${run}`;
@@ -55,11 +57,12 @@ async function runWorker(options: {
 	registerMockApi(sourceId);
 	const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
 	const find = modelRegistry.find.bind(modelRegistry);
-	vi.spyOn(modelRegistry, "find").mockImplementation((provider, id) =>
-		provider === "mock" && id === model.id ? model : find(provider, id),
+	vi.spyOn(modelRegistry, "find").mockImplementation(
+		(provider, id) =>
+			models.find(candidate => candidate.provider === provider && candidate.id === id) ?? find(provider, id),
 	);
-	vi.spyOn(modelRegistry, "getAvailable").mockImplementation(() => [model]);
-	vi.spyOn(modelRegistry, "getAll").mockImplementation(() => [model]);
+	vi.spyOn(modelRegistry, "getAvailable").mockImplementation(() => models);
+	vi.spyOn(modelRegistry, "getAll").mockImplementation(() => models);
 	options.setup?.(modelRegistry);
 	vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
 		agents: [{ name: "worker", description: "test", systemPrompt: "test", source: "bundled", tools: ["read"] }],
@@ -213,5 +216,55 @@ describe("per-call exact selection after background discovery", () => {
 			perCallModelIdentity: identity,
 			perCallThinkingLevel: level,
 		});
+	});
+
+	it.each([false, true])("skips uncredentialed candidates without runtime fallback (failure: %s)", async fails => {
+		const locked = createMockModel({ provider: "nokey", id: "locked" });
+		const open = Object.assign(
+			createMockModel({
+				id: "open",
+				reasoning: true,
+				handler: () =>
+					fails
+						? { stopReason: "error", errorMessage: "503 overloaded: Candidate request failed." }
+						: { content: ["Open answer."] },
+			}),
+			{ thinking: { mode: "effort", efforts: [Effort.Low, Effort.High] } satisfies ThinkingConfig },
+		);
+		const tail = createMockModel({ id: "tail", handler: () => ({ content: ["Wrong runtime fallback."] }) });
+		const backup = createMockModel({ id: "backup" });
+		const init = vi.spyOn(SessionManager.prototype, "appendSessionInit");
+		const result = await runWorker({
+			model: open,
+			models: [locked, open, tail, backup],
+			perCallModel: ["nokey/locked", "@review", "mock/tail"],
+			settings: perCallSettings(open, {
+				"task.maxEffort": "high",
+				"retry.enabled": true,
+				"retry.modelFallback": true,
+				"retry.maxRetries": 1,
+				"retry.baseDelayMs": 1,
+				modelRoles: { locked: "nokey/locked", review: "mock/open:high", tail: "mock/tail" },
+				"retry.fallbackChains": { default: ["mock/tail", "mock/backup"], review: ["mock/backup"] },
+			}),
+		});
+		expect(locked.calls).toHaveLength(0);
+		expect(open.calls.length).toBeGreaterThan(0);
+		expect(tail.calls).toHaveLength(0);
+		expect(backup.calls).toHaveLength(0);
+		expect(open.calls.every(call => call.options?.reasoning === Effort.High)).toBe(true);
+		expect(init.mock.calls[0]?.[0]).toMatchObject({
+			perCallModel: true,
+			perCallModelIdentity: "mock/open",
+			perCallThinkingLevel: Effort.High,
+		});
+		if (fails) {
+			expect(result.exitCode).not.toBe(0);
+			expect(failure(result)).toContain("Candidate request failed.");
+		} else {
+			expect(result.exitCode).toBe(0);
+			expect(open.calls).toHaveLength(1);
+			expect(result.output).toBe("Open answer.");
+		}
 	});
 });

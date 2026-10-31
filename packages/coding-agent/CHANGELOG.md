@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added per-call `model` selectors for configured chat roles (`@review[:level]`) and ordered candidate lists, choosing the first available approved model with credentials at spawn without runtime fallback; `task.perCallModelAllow` also accepts configured roles and scoped globs that only narrow grants ([#16793](https://github.com/can1357/oh-my-pi/pull/16793) by [@Xytronix](https://github.com/Xytronix))
+
 ### Fixed
 
 - Fixed agents showing as idle in the Agent Hub while still running after a failed streaming edit preview (`edit.streamingAbort`) auto-recovered the turn ([#18790](https://github.com/can1357/oh-my-pi/pull/18790) by [@H4vC](https://github.com/H4vC))
