@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed the dot between two extension statuses in the status bar wearing the statuses' accent color; it now uses the dim separator color, like the other status bar separators ([#15740](https://github.com/can1357/oh-my-pi/issues/15740), [#16351](https://github.com/can1357/oh-my-pi/pull/16351) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.14.1] - 2026-10-31
 
