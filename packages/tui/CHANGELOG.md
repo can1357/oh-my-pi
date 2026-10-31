@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Highlight the full keyboard-selected row in `/agents`, keeping selection and hover backgrounds filled through truncated text.
+- Highlight the full keyboard-selected row in `/agents`, keeping selection and hover backgrounds filled through truncated text ([#17562](https://github.com/can1357/oh-my-pi/pull/17562) by [@wolfiesch](https://github.com/wolfiesch))
 
 ## [18.14.1] - 2026-10-31
 
