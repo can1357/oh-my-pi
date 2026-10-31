@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { constants as fsConstants, type Stats } from "node:fs";
+import { constants as fsConstants, type Stats, statSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -4158,10 +4158,12 @@ test("the restore's advice for a killed run's recorded stage, followed as writte
 	// A directory it moves out of that cannot be written is named, with the fix.
 	expect(advice).toContain(`${path.dirname(ground.dir)}, which holds the staging directory`);
 	expect(advice).toContain("chmod u+w");
-	// It moves things aside; it never advises removing anything.
-	expect(advice).not.toMatch(/\brm\b|remov/);
 	const move = /`(\(d=[^`]+)`/.exec(advice)?.[1];
 	expect(move).toBeDefined();
+	// It moves things aside; its prose never advises removing anything, and
+	// the command deletes only inside the directory it has just made.
+	expect(advice.replace(move!, "")).not.toMatch(/\brm\b|remov/);
+	expect(move!.match(/\brm -rf [^;]+/g)).toEqual([`rm -rf "$d"/${path.basename(await fs.realpath(ground.dir))}`]);
 	const aside = path.join(root, `gc-quarantine-${path.basename(ground.record, ".json")}`);
 
 	expect(await Bun.spawn(["sh", "-c", move!]).exited).toBe(0);
@@ -4653,6 +4655,146 @@ test("the printed command, stopped after moving the staging directory, moves it 
 	expect(await Bun.file(path.join(aside, path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
 });
 
+test("the printed command, when moving the staging directory back fails too, says what it left where and loses nothing", async () => {
+	const { ground } = await archivedWithKilledStage();
+	const move = await printedCommand();
+	const aside = path.join(await fs.realpath(root), `gc-quarantine-${path.basename(ground.record, ".json")}`);
+	const stage = await fs.realpath(ground.dir);
+	const bin = path.join(root, "failing-bin");
+	await fs.mkdir(bin);
+	// An `mv` that refuses the record and the move back, and passes the first move on.
+	const movedStage = path.join(aside, path.basename(stage));
+	await Bun.write(
+		path.join(bin, "mv"),
+		`#!/bin/sh\nfor a in "$@"; do case "$a" in ${JSON.stringify(await fs.realpath(ground.record))}|${JSON.stringify(movedStage)}) echo "mv: injected failure" >&2; exit 1;; esac; done\nexec ${Bun.which("mv")!} "$@"\n`,
+	);
+	await fs.chmod(path.join(bin, "mv"), 0o755);
+
+	const first = await runPrinted(move, { PATH: `${bin}:${process.env.PATH ?? ""}` });
+
+	expect(first.exit).not.toBe(0);
+	expect(first.said).toContain(`everything that left ${stage} or`);
+	expect(first.said).toContain(`is in ${aside}, so nothing is lost`);
+	expect(await Bun.file(path.join(aside, path.basename(stage), "b.log")).text()).toBe("PARTIAL STAGE");
+	expect(await Bun.file(ground.record).exists()).toBe(true);
+	// As it says, the identical command now stops at its `mkdir`, moving nothing.
+	expect((await runPrinted(move)).exit).not.toBe(0);
+	expect(await Bun.file(path.join(aside, path.basename(stage), "b.log")).text()).toBe("PARTIAL STAGE");
+	expect(await Bun.file(ground.record).exists()).toBe(true);
+});
+
+// A second filesystem for the archived tree, as the reviews arranged it: the
+// archive's `sessions` a symlink onto /dev/shm, the agent directory and the
+// directory the printed command makes on the test's own filesystem, so the
+// command's `mv` of the staging directory is a copy and then a delete — which
+// can stop part-way and leave a partial copy, and only a real failure does.
+const otherFilesystem = (() => {
+	try {
+		return statSync("/dev/shm").dev !== statSync(os.tmpdir()).dev ? "/dev/shm" : undefined;
+	} catch {
+		return undefined;
+	}
+})();
+
+/** Puts the archived tree on {@link otherFilesystem}; returns the directory to remove afterwards. */
+async function archiveOnOtherFilesystem(): Promise<string> {
+	const external = await fs.mkdtemp(path.join(otherFilesystem!, "omp-session-archive-"));
+	await fs.mkdir(path.dirname(getArchivedSessionsDir(root)), { recursive: true });
+	await fs.symlink(external, getArchivedSessionsDir(root));
+	return external;
+}
+
+for (const failure of ["an unreadable file", "a write the kernel refuses part-way"] as const) {
+	test.skipIf(!otherFilesystem || (failure === "an unreadable file" && process.getuid?.() === 0))(
+		`the printed command's move onto another filesystem, stopped part-way by ${failure}, deletes its partial copy, and the identical command then finishes`,
+		async () => {
+			const external = await archiveOnOtherFilesystem();
+			try {
+				const { ground, liveArtifacts } = await archivedWithKilledStage();
+				// Large enough that a 128 KiB file-size limit stops the copy inside it.
+				await fs.appendFile(ground.file, Buffer.alloc(1 << 20, 0x61));
+				const before = await Bun.file(ground.file).bytes();
+				const move = await printedCommand();
+				const aside = path.join(await fs.realpath(root), `gc-quarantine-${path.basename(ground.record, ".json")}`);
+				expect((await fs.stat(ground.dir)).dev).not.toBe((await fs.stat(root)).dev);
+
+				let first: { exit: number; said: string };
+				if (failure === "an unreadable file") {
+					// The copy makes the directory, then cannot open the file in it.
+					await fs.chmod(ground.file, 0o000);
+					try {
+						first = await runPrinted(move);
+					} finally {
+						await fs.chmod(ground.file, 0o600);
+					}
+				} else {
+					// A real `EFBIG` from the kernel at 128 KiB — `ulimit -f` counts
+					// 512-byte blocks, and an ignored SIGXFSZ turns the signal into
+					// the error — standing in for a full disk, which a test cannot
+					// make without mounting one: the copy stops inside the file.
+					first = await runPrinted(`trap '' XFSZ; ulimit -f 256; ${move}`);
+				}
+
+				expect(first.exit).not.toBe(0);
+				expect(first.said).toContain("nothing was moved: once the cause is fixed, run this command again");
+				expect(await fs.lstat(aside).catch(() => undefined)).toBeUndefined();
+				expect(await Bun.file(ground.file).bytes()).toEqual(before);
+				expect(await Bun.file(ground.record).exists()).toBe(true);
+
+				const second = await runPrinted(move);
+				expect(second.exit).toBe(0);
+				expect(await Bun.file(path.join(aside, path.basename(ground.dir), "b.log")).bytes()).toEqual(before);
+				expect(await Bun.file(path.join(aside, path.basename(ground.record))).exists()).toBe(true);
+				await finishAfterRecovery();
+				expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
+			} finally {
+				await fs.rm(external, { recursive: true, force: true });
+			}
+		},
+	);
+}
+
+test.skipIf(!otherFilesystem || process.getuid?.() === 0)(
+	"the printed command's move onto another filesystem that copied everything but could not delete the original keeps the copy, says so, and loses nothing",
+	async () => {
+		const external = await archiveOnOtherFilesystem();
+		const stage = path.join(external, "x", ".b.log.0123456789abcdef.tmp");
+		const locked = path.join(stage, "locked");
+		const aside = path.join(await fs.realpath(root), "gc-quarantine-1");
+		try {
+			await fs.mkdir(locked, { recursive: true });
+			await Bun.write(path.join(stage, "b.log"), "PARTIAL STAGE");
+			await Bun.write(path.join(locked, "kept"), "KEPT");
+			const record = path.join(root, "gc-staging", "1.json");
+			await Bun.write(record, "{}");
+			const advice = await stagingResidueNote(stage, record, "so a restore leaves it");
+			const move = /`(\(d=[^`]+)`/.exec(advice)?.[1];
+			expect(move).toBeDefined();
+			// The copy reads `locked`; the delete that follows cannot empty it.
+			await fs.chmod(locked, 0o500);
+
+			const first = await runPrinted(move!);
+
+			expect(first.exit).not.toBe(0);
+			expect(first.said).toContain("could not take back all it did");
+			// Everything that left the staging directory is in the new one: the whole copy.
+			expect(await Bun.file(path.join(aside, path.basename(stage), "b.log")).text()).toBe("PARTIAL STAGE");
+			expect(await Bun.file(path.join(aside, path.basename(stage), "locked", "kept")).text()).toBe("KEPT");
+			// What the delete could not take, and the record, are where they were.
+			expect(await Bun.file(path.join(locked, "kept")).text()).toBe("KEPT");
+			expect(await Bun.file(record).text()).toBe("{}");
+			// As it says, the identical command now stops at its `mkdir`, moving nothing.
+			expect((await runPrinted(move!)).exit).not.toBe(0);
+			expect(await Bun.file(path.join(aside, path.basename(stage), "locked", "kept")).text()).toBe("KEPT");
+		} finally {
+			for (const dir of [locked, path.join(aside, path.basename(stage), "locked")]) {
+				await fs.chmod(dir, 0o700).catch(() => undefined);
+			}
+			await fs.rm(external, { recursive: true, force: true });
+		}
+	},
+);
+
 test("the printed command moves the stage where it said, though the agent directory is relinked after the message", async () => {
 	const realAgent = path.join(root, "agent-real");
 	const link = path.join(root, "agent-link");
@@ -4691,7 +4833,13 @@ async function finishAfterRecovery(): Promise<void> {
 	const record = restoreRecordPath(archiveFile);
 	const again = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
 	expect(again.restore?.errors).toEqual([restoreRecordLeftNote(record)]);
-	await fs.rename(record, path.join(root, `record-moved-aside-${Date.now()}`));
+	// As `mv` would: a rename, or a copy and then a delete where the archive is on another filesystem.
+	const aside = path.join(root, `record-moved-aside-${Date.now()}`);
+	await fs.rename(record, aside).catch(async (error: unknown) => {
+		if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
+		await fs.copyFile(record, aside, fsConstants.COPYFILE_EXCL);
+		await fs.unlink(record);
+	});
 	const finished = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
 	expect(finished.restore?.errors).toEqual([]);
 }

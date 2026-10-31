@@ -234,7 +234,9 @@ async function rewriteOwnRestoreRecord(own: OwnRestoreRecord, text: string): Pro
  * is replaced, and one it puts there between the comparison and the
  * `unlink` is removed. The aside name carries 64 random bits and the
  * `unlink` follows the comparison at once, which narrows that window and
- * does not close it.
+ * does not close it. Linux's `renameat2` with `RENAME_NOREPLACE` would
+ * refuse the first case, keeping both files; Node has no binding for it,
+ * and it would leave the second.
  */
 async function dropOwnRestoreRecord(own: OwnRestoreRecord): Promise<string | undefined> {
 	const aside = `${own.path}.${randomBytes(8).toString("hex")}.leaving`;
@@ -1772,18 +1774,30 @@ async function recordedStagingByPath(agentDir: string, root: string): Promise<Ma
  * command itself, not by a check that ran earlier. `realpath` resolves a tree
  * whose last part has been renamed away to the path it would have, and fails
  * — stopping the command — only when more than that is missing; containment
- * is decided on those canonical paths either way. Whatever stops it after
- * the `mkdir` takes back what it did — the staging directory moved back if
- * the record's move failed, then the still empty directory removed with
- * `rmdir` — so the identical command can be run again once the cause is
- * fixed; only a take-back that itself fails leaves the directory it made.
- * A writer that changes the trees, the directory it made or either source
- * between its checks and its moves is outside what it guards: the checks
- * and the moves name paths, so such a writer can redirect a move or have
- * `rmdir` take an empty directory it put there. It runs in a subshell, so
- * stopping does not close the shell it was pasted into. When the agent
- * directory already resolves into a session tree, no command is given at
- * all.
+ * is decided on those canonical paths either way.
+ *
+ * Whatever stops it after the `mkdir`, it takes back what it did when it
+ * can: the staging directory moved back if the record's move failed, then
+ * the directory it made removed with `rmdir` once empty. A move onto
+ * another filesystem is a copy and then a delete, so it can stop part-way —
+ * out of space, an unreadable file — and leave a partial copy inside the new
+ * directory. The command counts the staging directory's entries before the
+ * move; if the move fails and they are all still there, the original is
+ * whole and the partial copy is deleted, so that `rmdir` can work and the
+ * identical command runs again once the cause is fixed. If entries are
+ * missing, the copy finished and the delete did not, so the copy holds what
+ * the original lost and is kept. Whenever it cannot take everything back —
+ * that case, a move back that fails, an `rmdir` that fails — it says so:
+ * everything that left the staging directory or its record is in the new
+ * directory, and the identical command, run again, stops at its `mkdir`
+ * until someone finishes by hand. It is not failure-atomic, and killed
+ * part-way it says nothing. A writer that changes the trees, the directory
+ * it made or either source between its checks and its moves is outside what
+ * it guards: the checks and the moves name paths, so such a writer can
+ * redirect a move or have `rmdir` take an empty directory it put there. It
+ * runs in a subshell, so stopping does not close the shell it was pasted
+ * into. When the agent directory already resolves into a session tree, no
+ * command is given at all.
  */
 export async function stagingResidueNote(dir: string, record: string, consequence: string): Promise<string> {
 	const agentDir = path.dirname(path.dirname(record));
@@ -1793,7 +1807,10 @@ export async function stagingResidueNote(dir: string, record: string, consequenc
 	const writable =
 		` If the command stops because a directory is not writable — it names the directory, usually ` +
 		`${path.dirname(dir)}, which holds the staging directory, or ${path.dirname(record)}, which holds the record — ` +
-		`make it writable with \`chmod u+w\` and run the printed command again: when it stops, it takes back what it did.`;
+		`make it writable with \`chmod u+w\` and run the printed command again. On a read-only mount, or for a file or ` +
+		`directory marked immutable, \`chmod\` does not help: that has to be undone first. The command is not ` +
+		`failure-atomic: if it cannot take back what it did it says so, and then, as when it is killed part-way, the ` +
+		`directory it made is left and the command stops at its \`mkdir\` until that is finished by hand.`;
 	let example: string;
 	let afterSteps = "";
 	if (realAgentDir !== undefined && !roots.some(root => isWithin(root, realAgentDir))) {
@@ -1802,17 +1819,24 @@ export async function stagingResidueNote(dir: string, record: string, consequenc
 		const realRecord = await fs.realpath(record).catch(() => record);
 		const checks = [getSessionsDir(agentDir), getArchivedSessionsDir(agentDir)].map(shellQuote).join(" ");
 		const sources = [path.dirname(realDir), path.dirname(realRecord)].map(shellQuote).join(" ");
-		const back = shellQuote(path.basename(realDir));
+		const base = shellQuote(path.basename(realDir));
 		example =
-			`for example \`(d=${shellQuote(aside)}; for p in ${sources}; do [ -w "$p" ] || { echo "$p is not writable: ` +
-			`make it writable with chmod u+w and run this command again" >&2; exit 1; }; done; mkdir "$d" || exit 1; ` +
-			`r=$(realpath "$d") || { rmdir "$d"; exit 1; }; for t in ${checks}; do t=$(realpath "$t") || { rmdir "$d"; ` +
-			`exit 1; }; case "$r/" in "$t"/*) echo "$r is inside the session tree $t, so nothing was moved" >&2; rmdir "$d"; ` +
-			`exit 1;; esac; done; mv ${shellQuote(realDir)} "$d"/ || { rmdir "$d"; exit 1; }; mv ${shellQuote(realRecord)} ` +
-			`"$d"/ || { mv "$d"/${back} ${shellQuote(realDir)}; rmdir "$d"; exit 1; })\`, where \`mkdir\` makes that ` +
-			`directory new and stops if anything already has its name, and the command checks first that both ` +
-			`directories it moves out of are writable, then checks the session trees again before it moves anything, ` +
-			`and takes back what it did if it stops`;
+			`for example \`(d=${shellQuote(aside)}; s=${shellQuote(realDir)}; c=${shellQuote(realRecord)}; kept() { echo ` +
+			`"stopped part-way and could not take back all it did: everything that left $s or $c is in $d, so nothing ` +
+			`is lost; look at all three, and once the cause is fixed finish step 4 by hand, since this command stops at ` +
+			`its mkdir while $d is there" >&2; exit 1; }; back() { rmdir "$d" || kept; echo "nothing was moved: once the ` +
+			`cause is fixed, run this command again" >&2; exit 1; }; for p in ${sources}; do [ -w "$p" ] || { echo "$p ` +
+			`is not writable: make it writable with chmod u+w and run this command again" >&2; exit 1; }; done; ` +
+			`mkdir "$d" || exit 1; r=$(realpath "$d") || back; for t in ${checks}; do t=$(realpath "$t") || back; ` +
+			`case "$r/" in "$t"/*) echo "$r is inside the session tree $t" >&2; back;; esac; done; ` +
+			`n=$(find "$s" 2>/dev/null | wc -l); mv "$s" "$d"/ || { [ "$(find "$s" 2>/dev/null | wc -l)" = "$n" ] || ` +
+			`kept; chmod -R u+w "$d"/${base} 2>/dev/null; rm -rf "$d"/${base}; back; }; mv "$c" "$d"/ || { ` +
+			`mv "$d"/${base} "$s" || kept; back; })\`, where \`mkdir\` makes that directory new and stops if anything ` +
+			`already has its name, and the command checks first that both directories it moves out of are writable, ` +
+			`then checks the session trees again before it moves anything. A move onto another filesystem is a copy ` +
+			`and then a delete, so it can stop part-way; when the staging directory is then still whole, the command ` +
+			`deletes the partial copy it made, and it takes back the rest of what it did — or, if it cannot, says what ` +
+			`it left where`;
 		afterSteps = writable;
 	} else {
 		example =
