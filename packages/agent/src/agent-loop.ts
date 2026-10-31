@@ -1894,12 +1894,19 @@ export function isUserSteeringMessage(message: AgentMessage): boolean {
  * and the loop's live-taken steering.
  */
 export function steeringQueueState(messages: readonly AgentMessage[], count = messages.length): SteeringQueueState {
-	return steeringRangeState(messages, 0, count);
+	// Only a count of exactly 0 is "nothing queued": a negative or NaN count classifies an empty
+	// range as queued system steering, as the published function always has.
+	if (count === 0) return { queued: false };
+	return classifySteering(messages, 0, count);
 }
 
 /** {@link steeringQueueState} for `messages[start, end)`, without copying the range. */
 export function steeringRangeState(messages: readonly AgentMessage[], start: number, end: number): SteeringQueueState {
 	if (start >= end) return { queued: false };
+	return classifySteering(messages, start, end);
+}
+
+function classifySteering(messages: readonly AgentMessage[], start: number, end: number): SteeringQueueState {
 	let hasAgentSteering = false;
 	for (let i = start; i < end; i++) {
 		const message = messages[i];

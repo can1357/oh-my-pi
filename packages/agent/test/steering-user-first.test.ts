@@ -6,6 +6,8 @@ import {
 	type AgentMessage,
 	type AgentTool,
 	MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING,
+	steeringQueueState,
+	steeringRangeState,
 } from "@oh-my-pi/pi-agent-core";
 import type { Context, Message } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -308,6 +310,17 @@ describe("one-at-a-time steering: a person's message before agent steering", () 
 		expect(texts(calls[1]).slice(-3)).toEqual(["card 1", "mine", "card 2"]);
 		expect(calls).toHaveLength(2);
 		expect(transcriptTexts(agent)).toEqual(["start", "card 1", "mine", "card 2"]);
+	});
+
+	it("keeps steeringQueueState's published results, including its edge counts", () => {
+		const queue = [card(1), person("typed")];
+		expect(steeringQueueState(queue)).toEqual({ queued: true, source: "user" });
+		expect(steeringQueueState(queue, 1)).toEqual({ queued: true, source: "system" });
+		expect(steeringQueueState(queue, 0)).toEqual({ queued: false });
+		expect(steeringQueueState(queue, -1)).toEqual({ queued: true, source: "system" });
+		expect(steeringQueueState(queue, Number.NaN)).toEqual({ queued: true, source: "system" });
+		expect(steeringRangeState(queue, 1, 2)).toEqual({ queued: true, source: "user" });
+		expect(steeringRangeState(queue, 2, 2)).toEqual({ queued: false });
 	});
 
 	it("classifies the batch interrupt by a person's steer queued behind agent steering, and reads it next", async () => {
