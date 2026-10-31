@@ -575,6 +575,13 @@ export interface MCPOwnEnv {
 const ENV_PLACEHOLDER_PATTERN = /\$\{([^}:]+)(?::-([^}]*))?\}/g;
 
 /**
+ * Names that can be environment variables. Other `${...}` text (`${@}`,
+ * `${1}`, `${PWD%/x}`) is shell syntax for a `sh -c` child to expand, so it
+ * is never reported as unresolved.
+ */
+const ENV_VAR_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
  * Lookup result for an own-env `!command` value: it only exists once the
  * manager runs the command at connect time, which then substitutes the
  * placeholder ({@link substituteCommandEnvRefs}).
@@ -623,7 +630,6 @@ const VSCODE_PREDEFINED_VARIABLES: ReadonlySet<string> = new Set([
 	"userHome",
 	"cwd",
 	"pathSeparator",
-	"/",
 	"execPath",
 	"defaultBuildTask",
 	"file",
@@ -644,8 +650,9 @@ const VSCODE_PREDEFINED_VARIABLES: ReadonlySet<string> = new Set([
  * Expand environment variables in a string.
  * Supports ${VAR} and ${VAR:-default} syntax.
  *
- * `onUnresolved` receives the name of every plain `${VAR}` reference that has
- * no value and no default (except VS Code predefined variables when
+ * `onUnresolved` receives the name of every plain `${VAR}` reference whose
+ * name is a valid environment variable name and that has no value and no
+ * default (except VS Code predefined variables when
  * `options.vscodePredefinedVariables` is set); the reference stays literal in
  * the result either way. A reference to a command-backed own-env value stays
  * literal unreported: the manager substitutes it at connect time.
@@ -663,7 +670,12 @@ function expandEnvVars(
 		// (even an empty one) and stays literal when unset.
 		if (envValue !== undefined && (defaultValue === undefined || envValue !== "")) return envValue;
 		if (defaultValue !== undefined) return defaultValue;
-		if (!(options.vscodePredefinedVariables && VSCODE_PREDEFINED_VARIABLES.has(varName))) onUnresolved?.(varName);
+		if (
+			ENV_VAR_NAME_PATTERN.test(varName) &&
+			!(options.vscodePredefinedVariables && VSCODE_PREDEFINED_VARIABLES.has(varName))
+		) {
+			onUnresolved?.(varName);
+		}
 		return `\${${varName}}`;
 	});
 }

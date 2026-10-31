@@ -231,6 +231,16 @@ describe("standalone mcp.json unresolved env placeholders", () => {
 		expect(remote?.unresolvedEnv).toEqual([{ variable: UNSET, field: "headers.Authorization" }]);
 	});
 
+	test("leaves shell parameter syntax literal without flagging it", async () => {
+		const script = `cd "/srv/\${PWD##*/}" && exec srv "\${@}" "\${1}"`;
+		const servers = await load({
+			local: { command: "sh", args: ["-c", script, "--", "a"] },
+		});
+
+		expect(servers.get("local")?.args).toEqual(["-c", script, "--", "a"]);
+		expect(servers.get("local")?.unresolvedEnv).toBeUndefined();
+	});
+
 	test("flags an unset VS Code predefined variable outside VS Code/Cursor configs", async () => {
 		expect(Bun.env.workspaceFolder).toBeUndefined();
 		const servers = await load({
