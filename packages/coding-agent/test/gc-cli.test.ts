@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -65,9 +65,12 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-	stdoutSpy?.mockRestore();
+	// A test that times out is abandoned, not stopped, and restores its own
+	// spies only when its body ends, inside the next test, whose `spyOn` on
+	// the same function would take that spy over and recurse. Every spy goes
+	// here, before the next test starts.
+	mock.restore();
 	stdoutSpy = undefined;
-	stderrSpy?.mockRestore();
 	stderrSpy = undefined;
 	process.exitCode = originalExitCode;
 	restoreSettingsTestState(settingsState);
