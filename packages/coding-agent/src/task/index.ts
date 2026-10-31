@@ -1546,6 +1546,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						progress.resolvedModelIsFallback = nextProgress.resolvedModel
 							? nextProgress.resolvedModelIsFallback
 							: undefined;
+						progress.fastMode = nextProgress.resolvedModel ? nextProgress.fastMode : undefined;
 						progress.advisor = nextProgress.advisor ?? progress.advisor;
 						progress.completionPercent = nextProgress.completionPercent ?? progress.completionPercent;
 						progress.stage = nextProgress.stage ?? progress.stage;
@@ -1649,11 +1650,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						progress.resolvedModelIdentity = singleResult.resolvedModelIdentity;
 						progress.resolvedThinkingLevel = singleResult.resolvedThinkingLevel;
 						progress.resolvedModelIsFallback = singleResult.resolvedModelIsFallback;
+						progress.fastMode = singleResult.fastMode;
 					} else {
 						delete progress.resolvedModel;
 						delete progress.resolvedModelIdentity;
 						delete progress.resolvedThinkingLevel;
 						delete progress.resolvedModelIsFallback;
+						delete progress.fastMode;
 					}
 					onSettled?.(resultFailed);
 					const statusText = resultFailed

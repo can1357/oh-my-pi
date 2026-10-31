@@ -494,8 +494,8 @@ export class TurnRecovery {
 	 * has settled a turn here, and a switch — into a fallback, back to a restored
 	 * primary, or anywhere else — moves it only once the new model answers.
 	 *
-	 * Before anything has served there is no earlier work to miscredit, so the
-	 * configured model is both the only available answer and a safe one.
+	 * Before this runtime serves, expose its bootstrap selection explicitly:
+	 * resumed transcripts can still have earlier serving evidence to preserve.
 	 */
 	get servingModel(): ServingModel | undefined {
 		const served = this.#lastServed;
@@ -514,6 +514,7 @@ export class TurnRecovery {
 			modelIdentity: formatModelStringWithRouting(model),
 			thinkingLevel: level,
 			isFallback: this.#fallbackRouted,
+			served: false,
 			contextWindow: model.contextWindow,
 		};
 		this.#bootstrapCache = { model, level, routed: this.#fallbackRouted, value };
@@ -596,6 +597,7 @@ export class TurnRecovery {
 					modelIdentity: formatModelStringWithRouting(model),
 					thinkingLevel: level,
 					isFallback: this.#fallbackRouted,
+					served: true,
 					contextWindow: model.contextWindow,
 				},
 				sessionId: this.#host.sessionManager.getSessionId(),

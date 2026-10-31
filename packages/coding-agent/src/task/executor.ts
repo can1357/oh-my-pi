@@ -59,7 +59,7 @@ import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pendi
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster, isCurrentSessionRosterRef } from "../registry/persisted-agents";
 import {
 	type CreateAgentSessionOptions,
@@ -1259,6 +1259,10 @@ interface RunMonitorArgs {
  */
 interface SubagentRunMonitor {
 	readonly progress: AgentProgress;
+	/** Registry generation captured while the monitored session owns it. */
+	readonly registryRef: AgentRef | undefined;
+	/** Ownership token for this monitor's final model/tier snapshot. */
+	readonly registryAttributionOwner: symbol;
 	/** Fires when the run was asked to stop (caller signal, timeout, budget, terminate). */
 	readonly abortSignal: AbortSignal;
 	readonly accumulatedUsage: Usage;
@@ -1322,6 +1326,8 @@ interface SubagentRunMonitor {
 	sawAssistantMessage(): boolean;
 	/** Final raw output: end-of-run assistant text when available, else accumulated chunks. */
 	rawOutput(): string;
+	/** Refresh aligned tier policy changes made after event monitoring stopped. */
+	refreshFastMode(): void;
 	scheduleProgress(flush?: boolean): void;
 	/** Stop processing events and clear listeners/timers. Call once the run settled. */
 	finish(): void;
@@ -1388,6 +1394,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	const abortController = new AbortController();
 	const abortSignal = abortController.signal;
 	let activeSession: AgentSession | null = null;
+	let attributionSession: AgentSession | undefined;
+	let registryRef: AgentRef | undefined;
+	const registryAttributionOwner = Symbol();
 	let completionProbeStarted = false;
 	let yieldCalled = false;
 	let yieldCallPending = false;
@@ -2191,37 +2200,77 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	};
 
 	const attach = (session: AgentSession): (() => void) => {
+		attributionSession = session;
+		const ref = AgentRegistry.global().get(id);
+		if (ref?.session === session) {
+			registryRef ??= ref;
+			if (registryRef === ref) AgentRegistry.global().claimAttributionOwner(ref, registryAttributionOwner);
+		}
 		// The session owns attribution: it knows which model produced its output
 		// and withholds an armed-but-unproven fallback. Re-deriving that here from
 		// the event stream got it wrong twice over — the stream also carries
 		// advisor turns running on a different model, and a routing switch was
 		// read as evidence the target had served.
+		let selectedModel = session.model;
+		let selectedModelIdentity = selectedModel ? formatModelStringWithRouting(selectedModel) : undefined;
 		const publishServingModel = (): void => {
 			const serving = session.servingModel;
 			if (!serving) return;
-			const isFallback = serving.isFallback;
+			const history = registryRef?.session === session ? registryRef.history : undefined;
+			const bootstrapHistory =
+				serving.served === false &&
+				history?.resolvedModel &&
+				history.resolvedModel !== (serving.modelIdentity ?? serving.selector)
+					? history
+					: undefined;
+			const selector = bootstrapHistory?.resolvedModel ?? serving.selector;
+			const identity = bootstrapHistory ? bootstrapHistory.resolvedModel : serving.modelIdentity;
+			const thinkingLevel = bootstrapHistory ? undefined : serving.thinkingLevel;
+			const isFallback = bootstrapHistory ? (bootstrapHistory.resolvedModelIsFallback ?? false) : serving.isFallback;
+			if (session.model !== selectedModel) {
+				selectedModel = session.model;
+				selectedModelIdentity = selectedModel ? formatModelStringWithRouting(selectedModel) : undefined;
+			}
+			const servingIdentity = identity ?? selector;
+			// An armed fallback can be selected before it serves. Keep the old
+			// model's snapshot rather than attributing the candidate's tier to it.
+			let fastMode: boolean | undefined;
+			if (bootstrapHistory) {
+				fastMode = bootstrapHistory.fastMode;
+			} else if (servingIdentity === selectedModelIdentity) {
+				fastMode = session.isFastModeActive?.();
+			} else if (selector === progress.resolvedModel && identity === progress.resolvedModelIdentity) {
+				fastMode = progress.fastMode;
+			} else if (servingIdentity === history?.resolvedModel) {
+				fastMode = history.fastMode;
+			}
 			// A model swap moves the window the usage gauge divides by. Without
 			// this the Agent Hub kept the startup model's window while labelling
 			// the row with the fallback that replaced it. Models with no declared
 			// window keep the last known one rather than blanking the gauge.
 			const contextWindow =
-				serving.contextWindow && serving.contextWindow > 0 ? serving.contextWindow : progress.contextWindow;
+				!bootstrapHistory && serving.contextWindow && serving.contextWindow > 0
+					? serving.contextWindow
+					: progress.contextWindow;
 			if (
-				serving.selector === progress.resolvedModel &&
-				serving.modelIdentity === progress.resolvedModelIdentity &&
-				serving.thinkingLevel === progress.resolvedThinkingLevel &&
+				selector === progress.resolvedModel &&
+				identity === progress.resolvedModelIdentity &&
+				thinkingLevel === progress.resolvedThinkingLevel &&
 				(progress.resolvedModelIsFallback ?? false) === isFallback &&
+				fastMode === progress.fastMode &&
 				contextWindow === progress.contextWindow
 			) {
 				return;
 			}
-			progress.resolvedModel = serving.selector;
-			progress.resolvedModelIdentity = serving.modelIdentity;
-			progress.resolvedThinkingLevel = serving.thinkingLevel;
+			progress.resolvedModel = selector;
+			progress.resolvedModelIdentity = identity;
+			progress.resolvedThinkingLevel = thinkingLevel;
 			progress.resolvedModelIsFallback = isFallback;
+			progress.fastMode = fastMode;
 			progress.contextWindow = contextWindow;
 			scheduleProgress(true);
 		};
+		publishServingModel();
 		return session.subscribe(event => {
 			emitSubagentEvent(event);
 			publishAdvisorState(session);
@@ -2290,6 +2339,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 
 	return {
 		progress,
+		get registryRef() {
+			return registryRef;
+		},
+		registryAttributionOwner,
 		abortSignal,
 		accumulatedUsage,
 		hasUsage: () => hasUsage,
@@ -2376,6 +2429,25 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		lastReportTurnText: () => lastReportTurnText,
 		sawAssistantMessage: () => sawAssistantMessage,
 		rawOutput: () => (finalOutputChunks.length > 0 ? finalOutputChunks.join("") : outputChunks.join("")),
+		refreshFastMode: () => {
+			if (!registryRef || !AgentRegistry.global().isAttributionOwner(registryRef, registryAttributionOwner)) return;
+			const model = attributionSession?.model;
+			if (
+				model &&
+				formatModelStringWithRouting(model) === (progress.resolvedModelIdentity ?? progress.resolvedModel)
+			) {
+				if (registryRef.session === attributionSession && !attributionSession?.isDisposed) {
+					progress.fastMode = attributionSession?.isFastModeActive?.();
+				} else if (
+					registryRef.session === null &&
+					registryRef.history !== undefined &&
+					registryRef.history.resolvedModel === (progress.resolvedModelIdentity ?? progress.resolvedModel)
+				) {
+					// Detach sampled before dispose clears provider fallback state.
+					progress.fastMode = registryRef.history.fastMode;
+				}
+			}
+		},
 		scheduleProgress,
 		finish: () => {
 			resolved = true;
@@ -2969,8 +3041,22 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 						? monitor.resolveSignalAbortReason()
 						: monitor.resolveAbortReasonText()
 		: undefined;
+	monitor.refreshFastMode();
 	progress.status = wasAborted ? "aborted" : exitCode === 0 ? "completed" : "failed";
 	monitor.scheduleProgress(true);
+	// A newer monitor supersedes this snapshot, but parking the same turn does
+	// not: detach may need this run's tier when an unproven model is selected.
+	if (monitor.registryRef) {
+		AgentRegistry.global().setHistory(
+			id,
+			{
+				resolvedModel: progress.resolvedModelIdentity ?? progress.resolvedModel,
+				resolvedModelIsFallback: progress.resolvedModelIsFallback,
+				fastMode: progress.fastMode,
+			},
+			{ sessionFile: args.sessionFile, ref: monitor.registryRef, owner: monitor.registryAttributionOwner },
+		);
+	}
 
 	// Emit lifecycle end event after finalization so yield status is reflected
 	const settledPayload = {
@@ -3011,6 +3097,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		resolvedModelIdentity: progress.resolvedModelIdentity,
 		resolvedThinkingLevel: progress.resolvedThinkingLevel,
 		resolvedModelIsFallback: progress.resolvedModelIsFallback,
+		fastMode: progress.fastMode,
 		resolvedModelRoute: progress.resolvedModelRoute,
 		advisor: progress.advisor,
 		error: exitCode !== 0 && stderr ? stderr : undefined,
@@ -5287,7 +5374,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			sessionFile: subtaskSessionFile,
 			startTime,
 		});
-		AgentRegistry.global().setHistory(id, { outputPath: result.outputPath });
+		if (monitor.registryRef) {
+			AgentRegistry.global().setHistory(
+				id,
+				{ outputPath: result.outputPath },
+				{ sessionFile: subtaskSessionFile, ref: monitor.registryRef },
+			);
+		}
 		return result;
 	} finally {
 		// The result is published: messages held during the run get their own

@@ -339,7 +339,7 @@ export class AgentLifecycleManager {
 					const usage = session.sessionManager.getUsageStatistics();
 					const directCost = usage.cost - usage.subagentCost;
 					if (Number.isFinite(directCost) && directCost >= 0) {
-						this.#registry.setHistory(id, { directCost }, ref.sessionFile ?? undefined);
+						this.#registry.setHistory(id, { directCost }, { sessionFile: ref.sessionFile ?? undefined });
 					}
 				} catch (error) {
 					logger.debug("AgentLifecycleManager.park: cost snapshot failed", { id, error: String(error) });

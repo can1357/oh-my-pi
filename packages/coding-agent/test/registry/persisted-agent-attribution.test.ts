@@ -1,11 +1,17 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
+import * as sessionLoader from "@oh-my-pi/pi-coding-agent/session/session-loader";
+import { TurnRecovery, type TurnRecoveryHost } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
+import { modelChip } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createAssistantMessage } from "../helpers/agent-session-setup";
 
 const SONNET = { provider: "anthropic", model: "claude-sonnet-5" };
 const SOL = { provider: "openai-codex", model: "gpt-5.6-sol" };
@@ -13,7 +19,7 @@ const SOL = { provider: "openai-codex", model: "gpt-5.6-sol" };
 function assistant(
 	id: string,
 	parentId: string,
-	who: { provider: string; model: string },
+	who: { provider: string; model: string; serviceTier?: string },
 	stopReason: string,
 	content: unknown[],
 	cost = 0.5,
@@ -29,6 +35,7 @@ function assistant(
 			content,
 			provider: who.provider,
 			model: who.model,
+			serviceTier: who.serviceTier,
 			stopReason,
 			usage: { input: 10, output: 20, totalTokens: 30, cost: { total: cost } },
 		},
@@ -97,6 +104,10 @@ async function historyFor(dir: string, id: string, records: string[]): Promise<A
 	return registry;
 }
 
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
 describe("persisted agent model attribution", () => {
 	it("reports the model that produced output, not a fallback that never served", async () => {
 		using tempDir = TempDir.createSync("@omp-attribution-incident-");
@@ -116,6 +127,303 @@ describe("persisted agent model attribution", () => {
 		expect(history?.modelRole).toBe("task");
 		// Every assistant turn still counts toward the row's telemetry.
 		expect(history?.metrics?.requests).toBe(3);
+	});
+
+	it("does not infer an applied fast tier from persisted configured-tier records", async () => {
+		using tempDir = TempDir.createSync("@omp-unknown-fast-history-");
+		const registry = await historyFor(tempDir.path(), "Legacy", [
+			...transcriptHead(),
+			JSON.stringify({
+				type: "service_tier_change",
+				id: "tier",
+				parentId: "si",
+				serviceTier: { anthropic: "priority" },
+			}),
+			assistant("a1", "tier", SONNET, "stop", [{ type: "text", text: "done" }]),
+		]);
+		expect(registry.get("Legacy")?.history?.resolvedModel).toBe("anthropic/claude-sonnet-5");
+		expect(registry.get("Legacy")?.history?.fastMode).toBeUndefined();
+		expect(registry.get("Legacy")?.history?.responseFastMode).toBeUndefined();
+	});
+
+	it.each([undefined, "unrecognized"])(
+		"clears prior response evidence after a same-model unknown tier (%s)",
+		async tier => {
+			using tempDir = TempDir.createSync("@omp-refresh-fast-history-");
+			const registry = await historyFor(tempDir.path(), "Refresh", [
+				...transcriptHead(),
+				JSON.stringify({
+					type: "message",
+					id: "a1",
+					parentId: "si",
+					message: {
+						role: "assistant",
+						...SOL,
+						serviceTier: "priority",
+						stopReason: "stop",
+						content: [{ type: "text", text: "first" }],
+					},
+				}),
+			]);
+			const ref = registry.get("Refresh")!;
+			expect(modelChip(ref, undefined)?.fastMode).toBe(true);
+			await fs.appendFile(
+				path.join(tempDir.path(), "main", "Refresh.jsonl"),
+				JSON.stringify({
+					type: "message",
+					id: "a2",
+					parentId: "a1",
+					message: {
+						role: "assistant",
+						...SOL,
+						serviceTier: tier,
+						stopReason: "stop",
+						content: [{ type: "text", text: "latest" }],
+					},
+				}) + "\n",
+			);
+			await registerPersistedSubagents(registry, path.join(tempDir.path(), "main.jsonl"));
+			expect(modelChip(ref, undefined)?.fastMode).toBeUndefined();
+		},
+	);
+
+	it.each([
+		{ tier: "priority", expected: true },
+		{ tier: "ultrafast", expected: true },
+		{ tier: "default", expected: false },
+		{ tier: undefined, expected: undefined },
+		{ tier: "unrecognized", expected: undefined },
+	])("restores the latest serving response tier ($tier), not an earlier fast turn", async ({ tier, expected }) => {
+		using tempDir = TempDir.createSync("@omp-response-fast-history-");
+		const response = (id: string, parentId: string, serviceTier: string | undefined) =>
+			JSON.stringify({
+				type: "message",
+				id,
+				parentId,
+				message: {
+					role: "assistant",
+					...SOL,
+					serviceTier,
+					stopReason: "stop",
+					content: [{ type: "text", text: "done" }],
+				},
+			});
+		const registry = await historyFor(tempDir.path(), "Recorded", [
+			...transcriptHead(),
+			response("a1", "si", "priority"),
+			response("a2", "a1", tier),
+			modelChange("m2", "a2", "anthropic/claude-sonnet-5", "fallback", true),
+			assistant("failed", "m2", SONNET, "error", []),
+		]);
+		expect(registry.get("Recorded")?.history?.resolvedModel).toBe("openai-codex/gpt-5.6-sol");
+		expect(registry.get("Recorded")?.history?.responseFastMode).toBe(expected);
+	});
+
+	it.each([false, true])("keeps runtime fast state %s ahead of older response evidence", runtimeFast => {
+		const registry = new AgentRegistry();
+		const ref = registry.register({
+			id: "Worker",
+			displayName: "Worker",
+			kind: "sub",
+			session: null,
+			status: "parked",
+			history: { resolvedModel: "openai-codex/gpt-5.6-sol", fastMode: runtimeFast },
+		});
+		registry.setHistory(ref.id, {
+			resolvedModel: "openai-codex/gpt-5.6-sol",
+			responseFastMode: !runtimeFast,
+		});
+		expect(modelChip(ref, undefined)?.fastMode).toBe(runtimeFast);
+		registry.setHistory(ref.id, { resolvedModel: "anthropic/claude-sonnet-5" });
+		expect(modelChip(ref, undefined)?.fastMode).toBeUndefined();
+	});
+
+	it("preserves same-model runtime tier evidence across scans, but not model or transcript replacement", () => {
+		const registry = new AgentRegistry();
+		const ref = registry.register({
+			id: "Worker",
+			displayName: "Worker",
+			kind: "sub",
+			session: null,
+			sessionFile: "/tmp/original.jsonl",
+			history: { resolvedModel: "anthropic/claude-sonnet-5", fastMode: true },
+		});
+		registry.setHistory(ref.id, { resolvedModel: "anthropic/claude-sonnet-5" });
+		expect(ref.history?.fastMode).toBe(true);
+		registry.setHistory(ref.id, { fastMode: false });
+		expect(ref.history?.fastMode).toBe(false);
+		registry.setHistory(ref.id, { resolvedModel: "openai-codex/gpt-5.6-sol" });
+		expect(ref.history?.fastMode).toBeUndefined();
+		registry.setHistory(ref.id, { fastMode: true });
+		registry.setHistory(ref.id, { fastMode: undefined });
+		expect(ref.history?.fastMode).toBeUndefined();
+		registry.setHistory(ref.id, { fastMode: true });
+		registry.attachSession(ref.id, sessionStub(0), "/tmp/replacement.jsonl", ref);
+		expect(ref.history?.fastMode).toBeUndefined();
+		expect(ref.history?.resolvedModel).toBeUndefined();
+		expect(ref.history?.responseFastMode).toBeUndefined();
+	});
+
+	it("preserves cold-revived serving attribution until the bootstrap primary actually serves", async () => {
+		using tempDir = TempDir.createSync("@omp-cold-serving-attribution-");
+		const registry = await historyFor(tempDir.path(), "Cold", [
+			...transcriptHead(),
+			modelChange("m2", "si", "openai-codex/gpt-5.6-sol", "fallback", true),
+			assistant("a1", "m2", { ...SOL, serviceTier: "priority" }, "stop", [{ type: "text", text: "fallback work" }]),
+		]);
+		const ref = registry.get("Cold")!;
+		const primary = createMockModel({
+			provider: SONNET.provider,
+			id: SONNET.model,
+			handler: { content: ["new work"] },
+		});
+		const recovery = new TurnRecovery({
+			model: () => primary,
+			thinkingLevel: () => undefined,
+			sessionManager: { getSessionId: () => "cold-runtime" },
+			settings: Settings.isolated({}),
+			modelRegistry: {},
+			configWarnings: [],
+		} as unknown as TurnRecoveryHost);
+		const session = sessionStub(0.5);
+		Object.defineProperties(session, {
+			model: { get: () => primary },
+			servingModel: { get: () => recovery.servingModel },
+			isFastModeActive: { value: () => false },
+		});
+		registry.attachSession(ref.id, session, ref.sessionFile, ref);
+		registry.setStatus(ref.id, "idle", ref);
+		const lifecycle = new AgentLifecycleManager(registry);
+		lifecycle.adopt(ref.id, { idleTtlMs: 0 }, ref);
+		await lifecycle.park(ref.id);
+		expect(ref.history).toMatchObject({
+			resolvedModel: "openai-codex/gpt-5.6-sol",
+			resolvedModelIsFallback: true,
+			responseFastMode: true,
+		});
+		expect(ref.history?.fastMode).toBeUndefined();
+
+		// The same primary becomes authoritative only after it produces output.
+		await recovery.onAssistantSettledSuccessfully(createAssistantMessage("new primary work"));
+		registry.attachSession(ref.id, session, ref.sessionFile, ref);
+		registry.detachSession(ref.id, ref);
+		expect(ref.history?.resolvedModel).toBe("anthropic/claude-sonnet-5");
+		expect(ref.history?.resolvedModelIsFallback).toBe(false);
+		expect(ref.history?.fastMode).toBe(false);
+		expect(ref.history?.responseFastMode).toBeUndefined();
+	});
+
+	it("rejects superseded monitor writes at the registry boundary without retiring the owner on detach", () => {
+		const registry = new AgentRegistry();
+		const session = sessionStub(0);
+		Object.assign(session, {
+			model: { provider: SONNET.provider, id: SONNET.model },
+			servingModel: { selector: "anthropic/claude-sonnet-5", isFallback: false },
+			isFastModeActive: () => true,
+		});
+		const ref = registry.register({
+			id: "Worker",
+			displayName: "Worker",
+			kind: "sub",
+			session,
+			sessionFile: "/tmp/worker.jsonl",
+			history: { resolvedModel: "anthropic/claude-sonnet-5", fastMode: true },
+		});
+		const olderOwner = Symbol();
+		const owner = Symbol();
+		registry.claimAttributionOwner(ref, olderOwner);
+		registry.claimAttributionOwner(ref, owner);
+		const options = { sessionFile: "/tmp/worker.jsonl", ref, owner };
+		expect(
+			registry.setHistory(
+				ref.id,
+				{ resolvedModel: "openai-codex/gpt-5.6-sol", fastMode: false, outputPath: "/stale.md" },
+				{ ...options, owner: olderOwner },
+			),
+		).toBe(false);
+		expect(ref.history).toEqual({ resolvedModel: "anthropic/claude-sonnet-5", fastMode: true });
+
+		registry.detachSession(ref.id, ref);
+		expect(registry.setHistory(ref.id, { resolvedModel: "openai-codex/gpt-5.6-sol", fastMode: false }, options)).toBe(
+			true,
+		);
+		expect(ref.history).toMatchObject({ resolvedModel: "openai-codex/gpt-5.6-sol", fastMode: false });
+	});
+
+	it("fences delayed hydration attribution while retaining metadata, cost, and later rescans", async () => {
+		using tempDir = TempDir.createSync("@omp-delayed-runtime-attribution-");
+		const rootFile = path.join(tempDir.path(), "main.jsonl");
+		const transcriptFile = path.join(tempDir.path(), "main", "Worker.jsonl");
+		const registry = await historyFor(tempDir.path(), "Worker", [
+			...transcriptHead(),
+			assistant("a1", "si", SONNET, "stop", [{ type: "text", text: "old work" }], 0.5),
+		]);
+		const ref = registry.get("Worker")!;
+		await fs.appendFile(transcriptFile, `${modelUsage("usage", "a1", 0.1, "2026-08-07T11:30:00.000Z")}\n`);
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const visit = sessionLoader.visitEntriesFromFileStream;
+		let pause = true;
+		vi.spyOn(sessionLoader, "visitEntriesFromFileStream").mockImplementation(async (file, visitor, options) => {
+			const result = await visit(file, visitor, options);
+			if (file === transcriptFile && pause) {
+				pause = false;
+				entered.resolve();
+				await release.promise;
+			}
+			return result;
+		});
+		const hydration = registerPersistedSubagents(registry, rootFile);
+		try {
+			await entered.promise;
+			await fs.appendFile(
+				transcriptFile,
+				`${assistant("a2", "usage", { ...SOL, serviceTier: "priority" }, "stop", [{ type: "text", text: "new work" }])}\n`,
+			);
+			const session = sessionStub(1.25);
+			Object.assign(session, {
+				model: { provider: SOL.provider, id: SOL.model },
+				servingModel: {
+					selector: "openai-codex/gpt-5.6-sol",
+					modelIdentity: "openai-codex/gpt-5.6-sol",
+					isFallback: true,
+				},
+				isFastModeActive: () => false,
+			});
+			registry.attachSession(ref.id, session, transcriptFile, ref);
+			registry.setStatus(ref.id, "idle", ref);
+			registry.setHistory(ref.id, {
+				resolvedModel: "openai-codex/gpt-5.6-sol",
+				resolvedModelIsFallback: true,
+				fastMode: false,
+				responseFastMode: false,
+				outputPath: "/runtime/result.md",
+			});
+			const lifecycle = new AgentLifecycleManager(registry);
+			lifecycle.adopt(ref.id, { idleTtlMs: 0 }, ref);
+			await lifecycle.park(ref.id);
+			release.resolve();
+			await hydration;
+			expect(ref.history).toMatchObject({
+				resolvedModel: "openai-codex/gpt-5.6-sol",
+				resolvedModelIsFallback: true,
+				fastMode: false,
+				responseFastMode: false,
+				modelRole: "task",
+				outputPath: "/runtime/result.md",
+				directCost: 1.25,
+			});
+			// No permanent latch: a new scan can read current response evidence,
+			// and the aligned runtime false still outranks that response's true.
+			await registerPersistedSubagents(registry, rootFile);
+			expect(ref.history?.responseFastMode).toBe(true);
+			expect(ref.history?.fastMode).toBe(false);
+			expect(ref.history?.metrics?.requests).toBe(2);
+			expect(ref.history?.directCost).toBe(1.25);
+		} finally {
+			release.resolve();
+			await hydration;
+		}
 	});
 
 	it("treats a stall aborted mid-tool-call as unserved despite its partial content", async () => {
@@ -276,7 +584,7 @@ describe("persisted agent model attribution", () => {
 		expect(ref.status).toBe("parked");
 		expect(ref.session).toBeNull();
 		expect(ref.history?.directCost).toBeCloseTo(1);
-		expect(registry.setHistory("BuildThing", staleScanSnapshot!, transcriptFile)).toBe(true);
+		expect(registry.setHistory("BuildThing", staleScanSnapshot!, { sessionFile: transcriptFile })).toBe(true);
 		expect(ref.history?.directCost).toBeCloseTo(1);
 		// The stale persisted scan still supplies selected-leaf non-cost history;
 		// only its same-file cumulative direct-cost snapshot is rejected.
@@ -286,10 +594,10 @@ describe("persisted agent model attribution", () => {
 		const replacementFile = path.join(tempDir.path(), "replacement.jsonl");
 		expect(registry.attachSession("BuildThing", sessionStub(0.1), replacementFile, ref)).toBe(true);
 		expect(ref.history?.directCost).toBeUndefined();
-		expect(registry.setHistory("BuildThing", { directCost: 0.1 }, replacementFile)).toBe(true);
+		expect(registry.setHistory("BuildThing", { directCost: 0.1 }, { sessionFile: replacementFile })).toBe(true);
 		expect(ref.history?.directCost).toBeCloseTo(0.1);
 		// A late scan from the superseded transcript cannot update the new ref.
-		expect(registry.setHistory("BuildThing", staleScanSnapshot!, transcriptFile)).toBe(false);
+		expect(registry.setHistory("BuildThing", staleScanSnapshot!, { sessionFile: transcriptFile })).toBe(false);
 		expect(ref.history?.directCost).toBeCloseTo(0.1);
 		// Without a transcript identity token, setHistory keeps last-write semantics.
 		expect(registry.setHistory("BuildThing", { directCost: 0.05 })).toBe(true);

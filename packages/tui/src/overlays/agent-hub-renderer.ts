@@ -112,12 +112,13 @@ function showsThinkingLevel(level: ThinkingLevel | undefined): level is Exclude<
 	return level !== undefined && level !== ThinkingLevel.Off && level !== ThinkingLevel.Inherit;
 }
 
-/** Model id + thinking level (`sonnet-4-6 ◒ high`), level colored per theme. */
-function formatModelBadge(modelId: string, level: ThinkingLevel | undefined): string {
-	const model = theme.fg("muted", sanitizeDisplaySingleLine(modelId));
-	if (!showsThinkingLevel(level)) return model;
+/** Model id, optional fast glyph, and thinking level, colored per theme. */
+function formatModelBadge(modelId: string, level: ThinkingLevel | undefined, fastMode?: boolean): string {
+	const model = theme.fg("muted", modelId);
+	const label = fastMode && theme.icon.fast ? `${model} ${theme.fg("warning", theme.icon.fast)}` : model;
+	if (!showsThinkingLevel(level)) return label;
 	const display = theme.thinking[level] ?? level;
-	return `${model} ${theme.getThinkingBorderColor(level)(display)}`;
+	return `${label} ${theme.getThinkingBorderColor(level)(display)}`;
 }
 
 /** Theme token matching {@link Theme.getThinkingBorderColor} for native spans. */
@@ -161,6 +162,7 @@ interface ResolvedModelBadge {
 	model: string;
 	level: ThinkingLevel | undefined;
 	fallback: boolean;
+	fastMode?: boolean;
 }
 
 /** Resolve a selector, preserving provider identity when requested. */
@@ -169,12 +171,14 @@ function resolveSelectorBadge(
 	fallback: boolean,
 	preserveProvider: boolean,
 	fallbackLevel: ThinkingLevel | undefined,
+	explicitIdentity?: string,
 ): ResolvedModelBadge {
 	const cleanResolved = sanitizeDisplaySingleLine(resolved);
 	// Model ids may themselves contain colons (`qwen3:14b`), so only treat the
 	// suffix as a thinking level when it parses as one.
 	const colon = cleanResolved.lastIndexOf(":");
-	const explicitLevel = colon >= 0 ? parseThinkingLevel(cleanResolved.slice(colon + 1)) : undefined;
+	const explicitLevel =
+		cleanResolved !== explicitIdentity && colon >= 0 ? parseThinkingLevel(cleanResolved.slice(colon + 1)) : undefined;
 	const selector = explicitLevel !== undefined ? cleanResolved.slice(0, colon) : cleanResolved;
 	const label = preserveProvider ? selector : selector.slice(selector.indexOf("/") + 1);
 	return { model: label, level: explicitLevel ?? fallbackLevel, fallback };
@@ -194,26 +198,116 @@ function resolveModelBadge(
 	ref: AgentRecordLike,
 	observed: ObservableSession | undefined,
 ): ResolvedModelBadge | undefined {
-	const progress = observed?.progress;
-	const liveThinkingLevel = ref.session?.thinkingLevel;
+	// Detach captures the current policy after the completed run's monitor stopped.
+	const parkedHistory = !ref.session && observed?.status !== "active" && ref.history?.resolvedModel !== undefined;
+	const progress = parkedHistory ? undefined : observed?.progress;
+	const historyProgress =
+		parkedHistory && ref.history?.resolvedModel === observed?.progress?.resolvedModelIdentity
+			? observed?.progress
+			: undefined;
+	const liveThinkingLevel =
+		ref.session?.thinkingLevel ??
+		(historyProgress?.resolvedModel
+			? resolveSelectorBadge(
+					historyProgress.resolvedModel,
+					false,
+					true,
+					undefined,
+					historyProgress.resolvedModelIdentity,
+				).level
+			: undefined);
 	const serving = ref.session?.servingModel;
 	const fallbackSelector =
-		(serving?.isFallback ? serving.selector : undefined) ??
+		(serving?.isFallback && serving.served !== false ? serving.selector : undefined) ??
 		(progress?.resolvedModelIsFallback ? progress.resolvedModel : undefined) ??
-		(ref.history?.resolvedModelIsFallback ? ref.history.resolvedModel : undefined);
-	if (fallbackSelector) return resolveSelectorBadge(fallbackSelector, true, true, liveThinkingLevel);
-	const resolvedModel = progress?.resolvedModel ?? ref.history?.resolvedModel ?? serving?.selector;
-	if (resolvedModel) return resolveSelectorBadge(resolvedModel, false, false, liveThinkingLevel);
+		(!progress?.resolvedModel && ref.history?.resolvedModelIsFallback ? ref.history.resolvedModel : undefined);
+	const selector = fallbackSelector ?? progress?.resolvedModel ?? ref.history?.resolvedModel ?? serving?.selector;
 	const model = ref.session?.model;
+	// An armed fallback can point the session at a different model than the one shown.
+	const modelIdentity = model ? `${model.provider}/${model.id}` : undefined;
+	const explicitIdentity =
+		(selector === progress?.resolvedModel ? progress?.resolvedModelIdentity : undefined) ??
+		(selector === serving?.selector ? serving?.modelIdentity : undefined);
+	const displayedIdentity =
+		explicitIdentity ?? (selector ? resolveSelectorBadge(selector, false, true, undefined).model : modelIdentity);
+	const servingIdentity = serving?.modelIdentity ?? serving?.selector ?? modelIdentity;
+	const liveMatches =
+		modelIdentity !== undefined &&
+		(servingIdentity === modelIdentity || servingIdentity?.startsWith(`${modelIdentity}@`)) &&
+		displayedIdentity === servingIdentity;
+	const historyIdentity = ref.history?.resolvedModel;
+	const historyMatches =
+		historyIdentity !== undefined &&
+		(historyIdentity === displayedIdentity ||
+			(!explicitIdentity &&
+				resolveSelectorBadge(historyIdentity, false, true, undefined).model === displayedIdentity));
+	const snapshotFastMode =
+		(progress && progress.resolvedModel === selector ? progress.fastMode : undefined) ??
+		(historyMatches ? (ref.history?.fastMode ?? ref.history?.responseFastMode) : undefined);
+	const fastMode = (liveMatches ? ref.session?.isFastModeActive?.() : undefined) ?? snapshotFastMode;
+	if (selector) {
+		return {
+			...resolveSelectorBadge(
+				selector,
+				Boolean(fallbackSelector),
+				Boolean(fallbackSelector),
+				liveThinkingLevel,
+				explicitIdentity ?? historyProgress?.resolvedModelIdentity,
+			),
+			fastMode,
+		};
+	}
 	if (!model) return undefined;
-	return { model: model.id, level: model.thinking ? liveThinkingLevel : undefined, fallback: false };
+	return {
+		model: sanitizeDisplaySingleLine(model.id),
+		level: model.thinking ? liveThinkingLevel : undefined,
+		fallback: false,
+		fastMode,
+	};
 }
 
-export function modelBadge(ref: AgentRecordLike, observed: ObservableSession | undefined): string | undefined {
+/** Keep effort intact, sacrificing redundant role text before the model label. */
+export function boundedModelMetadata(
+	ref: AgentRecordLike,
+	observed: ObservableSession | undefined,
+	role: string | undefined,
+	width: number,
+): string {
 	const badge = resolveModelBadge(ref, observed);
-	if (!badge) return undefined;
-	const text = formatModelBadge(badge.model, badge.level);
-	return badge.fallback ? `${theme.fg("warning", "fallback →")} ${text}` : text;
+	const max = Math.max(0, width);
+	if (!badge) return role ? truncateToWidth(role, max) : "";
+	const modelText = formatModelBadge(badge.model, badge.level, badge.fastMode);
+	const full = badge.fallback ? `${theme.fg("warning", "fallback →")} ${modelText}` : modelText;
+	const combined = role ? `${role}${theme.sep.dot}${full}` : full;
+	if (visibleWidth(combined) <= max) return combined;
+	if (visibleWidth(full) <= max) {
+		const roleWidth = max - visibleWidth(full) - visibleWidth(theme.sep.dot);
+		const shortRole = role && roleWidth > 0 ? truncateToWidth(role, roleWidth) : "";
+		return shortRole ? `${shortRole}${theme.sep.dot}${full}` : full;
+	}
+	const suffix = [
+		badge.fastMode && theme.icon.fast ? theme.fg("warning", theme.icon.fast) : "",
+		showsThinkingLevel(badge.level)
+			? theme.getThinkingBorderColor(badge.level)(theme.thinking[badge.level] ?? badge.level)
+			: "",
+	]
+		.filter(Boolean)
+		.join(" ");
+	const suffixWidth = visibleWidth(suffix);
+	if (suffixWidth === max) return suffix;
+	if (suffixWidth >= max) {
+		const effort = showsThinkingLevel(badge.level)
+			? theme.getThinkingBorderColor(badge.level)(theme.thinking[badge.level] ?? badge.level)
+			: suffix;
+		return truncateToWidth(effort, max, Ellipsis.Omit);
+	}
+	const modelWidth = max - suffixWidth - (suffix ? 1 : 0);
+	const model = truncateToWidth(
+		`${badge.fallback ? theme.fg("warning", "fallback → ") : ""}${theme.fg("muted", badge.model)}`,
+		modelWidth,
+		Ellipsis.Unicode,
+	);
+	return `${model}${model && suffix ? " " : ""}${suffix}`;
 }
 
 /** A picker chip for the model that produced a row's work: label plus thinking-level colour token. */
@@ -224,27 +318,30 @@ export interface ModelChip {
 	/** Theme token of {@link level}. */
 	dot?: string;
 	fallback: boolean;
+	fastMode?: boolean;
 }
 
-/** Structured {@link modelBadge} for picker chips. */
+/** Structured model metadata for picker chips. */
 export function modelChip(ref: AgentRecordLike, observed: ObservableSession | undefined): ModelChip | undefined {
 	const badge = resolveModelBadge(ref, observed);
 	if (!badge) return undefined;
 	return {
-		text: sanitizeDisplaySingleLine(badge.model),
+		text: badge.model,
 		level: showsThinkingLevel(badge.level) ? badge.level : undefined,
 		dot: showsThinkingLevel(badge.level) ? thinkingToken(badge.level) : undefined,
 		fallback: badge.fallback,
+		fastMode: badge.fastMode,
 	};
 }
 
-/** Native spans of {@link modelBadge}. */
+/** Native spans of the resolved model metadata. */
 export function modelBadgeSpans(ref: AgentRecordLike, observed: ObservableSession | undefined): TspSpan[] | undefined {
 	const badge = resolveModelBadge(ref, observed);
 	if (!badge) return undefined;
 	const spans: TspSpan[] = [];
 	if (badge.fallback) spans.push(span("fallback → ", "warning"));
-	spans.push(span(sanitizeDisplaySingleLine(badge.model), "muted"));
+	spans.push(span(badge.model, "muted"));
+	if (badge.fastMode && theme.icon.fast) spans.push(span(` ${theme.icon.fast}`, "warning"));
 	if (showsThinkingLevel(badge.level)) {
 		spans.push(span(` ${theme.thinking[badge.level] ?? badge.level}`, thinkingToken(badge.level)));
 	}
