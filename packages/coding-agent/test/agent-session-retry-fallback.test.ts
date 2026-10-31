@@ -2749,6 +2749,72 @@ describe("AgentSession retry fallback", () => {
 		});
 	});
 
+	it("pauses an advisor whose credential switches keep landing on the capped account", async () => {
+		// A three-account pool whose sibling check claims a free account on every
+		// mark, yet each retry fails on the same capped credential (issue #17472).
+		vi.spyOn(modelRegistry.authStorage.credentials, "list").mockReturnValue(
+			[1, 2, 3].map(id => ({
+				id,
+				provider: "anthropic",
+				credential: { type: "api_key", key: `anthropic-key-${id}` },
+				disabledCause: null,
+			})),
+		);
+		const markReached = vi
+			.spyOn(modelRegistry.authStorage.limits, "markReached")
+			.mockResolvedValue({ switched: true, blockedUntilMs: Date.now() + 9_516 * 60_000 });
+		const mainModel = getBundledModel("openai", "gpt-4o-mini");
+		const advisorModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!mainModel || !advisorModel) throw new Error("Expected bundled models to exist");
+
+		const advisorMock = createMockModel();
+		let advisorRequests = 0;
+		const runawayCap = 50;
+		const advisorSettled = Promise.withResolvers<void>();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: mainModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: createMockModel({ responses: [{ content: ["Primary complete"] }] }).stream,
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 0,
+			"retry.modelFallback": false,
+		});
+		const advisorSelector = `${advisorModel.provider}/${advisorModel.id}`;
+		settings.setModelRole("advisor", advisorSelector);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorConfigs: [{ name: "quota-switch-test", model: advisorSelector }],
+			advisorStreamFn: (model, context, options) => {
+				advisorRequests++;
+				if (advisorRequests >= runawayCap) advisorSettled.resolve();
+				advisorMock.push({ stopReason: "error", errorMessage: "429 usage_limit_reached" });
+				return advisorMock.stream(model, context, options);
+			},
+		});
+		session.subscribe(event => {
+			if (event.type === "advisor_yielded") advisorSettled.resolve();
+		});
+
+		session.setAdvisorEnabled(true);
+		await session.prompt("Complete one primary turn");
+		await session.waitForIdle();
+		await advisorSettled.promise;
+
+		// One request plus one switch per sibling account, then the quota pause.
+		expect(advisorRequests).toBe(3);
+		expect(markReached).toHaveBeenCalledTimes(3);
+		expect(session.getAdvisorStatusOverview().advisors[0]).toMatchObject({
+			status: "quota_exhausted",
+			yielded: true,
+		});
+	});
+
 	describe("advisor on a timed Codex capacity 429", () => {
 		async function runAdvisorAgainstCapacityErrors(failures: number, maxRetries: number) {
 			const markReached = vi.spyOn(modelRegistry.authStorage.limits, "markReached");

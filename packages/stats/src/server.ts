@@ -163,6 +163,19 @@ const ensureClientBuild = async () => {
  */
 const STATS_ACTION_HEADER = "X-Omp-Stats-Action";
 
+/** What the page's Close calls; unset, the page offers none. */
+let closeHandler: (() => void) | undefined;
+
+/**
+ * Let the page close the dashboard: while `close` is set, it shows a Close
+ * button (and takes Esc and Ctrl+C) that calls it. `omp stats` sets it while
+ * Tern shows the page in place of the block it runs in, where the page has no
+ * way out of its own; `undefined` takes Close away again.
+ */
+export function setStatsCloseHandler(close: (() => void) | undefined): void {
+	closeHandler = close;
+}
+
 /**
  * Handle API requests.
  */
@@ -266,6 +279,17 @@ export async function handleApi(req: Request): Promise<Response> {
 		const details = await getRequestDetails(parseInt(id, 10));
 		if (!details) return new Response("Not Found", { status: 404 });
 		return Response.json(details);
+	}
+
+	if (path === "/api/close") {
+		if (req.method === "GET") return Response.json({ closable: closeHandler !== undefined });
+		if (req.method !== "POST") return Response.json({ error: "GET or POST required" }, { status: 405 });
+		if (req.headers.get(STATS_ACTION_HEADER) !== "1") {
+			return Response.json({ error: `${STATS_ACTION_HEADER}: 1 header required` }, { status: 403 });
+		}
+		if (!closeHandler) return Response.json({ error: "this dashboard is not closed from its page" }, { status: 404 });
+		closeHandler();
+		return new Response(null, { status: 202 });
 	}
 
 	if (path === "/api/sync") {

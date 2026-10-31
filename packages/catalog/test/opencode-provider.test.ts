@@ -342,6 +342,44 @@ describe("Shared models.dev catalog fallback", () => {
 		}
 	});
 
+	test("sanitizes an authoritative resolver's fallback cache when additive mode is enabled", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-additive-authoritative-cache-"));
+		try {
+			const bundledModel = getBundledModels("zai")[0];
+			if (!bundledModel) throw new Error("ZAI bundled catalog is empty");
+			const cachedOverride = { ...bundledModel, name: "Untrusted cached override", contextWindow: 1, maxTokens: 1 };
+			const cacheDbPath = path.join(tempDir, "models.db");
+			const legacyOptions = {
+				providerId: "zai" as const,
+				cacheDbPath,
+				staticModels: [bundledModel],
+				dynamicModelsAuthoritative: true,
+				// The authoritative endpoint fails, so the snapshot is the
+				// non-authoritative models.dev merge carrying the override.
+				fetchDynamicModels: async () => {
+					throw new Error("endpoint down");
+				},
+				modelsDev: {
+					fetch: async () => [cachedOverride],
+					map: (payload: Array<typeof cachedOverride>) => payload,
+				},
+			};
+			await resolveProviderModels(legacyOptions, "online");
+
+			const additiveOptions = { ...legacyOptions, modelsDev: { ...legacyOptions.modelsDev, additiveOnly: true } };
+			for (const strategy of ["online-if-uncached", "offline"] as const) {
+				const resolved = await resolveProviderModels(additiveOptions, strategy);
+				expect(resolved.models.find(model => model.id === bundledModel.id)).toMatchObject({
+					name: bundledModel.name,
+					contextWindow: bundledModel.contextWindow,
+					maxTokens: bundledModel.maxTokens,
+				});
+			}
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	test("retains one source's cached slice when the other source refreshes", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-partial-source-refresh-"));
 		try {

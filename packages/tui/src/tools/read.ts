@@ -466,11 +466,11 @@ function readRangeStart(rawPath: string, args: ReadRenderArgs | undefined): numb
 }
 
 /**
- * Read content as numbered, wrapped `code` (no path header: the head names
- * the file), matching the ANSI preview's hanging wrap. Numbers come from
+ * Read content as one numbered, wrapped `code` block (no path header: the head
+ * names the file), matching the ANSI preview's hanging wrap. Numbers come from
  * `lineNumbers` (`displayContent`'s per-line numbers, `null` for an elided
- * block; runs split with `…` between) when they cover every line, else count
- * up from `start`.
+ * block, which Tern shows as a `…` gap row where the numbers jump) when they
+ * cover every line, else count up from `start`.
  */
 export function readContentCode(
 	content: string,
@@ -479,10 +479,11 @@ export function readContentCode(
 	path: string | undefined,
 ): NativeNode[] {
 	const lines = content.split("\n");
-	return numberedCode(
+	const block = numberedCode(
 		lines.map((text, i) => ({ n: numbers && numbers.length === lines.length ? numbers[i]! : start + i, text })),
 		{ path, wrap: true },
 	);
+	return block ? [block] : [];
 }
 
 /** An image content block as the read tool emits it (base64 data + mime type). */

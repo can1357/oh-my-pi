@@ -1675,9 +1675,10 @@ export class EventController {
 				}
 				if (isNew) {
 					// A write's streamed path may still grow into a reply URL (`ou…` → `out://`), which
-					// draws as prose rather than a card; the block waits until the path tells. An unbound
-					// reveal never advances, so drop it: the next update's fresh entry shows all received.
-					if (partialJson && isReplyWrite(renderToolName, renderArgs) === undefined) {
+					// draws as prose rather than a card; the block waits until the path tells. Empty partial
+					// JSON (`toolcall_start`) is still streaming, not final empty args. An unbound reveal
+					// never advances, so drop it: the next update's fresh entry shows all received.
+					if (partialJson !== undefined && isReplyWrite(renderToolName, renderArgs) === undefined) {
 						this.#toolArgsReveal.finish(content.id);
 						continue;
 					}

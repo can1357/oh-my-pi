@@ -1379,7 +1379,7 @@ describe("Coding Agent Tools", () => {
 			fs.mkdirSync(childDir, { recursive: true });
 			writeFileWithMtime(path.join(testDir, ".hidden-root"), "hidden", base + 20_000);
 			writeFileWithMtime(path.join(testDir, ".DS_Store"), "mac metadata", base + 25_000);
-			writeFileWithMtime(path.join(testDir, "node_modules", "pkg", "index.js"), "ignored", base + 24_000);
+			writeFileWithMtime(path.join(testDir, "node_modules", "pkg", "index.js"), "dependency", base + 24_000);
 			for (let i = 0; i < 13; i += 1) {
 				const fileName = `root-${String(i).padStart(2, "0")}.txt`;
 				writeFileWithMtime(path.join(testDir, fileName), fileName, base + i);
@@ -1397,7 +1397,9 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain(".");
 			expect(output).toContain(".hidden-root");
 			expect(output).not.toContain(".DS_Store");
-			expect(output).not.toContain("node_modules");
+			expect(output).toContain("node_modules/");
+			expect(output).toContain("pkg/");
+			expect(output).not.toContain("index.js");
 			expect(output).toContain("root-00.txt");
 			expect(output).toContain("root-01.txt");
 			expect(output).toContain("root-12.txt");

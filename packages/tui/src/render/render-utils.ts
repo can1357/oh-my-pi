@@ -103,6 +103,8 @@ export const PREVIEW_LIMITS = {
 	EXPANDED_LINES: 12,
 	/** Items (files, results) shown in collapsed view */
 	COLLAPSED_ITEMS: 8,
+	/** Definition, type-definition and implementation locations shown in collapsed view */
+	LOCATIONS_COLLAPSED: 2,
 	/** Output preview lines in collapsed view */
 	OUTPUT_COLLAPSED: 3,
 	/** Output preview lines in expanded view */

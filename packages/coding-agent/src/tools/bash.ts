@@ -663,14 +663,17 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	/**
 	 * Session identity for a command, read when its tool call starts, so
 	 * `/fork`, `/new`, and `/resume` take effect on the next call while a call
-	 * already under way keeps the session it began in. Always set both keys: an
-	 * empty value replaces a stale one inherited from a parent omp process,
-	 * since an env overlay cannot unset.
+	 * already under way keeps the session it began in. `PI_TOOL_CALL_ID` is the
+	 * id this call runs under: the agent's call in the transcript, or the eval
+	 * tool bridge's own id for a call made from an eval cell. Always
+	 * set every key: an empty value replaces a stale one inherited from a parent
+	 * omp process, since an env overlay cannot unset.
 	 */
-	#sessionEnv(): Record<string, string> {
+	#sessionEnv(toolCallId: string): Record<string, string> {
 		return {
 			PI_SESSION_ID: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? "",
 			PI_SESSION_FILE: this.session.getSessionFile() ?? "",
+			PI_TOOL_CALL_ID: toolCallId,
 		};
 	}
 
@@ -1052,7 +1055,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// change while the call waits must not move it into the new session's
 		// shell, nor hand it the new session's identity.
 		const sessionId = this.session.getSessionId?.() ?? undefined;
-		const sessionEnv = this.#sessionEnv();
+		const sessionEnv = this.#sessionEnv(toolCallId);
 
 		// Extract a leading `cd <path> && ...` into cwd when the model ignores the
 		// cwd parameter. The scanner captures only a single path token and defers

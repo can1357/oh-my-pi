@@ -1893,7 +1893,7 @@ export class CommandController {
 		let finished = false;
 
 		if (isDeferred) {
-			this.ctx.pendingMessagesContainer.addChild(this.ctx.bashComponent);
+			this.ctx.pendingShellContainer.addChild(this.ctx.bashComponent);
 			this.ctx.pendingBashComponents.push(this.ctx.bashComponent);
 		} else {
 			this.ctx.present(this.ctx.bashComponent);
@@ -2004,7 +2004,7 @@ export class CommandController {
 		this.ctx.pythonComponent = new EvalExecutionComponent(code, this.ctx.ui, excludeFromContext);
 
 		if (isDeferred) {
-			this.ctx.pendingMessagesContainer.addChild(this.ctx.pythonComponent);
+			this.ctx.pendingShellContainer.addChild(this.ctx.pythonComponent);
 			this.ctx.pendingPythonComponents.push(this.ctx.pythonComponent);
 		} else {
 			this.ctx.present(this.ctx.pythonComponent);

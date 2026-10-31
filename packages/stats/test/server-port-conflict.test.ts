@@ -56,6 +56,8 @@ async function startBunHolder(responseExpr: string, options?: { hostname?: strin
 	const args = [process.execPath, "-e", source];
 	if (options?.statsOwned) args.push("omp-stats");
 	const child = Bun.spawn(args, {
+		// The isolated environment, passed explicitly: a child must never resolve the user's stats database.
+		env: { ...process.env },
 		stdin: "ignore",
 		stdout: "pipe",
 		stderr: "pipe",

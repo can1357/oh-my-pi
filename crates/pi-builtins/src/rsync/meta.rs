@@ -1123,8 +1123,9 @@ mod tests {
 		assert!(same_mtime(&e, &local(T0 - 1, 0), &window(1)));
 		assert!(!same_mtime(&e, &local(T0 + 2, 500), &window(1)));
 		assert!(!same_mtime(&e, &local(T0 - 2, 500), &window(1)));
-		// Negative: seconds and nanoseconds must both match.
-		assert!(!same_mtime(&e, &local(T0, 501), &window(-1)));
+		// Negative: seconds and nanoseconds must both match (100 ns apart: Windows
+		// file times have 100 ns resolution).
+		assert!(!same_mtime(&e, &local(T0, 600), &window(-1)));
 		assert!(same_mtime(&e, &local(T0, 500), &window(-1)));
 		// Accurate comparisons ignore the window.
 		assert!(!mtime_matches(&e, &local(T0 + 1, 500), &window(5), true));
@@ -1145,8 +1146,9 @@ mod tests {
 		assert_eq!(attr_changes(&e, &same, &base), 0);
 		assert!(attrs_unchanged(&e, &same, &base, None));
 
-		// Size (regular files only), time, and perms.
-		let other = with_mtime(vmeta(0o100600, 7), T0 + 1, 0).with_owner(10, 20);
+		// Size (regular files only), time, and perms (a write-bit change, the one
+		// permission Windows stores).
+		let other = with_mtime(vmeta(0o100444, 7), T0 + 1, 0).with_owner(10, 20);
 		assert_eq!(
 			attr_changes(&e, &other, &base),
 			ITEM_REPORT_SIZE | ITEM_REPORT_TIME | ITEM_REPORT_PERMS

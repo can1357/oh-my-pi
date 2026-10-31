@@ -2,8 +2,11 @@ import * as path from "node:path";
 
 import { buildPathTree, isUrlLikePath, type PathTreeInput, walkPathTree } from "@oh-my-pi/pi-utils";
 import type { TspTone } from "@oh-my-pi/pi-wire";
-import { code, col, keyed, span, text } from "../native/describe";
+import { code, col, keyed } from "../native/describe";
 import type { NativeNode } from "../native/node";
+import { getLanguageFromPath } from "../lang-from-path";
+import { replaceTabs } from "../render/render-utils";
+import { highlightCode, isHighlightLanguage, type Theme, type ThemeColor } from "../theme/theme";
 import { formatHashlineHeader } from "./hashline-format";
 import { fileRow } from "./native-view";
 
@@ -267,6 +270,135 @@ export function groupLineIndicesByBlank(rawLines: readonly string[]): number[][]
 }
 
 // =============================================================================
+// Code frames highlighted in their file's language (TUI renderers)
+// =============================================================================
+
+/** A code-frame row split after its rule: the gutter (match marker, line number, rule) and the source line. */
+interface CodeFrameRow {
+	gutter: string;
+	source: string;
+}
+
+/**
+ * Draw the code-frame rows of consecutive source lines: each gutter in
+ * `color`, the sources highlighted in `lang` as one run, so a multi-line
+ * string or comment keeps its colors. Without a language the sources take
+ * `color` too.
+ */
+function renderCodeFrameRun(
+	rows: readonly CodeFrameRow[],
+	lang: string | undefined,
+	color: ThemeColor,
+	theme: Theme,
+): string[] {
+	const sources = rows.map(row => replaceTabs(row.source));
+	const highlighted = isHighlightLanguage(lang) ? highlightCode(sources.join("\n"), lang, theme) : undefined;
+	return rows.map((row, index) => {
+		const source = highlighted?.[index] ?? theme.fg(color, sources[index]!);
+		return `${theme.fg(color, row.gutter)}${source}`;
+	});
+}
+
+/** A numbered code-frame row of search output, with its line number. */
+interface NumberedCodeFrame {
+	row: CodeFrameRow;
+	n: number;
+}
+
+function parseNumberedCodeFrame(line: string): NumberedCodeFrame | undefined {
+	const match = GROUPED_NUMBERED_LINE_RE.exec(line);
+	if (!match) return undefined;
+	const source = match[3]!;
+	return { row: { gutter: line.slice(0, line.length - source.length), source }, n: Number(match[2]) };
+}
+
+/** The file a grouped file header names, without its suffix and hashline tag: `## a.ts#3f2a (2)` → `a.ts`. */
+function groupedHeaderName(line: string): string {
+	const rest = GROUPED_HEADER_RE.exec(line)?.[2]?.trimEnd() ?? "";
+	return rest.replace(HEADER_SUFFIX_RE, "").replace(HEADER_HASH_TAG_RE, "");
+}
+
+/**
+ * Source rows highlighted together. A run longer than this (a huge AST match) highlights chunk by chunk as rows
+ * are requested, so a collapsed view never tokenizes source it hides; a string or comment spanning a chunk
+ * boundary loses its continuation there.
+ */
+const CODE_FRAME_CHUNK_ROWS = 64;
+
+/**
+ * Styled code-frame rows of grouped search output, highlighted in each owning
+ * file's language (`lang` overrides it when the highlighter knows it). A run of
+ * consecutive line numbers in one file highlights together on its first
+ * request; a gap row, a jump in line numbers or another file starts a new run.
+ * Rows without a numbered code frame (headers, gap rows, notes) return
+ * undefined, for the caller to style.
+ */
+export function createCodeFrameStyler(
+	lines: readonly string[],
+	contexts: readonly GroupedLineContext[],
+	color: ThemeColor,
+	theme: Theme,
+	lang?: string,
+): (index: number) => string | undefined {
+	// Each body row's language: the override, else its owning file's, from the resolved path or its header's name.
+	const langOverride = isHighlightLanguage(lang) ? lang : undefined;
+	const langs: (string | undefined)[] = [];
+	let headerLang: string | undefined;
+	for (let index = 0; index < lines.length; index++) {
+		const ctx = contexts[index]!;
+		if (ctx.kind === "content") {
+			langs.push(langOverride ?? (ctx.filePath ? getLanguageFromPath(ctx.filePath) : headerLang));
+			continue;
+		}
+		headerLang = ctx.kind === "file" ? getLanguageFromPath(groupedHeaderName(lines[index]!)) : undefined;
+		langs.push(undefined);
+	}
+
+	const frames: (NumberedCodeFrame | null)[] = [];
+	const frameAt = (index: number): NumberedCodeFrame | null => {
+		let frame = frames[index];
+		if (frame === undefined) {
+			frame = contexts[index]!.kind === "content" ? (parseNumberedCodeFrame(lines[index]!) ?? null) : null;
+			frames[index] = frame;
+		}
+		return frame;
+	};
+	// Whether the row at `index` continues the run of the row above it.
+	const continuesRun = (index: number): boolean => {
+		if (index <= 0 || langs[index] !== langs[index - 1]) return false;
+		const frame = frameAt(index);
+		const above = frameAt(index - 1);
+		return frame !== null && above !== null && frame.n === above.n + 1;
+	};
+	// First row of each row's run, memoized so walking back through a long run happens once.
+	const runStarts: number[] = [];
+	const runStartOf = (index: number): number => {
+		let row = index;
+		while (runStarts[row] === undefined && continuesRun(row)) row--;
+		const start = runStarts[row] ?? row;
+		for (let filled = row; filled <= index; filled++) runStarts[filled] = start;
+		return start;
+	};
+
+	const styled: string[] = [];
+	return index => {
+		if (frameAt(index) === null) return undefined;
+		const cached = styled[index];
+		if (cached !== undefined) return cached;
+		const runStart = runStartOf(index);
+		const start = runStart + Math.floor((index - runStart) / CODE_FRAME_CHUNK_ROWS) * CODE_FRAME_CHUNK_ROWS;
+		let end = index + 1;
+		while (end < start + CODE_FRAME_CHUNK_ROWS && end < lines.length && continuesRun(end)) end++;
+		const chunkRows: CodeFrameRow[] = [];
+		for (let row = start; row < end; row++) chunkRows.push(frameAt(row)!.row);
+		renderCodeFrameRun(chunkRows, langs[index], color, theme).forEach((row, offset) => {
+			styled[start + offset] = row;
+		});
+		return styled[index];
+	};
+}
+
+// =============================================================================
 // Native (TSP) description of grouped output
 // =============================================================================
 
@@ -306,10 +438,10 @@ export function* walkGroupedOutput(lines: readonly string[]): Generator<GroupedO
 
 /** `*12│text`, ` 12|text`, `*12:text`: optional match marker, line number, gutter, content. */
 const GROUPED_NUMBERED_LINE_RE = /^\s*(\*?)(\d+)(?:│|[:|])(.*)$/;
-/** `    │...`: grep's gap between non-adjacent context runs (drawn as {@link numberedCode}'s `…` row). */
+/** `    │...`: grep's gap between non-adjacent context runs (Tern draws it from the jump in {@link numberedCode}'s numbers). */
 const GROUPED_GAP_LINE_RE = /^\s*│\.\.\.$/;
 
-/** One source line for {@link numberedCode}: its number (`null` for an elision marker), text and match mark. */
+/** One source line for {@link numberedCode}: its number (`null` for an elision marker, which adds no line), text and match mark. */
 export interface NumberedLine {
 	n: number | null;
 	text: string;
@@ -317,58 +449,52 @@ export interface NumberedLine {
 }
 
 /**
- * Numbered `code` for possibly non-contiguous source lines: one block per run
- * of consecutive line numbers (`start` = the run's first line, match lines
- * `mark`ed), with a `…` row wherever the numbers jump or an elision marker
- * (`n: null`) sits. `path` is the file the lines come from: Tern picks their
- * grammar from it and draws no header (the row or head above names the file).
- * `wrap` soft-wraps long lines instead of scrolling the block sideways.
+ * One numbered `code` block for possibly non-contiguous source lines (match
+ * lines `mark`ed by their line number): `start` when the numbers run on
+ * consecutively, else `nums` (each line's number), from whose jumps Tern draws
+ * the `…` gap rows in the gutter. Elision markers (`n: null`) add no line; the
+ * numbers jump around them. `path` is the file the lines come from: Tern picks
+ * their grammar from it and draws no header (the row or head above names the
+ * file). `wrap` soft-wraps long lines instead of scrolling the block sideways.
+ * `undefined` when no line is numbered.
  */
 export function numberedCode(
 	lines: readonly NumberedLine[],
 	opts: { path?: string; wrap?: boolean } = {},
-): NativeNode[] {
-	const out: NativeNode[] = [];
-	let run: { start: number; text: string[]; marks: { line: number; tone: TspTone }[] } | undefined;
-	const flush = () => {
-		if (!run) return;
-		// The quiet `…` row between two non-adjacent runs.
-		if (out.length > 0) out.push(keyed(text([span("…", "dim")], { wrap: "none" }), `g${run.start}`));
-		out.push(
-			keyed(
-				code(run.text.join("\n"), {
-					start: run.start,
-					numbers: true,
-					path: opts.path,
-					wrap: opts.wrap,
-					marks: run.marks.length > 0 ? run.marks : undefined,
-				}),
-				`c${run.start}`,
-			),
-		);
-		run = undefined;
-	};
+): NativeNode | undefined {
+	const nums: number[] = [];
+	const body: string[] = [];
+	const marks: { line: number; tone: TspTone }[] = [];
+	let contiguous = true;
 	for (const line of lines) {
-		if (line.n === null) {
-			flush();
-			continue;
-		}
-		if (run && run.start + run.text.length !== line.n) flush();
-		run ??= { start: line.n, text: [], marks: [] };
-		run.text.push(line.text);
-		if (line.mark) run.marks.push({ line: line.n, tone: "accent" });
+		if (line.n === null) continue;
+		if (nums.length > 0 && line.n !== nums[nums.length - 1]! + 1) contiguous = false;
+		nums.push(line.n);
+		body.push(line.text);
+		if (line.mark) marks.push({ line: line.n, tone: "accent" });
 	}
-	flush();
-	return out;
+	if (nums.length === 0) return undefined;
+	return keyed(
+		code(body.join("\n"), {
+			start: contiguous ? nums[0] : undefined,
+			nums: contiguous ? undefined : nums,
+			numbers: true,
+			path: opts.path,
+			wrap: opts.wrap,
+			marks: marks.length > 0 ? marks : undefined,
+		}),
+		`c${nums[0]}`,
+	);
 }
 
 /**
  * Describe grouped search output (grep / ast-grep / ast-edit display content)
  * by file (§7.3 grep): per file a 22px path row (dim dir, strong name, the
  * header's suffix or the match count as a chip), then its lines as
- * {@link numberedCode} with match lines marked and `…` between non-adjacent
- * runs. Unnumbered body lines stay plain `code`. `maxFiles` keeps only the
- * first files (the caller says how many were left out). `file` owns the lines
+ * one {@link numberedCode} block with match lines marked (gaps between
+ * non-adjacent runs drawn in its gutter). Unnumbered body lines stay plain
+ * `code`. `maxFiles` keeps only the first files (the caller says how many
+ * were left out). `file` owns the lines
  * before any header: a single-file search prints none, yet its lines get the
  * same file row as a directory search's.
  */
@@ -386,10 +512,9 @@ export function describeGroupedOutput(
 
 	const flushLines = () => {
 		const target = current?.children ?? loose;
-		if (numbered.length > 0) {
-			target.push(...numberedCode(numbered, { path: current?.path }));
-			numbered = [];
-		}
+		const block = numberedCode(numbered, { path: current?.path });
+		if (block) target.push(block);
+		numbered = [];
 		if (plain.length > 0) {
 			target.push(keyed(code(plain.join("\n")), `p${target.length}`));
 			plain = [];

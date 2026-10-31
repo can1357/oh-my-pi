@@ -4519,7 +4519,7 @@ describe("ModelRegistry runtime discovery", () => {
 		const writeKey = cursorModelManagerOptions({ apiKey: tokenAtWrite }).cacheProviderId;
 		if (!writeKey) throw new Error("Expected Cursor manager options to name a cache namespace");
 		// Cursor discovery is authoritative: the row carries the manager's static fingerprint.
-		const fingerprint = fingerprintStaticModels(getBundledModels("cursor"), true);
+		const fingerprint = fingerprintStaticModels(getBundledModels("cursor"), { authoritative: true });
 		writeModelCache(writeKey, Date.now(), [discovered], true, fingerprint, cacheDbPath);
 		await authStorage.credentials.set("cursor", {
 			type: "oauth",

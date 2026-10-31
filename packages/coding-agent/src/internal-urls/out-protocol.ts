@@ -3,11 +3,13 @@
  *
  * Markdown written to `out://` is shown to the user the way a response is shown,
  * without ending the agent's turn: it answers a question the user asked mid-task,
- * or posts a requested progress report, while work continues. Two transports:
+ * or posts a requested progress report, while work continues. Three transports:
  * - `write out://`: transcripts draw the call's `content` as assistant prose,
  *   streamed as the arguments arrive (`reply`-scoped writes).
  * - a shell redirect (`cmd > out://`): the shell filesystem hands the closed
  *   handle's text to the running tool, whose result carries it as a reply.
+ * - an eval cell's bridged call (`tool.write` there, `tool.bash` redirecting there):
+ *   the bridge hands the text to the eval call, whose result carries it as a reply.
  *
  * The URL path is ignored and nothing is stored beyond the tool call, so the
  * scheme is write-only. On where it is {@link outRepliesActive} (by default the

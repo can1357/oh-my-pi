@@ -150,6 +150,16 @@ describe("BashTool execution results", () => {
 		expect(file).toBe("");
 	});
 
+	it("gives each command the id of the tool call running it", async () => {
+		const tool = new BashTool(makeSession());
+		// An earlier command in the session's persistent shell (or a parent omp) left a value behind.
+		await tool.execute("call-stale", { command: "export PI_TOOL_CALL_ID=toolu_stale" });
+		for (const id of ["toolu_first", "toolu_second"]) {
+			const result = await tool.execute(id, { command: `printf '%s|' "$PI_TOOL_CALL_ID"` });
+			expect((result.content.find(c => c.type === "text")?.text ?? "").split("|")[0]).toBe(id);
+		}
+	});
+
 	it("gives a call the identity of the session it started in, even if the session changes before it runs", async () => {
 		let sessionId = "session-a";
 		const gate = Promise.withResolvers<void>();
