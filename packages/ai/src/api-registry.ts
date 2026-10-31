@@ -786,6 +786,7 @@ const STREAM_OPTIONS = fieldsOf<SimpleStreamOptions>({
 		),
 	}),
 	codexCompaction: DATA,
+	codexAccessPrograms: DATA,
 	maxInFlightRequests: DATA,
 	waitForTerminalDrain: DATA,
 	onPayload: callbackOf([DATA, MODEL, SIGNAL], DATA),
