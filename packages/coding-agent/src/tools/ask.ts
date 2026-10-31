@@ -17,7 +17,13 @@ import type { AskToolDetails, QuestionResult } from "@oh-my-pi/pi-tui/tools/ask"
  */
 
 import { type as arkType } from "@oh-my-pi/omptype";
-import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import {
+	type AgentTool,
+	type AgentToolContext,
+	type AgentToolResult,
+	type AgentToolUpdateCallback,
+	TOOL_INTERRUPT_ABORT_REASON,
+} from "@oh-my-pi/pi-agent-core";
 import { type ImageContent, type TextContent, type ToolExample, validateToolArguments } from "@oh-my-pi/pi-ai";
 import { replaceTabs, TERMINAL, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { isRecord, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
@@ -579,6 +585,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	// would clobber each other: the second steals focus and orphans the first,
 	// whose promise then hangs until the user aborts the whole turn.
 	readonly concurrency = "exclusive";
+	readonly interruptible = true;
 	readonly loadMode = "discoverable";
 
 	constructor(private readonly session: ToolSession) {
@@ -756,6 +763,13 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		const planModeEnabled = this.session.getPlanModeState?.()?.enabled ?? false;
 		const settingsTimeout = askTimeoutMs(this.session.settings) ?? null;
 		const timeout = planModeEnabled ? null : settingsTimeout;
+		const cancelAsk = (): never => {
+			if (signal?.reason === TOOL_INTERRUPT_ABORT_REASON) {
+				throw new ToolAbortError("Ask interrupted by message");
+			}
+			context.abort();
+			throw new ToolAbortError("Ask tool was cancelled by the user");
+		};
 
 		// Send notification if waiting and not suppressed
 		this.#sendAskNotification();
@@ -794,10 +808,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 						{ timeout: timeout ?? undefined, signal, acceptImages: true },
 					);
 				const richResult = signal ? await untilAborted(signal, showRichDialog) : await showRichDialog();
-				if (!richResult) {
-					context.abort();
-					throw new ToolAbortError("Ask tool was cancelled by the user");
-				}
+				if (!richResult) return cancelAsk();
 				if (richResult.kind === "chat") {
 					const questionText = params.questions.map(q => q.question).join("\n");
 					return {
@@ -855,10 +866,8 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 							!result.multi &&
 							result.selectedOptions.length === 0 &&
 							result.customInput === undefined)
-					) {
-						context.abort();
-						throw new ToolAbortError("Ask tool was cancelled by the user");
-					}
+					)
+						cancelAsk();
 					const details: AskToolDetails = {
 						question: result.question,
 						options: result.options,
@@ -879,7 +888,11 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 				return { content: [{ type: "text" as const, text: responseText }, ...imageBlocks], details };
 			} catch (error) {
 				if (error instanceof Error && error.name === "AbortError") {
-					throw new ToolAbortError("Ask input was cancelled");
+					throw new ToolAbortError(
+						signal?.reason === TOOL_INTERRUPT_ABORT_REASON
+							? "Ask interrupted by message"
+							: "Ask input was cancelled",
+					);
 				}
 				throw error;
 			}
@@ -911,7 +924,11 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 				return { optionLabels, selectedOptions, customInput, note, navigation, cancelled, timedOut };
 			} catch (error) {
 				if (error instanceof Error && error.name === "AbortError") {
-					throw new ToolAbortError("Ask input was cancelled");
+					throw new ToolAbortError(
+						signal?.reason === TOOL_INTERRUPT_ABORT_REASON
+							? "Ask interrupted by message"
+							: "Ask input was cancelled",
+					);
 				}
 				throw error;
 			}
@@ -921,10 +938,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			const [q] = params.questions;
 			const { optionLabels, selectedOptions, customInput, note, cancelled, timedOut } = await askQuestion(q);
 
-			if (!timedOut && (cancelled || (selectedOptions.length === 0 && customInput === undefined))) {
-				context.abort();
-				throw new ToolAbortError("Ask tool was cancelled by the user");
-			}
+			if (!timedOut && (cancelled || (selectedOptions.length === 0 && customInput === undefined))) cancelAsk();
 			const details: AskToolDetails = {
 				question: q.question,
 				options: optionLabels,
@@ -967,10 +981,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 				timedOut,
 			} = await askQuestion(q, { previous, navigation });
 
-			if (cancelled && !timedOut) {
-				context.abort();
-				throw new ToolAbortError("Ask tool was cancelled by the user");
-			}
+			if (cancelled && !timedOut) cancelAsk();
 
 			resultsByIndex[questionIndex] = {
 				id: q.id,

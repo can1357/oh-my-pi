@@ -1,8 +1,10 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { type } from "@oh-my-pi/omptype";
-import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import { agentLoop, TOOL_INTERRUPT_ABORT_REASON, type AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { AgentLoopConfig } from "@oh-my-pi/pi-agent-core/types";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import type {
 	ExtensionAskDialogQuestion,
 	ExtensionAskDialogResult,
@@ -16,7 +18,7 @@ import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { tagImageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import * as ai from "@oh-my-pi/pi-ai";
-import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, Message, Model } from "@oh-my-pi/pi-ai";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
@@ -126,6 +128,125 @@ describe("AskTool cancellation", () => {
 			),
 		).rejects.toBeInstanceOf(ToolAbortError);
 		expect(abort).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not cancel the turn when steering interrupts the fallback selector", async () => {
+		const controller = new AbortController();
+		const abort = vi.fn();
+		const tool = new AskTool(createSession());
+		const context = createContext({
+			abort,
+			select: async () => {
+				controller.abort(TOOL_INTERRUPT_ABORT_REASON);
+				return undefined;
+			},
+		});
+		await expect(
+			tool.execute(
+				"call-interrupted",
+				{ questions: [{ id: "choice", question: "Which database?", options: [{ label: "SQLite" }] }] },
+				controller.signal,
+				undefined,
+				context,
+			),
+		).rejects.toBeInstanceOf(ToolAbortError);
+		expect(abort).not.toHaveBeenCalled();
+	});
+
+	it("delivers queued steering while ask is open without cancelling the turn", async () => {
+		const question = { id: "choice", question: "Which database?", options: [{ label: "SQLite" }] };
+		const abort = vi.fn();
+		const wake = Promise.withResolvers<void>();
+		let queued = false;
+		let closed = false;
+		const context = createContext({
+			abort,
+			askDialog: async (_questions, options) => {
+				expect(options?.timeout).toBeUndefined();
+				queued = true;
+				wake.resolve();
+				const { promise, resolve } = Promise.withResolvers<undefined>();
+				options?.signal?.addEventListener(
+					"abort",
+					() => {
+						closed = true;
+						resolve(undefined);
+					},
+					{ once: true },
+				);
+				return promise;
+			},
+		});
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "ask-1", name: "ask", arguments: { questions: [question] } }] },
+				{ content: ["I will revisit the database choice after handling the new request."] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: messages => messages as Message[],
+			getToolContext: () => context,
+			hasSteeringMessages: () => queued,
+			waitForSteeringMessages: () => wake.promise,
+			getSteeringMessages: async () => {
+				if (!queued) return [];
+				queued = false;
+				return [{ role: "user", content: "Check the schema first", timestamp: Date.now() }];
+			},
+		};
+		const controller = new AbortController();
+		// Safety only: the real steering watcher must release the dialog before this fires.
+		const timer = setTimeout(() => controller.abort("ask stayed open"), 2000);
+		try {
+			const events = [];
+			for await (const event of agentLoop(
+				[{ role: "user", content: "Choose a database", timestamp: Date.now() }],
+				{
+					systemPrompt: ["Test"],
+					messages: [],
+					tools: [
+						new AskTool(
+							createSession({
+								settings: Settings.isolated({ "ask.timeout": 30 }),
+								getPlanModeState: () => ({ enabled: true, planFilePath: "/tmp/plan.md" }),
+							}),
+						),
+					],
+				},
+				config,
+				controller.signal,
+				mock.stream,
+			)) {
+				events.push(event);
+			}
+			expect(controller.signal.aborted).toBe(false);
+			expect(closed).toBe(true);
+			expect(abort).not.toHaveBeenCalled();
+			expect(
+				events.some(
+					event =>
+						event.type === "message_start" &&
+						event.message.role === "user" &&
+						event.message.content === "Check the schema first",
+				),
+			).toBe(true);
+			const result = events.find(event => event.type === "tool_execution_end" && event.toolName === "ask");
+			expect(result?.type).toBe("tool_execution_end");
+			if (result?.type !== "tool_execution_end") return;
+			expect(result.isError).toBe(true);
+			expect(result.result.details).toMatchObject({ __interrupted: true, source: "interrupt_skipped" });
+			expect(mock.calls).toHaveLength(2);
+			expect(
+				mock.calls[1]?.context.messages.some(
+					message =>
+						message.role === "assistant" &&
+						message.content.some(part => part.type === "toolCall" && part.id === "ask-1"),
+				),
+			).toBe(true);
+		} finally {
+			clearTimeout(timer);
+		}
 	});
 
 	it("defaults to no timeout when ask.timeout is unset", async () => {
