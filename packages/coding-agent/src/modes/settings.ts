@@ -700,6 +700,19 @@ export const cfgDisplayShowTurnTime = register({
 	},
 });
 
+export const cfgDisplayStepSummaries = register({
+	id: "display.stepSummaries",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Step Summaries",
+		description:
+			"Caption each tool-calling step in plain English above its usage row (needs Show Token Usage). Uses the summary model role, else tiny; one small request per step",
+	},
+});
+
 export const cfgDisplayCacheMissMarker = register({
 	id: "display.cacheMissMarker",
 	type: "boolean",

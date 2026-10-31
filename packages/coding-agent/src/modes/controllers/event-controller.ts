@@ -40,7 +40,7 @@ import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { getSymbolTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../modes/types";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
-import type { AgentSessionEvent } from "../../session/agent-session";
+import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
 import {
 	isSilentAbort,
 	isUserInvokedSkillPrompt,
@@ -60,7 +60,14 @@ import { getApprovalGrants } from "../../tools/approval-cache";
 import { recoverAskQuestions } from "../../tools/ask";
 import { previewLine, PREVIEW_LIMITS, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
+import type { StepSummary } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { writeDeviceDispatch } from "../../tools/resolve";
+import {
+	STEP_SUMMARY_CUSTOM_TYPE,
+	type StepSummaryEntryData,
+	StepSummarizer,
+	stepSummaryTone,
+} from "../../step-summary/step-summarizer";
 import { SpeechEnhancer } from "../../tts/speech-enhancer";
 import { vocalizer } from "../../tts/vocalizer";
 import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
@@ -87,6 +94,7 @@ import {
 	cfgDisplayCacheMissMarker,
 	cfgDisplayShowTokenUsage,
 	cfgDisplayShowTurnTime,
+	cfgDisplayStepSummaries,
 	cfgDisplaySmoothStreaming,
 	cfgErrorNotify,
 	cfgTerminalShowImages,
@@ -353,6 +361,22 @@ export class EventController {
 	// keeps working — the WeakSet makes the coalesced path speak each delta exactly
 	// once instead of twice.
 	#vocalizedMessageUpdates = new WeakSet<object>();
+	/**
+	 * Caption service for {@link #stepSummaryOwner}, built on its first captioned step
+	 * (`display.stepSummaries`) and rebuilt when the view moves to another session, so
+	 * credentials, secret obfuscation, and earlier-caption context never cross sessions.
+	 */
+	#stepSummarizer: StepSummarizer | undefined = undefined;
+	#stepSummaryOwner: AgentSession | undefined = undefined;
+	/** Callbacks that caption a step's usage row (standalone or nested in a read group), by assistant-message timestamp; drained at `turn_end`. */
+	#uncaptionedUsageRows = new Map<number, (summary: StepSummary) => void>();
+	/**
+	 * The operator request the current run serves and the session it was sent in: step captions are written
+	 * against it. Agent-attributed `user` messages never set it; it is dropped when the run settles and when
+	 * a prompt without operator text (synthetic developer, `/skill:`) starts fresh work, so a caption never
+	 * describes an earlier task.
+	 */
+	#stepRequest: { owner: AgentSession; text: string } | undefined = undefined;
 	static readonly #MESSAGE_UPDATE_COALESCE_MS = 33;
 
 	constructor(private ctx: InteractiveModeContext) {
@@ -495,6 +519,11 @@ export class EventController {
 		this.#streamingReveal.stop();
 		this.#toolArgsReveal.stop();
 		this.composerPrediction.cancel();
+		this.#stepSummarizer?.dispose();
+		this.#stepSummarizer = undefined;
+		this.#stepSummaryOwner = undefined;
+		this.#stepRequest = undefined;
+		this.#uncaptionedUsageRows.clear();
 		this.#setTerminalProgress(false);
 		for (const timer of this.#ircExpiryTimers.values()) {
 			clearTimeout(timer);
@@ -1041,6 +1070,7 @@ export class EventController {
 		this.#turnStartedAt = undefined;
 		this.#turnUsage.reset();
 		this.#lastAgentEndAt = undefined;
+		this.#stepRequest = undefined;
 		this.#pinnedErrorComponent = undefined;
 		this.#pinnedErrorMessage = undefined;
 		this.#restorePinnedErrorInline = true;
@@ -1245,6 +1275,9 @@ export class EventController {
 			if (event.message.role === "custom" && isUserTurnInitiator(event.message)) {
 				this.#turnStartedAt = event.message.timestamp;
 				this.#turnUsage.reset();
+				// A collab peer's prompt is its own request; a `/skill:` prompt's text is the skill body, not the operator's words.
+				const request = isUserInvokedSkillPrompt(event.message) ? "" : textContent(event.message.content, "\n");
+				this.#stepRequest = request.trim() ? { owner: this.ctx.viewSession, text: request } : undefined;
 			}
 			const taskJobToast = isNativeRendering() ? nativeTaskJobToast(event.message) : undefined;
 			if (
@@ -1335,6 +1368,8 @@ export class EventController {
 				if (event.message.userInitiated) this.#turnStartedAt = event.message.timestamp;
 				else this.#turnStartedAt = undefined;
 				this.#turnUsage.reset();
+				// Neither carries operator text: captions go without a request rather than an earlier one.
+				this.#stepRequest = undefined;
 			}
 		} else if (event.message.role === "fileMention") {
 			this.#resetReadGroup();
@@ -1557,6 +1592,7 @@ export class EventController {
 	 * sure the live buffer's trailing partial gets flushed.
 	 */
 	#handleTurnEnd(event: Extract<AgentSessionEvent, { type: "turn_end" }>): void {
+		this.#captionStep(event);
 		if (!cfgSpeechEnabled.get(settings)) return;
 		if (cfgSpeechMode.get(settings) !== "yield") {
 			vocalizer.flush();
@@ -1566,6 +1602,47 @@ export class EventController {
 		if (event.message.stopReason === "aborted") return; // interrupted: never speak the aborted partial
 		const text = extractTextContent(event.message);
 		if (text) vocalizer.speak(text);
+	}
+
+	/**
+	 * Caption a finished tool-calling step on its usage row and persist the
+	 * caption for replay. Fire-and-forget: the caption lands whenever the
+	 * request returns, and is dropped if the view moved to another session.
+	 */
+	#captionStep(event: Extract<AgentSessionEvent, { type: "turn_end" }>): void {
+		const message = event.message;
+		if (message.role !== "assistant") return;
+		const caption = this.#uncaptionedUsageRows.get(message.timestamp);
+		this.#uncaptionedUsageRows.clear();
+		if (!caption || message.stopReason === "aborted" || message.stopReason === "error") return;
+		if (!cfgDisplayStepSummaries.get(settings)) return;
+		const owner = this.ctx.viewSession;
+		if (!owner?.modelRegistry || !owner.agent) return;
+		if (this.#stepSummaryOwner !== owner) {
+			this.#stepSummarizer?.dispose();
+			this.#stepSummaryOwner = owner;
+			this.#stepSummarizer = new StepSummarizer({
+				settings: owner.settings,
+				registry: owner.modelRegistry,
+				sessionId: owner.sessionId,
+				metadataResolver: provider => owner.agent.metadataForProvider(provider),
+				obfuscator: () => owner.obfuscator,
+			});
+		}
+		const summarizer = this.#stepSummarizer;
+		if (!summarizer) return;
+		const sessionManager = owner.sessionManager;
+		const sessionFile = sessionManager.getSessionFile();
+		const request = this.#stepRequest?.owner === owner ? this.#stepRequest.text : undefined;
+		void summarizer.summarize({ message, toolResults: event.toolResults, request }).then(text => {
+			if (!text) return;
+			if (this.ctx.viewSession !== owner || owner.sessionManager.getSessionFile() !== sessionFile) return;
+			const tone = stepSummaryTone(event.toolResults);
+			caption(tone ? { text, tone } : { text });
+			const data: StepSummaryEntryData = { messageTimestamp: message.timestamp, summary: text };
+			if (tone) data.tone = tone;
+			sessionManager.appendCustomEntry(STEP_SUMMARY_CUSTOM_TYPE, data);
+		});
 	}
 
 	async #handleMessageUpdate(event: Extract<AgentSessionEvent, { type: "message_update" }>): Promise<void> {
@@ -1776,6 +1853,15 @@ export class EventController {
 			}
 		}
 		if (event.message.role === "user") {
+			const content = event.message.content;
+			const request =
+				typeof content === "string"
+					? content
+					: content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+			// An agent-attributed `user` message (advisor redirect) is not the operator's request.
+			if (event.message.attribution !== "agent" && request.trim() && this.ctx.viewSession) {
+				this.#stepRequest = { owner: this.ctx.viewSession, text: request };
+			}
 			// Live steering stays listed until the agent appends it, which follows
 			// message_start: drop its Steering chip now.
 			this.ctx.updatePendingMessagesDisplay();
@@ -1916,28 +2002,40 @@ export class EventController {
 				const turnElapsed = cfgDisplayShowTurnTime.get(settings)
 					? turnElapsedMs(this.#turnStartedAt, event.message)
 					: undefined;
+				const readGroup = readCallIds !== undefined ? this.#lastReadGroup : undefined;
 				const usageAttached =
-					readCallIds !== undefined &&
-					(this.#lastReadGroup?.attachUsage(
-						readCallIds,
+					readGroup?.attachUsage(
+						readCallIds ?? [],
 						event.message.usage,
 						event.message.duration,
 						event.message.ttft,
 						event.message.timestamp,
 						turnElapsed,
-					) ??
-						false);
-				if (!usageAttached) {
+					) ?? false;
+				const captionable = cfgDisplayStepSummaries.get(settings);
+				const timestamp = event.message.timestamp;
+				if (readGroup && usageAttached) {
+					if (captionable) {
+						this.#uncaptionedUsageRows.set(timestamp, summary => {
+							if (readGroup.setUsageSummary(timestamp, summary)) this.ctx.ui.requestComponentRender(readGroup);
+						});
+					}
+				} else {
 					this.#resetReadGroup();
-					this.ctx.chatContainer.addChild(
-						createUsageRowBlock(
-							event.message.usage,
-							event.message.duration,
-							event.message.ttft,
-							event.message.timestamp,
-							turnElapsed,
-						),
+					const row = createUsageRowBlock(
+						event.message.usage,
+						event.message.duration,
+						event.message.ttft,
+						timestamp,
+						turnElapsed,
 					);
+					if (captionable) {
+						this.#uncaptionedUsageRows.set(timestamp, summary => {
+							row.setSummary(summary);
+							this.ctx.ui.requestComponentRender(row);
+						});
+					}
+					this.ctx.chatContainer.addChild(row);
 				}
 			}
 			if (displayMessage === event.message) {
@@ -2551,6 +2649,8 @@ export class EventController {
 		this.#setTerminalProgress(false);
 		this.ctx.statusLine.markActivityEnd();
 		this.#lastAgentEndAt = Date.now();
+		// The settled run's request is done: the next run captions against its own prompt, or none.
+		this.#stepRequest = undefined;
 		this.#streamingReveal.stop();
 		this.#toolArgsReveal.flushAll();
 		if (this.ctx.loadingAnimation) {

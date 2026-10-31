@@ -7,6 +7,7 @@
 ### Added
 
 - Added a `maxRows` callback to `FigureMarkdown`, `SvgFigure` and `TableChartFigure` so surfaces shorter than the screen can fit their figures; zero hides a figure without delaying transcript completion ([#15661](https://github.com/can1357/oh-my-pi/issues/15661), [#15853](https://github.com/can1357/oh-my-pi/pull/15853) by [@KunoLu](https://github.com/KunoLu))
+- Exported `UsageRowBlock` (returned by `createUsageRowBlock`) with `setSummary()`, and added `ReadToolGroupComponent.setUsageSummary()`, which add a caption line above a usage row's metrics after the row is mounted, in both the ANSI and native renderers; captions are stripped of terminal escapes and control characters and clipped to one line rather than wrapped ([#17456](https://github.com/can1357/oh-my-pi/pull/17456) by [@wolfiesch](https://github.com/wolfiesch))
 
 ### Fixed
 
