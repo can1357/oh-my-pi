@@ -61,6 +61,13 @@ export interface SessionSwitchEvent {
  * under `"open-elsewhere"` another omp process owns it and goes on using it.
  * Handlers observe; they cannot refuse the move, which has already happened by
  * the time it is announced — the session had nowhere else to save.
+ *
+ * The session's next tool call and model request, and its `session_shutdown`,
+ * wait for these handlers, so a handler that rekeys state to `sessionId` is
+ * done before work runs under it. Moves are announced one at a time, in order.
+ * Work already running when the move happened — a tool call in flight, a cell
+ * it started — is not held back. A handler that waits for this session's next
+ * tool call waits for itself.
  */
 export interface SessionMovedEvent {
 	type: "session_moved";

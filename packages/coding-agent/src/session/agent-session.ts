@@ -468,6 +468,7 @@ import {
 } from "./session-maintenance";
 import { classifyTitleDrift } from "./title-drift-classifier";
 import {
+	abortRejection,
 	cleanupEmptyMoveSession,
 	copySessionArtifacts,
 	extractSessionInit,
@@ -985,6 +986,14 @@ export class AgentSession implements SettingsScope {
 	#unsubscribeAgent?: () => void;
 	#unsubscribeQueueChange?: () => void;
 	#unsubscribeSessionMoved?: () => void;
+	/**
+	 * Every `session_moved` announcement so far, its handlers run one move at a
+	 * time. Tool calls and model requests wait for it: a handler that rekeys
+	 * state to the new id has to be done before work runs under that id.
+	 */
+	#movesAnnounced: Promise<void> = Promise.resolve();
+	/** How many of those announcements have handlers still running. */
+	#movesPending = 0;
 	/** Agent message count when {@link #disconnectFromAgent} unsubscribed; messages past it reached no persisting handler. */
 	#disconnectedMessageCount?: number;
 	#cancelExitRecorder?: () => void;
@@ -2181,16 +2190,25 @@ export class AgentSession implements SettingsScope {
 		this.#unsubscribeSessionMoved = this.sessionManager.onPersistenceNotice(notice => {
 			const runner = this.#extensionRunner;
 			if (!runner || !liveForMoves) return;
-			runner
-				.emit({
-					type: "session_moved",
-					reason: notice.reason,
-					previousSessionId: notice.previousSessionId,
-					sessionId: notice.sessionId,
-					previousSessionFile: notice.from,
-					sessionFile: notice.to,
-				})
-				.catch(error => logger.warn("session_moved handlers failed", { error: toError(error).message }));
+			// The move happens inside a synchronous write, so its handlers cannot
+			// be awaited here. They are kept instead, after the previous move's,
+			// and the next tool call or model request waits for them — as
+			// `session_switch`'s callers wait for theirs.
+			const event = {
+				type: "session_moved",
+				reason: notice.reason,
+				previousSessionId: notice.previousSessionId,
+				sessionId: notice.sessionId,
+				previousSessionFile: notice.from,
+				sessionFile: notice.to,
+			} as const;
+			this.#movesPending++;
+			this.#movesAnnounced = this.#movesAnnounced
+				.then(() => runner.emit(event))
+				.catch(error => logger.warn("session_moved handlers failed", { error: toError(error).message }))
+				.finally(() => {
+					this.#movesPending--;
+				});
 		});
 		liveForMoves = true;
 		this.#cacheWarmer = config.cacheWarmer;
@@ -2567,7 +2585,10 @@ export class AgentSession implements SettingsScope {
 			sessionId: () => this.sessionId,
 			costGate: () => this.#costGate,
 			localProtocolOptions: () => this.#localProtocolOptions(),
-			transformContext: (messages, signal) => this.#transformContext(messages, signal),
+			transformContext: async (messages, signal) => {
+				await this.#afterMovesAnnounced(signal);
+				return await this.#transformContext(messages, signal);
+			},
 			convertToLlm: messages => this.#convertToLlm(messages),
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
@@ -5677,6 +5698,18 @@ export class AgentSession implements SettingsScope {
 		return this.#ttsr.afterToolCall(ctx);
 	}
 	/**
+	 * Once the `session_moved` handlers announced so far have finished. Work
+	 * that runs under the id a move gave this session — a tool call, a model
+	 * request — starts after them; a cancelled caller stops waiting. A handler
+	 * that itself waits for this session's next tool call waits for itself.
+	 */
+	async #afterMovesAnnounced(signal: AbortSignal | undefined): Promise<void> {
+		while (this.#movesPending > 0) {
+			await (signal ? Promise.race([this.#movesAnnounced, abortRejection(signal)]) : this.#movesAnnounced);
+		}
+	}
+
+	/**
 	 * Emits the extension `tool_call` event for a loop-dispatched call at
 	 * arg-prep time — before concurrency scheduling, `tool_execution_start`,
 	 * and the wrapper's approval gate. A handler block becomes a blocked tool
@@ -5687,6 +5720,7 @@ export class AgentSession implements SettingsScope {
 	 * execution still emit there).
 	 */
 	async #beforeToolCall(ctx: BeforeToolCallContext, signal?: AbortSignal): Promise<BeforeToolCallResult | undefined> {
+		await this.#afterMovesAnnounced(signal);
 		const runner = this.#extensionRunner;
 		runner?.markLoopToolCall?.(ctx.toolCall.id, ctx.tool.name);
 		const ttsrResult = await this.#ttsr.beforeToolCall(ctx);
@@ -6423,10 +6457,6 @@ export class AgentSession implements SettingsScope {
 
 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
 		this.beginDispose();
-		// A move during teardown reaches no handler: this session is going away,
-		// and the subscription would otherwise outlive it in the manager.
-		this.#unsubscribeSessionMoved?.();
-		this.#unsubscribeSessionMoved = undefined;
 		// Stop cache warming before the drain windows below: an armed tick firing
 		// mid-dispose would issue a paid warm request and persist usage into the
 		// closing session writer.
@@ -6441,6 +6471,15 @@ export class AgentSession implements SettingsScope {
 		this.#cancelExitRecorder = undefined;
 		this.#cancelFatalRecoveryHint?.();
 		this.#cancelFatalRecoveryHint = undefined;
+		// The exit record can be this session's first write, and so the one that
+		// finds the file owned by another process and moves the session: its
+		// `session_moved` is delivered, and its handlers have finished, before
+		// `session_shutdown` runs under the new id. A move during the rest of
+		// teardown reaches no handler — the session is going away — and the
+		// subscription must not outlive it in the manager.
+		this.#unsubscribeSessionMoved?.();
+		this.#unsubscribeSessionMoved = undefined;
+		await this.#afterMovesAnnounced(undefined);
 		try {
 			await emitSessionShutdownEvent(this.#extensionRunner);
 		} catch (error) {
