@@ -698,6 +698,15 @@ function builtInErrorOf(error: object): (message: string, name: string) => Error
 	return message => new Error(message);
 }
 
+/** `key` of `source` as a read answers it, or `undefined` when the read throws. */
+function readQuietly(source: object, key: string): unknown {
+	try {
+		return Reflect.get(source, key);
+	} catch {
+		return undefined;
+	}
+}
+
 function copyHostValue(
 	value: unknown,
 	copies: Map<object, unknown>,
@@ -759,9 +768,11 @@ function copyHostValue(
 	}
 	// `DOMException` is no native error to the engine's check, but it is the platform's error class.
 	if (types.isNativeError(value) || value instanceof DOMException) {
-		// Read as the host reads them: a host error class may answer them from its prototype.
-		const name: unknown = Reflect.get(value, "name");
-		const message: unknown = Reflect.get(value, "message");
+		// Read as the host reads them: a host error class may answer them from its prototype. An
+		// error is a report of a failure, so a property whose read itself fails is left out: the
+		// exception that read throws is the host's own object, and must not be what crosses.
+		const name: unknown = readQuietly(value, "name");
+		const message: unknown = readQuietly(value, "message");
 		const domException = value instanceof DOMException;
 		const copy = builtInErrorOf(value)(
 			typeof message === "string" ? message : "",
@@ -774,7 +785,7 @@ function copyHostValue(
 		for (const key of Object.getOwnPropertyNames(value)) {
 			// A `DOMException`'s name, message and code are its brand's, set by its constructor.
 			if (domException && (key === "name" || key === "message" || key === "code")) continue;
-			const raw: unknown = Reflect.get(value, key);
+			const raw: unknown = readQuietly(value, key);
 			if (typeof raw === "function") continue;
 			define(key, next(raw), Object.getOwnPropertyDescriptor(value, key)?.enumerable === true);
 		}
@@ -782,7 +793,7 @@ function copyHostValue(
 			// What a host error class answers from its prototype is kept as data on the copy.
 			if (typeof name === "string" && !Object.hasOwn(copy, "name") && name !== copy.name)
 				define("name", name, false);
-			const code: unknown = Reflect.get(value, "code");
+			const code: unknown = readQuietly(value, "code");
 			if ((typeof code === "string" || typeof code === "number") && !Object.hasOwn(copy, "code")) {
 				define("code", code, false);
 			}
@@ -1112,7 +1123,15 @@ function fromHost<T>(call: () => T): T {
 	try {
 		return call();
 	} catch (error) {
-		throw copyHostData(error);
+		// The copy of a failure cannot itself fail with a host object: whatever goes wrong copying
+		// it, the extension is handed an error of its own.
+		let copied: unknown;
+		try {
+			copied = copyHostData(error);
+		} catch {
+			copied = new Error("The host failed, and its failure could not be handed over");
+		}
+		throw copied;
 	}
 }
 

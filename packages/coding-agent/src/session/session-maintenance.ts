@@ -77,6 +77,7 @@ import type { ModelRegistry } from "../config/model-registry";
 import { CHAT_MODEL_ROLE_IDS } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import type { ExtensionRunner, SessionBeforeCompactResult } from "../extensibility/extensions";
+import { copyHostData } from "../extensibility/extensions/boundary-data";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import type { GoalModeState } from "../goals/state";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
@@ -1130,13 +1131,16 @@ export class SessionMaintenance {
 	 */
 	/** Owns an invocation of a callback an extension handed to `ctx.compact`. This class is the
 	 *  party that CALLS `onComplete`/`onError`, so it is the only one that knows when the call
-	 *  starts and ends; the options object the extension passed is never rewritten. */
+	 *  starts and ends; the options object the extension passed is never rewritten. What the
+	 *  callback is handed — the result the host goes on to deliver in `manual_compaction_end`, the
+	 *  host's own error — is a copy: owning the call is not copying its arguments. */
 	#ownCompactionCallback<A extends unknown[]>(
 		callback: ((...args: A) => unknown) | undefined,
 	): ((...args: A) => unknown) | undefined {
 		if (!callback) return undefined;
 		const owner = this.#host.extensionRunner?.callbackOwner;
-		return owner ? owner.ownCallback(callback) : callback;
+		if (!owner) return callback;
+		return owner.ownCallback((...args: A): unknown => callback(...(args.map(arg => copyHostData(arg)) as A)));
 	}
 
 	async compact(

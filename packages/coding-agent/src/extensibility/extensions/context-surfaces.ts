@@ -84,9 +84,11 @@ function copiedIn<T>(owner: ExtensionCallbackOwner, copy: () => T): T {
 	return owner.runOwned(copy);
 }
 
-/** A string argument: as it is when it is one, else converted inside the admission. */
+/** A string argument, read inside the admission: refused once the session has gone, a string as
+ *  it is and anything else converted. A string must not skip the gate — it is what a dead
+ *  session's `notify`, `setStatus` or `setEditorText` would write into the live host. */
 function text(owner: ExtensionCallbackOwner, value: unknown): string {
-	return typeof value === "string" ? value : copiedIn(owner, () => String(value));
+	return copiedIn(owner, () => (typeof value === "string" ? value : String(value)));
 }
 
 function optionalText(owner: ExtensionCallbackOwner, value: unknown): string | undefined {
@@ -1305,7 +1307,13 @@ export function handUIContext(
 			ui.addAutocompleteProvider(scoped(factory, provider => [handAutocompleteProvider(provider, owner)])),
 		setEditorComponent: factory =>
 			ui.setEditorComponent(
-				optionalScoped(factory, (tui, theme, keybindings) => [handedTUI(tui), theme, handKeybindings(keybindings)]),
+				// The editor theme is the host's — its symbols, spinner frames included, are module
+				// state the next editor reads — so the factory is handed a copy, as `handTheme` copies.
+				optionalScoped(factory, (tui, theme, keybindings) => [
+					handedTUI(tui),
+					copyHostData(theme),
+					handKeybindings(keybindings),
+				]),
 			),
 		getEditorComponent: () => ui.getEditorComponent(),
 		get theme() {

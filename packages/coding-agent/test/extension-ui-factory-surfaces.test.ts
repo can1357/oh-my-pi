@@ -1149,6 +1149,76 @@ describe("what a session focuses or shows", () => {
 	});
 });
 
+describe("what a session's ctx.ui writes, once the session has gone", () => {
+	test("string members reach the host while it is live, and nothing once it has gone", () => {
+		const owner = new ExtensionRuntime();
+		const release = owner.beginSession();
+		cleanups.push(release);
+		// Only the UI surface is exercised; nothing here reaches the registry.
+		const runner = new ExtensionRunner([], owner, process.cwd(), SessionManager.inMemory(), {} as ModelRegistry);
+		const writes: string[] = [];
+		const host: ExtensionUIContext = {
+			...runner.getUIContext(),
+			notify: message => void writes.push(`notify:${message}`),
+			setStatus: (key, text) => void writes.push(`status:${key}=${text}`),
+			setTitle: title => void writes.push(`title:${title}`),
+			setWorkingMessage: message => void writes.push(`working:${message}`),
+			setEditorText: text => void writes.push(`editor:${text}`),
+			pasteToEditor: text => void writes.push(`paste:${text}`),
+		};
+		const ui = handUIContext(host, owner, runner.rendererScope);
+		const writeAll = (label: string): string[] =>
+			[
+				() => ui.notify(label),
+				() => ui.setStatus("key", label),
+				() => ui.setTitle(label),
+				() => ui.setWorkingMessage(label),
+				() => ui.setEditorText(label),
+				() => ui.pasteToEditor(label),
+			].map(write => {
+				try {
+					write();
+					return "written";
+				} catch {
+					return "refused";
+				}
+			});
+		const live = writeAll("live");
+		const liveWrites = writes.length;
+		release();
+		const gone = writeAll("PLANTED BY A DISPOSED SESSION");
+
+		expect({ live, liveWrites, gone, goneWrites: writes.length - liveWrites }).toEqual({
+			live: Array(6).fill("written"),
+			liveWrites: 6,
+			gone: Array(6).fill("refused"),
+			goneWrites: 0,
+		});
+	});
+
+	test("an editor factory is handed a copy of the editor theme, so its writes stay its own", async () => {
+		const h = await interactiveSession();
+		const refresh = spyOn(h.mode, "refreshSlashCommandState").mockResolvedValue();
+		cleanups.push(() => refresh.mockRestore());
+		const hostFrames = JSON.stringify(Reflect.get(getEditorTheme().symbols ?? {}, "spinnerFrames"));
+		let handedHost = true;
+		h.ui.setEditorComponent((_tui, editorTheme, _keybindings) => {
+			handedHost = editorTheme === getEditorTheme();
+			const frames: unknown = Reflect.get(editorTheme.symbols ?? {}, "spinnerFrames");
+			if (Array.isArray(frames)) frames[0] = "PWNED";
+			return new CustomEditor(editorTheme);
+		});
+		await h.session.dispose();
+		// The host restores its own editor at the next frame; draw it while this test's settings live.
+		h.mode.ui.renderNow();
+
+		expect({
+			handedHost,
+			hostFrames: JSON.stringify(Reflect.get(getEditorTheme().symbols ?? {}, "spinnerFrames")),
+		}).toEqual({ handedHost: false, hostFrames });
+	});
+});
+
 describe("what a session mounted, when its runtime goes on to serve the next session", () => {
 	test("a widget its controller mounted stays inert, and sends nothing, at a loopback endpoint", async () => {
 		const h = await interactiveSession();

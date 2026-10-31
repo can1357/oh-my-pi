@@ -13,6 +13,7 @@ import { MODEL_ROW } from "../../config/model-registry";
 import { type AuthorDataSite, CALLBACK, DATA, fieldsOf, snapshotAuthorData } from "./author-data";
 import { providerCallGate } from "./callback-ownership";
 import type { CompactOptions, ExtensionCallbackOwner } from "./types";
+import { copyHostData } from "./boundary-data";
 
 /** Every field `CompactOptions` has. A field it does not declare is not copied. */
 const COMPACT_OPTIONS = fieldsOf<CompactOptions>({
@@ -48,7 +49,12 @@ export async function runExtensionCompact(
 					new Map(),
 				) as CompactOptions)
 			: undefined;
-	await session.compact(instructions, options);
+	try {
+		await session.compact(instructions, options);
+	} catch (error) {
+		// The failure is the host's own object; the extension's `await` is handed a copy.
+		throw copyHostData(error);
+	}
 }
 
 interface SetModelCapableSession {
