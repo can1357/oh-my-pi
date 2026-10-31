@@ -180,31 +180,57 @@ export async function transactionAsync<T>(db: Database, fn: () => Promise<T>): P
 
 const closeCallbacks = new WeakMap<Database, Set<() => void>>();
 
+function runDatabaseCloseCallbacks(db: Database): void {
+	const callbacks = closeCallbacks.get(db);
+	if (callbacks === undefined) return;
+	closeCallbacks.delete(db);
+	for (const callback of callbacks) {
+		try {
+			callback();
+		} catch {
+			// Best-effort cleanup.
+		}
+	}
+}
+
 export function onDatabaseClose(db: Database, callback: () => void): void {
 	let callbacks = closeCallbacks.get(db);
 	if (callbacks === undefined) {
 		callbacks = new Set();
 		closeCallbacks.set(db, callbacks);
+
+		const originalClose = db.close.bind(db);
+		db.close = ((...args: Parameters<Database["close"]>) => {
+			try {
+				return originalClose(...args);
+			} finally {
+				runDatabaseCloseCallbacks(db);
+			}
+		}) as Database["close"];
+
+		const disposableDb = db as unknown as { [Symbol.dispose]?: () => void };
+		const disposeFn = disposableDb[Symbol.dispose];
+		if (typeof disposeFn === "function") {
+			const originalDispose = disposeFn.bind(disposableDb);
+			disposableDb[Symbol.dispose] = () => {
+				try {
+					originalDispose();
+				} finally {
+					runDatabaseCloseCallbacks(db);
+				}
+			};
+		}
 	}
 	callbacks.add(callback);
 }
 
 export function closeQuietly(db: Database | undefined | null): void {
 	if (db === undefined || db === null) return;
-	const callbacks = closeCallbacks.get(db);
-	if (callbacks !== undefined) {
-		closeCallbacks.delete(db);
-		for (const callback of callbacks) {
-			try {
-				callback();
-			} catch {
-				// Best-effort cleanup.
-			}
-		}
-	}
 	try {
 		db.close();
 	} catch {
 		// Best-effort cleanup.
+	} finally {
+		runDatabaseCloseCallbacks(db);
 	}
 }

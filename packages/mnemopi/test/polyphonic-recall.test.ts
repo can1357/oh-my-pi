@@ -338,4 +338,24 @@ describe("PolyphonicRecallEngine", () => {
 			closeQuietly(beam.db);
 		}
 	});
+
+	it("clears embedding cache when a caller-owned Database is closed directly via db.close()", () => {
+		const beam = makeBeam();
+		const engine = new PolyphonicRecallEngine({ db: beam.db, sessionId: beam.sessionId, channelId: beam.channelId });
+		insertWorking(beam, "wm-direct-close", "Direct close test memory", 0.9);
+		beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test')", [
+			"wm-direct-close",
+			JSON.stringify([1, 0]),
+		]);
+
+		// Populate the embedding cache for this db instance
+		const hits = engine.vectorVoice([1, 0]).map(h => h.memoryId);
+		expect(hits).toContain("wm-direct-close");
+
+		// Direct close without closeQuietly
+		beam.db.close();
+
+		// Calling close again or closeQuietly is safe and callbacks are already drained
+		expect(() => closeQuietly(beam.db)).not.toThrow();
+	});
 });
