@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `streamProxy` now keeps every outcome field a terminal `done` / `error` frame carries (`ProxyTerminalFields`): `errorStatus`, `errorId`, `providerReplays`, `errorRetryAfterMs` and any other `AssistantMessage` field except the client's own, where before it kept only the error text, usage and content. A replay count, a status and the header retry wait therefore reach recovery through a proxy; a non-2xx proxy response's own `Retry-After` / `retry-after-ms` headers set the wait too, and the error a failed compaction step throws carries it, so the compaction retry waits for it ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.14.2] - 2026-10-31
+
 ### Added
 
 - The soft steering signal a tool sees as `toolCall.steeringSignal` now aborts with the source of the queued message (`"user"`, `"irc"`, …) as its `reason`, so a tool can yield only to the sources it should ([#17537](https://github.com/can1357/oh-my-pi/issues/17537))

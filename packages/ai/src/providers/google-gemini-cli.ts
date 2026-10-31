@@ -513,6 +513,12 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			timestamp: Date.now(),
 		};
 		let rawRequestDump: RawHttpRequestDump | undefined;
+		// The current attempt's accepted (2xx) response headers, for `finalize`:
+		// an in-band stream error or a cut stream keeps the response's
+		// `Retry-After`. Cleared when an attempt starts (each endpoint, each
+		// empty-stream refetch), so a later attempt that fails before its response
+		// never reads an earlier response's headers.
+		let streamResponseHeaders: Headers | undefined;
 
 		try {
 			const apiKeyRaw = options?.apiKey;
@@ -956,6 +962,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				const isLastEndpoint = i === endpoints.length - 1;
 				try {
 					started = false;
+					streamResponseHeaders = undefined;
 					resetOutput();
 
 					// Per attempt: arm a pre-response (TTFT) timer, cleared the instant
@@ -1001,6 +1008,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						);
 					}
 
+					streamResponseHeaders = response.headers;
 					const requestUrl = response.url;
 					let currentResponse = response;
 
@@ -1021,6 +1029,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 								throw new AIError.ConfigurationError("Missing request URL");
 							}
 
+							streamResponseHeaders = undefined;
 							currentResponse = await (options?.fetch ?? fetch)(requestUrl, {
 								method: "POST",
 								headers: requestHeaders,
@@ -1036,6 +1045,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 									{ headers: currentResponse.headers },
 								);
 							}
+							streamResponseHeaders = currentResponse.headers;
 						}
 
 						const streamed = await streamResponse(currentResponse);
@@ -1137,11 +1147,17 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
-			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal, rawRequestDump });
+			const result = await AIError.finalize(error, {
+				api: model.api,
+				signal: options?.signal,
+				rawRequestDump,
+				streamResponseHeaders,
+			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			output.errorRetryAfterMs = result.retryAfterMs;
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });

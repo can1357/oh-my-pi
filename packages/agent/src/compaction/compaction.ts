@@ -59,7 +59,7 @@ import {
 	V2_RETAINED_MESSAGE_TOKEN_BUDGET,
 } from "./compaction-v2-streaming";
 import type { CompactionEntry, SessionEntry } from "./entries";
-import { NativeCompactionError } from "./errors";
+import { failedResponseError, NativeCompactionError } from "./errors";
 import {
 	type ConvertToLlm,
 	createCompactionSummaryMessage,
@@ -671,15 +671,14 @@ function resolveCompactionEffort(model: Model, level: ThinkingLevel | undefined)
  * `stopReason === "error"`. Carries the provider's HTTP `errorStatus`
  * onto a top-level `.status` field so callers (notably
  * `AgentSession.#isCompactionAuthFailure`) can branch on 401/403 without
- * regex-scraping `error.message`. The `auth_unavailable` synthetic
- * (pi-native gateway) does not populate `errorStatus`, hence the legacy
- * message-based check is still required upstream — see issue #986.
+ * regex-scraping `error.message`, and the failed response's header retry wait
+ * for the session's compaction retry (see {@link failedResponseError}). The
+ * `auth_unavailable` synthetic (pi-native gateway) does not populate
+ * `errorStatus`, hence the legacy message-based check is still required
+ * upstream — see issue #986.
  */
 function createSummarizationError(prefix: string, response: AssistantMessage): Error {
-	const text = `${prefix}: ${response.errorMessage || "Unknown error"}`;
-	return response.errorStatus === undefined
-		? new Error(text)
-		: new AIError.ProviderHttpError(text, response.errorStatus);
+	return failedResponseError(`${prefix}: ${response.errorMessage || "Unknown error"}`, response);
 }
 
 function shouldRetryHandoffWithAutoToolChoice(response: AssistantMessage): boolean {

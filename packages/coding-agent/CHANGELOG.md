@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A cut stream — a closed socket, a truncated chunked transfer, or a stream that ended mid-frame (`Unexpected end of JSON input`, an unterminated SSE event) — on a request the provider reports it sent once now gets up to two more tries on the same model before `retry.fallbackChains` moves the session to another one. At most two per recovery however many models the chain walks, each waiting a full-jitter backoff (scheduled sleep strictly under 1.5 s in all at the default `retry.baseDelayMs`, strictly under 16 s at any base); the longest retry hint the error names that does not fit strictly inside that window, and any failure after a held retry that does not report a single request, move on instead. Only `anthropic`, `openai-codex-responses` and `cursor` report that count today. A failure from a provider that reports a replay, or reports no count at all, moves at once, as do a 429, a 529, an overload, a usage limit, a timeout and a refusal. This replaces the one same-model retry before the chain that every provider used to get for a socket close after streamed output, which re-sent requests the provider had already replayed ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- Cancelling a retry (`abortRetry()`, Esc while retrying, RPC `abort_retry`) now ends the retry saga from whatever moment it lands: from an `auto_retry_start` listener before the backoff starts, as a credential rotation resolves, at a fallback switch, or while the retried request is already on the wire (which then completes or fails without a further retry); before, a cancellation outside the backoff sleep could be lost and the saga went on retrying ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.14.2] - 2026-10-31
+
 ### Added
 
 - Added `task.perCallModel` (`off` by default, `eval`, `on`) so a task item or an eval `agent()`/`workpool()` call can run on one exact model the operator already names: a chat role from your own (non-project) settings, the selected agent's own model, or the parent's current model. Glob values (`anthropic/*`) never approve a model. `task.perCallModelAllow` narrows that list, `task.maxEffort` caps the worker's effort, and the worker never switches to another model. Project settings can only narrow this: they never turn it on or approve a model ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
@@ -10,8 +17,6 @@
 ### Changed
 
 - `model` is now declared in every task schema: a task call, eval `agent()` or `workpool()` that passes a model the operator's configuration does not allow is refused with an error ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
-### Changed
-
 - Viewing a subagent or returning to the main session no longer posts a "Viewing agent …" / "Returned to main session" status (a popup in Tern); the status line and Tern's composer already show which agent is in view
 - In a Tern pane, `omp stats` shows the dashboard in place of the block it runs in, with a Close button (or Esc, or Ctrl+C) that stops it and brings the terminal back, and `/stats` opens it in a browser block beside omp, instead of the system browser
 - `bash` tool commands now see `PI_TOOL_CALL_ID`, the id of the call running them, so a script the agent runs can point at that call in the session transcript ([#17489](https://github.com/can1357/oh-my-pi/pull/17489) by [@will-bogusz](https://github.com/will-bogusz))

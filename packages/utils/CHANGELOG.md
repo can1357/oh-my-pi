@@ -2,12 +2,24 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `longestRetryHint`, the longest wait a response names across every retry header and every hint in its body ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+
+### Fixed
+
+- `extractRetryHint` and `longestRetryHint` read a `Retry-After` date with no zone as GMT, as an HTTP-date is, instead of in this machine's zone, and read no wait from a date with no zone in a message body (`reset at 2026-11-01 01:40:17`, `将在 … 重置`, `retry-after: 2026-11-01T01:40:17`) unless the provider declares the zone its stamps use; read as UTC, such a date once gave eight hours where the server's header said 750 ms. The new `excludeDates` option reads only a body's relative waits, for a caller that already has the header's wait ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+## [18.14.2] - 2026-10-31
+
+### Added
+
+- Added `oklabDistance`, the perceptual distance between two hex colors ([#17520](https://github.com/can1357/oh-my-pi/pull/17520))
+
 ## [18.14.1] - 2026-10-31
 
 ### Added
 
 - Added `isFileLockHeld`, which reports whether a file lock is held without acquiring it ([#17428](https://github.com/can1357/oh-my-pi/pull/17428) by [@andrebrait](https://github.com/andrebrait))
-- Added `oklabDistance`, the perceptual distance between two hex colors ([#17520](https://github.com/can1357/oh-my-pi/pull/17520))
 
 ## [18.14.0] - 2026-10-29
 

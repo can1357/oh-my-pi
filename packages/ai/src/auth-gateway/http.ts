@@ -9,6 +9,12 @@ import * as os from "node:os";
 import { getInstallId } from "@oh-my-pi/pi-utils";
 import type { Api, Model } from "../types";
 import type { ClientUsageIdentity } from "../usage";
+import {
+	getHeadersFromError,
+	getRetryAfterMsFromHeaders,
+	isRetryWaitMs,
+	retryWaitHeaderValue,
+} from "../utils/retry-after";
 
 const JSON_HEADERS = {
 	"Content-Type": "application/json",
@@ -49,6 +55,44 @@ export function gatewayResponseHeaders(
 		headers["openai-processing-ms"] = elapsed;
 	}
 	return headers;
+}
+
+/**
+ * `response` restating the failed upstream attempt's header retry wait as the
+ * two headers HTTP clients read a wait from — the OpenAI and Anthropic SDKs and
+ * omp's own providers pointed at the gateway: `retry-after-ms` in milliseconds
+ * and `Retry-After` in whole seconds, rounded up. `retryAfterMs`
+ * must come from the upstream response's headers
+ * (`AssistantMessage.errorRetryAfterMs`, or {@link thrownRetryAfterMs}), never
+ * from error text, so a body cannot become a header. Without a finite wait of
+ * zero or more, `response` is returned unchanged.
+ */
+export function withRetryAfterHeaders(response: Response, retryAfterMs: number | undefined): Response {
+	if (!isRetryWaitMs(retryAfterMs)) return response;
+	const waitMs = retryWaitHeaderValue(retryAfterMs);
+	response.headers.set("retry-after-ms", waitMs);
+	response.headers.set("retry-after", String(Math.ceil(Number(waitMs) / 1000)));
+	return response;
+}
+
+/**
+ * The structured `headers` member of a chat-format in-band error object
+ * (`/v1/messages`' `error` event, `/v1/chat/completions`' `error` chunk,
+ * `/v1/responses`' `response.failed` error), for a failure after the gateway
+ * committed its `200` and can no longer send real headers. Same shape as the
+ * `headers` Codex error events carry: `{ "retry-after-ms": "<integer ms>" }`.
+ * `retryAfterMs` follows {@link withRetryAfterHeaders}'s rule — the failed
+ * message's `errorRetryAfterMs` or a thrown error's own headers, never text —
+ * and without a finite wait of zero or more the member is absent
+ * (`JSON.stringify` drops `undefined`).
+ */
+export function inBandErrorHeaders(retryAfterMs: number | undefined): { "retry-after-ms": string } | undefined {
+	return isRetryWaitMs(retryAfterMs) ? { "retry-after-ms": retryWaitHeaderValue(retryAfterMs) } : undefined;
+}
+
+/** A thrown upstream failure's header retry wait, read from the error's own response headers. */
+export function thrownRetryAfterMs(error: unknown): number | undefined {
+	return getRetryAfterMsFromHeaders(getHeadersFromError(error));
 }
 
 /**

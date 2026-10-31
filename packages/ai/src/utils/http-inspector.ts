@@ -2,7 +2,12 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getLogsDir, isBunTestRuntime, isEnoent, isRecord, logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error/flags";
-import { appendRetryAfterHint, errorMessageText, getHeadersFromError } from "./retry-after.js";
+import {
+	appendRetryAfterHint,
+	errorMessageText,
+	getHeadersFromError,
+	getRetryAfterMsFromHeaders,
+} from "./retry-after.js";
 
 export type RawHttpRequestDump = {
 	provider: string;
@@ -170,7 +175,12 @@ export async function finalizeErrorMessage(
 	const body = captured
 		? mergeCapturedBody(errorMessageText(error), captured, capturedErrorResponse?.status)
 		: errorMessageText(error);
-	const message = appendRetryAfterHint(body, capturedErrorResponse?.headers ?? getHeadersFromError(error));
+	// The same headers `finalize` takes the field from (`getFailureRetryAfterMs`):
+	// the captured response's when they name a wait, else the error's own.
+	const capturedHeaders = capturedErrorResponse?.headers;
+	const waitHeaders =
+		getRetryAfterMsFromHeaders(capturedHeaders) !== undefined ? capturedHeaders : getHeadersFromError(error);
+	const message = appendRetryAfterHint(body, waitHeaders);
 	return appendRawHttpRequestDumpFor400(message, error, rawRequestDump);
 }
 

@@ -10,6 +10,10 @@
  * sentinel makes classification source-agnostic and refactor-stable.
  */
 
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
+import { retryWaitHeaders } from "@oh-my-pi/pi-ai/utils/retry-after";
+
 export class CompactionCancelledError extends Error {
 	override readonly name = "CompactionCancelledError" as const;
 
@@ -32,6 +36,21 @@ export class NativeCompactionError extends Error {
 	constructor(cause: unknown) {
 		super(cause instanceof Error ? cause.message : String(cause), { cause });
 	}
+}
+
+/**
+ * The Error a compaction step throws for a model response that ended in
+ * `stopReason: "error"`. It keeps the provider's HTTP status on `.status`, so
+ * callers can route auth failures without scraping the text, and the failed
+ * response's header retry wait (`errorRetryAfterMs`) as a `retry-after-ms`
+ * header, which the session's compaction retry reads through
+ * `getHeadersFromError`; the text never stands in for that wait.
+ */
+export function failedResponseError(text: string, response: AssistantMessage): Error {
+	const headers = retryWaitHeaders(response.errorRetryAfterMs);
+	return response.errorStatus === undefined
+		? Object.assign(new Error(text), { headers })
+		: new AIError.ProviderHttpError(text, response.errorStatus, { headers });
 }
 
 /**
