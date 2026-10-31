@@ -29,7 +29,7 @@ const MUSE_DENIAL_BODY =
 	"This API key is billed to a Muse Code subscription. Muse Code subscriptions cover requests from the Muse Code client only. Use it in Muse Code, or use a pay-as-you-go API key for other clients.";
 const MUSE_DENIAL_SUFFIX = " (type=permission_error param=client_attestation_denied)";
 const MUSE_REMEDIATION =
-	"Muse Code subscription keys are valid only for the Muse Code client. In omp, configure a pay-as-you-go Meta Model API key on the meta provider.";
+	"Muse Code subscription keys are valid only for the Muse Code client. In omp, set META_API_KEY to a pay-as-you-go Meta Model API key and use the meta provider.";
 const MUSE_DENIAL_PAYLOAD = {
 	error: {
 		message: MUSE_DENIAL_BODY,

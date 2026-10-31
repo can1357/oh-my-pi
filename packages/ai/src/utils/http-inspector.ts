@@ -260,7 +260,7 @@ export function rewriteClinePassError(errorMessage: string, provider: string): s
 }
 
 const MUSE_CODE_REMEDIATION =
-	"Muse Code subscription keys are valid only for the Muse Code client. In omp, configure a pay-as-you-go Meta Model API key on the meta provider.";
+	"Muse Code subscription keys are valid only for the Muse Code client. In omp, set META_API_KEY to a pay-as-you-go Meta Model API key and use the meta provider.";
 const MUSE_CODE_ATTESTATION_DENIAL_PATTERN = /client_attestation_denied|billed to a Muse Code subscription/i;
 
 /**
