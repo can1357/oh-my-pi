@@ -309,18 +309,53 @@ describe("PolyphonicRecallEngine", () => {
 		}
 	});
 
-	it("classifies CJK queries as IE ability and routes them through makeQuestionTokens in memoriaRetrieve", () => {
+	it("classifies CJK queries without temporal keywords to IE ability in memoriaRetrieve", () => {
 		const beam = makeBeam();
 		try {
 			beam.db.run(
 				`INSERT INTO memoria_facts
 					(session_id, message_idx, fact_type, key, value, context_snippet, importance, source_memory_id)
 					VALUES
-					(?, 0, 'entity', '北京大學', '排名位居前列', '請問北京大學的排名', 0.9, 'wm-cjk-pku'),
-					(?, 1, 'entity', 'PostgreSQL資料庫', '連線池設定為 32', 'PostgreSQL資料庫連線池設定', 0.95, 'wm-cjk-tsmc'),
-					(?, 2, 'entity', 'postmortem', 'unrelated incident note', 'postmortem review', 0.99, 'wm-cjk-tokyo')`,
-				[beam.sessionId, beam.sessionId, beam.sessionId],
+					(?, 0, 'entity', '北京大學', '排名位居前列', '請問北京大學的排名', 0.9, 'wm-cjk-pku')`,
+				[beam.sessionId],
 			);
+			const defaultMemoria = memoriaRetrieve(beam, "請問北京大學的排名");
+			expect(defaultMemoria.ability).toBe("IE");
+			expect((defaultMemoria.results as Array<{ key?: string }>).map(r => r.key)).toContain("北京大學");
+
+			const nonTemporalOrder = memoriaRetrieve(beam, "資料表欄位順序是什麼");
+			expect(nonTemporalOrder.ability).toBe("IE");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("routes mixed-script queries to IE and preserves intact technical subjects", () => {
+		const beam = makeBeam();
+		try {
+			beam.db.run(
+				`INSERT INTO memoria_facts
+					(session_id, message_idx, fact_type, key, value, context_snippet, importance, source_memory_id)
+					VALUES
+					(?, 0, 'entity', 'PostgreSQL資料庫', '連線池設定為 32', 'PostgreSQL資料庫連線池設定', 0.95, 'wm-cjk-tsmc'),
+					(?, 1, 'entity', 'postmortem', 'unrelated incident note', 'postmortem review', 0.99, 'wm-cjk-tokyo')`,
+				[beam.sessionId, beam.sessionId],
+			);
+			const mixedMemoria = memoriaRetrieve(beam, "請問PostgreSQL資料庫的連線池設定", null, 1);
+			expect(mixedMemoria.ability).toBe("IE");
+			expect((mixedMemoria.results as Array<{ key?: string }>)[0]?.key).toBe("PostgreSQL資料庫");
+
+			const englishMemoria = memoriaRetrieve(beam, "what is PostgreSQL", null, 1);
+			expect(englishMemoria.ability).toBe("IE");
+			expect((englishMemoria.results as Array<{ key?: string }>)[0]?.key).toBe("PostgreSQL資料庫");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("retrieves timeline events for mixed-script CJK terms under TR ability", () => {
+		const beam = makeBeam();
+		try {
 			beam.db.run(
 				`INSERT INTO memoria_timelines
 					(session_id, event_id, date, description, source_memory_id)
@@ -329,6 +364,17 @@ describe("PolyphonicRecallEngine", () => {
 					(?, 2, '2026-03-01', '完成PostgreSQL資料庫叢集遷移', 'wm-cjk-tsmc')`,
 				[beam.sessionId, beam.sessionId],
 			);
+			const timelineMemoria = memoriaRetrieve(beam, "PostgreSQL資料庫", "TR", 1);
+			expect(timelineMemoria.ability).toBe("TR");
+			expect((timelineMemoria.results as Array<{ event_id?: number }>)[0]?.event_id).toBe(2);
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("retrieves knowledge graph entities with conjunction-bearing names under MR ability", () => {
+		const beam = makeBeam();
+		try {
 			beam.db.run(
 				`INSERT INTO memoria_kg
 					(session_id, subject, predicate, object, confidence, source_memory_id)
@@ -337,25 +383,6 @@ describe("PolyphonicRecallEngine", () => {
 					(?, '大和銀行', 'located_in', '大阪', 0.75, 'wm-cjk-tokyo')`,
 				[beam.sessionId, beam.sessionId],
 			);
-			const defaultMemoria = memoriaRetrieve(beam, "請問北京大學的排名");
-			expect(defaultMemoria.ability).toBe("IE");
-			expect((defaultMemoria.results as Array<{ key?: string }>).map(r => r.key)).toContain("北京大學");
-
-			const nonTemporalOrder = memoriaRetrieve(beam, "資料表欄位順序是什麼");
-			expect(nonTemporalOrder.ability).toBe("IE");
-
-			const mixedMemoria = memoriaRetrieve(beam, "請問PostgreSQL資料庫的連線池設定", null, 1);
-			expect(mixedMemoria.ability).toBe("IE");
-			expect((mixedMemoria.results as Array<{ key?: string }>)[0]?.key).toBe("PostgreSQL資料庫");
-
-			const englishMemoria = memoriaRetrieve(beam, "what is PostgreSQL", null, 1);
-			expect(englishMemoria.ability).toBe("IE");
-			expect((englishMemoria.results as Array<{ key?: string }>)[0]?.key).toBe("PostgreSQL資料庫");
-
-			const timelineMemoria = memoriaRetrieve(beam, "PostgreSQL資料庫", "TR", 1);
-			expect(timelineMemoria.ability).toBe("TR");
-			expect((timelineMemoria.results as Array<{ event_id?: number }>)[0]?.event_id).toBe(2);
-
 			const daiwaDirect = memoriaRetrieve(beam, "大和銀行", "MR", 1);
 			expect((daiwaDirect.results as Array<{ subject?: string }>)[0]?.subject).toBe("大和銀行");
 
@@ -366,6 +393,60 @@ describe("PolyphonicRecallEngine", () => {
 		}
 	});
 
+	it("matches mixed-script Chinese copula questions like C語言是什麼 and Node.js資料庫 in factVoice", () => {
+		const beam = makeBeam();
+		try {
+			const engine = new PolyphonicRecallEngine({
+				db: beam.db,
+				sessionId: beam.sessionId,
+				channelId: beam.channelId,
+			});
+			const timestamp = new Date().toISOString();
+			insertWorking(beam, "wm-c-lang", "C語言是一種通用的編程語言", 0.9, timestamp);
+			insertWorking(beam, "wm-node-db", "Node.js資料庫連線已配置完畢", 0.9, timestamp);
+			beam.db.run(
+				`INSERT INTO consolidated_facts
+					(id, subject, predicate, object, confidence, mention_count, first_seen, last_seen, sources_json, veracity)
+					VALUES
+					('cf_c_lang', 'C語言', '定義', '編程語言', 0.95, 2, ?, ?, ?, 'likely_true'),
+					('cf_node_db', 'Node.js資料庫', '狀態', '已配置', 0.95, 2, ?, ?, ?, 'likely_true')`,
+				[timestamp, timestamp, JSON.stringify(["wm-c-lang"]), timestamp, timestamp, JSON.stringify(["wm-node-db"])],
+			);
+			expect(engine.factVoice("C語言是什麼").map(hit => hit.memoryId)).toContain("wm-c-lang");
+			expect(engine.factVoice("Node.js資料庫的設定").map(hit => hit.memoryId)).toContain("wm-node-db");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("ranks stronger primary matches above one-term matches in factRetrieve and kgRetrieve", () => {
+		const beam = makeBeam();
+		try {
+			beam.db.run(
+				`INSERT INTO memoria_facts
+					(session_id, message_idx, fact_type, key, value, context_snippet, importance, source_memory_id)
+					VALUES
+					(?, 0, 'entity', '北京大學', '排名位居前列', '請問北京大學的排名', 0.8, 'wm-pku'),
+					(?, 1, 'entity', '世界排名', '全球高校最新排名發布', '全球高校世界排名', 0.99, 'wm-world')`,
+				[beam.sessionId, beam.sessionId],
+			);
+			const factTop = memoriaRetrieve(beam, "請問北京大學的排名", "IE", 1);
+			expect((factTop.results as Array<{ key?: string }>)[0]?.key).toBe("北京大學");
+
+			beam.db.run(
+				`INSERT INTO memoria_kg
+					(session_id, subject, predicate, object, confidence, source_memory_id)
+					VALUES
+					(?, '研究中心', 'located_in', '總部大樓', 0.99, 'wm-center'),
+					(?, '研究與發展部', 'located_in', '科技園區', 0.8, 'wm-rd')`,
+				[beam.sessionId, beam.sessionId],
+			);
+			const kgTop = memoriaRetrieve(beam, "請問研究與發展部的位置", "MR", 1);
+			expect((kgTop.results as Array<{ subject?: string }>)[0]?.subject).toBe("研究與發展部");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
 	it("activates temporalVoice on both traditional and simplified CJK temporal queries", () => {
 		const beam = makeBeam();
 		try {

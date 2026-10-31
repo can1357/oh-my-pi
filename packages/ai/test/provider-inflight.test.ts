@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
@@ -159,6 +160,83 @@ describe("provider in-flight request limits", () => {
 		// transport is parked waiting for its terminal SSE frame.
 		await Bun.sleep(150);
 		releaseDone.resolve();
+		const [first, second] = await Promise.all([firstResult, secondResult]);
+		expect(first.content).toEqual([{ type: "text", text: "first" }]);
+		expect(second.content).toEqual([{ type: "text", text: "second" }]);
+		expect(overlapped).toBe(false);
+	}, 10_000);
+
+	test("holds an Anthropic permit until the body after message_stop reaches its end", async () => {
+		configureProviderMaxInFlightRequests({ tests: 1 });
+		const model: Model<"anthropic-messages"> = buildModel({
+			id: "claude-sonnet-4-5",
+			name: "Claude Sonnet",
+			api: "anthropic-messages",
+			provider: "tests",
+			baseUrl: "https://example.test",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 8192,
+		});
+		const encoder = new TextEncoder();
+		const stopSeen = Promise.withResolvers<void>();
+		const releaseTail = Promise.withResolvers<void>();
+		let calls = 0;
+		let tailSent = false;
+		let overlapped = false;
+		async function mockFetch(): Promise<Response> {
+			calls++;
+			if (calls === 2 && !tailSent) overlapped = true;
+			const first = calls === 1;
+			const text = first ? "first" : "second";
+			const sse = [
+				{
+					type: "message_start",
+					message: {
+						id: "msg_1",
+						type: "message",
+						role: "assistant",
+						model: model.id,
+						content: [],
+						usage: { input_tokens: 1, output_tokens: 0 },
+					},
+				},
+				{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+				{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
+				{ type: "content_block_stop", index: 0 },
+				{ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+				{ type: "message_stop" },
+			]
+				.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+				.join("");
+			const body = new ReadableStream<Uint8Array>({
+				async start(controller) {
+					controller.enqueue(encoder.encode(sse));
+					if (first) {
+						await releaseTail.promise;
+						tailSent = true;
+					}
+					controller.close();
+				},
+			});
+			return new Response(body, { headers: { "content-type": "text/event-stream" } });
+		}
+		const options = {
+			apiKey: "test",
+			fetch: mockFetch,
+			onSseEvent: (event: RawSseEvent) => {
+				if (event.event === "message_stop") stopSeen.resolve();
+			},
+		};
+		const firstResult = stream(model, context(), options).result();
+		await stopSeen.promise;
+		const secondResult = stream(model, context(), options).result();
+		// Exercise the real filesystem-backed lease scheduler while the first
+		// transport is still draining the body after message_stop.
+		await Bun.sleep(150);
+		releaseTail.resolve();
 		const [first, second] = await Promise.all([firstResult, secondResult]);
 		expect(first.content).toEqual([{ type: "text", text: "first" }]);
 		expect(second.content).toEqual([{ type: "text", text: "second" }]);

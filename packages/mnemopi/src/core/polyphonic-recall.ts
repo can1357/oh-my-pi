@@ -8,16 +8,17 @@ import { EpisodicGraph, extractProperNouns } from "./episodic-graph";
 import { STOP_WORDS } from "./synonyms";
 import { VeracityConsolidator } from "./veracity-consolidation";
 import {
+	CJK_CLAUSE_PARTICLE_RE,
 	CJK_PARTICLE_SPLIT_RE,
 	CJK_STOP_SEGMENTS,
 	cjkCodePointShingles,
 	codePointLength,
 	expandCjkCandidateSegments,
 	hasCjk,
+	RECALL_RAW_TOKEN_RE,
 	splitMixedScriptToken,
 	stripCjkQuestionAffixes,
 } from "../util/regex";
-
 export type PolyphonicVoice = "hybrid" | "vector" | "graph" | "fact" | "temporal";
 
 export interface VoiceRecallResult {
@@ -234,8 +235,9 @@ function queryTokens(query: string): string[] {
 
 function rawQueryTokens(query: string): string[] {
 	const tokens: string[] = [];
-	for (const match of query.matchAll(/[\p{L}\p{N}\u30FC\u3005\uFF66-\uFF9F_-]+/gu)) {
-		tokens.push(match[0]);
+	for (const match of query.matchAll(RECALL_RAW_TOKEN_RE)) {
+		const trimmed = match[0].replace(/^\.+|\.+$/gu, "");
+		if (trimmed.length > 0) tokens.push(trimmed);
 	}
 	return tokens;
 }
@@ -271,9 +273,13 @@ function factSubjectCandidates(query: string): string[] {
 				for (const seg of [word, strippedWord]) {
 					if (codePointLength(seg) >= 2 && !CJK_STOP_SEGMENTS.has(seg)) seen.add(seg);
 				}
-				for (const sub of strippedWord.split(CJK_PARTICLE_SPLIT_RE)) {
-					const strippedSub = stripCjkQuestionAffixes(sub);
-					if (codePointLength(strippedSub) >= 2 && !CJK_STOP_SEGMENTS.has(strippedSub)) seen.add(strippedSub);
+				for (const clauseRaw of strippedWord.split(CJK_CLAUSE_PARTICLE_RE)) {
+					const clause = stripCjkQuestionAffixes(clauseRaw);
+					if (codePointLength(clause) >= 2 && !CJK_STOP_SEGMENTS.has(clause)) seen.add(clause);
+					for (const sub of clause.split(CJK_PARTICLE_SPLIT_RE)) {
+						const strippedSub = stripCjkQuestionAffixes(sub);
+						if (codePointLength(strippedSub) >= 2 && !CJK_STOP_SEGMENTS.has(strippedSub)) seen.add(strippedSub);
+					}
 				}
 			}
 			if (wordLen >= 2) expandCjkCandidateSegments(rawWord, seen);

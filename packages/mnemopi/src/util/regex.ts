@@ -1,4 +1,6 @@
 const RECALL_TOKEN_RE = /[a-z0-9][a-z0-9_.:/+-]*/g;
+/** Token extractor preserving internal periods, hashes, pluses, and hyphens without sentence-final periods. */
+export const RECALL_RAW_TOKEN_RE = /[\p{L}\p{N}_.#+-]+/gu;
 const CJK_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u30FC\u3005\uFF66-\uFF9F]/u;
 /** Regular expression matching contiguous runs of 2+ CJK characters, prolong marks, iteration marks, or halfwidth Katakana. */
 export const CJK_RUN_RE =
@@ -7,10 +9,9 @@ const NON_CJK_TOKEN_RUN_RE =
 	/(?:(?![\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u30FC\u3005\uFF66-\uFF9F])[\p{L}\p{N}])(?:(?![\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u30FC\u3005\uFF66-\uFF9F])[\p{L}\p{N}_-])*/gu;
 /** Regular expression for splitting CJK phrases on possessive, modal, and Japanese/Korean grammatical particles while preserving conjunction-bearing entity names (e.g. `大和銀行`). */
 export const CJK_CLAUSE_PARTICLE_RE =
-	/(?:について|に関して|を確認|を調べ|에서|으로|에게|부터|까지|[的之了嗎呢吧啊呀嘛在從向由給對把被將をがはにでともへや의])/u;
-/** Regular expression for splitting CJK clauses on Chinese, Japanese, and Korean grammatical particles and conjunctions. */
+	/(?:是什麼意思|是什麼|是誰|在哪裡|在哪兒|怎麼樣|為什麼|為何|多少|如何|是否|について|に関して|を確認|を調べ|에서|으로|에게|부터|까지|[的之了嗎呢吧啊呀嘛在從向由給對把被將をがはにでともへや의])/u;
 export const CJK_PARTICLE_SPLIT_RE =
-	/(?:について|に関して|を確認|を調べ|에서|으로|에게|부터|까지|[的之了嗎呢吧啊呀嘛和與及或對將把被從向由給為於在並而但卻又也還只就才已曾讓跟をがはにでともへや은는이가을를의에로과와도만])/u;
+	/(?:是什麼意思|是什麼|是誰|在哪裡|在哪兒|怎麼樣|為什麼|為何|多少|如何|是否|について|に関して|を確認|を調べ|에서|으로|에게|부터|까지|[的之了嗎呢吧啊呀嘛和與及或對將把被從向由給為於在並而但卻又也還只就才已曾讓跟をがはにでともへや은는이가을를의에로과와도만])/u;
 const CJK_TRAILING_PARTICLE_RE =
 	/(?:について|に関して|を確認|を調べ|에서|으로|에게|부터|까지|[をがはにでともへや은는이가을를의에로과와도만])+$/u;
 const HOMOGENEOUS_CJK_SUBRUN_RE =

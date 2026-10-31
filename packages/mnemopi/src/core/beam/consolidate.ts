@@ -9,6 +9,7 @@ import {
 	cjkCodePointShingles,
 	codePointLength,
 	hasCjk,
+	RECALL_RAW_TOKEN_RE,
 	splitMixedScriptToken,
 	stripCjkQuestionAffixes,
 } from "../../util/regex";
@@ -241,7 +242,6 @@ function makeQuestionTokenGroups(query: string): {
 		"the",
 		"to",
 		"was",
-		"were",
 		"what",
 		"when",
 		"where",
@@ -249,8 +249,8 @@ function makeQuestionTokenGroups(query: string): {
 		"who",
 		"with",
 	]);
-	const rawTokens = [...query.matchAll(/[\p{L}\p{N}\u30FC\u3005\uFF66-\uFF9F_.-]+/gu)]
-		.map(m => m[0] ?? "")
+	const rawTokens = [...query.matchAll(RECALL_RAW_TOKEN_RE)]
+		.map(m => m[0]?.replace(/^\.+|\.+$/gu, "") ?? "")
 		.filter(token => {
 			const lower = token.toLowerCase();
 			return codePointLength(lower) > 1 && !stop.has(lower) && !CJK_STOP_SEGMENTS.has(lower);
@@ -306,6 +306,7 @@ function makeQuestionTokenGroups(query: string): {
 								if (codePointLength(sub) <= 12) pushUnique(primary, sub);
 							}
 						} else {
+							if (clauseLen <= 12) pushUnique(primary, clause);
 							for (const sub of validSubsegs) {
 								if (codePointLength(sub) <= 12) pushUnique(primary, sub);
 							}
@@ -972,40 +973,26 @@ function factRetrieve(beam: BeamMemoryState, query: string, topK: number): Memor
 	}
 	const where = clauses.length === 0 ? "1=1" : clauses.join(" OR ");
 	const trimmed = query.trim().toLowerCase();
-	const orderParts: string[] = [];
+	const scoreExprs: string[] = [];
 	const orderParams: SQLQueryBindings[] = [];
 	if (trimmed.length > 0) {
-		orderParts.push("WHEN lower(key) = ? OR lower(value) = ? THEN 5");
-		orderParams.push(trimmed, trimmed);
 		const trimmedLike = `%${escapeLike(trimmed)}%`;
-		orderParts.push("WHEN lower(key) LIKE ? ESCAPE '\\' OR lower(value) LIKE ? ESCAPE '\\' THEN 4");
-		orderParams.push(trimmedLike, trimmedLike);
+		scoreExprs.push(
+			"(CASE WHEN lower(key) = ? OR lower(value) = ? THEN 100 WHEN lower(key) LIKE ? ESCAPE '\\' OR lower(value) LIKE ? ESCAPE '\\' THEN 80 ELSE 0 END)",
+		);
+		orderParams.push(trimmed, trimmed, trimmedLike, trimmedLike);
 	}
-	if (exactPrimary.length > 0) {
-		const exactKeyChecks: string[] = [];
-		for (const p of exactPrimary) {
-			const like = `%${escapeLike(p)}%`;
-			exactKeyChecks.push("lower(key) LIKE ? ESCAPE '\\' OR lower(value) LIKE ? ESCAPE '\\'");
-			orderParams.push(like, like);
-		}
-		orderParts.push(`WHEN ${exactKeyChecks.join(" OR ")} THEN 3`);
+	const exactPrimarySet = new Set(exactPrimary);
+	for (const p of primary) {
+		const w = codePointLength(p);
+		const exactBonus = exactPrimarySet.has(p) ? w * 2 : 0;
+		const like = `%${escapeLike(p)}%`;
+		scoreExprs.push(
+			`(CASE WHEN lower(key) = ? OR lower(value) = ? THEN ${w * 8 + exactBonus} WHEN lower(key) LIKE ? ESCAPE '\\' OR lower(value) LIKE ? ESCAPE '\\' THEN ${w * 4 + exactBonus} WHEN lower(context_snippet) LIKE ? ESCAPE '\\' THEN ${w} ELSE 0 END)`,
+		);
+		orderParams.push(p, p, like, like, like);
 	}
-	if (primary.length > 0) {
-		const primaryKeyChecks: string[] = [];
-		const primaryCtxChecks: string[] = [];
-		for (const p of primary) {
-			const like = `%${escapeLike(p)}%`;
-			primaryKeyChecks.push("lower(key) LIKE ? ESCAPE '\\' OR lower(value) LIKE ? ESCAPE '\\'");
-			orderParams.push(like, like);
-			primaryCtxChecks.push("lower(context_snippet) LIKE ? ESCAPE '\\'");
-		}
-		for (const p of primary) {
-			orderParams.push(`%${escapeLike(p)}%`);
-		}
-		orderParts.push(`WHEN ${primaryKeyChecks.join(" OR ")} THEN 2`);
-		orderParts.push(`WHEN ${primaryCtxChecks.join(" OR ")} THEN 1`);
-	}
-	const exactMatchClause = orderParts.length > 0 ? `(CASE ${orderParts.join(" ")} ELSE 0 END) DESC, ` : "";
+	const exactMatchClause = scoreExprs.length > 0 ? `(${scoreExprs.join(" + ")}) DESC, ` : "";
 	const allParams = [...params, ...orderParams, topK];
 	const results = asRows(
 		beam.db
@@ -1072,35 +1059,23 @@ function kgRetrieve(beam: BeamMemoryState, query: string, topK: number): Memoria
 	}
 	const where = clauses.length === 0 ? "1=1" : clauses.join(" OR ");
 	const trimmed = query.trim().toLowerCase();
-	const orderParts: string[] = [];
+	const scoreExprs: string[] = [];
 	const orderParams: SQLQueryBindings[] = [];
 	if (trimmed.length > 0) {
-		orderParts.push("WHEN lower(subject) = ? OR lower(object) = ? THEN 3");
+		scoreExprs.push("(CASE WHEN lower(subject) = ? OR lower(object) = ? THEN 100 ELSE 0 END)");
 		orderParams.push(trimmed, trimmed);
 	}
-	if (exactPrimary.length > 0) {
-		const exactChecks: string[] = [];
-		for (const p of exactPrimary) {
-			const like = `%${escapeLike(p)}%`;
-			exactChecks.push(
-				"lower(subject) LIKE ? ESCAPE '\\' OR lower(predicate) LIKE ? ESCAPE '\\' OR lower(object) LIKE ? ESCAPE '\\'",
-			);
-			orderParams.push(like, like, like);
-		}
-		orderParts.push(`WHEN ${exactChecks.join(" OR ")} THEN 2`);
+	const exactPrimarySet = new Set(exactPrimary);
+	for (const p of primary) {
+		const w = codePointLength(p);
+		const exactBonus = exactPrimarySet.has(p) ? w * 2 : 0;
+		const like = `%${escapeLike(p)}%`;
+		scoreExprs.push(
+			`(CASE WHEN lower(subject) = ? OR lower(object) = ? THEN ${w * 8 + exactBonus} WHEN lower(subject) LIKE ? ESCAPE '\\' OR lower(predicate) LIKE ? ESCAPE '\\' OR lower(object) LIKE ? ESCAPE '\\' THEN ${w * 4 + exactBonus} ELSE 0 END)`,
+		);
+		orderParams.push(p, p, like, like, like);
 	}
-	if (primary.length > 0) {
-		const primaryChecks: string[] = [];
-		for (const p of primary) {
-			const like = `%${escapeLike(p)}%`;
-			primaryChecks.push(
-				"lower(subject) LIKE ? ESCAPE '\\' OR lower(predicate) LIKE ? ESCAPE '\\' OR lower(object) LIKE ? ESCAPE '\\'",
-			);
-			orderParams.push(like, like, like);
-		}
-		orderParts.push(`WHEN ${primaryChecks.join(" OR ")} THEN 1`);
-	}
-	const rankClause = orderParts.length > 0 ? `(CASE ${orderParts.join(" ")} ELSE 0 END) DESC, ` : "";
+	const rankClause = scoreExprs.length > 0 ? `(${scoreExprs.join(" + ")}) DESC, ` : "";
 	const allParams = [...params, ...orderParams, topK];
 	const results = asRows(
 		beam.db
