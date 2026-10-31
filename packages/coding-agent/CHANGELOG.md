@@ -5,6 +5,7 @@
 ### Added
 
 - Added per-call `model` selectors for configured chat roles (`@review[:level]`) and ordered candidate lists, choosing the first available approved model with credentials at spawn without runtime fallback; `task.perCallModelAllow` also accepts configured roles and scoped globs that only narrow grants ([#16793](https://github.com/can1357/oh-my-pi/pull/16793) by [@Xytronix](https://github.com/Xytronix))
+- Added operator-approved saved and explicit model selection for bundled seance consults, with exact model/effort revival; interactive `/seance` remains ungated ([#16784](https://github.com/can1357/oh-my-pi/pull/16784) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 

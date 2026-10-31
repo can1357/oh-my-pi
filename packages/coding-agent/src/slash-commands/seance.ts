@@ -2,6 +2,7 @@ import type { TextContent } from "@oh-my-pi/pi-ai";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
 import type { TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
+import { executeTaskFromHost } from "../task";
 import { discoverAgents } from "../task/discovery";
 import { isBundledSeance, resolveSeanceSource } from "../task/seance";
 import { SEANCE_AGENT_NAME } from "../task/seance-policy";
@@ -65,9 +66,16 @@ async function launchSeance(ctx: InteractiveModeContext, sourceSession: string, 
 		jobId = details.async?.jobId ?? jobId;
 	};
 	try {
-		const result = await taskTool.execute(`seance-${Snowflake.next()}`, params, undefined, update => {
-			collect(update.details as TaskToolDetails | undefined);
-		});
+		const result = await executeTaskFromHost(
+			taskTool,
+			`seance-${Snowflake.next()}`,
+			params,
+			ctx.session.buildToolContext(),
+			undefined,
+			update => {
+				collect(update.details as TaskToolDetails | undefined);
+			},
+		);
 		const details = result.details as TaskToolDetails | undefined;
 		collect(details);
 		const content = result.content

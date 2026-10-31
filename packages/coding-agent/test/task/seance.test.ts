@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { formatModelStringWithRouting } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { sessionDirForCwd } from "@oh-my-pi/pi-coding-agent/session/session-paths";
@@ -297,6 +300,54 @@ describe("seance cold restore", () => {
 			await expect(
 				restoreSeanceSession({ init: { ...init, tools: ["grep", "glob", "yield"] }, cwd, modelRegistry }),
 			).resolves.toBeUndefined();
+		} finally {
+			authStorage.close();
+		}
+	});
+
+	it("restores host @upstream selectors exactly and requires configured auth for that route", async () => {
+		using tempDir = TempDir.createSync("@omp-seance-restore-pinned-");
+		const cwd = tempDir.path();
+		const routed = buildModel({
+			id: "anthropic/seance-model",
+			name: "seance model",
+			api: "openai-completions",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: true,
+			thinking: { mode: "effort", efforts: [Effort.Low, Effort.High] },
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 8192,
+		});
+		const pinned = "openrouter/anthropic/seance-model@anthropic";
+		const authStorage = await AuthStorage.create(":memory:");
+		try {
+			authStorage.keys.setRuntime("openrouter", "test-key");
+			const modelRegistry = new ModelRegistry(authStorage);
+			vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([routed]);
+			const authCheck = vi.spyOn(modelRegistry, "hasConfiguredAuth");
+			const init = {
+				systemPrompt: ["seance prompt"],
+				task: "Read the source transcript.",
+				tools: ["read", "grep"],
+				agent: "seance",
+				resolvedModel: pinned,
+				restrictToolNames: true,
+				spawns: "",
+			};
+			for (const selector of [pinned, `${pinned}:high`]) {
+				authCheck.mockClear();
+				await expect(
+					restoreSeanceSession({ init: { ...init, resolvedModel: selector }, cwd, modelRegistry }),
+				).resolves.toEqual({ cwd, modelPattern: selector, toolNames: ["read", "grep"] });
+				const checkedModel = authCheck.mock.calls[0]?.[0];
+				if (!checkedModel) throw new Error("Expected authentication to be checked on the saved route");
+				expect(formatModelStringWithRouting(checkedModel)).toBe(pinned);
+			}
+			authCheck.mockReturnValue(false);
+			await expect(restoreSeanceSession({ init, cwd, modelRegistry })).resolves.toBeUndefined();
 		} finally {
 			authStorage.close();
 		}

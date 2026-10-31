@@ -15120,18 +15120,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Build a standalone `AgentToolContext` for running `AskTool.execute()`
-	 * outside a normal agent turn, for `/tree` `ask` re-answer (issue #5642).
-	 * `SelectorController` has no reachable `ToolContextStore` (that store is
-	 * built inside `sdk.ts` and never threaded through to mode controllers),
-	 * so this mirrors `refreshMCPTools()`'s `getCustomToolContext` factory
-	 * with real session state instead of a `{ ... } as unknown as
-	 * AgentToolContext` cast that could silently compile with an incomplete
-	 * context (roboomp review on #5895) — every `CustomToolContext` field is
-	 * backed by live session state, so a future required field fails to
-	 * compile here instead of surfacing as `undefined` at runtime.
+	 * Build a standalone context for host tool calls outside a normal agent turn,
+	 * including `/tree` ask re-answer and `/seance`. Mode controllers cannot reach
+	 * the SDK's ToolContextStore, so required fields are backed by live session state.
 	 */
-	buildAskReanswerContext(uiContext: ExtensionUIContext): AgentToolContext {
+	buildToolContext(uiContext?: ExtensionUIContext): AgentToolContext {
 		return {
 			sessionManager: this.sessionManager,
 			modelRegistry: this.#modelRegistry,
@@ -15143,7 +15136,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			},
 			settings: this.settings,
 			ui: uiContext,
-			hasUI: true,
+			hasUI: uiContext !== undefined,
 		};
 	}
 

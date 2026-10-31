@@ -6,6 +6,7 @@
 ### Changed
 
 - `TaskItem.model` and `TaskParams.model` now document configured `@role` selectors and ordered candidate lists for per-call selection; their `string | string[]` types are unchanged ([#16793](https://github.com/can1357/oh-my-pi/pull/16793) by [@Xytronix](https://github.com/Xytronix))
+- `TaskItem.model` now documents that bundled seance follows the per-call model gate; its `string | string[]` type is unchanged ([#16784](https://github.com/can1357/oh-my-pi/pull/16784) by [@Xytronix](https://github.com/Xytronix))
 - `grep` and `ast_grep` results with no matches render as one line with `0 matches` in the warning color, dropping the separate `No matches found` row ([#18700](https://github.com/can1357/oh-my-pi/pull/18700) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Ask forms support notes on options: `n` on radio/checkbox rows and `Alt+n` on select menus (`app.ask.note`), with selected notes shown alongside submitted answers and notes on unchosen options marked as drafts ([#18779](https://github.com/can1357/oh-my-pi/pull/18779) by [@Shadorain](https://github.com/Shadorain))
 

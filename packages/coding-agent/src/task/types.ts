@@ -161,7 +161,7 @@ function taskAgentSchemaRule(defaultAgent: string): string {
 	return "string";
 }
 
-/** Task fields the seance schema adds or widens; `seanceTaskSchemaFields` in ./seance must match it exactly. */
+/** Task fields the seance schema adds; `seanceTaskSchemaFields` in ./seance must match it exactly. */
 export type SeanceTaskSchemaFields = {
 	"sourceSession?"?: FluentType<string>;
 	"model?"?: FluentType<string | string[]>;
@@ -191,12 +191,12 @@ function createTaskSchema(options: {
 	const toolsField = options.evalToolsEnabled ? { "tools?": "string[]" } : {};
 	// `model` is declared only when the caller may send it: a per-call selector
 	// (one, or an ordered list) while `task.perCallModel` allows task calls, or
-	// seance's selector list. An undeclared `model` still reaches preflight (root
-	// keys survive lenient validation; batch items keep it via keepGatedItemKeys)
-	// and is refused there.
+	// seance's single selector, which preflight holds to the same gate. An
+	// undeclared `model` still reaches preflight (root keys survive lenient
+	// validation; batch items keep it via keepGatedItemKeys) and is refused there.
 	const gatedFields = {
-		...(options.perCallModel ? { "model?": "string | string[]" } : {}),
 		...options.seanceFields,
+		...(options.perCallModel ? { "model?": "string | string[]" } : {}),
 	};
 	if (options.batchEnabled) {
 		if (options.isolationEnabled) {
