@@ -248,10 +248,22 @@ function rawQueryTokens(query: string): string[] {
  * Stopwords never anchor a subject on their own — the regex extractor stores sentence-initial
  * words like `That` as subjects, so a bare `that` in the query would pull in unrelated memories.
  */
-function factSubjectCandidates(query: string): string[] {
-	const rawTokens = rawQueryTokens(query);
+function factSubjectCandidateGroups(query: string): {
+	all: string[];
+	primarySubjects: Set<string>;
+} {
+	const normalized = query.normalize("NFC");
+	const rawTokens = rawQueryTokens(normalized);
 	const tokens = rawTokens.map(t => t.toLowerCase());
 	const seen = new Set<string>();
+	const primary = new Set<string>();
+
+	const addPrimary = (val: string): void => {
+		seen.add(val);
+		primary.add(val.toLowerCase());
+		primary.add(val.normalize("NFKC").toLowerCase());
+	};
+
 	for (let i = 0; i < tokens.length; i++) {
 		const word = tokens[i] as string;
 		const rawWord = rawTokens[i] ?? word;
@@ -260,51 +272,54 @@ function factSubjectCandidates(query: string): string[] {
 		const wordLen = isCjk ? codePointLength(word) : word.length;
 		const minLen = isCjk ? 2 : 3;
 		if (isContent && wordLen >= minLen && !CJK_STOP_SEGMENTS.has(word)) {
-			seen.add(word);
-			if (rawWord !== word) seen.add(rawWord);
+			addPrimary(word);
+			if (rawWord !== word) addPrimary(rawWord);
 		}
 		if (isCjk) {
 			const { nonCjk, cjkRuns } = splitMixedScriptToken(rawWord);
 			for (const latin of nonCjk) {
-				if (latin.length >= 3 && !STOP_WORDS.has(latin.toLowerCase())) seen.add(latin);
+				if (latin.length >= 3 && !STOP_WORDS.has(latin.toLowerCase())) addPrimary(latin);
 			}
 			if (nonCjk.length > 0 && cjkRuns.length > 0) {
 				const strippedWord = stripCjkQuestionAffixes(word);
 				for (const seg of [word, strippedWord]) {
-					if (codePointLength(seg) >= 2 && !CJK_STOP_SEGMENTS.has(seg)) seen.add(seg);
+					if (codePointLength(seg) >= 2 && !CJK_STOP_SEGMENTS.has(seg)) addPrimary(seg);
 				}
 				for (const clauseRaw of strippedWord.split(CJK_CLAUSE_PARTICLE_RE)) {
 					const clause = stripCjkQuestionAffixes(clauseRaw);
-					if (codePointLength(clause) >= 2 && !CJK_STOP_SEGMENTS.has(clause)) seen.add(clause);
+					if (codePointLength(clause) >= 2 && !CJK_STOP_SEGMENTS.has(clause)) addPrimary(clause);
 					for (const sub of clause.split(CJK_PARTICLE_SPLIT_RE)) {
 						const strippedSub = stripCjkQuestionAffixes(sub);
-						if (codePointLength(strippedSub) >= 2 && !CJK_STOP_SEGMENTS.has(strippedSub)) seen.add(strippedSub);
+						if (codePointLength(strippedSub) >= 2 && !CJK_STOP_SEGMENTS.has(strippedSub)) addPrimary(strippedSub);
 					}
 				}
 			}
-			if (wordLen >= 2) expandCjkCandidateSegments(rawWord, seen);
+			if (wordLen >= 2) expandCjkCandidateSegments(rawWord, seen, primary);
 		}
 		const next = tokens[i + 1];
 		if (next !== undefined) {
-			if (isContent || !STOP_WORDS.has(next)) seen.add(`${word} ${next}`);
+			if (isContent || !STOP_WORDS.has(next)) addPrimary(`${word} ${next}`);
 			const nextIsCjk = hasCjk(next);
 			if (isContent && !isCjk && nextIsCjk) {
 				const firstClause = stripCjkQuestionAffixes(next.split(CJK_PARTICLE_SPLIT_RE)[0] ?? "");
 				if (codePointLength(firstClause) >= 2 && firstClause !== next) {
-					seen.add(`${word} ${firstClause}`);
+					addPrimary(`${word} ${firstClause}`);
 				}
 			} else if (isContent && isCjk && !nextIsCjk && !STOP_WORDS.has(next)) {
 				const clauses = word.split(CJK_PARTICLE_SPLIT_RE);
 				const lastClause = stripCjkQuestionAffixes(clauses[clauses.length - 1] ?? "");
 				if (codePointLength(lastClause) >= 2 && lastClause !== word) {
-					seen.add(`${lastClause} ${next}`);
+					addPrimary(`${lastClause} ${next}`);
 				}
 			}
 		}
 	}
-	return [...seen];
+	return { all: [...seen], primarySubjects: primary };
 }
 
+export function factSubjectCandidates(query: string): string[] {
+	return factSubjectCandidateGroups(query).all;
+}
 function contentTokens(text: string): Set<string> {
 	const out = new Set<string>();
 	for (const token of queryTokens(text)) {
@@ -346,18 +361,29 @@ function anchorTime(queryTime: string | Date | null | undefined): number | null 
 }
 
 const TEMPORAL_QUERY_RE =
-	/(?:昨天|昨日|今天|今日|最近(?![鄰邻公共點点對对小大優优佳近親亲似])|近期|最新|這週|本週|上週|上周|本周|这周|這個月|上個月|上个月|这个月|之前|先前|以前|何時|什麼時候|何时|什么时候|剛剛|剛才|刚刚|刚才|過去|过去|現在|现在|目前|截止(?:日|日期|時間|时间|時限|时限|前|到|至|於|于|$))/u;
-const NON_DEADLINE_CUTOFF_RE = /截止[頻频點点電壓压波長长區区]/u;
+	/(?:昨天|昨日|今天|今日|明天|明日|前天|大前天|後天|大後天|前日|後日|最近(?![鄰邻公共點点對对小大優优佳近親亲似])|近期|最新|這週|本週|上週|上周|下週|下周|本周|这周|這個月|上個月|上个月|下個月|下个月|这个月|去年|今年|明年|之前|先前|以前|何時|什麼時候|何时|什么时候|剛剛|剛才|刚刚|刚才|過去|过去|現在|现在|目前|截止(?![頻频點点電壓压波長长區区率])(?:日|日期|時間|时间|時限|时限|前|到|至|於|于|$)|いつ|何時|昨日|今日|明日|一昨日|明後日|先週|今週|来週|先月|今月|来月|去年|今年|来年|タイムライン|時系列|時期|日時|언제|어제|오늘|내일|그제|모레|지난주|이번주|다음주|지난달|이번달|다음달|작년|올해|내년|타임라인|연표|시기|일시)/u;
 function looksTemporal(query: string): boolean {
-	const lower = query.toLowerCase();
+	const normalized = query.normalize("NFC");
+	const lower = normalized.toLowerCase();
 	if (
-		["yesterday", "today", "recent", "last", "latest", "this week", "this month", "ago", "before"].some(keyword =>
-			lower.includes(keyword),
-		)
+		[
+			"yesterday",
+			"today",
+			"tomorrow",
+			"recent",
+			"last",
+			"latest",
+			"this week",
+			"next week",
+			"this month",
+			"next month",
+			"ago",
+			"before",
+		].some(keyword => lower.includes(keyword))
 	) {
 		return true;
 	}
-	return TEMPORAL_QUERY_RE.test(query) && !NON_DEADLINE_CUTOFF_RE.test(query);
+	return TEMPORAL_QUERY_RE.test(normalized);
 }
 
 export class PolyphonicRecallEngine {
@@ -558,18 +584,39 @@ export class PolyphonicRecallEngine {
 		}
 		return results;
 	}
-	factVoice(query: string): VoiceRecallResult[] {
+	factVoice(query: string, topK?: number): VoiceRecallResult[] {
 		if (envDisabled("MNEMOPI_VOICE_FACT")) return [];
+		const { all: candidates, primarySubjects } = factSubjectCandidateGroups(query);
+		const rawFacts = this.consolidator.getConsolidatedFactsBySubjects(candidates, 0.5);
+
+		const isPrimaryMatch = (subj: string): boolean => {
+			const lower = subj.toLowerCase();
+			const nfkc = subj.normalize("NFKC").toLowerCase();
+			return primarySubjects.has(lower) || primarySubjects.has(nfkc);
+		};
+
+		const sortedFacts = [...rawFacts].sort((a, b) => {
+			const aPrimary = isPrimaryMatch(a.subject) ? 1 : 0;
+			const bPrimary = isPrimaryMatch(b.subject) ? 1 : 0;
+			if (aPrimary !== bPrimary) return bPrimary - aPrimary;
+			const aLen = codePointLength(a.subject);
+			const bLen = codePointLength(b.subject);
+			if (aLen !== bLen) return bLen - aLen;
+			return b.confidence - a.confidence;
+		});
+
 		const byId = new Map<string, VoiceRecallResult>();
-		for (const fact of this.consolidator.getConsolidatedFactsBySubjects(factSubjectCandidates(query), 0.5)) {
+		for (const fact of sortedFacts) {
+			const primary = isPrimaryMatch(fact.subject);
+			const factScore = primary ? 1.0 + fact.confidence : fact.confidence;
 			for (const source of fact.sources) {
 				const memoryId = source.trim();
 				if (memoryId.length === 0) continue;
 				const existing = byId.get(memoryId);
-				if (existing !== undefined && existing.score >= fact.confidence) continue;
+				if (existing !== undefined && existing.score >= factScore) continue;
 				byId.set(memoryId, {
 					memoryId,
-					score: fact.confidence,
+					score: factScore,
 					voice: "fact",
 					metadata: {
 						fact_id: fact.id ?? "",
@@ -581,7 +628,8 @@ export class PolyphonicRecallEngine {
 				});
 			}
 		}
-		return [...byId.values()].sort((a, b) => b.score - a.score || a.memoryId.localeCompare(b.memoryId));
+		const results = [...byId.values()].sort((a, b) => b.score - a.score || a.memoryId.localeCompare(b.memoryId));
+		return typeof topK === "number" ? results.slice(0, topK) : results;
 	}
 	temporalVoice(query: string, options: PolyphonicCallOptions = {}): VoiceRecallResult[] {
 		if (envDisabled("MNEMOPI_VOICE_TEMPORAL") || !looksTemporal(query)) return [];

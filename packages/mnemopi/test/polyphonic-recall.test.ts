@@ -924,4 +924,110 @@ describe("PolyphonicRecallEngine", () => {
 			closeQuietly(beam.db);
 		}
 	});
+
+	it("ranks exact primary fact subject matches ahead of higher-confidence shingle matches", () => {
+		const beam = makeBeam();
+		try {
+			const engine = new PolyphonicRecallEngine({
+				db: beam.db,
+				sessionId: beam.sessionId,
+				channelId: beam.channelId,
+			});
+			// Beijing has confidence 0.95 (shingle), Peking University has confidence 0.60 (primary)
+			const timestamp = new Date().toISOString();
+			beam.db.run(
+				`INSERT INTO consolidated_facts
+					(id, subject, predicate, object, confidence, mention_count, first_seen, last_seen, sources_json, veracity)
+					VALUES
+					('cf-shingle', '北京', 'is', 'a city', 0.95, 10, ?, ?, ?, 'likely_true'),
+					('cf-primary', '北京大學', 'ranks', 'number one', 0.60, 2, ?, ?, ?, 'likely_true')`,
+				[
+					timestamp,
+					timestamp,
+					JSON.stringify(["wm-beijing-city"]),
+					timestamp,
+					timestamp,
+					JSON.stringify(["wm-pku-rank"]),
+				],
+			);
+			const results = engine.factVoice("請問北京大學的排名", 1);
+			expect(results.length).toBe(1);
+			expect(results[0]?.memoryId).toBe("wm-pku-rank");
+			expect(results[0]?.metadata.subject).toBe("北京大學");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("routes Japanese and Korean time questions to TR ability in memoriaRetrieve", () => {
+		const beam = makeBeam();
+		try {
+			beam.db.run(
+				`INSERT INTO memoria_timelines
+					(session_id, event_id, date, description, source_memory_id)
+					VALUES
+					(?, 1, '2026-10-01', 'v1.0 リリース デプロイ 완료 배포', 'wm-timeline-deploy')`,
+				[beam.sessionId],
+			);
+			const jpResult = memoriaRetrieve(beam, "いつデプロイしましたか");
+			expect(jpResult.ability).toBe("TR");
+			expect((jpResult.results as Array<{ description?: string }>)[0]?.description).toContain("v1.0 リリース");
+
+			const krResult = memoriaRetrieve(beam, "언제 배포했나요");
+			expect(krResult.ability).toBe("TR");
+			expect((krResult.results as Array<{ description?: string }>)[0]?.description).toContain("배포");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("matches NFC subject in factVoice when query is NFD-normalized", () => {
+		const beam = makeBeam();
+		try {
+			const engine = new PolyphonicRecallEngine({
+				db: beam.db,
+				sessionId: beam.sessionId,
+				channelId: beam.channelId,
+			});
+			const timestamp = new Date().toISOString();
+			beam.db.run(
+				`INSERT INTO consolidated_facts
+					(id, subject, predicate, object, confidence, mention_count, first_seen, last_seen, sources_json, veracity)
+					VALUES
+					('cf-jp-server', 'サーバー設定', 'is', 'NFC subject', 0.9, 3, ?, ?, ?, 'likely_true')`,
+				[timestamp, timestamp, JSON.stringify(["wm-jp-server-nfc"])],
+			);
+			const nfdQuery = "サーバー設定を確認".normalize("NFD");
+			const hits = engine.factVoice(nfdQuery);
+			expect(hits.map(h => h.memoryId)).toContain("wm-jp-server-nfc");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("enables temporalVoice for 昨天的截止頻率是多少 while what is the 截止頻率 remains non-temporal", () => {
+		const beam = makeBeam();
+		try {
+			const engine = new PolyphonicRecallEngine({
+				db: beam.db,
+				sessionId: beam.sessionId,
+				channelId: beam.channelId,
+			});
+			const now = new Date();
+			beam.db.run(
+				`INSERT INTO working_memory
+					(id, content, source, timestamp, session_id, importance, metadata_json, veracity, memory_type, scope, created_at)
+					VALUES
+					('wm-temp-cutoff', '昨天的截止頻率數據', 'test', ?, ?, 0.8, '{}', 'unknown', 'unknown', 'global', ?)`,
+				[now.toISOString(), beam.sessionId, now.toISOString()],
+			);
+			const temporalHits = engine.temporalVoice("昨天的截止頻率是多少");
+			expect(temporalHits.map(h => h.memoryId)).toContain("wm-temp-cutoff");
+
+			const nonTemporalHits = engine.temporalVoice("what is the 截止頻率");
+			expect(nonTemporalHits).toEqual([]);
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
 });

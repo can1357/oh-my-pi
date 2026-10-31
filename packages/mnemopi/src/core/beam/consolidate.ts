@@ -219,6 +219,7 @@ function makeQuestionTokenGroups(query: string): {
 	shingles: string[];
 	all: string[];
 } {
+	const normalizedQuery = query.normalize("NFC");
 	const stop = new Set([
 		...STOP_WORDS,
 		"a",
@@ -253,7 +254,7 @@ function makeQuestionTokenGroups(query: string): {
 		"who",
 		"with",
 	]);
-	const rawTokens = [...query.matchAll(RECALL_RAW_TOKEN_RE)]
+	const rawTokens = [...normalizedQuery.matchAll(RECALL_RAW_TOKEN_RE)]
 		.map(m => m[0]?.replace(/^\.+|\.+$/gu, "") ?? "")
 		.filter(token => {
 			const lower = token.toLowerCase();
@@ -864,14 +865,17 @@ export function extractAndStoreFacts(
 	return counts;
 }
 function classifyAbility(query: string): string {
-	const q = query.toLowerCase();
-	const deadlineContextRe = /截止(?:日|日期|時間|时间|時限|时限|前|到|至|於|于|$)/u;
-	const nonDeadlineCutoffRe = /截止[頻频點点電壓压波長长區区]/u;
-	const isDeadline = deadlineContextRe.test(query) && !nonDeadlineCutoffRe.test(query);
-	const hasRecent = /最近(?![鄰邻公共點点對对小大優优佳近親亲似])/u.test(query);
+	const normalized = query.normalize("NFC");
+	const q = normalized.toLowerCase();
+	const deadlineContextRe = /截止(?![頻频點点電壓压波長长區区率])(?:日|日期|時間|时间|時限|时限|前|到|至|於|于|$)/u;
+	const isDeadline = deadlineContextRe.test(normalized);
+	const hasRecent = /最近(?![鄰邻公共點点對对小大優优佳近親亲似])/u.test(normalized);
+	const cjkTemporalRe =
+		/(?:昨天|昨日|今天|今日|明天|明日|前天|大前天|後天|大後天|前日|後日|這週|本週|上週|上周|下週|下周|本周|这周|這個月|上個月|上个月|下個月|下个月|这个月|去年|今年|明年|之前|先前|以前|何時|什麼時候|何时|什么时候|剛剛|剛才|刚刚|刚才|過去|过去|現在|现在|目前|いつ|何時|昨日|今日|明日|一昨日|明後日|先週|今週|来週|先月|今月|来月|去年|今年|来年|タイムライン|時系列|時期|日時|언제|어제|오늘|내일|그제|모레|지난주|이번주|다음주|지난달|이번달|다음달|작년|올해|내년|타임라인|연표|시기|일시)/u;
 	if (
 		isDeadline ||
 		hasRecent ||
+		cjkTemporalRe.test(normalized) ||
 		[
 			"how many days",
 			"how many weeks",
@@ -1060,6 +1064,12 @@ function timelineRetrieve(beam: BeamMemoryState, query: string, topK: number): M
 		"顺序",
 		"先後",
 		"先后",
+		"いつ",
+		"언제",
+		"タイムライン",
+		"時系列",
+		"타임라인",
+		"연표",
 	]);
 	const exactPrimarySet = new Set(exactPrimary);
 	for (const p of primary) {

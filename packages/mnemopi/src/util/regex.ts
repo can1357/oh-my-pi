@@ -1,12 +1,12 @@
 const RECALL_TOKEN_RE = /[a-z0-9][a-z0-9_.:/+-]*/g;
 /** Token extractor preserving internal periods, hashes, pluses, and hyphens without sentence-final periods. */
-export const RECALL_RAW_TOKEN_RE = /[\p{L}\p{N}_.#+-]+/gu;
+export const RECALL_RAW_TOKEN_RE = /[\p{L}\p{N}_.#+-\u3099\u309A]+/gu;
 export const CJK_CHAR_RE =
-	/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u30FC\u3005\uFF66-\uFF9F]/u;
+	/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u30FC\u3005\uFF66-\uFF9F\u3099\u309A]/u;
 const CJK_RE = CJK_CHAR_RE;
-/** Regular expression matching contiguous runs of 2+ CJK characters, prolong marks, iteration marks, or halfwidth Katakana. */
+/** Regular expression matching contiguous runs of 2+ CJK characters, prolong marks, iteration marks, combining marks, or halfwidth Katakana. */
 export const CJK_RUN_RE =
-	/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u30FC\u3005\uFF66-\uFF9F]{2,}/gu;
+	/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u30FC\u3005\uFF66-\uFF9F\u3099\u309A]{2,}/gu;
 const NON_CJK_TOKEN_RUN_RE =
 	/(?:(?![\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u30FC\u3005\uFF66-\uFF9F])[\p{L}\p{N}])(?:(?![\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u30FC\u3005\uFF66-\uFF9F])[\p{L}\p{N}_-])*/gu;
 /** Regular expression for splitting CJK phrases on possessive, modal, and Japanese/Korean grammatical particles while preserving conjunction-bearing entity names (e.g. `大和銀行`). */
@@ -346,26 +346,33 @@ function addCandidateWithNfkc(value: string, seen: Set<string>, maxLen = 6): voi
  * shingles, preserving intact run shingles, particle-split sub-clauses, script-homogeneous subruns,
  * and NFKC normalizations for halfwidth Katakana.
  */
-export function expandCjkCandidateSegments(token: string, seen: Set<string>): void {
-	for (const match of token.matchAll(CJK_RUN_RE)) {
+export function expandCjkCandidateSegments(token: string, seen: Set<string>, primaryOut?: Set<string>): void {
+	const normalizedToken = token.normalize("NFC");
+	for (const match of normalizedToken.matchAll(CJK_RUN_RE)) {
 		const rawRun = match[0] ?? "";
 		for (const run of new Set([rawRun, rawRun.normalize("NFKC")])) {
 			const runLen = codePointLength(run);
 			if (runLen < 2) continue;
 			addCandidateWithNfkc(run, seen, Infinity);
+			if (primaryOut) addCandidateWithNfkc(run, primaryOut, Infinity);
 			const strippedRun = stripCjkQuestionAffixes(run);
-			if (strippedRun !== run) addCandidateWithNfkc(strippedRun, seen, Infinity);
+			if (strippedRun !== run) {
+				addCandidateWithNfkc(strippedRun, seen, Infinity);
+				if (primaryOut) addCandidateWithNfkc(strippedRun, primaryOut, Infinity);
+			}
 			for (const shingle of cjkCodePointShingles(run, [2, 3, 4])) seen.add(shingle);
 
 			for (const subMatch of run.matchAll(HOMOGENEOUS_CJK_SUBRUN_RE)) {
 				const subRun = subMatch[0] ?? "";
 				addCandidateWithNfkc(subRun, seen, Infinity);
+				if (primaryOut) addCandidateWithNfkc(subRun, primaryOut, Infinity);
 			}
 
 			for (const clauseRaw of strippedRun.split(CJK_CLAUSE_PARTICLE_RE)) {
 				const clause = stripCjkQuestionAffixes(clauseRaw);
 				if (codePointLength(clause) >= 2 && !CJK_STOP_SEGMENTS.has(clause)) {
 					addCandidateWithNfkc(clause, seen, Infinity);
+					if (primaryOut) addCandidateWithNfkc(clause, primaryOut, Infinity);
 				}
 			}
 
@@ -374,8 +381,11 @@ export function expandCjkCandidateSegments(token: string, seen: Set<string>): vo
 					const segLen = codePointLength(seg);
 					if (segLen < 2 || CJK_STOP_SEGMENTS.has(seg)) continue;
 					addCandidateWithNfkc(seg, seen, Infinity);
+					if (primaryOut) addCandidateWithNfkc(seg, primaryOut, Infinity);
 					for (const subMatch of seg.matchAll(HOMOGENEOUS_CJK_SUBRUN_RE)) {
-						addCandidateWithNfkc(subMatch[0] ?? "", seen, Infinity);
+						const subRun = subMatch[0] ?? "";
+						addCandidateWithNfkc(subRun, seen, Infinity);
+						if (primaryOut) addCandidateWithNfkc(subRun, primaryOut, Infinity);
 					}
 					if (segLen >= 3) {
 						for (const shingle of cjkCodePointShingles(seg, [2, 3, 4])) seen.add(shingle);
