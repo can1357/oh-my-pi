@@ -319,7 +319,7 @@ async function runFactExtraction(
 	beam: BeamMemoryState,
 	memoryId: string,
 	content: string,
-	scheduled: { rowid: number; content: string; created_at: string | null; timestamp: string | null } | null,
+	scheduled: { rowid: number; content: string; created_at: string | null } | null,
 	scheduledScope: string,
 ): Promise<void> {
 	try {
@@ -328,24 +328,27 @@ async function runFactExtraction(
 			if (countExtractedFactCategories(extracted) === 0) return;
 			// Discard stale results: the task is bound to the source row's
 			// incarnation at schedule time — the rowid generation, the stored
-			// content, and the creation stamps (created_at, timestamp) — plus
-			// the inherited scope. A delete + re-create with the same content
-			// and scope (even reusing the same rowid) produces different
-			// stamps, so the old incarnation's extraction cannot land on its
-			// replacement; an edit or re-scope changes content/scope directly.
-			// A null snapshot (source already trimmed before the task captured
-			// its version) is rejected outright. Facts otherwise inherit the
-			// scheduled scope, never wider than their source.
+			// content, and the immutable creation stamp (created_at, which no
+			// write path ever updates) — plus the inherited scope. A delete +
+			// re-create with the same content and scope (even reusing the same
+			// rowid) gets a fresh creation stamp, so the old incarnation's
+			// extraction cannot land on its replacement; an edit or re-scope
+			// changes content/scope directly. The mutable event timestamp is
+			// deliberately NOT part of the token: the duplicate-remember path
+			// refreshes it in place on identical content, which must not cancel
+			// a pending extraction. A null snapshot (source already trimmed
+			// before the task captured its version) is rejected outright. Facts
+			// otherwise inherit the scheduled scope, never wider than their
+			// source.
 			const source = beam.db
-				.prepare("SELECT rowid, content, created_at, timestamp, scope FROM working_memory WHERE id = ?")
-				.get(memoryId) as { rowid: number; content: string; created_at: string | null; timestamp: string | null; scope: string | null } | null;
+				.prepare("SELECT rowid, content, created_at, scope FROM working_memory WHERE id = ?")
+				.get(memoryId) as { rowid: number; content: string; created_at: string | null; scope: string | null } | null;
 			if (
 				source == null ||
 				scheduled == null ||
 				source.rowid !== scheduled.rowid ||
 				source.content !== scheduled.content ||
 				source.created_at !== scheduled.created_at ||
-				source.timestamp !== scheduled.timestamp ||
 				(source.scope ?? "session") !== scheduledScope
 			) {
 				return;
@@ -371,15 +374,15 @@ function scheduleFactExtraction(beam: BeamMemoryState, memoryId: string, content
 	if (content.trim() === "") return;
 	const runtimeOptions = getMnemopiRuntimeOptions();
 	// Bind the task to the source row's incarnation at schedule time: the
-	// rowid generation, the stored content, the creation stamps, and the
-	// inherited scope are captured now, and runFactExtraction discards the
-	// result if the source row no longer matches the whole token in the
-	// meantime (covers edits, re-scopes, and delete + re-create with
-	// identical content and scope, which reuses the rowid but gets fresh
-	// stamps).
+	// rowid generation, the stored content, the immutable creation stamp,
+	// and the inherited scope are captured now, and runFactExtraction
+	// discards the result if the source row no longer matches the whole
+	// token in the meantime (covers edits, re-scopes, and delete + re-create
+	// with identical content and scope, which reuses the rowid but gets a
+	// fresh creation stamp).
 	const scheduled = beam.db
-		.prepare("SELECT rowid, content, created_at, timestamp FROM working_memory WHERE id = ?")
-		.get(memoryId) as { rowid: number; content: string; created_at: string | null; timestamp: string | null } | null;
+		.prepare("SELECT rowid, content, created_at FROM working_memory WHERE id = ?")
+		.get(memoryId) as { rowid: number; content: string; created_at: string | null } | null;
 	const scheduledScope = sourceMemoryScope(beam, memoryId);
 	const task = withMnemopiRuntimeOptions(runtimeOptions, () =>
 		runFactExtraction(beam, memoryId, content, scheduled, scheduledScope),

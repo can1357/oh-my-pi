@@ -450,6 +450,29 @@ describe("E7 facts scope migration", () => {
 		}
 	});
 
+	it("keeps pending extraction when a duplicate remember refreshes the timestamp", async () => {
+		const memory = new Mnemopi({
+			sessionId: "session-a",
+			dbPath: tempDb(),
+			llm: { enabled: true, complete: async () => "The user uses the quorum relay for tokens" },
+		});
+		try {
+			const id = memory.remember("I use the quorum relay for tokens", { source: "test", extract: true });
+			expect(id).toBeTruthy();
+			// A duplicate remember of identical content hits the refresh path,
+			// which updates the mutable event timestamp in place without
+			// recreating the row: the pending extraction must survive it.
+			const dup = memory.remember("I use the quorum relay for tokens", { source: "test", extract: true });
+			expect(dup).toBe(id);
+			await memory.flushExtractions();
+			const rows = memory.conn.query("SELECT fact_id FROM facts WHERE source_msg_id = ?").all(id) as { fact_id: string }[];
+			expect(rows.length).toBeGreaterThan(0);
+		} finally {
+			await memory.flushExtractions();
+			memory.close();
+		}
+	});
+
 	it("discards extraction when the source row is forgotten and recreated identically", async () => {
 		const memory = new Mnemopi({
 			sessionId: "session-a",
@@ -460,11 +483,13 @@ describe("E7 facts scope migration", () => {
 			const id = memory.remember("same text both times", { source: "test", extract: true });
 			expect(id).toBeTruthy();
 			// Forget the row while extraction is in flight and re-create it with
-			// identical content and scope: the rowid generation token must still
-			// distinguish the new incarnation from the one the task bound to.
+			// identical content and scope but a different creation stamp (as a
+			// restore from another bank would): the immutable created_at
+			// generation marker must distinguish the new incarnation from the
+			// one the task bound to, even when the rowid is reused.
 			memory.beam.db.run("DELETE FROM working_memory WHERE id = ?", [id]);
 			memory.beam.db.run(
-				"INSERT INTO working_memory (id, content, session_id, scope) VALUES (?, 'same text both times', 'session-a', 'session')",
+				"INSERT INTO working_memory (id, content, session_id, scope, created_at) VALUES (?, 'same text both times', 'session-a', 'session', '2020-01-01 00:00:00')",
 				[id],
 			);
 			await memory.flushExtractions();
