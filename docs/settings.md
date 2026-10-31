@@ -467,6 +467,16 @@ Existing configs are migrated automatically when loaded. Retired backend selecto
 
 See [Models](./models.md) for the `models.yml` schema and custom-provider definitions.
 
+### Judgments
+
+| Key                         | Type   | Default | Notes |
+| --------------------------- | ------ | ------- | ----- |
+| `judgment.attemptTimeoutMs` | number | `3000` | Positive integer milliseconds allowed for one native judge candidate, including credentials, headers, retries, and response-body reading, while a `retry.fallbackChains.judge` entry remains to try. Local image preparation is excluded; prompted and on-device judges are unchanged. |
+
+The deadline only applies when you configured a judge fallback: a timed-out candidate is cancelled and the next configured fallback is tried, and its route is skipped for 30 seconds in the same session and model registry (judges without a session ID keep their own cooldown). A timeout never hands the judgment to a model you did not configure, such as a built-in default or the session model; without a configured fallback, a slow native judge runs to completion. The caller's own cancellation always ends the judgment without failover.
+
+The 3-second default leaves `find`'s 20-second budget room to reach a second and third candidate. A slow but healthy candidate can time out and fall through too; the cooldown does not remove it from the chain. For consistently slower judges, raise the budget with `omp config set judgment.attemptTimeoutMs 10000`. Raising the setting does not extend an enclosing tool or caller deadline.
+
 ### Advisor
 
 Advisors review primary turns on a configurable cadence and can inject advice. Enable them with `advisor.enabled`, `/advisor on`, or `--advisor`. For the default single advisor, `modelRoles.advisor` selects its model; when unset, resolution uses a configured `slow` role or the built-in slow-model priorities. An unavailable explicit advisor assignment does not silently select another model.

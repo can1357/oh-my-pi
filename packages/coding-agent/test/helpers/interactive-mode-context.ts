@@ -226,6 +226,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		chatContainer,
 		statusContainer: new Container(),
 		editorContainer: new Container(),
+		pendingShellContainer: new Container(),
 		pendingMessagesContainer: new Container(),
 		todoContainer: new Container(),
 		editor: { getText: () => "", setText: vi.fn(), onEscape: undefined },

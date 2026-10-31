@@ -415,8 +415,16 @@ Records the provider and a pseudonymous SHA-256 account/scope hash used to re-pi
 ```
 
 The latest `session_init` is also the cold-subagent revival contract. Optional
-fields include `agent`, `modelRole`, `resolvedModel`, `retryFallback`, `readOnly`,
+fields include `agent`, `modelRole`, `resolvedModel`, `perCallModel` (boolean),
+`perCallModelIdentity`, `perCallThinkingLevel`, `retryFallback`, `readOnly`,
 `advisor`, and `compactionThreshold` (`thresholdPercent`/`thresholdTokens`).
+For `perCallModel: true`, cold revival requires both `perCallModelIdentity` (the
+exact `provider/model-id[@upstream]`, without an effort suffix) and
+`perCallThinkingLevel` (the configured effort selector, including `auto`, or
+`null` for unset). Legacy per-call records missing either field refuse revival
+rather than guessing from the historical-display `resolvedModel`. These fields
+are preserved in anonymized exports under the same flag, model-identity and
+effort rules as other session metadata.
 `isolated: true` marks an isolation-worktree child that cannot be cold-revived.
 `systemPrompt` holds the base prompt blocks a model call was built from (never a per-turn
 `before_agent_start` override), and revival replays them unchanged. A session appends a newer

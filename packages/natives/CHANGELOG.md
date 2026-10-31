@@ -14,6 +14,10 @@
 - Avoided an unnecessary host-wide process scan when cancelling internal shell jobs, while retaining host-protection checks for external process targets ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed `tail -f` continuing to follow after its downstream reader exits when unrelated directory activity keeps its filesystem watcher busy ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
+### Added
+
+- Added `listWorkspace({ pruneExcludedDirs: false })` to stop pruning standard dependency/build directory names; hidden directories such as `.git` also require `hidden: true` ([#17539](https://github.com/can1357/oh-my-pi/issues/17539))
+
 ## [18.14.1] - 2026-10-31
 
 ### Added

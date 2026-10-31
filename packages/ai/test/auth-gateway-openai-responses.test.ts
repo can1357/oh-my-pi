@@ -177,6 +177,28 @@ describe("openai-responses parseRequest", () => {
 		expect(parsed.options.extra).toBeUndefined();
 	});
 
+	it("treats documented null controls as omitted, keeping a requested effort", () => {
+		const parsed = parseRequest({
+			model: "m",
+			input: "hi",
+			temperature: null,
+			top_p: null,
+			max_output_tokens: null,
+			reasoning: { effort: "low", summary: null },
+		});
+		expect(parsed.options).not.toHaveProperty("temperature");
+		expect(parsed.options).not.toHaveProperty("topP");
+		expect(parsed.options).not.toHaveProperty("maxOutputTokens");
+		expect(parsed.options).not.toHaveProperty("hideThinkingSummary");
+		expect(parsed.options.reasoning).toBe(Effort.Low);
+		expect(parseRequest({ model: "m", input: "hi", reasoning: null }).options).not.toHaveProperty("reasoning");
+	});
+
+	it("still rejects null in non-nullable fields and malformed non-null controls", () => {
+		expect(() => parseRequest({ model: "m", input: "hi", prompt_cache_key: null })).toThrow(/prompt_cache_key/);
+		expect(() => parseRequest({ model: "m", input: "hi", temperature: "0.5" })).toThrow(/temperature/);
+	});
+
 	it("coerces a message item with content:null to an empty content array (Codex #10956)", () => {
 		const parsed = parseRequest({
 			model: "gpt-5.3-codex-spark",
