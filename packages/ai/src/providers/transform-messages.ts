@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { carriesReasoning } from "@oh-my-pi/pi-catalog/compat/reasoning-carry";
+import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { renderDemotedThinking } from "../dialect/demotion";
 import type {
@@ -976,6 +977,16 @@ export function transformMessages<TApi extends Api>(
 				assistantMsg.credentialId !== undefined &&
 				targetCredentialId !== undefined &&
 				assistantMsg.credentialId !== targetCredentialId;
+			// Thinking bound to another credential, or to a prefix a history rewrite
+			// invalidated, is dropped. Another provider's non-Claude model wrote plain
+			// reasoning that neither binding governs, so its visible thinking stays
+			// and replays as demoted text below. Claude's reasoning from another host
+			// or account keeps being dropped.
+			const thinkingBound = foreignCredential || invalidBoundThinkingAssistantIndexes.has(index);
+			const keepsBoundThinking =
+				thinkingBound &&
+				assistantMsg.provider !== model.provider &&
+				preferredDialect(assistantMsg.upstreamModel ?? assistantMsg.model) !== "anthropic";
 			const signingAnthropicInvolved = isOfficialAnthropicSource || isSigningAnthropicTarget;
 			// Compatible Anthropic-messages reasoning targets that accept
 			// unsigned thinking natively (Z.AI, DeepSeek, the generic
@@ -1040,10 +1051,9 @@ export function transformMessages<TApi extends Api>(
 				!assistantMsg.content.some(anthropicVisibleThinkingSurvivesReplay);
 
 			const transformedContent = assistantMsg.content.flatMap((block, blockIndex) => {
-				if (foreignCredential && (block.type === "thinking" || block.type === "redactedThinking")) return [];
 				if (
-					invalidBoundThinkingAssistantIndexes.has(index) &&
-					(block.type === "thinking" || block.type === "redactedThinking")
+					thinkingBound &&
+					(block.type === "redactedThinking" || (block.type === "thinking" && !keepsBoundThinking))
 				) {
 					return [];
 				}

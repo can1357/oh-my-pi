@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Fixed Anthropic requests dropping the reasoning of earlier non-Claude turns from another provider whose credential differs from the request's, or that a compaction kept; it is now replayed as text like other models' reasoning ([#7241](https://github.com/can1357/oh-my-pi/issues/7241))
 - Fixed Codex conversation replay failing with an unknown `internal_chat_message_metadata_passthrough.content_token_count` parameter by omitting backend-internal response metadata from replayed input ([#17590](https://github.com/can1357/oh-my-pi/pull/17590) by [@briankeefe](https://github.com/briankeefe)).
 
 ## [18.14.2] - 2026-10-31
