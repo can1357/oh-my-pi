@@ -17,14 +17,20 @@ import { filterUserScoped } from "./utils/filter-user-extensions";
 describe("extensions discovery", () => {
 	let tempDir: TempDir;
 	let extensionsDir: string;
+	// Ambient discovery selects the installed plugins, which puts their `bin`
+	// directories on PATH; give every later test the PATH this one started with.
+	let savedPath: string | undefined;
 
 	beforeEach(() => {
+		savedPath = process.env.PATH;
 		tempDir = TempDir.createSync("@pi-ext-test-");
 		extensionsDir = path.join(getProjectAgentDir(tempDir.path()), "extensions");
 		fs.mkdirSync(extensionsDir, { recursive: true });
 		resetSettingsForTest();
 	});
 	afterEach(() => {
+		if (savedPath === undefined) delete process.env.PATH;
+		else process.env.PATH = savedPath;
 		resetSettingsForTest();
 		tempDir.removeSync();
 	});

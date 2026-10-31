@@ -16,7 +16,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 export interface RunnerScenario {
-	route: "session" | "twice" | "explicit" | "tools" | "selectors" | "install";
+	route: "session" | "twice" | "explicit" | "tools" | "selectExtensions" | "selectTools" | "install";
 	cwd: string;
 	/** `explicit`: the one extension file to load. */
 	explicitPath?: string;
@@ -83,11 +83,12 @@ switch (scenario.route) {
 		result.toolErrors = loaded.errors.map(error => error.error);
 		break;
 	}
-	case "selectors": {
-		result.selected = [
-			...(await getAllPluginExtensionPaths(scenario.cwd)),
-			...(await getAllPluginToolPaths(scenario.cwd)),
-		];
+	case "selectExtensions": {
+		result.selected = await getAllPluginExtensionPaths(scenario.cwd);
+		break;
+	}
+	case "selectTools": {
+		result.selected = await getAllPluginToolPaths(scenario.cwd);
 		break;
 	}
 	case "install": {

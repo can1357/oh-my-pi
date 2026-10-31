@@ -151,21 +151,22 @@ globalThis[${JSON.stringify(`__ompBinProbe_${name}`)}] = run.stdout.toString();
 		expect(result.PATH).toBe([binOf("tooling"), BASE_PATH].join(path.delimiter));
 	});
 
-	test("an SDK caller that selects plugin paths itself gets the directories on PATH", async () => {
+	test("an SDK caller that selects plugin paths itself gets the directories on PATH from either selector", async () => {
 		await writeBinPlugin(path.join(pluginsDir, "node_modules", "preload"), "preload", {
 			extensions: ["ext.js"],
 			tools: "tool.js",
 		});
 		await declare(["preload"]);
 
-		// What a caller passing preloadedExtensionPaths / preloadedCustomToolPaths selects.
-		const result = await run({ route: "selectors" });
+		// What a caller passing preloadedExtensionPaths or preloadedCustomToolPaths
+		// selects; each selector alone, in a process of its own.
+		const extensions = await run({ route: "selectExtensions" });
+		const tools = await run({ route: "selectTools" });
 
-		expect(result.selected).toEqual([
-			path.join(pluginsDir, "node_modules", "preload", "ext.js"),
-			path.join(pluginsDir, "node_modules", "preload", "tool.js"),
-		]);
-		expect(result.PATH).toBe([binOf("preload"), BASE_PATH].join(path.delimiter));
+		expect(extensions.selected).toEqual([path.join(pluginsDir, "node_modules", "preload", "ext.js")]);
+		expect(extensions.PATH).toBe([binOf("preload"), BASE_PATH].join(path.delimiter));
+		expect(tools.selected).toEqual([path.join(pluginsDir, "node_modules", "preload", "tool.js")]);
+		expect(tools.PATH).toBe([binOf("preload"), BASE_PATH].join(path.delimiter));
 	});
 
 	test("install validation puts the candidate's directories on PATH before its extension evaluates", async () => {
