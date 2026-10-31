@@ -289,7 +289,7 @@ export interface RestoredSession {
  * or unreadable — is passed through untouched, `code` and all: it is not a
  * damaged archive and callers test it with `isEnoent`.
  */
-function archiveReadError(file: string, cause: unknown): unknown {
+export function archiveReadError(file: string, cause: unknown): unknown {
 	// zlib failures carry a `Z_`-prefixed code; an errno is the filesystem's.
 	if (cause instanceof Error && "code" in cause && /^E[A-Z]+$/.test(String(cause.code))) return cause;
 	const stem = path.basename(file, ARCHIVED_SESSION_SUFFIX);

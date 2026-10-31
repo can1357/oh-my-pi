@@ -4128,6 +4128,340 @@ test("an archive run whose second look at the archive it supersedes fails does n
 	expect(told).toContain("could not be compared");
 	expect((await fs.readFile(archiveFile)).equals(before)).toBe(true);
 });
+
+// The command layer: each of these is a sentence `omp gc` printed about a file
+// it could not read, or a check it skipped because a look failed.
+
+/** Reclaim the archived session's live copy, or preview that. */
+async function reclaimSession(apply: boolean): Promise<GcResult> {
+	return await runGcCommand({ flags: { agentDir: root, reclaim: archiveFile, apply, forwardOnly: true, json: true } });
+}
+
+test.skipIf(process.getuid?.() === 0)(
+	"an archive run that cannot read a subagent transcript's header says so, not that the session is active",
+	async () => {
+		const nested = path.join(sessionFile.slice(0, -".jsonl".length), "sub.jsonl");
+		await Bun.write(nested, sessionBody(sessionId("sub-1"), "nested", root));
+		await fs.chmod(nested, 0);
+		let result: GcResult;
+		try {
+			result = await archiveOnly();
+		} finally {
+			await fs.chmod(nested, 0o600);
+		}
+
+		const told = result.archive?.errors.join("\n") ?? "";
+		expect(result.archive?.skippedActive).toBe(0);
+		expect(told).toContain(`who owns ${nested} could not be checked`);
+		expect(told).toContain("EACCES");
+		expect(result.archive?.archived).toBe(0);
+	},
+);
+
+test.skipIf(process.getuid?.() === 0)(
+	"a reclaim that cannot read a subagent transcript's header says so, not that a running process owns it",
+	async () => {
+		const nested = path.join(sessionFile.slice(0, -".jsonl".length), "sub.jsonl");
+		await Bun.write(nested, sessionBody(sessionId("sub-1"), "nested", root));
+		await archiveOnly();
+		await fs.chmod(nested, 0);
+		let preview: GcResult;
+		let applied: GcResult;
+		try {
+			preview = await reclaimSession(false);
+			applied = await reclaimSession(true);
+		} finally {
+			await fs.chmod(nested, 0o600);
+		}
+
+		for (const run of [preview, applied]) {
+			const told = run.reclaim?.errors.join("\n") ?? "";
+			expect(told).not.toContain("a running process owns");
+			expect(told).toContain(`who owns ${nested} could not be checked`);
+			expect(told).toContain("EACCES");
+		}
+		expect(await Bun.file(sessionFile).exists()).toBe(true);
+		expect(await Bun.file(nested).text()).toContain("nested");
+	},
+);
+
+test.skipIf(process.getuid?.() === 0)(
+	"a reclaim that cannot read the live transcript says so, not that it is no session file",
+	async () => {
+		await archiveOnly();
+		// A new modification time, so the session listing reads the file again
+		// rather than answering from what it read while archiving.
+		const later = new Date(Date.now() - 20 * 86_400_000);
+		await fs.utimes(sessionFile, later, later);
+		await fs.chmod(sessionFile, 0);
+		let preview: GcResult;
+		let applied: GcResult;
+		try {
+			preview = await reclaimSession(false);
+			applied = await reclaimSession(true);
+		} finally {
+			await fs.chmod(sessionFile, 0o600);
+		}
+
+		for (const run of [preview, applied]) {
+			const told = run.reclaim?.errors.join("\n") ?? "";
+			expect(told).not.toContain("is not a session file");
+			expect(told).toContain(`${sessionFile} could not be read`);
+			expect(told).toContain("EACCES");
+		}
+		expect(await Bun.file(sessionFile).exists()).toBe(true);
+	},
+);
+
+test.skipIf(process.getuid?.() === 0)(
+	"a reclaim that cannot read the archived transcript says so, not that it is no copy of the live one",
+	async () => {
+		await archiveOnly();
+		await fs.chmod(archiveFile, 0);
+		let preview: GcResult;
+		let applied: GcResult;
+		try {
+			preview = await reclaimSession(false);
+			applied = await reclaimSession(true);
+		} finally {
+			await fs.chmod(archiveFile, 0o644);
+		}
+
+		for (const run of [preview, applied]) {
+			const told = run.reclaim?.errors.join("\n") ?? "";
+			expect(told).not.toContain("is not a copy of");
+			expect(told).toContain(`${archiveFile} could not be compared with ${sessionFile}`);
+			expect(told).toContain("EACCES");
+		}
+		expect(await Bun.file(sessionFile).exists()).toBe(true);
+	},
+);
+
+test("a reclaim that cannot look at the archived transcript's mode keeps the live one, and says why", async () => {
+	await fs.chmod(sessionFile, 0o600);
+	await archiveOnly();
+	await fs.chmod(archiveFile, 0o644);
+	// Every look at the archived transcript's mode fails; the reclaim gives up
+	// nothing for a copy whose permissions it could not compare.
+	const broken = failWithEio("stat", archiveFile);
+	let applied: GcResult;
+	try {
+		applied = await reclaimSession(true);
+	} finally {
+		broken.mockRestore();
+	}
+
+	expect(applied.reclaim?.reclaimed).toBe(0);
+	expect(applied.reclaim?.errors.join("\n")).toContain("EIO: injected");
+	expect(await Bun.file(sessionFile).exists()).toBe(true);
+});
+
+test("a reclaim that cannot resolve the live tree keeps it, rather than taking the archived copy for independent", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "HELLO");
+	await archiveOnly();
+	// With no staging records, the independence check is the one look that
+	// resolves the live tree, and it fails.
+	const broken = failWithEio("realpath", liveArtifacts);
+	let applied: GcResult;
+	try {
+		applied = await reclaimSession(true);
+	} finally {
+		broken.mockRestore();
+	}
+
+	expect(applied.reclaim?.reclaimed).toBe(0);
+	expect(applied.reclaim?.errors.join("\n")).toContain("EIO: injected");
+	expect(await Bun.file(path.join(liveArtifacts, "a.log")).text()).toBe("HELLO");
+});
+
+test("a reclaim that cannot look at an archived artifact says so, not that it is no independent copy", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "HELLO");
+	await archiveOnly();
+	const broken = failWithEio("lstat", path.join(archiveFile.slice(0, -".jsonl.gz".length), "a.log"));
+	let applied: GcResult;
+	try {
+		applied = await reclaimSession(true);
+	} finally {
+		broken.mockRestore();
+	}
+
+	const told = applied.reclaim?.errors.join("\n") ?? "";
+	expect(told).not.toContain("is not an independent archived copy");
+	expect(told).toContain("EIO: injected");
+	expect(await Bun.file(path.join(liveArtifacts, "a.log")).text()).toBe("HELLO");
+});
+
+test("a reclaim whose last look at a live artifact fails says so, not that the file changed", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const live = path.join(liveArtifacts, "a.log");
+	await Bun.write(live, "HELLO");
+	await archiveOnly();
+	// The walk looks at the file, compares it, and looks again: that second
+	// look fails.
+	let looks = 0;
+	const broken = failWithEio("lstat", target => target === live && ++looks === 2);
+	let applied: GcResult;
+	try {
+		applied = await reclaimSession(true);
+	} finally {
+		broken.mockRestore();
+	}
+
+	const told = applied.reclaim?.errors.join("\n") ?? "";
+	expect(told).not.toContain("is no longer the file this run proved");
+	expect(told).toContain("EIO: injected");
+	expect(await Bun.file(live).text()).toBe("HELLO");
+});
+
+test("a reclaim that cannot open the live transcript for its last look says so, not that it changed", async () => {
+	await archiveOnly();
+	const broken = failWithEio("open", sessionFile);
+	let applied: GcResult;
+	try {
+		applied = await reclaimSession(true);
+	} finally {
+		broken.mockRestore();
+	}
+
+	const told = applied.reclaim?.errors.join("\n") ?? "";
+	expect(told).not.toContain("is no longer the transcript this run proved");
+	expect(told).toContain("EIO: injected");
+	expect(await Bun.file(sessionFile).exists()).toBe(true);
+});
+
+test("an archive run that cannot read the archived transcript it already holds says so, not that it changed", async () => {
+	await archiveOnly();
+	const before = await fs.readFile(archiveFile);
+	// The archive already holds these bytes; giving it the live mode reads it
+	// through a descriptor, and that read fails.
+	const broken = failReadsOf((target, flags) => target === archiveFile && typeof flags === "number");
+	let result: GcResult;
+	try {
+		result = await archiveOnly();
+	} finally {
+		broken.mockRestore();
+	}
+
+	const told = result.archive?.errors.join("\n") ?? "";
+	expect(told).not.toContain("changed while it was being archived");
+	expect(told).toContain("EIO: injected");
+	expect((await fs.readFile(archiveFile)).equals(before)).toBe(true);
+});
+
+test("an archive run that cannot look at the transcript it staged says so, not that it was replaced", async () => {
+	const broken = failWithEio(
+		"lstat",
+		target => isStagedFile(target) && target.endsWith(`${path.sep}${path.basename(archiveFile)}`),
+	);
+	let result: GcResult;
+	try {
+		result = await archiveOnly();
+	} finally {
+		broken.mockRestore();
+	}
+
+	const told = result.archive?.errors.join("\n") ?? "";
+	expect(told).not.toContain("was replaced while the archive was being written");
+	expect(told).toContain("EIO: injected");
+	expect(await Bun.file(sessionFile).exists()).toBe(true);
+});
+
+test("an archive run that cannot look at an artifact it staged says so, not that it is no longer its own", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "HELLO");
+	const broken = failWithEio("lstat", target => isStagedFile(target) && target.endsWith(`${path.sep}a.log`));
+	let result: GcResult;
+	try {
+		result = await archiveOnly();
+	} finally {
+		broken.mockRestore();
+	}
+
+	const told = result.archive?.errors.join("\n") ?? "";
+	expect(told).not.toContain("is no longer the file this run staged there");
+	expect(told).toContain("EIO: injected");
+	expect(await Bun.file(path.join(liveArtifacts, "a.log")).text()).toBe("HELLO");
+});
+
+test("an archive run that cannot look at a link whose target is gone says so, not nothing", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await fs.mkdir(liveArtifacts, { recursive: true });
+	const dangling = path.join(liveArtifacts, "dangling.log");
+	await fs.symlink(path.join(root, "nowhere"), dangling);
+	const broken = failWithEio("lstat", dangling);
+	let result: GcResult;
+	try {
+		result = await archiveOnly();
+	} finally {
+		broken.mockRestore();
+	}
+
+	expect(result.archive?.errors.join("\n")).toContain("EIO: injected");
+});
+
+test("an archive run that cannot look at its stage when taking back a publication says so, not that the name is not its own", async () => {
+	await Bun.write(path.join(sessionFile.slice(0, -".jsonl".length), "a.log"), "HELLO");
+	const destination = path.join(archiveFile.slice(0, -".jsonl.gz".length), "a.log");
+	// Once the stage is linked at the archived name, the read-back of that
+	// name fails, and so does the look at the stage when the run takes the
+	// publication back.
+	let linked = false;
+	const realLink = fs.link;
+	const link = spyOn(fs, "link").mockImplementation(async (from, to) => {
+		await realLink(from, to);
+		if (String(to) === destination) linked = true;
+	});
+	const open = failWithEio("open", target => linked && target === destination);
+	const lstat = failWithEio("lstat", target => linked && isStagedFile(target) && target.endsWith(`${path.sep}a.log`));
+	let result: GcResult;
+	try {
+		result = await archiveOnly();
+	} finally {
+		link.mockRestore();
+		open.mockRestore();
+		lstat.mockRestore();
+	}
+
+	const told = result.archive?.errors.join("\n") ?? "";
+	expect(told).not.toContain("is not what this run published there");
+	expect(told).toContain("could not be looked at");
+	expect(told).toContain("EIO: injected");
+});
+
+test("an archive run that cannot look at the name it superseded does not put the shorter copy back over it", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	await archiveOnly();
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST APPENDED");
+	const destination = path.join(archiveFile.slice(0, -".jsonl.gz".length), "a.log");
+	// Once the longer copy is renamed over the archived name, the read-back
+	// of that name fails, and so does the look before putting the shorter
+	// copy back.
+	let renamed = false;
+	const realRename = fs.rename;
+	const rename = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+		await realRename(from, to);
+		if (String(to) === destination) renamed = true;
+	});
+	const open = failWithEio("open", target => renamed && target === destination);
+	const lstat = failWithEio("lstat", target => renamed && target === destination);
+	let result: GcResult;
+	try {
+		result = await archiveOnly();
+	} finally {
+		rename.mockRestore();
+		open.mockRestore();
+		lstat.mockRestore();
+	}
+
+	const told = result.archive?.errors.join("\n") ?? "";
+	expect(told).toContain("was not put back, because what that name holds could not be checked");
+	expect(told).toContain("EIO: injected");
+	expect(await Bun.file(destination).text()).toBe("FIRST APPENDED");
+});
+
 test("re-archiving changes the mode of the archived transcript only, never what its name was rebound to", async () => {
 	await archiveOnly();
 	const unrelated = path.join(root, "private.txt");
