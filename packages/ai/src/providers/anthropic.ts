@@ -2462,6 +2462,7 @@ const streamAnthropicOnce = (
 			// expired token must fall back to a fresh request as before.
 			if (frozenRedemption && !forfeitFrozenForKillSwitch && Date.now() <= frozenRedemption.expiresAt) {
 				usingFallbackCredit = true;
+				demotedReasoningBlocks = frozenRedemption.demotedReasoningBlocks ?? 0;
 				const echoed =
 					frozenRedemption.prefillClaim !== false && frozenRedemption.refusedContent
 						? formatEchoedRefusalContent(frozenRedemption.refusedContent)
@@ -3267,6 +3268,7 @@ const streamAnthropicOnce = (
 										betaHeader: sentBetaHeader,
 										expiresAt: Date.now() + FALLBACK_CREDIT_TTL_MS,
 										refusedContent: output.content ? structuredClone(output.content) : undefined,
+										demotedReasoningBlocks,
 									};
 								}
 								if (stopDetails?.type === "refusal" && demotedReasoningBlocks > 0) {
@@ -5850,7 +5852,7 @@ function collapseFallbackSegments(content: AssistantMessage["content"]): Assista
 }
 
 /** History serialization choices {@link convertAnthropicMessages} applies to a request. */
-type AnthropicConversionOptions = {
+export type AnthropicConversionOptions = {
 	serverSideFallbackEnabled?: boolean;
 	replayCompaction?: boolean;
 	replayLegacyCompaction?: boolean;
