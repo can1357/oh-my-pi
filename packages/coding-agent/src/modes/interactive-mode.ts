@@ -365,7 +365,7 @@ import type {
 	YieldCompaction,
 } from "./types";
 import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
-import type { ConversationPosition } from "./utils/conversation-position";
+import type { ConversationPosition } from "../session/conversation-position";
 import { materializeImageChipLinks, UiHelpers } from "./utils/ui-helpers";
 
 import {

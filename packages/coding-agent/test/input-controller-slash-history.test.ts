@@ -8,6 +8,7 @@ import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { cfgBareExitOnEmptySession, cfgBareSlashCommands } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { isQueuedMessageList, splitQueuedMessages } from "@oh-my-pi/pi-tui/prompt/queue-input";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
 // Drives the real editor submit handler through the builtin slash dispatch
 // path. Before #3148 only a handful of commands recorded their text (each
@@ -243,8 +244,8 @@ describe("input controller — slash command history (#3148)", () => {
 		{ input: "=>\n1. /new\n2. inspect the result", readOnly: true, compacting: false },
 		{ input: "-> inspect the result", readOnly: false, compacting: true },
 	])("refuses guest queue shorthand ($input, readOnly=$readOnly)", async ({ input, readOnly, compacting }) => {
-		const { ctx, editor, addToHistory, followUp, prompt, onInputCallback, showStatus } = makeCtx(true);
-		const sendPrompt = vi.fn();
+		const { ctx, editor, addToHistory, followUp, prompt, onInputCallback } = makeCtx(true);
+		const sendPrompt = vi.fn(() => true);
 		Object.assign(ctx, { collabGuest: { readOnly, sendPrompt } });
 		Object.assign(ctx.session, { isCompacting: compacting });
 		controllerFor(ctx);
@@ -253,7 +254,6 @@ describe("input controller — slash command history (#3148)", () => {
 
 		await editor.onSubmit?.(input);
 
-		expect(showStatus).toHaveBeenCalledWith("/queue is host-only during a collab session");
 		expect(editor.getText()).toBe(input);
 		expect(addToHistory).not.toHaveBeenCalled();
 		expect(followUp).not.toHaveBeenCalled();
@@ -264,7 +264,7 @@ describe("input controller — slash command history (#3148)", () => {
 	});
 
 	it("routes /queue through the yield-only follow-up queue while streaming", async () => {
-		const { ctx, editor, addToHistory, followUp, showStatus } = makeCtx(true);
+		const { ctx, editor, addToHistory, followUp } = makeCtx(true);
 		controllerFor(ctx);
 		editor.setText("/queue inspect the final result");
 
@@ -272,11 +272,10 @@ describe("input controller — slash command history (#3148)", () => {
 
 		expect(followUp).toHaveBeenCalledWith("inspect the final result", undefined);
 		expect(addToHistory).toHaveBeenCalledWith("/queue inspect the final result");
-		expect(showStatus).toHaveBeenCalledWith("Queued message for when the agent yields");
 	});
 
 	it("starts the first queued item immediately when the session is idle", async () => {
-		const { ctx, editor, followUp, steer, onInputCallback, showStatus } = makeCtx();
+		const { ctx, editor, followUp, steer, onInputCallback } = makeCtx();
 		controllerFor(ctx);
 		const input = "=>\n1. inspect types\n2. run focused tests\n3. summarize failures";
 		editor.setText(input);
@@ -288,11 +287,10 @@ describe("input controller — slash command history (#3148)", () => {
 		);
 		expect(steer).not.toHaveBeenCalled();
 		expect(followUp.mock.calls.map(call => call[0])).toEqual(["run focused tests", "summarize failures"]);
-		expect(showStatus).toHaveBeenCalledWith("Sent first message; queued 2 for later yields");
 	});
 
 	it("queues an enumerated shorthand prompt as separate ordered follow-ups", async () => {
-		const { ctx, editor, addToHistory, followUp, showStatus } = makeCtx(true);
+		const { ctx, editor, addToHistory, followUp } = makeCtx(true);
 		controllerFor(ctx);
 		const input = "=>\n1. inspect types\n2. run focused tests\n3. summarize failures";
 		editor.setText(input);
@@ -305,7 +303,6 @@ describe("input controller — slash command history (#3148)", () => {
 			"summarize failures",
 		]);
 		expect(addToHistory).toHaveBeenCalledWith(input);
-		expect(showStatus).toHaveBeenCalledWith("Queued 3 messages for when the agent yields");
 	});
 });
 
@@ -315,7 +312,7 @@ describe("input controller — collab guest history", () => {
 		const harness = makeCtx();
 		harness.ctx.collabGuest = {
 			readOnly: false,
-			sendPrompt: vi.fn(),
+			sendPrompt: vi.fn(() => true),
 		} as unknown as InteractiveModeContext["collabGuest"];
 		harness.ctx.shutdown = vi.fn(async () => {});
 		// One registered skill, so `/skill:probe` reaches the skill branch that records its text.
@@ -390,7 +387,8 @@ describe("input controller — collab guest history", () => {
 	it("keeps a refused command out of history when it is queued during compaction", async () => {
 		const addToHistory = vi.fn();
 		const helpers = new UiHelpers({
-			collabGuest: { readOnly: false, sendPrompt: vi.fn() },
+			collabGuest: { readOnly: false, sendPrompt: vi.fn(() => true) },
+			sessionManager: SessionManager.inMemory(),
 			compactionQueuedMessages: [],
 			editor: { addToHistory, clearDraft: vi.fn(), getText: () => "" },
 			updatePendingMessagesDisplay: vi.fn(),
@@ -736,7 +734,7 @@ describe("input controller — bare slash commands opt-in", () => {
 
 		it("does not let a different command word confirm the armed one", async () => {
 			await enable();
-			const { ctx, editor, shutdown, showStatus } = makeCtx(false, history);
+			const { ctx, editor, shutdown, onInputCallback } = makeCtx(false, history);
 			controllerFor(ctx);
 
 			await editor.onSubmit?.("hotkeys");
@@ -744,12 +742,16 @@ describe("input controller — bare slash commands opt-in", () => {
 
 			expect(ctx.handleHotkeysCommand).not.toHaveBeenCalled();
 			expect(shutdown).not.toHaveBeenCalled();
-			expect(showStatus).toHaveBeenLastCalledWith(expect.stringContaining("Enter again to run /exit"));
+			expect(editor.getText()).toBe("exit");
+			await editor.onSubmit?.(editor.getText());
+			expect(shutdown).toHaveBeenCalledTimes(1);
+			expect(ctx.handleHotkeysCommand).not.toHaveBeenCalled();
+			expect(onInputCallback).not.toHaveBeenCalled();
 		});
 
 		it("requires a fresh confirmation after switching sessions", async () => {
 			await enable();
-			const { ctx, editor, shutdown, onInputCallback, showStatus, sessionManager } = makeCtx(false, history);
+			const { ctx, editor, shutdown, onInputCallback, sessionManager } = makeCtx(false, history);
 			controllerFor(ctx);
 
 			await editor.onSubmit?.("exit");
@@ -759,7 +761,6 @@ describe("input controller — bare slash commands opt-in", () => {
 
 			expect(shutdown).not.toHaveBeenCalled();
 			expect(onInputCallback).not.toHaveBeenCalled();
-			expect(showStatus).toHaveBeenCalledTimes(2);
 
 			await editor.onSubmit?.("exit");
 			expect(shutdown).toHaveBeenCalledTimes(1);

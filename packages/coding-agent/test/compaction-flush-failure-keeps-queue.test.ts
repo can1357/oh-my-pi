@@ -88,6 +88,7 @@ describe("flushCompactionQueue failure", () => {
 	) {
 		return createInteractiveModeContext({
 			session: live,
+			sessionManager: live.sessionManager,
 			compactionQueuedMessages: [...typed],
 			skillCommands,
 			fileSlashCommands: new Set<string>(),
@@ -433,10 +434,15 @@ describe("flushCompactionQueue failure", () => {
 		await new UiHelpers(ctx).flushCompactionQueue({ willRetry: false });
 		// The later failure left the admitted skill prompt out of the restored batch.
 		expect(ctx.compactionQueuedMessages).toEqual([typed[1]]);
+		const recovered = Promise.withResolvers<void>();
+		vi.spyOn(ctx, "updatePendingMessagesDisplay").mockImplementation(() => {
+			if (ctx.compactionQueuedMessages.includes(typed[0])) recovered.resolve();
+		});
 
 		dropped.resolve();
-		// The flush reacts to the dispatch result before this await resumes.
+		// SDK settlement precedes the asynchronous UI recovery; wait for its consumer event.
 		await promptCustomMessage.mock.results[0]?.value;
+		await recovered.promise;
 		// The skill invocation was never sent, so it returns to the batch instead of being lost.
 		expect(ctx.compactionQueuedMessages).toEqual(typed);
 

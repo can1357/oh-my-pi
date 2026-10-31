@@ -124,7 +124,7 @@ describe("collab host with no joined guest", () => {
 	it("mirrors no events or entries until a guest joins, then delivers the first frame after its welcome", async () => {
 		const fixture = makeFixture();
 		const transport = await startHost(fixture);
-		const send = spyOn(transport, "send").mockImplementation(() => {});
+		const send = spyOn(transport, "send").mockImplementation(() => true);
 		spyOn(transport, "sendBatch").mockImplementation(() => {});
 
 		fixture.emit({ type: "agent_start" });
@@ -144,7 +144,7 @@ describe("collab host with no joined guest", () => {
 	it("re-sends a state that matches the last one sent before the room emptied", async () => {
 		const fixture = makeFixture();
 		const transport = await startHost(fixture);
-		const send = spyOn(transport, "send").mockImplementation(() => {});
+		const send = spyOn(transport, "send").mockImplementation(() => true);
 		spyOn(transport, "sendBatch").mockImplementation(() => {});
 		vi.useFakeTimers();
 		const stateFrames = () => send.mock.calls.filter(([frame]) => frameType(frame) === "state");

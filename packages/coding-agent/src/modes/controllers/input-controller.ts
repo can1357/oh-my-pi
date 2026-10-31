@@ -61,7 +61,7 @@ import {
 	guestRefusesSlashCommand,
 	lookupBuiltinSlashCommand,
 } from "../../slash-commands/builtin-registry";
-import { restoreDetachedDraft } from "../../slash-commands/helpers/draft";
+import { restoreDetachedDraft, restoreQueuedDraft } from "../../slash-commands/helpers/draft";
 import { parseSlashCommand, parseSubcommand } from "../../slash-commands/helpers/parse";
 import { isTinyLocalModelKey } from "../../tiny/models";
 import { tinyTitleClient } from "../../tiny/title-client";
@@ -81,7 +81,11 @@ import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { resendProgramStatus } from "../../utils/run-status";
 import { loadImageInput } from "../../utils/image-loading";
 import { materializeImageChipLinks } from "../utils/ui-helpers";
-import { type ConversationPosition, continuesConversation, conversationPosition } from "../utils/conversation-position";
+import {
+	type ConversationPosition,
+	continuesConversation,
+	conversationPosition,
+} from "../../session/conversation-position";
 import { ensureSupportedImageInput, ImageInputTooLargeError } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { type ImageAttachmentSource, tagImageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { blobExtensionForImageMimeType } from "@oh-my-pi/pi-tui/prompt/image-format";
@@ -1255,10 +1259,15 @@ export class InputController {
 					return;
 				}
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-				this.ctx.editor.clearDraft(text);
-				// No local render: the prompt comes back from the host as a
-				// collab-prompt event/entry and renders with the author badge.
-				this.ctx.collabGuest.sendPrompt(text, images);
+				if (this.ctx.collabGuest.sendPrompt(text, images)) {
+					this.ctx.editor.clearDraft(text);
+				} else {
+					this.#dropSubmittedPending(submittedImages);
+					restoreDetachedDraft(this.ctx.editor, text, images, inputImageLinks);
+					this.ctx.showStatus("Collab prompt was not queued; returned it to the editor");
+				}
+				// No local render: admitted prompts come back from the host as a
+				// collab-prompt event/entry and render with the author badge.
 				return;
 			}
 
@@ -2051,6 +2060,9 @@ export class InputController {
 
 		this.releaseStaleYieldCompaction();
 		if (this.ctx.session.isCompacting || this.ctx.yieldCompaction) {
+			if (this.ctx.compactionQueuedMessages.length === 0) {
+				this.ctx.compactionQueueOrigin = conversationPosition(this.ctx.sessionManager);
+			}
 			for (let index = 0; index < messages.length; index++) {
 				this.ctx.compactionQueuedMessages.push({
 					text: messages[index] ?? "",
@@ -2198,6 +2210,27 @@ export class InputController {
 		}
 	}
 
+	/** Guest plaintext belongs to the host, never the local compaction/yield queue. */
+	#deliverFollowUpToGuest(
+		text: string,
+		images: ImageContent[] | undefined,
+		imageLinks: (string | undefined)[] | undefined,
+		recordedHistoryText?: string,
+	): boolean {
+		const guest = this.ctx.collabGuest;
+		if (!guest || text.startsWith("/")) return false;
+		if (guest.readOnly) {
+			restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
+			this.ctx.showStatus("This collab link is read-only — prompting is disabled");
+		} else if (guest.sendPrompt(text, images)) {
+			if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text);
+		} else {
+			restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
+			this.ctx.showStatus("Collab prompt was not queued; returned it to the editor");
+		}
+		return true;
+	}
+
 	/** Dispatch a follow-up-key submission that passed its input hooks. `admitted` fires once the session holds it. */
 	async #dispatchFollowUp(
 		text: string,
@@ -2213,15 +2246,14 @@ export class InputController {
 		this.releaseStaleYieldCompaction();
 		if (this.#guestRefusesSlash(text)) {
 			this.ctx.showStatus(`${text.split(/\s+/, 1)[0]} is host-only during a collab session`);
+			if (this.#matchesBuiltinSlashCommand(text)) {
+				restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
+			}
 			return;
 		}
-		if (this.ctx.collabGuest?.readOnly && !text.startsWith("/")) {
-			restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
-			this.ctx.showStatus("This collab link is read-only — prompting is disabled");
-			return;
-		}
+		if (this.#deliverFollowUpToGuest(text, images, imageLinks)) return;
 
-		// Compaction first: while compacting, free text gets queued via
+		// Local compaction first: free text gets queued via
 		// `queueCompactionMessage`, and `/skill:*` rides the same queue so a
 		// skill typed during compaction is not lost or short-circuited through
 		// `promptCustomMessage`. The compaction-resume path re-parses the
@@ -2289,16 +2321,7 @@ export class InputController {
 			this.ctx.showStatus(`${text.split(/\s+/, 1)[0]} is host-only during a collab session`);
 			return;
 		}
-		if (this.ctx.collabGuest) {
-			if (this.ctx.collabGuest.readOnly) {
-				restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
-				this.ctx.showStatus("This collab link is read-only — prompting is disabled");
-			} else {
-				if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text);
-				this.ctx.collabGuest.sendPrompt(text, images);
-			}
-			return;
-		}
+		if (this.#deliverFollowUpToGuest(text, images, imageLinks, recordedHistoryText)) return;
 
 		// Skill commands invoke through the custom-message path regardless of
 		// which keybinding submitted them. Enter routes them as `steer`;
@@ -2441,47 +2464,9 @@ export class InputController {
 	 * Returns the number of entries restored.
 	 */
 	#restoreEntriesToEditor(entries: RestoredQueuedMessage[], currentText?: string): number {
-		if (entries.length === 0) {
-			this.ctx.updatePendingMessagesDisplay();
-			return 0;
-		}
-		// Image markers are positional: `[Image #N]` ↔ `pendingImages[N-1]`
-		// (legacy drafts may still carry a trailing `attachment://N`). Each queued
-		// message numbered its references against its own local image list
-		// (1..K). Because we prepend the queued text but append the queued images
-		// to `pendingImages`, any existing draft images (M of them) — plus images
-		// already pulled in by earlier queued messages — shift the slot index that
-		// every reference must point to. Bumping each message's marker and URI
-		// indices by the running offset keeps the merged text aligned with the merged
-		// `pendingImages` order; draft markers stay valid because draft images
-		// keep their original positions.
-		const queuedImages = entries.flatMap(e => e.images ?? []);
-		let queuedText: string;
-		if (queuedImages.length > 0) {
-			const parts: string[] = [];
-			let imageOffset = this.ctx.editor.pendingImages.length;
-			for (const entry of entries) {
-				parts.push(shiftImageMarkers(entry.text, imageOffset));
-				if (entry.images && entry.images.length > 0) imageOffset += entry.images.length;
-			}
-			queuedText = parts.join("\n\n");
-		} else {
-			queuedText = entries.map(e => e.text).join("\n\n");
-		}
-		const current = currentText ?? this.ctx.editor.getText();
-		const combinedText = [queuedText, current].filter(t => t.trim()).join("\n\n");
-		// Hand queued images back to the pending-image buffer first (links are
-		// re-materialized lazily), then set the text: setCollapsedText folds the
-		// renumbered `[Image #N, WxH]` references back into chip tokens, and the
-		// collapse only recognizes indices within the merged pendingImages range.
-		if (queuedImages.length > 0) {
-			this.ctx.editor.pendingImages.push(...queuedImages);
-			this.ctx.editor.pendingImageLinks.push(...queuedImages.map(() => undefined));
-			this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
-		}
-		this.ctx.editor.setCollapsedText(combinedText);
+		const count = restoreQueuedDraft(this.ctx.editor, entries, currentText);
 		this.ctx.updatePendingMessagesDisplay();
-		return entries.length;
+		return count;
 	}
 
 	async #insertPendingImage(imageData: ImageContent, source?: ImageAttachmentSource): Promise<void> {

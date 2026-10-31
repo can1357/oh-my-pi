@@ -454,9 +454,12 @@ export class CollabGuestLink {
 		await this.#restoreLocalSession();
 	}
 
-	sendPrompt(text: string, images?: ImageContent[]): void {
-		if (this.#rejectReadOnly()) return;
-		this.#socket?.send({ t: "prompt", text, images: images && images.length > 0 ? images : undefined });
+	/** Whether the prompt entered the local relay queue, not a host acknowledgement. */
+	sendPrompt(text: string, images?: ImageContent[]): boolean {
+		if (this.#rejectReadOnly()) return false;
+		return (
+			this.#socket?.send({ t: "prompt", text, images: images && images.length > 0 ? images : undefined }) ?? false
+		);
 	}
 
 	sendAbort(): void {

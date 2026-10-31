@@ -172,7 +172,7 @@ describe("interactive native input ingress", () => {
 			h.session.isCompacting = compacting;
 			h.ctx.collabGuest = {
 				readOnly: false,
-				sendPrompt: vi.fn(),
+				sendPrompt: vi.fn(() => true),
 			} as unknown as InteractiveModeContext["collabGuest"];
 			const storage = attachHistory(h.editor);
 			h.editor.setText("/unknown");
@@ -191,6 +191,52 @@ describe("interactive native input ingress", () => {
 			expect(h.session.promptCustomMessage).not.toHaveBeenCalled();
 			expect(h.ctx.compactionQueuedMessages).toEqual([]);
 			expect(h.session.followUp).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each([
+		{ compacting: false, newer: false },
+		{ compacting: true, newer: false },
+		{ compacting: false, newer: true },
+		{ compacting: true, newer: true },
+	])(
+		"Ctrl+Enter restores a refused guest builtin and its detached attachments (%j)",
+		async ({ compacting, newer }) => {
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const h = await createHarness(pi => {
+				pi.on("input", async () => {
+					entered.resolve();
+					await release.promise;
+				});
+			});
+			h.session.isCompacting = compacting;
+			const sendPrompt = vi.fn(() => true);
+			h.ctx.collabGuest = { readOnly: false, sendPrompt } as unknown as InteractiveModeContext["collabGuest"];
+			const run = vi.fn(async () => true);
+			h.ctx.handleTanCommand = run;
+			const storage = attachHistory(h.editor);
+			h.draftWithImage("/tan work [Image #1]");
+			const submitting = h.pressSubmit(FOLLOW_UP);
+			await entered.promise;
+			if (newer) h.draftWithImage("next draft [Image #1]", newerImage, "local://newer.jpg");
+			release.resolve();
+			await submitting;
+
+			expect(h.editor.getExpandedText()).toBe(
+				newer ? "/tan work [Image #2]\n\nnext draft [Image #1]" : "/tan work [Image #1]",
+			);
+			expect(h.editor.pendingImages).toEqual(newer ? [newerImage, originalImage] : [originalImage]);
+			const links = newer ? ["local://newer.jpg", "local://original.png"] : ["local://original.png"];
+			expect(h.editor.pendingImageLinks).toEqual(links);
+			expect(h.editor.imageLinks).toEqual(links);
+			expect(storage.getRecent(10)).toEqual([]);
+			expect(run).not.toHaveBeenCalled();
+			expect(sendPrompt).not.toHaveBeenCalled();
+			expect(h.prompt).not.toHaveBeenCalled();
+			expect(h.session.promptCustomMessage).not.toHaveBeenCalled();
+			expect(h.session.followUp).not.toHaveBeenCalled();
+			expect(h.ctx.compactionQueuedMessages).toEqual([]);
 		},
 	);
 
@@ -831,7 +877,6 @@ describe("interactive native input ingress", () => {
 		await h.pressSubmit(ENTER);
 
 		expect(run).not.toHaveBeenCalled();
-		expect(h.ctx.showStatus).toHaveBeenCalledWith("/tan is host-only during a collab session");
 		expect(h.editor.getExpandedText()).toBe("/tan fix this block [Image #1]");
 		expect(h.editor.pendingImages).toEqual([originalImage]);
 		expect(h.editor.pendingImageLinks).toEqual(["local://original.png"]);

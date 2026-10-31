@@ -26,6 +26,7 @@ import type { EffectiveExtensionRoots } from "../capability/types";
 import type { AgentDefinition } from "../task/types";
 import type { SessionAccountPoolScope } from "../config/account-pools";
 import type { ModelRegistry } from "../config/model-registry";
+import type { ConversationPosition } from "./conversation-position";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
 import type { SkillsSettings } from "../extensibility/settings";
@@ -425,6 +426,12 @@ export interface AgentSessionConfig {
 
 /** Options for AgentSession.prompt(). */
 export interface PromptOptions {
+	/**
+	 * Optional origin for externally replayed input. Active session transitions
+	 * settle before command effects or admission; a different conversation rejects.
+	 * Not inherited by extension hooks or other SDK submissions.
+	 */
+	conversationOrigin?: ConversationPosition;
 	/** Whether to expand file-based prompt templates (default: true). */
 	expandPromptTemplates?: boolean;
 	/**
@@ -497,6 +504,8 @@ export interface FollowUpOptions {
 	expandPromptTemplates?: boolean;
 	/** Explicit billing/initiator attribution. */
 	attribution?: MessageAttribution;
+	/** Optional origin for externally replayed input. See {@link PromptOptions.conversationOrigin}. */
+	conversationOrigin?: ConversationPosition;
 	/** Called synchronously with the messages pushed onto the follow-up queue. See {@link PromptOptions.onPromptQueued}. */
 	onPromptQueued?: PromptOptions["onPromptQueued"];
 }
@@ -505,6 +514,8 @@ export interface FollowUpOptions {
 export interface SteerOptions {
 	/** Explicit billing/initiator attribution. */
 	attribution?: MessageAttribution;
+	/** Optional origin for externally replayed input. See {@link PromptOptions.conversationOrigin}. */
+	conversationOrigin?: ConversationPosition;
 	/** Called synchronously with the messages pushed onto the steering queue. See {@link PromptOptions.onPromptQueued}. */
 	onPromptQueued?: PromptOptions["onPromptQueued"];
 }

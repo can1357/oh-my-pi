@@ -18,7 +18,11 @@ import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/inp
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { CompactionQueuedMessage, InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
-import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import {
+	AgentSession,
+	type AgentSessionEvent,
+	type PromptOptions,
+} from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
 	SKILL_PROMPT_MESSAGE_TYPE,
@@ -100,8 +104,12 @@ function createStubInputControllerContext(opts: {
 		pendingImages: [] as ImageContent[],
 		pendingImageLinks: [] as (string | undefined)[],
 	};
-	const promptCustomMessage: PromptCustomMessage = vi.fn(async () => {});
-	const prompt = vi.fn(async (_text: string, _options?: unknown) => {});
+	const promptCustomMessage: PromptCustomMessage = vi.fn(async (_message, options) => {
+		options?.onPromptAdmitted?.();
+	});
+	const prompt = vi.fn(async (_text: string, options?: PromptOptions) => {
+		options?.onPromptAdmitted?.();
+	});
 	const handleGoalModeCommand = vi.fn(async (_rest?: string) => {});
 	const updatePendingMessagesDisplay = vi.fn();
 	const requestRender = vi.fn();
@@ -319,7 +327,7 @@ describe("InputController skill queue chip metadata", () => {
 			isStreaming: true,
 			isCompacting: true,
 		});
-		const sendPrompt = vi.fn();
+		const sendPrompt = vi.fn((_text: string, _images?: ImageContent[]) => true);
 		Object.assign(ctx, { collabGuest: { readOnly: false, sendPrompt } });
 		editor.setText(text);
 
@@ -338,7 +346,7 @@ describe("InputController skill queue chip metadata", () => {
 			isStreaming: true,
 			isCompacting: true,
 		});
-		const sendPrompt = vi.fn();
+		const sendPrompt = vi.fn((_text: string, _images?: ImageContent[]) => true);
 		Object.assign(ctx, { collabGuest: { readOnly: false, sendPrompt } });
 		editor.setText("newer draft");
 		const helpers = new UiHelpers(ctx);
@@ -356,24 +364,25 @@ describe("InputController skill queue chip metadata", () => {
 		expect(sendPrompt).not.toHaveBeenCalled();
 	});
 
-	it("keeps plain guest follow-ups and read-only builtins enqueueable during compaction", async () => {
-		const { ctx, editor } = createStubInputControllerContext({
+	it("forwards plain guest follow-ups before local compaction while retaining allowed builtin replay", async () => {
+		const { ctx, editor, prompt, promptCustomMessage } = createStubInputControllerContext({
 			skillCommands,
 			isStreaming: true,
 			isCompacting: true,
 		});
-		Object.assign(ctx, { collabGuest: { readOnly: false, sendPrompt: vi.fn() } });
+		const sendPrompt = vi.fn((_text: string, _images?: ImageContent[]) => true);
+		Object.assign(ctx, { collabGuest: { readOnly: false, sendPrompt } });
 		const controller = new InputController(ctx);
 		editor.setText("plain guest prompt");
 		await controller.handleFollowUp();
 		editor.setText("/hotkeys");
 		await controller.handleFollowUp();
 
-		expect(ctx.compactionQueuedMessages).toEqual([
-			{ text: "plain guest prompt", mode: "followUp", images: undefined },
-			{ text: "/hotkeys", mode: "followUp", images: undefined },
-		]);
+		expect(ctx.compactionQueuedMessages).toEqual([{ text: "/hotkeys", mode: "followUp", images: undefined }]);
 		expect(editor.addToHistory.mock.calls.map(call => call[0])).toEqual(["plain guest prompt", "/hotkeys"]);
+		expect(sendPrompt).toHaveBeenCalledWith("plain guest prompt", undefined);
+		expect(prompt).not.toHaveBeenCalled();
+		expect(promptCustomMessage).not.toHaveBeenCalled();
 	});
 
 	it("forwards plain guest follow-ups to the host when not compacting", async () => {
@@ -381,7 +390,7 @@ describe("InputController skill queue chip metadata", () => {
 			skillCommands,
 			isStreaming: true,
 		});
-		const sendPrompt = vi.fn();
+		const sendPrompt = vi.fn((_text: string, _images?: ImageContent[]) => true);
 		Object.assign(ctx, { collabGuest: { readOnly: false, sendPrompt } });
 		editor.setText("plain guest prompt");
 
@@ -400,7 +409,7 @@ describe("InputController skill queue chip metadata", () => {
 				isStreaming: true,
 				isCompacting,
 			});
-			const sendPrompt = vi.fn();
+			const sendPrompt = vi.fn((_text: string, _images?: ImageContent[]) => true);
 			Object.assign(ctx, { collabGuest: { readOnly: true, sendPrompt } });
 			const image: ImageContent = { type: "image", data: "Z3Vlc3Q=", mimeType: "image/png" };
 			editor.setText("read-only guest draft [Image #1]");
@@ -560,10 +569,13 @@ describe("compaction skill re-invocation", () => {
 
 	function createCompactionDrainContext(queuedMessages: CompactionQueuedMessage[], loopModeEnabled = false) {
 		const promptCustomMessageCalled = Promise.withResolvers<void>();
-		const promptCustomMessage: PromptCustomMessage = vi.fn(async () => {
+		const promptCustomMessage: PromptCustomMessage = vi.fn(async (_message, options) => {
+			options?.onPromptAdmitted?.();
 			promptCustomMessageCalled.resolve();
 		});
-		const prompt = vi.fn(async (_text: string, _options?: { streamingBehavior?: "steer" | "followUp" }) => {});
+		const prompt = vi.fn(async (_text: string, options?: PromptOptions) => {
+			options?.onPromptAdmitted?.();
+		});
 		const steer = vi.fn(async (_text: string, _images?: ImageContent[]) => {});
 		const followUp = vi.fn(async (_text: string, _images?: ImageContent[]) => {});
 		const armLoopAutoSubmit = vi.fn();
@@ -572,6 +584,7 @@ describe("compaction skill re-invocation", () => {
 		const handleGoalModeCommand = vi.fn(async (_args?: string) => {});
 		const ctx = {
 			editor,
+			sessionManager: SessionManager.inMemory(),
 			showStatus: vi.fn(),
 			handleHotkeysCommand,
 			handleGoalModeCommand,
@@ -660,7 +673,7 @@ describe("compaction skill re-invocation", () => {
 		expect(message.content[1]).toEqual(image);
 		expect(message.details).toMatchObject({ name: "test-skill", args: "arg1 arg2", lineCount: 1 });
 		// The flush also passes its own admission callbacks; the skill prompt is sent, not queue-only.
-		expect(options).toEqual({
+		expect(options).toMatchObject({
 			streamingBehavior: "followUp",
 			queueChipText: "/skill:test-skill arg1 arg2",
 			onPromptQueued: expect.any(Function),
@@ -685,7 +698,7 @@ describe("compaction skill re-invocation", () => {
 			helpers.queueCompactionMessage("plain guest prompt", "steer", [image]);
 			helpers.queueCompactionMessage("/hotkeys", "followUp");
 			editor.setText("typed after queueing");
-			const sendPrompt = vi.fn();
+			const sendPrompt = vi.fn((_text: string, _images?: ImageContent[]) => true);
 			Object.assign(ctx, { collabGuest: { readOnly: false, sendPrompt } });
 
 			await helpers.flushCompactionQueue({ willRetry });
@@ -708,7 +721,7 @@ describe("compaction skill re-invocation", () => {
 			const { ctx, promptCustomMessage, prompt, steer, followUp } = createCompactionDrainContext([
 				{ text, mode: "followUp" },
 			]);
-			const sendPrompt = vi.fn();
+			const sendPrompt = vi.fn((_text: string, _images?: ImageContent[]) => true);
 			Object.assign(ctx, { collabGuest: { readOnly: false, sendPrompt } });
 
 			await new UiHelpers(ctx).flushCompactionQueue({ willRetry: false });
@@ -733,7 +746,7 @@ describe("compaction skill re-invocation", () => {
 			first,
 			later,
 		]);
-		const sendPrompt = vi.fn();
+		const sendPrompt = vi.fn((_text: string, _images?: ImageContent[]) => true);
 		Object.assign(ctx, { collabGuest: { readOnly, sendPrompt } });
 		handleHotkeysCommand.mockImplementationOnce(() => {
 			throw new Error("local command failed");
@@ -761,7 +774,7 @@ describe("compaction skill re-invocation", () => {
 			first,
 			later,
 		]);
-		const sendPrompt = vi.fn();
+		const sendPrompt = vi.fn((_text: string, _images?: ImageContent[]) => true);
 		const originalBuild = ctx.session.buildUserSkillPrompt.bind(ctx.session);
 		const build = vi.spyOn(ctx.session, "buildUserSkillPrompt").mockImplementation(async (skill, input) => {
 			const built = await originalBuild(skill, input);
@@ -800,7 +813,7 @@ describe("compaction skill re-invocation", () => {
 				later,
 				pending,
 			]);
-			const sendPrompt = vi.fn();
+			const sendPrompt = vi.fn((_text: string, _images?: ImageContent[]) => true);
 			const leave = vi.fn(async (_reason: string) => {});
 			leave.mockImplementationOnce(async () => {
 				throw new Error("Local session restoration was cancelled");
@@ -838,7 +851,7 @@ describe("compaction skill re-invocation", () => {
 		const refused: CompactionQueuedMessage = { text, mode: "steer" };
 		const later: CompactionQueuedMessage = { text: "/hotkeys", mode: "followUp" };
 		const { ctx, handleHotkeysCommand, prompt, steer, followUp } = createCompactionDrainContext([refused, later]);
-		const sendPrompt = vi.fn();
+		const sendPrompt = vi.fn((_text: string, _images?: ImageContent[]) => true);
 		Object.assign(ctx, { collabGuest: { readOnly, sendPrompt } });
 		handleHotkeysCommand.mockImplementationOnce(() => {
 			throw new Error("local command failed");
@@ -869,6 +882,7 @@ describe("compaction skill re-invocation", () => {
 					throw new Error("transport refused the send");
 				}
 				sent.push(text);
+				return true;
 			});
 			Object.assign(ctx, { collabGuest: { readOnly: false, sendPrompt } });
 			const helpers = new UiHelpers(ctx);
@@ -915,7 +929,7 @@ describe("compaction skill re-invocation", () => {
 		await reported.promise;
 		expect(ctx.compactionQueuedMessages).toEqual([first, skill, pending]);
 		ctx.compactionQueuedMessages.push(newer);
-		const sendPrompt = vi.fn();
+		const sendPrompt = vi.fn((_text: string, _images?: ImageContent[]) => true);
 		Object.assign(ctx, { collabGuest: { readOnly: false, sendPrompt } });
 		release.resolve();
 		await flushing;
@@ -935,7 +949,7 @@ describe("compaction skill re-invocation", () => {
 		helpers.queueCompactionMessage("/goal set mutate", "followUp");
 		helpers.queueCompactionMessage("/hotkeys", "followUp");
 		editor.setText("newer draft");
-		const sendPrompt = vi.fn();
+		const sendPrompt = vi.fn((_text: string, _images?: ImageContent[]) => true);
 		Object.assign(ctx, { collabGuest: { readOnly: false, sendPrompt } });
 
 		await helpers.flushCompactionQueue({ willRetry: false });
@@ -956,7 +970,7 @@ describe("compaction skill re-invocation", () => {
 			{ text: "/goal set join during dispatch", mode: "steer" },
 			{ text: "/skill:test-skill go", mode: "followUp" },
 		]);
-		const sendPrompt = vi.fn();
+		const sendPrompt = vi.fn((_text: string, _images?: ImageContent[]) => true);
 		handleGoalModeCommand.mockImplementation(async () => {
 			await Promise.resolve();
 			Object.assign(ctx, { collabGuest: { readOnly: false, sendPrompt } });
@@ -990,7 +1004,7 @@ describe("compaction skill re-invocation", () => {
 		const helpers = new UiHelpers(ctx);
 		const flushing = helpers.flushCompactionQueue({ willRetry });
 		await entered.promise;
-		const sendPrompt = vi.fn();
+		const sendPrompt = vi.fn((_text: string, _images?: ImageContent[]) => true);
 		Object.assign(ctx, { collabGuest: { readOnly: false, sendPrompt } });
 		editor.setText("typed during skill load");
 		release.resolve();
@@ -1011,7 +1025,7 @@ describe("compaction skill re-invocation", () => {
 			const { ctx, promptCustomMessage, prompt, steer, followUp } = createCompactionDrainContext([
 				{ text: "plain guest prompt", mode: "followUp" },
 			]);
-			const sendPrompt = vi.fn();
+			const sendPrompt = vi.fn((_text: string, _images?: ImageContent[]) => true);
 			Object.assign(ctx, { collabGuest: { readOnly: true, sendPrompt } });
 
 			await new UiHelpers(ctx).flushCompactionQueue({ willRetry });
@@ -1034,7 +1048,7 @@ describe("compaction skill re-invocation", () => {
 				[{ text, mode: "followUp" }],
 				true,
 			);
-			const sendPrompt = vi.fn();
+			const sendPrompt = vi.fn((_text: string, _images?: ImageContent[]) => true);
 			const pauseLoop = vi.fn(() => {
 				ctx.loopModeEnabled = false;
 			});
@@ -1060,6 +1074,7 @@ describe("compaction skill re-invocation", () => {
 				{ text: "/skill:test-skill retry args", mode: "followUp", images: [image] },
 			]);
 			ctx.session = fixture.session;
+			ctx.sessionManager = fixture.session.sessionManager;
 			const uiHelpers = new UiHelpers(ctx);
 
 			await uiHelpers.flushCompactionQueue({ willRetry: true });

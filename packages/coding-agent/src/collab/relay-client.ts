@@ -193,12 +193,12 @@ export class CollabSocket {
 	}
 
 	/**
-	 * Queue one frame. An {@link EncodedFrame} is sealed as-is, so a caller that
-	 * already serialized the payload (to measure or bound it) does not pay for a
-	 * second `JSON.stringify`.
+	 * Queue one frame, returning whether local admission succeeded. This does
+	 * not acknowledge remote delivery. An {@link EncodedFrame} is sealed as-is,
+	 * avoiding a second `JSON.stringify` for callers that already serialized it.
 	 */
-	send(frame: CollabFrame | EncodedFrame, targetPeer = 0): void {
-		this.#sendOne(frame, targetPeer);
+	send(frame: CollabFrame | EncodedFrame, targetPeer = 0): boolean {
+		return this.#sendOne(frame, targetPeer);
 	}
 
 	/**
@@ -220,13 +220,13 @@ export class CollabSocket {
 		this.#sendOne(frame, 0, key);
 	}
 
-	#sendOne(frame: CollabFrame | EncodedFrame, targetPeer: number, key?: string): void {
-		if (this.#closed) return;
+	#sendOne(frame: CollabFrame | EncodedFrame, targetPeer: number, key?: string): boolean {
+		if (this.#closed) return false;
 		try {
 			const serialized = typeof frame === "string" ? frame : JSON.stringify(frame);
 			const prepared = Promise.withResolvers<void>();
 			this.#sendChain = Promise.all([this.#sendChain, prepared.promise]).then(() => {});
-			this.#enqueueSend(
+			return this.#enqueueSend(
 				[serialized].values(),
 				targetPeer,
 				Buffer.byteLength(serialized),
@@ -236,6 +236,7 @@ export class CollabSocket {
 			);
 		} catch (err) {
 			this.#failFatal(`could not serialize collab frame: ${String(err)}; rejoin to resync`);
+			return false;
 		}
 	}
 
@@ -311,7 +312,7 @@ export class CollabSocket {
 		onPrepared?: () => void,
 		eager = false,
 		key?: string,
-	): void {
+	): boolean {
 		// The queue invariant, enforced in one place: targeted work is only ever
 		// admitted for a peer still being served. A batch queued for a peer that has
 		// left would hold the head of a queue shared with everyone else, which is
@@ -320,16 +321,17 @@ export class CollabSocket {
 		if (targetPeer !== 0 && this.#retiredPeers.has(targetPeer)) {
 			logger.debug("collab: refusing frame for a peer that has left", { targetPeer });
 			onPrepared?.();
-			return;
+			return false;
 		}
 		if (this.#overCapacity(bytes)) {
 			onPrepared?.();
 			this.#failOverload();
-			return;
+			return false;
 		}
 		this.#pendingSends.push({ frames, targetPeer, bytes, cancelled: false, eager, onPrepared, key });
 		this.#pendingSendBytes += bytes;
 		this.#pumpSends();
+		return true;
 	}
 
 	#overCapacity(bytes: number): boolean {
