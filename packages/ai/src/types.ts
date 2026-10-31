@@ -718,6 +718,21 @@ export interface StreamOptions {
 	 */
 	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
 	/**
+	 * Ceiling on the server-stated wait a provider's own retry sleeps: each
+	 * pre-output retry loop, and the transport's retry of a 429 or 5xx. A longer
+	 * stated wait surfaces the failure at once. Its message ends with a note
+	 * that the server asked for that wait and the caller's ceiling refused it;
+	 * `errorRetryAfterMs` and the error's classification are unchanged. For a
+	 * caller that recovers on its own (waits visibly, rotates credentials, falls
+	 * back) instead of letting a provider sleep silently. When `maxRetryDelayMs`
+	 * is also positive, the smaller of the two bounds the wait.
+	 *
+	 * Unset or non-positive (the default): a provider sleeps a stated wait up to
+	 * `maxRetryDelayMs`, as before. `providerRetryWait` plays no part in it.
+	 * omp sets 10 s; coding-agent `PROVIDER_RETRY_WAIT_CEILING_MS` says why.
+	 */
+	providerRetryWaitCeilingMs?: number;
+	/**
 	 * Accept a normal provider stop with no visible text or tool call as a
 	 * successful completion. Passive callers and zero-output cache refreshes use
 	 * this because silence is their expected result; interactive agent turns

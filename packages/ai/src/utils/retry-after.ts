@@ -1,5 +1,6 @@
 import { retryResetTimezoneOffsetFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { extractRetryHint, longestRetryHint, parseRetryDateMs } from "@oh-my-pi/pi-utils";
+import { type RefusedRetryWait, statedRetryWaitLimit } from "./retry-wait";
 
 export type HeadersLike = Headers | Record<string, string | undefined> | undefined | null;
 
@@ -183,42 +184,41 @@ export function getStatedRetryAfterMs(
 	return providerRetryWaitMs(provider, errorMessageText(error), getFailureRetryAfterMs(error, headers));
 }
 
-/** How a transport's own `fetchWithRetry` loop keeps to the caller's cap; see {@link transportRetryBounds}. */
+/** How a transport's own `fetchWithRetry` loop keeps to the caller's bounds; see {@link transportRetryBounds}. */
 export interface TransportRetryBounds {
 	/** `fetchWithRetry`'s `maxDelayMs`: no retry sleep exceeds it. */
 	maxDelayMs: number;
-	/** Whether `response`'s headers name a wait longer than {@link maxDelayMs}: hand the refusal back at once. */
+	/** Whether `response`'s headers name a wait the caller's bounds refuse: hand the refusal back at once. */
 	declines(response: Response): boolean;
+	/** The refused wait {@link declines} saw on `response`, for the error the transport surfaces. */
+	refusal(response: Response): RefusedRetryWait | undefined;
 }
 
 /**
  * The bounds a transport-level retry loop (`fetchWithRetry`) takes from the
- * caller's `maxRetryDelayMs` (`StreamOptions`), so a transport retries a 429 or
- * 5xx exactly when the provider loops above it would. A retry whose response
- * headers name a longer wait than the cap is declined and the refusal surfaces
- * at once; the headers are read as `finalize` reads them
+ * caller's `StreamOptions`, so a transport retries a 429 or 5xx exactly when
+ * the provider loops above it would. A retry whose response headers name a
+ * longer wait than {@link statedRetryWaitLimit} allows (`maxRetryDelayMs`, or a
+ * smaller `providerRetryWaitCeilingMs`) is declined and the refusal surfaces at
+ * once; the headers are read as `finalize` reads them
  * ({@link getRetryAfterMsFromHeaders}), so the transport and the failed
- * message's `errorRetryAfterMs` judge one wait. A wait within the cap is
- * honored. A non-positive cap disables the bound, as the option documents; an
- * absent one keeps the transport's own `defaultMaxDelayMs`.
+ * message's `errorRetryAfterMs` judge one wait. `maxDelayMs`, the bound on any
+ * retry sleep, stays the cap alone: a non-positive cap disables it, as the
+ * option documents, and an absent one keeps the transport's own
+ * `defaultMaxDelayMs`.
  */
 export function transportRetryBounds(
 	maxRetryDelayMs: number | undefined,
 	defaultMaxDelayMs: number,
+	providerRetryWaitCeilingMs?: number,
 ): TransportRetryBounds {
-	const maxDelayMs =
-		maxRetryDelayMs === undefined || Number.isNaN(maxRetryDelayMs)
-			? defaultMaxDelayMs
-			: maxRetryDelayMs > 0
-				? maxRetryDelayMs
-				: Number.POSITIVE_INFINITY;
-	return {
-		maxDelayMs,
-		declines: response => {
-			const waitMs = getRetryAfterMsFromHeaders(response.headers);
-			return waitMs !== undefined && waitMs > maxDelayMs;
-		},
+	const maxDelayMs = statedRetryWaitLimit({ maxRetryDelayMs }, defaultMaxDelayMs).limitMs;
+	const limit = statedRetryWaitLimit({ maxRetryDelayMs, providerRetryWaitCeilingMs }, defaultMaxDelayMs);
+	const refusal = (response: Response): RefusedRetryWait | undefined => {
+		const waitMs = getRetryAfterMsFromHeaders(response.headers);
+		return waitMs !== undefined && waitMs > limit.limitMs ? { ...limit, waitMs } : undefined;
 	};
+	return { maxDelayMs, declines: response => refusal(response) !== undefined, refusal };
 }
 
 /**

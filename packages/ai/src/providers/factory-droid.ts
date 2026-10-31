@@ -379,6 +379,7 @@ type ForwardedOptions = Pick<
 	| "providerRetryWait"
 	| "acceptEmptyResponse"
 	| "maxRetryDelayMs"
+	| "providerRetryWaitCeilingMs"
 	| "streamIdleTimeoutMs"
 	| "streamFirstEventTimeoutMs"
 	| "maxTokens"
@@ -766,6 +767,7 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 					providerRetryWait: options?.providerRetryWait,
 					acceptEmptyResponse: options?.acceptEmptyResponse,
 					maxRetryDelayMs: options?.maxRetryDelayMs,
+					providerRetryWaitCeilingMs: options?.providerRetryWaitCeilingMs,
 					streamIdleTimeoutMs: options?.streamIdleTimeoutMs,
 					streamFirstEventTimeoutMs: options?.streamFirstEventTimeoutMs,
 					maxTokens: options?.maxTokens ?? scope.model.maxTokens ?? undefined,

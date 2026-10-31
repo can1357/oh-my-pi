@@ -662,6 +662,59 @@ describe("OpenAI Responses transient stream retry", () => {
 		expect(result.content).toMatchObject([{ type: "text", text: "Recovered" }]);
 	});
 
+	describe("the providerRetryWaitCeilingMs opt-in on the transient stream retry", () => {
+		const FIVE_MINUTES_MS = 5 * 60 * 1_000;
+		const REFUSAL_NOTE =
+			"(server asked to wait 15 s before retrying; the caller's 10 s providerRetryWaitCeilingMs refused it, so the provider did not retry)";
+
+		/** One in-band failure whose HTTP 200 states 15 s under a 5-minute cap, then a completion. */
+		async function run(ceilingMs: number | undefined) {
+			let attempts = 0;
+			const fetchMock = vi.fn(async () => {
+				attempts++;
+				return attempts === 1
+					? createHeaderWaitFailureResponse("15000")
+					: createCompletedTextResponse("Recovered", "resp_recovered");
+			}) as FetchImpl;
+			const providerRetryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
+			const result = await streamOpenAIResponses(model, context, {
+				apiKey: "test-key",
+				fetch: fetchMock,
+				maxRetryDelayMs: FIVE_MINUTES_MS,
+				providerRetryWaitCeilingMs: ceilingMs,
+				providerRetryWait,
+			}).result();
+			return { requests: attempts, providerRetryWait, result };
+		}
+
+		it("unset: sleeps a stated 15 s, as before", async () => {
+			const { requests, providerRetryWait, result } = await run(undefined);
+
+			expect(requests).toBe(2);
+			expect(providerRetryWait.mock.calls.map(call => call[0])).toEqual([15_000]);
+			expect(result.stopReason).toBe("stop");
+		});
+
+		it("set to 20 s and not exceeded: sleeps a stated 15 s", async () => {
+			const { requests, providerRetryWait } = await run(20_000);
+
+			expect(requests).toBe(2);
+			expect(providerRetryWait.mock.calls.map(call => call[0])).toEqual([15_000]);
+		});
+
+		it("set to 10 s and exceeded: surfaces a stated 15 s after one request, saying so, with its wait and classification kept", async () => {
+			const { requests, providerRetryWait, result } = await run(10_000);
+
+			expect(requests).toBe(1);
+			expect(providerRetryWait).not.toHaveBeenCalled();
+			expect(result.stopReason).toBe("error");
+			expect(result.errorClassificationMessage).toBeDefined();
+			expect(result.errorClassificationMessage).not.toContain("server asked");
+			expect(result.errorMessage).toBe(`${result.errorClassificationMessage} ${REFUSAL_NOTE}`);
+			expect(result.errorRetryAfterMs).toBe(15_000);
+		});
+	});
+
 	it("honors caller abort during the retry wait", async () => {
 		const controller = new AbortController();
 		const fetchMock = vi.fn(async () => createTruncatedPendingToolResponse()) as FetchImpl;

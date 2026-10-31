@@ -992,6 +992,7 @@ const streamOpenAICompletionsOnce = (
 						signal: requestSignal,
 						maxAttempts: options?.maxHttpAttempts,
 						maxRetryDelayMs: options?.maxRetryDelayMs,
+						providerRetryWaitCeilingMs: options?.providerRetryWaitCeilingMs,
 						retryWait: options?.providerRetryWait,
 						fetch: wrapFetchForCopilotFallback(
 							wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
@@ -1897,6 +1898,8 @@ const streamOpenAICompletionsOnce = (
 			output.errorId = result.id;
 			output.errorMessage = result.message;
 			output.errorRetryAfterMs = result.retryAfterMs;
+			if (result.classificationMessage !== undefined)
+				output.errorClassificationMessage = result.classificationMessage;
 			// Some providers via OpenRouter include extra details here.
 			const rawMetadata = readOpenRouterRawMetadata(capturedErrorResponse);
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;

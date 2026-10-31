@@ -2237,12 +2237,13 @@ function streamCursorWithWireMode(
 			const maxRetryDelayMs = options?.maxRetryDelayMs ?? DEFAULT_MAX_RETRY_DELAY_MS;
 			const backoffDelayMs = maxRetryDelayMs > 0 ? Math.min(uncappedDelayMs, maxRetryDelayMs) : uncappedDelayMs;
 			// The wait this attempt stated, its accepted response's headers included;
-			// a stated wait past the caller's cap surfaces the failure instead.
+			// a stated wait past the caller's bounds surfaces the failure instead.
 			const retryDelayMs = canRetryFromCheckpoint
 				? resolveRetryDelayMs(
 						getStatedRetryAfterMs(model.provider, error, { streamResponseHeaders }),
 						backoffDelayMs,
-						maxRetryDelayMs,
+						options,
+						error,
 					)
 				: undefined;
 			if (
@@ -2352,7 +2353,7 @@ function streamCursorWithWireMode(
 				baseConversationId !== undefined &&
 				usageState !== undefined &&
 				!usageState.sawTokenDelta &&
-				isCursorConversationRejected(error, result.message) &&
+				isCursorConversationRejected(error, result.classificationMessage ?? result.message) &&
 				canRotate
 			) {
 				const rotated = crypto.randomUUID();
@@ -2379,10 +2380,16 @@ function streamCursorWithWireMode(
 			// rejects too, `canRotate` is false and the original status surfaces.
 			output.errorId = rotatedRejection ? AIError.create(AIError.Flag.Transient) : result.id;
 			if (error instanceof ConnectEndStreamError) {
-				output.errorClassificationMessage = result.message;
-				output.errorMessage = error.diagnosticMessage;
+				output.errorClassificationMessage = result.classificationMessage ?? result.message;
+				output.errorMessage =
+					result.refusalNote === undefined
+						? error.diagnosticMessage
+						: `${error.diagnosticMessage} ${result.refusalNote}`;
 			} else {
 				output.errorMessage = result.message;
+				if (result.classificationMessage !== undefined) {
+					output.errorClassificationMessage = result.classificationMessage;
+				}
 			}
 			output.errorRetryAfterMs = result.retryAfterMs;
 			// Every request this turn sent beyond the first — a checkpoint resume, a

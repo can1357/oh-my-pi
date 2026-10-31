@@ -829,6 +829,7 @@ const streamOpenAIResponsesOnce = (
 						body: requestParams,
 						signal: requestSignal,
 						maxRetryDelayMs: options?.maxRetryDelayMs,
+						providerRetryWaitCeilingMs: options?.providerRetryWaitCeilingMs,
 						retryWait: options?.providerRetryWait,
 						fetch: wrapFetchForCopilotFallback(
 							wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
@@ -1225,12 +1226,13 @@ const streamOpenAIResponsesOnce = (
 						transientStreamRetryAttempt < OPENAI_RESPONSES_MAX_TRANSIENT_STREAM_RETRIES &&
 						isRetryableOpenAIResponsesStreamFailure(streamFailure);
 					// The wait this attempt stated, its accepted response's headers
-					// included; a wait past the caller's cap surfaces the failure instead.
+					// included; a wait past the caller's bounds surfaces the failure instead.
 					const retryDelayMs = canRetry
 						? resolveRetryDelayMs(
 								getStatedRetryAfterMs(model.provider, streamFailure, { streamResponseHeaders }),
 								OPENAI_RESPONSES_TRANSIENT_STREAM_RETRY_DELAY_MS,
-								options?.maxRetryDelayMs,
+								options,
+								streamFailure,
 							)
 						: undefined;
 					if (retryDelayMs === undefined) {
@@ -1344,6 +1346,8 @@ const streamOpenAIResponsesOnce = (
 			output.errorId = result.id;
 			output.errorMessage = result.message;
 			output.errorRetryAfterMs = result.retryAfterMs;
+			if (result.classificationMessage !== undefined)
+				output.errorClassificationMessage = result.classificationMessage;
 			if (AIError.isRequestBodyReadTimeout(result.status, result.message) && lastSubmittedRequestWasFullReplay) {
 				output.requestBodyReadTimeoutFullReplay = true;
 			}

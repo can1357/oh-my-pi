@@ -490,43 +490,45 @@ function rateLimitRejection(retryAfter: string): Response {
 interface TransportRetryOptions {
 	fetch: FetchImpl;
 	maxRetryDelayMs: number;
-	providerRetryWait: (delayMs: number, signal?: AbortSignal) => Promise<void>;
+	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
+	providerRetryWaitCeilingMs?: number;
 }
 
-describe("OpenAI-family transport retries of an ordinary 429 keep to the caller's cap and wait through providerRetryWait", () => {
-	const routes = [
-		{
-			name: "OpenAI Completions",
-			success: () => completedCompletionsSse("recovered"),
-			run: (options: TransportRetryOptions) =>
-				streamOpenAICompletions(completionsModel, context, { apiKey: "test-key", ...options }),
-		},
-		{
-			name: "Azure OpenAI Responses",
-			success: () => completedResponsesSse("recovered"),
-			run: (options: TransportRetryOptions) =>
-				streamAzureOpenAIResponses(azureModel, context, {
-					apiKey: "test-key",
-					azureBaseUrl: azureModel.baseUrl,
-					azureApiVersion: "v1",
-					...options,
-				}),
-		},
-		{
-			name: "OpenAI Responses",
-			success: () => completedResponsesSse("recovered"),
-			run: (options: TransportRetryOptions) =>
-				streamOpenAIResponses(responsesModel, context, { apiKey: "test-key", ...options }),
-		},
-		{
-			name: "Codex SSE",
-			success: () => completedCodexSse("recovered"),
-			run: (options: TransportRetryOptions) =>
-				streamOpenAICodexResponses(codexModel, context, { apiKey: "test-key", ...options }),
-		},
-	];
+/** The routes whose transport retries a refusal: three through `postOpenAIStream`, and Codex SSE. */
+const transportRoutes = [
+	{
+		name: "OpenAI Completions",
+		success: () => completedCompletionsSse("recovered"),
+		run: (options: TransportRetryOptions) =>
+			streamOpenAICompletions(completionsModel, context, { apiKey: "test-key", ...options }),
+	},
+	{
+		name: "Azure OpenAI Responses",
+		success: () => completedResponsesSse("recovered"),
+		run: (options: TransportRetryOptions) =>
+			streamAzureOpenAIResponses(azureModel, context, {
+				apiKey: "test-key",
+				azureBaseUrl: azureModel.baseUrl,
+				azureApiVersion: "v1",
+				...options,
+			}),
+	},
+	{
+		name: "OpenAI Responses",
+		success: () => completedResponsesSse("recovered"),
+		run: (options: TransportRetryOptions) =>
+			streamOpenAIResponses(responsesModel, context, { apiKey: "test-key", ...options }),
+	},
+	{
+		name: "Codex SSE",
+		success: () => completedCodexSse("recovered"),
+		run: (options: TransportRetryOptions) =>
+			streamOpenAICodexResponses(codexModel, context, { apiKey: "test-key", ...options }),
+	},
+];
 
-	for (const route of routes) {
+describe("OpenAI-family transport retries of an ordinary 429 keep to the caller's cap and wait through providerRetryWait", () => {
+	for (const route of transportRoutes) {
 		it(`${route.name}: a 429 whose 50 ms Retry-After exceeds a 10 ms cap ends after one request`, async () => {
 			let requests = 0;
 			const fetchMock: FetchImpl = vi.fn(async () => {
@@ -559,6 +561,61 @@ describe("OpenAI-family transport retries of an ordinary 429 keep to the caller'
 			expect(providerRetryWait.mock.calls[0]?.[0]).toBeGreaterThanOrEqual(50);
 			expect(result.stopReason).toBe("stop");
 			expect(result.content.find(block => block.type === "text")?.text).toBe("recovered");
+		});
+	}
+});
+
+describe("OpenAI-family transport retries and the providerRetryWaitCeilingMs opt-in", () => {
+	const FIVE_MINUTES_MS = 5 * 60 * 1_000;
+	const REFUSAL_NOTE =
+		"(server asked to wait 15 s before retrying; the caller's 10 s providerRetryWaitCeilingMs refused it, so the provider did not retry)";
+
+	for (const route of transportRoutes) {
+		/** A 429 stating 15 s under a 5-minute cap, then a success. */
+		const run = async (ceilingMs: number | undefined) => {
+			let requests = 0;
+			const fetchMock: FetchImpl = vi.fn(async () => {
+				requests++;
+				return requests === 1 ? rateLimitRejection("15") : route.success();
+			});
+			const providerRetryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
+			const result = await route
+				.run({
+					fetch: fetchMock,
+					maxRetryDelayMs: FIVE_MINUTES_MS,
+					providerRetryWaitCeilingMs: ceilingMs,
+					providerRetryWait,
+				})
+				.result();
+			return { requests, providerRetryWait, result };
+		};
+
+		it(`${route.name}: unset, a 429 stating 15 s is retried after sleeping it, as before`, async () => {
+			const { requests, providerRetryWait, result } = await run(undefined);
+
+			expect(requests).toBe(2);
+			expect(providerRetryWait.mock.calls.map(call => call[0])).toEqual([15_000]);
+			expect(result.stopReason).toBe("stop");
+		});
+
+		it(`${route.name}: set to 20 s and not exceeded, a 429 stating 15 s is retried after sleeping it`, async () => {
+			const { requests, providerRetryWait } = await run(20_000);
+
+			expect(requests).toBe(2);
+			expect(providerRetryWait.mock.calls.map(call => call[0])).toEqual([15_000]);
+		});
+
+		it(`${route.name}: set to 10 s and exceeded, a 429 stating 15 s surfaces after one request, saying so, with its wait and classification kept`, async () => {
+			const { requests, providerRetryWait, result } = await run(10_000);
+
+			expect(requests).toBe(1);
+			expect(providerRetryWait).not.toHaveBeenCalled();
+			expect(result.stopReason).toBe("error");
+			expect(result.errorStatus).toBe(429);
+			expect(result.errorRetryAfterMs).toBe(15_000);
+			expect(result.errorClassificationMessage).toBeDefined();
+			expect(result.errorClassificationMessage).not.toContain("server asked");
+			expect(result.errorMessage).toBe(`${result.errorClassificationMessage} ${REFUSAL_NOTE}`);
 		});
 	}
 });

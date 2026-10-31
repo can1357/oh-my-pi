@@ -5,6 +5,7 @@ import type { CapturedHttpErrorResponse, RawHttpRequestDump } from "../utils/htt
 import { classify, classifyMessage, status } from "./flags";
 import { formatMessage } from "./format";
 import { getFailureRetryAfterMs, type HeadersLike } from "../utils/retry-after";
+import { refusedRetryWaitNote, retryWaitRefusal } from "../utils/retry-wait";
 
 /** Context a provider catch block hands to {@link finalize}. */
 export interface FinalizeOptions {
@@ -53,6 +54,18 @@ export interface FinalizeResult {
 	 * cannot forge it.
 	 */
 	retryAfterMs: number | undefined;
+	/**
+	 * Set when a provider's own retry refused the wait the server stated
+	 * (`markRetryWaitRefused`): the note, naming the wait and the bound that
+	 * refused it, that ends {@link message}.
+	 */
+	refusalNote?: string;
+	/**
+	 * With {@link refusalNote}: {@link message} without the note, for
+	 * `AssistantMessage.errorClassificationMessage`, so the note never changes how
+	 * the failure is classified. `id` was classified from it.
+	 */
+	classificationMessage?: string;
 }
 
 /**
@@ -96,14 +109,20 @@ export async function finalize(error: unknown, opts: FinalizeOptions = {}): Prom
 		errorStatus: currentStatus,
 	});
 
+	// A provider's own retry that refused the stated wait says so. The id above
+	// was classified from the message without the note.
+	const refused = aborted ? undefined : retryWaitRefusal(error);
+	const refusalNote = refused === undefined ? undefined : refusedRetryWaitNote(refused);
+
 	return {
 		id,
 		status: currentStatus,
 		stopReason: aborted ? "aborted" : "error",
-		message,
+		message: refusalNote === undefined ? message : `${message} ${refusalNote}`,
 		retryAfterMs: getFailureRetryAfterMs(error, {
 			errorResponseHeaders: opts.capturedErrorResponse?.headers,
 			streamResponseHeaders: opts.streamResponseHeaders,
 		}),
+		...(refusalNote === undefined ? {} : { refusalNote, classificationMessage: message }),
 	};
 }

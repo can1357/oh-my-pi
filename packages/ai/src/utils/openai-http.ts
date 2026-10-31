@@ -23,7 +23,7 @@ export { OpenAIHttpError };
 import type { FetchImpl } from "../types";
 import type { CapturedHttpErrorResponse } from "./http-inspector";
 import { transportRetryBounds } from "./retry-after";
-import type { RetryWaitHook } from "./retry-wait";
+import { markRetryWaitRefused, type RetryWaitHook } from "./retry-wait";
 
 /**
  * Total attempts (initial + retries). Parity with the removed SDK clients'
@@ -82,6 +82,11 @@ export interface OpenAIStreamRequestInit {
 	 */
 	maxRetryDelayMs?: number;
 	/**
+	 * The caller's `StreamOptions.providerRetryWaitCeilingMs`: when set, a
+	 * 429/5xx whose headers name a longer wait is surfaced at once too.
+	 */
+	providerRetryWaitCeilingMs?: number;
+	/**
 	 * The caller's `StreamOptions.providerRetryWait`: every transport retry sleeps
 	 * through it, as every provider retry above the transport does.
 	 */
@@ -114,7 +119,11 @@ export interface OpenAIStreamHandle<TEvent> {
  * watchdog timers and abort-reason bookkeeping.
  */
 export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): Promise<OpenAIStreamHandle<TEvent>> {
-	const retryBounds = transportRetryBounds(init.maxRetryDelayMs, DEFAULT_MAX_RETRY_DELAY_MS);
+	const retryBounds = transportRetryBounds(
+		init.maxRetryDelayMs,
+		DEFAULT_MAX_RETRY_DELAY_MS,
+		init.providerRetryWaitCeilingMs,
+	);
 	let response: Response;
 	try {
 		response = await fetchWithRetry(init.url, {
@@ -129,7 +138,7 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 			// A proxy concurrency-admission 429 (`rate_limit_type: max_parallel_requests`)
 			// surfaces immediately instead of being slept-and-retried here; session
 			// recovery owns its backoff/fallback (issue #8854). So does a refusal whose
-			// headers name a longer wait than the caller's cap.
+			// headers name a longer wait than the caller's cap or ceiling.
 			shouldRetryResponse: async (response, bodyText) =>
 				!isConcurrencyAdmissionRejection(response, bodyText) &&
 				!retryBounds.declines(response) &&
@@ -145,7 +154,11 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 		throw AIError.networkFailureError(error, init.url);
 	}
 	if (!response.ok) {
-		throw await captureOpenAIHttpError(response);
+		const error = await captureOpenAIHttpError(response);
+		// A refusal the caller's bounds kept from a retry says so in the failed message.
+		const refused = AIError.isTransientStatus(response.status) ? retryBounds.refusal(response) : undefined;
+		if (refused !== undefined) markRetryWaitRefused(error, refused);
+		throw error;
 	}
 	if (!response.body) {
 		throw new AIError.ProviderResponseError(`OpenAI stream response has no body (status ${response.status})`, {

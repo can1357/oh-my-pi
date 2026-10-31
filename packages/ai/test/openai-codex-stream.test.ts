@@ -2704,7 +2704,7 @@ describe("openai-codex streaming", () => {
 			);
 		}
 
-		async function runWithCap(fetchMock: FetchImpl, maxRetryDelayMs: number) {
+		async function runWithCap(fetchMock: FetchImpl, maxRetryDelayMs: number, extra: { ceilingMs?: number } = {}) {
 			const tempDir = TempDir.createSync("@pi-codex-stream-");
 			setAgentDir(tempDir.path());
 			const providerRetryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
@@ -2713,6 +2713,7 @@ describe("openai-codex streaming", () => {
 				apiKey: createCodexTestToken(),
 				fetch: fetchMock,
 				maxRetryDelayMs,
+				providerRetryWaitCeilingMs: extra.ceilingMs,
 				providerRetryWait,
 			}).result();
 			return { result, providerRetryWait };
@@ -2807,6 +2808,45 @@ describe("openai-codex streaming", () => {
 			expect(providerRetryWait.mock.calls[0]?.[0]).toBe(750);
 			expect(result.stopReason).toBe("stop");
 			expect(result.content.find(block => block.type === "text")?.text).toBe("Hello after wait");
+		});
+
+		describe("the providerRetryWaitCeilingMs opt-in", () => {
+			const FIVE_MINUTES_MS = 5 * 60 * 1_000;
+			const REFUSAL_NOTE =
+				"(server asked to wait 15 s before retrying; the caller's 10 s providerRetryWaitCeilingMs refused it, so the provider did not retry)";
+
+			it("unset: sleeps a stated 15 s, as before", async () => {
+				const fetchMock = headerWaitFetch("15000");
+
+				const { result, providerRetryWait } = await runWithCap(fetchMock, FIVE_MINUTES_MS);
+
+				expect(fetchMock).toHaveBeenCalledTimes(2);
+				expect(providerRetryWait.mock.calls.map(call => call[0])).toEqual([15_000]);
+				expect(result.stopReason).toBe("stop");
+			});
+
+			it("set to 20 s and not exceeded: sleeps a stated 15 s", async () => {
+				const fetchMock = headerWaitFetch("15000");
+
+				const { providerRetryWait } = await runWithCap(fetchMock, FIVE_MINUTES_MS, { ceilingMs: 20_000 });
+
+				expect(fetchMock).toHaveBeenCalledTimes(2);
+				expect(providerRetryWait.mock.calls.map(call => call[0])).toEqual([15_000]);
+			});
+
+			it("set to 10 s and exceeded: surfaces a stated 15 s after one request, saying so, with its wait and classification kept", async () => {
+				const fetchMock = headerWaitFetch("15000");
+
+				const { result, providerRetryWait } = await runWithCap(fetchMock, FIVE_MINUTES_MS, { ceilingMs: 10_000 });
+
+				expect(fetchMock).toHaveBeenCalledTimes(1);
+				expect(providerRetryWait).not.toHaveBeenCalled();
+				expect(result.stopReason).toBe("error");
+				expect(result.errorClassificationMessage).toBeDefined();
+				expect(result.errorClassificationMessage).not.toContain("server asked");
+				expect(result.errorMessage).toBe(`${result.errorClassificationMessage} ${REFUSAL_NOTE}`);
+				expect(result.errorRetryAfterMs).toBe(15_000);
+			});
 		});
 	});
 

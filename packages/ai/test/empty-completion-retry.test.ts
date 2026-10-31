@@ -435,6 +435,71 @@ describe("withReplaySafeStreamRetry", () => {
 		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
 	});
 
+	describe("the providerRetryWaitCeilingMs opt-in", () => {
+		const FIVE_MINUTES_MS = 5 * 60 * 1_000;
+		const REFUSAL_NOTE =
+			"(server asked to wait 15 s before retrying; the caller's 10 s providerRetryWaitCeilingMs refused it, so the provider did not retry)";
+
+		/** One failed attempt stating 15 s under `capMs` (5 minutes by default), then content. */
+		async function run(ceilingMs: number | undefined, capMs = FIVE_MINUTES_MS) {
+			let attempts = 0;
+			const waits: number[] = [];
+			const stream = withReplaySafeStreamRetry(
+				{},
+				CTX,
+				{
+					maxRetryDelayMs: capMs,
+					providerRetryWaitCeilingMs: ceilingMs,
+					providerRetryWait: async (ms: number) => void waits.push(ms),
+				},
+				() => {
+					attempts++;
+					return attempts > 1 ? contentAttempt() : statedWaitErrorAttempt(15_000);
+				},
+				{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+			);
+			const result = await stream.result();
+			return { attempts, waits, result };
+		}
+
+		it("unset: sleeps a stated 15 s, as before", async () => {
+			const { attempts, waits, result } = await run(undefined);
+
+			expect(attempts).toBe(2);
+			expect(waits).toEqual([15_000]);
+			expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+		});
+
+		it("set to 20 s and not exceeded: sleeps a stated 15 s", async () => {
+			const { attempts, waits } = await run(20_000);
+
+			expect(attempts).toBe(2);
+			expect(waits).toEqual([15_000]);
+		});
+
+		it("set to 10 s and exceeded: surfaces a stated 15 s after one attempt, saying so, with its wait and classification kept", async () => {
+			const { attempts, waits, result } = await run(10_000);
+
+			expect(attempts).toBe(1);
+			expect(waits).toEqual([]);
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toBe(`429 Too many requests ${REFUSAL_NOTE}`);
+			expect(result.errorClassificationMessage).toBe("429 Too many requests");
+			expect(result.errorRetryAfterMs).toBe(15_000);
+			expect(result.errorStatus).toBe(429);
+		});
+
+		it("set to 20 s above a 10 s maxRetryDelayMs: the smaller cap still refuses a stated 15 s, and the note names it", async () => {
+			const { attempts, waits, result } = await run(20_000, 10_000);
+
+			expect(attempts).toBe(1);
+			expect(waits).toEqual([]);
+			expect(result.errorMessage).toBe(
+				"429 Too many requests (server asked to wait 15 s before retrying; the 10 s maxRetryDelayMs refused it, so the provider did not retry)",
+			);
+		});
+	});
+
 	interface CountedAttemptOptions {
 		fetch?: FetchImpl;
 		signal?: AbortSignal;

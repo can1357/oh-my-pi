@@ -888,6 +888,55 @@ describe("anthropic retry-after cap (maxRetryDelayMs)", () => {
 		expect(result.errorRetryAfterMs).toBe(750);
 	});
 
+	describe("the providerRetryWaitCeilingMs opt-in", () => {
+		const FIVE_MINUTES_MS = 5 * 60 * 1_000;
+		const REFUSAL_NOTE =
+			"(server asked to wait 15 s before retrying; the caller's 10 s providerRetryWaitCeilingMs refused it, so the provider did not retry)";
+
+		/** An HTTP 200 overload event whose headers state 15 s under a 5-minute cap, then a success. */
+		async function run(ceilingMs: number | undefined) {
+			const { calls, client } = createResponseClient([
+				createAnthropicOverloadedEventResponse("Service temporarily unavailable", { "retry-after-ms": "15000" }),
+				createAnthropicSseResponse("after the stated wait"),
+			]);
+			const providerRetryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
+			const result = await streamAnthropic(model, context, {
+				client,
+				maxRetryDelayMs: FIVE_MINUTES_MS,
+				providerRetryWaitCeilingMs: ceilingMs,
+				providerRetryWait,
+			}).result();
+			return { calls: calls.count, providerRetryWait, result };
+		}
+
+		it("unset: sleeps a stated 15 s, as before", async () => {
+			const { calls, providerRetryWait, result } = await run(undefined);
+
+			expect(calls).toBe(2);
+			expect(providerRetryWait.mock.calls.map(call => call[0])).toEqual([15_000]);
+			expect(result.stopReason).toBe("stop");
+		});
+
+		it("set to 20 s and not exceeded: sleeps a stated 15 s", async () => {
+			const { calls, providerRetryWait } = await run(20_000);
+
+			expect(calls).toBe(2);
+			expect(providerRetryWait.mock.calls.map(call => call[0])).toEqual([15_000]);
+		});
+
+		it("set to 10 s and exceeded: surfaces a stated 15 s after one request, saying so, with its wait and classification kept", async () => {
+			const { calls, providerRetryWait, result } = await run(10_000);
+
+			expect(calls).toBe(1);
+			expect(providerRetryWait).not.toHaveBeenCalled();
+			expect(result.stopReason).toBe("error");
+			expect(result.errorClassificationMessage).toBeDefined();
+			expect(result.errorClassificationMessage).not.toContain("server asked");
+			expect(result.errorMessage).toBe(`${result.errorClassificationMessage} ${REFUSAL_NOTE}`);
+			expect(result.errorRetryAfterMs).toBe(15_000);
+		});
+	});
+
 	it("honors retry headers from structurally compatible injected SDK errors", async () => {
 		let attempt = 0;
 		const error = Object.assign(new Error("529 overloaded"), {

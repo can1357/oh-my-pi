@@ -103,7 +103,7 @@ The server accepts this `SimpleStreamOptions` subset:
 `temperature`, `topP`, `topK`, `minP`, `presencePenalty`,
 `frequencyPenalty`, `repetitionPenalty`, `stopSequences`, `maxTokens`,
 `cacheRetention`, `cachedContent`, `userProfileId`, `headers`,
-`initiatorOverride`, `maxRetryDelayMs`, `metadata`, `sessionId`,
+`initiatorOverride`, `maxRetryDelayMs`, `providerRetryWaitCeilingMs`, `metadata`, `sessionId`,
 `promptCacheKey`, `promptCache`, `statefulResponses`,
 `streamFirstEventTimeoutMs`, `streamIdleTimeoutMs`, `reasoning`,
 `disableReasoning`, `forceReasoningOff`, `hideThinkingSummary`,

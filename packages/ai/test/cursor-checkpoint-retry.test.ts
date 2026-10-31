@@ -1,4 +1,4 @@
-import { expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import * as http2 from "node:http2";
 import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
@@ -396,6 +396,7 @@ function unavailableEndStreamFrame(wait: string): Buffer {
 async function runFirstAttemptScenario(
 	answerFirst: (providerStream: http2.ServerHttp2Stream) => void,
 	maxRetryDelayMs: number,
+	extra: { ceilingMs?: number } = {},
 ) {
 	const sessions = new Set<http2.Http2Session>();
 	let requestCount = 0;
@@ -431,6 +432,7 @@ async function runFirstAttemptScenario(
 		const result = await streamCursor(makeModel(`http://127.0.0.1:${address.port}`), context, {
 			apiKey: "test-token",
 			maxRetryDelayMs,
+			providerRetryWaitCeilingMs: extra.ceilingMs,
 			providerRetryWait: async delayMs => {
 				delays.push(delayMs);
 			},
@@ -520,4 +522,41 @@ it("retries an HTTP/2 503 whose Connect error body names no details, after its 7
 	expect(delays).toEqual([750]);
 	expect(result.stopReason).toBe("stop");
 	expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "after wait" })]);
+});
+
+describe("the providerRetryWaitCeilingMs opt-in", () => {
+	const FIVE_MINUTES_MS = 5 * 60 * 1_000;
+	const REFUSAL_NOTE =
+		"(server asked to wait 15 s before retrying; the caller's 10 s providerRetryWaitCeilingMs refused it, so the provider did not retry)";
+
+	it("unset: sleeps a stated 15 s, as before", async () => {
+		const { requestCount, delays, result } = await runFirstAttemptScenario(answerStatedWait("15s"), FIVE_MINUTES_MS);
+
+		expect(requestCount).toBe(2);
+		expect(delays).toEqual([15_000]);
+		expect(result.stopReason).toBe("stop");
+	});
+
+	it("set to 20 s and not exceeded: sleeps a stated 15 s", async () => {
+		const { requestCount, delays } = await runFirstAttemptScenario(answerStatedWait("15s"), FIVE_MINUTES_MS, {
+			ceilingMs: 20_000,
+		});
+
+		expect(requestCount).toBe(2);
+		expect(delays).toEqual([15_000]);
+	});
+
+	it("set to 10 s and exceeded: surfaces a stated 15 s after one request, saying so, with its classification kept", async () => {
+		const { requestCount, delays, result } = await runFirstAttemptScenario(answerStatedWait("15s"), FIVE_MINUTES_MS, {
+			ceilingMs: 10_000,
+		});
+
+		expect(requestCount).toBe(1);
+		expect(delays).toEqual([]);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("Please try again in 15s");
+		expect(result.errorMessage?.endsWith(` ${REFUSAL_NOTE}`)).toBe(true);
+		expect(result.errorClassificationMessage).toBeDefined();
+		expect(result.errorClassificationMessage).not.toContain("server asked");
+	});
 });

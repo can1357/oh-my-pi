@@ -3643,13 +3643,15 @@ const streamAnthropicOnce = (
 					// naming one) or in the error's text: retrying sooner than the server
 					// asked is a guaranteed failure that just burns the retry budget. Read
 					// as every layer above reads the failed message. The wait is bounded by
-					// `maxRetryDelayMs` so a multi-hour `retry-after` cannot park the
-					// provider stream before higher-level recovery runs: an over-cap hint
-					// surfaces the original error immediately.
+					// `maxRetryDelayMs` (and a set `providerRetryWaitCeilingMs`) so a long
+					// `retry-after` cannot park the provider stream before higher-level
+					// recovery runs: an over-bound hint surfaces the original error
+					// immediately, saying so.
 					const delayMs = resolveRetryDelayMs(
 						getStatedRetryAfterMs(sourceModel.provider, streamFailure, { streamResponseHeaders }),
 						backoffDelayMs,
-						options?.maxRetryDelayMs,
+						options,
+						streamFailure,
 					);
 					if (delayMs === undefined) throw streamFailure;
 					await waitForRetry(options?.providerRetryWait, delayMs, options?.signal);
@@ -3737,6 +3739,8 @@ const streamAnthropicOnce = (
 			output.errorId = result.id;
 			output.errorMessage = transport ? result.message : maybeAddReplayUnsignedThinkingHint(model, result.message);
 			output.errorRetryAfterMs = result.retryAfterMs;
+			if (result.classificationMessage !== undefined)
+				output.errorClassificationMessage = result.classificationMessage;
 			output.providerReplays = reportedProviderReplays();
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;

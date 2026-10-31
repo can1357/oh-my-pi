@@ -80,7 +80,13 @@ import {
 	type HeadersLike,
 	transportRetryBounds,
 } from "../utils/retry-after";
-import { type RetryWaitHook, resolveRetryDelayMs, waitForRetry } from "../utils/retry-wait";
+import {
+	markRetryWaitRefused,
+	type RetryWaitHook,
+	resolveRetryDelayMs,
+	type StatedWaitPolicy,
+	waitForRetry,
+} from "../utils/retry-wait";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { notifyRawSseEvent } from "../utils/sse-debug";
 import { providerReplaysFrom, type WireAttempts, wireCountedFetch } from "../utils/wire-attempts";
@@ -2035,7 +2041,7 @@ async function openCodexSseTransport(
 				requestSetup.requestSignal,
 				requestSetup.firstEventTimeoutMs,
 				options?.codexSseMaxAttempts,
-				options?.maxRetryDelayMs,
+				options,
 				options?.providerRetryWait,
 				event => options?.onSseEvent?.(event, model),
 				wrapFetchForRequestCompression(requestContext.wire.fetch, model),
@@ -2187,6 +2193,7 @@ async function handleCodexStreamFailure(context: CodexStreamFailureContext, erro
 	output.errorId = result.id;
 	output.errorMessage = result.message;
 	output.errorRetryAfterMs = result.retryAfterMs;
+	if (result.classificationMessage !== undefined) output.errorClassificationMessage = result.classificationMessage;
 	// A number, 0 included, whenever every attempt went through a transport
 	// this module owns: recovery above reads the absence of this field as "no
 	// layer here reports", so a failure that never reached the processor must
@@ -3230,13 +3237,14 @@ class CodexStreamProcessor {
 		}
 		// The wait this attempt stated: its error event's headers, else its
 		// accepted SSE response's (a WebSocket attempt has none). A wait past the
-		// caller's cap surfaces the failure instead.
+		// caller's bounds surfaces the failure instead.
 		const delayMs = resolveRetryDelayMs(
 			getStatedRetryAfterMs(this.model.provider, error, {
 				streamResponseHeaders: this.requestContext.streamResponseHeaders,
 			}),
 			CODEX_RETRY_DELAY_MS * (this.runtime.providerRetryAttempt + 1),
-			this.options?.maxRetryDelayMs,
+			this.options,
+			error,
 		);
 		if (delayMs === undefined) return false;
 
@@ -4700,8 +4708,11 @@ async function openCodexSseEventStream(
 	signal: AbortSignal | undefined,
 	firstEventTimeoutMs: number | undefined,
 	codexSseMaxAttempts: number | undefined,
-	/** The caller's `StreamOptions.maxRetryDelayMs`, which bounds this transport's retries ({@link transportRetryBounds}). */
-	maxRetryDelayMs: number | undefined,
+	/**
+	 * The caller's `maxRetryDelayMs` and `providerRetryWaitCeilingMs`, which bound
+	 * this transport's retries ({@link transportRetryBounds}).
+	 */
+	retryPolicy: StatedWaitPolicy | undefined,
 	/** The caller's `StreamOptions.providerRetryWait`, which every transport retry sleeps through. */
 	retryWait: RetryWaitHook | undefined,
 	onSseEvent?: OpenAICodexResponsesOptions["onSseEvent"],
@@ -4756,7 +4767,11 @@ async function openCodexSseEventStream(
 			sentModelsEtagHeader: headers.has(X_MODELS_ETAG_HEADER),
 		});
 
-	const retryBounds = transportRetryBounds(maxRetryDelayMs, CODEX_RATE_LIMIT_BUDGET_MS);
+	const retryBounds = transportRetryBounds(
+		retryPolicy?.maxRetryDelayMs,
+		CODEX_RATE_LIMIT_BUDGET_MS,
+		retryPolicy?.providerRetryWaitCeilingMs,
+	);
 	let response: Response;
 	try {
 		response = await fetchWithRetry(url, {
@@ -4776,7 +4791,7 @@ async function openCodexSseEventStream(
 			defaultDelayMs: attempt => CODEX_RETRY_DELAY_MS * (attempt + 1),
 			maxDelayMs: retryBounds.maxDelayMs,
 			retryWait,
-			// A refusal whose headers name a longer wait than the caller's cap is
+			// A refusal whose headers name a longer wait than the caller's bounds is
 			// surfaced at once, with that wait on the failed message.
 			shouldRetryResponse: response => !retryBounds.declines(response),
 			fetch: fetchAttempt,
@@ -4801,7 +4816,11 @@ async function openCodexSseEventStream(
 		// across the error-body read so a stalled body is bounded, then disarm once
 		// the read settles (issue #12664).
 		try {
-			throw await CodexApiError.fromResponse(response);
+			const error = await CodexApiError.fromResponse(response);
+			// A refusal the caller's bounds kept from a retry says so in the failed message.
+			const refused = AIError.isTransientStatus(response.status) ? retryBounds.refusal(response) : undefined;
+			if (refused !== undefined) markRetryWaitRefused(error, refused);
+			throw error;
 		} finally {
 			clearPreResponseTimeout?.();
 		}

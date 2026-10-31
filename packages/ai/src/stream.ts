@@ -1822,6 +1822,8 @@ function mapOptionsForApi<TApi extends Api>(
 		headers: options?.headers,
 		initiatorOverride: options?.initiatorOverride,
 		maxRetryDelayMs: options?.maxRetryDelayMs,
+		providerRetryWaitCeilingMs: options?.providerRetryWaitCeilingMs,
+		providerRetryWait: options?.providerRetryWait,
 		metadata: options?.metadata,
 		loopGuard: options?.loopGuard,
 		taskBudget: options?.taskBudget,

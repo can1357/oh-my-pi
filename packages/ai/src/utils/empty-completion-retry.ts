@@ -12,14 +12,20 @@
  * Empty-completion retries remain opt-in because a normal empty stop can be a
  * valid provider result. Transient-error retries use the shared provider error
  * classifier, are separately bounded by the caller's policy, and wait at least
- * as long as the provider stated (a stated wait past `maxRetryDelayMs` surfaces
- * the failure instead).
+ * as long as the provider stated (a stated wait past `maxRetryDelayMs`, or a
+ * set `providerRetryWaitCeilingMs`, surfaces the failure instead).
  */
 import * as AIError from "../error";
 import type { AssistantMessage, AssistantMessageEvent, Context, FetchImpl } from "../types";
 import { AssistantMessageEventStream } from "./event-stream";
 import { providerRetryWaitMs } from "./retry-after";
-import { resolveRetryDelayMs, waitForRetry } from "./retry-wait";
+import {
+	hasRefusedRetryWaitNote,
+	refusedRetryWaitNote,
+	resolveRetryDelayMs,
+	retryWaitRefusal,
+	waitForRetry,
+} from "./retry-wait";
 import { withWireCount } from "./wire-attempts";
 
 export const MAX_EMPTY_COMPLETION_RETRIES = 2;
@@ -67,6 +73,7 @@ interface StreamRetryOptions {
 	acceptEmptyResponse?: boolean;
 	fetch?: FetchImpl;
 	maxRetryDelayMs?: number;
+	providerRetryWaitCeilingMs?: number;
 }
 
 /** Controls which replay-safe provider results may issue a fresh request. */
@@ -193,13 +200,16 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				failedMessage.errorMessage !== undefined &&
 				providerErrorRetries < (policy.maxProviderErrorRetries ?? 0) &&
 				AIError.isProviderRetryableError(
-					new FinalizedProviderStreamError(failedMessage.errorMessage, failedMessage.errorStatus),
+					new FinalizedProviderStreamError(
+						failedMessage.errorClassificationMessage ?? failedMessage.errorMessage,
+						failedMessage.errorStatus,
+					),
 				);
 
 			// A provider error waits at least the wait its failed attempt stated, read
 			// as session retry reads it: the response headers' wait
 			// (`errorRetryAfterMs`) with the message's relative waits beside it, else
-			// the message's text. A wait past the caller's cap surfaces the failure.
+			// the message's text. A wait past the caller's bounds surfaces the failure.
 			const delayMs = retryEmpty
 				? EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** emptyRetries
 				: retryProviderError
@@ -210,7 +220,8 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 								failedMessage?.errorRetryAfterMs,
 							),
 							EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** providerErrorRetries,
-							options?.maxRetryDelayMs,
+							options,
+							failedMessage,
 						)
 					: undefined;
 
@@ -236,7 +247,7 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 
 			flush();
 			if (terminal) {
-				forwardTerminal(terminal);
+				forwardTerminal(retryProviderError && delayMs === undefined ? withRefusalNote(terminal) : terminal);
 			} else if (!outer.done) {
 				try {
 					outer.end(await inner.result());
@@ -248,6 +259,29 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 		}
 	})();
 	return outer;
+}
+
+/**
+ * `event`, when this wrapper refused the wait its failed message states
+ * ({@link resolveRetryDelayMs}), with the message saying so, unless the layer
+ * below already did. The note's text is kept out of the classification
+ * (`errorClassificationMessage`). A copy: the message belongs to the layer below.
+ */
+function withRefusalNote(event: AssistantMessageEvent): AssistantMessageEvent {
+	if (event.type !== "error") return event;
+	const refused = retryWaitRefusal(event.error);
+	const message = event.error.errorMessage;
+	if (refused === undefined || message === undefined) return event;
+	if (hasRefusedRetryWaitNote(message)) return event;
+	const note = refusedRetryWaitNote(refused);
+	return {
+		...event,
+		error: {
+			...event.error,
+			errorMessage: `${message} ${note}`,
+			errorClassificationMessage: event.error.errorClassificationMessage ?? message,
+		},
+	};
 }
 
 function terminalReplays(event: AssistantMessageEvent): number | undefined {

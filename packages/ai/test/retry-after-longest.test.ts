@@ -21,6 +21,7 @@ import {
 	longestProviderRetryHint,
 	providerRetryWaitMs,
 } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { type RefusedRetryWait, refusedRetryWaitNote } from "@oh-my-pi/pi-ai/utils/retry-wait";
 
 const MAX_VALUE_DIGITS = BigInt(Number.MAX_VALUE).toString();
 
@@ -205,4 +206,18 @@ describe("appendRetryAfterHint", () => {
 			expect(providerRetryWaitMs("anthropic", formatted, getRetryAfterMsFromHeaders(headers))).toBe(9000);
 		},
 	);
+});
+
+describe("a refused wait's note", () => {
+	it.each([
+		["the caller's ceiling", { option: "providerRetryWaitCeilingMs", limitMs: 10_000, waitMs: 15_000 }],
+		["maxRetryDelayMs", { option: "maxRetryDelayMs", limitMs: 600_000, waitMs: 900_000 }],
+	] as [string, RefusedRetryWait][])("names no wait the session's readers take, refused by %s", (_label, refused) => {
+		// Turn recovery reads a wait out of the failed message's text. The note
+		// restates the wait and names the bound; neither number may become one,
+		// or the session would sleep the bound instead of the server's wait.
+		const message = `429 Too many requests ${refusedRetryWaitNote(refused)}`;
+		expect(providerRetryWaitMs("anthropic", message, undefined)).toBeUndefined();
+		expect(longestProviderRetryHint("anthropic", message)).toBeUndefined();
+	});
 });
