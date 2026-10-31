@@ -182,7 +182,7 @@ function resolveGlobScopePattern(
 /**
  * Format a model as "provider/modelId" string.
  */
-export function formatModelString(model: Model<Api>): string {
+export function formatModelString(model: Pick<Model<Api>, "provider" | "id">): string {
 	return `${model.provider}/${model.id}`;
 }
 
@@ -221,6 +221,22 @@ export function prewalkWouldBeNoopWithRouting(
 ): boolean {
 	if (current && formatModelStringWithRouting(current) !== formatModelStringWithRouting(target)) return false;
 	return prewalkWouldBeNoop(current, currentLevel, target, targetLevel);
+}
+
+/** Restore a canonical model identity without interpreting any part of its id as a thinking selector. */
+export function resolveExactModelIdentity(
+	identity: string,
+	modelRegistry: ModelLookupRegistry,
+): Model<Api> | undefined {
+	const models = modelRegistry.getAvailable();
+	const literal = models.find(model => formatModelStringWithRouting(model) === identity);
+	if (literal) return literal;
+	const routing = splitUpstreamRouting(identity);
+	if (!routing) return undefined;
+	const base = models.find(model => formatModelString(model) === routing.base);
+	if (!base || !supportsUpstreamRouting(base)) return undefined;
+	const routed = applyUpstreamRouting(base, routing.upstream);
+	return formatModelStringWithRouting(routed) === identity ? routed : undefined;
 }
 
 function getOpenRouterRouteSuffix(modelId: string): { baseId: string; suffix: string } | undefined {
@@ -1660,14 +1676,49 @@ export function resolveRoleChain(role: string, settings: Settings, pool: Model<A
 
 /**
  * Resolve a list of override patterns to the first matching model.
+ *
+ * `exactOnly` matches each pattern only as a literal `provider/model-id`,
+ * optionally followed by a supported `:level` and an aggregator `@upstream` pin:
+ * no role aliases, globs, or fuzzy ids.
  */
 export function resolveModelOverride(
 	modelPatterns: string[],
 	modelRegistry: ModelLookupRegistry,
 	settings?: Settings,
+	options?: { exactOnly?: boolean },
 ): { model?: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel; explicitThinkingLevel: boolean; warning?: string } {
 	if (modelPatterns.length === 0) return { explicitThinkingLevel: false };
 	const availableModels = modelRegistry.getAvailable();
+	if (options?.exactOnly) {
+		const find = (selector: string) => availableModels.find(model => `${model.provider}/${model.id}` === selector);
+		const exact = (selector: string) => {
+			// Some real ids end in a level-shaped segment, so the literal id wins over a suffix split.
+			const literal = find(selector);
+			if (literal) return { model: literal, explicitThinkingLevel: false };
+			const { base, level } = splitThinkingSuffix(selector, -1, MAX_THINKING_SUFFIX_OPTIONS);
+			if (!level) return undefined;
+			const model = find(base);
+			if (!model) return undefined;
+			return {
+				model,
+				thinkingLevel:
+					level === AUTO_THINKING ? AUTO_THINKING : (resolveThinkingLevelForModel(model, level) ?? level),
+				explicitThinkingLevel: true,
+			};
+		};
+		for (const pattern of modelPatterns) {
+			const selector = pattern.trim();
+			const direct = exact(selector);
+			if (direct) return direct;
+			// The pin is part of the selection: it rides the resolved model to dispatch.
+			const routing = splitUpstreamRouting(selector);
+			const routed = routing ? exact(routing.base) : undefined;
+			if (routing && routed && supportsUpstreamRouting(routed.model)) {
+				return { ...routed, model: applyUpstreamRouting(routed.model, routing.upstream) };
+			}
+		}
+		return { explicitThinkingLevel: false };
+	}
 	const matchPreferences = getModelMatchPreferences(settings);
 	let warning: string | undefined;
 	for (const pattern of modelPatterns) {
@@ -1791,6 +1842,7 @@ export async function resolveModelOverrideWithAuthFallback(
 	modelRegistry: ModelLookupRegistry & Pick<ModelRegistry, "getApiKey">,
 	settings?: Settings,
 	sessionId?: string,
+	options?: { exactOnly?: boolean },
 ): Promise<{
 	model?: Model<Api>;
 	thinkingLevel?: ConfiguredThinkingLevel;
@@ -1804,7 +1856,7 @@ export async function resolveModelOverrideWithAuthFallback(
 		const enabledModels = modelRegistry.getAvailable().filter(model => !disabledProviders.has(model.provider));
 		lookupRegistry = { getAvailable: () => enabledModels };
 	}
-	const primary = resolveModelOverride(modelPatterns, lookupRegistry, settings);
+	const primary = resolveModelOverride(modelPatterns, lookupRegistry, settings, options);
 	if (!primary.model || !parentActiveModelPattern) {
 		return { ...primary, authFallbackUsed: false };
 	}

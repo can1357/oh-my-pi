@@ -199,3 +199,76 @@ it.each(["model", "upstream route"] as const)(
 	},
 	30_000,
 );
+
+it("revives a parked per-call worker on its exact model, not on a session-local switch", async () => {
+	const cwd = path.join(root, "home", "work");
+	const artifactsDir = path.join(root, "artifacts");
+	await fs.mkdir(cwd, { recursive: true });
+	await fs.mkdir(artifactsDir, { recursive: true });
+
+	const authStorage = createInMemoryAuthStorage();
+	authStorage.keys.setRuntime("mock", "test-key");
+	const modelRegistry = new ModelRegistry(authStorage);
+	const [exact, switched] = [PLANNER, TARGET].map(id =>
+		Object.assign(
+			createMockModel({
+				id,
+				reasoning: true,
+				handler: context =>
+					(context.tools ?? []).some(tool => tool.name === "yield")
+						? { content: [{ type: "toolCall", name: "yield", arguments: { type: "result", data: "done" } }] }
+						: { content: ["label"] },
+			}),
+			{ thinking },
+		),
+	);
+	const catalogAvailable = modelRegistry.getAvailable.bind(modelRegistry);
+	vi.spyOn(modelRegistry, "getAvailable").mockImplementation(kind => [exact, switched, ...catalogAvailable(kind)]);
+	vi.spyOn(modelRegistry, "awaitBackgroundRefresh").mockResolvedValue(undefined);
+	// Both models are operator-approved, so only the revive's model choice can move the worker.
+	const settings = Settings.isolated({
+		"task.agentIdleTtlMs": 0,
+		"task.perCallModel": "on",
+		"async.enabled": false,
+		"compaction.enabled": false,
+		"retry.enabled": false,
+		"todo.reminders": false,
+		"advisor.enabled": false,
+		modelRoles: { default: `mock/${PLANNER}`, review: `mock/${PLANNER}`, smol: `mock/${TARGET}` },
+	});
+
+	try {
+		const result = await runSubprocess({
+			cwd,
+			artifactsDir,
+			agent: { name: "task", description: "test", systemPrompt: "test", tools: ["read"], source: "bundled" },
+			task: "answer",
+			index: 0,
+			id: AGENT_ID,
+			modelOverride: `mock/${PLANNER}:medium`,
+			perCallModelGrants: { settings, agentName: "task", agentSource: "bundled" },
+			authStorage,
+			modelRegistry,
+			settings,
+			enableLsp: false,
+			enableMCP: false,
+			enableIrc: false,
+		});
+		expect(result.exitCode).toBe(0);
+
+		const live = AgentRegistry.global().get(AGENT_ID)?.session;
+		if (!live) throw new Error("Expected a kept-alive subagent session");
+		expect(live.model?.id).toBe(PLANNER);
+		// A focused worker can still be switched by hand; that persists a session-local model change.
+		await live.setModelTemporary(switched);
+		expect(live.sessionManager.getSessionLocalModelChange()?.model).toBe(`mock/${TARGET}`);
+
+		await AgentLifecycleManager.global().park(AGENT_ID);
+		const revived = await AgentLifecycleManager.global().ensureLive(AGENT_ID);
+
+		expect(revived.model?.id).toBe(PLANNER);
+		expect(revived.configuredThinkingLevel()).toBe(Effort.Medium);
+	} finally {
+		authStorage.close();
+	}
+}, 30_000);

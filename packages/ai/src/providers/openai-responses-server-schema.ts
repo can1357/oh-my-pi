@@ -353,7 +353,7 @@ export const reasoningConfigSchema = type({
 	// `none` maps to hideThinkingSummary; auto/concise/detailed mean "show
 	// summary". pi-ai has no per-level plumbing for the latter — walker logs
 	// once and treats them as default.
-	"summary?": "'auto' | 'concise' | 'detailed' | 'none'",
+	"summary?": "'auto' | 'concise' | 'detailed' | 'none' | null",
 });
 
 // ─── Stop ───────────────────────────────────────────────────────────────────
@@ -368,12 +368,12 @@ export const openaiResponsesRequestSchema = type({
 	"instructions?": "string | null",
 	"tools?": toolSchema.or(computerToolSchema).or(builtinToolSchema).array(),
 	"tool_choice?": toolChoiceSchema,
-	"max_output_tokens?": "number",
-	"temperature?": "number",
-	"top_p?": "number",
+	"max_output_tokens?": "number | null",
+	"temperature?": "number | null",
+	"top_p?": "number | null",
 	"stop?": stopSchema,
 	"stream?": "boolean",
-	"reasoning?": reasoningConfigSchema,
+	"reasoning?": reasoningConfigSchema.or("null"),
 	"store?": "boolean",
 	"previous_response_id?": "string",
 	"parallel_tool_calls?": "boolean",
