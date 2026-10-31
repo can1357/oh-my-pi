@@ -458,6 +458,8 @@ With an argument:
 
 Both forms then follow the session's continuations (`findSessionContinuation`, through `resolveResumeTarget` for a key): when its conversation went on in another file of the same directory (a sibling whose header names it in `continuationOf`), the copy with the newest turn opens instead, unless the named file has turns of its own that copy lacks, and a notice names both files. A file that no longer holds the session its generated `<timestamp>_<sessionId>.jsonl` name records was replaced under that session (conflict recovery leaves it as it found it); resume then opens the copy that continues the named session, when one exists. That applies to a path whose file no longer parses, and to a key that matched only the file name (the file holds another session) or found an unlisted file in step 4. A path whose file holds another session opens that session; a file without a generated name records no session id and is never taken as replaced.
 
+A session file another live omp process still owns is not continued under its id. The ownership lease is probed when the file is opened — a startup resume (`--resume`, `--continue`, the auto-resume breadcrumb, the picker) and in-session `/resume` alike — and when a live owner holds it, this process carries on in a fork of that session instead: its own id from the start, `parentSession` naming the owner's session, no `continuationOf` (so a later resume of the owner's file still lands on the owner), and a visible notice in the transcript. The owner keeps its id and its file untouched.
+
 Id/filename-prefix match behavior (local or global):
 
 - If the matched session's recorded directory no longer exists, CLI asks `Session's directory no longer exists (...). Move (re-root) it into the current directory? [Y/n]`.
@@ -585,6 +587,7 @@ SDK bridges extension session events to custom tool `onSession` callbacks:
 - `session_branch` -> `reason: "branch"`
 - `session_start` -> `reason: "start"`
 - `session_tree` -> `reason: "tree"`
+- `session_moved` -> `reason: "moved"`, with `previousSessionFile`
 - `session_shutdown` -> `reason: "shutdown"`
 
 These callbacks are observational; they do not cancel switch/fork.

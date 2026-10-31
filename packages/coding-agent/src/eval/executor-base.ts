@@ -612,7 +612,7 @@ export async function executeWithKernelBase<
 		throw error;
 	} finally {
 		await sink.dispose();
-		unregisterBridge?.();
+		await unregisterBridge?.();
 		abortShield.dispose?.();
 	}
 }

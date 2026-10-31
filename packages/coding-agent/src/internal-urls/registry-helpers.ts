@@ -8,6 +8,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { AgentRegistry } from "../registry/agent-registry";
+import { ARTIFACT_STAGING_SUFFIX } from "../session/artifact-staging";
 
 const extraArtifactsDirs = new Set<string>();
 /** Deepest nesting `sessionFilesFromDisk` descends below an artifacts dir. */
@@ -103,7 +104,9 @@ export async function sessionFilesFromDisk(
 			entries => {
 				if (!entries || depth >= MAX_SCAN_DEPTH) return;
 				for (const entry of entries) {
-					if (entry.isDirectory()) list(path.join(dir, entry.name), depth + 1);
+					if (entry.isDirectory() && !isArtifactStagingDir(entry.name)) {
+						list(path.join(dir, entry.name), depth + 1);
+					}
 				}
 			},
 			() => {},
@@ -138,13 +141,15 @@ export async function sessionFilesFromDisk(
 			// Prefer a direct transcript over a nested same-id copy.
 			for (const entry of entries) recordFile(dir, entry);
 			for (const entry of entries) {
-				if (entry.isDirectory()) await scan(path.join(dir, entry.name), depth + 1);
+				if (entry.isDirectory() && !isArtifactStagingDir(entry.name)) {
+					await scan(path.join(dir, entry.name), depth + 1);
+				}
 			}
 			return;
 		}
 		for (const entry of entries) {
 			if (entry.isDirectory()) {
-				await scan(path.join(dir, entry.name), depth + 1);
+				if (!isArtifactStagingDir(entry.name)) await scan(path.join(dir, entry.name), depth + 1);
 				continue;
 			}
 			recordFile(dir, entry);
@@ -152,6 +157,17 @@ export async function sessionFilesFromDisk(
 	};
 	for (const dir of dirs) await scan(dir, 0);
 	return found;
+}
+
+/**
+ * Whether `name` is an artifact copy's own staging directory.
+ *
+ * What is in one has not been accepted by any session: it is a copy still
+ * being built, or one a crash left behind. Walking into it would serve an
+ * unpublished transcript as if the session owned it.
+ */
+function isArtifactStagingDir(name: string): boolean {
+	return name.endsWith(ARTIFACT_STAGING_SUFFIX);
 }
 
 /** Directory entries of `dir`, or null when it is missing or not a directory. */

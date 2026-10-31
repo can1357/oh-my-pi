@@ -138,6 +138,7 @@ import { combine, type SettingsScope } from "../config/registry";
 import { type Settings, withActiveSettings } from "../config/settings";
 import { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
 import { getEditStore } from "../edit/store";
+import { closeArtifactPinAccount } from "../eval/artifact-readiness";
 import { releaseCompletionHandles } from "../eval/completion-bridge";
 import { releaseJudgmentBatches } from "../eval/judgment-batch-bridge";
 import type { EvalPreludeDefinition } from "../eval/preludes";
@@ -478,6 +479,12 @@ import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
+import {
+	artifactsMissingNotice,
+	noteResumedSessionFork,
+	renderTransferNotice,
+	SESSION_TRANSFER_MESSAGE_TYPE,
+} from "./session-transfer";
 import { resolveOpenAIWebsocketPreference } from "./settings-stream-fn";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
@@ -977,6 +984,7 @@ export class AgentSession implements SettingsScope {
 	// Event subscription state
 	#unsubscribeAgent?: () => void;
 	#unsubscribeQueueChange?: () => void;
+	#unsubscribeSessionMoved?: () => void;
 	/** Agent message count when {@link #disconnectFromAgent} unsubscribed; messages past it reached no persisting handler. */
 	#disconnectedMessageCount?: number;
 	#cancelExitRecorder?: () => void;
@@ -1826,6 +1834,39 @@ export class AgentSession implements SettingsScope {
 		this.#recordWithoutTurn([card]);
 	}
 
+	/**
+	 * Put the "artifacts did not arrive" notice into the live conversation once
+	 * the fork's copy has settled, so the next provider request carries it.
+	 *
+	 * The journal entry is the resume guard's
+	 * ({@link noteResumedSessionFork}); this adds the same text to the message
+	 * array the agent is holding, which a transcript rebuilt later would
+	 * otherwise be the only place it appeared.
+	 */
+	#tellModelWhenArtifactsAreMissing(): void {
+		const forkedFrom = this.sessionManager.forkedFromSession?.();
+		if (!forkedFrom) return;
+		void (async () => {
+			try {
+				if (await this.sessionManager.artifactsReproduced()) return;
+				if (this.#isDisposed) return;
+				const details = artifactsMissingNotice(this.sessionManager, forkedFrom);
+				this.agent.appendMessage({
+					role: "custom",
+					customType: SESSION_TRANSFER_MESSAGE_TYPE,
+					content: renderTransferNotice(details),
+					display: true,
+					details,
+					timestamp: Date.now(),
+				});
+			} catch (error) {
+				logger.warn("Failed to tell the model its inherited artifacts are missing", {
+					error: toError(error).message,
+				});
+			}
+		})();
+	}
+
 	#resetInFlight(): void {
 		this.#inFlightEpoch++;
 		this.#promptInFlightCount = 0;
@@ -2005,6 +2046,12 @@ export class AgentSession implements SettingsScope {
 				initialEvalStateContext.timestamp,
 			);
 		}
+		// A resume that forked copies the previous session's artifacts in the
+		// background. If they never arrive, the conversation this session is
+		// actually holding has to be told — a journal entry appended after the
+		// message array was built is read by the next process, not by the model
+		// talking now.
+		this.#tellModelWhenArtifactsAreMissing();
 		const ircHost: IrcBridgeHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -2118,6 +2165,32 @@ export class AgentSession implements SettingsScope {
 		this.#promptTemplates = config.promptTemplates ?? [];
 		this.#slashCommands = config.slashCommands ?? [];
 		this.#extensionRunner = config.extensionRunner;
+		// A move-off changes this session's id without anyone asking. Until it was
+		// announced, the only trace an extension could see was the id differing
+		// from the one it last read, with nothing to say the predecessor is still
+		// live — so a consumer that carries identity across sessions could carry
+		// it away from a session that is still running.
+		//
+		// Only a move this session is present for: `onPersistenceNotice` replays
+		// the ones raised before it subscribed, and replaying an identity change
+		// as if it were happening now would land it before `session_start`, and
+		// again for every later `AgentSession` over the same manager.
+		let liveForMoves = false;
+		this.#unsubscribeSessionMoved = this.sessionManager.onPersistenceNotice(notice => {
+			const runner = this.#extensionRunner;
+			if (!runner || !liveForMoves) return;
+			runner
+				.emit({
+					type: "session_moved",
+					reason: notice.reason,
+					previousSessionId: notice.previousSessionId,
+					sessionId: notice.sessionId,
+					previousSessionFile: notice.from,
+					sessionFile: notice.to,
+				})
+				.catch(error => logger.warn("session_moved handlers failed", { error: toError(error).message }));
+		});
+		liveForMoves = true;
 		this.#cacheWarmer = config.cacheWarmer;
 		if (config.cacheWarmer) {
 			const warmer = config.cacheWarmer;
@@ -6346,6 +6419,10 @@ export class AgentSession implements SettingsScope {
 
 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
 		this.beginDispose();
+		// A move during teardown reaches no handler: this session is going away,
+		// and the subscription would otherwise outlive it in the manager.
+		this.#unsubscribeSessionMoved?.();
+		this.#unsubscribeSessionMoved = undefined;
 		// Stop cache warming before the drain windows below: an armed tick firing
 		// mid-dispose would issue a paid warm request and persist usage into the
 		// closing session writer.
@@ -6399,6 +6476,10 @@ export class AgentSession implements SettingsScope {
 		const results = await Promise.allSettled([
 			this.#disposeOwnedAsyncJobs(),
 			this.#eval.disposeKernels(),
+			// Every answer this session was given and has not read, whichever
+			// cell or kernel asked, and every answer still on its way: the
+			// account is closed, not drained, so none can be charged after.
+			closeArtifactPinAccount(this.sessionManager.getSessionId()),
 			this.#releaseOwnedBrowserTabs(this.sessionManager.getSessionId()),
 			this.#releaseOwnedComputerSessions(this.#eval.getKernelOwnerId()),
 			this.#disconnectOwnedMcp(),
@@ -13081,7 +13162,6 @@ export class AgentSession implements SettingsScope {
 		await this.#bash.flushPending();
 		// Flush pending writes before switching so restore snapshots reflect committed state.
 		await this.sessionManager.flush();
-		const previousSessionState = this.sessionManager.captureState();
 		const bashTransition = this.#bash.beginSessionTransition();
 		// Only same-session reloads compare against the prior context to detect
 		// rollback edits (`#didSessionMessagesChange` below). Building it for a
@@ -13143,6 +13223,12 @@ export class AgentSession implements SettingsScope {
 		this.#usagePreflightReadyForNextModelCall = false;
 		this.#usagePreflightReadyModel = undefined;
 
+		// Last before the try, and it must stay there: this takes a counted
+		// holder on the session being left, and only the commit at the end of
+		// the try or the rollback in its catch ends that holder. Anything that
+		// throws above runs outside both, and would leave the session reserved
+		// for a process that is no longer in it.
+		const previousSessionState = this.sessionManager.captureState();
 		let cwdChangeTarget: string | undefined;
 		try {
 			if (switchingToDifferentSession) {
@@ -13153,8 +13239,16 @@ export class AgentSession implements SettingsScope {
 			// The file may be reloaded at the same path with a different latest contract (or the
 			// switch rolled back via restoreState); re-read it on the next model call either way.
 			this.#sessionInit = undefined;
-			await this.sessionManager.setSessionFile(sessionPath);
+			// A session another live omp process is writing, or whose file now
+			// holds a different session, is not ours to continue: take a fork of
+			// what was loaded instead of its id (same reasoning as the startup
+			// resume guard in session-transfer.ts).
+			const { forkedFrom } = await this.sessionManager.setSessionFile(sessionPath, { forkIfContested: true });
 			this.#bash.markSessionTransition(bashTransition);
+			if (forkedFrom) {
+				await noteResumedSessionFork(this.sessionManager, forkedFrom);
+				this.#tellModelWhenArtifactsAreMissing();
+			}
 			const newCwd = this.sessionManager.getCwd();
 			const recordedCwd = this.sessionManager.getRecordedCwd() ?? previousSessionState.cwd;
 			if (options?.preserveLocalCwd) {
@@ -13361,6 +13455,12 @@ export class AgentSession implements SettingsScope {
 				if (options?.onModelFallback) options.onModelFallback(modelFallbackWarning);
 				else this.emitNotice("warning", modelFallbackWarning);
 			}
+			// Last, because everything above can still throw into the rollback
+			// below — including a host's `onModelFallback`. Until this runs, the
+			// session this switch came from is still owned by this process, so a
+			// rollback takes it straight back instead of racing a second process
+			// for it; after it, no path may roll back.
+			this.sessionManager.commitSessionSwitch(previousSessionState);
 			return true;
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);

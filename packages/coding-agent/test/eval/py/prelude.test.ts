@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import { describe, expect, it } from "bun:test";
 import { $which, TempDir } from "@oh-my-pi/pi-utils";
 import { PYTHON_PRELUDE } from "../../../src/eval/py/prelude";
@@ -106,7 +107,9 @@ describe("python prelude", () => {
 			expect(requests).toEqual([
 				{
 					session: "test-session",
-					run: null,
+					// No cell, so no run: the host refuses that for everything
+					// but the questions that belong to the session.
+					run: "",
 					name: "read",
 					args: { path: "mcp://server/resource:10-14" },
 				},
@@ -119,16 +122,16 @@ describe("python prelude", () => {
 	async function runWithReadBridge(
 		code: string,
 		env: Record<string, string>,
-		readTool: (args: { path: string }) => Promise<unknown>,
+		readTool: (args: { path: string }, name?: string) => Promise<unknown>,
 	): Promise<{ stdout: string; stderr: string; requests: unknown[] }> {
 		const requests: unknown[] = [];
 		const server = Bun.serve({
 			hostname: "127.0.0.1",
 			port: 0,
 			fetch: async request => {
-				const body = (await request.json()) as { args: { path: string } };
+				const body = (await request.json()) as { name?: string; args: { path: string } };
 				requests.push(body);
-				return Response.json({ ok: true, value: await readTool(body.args) });
+				return Response.json({ ok: true, value: await readTool(body.args, body.name) });
 			},
 		});
 		try {
@@ -160,12 +163,36 @@ describe("python prelude", () => {
 				`print([read("artifact://12", limit=0), read("artifact://12", limit=-1), read("artifact://7", limit=0)])`,
 			].join("\n"),
 			{ PI_EVAL_LOCAL_ROOTS: JSON.stringify({ artifact: artifacts.path() }) },
-			async () => ({ text: "from the read tool" }),
+			async (args, name) => {
+				if (name !== "__artifacts_ready__") return { text: "from the read tool" };
+				// The host resolves the id against the artifacts dir once its
+				// copies have settled, and says what the file is; the kernel
+				// never lists the directory and checks what it opens.
+				const file = artifacts.join(`${(args as unknown as { id: string }).id}.eval.log`);
+				const stat = fs.statSync(file, { bigint: true });
+				return { text: file, details: { path: file, device: String(stat.dev), inode: String(stat.ino) } };
+			},
 		);
 
 		expect(stderr).toBe("");
 		expect(stdout).toBe("'second\\n'\n['', '', '']\n");
-		expect(requests).toEqual([]);
+		// The only host call is the readiness question every artifact read
+		// asks before it lists the directory: the kernel is a subprocess and
+		// cannot see a copy still filling it. The bytes come from the dir.
+		// One readiness question, from the one read that got as far as the
+		// directory: a `limit <= 0` read answers before it looks at anything.
+		expect(requests).toEqual([
+			{
+				name: "__artifacts_ready__",
+				// `answer`: the kernel asks for the file, and only comes back
+				// for the bytes if what it opens is not what it was told about.
+				// `token` is the hold the cell was given. This answer holds no
+				// pin, so there is nothing for the kernel to give back.
+				args: { id: "12", op: "answer", root: artifacts.path(), token: null },
+				run: "",
+				session: "test-session",
+			},
+		]);
 	});
 
 	it("reads an artifact another session holds in full, however large, through the read tool", async () => {
@@ -186,7 +213,7 @@ describe("python prelude", () => {
 		expect(stderr).toBe("");
 		expect(await Bun.file(out).text()).toBe(largeArtifact);
 		expect(stdout).toBe("'row 0\\nrow 1\\n'\nTrue\n");
-		expect(requests).toMatchObject([
+		expect(requests.filter(request => (request as { name?: string }).name !== "__artifacts_ready__")).toMatchObject([
 			{ name: "read", args: { path: "artifact://7:raw:1-1" } },
 			{ name: "read", args: { path: "artifact://7:raw:1-1" } },
 			{ name: "read", args: { path: "artifact://7:raw:1-1" } },

@@ -50,6 +50,33 @@ export interface SessionSwitchEvent {
 }
 
 /**
+ * Fired when this session had to leave its file and carried on under a new
+ * id — nobody asked for it, which is what separates it from a
+ * {@link SessionSwitchEvent}: there is no `new`/`resume`/`fork` a user or an
+ * agent chose, only a file this process may no longer write. The conversation,
+ * the cwd and the context are unchanged; only the identity moved.
+ *
+ * A consumer that carries identity across sessions (a role claim, a scheduler,
+ * an address book) should treat `previousSessionId` as possibly **still live**:
+ * under `"open-elsewhere"` another omp process owns it and goes on using it.
+ * Handlers observe; they cannot refuse the move, which has already happened by
+ * the time it is announced — the session had nowhere else to save.
+ */
+export interface SessionMovedEvent {
+	type: "session_moved";
+	/** Why the session could not stay on its file; see `SessionPersistenceNotice`. */
+	reason: "open-elsewhere" | "replaced" | "contested";
+	/** The id this session answered to until now. Still another process's live session under `"open-elsewhere"`. */
+	previousSessionId: string;
+	/** The id it answers to from now on. */
+	sessionId: string;
+	/** The file it was saving to. */
+	previousSessionFile: string;
+	/** The sibling file it saves to from now on. */
+	sessionFile: string;
+}
+
+/**
  * What a branch transition does with {@link SessionBeforeBranchEvent.entryId}:
  * - `"branch"`: rewinds to a user message; `entryId` and everything after it are dropped.
  * - `"fork"`: forks at a transcript entry; `entryId` is the last entry kept.
@@ -166,6 +193,7 @@ export type SessionEvent =
 	| SessionStartEvent
 	| SessionBeforeSwitchEvent
 	| SessionSwitchEvent
+	| SessionMovedEvent
 	| SessionBeforeBranchEvent
 	| SessionBranchEvent
 	| SessionBeforeCompactEvent

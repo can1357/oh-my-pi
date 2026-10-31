@@ -1172,12 +1172,13 @@ describe("AgentSession owner-routed async delivery", () => {
 			{ id: "mid-switch-job", ownerId: "Main" },
 		);
 		const setSessionFile = session.sessionManager.setSessionFile.bind(session.sessionManager);
-		const spy = vi.spyOn(session.sessionManager, "setSessionFile").mockImplementation(async file => {
-			await setSessionFile(file);
+		const spy = vi.spyOn(session.sessionManager, "setSessionFile").mockImplementation(async (file, options) => {
+			const result = await setSessionFile(file, options);
 			gate.resolve();
 			await manager.waitForAll();
 			await manager.drainDeliveries({ timeoutMs: 200, filter: { ownerId: "Main" } });
 			await session.waitForIdle();
+			return result;
 		});
 		try {
 			expect(await session.switchSession(targetSessionFile)).toBe(true);

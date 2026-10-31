@@ -493,6 +493,7 @@ Canonical event unions and payload types are in `types.ts`.
 
 - `session_start`
 - `session_before_switch` / `session_switch`
+- `session_moved`
 - `session_before_branch` / `session_branch`
 - `session_before_compact` / `session.compacting` / `session_compact`
 - `session_before_tree` / `session_tree`
@@ -522,6 +523,8 @@ Cancelable pre-events:
 - `session_before_tree` → `{ cancel?: boolean; summary?: { summary: string; details?: unknown } }`
 
 `session_before_branch` and `session_branch` carry `reason`, which decides what `session_before_branch.entryId` means. For `"branch"` (`branch(entryId)`, `/branch`) it is the user message being rewound: it and everything after it are dropped. For `"fork"` (`AgentSession.fork(entryId)`, RPC `fork` with an `entryId`) and `"btw"` (`/btw` promotion) it is the last entry kept in the new session.
+
+`session_moved` fires when the session had to leave its file and carried on under a new id, which nobody asked for — that is what separates it from `session_switch`, whose `new`/`resume`/`fork` reasons all name a choice. It carries `reason` (`"open-elsewhere"` when another live omp process owns the file, `"replaced"` when the file was taken over by another session, `"contested"` when a write conflict forced a move), `previousSessionId`, `sessionId`, `previousSessionFile`, and `sessionFile`. The conversation, cwd, and context are unchanged; only the identity moved. Handlers observe it — the move has already happened — and anything keyed on a session id should treat `previousSessionId` as possibly still live under `"open-elsewhere"`.
 
 ### Prompt and turn lifecycle
 

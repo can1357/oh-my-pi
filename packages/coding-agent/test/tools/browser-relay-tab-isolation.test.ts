@@ -113,7 +113,9 @@ async function launchRelayFixture(
 			headless: true,
 			pipe: true,
 			enableExtensions: [extensionDir],
-			args: ["--no-first-run", "--no-default-browser-check", "--use-mock-keychain"],
+			// Same flags as the `chromiumAvailable()` probe and the product launch: a host that
+			// restricts unprivileged user namespaces (Ubuntu 23.10+ AppArmor) has no usable sandbox.
+			args: ["--no-sandbox", "--no-first-run", "--no-default-browser-check", "--use-mock-keychain"],
 		});
 		browsers.push(browser);
 		const extensionId = await unpackedExtensionId(extensionDir);

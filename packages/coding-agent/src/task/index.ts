@@ -1248,7 +1248,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const agentSource = policy.agent.source;
 			const run = adopted.get(index);
 			const agentId =
-				run?.identity.agentId ?? (await outputManager.allocate(item.name?.trim() || generateTaskName()));
+				run?.identity.agentId ??
+				(await outputManager.allocate(item.name?.trim() || generateTaskName(), { signal }));
 			const assignment = (item.task ?? "").trim();
 			spawns.push({
 				agentId,
