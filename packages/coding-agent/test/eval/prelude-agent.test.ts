@@ -3,8 +3,8 @@ import * as path from "node:path";
 import * as vm from "node:vm";
 import { TempDir } from "@oh-my-pi/pi-utils/temp";
 import { createHelpers } from "../../src/eval/js/shared/helpers";
-import { JAVASCRIPT_PRELUDE_SOURCE } from "../../src/eval/js/shared/prelude";
 import { artifactReadBridge } from "../helpers/artifact-read-bridge";
+import { loadPrelude, preludeHelper } from "../helpers/prelude-sandbox";
 
 /**
  * The eval `agent()` helper always returns an `AgentHandle` — spawning is
@@ -17,13 +17,6 @@ import { artifactReadBridge } from "../helpers/artifact-read-bridge";
  * the host bridge (`__omp_call_tool__`) stubbed — no worker, no kernel — so the
  * test runs against the real shipped helper, not a re-implementation.
  */
-function loadPrelude(callTool: (name: string, args: unknown) => Promise<unknown>): Record<string, unknown> {
-	const sandbox: Record<string, unknown> = { __omp_call_tool__: callTool };
-	vm.createContext(sandbox);
-	vm.runInContext(JAVASCRIPT_PRELUDE_SOURCE, sandbox);
-	return sandbox;
-}
-
 type AgentHelper = (prompt: string, opts?: Record<string, unknown>) => Promise<unknown>;
 
 describe("eval js agent() handle", () => {
@@ -32,10 +25,10 @@ describe("eval js agent() handle", () => {
 		let seenArgs: Record<string, unknown> | undefined;
 		const sandbox = loadPrelude(async (name, args) => {
 			seenName = name;
-			seenArgs = args as Record<string, unknown>;
+			seenArgs = args;
 			return { id: "abc123", agent: "task" };
 		});
-		const handle = (await (sandbox.agent as AgentHelper)("say hi", {
+		const handle = (await preludeHelper<AgentHelper>(sandbox, "agent")("say hi", {
 			label: "Greeter",
 		})) as Record<string, unknown>;
 		expect(seenName).toBe("__agent__");
@@ -49,14 +42,12 @@ describe("eval js agent() handle", () => {
 	it("maps positional args onto named options in order", async () => {
 		let seenArgs: Record<string, unknown> | undefined;
 		const sandbox = loadPrelude(async (_name, args) => {
-			seenArgs = args as Record<string, unknown>;
+			seenArgs = args;
 			return { id: "legacy", agent: "reviewer" };
 		});
-		const positionalAgent = sandbox.agent as (
-			prompt: string,
-			options?: unknown,
-			...rest: unknown[]
-		) => Promise<unknown>;
+		const positionalAgent = preludeHelper<
+			(prompt: string, options?: unknown, ...rest: unknown[]) => Promise<unknown>
+		>(sandbox, "agent");
 		const schema = { type: "object", properties: { ok: { type: "boolean" } } };
 
 		await positionalAgent("scout", "reviewer", "Legacy", schema, true, false, true, "strict", ["read"]);
@@ -78,7 +69,7 @@ describe("eval js agent() handle", () => {
 		const sandbox = loadPrelude(async () => ({ text: "lonely" }));
 		// The factory returns a thenable handle wrapper, so normalize to a Promise
 		// before asserting rejection (Bun's `.rejects` requires a real Promise).
-		await expect(Promise.resolve((sandbox.agent as AgentHelper)("x"))).rejects.toThrow(
+		await expect(Promise.resolve(preludeHelper<AgentHelper>(sandbox, "agent")("x"))).rejects.toThrow(
 			"agent() did not return a handle",
 		);
 	});
@@ -89,12 +80,12 @@ describe("eval js agent() handle", () => {
 			if (name === "__wait__") return { items: [{ status: "completed", text: '{"k":1}' }] };
 			throw new Error(`unexpected bridge call ${name}`);
 		});
-		const withSchema = (await (sandbox.agent as AgentHelper)("emit", {
+		const withSchema = (await preludeHelper<AgentHelper>(sandbox, "agent")("emit", {
 			schema: { type: "object" },
 		})) as { wait(): Promise<unknown> };
 		expect(await withSchema.wait()).toEqual({ k: 1 });
 
-		const plain = (await (sandbox.agent as AgentHelper)("emit")) as {
+		const plain = (await preludeHelper<AgentHelper>(sandbox, "agent")("emit")) as {
 			wait(): Promise<unknown>;
 		};
 		expect(await plain.wait()).toBe('{"k":1}');
@@ -111,7 +102,10 @@ describe("eval js immediate-handle contract", () => {
 			if (name === "__wait__") return { items: [{ status: "completed", text: "OK" }] };
 			throw new Error(`unexpected bridge call ${name}`);
 		});
-		const completion = sandbox.completion as (prompt: string, opts?: unknown) => { wait(): Promise<unknown> };
+		const completion = preludeHelper<(prompt: string, opts?: unknown) => { wait(): Promise<unknown> }>(
+			sandbox,
+			"completion",
+		);
 
 		const handle = completion("Return OK", { model: "smol" });
 		expect(typeof handle.wait).toBe("function");
@@ -124,9 +118,9 @@ describe("eval js immediate-handle contract", () => {
 			if (name === "__wait__") return { items: [{ status: "completed", text: "done" }] };
 			throw new Error(`unexpected bridge call ${name}`);
 		});
-		const waitAll = sandbox.wait as (handles: unknown) => Promise<unknown[]>;
+		const waitAll = preludeHelper<(handles: unknown) => Promise<unknown[]>>(sandbox, "wait");
 
-		expect(await waitAll((sandbox.agent as AgentHelper)("go"))).toEqual(["done"]);
+		expect(await waitAll(preludeHelper<AgentHelper>(sandbox, "agent")("go"))).toEqual(["done"]);
 	});
 });
 
@@ -140,7 +134,7 @@ describe("eval js wait() timeout (issue #12549)", () => {
 		const sandbox = loadPrelude(async (name, args) => {
 			if (name === "__agent__") return { id: "a-1", agent: "task" };
 			if (name === "__wait__") {
-				waitCalls.push(args as WaitCall);
+				waitCalls.push(args);
 				return { items: [{ status: "completed", text: "done" }] };
 			}
 			throw new Error(`unexpected bridge call ${name}`);
@@ -150,15 +144,15 @@ describe("eval js wait() timeout (issue #12549)", () => {
 
 	it("treats a positional wait() timeout as seconds", async () => {
 		const { sandbox, waitCalls } = loadWaitPrelude();
-		const handle = await (sandbox.agent as AgentHelper)("go");
+		const handle = await preludeHelper<AgentHelper>(sandbox, "agent")("go");
 
-		expect(await (sandbox.wait as WaitHelper)([handle], 30)).toEqual(["done"]);
+		expect(await preludeHelper<WaitHelper>(sandbox, "wait")([handle], 30)).toEqual(["done"]);
 		expect(waitCalls).toEqual([{ items: [{ kind: "agent", id: "a-1" }], timeoutMs: 30_000 }]);
 	});
 
 	it("treats a positional handle.wait() timeout as seconds on resolved and pending handles", async () => {
 		const { sandbox, waitCalls } = loadWaitPrelude();
-		const agent = sandbox.agent as (prompt: string) => Waitable;
+		const agent = preludeHelper<(prompt: string) => Waitable>(sandbox, "agent");
 
 		expect(await ((await agent("resolved")) as Waitable).wait(45)).toBe("done");
 		expect(await agent("pending").wait(5)).toBe("done");
@@ -167,22 +161,24 @@ describe("eval js wait() timeout (issue #12549)", () => {
 
 	it("keeps the options-object form", async () => {
 		const { sandbox, waitCalls } = loadWaitPrelude();
-		const agent = sandbox.agent as AgentHelper;
+		const agent = preludeHelper<AgentHelper>(sandbox, "agent");
 
 		// Each handle caches its result after the first wait, so use one per call.
-		await (sandbox.wait as WaitHelper)([await agent("first")], { timeout: 10 });
+		await preludeHelper<WaitHelper>(sandbox, "wait")([await agent("first")], { timeout: 10 });
 		await ((await agent("second")) as Waitable).wait({ timeout: 2 });
 		expect(waitCalls.map(call => call.timeoutMs)).toEqual([10_000, 2_000]);
 	});
 
 	it("rejects mixing an options object with positional args", async () => {
 		const { sandbox, waitCalls } = loadWaitPrelude();
-		const agent = sandbox.agent as (prompt: string) => Waitable;
+		const agent = preludeHelper<(prompt: string) => Waitable>(sandbox, "agent");
 		const resolved = (await agent("resolved")) as Waitable;
 		// The sandbox has its own TypeError constructor, so match on the message.
 		const mixed = /do not mix both forms/;
 
-		await expect((sandbox.wait as WaitHelper)([resolved], { timeout: 10 }, true)).rejects.toThrow(mixed);
+		await expect(preludeHelper<WaitHelper>(sandbox, "wait")([resolved], { timeout: 10 }, true)).rejects.toThrow(
+			mixed,
+		);
 		await expect(resolved.wait({ timeout: 1 }, 2)).rejects.toThrow(mixed);
 		await expect(agent("pending").wait({ timeout: 1 }, 2)).rejects.toThrow(mixed);
 		expect(waitCalls).toEqual([]);

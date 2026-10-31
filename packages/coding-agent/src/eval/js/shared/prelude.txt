@@ -452,8 +452,16 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 				item.images = images[key];
 			}
 		}
+		// `op` is spread last: the helper's own operation always wins, so a
+		// caller-supplied `op` cannot turn the create into a close/cancel
+		// against an existing batch.
 		return judgeBatchFrom(
-			await globalThis.__omp_call_tool__("__judge_batch__", { op: "create", items, questions, ...batchOptions }),
+			await globalThis.__omp_call_tool__("__judge_batch__", {
+				...batchOptions,
+				items,
+				questions,
+				op: "create",
+			}),
 		);
 	};
 
@@ -534,10 +542,13 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			["name", "context", "tools"],
 			"{ name, context, tools }",
 		);
+		// `op` is spread last: the helper's own operation always wins, so a
+		// caller-supplied `op` cannot turn the create into a close/push against
+		// an existing pool.
 		const result = await globalThis.__omp_call_tool__("__workpool__", {
-			op: "create",
 			...(agentName === undefined ? {} : { agent: agentName }),
 			...options,
+			op: "create",
 		});
 		if (!result || typeof result.name !== "string") throw new Error("workpool() did not return a pool");
 		return new WorkPool(result.name, result.agent, result.limit);
