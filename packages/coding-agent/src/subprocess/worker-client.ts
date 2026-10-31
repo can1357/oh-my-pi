@@ -18,17 +18,11 @@ import { stripGitRepoLocationEnv } from "@oh-my-pi/pi-utils/env";
 import type { Subprocess } from "bun";
 
 /**
- * Shared lifecycle scaffolding for the ONNX inference subprocess clients
- * (mnemopi embeddings, speech-to-text, tiny-model titles/completions, TTS).
- * Each runs `onnxruntime-node` inside a dedicated Bun child process so the NAPI
- * constructor/finalizer never executes in the main agent address space — those
- * destructors segfault Bun on shutdown (issues #1606 / #1607 / #3031).
- *
- * Only the genuinely identical pieces live here: the worker-handle shape, the
- * spawn-command resolution, the parent-env snapshot, the `Bun.spawn` wiring,
- * the inline "worker unavailable" stub, and the ping/pong smoke probe. Each
- * client keeps its own divergent request/response correlation, streaming, and
- * teardown semantics.
+ * Shared lifecycle scaffolding for isolated subprocess workers: ONNX inference,
+ * stats activity, and SQLite reads. ONNX avoids native finalizer crashes; SQLite
+ * reads need a process that can be killed during a synchronous statement.
+ * Spawn-command resolution, environment, IPC, and teardown stay consistent
+ * while each caller owns its request protocol.
  */
 
 /** Minimal inbound contract shared by every worker: a correlated `ping`. */
@@ -230,17 +224,13 @@ export function inferenceWorkerEnv(overlay?: Record<string, string>): Record<str
 }
 
 /**
- * Spawn an inference worker subprocess and wire its IPC fan-out. Stdio is
- * captured (stderr redirected to a temp file, stdout ignored) so native
- * runtimes can't corrupt the chat scrollback while the crash reason still
- * reaches the parent. The file-backed capture deliberately avoids Bun
- * `ReadableStream` pipes: even an unref'd child with a piped stderr stream can
- * keep the parent event loop alive. After the worker exits, the last
- * {@link STDERR_TAIL_LIMIT_BYTES} are appended to the `onExit` error so
- * `tts/mnemopi/…: worker error` lines carry the actual stack instead of a bare
- * exit code (issue #4324). The child is `unref`'d outside `bun test` so an idle
- * worker never blocks process exit. `exitLabel` prefixes the worker-error
- * message surfaced for an unexpected (non-intentional) exit.
+ * Spawn an isolated worker subprocess and wire its IPC fan-out. Stdio is
+ * captured (stderr redirected to a temp file, stdout ignored) so worker output
+ * cannot corrupt the chat scrollback while the crash reason reaches the parent.
+ * The file-backed capture avoids Bun ReadableStream pipes: even an unref'd child
+ * with piped stderr can keep the parent event loop alive. After exit, the last
+ * {@link STDERR_TAIL_LIMIT_BYTES} are included in errors. The child is unref'd
+ * outside bun test unless the caller keeps it referenced.
  */
 export function createWorkerSubprocess<Outbound>(options: {
 	spawnCommand: WorkerSpawnCommand;
@@ -445,12 +435,9 @@ async function drainStderrCapture(capture: StderrCapture, exitLabel: string, tai
 
 /**
  * Wrap a {@link SpawnedSubprocess} as a {@link WorkerHandle}. The `send`
- * strategy is injected so each client keeps its exact IPC-send behaviour (e.g.
- * `safeSend` vs an inline guarded `proc.send`). `terminate()` SIGKILLs: the
- * point of subprocess isolation is that the parent never runs
- * `onnxruntime-node`'s NAPI finalizer (it crashes Bun on Windows), so the OS
- * reclaims the model memory instead. The intentional-exit flag is flipped
- * *before* the kill so `onExit` can tell it apart from a native crash.
+ * strategy is injected so each client keeps its exact IPC-send behaviour.
+ * `terminate()` SIGKILLs even a worker blocked inside native code; the OS
+ * reclaims its resources without waiting for a JS or native finalizer.
  */
 export function createWorkerHandle<Inbound, Outbound>(
 	spawned: SpawnedSubprocess<Outbound>,

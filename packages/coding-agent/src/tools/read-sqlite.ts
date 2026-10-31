@@ -33,13 +33,16 @@ import {
 import { throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
+import { readSqliteIsolated } from "./sqlite-read-worker-client";
 
-interface ResolvedSqliteReadPath {
+/** Resolved database file and selector passed to the isolated SQLite reader. */
+export interface ResolvedSqliteReadPath {
 	absolutePath: string;
 	sqliteSubPath: string;
 	queryString: string;
 	suffixResolution?: { from: string; to: string };
 }
+/** Resolve a read path to an existing SQLite database and its selector. */
 export async function resolveSqliteReadPath(
 	session: ToolSession,
 	readPath: string,
@@ -92,7 +95,17 @@ export async function resolveSqliteReadPath(
 
 	return null;
 }
+/** Run a SQLite read off the harness thread with a cancellable deadline. */
 export async function readSqlite(
+	resolvedSqlitePath: ResolvedSqliteReadPath,
+	signal?: AbortSignal,
+): Promise<AgentToolResult<ReadToolDetails>> {
+	throwIfAborted(signal);
+	return readSqliteIsolated(resolvedSqlitePath, signal);
+}
+
+/** Execute SQLite inspection inside the worker's query-only connection. */
+export async function runSqliteRead(
 	resolvedSqlitePath: ResolvedSqliteReadPath,
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<ReadToolDetails>> {
@@ -137,9 +150,8 @@ export async function readSqlite(
 					columns: sampleRows.columns,
 					rows: sampleRows.rows,
 				});
-				if (sampleRows.rows.length < sampleRows.totalCount) {
-					const remaining = sampleRows.totalCount - sampleRows.rows.length;
-					output += `\n[${remaining} more rows; append :${selector.table}?limit=20&offset=${sampleRows.rows.length} to the database path to continue]`;
+				if (sampleRows.hasMore) {
+					output += `\n[More rows; append :${selector.table}?limit=20&offset=${sampleRows.rows.length} to the database path to continue]`;
 				}
 				return toolResult<ReadToolDetails>(details)
 					.text(prependSuffixResolutionNotice(output, resolvedSqlitePath.suffixResolution))
@@ -174,7 +186,7 @@ export async function readSqlite(
 					.text(
 						prependSuffixResolutionNotice(
 							renderTable(page.columns, page.rows, {
-								totalCount: page.totalCount,
+								hasMore: page.hasMore,
 								offset: selector.offset,
 								limit: selector.limit,
 								table: selector.table,
@@ -191,7 +203,7 @@ export async function readSqlite(
 			case "raw": {
 				const result = executeReadQuery(db, selector.sql, selector.page);
 				let output = renderTable(result.columns, result.rows, {
-					totalCount: result.rows.length,
+					hasMore: false,
 					offset: 0,
 					limit: result.rows.length || DEFAULT_MAX_LINES,
 					table: "query",

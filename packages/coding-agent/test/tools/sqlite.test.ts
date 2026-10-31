@@ -6,10 +6,12 @@ import * as path from "node:path";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { readSqlite } from "@oh-my-pi/pi-coding-agent/tools/read-sqlite";
 import {
 	listTables,
 	parseSqlitePathCandidates,
 	parseSqliteSelector,
+	queryRows,
 	renderTable,
 	renderTableList,
 } from "@oh-my-pi/pi-coding-agent/tools/sqlite-reader";
@@ -341,6 +343,75 @@ describe("SQLite tool support", () => {
 		);
 	});
 
+	it("reads only the requested page and lookahead, without preparing a full count", () => {
+		const db = new Database(":memory:");
+		try {
+			db.run("CREATE TABLE entries (id INTEGER PRIMARY KEY, status TEXT)");
+			db.run("INSERT INTO entries VALUES (1, 'yes'), (2, 'no'), (3, 'yes'), (4, 'yes'), (5, 'no')");
+			const guarded = new Proxy(db, {
+				get(target, property, receiver) {
+					if (property === "query") {
+						return (sql: string) => {
+							if (/\bCOUNT\s*\(\s*\*\s*\)/i.test(sql)) throw new Error("Unbounded row count");
+							return target.query(sql);
+						};
+					}
+					return Reflect.get(target, property, receiver);
+				},
+			});
+			const options = { limit: 1, offset: 0, where: "status='yes'", order: "id:desc" };
+			expect(queryRows(guarded, "entries", options)).toMatchObject({ rows: [{ id: 4 }], hasMore: true });
+			expect(queryRows(guarded, "entries", { ...options, offset: 1 })).toMatchObject({
+				rows: [{ id: 3 }],
+				hasMore: true,
+			});
+			expect(queryRows(guarded, "entries", { ...options, offset: 2 })).toMatchObject({
+				rows: [{ id: 1 }],
+				hasMore: false,
+			});
+			expect(queryRows(guarded, "entries", { ...options, offset: 10 })).toMatchObject({
+				rows: [],
+				hasMore: false,
+			});
+			expect(queryRows(guarded, "entries", { limit: 2, offset: 0 }).rows).toHaveLength(2);
+			expect(queryRows(guarded, "entries", { limit: 5, offset: 0 }).hasMore).toBe(false);
+		} finally {
+			db.close();
+		}
+	});
+
+	it("cancels a running aggregate without blocking the read caller", async () => {
+		const dbPath = path.join(tmpDir, "slow-query.sqlite");
+		const db = new Database(dbPath);
+		try {
+			db.run(
+				"CREATE TABLE entries (id INTEGER); WITH RECURSIVE seq(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM seq WHERE x < 5000) INSERT INTO entries SELECT x FROM seq",
+			);
+		} finally {
+			db.close();
+		}
+
+		const controller = new AbortController();
+		// Real time is required here: fake timers cannot fire while a synchronous SQLite query blocks the harness thread.
+		const timer = setTimeout(() => controller.abort(), 100);
+		try {
+			await expect(
+				readSqlite(
+					{
+						absolutePath: dbPath,
+						sqliteSubPath: "",
+						queryString: new URLSearchParams({
+							q: "SELECT sum(a.id*b.id) FROM entries a CROSS JOIN entries b",
+						}).toString(),
+					},
+					controller.signal,
+				),
+			).rejects.toThrow(/aborted/i);
+		} finally {
+			clearTimeout(timer);
+		}
+	}, 5000);
+
 	it("supports pagination and includes a continuation hint", async () => {
 		const result = await readTool.execute("sqlite-page", { path: `${sqlitePath}:users?limit=2&offset=1` });
 		const text = getText(result);
@@ -348,7 +419,8 @@ describe("SQLite tool support", () => {
 		expect(text).toContain("Bob");
 		expect(text).toContain("Carol");
 		expect(text).not.toContain("Alice");
-		expect(text).toContain("append :users?limit=2&offset=3 to the database path to continue");
+		expect(text).toContain("more rows; append :users?limit=2&offset=3 to the database path to continue");
+		expect(text).not.toMatch(/\d+ more rows/);
 	});
 
 	it("supports where and order via the path selector", async () => {
@@ -476,7 +548,7 @@ describe("SQLite tool support", () => {
 		expect(pragma).toContain("TEXT");
 		expect(pragma).not.toContain("INTEGER");
 		expect(pragma).toContain("offset=2");
-	});
+	}, 15000);
 
 	it("pages a query with repeated column names exactly as it reads unpaged", async () => {
 		const read = async (query: string) =>
@@ -497,7 +569,7 @@ describe("SQLite tool support", () => {
 
 	it("truncates wide rows to the configured table width", () => {
 		const rendered = renderTable(["id", "payload"], [{ id: 1, payload: "x".repeat(320) }], {
-			totalCount: 1,
+			hasMore: false,
 			offset: 0,
 			limit: 20,
 			table: "wide_rows",
@@ -515,7 +587,7 @@ describe("SQLite tool support", () => {
 		for (let i = 1; i <= 32; i++) row[`col_${i}`] = `value_${i}`;
 
 		const rendered = renderTable(columns, [row], {
-			totalCount: 1,
+			hasMore: false,
 			offset: 0,
 			limit: 20,
 			table: "wide_columns",

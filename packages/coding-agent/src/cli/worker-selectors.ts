@@ -19,6 +19,8 @@ export const MNEMOPI_EMBED_SERVER_WORKER_ARG = "__omp_worker_mnemopi_embed_serve
 export const LSP_MUX_WORKER_ARG = "__omp_worker_lsp_mux";
 /** Parent-death watchdog thread selector shared by the CLI dispatcher and `startParentWatchdog`. */
 export const PARENT_WATCHDOG_WORKER_ARG = "__omp_worker_parent_watchdog";
+/** SQLite read selector shared by the CLI dispatcher and isolated reader. */
+export const SQLITE_READ_WORKER_ARG = "__omp_worker_sqlite_read";
 /** Activity-worker selector shared by the CLI dispatcher and worker launcher. */
 export const STATS_ACTIVITY_WORKER_ARG = "__omp_worker_stats_activity";
 /** Text-prediction daemon selector shared by the CLI dispatcher and the broker daemon spec. */

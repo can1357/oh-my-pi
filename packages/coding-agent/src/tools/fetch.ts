@@ -1,6 +1,5 @@
 import { repairCollapsedScheme, tryExtractEmbeddedUrlSelector } from "@oh-my-pi/pi-tui/tools/fetch";
 import type { ReadUrlToolDetails } from "@oh-my-pi/pi-tui/tools/fetch";
-import type { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -26,13 +25,13 @@ import type { RenderResult, SpecialHandler } from "../web/scrapers/types";
 import { finalizeOutput, loadPage, looksLikeHtml, MAX_BYTES } from "../web/scrapers/types";
 import { type BinaryFetchResult, convertWithMarkit, fetchBinary } from "../web/scrapers/utils";
 import { findCredential } from "../web/search/providers/utils";
-import { applyListLimit } from "@oh-my-pi/pi-tui/tools/list-limit";
 import { parseTailCount } from "./path-utils";
 import { type LineRange, parseLineRanges } from "@oh-my-pi/pi-tui/tools/line-ranges";
 import { isReadableUrlPath } from "@oh-my-pi/pi-tui/tools/read";
 import type { ParsedSelector } from "./read-selector";
 import { formatBytes } from "@oh-my-pi/pi-tui/render/render-utils";
-import { listTables, looksLikeSqlite, openSqliteReadConnection, renderTableList } from "./sqlite-reader";
+import { looksLikeSqlite } from "./sqlite-reader";
+import { readSqlite } from "./read-sqlite";
 import { ToolAbortError } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
@@ -805,7 +804,6 @@ type FetchRenderResult = RenderResult & {
 
 const BINARY_SAMPLE_CHARS = 4096;
 const URL_ARCHIVE_LIST_LIMIT = 500;
-const URL_SQLITE_LIST_LIMIT = 500;
 
 function sampleLooksBinary(text: string): boolean {
 	const limit = Math.min(text.length, BINARY_SAMPLE_CHARS);
@@ -930,16 +928,12 @@ async function renderNotebookPayload(bytes: Uint8Array, displayUrl: string): Pro
 	);
 }
 
-async function renderSqlitePayload(bytes: Uint8Array): Promise<string> {
+async function renderSqlitePayload(bytes: Uint8Array, signal?: AbortSignal): Promise<string> {
 	return withTempBinaryFile("omp-url-sqlite-", ".sqlite", bytes, async tempPath => {
-		let db: Database | null = null;
-		try {
-			db = await openSqliteReadConnection(tempPath);
-			const listLimit = applyListLimit(listTables(db), { limit: URL_SQLITE_LIST_LIMIT });
-			return renderTableList(listLimit.items);
-		} finally {
-			db?.close();
-		}
+		const result = await readSqlite({ absolutePath: tempPath, sqliteSubPath: "", queryString: "" }, signal);
+		const text = result.content.find(block => block.type === "text");
+		if (!text) throw new ToolError("SQLite read worker returned no text");
+		return text.text;
 	});
 }
 
@@ -1014,7 +1008,7 @@ async function tryRenderBinaryPayload(
 				finalUrl,
 				mime,
 				"sqlite",
-				await renderSqlitePayload(binary.buffer),
+				await renderSqlitePayload(binary.buffer, signal),
 				fetchedAt,
 				resultNotes,
 			);

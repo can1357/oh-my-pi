@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- SQLite `read` stays responsive to cancellation and stops slow queries after 30 seconds; paged reads offer continuation without scanning the whole table for a row count ([#17535](https://github.com/can1357/oh-my-pi/issues/17535)).
+
 ## [18.14.1] - 2026-10-31
 
 ### Added

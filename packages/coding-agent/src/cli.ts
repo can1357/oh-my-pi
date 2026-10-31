@@ -37,6 +37,7 @@ import {
 	LSP_MUX_WORKER_ARG,
 	MNEMOPI_EMBED_SERVER_WORKER_ARG,
 	PARENT_WATCHDOG_WORKER_ARG,
+	SQLITE_READ_WORKER_ARG,
 	STATS_ACTIVITY_WORKER_ARG,
 	TERMINAL_OUTPUT_WORKER_ARG,
 	TEXT_PREDICT_WORKER_ARG,
@@ -154,6 +155,7 @@ async function runSmokeTest(): Promise<void> {
 	const { smokeTestIdaHost } = await import("./ida/client");
 	const { smokeTestBlobBroker } = await import("./blob-broker/daemon");
 	const { smokeTestTerminalOutputWorker } = await import("./launch/terminal-output-worker-client");
+	const { smokeTestSqliteReadWorker } = await import("./tools/sqlite-read-worker-client");
 	const { smokeTestTextPredictDaemon } = await import("./predict/client");
 	await smokeTestSyncWorker();
 	await smokeTestStatsActivityWorker();
@@ -182,6 +184,7 @@ async function runSmokeTest(): Promise<void> {
 	await smokeTestIdaHost();
 	await smokeTestBlobBroker();
 	await smokeTestTerminalOutputWorker();
+	await smokeTestSqliteReadWorker();
 	await smokeTestTextPredictDaemon();
 	process.stdout.write("smoke-test: ok\n");
 }
@@ -292,6 +295,12 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		if (parentPort) installWorkerInbox(parentPort);
 		// This selector is the isolation boundary; a static import would evaluate xterm in normal CLI startup.
 		await import("./launch/terminal-output-worker");
+		return true;
+	}
+	if (arg === SQLITE_READ_WORKER_ARG) {
+		// Keep bun:sqlite and read-tool rendering out of the ordinary CLI startup graph.
+		const { startSqliteReadWorker } = await import("./tools/sqlite-read-worker");
+		await runIpcSubprocessWorker(startSqliteReadWorker);
 		return true;
 	}
 	if (arg === PARENT_WATCHDOG_WORKER_ARG) {
