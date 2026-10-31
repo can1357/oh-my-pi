@@ -1,5 +1,6 @@
 import { isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils/fetch-retry";
 import type { Api, AssistantMessage, Usage } from "../types";
+import { withoutRetryAfterHints } from "../utils/retry-after";
 import { AwsCredentialsError } from "./aws";
 import {
 	AnthropicConnectionError,
@@ -637,7 +638,7 @@ function isTerminalClientErrorStatus(status: number | undefined): boolean {
 }
 
 function classifyText(
-	errorMessage: string | undefined,
+	rawMessage: string | undefined,
 	errorStatus: number | undefined,
 	priorTokenOverflowEvidence = false,
 	api?: Api,
@@ -645,6 +646,9 @@ function classifyText(
 	modelId?: string,
 ): number {
 	let kinds = 0;
+	// The `retry-after-ms=N` hint the formatter appends is the server's wait, not
+	// error text: a wait of 500 or 403 ms must not read as an HTTP status.
+	const errorMessage = rawMessage === undefined ? undefined : withoutRetryAfterHints(rawMessage);
 	if (errorMessage) {
 		if (matchesOverflowText(errorMessage)) kinds |= Flag.ContextOverflow;
 		if (matchesPayloadRejectionText(errorMessage)) kinds |= Flag.PayloadRejected;

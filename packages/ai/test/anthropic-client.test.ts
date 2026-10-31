@@ -1,6 +1,6 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { AnthropicMessagesClient } from "@oh-my-pi/pi-ai/providers/anthropic-client";
+import { AnthropicMessagesClient, retryDelayFromHeaders } from "@oh-my-pi/pi-ai/providers/anthropic-client";
 import type { MessageCreateParamsStreaming } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 
@@ -283,6 +283,38 @@ describe("AnthropicMessagesClient request assembly", () => {
 		expect(headers.authorization).toBe("Bearer right-token");
 		expect(headers.Authorization).toBeUndefined();
 		expect(calls[0].url).toBe("https://api.anthropic.com/v1/messages");
+	});
+});
+
+// The client reads a Retry-After date with the one reader every retry parser
+// shares, and never reads a date as the seconds its leading digits spell.
+describe("retryDelayFromHeaders", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+	const at = Date.UTC(2026, 9, 31, 12, 0, 0);
+	const read = (value: string): number | undefined => retryDelayFromHeaders(new Headers({ "retry-after": value }));
+
+	it.each([
+		["an IMF date without its weekday, not as 31 seconds", "31 Oct 2026 12:00:30 GMT", 30_000],
+		[
+			"an RFC 850 two-digit year decades ahead",
+			"Sunday, 31-Oct-60 12:00:30 GMT",
+			Date.UTC(2060, 9, 31, 12, 0, 30) - at,
+		],
+		["a zoned RFC 3339 timestamp, not as 2026 seconds", "2026-10-31T12:00:30Z", 30_000],
+		["plain seconds", "30", 30_000],
+	])("reads %s", (_name, value, expected) => {
+		vi.spyOn(Date, "now").mockReturnValue(at);
+		expect(read(value)).toBe(expected);
+	});
+
+	it.each([
+		["seconds with trailing text", "30abc"],
+		["31 November", "Sat, 31 Nov 2026 12:00:30 GMT"],
+	])("names no wait for %s", (_name, value) => {
+		vi.spyOn(Date, "now").mockReturnValue(at);
+		expect(read(value)).toBeUndefined();
 	});
 });
 

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { isGitHubCopilotPolicyDenial } from "@oh-my-pi/pi-ai/error";
 import { formatMessage } from "@oh-my-pi/pi-ai/error/format";
 import { rewriteCopilotError } from "@oh-my-pi/pi-ai/utils/http-inspector";
@@ -90,6 +91,56 @@ describe("formatMessage keeps the server's wait through a provider rewrite", () 
 		expect(keepRetryAfterHint("no wait named", "rewritten")).toBe("rewritten");
 		expect(keepRetryAfterHint("retry-after-ms=5", "rewritten retry-after-ms=7")).toBe("rewritten retry-after-ms=7");
 	});
+
+	it("reads the wait from a Retry-After date with the shared reader", async () => {
+		const at = Date.now();
+		const fiftyYearWindow = new Date(at);
+		fiftyYearWindow.setUTCFullYear(fiftyYearWindow.getUTCFullYear() + 34);
+		const day = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][
+			fiftyYearWindow.getUTCDay()
+		];
+		const month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][
+			fiftyYearWindow.getUTCMonth()
+		];
+		const pad = (value: number): string => String(value).padStart(2, "0");
+		// RFC 850 with a two-digit year 34 years ahead: Date.parse reads it as the last century.
+		const rfc850 = `${day}, ${pad(fiftyYearWindow.getUTCDate())}-${month}-${pad(fiftyYearWindow.getUTCFullYear() % 100)} ${pad(fiftyYearWindow.getUTCHours())}:${pad(fiftyYearWindow.getUTCMinutes())}:${pad(fiftyYearWindow.getUTCSeconds())} GMT`;
+		const error = Object.assign(new Error("503 overloaded"), {
+			status: 503,
+			headers: new Headers({ "retry-after": rfc850 }),
+		});
+
+		const formatted = await formatMessage(error, { provider: "openai" });
+		const waitMs = Number(/retry-after-ms=(\d+)/.exec(formatted)?.[1]);
+
+		expect(waitMs).toBeGreaterThan(33 * 365 * 86_400_000);
+	});
+
+	// The hint is the server's wait, not error text: a wait whose milliseconds
+	// spell a status (403, 503, …) must not read as one in the classifier.
+	const cases: Array<[string, string, number | undefined]> = [
+		["github-copilot", "403 Forbidden", 403],
+		["cline-pass", "model not found", 400],
+		["cline-pass", "the user is not subscribed to required model plan", 400],
+		["openai", "request failed", undefined],
+	];
+	for (const [provider, message, status] of cases) {
+		it.each([401, 403, 429, 500, 502, 503, 504])(
+			`classifies ${provider} "${message}" the same with a wait of %i ms`,
+			async waitMs => {
+				const failure = (headers?: Headers): Error => Object.assign(new Error(message), { status, headers });
+				const hinted = await formatMessage(failure(new Headers({ "retry-after-ms": String(waitMs) })), {
+					provider,
+				});
+				const plain = await formatMessage(failure(), { provider });
+				expect(hinted).toContain(`retry-after-ms=${waitMs}`);
+
+				expect(AIError.classifyMessage({ provider, errorMessage: hinted, errorStatus: status })).toBe(
+					AIError.classifyMessage({ provider, errorMessage: plain, errorStatus: status }),
+				);
+			},
+		);
+	}
 });
 
 describe("isGitHubCopilotPolicyDenial", () => {

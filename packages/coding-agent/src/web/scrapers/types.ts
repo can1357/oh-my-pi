@@ -2,7 +2,7 @@
  * Shared types and utilities for web-fetch handlers
  */
 import { scheduler } from "node:timers/promises";
-import { ptree } from "@oh-my-pi/pi-utils";
+import { parseRetryAfterDate, ptree } from "@oh-my-pi/pi-utils";
 import type TurndownService from "@oh-my-pi/pi-utils/turndown";
 
 import type { ModelRegistry } from "../../config/model-registry";
@@ -96,8 +96,8 @@ function parseRetryAfterMs(value: string | null): number {
 	if (!value) return 1_000;
 	const seconds = Number(value);
 	if (Number.isFinite(seconds)) return Math.min(Math.max(seconds, 0) * 1000, RETRY_AFTER_MAX_MS);
-	const date = Date.parse(value);
-	if (!Number.isNaN(date)) return Math.min(Math.max(date - Date.now(), 0), RETRY_AFTER_MAX_MS);
+	const date = parseRetryAfterDate(value);
+	if (date !== undefined) return Math.min(Math.max(date - Date.now(), 0), RETRY_AFTER_MAX_MS);
 	return 1_000;
 }
 

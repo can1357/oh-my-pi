@@ -5,6 +5,7 @@ import {
 	findRetryRefusal,
 	isUnexpectedSocketCloseMessage,
 	longestRetryHint,
+	parseRetryAfterDate,
 	RetryRefusedError,
 } from "@oh-my-pi/pi-utils/fetch-retry";
 
@@ -486,11 +487,10 @@ describe("longestRetryHint", () => {
 			expect(longestRetryHint(new Headers({ "retry-after": asctime(at + 30_000) }))).toBe(30_000);
 		});
 
-		// The retry loop without a gate keeps today's reading: a date in text names no
-		// wait there, so the default backoff applies.
-		it("is still not read without a gate", () => {
+		// One date reader: the retry loop without a gate reads a date in text too.
+		it("is read without a gate too", () => {
 			vi.spyOn(Date, "now").mockReturnValue(at);
-			expect(extractRetryHint(undefined, `retry-after: ${imf(at + 30_000)}`)).toBeUndefined();
+			expect(extractRetryHint(undefined, `retry-after: ${imf(at + 30_000)}`)).toBe(30_000);
 		});
 
 		// RFC 9110 section 5.6.7, case by case: the rolling fifty-year reading of a
@@ -552,6 +552,52 @@ describe("longestRetryHint", () => {
 		it("reads both dates of a duplicate header joined by a comma", () => {
 			vi.spyOn(Date, "now").mockReturnValue(at);
 			expect(header(`${imf(at + 1_000)}, ${imf(at + 30_000)}`)).toBe(30_000);
+		});
+
+		// Every reader of a Retry-After date, with or without a budget, reads it the
+		// same way: the header reading without a gate agrees with the budget's.
+		it.each([
+			["an RFC 850 two-digit year decades ahead", "Sunday, 31-Oct-60 12:00:30 GMT"],
+			["the zone-less asctime form, read as GMT", "Sat Oct 31 12:00:30 2026"],
+			["31 November", "Sat, 31 Nov 2026 12:00:30 GMT"],
+			["a five-digit year", "Sat, 31 Oct 20260 12:00:30 GMT"],
+			["an RFC 5322 US zone", "Sat, 31 Oct 2026 05:00:30 PDT"],
+			["a zoned RFC 3339 timestamp", "2026-10-31T12:00:30Z"],
+			["a zone-less RFC 3339 timestamp", "2026-10-31T12:00:30"],
+		])("reads %s the same in the header without a gate", (_name, value) => {
+			vi.spyOn(Date, "now").mockReturnValue(at);
+			expect(extractRetryHint(new Headers({ "retry-after": value }))).toBe(header(value));
+		});
+
+		it("reads a timestamp written as one token in text with the same reader", () => {
+			vi.spyOn(Date, "now").mockReturnValue(at);
+			expect(extractRetryHint(undefined, "retry-after: 2026-10-31T12:00:30Z")).toBe(30_000);
+			expect(extractRetryHint(undefined, "retry-after: 2026-10-31T12:00:30")).toBeUndefined();
+		});
+	});
+
+	describe("parseRetryAfterDate", () => {
+		const at = Date.UTC(2026, 9, 31, 12, 0, 0);
+		it.each([
+			["IMF-fixdate", "Sat, 31 Oct 2026 12:00:30 GMT", at + 30_000],
+			["an RFC 5322 numeric offset", "Sat, 31 Oct 2026 13:00:30 +0100", at + 30_000],
+			["an RFC 5322 US zone", "Sat, 31 Oct 2026 05:00:30 PDT", at + 30_000],
+			["an RFC 5322 date without its weekday", "31 Oct 2026 12:00:30 GMT", at + 30_000],
+			["an RFC 3339 timestamp in UTC", "2026-10-31T12:00:30Z", at + 30_000],
+			["an RFC 3339 timestamp with an offset and a fraction", "2026-10-31T14:00:30.250+02:00", at + 30_250],
+			["the RFC 3339 leap second", "2016-12-31T23:59:60Z", Date.UTC(2017, 0, 1)],
+		])("reads %s", (_name, value, expected) => {
+			expect(parseRetryAfterDate(value, at)).toBe(expected);
+		});
+
+		it.each([
+			["an RFC 3339 timestamp without a zone", "2026-10-31T12:00:30"],
+			["an unknown zone", "Sat, 31 Oct 2026 12:00:30 CET"],
+			["an offset past 23 hours", "2026-10-31T12:00:30+24:00"],
+			["a seconds value", "30"],
+			["a seconds value with trailing text", "30abc"],
+		])("reads no date in %s", (_name, value) => {
+			expect(parseRetryAfterDate(value, at)).toBeUndefined();
 		});
 	});
 

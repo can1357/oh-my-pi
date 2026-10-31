@@ -6,7 +6,12 @@
 
 - Added `isFileLockHeld`, which reports whether a file lock is held without acquiring it ([#17428](https://github.com/can1357/oh-my-pi/pull/17428) by [@andrebrait](https://github.com/andrebrait))
 - Added a `retryGate` option to `fetchWithRetry`: it receives each retry's wait and is asked again with `0` immediately before the retry is sent; returning `false` stops retrying and surfaces the current failure. A retry the transport refuses at handoff with `RetryRefusedError` returns that failure too. While a gate is set, a response's wait is the longest one its headers or body name
-- Added `longestRetryHint`, the longest wait a response names across every retry header and every hint in its body, and `RetryRefusedError` / `findRetryRefusal` for a transport that refuses a retry at handoff. HTTP dates are read field by field in RFC 9110's three forms: a two-digit RFC 850 year is at most fifty years ahead, 23:59:60 is a leap second, a date without a zone is GMT, and a malformed date names no wait
+- Added `longestRetryHint`, the longest wait a response names across every retry header and every hint in its body, and `RetryRefusedError` / `findRetryRefusal` for a transport that refuses a retry at handoff
+- Added `parseRetryAfterDate`, the one reader of a `Retry-After` date. It reads RFC 9110's three forms field by field (a two-digit RFC 850 year is at most fifty years ahead, 23:59:60 is a leap second, a date without a zone is GMT, an impossible date names no wait), the zones RFC 5322 also allows, and an RFC 3339 timestamp that names its zone
+
+### Fixed
+
+- Fixed `extractRetryHint` reading a `Retry-After` date with `Date.parse`: a two-digit RFC 850 year within fifty years read as the last century, a leap second named no wait, 31 November rolled into December, a zone-less asctime date or RFC 3339 timestamp was read in the machine's own zone, and a `retry-after: <HTTP date>` in error text was ignored. It now uses `parseRetryAfterDate`, the same reader as `longestRetryHint`
 
 ## [18.14.0] - 2026-10-29
 

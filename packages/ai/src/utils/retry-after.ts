@@ -1,5 +1,5 @@
 import { retryResetTimezoneOffsetFor } from "@oh-my-pi/pi-catalog/compat/behavior";
-import { extractRetryHint } from "@oh-my-pi/pi-utils";
+import { extractRetryHint, parseRetryAfterDate } from "@oh-my-pi/pi-utils";
 
 export type HeadersLike = Headers | Record<string, string | undefined> | undefined | null;
 
@@ -14,6 +14,12 @@ export function extractProviderRetryHint(
 
 const RETRY_AFTER_HINT = "retry-after-ms=";
 const RETRY_AFTER_HINT_PATTERN = /\bretry-after-ms=(\d+)/g;
+const RETRY_AFTER_HINT_TOKEN_PATTERN = /\s*\bretry-after-ms=\d+/g;
+
+/** `message` without the `retry-after-ms=N` hints the formatter appends: text to classify, not the server's wait. */
+export function withoutRetryAfterHints(message: string): string {
+	return message.includes(RETRY_AFTER_HINT) ? message.replace(RETRY_AFTER_HINT_TOKEN_PATTERN, "") : message;
+}
 
 /**
  * `message` carrying the longest `retry-after-ms=` hint `source` carries, for a
@@ -110,8 +116,8 @@ function parseRetryAfterHeader(value: string | undefined): number | undefined {
 		return Math.ceil(numeric * 1000);
 	}
 
-	const dateMs = Date.parse(trimmed);
-	if (!Number.isNaN(dateMs)) {
+	const dateMs = parseRetryAfterDate(trimmed);
+	if (dateMs !== undefined) {
 		const delay = dateMs - Date.now();
 		return delay > 0 ? Math.ceil(delay) : undefined;
 	}

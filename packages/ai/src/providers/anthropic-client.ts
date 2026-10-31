@@ -21,6 +21,7 @@
  *   with up to 25% jitter).
  */
 import { scheduler } from "node:timers/promises";
+import { parseRetryAfterDate } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { AnthropicApiError, AnthropicConnectionError, AnthropicConnectionTimeoutError } from "../error";
 
@@ -118,12 +119,14 @@ export function retryDelayFromHeaders(headers: Pick<Headers, "get"> | undefined)
 		const ms = Number.parseFloat(retryAfterMs);
 		if (Number.isFinite(ms) && ms >= 0) return ms;
 	}
-	const retryAfter = headers.get("retry-after");
+	const retryAfter = headers.get("retry-after")?.trim();
 	if (retryAfter) {
-		const seconds = Number.parseFloat(retryAfter);
+		// A number of seconds, or an HTTP date: a date is never read as the
+		// seconds its leading digits spell.
+		const seconds = Number(retryAfter);
 		if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
-		const dateMs = Date.parse(retryAfter) - Date.now();
-		if (Number.isFinite(dateMs) && dateMs >= 0) return dateMs;
+		const dateMs = parseRetryAfterDate(retryAfter);
+		if (dateMs !== undefined && dateMs >= Date.now()) return dateMs - Date.now();
 	}
 	return undefined;
 }
