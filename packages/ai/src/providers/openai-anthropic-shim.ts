@@ -99,6 +99,7 @@ export function streamOpenAIAnthropicShim(
 					metadata: config.forwardCacheOptions ? options?.metadata : undefined,
 					sessionId: options?.sessionId,
 					promptCacheKey: options?.promptCacheKey,
+					omitDemotedReasoning: options?.omitDemotedReasoning,
 					onPayload: options?.onPayload,
 					onResponse: options?.onResponse,
 					onSseEvent: options?.onSseEvent,

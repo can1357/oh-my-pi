@@ -439,6 +439,22 @@ describe("Anthropic prior-turn thinking preservation (#2257, #2265)", () => {
 			]);
 		});
 
+		it("keeps a non-Claude model's reasoning from before a compaction on the same gateway", () => {
+			// A gateway target replays unsigned thinking natively instead of as text.
+			const gatewayTarget = makeAnthropicModel({ provider: "openrouter", id: "anthropic/claude-fable-5-1" });
+			expect(gatewayTarget.thinking?.prefixBinding).toBe(true);
+			const messages: Message[] = [
+				{ role: "user", content: "Compacted session summary", historyRewriteAt: 100, timestamp: 100 },
+				kimiTurn({ api: "openai-completions", provider: "openrouter", model: "moonshotai/kimi-k3", timestamp: 50 }),
+				makeUser("Continue"),
+			];
+			const params = convertAnthropicMessages(messages, gatewayTarget, false);
+			expect(params.find(param => param.role === "assistant")?.content).toEqual([
+				{ type: "thinking", thinking: "kimi private plan", signature: "" },
+				{ type: "text", text: "Kimi answer" },
+			]);
+		});
+
 		it("still drops Claude's reasoning from another provider under another credential", () => {
 			const claudeTurn = makeAssistant(
 				[

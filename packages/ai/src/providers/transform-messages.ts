@@ -978,21 +978,17 @@ export function transformMessages<TApi extends Api>(
 				targetCredentialId !== undefined &&
 				assistantMsg.credentialId !== targetCredentialId;
 			// Thinking bound to another credential, or to a prefix a history rewrite
-			// invalidated, is dropped. Another provider's model the catalog classes as
-			// non-Claude wrote plain reasoning that neither binding governs, so its
-			// visible thinking stays and replays as demoted text below. Claude's
-			// reasoning from another host or account, and an unclassified model's
-			// (an opaque proxy may serve Claude), keep being dropped.
+			// invalidated, is dropped. A model the catalog classes as non-Claude wrote
+			// plain reasoning that neither binding governs, so its visible thinking
+			// stays and replays as demoted text below. Claude's reasoning from another
+			// host or account, and an unclassified model's (an opaque proxy may serve
+			// Claude), keep being dropped.
 			const thinkingBound = foreignCredential || invalidBoundThinkingAssistantIndexes.has(index);
 			const sourceClass = thinkingBound
 				? classifyModel(assistantMsg.provider, assistantMsg.upstreamModel ?? assistantMsg.model, { lenient: true })
 						.class
 				: undefined;
-			const keepsBoundThinking =
-				thinkingBound &&
-				assistantMsg.provider !== model.provider &&
-				sourceClass !== "anthropic" &&
-				sourceClass !== "unknown";
+			const keepsBoundThinking = thinkingBound && sourceClass !== "anthropic" && sourceClass !== "unknown";
 			const signingAnthropicInvolved = isOfficialAnthropicSource || isSigningAnthropicTarget;
 			// Compatible Anthropic-messages reasoning targets that accept
 			// unsigned thinking natively (Z.AI, DeepSeek, the generic
