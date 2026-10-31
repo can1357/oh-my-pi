@@ -1590,7 +1590,7 @@ function statementName(recordName: string): string {
  * did. A retry believes it only of the same thing at that name, and not
  * while the run's directory is still at its old name: the one the record
  * recorded, or, for a record written before its run took the inodes, any
- * directory there unless it is another than the one the statement names. So
+ * directory there, unless the statement names a different directory. So
  * a statement written while the directory was still in its tree is not
  * believed, and one written by anything else has to name, exactly, what is
  * at the stage's name.
