@@ -1799,6 +1799,9 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		goalController.observe(event);
 		promptResults.observe(event);
 		settleWatcher.observe(event);
+		if (event.type === "model_changed") {
+			session.prewarmModelConnection();
+		}
 	});
 	await goalController.reconcile();
 	await goalController.settled();
@@ -2857,6 +2860,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				if (!isTextCursor(command.text, command.cursor)) {
 					return error(id, "predict_word", INVALID_TEXT_CURSOR_ERROR);
 				}
+				if (command.text) session.prewarmModelConnection();
 				try {
 					const method = cfgSpellingAutocomplete.get(session.settings);
 					const suffix = await wordPredictor.predict(method, command.text, command.cursor);

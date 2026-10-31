@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- RPC mode now prewarms the active model's API connection on `model_changed` events and when typing triggers `predict_word`, matching interactive mode ([#17102](https://github.com/can1357/oh-my-pi/pull/17102) by [@GTanger](https://github.com/GTanger))
+
 ## [18.14.1] - 2026-10-31
 
 ### Added

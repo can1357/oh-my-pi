@@ -8,6 +8,9 @@ provider "google" {
 	}
 	web-search "gemini"
 	image-count-budget 200
+	prewarm-base-url #true
+	request-encodings "gzip"
+	request-encoding-rejection "Unsupported Content-Encoding"
 
 	class "unknown" {
 		thinking-efforts "minimal" "low" "medium" "high"

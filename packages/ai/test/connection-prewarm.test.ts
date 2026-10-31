@@ -129,4 +129,56 @@ describe("prewarmModelConnection", () => {
 
 		expect(calls).toHaveLength(0);
 	});
+
+	it("warms official google and google-gemini-cli endpoints before the first request via prewarm-base-url, and warms google-antigravity after dispatch", async () => {
+		const { calls, fetch } = captureFetch();
+		const google = model("google", "google-generative-ai", "https://generativelanguage.googleapis.com");
+		const geminiCli = model("google-gemini-cli", "google-gemini-cli", "https://cloudcode-pa.googleapis.com");
+		const antigravity = model("google-antigravity", "google-gemini-cli", "https://daily-cloudcode-pa.googleapis.com");
+
+		await prewarmModelConnection(google, { fetch });
+		await prewarmModelConnection(geminiCli, { fetch });
+		// Before its first request, google-antigravity's effective endpoint
+		// (daily vs sandbox) is not yet known, so it is not guessed from baseUrl.
+		await prewarmModelConnection(antigravity, { fetch });
+
+		expect(calls.map(call => [call.url, call.init.method])).toEqual([
+			["https://generativelanguage.googleapis.com", "HEAD"],
+			["https://cloudcode-pa.googleapis.com", "HEAD"],
+		]);
+
+		// After dispatch to sandbox endpoint on antigravity:
+		await dispatch(
+			antigravity,
+			"https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:streamGenerateContent?alt=sse",
+		);
+		await prewarmModelConnection(antigravity, { fetch });
+
+		expect(calls.map(call => [call.url, call.init.method])).toEqual([
+			["https://generativelanguage.googleapis.com", "HEAD"],
+			["https://cloudcode-pa.googleapis.com", "HEAD"],
+			["https://daily-cloudcode-pa.sandbox.googleapis.com", "HEAD"],
+		]);
+	});
+
+	it("never probes google, google-gemini-cli, or google-antigravity when baseUrl is overridden to a custom gateway", async () => {
+		const { calls, fetch } = captureFetch();
+		const customGoogle = model("google", "google-generative-ai", "https://gateway.internal.example/google");
+		const customGeminiCli = model(
+			"google-gemini-cli",
+			"google-gemini-cli",
+			"https://gateway.internal.example/gemini-cli",
+		);
+		const customAntigravity = model(
+			"google-antigravity",
+			"google-gemini-cli",
+			"https://gateway.internal.example/antigravity",
+		);
+
+		await prewarmModelConnection(customGoogle, { fetch });
+		await prewarmModelConnection(customGeminiCli, { fetch });
+		await prewarmModelConnection(customAntigravity, { fetch });
+
+		expect(calls).toHaveLength(0);
+	});
 });

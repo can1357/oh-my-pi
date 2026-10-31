@@ -37,7 +37,7 @@ import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
 // Refresh is the sole responsibility of AuthStorage (broker-aware, single-flighted);
 // the stream provider trusts the access token threaded through `options.apiKey`.
-import { normalizeSchemaForCCA } from "../utils/schema";
+import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import { StreamMarkupHealing, type StreamMarkupHealingEvent } from "../utils/stream-markup-healing";
 import { prepareAnthropicImageContext } from "./anthropic-images";
 import forcedToolDirective from "./google-antigravity-forced-tool.md" with { type: "text" };
@@ -584,6 +584,13 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				endpoints = baseUrl ? [baseUrl] : [DEFAULT_ENDPOINT];
 			}
 
+			// The backend gates newer models on the client version; a process that
+			// skipped discovery (fresh model cache) must still send the current one.
+			// Kick it off in parallel with image/payload prep so network latency overlaps.
+			const antigravityVersionReady = isAntigravity
+				? ensureAntigravityVersion(options?.fetch ?? fetch, options?.signal)
+				: undefined;
+
 			// A host that declares an image contract (Claude behind Antigravity)
 			// rejects oversized images, and a rejected image stays in context, so
 			// clamp before building; readers without one take images as sent. The
@@ -603,9 +610,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			if (replacementPayload !== undefined) {
 				requestBody = replacementPayload as typeof requestBody;
 			}
-			// The backend gates newer models on the client version; a process that
-			// skipped discovery (fresh model cache) must still send the current one.
-			if (isAntigravity) await ensureAntigravityVersion(options?.fetch ?? fetch, options?.signal);
+			if (antigravityVersionReady) await antigravityVersionReady;
 			// Antigravity mirrors the native Go client: no `Accept`, gzip only, and
 			// no Claude-thinking beta on Claude 5.x (the compat flag scopes it).
 			const requestHeaders = {
@@ -620,6 +625,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				...options?.headers,
 			};
 			const requestBodyJson = JSON.stringify(requestBody);
+			const requestFetch = wrapFetchForRequestCompression(options?.fetch ?? fetch, model);
 			rawRequestDump = {
 				provider: model.provider,
 				api: output.api,
@@ -972,7 +978,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							maxAttempts: isLastEndpoint ? MAX_RETRIES + 1 : 1,
 							defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
 							maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
-							fetch: options?.fetch,
+							fetch: requestFetch,
 							timeout: false,
 						});
 					} finally {
@@ -1021,7 +1027,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 								throw new AIError.ConfigurationError("Missing request URL");
 							}
 
-							currentResponse = await (options?.fetch ?? fetch)(requestUrl, {
+							currentResponse = await requestFetch(requestUrl, {
 								method: "POST",
 								headers: requestHeaders,
 								body: requestBodyJson,
@@ -1216,25 +1222,6 @@ function deriveAntigravitySessionId(context: Context): string {
 	return randomSignedDecimalSessionId();
 }
 
-function normalizeAntigravityTools(
-	tools: CloudCodeAssistRequest["request"]["tools"],
-): CloudCodeAssistRequest["request"]["tools"] {
-	return tools?.map(tool => ({
-		...tool,
-		functionDeclarations: tool.functionDeclarations.map(declaration => {
-			if ("parameters" in declaration) {
-				return declaration;
-			}
-
-			const { parametersJsonSchema, ...rest } = declaration;
-			return {
-				...rest,
-				parameters: normalizeSchemaForCCA(parametersJsonSchema),
-			};
-		}),
-	}));
-}
-
 interface AntigravityRequestEnvelope {
 	sessionId: string;
 	requestId: string;
@@ -1358,8 +1345,7 @@ export function buildRequest(
 	}
 
 	if (context.tools && context.tools.length > 0) {
-		const convertedTools = convertTools(context.tools, model);
-		request.tools = isAntigravity ? normalizeAntigravityTools(convertedTools) : convertedTools;
+		request.tools = convertTools(context.tools, model, { antigravity: isAntigravity });
 		if (options.toolChoice) {
 			const choice = options.toolChoice;
 			if (typeof choice === "string") {

@@ -29,7 +29,13 @@ import { normalizeSystemPrompts, normalizeToolCallId } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs } from "../utils/idle-iterator";
-import { normalizeSchemaForCCA, normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
+import { wrapFetchForRequestCompression } from "../utils/request-compression";
+import {
+	normalizeSchemaForCCA,
+	normalizeSchemaForGoogle,
+	normalizeSchemaForGoogleCCA,
+	toolWireSchema,
+} from "../utils/schema";
 import type {
 	Content,
 	FinishReason,
@@ -406,14 +412,17 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 export function convertTools(
 	tools: Tool[],
 	model: Model<"google-generative-ai" | "google-gemini-cli" | "google-vertex">,
+	options?: { antigravity?: boolean },
 ): { functionDeclarations: Record<string, unknown>[] }[] | undefined {
 	if (tools.length === 0) return undefined;
 
 	/**
 	 * Claude models on Cloud Code Assist need the legacy `parameters` field;
-	 * the API translates it into Anthropic's `input_schema`.
+	 * the API translates it into Anthropic's `input_schema`. Antigravity Gemini
+	 * routes also require `parameters` with the composed Google-to-CCA schema.
 	 */
 	const useParameters = model.compat.ccaLegacyParametersSchema;
+	const useAntigravityGeminiParameters = !useParameters && options?.antigravity === true;
 
 	return [
 		{
@@ -422,7 +431,9 @@ export function convertTools(
 				description: tool.description || "",
 				...(useParameters
 					? { parameters: normalizeSchemaForCCA(toolWireSchema(tool)) }
-					: { parametersJsonSchema: normalizeSchemaForGoogle(toolWireSchema(tool)) }),
+					: useAntigravityGeminiParameters
+						? { parameters: normalizeSchemaForGoogleCCA(toolWireSchema(tool)) }
+						: { parametersJsonSchema: normalizeSchemaForGoogle(toolWireSchema(tool)) }),
 			})),
 		},
 	];
@@ -1063,7 +1074,10 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			};
 
 			const bodyJson = JSON.stringify(paramsToWireBody(params));
-			const fetchImpl = plan.fetch ?? options?.fetch ?? (globalThis.fetch.bind(globalThis) as FetchImpl);
+			const fetchImpl = wrapFetchForRequestCompression(
+				plan.fetch ?? options?.fetch ?? (globalThis.fetch.bind(globalThis) as FetchImpl),
+				model,
+			);
 			// Bun's native fetch ceiling is disabled (`timeout: false`) so configurable
 			// watchdogs govern slow-prefill streams (issues #2422, #16991). Direct callers
 			// that bypass `register-builtins` (which installs the iterator-level
