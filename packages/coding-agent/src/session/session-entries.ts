@@ -145,7 +145,7 @@ export interface ModelChangeEntry extends SessionEntryBase {
 	model: string;
 	/** Role: "default", "smol", "slow", etc. Undefined treated as "default" */
 	role?: string;
-	/** True when this transition selected a retry-fallback model rather than the configured model. */
+	/** True when this transition selected a model other than the requested one: a retry-fallback model, or a model that replaced the requested one when the session started. */
 	resolvedModelIsFallback?: boolean;
 }
 

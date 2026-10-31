@@ -12,7 +12,7 @@ import {
 	postmortem,
 	prompt,
 } from "@oh-my-pi/pi-utils";
-import type { ModelRegistry } from "../config/model-registry";
+import { type ModelRegistry, probeModelApiKey } from "../config/model-registry";
 import {
 	resolveConfiguredModelPatterns,
 	resolveProviderModelReference,
@@ -92,7 +92,7 @@ export function createSkillDescriptionCompressor(
 		async compress(_name, _description, request) {
 			const model = select();
 			if (!model) throw new Error("No smol or tiny model available");
-			const apiKey = await registry.getApiKey(model, sessionId);
+			const apiKey = await probeModelApiKey(registry, model, sessionId);
 			if (!apiKey) throw new Error(`No credential for ${model.provider}/${model.id}`);
 			const response = await instrumentedCompleteSimple(
 				model,

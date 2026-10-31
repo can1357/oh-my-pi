@@ -233,9 +233,11 @@ initiating session/branch and rejects stale session ownership.
 ```
 
 `role` is optional; missing is treated as `default` in context reconstruction.
-`resolvedModelIsFallback` optionally marks a retry-fallback transition. The
-reserved role `fallback` is ephemeral: model restoration prefers the configured
-default instead of restoring that role's temporary model.
+`resolvedModelIsFallback` optionally marks a transition onto a model other than
+the requested one: a retry fallback, or a model that replaced the requested one
+when the session started. The reserved role `fallback` is ephemeral: model
+restoration prefers the configured default instead of restoring that role's
+temporary model.
 
 ### `service_tier_change`
 

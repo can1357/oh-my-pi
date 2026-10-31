@@ -16,6 +16,7 @@
 import { completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { diffLineRuns, editDiffString, parseCodeStatus } from "@oh-my-pi/pi-natives";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { probeModelApiKey } from "../config/model-registry";
 import { resolveRoleSelection } from "../config/model-resolver";
 import type { WritethroughCallback } from "../lsp";
 import type { ToolSession } from "../tools";
@@ -350,7 +351,7 @@ export async function attemptEditAutoRepair(options: {
 	const sessionId = session.getSessionId?.() ?? undefined;
 	// Resolve the key eagerly so the session-sticky credential is recorded and
 	// an unauthenticated smol role bails before any region work.
-	const apiKey = await registry.getApiKey(model, sessionId);
+	const apiKey = await probeModelApiKey(registry, model, sessionId);
 	if (!apiKey) return undefined;
 
 	// Repair against the bytes on disk, not the snapshot: a later operation in

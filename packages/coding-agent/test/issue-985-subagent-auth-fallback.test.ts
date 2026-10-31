@@ -90,6 +90,24 @@ describe("issue #985: subagent dispatch auth fallback", () => {
 		expect(selected.model?.id).toBe("shared-id");
 		expect(selected.thinkingLevel?.toString()).toBe("high");
 		expect(selected.authFallbackUsed).toBe(false);
+		// Dispatch keeps the list's own pick instead of deferring to session creation.
+		expect(selected.primaryAuthFailed).toBe(false);
+	});
+
+	test("tries configured authenticated fallbacks without a parent model, as for a seance", async () => {
+		const registry = createMockRegistry({
+			models: [unauthedTaskModel, sharedModel, parentModel],
+			authedProviders: new Set(["deepseek"]),
+		});
+		const selected = await resolveModelOverrideWithAuthFallback(
+			["opencode-zen/qwen3.6-plus-free", "deepseek/shared-id:high"],
+			undefined,
+			registry,
+		);
+		expect(selected.model?.id).toBe("shared-id");
+		expect(selected.thinkingLevel?.toString()).toBe("high");
+		expect(selected.authFallbackUsed).toBe(false);
+		expect(selected.primaryAuthFailed).toBe(false);
 	});
 
 	test("falls back to parent active model when resolved subagent model has no auth", async () => {

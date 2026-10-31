@@ -1122,9 +1122,12 @@ describe("runSubprocess yield reminders", () => {
 
 		const createAgentSessionSpy = mockCreateAgentSession(session);
 
+		// Dispatch checks the requested model's key before it hands the model to
+		// the session, as every ModelRegistry can; this one's key works.
 		const modelRegistry = {
 			refresh: async () => {},
 			getAvailable: () => [{ provider: "openai", id: "gpt-4o", name: "GPT-4o" }],
+			getApiKey: async () => "test-key",
 		} as unknown as import("@oh-my-pi/pi-coding-agent/config/model-registry").ModelRegistry;
 
 		await runSubprocess({

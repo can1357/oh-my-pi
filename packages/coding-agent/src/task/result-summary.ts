@@ -5,7 +5,7 @@
  * when a woken subagent re-yields, so a parent reads the same shape (status,
  * preview, `agent://` pointer) regardless of which path delivered it.
  */
-import { prompt } from "@oh-my-pi/pi-utils";
+import { escapeXmlAttribute, escapeXmlText, prompt } from "@oh-my-pi/pi-utils";
 import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
 import { AgentRegistry, isResumable } from "../registry/agent-registry";
 import { ASYNC_INLINE_RESULT_MAX_CHARS } from "../session/async-job-delivery";
@@ -71,6 +71,25 @@ export function formatTaskResultSummary(
 	// irc instead of redoing the work. Isolated runs are parked without a
 	// reviver (their worktree is gone), so they must not read as resumable.
 	const resumable = result.aborted && !result.isolated && isResumable(AgentRegistry.global().get(result.id));
+	// A fallback answered for the requested model: name what served, and why
+	// when the session started on it, so the parent never reads a substituted
+	// run as the model it dispatched. The template renders unescaped, so the
+	// selectors are escaped as attribute values and the reason, which quotes
+	// them, as element text: neither can close the `<model>` line early.
+	const modelFallback =
+		result.resolvedModelIsFallback && result.resolvedModel
+			? {
+					served: escapeXmlAttribute(result.resolvedModel),
+					requested:
+						result.modelOverride === undefined
+							? undefined
+							: escapeXmlAttribute([result.modelOverride].flat().join(", ")),
+					reason:
+						result.resolvedModelFallbackReason === undefined
+							? undefined
+							: escapeXmlText(result.resolvedModelFallbackReason),
+				}
+			: undefined;
 	const render = (truncated: boolean): string =>
 		prompt.render(taskSummaryTemplate, {
 			agentName: result.agent,
@@ -81,6 +100,7 @@ export function formatTaskResultSummary(
 			error: error === undefined ? undefined : escapeHarnessTags(error),
 			resumable,
 			preview: escapeHarnessTags(truncated ? previewHead(output) : output),
+			modelFallback,
 			truncated,
 			meta: result.outputMeta
 				? {

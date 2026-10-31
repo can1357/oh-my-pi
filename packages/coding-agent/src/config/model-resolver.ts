@@ -47,7 +47,7 @@ import {
 	parseConfiguredThinkingLevel,
 	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
-import { isAuthenticated, kNoAuth, type ModelRegistry } from "./model-registry";
+import { isAuthenticated, kNoAuth, type ModelRegistry, probeModelApiKey } from "./model-registry";
 import {
 	DEFAULT_MODEL_ROLE_ALIAS,
 	formatModelRoleAlias,
@@ -1735,6 +1735,17 @@ export function sessionModelDiscoveryProviders(
 	return providers;
 }
 
+/** What a model-pattern resolution with an auth pre-flight settled on. */
+export interface ModelOverrideAuthResolution {
+	model?: Model<Api>;
+	thinkingLevel?: ConfiguredThinkingLevel;
+	explicitThinkingLevel: boolean;
+	authFallbackUsed: boolean;
+	/** The requested model's key was checked and could not serve this spawn. */
+	primaryAuthFailed: boolean;
+	warning?: string;
+}
+
 /**
  * Resolve a list of override patterns to the first matching model, with an
  * auth-aware fallback to the parent session's active model.
@@ -1754,6 +1765,10 @@ export function sessionModelDiscoveryProviders(
  * providers with multiple OAuth accounts may return `undefined` even though
  * the credential is usable once the subagent session starts — see #5325.
  *
+ * When the registry is scoped to an OAuth account pool, a provider no
+ * permitted account can serve rejects rather than resolving `undefined`; that
+ * is this model's unavailability, so it counts as a failed primary.
+ *
  * Keyless-by-design providers (llama.cpp, ollama, lm-studio) advertise the
  * `kNoAuth` sentinel from `getApiKey` to signal that they do not require
  * credentials. Those are treated as authenticated here so an explicitly
@@ -1762,7 +1777,11 @@ export function sessionModelDiscoveryProviders(
  *
  * If neither the subagent nor the parent has working auth, returns the
  * primary resolution unchanged so the existing error path still surfaces
- * a meaningful failure downstream.
+ * a meaningful failure downstream. `primaryAuthFailed` reports whether the
+ * primary's key was checked and did not work, whether or not a parent model
+ * was given or could replace it; it stays false when an authenticated later
+ * entry of the override list replaces the primary, since that list is the
+ * caller's own choice.
  */
 export async function resolveModelOverrideWithAuthFallback(
 	modelPatterns: string[],
@@ -1770,13 +1789,7 @@ export async function resolveModelOverrideWithAuthFallback(
 	modelRegistry: ModelLookupRegistry & Pick<ModelRegistry, "getApiKey">,
 	settings?: Settings,
 	sessionId?: string,
-): Promise<{
-	model?: Model<Api>;
-	thinkingLevel?: ConfiguredThinkingLevel;
-	explicitThinkingLevel: boolean;
-	authFallbackUsed: boolean;
-	warning?: string;
-}> {
+): Promise<ModelOverrideAuthResolution> {
 	const disabledProviders = disabledProviderIds(settings);
 	let lookupRegistry: ModelLookupRegistry = modelRegistry;
 	if (disabledProviders.size > 0) {
@@ -1784,38 +1797,47 @@ export async function resolveModelOverrideWithAuthFallback(
 		lookupRegistry = { getAvailable: () => enabledModels };
 	}
 	const primary = resolveModelOverride(modelPatterns, lookupRegistry, settings);
-	if (!primary.model || !parentActiveModelPattern) {
-		return { ...primary, authFallbackUsed: false };
+	if (!primary.model) {
+		return { ...primary, authFallbackUsed: false, primaryAuthFailed: false };
 	}
 
-	const primaryKey = await modelRegistry.getApiKey(primary.model, sessionId);
+	const primaryKey = await probeModelApiKey(modelRegistry, primary.model, sessionId);
 	if (primaryKey === kNoAuth || isAuthenticated(primaryKey)) {
-		return { ...primary, authFallbackUsed: false };
+		return { ...primary, authFallbackUsed: false, primaryAuthFailed: false };
 	}
 	// The ordered override list is the caller's own fallback chain: an
-	// authenticated later entry beats the parent's model.
+	// authenticated later entry beats the parent's model, and serves when no
+	// parent model is given (a prepared seance passes none).
 	for (const pattern of resolveConfiguredModelPatterns(modelPatterns, settings)) {
 		const candidate = resolveModelOverride([pattern], lookupRegistry, settings);
 		if (!candidate.model || modelsAreEqual(candidate.model, primary.model)) continue;
-		const candidateKey = await modelRegistry.getApiKey(candidate.model, sessionId);
+		const candidateKey = await probeModelApiKey(modelRegistry, candidate.model, sessionId);
 		if (candidateKey === kNoAuth || isAuthenticated(candidateKey)) {
-			return { ...candidate, authFallbackUsed: false };
+			return { ...candidate, authFallbackUsed: false, primaryAuthFailed: false };
 		}
+	}
+	if (!parentActiveModelPattern) {
+		return { ...primary, authFallbackUsed: false, primaryAuthFailed: true };
 	}
 
 	const fallback = resolveModelOverride([parentActiveModelPattern], lookupRegistry, settings);
 	if (!fallback.model) {
-		return { ...primary, authFallbackUsed: false };
+		return { ...primary, authFallbackUsed: false, primaryAuthFailed: true };
 	}
 	if (modelsAreEqual(fallback.model, primary.model)) {
-		return { ...primary, authFallbackUsed: false };
+		return { ...primary, authFallbackUsed: false, primaryAuthFailed: true };
 	}
-	const fallbackKey = await modelRegistry.getApiKey(fallback.model, sessionId);
+	const fallbackKey = await probeModelApiKey(modelRegistry, fallback.model, sessionId);
 	if (!isAuthenticated(fallbackKey)) {
-		return { ...primary, authFallbackUsed: false };
+		return { ...primary, authFallbackUsed: false, primaryAuthFailed: true };
 	}
 
-	return { ...fallback, authFallbackUsed: true, warning: primary.warning ?? fallback.warning };
+	return {
+		...fallback,
+		authFallbackUsed: true,
+		primaryAuthFailed: true,
+		warning: primary.warning ?? fallback.warning,
+	};
 }
 
 /**
