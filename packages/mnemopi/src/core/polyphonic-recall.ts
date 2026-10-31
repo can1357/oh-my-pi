@@ -19,6 +19,7 @@ import {
 	RECALL_RAW_TOKEN_RE,
 	splitMixedScriptToken,
 	stripCjkQuestionAffixes,
+	unicodeCaseVariants,
 } from "../util/regex";
 export type PolyphonicVoice = "hybrid" | "vector" | "graph" | "fact" | "temporal";
 
@@ -273,8 +274,7 @@ function factSubjectCandidateGroups(query: string): {
 		const wordLen = isCjk ? codePointLength(word) : word.length;
 		const minLen = isCjk ? 2 : 3;
 		if (isContent && wordLen >= minLen && !CJK_STOP_SEGMENTS.has(word)) {
-			addPrimary(word);
-			if (rawWord !== word) addPrimary(rawWord);
+			for (const variant of unicodeCaseVariants(rawWord)) addPrimary(variant);
 		}
 		if (isCjk) {
 			const { nonCjk, cjkRuns } = splitMixedScriptToken(rawWord);
@@ -350,6 +350,17 @@ function contentTokens(text: string): Set<string> {
 	}
 	return out;
 }
+function latinIdentifierTokens(text: string): Set<string> {
+	const out = new Set<string>();
+	for (const match of text.matchAll(/[a-z0-9][a-z0-9_.:/+-]{1,}/gi)) {
+		const lower = match[0].toLowerCase();
+		if (!STOP_WORDS.has(lower) && !/^\d+$/.test(lower)) {
+			out.add(lower);
+		}
+	}
+	return out;
+}
+
 function tokenJaccard(left: ReadonlySet<string>, right: ReadonlySet<string>): number {
 	if (left.size === 0 || right.size === 0) return 0;
 	let intersection = 0;
@@ -720,16 +731,26 @@ export class PolyphonicRecallEngine {
 			(a, b) => b.combinedScore - a.combinedScore || a.memoryId.localeCompare(b.memoryId),
 		);
 		const selected: PolyphonicMemoryResult[] = [];
-		const selectedTokens: Set<string>[] = [];
+		const selectedTokens: { tokens: Set<string>; latinIds: Set<string> }[] = [];
 		const limit = Math.max(0, Math.trunc(topK));
 		for (const candidate of sorted) {
 			if (selected.length >= limit) break;
 			const hydrated = hydrate(candidate);
 			if (hydrated === null) continue;
 			const tokens = contentTokens(hydrated.content);
-			if (selectedTokens.some(prior => tokenJaccard(tokens, prior) > NEAR_DUPLICATE_JACCARD)) continue;
+			const latinIds = latinIdentifierTokens(hydrated.content);
+			const isNearDuplicate = selectedTokens.some(prior => {
+				if (tokenJaccard(tokens, prior.tokens) <= NEAR_DUPLICATE_JACCARD) return false;
+				if (latinIds.size > 0 && prior.latinIds.size > 0) {
+					if (tokenJaccard(latinIds, prior.latinIds) < NEAR_DUPLICATE_JACCARD) {
+						return false;
+					}
+				}
+				return true;
+			});
+			if (isNearDuplicate) continue;
 			selected.push(hydrated);
-			selectedTokens.push(tokens);
+			selectedTokens.push({ tokens, latinIds });
 		}
 		return selected;
 	}

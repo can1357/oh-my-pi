@@ -14,6 +14,7 @@ import {
 	RECALL_RAW_TOKEN_RE,
 	splitMixedScriptToken,
 	stripCjkQuestionAffixes,
+	unicodeCaseVariants,
 } from "../../util/regex";
 import { STOP_WORDS } from "../synonyms";
 import { aaakEncode } from "../aaak";
@@ -330,8 +331,9 @@ function makeQuestionTokenGroups(query: string): {
 			}
 			pushUnique(shingles, token);
 		} else {
-			pushUnique(primary, token);
-			if (rawToken !== token && !/^[\x00-\x7f]*$/.test(rawToken)) pushUnique(primary, rawToken);
+			for (const variant of unicodeCaseVariants(rawToken)) {
+				pushUnique(primary, variant);
+			}
 		}
 	}
 

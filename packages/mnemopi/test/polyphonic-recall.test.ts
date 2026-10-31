@@ -1102,6 +1102,60 @@ describe("PolyphonicRecallEngine", () => {
 			);
 			const longRes = memoriaRetrieve(beam, "ソフトウェア開発プロジェクトについて", undefined, 1);
 			expect((longRes.results as Array<{ key?: string }>)[0]?.key).toBe("ソフトウェア開発プロジェクト");
+
+			// 6. Cyrillic/non-ASCII case variants match Memoria facts across casing differences
+			beam.db.run(
+				`INSERT INTO memoria_facts (session_id, message_idx, fact_type, key, value, context_snippet, importance, source_memory_id)
+					VALUES (?, 2, 'entity', 'Москва', 'capital of Russia', 'what is Москва', 0.95, 'mf-moscow')`,
+				[beam.sessionId],
+			);
+			const moscowRes = memoriaRetrieve(beam, "what is москва", "IE", 1);
+			expect((moscowRes.results as Array<{ key?: string }>)[0]?.key).toBe("Москва");
+
+			// 7. Simplified Chinese 后天 and 大后天 temporal routing
+			expect(memoriaRetrieve(beam, "后天部署了什么").ability).toBe("TR");
+			expect(memoriaRetrieve(beam, "大后天部署").ability).toBe("TR");
+
+			// 8. diversityRerank preserves mixed-script memories with distinct Latin identifiers
+			insertWorking(beam, "wm-pg-db", "PostgreSQL資料庫連線設定與備份策略", 0.9, timestamp);
+			insertWorking(beam, "wm-my-db", "MySQL資料庫連線設定與備份策略", 0.85, timestamp);
+			const mixedCandidates = new Map([
+				[
+					"wm-pg-db",
+					{
+						memoryId: "wm-pg-db",
+						combinedScore: 0.1,
+						voiceScores: { hybrid: 0.1 },
+						metadata: {},
+					},
+				],
+				[
+					"wm-my-db",
+					{
+						memoryId: "wm-my-db",
+						combinedScore: 0.09,
+						voiceScores: { hybrid: 0.09 },
+						metadata: {},
+					},
+				],
+			]);
+			const mixedReranked = engine.diversityRerank(mixedCandidates, 10, candidate => {
+				const row = beam.db
+					.query("SELECT id, content FROM working_memory WHERE id = ?")
+					.get(candidate.memoryId) as { id: string; content: string } | null;
+				if (!row) return null;
+				return {
+					id: row.id,
+					content: row.content,
+					score: candidate.combinedScore,
+					combined_score: candidate.combinedScore,
+					voice_scores: candidate.voiceScores,
+					metadata: candidate.metadata,
+					tier: "working",
+					tier_label: "working",
+				};
+			});
+			expect(mixedReranked.map(r => r.id)).toEqual(["wm-pg-db", "wm-my-db"]);
 		} finally {
 			closeQuietly(beam.db);
 		}
