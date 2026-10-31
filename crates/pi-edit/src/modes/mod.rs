@@ -14,14 +14,17 @@ pub fn engine_for(
 	allow_fuzzy: bool,
 	fuzzy_threshold: f64,
 	enforce_seen_lines: bool,
+	max_columns: usize,
 ) -> Box<dyn ModeEngine> {
 	match mode {
 		EditMode::Replace => Box::new(replace::ReplaceEngine { allow_fuzzy, fuzzy_threshold }),
-		EditMode::Patch => Box::new(patch::PatchEngine { allow_fuzzy, fuzzy_threshold }),
+		EditMode::Patch => {
+			Box::new(patch::PatchEngine { allow_fuzzy, fuzzy_threshold, first_match: false })
+		},
 		EditMode::ApplyPatch => {
 			Box::new(apply_patch::ApplyPatchEngine { allow_fuzzy, fuzzy_threshold })
 		},
-		EditMode::Hashline => Box::new(hashline::HashlineEngine { enforce_seen_lines }),
+		EditMode::Hashline => Box::new(hashline::HashlineEngine { enforce_seen_lines, max_columns }),
 		EditMode::Sloppy => Box::new(sloppy::SloppyEngine { allow_fuzzy, fuzzy_threshold }),
 	}
 }

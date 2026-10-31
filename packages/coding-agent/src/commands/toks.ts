@@ -17,7 +17,7 @@ const ENCODINGS: Record<natives.Encoding, { name: string; models: string }> = {
 	[natives.Encoding.ClaudeV3]: { name: "claude-v3", models: "Claude 3 … Opus 4.6" },
 	[natives.Encoding.ClaudeV47]: { name: "claude-v47", models: "Opus 4.7–4.9" },
 	[natives.Encoding.ClaudeV5]: { name: "claude-v5", models: "Opus 5+" },
-	[natives.Encoding.ClaudeV5Sonnet]: { name: "claude-v5-sonnet", models: "Sonnet/Fable 5+" },
+	[natives.Encoding.ClaudeV5Sonnet]: { name: "claude-v5-sonnet", models: "Sonnet/Fable 5+ · Haiku 5.5" },
 	[natives.Encoding.Qwen3]: { name: "qwen3", models: "Qwen 3.5+" },
 	[natives.Encoding.DeepSeekV3]: { name: "deepseek-v3", models: "DeepSeek V3–V4" },
 	[natives.Encoding.KimiK2]: { name: "kimi-k2", models: "Kimi K2–K3" },

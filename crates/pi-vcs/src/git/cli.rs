@@ -15,7 +15,7 @@
 //! on both the async and sync runners (git releases its lock files from its
 //! SIGTERM handler only).
 
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{borrow::Cow, ffi::OsStr, path::Path, process::Stdio, time::Duration};
 
 use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
@@ -306,6 +306,25 @@ pub(crate) fn run_sync(cwd: &Path, args: &[String], timeout: Duration) -> Result
 	run_sync_capped(cwd, args, timeout, OUTPUT_LIMIT_BYTES)
 }
 
+/// Stdin and environment for a [`run_sync_write`] invocation.
+pub(crate) struct SyncWrite<'a> {
+	/// Bytes piped to the child's stdin, then closed.
+	pub stdin: &'a [u8],
+	/// Variables set after [`apply_env`], so they win over its contract.
+	pub env:   &'a [(&'a str, &'a OsStr)],
+}
+
+/// Synchronous runner for local write plumbing (fsmonitor/untracked-cache
+/// pinned off) that feeds `input.stdin` and sets `input.env` on the child.
+pub(crate) fn run_sync_write(
+	cwd: &Path,
+	args: &[String],
+	timeout: Duration,
+	input: &SyncWrite<'_>,
+) -> Result<CliOutput> {
+	run_sync_impl(cwd, args, timeout, OUTPUT_LIMIT_BYTES, SyncMode::Write(input))
+}
+
 /// [`run_sync`] with an explicit retention cap. The cap is a parameter rather
 /// than a constant read inside the reader threads so a test can exercise the
 /// truncation contract on one call without lowering the limit for every other
@@ -316,7 +335,7 @@ pub(crate) fn run_sync_capped(
 	timeout: Duration,
 	limit: usize,
 ) -> Result<CliOutput> {
-	run_sync_with(cwd, args, timeout, limit, false)
+	run_sync_impl(cwd, args, timeout, limit, SyncMode::Read)
 }
 
 /// Write-capable runner with an explicit retention cap.
@@ -332,38 +351,101 @@ pub(crate) fn run_sync_writable_capped(
 	timeout: Duration,
 	limit: usize,
 ) -> Result<CliOutput> {
-	run_sync_with(cwd, args, timeout, limit, true)
+	run_sync_impl(cwd, args, timeout, limit, SyncMode::IndexWrite)
 }
 
-/// Shared implementation behind [`run_sync_capped`] and
-/// [`run_sync_writable_capped`]. `allow_index_write` removes the
-/// `GIT_OPTIONAL_LOCKS=0` read policy, letting a command that modifies the
-/// index report a lock conflict through its exit status.
-fn run_sync_with(
+/// How [`run_sync_impl`] prepares the child: argv hardening, stdin and env.
+#[derive(Clone, Copy)]
+enum SyncMode<'a> {
+	/// Lock-free read: `--no-optional-locks`, stdin closed.
+	Read,
+	/// Local write plumbing: fsmonitor/untracked-cache pinned off, the caller's
+	/// bytes piped to stdin and its variables set on the child.
+	Write(&'a SyncWrite<'a>),
+	/// Index stat refresh: argv passed through unhardened so the repository's
+	/// fsmonitor and untracked-cache keep their index extensions, stdin closed,
+	/// and the `GIT_OPTIONAL_LOCKS=0` read policy removed so the command can
+	/// take `index.lock` and report a lock conflict through its exit status.
+	IndexWrite,
+}
+
+/// Shared synchronous runner behind [`run_sync_capped`], [`run_sync_write`]
+/// and [`run_sync_writable_capped`].
+fn run_sync_impl(
 	cwd: &Path,
 	args: &[String],
 	timeout: Duration,
 	limit: usize,
-	allow_index_write: bool,
+	mode: SyncMode<'_>,
 ) -> Result<CliOutput> {
-	let hardened = (!allow_index_write).then(|| hardened_args(args, true));
-	let argv = hardened.as_deref().unwrap_or(args);
+	let argv: Cow<'_, [String]> = match mode {
+		SyncMode::Read => Cow::Owned(hardened_args(args, true)),
+		SyncMode::Write(_) => Cow::Owned(hardened_args(args, false)),
+		SyncMode::IndexWrite => Cow::Borrowed(args),
+	};
 	let mut cmd = std::process::Command::new("git");
-	cmd.args(argv)
+	cmd.args(argv.iter())
 		.current_dir(cwd)
-		.stdin(Stdio::null())
+		.stdin(if matches!(mode, SyncMode::Write(_)) {
+			Stdio::piped()
+		} else {
+			Stdio::null()
+		})
 		.stdout(Stdio::piped())
 		.stderr(Stdio::piped());
 	apply_env(&mut cmd);
-	if allow_index_write {
-		// `--no-optional-locks` and `GIT_OPTIONAL_LOCKS=0` are the same switch;
-		// pinning the environment variable would re-disable the writer.
-		cmd.env_remove("GIT_OPTIONAL_LOCKS");
+	match mode {
+		SyncMode::Read => {},
+		SyncMode::Write(write) => {
+			for (key, value) in write.env {
+				cmd.env(key, value);
+			}
+		},
+		SyncMode::IndexWrite => {
+			// `--no-optional-locks` and `GIT_OPTIONAL_LOCKS=0` are the same
+			// switch; pinning the environment variable would re-disable
+			// the writer.
+			cmd.env_remove("GIT_OPTIONAL_LOCKS");
+		},
 	}
 	let mut child = cmd.spawn().map_err(|err| spawn_error(cwd, err))?;
 	let stdout = spawn_sync_reader("git-cli-stdout", child.stdout.take(), limit);
 	let stderr = spawn_sync_reader("git-cli-stderr", child.stderr.take(), limit);
+	std::thread::scope(|scope| {
+		// The writer runs beside the deadline loop: a child that stops reading
+		// must still be killed on time, and the kill closes the pipe, which
+		// unblocks the writer before the scope joins it.
+		if let SyncMode::Write(write) = mode
+			&& let Some(mut pipe) = child.stdin.take()
+		{
+			let writer = std::thread::Builder::new()
+				.name("git-cli-stdin".into())
+				.spawn_scoped(scope, move || {
+					use std::io::Write;
+					// A child that exits early closes the pipe; its exit status
+					// is the answer, not this write error.
+					let _ = pipe.write_all(write.stdin);
+				});
+			if let Err(err) = writer {
+				// The dropped pipe reads as an empty input; the child must not
+				// act on it.
+				let _ = child.kill();
+				let _ = child.wait();
+				return Err(Error::backend("git spawn stdin writer", err));
+			}
+		}
+		wait_sync(&argv, child, stdout, stderr, timeout)
+	})
+}
 
+/// Deadline loop and output collection for [`run_sync_impl`].
+fn wait_sync(
+	argv: &[String],
+	mut child: std::process::Child,
+	stdout: Option<std::thread::JoinHandle<String>>,
+	stderr: Option<std::thread::JoinHandle<String>>,
+	timeout: Duration,
+) -> Result<CliOutput> {
 	let deadline = std::time::Instant::now() + timeout;
 	let status = loop {
 		match child.try_wait()? {
@@ -377,8 +459,8 @@ fn run_sync_with(
 	};
 	// The child has exited (or been killed), so the pipes reach EOF and the
 	// readers terminate; join can only block briefly on the final drain.
-	let stdout = stdout.map_or_else(String::new, |h| h.join().unwrap_or_default());
-	let stderr = stderr.map_or_else(String::new, |h| h.join().unwrap_or_default());
+	let stdout = stdout.map_or_default(|h| h.join().unwrap_or_default());
+	let stderr = stderr.map_or_default(|h| h.join().unwrap_or_default());
 	let Some(status) = status else {
 		return Err(Error::CliTimeout { command: format!("git {}", argv.join(" ")) });
 	};
@@ -450,7 +532,7 @@ fn read_capped_sync(mut stream: impl std::io::Read, limit: usize) -> String {
 			truncated = true;
 		}
 	}
-	let mut text = String::from_utf8_lossy(&retained).into_owned();
+	let mut text = String::from_utf8_lossy_owned(retained);
 	if truncated {
 		text.push_str(TRUNCATION_MARKER);
 	}
@@ -493,7 +575,7 @@ async fn read_capped(mut stream: impl tokio::io::AsyncRead + Unpin) -> Result<St
 			truncated = true;
 		}
 	}
-	let mut text = String::from_utf8_lossy(&retained).into_owned();
+	let mut text = String::from_utf8_lossy_owned(retained);
 	if truncated {
 		text.push_str(TRUNCATION_MARKER);
 	}

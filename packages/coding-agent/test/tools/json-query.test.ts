@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "../../src/config/settings";
+import { resolveLocalUrlToPath } from "../../src/internal-urls";
 import { ReadTool } from "../../src/tools/read";
 
 type ToolTextResult = {
@@ -36,6 +37,7 @@ describe("JSON query in read tool", () => {
 	let jsonlFile: string;
 	let numbersFile: string;
 	let mixedFile: string;
+	let failingLineFile: string;
 	let session: SessionLike;
 	let readTool: ReadTool;
 
@@ -45,6 +47,7 @@ describe("JSON query in read tool", () => {
 		jsonlFile = path.join(tempDir, "events.jsonl");
 		numbersFile = path.join(tempDir, "numbers.json");
 		mixedFile = path.join(tempDir, "mixed.json");
+		failingLineFile = path.join(tempDir, "failing.jsonl");
 
 		const testData = {
 			name: "my-project",
@@ -73,6 +76,8 @@ describe("JSON query in read tool", () => {
 		await fs.writeFile(numbersFile, '{"ids":[12345678901234567890,1.0,3]}', "utf-8");
 		// `.name` fails on the third element.
 		await fs.writeFile(mixedFile, '[{"name":"a"},{"name":"b"},3]', "utf-8");
+		// `.n + 1` fails on the second line only.
+		await fs.writeFile(failingLineFile, '{"n":1}\n{"n":"x"}\n{"n":3}\n', "utf-8");
 
 		session = createSession(tempDir);
 		readTool = new ReadTool(session);
@@ -121,6 +126,21 @@ describe("JSON query in read tool", () => {
 		await expect(readTool.execute("call_6", { path: `${jsonFile}?q=invalid [[[` })).rejects.toThrow(
 			/Failed to execute JSON query/i,
 		);
+	});
+
+	it("retains the reason and key when jaq rejects a large JSON value", async () => {
+		const largeFile = path.join(tempDir, "large.json");
+		const rows = Array.from({ length: 400 }, (_, index) => ({ label: `row ${index}`, input: "x".repeat(40) }));
+		await Bun.write(largeFile, JSON.stringify([{ rows }]));
+
+		const error = await readTool.execute("large-error", { path: `${largeFile}?q=.changedFiles` }).then(
+			() => null,
+			error => error,
+		);
+		const message = String(error);
+		expect(message).toContain("cannot index");
+		expect(message).toContain('with "changedFiles"');
+		expect(message.length).toBeLessThan(1000);
 	});
 
 	it("reads the file normally without jq query when ?q= is omitted", async () => {
@@ -183,6 +203,38 @@ describe("JSON query in read tool", () => {
 		expect(text).toContain("[more results; append ?q=.user&raw=true&limit=1&offset=2 to continue]");
 	});
 
+	it("queries located local JSONL and artifact JSON without losing pagination or URI identity", async () => {
+		const artifactsDir = path.join(tempDir, "artifacts");
+		const localProtocolOptions = { getArtifactsDir: () => artifactsDir, getSessionId: () => "json-query" };
+		const locatedTool = new ReadTool(
+			createSession(tempDir, { getArtifactsDir: () => artifactsDir, localProtocolOptions }),
+		);
+		const localFile = resolveLocalUrlToPath("local://events.jsonl", localProtocolOptions);
+		await fs.mkdir(path.dirname(localFile), { recursive: true });
+		await fs.mkdir(artifactsDir, { recursive: true });
+		await fs.copyFile(jsonlFile, localFile);
+		await fs.copyFile(jsonFile, path.join(artifactsDir, "0.json"));
+
+		const localUrl = "local://events.jsonl?q=.user&raw=true&offset=1&limit=1";
+		const localResult = await locatedTool.execute("local-json-page", { path: localUrl });
+		expect(getText(localResult)).toBe("bob\n[more results; append ?q=.user&raw=true&limit=1&offset=2 to continue]");
+		expect(localResult.details?.meta?.source).toEqual({ type: "internal", value: localUrl });
+		expect(
+			getText(
+				await locatedTool.execute("local-next-page", {
+					path: "local://events.jsonl?q=.user&raw=true&limit=1&offset=2",
+				}),
+			),
+		).toBe("charlie");
+
+		const artifactUrl = "artifact://0?q=.items&compact=true&offset=1&limit=1";
+		const artifactResult = await locatedTool.execute("artifact-json-page", { path: artifactUrl });
+		expect(getText(artifactResult)).toBe(
+			'[{"id":2,"name":"item-two","active":false}]\n[1 more items; append ?q=.items&compact=true&limit=1&offset=2 to continue]',
+		);
+		expect(artifactResult.details?.meta?.source).toEqual({ type: "internal", value: artifactUrl });
+	});
+
 	it("keeps number literals verbatim when paging an array", async () => {
 		const result = await readTool.execute("call_big", { path: `${numbersFile}?q=.ids&limit=2` });
 		expect(getText(result)).toBe(
@@ -212,7 +264,30 @@ describe("JSON query in read tool", () => {
 
 	it("stops jq once the page is full, before later results fail", async () => {
 		const result = await readTool.execute("call_early_stop", { path: `${mixedFile}?q=.[] | .name&raw=true&limit=1` });
-		expect(getText(result)).toBe("a\n[more results; append ?q=.[] | .name&raw=true&limit=1&offset=1 to continue]");
+		// jaq may report the later failure before it is stopped; the page still stands
+		expect(getText(result).split("\n").slice(-2)).toEqual([
+			"a",
+			"[more results; append ?q=.[] | .name&raw=true&limit=1&offset=1 to continue]",
+		]);
+	});
+
+	// Holds for the bundled jq and, with PI_DISABLE_UUTILS_BUILTINS set, for a system jq.
+	it("reports a line that fails mid-file alongside the other lines' results", async () => {
+		const text = getText(await readTool.execute("call_mid_error", { path: `${failingLineFile}?q=.n + 1` }));
+		expect(text).toStartWith("[jq stderr: ");
+		expect(text.split("\n").slice(1)).toEqual(["2", "4"]);
+
+		const paged = getText(
+			await readTool.execute("call_mid_error_page", { path: `${failingLineFile}?q=.n + 1&limit=1` }),
+		);
+		expect(paged).toStartWith("[jq stderr: ");
+		expect(paged).toEndWith("\n2\n[more results; append ?q=.n + 1&limit=1&offset=1 to continue]");
+	});
+
+	it("strips terminal controls from jq's stderr", async () => {
+		const query = String.raw`.name as $name | "\u001b[31mred\u0000" | stderr | $name`;
+		const text = getText(await readTool.execute("call_stderr_controls", { path: `${jsonFile}?q=${query}` }));
+		expect(text).toBe('[jq stderr: red]\n"my-project"');
 	});
 
 	it("treats a filter starting with - as a filter, not jq flags", async () => {

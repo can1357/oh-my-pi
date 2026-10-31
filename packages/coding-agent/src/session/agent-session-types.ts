@@ -24,6 +24,7 @@ import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager } from "../async";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { AgentDefinition } from "../task/types";
+import type { SessionAccountPoolScope } from "../config/account-pools";
 import type { ModelRegistry } from "../config/model-registry";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
@@ -42,10 +43,12 @@ import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { ToolSession } from "../tools";
 import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
 import type { SettingsGatedToolDelta } from "./session-tools";
+import type { CostGate } from "./cost-gate";
 import type { SessionManager } from "./session-manager";
 
 /** Maximum time the interactive shutdown path waits for Mnemopi consolidation. */
@@ -74,7 +77,7 @@ export type CommandMetadataChangedListener = () => void | Promise<void>;
 /** Public summary of an asynchronous job. */
 export type AsyncJobSnapshotItem = Pick<
 	AsyncJob,
-	"id" | "type" | "status" | "label" | "startTime" | "endTime" | "agentId"
+	"id" | "type" | "status" | "label" | "startTime" | "endTime" | "agentId" | "ownerId"
 > & {
 	/** Full command line of a job that runs a process; `label` is cut to 120 characters. */
 	command?: string;
@@ -94,6 +97,8 @@ export interface AsyncJobInspection {
 	output?: string;
 	/** Artifact holding the full output when `output` is cut. */
 	artifactId?: string;
+	/** The job's live widget (frozen once it settles). */
+	widget?: JobWidgetView;
 }
 
 /** Snapshot of running, recent, and pending-delivery asynchronous jobs. */
@@ -101,6 +106,16 @@ export interface AsyncJobSnapshot {
 	running: AsyncJobSnapshotItem[];
 	recent: AsyncJobSnapshotItem[];
 	delivery: AsyncJobDeliveryState;
+}
+
+/** Jobs of an agent and every subagent below it, with the lineage that nests them (see `AgentSession.getAsyncJobTree`). */
+export interface AsyncJobTree {
+	running: AsyncJobSnapshotItem[];
+	recent: AsyncJobSnapshotItem[];
+	/** The agent the tree is for; its own jobs are the top level. */
+	rootId?: string;
+	/** Subagents owning listed jobs, with the ancestors linking them to the root. */
+	agents: { id: string; parentId?: string }[];
 }
 
 export type { ShakeMode, ShakeResult } from "./shake-types";
@@ -153,8 +168,6 @@ export interface InitialRetryFallbackState {
 /** Dependencies and initial state used to construct an AgentSession. */
 export interface AgentSessionConfig {
 	agent: Agent;
-	/** Shared with the provider stream wrapper: current Codex Code Mode tool exposure snapshot for turn metadata. */
-	codeModeState?: { namespacesInfo?: unknown };
 	sessionManager: SessionManager;
 	settings: Settings;
 	/**
@@ -181,6 +194,8 @@ export interface AgentSessionConfig {
 	additionalExtensionPaths?: readonly string[];
 	/** Mirror of `disableExtensionDiscovery`; used when no inherited root provider exists. */
 	disableExtensionDiscovery?: boolean;
+	/** Cost gate of the session tree; refuses this session's model requests at `session.maxCost`. */
+	costGate?: CostGate;
 	/** Whether the session spawn policy permits the read-only `scout` subagent. Defaults to true. */
 	scoutAllowedBySpawnPolicy?: boolean;
 	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
@@ -197,8 +212,15 @@ export interface AgentSessionConfig {
 	initialRetryFallback?: InitialRetryFallbackState;
 	/** Skip retry.fallbackChains validation at construction; the host calls `validateRetryFallbackChains()` later. */
 	deferRetryFallbackValidation?: boolean;
+	/**
+	 * Override for the unexpected-stop judge verdict budget. Test seam so the
+	 * slow-verdict boundary runs in milliseconds; production never sets it.
+	 */
+	unexpectedStopJudgeTimeoutMs?: number;
 	/** Prewalk from the starting model to a fast/cheap target after implementation begins. */
 	prewalk?: Prewalk;
+	/** Keep `prewalk.auto` away from this session until `/new` (`--no-prewalk`). */
+	suppressAutoPrewalk?: boolean;
 	/** Force read-only plan mode at start, auto-approve, then switch to the target. */
 	planYolo?: PlanYolo;
 	/** Initial per-family service tiers for the live session. */
@@ -250,6 +272,13 @@ export interface AgentSessionConfig {
 	 * `allowSessionModelFallback` option. Default: false.
 	 */
 	allowSessionModelFallback?: boolean;
+	/**
+	 * `false` when the extension UI context cannot reach a human: ACP installs one
+	 * for every client, but without form elicitation its prompts resolve empty.
+	 * Saved-reset consent then takes its no-prompt-UI path. `createAgentSession`
+	 * passes its `interactivePrompts` option. Default: true.
+	 */
+	interactivePrompts?: boolean;
 	/** Whether the startup model may be replaced by refreshed same-selector registry metadata. */
 	rebindModelAfterDiscovery?: boolean;
 	/** Tool registry for LSP and settings. */
@@ -280,6 +309,12 @@ export interface AgentSessionConfig {
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	/** Provider request transform applied after message conversion. */
 	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
+	/**
+	 * Builds one advisor's provider request transform. Each advisor is its own
+	 * conversation, so it gets its own transform state (the date/cwd reminder).
+	 * Without it, advisors share {@link transformProviderContext}.
+	 */
+	createAdvisorTransformProviderContext?: () => (context: Context, model: Model) => Context | Promise<Context>;
 	/** Stream wrapper for side-channel requests. */
 	sideStreamFn?: StreamFn;
 	/** Stream wrapper for advisor requests. */
@@ -309,6 +344,8 @@ export interface AgentSessionConfig {
 	presentationPinnedToolNames?: ReadonlySet<string>;
 	/** Accessor for live MCP server instructions. */
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
+	/** Installs a host-owned MCP instructions source; see {@link AgentSession.setMcpServerInstructionsSource}. */
+	setMcpServerInstructionsSource?: (source: (() => Map<string, string> | undefined) | undefined) => void;
 	/** Time-traveling stream-rule manager. */
 	ttsrManager?: TtsrManager;
 	/** Secret obfuscator for provider and edit content. */
@@ -325,6 +362,8 @@ export interface AgentSessionConfig {
 	agentKind?: "main" | "sub";
 	/** Provider-facing session ID override. */
 	providerSessionId?: string;
+	/** OAuth account pools enforced on the session's key lookups; the session lifts them on dispose. */
+	accountPoolScope?: SessionAccountPoolScope;
 	/** Whether the provider prompt-cache key was explicit or fork-inherited. */
 	providerPromptCacheKeySource?: "explicit" | "fork";
 	/** Full advisor toolset built against an advisor-scoped tool session. */
@@ -376,6 +415,12 @@ export interface AgentSessionConfig {
 	disconnectOwnedMcpManager?: () => Promise<void>;
 	/** System prompt used by automatic session-title generation. */
 	titleSystemPrompt?: string;
+	/**
+	 * Name the unnamed session from the operator's messages, once each reply
+	 * begins (see `title.generator`). Only the interactive TUI sets this; print,
+	 * RPC, ACP, SDK and subagent sessions stay unnamed. Default: false.
+	 */
+	autoTitle?: boolean;
 }
 
 /** Options for AgentSession.prompt(). */
@@ -422,6 +467,14 @@ export interface PromptOptions {
 	 * failed before admission still only settles through the returned promise.
 	 */
 	onPromptAdmitted?: () => void;
+	/**
+	 * Called synchronously when this prompt is pushed onto the steer or
+	 * follow-up queue, just before {@link onPromptAdmitted}, with the messages it
+	 * pushed (its hidden companions, then the prompt), so a caller can tell them
+	 * from other queued work. Not called when the prompt starts its own turn or
+	 * is queued as an aside.
+	 */
+	onPromptQueued?: (queued: readonly AgentMessage[]) => void;
 }
 
 /** Payload for {@link AgentSession.setPromptDropped}: a user prompt cancelled
@@ -432,6 +485,8 @@ export interface DroppedPrompt {
 	text: string;
 	/** Image attachments submitted with the prompt. */
 	images?: ImageContent[];
+	/** Why the session refused it (e.g. the cost cap), for hosts to show beside the restored text; absent for an abort. */
+	reason?: string;
 }
 
 /** Options for AgentSession.followUp(). */
@@ -442,12 +497,16 @@ export interface FollowUpOptions {
 	expandPromptTemplates?: boolean;
 	/** Explicit billing/initiator attribution. */
 	attribution?: MessageAttribution;
+	/** Called synchronously with the messages pushed onto the follow-up queue. See {@link PromptOptions.onPromptQueued}. */
+	onPromptQueued?: PromptOptions["onPromptQueued"];
 }
 
 /** Options for AgentSession.steer(). */
 export interface SteerOptions {
 	/** Explicit billing/initiator attribution. */
 	attribution?: MessageAttribution;
+	/** Called synchronously with the messages pushed onto the steering queue. See {@link PromptOptions.onPromptQueued}. */
+	onPromptQueued?: PromptOptions["onPromptQueued"];
 }
 
 /** Options for AgentSession.sendUserMessage(). */
@@ -532,6 +591,8 @@ export interface SessionStats {
 	};
 	/** Concrete provider-routed model ids with finalized turn counts. */
 	routedModels?: Record<string, number>;
+	/** Failed edits by the engine's `errorKind`. */
+	editRejections?: Record<string, number>;
 	contextUsage?: ContextUsage;
 }
 
@@ -560,6 +621,8 @@ export type RestoredQueuedMessage = { text: string; images?: ImageContent[] };
 /** Options for the same ephemeral side turn used by /btw. */
 export interface EphemeralTurnOptions {
 	promptText: string;
+	/** Images sent with `promptText`, normalized for the model like a prompt's attachments. */
+	promptImages?: ImageContent[];
 	/** Detached prior side-turn messages to prepend to this request. They are copied and never appended to the session history. */
 	history?: readonly Message[];
 	/** Opaque provider-lineage key for a series of related side turns. Rotate it after cancellation or failure before retrying. */
@@ -568,6 +631,8 @@ export interface EphemeralTurnOptions {
 	tools?: false;
 	/** Optional positive safe-integer output-token cap. Transports that omit or overwrite caller output limits reject this option before inference. On budget-thinking models a cap disables optional thinking (models that require it reject the cap). */
 	maxTokens?: number;
+	/** Run at the model's lowest effort where the provider carries the change as a per-message control that keeps the prompt cache (Anthropic per-message effort, OpenAI `configuration_update`) and the session thinks. Elsewhere the session's reasoning applies, since changing request-level reasoning forfeits the cache. */
+	minimizeEffort?: boolean;
 	/** Positive safe-integer UTF-8 byte cap. Reject before inference when the serialized post-transform, secret-obfuscated provider context exceeds it. Measured before `before_provider_request` hooks; payload replacements are not re-measured. */
 	maxContextBytes?: number;
 	/** Awaited in order; a delivery failure rejects the side turn and aborts the request. */

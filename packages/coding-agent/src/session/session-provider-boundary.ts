@@ -18,7 +18,8 @@ import { describeAttachedImagesForTextModel, shouldDescribeImagesForTextModel } 
 import { blobExtensionForImageMimeType } from "@oh-my-pi/pi-tui/prompt/image-format";
 import { type CustomMessage, convertToLlm } from "./messages";
 import { IMAGE_ATTACHMENT_DESCRIPTION_TYPE } from "./queued-messages";
-import type { BuildSessionContextOptions, SessionContext } from "./session-context";
+import type { SessionContext, TranscriptSessionContextOptions } from "./session-context";
+import type { CostGate } from "./cost-gate";
 import type { SessionManager } from "./session-manager";
 
 import {
@@ -40,6 +41,8 @@ export interface SessionProviderBoundaryHost {
 	modelRegistry: ModelRegistry;
 	model(): Model | undefined;
 	sessionId(): string;
+	/** The session tree's current cost gate. */
+	costGate?(): CostGate | undefined;
 	localProtocolOptions(): LocalProtocolOptions;
 	transformContext(messages: AgentMessage[], signal?: AbortSignal): AgentMessage[] | Promise<AgentMessage[]>;
 	convertToLlm(messages: AgentMessage[]): Message[] | Promise<Message[]>;
@@ -48,6 +51,8 @@ export interface SessionProviderBoundaryHost {
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
 	/** Current secret obfuscator; swapped when `secrets.enabled` turns on mid-session. */
 	obfuscator(): SecretObfuscator | undefined;
+	/** Tool calls emitted by assistant turns of the current agent run. */
+	runToolCallIds(): ReadonlySet<string>;
 }
 
 /** Owns the transformations at the session/provider boundary. */
@@ -107,10 +112,16 @@ export class SessionProviderBoundary {
 		return [];
 	}
 
-	/** Builds the current deobfuscated context for agent display and replay. */
-	buildDisplaySessionContext(): SessionContext {
+	/**
+	 * Builds the current deobfuscated context for agent display and replay, sized for `model`'s frame budget
+	 * (the active model unless a caller is about to adopt another).
+	 */
+	buildDisplaySessionContext(model = this.#host.model()): SessionContext {
 		return deobfuscateSessionContext(
-			this.#host.sessionManager.buildSessionContext({ inFlightToolCallIds: this.#inFlightToolCallIds() }),
+			this.#host.sessionManager.buildSessionContext({
+				inFlightToolCallIds: this.#inFlightToolCallIds(),
+				maxFrameDataBytes: snapcompact.frameDataBytesBudget(model),
+			}),
 			this.#host.obfuscator(),
 		);
 	}
@@ -136,15 +147,20 @@ export class SessionProviderBoundary {
 		return undefined;
 	}
 
-	/** Builds the full display-only transcript context. */
-	buildTranscriptSessionContext(
-		options?: Pick<BuildSessionContextOptions, "collapseCompactedHistory" | "keepDanglingToolCalls">,
-	): SessionContext {
+	/**
+	 * Builds the full display-only transcript context. `keepInFlightToolCalls`
+	 * keeps unpaired calls only when the current agent run emitted them; calls
+	 * left unpaired by earlier runs (interrupted, host restarted) are stripped so
+	 * a mid-turn rebuild never revives them as active tool cards. This holds even
+	 * before the run's prompt (user, custom or developer message) is persisted.
+	 */
+	buildTranscriptSessionContext(options?: TranscriptSessionContextOptions): SessionContext {
+		const keepLive = options?.keepInFlightToolCalls === true && this.#host.agent.state.isStreaming;
 		return deobfuscateSessionContext(
 			this.#host.sessionManager.buildSessionContext({
 				transcript: true,
 				collapseCompactedHistory: options?.collapseCompactedHistory,
-				keepDanglingToolCalls: options?.keepDanglingToolCalls,
+				inFlightToolCallIds: keepLive ? this.#host.runToolCallIds() : undefined,
 			}),
 			this.#host.obfuscator(),
 		);
@@ -300,6 +316,7 @@ export class SessionProviderBoundary {
 					activeModelString: formatModelString(model),
 					telemetryConfig: this.#host.agent.telemetry,
 					sessionId: this.#host.sessionId(),
+					costGate: this.#host.costGate?.(),
 				},
 				signal,
 			);
@@ -355,16 +372,26 @@ export class SessionProviderBoundary {
 		) {
 			return preserveData;
 		}
-		const obfuscated: Record<string, unknown> = { ...slot };
-		let changed = false;
-		for (const key of ["text", "textHead", "textTail"] as const) {
-			const value = slot[key];
-			if (typeof value !== "string" || value.length === 0) continue;
-			const next = obfuscator.obfuscate(value);
-			if (next === value) continue;
-			obfuscated[key] = next;
-			changed = true;
+		const obfuscateText = (archive: Record<string, unknown>): Record<string, unknown> => {
+			let obfuscated = archive;
+			for (const key of ["text", "textHead", "textTail"] as const) {
+				const value = archive[key];
+				if (typeof value !== "string" || value.length === 0) continue;
+				const next = obfuscator.obfuscate(value);
+				if (next !== value) obfuscated = { ...obfuscated, [key]: next };
+			}
+			return obfuscated;
+		};
+		let obfuscated = obfuscateText(slot);
+		// The no-reasoning variant carries its own copy of the text and summary.
+		const variant = slot.withoutThinking;
+		if (isRecord(variant) && isRecord(variant.archive) && typeof variant.summary === "string") {
+			const archive = obfuscateText(variant.archive);
+			const summary = obfuscator.obfuscate(variant.summary);
+			if (archive !== variant.archive || summary !== variant.summary) {
+				obfuscated = { ...obfuscated, withoutThinking: { ...variant, summary, archive } };
+			}
 		}
-		return changed ? { ...preserveData, [snapcompact.PRESERVE_KEY]: obfuscated } : preserveData;
+		return obfuscated === slot ? preserveData : { ...preserveData, [snapcompact.PRESERVE_KEY]: obfuscated };
 	}
 }

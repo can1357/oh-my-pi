@@ -9,6 +9,7 @@ import {
 	findLeadingSlashCommandStart,
 } from "@oh-my-pi/pi-tui/autocomplete";
 import { Editor } from "@oh-my-pi/pi-tui/components/editor";
+import { applyEmojiCompletion, getEmojiSuggestions } from "@oh-my-pi/pi-tui/prompt/emoji-autocomplete";
 import { defaultEditorTheme } from "./test-themes";
 
 function onceAutocompleteUpdate(editor: Editor): Promise<void> {
@@ -165,6 +166,40 @@ describe("Editor async autocomplete scheduling", () => {
 		expect(submitted).toBe("@widgetx");
 	});
 
+	it("accepts the selected stale @ completion for a quoted path containing spaces", async () => {
+		const base = new CombinedAutocompleteProvider();
+		const refresh = Promise.withResolvers<{ items: AutocompleteItem[]; prefix: string } | null>();
+		let requests = 0;
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider({
+			getSuggestions(_lines, _cursorLine, _cursorCol, signal) {
+				requests += 1;
+				if (requests === 1) {
+					return Promise.resolve({
+						items: [
+							{ label: "obsidian calendar/", value: '@"~/0. before/obsidian calendar/' },
+							{ label: "obsidian/", value: '@"~/0. before/obsidian/' },
+						],
+						prefix: "@",
+					});
+				}
+				signal?.addEventListener("abort", () => refresh.resolve(null));
+				return refresh.promise;
+			},
+			applyCompletion: base.applyCompletion.bind(base),
+		});
+
+		const shown = untilAutocompleteShown(editor);
+		editor.handleInput("@");
+		await shown;
+		editor.handleInput('"~/0. before/ob');
+		editor.handleInput("\x1b[B");
+		editor.handleInput("\t");
+
+		expect(editor.getText()).toBe('@"~/0. before/obsidian/');
+		expect(editor.isShowingAutocomplete()).toBeFalse();
+	});
+
 	it("drops a hidden @ popup on Escape so its pending refresh never appears", async () => {
 		const editor = new Editor(defaultEditorTheme);
 		const refresh = Promise.withResolvers<{ items: AutocompleteItem[]; prefix: string } | null>();
@@ -215,6 +250,62 @@ describe("Editor async autocomplete scheduling", () => {
 		await shown;
 
 		expect(editor.render(80).join("\n")).toContain("widget-app/");
+	});
+});
+
+describe("Editor autocomplete after the cursor leaves the trigger token", () => {
+	const emojiProvider: AutocompleteProvider = {
+		async getSuggestions(lines, cursorLine, cursorCol) {
+			return getEmojiSuggestions((lines[cursorLine] ?? "").slice(0, cursorCol));
+		},
+		applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+			return applyEmojiCompletion(lines, cursorLine, cursorCol, item, prefix);
+		},
+	};
+
+	async function editorWithEmojiPopup(): Promise<{ editor: Editor; submitted: string[]; label: string }> {
+		const editor = new Editor(defaultEditorTheme);
+		const submitted: string[] = [];
+		editor.onSubmit = text => {
+			submitted.push(text);
+		};
+		editor.setAutocompleteProvider(emojiProvider);
+		for (const char of "nice :D") editor.handleInput(char);
+		await untilAutocompleteShown(editor);
+		// A row of the `:D` emoji list; the first row's label is reflowed by the list renderer.
+		const label = ":dagger:";
+		expect(editor.render(80).join("\n")).toContain(label);
+		return { editor, submitted, label };
+	}
+
+	it.each([
+		["Shift+Enter (kitty)", "\x1b[13;2u"],
+		["Ctrl+Enter (kitty)", "\x1b[13;5u"],
+		["Shift+Enter (legacy)", "\x1b[13;2~"],
+		["Alt+Enter", "\x1b\r"],
+	])("closes the popup on %s so Enter then submits without a stale list", async (_name, key) => {
+		const { editor, submitted, label } = await editorWithEmojiPopup();
+
+		editor.handleInput(key);
+		expect(editor.getText()).toBe("nice :D\n");
+		expect(editor.isShowingAutocomplete()).toBeFalse();
+		expect(editor.render(80).join("\n")).not.toContain(label);
+
+		editor.handleInput("\r");
+		expect(submitted).toEqual(["nice :D"]);
+	});
+
+	it.each([
+		["Left", "\x1b[D"],
+		["Home", "\x1b[H"],
+		["Ctrl+A", "\x01"],
+	])("closes the popup when %s moves the cursor off the token", async (_name, key) => {
+		const { editor, label } = await editorWithEmojiPopup();
+
+		editor.handleInput(key);
+		expect(editor.isShowingAutocomplete()).toBeFalse();
+		expect(editor.render(80).join("\n")).not.toContain(label);
+		expect(editor.getText()).toBe("nice :D");
 	});
 });
 
@@ -515,6 +606,84 @@ describe("Editor slash autocomplete acceptance", () => {
 		editor.handleInput("\r");
 
 		expect(submitted).toBe("/xyz");
+	});
+
+	describe("a command listed only because its description matches the typed text", () => {
+		// `not-a-command` is a subsequence of this description, never of the name `loop` (#16265).
+		const commands = [
+			{ name: "loop", description: "Toggle loop mode, not a re-run: gate a re-check on command status" },
+		];
+		const loopEditor = (): { editor: Editor; submitted: () => string } => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setAutocompleteProvider(new CombinedAutocompleteProvider(commands, "/tmp"));
+			let submitted = "";
+			editor.onSubmit = text => {
+				submitted = text;
+			};
+			return { editor, submitted: () => submitted };
+		};
+		const typed = async (): Promise<{ editor: Editor; submitted: () => string }> => {
+			const typing = loopEditor();
+			typing.editor.handleInput("/");
+			await untilAutocompleteShown(typing.editor);
+			for (const char of "not-a-command") typing.editor.handleInput(char);
+			await untilAutocompleteShown(typing.editor);
+			expect(typing.editor.render(80).join("\n")).toContain("loop");
+			return typing;
+		};
+
+		it("submits the typed command on Enter instead of running the listed one", async () => {
+			const { editor, submitted } = await typed();
+			editor.handleInput("\r");
+			expect(submitted()).toBe("/not-a-command");
+		});
+
+		it("runs the listed command once the user moves the selection onto it", async () => {
+			const { editor, submitted } = await typed();
+			editor.handleInput("\x1b[B");
+			editor.handleInput("\r");
+			expect(submitted()).toBe("/loop");
+		});
+
+		it("submits the typed command on an Enter that outruns the popup", () => {
+			const { editor, submitted } = loopEditor();
+			editor.setText("/not-a-command");
+			editor.handleInput("\r");
+			expect(submitted()).toBe("/not-a-command");
+		});
+	});
+
+	it("applies a matching alias on Enter even when the description ranks higher", () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider([{ name: "x", aliases: ["abcd"], description: "ace" }], "/tmp"),
+		);
+		let submitted = "";
+		editor.onSubmit = text => {
+			submitted = text;
+		};
+
+		editor.setText("/ac");
+		editor.handleInput("\r");
+
+		expect(submitted).toBe("/x");
+	});
+
+	it("applies a matching alias from the slash popup on Enter", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider([{ name: "x", aliases: ["abcd"], description: "ace" }], "/tmp"),
+		);
+		let submitted = "";
+		editor.onSubmit = text => {
+			submitted = text;
+		};
+
+		editor.handleInput("/ac");
+		await untilAutocompleteShown(editor);
+		editor.handleInput("\r");
+
+		expect(submitted).toBe("/x");
 	});
 
 	it("never completes Enter to the bare skill namespace row", () => {

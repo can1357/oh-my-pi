@@ -27,6 +27,9 @@ function claudeTokenizer(identity: ModelIdentity): ModelTokenizer | undefined {
 	if (identity.family === "sonnet" || identity.family === "fable" || identity.family === "mythos") {
 		return revisionAtLeast(identity.revision, "5") ? "claude-v5-sonnet" : "claude-v3";
 	}
+	// Haiku 5.5 moved to the post-4.7 tokenizer (~30% more tokens than Haiku
+	// 4.5). No Haiku-measured vocabulary is embedded; Sonnet 5's is the nearest.
+	if (identity.family === "haiku" && revisionAtLeast(identity.revision, "5.5")) return "claude-v5-sonnet";
 	return "claude-v3";
 }
 
@@ -44,6 +47,11 @@ function kimiTokenizer(identity: ModelIdentity): ModelTokenizer | undefined {
 
 function glmTokenizer(identity: ModelIdentity): ModelTokenizer | undefined {
 	return identity.class === "glm" && revisionAtLeast(identity.revision, "5") ? "glm5" : undefined;
+}
+
+// GPT-5 and later bill text in o200k_base; older generations (cl100k GPT-4, unparsed gpt-4o) keep the estimate.
+function openAITokenizer(identity: ModelIdentity): ModelTokenizer | undefined {
+	return identity.class === "openai" && revisionAtLeast(identity.revision, "5") ? "o200k" : undefined;
 }
 
 /**
@@ -65,7 +73,8 @@ export function resolveModelTokenizer(modelId: string, provider = ""): ModelToke
 		qwenTokenizer(identity) ??
 		deepSeekTokenizer(identity) ??
 		kimiTokenizer(identity) ??
-		glmTokenizer(identity);
+		glmTokenizer(identity) ??
+		openAITokenizer(identity);
 	if (modelTokenizerCache.size === MAX_TOKENIZER_CACHE_ENTRIES) modelTokenizerCache.clear();
 	modelTokenizerCache.set(cacheKey, tokenizer ?? null);
 	return tokenizer;

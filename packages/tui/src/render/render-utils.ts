@@ -8,14 +8,14 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Ellipsis } from "@oh-my-pi/pi-natives";
+import { Ellipsis } from "@oh-my-pi/pi-natives";
 import { expandWindowsLongPath, getWindowsShortPath } from "@oh-my-pi/pi-natives/path";
 import { pluralize, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatKeyHint, type KeyId } from "../app-keybindings";
 import { getKeybindings } from "../keybindings";
 import type { Theme } from "../theme/theme";
 import type { Component } from "../tui";
-import { replaceTabs, sliceByColumn, truncateToWidth, visibleWidth } from "../utils";
+import { replaceTabs, sliceByColumn, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
 import { Hasher } from "./utils";
 
 export { Ellipsis } from "@oh-my-pi/pi-natives";
@@ -233,15 +233,29 @@ export function getPreviewLines(text: string, maxLines: number, maxLineLen: numb
 	return lines.slice(0, maxLines).map(l => truncateToWidth(l.trim(), maxLineLen, ellipsis));
 }
 
+/** Collapse a possibly multi-line string into one line; whitespace runs (tabs included) become one space. */
+export function flattenLine(text: string): string {
+	return text.replace(/\s+/g, " ").trim();
+}
+
 /**
  * Collapse a possibly multi-line string into a single line, then truncate it to
  * `maxWidth` display cells. {@link truncateToWidth} alone caps width but
  * newlines are zero-width, so multi-line content (markdown briefs, tool args,
  * provider errors) would otherwise spill a single status row across several
- * visual lines. Whitespace runs collapse to one space, so tabs are handled too.
+ * visual lines.
  */
 export function previewLine(text: string, maxWidth: number, ellipsis?: Ellipsis): string {
-	return truncateToWidth(text.replace(/\s+/g, " ").trim(), maxWidth, ellipsis);
+	return truncateToWidth(flattenLine(text), maxWidth, ellipsis);
+}
+
+/**
+ * Clip a result row to `maxWidth` only while collapsed. Expanded rows stay whole
+ * so the frame wraps them: the expand key ({@link formatExpandHint}) must reveal
+ * text, not re-clip it.
+ */
+export function clipCollapsed(text: string, maxWidth: number, expanded: boolean | undefined): string {
+	return expanded ? text : truncateToWidth(text, maxWidth);
 }
 
 // =============================================================================
@@ -1128,7 +1142,19 @@ export function createCachedComponent(
 		invalidate() {
 			cached = undefined;
 		},
+		releaseRenderCaches() {
+			cached = undefined;
+		},
 	};
+}
+
+/**
+ * Fit a status header plus body rows to `width` for search-style results. The
+ * header soft-wraps so its trailing summary meta (counts, `truncated`) stays
+ * visible behind a long pattern; body rows keep single-row truncation.
+ */
+export function fitHeaderedRows(header: string, rows: readonly string[], width: number): string[] {
+	return [...wrapTextWithAnsi(header, width), ...rows.map(row => truncateToWidth(row, width, Ellipsis.Omit))];
 }
 
 /**
@@ -1158,6 +1184,14 @@ export function createRenderedStringCache(): RenderedStringCache {
 /** Drop the memo so the next lookup re-renders (e.g. the render function identity changed). */
 export function invalidateRenderedStringCache(cache: RenderedStringCache): void {
 	cache.theme = null;
+}
+
+export function releaseRenderedStringCache(cache: RenderedStringCache): void {
+	cache.theme = null;
+	cache.expanded = false;
+	cache.salt = "";
+	cache.content = "";
+	cache.value = "";
 }
 
 /** Reuse a rendered string while its theme, expansion, content, and salt match. */

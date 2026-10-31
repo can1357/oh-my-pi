@@ -128,14 +128,11 @@ async function resolveScopeProjectDir(runtimeDir: string): Promise<string | unde
 // ---------------------------------------------------------------------------
 
 /**
- * Connect to a scope's broker. Undefined when the scope cannot be addressed
- * (Windows pipe names derive from the project dir, which may be unknown for
- * discovered scopes). The caller owns the returned client and must close it.
+ * Connect to a scope's broker; the endpoint derives from the runtime dir alone.
+ * The caller owns the returned client and must close it.
  */
-export async function scopeClient(scope: PsScope): Promise<DaemonBrokerClient | undefined> {
-	const connectDir = scope.projectDir ?? (process.platform === "win32" ? undefined : scope.runtimeDir);
-	if (connectDir === undefined) return undefined;
-	return createDaemonBrokerClient(connectDir, { runtimeDir: scope.runtimeDir });
+export async function scopeClient(scope: PsScope): Promise<DaemonBrokerClient> {
+	return createDaemonBrokerClient(scope.projectDir ?? scope.runtimeDir, { runtimeDir: scope.runtimeDir });
 }
 
 /**
@@ -183,26 +180,24 @@ export async function collectScope(scope: PsScope): Promise<PsScopeReport> {
 	if (scope.brokerPid !== undefined) {
 		try {
 			const client = await scopeClient(scope);
-			if (client) {
-				try {
-					if (scope.projectDir === undefined) {
-						const ping = await client.request({ op: "ping" });
-						if (ping.op === "ping") scope.projectDir = ping.projectDir;
-					}
-					const result = await client.request({ op: "list" });
-					if (result.op !== "list") throw new Error(`Unexpected broker response ${result.op}`);
-					return {
-						scope,
-						daemons: result.daemons.map(snapshot => ({
-							snapshot,
-							command: formatCommand(persisted.get(snapshot.name)?.spec),
-							cwd: persisted.get(snapshot.name)?.spec.cwd,
-							supervised: true,
-						})),
-					};
-				} finally {
-					client.close();
+			try {
+				if (scope.projectDir === undefined) {
+					const ping = await client.request({ op: "ping" });
+					if (ping.op === "ping") scope.projectDir = ping.projectDir;
 				}
+				const result = await client.request({ op: "list" });
+				if (result.op !== "list") throw new Error(`Unexpected broker response ${result.op}`);
+				return {
+					scope,
+					daemons: result.daemons.map(snapshot => ({
+						snapshot,
+						command: formatCommand(persisted.get(snapshot.name)?.spec),
+						cwd: persisted.get(snapshot.name)?.spec.cwd,
+						supervised: true,
+					})),
+				};
+			} finally {
+				client.close();
 			}
 		} catch {
 			// Broker died or refused mid-query; fall through to the offline view.

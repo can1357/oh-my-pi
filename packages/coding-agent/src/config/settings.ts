@@ -15,6 +15,9 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { type GeneratedProvider, getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { type Api, type Model, modelKind } from "@oh-my-pi/pi-catalog/types";
 import {
 	getAgentDbPath,
 	getAgentDir,
@@ -36,8 +39,7 @@ import type { ModelRole } from "../config/model-roles";
 import { loadCapability } from "../discovery";
 import { AgentStorage } from "../session/agent-storage";
 import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "../session/compaction-methods";
-import MODEL_PRIO from "../priority.json" with { type: "json" };
-import { replaceFileAtomically } from "../utils/atomic-file";
+import { writeFileAtomically } from "../utils/atomic-file";
 import { isRegisteredSearchEngine } from "../web/search/provider";
 import { stringifyYamlConfig } from "@oh-my-pi/pi-utils/yaml-config";
 import {
@@ -199,6 +201,19 @@ function setByPath(obj: RawSettings, segments: readonly string[], value: unknown
 		current = current[segment] as RawSettings;
 	}
 	current[segments[segments.length - 1]] = value;
+}
+
+/**
+ * Assign `obj[key]` as an own property. Plain assignment of a parsed
+ * `__proto__` key (an agent name, say) would replace the prototype instead,
+ * silently dropping that entry.
+ */
+function setOwn(obj: RawSettings, key: string, value: unknown): void {
+	if (key === "__proto__") {
+		Object.defineProperty(obj, key, { value, enumerable: true, writable: true, configurable: true });
+	} else {
+		obj[key] = value;
+	}
 }
 
 /**
@@ -1093,9 +1108,10 @@ export class Settings {
 	 * Apply on-disk edits live: watch the directories holding config.yml, the
 	 * project settings files, and `--config` overlays, and run a debounced
 	 * keep-last-good reload (a file that fails to parse or validate keeps its
-	 * layer's last good values). Only the persisting process-global instance watches; other
-	 * instances ignore the call. Stopped by {@link stopWatching} /
-	 * {@link cancelPendingSaves}.
+	 * layer's last good values). Arming a watch also schedules one reload, so
+	 * edits that landed before it went live are not lost. Only the persisting
+	 * process-global instance watches; other instances ignore the call. Stopped
+	 * by {@link stopWatching} / {@link cancelPendingSaves}.
 	 */
 	startWatching(): void {
 		if (this.#watchingFiles || !this.#persist || this.#savesCancelled || globalInstance !== this) return;
@@ -1173,6 +1189,7 @@ export class Settings {
 	#syncFileWatchers(): void {
 		if (!this.#watchingFiles) return;
 		const targets = this.#configWatchTargets();
+		let armed = false;
 		for (const [dir, entry] of this.#fileWatchers) {
 			if (targets.has(dir)) continue;
 			entry.watcher.close();
@@ -1181,6 +1198,15 @@ export class Settings {
 		for (const [dir, names] of targets) {
 			const existing = this.#fileWatchers.get(dir);
 			if (existing) {
+				// A newly followed target can share a directory with the old one.
+				// Events for its name were filtered out while the reload was reading
+				// the files, so reconcile once even though no new watch was opened.
+				for (const name of names) {
+					if (!existing.names.has(name)) {
+						armed = true;
+						break;
+					}
+				}
 				existing.names = names;
 				continue;
 			}
@@ -1203,7 +1229,12 @@ export class Settings {
 				if (this.#fileWatchers.get(dir)?.watcher === watcher) this.#fileWatchers.delete(dir);
 			});
 			this.#fileWatchers.set(dir, { watcher, names });
+			armed = true;
 		}
+		// The sources were last read before a watch or name was added. Bun also
+		// arms macOS FSEvents asynchronously, so a write in between may raise no
+		// event. Re-read once; the next sync adds nothing new, so it settles.
+		if (armed) this.#scheduleWatchReload();
 	}
 
 	#scheduleWatchReload(): void {
@@ -1517,6 +1548,11 @@ export class Settings {
 
 	getAgentDir(): string {
 		return this.#agentDir;
+	}
+
+	/** Resolved absolute paths of the config overlays supplied to this instance. */
+	getConfigFiles(): readonly string[] {
+		return [...this.#configFiles];
 	}
 
 	/**
@@ -3260,6 +3296,23 @@ export class Settings {
 			const legacyWebOrder = legacy(providerSettings, "webSearchOrder", "providers.webSearchOrder");
 			const legacyWebExclude = legacy(providerSettings, "webSearchExclude", "providers.webSearchExclude");
 			const legacyGeminiModel = legacy(providerSettings, "webSearchGeminiModel", "providers.webSearchGeminiModel");
+			// Legacy settings named a provider; its swap target is the catalog's
+			// resolved per-model policy (`web-search-model` / `image-model` / tts
+			// seed kind), uniform across that provider's bundled rows.
+			const bundledSelector = (
+				provider: string,
+				pick: (model: Model<Api>) => string | undefined,
+			): string | undefined => {
+				for (const model of getBundledModels(provider as GeneratedProvider)) {
+					const id = pick(model);
+					if (id) return `${provider}/${id}`;
+				}
+				return undefined;
+			};
+			const webSearchSelector = (provider: string): string[] => {
+				const selector = bundledSelector(provider, model => model.webSearchModel);
+				return selector ? [selector] : [];
+			};
 			const geminiSelectors = (model: string): string[] => [
 				`google-gemini-cli/${model}`,
 				`google-antigravity/${model}`,
@@ -3270,11 +3323,11 @@ export class Settings {
 					case "gemini":
 						return geminiSelectors(geminiModel);
 					case "anthropic":
-						return ["anthropic/claude-haiku-4-5"];
+						return webSearchSelector("anthropic");
 					case "codex":
-						return ["openai-codex/gpt-5.6-luna"];
+						return webSearchSelector("openai-codex");
 					case "xai":
-						return ["xai/grok-4.5"];
+						return webSearchSelector("xai");
 					case "auto":
 						return [];
 					default:
@@ -3284,7 +3337,7 @@ export class Settings {
 			const geminiModel =
 				typeof legacyGeminiModel === "string" && legacyGeminiModel.trim()
 					? legacyGeminiModel.trim()
-					: "gemini-2.5-flash";
+					: (getBundledModels("google").find(model => model.webSearchModel)?.webSearchModel ?? "");
 			const excludedWebProviders = new Set(
 				Array.isArray(legacyWebExclude)
 					? legacyWebExclude.filter(
@@ -3317,31 +3370,28 @@ export class Settings {
 			if (orderedWebSelectors.length > 0 || excludedWebProviders.size > 0) {
 				setRoleChain(
 					"web",
-					dedupe([...orderedWebSelectors, ...MODEL_PRIO.web]).filter(selector => !isWebSelectorExcluded(selector)),
+					dedupe([...orderedWebSelectors, ...roleDefaultModels().web]).filter(
+						selector => !isWebSelectorExcluded(selector),
+					),
 				);
 			}
 
 			const legacyImage = legacy(providerSettings, "image", "providers.image");
 			const legacyImageOrder = legacy(providerSettings, "imageOrder", "providers.imageOrder");
+			const legacyImageProviders: Record<string, string> = {
+				openai: "openai",
+				"openai-codex": "openai-codex",
+				antigravity: "google-antigravity",
+				xai: "xai",
+				gemini: "google",
+				deepinfra: "deepinfra",
+			};
 			const imageSelector = (provider: string): string | undefined => {
-				switch (provider) {
-					case "openai":
-						return "openai/gpt-image-2";
-					case "openai-codex":
-						return "openai-codex/gpt-image-2";
-					case "antigravity":
-						return "google-antigravity/gemini-3-pro-image";
-					case "xai":
-						return "xai/grok-imagine-image";
-					case "openrouter":
-						return "openrouter/google/gemini-3-pro-image";
-					case "gemini":
-						return "google/gemini-3-pro-image";
-					case "deepinfra":
-						return "deepinfra/black-forest-labs/FLUX-2-pro";
-					default:
-						return undefined;
-				}
+				// OpenRouter rows carry no gemini image-model swap (the gemini class
+				// binds to Google transports only), so its legacy target stays literal.
+				if (provider === "openrouter") return "openrouter/google/gemini-3-pro-image";
+				const catalogProvider = legacyImageProviders[provider];
+				return catalogProvider ? bundledSelector(catalogProvider, model => model.imageModel) : undefined;
 			};
 			const orderedImageProviders = Array.isArray(legacyImageOrder)
 				? legacyImageOrder
@@ -3352,18 +3402,14 @@ export class Settings {
 				typeof value === "string" ? (imageSelector(value) ?? []) : [],
 			);
 			if (orderedImageSelectors.length > 0) {
-				setRoleChain("image", dedupe([...orderedImageSelectors, ...MODEL_PRIO.image]));
+				setRoleChain("image", dedupe([...orderedImageSelectors, ...roleDefaultModels().image]));
 			}
 
 			const legacyTtsProvider = legacy(providerSettings, "tts", "providers.tts");
 			const speechSelector =
-				legacyTtsProvider === "local"
-					? "local/kokoro"
-					: legacyTtsProvider === "xai"
-						? "xai/grok-tts"
-						: legacyTtsProvider === "deepinfra"
-							? "deepinfra/hexgrad/Kokoro-82M"
-							: undefined;
+				legacyTtsProvider === "local" || legacyTtsProvider === "xai" || legacyTtsProvider === "deepinfra"
+					? bundledSelector(legacyTtsProvider, model => (modelKind(model) === "tts" ? model.id : undefined))
+					: undefined;
 			if (speechSelector) setRoleChain("speech", [speechSelector]);
 
 			const legacySttModel = legacy(sttSettings, "modelName", "stt.modelName");
@@ -3393,7 +3439,7 @@ export class Settings {
 				(typeof legacyUnexpectedStopModel === "string" && legacyUnexpectedStopModel !== "online");
 			if (nonDefaultJudge) {
 				const judgeCandidates: string[] = [];
-				if (legacyJudgmentProvider !== "llm") judgeCandidates.push("typesafe/jev-latest");
+				if (legacyJudgmentProvider !== "llm") judgeCandidates.push("typesafe/jev-1.14.0");
 				if (typeof legacyAutoThinkingModel === "string" && legacyAutoThinkingModel !== "online") {
 					judgeCandidates.push(`local/${legacyAutoThinkingModel}`);
 				}
@@ -3449,6 +3495,23 @@ export class Settings {
 			if (sttSettings && Object.keys(sttSettings).length === 0) delete raw.stt;
 		}
 		migrateKindRoleSettings();
+
+		// The old web-provider migration persisted this pair of fuzzy defaults.
+		// Qualified selectors are now exact, so replace the pair without changing
+		// independently configured selectors or other role chains.
+		{
+			const retry = isRecord(raw.retry) ? raw.retry : undefined;
+			const chains = retry && isRecord(retry.fallbackChains) ? retry.fallbackChains : undefined;
+			const web = chains?.web;
+			if (chains && Array.isArray(web)) {
+				const index = web.findIndex(
+					(selector, i) => selector === "openai-codex/gpt-5.6" && web[i + 1] === "openai-codex/gpt-5.5",
+				);
+				if (index !== -1) {
+					chains.web = [...web.slice(0, index), "openai-codex/gpt-5.6-sol", ...web.slice(index + 2)];
+				}
+			}
+		}
 
 		// Consolidate the retired Exa suite toggles onto the sole remaining
 		// provider switch. The old runtime required both `enabled` and
@@ -3527,24 +3590,7 @@ export class Settings {
 	// ─────────────────────────────────────────────────────────────────────────
 
 	async #writeYamlAtomically(filePath: string, content: string): Promise<void> {
-		const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-		let removeTemp = false;
-		try {
-			const handle = await fs.promises.open(tempPath, "wx", 0o600);
-			removeTemp = true;
-			try {
-				await handle.writeFile(content, "utf8");
-				await handle.sync();
-			} finally {
-				await handle.close();
-			}
-			await replaceFileAtomically(tempPath, filePath);
-			removeTemp = false;
-		} finally {
-			if (removeTemp) {
-				await fs.promises.rm(tempPath, { force: true }).catch(() => {});
-			}
-		}
+		await writeFileAtomically(filePath, content);
 	}
 
 	#queueSave(): void {
@@ -3898,7 +3944,7 @@ export class Settings {
 		const result: RawSettings = {};
 		for (const key of Object.keys(overrides)) {
 			const override = overrides[key];
-			const baseVal = base[key];
+			const baseVal = Object.hasOwn(base, key) ? base[key] : undefined;
 
 			if (override === undefined) continue;
 
@@ -3910,12 +3956,12 @@ export class Settings {
 				baseVal !== null &&
 				!Array.isArray(baseVal)
 			) {
-				result[key] = this.#deepMerge(baseVal as RawSettings, override as RawSettings);
+				setOwn(result, key, this.#deepMerge(baseVal as RawSettings, override as RawSettings));
 			} else {
-				result[key] = override;
+				setOwn(result, key, override);
 			}
 		}
-		for (const key of Object.keys(base)) if (!Object.hasOwn(result, key)) result[key] = base[key];
+		for (const key of Object.keys(base)) if (!Object.hasOwn(result, key)) setOwn(result, key, base[key]);
 		return result;
 	}
 }

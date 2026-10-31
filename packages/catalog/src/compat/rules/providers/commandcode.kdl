@@ -337,6 +337,16 @@ provider "commandcode" {
 			cache-write 0.0
 		}
 	}
+	// Restate the 64K provider output cap beside the openai class's GPT-5.4
+	// window patch, or the class rule wins the whole limits axis.
+	class "openai" {
+		models "gpt-5.4" {
+			limits-patch {
+				context-window 1000000
+				max-tokens 65536
+			}
+		}
+	}
 	models "gpt-5.3-codex" {
 		cost-patch {
 			input 2.0

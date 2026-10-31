@@ -3,9 +3,11 @@
  * design tokens so canvas drawing follows the active theme.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import type { TraceSpanKind } from "../types";
-import { useSystemTheme } from "../useSystemTheme";
+
+/** Embedded viewers resolve canvas colors from their scoped style root. */
+export const TraceThemeRoot = createContext<HTMLElement | null>(null);
 
 export interface TraceTheme {
 	/** Span fill per category. */
@@ -42,8 +44,8 @@ export const CATEGORY_VARS: Record<TraceSpanKind, string> = {
 	background: "--ink-4",
 };
 
-function readTheme(): TraceTheme {
-	const style = getComputedStyle(document.documentElement);
+function readTheme(root: HTMLElement): TraceTheme {
+	const style = getComputedStyle(root);
 	const v = (name: string, fallback: string) => style.getPropertyValue(name).trim() || fallback;
 	return {
 		category: {
@@ -69,16 +71,18 @@ function readTheme(): TraceTheme {
 
 /**
  * Current trace palette. Re-reads the tokens whenever the resolved theme
- * changes (store or a direct `data-theme` attribute write).
+ * changes, without loading the live dashboard's theme preference store.
  */
 export function useTraceTheme(): TraceTheme {
-	const theme = useSystemTheme();
+	const root = useContext(TraceThemeRoot) ?? document.documentElement;
 	const [attrVersion, setAttrVersion] = useState(0);
 	useEffect(() => {
 		const observer = new MutationObserver(() => setAttrVersion(n => n + 1));
-		observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+		const options = { attributes: true, attributeFilter: ["data-theme", "style", "class"] };
+		observer.observe(document.documentElement, options);
+		if (root !== document.documentElement) observer.observe(root, options);
 		return () => observer.disconnect();
-	}, []);
-	// biome-ignore lint/correctness/useExhaustiveDependencies: theme/attrVersion are re-read triggers.
-	return useMemo(readTheme, [theme, attrVersion]);
+	}, [root]);
+	// biome-ignore lint/correctness/useExhaustiveDependencies: attrVersion triggers a CSS token re-read.
+	return useMemo(() => readTheme(root), [root, attrVersion]);
 }

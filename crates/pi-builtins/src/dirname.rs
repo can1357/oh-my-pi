@@ -79,9 +79,8 @@ impl Utility for Dirname {
 /// - `foo/bar` → `foo`
 /// - `a/b/c` → `a/b`
 ///
-/// Per POSIX.1-2017 dirname specification and GNU coreutils manual:
-/// - POSIX: <https://pubs.opengroup.org/onlinepubs/9699919799/utilities/dirname.html>
-/// - GNU: <https://www.gnu.org/software/coreutils/manual/html_node/dirname-invocation.html>
+/// Per the POSIX.1-2017 dirname specification:
+/// <https://pubs.opengroup.org/onlinepubs/9699919799/utilities/dirname.html>
 ///
 /// See issue #8910 and similar fix in basename (#8373, commit c5268a897).
 fn dirname_string_manipulation(path_bytes: &[u8]) -> Cow<'_, [u8]> {

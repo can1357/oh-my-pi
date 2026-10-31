@@ -33,7 +33,7 @@
 use std::sync::LazyLock;
 
 use crate::utok::{
-	bpe::{self, RankTable},
+	bpe::{self, PieceMemo, RankTable},
 	pretoken::Splitter,
 	utf::Unit,
 };
@@ -60,13 +60,18 @@ static JEV: LazyLock<Jev> = LazyLock::new(|| Jev {
 /// excluding the request frame. Valid text counts flavor-invariantly.
 pub fn content_token_count<U: Unit>(units: &[U]) -> u32 {
 	let jev = &*JEV;
-	let mut n = 0u32;
-	bpe::for_each_piece(&Splitter::Qwen, true, units, &mut |piece| {
-		n += if jev.whole.rank(piece).is_some() {
-			1
-		} else {
-			piece.chunks(WINDOW).map(|w| jev.base.count_merged(w)).sum()
-		};
-	});
-	n
+	PieceMemo::with(|memo| {
+		let mut n = 0u32;
+		bpe::for_each_piece(&Splitter::Qwen, true, units, &mut |piece| {
+			n += if jev.whole.rank(piece).is_some() {
+				1
+			} else {
+				piece
+					.chunks(WINDOW)
+					.map(|w| jev.base.count_merged(w, memo))
+					.sum()
+			};
+		});
+		n
+	})
 }

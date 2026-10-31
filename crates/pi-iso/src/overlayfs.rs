@@ -198,16 +198,15 @@ mod imp {
 
 	fn kernel_mount(merged: &Path, opts: &str) -> IsoResult<()> {
 		let target = to_cstring(merged.as_os_str().as_bytes(), "merged")?;
-		let source = CString::new("overlay").expect("static source");
-		let fstype = CString::new("overlay").expect("static fstype");
 		let opts_c = to_cstring(opts.as_bytes(), "overlay options")?;
 
-		// SAFETY: all pointers are valid CString-backed and outlive the call.
+		// SAFETY: all pointers are NUL-terminated (CString-backed or `c"…"`
+		// literals) and outlive the call.
 		let rc = unsafe {
 			libc::mount(
-				source.as_ptr(),
+				c"overlay".as_ptr(),
 				target.as_ptr(),
-				fstype.as_ptr(),
+				c"overlay".as_ptr(),
 				0,
 				opts_c.as_ptr().cast::<libc::c_void>(),
 			)

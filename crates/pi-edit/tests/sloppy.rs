@@ -287,7 +287,7 @@ async fn no_op_recovery_respects_utf8_boundaries_in_source_and_replacement() {
 			.apply_raw(&input, &writer)
 			.await
 			.expect_err("an unchanged edit reports a no-op instead of panicking");
-		assert!(matches!(error, EditError::Match(_)));
+		assert_eq!(error.kind(), "no_change", "{error}");
 		assert!(writer.requests.lock().is_empty());
 		assert_eq!(workspace.read("a.txt").unwrap(), before);
 	}
@@ -305,6 +305,26 @@ async fn overlapping_desired_matches_are_rejected_without_collapsing_source() {
 		.expect_err("overlapping matches are not adjacent duplicate blocks");
 	assert!(matches!(error, EditError::Match(_)));
 	assert!(error.to_string().contains("ambiguous"));
+	assert!(writer.requests.lock().is_empty());
+	assert_eq!(workspace.read("a.txt").unwrap(), before);
+}
+
+#[tokio::test]
+async fn a_staged_insertion_is_not_dropped_by_a_later_replace_on_the_same_find() {
+	let workspace = Workspace::new(EditMode::Sloppy);
+	let before = "old\nkeep\n";
+	workspace.write("a.txt", before);
+	let writer = DiskWriter::default();
+	let error = workspace
+		.apply_raw(
+			"*** Edit File: a.txt\n*** Find\nold\n*** Insert Before\nstaged\n*** Replace\nnew\n",
+			&writer,
+		)
+		.await
+		.expect_err("two operators on one *** Find cannot both apply");
+	assert!(matches!(error, EditError::Parse { .. }));
+	assert!(error.to_string().contains("*** Insert Before"), "{error}");
+	assert!(error.to_string().contains("*** Replace"), "{error}");
 	assert!(writer.requests.lock().is_empty());
 	assert_eq!(workspace.read("a.txt").unwrap(), before);
 }

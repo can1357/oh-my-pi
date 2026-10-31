@@ -54,20 +54,51 @@ afterEach(async () => {
 });
 
 it.each([
-	{ severity: "concern", continuation: undefined, immuneTurns: undefined, stop: false },
-	{ severity: "nit", continuation: undefined, immuneTurns: undefined, stop: false },
+	{
+		severity: "concern",
+		continueSeverity: "blocker",
+		continues: false,
+		continuation: undefined,
+		immuneTurns: undefined,
+		stop: false,
+	},
+	{
+		severity: "nit",
+		continueSeverity: undefined,
+		continues: false,
+		continuation: undefined,
+		immuneTurns: undefined,
+		stop: false,
+	},
+	{
+		severity: "concern",
+		continueSeverity: undefined,
+		continues: true,
+		continuation: "nit",
+		immuneTurns: undefined,
+		stop: false,
+	},
 	...([undefined, 0] as const).flatMap(immuneTurns =>
 		(["concern", "nit", "blocker"] as const).map(continuation => ({
 			severity: "blocker" as const,
+			continueSeverity: undefined,
+			continues: true,
 			continuation,
 			immuneTurns,
 			stop: false,
 		})),
 	),
-	{ severity: "blocker", continuation: "concern", immuneTurns: undefined, stop: true },
+	{
+		severity: "blocker",
+		continueSeverity: undefined,
+		continues: true,
+		continuation: "concern",
+		immuneTurns: undefined,
+		stop: true,
+	},
 ] as const)(
 	"routes terminal advice and same-run continuation %j",
-	async ({ severity, continuation, immuneTurns, stop }) => {
+	async ({ severity, continueSeverity, continues, continuation, immuneTurns, stop }) => {
 		const temp = TempDir.createSync("@pi-advisor-terminal-unwind-");
 		const auth = await AuthStorage.create(":memory:");
 		auth.keys.setRuntime("anthropic", "test-key");
@@ -85,7 +116,7 @@ it.each([
 		const continuationMarker = `CONTINUATION_${continuation}_${immuneTurns ?? "default"}_${stop}`;
 		const nextProviderStarted = Promise.withResolvers<void>();
 		const releaseNextProvider = Promise.withResolvers<void>();
-		const terminalCalls = severity === "blocker" ? (stop ? 3 : 4) : 2;
+		const terminalCalls = continues ? (stop ? 3 : 4) : 2;
 		const nextPrimaryCall = terminalCalls + 1;
 		let primaryCalls = 0;
 		const primaryContexts: string[] = [];
@@ -98,7 +129,7 @@ it.each([
 			handler: async () => {
 				if (primaryCalls === 1) return toolResponse("step-1", "step");
 				if (primaryCalls === 2) return textResponse("terminal answer");
-				if (severity === "blocker" && primaryCalls === 3) {
+				if (continues && primaryCalls === 3) {
 					continuationStarted.resolve();
 					await releaseContinuation.promise;
 					return textResponse("continuation answer");
@@ -163,6 +194,7 @@ it.each([
 			"retry.enabled": false,
 			"advisor.syncBacklog": "off",
 			...(immuneTurns === 0 ? { "advisor.immuneTurns": 0 } : {}),
+			...(continueSeverity ? { "advisor.continueSeverity": continueSeverity } : {}),
 		});
 		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
 		const session = new AgentSession({
@@ -233,7 +265,7 @@ it.each([
 				(message: AgentMessage) =>
 					message.role === "custom" && "customType" in message && message.customType === "advisor",
 			);
-			if (severity !== "blocker") {
+			if (!continues) {
 				expect(cards).toHaveLength(1);
 				const card = cards[0];
 				expect(card?.role).toBe("custom");
@@ -265,3 +297,87 @@ it.each([
 		}
 	},
 );
+
+// Regression: a qualifying `nit` that lands after the boundary window closed,
+// while the core loop still reports streaming, must take the same latched
+// continuation as a boundary-flush steer. Routed as an aside it was drained by
+// the loop's yield point into an extra turn the advisor then reviewed again.
+it("continues once on a late nit at advisor.continueSeverity=nit without re-reviewing the continuation", async () => {
+	const temp = TempDir.createSync("@pi-advisor-terminal-unwind-");
+	const auth = await AuthStorage.create(":memory:");
+	auth.keys.setRuntime("anthropic", "test-key");
+	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+	if (!model) throw new Error("Expected bundled model");
+	const lateNote = "LATE_NIT_MARKER";
+	const primaryContexts: string[] = [];
+	let reviewStarts = 0;
+	let streamingAtNote: boolean | undefined;
+
+	const primaryMock = createMockModel({
+		id: "terminal-unwind-primary",
+		provider: "anthropic",
+		responses: [textResponse("terminal answer"), textResponse("continuation answer")],
+		handler: () => textResponse("unexpected extra turn"),
+	});
+	const advisorMock = createMockModel({
+		id: "terminal-unwind-advisor",
+		provider: "anthropic",
+		handler: () => textResponse("advisor quiet"),
+	});
+	const agent = new Agent({
+		getApiKey: () => "test-key",
+		initialState: { model, systemPrompt: ["terminal unwind regression"], tools: [] },
+		convertToLlm,
+		streamFn: (messages, context, options) => {
+			primaryContexts.push(JSON.stringify(context.messages));
+			return primaryMock.stream(messages, context, options);
+		},
+	});
+	const originalSetOnTurnEnd = agent.setOnTurnEnd.bind(agent);
+	agent.setOnTurnEnd = callback => {
+		if (!callback) {
+			originalSetOnTurnEnd(undefined);
+			return;
+		}
+		originalSetOnTurnEnd(async (messages, signal, context) => {
+			await callback(messages, signal, context);
+			// The advisors' boundary window has closed; the loop has not yet yielded.
+			if (context?.willContinue === false && streamingAtNote === undefined) {
+				streamingAtNote = agent.state.isStreaming;
+				const advise = session.getAdvisorAgent()?.state.tools.find(tool => tool.name === "advise");
+				await advise?.execute("late-nit", { note: lateNote, severity: "nit" });
+			}
+		});
+	};
+
+	const settings = Settings.isolated({
+		"compaction.enabled": false,
+		"retry.enabled": false,
+		"advisor.syncBacklog": "off",
+		"advisor.continueSeverity": "nit",
+	});
+	settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
+	const session = new AgentSession({
+		agent,
+		sessionManager: SessionManager.inMemory(),
+		settings,
+		modelRegistry: new ModelRegistry(auth, temp.join("models.yml")),
+		advisorTools: [],
+		advisorStreamFn: (advisorModel, context, options) => {
+			if (context.messages.at(-1)?.role === "user") reviewStarts++;
+			return advisorMock.stream(advisorModel, context, options);
+		},
+	});
+	active = { session, auth, temp };
+	if (!session.setAdvisorEnabled(true)) throw new Error("Expected advisor runtime");
+
+	await session.prompt("answer in one line");
+	await session.waitForIdle();
+	expect(await session.waitForAdvisorCatchup(2_000)).toBe(true);
+
+	expect(streamingAtNote).toBe(true);
+	expect(primaryContexts).toHaveLength(2);
+	expect(primaryContexts[1]).toContain(lateNote);
+	// Only the user-started turn is reviewed; the advisor-started continuation is not.
+	expect(reviewStarts).toBe(1);
+});

@@ -56,6 +56,19 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 
 	const read = async (path, opts, ...rest) => {
 		const options = optionsArg("read", opts, rest, ["offset", "limit"], "{ offset, limit }");
+		if (typeof path === "string" && /^artifact:\/\/\d+$/i.test(path)) {
+			if (typeof options.limit === "number" && options.limit <= 0) return "";
+			const text = callHelper("hasRoot", path) ? await callHelper("read", path, options) : undefined;
+			if (text !== undefined) return text;
+			// Another session's, or no artifacts dir was injected: the read tool searches every registered one.
+			// A bounded raw read locates the file without inlining it; a bare `:raw` read refuses files over 50 KB.
+			const located = await globalThis.__omp_call_tool__("read", { path: `${path}:raw:1-1` });
+			const filePath = located?.details?.resolvedPath;
+			// Once located, the file is read like this session's artifacts and plain paths: read() is no read-tool policy gate.
+			if (typeof filePath === "string") return callHelper("read", filePath, options);
+			// An extension's replacement `read` may name no file: its own text for the selected lines is the answer.
+			return readToolText(withReadLineSelector(`${path}:raw`, options));
+		}
 		if (shouldDelegateRead(path)) {
 			const toolPath = withReadLineSelector(path, options);
 			return toolPath === null ? "" : readToolText(toolPath);
@@ -308,9 +321,13 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		}
 	};
 
-	const judge = async (state, questions) => {
+	// Optional `images` is a list of local paths or embedded `{ type: "image", data, mimeType }` attachments.
+	const judge = async (state, questions, opts) => {
 		checkQuestions(questions);
-		const result = await globalThis.__omp_call_tool__("__judge__", { state, questions });
+		const { images } = optionsArg("judge", opts, [], ["images"], "{ images }");
+		const args = { state, questions };
+		if (images !== undefined) args.images = images;
+		const result = await globalThis.__omp_call_tool__("__judge__", args);
 		if (!result || !isPlainObject(result.answers)) throw new Error("judge() did not return answers");
 		return result.answers;
 	};
@@ -402,17 +419,18 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	};
 
 	// Judge every state with the same questions on the host. `states` is
-	// `{ key: state }` or an array (keys are indices). `intent` is an optional
-	// nonempty progress/job label. Item failures land in `JudgmentItem.error`;
-	// only a run that dies wholesale rejects `drain()`.
+	// `{ key: state }` or an array (keys are indices); `images` maps keys to
+	// lists of local paths or embedded image attachments. `intent` is an
+	// optional nonempty progress/job label. Item failures land in
+	// `JudgmentItem.error`; only a run that dies wholesale rejects `drain()`.
 	const judgeBatch = async (states, questions, opts, ...rest) => {
 		checkQuestions(questions);
 		const options = optionsArg(
 			"judgeBatch",
 			opts,
 			rest,
-			["concurrency", "retries", "minOk", "intent"],
-			"{ intent, concurrency, retries, minOk }",
+			["concurrency", "retries", "minOk", "intent", "images"],
+			"{ intent, concurrency, retries, minOk, images }",
 		);
 		if (
 			options.intent !== undefined &&
@@ -424,8 +442,18 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		if (Array.isArray(states)) items = states.map((state, key) => ({ key, state }));
 		else if (isPlainObject(states)) items = Object.entries(states).map(([key, state]) => ({ key, state }));
 		else throw new TypeError("judgeBatch(states, questions) expects states as an object or array");
+		const { images, ...batchOptions } = options;
+		if (images !== undefined) {
+			if (!isPlainObject(images)) throw new TypeError("judgeBatch() images must be an object keyed by state key");
+			const itemsByKey = new Map(items.map(item => [String(item.key), item]));
+			for (const key of Object.keys(images)) {
+				const item = itemsByKey.get(key);
+				if (!item) throw new TypeError(`images contains unknown input key ${JSON.stringify(key)}`);
+				item.images = images[key];
+			}
+		}
 		return judgeBatchFrom(
-			await globalThis.__omp_call_tool__("__judge_batch__", { op: "create", items, questions, ...options }),
+			await globalThis.__omp_call_tool__("__judge_batch__", { op: "create", items, questions, ...batchOptions }),
 		);
 	};
 
@@ -439,8 +467,8 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 				"agent",
 				opts,
 				rest,
-				["agent", "label", "schema", "isolated", "apply", "merge", "schemaMode", "tools", "model"],
-				"{ agent, label, schema, schemaMode, isolated, apply, merge, tools, model }",
+				["agent", "label", "schema", "isolated", "apply", "merge", "schemaMode", "tools"],
+				"{ agent, label, schema, schemaMode, isolated, apply, merge, tools }",
 			);
 			const result = await globalThis.__omp_call_tool__("__agent__", { prompt, ...options });
 			if (!result || typeof result.id !== "string") throw new Error("agent() did not return a handle");
@@ -503,8 +531,8 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			"workpool",
 			opts,
 			rest,
-			["name", "context", "tools", "model"],
-			"{ name, context, tools, model }",
+			["name", "context", "tools"],
+			"{ name, context, tools }",
 		);
 		const result = await globalThis.__omp_call_tool__("__workpool__", {
 			op: "create",
@@ -538,10 +566,6 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			return s.total == null ? Infinity : Math.max(0, Number(s.total) - Number(s.spent ?? 0));
 		},
 		hard: async () => Boolean((await __budgetSnap()).hard),
-	};
-
-	const display = value => {
-		globalThis.__omp_display__(value);
 	};
 
 	const formatArgs = args => args.map(arg => (typeof arg === "string" ? arg : arg));
@@ -611,7 +635,6 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 
 	globalThis.console = consoleBridge;
 	globalThis.print = consoleBridge.log;
-	globalThis.display = display;
 	globalThis.tool = tool;
 	globalThis.completion = completion;
 	globalThis.output = output;

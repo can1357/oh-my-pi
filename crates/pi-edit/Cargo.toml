@@ -26,3 +26,5 @@ xxhash-rust.workspace = true
 [dev-dependencies]
 tempfile = "3"
 tokio.workspace = true
+# Stands in for the on-demand Lua wasm grammar in the hashline parity fixtures.
+tree-sitter-lua.workspace = true

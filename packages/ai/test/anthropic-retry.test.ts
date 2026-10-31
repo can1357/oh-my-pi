@@ -18,6 +18,18 @@ describe("isProviderRetryableError", () => {
 		expect(
 			isProviderRetryableError(new Error("Anthropic stream envelope error: stream ended before message_start")),
 		).toBe(true);
+		expect(
+			isProviderRetryableError(new Error("Anthropic stream envelope error: stream ended before message_delta")),
+		).toBe(true);
+	});
+
+	it("retries gateway stream drops before message_delta", () => {
+		expect(
+			isProviderRetryableError(new Error("Claude upstream stream ended before message_delta, reason=scanner_error")),
+		).toBe(true);
+		expect(
+			isProviderRetryableError(new Error("Claude upstream stream ended before message_start, reason=scanner_error")),
+		).toBe(true);
 	});
 
 	it("does not classify post-content envelope failures as provider-retryable", () => {
@@ -97,5 +109,19 @@ describe("isProviderRetryableError", () => {
 			const err = Object.assign(new Error(`400 ${JSON.stringify(body)}`), { status: 400, code, error: body });
 			expect(isProviderRetryableError(err)).toBe(false);
 		}
+	});
+
+	it("retries Aliyun multimodal-gateway 400s (flaky, byte-identical replay succeeds)", () => {
+		for (const text of [
+			"The provided URL does not appear to be valid. Ensure it is correctly formatted.",
+			"Download multimodal file timed out",
+		]) {
+			const message = `400 <400> InternalError.Algo.InvalidParameter: ${text}\n<400> InternalError.Algo.InvalidParameter: ${text} (type=invalid_request_error param=invalid_parameter_error)`;
+			const err = Object.assign(new Error(message), { status: 400 });
+			expect(isProviderRetryableError(err)).toBe(true);
+		}
+		// A genuine validation 400 stays terminal.
+		const bad = Object.assign(new Error("400 invalid_request_error: unknown field 'temperaturee'"), { status: 400 });
+		expect(isProviderRetryableError(bad)).toBe(false);
 	});
 });

@@ -38,6 +38,8 @@ interface FakeSessionConfig {
 	hang?: boolean;
 	/** Returned from getLastAssistantMessage (salvage source). */
 	lastAssistantMessage?: unknown;
+	/** When true, events after abort() are never delivered, like a provider stream that stops on abort. */
+	stopOnAbort?: boolean;
 }
 
 interface FakeSessionHandle {
@@ -70,6 +72,42 @@ function yieldToolEnd(): AgentSessionEvent {
 	} as AgentSessionEvent;
 }
 
+function assistantMessageStart(): AgentSessionEvent {
+	return { type: "message_start", message: { role: "assistant", content: [] } } as unknown as AgentSessionEvent;
+}
+
+function yieldToolStart(): AgentSessionEvent {
+	return {
+		type: "tool_execution_start",
+		toolCallId: "tool-yield",
+		toolName: "yield",
+		args: {},
+	} as unknown as AgentSessionEvent;
+}
+
+function readToolEnd(toolCallId: string): AgentSessionEvent {
+	return {
+		type: "tool_execution_end",
+		toolCallId,
+		toolName: "read",
+		result: { content: [{ type: "text", text: "file contents" }] },
+		isError: false,
+	} as AgentSessionEvent;
+}
+
+function incrementalYieldToolEnd(toolCallId = "tool-yield-inc"): AgentSessionEvent {
+	return {
+		type: "tool_execution_end",
+		toolCallId,
+		toolName: "yield",
+		result: {
+			content: [{ type: "text", text: "Section recorded." }],
+			details: { status: "success", type: ["findings"], data: { note: "partial" } },
+		},
+		isError: false,
+	} as AgentSessionEvent;
+}
+
 function createFakeSession(config: FakeSessionConfig = {}): FakeSessionHandle {
 	let abortCount = 0;
 	const steerCalls: SteerCall[] = [];
@@ -88,7 +126,10 @@ function createFakeSession(config: FakeSessionConfig = {}): FakeSessionHandle {
 			if (config.events?.length) {
 				const events = config.events;
 				queueMicrotask(() => {
-					for (const event of events) listener(event);
+					for (const event of events) {
+						if (config.stopOnAbort && abortCount > 0) break;
+						listener(event);
+					}
 				});
 			}
 			return () => {};
@@ -224,6 +265,35 @@ describe("runSubprocess request guards", () => {
 		expect(handle.steerCalls[0].content).toContain("[budget notice]");
 	});
 
+	it("uses the agent's own task.agentSoftRequestBudget entry instead of the global budget", async () => {
+		// The global budget 2 would stop this run at request 3; the agent's
+		// entry of 4 moves the notice to request 4 and the stop to 6.
+		const settings = Settings.isolated({
+			"task.maxRuntimeMs": 0,
+			"task.softRequestBudget": 2,
+			"task.agentSoftRequestBudget": { task: 4 },
+		});
+		const handle = createFakeSession({
+			events: [
+				assistantMessageEnd("1"),
+				assistantMessageEnd("2"),
+				assistantMessageEnd("3"),
+				assistantMessageEnd("4"),
+				assistantMessageEnd("5"),
+				yieldToolEnd(),
+			],
+		});
+		mockCreateAgentSession(handle.session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-agent-budget", settings });
+
+		expect(result.requests).toBe(5);
+		expect(result.aborted).toBe(false);
+		expect(handle.steerCalls.length).toBe(1);
+		expect(handle.steerCalls[0].content).toContain("used 4 requests");
+		expect(handle.steerCalls[0].content).toContain("soft budget: 4");
+	});
+
 	it("still force-stops at 1.5x the soft budget when budget notices are disabled", async () => {
 		// Budget 2: notice would normally fire at 2, but the force-stop at 3 must
 		// remain active even with the notice disabled.
@@ -276,6 +346,97 @@ describe("runSubprocess request guards", () => {
 		expect(result.abortReason).toContain("request budget exceeded");
 		expect(handle.abortCalls()).toBeGreaterThanOrEqual(1);
 		expect(handle.steerCalls.length).toBe(1);
+	});
+
+	it("budgets the steps of a tool loop the provider runs inside one streaming response", async () => {
+		// Cursor executes tools while its single assistant message still streams;
+		// each result feeds another model step. Budget 2: notice at the second
+		// step, force-stop at the third, all before the message ever ends.
+		const settings = Settings.isolated({
+			"task.maxRuntimeMs": 0,
+			"task.softRequestBudget": 2,
+			"task.softRequestBudgetNotice": true,
+		});
+		const handle = createFakeSession({
+			hang: true,
+			events: [assistantMessageStart(), readToolEnd("read-1"), readToolEnd("read-2"), readToolEnd("read-3")],
+		});
+		mockCreateAgentSession(handle.session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-server-steps", settings });
+
+		expect(handle.steerCalls.length).toBe(1);
+		expect(handle.abortCalls()).toBeGreaterThanOrEqual(1);
+		expect(result.abortReason).toContain("request budget exceeded");
+	});
+
+	it("counts a nonterminal incremental yield during a streaming response as a request", async () => {
+		const settings = Settings.isolated({
+			"task.maxRuntimeMs": 0,
+			"task.softRequestBudget": 2,
+			"task.softRequestBudgetNotice": true,
+		});
+		const handle = createFakeSession({
+			hang: true,
+			events: [assistantMessageStart(), readToolEnd("read-1"), incrementalYieldToolEnd(), readToolEnd("read-2")],
+		});
+		mockCreateAgentSession(handle.session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-incremental-yield", settings });
+
+		expect(handle.steerCalls.length).toBe(1);
+		expect(handle.steerCalls[0].content).toContain("used 2 requests");
+		expect(handle.abortCalls()).toBeGreaterThanOrEqual(1);
+		expect(result.abortReason).toContain("request budget exceeded");
+	});
+
+	it("lets a pending yield land before a sibling step's budget check can abort the run", async () => {
+		// Parallel calls in one Cursor step: the yield is still validating while
+		// siblings finish and push the count past 1.5x. The yield is the run's
+		// terminal report; a budget abort in between would discard it.
+		const settings = Settings.isolated({
+			"task.maxRuntimeMs": 0,
+			"task.softRequestBudget": 2,
+			"task.softRequestBudgetNotice": true,
+		});
+		const handle = createFakeSession({
+			hang: true,
+			stopOnAbort: true,
+			events: [
+				assistantMessageStart(),
+				yieldToolStart(),
+				readToolEnd("read-1"),
+				readToolEnd("read-2"),
+				readToolEnd("read-3"),
+				yieldToolEnd(),
+			],
+		});
+		mockCreateAgentSession(handle.session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-pending-yield", settings });
+
+		expect(result.abortReason ?? "").not.toContain("request budget exceeded");
+		expect(result.exitCode).toBe(0);
+	});
+
+	it("does not count tools run after the response ended as extra requests", async () => {
+		const settings = Settings.isolated({ "task.maxRuntimeMs": 0 });
+		const handle = createFakeSession({
+			events: [
+				assistantMessageStart(),
+				assistantMessageEnd("reading"),
+				readToolEnd("read-1"),
+				readToolEnd("read-2"),
+				assistantMessageStart(),
+				assistantMessageEnd("done"),
+				yieldToolEnd(),
+			],
+		});
+		mockCreateAgentSession(handle.session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-client-tools", settings });
+
+		expect(result.requests).toBe(2);
 	});
 
 	it("salvages the last assistant text for an aborted child with no completed output", async () => {

@@ -3,6 +3,7 @@ import type { AssistantMessage, AssistantMessageEvent, SimpleStreamOptions, Usag
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
+import { factoryModel } from "../../ai/test/helpers/factory-droid";
 import {
 	CacheWarmer,
 	type CacheWarmerDeps,
@@ -452,6 +453,78 @@ describe("cache warmer lifecycle", () => {
 		expect(h.warmer.status.reason).toBe("cache entry outlives the 30-minute idle window");
 	});
 
+	test("schedules Factory Droid Claude models at the tier their upstream actually writes", () => {
+		const model = factoryModel("claude-opus-4-6", ["snowflake"]);
+		const reply = (cttl: Usage["cttl"]) => ({
+			...makeMessage(makeUsage({ cacheWrite: 500, cttl })),
+			provider: model.provider,
+			model: model.id,
+		});
+		const h = harness();
+		h.warmer.start({ model, context: { messages: [] }, options: {} }, () => h.current);
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + SHORT_DELAY_MS);
+
+		// Long retention on an upstream that writes 5m entries keeps the 5m schedule.
+		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => h.current);
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + SHORT_DELAY_MS);
+		h.warmer.onResponse(reply({ ephemeral5m: 500 }));
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + SHORT_DELAY_MS);
+
+		// A reported 1h write moves the schedule to the 1h lifetime.
+		h.warmer.onResponse(reply({ ephemeral1h: 500 }));
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + LONG_DELAY_MS);
+	});
+
+	test("stops when a response reports a tier the model has no lifetime for", () => {
+		const model = factoryModel("claude-opus-4-6", ["anthropic"]);
+		model.promptCache = { short: 300 };
+		const h = harness();
+		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => h.current);
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + SHORT_DELAY_MS);
+		h.warmer.onResponse({
+			...makeMessage(makeUsage({ cacheWrite: 500, cttl: { ephemeral1h: 500 } })),
+			provider: model.provider,
+			model: model.id,
+		});
+		expect(h.warmer.status).toMatchObject({ state: "inactive", reason: "cache lifetime unavailable" });
+	});
+
+	test("warms a Factory Droid model whose override declares only the 1h lifetime", () => {
+		const model = factoryModel("claude-opus-4-6", ["anthropic"]);
+		model.promptCache = { long: 3600 };
+		const reply = (cttl: Usage["cttl"]) => ({
+			...makeMessage(makeUsage({ cacheWrite: 500, cttl })),
+			provider: model.provider,
+			model: model.id,
+		});
+		const h = harness();
+		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => h.current);
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + LONG_DELAY_MS);
+		h.warmer.onResponse(reply({ ephemeral1h: 500 }));
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + LONG_DELAY_MS);
+
+		// An upstream that wrote a 5m entry has no declared lifetime: stop.
+		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => h.current);
+		h.warmer.onResponse(reply({ ephemeral5m: 500 }));
+		expect(h.warmer.status).toMatchObject({ state: "inactive", reason: "cache lifetime unavailable" });
+	});
+
+	test("adopts the tier a Factory Droid server-side fallback response reports", () => {
+		const model = factoryModel("claude-fable-5", ["anthropic"]);
+		const h = harness();
+		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => h.current);
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + SHORT_DELAY_MS);
+		// The refused request retried on claude-opus-5; the response carries the served id.
+		h.warmer.onResponse({
+			...makeMessage(makeUsage({ cacheWrite: 500, cttl: { ephemeral1h: 500 } })),
+			content: [{ type: "fallback", from: { model: model.id }, to: { model: "claude-opus-5" } }],
+			provider: model.provider,
+			model: "claude-opus-5",
+		});
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + LONG_DELAY_MS);
+		expect(h.warmer.cacheEntry).toMatchObject({ tier: "long", ttlMs: 3_600_000 });
+	});
+
 	test("streaming mode stops when the agent settles", () => {
 		const h = harness();
 		h.mode = "streaming";
@@ -467,6 +540,60 @@ describe("cache warmer lifecycle", () => {
 		await advance(SHORT_DELAY_MS);
 		expect(h.replays).toHaveLength(0);
 		expect(h.warmer.status).toMatchObject({ state: "inactive", reason: "conversation context changed" });
+	});
+
+	test("publishes the cache entry only once a response reports cache usage, even with warming off", () => {
+		const h = harness();
+		h.mode = "off";
+		const sentAt = Date.now();
+		start(h, { apiKey: () => "resolved-at-request-time" });
+		expect(h.warmer.status).toMatchObject({ state: "inactive", reason: "cache warming disabled" });
+		expect(h.warmer.cacheEntry).toBeUndefined();
+		// The provider's reported write tier wins over the credential guess.
+		h.warmer.onResponse(makeMessage(makeUsage({ cacheWrite: 500, cttl: { ephemeral1h: 500 } })));
+		expect(h.warmer.cacheEntry).toEqual({ touchedAt: sentAt, tier: "long", ttlMs: 3_600_000 });
+		h.current = false;
+		expect(h.warmer.cacheEntry).toBeUndefined();
+	});
+
+	test("a failed or uncached response never publishes its entry", () => {
+		const failed = harness();
+		start(failed, { cacheRetention: "long" });
+		failed.warmer.onResponse(makeMessage(makeUsage({ cacheWrite: 500 }), "error"));
+		expect(failed.warmer.cacheEntry).toBeUndefined();
+
+		const uncached = harness();
+		start(uncached, { cacheRetention: "long" });
+		uncached.warmer.onResponse(makeMessage(makeUsage({})));
+		expect(uncached.warmer.cacheEntry).toBeUndefined();
+
+		// A later failure keeps the earlier confirmed entry with its own timestamp.
+		const kept = harness();
+		const confirmedAt = Date.now();
+		start(kept);
+		kept.warmer.onResponse(makeMessage(makeUsage({ cacheWrite: 500 })));
+		vi.advanceTimersByTime(1_000);
+		start(kept);
+		kept.warmer.onResponse(makeMessage(makeUsage({}), "error"));
+		expect(kept.warmer.cacheEntry).toEqual({ touchedAt: confirmedAt, tier: "short", ttlMs: 300_000 });
+	});
+
+	test("a refresh that hits the cache confirms and extends the entry; a miss does not", async () => {
+		const h = harness();
+		start(h);
+		const firstTouch = Date.now();
+		// Still pending: the long-running request has not answered yet.
+		await advance(SHORT_DELAY_MS);
+		expect(h.warmer.cacheEntry).toEqual({ touchedAt: firstTouch + SHORT_DELAY_MS, tier: "short", ttlMs: 300_000 });
+
+		const missed = harness();
+		missed.script = { kind: "generate", usage: makeUsage({ cacheWrite: PROMPT_TOKENS }) };
+		start(missed);
+		const missedTouch = Date.now();
+		missed.warmer.onResponse(makeMessage(makeUsage({ cacheWrite: 500 })));
+		await advance(SHORT_DELAY_MS);
+		expect(missed.warmer.status.reason).toBe("refresh missed the cache");
+		expect(missed.warmer.cacheEntry?.touchedAt).toBe(missedTouch);
 	});
 
 	test("extensions can stop a refresh and force one past the threshold", async () => {

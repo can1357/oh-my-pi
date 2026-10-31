@@ -84,7 +84,7 @@ export const sharpshooterBackend: MemoryBackend = {
 			releaseSharpshooterSession(session);
 			const disposeScheduler = startSharpshooterScheduler({
 				agentDir,
-				cwd: settings.getCwd(),
+				cwd: session.sessionManager.getCwd(),
 				settings,
 				modelRegistry,
 				sessionId: session.sessionId,
@@ -116,8 +116,8 @@ export const sharpshooterBackend: MemoryBackend = {
 		}
 	},
 
-	async buildDeveloperInstructions(agentDir, settings): Promise<string | undefined> {
-		const files = await readMemoryFiles(agentDir, settings.getCwd());
+	async buildDeveloperInstructions(agentDir, cwd, settings): Promise<string | undefined> {
+		const files = await readMemoryFiles(agentDir, cwd);
 		const populated = files.filter(file => file.content.trim().length > 0);
 		if (populated.length === 0) return undefined;
 		const parts = [
@@ -131,8 +131,8 @@ export const sharpshooterBackend: MemoryBackend = {
 		await rm(sharpshooterBankDir(agentDir, cwd), { recursive: true, force: true });
 	},
 
-	// `model` and `intervalMinutes` are read per extraction/scheduler tick; only
-	// the prompt-injected budget needs a rebuild to take effect.
+	// `model`, `minPromptLength`, and `intervalMinutes` are read per extraction/scheduler
+	// tick; only the prompt-injected budget needs a rebuild to take effect.
 	async applySettings(session, changed): Promise<void> {
 		if (changed.includes("sharpshooter.injectionTokenLimit")) await session.refreshBaseSystemPrompt();
 	},

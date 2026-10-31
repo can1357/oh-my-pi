@@ -179,6 +179,8 @@ export async function readSqlite(
 								limit: selector.limit,
 								table: selector.table,
 								dbPath: resolvedSqlitePath.absolutePath,
+								where: selector.where,
+								order: selector.order,
 							}),
 							resolvedSqlitePath.suffixResolution,
 						),
@@ -187,7 +189,7 @@ export async function readSqlite(
 					.done();
 			}
 			case "raw": {
-				const result = executeReadQuery(db, selector.sql);
+				const result = executeReadQuery(db, selector.sql, selector.page);
 				let output = renderTable(result.columns, result.rows, {
 					totalCount: result.rows.length,
 					offset: 0,
@@ -195,7 +197,14 @@ export async function readSqlite(
 					table: "query",
 					dbPath: resolvedSqlitePath.absolutePath,
 				});
-				if (result.truncated) {
+				if (result.truncated && selector.page) {
+					const next = new URLSearchParams({
+						q: selector.sql,
+						limit: String(selector.page.limit),
+						offset: String(selector.page.offset + result.rows.length),
+					});
+					output += `\n[More rows; append ?${next} to the database path to continue]`;
+				} else if (result.truncated) {
 					output += `\n[Output capped at ${MAX_RAW_QUERY_ROWS} rows; add a LIMIT/OFFSET clause to the query to page through more]`;
 				}
 				return toolResult<ReadToolDetails>(details)

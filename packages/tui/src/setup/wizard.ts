@@ -6,7 +6,7 @@ import { modelSetupScene } from "./scenes/model";
 import { providersSetupScene } from "./scenes/sign-in";
 import { themeSetupScene } from "./scenes/theme";
 import type { SetupScene } from "./scenes/types";
-import { SetupWizardComponent } from "./wizard-overlay";
+import { SetupWizardComponent, setupSceneApplies } from "./wizard-overlay";
 
 export type { SetupScene, SetupSceneController, SetupSceneHost, SetupSceneResult } from "./scenes/types";
 
@@ -70,13 +70,22 @@ export interface RunSetupWizardOptions {
 	playWelcomeIntro?: boolean;
 }
 
-/** Own the fullscreen setup overlay until its scenes and outro finish. */
+/**
+ * Own the fullscreen setup overlay until its scenes and outro finish. When
+ * none of `scenes` applies to the current renderer (a TSP surface skips
+ * `ansiOnly` ones) nothing is shown, but completion is still persisted.
+ */
 export async function runSetupWizard(
 	ctx: SetupHost,
 	scenes: readonly SetupScene[] = ALL_SCENES,
 	options: RunSetupWizardOptions = {},
 ): Promise<void> {
 	if (scenes.length === 0) return;
+	if (!scenes.some(setupSceneApplies)) {
+		if (options.markComplete !== false) await ctx.markComplete(CURRENT_SETUP_VERSION);
+		if (options.playWelcomeIntro !== false) ctx.playWelcomeIntro();
+		return;
+	}
 	const component = new SetupWizardComponent(ctx, scenes);
 	const overlay = ctx.ui.showOverlay(component, {
 		width: "100%",

@@ -32,8 +32,8 @@ On first XDG registry resolution, an existing config-root `marketplaces.json` is
 
 ### Interactive mode
 
-| Command        | Effect                                    |
-| -------------- | ----------------------------------------- |
+| Command                                  | Effect                                    |
+| ---------------------------------------- | ----------------------------------------- |
 | `/marketplace` or `/marketplace install` | Open interactive plugin browser (install) |
 
 ### Marketplace management
@@ -55,8 +55,8 @@ On first XDG registry resolution, an existing config-root `marketplaces.json` is
 | `/marketplace installed`                                                  | List installed marketplace plugins                 |
 | `/marketplace upgrade [--scope user\|project] [name@marketplace]`         | Upgrade one or all plugins                         |
 | `/plugins list`                                                           | List npm/link and marketplace plugins              |
-| `/plugins enable [--scope user\|project] name@marketplace`                | Enable a marketplace plugin                        |
-| `/plugins disable [--scope user\|project] name@marketplace`               | Disable a marketplace plugin                       |
+| `/plugins enable [--scope user\|project] <plugin>`                        | Enable an npm/link or marketplace plugin           |
+| `/plugins disable [--scope user\|project] <plugin>`                       | Disable an npm/link or marketplace plugin          |
 
 ### CLI equivalents
 
@@ -70,16 +70,16 @@ omp plugin marketplace list
 omp plugin discover [marketplace]
 omp plugin install [--dry-run] [--force] [--scope user|project] name@marketplace
 omp plugin uninstall [--dry-run] [--scope user|project] name@marketplace
-omp plugin upgrade [--scope user|project] [name@marketplace]
+omp plugin upgrade [--dry-run] [--scope user|project] [name@marketplace]
 omp plugin enable [--scope user|project] name@marketplace
 omp plugin disable [--scope user|project] name@marketplace
 omp plugin list
 
 ```
 
-TUI marketplace mutations (explicit commands and the selector) update disk state and invalidate discovery caches but do not refresh the active session. Run `/reload-plugins` to refresh task agents, skills, slash commands, and MCP servers; restart the session for newly installed non-MCP tools, hooks, or extension modules. ACP/RPC marketplace handlers refresh skills and slash commands automatically; ACP also refreshes task-agent discovery. Neither remote handler reconnects MCP servers or rebuilds every initialized capability set.
+TUI `/plugins enable` and `/plugins disable` refresh the active session's skills, slash commands, task agents, and MCP servers immediately; `--scope` selects a marketplace install when needed and npm/link toggles are global. Other TUI marketplace mutations (explicit commands and the selector) update disk state and invalidate discovery caches but do not refresh the active session. Run `/reload-plugins` after those mutations to refresh task agents, skills, slash commands, and MCP servers; restart the session for newly installed non-MCP tools, hooks, or extension modules. ACP/RPC marketplace handlers refresh skills and slash commands automatically; ACP also refreshes task-agent discovery. Neither remote handler reconnects MCP servers or rebuilds every initialized capability set.
 
-CLI `--dry-run` install validates the cached catalog, scope, existing install, and locally checkable source constraints without fetching plugin repositories or writing plugin state. Uninstall previews retain installed-scope ambiguity checks without removing anything. TUI/ACP/RPC slash commands do not accept `--dry-run`.
+CLI `--dry-run` install validates the cached catalog, scope, existing install, and locally checkable source constraints without fetching plugin repositories or writing plugin state. Uninstall previews retain installed-scope ambiguity checks without removing anything. `upgrade --dry-run` with no id lists each outdated plugin and scope as `from -> to` against the cached catalogs, the pairs a real `upgrade` reinstalls; `omp update --plugins --check` prints the same list. `upgrade name@marketplace --dry-run` lists every scope the real command reinstalls, as an upgrade, reinstall (same version) or downgrade, because naming a plugin always forces a reinstall of the catalog's current version. Neither installs anything. `upgrade` of an npm/git plugin, `marketplace add`, `remove` and `update`, `enable` and `disable` reject `--dry-run` with an error and change nothing. TUI/ACP/RPC slash commands do not accept `--dry-run`.
 
 ## Marketplace sources
 
@@ -101,36 +101,36 @@ A marketplace catalog lives at `.omp-plugin/marketplace.json` in the repository 
 
 ```json
 {
-  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "my-marketplace",
-  "owner": {
-    "name": "Your Name",
-    "email": "you@example.com"
-  },
-  "metadata": {
-    "description": "A collection of plugins",
-    "version": "1.0.0",
-    "pluginRoot": "plugins"
-  },
-  "plugins": [
-    {
-      "name": "my-plugin",
-      "description": "What this plugin does",
-      "source": "./my-plugin",
-      "category": "development",
-      "homepage": "https://github.com/you/my-plugin"
-    }
-  ]
+	"$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+	"name": "my-marketplace",
+	"owner": {
+		"name": "Your Name",
+		"email": "you@example.com"
+	},
+	"metadata": {
+		"description": "A collection of plugins",
+		"version": "1.0.0",
+		"pluginRoot": "plugins"
+	},
+	"plugins": [
+		{
+			"name": "my-plugin",
+			"description": "What this plugin does",
+			"source": "./my-plugin",
+			"category": "development",
+			"homepage": "https://github.com/you/my-plugin"
+		}
+	]
 }
 ```
 
 ### Required fields
 
-| Field        | Description                                                                                                      |
-| ------------ | ---------------------------------------------------------------------------------------------------------------- |
+| Field        | Description                                                                                                          |
+| ------------ | -------------------------------------------------------------------------------------------------------------------- |
 | `name`       | Marketplace name. ASCII letters, digits, hyphens, and dots. Must start and end with a letter or digit. Max 64 chars. |
-| `owner.name` | Marketplace owner name                                                                                           |
-| `plugins`    | Array of plugin entries                                                                                          |
+| `owner.name` | Marketplace owner name                                                                                               |
+| `plugins`    | Array of plugin entries                                                                                              |
 
 Top-level `metadata.description`, `metadata.version`, and `metadata.pluginRoot` are optional. When `metadata.pluginRoot` is set, it is prepended to relative plugin `source` paths.
 
@@ -232,7 +232,7 @@ Invalid catalog JSON or invalid required top-level fields reject the catalog. An
   marketplaces.json              # Registry of added marketplaces
   plugins/
     installed_plugins.json       # User-scoped marketplace plugins (version: 2)
-    omp-plugins.lock.json         # Runtime enable/feature state
+    omp-plugins.lock.json         # Runtime enable/feature state and plugin settings
     node_modules/<package>        # Symlink to the cached plugin
     cache/
       marketplaces/<name>/       # Cached marketplace clone/catalog
@@ -244,6 +244,8 @@ Invalid catalog JSON or invalid required top-level fields reject the catalog. An
     omp-plugins.lock.json         # Project runtime enable/feature state
     node_modules/<package>        # Symlink to the cached plugin
 ```
+
+The lockfile also holds plugin settings, including values a plugin marks `secret`, so it is written with owner-only permissions (`0600`).
 
 ## Naming rules
 

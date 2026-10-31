@@ -100,6 +100,16 @@ describe("classifyModel", () => {
 		}
 	});
 
+	test("K3.1 Pro retains Kimi K3 identity with its own revision", () => {
+		for (const [provider, model] of [
+			["", "k3.1-pro"],
+			["kimi-code", "k3.1-pro"],
+			["kimi-code", "k3.1-pro-highspeed"],
+		] as const) {
+			expect(classifyModel(provider, model)).toEqual({ class: "kimi", family: "k3", revision: "3.1.0" });
+		}
+	});
+
 	test("K3 identity does not absorb adjacent bare names", () => {
 		for (const model of [
 			"k30",
@@ -176,6 +186,17 @@ describe("classifyModel", () => {
 				revision: "4.6.0",
 			});
 		}
+	});
+
+	test("bare Meta-Llama wire ids classify as meta without a namespace segment", () => {
+		// SambaNova serves `Meta-Llama-*` with no `meta-llama/` prefix, which
+		// `bounded "llama"` never sees (prefix-anchored) and
+		// `namespace "meta-llama"` cannot match, so it used to land in class
+		// unknown and skip Meta cascade rules.
+		expect(classifyModel("sambanova", "Meta-Llama-3.3-70B-Instruct")).toEqual({
+			class: "meta",
+			family: "llama",
+		});
 	});
 });
 

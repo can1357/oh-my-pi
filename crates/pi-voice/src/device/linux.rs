@@ -4,7 +4,7 @@ use std::{
 	ffi::{CStr, c_char, c_int, c_long, c_uint, c_void},
 	ptr,
 	sync::{
-		Arc, Mutex, OnceLock,
+		Arc, LazyLock, Mutex, OnceLock,
 		atomic::{AtomicBool, Ordering},
 		mpsc,
 	},
@@ -71,14 +71,14 @@ struct PulseApi {
 	strerror:     PaStrerror,
 }
 
-static PULSE_API: OnceLock<Result<&'static PulseApi, String>> = OnceLock::new();
+static PULSE_API: LazyLock<Result<PulseApi, String>> = LazyLock::new(PulseApi::load);
 
 impl PulseApi {
 	fn get() -> Result<&'static Self, String> {
-		PULSE_API.get_or_init(Self::load).clone()
+		PULSE_API.as_ref().map_err(String::clone)
 	}
 
-	fn load() -> Result<&'static Self, String> {
+	fn load() -> Result<Self, String> {
 		let simple = open_library(c"libpulse-simple.so.0", libc::RTLD_NOW | libc::RTLD_GLOBAL)?;
 		let pulse = open_library(c"libpulse.so.0", libc::RTLD_NOW | libc::RTLD_GLOBAL)?;
 
@@ -107,7 +107,7 @@ impl PulseApi {
 		let strerror =
 			unsafe { std::mem::transmute::<*mut c_void, PaStrerror>(symbol(pulse, c"pa_strerror")?) };
 
-		Ok(Box::leak(Box::new(Self { simple_new, simple_free, simple_write, simple_read, strerror })))
+		Ok(Self { simple_new, simple_free, simple_write, simple_read, strerror })
 	}
 
 	fn error(&self, code: c_int) -> String {
@@ -139,14 +139,14 @@ struct AlsaApi {
 	strerror:       SndStrerror,
 }
 
-static ALSA_API: OnceLock<Result<&'static AlsaApi, String>> = OnceLock::new();
+static ALSA_API: LazyLock<Result<AlsaApi, String>> = LazyLock::new(AlsaApi::load);
 
 impl AlsaApi {
 	fn get() -> Result<&'static Self, String> {
-		ALSA_API.get_or_init(Self::load).clone()
+		ALSA_API.as_ref().map_err(String::clone)
 	}
 
-	fn load() -> Result<&'static Self, String> {
+	fn load() -> Result<Self, String> {
 		let library = open_library(c"libasound.so.2", libc::RTLD_NOW | libc::RTLD_GLOBAL)?;
 		// SAFETY: each symbol is resolved from the library defining this exact C
 		// API.
@@ -197,7 +197,7 @@ impl AlsaApi {
 			std::mem::transmute::<*mut c_void, SndStrerror>(symbol(library, c"snd_strerror")?)
 		};
 
-		Ok(Box::leak(Box::new(Self {
+		Ok(Self {
 			pcm_open,
 			pcm_set_params,
 			pcm_writei,
@@ -207,7 +207,7 @@ impl AlsaApi {
 			pcm_start,
 			pcm_close,
 			strerror,
-		})))
+		})
 	}
 
 	fn error(&self, code: c_int) -> String {

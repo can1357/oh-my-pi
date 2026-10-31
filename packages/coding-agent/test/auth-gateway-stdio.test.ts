@@ -3,9 +3,9 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { selectorCandidates } from "@oh-my-pi/pi-coding-agent/cli/auth-gateway-stdio";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 
-const fast = getBundledModel("google", "gemini-2.5-flash")!;
+const fast = getBundledModel("google", "gemini-3.5-flash")!;
 const mini = getBundledModel("openai", "gpt-4o-mini")!;
-const vertex = getBundledModel("google-vertex", "gemini-2.5-flash")!;
+const vertex = getBundledModel("google-vertex", "gemini-3.5-flash")!;
 const models = [fast, mini, vertex];
 const registry = { getAll: () => models, getAvailable: () => models };
 const key = (model: typeof fast) => `${model.provider}/${model.id}`;

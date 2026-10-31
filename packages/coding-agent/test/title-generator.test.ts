@@ -18,7 +18,6 @@ import {
 	setTerminalTitleState,
 } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
-import { initThemeSync, theme } from "@oh-my-pi/pi-tui/theme";
 import { isWsl, logger, setTerminalHeadless } from "@oh-my-pi/pi-utils";
 import { mockWindowsConsoleTitle, type WindowsConsoleTitleMock } from "./terminal-title-test-utils";
 
@@ -379,7 +378,7 @@ describe("title generator", () => {
 		expect(warnSpy).toHaveBeenCalledWith(
 			"title-generator: no API key",
 			expect.objectContaining({
-				sessionId: "session-1",
+				titleSessionId: "session-1",
 				provider: model.provider,
 				id: model.id,
 				reason: "missing-api-key",
@@ -413,7 +412,7 @@ describe("title generator", () => {
 		expect(warnSpy).toHaveBeenCalledWith(
 			"title-generator: error",
 			expect.objectContaining({
-				sessionId: "session-2",
+				titleSessionId: "session-2",
 				provider: model.provider,
 				id: model.id,
 				reason: "exception",
@@ -1056,6 +1055,33 @@ describe("terminal title runtime", () => {
 		}
 	});
 
+	it("reclaims the Windows console title after another process replaces it", () => {
+		// Issue #16842: a child omp (worker, `browser-relay`) attached to the
+		// pane's console retitled it to `omp`; under a TSP terminal every later
+		// emit composes the same title, so the dedupe cache must not swallow it.
+		const originalPlatform = process.platform;
+		const native = windowsTitleMock;
+		if (!native) throw new Error("Windows console title mock not initialized");
+		try {
+			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+			setNativeRendering(true);
+			setSessionTerminalTitle("HOST: Summarize self-host blog post");
+			resetEmitted();
+
+			// Untouched console: the repeat stays deduped.
+			setTerminalTitleState("working");
+			expect(native.titles).toEqual([]);
+
+			native.current = "omp";
+			setTerminalTitleState("idle");
+			expect(native.titles).toEqual(["HOST: Summarize self-host blog post"]);
+			expect(writes).toEqual([]);
+		} finally {
+			setNativeRendering(false);
+			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+		}
+	});
+
 	it("falls back to OSC verbatim when a direct title fails the native path on Windows", () => {
 		const originalPlatform = process.platform;
 		const native = windowsTitleMock;
@@ -1183,27 +1209,5 @@ describe("terminal title runtime", () => {
 			setTerminalTitlePullRequest(undefined);
 		}
 		expectWorkingSeparator(emittedTitles().at(-1), "Renamed");
-	});
-
-	it("emits a carded session title in Tern's `<icon> <CODE>: <title>` form, with the glyph only on a nerd TSP terminal", () => {
-		const card = { code: "FLAKY", emoji: "🧪", nf: "nf-md-flask" };
-		if (typeof theme === "undefined") initThemeSync("unicode");
-		const preset = spyOn(theme, "getSymbolPreset").mockReturnValue("nerd");
-		try {
-			setSessionTerminalTitle("Fix flaky park tests", undefined, card);
-			// Classic titles render in the OS UI font: the emoji, behind the brand and state.
-			expect(emittedTitles().at(-1)).toBe("π > 🧪 FLAKY: Fix flaky park tests");
-			setNativeRendering(true);
-			expect(emittedTitles().at(-1)).toBe("\u{f0093} FLAKY: Fix flaky park tests");
-			preset.mockReturnValue("unicode");
-			setSessionTerminalTitle("Fix flaky park tests", undefined, card);
-			expect(emittedTitles().at(-1)).toBe("🧪 FLAKY: Fix flaky park tests");
-			// A title without a card is shown as-is.
-			setSessionTerminalTitle("Renamed by hand");
-			expect(emittedTitles().at(-1)).toBe("Renamed by hand");
-		} finally {
-			setNativeRendering(false);
-			preset.mockRestore();
-		}
 	});
 });

@@ -1,7 +1,7 @@
 import { parseJsonWithRepair } from "@oh-my-pi/pi-utils";
 import type { Message, ToolCall } from "../types";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
-import { asRecord, mintToolCallId, partialSuffixOverlapAny } from "./coercion";
+import { asRecord, mintToolCallId, parseCompleteToolName, partialSuffixOverlapAny } from "./coercion";
 import dialectPrompt from "./qwen3.md" with { type: "text" };
 import { renderChatMlTranscript, renderToolResponseResults, stringifyJson } from "./rendering";
 import { TerminatorWait } from "./terminator-wait";
@@ -22,7 +22,6 @@ const THINK_CLOSE = "</think>";
 const TOOL_START_TAGS = [TOOL_OPEN] as const;
 const START_TAGS = [TOOL_OPEN, THINK_OPEN] as const;
 const THINK_CLOSE_TAGS = [THINK_CLOSE] as const;
-const COMPLETE_NAME = /^\s*\{\s*"name"\s*:\s*("(?:\\.|[^"\\])*")/;
 
 type State = "outside" | "thinking" | "tool";
 
@@ -167,15 +166,8 @@ export class Qwen3InbandScanner implements InbandScanner {
 	}
 
 	#tryStart(body: string, events: InbandScanEvent[]): void {
-		const nameMatch = COMPLETE_NAME.exec(body);
-		if (!nameMatch) return;
-		let name: unknown;
-		try {
-			name = JSON.parse(nameMatch[1]!);
-		} catch {
-			return;
-		}
-		if (typeof name !== "string" || name.length === 0) return;
+		const name = parseCompleteToolName(body);
+		if (!name) return;
 		this.#name = name;
 		this.#started = true;
 		events.push({ type: "toolStart", id: this.#id, name: this.#name });

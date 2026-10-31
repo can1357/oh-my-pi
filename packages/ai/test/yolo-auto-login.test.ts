@@ -34,7 +34,7 @@ describe("Yolo-Auto login wiring", () => {
 			}
 			fetchCalls.push({ url, init });
 			if (url === "https://yolo-auto.com/v1/models") {
-				return new Response(JSON.stringify({ data: [{ id: "deepseek-flash-v4" }] }), {
+				return new Response(JSON.stringify({ data: [{ id: "qwen3.8-27b" }] }), {
 					status: 200,
 					headers: { "Content-Type": "application/json" },
 				});
