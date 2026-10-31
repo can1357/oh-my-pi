@@ -8144,13 +8144,14 @@ export class AgentSession implements SettingsScope {
 	 *
 	 * @throws {AgentBusyError} while a turn runs.
 	 */
-	async resume(): Promise<void> {
+	async resume(options?: { onAccepted?: () => void }): Promise<void> {
 		const prompt = this.#recovery.prepareResume();
 		if (!prompt) {
 			await this.prompt(manualContinuePrompt, {
 				synthetic: true,
 				userInitiated: true,
 				expandPromptTemplates: false,
+				onAccepted: options?.onAccepted,
 			});
 			return;
 		}
@@ -8158,6 +8159,7 @@ export class AgentSession implements SettingsScope {
 		this.#todo.resetCycle();
 		this.#resetPromptMaintenanceState();
 		this.#scheduleAgentContinue({ source: "manual-continue", turnRecords: [prompt] });
+		options?.onAccepted?.();
 	}
 
 	/**

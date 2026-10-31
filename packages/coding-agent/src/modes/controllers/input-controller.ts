@@ -1779,8 +1779,7 @@ export class InputController {
 		this.ctx.editor.clearDraft(text);
 		try {
 			if (isContinueShortcut) {
-				await target.resume();
-				restoreOnAccepted?.();
+				await target.resume({ onAccepted: restoreOnAccepted });
 			} else {
 				const forwarded = await this.ctx.withLocalSubmission(
 					text,
