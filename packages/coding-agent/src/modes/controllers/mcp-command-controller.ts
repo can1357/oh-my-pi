@@ -1007,9 +1007,20 @@ export class MCPCommandController {
 		}
 	}
 
-	async #syncManagerConnection(name: string, config: MCPServerConfig): Promise<void> {
-		if (!this.ctx.mcpManager) return;
-		if (this.ctx.mcpManager.getConnectionStatus(name) !== "disconnected") return;
+	/**
+	 * Hand a just-tested server to the manager. Returns `false` when the seeding
+	 * connect of a lazy server left the session without a live connection, so
+	 * the caller can tell the user that its current tools did not load.
+	 */
+	async #syncManagerConnection(name: string, config: MCPServerConfig): Promise<boolean> {
+		if (!this.ctx.mcpManager) return true;
+		const status = this.ctx.mcpManager.getConnectionStatus(name);
+		// A connected server needs nothing from the test, and neither does an
+		// eager server that is still connecting. A lazy server is "connecting"
+		// only during an automatic reconnect (a deferred tool's first use, or a
+		// dropped transport). That attempt can still fail, so the seed below
+		// waits for it.
+		if (status === "connected" || (status === "connecting" && !config.lazy)) return true;
 		let managerConfig = config;
 		let managerSources: Record<string, SourceMeta> = {};
 		if (config.lazy) {
@@ -1028,7 +1039,11 @@ export class MCPCommandController {
 				if (source) managerSources = { [name]: source };
 			}
 		}
-		await this.ctx.mcpManager.connectServers({ [name]: managerConfig }, managerSources);
+		// An attempt that started in the meantime owns the server. `connectServers`
+		// would skip it, but it would still list the server in the startup barrier.
+		if (this.ctx.mcpManager.getConnectionStatus(name) === "disconnected") {
+			await this.ctx.mcpManager.connectServers({ [name]: managerConfig }, managerSources);
+		}
 		// A *lazy* server never connects through `connectServers`: with no
 		// cache it stays tool-less (dormant until `/mcp reconnect`), and with a
 		// cache it serves the LAST connect's catalog — which the test just
@@ -1036,6 +1051,7 @@ export class MCPCommandController {
 		// explicitly exercised this server, so spend one forced connect through
 		// the documented seeding path: it registers the live catalog and
 		// rewrites the cache for future startups.
+		let seeded = true;
 		if (managerConfig.lazy) {
 			try {
 				// `/mcp test` is an explicit user-driven retry, exactly like
@@ -1044,11 +1060,20 @@ export class MCPCommandController {
 				// successful test while this seeding call silently no-ops
 				// (`reconnectServer` returns `null` under an open breaker) and
 				// the server stays cache-less and tool-less.
-				await this.ctx.mcpManager.reconnectServer(name, { manual: true });
+				//
+				// `reconnectServer` also joins an attempt that is already in
+				// flight and returns that attempt's result. An automatic attempt
+				// can fail, or abort when a newer config supersedes it. Its
+				// failure is not the result of this seed, so start the seed's own
+				// attempt after it.
+				const joined = this.ctx.mcpManager.getConnectionStatus(name) === "connecting";
+				let connection = await this.ctx.mcpManager.reconnectServer(name, { manual: true });
+				if (!connection && joined) connection = await this.ctx.mcpManager.reconnectServer(name, { manual: true });
+				seeded = connection !== null;
 			} catch {
-				// The direct test connection succeeded but the manager-side seed
-				// failed; keep the test's own verdict and leave seeding to
-				// `/mcp reconnect`.
+				// The test connection worked but the seed failed. The caller
+				// says so, and `/mcp reconnect` can retry.
+				seeded = false;
 			}
 		}
 		// A lazy server keeps status "disconnected" by design even after
@@ -1062,6 +1087,7 @@ export class MCPCommandController {
 		) {
 			await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
 		}
+		return seeded;
 	}
 
 	async #handleWizardComplete(name: string, config: MCPServerConfig, scope: "user" | "project"): Promise<void> {
@@ -1468,9 +1494,11 @@ export class MCPCommandController {
 				const testConnection = connection;
 				connection = undefined;
 				const closing = disconnectServer(testConnection);
-				if (this.ctx.mcpManager?.getConnectionStatus(name) === "disconnected") {
-					// The manager is about to open its own connection (a lazy seed or
-					// an eager connect). Close this temporary one first: a server that
+				const managerStatus = this.ctx.mcpManager?.getConnectionStatus(name);
+				if (managerStatus === "disconnected" || (managerStatus === "connecting" && config.lazy)) {
+					// The manager is about to open its own connection (a lazy seed,
+					// which can follow an automatic attempt still in flight, or an
+					// eager connect). Close this temporary one first: a server that
 					// permits only one active client (or holds a singleton lock) would
 					// otherwise see it still open while that connect competes for the
 					// same slot, and every retry in its ladder can fail. Session
@@ -1486,7 +1514,16 @@ export class MCPCommandController {
 					void closing.catch(() => {});
 				}
 			}
-			await this.#syncManagerConnection(name, config);
+			if (!(await this.#syncManagerConnection(name, config))) {
+				lines.push(
+					theme.fg(
+						"warning",
+						`⚠ The test passed, but this session could not connect "${name}" to load its current tools.`,
+					),
+					`  Run /mcp reconnect ${name} to retry.`,
+					"",
+				);
+			}
 			this.#showMessage(lines.join("\n"));
 		} catch (error) {
 			if (abortController.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
