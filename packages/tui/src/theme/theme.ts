@@ -145,6 +145,7 @@ var themeWatcher: fs.FSWatcher | undefined;
 var themeReloadTimer: NodeJS.Timeout | undefined;
 var sigwinchHandler: (() => void) | undefined;
 var autoDetectedTheme: boolean = false;
+var composerTerminalForeground: boolean = false;
 var autoDarkTheme: string = "dark";
 var autoLightTheme: string = "light";
 var onThemeChangeCallback: ((event: ThemeChangeEvent) => void) | undefined;
@@ -383,6 +384,21 @@ export function setNativeSymbolPreset(preset: SymbolPreset | undefined): boolean
 	}
 	notifyThemeChange({ ephemeral: true });
 	return true;
+}
+
+/**
+ * Keep empty `text` tokens on the terminal default in transparent composers.
+ * Needed when one session is shown on terminals with different backgrounds,
+ * where any fixed fallback is unreadable on one of them.
+ */
+export function setComposerTerminalForeground(enabled: boolean): void {
+	composerTerminalForeground = enabled;
+}
+
+/** Style transparent composer text, honoring {@link setComposerTerminalForeground}. */
+export function composerTextColor(text: string): string {
+	if (composerTerminalForeground && theme.getFgAnsi("text") === "\x1b[39m") return theme.fg("text", text);
+	return theme.fgResolved("text", text);
 }
 
 /**
