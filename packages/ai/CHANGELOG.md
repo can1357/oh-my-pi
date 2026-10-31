@@ -12,6 +12,7 @@
 - Fixed a credential being blocked for every session for five minutes when the caller that needed its refresh was cancelled or refused. A refresh the caller left still records the provider's answer when it lands: a rate limit blocks the credential and a dead grant disables it, as for a caller that waited ([#17457](https://github.com/can1357/oh-my-pi/pull/17457) by [@sjawhar](https://github.com/sjawhar))
 - `AuthBrokerClient` and `AuthStorage`'s usage and saved-reset requests now read the global `fetch` per request instead of capturing it at construction ([#17457](https://github.com/can1357/oh-my-pi/pull/17457) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the Codex WebSocket's `onSseEvent` observer being told about a `response.create` or `response.steer` frame that was then not sent: it is now told once the frame is written, and only about frames that went out ([#17457](https://github.com/can1357/oh-my-pi/pull/17457) by [@sjawhar](https://github.com/sjawhar))
+- Fixed Codex conversation replay failing with an unknown `internal_chat_message_metadata_passthrough.content_token_count` parameter by omitting backend-internal response metadata from replayed input ([#17590](https://github.com/can1357/oh-my-pi/pull/17590) by [@briankeefe](https://github.com/briankeefe)).
 
 ## [18.14.2] - 2026-10-31
 
