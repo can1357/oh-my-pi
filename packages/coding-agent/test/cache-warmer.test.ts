@@ -6,6 +6,7 @@ import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { factoryModel } from "../../ai/test/helpers/factory-droid";
 import {
 	CacheWarmer,
+	type CacheRefreshOutcome,
 	type CacheWarmerDeps,
 	type CacheWarmingRefreshEnd,
 	type CacheWarmingRefreshStart,
@@ -600,6 +601,35 @@ describe("cache warmer lifecycle", () => {
 		await advance(SHORT_DELAY_MS);
 		expect(missed.warmer.status.reason).toBe("refresh missed the cache");
 		expect(missed.warmer.cacheEntry?.touchedAt).toBe(missedTouch);
+	});
+
+	test("counts a refresh from when the provider sent it, past a wait for an in-flight slot", async () => {
+		const slot = Promise.withResolvers<void>();
+		const h = harness({
+			stream: async (model, _context, options) => {
+				await slot.promise;
+				await options?.onPayload?.({}, model);
+				return scriptedStream(
+					{ kind: "generate", usage: makeUsage({ cacheRead: PROMPT_TOKENS }) },
+					{ options, consumed: [], cutOff: false },
+				);
+			},
+		});
+		const refreshes: Array<CacheRefreshOutcome | undefined> = [];
+		h.warmer.onWarmed = (_message, _extensionOverride, refresh) => refreshes.push(refresh);
+		const payloads: unknown[] = [];
+		start(h, { onPayload: payload => void payloads.push(payload) });
+		h.warmer.onResponse(makeMessage(makeUsage({ cacheWrite: 500 })));
+		await advance(SHORT_DELAY_MS);
+		await advance(20_000);
+		const sentAt = Date.now();
+		slot.resolve();
+		await drain();
+
+		expect(refreshes).toEqual([{ sentAt, hit: true }]);
+		expect(h.warmer.cacheEntry?.touchedAt).toBe(sentAt);
+		// The request's own payload hook still runs.
+		expect(payloads).toEqual([{}]);
 	});
 
 	test("extensions can stop a refresh and force one past the threshold", async () => {

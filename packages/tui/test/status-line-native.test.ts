@@ -153,10 +153,11 @@ const NO_USAGE = {
 	cost: 0,
 };
 
-/** A status line over a session that reports `cacheStatus(nowMs)` as its prompt cache. */
+/** A status line over a session that reports `cacheStatus(nowMs)` as its prompt cache and `contextTokens` as its context size. */
 function cacheStatusLine(
 	settings: StatusLineSettings,
-	cacheStatus: (nowMs: number) => PromptCacheStatus | undefined,
+	cacheStatus: (nowMs: number, nextTokens?: number) => PromptCacheStatus | undefined,
+	contextTokens?: number,
 ): StatusLineComponent {
 	const session: StatusLineSession = {
 		state: { messages: [] },
@@ -169,7 +170,8 @@ function cacheStatusLine(
 			getUsageStatistics: () => NO_USAGE,
 		},
 		modelRegistry: { isUsingOAuth: () => false },
-		getContextUsage: () => undefined,
+		getContextUsage: () =>
+			contextTokens === undefined ? undefined : { tokens: contextTokens, contextWindow: 1_000_000, percent: 32 },
 		autoResolvedThinkingLevel: () => undefined,
 		isFastModeActive: () => false,
 		getAsyncJobSnapshot: () => null,
@@ -271,6 +273,13 @@ describe("native prompt-cache chip", () => {
 			() => WARM,
 		);
 		expect(cacheChip(line)).toBeUndefined();
+	});
+
+	it("hands the session the context size the status line already counted", () => {
+		setNativeRendering(true);
+		const cacheStatus = vi.fn((_nowMs: number, _nextTokens?: number) => WARM);
+		cacheChip(cacheStatusLine(CACHE_SETTINGS, cacheStatus, 320_000));
+		expect(cacheStatus).toHaveBeenCalledWith(expect.any(Number), 320_000);
 	});
 });
 

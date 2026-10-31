@@ -303,6 +303,40 @@ describe("AgentSession prompt-cache status", () => {
 		expect(session.getPromptCacheStatus(Date.now())).toBeUndefined();
 	});
 
+	it("shows nothing cached after /clear, whose new transcript reads no earlier prefix", async () => {
+		session.setCacheWarmingMode("off");
+		session.agent.appendMessage({ role: "user", content: "question", timestamp: Date.now() });
+		const sentAt = send();
+		session.sessionManager.appendMessage(reply(model, usage({ cacheWrite: 50_000 })));
+		expect(session.getPromptCacheStatus(sentAt + 1)).toMatchObject({ state: "warm" });
+
+		expect(await session.resetSessionContext()).toBeDefined();
+		expect(session.getPromptCacheStatus(sentAt + 1)).toBeUndefined();
+	});
+
+	it("takes the next request's size from a caller that already counted it", () => {
+		session.setCacheWarmingMode("off");
+		send();
+		const count = vi.spyOn(session, "getContextUsage");
+		try {
+			expect(session.getPromptCacheStatus(Date.now(), 70_000)).toMatchObject({ state: "warm", nextTokens: 70_000 });
+			expect(count).not.toHaveBeenCalled();
+		} finally {
+			count.mockRestore();
+		}
+	});
+
+	it("counts a request's lifetime from when the provider sent it, not from a wait for a provider slot", () => {
+		session.setCacheWarmingMode("off");
+		const dispatched = session.startCacheWarming(model, { messages: [] }, { cacheRetention: "short" });
+		vi.advanceTimersByTime(30_000);
+		const sentAt = Date.now();
+		dispatched();
+		warmer.onResponse(reply(model, usage({ cacheWrite: 50_000 })));
+
+		expect(session.getPromptCacheStatus(sentAt)).toMatchObject({ state: "warm", touchedAt: sentAt });
+	});
+
 	describe("for a transcript this process has not sent (a reopened session)", () => {
 		beforeEach(async () => {
 			model = getBundledModel("anthropic", "claude-sonnet-4-5") as Model;
