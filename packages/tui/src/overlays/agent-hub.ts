@@ -124,11 +124,43 @@ const VIEW_TABS = [
 	{ id: "roster", label: "Flat" },
 	{ id: "tree", label: "By parent" },
 ] as const satisfies ReadonlyArray<{ id: HubViewMode; label: string }>;
+/**
+ * The section keys every footer advertises: `1` opens the roster, `2` the activity log.
+ * Both views name the same pair, so a section hint never reads as a dead key in one view.
+ */
+const SECTION_FOOTER_HINTS = "1:agents  2:activity";
+/** The roster key alone, for a footer too narrow to carry the whole pair. */
+const ROSTER_FOOTER_HINT = "1:agents";
+/**
+ * The same pair as native keycaps: `1` opens the roster, `2` the activity log.
+ *
+ * These reach the hint rows of the generic (non-picker) native description only.
+ * A picker-capable client describes the hub as a `picker` sheet, which names the
+ * sections through its own tab bar (`PICKER_TABS`) and has no hint row.
+ */
+const SECTION_HINTS: readonly NativeHint[] = [
+	{ keys: ["1"], label: "agents" },
+	{ keys: ["2"], label: "activity" },
+];
+/**
+ * The first footer candidate that fits `available` columns, or the last one when
+ * even that does not fit.
+ *
+ * A footer's width depends on the symbol preset: the ascii preset spells `Enter`,
+ * `Space` and `Esc` out, so the same hints are far wider than the unicode keycaps.
+ * The variant is therefore chosen on the rendered text rather than on a fixed
+ * column count, so a footer never loses its tail to truncation.
+ */
+function fitFooter(candidates: readonly string[], available: number): string {
+	const fitting = candidates.find(candidate => visibleWidth(candidate) <= available);
+	return fitting ?? candidates[candidates.length - 1]!;
+}
 const AGENT_HINTS: Readonly<Record<HubViewMode, readonly NativeHint[]>> = {
 	roster: agentHints("by parent"),
 	tree: agentHints("flat"),
 };
 const ACTIVITY_HINTS: readonly NativeHint[] = [
+	...SECTION_HINTS,
 	{ keys: ["j", "k"], label: "select" },
 	{ keys: ["enter"], label: "transcript" },
 	{ keys: ["space"], label: "follow" },
@@ -179,6 +211,7 @@ const ACTIVITY_KIND_ICON: Readonly<Record<AgentActivityKind, string>> = {
 
 function agentHints(nextView: string): readonly NativeHint[] {
 	return [
+		...SECTION_HINTS,
 		{ keys: ["j", "k"], label: "select" },
 		{ keys: ["enter"], label: "open" },
 		{ keys: ["t"], label: nextView },
@@ -1758,18 +1791,18 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		}
 		while (body.length < contentRows) body.push("");
 
+		// The roster footer names both sections, so this one does too: a section key that is
+		// advertised in one view and missing in the other reads as a dead key. The pair only
+		// stays while the rendered footer still fits, so no hint is cut off at the tail.
+		const activityHints = `${formatKeyHints(["j", "k"])}:select  ${formatKeyHint("enter")}:transcript  ${formatKeyHint("space")}:follow  ${formatKeyHint("f")}:filter  ${formatKeyHint("s")}:scope  /:search  ${formatKeyHint("escape")}:close`;
+		const footer = fitFooter(
+			[`${SECTION_FOOTER_HINTS}  ${activityHints}`, `${ROSTER_FOOTER_HINT}  ${activityHints}`],
+			innerWidth,
+		);
 		const lines = [topBorder(width, "Agent Hub")];
 		for (const line of body.slice(0, contentRows)) lines.push(row(line, width));
 		lines.push(divider(width));
-		lines.push(
-			row(
-				theme.fg(
-					"dim",
-					`1:agents  ${formatKeyHints(["j", "k"])}:select  ${formatKeyHint("enter")}:transcript  ${formatKeyHint("space")}:follow  ${formatKeyHint("f")}:filter  ${formatKeyHint("s")}:scope  /:search  ${formatKeyHint("escape")}:close`,
-				),
-				width,
-			),
-		);
+		lines.push(row(theme.fg("dim", footer), width));
 		lines.push(bottomBorder(width));
 		return lines;
 	}
@@ -1833,20 +1866,30 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 				? `/${this.#agentFilter.getValue()}  ·  `
 				: "";
 		if (showingNarrowDetails) {
+			const detailsHints = `${formatKeyHint("tab")}:roster  ${formatKeyHints(["pageUp", "pageDown"])}:scroll  ${formatKeyHint("enter")}:open  ${formatKeyHint("t")}:${nextView}  ${formatKeyHint("escape")}:roster`;
 			return theme.fg(
 				"dim",
-				`${filter}1:agents  2:activity  ${formatKeyHint("tab")}:roster  ${formatKeyHints(["pageUp", "pageDown"])}:scroll  ${formatKeyHint("enter")}:open  ${formatKeyHint("t")}:${nextView}  ${formatKeyHint("escape")}:roster`,
+				fitFooter(
+					[`${filter}${SECTION_FOOTER_HINTS}  ${detailsHints}`, `${filter}${detailsHints}`],
+					availableWidth,
+				),
 			);
 		}
-		if (availableWidth < 96) {
-			return theme.fg(
-				"dim",
-				`${filter}${formatKeyHints(["j", "k"])}:select  ${formatKeyHint("enter")}:open  ${formatKeyHint("t")}:${nextView}  ${formatKeyHint("tab")}:details  ${formatKeyHints(["r", "x"])}:manage  ${formatKeyHint("escape")}:close`,
-			);
-		}
+		const rosterHints = `${formatKeyHints(["j", "k"])}/wheel:select  ${formatKeyHints(["pageUp", "pageDown"])}:details  ${formatKeyHint("enter")}/click:open  ${formatKeyHint("t")}:${nextView}  ${formatKeyHint("r")}:revive  ${formatKeyHint("x")}:kill  ${formatKeyHint("escape")}:close`;
+		const plainHints = `${formatKeyHints(["j", "k"])}:select  ${formatKeyHint("enter")}:open  ${formatKeyHint("t")}:${nextView}  ${formatKeyHint("tab")}:details  ${formatKeyHints(["r", "x"])}:manage  ${formatKeyHint("escape")}:close`;
+		// The section keys stay as long as the footer has room for them: the wide footer
+		// names them next to the full hint set, the short one next to the narrow hint set,
+		// and only a footer too narrow for both drops them.
 		return theme.fg(
 			"dim",
-			`${filter}1:agents  2:activity  ${formatKeyHints(["j", "k"])}/wheel:select  ${formatKeyHints(["pageUp", "pageDown"])}:details  ${formatKeyHint("enter")}/click:open  ${formatKeyHint("t")}:${nextView}  ${formatKeyHint("r")}:revive  ${formatKeyHint("x")}:kill  ${formatKeyHint("escape")}:close`,
+			fitFooter(
+				[
+					`${filter}${SECTION_FOOTER_HINTS}  ${rosterHints}`,
+					`${filter}${SECTION_FOOTER_HINTS}  ${plainHints}`,
+					`${filter}${plainHints}`,
+				],
+				availableWidth,
+			),
 		);
 	}
 

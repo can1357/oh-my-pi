@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed the Agent Hub footer losing its tail to truncation when the symbol preset spelled the key hints out; the footer variant is now chosen on the rendered width ([#12432](https://github.com/can1357/oh-my-pi/issues/12432), [#16469](https://github.com/can1357/oh-my-pi/pull/16469) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.14.1] - 2026-10-31
 
