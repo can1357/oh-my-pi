@@ -60,6 +60,40 @@ export function parseDataUri(content: string): [mimeType: string, raw: Buffer] |
 
 	return [mimeType, Buffer.from(payload, "base64")];
 }
+function decodePercentEncoded(raw: string): Buffer {
+	try {
+		return Buffer.from(decodeURIComponent(raw), "utf-8");
+	} catch {
+		const binary = raw.replace(/%([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(Number.parseInt(hex, 16)));
+		return Buffer.from(binary, "latin1");
+	}
+}
+
+function extractCharset(params: string | undefined): string | null {
+	if (!params) return null;
+	const match = /;charset=([^;,]+)/i.exec(params);
+	return match?.[1]?.trim().toLowerCase() ?? null;
+}
+
+function decodeWithCharset(rawBytes: Uint8Array | Buffer, charset: string | null): string {
+	if (charset === "iso-8859-1" || charset === "latin1") {
+		return Buffer.isBuffer(rawBytes) ? rawBytes.toString("latin1") : Buffer.from(rawBytes).toString("latin1");
+	}
+	if (charset === "utf-16le" || charset === "utf16le") {
+		return Buffer.isBuffer(rawBytes) ? rawBytes.toString("utf16le") : Buffer.from(rawBytes).toString("utf16le");
+	}
+	return new TextDecoder("utf-8", { fatal: false }).decode(rawBytes);
+}
+
+function encodeWithCharset(text: string, charset: string | null): Buffer {
+	if (charset === "iso-8859-1" || charset === "latin1") {
+		return Buffer.from(text, "latin1");
+	}
+	if (charset === "utf-16le" || charset === "utf16le") {
+		return Buffer.from(text, "utf16le");
+	}
+	return Buffer.from(text, "utf-8");
+}
 
 export function shannonEntropy(text: string): number {
 	if (text.length === 0) return 0.0;
@@ -566,9 +600,43 @@ export function redactMemorySecrets(input: string): string {
 
 const TEXT_FIELDS = ["content", "extractText", "extract_text", "embedText", "embed_text", "source"] as const;
 
-function sanitizeAuxiliaryString(input: string): string {
+export function sanitizeTextField(input: string): string {
 	const stripped = stripInjectedMemoryTags(input);
-	return redactMemorySecrets(stripped.content);
+	const text = stripped.content;
+	const dataUriMatch = DATA_URI_RE.exec(text);
+	if (dataUriMatch?.groups !== undefined) {
+		const rawMime = dataUriMatch.groups.mime;
+		if (rawMime === undefined || VALID_MIME_RE.test(rawMime)) {
+			const mimeType = rawMime ?? "text/plain";
+			const params = dataUriMatch.groups.params;
+			const charset = extractCharset(params);
+			const isBase64 = dataUriMatch.groups.base64 !== undefined;
+			const rawPayload = dataUriMatch.groups.data ?? "";
+			let payloadBytes: Buffer | null = null;
+			if (isBase64) {
+				if (isValidBase64(rawPayload)) {
+					payloadBytes = Buffer.from(rawPayload, "base64");
+				}
+			} else {
+				payloadBytes = decodePercentEncoded(rawPayload);
+			}
+			if (payloadBytes !== null && (rawMime === undefined || isTextualMime(mimeType, payloadBytes))) {
+				let decoded = decodeWithCharset(payloadBytes, charset);
+				const tagRes = stripInjectedMemoryTags(decoded);
+				if (tagRes.stripped) decoded = tagRes.content;
+				const credRes = scrubLiveCredentials(decoded);
+				if (credRes.matchedTypes.length > 0) decoded = credRes.content;
+				if (tagRes.stripped || credRes.matchedTypes.length > 0) {
+					return decoded;
+				}
+			}
+		}
+	}
+	return redactMemorySecrets(text);
+}
+
+function sanitizeAuxiliaryString(input: string): string {
+	return sanitizeTextField(input);
 }
 
 function redactNested(value: unknown, stripTags = false): unknown {
@@ -751,52 +819,102 @@ function isTextualMime(mimeType: string, rawBytes?: Uint8Array): boolean {
  *    (after scrubbing textual data URIs and oversized text payloads so secrets are never written to blobs).
  */
 export function sanitizeContent(content: string): [sanitizedContent: string, meta: SanitizeMetadata] {
-	if (isDataUri(content)) {
-		const parsed = parseDataUri(content);
-		if (parsed !== null) {
-			const [mimeType, rawBytes] = parsed;
-			let bytesToStore: Buffer = rawBytes;
-			const dataMeta: SanitizeMetadata = {
-				original_size: rawBytes.length,
-				mime: mimeType,
-				extraction_reason: "data_uri",
-			};
-			const omittedMime = DATA_URI_RE.exec(content)?.groups?.mime === undefined;
-			if (omittedMime || isTextualMime(mimeType, rawBytes)) {
-				let decoded = new TextDecoder("utf-8", { fatal: false }).decode(rawBytes);
-				const tagRes = stripInjectedMemoryTags(decoded);
-				if (tagRes.stripped) {
-					decoded = tagRes.content;
-					dataMeta.stripped_tags = true;
+	const originalByteSize = Buffer.byteLength(content, "utf8");
+	let workingContent = content;
+	let tagsWereStripped = false;
+	let isMalformedMimeTag = false;
+	const headerEnd = content.indexOf(",");
+	if (content.startsWith("data:") && headerEnd !== -1) {
+		const origHeader = content.slice(0, headerEnd);
+		if (origHeader.includes("<") && origHeader.includes(">")) {
+			const strippedHeader = stripInjectedMemoryTags(origHeader).content;
+			// If the header had tags and stripping them resulted in data: or data:;base64 (i.e. tag was the whole MIME)
+			if (/^data:(?:;[-\w.+]+=[^;,]*)*(?:;base64)?$/i.test(strippedHeader)) {
+				isMalformedMimeTag = true;
+			}
+		}
+	}
+
+	const initialTagRes = stripInjectedMemoryTags(workingContent);
+	if (initialTagRes.stripped) {
+		workingContent = initialTagRes.content;
+		tagsWereStripped = true;
+	}
+
+	if (isDataUri(workingContent) && !isMalformedMimeTag) {
+		const match = DATA_URI_RE.exec(workingContent);
+		if (match?.groups !== undefined) {
+			const rawMime = match.groups.mime;
+			if (rawMime === undefined || VALID_MIME_RE.test(rawMime)) {
+				const mimeType = rawMime ?? (match.groups.base64 !== undefined ? "application/octet-stream" : "text/plain");
+				const params = match.groups.params;
+				const charset = extractCharset(params);
+				const rawPayload = match.groups.data ?? "";
+
+				let rawBytes: Buffer | null = null;
+				if (match.groups.base64 !== undefined) {
+					if (isValidBase64(rawPayload)) {
+						rawBytes = Buffer.from(rawPayload, "base64");
+					}
+				} else {
+					rawBytes = decodePercentEncoded(rawPayload);
 				}
-				const credRes = scrubLiveCredentials(decoded);
-				if (credRes.matchedTypes.length > 0) {
-					decoded = credRes.content;
-					dataMeta.redacted_secrets = credRes.matchedTypes;
-				}
-				if (tagRes.stripped || credRes.matchedTypes.length > 0) {
-					bytesToStore = Buffer.from(decoded, "utf8");
+
+				if (rawBytes !== null) {
+					let bytesToStore: Buffer = rawBytes;
+					let originalPayloadSize = rawBytes.length;
+					const omittedMime = rawMime === undefined;
+					const isTextual = omittedMime || isTextualMime(mimeType, rawBytes);
+					if (isTextual) {
+						const decoded = decodeWithCharset(rawBytes, charset);
+						originalPayloadSize = Buffer.byteLength(decoded, "utf8");
+					}
+					const dataMeta: SanitizeMetadata = {
+						original_size: originalPayloadSize,
+						mime: mimeType,
+						extraction_reason: "data_uri",
+					};
+					if (tagsWereStripped) {
+						dataMeta.stripped_tags = true;
+					}
+					if (isTextual) {
+						let decoded = decodeWithCharset(rawBytes, charset);
+						const tagRes = stripInjectedMemoryTags(decoded);
+						if (tagRes.stripped) {
+							decoded = tagRes.content;
+							dataMeta.stripped_tags = true;
+						}
+						const credRes = scrubLiveCredentials(decoded);
+						if (credRes.matchedTypes.length > 0) {
+							decoded = credRes.content;
+							dataMeta.redacted_secrets = credRes.matchedTypes;
+						}
+						if (tagRes.stripped || credRes.matchedTypes.length > 0) {
+							bytesToStore = encodeWithCharset(decoded, charset);
+						}
+					}
+					const sha256 = storeBlob(bytesToStore);
+					const blobRef = `blob://sha256/${sha256}`;
+					dataMeta.blob_ref = blobRef;
+					return [
+						`[Binary content extracted: ${mimeType}, ${bytesToStore.length.toLocaleString("en-US")} bytes → ${blobRef}]`,
+						dataMeta,
+					];
 				}
 			}
-			const sha256 = storeBlob(bytesToStore);
-			const blobRef = `blob://sha256/${sha256}`;
-			dataMeta.blob_ref = blobRef;
-			return [
-				`[Binary content extracted: ${mimeType}, ${bytesToStore.length.toLocaleString("en-US")} bytes → ${blobRef}]`,
-				dataMeta,
-			];
 		}
 	}
 
 	const meta: SanitizeMetadata = {};
-	const originalByteSize = Buffer.byteLength(content, "utf8");
-	let text = content;
+	if (tagsWereStripped) {
+		meta.stripped_tags = true;
+	}
+	let text = workingContent;
 	const tagResult = stripInjectedMemoryTags(text);
 	if (tagResult.stripped) {
 		text = tagResult.content;
 		meta.stripped_tags = true;
 	}
-
 	const credResult = scrubLiveCredentials(text);
 	if (credResult.matchedTypes.length > 0) {
 		text = credResult.content;

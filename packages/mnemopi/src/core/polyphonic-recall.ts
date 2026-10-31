@@ -4,6 +4,7 @@ import { type Env, polyphonicRecallEnabled } from "../config";
 import { closeQuietly, type DatabasePath, openDatabase } from "../db";
 import { backfillConsolidatedFacts, ensureVeracityConsolidator } from "./beam/consolidate";
 import type { BeamMemoryState, JsonValue, Metadata, RecallResult, RecallTierLabel } from "./beam/types";
+import { sanitizeTextField } from "./content-sanitizer";
 import { EpisodicGraph, extractProperNouns } from "./episodic-graph";
 import { STOP_WORDS } from "./synonyms";
 import { VeracityConsolidator } from "./veracity-consolidation";
@@ -658,6 +659,8 @@ export class PolyphonicRecallEngine {
 		if (row === null) return null;
 		return {
 			...row,
+			content: sanitizeTextField(row.content),
+			source: row.source ? sanitizeTextField(row.source) : row.source,
 			metadata: { ...parseMetadata(row.metadata_json), polyphonic: candidate.metadata },
 			recall_count: row.recall_count ?? undefined,
 			scope: row.scope ?? undefined,

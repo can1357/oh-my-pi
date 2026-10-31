@@ -21,6 +21,7 @@ import { isQueryCacheEnabled, QueryCache } from "../query-cache";
 import { adjustWeights, classifyIntent } from "../query-intent";
 import { getSynonyms, STOP_WORDS as QUERY_STOP_WORDS } from "../synonyms";
 import { extractTemporal } from "../temporal-parser";
+import { sanitizeTextField } from "../content-sanitizer";
 import { cosineSimilarity } from "../vector-math";
 import type { BeamMemoryState, RecallEnhancedOptions, RecallOptions, RecallResult } from "./types";
 
@@ -984,7 +985,12 @@ export async function recall(
 			finalResults = finalResults.slice(0, topK);
 		}
 		if (temporalOptions.updateRecallCounts !== false) updateRecallCounts(beam, finalResults, temporalOptions);
-		return finalResults;
+		return finalResults.map(res => ({
+			...res,
+			content: sanitizeTextField(res.content),
+			source: typeof res.source === "string" ? sanitizeTextField(res.source) : res.source,
+			context: typeof res.context === "string" ? sanitizeTextField(res.context) : res.context,
+		}));
 	});
 }
 
@@ -1394,13 +1400,16 @@ export function factRecall(beam: BeamMemoryState, query: string, topK = 30): Fac
 			const queryGroups = factExpandedTokenGroups(query, searchable);
 			const lexical = lexicalGroupRelevance(queryGroups, searchable);
 			const rank = ranks.get(asNumber(row.rowid)) ?? 0;
+			const cleanContent = sanitizeTextField(content);
+			const cleanSubject = sanitizeTextField(subject);
+			const cleanPredicate = sanitizeTextField(predicate);
 			const result: FactRecallResult = {
 				id: asString(row.fact_id),
-				content,
+				content: cleanContent,
 				score: round4(lexical * (0.7 + confidence * 0.2 + rank * 0.1)),
 				fact_id: asString(row.fact_id),
-				subject,
-				predicate,
+				subject: cleanSubject,
+				predicate: cleanPredicate,
 				timestamp: asNullableString(row.timestamp),
 				tier_label: "fact",
 				tier: "fact",

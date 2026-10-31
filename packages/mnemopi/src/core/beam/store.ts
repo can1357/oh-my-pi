@@ -8,6 +8,7 @@ import {
 	redactMemoryTextFields,
 	sanitizeContent,
 	sanitizeMetadataRecord,
+	sanitizeTextField,
 } from "../content-sanitizer";
 import { currentEmbeddingModel, embeddingsDisabled } from "../embeddings";
 import { EpisodicGraph } from "../episodic-graph";
@@ -97,7 +98,8 @@ function sqlBinding(value: unknown, fallback: SQLQueryBindings): SQLQueryBinding
 }
 
 function embeddingText(content: string, options: { embedText?: string; embed_text?: string }): string {
-	return options.embedText ?? options.embed_text ?? content;
+	const override = options.embedText ?? options.embed_text;
+	return override !== undefined ? sanitizeTextField(override) : content;
 }
 
 function storedEmbeddingText(content: string, embedText: string): string | null {
@@ -532,7 +534,8 @@ export function remember(beam: BeamMemoryState, rawContent: string, rawOptions: 
 	// `extractText` lets a caller decouple "what gets stored" from "what facts are
 	// mined". coding-agent retains full multi-author transcripts but wants
 	// fact/entity heuristics to read only the user-authored turns (issue #3372).
-	const extractionSource = options.extractText ?? options.extract_text ?? content;
+	const rawExtractionSource = options.extractText ?? options.extract_text;
+	const extractionSource = rawExtractionSource !== undefined ? sanitizeTextField(rawExtractionSource) : content;
 	proactiveLinkIfEnabled(
 		beam,
 		memoryId,

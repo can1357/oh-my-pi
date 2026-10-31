@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { sanitizeTextField } from "./content-sanitizer";
 import { closeQuietly, type DatabasePath, openDatabase, transaction } from "../db";
 
 export interface Gist {
@@ -345,12 +346,15 @@ export class EpisodicGraph {
 		};
 	}
 	extractFacts(content: string, memoryId: string): Fact[] {
+		const sanitized = sanitizeTextField(content);
 		const bounded =
-			content.length > EXTRACT_FACTS_MAX_CONTENT_LEN ? content.slice(0, EXTRACT_FACTS_MAX_CONTENT_LEN) : content;
+			sanitized.length > EXTRACT_FACTS_MAX_CONTENT_LEN
+				? sanitized.slice(0, EXTRACT_FACTS_MAX_CONTENT_LEN)
+				: sanitized;
 		const facts: Fact[] = [];
 		const pushFact = (subject: string, predicate: string, object: string, confidence: number): void => {
-			const cleanSubject = subject.trim();
-			const cleanObject = object.trim();
+			const cleanSubject = sanitizeTextField(subject.trim());
+			const cleanObject = sanitizeTextField(object.trim());
 			if (cleanSubject.length <= 2 || cleanObject.length <= 2 || facts.length >= MAX_FACTS_PER_MEMORY) return;
 			facts.push({
 				id: `fact_${memoryId}_${facts.length}`,
@@ -403,11 +407,14 @@ export class EpisodicGraph {
 		return row === null ? null : rowToGist(row);
 	}
 	storeFact(fact: Fact, memoryId: string, sessionId = "default"): void {
+		const cleanSubject = sanitizeTextField(fact.subject);
+		const cleanPredicate = sanitizeTextField(fact.predicate);
+		const cleanObject = sanitizeTextField(fact.object);
 		this.db.run(
 			`INSERT OR REPLACE INTO facts
 				(fact_id, session_id, subject, predicate, object, timestamp, source_msg_id, confidence)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			[fact.id, sessionId, fact.subject, fact.predicate, fact.object, fact.timestamp, memoryId, fact.confidence],
+			[fact.id, sessionId, cleanSubject, cleanPredicate, cleanObject, fact.timestamp, memoryId, fact.confidence],
 		);
 	}
 	getFact(id: string): Fact | null {
