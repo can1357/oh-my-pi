@@ -57,26 +57,39 @@ export interface ExecutorBackendResult {
 	displayOutputs: EvalDisplayOutput[];
 }
 
+/** Outcome of {@link ExecutorBackend.checkAvailability}. */
+export interface BackendAvailability {
+	ok: boolean;
+	/** Why the backend cannot run (e.g. which interpreters failed to start); surfaced in the eval error. */
+	reason?: string;
+}
+
 /** Pluggable language backend for the eval tool. */
 export interface ExecutorBackend {
 	readonly id: EvalLanguage;
 	readonly label: string;
 	/** Source language identifier passed to the syntax highlighter (e.g. "python", "javascript"). */
 	readonly highlightLang: string;
-	/** Cheap availability check. Used by fallback resolution and bounded by the caller's probe options. */
-	isAvailable(session: ToolSession, opts?: BackendProbeOptions): Promise<boolean>;
+	/** Cheap availability check. Used by backend resolution and bounded by the caller's probe options. */
+	checkAvailability(session: ToolSession, opts?: BackendProbeOptions): Promise<BackendAvailability>;
 	/** Execute one cell. Caller invokes once per cell and aggregates results. */
 	execute(code: string, opts: ExecutorBackendExecOptions): Promise<ExecutorBackendResult>;
 }
 
 /**
  * Resolve the on-disk roots that the eval helpers substitute for internal-URL
- * schemes (currently `local://`) from {@link contextLocalProtocolOptions} resolved
- * like the local:// handler does — the exact mapping `read local://…` uses — so an
- * eval `write("local://x")` and a later `read local://x` agree on the location.
- * Empty when no `local://` root resolves (read would fail the same way).
+ * schemes from {@link contextLocalProtocolOptions}, resolved the way the
+ * protocol handlers do, so an eval `write("local://x")` and a later
+ * `read local://x` agree on the location. `local://` maps to its root;
+ * `artifact://` maps to the session's artifacts dir, the dir `read artifact://<id>`
+ * searches first, so `read("artifact://<id>")` returns the artifact's text.
+ * A scheme is absent when its root does not resolve (read would fail the same way).
  */
 export function resolveEvalUrlRoots(session: ToolSession): Record<string, string> {
-	const options = LocalProtocolHandler.resolveOptions({ localProtocolOptions: contextLocalProtocolOptions(session) });
-	return options ? buildEvalUrlRoots(options) : {};
+	const protocolOptions = contextLocalProtocolOptions(session);
+	const options = LocalProtocolHandler.resolveOptions({ localProtocolOptions: protocolOptions });
+	const roots = options ? buildEvalUrlRoots(options) : {};
+	const artifactsDir = protocolOptions?.getArtifactsDir?.();
+	if (artifactsDir) roots.artifact = artifactsDir;
+	return roots;
 }

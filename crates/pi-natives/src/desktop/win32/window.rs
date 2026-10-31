@@ -2,7 +2,6 @@
 //! Automation delivery.
 
 use std::{
-	mem::size_of,
 	ptr::{null_mut, with_exposed_provenance_mut},
 	time::{Duration, Instant},
 };
@@ -480,7 +479,7 @@ pub(super) fn ensure_pattern_safe(root: HWND) -> CoreResult<()> {
 	{
 		return Err(DesktopError::background_unavailable(format!(
 			"window {} ({}) can take foreground during UI Automation actions; no action was sent; \
-			 use coordinate input with takeover:true or explicitly focus the target first",
+			 use coordinate input instead",
 			root.expose_provenance(),
 			class_name(root),
 		)));

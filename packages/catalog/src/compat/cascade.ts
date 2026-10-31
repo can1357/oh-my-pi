@@ -409,13 +409,16 @@ function resolveOverIndex(index: RuleIndex, target: ResolveTarget): ResolvedAxes
 			reasoning = true;
 		}
 	}
+	// Unclassified targets get their provider's ladder too: it is offered as
+	// unverified thinking (`resolveThinkingPolicy`), never as reasoning capability.
+	const offersThinking = reasoning || target.class === "unknown";
 	const wire: WinnerTable = {};
 	const thinking: WinnerTable = {};
 	const catalog: WinnerTable = {};
 	for (const { rule, rank } of ranked) {
 		contest(wire, rule.compiled.wire, rank, rule, target);
 		contest(catalog, rule.compiled.catalog, rank, rule, target);
-		if (reasoning) contest(thinking, rule.compiled.thinking, rank, rule, target);
+		if (offersThinking) contest(thinking, rule.compiled.thinking, rank, rule, target);
 	}
 	return {
 		wire: collect(wire, rule => rule.wire),

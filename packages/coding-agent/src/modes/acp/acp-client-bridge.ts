@@ -4,12 +4,14 @@
  * `AgentSession`) can route through the client when it advertises the
  * relevant capabilities at `initialize` time.
  */
+import { RequestError } from "@oh-my-pi/pi-utils/acp";
 import type {
 	PermissionOption as AcpPermissionOption,
 	TerminalHandle as AcpTerminalHandle,
 	AgentSideConnection,
 	ClientCapabilities,
 	RequestPermissionRequest,
+	RequestPermissionResponse,
 	ToolCallUpdate,
 } from "@oh-my-pi/pi-utils/acp";
 import type {
@@ -65,8 +67,8 @@ export function createAcpClientBridge(
 			createTerminalHandle(connection, sessionId, params);
 	}
 
-	bridge.requestPermission = (toolCall, options, signal) =>
-		requestPermission(connection, sessionId, toolCall, options, signal);
+	bridge.requestPermission = (toolCall, options, signal, steeringSignal) =>
+		requestPermission(connection, sessionId, toolCall, options, signal, steeringSignal);
 
 	return bridge;
 }
@@ -117,6 +119,7 @@ async function requestPermission(
 	toolCall: ClientBridgePermissionToolCall,
 	options: ClientBridgePermissionOption[],
 	signal: AbortSignal | undefined,
+	steeringSignal: AbortSignal | undefined,
 ): Promise<ClientBridgePermissionOutcome> {
 	const update: ToolCallUpdate = {
 		toolCallId: toolCall.toolCallId,
@@ -140,7 +143,58 @@ async function requestPermission(
 	if (signal?.aborted) {
 		return { outcome: "cancelled" };
 	}
-	const response = await connection.requestPermission(request);
+	// A steer queued while the dialog is open supersedes it: cancel the pending
+	// wire request (`$/cancel_request`) so the client is not left with a live
+	// dialog for a tool call the loop has already reported as cancelled.
+	const { promise, cancel } = connection.requestPermissionWithCancel(request);
+	if (!steeringSignal) {
+		const response = await promise;
+		return permissionOutcomeFromResponse(response, options);
+	}
+	if (steeringSignal.aborted) {
+		cancel();
+		// `cancel()` rejects the wire promise (RequestError.requestCancelled)
+		// that nothing else will observe on this early-exit path; keep it
+		// handled so the rejection cannot take down the process.
+		void promise.catch(() => undefined);
+		return { outcome: "cancelled" };
+	}
+	const steered = Promise.withResolvers<void>();
+	const onSteer = () => {
+		cancel();
+		steered.resolve();
+	};
+	steeringSignal.addEventListener("abort", onSteer, { once: true });
+	try {
+		const winner = await Promise.race([
+			promise.then(
+				response => ({ kind: "response" as const, response }),
+				error =>
+					// `cancel()` rejects the wire promise with
+					// request-cancelled; that rejection is the steer
+					// superseding the dialog, not a transport failure.
+					error instanceof RequestError && error.code === -32800
+						? { kind: "steered" as const }
+						: { kind: "error" as const, error },
+			),
+			steered.promise.then(() => ({ kind: "steered" as const })),
+		]);
+		if (winner.kind === "steered") {
+			return { outcome: "cancelled" };
+		}
+		if (winner.kind === "error") {
+			throw winner.error;
+		}
+		return permissionOutcomeFromResponse(winner.response, options);
+	} finally {
+		steeringSignal.removeEventListener("abort", onSteer);
+	}
+}
+
+function permissionOutcomeFromResponse(
+	response: RequestPermissionResponse,
+	options: ClientBridgePermissionOption[],
+): ClientBridgePermissionOutcome {
 	const outcome = response.outcome;
 	if (outcome.outcome === "cancelled") {
 		return { outcome: "cancelled" };

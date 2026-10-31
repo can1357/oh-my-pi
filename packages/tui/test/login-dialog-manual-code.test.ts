@@ -61,8 +61,9 @@ describe("LoginDialogComponent manual code input", () => {
 		const second = dialog.showManualInput("Paste the code:");
 		const rendered = dialog.render(80).join("\n");
 		expect(rendered.split("Paste the code:").length - 1).toBe(1);
-		// A stale value from the first attempt must not leak into the retry.
+		// A stale value from the first attempt must not leak into the retry; the field says why it is back.
 		expect(rendered).not.toContain("garbage");
+		expect(rendered).toContain("Couldn't read a code from that");
 
 		const url = "http://localhost:1455/auth/callback?code=OK&state=abc";
 		dialog.pasteText(url);

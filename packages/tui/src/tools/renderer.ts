@@ -26,6 +26,19 @@ export interface RenderResultOptions {
 	 * Streamed `xd://` previews stay queued until this is set.
 	 */
 	executionStarted?: boolean;
+	/**
+	 * Milliseconds since this call began executing (`tool_execution_start`),
+	 * or its total once settled; undefined before it starts. The terminal
+	 * transcript's options object computes it on read, so a render-time read
+	 * is live while the block's spinner ticks.
+	 */
+	elapsedMs?: number;
+	/** The call was abandoned without a final result (turn aborted, sealed). Native describe hooks only. */
+	cancelled?: boolean;
+	/** The native host shows files by path (`cx.supports("media")`). Native describe hooks only. */
+	media?: boolean;
+	/** The native host draws raw JSON values (`cx.supports("json")`). Native describe hooks only. */
+	json?: boolean;
 }
 
 /** Render options for a result, plus the tool-specific context the transcript threads through. */
@@ -90,6 +103,8 @@ export interface NativeToolHead {
 	readonly targetKind?: TspToolProps["targetKind"];
 	/** Language for `command` targets. */
 	readonly lang?: string;
+	/** The raw command line the head's Copy command button copies (set implicitly by a `command` target). */
+	readonly command?: string;
 	/** `file://` link for path targets. */
 	readonly href?: string;
 	/** Short facts after the target (`+8 −1`, `5 matches · 2 files`). */
@@ -117,8 +132,11 @@ export interface NativeToolView {
 	readonly body?: readonly NativeChild[];
 	/** Tone override; the frame otherwise derives it from the call status. */
 	readonly tone?: TspTone;
-	/** Body clamp while collapsed; `{tail}` keeps the end (terminal output). Defaults to the transcript's preview size. */
-	readonly preview?: TspPreview | { readonly tail: number } | "none";
+	/**
+	 * Body clamp while collapsed; `{tail}` keeps the end (terminal output). Defaults to the transcript's preview size.
+	 * `children`: the body stays whole while collapsed and its own `ansi`/`code` previews clamp instead.
+	 */
+	readonly preview?: TspPreview | { readonly tail: number } | "none" | "children";
 	/** Starts expanded whatever the transcript's expand state (the todo checklist); the user can still fold it. */
 	readonly open?: boolean;
 	/** Render frameless (`frame:"inline"`): a head line plus a disclosed body. */
@@ -180,6 +198,11 @@ export interface ToolRenderer<TArgs = unknown, TDetails = unknown> {
 	 * `options.spinnerFrame`.
 	 */
 	animatedPartialResult?: boolean | ((args: TArgs) => boolean);
+	/**
+	 * Repaint the block once a second while its call executes, for renderers
+	 * that show live `options.elapsedMs` without consuming the spinner frame.
+	 */
+	tickElapsed?: boolean;
 	/**
 	 * Whether replacing a pending call render with the first result requires a
 	 * full viewport repaint. Use for merged renderers whose pending rows can be

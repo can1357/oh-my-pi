@@ -445,7 +445,7 @@ export class ClaudeSessionStore implements ForeignSessionStore {
 			const timestamp = isoTimestamp(value.timestamp, stats.mtimeMs);
 			if (value.type === "assistant" && isRecord(value.message)) {
 				const model = stringField(value.message, "model");
-				if (model && model !== lastModel) {
+				if (model && model !== "<synthetic>" && model !== lastModel) {
 					const id = uniqueEntryId(`claude-${sourceUuid}-model`, usedIds);
 					const entry: ModelChangeEntry = {
 						type: "model_change",

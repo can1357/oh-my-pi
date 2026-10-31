@@ -32,7 +32,7 @@ const update = (effort: string) => ({ type: "configuration_update", reasoning: {
 
 describe("planStableOpenAIEffort", () => {
 	it("pins the request-level effort to the baseline and carries changes as configuration_update items", () => {
-		const state = createOpenAIEffortControlState<string>();
+		const state = createOpenAIEffortControlState<string>("session");
 
 		const first = [user("one")];
 		expect(planStableOpenAIEffort(state, first, "low")).toBe("low");
@@ -74,7 +74,7 @@ describe("planStableOpenAIEffort", () => {
 	});
 
 	it("appends the update after the latest tool result when the level changes inside a tool loop", () => {
-		const state = createOpenAIEffortControlState<string>();
+		const state = createOpenAIEffortControlState<string>("session");
 		planStableOpenAIEffort(state, [user("one")], "medium");
 
 		const loop: TestItem[] = [
@@ -106,7 +106,7 @@ describe("planStableOpenAIEffort", () => {
 	});
 
 	it("drops a change that returns to the effort already in force at that position", () => {
-		const state = createOpenAIEffortControlState<string>();
+		const state = createOpenAIEffortControlState<string>("session");
 		planStableOpenAIEffort(state, [user("one")], "low");
 		const turn = [user("one"), assistant("msg_1", "a"), user("two")];
 		planStableOpenAIEffort(state, turn, "high");
@@ -119,7 +119,7 @@ describe("planStableOpenAIEffort", () => {
 	});
 
 	it("re-baselines from the requested effort when the history under a transition is rewritten", () => {
-		const state = createOpenAIEffortControlState<string>();
+		const state = createOpenAIEffortControlState<string>("session");
 		planStableOpenAIEffort(state, [user("one")], "low");
 		planStableOpenAIEffort(state, [user("one"), assistant("msg_1", "a"), user("two")], "high");
 
@@ -166,6 +166,64 @@ describe("openai-codex configuration_update", () => {
 		timestamp: 2,
 	};
 	const secondUser = { role: "user" as const, content: "two", timestamp: 3 };
+	const secondAssistant = { ...firstAssistant, content: [{ type: "text" as const, text: "b" }], timestamp: 4 };
+
+	/** User turns and `configuration_update` items, in wire order. */
+	const shape = (input: readonly { type?: string | null; role?: string | null }[] | undefined) =>
+		(input ?? []).flatMap<unknown>(item =>
+			item.type === "configuration_update" ? [item] : item.role === "user" ? ["user"] : [],
+		);
+
+	it("plans side requests against a copy of the parent's updates", async () => {
+		const model = createCodexModel("gpt-6-astra");
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const parent = { apiKey: "token", sessionId: "astra-parent", providerSessionState };
+		const side = { ...parent, sessionId: "astra-parent:side:1", parentSessionId: "astra-parent" };
+		const history = [firstUser, firstAssistant, secondUser, secondAssistant];
+		const sidePrompt = { role: "user" as const, content: "side", timestamp: 5 };
+
+		await buildTransformedCodexRequestBody(model, turnContext([firstUser]), { ...parent, reasoning: "high" });
+		const parentFollowUp = await buildTransformedCodexRequestBody(
+			model,
+			turnContext([firstUser, firstAssistant, secondUser]),
+			{ ...parent, reasoning: "medium" },
+		);
+		const plain = await buildTransformedCodexRequestBody(model, turnContext([...history, sidePrompt]), {
+			...side,
+			reasoning: "medium",
+		});
+		const minimized = await buildTransformedCodexRequestBody(model, turnContext([...history, sidePrompt]), {
+			...side,
+			reasoning: "medium",
+			minimizeEffort: true,
+		});
+		const parentNext = await buildTransformedCodexRequestBody(
+			model,
+			turnContext([...history, { role: "user", content: "three", timestamp: 6 }]),
+			{ ...parent, reasoning: "medium" },
+		);
+
+		for (const body of [parentFollowUp, plain, minimized, parentNext]) expect(body.reasoning?.effort).toBe("high");
+		expect(shape(parentFollowUp.input)).toEqual(["user", update("medium"), "user"]);
+		expect(shape(plain.input)).toEqual(["user", update("medium"), "user", "user"]);
+		expect(shape(minimized.input)).toEqual(["user", update("medium"), "user", update("low"), "user"]);
+		// Neither side request recorded its effort in the parent's state.
+		expect(shape(parentNext.input)).toEqual(["user", update("medium"), "user", "user"]);
+	});
+
+	it("keeps a minimized side request at the requested effort when the parent has no baseline", async () => {
+		// Lowering the request-level effort would forfeit the cached prefix.
+		const body = await buildTransformedCodexRequestBody(createCodexModel("gpt-6-astra"), turnContext([firstUser]), {
+			apiKey: "token",
+			sessionId: "fresh:side:1",
+			parentSessionId: "fresh",
+			providerSessionState: new Map<string, ProviderSessionState>(),
+			reasoning: "high",
+			minimizeEffort: true,
+		});
+		expect(body.reasoning?.effort).toBe("high");
+		expect(shape(body.input)).toEqual(["user"]);
+	});
 
 	it("keeps reasoning.effort stable for gpt-6-astra and inserts the update before the new user turn", async () => {
 		const model = createCodexModel("gpt-6-astra");
@@ -400,6 +458,14 @@ describe("openai-responses configuration_update", () => {
 
 		expect(bodies).toHaveLength(2);
 		expect(requestEffort(bodies[0])).toBe("medium");
+		expect(requestEffort(bodies[1])).toBe("high");
+		expect(inputItems(bodies[1]).some(item => item.type === "configuration_update")).toBe(false);
+		expect(secondResponse.stopReason).toBe("stop");
+	});
+
+	it("sends effort changes at the request level in pro reasoning mode, which rejects configuration_update", async () => {
+		const { bodies, secondResponse } = await effortChange({ ...proxyModel(), reasoningMode: "pro" }, "high");
+
 		expect(requestEffort(bodies[1])).toBe("high");
 		expect(inputItems(bodies[1]).some(item => item.type === "configuration_update")).toBe(false);
 		expect(secondResponse.stopReason).toBe("stop");

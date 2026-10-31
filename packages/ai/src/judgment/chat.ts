@@ -5,6 +5,7 @@
 import { type } from "@oh-my-pi/omptype";
 import * as AIError from "../error";
 import { retryTransientCompletion } from "../oneshot-retry";
+import { sendsImageInputOnWire } from "../providers/vision-guard";
 import { completeSimple } from "../stream";
 import type { Api, AssistantMessage, Model, SimpleStreamOptions, Tool } from "../types";
 import type { TextBackend, TextCompletion, TextPrompt } from "./text";
@@ -40,19 +41,34 @@ export type ChatTextBackendOptions = Pick<SimpleStreamOptions, "apiKey" | "sessi
 
 /** Chat completions with reasoning disabled, temperature 0, and transient-failure retry. */
 export function chatTextBackend(model: Model<Api>, options: ChatTextBackendOptions): TextBackend {
+	const supportsImages = sendsImageInputOnWire(model);
 	return {
 		api: model.api,
 		provider: model.provider,
 		model: model.id,
+		...(supportsImages ? { supportsImages: true } : {}),
 		parseRetries: 2,
 		async complete(prompt: TextPrompt, judge: JudgeOptions): Promise<TextCompletion> {
+			if (prompt.images?.length && !supportsImages) {
+				throw new AIError.ValidationError(
+					`Chat judgment backend ${model.provider}/${model.id} does not support image inputs`,
+				);
+			}
 			const response = await retryTransientCompletion(
 				() =>
 					completeSimple(
 						model,
 						{
 							systemPrompt: [prompt.system],
-							messages: [{ role: "user", content: prompt.user, timestamp: Date.now() }],
+							messages: [
+								{
+									role: "user",
+									content: prompt.images?.length
+										? [{ type: "text" as const, text: prompt.user }, ...prompt.images]
+										: prompt.user,
+									timestamp: Date.now(),
+								},
+							],
 							tools: prompt.retry ? [SUBMIT_JUDGMENT] : undefined,
 						},
 						{

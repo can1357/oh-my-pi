@@ -14,6 +14,7 @@ import type {
 	Context,
 	Usage,
 } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 
 function makeEventStream(events: AssistantMessageEvent[], final: AssistantMessage): AssistantMessageEventStream {
@@ -35,7 +36,8 @@ async function collectSse(stream: ReadableStream<Uint8Array>): Promise<string[]>
 		buf += decoder.decode(value, { stream: true });
 	}
 	buf += decoder.decode();
-	return buf.split("\n\n").filter(s => s.length > 0);
+	// SSE comment frames (`: keepalive`) carry no event; spec-compliant clients skip them.
+	return buf.split("\n\n").filter(s => s.length > 0 && !s.startsWith(":"));
 }
 
 function parseSseLine(line: string): unknown {
@@ -281,6 +283,59 @@ describe("pi-native gateway cache controls", () => {
 		}
 	});
 });
+describe("pi-native gateway retry budgets", () => {
+	it("limits upstream OpenAI requests on persistent 429", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-retry-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.keys.setRuntime("openai", "test-key");
+		const model = buildModel({
+			id: "memory-429",
+			name: "Memory 429",
+			api: "openai-completions",
+			provider: "openai",
+			baseUrl: "https://api.openai.test/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_000,
+			maxTokens: 4096,
+		});
+		let upstreamRequests = 0;
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => model,
+			version: "test",
+			fetch: async () => {
+				upstreamRequests++;
+				return Response.json(
+					{ error: { message: "rate limited", type: "rate_limit_error" } },
+					{ status: 429, headers: { "retry-after": "0" } },
+				);
+			},
+		});
+
+		try {
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: "openai/memory-429",
+					context: baseContext,
+					options: { maxHttpAttempts: 3 },
+					stream: false,
+				}),
+			});
+			expect(response.ok).toBe(false);
+			expect(upstreamRequests).toBe(3);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+});
 
 describe("pi-native gateway reasoning flags", () => {
 	it("delivers a forced reasoning-off to the provider stream", async () => {
@@ -480,6 +535,33 @@ describe("pi-native encodeStream", () => {
 		expect((parsed[0] as { type: string }).type).toBe("start");
 		expect(parsed[1]).toEqual({ type: "error", reason: "error", errorMessage: "connection reset" });
 		expect(parsed[2]).toBe("[DONE]");
+	});
+
+	it("puts a keepalive on the wire before a silent source yields its first event", async () => {
+		// A model thinking for minutes must not leave the connection byte-less:
+		// Bun fetch and proxies cut silent responses at ~300 s (issue #17363).
+		const { promise: firstEvent, resolve: releaseFirstEvent } = Promise.withResolvers<void>();
+		const final = baseAssistant();
+		const silent = (async function* () {
+			await firstEvent;
+			yield { type: "done", reason: "stop", message: final } satisfies AssistantMessageEvent;
+		})() as unknown as AssistantMessageEventStream;
+		(silent as { result(): Promise<AssistantMessage> }).result = async () => final;
+
+		const reader = encodeStream(silent).getReader();
+		const first = await reader.read();
+		expect(new TextDecoder().decode(first.value)).toBe(": keepalive\n\n");
+
+		releaseFirstEvent();
+		const rest: string[] = [];
+		for (;;) {
+			const { value, done } = await reader.read();
+			if (done) break;
+			rest.push(new TextDecoder().decode(value));
+		}
+		expect(rest.join("")).toBe(
+			`data: ${JSON.stringify({ type: "done", reason: "stop", message: final })}\n\ndata: [DONE]\n\n`,
+		);
 	});
 });
 

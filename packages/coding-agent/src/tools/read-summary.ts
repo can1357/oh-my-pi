@@ -5,6 +5,7 @@ import { isMarkdownPath } from "@oh-my-pi/pi-tui/theme";
 import type { ClientBridge } from "../session/client-bridge";
 import type { ToolSession } from "../sdk";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
+import { ensureGrammar } from "../utils/grammars";
 import { countTextLines } from "./read-format";
 import { formatReadSummary } from "@oh-my-pi/pi-tui/tools/read";
 import { throwIfAborted } from "./tool-errors";
@@ -97,9 +98,12 @@ export async function trySummarize(
 		const cacheKey = `${absolutePath}\0${languagePath ?? ""}\0${Bun.hash(code)}\0${minBodyLines},${minCommentLines},${unfoldUntilLines},${unfoldLimitLines}`;
 		const memoized = cache.get(cacheKey);
 		if (memoized !== undefined) return memoized || null;
+		const summaryPath = languagePath ?? absolutePath;
+		await ensureGrammar({ path: summaryPath });
+		throwIfAborted(signal);
 		const result = await summarizeCodeAsync({
 			code,
-			path: languagePath ?? absolutePath,
+			path: summaryPath,
 			minBodyLines,
 			minCommentLines,
 			unfoldUntilLines,
@@ -113,7 +117,8 @@ export async function trySummarize(
 	}
 }
 
-/** Read session display preferences and format a structural summary. */
+/** Read session display preferences and format a structural summary; `rowPrefixes` records whether its rows carry `N:`/`N|` prefixes. */
 export function renderSummary(session: ToolSession, summary: SummaryResult) {
-	return formatReadSummary(resolveFileDisplayMode(session), summary);
+	const displayMode = resolveFileDisplayMode(session);
+	return { ...formatReadSummary(displayMode, summary), rowPrefixes: displayMode.lineNumbers };
 }

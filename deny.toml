@@ -34,8 +34,9 @@ allow = [
     "Zlib",
 ]
 # inferno is CDDL-1.0-licensed. Keep this
-# package-scoped: distributions disclose source availability in the aggregate
-# notice rather than globally admitting CDDL dependencies.
+# package-scoped: distributions disclose source availability in the native
+# addon's notices (packages/natives/THIRD-PARTY-NOTICES.txt) rather than
+# globally admitting CDDL dependencies.
 exceptions = [
     { allow = ["CDDL-1.0"], crate = "inferno@0.12.8" },
     { allow = ["WTFPL"], crate = "terminfo@0.9.0" },
@@ -43,15 +44,6 @@ exceptions = [
     # copyleft, satisfied by upstream source availability; no obligations
     # attach to our unmodified use. Keep it package-scoped like inferno.
     { allow = ["MPL-2.0"], crate = "uluru@3.1.0" },
-]
-
-# tree-sitter-graphql 0.1.0 has no SPDX expression in Cargo.toml. Its packaged
-# LICENSE is MIT; cargo-about pins the exact license-file checksum.
-[[licenses.clarify]]
-crate = "tree-sitter-graphql@0.1.0"
-expression = "MIT"
-license-files = [
-    { path = "LICENSE", hash = 0xda88ff2a },
 ]
 
 [sources]

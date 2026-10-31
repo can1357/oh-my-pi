@@ -24,6 +24,7 @@ import {
 	SHAPE_VARIANT_NAMES,
 	SHAPE_VARIANTS,
 	type Shape,
+	type ShapeGeometry,
 	type ShapeTarget,
 	type ShapeVariantName,
 } from "@oh-my-pi/snapcompact";
@@ -31,7 +32,7 @@ import { theme } from "../theme/theme";
 import sampleDoc from "./snapcompact-shape-preview-doc.md" with { type: "text" };
 import type { DescribeContext, NativeNode } from "../native/node";
 import { col, node, span, text } from "../native/describe";
-import { registerNativeBlob } from "../native/blobs";
+import { nativeImageNode } from "../native/blobs";
 
 /** Mini-frame edge in px — a small page from the real rasterizer ≈ a zoomed crop. */
 const SRC_FRAME_PX = 128;
@@ -90,7 +91,7 @@ export class SnapcompactShapePreview implements Component {
 
 	describe(cx: DescribeContext): NativeNode {
 		const shape = resolveShape(this.#model, this.#variant);
-		const name = resolvedVariantName(shape);
+		const name = this.#variant === "auto" ? resolvedVariantName(shape) : this.#variant;
 		const entry = cx.supports("image") ? this.#ensureEntry(name, shape) : undefined;
 		const memo = this.#native;
 		if (memo !== undefined && memo.variant === this.#variant && memo.entry === entry) return memo.node;
@@ -100,8 +101,7 @@ export class SnapcompactShapePreview implements Component {
 		else if (entry.state === "rendering") sample = node("spinner", { label: [span("rendering sample…", "dim")] });
 		else if (entry.state === "failed") sample = text([span("(sample render failed)", "dim")]);
 		else {
-			sample = node("image", {
-				blob: registerNativeBlob(entry.bytes, "image/png"),
+			sample = nativeImageNode(entry.bytes, "image/png", {
 				alt: `snapcompact ${label} sample`,
 				w: entry.edgePx,
 				h: entry.edgePx,
@@ -129,7 +129,7 @@ export class SnapcompactShapePreview implements Component {
 
 	render(width: number): readonly string[] {
 		const shape = resolveShape(this.#model, this.#variant);
-		const name = resolvedVariantName(shape);
+		const name = this.#variant === "auto" ? resolvedVariantName(shape) : this.#variant;
 		const { label, stats } = this.#caption(shape, name);
 		const lines: string[] = [theme.fg("muted", `  Sample (zoomed) · ${label} · ${stats}`), ""];
 
@@ -216,17 +216,23 @@ export class SnapcompactShapePreview implements Component {
 	}
 }
 
-/** Research name of the concrete geometry `resolveShape` picked (for `auto`). */
+/**
+ * Research name of the geometry `resolveShape` picked for `auto`. The frame
+ * edge is not compared: `auto` widens it per model line and hosts cap it
+ * (catalog `image-max-edge`), and the sample renders a fixed mini-page anyway.
+ */
 function resolvedVariantName(shape: Shape): ShapeVariantName {
 	for (const name of SHAPE_VARIANT_NAMES) {
-		const candidate = SHAPE_VARIANTS[name];
+		const candidate: ShapeGeometry = SHAPE_VARIANTS[name];
 		if (
 			candidate.font === shape.font &&
 			candidate.cellWidth === shape.cellWidth &&
 			candidate.cellHeight === shape.cellHeight &&
+			candidate.stretch === shape.stretch &&
 			candidate.variant === shape.variant &&
-			candidate.lineRepeat === shape.lineRepeat &&
-			candidate.frameSize === shape.frameSize
+			candidate.stopwordDim === shape.stopwordDim &&
+			candidate.columns === shape.columns &&
+			candidate.lineRepeat === shape.lineRepeat
 		) {
 			return name;
 		}

@@ -98,11 +98,9 @@ struct LimiterCursor<'collection> {
 
 impl LimiterCursor<'_> {
 	fn try_next(self, arg: Argument) -> Result<Argument, ExhaustedCommandSpace> {
-		if self.limiters.is_empty() {
-			Ok(arg)
-		} else {
-			let (current, remaining) = self.limiters.split_at_mut(1);
-			current[0].try_arg(arg, LimiterCursor { limiters: remaining })
+		match self.limiters.split_first_mut() {
+			None => Ok(arg),
+			Some((current, remaining)) => current.try_arg(arg, LimiterCursor { limiters: remaining }),
 		}
 	}
 }
@@ -156,11 +154,12 @@ fn count_osstr_chars_for_exec(s: &OsStr) -> usize {
 struct MaxCharsCommandSizeLimiter {
 	current_size: usize,
 	max_chars:    usize,
+	per_arg_overhead: usize,
 }
 
 impl MaxCharsCommandSizeLimiter {
 	fn new(max_chars: usize) -> Self {
-		Self { current_size: 0, max_chars }
+		Self { current_size: 0, max_chars, per_arg_overhead: 0 }
 	}
 
 	#[cfg(windows)]
@@ -176,13 +175,20 @@ impl MaxCharsCommandSizeLimiter {
 		// can have room to set their own environment variables.
 		const ARG_HEADROOM: usize = 2048;
 		let arg_max = unsafe { libc::sysconf(libc::_SC_ARG_MAX) } as usize;
+		let pointer_size = std::mem::size_of::<*const libc::c_char>();
 
 		let env_size: usize = env
 			.iter()
-			.map(|(var, value)| count_osstr_chars_for_exec(var) + count_osstr_chars_for_exec(value))
+			// The two string terminators account for '=' and '\0'; envp has one pointer.
+			.map(|(var, value)| {
+				count_osstr_chars_for_exec(var) + count_osstr_chars_for_exec(value) + pointer_size
+			})
 			.sum();
 
-		Self::new(arg_max - ARG_HEADROOM - env_size)
+		let mut limiter = Self::new(arg_max.saturating_sub(ARG_HEADROOM).saturating_sub(env_size).max(1));
+		// ARG_MAX covers argv pointers as well as strings. Keep -s string-only.
+		limiter.per_arg_overhead = pointer_size;
+		limiter
 	}
 }
 
@@ -192,7 +198,7 @@ impl CommandSizeLimiter for MaxCharsCommandSizeLimiter {
 		arg: Argument,
 		cursor: LimiterCursor<'_>,
 	) -> Result<Argument, ExhaustedCommandSpace> {
-		let chars = count_osstr_chars_for_exec(&arg.arg);
+		let chars = count_osstr_chars_for_exec(&arg.arg) + self.per_arg_overhead;
 		if self.current_size + chars <= self.max_chars {
 			let arg = cursor.try_next(arg)?;
 			self.current_size += chars;
@@ -602,7 +608,7 @@ impl ArgumentReader for WhitespaceDelimitedArgumentReader {
 		}
 
 		Ok(Some(Argument {
-			arg:  String::from_utf8_lossy(&result[..]).into_owned().into(),
+			arg:  String::from_utf8_lossy_owned(result).into(),
 			kind: if terminated_by_newline {
 				ArgumentKind::HardTerminated
 			} else {
@@ -657,7 +663,7 @@ impl ArgumentReader for ByteDelimitedArgumentReader {
 				continue;
 			}
 			return Ok(Some(Argument {
-				arg:  String::from_utf8_lossy(&result).into_owned().into(),
+				arg:  String::from_utf8_lossy_owned(result).into(),
 				kind: ArgumentKind::HardTerminated,
 			}));
 		}
@@ -1228,6 +1234,48 @@ mod tests {
 				.is_err()
 		);
 		assert!(limiter.try_arg(make_arg_hard("a"), empty_cursor()).is_ok());
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn large_input_is_split_into_successful_external_commands() {
+		let arg_max = unsafe { libc::sysconf(libc::_SC_ARG_MAX) } as usize;
+		// String bytes alone fit, but the argv pointers force multiple batches.
+		// Use a real external executable so an oversized batch surfaces E2BIG.
+		let count = arg_max / 256;
+		let input = format!("{}\n", "x".repeat(255)).repeat(count);
+		let (code, stdout, stderr) = crate::host::run_script(
+			"xargs /bin/sh -c 'printf \"%s\\n\" \"$#\"' sh",
+			&input,
+			&std::env::current_dir().unwrap(),
+		)
+		.await;
+		assert_eq!(code, 0, "{stderr}");
+		assert!(stderr.is_empty(), "{stderr}");
+		let batches: Vec<usize> = stdout.lines().map(|line| line.parse().unwrap()).collect();
+		assert!(batches.len() > 1, "input was not split into multiple commands");
+		assert_eq!(batches.iter().sum::<usize>(), count);
+		assert!(batches.iter().all(|&count| count > 0));
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn oversized_environment_rejects_command_without_panicking() {
+		let arg_max = unsafe { libc::sysconf(libc::_SC_ARG_MAX) } as usize;
+		// These short strings fit on their own, but their envp pointers do not.
+		let exports: String = (0..arg_max / 20).map(|i| format!(" XARGS_{i:08}=")).collect();
+		let (code, stdout, stderr) = crate::host::run_script(
+			&format!("export{exports}; xargs /bin/echo"),
+			"x\n",
+			&std::env::temp_dir(),
+		)
+		.await;
+		assert_eq!(code, 1, "{stderr}");
+		assert_eq!(stdout, "");
+		assert!(
+			stderr.contains("Base command and environment are too large"),
+			"an environment that exhausts ARG_MAX must reject the base command: {stderr}"
+		);
 	}
 
 	#[test]

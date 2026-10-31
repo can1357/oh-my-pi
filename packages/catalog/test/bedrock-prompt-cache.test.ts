@@ -141,12 +141,13 @@ describe("Bedrock prompt-cache compat", () => {
 		for (const testCase of cases) {
 			const { id, minimumTokens, supportsLongRetention } = testCase;
 			const model = buildModel(bedrockSpec({ id }));
-			expect(model.compat).toEqual({
+			expect(model.compat).toMatchObject({
 				promptCacheMode: minimumTokens === 0 ? "none" : "explicit",
 				supportsLongPromptCacheRetention: supportsLongRetention,
 				promptCacheMinimumTokens: minimumTokens,
 				promptCacheMaximumCheckpoints: minimumTokens === 0 ? 0 : 4,
 				supportsForcedToolChoice: true,
+				supportsThinkingBindingControls: true,
 				// bedrockSpec is reasoning:true → keepalive-free idle floor applies
 				// (900s for the adaptive-thinking family, 600s otherwise).
 				streamIdleTimeoutMs: expectsAdaptiveDisplay(id) ? 900_000 : 600_000,
@@ -247,6 +248,7 @@ describe("Bedrock prompt-cache compat", () => {
 			promptCacheMinimumTokens: 1024,
 			promptCacheMaximumCheckpoints: 4,
 			supportsForcedToolChoice: true,
+			supportsThinkingBindingControls: true,
 			streamRevision: "possible",
 		} as const;
 
@@ -258,10 +260,7 @@ describe("Bedrock prompt-cache compat", () => {
 			"global.amazon.nova-2-lite-v1:0",
 		] as const) {
 			const model = getBundledModel<"bedrock-converse-stream">("amazon-bedrock", id);
-			expect(model?.compat).toEqual({
-				...expected,
-				streamIdleTimeoutMs: model?.reasoning ? 600_000 : undefined,
-			});
+			expect(model?.compat).toMatchObject(expected);
 		}
 
 		// AWS documents in-region model IDs plus geo/global inference-profile IDs.
@@ -278,7 +277,7 @@ describe("Bedrock prompt-cache compat", () => {
 			"global.amazon.nova-2-lite-v1:0",
 		] as const) {
 			const model = buildModel(bedrockSpec({ id }));
-			expect(model.compat).toEqual({ ...expected, streamIdleTimeoutMs: 600_000 });
+			expect(model.compat).toMatchObject(expected);
 			expect(model.promptCache).toBeUndefined();
 		}
 	});

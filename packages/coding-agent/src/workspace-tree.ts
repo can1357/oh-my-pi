@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { FileType, type GlobMatch, listWorkspace } from "@oh-my-pi/pi-natives";
+import { sanitizeDisplayWarning, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { formatAge, formatBytes } from "@oh-my-pi/pi-utils";
 
 /** Defaults for the workspace tree shown in the system prompt. */
@@ -48,6 +49,9 @@ export interface BuildWorkspaceTreeOptions {
  * shown, .gitignore is not consulted, and the standard non-source directories
  * (`node_modules`, `.git`, build outputs, caches…) are pruned by the native
  * walker. Used by the read tool's directory-listing path.
+ *
+ * Rejects when the root itself cannot be listed; subdirectories that cannot be
+ * listed stay in the tree, marked `[unreadable: …]`.
  */
 export async function buildDirectoryTree(cwd: string, options: BuildDirectoryTreeOptions = {}): Promise<DirectoryTree> {
 	const rootPath = path.resolve(cwd);
@@ -55,29 +59,31 @@ export async function buildDirectoryTree(cwd: string, options: BuildDirectoryTre
 	const perDirLimit = options.perDirLimit === undefined ? null : options.perDirLimit;
 	const rootLimit = options.rootLimit === undefined ? perDirLimit : options.rootLimit;
 
-	let entries: readonly GlobMatch[];
-	let nativeTruncated: boolean;
-	try {
-		const result = await listWorkspace({
-			path: rootPath,
-			maxDepth,
-			hidden: true,
-			gitignore: false,
-		});
-		entries = result.entries;
-		nativeTruncated = result.truncated;
-	} catch {
-		return emptyTree(rootPath);
-	}
+	const result = await listWorkspace({
+		path: rootPath,
+		maxDepth,
+		hidden: true,
+		gitignore: false,
+		reportDirectoryErrors: true,
+	});
 
-	return assembleTree(rootPath, entries, {
+	return assembleTree(rootPath, result.entries, {
 		perDirLimit,
 		rootLimit,
 		lineCap: options.lineCap === undefined ? null : options.lineCap,
-		nativeTruncated,
+		nativeTruncated: result.truncated,
+		// Platform error text is untrusted display content: strip control
+		// characters and newlines, then bound it so one entry stays one line.
+		unreadable: new Map(
+			result.unreadableDirectories.map(dir => [
+				dir.path,
+				truncateToWidth(sanitizeDisplayWarning(dir.message), TRUNCATE_LENGTHS.CONTENT),
+			]),
+		),
 		// Tool output (read tool directory listing), not a cached prefix —
 		// the human-friendly relative "ago" is appropriate here.
 		ageMode: "relative",
+		compactMetadata: true,
 	});
 }
 
@@ -106,6 +112,7 @@ export async function buildWorkspaceTree(cwd: string, options: BuildWorkspaceTre
 			// mtimes so the block is byte-identical across sessions and does not
 			// bust the prompt cache (a relative "Nm ago" drifts every build).
 			ageMode: "absolute",
+			compactMetadata: false,
 		});
 		return { ...tree, agentsMdFiles: result.agentsMdFiles };
 	} catch {
@@ -124,6 +131,8 @@ interface Node {
 	children: Node[];
 	/** When > 0, `children` is laid out as `[recent…, oldest]`. */
 	droppedCount: number;
+	/** Why this directory's contents could not be listed. */
+	unreadable?: string;
 }
 
 interface RenderedLine {
@@ -139,6 +148,8 @@ interface AssembleOptions {
 	rootLimit: number | null;
 	lineCap: number | null;
 	nativeTruncated: boolean;
+	/** Relative directory path → listing error, rendered on that directory's line. */
+	unreadable?: ReadonlyMap<string, string>;
 	/**
 	 * How per-entry modification times are rendered.
 	 * - "relative": render-time "Nm ago" (fine for tool output).
@@ -146,6 +157,29 @@ interface AssembleOptions {
 	 *   the system-prompt workspace tree). See {@link makeAgeFormatter}.
 	 */
 	ageMode: "relative" | "absolute";
+	/** Whether metadata columns use compact or aligned separators. */
+	compactMetadata: boolean;
+}
+
+function formatLines(lines: readonly RenderedLine[], compactMetadata: boolean): string {
+	if (compactMetadata) {
+		return lines
+			.map(line => {
+				if (!line.age) return line.label;
+				const sizeColumn = line.size ? ` ${line.size}` : "";
+				return `${line.label}${sizeColumn} ${line.age}`;
+			})
+			.join("\n");
+	}
+
+	const maxLabelLength = lines.reduce((max, line) => Math.max(max, line.label.length), 0);
+	return lines
+		.map(line => {
+			if (!line.age) return line.label;
+			const sizeColumn = (line.size ?? "").padEnd(8);
+			return `${line.label.padEnd(maxLabelLength + 2)}${sizeColumn}  ${line.age.padEnd(4)}`.trimEnd();
+		})
+		.join("\n");
 }
 
 function assembleTree(rootPath: string, entries: readonly GlobMatch[], opts: AssembleOptions): DirectoryTree {
@@ -165,6 +199,7 @@ function assembleTree(rootPath: string, entries: readonly GlobMatch[], opts: Ass
 			depth: parentPath ? parentPath.split("/").length + 1 : 1,
 			children: [],
 			droppedCount: 0,
+			unreadable: opts.unreadable?.get(entry.path),
 		};
 		const bucket = byParent.get(parentPath);
 		if (bucket) bucket.push(node);
@@ -206,7 +241,7 @@ function assembleTree(rootPath: string, entries: readonly GlobMatch[], opts: Ass
 
 	return {
 		rootPath,
-		rendered: formatLines(lines),
+		rendered: formatLines(lines, opts.compactMetadata),
 		truncated: truncated || elidedCount > 0,
 		totalLines: lines.length,
 	};
@@ -248,8 +283,9 @@ function renderNode(node: Node, formatNodeAge: (mtimeMs: number) => string, out:
 	} else {
 		const indent = "  ".repeat(node.depth);
 		const suffix = node.isDir ? "/" : "";
+		const unreadable = node.unreadable ? ` [unreadable: ${node.unreadable}]` : "";
 		out.push({
-			label: `${indent}- ${node.name}${suffix}`,
+			label: `${indent}- ${node.name}${suffix}${unreadable}`,
 			depth: node.depth,
 			isRoot: false,
 			size: node.isDir ? undefined : formatBytes(node.size),
@@ -303,17 +339,6 @@ function applyLineCap(
 		isRoot: false,
 	});
 	return { lines: kept, elidedCount: removable.length };
-}
-
-function formatLines(lines: readonly RenderedLine[]): string {
-	const maxLabelLength = lines.reduce((max, line) => Math.max(max, line.label.length), 0);
-	return lines
-		.map(line => {
-			if (!line.age) return line.label;
-			const sizeColumn = (line.size ?? "").padEnd(8);
-			return `${line.label.padEnd(maxLabelLength + 2)}${sizeColumn}  ${line.age.padEnd(4)}`.trimEnd();
-		})
-		.join("\n");
 }
 
 function emptyTree(rootPath: string): DirectoryTree {

@@ -1,5 +1,6 @@
 import { isAnthropicServerToolHistoryBlock } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import { countNewlines, isRecord } from "@oh-my-pi/pi-utils";
+import { PRESERVE_KEY as SNAPCOMPACT_PRESERVE_KEY } from "@oh-my-pi/snapcompact";
 import {
 	type BlobStore,
 	externalizeImageDataSync,
@@ -136,6 +137,38 @@ export function forgetExternalizedImages(blobStore: BlobStore): void {
 	externalizedImageRefs.delete(blobStore);
 }
 
+/** True for the snapcompact archive slot, `preserveData[PRESERVE_KEY]`. */
+function isSnapcompactArchiveSlot(
+	key: string | undefined,
+	childKey: string,
+	value: unknown,
+): value is Record<string, unknown> {
+	return key === "preserveData" && childKey === SNAPCOMPACT_PRESERVE_KEY && isRecord(value);
+}
+
+/**
+ * The snapcompact archive under `preserveData[PRESERVE_KEY]`: its frames
+ * externalize to the blob store, and every other field persists verbatim. The
+ * next compaction re-renders the archive from `text`, so a cut would drop the
+ * newest history uncounted and render {@link TRUNCATION_NOTICE} into the frames.
+ */
+function persistSnapcompactArchive(archive: Record<string, unknown>, blobStore: BlobStore): Record<string, unknown> {
+	const frames = truncateForPersistence(archive.frames, blobStore, SNAPCOMPACT_FRAMES_KEY);
+	const persisted = frames === archive.frames ? archive : { ...archive, frames };
+	const view = archive.withoutThinking;
+	if (!isRecord(view) || !isRecord(view.archive)) return persisted;
+	const viewArchive = persistSnapcompactArchive(view.archive, blobStore);
+	return viewArchive === view.archive
+		? persisted
+		: { ...persisted, withoutThinking: { ...view, archive: viewArchive } };
+}
+
+function snapcompactArchiveNeedsRewrite(archive: Record<string, unknown>): boolean {
+	if (persistenceNodeNeedsRewrite(archive.frames, SNAPCOMPACT_FRAMES_KEY)) return true;
+	const view = archive.withoutThinking;
+	return isRecord(view) && isRecord(view.archive) && snapcompactArchiveNeedsRewrite(view.archive);
+}
+
 /**
  * Recursively truncate large strings in an object for session persistence.
  * - Truncates oversized string fields (key-agnostic), except signed/encrypted
@@ -191,10 +224,12 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 	// carrier persists atomically with its summary and metadata — both as a
 	// message `providerPayload` (`type: "anthropicCompaction"`) and under the
 	// preserveData slot, whose object carries no `type` marker of its own.
+	// Cursor server records are addressed by the SHA-256 of their bytes and carry
+	// signed reasoning, so they persist atomically too.
 	if (
 		typeof obj === "object" &&
 		obj !== null &&
-		(("type" in obj && obj.type === "anthropicCompaction") ||
+		(("type" in obj && (obj.type === "anthropicCompaction" || obj.type === "cursorHistory")) ||
 			(key === "anthropicCompaction" && "content" in obj && typeof obj.content === "string"))
 	) {
 		return obj;
@@ -260,7 +295,9 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 				changed = true;
 				continue;
 			}
-			const newValue = truncateForPersistence(value, blobStore, childKey);
+			const newValue = isSnapcompactArchiveSlot(key, childKey, value)
+				? persistSnapcompactArchive(value, blobStore)
+				: truncateForPersistence(value, blobStore, childKey);
 			if (newValue !== value) changed = true;
 			entries.push([childKey, newValue]);
 		}
@@ -338,7 +375,12 @@ function persistenceNodeNeedsRewrite(obj: unknown, key?: string): boolean {
 		if (isAtomicPersistenceNode(obj, key)) return false;
 		for (const childKey in obj) {
 			if (!Object.hasOwn(obj, childKey)) continue;
-			if (persistenceNodeNeedsRewrite((obj as Record<string, unknown>)[childKey], childKey)) return true;
+			const value = (obj as Record<string, unknown>)[childKey];
+			if (isSnapcompactArchiveSlot(key, childKey, value)) {
+				if (snapcompactArchiveNeedsRewrite(value)) return true;
+				continue;
+			}
+			if (persistenceNodeNeedsRewrite(value, childKey)) return true;
 		}
 		return false;
 	}
@@ -386,6 +428,7 @@ function isAtomicPersistenceNode(obj: object, key?: string): boolean {
 		}
 		if (
 			typed.type === "anthropicCompaction" ||
+			typed.type === "cursorHistory" ||
 			(key === "anthropicCompaction" && "content" in typed && typeof typed.content === "string")
 		)
 			return true;

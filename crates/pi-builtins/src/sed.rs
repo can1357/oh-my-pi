@@ -189,12 +189,12 @@ impl ReplacementTemplate {
 				ReplacementPart::Literal(s) => result.push_str(s),
 
 				ReplacementPart::WholeMatch => {
-					result.push_str(caps.get(0)?.map(|m| m.as_str()).unwrap_or_default());
+					result.push_str(caps.get(0)?.map_or_default(|m| m.as_str()));
 				},
 
 				ReplacementPart::Group(n) => {
 					let i: usize = (*n).try_into().unwrap();
-					result.push_str(caps.get(i)?.map(|m| m.as_str()).unwrap_or_default());
+					result.push_str(caps.get(i)?.map_or_default(|m| m.as_str()));
 				},
 			}
 		}
@@ -6189,8 +6189,10 @@ mod tests {
 	}
 
 	/// Truncating an input file after sed opened it must not fault the host
-	/// process; the reader keeps serving the bytes captured at open.
+	/// process; the reader keeps serving the bytes captured at open. Unix only:
+	/// the snapshot is the `SliceInput` path; Windows always streams.
 	#[test]
+	#[cfg(unix)]
 	fn test_file_truncated_after_open() -> io::Result<()> {
 		let mut tmp = NamedTempFile::new()?;
 		for _ in 0..4 {
@@ -8138,7 +8140,7 @@ fn substitute(
 				)
 				.unwrap_err()
 			})?;
-			let mut shell_out = String::from_utf8_lossy(&output_bytes.stdout).into_owned();
+			let mut shell_out = String::from_utf8_lossy_owned(output_bytes.stdout);
 			if shell_out.ends_with("\r\n") {
 				// On windows, both return carriage and newline characters are used
 				shell_out.truncate(shell_out.len() - 2);
@@ -8933,8 +8935,7 @@ impl fmt::Debug for State {
 				.field("index", index)
 				.field("input_name", input_name)
 				.field("line_number", line_number)
-				.field("reader", &"<BufRead>")
-				.finish(),
+				.finish_non_exhaustive(),
 		}
 	}
 }

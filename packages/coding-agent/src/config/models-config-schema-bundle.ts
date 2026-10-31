@@ -17,6 +17,16 @@ function validateMaxContextWindow(
 	return true;
 }
 
+function validateImageCountBudget(value: { imageCountBudget?: number }, ctx: NarrowContext): boolean {
+	if (
+		value.imageCountBudget !== undefined &&
+		(!Number.isSafeInteger(value.imageCountBudget) || value.imageCountBudget <= 0)
+	) {
+		return ctx.mustBe("imageCountBudget a positive integer");
+	}
+	return true;
+}
+
 export const getModelsConfigSchemaBundle = once(() => {
 	const OpenRouterRoutingSchema = type({
 		"only?": "string[]",
@@ -85,6 +95,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"requiresToolResultId?": "boolean",
 		"replayUnsignedThinking?": "boolean",
 		"bedrockMessagesApi?": "boolean",
+		"requiresThinkingPresence?": "boolean",
 	} as const;
 
 	const OpenAICompatFieldsSchema = type(OpenAICompatFields);
@@ -99,6 +110,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"supportsLongPromptCacheRetention?": "boolean",
 		"promptCacheMinimumTokens?": "number >= 0",
 		"promptCacheMaximumCheckpoints?": "number >= 0",
+		"supportsThinkingBindingControls?": "boolean",
 	});
 
 	// Provider-level overrides can target bundled models whose API is not repeated
@@ -106,7 +118,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 	const ApiCompatSchema = OpenAICompatSchema.and(BedrockCompatSchema);
 
 	const ApiSchema = type(
-		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-gemini-cli" | "google-vertex" | "openrouter-decisions" | "typesafe"',
+		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-gemini-cli" | "google-vertex" | "openrouter-decisions" | "openai-decisions" | "workers-ai-systemone" | "typesafe"',
 	);
 
 	// Models may also name a runner API (web search is built in). `validateProviderConfiguration`
@@ -168,7 +180,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		});
 
 	const ModelTokenizerSchema = type(
-		'"claude-v3" | "claude-v47" | "claude-v5" | "claude-v5-sonnet" | "qwen3" | "deepseek-v3" | "kimi-k2" | "glm5"',
+		'"claude-v3" | "claude-v47" | "claude-v5" | "claude-v5-sonnet" | "qwen3" | "deepseek-v3" | "kimi-k2" | "glm5" | "o200k"',
 	);
 
 	const RemoteCompactionSchema = type({
@@ -209,6 +221,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"thinking?": ModelThinkingSchema,
 		"input?": '("text" | "image")[]',
 		"imageInputDecoder?": '"stb"',
+		"imageCountBudget?": "number",
 		"tokenizer?": ModelTokenizerSchema,
 		"supportsTools?": "boolean",
 		"cost?": {
@@ -257,7 +270,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		) {
 			return ctx.mustBe("compactionModel a non-empty string");
 		}
-		return validateMaxContextWindow(value, ctx);
+		return validateImageCountBudget(value, ctx) && validateMaxContextWindow(value, ctx);
 	});
 
 	const ModelOverrideSchema = type({
@@ -268,6 +281,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"thinking?": ModelThinkingSchema,
 		"input?": '("text" | "image")[]',
 		"imageInputDecoder?": '"stb"',
+		"imageCountBudget?": "number",
 		"tokenizer?": ModelTokenizerSchema,
 		"supportsTools?": "boolean",
 		"cost?": {
@@ -309,7 +323,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		) {
 			return ctx.mustBe("compactionModel a non-empty string");
 		}
-		return validateMaxContextWindow(value, ctx);
+		return validateImageCountBudget(value, ctx) && validateMaxContextWindow(value, ctx);
 	});
 
 	const ProviderDiscoverySchema = type({
@@ -323,9 +337,30 @@ export const getModelsConfigSchemaBundle = once(() => {
 		 * returns a different, smaller model list.
 		 */
 		"injectV1?": "boolean",
+		/**
+		 * Defaults to `true`. Set `false` to ignore the reasoning ladder a
+		 * `/v1/models` row advertises and build each model's thinking surface from
+		 * the bundled catalog reference alone — for endpoints whose advertised
+		 * levels do not match what the route actually accepts.
+		 *
+		 * Only the discovery types that read `/v1/models` rows accept it. LiteLLM
+		 * is rejected rather than accepted-and-ignored: its authoritative
+		 * reasoning metadata comes from `/model_group/info`, so the flag would
+		 * apply only on the `/v1/models` fallback and silently do nothing the rest
+		 * of the time.
+		 */
+		"advertisedReasoning?": "boolean",
 	}).narrow((value, ctx) => {
 		if (value.injectV1 !== undefined && value.type !== "openai-models-list") {
 			return ctx.mustBe("injectV1 only on openai-models-list discovery");
+		}
+		if (
+			value.advertisedReasoning !== undefined &&
+			value.type !== "openai-models-list" &&
+			value.type !== "lm-studio" &&
+			value.type !== "proxy"
+		) {
+			return ctx.mustBe("advertisedReasoning only on discovery that reads /v1/models rows");
 		}
 		if (
 			value.timeoutMs !== undefined &&

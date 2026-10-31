@@ -70,7 +70,7 @@ pub fn block_range_at(options: BlockRangeOptions) -> Result<Option<BlockRange>> 
 		return Ok(None);
 	};
 
-	let Some(tree) = parse_cached(&code, language)? else {
+	let Some(tree) = parse_cached(&code, language, path.as_deref())? else {
 		return Ok(None);
 	};
 	let root = tree.root_node();
@@ -314,7 +314,7 @@ pub fn enclosing_block_boundaries(options: EnclosingBoundaryOptions) -> Result<O
 	let Some(language) = resolve_language(lang.as_deref(), path.as_deref()) else {
 		return Ok(None);
 	};
-	let Some(tree) = parse_cached(&code, language)? else {
+	let Some(tree) = parse_cached(&code, language, path.as_deref())? else {
 		return Ok(None);
 	};
 	let root = tree.root_node();
@@ -344,14 +344,15 @@ pub struct NodeSpan {
 ///
 /// The next block query over the same source and language is then a cache
 /// hit. Does nothing for empty source or an unrecognized language, where the
-/// queries never parse either, nor for a source the cache will not retain
-/// (the tree would be discarded and parsed again by the query).
+/// queries never parse either, nor for a source over
+/// [`MAX_ENTRY_SOURCE_BYTES`], where a typical tree would not fit the cache's
+/// memory budget (it would be discarded and parsed again by the query).
 pub fn warm_parse(code: &str, lang: Option<&str>, path: Option<&str>) -> Result<()> {
 	if !code.is_empty()
 		&& code.len() <= MAX_ENTRY_SOURCE_BYTES
 		&& let Some(language) = resolve_language(lang, path)
 	{
-		parse_cached(code, language)?;
+		parse_cached(code, language, path)?;
 	}
 	Ok(())
 }
@@ -383,7 +384,7 @@ pub fn node_chain_at(options: BlockRangeOptions) -> Result<Option<Vec<NodeSpan>>
 	let Some(col) = first_content_column(&code, row) else {
 		return Ok(None);
 	};
-	let Some(tree) = parse_cached(&code, language)? else {
+	let Some(tree) = parse_cached(&code, language, path.as_deref())? else {
 		return Ok(None);
 	};
 	let root = tree.root_node();
@@ -1081,7 +1082,7 @@ mod tests {
 			return Some(Vec::new());
 		}
 		let language = resolve_language(None, Some(path))?;
-		let tree = parse_cached(code, language).expect("grammar loads")?;
+		let tree = parse_cached(code, language, None).expect("grammar loads")?;
 		let root = tree.root_node();
 		if root.has_error() {
 			return None;
@@ -1132,16 +1133,30 @@ mod tests {
 	/// Repository `.ts` / `.py` / `.rs` sources, sorted for determinism. With a
 	/// budget, files are taken on a stride so the sample spans the whole tree
 	/// instead of one directory, skipping anything over 64 KiB.
-	fn repo_files(byte_budget: Option<usize>) -> Vec<PathBuf> {
+	async fn repo_files(byte_budget: Option<usize>) -> Vec<PathBuf> {
 		let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-		let mut files: Vec<PathBuf> = ignore::WalkBuilder::new(&root)
-			.build()
-			.filter_map(Result::ok)
-			.filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
-			.map(ignore::DirEntry::into_path)
-			.filter(|path| {
-				matches!(path.extension().and_then(std::ffi::OsStr::to_str), Some("ts" | "py" | "rs"))
+		let opts = pi_walker::walk::Options { gitignore: true, skip_git: true, ..Default::default() };
+		let walked =
+			pi_walker::walk::collect(&pi_walker::Fs::native(), &root, &opts, false, |_, entry| {
+				let wanted = entry.file_type == pi_walker::FileType::File
+					&& matches!(
+						entry
+							.rel_path()
+							.extension()
+							.and_then(std::ffi::OsStr::to_str),
+						Some("ts" | "py" | "rs")
+					);
+				if wanted {
+					pi_walker::walk::Action::Continue
+				} else {
+					pi_walker::walk::Action::Skip
+				}
 			})
+			.await
+			.expect("repository should walk");
+		let mut files: Vec<PathBuf> = walked
+			.iter()
+			.map(|entry| root.join(entry.rel_path()))
 			.collect();
 		files.sort();
 		let Some(budget) = byte_budget else {
@@ -1181,8 +1196,8 @@ mod tests {
 		(comparisons, none_verdicts)
 	}
 
-	#[test]
-	fn pruned_walk_matches_unpruned_on_repo_corpus_sample() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn pruned_walk_matches_unpruned_on_repo_corpus_sample() {
 		// Sandboxed runners (bazel test) stage only this crate's declared inputs,
 		// so the repository corpus this sweep samples is absent (or a symlink
 		// farm the walker cannot see through). Both surface as an empty scan —
@@ -1193,7 +1208,7 @@ mod tests {
 			eprintln!("skipping: repository corpus unavailable at {}", root.display());
 			return;
 		}
-		let files = repo_files(Some(768 * 1024));
+		let files = repo_files(Some(768 * 1024)).await;
 		if files.is_empty() {
 			eprintln!("skipping: repository corpus scan found no sources at {}", root.display());
 			return;
@@ -1203,11 +1218,11 @@ mod tests {
 		assert!(comparisons > 300, "expected a broad sweep, got {comparisons} comparisons");
 	}
 
-	#[test]
+	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "full repository sweep; run with `cargo nextest run --release -p pi-ast \
 	            --run-ignored ignored-only`"]
-	fn pruned_walk_matches_unpruned_on_full_repo_corpus() {
-		let files = repo_files(None);
+	async fn pruned_walk_matches_unpruned_on_full_repo_corpus() {
+		let files = repo_files(None).await;
 		assert!(files.len() > 3000, "expected the whole corpus, got {}", files.len());
 		let (comparisons, _) = sweep_corpus(&files);
 		println!("full corpus: {} files, {comparisons} comparisons", files.len());
@@ -1305,7 +1320,7 @@ mod tests {
 	/// i.e. nodes ending immediately after a newline.
 	fn nodes_with_content_end_before_raw_end(code: &str, path: &str) -> usize {
 		let language = resolve_language(None, Some(path)).expect("known language");
-		let tree = parse_cached(code, language)
+		let tree = parse_cached(code, language, None)
 			.expect("grammar loads")
 			.expect("tree");
 		let mut count = 0;

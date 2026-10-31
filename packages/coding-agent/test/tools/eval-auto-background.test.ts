@@ -122,7 +122,7 @@ describe("EvalTool auto-background", () => {
 
 	it("backgrounds a cell that outlives the threshold and delivers its result", async () => {
 		const deliveries: Array<{ jobId: string; text: string }> = [];
-		const updates: string[] = [];
+		const updates: Array<{ text: string; state?: string }> = [];
 		const asyncJobManager = new AsyncJobManager({
 			onJobComplete: async (jobId, text) => {
 				deliveries.push({ jobId, text });
@@ -146,7 +146,10 @@ describe("EvalTool auto-background", () => {
 			{ language: "js", code: "print('start'); await work(); print('done')" },
 			undefined,
 			update => {
-				updates.push(update.content?.find(block => block.type === "text")?.text ?? "");
+				updates.push({
+					text: update.content?.find(block => block.type === "text")?.text ?? "",
+					state: update.details?.async?.state,
+				});
 			},
 		);
 
@@ -166,15 +169,18 @@ describe("EvalTool auto-background", () => {
 		}
 		const runningJob = asyncJobManager.getJob(jobId);
 		expect(runningJob?.status).toBe("running");
-		const updatesAtBackground = updates.slice();
+		const updatesAtBackground = updates.length;
 		cell.release();
 		await runningJob?.promise;
 		await asyncJobManager.drainDeliveries({ timeoutMs: 1 });
 		expect(deliveries).toHaveLength(1);
 		expect(deliveries[0]?.jobId).toBe(jobId);
 		expect(deliveries[0]?.text).toContain("done");
-		// Tool-call updates stop once the cell is backgrounded.
-		expect(updates).toEqual(updatesAtBackground);
+		// The job keeps filling the call's card and settles it with its outcome.
+		const jobFrames = updates.slice(updatesAtBackground);
+		expect(jobFrames.every(frame => frame.state !== undefined)).toBe(true);
+		expect(jobFrames.at(-1)?.state).toBe("completed");
+		expect(jobFrames.at(-1)?.text).toContain("done");
 		await asyncJobManager.dispose();
 	});
 

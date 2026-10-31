@@ -245,7 +245,7 @@ export class RawSseViewerComponent implements Component {
 	/** The action bar's buttons run the same code as their keys. */
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (event.type !== "action") return;
-		if (event.act === "copy") this.#copyAll();
+		if (event.act === "copy-raw") this.#copyAll();
 		else if (event.act === "close") this.#close();
 	}
 
@@ -305,7 +305,7 @@ export class RawSseViewerComponent implements Component {
 							"status",
 						),
 					actionBar([
-						actionButton("Copy raw", "copy", { keys: "ctrl+c", tone: "accent" }),
+						actionButton("Copy raw", "copy-raw", { keys: "ctrl+c", tone: "accent" }),
 						null,
 						actionButton("Close", "close", { keys: "escape" }),
 					]),

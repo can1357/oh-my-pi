@@ -32,17 +32,19 @@
  *   billing (32px × 1.2, 10k-patch budget at `detail: "original"`) is
  *   area-proportional, so resolution cannot improve chars/$ — 1568 stays.
  *   `detail: "high"` would downgrade (2,500-patch cap); `original` is sent.
- * - **Unknown providers** default to `8on22-bw`. `providerImageBudget` still
- *   caps per-request images per provider so inline imaging cannot flood a
- *   request with attachments, but the old OpenRouter-specific 8-image cap is
- *   gone; routers now use the same permissive budget as direct
- *   Anthropic/Claude lines unless configured otherwise upstream.
+ * - **Unknown providers** default to `8on22-bw`. `providerImageBudget` caps
+ *   per-request images at the deployment's catalog `image-count-budget`, so
+ *   inline imaging cannot flood a request with attachments.
  *
  * The per-frame token estimate follows the reading model's catalog
  * `image-tokenization` rule (its lineage, not the gateway), so Claude behind
  * OpenRouter is billed as Claude and Opus 4.6 under its 1,568-token cap.
  * Models without a lineage rule fall back to the catalog rule for their wire
  * API; a reader with neither costs {@link FRAME_TOKEN_ESTIMATE} per frame.
+ *
+ * A host that downscales every image before the model reads it (catalog
+ * `image-max-edge`, e.g. Cursor) gets frames rendered at that edge instead,
+ * so glyphs reach the model at the size they were drawn.
  *
  * The whole pass is local and deterministic — no LLM call, no API key, no
  * latency beyond rendering. Rasterization and PNG encoding happen in native
@@ -51,17 +53,21 @@
  * re-attached to the compaction summary message on every context rebuild.
  */
 
-import type { Api, ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
+import type { Api, ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
+import { reachesBudgetedHost } from "@oh-my-pi/pi-ai/providers/anthropic-state";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import {
 	type ImageSize,
 	type ImageTokenization,
 	type ImageTokenizationTarget,
 	imageTokens,
+	resolveImageMaxEdge,
 	resolveImageTokenization,
 } from "@oh-my-pi/pi-catalog/compat/image-tokenization";
+import { resolveImageCountBudget, resolveInlineImageByteBudget } from "@oh-my-pi/pi-catalog/compat/request-size";
 import { classifyModel, compareRevision, parseRevision } from "@oh-my-pi/pi-catalog/identity";
 import { renderSnapcompactPng, snapcompactSupportedChars } from "@oh-my-pi/pi-natives";
-import { formatGroupedPaths, prompt } from "@oh-my-pi/pi-utils";
+import { formatGroupedPaths, isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import fileOperationsTemplate from "./prompts/file-operations.md" with { type: "text" };
 import snapcompactSummaryPrompt from "./prompts/snapcompact-summary.md" with { type: "text" };
@@ -96,12 +102,14 @@ export interface Shape {
 	frameSize: number;
 	/** Per-frame billed-token estimate for the shape's target provider. */
 	frameTokenEstimate: number;
+	/** `frameTokenEstimate` comes from a catalog rule measured against provider billing. */
+	frameTokensVerified?: boolean;
 	/** Resolution hint attached to frame images (OpenAI-only). */
 	imageDetail?: ImageContent["detail"];
 }
 
 /** Geometry half of a {@link Shape}: everything except provider billing. */
-export type ShapeGeometry = Omit<Shape, "frameTokenEstimate" | "imageDetail">;
+export type ShapeGeometry = Omit<Shape, "frameTokenEstimate" | "frameTokensVerified" | "imageDetail">;
 
 /**
  * Frame variants exercised by the SQuAD evals in `research/` that the native
@@ -273,7 +281,22 @@ export function frameTokens(billing: FrameBilling, size: ImageSize): number {
 function priceShape(base: ShapeGeometry, target: ShapeTarget | undefined): Shape {
 	const billing = frameBilling(target);
 	const frameTokenEstimate = frameTokens(billing, { width: base.frameSize, height: base.frameSize });
-	return { ...base, frameTokenEstimate, ...(billing.imageDetail && { imageDetail: billing.imageDetail }) };
+	return {
+		...base,
+		frameTokenEstimate,
+		...(billing.rule?.verified && { frameTokensVerified: true }),
+		...(billing.imageDetail && { imageDetail: billing.imageDetail }),
+	};
+}
+
+/**
+ * Per-frame tokens archive sizing charges `shape`: its own price when provider
+ * billing verified it, else at least {@link FRAME_TOKEN_ESTIMATE}.
+ */
+export function plannedFrameTokens(shape: Shape): number {
+	return shape.frameTokensVerified
+		? shape.frameTokenEstimate
+		: Math.max(FRAME_TOKEN_ESTIMATE, shape.frameTokenEstimate);
 }
 
 /** Eval-validated shapes, keyed by the provider family they won on. */
@@ -320,6 +343,7 @@ export function isShape(value: unknown): value is Shape {
 		shape.frameSize > 0 &&
 		typeof shape.frameTokenEstimate === "number" &&
 		shape.frameTokenEstimate > 0 &&
+		(shape.frameTokensVerified === undefined || typeof shape.frameTokensVerified === "boolean") &&
 		(detail === undefined || detail === "auto" || detail === "low" || detail === "high" || detail === "original")
 	);
 }
@@ -414,16 +438,23 @@ export interface ShapeTarget {
  * Pick the frame shape for a reader. An explicit `variant` (anything but
  * `"auto"`) forces that geometry; otherwise the model id selects the
  * eval-winning shape — and frame size — for its model line, falling back to
- * the API family's winner when the model is unmeasured. Billing (token
+ * the API family's winner when the model is unmeasured. Either way the frame
+ * is no wider than the host's catalog `image-max-edge`. Billing (token
  * estimate, detail hint) is computed for the resolved frame size from the
  * model's catalog image rule. Accepts a full pi-ai `Model` or any
  * `{ api, id }` subset.
  */
 export function resolveShape(model?: ShapeTarget, variant?: ShapeVariantName | "auto"): Shape {
-	if (variant && variant !== "auto") return priceShape(SHAPE_VARIANTS[variant], model);
+	if (variant && variant !== "auto") return priceShape(fitHostImageEdge(SHAPE_VARIANTS[variant], model), model);
 	const ideal = model?.id ? idealShapeVariant(model.id) : undefined;
 	const base = SHAPE_VARIANTS[ideal?.variant ?? FAMILY_VARIANT[apiFamily(model?.api)]];
-	return priceShape(ideal?.frameSize ? { ...base, frameSize: ideal.frameSize } : base, model);
+	return priceShape(fitHostImageEdge(ideal?.frameSize ? { ...base, frameSize: ideal.frameSize } : base, model), model);
+}
+
+/** Shrink `base` to the longest image edge `target`'s host passes to the model. */
+function fitHostImageEdge(base: ShapeGeometry, target: ShapeTarget | undefined): ShapeGeometry {
+	const maxEdge = target ? resolveImageMaxEdge(target) : undefined;
+	return maxEdge !== undefined && base.frameSize > maxEdge ? { ...base, frameSize: maxEdge } : base;
 }
 
 const CJK_HEAVY_MIN_WIDE_CHARS = 8;
@@ -483,11 +514,11 @@ export const MAX_FRAMES_DEFAULT = 80;
  *  text region (newest) — with the denser low-quality tier filling the middle. */
 export const HQ_EDGE_FRAMES = 3;
 
-/** Conservative per-frame token estimate for archive sizing and for frames of
- *  unknown size — the upper bound across shapes: high-res Claude frames hit the
- *  4,784 visual-token cap, billed at +5% margin (ceil(4784 * 1.05)). Keeps the
- *  overflow guard from undercounting a high-res archive at the raised
- *  {@link MAX_FRAMES_DEFAULT}. */
+/** Conservative per-frame token estimate for sizing archives whose frame price
+ *  is not billing-verified, and for frames of unknown size — the upper bound
+ *  across shapes: high-res Claude frames hit the 4,784 visual-token cap, billed
+ *  at +5% margin (ceil(4784 * 1.05)). Keeps the overflow guard from
+ *  undercounting a high-res archive at the raised {@link MAX_FRAMES_DEFAULT}. */
 export const FRAME_TOKEN_ESTIMATE = 5024;
 
 /** Conservative upper bound for one persisted frame's base64 payload. The
@@ -496,22 +527,32 @@ export const FRAME_TOKEN_ESTIMATE = 5024;
  *  standing request bodies at large context windows. */
 export const FRAME_DATA_BYTES_ESTIMATE = 170_000;
 
-/** Maximum snapcompact image base64 carried in every rebuilt provider request.
- *  Above this, provider backends can accept the HTTP body but fail mid-stream
+/** Frame payload cap for a deployment without a catalog `inline-image-byte-budget`:
+ *  an unmeasured backend can accept the HTTP body and still fail mid-stream
  *  with opaque 5xx errors. Keep this independent from visual-token budgeting:
  *  a 1M-token model can afford 70 images on paper, but not the resulting
  *  ~11 MB JSON payload on every turn. */
-export const FRAME_DATA_BYTES_BUDGET = 3_000_000;
+export const DEFAULT_FRAME_DATA_BYTES_BUDGET = 3_000_000;
+
+/** Base64 image bytes the archive frames riding every request to `model` may
+ *  carry: half the deployment's inline-image byte budget, else
+ *  {@link DEFAULT_FRAME_DATA_BYTES_BUDGET}. Frames are the oldest images in the
+ *  request, so the send-time byte clamp evicts them first; the other half stays
+ *  free for live screenshots. */
+export function frameDataBytesBudget(model: Model | undefined): number {
+	const inlineBudget = model ? resolveInlineImageByteBudget(model, reachesBudgetedHost(model)) : undefined;
+	return inlineBudget === undefined ? DEFAULT_FRAME_DATA_BYTES_BUDGET : Math.floor(inlineBudget / 2);
+}
 
 /** Default edge variants whose frames shrink with pixel area. Inkier variants
  *  keep the full {@link FRAME_DATA_BYTES_ESTIMATE} at any frame size. */
 const AREA_PRICED_VARIANTS: readonly ShapeGeometry[] = [SHAPE_VARIANTS["8on22-bw"], SHAPE_VARIANTS["11on16-bw"]];
 
-/** Frame-count cap implied by {@link FRAME_DATA_BYTES_BUDGET} for frames
- *  rendered by `shape`. {@link AREA_PRICED_VARIANTS} below 1932px are charged
+/** Frame-count cap a `budget` of base64 bytes implies for frames rendered by
+ *  `shape`. {@link AREA_PRICED_VARIANTS} below 1932px are charged
  *  {@link FRAME_DATA_BYTES_ESTIMATE} scaled by pixel area; every other shape
  *  pays the full estimate. */
-export function maxFramesForDataBudget(shape: ShapeGeometry): number {
+export function maxFramesForDataBudget(shape: ShapeGeometry, budget: number): number {
 	const areaPriced = AREA_PRICED_VARIANTS.some(
 		variant =>
 			variant.font === shape.font &&
@@ -525,7 +566,7 @@ export function maxFramesForDataBudget(shape: ShapeGeometry): number {
 	);
 	const areaRatio = areaPriced ? (shape.frameSize / HIGH_RES_ANTHROPIC_VARIANT.frameSize) ** 2 : 1;
 	const frameBytes = Math.min(FRAME_DATA_BYTES_ESTIMATE, Math.ceil(FRAME_DATA_BYTES_ESTIMATE * areaRatio));
-	return Math.max(1, Math.floor(FRAME_DATA_BYTES_BUDGET / frameBytes));
+	return Math.max(1, Math.floor(budget / frameBytes));
 }
 
 /** Base64 byte length for persisted snapcompact frames. */
@@ -533,36 +574,26 @@ export function frameDataBytes(frames: readonly Pick<Frame, "data">[]): number {
 	return frames.reduce((sum, frame) => sum + frame.data.length, 0);
 }
 
-/**
- * Per-request image-count budgets by provider id. These cap how many images an
- * entire request may carry (archive/system-prompt/tool-result imaging combined).
- * The values are conservative policy caps under the vendor hard limits
- * (Anthropic 100, OpenAI 500, Gemini ~2500); unknown providers fall to a safe
- * floor rather than sending unbounded attachments.
- */
-export const PROVIDER_IMAGE_BUDGETS: Record<string, number> = {
-	anthropic: 90,
-	"amazon-bedrock": 90,
-	openai: 200,
-	"openai-codex": 200,
-	google: 200,
-	"google-vertex": 200,
-	"google-gemini-cli": 200,
-	openrouter: 90,
-	umans: 10,
-};
-
-/** Safe floor for unknown providers (strictest mainstream measured: Groq ~5). */
+/** Safe floor for a deployment whose catalog rules set no `image-count-budget`
+ *  (strictest mainstream measured: Groq ~5). */
 export const DEFAULT_PROVIDER_IMAGE_BUDGET = 5;
 
-/** Per-request image budget for `provider`; unknown providers get the floor. */
-export function providerImageBudget(provider: string | undefined): number {
-	return (provider !== undefined ? PROVIDER_IMAGE_BUDGETS[provider] : undefined) ?? DEFAULT_PROVIDER_IMAGE_BUDGET;
+/** Most images one request to `model`'s deployment may carry, archive,
+ *  system-prompt and tool-result imaging combined. */
+export function providerImageBudget(model: Model | undefined): number {
+	return (
+		(model ? resolveImageCountBudget(model, reachesBudgetedHost(model)) : undefined) ?? DEFAULT_PROVIDER_IMAGE_BUDGET
+	);
 }
 
-/** Archive frame cap for `provider`: image budget, never above {@link MAX_FRAMES_DEFAULT}. */
-export function providerFrameBudget(provider: string | undefined): number {
-	return Math.min(providerImageBudget(provider), MAX_FRAMES_DEFAULT);
+/** Archive frame cap for `model`: its image budget, never above {@link MAX_FRAMES_DEFAULT}. */
+export function providerFrameBudget(model: Model | undefined): number {
+	return Math.min(providerImageBudget(model), MAX_FRAMES_DEFAULT);
+}
+
+/** Whether `model` may get a fresh `read` result as frames (catalog `snapcompact-image-reads`, opt-in). */
+export function readerImagesReadResults(model: Model): boolean {
+	return resolveCatalogPolicy(model).snapcompactImageReads === true;
 }
 
 /** Key under `CompactionEntry.preserveData` holding the frame archive. */
@@ -612,6 +643,16 @@ export interface Archive {
 	textHead?: string;
 	/** Newest text region kept verbatim around the imaged middle. */
 	textTail?: string;
+	/** The same history re-rendered for a reader that excludes assistant
+	 *  reasoning ({@link SerializeOptions.includeThinking} `false`), when this
+	 *  archive carries it. Read through {@link viewWithoutThinking}. */
+	withoutThinking?: ArchiveView;
+}
+
+/** What a reader gets for one compaction: the summary text and the archive it introduces. */
+export interface ArchiveView {
+	summary: string;
+	archive: Archive;
 }
 
 export interface Geometry {
@@ -803,7 +844,8 @@ export interface SerializeOptions {
 	 *  louder than archived tool noise. Defaults to `true`. */
 	dimToolResults?: boolean;
 	/** Serialize assistant reasoning as `¶think:` sections. Defaults to `true`.
-	 *  Callers archiving for a Claude/Anthropic-dialect model set this `false`:
+	 *  Callers archiving for a reader whose classifier refuses quoted reasoning
+	 *  ({@link readerIncludesThinking} `false`) set this `false`:
 	 *  the archive frames are replayed as text into every later request, and
 	 *  reasoning rendered back to Claude trips its `reasoning_extraction`
 	 *  classifier (issue #6093). */
@@ -1736,9 +1778,8 @@ export function frames(text: string, options?: Pick<RenderManyOptions, "shape" |
 // Archive helpers
 // ============================================================================
 
-/** Validate and extract a persisted frame archive from `preserveData`. */
-export function getPreservedArchive(preserveData: Record<string, unknown> | undefined): Archive | undefined {
-	const candidate = preserveData?.[PRESERVE_KEY];
+/** Validate one persisted archive object (frames, counters, text regions). */
+function validateArchive(candidate: unknown): Archive | undefined {
 	if (!candidate || typeof candidate !== "object") return undefined;
 	const archive = candidate as Archive;
 	const frames = Array.isArray(archive.frames)
@@ -1767,6 +1808,18 @@ export function getPreservedArchive(preserveData: Record<string, unknown> | unde
 		...(textHead !== undefined ? { textHead } : {}),
 		...(textTail !== undefined ? { textTail } : {}),
 	};
+}
+
+/** Validate and extract a persisted frame archive from `preserveData`, with its
+ *  {@link Archive.withoutThinking} variant when that is valid too. */
+export function getPreservedArchive(preserveData: Record<string, unknown> | undefined): Archive | undefined {
+	const slot = preserveData?.[PRESERVE_KEY];
+	const archive = validateArchive(slot);
+	if (!archive || !isRecord(slot) || !isRecord(slot.withoutThinking)) return archive;
+	const { summary, archive: variant } = slot.withoutThinking;
+	if (typeof summary !== "string" || !summary) return archive;
+	const variantArchive = validateArchive(variant);
+	return variantArchive ? { ...archive, withoutThinking: { summary, archive: variantArchive } } : archive;
 }
 
 /** Drop the persisted frame archive ({@link PRESERVE_KEY}) from `preserveData`,
@@ -1971,6 +2024,53 @@ export function historyBlocks(archive: Archive, options: HistoryBlockOptions = {
 	return blocks;
 }
 
+/**
+ * Re-applies a smaller frame byte budget to blocks {@link historyBlocks} already built: keeps the newest frames that
+ * fit, priced as {@link historyBlocks} prices them, and replaces each run of dropped frames with one omission notice.
+ * Returns `blocks` itself when every frame fits.
+ */
+export function capFrameDataBytes(
+	blocks: (TextContent | ImageContent)[],
+	maxFrameDataBytes: number,
+): (TextContent | ImageContent)[] {
+	const kept = new Set<number>();
+	let usedBytes = 0;
+	let dropped = false;
+	for (let index = blocks.length - 1; index >= 0; index--) {
+		const block = blocks[index];
+		if (block.type !== "image") continue;
+		if (usedBytes + block.data.length > maxFrameDataBytes) {
+			dropped = true;
+			continue;
+		}
+		usedBytes += block.data.length;
+		kept.add(index);
+	}
+	if (!dropped) return blocks;
+
+	const capped: (TextContent | ImageContent)[] = [];
+	let omittedFrames = 0;
+	let omittedBytes = 0;
+	const flushOmitted = (): void => {
+		if (omittedFrames === 0) return;
+		capped.push({ type: "text", text: omittedFrameNotice(omittedFrames, omittedBytes) });
+		omittedFrames = 0;
+		omittedBytes = 0;
+	};
+	for (let index = 0; index < blocks.length; index++) {
+		const block = blocks[index];
+		if (block.type === "image" && !kept.has(index)) {
+			omittedFrames++;
+			omittedBytes += block.data.length;
+			continue;
+		}
+		flushOmitted();
+		capped.push(block);
+	}
+	flushOmitted();
+	return capped;
+}
+
 // ============================================================================
 // Compaction entry point
 // ============================================================================
@@ -2105,27 +2205,131 @@ function planArchive(text: string, high: Shape, low: Shape, maxFrames: number): 
 	};
 }
 
+const THINK_LABEL = "¶think:";
+
+/** A scope label opening a serialized section, at the start of a line in raw
+ *  (`\n`) or normalized ({@link NEWLINE_GLYPH}) archive text. */
+const SECTION_START = new RegExp(`(?<=^|[\\n${NEWLINE_GLYPH}])(?=¶(?:user|think|ai|call):)`);
+
+const TRAILING_LINE_BREAKS = new RegExp(`[\\n${NEWLINE_GLYPH}]+$`);
+
 /**
- * Drop `¶think:` sections from serialized archive source text.
+ * Drop every `¶think:` section from archive source text: its label line and
+ * every following line up to the next scope label.
  *
- * Archives written before {@link SerializeOptions.includeThinking} existed bake
- * reasoning into their kept source; replaying it to Claude trips the
- * `reasoning_extraction` classifier (issue #6093). Re-compaction re-renders the
- * whole unfolded source, so scrubbing the prior text heals a poisoned session
- * at its next compaction. Conservative by construction: only sections that
- * start with `¶think:` at a section boundary are dropped.
+ * Archives rendered with {@link SerializeOptions.includeThinking} (or before it
+ * existed) bake reasoning into their kept source; replaying it to Claude trips
+ * the `reasoning_extraction` classifier (issue #6093). Re-rendering for a reader
+ * that excludes thinking scrubs the prior text with this. Paragraph breaks
+ * inside a thought are line breaks like any other, so a section ends only at
+ * the next label; a label inside a dimmed tool-output body is output text.
  */
 function stripThinkingSections(text: string): string {
-	return text
-		.split(NEWLINE_GLYPH)
-		.map(segment =>
-			segment
-				.split(/\n\n(?=¶(?:user|think|ai|call):)/)
-				.filter(section => !section.startsWith("¶think:"))
-				.join("\n\n"),
-		)
-		.filter(segment => segment.length > 0)
+	const sections: string[] = [];
+	let dimOpen = false;
+	for (const piece of text.split(SECTION_START)) {
+		if (dimOpen) sections[sections.length - 1] += piece;
+		else sections.push(piece);
+		const on = piece.lastIndexOf(DIM_ON);
+		const off = piece.lastIndexOf(DIM_OFF);
+		if (on !== off) dimOpen = on > off;
+	}
+	const kept = sections.filter(section => !section.startsWith(THINK_LABEL));
+	if (kept.length === sections.length) return text;
+	const stripped = kept.join("");
+	// A dropped final section leaves its predecessor's line break dangling.
+	return sections.at(-1)?.startsWith(THINK_LABEL) ? stripped.replace(TRAILING_LINE_BREAKS, "") : stripped;
+}
+
+/**
+ * Whether an archive read by `model` may carry assistant reasoning. The archive
+ * replays as text into every later request, and a reader whose classifier
+ * refuses reasoning quoted back into its input (the `classifier-cot-extraction`
+ * catalog axis, set for Claude: `reasoning_extraction`, issue #6093) gets
+ * `¶think:` sections and their legend left out.
+ */
+export function readerIncludesThinking(model: Model): boolean {
+	return resolveCatalogPolicy(model).classifierCotExtraction !== true;
+}
+
+/** Whether a snapcompact summary declares `¶think:` reasoning scopes: true for
+ *  archives rendered with {@link SerializeOptions.includeThinking}, and for
+ *  summaries written before that legend was gated on it. */
+export function summaryIncludesThinking(summary: string): boolean {
+	return summary.includes(THINK_LABEL);
+}
+
+/** The reasoning scope in a scope legend, current and earlier summary wordings
+ *  alike, wherever it sits: a summary, or one archived inside another archive. */
+const LEGEND_REASONING_SCOPE =
+	/`¶user:`, `¶think:`, (`¶ai:`, (?:and )?`¶call:`:? (?:open )?user, )assistant reasoning, /g;
+
+/** `text` (a summary or archive source, raw or normalized) without its
+ *  `¶think:` sections, and with the reasoning scope dropped from any legend. */
+export function textWithoutThinking(text: string): string {
+	return stripThinkingSections(text).replace(LEGEND_REASONING_SCOPE, "`¶user:`, $1");
+}
+
+const PREVIOUS_SUMMARY_HEAD = "[Summary of earlier history]";
+
+/**
+ * `archive`'s kept source as a reader that excludes reasoning may unfold it.
+ * An archive persisted without {@link Archive.text} keeps only its edges, and
+ * the tail's lines before its first scope label continue a section cut off in
+ * the dropped middle, whose scope is unknown; they are left out.
+ */
+function sourceForReaderWithoutThinking(archive: Archive): string {
+	if (archive.text) return archive.text;
+	const tail = archive.textTail ?? "";
+	const labelled = tail.search(SECTION_START);
+	return [archive.textHead, labelled < 0 ? "" : tail.slice(labelled)]
+		.filter((part): part is string => typeof part === "string" && part.length > 0)
 		.join(NEWLINE_GLYPH);
+}
+
+/**
+ * What a reader that excludes assistant reasoning reads for a compaction
+ * whose summary is `summary` and archive `archive`: the archive's
+ * {@link Archive.withoutThinking} variant when it carries one, the original
+ * when its summary declares no reasoning, else a fail-closed text-only form.
+ * That form keeps no frames (pixels cannot be scrubbed), takes its text edges
+ * from the source after every `¶think:` section is removed (so a section
+ * crossing an edge cannot leak), counts the dropped middle as truncated, and
+ * re-renders the summary without the reasoning legend; `details` restores its
+ * file list.
+ */
+export function viewWithoutThinking(summary: string, archive: Archive, details?: CompactionDetails): ArchiveView {
+	if (archive.withoutThinking) return archive.withoutThinking;
+	if (!summaryIncludesThinking(summary)) return { summary, archive };
+	const source = sourceForReaderWithoutThinking(archive);
+	const text = textWithoutThinking(source);
+	const headChars = archive.textHead?.length ?? 0;
+	const tailChars = archive.textTail?.length ?? 0;
+	const fits = headChars + tailChars >= text.length;
+	const textHead = fits ? text : text.slice(0, headChars);
+	const textTail = fits || tailChars === 0 ? "" : text.slice(text.length - tailChars);
+	const truncatedChars = archive.truncatedChars + (fits ? 0 : text.length - headChars - tailChars);
+	const files = details ? formatFileList(details.readFiles, details.modifiedFiles) : "";
+	return {
+		summary:
+			textHead.length === 0 && files.length === 0
+				? "No prior history."
+				: prompt.render(snapcompactSummaryPrompt, {
+						frameCount: 0,
+						truncatedChars,
+						includedPreviousSummary: text.startsWith(PREVIOUS_SUMMARY_HEAD),
+						files: files.length > 0 ? files : undefined,
+						includeThinking: false,
+					}),
+		archive: {
+			frames: [],
+			totalChars: textHead.length + textTail.length,
+			truncatedChars,
+			...(text ? { text } : {}),
+			...(textHead ? { textHead } : {}),
+			...(textTail ? { textTail } : {}),
+		},
+	};
 }
 
 /**
@@ -2153,21 +2357,23 @@ export async function compact<TMessage = Message>(
 	const llmMessages = (options?.convertToLlm ?? defaultConvertToLlm)(messages);
 	const serialized = serializeConversation(llmMessages, options);
 	const previousArchive = getPreservedArchive(previousPreserveData);
+	const excludeThinking = options?.includeThinking === false;
 	const previousTextRaw =
-		previousArchive?.text ??
-		[previousArchive?.textHead, previousArchive?.textTail]
-			.filter((part): part is string => typeof part === "string" && part.length > 0)
-			.join(NEWLINE_GLYPH);
+		excludeThinking && previousArchive
+			? sourceForReaderWithoutThinking(previousArchive)
+			: (previousArchive?.text ??
+				[previousArchive?.textHead, previousArchive?.textTail]
+					.filter((part): part is string => typeof part === "string" && part.length > 0)
+					.join(NEWLINE_GLYPH));
 	// Legacy archives may carry `¶think:` sections from before includeThinking
-	// existed; scrub them when this compaction excludes thinking so the
-	// re-rendered archive stops replaying reasoning (issue #6093). They may
-	// also carry data URLs a pre-guard slice cut at any offset; heal those in
-	// archive context before the text is folded into the new source.
+	// existed, and any archive may carry an earlier summary's reasoning legend;
+	// scrub both when this compaction excludes thinking so the re-rendered
+	// archive stops replaying reasoning (issue #6093). They may also carry data
+	// URLs a pre-guard slice cut at any offset; heal those in archive context
+	// before the text is folded into the new source.
 	const previousTextHealed = elideDataUrls(previousTextRaw, "archive");
 	const previousText =
-		options?.includeThinking === false && previousTextHealed.length > 0
-			? stripThinkingSections(previousTextHealed)
-			: previousTextHealed;
+		excludeThinking && previousTextHealed.length > 0 ? textWithoutThinking(previousTextHealed) : previousTextHealed;
 	const hasPreviousText = previousText.length > 0;
 	const includedPreviousSummary = !hasPreviousText && !!previousSummary;
 	const shapeProbeText = renderabilityProbeText(serialized, previousPreserveData, previousSummary);
@@ -2183,7 +2389,8 @@ export async function compact<TMessage = Message>(
 	let archiveText = normalize(serialized, { shape: high });
 
 	if (includedPreviousSummary && previousSummary) {
-		const head = `[Summary of earlier history] ${normalize(previousSummary, { shape: high })}`;
+		const lead = excludeThinking ? textWithoutThinking(previousSummary) : previousSummary;
+		const head = `${PREVIOUS_SUMMARY_HEAD} ${normalize(lead, { shape: high })}`;
 		archiveText = archiveText.length > 0 ? `${head} [Recent conversation] ${archiveText}` : head;
 	}
 

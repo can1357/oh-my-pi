@@ -222,8 +222,10 @@ ON CONFLICT(model_key) DO UPDATE SET
 	ttft_ms = (CASE WHEN model_perf.samples >= ${MODEL_PERF_DECAY_AT} THEN model_perf.ttft_ms * 0.5 ELSE model_perf.ttft_ms END) + excluded.ttft_ms,
 	updated_at = ${SQLITE_NOW_EPOCH}`,
 		);
+		// `model_key TEXT PRIMARY KEY` admits NULL (SQLite rowid-table quirk); a NULL
+		// key would break every consumer that treats perf keys as selectors.
 		this.#listModelPerfStmt = this.#db.prepare(
-			"SELECT model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms FROM model_perf",
+			"SELECT model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms FROM model_perf WHERE model_key IS NOT NULL",
 		);
 		this.#usageStmts = {
 			command: this.#prepareUsageStatements("command"),
@@ -281,6 +283,11 @@ CREATE TABLE IF NOT EXISTS hint_usage (
 CREATE TABLE IF NOT EXISTS meta (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS notice_claims (
+	key TEXT PRIMARY KEY,
+	expires_at_ms INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
@@ -551,6 +558,25 @@ FROM model_usage_legacy
 			this.#usageStmts[kind].upsert.run(name);
 		} catch (error) {
 			logger.warn("AgentStorage failed to record usage", { kind, name, error: String(error) });
+		}
+	}
+
+	/**
+	 * Claims a one-time notice: true only for the first claim of `key` among every
+	 * process sharing this database, so concurrent omp windows show it once. The
+	 * claim lasts until `expiresAtMs`, when the notice no longer applies.
+	 * Failures are logged and return false: a notice that cannot be recorded
+	 * stays unshown rather than repeating on every check.
+	 */
+	claimNotice(key: string, expiresAtMs: number): boolean {
+		try {
+			using prune = this.#db.prepare("DELETE FROM notice_claims WHERE expires_at_ms <= ?");
+			prune.run(Date.now());
+			using claim = this.#db.prepare("INSERT OR IGNORE INTO notice_claims (key, expires_at_ms) VALUES (?, ?)");
+			return claim.run(key, expiresAtMs).changes > 0;
+		} catch (error) {
+			logger.warn("AgentStorage failed to claim notice", { key, error: String(error) });
+			return false;
 		}
 	}
 

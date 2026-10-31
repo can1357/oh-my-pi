@@ -9,7 +9,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
-import { parseCloudflareAiGatewayCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare-ai-gateway";
+import { parseCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import {
 	getAgentDbPath,
 	getDbBusyTimeoutMs,
@@ -18,7 +18,7 @@ import {
 	logger,
 	openSqliteDatabase,
 } from "@oh-my-pi/pi-utils";
-import type { AuthCredentialStore, CredentialRefreshLeaseFence } from "./store";
+import type { AuthCredentialStore, CredentialRefreshLeaseFence, CredentialRefreshLeaseHolder } from "./store";
 import type {
 	AuthCredential,
 	DisabledCredentialSummary,
@@ -235,7 +235,11 @@ function resolveRowCredentialIdentityKey(provider: string, row: AuthRow): string
 	return credential?.type === "oauth" ? resolveCredentialIdentityKey(provider, credential) : null;
 }
 
-function matchesReplacementCredential(
+/**
+ * Whether upserting `incoming` replaces the active row holding `existing` (stored
+ * under `existingIdentityKey`) instead of inserting a new row beside it.
+ */
+export function matchesReplacementCredential(
 	provider: string,
 	existing: AuthCredential | null,
 	existingIdentityKey: string | null,
@@ -250,9 +254,9 @@ function matchesReplacementCredential(
 			const incomingToken = parseAlibabaTokenPlanCredential(incoming.key)?.token;
 			return existingToken !== undefined && existingToken === incomingToken;
 		}
-		if (provider === "cloudflare-ai-gateway") {
-			const existingToken = parseCloudflareAiGatewayCredential(existing.key)?.token;
-			const incomingToken = parseCloudflareAiGatewayCredential(incoming.key)?.token;
+		if (provider === "cloudflare-ai-gateway" || provider === "cloudflare-workers-ai") {
+			const existingToken = parseCloudflareCredential(existing.key)?.token;
+			const incomingToken = parseCloudflareCredential(incoming.key)?.token;
 			return existingToken !== undefined && existingToken === incomingToken;
 		}
 		return false;
@@ -304,6 +308,23 @@ function matchesReplacementCredential(
 		if (existingIdentifiers?.includes(identifier)) return true;
 	}
 	return false;
+}
+
+/**
+ * Whether two OAuth credentials belong to the same account of the same organization,
+ * whichever identity key each is stored under. The email decides when both carry one;
+ * otherwise a matching account id does, unless it is the organization's own id (a
+ * ChatGPT workspace id shared by every member). Project ids are shared between users
+ * (every consumer Antigravity login has the same one) and never count.
+ */
+export function isSameOAuthAccount(a: OAuthCredential, b: OAuthCredential): boolean {
+	const orgId = normalizeStoredAccountId(a.orgId);
+	if (orgId !== normalizeStoredAccountId(b.orgId)) return false;
+	const emailA = normalizeStoredEmail(a.email);
+	const emailB = normalizeStoredEmail(b.email);
+	if (emailA !== null && emailB !== null) return emailA === emailB;
+	const accountId = normalizeStoredAccountId(a.accountId);
+	return accountId !== null && accountId !== orgId && accountId === normalizeStoredAccountId(b.accountId);
 }
 
 function extractOAuthCredentialIdentifiers(credential: OAuthCredential): string[] {
@@ -408,6 +429,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#lastCredentialBlockSweepMs = Number.NEGATIVE_INFINITY;
 	#acquireCredentialRefreshLeaseStmt: Statement;
 	#getCredentialRefreshLeaseStmt: Statement;
+	#getCredentialRefreshLeaseHolderStmt: Statement;
+	#handBackCredentialRefreshLeaseStmt: Statement;
 	#renewCredentialRefreshLeaseStmt: Statement;
 	#releaseCredentialRefreshLeaseStmt: Statement;
 	#getCredentialStateStmt: Statement;
@@ -528,6 +551,12 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		);
 		this.#getCredentialRefreshLeaseStmt = this.#db.prepare(
 			"SELECT expires_at_ms FROM auth_credential_refresh_leases WHERE credential_id = ?",
+		);
+		this.#getCredentialRefreshLeaseHolderStmt = this.#db.prepare(
+			"SELECT owner, expires_at_ms FROM auth_credential_refresh_leases WHERE credential_id = ?",
+		);
+		this.#handBackCredentialRefreshLeaseStmt = this.#db.prepare(
+			`UPDATE auth_credential_refresh_leases SET owner = ?, expires_at_ms = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE credential_id = ? AND owner = ?`,
 		);
 		this.#renewCredentialRefreshLeaseStmt = this.#db.prepare(
 			`UPDATE auth_credential_refresh_leases SET expires_at_ms = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE credential_id = ? AND owner = ?`,
@@ -1764,6 +1793,24 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		return result.changes === 1;
 	}
 
+	getCredentialRefreshLeaseHolder(credentialId: number): CredentialRefreshLeaseHolder | undefined {
+		const row = this.#getCredentialRefreshLeaseHolderStmt.get(credentialId) as
+			| { owner?: string; expires_at_ms?: number }
+			| undefined;
+		if (typeof row?.owner !== "string" || typeof row.expires_at_ms !== "number") return undefined;
+		return { owner: row.owner, expiresAtMs: row.expires_at_ms };
+	}
+
+	handBackCredentialRefreshLease(credentialId: number, owner: string, holder: CredentialRefreshLeaseHolder): boolean {
+		const result = this.#handBackCredentialRefreshLeaseStmt.run(
+			holder.owner,
+			holder.expiresAtMs,
+			credentialId,
+			owner,
+		) as { changes: number };
+		return result.changes === 1;
+	}
+
 	releaseCredentialRefreshLease(credentialId: number, owner: string): void {
 		try {
 			this.#releaseCredentialRefreshLeaseStmt.run(credentialId, owner);
@@ -2114,6 +2161,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#deleteCachePrefixStmt.finalize();
 		this.#acquireCredentialRefreshLeaseStmt.finalize();
 		this.#getCredentialRefreshLeaseStmt.finalize();
+		this.#getCredentialRefreshLeaseHolderStmt.finalize();
+		this.#handBackCredentialRefreshLeaseStmt.finalize();
 		this.#renewCredentialRefreshLeaseStmt.finalize();
 		this.#releaseCredentialRefreshLeaseStmt.finalize();
 		this.#getCredentialStateStmt.finalize();

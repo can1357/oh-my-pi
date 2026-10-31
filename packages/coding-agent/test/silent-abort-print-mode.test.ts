@@ -16,6 +16,7 @@ import {
 	SHUTDOWN_CONSOLIDATE_BUDGET_MS,
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
+import * as telemetryExport from "../src/telemetry-export";
 
 function makeAssistantMessage(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
 	return {
@@ -57,19 +58,22 @@ function createMockSession(
 		extensionRunner: undefined,
 		subscribe: () => () => {},
 		prompt: async () => {},
+		disableStopTimeTodoReminders: () => {},
 		prepareForHeadlessAdvisorDrain: () => {},
 		setTextOutputCommitted: () => {},
 		waitForAdvisorCatchup: async () => true,
+		waitForIdle: async () => {},
 		dispose,
 	} as unknown as AgentSession;
 }
 
-describe("Print-mode silent-abort regression", () => {
+describe("Print-mode exit status", () => {
 	let exitSpy: Mock<typeof process.exit>;
 	let stderrOutput: string[];
 	let stdoutOutput: string[];
 
 	beforeEach(() => {
+		vi.spyOn(telemetryExport, "flushTelemetryExport").mockResolvedValue();
 		stderrOutput = [];
 		stdoutOutput = [];
 		vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
@@ -146,7 +150,7 @@ describe("Print-mode silent-abort regression", () => {
 		const session = createMockSession([errorMsg], async options => {
 			disposeOptions = options;
 		});
-		const exitCode = await runPrintMode(session, { mode: "text" });
+		const exitCode = await runPrintMode(session, { mode: "text", messages: ["hello"] });
 
 		// A real error SHOULD be written to stderr
 		const stderrText = stderrOutput.join("");
@@ -157,6 +161,48 @@ describe("Print-mode silent-abort regression", () => {
 		expect(disposeOptions?.mnemopiConsolidateTimeoutMs).toBe(SHUTDOWN_CONSOLIDATE_BUDGET_MS);
 	});
 
+	it("returns non-zero for the terminal length-stop error retained after session recovery", async () => {
+		const incomplete = makeAssistantMessage({ content: [], stopReason: "length" });
+		const failure = makeAssistantMessage({
+			content: [],
+			stopReason: "error",
+			errorMessage: "Length-stop recovery gave up",
+		});
+		const session = createMockSession([incomplete]);
+		let settled = false;
+		session.waitForIdle = async () => {
+			await Promise.resolve();
+			settled = true;
+		};
+		vi.spyOn(session, "getLastAssistantMessage").mockImplementation(() => (settled ? failure : incomplete));
+
+		expect(await runPrintMode(session, { mode: "text", messages: ["hello"] })).toBe(1);
+		expect(stderrOutput.join("")).toContain("Length-stop recovery gave up");
+	});
+
+	it("keeps a recovered mid-run API error from failing the one-shot exit", async () => {
+		const retryError = makeAssistantMessage({
+			content: [],
+			stopReason: "error",
+			errorMessage: "Temporary API failure",
+		});
+		const recovered = makeAssistantMessage({ content: [{ type: "text", text: "Recovered" }] });
+		const session = createMockSession([retryError]);
+		let settled = false;
+		session.waitForIdle = async () => {
+			await Promise.resolve();
+			settled = true;
+		};
+		vi.spyOn(session, "getLastAssistantMessage").mockImplementation(() => (settled ? recovered : retryError));
+
+		expect(await runPrintMode(session, { mode: "text", messages: ["hello"] })).toBe(0);
+		expect(stdoutOutput.join("")).toBe("Recovered\n");
+		// The admitted prompt turn writes the text working indicator to
+		// stderr; the pinned contract is that the recovered turn's error
+		// line never reaches it.
+		expect(stderrOutput.join("")).not.toContain("Temporary API failure");
+	});
+
 	it("prints thinking blocks only when printThoughts is enabled", async () => {
 		const message = makeAssistantMessage({
 			content: [
@@ -165,11 +211,11 @@ describe("Print-mode silent-abort regression", () => {
 			],
 		});
 
-		await runPrintMode(createMockSession([message]), { mode: "text" });
+		await runPrintMode(createMockSession([message]), { mode: "text", messages: ["hello"] });
 		expect(stdoutOutput.join("")).toBe("final answer\n");
 
 		stdoutOutput = [];
-		await runPrintMode(createMockSession([message]), { mode: "text", printThoughts: true });
+		await runPrintMode(createMockSession([message]), { mode: "text", printThoughts: true, messages: ["hello"] });
 		expect(stdoutOutput.join("")).toBe("inspect hidden branch\nfinal answer\n");
 	});
 });
