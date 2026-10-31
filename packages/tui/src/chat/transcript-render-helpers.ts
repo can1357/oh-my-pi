@@ -137,9 +137,9 @@ export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolAc
 }
 
 /**
- * Render a live IRC traffic custom message (`irc:incoming` / `irc:autoreply` /
- * `irc:relay`) as a transcript card. `getExpanded` supplies the live
- * expanded-state getter for the cached card.
+ * Render an IRC coordination custom message (`irc:incoming` / `irc:autoreply` /
+ * `irc:relay` / `irc:workpool`) as a tool-activity card. `getExpanded` supplies
+ * the live expanded-state getter for the cached card.
  */
 export function buildIrcMessageCard(message: CustomOrHookMessage, getExpanded: () => boolean): Component {
 	const details = (
@@ -161,19 +161,21 @@ export function buildIrcMessageCard(message: CustomOrHookMessage, getExpanded: (
 				: message.customType === "irc:workpool"
 					? ("workpool" as const)
 					: ("relay" as const);
-	return createIrcMessageCard(
-		{
-			kind,
-			from: details?.from,
-			to: details?.to,
-			body: kind === "incoming" ? details?.message : details?.body,
-			replyTo: details?.replyTo,
-			timestamp: message.timestamp,
-			pool: details?.pool,
-			mode: details?.mode,
-		},
-		getExpanded,
-		theme,
+	return new ToolActivityContainer(
+		createIrcMessageCard(
+			{
+				kind,
+				from: details?.from,
+				to: details?.to,
+				body: kind === "incoming" ? details?.message : details?.body,
+				replyTo: details?.replyTo,
+				timestamp: message.timestamp,
+				pool: details?.pool,
+				mode: details?.mode,
+			},
+			getExpanded,
+			theme,
+		),
 	);
 }
 
