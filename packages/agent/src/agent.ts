@@ -1880,7 +1880,11 @@ export class Agent {
 					try {
 						const updated = await transform(message);
 						if (updated) entry.toolResult = updated;
-					} catch {}
+					} catch (error) {
+						logger.warn("agent: cursor tool result transform failed", {
+							error: error instanceof Error ? error.message : String(error),
+						});
+					}
 				})();
 				entry.pending = pending;
 				await pending;
