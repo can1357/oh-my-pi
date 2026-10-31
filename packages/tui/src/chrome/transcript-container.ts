@@ -793,13 +793,6 @@ export class TranscriptContainer extends Container {
 			const after = this.#renderStablePrefix(entry, offered.emittedEnd, width);
 			rows = withLeadingBlank(after.slice(before.length), this.#opensWithBlank(offered.entry));
 		} else if (offered.kind === "commit") {
-			// A capped #peekBatch measured the frontier head and the block the cap
-			// left out, neither of them in the batch; measure them again so an
-			// image-budget retry counts the images the first pass did.
-			if (offered.start > this.#frontier) {
-				this.#measure(this.#entries[this.#frontier]!, width);
-				this.#measure(this.#entries[offered.start - 1]!, width);
-			}
 			rows = this.#renderRange(offered.start, offered.end, width, true).rows;
 			const head = offered.split ? this.#entries[offered.end] : undefined;
 			if (head !== undefined && offered.split !== undefined) {
