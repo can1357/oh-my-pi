@@ -170,6 +170,7 @@
 ### Fixed
 
 - Fixed every OpenAI Codex request failing with HTTP 404 `{"detail":"Not Found"}` on personal ChatGPT accounts whose token is not region-pinned ([#16493](https://github.com/can1357/oh-my-pi/issues/16493))
+- Fixed Amazon Bedrock replies that a dropped connection or gateway cut off mid-stream ending the turn as if they were finished, instead of being retried ([#16559](https://github.com/can1357/oh-my-pi/pull/16559) by [@mottopanikeiku](https://github.com/mottopanikeiku))
 
 ## [18.12.4] - 2026-10-20
 
