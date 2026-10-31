@@ -1970,6 +1970,9 @@ async function prepareProviderCall(
 			}),
 		};
 	}
+	// Before the transform too, so a request-size clamp in it measures the withdrawn definitions the provider
+	// re-declares; recomputed below against what the transform returns.
+	if (config.sentToolDefinitions) llmContext = config.sentToolDefinitions.withInactiveTools(llmContext);
 	if (config.transformProviderContext) {
 		llmContext = await config.transformProviderContext(llmContext, model);
 	}
@@ -1985,10 +1988,9 @@ async function prepareProviderCall(
 		};
 	}
 	// After `transformProviderContext`, so the recorded definitions are exactly what the provider receives.
-	if (config.sentToolDefinitions && llmContext.tools) {
-		config.sentToolDefinitions.record(llmContext.tools);
-		const inactiveTools = config.sentToolDefinitions.inactiveFor(llmContext.messages, llmContext.tools);
-		if (inactiveTools) llmContext = { ...llmContext, inactiveTools };
+	if (config.sentToolDefinitions) {
+		if (llmContext.tools) config.sentToolDefinitions.record(llmContext.tools);
+		llmContext = config.sentToolDefinitions.withInactiveTools(llmContext);
 	}
 	return { model, context: llmContext, promptToolWireTools, ownedDialect };
 }
