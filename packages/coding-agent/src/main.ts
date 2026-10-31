@@ -484,8 +484,7 @@ export async function submitInteractiveInput(
 		} else if (input.resume) {
 			// No queue intent: the streaming queue only carries user messages, so a
 			// continue shortcut while busy is rejected rather than queued as one.
-			await session.resume();
-			input.onAccepted?.();
+			await session.resume({ onAccepted: input.onAccepted });
 		} else if (isKnownSkillCommand(skillHost, input.text)) {
 			// Resubmitted skill text must dispatch through the skill path, or the
 			// model receives a literal `/skill:` token.
