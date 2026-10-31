@@ -2412,6 +2412,182 @@ describe("AgentSession retry delay cap", () => {
 		});
 	});
 
+	it.each([false, true])(
+		"bounds alternating account-policy denials to one account walk (model fallback: %s)",
+		async modelFallback => {
+			const maxRetries = 2;
+			const primaryModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+			const fallbackModel = getBundledModel("openai", "gpt-5.5");
+			if (!primaryModel || !fallbackModel) {
+				throw new Error("Expected bundled primary and fallback test models to exist");
+			}
+			const keys = ["codex-policy-A", "codex-policy-B"];
+			await authStorage.credentials.set(
+				"openai-codex",
+				keys.map((access, index) => ({
+					type: "oauth" as const,
+					access,
+					refresh: `policy-refresh-${index}`,
+					expires: Date.now() + 3_600_000,
+					accountId: `policy-account-${index}`,
+				})),
+			);
+			authStorage.keys.setRuntime("openai", "openai-fallback-key");
+			registerMockApi(RETRY_CAP_MOCK_API_SOURCE);
+
+			// Simulate a selector repeatedly offering the same two accounts despite
+			// their denials. Recovery must stay bounded independently of block expiry.
+			const rotateSpy = vi.spyOn(authStorage.limits, "rotate").mockResolvedValue({ switched: true });
+			const modelDenial = `Codex error event: The '${primaryModel.id}' model is not supported when using Codex with a ChatGPT account. (code=model_not_found)`;
+			const requestedKeys: string[] = [];
+			let sagaAttempts = 0;
+			const primaryMock = createMockModel({
+				id: primaryModel.id,
+				provider: primaryModel.provider,
+				handler: (_context, options) => {
+					const key = resolveInitialApiKey(options?.apiKey);
+					requestedKeys.push(key);
+					sagaAttempts++;
+					// A hard cap makes the unfixed loop fail assertions rather than hang.
+					if (sagaAttempts > maxRetries + keys.length + 1) {
+						return { content: ["unexpected retry past account bound"], stopReason: "stop" };
+					}
+					return {
+						stopReason: "error",
+						errorMessage: key === keys[0] ? CYBER_POLICY_ERROR : modelDenial,
+					};
+				},
+			});
+			const fallbackMock = createMockModel({
+				responses: [{ content: ["recovered on fallback"], stopReason: "stop" }],
+			});
+			const requestedModels: string[] = [];
+			const agent = new Agent({
+				getApiKey: model =>
+					model.provider === primaryModel.provider
+						? keys[requestedKeys.length % keys.length]
+						: "openai-fallback-key",
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					return aiStream.streamSimple(
+						model.provider === primaryModel.provider ? primaryMock.model : fallbackMock.model,
+						context,
+						options,
+					);
+				},
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.maxRetries": maxRetries,
+				"retry.baseDelayMs": 1,
+				"retry.modelFallback": modelFallback,
+				"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			});
+			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
+			const retryEndEvents: AutoRetryEndEvent[] = [];
+			session.subscribe(event => {
+				if (event.type === "auto_retry_end") retryEndEvents.push(event);
+			});
+
+			await session.prompt("Test account-policy recovery");
+			await session.waitForIdle();
+
+			expect(requestedKeys).toEqual(keys);
+			expect(rotateSpy).toHaveBeenCalledTimes(keys.length);
+			expect(session.isRetrying).toBe(false);
+			expect(retryEndEvents).toHaveLength(1);
+			if (modelFallback) {
+				expect(requestedModels.at(-1)).toBe(`${fallbackModel.provider}/${fallbackModel.id}`);
+				expect(lastAssistant(session).stopReason).toBe("stop");
+				expect(retryEndEvents[0].success).toBe(true);
+			} else {
+				expect(lastAssistant(session).stopReason).toBe("error");
+				expect(lastAssistant(session).errorMessage).toContain(modelDenial);
+				expect(retryEndEvents[0]).toMatchObject({ success: false, finalError: modelDenial });
+
+				// A later prompt gets its own account walk, not the spent saga's bound.
+				sagaAttempts = 0;
+				await session.prompt("Try a new turn");
+				await session.waitForIdle();
+				expect(requestedKeys).toEqual([...keys, ...keys]);
+				expect(retryEndEvents).toHaveLength(2);
+				expect(session.isRetrying).toBe(false);
+			}
+		},
+	);
+
+	it("skips a short sibling wait after account-policy exhaustion", async () => {
+		const primaryModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!primaryModel) throw new Error("Expected bundled primary test model to exist");
+		const providerSessionId = "spent-policy-account-allowance";
+		const now = Date.now();
+		vi.spyOn(Date, "now").mockReturnValue(now);
+		const waitSpy = mockSchedulerWaitWithClock();
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "api_key", key: "short-policy-A" },
+			{ type: "api_key", key: "short-policy-B" },
+		]);
+		registerMockApi(RETRY_CAP_MOCK_API_SOURCE);
+		const rows = authStorage.credentials.list("openai-codex");
+		const requestedKeys: string[] = [];
+		const modelDenial = `Codex error event: The '${primaryModel.id}' model is not supported when using Codex with a ChatGPT account. (code=model_not_found)`;
+		const primaryMock = createMockModel({
+			id: primaryModel.id,
+			provider: primaryModel.provider,
+			handler: (_context, options) => {
+				requestedKeys.push(resolveInitialApiKey(options?.apiKey));
+				if (requestedKeys.length === 1) return { stopReason: "error", errorMessage: CYBER_POLICY_ERROR };
+				// The first denied account is about to unblock, but the saga has
+				// already tried both accounts and must not wait to offer it again.
+				const firstRow = rows.find(
+					row => row.credential.type === "api_key" && row.credential.key === requestedKeys[0],
+				);
+				if (!firstRow) throw new Error("Expected first denied credential");
+				authStorage.blocks.delete(firstRow.id, "openai-codex:api_key", "account-policy");
+				authStorage.blocks.upsert({
+					credentialId: firstRow.id,
+					providerKey: "openai-codex:api_key",
+					blockScope: "account-policy",
+					blockedUntilMs: now + 2_000,
+				});
+				return { stopReason: "error", errorMessage: modelDenial };
+			},
+		});
+		const agent = new Agent({
+			getApiKey: model => modelRegistry.getApiKey(model, providerSessionId),
+			sessionId: providerSessionId,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (_model, context, options) => aiStream.streamSimple(primaryMock.model, context, options),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.maxRetries": 0,
+			"retry.modelFallback": false,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			providerSessionId,
+		});
+
+		await session.prompt("Test exhausted account allowance with a short sibling block");
+		await session.waitForIdle();
+
+		expect(waitSpy.mock.calls.some(call => call[0] >= 2_000)).toBe(false);
+		expect(requestedKeys).toHaveLength(2);
+		expect(session.isRetrying).toBe(false);
+		expect(lastAssistant(session).errorMessage).toContain(modelDenial);
+	});
+
 	it("tries sibling Codex accounts before advisor model fallback on cyber-policy denials", async () => {
 		const mainModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const advisorModel = getBundledModel("openai-codex", "gpt-5.6-sol");

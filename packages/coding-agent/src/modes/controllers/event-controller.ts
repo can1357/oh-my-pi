@@ -47,6 +47,7 @@ import {
 	isUserTurnInitiator,
 	readQueueChipText,
 	resolveAbortLabel,
+	isUserInterruptAbort,
 	USER_INTERRUPT_LABEL,
 } from "../../session/messages";
 import {
@@ -1674,9 +1675,10 @@ export class EventController {
 				}
 				if (isNew) {
 					// A write's streamed path may still grow into a reply URL (`ou…` → `out://`), which
-					// draws as prose rather than a card; the block waits until the path tells. An unbound
-					// reveal never advances, so drop it: the next update's fresh entry shows all received.
-					if (partialJson && isReplyWrite(renderToolName, renderArgs) === undefined) {
+					// draws as prose rather than a card; the block waits until the path tells. Empty partial
+					// JSON (`toolcall_start`) is still streaming, not final empty args. An unbound reveal
+					// never advances, so drop it: the next update's fresh entry shows all received.
+					if (partialJson !== undefined && isReplyWrite(renderToolName, renderArgs) === undefined) {
 						this.#toolArgsReveal.finish(content.id);
 						continue;
 					}
@@ -2587,6 +2589,15 @@ export class EventController {
 		// torn-down "Working…" row with the "F5 to Retry" affordance.
 		this.ctx.syncRetryHintRow();
 		this.ctx.ui.requestRender();
+		// The run yielded: a `/compact` queued behind it runs now. A run the user stopped (Esc, including
+		// the loop-mode pause) did not yield: the request goes back to the editor like other queued input.
+		if (this.ctx.yieldCompaction) {
+			const last = event.messages.findLast((message): message is AssistantMessage => message.role === "assistant");
+			const userStopped = options?.interrupted || (last?.stopReason === "aborted" && isUserInterruptAbort(last));
+			if (userStopped)
+				this.ctx.restoreCompactionQueueToEditor("Run stopped: queued compaction returned to the editor");
+			else this.ctx.runYieldCompaction();
+		}
 		// The user stopped the run themselves: no prediction or toast for it.
 		if (options?.interrupted) return;
 		if (this.#settledRunStatus(event).state === "done") this.composerPrediction.request();

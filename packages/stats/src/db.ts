@@ -100,7 +100,8 @@ const FORK_DEDUPE_KEY = "fork_dedupe_v1";
 // v2: tool-name sanitization at ingest (see `sanitizeToolName` in parser.ts)
 // collapses provider-side garbage names; a full re-parse replaces the polluted
 // rows already stored in existing databases.
-const TOOL_CALLS_BACKFILL_KEY = "tool_calls_v2";
+// v3: reclassify synthetic non-executions so historical tool error rates are corrected.
+const TOOL_CALLS_BACKFILL_KEY = "tool_calls_v3";
 // Older ingests dropped `Usage.orchestration` (never a stored column) when
 // pricing, so subscription models billed on orchestration tokens — multi-agent
 // Grok most notably — were priced from conversation buckets alone and could not
