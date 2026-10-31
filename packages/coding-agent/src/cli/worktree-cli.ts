@@ -23,7 +23,7 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getWorktreesDir, isEnoent } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
-import { lstatLookup, readdirLookup, statLookup } from "../task/isolation-lookup";
+import { lstatLookup, readdirLookup, readTextLookup, requireFound, statLookup } from "../task/isolation-lookup";
 import {
 	decideIsolationReclaim,
 	requireSandboxLockHeld,
@@ -126,12 +126,21 @@ export async function addWorktree(options: AddWorktreeOptions): Promise<void> {
 	const cwd = path.resolve(options.cwd ?? process.cwd());
 	const repository = vcs.requireGit(cwd);
 	const worktreePath = path.resolve(cwd, options.path);
-	try {
-		const stat = await fs.stat(worktreePath);
-		const nonEmpty = !stat.isDirectory() || (await fs.readdir(worktreePath)).length > 0;
-		if (nonEmpty) throw new Error(`fatal: '${options.path}' already exists`);
-	} catch (error) {
-		if (!isEnoent(error)) throw error;
+	// Absent is the ordinary case — the worktree is about to be created here.
+	// Anything else is a path this process could not inspect, and creating a
+	// worktree over it would be the same guess the rest of this file refuses.
+	const existing = await statLookup(worktreePath);
+	if (existing.kind === "unknown") {
+		throw new Error(`fatal: '${options.path}' could not be inspected: ${existing.reason}`);
+	}
+	if (existing.kind === "found") {
+		const listing = existing.value.isDirectory() ? await readdirLookup(worktreePath) : undefined;
+		if (listing?.kind === "unknown") {
+			throw new Error(`fatal: '${options.path}' could not be listed: ${listing.reason}`);
+		}
+		if (listing === undefined || listing.kind === "absent" || listing.value.length > 0) {
+			throw new Error(`fatal: '${options.path}' already exists`);
+		}
 	}
 
 	const settings = await Settings.init({ cwd });
@@ -271,6 +280,8 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 					const removed = await withSandboxLock(sandbox, "remove", async () => {
 						if (!options.all && !(await decideIsolationReclaim(sandbox)).reclaimable) return false;
 						await stopRetainedMount(sandbox);
+						// Asked here, after everything this branch awaited, and
+						// immediately before the removal itself.
 						requireSandboxLockHeld(sandbox, "remove");
 						await fs.rm(sandbox, { recursive: true, force: true });
 						return true;
@@ -366,6 +377,7 @@ async function scanWorktrees(): Promise<WorktreeEntry[]> {
 		if (childListing.kind === "absent") continue;
 		const children = childListing.value;
 		let nested = 0;
+		let unclassifiable = false;
 		for (const child of children) {
 			const childDir = path.join(dir, child);
 			const childStat = await statLookup(childDir);
@@ -376,6 +388,11 @@ async function scanWorktrees(): Promise<WorktreeEntry[]> {
 					orphanReason: `could not be read (${childStat.reason})`,
 					keep: true,
 				});
+				// Keeping the child while calling its parent a stray deletes the
+				// child with the parent: a removal of the container takes
+				// everything under it, so a parent holding something nobody
+				// could classify is not a stray either.
+				unclassifiable = true;
 				continue;
 			}
 			if (childStat.kind === "absent" || !childStat.value.isDirectory()) continue;
@@ -383,7 +400,17 @@ async function scanWorktrees(): Promise<WorktreeEntry[]> {
 			if (childClassified) {
 				entries.push(childClassified);
 				nested += 1;
+				if (childClassified.keep) unclassifiable = true;
 			}
+		}
+		if (unclassifiable) {
+			entries.push({
+				path: dir,
+				kind: "stray",
+				orphanReason: "holds a directory this process could not read",
+				keep: true,
+			});
+			continue;
 		}
 		if (nested === 0) {
 			entries.push({
@@ -398,8 +425,18 @@ async function scanWorktrees(): Promise<WorktreeEntry[]> {
 
 async function classifyDir(dir: string): Promise<WorktreeEntry | null> {
 	const gitEntry = path.join(dir, ".git");
-	const gitStat = await fs.stat(gitEntry).catch(() => null);
-	if (gitStat?.isFile()) {
+	const gitStat = await statLookup(gitEntry);
+	if (gitStat.kind === "unknown") {
+		// A `.git` nobody can stat is not a directory without one: read that
+		// way, a real linked worktree became a stray and was deleted.
+		return {
+			path: dir,
+			kind: "stray",
+			orphanReason: `its .git could not be read (${gitStat.reason})`,
+			keep: true,
+		};
+	}
+	if (gitStat.kind === "found" && gitStat.value.isFile()) {
 		return classifyPrCheckout(dir, gitEntry);
 	}
 	// A task-isolation sandbox is identified by its ownership marker — written
@@ -434,16 +471,19 @@ async function classifyDir(dir: string): Promise<WorktreeEntry | null> {
 }
 
 async function classifyPrCheckout(dir: string, gitEntry: string): Promise<WorktreeEntry> {
-	let contents: string;
-	try {
-		contents = await fs.readFile(gitEntry, "utf8");
-	} catch (err) {
+	const gitFile = await readTextLookup(gitEntry);
+	if (gitFile.kind !== "found") {
 		return {
 			path: dir,
 			kind: "pr-checkout",
-			orphanReason: `cannot read .git file: ${err instanceof Error ? err.message : String(err)}`,
+			orphanReason:
+				gitFile.kind === "absent" ? "its .git file is missing" : `cannot read .git file: ${gitFile.reason}`,
+			// A `.git` file nobody can read says nothing about whether this
+			// checkout is live, and `clear` would remove it on that silence.
+			keep: gitFile.kind === "unknown",
 		};
 	}
+	const contents = gitFile.value;
 	const match = /^gitdir:\s*(.+?)\s*$/m.exec(contents);
 	const parentGitDir = match?.[1];
 	if (!parentGitDir) {
@@ -453,8 +493,18 @@ async function classifyPrCheckout(dir: string, gitEntry: string): Promise<Worktr
 	const parentRepo = path.dirname(path.dirname(path.dirname(parentGitDir)));
 	const branch = await readWorktreeBranch(path.join(parentGitDir, "HEAD"));
 
-	const parentDirStat = await fs.stat(parentGitDir).catch(() => null);
-	if (!parentDirStat?.isDirectory()) {
+	const parentDirStat = await statLookup(parentGitDir);
+	if (parentDirStat.kind === "unknown") {
+		return {
+			path: dir,
+			kind: "pr-checkout",
+			parentRepo,
+			branch,
+			orphanReason: `its parent's worktree record could not be read (${parentDirStat.reason})`,
+			keep: true,
+		};
+	}
+	if (parentDirStat.kind === "absent" || !parentDirStat.value.isDirectory()) {
 		return {
 			path: dir,
 			kind: "pr-checkout",
@@ -463,8 +513,18 @@ async function classifyPrCheckout(dir: string, gitEntry: string): Promise<Worktr
 			orphanReason: "parent repo no longer tracks this worktree",
 		};
 	}
-	const parentRepoStat = await fs.stat(parentRepo).catch(() => null);
-	if (!parentRepoStat?.isDirectory()) {
+	const parentRepoStat = await statLookup(parentRepo);
+	if (parentRepoStat.kind === "unknown") {
+		return {
+			path: dir,
+			kind: "pr-checkout",
+			parentRepo,
+			branch,
+			orphanReason: `its parent repo could not be read (${parentRepoStat.reason})`,
+			keep: true,
+		};
+	}
+	if (parentRepoStat.kind === "absent" || !parentRepoStat.value.isDirectory()) {
 		return {
 			path: dir,
 			kind: "pr-checkout",
@@ -477,13 +537,11 @@ async function classifyPrCheckout(dir: string, gitEntry: string): Promise<Worktr
 }
 
 async function readWorktreeBranch(headFile: string): Promise<string | undefined> {
-	try {
-		const head = (await fs.readFile(headFile, "utf8")).trim();
-		const refMatch = /^ref:\s*refs\/heads\/(.+)$/.exec(head);
-		return refMatch?.[1];
-	} catch {
-		return undefined;
-	}
+	// A branch name is a label in a listing, so not knowing it costs nothing
+	// and decides nothing: no caller deletes on the strength of it.
+	const head = await readTextLookup(headFile);
+	if (head.kind !== "found") return undefined;
+	return /^ref:\s*refs\/heads\/(.+)$/.exec(head.value.trim())?.[1];
 }
 
 function formatEntryDetail(entry: WorktreeEntry): string {

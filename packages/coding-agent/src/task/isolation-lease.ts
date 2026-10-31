@@ -30,7 +30,7 @@ import { type FSWatcher, watch } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
-import { readdirLookup } from "./isolation-lookup";
+import { readdirLookup, reasonOf } from "./isolation-lookup";
 import {
 	withSandboxLock,
 	isProcessStillLive,
@@ -268,6 +268,15 @@ export async function leaseIsolationWorkspace(
 			if (claim.kind !== "claimed") {
 				throw new Error(`Isolation workspace ${sandbox} is being torn down and cannot be leased.`);
 			}
+			// The same path is not the same workspace: a lease written under a
+			// successor protects a run this caller never joined, and leaves the
+			// caller believing it holds the one it queued for.
+			if (claim.generation !== found.generation) {
+				throw new Error(
+					`Isolation workspace ${sandbox} is now generation ${claim.generation}, not ${found.generation}; ` +
+						"cannot lease a workspace that has been replaced.",
+				);
+			}
 			await writeProcessIdentity(leaseFile, options.agentId === undefined ? {} : { agentId: options.agentId });
 		});
 	} finally {
@@ -355,11 +364,17 @@ export async function markUnfinishedWriter(cwd: string): Promise<() => Promise<v
  */
 async function announceIntent(baseDir: string): Promise<() => Promise<void>> {
 	const file = path.join(baseDir, ISOLATION_INTENT_DIR, `${process.pid}-${Snowflake.next()}.json`);
-	const written = await writeProcessIdentity(file).then(
-		() => true,
-		() => false,
-	);
-	if (!written) return async () => {};
+	// Raises rather than returning a clear for a note that was never written.
+	// A caller told it announced itself waits for a lock believing the holder
+	// can see it, and on a full disk the holder saw nothing at all.
+	try {
+		await writeProcessIdentity(file);
+	} catch (error) {
+		throw new Error(
+			`Could not announce a stake in isolation workspace ${baseDir} (${reasonOf(error)}); ` +
+				"refusing to queue for its lock unseen.",
+		);
+	}
 	return async () => {
 		await fs.rm(file, { force: true }).catch(() => undefined);
 	};
@@ -555,11 +570,6 @@ async function settleIfIdle(mergedDir: string, workspace: LeasedWorkspace, baseD
 		// in; the run's result no longer depends on that exclusion, because the
 		// capture at release has already happened by the time this runs.
 		const leases = await readHolders(path.join(baseDir, ISOLATION_LEASE_DIR));
-		// Somebody queued for this very lock has already said so. Counting it
-		// is the only way a holder can see a party that is one position behind
-		// it; the owner used to list, see only itself, and exit while a real
-		// foreign write was waiting to be published.
-		const intents = await readHolders(path.join(baseDir, ISOLATION_INTENT_DIR));
 		if (leases.anyLive) {
 			// Somebody else arrived after a writer record let this process
 			// unreference its wait: the work is this process's to do, so the
@@ -571,6 +581,13 @@ async function settleIfIdle(mergedDir: string, workspace: LeasedWorkspace, baseD
 			// used to land just after it and the owner exited without capturing
 			// it. Under the lock there is no "just after".
 			const writersNow = await readHolders(path.join(baseDir, ISOLATION_UNFINISHED_DIR));
+			// Intents are read *after* every other listing this decision waits
+			// for, and nothing is awaited between reading them and acting on
+			// them. Read first, they are a snapshot of who had announced
+			// themselves before the awaits that followed, and a contender that
+			// announced during those awaits was invisible — which is how an
+			// owner exited with a foreign write still queued.
+			const intents = await readHolders(path.join(baseDir, ISOLATION_INTENT_DIR));
 			if (
 				leases.allOurs &&
 				!leases.unknown &&
@@ -591,6 +608,8 @@ async function settleIfIdle(mergedDir: string, workspace: LeasedWorkspace, baseD
 		// its record going away is the event this is waiting for just as much
 		// as the last lease going away.
 		const writers = await readHolders(path.join(baseDir, ISOLATION_UNFINISHED_DIR));
+		// Last, for the same reason as above.
+		const intents = await readHolders(path.join(baseDir, ISOLATION_INTENT_DIR));
 		if (writers.anyLive || intents.anyLive) {
 			// Our own record is kept until this process exits, so waiting for it
 			// must not keep this process alive: the record is on disk and
@@ -608,7 +627,14 @@ async function settleIfIdle(mergedDir: string, workspace: LeasedWorkspace, baseD
 			}
 			return undefined;
 		}
-		// Nothing is here and nothing is on its way: the teardown may run.
+		// Nothing is here and nothing is on its way — asked once more, with no
+		// await since, because the teardown this returns is irreversible.
+		const arriving = await readHolders(path.join(baseDir, ISOLATION_INTENT_DIR));
+		if (arriving.anyLive) {
+			workspace.poll?.ref?.();
+			workspace.watcher?.ref?.();
+			return undefined;
+		}
 		const owed = workspace.pendingTeardown;
 		workspace.pendingTeardown = undefined;
 		disarmTeardownWatch(workspace);

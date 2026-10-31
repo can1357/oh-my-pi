@@ -13,7 +13,14 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { acquireFileLock, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { hasLiveIsolationLease, hasUnfinishedWriter } from "./isolation-lease";
-import { lstatLookup, readdirLookup, readJsonLookup, statLookup } from "./isolation-lookup";
+import {
+	lstatLookup,
+	readdirLookup,
+	readJsonLookup,
+	readTextLookup,
+	realpathLookup,
+	statLookup,
+} from "./isolation-lookup";
 
 /**
  * How long a materialisation, teardown, lease or reclamation waits for the
@@ -38,14 +45,14 @@ export const SANDBOX_LOCK_WAIT = { retries: 600, retryDelayMs: 100 };
  */
 export async function resolveSandboxIdentity(target: string): Promise<string> {
 	const absolute = path.resolve(target);
-	try {
-		return await fs.realpath(absolute);
-	} catch (error) {
-		if (!isEnoent(error)) throw error;
-		const parent = path.dirname(absolute);
-		if (parent === absolute) return absolute;
-		return path.join(await resolveSandboxIdentity(parent), path.basename(absolute));
+	const resolved = await realpathLookup(absolute);
+	if (resolved.kind === "found") return resolved.value;
+	if (resolved.kind === "unknown") {
+		throw new Error(`Isolation path ${absolute} could not be resolved (${resolved.reason}).`);
 	}
+	const parent = path.dirname(absolute);
+	if (parent === absolute) return absolute;
+	return path.join(await resolveSandboxIdentity(parent), path.basename(absolute));
 }
 
 const { IsoBackendKind } = natives;
@@ -85,12 +92,12 @@ export interface IsolationOwner {
  */
 async function processStartToken(pid: number): Promise<string | null> {
 	if (process.platform === "linux") {
-		let stat: string;
-		try {
-			stat = await Bun.file(`/proc/${pid}/stat`).text();
-		} catch {
-			return null;
-		}
+		// `absent` is a process that has gone and `unknown` is a `/proc` this
+		// caller cannot read; both give no token, and the pid-only check that
+		// follows errs towards "still live", which is the safe direction here.
+		const read = await readTextLookup(`/proc/${pid}/stat`);
+		if (read.kind !== "found") return null;
+		const stat = read.value;
 		// The comm field (2) may embed spaces and parens, so parse the numeric
 		// fields after the final ')'. `starttime` is field 22 overall, i.e. the
 		// 20th token once `pid` and `(comm)` are dropped.
@@ -269,6 +276,11 @@ export async function clearClaimedWorkspace(baseDir: string): Promise<void> {
 	const entries = listing.value;
 	for (const entry of entries) {
 		if (entry === ISOLATION_OWNER_FILE) continue;
+		// Before each removal, not once before the listing: the listing is an
+		// await, and a hold checked before an await is a hold checked before
+		// somebody else could take the lock. This deleted a sandbox while a
+		// second process held it.
+		requireSandboxLockHeld(baseDir, "empty");
 		await fs.rm(path.join(baseDir, entry), { recursive: true, force: true });
 	}
 }
@@ -678,7 +690,10 @@ export async function acquireSandboxLockWithNotice(baseDir: string, purpose: str
 				heldByThisProcess.delete(handle);
 				lock.release();
 			},
-			isHeld: () => !released,
+			// Asked of the lock, not of the boolean beside it: a handle released
+			// by another route, or one whose release threw, leaves the two
+			// disagreeing, and the hold is whatever the lock says it is.
+			isHeld: () => !released && lock.acquired,
 		};
 		// Reachable for as long as it is held. A teardown whose capture outran
 		// its deadline sits for ever in `await capturing`, and its frame was

@@ -1469,6 +1469,35 @@ describe("a capture that could not read everything", () => {
 	});
 });
 
+describe("a capture that could not look everywhere", () => {
+	it("raises instead of reporting no nested repositories", async () => {
+		// A directory the walk could not list may hold a nested repo whose
+		// work the capture then misses entirely, and the teardown deletes on
+		// the strength of that capture.
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		const nested = path.join(repo, "vendor", "lib");
+		await fs.mkdir(nested, { recursive: true });
+		await initRepo(nested);
+
+		const real = fs.readdir;
+		const spy = vi.spyOn(fs, "readdir");
+		spy.mockImplementation((async (target: unknown, ...rest: unknown[]) => {
+			if (String(target) === path.join(repo, "vendor")) {
+				throw Object.assign(new Error("EIO: i/o error"), { code: "EIO" });
+			}
+			return await (real as (...a: unknown[]) => Promise<unknown>)(target, ...rest);
+		}) as unknown as typeof fs.readdir);
+
+		await expect(captureBaseline(repo)).rejects.toThrow(/Could not list/);
+		spy.mockRestore();
+	});
+});
+
 describe("applyNestedPatches", () => {
 	const nestedRel = "sub";
 	let fixtureParent: string;

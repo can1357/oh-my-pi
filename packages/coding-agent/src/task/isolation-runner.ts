@@ -39,12 +39,13 @@ const DEFERRED_CLEANUP_MAX_WAIT_MS = 30_000;
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { armTeardown, hasLiveIsolationLease, hasUnfinishedWriter } from "./isolation-lease";
 import {
+	readIsolationClaim,
 	readRetainedMountBackend,
 	requireSandboxLockHeld,
 	resolveSandboxIdentity,
 	withSandboxLock,
 } from "./isolation-ownership";
-import { ABSENT, FOUND, type Lookup, readdirLookup, statLookup } from "./isolation-lookup";
+import { ABSENT, FOUND, type Lookup, readdirLookup, readTextLookup, statLookup, UNKNOWN } from "./isolation-lookup";
 import { asReleaseHold, createReleaseHold } from "../utils/release-hold";
 import type { ExecutorOptions } from "./executor";
 import { runSubprocess } from "./executor";
@@ -336,6 +337,7 @@ export interface RetainedWorkspace {
 export async function retainIsolationWorkspace(
 	isolationDir: string,
 	backend?: natives.IsoBackendKind,
+	generation?: string,
 ): Promise<RetainedWorkspace> {
 	const baseDir = await resolveSandboxIdentity(path.dirname(isolationDir));
 	// Check and act under one hold. A session admitted *after* the check and
@@ -357,7 +359,7 @@ export async function retainIsolationWorkspace(
 			// state that is read rather than assumed: a decoy `.retained-*`
 			// without a mount, or an older sibling, sent callers to the wrong
 			// workspace and claimed metadata nothing had written.
-			const retained = await findRetainedSibling(baseDir);
+			const retained = await findRetainedSibling(baseDir, generation);
 			// Three answers, three messages. "Could not look" is neither a
 			// workspace to recover from nor a workspace that is gone, and
 			// naming the original path for it sent the user to an empty name.
@@ -376,7 +378,7 @@ export async function retainIsolationWorkspace(
 }
 
 /** The newest `.retained-*` copy of this sandbox that actually holds a workspace. */
-async function findRetainedSibling(baseDir: string): Promise<Lookup<string>> {
+async function findRetainedSibling(baseDir: string, generation: string | undefined): Promise<Lookup<string>> {
 	const parent = path.dirname(baseDir);
 	const prefix = `${path.basename(baseDir)}.retained-`;
 	const listing = await readdirLookup(parent);
@@ -396,6 +398,15 @@ async function findRetainedSibling(baseDir: string): Promise<Lookup<string>> {
 		const found = await statLookup(candidate);
 		if (found.kind === "unknown") return found;
 		if (found.kind === "absent" || !found.value.isDirectory()) continue;
+		// The stamp orders retentions of *this* path; it does not say whose run
+		// they hold. A later retention of the same slot by a successor was
+		// reported to the owner of the earlier one, whose own copy sat intact
+		// beside it. The marker inside the retained copy answers that.
+		if (generation !== undefined) {
+			const claim = await readIsolationClaim(path.join(parent, entry));
+			if (claim.kind === "unknown") return UNKNOWN(claim.reason);
+			if (claim.kind !== "claimed" || claim.generation !== generation) continue;
+		}
 		if (latest === undefined || stamp > latest.stamp) latest = { dir: candidate, stamp };
 	}
 	return latest === undefined ? ABSENT : FOUND(latest.dir);
@@ -567,7 +578,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			capture = await writeIsolationPatch(sandbox.mergedDir, baselineAtRelease, opts.artifactsDir, opts.agentId);
 		} catch (captureErr) {
 			retainWorkspace = true;
-			const retained = await retainIsolationWorkspace(sandbox.mergedDir, sandbox.backend);
+			const retained = await retainIsolationWorkspace(sandbox.mergedDir, sandbox.backend, sandbox.generation);
 			throw new Error(
 				renderIsolationError({
 					kind: "patch-capture-failed",
@@ -636,6 +647,11 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 					agentId: opts.agentId,
 					error: error instanceof Error ? error.message : String(error),
 				});
+				// Kept, so the caller's result can say it. A release whose
+				// capture failed used to return exit 0 with no error, no patch
+				// and no path: the only copy of the work survived in a
+				// directory nobody was told about.
+				releaseCaptureError = error;
 			});
 			const sandbox = handle;
 			// Someone is still working in the sandbox — a nested child that
@@ -656,6 +672,8 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		})();
 		return releasePromise;
 	};
+	/** Why the capture at release failed, when it did; the caller's result must carry it. */
+	let releaseCaptureError: unknown;
 	let lifecycleOwnsRelease = false;
 	try {
 		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
@@ -727,7 +745,24 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			// workspace, for work that was in fact captured: hand back what the
 			// release wrote.
 			await releasePromise;
-			return rememberAgentArtifacts({ ...result, ...(releasedCapture ?? {}) });
+			const released = rememberAgentArtifacts({ ...result, ...(releasedCapture ?? {}) });
+			if (releaseCaptureError === undefined) return released;
+			// The workspace is kept by the locked capture that refused; name it,
+			// because it holds the only copy of what could not be captured.
+			const retained = await retainIsolationWorkspace(isolationDir, isolationBackend, handle?.generation);
+			retainWorkspace = true;
+			return {
+				...released,
+				error: renderIsolationError({
+					kind: "patch-capture-failed",
+					message:
+						releaseCaptureError instanceof Error ? releaseCaptureError.message : String(releaseCaptureError),
+					retainedDir: retained.dir,
+					sidecarMissing: !retained.sidecarOk,
+					retainedGone: retained.location === "gone",
+					retainedUnknown: retained.location === "unknown",
+				}),
+			};
 		}
 		if (opts.mergeMode === "branch" && result.exitCode === 0) {
 			let commitResult: CommitToBranchResult | null;
@@ -763,7 +798,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 					});
 				} catch (patchErr) {
 					retainWorkspace = true;
-					const retained = await retainIsolationWorkspace(isolationDir, isolationBackend);
+					const retained = await retainIsolationWorkspace(isolationDir, isolationBackend, handle?.generation);
 					return rememberAgentArtifacts({
 						...result,
 						error: renderIsolationError({
@@ -797,7 +832,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				});
 			} catch (persistErr) {
 				retainWorkspace = true;
-				const retained = await retainIsolationWorkspace(isolationDir, isolationBackend);
+				const retained = await retainIsolationWorkspace(isolationDir, isolationBackend, handle?.generation);
 				return rememberAgentArtifacts({
 					...result,
 					branchName: commitResult?.branchName,
@@ -821,7 +856,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				return rememberAgentArtifacts({ ...result, ...capture.artifacts });
 			} catch (patchErr) {
 				retainWorkspace = true;
-				const retained = await retainIsolationWorkspace(isolationDir, isolationBackend);
+				const retained = await retainIsolationWorkspace(isolationDir, isolationBackend, handle?.generation);
 				return rememberAgentArtifacts({
 					...result,
 					error: renderIsolationError({
@@ -971,7 +1006,15 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 			changesApplied = false;
 			hadAnyChanges = false;
 		} else {
-			const patchText = await Bun.file(result.patchPath).text();
+			// A patch this process cannot read is not an empty patch: read that
+			// way, the run reports no changes for work it has already written.
+			const read = await readTextLookup(result.patchPath);
+			if (read.kind !== "found") {
+				throw new Error(
+					`Captured patch ${result.patchPath} could not be read (${read.kind === "absent" ? "it is not there" : read.reason}).`,
+				);
+			}
+			const patchText = read.value;
 			if (!patchText.trim()) {
 				changesApplied = true;
 				hadAnyChanges = false;

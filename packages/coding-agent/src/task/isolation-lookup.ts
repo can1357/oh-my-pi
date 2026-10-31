@@ -11,7 +11,7 @@
  * must say what it does with it, and the compiler will not let it be dropped.
  */
 
-import type { Stats } from "node:fs";
+import type { Dirent, Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 
@@ -53,6 +53,21 @@ export async function statLookup(target: string): Promise<Lookup<Stats>> {
 /** `lstat`, three-valued. Answers "is there an entry here", dangling or not. */
 export async function lstatLookup(target: string): Promise<Lookup<Stats>> {
 	return await lookupFs(async () => (await fs.lstat(target)) as Stats);
+}
+
+/** `readdir` with entry types, three-valued. */
+export async function readdirTypedLookup(dir: string): Promise<Lookup<Dirent[]>> {
+	return await lookupFs(async () => await fs.readdir(dir, { withFileTypes: true }));
+}
+
+/** `realpath`, three-valued: a path that cannot be resolved has no canonical form. */
+export async function realpathLookup(target: string): Promise<Lookup<string>> {
+	return await lookupFs(async () => await fs.realpath(target));
+}
+
+/** A UTF-8 file's contents, three-valued. */
+export async function readTextLookup(file: string): Promise<Lookup<string>> {
+	return await lookupFs(async () => await fs.readFile(file, "utf8"));
 }
 
 /** `readdir`, three-valued: a listing that failed is not an empty directory. */

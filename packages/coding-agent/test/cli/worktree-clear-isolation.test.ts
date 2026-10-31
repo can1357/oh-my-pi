@@ -14,6 +14,12 @@ import {
 } from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
 import { setWorktreesDir } from "@oh-my-pi/pi-utils";
 
+/** Directories this file made, removed after each test. */
+const temporary: string[] = [];
+
+/** The real `stat`, kept before any spy replaces it. */
+const realStat = fs.stat;
+
 /**
  * Regression for #6761: `omp worktree clear` (no `--all`) must delete only
  * task-isolation sandboxes whose owner process is gone. A sandbox owned by a
@@ -175,4 +181,33 @@ describe("worktree clear task-isolation ownership", () => {
 		expect(isoStopSpy).not.toHaveBeenCalled();
 		expect(await Bun.file(path.join(retained, "m", "work.txt")).exists()).toBe(true);
 	});
+});
+
+afterEach(async () => {
+	setWorktreesDir(undefined);
+	vi.restoreAllMocks();
+	for (const dir of temporary.splice(0)) await fs.rm(dir, { recursive: true, force: true });
+});
+
+it("keeps the parent of a child it could not read, instead of calling it a stray", async () => {
+	// The child was kept and the parent removed as a stray — and removing the
+	// container takes the child with it, so the keep meant nothing.
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-clear-unknown-"));
+	temporary.push(root);
+	setWorktreesDir(root);
+	const parent = path.join(root, "project");
+	const child = path.join(parent, "sandbox");
+	await fs.mkdir(child, { recursive: true });
+	await Bun.write(path.join(child, "payload.txt"), "work nobody else has\n");
+	const spy = vi.spyOn(fs, "stat");
+	spy.mockImplementation((async (target: string, ...rest: unknown[]) => {
+		if (String(target) === child) throw Object.assign(new Error("EACCES: denied"), { code: "EACCES" });
+		return await (realStat as (...a: unknown[]) => Promise<unknown>)(target, ...rest);
+	}) as unknown as typeof fs.stat);
+
+	const result = await clearWorktrees({ json: true });
+
+	spy.mockRestore();
+	expect(result.removed).toBe(0);
+	expect(await Bun.file(path.join(child, "payload.txt")).exists()).toBe(true);
 });

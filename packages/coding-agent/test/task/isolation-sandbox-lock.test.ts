@@ -6,6 +6,7 @@ import { scheduler } from "node:timers/promises";
 import {
 	deferTeardownWhileLeased,
 	forgetIsolationWorkspace,
+	leaseIsolationWorkspace,
 	hasUnfinishedWriter,
 	ISOLATION_INTENT_DIR,
 	ISOLATION_LEASE_DIR,
@@ -315,6 +316,58 @@ it("refuses a mount sidecar it cannot read, and a backend it does not know", asy
 	// An unrecognised backend is not "needs no teardown": answering that
 	// would route a possible mount to recursive removal.
 	await expect(readRetainedMountBackend(baseDir)).rejects.toThrow(/does not know/);
+});
+
+it("refuses a lease for a workspace that was replaced while it waited", async () => {
+	// Same path, new claim: a lease written under the successor protects a
+	// run this caller never joined, and the caller believes it holds the
+	// one it queued for.
+	const { baseDir, mergedDir } = await makeSandbox();
+	const lock = await acquireSandboxLockWithNotice(baseDir, "hold for the test");
+	const leasing = leaseIsolationWorkspace(mergedDir).then(
+		() => "leased" as const,
+		() => "refused" as const,
+	);
+
+	await scheduler.wait(60);
+	await writeIsolationOwner(baseDir, "successor");
+	lock.release();
+
+	expect(await leasing).toBe("refused");
+});
+
+it("refuses to announce a stake it could not write", async () => {
+	// A caller told it announced itself queues for the lock believing the
+	// holder can see it. On a full disk the holder saw nothing at all.
+	const { mergedDir } = await makeSandbox();
+	vi.spyOn(fs, "mkdir").mockRejectedValue(Object.assign(new Error("ENOSPC: no space"), { code: "ENOSPC" }));
+
+	await expect(markUnfinishedWriter(mergedDir)).rejects.toThrow(/announce a stake|ENOSPC/);
+});
+
+it("checks its hold before each removal, not once before the listing", async () => {
+	// The listing is an await, and a hold checked before an await is a hold
+	// checked before somebody else could take the lock. Checked only at the
+	// top, this deleted a sandbox while a second process held it.
+	const { baseDir } = await makeSandbox();
+	await Bun.write(path.join(baseDir, "payload.txt"), "work\n");
+	const lock = await acquireSandboxLockWithNotice(baseDir, "clear");
+	const real = fs.readdir;
+	const spy = vi.spyOn(fs, "readdir");
+	spy.mockImplementation((async (...args: unknown[]) => {
+		// The hold ends while the listing is in flight: the window the old
+		// check could not see.
+		spy.mockRestore();
+		lock.release();
+		return await (real as (...a: unknown[]) => Promise<string[]>)(...args);
+	}) as unknown as typeof fs.readdir);
+
+	await expect(runHoldingSandboxLock(baseDir, lock, async () => await clearClaimedWorkspace(baseDir))).rejects.toThrow(
+		/no longer holds/,
+	);
+
+	// And the data a lock-less caller would have deleted is still there.
+	expect(await Bun.file(path.join(baseDir, "payload.txt")).exists()).toBe(true);
 });
 
 describe("retaining a workspace another party has already moved", () => {

@@ -35,6 +35,7 @@ import {
 	SANDBOX_LOCK_WAIT,
 	writeIsolationOwner,
 } from "./isolation-ownership";
+import { lstatLookup, readdirTypedLookup, realpathLookup } from "./isolation-lookup";
 import { mapWithConcurrencyLimit } from "./parallel";
 import type { cfgIsolationBackend } from "./settings";
 
@@ -140,7 +141,12 @@ async function realCommonDir(dir: string): Promise<string | undefined> {
 	if (!commonDir) return undefined;
 	// git writes realpath'd admin pointers; match them across symlinked
 	// prefixes (macOS /var -> /private/var).
-	return fs.realpath(commonDir).catch(() => path.resolve(commonDir));
+	// A path that cannot be resolved has no canonical form, and two callers
+	// that fall back to different spellings lock different files.
+	const resolved = await realpathLookup(commonDir);
+	if (resolved.kind === "found") return resolved.value;
+	if (resolved.kind === "absent") return path.resolve(commonDir);
+	throw new IsolationCaptureIncompleteError(`Could not resolve ${commonDir}: ${resolved.reason}`, [commonDir]);
 }
 
 /**
@@ -163,24 +169,32 @@ async function discoverNestedRepos(repoRoot: string, ownRepos: readonly string[]
 	// Find all .git dirs/files that aren't the root or known submodules
 	const result: string[] = [];
 	async function walk(dir: string): Promise<void> {
-		let entries: Dirent[];
-		try {
-			entries = await fs.readdir(dir, { withFileTypes: true });
-		} catch {
-			return;
+		const listing = await readdirTypedLookup(dir);
+		if (listing.kind === "absent") return;
+		if (listing.kind === "unknown") {
+			// A directory this process could not list may hold a nested repo
+			// whose work the capture would then miss entirely — and the
+			// teardown deletes on the strength of that capture.
+			throw new IsolationCaptureIncompleteError(
+				`Could not list ${dir} while looking for nested repositories: ${listing.reason}`,
+				[dir],
+			);
 		}
+		const entries = listing.value;
 		for (const entry of entries) {
 			if (entry.name === "node_modules" || entry.name === ".git") continue;
 			if (!entry.isDirectory()) continue;
 			const full = path.join(dir, entry.name);
 			const rel = path.relative(repoRoot, full);
-			// Check if this directory is itself a git repo
+			// Check if this directory is itself a git repo. A `.git` that
+			// cannot be reached is not a directory without one: read that way,
+			// a nested repo's changes never reach the patch.
 			const gitDir = path.join(full, ".git");
-			let hasGit = false;
-			try {
-				await fs.access(gitDir);
-				hasGit = true;
-			} catch {}
+			const gitEntry = await lstatLookup(gitDir);
+			if (gitEntry.kind === "unknown") {
+				throw new IsolationCaptureIncompleteError(`Could not read ${gitDir}: ${gitEntry.reason}`, [gitDir]);
+			}
+			const hasGit = gitEntry.kind === "found";
 			if (hasGit && !submodulePaths.has(rel)) {
 				const commonDir = await realCommonDir(full);
 				if (commonDir && ownCommonDirs.has(commonDir)) continue;
@@ -250,12 +264,18 @@ export class IsolationBaselineTooLargeError extends Error {
 async function sumUntrackedBytes(repoRoot: string, untracked: readonly string[]): Promise<number> {
 	if (untracked.length === 0) return 0;
 	const { results } = await mapWithConcurrencyLimit([...untracked], 16, async entry => {
-		try {
-			const stat = await fs.lstat(path.join(repoRoot, entry));
-			return stat.isFile() ? stat.size : 0;
-		} catch {
+		// A budget estimate, not a decision about deletion: an entry that
+		// vanished mid-scan is the common case and contributes nothing, and an
+		// entry nobody can stat has no size to contribute either. Both are
+		// named in the log the budget failure prints rather than silently
+		// shrinking the estimate.
+		const found = await lstatLookup(path.join(repoRoot, entry));
+		if (found.kind === "unknown") {
+			logger.warn("isolation baseline could not size an untracked entry", { entry, reason: found.reason });
 			return 0;
 		}
+		if (found.kind === "absent") return 0;
+		return found.value.isFile() ? found.value.size : 0;
 	});
 	return results.reduce((total: number, size) => total + (size ?? 0), 0);
 }
@@ -514,13 +534,11 @@ export interface DeltaPatchResult {
 }
 
 async function hasGitEntry(dir: string): Promise<boolean> {
-	try {
-		await fs.lstat(path.join(dir, ".git"));
-		return true;
-	} catch (error) {
-		if (isEnoent(error)) return false;
-		throw error;
+	const found = await lstatLookup(path.join(dir, ".git"));
+	if (found.kind === "unknown") {
+		throw new IsolationCaptureIncompleteError(`Could not read ${path.join(dir, ".git")}: ${found.reason}`, [dir]);
 	}
+	return found.kind === "found";
 }
 
 export async function captureDeltaPatch(isolationDir: string, baseline: WorktreeBaseline): Promise<DeltaPatchResult> {
@@ -546,10 +564,16 @@ export async function captureDeltaPatch(isolationDir: string, baseline: Worktree
 
 	for (const { relativePath, baseline: nb } of baseline.nested) {
 		const nestedDir = path.join(isolationDir, relativePath);
-		try {
-			await fs.access(path.join(nestedDir, ".git"));
-		} catch {
-			continue;
+		// A nested repo whose `.git` cannot be reached is not a nested repo
+		// that went away: skipping it drops its work from the patch, and the
+		// teardown then deletes the directory holding the only copy.
+		const nestedGit = await lstatLookup(path.join(nestedDir, ".git"));
+		if (nestedGit.kind === "absent") continue;
+		if (nestedGit.kind === "unknown") {
+			throw new IsolationCaptureIncompleteError(
+				`Could not read ${path.join(nestedDir, ".git")}: ${nestedGit.reason}`,
+				[nestedDir],
+			);
 		}
 		const patch = await captureRepoDeltaPatch(nestedDir, nb, nb.repoRoot);
 		if (patch.trim()) nestedPatches.push({ relativePath, patch });
@@ -593,10 +617,12 @@ export async function applyNestedPatches(
 
 	for (const [relativePath, repoPatches] of byRepo) {
 		const nestedDir = path.join(repoRoot, relativePath);
-		try {
-			await fs.access(path.join(nestedDir, ".git"));
-		} catch {
-			continue;
+		const nestedGit = await lstatLookup(path.join(nestedDir, ".git"));
+		if (nestedGit.kind === "absent") continue;
+		if (nestedGit.kind === "unknown") {
+			// This applies a captured patch. Skipping a repo nobody could look
+			// at drops the agent's work for it without saying so.
+			throw new Error(`Could not read ${path.join(nestedDir, ".git")}: ${nestedGit.reason}`);
 		}
 		const repository = vcs.requireGit(nestedDir);
 
@@ -792,22 +818,24 @@ async function detachSubmodules(sourceRoot: string, isolationRoot: string): Prom
 	for (const relativePath of paths) {
 		const sourceDir = path.join(sourceRoot, relativePath);
 		const isolatedDir = path.join(isolationRoot, relativePath);
-		try {
-			await fs.lstat(path.join(sourceDir, ".git"));
-		} catch (error) {
-			if (isEnoent(error)) continue;
-			throw error;
+		const sourceGit = await lstatLookup(path.join(sourceDir, ".git"));
+		if (sourceGit.kind === "absent") continue;
+		if (sourceGit.kind === "unknown") {
+			throw new Error(`Could not read ${path.join(sourceDir, ".git")}: ${sourceGit.reason}`);
 		}
-		let isolatedEntry;
-		try {
-			isolatedEntry = await fs.lstat(path.join(isolatedDir, ".git"));
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
+		let isolated = await lstatLookup(path.join(isolatedDir, ".git"));
+		if (isolated.kind === "unknown") {
+			throw new Error(`Could not read ${path.join(isolatedDir, ".git")}: ${isolated.reason}`);
+		}
+		if (isolated.kind === "absent") {
 			// `git worktree add` (rcopy) checks out gitlinks but not their trees.
 			await fs.cp(sourceDir, isolatedDir, { recursive: true });
-			isolatedEntry = await fs.lstat(path.join(isolatedDir, ".git"));
+			isolated = await lstatLookup(path.join(isolatedDir, ".git"));
+			if (isolated.kind !== "found") {
+				throw new Error(`Submodule ${relativePath} has no .git after being copied into the isolation.`);
+			}
 		}
-		initialized.push({ sourceDir, isolatedDir, isFile: isolatedEntry.isFile() });
+		initialized.push({ sourceDir, isolatedDir, isFile: isolated.value.isFile() });
 	}
 	for (const { sourceDir, isolatedDir, isFile } of initialized.reverse()) {
 		if (!isFile) continue;
