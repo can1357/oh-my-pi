@@ -96,15 +96,19 @@ describe("settings registry", () => {
 				expect(cfgSearxngEndpoint.get(settings)).toBe("https://env.example");
 				expect(cfgSearxngBasicPassword.get(settings)).toBe("env-secret");
 			});
+			// A global value is read, not dropped at load, and its warning still names the file.
+			const source = dir.join("agent", "config.yml");
 			expect(warn).toHaveBeenCalledWith("Settings: ignoring invalid value", {
 				setting: "searxng.endpoint",
 				value: 8080,
 				expected: "a string",
+				source,
 			});
 			expect(warn).toHaveBeenCalledWith("Settings: ignoring invalid value", {
 				setting: "searxng.basicPassword",
 				value: 42,
 				expected: "a string",
+				source,
 			});
 		} finally {
 			warn.mockRestore();

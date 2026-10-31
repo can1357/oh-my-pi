@@ -46,6 +46,7 @@ import {
 	type AnySetting,
 	all as allSettings,
 	bindEffects,
+	type IgnoredValue,
 	inheritWarnings,
 	reportDropped,
 	lookup as lookupSetting,
@@ -901,10 +902,10 @@ export class Settings {
 	 * default, so returning it verbatim would hand callers a value the schema
 	 * says is impossible (#13183).
 	 *
-	 * A value the setting rejects is unset too, with a warning (`Setting.reportRejected`). Project
-	 * and `--config` files drop such values as they load ({@link #dropRejected}), so the files and
-	 * layers beneath still apply; what can remain here is a rejected global value, the lowest
-	 * layer, or one a definition's `validate` keeps for its own check.
+	 * A value the setting rejects is unset too, with a warning naming the file holding it
+	 * (`Setting.reportRejected`). Project and `--config` files drop such values as they load
+	 * ({@link #dropRejected}), so the files and layers beneath still apply; what can remain here is a
+	 * rejected global value, the lowest layer, or one a definition's `validate` keeps for its own check.
 	 */
 	rawValue(setting: AnySetting): unknown {
 		const value = configuredValue(this.#mergedView(), setting, this.#cwd);
@@ -912,8 +913,31 @@ export class Settings {
 			setting.rearmRejected(this);
 			return value;
 		}
-		setting.reportRejected(this, value);
+		setting.reportRejected(this, value, () => this.#sourceOf(setting));
 		return undefined;
+	}
+
+	/** The config file(s) holding `setting`'s merged value, as {@link getProvenance} finds its layer. */
+	#sourceOf(setting: AnySetting): string | undefined {
+		const segments = setting.segments;
+		if (getByPath(this.#overrides, segments) !== undefined) return undefined;
+		if (getByPath(this.#configOverlay, segments) !== undefined) return this.#configFiles.join(", ");
+		if (getByPath(projectLayerForMerge(this.#project), segments) !== undefined) {
+			return this.#projectSourcePaths.join(", ") || getProjectAgentDir(this.#cwd);
+		}
+		if (getByPath(this.#global, segments) !== undefined) return this.#configPath ?? undefined;
+		return this.#parent ? this.#parent.#sourceOf(setting) : undefined;
+	}
+
+	/**
+	 * Values config files hold that this instance ignores because their setting rejects them, each with
+	 * the file holding it: those project and `--config` files dropped as they loaded, and a rejected
+	 * value read as unset (a global one, say) once its setting has been read.
+	 */
+	ignoredValues(): IgnoredValue[] {
+		const ignored = [...this.warnState.invalid.values()];
+		for (const layer of this.warnState.dropped.values()) ignored.push(...layer.values());
+		return ignored;
 	}
 
 	/**
@@ -2545,7 +2569,8 @@ export class Settings {
 		const asWritten = this.#migrateRawSettings(merged, quarantineInvalid);
 		const dropped = new Map<AnySetting, unknown>();
 		const settings = this.#dropRejected(asWritten, dropped);
-		reportDropped(this, projectConfigDir, dropped, (setting, value) => {
+		// One key for the project layer: a re-scope to another project replaces what the last one dropped.
+		reportDropped(this, "project", dropped, (setting, value) => {
 			// Name the highest file holding the value; a value migration renamed names the project.
 			if (setting === cfgModelRoles && Bun.deepEquals(nativeModelRoles, value)) return projectConfigPath;
 			for (let index = items.length - 1; index >= 0; index--) {

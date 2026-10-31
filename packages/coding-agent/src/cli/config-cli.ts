@@ -161,6 +161,43 @@ function getTypeDisplay(def: CliSettingDef): string {
 	}
 }
 
+/** One value a config file holds that its setting rejects and so ignores, as `--json` reports it. */
+interface IgnoredEntry {
+	/** The value as written; absent for a credential, which says `redacted` instead, as in `list`. */
+	value?: unknown;
+	redacted?: true;
+	expected: string;
+	/** The config file holding it, when known. */
+	source?: string;
+}
+
+/** The values config files hold that `setting` (every setting when omitted) rejects, keyed by setting id. */
+function ignoredEntries(setting?: AnySetting): [id: string, entry: IgnoredEntry][] {
+	return settings
+		.ignoredValues()
+		.filter(ignored => !setting || ignored.setting === setting)
+		.map(({ setting: ignored, value, source }) => [
+			ignored.id,
+			{
+				...(ignored.isCredential ? { redacted: true as const } : { value }),
+				expected: ignored.expected,
+				...(source === undefined ? {} : { source }),
+			},
+		]);
+}
+
+/** Prints, on stderr, a warning for each of {@link ignoredEntries}: a hand-edited mistake is otherwise invisible here. */
+function warnIgnored(setting?: AnySetting): void {
+	for (const [id, entry] of ignoredEntries(setting)) {
+		// JSON shows the value's type and any stray whitespace, which is usually the mistake.
+		const shown = entry.redacted ? REDACTED : JSON.stringify(entry.value);
+		const where = entry.source === undefined ? "" : ` in ${entry.source}`;
+		console.error(
+			chalk.yellow(`${theme.status.warning} Ignored ${id} = ${shown}${where}: expected ${entry.expected}.`),
+		);
+	}
+}
+
 // =============================================================================
 // Command Handlers
 // =============================================================================
@@ -220,13 +257,20 @@ async function handleList(flags: { json?: boolean }): Promise<void> {
 		// one configured, which leaks the opposite of what redaction is for. A
 		// configured "" renders as unset, like in the settings panel (credentials
 		// are all strings).
-		const result: Record<string, { value?: unknown; redacted?: true; type: string; description: string }> = {};
+		const result: Record<
+			string,
+			{ value?: unknown; redacted?: true; type: string; description: string; ignored?: IgnoredEntry[] }
+		> = {};
 		for (const def of defs) {
 			const value = def.setting.get(settings);
 			result[def.path] =
 				def.setting.isCredential && value
 					? { redacted: true, type: def.type, description: def.description }
 					: { value, type: def.type, description: def.description };
+		}
+		for (const [id, entry] of ignoredEntries()) {
+			const target = result[id];
+			if (target) (target.ignored ??= []).push(entry);
 		}
 		await writeStdout(`${JSON.stringify(result, null, 2)}\n`);
 		return;
@@ -263,13 +307,15 @@ async function handleList(flags: { json?: boolean }): Promise<void> {
 		}
 		console.log("");
 	}
+	warnIgnored();
 }
 
 /**
  * The keys the `scope` layer sets, with the values as written: path-scoped arrays
  * (`enabledModels`, `enabledProviders`, `disabledProviders`) keep their `{ path, … }` entries
  * unresolved, so a host can edit the layer's own value without dropping them. Defaults, other
- * layers and the environment are not consulted. Credentials are redacted as in `list`.
+ * layers and the environment are not consulted. Credentials are redacted as in `list`. A value
+ * the setting rejects, which every read ignores, is marked so and names what was expected.
  */
 async function handleListLayer(scope: ConfigScope, flags: { json?: boolean }): Promise<void> {
 	const layer = scope === "project" ? settings.getProjectSettings() : settings.getGlobalSettings();
@@ -279,14 +325,20 @@ async function handleListLayer(scope: ConfigScope, flags: { json?: boolean }): P
 		for (const segment of def.setting.segments) value = isRecord(value) ? value[segment] : undefined;
 		if (value !== undefined) entries.push([def, value]);
 	}
+	const ignored = (def: CliSettingDef, value: unknown) => value !== null && !def.setting.accepts(value);
 
 	if (flags.json) {
-		const result: Record<string, { value?: unknown; redacted?: true; type: string; description: string }> = {};
+		const result: Record<
+			string,
+			{ value?: unknown; redacted?: true; type: string; description: string; ignored?: true; expected?: string }
+		> = {};
 		for (const [def, value] of entries) {
-			result[def.path] =
-				def.setting.isCredential && value
-					? { redacted: true, type: def.type, description: def.description }
-					: { value, type: def.type, description: def.description };
+			result[def.path] = {
+				...(def.setting.isCredential && value ? { redacted: true } : { value }),
+				type: def.type,
+				description: def.description,
+				...(ignored(def, value) ? { ignored: true, expected: def.setting.expected } : {}),
+			};
 		}
 		await writeStdout(`${JSON.stringify(result, null, 2)}\n`);
 		return;
@@ -295,7 +347,8 @@ async function handleListLayer(scope: ConfigScope, flags: { json?: boolean }): P
 	console.log(chalk.bold(`Settings in the ${scope} layer:\n`));
 	for (const [def, value] of entries) {
 		const valueStr = def.setting.isCredential && value ? REDACTED : formatValue(value);
-		console.log(`  ${chalk.white(def.path)} = ${valueStr} ${chalk.dim(getTypeDisplay(def))}`);
+		const note = ignored(def, value) ? ` ${chalk.yellow(`(ignored: expected ${def.setting.expected})`)}` : "";
+		console.log(`  ${chalk.white(def.path)} = ${valueStr} ${chalk.dim(getTypeDisplay(def))}${note}`);
 	}
 }
 
@@ -316,11 +369,25 @@ function handleGet(key: string | undefined, flags: { json?: boolean }): void {
 	const value = def.setting.get(settings);
 
 	if (flags.json) {
-		console.log(JSON.stringify({ key: def.path, value, type: def.type, description: def.description }, null, 2));
+		const ignored = ignoredEntries(def.setting).map(([, entry]) => entry);
+		console.log(
+			JSON.stringify(
+				{
+					key: def.path,
+					value,
+					type: def.type,
+					description: def.description,
+					...(ignored.length > 0 ? { ignored } : {}),
+				},
+				null,
+				2,
+			),
+		);
 		return;
 	}
 
 	console.log(formatValue(value));
+	warnIgnored(def.setting);
 }
 
 async function handleSet(key: string | undefined, value: string | undefined, flags: { json?: boolean }): Promise<void> {

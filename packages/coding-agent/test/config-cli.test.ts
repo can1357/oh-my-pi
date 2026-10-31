@@ -1,9 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { runConfigCommand } from "@oh-my-pi/pi-coding-agent/cli/config-cli";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getConfigRootDir, getProjectDir, setAgentDir, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
 let testAgentDir: TempDir | undefined;
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -27,6 +28,11 @@ async function runCliProcess(args: string[], env: NodeJS.ProcessEnv): Promise<Cl
 	const [exitCode, output, error] = await Promise.all([proc.exited, stdout, stderr]);
 	return { exitCode, output, error };
 }
+
+// `omp config` initializes the theme before it runs a command; its text output uses the status symbols.
+beforeAll(async () => {
+	await initTheme();
+});
 
 beforeEach(() => {
 	resetSettingsForTest();
@@ -275,9 +281,15 @@ describe("config list --scope", () => {
 		projectDir = undefined;
 	});
 
+	/** `config list --json`, of one layer as written when `scope` is given. */
 	async function listLayer(
-		scope: "global" | "project",
-	): Promise<Record<string, { value?: unknown; redacted?: true; type: string; description: string }>> {
+		scope?: "global" | "project",
+	): Promise<
+		Record<
+			string,
+			{ value?: unknown; redacted?: true; type: string; description: string; ignored?: unknown; expected?: string }
+		>
+	> {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(((
 			text: string,
@@ -360,6 +372,53 @@ describe("config list --scope", () => {
 		expect(text).toContain("hindsight.apiToken = ********");
 		expect(text).not.toContain("secret-token");
 		expect(text).not.toContain("defaultThinkingLevel");
+	});
+
+	it("shows get and list users a value a config file holds that every read ignores, and the file", async () => {
+		if (!testAgentDir || !projectDir) throw new Error("Test directories were not initialized");
+		const globalFile = path.join(testAgentDir.path(), "config.yml");
+		const projectFile = path.join(projectDir.path(), ".omp", "config.yml");
+		// A global value is read as unset; a project value is dropped as the project layer loads.
+		await Bun.write(globalFile, 'temperature: "hot"\nhindsight:\n  apiToken: 12345678\n');
+		await Bun.write(projectFile, "steeringMode: sometimes\n");
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const stderr = () => Bun.stripANSI(errorSpy.mock.calls.map(call => String(call[0] ?? "")).join("\n"));
+		const stdout = () => Bun.stripANSI(logSpy.mock.calls.map(call => String(call[0] ?? "")).join("\n"));
+
+		await runConfigCommand({ action: "get", key: "temperature", flags: {} });
+		expect(stderr()).toContain(`Ignored temperature = "hot" in ${globalFile}: expected a number.`);
+
+		await runConfigCommand({ action: "get", key: "temperature", flags: { json: true } });
+		expect(JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]))).toMatchObject({
+			key: "temperature",
+			value: -1,
+			ignored: [{ value: "hot", expected: "a number", source: globalFile }],
+		});
+
+		errorSpy.mockClear();
+		await runConfigCommand({ action: "list", flags: {} });
+		expect(stderr()).toContain(`Ignored steeringMode = "sometimes" in ${projectFile}: expected one of `);
+		// A credential of the wrong type is still a credential: named, never printed.
+		expect(stderr()).toContain(`Ignored hindsight.apiToken = ******** in ${globalFile}: expected a string.`);
+		expect(stderr()).not.toContain("12345678");
+		expect(stdout()).not.toContain("12345678");
+
+		const all = await listLayer();
+		expect(all.steeringMode.ignored).toEqual([
+			{ value: "sometimes", expected: expect.stringContaining("one of "), source: projectFile },
+		]);
+		expect(all["hindsight.apiToken"].ignored).toEqual([{ redacted: true, expected: "a string", source: globalFile }]);
+
+		// The layer as written still shows the value, marked so a host does not take it as the one in effect.
+		expect((await listLayer("project")).steeringMode).toMatchObject({
+			value: "sometimes",
+			ignored: true,
+			expected: expect.stringContaining("one of "),
+		});
+		logSpy.mockClear();
+		await runConfigCommand({ action: "list", flags: { scope: "global" } });
+		expect(stdout()).toMatch(/temperature = hot \(number\) \(ignored: expected a number\)/);
 	});
 
 	it("rejects --scope on actions other than list", async () => {

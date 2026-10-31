@@ -70,6 +70,7 @@ describe("out://", () => {
 				setting: "out.enabled",
 				value: "off",
 				expected: "a boolean",
+				source: dir.join("agent", "config.yml"),
 			});
 		} finally {
 			warn.mockRestore();
