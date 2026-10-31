@@ -119,7 +119,6 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 			const approved = await untilAborted(signal, () =>
 				requestApproval(
 					{
-						select: (title, options) => ui.select(title, options, { signal }),
 						approve: proposal => approve(proposal, { signal }),
 					},
 					{ name: this.name, approval: "write", formatApprovalDetails: () => [details] },
