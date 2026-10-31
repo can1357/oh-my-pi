@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed `thinkingLoopGuard` from compat records; `thinking-loop-guard` is now a catalog axis that applies on every host, with `"semantic"` for Gemini, DeepSeek, and Grok and `"off"` for Claude
+
 ## [18.14.1] - 2026-10-31
 
 ### Changed

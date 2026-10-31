@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `setStatsCloseHandler`: while a host sets one, the dashboard shows a Close button in its top bar and closes on Esc or Ctrl+C (with no text selected), for hosts that show it in place of their terminal
+
 ## [18.14.0] - 2026-10-29
 
 ### Changed

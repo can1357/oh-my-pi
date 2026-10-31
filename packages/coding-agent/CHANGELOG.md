@@ -5,6 +5,17 @@
 ### Added
 
 - Added opt-in model edits to the active goal objective through `goal.modelObjectiveUpdates` (`disabled`, `confirm`, or `on-request`), preserving the goal's budget and progress; the default remains `disabled` ([#17556](https://github.com/can1357/oh-my-pi/pull/17556) by [@wtfsayo](https://github.com/wtfsayo)).
+### Changed
+
+- Viewing a subagent or returning to the main session no longer posts a "Viewing agent …" / "Returned to main session" status (a popup in Tern); the status line and Tern's composer already show which agent is in view
+- In a Tern pane, `omp stats` shows the dashboard in place of the block it runs in, with a Close button (or Esc, or Ctrl+C) that stops it and brings the terminal back, and `/stats` opens it in a browser block beside omp, instead of the system browser
+
+### Fixed
+
+- Fixed a `!` or `$` command run while the agent works floating over the composer in Tern, where expanding its output covered the conversation; it now sits at the end of the conversation
+- Fixed `out://` replies sent from an eval cell (`tool.write` to `out://`, or `tool.bash` with `> out://`) never appearing even though the write reported "Shown to the user."; they now draw as replies after the eval card, and are refused where nothing would show them (a backgrounded cell, a browser tab script)
+- Fixed a `write` to `out://` (such as `out://baselines.md`) drawing as a Write card with line numbers instead of a reply streaming as prose
+- Fixed table charts drawing a `ratio` or `speedup` column as a series beside the timings it was computed from, which read as "719× less" against the baseline
 
 ## [18.14.1] - 2026-10-31
 
