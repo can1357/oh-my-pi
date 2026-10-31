@@ -1070,8 +1070,8 @@ describe("PolyphonicRecallEngine", () => {
 
 			// 3. 近期 / 最新 route to TR in memoriaRetrieve
 			beam.db.run(
-				`INSERT INTO memoria_timelines (session_id, date, description, importance, source_memory_id)
-					VALUES (?, '2026-10-30', '近期完成了核心服務部署', 50, 'tl-recent')`,
+				`INSERT INTO memoria_timelines (session_id, event_id, date, description, source_memory_id)
+					VALUES (?, 1, '2026-10-30', '近期完成了核心服務部署', 'tl-recent')`,
 				[beam.sessionId],
 			);
 			expect(memoriaRetrieve(beam, "近期部署了什麼").ability).toBe("TR");
@@ -1079,10 +1079,10 @@ describe("PolyphonicRecallEngine", () => {
 
 			// 4. Long particle-stripped MEMORIA subject (>12 chars) preserved as primary
 			beam.db.run(
-				`INSERT INTO memoria_facts (session_id, category, key, value, confidence, importance, context_snippet, source_memory_id)
+				`INSERT INTO memoria_facts (session_id, message_idx, fact_type, key, value, context_snippet, importance, source_memory_id)
 					VALUES
-					(?, 'knowledge', 'ソフ', 'unrelated shingle match', 0.99, 95, 'ソフ', 'mf-shingle'),
-					(?, 'knowledge', 'ソフトウェア開発プロジェクト', 'exact long subject match', 0.8, 60, 'ソフトウェア開発プロジェクト', 'mf-long')`,
+					(?, 0, 'entity', 'ソフ', 'unrelated shingle match', 'ソフ', 0.99, 'mf-shingle'),
+					(?, 1, 'entity', 'ソフトウェア開発プロジェクト', 'exact long subject match', 'ソフトウェア開発プロジェクト', 0.60, 'mf-long')`,
 				[beam.sessionId, beam.sessionId],
 			);
 			const longRes = memoriaRetrieve(beam, "ソフトウェア開発プロジェクトについて", undefined, 1);
