@@ -1132,6 +1132,8 @@ export class AgentSession implements SettingsScope {
 	#autolearnCaptureTask: Promise<void> | undefined;
 	#isDisposed = false;
 	#stallReminders: StallReminderController | undefined;
+	/** Idle Esc parks autonomous diagnostics without suppressing unrelated background completions. */
+	#stallReminderUserStopped = false;
 	#stallReminderDeliveryScheduled = false;
 	#stallReminderDeliveryHoldDepth = 0;
 	#stallDiagnosticTurnGeneration: number | undefined;
@@ -2937,6 +2939,7 @@ export class AgentSession implements SettingsScope {
 					!this.#isDisposed &&
 					this.#stallReminderDeliveryHoldDepth === 0 &&
 					!this.#planModeState?.enabled &&
+					!this.#stallReminderUserStopped &&
 					!this.#advisors.autoResumeSuppressed &&
 					!this.#clientBridge?.deferAgentInitiatedTurns,
 			});
@@ -5346,6 +5349,7 @@ export class AgentSession implements SettingsScope {
 			!this.isCompacting &&
 			!this.isGeneratingHandoff &&
 			!this.#planModeState?.enabled &&
+			!this.#stallReminderUserStopped &&
 			!this.#advisors.autoResumeSuppressed &&
 			!this.#clientBridge?.deferAgentInitiatedTurns &&
 			!this.agent.hasQueuedMessages() &&
@@ -8303,6 +8307,7 @@ export class AgentSession implements SettingsScope {
 	 * that a prior user interrupt suppressed and resets plan-mode reminder state.
 	 */
 	#noteUserTurn(): void {
+		this.#stallReminderUserStopped = false;
 		this.#advisors.autoResumeSuppressed = false;
 		this.#planModeReminderCount = 0;
 		this.#planModeReminderAwaitingProgress = false;
@@ -11404,6 +11409,7 @@ export class AgentSession implements SettingsScope {
 		preserveCompaction?: boolean;
 	}): Promise<void> {
 		const userInterrupt = options?.reason === USER_INTERRUPT_LABEL;
+		if (userInterrupt) this.#stallReminderUserStopped = true;
 		this.#pendingAbortErrorId = userInterrupt ? AIError.create(AIError.Flag.UserInterrupt) : undefined;
 		// Latch only when the interrupt stops something; an idle Esc would otherwise fold
 		// every later background completion for the rest of the session.
