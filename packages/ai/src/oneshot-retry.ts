@@ -1,10 +1,10 @@
 import * as AIError from "./error";
 import type { AssistantMessage } from "./types";
 import {
-	extractProviderRetryHint,
 	getHeadersFromError,
 	getRetryAfterMsFromHeaders,
 	type HeadersLike,
+	providerRetryWaitMs,
 } from "./utils/retry-after";
 
 /**
@@ -97,7 +97,6 @@ const DEFAULT_BASE_DELAY_MS = 500;
 const DEFAULT_MAX_DELAY_MS = 30_000;
 /** Cap on pure backoff growth. A provider hint may still exceed this, up to `maxDelayMs`. */
 const BACKOFF_CEILING_MS = 8_000;
-const RETRY_AFTER_MS_SUFFIX = /(?:^|\s)retry-after-ms=([0-9]+(?:\.[0-9]+)?)(?=\s|$)/i;
 
 function backoffDelayMs(attempt: number, baseDelayMs: number): number {
 	const growth = Math.min(baseDelayMs * 2 ** (attempt - 1), BACKOFF_CEILING_MS);
@@ -200,26 +199,16 @@ export async function retryTransientCompletion(
 		}
 
 		// Headers first: a real Anthropic 429/529 carries `retry-after` /
-		// `x-ratelimit-reset*` in the response, and the resolved AssistantMessage
-		// has none — the caller supplies them via `getResponseHeaders`. Thrown
-		// errors (e.g. AnthropicApiError) carry their own headers.
+		// `x-ratelimit-reset*` in the response. Thrown errors (e.g.
+		// AnthropicApiError) carry their own headers; a resolved AssistantMessage
+		// carries their wait as `errorRetryAfterMs`, and the caller may still supply
+		// the headers through `getResponseHeaders`. The header's wait is never read
+		// back out of the message text, which a body could have written.
 		const headers: HeadersLike = thrown !== undefined ? getHeadersFromError(thrown) : options?.getResponseHeaders?.();
-		const headerHintMs = getRetryAfterMsFromHeaders(headers);
-		const extractedTextHintMs = extractProviderRetryHint(options?.provider, errorMessage);
-		const suffixValue = RETRY_AFTER_MS_SUFFIX.exec(errorMessage)?.[1];
-		const parsedSuffixMs = suffixValue === undefined ? undefined : Number(suffixValue);
-		const suffixHintMs =
-			parsedSuffixMs !== undefined && Number.isFinite(parsedSuffixMs) && parsedSuffixMs > 0
-				? Math.ceil(parsedSuffixMs)
-				: undefined;
-		const textHintMs =
-			extractedTextHintMs === undefined && suffixHintMs === undefined
-				? undefined
-				: Math.max(extractedTextHintMs ?? 0, suffixHintMs ?? 0);
-		const hintMs =
-			headerHintMs === undefined && textHintMs === undefined
-				? undefined
-				: Math.max(headerHintMs ?? 0, textHintMs ?? 0);
+		const headerHintMs =
+			getRetryAfterMsFromHeaders(headers) ??
+			(thrown === undefined ? (message as AssistantMessage).errorRetryAfterMs : undefined);
+		const hintMs = providerRetryWaitMs(options?.provider, errorMessage, headerHintMs);
 		// An over-cap hint means "come back much later"; parking a oneshot that
 		// long is worse than surfacing the failure to the caller.
 		if (hintMs !== undefined && hintMs > maxDelayMs) {

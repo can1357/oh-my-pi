@@ -12,6 +12,18 @@ import type { AuthCredential, BlocksApi, StoredCredentialBlock } from "./types";
 /** Default block when no provider reset time is known; used by selectors and rate limits. */
 export const DEFAULT_BLOCK_MS = 60_000;
 
+/**
+ * Longest a credential stays blocked on a failure's stated retry wait — the
+ * text or header hint `RateLimits.markReached` receives. Seven days is the
+ * longest rolling usage window a provider here publishes (the weekly limits).
+ * A usage report can still extend a block to a later reset it states, such as a
+ * monthly quota's. Being short costs one request when the block lapses early: it
+ * fails and re-blocks. An unbounded hint has no such ceiling: a number a body
+ * quotes or a header misreports (`retry-after-ms=999…`, a far epoch) would take
+ * the credential out of rotation for good.
+ */
+export const MAX_HINTED_BLOCK_MS = 7 * 24 * 60 * 60 * 1000;
+
 /** Composite key for round-robin tracking: "<provider>:oauth" or "<provider>:api_key". */
 export function providerTypeKey(provider: string, type: AuthCredential["type"]): string {
 	return `${provider}:${type}`;

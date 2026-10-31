@@ -20,7 +20,7 @@ import type {
 import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { shouldDropTruncatedThinkingOnlyAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
-import { extractProviderRetryHint, longestProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { longestProviderRetryHint, providerRetryWaitMs } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-credit";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
@@ -873,7 +873,7 @@ export class TurnRecovery {
 		let recorded = this.#usageLimitOutcomes.get(message);
 		if (!recorded) {
 			const errorMessage = message.errorMessage || "Unknown error";
-			const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
+			const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage, message.errorRetryAfterMs);
 			const retryAfterMs = parsedRetryAfterMs ?? calculateRateLimitBackoffMs(parseRateLimitReason(errorMessage));
 			recorded = (async (): Promise<UsageLimitOutcome> => {
 				const outcome = await this.#host.modelRegistry.authStorage.limits.markReached(
@@ -2699,12 +2699,13 @@ export class TurnRecovery {
 		return true;
 	}
 
-	#parseRetryAfterMsFromError(errorMessage: string): number | undefined {
+	#parseRetryAfterMsFromError(errorMessage: string, headerRetryAfterMs?: number): number | undefined {
 		// The wait this failure names, as every caller that keeps a route or a
-		// credential closed reads it: the usage-limit mark and the retry delay.
-		// The held-retry check reads every occurrence on its own; see
+		// credential closed reads it: the usage-limit mark and the retry delay. The
+		// header's wait arrives structured (`errorRetryAfterMs`), never from the
+		// text. The held-retry check reads every occurrence on its own; see
 		// `longestProviderRetryHint` where the hold is decided.
-		return extractProviderRetryHint(this.#host.model()?.provider, errorMessage);
+		return providerRetryWaitMs(this.#host.model()?.provider, errorMessage, headerRetryAfterMs);
 	}
 
 	/**
@@ -2790,7 +2791,7 @@ export class TurnRecovery {
 		const staleOpenAIResponsesReplayError = AIError.is(id, AIError.Flag.StaleResponsesItem);
 		const accountPolicyDenial = AIError.is(id, AIError.Flag.AccountPolicy);
 		const recordedUsageLimitOutcome = await this.#usageLimitOutcomes.get(message);
-		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
+		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage, message.errorRetryAfterMs);
 		// A failure after a held retry that does not report going out once means
 		// the held call reached past the hold's bound, so the recovery stops
 		// holding — before the next model, reached on a fresh retry budget, can
@@ -2974,6 +2975,7 @@ export class TurnRecovery {
 				switchedCredential = (
 					await this.#host.modelRegistry.authStorage.limits.rotate(currentModel.provider, this.#host.sessionId(), {
 						error: errorMessage,
+						retryAfterMs: message.errorRetryAfterMs,
 						modelId: currentModel.id,
 						signal: rotateAbortController.signal,
 						waitForSibling: rotationsRemaining > 0,

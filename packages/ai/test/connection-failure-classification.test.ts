@@ -477,26 +477,56 @@ describe("connection-failure classification", () => {
 		"after 401 ns",
 		"(https://h.invalid/v1)",
 		"retry-after-ms=529",
+		"[fe80::1%eth0]:401",
+		"[fe80::1%25eth0]:403",
+		"127.1:401",
+		"after 401 nsec",
+		"after 403 μsec",
+		"after 503\u00ADms",
+		"after 529\u2063ms",
+		"after 403分",
+		"after 401日",
+		"after 429週",
+		"after 529초",
+		"after 401 micro-second",
+		"took 503.0 milliseconds",
+		"HTTP/3 stream 503",
+		"model=gpt-503-preview",
+		"x-request-503",
 	];
+	/** A decoration that is a sentence, not metadata: after `terminated` it reads as a reason. */
+	const PROSE_DECORATION = "等待503秒后重试";
 
-	it.each(WIRE_BASES.flatMap(base => DECORATIONS.map(decoration => [base, decoration])))(
-		"classifies %s decorated with %s like the bare diagnostic",
-		(base, decoration) => {
-			// A port, a duration split from its unit by a zero-width character, a CJK
-			// unit, or any decoration after undici's bare `terminated` is metadata:
-			// the decorated failure is the same wire cut. Read as a status, `port 503`
-			// took the cut off the connection lane; `terminated; …` matched no wire
-			// wording at all.
-			const separator = decoration.startsWith("(") ? " " : "; ";
-			const decorated = new Error(`${base}${separator}${decoration}`);
-			const bare = new Error(base);
-			for (const flag of [AIError.Flag.Connection, AIError.Flag.Transient]) {
-				expect(AIError.is(AIError.classify(decorated), flag)).toBe(AIError.is(AIError.classify(bare), flag));
-			}
-			expect(AIError.retriable(AIError.classify(decorated))).toBe(AIError.retriable(AIError.classify(bare)));
-			expect(AIError.status(decorated)).toBeUndefined();
-		},
-	);
+	it.each(
+		WIRE_BASES.flatMap(base =>
+			DECORATIONS.filter(decoration => !(base === "terminated" && decoration === PROSE_DECORATION)).map(
+				decoration => [base, decoration],
+			),
+		),
+	)("classifies %s decorated with %s like the bare diagnostic", (base, decoration) => {
+		// Metadata — a port behind any bracketed or dotted host, a duration in any
+		// spelling or script, split from its unit by any default-ignorable
+		// character, a stream number, an identifier — leaves the failure the same
+		// wire cut. Read as a status, `port 503` took the cut off the connection
+		// lane and `after 401 nsec` made it a non-retryable auth rejection.
+		const separator = decoration.startsWith("(") ? " " : "; ";
+		const decorated = new Error(`${base}${separator}${decoration}`);
+		const bare = new Error(base);
+		for (const flag of [AIError.Flag.Connection, AIError.Flag.Transient]) {
+			expect(AIError.is(AIError.classify(decorated), flag)).toBe(AIError.is(AIError.classify(bare), flag));
+		}
+		expect(AIError.retriable(AIError.classify(decorated))).toBe(AIError.retriable(AIError.classify(bare)));
+		expect(AIError.status(decorated)).toBeUndefined();
+	});
+
+	it("reads a sentence after terminated as a reason, without reading its number as a status", () => {
+		// "wait 503 seconds, then retry": words, so not a decoration of the bare
+		// diagnostic; and the number is a duration, so not a 503.
+		const error = new Error(`terminated; ${PROSE_DECORATION}`);
+		expect(AIError.is(AIError.classify(error), AIError.Flag.Connection)).toBe(false);
+		expect(AIError.retriable(AIError.classify(error))).toBe(true);
+		expect(AIError.status(error)).toBeUndefined();
+	});
 
 	it.each([
 		["the formatter's header wait", "terminated retry-after-ms=9000", true],
@@ -505,6 +535,13 @@ describe("connection-failure classification", () => {
 		["a reason after a colon", "terminated: content policy", false],
 		["a killed process", "Process terminated by signal SIGKILL", false],
 		["a reason after a word", "terminated by the operator", false],
+		// A reason behind any separator: round ten let these through as cut streams.
+		["a killed process after a semicolon", "terminated; process killed by SIGKILL", false],
+		["a policy reason in parentheses", "terminated (content policy violation)", false],
+		["a permission reason after a semicolon", "terminated; permission denied", false],
+		["a reason after the formatter's suffix", "terminated retry-after-ms=200 due to content policy", false],
+		["a reason field", "terminated; reason=content_policy", false],
+		["an identifier and a protocol", "terminated (model=gpt-503-preview via HTTP/1.1)", true],
 	] as [string, string, boolean][])("reads undici's terminated with %s correctly", (_label, text, connection) => {
 		expect(AIError.is(AIError.classify(new Error(text)), AIError.Flag.Connection)).toBe(connection);
 	});

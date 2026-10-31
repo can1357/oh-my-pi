@@ -555,53 +555,63 @@ function isFieldKey(quote: string, key: string, separator: string): boolean {
 		DURATION_FIELD_KEY.test(key)
 	);
 }
-/** Go's frame field, which has no separator: `stream error: stream ID 503`. */
-const GO_STREAM_ID_PATTERN = /\bstream\s+ID\s+\d+/g;
 /**
- * A port: after an IPv4 address, a bracketed IPv6 address or `localhost`
- * (`connect ECONNRESET 127.0.0.1:503`, `[::1]:503`), or named in prose
- * (`port 503`). A dotted host name before a colon is already a field key, so
- * `h.invalid:503` is covered there.
+ * A stream number in prose: Go's frame field (`stream error: stream ID 503`) and
+ * HTTP/3's (`HTTP/3 stream 503`). A stream is numbered, never a status.
  */
-const PORT_NUMBER_PATTERN = /(?:\b\d{1,3}(?:\.\d{1,3}){3}|\[[0-9A-Fa-f:.]+\]|\blocalhost):\d+|\bport\s+\d+/gi;
+const STREAM_NUMBER_PATTERN = /\bstream\s+(?:ID\s+)?\d+/gi;
 /**
- * Characters with no width that can sit between a number and its unit
- * (`503\u200Bms`) and would otherwise hide the unit from
- * {@link UNIT_NUMBER_PATTERN}: zero-width space, non-joiner and joiner, word
- * joiner, and the byte-order mark.
+ * A port, by the host in front of it: anything in brackets — every IPv6
+ * spelling, a zone (`[fe80::1%eth0]:401`, `[fe80::1%25eth0]:403`), an IPv4
+ * mapping (`[::ffff:192.0.2.1]:503`) — a dotted numeric host of two to four
+ * parts (`127.0.0.1:503`, the shorthand `127.1:401`), or `localhost`; or a port
+ * named in prose (`port 503`). A dotted host name before a colon is already a
+ * field key, so `h.invalid:503` is covered there.
  */
-const ZERO_WIDTH_PATTERN = /[\u200B-\u200D\u2060\uFEFF]/g;
+const PORT_NUMBER_PATTERN = /(?:\[[^\]\s]+\]|\b\d{1,3}(?:\.\d{1,3}){1,3}|\blocalhost):\d+|\bport\s+\d+/gi;
 /**
- * A number in the role of a duration: followed by a time unit, glued or
- * spaced — nanoseconds through days, any common spelling, the micro sign as
- * U+00B5 or U+03BC — or by a size or token unit. The unit, not what surrounds
- * it, decides: `after 401 ns`, `403µs`, `529 microseconds`, `2.5h`. A Latin
- * unit must end the word, so `503 Service` is not `503 s`; a CJK unit needs no
- * word end, because CJK text has none (`503秒后重试`).
+ * Every character Unicode marks as default-ignorable: nothing renders, so
+ * nothing can separate a number from its unit. Covers the zero-width space,
+ * joiners, the soft hyphen (`503\u00ADms`), the invisible separator
+ * (`529\u2063ms`), the word joiner and the byte-order mark, and any such
+ * character Unicode adds later.
+ */
+const DEFAULT_IGNORABLE_PATTERN = /\p{Default_Ignorable_Code_Point}/gu;
+/**
+ * A number in the role of a duration: followed by a unit of time, glued or
+ * spaced, or by a size or token unit. The unit decides, whatever surrounds
+ * it. Latin units come in every spelling of every SI prefix of the second
+ * (`ns`, `nsec`, `nanos`, `nanosecond`, `nano-second`, the micro sign as
+ * U+00B5 or U+03BC), and minutes through years; a Latin unit must end the word,
+ * so `503 Service` is not `503 s`. CJK and Korean units need no word end,
+ * because those scripts have none (`503秒后重试`): seconds and their
+ * subdivisions, minutes, hours, days, weeks, months and years in Chinese,
+ * Japanese and Korean.
  */
 const UNIT_NUMBER_PATTERN =
-	/(?<![\w.])\d+(?:\.\d+)?\s*(?:(?:ns|nanos?(?:econds?)?|us|µs|μs|micros?(?:econds?)?|ms|msecs?|millis?(?:econds?)?|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?|bytes?|[kmg]i?b|tokens?)(?![\p{L}\p{N}_])|毫秒|微秒|纳秒|秒钟|秒鐘|秒|分钟|分鐘|小时|小時|時間|天)/giu;
+	/(?<![\w.])\d+(?:\.\d+)?\s*(?:(?:n(?:ano)?s(?:ecs?)?|nanos?(?:-?secs?|-?seconds?)?|[uµμ]s(?:ecs?)?|micros?(?:-?secs?|-?seconds?)?|ms(?:ecs?)?|millis?(?:-?secs?|-?seconds?)?|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?|w|wks?|weeks?|mos?|months?|y|yrs?|years?|bytes?|[kmgt]i?b|tokens?)(?![\p{L}\p{N}_])|纳秒|微秒|毫秒|秒钟|秒鐘|秒|分钟|分鐘|分|小时|小時|時間|个月|個月|ヶ月|か月|カ月|月|星期|週間|周|週|天|日|年|나노초|마이크로초|밀리초|초|분|시간|개월|일|주|달|년)/giu;
 /**
  * Digits glued into an ASCII identifier or a path: `x-request-503-trace`,
  * `/jobs/503/`, `gpt-503-preview`. ASCII only on purpose: CJK prose glues a
- * status to the words around it (`服务器返回503错误`), and that number is the status.
+ * status to the words around it (`服务器返回503错误`), and that number is the
+ * status; a CJK or Korean unit after the number is read as a duration above.
  */
 const GLUED_NUMBER_PATTERN = /(?<=[A-Za-z_\-/])\d+|\d+(?=[A-Za-z_\-/])/g;
 
 /**
  * `text` with the digits that are diagnostic metadata removed, by the role
- * each number plays: inside a URL; a port; a duration, size or token count (a
- * unit after it, or the value of a field whose key names time); the value of
- * any other field that does not name a status; or glued into an identifier or
- * a path. Every reader that takes a bare number as an HTTP status, an auth
- * rejection, a capacity refusal or a transient status reads this instead, so
- * `read ECONNRESET after 401 ns` stays a wire cut. A status the sentence
- * states — `HTTP 503`, `status=529`, `503 Service Unavailable`, `error: 429`,
- * `(429)` — keeps its digits.
+ * each number plays: inside a URL; a port; a stream number; a duration, size
+ * or token count (a unit after it, or the value of a field whose key names
+ * time); the value of any other field that does not name a status; or glued
+ * into an identifier or a path. Every reader that takes a bare number as an
+ * HTTP status, an auth rejection, a capacity refusal or a transient status
+ * reads this instead, so `read ECONNRESET after 401 ns` stays a wire cut. A
+ * status the sentence states — `HTTP 503`, `status=529`, `503 Service
+ * Unavailable`, `error: 429`, `(429)` — keeps its digits.
  */
 function withoutMetadataNumbers(text: string): string {
 	return text
-		.replace(ZERO_WIDTH_PATTERN, "")
+		.replace(DEFAULT_IGNORABLE_PATTERN, "")
 		.replace(URL_PATTERN, url => url.replace(/\d+/g, ""))
 		.replace(PORT_NUMBER_PATTERN, port => port.replace(/\d+$/, ""))
 		.replace(FIELD_NUMBER_PATTERN, (field, quote: string, key: string, separator: string, _q, value: string) => {
@@ -609,9 +619,51 @@ function withoutMetadataNumbers(text: string): string {
 			const at = field.lastIndexOf(value);
 			return field.slice(0, at) + field.slice(at + value.length);
 		})
-		.replace(GO_STREAM_ID_PATTERN, field => field.replace(/\d+/g, ""))
+		.replace(STREAM_NUMBER_PATTERN, field => field.replace(/\d+/g, ""))
 		.replace(UNIT_NUMBER_PATTERN, quantity => quantity.replace(/^[\d.]+/, ""))
 		.replace(GLUED_NUMBER_PATTERN, "");
+}
+
+/** Words that introduce a decoration rather than state a reason (`after 401 ns`, `took 2 s`). */
+const DECORATION_FILLER_PATTERN = /\b(?:after|took|in|at|via|from|on|over|elapsed)\b/gi;
+/** A protocol name: `HTTP/1.1`, `HTTP/3`. */
+const PROTOCOL_PATTERN = /\bHTTP\/\d(?:\.\d)?\b/gi;
+/**
+ * A field whose value carries a digit, quoted or not — a number
+ * (`retry-after-ms=9000`, `elapsed_ms="401"`) or an identifier
+ * (`model=gpt-503-preview`, `request_id=req_7`) — or whose key names an
+ * identifier (`trace: abc`).
+ */
+const METADATA_FIELD_PATTERN =
+	/\b(?:[A-Za-z][\w.-]*\s*[:=]\s*(["']?)(?=[\w.-]*\d)[\w.-]+\1|(?:[A-Za-z][\w.-]*?(?:_id|-id|\.id|Id|ID)|id|trace)\s*[:=]\s*(["']?)[\w.-]+\2)/g;
+/**
+ * A token that joins letters and digits with `-`, `_` or `.`: an identifier
+ * (`x-request-503`, `gpt-503-preview`, `req_7`). A reason is words; a word with
+ * no digit (`SIGKILL`, `content_policy`) is not taken for an identifier.
+ */
+const DIGIT_IDENTIFIER_PATTERN = /\b(?=[\w.-]*\d)(?=[\w.-]*[A-Za-z])[A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)+\b/g;
+
+/**
+ * Whether `tail` carries metadata and nothing else: URLs, ports, stream
+ * numbers, protocol names, durations and sizes, fields whose value carries a
+ * digit, identifier fields, identifiers that carry a digit, the words that
+ * introduce them, and punctuation. One word of any other kind — a reason such
+ * as `content policy violation`, `process killed by SIGKILL`, `permission
+ * denied`, `due to …`, `reason=content_policy` — and it is not.
+ */
+function isMetadataOnly(tail: string): boolean {
+	const residue = tail
+		.replace(DEFAULT_IGNORABLE_PATTERN, "")
+		.replace(URL_PATTERN, " ")
+		.replace(PORT_NUMBER_PATTERN, " ")
+		.replace(STREAM_NUMBER_PATTERN, " ")
+		.replace(PROTOCOL_PATTERN, " ")
+		.replace(METADATA_FIELD_PATTERN, " ")
+		.replace(UNIT_NUMBER_PATTERN, " ")
+		.replace(DIGIT_IDENTIFIER_PATTERN, " ")
+		.replace(DECORATION_FILLER_PATTERN, " ")
+		.replace(/[\s;,.()[\]{}]+/g, "");
+	return residue === "";
 }
 
 export function create(...flags: number[]): number {
@@ -797,13 +849,24 @@ const CONNECTION_FAILURE_PATTERN =
  * word `terminated`. Anchored, because the word on its own inside a sentence
  * means something else entirely — a killed process ("Process terminated by
  * signal SIGKILL"), a policy stop ("terminated: content policy") — neither of
- * which an identical replay recovers. What may follow is a decoration, never a
- * reason: metadata after `;` or in parentheses (`terminated; after 401 ns`,
- * `terminated (https://h/v1)`), or the header wait the retry formatter appends
- * (`terminated retry-after-ms=9000`). A colon or a following word still
- * introduces a reason, and still does not match.
+ * which an identical replay recovers.
  */
-const UNDICI_TERMINATED_PATTERN = /^(?:TypeError:\s*)?terminated\.?(?:$|\s*[;(]|\s+retry-after-ms=)/i;
+const UNDICI_TERMINATED_HEAD_PATTERN = /^(?:TypeError:\s*)?terminated\.?/i;
+
+/**
+ * undici's `terminated`, alone or followed by metadata only
+ * ({@link isMetadataOnly}): `terminated; after 401 ns`, `terminated
+ * (https://h/v1)`, `terminated retry-after-ms=9000`. A reason never passes,
+ * whatever separates it — `terminated; process killed by SIGKILL`, `terminated
+ * (content policy violation)`, `terminated retry-after-ms=200 due to content
+ * policy` — and a colon always introduces one.
+ */
+function isUndiciTerminatedText(text: string): boolean {
+	const head = UNDICI_TERMINATED_HEAD_PATTERN.exec(text);
+	if (!head) return false;
+	const tail = text.slice(head[0].length);
+	return !/^\s*:/.test(tail) && isMetadataOnly(tail);
+}
 
 /**
  * Wire failures a runtime reports only as an errno on `err.code`, leaving the
@@ -844,7 +907,7 @@ function isConnectionFailure(text: string, status: number | undefined, reason: R
 		isTransientStreamDropError(text) ||
 		isTransientStreamParseError(text) ||
 		CODEX_HTTP_BODY_READ_ERROR_PATTERN.test(text) ||
-		UNDICI_TERMINATED_PATTERN.test(text.trim()) ||
+		isUndiciTerminatedText(text.trim()) ||
 		CONNECTION_FAILURE_PATTERN.test(text)
 	);
 }

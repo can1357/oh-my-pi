@@ -1861,6 +1861,7 @@ const streamOpenAICompletionsOnce = (
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			output.errorRetryAfterMs = result.retryAfterMs;
 			// Some providers via OpenRouter include extra details here.
 			const rawMetadata = readOpenRouterRawMetadata(capturedErrorResponse);
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;

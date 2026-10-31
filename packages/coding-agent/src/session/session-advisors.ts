@@ -38,7 +38,11 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { isUsageLimitOutcome, resolveModelServiceTier, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
+import {
+	getHeadersFromError,
+	getRetryAfterMsFromHeaders,
+	providerRetryWaitMs,
+} from "@oh-my-pi/pi-ai/utils/retry-after";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { extractHttpStatusFromError, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
@@ -2117,7 +2121,11 @@ export class SessionAdvisors {
 			if (rotation.switched) return true;
 		}
 
-		const retryAfterMs = extractProviderRetryHint(currentModel.provider, message);
+		const retryAfterMs = providerRetryWaitMs(
+			currentModel.provider,
+			message,
+			assistantFailure?.errorRetryAfterMs ?? getRetryAfterMsFromHeaders(getHeadersFromError(error)),
+		);
 		const usageLimit =
 			AIError.is(errorId, AIError.Flag.UsageLimit) ||
 			isUsageLimitOutcome(extractHttpStatusFromError(error), message);

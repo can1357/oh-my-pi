@@ -2162,6 +2162,7 @@ async function handleCodexStreamFailure(context: CodexStreamFailureContext, erro
 	output.errorStatus = result.status;
 	output.errorId = result.id;
 	output.errorMessage = result.message;
+	output.errorRetryAfterMs = result.retryAfterMs;
 	// A number, 0 included, whenever every attempt went through a transport
 	// this module owns: recovery above reads the absence of this field as "no
 	// layer here reports", so a failure that never reached the processor must

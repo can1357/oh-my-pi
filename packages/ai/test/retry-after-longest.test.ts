@@ -1,42 +1,61 @@
 /**
- * Two readings of the retry wait an error's text names. `extractProviderRetryHint`
- * is how long a route or credential stays closed — credential blocks,
- * usage-limit marks, one-shot retries, the session's retry delay — and reads
- * the first occurrence of each hint form plus the header wait the formatter
- * appended last. `longestProviderRetryHint` reads every occurrence, and only
- * turn recovery's held-retry check uses it, where it can only decline a hold.
+ * Three readings of a failure's retry wait.
+ *
+ * - `extractProviderRetryHint` reads the message text: the first occurrence of
+ *   each hint form. No position in the text is trusted as anyone's but the
+ *   body's, because a body can write any text.
+ * - `providerRetryWaitMs` is what every caller that keeps a route or credential
+ *   closed uses: the text reading and the response headers' wait, passed in
+ *   structured (`AssistantMessage.errorRetryAfterMs`), whichever is longer.
+ * - `longestProviderRetryHint` reads every occurrence, and only turn recovery's
+ *   held-retry check uses it, where it can only decline a hold.
  */
 import { describe, expect, it } from "bun:test";
 import {
 	extractProviderRetryHint,
 	formatErrorMessageWithRetryAfter,
+	getRetryAfterMsFromHeaders,
 	longestProviderRetryHint,
+	providerRetryWaitMs,
 } from "@oh-my-pi/pi-ai/utils/retry-after";
 
-/** Bodies that quote a longer number than the response's own wait. */
+const MAX_VALUE_DIGITS = BigInt(Number.MAX_VALUE).toString();
+
+/** Bodies that quote a longer number than the response's own first wait. */
 const QUOTED_LONGER = [
-	["an echoed prompt", 'usage_limit_reached retry-after-ms=200 echoed {"prompt":"retry-after-ms=86400000"}'],
-	["a URL query", "usage_limit_reached retry-after-ms=200 see https://h.invalid/?retry-after-ms=86400000"],
-	["a later separated hint", "usage_limit_reached retry-after-ms=200; upstream: retry-after-ms=9000;"],
-	["a quoted upstream counter", "x-ratelimit-reset=1 upstream said x-ratelimit-reset=9000."],
-	["a later absurd value", "retry-after-ms=200 upstream said retry-after-ms=999999999999999999999999."],
+	["an echoed prompt", 'usage_limit_reached retry-after-ms=200 echoed {"prompt":"retry-after-ms=86400000"}', 200],
+	["a URL query", "usage_limit_reached retry-after-ms=200 see https://h.invalid/?retry-after-ms=86400000", 200],
+	["a later separated hint", "usage_limit_reached retry-after-ms=200; upstream: retry-after-ms=9000;", 200],
+	["a quoted counter", "x-ratelimit-reset=1 upstream said x-ratelimit-reset=9000.", 1000],
+	// A body may end with a hint of its own; the final position proves nothing.
+	[
+		"a plain-text body ending in a longer hint",
+		"usage_limit_reached retry-after-ms=200\nUpstream diagnostic: retry-after-ms=86400000",
+		200,
+	],
+	[
+		"a body ending in a quoted upstream hint",
+		"retry-after-ms=200; quoted upstream response: retry-after-ms=9000",
+		200,
+	],
+	[
+		"a body ending in the largest finite number",
+		`retry-after-ms=200 upstream retry-after-ms=${MAX_VALUE_DIGITS}`,
+		200,
+	],
 ] as const;
 
 describe("extractProviderRetryHint", () => {
-	it.each(QUOTED_LONGER)("does not take a quoted number for the wait in %s", (_label, message) => {
-		// A durable block lasts as long as this reading. Searching every occurrence
-		// read the echoed prompt's 86,400,000 ms and blocked a credential for a day.
-		expect(extractProviderRetryHint("anthropic", message)).toBe(message.startsWith("x-ratelimit") ? 1000 : 200);
+	it.each(QUOTED_LONGER)("reads the body's first wait, not a later one, in %s", (_label, message, expected) => {
+		// A durable block lasts as long as the reading built on this. A later
+		// number — quoted, echoed, or simply the body's last word — once blocked a
+		// credential for a day, and at the final position for 1.8e308 ms.
+		expect(extractProviderRetryHint("anthropic", message)).toBe(expected);
 	});
 
 	it.each([
 		["one hint", "read ECONNRESET retry-after-ms=400", 400],
 		["two forms, the longer one counted", "try again in 2s retry-after-ms=9000", 9000],
-		[
-			"the formatter's trailing header wait after a shorter body hint",
-			"read ECONNRESET retry-after-ms=200 retry-after-ms=9000",
-			9000,
-		],
 	] as [string, string, number][])("reads %s", (_label, message, expected) => {
 		expect(extractProviderRetryHint("anthropic", message)).toBe(expected);
 	});
@@ -45,6 +64,30 @@ describe("extractProviderRetryHint", () => {
 		expect(extractProviderRetryHint("anthropic", "overloaded retry-after-ms=0")).toBe(0);
 		expect(extractProviderRetryHint("anthropic", "overloaded")).toBeUndefined();
 	});
+});
+
+describe("providerRetryWaitMs", () => {
+	it.each([
+		["a longer header wait behind a shorter body hint", "usage_limit_reached retry-after-ms=200", 9000, 9000],
+		["a shorter header wait behind a longer body hint", "usage_limit_reached retry-after-ms=9000", 200, 9000],
+		["a header wait and no body hint", "usage_limit_reached", 9000, 9000],
+		["a header wait behind a zero body hint", "usage_limit_reached retry-after-ms=0", 9000, 9000],
+		["a header wait behind a malformed body hint", "usage_limit_reached retry-after-ms=oops", 9000, 9000],
+		["no header wait", "usage_limit_reached retry-after-ms=200", undefined, 200],
+		[
+			"a short header wait behind a body that ends in a longer hint",
+			"usage_limit_reached retry-after-ms=200\nUpstream diagnostic: retry-after-ms=86400000",
+			200,
+			200,
+		],
+	] as [string, string, number | undefined, number][])(
+		"takes the longer of text and header for %s",
+		(_label, message, header, expected) => {
+			// The header's wait arrives from the response object; no text can stand
+			// in for it, and no text can lengthen it.
+			expect(providerRetryWaitMs("anthropic", message, header)).toBe(expected);
+		},
+	);
 });
 
 describe("longestProviderRetryHint", () => {
@@ -63,46 +106,19 @@ describe("longestProviderRetryHint", () => {
 
 describe("formatErrorMessageWithRetryAfter", () => {
 	it.each([
-		["a zero body hint and a Retry-After", "read ECONNRESET retry-after-ms=0", { "retry-after": "9" }, 9000],
-		["a malformed body hint and a Retry-After", "read ECONNRESET retry-after-ms=oops", { "retry-after": "9" }, 9000],
-	] as [string, string, Record<string, string>, number][])(
-		"keeps the header wait over %s",
-		(_label, message, headers, expected) => {
-			// A zero or unreadable body hint names no wait the header could stand
-			// behind; the header's wait is the one the server gave.
+		["a shorter body hint", "read ECONNRESET retry-after-ms=200", { "retry-after": "9" }, true],
+		["a zero body hint", "read ECONNRESET retry-after-ms=0", { "retry-after": "9" }, true],
+		["a malformed body hint", "read ECONNRESET retry-after-ms=oops", { "retry-after": "9" }, true],
+		["no body hint", "read ECONNRESET", { "retry-after": "9" }, true],
+		["a longer body hint", "read ECONNRESET retry-after-ms=9000", { "retry-after": "1" }, false],
+	] as [string, string, Record<string, string>, boolean][])(
+		"shows the header wait to the reader over %s",
+		(_label, message, headers, shown) => {
+			// The text is for the person reading it; the wait itself reaches readers
+			// structured, so whatever the text says, the header's 9 s is kept.
 			const formatted = formatErrorMessageWithRetryAfter(new Error(message), headers);
-			expect(extractProviderRetryHint("anthropic", formatted)).toBe(expected);
+			expect(formatted).toBe(shown ? `${message} retry-after-ms=9000` : message);
+			expect(providerRetryWaitMs("anthropic", formatted, getRetryAfterMsFromHeaders(headers))).toBe(9000);
 		},
 	);
-
-	it.each([
-		[
-			"a shorter body hint and a longer Retry-After",
-			"read ECONNRESET retry-after-ms=200",
-			{ "retry-after": "9" },
-			9000,
-		],
-		[
-			"a shorter body hint and a longer retry-after-ms header",
-			"usage_limit_reached retry-after-ms=200",
-			{ "retry-after-ms": "9000" },
-			9000,
-		],
-		["a longer body hint and a shorter header", "read ECONNRESET retry-after-ms=9000", { "retry-after": "1" }, 9000],
-		["no body hint", "read ECONNRESET", { "retry-after": "9" }, 9000],
-	] as [string, string, Record<string, string>, number][])(
-		"keeps the longest wait for %s",
-		(_label, message, headers, expected) => {
-			// A hint already in the message used to end the formatting, so a longer
-			// header wait never reached the readers and every consumer — credential
-			// blocks, one-shot retries, turn recovery — retried at the shorter one.
-			const formatted = formatErrorMessageWithRetryAfter(new Error(message), headers);
-			expect(extractProviderRetryHint("anthropic", formatted)).toBe(expected);
-		},
-	);
-
-	it("does not repeat a header wait the message already covers", () => {
-		const message = "read ECONNRESET retry-after-ms=9000";
-		expect(formatErrorMessageWithRetryAfter(new Error(message), { "retry-after": "9" })).toBe(message);
-	});
 });

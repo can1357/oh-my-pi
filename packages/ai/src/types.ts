@@ -1337,6 +1337,16 @@ export interface AssistantMessage {
 	/** Structured machine-readable error classifier; see `utils/error-id.ts` for bit layout and helpers. */
 	errorId?: number;
 	/**
+	 * The retry wait the failed response's headers stated (`retry-after-ms`,
+	 * `Retry-After`, `x-ratelimit-reset[-ms]`), in milliseconds. Set from the
+	 * response object, never parsed from text, so its provenance is the header:
+	 * a body cannot forge it, however it is worded. Consumers that keep a route
+	 * or credential closed take the longer of this and the first wait the
+	 * message text names (`providerRetryWaitMs`). The text may also show it, for
+	 * the reader; no consumer trusts the text for it.
+	 */
+	errorRetryAfterMs?: number;
+	/**
 	 * Request attempts a layer below the caller made beyond the first, before
 	 * this message was produced; `0` when the request went out exactly once.
 	 * `undefined` means "unknown", never "none": the provider does not report,
