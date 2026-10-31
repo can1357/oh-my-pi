@@ -201,6 +201,19 @@ describe("one-at-a-time steering: a person's message before agent steering", () 
 		expect(transcriptTexts(agent)).toEqual(["start", ...typed.slice(0, bound), "card 1", typed[bound], "card 2"]);
 	});
 
+	it("reads a burst of 20 typed behind 20 agent steers after floor((i - 1) / 4) agent steers each", async () => {
+		const queued: AgentMessage[] = [];
+		for (let n = 1; n <= 20; n++) queued.push(card(n));
+		for (let n = 1; n <= 20; n++) queued.push(person(`typed ${n}`));
+		const { agent } = await runWithQueued(queued);
+
+		const transcript = transcriptTexts(agent).slice(1);
+		const agentsBefore = (i: number) =>
+			transcript.slice(0, transcript.indexOf(`typed ${i}`)).filter(text => text.startsWith("card")).length;
+		const waits = Array.from({ length: 20 }, (_, index) => agentsBefore(index + 1));
+		expect(waits).toEqual([0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4]);
+	});
+
 	it("counts user steers queued before the agent steer toward its allowance", async () => {
 		// One older user message, then one new user message per model call.
 		const { agent } = await runWithQueued([person("U_old"), card(0)], {
