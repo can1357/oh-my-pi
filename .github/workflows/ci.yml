@@ -6,6 +6,7 @@ on:
       paths:
          - "packages/**"
          - "crates/**"
+         - "sdk/**"
          - "scripts/**"
          - ".omp/tools/**"
          - ".omp/tests/**"
@@ -36,6 +37,7 @@ on:
       paths:
          - "packages/**"
          - "crates/**"
+         - "sdk/**"
          - "scripts/**"
          - ".omp/tools/**"
          - ".omp/tests/**"
@@ -694,6 +696,165 @@ jobs:
            env:
               OMP_INSTALL_TEST_SKIP_NATIVE_BUILD: "1"
            run: bun run ci:test:install-methods
+
+   # The Go, Rust and Python RPC clients under sdk/ are built from the wire
+   # schema by `bun run gen:rpc` around hand-written transports.
+   # test/rpc-wire/generated.test.ts proves the committed files are what the
+   # generator writes; these jobs prove that output compiles, passes each SDK's
+   # own tests, and talks to a real server. A generator or schema change that
+   # alters the output changes sdk/ in the same PR (or generated.test fails),
+   # so the jobs run only when this run changes sdk/ or what the SDKs build
+   # with, and sdk_changes says why when they skip.
+   sdk_changes:
+      name: Detect SDK changes
+      runs-on: ubuntu-22.04
+      outputs:
+         run: ${{ steps.decide.outputs.run }}
+      steps:
+         # Two commits deep: on a PR, HEAD is GitHub's merge commit and HEAD^1
+         # the base tip. Sparse, so the fetch is blob-less: the diff reads trees.
+         - uses: actions/checkout@v4
+           with:
+              fetch-depth: 2
+              sparse-checkout: /scripts/ci-changed-paths.sh
+              sparse-checkout-cone-mode: false
+         - name: Decide whether the SDK jobs run
+           id: decide
+           shell: bash
+           run: |
+              inputs=(sdk rust-toolchain.toml rustfmt.toml .cargo scripts/ci-changed-paths.sh
+                 packages/coding-agent/test/rpc-wire/fake-openai-server.ts .github/workflows/ci.yml)
+              if changed=$(scripts/ci-changed-paths.sh "${inputs[@]}" 2>"$RUNNER_TEMP/why"); then
+                 cat "$RUNNER_TEMP/why"
+                 if [ -z "$changed" ]; then
+                    echo "::notice title=SDK jobs skipped::Nothing under ${inputs[*]} changed since the merge base, so the Go, Rust and Python SDK jobs do not run."
+                    echo "run=false" >> "$GITHUB_OUTPUT"
+                    exit 0
+                 fi
+                 echo "SDK inputs changed since the merge base:"
+                 while IFS= read -r path; do echo "  $path"; done <<< "$changed"
+              else
+                 echo "::notice title=SDK jobs run::Could not tell what this run changes, so every SDK job runs. $(cat "$RUNNER_TEMP/why")"
+              fi
+              echo "run=true" >> "$GITHUB_OUTPUT"
+
+   sdk_go:
+      name: SDK (Go)
+      needs: [sdk_changes]
+      if: needs.sdk_changes.outputs.run == 'true'
+      runs-on: ubuntu-22.04
+      timeout-minutes: 10
+      defaults:
+         run:
+            working-directory: sdk/go/omp-rpc
+      steps:
+         - uses: actions/checkout@v4
+           with:
+              sparse-checkout: sdk/go/omp-rpc
+         - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+           with:
+              # The floor the module declares.
+              go-version-file: sdk/go/omp-rpc/go.mod
+              # The module has no dependencies, so no go.sum to key a cache on.
+              cache: false
+         # gen:rpc writes wire.go gofmt-clean byte for byte (scripts/gen-rpc/go.ts).
+         - name: gofmt
+           run: |
+              unformatted=$(gofmt -l .)
+              if [ -n "$unformatted" ]; then
+                 gofmt -d .
+                 echo "::error title=gofmt::Not gofmt-clean: $unformatted"
+                 exit 1
+              fi
+         - name: go vet
+           run: go vet ./...
+         - name: go test
+           run: go test -race ./...
+
+   sdk_rust:
+      name: SDK (Rust)
+      needs: [sdk_changes]
+      if: needs.sdk_changes.outputs.run == 'true'
+      runs-on: ubuntu-22.04
+      timeout-minutes: 15
+      defaults:
+         run:
+            working-directory: sdk/rust/omp-rpc
+      steps:
+         # The crate is its own workspace (outside the root one test:rs covers)
+         # but builds with the root rust-toolchain.toml, rustfmt.toml and
+         # .cargo/config.toml; cone mode keeps the root files.
+         - uses: actions/checkout@v4
+           with:
+              sparse-checkout: |
+                 sdk/rust/omp-rpc
+                 .cargo
+         - name: cargo fmt
+           run: cargo fmt --check
+         - name: cargo clippy
+           run: cargo clippy --locked --all-targets -- -D warnings
+         - name: cargo test
+           run: cargo test --locked
+
+   sdk_python:
+      name: SDK (Python)
+      needs: [sdk_changes]
+      if: needs.sdk_changes.outputs.run == 'true'
+      runs-on: ubuntu-22.04
+      timeout-minutes: 10
+      steps:
+         - uses: actions/checkout@v4
+           with:
+              sparse-checkout: sdk/python
+         - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+           with:
+              # The floor in requires-python.
+              python-version: "3.11"
+         - name: Build and install the package
+           run: python -m pip install ./sdk/python/omp-rpc pytest==9.2.0 ruff==0.17.3
+         # The tests import from src/; this imports the installed wheel, so a
+         # module or package-data entry missing from the build fails here.
+         - name: Import the installed package
+           working-directory: ${{ runner.temp }}
+           run: python -c "import omp_rpc, omp_rpc._wire"
+         # Undefined names, unused imports and syntax errors only: Python's
+         # nearest thing to a compile. Style is not gated: sdk/python has no
+         # ruff configuration, and ruff's default format would rewrite most of
+         # the generated _wire.py.
+         - name: ruff (errors)
+           run: ruff check --select E4,E7,E9,F sdk/python
+         - name: pytest
+           run: python -m pytest sdk/python/omp-rpc/tests
+
+   # The ignored Rust smokes and the OMP_RPC_SMOKE Go smokes spawn this
+   # checkout's `omp --mode rpc` from source against the scripted local model
+   # (test/rpc-wire/fake-openai-server.ts): no network, no credentials. They
+   # are the only tests that exercise each client against the real server, so
+   # they need the workspace install and the linux-x64 addon.
+   sdk_smoke:
+      name: SDK real-server smokes (Go, Rust)
+      needs: [sdk_changes, native_addons]
+      if: ${{ !cancelled() && needs.sdk_changes.outputs.run == 'true' && needs.native_addons.result == 'success' }}
+      runs-on: ubuntu-22.04
+      timeout-minutes: 15
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/bun-install
+         - uses: ./.github/actions/native-artifacts
+           with:
+              targets: linux-x64-baseline linux-x64-modern
+         - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+           with:
+              go-version-file: sdk/go/omp-rpc/go.mod
+              cache: false
+         - name: Go smokes
+           working-directory: sdk/go/omp-rpc
+           env:
+              OMP_RPC_SMOKE: "1"
+           run: go test -run 'TestSmoke' -v ./...
+         - name: Rust smokes
+           working-directory: sdk/rust/omp-rpc
+           run: cargo test --locked --test smoke -- --ignored --nocapture
 
    # Aggregates every validation job so publish-side release jobs gate on one
    # result. Binary BUILDS deliberately do not wait for this gate — they run
