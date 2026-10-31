@@ -1286,7 +1286,7 @@ export class InputController {
 					// Detached mode commands leave restoration to their submitter; never
 					// replace a newer draft typed while the command was in flight.
 					if (!draftDetached) throw error;
-					restoreDetachedDraft(this.ctx.editor, text, inputImages, inputImageLinks);
+					if (!accepted) restoreDetachedDraft(this.ctx.editor, text, inputImages, inputImageLinks);
 					this.ctx.showError(error instanceof Error ? error.message : String(error));
 					return;
 				}
