@@ -67,6 +67,7 @@ import type {
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
+import { getHeadersFromError, getRetryAfterMsFromHeaders } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { resolvePromptCacheLookback } from "@oh-my-pi/pi-catalog/compat/prompt-cache-lookback";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
@@ -129,7 +130,7 @@ import {
 	cfgSnapcompactShape,
 } from "./context-settings";
 import { resolveModelCompactionSettings } from "./model-compaction-threshold";
-import { cfgRetry } from "./settings";
+import { cfgProvidersOpenaiCodexDaybreak, cfgRetry } from "./settings";
 
 export type CompactionCheckResult = Readonly<{
 	continuationScheduled: boolean;
@@ -504,7 +505,11 @@ export interface SessionMaintenanceHost {
 		message: AssistantMessage,
 		options: { autoContinue: boolean; triggerContextTokens?: number; excludeMediaMethods?: boolean },
 	): Promise<CompactionCheckResult>;
-	parseRetryAfterMsFromError(errorMessage: string): number | undefined;
+	/**
+	 * The retry delay a failure names: the longer of the first wait its text
+	 * names and the failed response's header wait, passed structured.
+	 */
+	parseRetryAfterMsFromError(errorMessage: string, headerRetryAfterMs?: number): number | undefined;
 	setModelTemporary(
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
@@ -3717,6 +3722,7 @@ export class SessionMaintenance {
 						remotePromptCacheKey: this.#host.getPromptCacheKeyForModel(remoteCompactionPolicyModel(candidate)),
 						providerSessionState: this.#host.providerSessionState,
 						preferWebsockets: this.#host.preferWebsockets(),
+						codexAccessPrograms: cfgProvidersOpenaiCodexDaybreak.get(this.#host.settings),
 						// Route every summarization HTTP request through the
 						// session's side-stream transport so the provider
 						// concurrency cap (e.g. providers.ollama-cloud.maxConcurrency)
@@ -5628,6 +5634,7 @@ export class SessionMaintenance {
 									),
 									providerSessionState: this.#host.providerSessionState,
 									preferWebsockets: this.#host.preferWebsockets(),
+									codexAccessPrograms: cfgProvidersOpenaiCodexDaybreak.get(this.#host.settings),
 									codexCompaction,
 									// This loop already retries the whole compaction attempt on
 									// transient errors, so the summarization oneshots must not
@@ -5673,7 +5680,13 @@ export class SessionMaintenance {
 								break;
 							}
 
-							const retryAfterMs = this.#host.parseRetryAfterMsFromError(message);
+							// The failed response's header wait rides on the thrown error's
+							// headers (a compaction failure carries its message's
+							// `errorRetryAfterMs` there); the text never stands in for it.
+							const retryAfterMs = this.#host.parseRetryAfterMsFromError(
+								message,
+								getRetryAfterMsFromHeaders(getHeadersFromError(error)),
+							);
 							// An input the summarizer cannot fit is deterministic: the same
 							// prompt fails identically every attempt, so the retry budget is
 							// pure latency and the next candidate (a larger window) is the

@@ -4,6 +4,12 @@
 
 ### Added
 
+- Added `longestRetryHint`, the longest wait a response names across every retry header and every hint in its body ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.14.1] - 2026-10-31
+
+### Added
+
 - Added `isFileLockHeld`, which reports whether a file lock is held without acquiring it ([#17428](https://github.com/can1357/oh-my-pi/pull/17428) by [@andrebrait](https://github.com/andrebrait))
 - Added a `retryGate` option to `fetchWithRetry`: it receives each retry's wait and is asked again with `0` immediately before the retry is sent; returning `false` stops retrying and surfaces the current failure. A retry the transport refuses at handoff with `RetryRefusedError` returns that failure too. While a gate is set, a response's wait is the longest one its headers or body name
 - Added `longestRetryHint`, the longest wait a response names across every retry header and every hint in its body, and `RetryRefusedError` / `findRetryRefusal` for a transport that refuses a retry at handoff
@@ -12,6 +18,7 @@
 ### Fixed
 
 - Fixed `extractRetryHint` reading a `Retry-After` date with `Date.parse`: a two-digit RFC 850 year within fifty years read as the last century, a leap second named no wait, 31 November rolled into December, a zone-less asctime or IMF date was read in the machine's own zone, and a `retry-after: <HTTP date>` in error text was ignored. It now uses `parseRetryAfter`, the same reading as `longestRetryHint`
+- Added `oklabDistance`, the perceptual distance between two hex colors ([#17520](https://github.com/can1357/oh-my-pi/pull/17520))
 
 ## [18.14.0] - 2026-10-29
 

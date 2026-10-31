@@ -72,6 +72,7 @@ import { getHeaderCaseInsensitive, resolveCacheRetention } from "./utils";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 import { applyGlyphCodec } from "./utils/glyph-codec";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
+import { retryWaitHeaders } from "./utils/retry-after";
 import { withThinkingLoopGuard } from "./utils/thinking-loop";
 import {
 	inheritReplayBudget,
@@ -80,7 +81,8 @@ import {
 	type ReplayArm,
 	withReplayBudget,
 } from "./utils/replay-budget";
-import { withTransportFetch } from "./utils/transport-fetch";
+import { withRequestTransport } from "./utils/transport-fetch";
+import { inheritWireAttempts, uncountedFetchOf } from "./utils/wire-attempts";
 
 function isGoogleVertexAuthenticatedModel(model: Model<Api>): boolean {
 	return (
@@ -726,8 +728,12 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 
 function createVertexAuthenticatedFetch(options: StreamOptions | undefined): FetchImpl {
 	const baseFetch = options?.fetch ?? fetch;
+	// The OAuth token is the route's own request, not an attempt at the model
+	// request: it takes the uncounted sibling of the counted transport, so a
+	// call that mints a token still reports the one model request it made.
+	const tokenFetch = uncountedFetchOf(baseFetch);
 	const vertexFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-		const token = await getVertexAccessToken({ signal: options?.signal, fetch: baseFetch });
+		const token = await getVertexAccessToken({ signal: options?.signal, fetch: tokenFetch });
 		const headers = new Headers(init?.headers);
 		headers.set("Authorization", `Bearer ${token}`);
 		const rewritten = resolveVertexRequest(input);
@@ -744,7 +750,12 @@ function createVertexAuthenticatedFetch(options: StreamOptions | undefined): Fet
 		}
 		return baseFetch(rewritten, { ...init, headers });
 	};
-	return Object.assign(vertexFetch, baseFetch.preconnect ? { preconnect: baseFetch.preconnect } : {});
+	// Model requests go through `baseFetch`, which counts them; expose that
+	// counter so the provider reads the request's attempts.
+	return inheritWireAttempts(
+		Object.assign(vertexFetch, baseFetch.preconnect ? { preconnect: baseFetch.preconnect } : {}),
+		baseFetch,
+	);
 }
 
 async function readVertexRequestBody(input: string | URL | Request, init: RequestInit | undefined): Promise<string> {
@@ -867,7 +878,7 @@ function streamDispatch<TApi extends Api>(
 ): AssistantMessageEventStream {
 	const requestOptions = withSupportedSamplingParams(
 		model,
-		withTransportFetch(model, (options || {}) as StreamOptions),
+		withRequestTransport(model, (options || {}) as StreamOptions),
 	) as OptionsForApi<TApi>;
 	assertExplicitOpenAIResponsesPromptCacheSupport(model, requestOptions);
 
@@ -1130,13 +1141,21 @@ function isRetryableUpstreamError(
 	return isUsageLimitOutcome(status, message);
 }
 
+/**
+ * The Error the `ApiKeyResolver` receives for a rotatable failed message. The
+ * credential layers behind the resolver (`limits.rotate`, the auth gateway's
+ * usage mark) read the failure's header retry wait from the Error's headers,
+ * so the message's structured `errorRetryAfterMs` travels on as a
+ * `retry-after-ms` header; the text never stands in for it.
+ */
 function createAssistantAuthError(message: AssistantMessage): Error {
 	const text = message.errorMessage ?? "Provider authentication failed";
 	const status = extractStatusFromAssistantError(message);
+	const headers = retryWaitHeaders(message.errorRetryAfterMs);
 	const error =
 		status === undefined
-			? new AIError.ProviderResponseError(text, { kind: "runtime" })
-			: new ProviderHttpError(text, status);
+			? Object.assign(new AIError.ProviderResponseError(text, { kind: "runtime" }), { headers })
+			: new ProviderHttpError(text, status, { headers });
 	return typeof message.errorId === "number" ? AIError.attach(error, message.errorId) : error;
 }
 
@@ -1253,7 +1272,7 @@ function streamSimpleRequest<TApi extends Api>(
 ): AssistantMessageEventStream {
 	const requestOptions = withSupportedSamplingParams(
 		model,
-		withTransportFetch(model, (options || {}) as SimpleStreamOptions),
+		withRequestTransport(model, (options || {}) as SimpleStreamOptions),
 	);
 
 	const apiKeyResolver = isApiKeyResolver(requestOptions?.apiKey) ? requestOptions.apiKey : undefined;
@@ -2170,6 +2189,7 @@ function mapOptionsForApi<TApi extends Api>(
 				serviceTier: options?.serviceTier,
 				preferWebsockets: options?.preferWebsockets,
 				codexCompaction: options?.codexCompaction,
+				codexAccessPrograms: options?.codexAccessPrograms,
 				reasoningSummary: options?.hideThinkingSummary ? null : undefined,
 				textVerbosity: options?.textVerbosity,
 				disableReasoning: options?.disableReasoning,

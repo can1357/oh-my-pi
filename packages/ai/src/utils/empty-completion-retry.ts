@@ -14,10 +14,11 @@
  * classifier and are separately bounded by the caller's policy.
  */
 import * as AIError from "../error";
-import type { AssistantMessage, AssistantMessageEvent, Context } from "../types";
+import type { AssistantMessage, AssistantMessageEvent, Context, FetchImpl } from "../types";
 import { AssistantMessageEventStream } from "./event-stream";
 import { longestServerWaitMs, ReplayBudget, type ReplayArm } from "./replay-budget";
 import { waitForRetry } from "./retry-wait";
+import { withWireCount } from "./wire-attempts";
 
 export const MAX_EMPTY_COMPLETION_RETRIES = 2;
 export const EMPTY_COMPLETION_BASE_DELAY_MS = 500;
@@ -63,6 +64,7 @@ interface StreamRetryOptions {
 	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
 	acceptEmptyResponse?: boolean;
 	replayBudgetMs?: number;
+	fetch?: FetchImpl;
 }
 
 /** Controls which replay-safe provider results may issue a fresh request. */
@@ -89,6 +91,18 @@ class FinalizedProviderStreamError extends Error {
  * Re-issues a fresh provider request only while the current attempt remains
  * replay-safe. Buffered pre-output events from discarded attempts never reach
  * consumers.
+ *
+ * Every attempt goes out under the same request counter (`withWireCount`), so
+ * a provider that reports `providerReplays` reports every request this
+ * wrapper's attempts made, the discarded ones included, and the terminal event
+ * is forwarded as reported: nothing here adds to a count, so nothing here can
+ * count a request twice or forget one.
+ *
+ * One check stays: a count over one counter never falls. A report below one an
+ * earlier attempt already made, or a number after an attempt that reported
+ * none, cannot be this request's count — the layer below counted only its own
+ * call — and is forwarded as unknown rather than as a zero the request has
+ * already disproved.
  */
 export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 	model: M,
@@ -103,9 +117,13 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 	// same deadline, and the replay started here is armed so the attempt's first
 	// request is checked again at the moment it is handed to the transport.
 	const budget = ReplayBudget.forCall(options);
+	const attemptOptions = withWireCount(budget && options ? budget.share(options) : options);
 	void (async () => {
 		let emptyRetries = 0;
 		let providerErrorRetries = 0;
+		/** The least count the request can report now: the highest an earlier attempt reported. */
+		let replayFloor = 0;
+		let unreportedAttempt = false;
 		// The attempt the running replay would replace, and the arm its first
 		// request consumes. When that request is refused at handoff, nothing of
 		// the replay reached the server and the replaced attempt stands.
@@ -113,6 +131,22 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 			| { buffered: AssistantMessageEvent[]; terminal: AssistantMessageEvent; message: AssistantMessage }
 			| undefined;
 		let arm: ReplayArm | undefined;
+		const forwardTerminal = (event: AssistantMessageEvent): void => {
+			const reported = terminalReplays(event);
+			if (reported === undefined || (!unreportedAttempt && reported >= replayFloor)) {
+				outer.push(event);
+				return;
+			}
+			// A copy, not a write: the message belongs to the layer below and may be
+			// the same object on its next call.
+			if (event.type === "error") {
+				const { providerReplays: _discarded, ...error } = event.error;
+				outer.push({ ...event, error });
+			} else if (event.type === "done") {
+				const { providerReplays: _discarded, ...message } = event.message;
+				outer.push({ ...event, message });
+			}
+		};
 		while (true) {
 			const buffered: AssistantMessageEvent[] = [];
 			let committed = options?.acceptEmptyResponse === true;
@@ -126,7 +160,7 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				// The attempt factory can throw synchronously (e.g. a config error
 				// raised before it creates its stream); surface it on the outer stream
 				// rather than leaking an unhandled rejection that never settles.
-				inner = attempt(model, context, budget && options ? budget.share(options) : options);
+				inner = attempt(model, context, attemptOptions);
 				for await (const event of inner) {
 					if (event.type === "done" || event.type === "error") {
 						terminal = event;
@@ -154,7 +188,7 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				if (refusedAtHandoff && held) {
 					for (const event of held.buffered) outer.push(event);
 					budget.stamp(held.message);
-					outer.push(held.terminal);
+					forwardTerminal(held.terminal);
 					return;
 				}
 			}
@@ -188,18 +222,22 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				) &&
 				!attemptExhaustedBudget;
 
-			let delayMs: number | undefined;
-			if (retryEmpty) {
-				delayMs = EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** emptyRetries;
-				emptyRetries++;
-			} else if (retryProviderError) {
-				delayMs = EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** providerErrorRetries;
-				providerErrorRetries++;
+			let delayMs = retryEmpty
+				? EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** emptyRetries
+				: retryProviderError
+					? EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** providerErrorRetries
+					: undefined;
+			if (retryProviderError && budget && delayMs !== undefined) {
 				// Under a budget the server's own wait governs: replaying a hinted
 				// failure sooner than asked is a guaranteed failure, and the later
-				// error would replace the one carrying the hint.
-				const serverWaitMs = budget ? longestServerWaitMs(failedMessage?.errorMessage) : undefined;
-				if (serverWaitMs !== undefined && serverWaitMs > delayMs) delayMs = serverWaitMs;
+				// error would replace the one carrying the hint. The wait is the
+				// longest the failed message states: its structured response-header
+				// wait, or any its text names.
+				const serverWaitMs = Math.max(
+					longestServerWaitMs(failedMessage?.errorMessage) ?? 0,
+					failedMessage?.errorRetryAfterMs ?? 0,
+				);
+				if (serverWaitMs > delayMs) delayMs = serverWaitMs;
 			}
 			// `delayMs` is set only for a message the policy would replay.
 			const replaced = completedMessage ?? failedMessage;
@@ -216,13 +254,18 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				} catch (waitError) {
 					flush();
 					if (signal?.aborted) {
-						if (terminal) outer.push(terminal);
+						if (terminal) forwardTerminal(terminal);
 					} else {
 						outer.fail(waitError);
 					}
 					return;
 				}
 				if (admitted) {
+					if (retryEmpty) emptyRetries++;
+					else providerErrorRetries++;
+					const discarded = terminal ? terminalReplays(terminal) : undefined;
+					if (discarded === undefined) unreportedAttempt = true;
+					else replayFloor = Math.max(replayFloor, discarded);
 					if (budget && terminal && replaced) {
 						held = { buffered: [...buffered], terminal, message: replaced };
 						arm = budget.arm(undefined);
@@ -234,7 +277,7 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 
 			flush();
 			if (terminal) {
-				outer.push(terminal);
+				forwardTerminal(terminal);
 			} else if (!outer.done) {
 				try {
 					outer.end(await inner.result());
@@ -246,4 +289,10 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 		}
 	})();
 	return outer;
+}
+
+function terminalReplays(event: AssistantMessageEvent): number | undefined {
+	if (event.type === "error") return event.error.providerReplays;
+	if (event.type === "done") return event.message.providerReplays;
+	return undefined;
 }

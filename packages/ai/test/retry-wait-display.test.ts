@@ -38,7 +38,7 @@ describe("the server's retry wait at display", () => {
 		expect(errorText(new Error("429 retry-after: 30"))).toBe("429 retry-after: 30");
 	});
 
-	it("carries the wait on an error as a number, never in its message", () => {
+	it("carries the wait on an error in its structured headers, never in its message", () => {
 		const error = assistantTurnError({ errorMessage: "503 overloaded", errorRetryAfterMs: 9_000 });
 		expect(error.message).toBe("503 overloaded");
 		expect(retryAfterMsOf(error)).toBe(9_000);
@@ -47,10 +47,13 @@ describe("the server's retry wait at display", () => {
 		expect(assistantTurnError({ errorMessage: "x" }, "Commit failed: x").message).toBe("Commit failed: x");
 	});
 
-	it("reads a wait only from a numeric own property", () => {
-		expect(retryAfterMsOf(Object.assign(new Error("e"), { retryAfterMs: "9000" }))).toBeUndefined();
-		expect(retryAfterMsOf({ retryAfterMs: 9_000 })).toBeUndefined();
-		expect(retryAfterMsOf(Object.create(Object.assign(new Error("e"), { retryAfterMs: 9_000 })))).toBeUndefined();
+	it("reads an error's wait only from its headers, never from its text or a loose property", () => {
+		expect(retryAfterMsOf(Object.assign(new Error("e"), { headers: new Headers({ "retry-after": "9" }) }))).toBe(
+			9_000,
+		);
+		expect(retryAfterMsOf(new Error("503 retry-after-ms=9000"))).toBeUndefined();
+		expect(retryAfterMsOf(Object.assign(new Error("e"), { retryAfterMs: 9_000 }))).toBeUndefined();
+		expect(errorText(new Error("503 retry-after-ms=9000"))).toBe("503 retry-after-ms=9000");
 		expect(errorText("plain")).toBe("plain");
 	});
 });

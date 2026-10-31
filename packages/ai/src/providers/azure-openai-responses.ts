@@ -124,6 +124,11 @@ const streamAzureOpenAIResponsesOnce = (
 					onSseEvent({ event: event.event, data: event.data, raw: [...event.raw] }, model);
 				}
 			: undefined;
+		// The current attempt's accepted (2xx) response headers, for `finalize`:
+		// an in-band error or a cut stream keeps the response's `Retry-After`.
+		// Cleared when an attempt starts, so a fallback request that fails before
+		// its response never reads an earlier response's headers.
+		let streamResponseHeaders: Headers | undefined;
 
 		try {
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
@@ -155,6 +160,7 @@ const streamAzureOpenAIResponsesOnce = (
 			const attemptedReasoningEffortFallbacks = new Set<string>();
 			let openaiStream: AsyncIterable<ResponseStreamEvent>;
 			while (true) {
+				streamResponseHeaders = undefined;
 				let requestTimeout: NodeJS.Timeout | undefined;
 				if (requestTimeoutMs !== undefined) {
 					requestTimeout = setTimeout(
@@ -174,11 +180,13 @@ const streamAzureOpenAIResponsesOnce = (
 						signal: requestSignal,
 						fetch: gateOptionalFetch(replayBudget, options?.fetch),
 						retryGate: replayBudget?.admits,
+						maxRetryDelayMs: options?.maxRetryDelayMs,
 						// Transient 408/429/5xx get Retry-After-aware transport retries;
 						// the first-event watchdog aborts `requestSignal`, so retries
 						// cannot extend the caller's deadline.
 						onSseEvent: rawSseObserver,
 					});
+					streamResponseHeaders = handle.response.headers;
 					openaiStream = handle.events;
 					break;
 				} catch (error) {
@@ -260,11 +268,13 @@ const streamAzureOpenAIResponsesOnce = (
 				api: model.api,
 				abortTracker,
 				rawRequestDump,
+				streamResponseHeaders,
 			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			output.errorRetryAfterMs = result.retryAfterMs;
 			replayBudget?.stamp(output);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;

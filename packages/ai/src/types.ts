@@ -645,6 +645,13 @@ export interface StreamOptions {
 	 */
 	storeResponses?: boolean;
 	/**
+	 * Request the Daybreak Blue cyber access program on Codex when the account
+	 * is eligible (see `openai-codex/access-programs.ts`). `false` omits
+	 * `access_programs`. Unset falls back to the host's
+	 * `configureCodexAccessPrograms` default, else on. Ignored elsewhere.
+	 */
+	codexAccessPrograms?: boolean;
+	/**
 	 * Disable native reasoning when the caller supplies an external scratchpad.
 	 * OpenAI Responses emits `reasoning: { effort: "none" }`; Anthropic and
 	 * Google transports use their native thinking-off controls.
@@ -1380,6 +1387,72 @@ export interface AssistantMessage {
 	 * was not given the provider's full retry ceiling.
 	 */
 	replayBudgetExhausted?: boolean;
+	/**
+	 * The failed attempt's response-header retry wait, in milliseconds. Set from
+	 * the attempt's own response headers, never parsed from text
+	 * (`getFailureRetryAfterMs`): a refusing (non-2xx) response's headers or the
+	 * error's own (`retry-after-ms`, `Retry-After`, `x-ratelimit-reset[-ms]`),
+	 * including the structured `headers` the Codex protocol carries in its error
+	 * event, nested error or `response.failed` error, which win over the HTTP
+	 * response's; else the headers of the accepted (2xx) response whose body the
+	 * failure arrived in — an in-band error or a stream cut — where only the
+	 * explicit `retry-after-ms` and `Retry-After` count. A free-form message or
+	 * an arbitrary property on an Error never sets it, so a body cannot forge
+	 * it, however it is worded. A relay (the proxy transport, the pi-native
+	 * gateway) can state any value here; `markReached` caps the block it sets at
+	 * `MAX_HINTED_BLOCK_MS`. Consumers that keep a route or credential closed
+	 * take the longer of this and the first wait the message text names
+	 * (`providerRetryWaitMs`). The text may also show it, for the reader; no
+	 * consumer trusts the text for it.
+	 */
+	errorRetryAfterMs?: number;
+	/**
+	 * Request attempts a layer below the caller made beyond the first, before
+	 * this message was produced; `0` when the request went out exactly once.
+	 * `undefined` means "unknown", never "none": the provider does not report,
+	 * or its requests went through a transport it cannot see into — a
+	 * caller-supplied client, or a caller-supplied `fetch`, which may resend
+	 * inside itself — and a count taken above that cannot say the request went
+	 * out once.
+	 *
+	 * Counted where each request is issued, before it goes out, so an attempt
+	 * that never opens counts too: on the `fetch` at the bottom of the
+	 * provider's stack (the request's counted transport on the `stream()` path), or at the
+	 * provider's own socket. Every resend this repository owns sits above that
+	 * counter and is counted by where it is — the provider's own replays (a
+	 * transport reopen, a transport fallback, a checkpoint resume, rebuilt
+	 * parameters, a client's own retry budget), the replays `fetchWithRetry`
+	 * makes, the uncompressed resend of a refused compressed body, the GitHub
+	 * Copilot identity resend.
+	 *
+	 * **One count per logical request.** The counter rides on the `fetch` in
+	 * the request's options, so a layer that sends the request again by calling
+	 * the provider again with those options — `streamSimple`'s authentication
+	 * retry under another key, the replay-safe empty-completion retry — counts
+	 * into the same counter, and the provider reports the request's whole count,
+	 * not its own call's share. A request the route makes for itself (the
+	 * Vertex OAuth token) is not an attempt at the model request and is not
+	 * counted.
+	 *
+	 * **Attempts, not HTTP requests.** Below the counter one attempt may still
+	 * be several HTTP requests — a redirect hop `fetch` follows, a transport
+	 * whose logical turn is several RPCs (Cursor's `RunSSE` plus `BidiAppend`)
+	 * — and those stay one attempt: neither is a second generation of the
+	 * request. The question the count answers is whether the request was sent
+	 * again.
+	 *
+	 * Recovery above the provider has to know that — replaying again multiplies
+	 * the work below. Streamed content cannot stand in for it: each loop stops
+	 * at its own commitment boundary and those boundaries differ (the Codex
+	 * loop replays an *empty* reasoning block, while the Anthropic loop counts
+	 * the same opened block as committed), and a loop that replayed a 503
+	 * before the attempt that finally streamed leaves content the first attempt
+	 * never produced.
+	 *
+	 * Set on a successful message too: the layer above may discard it (an empty
+	 * completion it retries), and the attempts already spent still happened.
+	 */
+	providerReplays?: number;
 	/**
 	 * Stable identifiers for request features the provider silently dropped
 	 * during this turn (e.g. `"priority"`). Set when a server-side rejection

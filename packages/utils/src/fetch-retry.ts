@@ -427,7 +427,6 @@ function daysInMonth(year: number, month: number): number {
 	if (month === 1) return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28;
 	return [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month]!;
 }
-
 function nonNegative(value: number): number | undefined {
 	return Number.isFinite(value) && value >= 0 ? value : undefined;
 }

@@ -20,6 +20,7 @@ import {
 	type StreamingPartialJsonCarrier,
 	setStreamingPartialJson,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { getRetryAfterMsFromHeaders, isRetryWaitMs } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { parseToolCallArguments } from "@oh-my-pi/pi-ai/utils/tool-call-arguments";
 import { parseStreamingJsonThrottled, readSseJson } from "@oh-my-pi/pi-utils";
 
@@ -62,6 +63,14 @@ export type ProxyAssistantMessageEvent =
 			type: "error";
 			reason: Extract<StopReason, "aborted" | "error">;
 			errorMessage?: string;
+			/**
+			 * The failed upstream response's header retry wait in milliseconds
+			 * (`AssistantMessage.errorRetryAfterMs`). Send it whenever the
+			 * upstream message has it: consumers read the wait from this field,
+			 * never from `errorMessage`, so omitting it leaves them only the
+			 * wait the body text names. Anything but a finite number >= 0 is ignored.
+			 */
+			errorRetryAfterMs?: number;
 			usage: AssistantMessage["usage"];
 			content?: AssistantMessage["content"];
 	  };
@@ -79,6 +88,10 @@ export interface ProxyStreamOptions extends SimpleStreamOptions {
  * Stream function that proxies through a server instead of calling LLM providers directly.
  * The server strips the partial field from delta events to reduce bandwidth.
  * We reconstruct the partial message client-side.
+ *
+ * A failure's retry wait (`errorRetryAfterMs`) comes from the terminal `error`
+ * frame's `errorRetryAfterMs`, or, when the proxy answers non-2xx, from that
+ * response's own `retry-after-ms` / `Retry-After` / `x-ratelimit-reset*` headers.
  *
  * Use this as the `streamFn` option when creating an Agent that needs to go through a proxy.
  *
@@ -118,6 +131,8 @@ export function streamProxy(model: Model, context: Context, options: ProxyStream
 		};
 
 		let response: Response | null = null;
+		// A non-2xx proxy response's own header retry wait, for the catch below.
+		let failedResponseRetryAfterMs: number | undefined;
 		// Declared outside try so the disconnect path (catch) can finalize
 		// still-buffered tool-call arguments before emitting the error event.
 		const partialJsonByIndex = new Map<number, string>();
@@ -166,6 +181,7 @@ export function streamProxy(model: Model, context: Context, options: ProxyStream
 				} catch {
 					// Couldn't parse error response
 				}
+				failedResponseRetryAfterMs = getRetryAfterMsFromHeaders(response.headers);
 				throw new Error(errorMessage);
 			}
 
@@ -197,6 +213,7 @@ export function streamProxy(model: Model, context: Context, options: ProxyStream
 			const reason = options.signal?.aborted ? "aborted" : "error";
 			partial.stopReason = reason;
 			partial.errorMessage = errorMessage;
+			if (failedResponseRetryAfterMs !== undefined) partial.errorRetryAfterMs = failedResponseRetryAfterMs;
 			// Disconnect/abort path: no terminal event ran, so trailing
 			// throttled deltas never reached content.arguments. Finalize
 			// them here so the persisted/retried transcript is complete.
@@ -406,6 +423,7 @@ function processProxyEvent(
 		case "error":
 			partial.stopReason = proxyEvent.reason;
 			partial.errorMessage = proxyEvent.errorMessage;
+			if (isRetryWaitMs(proxyEvent.errorRetryAfterMs)) partial.errorRetryAfterMs = proxyEvent.errorRetryAfterMs;
 			partial.usage = proxyEvent.usage;
 			if (proxyEvent.content !== undefined) partial.content = proxyEvent.content;
 			else finalizeBufferedArguments(partial, partialJsonByIndex);

@@ -75,9 +75,15 @@ import { getProxyForUrl } from "../utils/proxy";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { admitsReplay, gateFetch, ReplayBudget, type ReplayArm, restoreReplaced } from "../utils/replay-budget";
-import { getHeadersFromError, getRetryAfterMsFromHeaders, type HeadersLike } from "../utils/retry-after";
+import {
+	getHeadersFromError,
+	getRetryAfterMsFromHeaders,
+	type HeadersLike,
+	transportRetryBounds,
+} from "../utils/retry-after";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { notifyRawSseEvent } from "../utils/sse-debug";
+import { providerReplaysFrom, type WireAttempts, wireCountedFetch } from "../utils/wire-attempts";
 import { compactGrammarDefinition } from "./grammar";
 import {
 	type CodexLiteShapedBody,
@@ -762,6 +768,24 @@ interface CodexRequestContext {
 	rawRequestDump: RawHttpRequestDump;
 	/** The call's `replayBudgetMs`, shared by every rung that re-sends the request. */
 	replayBudget?: ReplayBudget;
+	/**
+	 * The `fetch` this request's SSE attempts are issued through and the
+	 * request's counter riding on it (`wireCountedFetch`): `withRequestTransport`'s
+	 * on the `stream()` path, shared with every re-entry that sends the request
+	 * again (an authentication retry). Every wrapper this module adds sits above
+	 * it — `fetchWithRetry` and its replays, compression and its uncompressed
+	 * resend — so their requests are counted where they are sent.
+	 */
+	wire: { fetch: FetchImpl; attempts: WireAttempts };
+	/**
+	 * The current attempt's accepted (2xx) SSE response headers, for `finalize`:
+	 * an in-band error or a cut stream keeps the response's `Retry-After` when
+	 * the error event's own structured headers name no wait. Cleared when an
+	 * attempt starts. A WebSocket attempt leaves it clear: the socket's
+	 * handshake answered the connection, which serves many requests, not this
+	 * request; its per-request wait rides the error event's structured headers.
+	 */
+	streamResponseHeaders?: Headers;
 }
 
 interface CodexRequestSetup {
@@ -1387,7 +1411,7 @@ function createCodexRequestContext(
 	}
 
 	const accountId = getCodexAccountId(apiKey);
-	applyCodexAccessPrograms(transformedBody, model, accountId);
+	applyCodexAccessPrograms(transformedBody, model, accountId, options?.codexAccessPrograms);
 	const baseUrl = model.baseUrl || CODEX_BASE_URL;
 	const url = resolveCodexResponsesUrl(baseUrl);
 
@@ -1452,6 +1476,7 @@ function createCodexRequestContext(
 		affinitySessionId: normalizeOpenAIPromptCacheKey(options?.parentSessionId),
 	});
 	transformedBody.client_metadata = requestMetadata.clientMetadata;
+	const wire = wireCountedFetch(options?.fetch);
 	return {
 		apiKey,
 		accountId,
@@ -1469,6 +1494,7 @@ function createCodexRequestContext(
 		transformedBody,
 		rawRequestDump,
 		replayBudget: contextOptions.replayBudget,
+		wire,
 	};
 }
 
@@ -1880,6 +1906,7 @@ async function openCodexWebSocketTransport(
 		if (!replayBudget.admits(0)) throw replayOf;
 		replayArm = replayBudget.arm(replayOf);
 	}
+	requestContext.streamResponseHeaders = undefined;
 	const canAppendBeforeRequest = websocketState.canAppend === true;
 	let chainedBody = buildCodexChainedRequestBody(requestContext.transformedBody, websocketState);
 	const websocketHeaders = createCodexHeaders(
@@ -1909,6 +1936,11 @@ async function openCodexWebSocketTransport(
 		if (websocketState.acceptedSteering === steered) websocketState.acceptedSteering = undefined;
 	};
 	replayBudget?.checkpoint();
+	// Past local routing: the busy-socket rejection above sends this call to SSE
+	// without ever attempting a websocket request, and counting it would report
+	// a replay to a concurrent call that made one request. From here the attempt
+	// is genuine, so a connection that fails to open still counts.
+	requestContext.wire.attempts.count += 1;
 	let websocketConnection = await getOrCreateCodexWebSocketConnection(
 		websocketState,
 		requestContext.turnState,
@@ -2075,6 +2107,7 @@ async function openCodexSseTransport(
 	const open = async (wireBody: RequestBody) => {
 		// Keep the 400 dump honest: record the body actually sent on the wire.
 		requestContext.rawRequestDump.body = wireBody;
+		requestContext.streamResponseHeaders = undefined;
 		return requestSetup.wrapCodexSseStream(
 			await openCodexSseEventStream(
 				requestContext.url,
@@ -2091,14 +2124,18 @@ async function openCodexSseTransport(
 				requestSetup.requestSignal,
 				requestSetup.firstEventTimeoutMs,
 				options?.codexSseMaxAttempts,
+				options?.maxRetryDelayMs,
 				event => options?.onSseEvent?.(event, model),
 				wrapFetchForRequestCompression(
-					gateFetch(requestContext.replayBudget, options?.fetch ?? fetch),
+					gateFetch(requestContext.replayBudget, requestContext.wire.fetch),
 					model,
 					requestContext.replayBudget,
 				),
 				requestContext.replayBudget,
 				replayOf,
+				headers => {
+					requestContext.streamResponseHeaders = headers;
+				},
 			),
 		);
 	};
@@ -2242,11 +2279,18 @@ async function handleCodexStreamFailure(
 		model: context.model.id,
 		signal: context.options?.signal,
 		rawRequestDump: context.requestContext.rawRequestDump,
+		streamResponseHeaders: context.requestContext.streamResponseHeaders,
 	});
 	output.stopReason = result.stopReason;
 	output.errorStatus = result.status;
 	output.errorId = result.id;
 	output.errorMessage = result.message;
+	output.errorRetryAfterMs = result.retryAfterMs;
+	// A number, 0 included, whenever every attempt went through a transport
+	// this module owns: recovery above reads the absence of this field as "no
+	// layer here reports", so a failure that never reached the processor must
+	// still say what the wire saw. `undefined` after a caller-supplied `fetch`.
+	output.providerReplays = providerReplaysFrom(context.requestContext.wire.attempts);
 	context.requestContext.replayBudget?.stamp(output);
 	output.duration = performance.now() - context.startTime;
 	if (context.firstTokenTime) {
@@ -3547,6 +3591,9 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 							url: "",
 							body: { model: model.id },
 						},
+						// No context: this call failed before its first request, but the
+						// request's counter may carry an earlier call's attempts.
+						wire: wireCountedFetch(options?.fetch),
 					},
 					startTime,
 				} satisfies CodexStreamFailureContext);
@@ -4825,12 +4872,16 @@ async function openCodexSseEventStream(
 	signal: AbortSignal | undefined,
 	firstEventTimeoutMs: number | undefined,
 	codexSseMaxAttempts: number | undefined,
+	/** The caller's `StreamOptions.maxRetryDelayMs`, which bounds this transport's retries ({@link transportRetryBounds}). */
+	maxRetryDelayMs: number | undefined,
 	onSseEvent?: OpenAICodexResponsesOptions["onSseEvent"],
 	fetchOverride?: FetchImpl,
 	/** The call's replay budget: gates transport retries and every handoff of this request. */
 	replayBudget?: ReplayBudget,
 	/** The failure this request replaces; returned as-is when the budget is already spent. */
 	replayOf?: unknown,
+	/** Receives the accepted (2xx) response's headers the moment it arrives. */
+	onAcceptedResponse?: (headers: Headers) => void,
 ): Promise<AsyncGenerator<Record<string, unknown>>> {
 	const headers = createCodexHeaders(
 		requestHeaders,
@@ -4885,6 +4936,7 @@ async function openCodexSseEventStream(
 		if (!replayBudget.admits(0)) throw replayOf;
 		replayBudget.arm(replayOf);
 	}
+	const retryBounds = transportRetryBounds(maxRetryDelayMs, CODEX_RATE_LIMIT_BUDGET_MS);
 	let response: Response;
 	try {
 		response = await fetchWithRetry(url, {
@@ -4902,7 +4954,10 @@ async function openCodexSseEventStream(
 			},
 			maxAttempts: resolveCodexSseMaxAttempts(codexSseMaxAttempts),
 			defaultDelayMs: attempt => CODEX_RETRY_DELAY_MS * (attempt + 1),
-			maxDelayMs: CODEX_RATE_LIMIT_BUDGET_MS,
+			maxDelayMs: retryBounds.maxDelayMs,
+			// A refusal whose headers name a longer wait than the caller's cap is
+			// surfaced at once, with that wait on the failed message.
+			shouldRetryResponse: response => !retryBounds.declines(response),
 			fetch: fetchAttempt,
 			retryGate: replayBudget?.admits,
 			timeout: false,
@@ -4933,6 +4988,7 @@ async function openCodexSseEventStream(
 			clearPreResponseTimeout?.();
 		}
 	}
+	onAcceptedResponse?.(response.headers);
 	updateCodexSessionMetadataFromHeaders(turnState, state, response.headers);
 	if (!response.body) {
 		throw new CodexProviderStreamError("No response body", false);

@@ -706,6 +706,11 @@ const streamOpenAIResponsesOnce = (
 					onSseEvent({ event: event.event, data: event.data, raw: [...event.raw] }, model);
 				}
 			: undefined;
+		// The current attempt's accepted (2xx) response headers, for `finalize`:
+		// an in-band error or a cut stream keeps the response's `Retry-After`.
+		// Cleared when an attempt starts, so a retry or fallback that fails before
+		// its response never reads an earlier response's headers.
+		let streamResponseHeaders: Headers | undefined;
 
 		try {
 			// Keep request routing on `sessionId` while allowing callers to pin a
@@ -810,6 +815,7 @@ const streamOpenAIResponsesOnce = (
 			const openResponsesStream = async (
 				requestParams: OpenAIResponsesSamplingParams,
 			): Promise<AsyncIterable<ResponseStreamEvent>> => {
+				streamResponseHeaders = undefined;
 				activeReasoningEffortFallbackKey = createOpenAIReasoningEffortFallbackKey(
 					"responses",
 					resolvedBaseUrl,
@@ -834,6 +840,7 @@ const streamOpenAIResponsesOnce = (
 						headers: headersWithTimeout,
 						body: requestParams,
 						signal: requestSignal,
+						maxRetryDelayMs: options?.maxRetryDelayMs,
 						fetch: wrapFetchForCopilotFallback(
 							wrapFetchForRequestCompression(
 								gateFetch(replayBudget, options?.fetch ?? fetch),
@@ -855,6 +862,7 @@ const streamOpenAIResponsesOnce = (
 						// so retries cannot extend the caller's deadline.
 						onSseEvent: rawSseObserver,
 					});
+					streamResponseHeaders = response.headers;
 					// Disarm the first-event watchdog as soon as headers arrive — a slow
 					// onResponse callback must not abort an already-connected stream.
 					clearTimeout(requestTimeout);
@@ -1393,11 +1401,13 @@ const streamOpenAIResponsesOnce = (
 				abortTracker,
 				rawRequestDump,
 				capturedErrorResponse,
+				streamResponseHeaders,
 			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			output.errorRetryAfterMs = result.retryAfterMs;
 			replayBudget?.stamp(output);
 			if (AIError.isRequestBodyReadTimeout(result.status, result.message) && lastSubmittedRequestWasFullReplay) {
 				output.requestBodyReadTimeoutFullReplay = true;

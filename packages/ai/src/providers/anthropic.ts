@@ -103,12 +103,13 @@ import {
 } from "./anthropic-slow-mode";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { admitsReplay, gateFetch, longestServerWaitMs, ReplayBudget, restoreReplaced } from "../utils/replay-budget";
-import { getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
+import { getFailureRetryAfterMs, getHeadersFromError } from "../utils/retry-after";
 import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
 import { spillToDescription } from "../utils/schema/spill";
 import { createSdkStreamRequestOptions } from "../utils/sdk-stream-timeout";
 import { notifyRawSseEvent } from "../utils/sse-debug";
 import { isForcedToolChoice } from "../utils/tool-choice";
+import { providerReplaysFrom, wireCountedFetch } from "../utils/wire-attempts";
 import {
 	AnthropicConnectionTimeoutError,
 	type AnthropicFetchOptions,
@@ -928,6 +929,22 @@ const ANTHROPIC_MESSAGE_EVENTS: ReadonlySet<string> = new Set([
 type RawMessagePingEvent = { type: "ping" };
 type AnthropicStreamEvent = RawMessageStreamEvent | RawMessagePingEvent;
 const ANTHROPIC_PING_EVENT: RawMessagePingEvent = { type: "ping" };
+
+/** A content delta that carries no bytes: a stalled relay can repeat these forever, so they are not stream progress. */
+function isEmptyContentDelta(event: AnthropicStreamEvent): boolean {
+	if (event.type !== "content_block_delta") return false;
+	const delta = event.delta;
+	switch (delta.type) {
+		case "text_delta":
+			return delta.text === "";
+		case "thinking_delta":
+			return delta.thinking === "";
+		case "input_json_delta":
+			return delta.partial_json === "";
+		default:
+			return false;
+	}
+}
 
 /**
  * In-stream `error` SSE frames carry an Anthropic error envelope:
@@ -1832,8 +1849,31 @@ const streamAnthropicOnce = (
 			timestamp: Date.now(),
 		};
 		let rawRequestDump: RawHttpRequestDump | undefined;
+		// The current attempt's accepted (2xx) response headers: set when its
+		// response arrives, cleared when the next attempt starts, so an in-band
+		// error or a cut stream reads this attempt's `Retry-After` and a later
+		// attempt that fails before its response never reads an earlier one's.
+		let streamResponseHeaders: Headers | undefined;
 		let transportPayload: unknown;
 		let activeAbortTracker = createAbortSourceTracker(options?.signal);
+		// Request attempts, counted on the `fetch` the client issues them through
+		// (`wireCountedFetch`): the request's own counter — `withRequestTransport`
+		// on the `stream()` path, `withWireCount` at `streamAnthropic` otherwise —
+		// shared by every call that sends this request again with the same
+		// options (an authentication retry, an empty-completion retry). Every
+		// wrapper `buildAnthropicClientOptions` adds sits above it — compression
+		// and its uncompressed resend, the cch rewriter, the Copilot identity
+		// resend — so their requests are counted too.
+		const wire = wireCountedFetch(options?.fetch);
+		/**
+		 * Every attempt after the first the request has made, or `undefined`
+		 * when the requests went through a transport this module does not own —
+		 * a caller-supplied client, or a transport that builds its own — or
+		 * through a caller-supplied `fetch`. Each knows how often it replayed and
+		 * this module does not.
+		 */
+		const reportedProviderReplays = (): number | undefined =>
+			transport || options?.client ? undefined : providerReplaysFrom(wire.attempts);
 
 		const onSseEvent = options?.onSseEvent;
 		const rawSseObserver = onSseEvent ? (event: RawSseEvent) => onSseEvent(event, sourceModel) : undefined;
@@ -2181,7 +2221,7 @@ const streamAnthropicOnce = (
 						context.tools?.some(tool => ANTHROPIC_BUFFERED_INPUT_TOOLS.has(tool.name)) ?? false,
 					thinkingEnabled: options?.thinkingEnabled,
 					thinkingDisplay: options?.thinkingDisplay,
-					fetch: options?.fetch,
+					fetch: wire.fetch,
 					maxRetryDelayMs: options?.maxRetryDelayMs,
 					copilotCacheKey,
 					copilotCacheSnapshot: copilotCached ?? null,
@@ -2471,6 +2511,7 @@ const streamAnthropicOnce = (
 			let replayOf: unknown;
 			while (true) {
 				activeAbortTracker = createAbortSourceTracker(options?.signal);
+				streamResponseHeaders = undefined;
 				const { requestSignal } = activeAbortTracker;
 				// The provider loop owns retries: pin the client's internal retry loop
 				// to zero even when no watchdog timeout is configured (the helper only
@@ -2640,6 +2681,7 @@ const streamAnthropicOnce = (
 					} finally {
 						if (requestTimeout !== undefined) clearTimeout(requestTimeout);
 					}
+					streamResponseHeaders = response.headers;
 					await notifyProviderResponse(options, response, sourceModel, requestId);
 					if (slowMode) {
 						const slowSignal = parseAnthropicSlowModeHeaders(response.headers);
@@ -2659,6 +2701,8 @@ const streamAnthropicOnce = (
 						number,
 						{
 							contentIndex: number;
+							/** True once a native signature_delta arrived; a block-start signature is only a fallback. */
+							signatureDeltaStarted?: boolean;
 							kind:
 								| "text"
 								| "thinking"
@@ -2697,7 +2741,9 @@ const streamAnthropicOnce = (
 						onFirstItemTimeout: () => activeAbortTracker.abortLocally(firstEventTimeoutAbortError),
 						abortSignal: options?.signal,
 						isProgressItem: item => {
-							if ((item as AnthropicStreamEvent).type === "ping") {
+							const event = item as AnthropicStreamEvent;
+							if (isEmptyContentDelta(event)) return false;
+							if (event.type === "ping") {
 								if (!sawNonPingEvent) return false;
 								if (pingProgressCapMs === undefined) return true;
 								return Date.now() - lastNonPingProgressAtMs < pingProgressCapMs;
@@ -2849,7 +2895,8 @@ const streamAnthropicOnce = (
 								const block: Block = {
 									type: "thinking",
 									thinking: event.content_block.thinking ?? "",
-									thinkingSignature: "",
+									thinkingSignature:
+										typeof event.content_block.signature === "string" ? event.content_block.signature : "",
 									[kStreamingBlockIndex]: event.index,
 								};
 								output.content.push(block);
@@ -3007,8 +3054,12 @@ const streamAnthropicOnce = (
 									continue;
 								}
 								streamedReplayUnsafeContent = true;
-								block.thinkingSignature = block.thinkingSignature || "";
-								block.thinkingSignature += event.delta.signature;
+								// Some compatible endpoints put the signature on block_start: a fallback that the
+								// first native delta replaces, not a prefix of the delta sequence.
+								block.thinkingSignature = openBlock.signatureDeltaStarted
+									? `${block.thinkingSignature ?? ""}${event.delta.signature}`
+									: event.delta.signature;
+								openBlock.signatureDeltaStarted = true;
 							}
 						} else if (event.type === "content_block_stop") {
 							if (sawTerminalEnvelope) {
@@ -3647,13 +3698,19 @@ const streamAnthropicOnce = (
 					providerRetryAttempt++;
 					const backoffDelayMs = calculateAnthropicRetryDelayMs(providerRetryAttempt - 1);
 					// Honor the server's retry hint (`retry-after-ms`/`retry-after`) on
-					// 429/529-style failures: retrying sooner than the server asked is a
-					// guaranteed failure that just burns the retry budget. Under a replay
-					// budget the longest wait the headers or the message name counts, so a
-					// header that says zero cannot beat a body that says thirty seconds.
-					const headerDelayMs = replayBudget
-						? longestServerWaitMs(streamFailure)
-						: getRetryAfterMsFromHeaders(getHeadersFromError(streamFailure));
+					// 429/529-style failures and on an accepted stream that failed after
+					// naming one: retrying sooner than the server asked is a guaranteed
+					// failure that just burns the retry budget. The same reader as the
+					// failed message's `errorRetryAfterMs`, so this cap and every layer
+					// above judge one wait. Under a replay budget the longest wait the
+					// headers or the message name also counts, so a header that says zero
+					// cannot beat a body that says thirty seconds.
+					const statedDelayMs = getFailureRetryAfterMs(streamFailure, { streamResponseHeaders });
+					const longestDelayMs = replayBudget ? longestServerWaitMs(streamFailure) : undefined;
+					const headerDelayMs =
+						longestDelayMs === undefined || (statedDelayMs !== undefined && statedDelayMs > longestDelayMs)
+							? statedDelayMs
+							: longestDelayMs;
 					// Bound the server-directed wait so a multi-hour `retry-after` cannot
 					// park the provider stream before higher-level recovery runs. A non-positive cap
 					// disables the bound; an over-cap hint surfaces the original error immediately.
@@ -3702,6 +3759,10 @@ const streamAnthropicOnce = (
 				output.content.unshift(...prefix);
 				if (retained !== output.content) retained.unshift(...prefix);
 			}
+			// A success carries the count too: the layer above may discard this
+			// response (an empty completion it retries) and the requests already
+			// spent on it are still requests the model saw.
+			output.providerReplays = reportedProviderReplays();
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			if (dropFastMode && model.compat.firstPartyProvider && options?.serviceTier === "priority") {
@@ -3754,11 +3815,14 @@ const streamAnthropicOnce = (
 				provider: sourceModel.provider,
 				abortTracker: activeAbortTracker,
 				rawRequestDump,
+				streamResponseHeaders,
 			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = transport ? result.message : maybeAddReplayUnsignedThinkingHint(model, result.message);
+			output.errorRetryAfterMs = result.retryAfterMs;
+			output.providerReplays = reportedProviderReplays();
 			replayBudget?.stamp(output);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;

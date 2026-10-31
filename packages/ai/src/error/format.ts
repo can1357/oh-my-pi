@@ -5,7 +5,7 @@ import {
 	rewriteClinePassError,
 	rewriteCopilotError,
 } from "../utils/http-inspector";
-import { formatErrorMessageWithRetryAfter, keepRetryAfterHint } from "../utils/retry-after";
+import { errorMessageText } from "../utils/retry-after";
 import { LLAMA_CPP_TOOL_CALL_PARSE_PATTERN } from "./flags";
 
 function rewriteOllamaToolCallJsonError(message: string): string {
@@ -24,21 +24,19 @@ export interface FormatMessageOptions {
 }
 
 /**
- * Format a provider error into a user-facing message, unifying the three
- * formatters: lightweight retry-after extraction, the raw-dump finalizer, and
- * the copilot rewrite.
+ * Format a provider error into a user-facing message, unifying the formatters:
+ * the plain message, the raw-dump finalizer, and the provider rewrites.
  *
  * Selection is driven by inputs, not a mode flag: a `rawRequestDump` routes
- * through {@link finalizeErrorMessage} (retry-after + raw dump + captured body),
- * otherwise the lightweight {@link formatErrorMessageWithRetryAfter} is used.
- * A provider rewrite that replaces the message keeps the server's
- * `retry-after-ms=` hint, so a caller can still read the wait it asked for.
+ * through {@link finalizeErrorMessage} (raw dump + captured body), otherwise
+ * the error's own message is used. The server's retry wait is never written
+ * into the message: `finalize` returns it structured as `retryAfterMs`, and a
+ * display renders it.
  */
 export async function formatMessage(error: unknown, opts: FormatMessageOptions = {}): Promise<string> {
-	const formatted = opts.rawRequestDump
+	let message = opts.rawRequestDump
 		? await finalizeErrorMessage(error, opts.rawRequestDump, opts.capturedErrorResponse)
-		: formatErrorMessageWithRetryAfter(error);
-	let message = formatted;
+		: errorMessageText(error);
 	if (opts.provider === "github-copilot") {
 		message = rewriteCopilotError(message, error, opts.provider);
 	}
@@ -48,5 +46,5 @@ export async function formatMessage(error: unknown, opts: FormatMessageOptions =
 	if (opts.provider === "ollama") {
 		message = rewriteOllamaToolCallJsonError(message);
 	}
-	return keepRetryAfterHint(formatted, message);
+	return message;
 }

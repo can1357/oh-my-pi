@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- The soft steering signal a tool sees as `toolCall.steeringSignal` now aborts with the source of the queued message (`"user"`, `"irc"`, …) as its `reason`, so a tool can yield only to the sources it should ([#17537](https://github.com/can1357/oh-my-pi/issues/17537))
+
+### Fixed
+
+- `streamProxy` keeps a failure's header retry wait as `errorRetryAfterMs`, from the terminal `error` frame's new `errorRetryAfterMs` field or a non-2xx proxy response's own `Retry-After` / `retry-after-ms` headers; the error a failed compaction step throws carries it too, so the compaction retry waits for it ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- Long tool-call intents no longer block tool execution when intent tracing is enabled ([#13140](https://github.com/can1357/oh-my-pi/issues/13140)).
+- Reject incomplete local compaction, turn-prefix, handoff, and branch summaries ending with `stopReason: "length"` instead of using truncated text as complete context. Omit incomplete display-only short summaries without discarding a completed full summary ([#17499](https://github.com/can1357/oh-my-pi/pull/17499) by [@Xytronix](https://github.com/Xytronix)).
+
+## [18.14.1] - 2026-10-31
+
+### Breaking Changes
+
+- `SentToolDefinitions.inactiveFor(messages, tools)` is replaced by `withInactiveTools(context)`, which also clears a stale `inactiveTools`; `transformProviderContext` now receives the request's `inactiveTools` ([#17492](https://github.com/can1357/oh-my-pi/pull/17492))
+
 ### Fixed
 
 - Long tool-call intents no longer block tool execution when intent tracing is enabled ([#13140](https://github.com/can1357/oh-my-pi/issues/13140)).

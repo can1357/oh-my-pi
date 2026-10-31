@@ -2,24 +2,30 @@
  * The server's retry wait, rendered for a person at the point of display.
  *
  * The wait is structured data everywhere: `AssistantMessage.errorRetryAfterMs`,
- * an `Error`'s own numeric `retryAfterMs`, an event's `retryAfterMs`. Classifiers,
- * retry decisions and credential blocks read those numbers. These helpers turn
- * the number into text only as the last step before the text reaches a person or
- * an external client, so no classifier ever sees a wait written into an error
- * message and mistakes its digits for a status. A string these helpers return is
- * for display only: never classify it, compare it, persist it as a machine field
- * or parse a wait back out of it.
+ * an event's `retryAfterMs`, and on an `Error` rebuilt from a failed message a
+ * `retry-after-ms` header (`retryWaitHeaders`), read back with the same header
+ * reader every retry layer uses. Classifiers, retry decisions and credential
+ * blocks read those numbers. These helpers turn the number into text only as the
+ * last step before the text reaches a person or an external client, so no
+ * classifier ever sees a wait written into an error message and mistakes its
+ * digits for a status.
+ *
+ * A string these helpers return is for display only: never classify it,
+ * compare it, persist it as a machine field or parse a wait back out of it. A
+ * missing wait renders nothing — never a default, never the last wait shown,
+ * never one scanned out of the text.
  */
 import { formatDuration } from "@oh-my-pi/pi-utils";
+import { getHeadersFromError, getRetryAfterMsFromHeaders, isRetryWaitMs, retryWaitHeaders } from "./retry-after";
 
-/** `retry after 30s`: the wait as a person reads it. */
+/** `retry after 30.0s`: the wait as a person reads it. */
 export function formatRetryWait(retryAfterMs: number): string {
 	return `retry after ${formatDuration(retryAfterMs)}`;
 }
 
-/** `text` with ` (retry after 30s)` when a wait is set; `text` unchanged otherwise. */
+/** `text` with ` (retry after 30.0s)` when a positive wait is set; `text` unchanged otherwise. */
 export function withRetryWait(text: string, retryAfterMs: number | undefined): string {
-	if (retryAfterMs === undefined || !Number.isFinite(retryAfterMs) || retryAfterMs <= 0) return text;
+	if (!isRetryWaitMs(retryAfterMs) || retryAfterMs === 0) return text;
 	return `${text} (${formatRetryWait(retryAfterMs)})`;
 }
 
@@ -31,18 +37,12 @@ export function assistantErrorText(
 	return withRetryWait(message.errorMessage || fallback, message.errorRetryAfterMs);
 }
 
-/**
- * The wait an `Error` carries as its own numeric `retryAfterMs` property: set on
- * an error built from a failed assistant turn, so the code that displays the
- * error can render the wait the message text no longer carries.
- */
+/** The wait an `Error` carries in its structured headers (`retryWaitHeaders`), if any. */
 export function retryAfterMsOf(error: unknown): number | undefined {
-	if (!(error instanceof Error) || !Object.hasOwn(error, "retryAfterMs")) return undefined;
-	const value: unknown = Reflect.get(error, "retryAfterMs");
-	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+	return getRetryAfterMsFromHeaders(getHeadersFromError(error));
 }
 
-/** `error`'s message as a person reads it, with the wait it carries. */
+/** `error`'s message as a person reads it, with the wait its headers carry. */
 export function errorText(error: unknown): string {
 	const text = error instanceof Error ? error.message : String(error);
 	return withRetryWait(text, retryAfterMsOf(error));
@@ -50,15 +50,15 @@ export function errorText(error: unknown): string {
 
 /**
  * An `Error` for a failed assistant turn: `message` is the turn's error text, and
- * the server's wait rides along as the numeric `retryAfterMs` property, never in
- * the text.
+ * the server's wait rides along as a `retry-after-ms` header (`retryWaitHeaders`),
+ * never in the text.
  */
 export function assistantTurnError(
 	message: { readonly errorMessage?: string; readonly errorRetryAfterMs?: number },
 	text: string = message.errorMessage || "Request failed",
 	options?: ErrorOptions,
-): Error & { retryAfterMs?: number } {
-	const error: Error & { retryAfterMs?: number } = new Error(text, options);
-	if (message.errorRetryAfterMs !== undefined) error.retryAfterMs = message.errorRetryAfterMs;
-	return error;
+): Error {
+	const error = new Error(text, options);
+	const headers = retryWaitHeaders(message.errorRetryAfterMs);
+	return headers ? Object.assign(error, { headers }) : error;
 }

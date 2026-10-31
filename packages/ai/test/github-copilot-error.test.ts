@@ -3,7 +3,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { isGitHubCopilotPolicyDenial } from "@oh-my-pi/pi-ai/error";
 import { formatMessage } from "@oh-my-pi/pi-ai/error/format";
 import { rewriteCopilotError } from "@oh-my-pi/pi-ai/utils/http-inspector";
-import { keepRetryAfterHint } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { getFailureRetryAfterMs } from "@oh-my-pi/pi-ai/utils/retry-after";
 
 function errorWithStatus(
 	status: number,
@@ -55,9 +55,10 @@ describe("rewriteCopilotError", () => {
 	});
 });
 
-// A rewrite replaces the formatted message; the server's wait must survive it,
-// because the caller reads the wait from the message.
-describe("formatMessage keeps the server's wait through a provider rewrite", () => {
+// The server's wait is structured: a rewrite replaces the message, and the wait
+// is never in either; it reaches the caller as `errorRetryAfterMs`, read from
+// the response's headers (`getFailureRetryAfterMs`), whatever the text says.
+describe("formatMessage never writes the server's wait into the message", () => {
 	const withWait = (status: number, message: string): Error =>
 		Object.assign(new Error(message), { status, headers: new Headers({ "retry-after": "30" }) });
 
@@ -72,11 +73,14 @@ describe("formatMessage keeps the server's wait through a provider rewrite", () 
 			"unavailable for organization accounts",
 		],
 		["cline-pass", 400, "model not found", "removed this model from the roster"],
+		["openai", 429, "429 Too many requests", "429 Too many requests"],
 	])("%s %i", async (provider, status, message, rewritten) => {
-		const formatted = await formatMessage(withWait(status, message), { provider });
+		const error = withWait(status, message);
+		const formatted = await formatMessage(error, { provider });
 
 		expect(formatted).toContain(rewritten);
-		expect(formatted).toContain("retry-after-ms=30000");
+		expect(formatted).not.toContain("retry-after");
+		expect(getFailureRetryAfterMs(error)).toBe(30_000);
 	});
 
 	it("still classifies the rewritten Copilot 403 as a policy denial", async () => {
@@ -84,15 +88,7 @@ describe("formatMessage keeps the server's wait through a provider rewrite", () 
 		expect(isGitHubCopilotPolicyDenial("github-copilot", undefined, formatted)).toBe(true);
 	});
 
-	it("keeps the longest hint the formatted message carried, and adds none when it carried none", () => {
-		expect(keepRetryAfterHint("a retry-after-ms=1 b retry-after-ms=30000", "rewritten")).toBe(
-			"rewritten retry-after-ms=30000",
-		);
-		expect(keepRetryAfterHint("no wait named", "rewritten")).toBe("rewritten");
-		expect(keepRetryAfterHint("retry-after-ms=5", "rewritten retry-after-ms=7")).toBe("rewritten retry-after-ms=7");
-	});
-
-	it("reads the wait from a Retry-After date with the shared reader", async () => {
+	it("reads the wait from a Retry-After date with the shared reader", () => {
 		const at = Date.now();
 		const fiftyYearWindow = new Date(at);
 		fiftyYearWindow.setUTCFullYear(fiftyYearWindow.getUTCFullYear() + 34);
@@ -110,14 +106,11 @@ describe("formatMessage keeps the server's wait through a provider rewrite", () 
 			headers: new Headers({ "retry-after": rfc850 }),
 		});
 
-		const formatted = await formatMessage(error, { provider: "openai" });
-		const waitMs = Number(/retry-after-ms=(\d+)/.exec(formatted)?.[1]);
-
-		expect(waitMs).toBeGreaterThan(33 * 365 * 86_400_000);
+		expect(getFailureRetryAfterMs(error)).toBeGreaterThan(33 * 365 * 86_400_000);
 	});
 
-	// The hint is the server's wait, not error text: a wait whose milliseconds
-	// spell a status (403, 503, …) must not read as one in the classifier.
+	// A wait whose milliseconds spell a status (403, 503, …) never reaches the
+	// classifier as text, so it cannot be read as one.
 	const cases: Array<[string, string, number | undefined]> = [
 		["github-copilot", "403 Forbidden", 403],
 		["cline-pass", "model not found", 400],
@@ -129,13 +122,13 @@ describe("formatMessage keeps the server's wait through a provider rewrite", () 
 			`classifies ${provider} "${message}" the same with a wait of %i ms`,
 			async waitMs => {
 				const failure = (headers?: Headers): Error => Object.assign(new Error(message), { status, headers });
-				const hinted = await formatMessage(failure(new Headers({ "retry-after-ms": String(waitMs) })), {
+				const withWaitHeader = await formatMessage(failure(new Headers({ "retry-after-ms": String(waitMs) })), {
 					provider,
 				});
 				const plain = await formatMessage(failure(), { provider });
-				expect(hinted).toContain(`retry-after-ms=${waitMs}`);
+				expect(withWaitHeader).toBe(plain);
 
-				expect(AIError.classifyMessage({ provider, errorMessage: hinted, errorStatus: status })).toBe(
+				expect(AIError.classifyMessage({ provider, errorMessage: withWaitHeader, errorStatus: status })).toBe(
 					AIError.classifyMessage({ provider, errorMessage: plain, errorStatus: status }),
 				);
 			},

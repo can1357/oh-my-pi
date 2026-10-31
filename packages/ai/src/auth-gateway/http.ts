@@ -9,6 +9,7 @@ import * as os from "node:os";
 import { getInstallId } from "@oh-my-pi/pi-utils";
 import type { Api, Model } from "../types";
 import type { ClientUsageIdentity } from "../usage";
+import { getHeadersFromError, getRetryAfterMsFromHeaders, isRetryWaitMs } from "../utils/retry-after";
 
 const JSON_HEADERS = {
 	"Content-Type": "application/json",
@@ -49,6 +50,28 @@ export function gatewayResponseHeaders(
 		headers["openai-processing-ms"] = elapsed;
 	}
 	return headers;
+}
+
+/**
+ * `response` restating the failed upstream attempt's header retry wait as the
+ * two headers HTTP clients read a wait from — the OpenAI and Anthropic SDKs and
+ * omp's own providers pointed at the gateway: `retry-after-ms` in milliseconds
+ * and `Retry-After` in whole seconds, rounded up. `retryAfterMs`
+ * must come from the upstream response's headers
+ * (`AssistantMessage.errorRetryAfterMs`, or {@link thrownRetryAfterMs}), never
+ * from error text, so a body cannot become a header. Without a finite wait of
+ * zero or more, `response` is returned unchanged.
+ */
+export function withRetryAfterHeaders(response: Response, retryAfterMs: number | undefined): Response {
+	if (!isRetryWaitMs(retryAfterMs)) return response;
+	response.headers.set("retry-after-ms", String(Math.ceil(retryAfterMs)));
+	response.headers.set("retry-after", String(Math.ceil(retryAfterMs / 1000)));
+	return response;
+}
+
+/** A thrown upstream failure's header retry wait, read from the error's own response headers. */
+export function thrownRetryAfterMs(error: unknown): number | undefined {
+	return getRetryAfterMsFromHeaders(getHeadersFromError(error));
 }
 
 /**

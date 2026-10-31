@@ -59,7 +59,7 @@ import {
 	V2_RETAINED_MESSAGE_TOKEN_BUDGET,
 } from "./compaction-v2-streaming";
 import type { CompactionEntry, SessionEntry } from "./entries";
-import { NativeCompactionError } from "./errors";
+import { failedResponseError, NativeCompactionError } from "./errors";
 import {
 	type ConvertToLlm,
 	createCompactionSummaryMessage,
@@ -91,6 +91,7 @@ import {
 	escapeSummaryBoundaryTags,
 	extractFileOpsFromMessage,
 	type FileOperations,
+	incompleteOutputError,
 	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversationForSummary,
 	stripReadSelector,
@@ -670,15 +671,14 @@ function resolveCompactionEffort(model: Model, level: ThinkingLevel | undefined)
  * `stopReason === "error"`. Carries the provider's HTTP `errorStatus`
  * onto a top-level `.status` field so callers (notably
  * `AgentSession.#isCompactionAuthFailure`) can branch on 401/403 without
- * regex-scraping `error.message`. The `auth_unavailable` synthetic
- * (pi-native gateway) does not populate `errorStatus`, hence the legacy
- * message-based check is still required upstream — see issue #986.
+ * regex-scraping `error.message`, and the failed response's header retry wait
+ * for the session's compaction retry (see {@link failedResponseError}). The
+ * `auth_unavailable` synthetic (pi-native gateway) does not populate
+ * `errorStatus`, hence the legacy message-based check is still required
+ * upstream — see issue #986.
  */
 function createSummarizationError(prefix: string, response: AssistantMessage): Error {
-	const text = `${prefix}: ${response.errorMessage || "Unknown error"}`;
-	return response.errorStatus === undefined
-		? new Error(text)
-		: new AIError.ProviderHttpError(text, response.errorStatus);
+	return failedResponseError(`${prefix}: ${response.errorMessage || "Unknown error"}`, response);
 }
 
 function shouldRetryHandoffWithAutoToolChoice(response: AssistantMessage): boolean {
@@ -750,6 +750,8 @@ export interface SummaryOptions {
 	providerSessionState?: Map<string, ProviderSessionState>;
 	/** Whether Codex remote compaction should prefer the provider WebSocket transport. */
 	preferWebsockets?: boolean;
+	/** Daybreak Blue request on Codex remote compaction; see `StreamOptions.codexAccessPrograms`. */
+	codexAccessPrograms?: boolean;
 	/** Classification shared by every provider request in this logical compaction. */
 	codexCompaction?: CodexCompactionContext;
 	/** Provider-visible tools for remote compaction transports that replay native tool history. */
@@ -1073,6 +1075,9 @@ async function summarizeConversationWindow(
 	if (response.stopReason === "error") {
 		throw createSummarizationError("Summarization failed", response);
 	}
+	if (response.stopReason === "length") {
+		throw new Error(incompleteOutputError("Summarization failed"));
+	}
 
 	const textContent = response.content
 		.filter((c): c is { type: "text"; text: string } => c.type === "text")
@@ -1179,6 +1184,9 @@ export async function generateHandoffFromContext(
 
 	if (response.stopReason === "error") {
 		throw createSummarizationError("Handoff generation failed", response);
+	}
+	if (response.stopReason === "length") {
+		throw new Error(incompleteOutputError("Handoff generation failed"));
 	}
 
 	return response.content
@@ -1303,8 +1311,10 @@ async function generateShortSummary(
 				case "error":
 					outcome = { kind: "failed", error: response.errorMessage || "Unknown error" };
 					break;
-				case "stop":
 				case "length":
+					outcome = { kind: "failed", error: incompleteOutputError("Short summary failed") };
+					break;
+				case "stop":
 				case "toolUse":
 					outcome = {
 						kind: "text",
@@ -1765,6 +1775,7 @@ export async function compact(
 				: options?.promptCacheKey,
 		providerSessionState: options?.providerSessionState,
 		preferWebsockets: options?.preferWebsockets,
+		codexAccessPrograms: options?.codexAccessPrograms,
 		codexCompaction: options?.codexCompaction,
 		tools: options?.tools,
 		fetch: options?.fetch,
@@ -2000,6 +2011,7 @@ export async function compact(
 						fetch: summaryOptions.fetch,
 						providerSessionState: summaryOptions.providerSessionState,
 						preferWebsockets: summaryOptions.preferWebsockets,
+						codexAccessPrograms: summaryOptions.codexAccessPrograms,
 						codexCompaction: summaryOptions.codexCompaction,
 					}),
 				{ signal },
@@ -2430,6 +2442,9 @@ async function generateTurnPrefixSummary(
 
 	if (response.stopReason === "error") {
 		throw createSummarizationError("Turn prefix summarization failed", response);
+	}
+	if (response.stopReason === "length") {
+		throw new Error(incompleteOutputError("Turn prefix summarization failed"));
 	}
 
 	return response.content
