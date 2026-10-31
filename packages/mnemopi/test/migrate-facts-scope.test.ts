@@ -8,6 +8,7 @@ import { consolidateToEpisodic, extractAndStoreFacts, storeExtractedFactCategori
 import { factRecall } from "@oh-my-pi/pi-mnemopi/core/beam/recall";
 import { initBeam } from "@oh-my-pi/pi-mnemopi/core/beam/schema";
 import { sourceMemoryScope } from "@oh-my-pi/pi-mnemopi/core/beam/fact-scope";
+import { get } from "@oh-my-pi/pi-mnemopi/core/beam/store";
 import { EpisodicGraph } from "@oh-my-pi/pi-mnemopi/core/episodic-graph";
 import {
 	hasPendingFactsScopeMigration as hasPendingMigration,
@@ -19,6 +20,7 @@ import * as migrationsBarrel from "@oh-my-pi/pi-mnemopi/core/migrations/index";
 import { closeQuietly, openDatabase } from "@oh-my-pi/pi-mnemopi/db";
 
 const roots: string[] = [];
+let prevNoEmbeddings: string | undefined;
 
 function tempDb(): string {
 	const root = mkdtempSync(join(tmpdir(), "mnemopi-facts-e7-"));
@@ -27,11 +29,16 @@ function tempDb(): string {
 }
 
 beforeEach(() => {
+	// Capture the caller's environment and restore it afterwards: deleting the
+	// variable outright would let later test files in the same Bun worker
+	// initialize native embeddings mid-suite.
+	prevNoEmbeddings = process.env.MNEMOPI_NO_EMBEDDINGS;
 	process.env.MNEMOPI_NO_EMBEDDINGS = "1";
 });
 
 afterEach(() => {
-	delete process.env.MNEMOPI_NO_EMBEDDINGS;
+	if (prevNoEmbeddings === undefined) delete process.env.MNEMOPI_NO_EMBEDDINGS;
+	else process.env.MNEMOPI_NO_EMBEDDINGS = prevNoEmbeddings;
 	while (roots.length > 0) rmSync(roots.pop() as string, { recursive: true, force: true });
 });
 
@@ -256,6 +263,40 @@ describe("E7 facts scope migration", () => {
 			for (const row of rows) expect(row.scope).toBe("session");
 		}
 		finally {
+			beamA.close();
+		}
+	});
+
+	it("get-by-id honors source narrowing and retirement like recall", () => {
+		const dbPath = tempDb();
+		const beamA = new BeamMemory({ sessionId: "session-a", dbPath });
+		try {
+			beamA.db.run(
+				"INSERT INTO working_memory (id, content, session_id, scope) VALUES ('wm-gid', 'g content', 'session-a', 'global')",
+			);
+			storeFactStrings(beamA, ["I use the quorum relay for tokens"], 0, "wm-gid");
+			const factId = (beamA.db
+				.query("SELECT fact_id FROM facts WHERE source_msg_id = 'wm-gid'")
+				.get() as { fact_id: string }).fact_id;
+			const beamB = new BeamMemory({ sessionId: "session-b", dbPath });
+			try {
+				expect(get(beamB, factId)).not.toBeNull();
+			} finally {
+				beamB.close();
+			}
+
+			beamA.db.run("UPDATE working_memory SET scope = 'session' WHERE id = 'wm-gid'");
+			const beamC = new BeamMemory({ sessionId: "session-b", dbPath });
+			try {
+				expect(get(beamC, factId)).toBeNull();
+			} finally {
+				beamC.close();
+			}
+			expect(get(beamA, factId)).not.toBeNull();
+
+			beamA.db.run("UPDATE working_memory SET superseded_by = 'x' WHERE id = 'wm-gid'");
+			expect(get(beamA, factId)).toBeNull();
+		} finally {
 			beamA.close();
 		}
 	});

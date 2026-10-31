@@ -783,6 +783,24 @@ function getFact(beam: BeamMemoryState, memoryId: string): Row | null {
 	const fact = statement.get(memoryId) as Row | null | undefined;
 	if (fact == null) return null;
 	if (fact.session_id !== beam.sessionId && fact.scope !== "global") return null;
+	// Mirror factRecall's source rules (factVisibilityWhere in recall.ts): a
+	// fact retires with its source when the source is superseded or expired,
+	// and stops resolving when the source row is visible to fewer sessions
+	// than the fact — otherwise get-by-id is a back door around factRecall.
+	const sourceId = typeof fact.source_msg_id === "string" ? fact.source_msg_id : "";
+	if (sourceId.length > 0) {
+		type SourceRow = { superseded_by: string | null; valid_until: string | null; session_id: string | null; scope: string | null };
+		let source = beam.db.prepare("SELECT superseded_by, valid_until, session_id, scope FROM working_memory WHERE id = ?").get(sourceId) as SourceRow | undefined;
+		if (source === undefined) {
+			source = beam.db.prepare("SELECT superseded_by, valid_until, session_id, scope FROM episodic_memory WHERE id = ?").get(sourceId) as SourceRow | undefined;
+		}
+		if (source !== undefined) {
+			if (source.superseded_by != null) return null;
+			const now = toUtcIso(new Date());
+			if (source.valid_until != null && source.valid_until <= now) return null;
+			if (source.session_id !== beam.sessionId && source.scope !== "global") return null;
+		}
+	}
 	const subject = typeof fact.subject === "string" ? fact.subject : "";
 	const predicate = typeof fact.predicate === "string" ? fact.predicate : "";
 	const object = typeof fact.object === "string" ? fact.object : "";

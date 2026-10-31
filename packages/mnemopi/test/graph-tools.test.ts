@@ -224,6 +224,51 @@ describe("EpisodicGraph fact scope (e7)", () => {
 		});
 	});
 
+	it("installs the FTS update trigger when opening an old-shape bank with fts_facts directly", () => {
+		const db = openDatabase(":memory:");
+		try {
+			db.run(`
+				CREATE TABLE facts (
+					fact_id TEXT PRIMARY KEY,
+					session_id TEXT DEFAULT 'default',
+					subject TEXT NOT NULL,
+					predicate TEXT NOT NULL,
+					object TEXT NOT NULL,
+					timestamp TEXT,
+					source_msg_id TEXT,
+					confidence REAL DEFAULT 0.5,
+					created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+				)
+			`);
+			db.run("CREATE VIRTUAL TABLE fts_facts USING fts5(subject, predicate, object, content='facts')");
+			db.run(`CREATE TRIGGER facts_ai AFTER INSERT ON facts BEGIN
+				INSERT INTO fts_facts(rowid, subject, predicate, object)
+				VALUES (new.rowid, new.subject, new.predicate, new.object);
+			END`);
+			const graph = new EpisodicGraph({ db });
+			const triggers = db
+				.query("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'facts_au'")
+				.all() as { name: string }[];
+			expect(triggers).toHaveLength(1);
+			const fact = {
+				id: "fact_standalone",
+				subject: "relay",
+				predicate: "uses",
+				object: "vaultword",
+				timestamp: "2026-01-01T00:00:00.000Z",
+				confidence: 0.7,
+			};
+			graph.storeFact(fact, "m_st", "test");
+			graph.storeFact({ ...fact, object: "safeword" }, "m_st", "test");
+			const stale = db.query("SELECT count(*) AS n FROM fts_facts WHERE fts_facts MATCH 'vaultword'").get() as { n: number };
+			const fresh = db.query("SELECT count(*) AS n FROM fts_facts WHERE fts_facts MATCH 'safeword'").get() as { n: number };
+			expect(stale.n).toBe(0);
+			expect(fresh.n).toBe(1);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("stores fresh facts with global scope and keeps the scope of re-stored facts", () => {
 		withGraph(graph => {
 			graph.storeFact(fact("fact_scope_new"), "mem_scope_1", "test");
