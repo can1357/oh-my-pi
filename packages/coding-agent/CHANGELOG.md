@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A `tools.approval` entry that is not `allow`, `deny` or `prompt` (a typo such as `denied` or `prmopt`, `block`, `ask`, `true`, `false`, a number, or an empty value) now asks before each call and logs a warning naming the tool and the value, instead of being ignored so the default `yolo` ran the call; a key that differs from the tool name only in case (`Bash`) applies its `deny` or `prompt`, and `omp config set` refuses such entries
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

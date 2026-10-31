@@ -447,6 +447,15 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 							`A restricted folder (tools.restrictedFolders) asks in every approval mode.`,
 					);
 				}
+				// A `tools.approval` entry that reads as `prompt` (unrecognised, or matched by case alone)
+				// says so: the fix is the entry, not the approval mode.
+				if (resolved.source === "user" && resolved.reason) {
+					throw new Error(
+						`Tool "${this.tool.name}" requires approval but no interactive UI available.\n` +
+							`Reason: ${resolved.reason}\n` +
+							`Set tools.approval.${resolved.policyKey ?? this.tool.name} to allow, deny or prompt.`,
+					);
+				}
 				throw new Error(
 					`Tool "${this.tool.name}" requires approval but no interactive UI available.\n` +
 						`Options:\n` +

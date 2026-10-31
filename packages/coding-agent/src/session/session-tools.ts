@@ -35,6 +35,7 @@ import {
 	resolveApproval,
 	resolveApprovalFromContext,
 	restrictedFolderReason,
+	userApprovalPolicy,
 } from "../tools/approval";
 import { getApprovalGrants } from "../tools/approval-cache";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
@@ -1034,9 +1035,9 @@ export class SessionTools {
 		// Default-config ACP sessions still ask for executable calls even though
 		// the schema defaults to yolo; explicit yolo is an intentional opt-in.
 		if (tool.name !== "bash" && this.#isExplicitAutoApproveMode()) {
-			const userPolicies: Record<string, unknown> = cfgToolsApproval.get(this.#host.settings);
-			const toolPolicy = userPolicies[tool.name];
-			if (!toolPolicy || toolPolicy === "allow") return tool;
+			// Read the entry as `resolveApproval` does: an unrecognised one (`false`, a typo) keeps the gate.
+			const policy = userApprovalPolicy(cfgToolsApproval.get(this.#host.settings), tool.name);
+			if (policy === undefined || policy === "allow") return tool;
 		}
 		return new Proxy(tool, {
 			get: (target, prop) => {

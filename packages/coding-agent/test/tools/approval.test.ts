@@ -1,4 +1,4 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { customToolToDefinition } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentTool, ToolApproval } from "@oh-my-pi/pi-agent-core";
 import {
@@ -11,6 +11,8 @@ import {
 	resolveApprovalFromContext,
 	truncateForPrompt,
 } from "@oh-my-pi/pi-coding-agent/tools/approval";
+import { cfgToolsApproval } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { logger } from "@oh-my-pi/pi-utils";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { DeferredMCPTool, MCPTool } from "../../src/mcp/tool-bridge";
@@ -147,10 +149,103 @@ describe("resolveApproval override and user policy", () => {
 		expect(resolveApproval(writeTool, {}, "yolo", { write: "deny" }).policy).toBe("deny");
 	});
 
-	it("ignores invalid user policy values", () => {
+	it("reads an unrecognised user policy as prompt, never as the mode's allow", () => {
 		const writeTool = tool("write", "write");
-		expect(resolveApproval(writeTool, {}, "always-ask", { write: "yes" }).policy).toBe("prompt");
-		expect(resolveApproval(writeTool, {}, "write", { write: 1 }).policy).toBe("allow");
+		expect(resolveApproval(writeTool, {}, "always-ask", { write: "yes" })).toMatchObject({
+			policy: "prompt",
+			source: "user",
+		});
+		expect(resolveApproval(writeTool, {}, "write", { write: 1 })).toMatchObject({ policy: "prompt", source: "user" });
+	});
+});
+
+describe("tools.approval entries as a user writes them by hand", () => {
+	const bash = tool("bash", "exec");
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	// Each spelling a user might type is covered end to end, on a real `bash` call, in
+	// approval-mode.test.ts; these cover what one call cannot show.
+	it("warns once per record about an unrecognised entry, naming the tool and the value", () => {
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const userConfig = { bash: "block" };
+		expect(resolveApproval(bash, {}, "yolo", userConfig)).toMatchObject({
+			policy: "prompt",
+			source: "user",
+			policyKey: "bash",
+			reason: 'tools.approval.bash is "block", not allow, deny or prompt',
+		});
+		resolveApproval(bash, {}, "yolo", userConfig);
+		expect(warn.mock.calls).toEqual([
+			[
+				"Approval: tools.approval entry is not allow, deny or prompt; asking instead",
+				{ tool: "bash", value: "block" },
+			],
+		]);
+		// A record with the entry fixed and broken again is a new record, and warns again.
+		resolveApproval(bash, {}, "yolo", { bash: "block" });
+		expect(warn).toHaveBeenCalledTimes(2);
+	});
+
+	it("applies a deny whose key names the tool only by case, naming that key", () => {
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const resolved = resolveApproval(bash, {}, "yolo", { Bash: "deny" });
+		expect(resolved).toMatchObject({ policy: "deny", source: "user", policyKey: "Bash" });
+		expect(() => requiresApproval(bash, {}, "yolo", { Bash: "deny" })).toThrow('remove "tools.approval.Bash: deny"');
+		expect(warn).toHaveBeenCalledWith("Approval: tools.approval key matches a tool only by case", {
+			key: "Bash",
+			tool: "bash",
+			value: "deny",
+			applied: "deny",
+		});
+	});
+
+	it("never grants through a key that names the tool only by case", () => {
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
+		expect(resolveApproval(bash, {}, "always-ask", { BASH: "allow" })).toMatchObject({
+			policy: "prompt",
+			source: "mode",
+		});
+		// An exact entry wins over a case variant; among variants the strictest applies.
+		expect(resolveApproval(bash, {}, "yolo", { bash: "allow", Bash: "deny" }).policy).toBe("allow");
+		expect(resolveApproval(bash, {}, "yolo", { Bash: "prompt", BASH: "deny" }).policy).toBe("deny");
+		expect(resolveApproval(bash, {}, "yolo", { Bash: "blcok" })).toMatchObject({
+			policy: "prompt",
+			reason: 'tools.approval.Bash is "blcok", which names bash only by case',
+		});
+	});
+
+	it("keeps a sub-tool's fallback deny under an unrecognised keyed entry", () => {
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const dispatch = tool("write", { tier: "exec", policyKey: "lsp" });
+		expect(resolveApproval(dispatch, {}, "yolo", { lsp: "block", write: "deny" })).toMatchObject({
+			policy: "deny",
+			policyKey: "write",
+		});
+		expect(resolveApproval(dispatch, {}, "yolo", { lsp: "block", write: "allow" })).toMatchObject({
+			policy: "prompt",
+			policyKey: "lsp",
+		});
+	});
+
+	it("carries an unrecognised legacy-name entry over as prompt", () => {
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const renamed = { ...tool("mcp__context7_query_docs", "write"), legacyName: "mcp__context_query_docs" };
+		expect(resolveApproval(renamed, {}, "yolo", { mcp__context_query_docs: "nope" })).toMatchObject({
+			policy: "prompt",
+			policyKey: "mcp__context_query_docs",
+		});
+	});
+
+	it("refuses to write an entry no policy names", () => {
+		const settings = Settings.isolated();
+		expect(() => cfgToolsApproval.set(settings, { bash: "block" })).toThrow(
+			'tools.approval entries must be allow, deny or prompt; got bash: "block"',
+		);
+		expect(() => Settings.isolated({ "tools.approval": { bash: null } })).toThrow("got bash: null");
+		cfgToolsApproval.override(settings, { bash: "Deny" });
+		expect(resolveApprovalFromContext({ settings }).userPolicies).toEqual({ bash: "Deny" });
 	});
 });
 

@@ -84,7 +84,7 @@ capped with a deterministic hash suffix; use the final capped name rather than t
 
 The sanitizer lowercases names and retains letters, digits, and underscores. For MCP names changed by the older digit-stripping sanitizer, a legacy `deny` or `prompt` key is inherited only when no current-name policy applies; legacy `allow` is never inherited.
 
-A decision's `policyKey` selects `tools.approval.<policyKey>` first, falling back to the invoking tool's policy when the keyed policy is missing or invalid. For example, `write` to a mounted `xd://lsp` device consults `tools.approval.lsp` before `tools.approval.write` and uses the device operation's tier.
+A decision's `policyKey` selects `tools.approval.<policyKey>` first, falling back to the invoking tool's policy when the keyed policy is missing, or when it is unrecognised and the invoking tool's policy is stricter. For example, `write` to a mounted `xd://lsp` device consults `tools.approval.lsp` before `tools.approval.write` and uses the device operation's tier.
 
 Resolution per tool call:
 
@@ -95,7 +95,7 @@ Resolution per tool call:
 5. Without an override, an explicit tool `allow`/`prompt` policy wins, then a valid user policy wins.
 6. With no explicit policy, the active mode auto-approves or prompts by tier. In `always-ask-cached`, a call whose `approvalCacheTargets` are all granted is allowed instead.
 
-Policy strings are trimmed and case-normalized. Invalid user values are ignored.
+Policy strings are trimmed and case-normalized (`Deny` and ` deny` deny). Any other value — a typo (`denied`, `prmopt`), another word (`block`, `ask`), `true`, `false`, a number, or `null` (a key left empty) — reads as `prompt`, never as no policy: whoever wrote the entry meant to restrain that tool, so the call asks first and, with no interactive UI, is refused with the entry named. A key that names the tool only by case (`Bash` for `bash`) applies its `deny` or `prompt` when the tool has no exact entry, never its `allow`. Each such entry logs a warning naming the tool and the value. `omp config set`, the settings panel and runtime overrides refuse such an entry, so only a hand-edited file can hold one.
 
 Approval is resolved again after extension `tool_call` handlers revise the input, against the arguments that will actually execute. A deny blocks execution before a prompt; a call that still requires a prompt fails rather than silently allowing it when no interactive UI is available.
 

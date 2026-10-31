@@ -6,7 +6,7 @@
  * - compare a tool capability tier against the active approval mode,
  * - format the generic approval prompt body.
  */
-import { isRecord, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import { replaceTabs } from "@oh-my-pi/pi-tui";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import approvalFolderTemplate from "../prompts/tools/approval-folder.md" with { type: "text" };
@@ -27,7 +27,13 @@ import {
 	approvalCacheKeyForPath,
 	approvalGrantKey,
 } from "./approval-cache";
-import { cfgToolsApproval, cfgToolsApprovalMode, cfgToolsRestrictedFolders } from "./settings";
+import {
+	type APPROVAL_POLICIES,
+	cfgToolsApproval,
+	cfgToolsApprovalMode,
+	cfgToolsRestrictedFolders,
+	parseApprovalPolicy,
+} from "./settings";
 import {
 	approvalFolderListing,
 	type ApprovalFolderListing,
@@ -38,7 +44,7 @@ import { expandTilde, resolveToCwd } from "./path-utils";
 
 export type { ToolApproval, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
 
-export type ApprovalPolicy = "allow" | "deny" | "prompt";
+export type ApprovalPolicy = (typeof APPROVAL_POLICIES)[number];
 
 /** Every approval mode: the type below and `isApprovalMode` read from one list. */
 const APPROVAL_MODES = ["always-ask", "always-ask-cached", "write", "yolo"] as const;
@@ -125,7 +131,8 @@ export interface ResolvedApproval {
 	policyKey?: string;
 }
 
-const POLICY_VALUES: ReadonlySet<ApprovalPolicy> = new Set(["allow", "deny", "prompt"]);
+/** How strongly each policy restrains a call, for choosing between two user entries that both apply. */
+const POLICY_RANK: Readonly<Record<ApprovalPolicy, number>> = { allow: 0, prompt: 1, deny: 2 };
 const TIER_VALUES: ReadonlySet<ToolTier> = new Set(["read", "write", "exec"]);
 
 /** Ordering of capability tiers, least to most privileged. */
@@ -260,11 +267,90 @@ export function recordApprovalGrant(
 
 const DEFAULT_PROMPT_TRUNCATE_CHARS = 2000;
 
-/** Best-effort conversion of an arbitrary user-supplied value to a policy. */
-function normalizePolicy(value: unknown): ApprovalPolicy | undefined {
-	if (typeof value !== "string") return undefined;
-	const lowered = value.trim().toLowerCase();
-	return POLICY_VALUES.has(lowered as ApprovalPolicy) ? (lowered as ApprovalPolicy) : undefined;
+/** The user policy one tool call gets: the `tools.approval` entry it came from, and why it differs from that entry's value. */
+interface UserPolicy {
+	policy: ApprovalPolicy;
+	/** The `tools.approval` key holding the entry. */
+	key: string;
+	/** Shown in the prompt when the entry is not simply its value: unrecognised, or matched by case alone. */
+	reason?: string;
+}
+
+/**
+ * Entries each `tools.approval` record already warned about. A record is replaced, never mutated,
+ * when its settings change, so a fixed and re-broken entry warns again.
+ */
+const warnedEntries = new WeakMap<object, Set<string>>();
+
+function warnEntryOnce(userConfig: Record<string, unknown>, key: string, message: string, context: object): void {
+	let warned = warnedEntries.get(userConfig);
+	if (!warned) {
+		warned = new Set();
+		warnedEntries.set(userConfig, warned);
+	}
+	if (warned.has(key)) return;
+	warned.add(key);
+	logger.warn(message, context);
+}
+
+/** `tools.approval.<key> is <value>`, as the prompt shows it. */
+function describeEntry(key: string, value: unknown): string {
+	return sanitizeText(`tools.approval.${key} is ${truncateForPrompt(JSON.stringify(value) ?? String(value), 80)}`);
+}
+
+/** The entry at `key`, read for the tool `name`; see {@link userPolicyFor}. */
+function readUserEntry(userConfig: Record<string, unknown>, key: string, name: string): UserPolicy | undefined {
+	const value = userConfig[key];
+	const policy = parseApprovalPolicy(value);
+	if (key === name) {
+		if (policy) return { policy, key };
+		warnEntryOnce(userConfig, key, "Approval: tools.approval entry is not allow, deny or prompt; asking instead", {
+			tool: key,
+			value,
+		});
+		return { policy: "prompt", key, reason: `${describeEntry(key, value)}, not allow, deny or prompt` };
+	}
+	warnEntryOnce(userConfig, key, "Approval: tools.approval key matches a tool only by case", {
+		key,
+		tool: name,
+		value,
+		applied: policy === "allow" ? "nothing" : (policy ?? "prompt"),
+	});
+	if (policy === "allow") return undefined;
+	return { policy: policy ?? "prompt", key, reason: `${describeEntry(key, value)}, which names ${name} only by case` };
+}
+
+/**
+ * The user's policy for the tool (or policy key) `name`, or `undefined` when `tools.approval` sets
+ * none. Whoever writes an entry means to restrain that tool, so a typo never grants it: an entry
+ * that is not `allow`, `deny` or `prompt` (any case, surrounding whitespace ignored) reads as
+ * `prompt`, and without an entry under `name` itself, one whose key differs only in case (`Bash`)
+ * applies its `deny` or `prompt` — never its `allow` — the strictest such entry winning. Each such
+ * entry warns once per record, naming the tool and the value.
+ */
+function userPolicyFor(userConfig: Record<string, unknown>, name: string): UserPolicy | undefined {
+	if (Object.hasOwn(userConfig, name)) return readUserEntry(userConfig, name, name);
+	let lowered: string | undefined;
+	let found: UserPolicy | undefined;
+	for (const key in userConfig) {
+		if (!Object.hasOwn(userConfig, key) || key.length !== name.length) continue;
+		lowered ??= name.toLowerCase();
+		if (key.toLowerCase() === lowered) found = stricterUserPolicy(found, readUserEntry(userConfig, key, name));
+	}
+	return found;
+}
+
+function stricterUserPolicy(a: UserPolicy | undefined, b: UserPolicy | undefined): UserPolicy | undefined {
+	if (!a || !b) return a ?? b;
+	return POLICY_RANK[b.policy] > POLICY_RANK[a.policy] ? b : a;
+}
+
+/**
+ * The policy the user's `tools.approval` entry for `toolName` gives it, read as {@link resolveApproval}
+ * reads it (an unrecognised value is `prompt`); `undefined` when no entry applies.
+ */
+export function userApprovalPolicy(userConfig: Record<string, unknown>, toolName: string): ApprovalPolicy | undefined {
+	return userPolicyFor(userConfig, toolName)?.policy;
 }
 
 function isToolTier(value: unknown): value is ToolTier {
@@ -280,7 +366,7 @@ function normalizeDecision(value: unknown): Omit<ResolvedApproval, "policy"> & {
 		const record = value as Record<string, unknown>;
 		const tier = isToolTier(record.tier) ? record.tier : "exec";
 		const reason = typeof record.reason === "string" && record.reason.length > 0 ? record.reason : undefined;
-		const policy = normalizePolicy(record.policy);
+		const policy = parseApprovalPolicy(record.policy);
 		const policyKey =
 			typeof record.policyKey === "string" && record.policyKey.length > 0 ? record.policyKey : undefined;
 		return {
@@ -395,29 +481,25 @@ function resolvePolicy(
 ): ResolvedApproval {
 	const decision = getToolDecision(tool, args);
 	const policyKey = decision.policyKey ?? tool.name;
-	const userPolicy = Object.hasOwn(userConfig, policyKey) ? normalizePolicy(userConfig[policyKey]) : undefined;
-	const fallbackPolicy =
-		policyKey !== tool.name && userPolicy === undefined && Object.hasOwn(userConfig, tool.name)
-			? normalizePolicy(userConfig[tool.name])
+	const keyed = userPolicyFor(userConfig, policyKey);
+	// The invoking tool's own policy applies when the keyed sub-tool has no entry of its own, and
+	// still applies, if stricter, when the keyed entry only reads as `prompt` (a `reason` says so).
+	const fallback =
+		policyKey !== tool.name && (keyed === undefined || keyed.reason !== undefined)
+			? userPolicyFor(userConfig, tool.name)
 			: undefined;
-	const effectiveUserPolicy = userPolicy ?? fallbackPolicy;
-	const userPolicyKey = userPolicy !== undefined ? policyKey : tool.name;
+	const own = stricterUserPolicy(keyed, fallback);
 
 	// Legacy-name fallback for renamed tools (e.g. MCP mints that gained digits).
 	// Fail-closed: only `deny`/`prompt` carry over from the old key, so a
 	// forgotten restrictive policy keeps protecting the renamed tool, while a
 	// stale `allow` cannot mask a `deny` another user sets under the new name.
-	const legacyPolicy =
-		effectiveUserPolicy === undefined &&
-		typeof tool.legacyName === "string" &&
-		tool.legacyName !== tool.name &&
-		Object.hasOwn(userConfig, tool.legacyName)
-			? normalizePolicy(userConfig[tool.legacyName])
+	const legacy =
+		own === undefined && typeof tool.legacyName === "string" && tool.legacyName !== tool.name
+			? userPolicyFor(userConfig, tool.legacyName)
 			: undefined;
-	const inheritedPolicy = legacyPolicy === "deny" || legacyPolicy === "prompt" ? legacyPolicy : undefined;
-	const inheritedPolicyKey = inheritedPolicy !== undefined ? tool.legacyName : undefined;
-	const combinedUserPolicy = effectiveUserPolicy ?? inheritedPolicy;
-	const combinedUserPolicyKey = effectiveUserPolicy !== undefined ? userPolicyKey : inheritedPolicyKey;
+	const user = own ?? (legacy?.policy === "allow" ? undefined : legacy);
+	const userFields = user ? { policyKey: user.key, ...(user.reason ? { reason: user.reason } : {}) } : {};
 
 	if (decision.policy === "deny") {
 		return {
@@ -429,13 +511,13 @@ function resolvePolicy(
 			...(decision.reason ? { reason: decision.reason } : {}),
 		};
 	}
-	if (combinedUserPolicy === "deny") {
+	if (user?.policy === "deny") {
 		return {
 			policy: "deny",
 			tier: decision.tier,
 			override: decision.override,
 			source: "user",
-			...(combinedUserPolicyKey ? { policyKey: combinedUserPolicyKey } : {}),
+			...userFields,
 		};
 	}
 
@@ -451,11 +533,11 @@ function resolvePolicy(
 			};
 		}
 		return {
-			policy: combinedUserPolicy ?? "allow",
+			policy: user?.policy ?? "allow",
 			tier: decision.tier,
 			override: false,
-			source: combinedUserPolicy ? "user" : "mode",
-			...(combinedUserPolicyKey ? { policyKey: combinedUserPolicyKey } : {}),
+			source: user ? "user" : "mode",
+			...userFields,
 		};
 	}
 
@@ -481,13 +563,13 @@ function resolvePolicy(
 		};
 	}
 
-	if (combinedUserPolicy) {
+	if (user) {
 		return {
-			policy: combinedUserPolicy,
+			policy: user.policy,
 			tier: decision.tier,
 			override: false,
 			source: "user",
-			...(combinedUserPolicyKey ? { policyKey: combinedUserPolicyKey } : {}),
+			...userFields,
 		};
 	}
 

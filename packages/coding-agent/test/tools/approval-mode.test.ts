@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -8,7 +8,8 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { logger, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { YAML } from "bun";
 
 const BASE_SETTINGS = {
 	"async.enabled": false,
@@ -305,5 +306,66 @@ describe("tools.approvalMode setting", () => {
 				},
 			} as never),
 		).rejects.toThrow(/pending provider safety checks but no interactive UI/);
+	});
+
+	describe("a hand-edited tools.approval entry under the default yolo", () => {
+		afterEach(() => {
+			vi.restoreAllMocks();
+		});
+
+		/** Settings read from a global `config.yml` holding `tools.approval: <approval>`, as a user writes it. */
+		async function handEdited(approval: Record<string, unknown>): Promise<Settings> {
+			const agentDir = path.join(tempDir, `hand-edited-${Snowflake.next()}`);
+			await Bun.write(path.join(agentDir, "config.yml"), YAML.stringify({ tools: { approval } }));
+			// The constructor reads PI_CONFIG_FILES as the load starts, so it is back before any await.
+			const ambient = process.env.PI_CONFIG_FILES;
+			delete process.env.PI_CONFIG_FILES;
+			let loading: Promise<Settings>;
+			try {
+				loading = Settings.loadReadOnly({ agentDir, cwd: path.join(tempDir, "cwd"), overrides: BASE_SETTINGS });
+			} finally {
+				if (ambient !== undefined) process.env.PI_CONFIG_FILES = ambient;
+			}
+			return await loading;
+		}
+
+		// The spellings measured on main: the first five kept their meaning there, the rest were read as
+		// no policy, so under the default yolo the command ran without asking.
+		const UNRECOGNISED = (written: string) =>
+			`requires approval but no interactive UI available.\nReason: tools.approval.bash is ${written}, not allow, deny or prompt`;
+		const spellings: Array<[label: string, approval: Record<string, unknown>, refusal: string, warns: boolean]> = [
+			["exact deny", { bash: "deny" }, 'Tool "bash" is blocked by user policy', false],
+			["capitalised Deny", { bash: "Deny" }, 'Tool "bash" is blocked by user policy', false],
+			["DENY", { bash: "DENY" }, 'Tool "bash" is blocked by user policy', false],
+			["deny with a leading space", { bash: " deny" }, 'Tool "bash" is blocked by user policy', false],
+			["exact prompt", { bash: "prompt" }, "requires approval but no interactive UI available.\nOptions:", false],
+			["denied", { bash: "denied" }, UNRECOGNISED('"denied"'), true],
+			["block", { bash: "block" }, UNRECOGNISED('"block"'), true],
+			["boolean false", { bash: false }, UNRECOGNISED("false"), true],
+			["boolean true", { bash: true }, UNRECOGNISED("true"), true],
+			["number 0", { bash: 0 }, UNRECOGNISED("0"), true],
+			["null", { bash: null }, UNRECOGNISED("null"), true],
+			[
+				"key Bash",
+				{ Bash: "deny" },
+				'Tool "Bash" is blocked by user policy.\nTo allow: remove "tools.approval.Bash: deny"',
+				true,
+			],
+			["typo prmopt", { bash: "prmopt" }, UNRECOGNISED('"prmopt"'), true],
+			["ask", { bash: "ask" }, UNRECOGNISED('"ask"'), true],
+		];
+		for (const [label, approval, refusal, warns] of spellings) {
+			it(`does not run the command for ${label}`, async () => {
+				const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+				const settings = await handEdited(approval);
+				await expect(
+					bashTool().execute(`hand-edited-${label}`, { command: "echo ran" }, undefined, undefined, {
+						settings,
+					} as AgentToolContext),
+				).rejects.toThrow(refusal);
+				const entryWarnings = warn.mock.calls.filter(([message]) => String(message).startsWith("Approval:"));
+				expect(entryWarnings).toHaveLength(warns ? 1 : 0);
+			});
+		}
 	});
 });

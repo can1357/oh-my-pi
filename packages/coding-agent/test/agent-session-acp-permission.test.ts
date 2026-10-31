@@ -6,6 +6,7 @@
  * behavior they have in the TUI.
  */
 import { afterAll, afterEach, beforeAll, expect, it, spyOn } from "bun:test";
+import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockModelOptions } from "@oh-my-pi/pi-ai/providers/mock";
@@ -30,7 +31,8 @@ import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { computerTurnInFlight, registerComputerController } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
 import { dispatchXdevTool, resolveMountedXdevExecutable, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
-import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
+import { logger, Snowflake, TempDir, withTimeout } from "@oh-my-pi/pi-utils";
+import { YAML } from "bun";
 
 // ---------------------------------------------------------------------------
 // Shared setup
@@ -94,12 +96,14 @@ async function createSession(
 		xdev?: XdevState;
 		builtInToolNames?: string[];
 		persist?: boolean;
+		/** Settings read from config files, in place of `settingsOverrides`. */
+		settings?: Settings;
 	},
 ): Promise<AgentSession> {
 	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 	if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 
-	const settings = Settings.isolated({ "compaction.enabled": false, ...settingsOverrides });
+	const settings = options?.settings ?? Settings.isolated({ "compaction.enabled": false, ...settingsOverrides });
 	const sessionManager = options?.persist
 		? SessionManager.create(tempDir.path(), `${tempDir.path()}/sessions`)
 		: SessionManager.inMemory(tempDir.path());
@@ -330,6 +334,36 @@ it("explicit yolo still gates tools whose per-tool policy requires a prompt", as
 
 	expect(permissionSpy).toHaveBeenCalledTimes(1);
 	expect(bashTool.executeCalls).toBe(1);
+});
+
+it("explicit yolo still gates a destructive tool whose hand-edited policy is not a policy", async () => {
+	const deleteTool = makeFakeTool("delete");
+	const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	// Only a config file can hold such an entry: every write refuses it.
+	const agentDir = tempDir.join(`hand-edited-${Snowflake.next()}`);
+	await Bun.write(
+		path.join(agentDir, "config.yml"),
+		YAML.stringify({ compaction: { enabled: false }, tools: { approvalMode: "yolo", approval: { delete: false } } }),
+	);
+	const ambient = process.env.PI_CONFIG_FILES;
+	delete process.env.PI_CONFIG_FILES;
+	let loading: Promise<Settings>;
+	try {
+		loading = Settings.loadReadOnly({ agentDir, cwd: tempDir.path() });
+	} finally {
+		if (ambient !== undefined) process.env.PI_CONFIG_FILES = ambient;
+	}
+	const logWarn = spyOn(logger, "warn").mockImplementation(() => {});
+	session = await createSession([deleteTool], bridge, {}, { settings: await loading });
+
+	await session.setActiveToolsByName(["delete"]);
+	const wrappedDelete = session.agent.state.tools.find(t => t.name === "delete");
+	await wrappedDelete!.execute("call-1", { path: "/tmp/gone.ts" }, undefined, undefined as never, undefined as never);
+
+	expect(permissionSpy).toHaveBeenCalledTimes(1);
+	expect(deleteTool.executeCalls).toBe(1);
+	logWarn.mockRestore();
 });
 
 /**
