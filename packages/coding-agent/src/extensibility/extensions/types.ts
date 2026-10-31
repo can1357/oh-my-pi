@@ -2419,6 +2419,10 @@ export interface ExtensionCallbackOwner {
 	 *  the author's is wrapped, and the KIND is declared here rather than guessed from what
 	 *  comes back. */
 	runOwned<R>(call: () => R, kind?: AdmittedWorkKind): R;
+	/** Runs one call as `runOwned` does, as the finish of work its session already began — a
+	 *  dispatch under way when the session ended — so the rest of it is not skipped. Optional for
+	 *  an embedder's runtime, which then has one lifetime for every session. */
+	finishOwned?<R>(call: () => R): R;
 	/** Counts `result` as a live callback when it is awaitable, returning something awaitable once
 	 *  more — a cold thenable must not be run twice. */
 	trackCallback<T>(result: T): T;
@@ -2493,6 +2497,9 @@ export interface Extension {
 	fileDeleteFallbackHandlers: FileDeleteFallbackHandler[];
 	messageRenderers: Map<string, MessageRenderer>;
 	composerShapes: Map<string, ComposerShapeDefinition>;
+	/** Called when `composerShapes` changes after load: a session registers a shape, or its end
+	 *  withdraws one. A host that installed the shapes resyncs its installation. */
+	composerShapeListeners?: Set<() => void>;
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;

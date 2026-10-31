@@ -1209,6 +1209,9 @@ export function handUIContext(
 	const handedTheme = (theme: Theme): Theme => (theme === undefined ? theme : handTheme(theme));
 	/** A widget's, a footer's and a header's factory: the TUI and the theme, each the session's. */
 	const component = (tui: TUI, theme: Theme): [TUI, Theme] => [handedTUI(tui), handedTheme(theme)];
+	/** Each editor factory this facade installed, by the wrapper the host holds: what
+	 *  `getEditorComponent` hands back. */
+	const editorFactories = new WeakMap<object, NonNullable<ReturnType<ExtensionUIContext["getEditorComponent"]>>>();
 	const handed: Decided<ExtensionUIContext> = {
 		get timeoutStartsOnPresentation() {
 			return ui.timeoutStartsOnPresentation;
@@ -1348,17 +1351,24 @@ export function handUIContext(
 			),
 		addAutocompleteProvider: factory =>
 			ui.addAutocompleteProvider(scoped(factory, provider => [handAutocompleteProvider(provider, owner)])),
-		setEditorComponent: factory =>
-			ui.setEditorComponent(
-				// The editor theme is the host's — its symbols, spinner frames included, are module
-				// state the next editor reads — so the factory is handed a copy, as `handTheme` copies.
-				optionalScoped(factory, (tui, theme, keybindings) => [
-					handedTUI(tui),
-					copyHostData(theme),
-					handKeybindings(keybindings),
-				]),
-			),
-		getEditorComponent: () => ui.getEditorComponent(),
+		setEditorComponent: factory => {
+			// The editor theme is the host's — its symbols, spinner frames included, are module
+			// state the next editor reads — so the factory is handed a copy, as `handTheme` copies.
+			const installed = optionalScoped<NonNullable<typeof factory>>(factory, (tui, theme, keybindings) => [
+				handedTUI(tui),
+				copyHostData(theme),
+				handKeybindings(keybindings),
+			]);
+			if (installed && factory) editorFactories.set(installed, factory);
+			ui.setEditorComponent(installed);
+		},
+		// What the host installed is its own object — the wrapper this facade made, or another
+		// extension's, or the host's. An extension reads back only the factory it installed itself.
+		getEditorComponent: () =>
+			copiedIn(owner, () => {
+				const current = ui.getEditorComponent();
+				return current === undefined ? undefined : editorFactories.get(current);
+			}),
 		get theme() {
 			return handTheme(ui.theme);
 		},
@@ -1367,16 +1377,22 @@ export function handUIContext(
 			const theme = await ui.getTheme(text(owner, name));
 			return theme && handTheme(theme);
 		},
+		// The theme is the whole process's (every session draws in it, and setting one starts the
+		// host's theme watcher): a session that has gone sets none.
 		setTheme: async theme => {
-			if (typeof theme === "string") return copyHostData(await ui.setTheme(theme));
-			// A theme the host handed out is the host's; any other object would be the extension's
-			// code drawing every session.
-			const hosts = themesHanded.get(theme);
-			if (!hosts) throw new Error(`${subject}: setTheme() takes a theme name, or a theme the host handed you.`);
-			return copyHostData(await ui.setTheme(hosts));
+			const host = copiedIn(owner, () => {
+				if (typeof theme === "string") return theme;
+				// A theme the host handed out is the host's; any other object would be the extension's
+				// code drawing every session.
+				const hosts = themesHanded.get(theme);
+				if (!hosts) throw new Error(`${subject}: setTheme() takes a theme name, or a theme the host handed you.`);
+				return hosts;
+			});
+			return copyHostData(await ui.setTheme(host));
 		},
 		getToolsExpanded: () => ui.getToolsExpanded(),
-		setToolsExpanded: expanded => ui.setToolsExpanded(expanded === true),
+		// Expanding redraws every tool block in the live transcript: a session that has gone does not.
+		setToolsExpanded: expanded => ui.setToolsExpanded(copiedIn(owner, () => expanded === true)),
 	};
 	return handed;
 }

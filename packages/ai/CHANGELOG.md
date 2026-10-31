@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an optional `hand` to `ProviderCallGate`: an `AdmittedSignal` aborts with what it answers for the caller's reason — a copy, so what the provider keeps is not the host's own object — and with an `AbortError` of its own when the reason cannot be copied, so a failed copy never stops cancellation or throws out of the caller's abort listener ([#17402](https://github.com/can1357/oh-my-pi/pull/17402) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.14.1] - 2026-10-31
 
 ### Added

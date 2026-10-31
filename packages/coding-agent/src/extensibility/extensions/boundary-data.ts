@@ -517,13 +517,37 @@ export class HandedSignals {
  * Cycles are copied as cycles.
  */
 export function copyHostData<T>(value: T, signals?: HandedSignals): T {
-	return new HostCopier(signals).copy(value) as T;
+	try {
+		return new HostCopier(signals).copy(value) as T;
+	} catch (error) {
+		throw copiedFailure(error);
+	}
 }
 
-/** How many objects one copy of host data handed to an extension may make ({@link copyHostData}).
- *  Chosen here, not derived: an order of magnitude above the largest session this host keeps — a
- *  long session's tree or message list is some hundred thousand objects — and small enough that a
- *  walk that would never end is stopped in well under a second. */
+/**
+ * A failure raised while host data was being copied — a getter of the host's that threw, the
+ * object bound — as whoever receives the copy is handed it: a copy too, never the host's own
+ * exception, which may hold the host's callables. The failure still reaches them. One that cannot
+ * be copied either becomes an error of the receiver's own saying so.
+ */
+function copiedFailure(error: unknown): unknown {
+	try {
+		return new HostCopier().copy(error);
+	} catch {
+		return new Error("Host data could not be handed over, and neither could the reason it failed");
+	}
+}
+
+/**
+ * How many objects one copy of host data handed to an extension may make ({@link copyHostData}).
+ * Chosen here, not derived, and set against what real payloads measure (round 49 of #17402):
+ * a session tree costs about 20 objects per turn, so about 50,000 turns reach it; the bundled
+ * model catalog is 8,630 objects for 5,703 models; and a parsed document of 250,000 records is
+ * 750,002 objects, so one of about 334,000 records is refused. Refusing is not silent and does
+ * not end the turn: the hook is reported failed (`onError` carries this bound's message) and the
+ * dispatch returns. A walk that would never end — a getter answering a fresh object on every
+ * read — is stopped here too, after about one to two seconds and some 150 MB on a loaded machine.
+ */
 export const HOST_DATA_NODE_LIMIT = 1_000_000;
 
 /** What a copy answers for a function it leaves out, so a record or a map drops the entry and an
@@ -781,20 +805,26 @@ function followWithCopiedReason(signal: AbortSignal): AbortSignal {
  * signal of the host's own that follows the one the extension passes, and answers a copy.
  */
 export function handHostModel(model: Model<Api>): Model<Api> {
-	const copier = new HostCopier();
-	const copy: Record<PropertyKey, unknown> = {};
-	for (const [field, schema] of MODEL_ROW.fields) {
-		const value: unknown = Reflect.get(model, field);
-		if (value === undefined) continue;
-		copy[field] =
-			field === "resolveHeaders" && typeof value === "function"
-				? handHostResolver(value, model)
-				: copier.declared(value, schema);
+	try {
+		const copier = new HostCopier();
+		const copy: Record<PropertyKey, unknown> = {};
+		for (const [field, schema] of MODEL_ROW.fields) {
+			const value: unknown = Reflect.get(model, field);
+			if (value === undefined) continue;
+			copy[field] =
+				field === "resolveHeaders" && typeof value === "function"
+					? handHostResolver(value, model)
+					: copier.declared(value, schema);
+		}
+		copier.finish();
+		// Built from every field `Model` declares (`MODEL_ROW` is checked against it), so it is one.
+		const handed = copy as unknown as Model<Api>;
+		return handed;
+	} catch (error) {
+		// A getter of the host's model that throws fails the read, as it does for the host — with a
+		// copy of its exception, not the host's own.
+		throw copiedFailure(error);
 	}
-	copier.finish();
-	// Built from every field `Model` declares (`MODEL_ROW` is checked against it), so it is one.
-	const handed = copy as unknown as Model<Api>;
-	return handed;
 }
 
 function handHostResolver(resolver: Function, model: Model<Api>): NonNullable<Model<Api>["resolveHeaders"]> {
@@ -979,6 +1009,12 @@ export function admitToolDefinition<T extends ToolDefinition<any, any>>(
 	const subject = `Extension ${extensionPath}`;
 	const admitted: Record<string, unknown> = {};
 	const copies = new Map<AuthorDataSchema, Map<object, unknown>>();
+	// A tool registered while a session runs is that session's (`ExtensionCallbackOwner.registrant`
+	// names the runtime it is a session of). Withdrawing it unlists it, but a host may still hold
+	// what it was handed — a tool adapter, a renderer it mounted — so every callback it captured
+	// answers for that session alone: refused once it has ended, whichever session the runtime
+	// serves next. One registered at load serves every session, through the runner's admission.
+	const session = owner.registrant === undefined ? undefined : owner;
 	for (const [field, keep] of Object.entries<ToolDefinitionField>(TOOL_DEFINITION_FIELDS)) {
 		const value: unknown = Reflect.get(definition, field);
 		if (value === undefined) continue;
@@ -986,7 +1022,8 @@ export function admitToolDefinition<T extends ToolDefinition<any, any>>(
 			admitted[field] = keep.admitted(value, { owner, receiver: definition, extensionPath, subject });
 		} else if (typeof value === "function" && keep === "bound") {
 			// Applied to the definition the extension registered, so a class keeps its receiver.
-			admitted[field] = (...args: unknown[]): unknown => Reflect.apply(value, definition, args);
+			const call = (...args: unknown[]): unknown => Reflect.apply(value, definition, args);
+			admitted[field] = session === undefined ? call : boundToSession(field, call, session, subject);
 		} else if (typeof value === "function" && typeof keep === "object") {
 			admitted[field] = owner.ownCallback((...args: unknown[]): unknown =>
 				snapshotAuthorData(
@@ -1005,6 +1042,29 @@ export function admitToolDefinition<T extends ToolDefinition<any, any>>(
 		}
 	}
 	return admitted as T;
+}
+
+/**
+ * A `bound` tool callback of a tool one session registered, as the host keeps it: run as that
+ * session's work, and not at all once it has ended. `execute` then fails, naming why — a call the
+ * model made gets an answer, not a silent nothing; a renderer, a describer and `onSession` answer
+ * nothing, so the host draws its own default and notifies no one.
+ */
+function boundToSession(
+	field: string,
+	call: (...args: unknown[]) => unknown,
+	session: ExtensionCallbackOwner,
+	subject: string,
+): (...args: unknown[]) => unknown {
+	if (field === "execute") {
+		return (...args: unknown[]): unknown => {
+			if (session.isRetired) {
+				throw new Error(`${subject}: the session that registered this tool has ended, so it can no longer run`);
+			}
+			return session.runOwned(() => call(...args));
+		};
+	}
+	return (...args: unknown[]): unknown => (session.isRetired ? undefined : session.runOwned(() => call(...args)));
 }
 
 function registrationSite(subject: string, field: string): AuthorDataSite {

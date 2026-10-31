@@ -130,9 +130,17 @@ export class AdmittedSignal {
 		this.#admitted = controller.signal;
 		// The reason is handed as the session's own copy: the caller's object is the host's, which
 		// it reads again after the abort (the text it persists for the turn).
+		// Copying it can fail — a getter that throws, a reason too large to copy. The abort happens
+		// regardless, with a reason of the session's own saying so; the failure is not thrown out of
+		// the caller's abort listener, where it would reach the process.
 		const reason = (): unknown => {
 			const hand = this.#gate?.hand;
-			return hand ? hand(caller.reason) : caller.reason;
+			if (!hand) return caller.reason;
+			try {
+				return hand(caller.reason);
+			} catch {
+				return new DOMException("The operation was aborted; its reason could not be handed over", "AbortError");
+			}
 		};
 		if (caller.aborted) {
 			controller.abort(reason());

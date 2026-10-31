@@ -145,14 +145,20 @@ export class ExtensionUiController {
 
 	#syncExtensionComposerShapes(): void {
 		this.disposeComposerShapes();
-		for (const definition of this.ctx.session.extensionRunner?.getComposerShapes() ?? []) {
+		const runner = this.ctx.session.extensionRunner;
+		for (const definition of runner?.getComposerShapes() ?? []) {
 			this.#composerShapeDisposers.push(installExtensionComposerShape(definition));
 		}
+		// A shape a session registers is installed, and one its end withdraws is taken out of the
+		// host's registries, so the selector and the drawn prompt show what is registered now.
+		if (runner)
+			this.#composerShapeDisposers.push(runner.onComposerShapesChanged(() => this.#syncExtensionComposerShapes()));
 		this.ctx.syncComposerShape();
 		this.ctx.syncExtensionLinks();
 	}
 
-	/** Remove extension-owned composer styles from the process registries. */
+	/** Remove extension-owned composer styles from the process registries, and stop following the
+	 *  runner's changes to them. */
 	disposeComposerShapes(): void {
 		for (const dispose of this.#composerShapeDisposers.splice(0)) dispose();
 	}

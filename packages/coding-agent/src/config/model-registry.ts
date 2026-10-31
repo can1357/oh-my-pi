@@ -73,6 +73,7 @@ import {
 import {
 	claimProviderRegistrationOwner,
 	providerCallGate,
+	registrationEnded,
 	sameRegistrant,
 } from "../extensibility/extensions/callback-ownership";
 import {
@@ -4144,7 +4145,9 @@ export class ModelRegistry {
 		const newestSource = remaining.at(-1)?.sourceId;
 		if (newestSource) this.#runtimeProviderSourceByName.set(providerName, newestSource);
 		else this.#runtimeProviderSourceByName.delete(providerName);
-		const live = remaining.filter(entry => entry.gate?.retired !== true);
+		// A registration whose session has ended goes; one an extension made at load stays while no
+		// session holds its runtime, so the next session finds the catalog it registered.
+		const live = remaining.filter(entry => !registrationEnded(entry.gate));
 		if (live.length === 0) {
 			this.#clearRuntimeProviderState(providerName);
 			return;

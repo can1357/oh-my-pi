@@ -75,8 +75,14 @@ What you register, and when, decides how long it lasts:
   belongs to that session: it runs as that session's work, and it is **withdrawn when that
   session ends**. A tool registered from session A's handler is absent in session B, not listed
   and doing nothing; a registration that replaced a load-time one of the same name gives it back.
-  To have it in B, register it again from B. A session that has ended can register nothing: the
-  call throws.
+  To have it in B, register it again from B. Whatever the host still holds of it — a tool's
+  `execute` and renderers, a composer shape it is drawing — answers for that session alone: once the
+  session has ended `execute` fails, saying so, and a shape draws as the built-in `box`. A flag's
+  value goes with its declaration, whatever it was set to. A session that has ended can register
+  nothing, nor unregister a provider: the call throws.
+- A dispatch already under way when its session ends runs to its end: the handlers after the one
+  that was running still run, and their result still reaches the host. A callback that session
+  registered refuses on its own.
 - A `ctx` you keep — its `ui`, `sessionManager`, `modelRegistry`, `memory` and `sessionModes` — is
   its session's, and refuses once that session has ended, even while the runtime serves the next
   one. A `ctx.setTimeout`/`ctx.setInterval` callback belongs to the session that scheduled it.

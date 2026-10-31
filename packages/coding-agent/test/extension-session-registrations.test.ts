@@ -17,6 +17,7 @@ import type {
 	ExtensionContext,
 	ExtensionContextActions,
 	ExtensionUIContext,
+	SessionStopEvent,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -300,5 +301,249 @@ describe("what a session holds, once it has gone", () => {
 		await Bun.sleep(80);
 
 		expect(fired).toEqual([]);
+	});
+});
+
+describe("what a session registered, held by the host after the session ends", () => {
+	test("a tool's retained callbacks do not run once their session has ended", async () => {
+		const calls: string[] = [];
+		const h = await reusedRuntime(pi => {
+			pi.on("session_start", () => {
+				pi.registerTool({
+					...tool("held", "A"),
+					execute: async () => {
+						calls.push("execute");
+						return { content: [{ type: "text" as const, text: "A" }] };
+					},
+					describeCall: () => {
+						calls.push("describeCall");
+						return undefined;
+					},
+					// The renderer's return type is the host's component; nothing here is drawn.
+					renderCall: (() => {
+						calls.push("renderCall");
+						return undefined;
+					}) as never,
+					onSession: () => void calls.push("onSession"),
+				});
+			});
+		});
+		const endA = h.session();
+		await h.runner.emit({ type: "session_start" });
+		// What a host keeps of the tool — its adapter holds the admitted definition.
+		const held = h.runner.getAllRegisteredTools().find(entry => entry.definition.name === "held")?.definition;
+		if (!held) throw new Error("the session's tool was not registered");
+		endA();
+		h.session();
+		let executed = "returned";
+		try {
+			await held.execute("late", {}, undefined, undefined, h.runner.createContext());
+		} catch (error) {
+			executed = String(error);
+		}
+		held.describeCall?.({}, {} as never);
+		held.renderCall?.({}, {} as never, {} as never);
+		await held.onSession?.({ reason: "start" } as never, h.runner.createContext());
+
+		expect({ calls, executed }).toEqual({
+			calls: [],
+			executed: expect.stringContaining("the session that registered this tool has ended"),
+		});
+	});
+
+	test("a composer shape's drawing methods do not run once their session has ended", async () => {
+		const calls: string[] = [];
+		const h = await reusedRuntime(pi => {
+			pi.on("session_start", () => {
+				pi.registerComposerShape({
+					label: "Session shape",
+					style: {
+						id: "session-shape",
+						filledSurface: true,
+						sideBorders: false,
+						verticalChrome: false,
+						statusAttachment: "inside",
+						bottomBar: false,
+						bottomBarGap: 0,
+						defaultPromptGutter: true,
+						defaultPaddingX: () => (calls.push("defaultPaddingX"), 1),
+						sideChromeWidth: () => (calls.push("sideChromeWidth"), 0),
+						renderTop: () => (calls.push("renderTop"), "top"),
+						renderRow: () => (calls.push("renderRow"), ["row"]),
+						renderBottom: () => (calls.push("renderBottom"), "bottom"),
+					} as never,
+				});
+			});
+		});
+		const endA = h.session();
+		await h.runner.emit({ type: "session_start" });
+		// The host installs what the runner hands it, and keeps drawing through it.
+		const installed = h.runner.getComposerShapes().find(shape => shape.style.id === "session-shape")?.style;
+		if (!installed) throw new Error("the session's shape was not registered");
+		installed.renderTop({ width: 40 } as never);
+		const live = [...calls];
+		endA();
+		h.session();
+		calls.length = 0;
+		for (const draw of [
+			() => installed.defaultPaddingX(undefined),
+			() => installed.sideChromeWidth(1),
+			() => installed.renderTop({ width: 40 } as never),
+			() => installed.renderRow({ width: 40 } as never),
+			() => installed.renderBottom({ width: 40 } as never),
+		]) {
+			try {
+				draw();
+			} catch {
+				// The host's `box` fallback may want a fuller context than this probe gives it.
+			}
+		}
+
+		expect({ live, afterEnd: calls, filledSurface: installed.filledSurface }).toEqual({
+			live: ["renderTop"],
+			afterEnd: [],
+			filledSurface: false,
+		});
+	});
+
+	test("a session flag's value is withdrawn with its declaration, whatever it was set to", async () => {
+		const h = await reusedRuntime(pi => {
+			pi.on("session_start", () => {
+				pi.registerFlag("session-flag", { type: "string", default: "default" });
+			});
+		});
+		const endA = h.session();
+		await h.runner.emit({ type: "session_start" });
+		h.runner.setFlagValue("session-flag", "chosen-by-the-user");
+		const during = h.runner.getFlagValues().get("session-flag");
+		endA();
+		h.session();
+
+		expect({ during, after: h.runner.getFlagValues().has("session-flag") }).toEqual({
+			during: "chosen-by-the-user",
+			after: false,
+		});
+	});
+});
+
+describe("a dispatch under way when its session ends", () => {
+	test("runs its remaining load-time handlers, and their result reaches the host", async () => {
+		const seen: string[] = [];
+		let release: (() => void) | undefined;
+		const h = await reusedRuntime(pi => {
+			pi.on("session_start", () => void seen.push("load-1"));
+			pi.on("session_start", async () => {
+				seen.push("load-2 enter");
+				release?.();
+				await Promise.resolve();
+				seen.push("load-2 leave");
+			});
+			pi.on("session_start", () => void seen.push("load-3"));
+			pi.on("session_stop", () => {
+				release?.();
+				return undefined;
+			});
+			pi.on("session_stop", () => ({ decision: "block" as const, reason: "an extension objects" }));
+		});
+		const errors: string[] = [];
+		h.runner.onError(error => void errors.push(error.error));
+		release = h.session();
+		await h.runner.emit({ type: "session_start" });
+		release = h.session();
+		const stopped = await h.runner.emitSessionStop({
+			// Only the signal is read by the dispatch; the rest of the event is the handlers' to ignore.
+			...({} as Omit<SessionStopEvent, "type" | "signal">),
+			signal: new AbortController().signal,
+		});
+
+		expect({ seen, stopped, errors }).toEqual({
+			seen: ["load-1", "load-2 enter", "load-2 leave", "load-3"],
+			stopped: expect.objectContaining({ decision: "block" }),
+			errors: [],
+		});
+	});
+});
+
+describe("a provider", () => {
+	const provider = (id: string) => ({
+		api: "openai-completions" as const,
+		baseUrl: "http://127.0.0.1:9/v1",
+		apiKey: "local-key",
+		models: [
+			{
+				id,
+				name: id,
+				reasoning: false,
+				input: ["text" as const],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 8_000,
+				maxTokens: 1_000,
+			},
+		],
+	});
+
+	test("a session that replaced a load-time provider twice gives the next session the load-time catalog", async () => {
+		const h = await reusedRuntime(pi => {
+			pi.registerProvider("shared", provider("load"));
+			pi.on("session_start", () => {
+				pi.registerProvider("shared", provider("A1"));
+				pi.registerProvider("shared", provider("A2"));
+			});
+		});
+		// The host drains what the factory queued at load, with its owner, as `sdk.ts` does.
+		for (const { name, config, sourceId, owner } of h.runtime.pendingProviderRegistrations.splice(0)) {
+			h.registry.registerProvider(name, config, sourceId, owner);
+		}
+		const endA = h.session();
+		await h.runner.emit({ type: "session_start" });
+		const duringA = h.registry.find("shared", "A2") !== undefined;
+		endA();
+		h.session();
+
+		expect({
+			duringA,
+			loadInB: h.registry.find("shared", "load") !== undefined,
+			a2InB: h.registry.find("shared", "A2") !== undefined,
+		}).toEqual({ duringA: true, loadInB: true, a2InB: false });
+	});
+
+	test("an ended session's continuation can neither register nor unregister one", async () => {
+		const outcomes: string[] = [];
+		const resume = Promise.withResolvers<void>();
+		const done = Promise.withResolvers<void>();
+		const attempt = (call: () => void): string => {
+			try {
+				call();
+				return "returned";
+			} catch (error) {
+				return String(error);
+			}
+		};
+		let api: ExtensionAPI | undefined;
+		const h = await reusedRuntime(pi => {
+			api = pi;
+			pi.on("session_start", async () => {
+				await resume.promise;
+				outcomes.push(attempt(() => pi.registerProvider("late", provider("late-model"))));
+				outcomes.push(attempt(() => pi.unregisterProvider("b-provider")));
+				done.resolve();
+			});
+		});
+		const endA = h.session();
+		const started = h.runner.emit({ type: "session_start" });
+		endA();
+		h.session();
+		h.registry.registerProvider("b-provider", provider("b-model"), "registrations", h.runtime);
+		resume.resolve();
+		await done.promise;
+		await started.catch(() => undefined);
+
+		expect(api).toBeDefined();
+		expect(outcomes).toEqual([
+			expect.stringContaining("its session has ended"),
+			expect.stringContaining("its session has ended"),
+		]);
+		expect(h.registry.find("b-provider", "b-model")).toBeDefined();
+		expect(h.registry.find("late", "late-model")).toBeUndefined();
 	});
 });

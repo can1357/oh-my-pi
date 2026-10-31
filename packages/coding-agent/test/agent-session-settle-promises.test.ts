@@ -1136,6 +1136,7 @@ describe("AgentSession settles what it promised", () => {
 		const firstEntered = Promise.withResolvers<void>();
 		const releaseFirst = Promise.withResolvers<void>();
 		let secondSeen = false;
+		let finalizedBeforeSecond: boolean | undefined;
 		let armed = false;
 		await startPooledRunWithStrandedAside(undefined, undefined, undefined, pi => {
 			// Two handlers for one event: the broadcast runs them one after another, so between
@@ -1148,9 +1149,10 @@ describe("AgentSession settles what it promised", () => {
 			pi.on("agent_start", () => {
 				if (!armed) return;
 				secondSeen = true;
+				finalizedBeforeSecond = resetSpy.mock.calls.length > 1;
 			});
 		});
-		const resetSpy = spyOn(Agent.prototype, "reset");
+		const resetSpy: ReturnType<typeof spyOn> = spyOn(Agent.prototype, "reset");
 		let broadcast: Promise<unknown> | undefined;
 		try {
 			armed = true;
@@ -1163,9 +1165,10 @@ describe("AgentSession settles what it promised", () => {
 			releaseFirst.resolve();
 			await broadcast;
 			for (let i = 0; i < 40; i++) await setImmediate();
-			// Retirement, not observation: a handler of this broadcast that had not started is made
-			// inert rather than waited out. The finalizer completes once the running one ends.
-			expect(secondSeen).toBe(false);
+			// A dispatch under way when its session ends runs to its end — the handlers after the one
+			// that was running still run — and disposal's finalizer waits for all of it, so it does not
+			// finish in the gap between them.
+			expect({ secondSeen, finalizedBeforeSecond }).toEqual({ secondSeen: true, finalizedBeforeSecond: false });
 			expect(resetSpy.mock.calls).toHaveLength(2);
 		} finally {
 			releaseFirst.resolve();
@@ -1423,6 +1426,7 @@ describe("AgentSession settles what it promised", () => {
 		const firstEntered = Promise.withResolvers<void>();
 		const releaseFirst = Promise.withResolvers<void>();
 		let secondSeen = false;
+		let finalizedBeforeSecond: boolean | undefined;
 		let armed = false;
 		await startPooledRunWithStrandedAside(undefined, undefined, undefined, pi => {
 			// `user_bash` runs its own sequential handler loop, outside the generic broadcast.
@@ -1434,9 +1438,10 @@ describe("AgentSession settles what it promised", () => {
 			pi.on("user_bash", () => {
 				if (!armed) return;
 				secondSeen = true;
+				finalizedBeforeSecond = resetSpy.mock.calls.length > 1;
 			});
 		});
-		const resetSpy = spyOn(Agent.prototype, "reset");
+		const resetSpy: ReturnType<typeof spyOn> = spyOn(Agent.prototype, "reset");
 		let bash: Promise<unknown> | undefined;
 		try {
 			armed = true;
@@ -1449,7 +1454,9 @@ describe("AgentSession settles what it promised", () => {
 			releaseFirst.resolve();
 			await bash?.catch(() => undefined);
 			for (let i = 0; i < 40; i++) await setImmediate();
-			expect(secondSeen).toBe(false);
+			// A specialised emitter's loop is a dispatch too: it runs to its end, and disposal's
+			// finalizer waits for all of it.
+			expect({ secondSeen, finalizedBeforeSecond }).toEqual({ secondSeen: true, finalizedBeforeSecond: false });
 			expect(resetSpy.mock.calls).toHaveLength(2);
 		} finally {
 			releaseFirst.resolve();

@@ -201,6 +201,16 @@ function handlerTimeoutForEvent(eventType: string): number {
 const EXTENSION_HANDLER_TIMEOUT = Symbol("extensionHandlerTimeout");
 const EXTENSION_HANDLER_ABORTED = Symbol("extensionHandlerAborted");
 
+/** One dispatch, as `ExtensionRunner.#runDispatched` keeps it: the session it was made for, whether
+ *  that session was live when it began, the handlers of it running now, and the hold that keeps
+ *  the session's disposal waiting until the dispatch is over. */
+interface DispatchRecord {
+	readonly session: ExtensionCallbackOwner;
+	readonly live: boolean;
+	running: number;
+	hold: PromiseWithResolvers<void> | undefined;
+}
+
 /** Events after which the session file and id may differ from what child shells last saw. */
 const SESSION_IDENTITY_EVENTS: Record<string, true> = {
 	session_start: true,
@@ -611,6 +621,11 @@ export class ExtensionRunner {
 	#suspendedExtensions = new Set<Extension>();
 	/** Per-extension listener factories from {@link onToolRegistered}, applied to late-added extensions too. */
 	#toolRegistrationSubscribers = new Set<(extension: Extension) => ToolRegistrationListener>();
+	/** {@link onComposerShapesChanged} subscriptions, applied to late-added extensions too. */
+	#composerShapeSubscribers = new Set<(extension: Extension) => void>();
+	/** The session each dispatch context was made for ({@link createContext}), and whether it was
+	 *  live then: what decides whether a dispatch runs to its end ({@link #runDispatched}). */
+	readonly #dispatchSessions = new WeakMap<object, DispatchRecord>();
 	/** Latest `session_start` broadcast, replayed to extensions added afterwards. */
 	#sessionStartEvent: RunnerEmitEvent | undefined;
 	/** Notified after {@link setSuspendedExtensions} suspends or resumes any extension. */
@@ -1254,7 +1269,7 @@ export class ExtensionRunner {
 							// Through runScoped like every other extension callback: invoked straight
 							// from the filesystem helper, it would otherwise run unowned. Handed a copy: the
 							// helper rethrows `req.cause` as the original error once no handler took it.
-							if (await this.runScoped(() => handler(copyHostData(req), ctx))) return true;
+							if (await this.#runDispatched(ctx, () => handler(copyHostData(req), ctx))) return true;
 						} catch (error) {
 							logger.warn("Extension file write fallback handler threw; trying next handler", {
 								extension: ext.path,
@@ -1273,7 +1288,7 @@ export class ExtensionRunner {
 					const ctx = this.createContext();
 					for (const handler of ext.fileDeleteFallbackHandlers) {
 						try {
-							if (await this.runScoped(() => handler(copyHostData(req), ctx))) return true;
+							if (await this.#runDispatched(ctx, () => handler(copyHostData(req), ctx))) return true;
 						} catch (error) {
 							logger.warn("Extension file delete fallback handler threw; trying next handler", {
 								extension: ext.path,
@@ -1304,6 +1319,7 @@ export class ExtensionRunner {
 			for (const extension of added) this.#installFileFallbacks(extension);
 		}
 		for (const extension of added) {
+			for (const attach of this.#composerShapeSubscribers) attach(extension);
 			const scope: ToolRegistrationScope = {
 				pending: new Set(),
 				closed: false,
@@ -1483,13 +1499,32 @@ export class ExtensionRunner {
 		if (firstFailure) throw firstFailure.reason;
 	}
 
-	/** Composer shapes registered during extension load, with later extensions winning id collisions. */
+	/** Composer shapes the extensions have registered — at load, or by a session still running —
+	 *  with later extensions winning id collisions. */
 	getComposerShapes(): ComposerShapeDefinition[] {
 		const shapes = new Map<string, ComposerShapeDefinition>();
 		for (const extension of this.extensions) {
 			for (const [id, shape] of extension.composerShapes) shapes.set(id, shape);
 		}
 		return [...shapes.values()];
+	}
+
+	/** Calls `listener` whenever an extension's composer shapes change after load — a session
+	 *  registers one, or its end withdraws one — including extensions added later. A host that
+	 *  installed {@link getComposerShapes} reinstalls them. Answers what unsubscribes. */
+	onComposerShapesChanged(listener: () => void): () => void {
+		const attached = new Set<Extension>();
+		const attach = (extension: Extension): void => {
+			extension.composerShapeListeners ??= new Set();
+			extension.composerShapeListeners.add(listener);
+			attached.add(extension);
+		};
+		for (const extension of this.extensions) attach(extension);
+		this.#composerShapeSubscribers.add(attach);
+		return () => {
+			this.#composerShapeSubscribers.delete(attach);
+			for (const extension of attached) extension.composerShapeListeners?.delete(listener);
+		};
 	}
 
 	/**
@@ -1715,7 +1750,7 @@ export class ExtensionRunner {
 				: base;
 		for (const handler of handlers) {
 			try {
-				await this.runScoped(() => handler(event, ctx));
+				await this.#runDispatched(base, () => handler(event, ctx));
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				logger.warn("link_activate handler failed", { extensionPath: owner.path, url, error: message });
@@ -1784,6 +1819,56 @@ export class ExtensionRunner {
 		if (!owner) return withActiveSettings(this.settings, fn);
 		if (owner.isRetired) return undefined;
 		return owner.runOwned(() => withActiveSettings(this.settings, fn));
+	}
+
+	/**
+	 * Runs one handler of a dispatch made with `ctx` ({@link createContext}). A dispatch that began
+	 * while its session was live runs to its end, as that session's work: its session ending while
+	 * an earlier handler awaited does not skip the handlers after it — a load-time handler serves
+	 * every session, this one's last dispatch included, and its result reaches the host — while a
+	 * callback that session registered refuses on its own (`ownCallback`). A dispatch that began
+	 * after its session had gone runs nothing, as {@link runScoped} refuses it.
+	 *
+	 * The dispatch is one piece of its session's work: held from its first handler until a turn of
+	 * the event loop after its last, so the session's disposal, which waits for work under way, does
+	 * not finish in the gap between two handlers and leave the next to run after it. A dispatch loop
+	 * moves from one handler to the next within that turn.
+	 */
+	#runDispatched<T>(ctx: ExtensionContext, fn: () => T): T | undefined {
+		// A handler's context may derive from the dispatch's (`Object.create`, a lent `ui`).
+		let dispatch: DispatchRecord | undefined;
+		for (let at: object | null = ctx; at !== null && dispatch === undefined; at = Object.getPrototypeOf(at)) {
+			dispatch = this.#dispatchSessions.get(at);
+		}
+		const finish = dispatch?.session.finishOwned;
+		if (!this.#scopeOwner || !dispatch || !finish) return this.runScoped(fn);
+		if (!dispatch.live) return undefined;
+		const record = dispatch;
+		if (record.running === 0 && record.hold === undefined) {
+			const hold = Promise.withResolvers<void>();
+			record.hold = hold;
+			record.session.trackCallback(hold.promise);
+		}
+		record.running++;
+		const settled = (): void => {
+			record.running--;
+			if (record.running > 0) return;
+			setImmediate(() => {
+				if (record.running > 0 || record.hold === undefined) return;
+				const hold = record.hold;
+				record.hold = undefined;
+				hold.resolve();
+			});
+		};
+		let result: T;
+		try {
+			result = Reflect.apply(finish, record.session, [() => withActiveSettings(this.settings, fn)]) as T;
+		} catch (error) {
+			settled();
+			throw error;
+		}
+		Promise.resolve(result).then(settled, settled);
+		return result;
 	}
 
 	/**
@@ -1911,7 +1996,7 @@ export class ExtensionRunner {
 			}
 			return handed;
 		};
-		return {
+		const context: ExtensionContext = {
 			// The host's services, each as `context-surfaces.ts` hands it: named members calling the
 			// host's object, copies in and out. The host keeps acting on its own objects — the
 			// approval prompt, the registry's rows and credentials, the history — so an extension
@@ -2044,6 +2129,8 @@ export class ExtensionRunner {
 							})
 					: undefined,
 		};
+		this.#dispatchSessions.set(context, { session, live: !session.isRetired, running: 0, hold: undefined });
+		return context;
 	}
 
 	/**
@@ -2236,7 +2323,7 @@ export class ExtensionRunner {
 		let handlerResult: R | typeof EXTENSION_HANDLER_TIMEOUT | typeof EXTENSION_HANDLER_ABORTED | undefined;
 		let handlerFailure: { error: unknown } | undefined;
 		try {
-			handlerResult = await this.runScoped(() =>
+			handlerResult = await this.#runDispatched(ctx, () =>
 				raceHandlerWithTimeout(
 					async (handlerSignal, budget) => {
 						registrationScope.signal = handlerSignal;

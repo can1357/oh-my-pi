@@ -196,7 +196,24 @@ export function providerCallGate(owner: ExtensionCallbackOwner): ProviderCallGat
 	};
 	gatesByOwner.set(owner, gate);
 	registrantOfGate.set(gate, owner.registrant ?? owner);
+	// A runtime with sessions of its own (`forSession`) serves each in turn: its gate is retired
+	// only between them. Any other owner's retirement is for good.
+	if (owner.registrant === undefined && typeof owner.forSession === "function") gatesServingEachSession.add(gate);
 	return gate;
+}
+
+/** The gates of a runtime that serves one session after another, rather than one lifetime. */
+const gatesServingEachSession = new WeakSet<ProviderCallGate>();
+
+/**
+ * Whether what `gate` registered is over for good. A gate of one session (`forSession`) retires
+ * once, when the session ends, and never comes back; so does an owner with one lifetime. A gate of
+ * a runtime itself — what an extension registered at load — serves each session in turn and is
+ * retired only between them: what it registered stays, refusing calls until the next session
+ * claims the runtime.
+ */
+export function registrationEnded(gate: ProviderCallGate | undefined): boolean {
+	return gate !== undefined && gate.retired && !gatesServingEachSession.has(gate);
 }
 
 /** Whether two gates are one registrant's: the same runtime, whichever of its sessions each

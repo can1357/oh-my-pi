@@ -13,6 +13,7 @@ import { types } from "node:util";
 import { OmpErrors, type as schemaOf } from "@oh-my-pi/omptype";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
+import { AdmittedSignal } from "@oh-my-pi/pi-ai/auth/provider-gate";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
@@ -27,6 +28,7 @@ import {
 	handUIContext,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/context-surfaces";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { providerCallGate } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/callback-ownership";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type {
 	ExtensionActions,
@@ -301,6 +303,75 @@ describe("what a ui factory is handed", () => {
 });
 
 describe("data the host hands an extension", () => {
+	test("an abort reason that cannot be copied still aborts the session's signal, with a reason of its own", () => {
+		const owner = new ExtensionRuntime();
+		cleanups.push(owner.beginSession());
+		const gate = providerCallGate(owner.forSession());
+		const caller = new AbortController();
+		const signal = new AdmittedSignal(gate, caller.signal).admit();
+		const uncaught: unknown[] = [];
+		// An exception thrown out of an abort listener reaches the global error handler.
+		const onError = (event: Event): void => {
+			uncaught.push(event instanceof ErrorEvent ? event.error : event);
+			event.preventDefault();
+		};
+		addEventListener("error", onError);
+		cleanups.push(() => removeEventListener("error", onError));
+		caller.abort({
+			get detail(): string {
+				throw new Error("host reason getter");
+			},
+		});
+
+		expect({
+			aborted: signal?.aborted,
+			abortError: signal?.reason instanceof DOMException && signal.reason.name === "AbortError",
+			uncaught,
+		}).toEqual({ aborted: true, abortError: true, uncaught: [] });
+	});
+
+	test("a host model getter that throws fails the read with a copy of its exception, not the host's", () => {
+		const owner = new ExtensionRuntime();
+		cleanups.push(owner.beginSession());
+		// Only the model copy is exercised; nothing here reaches the registry.
+		const runner = new ExtensionRunner([], owner, process.cwd(), SessionManager.inMemory(), {} as ModelRegistry);
+		let hostState = "initial";
+		const failure = Object.assign(new Error("host compat getter failed"), {
+			writer: () => {
+				hostState = "changed by the extension";
+			},
+		});
+		const model = {
+			id: "m",
+			provider: "p",
+			get compat(): never {
+				throw failure;
+			},
+		} as unknown as Model;
+		let caught: unknown;
+		try {
+			void runner.createContext(model).model;
+		} catch (error) {
+			caught = error;
+		}
+		const writer: unknown = caught instanceof Error ? Reflect.get(caught, "writer") : undefined;
+		if (typeof writer === "function") writer();
+
+		expect({
+			failed: caught instanceof Error,
+			same: caught === failure,
+			message: caught instanceof Error ? caught.message : undefined,
+			writer: typeof writer,
+			hostState,
+		}).toEqual({
+			failed: true,
+			same: false,
+			message: "host compat getter failed",
+			writer: "undefined",
+			hostState: "initial",
+		});
+	});
+
 	test("a model held in classes is copied by every field its type declares, nested ones included", async () => {
 		const h = await interactiveSession();
 		const selected = h.session.model;
@@ -1206,6 +1277,73 @@ describe("what a session's ctx.ui writes, once the session has gone", () => {
 			gone: Array(6).fill("refused"),
 			goneWrites: 0,
 		});
+	});
+
+	test("the process-wide theme and the transcript's tool expansion are not changed by a session that has gone", async () => {
+		const owner = new ExtensionRuntime();
+		const release = owner.beginSession();
+		cleanups.push(release);
+		// Only the UI surface is exercised; nothing here reaches the registry.
+		const runner = new ExtensionRunner([], owner, process.cwd(), SessionManager.inMemory(), {} as ModelRegistry);
+		const writes: string[] = [];
+		const host: ExtensionUIContext = {
+			...runner.getUIContext(),
+			setTheme: async theme => {
+				writes.push(`theme:${String(theme)}`);
+				return { success: true };
+			},
+			setToolsExpanded: expanded => void writes.push(`expanded:${expanded}`),
+		};
+		const ui = handUIContext(host, owner, runner.rendererScope);
+		const outcome = async (write: () => unknown): Promise<string> => {
+			try {
+				await write();
+				return "written";
+			} catch {
+				return "refused";
+			}
+		};
+		const live = [await outcome(() => ui.setTheme("live-theme")), await outcome(() => ui.setToolsExpanded(true))];
+		const liveWrites = writes.length;
+		release();
+		const gone = [
+			await outcome(() => ui.setTheme("theme-set-by-a-disposed-session")),
+			await outcome(() => ui.setToolsExpanded(false)),
+		];
+
+		expect({ live, liveWrites, gone, goneWrites: writes.slice(liveWrites) }).toEqual({
+			live: ["written", "written"],
+			liveWrites: 2,
+			gone: ["refused", "refused"],
+			goneWrites: [],
+		});
+	});
+
+	test("reading the editor back hands the extension its own factory, never the host's object", () => {
+		const owner = new ExtensionRuntime();
+		cleanups.push(owner.beginSession());
+		// Only the UI surface is exercised; nothing here reaches the registry.
+		const runner = new ExtensionRunner([], owner, process.cwd(), SessionManager.inMemory(), {} as ModelRegistry);
+		let stored: ReturnType<ExtensionUIContext["getEditorComponent"]>;
+		const host: ExtensionUIContext = {
+			...runner.getUIContext(),
+			setEditorComponent: factory => {
+				stored = factory;
+			},
+			getEditorComponent: () => stored,
+		};
+		const ui = handUIContext(host, owner, runner.rendererScope);
+		const own = () => new CustomEditor(getEditorTheme());
+		ui.setEditorComponent(own);
+		const readBack = ui.getEditorComponent();
+		const hostsOwn = () => new CustomEditor(getEditorTheme());
+		stored = hostsOwn;
+
+		expect({
+			own: readBack === own,
+			hostObject: (readBack as unknown) === (stored as unknown),
+			hostsAfterReplace: ui.getEditorComponent(),
+		}).toEqual({ own: true, hostObject: false, hostsAfterReplace: undefined });
 	});
 
 	test("an editor factory is handed a copy of the editor theme, so its writes stay its own", async () => {

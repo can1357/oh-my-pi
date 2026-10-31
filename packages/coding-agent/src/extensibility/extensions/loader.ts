@@ -18,7 +18,7 @@ import type {
 	TextContent,
 	TSchema,
 } from "@oh-my-pi/pi-ai";
-import { isBuiltinComposerStyle, type KeyId } from "@oh-my-pi/pi-tui";
+import { type ComposerStyle, getComposerStyle, isBuiltinComposerStyle, type KeyId } from "@oh-my-pi/pi-tui";
 import { hasFsCode, isEacces, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { type ExtensionModule, extensionModuleCapability } from "../../capability/extension-module";
 import { type Hook, hookCapability } from "../../capability/hook";
@@ -444,6 +444,7 @@ export class ExtensionRuntime implements IExtensionRuntime {
 				},
 				ownCallback: fn => runtime.#own(fn, lease),
 				runOwned: (call, kind) => runtime.#runOwned(call, kind, lease),
+				finishOwned: call => runtime.#runOwned(call, "value", lease, true),
 				trackCallback: result => runtime.trackCallback(result),
 				hasPendingCallbacks: () => runtime.hasPendingCallbacks(),
 				waitForPendingCallbacks: () => runtime.waitForPendingCallbacks(),
@@ -546,8 +547,17 @@ export class ExtensionRuntime implements IExtensionRuntime {
 		return this.#runOwned(call, kind, this.#leaseNow());
 	}
 
-	#runOwned<R>(call: () => R, kind: AdmittedWorkKind = "value", lease: ExtensionCallbackLease): R {
-		if (lease.isRetired) throw new Error("Extension session retired; its callbacks are no longer callable");
+	/** Runs `call` as `runOwned` does, but as the finish of work that session already began: a
+	 *  dispatch under way when its session ended runs to its end as that session's work, rather
+	 *  than skipping what is left of it. Never starts anything for a session that has gone. */
+	finishOwned<R>(call: () => R): R {
+		return this.#runOwned(call, "value", this.#leaseNow(), true);
+	}
+
+	#runOwned<R>(call: () => R, kind: AdmittedWorkKind = "value", lease: ExtensionCallbackLease, finishing = false): R {
+		if (lease.isRetired && !finishing) {
+			throw new Error("Extension session retired; its callbacks are no longer callable");
+		}
 		return this.#enter(lease, () => {
 			const produced = call();
 			if (kind !== "stream") return this.trackCallback(produced);
@@ -807,8 +817,14 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	}
 
 	/** Sets `key` to `value` in `map`, and, when `session` ends, puts back what it replaced — unless
-	 *  a later registration has replaced it in turn. */
-	#setFor<K, V>(session: ExtensionCallbackOwner | undefined, map: Map<K, V>, key: K, value: V): void {
+	 *  a later registration has replaced it in turn — then calls `withdrawn`. */
+	#setFor<K, V>(
+		session: ExtensionCallbackOwner | undefined,
+		map: Map<K, V>,
+		key: K,
+		value: V,
+		withdrawn?: () => void,
+	): void {
 		const replaced = map.has(key);
 		const previous = map.get(key);
 		map.set(key, value);
@@ -816,6 +832,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			if (map.get(key) !== value) return;
 			if (replaced) map.set(key, previous as V);
 			else map.delete(key);
+			withdrawn?.();
 		});
 	}
 
@@ -899,10 +916,22 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		options: { description?: string; type: "boolean" | "string"; default?: boolean | string },
 	): void {
 		const session = this.#registeringSession();
-		this.#setFor(session, this.extension.flags, name, { name, extensionPath: this.extension.path, ...options });
-		if (options.default !== undefined) {
-			this.#setFor(session, this.runtime.flagValues, name, options.default);
-		}
+		const values = this.runtime.flagValues;
+		const hadValue = values.has(name);
+		const previousValue = values.get(name);
+		// The flag's value goes with its declaration, whatever it has been set to since: a value
+		// the user chose for a session's flag is that session's. What it replaced comes back.
+		this.#setFor(
+			session,
+			this.extension.flags,
+			name,
+			{ name, extensionPath: this.extension.path, ...options },
+			() => {
+				if (hadValue) values.set(name, previousValue as boolean | string);
+				else values.delete(name);
+			},
+		);
+		if (options.default !== undefined) values.set(name, options.default);
 	}
 
 	registerMessageRenderer<T>(customType: string, renderer: MessageRenderer<T>): void {
@@ -957,7 +986,20 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		if (isBuiltinComposerStyle(id)) {
 			throw new Error(`Cannot replace built-in composer shape "${id}"`);
 		}
-		this.#setFor(this.#registeringSession(), this.extension.composerShapes, id, definition);
+		const session = this.#registeringSession();
+		// A host that installed this extension's shapes reinstalls them: a shape a session adds is
+		// drawable, and one its end withdraws leaves the host's registries.
+		const changed = (): void => {
+			for (const listener of this.extension.composerShapeListeners ?? []) listener();
+		};
+		this.#setFor(
+			session,
+			this.extension.composerShapes,
+			id,
+			session === undefined ? definition : sessionComposerShape(definition, session),
+			changed,
+		);
+		changed();
 	}
 
 	getFlag(name: string): boolean | string | undefined {
@@ -1032,13 +1074,87 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	}
 
 	registerProvider(name: string, config: ProviderConfig): void {
+		// Refused, by throwing, from a session that has ended — the same check every other
+		// registration makes — before anything reaches the registry.
+		this.#registeringSession();
 		this.extension.registersProviders = true;
 		this.runtime.registerProvider(name, config, this.extension.path);
 	}
 
+	/** Withdraws every registration of `name` this extension made, at load and in any session — but
+	 *  not from a session that has ended: its continuation must not reach a later session's
+	 *  registration. The session-end withdrawal is the host's (`whenSessionEnds`), not this call. */
 	unregisterProvider(name: string): void {
+		this.#registeringSession();
 		this.runtime.unregisterProvider(name, this.extension.path);
 	}
+}
+
+/**
+ * A composer shape one session registered, as the host keeps it. Withdrawing it at the session's
+ * end unlists it, but a host that installed it still holds its style (`installExtensionComposerShape`)
+ * and draws through it: so the style is the session's. Its data is read once, here, inside the
+ * registering call; its drawing methods run as that session's work. Once the session has ended
+ * the style answers as the host's `box` style — same id, nothing of the extension's runs — so the
+ * prompt stays drawable until the host resyncs its shapes.
+ */
+function sessionComposerShape(
+	definition: ComposerShapeDefinition,
+	session: ExtensionCallbackOwner,
+): ComposerShapeDefinition {
+	const style = definition.style;
+	const fallback = getComposerStyle("box");
+	const ended = (): boolean => session.isRetired;
+	const data = {
+		filledSurface: style.filledSurface,
+		sideBorders: style.sideBorders,
+		verticalChrome: style.verticalChrome,
+		statusAttachment: style.statusAttachment,
+		bottomBar: style.bottomBar,
+		bottomBarGap: style.bottomBarGap,
+		defaultPromptGutter: style.defaultPromptGutter,
+	};
+	const method = <K extends "defaultPaddingX" | "sideChromeWidth" | "renderTop" | "renderRow" | "renderBottom">(
+		key: K,
+	): ComposerStyle[K] => {
+		const own = style[key] as (...args: unknown[]) => unknown;
+		const box = fallback[key] as (...args: unknown[]) => unknown;
+		return ((...args: unknown[]): unknown =>
+			ended()
+				? Reflect.apply(box, fallback, args)
+				: session.runOwned(() => Reflect.apply(own, style, args))) as ComposerStyle[K];
+	};
+	const gated: ComposerStyle = {
+		id: style.id,
+		get filledSurface() {
+			// `box` paints no surface of its own.
+			return ended() ? false : data.filledSurface;
+		},
+		get sideBorders() {
+			return ended() ? fallback.sideBorders : data.sideBorders;
+		},
+		get verticalChrome() {
+			return ended() ? fallback.verticalChrome : data.verticalChrome;
+		},
+		get statusAttachment() {
+			return ended() ? fallback.statusAttachment : data.statusAttachment;
+		},
+		get bottomBar() {
+			return ended() ? fallback.bottomBar : data.bottomBar;
+		},
+		get bottomBarGap() {
+			return ended() ? fallback.bottomBarGap : data.bottomBarGap;
+		},
+		get defaultPromptGutter() {
+			return ended() ? fallback.defaultPromptGutter : data.defaultPromptGutter;
+		},
+		defaultPaddingX: method("defaultPaddingX"),
+		sideChromeWidth: method("sideChromeWidth"),
+		renderTop: method("renderTop"),
+		renderRow: method("renderRow"),
+		renderBottom: method("renderBottom"),
+	};
+	return { label: definition.label, description: definition.description, style: gated };
 }
 
 /**
