@@ -14,18 +14,25 @@ export function extractProviderRetryHint(
 
 const RETRY_AFTER_HINT = "retry-after-ms=";
 
-export function formatErrorMessageWithRetryAfter(error: unknown, headers?: HeadersLike): string {
-	const message = error instanceof Error ? error.message : JSON.stringify(error);
+export function errorMessageText(error: unknown): string {
+	return error instanceof Error ? error.message : JSON.stringify(error);
+}
+
+export function appendRetryAfterHint(message: string, headers: HeadersLike): string {
 	if (message.includes(RETRY_AFTER_HINT)) {
 		return message;
 	}
 
-	const retryAfterMs = getRetryAfterMsFromHeaders(headers ?? getHeadersFromError(error));
+	const retryAfterMs = getRetryAfterMsFromHeaders(headers);
 	if (retryAfterMs === undefined) {
 		return message;
 	}
 
 	return `${message} ${RETRY_AFTER_HINT}${retryAfterMs}`;
+}
+
+export function formatErrorMessageWithRetryAfter(error: unknown, headers?: HeadersLike): string {
+	return appendRetryAfterHint(errorMessageText(error), headers ?? getHeadersFromError(error));
 }
 
 export function getRetryAfterMsFromHeaders(headers: HeadersLike): number | undefined {

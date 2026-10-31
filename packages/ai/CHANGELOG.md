@@ -20,6 +20,7 @@
 - Fixed Cursor models served through `omp auth-gateway` being told their file and shell tools were unavailable while the client ran the calls anyway, in Cursor's own argument shape (edits failed validation); each call now reaches the client as one of its own tools and the turn stops with `toolUse` until the result comes back ([#17382](https://github.com/can1357/oh-my-pi/pull/17382) by [@eggpeat](https://github.com/eggpeat))
 - Fixed Cursor models served through `omp auth-gateway` being told each tool call was handed off, which left Composer issuing calls blind and answering their results with empty stops; the gateway now keeps the Cursor run open while the client runs a step's calls and answers them in-band with the client's results on its next request (up to 30 minutes; otherwise the turn is rebuilt from history as before) ([#17382](https://github.com/can1357/oh-my-pi/pull/17382) by [@eggpeat](https://github.com/eggpeat))
 - Fixed Anthropic-compatible endpoints behind a relay opening a new connection for every turn: the response body is now drained for up to 2.5 s after `message_stop` instead of being cancelled, so the kept-alive connection is reused ([#17432](https://github.com/can1357/oh-my-pi/pull/17432) by [@flosrn](https://github.com/flosrn))
+- Fixed provider HTTP errors printing the response body twice when the thrown error already carried it, including responses with a retry header ([#17503](https://github.com/can1357/oh-my-pi/pull/17503) by [@metaphoric-dev](https://github.com/metaphoric-dev))
 
 ## [18.14.0] - 2026-10-29
 
