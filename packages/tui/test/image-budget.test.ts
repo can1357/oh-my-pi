@@ -765,6 +765,125 @@ describe("Image budget integration", () => {
 		expect(text).not.toContain("[Image: newest.png");
 		expect(viewport.filter(row => row.includes("\x1b_G")).length).toBe(2);
 	});
+
+	it("keeps the newest images live and never splits an image block in a capped exit flush, in both walk orders", () => {
+		// The cap walks blocks newest-first to find where the batch starts, and the
+		// retirement peek measures newest-first too (#16660); the batch then renders,
+		// and on the retry re-renders, in display order. Every pass the flush writes
+		// must keep the newest images live, cut only on block boundaries, and stay
+		// within the cap. Image heights run both ways, so the cap lands inside tall
+		// and short image blocks, with and without a live frame before the stop.
+		const count = 5;
+		const cap = 2;
+		const width = 80;
+		for (const heights of [
+			[1, 2, 3, 4, 5],
+			[5, 4, 3, 2, 1],
+		]) {
+			const blocks = ["P", ...heights.flatMap((_, k) => [`L${k}`, `I${k}`])];
+			for (const liveFrameFirst of [true, false]) {
+				for (let maxRows = 7; maxRows <= 34; maxRows++) {
+					const label = `heights ${heights.join(",")}, live frame ${liveFrameFirst}, maxRows ${maxRows}`;
+					const budget = new ImageBudget(cap, () => {});
+					const transcript = new TranscriptContainer();
+					transcript.addChild(new Text("prompt", 0, 0));
+					for (const [k, height] of heights.entries()) {
+						transcript.addChild(new Text(`label-${k}`, 0, 0));
+						transcript.addChild(
+							new Image(
+								BASE64_ONE_PIXEL_PNG,
+								"image/png",
+								{ fallbackColor: t => t },
+								{
+									maxWidthCells: 4,
+									maxHeightCells: height,
+									budget,
+									imageKey: `image-${k}`,
+									filename: `image-${k}.png`,
+								},
+								{ widthPx: 40, heightPx: 10 * height },
+							),
+						);
+					}
+					const ids = heights.map((_, k) => budget.acquireId(`image-${k}`));
+					if (liveFrameFirst) {
+						let passes = 0;
+						do {
+							passes++;
+							budget.beginPass();
+							const frame = { now: passes, tick: passes };
+							transcript.beginFrame(frame);
+							expect(transcript.peekFinalizedBatch(width, 50)).toBeUndefined();
+							transcript.renderViewport(width, 50, frame);
+						} while (budget.endPass() && passes < 5);
+					}
+
+					// The stop's flush loop: the first pass composes the batch, a retry
+					// re-renders the offer.
+					const written: (readonly string[])[] = [];
+					let batchId = 0;
+					do {
+						budget.beginPass();
+						const batch =
+							written.length === 0
+								? transcript.peekFlushBatch(width, maxRows)
+								: transcript.rerenderOfferedBatch(width);
+						expect(batch, label).toBeDefined();
+						batchId = batch!.id;
+						written.push(batch!.rows);
+					} while ((budget.endPass() || (written.length === 1 && budget.observedCount > 0)) && written.length < 5);
+					expect(written.length, label).toBeGreaterThan(1);
+
+					for (const [pass, rows] of written.entries()) {
+						const where = `${label}, pass ${pass + 1}`;
+						expect(rows.length, where).toBeLessThanOrEqual(maxRows);
+						const seen: string[] = [];
+						const live = new Map<number, boolean>();
+						for (const [index, row] of rows.entries()) {
+							// A direct placement moves up over the rows its block reserved;
+							// all of them must be in the batch, above it.
+							const up = /\x1b\[(\d+)A/.exec(row);
+							if (up !== null) {
+								const reserved = Number(up[1]);
+								expect(index, where).toBeGreaterThanOrEqual(reserved);
+								expect(rows.slice(index - reserved, index), where).toEqual(Array(reserved).fill("\x1b[0m"));
+							}
+							// Text rows are padded to the width.
+							const text = /^label-(\d+)$/.exec(row.trimEnd());
+							const placed = /\x1b_Ga=p[^\x1b]*\bi=(\d+)/.exec(row);
+							const fallback = /\[Image: image-(\d+)\.png/.exec(row);
+							if (row.trimEnd() === "prompt") seen.push("P");
+							else if (text !== null) seen.push(`L${text[1]}`);
+							else if (placed !== null) {
+								const k = ids.indexOf(Number(placed[1]));
+								expect(k, where).toBeGreaterThanOrEqual(0);
+								seen.push(`I${k}`);
+								live.set(k, true);
+							} else if (fallback !== null) {
+								seen.push(`I${fallback[1]}`);
+								live.set(Number(fallback[1]), false);
+							}
+						}
+						// Whole blocks, newest last: the batch is a suffix of the transcript.
+						expect(seen.length, where).toBeGreaterThan(0);
+						expect(seen, where).toEqual(blocks.slice(blocks.length - seen.length));
+						if (pass < written.length - 1) continue;
+						// The written frame keeps the newest `cap` images live and the older ones as text.
+						const images = [...live.keys()];
+						expect(
+							images.map(k => live.get(k)),
+							where,
+						).toEqual(images.map(k => k >= count - cap));
+					}
+					transcript.acknowledgeFinalizedBatch(batchId);
+					expect(
+						transcript.blockStates().every(state => state === "committed"),
+						label,
+					).toBe(true);
+				}
+			}
+		}
+	});
 });
 
 describe("Image budget + Unicode placeholders", () => {
