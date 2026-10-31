@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `advisor.minSeverity` to drop notes below `nit`, `concern`, or `blocker` before they reach the agent; the default `nit` keeps all severities.
+
 ## [18.14.1] - 2026-10-31
 
 ### Added

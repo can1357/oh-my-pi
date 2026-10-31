@@ -238,10 +238,13 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 	 *   note is emitted (live or deferred). Defaults to a stock
 	 *   {@link AdvisorEmissionGuard} (default budget
 	 *   {@link ADVISOR_DEFAULT_BUDGET_PER_UPDATE}).
+	 * @param minSeverity Read the current delivery floor before admission, so
+	 *   dropped notes consume neither the budget nor dedupe history.
 	 */
 	constructor(
 		private readonly onAdvice: (note: string, severity: AdviseDetails["severity"] | undefined, turn?: number) => void,
 		guard?: AdvisorEmissionGuard,
+		private readonly minSeverity: () => AdvisorSeverity = () => "nit",
 	) {
 		this.#guard = guard ?? new AdvisorEmissionGuard();
 	}
@@ -291,6 +294,9 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 		_onUpdate?: AgentToolUpdateCallback<AdviseDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<AdviseDetails>> {
+		if (!meetsAdvisorSeverity(args.severity, this.minSeverity())) {
+			return this.#result("Dropped: below the minimum delivery severity.", args);
+		}
 		const rank = advisorSeverityRank(args.severity);
 		const key = advisorNoteDedupeKey(args.note);
 		if (this.#inProgressUpdate && args.severity !== "blocker") {

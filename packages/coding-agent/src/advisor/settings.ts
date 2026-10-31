@@ -62,6 +62,28 @@ export const cfgAdvisorImmuneTurns = register({
 	},
 });
 
+/** Minimum severity admitted for delivery to the watched agent. */
+export const cfgAdvisorMinSeverity = register({
+	id: "advisor.minSeverity",
+	protocolDefault: ["rpc", "acp"],
+	type: "enum",
+	values: ADVISOR_SEVERITIES,
+	default: "nit",
+	ui: {
+		tab: "model",
+		group: "Advisor",
+		label: "Advisor Minimum Severity",
+		description:
+			"Drop advisor notes below this severity before they reach the agent. Dropped notes never wake a finished agent, regardless of Advisor Continue Severity.",
+		options: [
+			{ value: "nit", label: "Nit", description: "Deliver every severity. Default." },
+			{ value: "concern", label: "Concern", description: "Deliver concerns and blockers." },
+			{ value: "blocker", label: "Blocker", description: "Deliver only blockers." },
+		],
+		condition: "advisorEnabled",
+	},
+});
+
 export const cfgAdvisorContinueSeverity = register({
 	id: "advisor.continueSeverity",
 	protocolDefault: ["rpc", "acp"],
