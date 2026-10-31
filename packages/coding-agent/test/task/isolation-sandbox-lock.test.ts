@@ -121,6 +121,36 @@ describe("the sandbox lock", () => {
 		expect(torndown).toBe(0);
 	});
 
+	it("keeps a held lock held when nothing but the hold refers to it", async () => {
+		// A native lock goes when its JavaScript handle is collected, and a
+		// suspended async frame was not enough to keep one. A teardown whose
+		// capture outran its deadline sits for ever in `await capturing`: about
+		// a second after the deadline its lock was gone and the workspace it
+		// was holding could be taken, which is the opposite of what the
+		// deadline promises. Measured at 123 s on this branch and on
+		// `03f2ed2d8982` alike, so it predates the capture bound.
+		const { baseDir } = await makeSandbox();
+		const handle = await (async () => {
+			const lock = await acquireSandboxLockWithNotice(baseDir, "probe");
+			return new WeakRef(lock);
+		})();
+
+		// Generational collection: a young-generation pass keeps it, and only
+		// enough allocation forces the older one that used to take the lock.
+		for (let round = 0; round < 40; round += 1) {
+			const garbage: unknown[] = [];
+			for (let item = 0; item < 20_000; item += 1) garbage.push({ item, pad: new Uint8Array(256) });
+			expect(garbage.length).toBe(20_000);
+			await scheduler.wait(1);
+			Bun.gc(round % 5 === 0);
+		}
+
+		expect(handle.deref()?.isHeld()).toBe(true);
+		handle.deref()?.release();
+		// Released means collectable again, so holding them is not a leak.
+		expect(await withSandboxLock(baseDir, "take after release", async () => "granted")).toBe("granted");
+	}, 30_000);
+
 	it("records a writer only if the claim is still there under the lock", async () => {
 		// A fact established before a lock is not a fact after it: the sandbox
 		// found before the wait was retired while this call queued, and the

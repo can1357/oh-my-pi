@@ -575,6 +575,14 @@ export async function withSandboxLock<T>(baseDir: string, purpose: string, body:
 const SANDBOX_LOCK_NOTICE_MS = 1_000;
 const SANDBOX_LOCK_REMINDER_MS = 30_000;
 
+/**
+ * Every sandbox lock this process currently holds.
+ *
+ * Its only job is reachability: a native lock is released when its JavaScript
+ * handle is collected, and a suspended async frame did not keep one alive.
+ */
+const heldByThisProcess = new Set<SandboxLockHandle>();
+
 /** Set once: stderr keeps a no-op error listener so a late stream failure cannot kill the run. */
 let stderrGuarded = false;
 
@@ -660,17 +668,26 @@ export async function acquireSandboxLockWithNotice(baseDir: string, purpose: str
 		// The handle carries its own state, so a hold recorded against it stops
 		// being a hold the moment it is released.
 		let released = false;
-		return {
+		const handle: SandboxLockHandle = {
 			baseDir,
 			release: () => {
 				// Idempotent: a caller that hands this handle to a continuation
 				// and a `finally` that also releases must not unlock twice.
 				if (released) return;
 				released = true;
+				heldByThisProcess.delete(handle);
 				lock.release();
 			},
 			isHeld: () => !released,
 		};
+		// Reachable for as long as it is held. A teardown whose capture outran
+		// its deadline sits for ever in `await capturing`, and its frame was
+		// not enough to keep the native lock alive: the lock was dropped about
+		// a second after the deadline and the workspace this teardown was
+		// holding became free to take, which is the opposite of what the
+		// deadline promises.
+		heldByThisProcess.add(handle);
+		return handle;
 	} catch (error) {
 		throw await describeSandboxLockFailure(baseDir, purpose, error, Date.now() - startedAt);
 	} finally {
