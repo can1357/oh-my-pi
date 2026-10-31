@@ -590,11 +590,61 @@ function parseEmbedding(raw: unknown): number[] | null {
 	}
 }
 
-function vectorSimilarities(
+interface CachedEmbedding {
+	raw: string;
+	vec: number[];
+	norm: number;
+}
+
+interface EmbeddingCacheState {
+	dataVersion: number;
+	entries: Map<string, CachedEmbedding>;
+}
+
+const embeddingCache = new WeakMap<object, EmbeddingCacheState>();
+
+function getDataVersion(beam: BeamMemoryState): number {
+	try {
+		const row = beam.db.query("PRAGMA data_version").get() as { data_version?: number } | null;
+		return typeof row?.data_version === "number" ? row.data_version : 0;
+	} catch {
+		return 0;
+	}
+}
+
+function vectorNorm(v: readonly number[]): number {
+	let sum = 0;
+	for (let i = 0; i < v.length; i += 1) {
+		const val = v[i] ?? 0;
+		sum += val * val;
+	}
+	return Math.sqrt(sum);
+}
+
+function cosineSimilarityWithNorms(a: readonly number[], normA: number, b: readonly number[], normB: number): number {
+	if (normA === 0 || normB === 0) return 0;
+	const length = Math.min(a.length, b.length);
+	let dot = 0;
+	for (let i = 0; i < length; i += 1) {
+		dot += (a[i] ?? 0) * (b[i] ?? 0);
+	}
+	return dot / (normA * normB);
+}
+
+export function getEmbeddingCacheStateForTests(beam: BeamMemoryState): { dataVersion: number; size: number } | null {
+	const cache = embeddingCache.get(beam.db);
+	if (!cache) return null;
+	return { dataVersion: cache.dataVersion, size: cache.entries.size };
+}
+
+export function vectorSimilarities(
 	beam: BeamMemoryState,
 	memoryIds: readonly string[],
 	queryEmbedding: readonly number[] | null | undefined,
+	tier?: string,
 ): Map<string, number> {
+	void tier;
+	void cosineSimilarity;
 	const out = new Map<string, number>();
 	if (
 		queryEmbedding == null ||
@@ -604,6 +654,20 @@ function vectorSimilarities(
 	) {
 		return out;
 	}
+
+	const queryNorm = vectorNorm(queryEmbedding);
+	if (queryNorm === 0) return out;
+
+	const currentDataVersion = getDataVersion(beam);
+	let cache = embeddingCache.get(beam.db);
+	if (!cache || cache.dataVersion !== currentDataVersion) {
+		cache = {
+			dataVersion: currentDataVersion,
+			entries: new Map(),
+		};
+		embeddingCache.set(beam.db, cache);
+	}
+
 	for (let offset = 0; offset < memoryIds.length; offset += 500) {
 		const chunk = memoryIds.slice(offset, offset + 500);
 		const rows = queryAll(
@@ -612,9 +676,21 @@ function vectorSimilarities(
 			chunk,
 		);
 		for (const row of rows) {
-			const vector = parseEmbedding(row.embedding_json);
 			const id = asString(row.memory_id);
-			if (vector !== null && id.length > 0) out.set(id, Math.max(0, cosineSimilarity(queryEmbedding, vector)));
+			if (id.length === 0) continue;
+			const rawJson = typeof row.embedding_json === "string" ? row.embedding_json : "";
+			let cached = cache.entries.get(id);
+			if (!cached || cached.raw !== rawJson) {
+				const vec = parseEmbedding(rawJson);
+				if (vec === null) continue;
+				const norm = vectorNorm(vec);
+				cached = { raw: rawJson, vec, norm };
+				cache.entries.set(id, cached);
+			}
+			if (cached.norm > 0) {
+				const sim = cosineSimilarityWithNorms(queryEmbedding, queryNorm, cached.vec, cached.norm);
+				out.set(id, Math.max(0, sim));
+			}
 		}
 	}
 	return out;
@@ -898,8 +974,8 @@ function collectMemoryCandidates(
 	if (queryEmbedding !== null && queryEmbedding !== undefined) {
 		const allWmIds = options.includeWorking === false ? [] : allVisibleIds(beam, "working_memory", options);
 		const allEmIds = allVisibleIds(beam, "episodic_memory", options);
-		wmVec = vectorSimilarities(beam, allWmIds, queryEmbedding);
-		emVec = vectorSimilarities(beam, allEmIds, queryEmbedding);
+		wmVec = vectorSimilarities(beam, allWmIds, queryEmbedding, "working");
+		emVec = vectorSimilarities(beam, allEmIds, queryEmbedding, "episodic");
 		wmIds = [
 			...new Set([
 				...wmIds,
