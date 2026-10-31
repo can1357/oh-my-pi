@@ -380,6 +380,23 @@ export function $envpos(name: string, defaultValue: number): number {
 	return parsed;
 }
 
+/**
+ * Parses a positive decimal integer from `env[name]`, requiring the whole value
+ * to be digits.
+ *
+ * {@link $envpos} uses `Number.parseInt`, so `1e3` reads as `1` and `12abc` as
+ * `12`. Use this variant where a partially numeric value must keep the default
+ * instead of silently shrinking the setting.
+ *
+ * @param name - Environment variable name to look up.
+ * @param defaultValue - Returned for an unset, empty, non-numeric or non-positive value.
+ * @param env - Environment source; defaults to `$env`.
+ */
+export function $envposExact(name: string, defaultValue: number, env: Record<string, string | undefined> = $env): number {
+	const raw = env[name]?.trim();
+	return raw !== undefined && /^\d+$/u.test(raw) && Number(raw) > 0 ? Number(raw) : defaultValue;
+}
+
 let terminalHeadless = isBunTestRuntime();
 
 /**
