@@ -1754,7 +1754,9 @@ async function readRegularText(at: string): Promise<{ text: string } | { unreada
 	try {
 		// The entry itself: a link to a file elsewhere is not a file here.
 		const standing = await fs.lstat(at).catch((error: unknown) => {
-			if (isEnoent(error)) return undefined;
+			// Absent, or a path component that is not a directory: either way
+			// nothing can stand at this name.
+			if (isEnoent(error) || codeOf(error) === "ENOTDIR") return undefined;
 			throw error;
 		});
 		if (!standing?.isFile()) return undefined;
@@ -1770,21 +1772,26 @@ async function readRegularText(at: string): Promise<{ text: string } | { unreada
 	}
 }
 
-/** What `destination` holds for the record named `recordName`, or undefined when it holds nothing. */
+/**
+ * What `destination` holds for the record named `recordName`, or undefined
+ * when it holds nothing. A place that cannot be listed is not an empty one:
+ * its copy of the record is still looked for at the one name a quarantine
+ * gives it, which searching the directory can reach without listing it.
+ */
 async function readQuarantinePlace(
 	destination: string,
 	recordName: string,
 	roots: readonly string[],
 ): Promise<QuarantinePlace | undefined> {
-	let names: string[];
+	const place: QuarantinePlace = { destination, paths: [] };
 	try {
-		names = await fs.readdir(destination);
+		const names = await fs.readdir(destination);
+		if (names.length === 0) return undefined;
+		place.paths = names.map(name => path.join(destination, name));
 	} catch (error) {
 		if (isEnoent(error)) return undefined;
-		return { destination, paths: [], unreadable: errorText(error) };
+		place.unreadable = errorText(error);
 	}
-	if (names.length === 0) return undefined;
-	const place: QuarantinePlace = { destination, paths: names.map(name => path.join(destination, name)) };
 	try {
 		const resolved = await resolvedPath(destination);
 		if (roots.some(root => isWithin(root, resolved.real) || isWithin(resolved.real, root))) {
@@ -1853,8 +1860,13 @@ function settleWithoutLedgerRecord(
 	const copyOf = (place: QuarantinePlace): string => path.join(place.destination, path.basename(record));
 	const held = places
 		.map(place => {
-			if (place.unreadable !== undefined) return `${place.destination} could not be read (${place.unreadable})`;
-			let holds = `${place.destination} holds ${place.paths.join(", ")}`;
+			let holds =
+				place.unreadable !== undefined
+					? `${place.destination} could not be listed (${place.unreadable})`
+					: `${place.destination} holds ${place.paths.join(", ")}`;
+			if (place.unreadable !== undefined && place.copy !== undefined) {
+				holds += `, though ${copyOf(place)} could be read and holds the whole record`;
+			}
 			if (place.insideTree !== undefined) holds += ` and resolves to ${place.insideTree}, inside a session tree`;
 			if (place.unresolved !== undefined) {
 				holds +=

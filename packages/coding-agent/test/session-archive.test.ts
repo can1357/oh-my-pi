@@ -5428,3 +5428,57 @@ test("a quarantine that cannot resolve the directory its record names refuses, a
 	expect(await Bun.file(ground.record).exists()).toBe(true);
 	expect(await fs.lstat(quarantineDestination(record)).catch(() => undefined)).toBeUndefined();
 });
+
+// The review's sequence, nothing removed by hand: a quarantine stopped once
+// its record and directory were in place and before the ledger entry went,
+// an archive run that then drops that entry, and a quarantine place this
+// user cannot list. Not listed is not empty.
+const unlistable = [
+	["searchable but not listable", 0o100],
+	["neither listable nor searchable", 0o000],
+	["neither listable nor searchable, beside a readable place holding the copy", 0o000],
+] as const;
+for (const [shape, mode] of unlistable) {
+	test.skipIf(process.getuid?.() === 0)(
+		`a quarantine retry with no ledger record does not say there is no copy when a place is ${shape}`,
+		async () => {
+			const { ground, record } = await archivedWithKilledStage();
+			const destination = quarantineDestination(record);
+			const copy = path.join(destination, record);
+			await quarantineStopped(ground, record, "before the ledger entry goes");
+			await archiveOnly();
+			expect(await Bun.file(ground.record).exists()).toBe(false);
+			const beside = shape.endsWith("holding the copy");
+			// The other place a quarantine of this id uses, beside the agent directory.
+			const other = path.join(root, "gc-quarantine", path.basename(record, ".json"));
+			if (beside) await Bun.write(path.join(other, "something"), "SOMETHING");
+			const locked = beside ? other : destination;
+			await fs.chmod(locked, mode);
+			let preview: GcResult;
+			let applied: GcResult;
+			try {
+				preview = await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } });
+				applied = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+			} finally {
+				await fs.chmod(locked, 0o700);
+			}
+
+			for (const run of [preview, applied]) {
+				expect(run.quarantine?.moved).toBe(false);
+				const told = run.quarantine?.errors.join("\n") ?? "";
+				// The defect first: a place that could not be listed is not one with no copy.
+				expect(told).not.toContain("none to put back");
+				if (mode === 0o000) expect(told).toContain(`${path.join(locked, record)} could not be read`);
+				if (mode === 0o100 || beside) expect(told).toContain(`copy ${copy} back to ${ground.record}`);
+				else expect(told).not.toContain(`back to ${ground.record}`);
+				expect(told).toContain(`${locked} could not be listed`);
+				expect(told).toContain("EACCES");
+				expect(told).toContain("carries it home");
+			}
+			// The record and the stage were there all along.
+			expect(await Bun.file(path.join(destination, path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
+			const listable = await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } });
+			expect(listable.quarantine?.errors.join("\n")).toContain(`copy ${copy} back to ${ground.record}`);
+		},
+	);
+}
