@@ -78,6 +78,7 @@ import {
 	sanitizeOpenAIResponsesAssistantFallbackItemsForReplay,
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
 	sanitizeOpenAIResponsesHistoryItemsForReplay,
+	stripOpenAIResponsesOutputOnlyItemFields,
 	stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay,
 	truncateResponseItemId,
 } from "../utils";
@@ -3710,6 +3711,7 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 		} else if (event.type === "response.output_item.done") {
 			const item = cloneJsonTree(event.item);
+			stripOpenAIResponsesOutputOnlyItemFields(item);
 			const entry =
 				item.type === "function_call" || item.type === "custom_tool_call"
 					? lookupOpenItem({ output_index: event.output_index, item_id: item.id ?? item.call_id })

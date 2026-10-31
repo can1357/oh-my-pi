@@ -668,33 +668,27 @@ export function createOpenAIResponsesHistoryPayload(
 /**
  * Server-annotated metadata the Codex backend attaches to output items but
  * rejects as an unknown parameter when replayed as input (e.g.
- * `content_token_count`). codex-rs drops it on deserialize; strip it on read so
- * already-persisted sessions replay too.
+ * `content_token_count`). codex-rs drops it on deserialize. Live turns strip it
+ * at capture; the read-side strip covers sessions persisted before that.
  */
 const OPENAI_RESPONSES_OUTPUT_ONLY_ITEM_FIELD = "internal_chat_message_metadata_passthrough";
-const strippedOutputOnlyItems = new WeakMap<Record<string, unknown>, Record<string, unknown>>();
 
-function stripOpenAIResponsesOutputOnlyItemFields(
+/** Drop backend-only fields from a privately owned output item as it is captured. */
+export function stripOpenAIResponsesOutputOnlyItemFields(item: object): void {
+	if (OPENAI_RESPONSES_OUTPUT_ONLY_ITEM_FIELD in item) {
+		delete (item as Record<string, unknown>)[OPENAI_RESPONSES_OUTPUT_ONLY_ITEM_FIELD];
+	}
+}
+
+function withoutOpenAIResponsesOutputOnlyItemFields(
 	items: Array<Record<string, unknown>>,
 ): Array<Record<string, unknown>> {
-	let stripped: Array<Record<string, unknown>> | undefined;
-	for (let index = 0; index < items.length; index++) {
-		const item = items[index]!;
-		if (!(OPENAI_RESPONSES_OUTPUT_ONLY_ITEM_FIELD in item)) continue;
-		let replacement = strippedOutputOnlyItems.get(item);
-		if (!replacement) {
-			const { [OPENAI_RESPONSES_OUTPUT_ONLY_ITEM_FIELD]: _metadata, ...rest } = item;
-			replacement = rest;
-			strippedOutputOnlyItems.set(item, replacement);
-		}
-		stripped ??= items.slice(0, index);
-		stripped[index] = replacement;
-	}
-	if (!stripped) return items;
-	for (let index = stripped.length; index < items.length; index++) {
-		stripped[index] = strippedOutputOnlyItems.get(items[index]!) ?? items[index]!;
-	}
-	return stripped;
+	if (!items.some(item => OPENAI_RESPONSES_OUTPUT_ONLY_ITEM_FIELD in item)) return items;
+	return items.map(item => {
+		if (!(OPENAI_RESPONSES_OUTPUT_ONLY_ITEM_FIELD in item)) return item;
+		const { [OPENAI_RESPONSES_OUTPUT_ONLY_ITEM_FIELD]: _metadata, ...rest } = item;
+		return rest;
+	});
 }
 
 export function getOpenAIResponsesHistoryPayload(
@@ -710,7 +704,7 @@ export function getOpenAIResponsesHistoryPayload(
 	return {
 		...providerPayload,
 		provider: payloadProvider,
-		items: stripOpenAIResponsesOutputOnlyItemFields(providerPayload.items),
+		items: withoutOpenAIResponsesOutputOnlyItemFields(providerPayload.items),
 	};
 }
 

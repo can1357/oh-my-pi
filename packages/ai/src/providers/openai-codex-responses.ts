@@ -58,6 +58,7 @@ import {
 	sanitizeOpenAIResponsesAssistantFallbackItemsForReplay,
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
 	stripOpenAIResponsesComputerLinkedReasoningIdsForReplay,
+	stripOpenAIResponsesOutputOnlyItemFields,
 } from "../utils";
 import { clearStreamingPartialJson, kStreamingLastParseLen, kStreamingPartialJson } from "../utils/block-symbols";
 import { hasVisibleAssistantContent } from "../utils/empty-completion-retry";
@@ -2555,6 +2556,7 @@ class CodexStreamProcessor {
 		const rawItem = rawEvent.item;
 		if (!rawItem || typeof rawItem !== "object") return;
 		const item = cloneJsonTree(rawItem) as CodexEventItem;
+		stripOpenAIResponsesOutputOnlyItemFields(item);
 		if (item.type === "image_generation_call" && item.result) item.status = "completed";
 
 		// Match the finalization to the OPEN ITEM that started this block, not the

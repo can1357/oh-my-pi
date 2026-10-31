@@ -1266,18 +1266,19 @@ describe("openai-codex native history redaction", () => {
 		]);
 	});
 
-	it("drops server-only passthrough metadata from replayed native items", () => {
+	it("drops server-only passthrough metadata from persisted native items on replay", () => {
 		// The Codex backend annotates output items with this field but 400s
 		// `Unknown parameter: 'input[N].internal_chat_message_metadata_passthrough.content_token_count'`
-		// when it comes back as input.
+		// when it comes back as input. Sessions persisted before capture-time
+		// stripping still carry it, mixed with unannotated items.
 		const model = createCodexModel("gpt-5.1-codex");
 		const passthrough = { content_token_count: 74, create_time: 1793470226.99, turn_id: "turn-1" };
-		const retainedUser = {
+		const userItem = (text: string, annotated: boolean): Record<string, unknown> => ({
 			type: "message",
 			role: "user",
-			content: [{ type: "input_text", text: "retained" }],
-			internal_chat_message_metadata_passthrough: { turn_id: "turn-0" },
-		};
+			content: [{ type: "input_text", text }],
+			...(annotated ? { internal_chat_message_metadata_passthrough: { turn_id: "turn-0" } } : {}),
+		});
 		const assistantItem = {
 			type: "message",
 			id: "msg_1",
@@ -1292,7 +1293,11 @@ describe("openai-codex native history redaction", () => {
 					role: "user",
 					content: "fallback",
 					timestamp: 1,
-					providerPayload: { type: "openaiResponsesHistory", provider: model.provider, items: [retainedUser] },
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: model.provider,
+						items: [userItem("first", true), userItem("middle", false), userItem("last", true)],
+					},
 				} as Context["messages"][number],
 				{
 					role: "assistant",
@@ -1324,8 +1329,39 @@ describe("openai-codex native history redaction", () => {
 		const messages = convertCodexResponsesMessages(model, context);
 
 		expect(JSON.stringify(messages)).not.toContain("internal_chat_message_metadata_passthrough");
-		expect(messages.map(item => ("role" in item ? item.role : item.type))).toEqual(["user", "assistant", "user"]);
+		expect(messages.map(item => ("role" in item ? item.role : item.type))).toEqual([
+			"user",
+			"user",
+			"user",
+			"assistant",
+			"user",
+		]);
 		// Persisted history stays untouched; only the wire copy is stripped.
 		expect(assistantItem.internal_chat_message_metadata_passthrough).toBe(passthrough);
+	});
+
+	it("does not store server-only passthrough metadata from streamed output items", async () => {
+		const model = createCodexModel("gpt-5.1-codex");
+		const events = COMPLETED_CODEX_EVENTS.map(event =>
+			event.type === "response.output_item.done"
+				? {
+						...event,
+						item: {
+							...(event.item as Record<string, unknown>),
+							internal_chat_message_metadata_passthrough: { content_token_count: 1, turn_id: "turn-1" },
+						},
+					}
+				: event,
+		);
+		const stream = streamOpenAICodexResponses(model, createCodexTestContext(), {
+			apiKey: createCodexTestToken(),
+			fetch: createCodexFetchMock(createCodexSse(events), () => {}),
+		});
+		const result = await stream.result();
+
+		const payload = result.providerPayload;
+		if (payload?.type !== "openaiResponsesHistory") throw new Error("expected native Responses history");
+		expect(payload.items.map(item => item.type)).toEqual(["message"]);
+		expect(payload.items[0]).not.toHaveProperty("internal_chat_message_metadata_passthrough");
 	});
 });
