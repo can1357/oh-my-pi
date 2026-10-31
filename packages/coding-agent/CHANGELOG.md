@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Reduced repeated prewalk continuations after read-only tool calls; successful `todo` calls can still re-arm the continuation ([#6174](https://github.com/can1357/oh-my-pi/issues/6174), [#17547](https://github.com/can1357/oh-my-pi/pull/17547) by [@ee-](https://github.com/ee-)).
+
 ## [18.14.1] - 2026-10-31
 
 ### Added

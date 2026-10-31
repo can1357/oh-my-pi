@@ -863,6 +863,48 @@ describe("AgentSession prewalk", () => {
 		expect(session.model?.id).toBe(primary.id);
 	});
 
+	it("bounds a completed read-only task to one continuation when replies alternate with tool results", async () => {
+		const created = createLifecycleSession(
+			[
+				toolCall("t1", "record"),
+				{ content: ["Answer: the task is complete."], stopReason: "stop" },
+				toolCall("t3", "record"),
+				{ content: ["Answer: nothing left to do."], stopReason: "stop" },
+			],
+			{ tools: [recordTool as AgentTool] },
+		);
+
+		await created.session.prompt("research the question");
+
+		expect(created.requested).toHaveLength(4);
+		const continuations = created.session.messages.filter(
+			message => message.role === "custom" && message.customType === "prewalk-continue",
+		);
+		expect(continuations).toHaveLength(1);
+		expect(created.session.model?.id).toBe(created.primary.id);
+	});
+
+	it("restores the continuation for a new user task while prewalk remains armed", async () => {
+		const created = createLifecycleSession(
+			[
+				toolCall("read-1", "record"),
+				{ content: ["Answer."], stopReason: "stop" },
+				toolCall("read-2", "record"),
+				{ content: ["Done."], stopReason: "stop" },
+				toolCall("read-3", "record"),
+				{ content: ["Plan."], stopReason: "stop" },
+				toolCall("write", "write"),
+				{ content: ["Implemented."], stopReason: "stop" },
+			],
+			{ tools: [recordTool as AgentTool, writeTool as AgentTool] },
+		);
+
+		await created.session.prompt("research the question");
+		await created.session.prompt("implement the change");
+
+		expect(created.session.model?.id).toBe(created.target.id);
+	});
+
 	it("does not switch on a read-only xd:// device dispatched through write (issue #7312)", async () => {
 		const primary = modelOrThrow("claude-sonnet-4-5");
 		const target = modelOrThrow("claude-sonnet-4-6");
@@ -1056,10 +1098,6 @@ describe("AgentSession prewalk", () => {
 	});
 
 	it("re-arms continuation after tool progress between prose turns", async () => {
-		// Regression: a normal prewalk can split planning across several turns:
-		// prose plan, todo init, then prose before implementation. Each tool
-		// progress segment must earn one continuation so the second prose turn
-		// cannot end the run before edit/write.
 		const primary = modelOrThrow("claude-sonnet-4-5");
 		const target = modelOrThrow("claude-sonnet-4-6");
 
