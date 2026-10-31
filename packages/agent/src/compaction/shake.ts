@@ -11,7 +11,7 @@
  * Layering mirrors `pruning.ts`: no I/O here.
  */
 
-import type { TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { ImageContent, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { Tokenizer } from "../tokenizer";
 import type { AgentMessage } from "../types";
 import type { CustomMessageEntry, SessionEntry, SessionMessageEntry } from "./entries";
@@ -85,6 +85,8 @@ export interface ToolResultShakeRegion {
 	/** Estimated tokens in the removable text only; retained images are excluded. */
 	tokens: number;
 	originalText: string;
+	/** Per-block lengths and image offsets when a tool result had multiple text blocks or preceding images. */
+	textSlots?: Array<{ imageOffset: number; length: number }>;
 	/** Human label for the offload doc (tool name). */
 	label: string;
 }
@@ -113,15 +115,24 @@ const CLOSING_XML = /^<\/([a-z_-]+)>$/;
 function toolResultText(
 	message: ToolResultMessage,
 	tokenizer: Tokenizer,
-): { originalText: string; tokens: number } | undefined {
+): { originalText: string; tokens: number; textSlots?: Array<{ imageOffset: number; length: number }> } | undefined {
 	const fragments: string[] = [];
+	const slots: Array<{ imageOffset: number; length: number }> = [];
+	let imageOffset = 0;
 	for (const block of message.content) {
-		if (block.type === "text" && block.text.length > 0) fragments.push(block.text);
+		if (block.type === "image") {
+			imageOffset++;
+		} else if (block.type === "text" && block.text.length > 0) {
+			fragments.push(block.text);
+			slots.push({ imageOffset, length: block.text.length });
+		}
 	}
 	if (fragments.length === 0) return undefined;
+	const needsSlots = slots.length > 1 || (slots[0]?.imageOffset ?? 0) > 0;
 	return {
 		originalText: fragments.join("\n"),
 		tokens: tokenizer.countTokens(fragments),
+		...(needsSlots ? { textSlots: slots } : {}),
 	};
 }
 
@@ -352,6 +363,7 @@ export function collectShakeRegions(entries: SessionEntry[], tokenizer: Tokenize
 				entry: entry as SessionMessageEntry,
 				tokens: text.tokens,
 				originalText: text.originalText,
+				...(text.textSlots ? { textSlots: text.textSlots } : {}),
 				label: toolResult.toolName,
 			});
 			continue;
@@ -417,6 +429,213 @@ function getBlockTextSlot(entry: SessionMessageEntry | CustomMessageEntry, block
 	};
 }
 
+export interface ShakenTextSlot {
+	/** Number of image blocks that preceded this text block in the original content. */
+	imageOffset: number;
+	block: TextContent;
+}
+
+export interface ParsedShakeArtifactRegion {
+	text: string;
+	slots: ShakenTextSlot[];
+}
+
+const shakenToolResultSlots = new WeakMap<ToolResultMessage, ShakenTextSlot[]>();
+const restoredToolResultCache = new WeakMap<
+	ToolResultMessage,
+	{ content: ToolResultMessage["content"]; restored: ToolResultMessage }
+>();
+
+const SHAKE_ARTIFACT_PLACEHOLDER_RE =
+	/^\[shaken ~\d+ tokens — recover: artifact:\/\/([A-Za-z0-9_-]+) \(region (\d+)\)\]$/;
+
+export interface ShakeArtifactRegionRef {
+	artifactId: string;
+	/** 1-based region number inside the shake artifact. */
+	region: number;
+}
+
+export function parseShakeArtifactPlaceholder(text: string): ShakeArtifactRegionRef | undefined {
+	const match = SHAKE_ARTIFACT_PLACEHOLDER_RE.exec(text.trim());
+	if (!match) return undefined;
+	const region = Number.parseInt(match[2]!, 10);
+	if (!Number.isFinite(region) || region < 1) return undefined;
+	return { artifactId: match[1]!, region };
+}
+
+/** Concatenate original regions into the persisted `.shake.log` artifact body. */
+export function formatShakeArtifactText(regions: readonly ShakeRegion[]): string {
+	const parts: string[] = [];
+	for (let i = 0; i < regions.length; i++) {
+		const region = regions[i]!;
+		const slotsMeta =
+			region.kind === "toolResult" && region.textSlots && region.textSlots.length > 0
+				? `, blocks=${region.textSlots.map(s => `${s.imageOffset}:${s.length}`).join("+")}`
+				: "";
+		parts.push(
+			`### region ${i + 1} (${region.label}, ~${region.tokens} tok, ${region.originalText.length} chars${slotsMeta})`,
+			"",
+			region.originalText,
+			"",
+		);
+	}
+	return parts.join("\n");
+}
+
+function parseShakenTextSlots(text: string, blocksSpec: string | undefined): ShakenTextSlot[] {
+	if (!blocksSpec) return [{ imageOffset: 0, block: { type: "text", text } }];
+	const slots: ShakenTextSlot[] = [];
+	let cursor = 0;
+	for (const part of blocksSpec.split("+")) {
+		const colon = part.indexOf(":");
+		if (colon <= 0) return [{ imageOffset: 0, block: { type: "text", text } }];
+		const imageOffset = Number.parseInt(part.slice(0, colon), 10);
+		const length = Number.parseInt(part.slice(colon + 1), 10);
+		if (!Number.isFinite(imageOffset) || imageOffset < 0 || !Number.isFinite(length) || length < 0) {
+			return [{ imageOffset: 0, block: { type: "text", text } }];
+		}
+		if (cursor + length > text.length) {
+			return [{ imageOffset: 0, block: { type: "text", text } }];
+		}
+		slots.push({ imageOffset, block: { type: "text", text: text.slice(cursor, cursor + length) } });
+		cursor += length + 1;
+	}
+	return slots.length > 0 ? slots : [{ imageOffset: 0, block: { type: "text", text } }];
+}
+
+/**
+ * Parse a persisted `.shake.log` artifact body into its 1-based region entries
+ * (including exact length-delimited bodies and multimodal text-block slots).
+ */
+export function parseShakeArtifactEntries(artifactText: string): Map<number, ParsedShakeArtifactRegion> {
+	const entries = new Map<number, ParsedShakeArtifactRegion>();
+	const headerRe = /(?<=^|\n\n)### region (\d+) \([^\n]*, ~\d+ tok(?:, (\d+) chars(?:, blocks=([0-9:+]+))?)?\)\n\n/g;
+	const matches: Array<{
+		region: number;
+		separatorStart: number;
+		bodyStart: number;
+		charLen?: number;
+		blocksSpec?: string;
+	}> = [];
+	let match: RegExpExecArray | null;
+	while ((match = headerRe.exec(artifactText)) !== null) {
+		const region = Number.parseInt(match[1]!, 10);
+		if (region !== matches.length + 1) continue;
+		const matchIndex = match.index;
+		const bodyStart = matchIndex + match[0].length;
+		const parsedLen = match[2] !== undefined ? Number.parseInt(match[2], 10) : undefined;
+		const charLen = parsedLen !== undefined && Number.isFinite(parsedLen) && parsedLen >= 0 ? parsedLen : undefined;
+		matches.push({
+			region,
+			separatorStart: matchIndex === 0 ? 0 : matchIndex - 2,
+			bodyStart,
+			charLen,
+			blocksSpec: match[3],
+		});
+		if (charLen !== undefined) {
+			headerRe.lastIndex = Math.min(artifactText.length, bodyStart + charLen);
+		}
+	}
+	for (let i = 0; i < matches.length; i++) {
+		const current = matches[i]!;
+		const next = matches[i + 1];
+		const bodyEnd =
+			current.charLen !== undefined
+				? Math.min(artifactText.length, current.bodyStart + current.charLen)
+				: next
+					? next.separatorStart
+					: artifactText.endsWith("\n")
+						? artifactText.length - 1
+						: artifactText.length;
+		const text = artifactText.slice(current.bodyStart, bodyEnd);
+		entries.set(current.region, {
+			text,
+			slots: parseShakenTextSlots(text, current.blocksSpec),
+		});
+	}
+	return entries;
+}
+
+/**
+ * Parse a persisted `.shake.log` artifact body back into its 1-based region map.
+ */
+export function parseShakeArtifactRegions(artifactText: string): Map<number, string> {
+	const regions = new Map<number, string>();
+	for (const [region, entry] of parseShakeArtifactEntries(artifactText)) {
+		regions.set(region, entry.text);
+	}
+	return regions;
+}
+
+export function isToolResultMessage(value: unknown): value is ToolResultMessage {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"role" in value &&
+		value.role === "toolResult" &&
+		"toolCallId" in value &&
+		typeof value.toolCallId === "string" &&
+		"toolName" in value &&
+		typeof value.toolName === "string" &&
+		"content" in value &&
+		Array.isArray(value.content) &&
+		"isError" in value &&
+		typeof value.isError === "boolean" &&
+		"timestamp" in value &&
+		typeof value.timestamp === "number"
+	);
+}
+
+/**
+ * Restore the original display text of a tool result elided by `shake` while
+ * leaving the stored/LLM-facing message untouched.
+ */
+export function restoreShakenToolResultMessage(
+	message: ToolResultMessage,
+	resolveArtifactRegion?: (ref: ShakeArtifactRegionRef) => string | ParsedShakeArtifactRegion | undefined,
+): ToolResultMessage {
+	if (message.prunedAt === undefined) return message;
+	let slots = shakenToolResultSlots.get(message);
+	if (!slots && resolveArtifactRegion) {
+		const textBlock = message.content.find((block): block is TextContent => block.type === "text");
+		const ref = textBlock ? parseShakeArtifactPlaceholder(textBlock.text) : undefined;
+		if (ref) {
+			const recovered = resolveArtifactRegion(ref);
+			if (recovered !== undefined) {
+				slots =
+					typeof recovered === "string"
+						? [{ imageOffset: 0, block: { type: "text", text: recovered } }]
+						: recovered.slots;
+				shakenToolResultSlots.set(message, slots);
+			}
+		}
+	}
+	if (!slots || slots.length === 0) return message;
+	const cached = restoredToolResultCache.get(message);
+	if (cached && cached.content === message.content) return cached.restored;
+	const images = message.content.filter((block): block is ImageContent => block.type === "image");
+	const content: (TextContent | ImageContent)[] = [];
+	if (images.length === 0) {
+		for (const slot of slots) content.push(slot.block);
+	} else {
+		for (let imgIndex = 0; imgIndex <= images.length; imgIndex++) {
+			for (const slot of slots) {
+				if (imgIndex < images.length ? slot.imageOffset === imgIndex : slot.imageOffset >= images.length) {
+					content.push(slot.block);
+				}
+			}
+			if (imgIndex < images.length) {
+				content.push(images[imgIndex]!);
+			}
+		}
+	}
+	const restored: ToolResultMessage = { ...message, content };
+	shakenToolResultSlots.set(restored, slots);
+	restoredToolResultCache.set(message, { content: message.content, restored });
+	restoredToolResultCache.set(restored, { content: restored.content, restored });
+	return restored;
+}
+
 /**
  * Pure mutation: replace a single region's content in place.
  *
@@ -433,6 +652,18 @@ export function applyShakeRegion(region: ShakeRegion, replacement: string, repla
 		const message = region.entry.message as ToolResultMessage;
 		const replacementIndex = message.content.findIndex(block => block.type === "text" && block.text.length > 0);
 		if (replacementIndex < 0) return;
+		if (!shakenToolResultSlots.has(message)) {
+			const slots: ShakenTextSlot[] = [];
+			let imageOffset = 0;
+			for (const block of message.content) {
+				if (block.type === "image") {
+					imageOffset++;
+				} else if (block.type === "text") {
+					slots.push({ imageOffset, block: { ...block } });
+				}
+			}
+			shakenToolResultSlots.set(message, slots);
+		}
 		const kept: typeof message.content = [];
 		for (let index = 0; index < message.content.length; index++) {
 			const block = message.content[index];

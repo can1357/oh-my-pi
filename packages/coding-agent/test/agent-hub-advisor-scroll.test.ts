@@ -746,4 +746,75 @@ describe("AgentTranscriptViewer", () => {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
 	});
+
+	it("restores shaken tool-call results from the session's .shake.log when viewing a local transcript", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "adv-view-shake-"));
+		const file = path.join(dir, "__advisor.jsonl");
+		const originalOutput = "SHAKEN_HUB_VIEWER_OUTPUT_MARKER";
+		fs.writeFileSync(
+			path.join(dir, "0.shake.log"),
+			`### region 1 (bash, ~120 tok, ${originalOutput.length} chars)\n\n${originalOutput}\n`,
+		);
+		const jsonl = [
+			JSON.stringify({ type: "session", version: CURRENT_SESSION_VERSION, id: "adv", timestamp: TS, cwd: "/tmp" }),
+			JSON.stringify({
+				type: "message",
+				id: "u0",
+				parentId: null,
+				timestamp: TS,
+				message: { role: "user", content: [{ type: "text", text: "Check output" }], timestamp: 0 },
+			}),
+			JSON.stringify({
+				type: "message",
+				id: "a0",
+				parentId: "u0",
+				timestamp: TS,
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "echo test" } }],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-sonnet",
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 1,
+				},
+			}),
+			JSON.stringify({
+				type: "message",
+				id: "tr0",
+				parentId: "a0",
+				timestamp: TS,
+				message: {
+					role: "toolResult",
+					toolCallId: "call-1",
+					toolName: "bash",
+					content: [{ type: "text", text: "[shaken ~120 tokens — recover: artifact://0 (region 1)]" }],
+					isError: false,
+					prunedAt: 2,
+					timestamp: 2,
+				},
+			}),
+		].join("\n");
+		fs.writeFileSync(file, `${jsonl}\n`);
+		const viewer = makeViewer(file);
+		try {
+			const rendered = viewer
+				.render(100)
+				.map(line => Bun.stripANSI(line))
+				.join("\n");
+			expect(rendered).toContain(originalOutput);
+			expect(rendered).not.toContain("[shaken ~");
+		} finally {
+			viewer.dispose();
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
 });

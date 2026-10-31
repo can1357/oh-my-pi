@@ -337,4 +337,75 @@ describe("libkitty end-to-end", () => {
 		expect(plainRows(term.getScrollBuffer()).some(row => row.includes(TOOL_MARKER))).toBe(false);
 		expect(plainRows(term.getViewport()).some(row => row.includes("LIVE_EDITOR_DRAFT"))).toBe(true);
 	});
+	it("keeps elided toolcall results visible in the UI after /shake while excluding them from model context", async () => {
+		const usage: Usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const TOOL_OUTPUT_MARKER = "SHAKEN_TOOL_UI_VISIBLE_MARKER";
+		const callId = "shake-elide-tool-call";
+		const toolCall: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: callId, name: "bash", arguments: { command: "echo marker" } }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet",
+			usage,
+			stopReason: "toolUse",
+			timestamp: 1,
+		};
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: callId,
+			toolName: "bash",
+			content: [{ type: "text", text: `${TOOL_OUTPUT_MARKER}\n${"output line ".repeat(400)}` }],
+			isError: false,
+			timestamp: 2,
+		};
+		const recentTail: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: `Recent tail\n${"recent word ".repeat(4_000)}` }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet",
+			usage,
+			stopReason: "stop",
+			timestamp: 3,
+		};
+		term = new VirtualTerminal(120, 16);
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			() => {},
+			undefined,
+			undefined,
+			undefined,
+			new Composer({ terminal: term }),
+		);
+		session.sessionManager.appendMessage({ role: "user", content: "Run command", timestamp: 0 });
+		session.sessionManager.appendMessage(toolCall);
+		session.sessionManager.appendMessage(toolResult);
+		session.sessionManager.appendMessage(recentTail);
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+		await mode.init({ suppressWelcomeIntro: true });
+		await mode.renderInitialMessages({ clearTerminalHistory: true });
+		await term.waitForRender(() => plainRows(term.getScrollBuffer()).some(row => row.includes(TOOL_OUTPUT_MARKER)));
+
+		await mode.handleShakeCommand("elide");
+		await term.waitForRender(() => plainRows(term.getScrollBuffer()).some(row => row.includes(TOOL_OUTPUT_MARKER)));
+
+		const rows = plainRows(term.getScrollBuffer());
+		expect(rows.some(row => row.includes(TOOL_OUTPUT_MARKER))).toBe(true);
+		expect(rows.some(row => row.includes("[shaken ~"))).toBe(false);
+
+		const modelToolResult = session.agent.state.messages.find(
+			(m): m is ToolResultMessage => m.role === "toolResult" && m.toolCallId === callId,
+		);
+		expect(modelToolResult?.content).toEqual([{ type: "text", text: expect.stringContaining("[shaken ~") }]);
+	});
 });

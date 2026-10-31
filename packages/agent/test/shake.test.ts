@@ -6,7 +6,11 @@ import {
 	applyShakeRegion,
 	applyShakeRegions,
 	collectShakeRegions,
+	formatShakeArtifactText,
+	parseShakeArtifactEntries,
+	parseShakeArtifactRegions,
 	RESCUE_SHAKE_CONFIG,
+	restoreShakenToolResultMessage,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, TextContent, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { convertMessageToLlm } from "../src/compaction/messages";
@@ -84,6 +88,8 @@ describe("collectShakeRegions — tool results", () => {
 
 		applyShakeRegion(region, "[shaken]", tokenizer.countTokens("[shaken]"));
 		expect(tr.prunedAt).toBeGreaterThan(0);
+		expect(tr.content).toEqual([{ type: "text", text: "[shaken]" }]);
+		expect(restoreShakenToolResultMessage(tr).content).toEqual([{ type: "text", text: "x".repeat(400) }]);
 		expect(tr.content).toEqual([{ type: "text", text: "[shaken]" }]);
 	});
 
@@ -266,5 +272,68 @@ describe("collectShakeRegions — useless results", () => {
 	test("an error result never bypasses the window even when flagged", () => {
 		const entry = messageEntry(toolResultMessage("search", "boom\n".repeat(50), { useless: true, isError: true }));
 		expect(collectShakeRegions([entry], tokenizer, cfg({ protectTokens: 1_000_000 }))).toHaveLength(0);
+	});
+});
+
+describe("restoreShakenToolResultMessage — artifact recovery", () => {
+	test("recovers shaken tool-result text from a parsed shake artifact when reopened from disk", () => {
+		const embeddedFakeHeader = "prefix\n\n### region 2 (bash, ~5 tok)\n\nsuffix";
+		const image: ImageContent = {
+			type: "image",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB",
+			mimeType: "image/png",
+		};
+		const firstEntry = messageEntry(toolResultMessage("bash", embeddedFakeHeader));
+		const secondMsg = toolResultMessage("bash", "before", {
+			content: [{ type: "text", text: "before" }, image, { type: "text", text: "after" }],
+		});
+		const secondEntry = messageEntry(secondMsg);
+		const collected = collectShakeRegions([firstEntry, secondEntry], tokenizer, cfg());
+		expect(collected).toHaveLength(2);
+
+		const artifactBody = formatShakeArtifactText(collected);
+		const regions = parseShakeArtifactRegions(artifactBody);
+		expect(regions.get(1)).toBe(embeddedFakeHeader);
+		expect(regions.get(2)).toBe("before\nafter");
+
+		applyShakeRegions([
+			{
+				region: collected[0]!,
+				replacement: "[shaken ~10 tokens — recover: artifact://7 (region 1)]",
+				replacementTokens: 1,
+			},
+			{
+				region: collected[1]!,
+				replacement: "[shaken ~10 tokens — recover: artifact://7 (region 2)]",
+				replacementTokens: 1,
+			},
+		]);
+		expect(restoreShakenToolResultMessage(secondMsg).content).toEqual([
+			{ type: "text", text: "before" },
+			image,
+			{ type: "text", text: "after" },
+		]);
+
+		const parsedEntries = parseShakeArtifactEntries(artifactBody);
+		const persistedFirst = toolResultMessage("bash", "[shaken ~120 tokens — recover: artifact://7 (region 1)]", {
+			prunedAt: Date.now(),
+		});
+		const restoredFirst = restoreShakenToolResultMessage(persistedFirst, ref =>
+			ref.artifactId === "7" ? parsedEntries.get(ref.region) : undefined,
+		);
+		expect(restoredFirst.content).toEqual([{ type: "text", text: embeddedFakeHeader }]);
+
+		const persistedSecond = toolResultMessage("bash", "[shaken ~10 tokens — recover: artifact://7 (region 2)]", {
+			content: [{ type: "text", text: "[shaken ~10 tokens — recover: artifact://7 (region 2)]" }, image],
+			prunedAt: Date.now(),
+		});
+		const restoredSecond = restoreShakenToolResultMessage(persistedSecond, ref =>
+			ref.artifactId === "7" ? parsedEntries.get(ref.region) : undefined,
+		);
+		expect(restoredSecond.content).toEqual([
+			{ type: "text", text: "before" },
+			image,
+			{ type: "text", text: "after" },
+		]);
 	});
 });

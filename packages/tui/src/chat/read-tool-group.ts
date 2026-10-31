@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
+import { isToolResultMessage, restoreShakenToolResultMessage } from "@oh-my-pi/pi-agent-core/compaction/shake";
 import { type Component } from "../tui";
 import { Container } from "../tui";
 import { Text } from "../components/text";
@@ -488,6 +489,9 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		if (!entry) return;
 		if (isPartial) return;
 		this.#blockVersion++;
+		if (isToolResultMessage(result)) {
+			result = restoreShakenToolResultMessage(result);
+		}
 		// `details` can contain raw file text and filesystem paths. Keep the
 		// latter for links while only the sanitized copy supplies display labels.
 		const rawDetails = result.details as ReadToolDetails | undefined;

@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { createCustomMessage } from "@oh-my-pi/pi-agent-core/compaction/messages";
+import { restoreShakenToolResultMessage } from "@oh-my-pi/pi-agent-core/compaction/shake";
 import type { ImageContent, MessageAttribution, TextContent } from "@oh-my-pi/pi-ai";
 import {
 	type CustomMessage,
@@ -52,7 +53,10 @@ export function customMessageEntryMessage(entry: CustomMessageEntryLike): Custom
 
 /** Restore the message represented by a transcript entry. */
 export function transcriptEntryMessage(entry: TranscriptEntryLike): AgentMessage | undefined {
-	return entry.type === "message" ? entry.message : customMessageEntryMessage(entry);
+	if (entry.type === "message") {
+		return entry.message.role === "toolResult" ? restoreShakenToolResultMessage(entry.message) : entry.message;
+	}
+	return customMessageEntryMessage(entry);
 }
 
 /** Identify user-authored requests among transcript and metadata entries. */

@@ -141,6 +141,47 @@ describe("AgentSession shake", () => {
 			const text = tr.content.map(b => (b.type === "text" ? b.text : "")).join("");
 			expect(text).toContain(`artifact://${result.artifactId}`);
 			expect(text).toContain("shaken");
+			const modelToolResult = session.agent.state.messages.find(
+				(m): m is ToolResultMessage => m.role === "toolResult",
+			);
+			expect(modelToolResult?.content).toEqual([
+				{ type: "text", text: expect.stringContaining(`artifact://${result.artifactId}`) },
+			]);
+			const transcriptToolResult = session
+				.buildTranscriptSessionContext()
+				.messages.find((m): m is ToolResultMessage => m.role === "toolResult");
+			expect(transcriptToolResult?.content).toEqual([{ type: "text", text: "X".repeat(4000) }]);
+
+			const sessionFile = sessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected persisted shake session");
+			const reopened = await SessionManager.open(sessionFile, tempDir.path());
+			try {
+				const reopenedModelResult = reopened
+					.buildSessionContext()
+					.messages.find((m): m is ToolResultMessage => m.role === "toolResult");
+				expect(reopenedModelResult?.content).toEqual([
+					{ type: "text", text: expect.stringContaining(`artifact://${result.artifactId}`) },
+				]);
+				const reopenedTranscriptResult = reopened
+					.buildSessionContext({ transcript: true })
+					.messages.find((m): m is ToolResultMessage => m.role === "toolResult");
+				expect(reopenedTranscriptResult?.content).toEqual([{ type: "text", text: "X".repeat(4000) }]);
+				await sessionManager.newSession();
+				seedHeavyToolResult("Y".repeat(4000));
+				appendRecentProtectedTail();
+				const secondShake = await session.shake("elide");
+				expect(secondShake.artifactId).toBe(result.artifactId);
+				const secondSessionFile = sessionManager.getSessionFile();
+				if (!secondSessionFile) throw new Error("Expected second persisted shake session");
+
+				await reopened.setSessionFile(secondSessionFile);
+				const switchedTranscriptResult = reopened
+					.buildSessionContext({ transcript: true })
+					.messages.find((m): m is ToolResultMessage => m.role === "toolResult");
+				expect(switchedTranscriptResult?.content).toEqual([{ type: "text", text: "Y".repeat(4000) }]);
+			} finally {
+				await reopened.close();
+			}
 		});
 
 		it("continues artifact-less when ordinary shake cannot allocate an artifact", async () => {
@@ -174,8 +215,9 @@ describe("AgentSession shake", () => {
 			};
 			const imageSnapshot = structuredClone(image);
 			seedHeavyToolResult(largeText);
+			const afterText = "trailing multimodal text ".repeat(200);
 			const [mixedResult] = branchToolResults();
-			mixedResult.content = [{ type: "text", text: largeText }, image];
+			mixedResult.content = [{ type: "text", text: largeText }, image, { type: "text", text: afterText }];
 			const tailBefore = recentProtectedTail("newer context");
 			appendRecentProtectedTail();
 
@@ -193,7 +235,7 @@ describe("AgentSession shake", () => {
 			expect(mixedResult.content[1]).toEqual(imageSnapshot);
 
 			const tokenizer = new Tokenizer();
-			const expectedFreed = tokenizer.countTokens(largeText) - tokenizer.countTokens(placeholder.text);
+			const expectedFreed = tokenizer.countTokens([largeText, afterText]) - tokenizer.countTokens(placeholder.text);
 			expect(result.tokensFreed).toBe(expectedFreed);
 			expect(result.tokensFreed).toBeGreaterThan(0);
 
@@ -228,6 +270,16 @@ describe("AgentSession shake", () => {
 						? persistedResult.message.content.find(block => block.type === "image")
 						: undefined;
 				expect(persistedImage).toEqual(imageSnapshot);
+				const reopenedTranscriptMixed = persisted
+					.buildSessionContext({ transcript: true })
+					.messages.find(
+						(m): m is ToolResultMessage => m.role === "toolResult" && m.toolCallId === mixedResult.toolCallId,
+					);
+				expect(reopenedTranscriptMixed?.content).toEqual([
+					{ type: "text", text: largeText },
+					imageSnapshot,
+					{ type: "text", text: afterText },
+				]);
 			} finally {
 				await persisted.close();
 			}
@@ -235,6 +287,15 @@ describe("AgentSession shake", () => {
 			const imageResult = await session.shake("images");
 			expect(imageResult.imagesDropped).toBe(1);
 			expect(mixedResult.content.some(block => block.type === "image")).toBe(false);
+			const transcriptAfterImageDrop = session
+				.buildTranscriptSessionContext()
+				.messages.find(
+					(m): m is ToolResultMessage => m.role === "toolResult" && m.toolCallId === mixedResult.toolCallId,
+				);
+			expect(transcriptAfterImageDrop?.content).toEqual([
+				{ type: "text", text: largeText },
+				{ type: "text", text: afterText },
+			]);
 		});
 
 		it("saves the tokens it elides from an assistant turn with the turn", async () => {

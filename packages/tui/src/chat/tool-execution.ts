@@ -1,5 +1,6 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import { isToolResultMessage, restoreShakenToolResultMessage } from "@oh-my-pi/pi-agent-core/compaction/shake";
 import { Box } from "../components/box";
 import { SPINNER_ADVANCE_MS } from "../components/loader";
 import { Image } from "../components/image";
@@ -638,6 +639,9 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	updateResult(result: ToolResultFrame, isPartial = false, _toolCallId?: string): void {
+		if (isToolResultMessage(result)) {
+			result = restoreShakenToolResultMessage(result);
+		}
 		const hadNoResult = this.#result === undefined;
 		const wasPartialResult = this.#result !== undefined && this.#isPartial;
 		const firstResultRepaintShapePainted = this.#firstResultViewportRepaintShapePainted;

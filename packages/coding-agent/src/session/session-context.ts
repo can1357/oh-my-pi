@@ -1,6 +1,12 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { customMessageEntryMessage, isUserRequestEntry } from "@oh-my-pi/pi-tui/chat/transcript-entry";
-import { getAnthropicCompactionPayload, isTurnStartEntry } from "@oh-my-pi/pi-agent-core/compaction";
+import {
+	getAnthropicCompactionPayload,
+	isTurnStartEntry,
+	type ParsedShakeArtifactRegion,
+	restoreShakenToolResultMessage,
+	type ShakeArtifactRegionRef,
+} from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	coerceServiceTierByFamily,
 	type OpenAIResponsesHistoryPayload,
@@ -176,6 +182,8 @@ export interface BuildSessionContextOptions {
 	inFlightToolCallIds?: ReadonlySet<string>;
 	/** Price and resolve persisted snapcompact frame payloads on demand. */
 	resolveFrameData?: (data: string) => snapcompact.LazyFrameData | undefined;
+	/** Resolve persisted `.shake.log` region text for display-transcript tool results. */
+	resolveShakeArtifactRegion?: (ref: ShakeArtifactRegionRef) => string | ParsedShakeArtifactRegion | undefined;
 	/** Archive frame bytes the LLM context attaches: the active model's {@link snapcompact.frameDataBytesBudget}
 	 *  (unset: {@link snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET}). */
 	maxFrameDataBytes?: number;
@@ -426,7 +434,11 @@ export function buildSessionContext(
 			) {
 				return;
 			}
-			pushMessage(entry.message);
+			const message =
+				options?.transcript && entry.message.role === "toolResult"
+					? restoreShakenToolResultMessage(entry.message, options.resolveShakeArtifactRegion)
+					: entry.message;
+			pushMessage(message);
 		} else if (entry.type === "custom_message") {
 			if (
 				!options?.transcript &&

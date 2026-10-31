@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Display `/shake` elided tool-call results in the TUI transcript while sending only the `[shaken …]` placeholder to the model ([#17514](https://github.com/can1357/oh-my-pi/pull/17514) by [@YibaiMeng](https://github.com/YibaiMeng)).
+
 ## [18.14.1] - 2026-10-31
 
 ### Added

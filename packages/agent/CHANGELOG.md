@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `restoreShakenToolResultMessage`, `parseShakeArtifactPlaceholder`, and `parseShakeArtifactRegions` so display transcripts can show the original text of shaken tool results while model context retains the `[shaken …]` placeholder ([#17514](https://github.com/can1357/oh-my-pi/pull/17514) by [@YibaiMeng](https://github.com/YibaiMeng)).
+
 ## [18.14.1] - 2026-10-31
 
 ### Breaking Changes

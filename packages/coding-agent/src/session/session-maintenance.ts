@@ -31,6 +31,7 @@ import {
 	DEFAULT_SHAKE_CONFIG,
 	type CompactionSettings as EngineCompactionSettings,
 	effectiveReserveTokens,
+	formatShakeArtifactText,
 	invalidateMessageCache,
 	isTranscriptUsageAnchor,
 	NativeCompactionError,
@@ -993,7 +994,7 @@ export class SessionMaintenance {
 		}
 		if (reservedArtifact.path && reservedArtifact.id) {
 			try {
-				await writeArtifact(reservedArtifact.path, this.#shakeArtifactText(regions));
+				await writeArtifact(reservedArtifact.path, formatShakeArtifactText(regions));
 			} catch {
 				if (opts.requireArtifact) throw new Error("shake could not save a recovery artifact");
 				artifactId = undefined;
@@ -1099,20 +1100,11 @@ export class SessionMaintenance {
 		}
 		return `[shaken ~${region.tokens} tokens]`;
 	}
-	/** Concatenate original regions into the persisted shake artifact body. */
-	#shakeArtifactText(regions: ShakeRegion[]): string {
-		const parts: string[] = [];
-		for (let i = 0; i < regions.length; i++) {
-			const region = regions[i];
-			parts.push(`### region ${i + 1} (${region.label}, ~${region.tokens} tok)`, "", region.originalText, "");
-		}
-		return parts.join("\n");
-	}
 
 	/** Persist the shake artifact, using the session manager's in-memory fallback when needed. */
 	async #saveShakeArtifact(regions: ShakeRegion[]): Promise<string | undefined> {
 		try {
-			return await this.#host.sessionManager.saveArtifact(this.#shakeArtifactText(regions), "shake");
+			return await this.#host.sessionManager.saveArtifact(formatShakeArtifactText(regions), "shake");
 		} catch {
 			return undefined;
 		}

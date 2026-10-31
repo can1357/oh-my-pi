@@ -1,5 +1,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import {
+	type ParsedShakeArtifactRegion,
+	parseShakeArtifactEntries,
+	type ShakeArtifactRegionRef,
+} from "@oh-my-pi/pi-agent-core/compaction";
 import type {
 	ImageContent,
 	Message,
@@ -1002,6 +1007,7 @@ export class SessionManager {
 	#adoptedArtifactManager: ArtifactManager | null = null;
 	#inMemoryArtifacts: Map<string, string> | null = null;
 	#inMemoryArtifactCounter = 0;
+	#shakeArtifactRegionsCache: Map<string, Map<number, ParsedShakeArtifactRegion>> | null = null;
 
 	#suppressBreadcrumb = false;
 	/**
@@ -1309,6 +1315,7 @@ export class SessionManager {
 		this.#rewriteRequired = true;
 		this.#artifactManager = null;
 		this.#artifactManagerSessionFile = null;
+		this.#shakeArtifactRegionsCache = null;
 		this.#pendingArtifactCopy = { sessionFile: to, done: copySessionArtifacts(from, to) };
 		this.#rememberBreadcrumb(this.#cwd, to);
 		this.#claimSession();
@@ -2072,6 +2079,7 @@ export class SessionManager {
 		this.#adoptedArtifactManager = null;
 		this.#inMemoryArtifacts = null;
 		this.#inMemoryArtifactCounter = 0;
+		this.#shakeArtifactRegionsCache = null;
 
 		if (this.#persist) {
 			this.#sessionFile =
@@ -2312,6 +2320,7 @@ export class SessionManager {
 		this.#artifactManager = null;
 		this.#artifactManagerSessionFile = null;
 		this.#adoptedArtifactManager = null;
+		this.#shakeArtifactRegionsCache = null;
 
 		if (this.#sessionFile) this.#rememberBreadcrumb(this.#cwd, this.#sessionFile);
 	}
@@ -2445,6 +2454,7 @@ export class SessionManager {
 		this.#forceFileCreation = true;
 		this.#artifactManager = null;
 		this.#artifactManagerSessionFile = null;
+		this.#shakeArtifactRegionsCache = null;
 
 		if (this.sanitizeLoadedOpenAIResponsesReplayMetadata()) this.#rewriteRequired = true;
 	}
@@ -2520,6 +2530,7 @@ export class SessionManager {
 		this.#draftOnlySessionCleanupArmed = false;
 		this.#artifactManager = null;
 		this.#artifactManagerSessionFile = null;
+		this.#shakeArtifactRegionsCache = null;
 		this.#rememberBreadcrumb(this.#cwd, this.#sessionFile);
 
 		await this.#rewriteAtomically();
@@ -2699,6 +2710,7 @@ export class SessionManager {
 				if (sessionPathChanged && !sessionMoved) this.#expectedDiskSize = null;
 				this.#artifactManager = null;
 				this.#artifactManagerSessionFile = null;
+				this.#shakeArtifactRegionsCache = null;
 				// Path is repointed; hot-path appends may use `#sessionFile` again.
 				this.#sessionFileRelocating = null;
 			}
@@ -3045,6 +3057,7 @@ export class SessionManager {
 		this.#entries = [];
 		this.#index.clear();
 		this.#inMemoryArtifacts = null;
+		this.#shakeArtifactRegionsCache = null;
 		this.#closeWriterEventually();
 		this.#entriesReleased = true;
 	}
@@ -3919,8 +3932,32 @@ export class SessionManager {
 	buildSessionContext(options?: BuildSessionContextOptions): SessionContext {
 		return buildSessionContext(this.#entries, this.#index.leafId(), this.#index.entriesById(), {
 			resolveFrameData: data => lazyImageDataSync(this.#blobs, data),
+			resolveShakeArtifactRegion: options?.transcript ? ref => this.#readShakeArtifactRegionSync(ref) : undefined,
 			...options,
 		});
+	}
+
+	#readShakeArtifactRegionSync(ref: ShakeArtifactRegionRef): ParsedShakeArtifactRegion | undefined {
+		const cacheScope = this.#sessionFile ?? this.getArtifactsDir() ?? this.getSeanceSourceArtifactsDir() ?? "mem";
+		const cacheKey = `${cacheScope}:${ref.artifactId}`;
+		let regions = this.#shakeArtifactRegionsCache?.get(cacheKey);
+		if (!regions) {
+			let text = this.getArtifactsDir() ? undefined : this.#inMemoryArtifacts?.get(ref.artifactId);
+			if (text === undefined) {
+				for (const dir of [this.getArtifactsDir(), this.getSeanceSourceArtifactsDir()]) {
+					if (!dir) continue;
+					try {
+						text = fs.readFileSync(path.join(dir, `${ref.artifactId}.shake.log`), "utf8");
+						break;
+					} catch {}
+				}
+			}
+			if (text === undefined) return undefined;
+			regions = parseShakeArtifactEntries(text);
+			this.#shakeArtifactRegionsCache ??= new Map();
+			this.#shakeArtifactRegionsCache.set(cacheKey, regions);
+		}
+		return regions.get(ref.region);
 	}
 
 	/** Prompt blocks for a snapcompact archive, budgeted and resolved as {@link buildSessionContext} attaches them. */
@@ -4130,6 +4167,7 @@ export class SessionManager {
 		this.#index.rebuild(this.#entries);
 		this.#artifactManager = null;
 		this.#artifactManagerSessionFile = null;
+		this.#shakeArtifactRegionsCache = null;
 		this.#forceFileCreation = this.#persist;
 
 		if (!this.#persist) {

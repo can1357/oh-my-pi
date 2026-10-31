@@ -14,7 +14,14 @@
  * same append path over the host's byte-capped transcript reads.
  */
 import type * as fs from "node:fs";
+import * as path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import {
+	type ParsedShakeArtifactRegion,
+	parseShakeArtifactEntries,
+	restoreShakenToolResultMessage,
+	type ShakeArtifactRegionRef,
+} from "@oh-my-pi/pi-agent-core/compaction/shake";
 import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import type { Component, TUI } from "../tui";
 import { Editor } from "../components/editor";
@@ -199,6 +206,7 @@ export class AgentTranscriptViewer implements Component {
 	#initialEntryId: string | undefined;
 	/** Last described node and the visible inputs it was built from. */
 	#nativeCache: { signature: string; node: NativeNode } | undefined;
+	#shakeRegionsCache = new Map<string, Map<number, ParsedShakeArtifactRegion>>();
 
 	readonly #deps: AgentTranscriptViewerDeps;
 
@@ -395,7 +403,7 @@ export class AgentTranscriptViewer implements Component {
 			sentinels: sentinelsFromBuffer(data),
 		};
 		this.#model = undefined;
-		this.#rebuild(this.#extractMessages(this.#deps.transcript.parseEntries(complete)));
+		this.#rebuild(this.#extractMessages(this.#deps.transcript.parseEntries(complete), sessionFile));
 	}
 
 	#appendLocal(sessionFile: string, stat: fs.Stats, state: LocalTranscriptState, allowAsync: boolean): void {
@@ -416,7 +424,7 @@ export class AgentTranscriptViewer implements Component {
 		const lastNewline = combined.lastIndexOf("\n");
 		const complete = lastNewline >= 0 ? combined.slice(0, lastNewline + 1) : "";
 		const previousModel = this.#model;
-		const parsed = complete ? this.#extractMessages(this.#deps.transcript.parseEntries(complete)) : [];
+		const parsed = complete ? this.#extractMessages(this.#deps.transcript.parseEntries(complete), sessionFile) : [];
 		let sentinels: LocalTranscriptSentinel[];
 		try {
 			sentinels = sentinelsFromFile(this.#deps.transcript.fs, sessionFile, stat.size);
@@ -510,17 +518,57 @@ export class AgentTranscriptViewer implements Component {
 	}
 
 	/** Filter to message entries, tracking the model from the first assistant / a model_change. */
-	#extractMessages(entries: AgentTranscriptEntry[]): SessionMessageEntryLike[] {
+	#extractMessages(entries: AgentTranscriptEntry[], sessionFile?: string): SessionMessageEntryLike[] {
 		const messages: SessionMessageEntryLike[] = [];
 		for (const entry of entries) {
 			if (entry.type === "message") {
-				messages.push(entry);
+				if (entry.message.role === "toolResult" && sessionFile) {
+					const restored = restoreShakenToolResultMessage(entry.message, ref =>
+						this.#readLocalShakeArtifactRegion(sessionFile, ref),
+					);
+					messages.push(restored === entry.message ? entry : { ...entry, message: restored });
+				} else {
+					messages.push(entry);
+				}
 				if (!this.#model && entry.message.role === "assistant") this.#model = entry.message.model;
 			} else if (entry.type === "model_change") {
 				this.#model = entry.model;
 			}
 		}
 		return messages;
+	}
+
+	#readLocalShakeArtifactRegion(
+		sessionFile: string,
+		ref: ShakeArtifactRegionRef,
+	): ParsedShakeArtifactRegion | undefined {
+		const cacheKey = `${sessionFile}:${ref.artifactId}`;
+		let regions = this.#shakeRegionsCache.get(cacheKey);
+		if (!regions) {
+			const dirs: string[] = [];
+			if (sessionFile.endsWith(".jsonl")) dirs.push(sessionFile.slice(0, -6));
+			let dir = path.dirname(sessionFile);
+			for (let depth = 0; depth < 4 && dir && !dirs.includes(dir); depth++) {
+				dirs.push(dir);
+				const parent = path.dirname(dir);
+				if (parent === dir) break;
+				dir = parent;
+			}
+			let text: string | undefined;
+			for (const candidateDir of dirs) {
+				try {
+					text = this.#deps.transcript.fs.readFileSync(
+						path.join(candidateDir, `${ref.artifactId}.shake.log`),
+						"utf-8",
+					);
+					break;
+				} catch {}
+			}
+			if (text === undefined) return undefined;
+			regions = parseShakeArtifactEntries(text);
+			this.#shakeRegionsCache.set(cacheKey, regions);
+		}
+		return regions.get(ref.region);
 	}
 
 	#rebuild(entries: SessionMessageEntryLike[]): void {
