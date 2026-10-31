@@ -1296,7 +1296,7 @@ fn collect_stage_paths(
 	let untracked = if all || requested.contains("") {
 		repo.ls_files(true, true)?
 	} else {
-		repo.ls_files_at_paths(true, true, requested)?
+		repo.ls_files_at_paths(true, true, requested)?.0
 	};
 	Ok(untracked.into_iter().collect())
 }

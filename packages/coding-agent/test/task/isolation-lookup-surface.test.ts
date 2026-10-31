@@ -59,7 +59,6 @@ const NOT_THIS_SUBSYSTEM = new Set([
 	"src/config/settings.ts",
 	"src/registry/agent-registry.ts",
 	"src/task/executor.ts",
-	"src/task/parallel.ts",
 	"src/task/settings.ts",
 	"src/tools/index.ts",
 	"src/utils/commit-message-generator.ts",
@@ -87,6 +86,28 @@ const ALLOWED_PACKAGES = new Set([
 	"node:timers/promises",
 	"node:util",
 ]);
+
+/**
+ * Every named symbol this subsystem imports, from anywhere. Pinned, because a
+ * helper that swallows an error is already a named export in this repository
+ * — `directoryExists`, whose body is `catch { return false }` — and the walk
+ * stops at the package boundary that holds it.
+ */
+const PINNED_SYMBOLS: string[] = [
+	"@oh-my-pi/pi-natives:VcsCommitAuthor",
+	"@oh-my-pi/pi-natives:VcsGitRepo",
+	"@oh-my-pi/pi-tui/tools/task:NestedRepoPatch",
+	"@oh-my-pi/pi-tui/tools/task:SingleResult",
+	"@oh-my-pi/pi-utils:Snowflake",
+	"@oh-my-pi/pi-utils:acquireFileLock",
+	"@oh-my-pi/pi-utils:formatBytes",
+	"@oh-my-pi/pi-utils:getWorktreeDir",
+	"@oh-my-pi/pi-utils:getWorktreesDir",
+	"@oh-my-pi/pi-utils:logger",
+	"@oh-my-pi/pi-utils:prompt",
+	"node:async_hooks:AsyncLocalStorage",
+	"node:timers/promises:scheduler",
+];
 
 interface Graph {
 	reachable: Set<string>;
@@ -183,6 +204,57 @@ describe("the isolation path's filesystem surface", () => {
 			const source = code(await fs.readFile(path.join(root, file), "utf8"));
 			source.split("\n").forEach((line, index) => {
 				if (/\b(require|createRequire)\s*\(/.test(line)) offences.push(`${file}:${index + 1}: ${line.trim()}`);
+			});
+		}
+
+		expect(offences.sort()).toEqual([]);
+	});
+
+	it("takes a fixed set of named symbols from workspace packages", async () => {
+		// The walk stops at package boundaries, so a read helper added to a
+		// package and called from here is invisible to it — and one already
+		// exists: `directoryExists`, whose body is `catch { return false }`.
+		// The names are pinned, so importing it is a failing diff.
+		const root = path.resolve(import.meta.dir, "../..");
+		const { reachable } = await walkIsolationGraph(root);
+		const named = new Set<string>();
+		for (const file of reachable) {
+			if (SURFACE.has(file)) continue;
+			// Comments removed but strings kept, so the specifier is readable,
+			// and whole-file rather than per line, so a split import is one
+			// match.
+			const source = (await fs.readFile(path.join(root, file), "utf8"))
+				.replace(/\/\*[\s\S]*?\*\//g, " ")
+				.replace(/(^|[^:])\/\/[^\n]*/g, "$1 ");
+			for (const match of source.matchAll(/import\s+(?:type\s+)?\{([^}]*)\}\s*from\s*"([^"]+)"/g)) {
+				const specifier = match[2] ?? "";
+				if (specifier.startsWith(".")) continue;
+				for (const name of (match[1] ?? "").split(",")) {
+					const bare = name
+						.replace(/\btype\b/, "")
+						.split(" as ")[0]
+						?.trim();
+					if (bare) named.add(`${specifier}:${bare}`);
+				}
+			}
+		}
+
+		expect([...named].sort()).toEqual([...PINNED_SYMBOLS].sort());
+	});
+
+	it("loads nothing through a computed specifier, which a graph cannot resolve", async () => {
+		// `await import(someExpression)` and `globalThis["B" + "un"]` are both
+		// reads a parse of the graph cannot follow, so both are refused
+		// outright rather than resolved.
+		const root = path.resolve(import.meta.dir, "../..");
+		const { reachable } = await walkIsolationGraph(root);
+		const offences: string[] = [];
+		for (const file of reachable) {
+			if (SURFACE.has(file)) continue;
+			const source = code(await fs.readFile(path.join(root, file), "utf8"));
+			source.split("\n").forEach((line, index) => {
+				if (/\bimport\s*\(\s*[^"'`)]/.test(line)) offences.push(`${file}:${index + 1}: computed import`);
+				if (/\bglobalThis\s*\[/.test(line)) offences.push(`${file}:${index + 1}: computed global`);
 			});
 		}
 

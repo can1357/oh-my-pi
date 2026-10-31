@@ -58,37 +58,6 @@ export const watch = nodeWatch;
 export type { FSWatcher };
 
 /**
- * The untracked paths of a working tree, and the directories git could not
- * read while listing them.
- *
- * `git ls-files --others` **warns on stderr and exits 0** when it cannot open
- * a directory, and the native binding returns only the array, so a short
- * listing is indistinguishable from a complete one. The warning is git's own
- * report of what it did not look at: reading it cannot disagree with git, and
- * it costs nothing — which a pre-walk of the tree could not say, since the
- * walk guessed at which directories git would read and was wrong five ways.
- *
- * `-z` because a path with a newline or a quote in it is still a path.
- */
-export async function listUntracked(repoDir: string): Promise<{ files: string[]; unreadable: string[] }> {
-	const git = Bun.spawn(["git", "-C", repoDir, "ls-files", "--others", "--exclude-standard", "-z"], {
-		stdout: "pipe",
-		stderr: "pipe",
-	});
-	const [out, err] = await Promise.all([new Response(git.stdout).text(), new Response(git.stderr).text()]);
-	const code = await git.exited;
-	if (code !== 0) throw new Error(`git ls-files failed in ${repoDir} (exit ${code}): ${err.trim()}`);
-	const files = out.split("\0").filter(entry => entry !== "");
-	const unreadable: string[] = [];
-	for (const line of err.split("\n")) {
-		const named = /could not open directory '(.*)':/.exec(line);
-		if (named?.[1] !== undefined) unreadable.push(named[1].replace(/\/$/, ""));
-		else if (line.trim() !== "") unreadable.push(line.trim());
-	}
-	return { files, unreadable };
-}
-
-/**
  * The start time a process reports to `ps`, or `null` when it reports none.
  *
  * A liveness probe, not a filesystem read, but it needs to spawn — and the

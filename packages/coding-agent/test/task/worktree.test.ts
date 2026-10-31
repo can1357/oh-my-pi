@@ -1465,11 +1465,14 @@ describe("a capture that could not read everything", () => {
 		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
 		await runGit(repo, ["add", ".gitignore", "tracked.txt"]);
 		await runGit(repo, ["commit", "-q", "-m", "base"]);
-		const baseline = await captureBaseline(repo);
-		await fs.writeFile(path.join(repo, "work.txt"), "the run's real change\n");
+		// Unreadable *before* the baseline as well, which is the ordering the
+		// walk refused: a run whose ignored directory is already locked must
+		// still start and still hand back its work.
 		const ignored = path.join(repo, "build", "cache");
 		await fs.mkdir(ignored, { recursive: true });
 		await fs.chmod(ignored, 0o000);
+		const baseline = await captureBaseline(repo);
+		await fs.writeFile(path.join(repo, "work.txt"), "the run's real change\n");
 
 		try {
 			const delta = await captureDeltaPatch(repo, baseline);
@@ -1522,7 +1525,7 @@ describe("a capture that could not read everything", () => {
 });
 
 describe("a capture that could not look everywhere", () => {
-	it("raises instead of reporting no nested repositories", async () => {
+	it("records, rather than raises, a directory the nested scan cannot list", async () => {
 		// A directory the walk could not list may hold a nested repo whose
 		// work the capture then misses entirely, and the teardown deletes on
 		// the strength of that capture.
@@ -1545,8 +1548,11 @@ describe("a capture that could not look everywhere", () => {
 			return await (real as (...a: unknown[]) => Promise<unknown>)(target, ...rest);
 		}) as unknown as typeof fs.readdir);
 
-		await expect(captureBaseline(repo)).rejects.toThrow(/Could not list/);
+		// Recorded rather than raised: git decides what the capture can see,
+		// and the capture refuses on git's own report at delta time.
+		const baseline = await captureBaseline(repo);
 		spy.mockRestore();
+		expect(baseline.nested.map(entry => entry.relativePath)).toEqual([]);
 	});
 });
 

@@ -747,6 +747,13 @@ export declare class VcsGitRepo {
   commitDetails(rev: string, signal?: unknown | undefined | null): Promise<VcsCommitDetails>
   /** List index or untracked paths. */
   lsFiles(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
+  /**
+   * Untracked paths, plus the directories git said it could not open.
+   *
+   * `git ls-files --others` warns and exits 0 when it cannot open a directory,
+   * so the list alone cannot say whether it is complete.
+   */
+  lsFilesWithWarnings(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<LsFilesWithWarnings>
   /** List tree paths. */
   lsTree(rev: string, paths: Array<string>, signal?: unknown | undefined | null): Promise<Array<string>>
   /** List submodule paths. */
@@ -878,6 +885,8 @@ export declare class VcsRepo {
   commitDetails(rev: string, signal?: unknown | undefined | null): Promise<VcsCommitDetails>
   /** List tracked or untracked paths. */
   lsFiles(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Untracked paths, plus the directories git said it could not open. */
+  lsFilesWithWarnings(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<LsFilesWithWarnings>
 }
 
 /**
@@ -3959,6 +3968,14 @@ export interface VcsCommitAuthor {
   name: string
   email: string
   date?: string
+}
+
+/** An untracked listing with git's own report of what it could not read. */
+export interface LsFilesWithWarnings {
+  /** The untracked paths git listed. */
+  paths: Array<string>
+  /** Directories git reported it could not open, so the listing is short. */
+  unreadable: Array<string>
 }
 
 /** Commit metadata. */

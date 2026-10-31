@@ -167,13 +167,15 @@ async function discoverNestedRepos(repoRoot: string, ownRepos: readonly string[]
 		const listing = await fs.readdirTypedLookup(dir);
 		if (listing.kind === "absent") return;
 		if (listing.kind === "unknown") {
-			// A directory this process could not list may hold a nested repo
-			// whose work the capture would then miss entirely — and the
-			// teardown deletes on the strength of that capture.
-			throw new IsolationCaptureIncompleteError(
-				`Could not list ${dir} while looking for nested repositories: ${listing.reason}`,
-				[dir],
-			);
+			// Recorded, not raised. This walk looks for nested repositories
+			// while the baseline is taken, and git decides what the capture
+			// can see: refusing here stopped runs whose unreadable directory
+			// was gitignored — `target/`, `.venv`, `dist/`, `__pycache__` —
+			// which git never reads and the capture never misses. The capture
+			// itself refuses, on git's own report, at the moment that
+			// authorises a delete.
+			logger.warn("nested-repository scan could not list a directory", { dir, reason: listing.reason });
+			return;
 		}
 		const entries = listing.value;
 		for (const entry of entries) {
@@ -458,18 +460,20 @@ async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRe
 	const currentHead = (await repo.headSha()) ?? "";
 	const currentStaged = await repo.diffText({ binary: true, cached: true });
 	const currentUnstaged = await repo.diffText({ binary: true });
-	// Git's own report of what it did not look at. A directory it could not
-	// open is a warning on stderr and exit 0, so the list alone cannot say
-	// whether it is complete — and this patch is what the teardown deletes on.
-	const listed = await fs.listUntracked(repoDir);
+	// Git's own report of what it did not look at, through the binding that
+	// runs git the way this repository runs git — the stripped environment,
+	// the deadline, the cancellation signal and the in-process fallback. A
+	// hand-spawned `git -C` inherited `GIT_WORK_TREE` from the caller, listed
+	// another tree, and the teardown removed this one on the strength of it.
+	const listed = await repo.lsFilesWithWarnings(true, true);
 	if (listed.unreadable.length > 0) {
 		throw new IsolationCaptureIncompleteError(
-			`git could not read ${listed.unreadable.length} director(y|ies) in ${repoDir}, so this capture cannot ` +
-				`say what is in them: ${listed.unreadable.slice(0, 10).join(", ")}`,
+			`git could not read ${listed.unreadable.length} ${listed.unreadable.length === 1 ? "directory" : "directories"} ` +
+				`in ${repoDir}, so this capture cannot say what is in them: ${listed.unreadable.slice(0, 10).join(", ")}`,
 			listed.unreadable,
 		);
 	}
-	const currentUntracked = listed.files;
+	const currentUntracked = listed.paths;
 	const currentUntracked_ = await captureUntrackedPatch(repoDir, currentUntracked, repo);
 	if (currentUntracked_.unread.length > 0) {
 		// The whole point of the capture is to decide whether the workspace may
