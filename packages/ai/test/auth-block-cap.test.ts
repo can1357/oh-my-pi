@@ -8,7 +8,7 @@
  */
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { DEFAULT_BLOCK_MS } from "@oh-my-pi/pi-ai/auth/blocks";
+import { type CredentialBlocks, DEFAULT_BLOCK_MS } from "@oh-my-pi/pi-ai/auth/blocks";
 import { type AuthCredentialStore, AuthStorage, type StoredAuthCredential } from "@oh-my-pi/pi-ai/auth-storage";
 import type { UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -144,10 +144,12 @@ describe("credential block ceiling", () => {
 			const now = Date.now();
 			vi.spyOn(Date, "now").mockReturnValue(now);
 
-			auth.blocks.mark("cap-local", "cap-local:api_key", 0, now + 400 * DAY_MS);
-			expect(auth.blocks.blockedUntil("cap-local", "cap-local:api_key", 0)).toBe(now + WEEK_MS);
-			auth.blocks.mark("cap-local", "cap-local:api_key", 1, Number.NaN);
-			expect(auth.blocks.blockedUntil("cap-local", "cap-local:api_key", 1)).toBe(now + DEFAULT_BLOCK_MS);
+			// `mark` and `blockedUntil` are the store's own API, under the public `BlocksApi`.
+			const blocks = auth.blocks as CredentialBlocks;
+			blocks.mark("cap-local", "cap-local:api_key", 0, now + 400 * DAY_MS);
+			expect(blocks.blockedUntil("cap-local", "cap-local:api_key", 0)).toBe(now + WEEK_MS);
+			blocks.mark("cap-local", "cap-local:api_key", 1, Number.NaN);
+			expect(blocks.blockedUntil("cap-local", "cap-local:api_key", 1)).toBe(now + DEFAULT_BLOCK_MS);
 
 			auth.blocks.upsert({
 				credentialId: second.id,
@@ -204,15 +206,16 @@ describe("credential block ceiling", () => {
 			// `updated_at` holds whole seconds; the week runs from the end of that second.
 			const boundedSecond = (oneDayAgoSec + 1) * 1000 + WEEK_MS;
 			// Written ten days ago: past its week, so released.
-			expect(auth.blocks.blockedUntil("cap-local", "cap-local:api_key", 0)).toBeUndefined();
+			const blocks = auth.blocks as CredentialBlocks;
+			expect(blocks.blockedUntil("cap-local", "cap-local:api_key", 0)).toBeUndefined();
 			// Written a day ago: blocked for the six days left of its week, not 400.
-			expect(auth.blocks.blockedUntil("cap-local", "cap-local:api_key", 1)).toBe(boundedSecond);
+			expect(blocks.blockedUntil("cap-local", "cap-local:api_key", 1)).toBe(boundedSecond);
 			expect(
 				auth.blocks.list([first.id, second.id]).map(block => [block.credentialId, block.blockedUntilMs]),
 			).toEqual([[second.id, boundedSecond]]);
 			// A new short block merges with the legacy row's bounded deadline: it
 			// must not restart that row's week from now.
-			auth.blocks.mark("cap-local", "cap-local:api_key", 1, now + 60_000);
+			blocks.mark("cap-local", "cap-local:api_key", 1, now + 60_000);
 			expect(auth.blocks.list([second.id]).map(block => block.blockedUntilMs)).toEqual([boundedSecond]);
 		} finally {
 			auth.close();

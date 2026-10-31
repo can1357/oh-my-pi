@@ -742,7 +742,7 @@ async function runCursorHttp2(answer: (run: http2.ServerHttp2Stream) => void): P
 		sessions.add(session);
 		session.on("close", () => sessions.delete(session));
 	});
-	server.on("stream", (run, headers) => {
+	server.on("stream", (run: http2.ServerHttp2Stream, headers: http2.IncomingHttpHeaders) => {
 		if (headers[":path"] !== "/agent.v1.AgentService/Run") {
 			run.respond({ ":status": 404 });
 			run.end();

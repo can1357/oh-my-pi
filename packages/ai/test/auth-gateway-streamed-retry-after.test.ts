@@ -226,7 +226,7 @@ describe("auth-gateway streamed format routes — an upstream failure before it 
 		const realSetTimeout = globalThis.setTimeout;
 		const timers = vi
 			.spyOn(globalThis, "setTimeout")
-			.mockImplementation(((handler: TimerHandler, delay?: number, ...args: unknown[]) =>
+			.mockImplementation(((handler: (...handlerArgs: unknown[]) => void, delay?: number, ...args: unknown[]) =>
 				realSetTimeout(handler, delay === STREAM_ACCEPT_HOLD_MAX_MS ? 0 : delay, ...args)) as typeof setTimeout);
 
 		// Held headers would leave this fetch pending until the test times out.
