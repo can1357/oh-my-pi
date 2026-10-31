@@ -125,6 +125,7 @@ import {
 	cfgAdvisorEvictStaleResults,
 	cfgAdvisorImmuneTurns,
 	cfgAdvisorMaxNotesPerUpdate,
+	cfgAdvisorMinSeverity,
 	cfgAdvisorReviewInterval,
 	cfgAdvisorReviewMode,
 	cfgAdvisorSyncBacklog,
@@ -1339,6 +1340,7 @@ export class SessionAdvisors {
 			const adviseTool = new AdviseTool(
 				(note, severity, turn) => this.#routeAdvice(advisorRef, note, severity, turn),
 				emissionGuard,
+				() => cfgAdvisorMinSeverity.get(this.#host.settings),
 			);
 
 			// `#advisorWatchdogPrompt` already carries WATCHDOG.md + YAML shared

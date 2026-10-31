@@ -28,7 +28,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Snowflake, TempDir } from "@oh-my-pi/pi-utils";
 
@@ -188,10 +188,11 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		opts: {
 			severity?: "nit" | "concern" | "blocker";
 			continueSeverity?: "nit" | "concern" | "blocker";
+			minSeverity?: "nit" | "concern" | "blocker";
 			extensionRunner?: AdvisorTestExtensionRunner;
 		} = {},
 	): Promise<CompletedAdvisorHarness> {
-		const { severity = "nit", continueSeverity, extensionRunner } = opts;
+		const { severity = "nit", continueSeverity, minSeverity, extensionRunner } = opts;
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({
 			responses: [
@@ -218,6 +219,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
 			streamFn: mock.stream,
 		});
 		const sessionManager = SessionManager.inMemory();
@@ -225,6 +227,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 			"compaction.enabled": false,
 			"retry.enabled": false,
 			...(continueSeverity ? { "advisor.continueSeverity": continueSeverity } : {}),
+			...(minSeverity ? { "advisor.minSeverity": minSeverity } : {}),
 		});
 		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
 		const authStorage = await AuthStorage.create(":memory:");
@@ -337,6 +340,50 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		expect(advisorCards).toHaveLength(1);
 		expect(advisorCards[0].content).toContain("Final yield needs correction");
 	});
+
+	it("never delivers a below-floor note or wakes the primary even when continueSeverity allows it", async () => {
+		const { session, sessionManager, mock } = await createCompletedAdvisorSession({
+			severity: "concern",
+			minSeverity: "blocker",
+			continueSeverity: "nit",
+		});
+		const persisted = capturePersistedAdvice(sessionManager);
+		await session.prompt("answer with exactly one line");
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected advisor agent to be live");
+		await advisor.prompt("inspect the completed turn");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(1);
+		expect(session.agent.state.messages.filter(isAdvisorCard)).toHaveLength(0);
+		expect(persisted).toEqual([]);
+
+		await session.prompt("continue with the next task");
+		await session.waitForIdle();
+		expect(JSON.stringify(mock.calls.at(-1)?.context.messages)).not.toContain("Fixture verdict confirmed");
+	});
+
+	it.each(["concern", "blocker"] as const)(
+		"delivers a %s at or above the floor and continues a finished run",
+		async severity => {
+			const { session, sessionManager, mock } = await createCompletedAdvisorSession({
+				severity,
+				minSeverity: "concern",
+			});
+			const persisted = capturePersistedAdvice(sessionManager);
+			await session.prompt("answer with exactly one line");
+			expect(session.setAdvisorEnabled(true)).toBe(true);
+			const advisor = session.getAdvisorAgent();
+			if (!advisor) throw new Error("Expected advisor agent to be live");
+			await advisor.prompt("inspect the completed turn");
+			await session.waitForIdle();
+
+			expect(mock.calls).toHaveLength(2);
+			expect(persisted.join("\n")).toContain("Fixture verdict confirmed");
+			expect(JSON.stringify(mock.calls[1].context.messages)).toContain("Fixture verdict confirmed");
+		},
+	);
 
 	it("preserves a late advisor concern below advisor.continueSeverity without waking the primary", async () => {
 		const { session, sessionManager, mock, advisorMock } = await createCompletedAdvisorSession({

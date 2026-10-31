@@ -687,6 +687,26 @@ describe("advisor", () => {
 	});
 
 	describe("AdviseTool", () => {
+		it("drops low-severity notes before they consume budget or dedupe history", async () => {
+			let minimum: "nit" | "concern" = "concern";
+			const delivered: string[] = [];
+			const tool = new AdviseTool(
+				note => delivered.push(note),
+				new AdvisorEmissionGuard({ budgetPerUpdate: 1 }),
+				() => minimum,
+			);
+			tool.beginUpdate(false);
+			const dropped = await tool.execute("floor-1", { note: "Rename the ambiguous helper." });
+			await tool.execute("floor-2", { note: "Handle the failed migration.", severity: "concern" });
+			expect(delivered).toEqual(["Handle the failed migration."]);
+			expect(JSON.stringify(dropped.content)).toContain("Dropped:");
+
+			minimum = "nit";
+			tool.beginUpdate(false);
+			await tool.execute("floor-3", { note: "Rename the ambiguous helper." });
+			expect(delivered).toEqual(["Handle the failed migration.", "Rename the ambiguous helper."]);
+		});
+
 		it("suppresses duplicate advice notes from the same advisor session", async () => {
 			const onAdvice = vi.fn();
 			const tool = new AdviseTool(onAdvice);

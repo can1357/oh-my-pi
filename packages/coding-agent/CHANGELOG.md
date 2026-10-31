@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `advisor.minSeverity` to drop notes below `nit`, `concern`, or `blocker` before they reach the agent; the default `nit` keeps all severities ([#3378](https://github.com/can1357/oh-my-pi/issues/3378), [#17563](https://github.com/can1357/oh-my-pi/pull/17563) by [@wolfiesch](https://github.com/wolfiesch))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
