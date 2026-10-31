@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `skills.hideSkills` to omit selected skills from the model catalog while keeping them available through `skill://` and explicit skill invocation.
+- Added `skills.hideSkills` to omit selected skills from the model catalog while keeping them available through `skill://` and explicit skill invocation ([#17560](https://github.com/can1357/oh-my-pi/pull/17560) by [@wolfiesch](https://github.com/wolfiesch))
 
 ## [18.14.1] - 2026-10-31
 
