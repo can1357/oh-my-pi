@@ -337,11 +337,13 @@ describe("python workpool model selection", () => {
 			expect(requests).toEqual([
 				{
 					session: "test-session",
-					run: null,
+					// Outside a cell the kernel sends an empty run, which the host refuses
+					// for everything but the questions that belong to the session.
+					run: "",
 					name: "__workpool__",
 					args: { op: "create", agent: "scout", model: "p/chosen:high" },
 				},
-				{ session: "test-session", run: null, name: "__workpool__", args: { op: "create", agent: "scout" } },
+				{ session: "test-session", run: "", name: "__workpool__", args: { op: "create", agent: "scout" } },
 			]);
 		} finally {
 			server.stop(true);
