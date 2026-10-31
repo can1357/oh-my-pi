@@ -322,7 +322,7 @@
 - Fixed session tree user and assistant turns looking identical in themes whose `accent` and `success` colors match or nearly match (`dark-terminal`, `dark-poimandres`, `light-poimandres`): user rows are now bold, the `assistant:` label switches to the path color, and custom and advisor messages are muted ([#17520](https://github.com/can1357/oh-my-pi/pull/17520) by [@wolfiesch](https://github.com/wolfiesch))
 ### Changed
 
-- Highlight the full keyboard-selected row in `/agents`, keeping selection and hover backgrounds filled through truncated text.
+- Highlight the full keyboard-selected row in `/agents`, keeping selection and hover backgrounds filled through truncated text ([#17562](https://github.com/can1357/oh-my-pi/pull/17562) by [@wolfiesch](https://github.com/wolfiesch))
 
 ## [18.14.1] - 2026-10-31
 
