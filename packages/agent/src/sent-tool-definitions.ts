@@ -1,4 +1,4 @@
-import type { Message, Tool } from "@oh-my-pi/pi-ai";
+import type { Context, Message, Tool } from "@oh-my-pi/pi-ai";
 
 /**
  * Last wire definition this Agent sent for each tool name, so a provider that keeps
@@ -14,11 +14,18 @@ export class SentToolDefinitions {
 	}
 
 	/**
-	 * Definitions for names the latest `requestControls.tools.declared` in `messages` holds
-	 * that are not in `active`; undefined when none. Names never sent by this Agent are
-	 * skipped: the provider drops them from the declaration.
+	 * `context` with {@link Context.inactiveTools} set to the definitions for names the latest
+	 * `requestControls.tools.declared` in its messages holds that are not in its `tools`; cleared when
+	 * there are none or the request declares no tools. Names never sent by this Agent are skipped: the
+	 * provider drops them from the declaration.
 	 */
-	inactiveFor(messages: readonly Message[], active: readonly Tool[]): Tool[] | undefined {
+	withInactiveTools(context: Context): Context {
+		const inactiveTools = context.tools?.length ? this.#inactiveFor(context.messages, context.tools) : undefined;
+		if (!inactiveTools && !context.inactiveTools) return context;
+		return { ...context, inactiveTools };
+	}
+
+	#inactiveFor(messages: readonly Message[], active: readonly Tool[]): Tool[] | undefined {
 		let declared: readonly string[] | undefined;
 		for (let index = messages.length - 1; index >= 0; index--) {
 			const message = messages[index];
