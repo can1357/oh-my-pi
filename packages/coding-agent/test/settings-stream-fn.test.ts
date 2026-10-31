@@ -536,6 +536,17 @@ describe("createSettingsAwareStreamFn", () => {
 
 			expect(calls[0]?.options?.fallbacks).toBeUndefined();
 		});
+
+		it("reads the unset chain as the [] default and still follows the catalog chain", () => {
+			const settings = Settings.isolated({ "providers.anthropic.serverSideFallback": true });
+			const { fn: base, calls } = captureBase();
+			const wrapped = createSettingsAwareStreamFn(settings, base);
+
+			expect(cfgProvidersAnthropicServerSideFallbackModels.get(settings)).toEqual([]);
+			wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+			expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-opus-5" }]);
+		});
 	});
 
 	describe("providers.muse-code.storeResponses (opt-in)", () => {
