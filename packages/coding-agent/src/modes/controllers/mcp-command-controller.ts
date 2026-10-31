@@ -82,6 +82,8 @@ import { cfgMcpEnableProjectConfig } from "../../mcp/settings";
 const MCP_MANUAL_INPUT_PROVIDER_ID = "mcp";
 const MCP_MANUAL_LOGIN_TIP = "Headless? Paste the redirect URL or code with /login <value>.";
 const MCP_TEST_ESCAPE_GRACE_MS = 5_000;
+/** Upper bound on waiting for `/mcp test`'s own connection to close before the manager connects. */
+const MCP_TEST_CLOSE_BEFORE_SYNC_MS = 2_000;
 /** MCP OAuth Esc handlers mapped to the handler each one restores when its flow unwinds. */
 const mcpOAuthEscapeOriginals = new WeakMap<() => void, (() => void) | undefined>();
 
@@ -1005,13 +1007,87 @@ export class MCPCommandController {
 		}
 	}
 
-	async #syncManagerConnection(name: string, config: MCPServerConfig): Promise<void> {
-		if (!this.ctx.mcpManager) return;
-		if (this.ctx.mcpManager.getConnectionStatus(name) !== "disconnected") return;
-		await this.ctx.mcpManager.connectServers({ [name]: config }, {});
-		if (this.ctx.mcpManager.getConnectionStatus(name) === "connected") {
+	/**
+	 * Hand a just-tested server to the manager. Returns `false` when the seeding
+	 * connect of a lazy server left the session without a live connection, so
+	 * the caller can tell the user that its current tools did not load.
+	 */
+	async #syncManagerConnection(name: string, config: MCPServerConfig): Promise<boolean> {
+		if (!this.ctx.mcpManager) return true;
+		const status = this.ctx.mcpManager.getConnectionStatus(name);
+		// A connected server needs nothing from the test, and neither does an
+		// eager server that is still connecting. A lazy server is "connecting"
+		// only during an automatic reconnect (a deferred tool's first use, or a
+		// dropped transport). That attempt can still fail, so the seed below
+		// waits for it.
+		if (status === "connected" || (status === "connecting" && !config.lazy)) return true;
+		let managerConfig = config;
+		let managerSources: Record<string, SourceMeta> = {};
+		if (config.lazy) {
+			// The seed below writes the tool cache under the identity of the config
+			// the manager holds, and the next startup looks it up with the config
+			// discovery produces (defaults such as `type` filled in, env
+			// placeholders expanded). Hand the manager that same shape, or the seed
+			// is unreadable next session and the server starts tool-less again.
+			const discovered = await loadAllMCPConfigs(getProjectDir(), {
+				extensionRoots: this.ctx.session.effectiveExtensionRoots,
+			});
+			const discoveredConfig = discovered.configs[name];
+			if (discoveredConfig) {
+				managerConfig = discoveredConfig;
+				const source = discovered.sources[name];
+				if (source) managerSources = { [name]: source };
+			}
+		}
+		// An attempt that started in the meantime owns the server. `connectServers`
+		// would skip it, but it would still list the server in the startup barrier.
+		if (this.ctx.mcpManager.getConnectionStatus(name) === "disconnected") {
+			await this.ctx.mcpManager.connectServers({ [name]: managerConfig }, managerSources);
+		}
+		// A *lazy* server never connects through `connectServers`: with no
+		// cache it stays tool-less (dormant until `/mcp reconnect`), and with a
+		// cache it serves the LAST connect's catalog — which the test just
+		// proved stale when the server's tools changed. Either way the user
+		// explicitly exercised this server, so spend one forced connect through
+		// the documented seeding path: it registers the live catalog and
+		// rewrites the cache for future startups.
+		let seeded = true;
+		if (managerConfig.lazy) {
+			try {
+				// `/mcp test` is an explicit user-driven retry, exactly like
+				// `/mcp reconnect` — it must reset the crash-burst window too, or
+				// a server that already tripped the reconnect breaker reports a
+				// successful test while this seeding call silently no-ops
+				// (`reconnectServer` returns `null` under an open breaker) and
+				// the server stays cache-less and tool-less.
+				//
+				// `reconnectServer` also joins an attempt that is already in
+				// flight and returns that attempt's result. An automatic attempt
+				// can fail, or abort when a newer config supersedes it. Its
+				// failure is not the result of this seed, so start the seed's own
+				// attempt after it.
+				const joined = this.ctx.mcpManager.getConnectionStatus(name) === "connecting";
+				let connection = await this.ctx.mcpManager.reconnectServer(name, { manual: true });
+				if (!connection && joined) connection = await this.ctx.mcpManager.reconnectServer(name, { manual: true });
+				seeded = connection !== null;
+			} catch {
+				// The test connection worked but the seed failed. The caller
+				// says so, and `/mcp reconnect` can retry.
+				seeded = false;
+			}
+		}
+		// A lazy server keeps status "disconnected" by design even after
+		// `connectServers` installed its cached tools as deferred entries (and
+		// after the seeding reconnect above). Gate the session refresh on tools
+		// actually held for this server — not on the connection status alone —
+		// or a cache-hit lazy test mounts nothing until a session reload.
+		if (
+			this.ctx.mcpManager.getConnectionStatus(name) === "connected" ||
+			this.ctx.mcpManager.getTools().some(tool => tool.mcpServerName === name)
+		) {
 			await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
 		}
+		return seeded;
 	}
 
 	async #handleWizardComplete(name: string, config: MCPServerConfig, scope: "user" | "project"): Promise<void> {
@@ -1173,18 +1249,7 @@ export class MCPCommandController {
 				for (const name of userServers) {
 					const config = userConfig.mcpServers![name];
 					const type = config.type ?? "stdio";
-					const state =
-						config.enabled === false
-							? "inactive"
-							: (this.ctx.mcpManager?.getConnectionStatus(name) ?? "disconnected");
-					const status =
-						state === "inactive"
-							? theme.fg("warning", " ◌ inactive")
-							: state === "connected"
-								? theme.fg("success", " ● connected")
-								: state === "connecting"
-									? theme.fg("muted", " ◌ connecting")
-									: theme.fg("muted", " ○ not connected");
+					const status = this.#formatListStatus(name, config.enabled === false);
 					lines.push(`  ${theme.fg("accent", name)}${status} ${theme.fg("dim", `[${type}]`)}`);
 				}
 				lines.push("");
@@ -1196,18 +1261,7 @@ export class MCPCommandController {
 				for (const name of projectServers) {
 					const config = projectConfig.mcpServers![name];
 					const type = config.type ?? "stdio";
-					const state =
-						config.enabled === false
-							? "inactive"
-							: (this.ctx.mcpManager?.getConnectionStatus(name) ?? "disconnected");
-					const status =
-						state === "inactive"
-							? theme.fg("warning", " ◌ inactive")
-							: state === "connected"
-								? theme.fg("success", " ● connected")
-								: state === "connecting"
-									? theme.fg("muted", " ◌ connecting")
-									: theme.fg("muted", " ○ not connected");
+					const status = this.#formatListStatus(name, config.enabled === false);
 					lines.push(`  ${theme.fg("accent", name)}${status} ${theme.fg("dim", `[${type}]`)}`);
 				}
 				lines.push("");
@@ -1218,13 +1272,7 @@ export class MCPCommandController {
 				for (const { providerName, shortPath, items: entries } of groupBySource(discoveredServers, e => e.source)) {
 					lines.push(theme.fg("accent", providerName) + theme.fg("muted", ` (${shortPath}):`));
 					for (const { name } of entries) {
-						const state = this.ctx.mcpManager!.getConnectionStatus(name);
-						const status =
-							state === "connected"
-								? theme.fg("success", " ● connected")
-								: state === "connecting"
-									? theme.fg("muted", " ◌ connecting")
-									: theme.fg("muted", " ○ not connected");
+						const status = this.#formatListStatus(name, false);
 						lines.push(`  ${theme.fg("accent", name)}${status}`);
 					}
 					lines.push("");
@@ -1244,6 +1292,25 @@ export class MCPCommandController {
 		} catch (error) {
 			this.ctx.showError(`Failed to list servers: ${error instanceof Error ? error.message : String(error)}`);
 		}
+	}
+
+	/** One server's `/mcp list` status badge. */
+	#formatListStatus(name: string, inactive: boolean): string {
+		if (inactive) return theme.fg("warning", " ◌ inactive");
+		const manager = this.ctx.mcpManager;
+		const state = manager?.getConnectionStatus(name) ?? "disconnected";
+		if (state === "connected") return theme.fg("success", " ● connected");
+		if (state === "connecting") return theme.fg("muted", " ◌ connecting");
+		// Registered tools without a connection are deferred entries (a lazy
+		// server's cached catalog): invoking one connects the server.
+		const toolCount = manager?.getTools().filter(tool => tool.mcpServerName === name).length ?? 0;
+		if (toolCount > 0) {
+			return theme.fg(
+				"muted",
+				` ○ not connected · ${toolCount} tool${toolCount === 1 ? "" : "s"}, connects on first use`,
+			);
+		}
+		return theme.fg("muted", " ○ not connected");
 	}
 
 	/**
@@ -1423,7 +1490,40 @@ export class MCPCommandController {
 			}
 
 			lines.push("");
-			await this.#syncManagerConnection(name, config);
+			if (connection) {
+				const testConnection = connection;
+				connection = undefined;
+				const closing = disconnectServer(testConnection);
+				const managerStatus = this.ctx.mcpManager?.getConnectionStatus(name);
+				if (managerStatus === "disconnected" || (managerStatus === "connecting" && config.lazy)) {
+					// The manager is about to open its own connection (a lazy seed,
+					// which can follow an automatic attempt still in flight, or an
+					// eager connect). Close this temporary one first: a server that
+					// permits only one active client (or holds a singleton lock) would
+					// otherwise see it still open while that connect competes for the
+					// same slot, and every retry in its ladder can fail. Session
+					// termination can hang (an HTTP server that never answers its
+					// DELETE, up to the configured timeout, or forever with
+					// `timeout: 0`), so the wait is bounded; the close carries on in
+					// the background.
+					await withTimeout(closing, MCP_TEST_CLOSE_BEFORE_SYNC_MS, "MCP test connection close timed out").catch(
+						() => {},
+					);
+				} else {
+					// Nothing will compete for the slot: never hold the result on it.
+					void closing.catch(() => {});
+				}
+			}
+			if (!(await this.#syncManagerConnection(name, config))) {
+				lines.push(
+					theme.fg(
+						"warning",
+						`⚠ The test passed, but this session could not connect "${name}" to load its current tools.`,
+					),
+					`  Run /mcp reconnect ${name} to retry.`,
+					"",
+				);
+			}
 			this.#showMessage(lines.join("\n"));
 		} catch (error) {
 			if (abortController.signal.aborted || (error instanceof Error && error.name === "AbortError")) {

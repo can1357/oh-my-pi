@@ -144,3 +144,64 @@ describe("translated MCP importers propagate enabled: false", () => {
 		});
 	}
 });
+
+// PR #9793 review (round 8): the same translated importers previously dropped
+// the per-server `lazy` flag the way they once dropped `enabled` (#7652) — a
+// `lazy: true` server declared in a foreign config eagerly started despite the
+// setting. Every importer that forwards `enabled` must forward `lazy`.
+const LAZY_FIXTURES: Fixture[] = [
+	{
+		provider: "claude",
+		file: ".claude/.mcp.json",
+		content: JSON.stringify({
+			mcpServers: { markitdown: { command: "uvx", args: ["markitdown-mcp"], type: "stdio", lazy: true } },
+		}),
+	},
+	{
+		provider: "cursor",
+		file: ".cursor/mcp.json",
+		content: JSON.stringify({
+			mcpServers: { markitdown: { command: "uvx", args: ["markitdown-mcp"], type: "stdio", lazy: true } },
+		}),
+	},
+	{
+		provider: "gemini",
+		file: ".gemini/settings.json",
+		content: JSON.stringify({
+			mcpServers: { markitdown: { command: "uvx", args: ["markitdown-mcp"], type: "stdio", lazy: true } },
+		}),
+	},
+	{
+		provider: "windsurf",
+		file: ".windsurf/mcp_config.json",
+		content: JSON.stringify({
+			mcpServers: { markitdown: { command: "uvx", args: ["markitdown-mcp"], type: "stdio", lazy: true } },
+		}),
+	},
+	{
+		provider: "vscode",
+		file: ".vscode/mcp.json",
+		content: JSON.stringify({
+			mcp: { servers: { markitdown: { command: "uvx", args: ["markitdown-mcp"], type: "stdio", lazy: true } } },
+		}),
+	},
+];
+
+describe("translated importers forward per-server lazy", () => {
+	for (const fixture of LAZY_FIXTURES) {
+		test(`${fixture.provider} forwards lazy: true`, async () => {
+			const cwd = await fs.mkdtemp(path.join(os.tmpdir(), `omp-mcp-lazy-import-${fixture.provider}-`));
+			try {
+				const filePath = path.join(cwd, fixture.file);
+				await fs.mkdir(path.dirname(filePath), { recursive: true });
+				await fs.writeFile(filePath, fixture.content);
+
+				const servers = await loadMcp(cwd, fixture.provider);
+				const markitdown = servers.find(server => server.name === "markitdown");
+				expect(markitdown?.lazy).toBe(true);
+			} finally {
+				await removeWithRetries(cwd);
+			}
+		});
+	}
+});

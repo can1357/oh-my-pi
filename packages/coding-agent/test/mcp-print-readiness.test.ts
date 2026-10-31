@@ -1,13 +1,16 @@
 import * as path from "node:path";
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { callTool } from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { resolveMCPStartupTimeoutMs } from "@oh-my-pi/pi-coding-agent/mcp/timeout";
+import { MCPToolCache } from "@oh-my-pi/pi-coding-agent/mcp/tool-cache";
 import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
-import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { type AgentSession, MCP_DISCOVERY_TURN_WAIT_MS } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { TOOL_NAME as LAZY_TOOL_NAME } from "./fixtures/lazy-mcp";
 
 const FIXTURE = path.join(import.meta.dir, "fixtures", "readiness-mcp.ts");
 const SLOW_START_MS = 1_100;
@@ -18,6 +21,9 @@ const originalStartup = Bun.env.OMP_MCP_STARTUP_TIMEOUT_MS;
 const originalStrict = Bun.env.OMP_MCP_REQUIRE_READY;
 
 afterEach(async () => {
+	// A timed-out test keeps running and restores its stderr spy late; restore
+	// every spy here so none leaks into the next test.
+	mock.restore();
 	await Promise.all(managers.splice(0).map(manager => manager.disconnectAll()));
 	if (originalTimeout === undefined) delete Bun.env.OMP_MCP_TIMEOUT_MS;
 	else Bun.env.OMP_MCP_TIMEOUT_MS = originalTimeout;
@@ -174,6 +180,62 @@ describe("headless MCP readiness", () => {
 		expect(capture.prompted()).toEqual(expectedTools.slice(0, 2));
 		expect(output.join("")).toContain('Warning: MCP server "slowstart" not ready after 80ms');
 	}, 3_000);
+
+	// A lazy server is dormant on purpose (PR #9793). The interactive first
+	// turn and the print-mode barrier both wait through `waitForStartup`, so
+	// neither may wait for it, report it unavailable, or spawn it. Its cached
+	// tools still reach the first prompt as deferred tools.
+	it("neither waits for nor reports a dormant lazy server, and offers its cached tools", async () => {
+		using tempDir = TempDir.createSync("@omp-mcp-lazy-readiness-");
+		const marker = tempDir.join("dormant-spawned");
+		const dormant: MCPStdioServerConfig = {
+			type: "stdio",
+			command: process.execPath,
+			args: [path.join(import.meta.dir, "fixtures", "lazy-mcp.ts")],
+			env: { LAZY_MCP_SPAWN_MARKER: marker },
+			lazy: true,
+		};
+		const store = new Map<string, string>();
+		const cache = new MCPToolCache({
+			getCache: (key: string) => store.get(key) ?? null,
+			setCache: (key: string, value: string) => {
+				store.set(key, value);
+			},
+		} as unknown as AgentStorage);
+		await cache.set("dormant", dormant, [
+			{ name: LAZY_TOOL_NAME, description: "d", inputSchema: { type: "object" } },
+		]);
+		const manager = new MCPManager(tempDir.path(), cache);
+		managers.push(manager);
+		await manager.connectServers({ instant: server("instant"), dormant }, {});
+		await waitForTools(manager, ["mcp__instant_marker"]);
+
+		// The interactive first turn waits on this barrier with this budget. A
+		// barrier that counted the dormant server would use all of it.
+		const started = performance.now();
+		const status = await manager.waitForStartup(MCP_DISCOVERY_TURN_WAIT_MS);
+		expect(performance.now() - started).toBeLessThan(MCP_DISCOVERY_TURN_WAIT_MS);
+		expect(status).toEqual({ connected: ["instant"], pending: [], failed: [] });
+
+		const capture = printSession(manager);
+		Bun.env.OMP_MCP_TIMEOUT_MS = "2500";
+		Bun.env.OMP_MCP_REQUIRE_READY = "1";
+		const output: string[] = [];
+		const stderrSpy = spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+			output.push(String(chunk));
+			return true;
+		});
+		let code: number;
+		try {
+			code = await runPrintMode(capture.session, { mode: "text", initialMessage: "use tools", mcpManager: manager });
+		} finally {
+			stderrSpy.mockRestore();
+		}
+		expect(code).toBe(0);
+		expect(capture.prompted()?.toSorted()).toEqual(["mcp__dormant_lazy_ping", "mcp__instant_marker"]);
+		expect(output.join("")).not.toContain('"dormant"');
+		expect(await Bun.file(marker).exists()).toBe(false);
+	}, 4_000);
 
 	it("reports a failed configured server and rejects strict print startup", async () => {
 		const manager = new MCPManager(import.meta.dir);
