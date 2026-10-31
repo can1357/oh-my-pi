@@ -103,7 +103,7 @@ export const TranscriptList = memo(function TranscriptList({
 						const chipText = row.span?.kind ?? row.marker?.kind ?? "";
 						const rowContent = (
 							<>
-								<span className="traces-kind" style={{ "--traces-kind-color": color } as React.CSSProperties}>
+								<span className="traces-kind" style={{ "--traces-kind-color": color }}>
 									{chipText}
 								</span>
 								{row.depth > 0 && (

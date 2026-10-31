@@ -4,6 +4,7 @@ import * as path from "node:path";
 import type { Message } from "@oh-my-pi/pi-ai";
 import { textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { getSessionsDir } from "@oh-my-pi/pi-utils/dirs";
+import { hasFsCode, isEacces, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils/fs-error";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
@@ -1214,20 +1215,33 @@ async function dedupeRealPaths(files: readonly string[]): Promise<string[]> {
  * twice when one bucket aliases another (#5385). The leaf scan inside a real
  * bucket does follow symlinks, which is what #15878 asks for: a transcript
  * staged in as a symlink is a transcript.
+ *
+ * Unavailable buckets are skipped individually. Unexpected enumeration errors
+ * propagate so callers can distinguish a failed scan from an empty result.
  */
 async function scanBucketFiles(root: string, pattern: string): Promise<string[]> {
 	let entries: fs.Dirent[];
 	try {
 		entries = await fs.promises.readdir(root, { withFileTypes: true });
-	} catch {
-		return [];
+	} catch (err) {
+		if (isEnoent(err) || isEnotdir(err)) return [];
+		throw err;
 	}
 	const out: string[] = [];
 	for (const entry of entries) {
 		if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
 		const dir = path.join(root, entry.name);
-		for await (const name of new Bun.Glob(pattern).scan({ cwd: dir, followSymlinks: true })) {
-			out.push(path.join(dir, name));
+		const bucketStart = out.length;
+		try {
+			for await (const name of new Bun.Glob(pattern).scan({ cwd: dir, followSymlinks: true })) {
+				out.push(path.join(dir, name));
+			}
+		} catch (err) {
+			if (isEnoent(err) || isEacces(err) || hasFsCode(err, "EPERM") || isEnotdir(err)) {
+				out.length = bucketStart;
+				continue;
+			}
+			throw err;
 		}
 	}
 	return out;
@@ -1386,18 +1400,14 @@ export async function findSessionFiles(
 	storage: SessionStorage = defaultSessionStorage(),
 ): Promise<string[]> {
 	if (!/^[\w-]+$/.test(idPrefix)) return [];
-	try {
-		// Key-indexed storages match only `*`, `*.ext` and exact names, so they
-		// list every session and leave the id match to the filter below.
-		const files =
-			storage instanceof FileSessionStorage
-				? await dedupeRealPaths(await scanBucketFiles(sessionsRoot, `*_${idPrefix}*.jsonl`))
-				: storage.listFilesSync(sessionsRoot, "*/*.jsonl");
-		// `*_` can also match an underscore inside an id; keep true id-prefix matches only.
-		return files.filter(file => sessionIdFromSessionPath(file)?.startsWith(idPrefix));
-	} catch {
-		return [];
-	}
+	// Key-indexed storages match only `*`, `*.ext` and exact names, so they
+	// list every session and leave the id match to the filter below.
+	const files =
+		storage instanceof FileSessionStorage
+			? await dedupeRealPaths(await scanBucketFiles(sessionsRoot, `*_${idPrefix}*.jsonl`))
+			: storage.listFilesSync(sessionsRoot, "*/*.jsonl");
+	// `*_` can also match an underscore inside an id; keep true id-prefix matches only.
+	return files.filter(file => sessionIdFromSessionPath(file)?.startsWith(idPrefix));
 }
 
 /**
