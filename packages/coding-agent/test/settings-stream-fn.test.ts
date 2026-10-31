@@ -428,6 +428,28 @@ describe("createSettingsAwareStreamFn", () => {
 			expect(calls[0]?.options?.fallbacks).toBeUndefined();
 		});
 
+		it("does not warn about a configured chain a per-call worker never sends", () => {
+			const warnings: unknown[] = [];
+			vi.spyOn(logger, "warn").mockImplementation((_message: unknown, context?: unknown) => {
+				warnings.push(context);
+			});
+			try {
+				const settings = Settings.isolated({
+					"providers.anthropic.serverSideFallback": true,
+					"providers.anthropic.serverSideFallbackModels": [42, "m1", "m2", "m3", "m4"],
+				});
+				const { fn: base, calls } = captureBase();
+				const wrapped = createSettingsAwareStreamFn(settings, base, { disableServerSideFallback: true });
+
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+				expect(calls[0]?.options?.fallbacks).toBeUndefined();
+				expect(warnings).toEqual([]);
+			} finally {
+				vi.restoreAllMocks();
+			}
+		});
+
 		it("caller-supplied fallbacks always win over the settings default", () => {
 			const settings = Settings.isolated({ "providers.anthropic.serverSideFallback": true });
 			const { fn: base, calls } = captureBase();

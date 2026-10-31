@@ -180,9 +180,13 @@ export function createSettingsAwareStreamFn(
 		// the catalog chain, and `[]` sends nothing even with the toggle on; an
 		// unset value (or one without a model id) keeps the catalog chain. The
 		// provider layer picks it up, sends the beta header, and honors the
-		// response signals. Models without a rule-assigned chain are untouched.
+		// response signals. Models without a rule-assigned chain are untouched,
+		// and a per-call worker (`disableServerSideFallback`) never reads the
+		// configured chain, so it never warns about a chain it would not send.
 		const catalogFallbackChain =
-			streamOptions?.fallbacks === undefined && cfgProvidersAnthropicServerSideFallback.get(settings)
+			streamOptions?.fallbacks === undefined &&
+			!slowModeContext?.disableServerSideFallback &&
+			cfgProvidersAnthropicServerSideFallback.get(settings)
 				? serverSideFallbackModels(model)
 				: [];
 		const serverSideFallbackChain =
