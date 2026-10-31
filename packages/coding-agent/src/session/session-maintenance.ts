@@ -23,6 +23,7 @@ import {
 	calculateContextTokens,
 	collectShakeRegions,
 	COMPACTION_RECOVERY_BAND,
+	collectLoadedSkills,
 	compact,
 	compactionContextTokens,
 	computeFileLists,
@@ -47,6 +48,7 @@ import {
 	shouldCompact,
 	shouldUseProviderNativeCompaction,
 	upsertFileOperations,
+	upsertLoadedSkills,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	DEFAULT_PRUNE_CONFIG,
@@ -375,15 +377,38 @@ function mergeLlmCompactionPreserveData(
 	return snapcompact.stripPreservedArchive(Object.keys(preserveData).length > 0 ? preserveData : undefined);
 }
 
-/** Wrap a handoff document as a compaction summary: append the cumulative file-operations tag and derive entry details. */
+/** Wrap a handoff document with cumulative file and loaded-skill metadata. */
 function handoffSummaryFromDocument(
 	document: string,
 	preparation: CompactionPreparation,
 ): { summary: string; details: CompactionDetails } {
 	const { readFiles, modifiedFiles } = computeFileLists(preparation.fileOps);
+	const loadedSkills = preparation.loadedSkills
+		? collectLoadedSkills([], preparation.loadedSkills)
+		: collectLoadedSkills(
+				[...preparation.messagesToSummarize, ...preparation.turnPrefixMessages],
+				[],
+				preparation.knownSkills,
+			);
 	return {
-		summary: upsertFileOperations(document, readFiles, modifiedFiles, preparation.fileOps.read),
-		details: { readFiles, modifiedFiles },
+		summary: upsertLoadedSkills(
+			upsertFileOperations(document, readFiles, modifiedFiles, preparation.fileOps.read),
+			loadedSkills,
+		),
+		details: { readFiles, modifiedFiles, ...(loadedSkills.length > 0 ? { loadedSkills } : {}) },
+	};
+}
+
+/** Keep skill metadata when snapcompact replaces or re-renders an LLM summary. */
+function withLoadedSkillDetails(
+	result: snapcompact.CompactionResult,
+	loadedSkills: readonly string[] | undefined,
+): snapcompact.CompactionResult<CompactionDetails> {
+	const skills = collectLoadedSkills([], loadedSkills);
+	if (skills.length === 0) return result;
+	return {
+		...result,
+		details: { readFiles: [], modifiedFiles: [], ...result.details, loadedSkills: skills },
 	};
 }
 
@@ -423,6 +448,8 @@ export interface SessionMaintenanceHost {
 	baseSystemPrompt(): string[];
 	goalModeState(): GoalModeState | undefined;
 	planReferencePath(): string;
+	/** Names of the session's loaded skills, which resolve namespaced `skill://` reads in summaries. */
+	knownSkills(): readonly string[];
 	nonMessageTokenSource(): NonMessageTokenSource;
 	hasExperimentalContextRolloverTools(): boolean;
 	takeExperimentalContextRolloverRequest(context: AgentTurnEndContext | undefined): boolean;
@@ -1308,7 +1335,13 @@ export class SessionMaintenance {
 				);
 			}
 			const pathEntries = this.#host.sessionManager.getBranch();
-			const preparation = prepareCompaction(pathEntries, effectiveSettings, activeModel, this.#tokenizer);
+			const preparation = prepareCompaction(
+				pathEntries,
+				effectiveSettings,
+				activeModel,
+				this.#tokenizer,
+				this.#host.knownSkills(),
+			);
 			if (!preparation) {
 				// Check why we can't compact
 				const lastEntry = pathEntries[pathEntries.length - 1];
@@ -1698,7 +1731,7 @@ export class SessionMaintenance {
 	): Promise<CompactionResult> {
 		const entries = this.#host.sessionManager.getBranch();
 		const settings = this.#compactionSettings;
-		const preparation = prepareCompaction(entries, settings, model, this.#tokenizer);
+		const preparation = prepareCompaction(entries, settings, model, this.#tokenizer, this.#host.knownSkills());
 		if (!preparation)
 			throw new ManualCompactionNoOpError("Nothing to compact (session too small or already rolled over)");
 
@@ -1820,7 +1853,7 @@ export class SessionMaintenance {
 			this.#fixedContextDeadEndNotifiedSessionId = undefined;
 		}
 		const branch = this.#host.sessionManager.getBranch();
-		const preparation = prepareCompaction(branch, settings, model, this.#tokenizer);
+		const preparation = prepareCompaction(branch, settings, model, this.#tokenizer, this.#host.knownSkills());
 		if (!preparation) return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
 		const sourceLeafId = branch.at(-1)?.id;
 		const sourceSessionId = this.#host.sessionId();
@@ -2192,6 +2225,7 @@ export class SessionMaintenance {
 			resolveMethodSettings(compactionSettings, "handoff"),
 			model,
 			this.#tokenizer,
+			this.#host.knownSkills(),
 		);
 		if (!preparation) throw new Error("Nothing to hand off (already compacted)");
 		const cleanup = Promise.withResolvers<void>();
@@ -2378,7 +2412,13 @@ export class SessionMaintenance {
 		const branch = this.#host.sessionManager.getBranch();
 		const snapshotLeafId = branch[branch.length - 1]?.id;
 		if (!snapshotLeafId) return clear();
-		const preparation = prepareCompaction(branch, effectiveSettings, model, this.#tokenizer);
+		const preparation = prepareCompaction(
+			branch,
+			effectiveSettings,
+			model,
+			this.#tokenizer,
+			this.#host.knownSkills(),
+		);
 		if (!preparation) return clear();
 		const signal = run.controller.signal;
 		let armed: ArmedSpeculation;
@@ -4013,7 +4053,14 @@ export class SessionMaintenance {
 			result = await snapcompact.compact(preparation, { ...options, maxFrames });
 			framePayloadBytes = this.#snapcompactFramePayloadBytes(result);
 		}
-		return { result, framePayloadBytes };
+		const loadedSkills =
+			preparation.loadedSkills ??
+			collectLoadedSkills(
+				[...preparation.messagesToSummarize, ...preparation.turnPrefixMessages],
+				[],
+				preparation.knownSkills,
+			);
+		return { result: withLoadedSkillDetails(result, loadedSkills), framePayloadBytes };
 	}
 
 	/**
@@ -4658,13 +4705,13 @@ export class SessionMaintenance {
 		model: Model,
 		maxFrames: number,
 	): Promise<snapcompact.CompactionResult> {
-		const details = entry.details as snapcompact.CompactionDetails | undefined;
+		const details = entry.details as CompactionDetails | undefined;
 		const fileOps = snapcompact.createFileOps();
 		for (const file of details?.readFiles ?? []) fileOps.read.add(file);
 		for (const file of details?.modifiedFiles ?? []) fileOps.edited.add(file);
 		const shapeSetting = cfgSnapcompactShape.get(this.#host.settings);
 		const shape = snapcompact.resolveShapeForText(archiveText, model, shapeSetting);
-		return await snapcompact.compact(
+		const result = await snapcompact.compact(
 			{
 				firstKeptEntryId: entry.firstKeptEntryId,
 				messagesToSummarize: [],
@@ -4682,6 +4729,7 @@ export class SessionMaintenance {
 				includeThinking: snapcompact.readerIncludesThinking(model),
 			},
 		);
+		return withLoadedSkillDetails(result, details?.loadedSkills);
 	}
 
 	/**
@@ -5121,7 +5169,13 @@ export class SessionMaintenance {
 			const pathEntries = this.#host.sessionManager.getBranch();
 
 			let pathEntriesForCompaction = pathEntries;
-			let preparation = prepareCompaction(pathEntriesForCompaction, effectiveSettings, this.#model, this.#tokenizer);
+			let preparation = prepareCompaction(
+				pathEntriesForCompaction,
+				effectiveSettings,
+				this.#model,
+				this.#tokenizer,
+				this.#host.knownSkills(),
+			);
 			if (!preparation) {
 				// prepareCompaction found nothing to summarize because the kept region
 				// is a single oversized recent turn — findCutPoint never cuts inside a
@@ -5176,6 +5230,7 @@ export class SessionMaintenance {
 									effectiveSettings,
 									this.#model,
 									this.#tokenizer,
+									this.#host.knownSkills(),
 								);
 								return preparation !== undefined;
 							},

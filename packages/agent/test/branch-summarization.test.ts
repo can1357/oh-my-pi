@@ -9,6 +9,7 @@ import {
 import type { AssistantMessage, Model, Usage } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { createAssistantMessage } from "./helpers";
 
 const MODEL: Model = buildModel({
 	id: "mock-model",
@@ -368,6 +369,102 @@ describe("branch summarization", () => {
 			});
 			expect(prompt).toContain("BRANCH_CONCLUSION_5000");
 		}
+	});
+
+	test("carries nested summary skills and records newer custom and read loads in recency order", async () => {
+		const entries: SessionEntry[] = [
+			{
+				type: "compaction",
+				id: "compaction-1",
+				parentId: null,
+				timestamp: new Date(0).toISOString(),
+				summary: "Earlier compacted work.",
+				firstKeptEntryId: "branch-1",
+				tokensBefore: 1000,
+				details: { readFiles: [], modifiedFiles: [], loadedSkills: ["build", "review"] },
+			},
+			{
+				type: "branch_summary",
+				id: "branch-1",
+				parentId: "compaction-1",
+				timestamp: new Date(1).toISOString(),
+				summary: "An earlier abandoned branch.",
+				fromId: "abandoned",
+				details: { readFiles: [], modifiedFiles: [], loadedSkills: ["deploy", "build"] },
+			},
+			{
+				type: "custom_message",
+				id: "skill-1",
+				parentId: "branch-1",
+				timestamp: new Date(2).toISOString(),
+				customType: "skill-prompt",
+				content: "Autoloaded review instructions.",
+				display: false,
+				details: { name: "review", path: "/skills/review/SKILL.md" },
+			},
+			{
+				type: "message",
+				id: "read-1",
+				parentId: "skill-1",
+				timestamp: new Date(3).toISOString(),
+				message: createAssistantMessage([
+					{ type: "toolCall", id: "read", name: "read", arguments: { path: "skill://release/ref.md:raw" } },
+				]),
+			},
+		];
+		const result = await generateBranchSummary(entries, {
+			model: MODEL,
+			apiKey: "test-api-key",
+			signal: new AbortController().signal,
+			completeImpl: async () => createAssistantMessage([{ type: "text", text: "Branch work completed." }]),
+		});
+		expect(result.loadedSkills).toEqual(["release", "review", "deploy", "build"]);
+		expect(result.summary).toContain("- release\n- review\n- deploy\n- build");
+		expect(result.summary?.match(/<loaded-skills>/g)).toHaveLength(1);
+		expect(result.summary).not.toContain("<files>");
+		expect(result.readFiles).toEqual([]);
+		// Budget truncation must not erase skill metadata from discarded entries.
+		const limited = prepareBranchEntries(entries, new Tokenizer(MODEL), 1);
+		expect(limited.loadedSkills).toEqual(result.loadedSkills);
+		const metadataOnly = await generateBranchSummary(entries, {
+			model: { ...MODEL, contextWindow: 100 },
+			reserveTokens: 99,
+			apiKey: "test-api-key",
+			signal: new AbortController().signal,
+			completeImpl: async () => {
+				throw new Error("No message fits the summary budget");
+			},
+		});
+		expect(metadataOnly.loadedSkills).toEqual(result.loadedSkills);
+		expect(metadataOnly.summary).toContain("- release\n- review\n- deploy\n- build");
+	});
+
+	test("resolves namespaced skill reads with the session's known skill names", async () => {
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "read-1",
+				parentId: null,
+				timestamp: new Date(0).toISOString(),
+				message: createAssistantMessage([
+					{
+						type: "toolCall",
+						id: "read",
+						name: "read",
+						arguments: { path: "skill://plugin/review/SKILL.md:raw" },
+					},
+				]),
+			},
+		];
+		const result = await generateBranchSummary(entries, {
+			model: MODEL,
+			apiKey: "test-api-key",
+			signal: new AbortController().signal,
+			completeImpl: async () => createAssistantMessage([{ type: "text", text: "Branch work completed." }]),
+			knownSkills: ["plugin", "plugin/review"],
+		});
+		expect(result.loadedSkills).toEqual(["plugin/review"]);
+		expect(result.summary).toContain("- plugin/review");
 	});
 
 	test("returns an aborted result when cancelled during transient retry backoff", async () => {

@@ -7,7 +7,10 @@ import { type Dialect, getDialectDefinition } from "@oh-my-pi/pi-ai/dialect";
 import { escapeHarmonyControlTokens } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { formatGroupedPaths, prompt, stringifyJson } from "@oh-my-pi/pi-utils";
 import type { AgentMessage } from "../types";
+import type { SessionEntry } from "./entries";
+import { getMessageFromEntry } from "./messages";
 import fileOperationsTemplate from "./prompts/file-operations.md" with { type: "text" };
+import loadedSkillsTemplate from "./prompts/loaded-skills.md" with { type: "text" };
 import summarizationSystemPrompt from "./prompts/summarization-system.md" with { type: "text" };
 
 // ============================================================================
@@ -199,6 +202,194 @@ export function upsertFileOperations(
 	if (!fileOperations) return baseSummary;
 	if (!baseSummary) return fileOperations;
 	return `${baseSummary}\n\n${fileOperations}`;
+}
+
+/** Maximum number of previously loaded skills retained across summary compactions. */
+export const LOADED_SKILLS_LIMIT = 50;
+
+// Read-tool path-list grammar, mirrored from packages/coding-agent/src/tools/path-utils.ts
+// (splitMixedUrlPathList, splitDelimitedPathEntry, splitTopLevelDelimitedPath). Keep in sync.
+const URL_READ_ENTRY_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
+const READ_TARGET_WHITESPACE_RE = /\s/;
+
+type ReadTargetDelimiter = "semicolon" | "comma" | "whitespace" | "mixed";
+
+function isReadTargetDelimiter(ch: string, delimiter: ReadTargetDelimiter): boolean {
+	if (delimiter === "semicolon") return ch === ";";
+	if (delimiter === "comma") return ch === ",";
+	if (delimiter === "whitespace") return READ_TARGET_WHITESPACE_RE.test(ch);
+	return ch === "," || ch === ";" || READ_TARGET_WHITESPACE_RE.test(ch);
+}
+
+function normalizeReadTarget(target: string): string {
+	const trimmed = target.trim();
+	return trimmed.length > 1 && trimmed.startsWith('"') && trimmed.endsWith('"') ? trimmed.slice(1, -1) : trimmed;
+}
+
+/** Top-level `delimiter` parts of `entry` outside `{…}` groups; null when it names a single target. */
+function splitReadTargetList(entry: string, delimiter: ReadTargetDelimiter): string[] | null {
+	const rawParts: string[] = [];
+	let braceDepth = 0;
+	let start = 0;
+	for (let i = 0; i < entry.length; i++) {
+		const ch = entry[i];
+		if (ch === "\\" && i + 1 < entry.length) {
+			i++;
+			continue;
+		}
+		if (ch === "{") {
+			braceDepth++;
+			continue;
+		}
+		if (ch === "}") {
+			if (braceDepth > 0) braceDepth--;
+			continue;
+		}
+		if (braceDepth !== 0 || !isReadTargetDelimiter(ch, delimiter)) continue;
+		rawParts.push(entry.slice(start, i));
+		start = i + 1;
+	}
+	rawParts.push(entry.slice(start));
+	if (rawParts.length < 2) return null;
+	const parts = rawParts.map(normalizeReadTarget).filter(part => part.length > 0);
+	if (parts.length === 0 || (parts.length < 2 && rawParts.length === parts.length)) return null;
+	return parts;
+}
+
+/**
+ * The targets one `read` path names. A list that starts with a URL splits only
+ * on `;`; one that starts with a local path tries `;`, then `,`, whitespace, and
+ * mixed delimiters. The read tool also keeps an entry whole when it is an
+ * existing literal file and splits whitespace lists only when every local part
+ * exists. Those filesystem checks only decide whether the read reaches its
+ * `skill://` parts, so without a filesystem the collector splits as if they pass.
+ */
+function splitReadTargets(path: string): string[] {
+	const entry = normalizeReadTarget(path);
+	const delimiters: readonly ReadTargetDelimiter[] = URL_READ_ENTRY_RE.test(entry)
+		? ["semicolon"]
+		: ["semicolon", "comma", "whitespace", "mixed"];
+	for (const delimiter of delimiters) {
+		const parts = splitReadTargetList(entry, delimiter);
+		if (parts) return parts;
+	}
+	return [entry];
+}
+
+// `skill://` URL grammar, mirrored from packages/coding-agent/src/internal-urls/parse.ts
+// (parseInternalUrl) and skill-protocol.ts (findUrlSkill). Keep in sync.
+const SKILL_URL_RE = /^skill:\/\/([^/?#]*)(\/[^?#]*)?/i;
+
+/**
+ * The skill a `read` target loads, or undefined when it is not a `skill://` URL
+ * the skill protocol accepts. Like the protocol, `skill://<plugin>/<name>/…`
+ * names the namespaced skill `<plugin>/<name>` when `knownSkills` lists it, and
+ * the skill named by the URL host otherwise.
+ */
+function skillNameFromReadTarget(target: string, knownSkills: readonly string[] | undefined): string | undefined {
+	const url = stripReadSelector(target);
+	const match = SKILL_URL_RE.exec(url);
+	if (!match) return undefined;
+	let host = match[1];
+	try {
+		host = decodeURIComponent(host);
+	} catch {
+		// The protocol keeps an undecodable host as written.
+	}
+	let pathname = match[2] ?? "";
+	try {
+		pathname = new URL(url).pathname;
+	} catch {
+		// The protocol falls back to the raw path when URL parsing fails (`skill://plugin:name`).
+	}
+	if (pathname.length > 1) {
+		const slash = pathname.indexOf("/", 1);
+		let segment: string;
+		try {
+			segment = decodeURIComponent(slash === -1 ? pathname.slice(1) : pathname.slice(1, slash));
+		} catch {
+			// The protocol rejects the URL before it looks up any skill.
+			return undefined;
+		}
+		const namespaced = `${host}/${segment}`;
+		if (knownSkills?.includes(namespaced)) return namespaced;
+	}
+	return host;
+}
+
+/**
+ * Collect skill loads from chronological messages, newest first, then carry
+ * forward older skills. The coding agent records slash commands and autoloads
+ * as `skill-prompt` custom messages with the skill name in their details.
+ * `knownSkills` lists the session's skill names, so a `skill://<plugin>/<name>/…`
+ * read resolves to its namespaced skill; without it, reads resolve to the URL host.
+ */
+export function collectLoadedSkills(
+	messages: readonly AgentMessage[],
+	previousSkills: readonly string[] = [],
+	knownSkills?: readonly string[],
+): string[] {
+	const skills = new Set<string>();
+	const add = (name: unknown): void => {
+		if (typeof name === "string" && name.length > 0 && skills.size < LOADED_SKILLS_LIMIT) skills.add(name);
+	};
+	for (let i = messages.length - 1; i >= 0 && skills.size < LOADED_SKILLS_LIMIT; i--) {
+		const message = messages[i];
+		if (message.role === "custom" && message.customType === "skill-prompt") {
+			const details = message.details;
+			if (details && typeof details === "object" && "name" in details) add(details.name);
+		} else if (message.role === "assistant") {
+			for (let j = message.content.length - 1; j >= 0 && skills.size < LOADED_SKILLS_LIMIT; j--) {
+				const block = message.content[j];
+				if (block.type !== "toolCall") continue;
+				const args = block.arguments as Record<string, unknown> | undefined;
+				if (!args) continue;
+				if (block.name === "skill") {
+					// Pruning still protects this legacy tool name in older transcripts.
+					add(args.name);
+				} else if (block.name === "read" && typeof args.path === "string") {
+					const targets = splitReadTargets(args.path);
+					for (let k = targets.length - 1; k >= 0; k--) add(skillNameFromReadTarget(targets[k], knownSkills));
+				}
+			}
+		}
+	}
+	for (const name of previousSkills) add(name);
+	return [...skills];
+}
+
+/** Collect skill loads and pi-generated summary metadata from chronological session entries. */
+export function collectLoadedSkillsFromEntries(
+	entries: readonly SessionEntry[],
+	previousSkills: readonly string[] = [],
+	knownSkills?: readonly string[],
+): string[] {
+	let skills = collectLoadedSkills([], previousSkills);
+	for (const entry of entries) {
+		if ((entry.type === "compaction" || entry.type === "branch_summary") && !entry.fromExtension) {
+			const details = entry.details;
+			if (
+				details &&
+				typeof details === "object" &&
+				"loadedSkills" in details &&
+				Array.isArray(details.loadedSkills)
+			) {
+				skills = collectLoadedSkills([], [...details.loadedSkills, ...skills]);
+			}
+		}
+		const message = getMessageFromEntry(entry);
+		if (message) skills = collectLoadedSkills([message], skills, knownSkills);
+	}
+	return skills;
+}
+
+/** Replace any previous loaded-skills blocks with the current, bounded skill list. */
+export function upsertLoadedSkills(summary: string, loadedSkills: readonly string[]): string {
+	const baseSummary = summary.replace(/<loaded-skills>[\s\S]*?<\/loaded-skills>\s*/g, "").trimEnd();
+	const skills = collectLoadedSkills([], loadedSkills);
+	if (skills.length === 0) return baseSummary;
+	const block = prompt.render(loadedSkillsTemplate, { skills });
+	return baseSummary ? `${baseSummary}\n\n${block}` : block;
 }
 
 // ============================================================================

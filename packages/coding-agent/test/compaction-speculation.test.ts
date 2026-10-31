@@ -121,6 +121,7 @@ describe("async speculative compaction", () => {
 			baseSystemPrompt: () => ["Test"],
 			goalModeState: () => undefined,
 			planReferencePath: () => "",
+			knownSkills: () => [],
 			nonMessageTokenSource: () => ({}),
 			memoryBackendSession: () => undefined,
 			emitSessionEvent: async (event: { type: string }) => {

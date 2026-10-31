@@ -104,7 +104,7 @@ An explicit user cancellation throws `Error("Handoff cancelled")`. Harness-initi
 
 If text was generated and not aborted, `SessionMaintenance.handoff()` commits the document on the **current** session:
 
-1. Wraps the document as a compaction summary: `upsertFileOperations(document, readFiles, modifiedFiles, …)` appends the cumulative `<files>` tag from the preparation's file operations; `{ readFiles, modifiedFiles }` becomes the entry `details`.
+1. Wraps the document as a compaction summary: `upsertFileOperations(document, readFiles, modifiedFiles, …)` appends the cumulative `<files>` tag, then `upsertLoadedSkills` appends previously loaded skill names with a re-load reminder. The entry `details` stores `readFiles`, `modifiedFiles`, and optional `loadedSkills` (up to 50 unique names, most recent first).
 2. Appends a regular `CompactionEntry` through `appendCompaction(summary, undefined, firstKeptEntryId, tokensBefore, options)`, with `details`, `fromExtension: false`, `method: "handoff"`, and a projected `tokensAfter` count.
 3. Rebuilds the display context, replaces live agent messages, re-anchors stats (`rebaseAfterCompaction`), resets the plan reference, advisor runtimes (`"handoff"`), and todo phases, and closes provider sessions whose history was rewritten.
 4. Emits the `session_compact` extension hook with the saved entry.

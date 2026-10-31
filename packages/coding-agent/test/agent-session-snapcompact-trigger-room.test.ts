@@ -202,6 +202,61 @@ describe("snapcompact archive sized by the compaction trigger", () => {
 		);
 	}
 
+	it("carries loaded skills from an LLM summary through snapcompact into the next LLM summary", async () => {
+		const model = opus(1_000_000);
+		const { session } = createSession(model, { "compaction.keepRecentTokens": 1 });
+		const entries = session.sessionManager.getBranch();
+		const first = entries[0];
+		const assistant = entries.find(entry => entry.type === "message" && entry.message.role === "assistant");
+		if (!first || assistant?.type !== "message" || assistant.message.role !== "assistant") {
+			throw new Error("Expected seeded history");
+		}
+		session.sessionManager.appendCompaction("Earlier LLM summary.", undefined, first.id, 2000, {
+			details: { readFiles: [], modifiedFiles: [], loadedSkills: ["review"] },
+		});
+		session.sessionManager.appendMessage({
+			role: "user",
+			content: "Archive the newly completed work.",
+			timestamp: Date.now(),
+		});
+		session.sessionManager.appendMessage({
+			...assistant.message,
+			content: [{ type: "text", text: "New work completed." }],
+			timestamp: Date.now(),
+		});
+		vi.spyOn(snapcompact, "compact").mockImplementation(async preparation => ({
+			summary: "Archived work.",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: { readFiles: [], modifiedFiles: [] },
+			preserveData: { snapcompact: { frames: [], totalChars: 0, truncatedChars: 0 } },
+		}));
+		await session.compact(undefined, { mode: "snapcompact" });
+		const archived = session.sessionManager.getBranch().at(-1);
+		if (archived?.type !== "compaction") throw new Error("Expected snapcompact entry");
+		expect(archived.details).toMatchObject({ loadedSkills: ["review"] });
+		session.sessionManager.appendMessage({ role: "user", content: "Continue the work.", timestamp: Date.now() });
+		session.sessionManager.appendMessage({
+			...assistant.message,
+			content: [{ type: "text", text: "Continuing." }],
+			timestamp: Date.now(),
+		});
+		const preparation = compactionModule.prepareCompaction(
+			session.sessionManager.getBranch(),
+			{ ...compactionModule.DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 1, remoteEnabled: false },
+			model,
+		);
+		if (!preparation) throw new Error("Expected history for the next summary");
+		const response = { ...assistant.message, content: [{ type: "text" as const, text: "Updated LLM summary." }] };
+		const result = await compactionModule.compact(preparation, model, "test-key", undefined, undefined, {
+			completeImpl: async () => response,
+			oneshotRetry: false,
+		});
+		expect(result.details).toMatchObject({ loadedSkills: ["review"] });
+		expect(result.summary).toContain("<loaded-skills>");
+		expect(result.summary).toContain("- review");
+	});
+
 	it("scales the frame budget with the trigger and ignores the window above it", async () => {
 		const frame = framePrice(opus(1_000_000));
 		const low = await requestedFrames(opus(1_000_000), { "compaction.thresholdTokens": 80_000 });

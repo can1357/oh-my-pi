@@ -39,9 +39,9 @@ export interface AnthropicCompactionPreserveData {
 	signature?: string;
 	/** Legacy threshold block state; replay-only. */
 	encryptedContent?: string;
-	/** Harness file metadata (`<files>` section) replayed after the retained tail. */
+	/** Harness file and loaded-skill metadata replayed after the retained tail. */
 	filesText?: string;
-	/** Earlier summaries' file metadata replayed inside the retained tail. */
+	/** Earlier summaries' harness metadata replayed inside the retained tail. */
 	retainedFiles?: AnthropicCompactionFiles[];
 	/** The retained tail replays unchanged (see `AnthropicCompactionPayload.exactTail`). */
 	exactTail?: true;

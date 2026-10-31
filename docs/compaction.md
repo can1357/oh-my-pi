@@ -382,6 +382,31 @@ file-operations.md (Write)
 
 Legacy `<read-files>`/`<modified-files>` tags from summaries written by earlier versions are stripped (alongside `<files>`) before re-appending, so old summaries self-heal on the next compaction.
 
+### Loaded-skill context in summaries
+
+LLM, handoff, and branch summaries append a deterministic `<loaded-skills>` block
+when the discarded entries include skill loads. This includes `read skill://name`
+(including selectors, sub-files, and `skill://` targets inside a `;` path list),
+legacy `skill` tool calls, and the custom messages used for `/skill:name`
+invocations and autoloaded skills. Skill URLs stay out of `<files>`. Like the
+`skill://` protocol, `skill://plugin/name/…` is recorded as the namespaced skill
+`plugin/name` when the session has a skill by that name, and as `plugin` otherwise.
+
+The block lists up to 50 distinct skill names, most recent first, and tells the
+agent to re-load a skill with `read skill://<name>` before relying on its compacted
+instructions. `details.loadedSkills` carries the names across later compactions;
+older session details without that optional field remain readable. Repeated
+summaries replace the block instead of duplicating it, and sessions without
+loaded skills have no block.
+
+Provider-native summaries persist the same metadata. OpenAI Responses V1/V2
+replay includes the block as a separate developer item alongside the replacement
+history, since native replay skips the summary entry's text. Anthropic replays it
+through the existing harness-metadata text beside the unchanged signed summary.
+
+Snapcompact archive renders and rebuilds carry `details.loadedSkills` forward as
+well, so switching between archive and LLM-summary methods does not lose the list.
+
 ### Persist and reload
 
 After summary generation (or hook-provided summary), agent session:
@@ -449,9 +474,9 @@ Branch summarization:
 3. Uses custom instructions if supplied, otherwise `branch-summary.md`.
 4. Calls summarization model with `SUMMARIZATION_SYSTEM_PROMPT` and a 2,048-token output limit.
 5. Prepends `branch-summary-preamble.md`.
-6. Appends file-operation tags.
+6. Appends file-operation and loaded-skill tags.
 
-Result is stored as `BranchSummaryEntry` with optional details (`readFiles`, `modifiedFiles`).
+Result is stored as `BranchSummaryEntry` with optional details (`readFiles`, `modifiedFiles`, `loadedSkills`).
 
 ## Extension and hook touchpoints
 

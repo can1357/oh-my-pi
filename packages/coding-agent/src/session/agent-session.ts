@@ -2693,6 +2693,7 @@ export class AgentSession implements SettingsScope {
 			baseSystemPrompt: () => this.#tools.baseSystemPrompt,
 			goalModeState: () => this.#goalModeState,
 			planReferencePath: () => this.#planReferencePath,
+			knownSkills: () => this.skills.map(skill => skill.name),
 			nonMessageTokenSource: () => this,
 			hasExperimentalContextRolloverTools: () => {
 				const enabled = this.#tools.getEnabledToolNames();
@@ -13921,6 +13922,7 @@ export class AgentSession implements SettingsScope {
 					const stream = await this.#sideStreamFn(requestModel, requestContext, requestOptions);
 					return stream.result();
 				},
+				knownSkills: this.skills.map(skill => skill.name),
 			});
 			this.#branchSummaryAbortController = undefined;
 			if (result.aborted) {
@@ -13933,6 +13935,7 @@ export class AgentSession implements SettingsScope {
 			summaryDetails = {
 				readFiles: result.readFiles || [],
 				modifiedFiles: result.modifiedFiles || [],
+				...(result.loadedSkills?.length ? { loadedSkills: result.loadedSkills } : {}),
 			};
 		} else if (hookSummary) {
 			summaryText = hookSummary.summary;
