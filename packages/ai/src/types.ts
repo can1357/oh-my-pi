@@ -228,18 +228,18 @@ export function resolveModelServiceTier(
  * True when the tier should be sent on the wire as the provider's service-tier
  * request field. `auto` is never forwarded — it is OpenAI's implicit default, so
  * omitting `service_tier` is identical to requesting `auto`, and the Codex
- * (ChatGPT OAuth) endpoint rejects an explicit `auto` outright. OpenAI /
- * OpenAI-Codex accept every other {@link ServiceTier}; Google (Gemini API +
- * Vertex) and OpenRouter accept `flex`/`priority`; Fireworks Serverless
- * realizes only its Priority serving path. Anthropic is absent because it
- * realizes `priority` via `speed: "fast"`.
+ * (ChatGPT OAuth) endpoint rejects an explicit `auto` outright. OpenAI accepts
+ * every other {@link ServiceTier}; Codex applies the discovery gate below.
+ * Google (Gemini API + Vertex) and OpenRouter accept `flex`/`priority`;
+ * Fireworks Serverless realizes only its Priority serving path. Anthropic is
+ * absent because it realizes `priority` via `speed: "fast"`.
  *
  * Codex-backend models (`openai-codex-responses`): `ultrafast` is sent only
- * when the model's discovered `service_tiers` lists it. `priority`/`scale`
- * are dropped only when that list is non-empty and omits them (codex-rs
- * `service_tier_for_request`); an empty or missing list counts as "not
- * reported" — accounts whose `/models` lists no tiers keep `/fast` — so the
- * provider-level answer stands. `flex` and `default` are never gated.
+ * when the model's discovered `service_tiers` lists it. `flex`/`priority`/`scale`
+ * are dropped only when that list is non-empty and omits them.
+ * An empty or missing list counts as "not reported" — accounts whose `/models`
+ * lists no tiers keep `/fast` — so the provider-level answer stands.
+ * `default` is never gated.
  * First-party OpenAI takes `ultrafast` as-is. A bare provider string cannot
  * carry the list, so it answers for the provider alone.
  */
@@ -249,12 +249,7 @@ export function shouldSendServiceTier(
 ): boolean {
 	if (!serviceTier || serviceTier === "auto") return false;
 	const provider = typeof target === "string" ? target : target?.provider;
-	if (
-		typeof target !== "string" &&
-		target?.api === "openai-codex-responses" &&
-		serviceTier !== "flex" &&
-		serviceTier !== "default"
-	) {
+	if (typeof target !== "string" && target?.api === "openai-codex-responses" && serviceTier !== "default") {
 		const advertised = target.serviceTiers;
 		if (serviceTier === "ultrafast") return advertised?.includes(serviceTier) === true;
 		if (advertised !== undefined && advertised.length > 0) return advertised.includes(serviceTier);

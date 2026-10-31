@@ -96,6 +96,9 @@ describe("shouldSendServiceTier", () => {
 		expect(shouldSendServiceTier("priority", customCodex)).toBe(true);
 		expect(shouldSendServiceTier("scale", customOpenAI)).toBe(true);
 		expect(shouldSendServiceTier("default", customOpenAI)).toBe(true);
+		expect(shouldSendServiceTier("flex", { ...openai, serviceTiers: ["priority"] })).toBe(true);
+		expect(shouldSendServiceTier("flex", { ...orOpenAI, serviceTiers: ["priority"] })).toBe(true);
+		expect(shouldSendServiceTier("flex", { ...customCodex, serviceTiers: ["priority"] })).toBe(false);
 		for (const model of customOpenAIAliases) {
 			expect(shouldSendServiceTier("priority", model)).toBe(true);
 		}
@@ -141,8 +144,6 @@ describe("shouldSendServiceTier", () => {
 		expect(shouldSendServiceTier("priority", unreported)).toBe(true);
 		expect(realizesPriorityServiceTier("priority", unreported)).toBe(true);
 		expect(shouldSendServiceTier("ultrafast", unreported)).toBe(false);
-		// Flex is always an accepted request option; `default` is out of this gate's scope.
-		expect(shouldSendServiceTier("flex", unlisted)).toBe(true);
 		expect(shouldSendServiceTier("default", unlisted)).toBe(true);
 		// No discovered list (bundled/custom rows): the provider-level answer stands.
 		expect(shouldSendServiceTier("priority", codex)).toBe(true);
