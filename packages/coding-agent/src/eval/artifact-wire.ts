@@ -89,6 +89,9 @@ type Presence<T> = { readonly [K in keyof T]-?: {} extends Pick<T, K> ? "optiona
 /** A shape every field of which is a string, which is all this wire carries. */
 type StringShape<T> = { [K in keyof T]: string | undefined };
 
+/** One variant of the request, by its op. */
+type RequestOf<Op extends ArtifactRequest["op"]> = Extract<ArtifactRequest, { op: Op }>;
+
 const SETTLED_ARTIFACT_FIELDS: Presence<SettledArtifact> = {
 	path: "required",
 	device: "required",
@@ -98,11 +101,24 @@ const SETTLED_ARTIFACT_FIELDS: Presence<SettledArtifact> = {
 	text: "optional",
 };
 
-const REQUEST_FIELDS: { readonly [Op in ArtifactRequest["op"]]: Presence<Extract<ArtifactRequest, { op: Op }>> } = {
-	answer: { op: "required", id: "required", root: "required", token: "optional" },
-	locate: { op: "required", id: "required", root: "required", token: "optional" },
-	take: { op: "required", file: "required" },
-	release: { op: "required", file: "required" },
+/**
+ * The parser for each request variant, each against that variant's own type.
+ *
+ * Per variant, never against the union: `keyof` a union is the keys its
+ * members share, so a shape checked against `ArtifactRequest` as a whole sees
+ * only `op`, and a variant could gain a field that is not a string — which
+ * the parser then refuses at run time — without anything failing to compile.
+ * Each entry names its variant, so its table is checked for the variant's
+ * fields and `shapeOf` for their being strings; the mapped type makes a new
+ * variant without an entry a compile error too.
+ */
+const REQUEST_PARSERS: { readonly [Op in ArtifactRequest["op"]]: (value: object) => RequestOf<Op> | null } = {
+	answer: value =>
+		shapeOf<RequestOf<"answer">>({ op: "required", id: "required", root: "required", token: "optional" }, value),
+	locate: value =>
+		shapeOf<RequestOf<"locate">>({ op: "required", id: "required", root: "required", token: "optional" }, value),
+	take: value => shapeOf<RequestOf<"take">>({ op: "required", file: "required" }, value),
+	release: value => shapeOf<RequestOf<"release">>({ op: "required", file: "required" }, value),
 };
 
 /**
@@ -110,7 +126,8 @@ const REQUEST_FIELDS: { readonly [Op in ArtifactRequest["op"]]: Presence<Extract
  * required one is missing or is not a string.
  *
  * There is no per-field code to forget a field in: the table is the list,
- * and the table is checked against the type.
+ * and the table is checked against the type. `T` must be one concrete shape,
+ * never a union (see {@link REQUEST_PARSERS}).
  */
 function shapeOf<T extends StringShape<T>>(fields: Presence<T>, value: unknown): T | null {
 	if (typeof value !== "object" || value === null) return null;
@@ -133,13 +150,11 @@ export function settledArtifactOf(value: unknown): SettledArtifact | null {
 }
 
 function isRequestOp(op: unknown): op is ArtifactRequest["op"] {
-	return typeof op === "string" && Object.hasOwn(REQUEST_FIELDS, op);
+	return typeof op === "string" && Object.hasOwn(REQUEST_PARSERS, op);
 }
 
 /** A reader's request, as it arrives at the host; `null` for anything that is not one. */
 export function artifactRequestOf(value: unknown): ArtifactRequest | null {
 	if (typeof value !== "object" || value === null || !("op" in value) || !isRequestOp(value.op)) return null;
-	// The table for this request's own op: the shape it is parsed into is the one its op names.
-	const fields = REQUEST_FIELDS[value.op] as Presence<ArtifactRequest>;
-	return shapeOf<ArtifactRequest>(fields, value);
+	return REQUEST_PARSERS[value.op](value);
 }

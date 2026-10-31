@@ -162,6 +162,27 @@ describe.skipIf(process.platform !== "linux")("eval artifact pins", () => {
 		expect(openUnder(dir)).toBe(0);
 	});
 
+	it("refuses a take at the lease boundary even before the lease timer has run", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-pins-");
+		const dir = artifacts(tempDir, "a", 2);
+		const session = sessionReading(dir, "boundary");
+		let now = 0;
+		const clock = spyOn(performance, "now").mockImplementation(() => now);
+		try {
+			const inside = await resolveSettledArtifact(session, "0", dir);
+			const boundary = await resolveSettledArtifact(session, "1", dir);
+			// The real lease timer has not run: only the clock says the lease is over.
+			now = 1_999;
+			expect((await takePinnedArtifact(inside?.file ?? "")).text).toBe("ORIGINAL 0");
+			now = 2_000;
+			await expect(takePinnedArtifact(boundary?.file ?? "")).rejects.toThrow("no longer held open");
+		} finally {
+			clock.mockRestore();
+		}
+		for (let turn = 0; turn < 1_000 && openUnder(dir) > 0; turn++) await scheduler.yield();
+		expect(openUnder(dir)).toBe(0);
+	});
+
 	it("lets an abandoned pin lapse at its lease with nobody asking for the slot", async () => {
 		using tempDir = TempDir.createSync("@omp-eval-pins-");
 		const dir = artifacts(tempDir, "a", 1);

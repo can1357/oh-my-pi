@@ -432,7 +432,16 @@ async function artifactElsewhere(
  * did.
  */
 const leaseClock = (): number => performance.now();
-/** Answers one session may hold pinned at once, so one cannot deny another. */
+/**
+ * Answers one session may hold pinned at once, so one cannot deny another.
+ *
+ * A pin lasts from an answer to the end of its read, so the limit is on reads
+ * in flight at once, not on reads: a cell that starts more than this many
+ * together (`await Promise.all(ids.map(id => read(`artifact://${id}`)))`) has
+ * the ones past it refused with an explicit error — how many depends on how
+ * many earlier reads have finished by then — and never answered with another
+ * file. A refused read can simply be asked again.
+ */
 const PINNED_FILES_MAX = 32;
 /**
  * How long an answer is its reader's before the pin lapses.
@@ -566,13 +575,14 @@ function pinAccountOf(session: ToolSession): PinAccount {
  * The token is a bearer capability, deliberately. Whoever presents it may take
  * or release the pin, and the charge stays with the session that asked. It is
  * random, and it travels only on the asking cell's own bridge to that cell's
- * runtime, so anything that can present it is code running beside the reader,
- * which can already read what the reader reads. Binding it to the asking
- * session instead would refuse a legitimate reader — work a finished cell left
- * running asks through the kernel's latest session, which in a kernel two
- * sessions share is not always the one its answer was charged to — and would
- * withhold nothing: what the pin holds open is an artifact the presenter's
- * session may already read by its number.
+ * runtime, so anything that can present it is code running beside the reader
+ * in the same runtime. Binding it to the asking session instead would refuse a
+ * legitimate reader: work a finished cell left running asks through the
+ * kernel's latest session, which in a kernel two sessions share is not always
+ * the one its answer was charged to. A pin is not interchangeable with reading
+ * by number — it keeps a file readable after its name was replaced or
+ * removed, which is what it is for — so the bearer is trusted because of where
+ * the token can travel, not because it could reach the file another way.
  */
 class ArtifactPin {
 	readonly token = `file-${crypto.randomUUID()}`;
@@ -601,16 +611,40 @@ class ArtifactPin {
 		this.#lapse.unref();
 	}
 
-	/** Whether the lease is over, so the slot is no longer the reader's. */
+	/**
+	 * Whether the lease is over, so the slot is no longer the reader's.
+	 *
+	 * The one reading of "expired": `take` refuses a lapsed pin and capacity
+	 * displaces only a lapsed one, both by this clock. The lease timer only
+	 * closes promptly what has already lapsed; a take that lands at the
+	 * boundary before the timer has run is refused all the same.
+	 */
 	get lapsed(): boolean {
 		return leaseClock() - this.#since >= PINNED_FILE_LEASE_MS;
 	}
 
 	/**
-	 * The descriptor, to the first caller only. The pin is gone from every
-	 * table before this returns, and the caller owns closing what it got.
+	 * The descriptor, to the first caller only, and only within the lease.
+	 * Taken or refused, the pin is gone from every table before this returns;
+	 * the caller owns closing what it got.
 	 */
 	take(): fs.promises.FileHandle | undefined {
+		if (this.lapsed) {
+			void this.release();
+			return undefined;
+		}
+		return this.#end();
+	}
+
+	/** End the claim without reading it. A second release has nothing to give back. */
+	async release(): Promise<void> {
+		await this.#end()
+			?.close()
+			.catch(() => {});
+	}
+
+	/** Out of every table, in one synchronous step, and the descriptor to whoever ended it. */
+	#end(): fs.promises.FileHandle | undefined {
 		const handle = this.#handle;
 		if (!handle) return undefined;
 		this.#handle = undefined;
@@ -619,13 +653,6 @@ class ArtifactPin {
 		this.#account.pins.delete(this);
 		this.#letGo?.();
 		return handle;
-	}
-
-	/** End the claim without reading it. A second release has nothing to give back. */
-	async release(): Promise<void> {
-		await this.take()
-			?.close()
-			.catch(() => {});
 	}
 }
 
@@ -687,7 +714,7 @@ export async function takePinnedArtifact(file: string): Promise<SettledArtifact>
  */
 async function pinFile(handle: fs.promises.FileHandle, answer: SettledArtifact, reader: PinReader): Promise<string> {
 	const account = reader.account;
-	let displaced: fs.promises.FileHandle | undefined;
+	let displaced: Promise<void> | undefined;
 	if (account.pins.size >= PINNED_FILES_MAX) {
 		let lapsed: ArtifactPin | undefined;
 		for (const pin of account.pins) {
@@ -702,7 +729,8 @@ async function pinFile(handle: fs.promises.FileHandle, answer: SettledArtifact, 
 				`${PINNED_FILES_MAX} artifact answers are outstanding for this session and none has lapsed; ${answer.path} cannot be answered for`,
 			);
 		}
-		displaced = lapsed.take();
+		// Out of the account now, synchronously; its descriptor closes below.
+		displaced = lapsed.release();
 	}
 	let token: string;
 	try {
@@ -711,7 +739,7 @@ async function pinFile(handle: fs.promises.FileHandle, answer: SettledArtifact, 
 		await handle.close().catch(() => {});
 		throw error;
 	} finally {
-		await displaced?.close().catch(() => {});
+		await displaced;
 	}
 	return token;
 }
