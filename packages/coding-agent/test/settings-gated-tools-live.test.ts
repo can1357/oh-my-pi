@@ -12,6 +12,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 import { cfgBashEnabled } from "@oh-my-pi/pi-coding-agent/exec/settings";
+import { cfgGoalEnabled, cfgGoalToolDefault } from "@oh-my-pi/pi-coding-agent/goals/settings";
 import { cfgGithubEnabled, cfgGrepEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 // Tool-gating settings (`grep.enabled`, `*.enabled`, ...) must reconcile a live
@@ -89,13 +90,17 @@ describe("settings-gated tools in a live session", () => {
 	});
 
 	it("never widens an explicit tool list", async () => {
-		const settings = Settings.isolated({ "grep.enabled": false, "github.enabled": false });
+		const settings = Settings.isolated({});
+		cfgGrepEnabled.set(settings, false);
+		cfgGithubEnabled.set(settings, false);
 		const session = await startSession(settings, ["read", "bash"]);
 		const before = session.getActiveToolNames();
 		expect(before).not.toContain("grep");
 
 		cfgGrepEnabled.set(settings, true);
 		cfgGithubEnabled.set(settings, true);
+		expect(cfgGrepEnabled.get(settings)).toBe(true);
+		expect(cfgGithubEnabled.get(settings)).toBe(true);
 		await settle(session);
 		expect(session.getActiveToolNames()).toEqual(before);
 		expect(session.getToolByName("grep")).toBeUndefined();
@@ -105,4 +110,116 @@ describe("settings-gated tools in a live session", () => {
 		expect(session.getActiveToolNames()).not.toContain("bash");
 		expect(session.getActiveToolNames()).toContain("read");
 	});
+
+	it.each([
+		{ name: "goal.toolDefault", gate: cfgGoalToolDefault },
+		{ name: "goal.enabled", gate: cfgGoalEnabled },
+	])("reconciles $name in both directions without losing lazy registration", async ({ gate }) => {
+		const settings = Settings.isolated({ "tools.xdev": true });
+		cfgGoalEnabled.set(settings, true);
+		cfgGoalToolDefault.set(settings, true);
+		gate.set(settings, false);
+		expect(gate.get(settings)).toBe(false);
+		const session = await startSession(settings);
+		expect(session.getEnabledToolNames()).not.toContain("goal");
+
+		gate.set(settings, true);
+		expect(gate.get(settings)).toBe(true);
+		await settle(session);
+		expect(session.getEnabledToolNames()).toContain("goal");
+
+		gate.set(settings, false);
+		expect(gate.get(settings)).toBe(false);
+		await settle(session);
+		expect(session.getEnabledToolNames()).not.toContain("goal");
+		expect(session.getMountedXdevToolNames()).not.toContain("goal");
+		// Keep the hidden registry entry so /goal still has an activation path.
+		expect(session.getToolByName("goal")).toBeDefined();
+
+		gate.set(settings, true);
+		expect(gate.get(settings)).toBe(true);
+		await settle(session);
+		expect(session.getEnabledToolNames()).toContain("goal");
+		const write = session.agent.state.tools.find(tool => tool.name === "write");
+		expect(write).toBeDefined();
+		await write!.execute("live_create", {
+			path: "xd://goal",
+			content: JSON.stringify({ op: "create", objective: "Live policy goal" }),
+		} as never);
+		expect(session.getGoalModeState()?.goal.objective).toBe("Live policy goal");
+	});
+
+	it.each([{ toolNames: [] }, { toolNames: ["read"] }])(
+		"keeps explicit $toolNames narrow across live goal toggles",
+		async ({ toolNames }) => {
+			const settings = Settings.isolated({});
+			cfgGoalEnabled.set(settings, false);
+			cfgGoalToolDefault.set(settings, false);
+			const session = await startSession(settings, toolNames.slice());
+			cfgGoalEnabled.set(settings, true);
+			cfgGoalToolDefault.set(settings, true);
+			expect(cfgGoalEnabled.get(settings)).toBe(true);
+			expect(cfgGoalToolDefault.get(settings)).toBe(true);
+			await settle(session);
+			expect(session.getEnabledToolNames()).not.toContain("goal");
+			expect(session.getMountedXdevToolNames()).not.toContain("goal");
+		},
+	);
+
+	it("restores explicit goal selection on feature enable without enabling the default policy", async () => {
+		const settings = Settings.isolated({ "goal.toolDefault": false });
+		cfgGoalEnabled.set(settings, false);
+		const session = await startSession(settings, ["read", "goal"]);
+		expect(session.getEnabledToolNames()).not.toContain("goal");
+		cfgGoalEnabled.set(settings, true);
+		expect(cfgGoalEnabled.get(settings)).toBe(true);
+		await settle(session);
+		expect(session.getEnabledToolNames()).toContain("goal");
+		cfgGoalEnabled.set(settings, false);
+		expect(cfgGoalEnabled.get(settings)).toBe(false);
+		await settle(session);
+		expect(session.getEnabledToolNames()).not.toContain("goal");
+		cfgGoalEnabled.set(settings, true);
+		expect(cfgGoalEnabled.get(settings)).toBe(true);
+		await settle(session);
+		expect(session.getEnabledToolNames()).toContain("goal");
+	});
+
+	it.each(["complete", "drop"] as const)(
+		"retains active controls after creation is disabled and hides creation after %s",
+		async operation => {
+			const settings = Settings.isolated({ "tools.xdev": true });
+			cfgGoalToolDefault.set(settings, true);
+			const session = await startSession(settings);
+			await session.goalRuntime.createGoal({ objective: "Manage after disable" });
+			cfgGoalToolDefault.set(settings, false);
+			expect(cfgGoalToolDefault.get(settings)).toBe(false);
+			await settle(session);
+			expect(session.getEnabledToolNames()).toContain("goal");
+			cfgGoalEnabled.set(settings, false);
+			expect(cfgGoalEnabled.get(settings)).toBe(false);
+			await settle(session);
+			expect(session.getEnabledToolNames()).toContain("goal");
+			expect(session.getGoalModeState()).toMatchObject({
+				enabled: true,
+				goal: { objective: "Manage after disable", status: "active" },
+			});
+			const write = session.agent.state.tools.find(tool => tool.name === "write");
+			expect(write).toBeDefined();
+			const get = await write!.execute("disabled_get", {
+				path: "xd://goal",
+				content: JSON.stringify({ op: "get" }),
+			} as never);
+			expect(get.isError ?? false).toBe(false);
+			const result = await write!.execute("disabled_terminal", {
+				path: "xd://goal",
+				content: JSON.stringify({ op: operation }),
+			} as never);
+			expect(result.isError ?? false).toBe(false);
+			if (operation === "complete") session.setGoalModeState(undefined);
+			await session.reconcileBuiltinTools();
+			expect(session.getEnabledToolNames()).not.toContain("goal");
+			expect(session.getMountedXdevToolNames()).not.toContain("goal");
+		},
+	);
 });

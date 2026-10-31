@@ -469,12 +469,12 @@ export class GoalRuntime {
 			const dropped = { ...state.goal, status: "dropped" as const, updatedAt: this.#now() };
 			this.#clearActiveAccounting();
 			this.#budgetReportedFor = undefined;
+			await this.#commitState(undefined, { persist: "none", emit: false });
 			await this.#host.emit({
 				type: "goal_updated",
 				goal: dropped,
 				state: { ...state, enabled: false, goal: dropped },
 			});
-			await this.#commitState(undefined, { persist: "none", emit: false });
 			return dropped;
 		});
 	}

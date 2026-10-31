@@ -3811,7 +3811,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		let goalRegistration: Promise<boolean> | undefined;
 		const ensureGoalRegistered = (): Promise<boolean> => {
 			if (toolRegistry.has("goal")) return Promise.resolve(true);
-			if (restrictToolNames || !cfgGoalEnabled.get(settings)) return Promise.resolve(false);
+			if (restrictToolNames || (!cfgGoalEnabled.get(settings) && toolSession.getGoalModeState?.()?.enabled !== true))
+				return Promise.resolve(false);
 			goalRegistration ??= (async () => {
 				const goalTool = await logger.time("createTools:goal:session", HIDDEN_TOOLS.goal, toolSession);
 				if (!goalTool || toolRegistry.has("goal")) return toolRegistry.has("goal");
@@ -3819,6 +3820,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				toolRegistry.set(goalTool.name, new ExtensionToolWrapper(nativeGoal, extensionRunner) as Tool);
 				builtInRegistryToolNames.add(goalTool.name);
 				nativeToolsByName.set(goalTool.name, nativeGoal);
+				session?.setToolBuiltIn(goalTool.name, true);
 				return true;
 			})().finally(() => {
 				goalRegistration = undefined;
@@ -3850,13 +3852,37 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// extension tool keeps its registry slot and only its native backing changes.
 		const reconcileSettingsGatedTools = async (
 			isBuiltIn: (name: string) => boolean,
+			isRuntimeSelected: (name: string) => boolean,
 		): Promise<SettingsGatedToolDelta> => {
 			const plan = await resolveBuiltinToolPlan(toolSession, options.toolNames);
 			const planned = new Set(plan.names);
 			const explicitToolNames = options.toolNames ? new Set(normalizeToolNames(options.toolNames)) : undefined;
 			const added: { name: string; builtIn: boolean; activate: boolean }[] = [];
 			const removed: string[] = [];
+			const selection: { name: string; activate: boolean }[] = [];
 			for (const name of SETTINGS_GATED_BUILTIN_TOOL_NAMES) {
+				if (name === "goal") {
+					// Keep the hidden registry entry for /goal and /guided-goal even when
+					// creation is not selected. Reconcile presentation independently:
+					// eager registration does not imply an enabled or mounted tool.
+					// /guided-goal explicitly grants creation before any record exists.
+					// Preserve that grant across unrelated settings changes, rather than
+					// confusing it with automatic default presentation.
+					const manualCreation =
+						!restrictToolNames &&
+						cfgGoalEnabled.get(settings) &&
+						toolSession.getGoalModeState?.() === undefined &&
+						isRuntimeSelected(name);
+					const activate = planned.has(name) || manualCreation;
+					const registered = toolRegistry.has(name);
+					if (activate && !registered && (await ensureGoalRegistered())) {
+						added.push({ name, builtIn: true, activate: true });
+					}
+					if ((!registered && toolRegistry.has(name)) || isBuiltIn(name)) {
+						selection.push({ name, activate });
+					}
+					continue;
+				}
 				const registered = toolRegistry.has(name);
 				if (!plan.isAllowed(name)) {
 					nativeToolsByName.delete(name);
@@ -3890,7 +3916,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				added.push({ name: entry.name, builtIn: false, activate: entry.hidden !== true });
 			}
 			syncXdevState();
-			return { added, removed, xdev: toolSession.xdev };
+			return { added, removed, selection, xdev: toolSession.xdev };
 		};
 
 		// Existing staged/device paths need write registered before active-set assembly.
@@ -4318,7 +4344,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return tool?.defaultInactive === true || tool?.hidden === true;
 			}),
 		);
-		const requestedActiveToolNames = normalizedRequested.filter(name => name !== "goal");
+		const requestedActiveToolNames = normalizedRequested.filter(name => name !== "goal" || activeToolNames.has(name));
 		const explicitlyRequestedToolNameSet = explicitlyRequestedToolNames
 			? new Set(explicitlyRequestedToolNames)
 			: undefined;

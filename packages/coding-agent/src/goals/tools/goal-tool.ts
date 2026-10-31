@@ -16,6 +16,7 @@ import type { ToolSession } from "../../tools";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 import { completionBudgetReport, remainingTokens } from "../runtime";
+import { cfgGoalEnabled } from "../settings";
 import type { Goal, GoalToolDetails } from "@oh-my-pi/pi-tui/tools/goal";
 
 const goalSchema = type({
@@ -85,6 +86,18 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 		const runtime = this.#session.getGoalRuntime?.();
 		if (!runtime) {
 			throw new ToolError("Goal mode is not active.");
+		}
+		if (params.op === "create" || params.op === "resume") {
+			if (!cfgGoalEnabled.get(this.#session.settings)) {
+				throw new ToolError("Goal mode is disabled (goal.enabled).");
+			}
+			const mode = this.#session.sessionManager?.getBranch().findLast(entry => entry.type === "mode_change")?.mode;
+			if (this.#session.getPlanModeState?.()?.enabled || mode === "plan" || mode === "plan_paused") {
+				throw new ToolError("Exit plan mode before starting a goal.");
+			}
+			if (mode === "vibe") {
+				throw new ToolError("Exit vibe mode before starting a goal.");
+			}
 		}
 
 		let response: GoalToolResponse;

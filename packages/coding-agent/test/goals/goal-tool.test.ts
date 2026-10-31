@@ -1,10 +1,13 @@
 import { describe, expect, it, vi } from "bun:test";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { completionBudgetReport, GoalRuntime } from "@oh-my-pi/pi-coding-agent/goals/runtime";
 import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
 import type { GoalModeState, GoalTokenUsage } from "@oh-my-pi/pi-coding-agent/goals/state";
 import { GoalTool } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { resolveApproval } from "@oh-my-pi/pi-coding-agent/tools/approval";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 function createUsage(overrides: Partial<GoalTokenUsage> = {}): GoalTokenUsage {
 	return {
@@ -35,7 +38,7 @@ function cloneState(state: GoalModeState | undefined): GoalModeState | undefined
 }
 
 function createToolSession(overrides: Partial<ToolSession>): ToolSession {
-	return overrides as ToolSession;
+	return { settings: Settings.isolated(), ...overrides } as ToolSession;
 }
 
 function createRuntimeHarness(initialState?: GoalModeState) {
@@ -127,6 +130,81 @@ describe("GoalTool", () => {
 			type: "text",
 			text: "Goal: Complete route\nStatus: complete\nTokens: 7 used / 10 budget\nRemaining tokens: 3\n\nGoal achieved. Report final budget usage to the user: tokens used: 7 of 10; time used: 3 seconds.",
 		});
+	});
+
+	it.each(["create", "resume"] as const)("rejects %s after goal mode is disabled", async op => {
+		const harness = createRuntimeHarness(
+			op === "resume" ? { enabled: false, mode: "active", goal: createGoal({ status: "paused" }) } : undefined,
+		);
+		const before = harness.getState();
+		const tool = new GoalTool(
+			createToolSession({
+				settings: Settings.isolated({ "goal.enabled": false }),
+				getGoalRuntime: () => harness.runtime,
+				getGoalModeState: () => harness.getState(),
+			}),
+		);
+
+		await expect(tool.execute("call-disabled", { op, objective: "New goal" })).rejects.toBeInstanceOf(ToolError);
+		expect(harness.getState()).toEqual(before);
+	});
+
+	it.each([
+		{ name: "active", mode: "none", enabled: true },
+		{ name: "saved active", mode: "plan", enabled: false },
+		{ name: "paused", mode: "plan_paused", enabled: false },
+	] as const)("rejects goal creation while plan mode is $name", async ({ mode, enabled }) => {
+		const harness = createRuntimeHarness();
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendModeChange(mode);
+		const tool = new GoalTool(
+			createToolSession({
+				sessionManager,
+				getGoalRuntime: () => harness.runtime,
+				getGoalModeState: () => harness.getState(),
+				getPlanModeState: () => (enabled ? { enabled: true, planFilePath: "local://PLAN.md" } : undefined),
+			}),
+		);
+
+		await expect(tool.execute("call-plan", { op: "create", objective: "New goal" })).rejects.toBeInstanceOf(
+			ToolError,
+		);
+		expect(harness.getState()).toBeUndefined();
+	});
+
+	it.each(["create", "resume"] as const)("rejects %s while vibe mode is active", async op => {
+		const harness = createRuntimeHarness(
+			op === "resume" ? { enabled: false, mode: "active", goal: createGoal({ status: "paused" }) } : undefined,
+		);
+		const before = harness.getState();
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendModeChange("vibe");
+		const tool = new GoalTool(
+			createToolSession({
+				sessionManager,
+				getGoalRuntime: () => harness.runtime,
+				getGoalModeState: () => harness.getState(),
+			}),
+		);
+
+		await expect(tool.execute("call-vibe", { op, objective: "New goal" })).rejects.toBeInstanceOf(ToolError);
+		expect(harness.getState()).toEqual(before);
+	});
+
+	it("keeps an existing goal readable and completable after new goals are disabled", async () => {
+		const harness = createRuntimeHarness({ enabled: true, mode: "active", goal: createGoal() });
+		const tool = new GoalTool(
+			createToolSession({
+				settings: Settings.isolated({ "goal.enabled": false }),
+				getGoalRuntime: () => harness.runtime,
+				getGoalModeState: () => harness.getState(),
+			}),
+		);
+
+		const current = await tool.execute("call-get-disabled", { op: "get" });
+		expect(current.details?.goal?.id).toBe("goal-1");
+		await tool.execute("call-complete-disabled", { op: "complete" });
+		expect(harness.getState()).toMatchObject({ enabled: false, goal: { status: "complete" } });
 	});
 
 	it("rejects create when a goal already exists", async () => {

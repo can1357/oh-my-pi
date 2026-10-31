@@ -5440,14 +5440,24 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (event.type === "goal_updated") {
 			if (event.state) this.#guidedGoalInterviewActive = false;
-			// Handle drop before clearing goalModeEnabled so #exitGoalMode can
-			// still restore the previous tool set while the flag is true.
+			// A native goal create can enter without /goal or /guided-goal.
+			if (event.state?.enabled && this.#goalModePreviousTools === undefined) {
+				this.#goalModePreviousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
+			}
+			// Drop tears down the mode before projecting the updated goal state.
 			if (event.state?.goal?.status === "dropped") {
 				await this.#exitGoalMode({ reason: "dropped", silent: true });
 				return;
 			}
+			if (event.state?.goal?.status === "paused") {
+				this.goalModeEnabled = false;
+				this.goalModePaused = true;
+				this.#cancelGoalContinuation();
+				await this.#exitGoalMode({ paused: true, reason: "paused", silent: true });
+				return;
+			}
 			this.goalModeEnabled = event.state?.enabled === true;
-			this.goalModePaused = event.state?.enabled !== true && event.state?.goal?.status === "paused";
+			this.goalModePaused = false;
 			if (!event.state?.enabled) {
 				this.#cancelGoalContinuation();
 			}
@@ -5606,10 +5616,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 		}
 
-		if (this.goalModeEnabled || this.goalModePaused) {
-			if (this.#goalModePreviousTools !== undefined) {
-				await this.session.setActiveToolsByName(this.#goalModePreviousTools);
-			}
+		if (this.goalModeEnabled || this.goalModePaused || this.#goalModePreviousTools !== undefined) {
+			// The destination already selected its tools. This snapshot belongs to
+			// the source goal and must not overwrite a new or resumed session.
 			this.session.setGoalModeState(undefined);
 			this.goalModeEnabled = false;
 			this.goalModePaused = false;
@@ -5674,16 +5683,17 @@ export class InteractiveMode implements InteractiveModeContext {
 			restorePlanModel: Object.keys(sessionContext.models).length === 0,
 		});
 		await VibeSessionRegistry.global().rehydrate(vibeSession);
-		const goalEnabled = cfgGoalEnabled.get(this.session.settings);
-		if (!goalEnabled && (sessionContext.mode === "goal" || sessionContext.mode === "goal_paused")) {
-			this.session.goalRuntime.clearAccounting();
-			this.sessionManager.appendModeChange("none");
-			return;
-		}
 		if (sessionContext.mode === "goal" || sessionContext.mode === "goal_paused") {
 			const goal = goalFromModeData(sessionContext.modeData);
 			if (!goal) {
 				this.sessionManager.appendModeChange("none");
+				return;
+			}
+			// Completion may have persisted just before a shutdown, without the
+			// turn-end teardown. Finish that teardown rather than reviving it.
+			if (goal.status === "complete") {
+				this.session.setGoalModeState({ enabled: false, mode: "exiting", reason: "completed", goal });
+				await this.#exitGoalMode({ reason: "completed", silent: true });
 				return;
 			}
 			this.session.setGoalModeState({
@@ -5696,17 +5706,20 @@ export class InteractiveMode implements InteractiveModeContext {
 			});
 			this.goalModeEnabled = restored?.enabled === true;
 			this.goalModePaused = restored?.enabled !== true && restored?.goal.status === "paused";
-			// sdk.ts excludes "goal" from the initial active tool set unconditionally.
-			// Re-add it now so the agent can call resume, complete, or drop on this goal.
+			// Cold-resumed goals stay paused until the host resumes them. Capture
+			// the destination's presentation, not the outgoing goal's toolset.
 			if (restored?.goal) {
 				const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
 				this.#goalModePreviousTools = previousTools;
-				await this.session.setActiveToolsByName([...new Set([...previousTools, "goal"])]);
+				await this.session.setActiveToolsByName(
+					restored.enabled ? [...new Set([...previousTools, "goal"])] : previousTools,
+				);
 			}
 			this.#updateGoalModeStatus();
 			return;
 		}
 		this.session.goalRuntime.clearAccounting();
+		await this.session.reconcileBuiltinTools();
 		if (sessionContext.mode === "vibe") {
 			if (!preserveVibe) {
 				await this.#enterVibeMode({
@@ -5792,11 +5805,13 @@ export class InteractiveMode implements InteractiveModeContext {
 				"Plan mode: the `write` tool is provided by an extension and cannot submit plans. Disable it to use plan mode.",
 			);
 		}
-		const uniquePlanTools = [...new Set([...previousTools.filter(name => name !== "write"), ...planAugmentations])];
+		const uniquePlanTools = [
+			...new Set([...previousTools.filter(name => name !== "write" && name !== "goal"), ...planAugmentations]),
+		];
 
 		this.#planModePreviousToolPresentation = {
-			enabled: previousTools.filter(name => !isMCPToolName(name)),
-			mounted: previousMountedTools.filter(name => !isMCPToolName(name)),
+			enabled: previousTools.filter(name => name !== "goal" && !isMCPToolName(name)),
+			mounted: previousMountedTools.filter(name => name !== "goal" && !isMCPToolName(name)),
 			registered: this.session.getAllToolNames(),
 		};
 		this.planModePlanFilePath = planFilePath;
@@ -5975,9 +5990,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.planModePlanFilePath = undefined;
 		this.#planModePreviousToolPresentation = undefined;
 		if (!options?.deferModelRestore) this.#planModePreviousModelState = undefined;
-		this.#updatePlanModeStatus();
 		const paused = options?.paused ?? false;
 		this.sessionManager.appendModeChange(paused ? "plan_paused" : "none");
+		await this.session.reconcileBuiltinTools();
+		this.#updatePlanModeStatus();
 		if (!options?.silent) {
 			this.showStatus(paused ? "Plan mode paused." : "Plan mode disabled.");
 		}
@@ -6006,6 +6022,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.goalModeEnabled) {
 			return;
 		}
+		if (!cfgGoalEnabled.get(this.session.settings)) {
+			this.showWarning("Goal mode is disabled. Enable it in settings (goal.enabled).");
+			return;
+		}
 		if (this.planModeEnabled || this.planModePaused) {
 			this.#warnPlanModeBlocks();
 			return;
@@ -6027,14 +6047,27 @@ export class InteractiveMode implements InteractiveModeContext {
 					});
 			await this.session.setActiveToolsByName(goalTools);
 		} catch (error) {
-			this.#goalModePreviousTools = undefined;
 			// The runtime already journaled the goal; without its tool it must not
 			// stay active, or every later entry is refused against a stuck goal.
 			if (state) {
 				const runtime = this.session.goalRuntime;
-				await (options.resume ? runtime.pauseGoal() : runtime.dropGoal()).catch((rollbackError: unknown) =>
-					logger.warn("Failed to roll back goal after tool activation failed", { error: String(rollbackError) }),
-				);
+				// The event subscriber is asynchronous. Await presentation cleanup as
+				// well, so a failed entry cannot leave its mode-change hold running.
+				await (options.resume ? runtime.pauseGoal() : runtime.dropGoal())
+					.then(() =>
+						this.#exitGoalMode({
+							paused: options.resume === true,
+							reason: options.resume ? "paused" : "dropped",
+							silent: true,
+						}),
+					)
+					.catch((rollbackError: unknown) =>
+						logger.warn("Failed to roll back goal after tool activation failed", {
+							error: String(rollbackError),
+						}),
+					);
+			} else {
+				this.#goalModePreviousTools = undefined;
 			}
 			throw error;
 		}
@@ -6057,13 +6090,25 @@ export class InteractiveMode implements InteractiveModeContext {
 		reason?: "completed" | "paused" | "dropped";
 	}): Promise<void> {
 		using _hold = this.#holdModeChanges();
-		const previousTools = this.#goalModePreviousTools;
-		// Not gated on goalModeEnabled: a pause's goal_updated clears that flag
-		// before this runs, which used to leave the goal tool active.
-		if (previousTools) {
-			await this.session.setActiveToolsByName(previousTools);
-		}
+		const sessionId = this.sessionManager.getSessionId();
 		const currentState = this.session.getGoalModeState();
+		if (options?.paused && (currentState?.enabled || currentState?.goal.status !== "paused")) return;
+		const previousTools = (this.#goalModePreviousTools ?? this.session.getEnabledToolNames()).filter(
+			name => name !== "goal",
+		);
+		// Restoring goal itself would pin automatic creation as a manual grant.
+		// Restore the other tools, then let the SDK apply the original goal policy.
+		await this.session.setActiveToolsByName(previousTools);
+		const restoredState = this.session.getGoalModeState();
+		if (
+			this.sessionManager.getSessionId() !== sessionId ||
+			restoredState?.goal.id !== currentState?.goal.id ||
+			restoredState?.enabled !== currentState?.enabled ||
+			restoredState?.mode !== currentState?.mode ||
+			restoredState?.goal.status !== currentState?.goal.status
+		) {
+			return;
+		}
 		if (options?.reason === "completed") {
 			this.session.setGoalModeState(undefined);
 			this.sessionManager.appendModeChange("none");
@@ -6081,6 +6126,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#previousGoalContinuationActivity = undefined;
 		this.#goalSuppressNextContinuation = false;
 		this.#cancelGoalContinuation();
+		await this.session.reconcileBuiltinTools();
 		this.syncIdleMaintenanceView();
 		this.#updateGoalModeStatus();
 		if (!options?.silent) {
@@ -6533,8 +6579,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		},
 	): Promise<boolean> {
 		const previousPresentation = this.#planModePreviousToolPresentation ?? {
-			enabled: this.session.getEnabledToolNames().filter(name => !isMCPToolName(name)),
-			mounted: this.session.getMountedXdevToolNames().filter(name => !isMCPToolName(name)),
+			enabled: this.session.getEnabledToolNames().filter(name => name !== "goal" && !isMCPToolName(name)),
+			mounted: this.session.getMountedXdevToolNames().filter(name => name !== "goal" && !isMCPToolName(name)),
 			registered: this.session.getAllToolNames(),
 		};
 
@@ -6611,6 +6657,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			previousPresentation.mounted,
 			previousPresentation.registered,
 		);
+		await this.session.reconcileBuiltinTools();
 		this.session.setPlanReferencePath(options.planFilePath);
 		try {
 			const autosaved = await autosaveApprovedPlan({
@@ -6958,7 +7005,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		// vibe set, so re-snapshotting it here would make the snapshot useless. That
 		// path passes the pre-vibe toolset recorded on the target's own mode_change
 		// entry instead.
-		const previousTools = options?.previousTools ?? this.session.getEnabledToolNames();
+		const previousTools = (options?.previousTools ?? this.session.getEnabledToolNames()).filter(
+			name => name !== "goal",
+		);
 		const vibeBaseTools = ["read"];
 		if (this.session.hasBuiltInTool("todo")) vibeBaseTools.push("todo");
 		// The entry runs as a stored promise so a concurrent /vibe joins it
@@ -7011,6 +7060,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#vibeModePreviousTools = undefined;
 		this.#vibeModeOwnerScope = undefined;
 		this.lastAssistantUsage = undefined;
+		this.sessionManager.appendModeChange("none");
+		await this.session.reconcileBuiltinTools();
 		this.#updateVibeModeStatus();
 		this.showStatus(
 			killed > 0
@@ -7057,11 +7108,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Exit vibe mode first.");
 			return false;
 		}
-		if (!cfgGoalEnabled.get(this.session.settings)) {
+		const { sub, rest: subRest } = parseGoalSubcommand(rest ?? "");
+		if (
+			!cfgGoalEnabled.get(this.session.settings) &&
+			(sub === "set" || sub === "resume" || (!this.goalModeEnabled && !this.goalModePaused))
+		) {
 			this.showWarning("Goal mode is disabled. Enable it in settings (goal.enabled).");
 			return false;
 		}
-		const { sub, rest: subRest } = parseGoalSubcommand(rest ?? "");
 		if (sub) return await this.#dispatchGoalSubcommand(sub, subRest, input);
 		if (this.goalModeEnabled) {
 			if (subRest) {
@@ -7118,7 +7172,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			// Expose the goal tool for the interview so the agent can finish by
 			// calling `goal create`. Record the pre-interview toolset first: the
 			// tool-driven create flips goalModeEnabled via `goal_updated`, and the
-			// eventual goal exit restores this set (dropping the goal tool again).
+			// eventual goal exit restores this set.
 			const enabledTools = this.session.getEnabledToolNames();
 			this.#goalModePreviousTools = enabledTools.filter(name => name !== "goal");
 			if (!enabledTools.includes("goal")) {
@@ -7267,6 +7321,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		await this.#enterGoalMode({ resume: true, silent: true });
+		if (!this.goalModeEnabled) return;
 		this.showStatus("Goal mode resumed.");
 		this.#scheduleGoalContinuation();
 	}

@@ -1,8 +1,12 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgGoalEnabled, cfgGoalToolDefault } from "@oh-my-pi/pi-coding-agent/goals/settings";
 import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import { RpcGoalController, type RpcGoalSession } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-goal";
 import {
@@ -10,10 +14,15 @@ import {
 	watchedScheduledTurnProbe,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-session-settle";
 import type { RpcSessionState } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
-import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { createAgentSession, type CreateAgentSessionOptions } from "@oh-my-pi/pi-coding-agent/sdk";
+import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { isSessionSettled, type SessionSettleState } from "@oh-my-pi/pi-coding-agent/session/session-settle";
 import type { GoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
+import { cfgAsyncEnabled, cfgToolsXdev } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { removeWithRetries, withTimeout } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 function nextMacrotask(): Promise<void> {
 	const { promise, resolve } = Promise.withResolvers<void>();
@@ -410,6 +419,318 @@ describe("RPC goal command", () => {
 	}, 30_000);
 });
 
+describe("RpcGoalController with SDK goal selection", () => {
+	let modelRegistry: ModelRegistry;
+	let authStorage: AuthStorage;
+	const sessions: { session: AgentSession; unsubscribe: () => void }[] = [];
+	const directories: string[] = [];
+
+	beforeAll(() => {
+		authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	afterEach(async () => {
+		for (const { session, unsubscribe } of sessions.splice(0)) {
+			unsubscribe();
+			await session.dispose();
+		}
+		for (const directory of directories.splice(0)) await removeWithRetries(directory);
+	});
+
+	afterAll(() => authStorage.close());
+
+	async function start(
+		options: {
+			toolDefault?: boolean;
+			toolNames?: readonly string[];
+			restrictToolNames?: boolean;
+			persist?: boolean;
+		} = {},
+	) {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-rpc-goal-sdk-"));
+		directories.push(directory);
+		const settings = Settings.isolated();
+		cfgAsyncEnabled.set(settings, false);
+		cfgToolsXdev.set(settings, true);
+		cfgGoalToolDefault.set(settings, options.toolDefault ?? false);
+		const { session } = await createAgentSession({
+			cwd: directory,
+			agentDir: directory,
+			authStorage,
+			modelRegistry,
+			sessionManager: options.persist
+				? SessionManager.create(directory, path.join(directory, "sessions"))
+				: SessionManager.inMemory(directory),
+			settings,
+			model: getBundledModel("anthropic", "claude-sonnet-4-5"),
+			toolNames: options.toolNames?.slice(),
+			restrictToolNames: options.restrictToolNames,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			rules: [],
+			workspaceTree: { rootPath: directory, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
+			enableMCP: false,
+			enableLsp: false,
+		} satisfies CreateAgentSessionOptions);
+		session.agent.streamFn = createMockModel({ handler: () => ({ content: ["Host turn complete."] }) }).stream;
+		const controller = new RpcGoalController(session);
+		const unsubscribe = session.subscribe(event => controller.observe(event));
+		sessions.push({ session, unsubscribe });
+		await controller.reconcile();
+		return { session, controller };
+	}
+
+	async function nativeGoal(
+		session: AgentSession,
+		command: Record<string, unknown>,
+		options: { expectError?: boolean } = {},
+	) {
+		const write = session.agent.state.tools.find(tool => tool.name === "write");
+		if (!write) throw new Error("Expected the SDK's native write transport");
+		const result = await write.execute("rpc-native-goal", {
+			path: "xd://goal",
+			content: JSON.stringify(command),
+		} as never);
+		expect(result.isError ?? false).toBe(options.expectError ?? false);
+		return result;
+	}
+
+	async function completeGoal(session: AgentSession, controller: RpcGoalController) {
+		session.agent.streamFn = createMockModel({
+			responses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "complete-goal",
+							name: "write",
+							arguments: { path: "xd://goal", content: JSON.stringify({ op: "complete" }) },
+						},
+					],
+				},
+				{ content: ["Goal complete."] },
+			],
+		}).stream;
+		await session.prompt("Complete the current goal.");
+		await controller.settled();
+		expect(session.getGoalModeState()).toBeUndefined();
+	}
+
+	test("native default creation cannot resume itself after host pause; terminal cycles restore creation", async () => {
+		const { session, controller } = await start({ toolDefault: true });
+		expect(session.getEnabledToolNames()).toContain("goal");
+		await nativeGoal(session, { op: "create", objective: "first native goal" });
+		const firstId = session.getGoalModeState()?.goal.id;
+		expect(firstId).toBeDefined();
+		expect(controller.continuationPending).toBe(false);
+		expect(session.messages).toEqual([]);
+
+		await controller.handle({ op: "pause" });
+		expect(session.getGoalModeState()?.goal).toMatchObject({ id: firstId, status: "paused" });
+		expect(session.getEnabledToolNames()).not.toContain("goal");
+		await nativeGoal(session, { op: "resume" }, { expectError: true });
+		expect(session.getGoalModeState()?.goal.status).toBe("paused");
+
+		await controller.handle({ op: "resume" });
+		expect(session.getEnabledToolNames()).toContain("goal");
+		await completeGoal(session, controller);
+		expect(session.getEnabledToolNames()).toContain("goal");
+
+		await nativeGoal(session, { op: "create", objective: "second native goal" });
+		expect(session.getGoalModeState()?.goal.id).not.toBe(firstId);
+		await controller.handle({ op: "pause" });
+		await controller.handle({ op: "drop" });
+		expect(session.getGoalModeState()).toBeUndefined();
+		expect(session.getEnabledToolNames()).toContain("goal");
+
+		await nativeGoal(session, { op: "create", objective: "third native goal" });
+		await nativeGoal(session, { op: "drop" });
+		await controller.settled();
+		expect(session.getGoalModeState()).toBeUndefined();
+		expect(session.getEnabledToolNames()).toContain("goal");
+	});
+
+	test("ordinary RPC stays default-off across manual create, completion, paused drop and resume", async () => {
+		const { session, controller } = await start();
+		expect(session.getEnabledToolNames()).not.toContain("goal");
+		await controller.handle({ op: "create", objective: "host managed" });
+		expect(session.getEnabledToolNames()).toContain("goal");
+		await completeGoal(session, controller);
+		expect(session.getEnabledToolNames()).not.toContain("goal");
+
+		await controller.handle({ op: "create", objective: "host managed again" });
+		await controller.handle({ op: "pause" });
+		expect(session.getEnabledToolNames()).not.toContain("goal");
+		await controller.handle({ op: "resume" });
+		expect(session.getEnabledToolNames()).toContain("goal");
+		await controller.handle({ op: "pause" });
+		await controller.handle({ op: "drop" });
+		expect(session.getEnabledToolNames()).not.toContain("goal");
+		expect(controller.continuationPending).toBe(false);
+	});
+
+	test("explicit SDK goal selection permits creation, but not native resume while paused", async () => {
+		const { session, controller } = await start({ toolNames: ["read", "write", "goal"] });
+		expect(session.getEnabledToolNames()).toContain("goal");
+		await nativeGoal(session, { op: "create", objective: "explicit goal selection" });
+		await controller.handle({ op: "pause" });
+		expect(session.getEnabledToolNames()).not.toContain("goal");
+		await nativeGoal(session, { op: "resume" }, { expectError: true });
+		expect(session.getGoalModeState()).toMatchObject({ enabled: false, goal: { status: "paused" } });
+		await controller.handle({ op: "resume" });
+		await completeGoal(session, controller);
+		expect(session.getEnabledToolNames()).toContain("goal");
+	});
+
+	test.each([
+		{ toolNames: [] },
+		{ toolNames: ["read"] },
+		{ toolNames: ["read", "write"] },
+		{ toolNames: ["read", "write"], restrictToolNames: true },
+	])("paused drop does not widen the original SDK selection: %j", async selection => {
+		const { session, controller } = await start({ ...selection, toolDefault: true });
+		expect(session.getEnabledToolNames()).not.toContain("goal");
+		await controller.handle({ op: "create", objective: "host-owned goal in a narrowed tool set" });
+		await controller.handle({ op: "pause" });
+		await controller.handle({ op: "drop" });
+		expect(session.getGoalModeState()).toBeUndefined();
+		expect(session.getEnabledToolNames()).not.toContain("goal");
+	});
+
+	test("paused drop reads live creation policy instead of the old management snapshot", async () => {
+		const { session, controller } = await start({ toolDefault: true });
+		await nativeGoal(session, { op: "create", objective: "change display settings" });
+		cfgGoalToolDefault.set(session.settings, false);
+		await session.reconcileBuiltinTools();
+		expect(session.getEnabledToolNames()).toContain("goal");
+		await controller.handle({ op: "pause" });
+		await controller.handle({ op: "drop" });
+		expect(session.getEnabledToolNames()).not.toContain("goal");
+
+		await controller.handle({ op: "create", objective: "enable creation while paused" });
+		await controller.handle({ op: "pause" });
+		cfgGoalToolDefault.set(session.settings, true);
+		await session.reconcileBuiltinTools();
+		expect(session.getEnabledToolNames()).not.toContain("goal");
+		await controller.handle({ op: "drop" });
+		expect(session.getEnabledToolNames()).toContain("goal");
+
+		await nativeGoal(session, { op: "create", objective: "master gate controls new creation" });
+		cfgGoalEnabled.set(session.settings, false);
+		await session.reconcileBuiltinTools();
+		expect(session.getEnabledToolNames()).toContain("goal");
+		await completeGoal(session, controller);
+		expect(session.getEnabledToolNames()).not.toContain("goal");
+	});
+
+	test("reconciliation retains an active journal and its controls when new creation is disabled", async () => {
+		const { session, controller } = await start({ toolDefault: true });
+		await nativeGoal(session, { op: "create", objective: "retain the active record" });
+		const goalId = session.getGoalModeState()?.goal.id;
+		cfgGoalEnabled.set(session.settings, false);
+		await controller.reconcile({ preserveActiveGoal: true });
+		await controller.settled();
+		expect(session.getGoalModeState()).toMatchObject({
+			enabled: true,
+			goal: { id: goalId, objective: "retain the active record", status: "active" },
+		});
+		expect(session.sessionManager.buildSessionContext().mode).toBe("goal");
+		await nativeGoal(session, { op: "get" });
+		await nativeGoal(session, { op: "drop" });
+		await controller.settled();
+		expect(session.getEnabledToolNames()).not.toContain("goal");
+	});
+
+	test("leaving an active native goal does not apply its source tool snapshot in the new session", async () => {
+		const { session, controller } = await start({ toolDefault: true });
+		await nativeGoal(session, { op: "create", objective: "source tools are not destination tools" });
+		expect(session.getEnabledToolNames()).toContain("glob");
+		await controller.beginSessionChange();
+		try {
+			expect(await session.newSession()).toBe(true);
+			await session.setActiveToolsByName(["read", "write"]);
+		} finally {
+			await controller.endSessionChange({ detachedRun: true });
+		}
+		await controller.settled();
+		expect(session.getGoalModeState()).toBeUndefined();
+		expect(session.getEnabledToolNames()).toContain("goal");
+		expect(session.getEnabledToolNames()).not.toContain("glob");
+		await nativeGoal(session, { op: "create", objective: "destination goal" });
+		await controller.handle({ op: "pause" });
+		expect(session.getEnabledToolNames()).not.toContain("goal");
+		await controller.handle({ op: "drop" });
+		expect(session.getEnabledToolNames()).toContain("goal");
+	});
+
+	test("new and switched sessions use destination selection and keep paused goals hidden", async () => {
+		const { session, controller } = await start({ toolDefault: true, persist: true });
+		await session.prompt("Persist the first transcript.");
+		await nativeGoal(session, { op: "create", objective: "belongs to the first transcript" });
+		await controller.handle({ op: "pause" });
+		await session.flushToDisk();
+		const sourceFile = session.sessionFile;
+		if (!sourceFile) throw new Error("Expected a persisted source transcript");
+
+		await controller.beginSessionChange();
+		try {
+			expect(await session.newSession()).toBe(true);
+			await session.setActiveToolsByName(["read", "write"]);
+		} finally {
+			await controller.endSessionChange({ detachedRun: true });
+		}
+		await controller.settled();
+		expect(session.getGoalModeState()).toBeUndefined();
+		expect(session.getEnabledToolNames()).toContain("goal");
+		expect(session.getEnabledToolNames()).not.toContain("glob");
+		await nativeGoal(session, { op: "create", objective: "belongs to the second transcript" });
+
+		await controller.beginSessionChange();
+		try {
+			expect(await session.switchSession(sourceFile)).toBe(true);
+		} finally {
+			await controller.endSessionChange({ detachedRun: true });
+		}
+		await controller.settled();
+		expect(session.getGoalModeState()?.goal).toMatchObject({
+			objective: "belongs to the first transcript",
+			status: "paused",
+		});
+		expect(session.getEnabledToolNames()).not.toContain("goal");
+		await nativeGoal(session, { op: "resume" }, { expectError: true });
+		expect(session.getGoalModeState()).toMatchObject({ enabled: false, goal: { status: "paused" } });
+		await controller.handle({ op: "resume" });
+		expect(session.getEnabledToolNames()).toContain("goal");
+		await controller.handle({ op: "drop" });
+		expect(session.getEnabledToolNames()).toContain("goal");
+	});
+
+	test("a stale native drop event cannot remove the next goal's tool", async () => {
+		const { session, controller } = await start();
+		await controller.handle({ op: "create", objective: "old goal" });
+		const previous = session.getGoalModeState();
+		if (!previous) throw new Error("Expected the first native goal");
+		await nativeGoal(session, { op: "drop" });
+		await controller.settled();
+		await controller.handle({ op: "create", objective: "new goal" });
+		const newId = session.getGoalModeState()?.goal.id;
+		controller.observe({
+			type: "goal_updated",
+			goal: { ...previous.goal, status: "dropped" },
+			state: { ...previous, enabled: false, goal: { ...previous.goal, status: "dropped" } },
+		});
+		await controller.settled();
+		expect(session.getGoalModeState()?.goal).toMatchObject({ id: newId, objective: "new goal", status: "active" });
+		expect(session.getEnabledToolNames()).toContain("goal");
+		await nativeGoal(session, { op: "get" });
+	});
+});
+
 describe("RpcGoalController continuation gate", () => {
 	const agentEnd = { type: "agent_end", messages: [], isTerminal: true } as unknown as AgentSessionEvent;
 	const hostInput = { type: "message_start", message: { role: "user", content: [] } } as unknown as AgentSessionEvent;
@@ -480,6 +801,10 @@ describe("RpcGoalController continuation gate", () => {
 			setActiveToolsByName: async (names: string[]) => {
 				tools = [...names];
 			},
+			reconcileBuiltinTools: async () => {
+				// This continuation-only fixture has no creation opt-in.
+				if (!goalState?.enabled) tools = tools.filter(name => name !== "goal");
+			},
 			getTodoPhases: () => [],
 			goalRuntime: {
 				buildContinuationPrompt: () => "continue",
@@ -490,19 +815,22 @@ describe("RpcGoalController continuation gate", () => {
 					await resumed.promise;
 					return goalState;
 				},
-				createGoal: async ({ objective }: { objective: string }): Promise<GoalModeState> => ({
-					enabled: true,
-					mode: "active",
-					goal: {
-						id: "g2",
-						objective,
-						status: "active",
-						tokensUsed: 0,
-						timeUsedSeconds: 0,
-						createdAt: 0,
-						updatedAt: 0,
-					},
-				}),
+				createGoal: async ({ objective }: { objective: string }): Promise<GoalModeState> => {
+					goalState = {
+						enabled: true,
+						mode: "active",
+						goal: {
+							id: "g2",
+							objective,
+							status: "active",
+							tokensUsed: 0,
+							timeUsedSeconds: 0,
+							createdAt: 0,
+							updatedAt: 0,
+						},
+					};
+					return goalState;
+				},
 			},
 			promptCustomMessage: (message: { customType: string }) => admit(message.customType),
 			waitForIdle: () => idle.promise,
@@ -812,9 +1140,9 @@ describe("RpcGoalController continuation gate", () => {
 		await f.controller.settled();
 		for (let i = 0; i < 5; i++) await nextMacrotask();
 		expect(f.threadResumes()).toBe(2);
-		// The pre-goal tool set was captured without the goal tool.
-		expect(f.tools()).toEqual(["read", "goal"]);
-		// When the goal later completes, exactly the pre-goal tools come back.
+		// Reattaching a paused goal never exposes a native resume route.
+		expect(f.tools()).toEqual(["read"]);
+		// Completing that record still leaves the creation-disabled selection intact.
 		const current = f.session.getGoalModeState();
 		f.session.setGoalModeState(current && { ...current, enabled: false, mode: "exiting", reason: "completed" });
 		f.controller.observe(agentEnd);

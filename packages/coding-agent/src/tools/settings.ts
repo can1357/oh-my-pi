@@ -1,6 +1,7 @@
 import { combine, register } from "../config/registry";
 import { cfgAutolearnEnabled } from "../autolearn/settings";
 import { cfgBashEnabled } from "../exec/settings";
+import { cfgGoalEnabled, cfgGoalToolDefault } from "../goals/settings";
 import { cfgCompactionExperimentalContextManagement } from "../session/context-settings";
 import { cfgEvalJs, cfgEvalPy } from "../eval/settings";
 import { cfgIdaAvailable } from "../ida/install";
@@ -1140,6 +1141,8 @@ export const cfgBuiltinToolGates = combine({
 	find: cfgFindEnabled,
 	github: cfgGithubEnabled,
 	glob: cfgGlobEnabled,
+	goal: cfgGoalEnabled,
+	goalToolDefault: cfgGoalToolDefault,
 	grep: cfgGrepEnabled,
 	ida: cfgIdaAvailable,
 	launch: cfgLaunchEnabled,

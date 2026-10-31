@@ -53,7 +53,14 @@ function cloneEvent(event: GoalRuntimeEvent): GoalRuntimeEvent {
 	return { ...event };
 }
 
-function createHarness(initial: { state?: GoalModeState; usage?: GoalTokenUsage; now?: number } = {}) {
+function createHarness(
+	initial: {
+		state?: GoalModeState;
+		usage?: GoalTokenUsage;
+		now?: number;
+		onEvent?: (event: GoalRuntimeEvent) => void;
+	} = {},
+) {
 	let state = cloneState(initial.state);
 	let usage = createUsage(initial.usage);
 	let now = initial.now ?? 0;
@@ -69,6 +76,7 @@ function createHarness(initial: { state?: GoalModeState; usage?: GoalTokenUsage;
 		getCurrentUsage: () => createUsage(usage),
 		emit: async event => {
 			events.push(cloneEvent(event));
+			initial.onEvent?.(event);
 		},
 		persist: (mode, persistedState) => {
 			persists.push({ mode, state: cloneState(persistedState) });
@@ -329,12 +337,18 @@ describe("goal runtime", () => {
 		expect(harness.hiddenMessages[0]?.customType).toBe("goal-budget-limit");
 	});
 
-	it("dropGoal emits goal_updated with the dropped goal and clears persisted state", async () => {
+	it("dropGoal clears persisted state before notifying observers", async () => {
 		const harness = createHarness({
 			state: {
 				enabled: true,
 				mode: "active",
 				goal: createGoal({ id: "g-99", objective: "Ship soon" }),
+			},
+			onEvent: event => {
+				if (event.type === "goal_updated" && event.goal?.status === "dropped") {
+					expect(harness.getState()).toBeUndefined();
+					expect(harness.persists.at(-1)).toEqual({ mode: "none", state: undefined });
+				}
 			},
 		});
 
