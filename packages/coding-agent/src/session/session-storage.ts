@@ -991,8 +991,11 @@ export class FileSessionStorage implements SessionStorage {
 			// Vanished mid-check; the steal path re-verifies before removal.
 			return true;
 		}
-		// The wall clock, because an mtime is a time of day: no monotonic
-		// reading can be compared with one.
+		// The wall clock, on purpose: a filesystem modification time and
+		// `Date.now()` share a time origin, and `performance.now()` does not,
+		// so only the wall clock can be subtracted from an mtime. A backward
+		// step defers an orphan's reclamation; it cannot extend a wait, and the
+		// OS gate, not this age, is what protects a live publisher.
 		return Date.now() - mtimeMs > SESSION_PUBLISH_LOCK_WAIT_MS;
 	}
 
