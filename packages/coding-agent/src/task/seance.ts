@@ -2,7 +2,13 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { prompt } from "@oh-my-pi/pi-utils";
-import { resolveModelOverrideWithAuthFallback, resolveSessionModelSelector } from "../config/model-resolver";
+import {
+	formatModelStringWithRouting,
+	resolveExactModelIdentity,
+	resolveModelOverride,
+	resolveModelOverrideWithAuthFallback,
+	resolveSessionModelSelector,
+} from "../config/model-resolver";
 import { sessionFilesFromDisk } from "../internal-urls/registry-helpers";
 import seanceAssignmentTemplate from "../prompts/system/seance-assignment.md" with { type: "text" };
 import seanceTaskGuidanceTemplate from "../prompts/tools/seance-task-guidance.md" with { type: "text" };
@@ -18,6 +24,7 @@ import type { TaskItem, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../tools";
 import { resolveToCwd } from "../tools/path-utils";
 import { getBundledAgent } from "./agents";
+import { assertPerCallModelApproved, PerCallModelError, type PerCallModelGrants } from "./model-approval";
 import { SEANCE_AGENT_NAME } from "./seance-policy";
 import type { AgentDefinition, SeanceTaskSchemaFields } from "./types";
 
@@ -156,12 +163,14 @@ export async function resolveSeanceSource(
 	}
 	throw new Error(`Session "${label}" was not found.`);
 }
-const modelSelectorInputSchema = type("string | string[]");
 export const seanceTaskSchemaFields = {
 	"sourceSession?": type("string"),
-	"model?": modelSelectorInputSchema,
+	"model?": type("string"),
 } satisfies Required<SeanceTaskSchemaFields>;
-export const seanceTaskGuidance = seanceTaskGuidanceTemplate;
+/** Mention per-call `model` only while `task.perCallModel` allows task calls. */
+export function seanceTaskGuidance(perCallModelEnabled: boolean): string {
+	return prompt.render(seanceTaskGuidanceTemplate, { perCallModelEnabled });
+}
 
 function validateSeanceFields(
 	item: TaskItem | TaskParams,
@@ -227,6 +236,9 @@ export async function prepareSeance(context: {
 	agent: AgentDefinition;
 	sourceSession?: string;
 	model?: string | string[];
+	/** Present for model-facing selections, including the saved-model path. */
+	modelGrants?: PerCallModelGrants;
+	exactModel?: boolean;
 	planMode: boolean;
 	isolationRequested: boolean;
 	hasCustomTools: boolean;
@@ -255,13 +267,28 @@ export async function prepareSeance(context: {
 			: typeof requestedModel === "string"
 				? [requestedModel]
 				: requestedModel;
-	if (requestedModels.length === 0) {
+	if (requestedModels.length === 0 && !context.modelGrants) {
 		throw new Error("The source session has no saved model. Select a model explicitly with `--model`.");
 	}
 	const modelPatterns: string[] = [];
 	for (const selector of requestedModels) {
 		if (requestedModel === undefined) {
-			if (resolveSessionModelSelector(modelRegistry, selector)) modelPatterns.push(selector);
+			if (!context.modelGrants) {
+				if (resolveSessionModelSelector(modelRegistry, selector)) modelPatterns.push(selector);
+				continue;
+			}
+			// Approve the dispatched exact identity, keeping any `@upstream` pin.
+			const resolved = resolveModelOverride([selector], modelRegistry, context.session.settings, {
+				exactOnly: true,
+			}).model;
+			if (resolved && modelRegistry.hasConfiguredAuth(resolved)) {
+				try {
+					assertPerCallModelApproved(resolved, context.modelGrants, modelRegistry);
+					modelPatterns.push(selector);
+				} catch (error) {
+					if (!(error instanceof PerCallModelError)) throw error;
+				}
+			}
 			continue;
 		}
 		const resolved = await resolveModelOverrideWithAuthFallback(
@@ -270,10 +297,28 @@ export async function prepareSeance(context: {
 			modelRegistry,
 			context.session.settings,
 			context.session.getSessionId?.() ?? undefined,
+			context.exactModel ? { exactOnly: true } : undefined,
 		);
-		if (resolved.model && modelRegistry.hasConfiguredAuth(resolved.model)) modelPatterns.push(selector);
+		if (resolved.model && modelRegistry.hasConfiguredAuth(resolved.model)) {
+			if (context.modelGrants) assertPerCallModelApproved(resolved.model, context.modelGrants, modelRegistry);
+			const identity = formatModelStringWithRouting(resolved.model);
+			modelPatterns.push(
+				context.exactModel
+					? resolved.explicitThinkingLevel && resolved.thinkingLevel
+						? `${identity}:${resolved.thinkingLevel}`
+						: identity
+					: selector,
+			);
+		}
 	}
 	if (modelPatterns.length === 0) {
+		if (context.modelGrants) {
+			throw new Error(
+				requestedModel === undefined
+					? "No approved saved model can serve this source. Stop and report this error; do not substitute another model or drop the source session. Configure an approved model or use /seance."
+					: `No available model matches \`model\` ${JSON.stringify(requestedModel)}. Stop and report this error instead of substituting another model or dropping \`model\`.`,
+			);
+		}
 		throw new Error(
 			"No available saved model can serve this source. Select an available model explicitly with `--model`.",
 		);
@@ -323,8 +368,16 @@ export async function restoreSeanceSession(context: {
 		return undefined;
 	}
 	const modelPattern = init.resolvedModel.trim();
+	if (init.perCallModel && (!init.perCallModelIdentity || init.perCallThinkingLevel === undefined)) return undefined;
 	await modelRegistry.awaitBackgroundRefresh().catch(() => {});
-	if (!resolveSessionModelSelector(modelRegistry, modelPattern)) return undefined;
+	// Per-call revival uses the separately persisted identity, never the display
+	// selector whose literal :level id could be mistaken for effort.
+	const restored = init.perCallModel
+		? init.perCallModelIdentity
+			? resolveExactModelIdentity(init.perCallModelIdentity, modelRegistry)
+			: undefined
+		: resolveModelOverride([modelPattern], modelRegistry, undefined, { exactOnly: true }).model;
+	if (!restored || !modelRegistry.hasConfiguredAuth(restored)) return undefined;
 	return {
 		cwd,
 		modelPattern,

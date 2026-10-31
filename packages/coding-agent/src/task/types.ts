@@ -163,10 +163,10 @@ function taskAgentSchemaRule(defaultAgent: string): string {
 	return "string";
 }
 
-/** Task fields the seance schema adds or widens; `seanceTaskSchemaFields` in ./seance must match it exactly. */
+/** Task fields the seance schema adds; `seanceTaskSchemaFields` in ./seance must match it exactly. */
 export type SeanceTaskSchemaFields = {
 	"sourceSession?"?: FluentType<string>;
-	"model?"?: FluentType<string | string[]>;
+	"model?"?: FluentType<string>;
 };
 
 type SeanceItemKey = {
@@ -191,10 +191,9 @@ function createTaskSchema(options: {
 		? { "outputSchema?": outputSchemaInputSchema, "schemaMode?": '"permissive" | "strict"' }
 		: {};
 	const toolsField = options.evalToolsEnabled ? { "tools?": "string[]" } : {};
-	// `model` is always declared so a rejected per-call model fails preflight
-	// instead of being deleted by `"+": "delete"`; an enabled per-call model
-	// and seance widen it to a list.
-	const seanceFields = { "model?": options.perCallModel ? "string | string[]" : "string", ...options.seanceFields };
+	// Always declare `model` so rejected per-call selectors reach preflight
+	// instead of being deleted by `"+": "delete"`.
+	const seanceFields = { ...options.seanceFields, "model?": options.perCallModel ? "string | string[]" : "string" };
 	if (options.batchEnabled) {
 		if (options.isolationEnabled) {
 			const item = type.raw({

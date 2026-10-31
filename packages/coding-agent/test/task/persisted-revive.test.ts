@@ -2,7 +2,13 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
-import { createMockModel, type MockResponse, type MockResponseSource } from "@oh-my-pi/pi-ai/providers/mock";
+import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import {
+	createMockModel,
+	type MockResponse,
+	type MockResponseSource,
+	registerMockApi,
+} from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
@@ -11,7 +17,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { formatModelStringWithRouting, parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgCompaction } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import type { PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
@@ -28,7 +34,7 @@ import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { type PersistedSessionInit, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { ModelMentionRegistry } from "@oh-my-pi/pi-coding-agent/session/model-mentions";
 import {
 	findRetryFallbackCandidates,
@@ -213,6 +219,39 @@ async function createPersistedSession(
 		timestamp: Date.now(),
 	});
 	await manager.close();
+	return sessionFile;
+}
+
+async function createPersistedSeanceSession(
+	cwd: string,
+	contract: Pick<
+		PersistedSessionInit,
+		"resolvedModel" | "perCallModel" | "perCallModelIdentity" | "perCallThinkingLevel"
+	>,
+): Promise<string> {
+	const source = SessionManager.create(cwd, path.join(cwd, "sources"));
+	source.appendMessage({ role: "user", content: "historical request", timestamp: 1 });
+	await source.ensureOnDisk();
+	const sourceFile = source.getSessionFile();
+	if (!sourceFile) throw new Error("Expected a persisted seance source");
+	await source.close();
+	const fork = await SessionManager.forkFrom(sourceFile, cwd, undefined, undefined, {
+		seance: true,
+		suppressBreadcrumb: true,
+		sessionFile: path.join(cwd, "forks", "seance.jsonl"),
+	});
+	const sessionFile = fork.getSessionFile();
+	if (!sessionFile) throw new Error("Expected a persisted seance fork");
+	fork.appendSessionInit({
+		systemPrompt: ["seance prompt"],
+		task: "Read the source transcript.",
+		tools: ["read", "grep", "glob"],
+		agent: "seance",
+		restrictToolNames: true,
+		spawns: "",
+		...contract,
+	});
+	await fork.close();
 	return sessionFile;
 }
 
@@ -630,6 +669,7 @@ describe("persisted subagent revival", () => {
 		({
 			authStorage: {},
 			awaitBackgroundRefresh: async () => {},
+			hasConfiguredAuth: () => true,
 			getAvailable: () => models,
 			getAll: () => models,
 		}) as unknown as ModelRegistry;
@@ -685,56 +725,62 @@ describe("persisted subagent revival", () => {
 		await expect(revive(Settings.isolated())).rejects.toThrow(/not approved/);
 	});
 
-	it("refuses before session creation when a per-call model cannot run at or below task.maxEffort", async () => {
-		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
-		const highOnly = perCallModelFixture("mock-high-only", [Effort.High]);
-		const disposed: boolean[] = [];
-		const settings = Settings.isolated({ "task.maxEffort": "low", modelRoles: { review: "mock/mock-high-only" } });
-		let options: CreateAgentSessionOptions | undefined;
-		let sessionModel: typeof highOnly | undefined = highOnly;
-		const create = vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async created => {
-			options = created;
-			const session = Object.assign(createRevivedSession([]).session, {
-				model: sessionModel,
-				dispose: async () => {
-					disposed.push(true);
-				},
+	it.each(["worker", "seance"] as const)(
+		"refuses a cold %s before session creation above task.maxEffort",
+		async kind => {
+			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+			const highOnly = perCallModelFixture("mock-high-only", [Effort.High]);
+			const disposed: boolean[] = [];
+			const settings = Settings.isolated({ "task.maxEffort": "low", modelRoles: { review: "mock/mock-high-only" } });
+			let options: CreateAgentSessionOptions | undefined;
+			let sessionModel: typeof highOnly | undefined = highOnly;
+			const create = vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async created => {
+				options = created;
+				const session = Object.assign(createRevivedSession([]).session, {
+					model: sessionModel,
+					dispose: async () => {
+						disposed.push(true);
+					},
+				});
+				return { session } as CreateAgentSessionResult;
 			});
-			return { session } as CreateAgentSessionResult;
-		});
-		const revive = async (perCallModel: boolean) => {
-			const cwd = makeTempDir("@pi-revive-per-call-floor-");
-			const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
-				agent: "task",
-				perCallModel,
-				resolvedModel: "mock/mock-high-only",
-				perCallModelIdentity: "mock/mock-high-only",
-				perCallThinkingLevel: Effort.High,
-			});
-			const ref = createRef(sessionFile);
-			const reviver = await createFactory(cwd, undefined, { settings, modelRegistry: stubRegistry([highOnly]) })(
-				ref,
+			const revive = async (perCallModel: boolean) => {
+				const cwd = makeTempDir("@pi-revive-per-call-floor-");
+				const contract = {
+					perCallModel,
+					resolvedModel: "mock/mock-high-only",
+					perCallModelIdentity: "mock/mock-high-only",
+					perCallThinkingLevel: Effort.High,
+				};
+				const sessionFile =
+					kind === "seance"
+						? await createPersistedSeanceSession(cwd, contract)
+						: await createPersistedSession(cwd, undefined, undefined, undefined, { agent: "task", ...contract });
+				const ref = createRef(sessionFile);
+				const reviver = await createFactory(cwd, undefined, { settings, modelRegistry: stubRegistry([highOnly]) })(
+					ref,
+				);
+				if (!reviver) throw new Error("Expected a persisted reviver");
+				return reviver(ref);
+			};
+
+			await expect(revive(true)).rejects.toThrow(
+				"mock/mock-high-only has no supported thinking effort at or below task.maxEffort=low",
 			);
-			if (!reviver) throw new Error("Expected a persisted reviver");
-			return reviver(ref);
-		};
+			expect(create).not.toHaveBeenCalled();
+			expect(disposed).toEqual([]);
+			await expect(revive(false)).resolves.toBeDefined();
 
-		await expect(revive(true)).rejects.toThrow(
-			"mock/mock-high-only has no supported thinking effort at or below task.maxEffort=low",
-		);
-		expect(create).not.toHaveBeenCalled();
-		expect(disposed).toEqual([]);
-		await expect(revive(false)).resolves.toBeDefined();
-
-		// A model the worker reaches later (e.g. an extension swap) is held to the same floor at dispatch.
-		cfgTaskMaxEffort.override(settings, Effort.High);
-		sessionModel = undefined;
-		await expect(revive(true)).rejects.toThrow("is no longer available");
-		cfgTaskMaxEffort.override(settings, Effort.Low);
-		const check = options?.assertDispatchModel;
-		if (!check) throw new Error("Expected a per-call dispatch check");
-		expect(() => check(highOnly)).toThrow("no supported thinking effort at or below task.maxEffort=low");
-	});
+			// A model the worker reaches later (e.g. an extension swap) is held to the same floor at dispatch.
+			cfgTaskMaxEffort.override(settings, Effort.High);
+			sessionModel = undefined;
+			await expect(revive(true)).rejects.toThrow("is no longer available");
+			cfgTaskMaxEffort.override(settings, Effort.Low);
+			const check = options?.assertDispatchModel;
+			if (!check) throw new Error("Expected a per-call dispatch check");
+			expect(() => check(highOnly)).toThrow("no supported thinking effort at or below task.maxEffort=low");
+		},
+	);
 
 	it.each([
 		{ identity: "mock/coding-router:low", level: Effort.High, availableId: "coding-router" },
@@ -1284,6 +1330,305 @@ describe("persisted subagent revival", () => {
 		} finally {
 			registry.unregister(parentId);
 		}
+	});
+
+	describe("cold seance revival", () => {
+		const routedModel = (id: string) =>
+			buildModel({
+				id,
+				name: id,
+				api: "openai-completions",
+				provider: "openrouter",
+				baseUrl: "https://openrouter.ai/api/v1",
+				reasoning: true,
+				thinking: { mode: "effort", efforts: [Effort.Low, Effort.High] },
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128000,
+				maxTokens: 8192,
+			});
+
+		it.each([
+			{
+				identity: "openrouter/anthropic/seance-model",
+				level: Effort.Low,
+				display: "openrouter/anthropic/seance-model:low",
+			},
+			{
+				identity: "openrouter/anthropic/seance-model:low",
+				level: Effort.High,
+				display: "openrouter/anthropic/seance-model:low",
+			},
+			{
+				identity: "openrouter/anthropic/seance-model@anthropic",
+				level: Effort.High,
+				display: "openrouter/anthropic/seance-model@anthropic:high",
+			},
+			{
+				identity: "openrouter/anthropic/seance-model:low@anthropic",
+				level: Effort.High,
+				display: "openrouter/anthropic/seance-model:low@anthropic:high",
+			},
+		])(
+			"restores exact $identity separately from its $level thinking effort",
+			async ({ identity, level, display }) => {
+				vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+				const models = [routedModel("anthropic/seance-model"), routedModel("anthropic/seance-model:low")];
+				const create = vi.spyOn(sdkModule, "createAgentSession").mockImplementation(
+					async options =>
+						({
+							session: Object.assign(createRevivedSession([]).session, {
+								model: options?.model,
+								thinkingLevel: options?.thinkingLevel,
+								dispose: async () => options?.sessionManager?.close(),
+							}),
+						}) as CreateAgentSessionResult,
+				);
+				const cwd = makeTempDir("@pi-revive-seance-exact-");
+				const sessionFile = await createPersistedSeanceSession(cwd, {
+					resolvedModel: display,
+					perCallModel: true,
+					perCallModelIdentity: identity,
+					perCallThinkingLevel: level,
+				});
+				const ref = createRef(sessionFile);
+				const factory = createFactory(cwd, undefined, {
+					settings: Settings.isolated({ modelRoles: { review: identity } }),
+					modelRegistry: stubRegistry(models),
+				});
+				const reviver = await factory(ref);
+				if (!reviver) throw new Error(`Expected a cold seance reviver for ${identity}`);
+				const revived = await reviver(ref);
+				try {
+					const model = revived.model;
+					if (!model) throw new Error("Expected the exact saved seance model");
+					expect(formatModelStringWithRouting(model)).toBe(identity);
+					expect(revived.thinkingLevel).toBe(level);
+					const options = create.mock.calls[0]?.[0];
+					expect(options?.model).toBe(model);
+					expect(options?.modelPattern).toBeUndefined();
+					expect(options?.modelPatternAuthFallback).toBeUndefined();
+					const check = options?.assertDispatchModel;
+					if (!check) throw new Error("Expected a dispatch guard after cold seance revival");
+					expect(check(model)).toBeUndefined();
+					// A literal :level sibling must not stand in for the exact saved identity.
+					models.splice(
+						models.findIndex(candidate => candidate.id === model.id),
+						1,
+					);
+				} finally {
+					await revived.dispose();
+				}
+				expect(await factory(ref)).toBeUndefined();
+				expect(create).toHaveBeenCalledTimes(1);
+			},
+		);
+
+		it("rechecks its real live parent's route and current operator grants before construction and dispatch", async () => {
+			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+			const unpinned = routedModel("anthropic/seance-model");
+			const identity = "openrouter/anthropic/seance-model@anthropic";
+			const saved = parseModelPattern(identity, [unpinned]).model;
+			if (!saved) throw new Error("Expected an @upstream-pinned model");
+			let parentModel: Model = saved;
+			let landedOn: Model | undefined;
+			const disposed: boolean[] = [];
+			const createdOptions: CreateAgentSessionOptions[] = [];
+			const create = vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+				if (!options) throw new Error("Expected cold revival options");
+				createdOptions.push(options);
+				return {
+					session: Object.assign(createRevivedSession([]).session, {
+						model: landedOn ?? options.model,
+						dispose: async () => {
+							disposed.push(true);
+							await options.sessionManager?.close();
+						},
+					}),
+				} as CreateAgentSessionResult;
+			});
+			const operator = Settings.isolated({ "task.maxEffort": "low" });
+			const settings = operator.overlay({ modelRoles: { review: identity } }, { derived: true });
+			const parentCwd = makeTempDir("@pi-revive-seance-live-parent-");
+			const roots: EffectiveExtensionRoots = {
+				explicit: [],
+				mode: "merge",
+				configured: [],
+				configuredLevel: "user",
+			};
+			const registry = AgentRegistry.global();
+			const parentId = "cold-seance-parent";
+			registry.register({
+				id: parentId,
+				displayName: parentId,
+				kind: "sub",
+				parentId: "Main",
+				status: "idle",
+				sessionFile: null,
+				session: {
+					get model() {
+						return parentModel;
+					},
+					sessionManager: { getCwd: () => parentCwd },
+					effectiveExtensionRoots: roots,
+					getSessionAgents: () => [],
+				} as unknown as AgentSession,
+			});
+			const prepareRevive = async (perCallModel: boolean) => {
+				const cwd = makeTempDir("@pi-revive-seance-grants-");
+				const sessionFile = await createPersistedSeanceSession(cwd, {
+					resolvedModel: `${identity}:high`,
+					perCallModel,
+					...(perCallModel ? { perCallModelIdentity: identity, perCallThinkingLevel: Effort.High } : {}),
+				});
+				const ref = { ...createRef(sessionFile), parentId };
+				const reviver = await createPersistedSubagentReviverFactory({
+					session: {
+						model: saved,
+						sessionManager: { getCwd: () => parentCwd, getArtifactManager: () => undefined },
+						effectiveExtensionRoots: roots,
+						getSessionAgents: () => [],
+					} as unknown as AgentSession,
+					authStorage: {} as never,
+					modelRegistry: stubRegistry([unpinned]),
+					settings,
+					enableLsp: true,
+				})(ref);
+				if (!reviver) throw new Error("Expected a cold seance reviver");
+				return () => reviver(ref);
+			};
+			try {
+				await (
+					await prepareRevive(true)
+				)();
+				const options = createdOptions[0];
+				const check = options?.assertDispatchModel;
+				if (!check) throw new Error("Expected a model-facing seance dispatch guard");
+				expect(options?.disableExtensionDiscovery).toBe(true);
+				expect(options?.toolNames).toEqual(["read", "grep", "glob"]);
+				expect(options?.disableModelFallback).toBe(true);
+				expect(options?.disableServerSideFallback).toBe(true);
+				expect(options?.thinkingLevelCeiling).toBe(Effort.Low);
+				expect(check(saved)).toBeUndefined();
+				expect(() => check(unpinned)).toThrow(/not approved/);
+
+				// The root still uses the pinned model, but only the real live parent grants.
+				parentModel = unpinned;
+				expect(() => check(saved)).toThrow(/not approved/);
+				const denied = await prepareRevive(true);
+				await expect(denied()).rejects.toThrow(/not approved/);
+				expect(create).toHaveBeenCalledTimes(1);
+
+				// A derived role cannot grant; a current operator-owned role can, and can be revoked.
+				operator.setModelRole("review", identity);
+				expect(check(saved)).toBeUndefined();
+				const revoked = await prepareRevive(true);
+				operator.setModelRole("review", undefined);
+				expect(() => check(saved)).toThrow(/not approved/);
+				await expect(revoked()).rejects.toThrow(/not approved/);
+				expect(create).toHaveBeenCalledTimes(1);
+
+				parentModel = saved;
+				expect(check(saved)).toBeUndefined();
+				landedOn = unpinned;
+				const drifted = await prepareRevive(true);
+				await expect(drifted()).rejects.toThrow(
+					`per-call model ${identity} is no longer available (resolution found openrouter/anthropic/seance-model)`,
+				);
+				expect(disposed).toEqual([true]);
+
+				// Interactive host /seance remains ungated even though no current grant admits its model.
+				parentModel = unpinned;
+				landedOn = saved;
+				await (
+					await prepareRevive(false)
+				)();
+				const hostOptions = createdOptions.at(-1);
+				expect(hostOptions?.modelPattern).toBe(`${identity}:high`);
+				expect(hostOptions?.assertDispatchModel).toBeUndefined();
+				expect(hostOptions?.disableModelFallback).toBeUndefined();
+				expect(hostOptions?.disableServerSideFallback).toBeUndefined();
+				expect(hostOptions?.thinkingLevelCeiling).toBeUndefined();
+			} finally {
+				registry.unregister(parentId);
+				await Promise.all(createdOptions.map(options => options.sessionManager?.close()));
+			}
+		});
+
+		it.each([
+			{ identity: undefined, level: Effort.Low },
+			{ identity: "mock/seance-model", level: undefined },
+			{ identity: undefined, level: undefined },
+		])("keeps missing exact metadata transcript-only (%j)", async ({ identity, level }) => {
+			const model = perCallModelFixture("seance-model");
+			const create = vi.spyOn(sdkModule, "createAgentSession");
+			const cwd = makeTempDir("@pi-revive-seance-legacy-");
+			const sessionFile = await createPersistedSeanceSession(cwd, {
+				resolvedModel: "mock/seance-model:low",
+				perCallModel: true,
+				perCallModelIdentity: identity,
+				perCallThinkingLevel: level,
+			});
+			const original = await Bun.file(sessionFile).text();
+			const ref = createRef(sessionFile);
+			expect(await createFactory(cwd, undefined, { modelRegistry: stubRegistry([model]) })(ref)).toBeUndefined();
+			expect(create).not.toHaveBeenCalled();
+			expect(await Bun.file(sessionFile).text()).toBe(original);
+		});
+
+		it("retains an unset thinking selector and blocks the first provider request after grant revocation", async () => {
+			const cwd = makeTempDir("@pi-revive-seance-dispatch-");
+			const model = createMockModel({ id: "cold-seance-model", handler: { content: ["Historical answer."] } });
+			const models = [model];
+			const authStorage = await AuthStorage.create(":memory:");
+			authStorage.keys.setRuntime("mock", "test-key");
+			const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
+			vi.spyOn(modelRegistry, "getAvailable").mockReturnValue(models);
+			vi.spyOn(modelRegistry, "getAvailableForProviders").mockReturnValue(models);
+			vi.spyOn(modelRegistry, "getAll").mockReturnValue(models);
+			vi.spyOn(modelRegistry, "find").mockImplementation((provider, id) =>
+				provider === model.provider && id === model.id ? model : undefined,
+			);
+			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+			const settings = Settings.isolated({
+				modelRoles: { review: `mock/${model.id}` },
+				"compaction.enabled": false,
+				"retry.enabled": false,
+				"todo.enabled": false,
+			});
+			const sessionFile = await createPersistedSeanceSession(cwd, {
+				resolvedModel: `mock/${model.id}`,
+				perCallModel: true,
+				perCallModelIdentity: `mock/${model.id}`,
+				perCallThinkingLevel: null,
+			});
+			const registry = AgentRegistry.global();
+			const ref = registry.register({ ...createRef(sessionFile), id: "cold-seance-dispatch" });
+			const apiSource = "persisted-seance-dispatch-test";
+			registerMockApi(apiSource);
+			let revived: AgentSession | undefined;
+			try {
+				const reviver = await createFactory(cwd, undefined, { settings, authStorage, modelRegistry })(ref);
+				if (!reviver) throw new Error("Expected a cold seance reviver with explicitly unset thinking");
+				revived = await reviver(ref);
+				expect(revived.thinkingLevel).toBeUndefined();
+				await revived.prompt("Answer the historical request.");
+				expect(model.calls).toHaveLength(1);
+				expect(model.calls[0]?.options?.disableServerSideFallback).toBe(true);
+				expect(model.calls[0]?.options?.fallbacks).toBeUndefined();
+
+				settings.setModelRole("review", undefined);
+				await revived.prompt("Approval has been withdrawn.");
+				expect(model.calls).toHaveLength(1);
+				expect(revived.getLastAssistantMessage()?.stopReason).toBe("error");
+				expect(revived.getLastAssistantMessage()?.errorMessage).toMatch(/not approved/);
+			} finally {
+				await revived?.dispose();
+				registry.unregister(ref.id);
+				unregisterCustomApis(apiSource);
+				authStorage.close();
+			}
+		});
 	});
 
 	it("falls back to the ref display name reviving a legacy session file without a persisted agent name", async () => {

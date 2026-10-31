@@ -217,7 +217,7 @@ describe("structured subagent primitive", () => {
 		expect(inherited.schema).toMatchObject({ source: "session", mode: "strict", outputSchemaOverridesAgent: false });
 	});
 
-	it("uses saved seance models in active-role/default order and honors an explicit available override", async () => {
+	it("keeps host-selected saved seance models in active-role/default order and honors a host override", async () => {
 		const seanceAgent = getBundledAgent("seance");
 		if (!seanceAgent) throw new Error("Expected the bundled seance agent");
 		mockDiscovery(seanceAgent);
@@ -255,7 +255,7 @@ describe("structured subagent primitive", () => {
 		const caller = Object.assign(session({ cwd }), { modelRegistry });
 		try {
 			const saved = await resolveEffectiveSubagentPolicy(
-				request({ session: caller, agent: "seance", sourceSession: sourceFile }),
+				request({ session: caller, agent: "seance", sourceSession: sourceFile, model: [] }),
 			);
 			expect(saved.preparedSession?.fork.sourceFile).toBe(sourceFile);
 
@@ -278,7 +278,7 @@ describe("structured subagent primitive", () => {
 		}
 	});
 
-	it("fails closed when the source has no saved model or an explicit model is unavailable", async () => {
+	it("fails closed when a host-selected source has no saved model or its host model is unavailable", async () => {
 		const seanceAgent = getBundledAgent("seance");
 		if (!seanceAgent) throw new Error("Expected the bundled seance agent");
 		mockDiscovery(seanceAgent);
@@ -295,7 +295,9 @@ describe("structured subagent primitive", () => {
 		const caller = Object.assign(session({ cwd }), { modelRegistry });
 		try {
 			await expect(
-				resolveEffectiveSubagentPolicy(request({ session: caller, agent: "seance", sourceSession: sourceFile })),
+				resolveEffectiveSubagentPolicy(
+					request({ session: caller, agent: "seance", sourceSession: sourceFile, model: [] }),
+				),
 			).rejects.toThrow("The source session has no saved model.");
 			await expect(
 				resolveEffectiveSubagentPolicy(

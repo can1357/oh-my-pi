@@ -127,48 +127,42 @@ describe("task schema (single-spawn)", () => {
 });
 
 describe("task schema seance fields", () => {
-	it("accepts source and model selectors in every flat/batch isolation mode", () => {
-		for (const batchEnabled of [false, true]) {
-			for (const isolationEnabled of [false, true]) {
-				const schema = getTaskSchema({
-					batchEnabled,
-					isolationEnabled,
-					evalToolsEnabled: false,
-					seanceFields: seanceTaskSchemaFields,
-				});
-				const modelSelector = batchEnabled
-					? ["anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4-5"]
-					: "anthropic/claude-sonnet-4-5";
-				const item = {
-					agent: "seance",
-					task: "Read historical context.",
-					solutionSpace: "focused read-only inspection",
-					sourceSession: "/sessions/source.jsonl",
-					model: modelSelector,
-					...(isolationEnabled ? { isolated: false } : {}),
-				};
-				const parsed = schema(batchEnabled ? { context: "shared context", tasks: [item] } : { ...item });
-				expect(parsed instanceof type.errors).toBe(false);
-				if (parsed instanceof type.errors) continue;
-				if (!parsed || typeof parsed !== "object") {
-					expect(parsed).toBeTruthy();
-					continue;
+	it.each([false, true])(
+		"preserves the source and exposes seance model arrays only while per-call models are enabled (%s)",
+		perCallModel => {
+			for (const batchEnabled of [false, true]) {
+				for (const isolationEnabled of [false, true]) {
+					const schema = getTaskSchema({
+						batchEnabled,
+						isolationEnabled,
+						perCallModel,
+						evalToolsEnabled: false,
+						seanceFields: seanceTaskSchemaFields,
+					});
+					const item = {
+						agent: "seance",
+						task: "Read historical context.",
+						solutionSpace: "focused read-only inspection",
+						sourceSession: "/sessions/source.jsonl",
+						model: perCallModel ? ["@review", "anthropic/claude-sonnet-4-5"] : "anthropic/claude-sonnet-4-5",
+						...(isolationEnabled ? { isolated: false } : {}),
+					};
+					const parsed = schema(batchEnabled ? { context: "shared context", tasks: [item] } : item);
+					if (parsed instanceof type.errors) throw new Error(parsed.summary);
+					expect(parsed).toMatchObject(
+						batchEnabled
+							? { tasks: [{ sourceSession: item.sourceSession, model: item.model }] }
+							: { sourceSession: item.sourceSession, model: item.model },
+					);
+					const arrayItem = { ...item, model: ["@review"] };
+					expect(
+						schema(batchEnabled ? { context: "shared context", tasks: [arrayItem] } : arrayItem) instanceof
+							type.errors,
+					).toBe(!perCallModel);
 				}
-				let parsedItem: unknown = parsed;
-				if (batchEnabled) {
-					if (!("tasks" in parsed) || !Array.isArray(parsed.tasks)) {
-						expect(parsed).toHaveProperty("tasks");
-						continue;
-					}
-					parsedItem = parsed.tasks[0];
-				}
-				expect(parsedItem).toMatchObject({
-					sourceSession: "/sessions/source.jsonl",
-					model: modelSelector,
-				});
 			}
-		}
-	});
+		},
+	);
 	it("omits seance fields when they are not enabled", () => {
 		for (const batchEnabled of [false, true]) {
 			for (const isolationEnabled of [false, true]) {
@@ -426,7 +420,35 @@ describe("task spawn validation", () => {
 		expect(tool.description).not.toContain("mock/replacement");
 	});
 
-	it("keys the seance model exemption on the resolved agent, not the raw `agent` value", async () => {
+	it("advertises seance models and approved roles only while task calls accept per-call models", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [bundledSeance],
+			projectAgentsDir: null,
+		});
+		for (const mode of ["off", "eval", "on"]) {
+			const description = (
+				await TaskTool.create(
+					createSession({
+						parentSpawns: "task,seance",
+						settings: { "task.perCallModel": mode, modelRoles: { review: "mock/approved-consultant" } },
+					}),
+				)
+			).description;
+			if (mode === "on") {
+				expect(description).toContain("Optional `model`");
+				expect(description).toContain("Approved roles:");
+				expect(description).toContain("`@review` → `mock/approved-consultant`");
+				expect(description).not.toContain("Omit `model`");
+			} else {
+				expect(description).toContain("Omit `model`");
+				expect(description).not.toContain("Optional `model`");
+				expect(description).not.toContain("Approved roles");
+				expect(description).not.toContain("mock/approved-consultant");
+			}
+		}
+	});
+
+	it("gates a seance model even when the agent name is implicit or padded", async () => {
 		const seen: unknown[] = [];
 		vi.spyOn(seanceModule, "prepareSeance").mockImplementation(async context => {
 			seen.push(context.model);
@@ -452,8 +474,8 @@ describe("task spawn validation", () => {
 			await run(true, { context: "c", tasks: [item] }),
 			await run(true, { context: "c", tasks: [{ ...item, agent: " seance " }] }),
 		];
-		for (const text of texts) expect(text).not.toContain("invalid `model` value");
-		expect(seen).toEqual([selectors, selectors, selectors, selectors]);
+		for (const text of texts) expect(text).toContain("task.perCallModel: off");
+		expect(seen).toEqual([]);
 	});
 
 	it.each([false, true])(

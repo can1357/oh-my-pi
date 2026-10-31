@@ -20,6 +20,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type {
 	AgentTool,
+	AgentToolContext,
 	AgentToolResult,
 	AgentToolUpdateCallback,
 	ToolSpeculationPolicy,
@@ -96,6 +97,31 @@ import {
 	cfgTaskStructured,
 	perCallModelEnabled,
 } from "./settings";
+
+const TASK_HOST_MODEL = Symbol("taskHostModel");
+
+type HostTaskContext = AgentToolContext & { [TASK_HOST_MODEL]?: string };
+type HostTaskParams = TaskParams & { [TASK_HOST_MODEL]?: string | string[] };
+
+/**
+ * Run a host-selected task model through a channel unavailable to serialized tool arguments.
+ * Keep `model` visible to approval and `tool_call` handlers, including their revisions.
+ * Omitting it selects the bundled seance's saved source model.
+ */
+export function executeTaskFromHost(
+	tool: AgentTool,
+	toolCallId: string,
+	params: TaskParams,
+	context: AgentToolContext,
+	signal?: AbortSignal,
+	onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
+): Promise<AgentToolResult<TaskToolDetails>> {
+	if ((tool as AgentTool & { [TASK_HOST_MODEL]?: boolean })[TASK_HOST_MODEL] !== true) {
+		throw new Error("The registered task tool does not support host model selection.");
+	}
+	const hostContext: HostTaskContext = { ...context, [TASK_HOST_MODEL]: toolCallId };
+	return tool.execute(toolCallId, params, signal, onUpdate, hostContext);
+}
 
 function createUsageTotals(): Usage {
 	return {
@@ -222,7 +248,8 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		hasBlockingAgents: renderedAgents.some(agent => agent.blocking),
 		hasStructuredAgents: renderedAgents.some(agent => agent.structured),
 		hasModelMentions: options.sessionAgents.length > 0,
-		seanceGuidance: seanceAgent && isBundledSeance(seanceAgent) ? seanceTaskGuidance : "",
+		seanceGuidance:
+			seanceAgent && isBundledSeance(seanceAgent) ? seanceTaskGuidance(options.perCallModelEnabled) : "",
 		ircEnabled: options.ircEnabled,
 		asyncGuidance: options.asyncGuidance,
 	});
@@ -303,8 +330,8 @@ function validateSpawnParams(
 	params: TaskParams,
 	batchEnabled: boolean,
 	fileEnabled: boolean,
-	defaultAgent: string,
 	settings: Settings,
+	hostModel: boolean,
 ): string | undefined {
 	const tasks = params.tasks;
 	if (
@@ -327,7 +354,7 @@ function validateSpawnParams(
 			if (inputError) return inputError;
 			const effortError = validateEffort(item.effort, label);
 			if (effortError) return effortError;
-			const modelError = validateModel(item, label, defaultAgent, settings);
+			const modelError = validateModel(item, label, settings, hostModel);
 			if (modelError) return modelError;
 		}
 		const seen = new Map<string, string>();
@@ -352,26 +379,28 @@ function validateSpawnParams(
 	return (
 		validateTaskInput(params, "The call", fileEnabled) ??
 		validateEffort(params.effort, "The call") ??
-		validateModel(params, "The call", defaultAgent, settings)
+		validateModel(params, "The call", settings, hostModel)
 	);
 }
 
 /**
- * A `model` on a call naming `seance` is checked at preflight, once the name resolves:
- * the bundled seance takes it as its source-session override, a shadowing agent as a per-call model.
+ * Every model-facing `model`, including seance's, uses the shared per-call gate.
+ * Host selections arrive through {@link executeTaskFromHost} and remain ungated.
  */
 function validateModel(
 	item: TaskItem | TaskParams,
 	label: string,
-	defaultAgent: string,
 	settings: Settings,
+	hostModel: boolean,
 ): string | undefined {
-	return (item.agent?.trim() || defaultAgent) === SEANCE_AGENT_NAME
-		? undefined
-		: invalidModelSelectorReason(item.model, label, { settings, invocationKind: "task" });
+	return hostModel ? undefined : invalidModelSelectorReason(item.model, label, { settings, invocationKind: "task" });
 }
 
-function spawnModelFields(params: TaskParams): Pick<StructuredSubagentRequest, "perCallModel" | "seanceModel"> {
+function spawnModelFields(
+	params: TaskParams,
+): Pick<StructuredSubagentRequest, "model" | "perCallModel" | "seanceModel"> {
+	const hostModel = (params as HostTaskParams)[TASK_HOST_MODEL];
+	if (hostModel !== undefined) return { model: hostModel };
 	if (params.model === undefined) return {};
 	if (params.agent === SEANCE_AGENT_NAME) return { seanceModel: params.model };
 	// `validateModel` rejected anything but one selector or a list of them before dispatch.
@@ -457,6 +486,8 @@ async function resolveTaskFile(session: ToolSession, item: TaskItem): Promise<Re
  */
 function spawnParamsFor(params: TaskParams, item: ResolvedTaskItem, defaultAgent: string): SpawnParams {
 	const spawn: SpawnParams = { agent: item.agent?.trim() || defaultAgent };
+	const hostModel = (params as HostTaskParams)[TASK_HOST_MODEL];
+	if (hostModel !== undefined) (spawn as HostTaskParams)[TASK_HOST_MODEL] = hostModel;
 	if (item.name !== undefined) spawn.name = item.name;
 	if (item.task !== undefined) spawn.task = item.task;
 	if (item.taskFile !== undefined) spawn.taskFile = item.taskFile;
@@ -496,11 +527,12 @@ function planSpawns(
 	defaultAgent: string,
 	seanceAdvertised: boolean,
 	settings: Settings,
+	hostModel = false,
 ): SpawnPlan | string {
 	const params = repairTaskParams(rawParams as TaskParams);
 	const error =
 		validateShapeParams(batchEnabled, params) ??
-		validateSpawnParams(params, batchEnabled, fileEnabled, defaultAgent, settings) ??
+		validateSpawnParams(params, batchEnabled, fileEnabled, settings, hostModel) ??
 		validateSeanceParams({ params, batchEnabled, defaultAgent, seanceAdvertised });
 	if (error) return error;
 	const items = resolveSpawnItems(params);
@@ -800,6 +832,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	// calls still normalize through arktype; `execute()` resolves `agent`
 	// defaults independently, so the success path is unchanged.
 	readonly lenientArgValidation = true;
+	readonly [TASK_HOST_MODEL] = true;
 	readonly renderResult = renderResult;
 	// Suppress the streaming call preview once a (partial or final) result exists
 	// so the task renders as ONE block that transitions in place — not a pending
@@ -1109,11 +1142,22 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		rawParams: unknown,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
+		context?: AgentToolContext,
 	): Promise<AgentToolResult<TaskToolDetails>> {
+		const hostCall = (context as HostTaskContext | undefined)?.[TASK_HOST_MODEL] === toolCallId;
+		// Read the final selection after any extension revision, not the host's original args.
+		const hostModel = hostCall ? ((rawParams as TaskParams | undefined)?.model ?? []) : undefined;
 		const launchSession = this.#launchSessions.get(toolCallId);
 		this.#launchSessions.delete(toolCallId);
 		try {
-			return await this.#dispatch(toolCallId, rawParams, launchSession, signal, onUpdate);
+			return await this.#dispatch(
+				toolCallId,
+				rawParams,
+				hostModel === undefined ? launchSession : undefined,
+				signal,
+				onUpdate,
+				hostModel,
+			);
 		} finally {
 			// No-op once dispatch adopted; otherwise nothing launched early may outlive the call.
 			launchSession?.discard("task call settled without adopting speculative launches");
@@ -1126,6 +1170,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		launchSession: TaskLaunchSession | undefined,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
+		hostModel?: string | string[],
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		// Schema defaults fill `agent` for model calls, but internal callers
 		// and stale transcripts can bypass arktype. `spawnParamsFor` resolves each
@@ -1139,11 +1184,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			defaultAgent,
 			this.#seanceSchemaFields() !== undefined,
 			this.session.settings,
+			hostModel !== undefined,
 		);
 		if (typeof plan === "string") {
 			return createTaskModeError(plan);
 		}
 		const { params } = plan;
+		if (hostModel !== undefined) (params as HostTaskParams)[TASK_HOST_MODEL] = hostModel;
 		const spawnItems: ResolvedTaskItem[] = [];
 		try {
 			for (const item of plan.items) spawnItems.push(await resolveTaskFile(this.session, item));
