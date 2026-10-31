@@ -233,6 +233,13 @@ export async function answerArtifactRequest(
 }
 
 /**
+ * What an `artifact://` id is: a number, as `artifact://` itself and both
+ * readers read it. The id picks a file by prefix, so anything else picks
+ * something that is not an artifact — an empty one, the first dotfile.
+ */
+const ARTIFACT_ID = /^\d+$/;
+
+/**
  * The file backing `artifact://<id>` for the cell that holds `token`, once
  * every copy filling the directory it was given has finished — or an error
  * naming what it looked in.
@@ -276,23 +283,31 @@ export async function resolveSettledArtifact(
 	// session that ends while this answer is on its way refuses the charge
 	// instead of taking a pin after its own disposal.
 	const handout: Handout = options.locate ? "location" : { account: pinAccountOf(session), owner: options.owner };
+	// Each of these is read once, here, and by one rule; the rest of this
+	// function only asks whether a value is present. An empty string arrives
+	// from the wire as a present string, and taken as absent at one read and
+	// present at the next it would be a token that neither names a hold nor
+	// gets one taken for it, and an answer with no hold named in it.
+	if (!ARTIFACT_ID.test(id)) throw new ToolError(`artifact://${id} is not an artifact: ids are numbers`);
+	if (root === "") throw new ToolError(`artifact://${id} was asked for with an empty artifacts directory`);
 	// A cell started before its artifacts directory existed carries no token,
 	// because there was nothing to hold. The directory may exist by now, and
 	// reading it by name alone is reading with no identity behind it, so the
 	// hold is taken here instead — and a directory that exists and cannot be
-	// held refuses the read rather than falling back to the name.
-	const effective = token ?? (root ? await holdArtifactRoot(root) : undefined);
+	// held refuses the read rather than falling back to the name. A token that
+	// is present, whatever it says, has to name a hold this process has.
+	const effective = token !== undefined ? token : root !== undefined ? await holdArtifactRoot(root) : undefined;
 	// Checked and taken in the same tick: a hold validated here and used after
 	// an await is a descriptor number the cap may have closed and the kernel
 	// handed to something else by then.
-	const held = effective ? heldRoots.get(effective) : undefined;
-	if (effective && !held) {
+	const held = effective !== undefined ? heldRoots.get(effective) : undefined;
+	if (effective !== undefined && !held) {
 		throw new ToolError(`the artifacts directory this cell was started on is no longer held open: ${root ?? ""}`);
 	}
 	if (held) held.refs++;
 	try {
 		const answer = await answerFromHold(session, id, root, held, signal, handout);
-		return answer && effective ? { ...answer, root: effective } : answer;
+		return answer && effective !== undefined ? { ...answer, root: effective } : answer;
 	} finally {
 		if (held) await releaseHold(held);
 	}

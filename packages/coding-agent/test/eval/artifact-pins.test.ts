@@ -13,12 +13,18 @@ import {
 	answerArtifactRequest,
 	artifactPinCeiling,
 	artifactPinCeilingFor,
+	holdArtifactRoot,
 	releaseArtifactRoots,
 	resolveSettledArtifact,
 	setArtifactPinCeilingForTests,
 	takePinnedArtifact,
 } from "../../src/eval/artifact-readiness";
-import { type ArtifactRequest, EVAL_ARTIFACT_ROOT_TOKEN, settledArtifactOf } from "../../src/eval/artifact-wire";
+import {
+	type ArtifactRequest,
+	artifactRequestOf,
+	EVAL_ARTIFACT_ROOT_TOKEN,
+	settledArtifactOf,
+} from "../../src/eval/artifact-wire";
 import { createHelpers } from "../../src/eval/js/shared/helpers";
 import { registerArtifactsDir } from "../../src/internal-urls/registry-helpers";
 import { AgentSession } from "../../src/session/agent-session";
@@ -402,6 +408,72 @@ describe.skipIf(process.platform !== "linux")("eval artifact pins", () => {
 			resume.resolve();
 			hook.mockRestore();
 		}
+	});
+});
+
+/**
+ * The wire takes any string for a request's fields, so an empty one arrives at
+ * the host as present. Each field is read there by one rule; an empty string
+ * is not a second, quieter way of leaving it out.
+ */
+describe.skipIf(process.platform !== "linux")("artifact requests with an empty field", () => {
+	/**
+	 * The host's answer to `sent` as a reader puts it on the wire, or what it
+	 * refused with. An answer is named by the file it is about, not by what its
+	 * path reaches now: a reader checks the object it opens against this.
+	 */
+	async function ask(session: ToolSession, sent: Record<string, string>): Promise<string> {
+		const request = artifactRequestOf(sent);
+		if (!request) return "refused at the wire";
+		try {
+			const answer = await answerArtifactRequest(session, request);
+			return answer ? `answered inode ${answer.inode}, root ${answer.root}` : "answered nothing";
+		} catch (error) {
+			return `refused: ${error instanceof Error ? error.message : String(error)}`;
+		}
+	}
+	const inodeOf = (file: string) => String(fs.statSync(file).ino);
+
+	it("refuses an empty token like any token that names no hold, once the name reaches another directory", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-empty-");
+		const dir = artifacts(tempDir, "a", 8);
+		const session = sessionReading(dir, "empty-token");
+		const hold = await holdArtifactRoot(dir);
+		if (hold === undefined) throw new Error("the directory could not be held");
+		const original = inodeOf(path.join(dir, "7.read.log"));
+		fs.renameSync(dir, path.join(tempDir.path(), "moved"));
+		fs.mkdirSync(dir);
+		fs.writeFileSync(path.join(dir, "7.read.log"), "WRONG FOREIGN");
+
+		expect(await ask(session, { op: "locate", id: "7", root: dir, token: hold })).toBe(
+			`answered inode ${original}, root ${hold}`,
+		);
+		expect(await ask(session, { op: "locate", id: "7", root: dir, token: "root-nobody-holds" })).toStartWith(
+			"refused: the artifacts directory this cell was started on is no longer held open",
+		);
+		expect(await ask(session, { op: "locate", id: "7", root: dir, token: "" })).toStartWith(
+			"refused: the artifacts directory this cell was started on is no longer held open",
+		);
+	});
+
+	it("refuses an empty artifact id instead of answering with the first dotfile", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-empty-");
+		const dir = artifacts(tempDir, "a", 1);
+		fs.writeFileSync(path.join(dir, ".omp-reserved"), "NOT AN ARTIFACT");
+		const session = sessionReading(dir, "empty-id");
+
+		expect(await ask(session, { op: "locate", id: "", root: dir })).toStartWith("refused: ");
+		expect(await ask(session, { op: "locate", id: "0", root: dir })).toStartWith(
+			`answered inode ${inodeOf(path.join(dir, "0.read.log"))},`,
+		);
+	});
+
+	it("refuses an empty artifacts directory instead of reading it as no directory at all", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-empty-");
+		const dir = artifacts(tempDir, "a", 1);
+		const session = sessionReading(dir, "empty-root");
+
+		expect(await ask(session, { op: "locate", id: "0", root: "" })).toStartWith("refused: ");
 	});
 });
 

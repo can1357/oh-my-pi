@@ -364,9 +364,9 @@ describe("eval artifact readiness", () => {
 			// And the quota is one session's: a session holding all of its
 			// answers cannot stop another from reading.
 			const held: string[] = [];
-			for (let n = 0; n < 32; n++) {
-				fs.writeFileSync(path.join(mine, `h${n}.read.log`), `HELD ${n}`);
-				const answer = await resolveSettledArtifact(me, `h${n}`, mine);
+			for (let n = 40; n < 72; n++) {
+				fs.writeFileSync(path.join(mine, `${n}.read.log`), `HELD ${n}`);
+				const answer = await resolveSettledArtifact(me, String(n), mine);
 				if (answer?.file) held.push(answer.file);
 			}
 			expect(held.length).toBe(32);
