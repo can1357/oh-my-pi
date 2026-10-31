@@ -108,6 +108,37 @@ const MAX_FACTS_PER_MEMORY = 5;
 const DEFAULT_LINK_THRESHOLD = 0.35;
 const LIVE_MEMORY_SQL = "superseded_by IS NULL AND (valid_until IS NULL OR valid_until > ?)";
 
+/** Clause connector that ends a fact object, so the next clause is never swallowed into it. */
+const CLAUSE_BREAK = String.raw`(?:and|but|or|nor|yet|then|because|so|while|which|that|who|whom|whose|when|where|if|since|although|though|unless|until|whereas)\b`;
+/** Optional leading article; must be a whole word, so `active` never loses its `a` and `an` never splits. */
+const ARTICLE = String.raw`(?:(?:an?|the)\s+)?`;
+/** Fact subject: from the first capitalized word up to the predicate. */
+const SUBJECT = String.raw`\b([A-Z][a-zA-Z\s]+?)`;
+/**
+ * Start of another extractable clause (`Bob is …`, `Bob Jones is …`, `the runtime has …`). Catches clauses
+ * joined by a connector missing from {@link CLAUSE_BREAK}, so their whole subject is left for the next match.
+ */
+const NEXT_CLAUSE = String.raw`${ARTICLE}(?:[A-Z][a-zA-Z\d]*[ \t]+)*[a-zA-Z\d]+\s+(?:is|has|uses?|using|used|works?)\b`;
+
+/**
+ * Captures a whole phrase of `word`s up to punctuation, a line break, a clause connector, or the
+ * subject of another clause. Connectors may start an object (for example, `that permission`) but
+ * terminate it after the first token.
+ * Each word must end on a token boundary; a phrase whose first word does not yields no match.
+ */
+function phrase(word: string): string {
+	const token = String.raw`${word}(?:['-]${word})*\b`;
+	return String.raw`(${token}(?:[ \t]+(?!${CLAUSE_BREAK}|${NEXT_CLAUSE})${token})*)`;
+}
+
+const IS_FACT = new RegExp(String.raw`${SUBJECT}\s+is\s+${ARTICLE}${phrase("[a-zA-Z]+")}`, "g");
+const HAS_FACT = new RegExp(String.raw`${SUBJECT}\s+has\s+${ARTICLE}${phrase(String.raw`[a-zA-Z\d]+`)}`, "g");
+const USES_FACT = new RegExp(String.raw`${SUBJECT}\s+(?:uses?|using|used)\s+${ARTICLE}${phrase("[a-zA-Z]+")}`, "g");
+const WORKS_AT_FACT = new RegExp(
+	String.raw`${SUBJECT}\s+works?\s+(?:at|for|with)\s+([A-Z][a-zA-Z]*(?:[ \t]+[A-Z][a-zA-Z]*)*)\b`,
+	"g",
+);
+
 function nowIso(): string {
 	return new Date().toISOString();
 }
@@ -363,22 +394,10 @@ export class EpisodicGraph {
 			});
 		};
 
-		for (const match of bounded.matchAll(/\b([A-Z][a-zA-Z\s]+?)\s+is\s+(?:a|an|the)?\s*([a-zA-Z\s]+?)\b/g)) {
-			pushFact(match[1] ?? "", "is", match[2] ?? "", 0.7);
-		}
-		for (const match of bounded.matchAll(/\b([A-Z][a-zA-Z\s]+?)\s+has\s+(?:a|an|the)?\s*([a-zA-Z\d\s]+?)\b/g)) {
-			pushFact(match[1] ?? "", "has", match[2] ?? "", 0.6);
-		}
-		for (const match of bounded.matchAll(
-			/\b([A-Z][a-zA-Z\s]+?)\s+(uses?|using|used)\s+(?:a|an|the)?\s*([a-zA-Z\s]+?)\b/g,
-		)) {
-			pushFact(match[1] ?? "", "uses", match[3] ?? "", 0.6);
-		}
-		for (const match of bounded.matchAll(
-			/\b([A-Z][a-zA-Z\s]+?)\s+works?\s+(?:at|for|with)\s+([A-Z][a-zA-Z\s]+?)\b/g,
-		)) {
-			pushFact(match[1] ?? "", "works_at", match[2] ?? "", 0.7);
-		}
+		for (const match of bounded.matchAll(IS_FACT)) pushFact(match[1] ?? "", "is", match[2] ?? "", 0.7);
+		for (const match of bounded.matchAll(HAS_FACT)) pushFact(match[1] ?? "", "has", match[2] ?? "", 0.6);
+		for (const match of bounded.matchAll(USES_FACT)) pushFact(match[1] ?? "", "uses", match[2] ?? "", 0.6);
+		for (const match of bounded.matchAll(WORKS_AT_FACT)) pushFact(match[1] ?? "", "works_at", match[2] ?? "", 0.7);
 		return facts;
 	}
 	storeGist(gist: Gist, memoryId: string): void {

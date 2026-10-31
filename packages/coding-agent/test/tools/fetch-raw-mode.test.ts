@@ -7,6 +7,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { materializeReadUrlToFile } from "@oh-my-pi/pi-coding-agent/tools/fetch";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import * as scrapers from "@oh-my-pi/pi-coding-agent/web/scrapers/types";
+import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 const ATOM = `<?xml version="1.0"?>\n<feed xmlns="http://www.w3.org/2005/Atom"><title>Sample</title><entry><title>One</title><id>1</id><updated>2024-01-01T00:00:00Z</updated><content>body</content></entry></feed>`;
@@ -401,6 +402,23 @@ describe("read URL beyond the inline preview (regression: tail past 500,000 char
 		const tailText = tail.content.find(c => c.type === "text")?.text ?? "";
 		expect(tailText).toContain("+line-12000");
 		expect(tailText).toContain(marker);
+	});
+
+	it("shows the head of a first line over the byte budget instead of an empty body", async () => {
+		const tool = new ReadTool(makeSession(testDir));
+		const firstLine = `<!DOCTYPE html><html><head>${'<meta name="k" content="v"/>'.repeat(2_000)}`;
+		stubLoadPage(`${firstLine}\n<body>tail</body></html>\n`, "text/html");
+
+		const result = await tool.execute("call", { path: "https://example.com/minified.html:raw" });
+		const text = result.content.find(c => c.type === "text")?.text ?? "";
+		const truncation = result.details?.meta?.truncation;
+
+		expect(text.length).toBe(DEFAULT_MAX_BYTES);
+		expect(firstLine.startsWith(text)).toBe(true);
+		expect(truncation?.partialLine).toBe(true);
+		expect(truncation?.outputBytes).toBe(DEFAULT_MAX_BYTES);
+		expect(truncation?.totalBytes).toBe(firstLine.length);
+		expect(truncation?.artifactId).toBeDefined();
 	});
 
 	it.each(truncationSourceCases)(

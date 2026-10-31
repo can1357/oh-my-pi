@@ -587,6 +587,21 @@ describe("lsp regressions", () => {
 		10_000,
 	);
 
+	it("reads location context from a CRLF file without the carriage returns", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-crlf-context-");
+		try {
+			const filePath = path.join(tempDir.path(), "input.ts");
+			await Bun.write(filePath, "const a = 1;\r\nconst b = 2;\r\nconst c = 3;\r\n");
+			expect(await readLocationContext(filePath, 2)).toEqual([
+				"1: const a = 1;",
+				"2: const b = 2;",
+				"3: const c = 3;",
+			]);
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
 	it.skipIf(process.platform === "win32")(
 		"keeps a FIFO location as a header without reading its context",
 		async () => {

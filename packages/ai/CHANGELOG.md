@@ -2,12 +2,30 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Replaced `isLoopGuardedModel` with `loopGuardLevel`, which returns `"off"`, `"exact"`, or `"semantic"` from the model's `thinking-loop-guard` catalog rule
+
 ### Added
 
 - Added provider-request holds (`runInRequestHoldScope`): work that must stay alive but stop calling out runs in a hold scope, and once the scope is held nothing it sends reaches a server. Every transport send in pi-ai and pi-agent-core asks the hold immediately before it sends, with no caller code such as an outbound observer between the answer and the send (`admitSend`, `gatedFetch`): each provider's fetch and its retries, Anthropic's `node:https` transport, Cursor's HTTP/2 run and every frame written on its open stream (tool results included), the proxy tunnel, and the Codex and GitLab Duo WebSockets and every frame on them. A request whose hold begins while its connection is still being set up (a TLS handshake, a WebSocket upgrade, a proxy tunnel) is cut before it lands (`cutIfHeldBeforeResponse`). `withAuth`, `withOAuthAccess` and the streaming entry points also check before they resolve a credential, so a held caller starts no token refresh. A held request waits, then is refused (`RequestHeldError`) when its signal or the scope ends; one still waiting for its response when the hold begins is aborted, and its retry waits held. A refusal is terminal: the provider retry loops and the Anthropic client do not replay it. The global `fetch` is wrapped as a backstop for code that never asks ([#17457](https://github.com/can1357/oh-my-pi/pull/17457) by [@sjawhar](https://github.com/sjawhar))
 
+### Changed
+
+- DeepSeek and Grok models on Amazon Bedrock now get the same near-duplicate reasoning-loop checks as on other hosts
+
 ### Fixed
 
+- Fixed Claude turns failing with "Thinking loop detected" when summarized thinking repeated a progress line such as "Still writing the parser..."; Claude models no longer run the loop guard
+- Fixed the loop guard discarding turns from other models whose reasoning summary repeats one status line a few times; whole-line repetition now has to cover about 1 KB before it counts as a loop
+- Fixed per-request OpenAI-compatible headers being combined with differently cased model headers instead of overriding them ([#17513](https://github.com/can1357/oh-my-pi/pull/17513) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed a stalled Anthropic stream that keeps sending empty content deltas never timing out, because those deltas were treated as stream progress ([#17484](https://github.com/can1357/oh-my-pi/pull/17484) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed Anthropic-compatible endpoints that put a thinking signature on the streamed content block losing it, so replayed reasoning keeps its signed block ([#17483](https://github.com/can1357/oh-my-pi/pull/17483) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed `AuthStorage.close()` and `replaceStore()` losing a rotated OAuth refresh token when a refresh was still in flight, with or without durable refresh leases; the store now stays open until that token is saved, and new refreshes are refused ([#17518](https://github.com/can1357/oh-my-pi/issues/17518))
+- Fixed `/usage` showing Cursor's "Other Models" meter as an inflated dollar amount; it now shows the percentage Cursor reports, like Cursor Models ([#17462](https://github.com/can1357/oh-my-pi/pull/17462) by [@eggpeat](https://github.com/eggpeat))
+- Fixed the `omp auth-gateway` Responses endpoint rejecting documented null values for temperature, `top_p`, output limits, reasoning, and reasoning summaries ([#17466](https://github.com/can1357/oh-my-pi/pull/17466) by [@Xytronix](https://github.com/Xytronix)).
+- Fixed provider HTTP errors printing the response body twice when the thrown error already carried it, including responses with a retry header ([#17503](https://github.com/can1357/oh-my-pi/pull/17503) by [@metaphoric-dev](https://github.com/metaphoric-dev))
+- Fixed Gemini tool calls through the `omp auth-gateway` chat-completions endpoint failing on the next turn: the gateway now returns each call's thought signature in `extra_content` and replays the one a client sends back ([#17509](https://github.com/can1357/oh-my-pi/pull/17509) by [@justdoGIT](https://github.com/justdoGIT))
 - Fixed shared credential and usage work depending on whichever caller started it: an OAuth refresh, a saved-reset lookup or redemption, a usage probe, and an AWS or Vertex credential lookup took the first caller's cancellation, timeout or `fetch` for every caller that joined it, so one caller leaving failed the others, and a caller that brought its own `fetch` could get another caller's result. Such work now runs as long as any caller still waits for it, each caller's signal ends only its own wait, a held caller starts none, and lookups are shared only among callers of the same `fetch`. A saved-reset lookup now shows each caller its own session's accounts, and a redemption ends within 45 seconds however long its callers wait ([#17457](https://github.com/can1357/oh-my-pi/pull/17457) by [@sjawhar](https://github.com/sjawhar))
 - Fixed a credential being blocked for every session for five minutes when the caller that needed its refresh was cancelled or refused. A refresh the caller left still records the provider's answer when it lands: a rate limit blocks the credential and a dead grant disables it, as for a caller that waited ([#17457](https://github.com/can1357/oh-my-pi/pull/17457) by [@sjawhar](https://github.com/sjawhar))
 - `AuthBrokerClient` and `AuthStorage`'s usage and saved-reset requests now read the global `fetch` per request instead of capturing it at construction ([#17457](https://github.com/can1357/oh-my-pi/pull/17457) by [@sjawhar](https://github.com/sjawhar))
