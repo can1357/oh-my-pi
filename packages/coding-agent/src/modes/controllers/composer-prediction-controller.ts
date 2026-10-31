@@ -70,6 +70,8 @@ interface ReadyPrediction {
 	entryId: string | undefined;
 	shown: boolean;
 	accepted: boolean;
+	/** A run started: no longer offered, but still settled by the message that started it. */
+	hidden: boolean;
 }
 
 /**
@@ -104,7 +106,7 @@ export class ComposerPredictionController {
 	/** The prediction for the conversation as it stands now, if one is ready. */
 	get text(): string | undefined {
 		const prediction = this.#prediction;
-		if (!prediction || !this.#isCurrent(prediction.source)) return undefined;
+		if (!prediction || prediction.hidden || !this.#isCurrent(prediction.source)) return undefined;
 		return prediction.text;
 	}
 
@@ -138,6 +140,19 @@ export class ComposerPredictionController {
 		this.#abort = undefined;
 		if (!this.#prediction) return;
 		this.#prediction = undefined;
+		this.#ctx.ui.requestRender();
+	}
+
+	/**
+	 * A run is starting: abort an in-flight prediction and hide the shown one. Unlike {@link cancel},
+	 * keep it for {@link settle}, because the run's input message arrives after the run starts.
+	 */
+	hide(): void {
+		this.#abort?.abort();
+		this.#abort = undefined;
+		const prediction = this.#prediction;
+		if (!prediction || prediction.hidden) return;
+		prediction.hidden = true;
 		this.#ctx.ui.requestRender();
 	}
 
@@ -205,7 +220,7 @@ export class ComposerPredictionController {
 				: { promptVersion: PROMPT_VERSION };
 			const entryId = usageId && this.#appendEntry(source, COMPOSER_PREDICTION_ENTRY_TYPE, data, usageId);
 			if (!text) return;
-			this.#prediction = { text, source, entryId, shown: false, accepted: false };
+			this.#prediction = { text, source, entryId, shown: false, accepted: false, hidden: false };
 			this.#ctx.ui.requestRender();
 		} catch (error) {
 			if (!abort.signal.aborted) logger.debug("Composer prediction failed", { error: String(error) });
@@ -248,7 +263,9 @@ export class ComposerPredictionController {
 	/** The current prediction, when `text` is what it offers. */
 	#readyFor(text: string): ReadyPrediction | undefined {
 		const prediction = this.#prediction;
-		return prediction && prediction.text === text && this.#isCurrent(prediction.source) ? prediction : undefined;
+		return prediction && !prediction.hidden && prediction.text === text && this.#isCurrent(prediction.source)
+			? prediction
+			: undefined;
 	}
 
 	#isCurrent(source: PredictionSource): boolean {

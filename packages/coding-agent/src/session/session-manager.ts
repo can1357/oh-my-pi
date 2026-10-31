@@ -3596,7 +3596,8 @@ export class SessionManager {
 
 	/**
 	 * Record a custom entry on the branch that produced it, as {@link appendModelUsage} does: nothing
-	 * is written once the session or parent entry is gone, and a branch that moved on keeps its leaf.
+	 * is written once the session or parent entry is gone. When `parentId` is still the active leaf the
+	 * entry joins the path and becomes the leaf; a branch that moved on keeps its leaf.
 	 */
 	appendCustomEntryOnBranch(
 		customType: string,
