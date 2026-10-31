@@ -1483,8 +1483,9 @@ describe("what a session set on the host's UI", () => {
 	test("is left alone when another session set the slot since, whatever wrapper each runner holds the host's UI through", async () => {
 		/** Two runners over one host UI, as the SDK builds them: each sets a user-wait tracker before
 		 *  `initialize` (`sdk.ts`), so each holds the UI through a wrapper of its own (`trackUserWaits`).
-		 *  Also each through an embedder's own transparent Proxy, and both through the same object. */
-		const shippedShape = async (shape: "tracked" | "proxied" | "bare") => {
+		 *  Also each through an embedder's own transparent Proxy, each through an embedder's own copy
+		 *  that forwards with bound methods (tracked too), and both through the same object. */
+		const shippedShape = async (shape: "tracked" | "proxied" | "forwarded" | "bare") => {
 			const state: Record<string, unknown> = {};
 			const runtimes = await Promise.all(
 				["A", "B"].map(name =>
@@ -1499,33 +1500,41 @@ describe("what a session set on the host's UI", () => {
 			const [a, b] = runtimes;
 			if (!a || !b) throw new Error("two runtimes were not made");
 			const ui = recordingUI(a.runner.getUIContext(), state);
+			const heldThrough = (): ExtensionUIContext => {
+				if (shape === "proxied") return new Proxy(ui, {});
+				if (shape === "forwarded")
+					return { ...ui, setStatus: ui.setStatus.bind(ui), setFooter: ui.setFooter.bind(ui) };
+				return ui;
+			};
 			for (const { runner } of runtimes) {
-				if (shape === "tracked") runner.setUserWaitTracker(dialog => dialog());
+				if (shape === "tracked" || shape === "forwarded") runner.setUserWaitTracker(dialog => dialog());
 				const [host, context] = actions();
-				runner.initialize(host, context, undefined, shape === "proxied" ? new Proxy(ui, {}) : ui, "tui");
+				runner.initialize(host, context, undefined, heldThrough(), "tui");
 			}
 			const endA = a.session();
 			await a.runner.emit({ type: "session_start" });
 			b.session();
 			await b.runner.emit({ type: "session_start" });
-			const footerOf = () => (typeof state.footer === "function" ? "set" : String(state.footer));
-			const footerBefore = footerOf();
+			// B set the footer last: what stays once A ends is B's own factory, whatever happened between.
+			const footerB = state.footer;
 			endA();
 			return {
 				wrappersDiffer: a.runner.getUIContext() !== b.runner.getUIContext(),
 				status: state["status:shared"],
-				footer: { before: footerBefore, after: footerOf() },
+				footer: typeof footerB === "function" && state.footer === footerB ? "B's" : String(state.footer),
 			};
 		};
 
 		expect({
 			tracked: await shippedShape("tracked"),
 			proxied: await shippedShape("proxied"),
+			forwarded: await shippedShape("forwarded"),
 			bare: await shippedShape("bare"),
 		}).toEqual({
-			tracked: { wrappersDiffer: true, status: "B's status", footer: { before: "set", after: "set" } },
-			proxied: { wrappersDiffer: true, status: "B's status", footer: { before: "set", after: "set" } },
-			bare: { wrappersDiffer: false, status: "B's status", footer: { before: "set", after: "set" } },
+			tracked: { wrappersDiffer: true, status: "B's status", footer: "B's" },
+			proxied: { wrappersDiffer: true, status: "B's status", footer: "B's" },
+			forwarded: { wrappersDiffer: true, status: "B's status", footer: "B's" },
+			bare: { wrappersDiffer: false, status: "B's status", footer: "B's" },
 		});
 	});
 
@@ -1609,8 +1618,10 @@ describe("an answer that arrives after its session has gone", () => {
 
 	test("of a live call is ended by the host when the handle is refused, whichever turn the session ends on", async () => {
 		const results: Array<{ turns: number; delivered: boolean; stops: number }> = [];
+		// One runtime, one session per turn count: the session ends that many microtask turns after the
+		// host's call has settled, so every point between the host's answer and its delivery is tried.
+		const h = await reusedRuntime(() => {});
 		for (let turns = 0; turns < 12; turns++) {
-			const h = await reusedRuntime(() => {});
 			const connecting = Promise.withResolvers<void>();
 			cleanups.push(() => connecting.resolve());
 			let stops = 0;
@@ -1645,7 +1656,10 @@ describe("an answer that arrives after its session has gone", () => {
 			if (answer !== undefined && "live" in answer) await answer.live.stop();
 		}
 
-		expect(results.filter(result => !result.delivered && result.stops !== 1)).toEqual([]);
+		expect({
+			refusedTurns: results.some(result => !result.delivered),
+			stranded: results.filter(result => !result.delivered && result.stops !== 1),
+		}).toEqual({ refusedTurns: true, stranded: [] });
 	});
 
 	test("of a live call is stopped before anything of it is read", async () => {

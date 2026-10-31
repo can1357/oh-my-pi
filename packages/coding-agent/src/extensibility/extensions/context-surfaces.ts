@@ -177,6 +177,9 @@ const MODEL_REGISTRY_MEMBERS = {
 	hydrateCredentialScopedModelCaches: false,
 	reapplyModelPolicies: false,
 	refreshInBackground: false,
+	// The host's own background refresh, as `refreshInBackground` and `awaitBackgroundRefresh` beside
+	// it: an extension asks per provider (`isProviderDiscoveryPending`).
+	isBackgroundRefreshPending: false,
 	awaitBackgroundRefresh: false,
 	refreshIfStale: false,
 	awaitInitialBackgroundRefresh: false,
@@ -1359,6 +1362,20 @@ function editorFactoriesOf(owner: ExtensionCallbackOwner): WeakMap<object, Edito
  *  whichever wrapper its runner holds the UI through. */
 const uiSlotsHeld = new WeakMap<object, Map<string, ExtensionCallbackOwner>>();
 
+/** A session's last setting of a slot, as {@link latestSettings} keeps it: who set it, and how to
+ *  set it again on the host UI it was set through. */
+interface SlotSetting {
+	readonly owner: ExtensionCallbackOwner;
+	readonly again: () => void;
+}
+
+/**
+ * The latest setting of each slot, through whichever host UI: a session's end, taking a slot back,
+ * sets this one again when another session made it ({@link hostUIKey} says why). Gone once the
+ * slot is cleared or the session that set it ends.
+ */
+const latestSettings = new Map<string, SlotSetting>();
+
 /** Where a host UI carries the key its slots are held under ({@link hostUIKey}). */
 const HOST_UI_KEY = Symbol("omp.extension.hostUIKey");
 
@@ -1373,10 +1390,10 @@ const HOST_UI_KEY = Symbol("omp.extension.hostUIKey");
  * The key is the object's own: read from its own property table, never through its prototype
  * chain, so two host UIs made from one prototype (`Object.create(parent)`) are two keys even once
  * the prototype has one. A host UI that cannot take a key — one made non-extensible, such as the
- * frozen no-UI object every runner without a UI shares — is keyed by its identity, seen through
- * `trackUserWaits` ({@link hostUIOf}). (A frozen UI is never wrapped by `trackUserWaits`: the Proxy
- * invariant forbids answering its frozen members with wrappers, and a runner wraps only a UI it is
- * given.)
+ * frozen no-UI object every runner without a UI shares — is keyed by its identity: through a
+ * `trackUserWaits` wrapper, the identity of the UI it wraps ({@link hostUIOf}). A frozen UI takes
+ * that path only untracked, handed to a runner with no user-wait tracker: the Proxy invariant
+ * forbids `trackUserWaits` answering a frozen UI's members with wrappers, so one cannot be tracked.
  *
  * What no key can see through is a wrapper that leaves no trace on the host: an object that
  * forwards by copying its members — `{ ...hostUI, setStatus: hostUI.setStatus.bind(hostUI) }` —
@@ -1384,11 +1401,11 @@ const HOST_UI_KEY = Symbol("omp.extension.hostUIKey");
  * wrapper names the host behind it — a bound function's target and a Proxy's target are not
  * observable — and the members it shares with the host are shared just as much by unrelated UIs
  * made from the same base, which must stay apart (the `Object.create(parent)` case above). So two
- * runners over such wrappers hold separate slots, and one session's end can clear a slot another
- * set since through its own wrapper. No shipped host builds that: the TUI drives one runner, a
- * subagent's runner holds the shared no-UI object, and ACP's per-session UIs set no slots. An
- * embedder that runs two agents over one UI hands each the same object, or a Proxy over an object
- * that can take a key.
+ * runners over such wrappers hold separate slots, and taking a session's slot back clears it
+ * through its own wrapper, which may be the UI another session has written to since. The slot is
+ * then set again as that session last set it ({@link latestSettings}): whether the two wrappers
+ * front one UI or two, the later setting is what stays. Over two UIs that is the other UI's own
+ * setting made again, the same text or the same factory.
  */
 function hostUIKey(ui: ExtensionUIContext): object {
 	const own: unknown = Reflect.getOwnPropertyDescriptor(ui, HOST_UI_KEY)?.value;
@@ -1485,21 +1502,32 @@ export function handUIContext(
 	const held = slots;
 	/** The slots this facade takes back when its session ends: one withdrawal each. */
 	const withdrawing = new Set<string>();
-	/** The session has set `slot` on the host's UI, or cleared it: a slot it set is taken back with
-	 *  `clear` when it ends, unless a session has set the slot since. */
-	const holds = (slot: string, clearing: boolean, clear: () => void): void => {
+	/** The session sets `slot` on the host's UI with `set`, or clears it: a slot it set is taken
+	 *  back with `clear` when it ends, unless a session has set the slot since through this UI. A
+	 *  slot another session set later through another UI is then set again as that session last set
+	 *  it ({@link latestSettings}), so taking this one back cannot erase it. */
+	const holds = (slot: string, clearing: boolean, set: () => void, clear: () => void): void => {
+		set();
 		if (clearing) {
 			if (held.get(slot) === owner) held.delete(slot);
+			latestSettings.delete(slot);
 			return;
 		}
 		held.set(slot, owner);
+		latestSettings.set(slot, { owner, again: set });
 		if (withdrawing.has(slot)) return;
 		withdrawing.add(slot);
 		owner.whenSessionEnds?.(() => {
 			withdrawing.delete(slot);
+			const latest = latestSettings.get(slot);
+			if (latest?.owner === owner) latestSettings.delete(slot);
 			if (held.get(slot) !== owner) return;
 			held.delete(slot);
-			clear();
+			try {
+				clear();
+			} finally {
+				if (latest && latest.owner !== owner && !latest.owner.isRetired) latest.again();
+			}
 		});
 	};
 	const handed: Decided<ExtensionUIContext> = {
@@ -1564,38 +1592,61 @@ export function handUIContext(
 		setStatus: (key, value) => {
 			const slot = text(owner, key);
 			const shown = optionalText(owner, value);
-			ui.setStatus(slot, shown);
-			holds(`status:${slot}`, shown === undefined, () => ui.setStatus(slot, undefined));
+			holds(
+				`status:${slot}`,
+				shown === undefined,
+				() => ui.setStatus(slot, shown),
+				() => ui.setStatus(slot, undefined),
+			);
 		},
 		setWorkingMessage: message => {
 			const shown = optionalText(owner, message);
-			ui.setWorkingMessage(shown);
-			holds("workingMessage", shown === undefined, () => ui.setWorkingMessage(undefined));
+			holds(
+				"workingMessage",
+				shown === undefined,
+				() => ui.setWorkingMessage(shown),
+				() => ui.setWorkingMessage(undefined),
+			);
 		},
 		setWidget: (key, content, options) => {
 			const slot = text(owner, key);
-			ui.setWidget(
-				slot,
-				typeof content === "function" ? scoped(content, component) : data(owner, content, subject, "content"),
-				data(owner, options, subject, "options"),
+			const shown =
+				typeof content === "function" ? scoped(content, component) : data(owner, content, subject, "content");
+			const shownOptions = data(owner, options, subject, "options");
+			holds(
+				`widget:${slot}`,
+				content === undefined,
+				() => ui.setWidget(slot, shown, shownOptions),
+				() => ui.setWidget(slot, undefined),
 			);
-			holds(`widget:${slot}`, content === undefined, () => ui.setWidget(slot, undefined));
 		},
 		setFooter: factory => {
 			const installed = optionalScoped(factory, component);
-			ui.setFooter(installed);
-			holds("footer", installed === undefined, () => ui.setFooter(undefined));
+			holds(
+				"footer",
+				installed === undefined,
+				() => ui.setFooter(installed),
+				() => ui.setFooter(undefined),
+			);
 		},
 		setHeader: factory => {
 			const installed = optionalScoped(factory, component);
-			ui.setHeader(installed);
-			holds("header", installed === undefined, () => ui.setHeader(undefined));
+			holds(
+				"header",
+				installed === undefined,
+				() => ui.setHeader(installed),
+				() => ui.setHeader(undefined),
+			);
 		},
 		// A blank title releases the extension's claim on the terminal's title, as the host reads it.
 		setTitle: title => {
 			const shown = text(owner, title);
-			ui.setTitle(shown);
-			holds("title", shown.trim() === "", () => ui.setTitle(""));
+			holds(
+				"title",
+				shown.trim() === "",
+				() => ui.setTitle(shown),
+				() => ui.setTitle(""),
+			);
 		},
 		custom: (factory, options) => {
 			// The dialog belongs to the session that opens it: its option callbacks run as that
@@ -1679,8 +1730,12 @@ export function handUIContext(
 			]);
 			// The factory is the extension's own: `getEditorComponent` hands it back as it is.
 			if (installed && factory) editorFactories.set(installed, handAsIs(factory));
-			ui.setEditorComponent(installed);
-			holds("editor", installed === undefined, () => ui.setEditorComponent(undefined));
+			holds(
+				"editor",
+				installed === undefined,
+				() => ui.setEditorComponent(installed),
+				() => ui.setEditorComponent(undefined),
+			);
 		},
 		// What the host installed is its own object — the wrapper this session made, or another
 		// extension's, or the host's. An extension reads back only the factory it installed itself.

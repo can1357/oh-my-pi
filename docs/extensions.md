@@ -103,8 +103,10 @@ What you register, and when, decides how long it lasts:
   saying the session has ended, if the session has ended by the time the answer would reach you,
   rather than handing you what the host worked out afterwards. What is checked is delivery, not
   the moment the host settled: an answer the host had already settled is refused too if the session
-  ends before it reaches you. A call you do not await is refused the same way, but its rejection
-  ends only that call, never your session or the process; await it to learn how it ended. A live
+  ends before it reaches you. A call whose promise you drop is refused the same way, and its
+  rejection ends only that call. A call you chain on without awaiting — `ctx.compact().then(…)` —
+  needs a `.catch()`: the promise `then` makes rejects too, and an unhandled rejection ends omp,
+  your session with it. Await a call, or catch it, to learn how it ended. A live
   call is never left running with its handle refused: still starting when its session ends, or
   settled just before the end, the host ends it. A host answer whose promise names its own
   constructor is refused rather than followed, since following it would run that constructor.

@@ -811,6 +811,7 @@ const STREAM_OPTIONS = fieldsOf<SimpleStreamOptions>({
 	anthropicSlowMode: WITHHELD,
 	reasoning: DATA,
 	disableReasoning: DATA,
+	disableServerSideFallback: DATA,
 	hideThinkingSummary: DATA,
 	textVerbosity: DATA,
 	thinkingBudgets: DATA,
