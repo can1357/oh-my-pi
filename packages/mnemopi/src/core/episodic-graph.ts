@@ -201,12 +201,12 @@ function parseJsonStringArray(value: string | null): string[] {
 function rowToGist(row: GistRow): Gist {
 	return {
 		id: row.id,
-		text: row.text,
+		text: sanitizeTextField(row.text),
 		timestamp: row.timestamp ?? "",
-		participants: parseJsonStringArray(row.participants_json),
-		location: row.location,
-		emotion: row.emotion,
-		timeScope: row.time_scope,
+		participants: parseJsonStringArray(row.participants_json).map(p => sanitizeTextField(p)),
+		location: row.location !== null ? sanitizeTextField(row.location) : null,
+		emotion: row.emotion !== null ? sanitizeTextField(row.emotion) : null,
+		timeScope: row.time_scope !== null ? sanitizeTextField(row.time_scope) : null,
 	};
 }
 
@@ -366,14 +366,15 @@ export class EpisodicGraph {
 	}
 
 	extractGist(content: string, memoryId: string): Gist {
+		const cleanContent = sanitizeTextField(content);
 		return {
 			id: `gist_${memoryId}`,
-			text: this.createSummary(content),
+			text: this.createSummary(cleanContent),
 			timestamp: nowIso(),
-			participants: this.extractParticipants(content),
-			location: this.extractLocation(content),
-			emotion: this.extractEmotion(content),
-			timeScope: this.extractTemporalScope(content),
+			participants: this.extractParticipants(cleanContent),
+			location: this.extractLocation(cleanContent),
+			emotion: this.extractEmotion(cleanContent),
+			timeScope: this.extractTemporalScope(cleanContent),
 		};
 	}
 	extractFacts(content: string, memoryId: string): Fact[] {
@@ -405,18 +406,23 @@ export class EpisodicGraph {
 		return facts;
 	}
 	storeGist(gist: Gist, memoryId: string): void {
+		const cleanText = sanitizeTextField(gist.text);
+		const cleanParticipants = gist.participants.map(p => sanitizeTextField(p));
+		const cleanLocation = gist.location !== null ? sanitizeTextField(gist.location) : null;
+		const cleanEmotion = gist.emotion !== null ? sanitizeTextField(gist.emotion) : null;
+		const cleanTimeScope = gist.timeScope !== null ? sanitizeTextField(gist.timeScope) : null;
 		this.db.run(
 			`INSERT OR REPLACE INTO gists
 				(id, text, timestamp, participants_json, location, emotion, time_scope, memory_id)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			[
 				gist.id,
-				gist.text,
+				cleanText,
 				gist.timestamp,
-				JSON.stringify(gist.participants),
-				gist.location,
-				gist.emotion,
-				gist.timeScope,
+				JSON.stringify(cleanParticipants),
+				cleanLocation,
+				cleanEmotion,
+				cleanTimeScope,
 				memoryId,
 			],
 		);
@@ -547,9 +553,9 @@ export class EpisodicGraph {
 		const linkExisting = options.linkExisting ?? true;
 		const minLinkScore = options.minLinkScore ?? DEFAULT_LINK_THRESHOLD;
 		const extractEntities = options.extractEntities ?? true;
-		const gist = this.extractGist(content, memoryId);
-		const facts = extractEntities ? this.extractFacts(content, memoryId) : [];
-		// One transaction for every gist/fact/edge write: autocommitted, each
+		const sanitizedContent = sanitizeTextField(content);
+		const gist = this.extractGist(sanitizedContent, memoryId);
+		const facts = extractEntities ? this.extractFacts(sanitizedContent, memoryId) : [];
 		// `addEdge` paid its own WAL commit (an fsync), so linking a memory
 		// against a large bank blocked the caller's event loop for seconds (#14998).
 		return transaction(this.db, () => {

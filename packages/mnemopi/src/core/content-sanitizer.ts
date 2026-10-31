@@ -7,8 +7,8 @@ export const SIZE_BASE64_CHECK = 100_000;
 export const ENTROPY_THRESHOLD = 5.0;
 
 const DATA_URI_RE =
-	/^data:(?<mime>[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+)?(?<params>(?:;[A-Za-z0-9!#$&^_.+-]+=[^;,]*)*)(?<base64>;base64)?,(?<data>[\s\S]*)$/i;
-const VALID_MIME_RE = /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/;
+	/^data:(?<mime>[A-Za-z0-9!#$%&'*+.^_`|~-]+\/[A-Za-z0-9!#$%&'*+.^_`|~-]+)?(?<params>(?:;[A-Za-z0-9!#$%&'*+.^_`|~-]+=[^;,]*)*)(?<base64>;base64)?,(?<data>[\s\S]*)$/i;
+const VALID_MIME_RE = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+\/[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
 const BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 export interface BlobMetadata {
 	blob_ref?: string;
@@ -85,7 +85,7 @@ function decodePercentEncoded(raw: string): Buffer {
 
 function extractCharset(params: string | undefined): string | null {
 	if (!params) return null;
-	const match = /;charset=([^;,]+)/i.exec(params);
+	const match = /(?:^|;)\s*charset=([^;,]+)/i.exec(params);
 	return match?.[1]?.trim().toLowerCase() ?? null;
 }
 
@@ -711,7 +711,7 @@ export function sanitizeTextField(input: string): string {
 			} else {
 				payloadBytes = decodePercentEncoded(rawPayload);
 			}
-			if (payloadBytes !== null && (rawMime === undefined || isTextualMime(mimeType, payloadBytes))) {
+			if (payloadBytes !== null && (rawMime === undefined || isTextualMime(mimeType, payloadBytes, charset))) {
 				const unsupportedCharset = !isSupportedSymmetricCharset(charset);
 				let decoded = decodeWithCharset(payloadBytes, charset);
 				const tagRes = stripInjectedMemoryTags(decoded);
@@ -725,16 +725,30 @@ export function sanitizeTextField(input: string): string {
 		}
 	} else if (/^data:/i.test(text)) {
 		const b64Fallback = /^data:[^,]*;base64,(?<data>[\s\S]*)$/i.exec(text);
-		const payloadBytes =
-			b64Fallback?.groups?.data !== undefined ? decodeBase64Payload(b64Fallback.groups.data) : null;
-		if (payloadBytes !== null) {
-			let decoded = decodeWithCharset(payloadBytes, "utf-8");
-			const tagRes = stripInjectedMemoryTags(decoded);
-			if (tagRes.stripped) decoded = tagRes.content;
-			const credRes = scrubLiveCredentials(decoded);
-			if (credRes.matchedTypes.length > 0) decoded = credRes.content;
-			if (tagRes.stripped || credRes.matchedTypes.length > 0) {
-				return decoded;
+		if (b64Fallback?.groups?.data !== undefined) {
+			const payloadBytes = decodeBase64Payload(b64Fallback.groups.data);
+			if (payloadBytes !== null) {
+				let decoded = decodeWithCharset(payloadBytes, "utf-8");
+				const tagRes = stripInjectedMemoryTags(decoded);
+				if (tagRes.stripped) decoded = tagRes.content;
+				const credRes = scrubLiveCredentials(decoded);
+				if (credRes.matchedTypes.length > 0) decoded = credRes.content;
+				if (tagRes.stripped || credRes.matchedTypes.length > 0) {
+					return decoded;
+				}
+			}
+		} else {
+			const nonB64Fallback = /^data:[^,]*,(?<data>[\s\S]*)$/i.exec(text);
+			if (nonB64Fallback?.groups?.data !== undefined) {
+				const payloadBytes = decodePercentEncoded(nonB64Fallback.groups.data);
+				let decoded = decodeWithCharset(payloadBytes, "utf-8");
+				const tagRes = stripInjectedMemoryTags(decoded);
+				if (tagRes.stripped) decoded = tagRes.content;
+				const credRes = scrubLiveCredentials(decoded);
+				if (credRes.matchedTypes.length > 0) decoded = credRes.content;
+				if (tagRes.stripped || credRes.matchedTypes.length > 0) {
+					return decoded;
+				}
 			}
 		}
 	}
@@ -849,7 +863,12 @@ function redactNested(value: unknown, stripTags = false): unknown {
 		}
 		const nextItem = redactNested(item, stripTags);
 		if (safeKey !== key || nextItem !== item) changed = true;
-		out[safeKey] = nextItem;
+		Object.defineProperty(out, safeKey, {
+			value: nextItem,
+			enumerable: true,
+			configurable: true,
+			writable: true,
+		});
 	}
 	return changed ? out : value;
 }
@@ -973,7 +992,10 @@ function isKnownBinaryMime(lower: string): boolean {
 	);
 }
 
-function isTextualMime(mimeType: string, rawBytes?: Uint8Array): boolean {
+function isTextualMime(mimeType: string, rawBytes?: Uint8Array, charset?: string | null): boolean {
+	if (charset !== undefined && charset !== null && charset.trim().length > 0) {
+		return true;
+	}
 	const lower = mimeType.trim().toLowerCase();
 	if (
 		lower === "" ||
@@ -1041,7 +1063,7 @@ export function sanitizeContent(content: string): [sanitizedContent: string, met
 					let bytesToStore: Buffer = rawBytes;
 					const originalPayloadSize = rawBytes.length;
 					const omittedMime = rawMime === undefined;
-					const isTextual = omittedMime || isTextualMime(mimeType, rawBytes);
+					const isTextual = omittedMime || isTextualMime(mimeType, rawBytes, charset);
 					const dataMeta: SanitizeMetadata = {
 						original_size: originalPayloadSize,
 						mime: mimeType,
@@ -1078,37 +1100,74 @@ export function sanitizeContent(content: string): [sanitizedContent: string, met
 			}
 		} else {
 			const b64Fallback = /^data:[^,]*;base64,(?<data>[\s\S]*)$/i.exec(workingContent);
-			const rawBytes = b64Fallback?.groups?.data !== undefined ? decodeBase64Payload(b64Fallback.groups.data) : null;
-			if (rawBytes !== null) {
-				let decoded = decodeWithCharset(rawBytes, "utf-8");
-				const tagRes = stripInjectedMemoryTags(decoded);
-				if (tagRes.stripped) {
-					decoded = tagRes.content;
-				}
-				const credRes = scrubLiveCredentials(decoded);
-				if (credRes.matchedTypes.length > 0) {
-					decoded = credRes.content;
-				}
-				if (tagRes.stripped || credRes.matchedTypes.length > 0) {
-					const bytesToStore = encodeWithCharset(decoded, "utf-8", rawBytes);
-					const sha256 = storeBlob(bytesToStore);
-					const blobRef = `blob://sha256/${sha256}`;
-					const dataMeta: SanitizeMetadata = {
-						original_size: rawBytes.length,
-						mime: "text/plain",
-						extraction_reason: "data_uri",
-						blob_ref: blobRef,
-					};
-					if (tagsWereStripped || tagRes.stripped) {
-						dataMeta.stripped_tags = true;
+			if (b64Fallback?.groups?.data !== undefined) {
+				const rawBytes = decodeBase64Payload(b64Fallback.groups.data);
+				if (rawBytes !== null) {
+					let decoded = decodeWithCharset(rawBytes, "utf-8");
+					const tagRes = stripInjectedMemoryTags(decoded);
+					if (tagRes.stripped) {
+						decoded = tagRes.content;
 					}
+					const credRes = scrubLiveCredentials(decoded);
 					if (credRes.matchedTypes.length > 0) {
-						dataMeta.redacted_secrets = credRes.matchedTypes;
+						decoded = credRes.content;
 					}
-					return [
-						`[Binary content extracted: text/plain, ${bytesToStore.length.toLocaleString("en-US")} bytes → ${blobRef}]`,
-						dataMeta,
-					];
+					if (tagRes.stripped || credRes.matchedTypes.length > 0) {
+						const bytesToStore = encodeWithCharset(decoded, "utf-8", rawBytes);
+						const sha256 = storeBlob(bytesToStore);
+						const blobRef = `blob://sha256/${sha256}`;
+						const dataMeta: SanitizeMetadata = {
+							original_size: rawBytes.length,
+							mime: "text/plain",
+							extraction_reason: "data_uri",
+							blob_ref: blobRef,
+						};
+						if (tagsWereStripped || tagRes.stripped) {
+							dataMeta.stripped_tags = true;
+						}
+						if (credRes.matchedTypes.length > 0) {
+							dataMeta.redacted_secrets = credRes.matchedTypes;
+						}
+						return [
+							`[Binary content extracted: text/plain, ${bytesToStore.length.toLocaleString("en-US")} bytes → ${blobRef}]`,
+							dataMeta,
+						];
+					}
+				}
+			} else {
+				const nonB64Fallback = /^data:[^,]*,(?<data>[\s\S]*)$/i.exec(workingContent);
+				if (nonB64Fallback?.groups?.data !== undefined) {
+					const rawBytes = decodePercentEncoded(nonB64Fallback.groups.data);
+					let decoded = decodeWithCharset(rawBytes, "utf-8");
+					const tagRes = stripInjectedMemoryTags(decoded);
+					if (tagRes.stripped) {
+						decoded = tagRes.content;
+					}
+					const credRes = scrubLiveCredentials(decoded);
+					if (credRes.matchedTypes.length > 0) {
+						decoded = credRes.content;
+					}
+					if (tagRes.stripped || credRes.matchedTypes.length > 0) {
+						const bytesToStore = encodeWithCharset(decoded, "utf-8", rawBytes);
+						const sha256 = storeBlob(bytesToStore);
+						const blobRef = `blob://sha256/${sha256}`;
+						const dataMeta: SanitizeMetadata = {
+							original_size: rawBytes.length,
+							mime: "text/plain",
+							extraction_reason: "data_uri",
+							blob_ref: blobRef,
+						};
+						if (tagsWereStripped || tagRes.stripped) {
+							dataMeta.stripped_tags = true;
+						}
+						if (credRes.matchedTypes.length > 0) {
+							dataMeta.redacted_secrets = credRes.matchedTypes;
+						}
+						return [
+							`[Binary content extracted: text/plain, ${bytesToStore.length.toLocaleString("en-US")} bytes → ${blobRef}]`,
+							dataMeta,
+						];
+					}
 				}
 			}
 		}
