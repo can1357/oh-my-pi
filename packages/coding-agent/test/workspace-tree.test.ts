@@ -103,6 +103,25 @@ describe("buildWorkspaceTree", () => {
 		expect(tree.rendered).not.toContain("deep.txt");
 	});
 
+	it("lists dependency, VCS, and build directories in explicit directory reads only", async () => {
+		const cwd = await makeTempDir();
+		await Bun.write(path.join(cwd, "package.json"), "{}");
+		await Bun.write(path.join(cwd, "dist", "esm", "index.js"), "export {};");
+		await Bun.write(path.join(cwd, "node_modules", "dep", "index.js"), "export {};");
+		await Bun.write(path.join(cwd, ".git", "HEAD"), "ref: refs/heads/main");
+
+		const listing = await buildDirectoryTree(cwd, { maxDepth: 2 });
+		for (const entry of ["- package.json", "- dist/", "- esm/", "- node_modules/", "- dep/", "- .git/", "- HEAD"]) {
+			expect(listing.rendered).toContain(entry);
+		}
+
+		const workspace = await buildWorkspaceTree(cwd);
+		expect(workspace.rendered).toContain("package.json");
+		for (const pruned of ["dist", "node_modules", ".git"]) {
+			expect(workspace.rendered).not.toContain(pruned);
+		}
+	});
+
 	it("caps the rendered tree at the hard line limit", async () => {
 		const cwd = await makeTempDir();
 		const base = Date.now() - 60_000;

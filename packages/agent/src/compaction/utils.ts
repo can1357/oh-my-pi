@@ -28,6 +28,11 @@ export function createFileOps(): FileOperations {
 	};
 }
 
+/** Error text for a summarization call that hit its output limit (`stopReason: "length"`): partial text is never used. */
+export function incompleteOutputError(prefix: string): string {
+	return `${prefix}: model output ended incomplete (stopReason: length)`;
+}
+
 // Read-tool selector grammar, mirrored from the conservative filesystem splitter in
 // packages/coding-agent/src/tools/path-utils.ts (splitPathAndSel). Keep in sync.
 // A trailing `:chunk` is a selector only when it is a line-range list
