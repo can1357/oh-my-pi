@@ -95,7 +95,7 @@ Older unqualified action names are migrated when `keybindings.yml` is loaded, bu
 
 ## Recover an interrupted prompt
 
-`Escape` stops a running turn. While the turn is still inside its first thinking block, the prompt that started it — text and image attachments, exactly as typed — also goes back into the composer, ahead of anything typed while the turn ran, so a change of mind during reasoning is an edit rather than a retype. The message also stays in the transcript: the composer holds a new draft of the same words.
+`Escape` stops a running turn. While the turn is still inside its first thinking block, the prompt that started it — text and image attachments, exactly as typed — also goes back into the composer, ahead of anything typed while the turn ran, so a change of mind during reasoning is an edit rather than a retype. The turn itself is taken back as well: its prompt and the cut-short reply leave the transcript and the saved branch, so the next turn does not read a question nobody meant to send.
 
 Once that thinking block ends, or visible text or a tool call starts, the model has committed to an answer and `Escape` is a plain stop: the composer is left alone. Prompts the agent started itself (continuations, synthetic turns, agent-attributed work) are never restored, and neither is a prompt whose turn has already settled. Restore is on by default. Turn it off with **Restore Prompt on Interrupt** in `/settings` under Interaction > Input, or set `composer.restoreInterruptedPrompt: false`.
 

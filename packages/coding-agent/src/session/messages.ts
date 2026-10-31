@@ -456,6 +456,12 @@ export const CHECKPOINT_ACTIVE_REMINDER_TYPE = "checkpoint-active-reminder";
 /** Custom message type carrying a completed rewind's report into model context. */
 export const REWIND_REPORT_MESSAGE_TYPE = "rewind-report";
 
+/** Custom message type recording a turn an interrupt took back off the branch.
+ *  The entry is appended off-branch and never replayed: it exists only to carry
+ *  the leaf the retraction cut to, since nothing else writes a leaf change to
+ *  the session file and a reload would otherwise replay the dropped turn. */
+export const RETRACTED_TURN_MESSAGE_TYPE = "retracted-turn";
+
 /** Metadata persisted with a hidden interrupted-thinking continuity message. */
 export interface InterruptedThinkingDetails {
 	interruptedAt: number;

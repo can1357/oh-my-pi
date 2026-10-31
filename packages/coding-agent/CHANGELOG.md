@@ -4,7 +4,7 @@
 
 ### Added
 
-- Escape while a turn is still inside its first thinking block puts the prompt that started it back in the composer — text and image attachments, exactly as typed, ahead of anything typed since — so an interrupt during reasoning is an edit rather than a retype; once that block ends, or text or a tool call starts, Esc stays a plain stop; `composer.restoreInterruptedPrompt: false` turns it off ([#17528](https://github.com/can1357/oh-my-pi/pull/17528) by [@iacore](https://github.com/iacore))
+- Escape while a turn is still inside its first thinking block puts the prompt that started it back in the composer — text and image attachments, exactly as typed, ahead of anything typed since — so an interrupt during reasoning is an edit rather than a retype, and takes that turn back off the transcript and the saved branch instead of leaving an unanswered question behind; once that block ends, or text or a tool call starts, Esc stays a plain stop; `composer.restoreInterruptedPrompt: false` turns it off ([#17528](https://github.com/can1357/oh-my-pi/pull/17528) by [@iacore](https://github.com/iacore))
 
 ## [18.14.1] - 2026-10-31
 
