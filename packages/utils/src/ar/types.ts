@@ -37,7 +37,7 @@ export type WritableArchiveFormat = "zip" | "tar" | "tar.gz" | "tar.zst" | "asar
  * Where to read an archive from: an extension-inferred filesystem path, a
  * format-tagged filesystem path, in-memory bytes, or any caller-provided
  * {@link ByteSource} (e.g. `httpByteSource` for ranged remote reads).
- * File- and source-backed ZIP/ASAR/RAR/7z/ISO are read lazily.
+ * File- and source-backed TAR/ZIP/ASAR/RAR/7z/ISO are read lazily.
  */
 export type ArchiveSource =
 	| string

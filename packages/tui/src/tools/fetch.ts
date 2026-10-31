@@ -28,6 +28,7 @@ export interface ReadUrlToolDetails {
 	finalUrl: string;
 	contentType: string;
 	method: string;
+	raw?: boolean;
 	truncated: boolean;
 	notes: string[];
 	meta?: OutputMeta;

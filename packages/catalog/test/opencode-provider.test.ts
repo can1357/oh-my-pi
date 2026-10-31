@@ -342,6 +342,44 @@ describe("Shared models.dev catalog fallback", () => {
 		}
 	});
 
+	test("sanitizes an authoritative resolver's fallback cache when additive mode is enabled", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-additive-authoritative-cache-"));
+		try {
+			const bundledModel = getBundledModels("zai")[0];
+			if (!bundledModel) throw new Error("ZAI bundled catalog is empty");
+			const cachedOverride = { ...bundledModel, name: "Untrusted cached override", contextWindow: 1, maxTokens: 1 };
+			const cacheDbPath = path.join(tempDir, "models.db");
+			const legacyOptions = {
+				providerId: "zai" as const,
+				cacheDbPath,
+				staticModels: [bundledModel],
+				dynamicModelsAuthoritative: true,
+				// The authoritative endpoint fails, so the snapshot is the
+				// non-authoritative models.dev merge carrying the override.
+				fetchDynamicModels: async () => {
+					throw new Error("endpoint down");
+				},
+				modelsDev: {
+					fetch: async () => [cachedOverride],
+					map: (payload: Array<typeof cachedOverride>) => payload,
+				},
+			};
+			await resolveProviderModels(legacyOptions, "online");
+
+			const additiveOptions = { ...legacyOptions, modelsDev: { ...legacyOptions.modelsDev, additiveOnly: true } };
+			for (const strategy of ["online-if-uncached", "offline"] as const) {
+				const resolved = await resolveProviderModels(additiveOptions, strategy);
+				expect(resolved.models.find(model => model.id === bundledModel.id)).toMatchObject({
+					name: bundledModel.name,
+					contextWindow: bundledModel.contextWindow,
+					maxTokens: bundledModel.maxTokens,
+				});
+			}
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	test("retains one source's cached slice when the other source refreshes", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-partial-source-refresh-"));
 		try {
@@ -793,38 +831,39 @@ describe("OpenCode provider discovery", () => {
 		});
 	});
 
-	test("routes live Go Argon to native Gemini with supported thinking levels (#15722)", async () => {
-		const id = "gemini-4-argon-contributor";
+	test("routes both Go Argon IDs to native Gemini with supported thinking levels (#17031)", async () => {
+		const ids = ["gemini-4-argon", "gemini-4-argon-contributor"] as const;
 		const baseUrl = "https://opencode.ai/inference/go/v1";
 		const descriptor = MODELS_DEV_PROVIDER_DESCRIPTORS.find(item => item.providerId === "opencode-go");
-		expect(descriptor?.resolveApi?.(id, { tool_call: true })).toEqual({ api: "google-generative-ai", baseUrl });
-
 		let requestedUrl = "";
 		const options = opencodeGoModelManagerOptions({
 			apiKey: "test-key",
 			fetch: async input => {
 				requestedUrl = String(input);
-				return modelListResponse([id]);
+				return modelListResponse(ids);
 			},
 		});
-		const spec = (await options.fetchDynamicModels?.())?.find(model => model.id === id);
-		if (!spec) throw new Error("Go did not discover Argon");
-		const model = buildModel(spec);
+		const specs = await options.fetchDynamicModels?.();
 		expect(requestedUrl).toBe(`${baseUrl}/models`);
-		expect(model).toMatchObject({
-			api: "google-generative-ai",
-			baseUrl,
-			reasoning: true,
-			input: ["text", "image"],
-			contextWindow: 1_048_576,
-			maxTokens: 65_536,
-			thinking: {
-				mode: "google-level",
-				efforts: [Effort.Low, Effort.Medium, Effort.High],
-				requiresEffort: true,
-			},
-		});
-		expect(options.dropCachedModelIdsOnStaticMismatch).toContain(id);
+		for (const id of ids) {
+			expect(descriptor?.resolveApi?.(id, { tool_call: true })).toEqual({ api: "google-generative-ai", baseUrl });
+			const spec = specs?.find(model => model.id === id);
+			if (!spec) throw new Error(`Go did not discover ${id}`);
+			expect(buildModel(spec)).toMatchObject({
+				api: "google-generative-ai",
+				baseUrl,
+				reasoning: true,
+				input: ["text", "image"],
+				contextWindow: 1_048_576,
+				maxTokens: 65_536,
+				thinking: {
+					mode: "google-level",
+					efforts: [Effort.Low, Effort.Medium, Effort.High],
+					requiresEffort: true,
+				},
+			});
+			expect(options.dropCachedModelIdsOnStaticMismatch).toContain(id);
+		}
 	});
 
 	test("routes live Zen Argon to the native Google endpoint (#15977)", async () => {

@@ -355,7 +355,7 @@ describe("ModelRegistry", () => {
 				Date.now(),
 				[cachedChat],
 				true,
-				fingerprintStaticModels(getBundledModels("deepinfra"), true),
+				fingerprintStaticModels(getBundledModels("deepinfra"), { authoritative: true }),
 				path.join(tempDir, "models.db"),
 			);
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
@@ -1815,6 +1815,7 @@ describe("ModelRegistry", () => {
 		let thinkingCustom: ModelRegistry;
 		let thinkingOverride: ModelRegistry;
 		let deepseekOverride: ModelRegistry;
+		let prefixBoundOverride: ModelRegistry;
 		beforeAll(() => {
 			thinkingCustom = readonlyRegistry({
 				providers: {
@@ -1849,6 +1850,21 @@ describe("ModelRegistry", () => {
 					},
 				},
 			});
+			prefixBoundOverride = readonlyRegistry({
+				providers: {
+					anthropic: {
+						modelOverrides: {
+							"claude-opus-5-5": {
+								thinking: {
+									mode: "anthropic-adaptive",
+									supportsDisplay: true,
+									efforts: [Effort.Low, Effort.High],
+								},
+							},
+						},
+					},
+				},
+			});
 		});
 
 		test("custom models preserve explicit thinking verbatim", () => {
@@ -1876,6 +1892,18 @@ describe("ModelRegistry", () => {
 				mode: "effort",
 				efforts: [Effort.Max, Effort.High, Effort.Low],
 				defaultLevel: Effort.High,
+			});
+		});
+
+		test("model overrides keep catalog prefix binding the override does not set", () => {
+			const model = getModelsForProvider(prefixBoundOverride, "anthropic").find(m => m.id === "claude-opus-5-5");
+			// Without prefixBinding, pruning/compaction stop preserving the bound prefix
+			// and prefix-mismatch 400s are not retried (#17276).
+			expect(model?.thinking).toEqual({
+				mode: "anthropic-adaptive",
+				supportsDisplay: true,
+				efforts: [Effort.Low, Effort.High],
+				prefixBinding: true,
 			});
 		});
 	});
@@ -3293,9 +3321,9 @@ describe("ModelRegistry", () => {
 				{ providers: {} },
 				{
 					seedCache: dbPath => {
-						for (const [providerId, dynamicModelsAuthoritative] of [
-							["zai", false],
-							["anthropic", true],
+						for (const [providerId, policy] of [
+							["zai", { additive: true }],
+							["anthropic", { authoritative: true, additive: true }],
 						] as const) {
 							const bundledModels = getBundledModels(providerId);
 							writeModelCache(
@@ -3303,7 +3331,7 @@ describe("ModelRegistry", () => {
 								Date.now(),
 								bundledModels,
 								false,
-								fingerprintStaticModels(bundledModels, dynamicModelsAuthoritative),
+								fingerprintStaticModels(bundledModels, policy),
 								dbPath,
 							);
 						}
@@ -3390,7 +3418,7 @@ describe("ModelRegistry", () => {
 								}),
 							],
 							true,
-							fingerprintStaticModels(getBundledModels("ollama-cloud")),
+							fingerprintStaticModels(getBundledModels("ollama-cloud"), { additive: true }),
 							dbPath,
 						);
 					},
@@ -3473,7 +3501,7 @@ describe("ModelRegistry", () => {
 				{
 					seedCache: dbPath =>
 						writeModelCache(
-							"cached-compact-proxy:openai-models-list-context-v4",
+							"cached-compact-proxy:openai-models-list-context-v6",
 							Date.now(),
 							[
 								buildModel({
@@ -3520,11 +3548,11 @@ describe("ModelRegistry", () => {
 					maxTokens: 16_384,
 				});
 			litellmStaleNamespaceCache = readonlyRegistry(litellmProxyConfig(), {
-				// Rows cached before mode filtering must be orphaned instead of
-				// serving stale non-conversational entries.
+				// Rows from rich-v6 may contain only the first /v2/model/info page;
+				// decisions-mode routing was already corrected in that namespace.
 				seedCache: dbPath =>
 					writeModelCache(
-						"litellm-proxy:litellm-rich-v4",
+						"litellm-proxy:litellm-rich-v6",
 						Date.now(),
 						[litellmCachedModel("MiniMax-M3 (3x usage)")],
 						true,
@@ -3535,7 +3563,7 @@ describe("ModelRegistry", () => {
 			litellmCurrentNamespaceCache = readonlyRegistry(litellmProxyConfig(), {
 				seedCache: dbPath =>
 					writeModelCache(
-						"litellm-proxy:litellm-rich-v5",
+						"litellm-proxy:litellm-rich-v7",
 						Date.now(),
 						[litellmCachedModel("MiniMax-M3")],
 						true,
@@ -3615,12 +3643,12 @@ describe("ModelRegistry", () => {
 			});
 		});
 
-		test("ignores litellm discovery rows cached under the retired rich-v4 namespace", () => {
+		test("ignores litellm discovery rows cached under the retired rich-v6 namespace", () => {
 			expect(litellmStaleNamespaceCache.find("litellm-proxy", "minimax/minimax-m3")).toBeUndefined();
 			expect(getModelsForProvider(litellmStaleNamespaceCache, "litellm-proxy")).toHaveLength(0);
 		});
 
-		test("restores LiteLLM backend session policy from rich-v5 alias rows without changing their API", () => {
+		test("restores LiteLLM backend session policy from rich-v7 alias rows without changing their API", () => {
 			const model = litellmCurrentNamespaceCache.find("litellm-proxy", "minimax/minimax-m3");
 			expect(model?.name).toBe("MiniMax-M3");
 			expect(model?.provider).toBe("litellm-proxy");
@@ -3658,7 +3686,7 @@ describe("ModelRegistry", () => {
 				Date.now(),
 				[served],
 				true,
-				fingerprintStaticModels(getBundledModels("google-antigravity"), true),
+				fingerprintStaticModels(getBundledModels("google-antigravity"), { authoritative: true }),
 				path.join(tempDir, "models.db"),
 			);
 			const restarted = new ModelRegistry(authStorage, modelsJsonPath);

@@ -1,4 +1,4 @@
-import { clearSubmittedText, restoreDetachedDraft } from "./helpers/draft";
+import { clearSubmittedText, runWithDetachedDraft } from "./helpers/draft";
 import * as path from "node:path";
 import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -30,7 +30,7 @@ import { CLI_THINKING_LEVELS, getConfiguredThinkingLevelMetadata } from "@oh-my-
 import { noThinkingMessage, resolveThinkingArgument } from "./helpers/effort";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSecurityCommand } from "./helpers/security";
-import type { ParsedSlashCommand, SlashCommandSpec, TuiSlashCommandRuntime } from "./types";
+import type { SlashCommandSpec } from "./types";
 
 import {
 	cfgComputerBackgroundFallback,
@@ -40,7 +40,7 @@ import {
 	cfgComputerMaxWidth,
 	cfgRatchetEnabled,
 } from "../tools/settings";
-import { cfgSkillful } from "../session/settings";
+import { cfgPrewalkFrom, cfgPrewalkInto, cfgSkillful } from "../session/settings";
 import { formatSlowModeResetClock } from "../session/anthropic-slow-mode";
 import { cfgExtendedContext } from "../session/context-settings";
 import { cfgGoalEnabled } from "../goals/settings";
@@ -70,49 +70,6 @@ function resolveSessionModelSelector(
 		settings,
 		preferences: getModelMatchPreferences(settings),
 	});
-}
-
-async function runWithDetachedModeDraft(
-	command: ParsedSlashCommand,
-	runtime: TuiSlashCommandRuntime,
-	run: () => Promise<boolean>,
-): Promise<void> {
-	const { editor } = runtime.ctx;
-	if (!runtime.draftDetached) editor.clearDraft();
-	try {
-		const submitted = await run();
-		const hasAttachments = (runtime.input?.images?.length ?? 0) > 0 || (runtime.input?.imageLinks?.length ?? 0) > 0;
-		if (!submitted && hasAttachments) {
-			if (runtime.draftDetached) {
-				// Newer typing may already sit in the editor: merge the submission
-				// back beside it so each draft's image markers keep their images.
-				restoreDetachedDraft(editor, command.text, runtime.input?.images, runtime.input?.imageLinks);
-				return;
-			}
-			editor.pendingImages = [...(runtime.input?.images ?? []), ...editor.pendingImages];
-			editor.pendingImageLinks = [
-				...(runtime.input?.imageLinks ?? runtime.input?.images?.map(() => undefined) ?? []),
-				...editor.pendingImageLinks,
-			];
-			editor.imageLinks = editor.pendingImageLinks.length > 0 ? editor.pendingImageLinks : undefined;
-		}
-	} catch (error) {
-		if (runtime.draftDetached) {
-			// The caller already took this draft out of the editor before
-			// dispatch (Ctrl+Enter's `handleFollowUp`, or `onSubmit` for these
-			// mode commands); it owns restoring the submission and reporting
-			// the error so a submission that failed after newer text was typed
-			// merges with it once, instead of being silently dropped here.
-			throw error;
-		}
-		if (!editor.getText() && editor.pendingImages.length === 0) {
-			editor.setText(command.text);
-			editor.pendingImages = runtime.input?.images ? [...runtime.input.images] : [];
-			editor.pendingImageLinks = runtime.input?.imageLinks ? [...runtime.input.imageLinks] : [];
-			editor.imageLinks = editor.pendingImageLinks.length > 0 ? editor.pendingImageLinks : undefined;
-		}
-		runtime.ctx.showError(error instanceof Error ? error.message : String(error));
-	}
 }
 
 /** `/fast status` label for the active model: "ultra" for the Ultrafast tier, "on" for priority, else "off". */
@@ -340,7 +297,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			return "Plan: off";
 		},
 		handleTui: async (command, runtime) => {
-			await runWithDetachedModeDraft(command, runtime, () =>
+			await runWithDetachedDraft(command, runtime, () =>
 				runtime.ctx.handlePlanModeCommand(command.args || undefined, runtime.input),
 			);
 		},
@@ -369,7 +326,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			return "Vibe: off";
 		},
 		handleTui: async (command, runtime) => {
-			await runWithDetachedModeDraft(command, runtime, () =>
+			await runWithDetachedDraft(command, runtime, () =>
 				runtime.ctx.handleVibeModeCommand(command.args || undefined, runtime.input),
 			);
 		},
@@ -395,7 +352,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			return state ? `Goal: ${state.goal.status} (${shortDetail(state.goal.objective)})` : "Goal: off";
 		},
 		handleTui: async (command, runtime) => {
-			await runWithDetachedModeDraft(command, runtime, () =>
+			await runWithDetachedDraft(command, runtime, () =>
 				runtime.ctx.handleGoalModeCommand(command.args || undefined, runtime.input),
 			);
 		},
@@ -407,7 +364,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		inlineHint: "[rough objective]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
-			await runWithDetachedModeDraft(command, runtime, () =>
+			await runWithDetachedDraft(command, runtime, () =>
 				runtime.ctx.handleGuidedGoalCommand(command.args || undefined, runtime.input),
 			);
 		},
@@ -771,15 +728,24 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		description: "Arm, restart, or cancel a one-shot model handoff",
 		allowArgs: true,
 		acpDescription: "Arm, restart, or cancel prewalk",
-		acpInputHint: "[restart|off]",
+		acpInputHint: "[into] | restart [from] [into] | off",
 		subcommands: [
-			{ name: "restart", description: "Return to @default and re-arm the handoff to @smol" },
+			{
+				name: "restart",
+				description: "Return to the planning model and re-arm the handoff (default prewalk.from → prewalk.into)",
+				usage: "[from] [into]",
+			},
 			{ name: "off", description: "Cancel this session's handoff without changing the active model" },
 		],
 		handle: async (command, runtime) => {
-			const arg = command.args.trim().toLowerCase();
-			if (arg && arg !== "restart" && arg !== "off") return usage("Usage: /prewalk [restart|off]", runtime);
-			if (arg === "off") {
+			const [verb, ...rest] = command.args.trim().split(/\s+/).filter(Boolean);
+			const keyword = verb?.toLowerCase();
+			const restart = keyword === "restart";
+			const args = restart || keyword === "off" ? rest : verb ? [verb, ...rest] : [];
+			if (args.length > (restart ? 2 : keyword === "off" ? 0 : 1)) {
+				return usage("Usage: /prewalk [into] | restart [from] [into] | off", runtime);
+			}
+			if (keyword === "off") {
 				const armed = runtime.session.getPrewalkState() !== undefined;
 				runtime.session.disarmPrewalk();
 				await runtime.output(
@@ -789,17 +755,20 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				);
 				return commandConsumed();
 			}
-			const target = resolveSessionModelSelector("@smol", runtime.session, runtime.settings);
+			const into = (restart ? args[1] : args[0]) ?? cfgPrewalkInto.get(runtime.settings);
+			const target = resolveSessionModelSelector(into, runtime.session, runtime.settings);
 			if (target.error || !target.model) {
-				return usage(target.error ?? 'Model "@smol" not found', runtime);
+				return usage(target.error ?? `Model "${into}" not found`, runtime);
 			}
 			if (!runtime.session.modelRegistry.hasConfiguredAuth(target.model)) {
 				return usage(`No API key for ${target.model.provider}/${target.model.id}`, runtime);
 			}
-			if (arg === "restart") {
-				const source = resolveSessionModelSelector("@default", runtime.session, runtime.settings);
+			const targetLabel = `${into} (${target.model.provider}/${target.model.id})`;
+			if (restart) {
+				const from = args[0] ?? cfgPrewalkFrom.get(runtime.settings);
+				const source = resolveSessionModelSelector(from, runtime.session, runtime.settings);
 				if (source.error || !source.model) {
-					return usage(source.error ?? 'Model "@default" not found', runtime);
+					return usage(source.error ?? `Model "${from}" not found`, runtime);
 				}
 				if (!runtime.session.modelRegistry.hasConfiguredAuth(source.model)) {
 					return usage(`No API key for ${source.model.provider}/${source.model.id}`, runtime);
@@ -811,11 +780,11 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					target.thinkingLevel,
 				);
 				if (result === "rejected") return commandConsumed();
-				const restartSource = `${source.model.provider}/${source.model.id}`;
+				const sourceLabel = `${from} (${source.model.provider}/${source.model.id})`;
 				await runtime.output(
 					result === "armed"
-						? `Prewalk restarted: using @default (${restartSource}) for planning, then switching to @smol (${target.model.provider}/${target.model.id}) at the next edit/write (todo-gated).`
-						: `Prewalk reset: using @default (${restartSource}); @smol resolves to the same model and thinking level, so no handoff was armed.`,
+						? `Prewalk restarted: using ${sourceLabel} for planning, then switching to ${targetLabel} at the next edit/write (todo-gated).`
+						: `Prewalk reset: using ${sourceLabel}; ${into} resolves to the same model and thinking level, so no handoff was armed.`,
 				);
 				return commandConsumed();
 			}

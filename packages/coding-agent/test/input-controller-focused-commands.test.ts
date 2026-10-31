@@ -17,7 +17,6 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import manualContinuePrompt from "../src/prompts/system/manual-continue.md" with { type: "text" };
 import { beginSettingsTest, restoreSettingsTestState } from "./helpers/settings-test-state";
 
 function createFocusedContext() {
@@ -42,6 +41,7 @@ function createFocusedContext() {
 		clearDraft: vi.fn(),
 	};
 	const prompt = vi.fn(async () => {});
+	const resume = vi.fn(async () => {});
 	const ctx = {
 		editor,
 		ui: { requestRender: vi.fn() },
@@ -53,7 +53,7 @@ function createFocusedContext() {
 			customCommands: [],
 			promptTemplates: [],
 		},
-		viewSession: { isStreaming: false, queuedMessageCount: 0, prompt, abort: vi.fn(async () => {}) },
+		viewSession: { isStreaming: false, queuedMessageCount: 0, prompt, resume, abort: vi.fn(async () => {}) },
 		focusedAgentId: "Worker",
 		skillCommands: new Map(),
 		fileSlashCommands: new Set<string>(),
@@ -70,7 +70,7 @@ function createFocusedContext() {
 		showResetUsageSelector: vi.fn(async () => {}),
 		withLocalSubmission: vi.fn(async <T>(_text: string, fn: () => Promise<T>) => fn()),
 	};
-	return { ctx: ctx as unknown as InteractiveModeContext, raw: ctx, editor, prompt };
+	return { ctx: ctx as unknown as InteractiveModeContext, raw: ctx, editor, prompt, resume };
 }
 
 async function submit(text: string) {
@@ -87,28 +87,25 @@ describe("focused subagent view slash commands", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("continues the focused session with a synthetic directive for . and c", async () => {
+	it("resumes the focused session for . and c", async () => {
 		for (const shortcut of [".", "c"]) {
-			const { prompt, editor, raw } = await submit(shortcut);
-			expect(prompt).toHaveBeenCalledWith(manualContinuePrompt, {
-				synthetic: true,
-				userInitiated: true,
-			});
+			const { prompt, resume, editor, raw } = await submit(shortcut);
+			expect(resume).toHaveBeenCalledTimes(1);
+			expect(prompt).not.toHaveBeenCalled();
 			expect(editor.clearDraft).toHaveBeenCalledWith(shortcut);
 			expect(raw.withLocalSubmission).not.toHaveBeenCalled();
 		}
 	});
 
 	it("restores a focused continue shortcut when the target is busy", async () => {
-		const { ctx, raw, editor, prompt } = createFocusedContext();
-		prompt.mockRejectedValueOnce(new AgentBusyError());
+		const { ctx, raw, editor, resume } = createFocusedContext();
+		resume.mockRejectedValueOnce(new AgentBusyError());
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 		await ctx.editor.onSubmit?.(".");
 
 		expect(editor.getText()).toBe(".");
 		expect(raw.showError).toHaveBeenCalledTimes(1);
-		expect(prompt).toHaveBeenCalledWith(manualContinuePrompt, { synthetic: true, userInitiated: true });
 	});
 
 	it("runs /usage from the focused view", async () => {
@@ -137,8 +134,50 @@ describe("focused subagent view slash commands", () => {
 
 	it("runs /btw with its question from the focused view instead of steering the agent", async () => {
 		const { raw, prompt } = await submit("/btw what is it doing?");
-		expect(raw.handleBtwCommand).toHaveBeenCalledWith("what is it doing?");
+		expect(raw.handleBtwCommand).toHaveBeenCalledWith("what is it doing?", undefined);
 		expect(prompt).not.toHaveBeenCalled();
+	});
+
+	it("answers a side file command from the focused view and releases its draft", async () => {
+		const focused = createFocusedContext();
+		Object.assign(focused.raw, { fileSlashCommands: new Set(["sitrep"]) });
+		Object.assign(focused.raw.session, {
+			slashCommands: [
+				{
+					name: "sitrep",
+					description: "",
+					content: "Report. Focus: $ARGUMENTS",
+					side: true,
+					source: "via OMP User",
+				},
+			],
+		});
+		const controller = new InputController(focused.ctx);
+		controller.setupEditorSubmitHandler();
+		focused.editor.setText("/sitrep the migration");
+		await focused.ctx.editor.onSubmit?.("/sitrep the migration");
+		expect(focused.raw.handleBtwCommand).toHaveBeenCalledWith(
+			"Report. Focus: the migration",
+			undefined,
+			"/sitrep the migration",
+		);
+		expect(focused.editor.clearDraft).toHaveBeenCalledTimes(1);
+		expect(focused.prompt).not.toHaveBeenCalled();
+	});
+
+	it("keeps a builtin gated to the main session when a side file command shares its name", async () => {
+		const focused = createFocusedContext();
+		Object.assign(focused.raw, { fileSlashCommands: new Set(["clear"]) });
+		Object.assign(focused.raw.session, {
+			slashCommands: [{ name: "clear", description: "", content: "Side", side: true, source: "via OMP User" }],
+		});
+		const controller = new InputController(focused.ctx);
+		controller.setupEditorSubmitHandler();
+		focused.editor.setText("/clear");
+		await focused.ctx.editor.onSubmit?.("/clear");
+		expect(focused.raw.handleBtwCommand).not.toHaveBeenCalled();
+		expect(focused.raw.showStatus).toHaveBeenCalledTimes(1);
+		expect(focused.editor.getText()).toBe("/clear");
 	});
 
 	it("sets the focused agent's thinking level with /effort, leaving the main session alone", async () => {

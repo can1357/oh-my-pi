@@ -82,7 +82,7 @@ impl builtins::Command for TypeCommand {
 						},
 						ResolvedType::File { path, .. } => {
 							if self.show_path_only || self.force_path_search {
-								writeln!(context.stdout(), "{}", path.to_string_lossy())?;
+								writeln!(context.stdout(), "{}", path.display())?;
 							} else {
 								writeln!(context.stdout(), "file")?;
 							}
@@ -108,20 +108,20 @@ impl builtins::Command for TypeCommand {
 								// Do nothing. When we're displaying all locations, then
 								// we don't show hashed paths.
 							} else if self.show_path_only || self.force_path_search {
-								writeln!(context.stdout(), "{}", path.to_string_lossy())?;
+								writeln!(context.stdout(), "{}", path.display())?;
 							} else if hashed {
 								writeln!(
 									context.stdout(),
 									"{name} is hashed ({path})",
 									name = name,
-									path = path.to_string_lossy()
+									path = path.display()
 								)?;
 							} else {
 								writeln!(
 									context.stdout(),
 									"{name} is {path}",
 									name = name,
-									path = path.to_string_lossy()
+									path = path.display()
 								)?;
 							}
 						},

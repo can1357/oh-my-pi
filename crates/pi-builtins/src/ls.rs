@@ -11,6 +11,10 @@ use std::{
 	ops::RangeInclusive,
 	path::{Path, PathBuf},
 	rc::Rc,
+	sync::{
+		Arc,
+		atomic::{AtomicBool, Ordering},
+	},
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -817,10 +821,9 @@ pub(crate) fn validate_ls_colors(ls_colors: &str) -> Result<(), LsColorsParseErr
 				}
 			},
 			_ => {
-				if idx + 1 >= bytes.len() {
+				let Some(&label) = bytes[idx..].first_chunk::<2>() else {
 					return Err(LsColorsParseError::InvalidSyntax);
-				}
-				let label = [bytes[idx], bytes[idx + 1]];
+				};
 				idx += 2;
 				if idx >= bytes.len() || bytes[idx] != b'=' {
 					return Err(LsColorsParseError::InvalidSyntax);
@@ -2481,7 +2484,7 @@ use std::{
 	borrow::Cow,
 	cell::LazyCell,
 	ffi::{OsStr, OsString},
-	fmt::Write as FmtWrite,
+	fmt::{NumBuffer, Write as FmtWrite},
 	io::Write,
 	iter,
 	sync::LazyLock,
@@ -2674,7 +2677,7 @@ fn push_basic_escape(buf: &mut String, byte: u8) {
 		b'\x1b' => buf.push_str("\\e"),
 		b'"' => buf.push('"'),
 		b'\'' => buf.push('\''),
-		b if (0x20..=0x7e).contains(&b) => buf.push(b as char),
+		b @ 0x20..=0x7e => buf.push(b as char),
 		_ => {
 			let _ = write!(buf, "\\{byte:03o}");
 		},
@@ -3086,7 +3089,7 @@ fn display_date(
 	};
 
 	let Ok(timestamp) = jiff::Timestamp::try_from(time) else {
-		out.extend(system_time_to_sec(time).0.to_string().as_bytes());
+		out.extend(system_time_to_sec(time).0.format_into(&mut NumBuffer::new()).as_bytes());
 		return Ok(());
 	};
 	let zoned = Zoned::new(timestamp, config.time_zone.clone());
@@ -3929,6 +3932,7 @@ struct LsRuntime {
 	paths:  ShellPaths,
 	stderr: RefCell<OpenFile>,
 	status: Cell<i32>,
+	cancel: Arc<AtomicBool>,
 }
 
 impl LsRuntime {
@@ -3940,6 +3944,12 @@ impl LsRuntime {
 	/// The shell's filesystem, which every listed path goes through.
 	fn fs(&self) -> &BlockingFs {
 		self.paths.fs()
+	}
+
+	/// Whether the shell cancelled this `ls` (abort, `timeout`): a `-R` walk
+	/// of `/` would otherwise run to the end first.
+	fn is_cancelled(&self) -> bool {
+		self.cancel.load(Ordering::Relaxed)
 	}
 }
 
@@ -3969,6 +3979,7 @@ impl Utility for Ls {
 			paths: host.paths().clone(),
 			stderr: RefCell::new(host.stderr_clone()),
 			status: Cell::new(0),
+			cancel: host.cancel_flag(),
 		});
 		let config = match Config::from(&self.matches, host, Rc::clone(&runtime)) {
 			Ok(config) => config,
@@ -4777,8 +4788,7 @@ impl<'a> PathData<'a> {
 			PathDataDisplayName::Custom(
 				dir_entry
 					.as_ref()
-					.map(|entry| entry.file_name())
-					.unwrap_or_default()
+					.map_or_default(|entry| entry.file_name())
 					.into(),
 			)
 		};
@@ -5038,6 +5048,9 @@ pub fn list(locs: Vec<&Path>, config: &Config, out: StreamWriter) -> std::io::Re
 	state.out.flush()?;
 
 	for (pos, path_data) in dirs.iter().enumerate() {
+		if config.runtime.is_cancelled() {
+			break;
+		}
 		let needs_blank_line = pos != 0 || !files.is_empty();
 		// Do read_dir call here to match GNU semantics by printing
 		// read_dir errors before directory headings, names and totals
@@ -5075,6 +5088,9 @@ pub fn list(locs: Vec<&Path>, config: &Config, out: StreamWriter) -> std::io::Re
 
 		// Only runs if it must list recursively.
 		while let Some(dir_data) = state.stack.pop() {
+			if config.runtime.is_cancelled() {
+				break;
+			}
 			let resolved_dir = config.runtime.paths.resolve(&dir_data.0);
 			let read_dir = match fs.read_dir(&resolved_dir) {
 				Err(err) => {
@@ -5097,7 +5113,7 @@ pub fn list(locs: Vec<&Path>, config: &Config, out: StreamWriter) -> std::io::Re
 			// combinatorial explosion; we decrease it logarithmically here.
 			let (cap, len) = (state.stack.capacity(), state.stack.len());
 			if cap > (len + 4) * 2 {
-				state.stack.shrink_to(len + (cap - len) / 2);
+				state.stack.shrink_to(len.midpoint(cap));
 			}
 		}
 

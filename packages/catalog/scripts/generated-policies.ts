@@ -82,7 +82,9 @@ export function rebakeModelThinking(model: ModelSpec<Api>): void {
 	if (
 		model.compat &&
 		"thinkingFormat" in model.compat &&
-		model.compat.thinkingFormat === "chat-template" &&
+		// These wire formats carry provider-authored controls that cannot be
+		// recovered from model identity (including Kimi's live effort ladder).
+		(model.compat.thinkingFormat === "chat-template" || model.compat.thinkingFormat === "kimi") &&
 		model.thinking
 	)
 		return;

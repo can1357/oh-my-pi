@@ -7,8 +7,8 @@ import { ZipPackage } from "@oh-my-pi/pi-utils/ar";
 const EXTENSIONS = [".xlsx"];
 const MIMETYPES = ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"];
 
-/** A text value: bare string/number, or a `{ "#text" }` node when the element carries attributes. */
-type XmlText = string | number | { "#text"?: string };
+/** A text value: bare string, or a `{ "#text" }` node when the element carries attributes. */
+type XmlText = string | { "#text"?: string };
 
 interface RichTextRun {
 	t?: XmlText;
@@ -19,7 +19,7 @@ interface StringItem {
 }
 interface Cell {
 	"@_t"?: string;
-	v?: string | number;
+	v?: string;
 	is?: StringItem;
 }
 interface Row {
@@ -57,10 +57,13 @@ export class XlsxConverter implements Converter {
 
 	async convert(input: Buffer, _streamInfo: StreamInfo): Promise<ConversionResult> {
 		const zip = await ZipPackage.open(input);
+		// Cell text must survive verbatim: numeric coercion would round long digit
+		// strings and strip leading zeros from shared/inline strings.
 		const parser = new XMLParser({
 			ignoreAttributes: false,
 			attributeNamePrefix: "@_",
 			textNodeName: "#text",
+			parseTagValue: false,
 			processEntities: { maxTotalExpansions: 1_000_000 },
 		});
 		// Parse shared strings
@@ -143,10 +146,10 @@ export class XlsxConverter implements Converter {
 		}
 		// Boolean
 		if (cell["@_t"] === "b") {
-			return cell.v === 1 || cell.v === "1" ? "TRUE" : "FALSE";
+			return cell.v === "1" ? "TRUE" : "FALSE";
 		}
 		// Number or formula result
-		if (cell.v != null) return String(cell.v);
+		if (cell.v != null) return cell.v;
 		return "";
 	}
 
@@ -168,7 +171,7 @@ export class XlsxConverter implements Converter {
 function textValue(t: XmlText | undefined): string {
 	if (t == null) return "";
 	if (typeof t === "object") return t["#text"] || "";
-	return String(t);
+	return t;
 }
 
 function toArray<T>(val: T | T[] | undefined): T[] {

@@ -342,7 +342,8 @@ export function aggregateMetrics<TRecord extends AgentRecordLike>(args: {
 /** Parent-before-child projection preserving initial subtree rank and prepending new siblings. */
 export function projectAgentTree<TRecord extends AgentRecordLike>(
 	refs: readonly TRecord[],
-	rosterRank: ReadonlyMap<TRecord, number> | undefined,
+	/** Rows spawned while the hub is open; such a child never lifts its parent's group. */
+	spawnedWhileOpen?: (ref: TRecord) => boolean,
 ): AgentTreeProjection<TRecord> {
 	const ids = new Set<string>();
 	const operationalIndex = new Map<string, number>();
@@ -374,13 +375,13 @@ export function projectAgentTree<TRecord extends AgentRecordLike>(
 			const current = stack.pop();
 			if (!current) continue;
 			if (current.expanded) {
-				let order = operationalIndex.get(current.ref.id) ?? Number.MAX_SAFE_INTEGER;
-				const parentRank = rosterRank?.get(current.ref);
+				const own = operationalIndex.get(current.ref.id) ?? Number.MAX_SAFE_INTEGER;
+				let order = own;
 				for (const child of children.get(current.ref.id) ?? []) {
-					const childRank = rosterRank?.get(child);
 					// A child spawned later cannot move an existing parent's group.
-					if (parentRank !== undefined && childRank !== undefined && childRank < 0 && childRank < parentRank)
+					if (spawnedWhileOpen?.(child) && (operationalIndex.get(child.id) ?? Number.MAX_SAFE_INTEGER) < own) {
 						continue;
+					}
 					order = Math.min(order, subtreeOrder.get(child.id) ?? Number.MAX_SAFE_INTEGER);
 				}
 				subtreeOrder.set(current.ref.id, order);
