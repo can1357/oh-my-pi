@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed WSL startup hanging indefinitely when the Windows interop pipe wedged; the startup probes now give up after 500 ms and fall back to the Linux paths ([#8402](https://github.com/can1357/oh-my-pi/issues/8402), [#15337](https://github.com/can1357/oh-my-pi/pull/15337) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.14.1] - 2026-10-31
 
