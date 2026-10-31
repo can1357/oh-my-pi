@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `/debug` now includes an opt-in prompt-cache view and includes bounded derived cache diagnostics plus dropped-record metadata in report bundles when `PI_PROMPT_CACHE_DEBUG=1` ([#11938](https://github.com/can1357/oh-my-pi/pull/11938) by [@pedropaulovc](https://github.com/pedropaulovc)).
+
 ## [18.14.1] - 2026-10-31
 
 ### Added
