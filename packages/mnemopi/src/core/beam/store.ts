@@ -8,6 +8,7 @@ import { EpisodicGraph } from "../episodic-graph";
 import { countExtractedFactCategories, extractFactCategoriesSafe } from "../extraction";
 import { getMnemopiRuntimeOptions, withMnemopiRuntimeOptions } from "../runtime-options";
 import { storeExtractedFactCategories } from "./consolidate";
+import { sourceMemoryScope } from "./fact-scope";
 import { type EmbedItem, scheduleEmbedding, vecAvailable, vecInsert } from "./helpers";
 import type {
 	BeamEvent,
@@ -184,7 +185,11 @@ const MEMORIA_SOURCE_TABLES = [
  * `EpisodicGraph` has initialised, so they are guarded. Callers own the
  * transaction and the base `working_memory` delete.
  */
-function purgeWorkingMemoryArtifacts(db: BeamMemoryState["db"], ids: readonly string[]): void {
+function purgeWorkingMemoryArtifacts(
+	db: BeamMemoryState["db"],
+	ids: readonly string[],
+	options: { preserveAnnotations?: boolean } = {},
+): void {
 	if (ids.length === 0) return;
 	const placeholders = ids.map(() => "?").join(", ");
 
@@ -199,7 +204,12 @@ function purgeWorkingMemoryArtifacts(db: BeamMemoryState["db"], ids: readonly st
 		db.run(`DELETE FROM facts WHERE source_msg_id IN (${placeholders})`, [...ids]);
 	}
 
-	db.run(`DELETE FROM annotations WHERE memory_id IN (${placeholders})`, [...ids]);
+	// Content edits reuse this helper but must keep the source's annotations:
+	// they describe the memory itself (occurred_on, has_source, caller-added
+	// metadata) and survive a rewording, so the edit path opts out here.
+	if (!options.preserveAnnotations) {
+		db.run(`DELETE FROM annotations WHERE memory_id IN (${placeholders})`, [...ids]);
+	}
 	db.run(`DELETE FROM memory_embeddings WHERE memory_id IN (${placeholders})`, [...ids]);
 	for (const table of MEMORIA_SOURCE_TABLES) {
 		db.run(`DELETE FROM ${table} WHERE source_memory_id IN (${placeholders})`, [...ids]);
@@ -292,10 +302,21 @@ function proactiveLinkIfEnabled(
 			sessionId: beam.sessionId,
 			linkExisting: true,
 			extractEntities,
+			scope: sourceMemoryScope(beam, memoryId),
 		});
 	} catch {
 		// Proactive graph enrichment must never block durable memory storage.
 	}
+}
+
+/**
+ * Fresh per-insert generation token for a working-memory row. Unlike
+ * created_at (one-second precision, preserved by force imports) and the
+ * rowid (reused after deletes), this value changes on every insert, so it
+ * distinguishes a delete + re-create even within the same second.
+ */
+function freshGeneration(): string {
+	return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
 /**
@@ -304,12 +325,45 @@ function proactiveLinkIfEnabled(
  * are swallowed so they can never disrupt the synchronous `remember` that
  * scheduled them.
  */
-async function runFactExtraction(beam: BeamMemoryState, memoryId: string, content: string): Promise<void> {
+async function runFactExtraction(
+	beam: BeamMemoryState,
+	memoryId: string,
+	content: string,
+	scheduled: { rowid: number; content: string; generation: string | null } | null,
+	scheduledScope: string,
+): Promise<void> {
 	try {
 		const extracted = await extractFactCategoriesSafe(content);
 		withLoopPhase("mnemopi.extract", () => {
 			if (countExtractedFactCategories(extracted) === 0) return;
-			storeExtractedFactCategories(beam, extracted, 0, memoryId);
+			// Discard stale results: the task is bound to the source row's
+			// incarnation at schedule time — the per-insert generation token,
+			// the rowid, the stored content, and the inherited scope. Every
+			// insert path writes a fresh generation value, so a delete +
+			// re-create with identical content and scope (even within the same
+			// second, where the rowid and the one-second-precision created_at
+			// can both be reused, and even a force import that preserves
+			// exported timestamps) fails the check; an edit or re-scope changes
+			// content/scope directly. In-place refreshes (duplicate remember,
+			// edit with identical content) keep the generation, so they do not
+			// cancel a pending extraction. A null snapshot (source already
+			// trimmed before the task captured its version) is rejected
+			// outright. Facts otherwise inherit the scheduled scope, never
+			// wider than their source.
+			const source = beam.db
+				.prepare("SELECT rowid, content, generation, scope FROM working_memory WHERE id = ?")
+				.get(memoryId) as { rowid: number; content: string; generation: string | null; scope: string | null } | null;
+			if (
+				source == null ||
+				scheduled == null ||
+				source.rowid !== scheduled.rowid ||
+				source.content !== scheduled.content ||
+				source.generation !== scheduled.generation ||
+				(source.scope ?? "session") !== scheduledScope
+			) {
+				return;
+			}
+			storeExtractedFactCategories(beam, extracted, 0, memoryId, 0.7, scheduledScope);
 			invalidateCaches(beam);
 		});
 	} catch {
@@ -329,7 +383,20 @@ async function runFactExtraction(beam: BeamMemoryState, memoryId: string, conten
 function scheduleFactExtraction(beam: BeamMemoryState, memoryId: string, content: string): void {
 	if (content.trim() === "") return;
 	const runtimeOptions = getMnemopiRuntimeOptions();
-	const task = withMnemopiRuntimeOptions(runtimeOptions, () => runFactExtraction(beam, memoryId, content));
+	// Bind the task to the source row's incarnation at schedule time: the
+	// per-insert generation token, the rowid, the stored content, and the
+	// inherited scope are captured now, and runFactExtraction discards the
+	// result if the source row no longer matches the whole token in the
+	// meantime (covers edits, re-scopes, and delete + re-create with
+	// identical content and scope — even within the same second, where the
+	// rowid and the one-second-precision created_at can both be reused).
+	const scheduled = beam.db
+		.prepare("SELECT rowid, content, generation FROM working_memory WHERE id = ?")
+		.get(memoryId) as { rowid: number; content: string; generation: string | null } | null;
+	const scheduledScope = sourceMemoryScope(beam, memoryId);
+	const task = withMnemopiRuntimeOptions(runtimeOptions, () =>
+		runFactExtraction(beam, memoryId, content, scheduled, scheduledScope),
+	);
 	const pending = beam.pendingExtractions;
 	if (pending !== undefined) {
 		pending.add(task);
@@ -469,7 +536,9 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 				timestamp,
 				source,
 				validUntil,
-				scope,
+				// An omitted scope keeps the stored value (the variable above was
+				// defaulted to 'session', which would silently narrow a global source).
+				options.scope ?? null,
 				authorId,
 				authorType,
 				channelId,
@@ -490,6 +559,13 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 			metadata: metadata ?? undefined,
 		});
 		if (embedText !== content) scheduleEmbedding(beam, [{ memoryId: existingId, content: embedText }]);
+		// A duplicate write that explicitly re-scopes the row invalidates any
+		// pending extraction (its bound scope no longer matches); schedule the
+		// replacement under the updated scope. An omitted scope keeps the
+		// stored value, so the pending task remains valid.
+		if (options.extract === true && options.scope !== undefined) {
+			scheduleFactExtraction(beam, existingId, options.extractText ?? options.extract_text ?? content);
+		}
 		invalidateCaches(beam);
 		return existingId;
 	}
@@ -499,8 +575,8 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 		`
 			INSERT INTO working_memory
 			(id, content, embed_text, source, timestamp, session_id, importance, metadata_json, valid_until, scope,
-			 author_id, author_type, channel_id, veracity, memory_type, trust_tier)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 author_id, author_type, channel_id, veracity, memory_type, trust_tier, generation)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`,
 		[
 			memoryId,
@@ -519,6 +595,7 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 			veracity,
 			memoryType,
 			trustTier,
+			freshGeneration(),
 		],
 	);
 	addTemporalAnnotations(beam, memoryId, timestamp, source);
@@ -562,8 +639,8 @@ export function rememberBatch(
 		using statement = beam.db.prepare(`
 			INSERT INTO working_memory
 			(id, content, embed_text, source, timestamp, session_id, importance, metadata_json,
-			 author_id, author_type, channel_id, memory_type, veracity, trust_tier, scope)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 author_id, author_type, channel_id, memory_type, veracity, trust_tier, scope, generation)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`);
 		for (const item of items) {
 			const itemTimestamp = item.timestamp ?? timestamp;
@@ -593,6 +670,7 @@ export function rememberBatch(
 				itemVeracity,
 				trustTier,
 				item.scope ?? defaultScope,
+				freshGeneration(),
 			);
 			addTemporalAnnotations(beam, memoryId, itemTimestamp, source);
 			emitEvent(beam, "MEMORY_ADDED", {
@@ -727,6 +805,14 @@ export function updateWorking(
 		params.push(importance);
 	}
 	if (assignments.length === 0) return false;
+	// Capture the old content BEFORE the UPDATE: an actual content change is
+	// what invalidates the source's derived facts, and the post-update value
+	// would compare equal to the new one.
+	const oldContent = content !== null
+		? (beam.db
+				.prepare("SELECT content FROM working_memory WHERE id = ? AND session_id = ?")
+				.get(memoryId, beam.sessionId) as { content: string } | null)
+		: null;
 	params.push(memoryId, beam.sessionId);
 	const result = beam.db.run(
 		`UPDATE working_memory SET ${assignments.join(", ")} WHERE id = ? AND session_id = ?`,
@@ -734,7 +820,27 @@ export function updateWorking(
 	);
 	if (result.changes > 0) {
 		invalidateCaches(beam);
-		if (content !== null) scheduleEmbedding(beam, [{ memoryId, content }]);
+		if (content !== null) {
+			// An edited source no longer supports what was extracted from its old
+			// content: retire the source's fact and graph derivatives so they
+			// cannot outlive the statement that produced them (the next
+			// extraction pass re-derives facts from the new content). Skipped
+			// when the content is unchanged so no-op updates keep derivatives.
+			if (oldContent == null || oldContent.content !== content) {
+				// Derivative rows carry an untyped source id, so when the other
+				// tier holds a row with the same id (imported/restored banks)
+				// we cannot tell which tier produced them — purging would
+				// destroy the untouched episode's derivatives. Skip in that
+				// collision; otherwise cascade the full artifact set (facts,
+				// memoria projections, gists, graph edges) via the shared helper.
+				const episodeCollision =
+					beam.db.prepare("SELECT 1 FROM episodic_memory WHERE id = ?").get(memoryId) !== null;
+				if (!episodeCollision) {
+					purgeWorkingMemoryArtifacts(beam.db, [memoryId], { preserveAnnotations: true });
+				}
+			}
+			scheduleEmbedding(beam, [{ memoryId, content }]);
+		}
 	}
 	return result.changes > 0;
 }
@@ -778,6 +884,28 @@ function getFact(beam: BeamMemoryState, memoryId: string): Row | null {
 	const fact = statement.get(memoryId) as Row | null | undefined;
 	if (fact == null) return null;
 	if (fact.session_id !== beam.sessionId && fact.scope !== "global") return null;
+	// Mirror factRecall's source rules (factVisibilityWhere in recall.ts): a
+	// fact retires with its source when the source is superseded or expired,
+	// and stops resolving when the source row is visible to fewer sessions
+	// than the fact — otherwise get-by-id is a back door around factRecall.
+	const sourceId = typeof fact.source_msg_id === "string" ? fact.source_msg_id : "";
+	if (sourceId.length > 0) {
+		type SourceRow = { superseded_by: string | null; valid_until: string | null; session_id: string | null; scope: string | null };
+		// bun:sqlite get() returns null (not undefined) for a missing row.
+		// The tiers' primary keys are independent, so the same id can exist in
+		// both; probe both conservatively (mirrors factVisibilityWhere) — a
+		// visible row in one tier must not mask a retired or private row in
+		// the other.
+		const wmSource = beam.db.prepare("SELECT superseded_by, valid_until, session_id, scope FROM working_memory WHERE id = ?").get(sourceId) as SourceRow | null;
+		const epSource = beam.db.prepare("SELECT superseded_by, valid_until, session_id, scope FROM episodic_memory WHERE id = ?").get(sourceId) as SourceRow | null;
+		const now = toUtcIso(new Date());
+		for (const source of [wmSource, epSource]) {
+			if (source == null) continue;
+			if (source.superseded_by != null) return null;
+			if (source.valid_until != null && source.valid_until <= now) return null;
+			if (source.session_id !== beam.sessionId && source.scope !== "global") return null;
+		}
+	}
 	const subject = typeof fact.subject === "string" ? fact.subject : "";
 	const predicate = typeof fact.predicate === "string" ? fact.predicate : "";
 	const object = typeof fact.object === "string" ? fact.object : "";
@@ -937,8 +1065,8 @@ export function importFromDict(beam: BeamMemoryState, data: Record<string, unkno
 				(id, content, source, timestamp, session_id, importance, metadata_json,
 				 valid_until, superseded_by, scope, recall_count, last_recalled, created_at,
 				 veracity, consolidated_at, memory_type, embed_text, author_id, author_type, channel_id,
-				 trust_tier, event_date, event_date_precision, temporal_tags)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				 trust_tier, event_date, event_date_precision, temporal_tags, generation)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			`,
 				[
 					id,
@@ -965,6 +1093,7 @@ export function importFromDict(beam: BeamMemoryState, data: Record<string, unkno
 					sqlBinding(item.event_date, null),
 					sqlBinding(item.event_date_precision, "unknown"),
 					sqlBinding(item.temporal_tags, "[]"),
+					freshGeneration(),
 				],
 			);
 		}
@@ -990,6 +1119,17 @@ export function importFromDict(beam: BeamMemoryState, data: Record<string, unkno
 					}
 				}
 				db.run("DELETE FROM episodic_memory WHERE id = ?", [id]);
+				// A force overwrite replaces the episode's content entirely:
+				// cascade the old row's fact / graph / annotation artifacts so
+				// the replacement cannot keep derivatives of the overwritten
+				// text (mirrors the working-memory branch above). Derivative
+				// rows are keyed only by the untyped id, so when a working row
+				// with the same id exists the purge cannot tell the tiers apart
+				// — skip it, as the edit path does.
+				const workingCollision = workingExists.get(id) !== null;
+				if (!workingCollision) {
+					purgeWorkingMemoryArtifacts(db, [id]);
+				}
 				stats.episodic_memory.overwritten++;
 			} else {
 				stats.episodic_memory.inserted++;

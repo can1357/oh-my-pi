@@ -7,6 +7,7 @@ import { REGEX_EXTRACTION_MAX_INPUT_CHARS } from "../entities";
 import { EpisodicGraph } from "../episodic-graph";
 import { type ExtractedFactCategories, heuristicExtractFacts } from "../extraction";
 import { clampVeracity, VERACITY_WEIGHTS, type Veracity, VeracityConsolidator } from "../veracity-consolidation";
+import { sourceMemoryScope } from "./fact-scope";
 import { scheduleEmbedding } from "./helpers";
 import type { BeamMemoryState, BeamStats, JsonValue, MemoriaRetrieveResult, Metadata, SleepResult } from "./types";
 
@@ -273,6 +274,7 @@ function insertFactRows(
 	context: string,
 	importance: number,
 	sourceMemoryId: string | null,
+	scope = "global",
 ): void {
 	const timestamp = isoNow();
 	beam.db.run(
@@ -283,11 +285,16 @@ function insertFactRows(
 	);
 
 	const factId = stableMemoryId(`${sourceSession(beam)}\0${factType}\0${key}\0${value}`, sourceMemoryId ?? "");
+	// Extracted durable facts inherit the scope of the memory they were
+	// extracted from (default 'global'), so bank-level extraction stays
+	// recallable across sessions while session-scoped consolidations keep
+	// their facts private. Pre-existing fact rows keep the column's 'session'
+	// default (no retroactive widening).
 	beam.db.run(
 		`INSERT OR IGNORE INTO facts
-		 (fact_id, session_id, subject, predicate, object, timestamp, source_msg_id, confidence)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		[factId, sourceSession(beam), key, factType, value, timestamp, sourceMemoryId, importance],
+		 (fact_id, session_id, subject, predicate, object, timestamp, source_msg_id, confidence, scope)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		[factId, sourceSession(beam), key, factType, value, timestamp, sourceMemoryId, importance, scope],
 	);
 }
 
@@ -468,7 +475,12 @@ function timelineDate(description: string): string | null {
  * — consolidation is the explicit "settle and compress" step where the graph
  * is supposed to gain edges.
  */
-function ingestIntoEpisodicGraph(beam: BeamMemoryState, memoryId: string, summary: string): void {
+function ingestIntoEpisodicGraph(
+	beam: BeamMemoryState,
+	memoryId: string,
+	summary: string,
+	scope = "global",
+): void {
 	try {
 		const graph =
 			beam.episodicGraph instanceof EpisodicGraph
@@ -478,6 +490,7 @@ function ingestIntoEpisodicGraph(beam: BeamMemoryState, memoryId: string, summar
 			sessionId: sourceSession(beam),
 			linkExisting: true,
 			extractEntities: true,
+			scope,
 		});
 	} catch {
 		// Graph enrichment is best-effort and never blocks consolidation.
@@ -521,8 +534,11 @@ export function consolidateToEpisodic(
 			timestamp,
 		],
 	);
-	extractAndStoreFacts(beam, summary, 0, memoryId);
-	ingestIntoEpisodicGraph(beam, memoryId, summary);
+	// Facts inherit the episode's scope: a session-scoped summary keeps its
+	// extracted facts session-scoped (no silent cross-session widening), in
+	// both the beam extractor and the graph ingestion below.
+	extractAndStoreFacts(beam, summary, 0, memoryId, scope);
+	ingestIntoEpisodicGraph(beam, memoryId, summary, scope);
 	scheduleEmbedding(beam, [{ memoryId, content: summary }]);
 	emitEvent(beam, "MEMORY_CONSOLIDATED", memoryId, summary, source, importance, {
 		summary_of: [...sourceWmIds],
@@ -590,6 +606,7 @@ export function detectLanguage(_beam: BeamMemoryState, text: string): string {
 }
 type StoreFactStringOptions = {
 	routeHeuristicCategories?: boolean;
+	scope?: string;
 };
 
 export function storeFactStrings(
@@ -601,9 +618,13 @@ export function storeFactStrings(
 	options: StoreFactStringOptions = {},
 ): number {
 	const routeHeuristicCategories = options.routeHeuristicCategories ?? true;
+	// Direct calls without an explicit scope inherit the source memory's scope,
+	// the same rule as extractAndStoreFacts — a private source must not produce
+	// global facts.
+	const scope = options.scope ?? (sourceMemoryId !== null ? sourceMemoryScope(beam, sourceMemoryId) : "global");
 	let stored = 0;
 	for (const fact of facts) {
-		insertFactRows(beam, messageIdx, "entity", "fact", fact, fact, importance, sourceMemoryId);
+		insertFactRows(beam, messageIdx, "entity", "fact", fact, fact, importance, sourceMemoryId, scope);
 		stored++;
 		if (!routeHeuristicCategories) continue;
 		const pref = /^The user (prefers|dislikes) (.+)$/i.exec(fact);
@@ -625,16 +646,23 @@ export function storeExtractedFactCategories(
 	messageIdx = 0,
 	sourceMemoryId: string | null = null,
 	importance = 0.7,
+	scope?: string,
 ): number {
-	let stored = storeFactStrings(beam, extracted.facts, messageIdx, sourceMemoryId, importance);
+	// Same inheritance rule as extractAndStoreFacts: callers that omit the scope
+	// get the source memory's scope instead of an unconditional 'global'.
+	const effectiveScope = scope ?? (sourceMemoryId !== null ? sourceMemoryScope(beam, sourceMemoryId) : "global");
+	let stored = storeFactStrings(beam, extracted.facts, messageIdx, sourceMemoryId, importance, { scope: effectiveScope });
 	stored += storeFactStrings(beam, extracted.instructions, messageIdx, sourceMemoryId, importance, {
 		routeHeuristicCategories: false,
+		scope: effectiveScope,
 	});
 	stored += storeFactStrings(beam, extracted.preferences, messageIdx, sourceMemoryId, importance, {
 		routeHeuristicCategories: false,
+		scope: effectiveScope,
 	});
 	stored += storeFactStrings(beam, extracted.timelines, messageIdx, sourceMemoryId, importance, {
 		routeHeuristicCategories: false,
+		scope: effectiveScope,
 	});
 	for (const instruction of extracted.instructions) {
 		insertInstruction(beam, messageIdx, instruction, instruction, sourceMemoryId);
@@ -655,6 +683,7 @@ export function extractAndStoreFacts(
 	content: string,
 	messageIdx = 0,
 	sourceMemoryId: string | null = null,
+	scope?: string,
 ): FactCounts {
 	const counts: FactCounts = {
 		metric: 0,
@@ -668,6 +697,10 @@ export function extractAndStoreFacts(
 	};
 	const text = String(content ?? "");
 	if (text.length > PATTERN_FACT_EXTRACTION_MAX_INPUT_CHARS) return counts;
+	// Facts inherit the scope of the memory they were extracted from and are
+	// never more visible than that source; only scopeless calls without a
+	// source default to 'global'.
+	const effectiveScope = scope ?? (sourceMemoryId !== null ? sourceMemoryScope(beam, sourceMemoryId) : "global");
 	for (const match of text.matchAll(
 		/(\d+(?:[.,]\d+)?)\s*(ms|sec|seconds?|minutes?|hours?|days?|weeks?|months?|%|KB|MB|GB|TB|rows?|columns?|roles?|features?|bugs?|commits?|cards?|users?|items?|tests?|APIs?|endpoints?|sprints?|tickets?)\b/gi,
 	)) {
@@ -712,6 +745,7 @@ export function extractAndStoreFacts(
 			contextSnippet(text, match.index ?? 0),
 			0.65,
 			sourceMemoryId,
+			effectiveScope,
 		);
 		counts.metric++;
 		if (counts.metric >= 10) break;
@@ -720,7 +754,7 @@ export function extractAndStoreFacts(
 	for (const match of text.matchAll(/\b(\d{4}-\d{2}-\d{2})\b/g)) {
 		const date = match[1] ?? "";
 		const ctx = contextSnippet(text, match.index ?? 0, 100);
-		insertFactRows(beam, messageIdx, "date", "iso_date", date, ctx, 0.5, sourceMemoryId);
+		insertFactRows(beam, messageIdx, "date", "iso_date", date, ctx, 0.5, sourceMemoryId, effectiveScope);
 		counts.date++;
 		if (/\b(release|deadline|meeting|launch|ship|shipped|due|start|started|finish|finished)\b/i.test(ctx)) {
 			insertTimeline(beam, messageIdx, date, ctx, sourceMemoryId);
@@ -740,11 +774,12 @@ export function extractAndStoreFacts(
 			contextSnippet(text, match.index ?? 0),
 			0.6,
 			sourceMemoryId,
+			effectiveScope,
 		);
 		counts.version++;
 	}
 
-	counts.entity += storeFactStrings(beam, heuristicExtractFacts(text), messageIdx, sourceMemoryId);
+	counts.entity += storeFactStrings(beam, heuristicExtractFacts(text), messageIdx, sourceMemoryId, 0.7, { scope: effectiveScope });
 
 	for (const match of text.matchAll(
 		/\b([A-Z][A-Za-z0-9_-]{2,})\s+(?:is|uses|runs|owns|depends on)\s+([^.!?;]{2,80})/g,

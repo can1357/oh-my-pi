@@ -440,14 +440,25 @@ function factVisibilityWhere(beam: BeamMemoryState, tableAlias: string): { where
 	const scope = factsHaveScopeColumn(beam)
 		? `(${prefix}session_id = ? OR ${prefix}scope = 'global')`
 		: `${prefix}session_id = ?`;
-	// A fact is a derivative of the working_memory row it was extracted from: once that row is
-	// explicitly superseded (`memory_edit invalidate`) or has expired, the fact must stop
-	// surfacing — otherwise an explicit invalidation is silently defeated at the fact layer.
-	// Correlated EXISTS probes the source's primary key (same shape as the fts_working /
-	// fts_episodes visibility predicates). Facts whose source row no longer exists stay
-	// visible: nothing contradicts them.
+	// A fact is a derivative of the memory row it was extracted from — a working_memory
+	// entry or the episode a consolidation produced: once that source is explicitly
+	// superseded (`memory_edit invalidate`) or has expired, the fact must stop surfacing,
+	// otherwise an explicit invalidation is silently defeated at the fact layer.
+	// Correlated EXISTS probes the source's primary key in both tiers (same shape as the
+	// fts_working / fts_episodes visibility predicates). Facts whose source row no longer
+	// exists in either tier stay visible: nothing contradicts them.
 	const sourceSuperseded = `NOT EXISTS (SELECT 1 FROM working_memory w WHERE w.id = ${prefix}source_msg_id AND (w.superseded_by IS NOT NULL OR (w.valid_until IS NOT NULL AND w.valid_until <= ?)))`;
-	return { where: `${scope} AND ${sourceSuperseded}`, params: [beam.sessionId, nowIso()] };
+	const episodeSuperseded = `NOT EXISTS (SELECT 1 FROM episodic_memory e WHERE e.id = ${prefix}source_msg_id AND (e.superseded_by IS NOT NULL OR (e.valid_until IS NOT NULL AND e.valid_until <= ?)))`;
+	// A fact must never outshine its source: if the source row still exists but
+	// was narrowed from global to session scope after extraction, the fact must
+	// stop being visible cross-session (or the narrowing would be silently
+	// defeated at the fact layer). Sources that no longer exist stay visible.
+	// A NULL scope is treated as 'session', and a NULL owner matches no
+	// caller session — including an explicitly empty session id, which a
+	// COALESCE to '' would wrongly equate with the missing owner.
+	const sourceVisible = `NOT EXISTS (SELECT 1 FROM working_memory w WHERE w.id = ${prefix}source_msg_id AND NOT (COALESCE(w.scope, 'session') = 'global' OR (w.session_id IS NOT NULL AND w.session_id = ?)))`;
+	const episodeVisible = `NOT EXISTS (SELECT 1 FROM episodic_memory e WHERE e.id = ${prefix}source_msg_id AND NOT (COALESCE(e.scope, 'session') = 'global' OR (e.session_id IS NOT NULL AND e.session_id = ?)))`;
+	return { where: `${scope} AND ${sourceSuperseded} AND ${episodeSuperseded} AND ${sourceVisible} AND ${episodeVisible}`, params: [beam.sessionId, nowIso(), nowIso(), beam.sessionId, beam.sessionId] };
 }
 
 function buildWhere(

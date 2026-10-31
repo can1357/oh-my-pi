@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { closeQuietly, type DatabasePath, openDatabase, transaction } from "../db";
+import { ensureFactsFtsUpdateTrigger } from "./facts-fts";
 
 export interface Gist {
 	readonly id: string;
@@ -50,6 +51,7 @@ export interface IngestOptions {
 	readonly linkExisting?: boolean;
 	readonly minLinkScore?: number;
 	readonly extractEntities?: boolean;
+	readonly scope?: string;
 }
 
 export interface IngestResult {
@@ -303,6 +305,7 @@ export class EpisodicGraph {
 			CREATE TABLE IF NOT EXISTS facts (
 				fact_id TEXT PRIMARY KEY,
 				session_id TEXT DEFAULT 'default',
+				scope TEXT DEFAULT 'session',
 				subject TEXT NOT NULL,
 				predicate TEXT NOT NULL,
 				object TEXT NOT NULL,
@@ -312,6 +315,17 @@ export class EpisodicGraph {
 				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 			)
 		`);
+		// `facts` may predate the column on banks where this graph store created
+		// it before the beam schema shipped scope; add it idempotently.
+		const factColumns = this.db.query("PRAGMA table_info(facts)").all() as { name: string }[];
+		if (!factColumns.some(column => column.name === "scope")) {
+			this.db.run("ALTER TABLE facts ADD COLUMN scope TEXT DEFAULT 'session'");
+		}
+		// Banks opened directly through this store (without BeamMemory/initBeam)
+		// may have an fts_facts index with only insert/delete triggers; install
+		// the shared update trigger so in-place re-stores keep the index fresh
+		// there too. initBeam uses the same helper on the normal path.
+		ensureFactsFtsUpdateTrigger(this.db);
 		this.db.run("CREATE INDEX IF NOT EXISTS idx_facts_subject ON facts(subject)");
 		this.db.run("CREATE INDEX IF NOT EXISTS idx_facts_predicate ON facts(predicate)");
 		this.db.run("CREATE INDEX IF NOT EXISTS idx_facts_object ON facts(object)");
@@ -402,12 +416,32 @@ export class EpisodicGraph {
 		const row = this.db.query("SELECT * FROM gists WHERE id = ?").get(id) as GistRow | null;
 		return row === null ? null : rowToGist(row);
 	}
-	storeFact(fact: Fact, memoryId: string, sessionId = "default"): void {
+	storeFact(fact: Fact, memoryId: string, sessionId = "default", scope = "global"): void {
+		// Fresh facts are stored with the given scope (default 'global').
+		// Re-stored facts refresh their data but KEEP their existing scope —
+		// replacing the row with a forced scope would retroactively widen or
+		// narrow pre-existing rows. Every non-global row (session, channel,
+		// custom) also keeps its original session_id: fact ids are
+		// content-derived, so the same content stored from another session
+		// must not transfer ownership (and visibility) of a private fact.
 		this.db.run(
-			`INSERT OR REPLACE INTO facts
-				(fact_id, session_id, subject, predicate, object, timestamp, source_msg_id, confidence)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			[fact.id, sessionId, fact.subject, fact.predicate, fact.object, fact.timestamp, memoryId, fact.confidence],
+			`INSERT INTO facts
+				(fact_id, session_id, subject, predicate, object, timestamp, source_msg_id, confidence, scope)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+				ON CONFLICT(fact_id) DO UPDATE SET
+					session_id = CASE
+						WHEN facts.scope = 'global' THEN excluded.session_id
+						ELSE facts.session_id
+					END,
+					-- A cross-session re-store of a non-global fact must not touch the
+					-- row at all: only the owner (or a global row) may refresh content.
+					subject = CASE WHEN facts.scope = 'global' OR facts.session_id = excluded.session_id THEN excluded.subject ELSE facts.subject END,
+					predicate = CASE WHEN facts.scope = 'global' OR facts.session_id = excluded.session_id THEN excluded.predicate ELSE facts.predicate END,
+					object = CASE WHEN facts.scope = 'global' OR facts.session_id = excluded.session_id THEN excluded.object ELSE facts.object END,
+					timestamp = CASE WHEN facts.scope = 'global' OR facts.session_id = excluded.session_id THEN excluded.timestamp ELSE facts.timestamp END,
+					source_msg_id = CASE WHEN facts.scope = 'global' OR facts.session_id = excluded.session_id THEN excluded.source_msg_id ELSE facts.source_msg_id END,
+					confidence = CASE WHEN facts.scope = 'global' OR facts.session_id = excluded.session_id THEN excluded.confidence ELSE facts.confidence END`,
+			[fact.id, sessionId, fact.subject, fact.predicate, fact.object, fact.timestamp, memoryId, fact.confidence, scope],
 		);
 	}
 	getFact(id: string): Fact | null {
@@ -521,6 +555,7 @@ export class EpisodicGraph {
 		const linkExisting = options.linkExisting ?? true;
 		const minLinkScore = options.minLinkScore ?? DEFAULT_LINK_THRESHOLD;
 		const extractEntities = options.extractEntities ?? true;
+		const scope = options.scope ?? "global";
 		const gist = this.extractGist(content, memoryId);
 		const facts = extractEntities ? this.extractFacts(content, memoryId) : [];
 		// One transaction for every gist/fact/edge write: autocommitted, each
@@ -537,7 +572,7 @@ export class EpisodicGraph {
 			edges.push(gistEdge);
 
 			for (const fact of facts) {
-				this.storeFact(fact, memoryId, sessionId);
+				this.storeFact(fact, memoryId, sessionId, scope);
 				const edge = {
 					source: gist.id,
 					target: fact.id,
