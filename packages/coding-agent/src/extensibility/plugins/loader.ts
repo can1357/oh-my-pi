@@ -438,12 +438,14 @@ export function resolvePluginExtensionPaths(plugin: InstalledPlugin): string[] {
  *
  * The realpath is the identity: two names for one directory add one entry, the first. A
  * directory whose installed path is already on PATH is not added again; an inherited entry that
- * names its realpath does not count, since that is the entry that goes stale. Entries that are
- * not directories add nothing. Entries stay for the life of the process.
+ * names its realpath does not count, since that is the entry that goes stale, and it must not stay
+ * ahead: a shell keeps the path it found for a command it already ran. Entries that are not
+ * directories add nothing. The inherited PATH string is kept as it was, empty entries included.
+ * Entries stay for the life of the process.
  */
 export function prependPluginBinDirs(plugins: readonly InstalledPlugin[]): void {
-	const inherited = process.env.PATH ?? "";
-	const present = new Set(inherited.split(path.delimiter));
+	const inherited = process.env.PATH;
+	const present = new Set((inherited ?? "").split(path.delimiter));
 	const identities = new Set<string>();
 	const added: string[] = [];
 	for (const plugin of plugins) {
@@ -464,7 +466,7 @@ export function prependPluginBinDirs(plugins: readonly InstalledPlugin[]): void 
 		}
 	}
 	if (added.length === 0) return;
-	process.env.PATH = inherited ? [...added, inherited].join(path.delimiter) : added.join(path.delimiter);
+	process.env.PATH = [...added, ...(inherited === undefined ? [] : [inherited])].join(path.delimiter);
 }
 
 // =============================================================================

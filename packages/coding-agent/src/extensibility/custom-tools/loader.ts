@@ -16,7 +16,7 @@ import { type CustomTool, loadCapability } from "../../discovery";
 import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
 import type { HookUIContext } from "../../extensibility/hooks/types";
-import { getAllPluginToolPaths } from "../../extensibility/plugins/loader";
+import { getAllPluginToolPaths, getEnabledPlugins, prependPluginBinDirs } from "../../extensibility/plugins/loader";
 import { loadLegacyPiModule } from "../plugins/legacy-pi-compat";
 // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
 import * as PiCodingAgent from "../../index";
@@ -218,7 +218,8 @@ export class CustomToolLoader {
 }
 
 /**
- * Load all tools from configuration.
+ * Load all tools from configuration. Installed plugins' manifest `bin`
+ * directories go on PATH first, before any tool module evaluates.
  * @param pathsWithSources - Array of tool paths with optional source metadata
  * @param cwd - Current working directory for resolving relative paths
  * @param builtInToolNames - Names of built-in tools to check for conflicts
@@ -234,6 +235,7 @@ export async function loadCustomTools(
 		reject?(reason: string): Promise<AgentToolResult<unknown> | undefined>;
 	}) => void,
 ) {
+	prependPluginBinDirs(await getEnabledPlugins(cwd));
 	const loader = new CustomToolLoader(PiCodingAgent, cwd, builtInToolNames, pushPendingAction);
 	await loader.load(pathsWithSources);
 	return {
