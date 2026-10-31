@@ -440,14 +440,16 @@ function factVisibilityWhere(beam: BeamMemoryState, tableAlias: string): { where
 	const scope = factsHaveScopeColumn(beam)
 		? `(${prefix}session_id = ? OR ${prefix}scope = 'global')`
 		: `${prefix}session_id = ?`;
-	// A fact is a derivative of the working_memory row it was extracted from: once that row is
-	// explicitly superseded (`memory_edit invalidate`) or has expired, the fact must stop
-	// surfacing — otherwise an explicit invalidation is silently defeated at the fact layer.
-	// Correlated EXISTS probes the source's primary key (same shape as the fts_working /
-	// fts_episodes visibility predicates). Facts whose source row no longer exists stay
-	// visible: nothing contradicts them.
+	// A fact is a derivative of the memory row it was extracted from — a working_memory
+	// entry or the episode a consolidation produced: once that source is explicitly
+	// superseded (`memory_edit invalidate`) or has expired, the fact must stop surfacing,
+	// otherwise an explicit invalidation is silently defeated at the fact layer.
+	// Correlated EXISTS probes the source's primary key in both tiers (same shape as the
+	// fts_working / fts_episodes visibility predicates). Facts whose source row no longer
+	// exists in either tier stay visible: nothing contradicts them.
 	const sourceSuperseded = `NOT EXISTS (SELECT 1 FROM working_memory w WHERE w.id = ${prefix}source_msg_id AND (w.superseded_by IS NOT NULL OR (w.valid_until IS NOT NULL AND w.valid_until <= ?)))`;
-	return { where: `${scope} AND ${sourceSuperseded}`, params: [beam.sessionId, nowIso()] };
+	const episodeSuperseded = `NOT EXISTS (SELECT 1 FROM episodic_memory e WHERE e.id = ${prefix}source_msg_id AND (e.superseded_by IS NOT NULL OR (e.valid_until IS NOT NULL AND e.valid_until <= ?)))`;
+	return { where: `${scope} AND ${sourceSuperseded} AND ${episodeSuperseded}`, params: [beam.sessionId, nowIso(), nowIso()] };
 }
 
 function buildWhere(

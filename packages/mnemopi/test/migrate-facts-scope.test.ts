@@ -4,10 +4,10 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BeamMemory } from "@oh-my-pi/pi-mnemopi/core/beam";
-import { consolidateToEpisodic, storeExtractedFactCategories, storeFactStrings } from "@oh-my-pi/pi-mnemopi/core/beam/consolidate";
+import { consolidateToEpisodic, extractAndStoreFacts, storeExtractedFactCategories, storeFactStrings } from "@oh-my-pi/pi-mnemopi/core/beam/consolidate";
 import { factRecall } from "@oh-my-pi/pi-mnemopi/core/beam/recall";
 import { initBeam } from "@oh-my-pi/pi-mnemopi/core/beam/schema";
-import { sourceMemoryScope } from "@oh-my-pi/pi-mnemopi/core/beam/store";
+import { sourceMemoryScope } from "@oh-my-pi/pi-mnemopi/core/beam/fact-scope";
 import { EpisodicGraph } from "@oh-my-pi/pi-mnemopi/core/episodic-graph";
 import {
 	hasPendingFactsScopeMigration as hasPendingMigration,
@@ -343,8 +343,10 @@ describe("E7 facts scope, writer paths", () => {
 			beam.db.run(
 				"INSERT INTO working_memory (id, content, session_id, scope) VALUES ('wm-g', 'g content', 'session-a', 'global')",
 			);
+			beam.db.run("INSERT INTO episodic_memory (id, content, scope) VALUES ('ep-s', 'episode content', 'session')");
 			expect(sourceMemoryScope(beam, "wm-s")).toBe("session");
 			expect(sourceMemoryScope(beam, "wm-g")).toBe("global");
+			expect(sourceMemoryScope(beam, "ep-s")).toBe("session");
 			expect(sourceMemoryScope(beam, "wm-missing")).toBe("session");
 		} finally {
 			beam.close();
@@ -421,6 +423,58 @@ describe("E7 facts scope, writer paths", () => {
 			expect(fresh.n).toBe(1);
 		} finally {
 			beam.close();
+		}
+	});
+});
+describe("E7 facts scope, review round 2", () => {
+	it("public extractAndStoreFacts inherits the source memory's scope", () => {
+		const dbPath = tempDb();
+		const beam = new BeamMemory({ sessionId: "session-a", dbPath });
+		try {
+			beam.db.run(
+				"INSERT INTO working_memory (id, content, session_id, scope) VALUES ('wm-pub', 'c', 'session-a', 'session')",
+			);
+			extractAndStoreFacts(beam, "I use the quorum relay for tokens", 0, "wm-pub");
+			const rows = beam.db
+				.query("SELECT scope FROM facts WHERE source_msg_id = 'wm-pub'")
+				.all() as { scope: string }[];
+			expect(rows.length).toBeGreaterThan(0);
+			for (const row of rows) expect(row.scope).toBe("session");
+		} finally {
+			beam.close();
+		}
+	});
+
+	it("facts retire when their episodic source is invalidated", () => {
+		const dbPath = tempDb();
+		const beamA = new BeamMemory({ sessionId: "session-a", dbPath });
+		try {
+			const episodeId = consolidateToEpisodic(
+				beamA,
+				"Relay upgrade shipped on 2026-03-14",
+				["wm-1"],
+				"test",
+				0.6,
+				{ scope: "global" },
+			);
+			const beamB = new BeamMemory({ sessionId: "session-b", dbPath });
+			try {
+				const before = factRecall(beamB, "iso_date", 10);
+				expect(before.some(result => result.content.includes("2026-03-14"))).toBe(true);
+			} finally {
+				beamB.close();
+			}
+
+			beamA.db.run("UPDATE episodic_memory SET superseded_by = 'ep-x' WHERE id = ?", [episodeId]);
+			const beamC = new BeamMemory({ sessionId: "session-b", dbPath });
+			try {
+				const after = factRecall(beamC, "iso_date", 10);
+				expect(after.some(result => result.content.includes("2026-03-14"))).toBe(false);
+			} finally {
+				beamC.close();
+			}
+		} finally {
+			beamA.close();
 		}
 	});
 });

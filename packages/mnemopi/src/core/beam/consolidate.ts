@@ -7,6 +7,7 @@ import { REGEX_EXTRACTION_MAX_INPUT_CHARS } from "../entities";
 import { EpisodicGraph } from "../episodic-graph";
 import { type ExtractedFactCategories, heuristicExtractFacts } from "../extraction";
 import { clampVeracity, VERACITY_WEIGHTS, type Veracity, VeracityConsolidator } from "../veracity-consolidation";
+import { sourceMemoryScope } from "./fact-scope";
 import { scheduleEmbedding } from "./helpers";
 import type { BeamMemoryState, BeamStats, JsonValue, MemoriaRetrieveResult, Metadata, SleepResult } from "./types";
 
@@ -676,7 +677,7 @@ export function extractAndStoreFacts(
 	content: string,
 	messageIdx = 0,
 	sourceMemoryId: string | null = null,
-	scope = "global",
+	scope?: string,
 ): FactCounts {
 	const counts: FactCounts = {
 		metric: 0,
@@ -690,6 +691,10 @@ export function extractAndStoreFacts(
 	};
 	const text = String(content ?? "");
 	if (text.length > PATTERN_FACT_EXTRACTION_MAX_INPUT_CHARS) return counts;
+	// Facts inherit the scope of the memory they were extracted from and are
+	// never more visible than that source; only scopeless calls without a
+	// source default to 'global'.
+	const effectiveScope = scope ?? (sourceMemoryId !== null ? sourceMemoryScope(beam, sourceMemoryId) : "global");
 	for (const match of text.matchAll(
 		/(\d+(?:[.,]\d+)?)\s*(ms|sec|seconds?|minutes?|hours?|days?|weeks?|months?|%|KB|MB|GB|TB|rows?|columns?|roles?|features?|bugs?|commits?|cards?|users?|items?|tests?|APIs?|endpoints?|sprints?|tickets?)\b/gi,
 	)) {
@@ -734,7 +739,7 @@ export function extractAndStoreFacts(
 			contextSnippet(text, match.index ?? 0),
 			0.65,
 			sourceMemoryId,
-			scope,
+			effectiveScope,
 		);
 		counts.metric++;
 		if (counts.metric >= 10) break;
@@ -743,7 +748,7 @@ export function extractAndStoreFacts(
 	for (const match of text.matchAll(/\b(\d{4}-\d{2}-\d{2})\b/g)) {
 		const date = match[1] ?? "";
 		const ctx = contextSnippet(text, match.index ?? 0, 100);
-		insertFactRows(beam, messageIdx, "date", "iso_date", date, ctx, 0.5, sourceMemoryId, scope);
+		insertFactRows(beam, messageIdx, "date", "iso_date", date, ctx, 0.5, sourceMemoryId, effectiveScope);
 		counts.date++;
 		if (/\b(release|deadline|meeting|launch|ship|shipped|due|start|started|finish|finished)\b/i.test(ctx)) {
 			insertTimeline(beam, messageIdx, date, ctx, sourceMemoryId);
@@ -763,12 +768,12 @@ export function extractAndStoreFacts(
 			contextSnippet(text, match.index ?? 0),
 			0.6,
 			sourceMemoryId,
-			scope,
+			effectiveScope,
 		);
 		counts.version++;
 	}
 
-	counts.entity += storeFactStrings(beam, heuristicExtractFacts(text), messageIdx, sourceMemoryId, 0.7, { scope });
+	counts.entity += storeFactStrings(beam, heuristicExtractFacts(text), messageIdx, sourceMemoryId, 0.7, { scope: effectiveScope });
 
 	for (const match of text.matchAll(
 		/\b([A-Z][A-Za-z0-9_-]{2,})\s+(?:is|uses|runs|owns|depends on)\s+([^.!?;]{2,80})/g,

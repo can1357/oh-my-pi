@@ -8,6 +8,7 @@ import { EpisodicGraph } from "../episodic-graph";
 import { countExtractedFactCategories, extractFactCategoriesSafe } from "../extraction";
 import { getMnemopiRuntimeOptions, withMnemopiRuntimeOptions } from "../runtime-options";
 import { storeExtractedFactCategories } from "./consolidate";
+import { sourceMemoryScope } from "./fact-scope";
 import { type EmbedItem, scheduleEmbedding, vecAvailable, vecInsert } from "./helpers";
 import type {
 	BeamEvent,
@@ -319,20 +320,6 @@ async function runFactExtraction(beam: BeamMemoryState, memoryId: string, conten
 	} catch {
 		// Background fact extraction is best-effort and never surfaces to the caller.
 	}
-}
-
-/**
- * The scope that facts derived from a stored memory should inherit: facts are
- * never more visible than the memory they were extracted from. A missing
- * source row (forgotten before the async extraction ran) falls back to the
- * conservative 'session'.
- */
-export function sourceMemoryScope(beam: BeamMemoryState, memoryId: string): string {
-	const row = beam.db.query("SELECT scope FROM working_memory WHERE id = ?").get(memoryId) as
-		| { scope: string | null }
-		| null;
-	const scope = row?.scope;
-	return typeof scope === "string" && scope.length > 0 ? scope : "session";
 }
 
 /**
