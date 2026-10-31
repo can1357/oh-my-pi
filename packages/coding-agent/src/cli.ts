@@ -35,6 +35,7 @@ import {
 	DAEMON_BROKER_WORKER_ARG,
 	IDA_HOST_WORKER_ARG,
 	LSP_MUX_WORKER_ARG,
+	MNEMOPI_EMBED_SERVER_WORKER_ARG,
 	PARENT_WATCHDOG_WORKER_ARG,
 	STATS_ACTIVITY_WORKER_ARG,
 	TERMINAL_OUTPUT_WORKER_ARG,
@@ -51,9 +52,13 @@ if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
 	process.exit(1);
 }
 
-try {
-	process.title = APP_NAME;
-} catch {}
+// On Windows `process.title` is the shared console title, not a process name
+// (see `setProcessName`): every omp child would retitle the pane's tab.
+if (process.platform !== "win32") {
+	try {
+		process.title = APP_NAME;
+	} catch {}
+}
 
 // `Bun.build`-API compiled Windows executables report `import.meta.main ===
 // false`: the standalone loader keys the entry module with native backslashes
@@ -83,6 +88,7 @@ const PREPAINT_SAFE_FLAGS: Record<string, true> = {
 	"--no-extensions": true,
 	"--no-skills": true,
 	"--no-rules": true,
+	"--no-context-files": true,
 	"--no-tools": true,
 	"--no-lsp": true,
 	"--no-title": true,
@@ -269,6 +275,11 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === MNEMOPI_EMBED_WORKER_ARG) {
 		const { startMnemopiEmbedWorker } = await import("./mnemopi/embed-worker");
 		await runIpcSubprocessWorker(startMnemopiEmbedWorker);
+		return true;
+	}
+	if (arg === MNEMOPI_EMBED_SERVER_WORKER_ARG) {
+		const { startMnemopiEmbedServerFromEnvironment } = await import("./mnemopi/embed-server");
+		await startMnemopiEmbedServerFromEnvironment();
 		return true;
 	}
 	if (arg === STATS_ACTIVITY_WORKER_ARG) {

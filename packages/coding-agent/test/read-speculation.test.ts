@@ -356,9 +356,12 @@ describe("read speculation assessment", () => {
 		);
 		expect(history.get(existing.id)?.oursLines).toEqual(["old ours"]);
 
+		// The live block no longer matches #1, so the authoritative read retires
+		// that id and registers the changed block under a fresh one.
 		const result = await tool.execute("ordinary-conflict-read", args);
-		expect(result.content?.find(entry => entry.type === "text")?.text).toContain("──── #1");
-		expect(history.get(existing.id)?.oursLines).toEqual(["new ours"]);
+		expect(result.content?.find(entry => entry.type === "text")?.text).toContain("──── #2");
+		expect(history.get(existing.id)).toBeUndefined();
+		expect(history.get(2)?.oursLines).toEqual(["new ours"]);
 	});
 
 	it("tracks repeat reads only when speculative results commit", async () => {

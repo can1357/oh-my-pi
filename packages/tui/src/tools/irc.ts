@@ -21,6 +21,18 @@ export interface IrcMessage {
 	 * ping-pong forever.
 	 */
 	wakeRelay?: boolean;
+	/**
+	 * One leg of an `all` broadcast. Like relays, broadcasts never draw an
+	 * automatic wake-turn reply: every woken idle peer would otherwise answer
+	 * the broadcaster, mostly to say the message was not for it.
+	 */
+	broadcast?: boolean;
+	/**
+	 * Interim acknowledgement or progress on something the recipient asked
+	 * (`agent://<id>?progress`): it neither answers that request nor asks one,
+	 * so the recipient's `wait` keeps waiting for the actual reply.
+	 */
+	progress?: boolean;
 }
 
 /** Delivery outcome for one peer recipient. */

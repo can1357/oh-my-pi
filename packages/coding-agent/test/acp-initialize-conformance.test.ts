@@ -114,6 +114,7 @@ class FakeAgentSession {
 	}
 	setActiveToolsByName(): void {}
 	setClientBridge(): void {}
+	setMcpServerInstructionsSource(): void {}
 	getPlanModeState(): undefined {
 		return undefined;
 	}
@@ -256,5 +257,15 @@ describe("ACP initialize conformance", () => {
 				}),
 			}),
 		);
+	});
+
+	it("advertises the steering extension via top-level _meta", async () => {
+		const agent = await createAgent();
+		const response = await agent.initialize(buildInitializeRequest());
+		expectAcpStructure(arkInitializeResponse, response);
+		// Top-level `_meta` (sibling of `agentCapabilities`) is the
+		// claude-agent-acp / codex-acp advertisement that gates clients'
+		// `_session/steering` calls (agent-shell, spec proposal `session/inject`).
+		expect(response._meta).toEqual({ steering: { supported: true } });
 	});
 });

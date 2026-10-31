@@ -1,8 +1,8 @@
 import * as fs from "node:fs/promises";
-import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { IpcConnection, IpcServer } from "@oh-my-pi/pi-natives";
 import { TUI, type TuiPaint } from "@oh-my-pi/pi-tui";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal";
 import { streamSocketEndpoint } from "../../src/stream/paths";
@@ -19,8 +19,7 @@ afterEach(async () => {
 describe("StreamPublisher", () => {
 	it("publishes viewport deltas and ordered resets, then detaches when the streamer closes", async () => {
 		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-stream-publisher-"));
-		const endpoint = await streamSocketEndpoint(cwd, { create: true });
-		await fs.rm(endpoint, { force: true });
+		const endpoint = await streamSocketEndpoint(cwd);
 		const frames: StreamSessionFrame[] = [];
 		const frameWaiters: Array<{ count: number; resolve: () => void }> = [];
 		const waitForFrameCount = (count: number): Promise<void> => {
@@ -29,18 +28,11 @@ describe("StreamPublisher", () => {
 			frameWaiters.push({ count, resolve: waiter.resolve });
 			return waiter.promise;
 		};
-		let peer: net.Socket | undefined;
-		const server = net.createServer(socket => {
-			peer = socket;
-			let input = "";
-			socket.on("data", chunk => {
-				input += chunk.toString("utf8");
-				for (;;) {
-					const newline = input.indexOf("\n");
-					if (newline < 0) break;
-					const line = input.slice(0, newline);
-					input = input.slice(newline + 1);
-					if (!line) continue;
+		let peer: IpcConnection | undefined;
+		const server = await IpcServer.listen(endpoint, { framing: "lines" }, conn => {
+			peer = conn;
+			conn.start(
+				line => {
 					const frame = JSON.parse(line) as StreamSessionFrame;
 					frames.push(frame);
 					for (let index = frameWaiters.length - 1; index >= 0; index--) {
@@ -50,21 +42,15 @@ describe("StreamPublisher", () => {
 						waiter.resolve();
 					}
 					if (frame.t === "hello") {
-						socket.write(
-							`${JSON.stringify({ t: "welcome", proto: STREAM_LOCAL_PROTO, channel: "test", url: "test" })}\n`,
-						);
+						conn.send(JSON.stringify({ t: "welcome", proto: STREAM_LOCAL_PROTO, channel: "test", url: "test" }));
 					}
-				}
-			});
+				},
+				() => {},
+			);
 		});
-		const listening = Promise.withResolvers<void>();
-		server.listen(endpoint, () => listening.resolve());
-		await listening.promise;
 		cleanup.push(async () => {
 			peer?.destroy();
-			const closed = Promise.withResolvers<void>();
-			server.close(() => closed.resolve());
-			await closed.promise;
+			await server.close();
 			await fs.rm(cwd, { recursive: true, force: true });
 		});
 

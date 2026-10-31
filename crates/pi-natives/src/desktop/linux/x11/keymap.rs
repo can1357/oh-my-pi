@@ -217,16 +217,20 @@ impl Keymap {
 }
 
 /// Emits `steps` in order. When one fails, the keys this run still holds are
-/// released in reverse so no modifier is left chording later input.
+/// released in reverse so no modifier is left chording later input. Once the
+/// last press is out the input has gone out, so a cancel no longer stops the
+/// releases after it.
 pub(super) fn run_steps(
 	steps: &[KeyStep],
 	mut emit: impl FnMut(KeyStep) -> CoreResult<()>,
 ) -> CoreResult<()> {
+	let last_press = steps.iter().rposition(|step| step.press);
 	let mut held: Vec<u8> = Vec::new();
-	for &step in steps {
+	for (index, &step) in steps.iter().enumerate() {
+		let sent = last_press.is_none_or(|last| index > last);
 		// An emitter can fail after the press was queued (e.g. SYN_REPORT
 		// failed after EV_KEY). Include the attempted press in cleanup.
-		let result = control::check().and_then(|()| {
+		let result = (if sent { Ok(()) } else { control::check() }).and_then(|()| {
 			if step.press && !held.contains(&step.keycode) {
 				held.push(step.keycode);
 			}
@@ -583,5 +587,38 @@ mod tests {
 	#[test]
 	fn text_with_an_unmapped_glyph_is_refused_whole() {
 		assert!(keymap().plan_text("a€").is_err());
+	}
+
+	#[test]
+	fn a_cancel_once_the_last_press_is_out_still_releases_and_succeeds() {
+		let source = control::CancellationSource::default();
+		let token = source.token();
+		let mut emitted = Vec::new();
+		let result = control::with_token_for_test(&token, || {
+			run_steps(&[press(CTRL), press(A), release(A), release(CTRL)], |step| {
+				emitted.push(step);
+				if step == press(A) {
+					source.cancel();
+				}
+				Ok(())
+			})
+		});
+		assert!(result.is_ok());
+		assert_eq!(emitted, vec![press(CTRL), press(A), release(A), release(CTRL)]);
+		// A cancel before the last press still stops it.
+		let source = control::CancellationSource::default();
+		let token = source.token();
+		let mut emitted = Vec::new();
+		let result = control::with_token_for_test(&token, || {
+			run_steps(&[press(CTRL), press(A), release(A), release(CTRL)], |step| {
+				emitted.push(step);
+				if step == press(CTRL) {
+					source.cancel();
+				}
+				Ok(())
+			})
+		});
+		assert!(result.is_err());
+		assert_eq!(emitted, vec![press(CTRL), release(CTRL)]);
 	}
 }

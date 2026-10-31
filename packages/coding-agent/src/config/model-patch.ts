@@ -3,6 +3,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { isVertexExpressOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
+import { openrouterDecisionsBaseUrl } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { apiServesKind, modelKind, type ModelKind, runnerApiKind } from "@oh-my-pi/pi-catalog/types";
 import { isRecord } from "@oh-my-pi/pi-utils";
@@ -37,7 +38,8 @@ export interface ProviderOverride {
  * (docs/models.md): every model under the provider rides the auth-gateway,
  * so the gateway `baseUrl` follows the transport regardless of the model's
  * own API — a model must never end up pi-native on a catalog upstream host
- * (#2555).
+ * (#2555). An unscoped override names the OpenRouter `/api/v1` chat root, so
+ * Decisions models move to its `/api/alpha` sibling on the same host.
  */
 export function resolveProviderBaseUrl<TApi extends Api>(
 	modelApi: TApi,
@@ -47,6 +49,9 @@ export function resolveProviderBaseUrl<TApi extends Api>(
 	if (override?.baseUrl === undefined) return modelBaseUrl;
 	if (override.transport === "pi-native") return override.baseUrl;
 	if (override.baseUrlApis !== undefined && !override.baseUrlApis.includes(modelApi)) return modelBaseUrl;
+	if (override.baseUrlApis === undefined && modelApi === "openrouter-decisions") {
+		return openrouterDecisionsBaseUrl(override.baseUrl);
+	}
 	return override.baseUrl;
 }
 
@@ -90,7 +95,7 @@ export function mergeDiscoveredModel<TApi extends Api>(
 ): Model<TApi> {
 	if (existing) {
 		const supportsTools = model.supportsTools ?? existing.supportsTools;
-		return buildModel({
+		const merged = buildModel({
 			...toModelSpec(model),
 			baseUrl: resolveProviderBaseUrl(model.api, model.baseUrl ?? existing.baseUrl, providerOverride),
 			headers: undefined,
@@ -113,9 +118,10 @@ export function mergeDiscoveredModel<TApi extends Api>(
 			...(supportsTools !== undefined ? { supportsTools } : {}),
 			compat: mergeCompat(model.compatConfig, providerOverride?.compat),
 		} as ModelSpec<TApi>);
+		return Bun.deepEquals(merged, model) ? model : merged;
 	}
 	if (providerOverride) {
-		return buildModel({
+		const merged = buildModel({
 			...toModelSpec(model),
 			baseUrl: resolveProviderBaseUrl(model.api, model.baseUrl, providerOverride),
 			headers: undefined,
@@ -130,6 +136,7 @@ export function mergeDiscoveredModel<TApi extends Api>(
 			),
 			compat: mergeCompat(model.compatConfig, providerOverride.compat),
 		} as ModelSpec<TApi>);
+		return Bun.deepEquals(merged, model) ? model : merged;
 	}
 	return model;
 }
@@ -242,6 +249,7 @@ export interface ModelPatch {
 	thinking?: ThinkingConfig;
 	input?: ("text" | "image")[];
 	imageInputDecoder?: Model<Api>["imageInputDecoder"];
+	imageCountBudget?: number;
 	tokenizer?: Model<Api>["tokenizer"];
 	supportsTools?: boolean;
 	cost?: Partial<Model<Api>["cost"]>;
@@ -278,11 +286,16 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 		result.kind = patch.kind;
 		result.kindConfig = patch.kind;
 	}
-	if (patch.reasoning !== undefined) result.reasoning = patch.reasoning;
+	if (patch.reasoning !== undefined) {
+		result.reasoning = patch.reasoning;
+		// A configured capability replaces the catalog's unverified guess.
+		if (result.thinking?.unverified) delete result.thinking;
+	}
 	if (patch.thinking !== undefined) result.thinking = patch.thinking;
 	if (patch.input !== undefined) result.input = patch.input;
 	if (patch.tokenizer !== undefined) result.tokenizer = patch.tokenizer;
 	if (patch.imageInputDecoder !== undefined) result.imageInputDecoder = patch.imageInputDecoder;
+	if (patch.imageCountBudget !== undefined) result.imageCountBudget = patch.imageCountBudget;
 	if (patch.supportsTools !== undefined) result.supportsTools = patch.supportsTools;
 	if (patch.promptCache !== undefined) {
 		result.promptCache = patch.promptCache;
@@ -342,7 +355,10 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	if (patch.thinking !== undefined && built.thinking !== undefined) {
 		// Config-authored capability metadata owns the explicit surface; build
 		// first so non-reasoning and wire-disabled models still suppress it.
-		built.thinking = patch.thinking;
+		// Prefix binding is a lineage safety invariant, not surface: keep the
+		// rule-derived flag unless the patch sets it.
+		const { prefixBinding } = built.thinking;
+		built.thinking = prefixBinding ? { prefixBinding, ...patch.thinking } : patch.thinking;
 	}
 	// Capacity already includes registry policy and runtime metadata; rebuilding
 	// compat must not replace it with the catalog's baseline limits.

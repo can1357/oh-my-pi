@@ -261,3 +261,30 @@ export function $which(command: string, options?: WhichOptions): string | null {
 	}
 	return result;
 }
+
+/**
+ * Locate every match for `command` on PATH, in PATH order, uncached.
+ *
+ * Callers that probe candidates (e.g. the Python eval backend) use this so a broken
+ * first hit — a version-manager shim with no version selected, a Windows Store alias —
+ * does not hide a working binary further down PATH. On macOS the Xcode/CLT toolchain
+ * match is appended last, mirroring {@link $which}'s fallback.
+ *
+ * @param command - Binary name to resolve
+ * @param options - `PATH` (defaults to `process.env.PATH`) and `cwd` for relative entries
+ * @returns Distinct filesystem paths; empty when nothing matches
+ */
+export function $whichAll(command: string, options?: Bun.WhichOptions): string[] {
+	const searchPath = options?.PATH ?? process.env.PATH ?? "";
+	const matches: string[] = [];
+	for (const dir of searchPath.split(path.delimiter)) {
+		if (!dir) continue;
+		const match = Bun.which(command, { cwd: options?.cwd, PATH: dir });
+		if (match && !matches.includes(match)) matches.push(match);
+	}
+	if (os.platform() === "darwin" && isXcodeBin(command)) {
+		const toolchainMatch = getMacosToolPaths().get(command);
+		if (toolchainMatch && !matches.includes(toolchainMatch)) matches.push(toolchainMatch);
+	}
+	return matches;
+}

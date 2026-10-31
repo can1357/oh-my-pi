@@ -44,6 +44,24 @@ export type AgentSessionEvent =
 			/** True when compaction was skipped for a benign reason. */
 			skipped?: boolean;
 	  }
+	// One pair per manual compaction (RPC `compact`, `/compact`, extension
+	// `ctx.compact()`), emitted once the live turn is aborted; fallback passes to
+	// the next configured method stay inside the same pair.
+	| {
+			type: "manual_compaction_start";
+			/** The `/compact <mode>` subcommand, when one was given. */
+			mode?: string;
+	  }
+	| {
+			type: "manual_compaction_end";
+			/** Present when the compaction committed. */
+			result?: CompactionResult;
+			/** True when the compaction was cancelled (abort, or a `session_before_compact` hook). */
+			aborted: boolean;
+			/** True when there was nothing to compact; `errorMessage` says why. */
+			skipped?: boolean;
+			errorMessage?: string;
+	  }
 	| {
 			type: "auto_retry_start";
 			attempt: number;
@@ -83,9 +101,12 @@ export type AgentSessionEvent =
 	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState }
 	// Coalesced snapshot of the displayable steering/follow-up queue: emitted
 	// whenever it differs from the last `queue_update` (enqueue, dequeue on
-	// delivery, remove, clear/restore, or session switch), never on a no-op
-	// mutation. Mirrors `AgentSession.getQueuedMessages()`.
-	| { type: "queue_update"; steering: string[]; followUp: string[] };
+	// delivery, remove, clear/restore, live-steering adoption/withdrawal, or
+	// session switch), never on a no-op mutation. Mirrors
+	// `AgentSession.getQueuedMessages()`; `liveSteered` counts the leading
+	// `steering` entries already sent into the streaming response, which
+	// `remove_queued_message` cannot reach.
+	| { type: "queue_update"; steering: string[]; followUp: string[]; liveSteered: number };
 
 /** Listener function for agent session events. */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;

@@ -1,0 +1,120 @@
+%YAML 1.2
+# Vendored from asbjornenge/Docker.tmbundle@0f6b7bc8 Syntaxes/; MIT, copyright 2014 Asbjorn Enge.
+---
+# http://www.sublimetext.com/docs/3/syntax.html
+name: Dockerfile
+scope: source.dockerfile
+
+file_extensions:
+  - Dockerfile
+  - dockerfile
+
+hidden_file_extensions:
+  - .Dockerfile
+
+first_line_match: ^\s*(?i:(from(?!\s+\S+\s+import)|arg))\s+
+
+variables:
+  onbuild_directive: (?i:(onbuild)\s+)?
+  onbuild_commands_directive:
+    "{{onbuild_directive}}(?i:add|arg|env|expose|healthcheck|label|run|shell|stopsignal|user|volume|workdir)"
+  nononbuild_commands_directive: (?i:maintainer)
+  runtime_directive: "{{onbuild_directive}}(?i:cmd|entrypoint)"
+  from_directive: (?i:(from))\s+[^\s:@]+(?:[:@](\S+))?(?:\s+(?i:(as))\s+(\S+))?
+  copy_directive: ({{onbuild_directive}}(?i:copy))(?:\s+--from=(\S+))?
+
+contexts:
+  main:
+    - include: comments
+    - match: ^(?i:arg)\s
+      scope: keyword.control.dockerfile
+    - include: from
+
+  from:
+    - match: ^{{from_directive}}
+      captures:
+        1: keyword.control.dockerfile
+        2: entity.name.enum.tag-digest
+        3: keyword.control.dockerfile
+        4: variable.stage-name
+      push: body
+
+  body:
+    - include: comments
+    - include: directives
+    - include: invalid
+    - include: from
+
+  directives:
+    - match: ^\s*{{onbuild_commands_directive}}\s
+      captures:
+        0: keyword.control.dockerfile
+        1: keyword.other.special-method.dockerfile
+      push: args
+    - match: ^\s*{{nononbuild_commands_directive}}\s
+      scope: keyword.control.dockerfile
+      push: args
+    - match: ^\s*{{copy_directive}}\s
+      captures:
+        1: keyword.control.dockerfile
+        2: keyword.other.special-method.dockerfile
+        3: variable.stage-name
+      push: args
+    - match: ^\s*{{runtime_directive}}\s
+      captures:
+        0: keyword.operator.dockerfile
+        1: keyword.other.special-method.dockerfile
+      push: args
+
+  escaped-char:
+    - match: \\.
+      scope: constant.character.escaped.dockerfile
+
+  args:
+    - include: comments
+    - include: escaped-char
+    - match: ^\s*$
+    - match: \\\s+$
+    - match: \n
+      pop: true
+    - match: '"'
+      scope: punctuation.definition.string.begin.dockerfile
+      push: double_quote_string
+    - match: "'"
+      scope: punctuation.definition.string.begin.dockerfile
+      push: single_quote_string
+
+  double_quote_string:
+    - meta_scope: string.quoted.double.dockerfile
+    - include: escaped-char
+    - match: ^\s*$
+    - match: \\\s+$
+    - match: \n
+      set: invalid
+    - match: '"'
+      scope: punctuation.definition.string.end.dockerfile
+      pop: true
+
+  single_quote_string:
+    - meta_scope: string.quoted.single.dockerfile
+    - include: escaped-char
+    - match: ^\s*$
+    - match: \\\s+$
+    - match: \n
+      set: invalid
+    - match: "'"
+      scope: punctuation.definition.string.end.dockerfile
+      pop: true
+
+  comments:
+    - match: ^(\s*)((#).*$\n?)
+      comment: comment.line
+      captures:
+        1: punctuation.whitespace.comment.leading.dockerfile
+        2: comment.dockerfile
+        3: punctuation.definition.comment.dockerfile
+
+  invalid:
+    - match: ^[^A-Z\n](.*)$
+      scope: invalid
+      set: body

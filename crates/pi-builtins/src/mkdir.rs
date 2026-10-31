@@ -215,7 +215,7 @@ fn exec(dirs: ValuesRef<'_, OsString>, config: &Config, host: &mut Host) {
 
 /// Creates a directory at `path`, including parents when requested.
 fn mkdir(path: &Path, config: &Config, host: &mut Host) -> Result<(), MkdirError> {
-	if path.as_os_str().is_empty() {
+	if path.is_empty() {
 		return Err(MkdirError::Message(
 			"cannot create directory '': No such file or directory".into(),
 		));
@@ -278,8 +278,8 @@ fn acl_default_perm_bits(filesystem: &BlockingFs, path: &Path) -> u32 {
 		return 0;
 	}
 	let entries: Vec<u8> = value[3..].iter().copied().filter(|&byte| byte != 255).collect();
-	entries.chunks_exact(4).fold(0, |perm, entry| {
-		(perm << 3) | u32::from(entry[2]) | u32::from(entry[3])
+	entries.as_chunks::<4>().0.iter().fold(0, |perm, &[_, _, lo, hi]| {
+		(perm << 3) | u32::from(lo) | u32::from(hi)
 	})
 }
 
@@ -306,7 +306,7 @@ fn create_dir(
 	if !has_parent_dir {
 		// `mkdir -p` of a directory that exists, the common case, takes one
 		// stat; GNU prints nothing for it, even with -v.
-		if path == Path::new("") || host.fs().is_dir(host.resolve(path)) {
+		if path.is_empty() || host.fs().is_dir(host.resolve(path)) {
 			return Ok(());
 		}
 		// The leaf is tried first; its ancestors are looked at only when it
@@ -322,7 +322,7 @@ fn create_dir(
 	let mut dirs_to_create = Vec::with_capacity(16);
 	let mut current = path;
 	while let Some(parent) = parent_path(current) {
-		if parent == Path::new("") {
+		if parent.is_empty() {
 			break;
 		}
 		dirs_to_create.push(parent);

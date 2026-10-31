@@ -117,9 +117,13 @@ impl builtins::Command for ReadCommand {
 		// Convert timeout to Duration.
 		let timeout = self.timeout_in_seconds.map(Duration::from_secs_f64);
 
-		// Perform the read operation (potentially with timeout).
-		let read_result =
-			self.read_line(input_stream, context.stderr(), timeout, || context.is_cancelled())?;
+		// Keep the runtime worker free for process-substitution producers.
+		let cancel_token = context.cancel_token();
+		let read_result = self
+			.read_line(input_stream, context.stderr(), timeout, move || {
+				cancel_token.as_ref().is_some_and(|token| token.is_cancelled())
+			})
+			.await?;
 
 		// Determine whether to skip IFS splitting (for -N option).
 		let skip_ifs_splitting = self.return_after_n_chars_no_delimiter.is_some();
@@ -621,7 +625,7 @@ impl ReadCommand {
 	/// - Without `-r`: backslash-newline is line continuation, other backslashes
 	///   escape the next char
 	/// - With `-r`: backslash is treated as a literal character
-	fn read_line<F>(
+	async fn read_line<F>(
 		&self,
 		input_file: brush_core::openfiles::OpenFile,
 		mut stderr_file: impl std::io::Write,
@@ -629,7 +633,7 @@ impl ReadCommand {
 		is_cancelled: F,
 	) -> Result<ReadResult, brush_core::Error>
 	where
-		F: Fn() -> bool,
+		F: Fn() -> bool + Send + 'static,
 	{
 		let term_mode = self.setup_terminal_settings(&input_file)?;
 
@@ -672,7 +676,24 @@ impl ReadCommand {
 		// Configure and perform the read.
 		let config = LineReaderConfig { delimiter, char_limit, process_escapes: !self.raw_mode };
 
-		read_line_with_reader(&mut reader, &config, &is_cancelled)
+		#[cfg(target_family = "wasm")]
+		{
+			// Threadless Wasm cannot spawn blocking workers.
+			read_line_with_reader(&mut reader, &config, &is_cancelled)
+		}
+		#[cfg(not(target_family = "wasm"))]
+		{
+			// Seekable input cannot depend on a producer queued on this runtime.
+			// A builtin already on a blocking worker (an owned-shell pipeline stage
+			// or async job) leaves the runtime workers free for that producer, and
+			// offloading again would hold this worker while queueing another one.
+			if reader.source.reads_ahead() || brush_core::commands::builtin_on_blocking_worker() {
+				return read_line_with_reader(&mut reader, &config, &is_cancelled);
+			}
+			tokio::task::spawn_blocking(move || read_line_with_reader(&mut reader, &config, &is_cancelled))
+				.await
+				.map_err(ErrorKind::ThreadingError)?
+		}
 	}
 
 	fn setup_terminal_settings(
@@ -983,14 +1004,15 @@ mod tests {
 	}
 
 	#[cfg(unix)]
-	#[test]
-	fn test_read_line_returns_interrupted_when_cancelled_before_input() {
+	#[tokio::test]
+	async fn test_read_line_returns_interrupted_when_cancelled_before_input() {
 		let command = test_command();
 		let (reader, _writer) = std::io::pipe().expect("pipe creation must succeed");
 		let input_file = brush_core::openfiles::OpenFile::from(reader);
 
 		let err = command
 			.read_line(input_file, Vec::<u8>::new(), None, || true)
+			.await
 			.expect_err("cancelled state must interrupt read builtin");
 		assert_eq!(err.to_string(), "interrupted");
 	}

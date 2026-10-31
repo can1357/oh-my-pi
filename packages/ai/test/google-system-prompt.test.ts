@@ -80,7 +80,7 @@ describe("Google provider system prompts", () => {
 		expect(payload.contents).toHaveLength(1);
 	});
 
-	it("demotes same-model unsigned thinking instead of emitting an unsigned thought part", async () => {
+	it("replays the same model's unsigned thinking as an unsigned thought part", async () => {
 		const payload = await captureGooglePayload({
 			messages: [
 				{
@@ -88,7 +88,10 @@ describe("Google provider system prompts", () => {
 					api: "google-generative-ai",
 					provider: "google",
 					model: model.id,
-					content: [{ type: "thinking", thinking: "unsigned prior thought" }],
+					content: [
+						{ type: "thinking", thinking: "unsigned prior thought" },
+						{ type: "text", text: "answer", textSignature: "QUJDRA==" },
+					],
 					usage: {
 						input: 0,
 						output: 0,
@@ -105,7 +108,84 @@ describe("Google provider system prompts", () => {
 
 		expect(payload.contents[0]).toEqual({
 			role: "model",
-			parts: [{ text: renderDemotedThinking(model.id, "unsigned prior thought") }],
+			parts: [
+				{ thought: true, text: "unsigned prior thought" },
+				{ text: "answer", thoughtSignature: "QUJDRA==" },
+			],
+		});
+	});
+
+	it("replays a signature-only thought part after reply text as the thought part it was", async () => {
+		const frame = {
+			candidates: [
+				{
+					content: {
+						role: "model",
+						parts: [
+							{ text: "answer" },
+							{ thought: true, text: "", thoughtSignature: "QUJDRA==" },
+							{ text: " more" },
+						],
+					},
+					finishReason: "STOP",
+				},
+			],
+		};
+		const sse: FetchImpl = async () =>
+			new Response(`data: ${JSON.stringify(frame)}\n\n`, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		const reply = await streamGoogle(
+			model,
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			{
+				apiKey: "test-key",
+				fetch: sse,
+			},
+		).result();
+		expect(reply.content).toMatchObject([
+			{ type: "text", text: "answer" },
+			{ type: "thinking", thinking: "", thinkingSignature: "QUJDRA==" },
+			{ type: "text", text: " more" },
+		]);
+
+		const payload = await captureGooglePayload({ messages: [reply] });
+		expect(payload.contents[0]).toEqual({
+			role: "model",
+			parts: [{ text: "answer" }, { thought: true, text: "", thoughtSignature: "QUJDRA==" }, { text: " more" }],
+		});
+	});
+
+	it("demotes another model's thinking to fenced text without its signatures", async () => {
+		const payload = await captureGooglePayload({
+			messages: [
+				{
+					role: "assistant",
+					api: "google-generative-ai",
+					provider: "google",
+					model: "gemini-2.5-pro",
+					content: [
+						{ type: "thinking", thinking: "other model's thought", thinkingSignature: "QUJDRA==" },
+						{ type: "text", text: "answer", textSignature: "QUJDRA==" },
+					],
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: 1,
+				},
+			],
+		});
+
+		expect(payload.contents[0]).toEqual({
+			role: "model",
+			parts: [{ text: renderDemotedThinking(model.id, "other model's thought") }, { text: "answer" }],
 		});
 	});
 });

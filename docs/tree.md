@@ -63,6 +63,7 @@ The selector recenters around current selection and shows up to:
 
 - `Up` / `Down`: move selection (wraps)
 - `Alt+Up` / `Alt+Down`: jump to previous/next user or assistant turn
+- `app.tree.previousBranch` / `app.tree.nextBranch` (unbound by default; bind them in [`keybindings.yml`](./keybindings.md), e.g. to `Shift+Left` / `Shift+Right`): jump to the previous/next visible branch in rendered order (wraps), across nested forks. A branch whose head is filtered out lands on its first visible descendant.
 - `Page Up` / `Page Down`, or `Left` / `Right`: page
 - `Home` / `End`: first/last visible item
 - `Enter`: select node
@@ -227,12 +228,12 @@ Label edits in tree UI call `appendLabelChange(targetId, label)`.
 
 ## `/tree` vs adjacent operations
 
-| Operation | Scope                                            | Result                                                                                                                                                   |
-| --------- | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/tree`   | Current session file                             | Moves leaf to selected point (same file)                                                                                                                 |
-| `/branch` (alias `/rewind`) | Current session file | Opens transcript rewind; moves the leaf in place and restores user-request drafts |
-| `/fork`   | Whole current session                            | Duplicates session into a new persisted session file                                                                                                     |
-| `/resume` | Session list                                     | Switches to another session file                                                                                                                         |
+| Operation                   | Scope                 | Result                                                                            |
+| --------------------------- | --------------------- | --------------------------------------------------------------------------------- |
+| `/tree`                     | Current session file  | Moves leaf to selected point (same file)                                          |
+| `/branch` (alias `/rewind`) | Current session file  | Opens transcript rewind; moves the leaf in place and restores user-request drafts |
+| `/fork`                     | Whole current session | Duplicates session into a new persisted session file                              |
+| `/resume`                   | Session list          | Switches to another session file                                                  |
 
 Key distinction: `/tree` and `/branch` navigate inside one session file. `/fork` duplicates the file; `/resume` switches files. The programmatic `AgentSession.branch()` API still creates a separate branched session.
 

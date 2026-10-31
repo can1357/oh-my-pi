@@ -271,7 +271,7 @@ describe("snapcompact frame persistence", () => {
 		await resolveBlobRefsInEntries(loaded, blobStore);
 		const loadedArchive = snapcompact.getPreservedArchive(loaded[0]!.preserveData)!;
 		const blocks = snapcompact.historyBlocks(loadedArchive, {
-			maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET,
+			maxFrameDataBytes: snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET,
 			resolveFrameData: data => lazyImageDataSync(blobStore, data),
 		});
 		const imageBlocks = blocks.filter((block): block is ImageContent => block.type === "image");
@@ -282,9 +282,46 @@ describe("snapcompact frame persistence", () => {
 		// Without a resolver the reference must never leave as image data: a
 		// dropped picture is recoverable, a rejected request is not.
 		const unresolved = snapcompact
-			.historyBlocks(loadedArchive, { maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET })
+			.historyBlocks(loadedArchive, { maxFrameDataBytes: snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET })
 			.filter((block): block is ImageContent => block.type === "image");
 		expect(unresolved).toHaveLength(0);
+	});
+
+	it("keeps archive source text whole while externalizing frames of both views", () => {
+		using tempDir = TempDir.createSync("@snapcompact-archive-text-persistence-");
+		const blobStore = new BlobStore(tempDir.path());
+		const frame = { data: Buffer.alloc(4_000, 7).toString("base64"), mimeType: "image/png", cols: 100, rows: 100 };
+		const archiveText = "kept archive source ".repeat(30_000);
+		const archive: Archive = {
+			frames: [{ ...frame, chars: 5000 }],
+			totalChars: archiveText.length,
+			truncatedChars: 0,
+			text: archiveText,
+			textTail: archiveText,
+			withoutThinking: {
+				summary: "summary",
+				archive: { frames: [{ ...frame, chars: 5000 }], totalChars: 1, truncatedChars: 0, text: archiveText },
+			},
+		};
+		const entry: CompactionEntry = {
+			type: "compaction",
+			id: "compaction-1",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			summary: "summary",
+			firstKeptEntryId: "entry-1",
+			tokensBefore: 5000,
+			preserveData: { [snapcompact.PRESERVE_KEY]: archive },
+		};
+
+		const persisted = prepareEntryForPersistence(entry, blobStore) as CompactionEntry;
+		const persistedArchive = persisted.preserveData![snapcompact.PRESERVE_KEY] as Archive;
+		expect(persistedArchive.text).toBe(archiveText);
+		expect(persistedArchive.textTail).toBe(archiveText);
+		expect(persistedArchive.withoutThinking!.archive.text).toBe(archiveText);
+		expect(isBlobRef(persistedArchive.frames[0]!.data)).toBe(true);
+		expect(isBlobRef(persistedArchive.withoutThinking!.archive.frames[0]!.data)).toBe(true);
+		expect(archive.frames[0]!.data).toBe(frame.data);
 	});
 
 	it("marks a missing frame blob in place instead of claiming a budget omission", () => {
@@ -408,7 +445,7 @@ describe("snapcompact frame persistence", () => {
 		await resolveBlobRefsInEntries([entry], blobStore);
 		const recovered = snapcompact.getPreservedArchive(entry.preserveData)!;
 		const blocks = snapcompact.historyBlocks(recovered, {
-			maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET,
+			maxFrameDataBytes: snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET,
 		});
 		expect(blocks).toEqual([{ type: "text", text: sourceText }]);
 	});

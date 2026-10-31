@@ -13,8 +13,10 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
+import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
+import { createMCPToolName } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type {
 	ClientBridge,
@@ -24,8 +26,11 @@ import type {
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
+import { computerTurnInFlight, registerComputerController } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
 import { dispatchXdevTool, resolveMountedXdevExecutable, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 
 // ---------------------------------------------------------------------------
 // Shared setup
@@ -127,37 +132,6 @@ async function createSession(
 	return sess;
 }
 
-async function createSessionWithMockModel(
-	tools: AgentTool[],
-	bridge: ClientBridge,
-	responses: NonNullable<MockModelOptions["responses"]>,
-): Promise<AgentSession> {
-	const mock = createMockModel({ responses });
-	const settings = Settings.isolated({ "compaction.enabled": false });
-	const sessionManager = SessionManager.inMemory(tempDir.path());
-	const agent = new Agent({
-		getApiKey: () => "test-key",
-		initialState: {
-			model: mock.model,
-			systemPrompt: ["Test"],
-			tools,
-			messages: [],
-		},
-		convertToLlm,
-		streamFn: mock.stream,
-	});
-
-	const sess = new AgentSession({
-		agent,
-		sessionManager,
-		settings,
-		modelRegistry: { getApiKey: () => "test-key" } as never,
-		toolRegistry: new Map(tools.map(t => [t.name, t])),
-	});
-	sess.setClientBridge(bridge);
-	return sess;
-}
-
 beforeAll(() => {
 	tempDir = TempDir.createSync("@pi-acp-permission-test-");
 });
@@ -183,6 +157,146 @@ it("eval bridge dispatch uses the same ACP gate as a direct tool call", async ()
 
 	expect(permissionSpy).toHaveBeenCalledTimes(1);
 	expect(bashTool.executeCalls).toBe(1);
+});
+
+it("eval applies a custom-wire patch exactly once through the canonical tool's ACP gate", async () => {
+	const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	const toolSession = makeToolSession(bridge);
+	const editTool = new EditTool(toolSession);
+	const executeSpy = spyOn(editTool, "execute");
+	session = await createSession([editTool as AgentTool], bridge, {
+		"tools.approval": { edit: "prompt" },
+	});
+	toolSession.getToolForEvalBridge = name => session!.getToolForEvalBridge(name);
+	toolSession.getEvalBridgeToolNames = () => session!.getEvalBridgeToolNames();
+	await Bun.write(tempDir.join("eval-wire-old.txt"), "old\n");
+	const input =
+		"*** Begin Patch\n*** Add File: eval-wire.txt\n+ok\n*** Delete File: eval-wire-old.txt\n*** End Patch\n";
+
+	await callSessionTool("apply_patch", { input }, { session: toolSession });
+
+	expect(await Bun.file(tempDir.join("eval-wire.txt")).text()).toBe("ok\n");
+	expect(await Bun.file(tempDir.join("eval-wire-old.txt")).exists()).toBe(false);
+	expect(executeSpy).toHaveBeenCalledTimes(1);
+	expect(executeSpy.mock.calls[0]?.[1]).toEqual({ input });
+	expect(permissionSpy).toHaveBeenCalledTimes(1);
+	expect(session.getToolForEvalBridge("edit")?.name).toBe("edit");
+	expect(session.getEvalBridgeToolNames()).toEqual(["edit", "apply_patch"]);
+	expect(new EvalTool(toolSession).description).toContain("`edit`, `apply_patch`");
+});
+
+it("eval refuses both canonical and wire names after their tool is disabled", async () => {
+	const edit = { ...makeFakeTool("edit"), customWireName: "apply_patch" };
+	session = await createSession([edit, makeFakeTool("read")]);
+	await session.setActiveToolsByName(["read"]);
+
+	expect(session.getToolForEvalBridge("edit")).toBeUndefined();
+	expect(session.getToolForEvalBridge("apply_patch")).toBeUndefined();
+	expect(session.getEvalBridgeToolNames()).toEqual(["read"]);
+});
+
+it("eval preserves raw patch validation when resolving a wire alias", async () => {
+	const toolSession = makeToolSession(makeBridge({ outcome: "cancelled" }));
+	const editTool = new EditTool(toolSession);
+	session = await createSession([editTool as AgentTool]);
+	toolSession.getToolForEvalBridge = name => session!.getToolForEvalBridge(name);
+
+	const result = await callSessionTool("apply_patch", { input: "not a patch" }, { session: toolSession });
+
+	expect(result).toMatchObject({ hasError: true });
+});
+
+it("eval gives an exact custom name precedence even when that exact tool is disabled", async () => {
+	const edit = { ...makeFakeTool("edit"), customWireName: "apply_patch" };
+	const exact = makeFakeTool("apply_patch");
+	session = await createSession([edit, exact], undefined, {}, { builtInToolNames: ["edit"] });
+
+	await session.getToolForEvalBridge("apply_patch")!.execute("exact", {}, undefined);
+	expect(exact.executeCalls).toBe(1);
+	expect(edit.executeCalls).toBe(0);
+	expect(session.hasBuiltInTool("apply_patch")).toBe(false);
+	await session.setActiveToolsByName(["edit"]);
+	expect(session.getToolForEvalBridge("apply_patch")).toBeUndefined();
+	expect(session.getEvalBridgeToolNames()).toEqual(["edit"]);
+});
+
+it("eval rejects ambiguous wire names rather than choosing a registry insertion order", async () => {
+	const first = { ...makeFakeTool("first"), customWireName: "shared" };
+	const second = { ...makeFakeTool("second"), customWireName: "shared" };
+	session = await createSession([first, second]);
+
+	expect(session.getToolForEvalBridge("shared")).toBeUndefined();
+	expect(session.getEvalBridgeToolNames()).toEqual(["first", "second"]);
+});
+
+it("eval does not advertise tools that require a direct tool result", async () => {
+	session = await createSession([
+		{ ...makeFakeTool("checkpoint"), customWireName: "savepoint" },
+		{ ...makeFakeTool("rewind"), customWireName: "restorepoint" },
+		makeFakeTool("read"),
+	]);
+
+	expect(session.getEvalBridgeToolNames()).toEqual(["read"]);
+});
+
+it("eval applies direct-only restrictions to the resolved tool rather than its wire spelling", async () => {
+	const tool = Object.assign(makeFakeTool("savepoint"), { customWireName: "checkpoint" });
+	session = await createSession([tool]);
+	const toolSession = makeToolSession(makeBridge({ outcome: "cancelled" }));
+	toolSession.getToolForEvalBridge = name => session!.getToolForEvalBridge(name);
+
+	expect(session.getEvalBridgeToolNames()).toEqual(["savepoint", "checkpoint"]);
+	await callSessionTool("checkpoint", {}, { session: toolSession });
+	expect(tool.executeCalls).toBe(1);
+});
+
+it("eval resolves xd:// and Claude Code MCP spellings over enabled tools only", async () => {
+	const tools = ["read", "mcp__srv_active", "mcp__srv_idle", "lsp", "ast_grep"].map(makeFakeTool);
+	const xdev: XdevState = {
+		tools: new Map(tools.map(tool => [tool.name, tool])),
+		mountedNames: new Set(),
+		builtInNames: new Set(),
+		isActive: name => session?.getActiveToolNames().includes(name) ?? false,
+	};
+	session = await createSession(tools, undefined, {}, { xdev });
+	await session.setActiveToolsByName(["read", "mcp__srv_active"]);
+	xdev.mountedNames.add("lsp");
+	const toolSession = makeToolSession(makeBridge({ outcome: "cancelled" }));
+	toolSession.getToolForEvalBridge = name => session!.getToolForEvalBridge(name);
+	toolSession.getToolByName = name => session!.getToolByName(name);
+
+	await callSessionTool("mcp__srv__active", {}, { session: toolSession });
+	await callSessionTool("xd://lsp", {}, { session: toolSession });
+	await callSessionTool("xd://read", {}, { session: toolSession });
+	expect(tools.map(tool => tool.executeCalls)).toEqual([1, 1, 0, 1, 0]);
+
+	await expect(callSessionTool("mcp__srv__idle", {}, { session: toolSession })).rejects.toThrow(
+		"registered but not available",
+	);
+	await expect(callSessionTool("xd://ast_grep", {}, { session: toolSession })).rejects.toThrow(
+		"registered but not available",
+	);
+	await expect(callSessionTool("nope", {}, { session: toolSession })).rejects.toThrow("Unknown tool");
+});
+
+it("eval leaves a Claude Code MCP spelling unresolved when mounted and active tools both answer it", async () => {
+	const emitted = "mcp__foo__bar__foo_bar_baz";
+	const active = makeFakeTool(createMCPToolName("foo__bar", "foo_bar_baz"));
+	const mounted = makeFakeTool(createMCPToolName("foo", "bar__foo_bar_baz"));
+	const xdev: XdevState = {
+		tools: new Map([active, mounted].map(tool => [tool.name, tool])),
+		mountedNames: new Set(),
+		builtInNames: new Set(),
+		isActive: name => name === active.name,
+	};
+	session = await createSession([active, mounted], undefined, {}, { xdev });
+	await session.setActiveToolsByName([active.name]);
+	xdev.mountedNames.add(mounted.name);
+
+	expect(session.getToolForEvalBridge(emitted)).toBeUndefined();
+	xdev.mountedNames.delete(mounted.name);
+	expect(session.getToolForEvalBridge(emitted)?.name).toBe(active.name);
 });
 
 it("explicit yolo approval mode skips the ACP permission gate", async () => {
@@ -227,6 +341,7 @@ function noUiRunner(): ExtensionRunner {
 		hasHandlers: () => false,
 		consumeToolCallEmitted: () => false,
 		hasUI: () => false,
+		hasSessionApproval: () => false,
 		sessionId: "acp-permission-test",
 		runScoped<T>(fn: () => T): T {
 			return fn();
@@ -256,6 +371,55 @@ it("always-ask: an ACP grant satisfies the inner wrapper's explicit prompt polic
 
 	expect(permissionSpy).toHaveBeenCalledTimes(1);
 	expect(bashTool.executeCalls).toBe(1);
+});
+
+it("ACP bash uses pattern decisions and scopes persistent grants to noncritical commands", async () => {
+	const settingsOverrides = {
+		"tools.approvalMode": "always-ask",
+		"tools.approval": { bash: "prompt" },
+		"bash.patterns": [
+			{ match: "echo safe*", approval: "allow" },
+			{ match: "echo denied*", approval: "deny" },
+		],
+	};
+	const settings = Settings.isolated(settingsOverrides);
+	const requests: string[] = [];
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		async requestPermission(toolCall) {
+			const input = toolCall.rawInput;
+			if (!input || typeof input !== "object" || !("command" in input) || typeof input.command !== "string") {
+				throw new Error("Missing bash command");
+			}
+			const command = input.command;
+			requests.push(command);
+			return { outcome: "selected", optionId: "allow_always", kind: "allow_always" };
+		},
+	};
+	const bashTool = makeFakeTool("bash");
+	bashTool.approval = new BashTool({ ...makeToolSession(bridge), settings }).approval;
+	const wrapped = new ExtensionToolWrapper(bashTool, noUiRunner()) as unknown as AgentTool;
+	session = await createSession([wrapped], bridge, settingsOverrides);
+	await session.setActiveToolsByName(["bash"]);
+	const gatedBash = session.agent.state.tools.find(tool => tool.name === "bash");
+	if (!gatedBash) throw new Error("Missing bash tool");
+	const ctx = { settings } as never;
+	const run = (command: string) =>
+		gatedBash.execute(`call-${command}`, { command }, undefined, undefined as never, ctx);
+
+	await run("echo safe-read");
+	expect(requests).toEqual([]);
+	await expect(run("echo denied-write")).rejects.toThrow(/blocked by tool policy/);
+	expect(requests).toEqual([]);
+	await run("echo probe-1");
+	await run("echo probe-2");
+	// "Always allow" covers later ordinary commands, as before.
+	expect(requests).toEqual(["echo probe-1"]);
+	await run("rm -rf /");
+	await run("rm -rf /");
+	// Critical commands ask on every call, whatever was granted.
+	expect(requests).toEqual(["echo probe-1", "rm -rf /", "rm -rf /"]);
+	expect(bashTool.executeCalls).toBe(5);
 });
 
 it("always-ask: an ordinary edit without an ACP grant still faces the inner approval gate", async () => {
@@ -558,6 +722,46 @@ it("apply_patch custom-wire delete requests ACP permission through agent dispatc
 	]);
 });
 
+it("lets the computer display sleep while the ACP client asks the user for permission", async () => {
+	const bashTool = makeFakeTool("bash");
+	const releases: number[] = [];
+	let owner = "";
+	let asked: { turn: number | undefined; releases: number[] } | undefined;
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		async requestPermission() {
+			asked = { turn: computerTurnInFlight(owner), releases: [...releases] };
+			return { outcome: "selected", optionId: "allow_once", kind: "allow_once" };
+		},
+	};
+	session = await createSessionWithMockModel([bashTool], bridge, [
+		{ content: [{ type: "toolCall", id: "call-bash", name: "bash", arguments: { command: "echo hi" } }] },
+		{ content: ["done"] },
+	]);
+	owner = session.getEvalKernelOwnerId();
+	const unregister = registerComputerController(owner, {
+		async run() {
+			throw new Error("not used");
+		},
+		async capabilities() {
+			return undefined;
+		},
+		releaseDisplay(turn) {
+			releases.push(turn);
+		},
+		async close() {},
+	});
+	try {
+		await session.prompt("run it");
+	} finally {
+		unregister();
+	}
+
+	expect(asked).toEqual({ turn: undefined, releases: [1] });
+	expect(bashTool.executeCalls).toBe(1);
+	expect(releases).toEqual([1, 2]);
+});
+
 it("patch-mode delete operations take precedence over earlier moves", async () => {
 	const editTool = makeFakeTool("edit");
 	const requests: ClientBridgePermissionToolCall[] = [];
@@ -825,28 +1029,6 @@ it("unknown selected permission option ID fails closed without executing", async
 	expect(bashTool.executeCalls).toBe(0);
 });
 
-// ---------------------------------------------------------------------------
-// 3. Always allow caches: bridge called exactly once across two executions
-// ---------------------------------------------------------------------------
-
-it("allow_always: caches decision and calls bridge only once for subsequent executes", async () => {
-	const bashTool = makeFakeTool("bash");
-	const bridge = makeBridge({ outcome: "selected", optionId: "allow_always", kind: "allow_always" });
-	const permissionSpy = spyOn(bridge, "requestPermission");
-	session = await createSession([bashTool], bridge);
-
-	await session.setActiveToolsByName(["bash"]);
-	const wrappedBash = session.agent.state.tools.find(t => t.name === "bash");
-
-	// First call — bridge is consulted, decision cached.
-	await wrappedBash!.execute("call-1", { command: "echo a" }, undefined, undefined as never, undefined as never);
-	// Second call — must skip the bridge entirely.
-	await wrappedBash!.execute("call-2", { command: "echo b" }, undefined, undefined as never, undefined as never);
-
-	expect(permissionSpy).toHaveBeenCalledTimes(1);
-	expect(bashTool.executeCalls).toBe(2);
-});
-
 it.each(boundaryCases)(
 	"%s permission decisions prompt again after a successful %s session boundary",
 	async (decision, transition) => {
@@ -926,4 +1108,464 @@ it("setActiveToolsByName normalizes legacy tool names", async () => {
 	await session.setActiveToolsByName(["Search", "glob", "grep"]);
 
 	expect(session.getActiveToolNames()).toEqual(["grep", "glob"]);
+});
+
+// ---------------------------------------------------------------------------
+// 5. Steering supersedes an open permission dialog (ACP `_session/steering`)
+// ---------------------------------------------------------------------------
+
+it("a steer sent while a permission dialog is open supersedes it instead of waiting behind it", async () => {
+	const deleteTool = makeFakeTool("delete");
+	const permissionPending = Promise.withResolvers<ClientBridgePermissionOutcome>();
+	const permissionOpened = Promise.withResolvers<void>();
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		async requestPermission(_toolCall, _options, _signal) {
+			permissionOpened.resolve();
+			return await permissionPending.promise;
+		},
+	};
+	session = await createSessionWithMockModel([deleteTool as AgentTool], bridge, [
+		{
+			content: [{ type: "toolCall", id: "call-delete-1", name: "delete", arguments: { path: "/tmp/gone.ts" } }],
+		},
+		{ content: ["done after steer"] },
+	]);
+
+	// Drive the turn; the delete tool's permission elicit pends inside it.
+	let promptSettled = false;
+	const promptDone = session.prompt("delete something").then(() => {
+		promptSettled = true;
+	});
+	// Await the observable signal that the elicit is open — not a guessed delay.
+	await permissionOpened.promise;
+
+	// The turn is live, so the steer joins it — and must supersede the open
+	// dialog: the elicit is abandoned, its tool call surfaces as a cancelled
+	// permission (a normal tool error), and the queued message is injected at
+	// the next batch boundary (the model call that produced the final
+	// response), not behind the dialog until the user answers.
+	const admitted = await session.joinActiveTurn("wait — use the other parser instead");
+	expect(admitted).toBe(true);
+
+	await promptDone;
+	expect(promptSettled).toBe(true);
+	// The superseded call never executed.
+	expect(deleteTool.executeCalls).toBe(0);
+	// The steer reached the model inside the same turn.
+	const messages = session.agent.state.messages;
+	expect(
+		messages.some(
+			message => message.role === "user" && JSON.stringify(message.content).includes("use the other parser"),
+		),
+	).toBe(true);
+
+	// Resolve the abandoned elicit so nothing dangles into the next test.
+	permissionPending.resolve({ outcome: "cancelled" });
+});
+
+it("keeps the dialog open when an agent-authored steer queues mid-dialog", async () => {
+	const deleteTool = makeFakeTool("delete");
+	const permissionPending = Promise.withResolvers<ClientBridgePermissionOutcome>();
+	const permissionOpened = Promise.withResolvers<void>();
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		async requestPermission(_toolCall, _options, _signal) {
+			permissionOpened.resolve();
+			return await permissionPending.promise;
+		},
+	};
+	// A controllable loop steering signal: tool calls run under a ctx
+	// (`ctx.toolCall.steeringSignal`), so the gate takes the production
+	// loop-signal path and the test aborts it on command, exactly the way
+	// the loop's any-source steering poll does.
+	const loopSteering = new AbortController();
+	session = await createSessionWithMockModel(
+		[deleteTool as AgentTool],
+		bridge,
+		[
+			{
+				content: [{ type: "toolCall", id: "call-delete-9", name: "delete", arguments: { path: "/tmp/gone2.ts" } }],
+			},
+			{ content: ["done after steer"] },
+		],
+		{ loopSteeringSignal: loopSteering.signal },
+	);
+
+	let promptSettled = false;
+	const promptDone = session.prompt("delete something else").then(() => {
+		promptSettled = true;
+	});
+	await permissionOpened.promise;
+
+	// An agent-authored steer queues while the dialog is open: the loop's
+	// steering signal aborts for it (any queued source), but no user
+	// steering arrival fired, so the dialog must stay open — the tool call
+	// keeps waiting on the user instead of being classified as superseded.
+	await session.agent.steer({
+		role: "user",
+		content: [{ type: "text", text: "agent-authored aside while the dialog is open" }],
+		timestamp: Date.now(),
+	});
+	loopSteering.abort();
+	await Bun.sleep(50);
+	expect(promptSettled).toBe(false);
+	expect(deleteTool.executeCalls).toBe(0);
+
+	// A user steer through the arrival channel still supersedes the dialog.
+	const admitted = await session.joinActiveTurn("wait — the user changed their mind");
+	expect(admitted).toBe(true);
+	await promptDone;
+	expect(promptSettled).toBe(true);
+	expect(deleteTool.executeCalls).toBe(0);
+	const messages = session.agent.state.messages;
+	expect(
+		messages.some(
+			message => message.role === "user" && JSON.stringify(message.content).includes("the user changed their mind"),
+		),
+	).toBe(true);
+
+	// Resolve the abandoned elicit so nothing dangles into the next test.
+	permissionPending.resolve({ outcome: "cancelled" });
+});
+
+it("delivers the steer that supersedes a permission dialog ahead of older queued steers", async () => {
+	const deleteTool = makeFakeTool("delete");
+	const permissionPending = Promise.withResolvers<ClientBridgePermissionOutcome>();
+	const permissionOpened = Promise.withResolvers<void>();
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		async requestPermission(_toolCall, _options, _signal) {
+			permissionOpened.resolve();
+			return await permissionPending.promise;
+		},
+	};
+	// Hold the first response open so an older steer can queue before the
+	// delete call dispatches; the later steer supersedes the elicit and must
+	// deliver first (agent.prioritizeSteering — same semantics as the TUI
+	// approval dialog's denying steer).
+	const turnStreamStarted = Promise.withResolvers<void>();
+	const releaseTurnStream = Promise.withResolvers<void>();
+	session = await createSessionWithMockModel([deleteTool as AgentTool], bridge, [
+		async () => {
+			turnStreamStarted.resolve();
+			await releaseTurnStream.promise;
+			return {
+				content: [{ type: "toolCall", id: "call-delete-1", name: "delete", arguments: { path: "/tmp/gone.ts" } }],
+			};
+		},
+		{ content: ["answered superseding steer"] },
+		{ content: ["answered older steer"] },
+	]);
+
+	const promptDone = session.prompt("delete something");
+	await withTimeout(turnStreamStarted.promise, 5_000, "Held turn stream never started");
+	// An older steer queues while the turn streams, before any dialog exists.
+	expect(await session.joinActiveTurn("older question about the batch")).toBe(true);
+	releaseTurnStream.resolve();
+	await permissionOpened.promise;
+
+	// This steer supersedes the open dialog.
+	expect(await session.joinActiveTurn("why this deletion?")).toBe(true);
+
+	await promptDone;
+	await session.waitForIdle();
+	expect(deleteTool.executeCalls).toBe(0);
+
+	// Order proof: the superseding steer was delivered to the model before
+	// the older queued one.
+	const messages = session.agent.state.messages;
+	const contentIndexOf = (needle: string) =>
+		messages.findIndex(message => message.role === "user" && JSON.stringify(message.content).includes(needle));
+	const supersedeIndex = contentIndexOf("why this deletion?");
+	const olderIndex = contentIndexOf("older question about the batch");
+	expect(supersedeIndex).toBeGreaterThanOrEqual(0);
+	expect(olderIndex).toBeGreaterThan(supersedeIndex);
+
+	permissionPending.resolve({ outcome: "cancelled" });
+});
+
+it("delivers the user steer that supersedes a dialog ahead of an agent-authored steer", async () => {
+	// Regression: the permission gate promoted *any* queued message older
+	// than the dialog-open baseline — including steers the agent enqueued
+	// itself without ever firing the steering-arrival signal. The user's
+	// superseding steer must deliver first; the agent-authored one waits
+	// for the next boundary.
+	const deleteTool = makeFakeTool("delete");
+	const permissionPending = Promise.withResolvers<ClientBridgePermissionOutcome>();
+	const permissionOpened = Promise.withResolvers<void>();
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		async requestPermission(_toolCall, _options, _signal) {
+			permissionOpened.resolve();
+			return await permissionPending.promise;
+		},
+	};
+	const turnStreamStarted = Promise.withResolvers<void>();
+	const releaseTurnStream = Promise.withResolvers<void>();
+	session = await createSessionWithMockModel([deleteTool as AgentTool], bridge, [
+		async () => {
+			turnStreamStarted.resolve();
+			await releaseTurnStream.promise;
+			return {
+				content: [{ type: "toolCall", id: "call-delete-1", name: "delete", arguments: { path: "/tmp/gone.ts" } }],
+			};
+		},
+		{ content: ["answered user steer"] },
+		{ content: ["answered agent steer"] },
+	]);
+
+	const promptDone = session.prompt("delete something");
+	await withTimeout(turnStreamStarted.promise, 5_000, "Held turn stream never started");
+	releaseTurnStream.resolve();
+	await permissionOpened.promise;
+
+	// The agent enqueues a steer while the dialog is open. This path never
+	// fires the steering-arrival signal, so it must not be promoted.
+	session.agent.steer({
+		role: "user",
+		content: [{ type: "text", text: "agent-authored steer" }],
+		timestamp: Date.now(),
+	});
+
+	// The user steer supersedes the open dialog and delivers first.
+	expect(await session.joinActiveTurn("user steer superseding the dialog")).toBe(true);
+
+	await promptDone;
+	await session.waitForIdle();
+	expect(deleteTool.executeCalls).toBe(0);
+
+	const messages = session.agent.state.messages;
+	const contentIndexOf = (needle: string) =>
+		messages.findIndex(message => message.role === "user" && JSON.stringify(message.content).includes(needle));
+	const userSteerIndex = contentIndexOf("user steer superseding the dialog");
+	const agentSteerIndex = contentIndexOf("agent-authored steer");
+	expect(userSteerIndex).toBeGreaterThanOrEqual(0);
+	expect(agentSteerIndex).toBeGreaterThan(userSteerIndex);
+
+	permissionPending.resolve({ outcome: "cancelled" });
+});
+
+it("parks a steer that lands mid-dispatch until the owning prompt goes live, then injects it", async () => {
+	// Park-until-live: a steer arriving while the owning prompt is reserved
+	// but still dispatching (`#promptInFlightCount` raised, the agent not yet
+	// streaming) must neither be refused back to the host (agent-shell would
+	// interrupt the very turn it targeted) nor injected mid-dispatch — it
+	// parks, then admits when the run goes live, and the loop's boundary
+	// poll delivers it into that run.
+	const keyGate = Promise.withResolvers<void>();
+	const dispatched = Promise.withResolvers<void>();
+	let keyCalls = 0;
+	const gatedApiKey = (): Promise<string> | string => {
+		keyCalls++;
+		if (keyCalls === 1) {
+			dispatched.resolve();
+			return keyGate.promise.then(() => "test-key");
+		}
+		return "test-key";
+	};
+	const bridge: ClientBridge = { capabilities: {} };
+	session = await createSessionWithMockModel(
+		[],
+		bridge,
+		[{ content: ["first answer"] }, { content: ["steer answer"] }],
+		{ getApiKey: gatedApiKey },
+	);
+
+	const promptDone = session.prompt("first");
+	// Hold open the pre-dispatch window: the prompt is in flight (its
+	// in-flight bracket raised — `isStreaming` true) while the agent has
+	// not started streaming.
+	await dispatched.promise;
+	expect(session.isStreaming).toBe(true);
+	expect(session.agent.state.isStreaming).toBe(false);
+
+	const admitted = session.joinActiveTurn("steer the dispatching turn");
+	// The steer parks rather than settling: give it a beat to prove it
+	// neither admitted early nor refused.
+	await Bun.sleep(20);
+	let settled = false;
+	void admitted.then(
+		() => {
+			settled = true;
+		},
+		() => {
+			settled = true;
+		},
+	);
+	await Bun.sleep(20);
+	expect(settled).toBe(false);
+
+	// The owning prompt goes live: the parked steer admits and injects into
+	// the now-running turn.
+	keyGate.resolve();
+	expect(await admitted).toBe(true);
+	await promptDone;
+	await session.waitForIdle();
+
+	// The run went live; the loop's boundary poll injected the parked steer
+	// after the first response, and the continuation answered it in turn.
+	const messages = session.agent.state.messages;
+	const steerIndex = messages.findIndex(
+		message => message.role === "user" && JSON.stringify(message.content).includes("steer the dispatching turn"),
+	);
+	const answerIndex = messages.findIndex(
+		message => message.role === "assistant" && JSON.stringify(message.content).includes("steer answer"),
+	);
+	expect(steerIndex).toBeGreaterThanOrEqual(0);
+	expect(answerIndex).toBeGreaterThan(steerIndex);
+});
+
+it("refuses a steer into an agent-initiated turn whose output has no client forwarder", async () => {
+	// An idle `triggerTurn` custom message starts an agent-initiated turn:
+	// `#beginInFlight` counts it, but no client prompt owns it, so its
+	// output has no promptTurn forwarder. A steer arriving mid-run must be
+	// refused (the host keeps its content and resubmits via session/prompt)
+	// instead of being admitted into a run whose answer would be dropped.
+	const turnStarted = Promise.withResolvers<void>();
+	const releaseTurn = Promise.withResolvers<void>();
+	session = await createSessionWithMockModel([], { capabilities: {} }, [
+		async () => {
+			turnStarted.resolve();
+			await releaseTurn.promise;
+			return { content: ["agent-initiated done"] };
+		},
+	]);
+	const sent = session.sendCustomMessage(
+		{ customType: "background", content: "do work", display: false },
+		{
+			deliverAs: "nextTurn",
+			triggerTurn: true,
+		},
+	);
+	await turnStarted.promise;
+	expect(session.agent.state.isStreaming).toBe(true);
+	expect(session.isStreaming).toBe(true);
+
+	expect(await session.joinActiveTurn("steer the agent-initiated turn")).toBe(false);
+	expect(session.getQueuedMessages().steering).toEqual([]);
+
+	releaseTurn.resolve();
+	await sent;
+	await session.waitForIdle();
+	const messages = session.agent.state.messages;
+	expect(
+		messages.some(
+			message =>
+				message.role === "user" && JSON.stringify(message.content).includes("steer the agent-initiated turn"),
+		),
+	).toBe(false);
+});
+
+async function createSessionWithMockModel(
+	tools: AgentTool[],
+	bridge: ClientBridge,
+	responses: NonNullable<MockModelOptions["responses"]>,
+	options?: { getApiKey?: () => Promise<string> | string; loopSteeringSignal?: AbortSignal },
+): Promise<AgentSession> {
+	const mock = createMockModel({ responses });
+	const settings = Settings.isolated({ "compaction.enabled": false });
+	const sessionManager = SessionManager.inMemory(tempDir.path());
+	const getApiKey = options?.getApiKey ?? (() => "test-key");
+	const agent = new Agent({
+		getApiKey,
+		// With a loop steering signal the tool calls run under a ctx
+		// (`ctx.toolCall.steeringSignal`), the path the production loop
+		// wires; the test aborts it on command to simulate the loop's
+		// any-source steering abort.
+		...(options?.loopSteeringSignal
+			? {
+					getToolContext: (() => ({ toolCall: { steeringSignal: options.loopSteeringSignal } }) as never) as never,
+				}
+			: {}),
+		initialState: {
+			model: mock.model,
+			systemPrompt: ["Test"],
+			tools,
+			messages: [],
+		},
+		convertToLlm,
+		streamFn: mock.stream,
+	});
+	const sess = new AgentSession({
+		agent,
+		sessionManager,
+		settings,
+		modelRegistry: { getApiKey } as never,
+		toolRegistry: new Map(tools.map(t => [t.name, t])),
+	});
+	sess.setClientBridge(bridge);
+	return sess;
+}
+
+it("delivers two steers admitted in one dialog window first-arrival-first", async () => {
+	// Two admissions can land while one permission dialog is open, before
+	// the gate's abort wake runs: the first group must stay first (the
+	// promotion is FIFO within the window), not be shadowed by the second
+	// group's latest-slot write.
+	const deleteTool = makeFakeTool("delete");
+	const permissionPending = Promise.withResolvers<ClientBridgePermissionOutcome>();
+	const permissionOpened = Promise.withResolvers<void>();
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		async requestPermission(_toolCall, _options, _signal) {
+			permissionOpened.resolve();
+			return await permissionPending.promise;
+		},
+	};
+	const turnStreamStarted = Promise.withResolvers<void>();
+	const releaseTurnStream = Promise.withResolvers<void>();
+	session = await createSessionWithMockModel([deleteTool as AgentTool], bridge, [
+		async () => {
+			turnStreamStarted.resolve();
+			await releaseTurnStream.promise;
+			return {
+				content: [{ type: "toolCall", id: "call-delete-1", name: "delete", arguments: { path: "/tmp/gone.ts" } }],
+			};
+		},
+		{ content: ["answered first steer"] },
+		{ content: ["answered second steer"] },
+	]);
+
+	const promptDone = session.prompt("delete something");
+	await turnStreamStarted.promise;
+	releaseTurnStream.resolve();
+	await permissionOpened.promise;
+
+	// Both admissions in the same dialog window, with no await between the
+	// calls: each call's enqueue fires before the gate's abort wake runs.
+	const first = session.joinActiveTurn("first steering question");
+	const second = session.joinActiveTurn("second steering question");
+	expect(await first).toBe(true);
+	expect(await second).toBe(true);
+
+	await promptDone;
+	await session.waitForIdle();
+	expect(deleteTool.executeCalls).toBe(0);
+
+	const messages = session.agent.state.messages;
+	const contentIndexOf = (needle: string) =>
+		messages.findIndex(message => message.role === "user" && JSON.stringify(message.content).includes(needle));
+	expect(contentIndexOf("first steering question")).toBeLessThan(contentIndexOf("second steering question"));
+
+	permissionPending.resolve({ outcome: "cancelled" });
+});
+
+it("parks a steer submitted before the owning prompt's dispatch preprocessing", async () => {
+	const session = await createSessionWithMockModel([makeFakeTool("noop")], makeBridge({ outcome: "cancelled" }), [
+		{ content: ["ok"] },
+	]);
+
+	// The submission's synchronous prefix must reserve the client claim
+	// before any dispatch preprocessing await (maintenance wait, command
+	// expansion, image normalization): a steer landing in that window parks
+	// until the run goes live and injects into it, instead of being declined
+	// (the pre-fix claim appeared only after normalization, so this steer
+	// answered false and the host's resubmission implicitly cancelled the
+	// still-dispatching prompt).
+	const dispatched = session.prompt("hello there");
+	const steer = session.joinActiveTurn("steer the dispatching prompt");
+	expect(await steer).toBe(true);
+	expect(await dispatched).toBe(true);
+	await session.waitForIdle();
 });

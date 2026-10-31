@@ -105,6 +105,31 @@ describe("AnthropicMessagesClient error mapping", () => {
 		expect((error as AIError.AnthropicApiError).message).toBe("500 status code (no body)");
 	});
 
+	it("names the host and cause when the transport rejects", async () => {
+		const networkError = Object.assign(new TypeError("getaddrinfo ETIMEOUT api.anthropic.com"), {
+			code: "ETIMEOUT",
+		});
+		const { calls, fetch } = createFetchMock([networkError]);
+		const client = new AnthropicMessagesClient({
+			apiKey: "sk-test",
+			baseURL: "https://api.anthropic.com",
+			maxRetries: 0,
+			fetch,
+		});
+
+		const error = await client.messages
+			.create(params)
+			.asResponse()
+			.catch(err => err);
+
+		expect(error).toBeInstanceOf(AIError.AnthropicConnectionError);
+		expect((error as Error).message).toBe(
+			"No internet connection: couldn't reach api.anthropic.com (getaddrinfo ETIMEOUT). Check your network or proxy and try again.",
+		);
+		expect((error as Error).cause).toBe(networkError);
+		expect(calls.length).toBe(1);
+	});
+
 	it("does not let fetchOptions override core request fields", async () => {
 		const { calls, fetch } = createFetchMock([new Response(null, { status: 200 })]);
 		const preAborted = AbortSignal.abort();

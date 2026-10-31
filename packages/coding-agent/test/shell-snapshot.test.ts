@@ -244,7 +244,11 @@ describe("shell-snapshot fn-env helper", () => {
 });
 
 describe("getOrCreateSnapshot", () => {
-	it("re-exports env vars referenced by snapshotted functions (issue #3470)", async () => {
+	// `getOrCreateSnapshot` deliberately returns null on win32 (snapshotting is POSIX-only), and the
+	// assertions below pin POSIX file modes / per-uid dirs that Windows has no equivalent for.
+	const onWindows = process.platform === "win32";
+
+	it.skipIf(onWindows)("re-exports env vars referenced by snapshotted functions (issue #3470)", async () => {
 		const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-3470-"));
 		await fs.writeFile(
 			path.join(home, ".bashrc"),
@@ -297,7 +301,7 @@ describe("getOrCreateSnapshot", () => {
 		expect(dirStat.mode & 0o077).toBe(0);
 	});
 
-	it("keeps the snapshot file at 0600 even when the rc file resets umask to 022", async () => {
+	it.skipIf(onWindows)("keeps the snapshot file at 0600 even when the rc file resets umask to 022", async () => {
 		// PR-review regression: previous revision ran `umask 077` BEFORE sourcing
 		// the rc, so a typical `.bashrc` with `umask 022` reopened the world-read
 		// window between the shell's first `>|` and the JS post-spawn chmod.
@@ -324,6 +328,30 @@ describe("getOrCreateSnapshot", () => {
 		expect(fileStat.mode & 0o077).toBe(0);
 		const content = await fs.readFile(snapshotPath!, "utf8");
 		expect(content).toContain(`export __MISE_EXE='${REAL_ECHO}'`);
+	});
+
+	it.skipIf(onWindows)("drops core-tool aliases so they resolve to real binaries (issue #17067)", async () => {
+		// Regression: the alias filter embedded the anchored `^(ls|...)$` regex
+		// inside `^alias (...)=`, which never matches, so `alias ls='eza --icons'`
+		// reached the bash tool and broke every `ls <path>`.
+		const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-17067-"));
+		await fs.writeFile(path.join(home, ".bashrc"), [`alias ls='eza --icons'`, `alias lg='lazygit'`, ``].join("\n"));
+
+		const realBash = REAL_BASH;
+		if (!existsSync(realBash)) return;
+		const shellLink = path.join(home, "bash-omp-17067");
+		await fs.symlink(realBash, shellLink);
+
+		const snapshotPath = await getOrCreateSnapshot(shellLink, { ...process.env, HOME: home });
+		expect(snapshotPath).not.toBeNull();
+
+		const replay = Bun.spawn(
+			[realBash, "--noprofile", "--norc", "-c", `source "$1"; type -t ls; type -t lg`, "_", snapshotPath!],
+			{ stdout: "pipe", stderr: "pipe" },
+		);
+		const stdout = await readStream(replay.stdout as ReadableStream<Uint8Array> | null);
+		await replay.exited;
+		expect(stdout).toBe("file\nalias\n");
 	});
 	it("cleans up the empty snapshot file when the shell exits with a non-zero code", async () => {
 		const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-fail-"));
@@ -450,7 +478,7 @@ describe("getOrCreateSnapshot", () => {
 		}
 	});
 
-	it("keeps snapshots in a uid-scoped dir so accounts sharing /tmp cannot collide", async () => {
+	it.skipIf(onWindows)("keeps snapshots in a uid-scoped dir so accounts sharing /tmp cannot collide", async () => {
 		// Regression: the dir used to be a single fixed `omp-shell-snapshots` name
 		// under the shared `os.tmpdir()`, created 0700. The first account to run omp
 		// owned it and every other account's pre-create write died with EACCES.

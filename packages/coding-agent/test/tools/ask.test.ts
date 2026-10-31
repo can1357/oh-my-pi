@@ -1509,6 +1509,45 @@ describe("AskTool rich ask dialog", () => {
 		});
 	});
 
+	it("names the option a note is on in the text the model reads and in single-question details", async () => {
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{ id: "s", selectedOptions: ["Two"], note: "picked for speed", noteOption: "Two" },
+				{ id: "m", selectedOptions: ["X", "Y"], note: "Y only on weekends", noteOption: "Y" },
+				{ id: "c", selectedOptions: [], customInput: "my own", note: "about my answer" },
+			],
+		});
+		const questions = [
+			{ id: "s", question: "Single?", options: [{ label: "One" }, { label: "Two" }] },
+			{ id: "m", question: "Multi?", multi: true, options: [{ label: "X" }, { label: "Y" }] },
+			{ id: "c", question: "Custom?", options: [{ label: "A" }] },
+		];
+		const tool = new AskTool(createSession());
+		const multi = await tool.execute("call-multi", { questions }, undefined, undefined, createContext({ askDialog }));
+		expect(multi.content[0]).toEqual({
+			type: "text",
+			text: 'User answers:\ns: Two (note on Two: picked for speed)\nm: [X, Y] (note on Y: Y only on weekends)\nc: "my own" (note: about my answer)',
+		});
+
+		askDialog.mockResolvedValue({
+			kind: "submit",
+			results: [{ id: "m", selectedOptions: ["X", "Y"], note: "Y only on weekends", noteOption: "Y" }],
+		});
+		const single = await tool.execute(
+			"call-single",
+			{ questions: [questions[1]!] },
+			undefined,
+			undefined,
+			createContext({ askDialog }),
+		);
+		expect(single.content[0]).toEqual({
+			type: "text",
+			text: "User selected: X, Y\nUser added note on Y: Y only on weekends",
+		});
+		expect(single.details?.noteOption).toBe("Y");
+	});
+
 	it("returns custom-answer and note images after text, numbering markers across answers in text and details", async () => {
 		// A clipboard paste committed to the session carries its file; the model gets the same
 		// source notice a main-editor attachment gets, right before the image.
