@@ -317,11 +317,6 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"strip-image-input": wire("stripImageInput", [...OAI, "anthropic", "google"]),
 	"supports-forced-tool-choice": wire("supportsForcedToolChoice", [...OAI, "anthropic", "bedrock"]),
 	"supports-sampling-params": wire("supportsSamplingParams", [...OAI, "anthropic", "bedrock", "devin", "google"]),
-	"thinking-loop-guard": wire("thinkingLoopGuard", [...OAI, "anthropic", "google"], "scalar", [
-		"gemini",
-		"deepseek",
-		"xai",
-	]),
 
 	// ── thinking control surface ──
 	"thinking-default-level": { key: "defaultLevel", set: "thinking", shape: "scalar", values: EFFORTS },
@@ -455,6 +450,19 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		set: "catalog",
 		shape: "scalar",
 		values: ["output", "signature"],
+	},
+	/**
+	 * Stream loop guard for the model line, on every host and API (read
+	 * through `loopGuardLevel` in pi-ai `utils/thinking-loop`). `semantic`
+	 * adds near-duplicate and stalled-wording paragraph detection to the
+	 * exact repeated-cycle check; `off` disables the guard. Unassigned: exact
+	 * repeated cycles only.
+	 */
+	"thinking-loop-guard": {
+		key: "thinkingLoopGuard",
+		set: "catalog",
+		shape: "scalar",
+		values: ["off", "semantic"],
 	},
 	"delegation-bias": { key: "delegationBias", set: "catalog", shape: "scalar", values: DELEGATION_BIASES },
 	"discovery-api": { key: "discoveryApi", set: "catalog", shape: "scalar" },
