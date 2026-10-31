@@ -537,6 +537,20 @@ describe("AsyncJobManager", () => {
 		}
 	});
 
+	test("a cap between 0 and 1 still allows one job, as before", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: () => 0.5, onJobComplete: async () => {} });
+		const release = Promise.withResolvers<void>();
+		try {
+			registerHeldJobs(manager, 1, release.promise);
+			expect(manager.atCapacity).toBe(true);
+			expect(() => registerHeldJobs(manager, 1, release.promise)).toThrow("Background job limit reached (1)");
+		} finally {
+			release.resolve();
+			await manager.waitForAll();
+			await manager.dispose();
+		}
+	});
+
 	test("a manager with the default cap of async.maxJobs, 100, still refuses the 101st job", async () => {
 		const manager = new AsyncJobManager({ maxRunningJobs: () => 100, onJobComplete: async () => {} });
 		const release = Promise.withResolvers<void>();

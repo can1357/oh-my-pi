@@ -371,11 +371,14 @@ export class AsyncJobManager {
 		);
 	}
 
-	/** Effective running-job cap, resolved at check time; `Infinity` when the configured cap is `0` or less. */
+	/**
+	 * Effective running-job cap, resolved at check time: `Infinity` when the configured cap is `0` or
+	 * less, else the cap floored to at least 1.
+	 */
 	get #maxRunningJobs(): number {
 		const option = this.#maxRunningJobsOption;
-		const value = Math.floor((typeof option === "function" ? option() : option) ?? DEFAULT_MAX_RUNNING_JOBS);
-		return value > 0 ? value : Number.POSITIVE_INFINITY;
+		const value = (typeof option === "function" ? option() : option) ?? DEFAULT_MAX_RUNNING_JOBS;
+		return value > 0 ? Math.max(1, Math.floor(value)) : Number.POSITIVE_INFINITY;
 	}
 
 	/** True when the running-job count has reached the configured cap. */
