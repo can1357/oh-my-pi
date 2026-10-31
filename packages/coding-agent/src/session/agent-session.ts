@@ -5376,6 +5376,87 @@ export class AgentSession implements SettingsScope {
 		}
 		return undefined;
 	}
+	#preserveAbortedZeroOutputPrompt(expandedText: string, options?: PromptOptions): string {
+		if (options?.synthetic) return expandedText;
+		const CANCELLATION_CUE_PATTERN = /^\s*(stop|cancel|abort|never\s*mind|disregard|forget\s+that)\b/i;
+		if (CANCELLATION_CUE_PATTERN.test(expandedText)) return expandedText;
+
+		const messages = this.agent.state.messages;
+		if (messages.length < 2) return expandedText;
+
+		const lastAssistantIndex = messages.findLastIndex(m => m.role === "assistant");
+		if (lastAssistantIndex < 0) return expandedText;
+
+		const lastAssistant = messages[lastAssistantIndex] as AssistantMessage;
+		if (lastAssistant.stopReason !== "aborted") return expandedText;
+
+		// Check if any visible assistant text was produced (resp_len === 0)
+		for (const block of lastAssistant.content) {
+			if (block.type === "text" && block.text.trim().length > 0) return expandedText;
+		}
+
+		// Check if any completed tool execution occurred in M1's turn
+		for (let i = lastAssistantIndex - 1; i >= 0; i--) {
+			const m = messages[i];
+			if (m.role === "user") break;
+			if (m.role === "toolResult") {
+				if (m.details && typeof m.details === "object" && "executed" in m.details && m.details.executed === false) {
+					continue;
+				}
+				return expandedText;
+			}
+			if (m.role === "assistant") {
+				for (const block of m.content) {
+					if (block.type === "text" && block.text.trim().length > 0) return expandedText;
+				}
+			}
+		}
+
+		// Also check tool results after lastAssistant
+		for (let i = lastAssistantIndex + 1; i < messages.length; i++) {
+			const m = messages[i];
+			if (m.role === "user") break;
+			if (m.role === "toolResult") {
+				if (m.details && typeof m.details === "object" && "executed" in m.details && m.details.executed === false) {
+					continue;
+				}
+				return expandedText;
+			}
+		}
+
+		// Find the user prompt M1 that initiated this turn
+		let m1UserMessage: UserMessage | undefined;
+		for (let i = lastAssistantIndex - 1; i >= 0; i--) {
+			const m = messages[i];
+			if (m.role === "user") {
+				m1UserMessage = m as UserMessage;
+				break;
+			}
+		}
+
+		if (!m1UserMessage) return expandedText;
+
+		// Check within < 120_000 ms
+		const elapsedMs = Date.now() - m1UserMessage.timestamp;
+		if (elapsedMs >= 120_000) return expandedText;
+
+		let m1Text = "";
+		if (typeof m1UserMessage.content === "string") {
+			m1Text = m1UserMessage.content.trim();
+		} else if (Array.isArray(m1UserMessage.content)) {
+			const parts: string[] = [];
+			for (const part of m1UserMessage.content) {
+				if (part.type === "text" && part.text.trim().length > 0) {
+					parts.push(part.text.trim());
+				}
+			}
+			m1Text = parts.join("\n\n");
+		}
+
+		if (!m1Text) return expandedText;
+
+		return `${m1Text}\n\n${expandedText}`;
+	}
 
 	#localProtocolOptions(): LocalProtocolOptions {
 		return {
@@ -7812,10 +7893,11 @@ export class AgentSession implements SettingsScope {
 		const templated = expandPromptTemplates ? expandPromptTemplate(text, [...this.#promptTemplates]) : text;
 		const expandedText = options?.synthetic ? templated : this.#modelMentions.expandMentions(templated);
 
+		const finalExpandedText = this.#preserveAbortedZeroOutputPrompt(expandedText, options);
 		// Magic keywords (see modes/magic-keywords.ts): append hidden system notices after the
 		// user's message that steer this turn. User-authored prompts only — synthetic /
 		// agent-initiated turns never trigger them.
-		const keywordNotices = options?.synthetic ? [] : this.#createMagicKeywordNotices(expandedText);
+		const keywordNotices = options?.synthetic ? [] : this.#createMagicKeywordNotices(finalExpandedText);
 
 		// A `^` mention in a non-synthetic prompt mints a new alias. The hidden
 		// session-agent notice (which tells the model about the alias) must ride
@@ -7852,7 +7934,7 @@ export class AgentSession implements SettingsScope {
 			// abort() can land while the images are prepared; the message is then
 			// dropped instead of queued (same contract as the idle drop below).
 			const queueGeneration = this.#promptGeneration;
-			const queued = await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, {
+			const queued = await this.#queueUserMessage(finalExpandedText, options?.images, streamingBehavior, {
 				timestamp: submittedAt,
 				attribution: promptAttribution,
 				prependMessages: prependNotices,
@@ -7883,13 +7965,13 @@ export class AgentSession implements SettingsScope {
 				? buildNamedToolChoice("think", activeModel)
 				: undefined;
 		const eagerTodoPrelude =
-			!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTodoPrelude(expandedText) : undefined;
+			!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTodoPrelude(finalExpandedText) : undefined;
 		const eagerTaskPrelude =
-			!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTaskPrelude(expandedText) : undefined;
+			!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTaskPrelude(finalExpandedText) : undefined;
 		const attachmentSourceNotices = this.#createAttachmentSourceNotices(options?.images, submittedAt);
 		const normalizedImages = await this.#normalizeImagesForModel(options?.images);
 
-		const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
+		const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: finalExpandedText }];
 		if (normalizedImages?.length) {
 			userContent.push(...normalizedImages);
 		}
@@ -7927,7 +8009,7 @@ export class AgentSession implements SettingsScope {
 				outcome.sessionClaimed = this.agent.state.isStreaming;
 				throw new AgentBusyError();
 			}
-			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, {
+			await this.#queueUserMessage(finalExpandedText, options?.images, streamingBehavior, {
 				timestamp: submittedAt,
 				attribution: promptAttribution,
 				prependMessages: prependNotices,
@@ -7984,7 +8066,7 @@ export class AgentSession implements SettingsScope {
 		let turnError: unknown;
 		let dispatched = false;
 		try {
-			dispatched = await this.#promptWithMessage(message, expandedText, {
+			dispatched = await this.#promptWithMessage(message, finalExpandedText, {
 				...options,
 				images: normalizedImages,
 				prependMessages:
