@@ -2,15 +2,23 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The bash tool's built-in `rsync` now escapes non-ASCII bytes in the file names it prints unless the shell's locale is a charset the system can load, the way rsync 3.5.1 does; a UTF-8 locale and `--8-bit-output` print them unescaped ([#17401](https://github.com/can1357/oh-my-pi/pull/17401) by [@sjawhar](https://github.com/sjawhar))
+- The bash tool's built-in `rsync` now escapes non-ASCII bytes in an option-error message in every locale, as rsync 3.5.1 does, unless an earlier `-8` on the same command line turns the escaping off ([#17401](https://github.com/can1357/oh-my-pi/pull/17401) by [@sjawhar](https://github.com/sjawhar))
+- The bash tool's built-in `rsync` now resolves a locale the shell exports through `LOCPATH` or `PATH_LOCALE`, so a file name that locale represents prints unescaped instead of falling back to the C locale, and prints a warning when it cannot read that locale at all rather than escaping without a word ([#17401](https://github.com/can1357/oh-my-pi/pull/17401) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.14.1] - 2026-10-31
+
 ### Added
 
 - Added `FileLock.isHeld(path)`, which reports whether a lock is held without acquiring it ([#17428](https://github.com/can1357/oh-my-pi/pull/17428) by [@andrebrait](https://github.com/andrebrait))
 
 ### Fixed
 
-- The bash tool's built-in `rsync` now escapes non-ASCII bytes in the file names it prints unless the shell's locale is a charset the system can load, the way rsync 3.5.1 does; a UTF-8 locale and `--8-bit-output` print them unescaped ([#17401](https://github.com/can1357/oh-my-pi/pull/17401) by [@sjawhar](https://github.com/sjawhar))
-- The bash tool's built-in `rsync` now escapes non-ASCII bytes in an option-error message in every locale, as rsync 3.5.1 does, unless an earlier `-8` on the same command line turns the escaping off ([#17401](https://github.com/can1357/oh-my-pi/pull/17401) by [@sjawhar](https://github.com/sjawhar))
-- The bash tool's built-in `rsync` now resolves a locale the shell exports through `LOCPATH` or `PATH_LOCALE`, so a file name that locale represents prints unescaped instead of falling back to the C locale, and prints a warning when it cannot read that locale at all rather than escaping without a word ([#17401](https://github.com/can1357/oh-my-pi/pull/17401) by [@sjawhar](https://github.com/sjawhar))
+- Fixed native search on Windows (the bash tool's `fd`, grep, glob) failing with "The filename, directory name, or volume label syntax is incorrect" or "path not found" for paths with `.`/`..` components or `/` separators, including `fd` run without a search path
+- Fixed glob and find on Windows reporting a symlinked file's own size and mtime instead of its target's, which dropped linked files from listings that skip empty files
+- Fixed the bash tool's built-in `rsync` on Windows ignoring per-directory merge files whose name includes a directory part, such as `--filter=':- ../rules'`
 
 ## [18.14.0] - 2026-10-29
 

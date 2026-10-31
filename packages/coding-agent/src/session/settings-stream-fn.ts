@@ -27,6 +27,7 @@ import {
 	cfgProvidersCacheRetention,
 	cfgProvidersMaxInFlightRequests,
 	cfgProvidersMuseCodeStoreResponses,
+	cfgProvidersOpenaiCodexDaybreak,
 	cfgProvidersOpenaiLiveSteering,
 	cfgProvidersOpenaiWebsockets,
 	cfgProvidersOpenrouterVariant,
@@ -133,6 +134,11 @@ export function createSettingsAwareStreamFn(
 		const storeResponses =
 			streamOptions?.storeResponses ??
 			(model.provider === "muse-code" ? cfgProvidersMuseCodeStoreResponses.get(settings) : undefined);
+		// Per request from this session's settings: the process-wide default in
+		// pi-ai follows whichever session bound effects last.
+		const codexAccessPrograms =
+			streamOptions?.codexAccessPrograms ??
+			(model.api === "openai-codex-responses" ? cfgProvidersOpenaiCodexDaybreak.get(settings) : undefined);
 		const maxInFlightRequests = validateProviderMaxInFlightRequests(
 			streamOptions?.maxInFlightRequests ?? cfgProvidersMaxInFlightRequests.get(settings),
 		);
@@ -171,6 +177,7 @@ export function createSettingsAwareStreamFn(
 			liveSteering: cfgProvidersOpenaiLiveSteering.get(settings) ? streamOptions?.liveSteering : undefined,
 			...(fallbacks !== undefined ? { fallbacks } : {}),
 			...(storeResponses !== undefined ? { storeResponses } : {}),
+			...(codexAccessPrograms !== undefined ? { codexAccessPrograms } : {}),
 			...(slowModeHooks !== undefined ? { anthropicSlowMode: slowModeHooks } : {}),
 		};
 		return base(model, context, merged);
