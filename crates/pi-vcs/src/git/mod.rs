@@ -294,119 +294,31 @@ fn read_optional(path: &Path) -> Option<String> {
 /// Resolve a git dir's explicit `core.worktree` override to an absolute
 /// path — the mechanism `git submodule` and `git init --separate-git-dir`
 /// both use to point a git dir at a work tree that is not its own parent
-/// directory. `None` when unset, the ordinary case. Read textually: the
-/// discovery paths this serves must stay gix-free.
+/// directory. `None` when unset, the ordinary case.
+///
+/// The key comes from the files git's own repository setup reads for the
+/// main worktree: the git dir's `config`, then its `config.worktree` when
+/// `extensions.worktreeConfig` is on, which is where `git sparse-checkout
+/// init` moves the key. Git follows neither file's `include.path` for this
+/// key, so neither does this. The files go through gitoxide's config
+/// parser, which opens no repository, so discovery stays a filesystem walk.
 fn configured_worktree(git_dir: &Path) -> Option<PathBuf> {
-	let content = read_optional(&git_dir.join("config"))?;
-	let worktree = parse_core_worktree(&content)?;
-	let path = Path::new(&worktree);
-	if path.is_absolute() {
-		Some(normalize_path(path))
-	} else {
-		Some(normalize_path(&git_dir.join(path)))
-	}
-}
+	use gix::bstr::ByteSlice as _;
 
-/// Parse `core.worktree` out of git-config text. Sections and keys compare
-/// case-insensitively; subsections (`[core "x"]`) never match; git's
-/// backslash escapes decode regardless of whether the value is quoted, and
-/// an unquoted `#`/`;` starts a trailing comment. A leading UTF-8 BOM is
-/// skipped, as git does. Scans the whole file and keeps the last assignment
-/// seen — git's own precedence for a repeated scalar key — rather than
-/// stopping at the first match.
-fn parse_core_worktree(content: &str) -> Option<String> {
-	let content = content.strip_prefix('\u{feff}').unwrap_or(content);
-	let mut in_core = false;
-	let mut worktree = None;
-	let mut lines = content.lines();
-	while let Some(raw) = lines.next() {
-		let line = raw.trim();
-		if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
-			continue;
-		}
-		if let Some(rest) = line.strip_prefix('[') {
-			in_core = match rest.split_once(']') {
-				Some((name, trailer)) => {
-					let trailer = trailer.trim_start();
-					(trailer.is_empty() || trailer.starts_with('#') || trailer.starts_with(';'))
-						&& name.trim().eq_ignore_ascii_case("core")
-				},
-				None => false,
-			};
-		}
-		if !in_core {
-			continue;
-		}
-		let Some((key, value)) = line.split_once('=') else {
-			continue;
-		};
-		if !key.trim().eq_ignore_ascii_case("worktree") {
-			continue;
-		}
-		let value = decode_config_value(value.trim(), &mut lines);
-		worktree = if value.is_empty() { None } else { Some(value) };
-	}
-	worktree
-}
-
-/// Decode a `core.worktree` value per git's config value grammar: a double
-/// quote toggles a verbatim region that may contain leading/trailing
-/// whitespace and `#`/`;` literally, and — inside or outside quotes — a
-/// backslash escapes the following character: `\"` and `\\` for the quote
-/// and backslash themselves, `\n`/`\t`/`\b` for the named control
-/// characters. Any other `\x` keeps `x`; git itself rejects such a file as
-/// a bad config line, so no value git accepts depends on it. Git 2.43
-/// writes a submodule's `core.worktree` unquoted with the quote character
-/// backslash-escaped (`worktree = ../../../sub\"quote`) whenever the path
-/// only needs that one escape, so escape decoding cannot be gated on the
-/// value being quoted. A backslash ending a line continues the value on the
-/// next line of `continuation`, which is consumed so the caller does not
-/// parse it as a line of its own. An unescaped `#`/`;` outside quotes
-/// starts a trailing comment; unquoted trailing whitespace before it (or
-/// before end of value) is trimmed, same as git, while whitespace inside
-/// quotes is kept.
-fn decode_config_value<'a>(
-	value: &'a str,
-	continuation: &mut impl Iterator<Item = &'a str>,
-) -> String {
-	let mut out = String::with_capacity(value.len());
-	let mut chars = value.chars();
-	let mut quoted = false;
-	let mut trim_from: Option<usize> = None;
-	while let Some(ch) = chars.next() {
-		match ch {
-			'"' => {
-				quoted = !quoted;
-				trim_from = None;
-			},
-			'\\' => {
-				trim_from = None;
-				match chars.next() {
-					Some('n') => out.push('\n'),
-					Some('t') => out.push('\t'),
-					Some('b') => out.push('\u{8}'),
-					Some(escaped) => out.push(escaped),
-					None => match continuation.next() {
-						Some(next) => chars = next.chars(),
-						None => break,
-					},
-				}
-			},
-			'#' | ';' if !quoted => break,
-			ch if !quoted && ch.is_whitespace() => {
-				trim_from.get_or_insert(out.len());
-				out.push(ch);
-			},
-			ch => {
-				trim_from = None;
-				out.push(ch);
-			},
-		}
-	}
-	if let Some(index) = trim_from {
-		out.truncate(index);
-	}
-	out
+	let read = |name: &str, source: gix::config::Source| {
+		gix::config::File::from_path_no_includes(git_dir.join(name), source).ok()
+	};
+	let config = read("config", gix::config::Source::Local)?;
+	let worktree_config = matches!(config.boolean("extensions.worktreeConfig"), Some(Ok(true)))
+		.then(|| read("config.worktree", gix::config::Source::Worktree))
+		.flatten();
+	let worktree = worktree_config
+		.as_ref()
+		.and_then(|file| file.string("core.worktree"))
+		.or_else(|| config.string("core.worktree"))
+		.filter(|worktree| !worktree.is_empty())?;
+	// A relative value is relative to the git dir; `join` keeps an absolute one.
+	Some(normalize_path(&git_dir.join(worktree.to_path_lossy())))
 }
 
 /// Lexically normalize `.`/`..` segments without touching the filesystem, so
@@ -694,14 +606,56 @@ mod tests {
 		}
 	}
 
+	/// `configured_worktree()` of a submodule-shaped git dir,
+	/// `<temp>/super/.git/modules/sub`, whose `config` holds `config` and whose
+	/// `config.worktree` holds `worktree_config` when given. The result comes
+	/// back relative to `<temp>`, so `../../../x` in a config reads `super/x`.
+	fn worktree_from(config: &str, worktree_config: Option<&str>) -> Option<PathBuf> {
+		let temp = tempfile::tempdir().unwrap();
+		let git_dir = temp.path().join("super/.git/modules/sub");
+		fs::create_dir_all(&git_dir).unwrap();
+		fs::write(git_dir.join("config"), config).unwrap();
+		if let Some(worktree_config) = worktree_config {
+			fs::write(git_dir.join("config.worktree"), worktree_config).unwrap();
+		}
+		let worktree = configured_worktree(&git_dir)?;
+		Some(
+			worktree
+				.strip_prefix(temp.path())
+				.map_or_else(|_| worktree.clone(), Path::to_path_buf),
+		)
+	}
+
+	#[test]
+	fn core_worktree_resolves_relative_to_the_git_dir() {
+		// Exactly what `git submodule add` writes for a checkout at `super/sub`.
+		assert_eq!(
+			worktree_from("[core]\n\tbare = false\n\tworktree = ../../../sub\n", None),
+			Some(PathBuf::from("super/sub"))
+		);
+		assert_eq!(worktree_from("[core]\n\tbare = false\n", None), None);
+		#[cfg(unix)]
+		assert_eq!(
+			worktree_from("[core]\n\tworktree = /elsewhere/main\n", None),
+			Some(PathBuf::from("/elsewhere/main"))
+		);
+	}
+
 	#[test]
 	fn core_worktree_repeated_key_honors_last_occurrence() {
 		// Git itself applies a repeated scalar key in file order, last wins —
-		// `git config --get core.worktree` on this exact text returns `/main`.
+		// `git config --get core.worktree` on this exact text returns the
+		// second value.
 		assert_eq!(
-			parse_core_worktree("[core]\n\tworktree = /wrong\n\tworktree = /main\n"),
-			Some("/main".to_owned())
+			worktree_from("[core]\n\tworktree = ../../../wrong\n\tworktree = ../../../main\n", None),
+			Some(PathBuf::from("super/main"))
 		);
+	}
+
+	#[test]
+	fn core_worktree_ignores_a_core_subsection() {
+		// `[core "x"]` is section `core.x`, not `core`.
+		assert_eq!(worktree_from("[core \"x\"]\n\tworktree = ../../../main\n", None), None);
 	}
 
 	#[test]
@@ -713,8 +667,8 @@ mod tests {
 		// to the common dir and a linked worktree derives a different Mnemopi
 		// bank root than direct access to the same checkout.
 		assert_eq!(
-			parse_core_worktree("[core] # relocated by git-submodule\n\tworktree = /main\n"),
-			Some("/main".to_owned())
+			worktree_from("[core] # relocated by git-submodule\n\tworktree = ../../../main\n", None),
+			Some(PathBuf::from("super/main"))
 		);
 	}
 
@@ -723,8 +677,18 @@ mod tests {
 		// Same as the `#` case above, but with git's other valid inline-comment
 		// marker.
 		assert_eq!(
-			parse_core_worktree("[core]; relocated by git-submodule\n\tworktree = /main\n"),
-			Some("/main".to_owned())
+			worktree_from("[core]; relocated by git-submodule\n\tworktree = ../../../main\n", None),
+			Some(PathBuf::from("super/main"))
+		);
+	}
+
+	#[test]
+	fn core_worktree_recognizes_a_key_on_the_section_header_line() {
+		// A key may follow the header on its own line: git 2.43's `git config
+		// --file <config> --get core.worktree` returns the value for this text.
+		assert_eq!(
+			worktree_from("[core] worktree = ../../../main\n", None),
+			Some(PathBuf::from("super/main"))
 		);
 	}
 
@@ -734,8 +698,8 @@ mod tests {
 		// (verified against real git 2.43): the quote is escaped, and the
 		// backslash preceding it must not survive into the resolved path.
 		assert_eq!(
-			parse_core_worktree("[core]\n\tworktree = \"../../../sub\\\"quote\"\n"),
-			Some(r#"../../../sub"quote"#.to_owned())
+			worktree_from("[core]\n\tworktree = \"../../../sub\\\"quote\"\n", None),
+			Some(PathBuf::from(r#"super/sub"quote"#))
 		);
 	}
 
@@ -746,20 +710,20 @@ mod tests {
 		// wrapping the whole value in quotes, so escape decoding must not be
 		// gated on the value being fully quoted.
 		assert_eq!(
-			parse_core_worktree("[core]\n\tworktree = ../../../sub\\\"quote\n"),
-			Some(r#"../../../sub"quote"#.to_owned())
+			worktree_from("[core]\n\tworktree = ../../../sub\\\"quote\n", None),
+			Some(PathBuf::from(r#"super/sub"quote"#))
 		);
 	}
 
 	#[test]
 	fn core_worktree_skips_a_leading_utf8_bom() {
 		// Git skips a UTF-8 byte-order mark at the start of a config file, so
-		// `git config --file <config> --get core.worktree` on this text returns
-		// `/main`. Without skipping it the first `[core]` header goes
+		// `git config --file <config> --get core.worktree` returns the value
+		// for this text. Without skipping it the first `[core]` header goes
 		// unrecognized and `primary_root()` falls back to the common dir.
 		assert_eq!(
-			parse_core_worktree("\u{feff}[core]\n\tworktree = /main\n"),
-			Some("/main".to_owned())
+			worktree_from("\u{feff}[core]\n\tworktree = ../../../main\n", None),
+			Some(PathBuf::from("super/main"))
 		);
 	}
 
@@ -767,16 +731,107 @@ mod tests {
 	fn core_worktree_joins_backslash_continued_lines() {
 		// A backslash at the end of a line continues the value on the next
 		// line, inside or outside quotes. Git 2.43's `git config --file
-		// <config> --get core.worktree` returns `/path/main` for both texts; a
-		// truncated `/path/ma` would point `primary_root()` at a path that
+		// <config> --get core.worktree` returns `../../../main` for both texts;
+		// a truncated `../../../ma` would point `primary_root()` at a path that
 		// does not exist.
 		assert_eq!(
-			parse_core_worktree("[core]\n\tworktree = /path/ma\\\nin\n"),
-			Some("/path/main".to_owned())
+			worktree_from("[core]\n\tworktree = ../../../ma\\\nin\n", None),
+			Some(PathBuf::from("super/main"))
 		);
 		assert_eq!(
-			parse_core_worktree("[core]\n\tworktree = \"/path/ma\\\nin\" # note\n"),
-			Some("/path/main".to_owned())
+			worktree_from("[core]\n\tworktree = \"../../../ma\\\nin\" # note\n", None),
+			Some(PathBuf::from("super/main"))
 		);
+	}
+
+	#[test]
+	fn core_worktree_reads_config_worktree_only_under_the_worktree_config_extension() {
+		// Git's repository setup reads `config.worktree` after `config` only
+		// when `extensions.worktreeConfig` is on: `git --git-dir=<dir>
+		// rev-parse --show-toplevel` (git 2.43) reports `b` for the first two
+		// layouts and `a` for the third.
+		let moved = "[core]\n\tworktree = ../../../b\n";
+		assert_eq!(
+			worktree_from("[extensions]\n\tworktreeConfig = true\n", Some(moved)),
+			Some(PathBuf::from("super/b"))
+		);
+		assert_eq!(
+			worktree_from(
+				"[core]\n\tworktree = ../../../a\n[extensions]\n\tworktreeConfig = true\n",
+				Some(moved)
+			),
+			Some(PathBuf::from("super/b"))
+		);
+		assert_eq!(
+			worktree_from("[core]\n\tworktree = ../../../a\n", Some(moved)),
+			Some(PathBuf::from("super/a"))
+		);
+	}
+
+	/// Canonical `primary_root()` of the checkout containing `dir`.
+	fn canonical_primary_root(dir: &Path) -> PathBuf {
+		let repo = GitRepo::discover(dir).unwrap().expect("checkout");
+		fs::canonicalize(repo.primary_root()).unwrap()
+	}
+
+	#[test]
+	fn primary_root_of_a_submodule_and_its_worktree_survives_sparse_checkout() {
+		let temp = tempfile::tempdir().unwrap();
+		let source = temp.path().join("source");
+		let superproject = temp.path().join("super");
+		for repo in [&source, &superproject] {
+			fs::create_dir_all(repo).unwrap();
+			run_git(repo, &["init", "-q", "-b", "main"]);
+			run_git(repo, &["config", "user.name", "VCS Test"]);
+			run_git(repo, &["config", "user.email", "vcs@example.com"]);
+			run_git(repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+		}
+		run_git(&superproject, &[
+			"-c",
+			"protocol.file.allow=always",
+			"submodule",
+			"add",
+			"-q",
+			source.to_str().unwrap(),
+			"sub",
+		]);
+		let submodule = superproject.join("sub");
+		let worktree = temp.path().join("sub-wt");
+		run_git(&submodule, &["worktree", "add", "-q", "-b", "wt", worktree.to_str().unwrap()]);
+		let expected = fs::canonicalize(&submodule).unwrap();
+		assert_eq!(canonical_primary_root(&submodule), expected);
+		assert_eq!(canonical_primary_root(&worktree), expected);
+
+		// Git 2.36+ moves `core.worktree` into `config.worktree` here and turns
+		// on `extensions.worktreeConfig`; the checkout must not resolve to the
+		// internal `.git/modules/sub` store afterwards.
+		run_git(&submodule, &["sparse-checkout", "init", "--cone"]);
+		assert_eq!(canonical_primary_root(&submodule), expected);
+		assert_eq!(canonical_primary_root(&worktree), expected);
+	}
+
+	#[test]
+	fn primary_root_of_a_separate_git_dir_checkout_matches_its_worktree() {
+		// `--separate-git-dir` writes no `core.worktree`, so both resolve to
+		// the git dir, the root `git worktree list` reports first.
+		let temp = tempfile::tempdir().unwrap();
+		let checkout = temp.path().join("sep");
+		let git_dir = temp.path().join("sep.git");
+		run_git(temp.path(), &[
+			"init",
+			"-q",
+			"-b",
+			"main",
+			&format!("--separate-git-dir={}", git_dir.display()),
+			checkout.to_str().unwrap(),
+		]);
+		run_git(&checkout, &["config", "user.name", "VCS Test"]);
+		run_git(&checkout, &["config", "user.email", "vcs@example.com"]);
+		run_git(&checkout, &["commit", "-q", "--allow-empty", "-m", "init"]);
+		let worktree = temp.path().join("sep-wt");
+		run_git(&checkout, &["worktree", "add", "-q", "-b", "wt", worktree.to_str().unwrap()]);
+		let expected = fs::canonicalize(&git_dir).unwrap();
+		assert_eq!(canonical_primary_root(&checkout), expected);
+		assert_eq!(canonical_primary_root(&worktree), expected);
 	}
 }
