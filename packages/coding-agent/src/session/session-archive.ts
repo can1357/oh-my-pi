@@ -139,7 +139,7 @@ export async function restoreRecordRefusal(record: string): Promise<string | und
 export function restoreRecordLeftNote(record: string): string {
 	return (
 		`${record} was there before this run — an earlier restore's record of being unfinished, or something else — and a ` +
-		`restore removes only the record it wrote itself, so it was left; while it is there this session is treated as ` +
+		`restore removes only the record it created in the same run, so it was left; while it is there this session is treated as ` +
 		`unfinished: look at it, and once the session holds everything, move it aside`
 	);
 }
