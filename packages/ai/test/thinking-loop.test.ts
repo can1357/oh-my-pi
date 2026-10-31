@@ -8,6 +8,7 @@ import type { Api, AssistantMessage, AssistantMessageEvent, Context, Model, Mode
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { wrapLeakedThinkingStream } from "@oh-my-pi/pi-ai/utils/leaked-thinking-stream";
 import {
+	GEMINI_HEADER_PARTIAL_LINE_CAP,
 	GEMINI_HEADER_RUNAWAY_THRESHOLD,
 	GeminiHeaderRunDetector,
 	isLoopGuardedModel,
@@ -1098,6 +1099,110 @@ describe("GeminiHeaderRunDetector", () => {
 		detector.reset();
 		expect(detector.count).toBe(0);
 		expect(detector.push(runaway)).toBe(true);
+	});
+
+	test("counts a title whose capped tail trims to whitespace-only", () => {
+		// A title followed by a whitespace run longer than the partial-line cap:
+		// the retained tail is whitespace-only, so the verdict must come from the
+		// folded opening marker, never from `line !== ""` on the capped tail.
+		const detector = new GeminiHeaderRunDetector();
+		expect(detector.push(`## Padding Title ${" ".repeat(GEMINI_HEADER_PARTIAL_LINE_CAP)}`)).toBe(false);
+		expect(detector.push("\n")).toBe(false);
+		expect(detector.count).toBe(1);
+	});
+
+	test("counts a padded bold title once per line whether whole or split before its newline", () => {
+		// A bold title followed by a whitespace run longer than the partial-line
+		// cap: the `**` closer that makes the run a title is cut out of the
+		// retained tail along with the head, so the tail can no longer witness it.
+		// Failure mode: the title counts when the delta that completes the line
+		// also carries its newline, and is dropped as soon as the boundary falls
+		// before the newline — a model looping on padded bold titles is never
+		// interrupted and the user waits on a stream that never issues a tool call.
+		const title = (i: number) => `**Refining Stage ${i}**${" ".repeat(GEMINI_HEADER_PARTIAL_LINE_CAP + 8)}`;
+		// Each line completing inside one delta is judged whole (the pre-cap verdict).
+		const whole = new GeminiHeaderRunDetector();
+		for (let i = 0; i < GEMINI_HEADER_RUNAWAY_THRESHOLD; i++) whole.push(`${title(i)}\n`);
+		expect(whole.count).toBe(GEMINI_HEADER_RUNAWAY_THRESHOLD);
+		// The same titles with the boundary before the newline must agree.
+		const split = new GeminiHeaderRunDetector();
+		let tripped = false;
+		for (let i = 0; i < GEMINI_HEADER_RUNAWAY_THRESHOLD; i++) {
+			split.push(title(i));
+			tripped = split.push("\n") || tripped;
+		}
+		expect(split.count).toBe(GEMINI_HEADER_RUNAWAY_THRESHOLD);
+		expect(tripped).toBe(true);
+	});
+
+	test("never counts a marker-only bold run past the partial-line cap as a title", () => {
+		// `****` with nothing but whitespace around it is not a summary title: the
+		// whole-line verdict needs `.+` between the opener and the closer. Failure
+		// mode: the retained tail still ends on the marker, so the line is counted
+		// as a title only when the delta boundary falls before the newline — a
+		// phantom header that can drive a legitimate reasoning block over the
+		// runaway threshold and interrupt the stream with a spurious reminder.
+		const stray = (i: number) => `${" ".repeat(GEMINI_HEADER_PARTIAL_LINE_CAP + 8 + i)}****`;
+		// Each line completing inside one delta is judged whole: no title.
+		const whole = new GeminiHeaderRunDetector();
+		for (let i = 0; i < GEMINI_HEADER_RUNAWAY_THRESHOLD; i++) whole.push(`${stray(i)}\n`);
+		expect(whole.count).toBe(0);
+		// The same lines with the boundary before the newline must agree.
+		const split = new GeminiHeaderRunDetector();
+		let tripped = false;
+		for (let i = 0; i < GEMINI_HEADER_RUNAWAY_THRESHOLD; i++) {
+			tripped = split.push(stray(i)) || split.push("\n") || tripped;
+		}
+		expect(split.count).toBe(0);
+		expect(tripped).toBe(false);
+	});
+
+	test("trips on a runaway padded past the partial-line cap whatever the chunking", () => {
+		// 36 distinct titles each padded past the cap with whitespace: the retained
+		// tail is whitespace-only, so chunked feeds must still count every title
+		// exactly as a single whole delta does.
+		const padded: string[] = [];
+		for (let i = 0; i < GEMINI_HEADER_RUNAWAY_THRESHOLD; i++) {
+			padded.push(`## Refining Stage ${i}${" ".repeat(GEMINI_HEADER_PARTIAL_LINE_CAP)}`);
+		}
+		const text = `${padded.join("\n")}\n`;
+		// One chunking representative: every generated line is a 19-20 character
+		// prefix plus 512 spaces, so it is longer than the cap and every chunking
+		// crosses it before the newline — a step below the cap and a step above it
+		// take the same capped branch, so a second row would be a duplicate.
+		expect(feedHeaders(text, 1)).toBe(true);
+		const whole = new GeminiHeaderRunDetector();
+		expect(whole.push(text)).toBe(true);
+	});
+
+	test("counts a >512-char title once per line whether chunked or whole", () => {
+		const titles = [`## ${"Analyzing".repeat(90)}`, `**${"Refining".repeat(90)}**`];
+		for (const title of titles) {
+			expect(title.length).toBeGreaterThan(GEMINI_HEADER_PARTIAL_LINE_CAP);
+			const text = `${title}\n`;
+			const whole = new GeminiHeaderRunDetector();
+			expect(whole.push(text)).toBe(false);
+			expect(whole.count).toBe(1);
+			// One character per delta: the cap is crossed and the head re-cut on
+			// every character after it, so the title must still count once.
+			const detector = new GeminiHeaderRunDetector();
+			for (const ch of text) detector.push(ch);
+			expect(detector.count).toBe(whole.count);
+		}
+	});
+
+	test("never counts a 600-char non-title line, whatever the chunking", () => {
+		const prose = `The model is reworking ${"handler_0".repeat(70)} into the result.`;
+		expect(prose.length).toBeGreaterThan(600);
+		const text = `${prose}\n`;
+		const whole = new GeminiHeaderRunDetector();
+		expect(whole.push(text)).toBe(false);
+		expect(whole.count).toBe(0);
+		// One character per delta: the line's head settles as plain prose on its
+		// first character, so no chunking can turn it into a title.
+		const detector = new GeminiHeaderRunDetector();
+		for (const ch of text) detector.push(ch);
+		expect(detector.count).toBe(0);
 	});
 });
 

@@ -2487,3 +2487,124 @@
 - Fixed a terminal resize during foreground-tool streaming on an unknown-viewport / ED3-risk host (Ghostty/kitty/Alacritty/iTerm2/WSL) leaving native scrollback permanently out of sync, so scrolling back after the turn showed missing rows. A pure geometry resize (no content change) takes the in-place viewport-repaint path, which — unlike a content-bearing resize that rebuilds via the geometry branch — never flagged native history. Because the prompt-submit checkpoint (`refreshNativeScrollbackIfDirty`) only rebuilds when scrollback is marked dirty on these hosts, the discrepancy was never reconciled. Overflowing geometry repaints whose viewport is not known to be at the bottom now mark scrollback dirty so the next checkpoint rebuilds an exact copy of the transcript.
 
 Older entries are archived in [packages/tui/CHANGELOG.md@6693ddbfd58c](https://github.com/can1357/oh-my-pi/blob/6693ddbfd58ce9edcdc0dc3fe98a8882c9bae834/packages/tui/CHANGELOG.md).
+## [15.8.2] - 2026-06-03
+
+### Added
+
+- Added `PI_NO_SYNC_OUTPUT=1` to disable DEC 2026 synchronized-output wrappers for terminals whose implementation is buggy or visually worse, while keeping the renderer's autowrap guards active during paints ([#1765](https://github.com/can1357/oh-my-pi/issues/1765)).
+
+### Fixed
+
+- Fixed terminal resizes that land in the same render frame as streamed output splicing a phantom blank row into native scrollback and offsetting every later row by one. A height shrink (or width change carrying an append) with content overflowing the viewport fell through to the differential emitter, whose scroll math is anchored to the pre-resize viewport top and hardware-cursor row — both invalidated by the terminal's own resize reflow. Geometry-changed frames now rebuild native history when the viewport is at (or possibly at) the bottom, and defer non-destructively for a reader confirmed scrolled into history.
+- Fixed Ghostty/kitty/Alacritty-style ED3-risk terminals freezing the prompt after a deferred shrink; focused keyboard input now uses the same explicit user-input viewport opt-in as autocomplete and can repaint immediately instead of waiting for a resize.
+- Deferred eager live scrollback rebuilds under WSL fronted by Windows Terminal (`WT_SESSION` present in a Linux environment) so foreground streaming no longer emits ED3 (`CSI 3 J`) and yanks a reader scrolled into Windows Terminal's host scrollback; deferred rewrites still reconcile at the next prompt-submit checkpoint ([#1610](https://github.com/can1357/oh-my-pi/issues/1610)).
+- Fixed tmux (and screen/zellij) pane history gaining a complete duplicate copy of the transcript every time a deferred offscreen edit was followed by another render. Multiplexer panes never receive a destructive scrollback clear, so the dirty-scrollback rebuild path only appended the full transcript on top of preserved pane history — repeatedly. Live frames inside multiplexers now keep repainting the viewport and leave history reconciliation to explicit checkpoints, which also removes the O(transcript) write amplification per frame.
+- Fixed tmux pane viewports corrupting and pane history duplicating when a resize coincides with rendering: a resize racing a streamed append reached the stale-anchor diff emitters (phantom rows in the pane), a forced render racing a resize replayed the whole transcript into preserved pane history, and the prompt-submit checkpoint did the same after any deferred offscreen edit. Geometry-changed frames inside multiplexers now repaint the viewport in place, and forced-render geometry replays plus checkpoint replays are disabled there — tmux reflows its own pane grid and its history cannot be cleared, only duplicated.
+- Fixed terminal resize events whose dimensions net out unchanged by render time (rapid SIGWINCH round trips during a window drag, coalesced into one 16ms frame) being invisible to the renderer. The terminal reflows its buffer on every resize event — rows move between the viewport and scrollback and can be evicted at the scrollback cap — so diffing against the pre-resize screen splices blank phantom rows into the viewport. The renderer now tracks the resize event itself, not just the dimension delta, and routes such frames through the geometry-change repaint/rebuild paths.
+- Fixed Termux terminal resizes (screen rotation or software-keyboard toggles) displacing or hiding output after the viewport height changed. Content-bearing resizes were routed to the differential emitter, whose scroll math is anchored to the pre-resize viewport, so appended rows landed too low; pure height changes were treated as no-ops, exposing blank rows that later appends could fill without growing native scrollback. Termux resizes now repaint or rebuild at the new geometry like every other non-multiplexer terminal.
+- Fixed the turn-end teardown frame freezing on ED3-risk terminals (Ghostty/kitty/Alacritty/iTerm2): disabling eager scrollback rebuild now takes effect only after the in-flight frame is classified, so the loader/status removal still paints instead of deferring and leaving a stale spinner until the next keystroke.
+- Fixed non-WT ConPTY terminals on Windows (Tabby, Hyper, VS Code, conhost) clearing scrollback and yanking the viewport to the top whenever streaming output or a prompt-submit rebuild arrived while the user was scrolled up. The kernel32 viewport probe describes the ConPTY pseudo-console buffer — which is pinned to the visible grid, invisible to host-UI scrollback — so it reported "at bottom" no matter where the user had scrolled, and the [#1635](https://github.com/can1357/oh-my-pi/issues/1635) fix only distrusted it under `WT_SESSION`, which Tabby and other ConPTY hosts never set. The probe is now removed entirely: every Windows host is treated as viewport-unobservable, live mutations defer destructive rebuilds (no `\x1b[3J`, no viewport movement), and native scrollback reconciles at the prompt-submit checkpoint where the Enter keystroke has already pinned the host viewport to the bottom ([#1746](https://github.com/can1357/oh-my-pi/issues/1746)).
+- Fixed emoji-presentation symbols (a default-text symbol followed by variation-selector-16 `U+FE0F`, e.g. `⚠️`, `ℹ️`, `❤️`, keycaps) measuring as 1 cell instead of 2 in the native width engine on macOS. The native scanner now keeps `UnicodeWidthStr` as the source of truth for multi-codepoint graphemes and applies only the local macOS Hangul Compatibility Jamo character-width delta, preserving VS16/keycap sequence widths without reintroducing jamo cursor drift.
+- Deferred eager live scrollback rebuilds on macOS Terminal.app and iTerm2 so assistant/tool streaming no longer emits ED3 (`CSI 3 J`) while their native viewport position is unobservable, preserving readers scrolled into terminal history ([#1300](https://github.com/can1357/oh-my-pi/issues/1300)).
+- Fixed width-shrink reflow leaving old-width rows in native history so later appends no longer undercount scrollback growth or duplicate wrapped content.
+- Fixed hiding overlays after terminal reflow so stale dialog rows are scrubbed from native scrollback on non-multiplexer terminals.
+
+### Removed
+
+- Removed `shouldTrustNativeViewportProbe` and `ProcessTerminal`'s kernel32 `GetConsoleScreenBufferInfo` viewport probe. No Windows environment can answer "is the user's viewport at the bottom" truthfully — under ConPTY (every modern host) the pseudo-console buffer is pinned to the visible grid so the probe always read "at bottom", and under legacy conhost the window tracks the output cursor rather than the buffer tail so it always read "scrolled up" — so the probe and its trust gate are gone; `ProcessTerminal` no longer implements the optional `Terminal.isNativeViewportAtBottom`.
+
+## [15.8.1] - 2026-06-02
+
+### Fixed
+
+- Deferred eager live scrollback rebuilds on VTE terminals so GNOME-style Linux terminals do not flash or erase readable scrollback during streaming ([#1719](https://github.com/can1357/oh-my-pi/issues/1719)).
+
+## [15.8.0] - 2026-06-02
+
+### Fixed
+
+- Deferred eager live scrollback rebuilds on POSIX terminals where xterm ED3 (`CSI 3 J`, erase saved lines) can disturb scrolled-up readers during streaming, while keeping direct user-input and checkpoint rebuilds explicit ([#1682](https://github.com/can1357/oh-my-pi/issues/1682)).
+- Fixed TUI shutdown placing the parent shell prompt one row below short rendered content instead of directly on the next line ([#1620](https://github.com/can1357/oh-my-pi/issues/1620)).
+- Stopped painting inline color swatches for 4-digit hex runs in Markdown rendering. The `#RGBA` CSS form collides with hashline `#TAG` snapshot tags (4 hex digits, e.g. `#6C5E`), which were sprouting spurious RGB swatches in prose and codespans. Only `#RGB`, `#RRGGBB`, and `#RRGGBBAA` qualify now.
+
+Older entries are archived in [packages/tui/CHANGELOG.md@3deb6751027b](https://github.com/can1357/oh-my-pi/blob/3deb6751027b11b10ac14b2a5c07303817276505/packages/tui/CHANGELOG.md).
+## [15.7.6] - 2026-06-01
+
+### Fixed
+
+- Fixed native Windows + Windows Terminal freezing the editor on the wrap keystroke, on `/plan`/`/resume`/model-switch/status-line toggles, and on any other offscreen structural mutation until the next prompt submit. The `15.7.5` `#1635` fix routed every viewport-saturating pure-append and structural mutation through `deferredMutation` (a literal no-op) whenever `isNativeViewportAtBottom()` returned `undefined` — which it always does under `WT_SESSION` because the kernel32 probe can't see WT host scrollback. The deferral was only ever meant for the *confirmed-scrolled* case; an unknown viewport now falls back to a non-destructive `viewportRepaint` instead, so the live UI keeps updating without emitting `\x1b[3J` and without yanking a possibly-scrolled reader. Confirmed-scrolled frames (probe returns `false`) still defer.
+- Removed the hard-coded 20-result cap on `@`-prefixed fuzzy file completion in `CombinedAutocompleteProvider.#getFuzzyFileSuggestions`. The dropdown now honors the existing `maxResults: 100` ceiling already configured for `fuzzyFind`, so projects with many files sharing a common stem (e.g. `@controller`, `@test`) surface all relevant matches instead of being silently truncated. ([#1652](https://github.com/can1357/oh-my-pi/issues/1652))
+
+## [15.7.5] - 2026-06-01
+
+### Fixed
+
+- Fixed native Windows + Windows Terminal scrollback being yanked to the top when a streaming response triggered a TUI full redraw. Under ConPTY the `kernel32` `GetConsoleScreenBufferInfo` probe answers about the pseudo-console (always at the buffer tail) and not about WT's host scrollback, so `isNativeViewportAtBottom()` falsely returned `true` while the user was scrolled up and the shrink-across-viewport branch issued a destructive `historyRebuild` (`\x1b[2J\x1b[H\x1b[3J`). The probe now short-circuits to `undefined` whenever `WT_SESSION` is set, letting the existing deferred-rebuild path keep streaming-time mutations non-destructive and reconcile native history at the next prompt-submit checkpoint. ([#1635](https://github.com/can1357/oh-my-pi/issues/1635))
+
+Older entries are archived in [packages/tui/CHANGELOG.md@3d45d8557cd7](https://github.com/can1357/oh-my-pi/blob/3d45d8557cd7493221b69c7ed3c6b6a2307f46e7/packages/tui/CHANGELOG.md).
+## [15.7.3] - 2026-05-31
+
+### Added
+
+- Added `overflowSearch` to `SelectListLayoutOptions` to let consumers enable or disable type-to-filter search and search-status rendering per SelectList instance
+- Added fuzzy type-to-filter search to overflowing `SelectList` pickers, with search status and result counts.
+- Added `TUI.setEagerNativeScrollbackRebuild(enabled)` — while enabled, live render frames rebuild native scrollback on offscreen/structural changes even when the viewport position is unobservable (POSIX), instead of deferring to a non-destructive repaint. Trades the anti-yank guarantee for clean, duplicate-free history; intended for windows where output above the fold is actively re-laying out (e.g. a tool whose result is still streaming). A terminal that reports a known-scrolled viewport still defers.
+
+### Changed
+
+- Disabled interactive search filtering for editor autocomplete and slash-command `SelectList`s by passing `overflowSearch: false` in their layout options
+
+### Fixed
+
+- Preserved hidden tmux overlays in the live viewport by removing overlay content from view when an overlay was hidden while keeping pane history intact
+- Preserved native scrollback when forced TUI renders coalesce with content growth, and deferred pure tail appends while readers are scrolled into history.
+- Preserved existing terminal scrollback during forced and structural TUI renders so preexisting shell lines remained visible after component mutations
+- Rebuilt native scrollback for safe bottom-anchored offscreen edits and high-water preview collapses instead of repainting only the viewport, preventing stale or duplicated rows above the live viewport.
+- Stripped internal cursor marker sentinels from all rendered lines so offscreen focus markers no longer leak into terminal output
+- Truncated all painted lines to terminal width during viewport repaints and append-tail updates so long content no longer overflows or wraps unexpectedly
+- Fixed `tui.select.cancel` handling in `SelectList` so pressing Escape or Ctrl+C closes the list even when no matches are currently shown
+- Fixed native scrollback corruption when an offscreen row edit and repeated-tail append land in one render frame; ambiguous appended tails now rebuild history instead of splicing stale rows into the buffer.
+- Fixed scrolled-up readers being yanked back to the tail whenever streaming content arrived on POSIX terminals (macOS/Linux). Native viewport position is unobservable there (`isNativeViewportAtBottom()` returns `undefined`), and the planner optimistically treated "unknown" as "at bottom", so every offscreen streaming edit ran a destructive `historyRebuild` that cleared scrollback and snapped the view to the bottom. Live render frames now treat an unknown viewport as unsafe for a destructive rebuild — they defer to a non-destructive viewport repaint and reconcile native scrollback at the next explicit checkpoint (prompt submit). Resize and checkpoint replays keep the prior behavior.
+- Fixed native scrollback not rewrapping when the terminal widens on POSIX. A width increase reflows the transcript to fewer lines, which the shrink-across-boundary branch intercepted and (after the unknown-viewport deferral) repainted only the viewport — leaving committed history wrapped at the old width and duplicated above the live viewport. Width changes now rebuild native scrollback at the new geometry even when the viewport position is unknown (a yank is acceptable on an explicit resize); a terminal that can report a scrolled viewport still defers.
+
+## [15.7.0] - 2026-05-31
+
+### Fixed
+
+- Fixed slash-command autocomplete repainting when a Windows Terminal session cannot report native scrollback position; live input renders can now bypass the unknown-viewport deferral without weakening background scrollback protection. ([#1550](https://github.com/can1357/oh-my-pi/issues/1550))
+
+Older entries are archived in [packages/tui/CHANGELOG.md@539f05ae39f8](https://github.com/can1357/oh-my-pi/blob/539f05ae39f81319dc75d650757dad3c76482343/packages/tui/CHANGELOG.md).
+## [15.6.0] - 2026-05-30
+
+### Added
+
+- Added autocomplete triggering for internal URL scheme tokens such as `local://` and `skill://` while typing in the editor
+
+### Fixed
+
+- Fixed streaming output staying invisible in Windows Terminal + WSL2 until the window was minimized + restored. The 15.5.14 WSL branch of `requiresNativeViewportProofForReplay` treated an unknown native viewport state as "scrolled into history" — but `ProcessTerminal.isNativeViewportAtBottom` can only return a real answer through `kernel32.dll` FFI, which a Linux user-space process inside WSL cannot load, so the probe was permanently `undefined`. Every row-inserting structural mutation (each new streaming token row above the bottom-anchored prompt) was therefore classified as `deferredMutation` and emitted zero bytes. Any geometry change (resize/minimize/restore) bypassed the gate via a different render intent, which is why the output became visible only on window resize. The WSL clause is removed; on platforms where the probe cannot answer, unknown is treated as at-bottom (the pre-15.5.14 behaviour) so the live render path runs again. Native Win32 keeps the conservative "assume scrolled when unknown" heuristic since `kernel32` FFI does succeed there and unknown means the probe transiently failed. ([#1534](https://github.com/can1357/oh-my-pi/issues/1534))
+
+## [15.5.14] - 2026-05-29
+
+### Added
+
+- `Markdown` now renders a small color-chip swatch, painted with the referenced color, in front of CSS hex colors mentioned in prose, thinking traces, lists, tables, and blockquotes (e.g. `#C5FFD6` or `` `#C5FFD6` ``). The chip glyph comes from the theme's symbol set so it degrades across tiers (Nerd Font / Unicode `■` → ASCII `[]`) and is overridable via the `md.colorSwatch` symbol. Truecolor terminals get an exact 24-bit chip; others fall back to the nearest 256-color cell. Bare prose requires a hex letter for 3/4-digit forms so short issue/PR references (`#123`, `#1011`) don't sprout swatches; backticked codes are always treated as colors.
+
+### Fixed
+
+- Fixed the terminal hardware cursor disappearing in Ghostty. `resolveHardwareCursorPreference` force-hid the hardware cursor whenever it detected a Ghostty session (to fight bar-cursor afterimage "trails"), but the editor was simultaneously kept in terminal-cursor (marker-only) mode via `getUseTerminalCursorMarker()`, which renders no glyph and relies on the now-hidden hardware cursor — so Ghostty users had no visible caret at all, regardless of `PI_HARDWARE_CURSOR`. The Ghostty/`PI_FORCE_HARDWARE_CURSOR` override and the redundant `useTerminalCursorMarker` state are removed: `showHardwareCursor` is honored as-requested again (hardware cursor on by default), and disabling it cleanly falls back to the steady software-cursor glyph. The per-paint anti-trail mitigations (hide-cursor + autowrap-off inside the synchronized-output block) are retained, which is the actual trail fix.
+
+## [15.5.12] - 2026-05-29
+
+### Fixed
+
+- Fixed terminal resizes corrupting native scrollback with duplicated rows. The 15.4.0 change that defers a destructive scrollback clear+replay (so a user scrolled into history is not yanked while a streaming tail cell mutates) also caught genuine width/height resizes: a resize reflows the terminal's own committed scrollback at the new geometry, but repainting only the viewport left the stale old-size rows in history, so every overflowed row showed up twice (old-size wrap + new-size copy) when scrolling back, until the next prompt submit cleaned it up. `#planRender` now rebuilds history synchronously when the frame's geometry actually changed (`widthChanged || heightChanged`) via the restored `historyRebuild` intent, and defers the rebuild only for pure content mutations where the user may be reading scrollback mid-stream.
+
+## [15.5.0] - 2026-05-26
+
+### Fixed
+
+- Fixed `@` file mention autocomplete stalling for seconds when the query references something outside the project root (e.g. `@../`, `@~/`, `@/abs/`). `CombinedAutocompleteProvider` now short-circuits to plain immediate-directory prefix listing in those cases instead of dispatching a recursive `fuzzyFind` walk over a sibling directory full of unrelated projects. Inside-cwd queries keep the existing fuzzy-then-prefix behavior. ([#1395](https://github.com/can1357/oh-my-pi/issues/1395))
+- Gated the Hangul Compatibility Jamo width correction (U+3131..U+318E → 1 cell, originally landed in 15.0.1 for the IME / hardware-cursor displacement bug) behind `process.platform === "darwin"` in the TS path and `cfg!(target_os = "macos")` in the `pi-natives` Rust path. macOS terminals (Ghostty / Terminal.app / iTerm2) render jamo as 1 cell despite UAX#11 classifying them as Wide, but WezTerm and most Linux terminals honor UAX#11 and render them as 2 cells. The unconditional correction therefore desynced the TUI's column bookkeeping from the terminal's actual rendering off-darwin, producing corrupted layout and broken Korean input on Linux. On non-darwin the helpers now defer entirely to `Bun.stringWidth` / `UnicodeWidthStr` (also a small perf win on the multi-char-grapheme path). ([#1410](https://github.com/can1357/oh-my-pi/issues/1410))
+
+Older entries are archived in [packages/tui/CHANGELOG.md@ec051608a87a](https://github.com/can1357/oh-my-pi/blob/ec051608a87ad78d4930a46af7f5582192005ada/packages/tui/CHANGELOG.md).
