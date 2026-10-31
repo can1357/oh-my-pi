@@ -618,7 +618,10 @@ export function storeFactStrings(
 	options: StoreFactStringOptions = {},
 ): number {
 	const routeHeuristicCategories = options.routeHeuristicCategories ?? true;
-	const scope = options.scope ?? "global";
+	// Direct calls without an explicit scope inherit the source memory's scope,
+	// the same rule as extractAndStoreFacts — a private source must not produce
+	// global facts.
+	const scope = options.scope ?? (sourceMemoryId !== null ? sourceMemoryScope(beam, sourceMemoryId) : "global");
 	let stored = 0;
 	for (const fact of facts) {
 		insertFactRows(beam, messageIdx, "entity", "fact", fact, fact, importance, sourceMemoryId, scope);
@@ -643,20 +646,23 @@ export function storeExtractedFactCategories(
 	messageIdx = 0,
 	sourceMemoryId: string | null = null,
 	importance = 0.7,
-	scope = "global",
+	scope?: string,
 ): number {
-	let stored = storeFactStrings(beam, extracted.facts, messageIdx, sourceMemoryId, importance, { scope });
+	// Same inheritance rule as extractAndStoreFacts: callers that omit the scope
+	// get the source memory's scope instead of an unconditional 'global'.
+	const effectiveScope = scope ?? (sourceMemoryId !== null ? sourceMemoryScope(beam, sourceMemoryId) : "global");
+	let stored = storeFactStrings(beam, extracted.facts, messageIdx, sourceMemoryId, importance, { scope: effectiveScope });
 	stored += storeFactStrings(beam, extracted.instructions, messageIdx, sourceMemoryId, importance, {
 		routeHeuristicCategories: false,
-		scope,
+		scope: effectiveScope,
 	});
 	stored += storeFactStrings(beam, extracted.preferences, messageIdx, sourceMemoryId, importance, {
 		routeHeuristicCategories: false,
-		scope,
+		scope: effectiveScope,
 	});
 	stored += storeFactStrings(beam, extracted.timelines, messageIdx, sourceMemoryId, importance, {
 		routeHeuristicCategories: false,
-		scope,
+		scope: effectiveScope,
 	});
 	for (const instruction of extracted.instructions) {
 		insertInstruction(beam, messageIdx, instruction, instruction, sourceMemoryId);

@@ -212,6 +212,18 @@ describe("EpisodicGraph fact scope (e7)", () => {
 		});
 	});
 
+	it("keeps the original owner for channel-scoped facts on cross-session re-stores", () => {
+		withGraph(graph => {
+			graph.storeFact(fact("fact_channel_owner"), "mem_ch", "session-a", "channel");
+			graph.storeFact(fact("fact_channel_owner"), "mem_ch", "session-b", "channel");
+			const row = graph.db
+				.query("SELECT session_id, scope FROM facts WHERE fact_id = 'fact_channel_owner'")
+				.get() as { session_id: string; scope: string };
+			expect(row.session_id).toBe("session-a");
+			expect(row.scope).toBe("channel");
+		});
+	});
+
 	it("stores fresh facts with global scope and keeps the scope of re-stored facts", () => {
 		withGraph(graph => {
 			graph.storeFact(fact("fact_scope_new"), "mem_scope_1", "test");

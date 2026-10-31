@@ -155,7 +155,12 @@ describe("E7 facts scope migration", () => {
 		expect(migrate(dbPath, false, false, () => undefined)).toBe(1);
 		expect(migrate(dbPath, false, false, () => undefined)).toBe(0);
 		expect(factScopes(dbPath)).toEqual({ "fact-1": "session" });
-		expect(hasPendingMigration(openDatabase(dbPath))).toBe(false);
+		const probe = openDatabase(dbPath);
+		try {
+			expect(hasPendingMigration(probe)).toBe(false);
+		} finally {
+			closeQuietly(probe);
+		}
 	});
 
 	it("reports dry-run without writes and writes backup only when requested", () => {
@@ -263,6 +268,11 @@ describe("E7 facts scope recall, end to end", () => {
 		try {
 			const cols = beamA.db.query("PRAGMA table_info(facts)").all() as { name: string }[];
 			expect(cols.some(row => row.name === "scope")).toBe(true);
+			// The source memory is stored global, so its extracted facts inherit
+			// 'global' and stay recallable cross-session (the durable-tier case).
+			beamA.db.run(
+				"INSERT INTO working_memory (id, content, session_id, scope) VALUES ('wm-src-1', 'src content', 'session-a', 'global')",
+			);
 			storeFactStrings(beamA, ["Zorblax relay requires quorum tokens"], 0, "wm-src-1");
 			const stored = beamA.db
 				.query("SELECT scope FROM facts WHERE source_msg_id = 'wm-src-1'")
@@ -473,6 +483,56 @@ describe("E7 facts scope, review round 2", () => {
 			} finally {
 				beamC.close();
 			}
+		} finally {
+			beamA.close();
+		}
+	});
+});
+describe("E7 facts scope, review round 3", () => {
+	it("direct storeFactStrings inherits the source memory's scope", () => {
+		const dbPath = tempDb();
+		const beam = new BeamMemory({ sessionId: "session-a", dbPath });
+		try {
+			beam.db.run(
+				"INSERT INTO working_memory (id, content, session_id, scope) VALUES ('wm-d', 'd content', 'session-a', 'session')",
+			);
+			storeFactStrings(beam, ["I use the quorum relay for tokens"], 0, "wm-d");
+			const rows = beam.db
+				.query("SELECT scope FROM facts WHERE source_msg_id = 'wm-d'")
+				.all() as { scope: string }[];
+			expect(rows.length).toBeGreaterThan(0);
+			for (const row of rows) expect(row.scope).toBe("session");
+		} finally {
+			beam.close();
+		}
+	});
+
+	it("global facts hide cross-session when the source is narrowed to session", () => {
+		const dbPath = tempDb();
+		const beamA = new BeamMemory({ sessionId: "session-a", dbPath });
+		try {
+			beamA.db.run(
+				"INSERT INTO working_memory (id, content, session_id, scope) VALUES ('wm-n', 'n content', 'session-a', 'global')",
+			);
+			storeFactStrings(beamA, ["I use the quorum relay for tokens"], 0, "wm-n");
+			const beamB = new BeamMemory({ sessionId: "session-b", dbPath });
+			try {
+				const before = factRecall(beamB, "quorum", 10);
+				expect(before.some(result => result.content.includes("quorum"))).toBe(true);
+			} finally {
+				beamB.close();
+			}
+
+			beamA.db.run("UPDATE working_memory SET scope = 'session' WHERE id = 'wm-n'");
+			const beamC = new BeamMemory({ sessionId: "session-b", dbPath });
+			try {
+				const after = factRecall(beamC, "quorum", 10);
+				expect(after.some(result => result.content.includes("quorum"))).toBe(false);
+			} finally {
+				beamC.close();
+			}
+			const own = factRecall(beamA, "quorum", 10);
+			expect(own.some(result => result.content.includes("quorum"))).toBe(true);
 		} finally {
 			beamA.close();
 		}

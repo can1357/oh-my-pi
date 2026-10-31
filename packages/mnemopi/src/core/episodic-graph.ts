@@ -414,18 +414,18 @@ export class EpisodicGraph {
 		// Fresh facts are stored with the given scope (default 'global').
 		// Re-stored facts refresh their data but KEEP their existing scope —
 		// replacing the row with a forced scope would retroactively widen or
-		// narrow pre-existing rows. Session-scoped rows also keep their
-		// original session_id: fact ids are content-derived, so the same
-		// content stored from another session must not transfer ownership
-		// (and cross-session visibility) of a session-private fact.
+		// narrow pre-existing rows. Every non-global row (session, channel,
+		// custom) also keeps its original session_id: fact ids are
+		// content-derived, so the same content stored from another session
+		// must not transfer ownership (and visibility) of a private fact.
 		this.db.run(
 			`INSERT INTO facts
 				(fact_id, session_id, subject, predicate, object, timestamp, source_msg_id, confidence, scope)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT(fact_id) DO UPDATE SET
 					session_id = CASE
-						WHEN facts.scope = 'session' THEN facts.session_id
-						ELSE excluded.session_id
+						WHEN facts.scope = 'global' THEN excluded.session_id
+						ELSE facts.session_id
 					END,
 					subject = excluded.subject,
 					predicate = excluded.predicate,

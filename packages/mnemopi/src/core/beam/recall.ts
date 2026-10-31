@@ -449,7 +449,13 @@ function factVisibilityWhere(beam: BeamMemoryState, tableAlias: string): { where
 	// exists in either tier stay visible: nothing contradicts them.
 	const sourceSuperseded = `NOT EXISTS (SELECT 1 FROM working_memory w WHERE w.id = ${prefix}source_msg_id AND (w.superseded_by IS NOT NULL OR (w.valid_until IS NOT NULL AND w.valid_until <= ?)))`;
 	const episodeSuperseded = `NOT EXISTS (SELECT 1 FROM episodic_memory e WHERE e.id = ${prefix}source_msg_id AND (e.superseded_by IS NOT NULL OR (e.valid_until IS NOT NULL AND e.valid_until <= ?)))`;
-	return { where: `${scope} AND ${sourceSuperseded} AND ${episodeSuperseded}`, params: [beam.sessionId, nowIso(), nowIso()] };
+	// A fact must never outshine its source: if the source row still exists but
+	// was narrowed from global to session scope after extraction, the fact must
+	// stop being visible cross-session (or the narrowing would be silently
+	// defeated at the fact layer). Sources that no longer exist stay visible.
+	const sourceVisible = `NOT EXISTS (SELECT 1 FROM working_memory w WHERE w.id = ${prefix}source_msg_id AND NOT (w.session_id = ? OR w.scope = 'global'))`;
+	const episodeVisible = `NOT EXISTS (SELECT 1 FROM episodic_memory e WHERE e.id = ${prefix}source_msg_id AND NOT (e.session_id = ? OR e.scope = 'global'))`;
+	return { where: `${scope} AND ${sourceSuperseded} AND ${episodeSuperseded} AND ${sourceVisible} AND ${episodeVisible}`, params: [beam.sessionId, nowIso(), nowIso(), beam.sessionId, beam.sessionId] };
 }
 
 function buildWhere(
