@@ -14,7 +14,7 @@
 
 - Fixed Claude turns failing with "Thinking loop detected" when summarized thinking repeated a progress line such as "Still writing the parser..."; Claude models no longer run the loop guard
 - Fixed the loop guard discarding turns from other models whose reasoning summary repeats one status line a few times; whole-line repetition now has to cover about 1 KB before it counts as a loop
-- Fixed Codex requests sending Flex when the model's advertised service tiers exclude it ([#6451](https://github.com/can1357/oh-my-pi/issues/6451)).
+- Fixed Codex requests sending Flex when the model's advertised service tiers exclude it ([#6451](https://github.com/can1357/oh-my-pi/issues/6451), [#17566](https://github.com/can1357/oh-my-pi/pull/17566) by [@jasonharrison](https://github.com/jasonharrison)).
 
 ## [18.14.1] - 2026-10-31
 
