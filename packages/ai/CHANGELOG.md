@@ -8,6 +8,10 @@
 - `AuthStorage` can be constructed over an `AuthStorageBackend` (its namespaces plus `setAccountPolicies`/`replaceStore`/`close`) instead of a credential store, so another thread's instance can serve every call
 - Anthropic sessions on the official API now use message threads (`message-threads-2026-08-12`, as Claude Code does): after the first turn each request sends only the new messages, cutting time to first token in long conversations; a refused or expired thread replays the full conversation automatically. `statefulResponses: false` or `PI_ANTHROPIC_MESSAGE_THREADS=0` turns it off, `PI_ANTHROPIC_MESSAGE_THREADS=1` opts other endpoints in
 
+### Added
+
+- Added `omitDemotedReasoning` to `StreamOptions`: an Anthropic request leaves out other models' reasoning that it would otherwise replay as text, and a refused request reports how many such blocks it carried in `demotedReasoningBlocks` ([#10407](https://github.com/can1357/oh-my-pi/issues/10407))
+
 ### Fixed
 
 - Fixed xAI speech requests failing with `422 missing field language`: `xai-tts` now sends `language`, which xAI's `/v1/tts` requires, defaulting to `auto` (automatic detection) when the caller passes none, as the auth gateway's `/v1/audio/speech` does ([#17992](https://github.com/can1357/oh-my-pi/pull/17992) by [@Mirceone](https://github.com/Mirceone))
