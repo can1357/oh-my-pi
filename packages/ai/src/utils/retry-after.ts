@@ -82,19 +82,126 @@ export function formatErrorMessageWithRetryAfter(error: unknown, headers?: Heade
 	return `${message} ${RETRY_AFTER_HINT}${retryAfterMs}`;
 }
 
+/**
+ * Whether `value` can be an `AssistantMessage.errorRetryAfterMs`: a finite
+ * number of milliseconds, zero or more. A relay carries the field as untrusted
+ * JSON (the proxy's terminal frame, the pi-native failure frame), and nothing
+ * else may be restated as a header.
+ */
+export function isRetryWaitMs(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+/**
+ * `retryAfterMs` restated as a `retry-after-ms` header, for an Error rebuilt
+ * from a failed message, so a reader of the Error's headers
+ * ({@link getHeadersFromError}) sees the message's structured wait. The text
+ * never stands in for it. `undefined` unless {@link isRetryWaitMs}.
+ */
+export function retryWaitHeaders(retryAfterMs: number | undefined): Headers | undefined {
+	return isRetryWaitMs(retryAfterMs) ? new Headers({ "retry-after-ms": String(retryAfterMs) }) : undefined;
+}
+
+/** The response headers a failed attempt can read its wait from; see {@link getFailureRetryAfterMs}. */
+export interface FailureResponseHeaders {
+	/** Headers of the non-2xx response that refused the request, when the provider captured it. */
+	errorResponseHeaders?: HeadersLike;
+	/**
+	 * Headers of the accepted (2xx) response whose body the failure arrived in:
+	 * an in-band error event, or a stream cut after the response arrived.
+	 */
+	streamResponseHeaders?: HeadersLike;
+}
+
+/**
+ * The retry wait a failed attempt's own response headers name. `AIError.finalize`
+ * returns it as `retryAfterMs` (the message's `errorRetryAfterMs`), and a
+ * provider's pre-output retry loop checks it against `maxRetryDelayMs`, so the
+ * layer that retries and the layers that read the failed message see one wait.
+ *
+ * Headers that refused the request come first: the captured non-2xx
+ * response's, else the error's own ({@link getHeadersFromError}, which include
+ * the structured headers a protocol error event carries, as Codex's do). When
+ * they name a wait it wins, a window reset included: on a refusal,
+ * `x-ratelimit-reset` says when this request can succeed.
+ *
+ * Otherwise the accepted response's headers, and from those only explicit wait
+ * instructions: `retry-after-ms` and `Retry-After`. Never
+ * `x-ratelimit-reset[-ms]` there: on a response the server accepted, a window
+ * reset says when a rate window that did not refuse this request resets, not
+ * that the client must wait. A provider that sends it on every response would
+ * otherwise turn every stream cut into a held-retry veto, or a credential block
+ * as long as the window.
+ */
+export function getFailureRetryAfterMs(error: unknown, headers: FailureResponseHeaders = {}): number | undefined {
+	return (
+		getRetryAfterMsFromHeaders(headers.errorResponseHeaders ?? getHeadersFromError(error)) ??
+		getExplicitRetryAfterMsFromHeaders(headers.streamResponseHeaders)
+	);
+}
+
+/** How a transport's own `fetchWithRetry` loop keeps to the caller's cap; see {@link transportRetryBounds}. */
+export interface TransportRetryBounds {
+	/** `fetchWithRetry`'s `maxDelayMs`: no retry sleep exceeds it. */
+	maxDelayMs: number;
+	/** Whether `response`'s headers name a wait longer than {@link maxDelayMs}: hand the refusal back at once. */
+	declines(response: Response): boolean;
+}
+
+/**
+ * The bounds a transport-level retry loop (`fetchWithRetry`) takes from the
+ * caller's `maxRetryDelayMs` (`StreamOptions`), so a transport retries a 429 or
+ * 5xx exactly when the provider loops above it would. A retry whose response
+ * headers name a longer wait than the cap is declined and the refusal surfaces
+ * at once; the headers are read as `finalize` reads them
+ * ({@link getRetryAfterMsFromHeaders}), so the transport and the failed
+ * message's `errorRetryAfterMs` judge one wait. A wait within the cap is
+ * honored. A non-positive cap disables the bound, as the option documents; an
+ * absent one keeps the transport's own `defaultMaxDelayMs`.
+ */
+export function transportRetryBounds(
+	maxRetryDelayMs: number | undefined,
+	defaultMaxDelayMs: number,
+): TransportRetryBounds {
+	const maxDelayMs =
+		maxRetryDelayMs === undefined
+			? defaultMaxDelayMs
+			: maxRetryDelayMs > 0
+				? maxRetryDelayMs
+				: Number.POSITIVE_INFINITY;
+	return {
+		maxDelayMs,
+		declines: response => {
+			const waitMs = getRetryAfterMsFromHeaders(response.headers);
+			return waitMs !== undefined && waitMs > maxDelayMs;
+		},
+	};
+}
+
 export function getRetryAfterMsFromHeaders(headers: HeadersLike): number | undefined {
 	if (!headers) return undefined;
-
-	const retryAfterMs = parseRetryAfterMsHeader(getHeaderValue(headers, "retry-after-ms"));
-	const retryAfter = parseRetryAfterHeader(getHeaderValue(headers, "retry-after"));
-	const resetMs = parseResetHeader(getHeaderValue(headers, "x-ratelimit-reset-ms"), "ms");
-	const resetSeconds = parseResetHeader(getHeaderValue(headers, "x-ratelimit-reset"), "s");
-
-	const candidates = [retryAfterMs, retryAfter, resetMs, resetSeconds].filter(
-		(value): value is number => value !== undefined,
+	return longestWait(
+		getExplicitRetryAfterMsFromHeaders(headers),
+		parseResetHeader(getHeaderValue(headers, "x-ratelimit-reset-ms"), "ms"),
+		parseResetHeader(getHeaderValue(headers, "x-ratelimit-reset"), "s"),
 	);
-	if (candidates.length === 0) return undefined;
-	return Math.max(...candidates);
+}
+
+/** `retry-after-ms` and `Retry-After`: the headers that tell the client to wait. */
+function getExplicitRetryAfterMsFromHeaders(headers: HeadersLike): number | undefined {
+	if (!headers) return undefined;
+	return longestWait(
+		parseRetryAfterMsHeader(getHeaderValue(headers, "retry-after-ms")),
+		parseRetryAfterHeader(getHeaderValue(headers, "retry-after")),
+	);
+}
+
+function longestWait(...waits: (number | undefined)[]): number | undefined {
+	let longest: number | undefined;
+	for (const wait of waits) {
+		if (wait !== undefined && (longest === undefined || wait > longest)) longest = wait;
+	}
+	return longest;
 }
 
 export function getHeadersFromError(error: unknown): HeadersLike {

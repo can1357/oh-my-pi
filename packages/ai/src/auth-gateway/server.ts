@@ -38,8 +38,17 @@ import * as openaiChat from "../providers/openai-chat-server";
 import * as openaiResponses from "../providers/openai-responses-server";
 import * as piNative from "../providers/pi-native-server";
 import { completeSimple, streamSimple } from "../stream";
-import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "../types";
+import type {
+	Api,
+	AssistantMessage,
+	AssistantMessageEvent,
+	AssistantMessageEventStream,
+	Context,
+	Model,
+	SimpleStreamOptions,
+} from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
+import { AssistantMessageEventStream as ReplayEventStream } from "../utils/event-stream";
 import { parseBind } from "../utils/parse-bind";
 import { resolvePeer } from "../utils/resolve-peer";
 import { type AuthGatewayClientScope, AuthGatewayClientTable } from "./clients";
@@ -63,7 +72,9 @@ import {
 	json,
 	readBearerToken,
 	resolveClientIdentity,
+	thrownRetryAfterMs,
 	withCors,
+	withRetryAfterHeaders,
 } from "./http";
 import { handleEmbeddings } from "./routes/embeddings";
 import { handleImageEdits, handleImageGenerations } from "./routes/images";
@@ -285,6 +296,84 @@ function clientClosedResponse(route: { module: FormatModule }): Response {
 	return route.module.formatError(499, "request_aborted", "client closed request");
 }
 
+/**
+ * Longest a streamed chat-format response withholds its status line while the
+ * upstream has not yet accepted the request. Within it, an upstream failure
+ * before acceptance is answered as an HTTP error that carries the upstream's
+ * retry wait as headers, which streaming clients read and in-band error text
+ * cannot give them. Past it the gateway commits its `200` and streams: a
+ * provider that never reports its response (`onResponse`) and thinks long must
+ * still get headers and keepalives on the wire well before Bun's, proxies' and
+ * clients' silence timeouts cut the connection (#17363).
+ */
+export const STREAM_ACCEPT_HOLD_MAX_MS = 10_000;
+
+/** A streamed turn once its upstream accepted the request, or the failure that ended it before. */
+type HeldTurn =
+	| { kind: "open"; events: AssistantMessageEventStream }
+	| { kind: "failed"; message: AssistantMessage }
+	| { kind: "threw"; error: unknown };
+
+/**
+ * Read `events` until the upstream accepted the request — `accepted` settles
+ * (an upstream 2xx response), an event other than `start` arrives, `signal`
+ * aborts, or {@link STREAM_ACCEPT_HOLD_MAX_MS} passes — so that a failure
+ * before then can still become an HTTP error. An open turn replays every event
+ * read so far, then the rest, through a fresh stream.
+ */
+async function holdUntilUpstreamAccepts(
+	events: AssistantMessageEventStream,
+	accepted: Promise<void>,
+	signal: AbortSignal,
+): Promise<HeldTurn> {
+	const iterator = events[Symbol.asyncIterator]();
+	const held: AssistantMessageEvent[] = [];
+	const { promise: released, resolve: release } = Promise.withResolvers<undefined>();
+	const releaseHold = (): void => release(undefined);
+	const cap = setTimeout(releaseHold, STREAM_ACCEPT_HOLD_MAX_MS);
+	signal.addEventListener("abort", releaseHold, { once: true });
+	void accepted.then(releaseHold);
+	let next = iterator.next();
+	try {
+		while (true) {
+			const step = await Promise.race([next, released]);
+			if (step === undefined || step.done) break;
+			if (step.value.type === "error") return { kind: "failed", message: step.value.error };
+			held.push(step.value);
+			next = iterator.next();
+			if (step.value.type !== "start") break;
+		}
+	} catch (error) {
+		return { kind: "threw", error };
+	} finally {
+		clearTimeout(cap);
+		signal.removeEventListener("abort", releaseHold);
+	}
+	const replay = new ReplayEventStream();
+	void (async () => {
+		try {
+			for (const event of held) replay.push(event);
+			for (let step = await next; !step.done; step = await iterator.next()) replay.push(step.value);
+			replay.end();
+		} catch (error) {
+			replay.fail(error);
+		}
+	})();
+	return { kind: "open", events: replay };
+}
+
+/** The error response for a turn its upstream ended in failure, with the failed response's header retry wait. */
+function failedTurnResponse(formatError: FormatModule["formatError"], message: AssistantMessage): Response {
+	const errorMessage =
+		message.errorMessage ?? (message.stopReason === "aborted" ? "Request was aborted" : "Upstream request failed");
+	if (message.stopReason === "aborted") return formatError(499, "request_aborted", errorMessage);
+	const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
+	return withRetryAfterHeaders(
+		formatError(classified.status, classified.type, errorMessage),
+		message.errorRetryAfterMs,
+	);
+}
+
 /** Route that serves each non-chat catalog kind the gateway advertises. */
 const KIND_ROUTES: Partial<Record<ModelKind, string>> = {
 	judge: "POST /v1/systemone",
@@ -453,20 +542,13 @@ async function handleFormatEndpoint(
 			const message = await completeSimple(model, parsed.context, streamOpts);
 			recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined);
 			if (message.stopReason === "aborted" || message.stopReason === "error") {
-				const errorMessage =
-					message.errorMessage ??
-					(message.stopReason === "aborted" ? "Request was aborted" : "Upstream request failed");
 				logger.warn("auth-gateway non-streaming failed", {
 					format: route.label,
 					reason: message.stopReason,
-					error: errorMessage,
+					error: message.errorMessage,
 					peer,
 				});
-				if (message.stopReason === "aborted") {
-					return route.module.formatError(499, "request_aborted", errorMessage);
-				}
-				const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
-				return route.module.formatError(classified.status, classified.type, errorMessage);
+				return failedTurnResponse(route.module.formatError, message);
 			}
 			return json(
 				200,
@@ -481,7 +563,10 @@ async function handleFormatEndpoint(
 				error: classified.message,
 				peer,
 			});
-			return route.module.formatError(classified.status, classified.type, classified.message);
+			return withRetryAfterHeaders(
+				route.module.formatError(classified.status, classified.type, classified.message),
+				thrownRetryAfterMs(error),
+			);
 		} finally {
 			// Every non-streaming outcome — answered, upstream error, thrown,
 			// client gone — is done with the provider state here.
@@ -499,6 +584,14 @@ async function handleFormatEndpoint(
 		clientHold?.();
 	};
 	let streamOwnsLease = false;
+	// The upstream accepted the request once a provider reports a 2xx response;
+	// see `holdUntilUpstreamAccepts`. A caller-supplied hook still runs.
+	const accepted = Promise.withResolvers<void>();
+	const callerOnResponse = streamOpts.onResponse;
+	streamOpts.onResponse = async (response, responseModel, responseSignal) => {
+		if (response.status >= 200 && response.status < 300) accepted.resolve();
+		await callerOnResponse?.(response, responseModel, responseSignal);
+	};
 	try {
 		let events: AssistantMessageEventStream;
 		try {
@@ -507,7 +600,10 @@ async function handleFormatEndpoint(
 		} catch (error) {
 			const classified = classifyGatewayError(error);
 			logger.warn("auth-gateway streamSimple threw", { format: route.label, error: classified.message, peer });
-			return route.module.formatError(classified.status, classified.type, classified.message);
+			return withRetryAfterHeaders(
+				route.module.formatError(classified.status, classified.type, classified.message),
+				thrownRetryAfterMs(error),
+			);
 		}
 		if (controller.signal.aborted) return clientClosedResponse(route);
 		void events
@@ -519,7 +615,32 @@ async function handleFormatEndpoint(
 			.finally(settle);
 		streamOwnsLease = true;
 
-		const sseStream = route.module.encodeStream(events, parsed.modelId, parsed.options, {
+		// Hold the status line until the upstream accepts, so a failure before
+		// that reaches the client as an HTTP error with its retry wait.
+		const held = await holdUntilUpstreamAccepts(events, accepted.promise, controller.signal);
+		if (controller.signal.aborted) return clientClosedResponse(route);
+		if (held.kind === "failed") {
+			logger.warn("auth-gateway streaming failed before the upstream accepted", {
+				format: route.label,
+				reason: held.message.stopReason,
+				error: held.message.errorMessage,
+				peer,
+			});
+			return failedTurnResponse(route.module.formatError, held.message);
+		}
+		if (held.kind === "threw") {
+			const classified = classifyGatewayError(held.error);
+			logger.warn("auth-gateway streaming threw before the upstream accepted", {
+				format: route.label,
+				error: classified.message,
+				peer,
+			});
+			return withRetryAfterHeaders(
+				route.module.formatError(classified.status, classified.type, classified.message),
+				thrownRetryAfterMs(held.error),
+			);
+		}
+		const sseStream = route.module.encodeStream(held.events, parsed.modelId, parsed.options, {
 			signal: controller.signal,
 			onCancel: reason => {
 				if (!controller.signal.aborted) {
@@ -677,20 +798,13 @@ async function handlePiNative(
 			const message = await completeSimple(model, parsed.context, streamOpts);
 			recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined);
 			if (message.stopReason === "aborted" || message.stopReason === "error") {
-				const errorMessage =
-					message.errorMessage ??
-					(message.stopReason === "aborted" ? "Request was aborted" : "Upstream request failed");
 				logger.warn("auth-gateway non-streaming failed", {
 					format: "pi-native",
 					reason: message.stopReason,
-					error: errorMessage,
+					error: message.errorMessage,
 					peer,
 				});
-				if (message.stopReason === "aborted") {
-					return piNative.formatError(499, "request_aborted", errorMessage);
-				}
-				const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
-				return piNative.formatError(classified.status, classified.type, errorMessage);
+				return failedTurnResponse(piNative.formatError, message);
 			}
 			return json(
 				200,
@@ -701,7 +815,10 @@ async function handlePiNative(
 			if (controller.signal.aborted) return aborted();
 			const classified = classifyGatewayError(error);
 			logger.warn("auth-gateway non-streaming aborted", { format: "pi-native", error: classified.message, peer });
-			return piNative.formatError(classified.status, classified.type, classified.message);
+			return withRetryAfterHeaders(
+				piNative.formatError(classified.status, classified.type, classified.message),
+				thrownRetryAfterMs(error),
+			);
 		} finally {
 			// Every non-streaming outcome — answered, upstream error, thrown,
 			// client gone — is done with the provider state here.
@@ -727,7 +844,10 @@ async function handlePiNative(
 		} catch (error) {
 			const classified = classifyGatewayError(error);
 			logger.warn("auth-gateway streamSimple threw", { format: "pi-native", error: classified.message, peer });
-			return piNative.formatError(classified.status, classified.type, classified.message);
+			return withRetryAfterHeaders(
+				piNative.formatError(classified.status, classified.type, classified.message),
+				thrownRetryAfterMs(error),
+			);
 		}
 		if (controller.signal.aborted) return aborted();
 		void events

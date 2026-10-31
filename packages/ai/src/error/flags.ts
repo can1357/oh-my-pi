@@ -578,18 +578,101 @@ const PORT_NUMBER_PATTERN = /(?:\[[^\]\s]+\]|\b\d{1,3}(?:\.\d{1,3}){1,3}|\blocal
  */
 const DEFAULT_IGNORABLE_PATTERN = /\p{Default_Ignorable_Code_Point}/gu;
 /**
- * A number in the role of a duration: followed by a unit of time, glued or
- * spaced, or by a size or token unit. The unit decides, whatever surrounds
- * it. Latin units come in every spelling of every SI prefix of the second
- * (`ns`, `nsec`, `nanos`, `nanosecond`, `nano-second`, the micro sign as
- * U+00B5 or U+03BC), and minutes through years; a Latin unit must end the word,
- * so `503 Service` is not `503 s`. CJK and Korean units need no word end,
- * because those scripts have none (`503秒后重试`): seconds and their
- * subdivisions, minutes, hours, days, weeks, months and years in Chinese,
- * Japanese and Korean.
+ * The SI prefixes, by name, power of ten and symbol (SI Brochure, 9th edition,
+ * Table 7, with the 2022 additions ronna, quetta, ronto and quecto). The SI
+ * defines no others. Micro's symbol is the micro sign (U+00B5), the Greek mu
+ * (U+03BC) or, in ASCII, `u`.
  */
-const UNIT_NUMBER_PATTERN =
-	/(?<![\w.])\d+(?:\.\d+)?\s*(?:(?:n(?:ano)?s(?:ecs?)?|nanos?(?:-?secs?|-?seconds?)?|[uµμ]s(?:ecs?)?|micros?(?:-?secs?|-?seconds?)?|ms(?:ecs?)?|millis?(?:-?secs?|-?seconds?)?|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?|w|wks?|weeks?|mos?|months?|y|yrs?|years?|bytes?|[kmgt]i?b|tokens?)(?![\p{L}\p{N}_])|纳秒|微秒|毫秒|秒钟|秒鐘|秒|分钟|分鐘|分|小时|小時|時間|个月|個月|ヶ月|か月|カ月|月|星期|週間|周|週|天|日|年|나노초|마이크로초|밀리초|초|분|시간|개월|일|주|달|년)/giu;
+const SI_PREFIXES: readonly (readonly [name: string, power: number, ...symbols: string[]])[] = [
+	["quetta", 30, "Q"],
+	["ronna", 27, "R"],
+	["yotta", 24, "Y"],
+	["zetta", 21, "Z"],
+	["exa", 18, "E"],
+	["peta", 15, "P"],
+	["tera", 12, "T"],
+	["giga", 9, "G"],
+	["mega", 6, "M"],
+	["kilo", 3, "k"],
+	["hecto", 2, "h"],
+	["deca", 1, "da"],
+	["deka", 1, "da"],
+	["deci", -1, "d"],
+	["centi", -2, "c"],
+	["milli", -3, "m"],
+	["micro", -6, "µ", "μ", "u"],
+	["nano", -9, "n"],
+	["pico", -12, "p"],
+	["femto", -15, "f"],
+	["atto", -18, "a"],
+	["zepto", -21, "z"],
+	["yocto", -24, "y"],
+	["ronto", -27, "r"],
+	["quecto", -30, "q"],
+];
+/**
+ * A prefix symbol plus `s` that is an everyday word in a language provider
+ * errors arrive in — `as` (English), `es` (Spanish), `das` (German) — is not
+ * read as attoseconds, exaseconds or decaseconds, or `HTTP 503 as expected`
+ * would lose its status. Those prefixes still count spelled out
+ * (`attoseconds`) or with `sec` (`asec`).
+ */
+const SI_SECOND_SYMBOL_WORDS: Record<string, true> = { as: true, es: true, das: true };
+
+/**
+ * A unit of time in Latin script: a second with any SI prefix — by name, glued
+ * or hyphenated (`picoseconds`, `nano-second`), by symbol with `s` or `sec`
+ * (`fs`, `psec`, `µs`), or a prefix of a millisecond or less standing alone as
+ * Java and Rust write durations (`nanos`, `millis`) — or minutes through years.
+ * Built from {@link SI_PREFIXES}, so every prefix and every spelling of it
+ * comes from one table.
+ */
+const LATIN_TIME_UNIT = (() => {
+	const names = SI_PREFIXES.map(([name]) => name);
+	const symbols = [...new Set(SI_PREFIXES.flatMap(([, , ...symbols]) => symbols))];
+	const symbolSeconds = symbols
+		.map(symbol => `${symbol}s`)
+		.filter(unit => SI_SECOND_SYMBOL_WORDS[unit.toLowerCase()] !== true);
+	const subMilliNames = SI_PREFIXES.filter(([, power]) => power <= -3).map(([name]) => name);
+	return [
+		`(?:(?:${names.join("|")})-?)?(?:seconds?|secs?)`,
+		`(?:${symbols.join("|")})secs?`,
+		...symbolSeconds,
+		"s",
+		`(?:${subMilliNames.join("|")})s?`,
+		"m|mins?|minutes?|h|hrs?|hours?|d|days?|w|wks?|weeks?|mos?|months?|y|yrs?|years?",
+	].join("|");
+})();
+/**
+ * A unit of time in Chinese, Japanese or Korean. These scripts put no space
+ * between words, so a unit needs no word end (`503秒后重试`).
+ *
+ * A second with any prefix: 秒 means nothing but "second", so whatever is glued
+ * to its front is its prefix — one character in Chinese, where each SI prefix
+ * is one (`纳秒`, `納秒`, `奈秒`, `皮秒`, `飞秒`), or a katakana word in Japanese,
+ * where each is written so (`ミリ秒`, `ナノ秒`, `ピコ秒`). Korean's 초 is also the
+ * sound of other words, so its prefix is the two-to-four-syllable loanword
+ * Korean writes every SI prefix as (`나노초`, `마이크로초`, `피코초`); one syllable
+ * before 초 is a word of its own (`최초`, "first"; `기초`, "basis").
+ *
+ * Minutes through years: 分, the hour (GB 3100 writes it `[小]时`, JIS `時`), 天
+ * and 日, the week (`周`, `週`, `星期`, `礼拜`), the month with or without a
+ * counter (`个月`, `ヶ月`, `か月`), 年, each with the measure suffix Chinese and
+ * Japanese may write after it (`分钟`, `秒鐘`, `時間`, `週間`); Korean 분, 시간,
+ * 일, 주, 개월, 달, 년.
+ */
+const CJK_TIME_UNIT =
+	"(?:(?:\\p{Script=Han}|\\p{Script=Katakana}+)?秒|分|小?[时時]|[钟鐘][头頭]|天|日|[周週]|星期|[礼禮]拜|[个個ヶかカケ箇]?月|年)[钟鐘间間]?|(?:\\p{Script=Hangul}{2,4})?초|분|시간|일|주|개월|달|년";
+/**
+ * A number in the role of a duration: a quantity followed by a unit of time
+ * ({@link LATIN_TIME_UNIT}, {@link CJK_TIME_UNIT}), glued or spaced, or by a
+ * size or token unit. The unit decides, whatever surrounds it. A Latin unit
+ * must end the word, so `503 Service` is not `503 s`.
+ */
+const UNIT_NUMBER_PATTERN = new RegExp(
+	`(?<![\\w.])\\d+(?:\\.\\d+)?\\s*(?:(?:${LATIN_TIME_UNIT}|bytes?|[kmgt]i?b|tokens?)(?![\\p{L}\\p{N}_])|${CJK_TIME_UNIT})`,
+	"giu",
+);
 /**
  * Digits glued into an ASCII identifier or a path: `x-request-503-trace`,
  * `/jobs/503/`, `gpt-503-preview`. ASCII only on purpose: CJK prose glues a
@@ -598,24 +681,89 @@ const UNIT_NUMBER_PATTERN =
  */
 const GLUED_NUMBER_PATTERN = /(?<=[A-Za-z_\-/])\d+|\d+(?=[A-Za-z_\-/])/g;
 
+/** The words of a field key, lower-cased: `remote_address` → `remote`, `address`; `exitCode` → `exit`, `code`. */
+function fieldKeyWords(key: string): string[] {
+	return key
+		.replace(/([a-z\d])([A-Z])/g, "$1 $2")
+		.toLowerCase()
+		.split(/[\s_.-]+/)
+		.filter(word => word !== "");
+}
+/** Key words that state why: the field is a reason whatever its value. */
+const CAUSE_KEY_WORDS: Record<string, true> = { reason: true, cause: true, why: true, signal: true, policy: true };
+/** What an exit reports: `exit_code`, `exitStatus`, `exit_signal` state why a process ended. */
+const EXIT_KEY_WORDS: Record<string, true> = { code: true, status: true, signal: true };
+/** Key words that name where: the field is metadata whatever its value. */
+const LOCATION_KEY_WORDS: Record<string, true> = {
+	host: true,
+	hostname: true,
+	addr: true,
+	address: true,
+	ip: true,
+	peer: true,
+	remote: true,
+	server: true,
+	origin: true,
+	endpoint: true,
+	url: true,
+	uri: true,
+	path: true,
+	port: true,
+	socket: true,
+};
+/**
+ * Whether a field's key states why — `reason`, `cause`, `why`, `signal`,
+ * `policy`, or an exit's code, status or signal (`exit_code`, `exitSignal`).
+ * The key decides, not the value: `signal=9` and `reason=policy_v2` are
+ * reasons although their values carry a digit, so neither is metadata and
+ * neither number is stripped as one.
+ */
+function isCauseFieldKey(key: string): boolean {
+	const words = fieldKeyWords(key);
+	const last = words.at(-1);
+	if (last === undefined) return false;
+	return CAUSE_KEY_WORDS[last] === true || (EXIT_KEY_WORDS[last] === true && words.at(-2) === "exit");
+}
+/**
+ * Whether a field's key names where: a host or an address (`host`,
+ * `hostname`, `remote_address`, `peer`, `ip`), a server or origin, an
+ * endpoint, URL or path, a port or a socket. Metadata whatever its value:
+ * `host=localhost` is no more a reason than `host=127.0.0.1`.
+ */
+function isLocationFieldKey(key: string): boolean {
+	const last = fieldKeyWords(key).at(-1);
+	return last !== undefined && LOCATION_KEY_WORDS[last] === true;
+}
+/**
+ * A host on its own, without a port: an IPv6 address in brackets or bare
+ * (`[::1]`, `[fe80::1%eth0]`, `2001:db8::503`, Node's `::1`), a dotted-quad
+ * IPv4 address, or `localhost`. Its digits are an address, never a status. An
+ * IPv6 address has at least two colons and only hex digits between them, so a
+ * bracketed word (`[policy]`) is not one.
+ */
+const HOST_PATTERN =
+	/\[[\dA-Fa-f:.]*:[\dA-Fa-f:.]*(?:%[\w.-]+)?\]|(?<![\w:])(?:[\dA-Fa-f]{0,4}:){2,7}[\dA-Fa-f]{0,4}(?:%[\w.-]+)?(?![\w:])|\b\d{1,3}(?:\.\d{1,3}){3}\b|\blocalhost\b/g;
+
 /**
  * `text` with the digits that are diagnostic metadata removed, by the role
- * each number plays: inside a URL; a port; a stream number; a duration, size
- * or token count (a unit after it, or the value of a field whose key names
- * time); the value of any other field that does not name a status; or glued
- * into an identifier or a path. Every reader that takes a bare number as an
- * HTTP status, an auth rejection, a capacity refusal or a transient status
- * reads this instead, so `read ECONNRESET after 401 ns` stays a wire cut. A
- * status the sentence states — `HTTP 503`, `status=529`, `503 Service
- * Unavailable`, `error: 429`, `(429)` — keeps its digits.
+ * each number plays: inside a URL; a host or a port; a stream number; a
+ * duration, size or token count (a unit after it, or the value of a field
+ * whose key names time); the value of any other field whose key names neither
+ * a status nor a cause; or glued into an identifier or a path. Every reader
+ * that takes a bare number as an HTTP status, an auth rejection, a capacity
+ * refusal or a transient status reads this instead, so `read ECONNRESET after
+ * 401 ns` stays a wire cut. A status the sentence states — `HTTP 503`,
+ * `status=529`, `503 Service Unavailable`, `error: 429`, `(429)` — keeps its
+ * digits, and so does a number a cause field states (`reason=503`).
  */
 function withoutMetadataNumbers(text: string): string {
 	return text
 		.replace(DEFAULT_IGNORABLE_PATTERN, "")
 		.replace(URL_PATTERN, url => url.replace(/\d+/g, ""))
 		.replace(PORT_NUMBER_PATTERN, port => port.replace(/\d+$/, ""))
+		.replace(HOST_PATTERN, host => host.replace(/\d+/g, ""))
 		.replace(FIELD_NUMBER_PATTERN, (field, quote: string, key: string, separator: string, _q, value: string) => {
-			if (!isFieldKey(quote, key, separator) || STATUS_FIELD_KEY.test(key)) return field;
+			if (!isFieldKey(quote, key, separator) || STATUS_FIELD_KEY.test(key) || isCauseFieldKey(key)) return field;
 			const at = field.lastIndexOf(value);
 			return field.slice(0, at) + field.slice(at + value.length);
 		})
@@ -629,40 +777,64 @@ const DECORATION_FILLER_PATTERN = /\b(?:after|took|in|at|via|from|on|over|elapse
 /** A protocol name: `HTTP/1.1`, `HTTP/3`. */
 const PROTOCOL_PATTERN = /\bHTTP\/\d(?:\.\d)?\b/gi;
 /**
- * A field whose value carries a digit, quoted or not — a number
- * (`retry-after-ms=9000`, `elapsed_ms="401"`) or an identifier
- * (`model=gpt-503-preview`, `request_id=req_7`) — or whose key names an
- * identifier (`trace: abc`).
+ * A field: a key, `:` or `=`, and a value, quoted or not — a word, an
+ * identifier, a number, a host (`api.example.com:443`, `[::1]`).
  */
-const METADATA_FIELD_PATTERN =
-	/\b(?:[A-Za-z][\w.-]*\s*[:=]\s*(["']?)(?=[\w.-]*\d)[\w.-]+\1|(?:[A-Za-z][\w.-]*?(?:_id|-id|\.id|Id|ID)|id|trace)\s*[:=]\s*(["']?)[\w.-]+\2)/g;
+const FIELD_PATTERN = /(?<![\w.%:[-])([A-Za-z][\w.-]*)\s*[:=]\s*(["']?)([\w.%:-]+|\[[^\]\s]+\])\2/g;
+/** A key that names an identifier: `id`, `request_id`, `requestId`, `trace`. */
+const ID_FIELD_KEY = /^(?:[A-Za-z][\w.-]*?(?:_id|-id|\.id|Id|ID)|id|trace)$/;
+/**
+ * Whether a field is metadata. The key decides when it says what the value
+ * is: a status or a cause makes it a reason (`reason=policy_v2`, `signal=9`);
+ * an identifier, a location or a time makes it metadata (`host=localhost`,
+ * `trace: abc`, `elapsed: 503`). A key that says neither is read by its value:
+ * a number or an identifier is metadata (`model=gpt-503-preview`), words are
+ * a reason (`mode=strict`).
+ */
+function isMetadataField(key: string, value: string): boolean {
+	if (STATUS_FIELD_KEY.test(key) || isCauseFieldKey(key)) return false;
+	if (ID_FIELD_KEY.test(key) || isLocationFieldKey(key) || DURATION_FIELD_KEY.test(key)) return true;
+	return /\d/.test(value);
+}
 /**
  * A token that joins letters and digits with `-`, `_` or `.`: an identifier
  * (`x-request-503`, `gpt-503-preview`, `req_7`). A reason is words; a word with
- * no digit (`SIGKILL`, `content_policy`) is not taken for an identifier.
+ * no digit (`content_policy`) is not taken for an identifier.
  */
 const DIGIT_IDENTIFIER_PATTERN = /\b(?=[\w.-]*\d)(?=[\w.-]*[A-Za-z])[A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)+\b/g;
+/**
+ * A signal name, POSIX `SIG` and the name in capitals (`SIGKILL`, `SIGTERM-15`,
+ * `SIGKILL9`): the cause of a killed process, never an identifier, whatever
+ * digits follow it.
+ */
+const SIGNAL_NAME_PATTERN = /\bSIG[A-Z]{2,}/;
 
 /**
- * Whether `tail` carries metadata and nothing else: URLs, ports, stream
- * numbers, protocol names, durations and sizes, fields whose value carries a
- * digit, identifier fields, identifiers that carry a digit, the words that
- * introduce them, and punctuation. One word of any other kind — a reason such
- * as `content policy violation`, `process killed by SIGKILL`, `permission
- * denied`, `due to …`, `reason=content_policy` — and it is not.
+ * Whether `tail` carries metadata and the transport cause and nothing else:
+ * URLs, hosts and ports, stream numbers, protocol names, durations and sizes,
+ * metadata fields ({@link isMetadataField}), identifiers that carry a digit,
+ * the cause undici attaches to `terminated` ({@link TRANSPORT_CAUSE_PATTERN}),
+ * the words that introduce them, and punctuation. A signal name, a cause or
+ * status field, or one word of any other kind — `content policy violation`,
+ * `process killed by SIGKILL`, `permission denied`, `due to …` — and it is not.
  */
 function isMetadataOnly(tail: string): boolean {
+	if (SIGNAL_NAME_PATTERN.test(tail)) return false;
 	const residue = tail
 		.replace(DEFAULT_IGNORABLE_PATTERN, "")
 		.replace(URL_PATTERN, " ")
+		.replace(FIELD_PATTERN, (field, key: string, _quote: string, value: string) =>
+			isMetadataField(key, value) ? " " : field,
+		)
 		.replace(PORT_NUMBER_PATTERN, " ")
+		.replace(HOST_PATTERN, " ")
 		.replace(STREAM_NUMBER_PATTERN, " ")
 		.replace(PROTOCOL_PATTERN, " ")
-		.replace(METADATA_FIELD_PATTERN, " ")
 		.replace(UNIT_NUMBER_PATTERN, " ")
 		.replace(DIGIT_IDENTIFIER_PATTERN, " ")
+		.replace(TRANSPORT_CAUSE_PATTERN, " ")
 		.replace(DECORATION_FILLER_PATTERN, " ")
-		.replace(/[\s;,.()[\]{}]+/g, "");
+		.replace(/[\s;:,.()[\]{}]+/g, "");
 	return residue === "";
 }
 
@@ -845,6 +1017,17 @@ const CONNECTION_FAILURE_PATTERN =
 	/connection (?:closed|reset|aborted)|closed the connection|socket hang up|socket is closed|other side closed|use of closed network connection|reset before headers|premature close|incomplete chunked|transfer[ _-]?encoding\s*error|\bECONNRESET\b|\bEPIPE\b|HTTP2(?:StreamReset|RefusedStream)|\bNGHTTP2_(?:INTERNAL_ERROR|REFUSED_STREAM)\b|stream error:[^;]*;\s*(?:INTERNAL_ERROR|REFUSED_STREAM)\b/i;
 
 /**
+ * The transport cause undici attaches when it terminates a body: a wire
+ * failure the connection reader already names (`other side closed`,
+ * `ECONNRESET`), an undici error code (`UND_ERR_BODY_TIMEOUT`), or a timeout of
+ * a transfer phase (undici's `Body Timeout Error` and `Headers Timeout Error`,
+ * `read timed out`). It says how the wire failed, so it is no reason.
+ */
+const TRANSPORT_CAUSE_PATTERN = new RegExp(
+	`${CONNECTION_FAILURE_PATTERN.source}|\\bUND_ERR_[A-Z_]+\\b|\\b(?:body|headers?|connect(?:ion)?|socket|read|write|idle|request|response|stream)[ _-]?(?:time[ _-]?out(?:[ _-]?error)?|timed[ _-]?out)\\b`,
+	"gi",
+);
+/**
  * undici's whole diagnostic for a response body that ended early is the bare
  * word `terminated`. Anchored, because the word on its own inside a sentence
  * means something else entirely — a killed process ("Process terminated by
@@ -854,18 +1037,18 @@ const CONNECTION_FAILURE_PATTERN =
 const UNDICI_TERMINATED_HEAD_PATTERN = /^(?:TypeError:\s*)?terminated\.?/i;
 
 /**
- * undici's `terminated`, alone or followed by metadata only
- * ({@link isMetadataOnly}): `terminated; after 401 ns`, `terminated
- * (https://h/v1)`, `terminated retry-after-ms=9000`. A reason never passes,
- * whatever separates it — `terminated; process killed by SIGKILL`, `terminated
- * (content policy violation)`, `terminated retry-after-ms=200 due to content
- * policy` — and a colon always introduces one.
+ * undici's `terminated`, alone or followed by metadata and its transport cause
+ * only ({@link isMetadataOnly}), whatever separates them: `terminated; after
+ * 401 ns`, `terminated (https://h/v1)`, `terminated retry-after-ms=9000`,
+ * `terminated; [::1]`, `terminated (Body Timeout Error)`. A reason never
+ * passes — `terminated; process killed by SIGKILL`, `terminated: content
+ * policy`, `terminated; signal=9`, `terminated retry-after-ms=200 due to
+ * content policy`.
  */
 function isUndiciTerminatedText(text: string): boolean {
 	const head = UNDICI_TERMINATED_HEAD_PATTERN.exec(text);
 	if (!head) return false;
-	const tail = text.slice(head[0].length);
-	return !/^\s*:/.test(tail) && isMetadataOnly(tail);
+	return isMetadataOnly(text.slice(head[0].length));
 }
 
 /**

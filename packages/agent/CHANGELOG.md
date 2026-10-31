@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- `streamProxy` keeps a failure's header retry wait as `errorRetryAfterMs`, from the terminal `error` frame's new `errorRetryAfterMs` field or a non-2xx proxy response's own `Retry-After` / `retry-after-ms` headers; the error a failed compaction step throws carries it too, so the compaction retry waits for it ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
 - Long tool-call intents no longer block tool execution when intent tracing is enabled ([#13140](https://github.com/can1357/oh-my-pi/issues/13140)).
 ### Breaking Changes
 

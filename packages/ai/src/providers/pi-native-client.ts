@@ -36,6 +36,7 @@ import {
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
 import { notifyProviderResponse } from "../utils/provider-response";
+import { isRetryWaitMs } from "../utils/retry-after";
 
 /**
  * Fields that must not cross the wire — either non-serializable (functions,
@@ -292,13 +293,15 @@ export function streamPiNative<TApi extends Api>(
 
 /**
  * `encodeStream`'s transport-failure envelope (`pi-native-server.ts`): an
- * `error` event carrying only `errorMessage`, because the gateway had no
- * `AssistantMessage` to attach when the upstream iterator threw.
+ * `error` event carrying only `errorMessage`, and the thrown error's header
+ * retry wait as `errorRetryAfterMs` when it had one, because the gateway had
+ * no `AssistantMessage` to attach when the upstream iterator threw.
  */
 interface GatewayFailureFrame {
 	type: "error";
 	reason: "error";
 	errorMessage?: string;
+	errorRetryAfterMs?: unknown;
 	error?: undefined;
 }
 
@@ -314,6 +317,7 @@ function gatewayFailureEvent(model: Model<Api>, frame: GatewayFailureFrame): Ass
 	const error = makeSyntheticAssistant(model);
 	error.stopReason = "error";
 	error.errorMessage = frame.errorMessage || "auth-gateway stream failed";
+	if (isRetryWaitMs(frame.errorRetryAfterMs)) error.errorRetryAfterMs = frame.errorRetryAfterMs;
 	return { type: "error", reason: "error", error };
 }
 

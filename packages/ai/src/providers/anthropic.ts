@@ -101,7 +101,7 @@ import {
 	parseAnthropicSlowModeHeaders,
 } from "./anthropic-slow-mode";
 import { notifyProviderResponse } from "../utils/provider-response";
-import { getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
+import { getFailureRetryAfterMs, getHeadersFromError } from "../utils/retry-after";
 import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
 import { spillToDescription } from "../utils/schema/spill";
 import { createSdkStreamRequestOptions } from "../utils/sdk-stream-timeout";
@@ -1827,6 +1827,11 @@ const streamAnthropicOnce = (
 			timestamp: Date.now(),
 		};
 		let rawRequestDump: RawHttpRequestDump | undefined;
+		// The current attempt's accepted (2xx) response headers: set when its
+		// response arrives, cleared when the next attempt starts, so an in-band
+		// error or a cut stream reads this attempt's `Retry-After` and a later
+		// attempt that fails before its response never reads an earlier one's.
+		let streamResponseHeaders: Headers | undefined;
 		let transportPayload: unknown;
 		let activeAbortTracker = createAbortSourceTracker(options?.signal);
 		// Request attempts, counted on the `fetch` the client issues them through
@@ -2479,6 +2484,7 @@ const streamAnthropicOnce = (
 			let sentSlow = false;
 			while (true) {
 				activeAbortTracker = createAbortSourceTracker(options?.signal);
+				streamResponseHeaders = undefined;
 				const { requestSignal } = activeAbortTracker;
 				// The provider loop owns retries: pin the client's internal retry loop
 				// to zero even when no watchdog timeout is configured (the helper only
@@ -2644,6 +2650,7 @@ const streamAnthropicOnce = (
 					} finally {
 						if (requestTimeout !== undefined) clearTimeout(requestTimeout);
 					}
+					streamResponseHeaders = response.headers;
 					await notifyProviderResponse(options, response, sourceModel, requestId);
 					if (slowMode) {
 						const slowSignal = parseAnthropicSlowModeHeaders(response.headers);
@@ -3601,9 +3608,12 @@ const streamAnthropicOnce = (
 					providerRetryAttempt++;
 					const backoffDelayMs = calculateAnthropicRetryDelayMs(providerRetryAttempt - 1);
 					// Honor the server's retry hint (`retry-after-ms`/`retry-after`) on
-					// 429/529-style failures: retrying sooner than the server asked is a
-					// guaranteed failure that just burns the retry budget.
-					const headerDelayMs = getRetryAfterMsFromHeaders(getHeadersFromError(streamFailure));
+					// 429/529-style failures and on an accepted stream that failed after
+					// naming one: retrying sooner than the server asked is a guaranteed
+					// failure that just burns the retry budget. The same reader as the
+					// failed message's `errorRetryAfterMs`, so this cap and every layer
+					// above judge one wait.
+					const headerDelayMs = getFailureRetryAfterMs(streamFailure, { streamResponseHeaders });
 					// Bound the server-directed wait so a multi-hour `retry-after` cannot
 					// park the provider stream before higher-level recovery runs. A non-positive cap
 					// disables the bound; an over-cap hint surfaces the original error immediately.
@@ -3690,6 +3700,7 @@ const streamAnthropicOnce = (
 				provider: sourceModel.provider,
 				abortTracker: activeAbortTracker,
 				rawRequestDump,
+				streamResponseHeaders,
 			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;

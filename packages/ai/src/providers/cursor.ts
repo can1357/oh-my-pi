@@ -614,10 +614,17 @@ function log(type: string, subtype?: string, data?: unknown): void {
 
 class ConnectEndStreamError extends AIError.ProviderResponseError {
 	readonly diagnosticMessage: string;
+	/**
+	 * The refusing (non-2xx) response's headers when the error came from one, so
+	 * `finalize` reads the wait they name; absent for an end-stream frame, whose
+	 * accepted response's headers reach `finalize` separately.
+	 */
+	readonly headers: Headers | undefined;
 
-	constructor(classificationMessage: string, diagnosticMessage: string) {
+	constructor(classificationMessage: string, diagnosticMessage: string, headers?: Headers) {
 		super(classificationMessage, { kind: "envelope" });
 		this.diagnosticMessage = diagnosticMessage;
+		this.headers = headers;
 	}
 }
 
@@ -757,27 +764,32 @@ function decodeCursorStructuredError(error: unknown): CursorStructuredError | un
 	return undefined;
 }
 
-function classifyCursorStructuredError(structured: CursorStructuredError): Error {
+function classifyCursorStructuredError(structured: CursorStructuredError, headers: Headers | undefined): Error {
 	const { code, name, message, retryable } = structured;
 	const fullMessage = `Cursor ${name}: ${message}`;
 	if (code === 21) return new AIError.AbortError(fullMessage);
 	const status = CURSOR_ERROR_STATUS[code];
-	if (status !== undefined) return new AIError.ProviderHttpError(fullMessage, status, { code: name });
+	if (status !== undefined) return new AIError.ProviderHttpError(fullMessage, status, { code: name, headers });
 	if (retryable === true || (retryable === undefined && CURSOR_RETRYABLE_ERROR_CODES.has(code))) {
-		return new AIError.ProviderHttpError(fullMessage, 503, { code: name });
+		return new AIError.ProviderHttpError(fullMessage, 503, { code: name, headers });
 	}
-	return new AIError.ProviderHttpError(fullMessage, 400, { code: name });
+	return new AIError.ProviderHttpError(fullMessage, 400, { code: name, headers });
 }
 
-/** Classify a Connect error object (`{ code, message, details }`). */
-function classifyConnectError(error: Record<string, unknown>): Error {
+/**
+ * Classify a Connect error object (`{ code, message, details }`). `headers` are
+ * the refusing (non-2xx) response's when the object is that response's body;
+ * the error carries them so `finalize` reads the wait they name.
+ */
+function classifyConnectError(error: Record<string, unknown>, headers?: Headers): Error {
 	const structured = decodeCursorStructuredError(error);
-	if (structured) return classifyCursorStructuredError(structured);
+	if (structured) return classifyCursorStructuredError(structured, headers);
 	const code = typeof error.code === "string" ? error.code : "unknown";
 	const message = typeof error.message === "string" ? error.message : "Unknown error";
 	const endStreamError = new ConnectEndStreamError(
 		`Connect error ${code}: ${message}`,
 		formatConnectEndStreamError(error),
+		headers,
 	);
 	// Without a decodable binary detail, Cursor's retry verdict survives only in
 	// the detail's debug JSON; the classification text drops it, so carry it as
@@ -819,6 +831,18 @@ interface CursorRunTransport extends CursorMessageWriter {
 }
 
 function wrapHttp2RunTransport(request: http2.ClientHttp2Stream): CursorRunTransport {
+	// A non-2xx Run response is a refusal, as the HTTP/1 transport treats it:
+	// fail with its status and headers (so `finalize` reads the wait they name)
+	// instead of decoding its body as Connect frames.
+	request.on("response", headers => {
+		const status = Number(headers[":status"]);
+		if (status >= 200 && status < 300) return;
+		request.destroy(
+			new AIError.ProviderHttpError(`Cursor Run failed with HTTP ${status}`, status, {
+				headers: cursorResponseHeaders(headers),
+			}),
+		);
+	});
 	return {
 		get closed() {
 			return request.closed;
@@ -928,8 +952,10 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 		}
 		const error = await response.json().catch(() => undefined);
 		throw isRecord(error)
-			? classifyConnectError(error)
-			: new AIError.ProviderHttpError(`Cursor BidiAppend failed with HTTP ${response.status}`, response.status);
+			? classifyConnectError(error, response.headers)
+			: new AIError.ProviderHttpError(`Cursor BidiAppend failed with HTTP ${response.status}`, response.status, {
+					headers: response.headers,
+				});
 	};
 
 	const pumpAppends = (): void => {
@@ -960,7 +986,9 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 			});
 			responseListener(responseHeaders);
 			if (!response.ok) {
-				throw new AIError.ProviderHttpError(`Cursor RunSSE failed with HTTP ${response.status}`, response.status);
+				throw new AIError.ProviderHttpError(`Cursor RunSSE failed with HTTP ${response.status}`, response.status, {
+					headers: response.headers,
+				});
 			}
 			if (!response.body) {
 				throw new AIError.ProviderResponseError("Cursor RunSSE returned no response body", {
@@ -1031,6 +1059,22 @@ function isHttp2Unavailable(error: unknown): boolean {
 		(code === "ERR_HTTP2_ERROR" && /h2 is not supported/i.test(message)) ||
 		/Cursor run transport could not negotiate HTTP\/2/i.test(message)
 	);
+}
+
+/** A Run response's headers as `Headers`, for `finalize`'s readers; pseudo-headers (`:status`) are left out. */
+function cursorResponseHeaders(headers: http2.IncomingHttpHeaders): Headers {
+	const result = new Headers();
+	for (const [name, value] of Object.entries(headers)) {
+		if (name.startsWith(":") || value === undefined) continue;
+		for (const item of Array.isArray(value) ? value : [value]) result.append(name, String(item));
+	}
+	return result;
+}
+
+/** The Run response's headers when it was accepted (2xx); `undefined` for any other status. */
+function acceptedCursorResponseHeaders(headers: http2.IncomingHttpHeaders): Headers | undefined {
+	const status = Number(headers[":status"]);
+	return status >= 200 && status < 300 ? cursorResponseHeaders(headers) : undefined;
 }
 
 /**
@@ -1248,6 +1292,12 @@ function streamCursorWithWireMode(
 		let runTransport: CursorRunTransport | null = null;
 		let heartbeatTimer: NodeJS.Timeout | null = null;
 		let debugResponseLogPromise: Promise<RequestDebugResponseLog | undefined> | undefined;
+		// This attempt's accepted (2xx) Run response headers, for `finalize`:
+		// Cursor reports failures in band (an end-stream frame, gRPC trailers) or
+		// as a cut, so the response's `Retry-After` is the header wait it has.
+		// Every further attempt (checkpoint resume, HTTP/1 drop, wire-model
+		// replay) is a new call with its own record.
+		let streamResponseHeaders: Headers | undefined;
 		const h2Completion = Promise.withResolvers<void>();
 		let h2Settled = false;
 		let sawTurnEnded = false;
@@ -1595,6 +1645,7 @@ function streamCursorWithWireMode(
 			};
 
 			runTransport.onResponse(headers => {
+				streamResponseHeaders = acceptedCursorResponseHeaders(headers);
 				const protocol = transportMode === "http2" ? "HTTP/2" : "HTTP/1.1";
 				debugResponseLogPromise = debugSession?.openResponseLog(
 					`${protocol} ${headers[":status"] ?? ""}`.trim(),
@@ -2210,7 +2261,11 @@ function streamCursorWithWireMode(
 				endCurrentThinkingBlock(output, stream, openBlockState);
 				flushOpenToolCalls(output, stream, openBlockState);
 			}
-			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal });
+			const result = await AIError.finalize(error, {
+				api: model.api,
+				signal: options?.signal,
+				streamResponseHeaders,
+			});
 			// #8345/#15830: a server-side per-conversation rejection (a bare
 			// resource_exhausted, or PROVIDER_ERROR after a mid-turn cut) with zero
 			// tokens means the conversation is poisoned, not the account. Rotate

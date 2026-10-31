@@ -146,7 +146,12 @@ data: [DONE]
 
 The server stops after a canonical `done` or `error` event and then writes
 `[DONE]`. If its event iterator throws first, it best-effort emits
-`{"type":"error","reason":"error","errorMessage":"..."}` followed by `[DONE]`.
+`{"type":"error","reason":"error","errorMessage":"...","errorRetryAfterMs":9000}`
+followed by `[DONE]`. `errorRetryAfterMs` is present only when the thrown
+error's own response headers named a retry wait; the client copies it onto the
+synthetic message's `errorRetryAfterMs` when it is a finite number of zero or
+more. A canonical `error` event carries the upstream message's
+`errorRetryAfterMs` as part of the message itself.
 Cancelling the HTTP body propagates cancellation to the gateway request.
 
 The client parses every event and pushes it verbatim into
@@ -192,7 +197,11 @@ Provider/handler failures that reach the pi-native route use:
 ```
 
 with the appropriate HTTP status, `Content-Type: application/json`, and
-`Cache-Control: no-store`. The client converts this shape into
+`Cache-Control: no-store`. When the failed upstream attempt's response headers
+named a retry wait (the failed message's `errorRetryAfterMs`, or a thrown
+error's own headers), the response also carries `retry-after-ms` with that wait
+in milliseconds and `Retry-After` in whole seconds, rounded up. Error text never
+becomes one of these headers. The client converts this shape into
 `AuthGatewayError`, preserving status, response headers, and `type`.
 
 Bearer authentication runs before the route handler. A missing or invalid

@@ -13,7 +13,13 @@ import {
 	recordGatewayUsage,
 	resolveGatewayApiKey,
 } from "../dispatch";
-import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
+import {
+	gatewayResponseHeaders,
+	json,
+	resolveClientIdentity,
+	thrownRetryAfterMs,
+	withRetryAfterHeaders,
+} from "../http";
 
 function isGatewayImageApi(api: string): boolean {
 	return (
@@ -111,7 +117,10 @@ async function handleImages(
 		if (controller.signal.aborted) return aborted();
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway image generation failed", { format: "images", error: classified.message, peer });
-		return imagesServer.formatError(classified.status, classified.type, classified.message);
+		return withRetryAfterHeaders(
+			imagesServer.formatError(classified.status, classified.type, classified.message),
+			thrownRetryAfterMs(error),
+		);
 	}
 }
 

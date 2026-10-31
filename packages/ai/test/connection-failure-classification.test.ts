@@ -582,3 +582,238 @@ describe("connection-failure classification", () => {
 		expect(flagsOfMessage(errorMessage).connection).toBe(connection);
 	});
 });
+
+/**
+ * The decoration rules as rules, not as the examples that found them. Every
+ * spelling below is written out from its standard here, not imported from the
+ * implementation, and most appear in no reviewer's matrix.
+ */
+describe("a number's role is decided by a rule, not a list", () => {
+	const bareFlags = (text: string) => {
+		const id = AIError.classify(new Error(text));
+		return {
+			connection: AIError.is(id, AIError.Flag.Connection),
+			transient: AIError.is(id, AIError.Flag.Transient),
+			retriable: AIError.retriable(id),
+		};
+	};
+	const BASES = ["read ECONNRESET", "write EPIPE", "socket hang up", "terminated"];
+	const STATUS_NUMBERS = [401, 403, 429, 503, 529];
+	/** Every SI prefix (SI Brochure, 9th edition, Table 7, and the 2022 additions), by name. */
+	const SI_PREFIX_NAMES = [
+		"quetta",
+		"ronna",
+		"yotta",
+		"zetta",
+		"exa",
+		"peta",
+		"tera",
+		"giga",
+		"mega",
+		"kilo",
+		"hecto",
+		"deca",
+		"deka",
+		"deci",
+		"centi",
+		"milli",
+		"micro",
+		"nano",
+		"pico",
+		"femto",
+		"atto",
+		"zepto",
+		"yocto",
+		"ronto",
+		"quecto",
+	];
+	/** Every SI prefix by symbol, micro in all three spellings. `a`, `da` and `E` are covered below. */
+	const SI_SYMBOLS = [
+		"Q",
+		"R",
+		"Y",
+		"Z",
+		"P",
+		"T",
+		"G",
+		"M",
+		"k",
+		"h",
+		"d",
+		"c",
+		"m",
+		"µ",
+		"μ",
+		"u",
+		"n",
+		"p",
+		"f",
+		"z",
+		"y",
+		"r",
+		"q",
+	];
+	const LATIN_SECONDS = [
+		...SI_PREFIX_NAMES.flatMap(prefix => [
+			`${prefix}seconds`,
+			`${prefix}second`,
+			`${prefix}-second`,
+			`${prefix}secs`,
+		]),
+		...SI_SYMBOLS.flatMap(symbol => [`${symbol}s`, `${symbol}sec`, `${symbol}secs`]),
+		"asec",
+		"dasec",
+		"Esec",
+		"picos",
+		"femtos",
+	];
+	/** Chinese writes each SI prefix as one character before 秒 (mainland and Taiwan forms). */
+	const HAN_SECONDS = ["纳", "納", "奈", "微", "毫", "皮", "飞", "飛", "阿", "仄", "介", "幺", "攸", "千"].map(
+		p => `${p}秒`,
+	);
+	/** Japanese writes each SI prefix in katakana before 秒. */
+	const KATAKANA_SECONDS = [
+		"ミリ",
+		"マイクロ",
+		"ナノ",
+		"ピコ",
+		"フェムト",
+		"アト",
+		"ゼプト",
+		"ヨクト",
+		"ロント",
+		"クエクト",
+		"キロ",
+	].map(p => `${p}秒`);
+	/** Korean writes each SI prefix as a loanword of two to four syllables before 초. */
+	const HANGUL_SECONDS = [
+		"밀리",
+		"마이크로",
+		"나노",
+		"피코",
+		"펨토",
+		"아토",
+		"젭토",
+		"욕토",
+		"론토",
+		"퀙토",
+		"킬로",
+	].map(p => `${p}초`);
+	/** Minutes through years in Chinese (GB 3100 writes the hour `[小]时`), Japanese and Korean. */
+	const CJK_UNITS = [
+		"時",
+		"时",
+		"小时",
+		"小時",
+		"時間",
+		"分钟",
+		"分鐘",
+		"秒钟",
+		"天",
+		"星期",
+		"礼拜",
+		"禮拜",
+		"週間",
+		"周",
+		"个月",
+		"個月",
+		"ヶ月",
+		"か月",
+		"カ月",
+		"시간",
+		"분",
+		"일",
+		"주",
+		"개월",
+		"달",
+		"년",
+	];
+	const UNITS = [...LATIN_SECONDS, ...HAN_SECONDS, ...KATAKANA_SECONDS, ...HANGUL_SECONDS, ...CJK_UNITS];
+
+	it.each(UNITS.map((unit, index) => [unit, STATUS_NUMBERS[index % STATUS_NUMBERS.length]] as const))(
+		"reads %s after %d as a duration on every wire diagnostic",
+		(unit, number) => {
+			for (const base of BASES) {
+				for (const quantity of [`after ${number} ${unit}`, `after ${number}${unit}`]) {
+					const text = `${base}; ${quantity}`;
+					expect({ text, ...bareFlags(text) }).toEqual({ text, ...bareFlags(base) });
+					expect(AIError.status(new Error(text))).toBeUndefined();
+				}
+			}
+		},
+	);
+
+	it.each([
+		// An SI symbol plus `s` that is an everyday word is not taken for a unit.
+		["HTTP 503 as expected", 503],
+		["HTTP 503 es temporal", 503],
+		["HTTP 503 das Upstream ist überlastet", 503],
+	] as [string, number][])("keeps the status in %s", (text, status) => {
+		expect(AIError.status(new Error(text))).toBe(status);
+	});
+
+	it.each([
+		// 部分 is "part": a one-character prefix belongs only to 秒, which means
+		// nothing but "second", so 分 inside another word is not a minute.
+		"read ECONNRESET 503 部分请求失败",
+		// 최초 is "first": one syllable before 초 is a word, not a prefix.
+		"read ECONNRESET 오류 503 최초 발생",
+		// A number a cause field states is what the field says it is, not metadata.
+		"read ECONNRESET; reason=503",
+	])("keeps the capacity number in %s", text => {
+		expect(bareFlags(text).connection).toBe(false);
+	});
+
+	it.each([
+		// An IPv6 group is hex: `503` there is an address, bracketed or bare as Node prints it.
+		"read ECONNRESET [2001:db8::503]",
+		"connect ECONNRESET 2001:db8::429",
+		"read ECONNRESET; peer=[fe80::401%eth0]",
+	])("reads the digits of a host without a port as an address: %s", text => {
+		expect(bareFlags(text)).toEqual(bareFlags(text.startsWith("connect") ? "connect ECONNRESET" : "read ECONNRESET"));
+		expect(AIError.status(new Error(text))).toBeUndefined();
+	});
+
+	it.each([
+		// A key that states why makes the field a reason, whatever its value.
+		"terminated; reason=SIGKILL9",
+		"terminated; reason=policy_v2",
+		"terminated; signal=9",
+		"terminated; exit_signal=9",
+		"terminated after 5s; reason=content_policy_v2",
+		"terminated; exit_code=137",
+		"terminated (signal: 15)",
+		"terminated; cause=oom_2",
+		"terminated; policy=v3",
+		"terminated (exitCode=143)",
+		// A signal name is the cause of a killed process, never an identifier.
+		"terminated; SIGKILL-9",
+		"terminated; SIGTERM_15",
+		"terminated; killed by SIGSEGV",
+	])("reads a reason after terminated as a reason: %s", text => {
+		expect(bareFlags(text).connection).toBe(false);
+	});
+
+	it.each([
+		// An address is metadata by its role, with or without a port or a key.
+		"terminated; 192.0.2.1",
+		"terminated; [::1]",
+		"terminated; [fe80::1%eth0]",
+		"terminated; host=api.example.com",
+		"terminated; host=localhost",
+		"terminated; 198.51.100.23",
+		"terminated [2001:db8::1]",
+		"terminated (peer=203.0.113.9)",
+		"terminated; remote_address=gateway.internal",
+		"terminated; endpoint=api.anthropic.com",
+		"terminated; hostname: edge-proxy",
+		// undici attaches the transport cause it was terminated by.
+		"terminated (Body Timeout Error)",
+		"terminated (Headers Timeout Error)",
+		"terminated: Body Timeout Error",
+		"terminated (UND_ERR_BODY_TIMEOUT)",
+		"terminated; read timed out after 300 s",
+	])("reads metadata or undici's own cause after terminated as a cut stream: %s", text => {
+		expect(bareFlags(text)).toEqual({ connection: true, transient: true, retriable: true });
+	});
+});

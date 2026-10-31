@@ -72,6 +72,7 @@ import { getHeaderCaseInsensitive, resolveCacheRetention } from "./utils";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 import { applyGlyphCodec } from "./utils/glyph-codec";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
+import { retryWaitHeaders } from "./utils/retry-after";
 import { withThinkingLoopGuard } from "./utils/thinking-loop";
 import { withRequestTransport } from "./utils/transport-fetch";
 import { inheritWireAttempts, uncountedFetchOf } from "./utils/wire-attempts";
@@ -1108,13 +1109,21 @@ function isRetryableUpstreamError(
 	return isUsageLimitOutcome(status, message);
 }
 
+/**
+ * The Error the `ApiKeyResolver` receives for a rotatable failed message. The
+ * credential layers behind the resolver (`limits.rotate`, the auth gateway's
+ * usage mark) read the failure's header retry wait from the Error's headers,
+ * so the message's structured `errorRetryAfterMs` travels on as a
+ * `retry-after-ms` header; the text never stands in for it.
+ */
 function createAssistantAuthError(message: AssistantMessage): Error {
 	const text = message.errorMessage ?? "Provider authentication failed";
 	const status = extractStatusFromAssistantError(message);
+	const headers = retryWaitHeaders(message.errorRetryAfterMs);
 	const error =
 		status === undefined
-			? new AIError.ProviderResponseError(text, { kind: "runtime" })
-			: new ProviderHttpError(text, status);
+			? Object.assign(new AIError.ProviderResponseError(text, { kind: "runtime" }), { headers })
+			: new ProviderHttpError(text, status, { headers });
 	return typeof message.errorId === "number" ? AIError.attach(error, message.errorId) : error;
 }
 

@@ -309,6 +309,9 @@ export function streamFactoryDroidGemini(
 		const tracker = createAbortSourceTracker(options.signal);
 		const stalled = new AIError.StreamTimeoutError("Factory Gemini stream stalled");
 		let firstEventTimer: NodeJS.Timeout | undefined;
+		// The generate response's headers once it is accepted (2xx), for
+		// `finalize`: an in-band chunk error or a cut stream keeps its `Retry-After`.
+		let streamResponseHeaders: Headers | undefined;
 
 		try {
 			const { contents, systemInstruction } = toGeminiContents(model, context);
@@ -370,6 +373,7 @@ export function streamFactoryDroidGemini(
 					{ headers: response.headers },
 				);
 			}
+			streamResponseHeaders = response.headers;
 			await notifyProviderResponse(options, response, model, response.headers.get("x-request-id"));
 			if (!response.body) throw new Error("Factory Gemini generate returned an empty body");
 
@@ -492,6 +496,7 @@ export function streamFactoryDroidGemini(
 				api: model.api,
 				provider: model.provider,
 				abortTracker: tracker,
+				streamResponseHeaders,
 			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;

@@ -759,9 +759,10 @@ export type ObservedUsageInput = {
 export type MarkUsageLimitOptions = {
 	/**
 	 * How long to block the credential, from the failure's stated retry wait.
-	 * Clamped to `MAX_HINTED_BLOCK_MS` (7 days): no message or header may take a
-	 * credential out of rotation for longer. A usage report can still extend the
-	 * block to a later reset it states.
+	 * Clamped to `MAX_HINTED_BLOCK_MS` (7 days), and NaN is no wait: no
+	 * message, header or usage report may take a credential out of rotation for
+	 * longer. A usage report can extend the block to a later reset it states, up
+	 * to the same ceiling.
 	 */
 	retryAfterMs?: number;
 	/**

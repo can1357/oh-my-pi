@@ -858,6 +858,13 @@ const streamOpenAICompletionsOnce = (
 		// the catch handler uses it to close open blocks before emitting the
 		// terminal error so both exit paths obey the same block lifecycle.
 		let finishOpenBlocksOnError: () => void = () => {};
+		// The current attempt's accepted (2xx) response headers: droid CLI parity
+		// reads cache-read details from `fireworks-cached-prompt-tokens` when the
+		// SSE body omits `cached_tokens`, and the catch hands them to `finalize`
+		// so an in-band error or a cut stream keeps the response's `Retry-After`.
+		// Cleared when an attempt starts: a fallback request that fails before
+		// its response must not read an earlier response's headers.
+		let responseHeaders: Headers | undefined;
 
 		try {
 			const policy = resolveOpenAICompatForRequest(model, options, Boolean(context.tools?.length));
@@ -908,6 +915,7 @@ const streamOpenAICompletionsOnce = (
 				? `${trimmedBaseUrl}/chat/completions?${new URLSearchParams(query)}`
 				: `${trimmedBaseUrl}/chat/completions`;
 			const createCompletionsStream = async (toolStrictModeOverride?: ToolStrictModeOverride) => {
+				responseHeaders = undefined;
 				const effectiveToolStrictModeOverride = disableStrictTools ? "none" : toolStrictModeOverride;
 				const builtParams = buildParams(model, context, options, effectiveToolStrictModeOverride);
 				appliedStrictTools = builtParams.strictToolsApplied;
@@ -957,6 +965,7 @@ const streamOpenAICompletionsOnce = (
 						body: params,
 						signal: requestSignal,
 						maxAttempts: options?.maxHttpAttempts,
+						maxRetryDelayMs: options?.maxRetryDelayMs,
 						fetch: wrapFetchForCopilotFallback(
 							wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
 							model.provider === "github-copilot",
@@ -985,10 +994,6 @@ const streamOpenAICompletionsOnce = (
 					clearTimeout(requestTimeout);
 				}
 			};
-			// droid CLI parity: cache-read details can arrive on the
-			// `fireworks-cached-prompt-tokens` response header when the SSE body
-			// omits `cached_tokens`; captured here for the usage parser.
-			let responseHeaders: Headers | undefined;
 			let openaiStream: AsyncIterable<ChatCompletionChunk>;
 			try {
 				openaiStream = await createCompletionsStream();
@@ -1856,6 +1861,7 @@ const streamOpenAICompletionsOnce = (
 				abortTracker,
 				rawRequestDump,
 				capturedErrorResponse,
+				streamResponseHeaders: responseHeaders,
 			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;

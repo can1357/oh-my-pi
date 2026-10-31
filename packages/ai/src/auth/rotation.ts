@@ -8,6 +8,7 @@ import { raceSignal } from "./abort";
 import {
 	ACCOUNT_POLICY_BLOCK_SCOPE,
 	AUTH_BLOCK_SCOPE,
+	boundedBlockDeadline,
 	DEFAULT_BLOCK_MS,
 	MAX_HINTED_BLOCK_MS,
 	credentialBlockScopesForRequest,
@@ -249,14 +250,17 @@ export class RateLimits implements LimitsApi {
 
 		const routing = this.#credentialBlockRouting(provider, credentialType, options?.modelId);
 		const now = Date.now();
-		// The stated wait is clamped; only a usage report below may block longer.
+		// A NaN wait states nothing: it gets the default block and is not provider
+		// timing. The stated wait is clamped, and so is every report deadline below
+		// (`boundedBlockDeadline`): no message, header or report blocks past it.
+		const statedWaitMs = Number.isNaN(options?.retryAfterMs) ? undefined : options?.retryAfterMs;
 		const requestedBlockMs =
-			options?.retryAfterMs === undefined ? DEFAULT_BLOCK_MS : Math.min(options.retryAfterMs, MAX_HINTED_BLOCK_MS);
+			statedWaitMs === undefined ? DEFAULT_BLOCK_MS : Math.min(statedWaitMs, MAX_HINTED_BLOCK_MS);
 		const requestedBlockedUntilMs = now + requestedBlockMs;
 		let blockedUntil = requestedBlockedUntilMs;
 		// Heuristic/default fallbacks are guesses; provider-stated hints and
 		// report-derived extensions are timed.
-		let providerTimed = options?.providerTimed === true;
+		let providerTimed = options?.providerTimed === true && !Number.isNaN(options.retryAfterMs);
 
 		// Epoch ms of the usage-report-derived reset. Authoritative only when
 		// EVERY exhausted window carries a future reset: a permanent cap
@@ -276,7 +280,7 @@ export class RateLimits implements LimitsApi {
 				if (isUsageLimitReached(scopedLimits)) {
 					const resetAtMs = usageResetAtMs(scopedLimits, Date.now());
 					if (resetAtMs && resetAtMs > blockedUntil) {
-						blockedUntil = resetAtMs;
+						blockedUntil = boundedBlockDeadline(resetAtMs, now);
 						providerTimed = true;
 					}
 					const nowMs = Date.now();
@@ -285,7 +289,7 @@ export class RateLimits implements LimitsApi {
 						.map(limit => windowResetAt(limit.window))
 						.filter((reset): reset is number => reset !== undefined && reset > nowMs);
 					if (exhaustedLimits.length > 0 && futureResets.length === exhaustedLimits.length) {
-						reportResetAtMs = Math.max(...futureResets);
+						reportResetAtMs = boundedBlockDeadline(Math.max(...futureResets), now);
 					}
 				}
 			}
