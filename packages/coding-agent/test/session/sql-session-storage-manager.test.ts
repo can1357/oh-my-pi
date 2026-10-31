@@ -200,6 +200,8 @@ describe("SessionManager + SqlSessionStorage (SQLite)", () => {
 		if (turn?.type !== "message" || turn.message.role !== "user") throw new Error("Expected user turn");
 		turn.message.content = "pruned before rewrite";
 
+		// The size-checked replace opens with the session row's size lock, then rewrites the parts.
+		heldClient.holdQueryPrefix = "SELECT byte_len FROM omp_session_files WHERE path";
 		heldClient.holdNextReplace = true;
 		const rewritePublished = manager.rewriteEntries();
 		await heldClient.replaceStarted.promise;
