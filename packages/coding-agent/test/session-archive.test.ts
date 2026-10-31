@@ -3693,39 +3693,52 @@ test("staging cleanup leaves a FIFO that took the staged file's place", async ()
 	await fs.rm(ground.dir, { recursive: true, force: true });
 });
 
+/**
+ * How long a FIFO test waits before calling a run hung, and how long such a
+ * test may take in all. A real hang is unbounded, so a long window costs
+ * only the red runs; a short one called runs that were merely slow hung on a
+ * box at a load of 500, where a clean refusal can take seconds.
+ */
+const HANG_MS = 20_000;
+const FIFO_TEST_MS = 60_000;
+
 for (const apply of [false, true]) {
-	test(`a FIFO at the live transcript's name is refused rather than waited on (${apply ? "apply" : "preview"})`, async () => {
-		await archiveEverything();
-		expect(await Bun.spawn(["mkfifo", sessionFile]).exited).toBe(0);
+	test(
+		`a FIFO at the live transcript's name is refused rather than waited on (${apply ? "apply" : "preview"})`,
+		async () => {
+			await archiveEverything();
+			expect(await Bun.spawn(["mkfifo", sessionFile]).exited).toBe(0);
 
-		const run = runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply, json: true } });
-		// A real timer, because the defect is a blocking open on a FIFO in the
-		// thread pool: no fake clock reaches it, and it raises no signal to
-		// await. A passing run resolves first and pays nothing.
-		const outcome = await Promise.race([run, Bun.sleep(5_000).then(() => "hung" as const)]);
-		if (outcome === "hung") {
-			// Give the blocked reader a writer and an end, so the run can finish
-			// and release the gc lock before the next test.
-			const writer = await fs.open(sessionFile, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
-			await writer.close();
-			await run.catch(() => undefined);
-		}
+			const run = runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply, json: true } });
+			// A real timer, because the defect is a blocking open on a FIFO in the
+			// thread pool: no fake clock reaches it, and it raises no signal to
+			// await. A passing run resolves first and pays nothing.
+			const outcome = await Promise.race([run, Bun.sleep(HANG_MS).then(() => "hung" as const)]);
+			if (outcome === "hung") {
+				// Give the blocked reader a writer and an end, so the run can finish
+				// and release the gc lock before the next test.
+				const writer = await fs.open(sessionFile, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
+				await writer.close();
+				await run.catch(() => undefined);
+			}
 
-		expect(outcome).not.toBe("hung");
-		if (outcome !== "hung") expect(outcome.restore?.errors.length).toBeGreaterThan(0);
-		expect((await fs.lstat(sessionFile)).isFIFO()).toBe(true);
-	}, 15_000);
+			expect(outcome).not.toBe("hung");
+			if (outcome !== "hung") expect(outcome.restore?.errors.length).toBeGreaterThan(0);
+			expect((await fs.lstat(sessionFile)).isFIFO()).toBe(true);
+		},
+		FIFO_TEST_MS,
+	);
 }
 
 /**
  * `run`, or "hung" when it is still waiting on the FIFO at `fifo` after a
- * real five seconds — then given a writer, so it can finish and release the
- * gc lock before the next test.
+ * real {@link HANG_MS} — then given a writer, so it can finish and release
+ * the gc lock before the next test.
  */
 async function unlessHungOn<T>(fifo: string, run: Promise<T>): Promise<T | "hung"> {
 	// A real timer: a blocking open on a FIFO waits in the thread pool, where
 	// no fake clock reaches it. A passing run resolves first and pays nothing.
-	const outcome = await Promise.race([run, Bun.sleep(5_000).then(() => "hung" as const)]);
+	const outcome = await Promise.race([run, Bun.sleep(HANG_MS).then(() => "hung" as const)]);
 	if (outcome === "hung") {
 		const writer = await fs.open(fifo, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
 		await writer.close();
@@ -3734,36 +3747,44 @@ async function unlessHungOn<T>(fifo: string, run: Promise<T>): Promise<T | "hung
 	return outcome;
 }
 
-test("an archive run is not held up by a FIFO named like a transcript, and archives the session beside it", async () => {
-	const fifo = path.join(getSessionsDir(root), "--other--", "other.jsonl");
-	await fs.mkdir(path.dirname(fifo), { recursive: true });
-	expect(await Bun.spawn(["mkfifo", fifo]).exited).toBe(0);
+test(
+	"an archive run is not held up by a FIFO named like a transcript, and archives the session beside it",
+	async () => {
+		const fifo = path.join(getSessionsDir(root), "--other--", "other.jsonl");
+		await fs.mkdir(path.dirname(fifo), { recursive: true });
+		expect(await Bun.spawn(["mkfifo", fifo]).exited).toBe(0);
 
-	const outcome = await unlessHungOn(fifo, archiveOnly());
-
-	expect(outcome).not.toBe("hung");
-	expect(await Bun.file(archiveFile).exists()).toBe(true);
-	// Left out, and said so.
-	if (outcome !== "hung")
-		expect(outcome.archive?.errors.join("\n")).toContain(`${fifo} is a FIFO, not a regular file`);
-	expect((await fs.lstat(fifo)).isFIFO()).toBe(true);
-}, 15_000);
-
-for (const apply of [false, true]) {
-	test(`a reclaim is not held up by a FIFO at the live transcript's name (${apply ? "apply" : "preview"})`, async () => {
-		await archiveOnly();
-		await fs.unlink(sessionFile);
-		expect(await Bun.spawn(["mkfifo", sessionFile]).exited).toBe(0);
-
-		const outcome = await unlessHungOn(
-			sessionFile,
-			runGcCommand({ flags: { agentDir: root, reclaim: archiveFile, apply, forwardOnly: true, json: true } }),
-		);
+		const outcome = await unlessHungOn(fifo, archiveOnly());
 
 		expect(outcome).not.toBe("hung");
-		if (outcome !== "hung") expect(outcome.reclaim?.errors.length).toBeGreaterThan(0);
-		expect((await fs.lstat(sessionFile)).isFIFO()).toBe(true);
-	}, 15_000);
+		expect(await Bun.file(archiveFile).exists()).toBe(true);
+		// Left out, and said so.
+		if (outcome !== "hung")
+			expect(outcome.archive?.errors.join("\n")).toContain(`${fifo} is a FIFO, not a regular file`);
+		expect((await fs.lstat(fifo)).isFIFO()).toBe(true);
+	},
+	FIFO_TEST_MS,
+);
+
+for (const apply of [false, true]) {
+	test(
+		`a reclaim is not held up by a FIFO at the live transcript's name (${apply ? "apply" : "preview"})`,
+		async () => {
+			await archiveOnly();
+			await fs.unlink(sessionFile);
+			expect(await Bun.spawn(["mkfifo", sessionFile]).exited).toBe(0);
+
+			const outcome = await unlessHungOn(
+				sessionFile,
+				runGcCommand({ flags: { agentDir: root, reclaim: archiveFile, apply, forwardOnly: true, json: true } }),
+			);
+
+			expect(outcome).not.toBe("hung");
+			if (outcome !== "hung") expect(outcome.reclaim?.errors.length).toBeGreaterThan(0);
+			expect((await fs.lstat(sessionFile)).isFIFO()).toBe(true);
+		},
+		FIFO_TEST_MS,
+	);
 }
 
 /**
@@ -3798,112 +3819,331 @@ const PIPE_PAYLOAD = "UNIQUE USER INPUT WAITING IN A PIPE, 52 BYTES LONG.\n";
 // `notes.jsonl` is the review's own shape: named like a transcript, so it is
 // also among the files the archive run checks for subagent sessions.
 for (const name of ["pipe", "notes.jsonl"]) {
-	test(`an archive run neither waits on nor drains a FIFO an artifact links to, and names it (${name})`, async () => {
-		const link = path.join(sessionFile.slice(0, -".jsonl".length), name);
-		await fs.mkdir(path.dirname(link), { recursive: true });
-		const fifo = path.join(root, "outside.fifo");
-		const pipe = await pipeHolding(fifo, PIPE_PAYLOAD);
-		await fs.symlink(fifo, link);
-		try {
-			const outcome = await unlessHungOn(fifo, archiveOnly());
+	test(
+		`an archive run neither waits on nor drains a FIFO an artifact links to, and names it (${name})`,
+		async () => {
+			const link = path.join(sessionFile.slice(0, -".jsonl".length), name);
+			await fs.mkdir(path.dirname(link), { recursive: true });
+			const fifo = path.join(root, "outside.fifo");
+			const pipe = await pipeHolding(fifo, PIPE_PAYLOAD);
+			await fs.symlink(fifo, link);
+			try {
+				const outcome = await unlessHungOn(fifo, archiveOnly());
 
-			expect(outcome).not.toBe("hung");
-			expect(await pipe.left()).toBe(PIPE_PAYLOAD);
-			if (outcome !== "hung") expect(outcome.archive?.errors.join("\n")).toContain(`${link} links to a FIFO`);
-			expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
-		} finally {
-			await pipe.close();
-		}
-	}, 15_000);
+				expect(outcome).not.toBe("hung");
+				expect(await pipe.left()).toBe(PIPE_PAYLOAD);
+				if (outcome !== "hung") expect(outcome.archive?.errors.join("\n")).toContain(`${link} links to a FIFO`);
+				expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+			} finally {
+				await pipe.close();
+			}
+		},
+		FIFO_TEST_MS,
+	);
 }
 
-test("a blob sweep neither waits on nor drains a FIFO a transcript's name links to", async () => {
-	const link = path.join(sessionFile.slice(0, -".jsonl".length), "notes.jsonl");
-	await fs.mkdir(path.dirname(link), { recursive: true });
-	const fifo = path.join(root, "outside.fifo");
-	const pipe = await pipeHolding(fifo, PIPE_PAYLOAD);
-	await fs.symlink(fifo, link);
-	try {
-		const outcome = await unlessHungOn(
-			fifo,
-			runGcCommand({ flags: { agentDir: root, blobs: true, apply: true, json: true } }),
-		);
-
-		expect(outcome).not.toBe("hung");
-		expect(await pipe.left()).toBe(PIPE_PAYLOAD);
-		if (outcome !== "hung") expect(outcome.blobs?.errors).toEqual([]);
-	} finally {
-		await pipe.close();
-	}
-}, 15_000);
-
-for (const apply of [false, true]) {
-	test(`a reclaim neither waits on nor drains a FIFO an artifact links to, and keeps the link (${apply ? "apply" : "preview"})`, async () => {
-		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
-		await Bun.write(path.join(liveArtifacts, "a.log"), "HELLO");
-		await archiveOnly();
-		const link = path.join(liveArtifacts, "pipe");
+test(
+	"a blob sweep neither waits on nor drains a FIFO a transcript's name links to",
+	async () => {
+		const link = path.join(sessionFile.slice(0, -".jsonl".length), "notes.jsonl");
+		await fs.mkdir(path.dirname(link), { recursive: true });
 		const fifo = path.join(root, "outside.fifo");
 		const pipe = await pipeHolding(fifo, PIPE_PAYLOAD);
 		await fs.symlink(fifo, link);
 		try {
 			const outcome = await unlessHungOn(
 				fifo,
-				runGcCommand({ flags: { agentDir: root, reclaim: archiveFile, apply, forwardOnly: true, json: true } }),
+				runGcCommand({ flags: { agentDir: root, blobs: true, apply: true, json: true } }),
 			);
 
 			expect(outcome).not.toBe("hung");
 			expect(await pipe.left()).toBe(PIPE_PAYLOAD);
-			if (outcome !== "hung") {
-				expect(outcome.reclaim?.reclaimed ?? 0).toBe(0);
-				expect(outcome.reclaim?.errors.join("\n")).toContain(`${link} links to a FIFO`);
-			}
-			expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
-			expect(await Bun.file(sessionFile).exists()).toBe(true);
+			if (outcome !== "hung") expect(outcome.blobs?.errors).toEqual([]);
 		} finally {
 			await pipe.close();
 		}
-	}, 15_000);
+	},
+	FIFO_TEST_MS,
+);
+
+for (const apply of [false, true]) {
+	test(
+		`a reclaim neither waits on nor drains a FIFO an artifact links to, and keeps the link (${apply ? "apply" : "preview"})`,
+		async () => {
+			const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+			await Bun.write(path.join(liveArtifacts, "a.log"), "HELLO");
+			await archiveOnly();
+			const link = path.join(liveArtifacts, "pipe");
+			const fifo = path.join(root, "outside.fifo");
+			const pipe = await pipeHolding(fifo, PIPE_PAYLOAD);
+			await fs.symlink(fifo, link);
+			try {
+				const outcome = await unlessHungOn(
+					fifo,
+					runGcCommand({ flags: { agentDir: root, reclaim: archiveFile, apply, forwardOnly: true, json: true } }),
+				);
+
+				expect(outcome).not.toBe("hung");
+				expect(await pipe.left()).toBe(PIPE_PAYLOAD);
+				if (outcome !== "hung") {
+					expect(outcome.reclaim?.reclaimed ?? 0).toBe(0);
+					expect(outcome.reclaim?.errors.join("\n")).toContain(
+						`${link} is a link the archive holds no copy for: it leads to a FIFO`,
+					);
+				}
+				expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+				expect(await Bun.file(sessionFile).exists()).toBe(true);
+			} finally {
+				await pipe.close();
+			}
+		},
+		FIFO_TEST_MS,
+	);
 }
 
-test("an archive run names a FIFO in an artifact tree, which it leaves out", async () => {
-	const fifo = path.join(sessionFile.slice(0, -".jsonl".length), "pipe");
-	await fs.mkdir(path.dirname(fifo), { recursive: true });
-	expect(await Bun.spawn(["mkfifo", fifo]).exited).toBe(0);
+test(
+	"an archive run names a FIFO in an artifact tree, which it leaves out",
+	async () => {
+		const fifo = path.join(sessionFile.slice(0, -".jsonl".length), "pipe");
+		await fs.mkdir(path.dirname(fifo), { recursive: true });
+		expect(await Bun.spawn(["mkfifo", fifo]).exited).toBe(0);
 
-	const outcome = await unlessHungOn(fifo, archiveOnly());
-
-	expect(outcome).not.toBe("hung");
-	if (outcome !== "hung") expect(outcome.archive?.errors.join("\n")).toContain(`${fifo} is a FIFO`);
-}, 15_000);
-
-test("an archive run whose artifact is replaced by a FIFO after it was found neither waits on nor drains it", async () => {
-	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
-	const artifact = path.join(liveArtifacts, "sub.jsonl");
-	await Bun.write(artifact, sessionBody(sessionId("sub-1"), "nested", root));
-	// The first open of the artifact finds a FIFO with input waiting where
-	// the file was found: the name changed after every look at it.
-	let swapped: HeldPipe | undefined;
-	let swapping = false;
-	const realOpen = fs.open;
-	spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
-		if (!swapping && String(target) === artifact) {
-			swapping = true;
-			await fs.unlink(artifact);
-			swapped = await pipeHolding(artifact, PIPE_PAYLOAD);
-		}
-		return await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
-	}) as typeof fs.open);
-	try {
-		const outcome = await unlessHungOn(artifact, archiveOnly());
+		const outcome = await unlessHungOn(fifo, archiveOnly());
 
 		expect(outcome).not.toBe("hung");
-		expect(swapped).toBeDefined();
-		expect(await swapped?.left()).toBe(PIPE_PAYLOAD);
-	} finally {
-		await swapped?.close();
+		if (outcome !== "hung") expect(outcome.archive?.errors.join("\n")).toContain(`${fifo} is a FIFO`);
+	},
+	FIFO_TEST_MS,
+);
+
+test(
+	"an archive run whose artifact is replaced by a FIFO after it was found neither waits on nor drains it",
+	async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		const artifact = path.join(liveArtifacts, "sub.jsonl");
+		await Bun.write(artifact, sessionBody(sessionId("sub-1"), "nested", root));
+		// The first open of the artifact finds a FIFO with input waiting where
+		// the file was found: the name changed after every look at it.
+		let swapped: HeldPipe | undefined;
+		let swapping = false;
+		const realOpen = fs.open;
+		spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
+			if (!swapping && String(target) === artifact) {
+				swapping = true;
+				await fs.unlink(artifact);
+				swapped = await pipeHolding(artifact, PIPE_PAYLOAD);
+			}
+			return await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
+		}) as typeof fs.open);
+		try {
+			const outcome = await unlessHungOn(artifact, archiveOnly());
+
+			expect(outcome).not.toBe("hung");
+			expect(swapped).toBeDefined();
+			expect(await swapped?.left()).toBe(PIPE_PAYLOAD);
+		} finally {
+			await swapped?.close();
+		}
+	},
+	FIFO_TEST_MS,
+);
+
+// A FIFO at `gc.lock`, itself or through a link, with input waiting: every
+// gc command reads the lock before it does anything, when it cannot create
+// one, to see whether its holder is gone.
+const lockedCommands: [string, (lock: string) => Promise<() => Promise<GcResult>>][] = [
+	["archive --apply", async () => () => archiveOnly()],
+	[
+		"reclaim (preview)",
+		async () => {
+			await archiveOnly();
+			return () => runGcCommand({ flags: { agentDir: root, reclaim: archiveFile, forwardOnly: true, json: true } });
+		},
+	],
+	[
+		"reclaim --apply",
+		async () => {
+			await archiveOnly();
+			return () =>
+				runGcCommand({
+					flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+				});
+		},
+	],
+	[
+		"restore --apply",
+		async () => {
+			await archiveEverything();
+			return () => runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+		},
+	],
+	[
+		"quarantine --apply",
+		async () => () =>
+			runGcCommand({ flags: { agentDir: root, quarantine: "0000000000000000.json", apply: true, json: true } }),
+	],
+];
+for (const form of ["a FIFO", "a link to a FIFO"] as const) {
+	for (const [command, prepare] of lockedCommands) {
+		test(
+			`${command} neither waits on nor drains ${form} at gc.lock, and names it`,
+			async () => {
+				const lock = path.join(root, "gc.lock");
+				const run = await prepare(lock);
+				const fifo = form === "a FIFO" ? lock : path.join(root, "outside-lock.fifo");
+				const pipe = await pipeHolding(fifo, PIPE_PAYLOAD);
+				if (form === "a link to a FIFO") await fs.symlink(fifo, lock);
+				try {
+					const outcome = await unlessHungOn(
+						fifo,
+						run().then(
+							result => ({ failure: undefined, result }),
+							(failure: unknown) => ({ failure, result: undefined }),
+						),
+					);
+
+					expect(outcome).not.toBe("hung");
+					expect(await pipe.left()).toBe(PIPE_PAYLOAD);
+					if (outcome !== "hung")
+						expect(String(outcome.failure)).toContain(`${lock} is a FIFO, not a regular file`);
+					expect((await fs.lstat(lock)).isFIFO() || (await fs.lstat(lock)).isSymbolicLink()).toBe(true);
+					// The breaker lock it took to look is given back: the review saw
+					// `gc.lock.break` held for as long as the read hung.
+					expect(await fs.lstat(`${lock}.break`).catch(() => undefined)).toBeUndefined();
+					// Moved aside, as the message says, and the same command runs.
+					await fs.rename(lock, path.join(root, "gc.lock.aside"));
+					const again = await run().then(
+						() => "",
+						(failure: unknown) => String(failure),
+					);
+					expect(again).not.toContain("gc.lock");
+					expect(again).not.toContain("GC already running");
+				} finally {
+					await pipe.close();
+				}
+			},
+			FIFO_TEST_MS,
+		);
 	}
-}, 15_000);
+}
+
+// A FIFO the archive holds, itself or through a link, with input waiting. gc
+// never archives one, so a person put it there. The restore names it,
+// carries the rest home, reads nothing from it, and does not finish — the
+// one refusal the review found that said nothing.
+for (const form of ["a FIFO", "a link to a FIFO"] as const) {
+	for (const apply of [false, true]) {
+		test(
+			`a restore names ${form} in the archive, reads nothing from it, and does not finish (${apply ? "apply" : "preview"})`,
+			async () => {
+				const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+				await Bun.write(path.join(liveArtifacts, "a.log"), "HELLO");
+				await archiveEverything();
+				const entry = path.join(archiveFile.slice(0, -".jsonl.gz".length), "pipe");
+				const fifo = form === "a FIFO" ? entry : path.join(root, "outside-archive.fifo");
+				const pipe = await pipeHolding(fifo, PIPE_PAYLOAD);
+				if (form === "a link to a FIFO") await fs.symlink(fifo, entry);
+				try {
+					const outcome = await unlessHungOn(
+						fifo,
+						runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply, json: true } }),
+					);
+
+					expect(outcome).not.toBe("hung");
+					expect(await pipe.left()).toBe(PIPE_PAYLOAD);
+					if (outcome !== "hung") {
+						expect(outcome.restore?.errors.join("\n")).toContain(
+							`${entry} ${form === "a FIFO" ? "is" : "links to"} a FIFO in the archive, which a restore cannot carry home`,
+						);
+						expect(outcome.restore?.artifactsRestored).toBe(false);
+					}
+					if (apply) expect(await Bun.file(path.join(liveArtifacts, "a.log")).text()).toBe("HELLO");
+					expect(await fs.lstat(path.join(liveArtifacts, "pipe")).catch(() => undefined)).toBeUndefined();
+				} finally {
+					await pipe.close();
+				}
+			},
+			FIFO_TEST_MS,
+		);
+	}
+}
+
+// The review's end-to-end shapes: an artifact the archive holds an old copy
+// of, then replaced by a link to new bytes outside the session; and a link to
+// a directory with a FIFO in it, which the archive named and left out. A
+// reclaim gives a link up only once the archive is shown to hold what it
+// leads to.
+const unprovedLinks: [string, (live: string, outside: string) => Promise<void>][] = [
+	[
+		"a link to a file holding bytes the archive does not",
+		async (live, outside) => {
+			await Bun.write(outside, "NEW RESULT NOT IN GC ARCHIVE");
+			await fs.rm(live);
+			await fs.symlink(outside, live);
+		},
+	],
+	[
+		"a link to a directory holding a file the archive does not",
+		async (live, outside) => {
+			await Bun.write(path.join(outside, "result"), "NEW RESULT NOT IN GC ARCHIVE");
+			await fs.rm(live);
+			await fs.symlink(outside, live);
+		},
+	],
+];
+for (const [shape, relink] of unprovedLinks) {
+	for (const apply of [false, true]) {
+		test(`a reclaim keeps ${shape}, and names it (${apply ? "apply" : "preview"})`, async () => {
+			const live = path.join(sessionFile.slice(0, -".jsonl".length), "later");
+			await Bun.write(live, "OLD RESULT SAVED BY GC");
+			await archiveOnly();
+			const outside = path.join(root, "outside-new");
+			await relink(live, outside);
+
+			const result = await runGcCommand({
+				flags: { agentDir: root, reclaim: archiveFile, apply, forwardOnly: true, json: true },
+			});
+
+			expect(result.reclaim?.reclaimed ?? 0).toBe(0);
+			expect(result.reclaim?.wouldReclaim ?? 0).toBe(0);
+			expect(result.reclaim?.errors.join("\n")).toContain(live);
+			expect((await fs.lstat(live)).isSymbolicLink()).toBe(true);
+			expect(await Bun.file(sessionFile).exists()).toBe(true);
+		});
+	}
+}
+
+for (const apply of [false, true]) {
+	test(
+		`a reclaim keeps a link to a directory holding a FIFO the archive left out (${apply ? "apply" : "preview"})`,
+		async () => {
+			const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+			const outside = path.join(root, "outside-directory");
+			await Bun.write(path.join(outside, "normal"), "NORMAL");
+			const pipe = await pipeHolding(path.join(outside, "pipe"), PIPE_PAYLOAD);
+			const link = path.join(liveArtifacts, "outside-directory");
+			await fs.mkdir(liveArtifacts, { recursive: true });
+			await fs.symlink(outside, link);
+			try {
+				const archived = await archiveOnly();
+				expect(archived.archive?.errors.join("\n")).toContain(`${path.join(link, "pipe")} is a FIFO`);
+
+				const result = await runGcCommand({
+					flags: { agentDir: root, reclaim: archiveFile, apply, forwardOnly: true, json: true },
+				});
+
+				expect(result.reclaim?.reclaimed ?? 0).toBe(0);
+				expect(result.reclaim?.wouldReclaim ?? 0).toBe(0);
+				expect(result.reclaim?.errors.join("\n")).toContain(link);
+				expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+				expect(await pipe.left()).toBe(PIPE_PAYLOAD);
+			} finally {
+				await pipe.close();
+			}
+		},
+		FIFO_TEST_MS,
+	);
+}
 
 test("a private transcript stays private through archive, reclaim and restore", async () => {
 	await fs.chmod(sessionFile, 0o600);
@@ -4899,29 +5139,33 @@ for (const subject of ["an artifact", "the transcript"] as const) {
 }
 
 for (const apply of [false, true]) {
-	test(`a FIFO among the staging records is refused rather than waited on (${apply ? "apply" : "preview"})`, async () => {
-		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
-		await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
-		await archiveEverything();
-		expect(await Bun.spawn(["mkfifo", path.join(stagingLedgerDir(root), "planted.json")]).exited).toBe(0);
+	test(
+		`a FIFO among the staging records is refused rather than waited on (${apply ? "apply" : "preview"})`,
+		async () => {
+			const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+			await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+			await archiveEverything();
+			expect(await Bun.spawn(["mkfifo", path.join(stagingLedgerDir(root), "planted.json")]).exited).toBe(0);
 
-		const run = runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply, json: true } });
-		// A real timer, because the defect is a blocking open on a FIFO in the
-		// thread pool: no fake clock reaches it, and it raises no signal to
-		// await. A passing run resolves first and pays nothing.
-		const outcome = await Promise.race([run, Bun.sleep(5_000).then(() => "hung" as const)]);
-		if (outcome === "hung") {
-			const writer = await fs.open(
-				path.join(stagingLedgerDir(root), "planted.json"),
-				fsConstants.O_WRONLY | fsConstants.O_NONBLOCK,
-			);
-			await writer.close();
-			await run.catch(() => undefined);
-		}
+			const run = runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply, json: true } });
+			// A real timer, because the defect is a blocking open on a FIFO in the
+			// thread pool: no fake clock reaches it, and it raises no signal to
+			// await. A passing run resolves first and pays nothing.
+			const outcome = await Promise.race([run, Bun.sleep(HANG_MS).then(() => "hung" as const)]);
+			if (outcome === "hung") {
+				const writer = await fs.open(
+					path.join(stagingLedgerDir(root), "planted.json"),
+					fsConstants.O_WRONLY | fsConstants.O_NONBLOCK,
+				);
+				await writer.close();
+				await run.catch(() => undefined);
+			}
 
-		expect(outcome).not.toBe("hung");
-		if (outcome !== "hung") expect(outcome.restore?.errors.join("\n")).toContain("planted.json");
-	}, 15_000);
+			expect(outcome).not.toBe("hung");
+			if (outcome !== "hung") expect(outcome.restore?.errors.join("\n")).toContain("planted.json");
+		},
+		FIFO_TEST_MS,
+	);
 }
 
 test("an archived transcript keeps the mode of the file it was read from, whatever takes the live name later", async () => {

@@ -60,40 +60,60 @@
 	],
 	"overrides": [
 		{
-			"files": ["packages/coding-agent/src/cli/gc-cli.ts", "packages/coding-agent/src/session/session-archive.ts"],
+			"files": [
+				"packages/coding-agent/src/cli/gc-cli.ts",
+				"packages/coding-agent/src/session/session-archive.ts",
+				"packages/coding-agent/src/session/gc-lock.ts"
+			],
 			"rules": {
+				"eslint/no-restricted-globals": [
+					"error",
+					{
+						"name": "Bun",
+						"message": "Import what gc needs from \"bun\" by name (Glob, CryptoHasher, sleep): the Bun global carries Bun.file and Bun.write, which open a name and go through whatever is there."
+					},
+					{
+						"name": "require",
+						"message": "gc's modules import; a require can reach node:fs past the import rule. Take the filesystem from session/gc-fs.ts."
+					},
+					{
+						"name": "module",
+						"message": "gc's modules import; module.require can reach node:fs past the import rule. Take the filesystem from session/gc-fs.ts."
+					}
+				],
 				"eslint/no-restricted-properties": [
 					"error",
 					{
-						"object": "Bun",
-						"property": "file",
-						"message": "gc opens a file in a session tree only through openRegularFile (session/regular-file.ts): a name can stand for a FIFO, which a read by name waits on or drains."
-					},
-					{
-						"object": "fs",
-						"property": "open",
-						"message": "Use openRegularFile or createExclusive (session/regular-file.ts): an open by name can block on, or read from, a FIFO."
-					},
-					{
-						"object": "fs",
-						"property": "readFile",
-						"message": "Use openRegularFile (session/regular-file.ts) and read the descriptor."
-					},
-					{
-						"object": "fs",
-						"property": "copyFile",
-						"message": "Use openRegularFile (session/regular-file.ts) and copy the descriptor: copyFile reads the source by name."
-					},
-					{
-						"object": "fs",
-						"property": "createReadStream",
-						"message": "Use openRegularFile (session/regular-file.ts) and read the descriptor."
+						"object": "globalThis",
+						"property": "Bun",
+						"message": "Import what gc needs from \"bun\" by name: the Bun global carries Bun.file and Bun.write."
 					}
 				],
 				"eslint/no-restricted-imports": [
 					"error",
 					{
 						"paths": [
+							{
+								"name": "bun",
+								"importNames": ["file", "write", "mmap"],
+								"message": "gc opens a file only through openRegularFile, and creates one only through createExclusive or writeExclusive (session/regular-file.ts)."
+							},
+							{
+								"name": "node:fs/promises",
+								"message": "Take the filesystem from session/gc-fs.ts, which has no call that opens a file, and open one with openRegularFile (session/regular-file.ts)."
+							},
+							{
+								"name": "node:fs",
+								"message": "Take the filesystem from session/gc-fs.ts, which has no call that opens a file, and open one with openRegularFile (session/regular-file.ts)."
+							},
+							{
+								"name": "fs/promises",
+								"message": "Take the filesystem from session/gc-fs.ts, which has no call that opens a file, and open one with openRegularFile (session/regular-file.ts)."
+							},
+							{
+								"name": "fs",
+								"message": "Take the filesystem from session/gc-fs.ts, which has no call that opens a file, and open one with openRegularFile (session/regular-file.ts)."
+							},
 							{
 								"name": "../session/session-loader",
 								"importNames": ["readSessionHeaderId"],

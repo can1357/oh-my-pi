@@ -19,15 +19,24 @@
  * hold `<agentDir>/gc.lock` while they do it.
  */
 import { randomBytes } from "node:crypto";
-import * as fs from "node:fs/promises";
-import { constants as fsConstants, type Stats } from "node:fs";
+import { CryptoHasher, Glob } from "bun";
+import * as fs from "./gc-fs";
+import { constants as fsConstants, type Stats } from "./gc-fs";
 import * as path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createGunzip } from "node:zlib";
 import { getAgentDir, getSessionsDir, isEnoent, type FileLockHandle } from "@oh-my-pi/pi-utils";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { codeOf, statIfPresent, withGcLock } from "./gc-lock";
-import { absentFile, createExclusive, NotARegularFile, notRegularAsAbsent, openRegularFile } from "./regular-file";
+import {
+	absentFile,
+	createExclusive,
+	kindOf,
+	NotARegularFile,
+	notRegularAsAbsent,
+	openRegularFile,
+	writeExclusive,
+} from "./regular-file";
 import { SESSION_TITLE_SLOT_BYTES } from "./session-entries";
 import { readSessionHeaderIdFromHandle, sessionHeaderIdFromBytes } from "./session-loader";
 import { SESSION_STAGING_RE, sessionStagingPath, tryAcquireSessionLease } from "./session-storage";
@@ -36,7 +45,7 @@ import { parseTitleSlotFromContent, parseTitleSlotLine } from "./session-title-s
 /** Suffix `gc --archive` gives a transcript it has compressed. */
 export const ARCHIVED_SESSION_SUFFIX = ".jsonl.gz";
 const SESSION_SUFFIX = ".jsonl";
-const ARCHIVED_SESSION_GLOB = new Bun.Glob(`*/*${ARCHIVED_SESSION_SUFFIX}`);
+const ARCHIVED_SESSION_GLOB = new Glob(`*/*${ARCHIVED_SESSION_SUFFIX}`);
 
 /** `<agentDir>/archive/sessions`, the root `gc --archive` moves transcripts into. */
 export function getArchivedSessionsDir(agentDir?: string): string {
@@ -667,7 +676,7 @@ export interface CopiedBytes {
  * happens to the source afterwards changes either.
  */
 export async function copyHandleWithDigest(source: fs.FileHandle, destination: fs.FileHandle): Promise<CopiedBytes> {
-	const hasher = new Bun.CryptoHasher("sha256");
+	const hasher = new CryptoHasher("sha256");
 	let size = 0;
 	for await (const chunk of bytesOfHandle(source)) {
 		hasher.update(chunk);
@@ -682,7 +691,7 @@ export async function copyHandleWithDigest(source: fs.FileHandle, destination: f
 
 /** The digest and length of everything an open descriptor holds. */
 export async function digestOfHandle(handle: fs.FileHandle): Promise<CopiedBytes> {
-	const hasher = new Bun.CryptoHasher("sha256");
+	const hasher = new CryptoHasher("sha256");
 	let size = 0;
 	for await (const chunk of bytesOfHandle(handle)) {
 		hasher.update(chunk);
@@ -703,7 +712,7 @@ export async function inflateIntoHandleWithDigest(
 	source: AsyncIterable<Uint8Array>,
 	destination: fs.FileHandle,
 ): Promise<CopiedBytes> {
-	const hasher = new Bun.CryptoHasher("sha256");
+	const hasher = new CryptoHasher("sha256");
 	let size = 0;
 	await pipeline(source, createGunzip(), async (inflated: NodeJS.ReadableStream) => {
 		for await (const chunk of inflated as AsyncIterable<Uint8Array>) {
@@ -1154,6 +1163,7 @@ async function copyEntryDereferenced(
 	ledger: string,
 	notes: string[],
 	isResidue: (entry: string) => boolean,
+	special: string[],
 ): Promise<void> {
 	const stat = await fs.stat(source).catch(error => {
 		// A link whose target is gone: nothing to carry, nothing to lose.
@@ -1197,11 +1207,15 @@ async function copyEntryDereferenced(
 				ledger,
 				notes,
 				isResidue,
+				special,
 			);
 		}
 		return;
 	}
-	if (!stat.isFile()) return;
+	if (!stat.isFile()) {
+		special.push(await archivedSpecialNote(source, stat));
+		return;
+	}
 	if (existing) {
 		// Anything but a regular file at the name already holds something else.
 		const live = await openRegularFile(destination).catch(notRegularAsAbsent);
@@ -1275,7 +1289,7 @@ async function copyTreeDereferenced(
 	destination: string,
 	agentDir: string,
 	notes: string[],
-): Promise<Array<[string, string]>> {
+): Promise<{ leftOut: Array<[string, string]>; special: string[] }> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
 	const archiveRoot = await fs.realpath(source);
 	const recorded = await stagingResidueUnder(agentDir, source);
@@ -1288,10 +1302,27 @@ async function copyTreeDereferenced(
 		leftOut.set(entry, record);
 		return true;
 	};
+	const special: string[] = [];
 	const ledger = stagingLedgerDir(agentDir);
-	await copyEntryDereferenced(source, destination, archiveRoot, ledger, notes, isResidue);
+	await copyEntryDereferenced(source, destination, archiveRoot, ledger, notes, isResidue, special);
 	await assertLiveTreeHoldsArchive(source, destination, archiveRoot, isResidue);
-	return [...leftOut];
+	return { leftOut: [...leftOut], special };
+}
+
+/**
+ * What a restore says about a FIFO, a socket or a device it found in the
+ * archived tree, itself or at the end of a link: gc never archives one, so a
+ * person put it there. It is not read — reading a FIFO waits on it, or takes
+ * what was written to it — and not carried home, and the restore does not
+ * finish while it is there.
+ */
+async function archivedSpecialNote(entry: string, stat: Stats): Promise<string> {
+	const named = await fs.lstat(entry);
+	return (
+		`${entry} ${named.isSymbolicLink() ? "links to" : "is"} ${kindOf(stat)} in the archive, which a restore cannot ` +
+		`carry home, so it was left there and not read; the restore does not finish while it is there — move it out ` +
+		`of the archive and restore again`
+	);
 }
 
 /**
@@ -1400,7 +1431,7 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 		const file = path.join(dir, path.basename(target));
 		const record = path.join(ledger, `${Snowflake.next()}.json`);
 		const intent: StagingRecord = { dir, file };
-		await fs.writeFile(record, JSON.stringify(intent), { flag: "wx", mode: 0o600 });
+		await writeExclusive(record, JSON.stringify(intent), 0o600);
 		try {
 			await fs.mkdir(dir, { mode: 0o700 });
 		} catch (error) {
@@ -1419,7 +1450,9 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 				dirIdentity: { dev: minted.dev, ino: minted.ino },
 				identity: { dev: created.dev, ino: created.ino },
 			};
-			await fs.writeFile(`${record}${STAGING_RECORD_PART}`, JSON.stringify(recorded), { mode: 0o600 });
+			// Created afresh: a FIFO or a link already at the name is not
+			// written through — it fails this attempt instead.
+			await writeExclusive(`${record}${STAGING_RECORD_PART}`, JSON.stringify(recorded), 0o600);
 			await fs.rename(`${record}${STAGING_RECORD_PART}`, record);
 			return { dir, file, handle, created, record };
 		} catch (error) {
@@ -2536,7 +2569,11 @@ export async function artifactRestoreConflicts(
 			}
 			return;
 		}
-		if (!stat.isFile() || !existing) return;
+		if (!stat.isFile()) {
+			conflicts.push(await archivedSpecialNote(source, stat));
+			return;
+		}
+		if (!existing) return;
 		let live: fs.FileHandle | undefined;
 		try {
 			// Anything but a regular file at the name already holds something else.
@@ -2690,7 +2727,7 @@ const ARCHIVED_HEADER_READ_LIMIT = 1024 * 1024;
 async function treeFiles(root: string): Promise<string[]> {
 	if (!(await statIfPresent(root))) return [];
 	const files: string[] = [];
-	for await (const name of new Bun.Glob("**/*").scan({
+	for await (const name of new Glob("**/*").scan({
 		cwd: root,
 		dot: true,
 		onlyFiles: true,
@@ -2982,7 +3019,12 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 		const leasedOwners = await ownerSignature(owners);
 		if (hasArtifacts) {
 			try {
-				const leftOut = await copyTreeDereferenced(archiveArtifacts, liveArtifacts, stagingAgentDir, notes);
+				const { leftOut, special } = await copyTreeDereferenced(
+					archiveArtifacts,
+					liveArtifacts,
+					stagingAgentDir,
+					notes,
+				);
 				if (!(await leases.refresh())) throw noOwners();
 				if ((await ownerSignature(owners)) !== leasedOwners) {
 					throw new Error(
@@ -2991,12 +3033,13 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 							`run \`${restoreCommand}\` again`,
 					);
 				}
-				// Leaving anything out is not a finished restore: each directory
-				// is named, the record stays down and the command fails. The
-				// directory stays in the archive, and nothing here suggests
-				// removing it.
+				// Leaving anything out is not a finished restore: each directory,
+				// and each FIFO, socket or device the archive holds, is named, the
+				// record stays down and the command fails. What was left out stays
+				// in the archive, and nothing here suggests removing it.
 				for (const [dir, staging] of leftOut) notRestored.push(stagingResidueNote(dir, staging, ARCHIVED_RESIDUE));
-				artifactsRestored = leftOut.length === 0;
+				notRestored.push(...special);
+				artifactsRestored = leftOut.length === 0 && special.length === 0;
 			} catch (error) {
 				notRestored.push(
 					`the artifact tree (subagent transcripts, tool output) at ${archiveArtifacts} was not restored whole: ${

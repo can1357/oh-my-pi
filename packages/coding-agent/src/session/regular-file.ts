@@ -102,6 +102,20 @@ export async function createExclusive(file: string, mode: number, readable = fal
 	return await fs.open(file, readable ? "wx+" : "wx", mode);
 }
 
+/**
+ * Write `text` to `file`, which must not exist yet: created with `O_EXCL`,
+ * so nothing already at the name — a FIFO, a link to somebody's file — is
+ * written through. EEXIST when something is there.
+ */
+export async function writeExclusive(file: string, text: string, mode: number): Promise<void> {
+	const handle = await createExclusive(file, mode);
+	try {
+		await handle.writeFile(text);
+	} finally {
+		await handle.close();
+	}
+}
+
 /** The error a read by name gave when nothing was at `file`, for a reader that opened it through {@link openRegularFile}. */
 export function absentFile(file: string): Error {
 	return Object.assign(new Error(`ENOENT: no such file or directory, open '${file}'`), { code: "ENOENT", path: file });

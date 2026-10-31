@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
-import * as fs from "node:fs/promises";
-import type { Stats } from "node:fs";
+import { CryptoHasher, Glob } from "bun";
+import * as fs from "../session/gc-fs";
+import type { Stats } from "../session/gc-fs";
 import * as path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -97,10 +98,10 @@ import {
 
 const BLOB_FILE_RE = /^([a-f0-9]{64})(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$/;
 const BLOB_REF_RE = /\bblob:sha256:([a-f0-9]{64})\b/gi;
-const JSONL_GLOB = new Bun.Glob("**/*.jsonl");
-const JSONL_GZ_GLOB = new Bun.Glob("**/*.jsonl.gz");
-const JSONL_BACKUP_GLOB = new Bun.Glob("**/*.jsonl.*.bak");
-const ANY_FILE_GLOB = new Bun.Glob("**/*");
+const JSONL_GLOB = new Glob("**/*.jsonl");
+const JSONL_GZ_GLOB = new Glob("**/*.jsonl.gz");
+const JSONL_BACKUP_GLOB = new Glob("**/*.jsonl.*.bak");
+const ANY_FILE_GLOB = new Glob("**/*");
 const ACTIVE_STATUSES: ReadonlySet<SessionStatus> = new Set(["pending", "interrupted", "unknown"]);
 const DAY_MS = 86_400_000;
 const GC_WRITE_GRACE_MS = 5 * 60_000;
@@ -556,7 +557,7 @@ async function scanSessionLinesIfPresent(file: string, onLine: (line: Uint8Array
  * symlink is a transcript like any other, and a blob it references must not be
  * swept because the walk could not see it.
  */
-async function scanSessionTree(glob: Bun.Glob, root: string): Promise<string[]> {
+async function scanSessionTree(glob: Glob, root: string): Promise<string[]> {
 	try {
 		const files = await Array.fromAsync(glob.scan({ cwd: root, followSymlinks: true }), name =>
 			path.join(root, name),
@@ -1101,7 +1102,7 @@ function sessionArtifactsPath(sessionPath: string): string {
 
 /** SHA-256 and byte count of a stream, used to prove an archive inflates to its source. */
 async function digestStream(stream: AsyncIterable<Uint8Array>): Promise<{ hash: string; bytes: number }> {
-	const hasher = new Bun.CryptoHasher("sha256");
+	const hasher = new CryptoHasher("sha256");
 	let bytes = 0;
 	for await (const chunk of stream) {
 		hasher.update(chunk);
