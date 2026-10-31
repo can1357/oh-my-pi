@@ -5,6 +5,7 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { BuiltSkillCommandPrompt } from "@oh-my-pi/pi-coding-agent/modes/skill-command";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -157,7 +158,7 @@ describe("issue #2372 pre-streaming chat rebuild preserves optimistic submission
 		mode.isInitialized = true;
 		const controller = new EventController(mode);
 		const addMessageSpy = vi.spyOn(mode, "addMessageToChat");
-		const skillPrompt = {
+		const skillPrompt: BuiltSkillCommandPrompt = {
 			message: {
 				customType: SKILL_PROMPT_MESSAGE_TYPE,
 				content: "Expanded skill instructions",
@@ -166,7 +167,7 @@ describe("issue #2372 pre-streaming chat rebuild preserves optimistic submission
 				attribution: "user",
 			},
 			options: { streamingBehavior: "followUp", queueChipText: "/skill:sample" },
-		} as const;
+		};
 
 		mode.startPendingSubmission({ text: "/skill:sample", skillPrompt });
 		expect(mode.optimisticUserMessageSignature).toBeUndefined();
