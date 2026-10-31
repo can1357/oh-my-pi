@@ -46,9 +46,10 @@ export interface BuildWorkspaceTreeOptions {
 
 /**
  * Build a generic directory tree using a single native scan. Hidden files are
- * shown, .gitignore is not consulted, and the standard non-source directories
- * (`node_modules`, `.git`, build outputs, caches…) are pruned by the native
- * walker. Used by the read tool's directory-listing path.
+ * shown, .gitignore is not consulted, and every child is listed — including
+ * `node_modules`, `.git`, build outputs, and caches, which only the startup
+ * {@link buildWorkspaceTree} prunes. Used by the read tool's directory-listing
+ * path.
  *
  * Rejects when the root itself cannot be listed; subdirectories that cannot be
  * listed stay in the tree, marked `[unreadable: …]`.
@@ -64,6 +65,7 @@ export async function buildDirectoryTree(cwd: string, options: BuildDirectoryTre
 		maxDepth,
 		hidden: true,
 		gitignore: false,
+		pruneExcludedDirs: false,
 		reportDirectoryErrors: true,
 	});
 

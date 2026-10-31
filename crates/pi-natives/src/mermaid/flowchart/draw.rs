@@ -326,10 +326,12 @@ pub fn draw_arrow(graph: &AsciiGraph, edge: &AsciiEdge) -> [Layer; 6] {
 	if edge.path.is_empty() {
 		return std::array::from_fn(|_| Layer::over(&graph.canvas));
 	}
-	let label_canvas = draw_arrow_label(graph, edge);
-	let (path_canvas, lines_drawn, line_dirs) = draw_path(graph, &edge.path, edge.style);
+	let drawing_path = edge_drawing_path(graph, edge);
+	let label_canvas = draw_arrow_label(graph, edge, &drawing_path);
+	let (path_canvas, lines_drawn, line_dirs) =
+		draw_path(graph, &edge.path, &drawing_path, edge.style);
 	let source_shape = graph.nodes.get(edge.from).map_or_default(|node| node.shape);
-	let box_start_canvas = draw_box_start(graph, &edge.path, source_shape);
+	let box_start_canvas = draw_box_start(graph, &edge.path, &drawing_path, source_shape);
 	let arrow_end_canvas = if edge.has_arrow_end {
 		match (lines_drawn.last(), line_dirs.last()) {
 			(Some(line), Some(&dir)) => draw_arrow_head(graph, line, dir),
@@ -357,7 +359,7 @@ pub fn draw_arrow(graph: &AsciiGraph, edge: &AsciiEdge) -> [Layer; 6] {
 	} else {
 		Layer::over(&graph.canvas)
 	};
-	let corners_canvas = draw_corners(graph, &edge.path);
+	let corners_canvas = draw_corners(graph, &edge.path, &drawing_path);
 	[
 		path_canvas,
 		box_start_canvas,
@@ -382,9 +384,89 @@ const fn reverse_direction(dir: Dir) -> Dir {
 	}
 }
 
+/// Drawing coordinates of an edge's path: [`line_to_drawing`], except that a
+/// parallel edge sharing a port with another edge moves its stem segment beside
+/// that edge's stem, so the two lines, tee and arrowhead stay apart. The end
+/// stem moves when another edge leaves the port it enters; the start stem of a
+/// repeated edge moves when another edge already uses the port it leaves.
+fn edge_drawing_path(graph: &AsciiGraph, edge: &AsciiEdge) -> Vec<DrawingCoord> {
+	let mut coords = line_to_drawing(graph, &edge.path);
+	let n = edge.path.len();
+	let twins = graph
+		.edges
+		.iter()
+		.filter(|other| edge.joins_same_pair(other))
+		.count();
+	if n < 3 || edge.from == edge.to || twins < 2 {
+		return coords;
+	}
+	let mut others = graph
+		.edges
+		.iter()
+		.filter(|other| !std::ptr::eq(*other, edge) && !other.path.is_empty());
+	if others
+		.clone()
+		.any(|other| other.from == edge.to && other.start_dir == edge.end_dir)
+	{
+		shift_stem(graph, &mut coords, &edge.path, [n - 1, n - 2, n - 3], edge.end_dir);
+	}
+	let is_repeat = graph
+		.edges
+		.iter()
+		.position(|other| std::ptr::eq(other, edge))
+		.is_some_and(|id| {
+			graph.edges[..id]
+				.iter()
+				.any(|other| edge.joins_same_pair(other))
+		});
+	if is_repeat
+		&& others.any(|other| {
+			(other.from == edge.from && other.start_dir == edge.start_dir)
+				|| (other.to == edge.from && other.end_dir == edge.start_dir)
+		}) {
+		shift_stem(graph, &mut coords, &edge.path, [0, 1, 2], edge.start_dir);
+	}
+	coords
+}
+
+/// Move the stem segment `port`→`corner` of `path` sideways, toward `beyond`
+/// (the point after the corner) so it never crosses the stem it leaves: half a
+/// border column (at most 2 cells) for top and bottom ports, one row for side
+/// ports.
+fn shift_stem(
+	graph: &AsciiGraph,
+	coords: &mut [DrawingCoord],
+	path: &[GridCoord],
+	[port, corner, beyond]: [usize; 3],
+	side: Dir,
+) {
+	let (p, c, b) = (path[port], path[corner], path[beyond]);
+	match side {
+		Dir::Up | Dir::Down if p.x == c.x && c.y == b.y => {
+			let step = graph
+				.column_width
+				.get(&p.x)
+				.copied()
+				.unwrap_or(3)
+				.div_euclid(2)
+				.clamp(1, 2);
+			let dx = (b.x - c.x).signum() * step;
+			coords[port].x += dx;
+			coords[corner].x += dx;
+		},
+		Dir::Left | Dir::Right if p.y == c.y && c.x == b.x => {
+			let dy = (b.y - c.y).signum();
+			coords[port].y += dy;
+			coords[corner].y += dy;
+		},
+		_ => {},
+	}
+}
+
 fn draw_path(
 	graph: &AsciiGraph,
 	path: &[GridCoord],
+	drawing_path: &[DrawingCoord],
 	style: EdgeStyle,
 ) -> (Layer, Vec<Vec<DrawingCoord>>, Vec<Dir>) {
 	let mut canvas = Layer::over(&graph.canvas);
@@ -394,9 +476,8 @@ fn draw_path(
 		return (canvas, lines, directions);
 	};
 	let mut previous = first;
-	for &next in &path[1..] {
-		let previous_drawing = grid_to_drawing_coord(graph, previous);
-		let next_drawing = grid_to_drawing_coord(graph, next);
+	let mut previous_drawing = drawing_path[0];
+	for (&next, &next_drawing) in path[1..].iter().zip(&drawing_path[1..]) {
 		if previous_drawing == next_drawing {
 			previous = next;
 			continue;
@@ -417,23 +498,31 @@ fn draw_path(
 		lines.push(segment);
 		directions.push(dir);
 		previous = next;
+		previous_drawing = next_drawing;
 	}
 	(canvas, lines, directions)
 }
 
 /// Mark where an edge leaves its source box with a tee on the border. The
 /// path's first cell is the box's border cell, so the tee goes exactly there
-/// even when the first segment is too short to draw any line cell.
-fn draw_box_start(graph: &AsciiGraph, path: &[GridCoord], source_shape: NodeShape) -> Layer {
+/// (moved with the stem, see [`edge_drawing_path`]) even when the first
+/// segment is too short to draw any line cell.
+fn draw_box_start(
+	graph: &AsciiGraph,
+	path: &[GridCoord],
+	drawing_path: &[DrawingCoord],
+	source_shape: NodeShape,
+) -> Layer {
 	let mut canvas = Layer::over(&graph.canvas);
 	if graph.config.use_ascii || matches!(source_shape, NodeShape::StateStart | NodeShape::StateEnd)
 	{
 		return canvas;
 	}
-	let Some((&first, &second)) = path.first().zip(path.get(1)) else {
+	let (Some((&first, &second)), Some(&from)) =
+		(path.first().zip(path.get(1)), drawing_path.first())
+	else {
 		return canvas;
 	};
-	let from = grid_to_drawing_coord(graph, first);
 	let tee = match determine_direction(first, second) {
 		Dir::Up => '┴',
 		Dir::Down => '┬',
@@ -511,12 +600,12 @@ const fn corner_char(previous: Dir, next: Dir, use_ascii: bool) -> char {
 	}
 }
 
-fn draw_corners(graph: &AsciiGraph, path: &[GridCoord]) -> Layer {
+fn draw_corners(graph: &AsciiGraph, path: &[GridCoord], drawing_path: &[DrawingCoord]) -> Layer {
 	let mut canvas = Layer::over(&graph.canvas);
-	for points in path.windows(3) {
-		let drawing = grid_to_drawing_coord(graph, points[1]);
-		let previous = determine_direction(points[0], points[1]);
-		let next = determine_direction(points[1], points[2]);
+	for (index, &[first, middle, last]) in path.array_windows().enumerate() {
+		let drawing = drawing_path[index + 1];
+		let previous = determine_direction(first, middle);
+		let next = determine_direction(middle, last);
 		canvas.set(
 			drawing.x,
 			drawing.y,
@@ -526,12 +615,23 @@ fn draw_corners(graph: &AsciiGraph, path: &[GridCoord]) -> Layer {
 	canvas
 }
 
-fn draw_arrow_label(graph: &AsciiGraph, edge: &AsciiEdge) -> Layer {
+fn draw_arrow_label(graph: &AsciiGraph, edge: &AsciiEdge, drawing_path: &[DrawingCoord]) -> Layer {
 	let mut canvas = Layer::over(&graph.canvas);
 	if edge.text.is_empty() {
 		return canvas;
 	}
-	let line = line_to_drawing(graph, &edge.label_line);
+	let line = if let [a, b] = edge.label_line.as_slice() {
+		edge
+			.path
+			.array_windows()
+			.enumerate()
+			.find_map(|(i, [from, to])| {
+				(from == a && to == b).then(|| vec![drawing_path[i], drawing_path[i + 1]])
+			})
+			.unwrap_or_else(|| line_to_drawing(graph, &edge.label_line))
+	} else {
+		line_to_drawing(graph, &edge.label_line)
+	};
 	let upward = match (edge.path.first(), edge.path.last()) {
 		(Some(start), Some(end)) if edge.path.len() >= 2 && end.y < start.y => Some(true),
 		(Some(start), Some(end)) if edge.path.len() >= 2 && end.y > start.y => Some(false),
@@ -619,18 +719,18 @@ fn draw_bundled_edge_segment(
 			}
 		})
 		.collect();
-	for pair in drawing_path.windows(2) {
-		if pair[0] != pair[1] {
-			draw_line(&mut path_canvas, pair[0], pair[1], 1, -1, graph.config.use_ascii, edge.style);
+	for &[from, to] in drawing_path.array_windows() {
+		if from != to {
+			draw_line(&mut path_canvas, from, to, 1, -1, graph.config.use_ascii, edge.style);
 		}
 	}
 
 	let mut corners_canvas = Layer::over(&graph.canvas);
-	for points in edge.path_to_junction.windows(3) {
-		let dc = grid_to_drawing_coord(graph, points[1]);
+	for &[first, middle, last] in edge.path_to_junction.array_windows() {
+		let dc = grid_to_drawing_coord(graph, middle);
 		let c = corner_char(
-			determine_direction(points[0], points[1]),
-			determine_direction(points[1], points[2]),
+			determine_direction(first, middle),
+			determine_direction(middle, last),
 			graph.config.use_ascii,
 		);
 		corners_canvas.set(dc.x, dc.y, Cell::from(c));
@@ -702,16 +802,16 @@ fn draw_bundle_shared_path(graph: &AsciiGraph, bundle: &EdgeBundle) -> (Layer, L
 			}
 		})
 		.collect();
-	for pair in drawing_path.windows(2) {
-		if pair[0] != pair[1] {
-			draw_line(&mut path_canvas, pair[0], pair[1], 1, -1, graph.config.use_ascii, style);
+	for &[from, to] in drawing_path.array_windows() {
+		if from != to {
+			draw_line(&mut path_canvas, from, to, 1, -1, graph.config.use_ascii, style);
 		}
 	}
-	for points in bundle.shared_path.windows(3) {
-		let dc = grid_to_drawing_coord(graph, points[1]);
+	for &[first, middle, last] in bundle.shared_path.array_windows() {
+		let dc = grid_to_drawing_coord(graph, middle);
 		let c = corner_char(
-			determine_direction(points[0], points[1]),
-			determine_direction(points[1], points[2]),
+			determine_direction(first, middle),
+			determine_direction(middle, last),
 			graph.config.use_ascii,
 		);
 		corners_canvas.set(dc.x, dc.y, Cell::from(c));

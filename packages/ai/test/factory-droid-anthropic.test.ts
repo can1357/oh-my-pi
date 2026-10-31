@@ -4,14 +4,60 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { streamAnthropic } from "../src/providers/anthropic";
 import { streamFactoryDroid } from "../src/providers/factory-droid";
-import type { AnthropicFallbackCreditHandle, AssistantMessage, Message } from "../src/types";
+import type {
+	AnthropicFallbackCreditHandle,
+	AssistantMessage,
+	AssistantMessageEventStream,
+	Message,
+} from "../src/types";
 import {
 	anthropicChunks,
 	type CapturedRequest,
 	captureFetch,
 	factoryModel,
+	factoryRegistryModel,
 	WORKOS_TOKEN,
 } from "./helpers/factory-droid";
+
+/** The `ttl` of every cache breakpoint in a request body, `5m` where none is set. */
+function breakpointTtls(body: unknown): string[] {
+	if (Array.isArray(body)) return body.flatMap(breakpointTtls);
+	if (typeof body !== "object" || body === null) return [];
+	return Object.entries(body).flatMap(([key, value]) => {
+		if (key !== "cache_control") return breakpointTtls(value);
+		if (typeof value !== "object" || value === null) return [];
+		return "ttl" in value && typeof value.ttl === "string" ? [value.ttl] : ["5m"];
+	});
+}
+
+/** The shared anthropic fixture with a chosen served-model id in `message_start`. */
+function anthropicChunksFrom(modelId: string, text: string): string[] {
+	return anthropicChunks(text).map(chunk => {
+		const parsed = JSON.parse(chunk) as { type?: string; message?: { model?: string } };
+		if (parsed.type === "message_start" && parsed.message) parsed.message.model = modelId;
+		return JSON.stringify(parsed);
+	});
+}
+
+/** A per-call (`disableServerSideFallback`) Factory request for `requested` answered by `chunks`. */
+function perCallStream(
+	requested: string,
+	chunks: string[],
+	captured: CapturedRequest[] = [],
+): AssistantMessageEventStream {
+	return streamFactoryDroid(
+		factoryModel(requested),
+		{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+		{ apiKey: WORKOS_TOKEN, fetch: captureFetch(captured, chunks), disableServerSideFallback: true },
+	);
+}
+
+/** Non-`start` event types a stream forwards. */
+async function eventTypes(stream: AssistantMessageEventStream): Promise<string[]> {
+	const events: string[] = [];
+	for await (const event of stream) if (event.type !== "start") events.push(event.type);
+	return events;
+}
 
 describe("Factory Droid anthropic wire (Claude)", () => {
 	it("does not invent effort when the registry default leaves thinking off", async () => {
@@ -59,6 +105,93 @@ describe("Factory Droid anthropic wire (Claude)", () => {
 		expect(request.headers["anthropic-beta"] ?? "").not.toContain("server-side-fallback-2026-06-01");
 		expect(request.headers["anthropic-beta"] ?? "").not.toContain("fallback-credit-2026-06-01");
 	});
+
+	it.each([
+		["claude-fable-5", "claude-opus-5"],
+		// Neither dot normalization nor the fast-tier base variant widens to a sibling or the other direction.
+		["claude-fable-5", "claude-fable-5-1"],
+		["claude-fable-5.1", "claude-fable-5"],
+		["claude-opus-5-5-fast", "claude-opus-5"],
+		["claude-opus-5-5", "claude-opus-5-5-fast"],
+	])("fails a per-call response for %s served by %s before forwarding content", async (requested, served) => {
+		const stream = perCallStream(requested, anthropicChunksFrom(served, "Wrong model"));
+
+		expect(await eventTypes(stream)).toEqual(["error"]);
+		const result = await stream.result();
+		expect(result.errorMessage ?? "").toContain(`served by ${served}`);
+		expect(result.errorMessage ?? "").toContain(`request on ${requested}`);
+	});
+
+	it("fails a per-call response carrying a fallback handoff block before forwarding content", async () => {
+		const chunks = anthropicChunksFrom("claude-fable-5", "Wrong model");
+		chunks.splice(
+			1,
+			0,
+			JSON.stringify({
+				type: "content_block_start",
+				index: 0,
+				content_block: { type: "fallback", from: { model: "claude-fable-5" }, to: { model: "claude-opus-5" } },
+			}),
+		);
+		const stream = perCallStream("claude-fable-5", chunks);
+
+		expect(await eventTypes(stream)).toEqual(["error"]);
+		expect((await stream.result()).errorMessage ?? "").toContain("fallback handoff");
+	});
+
+	it("accepts Factory's wire aliases: hyphenated dots in any case, and the registry baseVariant", async () => {
+		const dotted = await perCallStream("claude-fable-5.1", anthropicChunksFrom("CLAUDE-FABLE-5-1", "OK")).result();
+		expect(dotted.stopReason).toBe("stop");
+
+		const baseId = factoryRegistryModel("claude-opus-5-fast").policy.entitlement.baseVariant;
+		expect(baseId).toBeDefined();
+		const fast = await perCallStream("claude-opus-5-fast", anthropicChunksFrom(baseId!.toUpperCase(), "OK")).result();
+		expect(fast.stopReason).toBe("stop");
+	});
+
+	it.each([false, true])("sends the refusal chain only without disableServerSideFallback: %p", async disabled => {
+		const captured: CapturedRequest[] = [];
+		await streamFactoryDroid(
+			factoryModel("claude-fable-5", ["anthropic"]),
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: captureFetch(captured, anthropicChunksFrom("claude-fable-5", "OK")),
+				disableServerSideFallback: disabled,
+			},
+		).result();
+
+		const request = captured[0]!;
+		expect(request.body.fallbacks).toEqual(disabled ? undefined : [{ model: "claude-opus-5" }]);
+		const betas = request.headers["anthropic-beta"] ?? "";
+		expect(betas.includes("server-side-fallback-2026-06-01")).toBe(!disabled);
+		expect(betas.includes("fallback-credit-2026-06-01")).toBe(!disabled);
+	});
+
+	it.each([
+		["anthropic", "1h"],
+		["vertex_anthropic", "1h"],
+		["bedrock_anthropic", "1h"],
+		["azure_anthropic", "1h"],
+		["snowflake", "5m"],
+	] as const)(
+		"writes long retention on the %s upstream as ttl %p without the extended-cache beta",
+		async (upstream, ttl) => {
+			const captured: CapturedRequest[] = [];
+			await streamFactoryDroid(
+				factoryModel("claude-opus-4-6", [upstream]),
+				{ systemPrompt: ["Stay concise."], messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+				{ apiKey: WORKOS_TOKEN, cacheRetention: "long", fetch: captureFetch(captured, anthropicChunks("OK")) },
+			).result();
+
+			const request = captured[0]!;
+			expect(request.headers["x-api-provider"]).toBe(upstream);
+			const ttls = breakpointTtls(request.body);
+			expect(ttls.length).toBeGreaterThan(0);
+			expect(ttls.filter(written => written !== ttl)).toEqual([]);
+			expect(request.headers["anthropic-beta"] ?? "").not.toContain("extended-cache-ttl-2025-04-11");
+		},
+	);
 
 	it.each([
 		["required", () => ({ type: "any" })],

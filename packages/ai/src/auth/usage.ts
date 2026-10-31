@@ -106,6 +106,7 @@ export interface UsageServiceDeps {
 }
 
 type UsageReportsOptions = {
+	provider?: Provider;
 	baseUrlResolver?: (provider: Provider) => string | undefined;
 	signal?: AbortSignal;
 };
@@ -766,17 +767,22 @@ export class UsageService implements UsageApi {
 			// dispatch + credential selection) coalesce into one upstream call.
 			// Each caller's `signal` only cancels THAT caller's await; the
 			// shared upstream fetch runs to completion so peers aren't punished.
-			const overrideKey = `__override__\0${this.#deps.cache.epoch}`;
+			const scope = options?.provider === undefined ? "*" : `provider:${options.provider}`;
+			const overrideKey = `__override__\0${this.#deps.cache.epoch}\0${scope}`;
 			let shared = this.#usageReportsInFlight.get(overrideKey);
 			if (!shared) {
 				// Don't forward the caller signal into the shared fetch — first caller's
 				// abort would otherwise cancel the upstream for every peer.
-				shared = storeOverride().finally(() => {
+				shared = storeOverride(undefined, options?.provider).finally(() => {
 					this.#usageReportsInFlight.delete(overrideKey);
 				});
 				this.#usageReportsInFlight.set(overrideKey, shared);
 			}
-			const reports = await raceSignal(shared, options?.signal, "usage fetch aborted");
+			const fetched = await raceSignal(shared, options?.signal, "usage fetch aborted");
+			const reports =
+				fetched && options?.provider !== undefined
+					? fetched.filter(report => report.provider === options.provider)
+					: fetched;
 			if (reports) this.#deps.blocks.reconcileReports(reports);
 			if (!reports || this.#runtimeUsageProviderOverrides.size === 0) return reports;
 
@@ -785,13 +791,17 @@ export class UsageService implements UsageApi {
 			const brokerProviders = new Set(reports.map(report => report.provider));
 			const localProviders = new Set<Provider>();
 			for (const provider of this.#runtimeUsageProviderOverrides.keys()) {
+				if (options?.provider !== undefined && provider !== options.provider) continue;
 				if (!brokerProviders.has(provider)) localProviders.add(provider);
 			}
 			if (localProviders.size === 0) return reports;
 			const localReports = await this.#fetchLocalReports(options, localProviders);
 			return localReports?.length ? [...reports, ...localReports] : reports;
 		}
-		return this.#fetchLocalReports(options);
+		return this.#fetchLocalReports(
+			options,
+			options?.provider !== undefined ? new Set([options.provider]) : undefined,
+		);
 	}
 
 	/** Probe only the selected providers locally, preserving per-credential caching and cooldowns. */

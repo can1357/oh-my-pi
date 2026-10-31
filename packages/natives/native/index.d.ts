@@ -252,6 +252,14 @@ export declare class EditStore {
 export declare class FileLock {
   /** Try to acquire `path` without blocking. */
   static tryAcquire(path: string): FileLock
+  /**
+   * Whether any handle, in any process including this one, holds `path`.
+   *
+   * Observes without locking or opening the lock: a `connect(2)` probe on
+   * Linux, an `F_GETLK` query on other Unix platforms, a `\BaseNamedObjects`
+   * directory listing on Windows. A concurrent `tryAcquire()` never meets it.
+   */
+  static isHeld(path: string): boolean
   /** Whether this handle owns the requested lock. */
   get acquired(): boolean
   /** Release this handle's ownership without affecting a successor. */
@@ -947,9 +955,18 @@ export interface Application {
   pid?: number
 }
 
-/** Controls whether launching an application deliberately activates it. */
+/**
+ * How `apps.open` opens its target.
+ *
+ * `activate` deliberately brings the application forward. On macOS a file,
+ * folder or URL target opens in its default application, or in `app` (an
+ * application ID, name or path); `reveal` instead shows the file or folder
+ * selected in Finder, which comes to the front.
+ */
 export interface ApplicationOpenOptions {
   activate?: boolean
+  reveal?: boolean
+  app?: string
 }
 
 /** Filters the native application inventory without requiring screen access. */
@@ -1717,12 +1734,13 @@ export declare function diffWords(oldText: string, newText: string): Array<DiffC
 
 /**
  * Whole-call apply outcome. `is_error` carries the model-facing failure in
- * `text` with no files.
+ * `text` with no files, and `error_kind` its class (`EditError::kind`).
  */
 export interface EditApplyOutcome {
   text: string
   files: Array<EditFileOutcome>
   isError: boolean
+  errorKind?: string
 }
 
 /** Apply-time knobs. */
@@ -1749,6 +1767,9 @@ export interface EditDiffResult {
 
 /** Numbered unified diff between two texts (`generateDiffString`). */
 export declare function editDiffString(oldText: string, newText: string, path?: string | undefined | null): EditDiffResult
+
+/** Every `errorKind` a failed apply outcome can carry. */
+export declare function editErrorKinds(): Array<string>
 
 /** A destructive file operation a payload declares. */
 export interface EditFileOpIntent {
@@ -2066,7 +2087,7 @@ export interface FuzzyFindOptions {
   hidden?: boolean
   /** Respect .gitignore (default: true). */
   gitignore?: boolean
-  /** Enable walker scan caching (default: false). */
+  /** Reuse unchanged directory listings across calls (default: false). */
   cache?: boolean
   /** Maximum number of matches to return (default: 100). */
   maxResults?: number
@@ -2101,12 +2122,8 @@ export declare function getWorkProfile(lastSeconds: number): WorkProfile
 /**
  * Find filesystem entries matching a glob pattern.
  *
- * Resolves the search root, scans entries, applies glob and optional file-type
- * filters, and optionally streams each accepted match through `on_match`.
- *
- * When `sortByMtime` is enabled, the walker ranks matches by mtime before the
- * native layer applies final symlink-aware file-type filtering and callback
- * emission.
+ * Resolves the search root, runs the glob search, and optionally streams each
+ * returned match through `on_match`.
  *
  * # Errors
  * Returns an error when the search path cannot be resolved, the path is not a
@@ -2140,13 +2157,18 @@ export interface GlobOptions {
   fileType?: FileType
   /** Match simple patterns recursively by default (`*.ts` -> recursive). */
   recursive?: boolean
+  /**
+   * Follow descendant symbolic links with cycle detection (default: false).
+   * The filesystem provider is responsible for enforcing mount containment.
+   */
+  followLinks?: boolean
   /** Include hidden files (default: false). */
   hidden?: boolean
   /** Maximum number of results to return. */
   maxResults?: number
   /** Respect .gitignore files (default: true). */
   gitignore?: boolean
-  /** Enable walker scan caching (default: false). */
+  /** Reuse unchanged directory listings across calls (default: false). */
   cache?: boolean
   /** Sort results by mtime (most recent first) before applying limit. */
   sortByMtime?: boolean
@@ -2221,6 +2243,13 @@ export interface GrepOptions {
    * every file under it.
    */
   glob?: string
+  /**
+   * Glob patterns of files and directories to leave out, relative to `path`:
+   * one without `/` matches at any depth (`*.test.ts`, `vendor`), a leading
+   * `/` anchors it to `path` (`/vendor`); a matched directory is not
+   * searched.
+   */
+  exclude?: Array<string>
   /**
    * Match simple glob patterns at any depth (default: true; `*.ts` ->
    * `**\/*.ts`). Set false when `glob` is already relative to `path`.
@@ -2438,17 +2467,6 @@ export interface InlineSloppyRegion {
   payload: string
 }
 
-/**
- * Invalidate the walker scan cache.
- *
- * When called with a path, removes entries for roots containing that path.
- * When called without a path, clears the entire cache.
- *
- * Intended to be called after agent file mutations: write, edit, rename, or
- * delete.
- */
-export declare function invalidateFsScanCache(path?: string | undefined | null): void
-
 /** Options for `IpcConnection.connect`. */
 export interface IpcConnectOptions {
   /**
@@ -2635,7 +2653,7 @@ export interface LineRange {
  *
  * File-level ignore rules for AGENTS.md are bypassed by checking each
  * traversed directory directly when `collectAgentsMd` is enabled, but ignored
- * directories are still pruned by the walker and are not searched.
+ * directories are still pruned by the walk and are not searched.
  */
 export declare function listWorkspace(options: ListWorkspaceOptions): Promise<ListWorkspaceResult>
 
@@ -2649,6 +2667,13 @@ export interface ListWorkspaceOptions {
   hidden?: boolean
   /** Respect .gitignore files. Default: true. */
   gitignore?: boolean
+  /**
+   * Prune dependency, VCS, build-output, and cache directory names
+   * (`node_modules`, `.git`, `dist`, `target`, …); `false` lists them too.
+   * Hidden entries still require `hidden: true`; ignored entries require
+   * `gitignore: false`. Default: true.
+   */
+  pruneExcludedDirs?: boolean
   /**
    * Also surface AGENTS.md files in directories at depth 1..=4, even when
    * gitignore would otherwise hide the file. Walks deeper than `maxDepth`

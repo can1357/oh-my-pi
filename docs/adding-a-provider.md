@@ -97,40 +97,40 @@ authorization-code flow, and `github-copilot.kdl` for a custom flow.
 **Catalog KDL** (compiled by
 `packages/catalog/scripts/compat-compiler/compile-providers.ts`):
 
-| Node | Effect |
-| ---- | ------ |
-| `default-model "id"` | Required for a catalog entry. Supplies `DEFAULT_MODEL_PER_PROVIDER`. |
-| `env "VAR" …` | Ordered runtime API-key environment fallbacks, unless overridden by auth policy. |
-| `allow-unauthenticated #true` | Allows runtime discovery-manager creation without credentials. Does not by itself make hosted inference keyless. |
-| `dynamic-models-authoritative #true` | Successful discovery replaces bundled provider models rather than retaining fallback-only IDs. |
-| `skip-cross-provider-reference-fills #true` | Prevents generation from borrowing reasoning, modalities, and limits from same-ID rows on other providers. |
-| `keep-bundled-names #true` | Runtime discovery and its cache keep a bundled row's display name instead of the live one, so a model's name does not change once discovery lands. For hosts whose live names are slug-like (`openai-codex`). |
-| `discovery label="…"` | Enables catalog generation for an entry with a discovery factory. Optional `oauth-provider`, `allow-unauthenticated`, and child `env` select generation credentials/policy. |
-| `seed api="…" base-url="…"` | Defines reviewed model rows; individual rows may override API and base URL. Each row needs `name`, `reasoning`, `input`, `cost`, and `limits`. |
-| Seed `bundle` / `precedence` | `bundle="always"` is the default; `"fallback"` omits seeds after authoritative discovery, and `"empty"` emits them only if the provider has no rows. Default `precedence="upstream"` lets upstream rows win; `"seed"` pins the seed row. |
-| `kind-apis { … }` | Maps non-chat catalog kinds to their runner APIs. |
-| Compat/thinking/catalog directives | Deployment policy, optionally scoped to classes, revisions, families, or model IDs. See `src/compat/axes.ts` and existing provider rules. |
+| Node                                        | Effect                                                                                                                                                                                                                                   |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `default-model "id"`                        | Required for a catalog entry. Supplies `DEFAULT_MODEL_PER_PROVIDER`.                                                                                                                                                                     |
+| `env "VAR" …`                               | Ordered runtime API-key environment fallbacks, unless overridden by auth policy.                                                                                                                                                         |
+| `allow-unauthenticated #true`               | Allows runtime discovery-manager creation without credentials. Does not by itself make hosted inference keyless.                                                                                                                         |
+| `dynamic-models-authoritative #true`        | Successful discovery replaces bundled provider models rather than retaining fallback-only IDs.                                                                                                                                           |
+| `skip-cross-provider-reference-fills #true` | Prevents generation from borrowing reasoning, modalities, and limits from same-ID rows on other providers.                                                                                                                               |
+| `keep-bundled-names #true`                  | Runtime discovery and its cache keep a bundled row's display name instead of the live one, so a model's name does not change once discovery lands. For hosts whose live names are slug-like (`openai-codex`).                            |
+| `discovery label="…"`                       | Enables catalog generation for an entry with a discovery factory. Optional `oauth-provider`, `allow-unauthenticated`, and child `env` select generation credentials/policy.                                                              |
+| `seed api="…" base-url="…"`                 | Defines reviewed model rows; individual rows may override API and base URL. Each row needs `name`, `reasoning`, `input`, `cost`, and `limits`.                                                                                           |
+| Seed `bundle` / `precedence`                | `bundle="always"` is the default; `"fallback"` omits seeds after authoritative discovery, and `"empty"` emits them only if the provider has no rows. Default `precedence="upstream"` lets upstream rows win; `"seed"` pins the seed row. |
+| `kind-apis { … }`                           | Maps non-chat catalog kinds to their runner APIs.                                                                                                                                                                                        |
+| Compat/thinking/catalog directives          | Deployment policy, optionally scoped to classes, revisions, families, or model IDs. See `src/compat/axes.ts` and existing provider rules.                                                                                                |
 
 **Auth KDL** (compiled by
 `packages/catalog/scripts/compat-compiler/compile-auth.ts`):
 
-| Node | Effect |
-| ---- | ------ |
-| `name "…"` | Required display name. |
-| `env "VAR" …` / `env hook="…"` | Overrides catalog environment fallbacks with an ordered list or computed resolver. |
-| `login "api-key" { … }` | Paste-a-key login with optional validation. |
-| `login "oauth-code" { … }` | Declarative authorization-code flow. Requires an explicit `refresh` policy. |
-| `login "device-code" { … }` | Declarative device-code flow. Requires an explicit `refresh` policy. |
-| `login "custom" hook="…"` | Lazy whole-flow hook when the declarative grammar is insufficient. |
-| `refresh { … }` / `refresh hook="…"` / `refresh "none"` | Token refresh policy, custom refresher, or explicit no-refresh policy. |
-| `available #false` | Marks the login entry unavailable. |
-| `show-in-login-list #false` | Hides a login flow from the interactive list. |
-| `store-as "id"` | Stores credentials under another provider ID. |
-| `callback-port N`, `paste-code #true` | Coding-agent/broker callback metadata; OAuth-code flows derive these from their callback policy unless overridden. |
-| `oauth-token-env "VAR" …` | Dedicated OAuth environment tokens; borrowed API-key aliases do not make this provider automatically available. |
-| `org-scoped-identity #true` | Distinguishes stored accounts by organization as well as identity. |
-| `api-key-format "structured"` | Declares a transport-specific credential encoding rather than a plain bearer. |
-| `allows-missing-api-key #true`, `native-auth-api "api" …` | Marks transport-owned authentication paths. |
+| Node                                                      | Effect                                                                                                             |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `name "…"`                                                | Required display name.                                                                                             |
+| `env "VAR" …` / `env hook="…"`                            | Overrides catalog environment fallbacks with an ordered list or computed resolver.                                 |
+| `login "api-key" { … }`                                   | Paste-a-key login with optional validation.                                                                        |
+| `login "oauth-code" { … }`                                | Declarative authorization-code flow. Requires an explicit `refresh` policy.                                        |
+| `login "device-code" { … }`                               | Declarative device-code flow. Requires an explicit `refresh` policy.                                               |
+| `login "custom" hook="…"`                                 | Lazy whole-flow hook when the declarative grammar is insufficient.                                                 |
+| `refresh { … }` / `refresh hook="…"` / `refresh "none"`   | Token refresh policy, custom refresher, or explicit no-refresh policy.                                             |
+| `available #false`                                        | Marks the login entry unavailable.                                                                                 |
+| `show-in-login-list #false`                               | Hides a login flow from the interactive list.                                                                      |
+| `store-as "id"`                                           | Stores credentials under another provider ID.                                                                      |
+| `callback-port N`, `paste-code #true`                     | Coding-agent/broker callback metadata; OAuth-code flows derive these from their callback policy unless overridden. |
+| `oauth-token-env "VAR" …`                                 | Dedicated OAuth environment tokens; borrowed API-key aliases do not make this provider automatically available.    |
+| `org-scoped-identity #true`                               | Distinguishes stored accounts by organization as well as identity.                                                 |
+| `api-key-format "structured"`                             | Declares a transport-specific credential encoding rather than a plain bearer.                                      |
+| `allows-missing-api-key #true`, `native-auth-api "api" …` | Marks transport-owned authentication paths.                                                                        |
 
 The compiled types in `packages/catalog/src/compat/types.ts` and the compiler
 are the complete grammar reference. The materialized runtime interface is

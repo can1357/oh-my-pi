@@ -183,4 +183,20 @@ describe("kimi usage provider", () => {
 		expect(report!.limits).toHaveLength(1);
 		expect(report!.limits[0]!.label).toBe("Weekly limit");
 	});
+
+	it("treats an account without a Kimi Code plan as nothing to meter, not an invalid response", async () => {
+		const warnings: string[] = [];
+		const logger = { debug() {}, warn: (message: string) => warnings.push(message) };
+		const fetchUsage = (payload: unknown) =>
+			kimiUsageProvider.fetchUsage(
+				{ provider: "kimi-code", credential: makeCredential() },
+				{ ...makeCtx(payload), logger },
+			);
+
+		expect(await fetchUsage({})).toBeNull();
+		expect(warnings).toEqual([]);
+
+		expect(await fetchUsage({ usage: "garbled" })).toBeNull();
+		expect(warnings).toEqual(["Kimi usage response invalid"]);
+	});
 });

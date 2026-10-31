@@ -70,7 +70,7 @@ Set the role mapping in `~/.omp/agent/config.yml`:
 
 ```yaml
 modelRoles:
-  review: openai/gpt-5.4:high
+   review: openai/gpt-5.4:high
 ```
 
 `@review` resolves through `modelRoles.review`. Each `modelRoles.<role>` value stores a concrete model selector and may append a thinking suffix such as `:high` (`src/config/model-resolver.ts`). Changing that mapping affects subsequent task resolutions without editing agent definitions. Task/eval preflight reloads the current global, project, and explicit overlay settings before rediscovering agents, so agent files and their role aliases added during a live session resolve from one refreshed configuration state.
@@ -79,14 +79,14 @@ With the default batched task schema, supply shared `context` and per-item `task
 
 ```json
 {
-  "context": "Review the current change in this repository.",
-  "tasks": [
-    {
-      "agent": "reviewer",
-      "task": "Report concrete correctness findings.",
-      "solutionSpace": "Review cause and failure modes are open; no known defect."
-    }
-  ]
+	"context": "Review the current change in this repository.",
+	"tasks": [
+		{
+			"agent": "reviewer",
+			"task": "Report concrete correctness findings.",
+			"solutionSpace": "Review cause and failure modes are open; no known defect."
+		}
+	]
 }
 ```
 
@@ -116,12 +116,12 @@ Route these tiers through roles by keeping aliases in `task.agentModelOverrides`
 
 ```yaml
 task:
-  agentModelOverrides:
-    sonic: "@fast_worker"
-    task: "@good_worker"
+   agentModelOverrides:
+      sonic: "@fast_worker"
+      task: "@good_worker"
 modelRoles:
-  fast_worker: openai/gpt-5-mini
-  good_worker: openai/gpt-5.4:high
+   fast_worker: openai/gpt-5-mini
+   good_worker: openai/gpt-5.4:high
 ```
 
 The `vibe_spawn` `cli` remains `fast` or `good`; update `modelRoles` to change the worker model.
@@ -155,7 +155,7 @@ Because bundled parsing uses `level: "fatal"`, unrecoverable YAML errors or inva
    - explicit CLI `--extension` / SDK `additionalExtensionPaths` directory roots
    - the session's effective `extensions:` array, in its configured order
    - installed npm/link plugins
-   Project and user `extensions:` arrays are not concatenated: settings use array-replacement precedence. Session overlays/runtime overrides and the configured array's project/user provenance are preserved. In `explicit-only` mode (`--no-extensions` or SDK `disableExtensionDiscovery`), only explicit roots contribute this package surface; file entrypoints have no `agents/` subdirectory to scan.
+     Project and user `extensions:` arrays are not concatenated: settings use array-replacement precedence. Session overlays/runtime overrides and the configured array's project/user provenance are preserved. In `explicit-only` mode (`--no-extensions` or SDK `disableExtensionDiscovery`), only explicit roots contribute this package surface; file entrypoints have no `agents/` subdirectory to scan.
 4. Claude marketplace plugin roots (`listClaudePluginRoots(home, cwd)`) with `agents/` subdirs — only when `isProviderEnabled("claude-plugins")`; project-scope plugins sort before user-scope. User-scope roots additionally require the `claude-plugins` or `claude` user source to be enabled (`isUserSourceEnabled`: normally via `enabledProviders`, e.g. `["claude-plugins"]`; `claude` is also enabled implicitly when `CLAUDE_CONFIG_DIR` is set), except roots whose origin is not the foreign `~/.claude/plugins` tree (omp's own installs with `origin: "omp"` and `--plugin-dir` roots) — mirroring the skills path's exemption.
 5. Bundled agents (`loadBundledAgents()`)
 
@@ -227,7 +227,53 @@ For task dispatch, model precedence is:
 2. the agent frontmatter's prioritized `model` list
 3. the parent's active model, then its configured/default model fallback
 
-Role aliases in either of the first two sources are expanded through `modelRoles`. The shared eval bridge can also supply an invocation-local model override ahead of the settings override; the task wire schema does not expose that field.
+A call's per-call `model` (task item / flat call, eval `agent()` / `workpool()`; see below) replaces steps 2 and 3 when it is approved, and is a conflict error for an agent with a step-1 entry rather than outranking it. Role aliases in steps 1 and 2 are expanded through `modelRoles`. Host callers (SDK `runStructuredSubagent({ model })`, `omp cleanse --model`) supply an ungated model ahead of the settings override; the bundled seance agent's `model` overrides its source session's saved model as before.
+
+### Per-call `model`
+
+`task.perCallModel` decides where a model-facing call may pick its model:
+
+| Value           | Behavior                                                                                                                                                                                                    |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `off` (default) | A task item, flat call, `agent()` or `workpool()` that passes `model` fails preflight (the bundled seance agent's own `model` is separate; see below). The field stays in the task schema.                  |
+| `eval`          | Accepted by eval `agent()` and `workpool()` only; task items behave as `off`. Use it to route a specialist (e.g. a pinned `reviewer`) from a script while ordinary delegation keeps its configured routing. |
+| `on`            | Accepted everywhere.                                                                                                                                                                                        |
+
+Only the operator's layers can turn it on: a project's `task.perCallModel` can lower the mode (`on` → `eval` → `off`) but never raise it.
+
+A per-call `model` is exactly one `provider/model-id[@upstream][:level]` (for example `anthropic/claude-sonnet-4-5:high`). The optional `@upstream` pin is supported only by aggregators and is part of the model identity: pinned and unpinned routes are different models for approval. The optional `:level` is clamped to a level the model supports, still bounded by `task.maxEffort`; a literal catalog id wins over splitting a level-shaped suffix. Role aliases (including `@default` and a legacy `pi/<role>` naming a built-in or configured custom role), arrays, comma lists, globs and partial ids fail preflight; when `task.perCallModel` refuses the call, that error is reported first. It is matched literally against the available chat models; there is no fuzzy resolution, and a non-chat model is rejected with that reason.
+
+The model must be one the operator already routes to:
+
+- a configured chat role's `modelRoles` value from the operator's layers (global config, `--config` files, runtime overrides or an SDK host's settings, never project settings; non-chat roles such as `image`, `web` and `judge` grant nothing, and role aliases inside a value are not expanded into built-in defaults),
+- the selected agent's own frontmatter `model`, only when that agent is bundled or user-level, still discovered and not disabled (a project agent's frontmatter never grants directly and a repository agent file cannot add entries to `task.perCallModelAllow`, but its frontmatter model, like any agent's live model, becomes approvable for its per-call children and transitively below them; another agent's frontmatter grants nothing),
+- the parent's live model, only when its routing can be written as one exact selector (several `only` upstreams, an `order` list or any other routing field grants nothing).
+
+User-tagged `^provider/model` mention agents (`m<N>`) use the bundled task template with their tagged model as their own frontmatter, so selecting one grants that model too, subject to the same discovery, disabled-agent and allowlist checks.
+
+How grant values match:
+
+- A literal id is checked against the full catalog, including unavailable models. An unavailable `x:low` id never grants the base `x`, and brackets in an id (`[1m]`) are literal.
+- A value containing `*` or `?` never grants, in a role or in agent frontmatter. It still routes the role or agent as before; to allow a per-call model the operator names it exactly.
+- Any other value grants the one model it resolves to, using the most-recently-used order and the operator's `modelProviderOrder` captured at spawn or revival; later model switches do not change that resolution.
+
+Catalog membership, credentials, built-in role defaults and saved transcripts grant nothing. `task.perCallModelAllow`, when set, narrows the result: each trimmed entry is compared literally to the model's canonical `provider/id[@upstream]` (no resolution, `:level` split, glob or bare id), and the model must be granted and listed. A project's list narrows it further: the model must be listed by both, so a project list, including an empty one, never replaces the operator's.
+
+Grants come from the operator's settings or an SDK host's settings instance; a plain `Settings.overlay()` created by a host is its own authority, including its roles and allowlist. Project settings (`.omp/config.yml`, `.omp/settings.json`, `.claude/settings.json` and the other project providers) and settings overlays derived for subagents never grant and defer to the operator's authority; they can only narrow it through `task.perCallModel`, `task.perCallModelAllow` and `task.disabledAgents`. The agent can write a repository's files, and settings are reloaded before every spawn, so a role written there mid-session would otherwise approve its own model. Role and allowlist edits apply live, so removing a role stops it granting.
+
+The operator's own files stay trusted: the global config, `--config` files and user-level agent files grant as written, and anything able to edit them can change grants like any other setting. The gate covers only calls that pass `model`; a call without it routes through `task.agentModelOverrides`, agent frontmatter and `modelRoles`, project layers included, as before.
+
+When per-call selection is enabled for a surface, the task/eval tool descriptions list approved role models and the narrowing allowlist. Provider-qualified role values are listed as configured, without checking availability; bare values are resolved through the current registry to exact `provider/model-id` selectors and omitted without one. Glob role values grant nothing and are not listed. The advertisement uses the same literal allowlist comparison as dispatch.
+
+A `model` for an agent with a `task.agentModelOverrides` entry fails preflight with a conflict error, so the operator's override is never silently replaced. Per-call `model` is not supported for the bundled seance agent, whose own `model` overrides its source session's saved model as before. A project or user agent that shadows the `seance` name is an ordinary agent: its `model` is a per-call `model`, held to every rule here.
+
+A per-call worker never moves to an unapproved main-loop model. Retry fallback, context promotion and agent prewalk are off, and an unavailable requested model or missing working credentials fails the call rather than using the parent's model. Its requests never carry a server-side fallback chain, including one a caller supplies. Factory models whose provider attaches a server-side fallback chain are not refused: the per-call request omits the chain, and a response served by another model (or carrying a fallback handoff block) fails the worker before any of its content is forwarded. Every main-loop request is checked against the current operator grants, so an extension replacement or settings change cannot move the worker to an unapproved model; a decision is reused until the settings or the model catalog change. A cold registry at preflight, or a model not yet found during background discovery, is checked again before child-session creation once discovery settles.
+
+Cold revival waits for model discovery, restores only the exact saved `perCallModelIdentity` route and `perCallThinkingLevel` selector, and rechecks current grants before creating the child session and again on every main-loop request. The selected agent is rediscovered through the live real parent's session, including that parent's local mention agents; root discovery supplies only file-defined agents when a nested worker's parent is not live, never the root's local mention agents. Current configured roles and discovered, enabled bundled/user frontmatter can still grant without a live parent. The parent's model grants only from the worker's real parent while it is live (the root session for its direct children); missing parent-local grants refuse revival with an error directing the operator to revive the parent first. Revival never wakes the parent automatically or treats saved grant metadata as authorization. Legacy per-call records missing either canonical field refuse revival rather than guessing from `resolvedModel`. Changing `task.perCallModel` affects new calls only.
+
+Side requests the session makes for maintenance (compaction summaries and advisor calls) are not covered by the main-loop approval check: compaction tries the model's `compactionModel`, the session model and the built-in chat roles' models, then also the available model with the largest context window.
+
+For a per-call `model`, `task.maxEffort` bounds every per-call-model spawn, not the endpoint's eventual behavior: an explicit `:level` is clamped to the highest supported effort at or below the cap, and an omitted `:level` inherits the agent's thinking level capped at this value. Unset, `:inherit` and `:off` keep their existing meaning; the ceiling does not replace them with an explicit effort or change provider defaults. A model with no supported effort under the cap fails the spawn and every later request. Cold revival reapplies the live cap to the saved effort selector. An endpoint's own effort-negotiation retry can still round to the nearest supported tier, including above the request (for example `minimal` → `low` or `xhigh` → `max`).
 
 After policy resolution, the `before_subagent_spawn` extension hook runs once for the actual dispatch. It can block the spawn or replace the resolved model patterns; a routing note is carried into progress metadata.
 

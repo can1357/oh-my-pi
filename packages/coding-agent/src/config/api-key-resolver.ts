@@ -1,4 +1,9 @@
-import { type ApiKeyResolution, type ApiKeyResolver, markAfterSiblingWait } from "@oh-my-pi/pi-ai/auth-retry";
+import {
+	type ApiKeyResolution,
+	type ApiKeyResolver,
+	createOAuthProvenance,
+	markAfterSiblingWait,
+} from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { isUsageLimitOutcome } from "@oh-my-pi/pi-ai/error/rate-limit";
 import type { AuthApiKeyOptions, AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
@@ -55,19 +60,28 @@ export function createApiKeyResolver(
 	options: ApiKeyResolverOptions = {},
 ): ApiKeyResolver {
 	const { sessionId, baseUrl, modelId } = options;
-	const resolveKey = (
+	// One resolver serves many requests, and they fail out of order, so the
+	// token a 401 rejected is looked up from the bearer that request sent.
+	const provenance = createOAuthProvenance();
+	const resolveKey = async (
 		forceRefresh: boolean | undefined,
 		signal?: AbortSignal,
 		refreshReason?: AuthApiKeyOptions["refreshReason"],
-	): Promise<ApiKeyResolution> =>
-		registry.getApiKeyWithCredentialForProvider(provider, sessionId, {
+		rejectedAccessToken?: string,
+	): Promise<ApiKeyResolution> => {
+		const resolved = await registry.getApiKeyWithCredentialForProvider(provider, sessionId, {
 			baseUrl,
 			modelId,
 			forceRefresh,
 			signal,
 			refreshReason,
+			rejectedAccessToken,
 		});
+		provenance.record(resolved);
+		return resolved;
+	};
 	return async ({ lastChance, error, signal, previousKey }) => {
+		const rejectedAccessToken = provenance.accessFor(previousKey);
 		if (error === undefined) {
 			return resolveKey(undefined);
 		}
@@ -95,6 +109,6 @@ export function createApiKeyResolver(
 			const resolved = await resolveKey(undefined);
 			return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;
 		}
-		return resolveKey(true, signal, AIError.status(error) === 401 ? "auth-recovery" : undefined);
+		return resolveKey(true, signal, AIError.status(error) === 401 ? "auth-recovery" : undefined, rejectedAccessToken);
 	};
 }

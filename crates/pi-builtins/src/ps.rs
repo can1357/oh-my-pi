@@ -499,6 +499,10 @@ fn parse_ps_args(argv: &[String], paths: &ShellPaths) -> std::result::Result<Par
 				let value = take_ps_value(argv, &mut index, arg.strip_prefix("--sort="), "--sort")?;
 				parse_ps_sort(&value, &mut options.sort)?;
 			},
+			_ if let Some(long) = arg.strip_prefix("--") => {
+				let name = long.split_once('=').map_or(long, |(name, _)| name);
+				return Err(unsupported_option(&format!("unrecognized option '--{name}'")));
+			},
 			_ if let Some(group) = arg.strip_prefix('-') => {
 				if group.is_empty() {
 					return Err((1, "invalid option '-'".to_string()));
@@ -553,11 +557,8 @@ fn parse_ps_flag_group(
 	if bsd {
 		options.bsd_syntax = true;
 	}
-	let mut offset = 0;
-	while offset < group.len() {
-		let option = group.as_bytes()[offset] as char;
-		offset += 1;
-		let remainder = &group[offset..];
+	for (start, option) in group.char_indices() {
+		let remainder = &group[start + option.len_utf8()..];
 		match option {
 			'A' => options.all = true,
 			'e' if !bsd => options.all = true,
@@ -650,10 +651,20 @@ fn parse_ps_flag_group(
 				parse_group_list(&value, &mut options.real_groups)?;
 				return Ok(());
 			},
-			_ => return Err((1, format!("unsupported option '-{option}'"))),
+			_ => return Err(unsupported_option(&format!("unsupported option '-{option}'"))),
 		}
 	}
 	Ok(())
+}
+
+/// Appended to every unsupported-option error: this `ps` covers a subset of
+/// procps. In the embedded shell `command ps` and `env ps` still run this
+/// builtin, so only a full path reaches a host `ps`, and not every host has one.
+const SYSTEM_PS_HINT: &str = "this ps supports a subset of procps options (see 'ps --help'); a \
+                              system ps, if installed, may support more when run by its full path";
+
+fn unsupported_option(message: &str) -> (u8, String) {
+	(1, format!("{message}; {SYSTEM_PS_HINT}"))
 }
 
 fn parse_ps_format(
@@ -1189,8 +1200,8 @@ fn format_ps_thread_time(time: Duration) -> String {
 fn format_ps_state(row: &PsProcessRow) -> String {
 	let mut state = row.state.to_string();
 	match row.nice {
-		Some(value) if value < 0 => state.push('<'),
-		Some(value) if value > 0 => state.push('N'),
+		Some(..=-1) => state.push('<'),
+		Some(1..) => state.push('N'),
 		_ => {},
 	}
 	if row.sid == Some(row.pid) {
@@ -1409,6 +1420,28 @@ mod tests {
 	}
 
 	#[test]
+	fn unknown_options_name_themselves_and_point_at_system_ps() {
+		for (args, named) in [
+			(&["-eo", "pid,args", "--forest"][..], "unrecognized option '--forest'"),
+			(&["--cols=200", "-e"][..], "unrecognized option '--cols'"),
+			(&["-eH"][..], "unsupported option '-H'"),
+		] {
+			let argv: Vec<String> = args.iter().map(ToString::to_string).collect();
+			let Err((code, message)) = parse_ps_args(&argv, &ShellPaths::default()) else {
+				panic!("{args:?} must be rejected");
+			};
+			assert_eq!(code, 1, "{args:?}");
+			let hint = message
+				.strip_prefix(named)
+				.and_then(|rest| rest.strip_prefix("; "))
+				.unwrap_or_else(|| panic!("{args:?}: {message:?} must start with {named:?}"));
+			assert!(hint.contains("'ps --help'"), "{args:?}: {message:?}");
+			assert!(hint.contains("system ps"), "{args:?}: {message:?}");
+			assert!(hint.contains("full path"), "{args:?}: {message:?}");
+		}
+	}
+
+	#[test]
 	fn parses_sort_keys_and_directions() {
 		let mut sort = Vec::new();
 		parse_ps_sort("-pcpu,+pid command", &mut sort).expect("valid sort keys");
@@ -1448,18 +1481,13 @@ mod tests {
 			"03:04"
 		);
 		assert_eq!(
-			format_ps_start(
-				Some(started_at),
-				Some(Duration::from_secs(24 * 60 * 60)),
-				&TimeZone::UTC,
-				false,
-			),
+			format_ps_start(Some(started_at), Some(Duration::from_hours(24)), &TimeZone::UTC, false),
 			"Jan02"
 		);
 		assert_eq!(
 			format_ps_start(
 				Some(started_at),
-				Some(Duration::from_secs(180 * 24 * 60 * 60)),
+				Some(Duration::from_hours(180 * 24)),
 				&TimeZone::UTC,
 				false,
 			),
@@ -1470,6 +1498,22 @@ mod tests {
 			"Tue Jan  2 03:04:00 2024"
 		);
 		assert_eq!(format_ps_start(None, None, &TimeZone::UTC, false), "?");
+	}
+
+	#[test]
+	fn non_ascii_option_in_a_cluster_is_reported_not_a_panic() {
+		for (arg, message) in [
+			("-é", "unsupported option '-é'"),
+			("-eé", "unsupported option '-é'"),
+			// `-o` takes the rest of the cluster, here `é`, as its value.
+			("-eoé", "unknown output format specifier 'é'"),
+		] {
+			let Err((code, error)) = parse_ps_args(&[arg.to_string()], &ShellPaths::default()) else {
+				panic!("{arg:?} must be rejected");
+			};
+			assert_eq!(code, 1, "{arg:?}");
+			assert!(error.starts_with(message), "{arg:?}: {error}");
+		}
 	}
 }
 

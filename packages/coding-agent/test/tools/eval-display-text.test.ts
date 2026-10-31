@@ -5,6 +5,8 @@ import type { EvalDisplayOutput } from "@oh-my-pi/pi-coding-agent/eval/types";
 import * as pyKernel from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
+import { splitEvalOutput } from "@oh-my-pi/pi-tui/tools/eval";
+import { OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
 
 function makeSession(): ToolSession {
 	return {
@@ -99,6 +101,29 @@ describe("EvalTool printed views", () => {
 		expect(kept).toHaveLength(16);
 		expect(kept.map(entry => entry.text)).toEqual(Array.from({ length: 16 }, (_, i) => `v${i}`));
 		expect(modelText(result)).toBe("text");
+	});
+
+	it("places views whose printed lines the column cap cut", async () => {
+		vi.spyOn(pyKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		const wide = JSON.stringify({ items: Array.from({ length: 30 }, (_, i) => i) });
+		const tall = `{\n  "a": "${"x".repeat(40)}",\n  "b": 1\n}`;
+		const sink = new OutputSink({ maxColumns: 32, spillThreshold: 100_000 });
+		await sink.push(`rows: ${wide}\n${tall}\n`);
+		const { output } = await sink.dump();
+		const views: EvalDisplayOutput[] = [
+			{ type: "view", text: wide, view: { kind: "json", value: JSON.parse(wide) } },
+			{ type: "view", text: tall, view: { kind: "json", value: JSON.parse(tall) } },
+		];
+		vi.spyOn(evalIndex.jsBackend, "execute").mockResolvedValue(baseResult(output, views) as never);
+
+		const result = await new EvalTool(makeSession()).execute("call-cut", { language: "js", code: "print(x)" });
+
+		const cell = result.details?.cells?.[0];
+		expect(splitEvalOutput(cell?.output ?? "", cell?.views)).toEqual([
+			{ kind: "text", text: "rows: " },
+			{ kind: "view", view: { kind: "json", value: JSON.parse(wide) } },
+			{ kind: "view", view: { kind: "json", value: JSON.parse(tall) } },
+		]);
 	});
 
 	it("omits views when nothing qualified", async () => {

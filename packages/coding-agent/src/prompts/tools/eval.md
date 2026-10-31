@@ -3,16 +3,41 @@ One cell per call; top-level state persists, including across compaction.{{#if s
 {{#if py}}Python: plain Python subprocess, not IPython (no `get_ipython()`, `obj?`, or `%matplotlib`). Magics like `%pip`, `%load`, `%time` and `!cmd` are rewritten to Python. Top-level `await` works; `asyncio.run(…)` fails.{{/if}}
 {{#if js}}JS: Bun (`Bun.file`, `Bun.write`, `Bun.$`); top-level `await`/`return` work.{{/if}}
 On error, retry only the failed step; earlier steps may have taken effect.
+Cell deadline: nonzero `timeout` values clamp to {{timeoutMin}}–{{timeoutMax}} seconds{{#if configuredMaxTimeout}}, with configured `tools.maxTimeout: {{configuredMaxTimeout}}` (effective ceiling {{timeoutCeiling}}s){{/if}}; `0` disables the deadline. A changed supplied deadline is disclosed before execution.
 Printing an image{{#if py}} or figure{{/if}} attaches it.
 
 <prelude>
-{{#ifAll py js}}Python helpers: sync, kwargs; JS helpers: async, ONE trailing options object.{{else}}{{#if py}}Sync; kwargs.{{/if}}{{#if js}}Async; ONE trailing options object.{{/if}}{{/ifAll}}
+{{#ifAll py js}}
+Python helpers take kwargs; JS helpers take positional args or ONE trailing options object.
 ```
-print(value, ...)  log(message)  phase(title)
-read(path, offset?, limit?)  write(path, content)  env(key?, value?)  output(*ids, format?, query?, offset?, limit?)
+print(value, ...)  log(message)  phase(title)  env(key?, value?) — sync
+read(path, offset?, limit?)  write(path, content); JS: await read(path, offset?, limit?)  await write(path, content) — Python: sync; JS: async
+output(*ids, format?, query?, offset?, limit?); JS: await output(...ids, { format?, query?, offset?, limit? }) — Python: sync; JS: async
+wait(handles, timeout?=None, raise_errors?=True); JS: await wait(handles, { timeout?, raiseErrors? }) — Python: sync; JS: async; agent/completion barrier, ordered results; `raise_errors=False` / `raiseErrors: false` retains failures.
+await tool.<name>(args) — async; session tool; `args` is its parameter object
+```
+{{else}}
+`await` marks async helpers; the rest are sync.
+{{#if py}}
+Python (kwargs):
+```py
+print(value, ...)  log(message)  phase(title)  env(key?, value?)
+read(path, offset?, limit?)  write(path, content)  output(*ids, format?, query?, offset?, limit?)
+wait(handles, timeout?=None, raise_errors?=True) — agent/completion barrier, ordered results; `raise_errors=False` retains failures.
 await tool.<name>(args) — session tool; `args` is its parameter object
-wait(handles, timeout?=None, raise_errors?=True) — agent/completion barrier, ordered results{{#if js}}; JS: wait(handles, { timeout, raiseErrors }){{/if}}; `raise_errors=False` retains failures.
 ```
+{{/if}}
+{{#if js}}
+JS (positional args or ONE trailing options object):
+```js
+print(value, ...)  log(message)  phase(title)  env(key?, value?)
+await read(path, offset?, limit?)  await write(path, content)  await output(...ids, { format?, query?, offset?, limit? })
+await wait(handles, { timeout?, raiseErrors? }) — agent/completion barrier, ordered results; `raiseErrors: false` retains failures.
+await tool.<name>(args) — session tool; `args` is its parameter object
+```
+{{/if}}
+{{/ifAll}}
+{{#if toolNames}}Session tool names: {{#each toolNames}}`{{this}}`{{#unless @last}}, {{/unless}}{{/each}}.{{/if}}
 </prelude>
 
 {{#if inlineTopics}}
@@ -29,6 +54,13 @@ More globals; `read` the linked docs before first use:
 - `{{name}}`: {{summary}} → `xd://eval/{{name}}`
 {{/each}}
 </namespaces>
+{{#each inlinePreludes}}
+
+<{{name}}>
+Global `{{name}}`, documented here in full (no `read` needed):
+{{{documentation}}}
+</{{name}}>
+{{/each}}
 {{/if}}
 
 <critical>

@@ -621,6 +621,60 @@ exit 64
 		}
 	});
 
+	it("lets the user answer a prompt in a zsh shortcut command through the PTY stdin writer (#17210)", async () => {
+		if (process.platform === "win32" || Bun.env.PI_NO_PTY === "1") {
+			return;
+		}
+		const zshPath = ["/bin/zsh", "/usr/bin/zsh", "/usr/local/bin/zsh", "/opt/homebrew/bin/zsh"].find(candidate =>
+			fs.existsSync(candidate),
+		);
+		if (!zshPath) {
+			return;
+		}
+		cfgShellPath.set(Settings.instance, zshPath);
+		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
+			shell: zshPath,
+			args: ["-l", "-c"],
+			env: { PATH: Bun.env.PATH ?? "", HOME: tempDir, ZDOTDIR: tempDir, SHELL_SESSIONS_DISABLE: "1" },
+			prefix: undefined,
+		});
+
+		// Answer once the prompt is on screen and stdin is writable, in whichever
+		// order those two callbacks arrive — like a user at the keyboard.
+		let screen = "";
+		let write: ((data: string) => void) | undefined;
+		let answered = false;
+		const answer = () => {
+			if (answered || !write || !screen.includes("Choose [Y/n]:")) return;
+			answered = true;
+			write("y");
+		};
+		const result = await executeBash(
+			"printf 'Choose [Y/n]: '; read -k 1 answer; printf '\\nANSWER=%s\\n' \"$answer\"",
+			{
+				cwd: tempDir,
+				timeout: 15000,
+				useUserShell: true,
+				pty: {
+					cols: 80,
+					rows: 24,
+					onStdin: writer => {
+						write = writer;
+						answer();
+					},
+					onChunk: chunk => {
+						screen += chunk;
+						answer();
+					},
+				},
+			},
+		);
+
+		expect(result.timedOut).toBeUndefined();
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain("ANSWER=y");
+	});
+
 	it("returns a real PID for background external commands", async () => {
 		if (process.platform === "win32") {
 			return;

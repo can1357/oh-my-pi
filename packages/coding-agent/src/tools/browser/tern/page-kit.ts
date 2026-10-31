@@ -243,10 +243,11 @@ const markElement = el => {
 };
 const inputType = el => String(el.type || el.getAttribute("type") || "text").toLowerCase();
 const composedParent = node => node.parentElement || (node.getRootNode && node.getRootNode().host) || null;
+// Flat-tree ancestry: slotted content renders (and hit-tests) inside its assigned slot's shadow tree.
 const composedContains = (ancestor, descendant) => {
 	for (let current = descendant, depth = 0; current && depth < 256; depth++) {
 		if (current === ancestor) return true;
-		current = composedParent(current);
+		current = current.assignedSlot || composedParent(current);
 	}
 	return false;
 };

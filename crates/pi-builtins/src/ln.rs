@@ -64,7 +64,7 @@ enum LnError {
 	#[error("extra operand {}\nTry '{} --help' for more information.", _0.quote(), _1)]
 	ExtraOperand(OsString, String),
 
-	#[error("{}: hard link not allowed for directory", _0.to_string_lossy())]
+	#[error("{}: hard link not allowed for directory", _0.display())]
 	FailedToCreateHardLinkDir(PathBuf),
 
 	#[error("{0}")]
@@ -432,11 +432,7 @@ fn link_files_in_dir(
 
 		linked_destinations.insert(targetpath.clone());
 	}
-	if all_successful {
-		Ok(())
-	} else {
-		Err(LnError::SomeLinksFailed.into())
-	}
+	all_successful.ok_or_else(|| LnError::SomeLinksFailed.into())
 }
 
 /// Physical canonicalization that tolerates missing components (`-m`).

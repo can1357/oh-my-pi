@@ -265,7 +265,7 @@ describe("wait", () => {
 		/** A live session that takes IRC deliveries and can end its turn on demand. */
 		function liveSession() {
 			const listeners = new Set<(event: { type: string }) => void>();
-			const state = { isStreaming: true, runStartedAt: 0 };
+			const state = { isStreaming: true, runStartedAt: 0, holdsQuestion: false };
 			const session = {
 				get isStreaming() {
 					return state.isStreaming;
@@ -275,6 +275,7 @@ describe("wait", () => {
 				},
 				deliverIrcMessage: async () => "injected",
 				waitForIrcReplies: async () => {},
+				hasQueuedIrcFrom: () => state.holdsQuestion,
 				subscribe: (listener: (event: { type: string }) => void) => {
 					listeners.add(listener);
 					return () => listeners.delete(listener);
@@ -392,6 +393,60 @@ describe("wait", () => {
 			expect(result.content[0]).toMatchObject({
 				text: expect.stringContaining("`Main` finished its turn without replying"),
 			});
+		});
+
+		test("keeps waiting when the agent asked ends its turn still holding the question for a turn of its own", async () => {
+			const { main } = registerParentAndChild();
+			await ask();
+			const waiting = childWait();
+			let settled = false;
+			void waiting.then(() => {
+				settled = true;
+			});
+			main.state.holdsQuestion = true;
+			main.endTurn();
+			// Let the turn-end re-check run (it waits on queued replies, a resolved promise here).
+			const checked = Promise.withResolvers<void>();
+			setImmediate(checked.resolve);
+			await checked.promise;
+			expect(settled).toBe(false);
+			await IrcBus.global().send({ from: "Main", to: "Child", body: "heliotrope" });
+			expect((await waiting).details?.waited).toMatchObject({ from: "Main", body: "heliotrope" });
+		});
+
+		test("a progress note leaves the question owed, even once the agent asked goes idle", async () => {
+			const { main } = registerParentAndChild();
+			await ask();
+			await IrcBus.global().send({ from: "Main", to: "Child", body: "on it", progress: true });
+			main.endTurn();
+			const waiting = childWait();
+			let settled = false;
+			void waiting.then(() => {
+				settled = true;
+			});
+			const checked = Promise.withResolvers<void>();
+			setImmediate(checked.resolve);
+			await checked.promise;
+			expect(settled).toBe(false);
+			await IrcBus.global().send({ from: "Main", to: "Child", body: "heliotrope" });
+			expect((await waiting).details?.waited).toMatchObject({ from: "Main", body: "heliotrope" });
+			expect(await idleText(childWait())).toContain("no agent you messaged this run owes a reply");
+		});
+
+		test("after a progress note, settling the job of the turn that sent it does not answer", async () => {
+			registerParentAndChild();
+			await IrcBus.global().send({ from: "Main", to: "Child", body: "which codeword?" });
+			await IrcBus.global().send({ from: "Child", to: "Main", body: "checking", progress: true });
+			IrcBus.recordReply("Child", "Main");
+			expect(IrcBus.global().unansweredSends("Main", 0)).toEqual([
+				{ to: "Child", sentAt: expect.any(Number), promised: true },
+			]);
+		});
+
+		test("a progress note asks nothing back", async () => {
+			registerParentAndChild();
+			await IrcBus.global().send({ from: "Child", to: "Main", body: "halfway", progress: true });
+			expect(await idleText(childWait())).toContain("no agent you messaged this run owes a reply");
 		});
 
 		test("returns at once when the agent asked runs the caller inline and cannot see the question", async () => {
