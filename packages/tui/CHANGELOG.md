@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `statusLine.segmentOptions.usage` with `showLabel`, `showPercent`, and `showReset` toggles, a `compact` option that renders quota windows as `5h24%4h47m` instead of `5h 24% (4h 47m)`, and `showResetCredits: false` to hide the saved-reset badge ([#14304](https://github.com/can1357/oh-my-pi/pull/14304) by [@iddqdld](https://github.com/iddqdld)).
 - Added `iconButton()`, `quietButton()` and `segmentedTabs()` to `native/overlay`, and `disabled`, `busy` and `icon` options to `actionButton()`
 - Added `nativeTail` to `Composer.setRuntimeChildren` options: containers whose children continue the native surface's `main` after the transcript instead of riding in the dock
 - Added `isHighlightLanguage` and `createCodeFrameStyler` for renderers that highlight source lines in their file's language ([#17550](https://github.com/can1357/oh-my-pi/pull/17550) by [@JustasMasiulis](https://github.com/JustasMasiulis))
