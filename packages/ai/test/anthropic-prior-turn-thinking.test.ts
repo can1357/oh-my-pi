@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { renderDemotedThinking } from "@oh-my-pi/pi-ai/dialect";
-import { convertAnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { type AnthropicMessageConversionOptions, convertAnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type {
 	AssistantMessage,
 	Message,
@@ -404,10 +404,7 @@ describe("Anthropic prior-turn thinking preservation (#2257, #2265)", () => {
 				],
 				{ provider: "kimi-code", model: "k3", stopReason: "stop", ...overrides },
 			);
-		const assistantBlocks = (
-			messages: Message[],
-			opts: Parameters<typeof convertAnthropicMessages>[3] = {},
-		): WireBlock[] => {
+		const assistantBlocks = (messages: Message[], opts: AnthropicMessageConversionOptions = {}): WireBlock[] => {
 			const params = convertAnthropicMessages(messages, officialTarget(), false, {
 				credentialId: TARGET_CREDENTIAL,
 				...opts,

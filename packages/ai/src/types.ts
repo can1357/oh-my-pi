@@ -1713,4 +1713,6 @@ export interface AnthropicFallbackCreditHandle {
 	expiresAt: number;
 	/** The refused response's content, in `AssistantMessage` block form. */
 	refusedContent?: AssistantMessage["content"];
+	/** How many of other models' reasoning blocks the refused request replayed as text. */
+	demotedReasoningBlocks?: number;
 }
