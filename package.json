@@ -184,6 +184,7 @@
 	"overrides": {
 		"@ark/schema": "0.56.2"
 	},
+	"trustedDependencies": [],
 	"lint-staged": {
 		"packages/*/src/**/*.{ts,tsx}": [
 			"oxlint --fix",
