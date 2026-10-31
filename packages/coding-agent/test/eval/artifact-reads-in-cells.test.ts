@@ -4,8 +4,14 @@ import * as path from "node:path";
 import { $which, TempDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../src/config/settings";
 import { releaseArtifactRoots } from "../../src/eval/artifact-readiness";
+import { artifactRequestOf } from "../../src/eval/artifact-wire";
 import js from "../../src/eval/js";
-import { disposeAllVmContexts } from "../../src/eval/js/context-manager";
+import {
+	disposeAllVmContexts,
+	type JsEvalWorkerHandle,
+	setJsEvalWorkerFactoriesForTests,
+} from "../../src/eval/js/context-manager";
+import type { WorkerOutbound } from "../../src/eval/js/worker-protocol";
 import py from "../../src/eval/py";
 import { disposeAllKernelSessions } from "../../src/eval/py/executor";
 import { disposePyToolBridge } from "../../src/eval/py/tool-bridge";
@@ -193,6 +199,146 @@ describe.skipIf(process.platform !== "linux")("artifact reads in real cells", ()
 			expect(openUnder(f.root)).toBe(0);
 		}, 60_000);
 	}
+
+	it("js: two first reads in one rootless cell read the directory the cell bound, not its replacement", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-cells-");
+		const f = fixture(tempDir);
+		const tokens: (string | undefined)[] = [];
+		let answers = 0;
+		let deliverSecond: (() => void) | undefined;
+		// A real worker whose second `answer` request reaches the host only when the test lets it.
+		const spawn = (): JsEvalWorkerHandle => {
+			const worker = new Worker(new URL("../../src/eval/js/worker-entry.ts", import.meta.url).href, {
+				type: "module",
+			});
+			return {
+				mode: "worker",
+				send: message => worker.postMessage(message),
+				onMessage(handler) {
+					const listener = (event: MessageEvent<WorkerOutbound>): void => {
+						const message = event.data;
+						const request = message.type === "tool-call" ? artifactRequestOf(message.args) : null;
+						if (request?.op === "answer") {
+							tokens.push(request.token);
+							if (++answers === 2) {
+								deliverSecond = () => handler(message);
+								return;
+							}
+						}
+						handler(message);
+					};
+					worker.addEventListener("message", listener);
+					return () => worker.removeEventListener("message", listener);
+				},
+				onError(handler) {
+					const listener = (event: ErrorEvent): void => handler(new Error(event.message));
+					worker.addEventListener("error", listener);
+					return () => worker.removeEventListener("error", listener);
+				},
+				async close() {
+					worker.terminate();
+					return true;
+				},
+				async terminate() {
+					worker.terminate();
+				},
+			};
+		};
+		const restore = setJsEvalWorkerFactoriesForTests({ spawnProcess: spawn, spawnWorker: spawn });
+		const first = path.join(f.dir, "first");
+		const code =
+			barrier("js", f.dir, "ready") +
+			`const first = read('artifact://0').then(async text => { print('FIRST', text); await Bun.write(${q(first)}, '1'); });\n` +
+			`const second = read('artifact://0').then(text => print('SECOND', text));\n` +
+			`const both = await Promise.all([first, second]);\n`;
+		const cell = run("js", code, f);
+		try {
+			await until(path.join(f.dir, "ready"));
+			fs.mkdirSync(f.root);
+			fs.writeFileSync(path.join(f.root, "0.read.log"), "ORIGINAL");
+			fs.writeFileSync(path.join(f.dir, "ready-go"), "1");
+			await until(first);
+			// The first read has bound the directory; the second's request is still on its way.
+			fs.renameSync(f.root, path.join(f.dir, "saved"));
+			fs.mkdirSync(f.root);
+			fs.writeFileSync(path.join(f.root, "0.read.log"), "WRONG FOREIGN");
+			if (!deliverSecond) throw new Error("the second read never asked");
+			deliverSecond();
+			const result = await cell;
+			expect(result.output).not.toContain("WRONG FOREIGN");
+			expect(result.output.trim()).toBe("FIRST ORIGINAL\nSECOND ORIGINAL");
+			expect(result.exitCode).toBe(0);
+			// Both first reads asked with no token; the refused answer was asked again through the bound hold.
+			expect(tokens.slice(0, 2)).toEqual([undefined, undefined]);
+			expect(tokens[2]).toStartWith("root-");
+		} finally {
+			restore();
+			fs.writeFileSync(path.join(f.dir, "ready-go"), "1");
+			deliverSecond?.();
+			await cell.catch(() => undefined);
+		}
+	}, 30_000);
+
+	it.skipIf(!python)(
+		"py: two first reads on two threads read the directory the cell bound, not its replacement",
+		async () => {
+			using tempDir = TempDir.createSync("@omp-eval-cells-");
+			const f = fixture(tempDir);
+			const at = (name: string) => q(path.join(f.dir, name));
+			// Each thread writes what it read to a file: thread output does not reach the cell's.
+			const code = [
+				"from pathlib import Path",
+				"import time",
+				"from threading import Thread, Lock",
+				"real_bridge = _bridge_call",
+				"lock = Lock()",
+				"answers = 0",
+				"def gated(name, args, *rest, **kw):",
+				"    global answers",
+				"    hold = False",
+				"    if name == '__artifacts_ready__' and args.get('op') == 'answer':",
+				"        with lock:",
+				"            answers += 1",
+				"            hold = answers == 2",
+				"        if hold:",
+				`            Path(${at("second")}).write_text('1')`,
+				`            while not Path(${at("next")}).exists(): time.sleep(.005)`,
+				"    return real_bridge(name, args, *rest, **kw)",
+				"_bridge_call = gated",
+				"def first():",
+				`    Path(${at("first-text")}).write_text(read('artifact://0'))`,
+				`    Path(${at("first")}).write_text('1')`,
+				"def second():",
+				`    Path(${at("second-text")}).write_text(read('artifact://0'))`,
+				`Path(${at("ready")}).write_text('1')`,
+				`while not Path(${at("go")}).exists(): time.sleep(.005)`,
+				"threads = [Thread(target=first), Thread(target=second)]",
+				"for thread in threads: thread.start()",
+				"for thread in threads: thread.join()",
+			].join("\n");
+			const cell = run("py", code, f);
+			try {
+				await until(path.join(f.dir, "ready"));
+				fs.mkdirSync(f.root);
+				fs.writeFileSync(path.join(f.root, "0.read.log"), "ORIGINAL");
+				fs.writeFileSync(path.join(f.dir, "go"), "1");
+				await Promise.all([until(path.join(f.dir, "first")), until(path.join(f.dir, "second"))]);
+				fs.renameSync(f.root, path.join(f.dir, "saved"));
+				fs.mkdirSync(f.root);
+				fs.writeFileSync(path.join(f.root, "0.read.log"), "WRONG FOREIGN");
+				fs.writeFileSync(path.join(f.dir, "next"), "1");
+				const result = await cell;
+				expect(result.exitCode).toBe(0);
+				expect(fs.readFileSync(path.join(f.dir, "first-text"), "utf8")).toBe("ORIGINAL");
+				expect(fs.readFileSync(path.join(f.dir, "second-text"), "utf8")).toBe("ORIGINAL");
+			} finally {
+				fs.writeFileSync(path.join(f.dir, "go"), "1");
+				fs.writeFileSync(path.join(f.dir, "next"), "1");
+				await cell.catch(() => undefined);
+			}
+		},
+		30_000,
+	);
 
 	it.skipIf(!python)(
 		"py: a read whose name was replaced reads the pinned file it was answered about",

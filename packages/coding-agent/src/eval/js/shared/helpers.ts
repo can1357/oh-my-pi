@@ -222,15 +222,21 @@ async function settledArtifactFor(ctx: HelperContext, rawPath: string): Promise<
 }
 
 /**
- * Ask the host one lookup through the hold this cell reads, and remember the
- * hold a cell's first read bound, on that cell's own roots.
+ * Ask the host one lookup through the hold this cell reads, and accept the
+ * answer only if it was issued against that hold.
  *
- * A cell started before its artifacts directory existed carries no token. Its
- * first read takes a hold, and that hold is what every read after it uses:
- * without this the next read resolves the pathname again, and a directory
- * replaced between two reads of one cell is read as the cell's own. It is
- * written on the roots object this run was given, so it binds this cell and
- * not the next one, which is assigned the directory as it is then.
+ * A cell started before its artifacts directory existed carries no token. The
+ * first answer it consumes binds the hold that answer names, on the roots
+ * object this run was given — so it binds this cell and not the next one,
+ * which is assigned the directory as it is then — and every read after it is
+ * asked through that hold. Remembering the first token is not enough: two
+ * reads started together both ask with no token, and the second can be
+ * answered, after the first has bound the directory, from whatever was put at
+ * the name since. So the agreement is checked here, where the answer is
+ * consumed, because this is the only place that knows what the cell is bound
+ * to now. An answer naming another hold is refused — its pin given back,
+ * nothing of it read — and asked again through the cell's own hold. An
+ * answer that still disagrees is an error, not bytes.
  */
 async function askArtifact(
 	ctx: HelperContext,
@@ -240,8 +246,24 @@ async function askArtifact(
 ): Promise<SettledArtifact | null | undefined> {
 	const roots = ctx.localRoots();
 	const answer = await ctx.resolveArtifact?.({ op, id, root, token: roots[EVAL_ARTIFACT_ROOT_TOKEN] });
-	if (answer?.root) roots[EVAL_ARTIFACT_ROOT_TOKEN] ??= answer.root;
-	return answer;
+	if (!answer) return answer;
+	// Bound and compared in one tick: no other read of this cell can bind in between.
+	if (answer.root !== undefined) roots[EVAL_ARTIFACT_ROOT_TOKEN] ??= answer.root;
+	const bound = roots[EVAL_ARTIFACT_ROOT_TOKEN];
+	if (bound === undefined || answer.root === bound) return answer;
+	await giveBack(ctx, answer);
+	const again = await ctx.resolveArtifact?.({ op, id, root, token: bound });
+	if (!again || again.root === bound) return again;
+	await giveBack(ctx, again);
+	throw new ToolError(
+		`artifact://${id} was answered from a directory other than the one this cell reads at ${root}; it was not read`,
+	);
+}
+
+/** Give back the pin `answer` holds, if any. One that cannot be delivered still ends with its cell, kernel or lease. */
+async function giveBack(ctx: HelperContext, answer: SettledArtifact): Promise<void> {
+	if (answer.file === undefined) return;
+	await ctx.resolveArtifact?.({ op: "release", file: answer.file }).catch(() => {});
 }
 
 /**
@@ -293,12 +315,8 @@ async function readSettledArtifact(ctx: HelperContext, answer: SettledArtifact):
 		throw new ToolError(`${answer.path} is no longer the artifact this session was told to read`);
 	} finally {
 		// Read, or refused: either way this read is over, and its pin goes
-		// back now rather than when a lease runs out. A give-back that cannot
-		// be delivered changes nothing here — the pin still ends with its
-		// cell, its kernel or its lease.
-		if (!taken && answer.file !== undefined) {
-			await ctx.resolveArtifact?.({ op: "release", file: answer.file }).catch(() => {});
-		}
+		// back now rather than when a lease runs out.
+		if (!taken) await giveBack(ctx, answer);
 	}
 }
 

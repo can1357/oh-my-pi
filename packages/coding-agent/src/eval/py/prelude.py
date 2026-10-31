@@ -102,40 +102,62 @@ if "__omp_prelude_loaded__" not in globals():
         behind, which the host answers with the session's own authority.
 
         The answer holds a pin on the file for this reader, which the reader
-        ends: by taking it (`_artifact_take`) or giving it back after its read
-        (`_artifact_release`). A caller that only hands the path on asks with
-        `locate`, and nothing is held for it."""
+        ends: by taking it when the name no longer means the file, or by
+        giving it back after its read (`_artifact_release`). A caller that
+        only hands the path on asks with `locate`, and nothing is held for it.
+
+        The answer is accepted only if it was issued against the hold this
+        cell reads through. A cell started before its artifacts directory
+        existed carries no token; the first answer it consumes binds the hold
+        that answer names, and every read after it is asked through that
+        hold. Two reads started together — two threads — both ask with no
+        token, and the second can be answered, after the first has bound the
+        directory, from whatever was put at the name since. So the agreement
+        is checked here, where the answer is consumed: an answer naming
+        another hold is refused, its pin given back and nothing of it read,
+        and asked again through the cell's own hold. One that still disagrees
+        is an error, not bytes."""
         roots = _omp_url_roots()
         root = roots.get("artifact")
         if not root:
             return None
-        # A cell started before its artifacts directory existed carries no
-        # token. Its first read takes a hold, and that hold is what every read
-        # after it uses: without this the next read resolves the pathname
-        # again, and a directory replaced between two reads of one cell is
-        # read as the cell's own.
         _run = globals().get("__omp_current_run_id__")
         _cell = _run() if callable(_run) else None
         _bind_key = (_cell, root)
-        details = _artifact_details(
-            {
-                "op": "locate" if locate else "answer",
-                "id": path[11:],
-                "root": os.path.abspath(root),
-                # The hold this cell was given on that directory: the host
-                # answers from the directory the cell was started on, not from
-                # whatever its pathname reaches when the read lands.
-                "token": roots.get("__artifactRoot") or _OMP_BOUND_ROOTS.get(_bind_key),
-            }
-        )
+        assigned = roots.get("__artifactRoot")
+        request = {
+            "op": "locate" if locate else "answer",
+            "id": path[11:],
+            "root": os.path.abspath(root),
+            # The hold this cell was given on that directory, or the one its
+            # first answer bound: the host answers from that directory, not
+            # from whatever its pathname reaches when the read lands.
+            "token": assigned or _OMP_BOUND_ROOTS.get(_bind_key),
+        }
+        details = _artifact_details(request)
         if details is None:
             return None
-        bound = details.get("root")
-        if isinstance(bound, str) and bound:
+        issued = details.get("root")
+        if assigned:
+            bound = assigned
+        elif isinstance(issued, str) and issued:
             # This cell's binding, not the kernel's: the next cell is assigned
-            # the directory as it is then.
-            _OMP_BOUND_ROOTS.setdefault(_bind_key, bound)
-        return details
+            # the directory as it is then. `setdefault` is one atomic step, so
+            # of two threads binding at once exactly one wins and the other
+            # sees the winner.
+            bound = _OMP_BOUND_ROOTS.setdefault(_bind_key, issued)
+        else:
+            bound = _OMP_BOUND_ROOTS.get(_bind_key)
+        if bound is None or issued == bound:
+            return details
+        _artifact_release(details)
+        again = _artifact_details({**request, "token": bound})
+        if again is None or again.get("root") == bound:
+            return again
+        _artifact_release(again)
+        raise RuntimeError(
+            f"{path} was answered from a directory other than the one this cell reads at {root}; it was not read"
+        )
 
     def _artifact_release(answer: dict) -> None:
         """Give back the pin `answer` holds, now that its read is over.

@@ -32,12 +32,17 @@ export interface SettledArtifact {
 	 */
 	file?: string;
 	/**
-	 * The hold this answer was read through, for a cell that was given none.
+	 * The hold this answer was issued against: the artifacts directory, held
+	 * open, that it was resolved through. Absent only when there was no
+	 * directory to hold.
 	 *
 	 * A cell started before its artifacts directory existed has no token, and
 	 * taking a fresh hold at every read would let the directory change under
-	 * it between two reads. Its first read binds it: the token comes back here
-	 * and the reader sends it with everything after.
+	 * it between two reads. The first answer it consumes binds it, and it
+	 * sends that token with everything after. An answer naming any other hold
+	 * — one issued, while another read was binding, against a directory put at
+	 * the name since — is refused where it is consumed, and the read is asked
+	 * again through the cell's own hold.
 	 */
 	root?: string;
 	/**

@@ -15,7 +15,7 @@ import {
 	resolveSettledArtifact,
 	takePinnedArtifact,
 } from "../../src/eval/artifact-readiness";
-import { settledArtifactOf } from "../../src/eval/artifact-wire";
+import { type ArtifactRequest, EVAL_ARTIFACT_ROOT_TOKEN, settledArtifactOf } from "../../src/eval/artifact-wire";
 import { createHelpers } from "../../src/eval/js/shared/helpers";
 import { registerArtifactsDir } from "../../src/internal-urls/registry-helpers";
 import { AgentSession } from "../../src/session/agent-session";
@@ -53,6 +53,21 @@ function artifacts(tempDir: TempDir, name: string, count: number): string {
 	fs.mkdirSync(dir, { recursive: true });
 	for (let n = 0; n < count; n++) fs.writeFileSync(path.join(dir, `${n}.read.log`), `ORIGINAL ${n}`);
 	return dir;
+}
+
+/** A real `AgentSession`, whose `dispose()` is what ends its pin account. */
+function agentSession(tempDir: TempDir) {
+	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+	if (!model) throw new Error("expected bundled model");
+	const authStorage = createInMemoryAuthStorage();
+	const sessionManager = SessionManager.inMemory(tempDir.path());
+	const session = new AgentSession({
+		agent: new Agent({ initialState: { model, systemPrompt: ["test"], tools: [] } }),
+		sessionManager,
+		settings: Settings.isolated(),
+		modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
+	});
+	return { session, sessionManager, authStorage };
 }
 
 afterEach(async () => {
@@ -135,17 +150,15 @@ describe.skipIf(process.platform !== "linux")("eval artifact pins", () => {
 		const dir = artifacts(tempDir, "a", 2);
 		const session = sessionReading(dir, "owner-ends");
 		const cell = new ArtifactPinOwner();
-		const answer = await resolveSettledArtifact(session, "0", dir, undefined, undefined, false, undefined, {
-			owner: cell,
-		});
+		const answer = await resolveSettledArtifact(session, "0", dir, undefined, undefined, { owner: cell });
 		expect(openUnder(dir)).toBe(1);
 
 		await cell.end();
 		expect(openUnder(dir)).toBe(0);
 		await expect(takePinnedArtifact(answer?.file ?? "")).rejects.toThrow("no longer held open");
-		await expect(
-			resolveSettledArtifact(session, "1", dir, undefined, undefined, false, undefined, { owner: cell }),
-		).rejects.toThrow("has ended");
+		await expect(resolveSettledArtifact(session, "1", dir, undefined, undefined, { owner: cell })).rejects.toThrow(
+			"has ended",
+		);
 		expect(openUnder(dir)).toBe(0);
 	});
 
@@ -176,18 +189,9 @@ describe.skipIf(process.platform !== "linux")("eval artifact pins", () => {
 		expect(openUnder(dir)).toBe(0);
 	});
 
-	it("gives back every pin a session holds when the session is disposed", async () => {
+	it("gives back every pin a session holds when the session is disposed, and a revived id starts anew", async () => {
 		using tempDir = TempDir.createSync("@omp-eval-pins-");
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("expected bundled model");
-		const authStorage = createInMemoryAuthStorage();
-		const sessionManager = SessionManager.inMemory(tempDir.path());
-		const session = new AgentSession({
-			agent: new Agent({ initialState: { model, systemPrompt: ["test"], tools: [] } }),
-			sessionManager,
-			settings: Settings.isolated(),
-			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
-		});
+		const { session, sessionManager, authStorage } = agentSession(tempDir);
 		const dir = artifacts(tempDir, "a", 33);
 		const reader = sessionReading(dir, sessionManager.getSessionId());
 		try {
@@ -195,12 +199,114 @@ describe.skipIf(process.platform !== "linux")("eval artifact pins", () => {
 			expect(openUnder(dir)).toBe(32);
 			await session.dispose();
 			expect(openUnder(dir)).toBe(0);
-			// The quota went with the descriptors.
+			// A session revived under the same id reads again, on an account of its own.
 			expect((await resolveSettledArtifact(reader, "32", dir))?.path).toBe(path.join(dir, "32.read.log"));
 		} finally {
 			await session.dispose();
 			authStorage.close();
 		}
+	});
+
+	it("refuses an answer still on its way when its session is disposed, instead of pinning after the disposal", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-pins-");
+		const { session, sessionManager, authStorage } = agentSession(tempDir);
+		const dir = artifacts(tempDir, "a", 1);
+		// No cell or kernel owner: the session's own lifetime is all that ends it.
+		const reader = sessionReading(dir, sessionManager.getSessionId());
+		const open = fsp.open;
+		const opened = Promise.withResolvers<void>();
+		const resume = Promise.withResolvers<void>();
+		const hook = spyOn(fs.promises, "open").mockImplementation((async (...args: Parameters<typeof open>) => {
+			const handle = await open(...args);
+			// The file is open; its charge has not happened yet.
+			if (String(args[0]).endsWith("/0.read.log")) {
+				opened.resolve();
+				await resume.promise;
+			}
+			return handle;
+		}) as typeof open);
+		try {
+			const answering = answerArtifactRequest(reader, { op: "answer", id: "0", root: dir });
+			await opened.promise;
+			await session.dispose();
+			resume.resolve();
+			await expect(answering).rejects.toThrow("the session this read belongs to has ended");
+			expect(openUnder(dir)).toBe(0);
+		} finally {
+			resume.resolve();
+			hook.mockRestore();
+			await session.dispose();
+			authStorage.close();
+		}
+	});
+
+	it("refuses a first read's answer issued against another directory than the one the cell bound, and reads its own", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-pins-");
+		const dir = path.join(tempDir.path(), "a");
+		const session = sessionReading(dir, "first-reads");
+		// A cell started before its directory existed: no token on its roots.
+		const roots: Record<string, string> = { artifact: dir };
+		const asked: ArtifactRequest[] = [];
+		const second = Promise.withResolvers<void>();
+		let answers = 0;
+		const helpers = createHelpers({
+			cwd: () => tempDir.path(),
+			env: new Map(),
+			localRoots: () => roots,
+			emitStatus: () => {},
+			resolveArtifact: async request => {
+				asked.push(request);
+				// The second first-read reaches the host only after the directory is replaced.
+				if (request.op === "answer" && ++answers === 2) await second.promise;
+				return settledArtifactOf(await answerArtifact(session, request));
+			},
+		});
+		fs.mkdirSync(dir);
+		fs.writeFileSync(path.join(dir, "0.read.log"), "ORIGINAL");
+		const first = helpers.read("artifact://0");
+		const later = helpers.read("artifact://0");
+		expect(await first).toBe("ORIGINAL");
+		fs.renameSync(dir, path.join(tempDir.path(), "saved"));
+		fs.mkdirSync(dir);
+		fs.writeFileSync(path.join(dir, "0.read.log"), "WRONG FOREIGN");
+		second.resolve();
+		expect(await later).toBe("ORIGINAL");
+		const bound = roots[EVAL_ARTIFACT_ROOT_TOKEN];
+		expect(bound).toStartWith("root-");
+		// Both first reads asked with no token; the conflicting answer was given back and asked again through the bound hold.
+		expect(asked.filter(request => request.op === "answer").map(request => request.token)).toEqual([
+			undefined,
+			undefined,
+			bound,
+		]);
+		expect(openUnder(path.join(tempDir.path(), "saved"))).toBe(0);
+		expect(openUnder(dir)).toBe(0);
+	});
+
+	it("fails a read loudly when even the cell's own hold answers from another directory", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-pins-");
+		const roots: Record<string, string> = { artifact: tempDir.path(), [EVAL_ARTIFACT_ROOT_TOKEN]: "root-mine" };
+		const released: string[] = [];
+		let answered = 0;
+		const helpers = createHelpers({
+			cwd: () => tempDir.path(),
+			env: new Map(),
+			localRoots: () => roots,
+			emitStatus: () => {},
+			// A host that answers from some other hold whatever it is asked.
+			resolveArtifact: async request => {
+				if (request.op === "release") released.push(request.file);
+				if (request.op !== "answer") return null;
+				answered++;
+				const file = path.join(tempDir.path(), "0.read.log");
+				return { path: file, device: "0", inode: "0", file: `file-${answered}`, root: "root-other" };
+			},
+		});
+		await expect(helpers.read("artifact://0")).rejects.toThrow(
+			"answered from a directory other than the one this cell reads",
+		);
+		// Neither answer was read; both pins went back.
+		expect(released).toEqual(["file-1", "file-2"]);
 	});
 
 	it("gives a read's pin back only after that read, never on another read's behalf", async () => {
