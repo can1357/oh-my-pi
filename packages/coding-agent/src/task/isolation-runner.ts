@@ -18,12 +18,12 @@
  *
  * Step 1 happens once per top-level call; steps 2 and 3 are per-spawn.
  */
-import * as fs from "node:fs/promises";
+import * as fs from "./isolation-fs";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import type * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
+import { logger, prompt } from "@oh-my-pi/pi-utils";
 import isolationErrorTemplate from "../prompts/tools/isolation-error.md" with { type: "text" };
 import isolationSummaryTemplate from "../prompts/tools/isolation-summary.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";
@@ -45,7 +45,6 @@ import {
 	resolveSandboxIdentity,
 	withSandboxLock,
 } from "./isolation-ownership";
-import { ABSENT, FOUND, type Lookup, readdirLookup, readTextLookup, statLookup, UNKNOWN } from "./isolation-lookup";
 import { asReleaseHold, createReleaseHold } from "../utils/release-hold";
 import type { ExecutorOptions } from "./executor";
 import { runSubprocess } from "./executor";
@@ -252,7 +251,7 @@ export async function persistNestedPatches(
 			// leave a truncated file behind, and `force: true` makes removing
 			// a never-created path a no-op.
 			saved.push(destination);
-			await Bun.write(destination, nestedPatch.patch);
+			await fs.writeFileDeep(destination, nestedPatch.patch);
 		}
 	} catch (error) {
 		await Promise.all(saved.map(file => fs.rm(file, { force: true }).catch(() => undefined)));
@@ -287,7 +286,7 @@ async function writeIsolationPatch(
 ): Promise<IsolationPatchCapture> {
 	const delta = await captureDeltaPatch(isolationDir, baseline);
 	const patchPath = path.join(artifactsDir, `${agentId}.patch`);
-	await Bun.write(patchPath, delta.rootPatch);
+	await fs.writeFileDeep(patchPath, delta.rootPatch);
 	const nestedPatchPaths = await persistNestedPatches(artifactsDir, agentId, delta.nestedPatches);
 	return {
 		artifacts: {
@@ -353,7 +352,7 @@ export async function retainIsolationWorkspace(
 		// Only `ENOENT` says the workspace has moved. A stat that fails for any
 		// other reason is a workspace this caller could not look at, and
 		// retention goes ahead on the real path rather than hunting siblings.
-		const existing = await statLookup(isolationDir);
+		const existing = await fs.statLookup(isolationDir);
 		if (existing.kind === "absent") {
 			// Someone else moved it. Report a path that exists and a sidecar
 			// state that is read rather than assumed: a decoy `.retained-*`
@@ -378,11 +377,11 @@ export async function retainIsolationWorkspace(
 }
 
 /** The newest `.retained-*` copy of this sandbox that actually holds a workspace. */
-async function findRetainedSibling(baseDir: string, generation: string | undefined): Promise<Lookup<string>> {
+async function findRetainedSibling(baseDir: string, generation: string | undefined): Promise<fs.Lookup<string>> {
 	const parent = path.dirname(baseDir);
 	const prefix = `${path.basename(baseDir)}.retained-`;
-	const listing = await readdirLookup(parent);
-	if (listing.kind !== "found") return listing.kind === "absent" ? ABSENT : listing;
+	const listing = await fs.readdirLookup(parent);
+	if (listing.kind !== "found") return listing.kind === "absent" ? fs.ABSENT : listing;
 	// Ordered by the retention stamp in the name, not by modification time:
 	// a file touched inside an older retention made that unrelated workspace
 	// look like the newest one, and the user was sent to a stranger's run.
@@ -395,7 +394,7 @@ async function findRetainedSibling(baseDir: string, generation: string | undefin
 		// A retained copy with no mount directory is not this workspace. A
 		// candidate that cannot be looked at is not evidence either way, so
 		// the whole answer becomes "I do not know" rather than the next best.
-		const found = await statLookup(candidate);
+		const found = await fs.statLookup(candidate);
 		if (found.kind === "unknown") return found;
 		if (found.kind === "absent" || !found.value.isDirectory()) continue;
 		// The stamp orders retentions of *this* path; it does not say whose run
@@ -404,12 +403,12 @@ async function findRetainedSibling(baseDir: string, generation: string | undefin
 		// beside it. The marker inside the retained copy answers that.
 		if (generation !== undefined) {
 			const claim = await readIsolationClaim(path.join(parent, entry));
-			if (claim.kind === "unknown") return UNKNOWN(claim.reason);
+			if (claim.kind === "unknown") return fs.UNKNOWN(claim.reason);
 			if (claim.kind !== "claimed" || claim.generation !== generation) continue;
 		}
 		if (latest === undefined || stamp > latest.stamp) latest = { dir: candidate, stamp };
 	}
-	return latest === undefined ? ABSENT : FOUND(latest.dir);
+	return latest === undefined ? fs.ABSENT : fs.FOUND(latest.dir);
 }
 
 /**
@@ -1008,7 +1007,7 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 		} else {
 			// A patch this process cannot read is not an empty patch: read that
 			// way, the run reports no changes for work it has already written.
-			const read = await readTextLookup(result.patchPath);
+			const read = await fs.readTextLookup(result.patchPath);
 			if (read.kind !== "found") {
 				throw new Error(
 					`Captured patch ${result.patchPath} could not be read (${read.kind === "absent" ? "it is not there" : read.reason}).`,

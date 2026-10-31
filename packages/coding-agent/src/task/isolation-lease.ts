@@ -26,11 +26,13 @@
  *   the run, so its lease carries the owner's agent id and the owner ignores
  *   it; a nested child's does not and is honoured.
  */
+// `watch` is a notification channel, not a read: it answers "something
+// changed", never "nothing is there", so it cannot produce the absence this
+// subsystem's rule is about. Its own failure is handled where it is used.
 import { type FSWatcher, watch } from "node:fs";
-import * as fs from "node:fs/promises";
+import * as fs from "./isolation-fs";
 import * as path from "node:path";
-import { isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
-import { readdirLookup, reasonOf } from "./isolation-lookup";
+import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import {
 	withSandboxLock,
 	isProcessStillLive,
@@ -175,9 +177,12 @@ function isOwnersOwnLease(holder: ProcessIdentity, agentId: unknown, ownerAgentI
 
 /** The agent id recorded in a lease file, if any. */
 async function readLeaseAgentId(file: string): Promise<unknown> {
-	const decoded: unknown = await Bun.file(file)
-		.json()
-		.catch(() => undefined);
+	// An id nobody can read is simply not an id: this only decides whether a
+	// lease is the owner's own, and the unreadable case is already counted as
+	// a live foreign holder by `readHolders`, which is the strict answer.
+	const found = await fs.readJsonLookup(file);
+	if (found.kind !== "found") return undefined;
+	const decoded = found.value;
 	if (typeof decoded !== "object" || decoded === null || !("agentId" in decoded)) return undefined;
 	return decoded.agentId;
 }
@@ -192,7 +197,7 @@ async function readLeaseAgentId(file: string): Promise<unknown> {
  */
 export async function hasLiveIsolationLease(baseDir: string, ownerAgentId?: string): Promise<boolean> {
 	const leaseDir = path.join(baseDir, ISOLATION_LEASE_DIR);
-	const listing = await readdirLookup(leaseDir);
+	const listing = await fs.readdirLookup(leaseDir);
 	if (listing.kind === "absent") return false;
 	if (listing.kind === "unknown") {
 		logger.warn("isolation lease directory could not be listed; treating the sandbox as in use", {
@@ -371,7 +376,7 @@ async function announceIntent(baseDir: string): Promise<() => Promise<void>> {
 		await writeProcessIdentity(file);
 	} catch (error) {
 		throw new Error(
-			`Could not announce a stake in isolation workspace ${baseDir} (${reasonOf(error)}); ` +
+			`Could not announce a stake in isolation workspace ${baseDir} (${fs.reasonOf(error)}); ` +
 				"refusing to queue for its lock unseen.",
 		);
 	}
@@ -396,7 +401,7 @@ export async function hasUnfinishedWriter(baseDir: string): Promise<boolean> {
 
 /** Whether a live process has a record in `dir`, clearing dead ones on the way past. */
 async function hasLiveRecordIn(dir: string): Promise<boolean> {
-	const listing = await readdirLookup(dir);
+	const listing = await fs.readdirLookup(dir);
 	if (listing.kind === "absent") return false;
 	// A directory that cannot be listed is not an empty one, and the caller is
 	// about to delete or rename what is in it.
@@ -438,7 +443,7 @@ interface HolderReading {
  * transition as a state.
  */
 async function readHolders(dir: string): Promise<HolderReading> {
-	const listing = await readdirLookup(dir);
+	const listing = await fs.readdirLookup(dir);
 	if (listing.kind === "absent") return { anyLive: false, allOurs: true, unknown: false };
 	if (listing.kind === "unknown") return { anyLive: true, allOurs: false, unknown: true };
 	const entries = listing.value;
@@ -457,23 +462,6 @@ async function readHolders(dir: string): Promise<HolderReading> {
 		if (holder.pid !== process.pid) allOurs = false;
 	}
 	return { anyLive, allOurs, unknown: false };
-}
-
-/** Whether every unfinished-writer record at `baseDir` belongs to this process. */
-async function ownsEveryUnfinishedWriter(baseDir: string): Promise<boolean> {
-	const dir = path.join(baseDir, ISOLATION_UNFINISHED_DIR);
-	const listing = await readdirLookup(dir);
-	// A failure to look is not an absence. Not knowing whose records these are
-	// means they may be a foreign writer's, and this process stays.
-	if (listing.kind === "absent") return true;
-	if (listing.kind === "unknown") return false;
-	const entries = listing.value;
-	for (const entry of entries) {
-		const holder = await readProcessIdentity(path.join(dir, entry));
-		if (holder === undefined) continue;
-		if (holder === "unreadable" || holder.pid !== process.pid) return false;
-	}
-	return true;
 }
 
 /** Whether the sandbox at `baseDir` was materialised by this process, so its teardown runs here. */

@@ -205,7 +205,7 @@ it("keeps the parent of a child it could not read, instead of calling it a stray
 		return await (realStat as (...a: unknown[]) => Promise<unknown>)(target, ...rest);
 	}) as unknown as typeof fs.stat);
 
-	const result = await clearWorktrees({ json: true });
+	const result = await clearWorktrees({ json: true, all: false, dryRun: false });
 
 	spy.mockRestore();
 	expect(result.removed).toBe(0);

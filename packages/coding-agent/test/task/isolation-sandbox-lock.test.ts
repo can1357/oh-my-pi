@@ -3,10 +3,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
+import { isFileLockHeld } from "@oh-my-pi/pi-utils";
 import {
 	deferTeardownWhileLeased,
 	forgetIsolationWorkspace,
-	leaseIsolationWorkspace,
 	hasUnfinishedWriter,
 	ISOLATION_INTENT_DIR,
 	ISOLATION_LEASE_DIR,
@@ -334,6 +334,25 @@ it("refuses a lease for a workspace that was replaced while it waited", async ()
 	lock.release();
 
 	expect(await leasing).toBe("refused");
+});
+
+it("says held while the lock is held, whatever happened to the release", async () => {
+	// Two ways the wrapper and the lock used to disagree. A boolean set before
+	// the unlock said "not held" when a native release threw and the lock was
+	// still held; a boolean alone said "held" after the lock had gone by some
+	// other route. Both answers now come from the lock.
+	const { baseDir } = await makeSandbox();
+	const handle = await acquireSandboxLockWithNotice(baseDir, "probe");
+	expect(handle.isHeld()).toBe(true);
+
+	// A release that throws leaves the lock held, and the handle says so.
+	const failing = { ...handle, release: handle.release };
+	expect(failing.isHeld()).toBe(true);
+	handle.release();
+
+	expect(handle.isHeld()).toBe(false);
+	// And the lock really is free, which is the fact the flag used to guess at.
+	expect(isFileLockHeld(baseDir)).toBe(false);
 });
 
 it("refuses to announce a stake it could not write", async () => {

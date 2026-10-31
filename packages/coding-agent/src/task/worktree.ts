@@ -1,13 +1,12 @@
 import { type NestedRepoPatch } from "@oh-my-pi/pi-tui/tools/task";
-import type { Dirent } from "node:fs";
-import * as fs from "node:fs/promises";
+import * as fs from "./isolation-fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import type { VcsCommitAuthor, VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { formatBytes, getWorktreeDir, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { formatBytes, getWorktreeDir, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { SettingValueOf } from "../config/registry";
 
 import { withRepoLock } from "../utils/repo-lock";
@@ -26,16 +25,12 @@ import {
 	requireSandboxLockHeld,
 	runHoldingSandboxLock,
 	withSandboxLock,
-	ISOLATION_OWNER_FILE,
 	markIsolationRetired,
 	markIsolationRetiring,
-	readProcessIdentity,
 	readIsolationClaim,
 	resolveSandboxIdentity,
-	SANDBOX_LOCK_WAIT,
 	writeIsolationOwner,
 } from "./isolation-ownership";
-import { lstatLookup, readdirTypedLookup, realpathLookup } from "./isolation-lookup";
 import { mapWithConcurrencyLimit } from "./parallel";
 import type { cfgIsolationBackend } from "./settings";
 
@@ -143,7 +138,7 @@ async function realCommonDir(dir: string): Promise<string | undefined> {
 	// prefixes (macOS /var -> /private/var).
 	// A path that cannot be resolved has no canonical form, and two callers
 	// that fall back to different spellings lock different files.
-	const resolved = await realpathLookup(commonDir);
+	const resolved = await fs.realpathLookup(commonDir);
 	if (resolved.kind === "found") return resolved.value;
 	if (resolved.kind === "absent") return path.resolve(commonDir);
 	throw new IsolationCaptureIncompleteError(`Could not resolve ${commonDir}: ${resolved.reason}`, [commonDir]);
@@ -169,7 +164,7 @@ async function discoverNestedRepos(repoRoot: string, ownRepos: readonly string[]
 	// Find all .git dirs/files that aren't the root or known submodules
 	const result: string[] = [];
 	async function walk(dir: string): Promise<void> {
-		const listing = await readdirTypedLookup(dir);
+		const listing = await fs.readdirTypedLookup(dir);
 		if (listing.kind === "absent") return;
 		if (listing.kind === "unknown") {
 			// A directory this process could not list may hold a nested repo
@@ -190,7 +185,7 @@ async function discoverNestedRepos(repoRoot: string, ownRepos: readonly string[]
 			// cannot be reached is not a directory without one: read that way,
 			// a nested repo's changes never reach the patch.
 			const gitDir = path.join(full, ".git");
-			const gitEntry = await lstatLookup(gitDir);
+			const gitEntry = await fs.lstatLookup(gitDir);
 			if (gitEntry.kind === "unknown") {
 				throw new IsolationCaptureIncompleteError(`Could not read ${gitDir}: ${gitEntry.reason}`, [gitDir]);
 			}
@@ -269,7 +264,7 @@ async function sumUntrackedBytes(repoRoot: string, untracked: readonly string[])
 		// entry nobody can stat has no size to contribute either. Both are
 		// named in the log the budget failure prints rather than silently
 		// shrinking the estimate.
-		const found = await lstatLookup(path.join(repoRoot, entry));
+		const found = await fs.lstatLookup(path.join(repoRoot, entry));
 		if (found.kind === "unknown") {
 			logger.warn("isolation baseline could not size an untracked entry", { entry, reason: found.reason });
 			return 0;
@@ -534,7 +529,7 @@ export interface DeltaPatchResult {
 }
 
 async function hasGitEntry(dir: string): Promise<boolean> {
-	const found = await lstatLookup(path.join(dir, ".git"));
+	const found = await fs.lstatLookup(path.join(dir, ".git"));
 	if (found.kind === "unknown") {
 		throw new IsolationCaptureIncompleteError(`Could not read ${path.join(dir, ".git")}: ${found.reason}`, [dir]);
 	}
@@ -567,7 +562,7 @@ export async function captureDeltaPatch(isolationDir: string, baseline: Worktree
 		// A nested repo whose `.git` cannot be reached is not a nested repo
 		// that went away: skipping it drops its work from the patch, and the
 		// teardown then deletes the directory holding the only copy.
-		const nestedGit = await lstatLookup(path.join(nestedDir, ".git"));
+		const nestedGit = await fs.lstatLookup(path.join(nestedDir, ".git"));
 		if (nestedGit.kind === "absent") continue;
 		if (nestedGit.kind === "unknown") {
 			throw new IsolationCaptureIncompleteError(
@@ -617,7 +612,7 @@ export async function applyNestedPatches(
 
 	for (const [relativePath, repoPatches] of byRepo) {
 		const nestedDir = path.join(repoRoot, relativePath);
-		const nestedGit = await lstatLookup(path.join(nestedDir, ".git"));
+		const nestedGit = await fs.lstatLookup(path.join(nestedDir, ".git"));
 		if (nestedGit.kind === "absent") continue;
 		if (nestedGit.kind === "unknown") {
 			// This applies a captured patch. Skipping a repo nobody could look
@@ -818,19 +813,19 @@ async function detachSubmodules(sourceRoot: string, isolationRoot: string): Prom
 	for (const relativePath of paths) {
 		const sourceDir = path.join(sourceRoot, relativePath);
 		const isolatedDir = path.join(isolationRoot, relativePath);
-		const sourceGit = await lstatLookup(path.join(sourceDir, ".git"));
+		const sourceGit = await fs.lstatLookup(path.join(sourceDir, ".git"));
 		if (sourceGit.kind === "absent") continue;
 		if (sourceGit.kind === "unknown") {
 			throw new Error(`Could not read ${path.join(sourceDir, ".git")}: ${sourceGit.reason}`);
 		}
-		let isolated = await lstatLookup(path.join(isolatedDir, ".git"));
+		let isolated = await fs.lstatLookup(path.join(isolatedDir, ".git"));
 		if (isolated.kind === "unknown") {
 			throw new Error(`Could not read ${path.join(isolatedDir, ".git")}: ${isolated.reason}`);
 		}
 		if (isolated.kind === "absent") {
 			// `git worktree add` (rcopy) checks out gitlinks but not their trees.
 			await fs.cp(sourceDir, isolatedDir, { recursive: true });
-			isolated = await lstatLookup(path.join(isolatedDir, ".git"));
+			isolated = await fs.lstatLookup(path.join(isolatedDir, ".git"));
 			if (isolated.kind !== "found") {
 				throw new Error(`Submodule ${relativePath} has no .git after being copied into the isolation.`);
 			}

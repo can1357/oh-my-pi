@@ -6,21 +6,13 @@
  * it. `omp worktree clear` consults the marker so it can distinguish a live
  * subagent's sandbox from a crashed run's leftover instead of deleting both.
  */
-import * as fs from "node:fs/promises";
+import * as fs from "./isolation-fs";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { acquireFileLock, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { acquireFileLock, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { hasLiveIsolationLease, hasUnfinishedWriter } from "./isolation-lease";
-import {
-	lstatLookup,
-	readdirLookup,
-	readJsonLookup,
-	readTextLookup,
-	realpathLookup,
-	statLookup,
-} from "./isolation-lookup";
 
 /**
  * How long a materialisation, teardown, lease or reclamation waits for the
@@ -45,7 +37,7 @@ export const SANDBOX_LOCK_WAIT = { retries: 600, retryDelayMs: 100 };
  */
 export async function resolveSandboxIdentity(target: string): Promise<string> {
 	const absolute = path.resolve(target);
-	const resolved = await realpathLookup(absolute);
+	const resolved = await fs.realpathLookup(absolute);
 	if (resolved.kind === "found") return resolved.value;
 	if (resolved.kind === "unknown") {
 		throw new Error(`Isolation path ${absolute} could not be resolved (${resolved.reason}).`);
@@ -95,7 +87,7 @@ async function processStartToken(pid: number): Promise<string | null> {
 		// `absent` is a process that has gone and `unknown` is a `/proc` this
 		// caller cannot read; both give no token, and the pid-only check that
 		// follows errs towards "still live", which is the safe direction here.
-		const read = await readTextLookup(`/proc/${pid}/stat`);
+		const read = await fs.readTextLookup(`/proc/${pid}/stat`);
 		if (read.kind !== "found") return null;
 		const stat = read.value;
 		// The comm field (2) may embed spaces and parens, so parse the numeric
@@ -135,7 +127,7 @@ async function writeFileAtomically(file: string, contents: string): Promise<void
 	const temporary = `${file}.${process.pid}.${Snowflake.next()}.tmp`;
 	await fs.mkdir(path.dirname(file), { recursive: true });
 	try {
-		await Bun.write(temporary, contents);
+		await fs.writeFileDeep(temporary, contents);
 		await fs.rename(temporary, file);
 	} catch (error) {
 		await fs.rm(temporary, { force: true }).catch(() => undefined);
@@ -145,7 +137,7 @@ async function writeFileAtomically(file: string, contents: string): Promise<void
 
 /** The identity recorded in `file`, `undefined` when there is none, `"unreadable"` when it cannot be read. */
 export async function readProcessIdentity(file: string): Promise<ProcessIdentity | "unreadable" | undefined> {
-	const found = await readJsonLookup(file);
+	const found = await fs.readJsonLookup(file);
 	if (found.kind === "absent") return undefined;
 	if (found.kind === "unknown") return "unreadable";
 	const decoded = found.value;
@@ -238,7 +230,7 @@ export async function readIsolationClaim(baseDir: string): Promise<IsolationClai
 	// `readJsonLookup` asks `lstat` first, so a dangling marker symlink — whose
 	// open gives `ENOENT` just as a missing one does — is an entry that exists
 	// and cannot be read, which is unknown.
-	const found = await readJsonLookup(path.join(baseDir, ISOLATION_OWNER_FILE));
+	const found = await fs.readJsonLookup(path.join(baseDir, ISOLATION_OWNER_FILE));
 	if (found.kind === "absent") return { kind: "absent" };
 	if (found.kind === "unknown") return { kind: "unknown", reason: found.reason };
 	const decoded = found.value;
@@ -268,21 +260,30 @@ export async function clearClaimedWorkspace(baseDir: string): Promise<void> {
 	// A listing that fails is not an empty sandbox: reading it as one leaves
 	// the previous owner's data in place under this run's claim, and the run
 	// then works in a workspace it believes is clean.
-	const listing = await readdirLookup(baseDir);
+	const listing = await fs.readdirLookup(baseDir);
 	if (listing.kind === "absent") return;
 	if (listing.kind === "unknown") {
 		throw new Error(`Isolation workspace ${baseDir} could not be listed (${listing.reason}); refusing to clear it.`);
 	}
-	const entries = listing.value;
+	const entries = listing.value.filter(entry => entry !== ISOLATION_OWNER_FILE);
+	if (entries.length === 0) return;
+	// Moved aside in one step, then deleted.
+	//
+	// Checking the hold before each removal is still a check at the top of an
+	// act: a removal already running keeps deleting after the hold ends, and
+	// it erased a file a peer created in the directory it was walking. A
+	// rename is a single syscall that either happened under this hold or did
+	// not, and once it has, nothing a peer writes to the live path is inside
+	// what this call deletes.
+	const aside = path.join(baseDir, `${ISOLATION_CLEARING_PREFIX}${Snowflake.next()}`);
+	await fs.mkdir(aside);
+	requireSandboxLockHeld(baseDir, "empty");
 	for (const entry of entries) {
-		if (entry === ISOLATION_OWNER_FILE) continue;
-		// Before each removal, not once before the listing: the listing is an
-		// await, and a hold checked before an await is a hold checked before
-		// somebody else could take the lock. This deleted a sandbox while a
-		// second process held it.
-		requireSandboxLockHeld(baseDir, "empty");
-		await fs.rm(path.join(baseDir, entry), { recursive: true, force: true });
+		await fs.rename(path.join(baseDir, entry), path.join(aside, entry));
 	}
+	// Outside the hold's protection on purpose: this path is unreachable to
+	// anybody else, so how long it takes no longer decides anything.
+	await fs.rm(aside, { recursive: true, force: true });
 }
 
 /** Why a sandbox may or may not be reclaimed by something that did not materialise it. */
@@ -306,7 +307,7 @@ export interface IsolationReclaimDecision {
  */
 export async function decideIsolationReclaim(baseDir: string): Promise<IsolationReclaimDecision> {
 	const markerFile = path.join(baseDir, ISOLATION_OWNER_FILE);
-	const marker = await readJsonLookup(markerFile);
+	const marker = await fs.readJsonLookup(markerFile);
 	if (marker.kind === "absent") {
 		// A sandbox with no marker at all: a pre-marker leftover, or one whose
 		// marker something removed. Neither is proof that no task is working
@@ -361,6 +362,12 @@ export async function decideIsolationReclaim(baseDir: string): Promise<Isolation
 	return { reclaimable: true, reason: "task-isolation leftover (no live task owns it)" };
 }
 
+/** Suffix of the name a reclaim moves a whole sandbox to before deleting it. */
+export const ISOLATION_REMOVING_SUFFIX = ".removing-";
+
+/** Prefix of the staging directory a clear moves a sandbox's contents into before deleting them. */
+export const ISOLATION_CLEARING_PREFIX = ".omp-clearing-";
+
 /** Sidecar recording the native-teardown backend of a retained workspace. */
 export const RETAINED_BACKEND_FILE = ".omp-retained-backend.json";
 
@@ -389,7 +396,7 @@ export function needsNativeTeardown(backend: unknown): backend is number {
  * without it (the workspace merely falls back to plain recursive removal).
  */
 export async function writeRetainedBackend(baseDir: string, backend: number): Promise<void> {
-	await Bun.write(
+	await fs.writeFileDeep(
 		path.join(baseDir, RETAINED_BACKEND_FILE),
 		JSON.stringify({ backend, retainedAt: new Date().toISOString() }),
 	);
@@ -410,7 +417,7 @@ export async function readRetainedMountBackend(dir: string): Promise<number | un
 	// sidecar". A dangling entry — which `stat` reports as `ENOENT` while
 	// `lstat` sees it — and an unreadable one are both `unknown`, and the
 	// caller is about to remove a possible mount, so unknown raises.
-	const found = await readJsonLookup(sidecar);
+	const found = await fs.readJsonLookup(sidecar);
 	if (found.kind === "absent") return undefined;
 	if (found.kind === "unknown") {
 		throw new Error(`retained-mount metadata at ${sidecar} could not be read: ${found.reason}`);
@@ -436,11 +443,6 @@ export async function readRetainedMountBackend(dir: string): Promise<number | un
 /** Whether `backend` is a backend value this build understands. */
 function isKnownBackend(backend: number): boolean {
 	return Object.values(IsoBackendKind).includes(backend as natives.IsoBackendKind);
-}
-
-/** One-line text for an error recorded in a reclaim decision. */
-function errorText(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 /**
@@ -686,9 +688,13 @@ export async function acquireSandboxLockWithNotice(baseDir: string, purpose: str
 				// Idempotent: a caller that hands this handle to a continuation
 				// and a `finally` that also releases must not unlock twice.
 				if (released) return;
+				// Marked released only once the lock really is: a native
+				// release that threw left the wrapper saying "not held" while
+				// the lock was still held, which is the same disagreement the
+				// boolean caused, with the sign reversed.
+				lock.release();
 				released = true;
 				heldByThisProcess.delete(handle);
-				lock.release();
 			},
 			// Asked of the lock, not of the boolean beside it: a handle released
 			// by another route, or one whose release threw, leaves the two
