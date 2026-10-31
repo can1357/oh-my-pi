@@ -156,6 +156,15 @@ describe("pi-native parseRequest", () => {
 		expect(parsed.options.acceptEmptyResponse).toBe(true);
 	});
 
+	it("forwards omitDemotedReasoning so a stripped retry leaves other models' reasoning out server-side", () => {
+		const parsed = parseRequest({
+			modelId: "anthropic/claude-opus-5-5",
+			context: baseContext,
+			options: { omitDemotedReasoning: true },
+		});
+		expect(parsed.options.omitDemotedReasoning).toBe(true);
+	});
+
 	it("preserves headers, metadata, sessionId, thinkingBudgets, and hidden thinking summaries", () => {
 		const parsed = parseRequest({
 			modelId: "x",
