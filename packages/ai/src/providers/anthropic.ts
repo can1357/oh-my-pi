@@ -24,7 +24,7 @@ import { NO_AUTH_SENTINEL } from "../auth-retry";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
-import { waitForRetry } from "../utils/retry-wait";
+import { resolveRetryDelayMs, waitForRetry } from "../utils/retry-wait";
 import { getEnvApiKey } from "../env-api-key";
 import { OUTPUT_FALLBACK_BUFFER } from "../stream";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
@@ -3583,16 +3583,16 @@ const streamAnthropicOnce = (
 					const backoffDelayMs = calculateAnthropicRetryDelayMs(providerRetryAttempt - 1);
 					// Honor the server's retry hint (`retry-after-ms`/`retry-after`) on
 					// 429/529-style failures: retrying sooner than the server asked is a
-					// guaranteed failure that just burns the retry budget.
-					const headerDelayMs = getRetryAfterMsFromHeaders(getHeadersFromError(streamFailure));
-					// Bound the server-directed wait so a multi-hour `retry-after` cannot
-					// park the provider stream before higher-level recovery runs. A non-positive cap
-					// disables the bound; an over-cap hint surfaces the original error immediately.
-					const maxRetryDelayMs = options?.maxRetryDelayMs ?? 60_000;
-					if (headerDelayMs !== undefined && maxRetryDelayMs > 0 && headerDelayMs > maxRetryDelayMs) {
-						throw streamFailure;
-					}
-					const delayMs = headerDelayMs !== undefined ? Math.max(headerDelayMs, backoffDelayMs) : backoffDelayMs;
+					// guaranteed failure that just burns the retry budget. The wait is
+					// bounded by `maxRetryDelayMs` so a multi-hour `retry-after` cannot park
+					// the provider stream before higher-level recovery runs: an over-cap
+					// hint surfaces the original error immediately.
+					const delayMs = resolveRetryDelayMs(
+						getRetryAfterMsFromHeaders(getHeadersFromError(streamFailure)),
+						backoffDelayMs,
+						options?.maxRetryDelayMs,
+					);
+					if (delayMs === undefined) throw streamFailure;
 					await waitForRetry(options?.providerRetryWait, delayMs, options?.signal);
 					output.content.length = 0;
 					output.model = sourceModel.id;
