@@ -36,7 +36,7 @@ import {
 	normalizeMessagesForProvider,
 	normalizeTools,
 	resolveOwnedDialectFromEnv,
-	steeringQueueState,
+	steeringRangeState,
 	unpairedToolCallTail,
 } from "./agent-loop";
 import type { AppendOnlyContextManager } from "./append-only-context";
@@ -456,8 +456,9 @@ export class Agent {
 	#withdrawnMessages = new WeakMap<AgentMessage, AbortController>();
 	#steeringWaiters = new Set<() => void>();
 	#queuedMessageGrouping?: (previous: AgentMessage, next: AgentMessage) => boolean;
-	/** The head agent steering message user units passed, and how many passed it. */
+	/** The head agent steering message priority units passed, and how many passed it. */
 	#steeringHeadPassed?: { head: AgentMessage; count: number };
+	#steeringPriority?: (message: AgentMessage) => boolean;
 
 	#steeringMode: "all" | "one-at-a-time";
 	#followUpMode: "all" | "one-at-a-time";
@@ -1088,6 +1089,9 @@ export class Agent {
 		delete this.#queuedMessageClaims[queue];
 		if (restore) {
 			if (queue === "steering") {
+				// The claim was the oldest unit of its class (a person's messages or
+				// agent steering each leave the queue in arrival order), so the front
+				// keeps both classes' order.
 				this.#steeringQueue = [...claim.messages, ...this.#steeringQueue];
 				this.#notifySteeringWaiters();
 			} else {
@@ -1115,6 +1119,8 @@ export class Agent {
 			}
 		}
 		if (restored.steering.length > 0) {
+			// What the run took is older than what remains of its own class, so the
+			// front keeps both classes' order (see #cancelQueuedMessagePreparation).
 			this.#steeringQueue = [...restored.steering, ...this.#steeringQueue];
 			this.#notifySteeringWaiters();
 		}
@@ -1154,8 +1160,8 @@ export class Agent {
 	/**
 	 * Take back dequeued input the transcript has not recorded yet, ahead of an abort (Esc restores
 	 * it to the editor): steering live steering took for the in-flight response, then each batch
-	 * dequeued for the next model call, oldest first. The aborted run then neither records it (or
-	 * the context prepared for it) nor requeues it.
+	 * dequeued for the next model call, in the order they were taken. The aborted run then neither
+	 * records it (or the context prepared for it) nor requeues it.
 	 */
 	withdrawUndeliveredQueuedMessages(): { steering: AgentMessage[]; followUp: AgentMessage[] } {
 		const withdrawn: Record<QueuedMessageQueue, AgentMessage[]> = { steering: [], followUp: [] };
@@ -1546,6 +1552,18 @@ export class Agent {
 		this.#queuedMessageGrouping = predicate;
 	}
 
+	/**
+	 * Rule for the steering one-at-a-time delivery takes first: a unit holding a
+	 * message it accepts goes ahead of earlier units that hold none, within
+	 * {@link MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING}. Defaults to
+	 * {@link isUserSteeringMessage}. The predicate must be synchronous and
+	 * side-effect-free. A host that lists queued messages should pass the rule
+	 * its list uses, so the order it shows is the order the agent reads them.
+	 */
+	setSteeringPriority(predicate: ((message: AgentMessage) => boolean) | undefined): void {
+		this.#steeringPriority = predicate;
+	}
+
 	/** End (exclusive) of the grouped delivery unit that starts at `start`. */
 	#unitEnd(queue: readonly AgentMessage[], start: number): number {
 		let end = start + 1;
@@ -1559,32 +1577,42 @@ export class Agent {
 	}
 
 	/**
-	 * Bounds of the steering unit delivered next: the whole queue in "all" mode;
-	 * in "one-at-a-time" mode the first unit holding a user-authored message, else
-	 * the head unit. A person's steer is read at the next boundary rather than
-	 * behind every agent steer queued before it; each class keeps its own order.
-	 * An agent unit at the head that {@link MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING}
-	 * user units have passed goes next, so sustained user input cannot starve it.
+	 * Start of the steering unit delivered next: the whole queue in "all" mode;
+	 * in "one-at-a-time" mode the first unit holding a priority message
+	 * ({@link setSteeringPriority}, a person's by default), else the head unit. A
+	 * person's steer is read at the next boundary rather than behind every agent
+	 * steer queued before it; each class keeps its own order. An agent unit at the
+	 * head that {@link MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING} priority units have
+	 * passed goes next, so sustained priority input delays agent steering but
+	 * cannot starve it. Allocation-free: the mid-batch steering poll calls it.
 	 */
-	#nextSteeringUnit(): { start: number; end: number } {
+	#nextSteeringUnitStart(): number {
 		const queue = this.#steeringQueue;
-		if (this.#steeringMode === "all" || queue.length === 0) return { start: 0, end: queue.length };
-		const headEnd = this.#unitEnd(queue, 0);
+		if (this.#steeringMode === "all" || queue.length === 0) return 0;
 		const passed = this.#steeringHeadPassed;
-		if (passed?.head === queue[0] && passed.count >= MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING) {
-			return { start: 0, end: headEnd };
-		}
-		for (let start = 0, end = headEnd; start < queue.length; start = end, end = this.#unitEnd(queue, start)) {
+		if (passed?.head === queue[0] && passed.count >= MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING) return 0;
+		const isPriority = this.#steeringPriority ?? isUserSteeringMessage;
+		for (let start = 0; start < queue.length;) {
+			const end = this.#unitEnd(queue, start);
 			for (let i = start; i < end; i++) {
-				if (isUserSteeringMessage(queue[i])) return { start, end };
+				if (isPriority(queue[i])) return start;
 			}
+			start = end;
 		}
-		return { start: 0, end: headEnd };
+		return 0;
+	}
+
+	/** End (exclusive) of the steering unit starting at `start`; the whole queue in "all" mode. */
+	#steeringUnitEnd(start: number): number {
+		const queue = this.#steeringQueue;
+		if (this.#steeringMode === "all" || start >= queue.length) return queue.length;
+		return this.#unitEnd(queue, start);
 	}
 
 	#dequeueSteeringMessages(): AgentMessage[] {
 		const queue = this.#steeringQueue;
-		const { start, end } = this.#nextSteeringUnit();
+		const start = this.#nextSteeringUnitStart();
+		const end = this.#steeringUnitEnd(start);
 		if (start === end) return [];
 		if (start === 0) {
 			this.#steeringHeadPassed = undefined;
@@ -2063,8 +2091,8 @@ export class Agent {
 				return this.#dequeueSteeringMessagesAfterHooks(signal ?? loopSignal);
 			},
 			hasSteeringMessages: () => {
-				const { start, end } = this.#nextSteeringUnit();
-				return steeringQueueState(this.#steeringQueue.slice(start, end));
+				const start = this.#nextSteeringUnitStart();
+				return steeringRangeState(this.#steeringQueue, start, this.#steeringUnitEnd(start));
 			},
 			waitForSteeringMessages: signal => this.#waitForSteeringMessages(signal),
 			onLiveSteeringTaken: messages => this.#adoptLiveSteering(messages),

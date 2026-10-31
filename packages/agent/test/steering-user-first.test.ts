@@ -66,7 +66,11 @@ function transcriptTexts(agent: Agent): string[] {
  */
 async function runWithQueued(
 	queued: AgentMessage[],
-	options: { steeringMode?: "all" | "one-at-a-time"; grouping?: boolean } = {},
+	options: {
+		steeringMode?: "all" | "one-at-a-time";
+		grouping?: boolean;
+		priority?: (message: AgentMessage) => boolean;
+	} = {},
 ): Promise<{ agent: Agent; calls: Context[] }> {
 	const agentRef = {} as { current: Agent };
 	const schema = type({});
@@ -100,6 +104,7 @@ async function runWithQueued(
 				(next.role === "user" || next.role === "custom"),
 		);
 	}
+	if (options.priority) agent.setSteeringPriority(options.priority);
 	agentRef.current = agent;
 	await agent.prompt("start");
 	return { agent, calls: mock.calls.map(call => call.context) };
@@ -139,6 +144,23 @@ describe("one-at-a-time steering: a person's message before agent steering", () 
 		const { agent } = await runWithQueued([card(1), parent, card(2)]);
 
 		expect(transcriptTexts(agent)).toEqual(["start", "card 1", "parent", "card 2"]);
+	});
+
+	it("lets the host's priority rule decide which steering goes first", async () => {
+		const hidden: AgentMessage = {
+			role: "custom",
+			customType: "hidden-note",
+			content: "hidden note",
+			display: false,
+			attribution: "user",
+			timestamp: 1,
+		};
+		const byDefault = await runWithQueued([card(1), hidden, person("typed")]);
+		expect(transcriptTexts(byDefault.agent)).toEqual(["start", "hidden note", "typed", "card 1"]);
+
+		const visibleOnly = (message: AgentMessage) => message.role === "user";
+		const byHost = await runWithQueued([card(1), hidden, person("typed")], { priority: visibleOnly });
+		expect(transcriptTexts(byHost.agent)).toEqual(["start", "typed", "card 1", "hidden note"]);
 	});
 
 	it("reads the head agent steer after every bound's worth of user steers, so sustained input starves nothing", async () => {

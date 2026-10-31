@@ -1947,6 +1947,13 @@ export class AgentSession implements SettingsScope {
 			(previous, next) =>
 				isHiddenUserCompanion(previous) && (isHiddenUserCompanion(next) || isUserQueuedMessage(next)),
 		);
+		// One-at-a-time steering reads a person's message ahead of agent steering. The queue chips
+		// (getQueuedMessages) list exactly the messages this rule accepts, and the grouping above
+		// keeps each one's hidden companions in its unit, so the chips show the order the agent
+		// reads them; the first is read at the next boundary, unless four in a row just passed the
+		// agent steer at the head of the queue (MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING), which goes
+		// first.
+		this.agent.setSteeringPriority(isUserAuthoredQueuedMessage);
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
 		this.#ownsCostGate = config.costGate === undefined;
@@ -10351,7 +10358,8 @@ export class AgentSession implements SettingsScope {
 	 *  directives, which the user never sees.
 	 *  `forInterrupt` also withdraws input the run already dequeued but never recorded — live-steered
 	 *  into the aborted response, or taken for its next model call — and treats it as queued ahead of
-	 *  the rest (it was queued first). */
+	 *  the rest: a person's messages and agent steering each leave the queue in arrival order, so what
+	 *  the run took was queued before what remains of its own class. */
 	clearQueue(options?: { forInterrupt?: boolean }): {
 		steering: RestoredQueuedMessage[];
 		followUp: RestoredQueuedMessage[];

@@ -283,6 +283,45 @@ describe("AgentSession queued steer delivery", () => {
 			expect(session.agent.hasQueuedMessages()).toBe(false);
 		});
 
+		it("orders steering by the rule the queue chips use, not by attribution alone", async () => {
+			const hidden: AgentMessage = {
+				role: "custom",
+				customType: "hidden-note",
+				content: "hidden user-attributed note",
+				display: false,
+				attribution: "user",
+				timestamp: Date.now(),
+			};
+			let queued: { steering: readonly string[] } | undefined;
+			const { session, mock } = await createSession([
+				async () => {
+					await session.sendCustomMessage(
+						{ customType: "envoy-message", content: "card one", display: true },
+						{ deliverAs: "steer", triggerTurn: true },
+					);
+					session.agent.steer(hidden);
+					await session.prompt("read me now", { streamingBehavior: "steer" });
+					queued = session.getQueuedMessages();
+					return { content: ["working"] };
+				},
+				{ content: ["read the person"] },
+				{ content: ["read the card"] },
+				{ content: ["read the note"] },
+			]);
+			session.setSteeringMode("one-at-a-time");
+
+			await session.prompt("start");
+			await session.waitForIdle();
+
+			// The chips list only the typed message, and it is the one read next; the hidden
+			// note is not a chip, so it keeps its place behind the card.
+			expect(queued?.steering).toEqual(["read me now"]);
+			expect(textsOf(mock.calls[1])).toContain("read me now");
+			expect(textsOf(mock.calls[2])).toContain("card one");
+			expect(textsOf(mock.calls[2])).not.toContain("hidden user-attributed note");
+			expect(textsOf(mock.calls[3])).toContain("hidden user-attributed note");
+		});
+
 		it("still delivers everything in queue order at the next boundary in all mode", async () => {
 			const { session, sessionManager, mock } = await createSession([
 				async () => {

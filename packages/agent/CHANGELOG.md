@@ -5,10 +5,11 @@
 ### Added
 
 - The soft steering signal a tool sees as `toolCall.steeringSignal` now aborts with the source of the queued message (`"user"`, `"irc"`, …) as its `reason`, so a tool can yield only to the sources it should ([#17537](https://github.com/can1357/oh-my-pi/issues/17537))
+- `isUserSteeringMessage`, `steeringRangeState` and `Agent.setSteeringPriority(predicate)`: the rule for which queued steering is a person's, a copy-free range classifier, and a host's own rule for which steering goes first ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 
-- `one-at-a-time` steering delivers the first queued unit holding a user-authored message (`isUserSteeringMessage`) ahead of agent-authored steering queued before it, and the agent unit at the head goes next once `MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING` (4) user units have passed it; `steeringQueueState` classifies the messages it is given and no longer takes a count ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
+- `one-at-a-time` steering delivers the first queued unit holding a user-authored message ahead of agent-authored steering queued before it, and the agent unit at the head goes next once `MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING` (4) user units have passed it; the mid-batch interrupt classifies that whole unit instead of the first queued message ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 

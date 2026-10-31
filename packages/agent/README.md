@@ -253,15 +253,21 @@ steering until the current turn completes.
 
 In `one-at-a-time` mode each boundary takes one delivery unit, and a unit holding a user-authored
 message (`attribution: "user"`, or a `role: "user"` message not attributed to an agent; see
-`isUserSteeringMessage`) goes ahead of agent-authored steering queued before it. A person's steer is
-read at the next boundary however many agent steers wait; user units keep their order, as do agent
-units. After `MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING` (4) user units have gone ahead of the agent unit
-at the head of the queue, that agent unit goes next, so sustained user input delays agent steering but
-never starves it. `all` mode delivers the whole queue in order.
+`isUserSteeringMessage`, or the host's own rule from `setSteeringPriority(predicate)`) goes ahead of
+agent-authored steering queued before it. A person's steer is read at the next boundary however many
+agent steers wait; user units keep their order, as do agent units. After
+`MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING` (4) user units have gone ahead of the agent unit at the head
+of the queue, that agent unit goes next, so sustained user input delays agent steering but never
+starves it: an agent unit with `k` agent units ahead of it is read within `5 × (k + 1)` boundaries.
+`all` mode delivers the whole queue in order. A host that lists queued messages should pass
+`setSteeringPriority` the rule its list uses, so the list shows the order the agent reads them.
 
 Hosts can use `setQueuedMessageGrouping((previous, next) => boolean)` to keep adjacent companion
 records and their prompt together in `one-at-a-time` mode. Without a grouping predicate, records
-remain separate. `replaceQueue("steering" | "followUp", messages)` replaces only the selected queue.
+remain separate. Taking a user unit from the middle of the queue makes the records on either side of
+it adjacent though they never were, so a predicate should only join records that belong together
+wherever they sit (such as a companion and the prompt after it), not pair openers with closers.
+`replaceQueue("steering" | "followUp", messages)` replaces only the selected queue.
 
 ## Custom Message Types
 
