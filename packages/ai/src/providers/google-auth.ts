@@ -16,7 +16,7 @@
 import { Buffer } from "node:buffer";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $envpos, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { $envpos, findRetryRefusal, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { FetchImpl } from "../types";
 import { raceWithSignal } from "../utils/abort";
@@ -182,7 +182,10 @@ async function fetchMetadataToken(
 		});
 		if (!response.ok) return undefined;
 		return (await response.json()) as TokenResponse;
-	} catch {
+	} catch (error) {
+		// The caller's replay budget refused this probe: that is not "no metadata
+		// server", and the call must answer with the failure its replay replaced.
+		if (findRetryRefusal(error)) throw error;
 		return undefined;
 	}
 }
@@ -307,7 +310,16 @@ export async function getVertexAccessToken(options?: { signal?: AbortSignal; fet
 
 	const cacheKey = "vertex-adc";
 	const existing = inflight.get(cacheKey);
-	if (existing) return raceWithSignal(existing, options?.signal);
+	if (existing) {
+		try {
+			return await raceWithSignal(existing, options?.signal);
+		} catch (error) {
+			// The shared resolution ran on another call's fetch, and that call's
+			// replay budget refused it. This call was not refused: resolve again.
+			if (!findRetryRefusal(error)) throw error;
+			return getVertexAccessToken(options);
+		}
+	}
 
 	// Deliberately resolve without any caller's signal: the in-flight promise is shared
 	// by every concurrent caller, so aborting one request must not fail the whole batch.

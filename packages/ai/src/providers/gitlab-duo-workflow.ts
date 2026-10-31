@@ -450,7 +450,7 @@ export const streamGitLabDuoWorkflow: StreamFunction<"gitlab-duo-agent"> = (
 
 	void runGitLabDuoWorkflow(model, context, options, state).catch(caught => {
 		// A restart the budget refused at handoff stands for the failure it replaced.
-		const errorText = gitLabDuoWorkflowErrorText(restoreReplaced(caught));
+		const errorText = gitLabDuoWorkflowErrorText(restoreReplaced(caught, state.replayBudget));
 		if (!stream.done) {
 			output.stopReason = "error";
 			// A throw (socket reject, abnormal 1006 close, …) on a goal already past the
@@ -1318,6 +1318,9 @@ async function runGitLabDuoWorkflow(
 		try {
 			setup = await setupForNamespace(cachedNamespace);
 		} catch (cachedError) {
+			// A replay the budget refused is not a stale namespace: keep the cache,
+			// and let the call answer with the failure the replay replaced.
+			if (findRetryRefusal(cachedError)) throw cachedError;
 			// The cached account namespace no longer works (revoked access, deleted
 			// group, membership change). Drop it and re-discover once from scratch.
 			traceGitLabDuoWorkflow("namespace.cache_invalidate", {

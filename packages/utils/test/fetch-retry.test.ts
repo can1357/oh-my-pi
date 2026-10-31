@@ -492,6 +492,67 @@ describe("longestRetryHint", () => {
 			vi.spyOn(Date, "now").mockReturnValue(at);
 			expect(extractRetryHint(undefined, `retry-after: ${imf(at + 30_000)}`)).toBeUndefined();
 		});
+
+		// RFC 9110 section 5.6.7, case by case: the rolling fifty-year reading of a
+		// two-digit year, the leap second, and a malformed field never read as part
+		// of a longer one.
+		const header = (value: string): number | undefined => longestRetryHint(new Headers({ "retry-after": value }));
+		const body = (value: string): number | undefined => longestRetryHint(undefined, `retry-after: ${value}`);
+
+		it.each([
+			["less than fifty years ahead", "Sunday, 31-Oct-60 12:00:30 GMT", Date.UTC(2060, 9, 31, 12, 0, 30) - at],
+			["more than fifty years ahead, read as the past", "Sunday, 31-Oct-80 12:00:30 GMT", 0],
+			["a four-digit year", "Sunday, 31-Oct-2060 12:00:30 GMT", Date.UTC(2060, 9, 31, 12, 0, 30) - at],
+		])("reads an RFC 850 year %s, in a header and in text", (_name, value, expected) => {
+			vi.spyOn(Date, "now").mockReturnValue(at);
+			expect(header(value)).toBe(expected);
+			expect(body(value)).toBe(expected);
+		});
+
+		it("reads a 29 February only in the century the fifty-year rule picks", () => {
+			// From 2060 the window ends in 2110: "00" is 2100, which has no 29 February.
+			vi.spyOn(Date, "now").mockReturnValue(Date.UTC(2060, 0, 1));
+			expect(header("Tuesday, 29-Feb-00 00:00:00 GMT")).toBeUndefined();
+			// From 2026 it is 2000, which has one.
+			vi.spyOn(Date, "now").mockReturnValue(at);
+			expect(header("Tuesday, 29-Feb-00 00:00:00 GMT")).toBe(0);
+		});
+
+		it("reads the leap second 23:59:60 as the instant after 23:59:59", () => {
+			vi.spyOn(Date, "now").mockReturnValue(Date.UTC(2016, 11, 31, 23, 59, 30));
+			expect(header("Sat, 31 Dec 2016 23:59:60 GMT")).toBe(30_000);
+			expect(body("Sat, 31 Dec 2016 23:59:60 GMT")).toBe(30_000);
+			expect(header("Sat, 31 Dec 2016 12:00:60 GMT")).toBeUndefined();
+		});
+
+		it("never reads a prefix of a malformed year beside a valid date", () => {
+			vi.spyOn(Date, "now").mockReturnValue(at);
+			const valid = imf(at + 30_000);
+			expect(longestRetryHint(undefined, `retry-after: Sat Oct 31 12:00:30 999999999; retry-after: ${valid}`)).toBe(
+				30_000,
+			);
+			expect(
+				longestRetryHint(undefined, `retry-after: Sat, 31 Oct 999999999 12:00:30 GMT; retry-after: ${valid}`),
+			).toBe(30_000);
+			expect(longestRetryHint(undefined, `retry-after: Sat, 31 Oct 2026 12:00:300 GMT; retry-after: ${valid}`)).toBe(
+				30_000,
+			);
+		});
+
+		it.each([
+			["a day the month does not have", "Sat, 31 Nov 2026 12:00:30 GMT"],
+			["an hour past 23", "Sat, 31 Oct 2026 24:00:30 GMT"],
+			["an unknown month", "Sat, 31 Foo 2026 12:00:30 GMT"],
+			["a five-digit year", "Sat, 31 Oct 20260 12:00:30 GMT"],
+		])("names no wait for %s", (_name, value) => {
+			vi.spyOn(Date, "now").mockReturnValue(at);
+			expect(header(value)).toBeUndefined();
+		});
+
+		it("reads both dates of a duplicate header joined by a comma", () => {
+			vi.spyOn(Date, "now").mockReturnValue(at);
+			expect(header(`${imf(at + 1_000)}, ${imf(at + 30_000)}`)).toBe(30_000);
+		});
 	});
 
 	it("names no wait when nothing names one", () => {

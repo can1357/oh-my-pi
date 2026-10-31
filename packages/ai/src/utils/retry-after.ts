@@ -13,6 +13,23 @@ export function extractProviderRetryHint(
 }
 
 const RETRY_AFTER_HINT = "retry-after-ms=";
+const RETRY_AFTER_HINT_PATTERN = /\bretry-after-ms=(\d+)/g;
+
+/**
+ * `message` carrying the longest `retry-after-ms=` hint `source` carries, for a
+ * rewrite that replaces a formatted error message with its own text: the
+ * server's wait stays readable to the caller. `message` unchanged when it
+ * already carries a hint or `source` has none.
+ */
+export function keepRetryAfterHint(source: string, message: string): string {
+	if (message.includes(RETRY_AFTER_HINT)) return message;
+	let longest: number | undefined;
+	for (const match of source.matchAll(RETRY_AFTER_HINT_PATTERN)) {
+		const ms = Number(match[1]);
+		if (longest === undefined || ms > longest) longest = ms;
+	}
+	return longest === undefined ? message : `${message} ${RETRY_AFTER_HINT}${longest}`;
+}
 
 export function formatErrorMessageWithRetryAfter(error: unknown, headers?: HeadersLike): string {
 	const message = error instanceof Error ? error.message : JSON.stringify(error);

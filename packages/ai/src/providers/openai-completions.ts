@@ -1885,8 +1885,9 @@ const streamOpenAICompletionsOnce = (
 			try {
 				finishOpenBlocksOnError();
 			} catch {}
-			const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
-			const result = await AIError.finalize(restoreReplaced(error), {
+			const answered = restoreReplaced(error, replayBudget);
+			const capturedErrorResponse = answered instanceof OpenAIHttpError ? answered.captured : undefined;
+			const result = await AIError.finalize(answered, {
 				api: model.api,
 				provider: model.provider,
 				abortTracker,

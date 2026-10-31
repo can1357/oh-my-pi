@@ -41,7 +41,7 @@ import type {
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
+import { extractHttpStatusFromError, RetryRefusedError } from "@oh-my-pi/pi-utils";
 
 beforeAll(() => configureCredentialRedaction(true));
 afterAll(() => configureCredentialRedaction(false));
@@ -791,6 +791,41 @@ describe("GitLab Duo Workflow per-account namespace cache", () => {
 		failNamespaceOnce = true;
 		await driveOneTurn(apiKey, baseUrl, fetchImpl, new Map<string, ProviderSessionState>());
 		expect(groupHits.count).toBe(2);
+	});
+
+	// A replay budget that refuses a request during the cached namespace's setup
+	// says nothing about the namespace: the cache stays, and the turn answers
+	// with the failure the replay replaced.
+	it("keeps the cached namespace when a replay budget refuses its setup", async () => {
+		const apiKey = "acct-refused-key";
+		const baseUrl = "https://gitlab.cache-refused.example.com";
+		const groupHits = { count: 0 };
+		let refuse = false;
+		const discovery = autoDiscoveryFetch(groupHits, "gid://gitlab/Group/refused-root");
+		const fetchImpl: FetchImpl = async (input, init) => {
+			if (refuse && String(input).includes("/direct_access")) {
+				throw new RetryRefusedError(new Error("503 original overload"));
+			}
+			return discovery(input, init);
+		};
+
+		await driveOneTurn(apiKey, baseUrl, fetchImpl, new Map<string, ProviderSessionState>());
+		expect(groupHits.count).toBe(1);
+
+		refuse = true;
+		const refused = await streamGitLabDuoWorkflow({ ...model, baseUrl } as Model<"gitlab-duo-agent">, context, {
+			apiKey,
+			fetch: fetchImpl,
+			providerSessionState: new Map<string, ProviderSessionState>(),
+			webSocketFactory: () => makeSocket(),
+		}).result();
+		expect(refused.stopReason).toBe("error");
+		expect(refused.errorMessage).toContain("503 original overload");
+		expect(groupHits.count).toBe(1);
+
+		refuse = false;
+		await driveOneTurn(apiKey, baseUrl, fetchImpl, new Map<string, ProviderSessionState>());
+		expect(groupHits.count).toBe(1);
 	});
 
 	it("ensures Duo settings once per account rather than once per provider session", async () => {

@@ -11,6 +11,8 @@ import {
 	restoreReplaced,
 	withReplayBudget,
 } from "@oh-my-pi/pi-ai/utils/replay-budget";
+import { transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { RetryRefusedError } from "@oh-my-pi/pi-utils";
 
 afterEach(() => {
@@ -187,6 +189,204 @@ describe("the transport handoff", () => {
 		).rejects.toThrow("socket hang up");
 		clock.advance(500);
 		expect(() => budget.checkpoint()).not.toThrow();
+	});
+});
+
+/** What `run` threw, or `undefined` when it returned. */
+async function thrownBy(run: () => unknown): Promise<unknown> {
+	try {
+		await run();
+	} catch (error) {
+		return error;
+	}
+	return undefined;
+}
+
+// Each replay's arm has an identity: the send that carries the replay takes it
+// and releases that arm alone. These are compositions of the real budget and
+// transport helpers; no stock provider runs two replays at once.
+describe("arm ownership", () => {
+	it("does not let an older send's settlement release a replay armed after it began", async () => {
+		const clock = fakeClock();
+		const budget = budgetOf(100);
+		const older = Promise.withResolvers<Response>();
+		budget.arm(new Error("A"));
+		const sendA = budget.gateFetch(() => older.promise)("https://example.test/A");
+		const replacedB = new Error("B");
+		budget.arm(replacedB);
+		older.resolve(new Response("A"));
+		await sendA;
+		clock.advance(200);
+
+		const refusal = await thrownBy(() => budget.checkpoint());
+
+		expect(refusal).toBeInstanceOf(RetryRefusedError);
+		expect(restoreReplaced(refusal)).toBe(replacedB);
+	});
+
+	it("keeps a replay a send already took when a newer replay is armed, sent and settled", async () => {
+		const clock = fakeClock();
+		const budget = budgetOf(100);
+		const replacedA = new Error("A");
+		const ready = Promise.withResolvers<void>();
+		let written = 0;
+		budget.arm(replacedA);
+		const sendA = budget.gateFetch(async () => {
+			await ready.promise;
+			budget.checkpoint();
+			written++;
+			return new Response("A");
+		})("https://example.test/A");
+		budget.arm(new Error("B"));
+		await budget.gateFetch(async () => new Response("B"))("https://example.test/B");
+		clock.advance(200);
+		ready.resolve();
+
+		const refusal = await thrownBy(() => sendA);
+
+		expect(written).toBe(0);
+		expect(restoreReplaced(refusal)).toBe(replacedA);
+	});
+
+	it("keeps the arm through token and connection checkpoints, and refuses the delayed write", () => {
+		const clock = fakeClock();
+		const budget = budgetOf(100);
+		const replaced = new Error("503");
+		budget.arm(replaced);
+		budget.checkpoint();
+		budget.checkpoint();
+		clock.advance(200);
+		let writes = 0;
+
+		let refusal: unknown;
+		try {
+			budget.handoff();
+			writes++;
+		} catch (error) {
+			refusal = error;
+		}
+
+		expect(writes).toBe(0);
+		expect(restoreReplaced(refusal)).toBe(replaced);
+	});
+
+	it("refuses again when a wrapper inside the send catches a refusal and retries", async () => {
+		const clock = fakeClock();
+		const budget = budgetOf(100);
+		const model = buildModel({
+			id: "m",
+			name: "m",
+			api: "openai-completions",
+			provider: "wire",
+			baseUrl: "https://example.test",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1000,
+			maxTokens: 100,
+		});
+		let writes = 0;
+		const transport = transportFetch(
+			model,
+			async () => {
+				writes++;
+				return new Response("ok");
+			},
+			budget,
+		);
+		const wrapper = budget.gateFetch(async (input, init) => {
+			clock.advance(200);
+			try {
+				return await transport(input, init);
+			} catch {
+				return transport(input, init);
+			}
+		});
+		budget.arm(new Error("503"));
+
+		const refusal = await thrownBy(() => wrapper("https://example.test"));
+
+		expect(writes).toBe(0);
+		expect(refusal).toBeInstanceOf(RetryRefusedError);
+	});
+
+	it("refuses the replay's own send after a checkpoint refusal was swallowed before it", async () => {
+		const clock = fakeClock();
+		const budget = budgetOf(100);
+		const replaced = new Error("503");
+		budget.arm(replaced);
+		clock.advance(200);
+		let writes = 0;
+		// A token probe that reads every failure as "no token", then a retry of it.
+		for (let probe = 0; probe < 2; probe++) {
+			expect(await thrownBy(() => budget.checkpoint())).toBeInstanceOf(RetryRefusedError);
+		}
+
+		const refusal = await thrownBy(() =>
+			budget.gateFetch(async () => {
+				writes++;
+				return new Response("ok");
+			})("https://example.test"),
+		);
+
+		expect(writes).toBe(0);
+		expect(restoreReplaced(refusal)).toBe(replaced);
+	});
+
+	it("lets requests through once the send that took a refused arm has settled", async () => {
+		const clock = fakeClock();
+		const budget = budgetOf(100);
+		budget.arm(new Error("503"));
+		clock.advance(200);
+		await thrownBy(() => budget.gateFetch(async () => new Response("ok"))("https://example.test"));
+
+		// A cleanup request after the refused replay (a workflow stop) is not a replay.
+		expect(() => budget.checkpoint()).not.toThrow();
+	});
+
+	it("renames the replay being prepared when it is armed again, so disarming the earlier arm keeps the later", () => {
+		const clock = fakeClock();
+		const budget = budgetOf(100);
+		const earlier = budget.arm("A");
+		const later = budget.arm("B");
+		budget.disarm(earlier);
+		clock.advance(200);
+
+		expect(() => budget.handoff()).toThrow(RetryRefusedError);
+		expect(later.refused).toBe(true);
+	});
+
+	it("drops a disarmed replay, so requests after it pass", () => {
+		const clock = fakeClock();
+		const budget = budgetOf(100);
+		const arm = budget.arm("A");
+		budget.disarm(arm);
+		clock.advance(200);
+
+		expect(() => budget.checkpoint()).not.toThrow();
+		expect(() => budget.handoff()).not.toThrow();
+	});
+});
+
+describe("the failure a refused call answers with", () => {
+	it("is the failure the replay replaced, even after a layer turned the refusal into another error", () => {
+		const clock = fakeClock();
+		const budget = budgetOf(100);
+		const replaced = new Error("503 original overload");
+		budget.arm(replaced);
+		clock.advance(200);
+		expect(() => budget.checkpoint()).toThrow(RetryRefusedError);
+		const converted = new Error("Connection error.");
+
+		expect(restoreReplaced(converted, budget)).toBe(replaced);
+		expect(restoreReplaced(converted)).toBe(converted);
+	});
+
+	it("is the error itself when the budget refused nothing", () => {
+		const budget = budgetOf(100);
+		const error = new Error("400 bad request");
+
+		expect(restoreReplaced(error, budget)).toBe(error);
 	});
 });
 

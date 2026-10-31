@@ -1,4 +1,4 @@
-import type { FetchImpl } from "@oh-my-pi/pi-utils";
+import { type FetchImpl, findRetryRefusal } from "@oh-my-pi/pi-utils";
 import type { AntigravityModelWireProfile } from "../types";
 
 /**
@@ -86,6 +86,9 @@ export function ensureAntigravityVersion(fetcher: FetchImpl = fetch, signal?: Ab
 			return Promise.resolve();
 		}
 		antigravityVersionFetch = (async () => {
+			// A lookup the calling request's replay budget refused did not fail: it
+			// must not suppress every caller's lookups for the retry window.
+			let refused = false;
 			try {
 				const response = await fetcher(ANTIGRAVITY_VERSION_MANIFEST_URL, {
 					headers: { "Cache-Control": "no-cache", "User-Agent": "electron-builder" },
@@ -94,11 +97,12 @@ export function ensureAntigravityVersion(fetcher: FetchImpl = fetch, signal?: Ab
 				if (response.ok) {
 					discoveredAntigravityVersion = parseAntigravityManifestVersion(await response.text());
 				}
-			} catch {
+			} catch (error) {
 				// Silent: the pinned fallback remains valid when version discovery fails.
+				refused = findRetryRefusal(error) !== undefined;
 			} finally {
 				antigravityVersionFetch = null;
-				if (!discoveredAntigravityVersion) antigravityVersionFailedAt = Date.now();
+				if (!discoveredAntigravityVersion && !refused) antigravityVersionFailedAt = Date.now();
 			}
 		})();
 	}

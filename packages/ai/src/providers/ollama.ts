@@ -781,7 +781,7 @@ const streamOllamaOnce = (
 					clearStreamingPartialJson(block);
 				}
 			}
-			const result = await AIError.finalize(restoreReplaced(error), {
+			const result = await AIError.finalize(restoreReplaced(error, replayBudget), {
 				api: model.api,
 				provider: model.provider,
 				signal: options.signal,

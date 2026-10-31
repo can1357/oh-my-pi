@@ -34,8 +34,21 @@ const RETRY_AFTER_BODY_PATTERN = /retry-after\s*[:=]\s*([^\s,;]+)/i;
 // the obsolete RFC 850 form, ANSI C asctime). The delta pattern above stops at the
 // first space or comma, so it cannot capture a date; only the budget reading
 // (`longestRetryHint`) uses this, so the retry loop without a gate reads as before.
+// A candidate ends at a token boundary, so a prefix of a longer number is never
+// taken for a year or a time; `httpDateMs` then checks it field by field.
 const RETRY_AFTER_DATE_BODY_PATTERN =
-	/retry-after\s*[:=]\s*((?:[A-Za-z]{3,9},\s+\d{1,2}[ -][A-Za-z]{3}[ -]\d{2,4}\s+\d{2}:\d{2}:\d{2}|[A-Za-z]{3}\s+[A-Za-z]{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})(?:\s+(?:GMT|UTC))?)/i;
+	/retry-after\s*[:=]\s*((?:[A-Za-z]{3,9},\s+\d{1,2}[ -][A-Za-z]{3}[ -]\d{2,4}\s+\d{2}:\d{2}:\d{2}|[A-Za-z]{3}\s+[A-Za-z]{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})(?:\s+(?:GMT|UTC|[+-]\d{4}))?)(?![\w:])/i;
+// RFC 9110 section 5.6.7. The day name is optional before the comma forms: a
+// duplicate header joined by commas splits a date at its comma, and RFC 5322
+// (which a forwarded message may use) makes it optional too.
+const IMF_FIXDATE_PATTERN =
+	/^(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s*)?(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})\s+(\d{2}):(\d{2}):(\d{2})(?:\s+(GMT|UTC|[+-]\d{4}))?$/i;
+const RFC850_DATE_PATTERN =
+	/^(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s*)?(\d{1,2})-([A-Za-z]{3})-(\d{2}|\d{4})\s+(\d{2}):(\d{2}):(\d{2})(?:\s+(GMT|UTC))?$/i;
+const ASCTIME_DATE_PATTERN =
+	/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+([A-Za-z]{3})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})(?:\s+(GMT|UTC))?$/i;
+const HTTP_DATE_MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+const MS_PER_400_YEARS = 146_097 * 86_400_000;
 const RESET_MS_BODY_PATTERN = /x-ratelimit-reset-ms\s*[:=]\s*(\d+)/i;
 const RESET_BODY_PATTERN = /x-ratelimit-reset\s*[:=]\s*(\d+)/i;
 
@@ -182,13 +195,83 @@ function headerRetryHints(headers: Headers): number[] {
 
 /**
  * The instant an HTTP date names, in ms since the epoch, or `undefined` when
- * `value` is not a date. HTTP dates are GMT: the asctime form carries no zone
- * and would otherwise be read in the machine's local zone.
+ * `value` is not one of the three forms RFC 9110 section 5.6.7 defines. Every
+ * field is range-checked: the day must exist in its month, and second 60 is
+ * accepted only as a leap second at 23:59, read as the instant after 23:59:59.
+ * HTTP dates are GMT, so a date without a zone is read as GMT. The two-digit
+ * year of the RFC 850 form is the latest year with those digits that is not
+ * more than fifty years after `nowMs`.
  */
-function httpDateMs(value: string): number | undefined {
+function httpDateMs(value: string, nowMs = Date.now()): number | undefined {
 	const text = value.trim();
-	const ms = Date.parse(/(?:GMT|UTC|Z|[+-]\d{2}:?\d{2})$/i.test(text) ? text : `${text} GMT`);
-	return Number.isNaN(ms) ? undefined : ms;
+	let match = IMF_FIXDATE_PATTERN.exec(text);
+	if (match) {
+		return utcInstant(Number(match[3]), match[2]!, match[1]!, match[4]!, match[5]!, match[6]!, match[7]);
+	}
+	match = ASCTIME_DATE_PATTERN.exec(text);
+	if (match) {
+		return utcInstant(Number(match[6]), match[1]!, match[2]!, match[3]!, match[4]!, match[5]!, match[7]);
+	}
+	match = RFC850_DATE_PATTERN.exec(text);
+	if (!match) return undefined;
+	const [, day, month, year, hour, minute, second, zone] = match;
+	if (year!.length === 4) return utcInstant(Number(year), month!, day!, hour!, minute!, second!, zone);
+	// Not more than fifty years ahead: the latest of the three centuries that
+	// fits, chosen first and then checked, so a 29 February that only exists in
+	// another century is not moved there.
+	const monthIndex = HTTP_DATE_MONTHS.indexOf(month!.toLowerCase());
+	if (monthIndex < 0) return undefined;
+	const now = new Date(nowMs);
+	const limitMs = Date.UTC(
+		now.getUTCFullYear() + 50,
+		now.getUTCMonth(),
+		now.getUTCDate(),
+		now.getUTCHours(),
+		now.getUTCMinutes(),
+		now.getUTCSeconds(),
+		now.getUTCMilliseconds(),
+	);
+	const nearest = Math.floor(now.getUTCFullYear() / 100) * 100 + Number(year);
+	for (const candidate of [nearest + 100, nearest, nearest - 100]) {
+		if (Date.UTC(candidate, monthIndex, Number(day), Number(hour), Number(minute), Number(second)) > limitMs)
+			continue;
+		return utcInstant(candidate, month!, day!, hour!, minute!, second!, zone);
+	}
+	return undefined;
+}
+
+/** The UTC instant of a checked calendar date and time of day; `undefined` when a field is out of range. */
+function utcInstant(
+	year: number,
+	monthName: string,
+	dayText: string,
+	hourText: string,
+	minuteText: string,
+	secondText: string,
+	zone: string | undefined,
+): number | undefined {
+	const month = HTTP_DATE_MONTHS.indexOf(monthName.toLowerCase());
+	const day = Number(dayText);
+	const hour = Number(hourText);
+	const minute = Number(minuteText);
+	const second = Number(secondText);
+	if (month < 0 || year < 0 || day < 1 || day > daysInMonth(year, month)) return undefined;
+	if (hour > 23 || minute > 59 || second > (hour === 23 && minute === 59 ? 60 : 59)) return undefined;
+	let offsetMs = 0;
+	if (zone !== undefined && /^[+-]/.test(zone)) {
+		const offsetHours = Number(zone.slice(1, 3));
+		const offsetMinutes = Number(zone.slice(3, 5));
+		if (offsetHours > 23 || offsetMinutes > 59) return undefined;
+		offsetMs = (zone[0] === "-" ? -1 : 1) * (offsetHours * 60 + offsetMinutes) * 60_000;
+	}
+	// `Date.UTC` reads years 0-99 as 1900-1999; a 400-year shift is exact.
+	const shift = year < 100 ? MS_PER_400_YEARS : 0;
+	return Date.UTC(year + (shift ? 400 : 0), month, day, hour, minute, second) - shift - offsetMs;
+}
+
+function daysInMonth(year: number, month: number): number {
+	if (month === 1) return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28;
+	return [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month]!;
 }
 
 function nonNegative(value: number): number | undefined {

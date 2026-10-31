@@ -256,7 +256,7 @@ const streamAzureOpenAIResponsesOnce = (
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
-			const result = await AIError.finalize(restoreReplaced(error), {
+			const result = await AIError.finalize(restoreReplaced(error, replayBudget), {
 				api: model.api,
 				abortTracker,
 				rawRequestDump,

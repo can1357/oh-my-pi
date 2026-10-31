@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { isGitHubCopilotPolicyDenial } from "@oh-my-pi/pi-ai/error";
+import { formatMessage } from "@oh-my-pi/pi-ai/error/format";
 import { rewriteCopilotError } from "@oh-my-pi/pi-ai/utils/http-inspector";
+import { keepRetryAfterHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 
 function errorWithStatus(
 	status: number,
@@ -49,6 +51,44 @@ describe("rewriteCopilotError", () => {
 		expect(result).toContain("GitHub Copilot access denied (HTTP 403)");
 		expect(result).not.toContain("GitHub Copilot authentication failed");
 		expect(result).not.toContain("/login github-copilot");
+	});
+});
+
+// A rewrite replaces the formatted message; the server's wait must survive it,
+// because the caller reads the wait from the message.
+describe("formatMessage keeps the server's wait through a provider rewrite", () => {
+	const withWait = (status: number, message: string): Error =>
+		Object.assign(new Error(message), { status, headers: new Headers({ "retry-after": "30" }) });
+
+	it.each([
+		["github-copilot", 401, "401 Unauthorized", "GitHub Copilot authentication failed (HTTP 401)"],
+		["github-copilot", 403, "403 Forbidden", "GitHub Copilot access denied (HTTP 403)"],
+		["cline-pass", 400, "the user is not subscribed to required model plan", "requires a ClinePass subscription"],
+		[
+			"cline-pass",
+			400,
+			"organization accounts cannot use individual model inference subscriptions",
+			"unavailable for organization accounts",
+		],
+		["cline-pass", 400, "model not found", "removed this model from the roster"],
+	])("%s %i", async (provider, status, message, rewritten) => {
+		const formatted = await formatMessage(withWait(status, message), { provider });
+
+		expect(formatted).toContain(rewritten);
+		expect(formatted).toContain("retry-after-ms=30000");
+	});
+
+	it("still classifies the rewritten Copilot 403 as a policy denial", async () => {
+		const formatted = await formatMessage(withWait(403, "403 Forbidden"), { provider: "github-copilot" });
+		expect(isGitHubCopilotPolicyDenial("github-copilot", undefined, formatted)).toBe(true);
+	});
+
+	it("keeps the longest hint the formatted message carried, and adds none when it carried none", () => {
+		expect(keepRetryAfterHint("a retry-after-ms=1 b retry-after-ms=30000", "rewritten")).toBe(
+			"rewritten retry-after-ms=30000",
+		);
+		expect(keepRetryAfterHint("no wait named", "rewritten")).toBe("rewritten");
+		expect(keepRetryAfterHint("retry-after-ms=5", "rewritten retry-after-ms=7")).toBe("rewritten retry-after-ms=7");
 	});
 });
 

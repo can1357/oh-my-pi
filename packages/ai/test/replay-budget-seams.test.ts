@@ -168,6 +168,69 @@ describe("a token fetch between the decision and the inference request", () => {
 		expect(result.replayBudgetExhausted).toBeUndefined();
 	}, 15_000);
 
+	// The deadline passes before the metadata probe itself, while the gcloud ADC
+	// file is read: the probe's checkpoint refuses. The probe must not read that
+	// as "no metadata server": the call answers with the 503 its replay replaced.
+	it("answers with the original failure when the budget refuses the metadata probe itself", async () => {
+		const saved = { project: process.env.GOOGLE_CLOUD_PROJECT, location: process.env.GOOGLE_VERTEX_LOCATION };
+		process.env.GOOGLE_CLOUD_PROJECT = "seam-project";
+		process.env.GOOGLE_VERTEX_LOCATION = "global";
+		__resetVertexTokenCache();
+		const clock = skewedClock();
+		let adcReads = 0;
+		const bunFile = Bun.file.bind(Bun);
+		const readsAdcSlowly = (path: string | URL, options?: BlobPropertyBag): Bun.BunFile => {
+			const file = bunFile(path, options);
+			if (!String(path).endsWith("application_default_credentials.json")) return file;
+			return new Proxy(file, {
+				get(target, key) {
+					if (key !== "json") return Reflect.get(target, key, target);
+					return async () => {
+						// The replay's ADC lookup outlasts the budget.
+						if (++adcReads === 2) clock.lateBy(30_000);
+						return target.json();
+					};
+				},
+			});
+		};
+		vi.spyOn(Bun, "file").mockImplementation(readsAdcSlowly as typeof Bun.file);
+		let tokens = 0;
+		let inference = 0;
+		const server = route(async (_n, path) => {
+			if (path === "/token") {
+				tokens++;
+				return Response.json({ access_token: "vertex-test-token", expires_in: 3600 });
+			}
+			inference++;
+			__resetVertexTokenCache();
+			return failure(503, "original overload sentinel", { "retry-after-ms": "1" });
+		});
+		try {
+			const result = await stream(vertexModel, context, {
+				apiKey: "<authenticated>",
+				replayBudgetMs: 20_000,
+				fetch: (input, init) =>
+					fetch(server.url + (String(input).includes("metadata.google.internal") ? "/token" : "/inference"), init),
+			}).result();
+
+			expect(adcReads).toBe(2);
+			expect(tokens).toBe(1);
+			expect(inference).toBe(1);
+			expect(result.errorMessage).toContain("original overload sentinel");
+			expect(result.errorMessage).toContain("retry-after-ms=1");
+			expect(result.replayBudgetExhausted).toBe(true);
+		} finally {
+			server.stop();
+			for (const [key, value] of [
+				["GOOGLE_CLOUD_PROJECT", saved.project],
+				["GOOGLE_VERTEX_LOCATION", saved.location],
+			] as const) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
+	}, 15_000);
+
 	it("keeps a GitLab Duo auth replay checked past its token request and a slow payload hook", async () => {
 		const model = getGitLabDuoModels().find(candidate => candidate.id === "duo-chat-gpt-5-1");
 		if (!model) throw new Error("expected the GitLab Duo test model");
@@ -326,6 +389,8 @@ describe("a correction the server asked to delay by 30 s, against a 2 s budget",
 
 				expect(server.sends).toHaveLength(1);
 				expect(result.replayBudgetExhausted).toBe(true);
+				// The server's wait stays readable on the error, whatever rewrite the provider applies.
+				expect(result.errorMessage).toContain("retry-after-ms=30000");
 			} finally {
 				server.stop();
 			}

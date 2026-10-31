@@ -1090,7 +1090,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			stream.end();
 		} catch (caught) {
 			// A request the budget refused at handoff stands for the failure it replaced.
-			const error = restoreReplaced(caught);
+			const error = restoreReplaced(caught, replayBudget);
 			for (const block of output.content) {
 				if (block.type === "toolCall") clearStreamingPartialJson(block);
 			}

@@ -1199,7 +1199,7 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			stream.push({ type: "done", reason: output.stopReason as "length" | "stop" | "toolUse", message: output });
 			stream.end();
 		} catch (error) {
-			const result = await AIError.finalize(restoreReplaced(error), {
+			const result = await AIError.finalize(restoreReplaced(error, replayBudget), {
 				api: model.api,
 				signal: options?.signal,
 				rawRequestDump,

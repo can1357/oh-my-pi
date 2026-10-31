@@ -5,7 +5,7 @@ import {
 	rewriteClinePassError,
 	rewriteCopilotError,
 } from "../utils/http-inspector";
-import { formatErrorMessageWithRetryAfter } from "../utils/retry-after";
+import { formatErrorMessageWithRetryAfter, keepRetryAfterHint } from "../utils/retry-after";
 import { LLAMA_CPP_TOOL_CALL_PARSE_PATTERN } from "./flags";
 
 function rewriteOllamaToolCallJsonError(message: string): string {
@@ -31,11 +31,14 @@ export interface FormatMessageOptions {
  * Selection is driven by inputs, not a mode flag: a `rawRequestDump` routes
  * through {@link finalizeErrorMessage} (retry-after + raw dump + captured body),
  * otherwise the lightweight {@link formatErrorMessageWithRetryAfter} is used.
+ * A provider rewrite that replaces the message keeps the server's
+ * `retry-after-ms=` hint, so a caller can still read the wait it asked for.
  */
 export async function formatMessage(error: unknown, opts: FormatMessageOptions = {}): Promise<string> {
-	let message = opts.rawRequestDump
+	const formatted = opts.rawRequestDump
 		? await finalizeErrorMessage(error, opts.rawRequestDump, opts.capturedErrorResponse)
 		: formatErrorMessageWithRetryAfter(error);
+	let message = formatted;
 	if (opts.provider === "github-copilot") {
 		message = rewriteCopilotError(message, error, opts.provider);
 	}
@@ -45,5 +48,5 @@ export async function formatMessage(error: unknown, opts: FormatMessageOptions =
 	if (opts.provider === "ollama") {
 		message = rewriteOllamaToolCallJsonError(message);
 	}
-	return message;
+	return keepRetryAfterHint(formatted, message);
 }

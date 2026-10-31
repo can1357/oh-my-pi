@@ -2230,7 +2230,7 @@ async function handleCodexStreamFailure(
 	caught: unknown,
 ): Promise<AssistantMessage> {
 	// A request the budget refused at handoff stands for the failure it replaced.
-	const error = restoreReplaced(caught);
+	const error = restoreReplaced(caught, context.requestContext.replayBudget);
 	const { output } = context;
 	if (context.requestContext.websocketState && !shouldPreserveCodexWebSocketAppendState(context, error)) {
 		resetCodexWebSocketAppendState(context.requestContext.websocketState);

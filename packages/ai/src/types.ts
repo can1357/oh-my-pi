@@ -561,7 +561,9 @@ export interface StreamOptions {
 	 * stream open — after every preparation hook, signature and diagnostic
 	 * observer. A refused replay is never handed off: the provider returns the
 	 * failure it would have replaced, with
-	 * {@link AssistantMessage.replayBudgetExhausted} set. A refusal latches for
+	 * {@link AssistantMessage.replayBudgetExhausted} set — also when the refusal
+	 * lands on a token fetch or credential probe on the replay's way to the
+	 * wire, which never reads it as "no credentials". A refusal latches for
 	 * the rest of the call. A failure the provider would not have replayed is
 	 * never marked. What the transport does after the handoff — a custom `fetch`
 	 * that queues the request, a socket that buffers it — is outside the
@@ -570,9 +572,11 @@ export interface StreamOptions {
 	 * A server's wait is never shortened to fit, because retrying sooner than
 	 * the server asked is a guaranteed failure: a requested wait that would end
 	 * past the budget ends the call at once rather than sleeping into it, and
-	 * the server's hint stays on the returned error for the caller. The wait is
-	 * the longest one the server named, across every retry header and every
-	 * hint in the error body, whatever shorter or malformed hints sit beside it.
+	 * the server's hint stays on the returned error for the caller, through any
+	 * provider rewrite of the message. The wait is the longest one the server
+	 * named, across every retry header and every hint in the error body,
+	 * whatever shorter or malformed hints sit beside it; an HTTP date is read
+	 * by RFC 9110's three forms, a two-digit year as at most fifty years ahead.
 	 *
 	 * Requests inside one attempt that is already on the wire (a token fetch, a
 	 * streaming append) are not replays and are not checked. The request in

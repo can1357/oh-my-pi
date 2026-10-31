@@ -6,7 +6,7 @@ import { type RetryWaitHook, waitForRetry } from "./retry-wait";
 
 /**
  * A replay admitted by a {@link ReplayBudget} whose own request has not yet
- * been handed to the transport. `refused` is set when the deadline passed first.
+ * been sent. `refused` is set when the deadline refused it first.
  */
 export interface ReplayArm {
 	readonly replaced: unknown;
@@ -39,21 +39,32 @@ interface ReplayBudgetCarrier {
  *    transport.
  *
  * An admission arms the replay, and the arm stays held until the replay's own
- * request has been sent: the provider's send gate ({@link gateFetch}) releases
- * it when that call settles, and an explicit transport site (the HTTP/2 stream
- * open, the WebSocket frame write) consumes it with {@link handoff}. Until
- * then every request that passes a checkpoint is checked against the deadline
- * — the provider's send gate, the innermost transport fetch
- * ({@link checkpoint}), a connection being opened — and none of them releases
- * the arm. So a token fetch or a library wrapper that runs between the
- * decision and the send neither spends the replay's check nor stands in for
- * it: the request that reaches the transport last is still checked.
+ * request has been sent. While a replay is being prepared its arm is pending:
+ * arming it again (the rung's decision, then the send path that names the
+ * failure once more) renames that one pending arm. The send that carries the
+ * replay takes the pending arm and holds it under its own identity: the
+ * provider's send gate ({@link gateFetch}) takes it when its call begins and
+ * releases exactly that arm when the call settles, and an explicit transport
+ * site (the HTTP/2 stream open, the WebSocket frame write) takes and releases
+ * it in one step with {@link handoff}. So a replay armed after a send began is
+ * never released by that send, and an arm a send already holds cannot be
+ * displaced by a newer one.
+ *
+ * While any arm is pending or held, every request that passes a checkpoint is
+ * checked against the deadline — the provider's send gate, the innermost
+ * transport fetch ({@link checkpoint}), a connection being opened — and none of
+ * them releases an arm. So a token fetch or a library wrapper that runs between
+ * the decision and the send neither spends the replay's check nor stands in
+ * for it: the request that reaches the transport last is still checked.
  *
  * A refusal throws a `RetryRefusedError` carrying the failure the replay would
  * have replaced ({@link arm}); the layer that admitted the replay answers with
- * that failure ({@link restoreReplaced}). What the transport does with a
- * request after the handoff — a caller-supplied `fetch` that queues it, a
- * socket that buffers it — is outside the budget's reach.
+ * that failure ({@link restoreReplaced}). A refused arm is not released by the
+ * check that refused it: a wrapper that catches the refusal and checks again
+ * is refused again, and a refused pending arm refuses the replay's own send
+ * when that send takes it. What the transport does with a request after the
+ * handoff — a caller-supplied `fetch` that queues it, a socket that buffers it
+ * — is outside the budget's reach.
  *
  * Requests made while no replay is armed — the call's first attempt, and
  * requests a replay makes after its own request was sent (a streaming append,
@@ -64,7 +75,11 @@ export class ReplayBudget {
 	readonly #deadline: number;
 	readonly #gated = new WeakSet<FetchImpl>();
 	#refused = false;
-	#arm: ReplayArm | undefined;
+	/** The replay being prepared: armed, and taken by no send yet. */
+	#pending: ReplayArm | undefined;
+	/** Arms a send has taken, each released when that send settles. */
+	readonly #held = new Set<ReplayArm>();
+	#refusedReplaced: unknown;
 
 	constructor(budgetMs: number) {
 		this.#deadline = performance.now() + budgetMs;
@@ -104,7 +119,7 @@ export class ReplayBudget {
 	 */
 	readonly admits = (delayMs: number): boolean => {
 		if (!this.#refused && performance.now() + delayMs < this.#deadline) {
-			this.#arm ??= { replaced: undefined, refused: false };
+			this.#pending ??= { replaced: undefined, refused: false };
 			return true;
 		}
 		this.#refused = true;
@@ -112,68 +127,108 @@ export class ReplayBudget {
 	};
 
 	/**
-	 * Names the failure the armed replay replaces. A refusal before the
-	 * replay's request is sent throws a `RetryRefusedError` carrying it.
+	 * Names the failure the replay being prepared replaces: this becomes the
+	 * pending arm, in place of any earlier pending arm. An arm a send has
+	 * already taken is not affected. A refusal before the replay's request is
+	 * sent throws a `RetryRefusedError` carrying `replaced`.
 	 */
 	arm(replaced: unknown): ReplayArm {
 		const arm: ReplayArm = { replaced, refused: false };
-		this.#arm = arm;
+		this.#pending = arm;
 		return arm;
 	}
 
-	/** Drops `arm` when it is still held. */
+	/** Drops `arm` when it is still the pending arm, the one no send has taken. */
 	disarm(arm: ReplayArm): void {
-		if (this.#arm === arm) this.#arm = undefined;
+		if (this.#pending === arm) this.#pending = undefined;
 	}
 
 	/**
-	 * Checks an armed replay against the deadline without releasing it. For a
-	 * request that may not be the replay's own (a token fetch, an inner library
-	 * wrapper, the innermost transport fetch) and before opening a connection:
-	 * refused, it throws; passed, the replay's own send is still checked later.
+	 * Checks every pending or held arm against the deadline without taking or
+	 * releasing any. For a request that may not be the replay's own (a token
+	 * fetch, an inner library wrapper, the innermost transport fetch) and before
+	 * opening a connection: refused, it throws; passed, the replay's own send is
+	 * still checked later.
 	 */
 	readonly checkpoint = (): void => {
-		const arm = this.#arm;
-		if (arm === undefined || (!this.#refused && performance.now() < this.#deadline)) return;
-		this.#arm = undefined;
-		this.#refuseArm(arm);
+		this.#check(undefined);
 	};
 
 	/**
 	 * Called by an explicit transport site immediately before it sends the
-	 * replay's own request (an HTTP/2 stream open, a WebSocket frame): checks
-	 * the armed replay and consumes it, so the attempt's later requests pass.
+	 * replay's own request (an HTTP/2 stream open, a WebSocket frame): takes the
+	 * pending arm, checks it, and releases it, so the attempt's later requests
+	 * pass. Refused, it throws and the arm is spent with the refused request.
 	 */
 	readonly handoff = (): void => {
-		const arm = this.#arm;
-		if (arm === undefined) return;
-		this.#arm = undefined;
-		if (!this.#refused && performance.now() < this.#deadline) return;
-		this.#refuseArm(arm);
+		const own = this.#take();
+		try {
+			this.#check(own);
+		} finally {
+			if (own) this.#held.delete(own);
+		}
 	};
 
-	#refuseArm(arm: ReplayArm): never {
+	/** The pending arm, now held by the send that takes it; `undefined` when none is pending. */
+	#take(): ReplayArm | undefined {
+		const arm = this.#pending;
+		if (arm === undefined) return undefined;
+		this.#pending = undefined;
+		this.#held.add(arm);
+		return arm;
+	}
+
+	/**
+	 * Refuses when an arm is pending or held and the deadline has passed (or a
+	 * replay was already refused). Every pending and held arm is marked refused
+	 * and none is released: a refused pending arm refuses every later check
+	 * until the send that carries its replay takes it, and that send is refused
+	 * too. The refusal names the failure `own` replaces — the arm the checking
+	 * send took — or else the pending arm's, or else the newest held arm's.
+	 */
+	#check(own: ReplayArm | undefined): void {
+		const pending = this.#pending;
+		if (pending === undefined && this.#held.size === 0) return;
+		if (!this.#refused && performance.now() < this.#deadline) return;
 		this.#refused = true;
-		arm.refused = true;
-		throw new RetryRefusedError(arm.replaced);
+		if (pending) pending.refused = true;
+		let newest: ReplayArm | undefined;
+		for (const arm of this.#held) {
+			arm.refused = true;
+			newest = arm;
+		}
+		const replaced = (own ?? pending ?? newest)?.replaced;
+		if (this.#refusedReplaced === undefined) this.#refusedReplaced = replaced;
+		throw new RetryRefusedError(replaced);
+	}
+
+	/**
+	 * The failure the first refused replay would have replaced, when it named
+	 * one. A layer that turned the refusal into another error (a credential
+	 * probe that read it as "no credentials") still answers with this
+	 * ({@link restoreReplaced}).
+	 */
+	get refusedReplaced(): unknown {
+		return this.#refusedReplaced;
 	}
 
 	/**
 	 * The provider's send gate around `base`, the fetch its own request goes
-	 * through: a {@link checkpoint} immediately before each call, and once the
-	 * call settles the replay armed when it began is released — that request
-	 * was the replay's own. A fetch this budget already gates is returned as it
-	 * is.
+	 * through. Each call takes the pending arm — the replay its request carries
+	 * — and is checked like a {@link checkpoint}; the arm stays held while the
+	 * call runs, so a check inside it (an inner wrapper's, the transport's)
+	 * still sees it. When the call settles, that arm, and only that arm, is
+	 * released. A fetch this budget already gates is returned as it is.
 	 */
 	gateFetch(base: FetchImpl): FetchImpl {
 		if (this.#gated.has(base)) return base;
 		const gated: FetchImpl = async (input, init) => {
-			this.checkpoint();
-			const armed = this.#arm;
+			const own = this.#take();
 			try {
+				this.#check(own);
 				return await base(input, init);
 			} finally {
-				if (armed !== undefined && this.#arm === armed) this.#arm = undefined;
+				if (own) this.#held.delete(own);
 			}
 		};
 		if (base.preconnect) gated.preconnect = base.preconnect;
@@ -297,14 +352,17 @@ export function gateOptionalFetch(
 }
 
 /**
- * The failure a refused replay would have replaced, when `error` is (or is
- * caused by) a handoff refusal that named one; the refusal itself when it named
- * none; otherwise `error` unchanged.
+ * The failure a call answers with once one of its replays was refused: the
+ * failure a refusal in `error` (or in its causes) named, or the refusal itself
+ * when it named none. When `error` carries no refusal but `budget` refused a
+ * replay that named a failure, that failure: a layer between the refusal and
+ * this answer turned it into `error` (a credential probe that read it as "no
+ * credentials"), and no request could follow it. Otherwise `error` unchanged.
  */
-export function restoreReplaced(error: unknown): unknown {
+export function restoreReplaced(error: unknown, budget?: ReplayBudget): unknown {
 	const refusal = findRetryRefusal(error);
-	if (!refusal) return error;
-	return refusal.replaced ?? refusal;
+	if (refusal) return refusal.replaced ?? refusal;
+	return budget?.refusedReplaced ?? error;
 }
 
 /**

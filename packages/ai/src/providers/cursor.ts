@@ -2005,7 +2005,7 @@ function streamCursorWithWireMode(
 		} catch (caughtError) {
 			if (relay) clearTimeout(relay.quietTimer);
 			// A request the budget refused at handoff stands for the failure it replaced.
-			let error = restoreReplaced(caughtError);
+			let error = restoreReplaced(caughtError, replayBudget);
 			const h2Unavailable = transportMode === "http2" && isHttp2Unavailable(error);
 			if (
 				h2Unavailable &&

@@ -3749,7 +3749,7 @@ const streamAnthropicOnce = (
 				if (block.type === "toolCall") clearStreamingPartialJson(block);
 			}
 			const retained = settleFallbackHandoff();
-			const result = await AIError.finalize(restoreReplaced(error), {
+			const result = await AIError.finalize(restoreReplaced(error, replayBudget), {
 				api: sourceModel.api,
 				provider: sourceModel.provider,
 				abortTracker: activeAbortTracker,

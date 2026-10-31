@@ -1032,6 +1032,22 @@ interface HintScenario {
 /** An HTTP date 30 s ahead of now: inside the transport's own cap, so only the caller's budget stops it. */
 const dateIn30s = (): string => new Date(Date.now() + 30_000).toUTCString();
 
+/**
+ * An RFC 850 date with a two-digit year 34 years ahead: inside RFC 9110's
+ * fifty-year window, so it names a wait decades long. Read with JavaScript's
+ * fixed two-digit-year cutoff it would be in the past.
+ */
+const rfc850DecadesAhead = (): string => {
+	const date = new Date(Date.now());
+	date.setUTCFullYear(date.getUTCFullYear() + 34);
+	const day = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][date.getUTCDay()];
+	const month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][
+		date.getUTCMonth()
+	];
+	const pad = (value: number): string => String(value).padStart(2, "0");
+	return `${day}, ${pad(date.getUTCDate())}-${month}-${pad(date.getUTCFullYear() % 100)} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())} GMT`;
+};
+
 // Every wait the server names counts, however many there are and whatever
 // malformed or shorter hint sits beside them: a retry sent inside a window the
 // server said is closed is a guaranteed failure.
@@ -1061,6 +1077,28 @@ describe.each<HintScenario>([
 
 				expect(route.requests()).toBe(1);
 				expect(result.replayBudgetExhausted).toBe(true);
+			} finally {
+				route.stop();
+			}
+		},
+	);
+});
+
+// RFC 9110 reads a two-digit year as at most fifty years ahead, so this date is
+// decades away; read with JavaScript's fixed cutoff it would be in the past and
+// retried at once. No lane may send it again. Whether the call is marked follows
+// the provider's own policy: a lane whose own cap declines a wait that long gives
+// up by itself, before the budget is asked.
+describe("a retryable failure naming an RFC 850 date whose two-digit year is decades ahead", () => {
+	it.each(HTTP_LANES.map(lane => [lane.name, lane] as const))(
+		"%s does not send the request again under a 2 s budget",
+		async (_name, lane) => {
+			const text = `retry-after: ${rfc850DecadesAhead()}; Please retry in 1ms`;
+			const route = scripted(n => (n === 1 ? failure(503, {}, text) : failure(400)));
+			try {
+				await lane.call(route.url, { replayBudgetMs: 2_000 });
+
+				expect(route.requests()).toBe(1);
 			} finally {
 				route.stop();
 			}

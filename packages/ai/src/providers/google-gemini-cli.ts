@@ -1161,7 +1161,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
-			const result = await AIError.finalize(restoreReplaced(error), {
+			const result = await AIError.finalize(restoreReplaced(error, replayBudget), {
 				api: model.api,
 				signal: options?.signal,
 				rawRequestDump,
