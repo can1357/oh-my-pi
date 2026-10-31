@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The `seance` guidance in the task tool and the `archive` docs now say that a question about an earlier session is answered by the `seance` agent, and that reading the session's raw JSONL belongs to narrow mechanical checks only, so a consult is no longer duplicated by transcript reads and re-run checks ([#17523](https://github.com/can1357/oh-my-pi/pull/17523) by [@iacore](https://github.com/iacore))
+
 ## [18.14.1] - 2026-10-31
 
 ### Added

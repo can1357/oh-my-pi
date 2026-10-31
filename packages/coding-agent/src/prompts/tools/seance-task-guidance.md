@@ -1,2 +1,4 @@
 Historical consults: use `agent: "seance"` with `sourceSession` (id/path); optional `model` overrides the saved source model. The source stays unchanged.
-If the saved model is absent/unavailable, set `model` explicitly.
+If the saved model is absent/unavailable, set `model` explicitly. `/seance` is the editor command for the same consult; the model reaches it only through this agent.
+When the user points at an earlier session — "read the past session", "what did we decide about X", "is that fixed yet" — the consult IS the read: the fork already contains the source transcript and its tool results, so reading the `.jsonl` here, grepping it, or re-running its checks duplicates what this agent does once, and what it copies stays in this context for every later turn.
+Ask the consult what was already established; a fact that changed after the session (an open PR's state, a device's current config) is a live check, kept narrow by knowing what the transcript already settled.
