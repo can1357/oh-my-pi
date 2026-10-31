@@ -50,6 +50,7 @@ function createContext(
 		promptCacheKey?: string;
 		launchWarning?: string;
 		ternMoveError?: Error;
+		ternFocusError?: Error;
 	} = {},
 ) {
 	const sessionFile = options.persisted === false ? undefined : (options.sessionFile ?? sourceSessionFile);
@@ -79,6 +80,9 @@ function createContext(
 	const moveTernBlockToTab = vi.fn(async (_block: number): Promise<void> => {
 		if (options.ternMoveError) throw options.ternMoveError;
 	});
+	const focusTernBlock = vi.fn(async (_block: number): Promise<void> => {
+		if (options.ternFocusError) throw options.ternFocusError;
+	});
 	const showError = vi.fn();
 	const showHookConfirm = vi.fn(async () => options.confirmed ?? false);
 	const ctx = {
@@ -107,6 +111,7 @@ function createContext(
 			options.activeProfile === null ? undefined : (options.activeProfile ?? "active-profile"),
 		argv: () => options.argv ?? ["--model", "provider/model", "prompt text"],
 		moveTernBlockToTab,
+		focusTernBlock,
 	});
 	return {
 		controller,
@@ -116,6 +121,7 @@ function createContext(
 		flush,
 		launchTerminal,
 		moveTernBlockToTab,
+		focusTernBlock,
 		showError,
 		showHookConfirm,
 	};
@@ -464,34 +470,49 @@ describe("/fork inside Tern", () => {
 
 	it("forks into a new tab while a turn is running, leaving the running session in place", async () => {
 		const tern = await startTern(() => ({ ok: { block: 9 } }));
-		const { controller, ctx, session, moveTernBlockToTab } = createContext({ streaming: true });
+		const { controller, ctx, session, moveTernBlockToTab, focusTernBlock } = createContext({ streaming: true });
 		await controller.handleForkCommand();
 		expect(tern.forks).toEqual([{ id: 1, op: { block: 5 } }]);
 		expect(session.flushToDisk).toHaveBeenCalledTimes(1);
 		expect(session.fork).not.toHaveBeenCalled();
 		expect(moveTernBlockToTab).toHaveBeenCalledWith(9);
+		expect(focusTernBlock).toHaveBeenCalledWith(9);
 		expect(ctx.showWarning).not.toHaveBeenCalled();
 		expect(ctx.present).toHaveBeenCalledTimes(1);
 	});
 
 	it("keeps the fork and says it stayed a pane when Tern cannot move it into a tab", async () => {
 		await startTern(() => ({ ok: { block: 9 } }));
-		const { controller, ctx, session, moveTernBlockToTab } = createContext({
+		const { controller, ctx, session, moveTernBlockToTab, focusTernBlock } = createContext({
 			ternMoveError: new Error("tern move BLOCK tab new-tab exited with code 1"),
 		});
 		await controller.handleForkCommand();
 		expect(moveTernBlockToTab).toHaveBeenCalledWith(9);
+		expect(focusTernBlock).not.toHaveBeenCalled();
 		expect(session.fork).not.toHaveBeenCalled();
+		expect(ctx.present).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps the fork visible when Tern cannot select the tab it moved it into", async () => {
+		await startTern(() => ({ ok: { block: 9 } }));
+		const { controller, ctx, moveTernBlockToTab, focusTernBlock } = createContext({
+			ternFocusError: new Error("tern focus 9 exited with code 1"),
+		});
+		await controller.handleForkCommand();
+		expect(moveTernBlockToTab).toHaveBeenCalledWith(9);
+		expect(focusTernBlock).toHaveBeenCalledWith(9);
+		expect(ctx.showError).not.toHaveBeenCalled();
 		expect(ctx.present).toHaveBeenCalledTimes(1);
 	});
 
 	it("refuses the in-place fallback mid-turn when Tern declines the fork", async () => {
 		const tern = await startTern(() => ({ error: { kind: "not_agent", message: "no session file" } }));
-		const { controller, ctx, session, moveTernBlockToTab } = createContext({ streaming: true });
+		const { controller, ctx, session, moveTernBlockToTab, focusTernBlock } = createContext({ streaming: true });
 		await controller.handleForkCommand();
 		expect(tern.forks).toHaveLength(1);
 		expect(session.fork).not.toHaveBeenCalled();
 		expect(moveTernBlockToTab).not.toHaveBeenCalled();
+		expect(focusTernBlock).not.toHaveBeenCalled();
 		expect(ctx.showWarning).toHaveBeenCalledTimes(1);
 	});
 });

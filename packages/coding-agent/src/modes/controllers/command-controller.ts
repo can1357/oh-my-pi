@@ -87,7 +87,7 @@ import {
 import { formatProviderName } from "@oh-my-pi/pi-tui/chrome/format";
 import { formatCompactQuota } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { resolveTernPane, type TernPane } from "../../tools/browser/tern/kind";
-import { moveTernBlockToNewTab } from "../../tools/browser/tern/move";
+import { focusTernBlock, moveTernBlockToNewTab } from "../../tools/browser/tern/move";
 import { TernError, type TernErrorKind, TernSocketClient } from "../../tools/browser/tern/wire";
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
@@ -148,6 +148,8 @@ interface ForkTerminalDependencies {
 	argv: () => string[];
 	/** Move a block Tern just opened into a tab of its own. */
 	moveTernBlockToTab: (block: number) => Promise<void>;
+	/** Bring that tab to the front, so the fork is what the user sees. */
+	focusTernBlock: (block: number) => Promise<void>;
 }
 
 /** What asking Tern for a fork yielded: the block it opened, a reason to fork in place, or a report already made. */
@@ -214,6 +216,7 @@ export class CommandController {
 			getActiveProfile,
 			argv: () => process.argv.slice(2),
 			moveTernBlockToTab: moveTernBlockToNewTab,
+			focusTernBlock,
 			...forkTerminalDependencies,
 		};
 	}
@@ -1610,10 +1613,10 @@ export class CommandController {
 
 	/**
 	 * `/fork` inside a Tern pane: ask Tern to run `omp --fork` of this session, then move the block
-	 * it opened into a tab of its own, which keeps the original session. False means fork in place
-	 * instead: outside Tern, an unsaved session, a Tern without `fork`, or Tern refusing it. Once
-	 * the request is out, an unconfirmed one is reported rather than retried in place, since Tern
-	 * may still open the pane.
+	 * it opened into a tab of its own and select that tab, which keeps the original session. False
+	 * means fork in place instead: outside Tern, an unsaved session, a Tern without `fork`, or Tern
+	 * refusing it. Once the request is out, an unconfirmed one is reported rather than retried in
+	 * place, since Tern may still open the pane.
 	 */
 	async #forkIntoTernTab(): Promise<boolean> {
 		const tern = resolveTernPane();
@@ -1630,6 +1633,17 @@ export class CommandController {
 				block: attempt.block,
 				error,
 			});
+		}
+		if (moved) {
+			// A `new-tab` move leaves the original tab selected: without this the fork opens behind it.
+			try {
+				await this.#forkTerminalDependencies.focusTernBlock(attempt.block);
+			} catch (error) {
+				logger.warn("Tern moved the /fork block into a new tab but could not select that tab", {
+					block: attempt.block,
+					error,
+				});
+			}
 		}
 		const note = this.ctx.session.isStreaming ? " · the running response continues here, not in the fork" : "";
 		this.ctx.present([

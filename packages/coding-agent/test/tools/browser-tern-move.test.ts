@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { moveTernBlockToNewTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/move";
+import { focusTernBlock, moveTernBlockToNewTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/move";
 
 describe("moveTernBlockToNewTab", () => {
 	let directory: string | undefined;
@@ -36,5 +36,16 @@ describe("moveTernBlockToNewTab", () => {
 		await expect(moveTernBlockToNewTab(7, { executable })).rejects.toThrow(
 			/exited with code 2: no tab number new-tab/,
 		);
+	});
+
+	it("selects the tab by focusing the block it holds", async () => {
+		const { executable, recordedArgv } = await stub(0);
+		await focusTernBlock(4_294_967_295, { executable });
+		expect(await recordedArgv()).toEqual(["focus", "4294967295"]);
+	});
+
+	it("reports a refused focus with the CLI's stderr", async () => {
+		const { executable } = await stub(3);
+		await expect(focusTernBlock(7, { executable })).rejects.toThrow(/exited with code 3: no tab number new-tab/);
 	});
 });
