@@ -675,4 +675,121 @@ describe("CollabSocket send backpressure", () => {
 			socket.close();
 		}
 	});
+
+	it("keeps live traffic flowing beside a joining peer's snapshot, after what was queued before it", async () => {
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const key = await importRoomKey(generateRoomKey());
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/lanes", role: "host", key });
+		function* chunks(): Generator<CollabFrame> {
+			for (let i = 0; i < 20; i++) {
+				yield {
+					t: "snapshot-chunk",
+					entries: [
+						{
+							type: "message",
+							id: `e${i}`,
+							parentId: null,
+							timestamp: "2026-11-01T00:00:00Z",
+							// Over the high-water mark: one chunk per drain, as on a slow uplink.
+							message: { role: "user", content: "x".repeat(70 * 1024), timestamp: 0 },
+						},
+					],
+					final: i === 19,
+				};
+			}
+		}
+		try {
+			socket.connect();
+			const ws = BackpressuredWebSocket.instances[0]!;
+			ws.open();
+			socket.send({ t: "error", message: "before" });
+			socket.sendBatch(chunks(), 7);
+			for (let i = 0; i < 20; i++) socket.send({ t: "error", message: `live ${i}` });
+			socket.send({ t: "bye", reason: "after snapshot" }, 7);
+			await waitUntil(() => {
+				ws.bufferedAmount = 0;
+				return ws.sent.length === 42;
+			}, "the queues never drained");
+			const received: Array<{ peer: number; frame: CollabFrame }> = [];
+			for (const bytes of ws.sent) {
+				const envelope = unpackEnvelope(bytes)!;
+				received.push({ peer: envelope.peerId, frame: await open(key, envelope.payload) });
+			}
+			const label = ({ frame }: { frame: CollabFrame }) =>
+				frame.t === "error" ? frame.message : frame.t === "snapshot-chunk" ? frame.entries[0]!.id : frame.t;
+			// What was queued before the peer joined reaches it before its welcome, as on one FIFO queue.
+			expect(received[0]).toEqual({ peer: 0, frame: { t: "error", message: "before" } });
+			const lane = received.filter(({ peer }) => peer === 7).map(label);
+			expect(lane).toEqual([...Array.from({ length: 20 }, (_, i) => `e${i}`), "bye"]);
+			expect(received.filter(({ peer }) => peer === 0).map(label)).toEqual([
+				"before",
+				...Array.from({ length: 20 }, (_, i) => `live ${i}`),
+			]);
+			// Live traffic took turns with the snapshot instead of waiting for all of it.
+			const order = received.map(label);
+			expect(order.indexOf("live 0")).toBeLessThan(order.indexOf("e1"));
+			expect(order.indexOf("live 18")).toBeLessThan(order.indexOf("e19"));
+		} finally {
+			socket.close();
+		}
+	});
+
+	it("drops a host's shared backlog over its cap and reports it instead of ending the room", async () => {
+		vi.spyOn(crypto.subtle, "encrypt").mockResolvedValue(new Uint8Array([1, 2, 3, 4]).buffer);
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/shed", role: "host", key: {} as CryptoKey });
+		let overflows = 0;
+		const closes: string[] = [];
+		socket.onBacklogOverflow = () => overflows++;
+		socket.onClose = reason => closes.push(reason);
+		try {
+			socket.connect();
+			const ws = BackpressuredWebSocket.instances[0]!;
+			ws.open();
+			for (let i = 0; i < 300; i++) socket.send({ t: "error", message: `live ${i}` });
+			await Promise.resolve();
+			expect(overflows).toBe(1);
+			expect(closes).toEqual([]);
+			expect(socket.isOpen).toBe(true);
+			// The 256 it held and the frame that overflowed it are gone; the 43 after still go.
+			await waitUntil(() => {
+				ws.bufferedAmount = 0;
+				return ws.sent.length === 43;
+			}, "frames after the overflow never went");
+			expect(closes).toEqual([]);
+		} finally {
+			socket.close();
+		}
+	});
+
+	it("drops only the joining peer whose lane outgrows its cap", async () => {
+		vi.spyOn(crypto.subtle, "encrypt").mockResolvedValue(new Uint8Array([1, 2, 3, 4]).buffer);
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/lane-cap", role: "host", key: {} as CryptoKey });
+		const overflowed: number[] = [];
+		socket.onPeerOverflow = peer => overflowed.push(peer);
+		socket.onBacklogOverflow = () => overflowed.push(0);
+		const closes: string[] = [];
+		socket.onClose = reason => closes.push(reason);
+		try {
+			socket.connect();
+			BackpressuredWebSocket.instances[0]!.open();
+			socket.sendBatch([{ t: "error", message: "welcome" }], 7);
+			for (let i = 0; i < 300; i++) socket.send({ t: "ui-request-end", reqId: i }, 7);
+			socket.send({ t: "error", message: "live" });
+			await Promise.resolve();
+			expect(overflowed).toEqual([7]);
+			expect(socket.hasLane(7)).toBe(false);
+			expect(closes).toEqual([]);
+			expect(socket.isOpen).toBe(true);
+		} finally {
+			socket.close();
+		}
+	});
 });

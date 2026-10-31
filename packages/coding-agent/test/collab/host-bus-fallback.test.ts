@@ -67,7 +67,8 @@ describe("collab host bus fallback", () => {
 		const welcomed = Promise.withResolvers<void>();
 		const mirrored: Array<{ id?: string; status?: string }> = [];
 		guestSocket.onFrame = frame => {
-			if (frame.t === "welcome") welcomed.resolve();
+			// The catch-up's `agents` ends the welcome train; live traffic reaches the guest from then on.
+			if (frame.t === "agents") welcomed.resolve();
 			if (frame.t === "bus" && frame.channel === TASK_SUBAGENT_LIFECYCLE_CHANNEL) {
 				mirrored.push(frame.data as { id?: string; status?: string });
 			}

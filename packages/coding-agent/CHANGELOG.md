@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a busy collab host ending its room with "collab send backlog exceeded its limit" while a guest loaded a large session: a joining guest's welcome now streams on its own lane, serialized chunk by chunk as the relay drains, while live frames skip that guest and reach it as a catch-up (the entries it missed, then fresh state) once its snapshot is in; a backlog the relay still can't drain is dropped and its guests welcomed again instead of ending the room
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

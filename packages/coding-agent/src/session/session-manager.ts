@@ -3517,9 +3517,10 @@ export class SessionManager {
 
 	/**
 	 * The live header and entries, for collab replication. Nothing is copied:
-	 * the host mutates entries in place on rewrite paths, so callers must not
-	 * mutate what this returns and must serialize it synchronously, before any
-	 * such rewrite can run.
+	 * the host appends to this array and mutates entries in place on rewrite
+	 * paths, so callers must not mutate what this returns, must copy the array
+	 * at once to fix which entries it holds, and get an entry's newer form when
+	 * they serialize it after a rewrite ran.
 	 */
 	snapshotForReplication(): { header: SessionHeader; entries: readonly SessionEntry[] } {
 		return { header: this.#header, entries: this.#entries };

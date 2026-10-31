@@ -900,7 +900,8 @@ describe("collab host registry lifecycle (#6099)", () => {
 		const seen: string[] = [];
 		const after = Promise.withResolvers<void>();
 		guest.onFrame = frame => {
-			if (frame.t === "welcome") welcomed.resolve();
+			// The catch-up's `agents` ends the welcome train; live traffic reaches the guest from then on.
+			if (frame.t === "agents") welcomed.resolve();
 			if (frame.t === "event" && frame.event.type === "notice") {
 				seen.push(frame.event.message);
 				if (frame.event.message === "after publication") after.resolve();

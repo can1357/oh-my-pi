@@ -1,9 +1,10 @@
 /**
  * Contract: an auto-started collab host mirrors nothing while no guest is
- * joined (events, entries and state refreshes are all skipped), the first
- * frame after a guest's welcome reaches it, and the state dedupe baseline
- * restarts from the welcome so a change made while the room was empty is not
- * mistaken for one guests already have.
+ * joined (events, entries and state refreshes are all skipped). A joining
+ * guest's live traffic is held off while its welcome streams — the entries it
+ * missed follow its last chunk, with fresh state — and reaches it from then on.
+ * The state dedupe baseline restarts when that catch-up ends, so a change made
+ * while the room was empty is not mistaken for one guests already have.
  */
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
@@ -121,22 +122,32 @@ function frameType(frame: CollabFrame | string): string | undefined {
 }
 
 describe("collab host with no joined guest", () => {
-	it("mirrors no events or entries until a guest joins, then delivers the first frame after its welcome", async () => {
+	it("mirrors nothing until a guest joins, catches it up after its welcome, then mirrors live", async () => {
 		const fixture = makeFixture();
 		const transport = await startHost(fixture);
 		const send = spyOn(transport, "send").mockImplementation(() => {});
-		spyOn(transport, "sendBatch").mockImplementation(() => {});
+		let train: Iterable<CollabFrame | string> | undefined;
+		spyOn(transport, "sendBatch").mockImplementation(frames => {
+			train = frames;
+		});
 
 		fixture.emit({ type: "agent_start" });
 		fixture.append(textEntry("before-join"));
 		expect(send.mock.calls).toEqual([]);
 
 		transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "guest" }, 1);
+		// Its welcome is still streaming: nothing queues behind it.
 		fixture.emit({ type: "agent_start" });
-		fixture.append(textEntry("after-join"));
+		fixture.append(textEntry("during-welcome"));
+		expect(send.mock.calls).toEqual([]);
 
+		// The transport drains the train: the skipped entry follows the last chunk, then fresh state.
+		if (!train) throw new Error("no welcome train queued");
+		expect([...train].map(frameType)).toEqual(["welcome", "snapshot-chunk", "entry", "state", "agents"]);
+
+		fixture.emit({ type: "agent_start" });
+		fixture.append(textEntry("after-welcome"));
 		const types = send.mock.calls.map(([frame]) => frameType(frame));
-		expect(types[0]).toBe("welcome");
 		expect(types).toContain("event");
 		expect(types).toContain("entry");
 	});
@@ -145,11 +156,21 @@ describe("collab host with no joined guest", () => {
 		const fixture = makeFixture();
 		const transport = await startHost(fixture);
 		const send = spyOn(transport, "send").mockImplementation(() => {});
-		spyOn(transport, "sendBatch").mockImplementation(() => {});
+		const trains: Iterable<CollabFrame | string>[] = [];
+		spyOn(transport, "sendBatch").mockImplementation(frames => {
+			trains.push(frames);
+		});
 		vi.useFakeTimers();
 		const stateFrames = () => send.mock.calls.filter(([frame]) => frameType(frame) === "state");
+		const join = (peer: number) => {
+			transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "first" }, peer);
+			const train = trains.at(-1);
+			if (!train) throw new Error("no welcome train queued");
+			// Drained by the transport; its catch-up state is the guest's own, not a broadcast.
+			for (const _ of train);
+		};
 
-		transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "first" }, 1);
+		join(1);
 		fixture.isStreaming = true;
 		fixture.emit({ type: "agent_start" });
 		vi.advanceTimersByTime(500);
@@ -164,7 +185,7 @@ describe("collab host with no joined guest", () => {
 
 		// The same guest rejoins; its welcome carries the idle state, and going busy
 		// again before the join's state refresh fires must still reach it.
-		transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "first" }, 2);
+		join(2);
 		fixture.isStreaming = true;
 		fixture.emit({ type: "agent_start" });
 		vi.advanceTimersByTime(500);

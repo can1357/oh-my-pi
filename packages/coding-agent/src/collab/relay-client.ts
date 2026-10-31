@@ -86,6 +86,29 @@ interface PendingSend {
 	head?: CollabFrame | string;
 	/** Supersession key from {@link CollabSocket.sendLatest}; a newer send under it cancels this one while queued. */
 	key?: string;
+	/** The queue holding it: the shared one, or the lane of the peer it targets. */
+	queue: SendQueue;
+	/** Admission order across every queue. */
+	seq: number;
+}
+
+/**
+ * One FIFO of outbound work. The shared queue carries broadcasts and targeted
+ * frames for peers without a lane. A lane is one joining peer's own queue: its
+ * welcome batch and every targeted frame for that peer after it. Lanes drain in
+ * turn with the shared queue, so a long snapshot to one guest neither holds the
+ * live traffic everyone else is owed nor lets that traffic pile up behind it
+ * until the caps end the room. A lane's head still waits for every shared frame
+ * admitted before it: the joiner's welcome reaches it after the frames its
+ * snapshot already covers, so none lands twice, and a frame that joined the
+ * lane later never overtakes a broadcast queued before it.
+ */
+interface SendQueue {
+	/** 0 for the shared queue, else the lane's peer. */
+	readonly peer: number;
+	items: PendingSend[];
+	/** Bytes of queued regular sends plus the batch frame in flight, against the caps. */
+	bytes: number;
 }
 
 export interface CollabSocketOptions {
@@ -102,6 +125,15 @@ export class CollabSocket {
 	onControl?: (msg: RelayControlMessage) => void;
 	/** Fires on each close; `willReconnect` distinguishes retries from terminal shutdown. */
 	onClose?: (reason: string, willReconnect: boolean) => void;
+	/**
+	 * Host only: the shared queue outgrew its caps, and everything in it was
+	 * dropped. Every guest it served missed frames and needs a fresh welcome; the
+	 * room stays up. Without a handler the overflow ends the socket, as it always
+	 * does for a guest, whose own backlog is its unsent prompts.
+	 */
+	onBacklogOverflow?: () => void;
+	/** Host only: `peer`'s lane outgrew its caps and was dropped; that peer needs a fresh welcome. */
+	onPeerOverflow?: (peer: number) => void;
 
 	readonly #opts: CollabSocketOptions;
 	#ws: WebSocket | null = null;
@@ -135,11 +167,15 @@ export class CollabSocket {
 	#sendChain: Promise<void> = Promise.resolve();
 	/** Serializes open() so frames are delivered in arrival order. */
 	#recvChain: Promise<void> = Promise.resolve();
-	#pendingSends: PendingSend[] = [];
-	#pendingSendBytes = 0;
+	#shared: SendQueue = { peer: 0, items: [], bytes: 0 };
+	/** Joining peers' lanes, by peer; a lane closes once it is empty. */
+	#lanes = new Map<number, SendQueue>();
+	#seq = 0;
+	/** Round-robin cursor over the queues with work. */
+	#turn = 0;
 	/**
 	 * Peers the relay has retired. Sole authority for the queue invariant: **every
-	 * entry in {@link #pendingSends} with a non-zero `targetPeer` is work for a
+	 * entry in {@link #shared} or a lane with a non-zero `targetPeer` is work for a
 	 * peer absent from here.**
 	 *
 	 * Entered synchronously in {@link #handleMessage}, before any owner callback
@@ -202,22 +238,21 @@ export class CollabSocket {
 	}
 
 	/**
-	 * Queue a broadcast frame that supersedes every frame still waiting under the
-	 * same `key`, for cumulative snapshots where only the newest matters — the
-	 * host's streaming `message_update` carries the whole message so far. Bounds
-	 * the queue by live keys instead of by emitted frames, so a stream that
-	 * outpaces the uplink does not hit the admission cap and end the room (#16956).
+	 * Queue a frame that supersedes every frame still waiting under the same
+	 * `key`, for cumulative snapshots where only the newest matters — the host's
+	 * streaming `message_update` carries the whole message so far. Bounds the
+	 * queue by live keys instead of by emitted frames, so a stream that outpaces
+	 * the uplink does not hit the admission cap (#16956).
 	 *
-	 * The queue head is never superseded: it may already be sealing or waiting on
+	 * A queue head is never superseded: it may already be sealing or waiting on
 	 * backpressure, and cancelling it on every newer frame would starve the guest
 	 * of updates for as long as the stream outpaces the drain. Survivors keep
 	 * emission order: the newest frame is appended, never moved ahead of frames
 	 * queued before it.
 	 */
-	sendLatest(key: string, frame: CollabFrame | EncodedFrame): void {
-		const head = this.#pendingSends[0];
-		this.#discardWhere(pending => pending !== head && pending.key === key);
-		this.#sendOne(frame, 0, key);
+	sendLatest(key: string, frame: CollabFrame | EncodedFrame, targetPeer = 0): void {
+		this.#discardWhere(pending => pending.key === key && pending !== pending.queue.items[0]);
+		this.#sendOne(frame, targetPeer, key);
 	}
 
 	#sendOne(frame: CollabFrame | EncodedFrame, targetPeer: number, key?: string): void {
@@ -240,19 +275,26 @@ export class CollabSocket {
 	}
 
 	/**
-	 * Keeps a snapshot contiguous with its welcome and ahead of subsequent live
-	 * traffic. {@link EncodedFrame} items are sealed as-is, as in {@link send}.
+	 * Queue a lazily pulled train of frames. Targeted at a peer, it opens that
+	 * peer's lane: the train stays contiguous, every later targeted frame for the
+	 * peer follows it, and broadcasts keep flowing beside it. A peer still
+	 * loading its welcome ignores the broadcasts that pass it; the owner sends it
+	 * what it missed at the end of the train. {@link EncodedFrame} items are
+	 * sealed as-is, as in {@link send}.
 	 */
 	sendBatch(frames: Iterable<CollabFrame | EncodedFrame>, targetPeer = 0): void {
 		if (this.#closed) return;
 		this.#enqueueSend(frames[Symbol.iterator](), targetPeer, 0);
 	}
 
+	/** Whether `peer` has a lane: a batch, or targeted frames behind one, not yet written. */
+	hasLane(peer: number): boolean {
+		return this.#lanes.has(peer);
+	}
+
 	/**
-	 * Discard everything still queued for a peer that left. The queue is shared
-	 * and strictly FIFO, so a half-delivered snapshot would otherwise hold its
-	 * head and stall every later frame — including the next guest's welcome —
-	 * behind a retransmission the relay drops on arrival.
+	 * Discard everything still queued for a peer that left. A half-delivered
+	 * snapshot would otherwise keep pulling chunks the relay drops on arrival.
 	 *
 	 * @returns how many queued entries were discarded.
 	 */
@@ -261,23 +303,32 @@ export class CollabSocket {
 		return this.#discardWhere(pending => pending.targetPeer === peerId);
 	}
 
-	/** Single eviction path: cancels an in-flight head cleanly and refunds its accounting. */
+	/** Single eviction path: cancels an in-flight head cleanly, refunds its accounting, closes emptied lanes. */
 	#discardWhere(match: (pending: PendingSend) => boolean): number {
-		if (this.#pendingSends.length === 0) return 0;
+		let discarded = this.#discardIn(this.#shared, match);
+		for (const lane of this.#lanes.values()) {
+			discarded += this.#discardIn(lane, match);
+			if (lane.items.length === 0) this.#lanes.delete(lane.peer);
+		}
+		return discarded;
+	}
+
+	#discardIn(queue: SendQueue, match: (pending: PendingSend) => boolean): number {
+		if (queue.items.length === 0) return 0;
 		const keep: PendingSend[] = [];
-		for (const pending of this.#pendingSends) {
+		for (const pending of queue.items) {
 			if (!match(pending)) {
 				keep.push(pending);
 				continue;
 			}
 			pending.cancelled = true;
-			this.#pendingSendBytes -= pending.bytes;
+			queue.bytes -= pending.bytes;
 			pending.onPrepared?.();
 			pending.onPrepared = undefined;
 			pending.frames.return?.(undefined);
 		}
-		const discarded = this.#pendingSends.length - keep.length;
-		this.#pendingSends = keep;
+		const discarded = queue.items.length - keep.length;
+		queue.items = keep;
 		return discarded;
 	}
 
@@ -287,10 +338,10 @@ export class CollabSocket {
 	 * out peer ids from 1 again. No `peer-left` announces any of it, so every id
 	 * this socket knew is meaningless and may already have been reissued.
 	 *
-	 * Targeted work is therefore undeliverable and must go. A batch is the
-	 * pressing case: it is one queue entry whose accounting covers only the chunk
-	 * in flight, so nothing bounds how long it keeps iterating at a retired id
-	 * while every new guest's welcome waits behind it. Retirement records go too —
+	 * Targeted work is therefore undeliverable and must go: every lane, and the
+	 * targeted frames in the shared queue. A batch is the pressing case: it is one
+	 * queue entry whose accounting covers only the chunk in flight, so nothing
+	 * bounds how long it keeps iterating at a retired id. Retirement records go too —
 	 * keeping them would permanently refuse a reissued id, and so does the owner's
 	 * view of who is in the room — see {@link onRoomRecreated}, because an id is
 	 * also what the owner keys write permission off. Broadcast work is addressed to
@@ -322,18 +373,85 @@ export class CollabSocket {
 			onPrepared?.();
 			return;
 		}
-		if (this.#overCapacity(bytes)) {
+		const queue = this.#queueFor(targetPeer, eager);
+		if (queue.items.length >= MAX_PENDING_SENDS || queue.bytes + bytes > MAX_PENDING_SEND_BYTES) {
 			onPrepared?.();
-			this.#failOverload();
+			this.#overflow(queue);
 			return;
 		}
-		this.#pendingSends.push({ frames, targetPeer, bytes, cancelled: false, eager, onPrepared, key });
-		this.#pendingSendBytes += bytes;
+		queue.items.push({
+			frames,
+			targetPeer,
+			bytes,
+			cancelled: false,
+			eager,
+			onPrepared,
+			key,
+			queue,
+			seq: ++this.#seq,
+		});
+		queue.bytes += bytes;
 		this.#pumpSends();
 	}
 
-	#overCapacity(bytes: number): boolean {
-		return this.#pendingSends.length >= MAX_PENDING_SENDS || this.#pendingSendBytes + bytes > MAX_PENDING_SEND_BYTES;
+	/** A targeted frame joins its peer's lane while one is open; a targeted batch opens one. */
+	#queueFor(targetPeer: number, eager: boolean): SendQueue {
+		if (targetPeer === 0) return this.#shared;
+		const lane = this.#lanes.get(targetPeer);
+		if (lane) return lane;
+		if (eager) return this.#shared;
+		const opened: SendQueue = { peer: targetPeer, items: [], bytes: 0 };
+		this.#lanes.set(targetPeer, opened);
+		return opened;
+	}
+
+	/**
+	 * A queue outgrew its caps. A host drops that queue's work and asks its owner
+	 * to resync whoever it was for — every guest for the shared queue, one peer
+	 * for a lane — so one slow guest or a burst of live traffic never ends the
+	 * room. A guest, or a host without the handler, fails as before.
+	 */
+	#overflow(queue: SendQueue): void {
+		const shared = queue === this.#shared;
+		if (this.#opts.role !== "host" || !(shared ? this.onBacklogOverflow : this.onPeerOverflow)) {
+			this.#failOverload();
+			return;
+		}
+		const peer = queue.peer;
+		const dropped = shared ? this.#discardWhere(pending => pending.queue === queue) : this.dropPeer(peer);
+		logger.warn("collab: send backlog over its limit; dropped it to resync", { peer, dropped });
+		const room = this.#roomGeneration;
+		// Deferred: the overflow is found mid-send, inside the owner's own call.
+		queueMicrotask(() => {
+			if (this.#closed || room !== this.#roomGeneration) return;
+			if (shared) this.onBacklogOverflow?.();
+			else this.onPeerOverflow?.(peer);
+		});
+	}
+
+	/** The next queue to send from, in turn among the shared queue and every lane whose head is due. */
+	#nextQueue(): SendQueue | undefined {
+		const ready: SendQueue[] = [];
+		if (this.#shared.items.length > 0) ready.push(this.#shared);
+		const sharedHead = this.#shared.items[0]?.seq ?? Number.POSITIVE_INFINITY;
+		for (const lane of this.#lanes.values()) {
+			const head = lane.items[0];
+			if (head && sharedHead > head.seq) ready.push(lane);
+		}
+		if (ready.length === 0) return undefined;
+		this.#turn = (this.#turn + 1) % ready.length;
+		return ready[this.#turn];
+	}
+
+	/** Retire a finished head from its queue; an emptied lane closes. */
+	#finishHead(pending: PendingSend): void {
+		const queue = pending.queue;
+		const at = queue.items.indexOf(pending);
+		// Already discarded (and refunded) while its write was settling.
+		if (at < 0) return;
+		queue.items.splice(at, 1);
+		queue.bytes -= pending.bytes;
+		if (queue.items.length === 0 && this.#lanes.get(queue.peer) === queue) this.#lanes.delete(queue.peer);
 	}
 
 	#failOverload(): void {
@@ -356,13 +474,13 @@ export class CollabSocket {
 			.finally(() => {
 				if (generation !== this.#sendGeneration) return;
 				this.#sending = false;
-				if (this.#pendingSends.length > 0) this.#pumpSends();
+				if (this.#shared.items.length > 0 || this.#lanes.size > 0) this.#pumpSends();
 			});
 	}
 
 	async #sendPending(generation: number): Promise<void> {
 		while (!this.#closed && generation === this.#sendGeneration) {
-			const pending = this.#pendingSends[0];
+			const pending = this.#nextQueue()?.items[0];
 			if (!pending) return;
 			// Batch iterators stay lazy under backpressure. Regular sends are prepared
 			// eagerly so flush() can settle before close() hands their envelope to the
@@ -375,19 +493,20 @@ export class CollabSocket {
 			if (value === undefined) {
 				const next = pending.frames.next();
 				if (next.done) {
-					this.#pendingSends.shift();
-					this.#pendingSendBytes -= pending.bytes;
+					this.#finishHead(pending);
 					continue;
 				}
 				value = next.value;
 			}
 			const serialized = typeof value === "string" ? value : JSON.stringify(value);
 			const bytes = pending.bytes === 0 ? Buffer.byteLength(serialized) : 0;
-			if (this.#pendingSendBytes + bytes > MAX_PENDING_SEND_BYTES) {
-				this.#failOverload();
-				return;
+			const queue = pending.queue;
+			if (queue.bytes + bytes > MAX_PENDING_SEND_BYTES) {
+				// A batch frame its queue can't hold: the same overflow as an admission.
+				this.#overflow(queue);
+				continue;
 			}
-			this.#pendingSendBytes += bytes;
+			queue.bytes += bytes;
 			try {
 				const sealed = await sealSerialized(this.#opts.key, serialized);
 				if (this.#closed || generation !== this.#sendGeneration) return;
@@ -401,24 +520,19 @@ export class CollabSocket {
 				if (outcome === "sent") {
 					pending.preparedEnvelope = undefined;
 					if (pending.eager) {
-						this.#pendingSends.shift();
-						this.#pendingSendBytes -= pending.bytes;
+						this.#finishHead(pending);
 					} else {
 						// Pull the successor now: an exhausted batch must leave the head
 						// immediately, or backpressure would hold every later send behind
 						// a batch with nothing left to write. One chunk is held at most.
 						const next = pending.frames.next();
-						if (next.done) {
-							this.#pendingSends.shift();
-							this.#pendingSendBytes -= pending.bytes;
-						} else {
-							pending.head = next.value;
-						}
+						if (next.done) this.#finishHead(pending);
+						else pending.head = next.value;
 					}
 				}
 			} finally {
 				// Every terminal path that flips the generation also zeroes the counter.
-				if (generation === this.#sendGeneration) this.#pendingSendBytes -= bytes;
+				if (generation === this.#sendGeneration) queue.bytes -= bytes;
 			}
 		}
 	}
@@ -471,13 +585,16 @@ export class CollabSocket {
 	/** Revoke unsent frames, including sealing work, before admitting a final frame. */
 	discardPendingSends(): void {
 		this.#sendGeneration++;
-		for (const pending of this.#pendingSends) {
-			pending.cancelled = true;
-			pending.onPrepared?.();
-			pending.frames.return?.(undefined);
+		for (const queue of [this.#shared, ...this.#lanes.values()]) {
+			for (const pending of queue.items) {
+				pending.cancelled = true;
+				pending.onPrepared?.();
+				pending.frames.return?.(undefined);
+			}
 		}
-		this.#pendingSends.length = 0;
-		this.#pendingSendBytes = 0;
+		this.#shared.items = [];
+		this.#shared.bytes = 0;
+		this.#lanes.clear();
 		this.#sending = false;
 		this.#sendChain = Promise.resolve();
 		this.#clearBackpressureDrain();
@@ -514,8 +631,8 @@ export class CollabSocket {
 		this.#retryMissingRoom = false;
 		const ws = this.#ws;
 		this.#ws = null;
-		const prepared = this.#pendingSends.flatMap(pending =>
-			pending.preparedEnvelope ? [pending.preparedEnvelope] : [],
+		const prepared = [this.#shared, ...this.#lanes.values()].flatMap(queue =>
+			queue.items.flatMap(pending => (pending.preparedEnvelope ? [pending.preparedEnvelope] : [])),
 		);
 		this.#discardPendingSends();
 		if (ws) {

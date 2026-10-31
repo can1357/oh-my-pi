@@ -102,7 +102,8 @@ it("supersedes queued updates of a streaming message instead of ending the room"
 	const events: AgentSessionEvent[] = [];
 	const welcomed = Promise.withResolvers<void>();
 	guest.onFrame = (frame: CollabFrame) => {
-		if (frame.t === "welcome") welcomed.resolve();
+		// The catch-up's `agents` ends the welcome train; live traffic reaches the guest from then on.
+		if (frame.t === "agents") welcomed.resolve();
 		if (frame.t === "event") events.push(frame.event as AgentSessionEvent);
 	};
 	guest.onOpen = () => guest.send({ t: "hello", proto: COLLAB_PROTO, name: "watcher" });
