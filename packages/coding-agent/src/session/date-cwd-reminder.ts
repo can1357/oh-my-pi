@@ -28,10 +28,17 @@ export const DATE_CWD_REMINDER_CUSTOM_TYPE = "date-cwd-reminder";
 
 /** One reminder as sent: prepended to a user turn, or a developer turn placed after a turn. */
 export interface DateCwdReminderPlacement {
+	/** Key of the first turn of the conversation the placement belongs to, as that conversation began. */
+	conversation: string;
 	/** Key of the user turn the reminder prefixes, or of the turn the developer turn follows. */
 	turn: string;
 	reminder: string;
 	placement: "prefix" | "control";
+	/**
+	 * On the conversation's own first turn: a digest of that turn, which finds the conversation again
+	 * when a context hook re-creates its first turn under a new key on every request.
+	 */
+	firstTurn?: string;
 }
 
 /** Where an injector records the reminders it places, and reads back those an earlier injector placed. */
@@ -44,9 +51,16 @@ export interface DateCwdReminderJournal {
 function placementOfEntry(entry: SessionEntry): DateCwdReminderPlacement | undefined {
 	if (entry.type !== "custom" || entry.customType !== DATE_CWD_REMINDER_CUSTOM_TYPE) return undefined;
 	const data = entry.data;
-	if (!isRecord(data) || typeof data.turn !== "string" || typeof data.reminder !== "string") return undefined;
-	if (data.placement !== "prefix" && data.placement !== "control") return undefined;
-	return { turn: data.turn, reminder: data.reminder, placement: data.placement };
+	if (!isRecord(data)) return undefined;
+	const { conversation, turn, reminder, placement, firstTurn } = data;
+	if (typeof conversation !== "string" || typeof turn !== "string" || typeof reminder !== "string") return undefined;
+	if (placement !== "prefix" && placement !== "control") return undefined;
+	return { conversation, turn, reminder, placement, ...(typeof firstTurn === "string" ? { firstTurn } : {}) };
+}
+
+/** Identifies a first turn by what it carries, not by its key: a re-created copy digests the same. */
+function firstTurnDigest(message: UserMessage): string {
+	return Bun.hash(JSON.stringify([message.attribution ?? "", message.content])).toString(16);
 }
 
 /** A journal kept as custom entries on the session's branch: fork, branch switch and resume read the right set. */
@@ -107,6 +121,8 @@ interface AnchoredControl {
 
 /** Everything the injector remembers about one conversation. */
 interface RootState {
+	/** The journal's name for this conversation: its first turn's key when it began. */
+	conversation: string;
 	/** The reminder the conversation was last sent. */
 	reminder: string | undefined;
 	injections: Map<string, Injection>;
@@ -265,6 +281,10 @@ export class DateCwdReminderInjector {
 	 * first message can build it afresh, stamped `Date.now()`, for every request.
 	 * The conversation goes on under the new key with the reminder that turn was
 	 * first sent with, so a changed reminder is appended instead of rewriting it.
+	 *
+	 * Any other new conversation journals every reminder it starts with under its
+	 * own name, the inherited ones under the keys they hold now: a compaction can
+	 * renumber the turns that share a key.
 	 */
 	#newRootState(
 		keys: string[],
@@ -272,8 +292,8 @@ export class DateCwdReminderInjector {
 		root: string,
 		firstUser: UserMessage,
 		reminder: string,
+		predecessor: { root: string; state: RootState } | undefined,
 	): RootState {
-		const predecessor = this.#predecessorOf(keys);
 		const previous = predecessor?.state;
 		const previousFirst = predecessor?.state.injections.get(predecessor.root);
 		const recreated =
@@ -282,6 +302,7 @@ export class DateCwdReminderInjector {
 			previousFirst.source.attribution === firstUser.attribution &&
 			Bun.deepEquals(previousFirst.source.content, firstUser.content);
 		const state: RootState = {
+			conversation: recreated ? predecessor.state.conversation : root,
 			reminder: recreated ? predecessor.state.reminder : reminder,
 			injections: new Map(previous?.injections),
 			controls: previous ? [...previous.controls] : [],
@@ -306,9 +327,25 @@ export class DateCwdReminderInjector {
 			state.reminder = this.#carriedReminder(state, keys) ?? previousFirst.reminder;
 			// One conversation under a new first-turn key: the old key is never sent again.
 			this.#states.delete(predecessor.root);
-		} else if (!state.injections.has(root) && !messageStartsWithReminder(firstUser, reminder)) {
+			return state;
+		}
+		if (!state.injections.has(root) && !messageStartsWithReminder(firstUser, reminder)) {
 			state.injections.set(root, { reminder, source: firstUser, injected: injectReminder(firstUser, reminder) });
-			this.#journal?.record({ turn: root, reminder, placement: "prefix" });
+		}
+		if (this.#journal) {
+			for (const [turn, injection] of state.injections) {
+				this.#journal.record({
+					conversation: root,
+					turn,
+					reminder: injection.reminder,
+					placement: "prefix",
+					...(turn === root ? { firstTurn: firstTurnDigest(firstUser) } : {}),
+				});
+			}
+			for (const { anchor, message } of state.controls) {
+				if (typeof message.content !== "string") continue;
+				this.#journal.record({ conversation: root, turn: anchor, reminder: message.content, placement: "control" });
+			}
 		}
 		return state;
 	}
@@ -316,32 +353,53 @@ export class DateCwdReminderInjector {
 	/**
 	 * State for a conversation an earlier injector served, rebuilt from its journal:
 	 * each turn gets back the reminder it was sent with, and the turns up to the
-	 * last reply count as sent, so a changed reminder is appended after them.
-	 * Undefined when the journal holds no reminder for the first turn: a new
-	 * conversation, or a transcript from before reminders were journaled.
+	 * last reply count as sent, so a changed reminder is appended after them. The
+	 * conversation is the one journaled under this first turn's key, else the
+	 * latest whose first turn digests the same (a context hook re-created it).
+	 * Undefined when there is none: a new conversation, or a transcript from
+	 * before reminders were journaled.
 	 */
 	#restoredRootState(
 		messages: Message[],
 		keys: string[],
 		counts: Map<string, number>,
 		root: string,
+		firstUser: UserMessage,
 	): RootState | undefined {
 		const placements = this.#journal?.load();
-		if (!placements?.some(placement => placement.turn === root && placement.placement === "prefix")) {
-			return undefined;
+		if (!placements || placements.length === 0) return undefined;
+		let conversation: string | undefined = root;
+		if (!placements.some(placement => placement.conversation === root && placement.turn === root)) {
+			const digest = firstTurnDigest(firstUser);
+			conversation = placements.findLast(placement => placement.firstTurn === digest)?.conversation;
 		}
+		if (conversation === undefined) return undefined;
 		const indexOf = new Map(keys.map((key, index) => [key, index]));
-		const state: RootState = { reminder: undefined, injections: new Map(), controls: [], seen: new Set(), counts };
-		for (const { turn, reminder, placement } of placements) {
+		const state: RootState = {
+			conversation,
+			reminder: undefined,
+			injections: new Map(),
+			controls: [],
+			seen: new Set(),
+			counts,
+		};
+		for (const placement of placements) {
+			if (placement.conversation !== conversation) continue;
+			// The conversation's first turn may be back under a new key; it is this request's first turn.
+			const turn = placement.turn === conversation ? root : placement.turn;
 			const index = indexOf.get(turn);
 			if (index === undefined) continue;
-			if (placement === "control") {
-				state.controls.push({ anchor: turn, message: createReminderControl(reminder) });
+			if (placement.placement === "control") {
+				state.controls.push({ anchor: turn, message: createReminderControl(placement.reminder) });
 				continue;
 			}
 			const source = messages[index]!;
-			if (source.role === "user")
-				state.injections.set(turn, { reminder, source, injected: injectReminder(source, reminder) });
+			if (source.role !== "user") continue;
+			state.injections.set(turn, {
+				reminder: placement.reminder,
+				source,
+				injected: injectReminder(source, placement.reminder),
+			});
 		}
 		const lastReply = messages.findLastIndex(message => message.role === "assistant");
 		for (let index = 0; index <= lastReply; index++) state.seen.add(keys[index]!);
@@ -388,9 +446,13 @@ export class DateCwdReminderInjector {
 			this.#followOrdinals(state, counts, false);
 			state.reminder = this.#carriedReminder(state, keys) ?? state.reminder;
 		} else {
+			// A conversation this injector serves already shares turns with this one (a compaction, a
+			// re-created first turn): continue it in memory. Only a conversation it has never seen
+			// reads the journal.
+			const predecessor = this.#predecessorOf(keys);
 			state =
-				this.#restoredRootState(messages, keys, counts, root) ??
-				this.#newRootState(keys, counts, root, firstUser, reminder);
+				(predecessor ? undefined : this.#restoredRootState(messages, keys, counts, root, firstUser)) ??
+				this.#newRootState(keys, counts, root, firstUser, reminder, predecessor);
 		}
 		this.#activate(root, state);
 		if (state.reminder !== reminder) {
@@ -412,6 +474,7 @@ export class DateCwdReminderInjector {
 					break;
 				}
 			}
+			const turnIndex = newUser ?? messages.length - 1;
 			if (newUser !== undefined) {
 				const message = messages[newUser] as UserMessage;
 				state.injections.set(keys[newUser]!, {
@@ -419,11 +482,16 @@ export class DateCwdReminderInjector {
 					source: message,
 					injected: injectReminder(message, reminder),
 				});
-				this.#journal?.record({ turn: keys[newUser]!, reminder, placement: "prefix" });
 			} else {
-				state.controls.push({ anchor: keys.at(-1)!, message: createReminderControl(reminder) });
-				this.#journal?.record({ turn: keys.at(-1)!, reminder, placement: "control" });
+				state.controls.push({ anchor: keys[turnIndex]!, message: createReminderControl(reminder) });
 			}
+			this.#journal?.record({
+				conversation: state.conversation,
+				// The journal names the first turn after its conversation: a hook may re-create it under a new key.
+				turn: turnIndex === firstIndex ? state.conversation : keys[turnIndex]!,
+				reminder,
+				placement: newUser === undefined ? "control" : "prefix",
+			});
 			state.reminder = reminder;
 		}
 

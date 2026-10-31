@@ -643,13 +643,17 @@ describe("date-cwd-reminder", () => {
 				context.messages.map(message => JSON.stringify([message.role, message.content]));
 			const createJournal = () => {
 				const placements: DateCwdReminderPlacement[] = [];
+				let loads = 0;
 				const journal: DateCwdReminderJournal = {
-					load: () => placements,
+					load: () => {
+						loads++;
+						return placements;
+					},
 					record: placement => {
 						placements.push(placement);
 					},
 				};
-				return { placements, journal };
+				return { placements, journal, loads: () => loads };
 			};
 
 			it("sends an earlier injector's turns with the reminders they were sent with", () => {
@@ -701,8 +705,19 @@ describe("date-cwd-reminder", () => {
 				);
 
 				expect(placements).toEqual([
-					{ turn: "user:1:", reminder: renderDateCwdReminder("2026-08-14", "/work"), placement: "prefix" },
-					{ turn: "user:3:", reminder: renderDateCwdReminder("2026-08-15", "/work"), placement: "prefix" },
+					{
+						conversation: "user:1:",
+						turn: "user:1:",
+						reminder: renderDateCwdReminder("2026-08-14", "/work"),
+						placement: "prefix",
+						firstTurn: expect.any(String),
+					},
+					{
+						conversation: "user:1:",
+						turn: "user:3:",
+						reminder: renderDateCwdReminder("2026-08-15", "/work"),
+						placement: "prefix",
+					},
 				]);
 			});
 
@@ -718,6 +733,119 @@ describe("date-cwd-reminder", () => {
 				);
 
 				expect(out.messages[0]?.content).toBe(`${renderDateCwdReminder("2026-08-17", "/work")}\n\nold`);
+			});
+
+			it("resends a retained turn with its own reminder after a compaction renumbered it", () => {
+				const { journal } = createJournal();
+				const earlier = new DateCwdReminderInjector(journal);
+				const user: Message = { role: "user", content: "ok", timestamp: 1 };
+				earlier.transform({ systemPrompt: ["system"], messages: [user] }, "2026-08-14", "/work");
+				// Two same-millisecond turns: the second is `user:1:#1` and takes the new date.
+				earlier.transform(
+					{ systemPrompt: ["system"], messages: structuredClone([user, createAssistantMessage("a"), user]) },
+					"2026-08-15",
+					"/work",
+				);
+				// The compaction drops the first, so the survivor is `user:1:` now.
+				const summary: Message = { role: "user", content: "summary", timestamp: 3 };
+				const compacted = earlier.transform(
+					{ systemPrompt: ["system"], messages: [summary, structuredClone(user)] },
+					"2026-08-15",
+					"/work",
+				);
+				const reply = createAssistantMessage("b");
+
+				const resumed = new DateCwdReminderInjector(journal).transform(
+					{
+						systemPrompt: ["system"],
+						messages: [summary, structuredClone(user), reply, { role: "user", content: "next", timestamp: 5 }],
+					},
+					"2026-08-16",
+					"/work",
+				);
+
+				expect(wireOf(resumed).slice(0, 2)).toEqual(wireOf(compacted));
+				expect(compacted.messages[1]?.content).toBe(`${renderDateCwdReminder("2026-08-15", "/work")}\n\nok`);
+			});
+
+			it("leaves out a dropped turn's developer reminder after a compaction renumbered its twin", () => {
+				const { journal } = createJournal();
+				const earlier = new DateCwdReminderInjector(journal);
+				const user: Message = { role: "user", content: "first", timestamp: 1 };
+				const result: Message = {
+					role: "toolResult",
+					toolCallId: "call-1",
+					toolName: "read",
+					content: [{ type: "text", text: "same" }],
+					isError: false,
+					timestamp: 2,
+				};
+				const call = createAssistantMessage("a");
+				earlier.transform({ systemPrompt: ["system"], messages: [user] }, "2026-08-14", "/work");
+				// The date rolls over mid tool loop: the reminder follows the first of two identical results.
+				earlier.transform(
+					{ systemPrompt: ["system"], messages: structuredClone([user, call, result]) },
+					"2026-08-15",
+					"/work",
+				);
+				earlier.transform(
+					{ systemPrompt: ["system"], messages: structuredClone([user, call, result, call, result]) },
+					"2026-08-15",
+					"/work",
+				);
+				// The compaction drops the first result; its twin now holds the key it had.
+				const summary: Message = { role: "user", content: "summary", timestamp: 3 };
+				const compacted = earlier.transform(
+					{ systemPrompt: ["system"], messages: structuredClone([summary, call, result]) },
+					"2026-08-15",
+					"/work",
+				);
+
+				const resumed = new DateCwdReminderInjector(journal).transform(
+					{
+						systemPrompt: ["system"],
+						messages: structuredClone([summary, call, result, createAssistantMessage("b")]),
+					},
+					"2026-08-15",
+					"/work",
+				);
+
+				expect(compacted.messages.map(message => message.role)).toEqual(["user", "assistant", "toolResult"]);
+				expect(wireOf(resumed).slice(0, 3)).toEqual(wireOf(compacted));
+				expect(resumed.messages.map(message => message.role)).toEqual([
+					"user",
+					"assistant",
+					"toolResult",
+					"assistant",
+				]);
+			});
+
+			it("finds a first turn a context hook re-creates on every request, without reading the journal each time", () => {
+				const { journal, loads } = createJournal();
+				let stamp = 1000;
+				const history: Message[] = [{ role: "user", content: "task", timestamp: 1 }];
+				const send = (injector: DateCwdReminderInjector, date: string) =>
+					injector.transform(
+						{
+							systemPrompt: ["system"],
+							messages: [{ role: "user", content: "BOOTSTRAP", timestamp: stamp++ }, ...history],
+						},
+						date,
+						"/work",
+					);
+				const earlier = new DateCwdReminderInjector(journal);
+				let sent = send(earlier, "2026-08-14");
+				for (let request = 0; request < 5; request++) {
+					history.push(createAssistantMessage(`call ${request}`));
+					sent = send(earlier, "2026-08-14");
+				}
+				expect(loads()).toBe(1);
+				history.push(createAssistantMessage("done"), { role: "user", content: "next", timestamp: 50 });
+
+				const resumed = send(new DateCwdReminderInjector(journal), "2026-08-16");
+
+				expect(wireOf(resumed).slice(0, sent.messages.length)).toEqual(wireOf(sent));
+				expect(resumed.messages.at(-1)?.content).toBe(`${renderDateCwdReminder("2026-08-16", "/work")}\n\nnext`);
 			});
 		});
 	});
