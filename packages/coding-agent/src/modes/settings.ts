@@ -918,6 +918,20 @@ export const cfgComposerRecallClearedDrafts = register({
 	},
 });
 
+export const cfgComposerRestoreInterruptedPrompt = register({
+	id: "composer.restoreInterruptedPrompt",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Restore Prompt on Interrupt",
+		get description() {
+			return `Put the interrupted prompt back in the editor, ahead of anything typed since, when ${formatKeyHint("escape")} stops a turn`;
+		},
+	},
+});
+
 export const cfgDoubleEscapeAction = register({
 	id: "doubleEscapeAction",
 	type: "enum",

@@ -304,6 +304,7 @@ import type {
 	FollowUpOptions,
 	FreshSessionResult,
 	HandoffResult,
+	InterruptiblePrompt,
 	ModelCycleResult,
 	Prewalk,
 	PromptOptions,
@@ -1078,6 +1079,8 @@ export class AgentSession implements SettingsScope {
 	/** Host hook invoked when a typed user prompt is dropped before dispatch;
 	 *  see {@link setPromptDropped}. */
 	#promptDropped: ((prompt: DroppedPrompt) => void) | undefined;
+	/** The typed prompt whose turn is in flight; see {@link getInterruptiblePrompt}. */
+	#interruptiblePrompt: InterruptiblePrompt | undefined;
 	#titleGenerationAbortController = new AbortController();
 	#toolChoiceQueue = new ToolChoiceQueue();
 
@@ -4620,6 +4623,13 @@ export class AgentSession implements SettingsScope {
 			const delta = event.assistantMessageEvent;
 			if (delta.type === "text_delta" || delta.type === "thinking_delta" || delta.type === "toolcall_delta") {
 				this.tokenRate.push(delta.delta);
+			}
+			// An interrupt returns the prompt only while the turn is still inside
+			// its first thinking block. Once that block ends — or visible text or a
+			// tool call begins — the model has committed to an answer, and Esc is a
+			// stop, not a retake of the prompt.
+			if (delta.type === "thinking_end" || delta.type === "text_start" || delta.type === "toolcall_start") {
+				this.#interruptiblePrompt = undefined;
 			}
 		} else if (event.type === "message_end" && event.message.role === "assistant") {
 			const assistant = event.message as AssistantMessage;
@@ -8388,6 +8398,13 @@ export class AgentSession implements SettingsScope {
 		let turnError: unknown;
 		let dispatched = false;
 		const refusalBeforeDispatch = this.#costCapRefusal;
+		// Kept for exactly the turn's lifetime, so an interrupt mid-turn can hand
+		// the operator's own words back to the composer (getInterruptiblePrompt).
+		const interruptiblePrompt: InterruptiblePrompt | undefined =
+			message.role === "user" && promptAttribution === "user"
+				? { text: typedText, images: options?.images }
+				: undefined;
+		this.#interruptiblePrompt = interruptiblePrompt;
 		try {
 			dispatched = await this.#promptWithMessage(message, expandedText, {
 				...options,
@@ -8412,6 +8429,9 @@ export class AgentSession implements SettingsScope {
 			}
 			throw error;
 		} finally {
+			// #promptWithMessage spans the run, so reaching here means the turn
+			// settled: there is nothing left to hand back.
+			if (this.#interruptiblePrompt === interruptiblePrompt) this.#interruptiblePrompt = undefined;
 			// Clean up residual eager-todo directive if the prompt never consumed it
 			// (e.g., compaction aborted, validation failed).
 			this.#toolChoiceQueue.removeByLabel("eager-todo");
@@ -11202,6 +11222,20 @@ export class AgentSession implements SettingsScope {
 	 *  it would vanish; interactive mode restores it to the editor for editing. */
 	setPromptDropped(handler: ((prompt: DroppedPrompt) => void) | undefined): void {
 		this.#promptDropped = handler;
+	}
+
+	/**
+	 * The user prompt that started the turn in flight, exactly as typed and with
+	 * its attachments: what a host puts back in the composer when it interrupts
+	 * that turn, so an Esc is an edit rather than a retype. Undefined while no
+	 * turn runs, for prompts the session did not take from the operator
+	 * (synthetic and agent-attributed work), and once the turn's first thinking
+	 * block has ended — from then on Esc stops an answer that has begun, it does
+	 * not ask for the prompt back. The message is already persisted, so the
+	 * transcript keeps it too.
+	 */
+	getInterruptiblePrompt(): InterruptiblePrompt | undefined {
+		return this.#interruptiblePrompt;
 	}
 
 	/**

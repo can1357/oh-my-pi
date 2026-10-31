@@ -489,6 +489,17 @@ export interface DroppedPrompt {
 	reason?: string;
 }
 
+/** Payload for {@link AgentSession.getInterruptiblePrompt}: the user prompt
+ *  that started the turn in flight, as it was typed, so a host can put it back
+ *  in the composer when that turn is interrupted instead of making the user
+ *  retype it. Unlike {@link DroppedPrompt} the message is already persisted. */
+export interface InterruptiblePrompt {
+	/** The prompt exactly as typed, before template/command expansion. */
+	text: string;
+	/** Image attachments submitted with the prompt. */
+	images?: ImageContent[];
+}
+
 /** Options for AgentSession.followUp(). */
 export interface FollowUpOptions {
 	/** Enqueue as a hidden developer message instead of a user follow-up. */

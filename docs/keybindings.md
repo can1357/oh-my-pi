@@ -93,6 +93,12 @@ Terminals that implement OSC 5522 enhanced paste can send clipboard MIME data di
 
 Older unqualified action names are migrated when `keybindings.yml` is loaded, but new docs and new configs should use the namespaced action IDs above. Existing `keybindings.json` files are still accepted and migrated to `keybindings.yml`; `keybindings.yaml` is also accepted.
 
+## Recover an interrupted prompt
+
+`Escape` stops a running turn. While the turn is still inside its first thinking block, the prompt that started it — text and image attachments, exactly as typed — also goes back into the composer, ahead of anything typed while the turn ran, so a change of mind during reasoning is an edit rather than a retype. The message also stays in the transcript: the composer holds a new draft of the same words.
+
+Once that thinking block ends, or visible text or a tool call starts, the model has committed to an answer and `Escape` is a plain stop: the composer is left alone. Prompts the agent started itself (continuations, synthetic turns, agent-attributed work) are never restored, and neither is a prompt whose turn has already settled. Restore is on by default. Turn it off with **Restore Prompt on Interrupt** in `/settings` under Interaction > Input, or set `composer.restoreInterruptedPrompt: false`.
+
 ## Vim editing mode
 
 Off by default. Turn it on with **Vim Editing Mode** in `/settings` (Interaction → Input), or set it directly:
