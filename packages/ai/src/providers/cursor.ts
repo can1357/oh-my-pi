@@ -1,5 +1,5 @@
 import * as fs from "node:fs/promises";
-import http2 from "node:http2";
+import type http2 from "node:http2";
 import { cursorModelParameters } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { isCursorMaxModeWireId } from "@oh-my-pi/pi-catalog/compat/collapse";
 import { classifyModel, collapseVariantId } from "@oh-my-pi/pi-catalog/compat/taxonomy";
@@ -1484,17 +1484,21 @@ function streamCursorWithWireMode(
 
 			if (transportMode === "http2") {
 				const proxyUrl = getProxyForUrl(model.provider, new URL(baseUrl));
+				// Lazily loaded: a top-level http2 import initializes the http/2
+				// stack during module evaluation for every session, while this
+				// transport is only needed when a Cursor request actually streams.
+				const { connect } = await import("node:http2");
 				let client: http2.ClientHttp2Session;
 				if (proxyUrl) {
 					const tlsSocket = await connectProxiedSocket(proxyUrl, baseUrl, {
 						signal: options?.signal,
 						timeoutMs: CURSOR_PROXY_TUNNEL_TIMEOUT_MS,
 					});
-					client = http2.connect(baseUrl, {
+					client = connect(baseUrl, {
 						createConnection: () => tlsSocket,
 					});
 				} else {
-					client = http2.connect(baseUrl);
+					client = connect(baseUrl);
 				}
 				h2Client = client;
 				client.on("error", error => settleH2(mapH2TransportError(error, baseUrl)));
