@@ -5303,21 +5303,12 @@ for (const [shape, arrange] of unreadableCopies) {
 	);
 }
 
-/** Make every `fs[method]` call on exactly `at` fail with an injected EIO until restored. */
-function failAt(method: "lstat" | "realpath", at: string) {
-	const real = fs[method] as (...args: unknown[]) => Promise<unknown>;
-	return spyOn(fs, method).mockImplementation((async (target: string, ...rest: unknown[]) => {
-		if (String(target) === at) throw Object.assign(new Error(`EIO: injected, ${method} ${at}`), { code: "EIO" });
-		return await real(target, ...rest);
-	}) as never);
-}
-
 test("a quarantine retry with no ledger record says where a place resolves could not be checked", async () => {
 	const { ground, record } = await archivedWithKilledStage();
 	const destination = quarantineDestination(record);
 	await quarantineStopped(ground, record, "before the ledger entry goes");
 	await fs.unlink(ground.record);
-	const broken = failAt("realpath", destination);
+	const broken = failWithEio("realpath", destination);
 	let applied: GcResult;
 	try {
 		applied = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
@@ -5336,7 +5327,7 @@ test("a quarantine that cannot resolve the parent of a directory already gone re
 	// The directory gone before the quarantine, so only the record would move,
 	// into the quarantine beside the tree the directory's parent is in.
 	await fs.rename(ground.dir, path.join(root, "gone-before"));
-	const broken = failAt("realpath", path.dirname(ground.dir));
+	const broken = failWithEio("realpath", path.dirname(ground.dir));
 	let preview: GcResult;
 	let applied: GcResult;
 	try {
@@ -5361,7 +5352,7 @@ test("a quarantine that cannot check its destination refuses, and moves nothing 
 	const { ground, record } = await archivedWithKilledStage();
 	const destination = quarantineDestination(record);
 	await Bun.write(path.join(destination, "unrelated"), "UNRELATED");
-	const broken = failAt("lstat", destination);
+	const broken = failWithEio("lstat", destination);
 	let preview: GcResult;
 	let applied: GcResult;
 	try {
@@ -5380,4 +5371,50 @@ test("a quarantine that cannot check its destination refuses, and moves nothing 
 	expect(await fs.readdir(destination)).toEqual(["unrelated"]);
 	expect(await Bun.file(ground.file).text()).toBe("PARTIAL STAGE");
 	expect(await Bun.file(ground.record).exists()).toBe(true);
+});
+
+test("a quarantine that cannot resolve a session tree refuses, and moves nothing", async () => {
+	const { ground, record } = await archivedWithKilledStage();
+	const broken = failWithEio("realpath", getSessionsDir(root));
+	let preview: GcResult;
+	let applied: GcResult;
+	try {
+		preview = await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } });
+		applied = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+	} finally {
+		broken.mockRestore();
+	}
+
+	for (const run of [preview, applied]) {
+		expect(run.quarantine?.moved).toBe(false);
+		const told = run.quarantine?.errors.join("\n") ?? "";
+		expect(told).toContain(`${getSessionsDir(root)} could not be resolved`);
+		expect(told).toContain("nothing was moved");
+	}
+	expect(await Bun.file(ground.file).text()).toBe("PARTIAL STAGE");
+	expect(await Bun.file(ground.record).exists()).toBe(true);
+	expect(await fs.lstat(quarantineDestination(record)).catch(() => undefined)).toBeUndefined();
+});
+
+test("a quarantine that cannot resolve the directory its record names refuses, and moves nothing", async () => {
+	const { ground, record } = await archivedWithKilledStage();
+	const broken = failWithEio("realpath", ground.dir);
+	let preview: GcResult;
+	let applied: GcResult;
+	try {
+		preview = await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } });
+		applied = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+	} finally {
+		broken.mockRestore();
+	}
+
+	for (const run of [preview, applied]) {
+		expect(run.quarantine?.moved).toBe(false);
+		const told = run.quarantine?.errors.join("\n") ?? "";
+		expect(told).toContain(`${ground.dir} could not be resolved`);
+		expect(told).not.toContain("outside the sessions and archive trees");
+	}
+	expect(await Bun.file(ground.file).text()).toBe("PARTIAL STAGE");
+	expect(await Bun.file(ground.record).exists()).toBe(true);
+	expect(await fs.lstat(quarantineDestination(record)).catch(() => undefined)).toBeUndefined();
 });

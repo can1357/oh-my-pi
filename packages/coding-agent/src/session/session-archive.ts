@@ -2089,7 +2089,12 @@ export async function quarantineStagingRecord(
 		return refuse(`${record} is not a staging record in ${ledger}`);
 	}
 	const id = path.basename(record, ".json");
-	const roots = await stagingRoots(agentDir);
+	let roots: string[];
+	try {
+		roots = await stagingRoots(agentDir);
+	} catch (error) {
+		return refuse(`${errorText(error)}, so nothing was moved`);
+	}
 	const quarantineFor = (tree: string | undefined): string =>
 		path.join(tree === undefined ? agentDir : path.dirname(tree), "gc-quarantine", id);
 
@@ -2125,7 +2130,7 @@ export async function quarantineStagingRecord(
 		return refuse(`${record} could not be read: ${errorText(error)}`);
 	}
 	const ground = await checkRecordedGround(entry, roots);
-	if (ground.kind === "refused") return refuse(ground.note);
+	if (ground.kind === "refused" || ground.kind === "unknown") return refuse(ground.note);
 	const directoryPresent = ground.kind !== "gone";
 	const moved = path.basename(entry.dir);
 
