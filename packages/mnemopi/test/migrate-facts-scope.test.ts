@@ -9,6 +9,7 @@ import { factRecall } from "@oh-my-pi/pi-mnemopi/core/beam/recall";
 import { initBeam } from "@oh-my-pi/pi-mnemopi/core/beam/schema";
 import { sourceMemoryScope } from "@oh-my-pi/pi-mnemopi/core/beam/fact-scope";
 import { get, updateWorking } from "@oh-my-pi/pi-mnemopi/core/beam/store";
+import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
 import { EpisodicGraph } from "@oh-my-pi/pi-mnemopi/core/episodic-graph";
 import {
 	hasPendingFactsScopeMigration as hasPendingMigration,
@@ -360,6 +361,59 @@ describe("E7 facts scope migration", () => {
 			}
 		} finally {
 			beamA.close();
+		}
+	});
+
+	it("content edits preserve the source's annotations", () => {
+		const dbPath = tempDb();
+		const beamA = new BeamMemory({ sessionId: "session-a", dbPath });
+		try {
+			beamA.db.run(
+				"INSERT INTO working_memory (id, content, session_id, scope) VALUES ('wm-ann', 'old text', 'session-a', 'global')",
+			);
+			beamA.db.run(
+				"INSERT INTO annotations (memory_id, kind, value, source) VALUES ('wm-ann', 'occurred_on', '2026-01-02T00:00:00.000Z', 'test')",
+			);
+			storeFactStrings(beamA, ["I use the quorum relay for tokens"], 0, "wm-ann");
+
+			expect(updateWorking(beamA, "wm-ann", "completely different text")).toBe(true);
+
+			const facts = beamA.db.query("SELECT fact_id FROM facts WHERE source_msg_id = 'wm-ann'").all() as unknown[];
+			expect(facts.length).toBe(0);
+			const annotation = beamA.db
+				.query("SELECT value FROM annotations WHERE memory_id = 'wm-ann' AND kind = 'occurred_on'")
+				.get() as { value: string } | null;
+			expect(annotation != null && annotation.value === "2026-01-02T00:00:00.000Z").toBe(true);
+		} finally {
+			beamA.close();
+		}
+	});
+
+	it("discards extraction results when the source is edited while in flight", async () => {
+		const idRef: { id: string } = { id: "" };
+		const memory = new Mnemopi({
+			sessionId: "session-a",
+			dbPath: tempDb(),
+			llm: {
+				enabled: true,
+				complete: async prompt => {
+					// Edit the source after remember() has returned (and the task
+					// captured the scheduled version) but before extraction settles.
+					await new Promise(resolve => setTimeout(resolve, 0));
+					updateWorking(memory.beam, idRef.id, "completely different text");
+					return "The user uses the quorum relay for tokens";
+				},
+			},
+		});
+		try {
+			idRef.id = memory.remember("I use the quorum relay for tokens", { source: "test", extract: true });
+			expect(idRef.id).toBeTruthy();
+			await memory.flushExtractions();
+			const rows = memory.conn.query("SELECT fact_id FROM facts WHERE source_msg_id = ?").all(idRef.id) as { fact_id: string }[];
+			expect(rows.length).toBe(0);
+		} finally {
+			await memory.flushExtractions();
+			memory.close();
 		}
 	});
 

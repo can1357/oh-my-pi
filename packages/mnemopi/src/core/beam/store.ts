@@ -185,7 +185,11 @@ const MEMORIA_SOURCE_TABLES = [
  * `EpisodicGraph` has initialised, so they are guarded. Callers own the
  * transaction and the base `working_memory` delete.
  */
-function purgeWorkingMemoryArtifacts(db: BeamMemoryState["db"], ids: readonly string[]): void {
+function purgeWorkingMemoryArtifacts(
+	db: BeamMemoryState["db"],
+	ids: readonly string[],
+	options: { preserveAnnotations?: boolean } = {},
+): void {
 	if (ids.length === 0) return;
 	const placeholders = ids.map(() => "?").join(", ");
 
@@ -200,7 +204,12 @@ function purgeWorkingMemoryArtifacts(db: BeamMemoryState["db"], ids: readonly st
 		db.run(`DELETE FROM facts WHERE source_msg_id IN (${placeholders})`, [...ids]);
 	}
 
-	db.run(`DELETE FROM annotations WHERE memory_id IN (${placeholders})`, [...ids]);
+	// Content edits reuse this helper but must keep the source's annotations:
+	// they describe the memory itself (occurred_on, has_source, caller-added
+	// metadata) and survive a rewording, so the edit path opts out here.
+	if (!options.preserveAnnotations) {
+		db.run(`DELETE FROM annotations WHERE memory_id IN (${placeholders})`, [...ids]);
+	}
 	db.run(`DELETE FROM memory_embeddings WHERE memory_id IN (${placeholders})`, [...ids]);
 	for (const table of MEMORIA_SOURCE_TABLES) {
 		db.run(`DELETE FROM ${table} WHERE source_memory_id IN (${placeholders})`, [...ids]);
@@ -306,15 +315,34 @@ function proactiveLinkIfEnabled(
  * are swallowed so they can never disrupt the synchronous `remember` that
  * scheduled them.
  */
-async function runFactExtraction(beam: BeamMemoryState, memoryId: string, content: string): Promise<void> {
+async function runFactExtraction(
+	beam: BeamMemoryState,
+	memoryId: string,
+	content: string,
+	scheduledContent: string | null,
+	scheduledScope: string,
+): Promise<void> {
 	try {
 		const extracted = await extractFactCategoriesSafe(content);
 		withLoopPhase("mnemopi.extract", () => {
 			if (countExtractedFactCategories(extracted) === 0) return;
-			// Facts inherit the stored memory's scope (never wider than their
-			// source), so a session-scoped remember() does not leak extracted
-			// facts into other sessions.
-			storeExtractedFactCategories(beam, extracted, 0, memoryId, 0.7, sourceMemoryScope(beam, memoryId));
+			// Discard stale results: if the source row disappeared (forget/
+			// trim), or its stored content or scope changed (edit, re-scope,
+			// id reuse) while extraction was in flight, storing would publish
+			// facts mined from the old text or wider than the source's current
+			// scope. Facts otherwise inherit the scheduled scope, never wider
+			// than their source.
+			const source = beam.db
+				.prepare("SELECT content, scope FROM working_memory WHERE id = ?")
+				.get(memoryId) as { content: string; scope: string | null } | null;
+			if (
+				source == null ||
+				(scheduledContent !== null && source.content !== scheduledContent) ||
+				(source.scope ?? "session") !== scheduledScope
+			) {
+				return;
+			}
+			storeExtractedFactCategories(beam, extracted, 0, memoryId, 0.7, scheduledScope);
 			invalidateCaches(beam);
 		});
 	} catch {
@@ -334,7 +362,16 @@ async function runFactExtraction(beam: BeamMemoryState, memoryId: string, conten
 function scheduleFactExtraction(beam: BeamMemoryState, memoryId: string, content: string): void {
 	if (content.trim() === "") return;
 	const runtimeOptions = getMnemopiRuntimeOptions();
-	const task = withMnemopiRuntimeOptions(runtimeOptions, () => runFactExtraction(beam, memoryId, content));
+	// Bind the task to the source version at schedule time: the stored content
+	// and the inherited scope are captured now, and runFactExtraction discards
+	// the result if the source row changed or disappeared in the meantime.
+	const scheduled = beam.db
+		.prepare("SELECT content FROM working_memory WHERE id = ?")
+		.get(memoryId) as { content: string } | null;
+	const scheduledScope = sourceMemoryScope(beam, memoryId);
+	const task = withMnemopiRuntimeOptions(runtimeOptions, () =>
+		runFactExtraction(beam, memoryId, content, scheduled?.content ?? null, scheduledScope),
+	);
 	const pending = beam.pendingExtractions;
 	if (pending !== undefined) {
 		pending.add(task);
@@ -763,7 +800,7 @@ export function updateWorking(
 				const episodeCollision =
 					beam.db.prepare("SELECT 1 FROM episodic_memory WHERE id = ?").get(memoryId) !== null;
 				if (!episodeCollision) {
-					purgeWorkingMemoryArtifacts(beam.db, [memoryId]);
+					purgeWorkingMemoryArtifacts(beam.db, [memoryId], { preserveAnnotations: true });
 				}
 			}
 			scheduleEmbedding(beam, [{ memoryId, content }]);
