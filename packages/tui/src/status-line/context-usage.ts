@@ -39,9 +39,8 @@ export interface ContextSavingsEstimate {
 /** Real sessions satisfy this view without wrapping or copying their state. */
 export interface ContextUsageSession extends NonMessageTokenSource {
 	readonly model: Model | undefined;
-	readonly agent: {
+	readonly agent: NonNullable<NonMessageTokenSource["agent"]> & {
 		readonly tokenizer: Tokenizer;
-		readonly state?: { readonly tools?: readonly ContextTool[] };
 	};
 	readonly messages?: AgentMessage[];
 	getContextBreakdown?():
