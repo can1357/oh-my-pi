@@ -1060,24 +1060,39 @@ describe("PolyphonicRecallEngine", () => {
 				],
 			);
 
-			// 1. Punctuation boundary: "what is PostgreSQL?" matches "PostgreSQL"
+			// 1. Punctuation & hashtag boundary: "what is PostgreSQL?" and "#PostgreSQL" match "PostgreSQL"
 			const pgHits = engine.factVoice("what is PostgreSQL?", 1);
 			expect(pgHits[0]?.memoryId).toBe("wm-pg");
+			const hashtagPgHits = engine.factVoice("請查詢 #PostgreSQL 的設定", 1);
+			expect(hashtagPgHits[0]?.memoryId).toBe("wm-pg");
 
-			// 2. Specificity tie-breaker: "北京大學" (4 chars) beats "排名" (2 chars) at equal confidence even with later memoryId
+			// 2. Mixed-script Japanese possessive particle の: "C言語の仕様を確認" matches "C言語"
+			beam.db.run(
+				`INSERT INTO consolidated_facts
+					(id, subject, predicate, object, confidence, mention_count, first_seen, last_seen, sources_json, veracity)
+					VALUES ('cf-clang', 'C言語', 'is', 'systems language', 0.9, 2, ?, ?, ?, 'likely_true')`,
+				[timestamp, timestamp, JSON.stringify(["wm-clang"])],
+			);
+			const clangHits = engine.factVoice("C言語の仕様を確認", 1);
+			expect(clangHits[0]?.memoryId).toBe("wm-clang");
+
+			// 3. Specificity tie-breaker: "北京大學" (4 chars) beats "排名" (2 chars) at equal confidence even with later memoryId
 			const pkuHits = engine.factVoice("請問北京大學的排名", 1);
 			expect(pkuHits[0]?.memoryId).toBe("z_pku");
 
-			// 3. 近期 / 最新 route to TR in memoriaRetrieve
+			// 4. 近期 / 最新 route to TR in memoriaRetrieve and looksTemporal even when followed by 公共/距離
 			beam.db.run(
 				`INSERT INTO memoria_timelines (session_id, event_id, date, description, source_memory_id)
-					VALUES (?, 1, '2026-10-30', '近期完成了核心服務部署', 'tl-recent')`,
+					VALUES (?, 1, '2026-10-30', '近期完成了公共 API 核心服務部署', 'tl-recent')`,
 				[beam.sessionId],
 			);
 			expect(memoriaRetrieve(beam, "近期部署了什麼").ability).toBe("TR");
 			expect(memoriaRetrieve(beam, "最新部署是什麼").ability).toBe("TR");
+			expect(memoriaRetrieve(beam, "最新公共 API 部署").ability).toBe("TR");
+			expect(memoriaRetrieve(beam, "近期公共服務變更").ability).toBe("TR");
+			expect(memoriaRetrieve(beam, "最近公共祖先演算法").ability).not.toBe("TR");
 
-			// 4. Long particle-stripped MEMORIA subject (>12 chars) preserved as primary
+			// 5. Long particle-stripped MEMORIA subject (>12 chars) preserved as primary
 			beam.db.run(
 				`INSERT INTO memoria_facts (session_id, message_idx, fact_type, key, value, context_snippet, importance, source_memory_id)
 					VALUES

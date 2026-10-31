@@ -7,6 +7,7 @@ import {
 	CJK_CLAUSE_PARTICLE_RE,
 	CJK_PARTICLE_SPLIT_RE,
 	CJK_STOP_SEGMENTS,
+	CJK_TEMPORAL_QUERY_RE,
 	cjkCodePointShingles,
 	codePointLength,
 	hasCjk,
@@ -867,17 +868,8 @@ export function extractAndStoreFacts(
 function classifyAbility(query: string): string {
 	const normalized = query.normalize("NFC");
 	const q = normalized.toLowerCase();
-	const deadlineContextRe = /截止(?![頻频點点電壓压波長长區区率])(?:日|日期|時間|时间|時限|时限|前|到|至|於|于|$)/u;
-	const isDeadline = deadlineContextRe.test(normalized);
-	const hasRecent = /(?:最近|近期|最新)(?!(?:鄰|邻|公共|點|点|對|对|小|大|優|优|佳|近|親|亲|似|距離|距离|最少))/u.test(
-		normalized,
-	);
-	const cjkTemporalRe =
-		/(?:昨天|昨日|今天|今日|明天|明日|前天|大前天|後天|大後天|前日|後日|這週|本週|上週|上周|下週|下周|本周|这周|這個月|上個月|上个月|下個月|下个月|这个月|去年|今年|明年|之前|先前|以前|何時|什麼時候|何时|什么时候|剛剛|剛才|刚刚|刚才|過去|过去|現在|现在|目前|いつ|何時|昨日|今日|明日|一昨日|明後日|先週|今週|来週|先月|今月|来月|去年|今年|来年|タイムライン|時系列|時期|日時|언제|어제|오늘|내일|그제|모레|지난주|이번주|다음주|지난달|이번달|다음달|작년|올해|내년|타임라인|연표|시기|일시)/u;
 	if (
-		isDeadline ||
-		hasRecent ||
-		cjkTemporalRe.test(normalized) ||
+		CJK_TEMPORAL_QUERY_RE.test(normalized) ||
 		[
 			"how many days",
 			"how many weeks",

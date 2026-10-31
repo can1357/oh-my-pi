@@ -11,6 +11,7 @@ import {
 	CJK_CLAUSE_PARTICLE_RE,
 	CJK_PARTICLE_SPLIT_RE,
 	CJK_STOP_SEGMENTS,
+	CJK_TEMPORAL_QUERY_RE,
 	cjkCodePointShingles,
 	codePointLength,
 	expandCjkCandidateSegments,
@@ -281,16 +282,19 @@ function factSubjectCandidateGroups(query: string): {
 				if (latin.length >= 3 && !STOP_WORDS.has(latin.toLowerCase())) addPrimary(latin);
 			}
 			if (nonCjk.length > 0 && cjkRuns.length > 0) {
-				const strippedWord = stripCjkQuestionAffixes(word);
-				for (const seg of [word, strippedWord]) {
-					if (codePointLength(seg) >= 2 && !CJK_STOP_SEGMENTS.has(seg)) addPrimary(seg);
-				}
-				for (const clauseRaw of strippedWord.split(CJK_CLAUSE_PARTICLE_RE)) {
-					const clause = stripCjkQuestionAffixes(clauseRaw);
-					if (codePointLength(clause) >= 2 && !CJK_STOP_SEGMENTS.has(clause)) addPrimary(clause);
-					for (const sub of clause.split(CJK_PARTICLE_SPLIT_RE)) {
-						const strippedSub = stripCjkQuestionAffixes(sub);
-						if (codePointLength(strippedSub) >= 2 && !CJK_STOP_SEGMENTS.has(strippedSub)) addPrimary(strippedSub);
+				for (const sourceForm of new Set([word, rawWord])) {
+					const strippedWord = stripCjkQuestionAffixes(sourceForm);
+					for (const seg of [sourceForm, strippedWord]) {
+						if (codePointLength(seg) >= 2 && !CJK_STOP_SEGMENTS.has(seg)) addPrimary(seg);
+					}
+					for (const clauseRaw of strippedWord.split(CJK_CLAUSE_PARTICLE_RE)) {
+						const clause = stripCjkQuestionAffixes(clauseRaw);
+						if (codePointLength(clause) >= 2 && !CJK_STOP_SEGMENTS.has(clause)) addPrimary(clause);
+						for (const sub of clause.split(CJK_PARTICLE_SPLIT_RE)) {
+							const strippedSub = stripCjkQuestionAffixes(sub);
+							if (codePointLength(strippedSub) >= 2 && !CJK_STOP_SEGMENTS.has(strippedSub))
+								addPrimary(strippedSub);
+						}
 					}
 				}
 			}
@@ -360,8 +364,7 @@ function anchorTime(queryTime: string | Date | null | undefined): number | null 
 	return Number.isFinite(parsed) ? parsed : null;
 }
 
-const TEMPORAL_QUERY_RE =
-	/(?:昨天|昨日|今天|今日|明天|明日|前天|大前天|後天|大後天|前日|後日|最近(?![鄰邻公共點点對对小大優优佳近親亲似])|近期|最新|這週|本週|上週|上周|下週|下周|本周|这周|這個月|上個月|上个月|下個月|下个月|这个月|去年|今年|明年|之前|先前|以前|何時|什麼時候|何时|什么时候|剛剛|剛才|刚刚|刚才|過去|过去|現在|现在|目前|截止(?![頻频點点電壓压波長长區区率])(?:日|日期|時間|时间|時限|时限|前|到|至|於|于|$)|いつ|何時|昨日|今日|明日|一昨日|明後日|先週|今週|来週|先月|今月|来月|去年|今年|来年|タイムライン|時系列|時期|日時|언제|어제|오늘|내일|그제|모레|지난주|이번주|다음주|지난달|이번달|다음달|작년|올해|내년|타임라인|연표|시기|일시)/u;
+const TEMPORAL_QUERY_RE = CJK_TEMPORAL_QUERY_RE;
 function looksTemporal(query: string): boolean {
 	const normalized = query.normalize("NFC");
 	const lower = normalized.toLowerCase();
