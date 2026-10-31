@@ -76,7 +76,7 @@ export interface ProcessTerminalRenderHarness {
 export function createProcessTerminalRenderHarness(
 	initialColumns = 100,
 	initialRows = 30,
-	terminalOptions: ProcessTerminalOptions = { conpty: false },
+	terminalOptions: ProcessTerminalOptions = {},
 	startOptions?: TUIStartOptions,
 ): ProcessTerminalRenderHarness {
 	// This harness exercises the real ProcessTerminal I/O pipeline, so it opts
@@ -115,7 +115,7 @@ export function createProcessTerminalRenderHarness(
 	// Default to non-ConPTY behavior so kitty-flag and write-chunking assertions
 	// are hermetic: the ambient WSL env (WSL_DISTRO_NAME / WSL_INTEROP) must not
 	// change what the suite observes. See ProcessTerminalOptions.
-	const terminal = new ProcessTerminal(terminalOptions);
+	const terminal = new ProcessTerminal({ conpty: false, ...terminalOptions });
 	const tui = new TUI(terminal);
 	const probe = new WidthProbe();
 	tui.addChild(probe);
