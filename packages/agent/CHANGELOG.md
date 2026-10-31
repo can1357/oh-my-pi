@@ -4,12 +4,36 @@
 
 ### Added
 
-- `PI_INTENT_DESC` replaces the schema description of the injected `i` intent field
-- `AgentTool.approvalRestrictionPaths` reports paths a call reads, so restricted folders cover them without the approval being remembered per path ([#17133](https://github.com/can1357/oh-my-pi/pull/17133) by [@iliaal](https://github.com/iliaal))
+- The soft steering signal a tool sees as `toolCall.steeringSignal` now aborts with the source of the queued message (`"user"`, `"irc"`, …) as its `reason`, so a tool can yield only to the sources it should ([#17537](https://github.com/can1357/oh-my-pi/issues/17537))
 
 ### Changed
 
 - `one-at-a-time` steering delivers the first queued unit holding a user-authored message (`isUserSteeringMessage`) ahead of agent-authored steering queued before it; `steeringQueueState` classifies the messages it is given and no longer takes a count ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
+
+### Fixed
+
+- Reject incomplete local compaction, turn-prefix, handoff, and branch summaries ending with `stopReason: "length"` instead of using truncated text as complete context. Omit incomplete display-only short summaries without discarding a completed full summary ([#17499](https://github.com/can1357/oh-my-pi/pull/17499) by [@Xytronix](https://github.com/Xytronix)).
+
+## [18.14.1] - 2026-10-31
+
+### Breaking Changes
+
+- `SentToolDefinitions.inactiveFor(messages, tools)` is replaced by `withInactiveTools(context)`, which also clears a stale `inactiveTools`; `transformProviderContext` now receives the request's `inactiveTools` ([#17492](https://github.com/can1357/oh-my-pi/pull/17492))
+
+### Fixed
+
+- Long tool-call intents no longer block tool execution when intent tracing is enabled ([#13140](https://github.com/can1357/oh-my-pi/issues/13140)).
+
+## [18.14.0] - 2026-10-29
+
+### Breaking Changes
+
+- Removed the Bun event-loop workaround utilities from `@oh-my-pi/pi-agent-core/utils/yield`; agent loops no longer insert cooperative sleeps while streaming or between tool calls.
+
+### Added
+
+- Added `AgentTool.approvalRestrictionPaths` so tools can report the paths they read, allowing restricted-folder approvals to cover those paths without remembering approval separately for each path.
+- Added `Agent.logContext`, which adds custom context fields to every log record written during an agent run.
 
 ## [18.13.3] - 2026-10-28
 

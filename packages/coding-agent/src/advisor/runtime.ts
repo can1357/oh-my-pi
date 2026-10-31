@@ -590,7 +590,6 @@ export class AdvisorRuntime {
 	}
 
 	#clearAdvisorContextAtCurrentCursor(): void {
-		this.#consecutiveFailures = 0;
 		this.#clearSeenContext();
 		try {
 			this.agent.reset();
@@ -613,6 +612,7 @@ export class AdvisorRuntime {
 		this.#deliveredPrefix = [];
 		this.#pending = [];
 		this.#held = [];
+		this.#consecutiveFailures = 0;
 		this.#clearAdvisorContextAtCurrentCursor();
 		if (clearBacklog) {
 			this.#backlog = 0;
@@ -1188,6 +1188,8 @@ export class AdvisorRuntime {
 						pending: this.#pending.length,
 						backlog: this.#backlog,
 					});
+					// A maintenance re-prime is not a recovery: the batch keeps its strikes, or a batch that
+					// keeps failing and keeps triggering maintenance is retried without end instead of dropped.
 					this.#clearAdvisorContextAtCurrentCursor();
 					const preparedMessages = this.#prepareBatch(rawMessages);
 					return {
@@ -1445,8 +1447,13 @@ export class AdvisorRuntime {
 					this.#rollbackFailedTurn(messageSnapshot);
 					logger.debug("advisor turn failed", { err: String(err) });
 					if (classifierRefusal) {
-						if (this.#includeThinking) {
-							this.#includeThinking = false;
+						// Stripping only recovers when it changes what was sent: a batch
+						// without primary reasoning would be resent byte-for-byte and
+						// refused again, so it goes straight to the model fallback.
+						const strippingChangesBatch =
+							this.#includeThinking && this.#renderPreparedDelta(preparedMessages, wip, false) !== renderBatch();
+						this.#includeThinking = false;
+						if (strippingChangesBatch) {
 							// Do NOT advance #seenContext here: the requeued batch is
 							// re-deduped by #prepareBatch on the next drain, so a mutation
 							// now would double-fold first-time primary context into
@@ -1607,6 +1614,7 @@ export class AdvisorRuntime {
 						this.#noteDroppedBacklog(err);
 						success = true;
 					} else if (contextOverflow) {
+						this.#consecutiveFailures = 0;
 						this.#clearAdvisorContextAtCurrentCursor();
 						if (contextWasFresh) {
 							// The bounded update cannot fit even with no advisor history. Drop

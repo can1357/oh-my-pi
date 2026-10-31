@@ -27,6 +27,7 @@ import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 
 withoutTerminalMultiplexer();
 
+import { VirtualRenderScheduler } from "./virtual-render-scheduler";
 import { VirtualTerminal } from "./virtual-terminal";
 
 type MutableTerminalInfo = { id: string; imageProtocol: ImageProtocol | null };
@@ -797,7 +798,7 @@ describe("TUI inline-image budget", () => {
 	const originalProtocol = TERMINAL.imageProtocol;
 	const originalTerminalId = terminal.id;
 	let originalCellDims: CellDimensions;
-	let monotonicNow = 0;
+	const scheduler = new VirtualRenderScheduler();
 
 	beforeEach(() => {
 		originalCellDims = { ...getCellDimensions() };
@@ -807,13 +808,7 @@ describe("TUI inline-image budget", () => {
 		// (which re-sends `a=t` data) never fires in the generic budget tests; the
 		// dedicated Ghostty tests opt in by setting `terminal.id = "ghostty"`.
 		terminal.id = "xterm";
-		monotonicNow = 0;
-		// Advance one full 30fps frame (>1000/30ms) per tick so the render
-		// throttle computes a zero delay and every requestRender flushes inline.
-		vi.spyOn(performance, "now").mockImplementation(() => {
-			monotonicNow += 40;
-			return monotonicNow;
-		});
+		scheduler.reset();
 	});
 
 	afterEach(() => {
@@ -823,14 +818,8 @@ describe("TUI inline-image budget", () => {
 		terminal.id = originalTerminalId;
 	});
 
-	async function settle(term: VirtualTerminal): Promise<void> {
-		for (let i = 0; i < 4; i++) {
-			const tick = Promise.withResolvers<void>();
-			process.nextTick(tick.resolve);
-			await tick.promise;
-			await Bun.sleep(40);
-			await term.flush();
-		}
+	function createTui(term: VirtualTerminal): TUI {
+		return new TUI(term, undefined, { renderScheduler: scheduler });
 	}
 
 	function makeImage(budget: ImageBudget, key: string): Image {
@@ -853,7 +842,7 @@ describe("TUI inline-image budget", () => {
 		});
 
 		setKittyGraphics({ unicodePlaceholders: false });
-		const tui = new TUI(term);
+		const tui = createTui(term);
 		tui.addChild(
 			new Image(
 				BASE64_ONE_PIXEL_PNG,
@@ -867,7 +856,7 @@ describe("TUI inline-image budget", () => {
 
 		try {
 			tui.start();
-			await settle(term);
+			await scheduler.settle(term);
 
 			const output = writes.join("");
 			expect(output).toContain("\x1b7\x1b[3A");
@@ -895,7 +884,7 @@ describe("TUI inline-image budget", () => {
 
 		setKittyGraphics({ unicodePlaceholders: false });
 		Bun.env.PI_TUI_RESIZE_IN_PLACE = "1";
-		const tui = new TUI(term);
+		const tui = createTui(term);
 		tui.addChild(
 			new Image(
 				BASE64_ONE_PIXEL_PNG,
@@ -909,10 +898,11 @@ describe("TUI inline-image budget", () => {
 
 		try {
 			tui.start();
-			await settle(term);
+			await scheduler.settle(term);
 			writes.length = 0;
 			term.resize(30, 6);
-			await settle(term);
+			// The width repaint lands once the 120 ms resize settle window closes.
+			await scheduler.advance(term, 160);
 
 			const output = writes.join("");
 			expect(output).toContain("a=p,q=2,C=1");
@@ -942,7 +932,7 @@ describe("TUI inline-image budget", () => {
 				}
 				realWrite(data);
 			});
-			const tui = new TUI(term);
+			const tui = createTui(term);
 			tui.setMaxInlineImages(2);
 			const images = Array.from({ length: 5 }, (_, i) => makeImage(tui.imageBudget, `retired-${i}`));
 			const ids = images.map((_, i) => tui.imageBudget.acquireId(`retired-${i}`));
@@ -959,14 +949,14 @@ describe("TUI inline-image budget", () => {
 				: undefined;
 			try {
 				tui.start();
-				await settle(term);
+				await scheduler.settle(term);
 				for (current = 1; current < images.length; current++) {
 					tui.requestRender();
-					await settle(term);
+					await scheduler.settle(term);
 					if (current === 1) {
 						expect([...resident]).toEqual(ids.slice(0, 2));
 						tui.resetDisplay();
-						await settle(term);
+						await scheduler.settle(term);
 						// A latched reset deletes nothing until its own repaint runs. In
 						// the fullscreen arm the overlay is installed before start(),
 						// so no normal frame is ever painted and that repaint never
@@ -980,18 +970,18 @@ describe("TUI inline-image budget", () => {
 				expect(peak).toBe(2);
 				current = 0;
 				tui.requestRender();
-				await settle(term);
+				await scheduler.settle(term);
 				expect(resident.has(ids[0]!)).toBe(true);
 				expect(resident.size).toBe(2);
 				tui.setMaxInlineImages(1);
-				await settle(term);
+				await scheduler.settle(term);
 				expect([...resident]).toEqual([ids[0]!]);
 				tui.resetDisplay();
-				await settle(term);
+				await scheduler.settle(term);
 				expect([...resident]).toEqual([ids[0]!]);
 				if (overlay) {
 					overlay.hide();
-					await settle(term);
+					await scheduler.settle(term);
 					expect([...resident]).toEqual([ids[0]!]);
 				}
 			} finally {
@@ -1098,7 +1088,7 @@ describe("TUI inline-image budget", () => {
 		const { resident, placed, alt } = trackKittyGraphics(term);
 
 		setKittyGraphics({ unicodePlaceholders: false });
-		const tui = new TUI(term);
+		const tui = createTui(term);
 		tui.setMaxInlineImages(2);
 		const behind = [makeImage(tui.imageBudget, "behind-0"), makeImage(tui.imageBudget, "behind-1")];
 		const behindIds = behind.map((_, i) => tui.imageBudget.acquireId(`behind-${i}`));
@@ -1112,7 +1102,7 @@ describe("TUI inline-image budget", () => {
 
 		try {
 			tui.start();
-			await settle(term);
+			await scheduler.settle(term);
 			expect([...placed].sort(ascending)).toEqual([...behindIds].sort(ascending));
 
 			// The modal's own image lives in the alternate screen's store while
@@ -1123,12 +1113,12 @@ describe("TUI inline-image budget", () => {
 				{ render: width => modal.render(width), invalidate: () => {} },
 				{ fullscreen: true },
 			);
-			await settle(term);
+			await scheduler.settle(term);
 			expect(alt.placed.has(modalId)).toBe(true);
 			expect(resident.has(modalId)).toBe(false);
 
 			overlay.hide();
-			await settle(term);
+			await scheduler.settle(term);
 
 			expect([...placed].sort(ascending)).toEqual([...behindIds].sort(ascending));
 			expect([...resident].sort(ascending)).toEqual([...behindIds].sort(ascending));
@@ -1144,7 +1134,7 @@ describe("TUI inline-image budget", () => {
 		const { resident, placed } = trackKittyGraphics(term);
 
 		setKittyGraphics({ unicodePlaceholders: false });
-		const tui = new TUI(term);
+		const tui = createTui(term);
 		tui.setMaxInlineImages(2);
 		const behind = makeImage(tui.imageBudget, "behind");
 		const shared = makeImage(tui.imageBudget, "shared");
@@ -1164,17 +1154,17 @@ describe("TUI inline-image budget", () => {
 
 		try {
 			tui.start();
-			await settle(term);
+			await scheduler.settle(term);
 			expect(placed.has(sharedId)).toBe(true);
 
 			const overlay = tui.showOverlay(
 				{ render: width => modalImages.flatMap(image => image.render(width)), invalidate: () => {} },
 				{ fullscreen: true },
 			);
-			await settle(term);
+			await scheduler.settle(term);
 
 			overlay.hide();
-			await settle(term);
+			await scheduler.settle(term);
 
 			expect(placed.has(sharedId)).toBe(true);
 			expect(resident.has(sharedId)).toBe(true);
@@ -1190,7 +1180,7 @@ describe("TUI inline-image budget", () => {
 		const { placed, resident, deleted } = trackKittyGraphics(term);
 
 		setKittyGraphics({ unicodePlaceholders: false });
-		const tui = new TUI(term);
+		const tui = createTui(term);
 		tui.setMaxInlineImages(1);
 		const older = makeImage(tui.imageBudget, "older");
 		const kept = makeImage(tui.imageBudget, "kept");
@@ -1205,21 +1195,21 @@ describe("TUI inline-image budget", () => {
 
 		try {
 			tui.start();
-			await settle(term);
+			await scheduler.settle(term);
 			expect(placed.has(keptId)).toBe(true);
 
 			const overlay = tui.showOverlay(
 				{ render: width => modal.render(width), invalidate: () => {} },
 				{ fullscreen: true },
 			);
-			await settle(term);
+			await scheduler.settle(term);
 
 			// Dropping the older image relaxes the threshold, but the pass already
 			// decided suppression under the old one. That stale text fallback lasts
 			// a frame; deleting the graphic behind it lasts forever.
 			overlay.hide();
 			transcript = [kept];
-			await settle(term);
+			await scheduler.settle(term);
 
 			expect(deleted).not.toContain(keptId);
 			expect(placed.has(keptId)).toBe(true);
@@ -1240,7 +1230,7 @@ describe("TUI inline-image budget", () => {
 		const { writes } = trackKittyGraphics(term);
 
 		setKittyGraphics({ unicodePlaceholders: true });
-		const tui = new TUI(term);
+		const tui = createTui(term);
 		tui.setMaxInlineImages(3);
 		const gone = makeImage(tui.imageBudget, "gone");
 		const goneId = tui.imageBudget.acquireId("gone");
@@ -1252,7 +1242,7 @@ describe("TUI inline-image budget", () => {
 
 		try {
 			tui.start();
-			await settle(term);
+			await scheduler.settle(term);
 			expect(writes.join("")).toContain(BASE64_ONE_PIXEL_PNG);
 
 			// Drop it from the frame, then reset. `d=A` spares virtual placements
@@ -1262,7 +1252,7 @@ describe("TUI inline-image budget", () => {
 			showImage = false;
 			writes.length = 0;
 			tui.resetDisplay();
-			await settle(term);
+			await scheduler.settle(term);
 
 			const output = writes.join("");
 			const deleteAll = output.indexOf("\x1b_Ga=d,d=A");
@@ -1280,7 +1270,7 @@ describe("TUI inline-image budget", () => {
 		const { placed, deleted } = trackKittyGraphics(term);
 
 		setKittyGraphics({ unicodePlaceholders: false });
-		const tui = new TUI(term);
+		const tui = createTui(term);
 		tui.setMaxInlineImages(3);
 		const transcript = makeImage(tui.imageBudget, "transcript");
 		const transcriptId = tui.imageBudget.acquireId("transcript");
@@ -1288,22 +1278,22 @@ describe("TUI inline-image budget", () => {
 
 		try {
 			tui.start();
-			await settle(term);
+			await scheduler.settle(term);
 			expect(placed.has(transcriptId)).toBe(true);
 
 			// The modal carries no images of its own, so nothing on the alternate
 			// buffer has any claim on the transcript's graphic.
 			tui.showOverlay(new Text("MODAL", 0, 0), { fullscreen: true });
-			await settle(term);
+			await scheduler.settle(term);
 			tui.resetDisplay();
-			await settle(term);
+			await scheduler.settle(term);
 			expect(deleted).not.toContain(transcriptId);
 
 			// stop() restores the normal screen and drops the reset latch, so no
 			// destructive repaint ever runs — a deletion issued at latch time would
 			// leave the transcript blank with nothing left to re-place it.
 			tui.stop();
-			await settle(term);
+			await scheduler.settle(term);
 			expect(deleted).not.toContain(transcriptId);
 			expect(placed.has(transcriptId)).toBe(true);
 		} finally {
@@ -1397,7 +1387,7 @@ describe("TUI inline-image budget", () => {
 		trackKittyGraphics(term);
 
 		setKittyGraphics({ unicodePlaceholders: false });
-		const tui = new TUI(term);
+		const tui = createTui(term);
 		tui.setMaxInlineImages(2);
 		const transcript = Array.from({ length: 3 }, (_, i) => makeImage(tui.imageBudget, `row-${i}`));
 		const oldestId = tui.imageBudget.acquireId("row-0");
@@ -1408,7 +1398,7 @@ describe("TUI inline-image budget", () => {
 
 		try {
 			tui.start();
-			await settle(term);
+			await scheduler.settle(term);
 
 			// Over cap, so the oldest is demoted and its graphic really is gone.
 			// Its key must not hand that id back to a recreated component.
@@ -1426,7 +1416,7 @@ describe("TUI inline-image budget", () => {
 		const { placed, deleted } = trackKittyGraphics(term);
 
 		setKittyGraphics({ unicodePlaceholders: false });
-		const tui = new TUI(term);
+		const tui = createTui(term);
 		tui.setMaxInlineImages(2);
 		const other = makeImage(tui.imageBudget, "other");
 		const shared = makeImage(tui.imageBudget, "shared");
@@ -1446,16 +1436,16 @@ describe("TUI inline-image budget", () => {
 
 		try {
 			tui.start();
-			await settle(term);
+			await scheduler.settle(term);
 			expect(placed.has(sharedId)).toBe(true);
 
 			const overlay = tui.showOverlay(
 				{ render: width => modalImages.flatMap(image => image.render(width)), invalidate: () => {} },
 				{ fullscreen: true },
 			);
-			await settle(term);
+			await scheduler.settle(term);
 			overlay.hide();
-			await settle(term);
+			await scheduler.settle(term);
 
 			// Suppression is not retirement: the graphic survived, so the key must
 			// still resolve to it. A fresh id here orphans the old one, and the next
@@ -1464,7 +1454,7 @@ describe("TUI inline-image budget", () => {
 			expect(tui.imageBudget.acquireId("shared")).toBe(sharedId);
 
 			tui.requestRender();
-			await settle(term);
+			await scheduler.settle(term);
 			expect(deleted).not.toContain(sharedId);
 			expect(placed.has(sharedId)).toBe(true);
 		} finally {
@@ -1479,7 +1469,7 @@ describe("TUI inline-image budget", () => {
 		const { writes } = trackKittyGraphics(term);
 
 		setKittyGraphics({ unicodePlaceholders: false });
-		const tui = new TUI(term);
+		const tui = createTui(term);
 		tui.setMaxInlineImages(2);
 		tui.setFrameProvider({
 			renderFrame: () => ({ viewport: ["transcript"] }),
@@ -1493,22 +1483,22 @@ describe("TUI inline-image budget", () => {
 
 		try {
 			tui.start();
-			await settle(term);
+			await scheduler.settle(term);
 
 			const first = tui.showOverlay(
 				{ render: width => firstModal.flatMap(image => image.render(width)), invalidate: () => {} },
 				{ fullscreen: true },
 			);
-			await settle(term);
+			await scheduler.settle(term);
 			first.hide();
-			await settle(term);
+			await scheduler.settle(term);
 
 			writes.length = 0;
 			const second = tui.showOverlay(
 				{ render: width => secondModal.render(width), invalidate: () => {} },
 				{ fullscreen: true },
 			);
-			await settle(term);
+			await scheduler.settle(term);
 
 			// `?1049h` starts a cleared buffer, so the previous modal's split says
 			// nothing about this one. Carrying it renders the sole image as text for
@@ -1528,7 +1518,7 @@ describe("TUI inline-image budget", () => {
 		const { placed, deleted } = trackKittyGraphics(term);
 
 		setKittyGraphics({ unicodePlaceholders: false });
-		const tui = new TUI(term);
+		const tui = createTui(term);
 		tui.setMaxInlineImages(2);
 		const behind = [makeImage(tui.imageBudget, "behind-0"), makeImage(tui.imageBudget, "behind-1")];
 		const behindIds = behind.map((_, i) => tui.imageBudget.acquireId(`behind-${i}`));
@@ -1553,20 +1543,20 @@ describe("TUI inline-image budget", () => {
 
 		try {
 			tui.start();
-			await settle(term);
+			await scheduler.settle(term);
 			expect(behindIds.every(id => placed.has(id))).toBe(true);
 
 			tui.showOverlay(
 				{ render: width => modalImages.flatMap(image => image.render(width)), invalidate: () => {} },
 				{ fullscreen: true },
 			);
-			await settle(term);
+			await scheduler.settle(term);
 
 			// stop() leaves the alternate buffer but not the overlay stack, so the
 			// flush must not count a modal that is no longer painted: its images
 			// would push the transcript's over the cap and delete them for good.
 			tui.stop();
-			await settle(term);
+			await scheduler.settle(term);
 
 			expect(deleted.filter(id => behindIds.includes(id))).toEqual([]);
 			expect(behindIds.every(id => placed.has(id))).toBe(true);
@@ -1581,7 +1571,7 @@ describe("TUI inline-image budget", () => {
 		const { placed, deleted, writes } = trackKittyGraphics(term);
 
 		setKittyGraphics({ unicodePlaceholders: false });
-		const tui = new TUI(term);
+		const tui = createTui(term);
 		tui.setMaxInlineImages(2);
 		const behind = [makeImage(tui.imageBudget, "behind-0"), makeImage(tui.imageBudget, "behind-1")];
 		const behindIds = behind.map((_, i) => tui.imageBudget.acquireId(`behind-${i}`));
@@ -1595,18 +1585,18 @@ describe("TUI inline-image budget", () => {
 
 		try {
 			tui.start();
-			await settle(term);
+			await scheduler.settle(term);
 			expect(behindIds.every(id => placed.has(id))).toBe(true);
 
 			const overlay = tui.showOverlay(
 				{ render: width => modalImages.flatMap(image => image.render(width)), invalidate: () => {} },
 				{ fullscreen: true },
 			);
-			await settle(term);
+			await scheduler.settle(term);
 
 			writes.length = 0;
 			overlay.hide();
-			await settle(term);
+			await scheduler.settle(term);
 
 			// The modal's split must not reach the transcript. A `d=I` here also
 			// takes the id's scrollback placements, which no repaint restores, and
@@ -1629,7 +1619,7 @@ describe("TUI inline-image budget", () => {
 		const { resident, placed } = trackKittyGraphics(term);
 
 		setKittyGraphics({ unicodePlaceholders: false });
-		const tui = new TUI(term);
+		const tui = createTui(term);
 		tui.setMaxInlineImages(2);
 		const behind = [makeImage(tui.imageBudget, "behind-0"), makeImage(tui.imageBudget, "behind-1")];
 		const modal = makeImage(tui.imageBudget, "modal");
@@ -1641,15 +1631,15 @@ describe("TUI inline-image budget", () => {
 
 		try {
 			tui.start();
-			await settle(term);
+			await scheduler.settle(term);
 			tui.showOverlay({ render: width => modal.render(width), invalidate: () => {} }, { anchor: "center" });
-			await settle(term);
+			await scheduler.settle(term);
 			expect(placed.has(modalId)).toBe(true);
 
 			// Overlays composite after the budget pass closes, so a later repaint
 			// that leaves them byte-identical must not mistake them for retired.
 			tui.requestRender();
-			await settle(term);
+			await scheduler.settle(term);
 			expect(placed.has(modalId)).toBe(true);
 			expect(resident.has(modalId)).toBe(true);
 		} finally {
@@ -1664,7 +1654,7 @@ describe("TUI inline-image budget", () => {
 		const { resident, placed } = trackKittyGraphics(term);
 
 		setKittyGraphics({ unicodePlaceholders: false });
-		const tui = new TUI(term);
+		const tui = createTui(term);
 		tui.setMaxInlineImages(2);
 		const behind = [makeImage(tui.imageBudget, "behind-0"), makeImage(tui.imageBudget, "behind-1")];
 		const modalImages = [makeImage(tui.imageBudget, "modal-0"), makeImage(tui.imageBudget, "modal-1")];
@@ -1676,28 +1666,28 @@ describe("TUI inline-image budget", () => {
 
 		try {
 			tui.start();
-			await settle(term);
+			await scheduler.settle(term);
 			expect(resident.size).toBe(2);
 
 			const overlay = tui.showOverlay(
 				{ render: width => modalImages.flatMap(image => image.render(width)), invalidate: () => {} },
 				{ anchor: "center" },
 			);
-			await settle(term);
+			await scheduler.settle(term);
 
 			// The overlay's images are the newest in display order, so the cap keeps
 			// them and demotes the transcript's — it may not simply stop counting.
 			const sizes: number[] = [];
 			for (let i = 0; i < 4; i++) {
 				tui.requestRender();
-				await settle(term);
+				await scheduler.settle(term);
 				sizes.push(resident.size);
 			}
 			expect(sizes).toEqual([2, 2, 2, 2]);
 			expect(modalIds.every(id => placed.has(id))).toBe(true);
 
 			overlay.hide();
-			await settle(term);
+			await scheduler.settle(term);
 			expect(resident.size).toBe(2);
 		} finally {
 			tui.stop();
@@ -1714,7 +1704,7 @@ describe("TUI inline-image budget", () => {
 			realWrite(data);
 		});
 
-		const tui = new TUI(term);
+		const tui = createTui(term);
 		tui.setMaxInlineImages(1);
 		tui.addChild(makeImage(tui.imageBudget, "first"));
 		tui.addChild(makeImage(tui.imageBudget, "second"));
@@ -1722,7 +1712,7 @@ describe("TUI inline-image budget", () => {
 
 		try {
 			tui.start();
-			await settle(term);
+			await scheduler.settle(term);
 
 			const output = writes.join("");
 			expect(output.match(/\x1b_Ga=t/g)).toHaveLength(1);
@@ -1742,20 +1732,20 @@ describe("TUI inline-image budget", () => {
 			realWrite(data);
 		});
 
-		const tui = new TUI(term);
+		const tui = createTui(term);
 		tui.setMaxInlineImages(1);
 		const oldId = tui.imageBudget.acquireId("img-old");
 		tui.addChild(makeImage(tui.imageBudget, "img-old"));
 
 		try {
 			tui.start();
-			await settle(term);
+			await scheduler.settle(term);
 			writes.length = 0;
 
 			// A second image arrives, exceeding the cap of 1.
 			tui.addChild(makeImage(tui.imageBudget, "img-new"));
 			tui.requestRender();
-			await settle(term);
+			await scheduler.settle(term);
 
 			// The demotion never forces a destructive replay: committed
 			// placements are immutable, so no ED2/ED3 is emitted...
@@ -1781,7 +1771,7 @@ describe("TUI inline-image budget", () => {
 			realWrite(data);
 		});
 
-		const tui = new TUI(term);
+		const tui = createTui(term);
 		const firstId = tui.imageBudget.acquireId("first");
 		const secondId = tui.imageBudget.acquireId("second");
 		tui.addChild(makeImage(tui.imageBudget, "first"));
@@ -1789,7 +1779,7 @@ describe("TUI inline-image budget", () => {
 
 		try {
 			tui.start();
-			await settle(term);
+			await scheduler.settle(term);
 			writes.length = 0;
 
 			tui.clearInlineImages();
@@ -1812,10 +1802,10 @@ describe("TUI inline-image budget", () => {
 			realWrite(data);
 		});
 
-		const tui = new TUI(term);
+		const tui = createTui(term);
 		tui.addChild(makeImage(tui.imageBudget, "persist"));
 		tui.start();
-		await settle(term);
+		await scheduler.settle(term);
 		writes.length = 0;
 
 		tui.stop();
@@ -1837,11 +1827,11 @@ describe("TUI inline-image budget", () => {
 		});
 
 		setKittyGraphics({ unicodePlaceholders: true });
-		const tui = new TUI(term);
+		const tui = createTui(term);
 		tui.addChild(makeImage(tui.imageBudget, "behind-modal"));
 		try {
 			tui.start();
-			await settle(term);
+			await scheduler.settle(term);
 			writes.length = 0;
 
 			const overlay = tui.showOverlay(new Text("MODEL SELECTOR\nMODEL ROW 2\nMODEL ROW 3\nMODEL ROW 4", 0, 0), {
@@ -1849,7 +1839,7 @@ describe("TUI inline-image budget", () => {
 				width: "100%",
 				maxHeight: "100%",
 			});
-			await settle(term);
+			await scheduler.settle(term);
 
 			const modalOutput = writes.join("");
 			expect(modalOutput).not.toContain("\x1b[?1049h");
@@ -1859,7 +1849,7 @@ describe("TUI inline-image budget", () => {
 
 			writes.length = 0;
 			overlay.hide();
-			await settle(term);
+			await scheduler.settle(term);
 
 			expect(term.getViewport().join("\n")).toContain(KITTY_PLACEHOLDER);
 		} finally {
@@ -1877,13 +1867,13 @@ describe("TUI inline-image budget", () => {
 			realWrite(data);
 		});
 
-		const tui = new TUI(term);
+		const tui = createTui(term);
 		tui.setMaxInlineImages(3); // high cap: no demotion in this test
 		tui.addChild(makeImage(tui.imageBudget, "only"));
 
 		try {
 			tui.start();
-			await settle(term);
+			await scheduler.settle(term);
 			// First paint transmits the data (a=t carrying the base64) and places it.
 			const initial = writes.join("");
 			expect(initial).toContain("\x1b_Ga=t");
@@ -1892,7 +1882,7 @@ describe("TUI inline-image budget", () => {
 
 			// Force a full redraw (clear scrollback + repaint the whole transcript).
 			tui.requestRender(true, { clearScrollback: true });
-			await settle(term);
+			await scheduler.settle(term);
 
 			// The repaint re-sends the base64.
 			const repaint = writes.join("");
@@ -1913,17 +1903,17 @@ describe("TUI inline-image budget", () => {
 		});
 
 		setKittyGraphics({ unicodePlaceholders: false });
-		const tui = new TUI(term);
+		const tui = createTui(term);
 		tui.setMaxInlineImages(3);
 		tui.addChild(makeImage(tui.imageBudget, "only"));
 
 		try {
 			tui.start();
-			await settle(term);
+			await scheduler.settle(term);
 			writes.length = 0;
 
 			tui.resetDisplay();
-			await settle(term);
+			await scheduler.settle(term);
 
 			// ED2/ED3 erase text but leave graphics untouched. d=A also removes
 			// untracked placements; current images must be re-sent and re-placed.
@@ -1937,59 +1927,6 @@ describe("TUI inline-image budget", () => {
 			expect(repaint).toContain(BASE64_ONE_PIXEL_PNG);
 		} finally {
 			tui.stop();
-			setKittyGraphics(originalGraphics);
-		}
-	});
-
-	it("holds the first Ghostty image paint until the startup settle window passes", () => {
-		const originalId = terminal.id;
-		const originalGraphics = { ...getKittyGraphics() };
-		const term = new VirtualTerminal(40, 12);
-		const writes: string[] = [];
-		const realWrite = term.write.bind(term);
-		vi.spyOn(term, "write").mockImplementation((data: string) => {
-			writes.push(data);
-			realWrite(data);
-		});
-
-		let now = 0;
-		const scheduled: Array<{ delayMs: number; callback: () => void; canceled: boolean }> = [];
-		const renderScheduler = {
-			now: () => now,
-			scheduleImmediate: (callback: () => void) => callback(),
-			scheduleRender: (callback: () => void, delayMs: number) => {
-				const entry = { delayMs, callback, canceled: false };
-				scheduled.push(entry);
-				return {
-					cancel: () => {
-						entry.canceled = true;
-					},
-				};
-			},
-		};
-
-		terminal.id = "ghostty";
-		terminal.imageProtocol = ImageProtocol.Kitty;
-		setKittyGraphics({ unicodePlaceholders: true });
-
-		const tui = new TUI(term, undefined, { renderScheduler });
-		tui.addChild(makeImage(tui.imageBudget, "only"));
-
-		try {
-			tui.start();
-			expect(writes.join("")).not.toContain("\x1b_Ga=t");
-
-			const delayed = scheduled.find(entry => !entry.canceled && entry.delayMs === 100);
-			expect(delayed).toBeDefined();
-			now = 100;
-			delayed?.callback();
-
-			const output = writes.join("");
-			expect(output).toContain("\x1b_Ga=t");
-			expect(output).toContain(BASE64_ONE_PIXEL_PNG);
-		} finally {
-			tui.stop();
-			terminal.id = originalId;
 			setKittyGraphics(originalGraphics);
 		}
 	});

@@ -7,6 +7,7 @@
  * compat per request.
  */
 
+import RULES from "./compat/rules.json" with { type: "json" };
 import { resolveDiscoveryApi, resolveModelPolicy } from "./compat/resolve";
 import type { ModelIdentity } from "./compat/types";
 import { resolveModelTokenizer } from "./model-tokenizer";
@@ -463,10 +464,56 @@ export function buildDiscoveredModel(spec: ModelSpec<Api>, providerType: string)
 	return buildModel({ ...spec, api, providerType });
 }
 
+/** Every dated card instant in the compiled rules, ascending; collected on first use. */
+let ruleCardInstants: number[] | undefined;
+
+function collectRuleCardInstants(value: unknown, out: number[]): void {
+	if (Array.isArray(value)) {
+		for (const item of value) collectRuleCardInstants(item, out);
+		return;
+	}
+	if (typeof value !== "object" || value === null) return;
+	for (const key in value) {
+		const child: unknown = Reflect.get(value, key);
+		if (key === "effectiveFrom" && typeof child === "string") {
+			const instant = Date.parse(child);
+			if (Number.isFinite(instant)) out.push(instant);
+		} else {
+			collectRuleCardInstants(child, out);
+		}
+	}
+}
+
 /**
- * Build one model from an authored spec. Bundled models.json rows are fully
- * materialized by the generator and consumed directly (see `models.ts`), so
- * this only runs for discovered/custom/override specs.
+ * The first instant after `now` at which {@link buildModel} could select a
+ * different dated price card for a spec carrying `cost`: the next
+ * `effectiveFrom` of the spec's own rate schedule or of any dated card in the
+ * compiled rules. A build of an unchanged spec made at or after `now` is
+ * identical to a fresh one until then. `Infinity` when no change is pending.
+ */
+export function nextBuildPriceChange(cost: ModelCost, now: number): number {
+	if (ruleCardInstants === undefined) {
+		const instants: number[] = [];
+		collectRuleCardInstants(RULES, instants);
+		ruleCardInstants = instants.sort((a, b) => a - b);
+	}
+	let next = Number.POSITIVE_INFINITY;
+	for (const instant of ruleCardInstants) {
+		if (instant > now) {
+			next = instant;
+			break;
+		}
+	}
+	for (const rate of cost.timeBased?.effectiveRates ?? []) {
+		if (rate.effectiveFrom > now && rate.effectiveFrom < next) next = rate.effectiveFrom;
+	}
+	return next;
+}
+
+/**
+ * Build one model from an authored spec. Bundled models are prebuilt by the
+ * generator and decoded by `models.ts`, so this only runs for discovered,
+ * custom, and override specs.
  */
 export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi> {
 	const policy = resolveModelPolicy(spec);

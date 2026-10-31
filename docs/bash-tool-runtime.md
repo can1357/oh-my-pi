@@ -56,12 +56,12 @@ If `bashInterceptor.enabled` is true (default `false`), `BashTool` loads `bashIn
 Interception behavior:
 
 - command is blocked **only** when:
-  - regex rule matches, and
-  - the suggested tool is present in `ctx.toolNames`.
+   - regex rule matches, and
+   - the suggested tool is present in `ctx.toolNames`.
 - invalid regex rules are silently skipped.
 - on block, `BashTool` throws `ToolError` with message:
-  - `Blocked: ...`
-  - original command included.
+   - `Blocked: ...`
+   - original command included.
 - heredocs, parameter expansion, command substitutions, backticks, grouping, and malformed quoting do not produce extra fragments; they retain only the complete-input check. Interception is best-effort routing to dedicated tools, not a shell-security policy.
 
 Default rule patterns (defined in code) target common misuses:
@@ -114,7 +114,7 @@ Print mode and non-UI RPC/tool contexts cannot use the local interactive overlay
 A nonblank `name` routes to `startService()` before finite-command timeout, async, terminal, or output-sink selection.
 
 - Names are 1–48 characters: an initial letter or digit, followed by letters, digits, dots, underscores, or hyphens. Names are project-broker scoped; starting an existing live name replaces that process.
-- Services execute the configured external shell with its args, prefix, and shell environment plus `PI_SESSION_ID`/`PI_SESSION_FILE`, not the embedded shell or finite-command direnv preflight.
+- Services execute the configured external shell with its args, prefix, and shell environment plus `PI_SESSION_ID`/`PI_SESSION_FILE`/`PI_TOOL_CALL_ID`, not the embedded shell or finite-command direnv preflight.
 - `pty` defaults to `true`; no command deadline is imposed.
 - `ready` must include a log regex or TCP port (1–65535). When both are present, both must pass. TCP host defaults to `127.0.0.1`; readiness timeout defaults to 30 seconds and is clamped to 0.05–3600 seconds.
 - Without a readiness condition, startup returns the running service. With one, startup waits for readiness, exit, or the readiness deadline. A readiness timeout is reported without stopping the process. A queued steering message ends the readiness wait early: the call returns `starting` and the service keeps starting.
@@ -157,7 +157,7 @@ Known differences from jq 1.8: slicing `null` errors (`.a[1:]` over `{}`), index
 
 At each call, the executor loads settings shell config (`shell`, `env`, optional `prefix`) and runs `applyDirenvPreflight()`.
 
-Unless `bash.direnv` is `"off"`, preflight attempts to load the cwd's direnv/devenv changes within `bash.direnvLoadTimeoutMs`, additionally bounded by a positive command timeout. Direnv-provided variables are merged below explicit caller `env`; safe variables removed by direnv are prepended as `unset -v ...`. ACP-terminal and PTY routes run the same preflight before their backend; the non-PTY executor runs it internally. Every `BashTool` route passes the session identity (`PI_SESSION_ID`, and `PI_SESSION_FILE` as an absolute path or empty when unpersisted) as caller `env`, read with the session ID when the call starts; it is not part of the shell session key, so it never starts a new shell.
+Unless `bash.direnv` is `"off"`, preflight attempts to load the cwd's direnv/devenv changes within `bash.direnvLoadTimeoutMs`, additionally bounded by a positive command timeout. Direnv-provided variables are merged below explicit caller `env`; safe variables removed by direnv are prepended as `unset -v ...`. ACP-terminal and PTY routes run the same preflight before their backend; the non-PTY executor runs it internally. Every `BashTool` route passes the session identity (`PI_SESSION_ID`, and `PI_SESSION_FILE` as an absolute path or empty when unpersisted) and the call's `PI_TOOL_CALL_ID` as caller `env`, read with the session ID when the call starts; it is not part of the shell session key, so it never starts a new shell.
 
 Successful exports retain their loaded environment and `DIRENV_*` state per `.envrc` directory. Each call still runs `direnv export json` to check direnv's watched inputs and authorization state, but an unchanged environment avoids re-running `.envrc` and devenv setup. OMP returns the complete diff relative to its process environment. A change to that process environment, or to the nanosecond timestamp, size, or existence of the `.envrc` or any direnv-watched path (including direnv's allow/deny files), restarts the load from a clean baseline; so does a warm export that reports any change. This cache does not modify OMP's process environment.
 
@@ -312,13 +312,13 @@ Interactive `!` calls request configured user-shell execution. zsh/fish commands
 
 This table covers finite-command execution; named-service routing is described separately above.
 
-| Surface                        | Entry path                                            | PTY eligible                                          | Live output UX                                                           | Error surfacing                                  |
-| ------------------------------ | ----------------------------------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------ |
-| Interactive tool call          | `BashTool.execute`                                    | Yes, when `pty=true` and UI exists and `PI_NO_PTY!=1` | PTY overlay (interactive) or streamed tail updates                       | Tool errors become `toolResult.isError`          |
-| Print mode tool call           | `BashTool.execute`                                    | No (no UI context)                                    | No TUI overlay; output appears in event stream/final assistant text flow | Same tool error mapping                          |
-| RPC tool call (agent tooling)  | `BashTool.execute`                                    | Usually no UI -> non-PTY                              | Structured tool events/results                                           | Same tool error mapping                          |
-| Interactive bang command (`!`) | `AgentSession.executeBash` + `BashExecutionComponent` | Headless PTY for supported zsh/fish user shells; not the interactive overlay | Dedicated bash execution component with PTY replay when used | Controller catches exceptions and shows UI error |
-| RPC `bash` command             | `rpc-mode` -> `session.executeBash`                   | No                                                    | Returns `BashResult` directly                                            | Consumer handles returned fields                 |
+| Surface                        | Entry path                                            | PTY eligible                                                                 | Live output UX                                                           | Error surfacing                                  |
+| ------------------------------ | ----------------------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------ |
+| Interactive tool call          | `BashTool.execute`                                    | Yes, when `pty=true` and UI exists and `PI_NO_PTY!=1`                        | PTY overlay (interactive) or streamed tail updates                       | Tool errors become `toolResult.isError`          |
+| Print mode tool call           | `BashTool.execute`                                    | No (no UI context)                                                           | No TUI overlay; output appears in event stream/final assistant text flow | Same tool error mapping                          |
+| RPC tool call (agent tooling)  | `BashTool.execute`                                    | Usually no UI -> non-PTY                                                     | Structured tool events/results                                           | Same tool error mapping                          |
+| Interactive bang command (`!`) | `AgentSession.executeBash` + `BashExecutionComponent` | Headless PTY for supported zsh/fish user shells; not the interactive overlay | Dedicated bash execution component with PTY replay when used             | Controller catches exceptions and shows UI error |
+| RPC `bash` command             | `rpc-mode` -> `session.executeBash`                   | No                                                                           | Returns `BashResult` directly                                            | Consumer handles returned fields                 |
 
 ## Operational caveats
 

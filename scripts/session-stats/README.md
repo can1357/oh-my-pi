@@ -41,15 +41,15 @@ within ~5–10% of Claude's BPE in aggregate.
 
 All tables are prefixed `ss_` to avoid collision with `packages/stats`.
 
-|Table|Granularity|
-|---|---|
-|`ss_sessions`|one row per `.jsonl`; carries sync state + session metadata|
-|`ss_tool_calls`|one row per `toolCall` content block (`arg_json`, `arg_tokens`)|
-|`ss_tool_results`|one row per `toolResult` message (`result_text`, `result_tokens`, `is_error`)|
-|`ss_assistant_msgs`|per assistant message text + thinking blobs and token counts|
-|`ss_user_msgs`|per user message text and token count|
-|`ss_edit_calls`|per `edit` call: `success`, `warnings`, `raw_input_len`|
-|`ss_edit_sections`|per `¶PATH` section in an edit; precomputed `longest_repeat_*`, `dup_anchors`. Legacy `§PATH` sections from pre-2026-05 sessions still parse.|
+| Table               | Granularity                                                                                                                                   |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ss_sessions`       | one row per `.jsonl`; carries sync state + session metadata                                                                                   |
+| `ss_tool_calls`     | one row per `toolCall` content block (`arg_json`, `arg_tokens`)                                                                               |
+| `ss_tool_results`   | one row per `toolResult` message (`result_text`, `result_tokens`, `is_error`)                                                                 |
+| `ss_assistant_msgs` | per assistant message text + thinking blobs and token counts                                                                                  |
+| `ss_user_msgs`      | per user message text and token count                                                                                                         |
+| `ss_edit_calls`     | per `edit` call: `success`, `warnings`, `raw_input_len`                                                                                       |
+| `ss_edit_sections`  | per `¶PATH` section in an edit; precomputed `longest_repeat_*`, `dup_anchors`. Legacy `§PATH` sections from pre-2026-05 sessions still parse. |
 
 Indexes on `(tool_name, timestamp)` and `(session_file, seq)` make per-tool
 aggregations and ordered session walks cheap.
@@ -75,7 +75,7 @@ signal and decodes hashline op kinds (`replace`, `insert after`, `delete`,
 ## Usage audit (`audit.ts`)
 
 Standalone Bun script — reads session JSONL directly (no `sync.py` / tiktoken
-needed) and uses the *real* per-request usage recorded in each assistant
+needed) and uses the _real_ per-request usage recorded in each assistant
 message (input/output/cacheRead/cacheWrite + nominal cost) instead of
 re-tokenizing.
 
@@ -91,7 +91,7 @@ bun run stats:audit -- --no-cache                  # force fresh LLM verdicts
 
 The scan phase reports the main-vs-subagent usage split, per-folder and
 per-session cost, per-tool traffic (estimated arg/result tokens plus a
-*context-residency* metric: result tokens × subsequent requests), repeated
+_context-residency_ metric: result tokens × subsequent requests), repeated
 reads of the same file, the largest single tool results, compactions, and
 edit-failure churn.
 

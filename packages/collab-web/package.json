@@ -27,7 +27,7 @@
     "mock-host": "bun scripts/mock-host.ts",
     "relay": "bun scripts/local-relay.ts",
     "build": "rm -rf dist && bun build ./index.html --outdir=dist --minify --define process.env.NODE_ENV='\"production\"' --entry-naming=[hash].[ext] --chunk-naming=[hash].[ext] --asset-naming=[hash].[ext] && mv dist/*.html dist/index.html && cp -R public/. dist/",
-    "gen:tool-views": "bun scripts/build-tool-views.ts",
+    "gen:export-viewer": "bun scripts/build-export-viewer.ts",
     "prepack": "bun run build",
     "test": "bun test --parallel",
     "check": "oxlint . && oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && bun run check:types",
@@ -37,6 +37,7 @@
     "fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts'"
   },
   "dependencies": {
+    "@oh-my-pi/omp-stats": "catalog:",
     "@oh-my-pi/pi-utils": "catalog:",
     "@oh-my-pi/pi-wire": "catalog:",
     "lucide-react": "catalog:",

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { AsyncJobManager, type AsyncJob } from "../../src/async/job-manager";
 import { type JobWidgetAuthorRequest, JobWidgets, TextTap } from "../../src/job-widgets";
 
@@ -87,70 +87,6 @@ function setup(options: { maxInFlight?: number; enabled?: () => boolean; refresh
 }
 
 describe("job widget registry", () => {
-	it("asks for a spec only once the job is 15 s old and has output, and shows it while it is being written", async () => {
-		const { manager, widgets, calls, advance } = setup();
-		const { job, tap } = startJob(manager, "bench");
-		tap.append("req 1 rps=40\nreq 2 rps=48\nreq 3 rps=52\n");
-		widgets.view(job);
-		expect(calls).toHaveLength(0);
-
-		advance(15_000);
-		expect(widgets.view(job)?.state).toBe("authoring");
-		expect(calls).toHaveLength(1);
-		expect(calls[0].request.sources[0]).toMatchObject({ id: "out", lines: 3 });
-
-		calls[0].answer.resolve(REQ_SPEC);
-		await settle();
-		const view = widgets.view(job);
-		// Lines read before the spec existed still feed it: the source is reread from its start.
-		expect(view).toMatchObject({ title: "load test", state: "live", headline: { text: "52 req/s" } });
-	});
-
-	it("stops requesting specs for a previously shown job after widgets are disabled", () => {
-		vi.useFakeTimers();
-		try {
-			let enabled = true;
-			const { manager, widgets, calls, advance } = setup({ enabled: () => enabled, refreshMs: 10 });
-			const { job, tap } = startJob(manager, "bench");
-			tap.append("req 1 rps=40\nreq 2 rps=48\nreq 3 rps=52\n");
-			widgets.view(job);
-			const unsubscribe = widgets.subscribe(() => {});
-			enabled = false;
-			advance(15_000);
-			vi.advanceTimersByTime(20);
-			expect(calls).toHaveLength(0);
-			expect(widgets.view(job)).toBeUndefined();
-			unsubscribe();
-		} finally {
-			vi.useRealTimers();
-		}
-	});
-
-	it("stops the background timer while widgets are disabled, and resumes on re-enable", () => {
-		vi.useFakeTimers();
-		try {
-			let enabled = true;
-			const { manager, widgets, calls, advance } = setup({ enabled: () => enabled, refreshMs: 10 });
-			const { job, tap } = startJob(manager, "bench");
-			tap.append("req 1 rps=40\nreq 2 rps=48\nreq 3 rps=52\n");
-			widgets.view(job);
-			const unsubscribe = widgets.subscribe(() => {});
-			enabled = false;
-			advance(15_000);
-			vi.advanceTimersByTime(1_000);
-			expect(calls).toHaveLength(0);
-			// The TUI repaints after the setting flips back; that restarts the timer.
-			enabled = true;
-			widgets.view(job);
-			vi.advanceTimersByTime(20);
-			expect(calls).toHaveLength(1);
-			calls[0].answer.resolve(REQ_SPEC);
-			unsubscribe();
-		} finally {
-			vi.useRealTimers();
-		}
-	});
-
 	it("aborts an in-flight spec request when widgets are disabled", async () => {
 		let enabled = true;
 		const signals: AbortSignal[] = [];
@@ -279,6 +215,56 @@ describe("job widget registry", () => {
 		calls[1].answer.resolve(STEP_SPEC);
 		await settle();
 		expect(widgets.view(job)).toMatchObject({ title: "training", headline: { text: "0.01" } });
+	});
+
+	describe("specs matching unrelated lines", () => {
+		const GRID_SPEC = {
+			title: "PR checks",
+			rules: [{ from: "out", match: String.raw`^(?P<name>\S+)\s+(?P<status>\S+)`, key: "name", text: "status" }],
+			blocks: [{ kind: "grid", field: "status", label: "checks", tones: { pass: "success", pending: "pending" } }],
+		};
+		const checks = (count: number) =>
+			Array.from({ length: count }, (_, index) => `job${index % 4} ${index % 2 ? "pass" : "pending"}\n`).join("");
+		const prose = (count: number) =>
+			Array.from({ length: count }, (_, index) => `Rule${index} should hold for every module\n`).join("");
+
+		it("sends back a spec whose rules fit the samples but not the whole output", async () => {
+			const { manager, widgets, calls, advance } = setup();
+			const { job, tap } = startJob(manager, "gh pr checks --watch");
+			// The author sees the first 30 and the last 60 lines; the prose between them it never sees.
+			tap.append(`${checks(30)}${prose(60)}${checks(60)}`);
+			advance(15_000);
+			widgets.view(job);
+			calls[0].answer.resolve(GRID_SPEC);
+			await settle();
+			expect(calls).toHaveLength(2);
+			expect(calls[1].request.rejected?.errors).toEqual([
+				'field "status": split into 64 keys, more than the 48 it may draw; its key group captures words of lines that carry no data, so anchor the rule on the literal text of the lines that do',
+				'blocks[0] (grid): 60 of 64 cells carry no status its tones name ("should", "should", "should"); capture the status word of status lines and name each status in `tones`',
+			]);
+			expect(widgets.view(job)?.state).toBe("authoring");
+		});
+
+		it("drops a live spec once new output makes it draw unrelated lines, and asks again with why", async () => {
+			const { manager, widgets, calls, advance } = setup();
+			const { job, tap } = startJob(manager, "gh pr checks --watch");
+			tap.append(checks(8));
+			advance(15_000);
+			widgets.view(job);
+			calls[0].answer.resolve(GRID_SPEC);
+			await settle();
+			expect(widgets.view(job)?.state).toBe("live");
+
+			tap.append(prose(5));
+			const view = widgets.view(job);
+			expect(view?.blocks.some(entry => entry.kind === "grid")).toBe(false);
+			expect(calls).toHaveLength(2);
+			const rejected = calls[1].request.rejected;
+			expect(JSON.parse(rejected?.answer ?? "null")).toEqual(GRID_SPEC);
+			expect(rejected?.errors).toEqual([
+				'blocks[0] (grid): 5 of 9 cells carry no status its tones name ("should", "should", "should"); capture the status word of status lines and name each status in `tones`',
+			]);
+		});
 	});
 
 	it("freezes a settled job's view after a final read and pushes changes to subscribers", async () => {

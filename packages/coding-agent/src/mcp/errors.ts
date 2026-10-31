@@ -222,7 +222,12 @@ export function normalizeMCPTransportError(
 		normalizedCode === "CONNECTIONREFUSED" ||
 		normalizedCode === "ENETUNREACH" ||
 		normalizedCode === "EHOSTUNREACH" ||
-		/\b(?:ECONNREFUSED|ConnectionRefused|ENETUNREACH|EHOSTUNREACH)\b/i.test(message)
+		normalizedCode === "ENOTFOUND" ||
+		normalizedCode === "EAI_AGAIN" ||
+		normalizedCode === "FAILEDTOOPENSOCKET" ||
+		/\b(?:ECONNREFUSED|ConnectionRefused|ENETUNREACH|EHOSTUNREACH|ENOTFOUND|EAI_AGAIN|FailedToOpenSocket)\b/i.test(
+			message,
+		)
 	) {
 		failure = "connect";
 		retryable = true;
