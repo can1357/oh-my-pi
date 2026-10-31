@@ -1,9 +1,20 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import * as path from "node:path";
 import * as vm from "node:vm";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import {
+	registerArtifactsDir,
+	resetRegisteredArtifactDirsForTests,
+} from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { TempDir } from "@oh-my-pi/pi-utils/temp";
+import { AgentRegistry } from "../../src/registry/agent-registry";
+import type { AgentSession } from "../../src/session/agent-session";
 import { createHelpers } from "../../src/eval/js/shared/helpers";
 import { JAVASCRIPT_PRELUDE_SOURCE } from "../../src/eval/js/shared/prelude";
+import { callSessionTool } from "../../src/eval/js/tool-bridge";
 import { artifactReadBridge } from "../helpers/artifact-read-bridge";
 
 /**
@@ -294,5 +305,132 @@ describe("eval js read() URI delegation", () => {
 			{ name: "read", args: { path: "artifact://12:raw:1-1" } },
 			{ name: "read", args: { path: "artifact://12:raw:2-3" } },
 		]);
+	});
+});
+
+describe("eval js workpool model selection", () => {
+	it("sends an exact selector through the shipped workpool helper", async () => {
+		const calls: Array<{ name: string; args: unknown }> = [];
+		const sandbox = loadPrelude(async (name, args) => {
+			calls.push({ name, args });
+			return { name: "chosen", agent: "scout", limit: 2 };
+		});
+		const create = sandbox.workpool as (agent: string, options: Record<string, unknown>) => Promise<unknown>;
+		await create("scout", { name: "chosen", model: "p/chosen:high" });
+		expect(calls).toEqual([
+			{
+				name: "__workpool__",
+				args: { op: "create", agent: "scout", name: "chosen", model: "p/chosen:high" },
+			},
+		]);
+	});
+});
+
+describe("eval js output() options (issue #17455)", () => {
+	afterEach(() => {
+		AgentRegistry.resetGlobalForTests();
+		resetRegisteredArtifactDirsForTests();
+	});
+
+	// Over the 50 KB the read tool pages agent:// at, so only a verbatim read reaches the tail.
+	const rows = Array.from({ length: 4000 }, (_, i) => `ROW ${i + 1} ${"x".repeat(20)}`);
+
+	/** The prelude behind the real eval bridge: schema validation, then the built-in read tool on agent://. */
+	async function loadOutputPrelude(tmp: TempDir): Promise<Record<string, unknown>> {
+		const artifacts = path.join(tmp.path(), "artifacts");
+		await Bun.write(path.join(artifacts, "Scout.md"), `${rows.join("\n")}\n`);
+		await Bun.write(
+			path.join(artifacts, "Report.md"),
+			JSON.stringify({ files: [{ path: "a.ts" }, { path: "b.ts" }] }),
+		);
+		await Bun.write(path.join(artifacts, "Shell.md"), "\x1b[31mred\x1b[0m plain\n");
+		await Bun.write(path.join(artifacts, "Wide.md"), `${"w".repeat(60_000)}\nlast\n`);
+		registerArtifactsDir(artifacts);
+		const session: ToolSession = {
+			cwd: tmp.path(),
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			getArtifactsDir: () => artifacts,
+			settings: Settings.isolated(),
+		};
+		const readTool = new ReadTool(session);
+		session.getToolByName = name => (name === "read" ? (readTool as unknown as AgentTool) : undefined);
+		const sandbox = loadPrelude((name, args) => callSessionTool(name, args, { session }));
+		sandbox.__omp_helpers__ = createHelpers({
+			cwd: () => tmp.path(),
+			env: new Map(),
+			localRoots: () => ({}),
+			emitStatus: () => {},
+		});
+		return sandbox;
+	}
+
+	it("selects the offset/limit line window, verbatim past the read tool's page", async () => {
+		using tmp = TempDir.createSync("@eval-prelude-output-lines-");
+		const sandbox = await loadOutputPrelude(tmp);
+
+		expect(await vm.runInContext(`output("Scout", { offset: 3990, limit: 2 })`, sandbox)).toBe(
+			`${rows[3989]}\n${rows[3990]}`,
+		);
+		expect(await vm.runInContext(`output("Scout")`, sandbox)).toBe(`${rows.join("\n")}\n`);
+		expect(await vm.runInContext(`output("Wide", { offset: 2, limit: 1 })`, sandbox)).toBe("last");
+		expect(await vm.runInContext(`output("Scout", "Shell", { limit: 1 })`, sandbox)).toEqual([
+			{ id: "Scout", content: rows[0] },
+			{ id: "Shell", content: "\x1b[31mred\x1b[0m plain" },
+		]);
+		await expect(vm.runInContext(`output("Scout", { offset: 4001 })`, sandbox)).rejects.toThrow(
+			"Offset 4001 is beyond end of output (4000 lines) for Scout",
+		);
+	});
+
+	it("extracts a JSON query and refuses to combine it with a line window", async () => {
+		using tmp = TempDir.createSync("@eval-prelude-output-query-");
+		const sandbox = await loadOutputPrelude(tmp);
+
+		expect(await vm.runInContext(`output("Report", { query: ".files[1].path" })`, sandbox)).toBe('"b.ts"');
+		expect(await vm.runInContext(`output("Report", { query: ".files[5]" })`, sandbox)).toBe("null");
+		await expect(vm.runInContext(`output("Scout", { query: ".x" })`, sandbox)).rejects.toThrow(
+			"Output Scout is not valid JSON",
+		);
+		await expect(vm.runInContext(`output("Report", { query: ".files", limit: 1 })`, sandbox)).rejects.toThrow(
+			"query cannot be combined with offset/limit",
+		);
+	});
+
+	it("strips ANSI for format stripped and returns metadata for format json", async () => {
+		using tmp = TempDir.createSync("@eval-prelude-output-format-");
+		const sandbox = await loadOutputPrelude(tmp);
+
+		expect(await vm.runInContext(`output("Shell", { format: "stripped" })`, sandbox)).toBe("red plain\n");
+		expect(await vm.runInContext(`output("Scout", { format: "json", offset: 2, limit: 1 })`, sandbox)).toEqual({
+			id: "Scout",
+			path: path.join(tmp.path(), "artifacts", "Scout.md"),
+			line_count: 4000,
+			char_count: rows.join("\n").length + 1,
+			content: rows[1],
+			range: { start_line: 2, end_line: 2, total_lines: 4000 },
+		});
+	});
+
+	it("keeps the previous-run banner while the agent streams a follow-up, but queries the published data", async () => {
+		using tmp = TempDir.createSync("@eval-prelude-output-superseded-");
+		const sandbox = await loadOutputPrelude(tmp);
+		const registry = AgentRegistry.global();
+		for (const id of ["Scout", "Report"]) {
+			registry.register({
+				id,
+				displayName: id,
+				kind: "sub",
+				session: { isStreaming: true } as AgentSession,
+				status: "running",
+			});
+		}
+
+		expect(await vm.runInContext(`output("Scout", { limit: 1 })`, sandbox)).toContain("PREVIOUS run");
+		expect(await vm.runInContext(`output("Report", { query: ".files[0].path" })`, sandbox)).toBe('"a.ts"');
+
+		registry.setStatus("Scout", "idle");
+		expect(await vm.runInContext(`output("Scout")`, sandbox)).toBe(`${rows.join("\n")}\n`);
 	});
 });

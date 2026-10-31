@@ -3482,7 +3482,7 @@ async function executeToolCalls(
 		// also cascades: the freshly detached job's own completion re-triggers
 		// this check for the next command, so millisecond-long commands chain
 		// into separate background deliveries (#12869).
-		if (source === "irc" && softInterrupts) steeringSoftController.abort();
+		if (source === "irc" && softInterrupts) steeringSoftController.abort("irc");
 	};
 
 	const checkSteering = async (): Promise<void> => {
@@ -3521,7 +3521,7 @@ async function executeToolCalls(
 				interruptState.triggered = true;
 				interruptState.source = steeringSource ?? "unknown";
 				steeringAbortController.abort(TOOL_INTERRUPT_ABORT_REASON);
-				if (softInterrupts) steeringSoftController.abort();
+				if (softInterrupts) steeringSoftController.abort(interruptState.source);
 			}
 			return;
 		}
