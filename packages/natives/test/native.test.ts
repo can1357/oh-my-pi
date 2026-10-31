@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { filterChildShellEnv } from "@oh-my-pi/pi-utils";
 import {
 	AstMatchStrictness,
 	astMatch,
@@ -829,6 +830,90 @@ try {
 	});
 
 	describe("pty", () => {
+		it("does not leak inherited IPC markers into shell or argv PTY children", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pty-ipc-env-"));
+			try {
+				await Bun.write(
+					path.join(root, "package.json"),
+					JSON.stringify({ scripts: { probe: `${JSON.stringify(process.execPath)} probe.ts` } }),
+				);
+				await Bun.write(
+					path.join(root, "probe.ts"),
+					'await Bun.write("observed.json", JSON.stringify({ fd: process.env.NODE_CHANNEL_FD ?? null, mode: process.env.NODE_CHANNEL_SERIALIZATION_MODE ?? null, ordinary: process.env.OMP_PTY_PARENT, overlay: process.env.OMP_PTY_OVERLAY, posixAlias: process.env.node_channel_fd ?? null }));\n',
+				);
+				// Spawn env seeds native OS inheritance without mutating the test runner.
+				// Bun.env writes only its JS map; Bun also hides IPC keys at startup.
+				const fdKey = process.platform === "win32" ? "Node_Channel_Fd" : "NODE_CHANNEL_FD";
+				const modeKey =
+					process.platform === "win32" ? "Node_Channel_Serialization_Mode" : "NODE_CHANNEL_SERIALIZATION_MODE";
+				const hostScript = `
+					import * as path from "node:path";
+					import { PtySession } from ${JSON.stringify(addonUrl)};
+					const fdKey = process.platform === "win32" ? "Node_Channel_Fd" : "NODE_CHANNEL_FD";
+					const modeKey = process.platform === "win32" ? "Node_Channel_Serialization_Mode" : "NODE_CHANNEL_SERIALIZATION_MODE";
+					// Mirror the spawn-seeded IPC values only for the unchanged JS-map assertion.
+					// These assignments do not deliver the native inherited environment.
+					Bun.env[fdKey] = "3";
+					Bun.env[modeKey] = "advanced";
+					const options = {
+						cwd: ${JSON.stringify(root)}, timeoutMs: 5000, cols: 80, rows: 24,
+						env: { PATH: path.dirname(process.execPath) + path.delimiter + Bun.env.PATH, OMP_PTY_OVERLAY: "explicit-value" },
+					};
+					for (const backend of ["shell", "argv"]) {
+						let rawEnv = "";
+						const inspect = new PtySession();
+						const onChunk = (error, chunk) => { if (error) throw error; rawEnv += chunk; };
+						const inspected = backend === "shell"
+							? await inspect.start({ ...options, shell: process.platform === "win32" ? "cmd.exe" : "sh", command: process.platform === "win32" ? "set" : "env" }, onChunk)
+							: await inspect.startArgv({ ...options, application: process.platform === "win32" ? "cmd.exe" : "env", args: process.platform === "win32" ? ["/c", "set"] : [] }, onChunk);
+						if (inspected.exitCode !== 0) throw new Error("PTY environment probe failed");
+						const inheritedMarkers = rawEnv.split(String.fromCharCode(10))
+							.map(line => line.trim().split("=")[0])
+							.map(key => process.platform === "win32" ? key.toUpperCase() : key)
+							.filter(key => key === "NODE_CHANNEL_FD" || key === "NODE_CHANNEL_SERIALIZATION_MODE");
+						const session = new PtySession();
+						const result = backend === "shell"
+							? await session.start({ ...options, shell: process.platform === "win32" ? "cmd.exe" : "sh", command: JSON.stringify(process.execPath) + " run --silent probe" })
+							: await session.startArgv({ ...options, application: process.execPath, args: ["run", "--silent", "probe"] });
+						if (result.exitCode !== 0 || result.timedOut || result.cancelled) throw new Error(JSON.stringify({ backend, result }));
+						const observed = await Bun.file(${JSON.stringify(path.join(root, "observed.json"))}).json();
+						console.log(JSON.stringify({ backend, observed, inheritedMarkers, hostFd: Bun.env[fdKey], hostMode: Bun.env[modeKey] }));
+					}
+				`;
+				const host = Bun.spawn([process.execPath, "-e", hostScript], {
+					cwd: root,
+					env: {
+						...filterChildShellEnv(Bun.env, root),
+						[fdKey]: "3",
+						[modeKey]: "advanced",
+						OMP_PTY_PARENT: "ordinary-parent-value",
+						...(process.platform === "win32" ? {} : { node_channel_fd: "ordinary-posix-alias" }),
+					},
+					stdout: "pipe",
+					stderr: "pipe",
+					signal: AbortSignal.timeout(20_000),
+				});
+				const [stdout, stderr] = await Promise.all([
+					new Response(host.stdout).text(),
+					new Response(host.stderr).text(),
+				]);
+				expect({ exitCode: await host.exited, stderr }).toEqual({ exitCode: 0, stderr: "" });
+				const observed = {
+					fd: null,
+					mode: null,
+					ordinary: "ordinary-parent-value",
+					overlay: "explicit-value",
+					posixAlias: process.platform === "win32" ? null : "ordinary-posix-alias",
+				};
+				expect(Bun.JSONL.parse(stdout.trim())).toEqual([
+					{ backend: "shell", observed, inheritedMarkers: [], hostFd: "3", hostMode: "advanced" },
+					{ backend: "argv", observed, inheritedMarkers: [], hostFd: "3", hostMode: "advanced" },
+				]);
+			} finally {
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		});
+
 		it("passes executable arguments without shell quoting", async () => {
 			const scriptPath = path.join(testDir, "pty-argv.ts");
 			const expected = ["argument with spaces", 'quote"inside', "backslash\\end"];

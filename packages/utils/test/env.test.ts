@@ -7,9 +7,11 @@ import {
 	filterChildShellEnv,
 	filterProcessEnv,
 	getDbBusyTimeoutMs,
+	getDotenvEnvValues,
 	parseEnvFile,
 	setInteractiveHost,
 	stripGitRepoLocationEnv,
+	stripNodeIpcChannelEnv,
 } from "@oh-my-pi/pi-utils/env";
 
 const tempDirs: string[] = [];
@@ -252,6 +254,96 @@ describe("filterChildShellEnv", () => {
 		).toEqual({ GIT_EDITOR: "true", GIT_AUTHOR_NAME: "Agent" });
 	});
 
+	it("drops node IPC channel pointers from tool-call env", () => {
+		const cwd = path.dirname(writeTempEnv(""));
+		// The agent's own worker channel (`NODE_CHANNEL_FD=3`) must not reach
+		// tool-call children: `bun run` inside a bash tool call reads it as
+		// its control channel and dies with EBADF (posix_spawn()).
+		expect(
+			filterChildShellEnv(
+				{
+					NODE_CHANNEL_FD: "3",
+					NODE_CHANNEL_SERIALIZATION_MODE: "advanced",
+					UNCHANGED: "parent-value",
+				},
+				cwd,
+			),
+		).toEqual({ UNCHANGED: "parent-value" });
+	});
+
+	it("removes dotenv values expanded from IPC markers without losing provenance", () => {
+		const cwd = path.dirname(writeTempEnv("FROM_FD=$NODE_CHANNEL_FD\n"));
+		const env = { NODE_CHANNEL_FD: "3", FROM_FD: "3", UNCHANGED: "parent-value" };
+
+		expect({
+			child: filterChildShellEnv(env, cwd),
+			hasExpandedValue: getDotenvEnvValues(cwd, env).includes("3"),
+		}).toEqual({ child: { UNCHANGED: "parent-value" }, hasExpandedValue: true });
+		expect(env.NODE_CHANNEL_FD).toBe("3");
+
+		const parentOverride = { ...env, FROM_FD: "parent-override" };
+		expect(filterChildShellEnv(parentOverride, cwd)).toEqual({
+			FROM_FD: "parent-override",
+			UNCHANGED: "parent-value",
+		});
+
+		const windowsEnv = { node_channel_fd: "3", FROM_FD: "3", UNCHANGED: "parent-value" };
+		expect({
+			child: filterChildShellEnv(windowsEnv, cwd, "win32"),
+			hasExpandedValue: getDotenvEnvValues(cwd, windowsEnv, "win32").includes("3"),
+		}).toEqual({ child: { UNCHANGED: "parent-value" }, hasExpandedValue: true });
+		expect(windowsEnv.node_channel_fd).toBe("3");
+
+		const posixEnv = { node_channel_fd: "3", FROM_FD: "3", UNCHANGED: "parent-value" };
+		expect(filterChildShellEnv(posixEnv, cwd, "linux")).toEqual(posixEnv);
+		expect(getDotenvEnvValues(cwd, posixEnv, "linux")).not.toContain("3");
+	});
+
+	it("removes dotenv values derived from IPC keys hidden by Bun", () => {
+		const cwd = path.dirname(
+			writeTempEnv(
+				[
+					"FROM_FD=$NODE_CHANNEL_FD",
+					"INDIRECT=${FROM_FD}/suffix",
+					"ESCAPED=\\$NODE_CHANNEL_FD",
+					"ORDINARY=$MISSING_PARENT",
+				].join("\n"),
+			),
+		);
+		const env = {
+			FROM_FD: "3",
+			INDIRECT: "3/suffix",
+			ESCAPED: "parent-escaped",
+			ORDINARY: "parent-override",
+			KEEP: "parent-value",
+		};
+
+		expect({
+			child: filterChildShellEnv(env, cwd, "darwin"),
+			values: getDotenvEnvValues(cwd, env, "darwin"),
+		}).toEqual({
+			child: { ESCAPED: "parent-escaped", ORDINARY: "parent-override", KEEP: "parent-value" },
+			values: expect.arrayContaining(["3", "3/suffix"]),
+		});
+		expect(env.FROM_FD).toBe("3");
+
+		fs.writeFileSync(path.join(cwd, ".env.local"), "FROM_FD=local-value\n");
+		expect(filterChildShellEnv({ FROM_FD: "parent-override" }, cwd, "darwin")).toEqual({
+			FROM_FD: "parent-override",
+		});
+
+		const windowsCwd = path.dirname(
+			writeTempEnv("FROM_FD=$nOdE_cHaNnEl_Fd\nFROM_MODE=${node_channel_serialization_mode}\n"),
+		);
+		expect(
+			filterChildShellEnv({ FROM_FD: "4", FROM_MODE: "advanced", KEEP: "parent-value" }, windowsCwd, "win32"),
+		).toEqual({
+			KEEP: "parent-value",
+		});
+		expect(getDotenvEnvValues(windowsCwd, { FROM_FD: "4" }, "win32")).toContain("4");
+		expect(filterChildShellEnv({ FROM_FD: "4" }, windowsCwd, "darwin")).toEqual({ FROM_FD: "4" });
+	});
+
 	it("uses the launch mode when dotenv changes NODE_ENV", async () => {
 		const cwd = path.dirname(writeTempEnv("NODE_ENV=production\n"));
 		fs.writeFileSync(
@@ -331,6 +423,25 @@ describe("stripGitRepoLocationEnv", () => {
 		const posixEnv: Record<string, string> = { GIT_DIR: "a", git_dir: "b", KEEP: "d" };
 		stripGitRepoLocationEnv(posixEnv, "linux");
 		expect(posixEnv).toEqual({ git_dir: "b", KEEP: "d" });
+	});
+});
+
+describe("stripNodeIpcChannelEnv", () => {
+	it("matches case-insensitively on win32 and exactly on POSIX", () => {
+		// Windows resolves `node_channel_fd` as `NODE_CHANNEL_FD`; POSIX names
+		// are case-sensitive and must not be over-stripped.
+		const win32Env: Record<string, string> = {
+			NODE_CHANNEL_FD: "3",
+			node_channel_fd: "3",
+			Node_Channel_Serialization_Mode: "json",
+			KEEP: "d",
+		};
+		stripNodeIpcChannelEnv(win32Env, "win32");
+		expect(win32Env).toEqual({ KEEP: "d" });
+
+		const posixEnv: Record<string, string> = { NODE_CHANNEL_FD: "3", node_channel_fd: "3", KEEP: "d" };
+		stripNodeIpcChannelEnv(posixEnv, "linux");
+		expect(posixEnv).toEqual({ node_channel_fd: "3", KEEP: "d" });
 	});
 });
 

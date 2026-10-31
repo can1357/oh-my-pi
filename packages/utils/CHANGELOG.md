@@ -113,6 +113,10 @@
 ### Fixed
 
 - Fixed an unhandled rejection when a subprocess is spawned with an already-aborted signal ([#15750](https://github.com/can1357/oh-my-pi/pull/15750) by [@harshaygadekar](https://github.com/harshaygadekar))
+### Fixed
+
+- Fixed project dotenv values derived from IPC markers leaking into custom tool environments ([#15632](https://github.com/can1357/oh-my-pi/pull/15632) by [@Komzpa](https://github.com/Komzpa))
+- Fixed `bun run` failing with `EBADF: Bad file descriptor` in bash tool calls ([#15632](https://github.com/can1357/oh-my-pi/pull/15632) by [@Komzpa](https://github.com/Komzpa))
 
 ## [18.10.0] - 2026-10-12
 
