@@ -233,6 +233,9 @@ export function runFoot(input: RunFootInput): NativeNode {
 		: RUN_STATE[input.state];
 	const facts = (input.facts ?? []).map(fact => plainText(fact).trim()).filter(fact => fact.length > 0);
 	const notices: string[] = [];
+	if (input.meta?.droppedLines) notices.push(`… ${input.meta.droppedLines} earlier lines dropped`);
+	if (input.meta?.throttledLines) notices.push(`… ${input.meta.throttledLines} lines skipped in output`);
+	if (input.meta?.throttledFragmentLost) notices.push("… partial output skipped in output");
 	if (input.meta?.truncation) notices.push(formatTruncationMetaNotice(input.meta.truncation, input.meta.source));
 	if (input.meta?.artifactError) notices.push(formatArtifactErrorNotice(input.meta.artifactError));
 	const factSpans: TspSpan[] = [];

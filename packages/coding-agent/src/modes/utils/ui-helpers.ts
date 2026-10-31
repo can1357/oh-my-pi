@@ -286,14 +286,20 @@ export class UiHelpers {
 		switch (message.role) {
 			case "bashExecution": {
 				const component = new BashExecutionComponent(message.command, this.ctx.ui, message.excludeFromContext);
-				if (message.output) {
-					component.appendOutput(message.output);
-				}
+				// Replay seeds the persisted output as the completed snapshot.
+				// Routing it through appendOutput() would apply the live streaming
+				// cap (last STREAMING_LINE_CAP lines), leaving every resumed block
+				// permanently truncated to its tail with no way to expand back.
 				component.setComplete(message.exitCode, message.cancelled, {
+					output: message.output,
 					truncation: message.meta?.truncation,
 					artifactError: message.meta?.artifactError,
 					images: message.images,
-					showImages: cfgTerminalShowImages.get(settings),
+					// The mode context's settings, not the process-wide singleton:
+					// the context owns the session this render belongs to, and a
+					// test that drives it must not have to install (or reset) the
+					// global one.
+					showImages: cfgTerminalShowImages.get(this.ctx.settings),
 				});
 				this.ctx.chatContainer.addChild(component);
 				break;
