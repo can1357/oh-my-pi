@@ -200,6 +200,7 @@ describe("submitInteractiveInput", () => {
 				options?.onAccepted?.();
 				return true;
 			}),
+			resume: vi.fn(async () => {}),
 			isStreaming: false,
 		};
 		await submitInteractiveInput(mode, session, createInput({ text: "loop iteration" }));
@@ -297,6 +298,7 @@ describe("submitInteractiveInput", () => {
 			...skillPromptBuilder,
 			prompt: vi.fn(async () => false),
 			promptCustomMessage: vi.fn(async () => true),
+			resume: vi.fn(async () => {}),
 			isStreaming: false,
 		};
 		await submitInteractiveInput(mode, session, createInput({ text: "/local", onAccepted }));
