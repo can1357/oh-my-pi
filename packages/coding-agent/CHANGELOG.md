@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.14.1] - 2026-10-31
+
 ### Added
 
 - Added the `providers.openai-codex.daybreak` setting (default on) to stop omp from automatically requesting the Daybreak Blue cyber access program on eligible ChatGPT accounts; each session follows its own value ([#17508](https://github.com/can1357/oh-my-pi/pull/17508) by [@H4vC](https://github.com/H4vC))
