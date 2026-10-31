@@ -9,6 +9,7 @@ import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, defineRolePainter, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { spaces, truncate, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
+import { composerTextColor } from "@oh-my-pi/pi-tui/theme/theme";
 import { PREVIEW_PROMPT, type ComposerShapePreviewLook } from "../../overlays/composer-shape-preview";
 import {
 	type ComposerChromeContext,
@@ -75,7 +76,7 @@ export function composerShapePreviewRows(theme: Theme, id: string, width: number
 	rows.push(
 		...shape.row({
 			...chrome,
-			text: shape.filled ? caret : theme.fgResolved("text", caret),
+			text: shape.filled ? caret : composerTextColor(theme, caret),
 			pad: spaces(contentWidth - visibleWidth(prompt) - 1),
 			gutter: gutter ? theme.fg("accent", gutter) : "",
 			first: true,

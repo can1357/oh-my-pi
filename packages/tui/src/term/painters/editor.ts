@@ -19,6 +19,7 @@ import type { TspEditorDecoration, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { UiNode } from "../../node";
 import { fgSgr } from "../../theme/color";
 import type { Theme } from "../../theme/contract";
+import { composerTextColor } from "../../theme/theme";
 import { hyperlink } from "../../text/osc";
 import { TAB_WIDTH, truncate, visibleWidth } from "../../text/width";
 import { widgetState } from "../widgets";
@@ -505,7 +506,7 @@ export function paintField(node: UiNode, cx: PaintContext, options?: { wrap?: bo
 
 	const rows = layoutText(text, wrapWidth);
 	const caretRow = rowOf(rows, caret);
-	const base = sgrPair(theme.fgResolved("text", MARK)) as [string, string];
+	const base = sgrPair(composerTextColor(theme, MARK)) as [string, string];
 	const styles = rangeStyles(
 		theme,
 		props,

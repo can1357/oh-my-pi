@@ -2,10 +2,14 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { generateThemeVars } from "@oh-my-pi/pi-coding-agent/export/html";
+import "@oh-my-pi/pi-coding-agent/modes/settings";
 import { sessionAccentHex } from "@oh-my-pi/pi-coding-agent/ui/status/accent";
 import { getResolvedThemeColors, getThemeByName, isLightTheme } from "@oh-my-pi/pi-coding-agent/ui/theme/service";
 import { builtinThemes } from "@oh-my-pi/pi-tui/theme/loader";
+import { composerTextColor, createTheme, setComposerTerminalForeground } from "@oh-my-pi/pi-tui/theme/theme";
 import { getAgentDir, getCustomThemesDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
 describe("theme lightness", () => {
@@ -95,5 +99,51 @@ describe("getResolvedThemeColors HTML export defaults", () => {
 		expect(vars).toContain("--container-bg: rgb(68, 95, 136);");
 		expect(vars).toContain("--text: #e5e5e7;");
 		expect(vars).toContain("--userMessageText: #e5e5e7;");
+	});
+});
+
+describe("composer.terminalForeground", () => {
+	// Opt-in: an empty `text` token stays on the terminal default so typed text
+	// follows each terminal's own foreground — a session attached from several
+	// devices has no single readable fallback. Explicit text colors are
+	// unchanged, and the default keeps the contrast fallback.
+	const titanium = (): ReturnType<typeof createTheme> => {
+		const json = builtinThemes().titanium;
+		if (!json) throw new Error("Titanium theme is unavailable");
+		return createTheme(json, { depth: "truecolor" });
+	};
+
+	it("keeps transparent composer text on the terminal default only when opted in", () => {
+		const theme = titanium();
+
+		expect(composerTextColor(theme, "typed")).toContain("\x1b[38;2;229;229;231mtyped");
+		try {
+			setComposerTerminalForeground(true);
+			expect(composerTextColor(theme, "typed")).toContain("\x1b[39mtyped");
+		} finally {
+			setComposerTerminalForeground(false);
+		}
+	});
+
+	it("applies composer.terminalForeground from settings", () => {
+		const release = bindEffects(Settings.isolated({ "composer.terminalForeground": true }));
+		try {
+			expect(composerTextColor(titanium(), "typed")).toContain("\x1b[39mtyped");
+		} finally {
+			release();
+			setComposerTerminalForeground(false);
+		}
+	});
+
+	it("keeps explicit text colors when the terminal foreground is opted in", () => {
+		const json = builtinThemes()["light-poimandres"];
+		if (!json) throw new Error("Light Poimandres theme is unavailable");
+		const theme = createTheme(json, { depth: "truecolor" });
+		try {
+			setComposerTerminalForeground(true);
+			expect(composerTextColor(theme, "typed")).toContain("\x1b[38;2;80;100;119mtyped");
+		} finally {
+			setComposerTerminalForeground(false);
+		}
 	});
 });

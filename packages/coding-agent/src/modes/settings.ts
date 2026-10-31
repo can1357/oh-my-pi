@@ -14,6 +14,7 @@ import {
 import { WORD_COMPLETION_METHODS } from "./view-model/prompt/word-completion";
 import { DEFAULT_MAX_FPS, parseMaxFps } from "../config/frame-rate";
 import { parseSpinnerInterval } from "../config/spinner-interval";
+import { setComposerTerminalForeground } from "@oh-my-pi/pi-tui/theme/theme";
 import { formatKeyHint, formatKeyHints } from "../ui/keys/hints";
 import { setTightLayout } from "../ui/styles/terminal-padding";
 import { setColorBlindMode, setSymbolPreset, setThemeSlot } from "../ui/theme/service";
@@ -137,6 +138,19 @@ export const cfgComposerShape = register({
 		options: "runtime",
 	},
 });
+
+export const cfgComposerTerminalForeground = register({
+	id: "composer.terminalForeground",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "appearance",
+		group: "Composer",
+		label: "Terminal Foreground",
+		description: "Keep typed text on each terminal's own color, for sessions shown on several terminals",
+	},
+});
+effect(cfgComposerTerminalForeground, setComposerTerminalForeground);
 
 export const cfgComposerTokenRate = register({
 	id: "composer.tokenRate",

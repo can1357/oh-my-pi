@@ -299,3 +299,20 @@ export class ResolvedTheme implements Theme {
 export function createTheme(json: ThemeJson, options: ThemeOptions = {}): ResolvedTheme {
 	return new ResolvedTheme(json, options);
 }
+
+var composerTerminalForeground = false;
+
+/**
+ * Keep empty `text` tokens on the terminal default in transparent composers.
+ * Needed when one session is shown on terminals with different backgrounds,
+ * where any fixed fallback is unreadable on one of them.
+ */
+export function setComposerTerminalForeground(enabled: boolean): void {
+	composerTerminalForeground = enabled;
+}
+
+/** Style transparent composer text, honoring {@link setComposerTerminalForeground}. */
+export function composerTextColor(theme: Theme, text: string): string {
+	if (composerTerminalForeground && !theme.has("text")) return theme.fg("text", text);
+	return theme.fgResolved("text", text);
+}
