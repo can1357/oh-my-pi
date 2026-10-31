@@ -5,6 +5,8 @@ export interface AbortSourceTracker {
 	requestSignal: AbortSignal;
 	abortLocally(reason: Error): Error;
 	getLocalAbortReason(): Error | undefined;
+	/** The reason the caller passed to `abort()`, read from the caller's own signal, never the racy merged one. */
+	getCallerAbortReason(): string | undefined;
 	wasCallerAbort(): boolean;
 }
 
@@ -40,6 +42,9 @@ export function createAbortSourceTracker(callerSignal?: AbortSignal): AbortSourc
 			if (!localAbortReason || callerSignal?.aborted) return undefined;
 			return requestSignal.reason === localAbortReason ? localAbortReason : undefined;
 		},
+		getCallerAbortReason() {
+			return AIError.callerAbortReason(callerSignal);
+		},
 		wasCallerAbort() {
 			// If the caller signal aborted, treat it as a caller abort regardless of which
 			// AbortController won the race to set `requestSignal.reason`. The previous
@@ -55,11 +60,15 @@ export function createAbortSourceTracker(callerSignal?: AbortSignal): AbortSourc
 /**
  * Race a shared promise against a caller's AbortSignal without coupling the
  * underlying work to that signal. The shared promise keeps running (and caches
- * its result) even when an individual caller bails out.
+ * its result) even when an individual caller bails out, and stays observed so
+ * its later rejection is never unhandled.
  */
 export function raceWithSignal<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
 	if (!signal) return promise;
-	if (signal.aborted) return Promise.reject(signal.reason ?? new AIError.AbortError());
+	if (signal.aborted) {
+		void promise.catch(() => {});
+		return Promise.reject(signal.reason ?? new AIError.AbortError());
+	}
 	const { promise: aborted, reject } = Promise.withResolvers<never>();
 	const onAbort = () => reject(signal.reason ?? new AIError.AbortError());
 	signal.addEventListener("abort", onAbort, { once: true });

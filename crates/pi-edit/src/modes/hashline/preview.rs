@@ -77,14 +77,12 @@ fn streaming_diff(
 	}
 	let mut rows = Vec::new();
 	let mut first = None;
-	let mut index = 0;
-	while index < resolved.len() {
-		let op_line = resolved[index].line_num();
+	for group in resolved.chunk_by(|a, b| a.line_num() == b.line_num()) {
 		let mut deletes = Vec::new();
 		let mut inserts = Vec::new();
 		let mut insert_base = None;
-		while index < resolved.len() && resolved[index].line_num() == op_line {
-			match &resolved[index] {
+		for edit in group {
+			match edit {
 				Edit::Delete { anchor, .. } => deletes.push(anchor.line),
 				Edit::Insert { cursor, text, .. } => {
 					insert_base.get_or_insert_with(|| cursor_line(*cursor, file_lines.len()));
@@ -92,7 +90,6 @@ fn streaming_diff(
 				},
 				Edit::Cut { .. } | Edit::Paste { .. } | Edit::Block { .. } => {},
 			}
-			index += 1;
 		}
 		deletes.sort_unstable();
 		for line in &deletes {

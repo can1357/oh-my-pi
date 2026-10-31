@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import * as vm from "node:vm";
 import { type Element, parseHTML } from "@oh-my-pi/pi-utils/dom";
+import { Marked } from "@oh-my-pi/pi-utils/marked";
 
-const [templateHtml, templateJs, markedJs] = await Promise.all([
-	Bun.file(new URL("../src/export/html/template.html", import.meta.url)).text(),
+const [templateHtml, shellHtml, templateJs] = await Promise.all([
+	Bun.file(new URL("../src/export/html/template.html.txt", import.meta.url)).text(),
+	Bun.file(new URL("../src/export/html/shell.html", import.meta.url)).text(),
 	Bun.file(new URL("../src/export/html/template.js", import.meta.url)).text(),
-	Bun.file(new URL("../src/export/html/vendor/marked.min.js", import.meta.url)).text(),
 ]);
 
 interface MinimalMessageEntry {
@@ -33,7 +34,7 @@ interface MinimalSession {
 }
 
 function renderSession(session: MinimalSession) {
-	const { document, window } = parseHTML(templateHtml);
+	const { document, window } = parseHTML(templateHtml.replace("</body>", `${shellHtml}</body>`));
 	const sessionData = document.getElementById("session-data");
 	if (!sessionData) throw new Error("Export template is missing session data");
 	sessionData.textContent = Buffer.from(JSON.stringify(session)).toBase64();
@@ -62,6 +63,7 @@ function renderSession(session: MinimalSession) {
 	const context = vm.createContext({
 		window,
 		document,
+		ompMarkdown: { Marked },
 		hljs: {
 			getLanguage: () => false,
 			highlight: () => ({ value: "" }),
@@ -77,8 +79,6 @@ function renderSession(session: MinimalSession) {
 		setTimeout: () => 0,
 		clearTimeout() {},
 	});
-	vm.runInContext(markedJs, context);
-	vm.runInContext("marked = new marked.Marked()", context);
 	vm.runInContext(templateJs, context);
 	return document;
 }

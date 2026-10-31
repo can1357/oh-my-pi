@@ -8,7 +8,7 @@ import type { TUI } from "../src/index";
 import { CopySelectorComponent } from "../src/overlays/copy-selector";
 import { type BranchVariantPath, RewindSelectorComponent } from "../src/overlays/rewind-selector";
 import { TreeSelectorComponent, type TreeSelectorNode } from "../src/overlays/tree-selector";
-import { initTheme } from "../src/theme";
+import { initTheme, setTheme } from "../src/theme";
 
 const pickerCx: DescribeContext = {
 	cols: 120,
@@ -124,6 +124,37 @@ describe("rewind page", () => {
 		expect(captionText(page.main)).toContain("nothing below to drop");
 		expect(page.dock).toHaveLength(1);
 		expect(JSON.stringify((page.dock[0] as RewindSelectorComponent).describe(pickerCx))).toContain("4/4");
+	});
+
+	test("an interrupted turn that shows nothing is never picked: the page opens on the turn above it", () => {
+		// Interrupted before the first token: no text, no usage row.
+		const interrupted = {
+			...assistant([]),
+			stopReason: "aborted",
+			errorMessage: "Interrupted by user",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		} as unknown as AgentMessage;
+		const selector = new RewindSelectorComponent([...transcript(), entry("a3", "u2", interrupted)], {
+			ui,
+			cwd: "/tmp",
+			requestRender: () => {},
+			onSelect: () => {},
+			onCancel: () => {},
+		});
+		const { main } = selector.describeScreen(pickerCx);
+		expect(marks(main)).toEqual(["-", "here:main:u2", "pick", "drop"]);
+		expect(captionText(main)).toContain("1 turn below dropped");
+		expect(JSON.stringify(selector.describe(pickerCx))).toContain("4/5");
+		// Down has nothing that shows to step onto.
+		selector.handleInput("\x1b[B");
+		expect(marks(selector.describeScreen(pickerCx).main)).toEqual(["-", "here:main:u2", "pick", "drop"]);
 	});
 
 	test("stepping up moves the pick and drops everything below it", () => {
@@ -302,6 +333,97 @@ describe("session tree picker", () => {
 		expect(byId.get("u3")?.badges).toEqual([{ text: "idea", tone: "warning" }]);
 		expect((byId.get("u2")?.depth ?? 0) > (byId.get("a1")?.depth ?? 0)).toBe(true);
 		expect(p.selected).toBe("a3");
+	});
+
+	test("an open tree keeps user and assistant labels apart as the theme switches", async () => {
+		const selector = treeSelector();
+		const labelStyles = () => {
+			const items = treeProps(selector).items ?? [];
+			return ["u1", "a1"].map(id => {
+				const label = items.find(item => item.id === id)?.label;
+				return typeof label === "string" ? undefined : label?.[0]?.s;
+			});
+		};
+		try {
+			await setTheme("dark-github");
+			expect(labelStyles()).toEqual(["accent strong", "success"]);
+			// `dark-terminal` paints `accent` and `success` the same green.
+			await setTheme("dark-terminal");
+			expect(labelStyles()).toEqual(["accent strong", "statusLinePath"]);
+			await setTheme("dark-github");
+			expect(labelStyles()).toEqual(["accent strong", "success"]);
+		} finally {
+			await initTheme(false);
+		}
+	});
+
+	test("message labels fold \\r and Unicode line separators without flattening the selected preview", () => {
+		const content = "Front End \r\u2028\u2029Act as a UI lead";
+		const entries = [
+			entry("user", null, user(content)),
+			entry("assistant", "user", assistant([{ type: "text", text: content }])),
+		];
+		const selector = new TreeSelectorComponent(
+			[{ entry: entries[0]!, children: [{ entry: entries[1]!, children: [] }] }],
+			"assistant",
+			40,
+			() => {},
+			() => {},
+		);
+		for (const item of treeProps(selector).items ?? []) {
+			const label = typeof item.label === "string" ? item.label : item.label.map(part => part.t).join("");
+			expect(label).toBe(`${item.id}: Front End    Act as a UI lead`);
+		}
+		for (const row of selector.render(100)) expect(row).not.toMatch(/[\r\n\u2028\u2029]/);
+		const preview = selector.describe(pickerCx).c?.[0] as NativeNode;
+		expect(preview.c?.at(-1)).toMatchObject({ k: "md", p: { text: content } });
+	});
+
+	test("line separators cannot escape through tool summaries, session markers or label badges", () => {
+		const value = "before\u2028\u2029after";
+		const nodes: TreeSelectorNode[] = [
+			{
+				entry: entry(
+					"calls",
+					null,
+					assistant([{ type: "toolCall", id: "c0", name: "bash", arguments: { command: value } }]),
+				),
+				children: [],
+			},
+			{
+				entry: entry("tool0", null, { ...toolResult("c0", ""), toolName: "bash" } as AgentMessage),
+				children: [],
+			},
+			{
+				entry: {
+					type: "model_change",
+					model: value,
+					provider: "demo",
+					id: "marker0",
+					parentId: null,
+					timestamp: "2026-10-29T00:00:00Z",
+				},
+				children: [],
+				label: value,
+			} as TreeSelectorNode,
+		];
+		const selector = new TreeSelectorComponent(
+			nodes,
+			null,
+			40,
+			() => {},
+			() => {},
+			undefined,
+			"all",
+		);
+		const p = treeProps(selector);
+		for (const id of ["tool0", "marker0"]) {
+			const item = p.items?.find(item => item.id === id);
+			const label = typeof item!.label === "string" ? item!.label : item!.label.map(part => part.t).join("");
+			expect(label).toContain("before  after");
+			for (const badge of item!.badges ?? []) expect(badge.text).toBe("before  after");
+		}
+		for (const row of selector.render(100)) expect(row).not.toMatch(/[\r\n\u2028\u2029]/);
 	});
 
 	test("typing and filter tabs change the order, never the catalogue", () => {

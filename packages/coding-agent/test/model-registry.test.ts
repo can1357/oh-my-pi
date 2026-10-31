@@ -335,7 +335,7 @@ describe("ModelRegistry", () => {
 				Date.now(),
 				[cachedChat],
 				true,
-				fingerprintStaticModels(getBundledModels("deepinfra"), true),
+				fingerprintStaticModels(getBundledModels("deepinfra"), { authoritative: true }),
 				path.join(tempDir, "models.db"),
 			);
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
@@ -1795,6 +1795,7 @@ describe("ModelRegistry", () => {
 		let thinkingCustom: ModelRegistry;
 		let thinkingOverride: ModelRegistry;
 		let deepseekOverride: ModelRegistry;
+		let prefixBoundOverride: ModelRegistry;
 		beforeAll(() => {
 			thinkingCustom = readonlyRegistry({
 				providers: {
@@ -1829,6 +1830,21 @@ describe("ModelRegistry", () => {
 					},
 				},
 			});
+			prefixBoundOverride = readonlyRegistry({
+				providers: {
+					anthropic: {
+						modelOverrides: {
+							"claude-opus-5-5": {
+								thinking: {
+									mode: "anthropic-adaptive",
+									supportsDisplay: true,
+									efforts: [Effort.Low, Effort.High],
+								},
+							},
+						},
+					},
+				},
+			});
 		});
 
 		test("custom models preserve explicit thinking verbatim", () => {
@@ -1856,6 +1872,18 @@ describe("ModelRegistry", () => {
 				mode: "effort",
 				efforts: [Effort.Max, Effort.High, Effort.Low],
 				defaultLevel: Effort.High,
+			});
+		});
+
+		test("model overrides keep catalog prefix binding the override does not set", () => {
+			const model = getModelsForProvider(prefixBoundOverride, "anthropic").find(m => m.id === "claude-opus-5-5");
+			// Without prefixBinding, pruning/compaction stop preserving the bound prefix
+			// and prefix-mismatch 400s are not retried (#17276).
+			expect(model?.thinking).toEqual({
+				mode: "anthropic-adaptive",
+				supportsDisplay: true,
+				efforts: [Effort.Low, Effort.High],
+				prefixBinding: true,
 			});
 		});
 	});
@@ -3231,9 +3259,9 @@ describe("ModelRegistry", () => {
 				{ providers: {} },
 				{
 					seedCache: dbPath => {
-						for (const [providerId, dynamicModelsAuthoritative] of [
-							["zai", false],
-							["anthropic", true],
+						for (const [providerId, policy] of [
+							["zai", { additive: true }],
+							["anthropic", { authoritative: true, additive: true }],
 						] as const) {
 							const bundledModels = getBundledModels(providerId);
 							writeModelCache(
@@ -3241,7 +3269,7 @@ describe("ModelRegistry", () => {
 								Date.now(),
 								bundledModels,
 								false,
-								fingerprintStaticModels(bundledModels, dynamicModelsAuthoritative),
+								fingerprintStaticModels(bundledModels, policy),
 								dbPath,
 							);
 						}
@@ -3328,7 +3356,7 @@ describe("ModelRegistry", () => {
 								}),
 							],
 							true,
-							fingerprintStaticModels(getBundledModels("ollama-cloud")),
+							fingerprintStaticModels(getBundledModels("ollama-cloud"), { additive: true }),
 							dbPath,
 						);
 					},
@@ -3411,7 +3439,7 @@ describe("ModelRegistry", () => {
 				{
 					seedCache: dbPath =>
 						writeModelCache(
-							"cached-compact-proxy:openai-models-list-context-v5",
+							"cached-compact-proxy:openai-models-list-context-v6",
 							Date.now(),
 							[
 								buildModel({
@@ -3596,7 +3624,7 @@ describe("ModelRegistry", () => {
 				Date.now(),
 				[served],
 				true,
-				fingerprintStaticModels(getBundledModels("google-antigravity"), true),
+				fingerprintStaticModels(getBundledModels("google-antigravity"), { authoritative: true }),
 				path.join(tempDir, "models.db"),
 			);
 			const restarted = new ModelRegistry(authStorage, modelsJsonPath);

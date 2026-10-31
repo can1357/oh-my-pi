@@ -43,7 +43,7 @@ import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import type { TspSpan, TspTableColumn, TspText, TspTone } from "@oh-my-pi/pi-wire";
 import { col, elapsed, node, span, text } from "../native/describe";
 import { type DescribeContext, leafKey, type NativeChild, type NativeNode, type NativeUiEvent } from "../native/node";
-import { actionBar, actionButton } from "../native/overlay";
+import { actionBar, actionButton, segmentedTabs } from "../native/overlay";
 
 /** Local calendar-day activity consumed by the usage heatmap. */
 export interface DailyActivityPoint {
@@ -1135,8 +1135,7 @@ export class UsageDashboardComponent implements Component {
 			);
 		}
 		const children: NativeChild[] = [
-			node(
-				"tabs",
+			segmentedTabs(
 				{
 					items: [
 						{ id: "overview", label: "Overview" },
@@ -1144,7 +1143,6 @@ export class UsageDashboardComponent implements Component {
 					],
 					active: this.#view,
 				},
-				undefined,
 				"tabs",
 			),
 			node("spacer", { grow: 1 }),

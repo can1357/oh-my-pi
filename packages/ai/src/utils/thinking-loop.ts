@@ -18,7 +18,10 @@
  * Four failure shapes are detected:
  * 1. **Exact suffix cycles** — a byte-identical unit repeated back-to-back,
  *    including long cycles such as the observed 311-character Kiro runaway.
- *    This bounded detector applies to every model.
+ *    This bounded detector applies to every model the guard covers. A cycle
+ *    spanning a line break repeats whole lines — reasoning summarizers restate
+ *    one status line ("Still writing the parser...") while hidden work runs —
+ *    so it needs the long-cycle floor, not the short-stutter one.
  * 2. **Near-duplicate segments** — paragraphs that normalize to the same
  *    word-trigram fingerprint. Caught with a Jaccard window over recent
  *    paragraphs. Thresholds were calibrated on a real loop transcript plus
@@ -37,8 +40,9 @@
  * before analysis because legitimate code repeats one keyword skeleton with
  * different literals, and numeric tokens are stripped during normalization.
  *
- * Scope: exact cycles are guarded for every model; semantic heuristics remain
- * limited to Gemini, DeepSeek, and Grok family streams. Thinking stays armed
+ * Scope: the `thinking-loop-guard` catalog axis picks the level per model line
+ * ({@link loopGuardLevel}): exact cycles by default, plus semantic heuristics
+ * for Gemini, DeepSeek, and Grok, and no guard for Claude. Thinking stays armed
  * after a tool call starts — xAI/Grok can keep emitting `thinking_delta` after
  * `toolcall_start`, and those deltas count as stream progress so the idle
  * watchdog never fires. Visible assistant text still latches the thinking
@@ -49,6 +53,7 @@
  * three guarded attempts and then fail closed. Disable detection with
  * `PI_NO_THINKING_LOOP_GUARD=1`.
  */
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { Api, AssistantMessage, Model, StreamOptions } from "../types";
@@ -68,7 +73,9 @@ const EXACT_CHECK_STRIDE = 128;
 /** Short cycles need four repeats covering at least this many characters. */
 const EXACT_SHORT_MAX_UNIT = 60;
 const EXACT_SHORT_MIN_REPEATED_CHARS = 180;
-/** Long cycles need at least three repeats covering at least this many chars. */
+/** Long cycles need at least three repeats covering at least this many chars.
+ *  Short cycles that span a line break need it too: those repeat whole lines,
+ *  which summarizer status lines do legitimately. */
 const EXACT_LONG_MIN_REPEATED_CHARS = 1024;
 /** Repeated characters before a punctuation-only run counts as a loop. Matches
  *  {@link EXACT_LONG_MIN_REPEATED_CHARS}: a model that has emitted a kilobyte of
@@ -125,19 +132,21 @@ const CONCRETE_ANCHOR =
 const CODE_LINE = /^(?:[ \t]*```.*|(?: {2,}|\t)(?![ \t]*(?:[-*+]|\d+[.)])[ \t]).*|.*[{}[\](;,>][ \t]*)$/gm;
 
 /**
- * True when resolved compatibility policy enables semantic loop heuristics for
- * this model. Exact suffix-cycle detection applies to every enabled model
- * independently of this predicate.
+ * How much of the loop guard runs on a stream: `off` none, `exact` only
+ * exact suffix cycles, `semantic` exact cycles plus the near-duplicate and
+ * progress-lexicon paragraph heuristics.
  */
-export function isLoopGuardedModel(model: Model<Api>, options?: StreamOptions): boolean {
-	if (options?.loopGuard?.enabled === false) return false;
-	const compat = model.compat;
-	if (compat !== undefined) return "thinkingLoopGuard" in compat && compat.thinkingLoopGuard !== undefined;
-	// Custom API surfaces resolve no compat record, so the KDL `thinking-loop-guard`
-	// axis cannot land on them; fall back to the class facts the axis encodes
-	// (classes/{gemini,deepseek,xai}.kdl).
-	const cls = model.identity?.class;
-	return cls === "gemini" || cls === "deepseek" || cls === "xai";
+export type LoopGuardLevel = "off" | "exact" | "semantic";
+
+/**
+ * Loop-guard level for a model stream. `PI_NO_THINKING_LOOP_GUARD=1` and
+ * `loopGuard.enabled: false` turn it off; otherwise the model line's
+ * `thinking-loop-guard` catalog axis decides, and unassigned lines get `exact`.
+ */
+export function loopGuardLevel(model: Model<Api>, options?: StreamOptions): LoopGuardLevel {
+	if (process.env.PI_NO_THINKING_LOOP_GUARD === "1" || options?.loopGuard?.enabled === false) return "off";
+	const level = resolveCatalogPolicy(model).thinkingLoopGuard;
+	return level === "off" || level === "semantic" ? level : "exact";
 }
 
 /**
@@ -397,7 +406,7 @@ export function guardThinkingLoopStream(
 	options?: StreamOptions,
 ): AssistantMessageEventStream {
 	const outer = new AssistantMessageEventStream();
-	const semanticHeuristics = isLoopGuardedModel(model, options);
+	const semanticHeuristics = loopGuardLevel(model, options) === "semantic";
 	const thinkingDetector = new ThinkingLoopDetector(semanticHeuristics);
 	const textDetector = new ThinkingLoopDetector(semanticHeuristics);
 	const checkAssistantContent = options?.loopGuard?.checkAssistantContent !== false;
@@ -500,11 +509,10 @@ export function guardThinkingLoopStream(
 }
 
 /**
- * Apply the loop guard around a provider dispatch. Unless explicitly disabled,
- * every model gets exact suffix-cycle detection; Gemini, DeepSeek, and Grok also
- * get the semantic heuristics selected by {@link isLoopGuardedModel}. The guard
- * injects an abort signal into the provider call so a detected loop tears down
- * the upstream, then wraps the returned stream. Bounding result-path re-samples
+ * Apply the loop guard around a provider dispatch at the model's
+ * {@link loopGuardLevel}; `off` dispatches unwrapped. The guard injects an
+ * abort signal into the provider call so a detected loop tears down the
+ * upstream, then wraps the returned stream. Bounding result-path re-samples
  * lives in the result-awaiting caller.
  */
 export function withThinkingLoopGuard<
@@ -514,9 +522,7 @@ export function withThinkingLoopGuard<
 	options: O | undefined,
 	dispatch: (options: O | undefined) => AssistantMessageEventStream,
 ): AssistantMessageEventStream {
-	if (process.env.PI_NO_THINKING_LOOP_GUARD === "1" || options?.loopGuard?.enabled === false) {
-		return dispatch(options);
-	}
+	if (loopGuardLevel(model, options) === "off") return dispatch(options);
 	const controller = new AbortController();
 	const caller = options?.signal;
 	const signal = caller ? AbortSignal.any([caller, controller.signal]) : controller.signal;
@@ -584,7 +590,8 @@ const exactZ = new Uint16Array(EXACT_MAX_UNIT + 1);
  * computed — the period check reads nothing past it, and each `z[i]` reads
  * only `z[i - left]` with `i - left < i`, which is already filled. Short
  * cycles retain the original 180-character/four-repeat sensitivity; long
- * cycles require at least three repeats and 1024 repeated characters.
+ * cycles and short ones spanning a line break require at least three repeats
+ * and 1024 repeated characters.
  *
  * A unit carrying a letter or an emoji matches at those thresholds. A unit with
  * neither, such as the `?!?!` run a stuck model emits, matches only once it has
@@ -616,7 +623,11 @@ function detectExactSuffixCycle(text: string): [unit: string, count: number] | n
 		if (count < minCount) continue;
 		const unit = text.slice(-len);
 		if (/\p{L}|\p{Extended_Pictographic}/u.test(unit)) {
-			const minChars = len <= EXACT_SHORT_MAX_UNIT ? EXACT_SHORT_MIN_REPEATED_CHARS : EXACT_LONG_MIN_REPEATED_CHARS;
+			// `unit` is one whole period, so it holds a newline iff the cycle does.
+			const minChars =
+				len <= EXACT_SHORT_MAX_UNIT && !unit.includes("\n")
+					? EXACT_SHORT_MIN_REPEATED_CHARS
+					: EXACT_LONG_MIN_REPEATED_CHARS;
 			if (len * count >= minChars) return [unit, count];
 			continue;
 		}

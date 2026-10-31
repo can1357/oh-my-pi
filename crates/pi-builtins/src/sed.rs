@@ -189,12 +189,12 @@ impl ReplacementTemplate {
 				ReplacementPart::Literal(s) => result.push_str(s),
 
 				ReplacementPart::WholeMatch => {
-					result.push_str(caps.get(0)?.map(|m| m.as_str()).unwrap_or_default());
+					result.push_str(caps.get(0)?.map_or_default(|m| m.as_str()));
 				},
 
 				ReplacementPart::Group(n) => {
 					let i: usize = (*n).try_into().unwrap();
-					result.push_str(caps.get(i)?.map(|m| m.as_str()).unwrap_or_default());
+					result.push_str(caps.get(i)?.map_or_default(|m| m.as_str()));
 				},
 			}
 		}
@@ -8140,7 +8140,7 @@ fn substitute(
 				)
 				.unwrap_err()
 			})?;
-			let mut shell_out = String::from_utf8_lossy(&output_bytes.stdout).into_owned();
+			let mut shell_out = String::from_utf8_lossy_owned(output_bytes.stdout);
 			if shell_out.ends_with("\r\n") {
 				// On windows, both return carriage and newline characters are used
 				shell_out.truncate(shell_out.len() - 2);
@@ -8935,8 +8935,7 @@ impl fmt::Debug for State {
 				.field("index", index)
 				.field("input_name", input_name)
 				.field("line_number", line_number)
-				.field("reader", &"<BufRead>")
-				.finish(),
+				.finish_non_exhaustive(),
 		}
 	}
 }

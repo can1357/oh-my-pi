@@ -638,7 +638,7 @@ mod background {
 			KeyName::F23 => (VK_F23, 0),
 			KeyName::F24 => (VK_F24, 0),
 			KeyName::Char(character) => {
-				let mut units = [0; 2];
+				let mut units = [0; char::MAX_LEN_UTF16];
 				let encoded = character.encode_utf16(&mut units);
 				if encoded.len() != 1 {
 					return Err(DesktopError::input_failed(format!(
@@ -923,7 +923,7 @@ mod background {
 						control::sent_gap_wait(KEY_GAP + ENTER_SETTLE, sent)?;
 					},
 					TextUnit::Char(character) => {
-						let mut units = [0; 2];
+						let mut units = [0; char::MAX_LEN_UTF16];
 						for &unit in character.encode_utf16(&mut units).iter() {
 							post(emitter.hwnd, WM_CHAR, usize::from(unit), 1)?;
 						}
@@ -937,7 +937,7 @@ mod background {
 }
 
 mod foreground {
-	use std::{mem::size_of, time::Duration};
+	use std::time::Duration;
 
 	use windows_sys::Win32::{
 		Foundation::{HWND, POINT},
@@ -1049,13 +1049,11 @@ mod foreground {
 					));
 				}
 				let _ = window::activate(self.previous)?;
-				if window::wait_for_foreground(self.previous, ACTIVATION_TIMEOUT)? {
-					Ok(())
-				} else {
-					Err(DesktopError::input_failed(
+				window::wait_for_foreground(self.previous, ACTIVATION_TIMEOUT)?.ok_or_else(|| {
+					DesktopError::input_failed(
 						"Windows refused to restore the previous foreground window",
-					))
-				}
+					)
+				})
 			})
 		}
 	}
@@ -1526,7 +1524,7 @@ mod foreground {
 				&events[..2]
 			},
 			TextUnit::Char(character) => {
-				let mut units = [0; 2];
+				let mut units = [0; char::MAX_LEN_UTF16];
 				let units = character.encode_utf16(&mut units);
 				for (index, &unit) in units.iter().enumerate() {
 					events[index * 2] = unicode_event(unit, false);
@@ -1747,11 +1745,7 @@ pub(super) fn raise_window(id: &str) -> CoreResult<()> {
 		}
 	}
 	let _ = window::activate(hwnd)?;
-	if window::wait_for_foreground(hwnd, Duration::from_millis(500))? {
-		Ok(())
-	} else {
-		Err(DesktopError::input_failed(format!(
-			"Windows refused to raise window {id} (foreground lock)"
-		)))
-	}
+	window::wait_for_foreground(hwnd, Duration::from_millis(500))?.ok_or_else(|| {
+		DesktopError::input_failed(format!("Windows refused to raise window {id} (foreground lock)"))
+	})
 }

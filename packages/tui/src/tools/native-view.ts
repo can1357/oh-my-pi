@@ -23,7 +23,7 @@ export function displayPath(filePath: string): string {
 	return shortenPath(filePath);
 }
 
-/** `file://` link for a head's path target, when the path is absolute. */
+/** Configured file link for a head's path target, when the path is absolute. */
 export function fileHref(filePath: string | undefined): string | undefined {
 	return filePath && path.isAbsolute(filePath) ? tryFileUri(filePath) : undefined;
 }

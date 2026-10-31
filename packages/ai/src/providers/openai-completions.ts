@@ -252,6 +252,31 @@ function mergeStoredGeminiSignature(existing: string | undefined, update: Stored
 	return JSON.stringify(merged);
 }
 
+/** The stored signature envelope for a client-replayed `extra_content` (`google` or `vertex`), as this provider writes it. */
+export function storeGeminiToolCallSignature(extraContent: unknown): string | undefined {
+	const perCall = getGeminiThoughtSignatureExtraContent(extraContent);
+	return perCall ? JSON.stringify({ perCall } satisfies StoredGeminiSignature) : undefined;
+}
+
+/**
+ * The `extra_content` that replays a tool call's Gemini signature on an OpenAI-compatible wire: read from the
+ * envelope this provider stores, or wrapped from the raw signature a native Gemini transport recorded.
+ */
+export function geminiToolCallExtraContent(
+	thoughtSignature: string | undefined,
+): GeminiThoughtSignatureExtraContent | undefined {
+	if (!thoughtSignature) return undefined;
+	const stored = parseStoredThoughtSignature(thoughtSignature);
+	if (stored === undefined) return { google: { thought_signature: thoughtSignature } };
+	return getGeminiThoughtSignatureExtraContent(normalizeStoredGeminiSignature(stored)?.perCall);
+}
+
+/** The raw Gemini signature behind a tool call's `thoughtSignature`, as native Gemini parts carry it. */
+export function rawGeminiToolCallSignature(thoughtSignature: string | undefined): string | undefined {
+	const extraContent = geminiToolCallExtraContent(thoughtSignature);
+	return extraContent?.google?.thought_signature ?? extraContent?.vertex?.thought_signature;
+}
+
 /**
  * LiteLLM's wire shape for Anthropic thinking: streamed as
  * `delta.thinking_blocks` (mirrored under
@@ -273,10 +298,20 @@ function getLiteLLMThinkingBlocksDelta(delta: object): unknown[] | undefined {
 	return Array.isArray(mirrored) && mirrored.length > 0 ? mirrored : undefined;
 }
 
-/** Whether a thinking block's signature is a raw LiteLLM (Anthropic) one, not a reasoning field name. */
+/** `thinkingSignature` marking thinking decoded from Mistral typed content parts. */
+const MISTRAL_CONTENT_PARTS_SIGNATURE = "mistral-content-parts";
+
+/**
+ * Whether a thinking block's signature is a raw LiteLLM (Anthropic) one, not a
+ * reasoning field name or the Mistral content-parts marker.
+ */
 export function isLiteLLMThinkingSignature(signature: string | undefined): signature is string {
 	return (
-		!!signature && signature !== "reasoning_content" && signature !== "reasoning" && signature !== "reasoning_text"
+		!!signature &&
+		signature !== "reasoning_content" &&
+		signature !== "reasoning" &&
+		signature !== "reasoning_text" &&
+		signature !== MISTRAL_CONTENT_PARTS_SIGNATURE
 	);
 }
 
@@ -809,7 +844,6 @@ const streamOpenAICompletionsOnce = (
 	(async () => {
 		const startTime = performance.now();
 		let firstTokenTime: number | undefined;
-		const policy = resolveOpenAICompatForRequest(model, options, Boolean(context.tools?.length));
 
 		const output: AssistantMessage = createInitialResponsesAssistantMessage(model.api, model.provider, model.id);
 		let rawRequestDump: RawHttpRequestDump | undefined;
@@ -851,6 +885,7 @@ const streamOpenAICompletionsOnce = (
 		let finishOpenBlocksOnError: () => void = () => {};
 
 		try {
+			const policy = resolveOpenAICompatForRequest(model, options, Boolean(context.tools?.length));
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const idleTimeoutFallbackMs = model.compat.streamIdleTimeoutMs;
 			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs(idleTimeoutFallbackMs);
@@ -1508,7 +1543,7 @@ const streamOpenAICompletionsOnce = (
 							if (part?.type === "thinking" && Array.isArray(part.thinking)) {
 								for (const inner of part.thinking as Array<{ type?: unknown; text?: unknown } | null>) {
 									if (inner?.type === "text" && typeof inner.text === "string" && inner.text.length > 0) {
-										appendThinkingDelta(inner.text, "mistral-content-parts");
+										appendThinkingDelta(inner.text, MISTRAL_CONTENT_PARTS_SIGNATURE);
 										suppressHealedThinking = true;
 									}
 								}

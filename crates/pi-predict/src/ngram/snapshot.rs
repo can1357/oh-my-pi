@@ -84,10 +84,7 @@ impl Writer {
 
 	fn text(&mut self, text: &str) {
 		// Words are capped far below this by the prose gates' line limit.
-		let mut end = text.len().min(usize::from(u16::MAX));
-		while !text.is_char_boundary(end) {
-			end -= 1;
-		}
+		let end = text.floor_char_boundary(usize::from(u16::MAX));
 		self.u16(end as u16);
 		self.put(&text.as_bytes()[..end]);
 	}
@@ -113,9 +110,7 @@ impl<'a> Reader<'a> {
 	}
 
 	fn array<const N: usize>(&mut self) -> anyhow::Result<[u8; N]> {
-		let mut out = [0u8; N];
-		out.copy_from_slice(self.take(N)?);
-		Ok(out)
+		Ok(*self.take(N)?.as_array().expect("take yields N bytes"))
 	}
 
 	fn u16(&mut self) -> anyhow::Result<u16> {

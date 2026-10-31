@@ -867,6 +867,19 @@ export const cfgAskEnabled = register({
 	},
 });
 
+export const cfgOutEnabled = register({
+	id: "out.enabled",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Available Tools",
+		label: "Out",
+		description:
+			"Let the agent reply mid-task by writing to out://, shown like a response without ending its turn. Unset: on in the interactive TUI, off in print, RPC, and ACP",
+	},
+});
+
 // Tool execution
 export const cfgToolsIntentTracing = register({
 	id: "tools.intentTracing",

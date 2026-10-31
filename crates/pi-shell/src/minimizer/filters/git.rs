@@ -1,6 +1,6 @@
 //! Git output filters.
 
-use std::fmt::Write as _;
+use std::fmt::{NumBuffer, Write as _};
 
 use crate::minimizer::{MinimizerCtx, MinimizerOutput, engine, primitives};
 
@@ -64,17 +64,13 @@ pub(crate) fn filter_for(
 		{
 			cleaned
 		},
-		Some("diff") => {
-			if exit_code == 0 {
-				if let Some(mode) = diff_listing_mode(ctx.command) {
-					compact_diff_listing(&cleaned, mode)
-				} else {
-					compact_diff_output(&cleaned)
-				}
-			} else {
-				compact_diff_output(&cleaned)
-			}
+		Some("diff")
+			if exit_code == 0
+				&& let Some(mode) = diff_listing_mode(ctx.command) =>
+		{
+			compact_diff_listing(&cleaned, mode)
 		},
+		Some("diff") => compact_diff_output(&cleaned),
 		Some("show") if is_show_custom_format(ctx.command) => cleaned,
 		Some("show") if keeps_patch_whole(ctx, overlay_program, input, &cleaned, exit_code) => {
 			cleaned
@@ -568,14 +564,14 @@ fn format_status_summary(summary: &StatusSummary) -> String {
 		return out;
 	}
 	out.push_str("staged ");
-	out.push_str(&summary.staged.to_string());
+	out.push_str(summary.staged.format_into(&mut NumBuffer::new()));
 	out.push_str(", unstaged ");
-	out.push_str(&summary.unstaged.to_string());
+	out.push_str(summary.unstaged.format_into(&mut NumBuffer::new()));
 	out.push_str(", untracked ");
-	out.push_str(&summary.untracked.to_string());
+	out.push_str(summary.untracked.format_into(&mut NumBuffer::new()));
 	if summary.conflicts > 0 {
 		out.push_str(", conflicts ");
-		out.push_str(&summary.conflicts.to_string());
+		out.push_str(summary.conflicts.format_into(&mut NumBuffer::new()));
 	}
 	out.push('\n');
 	for path in summary.paths.iter().take(40) {
@@ -929,7 +925,7 @@ fn condense_branch(input: &str) -> String {
 		}
 		if local.len() > 24 {
 			out.push_str(" … +");
-			out.push_str(&(local.len() - 24).to_string());
+			out.push_str((local.len() - 24).format_into(&mut NumBuffer::new()));
 		}
 		out.push('\n');
 	}
@@ -939,7 +935,7 @@ fn condense_branch(input: &str) -> String {
 		.collect::<Vec<_>>();
 	if !remote_only.is_empty() {
 		out.push_str("remote-only (");
-		out.push_str(&remote_only.len().to_string());
+		out.push_str(remote_only.len().format_into(&mut NumBuffer::new()));
 		out.push_str("):");
 		for branch in remote_only.iter().take(24) {
 			out.push(' ');
@@ -947,7 +943,7 @@ fn condense_branch(input: &str) -> String {
 		}
 		if remote_only.len() > 24 {
 			out.push_str(" … +");
-			out.push_str(&(remote_only.len() - 24).to_string());
+			out.push_str((remote_only.len() - 24).format_into(&mut NumBuffer::new()));
 		}
 		out.push('\n');
 	}
@@ -994,7 +990,7 @@ pub(crate) fn compact_diff_output(input: &str) -> String {
 		let changed = file.added + file.removed;
 		out.push_str(&file.path);
 		out.push_str(" | ");
-		out.push_str(&changed.to_string());
+		out.push_str(changed.format_into(&mut NumBuffer::new()));
 		out.push(' ');
 		out.push_str(&diff_bar(file.added, file.removed));
 		out.push('\n');
@@ -1004,9 +1000,9 @@ pub(crate) fn compact_diff_output(input: &str) -> String {
 	}
 	out.push_str(&format_file_count(files.len()));
 	out.push_str(" changed, ");
-	out.push_str(&total_added.to_string());
+	out.push_str(total_added.format_into(&mut NumBuffer::new()));
 	out.push_str(" insertions(+), ");
-	out.push_str(&total_removed.to_string());
+	out.push_str(total_removed.format_into(&mut NumBuffer::new()));
 	out.push_str(" deletions(-)\n\n--- Changes ---\n");
 
 	for file in files.iter().take(12) {
@@ -1515,7 +1511,7 @@ fn condense_fetch(input: &str, exit_code: i32) -> String {
 			out.push_str("ok fetched (up-to-date)\n");
 		} else {
 			out.push_str("ok fetched, ");
-			out.push_str(&updates.to_string());
+			out.push_str(updates.format_into(&mut NumBuffer::new()));
 			out.push_str(" update");
 			if updates != 1 {
 				out.push('s');

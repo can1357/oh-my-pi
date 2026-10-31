@@ -7,14 +7,13 @@ use std::{
 	ffi::{OsStr, OsString},
 	io::{Error, ErrorKind},
 	path::{Path, PathBuf},
-	time::SystemTime,
+	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use clap::{
 	Arg, ArgAction, ArgGroup, ArgMatches, Command,
 	builder::{PossibleValue, ValueParser},
 };
-use filetime::FileTime;
 use jiff::{Timestamp, ToSpan, Zoned, civil::Time, fmt::strtime, tz::TimeZone};
 #[cfg(unix)]
 use libc::O_NONBLOCK;
@@ -35,8 +34,8 @@ use crate::{
 enum TouchError {
 	#[error("Unable to parse date: {0}")]
 	InvalidDateFormat(String),
-	#[error("Source has invalid access or modification time: {0}")]
-	InvalidFiletime(FileTime),
+	#[error("Source has invalid access or modification time: {}", display_file_time(.0))]
+	InvalidFiletime(SystemTime),
 	#[error("failed to get attributes of {}: {}", .0.quote(), io_error(.1))]
 	ReferenceFileInaccessible(PathBuf, std::io::Error),
 	#[cfg(windows)]
@@ -117,7 +116,7 @@ enum ChangeTimes {
 enum Source {
 	/// Use access/modification times of given file
 	Reference(PathBuf),
-	Timestamp(FileTime),
+	Timestamp(SystemTime),
 	/// Use current time
 	Now,
 }
@@ -161,12 +160,34 @@ mod format {
 	pub(crate) const YYYYMMDDHHMM_OFFSET: &str = "%Y-%m-%d %H:%M %z";
 }
 
-fn timestamp_to_filetime(ts: Timestamp) -> FileTime {
-	FileTime::from_system_time(SystemTime::from(ts))
+/// `secs` whole seconds from the Unix epoch.
+fn unix_time(secs: i64) -> SystemTime {
+	if secs < 0 {
+		UNIX_EPOCH - Duration::from_secs(secs.unsigned_abs())
+	} else {
+		UNIX_EPOCH + Duration::from_secs(secs as u64)
+	}
 }
 
-fn filetime_to_zoned(ft: &FileTime, time_zone: &TimeZone) -> Option<Zoned> {
-	let ts = Timestamp::new(ft.unix_seconds(), ft.nanoseconds() as i32).ok()?;
+/// `{seconds}.{nanos:09}s`, seconds floored and counted from the platform's
+/// file-time epoch (1601 on Windows, 1970 elsewhere).
+fn display_file_time(time: &SystemTime) -> String {
+	let (secs, nanos) = match time.duration_since(UNIX_EPOCH) {
+		Ok(d) => (d.as_secs() as i64, d.subsec_nanos()),
+		Err(e) => {
+			let d = e.duration();
+			match d.subsec_nanos() {
+				0 => (-(d.as_secs() as i64), 0),
+				n => (-(d.as_secs() as i64) - 1, 1_000_000_000 - n),
+			}
+		},
+	};
+	let secs = secs + if cfg!(windows) { 11_644_473_600 } else { 0 };
+	format!("{secs}.{nanos:09}s")
+}
+
+fn time_to_zoned(time: SystemTime, time_zone: &TimeZone) -> Option<Zoned> {
+	let ts = Timestamp::try_from(time).ok()?;
 	Some(Zoned::new(ts, time_zone.clone()))
 }
 
@@ -447,7 +468,7 @@ fn touch(
 				.map_err(|error| TouchError::ReferenceFileInaccessible(reference.to_owned(), error))?
 		},
 		Source::Now => {
-			let now = timestamp_to_filetime(Timestamp::now());
+			let now = SystemTime::from(Timestamp::now());
 			(Some(now), Some(now))
 		},
 		&Source::Timestamp(ts) => (Some(ts), Some(ts)),
@@ -455,10 +476,10 @@ fn touch(
 	let (atime, mtime) = (atime.filter(|_| wants_atime), mtime.filter(|_| wants_mtime));
 
 	let (atime, mtime) = if let Some(date) = &opts.date {
-		let adjust = |time: Option<FileTime>| {
+		let adjust = |time: Option<SystemTime>| {
 			time.map(|time| {
 				parse_date(
-					filetime_to_zoned(&time, time_zone).ok_or(TouchError::InvalidFiletime(time))?,
+					time_to_zoned(time, time_zone).ok_or(TouchError::InvalidFiletime(time))?,
 					date,
 					time_zone,
 				)
@@ -476,9 +497,7 @@ fn touch(
 	let (atime, mtime) = if opts.source == Source::Now && opts.date.is_none() {
 		(pi_vfs::FileTime::Now, pi_vfs::FileTime::Now)
 	} else {
-		let at = |time: Option<FileTime>| {
-			time.map_or(pi_vfs::FileTime::Omit, |time| pi_vfs::FileTime::At(SystemTime::from(time)))
-		};
+		let at = |time: Option<SystemTime>| time.map_or(pi_vfs::FileTime::Omit, pi_vfs::FileTime::At);
 		(at(atime), at(mtime))
 	};
 
@@ -687,7 +706,7 @@ fn stat(
 	follow: bool,
 	want_atime: bool,
 	want_mtime: bool,
-) -> std::io::Result<(Option<FileTime>, Option<FileTime>)> {
+) -> std::io::Result<(Option<SystemTime>, Option<SystemTime>)> {
 	let metadata = if follow {
 		match fs.metadata(path) {
 			// Successfully followed symlink
@@ -701,16 +720,12 @@ fn stat(
 		fs.symlink_metadata(path)?
 	};
 
-	let atime = want_atime
-		.then(|| metadata.accessed().map(FileTime::from_system_time))
-		.transpose()?;
-	let mtime = want_mtime
-		.then(|| metadata.modified().map(FileTime::from_system_time))
-		.transpose()?;
+	let atime = want_atime.then(|| metadata.accessed()).transpose()?;
+	let mtime = want_mtime.then(|| metadata.modified()).transpose()?;
 	Ok((atime, mtime))
 }
 
-fn parse_date(ref_zoned: Zoned, s: &str, time_zone: &TimeZone) -> Result<FileTime, TouchError> {
+fn parse_date(ref_zoned: Zoned, s: &str, time_zone: &TimeZone) -> Result<SystemTime, TouchError> {
 	// This isn't actually compatible with GNU touch, but there doesn't seem to
 	// be any simple specification for what format this parameter allows and I'm
 	// not about to implement GNU parse_datetime.
@@ -729,7 +744,7 @@ fn parse_date(ref_zoned: Zoned, s: &str, time_zone: &TimeZone) -> Result<FileTim
 		.and_then(|tm| tm.to_datetime())
 		.and_then(|dt| TimeZone::UTC.to_zoned(dt))
 	{
-		return Ok(timestamp_to_filetime(parsed.timestamp()));
+		return Ok(SystemTime::from(parsed.timestamp()));
 	}
 
 	// Also support other formats found in the GNU tests like
@@ -745,22 +760,22 @@ fn parse_date(ref_zoned: Zoned, s: &str, time_zone: &TimeZone) -> Result<FileTim
 			.and_then(|tm| tm.to_datetime())
 			.and_then(|dt| TimeZone::UTC.to_zoned(dt))
 		{
-			return Ok(timestamp_to_filetime(parsed.timestamp()));
+			return Ok(SystemTime::from(parsed.timestamp()));
 		}
 	}
 
 	// "Equivalent to %Y-%m-%d (the ISO 8601 date format). (C99)"
 	// ("%F", ISO_8601_FORMAT),
-	if let Ok(filetime) = strtime::parse(format::ISO_8601, s)
+	if let Ok(time) = strtime::parse(format::ISO_8601, s)
 		.and_then(|tm| tm.to_date())
 		.and_then(|date| {
 			time_zone
 				.to_ambiguous_zoned(date.to_datetime(Time::midnight()))
 				.unambiguous()
 		})
-		.map(|zdt| timestamp_to_filetime(zdt.timestamp()))
+		.map(|zdt| SystemTime::from(zdt.timestamp()))
 	{
-		return Ok(filetime);
+		return Ok(time);
 	}
 
 	// "@%s" is "The number of seconds since the Epoch, 1970-01-01 00:00:00 +0000
@@ -768,13 +783,13 @@ fn parse_date(ref_zoned: Zoned, s: &str, time_zone: &TimeZone) -> Result<FileTim
 	if s.bytes().next() == Some(b'@')
 		&& let Ok(ts) = &s[1..].parse::<i64>()
 	{
-		return Ok(FileTime::from_unix_time(*ts, 0));
+		return Ok(unix_time(*ts));
 	}
 
 	if let Ok(parsed) = parse_datetime::parse_datetime_at_date(ref_zoned, s)
 		&& let Some(zoned) = parsed.into_zoned()
 	{
-		return Ok(timestamp_to_filetime(zoned.timestamp()));
+		return Ok(SystemTime::from(zoned.timestamp()));
 	}
 
 	Err(TouchError::InvalidDateFormat(s.to_owned()))
@@ -793,15 +808,15 @@ fn prepend_century(s: &str) -> Result<String, TouchError> {
 	Ok(format!("{}{s}", if first_two_digits > 68 { 19 } else { 20 }))
 }
 
-/// Parses a timestamp string into a [`FileTime`].
+/// Parses a timestamp string into a [`SystemTime`].
 ///
-/// This function attempts to parse a string into a [`FileTime`]
+/// This function attempts to parse a string into a [`SystemTime`]
 /// As expected by gnu touch -t : `[[cc]yy]mmddhhmm[.ss]`
 ///
 /// Note that  If the year is specified with only two digits,
 /// then cc is 20 for years in the range 0 … 68, and 19 for years in 69 … 99.
 /// in order to be compatible with GNU `touch`.
-fn parse_timestamp(s: &str, time_zone: &TimeZone) -> Result<FileTime, TouchError> {
+fn parse_timestamp(s: &str, time_zone: &TimeZone) -> Result<SystemTime, TouchError> {
 	use format::{YYYYMMDDHHMM, YYYYMMDDHHMM_DOT_SS};
 
 	let current_year = || Timestamp::now().to_zoned(time_zone.clone()).year();
@@ -839,7 +854,7 @@ fn parse_timestamp(s: &str, time_zone: &TimeZone) -> Result<FileTime, TouchError
 		.unambiguous()
 		.map_err(|_| TouchError::Message(format!("invalid date ts format {}", ts.quote())))?;
 
-	Ok(timestamp_to_filetime(local.timestamp()))
+	Ok(SystemTime::from(local.timestamp()))
 }
 
 // TODO: this may be a good candidate to put in fsext.rs
@@ -924,14 +939,14 @@ pub(crate) fn touch_builtin<SE: ShellExtensions>() -> Registration<SE> {
 #[cfg(test)]
 mod tests {
 	use std::{
-		fs,
+		fs::{self, FileTimes},
 		path::{Path, PathBuf},
+		time::{SystemTime, UNIX_EPOCH},
 	};
 
 	use clap::Parser;
-	use filetime::{FileTime, set_file_times};
 
-	use super::{ChangeTimes, Touch, Utility, determine_atime_mtime_change, uu_app};
+	use super::{ChangeTimes, Touch, Utility, determine_atime_mtime_change, unix_time, uu_app};
 	use crate::host::{Host, run_util};
 
 	fn canonical_tempdir() -> (tempfile::TempDir, PathBuf) {
@@ -940,12 +955,17 @@ mod tests {
 		(dir, canonical)
 	}
 
-	fn times_of(path: &Path) -> (FileTime, FileTime) {
+	fn times_of(path: &Path) -> (SystemTime, SystemTime) {
 		let metadata = fs::metadata(path).unwrap();
-		(
-			FileTime::from_last_access_time(&metadata),
-			FileTime::from_last_modification_time(&metadata),
-		)
+		(metadata.accessed().unwrap(), metadata.modified().unwrap())
+	}
+
+	fn unix_seconds(time: SystemTime) -> u64 {
+		time.duration_since(UNIX_EPOCH).unwrap().as_secs()
+	}
+
+	fn set_file_times(path: PathBuf, atime: SystemTime, mtime: SystemTime) -> std::io::Result<()> {
+		fs::set_times(path, FileTimes::new().set_accessed(atime).set_modified(mtime))
 	}
 
 	fn run_with_tz(cwd: &Path, args: &[&str], tz: &str) -> (i32, crate::host::Capture) {
@@ -986,8 +1006,8 @@ mod tests {
 	fn reference_copies_times_from_relative_reference() {
 		let (_dir, root) = canonical_tempdir();
 		fs::write(root.join("ref"), b"x").unwrap();
-		let ref_atime = FileTime::from_unix_time(1_000_000, 0);
-		let ref_mtime = FileTime::from_unix_time(2_000_000, 0);
+		let ref_atime = unix_time(1_000_000);
+		let ref_mtime = unix_time(2_000_000);
 		set_file_times(root.join("ref"), ref_atime, ref_mtime).unwrap();
 
 		let (code, capture) = run_util::<Touch>(&["-r", "ref", "new"], "", &root);
@@ -1005,16 +1025,16 @@ mod tests {
 		assert_eq!(code, 0);
 		assert_eq!(capture.err(), "");
 		let (atime, mtime) = times_of(&root.join("f"));
-		assert_eq!(mtime.unix_seconds(), 981_173_106);
-		assert_eq!(atime.unix_seconds(), 981_173_106);
+		assert_eq!(unix_seconds(mtime), 981_173_106);
+		assert_eq!(unix_seconds(atime), 981_173_106);
 	}
 
 	#[test]
 	fn modification_only_preserves_existing_atime() {
 		let (_dir, root) = canonical_tempdir();
 		fs::write(root.join("f"), b"x").unwrap();
-		let old_atime = FileTime::from_unix_time(1_111, 0);
-		let old_mtime = FileTime::from_unix_time(2_222, 0);
+		let old_atime = unix_time(1_111);
+		let old_mtime = unix_time(2_222);
 		set_file_times(root.join("f"), old_atime, old_mtime).unwrap();
 
 		let (code, capture) =
@@ -1023,7 +1043,7 @@ mod tests {
 		assert_eq!(capture.err(), "");
 		let (atime, mtime) = times_of(&root.join("f"));
 		assert_eq!(atime, old_atime, "-m must not change atime");
-		assert_eq!(mtime, FileTime::from_unix_time(981_173_106, 0));
+		assert_eq!(mtime, unix_time(981_173_106));
 	}
 
 	#[test]
@@ -1032,13 +1052,13 @@ mod tests {
 		let (code, capture) = run_with_tz(&root, &["-d", "2001-02-03", "date"], "Asia/Tokyo");
 		assert_eq!(code, 0);
 		assert_eq!(capture.err(), "");
-		assert_eq!(times_of(&root.join("date")).1.unix_seconds(), 981_126_000);
+		assert_eq!(unix_seconds(times_of(&root.join("date")).1), 981_126_000);
 
 		let (code, capture) =
 			run_with_tz(&root, &["-t", "200102030405.06", "stamp"], "Asia/Tokyo");
 		assert_eq!(code, 0);
 		assert_eq!(capture.err(), "");
-		assert_eq!(times_of(&root.join("stamp")).1.unix_seconds(), 981_140_706);
+		assert_eq!(unix_seconds(times_of(&root.join("stamp")).1), 981_140_706);
 	}
 
 	#[test]

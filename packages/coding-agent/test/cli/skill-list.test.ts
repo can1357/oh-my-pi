@@ -123,6 +123,13 @@ describe("runSkillsCommand", () => {
 });
 
 describe("handleSkillList", () => {
+	// `handleSkillList` reads the inspected directory's config through
+	// `Settings.init({ cwd })`, which returns an already-initialized singleton
+	// unchanged; start from none so the fixture's `.omp/config.yml` is read.
+	beforeEach(() => {
+		resetSettingsForTest();
+	});
+
 	afterEach(() => {
 		resetSettingsForTest();
 		// `Settings.init()` opens `<agentDir>/agent.db`; release it so the temp

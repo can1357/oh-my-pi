@@ -6,6 +6,12 @@
 
 - Fixed `EpisodicGraph.extractFacts` truncating multi-word objects, dropping numeric objects, matching cross-line or stopword subjects (`This`, `That`, `It`), and missing Unicode names and CJK entity triples, and updated `findFactsBySubject` to match case-insensitively ([#17240](https://github.com/can1357/oh-my-pi/pull/17240) by [@GTanger](https://github.com/GTanger)).
 
+## [18.14.2] - 2026-10-31
+
+### Fixed
+
+- Fixed heuristic episodic facts storing word fragments (`Drafting is active.` → `ctive`), truncated multiword objects, or nothing for `has an …` sentences ([#17511](https://github.com/can1357/oh-my-pi/issues/17511))
+
 ## [18.13.3] - 2026-10-28
 
 ### Changed

@@ -13,9 +13,9 @@ Extensions are the primary way to add capabilities to `omp`. A single extension 
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
-  pi.on("session_start", async (_event, ctx) => {
-    ctx.ui.notify("My extension loaded!", "info");
-  });
+	pi.on("session_start", async (_event, ctx) => {
+		ctx.ui.notify("My extension loaded!", "info");
+	});
 }
 ```
 
@@ -29,47 +29,47 @@ The following extension registers a slash command, a tool, and a session-start h
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 export default function myExtension(pi: ExtensionAPI) {
-  const z = pi.zod;
+	const z = pi.zod;
 
-  // Runs once when the session loads
-  pi.on("session_start", async (_event, ctx) => {
-    ctx.ui.notify(`Session ready in ${ctx.cwd}`, "info");
-  });
+	// Runs once when the session loads
+	pi.on("session_start", async (_event, ctx) => {
+		ctx.ui.notify(`Session ready in ${ctx.cwd}`, "info");
+	});
 
-  // Slash command: /greet
-  pi.registerCommand("greet", {
-    description: "Send a greeting into the conversation",
-    handler: async (args, ctx) => {
-      const name = args.trim() || "world";
-      pi.sendMessage(
-        {
-          customType: "greeting",
-          content: `Hello, ${name}!`,
-          display: true,
-          attribution: "user",
-        },
-        { triggerTurn: false }
-      );
-      ctx.ui.notify(`Greeted ${name}`, "info");
-    },
-  });
+	// Slash command: /greet
+	pi.registerCommand("greet", {
+		description: "Send a greeting into the conversation",
+		handler: async (args, ctx) => {
+			const name = args.trim() || "world";
+			pi.sendMessage(
+				{
+					customType: "greeting",
+					content: `Hello, ${name}!`,
+					display: true,
+					attribution: "user",
+				},
+				{ triggerTurn: false },
+			);
+			ctx.ui.notify(`Greeted ${name}`, "info");
+		},
+	});
 
-  // LLM-callable tool
-  pi.registerTool({
-    name: "word_count",
-    label: "Word Count",
-    description: "Count the words in a string",
-    parameters: z.object({
-      text: z.string().describe("Text to count"),
-    }),
-    async execute(_id, params, _signal, _onUpdate, _ctx) {
-      const count = params.text.split(/\s+/).filter(Boolean).length;
-      return {
-        content: [{ type: "text", text: String(count) }],
-        details: { count },
-      };
-    },
-  });
+	// LLM-callable tool
+	pi.registerTool({
+		name: "word_count",
+		label: "Word Count",
+		description: "Count the words in a string",
+		parameters: z.object({
+			text: z.string().describe("Text to count"),
+		}),
+		async execute(_id, params, _signal, _onUpdate, _ctx) {
+			const count = params.text.split(/\s+/).filter(Boolean).length;
+			return {
+				content: [{ type: "text", text: String(count) }],
+				details: { count },
+			};
+		},
+	});
 }
 ```
 
@@ -107,10 +107,10 @@ To package an extension as an installable plugin, add an `omp` field to `package
 
 ```json
 {
-  "name": "my-omp-extension",
-  "omp": {
-    "extensions": ["./src/main.ts"]
-  }
+	"name": "my-omp-extension",
+	"omp": {
+		"extensions": ["./src/main.ts"]
+	}
 }
 ```
 
@@ -118,9 +118,9 @@ The legacy `pi` key is also accepted for backwards compatibility:
 
 ```json
 {
-  "pi": {
-    "extensions": ["./index.ts"]
-  }
+	"pi": {
+		"extensions": ["./index.ts"]
+	}
 }
 ```
 
@@ -128,9 +128,9 @@ Multiple entry points are supported:
 
 ```json
 {
-  "omp": {
-    "extensions": ["./src/safety.ts", "./src/tools.ts"]
-  }
+	"omp": {
+		"extensions": ["./src/safety.ts", "./src/tools.ts"]
+	}
 }
 ```
 
@@ -140,27 +140,27 @@ Installed-plugin manifest entries may be `.ts`, `.js`, `.mjs`, or `.cjs`; a mani
 
 ```ts
 pi.registerCommand("my-cmd", {
-  description: "What the command does",
-  handler: async (args, ctx) => {
-    // args: everything the user typed after /my-cmd
-    // ctx: ExtensionCommandContext — includes ctx.ui, ctx.cwd, session controls
-    ctx.ui.notify("Running!", "info");
-    await ctx.waitForIdle();
-    await ctx.newSession();
-  },
+	description: "What the command does",
+	handler: async (args, ctx) => {
+		// args: everything the user typed after /my-cmd
+		// ctx: ExtensionCommandContext — includes ctx.ui, ctx.cwd, session controls
+		ctx.ui.notify("Running!", "info");
+		await ctx.waitForIdle();
+		await ctx.newSession();
+	},
 });
 ```
 
 `ExtensionCommandContext` session-control methods:
 
-| Method | Effect |
-|---|---|
-| `waitForIdle()` | Wait for the agent to finish streaming |
-| `newSession(opts?)` | Open a fresh session |
-| `switchSession(path)` | Switch to an existing session file |
-| `branch(entryId)` | Fork from a specific history entry |
-| `navigateTree(id, opts?)` | Jump to a different point in the session tree |
-| `reload()` | Reload the session runtime |
+| Method                            | Effect                                                                     |
+| --------------------------------- | -------------------------------------------------------------------------- |
+| `waitForIdle()`                   | Wait for the agent to finish streaming                                     |
+| `newSession(opts?)`               | Open a fresh session                                                       |
+| `switchSession(path)`             | Switch to an existing session file                                         |
+| `branch(entryId)`                 | Fork from a specific history entry                                         |
+| `navigateTree(id, opts?)`         | Jump to a different point in the session tree                              |
+| `reload()`                        | Reload the session runtime                                                 |
 | `compact(instructionsOrOptions?)` | Compact the current context; also available on the base `ExtensionContext` |
 
 Use command contexts for switching, branching, tree navigation, and reload. `compact()` accepts either an instruction string or `CompactOptions`.
@@ -175,24 +175,24 @@ Zod-compatible omptype builder; `pi.arktype` and the legacy-compatible
 const z = pi.zod;
 
 pi.registerTool({
-  name: "search_notes",           // snake_case, unique
-  label: "Search Notes",          // human-readable label for TUI
-  description: "Full-text search through project notes",
-  parameters: z.object({
-    query: z.string().describe("Search query"),
-    limit: z.number().default(10).optional().describe("Max results"),
-  }),
-  async execute(toolCallId, params, signal, onUpdate, ctx) {
-    if (signal?.aborted) {
-      return { content: [{ type: "text", text: "Cancelled" }], details: { query: params.query, count: 0 } };
-    }
-    onUpdate?.({ content: [{ type: "text", text: "Searching..." }], details: { query: params.query, count: 0 } });
-    // ... do work ...
-    return {
-      content: [{ type: "text", text: `Found N results for "${params.query}"` }],
-      details: { query: params.query, count: 0 },
-    };
-  },
+	name: "search_notes", // snake_case, unique
+	label: "Search Notes", // human-readable label for TUI
+	description: "Full-text search through project notes",
+	parameters: z.object({
+		query: z.string().describe("Search query"),
+		limit: z.number().default(10).optional().describe("Max results"),
+	}),
+	async execute(toolCallId, params, signal, onUpdate, ctx) {
+		if (signal?.aborted) {
+			return { content: [{ type: "text", text: "Cancelled" }], details: { query: params.query, count: 0 } };
+		}
+		onUpdate?.({ content: [{ type: "text", text: "Searching..." }], details: { query: params.query, count: 0 } });
+		// ... do work ...
+		return {
+			content: [{ type: "text", text: `Found N results for "${params.query}"` }],
+			details: { query: params.query, count: 0 },
+		};
+	},
 });
 ```
 
@@ -202,22 +202,22 @@ Tool definitions may also set `loadMode: "essential" | "discoverable"` (`"discov
 
 ```ts
 pi.on("tool_call", async (event, ctx) => {
-  // event.toolName, event.input, event.toolCallId
-  if (event.toolName !== "bash") return;
+	// event.toolName, event.input, event.toolCallId
+	if (event.toolName !== "bash") return;
 
-  const command = String((event.input as { command?: unknown }).command ?? "");
-  if (command.includes("rm -rf /")) {
-    return { block: true, reason: "Blocked by safety policy" };
-  }
+	const command = String((event.input as { command?: unknown }).command ?? "");
+	if (command.includes("rm -rf /")) {
+		return { block: true, reason: "Blocked by safety policy" };
+	}
 });
 
 pi.on("turn_end", async (_event, ctx) => {
-  ctx.ui.setStatus("tokens", `~${ctx.getContextUsage()?.tokens ?? "?"} tokens`);
+	ctx.ui.setStatus("tokens", `~${ctx.getContextUsage()?.tokens ?? "?"} tokens`);
 });
 
-pi.on("session_stop", async (event) => {
-  if (event.stop_hook_active) return;
-  return { continue: true, additionalContext: `Review final status after turn ${event.turn_id}.` };
+pi.on("session_stop", async event => {
+	if (event.stop_hook_active) return;
+	return { continue: true, additionalContext: `Review final status after turn ${event.turn_id}.` };
 });
 ```
 
@@ -225,13 +225,13 @@ Full event catalog: see [extension authoring guide](../extensions.md).
 
 ## Extension vs hook — when to use which
 
-| Need | Use |
-|---|---|
-| Tools + commands + events in one module | **Extension** (`ExtensionAPI`) |
-| Pure event interception (policy, redaction) | **Extension** or **Hook** (both work; extension is preferred) |
-| Legacy hook module already exists | **Hook** (`HookAPI` from `@oh-my-pi/pi-coding-agent/extensibility/hooks`) |
-| Registering a provider, shortcut, or CLI flag | **Extension only** |
-| Shipping as a marketplace plugin | **Extension** (use `package.json` manifest) |
+| Need                                          | Use                                                                       |
+| --------------------------------------------- | ------------------------------------------------------------------------- |
+| Tools + commands + events in one module       | **Extension** (`ExtensionAPI`)                                            |
+| Pure event interception (policy, redaction)   | **Extension** or **Hook** (both work; extension is preferred)             |
+| Legacy hook module already exists             | **Hook** (`HookAPI` from `@oh-my-pi/pi-coding-agent/extensibility/hooks`) |
+| Registering a provider, shortcut, or CLI flag | **Extension only**                                                        |
+| Shipping as a marketplace plugin              | **Extension** (use `package.json` manifest)                               |
 
 New authoring should use `ExtensionAPI`. Discovered JS/TS hook factories are loaded through this API in normal sessions; the standalone `HookRunner` remains for legacy SDK consumers. Shared event names do not imply identical result-chaining behavior in both runners.
 
@@ -250,7 +250,7 @@ To temporarily disable a specific extension module by name without removing the 
 ```yaml
 # ~/.omp/agent/config.yml
 disabledExtensions:
-  - extension-module:my-ext
+   - extension-module:my-ext
 ```
 
 The derived name is the filename stem (or directory name for `index.ts`-style entries): `/path/to/my-ext.ts` → `my-ext`.

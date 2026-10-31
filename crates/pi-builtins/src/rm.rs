@@ -931,8 +931,7 @@ impl Utility for Rm {
 fn run_matches(host: &mut Host, matches: &ArgMatches) -> i32 {
 	let files: Vec<_> = matches
 		.get_many::<OsString>(ARG_FILES)
-		.map(|v| v.map(OsString::as_os_str).collect())
-		.unwrap_or_default();
+		.map_or_default(|v| v.map(OsString::as_os_str).collect());
 
 	let force_flag = matches.get_flag(OPT_FORCE);
 	if files.is_empty() && !force_flag {
@@ -1751,7 +1750,7 @@ fn path_is_current_or_parent_directory(path: &Path) -> bool {
 		&& !path.has_root()
 	{
 		let rest = components.as_path();
-		return rest.as_os_str().is_empty() || path_is_current_or_parent_directory(rest);
+		return rest.is_empty() || path_is_current_or_parent_directory(rest);
 	}
 	let path_str = os_bytes(path.as_os_str());
 	let dir_separator = MAIN_SEPARATOR as u8;
@@ -2146,12 +2145,16 @@ mod tests {
 		}
 	}
 
-	/// A directory chain far deeper than the removal could recurse through on
-	/// a small stack, and deep enough that its paths pass `PATH_MAX` and one
-	/// descriptor per level would pass the default descriptor limit. Every
-	/// level also holds a file, so the walk keeps listing a directory after
-	/// coming back up out of its subdirectory. Redox removes through the
-	/// provider walk rather than the descriptor walk, so it is not covered.
+	/// A directory chain deeper than the removal could recurse through on a
+	/// small stack, whose paths pass `PATH_MAX`, and which one descriptor per
+	/// level would take past Linux's default limit of 1024. Every level also
+	/// holds a file, so the walk keeps listing a directory after coming back up
+	/// out of its subdirectory. Redox removes through the provider walk rather
+	/// than the descriptor walk, so it is not covered.
+	///
+	/// Keep the chain shallow beyond that: on macOS every file operation slows
+	/// with its directory's depth, so building and removing the chain grows
+	/// quadratically, and 5,000 levels took over five minutes.
 	#[cfg(all(unix, not(target_os = "redox")))]
 	#[test]
 	fn removes_a_directory_chain_deeper_than_the_stack() {
@@ -2159,21 +2162,23 @@ mod tests {
 
 		use uucore::safe_traversal::{DirFd, SymlinkBehavior};
 
-		const DEPTH: usize = 5_000;
+		const DEPTH: usize = 1_100;
+		const NAME: &str = "level";
+		const { assert!(DEPTH * (NAME.len() + 1) > libc::PATH_MAX as usize) };
 		let cwd = tempdir().unwrap();
 		let root = cwd.path().join("deep");
 		std::fs::create_dir(&root).unwrap();
 		let mut dir = DirFd::open(&root, SymlinkBehavior::NoFollow).unwrap();
 		for _ in 0..DEPTH {
 			dir.open_file_at(OsStr::new("f")).unwrap();
-			dir.mkdir_at(OsStr::new("d"), 0o755).unwrap();
-			dir = dir.open_subdir(OsStr::new("d"), SymlinkBehavior::NoFollow).unwrap();
+			dir.mkdir_at(OsStr::new(NAME), 0o755).unwrap();
+			dir = dir.open_subdir(OsStr::new(NAME), SymlinkBehavior::NoFollow).unwrap();
 		}
 		drop(dir);
 
 		let cwd_path = cwd.path().to_path_buf();
 		let (code, err) = std::thread::Builder::new()
-			.stack_size(512 * 1024)
+			.stack_size(256 * 1024)
 			.spawn(move || {
 				let (code, capture) = run_util::<Rm>(&["-rf", "deep"], "", cwd_path);
 				(code, capture.err())

@@ -1673,6 +1673,17 @@ export interface LiveStartResult {
 	voice: string;
 }
 
+export interface LiveConnectParams {
+	sdpOffer: string;
+	voice?: string;
+	instructions?: string;
+}
+
+export interface LiveConnectResult {
+	voice: string;
+	sdpAnswer: string;
+}
+
 export interface LiveMuteParams {
 	muted?: boolean;
 }
@@ -1740,6 +1751,15 @@ export interface SetAutoRetryParams {
 
 export interface BashParams {
 	command: string;
+}
+
+export interface GetSessionLeaseParams {
+	sessionIds: string[];
+}
+
+export interface GetSessionLeaseResult {
+	held: string[];
+	unknown: string[];
 }
 
 export interface ExportHtmlParams {
@@ -1899,6 +1919,7 @@ export interface RpcWireCommands {
 	cancel_subagent: { params: CancelSubagentParams; result: CancelSubagentResult };
 	steer_subagent: { params: SteerSubagentParams; result: undefined };
 	live_start: { params: LiveStartParams; result: LiveStartResult };
+	live_connect: { params: LiveConnectParams; result: LiveConnectResult };
 	live_stop: { params: undefined; result: undefined };
 	live_mute: { params: LiveMuteParams; result: LiveMuteResult };
 	dictation_start: { params: DictationStartParams; result: undefined };
@@ -1920,6 +1941,7 @@ export interface RpcWireCommands {
 	bash: { params: BashParams; result: BashResult };
 	abort_bash: { params: undefined; result: undefined };
 	get_session_stats: { params: undefined; result: SessionStats };
+	get_session_lease: { params: GetSessionLeaseParams; result: GetSessionLeaseResult };
 	export_html: { params: ExportHtmlParams; result: ExportHtmlResult };
 	switch_session: { params: SwitchSessionParams; result: CancellationResult };
 	branch: { params: BranchParams; result: BranchResult };

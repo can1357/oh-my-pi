@@ -63,6 +63,7 @@ import {
 	type ToolResultMessage,
 	type Usage,
 } from "../types";
+import { mergeHeaders } from "./anthropic-headers";
 import { resolveCopilotRequestIdentity } from "./github-copilot-headers";
 import { resolveXaiBaseUrl } from "./xai-base-url";
 
@@ -253,11 +254,11 @@ export function resolveOpenAIRequestSetup(
 		apiKey = $env.OPENAI_API_KEY;
 	}
 	const rawApiKey = apiKey;
-	let headers = { ...model.headers };
-	if (model.provider === "openrouter") {
-		Object.assign(headers, getOpenRouterHeaders());
-	}
-	Object.assign(headers, options.extraHeaders);
+	let headers = mergeHeaders(
+		model.headers,
+		model.provider === "openrouter" ? getOpenRouterHeaders() : undefined,
+		options.extraHeaders,
+	);
 	if (model.provider === "coreweave") {
 		applyCoreWeaveProjectHeader(headers);
 	}
@@ -1062,7 +1063,12 @@ export function resolveOpenAICompatPolicy<TApi extends Api>(
 	if (disabled && compat.supportsReasoningEffort && !omitReasoningEffort) {
 		if (disableMode === "none-effort") {
 			wireEffort = "none";
-		} else if (disableReason === "caller" && requestedEffort === undefined && disableMode === "lowest-effort") {
+		} else if (
+			modelSupported &&
+			disableReason === "caller" &&
+			requestedEffort === undefined &&
+			disableMode === "lowest-effort"
+		) {
 			const minEffort = getSupportedEfforts(model)[0];
 			if (minEffort === undefined) {
 				throw new AIError.ConfigurationError(

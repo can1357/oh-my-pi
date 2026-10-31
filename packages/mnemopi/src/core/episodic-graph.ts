@@ -200,10 +200,39 @@ const CJK_FACT_STOP_WORDS: ReadonlySet<string> = new Set([
 	"明天",
 ]);
 
-const ENGLISH_ENTITY_TOKEN = "\\p{Lu}[\\p{L}\\p{N}_-]*(?:\\.[\\p{L}\\p{N}_-]+)*";
-const ENGLISH_ENTITY_SUBJECT = `(?<![\\p{L}\\p{N}_])(${ENGLISH_ENTITY_TOKEN}(?:[ \\t]+${ENGLISH_ENTITY_TOKEN}){0,4})`;
-const ENGLISH_OBJECT_PHRASE =
-	"([\\p{L}\\p{N}][\\p{L}\\p{N}_.\\-'/]*(?:[ \\t]+[\\p{L}\\p{N}][\\p{L}\\p{N}_.\\-'/]*){0,6})";
+/** Clause connector that ends a fact object, so the next clause is never swallowed into it. */
+const CLAUSE_BREAK = String.raw`(?:and|but|or|nor|yet|then|because|so|while|which|that|who|whom|whose|when|where|if|since|although|though|unless|until|whereas)\b`;
+/** Optional leading article; must be a whole word, so `active` never loses its `a` and `an` never splits. */
+const ARTICLE = String.raw`(?:(?:an?|the)[ \t]+)?`;
+/** Fact subject: from the first capitalized word up to the predicate on the same line. */
+const SUBJECT = String.raw`(?<![\p{L}\p{N}_])(\p{Lu}[\p{L} \t]*?)`;
+/**
+ * Start of another extractable clause (`Bob is …`, `Bob Jones is …`, `the runtime has …`). Catches clauses
+ * joined by a connector missing from {@link CLAUSE_BREAK}, so their whole subject is left for the next match.
+ */
+const NEXT_CLAUSE = String.raw`${ARTICLE}(?:\p{Lu}[\p{L}\d]*[ \t]+)*[\p{L}\d]+[ \t]+(?:is|has|uses?|using|used|works?)\b`;
+
+/**
+ * Captures a whole phrase of `word`s up to punctuation, a line break, a clause connector, or the
+ * subject of another clause. Connectors may start an object (for example, `that permission`) but
+ * terminate it after the first token.
+ * Each word must end on a token boundary; a phrase whose first word does not yields no match.
+ */
+function phrase(word: string): string {
+	const token = String.raw`${word}(?:[.'-]${word})*(?![\p{L}\p{N}_])`;
+	return String.raw`(${token}(?:[ \t]+(?!${CLAUSE_BREAK}|${NEXT_CLAUSE})${token})*)`;
+}
+
+const IS_FACT = new RegExp(String.raw`${SUBJECT}[ \t]+is[ \t]+${ARTICLE}${phrase(String.raw`\p{L}+`)}`, "gu");
+const HAS_FACT = new RegExp(String.raw`${SUBJECT}[ \t]+has[ \t]+${ARTICLE}${phrase(String.raw`[\p{L}\d]+`)}`, "gu");
+const USES_FACT = new RegExp(
+	String.raw`${SUBJECT}[ \t]+(?:uses?|using|used)[ \t]+${ARTICLE}${phrase(String.raw`\p{L}+`)}`,
+	"gu",
+);
+const WORKS_AT_FACT = new RegExp(
+	String.raw`${SUBJECT}[ \t]+works?[ \t]+(?:at|for|with)[ \t]+(\p{Lu}\p{L}*(?:[ \t]+\p{Lu}\p{L}*)*)(?![\p{L}\p{N}_])`,
+	"gu",
+);
 
 const CJK_LEFT_BOUNDARY = "(?:^|[，。！？；、：\\r\\n.!?;:\\s])";
 const CJK_SUBJECT_TOKEN = "([\\p{Script=Han}A-Za-z][\\p{Script=Han}A-Za-z0-9_.\\-]{1,11})";
@@ -216,43 +245,11 @@ const CJK_SUBJECT_TRAILING_STOP_RE =
 const CJK_REJECT_PARTICLES =
 	/(?:的|了|嗎|吗|呢|吧|啊|但|而|且|或|若|當|当|因為|因为|所以|如果|雖然|虽然|已經|已经|正在|決定|决定|認為|认为|覺得|觉得|發現|发现|表示|說明|说明|討論|讨论|最後|最后|後來|后来|目前|現在|现在|沒有|没有|所有|還是|还是|但是|總是|总是|於是|于是|大家|比較|比较|結束|结束|開始|开始)/u;
 
-const FACT_EXTRACTION_PATTERNS: readonly {
+const CJK_FACT_PATTERNS: readonly {
 	readonly regex: RegExp;
 	readonly predicate: string;
 	readonly confidence: number;
 }[] = [
-	{
-		regex: new RegExp(
-			`${ENGLISH_ENTITY_SUBJECT}[ \\t]+is(?:[ \\t]+(?:a|an|the))?[ \\t]+${ENGLISH_OBJECT_PHRASE}`,
-			"gu",
-		),
-		predicate: "is",
-		confidence: 0.7,
-	},
-	{
-		regex: new RegExp(
-			`${ENGLISH_ENTITY_SUBJECT}[ \\t]+has(?:[ \\t]+(?:a|an|the))?[ \\t]+${ENGLISH_OBJECT_PHRASE}`,
-			"gu",
-		),
-		predicate: "has",
-		confidence: 0.6,
-	},
-	{
-		regex: new RegExp(
-			`${ENGLISH_ENTITY_SUBJECT}[ \\t]+(?:uses?|using|used)(?:[ \\t]+(?:a|an|the))?[ \\t]+${ENGLISH_OBJECT_PHRASE}`,
-			"gu",
-		),
-		predicate: "uses",
-		confidence: 0.6,
-	},
-	{
-		regex: new RegExp(
-			`${ENGLISH_ENTITY_SUBJECT}[ \\t]+works?[ \\t]+(?:at|for|with)[ \\t]+${ENGLISH_OBJECT_PHRASE}`,
-			"gu",
-		),
-		predicate: "works_at",
-		confidence: 0.7,
-	},
 	{
 		regex: new RegExp(
 			`${CJK_LEFT_BOUNDARY}${CJK_SUBJECT_TOKEN}[ \\t]*(?<![但還还認认總总就只可或若雖虽不沒没無无非於于])(?:是|為|为)(?![否的])[ \\t]*${CJK_OBJECT_PHRASE}`,
@@ -531,9 +528,11 @@ export class EpisodicGraph {
 			let cleanSubject = subject.trim();
 			while (true) {
 				const firstSpaceIndex = cleanSubject.search(/[ \t]+/);
-				const firstWord = firstSpaceIndex === -1 ? cleanSubject : cleanSubject.slice(0, firstSpaceIndex);
-				if (firstWord.length > 0 && ENGLISH_FACT_STOP_WORDS.has(firstWord.toLowerCase())) {
-					cleanSubject = firstSpaceIndex === -1 ? "" : cleanSubject.slice(firstSpaceIndex).trim();
+				if (firstSpaceIndex === -1) break;
+				const firstWord = cleanSubject.slice(0, firstSpaceIndex);
+				const rest = cleanSubject.slice(firstSpaceIndex).trim();
+				if (firstWord.length > 0 && ENGLISH_FACT_STOP_WORDS.has(firstWord.toLowerCase()) && /^\p{Lu}/u.test(rest)) {
+					cleanSubject = rest;
 				} else {
 					break;
 				}
@@ -552,9 +551,6 @@ export class EpisodicGraph {
 			if (cleanSubject.length < minSubjectLen) return;
 
 			let cleanObject = object.trim();
-			cleanObject = cleanObject
-				.replace(/\s+\b(?:and|but|or|because|since|while|when|where|which|that)\b[\s\S]*$/i, "")
-				.trim();
 			cleanObject =
 				cleanObject
 					.split(/[，。！？；、,\r\n!?;]|\.(?=\s|$)|(?:並|并且|且|而且|但是|因為|因为|所以)/u)[0]
@@ -581,7 +577,11 @@ export class EpisodicGraph {
 			});
 		};
 
-		for (const { regex, predicate, confidence } of FACT_EXTRACTION_PATTERNS) {
+		for (const match of bounded.matchAll(IS_FACT)) pushFact(match[1] ?? "", "is", match[2] ?? "", 0.7);
+		for (const match of bounded.matchAll(HAS_FACT)) pushFact(match[1] ?? "", "has", match[2] ?? "", 0.6);
+		for (const match of bounded.matchAll(USES_FACT)) pushFact(match[1] ?? "", "uses", match[2] ?? "", 0.6);
+		for (const match of bounded.matchAll(WORKS_AT_FACT)) pushFact(match[1] ?? "", "works_at", match[2] ?? "", 0.7);
+		for (const { regex, predicate, confidence } of CJK_FACT_PATTERNS) {
 			for (const match of bounded.matchAll(regex)) {
 				pushFact(match[1] ?? "", predicate, match[2] ?? "", confidence);
 			}

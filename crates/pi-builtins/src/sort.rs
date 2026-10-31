@@ -467,7 +467,6 @@ mod check {
 use std::{cmp::Ordering, ffi::OsStr, io::Read, iter, thread};
 
 use flume::{Receiver, Sender};
-use itertools::Itertools;
 use pi_vfs::BlockingFs;
 
 use super::{
@@ -534,7 +533,7 @@ pub fn check(fs: &BlockingFs, path: &OsStr, settings: &GlobalSettings) -> SortRe
 			let _ = recycled_sender.send(prev_chunk.recycle());
 		}
 
-		for (a, b) in chunk.lines().iter().tuple_windows() {
+		for [a, b] in chunk.lines().array_windows() {
 			line_idx += 1;
 			if compare_by(a, b, settings, chunk.line_data(), chunk.line_data()) > max_allowed_cmp {
 				return Err(
@@ -994,7 +993,7 @@ fn parse_lines<'a>(
 	let mut start = 0usize;
 	let mut index = 0usize;
 	for sep_idx in memchr_iter(separator, read) {
-		if index % (64 * 1024) == 0 && settings.cancel.load(AtomicOrdering::Relaxed) {
+		if index.is_multiple_of(64 * 1024) && settings.cancel.load(AtomicOrdering::Relaxed) {
 			return;
 		}
 		let line = &read[start..sep_idx];
@@ -2576,11 +2575,8 @@ impl Compare<MergeableFile> for FileComparator<'_> {
 
 /// Wait for the child to exit and check its exit code.
 fn check_child_success(mut child: Child, program: &str) -> SortResult<()> {
-	if matches!(child.wait().map(|e| e.code()), Ok(Some(0) | None) | Err(_)) {
-		Ok(())
-	} else {
-		Err(SortError::CompressProgTerminatedAbnormally { prog: program.to_owned() }.into())
-	}
+	matches!(child.wait().map(|e| e.code()), Ok(Some(0) | None) | Err(_))
+		.ok_or_else(|| SortError::CompressProgTerminatedAbnormally { prog: program.to_owned() }.into())
 }
 
 /// A temporary file that can be written to.
@@ -3356,7 +3352,10 @@ mod tmp_dir {
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 
-use std::path::{Path, PathBuf};
+use std::{
+	fmt::NumBuffer,
+	path::{Path, PathBuf},
+};
 
 use pi_vfs::{BlockingFs, File, OpenOptions, TempOptions};
 
@@ -3405,7 +3404,7 @@ impl TmpDirWrapper {
 			self.init_tmp_dir()?;
 		}
 		let dir = self.temp_dir.as_deref().expect("temporary directory was created");
-		let path = pi_vfs::join_path(dir, Path::new(&self.size.to_string()));
+		let path = pi_vfs::join_path(dir, Path::new(self.size.format_into(&mut NumBuffer::new())));
 		let file = self
 			.fs
 			.open_with(&path, OpenOptions::new().write(true).create_new(true))
@@ -3436,12 +3435,13 @@ use std::num::NonZero;
 use std::{
 	cmp::Ordering,
 	ffi::{OsStr, OsString},
+	fmt::NumBuffer,
 	hash::{Hash, Hasher},
 	io::{BufRead, BufReader, BufWriter, Read, Write},
 	num::IntErrorKind,
 	ops::Range,
 	path::{Path, PathBuf},
-	sync::{Arc, LazyLock, OnceLock, atomic::{AtomicBool, Ordering as AtomicOrdering}},
+	sync::{Arc, LazyLock, atomic::{AtomicBool, Ordering as AtomicOrdering}},
 };
 
 use bigdecimal::BigDecimal;
@@ -5188,10 +5188,11 @@ fn legacy_key_to_k(from: &LegacyKeyPart, to: Option<&LegacyKeyPart>) -> String {
 		};
 
 		keydef.push(',');
-		keydef.push_str(&end_field.to_string());
+		let mut buf = NumBuffer::new();
+		keydef.push_str(end_field.format_into(&mut buf));
 		if to.char_pos != 0 {
 			keydef.push('.');
-			keydef.push_str(&to.char_pos.to_string());
+			keydef.push_str(to.char_pos.format_into(&mut buf));
 		}
 		keydef.push_str(&to.opts);
 	}
@@ -5381,10 +5382,7 @@ fn key_spans_multiple_fields(selector: &FieldSelector) -> bool {
 	) {
 		return false;
 	}
-	match &selector.to {
-		None => true,
-		Some(to) => to.field > selector.from.field,
-	}
+	selector.to.as_ref().is_none_or(|to| to.field > selector.from.field)
 }
 
 fn key_leading_blanks_significant(selector: &FieldSelector) -> bool {
@@ -6794,33 +6792,31 @@ enum Month {
 type MonthTable = Vec<(Vec<u8>, Month)>;
 
 fn get_locale_month_table() -> Option<&'static MonthTable> {
-	static TABLE: OnceLock<Option<MonthTable>> = OnceLock::new();
+	static TABLE: LazyLock<Option<MonthTable>> = LazyLock::new(|| {
+		let months = get_locale_months()?;
+		let all_months = [
+			Month::January,
+			Month::February,
+			Month::March,
+			Month::April,
+			Month::May,
+			Month::June,
+			Month::July,
+			Month::August,
+			Month::September,
+			Month::October,
+			Month::November,
+			Month::December,
+		];
+		let table: Vec<(Vec<u8>, Month)> = months
+			.iter()
+			.zip(all_months.iter())
+			.map(|(name, &month)| (name.clone(), month))
+			.collect();
+		Some(table)
+	});
 
-	TABLE
-		.get_or_init(|| {
-			let months = get_locale_months()?;
-			let all_months = [
-				Month::January,
-				Month::February,
-				Month::March,
-				Month::April,
-				Month::May,
-				Month::June,
-				Month::July,
-				Month::August,
-				Month::September,
-				Month::October,
-				Month::November,
-				Month::December,
-			];
-			let table: Vec<(Vec<u8>, Month)> = months
-				.iter()
-				.zip(all_months.iter())
-				.map(|(name, &month)| (name.clone(), month))
-				.collect();
-			Some(table)
-		})
-		.as_ref()
+	TABLE.as_ref()
 }
 
 /// Parse the beginning string into a Month, returning [`Month::Unknown`] on
@@ -6888,7 +6884,7 @@ fn print_sorted<'a, T: Iterator<Item = &'a Line<'a>>>(
 		.map_err(|error| SortError::WriteFailed { path: output_name.clone(), error })?;
 	for (index, line) in iter.enumerate() {
 		// A result held in memory can be a gigabyte of lines.
-		if index % (64 * 1024) == 0 && settings.cancel.load(AtomicOrdering::Relaxed) {
+		if index.is_multiple_of(64 * 1024) && settings.cancel.load(AtomicOrdering::Relaxed) {
 			return Err(SortError::Cancelled);
 		}
 		line.print(&mut writer, settings)

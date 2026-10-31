@@ -130,6 +130,12 @@ export class JobsSheet implements Component {
 	#native: { key: string; output: string | undefined; node: NativeNode } | undefined;
 	/** Fallback output tail, reused while the selected job's output is unchanged. */
 	#tail: { id: string; output: string; lines: readonly string[] } | undefined;
+	/**
+	 * The selected job as last seen: its row, detail and the subagents placing
+	 * it. The session evicts settled jobs on its own clock; while the user keeps
+	 * one selected it stays listed with its last output, until they select another.
+	 */
+	#held: { job: JobsPanelJob; detail: JobsPanelDetail | undefined; agents: readonly JobTreeAgent[] } | undefined;
 
 	constructor(source: JobsSheetSource) {
 		this.#source = source;
@@ -137,7 +143,7 @@ export class JobsSheet implements Component {
 
 	describe(_cx: DescribeContext): NativeNode {
 		const { rows, jobs, selected, cancellable } = this.#current();
-		const detail = selected && this.#source.inspect(selected.id);
+		const detail = selected && this.#inspect(selected.id);
 		const now = Date.now();
 		// Elapsed nodes tick on their own; list values and the output pane redraw
 		// when a job starts, settles, leaves or moves in the tree, its process
@@ -201,7 +207,7 @@ export class JobsSheet implements Component {
 				),
 			);
 		}
-		const detail = selected && this.#source.inspect(selected.id);
+		const detail = selected && this.#inspect(selected.id);
 		if (detail) {
 			// Rows show the cut label; the selected job's command wraps here,
 			// bounded so a long script never pushes the facts and output off the sheet.
@@ -262,13 +268,41 @@ export class JobsSheet implements Component {
 		selected: JobsPanelJob | undefined;
 		cancellable: boolean;
 	} {
-		const { running, recent, rootId, agents } = this.#source.load();
-		const rows = buildJobTree([...running, ...recent], agents ?? [], rootId);
+		const snapshot = this.#source.load();
+		const { running, rootId } = snapshot;
+		let { recent, agents = [] } = snapshot;
+		// A settled job the session evicted stays listed while it is selected.
+		const held = this.#held?.job.id === this.#selectedId ? this.#held : undefined;
+		const evicted =
+			held !== undefined &&
+			held.job.status !== "running" &&
+			!running.some(job => job.id === held.job.id) &&
+			!recent.some(job => job.id === held.job.id);
+		if (evicted) {
+			recent = [...recent, held.job];
+			const known = new Set(agents.map(agent => agent.id));
+			agents = [...agents, ...held.agents.filter(agent => !known.has(agent.id))];
+		}
+		const rows = buildJobTree([...running, ...recent], agents, rootId);
 		const jobs = rows.flatMap(entry => (entry.kind === "job" ? [entry.job] : []));
 		const selected = jobs.find(job => job.id === this.#selectedId) ?? jobs[0];
 		this.#selectedId = selected?.id;
+		if (!selected) this.#held = undefined;
+		else if (!evicted) {
+			const detail = held?.job.id === selected.id ? held.detail : undefined;
+			this.#held = { job: selected, detail, agents: snapshot.agents ?? [] };
+		}
 		const owned = selected?.ownerId === undefined || selected.ownerId === rootId;
 		return { rows, jobs, selected, cancellable: this.#source.cancel !== undefined && owned };
+	}
+
+	/** The job's detail from the source, else the last one seen while it was held. */
+	#inspect(id: string): JobsPanelDetail | undefined {
+		const detail = this.#source.inspect(id);
+		const held = this.#held?.job.id === id ? this.#held : undefined;
+		if (!held) return detail;
+		if (detail) held.detail = detail;
+		return held.detail;
 	}
 
 	#tailLines(id: string, output: string): readonly string[] {

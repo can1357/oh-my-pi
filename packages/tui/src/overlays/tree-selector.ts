@@ -10,7 +10,7 @@ import {
 	TruncatedText,
 	truncateToWidth,
 } from "../index";
-import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
+import { isRecord, oklabDistance, sanitizeText } from "@oh-my-pi/pi-utils";
 /** Available session-tree display filters. */
 export const TREE_FILTER_MODES = ["default", "no-tools", "user-only", "labeled-only", "all"] as const;
 /** Session-tree display filter. */
@@ -94,8 +94,13 @@ interface AdvisorTreeDisplay {
  */
 function sanitizeTreeField(value: string): string {
 	return sanitizeText(value)
-		.replace(/[\n\t]/g, " ")
+		.replace(/[\r\n\t\u2028\u2029]/g, " ")
 		.trim();
+}
+
+/** Strip ANSI/control characters and fold line breaks for single-line tree rows and headers. */
+function treeRowText(value: string): string {
+	return plainText(value.replace(/[\r\n\u2028\u2029]/g, " "));
 }
 
 /**
@@ -165,10 +170,38 @@ function stripSystemWrapperTags(content: string): string {
 /** Per-message cap on text folded into the tree search index. */
 const SEARCH_TEXT_LIMIT = 200;
 
-/** One theme-colored piece of an entry's display text. */
+/** One theme-colored piece of an entry's display text; `strong` draws it bold. */
 interface EntryPart {
 	t: string;
 	s?: ThemeColor;
+	strong?: boolean;
+}
+
+/** An entry part as a native span. */
+function partSpan(part: EntryPart): TspSpan {
+	const style = part.strong ? (part.s ? `${part.s} strong` : "strong") : part.s;
+	return span(treeRowText(part.t), style);
+}
+
+/** OKLab distance under which two role colors read as the same color. */
+const SAME_COLOR_DISTANCE = 0.05;
+
+let assistantLabel: { theme: typeof theme; color: ThemeColor } | undefined;
+
+/**
+ * The `assistant:` label color: `success`, unless it looks like the `user:` label's
+ * `accent` (`dark-terminal`, `*-poimandres`); then the path color, then `muted`.
+ */
+function assistantLabelColor(): ThemeColor {
+	if (assistantLabel?.theme !== theme) {
+		const accent = theme.getColorHex("accent");
+		const color =
+			(["success", "statusLinePath"] as const).find(
+				c => oklabDistance(theme.getColorHex(c), accent) >= SAME_COLOR_DISTANCE,
+			) ?? "muted";
+		assistantLabel = { theme, color };
+	}
+	return assistantLabel.color;
 }
 
 /** A cached native tree item and the inputs it was built from. */
@@ -234,6 +267,8 @@ class TreeList implements Component {
 		| undefined;
 	/** Bumped on every label edit: labels are item badges. */
 	#labelVersion = 0;
+	/** Theme the native item caches were built under: labels bake in the `assistant:` color. */
+	#nativeTheme = theme;
 	#pickerItems:
 		| { rows: readonly TreeRow<TreeSelectorNode, string>[]; labels: number; items: TspPickerItem[] }
 		| undefined;
@@ -703,6 +738,7 @@ class TreeList implements Component {
 	 * only `order` (the visible entries) and the selection.
 	 */
 	pickerView(): TreePickerView {
+		this.#syncNativeTheme();
 		const allRows = this.#tree.allRows;
 		if (this.#pickerItems?.rows !== allRows || this.#pickerItems.labels !== this.#labelVersion) {
 			// Real branch points get a disclosure; linear chains stay flat at their head's depth.
@@ -734,9 +770,7 @@ class TreeList implements Component {
 	#pickerItem(row: TreeRow<TreeSelectorNode, string>, open: boolean): TspPickerItem {
 		const item = row.item;
 		const entry = item.entry;
-		const label = this.#entryParts(item).map(part =>
-			span(part.t.includes("\x1b") ? plainText(part.t) : part.t, part.s),
-		);
+		const label = this.#entryParts(item).map(partSpan);
 		let kind: TspPickerItem["node"] = "marker";
 		let role: string | undefined;
 		if (isUserRequestEntry(entry)) {
@@ -755,7 +789,7 @@ class TreeList implements Component {
 			node: kind,
 			...(role ? { role } : {}),
 			...(open ? { open: true } : {}),
-			...(item.label ? { badges: [{ text: plainText(item.label), tone: "warning" as const }] } : {}),
+			...(item.label ? { badges: [{ text: treeRowText(item.label), tone: "warning" as const }] } : {}),
 			...(this.#activePathIds.has(row.key) ? { dot: "accent" as const } : {}),
 		};
 	}
@@ -772,7 +806,7 @@ class TreeList implements Component {
 		if (selected) {
 			const entry = selected.entry;
 			const parts = this.#entryParts(selected)
-				.map(part => (part.t.includes("\x1b") ? plainText(part.t) : part.t))
+				.map(part => treeRowText(part.t))
 				.join("");
 			if (entry.type === "message" || entry.type === "custom_message") {
 				const target: OutlineTarget = {
@@ -784,12 +818,14 @@ class TreeList implements Component {
 					entries: [entry],
 				};
 				const copy = targetCopy(target, collectBlocks(target.entries));
-				preview.push(text(`${copy.label[0]!.toUpperCase()}${copy.label.slice(1)}`, { role: "omp.picker.title" }));
-				if (selected.label) preview.push(text([span(plainText(selected.label), "warning")]));
+				preview.push(
+					text(treeRowText(`${copy.label[0]!.toUpperCase()}${copy.label.slice(1)}`), { role: "omp.picker.title" }),
+				);
+				if (selected.label) preview.push(text([span(treeRowText(selected.label), "warning")]));
 				preview.push(turnPreview(target, copy.content || parts));
 			} else {
 				preview.push(text(parts, { role: "omp.picker.title" }));
-				if (selected.label) preview.push(text([span(plainText(selected.label), "warning")]));
+				if (selected.label) preview.push(text([span(treeRowText(selected.label), "warning")]));
 			}
 		}
 		this.#previewMemo = { node: selected, labels: this.#labelVersion, preview };
@@ -803,6 +839,7 @@ class TreeList implements Component {
 	 * instead of drawn tree connectors.
 	 */
 	describeList(): NativeNode {
+		this.#syncNativeTheme();
 		const rows = this.#tree.rows;
 		let items = this.#itemsNative;
 		if (items?.rows !== rows) {
@@ -852,6 +889,15 @@ class TreeList implements Component {
 		];
 	}
 
+	/** Drop native items built under another theme. */
+	#syncNativeTheme(): void {
+		if (this.#nativeTheme === theme) return;
+		this.#nativeTheme = theme;
+		this.#pickerItems = undefined;
+		this.#itemsNative = undefined;
+		this.#itemCache.clear();
+	}
+
 	#describeRow(row: TreeRow<TreeSelectorNode, string>): NativeNode {
 		const item = row.item;
 		const branch = row.parentKey !== undefined && row.siblingCount > 1;
@@ -859,10 +905,8 @@ class TreeList implements Component {
 		if (cached !== undefined && cached.label === item.label && cached.branch === branch) return cached.node;
 		const label: TspSpan[] = [];
 		if (this.#activePathIds.has(row.key)) label.push(span(`${theme.md.bullet} `, "accent"));
-		if (item.label) label.push(span(`[${plainText(item.label)}] `, "warning"));
-		for (const part of this.#entryParts(item)) {
-			label.push(span(part.t.includes("\x1b") ? plainText(part.t) : part.t, part.s));
-		}
+		if (item.label) label.push(span(`[${treeRowText(item.label)}] `, "warning"));
+		for (const part of this.#entryParts(item)) label.push(partSpan(part));
 		const described = node("item", { label, icon: branch ? "branch" : undefined }, undefined, row.key);
 		this.#itemCache.set(row.key, { label: item.label, branch, node: described });
 		return described;
@@ -954,7 +998,7 @@ class TreeList implements Component {
 		// Active path marker - shown right before the entry text
 		const isOnActivePath = this.#activePathIds.has(node.entry.id);
 		const pathMarker = isOnActivePath ? theme.fg("accent", `${theme.md.bullet} `) : "";
-		const label = node.label ? theme.fg("warning", `[${node.label}] `) : "";
+		const label = node.label ? theme.fg("warning", `[${treeRowText(node.label)}] `) : "";
 		return `${pathMarker}${label}${this.#getEntryDisplayText(node, selected)}`;
 	}
 
@@ -1050,7 +1094,13 @@ class TreeList implements Component {
 
 	#getEntryDisplayText(node: TreeSelectorNode, isSelected: boolean): string {
 		let result = "";
-		for (const part of this.#entryParts(node)) result += part.s ? theme.fg(part.s, part.t) : part.t;
+		for (const part of this.#entryParts(node)) {
+			let value = treeRowText(part.t);
+			if (part.s) value = theme.fg(part.s, value);
+			// A selected row is bolded whole; nested bold would close it early.
+			if (part.strong && !isSelected) value = theme.bold(value);
+			result += value;
+		}
 		return isSelected ? theme.bold(result) : result;
 	}
 
@@ -1066,7 +1116,10 @@ class TreeList implements Component {
 				if (role === "user") {
 					const msgWithContent = msg as { content?: unknown };
 					const content = normalize(this.#extractContent(msgWithContent.content));
-					return [{ t: "user: ", s: "accent" }, { t: content }];
+					return [
+						{ t: "user: ", s: "accent", strong: true },
+						{ t: content, s: "accent", strong: true },
+					];
 				}
 				if (role === "developer") {
 					const msgWithContent = msg as { content?: unknown };
@@ -1078,15 +1131,10 @@ class TreeList implements Component {
 				}
 				if (role === "assistant") {
 					const presentation = resolveAssistantErrorPresentation(msg);
-					if (presentation.kind === "compact-recovered") {
-						return [
-							{ t: "assistant: ", s: "success" },
-							{ t: presentation.text, s: "dim" },
-						];
-					}
+					const head: EntryPart = { t: "assistant: ", s: assistantLabelColor() };
+					if (presentation.kind === "compact-recovered") return [head, { t: presentation.text, s: "dim" }];
 					const msgWithContent = msg as { content?: unknown; stopReason?: string; errorMessage?: string };
 					const textContent = normalize(this.#extractContent(msgWithContent.content));
-					const head: EntryPart = { t: "assistant: ", s: "success" };
 					if (textContent) return [head, { t: textContent }];
 					if (presentation.kind === "full") {
 						return [head, { t: normalize(presentation.text).slice(0, 80), s: "error" }];
@@ -1110,10 +1158,16 @@ class TreeList implements Component {
 				if (entry.customType === "advisor") {
 					const { qualifier, text } = advisorTreeDisplay(entry.details);
 					const label = qualifier ? `advisor (${qualifier}): ` : "advisor: ";
-					return [{ t: label, s: "customMessageLabel" }, { t: normalize(text) }];
+					return [
+						{ t: label, s: "customMessageLabel" },
+						{ t: normalize(text), s: "muted" },
+					];
 				}
 				const content = stripSystemWrapperTags(this.#joinTextContent(entry.content));
-				return [{ t: `[${entry.customType}]: `, s: "customMessageLabel" }, { t: normalize(content) }];
+				return [
+					{ t: `[${entry.customType}]: `, s: "customMessageLabel" },
+					{ t: normalize(content), s: "muted" },
+				];
 			}
 			case "compaction": {
 				const tokens = Math.round(entry.tokensBefore / 1000);
