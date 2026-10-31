@@ -337,10 +337,78 @@ describe("AgentSession prompt-cache status", () => {
 		expect(session.getPromptCacheStatus(sentAt)).toMatchObject({ state: "warm", touchedAt: sentAt });
 	});
 
+	it("turns cold after /fresh rotates the provider session an OpenAI request keys its cache by", async () => {
+		model = getBundledModel("openai-codex", "gpt-5.6-sol") as Model;
+		await createSession(model);
+		session.setCacheWarmingMode("off");
+		const sentAt = send();
+		expect(session.getPromptCacheStatus(sentAt + 1)).toMatchObject({ state: "warm" });
+
+		expect(session.freshSession()).toBeDefined();
+		expect(session.getPromptCacheStatus(sentAt + 1)).toMatchObject({
+			state: "cold",
+			inferred: false,
+			reason: { kind: "cache-key" },
+		});
+	});
+
+	it("stays warm after /fresh on a provider whose cache follows the prompt alone", () => {
+		session.setCacheWarmingMode("off");
+		const sentAt = send();
+		expect(session.freshSession()).toBeDefined();
+		expect(session.getPromptCacheStatus(sentAt + 1)).toMatchObject({ state: "warm", inferred: false });
+	});
+
+	it("lets the entry lapse while a refresh still waits for a provider slot", async () => {
+		session.setCacheWarmingMode("idle");
+		const slot = Promise.withResolvers<void>();
+		refreshGate = slot.promise;
+		const sentAt = send();
+		vi.advanceTimersByTime(REFRESH_DELAY_MS);
+		await drain();
+
+		expect(session.getPromptCacheStatus(sentAt + SHORT_TTL_MS)).toMatchObject({
+			state: "cold",
+			reason: { kind: "expired", at: sentAt + SHORT_TTL_MS },
+			warming: { state: "scheduled" },
+		});
+		slot.resolve();
+		await drain();
+	});
+
 	describe("for a transcript this process has not sent (a reopened session)", () => {
 		beforeEach(async () => {
 			model = getBundledModel("anthropic", "claude-sonnet-4-5") as Model;
 			await createSession(model);
+		});
+
+		it("reads /fresh after the newest cached reply as cold for an OpenAI request keyed by the provider session", async () => {
+			model = getBundledModel("openai-codex", "gpt-5.6-sol") as Model;
+			await createSession(model);
+			session.sessionManager.appendMessage(reply(model, usage({ cacheRead: 50_000 })));
+			expect(session.getPromptCacheStatus(Date.now() + 1)).toMatchObject({ state: "warm", inferred: true });
+
+			vi.advanceTimersByTime(1);
+			expect(session.freshSession()).toBeDefined();
+			expect(session.getPromptCacheStatus(Date.now() + 1)).toMatchObject({
+				state: "cold",
+				inferred: true,
+				reason: { kind: "cache-key" },
+			});
+		});
+
+		it("reads a persistent entry as cold once cache retention is off, instead of hiding it", async () => {
+			model = getBundledModel("openai-codex", "gpt-5.6-sol") as Model;
+			await createSession(model);
+			session.sessionManager.appendMessage(reply(model, usage({ cacheRead: 50_000 })));
+			expect(session.getPromptCacheStatus(Date.now() + 1)).toMatchObject({ state: "warm", inferred: true });
+
+			cfgProvidersCacheRetention.override(settings, "none");
+			expect(session.getPromptCacheStatus(Date.now() + 1)).toMatchObject({
+				state: "cold",
+				inferred: true,
+				reason: { kind: "retention" },
+			});
 		});
 
 		it("infers the entry from the newest cached reply's send time and its model's lifetime", () => {

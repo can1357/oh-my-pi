@@ -281,6 +281,11 @@ interface ActiveRun extends CacheWarmRequest {
 	/** Set while a refresh that an extension forced is in flight. */
 	extensionOverride: boolean;
 	timer?: NodeJS.Timeout;
+	/**
+	 * When the provider sent the refresh in progress (its `onPayload`); undefined while it waits for
+	 * an in-flight slot or an extension's decision, when nothing has reached the provider yet.
+	 */
+	refreshSentAt?: number;
 	warmingStopReason?: string;
 	/** Cache entry this run's request writes; a refresh hit confirms and extends it. */
 	entry: TrackedCacheEntry;
@@ -396,7 +401,8 @@ export class CacheWarmer {
 			return { state: "inactive", reason: "cache economics unavailable" };
 		}
 		return {
-			state: refreshing ? "refreshing" : "scheduled",
+			// A refresh still queued for a provider slot holds nothing off: the entry can lapse before it goes out.
+			state: refreshing && run.refreshSentAt !== undefined ? "refreshing" : "scheduled",
 			nextWarmAt: run.nextWarmAt,
 			stopsAt: run.startedAt + (run.phase === "idle" ? MAX_IDLE_WARMING_AGE_MS : MAX_WARMING_AGE_MS),
 			decision,
@@ -619,6 +625,7 @@ export class CacheWarmer {
 
 	async #refresh(run: ActiveRun): Promise<void> {
 		run.timer = undefined;
+		run.refreshSentAt = undefined;
 		if (!this.#validateRun(run)) return;
 		const decision = this.#evaluate(run);
 		const action = await this.#decide(decision);
@@ -643,11 +650,11 @@ export class CacheWarmer {
 		this.onRefreshStart?.(refresh);
 		let outcome: CacheWarmingRefreshEnd["outcome"] = "error";
 		let usage: Usage | undefined;
-		// Moved to when the provider sends it, past any wait for an in-flight slot.
-		const dispatch = { at: Date.now() };
+		// Superseded by when the provider sends it, past any wait for an in-flight slot.
+		const queuedAt = Date.now();
 		try {
-			const message = await this.#replay(run, dispatch);
-			const sentAt = dispatch.at;
+			const message = await this.#replay(run);
+			const sentAt = run.refreshSentAt ?? queuedAt;
 			// Record before the abort check: a refresh cancelled or replaced after the
 			// provider accepted it was still billed, and spend tracking must see it.
 			// Only a refresh that answered for the conversation as it still stands
@@ -703,7 +710,7 @@ export class CacheWarmer {
 	 * adaptive allowance and runs to terminal metadata under a true one-token
 	 * total-generation cap.
 	 */
-	async #replay(run: ActiveRun, dispatch: { at: number }): Promise<AssistantMessage | undefined> {
+	async #replay(run: ActiveRun): Promise<AssistantMessage | undefined> {
 		const cutoff = new AbortController();
 		let stream: CacheWarmStream;
 		const onPayload = run.options.onPayload;
@@ -712,7 +719,7 @@ export class CacheWarmer {
 			maxTokens: 1,
 			signal: AbortSignal.any([run.controller.signal, cutoff.signal]),
 			onPayload: (payload, model, signal) => {
-				dispatch.at = Date.now();
+				run.refreshSentAt = Date.now();
 				return onPayload?.(payload, model, signal);
 			},
 		};

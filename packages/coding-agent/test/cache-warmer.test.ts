@@ -632,6 +632,34 @@ describe("cache warmer lifecycle", () => {
 		expect(payloads).toEqual([{}]);
 	});
 
+	test("reports a refresh as refreshing only once the provider sent it, not while it waits for a slot", async () => {
+		const slot = Promise.withResolvers<void>();
+		const answer = Promise.withResolvers<void>();
+		const h = harness({
+			stream: async (model, _context, options) => {
+				await slot.promise;
+				await options?.onPayload?.({}, model);
+				await answer.promise;
+				return scriptedStream(
+					{ kind: "generate", usage: makeUsage({ cacheRead: PROMPT_TOKENS }) },
+					{ options, consumed: [], cutOff: false },
+				);
+			},
+		});
+		start(h);
+		h.warmer.onResponse(makeMessage(makeUsage({ cacheWrite: 500 })));
+		await advance(SHORT_DELAY_MS);
+		expect(h.warmer.status.state).toBe("scheduled");
+
+		slot.resolve();
+		await drain();
+		expect(h.warmer.status.state).toBe("refreshing");
+
+		answer.resolve();
+		await drain();
+		expect(h.warmer.status).toMatchObject({ state: "scheduled", nextWarmAt: Date.now() + SHORT_DELAY_MS });
+	});
+
 	test("extensions can stop a refresh and force one past the threshold", async () => {
 		const stopped = harness({ decide: () => Promise.resolve("stop") });
 		start(stopped);
