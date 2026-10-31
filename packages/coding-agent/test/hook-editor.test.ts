@@ -591,6 +591,24 @@ describe("HookEditorComponent prompt-style mode", () => {
 		expect(onSubmit).not.toHaveBeenCalled();
 	});
 
+	it("cancels a draft with no text on submitDraft even when an image is attached", () => {
+		// Submit keeps only images whose markers are in the text, so a blank draft would reach
+		// the ask dialog as blank text, which unselects the custom answer being re-edited.
+		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
+		const onSubmit = vi.fn();
+		const onCancel = vi.fn();
+		const component = new HookEditorComponent(createTui(), "Custom answer", undefined, onSubmit, onCancel, {
+			promptStyle: true,
+			acceptImages: true,
+			images: [image],
+		});
+
+		component.submitDraft();
+
+		expect(onSubmit).not.toHaveBeenCalled();
+		expect(onCancel).toHaveBeenCalledTimes(1);
+	});
+
 	it("renders the title in the border, detail lines, hint, and prompt gutter", () => {
 		const title = "◆ Other (type your own)\nEnter your response:";
 		const component = new HookEditorComponent(createTui(), title, "不太清楚，", vi.fn(), vi.fn(), {
