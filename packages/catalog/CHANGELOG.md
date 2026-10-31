@@ -5,6 +5,14 @@
 ### Added
 
 - Added the `prewarm-base-url` catalog axis (`prewarmBaseUrl`) and opted `google` and `google-gemini-cli` into pre-first-turn connection prewarming and `gzip` request body compression (`google-antigravity` also opts into `gzip` compression and declares its sandbox endpoint host) ([#17102](https://github.com/can1357/oh-my-pi/pull/17102) by [@GTanger](https://github.com/GTanger))
+### Breaking Changes
+
+- Removed `thinkingLoopGuard` from compat records; `thinking-loop-guard` is now a catalog axis that applies on every host, with `"semantic"` for Gemini, DeepSeek, and Grok and `"off"` for Claude
+
+### Fixed
+
+- Fixed GitHub Copilot Claude 5.x base models (`claude-opus-5`, `claude-opus-5.5`, `claude-sonnet-5`, `claude-sonnet-5.5`) reporting the 1M window of their `-1m` variants once the model list was read from cache; discovered limits now survive cached reads instead of reverting to bundled values ([#17481](https://github.com/can1357/oh-my-pi/issues/17481))
+
 ## [18.14.1] - 2026-10-31
 
 ### Changed

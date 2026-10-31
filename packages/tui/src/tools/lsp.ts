@@ -12,12 +12,14 @@ import type { NativeToolHead, NativeToolView, RenderResultOptions, ToolRenderer,
 import type { Component } from "../tui";
 import { Text } from "../components/text";
 import { getLanguageFromPath } from "../lang-from-path";
-import { highlightCode as highlightThemeCode, type Theme } from "../theme/theme";
+import { highlightCode as highlightThemeCode, isHighlightLanguage, type Theme } from "../theme/theme";
 import {
+	formatCodeFrameLine,
 	formatCount,
 	formatExpandHint,
 	formatMoreItems,
 	formatStatusIcon,
+	PREVIEW_LIMITS,
 	type ParsedDiagnostic,
 	parseDiagnosticMessage,
 	replaceTabs,
@@ -34,8 +36,8 @@ import { ansi, code, col, compact, keyed, md, node, row, span, text } from "../n
 import type { NativeNode } from "../native/node";
 import { OwnerMemo } from "../native/memo";
 import { plainText } from "../native/spans";
-import { walkGroupedOutput } from "./grouped-file-output";
-import { diagnosticGlyph, fileHref, fileRow, inlineErrorView } from "./native-view";
+import { numberedCode, walkGroupedOutput } from "./grouped-file-output";
+import { diagnosticGlyph, displayPath, fileHref, fileRow, inlineErrorView } from "./native-view";
 import { activeThemeSymbol } from "../theme/active-symbols";
 
 /** Display arguments for an LSP tool request. */
@@ -188,8 +190,10 @@ export function renderResult(
 	const text = content.text;
 	const lines = text.split("\n");
 
-	// Static type detection (result content doesn't change between renders)
-	const codeBlockMatch = text.match(/```(\w*)\n([\s\S]*?)```/);
+	// Static type detection (result content doesn't change between renders). Locations are
+	// anchored at the response's first line, so they win over checks a source snippet could trip.
+	const locations = parseLspLocations(lines);
+	const codeBlockMatch = locations ? null : text.match(/```(\w*)\n([\s\S]*?)```/);
 	const errorMatch = text.match(/(\d+)\s+error\(s\)/);
 	const warningMatch = text.match(/(\d+)\s+warning\(s\)/);
 	const refMatch = text.match(/(\d+)\s+reference\(s\)/);
@@ -217,6 +221,13 @@ export function renderResult(
 	// and render it once per expanded state instead of on every spinner frame.
 	const bodies: Array<LspResultBody | undefined> = [undefined, undefined];
 	const renderBody = (expanded: boolean): LspResultBody => {
+		if (locations) {
+			return {
+				label: "Locations",
+				state: locations.count > 0 ? "success" : "warning",
+				bodyLines: renderLocations(locations, expanded, theme),
+			};
+		}
 		if (codeBlockMatch) {
 			return {
 				label: "Hover",
@@ -273,6 +284,7 @@ export function renderResult(
 
 		// Hover code hangs under its rail; expanded rows hang under their tree
 		// connector or guide rails so Ctrl+O reveals full text instead of clipping.
+		// Collapsed source lines stop at the card's edge, one row each under their rail.
 		const rail = ` ${theme.fg("mdCodeBlockBorder", theme.boxRound.vertical)} `;
 		const contentLines = codeBlockMatch
 			? bodyLines.flatMap(line =>
@@ -280,7 +292,9 @@ export function renderResult(
 				)
 			: expanded
 				? bodyLines.flatMap(line => wrapGuidedLine(line, contentWidth, theme))
-				: bodyLines;
+				: locations
+					? clipCollapsedLocations(bodyLines, contentWidth, locations, theme)
+					: bodyLines;
 		return {
 			header,
 			phase: isPartial ? "partial" : state,
@@ -558,6 +572,109 @@ function renderReferences(refMatch: RegExpMatchArray, lines: string[], expanded:
 }
 
 // =============================================================================
+// Locations Rendering
+// =============================================================================
+
+/** One location of a definition-style response, with its numbered source context. */
+interface LspLocation {
+	file: string;
+	line: number;
+	col: number;
+	/** Source lines around the location; the location's own line is `mark`ed. */
+	context: { n: number; text: string; mark: boolean }[];
+}
+
+/** A definition, type definition or implementation response. */
+interface LspLocations {
+	/** `definition`, `type definition` or `implementation`. */
+	noun: string;
+	count: number;
+	locations: LspLocation[];
+}
+
+const LOCATIONS_HEADER_RE = /^Found (\d+) (definition|type definition|implementation)\(s\):$/;
+/**
+ * `  file:line:col`, the path from column 2 on (it may itself start with whitespace). Context rows are
+ * `    N: source`; a row matching both is context of the current location.
+ */
+const LOCATION_RE = /^ {2}(.+):(\d+):(\d+)$/;
+const LOCATION_CONTEXT_RE = /^ {4}(\d+): ?(.*)$/;
+
+/**
+ * Parse a `Found N definition(s):` response (also type definitions and
+ * implementations): `  file:line:col` rows, each followed by its
+ * `    N: source` context lines.
+ */
+function parseLspLocations(lines: readonly string[]): LspLocations | undefined {
+	const header = LOCATIONS_HEADER_RE.exec(lines[0] ?? "");
+	if (!header) return undefined;
+	const locations: LspLocation[] = [];
+	for (const line of lines.slice(1)) {
+		const current = locations.at(-1);
+		const context = current ? LOCATION_CONTEXT_RE.exec(line) : null;
+		if (current && context) {
+			const n = Number(context[1]);
+			current.context.push({ n, text: context[2].trimEnd(), mark: n === current.line });
+			continue;
+		}
+		const location = LOCATION_RE.exec(line);
+		if (location) {
+			const [, file, lineNumber, column] = location;
+			locations.push({ file, line: Number(lineNumber), col: Number(column), context: [] });
+		}
+	}
+	return { noun: header[2], count: Number(header[1]), locations };
+}
+
+/**
+ * Render definitions, type definitions and implementations: each
+ * `file:line:col` over its source context, the location's line marked like a
+ * grep match.
+ */
+function renderLocations(parsed: LspLocations, expanded: boolean, theme: Theme): string[] {
+	const { noun, count, locations } = parsed;
+	const shown = expanded ? locations : locations.slice(0, PREVIEW_LIMITS.LOCATIONS_COLLAPSED);
+	const hidden = locations.length - shown.length;
+	const icon = count > 0 ? theme.styledSymbol("tool.lsp", "accent") : theme.styledSymbol("status.warning", "warning");
+	const rows = [
+		`${icon} ${theme.fg("dim", formatCount(noun, count))}${formatExpandHint(theme, expanded, hidden > 0)}`,
+	];
+
+	shown.forEach((location, index) => {
+		const isLast = index === shown.length - 1 && hidden === 0;
+		const branch = isLast ? theme.tree.last : theme.tree.branch;
+		const rail = isLast ? "   " : `${theme.tree.vertical}  `;
+		const position = theme.fg("muted", `:${location.line}:${location.col}`);
+		const file = theme.fg("accent", replaceTabs(shortenPath(location.file)));
+		rows.push(` ${theme.fg("dim", branch)} ${file}${position}`);
+
+		const numberWidth = location.context.reduce((width, line) => Math.max(width, String(line.n).length), 0);
+		for (const line of location.context) {
+			const frame = formatCodeFrameLine(line.mark ? "*" : "", line.n, replaceTabs(line.text), numberWidth);
+			rows.push(` ${theme.fg("dim", rail)}${theme.fg("toolOutput", frame)}`);
+		}
+	});
+
+	if (hidden > 0) {
+		rows.push(` ${theme.fg("dim", theme.tree.last)} ${theme.fg("muted", formatMoreItems(hidden, noun))}`);
+	}
+	return rows;
+}
+
+/**
+ * Collapsed location rows stop at the card's edge. When that clips a row and no hidden location already
+ * advertises Ctrl+O, the header gets the expand hint: the expanded view wraps the full text.
+ */
+function clipCollapsedLocations(rows: string[], width: number, parsed: LspLocations, theme: Theme): string[] {
+	const clipped = rows.map(row => truncateToWidth(row, width));
+	const hinted = parsed.locations.length > PREVIEW_LIMITS.LOCATIONS_COLLAPSED;
+	if (!hinted && clipped.some((row, index) => row !== rows[index])) {
+		clipped[0] = truncateToWidth(`${rows[0]}${formatExpandHint(theme, false, true)}`, width);
+	}
+	return clipped;
+}
+
+// =============================================================================
 // Symbols Rendering
 // =============================================================================
 
@@ -615,6 +732,13 @@ function renderSymbols(symbolsMatch: RegExpMatchArray, lines: string[], expanded
 	};
 
 	const topLevelCount = symbols.filter(s => s.indent === 0).length;
+	// The glyph keeps the accent; the name and signature read as code in the file's language.
+	const lang = getLanguageFromPath(fileName);
+	const symbolName = (name: string): string => {
+		const plain = replaceTabs(name);
+		if (!isHighlightLanguage(lang)) return theme.fg("accent", plain);
+		return highlightThemeCode(plain, lang, theme)[0] ?? plain;
+	};
 
 	if (expanded) {
 		let output = `${icon} ${theme.fg("dim", `in ${fileName}`)}`;
@@ -626,7 +750,7 @@ function renderSymbols(symbolsMatch: RegExpMatchArray, lines: string[], expanded
 			const symIsLast = isLast[i];
 			const branch = symIsLast ? theme.tree.last : theme.tree.branch;
 			const detailPrefix = symIsLast ? "   " : `${theme.tree.vertical}  `;
-			output += `\n${prefix}${theme.fg("dim", branch)} ${theme.fg("accent", sym.icon)} ${theme.fg("accent", sym.name)}`;
+			output += `\n${prefix}${theme.fg("dim", branch)} ${theme.fg("accent", sym.icon)} ${symbolName(sym.name)}`;
 			output += `\n${prefix}${theme.fg("dim", detailPrefix)}${theme.fg("muted", `line ${sym.line}`)}`;
 		}
 		return output.split("\n");
@@ -641,7 +765,7 @@ function renderSymbols(symbolsMatch: RegExpMatchArray, lines: string[], expanded
 		const sym = topLevel[i];
 		const isLast = i === topLevel.length - 1 && topLevelCount <= 3;
 		const branch = isLast ? theme.tree.last : theme.tree.branch;
-		output += `\n ${theme.fg("dim", branch)} ${theme.fg("accent", sym.icon)} ${theme.fg("accent", sym.name)} ${theme.fg(
+		output += `\n ${theme.fg("dim", branch)} ${theme.fg("accent", sym.icon)} ${symbolName(sym.name)} ${theme.fg(
 			"muted",
 			`line ${sym.line}`,
 		)}`;
@@ -999,6 +1123,29 @@ function describeLspSymbols(lines: string[]): NativeNode | undefined {
 	return roots.length > 0 ? node("tree", { nodes: roots }) : undefined;
 }
 
+/** Definition-style locations: a file row with `:line:col`, then the numbered source context. */
+function describeLspLocations(
+	request: Partial<LspParams> | undefined,
+	fallbackAction: string,
+	parsed: LspLocations,
+): NativeToolView {
+	const body = parsed.locations.map(location => {
+		const file = plainText(location.file);
+		const context = location.context.map(line => ({ ...line, text: plainText(line.text) }));
+		const range = `:${location.line}:${location.col}`;
+		const code = numberedCode(context, { path: file });
+		const header = fileRow(displayPath(file), { range, title: file });
+		return keyed(col(code ? [header, code] : [header], { gap: "xs" }), `${file}${range}`);
+	});
+	return {
+		tool: lspNativeHead(request, fallbackAction, [formatCount(parsed.noun, parsed.count)]),
+		tone: parsed.count > 0 ? undefined : "warning",
+		inline: true,
+		body: body.length > 0 ? body : undefined,
+		preview: { lines: PREVIEW_LIMITS.COLLAPSED_ITEMS },
+	};
+}
+
 function describeLspResult(result: ToolRenderResult<LspToolDetails>, args: LspParams | undefined): NativeToolView {
 	const request = args ?? result.details?.request;
 	const fallbackAction = result.details?.action ?? "request";
@@ -1008,6 +1155,9 @@ function describeLspResult(result: ToolRenderResult<LspToolDetails>, args: LspPa
 	if (!text) return { tool: lspNativeHead(request, fallbackAction, ["No result"]), tone: "warning", inline: true };
 
 	const lines = text.split("\n");
+	const locations = parseLspLocations(lines);
+	if (locations) return describeLspLocations(request, fallbackAction, locations);
+
 	const statusError = activeThemeSymbol("status.error");
 	const refMatch = text.match(/(\d+)\s+reference\(s\)/);
 	const symbolsMatch = text.match(/Symbols in (.+):/);
