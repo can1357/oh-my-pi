@@ -4,18 +4,26 @@
 
 ### Added
 
-- Added a `maxRows` callback to `FigureMarkdown`, `SvgFigure` and `TableChartFigure` so surfaces shorter than the screen can fit their figures; zero hides a figure without delaying transcript completion ([#15661](https://github.com/can1357/oh-my-pi/issues/15661), [#15853](https://github.com/can1357/oh-my-pi/pull/15853) by [@KunoLu](https://github.com/KunoLu))
 - Exported the `InputListener` and `InputListenerResult` types `TUI.addInputListener` takes ([#17402](https://github.com/can1357/oh-my-pi/pull/17402) by [@sjawhar](https://github.com/sjawhar))
 - Added `whenInputScopeGone`, `hasInputScope` and `pinInputScope` to `tools/renderer-scope`, and an optional `pin()` to `ToolRendererScope`: a host registers what it owes once a renderer scope has gone (an extension's overlays), settled by the TUI's retirement sweep before any component is retired, drawn or handed a key; bindings and obligations belong to the session the scope serves when they are made, so a scope whose owner already serves the next session does not revive them ([#17402](https://github.com/can1357/oh-my-pi/pull/17402) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 
-- Fixed IME composition text in the BTW history `Follow up:` input appearing at the left edge instead of at the caret when the hardware cursor is enabled ([#17427](https://github.com/can1357/oh-my-pi/issues/17427))
-- Fixed session tree rows overlapping when messages, tool arguments, or labels contain carriage returns or Unicode line/paragraph separators (`U+2028`, `U+2029`), while keeping multiline formatting in the selected entry preview ([#17430](https://github.com/can1357/oh-my-pi/pull/17430) by [@lincicomb](https://github.com/lincicomb)).
 - Fixed a key reserved by a component's `capturesInput` reaching its `handleInput` after that component closed its dialog, ended its extension's session or moved focus while reserving it; the key is consumed and handled by nothing ([#17402](https://github.com/can1357/oh-my-pi/pull/17402) by [@sjawhar](https://github.com/sjawhar))
 - Fixed a focus target an extension's overlay owns (`ownsOverlayFocusTarget`) taking input outside that extension's session; it now takes input inside it and none once it has gone, and the overlay is asked about ownership inside it too. An asynchronous `handleInput` is now work its session owns until it ends ([#17402](https://github.com/can1357/oh-my-pi/pull/17402) by [@sjawhar](https://github.com/sjawhar))
 - Fixed a native edit typed into an extension's editor being lost when the frame that swapped the host's editor in arrived first: the edit now reaches the host's editor ([#17402](https://github.com/can1357/oh-my-pi/pull/17402) by [@sjawhar](https://github.com/sjawhar))
 - Fixed focus landing on, or being left on, an extension's component whose session has gone — an outer overlay a closing inner one handed focus back to, a component focused through a gone session's replacement: `TUI.setFocus` and the retirement sweep send it to what the host put in that component's place, through a chain of them, or nowhere, and an overlay holding such a component comes down whichever session showed it. A focus target an extension's overlay owns now retires with the overlay and goes where the overlay went, and a component a gone session left behind takes input in the next session that binds it rather than staying retired ([#17402](https://github.com/can1357/oh-my-pi/pull/17402) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.14.1] - 2026-10-31
+
+### Added
+
+- Added a `maxRows` callback to `FigureMarkdown`, `SvgFigure` and `TableChartFigure` so surfaces shorter than the screen can fit their figures; zero hides a figure without delaying transcript completion ([#15661](https://github.com/can1357/oh-my-pi/issues/15661), [#15853](https://github.com/can1357/oh-my-pi/pull/15853) by [@KunoLu](https://github.com/KunoLu))
+
+### Fixed
+
+- Fixed IME composition text in the BTW history `Follow up:` input appearing at the left edge instead of at the caret when the hardware cursor is enabled ([#17427](https://github.com/can1357/oh-my-pi/issues/17427))
+- Fixed session tree rows overlapping when messages, tool arguments, or labels contain carriage returns or Unicode line/paragraph separators (`U+2028`, `U+2029`), while keeping multiline formatting in the selected entry preview ([#17430](https://github.com/can1357/oh-my-pi/pull/17430) by [@lincicomb](https://github.com/lincicomb)).
 - Fixed the Background jobs sheet dropping a finished job and its output while you were reading it; the selected job now stays until you select another ([#17506](https://github.com/can1357/oh-my-pi/pull/17506) by [@H4vC](https://github.com/H4vC))
 
 ## [18.14.0] - 2026-10-29

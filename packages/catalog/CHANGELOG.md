@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.14.1] - 2026-10-31
+
 ### Changed
 
 - Clamping a requested thinking effort now resolves through the model's `effortMap` alias first, so the request lands on the tier the model serves instead of the nearest lower one ([#17395](https://github.com/can1357/oh-my-pi/pull/17395) by [@Maziar123](https://github.com/Maziar123))

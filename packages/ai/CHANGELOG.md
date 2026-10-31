@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.14.1] - 2026-10-31
+
 ### Added
 
 - Added the `codexAccessPrograms` stream option and `configureCodexAccessPrograms()` process default to turn off the automatic Daybreak Blue `access_programs` request on Codex ([#17508](https://github.com/can1357/oh-my-pi/pull/17508) by [@H4vC](https://github.com/H4vC))
@@ -2317,27 +2319,4 @@
 - Enabled freeform tool patch support for Azure OpenAI and Codex models.
 - Fixed an issue where the `/usage show` command returned "No usage data available" when using a custom proxy base URL for Codex.
 
-## [16.2.2] - 2026-06-27
-
-### Added
-
-- Added a comprehensive, public-facing error module exported via the "./error" path, featuring structured error classification, provider-specific HTTP error classes (e.g., Anthropic, OpenAI, Gemini), OAuth/Auth-specific errors, rate-limit utilities, and retryability predicates.
-
-### Changed
-
-- Updated OpenAI Codex defaults to increase default text verbosity to medium, enable detailed reasoning summaries by default, and include all turns in the reasoning context by default.
-- Updated the OpenAI Codex WebSocket transport to resolve its configuration (via PI_CODEX_WEBSOCKET_* environment variables) once at startup rather than re-parsing on every request.
-- Enhanced cross-model reasoning recovery and preservation to render demoted reasoning in the target model's canonical inline thinking dialect (such as Gemini's thinking fence or standard think tags) to prevent leaking inert context or control tokens into history.
-- Broadened the leaked-thinking stream healer to recover reasoning emitted in any dialect's canonical idiom (including Gemini, Gemma, Harmony, and scratchpads) and route them to thinking events instead of raw markup.
-- Implemented automatic retry logic for detected thinking-loop stalls to improve response reliability.
-- Hardened stateful delta chaining to ignore transient streaming bookkeeping symbols during structural equality checks, preventing unnecessary full-transcript replays.
-
-### Fixed
-
-- Fixed preservation of OpenAI Responses assistant message phase values across auth-gateway parsing, streaming, and history replay, ensuring GPT-5.4/GPT-5.5 intermediate updates and final answers retain their original phase labels.
-
-### Removed
-
-- Removed Pi dialect support and related serialization/parsing logic.
-
-Older entries are archived in [packages/ai/CHANGELOG.md@ef4bc35e85d8](https://github.com/can1357/oh-my-pi/blob/ef4bc35e85d88932d92b01ae7121c9f47208cf40/packages/ai/CHANGELOG.md).
+Older entries are archived in [packages/ai/CHANGELOG.md@cef4a452836c](https://github.com/can1357/oh-my-pi/blob/cef4a452836c7a8d547dd14470c34c9ed2dbb5f8/packages/ai/CHANGELOG.md).
