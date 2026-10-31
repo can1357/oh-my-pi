@@ -1,9 +1,6 @@
 # Changelog
 
 ## [Unreleased]
-### Fixed
-
-- Fixed `workpool()` and `judgeBatch()` ignoring an `op` given to their helpers, so a spread or `op` override now takes effect ([#16446](https://github.com/can1357/oh-my-pi/issues/16446), [#16459](https://github.com/can1357/oh-my-pi/pull/16459) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Changed
 
@@ -11,6 +8,7 @@
 - In a Tern pane, `omp stats` shows the dashboard in place of the block it runs in, with a Close button (or Esc, or Ctrl+C) that stops it and brings the terminal back, and `/stats` opens it in a browser block beside omp, instead of the system browser
 
 ### Fixed
+- Fixed `workpool()` and `judgeBatch()` ignoring an `op` given to their helpers, so a spread or `op` override now takes effect ([#16446](https://github.com/can1357/oh-my-pi/issues/16446), [#16459](https://github.com/can1357/oh-my-pi/pull/16459) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed a `!` or `$` command run while the agent works floating over the composer in Tern, where expanding its output covered the conversation; it now sits at the end of the conversation
 - Fixed `out://` replies sent from an eval cell (`tool.write` to `out://`, or `tool.bash` with `> out://`) never appearing even though the write reported "Shown to the user."; they now draw as replies after the eval card, and are refused where nothing would show them (a backgrounded cell, a browser tab script)
