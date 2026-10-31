@@ -434,6 +434,10 @@
 - Fixed language servers keeping every file omp ever opened loaded for the whole session; files unused for 5 minutes are now closed when omp opens another, so the server can free that memory ([#15418](https://github.com/can1357/oh-my-pi/pull/15418) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `write` turning a CRLF file into LF and dropping its UTF-8 BOM when it replaces the file; it now keeps both, as `edit` does ([#16575](https://github.com/can1357/oh-my-pi/pull/16575) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Changed
+
+- User append instructions (`APPEND_SYSTEM.md`, `--append-system-prompt`) now render under a `§ User Instructions` heading wrapped in a `<user-instructions>` block when generated blocks precede them, so they do not read as a trailing paragraph of a server-supplied MCP section ([#14603](https://github.com/can1357/oh-my-pi/pull/14603) by [@iacore](https://github.com/iacore))
+
 ## [18.12.6] - 2026-10-21
 
 ### Added
