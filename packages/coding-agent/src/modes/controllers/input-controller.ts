@@ -1152,7 +1152,14 @@ export class InputController {
 			text = this.#compactDraftImages(text.trim());
 			const hasPendingImages = this.ctx.editor.pendingImages.length > 0;
 			if ((!isSettingsInitialized() || cfgEmojiAutocomplete.get(settings)) && text) text = expandEmoticons(text);
-			const restoreOnAccepted = this.#restoreOnAccepted();
+			let accepted = false;
+			const restoreStash = this.#restoreOnAccepted();
+			const restoreOnAccepted = restoreStash
+				? () => {
+						accepted = true;
+						restoreStash();
+					}
+				: undefined;
 
 			// Focused subagent session: the editor is a plain chat box for it.
 			// Everything below (slash/bash/python, loop,
@@ -1235,6 +1242,12 @@ export class InputController {
 					({ text, images: inputImages, imageLinks: inputImageLinks } = input);
 					hasInputImages = (inputImages?.length ?? 0) > 0;
 				}
+			} catch (error) {
+				if (submittedDraftDetached) {
+					restoreDetachedDraft(this.ctx.editor, submittedText, submittedImages, inputImageLinks);
+				}
+				this.ctx.showError(error instanceof Error ? error.message : String(error));
+				return;
 			} finally {
 				hooksDone.resolve();
 			}
@@ -1436,6 +1449,10 @@ export class InputController {
 					});
 					if (!forwarded) restoreOnAccepted?.();
 				} catch (error) {
+					if (accepted) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+						return;
+					}
 					// Restore the snapshot only when nothing newer was attached
 					// while the command ran; otherwise the newer draft wins.
 					if (inputImages && inputImages.length > 0 && this.ctx.editor.pendingImages.length === 0) {
@@ -1484,6 +1501,10 @@ export class InputController {
 					// state untouched, so the previous body (if any) survives.
 					if (submittedMode === "loop" && forwarded) this.ctx.setLoopPrompt(text);
 				} catch (error) {
+					if (accepted) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+						return;
+					}
 					// Don't lose the queued steer draft: restore images then the collapsed
 					// text so chip tokens (and band cards) survive the retry.
 					if (images && images.length > 0) {
@@ -1568,6 +1589,10 @@ export class InputController {
 					// loop instead of resubmitting a local action on next idle.
 					if (!forwarded && this.ctx.loopPrompt === text) this.ctx.pauseLoop();
 				} catch (error) {
+					if (accepted) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+						return;
+					}
 					// Don't lose the message: hand images then collapsed text back to the
 					// editor so the user can retry (e.g. prompt dispatch rejecting an
 					// extension command).
@@ -1726,7 +1751,14 @@ export class InputController {
 	async #submitToFocusedSession(text: string, streamingBehavior: "steer" | "followUp"): Promise<void> {
 		const target = this.ctx.viewSession;
 		const draftText = this.ctx.editor.getText();
-		const restoreOnAccepted = this.#restoreOnAccepted();
+		let accepted = false;
+		const restoreStash = this.#restoreOnAccepted();
+		const restoreOnAccepted = restoreStash
+			? () => {
+					accepted = true;
+					restoreStash();
+				}
+			: undefined;
 		const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
 		const imageLinks =
 			images && this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
@@ -1789,6 +1821,10 @@ export class InputController {
 				if (!forwarded) restoreOnAccepted?.();
 			}
 		} catch (error) {
+			if (accepted) {
+				this.ctx.showError(error instanceof Error ? error.message : String(error));
+				return;
+			}
 			// Hand the message back, mirroring the main submit error path: restore
 			// pasted images so the user can retry an image-only or text+image draft.
 			if (images && images.length > 0) {
@@ -2356,12 +2392,21 @@ export class InputController {
 		imageLinks: (string | undefined)[] | undefined,
 		origin: ConversationPosition,
 		admitted: () => void,
-		restoreOnAccepted?: () => void,
+		onAccepted?: () => void,
 	): Promise<void> {
+		let accepted = false;
+		const restoreOnAccepted = onAccepted
+			? () => {
+					accepted = true;
+					onAccepted();
+				}
+			: undefined;
 		// Ctrl+Enter detached the draft before the first await, so a side command
 		// has no editor state left to release; a render failure hands it back.
 		const restoreSideDraft = {
-			restore: () => restoreDetachedDraft(this.ctx.editor, text, images, imageLinks),
+			restore: () => {
+				if (!accepted) restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
+			},
 			onAccepted: restoreOnAccepted,
 		};
 
@@ -2412,7 +2457,7 @@ export class InputController {
 					text = slashResult;
 				}
 			} catch (error) {
-				restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
+				if (!accepted) restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
 				this.ctx.showError(error instanceof Error ? error.message : String(error));
 				return;
 			}
@@ -2431,7 +2476,7 @@ export class InputController {
 		// queue rejection): restore both text AND pending images so an image-only
 		// or text+image draft can be retried, mirroring the main submit error path.
 		const restoreOnError = (error: unknown) => {
-			restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
+			if (!accepted) restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
 			this.ctx.showError(error instanceof Error ? error.message : String(error));
 		};
 

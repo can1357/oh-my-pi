@@ -1066,7 +1066,6 @@ describe("InputController keybinding setup", () => {
 				cancelled: false,
 				started: true,
 				resume: true,
-				onAccepted: undefined,
 			});
 		}
 	});
@@ -1665,6 +1664,126 @@ describe("InputController global tool-output expand (ctrl+o)", () => {
 });
 
 describe("Ctrl+S prompt stash", () => {
+	for (const path of [
+		"idle Enter",
+		"streaming Enter",
+		"idle follow-up",
+		"streaming follow-up",
+		"focused prompt",
+		"focused .",
+		"focused c",
+	] as const) {
+		for (const accept of [false, true]) {
+			it(`preserves rich drafts when ${path} rejects ${accept ? "after" : "before"} acceptance`, async () => {
+				const { ctx, editor, customHandlers, spies, setFocusedAgent } = await createContext();
+				const controller = new InputController(ctx);
+				controller.setupKeyHandlers();
+				controller.setupEditorSubmitHandler();
+				const saved: ImageContent = { type: "image", data: "c2F2ZWQ=", mimeType: "image/png" };
+				const submitted: ImageContent = { type: "image", data: "c2VudA==", mimeType: "image/png" };
+				editor.setText("saved [Image #1]");
+				editor.pendingImages = [saved];
+				editor.pendingImageLinks = ["file:///saved.png"];
+				customHandlers.get("ctrl+s")?.();
+				if (path.startsWith("focused")) setFocusedAgent("agent");
+				Object.assign(ctx.session, { isStreaming: path.startsWith("streaming") });
+				const reject = async (options?: { onAccepted?: () => void }) => {
+					if (accept) options?.onAccepted?.();
+					throw new Error("dispatch failed");
+				};
+				spies.prompt.mockImplementation(async (_text, options) => reject(options));
+				Object.assign(ctx.session, { resume: async (options?: { onAccepted?: () => void }) => reject(options) });
+				const shortcut = path === "focused ." ? "." : path === "focused c" ? "c" : undefined;
+				const text = shortcut ?? "submitted [Image #1]";
+				editor.setText(text);
+				if (!shortcut) {
+					editor.pendingImages = [submitted];
+					editor.pendingImageLinks = ["file:///submitted.png"];
+				}
+				if (path.endsWith("follow-up")) await controller.handleFollowUp();
+				else {
+					editor.setText(""); // Enter resets text, but leaves attachments for the controller.
+					await editor.onSubmit?.(text);
+				}
+				expect(spies.showError).toHaveBeenCalledWith("dispatch failed");
+				expect(editor.getText()).toBe(accept ? "saved [Image #1]" : text);
+				expect(editor.pendingImages).toEqual(accept ? [saved] : shortcut ? [] : [submitted]);
+				expect(editor.pendingImageLinks).toEqual(
+					accept ? ["file:///saved.png"] : shortcut ? [] : ["file:///submitted.png"],
+				);
+				if (!accept) {
+					editor.clearDraft();
+					customHandlers.get("ctrl+s")?.();
+					expect(editor.getText()).toBe("saved [Image #1]");
+					expect(editor.pendingImages).toEqual([saved]);
+					expect(editor.pendingImageLinks).toEqual(["file:///saved.png"]);
+				}
+			});
+		}
+	}
+
+	for (const mode of ["plan", "vibe", "goal", "guided-goal"]) {
+		it(`returns /${mode} images when an input hook rejects before admission`, async () => {
+			const { ctx, editor, customHandlers, spies } = await createContext();
+			const controller = new InputController(ctx);
+			controller.setupKeyHandlers();
+			controller.setupEditorSubmitHandler();
+			const saved: ImageContent = { type: "image", data: "c2F2ZWQ=", mimeType: "image/png" };
+			const submitted: ImageContent = { type: "image", data: "c2VudA==", mimeType: "image/png" };
+			editor.setText("saved [Image #1]");
+			editor.pendingImages = [saved];
+			editor.pendingImageLinks = ["file:///saved.png"];
+			customHandlers.get("ctrl+s")?.();
+			editor.pendingImages = [submitted];
+			editor.pendingImageLinks = ["file:///submitted.png"];
+			Object.assign(ctx.session, {
+				extensionRunner: {
+					hasHandlers: (event: string) => event === "input",
+					emitInput: async () => {
+						throw new Error("hook failed");
+					},
+				},
+			});
+			await editor.onSubmit?.(`/${mode} [Image #1]`);
+			expect(spies.prompt).not.toHaveBeenCalled();
+			expect(spies.showError).toHaveBeenCalledWith("hook failed");
+			expect(editor.getText()).toBe(`/${mode} [Image #1]`);
+			expect(editor.pendingImages).toEqual([submitted]);
+			expect(editor.pendingImageLinks).toEqual(["file:///submitted.png"]);
+			editor.clearDraft();
+			customHandlers.get("ctrl+s")?.();
+			expect(editor.getText()).toBe("saved [Image #1]");
+			expect(editor.pendingImages).toEqual([saved]);
+		});
+	}
+
+	for (const queued of [false, true]) {
+		it(`restores a rich stash when a follow-up is held by ${queued ? "yield compaction" : "active compaction"}`, async () => {
+			const { ctx, editor, customHandlers, spies } = await createContext();
+			const controller = new InputController(ctx);
+			controller.setupKeyHandlers();
+			const saved: ImageContent = { type: "image", data: "c2F2ZWQ=", mimeType: "image/png" };
+			editor.setText("saved [Image #1]");
+			editor.pendingImages = [saved];
+			editor.pendingImageLinks = ["file:///saved.png"];
+			customHandlers.get("ctrl+s")?.();
+			const held: string[] = [];
+			Object.assign(ctx, {
+				queueCompactionMessage: (text: string) => {
+					held.push(text);
+				},
+				yieldCompaction: queued ? { text: "/compact", sessionId: "session", leafId: null } : undefined,
+			});
+			Object.assign(ctx.session, { isCompacting: !queued });
+			editor.setText("after compaction");
+			await controller.handleFollowUp();
+			expect(held).toEqual(["after compaction"]);
+			expect(spies.prompt).not.toHaveBeenCalled();
+			expect(editor.getText()).toBe("saved [Image #1]");
+			expect(editor.pendingImages).toEqual([saved]);
+			expect(editor.pendingImageLinks).toEqual(["file:///saved.png"]);
+		});
+	}
 	for (const followUp of [false, true]) {
 		for (const accepted of [false, true]) {
 			it(`restores a stash only for an accepted side file command (${followUp ? "follow-up" : "Enter"}, accepted=${accepted})`, async () => {
