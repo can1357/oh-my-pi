@@ -415,7 +415,7 @@ export interface InteractiveModeContext {
 		text: string,
 		mode: "steer" | "followUp",
 		images?: ImageContent[],
-		options?: { preserveDraft?: boolean },
+		options?: { preserveDraft?: boolean; historyRecorded?: boolean },
 	): void;
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void>;
 	/** Start the compaction queued for the next yield, if any; it runs once the session is idle. */

@@ -44,7 +44,11 @@ import { createModelMentionSource } from "@oh-my-pi/pi-tui/prompt/model-mention-
 import { createModelBrowserSource } from "../model-browser-source";
 import { parseQueueShorthand, splitQueuedMessages } from "@oh-my-pi/pi-tui/prompt/queue-input";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "../../modes/skill-command";
-import { parseFileSlashInvocation, renderFileSlashCommand } from "../../extensibility/slash-commands";
+import {
+	type FileSlashCommand,
+	parseFileSlashInvocation,
+	renderFileSlashCommand,
+} from "../../extensibility/slash-commands";
 import type { InteractiveModeContext, SubmittedUserInput } from "../../modes/types";
 import { openLocalFileInEditor } from "../local-file-editor";
 import { AgentRegistry } from "../../registry/agent-registry";
@@ -52,7 +56,11 @@ import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { PINNED_HUD_TOGGLE_ID } from "../../task/output-manager";
 import { pickRecentFocusableAgentId } from "./session-focus-controller";
-import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
+import {
+	executeBuiltinSlashCommand,
+	guestRefusesSlashCommand,
+	lookupBuiltinSlashCommand,
+} from "../../slash-commands/builtin-registry";
 import { restoreDetachedDraft } from "../../slash-commands/helpers/draft";
 import { parseSlashCommand, parseSubcommand } from "../../slash-commands/helpers/parse";
 import { isTinyLocalModelKey } from "../../tiny/models";
@@ -1176,7 +1184,13 @@ export class InputController {
 				);
 				return;
 			}
+			// A bare word routed into a command is recorded like the command itself: the opt-in
+			// means the user asked for it to behave as typed. The confirm path above returns first,
+			// so a word that is only armed — not run — is never recorded.
 			if (bareSlashCommand) text = bareSlashCommand.command;
+
+			// Only suppress this submission's already-recorded text: a builtin can return a distinct body.
+			let recordedHistoryText: string | undefined;
 
 			// Handle built-in slash commands
 			if (text) {
@@ -1185,6 +1199,20 @@ export class InputController {
 					(inputImages?.length ?? 0) > 0 || (inputImageLinks?.length ?? 0) > 0
 						? { images: inputImages, imageLinks: inputImageLinks }
 						: undefined;
+				// Commands such as /new, /resume, /fork and /move switch the conversation or the
+				// working directory while they run. Recording before dispatch files the command
+				// under the context it was typed in — in the database *and* in the editor's local
+				// list, which is still the one that context seeded. Recording after dispatch put
+				// the command in the destination's list, where the next Up would recall it.
+				if (
+					text.startsWith("/") &&
+					!shouldSkipHistory(text) &&
+					!this.#guestRefusesSlash(text) &&
+					!this.#resolveSideFileCommand(text)
+				) {
+					this.ctx.editor.addToHistory(text);
+					recordedHistoryText = text;
+				}
 				let slashResult: string | boolean;
 				try {
 					slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input, draftDetached });
@@ -1199,14 +1227,10 @@ export class InputController {
 					return;
 				}
 				if (slashResult === true) {
-					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 					return;
 				}
 				if (typeof slashResult === "string") {
 					// Command handled but returned remaining text to use as prompt.
-					// Record the original slash command text so Up Arrow recalls
-					// "/loop 10 fix bug" rather than just "fix bug".
-					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 					text = slashResult;
 				}
 			}
@@ -1242,10 +1266,14 @@ export class InputController {
 			// transcript and runnable mid-turn, so they never steer the running work.
 			// The side question carries text only, so the submitted attachments drop.
 			if (
-				await this.#runSideFileCommand(text, {
-					detach: () => this.#detachSideSubmission(draftText, submittedImages),
-					restore: () => this.#restoreResetSubmission(submittedText),
-				})
+				await this.#runSideFileCommand(
+					text,
+					{
+						detach: () => this.#detachSideSubmission(draftText, submittedImages),
+						restore: () => this.#restoreResetSubmission(submittedText),
+					},
+					recordedHistoryText,
+				)
 			) {
 				return;
 			}
@@ -1262,10 +1290,15 @@ export class InputController {
 				}
 				if (this.ctx.session.isCompacting) {
 					const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-					this.ctx.queueCompactionMessage(text, "steer", images);
+					this.ctx.queueCompactionMessage(
+						text,
+						"steer",
+						images,
+						text === recordedHistoryText ? { historyRecorded: true } : undefined,
+					);
 					return;
 				}
-				if (await this.#invokeSkillCommand(text, "steer", inputImages, inputImageLinks)) {
+				if (await this.#invokeSkillCommand(text, "steer", recordedHistoryText, inputImages, inputImageLinks)) {
 					// The dispatch above ran the turn inline without resolving the input
 					// callback, so nothing re-enters `getUserInput` to arm the next
 					// iteration. Arm it here, now that the turn has settled.
@@ -1320,7 +1353,12 @@ export class InputController {
 			// Queue input during compaction
 			if (this.ctx.session.isCompacting) {
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-				this.ctx.queueCompactionMessage(text, "steer", images);
+				this.ctx.queueCompactionMessage(
+					text,
+					"steer",
+					images,
+					text === recordedHistoryText ? { historyRecorded: true } : undefined,
+				);
 				// An inline `/loop` body queued here arms the loop only when it is
 				// an actual model prompt. Skill/bash/python bodies never reach this
 				// branch, but an extension-command body would otherwise be retained
@@ -1334,7 +1372,7 @@ export class InputController {
 			// submission path creates an optimistic user message; otherwise a
 			// consumed command remains rendered like a prompt sent to the model.
 			if (this.#isLocalExtensionCommand(text)) {
-				this.ctx.editor.clearDraft(text);
+				this.ctx.editor.clearDraft(text === recordedHistoryText ? undefined : text);
 				try {
 					await this.ctx.session.prompt(text, { images: inputImages });
 				} catch (error) {
@@ -1356,7 +1394,7 @@ export class InputController {
 			// If streaming, use prompt() with steer behavior
 			// This handles extension commands (execute immediately), prompt template expansion, and queueing
 			if (this.ctx.session.isStreaming) {
-				this.ctx.editor.addToHistory(text);
+				if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text);
 				// Enter already cleared the editor synchronously. A later clear here
 				// can erase the tail of an unbracketed paste arriving after Enter.
 				this.ctx.editor.imageLinks = undefined;
@@ -1476,7 +1514,7 @@ export class InputController {
 				this.ctx.updatePendingMessagesDisplay();
 				this.ctx.ui.requestRender();
 			}
-			this.ctx.editor.addToHistory(text);
+			if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text);
 		};
 		// A queued `/compact` waits for Enter input taken before it to reach the session (skill
 		// expansion, `/queue`, mode commands), the same as for the follow-up key.
@@ -1514,6 +1552,12 @@ export class InputController {
 			this.ctx.locallySubmittedUserSignatures.size === 0 &&
 			this.ctx.session.messages.length === 0;
 		const folded = text.toLowerCase();
+		// A /guided-goal interview is a question-and-answer exchange, so `c` is a
+		// plausible answer ("option C"), not a request to run a command named /c — the
+		// same reason the continue shortcut stands down at the submit call site (see
+		// `text === "c" && !isGuidedGoalInterviewActive()`). Leaving the word alone here
+		// also keeps an empty session from silently executing `/c` on a single Enter.
+		if (folded === "c" && this.ctx.isGuidedGoalInterviewActive()) return undefined;
 		if (
 			emptySession &&
 			Object.hasOwn(BARE_EXIT_WORDS, folded) &&
@@ -1542,21 +1586,34 @@ export class InputController {
 		);
 	}
 
+	#resolveSideFileCommand(text: string): { command: FileSlashCommand; args: string } | undefined {
+		const invocation = parseFileSlashInvocation(text);
+		if (!invocation) return undefined;
+		const builtin = lookupBuiltinSlashCommand(invocation.name);
+		if (builtin && (builtin.allowArgs || !invocation.args)) return undefined;
+		if (!this.ctx.fileSlashCommands.has(invocation.name)) return undefined;
+		const session = this.ctx.session;
+		if (session.extensionRunner?.getCommand(invocation.name) !== undefined) return undefined;
+		if (session.customCommands.some(loaded => loaded.command.name === invocation.name)) return undefined;
+		if (isKnownSkillCommand(this.ctx, text)) return undefined;
+		const command = session.slashCommands.find(cmd => cmd.name === invocation.name);
+		return command?.side ? { command, args: invocation.args } : undefined;
+	}
+
 	/**
 	 * Answer `text` as a /btw side question when it invokes a `side: true` file command.
 	 * Extension, custom and skill commands keep precedence over a file command of the same name.
 	 * `draft.detach` releases the submission's remaining editor state before the side question
 	 * runs; `draft.restore` hands the submission back when its template fails to render.
 	 */
-	async #runSideFileCommand(text: string, draft: { detach?: () => void; restore: () => void }): Promise<boolean> {
-		const invocation = parseFileSlashInvocation(text);
-		if (!invocation || !this.ctx.fileSlashCommands.has(invocation.name)) return false;
-		const session = this.ctx.session;
-		if (session.extensionRunner?.getCommand(invocation.name) !== undefined) return false;
-		if (session.customCommands.some(loaded => loaded.command.name === invocation.name)) return false;
-		if (isKnownSkillCommand(this.ctx, text)) return false;
-		const command = session.slashCommands.find(cmd => cmd.name === invocation.name);
-		if (!command?.side) return false;
+	async #runSideFileCommand(
+		text: string,
+		draft: { detach?: () => void; restore: () => void },
+		recordedHistoryText?: string,
+	): Promise<boolean> {
+		const invocation = this.#resolveSideFileCommand(text);
+		if (!invocation) return false;
+		const { command } = invocation;
 		let question: string;
 		try {
 			question = renderFileSlashCommand(command, invocation.args);
@@ -1565,7 +1622,7 @@ export class InputController {
 			this.ctx.showError(error instanceof Error ? error.message : String(error));
 			return true;
 		}
-		this.ctx.editor.addToHistory(text);
+		if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text);
 		draft.detach?.();
 		const args = invocation.args.trim();
 		await this.ctx.handleBtwCommand(question, undefined, args ? `/${command.name} ${args}` : `/${command.name}`);
@@ -1863,13 +1920,16 @@ export class InputController {
 	/**
 	 * Dispatch a `/skill:<name> [args]` invocation through `promptCustomMessage`
 	 * using the supplied `streamingBehavior`. Returns false when the text is not
-	 * a registered skill command and leaves the editor state untouched. Registered
-	 * skills consume the full composer draft (text plus pending images) before
-	 * dispatch; if dispatch rejects, the draft is restored so the user can retry.
+	 * a registered skill command and leaves the editor state untouched.
+	 * A distinct skill body returned by a builtin is recorded before dispatch, without
+	 * recording the original submission twice. Preserve newer composer state when the
+	 * submitted draft is already detached; otherwise consume it. Restore the submitted
+	 * text and images on rejection so the user can retry.
 	 */
 	async #invokeSkillCommand(
 		text: string,
 		streamingBehavior: "steer" | "followUp",
+		recordedHistoryText: string | undefined,
 		images?: ImageContent[],
 		imageLinks?: (string | undefined)[],
 		preserveDraft = false,
@@ -1894,8 +1954,13 @@ export class InputController {
 			}
 		};
 
-		if (preserveDraft) this.ctx.editor.addToHistory(text);
-		else this.ctx.editor.clearDraft(text);
+		// The wrapper is already filed; a distinct returned skill invocation is new input.
+		const historyText = text === recordedHistoryText ? undefined : text;
+		if (preserveDraft) {
+			if (historyText !== undefined) this.ctx.editor.addToHistory(historyText);
+		} else {
+			this.ctx.editor.clearDraft(historyText);
+		}
 		try {
 			const dispatched = await invokeSkillCommandFromText(this.ctx, text, streamingBehavior, {
 				images: draftImages,
@@ -2145,6 +2210,17 @@ export class InputController {
 		// has no editor state left to release; a render failure hands it back.
 		const restoreSideDraft = { restore: () => restoreDetachedDraft(this.ctx.editor, text, images, imageLinks) };
 
+		this.releaseStaleYieldCompaction();
+		if (this.#guestRefusesSlash(text)) {
+			this.ctx.showStatus(`${text.split(/\s+/, 1)[0]} is host-only during a collab session`);
+			return;
+		}
+		if (this.ctx.collabGuest?.readOnly && !text.startsWith("/")) {
+			restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
+			this.ctx.showStatus("This collab link is read-only — prompting is disabled");
+			return;
+		}
+
 		// Compaction first: while compacting, free text gets queued via
 		// `queueCompactionMessage`, and `/skill:*` rides the same queue so a
 		// skill typed during compaction is not lost or short-circuited through
@@ -2154,7 +2230,6 @@ export class InputController {
 		// main-turn prompt. Builtins keep precedence, as in the dispatch below.
 		// A compaction queued for the next yield holds later follow-ups the same
 		// way, so they run after it.
-		this.releaseStaleYieldCompaction();
 		if (this.ctx.session.isCompacting || this.ctx.yieldCompaction) {
 			if (
 				text &&
@@ -2167,10 +2242,24 @@ export class InputController {
 			return;
 		}
 
+		let recordedHistoryText: string | undefined;
+
 		if (text) {
 			try {
 				const input =
 					(images?.length ?? 0) > 0 || (imageLinks?.length ?? 0) > 0 ? { images, imageLinks } : undefined;
+				// Same reason as the submit path: record before dispatch files the command under the
+				// context it was typed in — in the database and in the editor's local list, which is
+				// still the one that context seeded.
+				if (
+					text.startsWith("/") &&
+					!shouldSkipHistory(text) &&
+					!this.#guestRefusesSlash(text) &&
+					!this.#resolveSideFileCommand(text)
+				) {
+					this.ctx.editor.addToHistory(text);
+					recordedHistoryText = text;
+				}
 				const slashResult = await executeBuiltinSlashCommand(text, {
 					ctx: this.ctx,
 					input,
@@ -2178,13 +2267,10 @@ export class InputController {
 					followUp: origin,
 				});
 				if (slashResult === true) {
-					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 					return;
 				}
 				if (typeof slashResult === "string") {
 					// Command handled but returned remaining text to use as prompt.
-					// Record the original slash command text so Up Arrow recalls it.
-					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 					text = slashResult;
 				}
 			} catch (error) {
@@ -2194,12 +2280,30 @@ export class InputController {
 			}
 		}
 
-		if (text && (await this.#runSideFileCommand(text, restoreSideDraft))) return;
+		if (text && (await this.#runSideFileCommand(text, restoreSideDraft, recordedHistoryText))) return;
+
+		// The dispatcher can leave a skill or unknown slash command unconsumed for a guest.
+		// Refuse it without touching the composer: this submission was detached before the awaits.
+		// Bash and python input stay ungated here, as they always were.
+		if (this.ctx.collabGuest && text.startsWith("/")) {
+			this.ctx.showStatus(`${text.split(/\s+/, 1)[0]} is host-only during a collab session`);
+			return;
+		}
+		if (this.ctx.collabGuest) {
+			if (this.ctx.collabGuest.readOnly) {
+				restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
+				this.ctx.showStatus("This collab link is read-only — prompting is disabled");
+			} else {
+				if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text);
+				this.ctx.collabGuest.sendPrompt(text, images);
+			}
+			return;
+		}
 
 		// Skill commands invoke through the custom-message path regardless of
 		// which keybinding submitted them. Enter routes them as `steer`;
 		// Ctrl+Enter (this handler) routes them as `followUp`.
-		if (text && (await this.#invokeSkillCommand(text, "followUp", images, imageLinks, true))) {
+		if (text && (await this.#invokeSkillCommand(text, "followUp", recordedHistoryText, images, imageLinks, true))) {
 			return;
 		}
 
@@ -2212,7 +2316,7 @@ export class InputController {
 		};
 
 		if (this.ctx.session.isStreaming) {
-			this.ctx.editor.addToHistory(text);
+			if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text);
 			try {
 				await this.ctx.withLocalSubmission(
 					text,
@@ -2232,7 +2336,7 @@ export class InputController {
 		}
 
 		// Not streaming — just submit normally
-		this.ctx.editor.addToHistory(text);
+		if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text);
 		try {
 			await this.ctx.withLocalSubmission(
 				text,
@@ -2935,6 +3039,14 @@ export class InputController {
 			this.ctx.editor.insertTextAttachment(text);
 			this.ctx.showError("Failed to save paste to a file — attached as a text chip instead");
 		}
+	}
+
+	/**
+	 * Whether this session's collab guest gates refuse `text` instead of running it. A refused
+	 * command must not enter history: the next Up would offer a command that cannot be repeated.
+	 */
+	#guestRefusesSlash(text: string): boolean {
+		return this.ctx.collabGuest !== undefined && guestRefusesSlashCommand(text);
 	}
 
 	/**

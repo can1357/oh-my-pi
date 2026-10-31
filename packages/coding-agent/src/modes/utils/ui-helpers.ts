@@ -11,6 +11,7 @@ import type { AdvisorMessageDetails } from "../../advisor";
 import { InternalUrlRouter } from "../../internal-urls";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
+import { shouldSkipHistory } from "../controllers/input-controller";
 import { continuesConversation } from "./conversation-position";
 import { createAdvisorMessageCard } from "@oh-my-pi/pi-tui/chat/advisor-message";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
@@ -82,9 +83,13 @@ import {
 	type SkillPromptDetails,
 } from "../../session/messages";
 import type { SessionContext, StrippedToolCallsMarker } from "../../session/session-context";
-import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
+import {
+	executeBuiltinSlashCommand,
+	guestRefusesSlashCommand,
+	lookupBuiltinSlashCommand,
+} from "../../slash-commands/builtin-registry";
 import { parseSlashCommand } from "../../slash-commands/helpers/parse";
-import { buildSkillCommandPrompt, invokeSkillCommandFromText, isKnownSkillCommand } from "../skill-command";
+import { buildSkillCommandPrompt, isKnownSkillCommand } from "../skill-command";
 import {
 	createAssistantMessageComponent,
 	getAssistantMessageLinkTargets,
@@ -1310,12 +1315,21 @@ export class UiHelpers {
 		text: string,
 		mode: "steer" | "followUp",
 		images?: ImageContent[],
-		options?: { preserveDraft?: boolean },
+		options?: { preserveDraft?: boolean; historyRecorded?: boolean },
 	): void {
+		if (this.ctx.collabGuest && guestRefusesSlashCommand(text)) {
+			this.ctx.showStatus(`${text.split(/\s+/, 1)[0]} is host-only during a collab session`);
+			return;
+		}
 		const queuedImages = images && images.length > 0 ? images : undefined;
 		this.ctx.compactionQueuedMessages.push({ text, mode, images: queuedImages } as CompactionQueuedMessage);
-		if (options?.preserveDraft) this.ctx.editor.addToHistory(text);
-		else this.ctx.editor.clearDraft(text);
+		// Queuing bypasses normal slash recording. Keep room keys and auth codes out of history.
+		const historyText = options?.historyRecorded || shouldSkipHistory(text) ? undefined : text;
+		if (options?.preserveDraft) {
+			if (historyText !== undefined) this.ctx.editor.addToHistory(historyText);
+		} else {
+			this.ctx.editor.clearDraft(historyText);
+		}
 		this.ctx.updatePendingMessagesDisplay();
 		this.ctx.showStatus(
 			queuedImages ? "Queued message with image for after compaction" : "Queued message for after compaction",
@@ -1331,20 +1345,46 @@ export class UiHelpers {
 		if (!forwarded && this.ctx.loopPrompt === text) this.ctx.pauseLoop();
 	}
 
+	/** Deliver guest prompts remotely and refuse host-only commands without touching newer drafts. */
+	#deliverQueuedMessageToGuest(message: CompactionQueuedMessage, onConsumed: () => void): boolean {
+		const guest = this.ctx.collabGuest;
+		if (!guest) return false;
+		if (guestRefusesSlashCommand(message.text)) {
+			this.ctx.showStatus(`${message.text.split(/\s+/, 1)[0]} is host-only during a collab session`);
+			this.#parkLoopOnLocalConsume(message.text, false);
+			onConsumed();
+			return true;
+		}
+		// Allowed read-only builtins still run through the local dispatcher.
+		if (message.text.startsWith("/")) return false;
+		if (guest.readOnly) {
+			this.ctx.showStatus("This collab link is read-only — prompting is disabled");
+			this.#parkLoopOnLocalConsume(message.text, false);
+		} else {
+			guest.sendPrompt(message.text, message.images);
+		}
+		onConsumed();
+		return true;
+	}
+
 	/** Deliver one compaction-queued message; `onQueued` receives what it pushes onto the session queues. */
 	async #deliverQueuedMessage(
 		message: CompactionQueuedMessage,
 		onQueued: (queued: readonly AgentMessage[]) => void,
+		onGuestConsumed: () => void,
 	): Promise<void> {
+		if (this.#deliverQueuedMessageToGuest(message, onGuestConsumed)) return;
 		const builtin = await executeBuiltinSlashCommand(message.text, {
 			ctx: this.ctx,
 			input: message.images ? { images: message.images } : undefined,
+			draftDetached: true,
 		});
 		if (builtin === true) {
 			this.#parkLoopOnLocalConsume(message.text, false);
 			return;
 		}
 		if (typeof builtin === "string") {
+			if (this.#deliverQueuedMessageToGuest({ ...message, text: builtin }, onGuestConsumed)) return;
 			const forwarded = await this.ctx.session.prompt(builtin, {
 				streamingBehavior: message.mode,
 				images: message.images,
@@ -1353,14 +1393,16 @@ export class UiHelpers {
 			this.#parkLoopOnLocalConsume(message.text, forwarded);
 			return;
 		}
-		if (
-			await invokeSkillCommandFromText(this.ctx, message.text, message.mode, {
-				propagateErrors: true,
+		if (this.#deliverQueuedMessageToGuest(message, onGuestConsumed)) return;
+		const built = await buildSkillCommandPrompt(this.ctx, message.text, message.mode, message.images);
+		// Reading a skill file can overlap /join. Recheck before dispatching its local message.
+		if (this.#deliverQueuedMessageToGuest(message, onGuestConsumed)) return;
+		if (built) {
+			await this.ctx.session.promptCustomMessage(built.message, {
+				...built.options,
 				queueOnly: true,
-				images: message.images,
 				onPromptQueued: onQueued,
-			})
-		) {
+			});
 			return;
 		}
 		if (this.ctx.isKnownSlashCommand(message.text)) {
@@ -1435,6 +1477,20 @@ export class UiHelpers {
 		let firstQueued: readonly AgentMessage[] = [];
 		let firstFailed = false;
 		let firstLeftOut = false;
+		// Guest handoffs and refusals cannot be rolled back with local session queues.
+		const consumedByGuest = new Set<CompactionQueuedMessage>();
+		const onGuestConsumed = (message: CompactionQueuedMessage) => {
+			consumedByGuest.add(message);
+			// A first-prompt failure can restore the batch while another delivery awaits /join.
+			if (restored) {
+				this.ctx.compactionQueuedMessages = this.ctx.compactionQueuedMessages.filter(item => item !== message);
+				this.ctx.updatePendingMessagesDisplay();
+			}
+		};
+		const deliverQueuedMessage = (
+			message: CompactionQueuedMessage,
+			onQueued: (queued: readonly AgentMessage[]) => void,
+		) => this.#deliverQueuedMessage(message, onQueued, () => onGuestConsumed(message));
 
 		const reportFailure = (count: number, error: unknown) => {
 			this.ctx.updatePendingMessagesDisplay();
@@ -1451,7 +1507,12 @@ export class UiHelpers {
 			restored = true;
 			firstLeftOut = firstAdmitted !== undefined && !firstFailed;
 			this.ctx.session.dropQueuedMessages(firstLeftOut ? deliveredByFlush : [...deliveredByFlush, ...firstQueued]);
-			const batch = firstLeftOut ? queuedMessages.filter(message => message !== firstPrompt) : queuedMessages;
+			const batch =
+				firstLeftOut || consumedByGuest.size > 0
+					? queuedMessages.filter(
+							message => !consumedByGuest.has(message) && (!firstLeftOut || message !== firstPrompt),
+						)
+					: queuedMessages;
 			this.ctx.compactionQueuedMessages = batch;
 			reportFailure(batch.length, error);
 		};
@@ -1459,7 +1520,7 @@ export class UiHelpers {
 		try {
 			if (options?.willRetry) {
 				for (const message of queuedMessages) {
-					await this.#deliverQueuedMessage(message, onDelivered);
+					await deliverQueuedMessage(message, onDelivered);
 				}
 				this.ctx.updatePendingMessagesDisplay();
 				return;
@@ -1474,7 +1535,7 @@ export class UiHelpers {
 			}
 			if (firstPromptIndex === -1) {
 				for (const message of queuedMessages) {
-					await this.#deliverQueuedMessage(message, onDelivered);
+					await deliverQueuedMessage(message, onDelivered);
 				}
 				return;
 			}
@@ -1488,7 +1549,7 @@ export class UiHelpers {
 				// preCommands are all slash commands; #deliverQueuedMessage handles
 				// that branch (no local-submission marking needed since slash
 				// commands don't generate a matching user message_start).
-				await this.#deliverQueuedMessage(message, onDelivered);
+				await deliverQueuedMessage(message, onDelivered);
 			}
 
 			const onFirstQueued = (queued: readonly AgentMessage[]) => {
@@ -1543,19 +1604,26 @@ export class UiHelpers {
 			// are rebuilt as user-attributed custom messages so queued `/skill:` text
 			// is not sent as a literal prompt after compaction.
 			let promptPromise: Promise<unknown>;
-			if (isKnownSkillCommand(this.ctx, first.text)) {
+			if (this.ctx.collabGuest) {
+				// Forwarded or locally refused guest input is consumed, just like an admitted local prompt.
+				promptPromise = deliverQueuedMessage(firstPrompt, onFirstQueued).then(onFirstAdmitted, onFirstFailed);
+				await promptPromise;
+				if (restored) return;
+			} else if (isKnownSkillCommand(this.ctx, first.text)) {
 				const built = await buildSkillCommandPrompt(this.ctx, first.text, first.mode, first.images);
-				promptPromise = built
-					? this.ctx.session
-							.promptCustomMessage(built.message, {
-								...built.options,
-								onPromptQueued: onFirstQueued,
-								onPromptAdmitted: onFirstAdmitted,
-							})
-							.then(sent => {
-								if (sent === false) onFirstDropped();
-							}, onFirstFailed)
-					: Promise.resolve();
+				promptPromise = this.#deliverQueuedMessageToGuest(firstPrompt, () => onGuestConsumed(first))
+					? Promise.resolve(onFirstAdmitted())
+					: built
+						? this.ctx.session
+								.promptCustomMessage(built.message, {
+									...built.options,
+									onPromptQueued: onFirstQueued,
+									onPromptAdmitted: onFirstAdmitted,
+								})
+								.then(sent => {
+									if (sent === false) onFirstDropped();
+								}, onFirstFailed)
+						: Promise.resolve();
 			} else {
 				const disposeFirstPrompt = this.ctx.recordLocalSubmission(first.text, first.images?.length ?? 0);
 				promptPromise = this.ctx.session
@@ -1572,7 +1640,7 @@ export class UiHelpers {
 			}
 
 			for (const message of rest) {
-				await this.#deliverQueuedMessage(message, onDelivered);
+				await deliverQueuedMessage(message, onDelivered);
 				// The first prompt failed while the rest was still being delivered: the whole batch is
 				// back in the compaction queue, so take back what was delivered since and stop.
 				if (restored) {

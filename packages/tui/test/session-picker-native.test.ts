@@ -3,7 +3,7 @@ import type { TspPickerProps } from "@oh-my-pi/pi-wire";
 import { OverlayPanel } from "../src/chrome/overlay-box";
 import { TextFormField } from "../src/components/form";
 import type { DescribeContext, NativeNode } from "../src/native/node";
-import { type HistorySearchEntry, HistorySearchComponent } from "../src/overlays/history-search";
+import { type HistorySearchEntry, HistorySearchComponent, type HistorySource } from "../src/overlays/history-search";
 import { type SessionSelectorEntry, SessionSelectorComponent } from "../src/overlays/session-selector";
 import { initTheme } from "../src/theme";
 
@@ -291,10 +291,59 @@ describe("history search picker", () => {
 		search: (query: string) => entries.filter(e => e.prompt.includes(query)),
 	};
 
-	it("hoists a keyed md picker from the dock and inserts on activate", () => {
+	it("searches and activates a single source while preserving its method receiver", () => {
+		class Source {
+			#entries = entries;
+
+			getRecent(limit: number): HistorySearchEntry[] {
+				return this.#entries.slice(0, limit);
+			}
+
+			search(query: string, limit: number): HistorySearchEntry[] {
+				return this.#entries.filter(entry => entry.prompt.includes(query)).slice(0, limit);
+			}
+		}
 		const inserted: string[] = [];
 		const search = new HistorySearchComponent(
-			source,
+			new Source(),
+			prompt => inserted.push(prompt),
+			() => {},
+		);
+		const sheet = () => props((search.describe(withPicker).c as NativeNode[])[0]!);
+		expect(sheet().items?.map(item => item.label)).toEqual(["deploy the release", "routine status"]);
+		type(search, "deploy");
+		const result = sheet();
+		expect(result.items?.map(item => item.label)).toEqual(["deploy the release"]);
+		expect(result.actions?.some(action => action.id === "scope" || action.id === "scope-back")).toBe(false);
+		search.handleNativeEvent({ type: "activate", key: "^picker", item: result.items![0]!.id });
+		expect(inserted).toEqual(["deploy the release\nwith notes"]);
+		search.dispose();
+	});
+
+	it("searches and activates a source with virtual methods", () => {
+		const virtualSource = new Proxy<HistorySource>(Object.create(null), {
+			get: (_target, key) => Reflect.get(source, key),
+		});
+		const inserted: string[] = [];
+		const search = new HistorySearchComponent(
+			virtualSource,
+			prompt => inserted.push(prompt),
+			() => {},
+		);
+		const sheet = () => props((search.describe(withPicker).c as NativeNode[])[0]!);
+		expect(sheet().items?.map(item => item.label)).toEqual(["deploy the release", "routine status"]);
+		type(search, "deploy");
+		const result = sheet();
+		expect(result.items?.map(item => item.label)).toEqual(["deploy the release"]);
+		search.handleNativeEvent({ type: "activate", key: "^picker", item: result.items![0]!.id });
+		expect(inserted).toEqual(["deploy the release\nwith notes"]);
+		search.dispose();
+	});
+
+	it("hoists a keyed picker from the dock and inserts on activate", () => {
+		const inserted: string[] = [];
+		const search = new HistorySearchComponent(
+			[{ ...source, label: "all projects" }],
 			prompt => inserted.push(prompt),
 			() => {},
 		);
@@ -304,12 +353,111 @@ describe("history search picker", () => {
 		const sheet = (root.c as NativeNode[])[0]!;
 		expect(sheet.key).toBe("picker");
 		const p = props(sheet);
-		expect(p.size).toBe("md");
 		expect(p.items).toHaveLength(1);
 		expect(p.items?.[0]).toMatchObject({ label: "deploy the release", hits: [[0, 6]], detail: "/work/app" });
 
 		search.handleNativeEvent({ type: "activate", key: "^picker", item: p.items![0]!.id });
 		expect(inserted).toEqual(["deploy the release\nwith notes"]);
 		expect(search.describe(withoutPicker).k).toBe("card");
+	});
+
+	it("exposes both scope directions and preserves the query caret during native actions", () => {
+		const inserted: string[] = [];
+		const search = new HistorySearchComponent(
+			["first", "second", "third"].map(label => ({ ...source, label })),
+			prompt => inserted.push(prompt),
+			() => inserted.push("canceled"),
+		);
+		type(search, "deploy");
+		search.handleInput("\x1b[D");
+		const sheet = () => props((search.describe(withPicker).c as NativeNode[])[0]!);
+		expect(sheet().actions).toContainEqual({ id: "scope", label: "second", keys: ["tab"] });
+		expect(sheet().actions).toContainEqual({ id: "scope-back", label: "third", keys: ["shift", "tab"] });
+		const hints = (search.describe(withoutPicker).c as NativeNode[]).find(child => child.key === "hints")!;
+		const keycaps = (hints.c as NativeNode[]).flatMap(row =>
+			(row.c as NativeNode[]).filter(child => child.k === "kbd").map(child => child.p),
+		);
+		expect(keycaps).toContainEqual({ keys: ["tab"] });
+		expect(keycaps).toContainEqual({ keys: ["shift", "tab"] });
+		search.handleNativeEvent({ type: "action", key: "^picker", act: "scope", mods: [] });
+		expect(sheet()).toMatchObject({ query: "deploy", cursor: 5 });
+		expect(sheet().title).toContain("second");
+		search.handleNativeEvent({ type: "action", key: "^picker", act: "scope-back", mods: [] });
+		search.handleNativeEvent({ type: "action", key: "^picker", act: "scope-back", mods: [] });
+		expect(sheet()).toMatchObject({ query: "deploy", cursor: 5 });
+		expect(sheet().title).toContain("third");
+		expect(inserted).toEqual([]);
+		search.handleNativeEvent({ type: "activate", key: "^picker", item: sheet().items![0]!.id });
+		expect(inserted).toEqual([entries[0]!.prompt]);
+	});
+
+	it("does not advertise or reset selection for a one-scope ring", () => {
+		const search = new HistorySearchComponent(
+			[{ ...source, label: "only" }],
+			() => {},
+			() => {},
+		);
+		search.handleInput("\x1b[B");
+		const sheet = () => props((search.describe(withPicker).c as NativeNode[])[0]!);
+		const selected = sheet().selected;
+		for (const key of ["\t", "\x1b[Z"]) search.handleInput(key);
+		search.handleNativeEvent({ type: "action", key: "^picker", act: "scope", mods: [] });
+		expect(sheet().selected).toBe(selected);
+		expect(sheet().actions?.filter(action => action.id.startsWith("scope"))).toEqual([]);
+		const hints = (search.describe(withoutPicker).c as NativeNode[]).find(child => child.key === "hints")!;
+		const keycaps = (hints.c as NativeNode[]).flatMap(row =>
+			(row.c as NativeNode[]).filter(child => child.k === "kbd").map(child => child.p),
+		);
+		expect(keycaps).not.toContainEqual({ keys: ["tab"] });
+		expect(keycaps).not.toContainEqual({ keys: ["shift", "tab"] });
+	});
+
+	for (const [name, context] of [
+		["picker", withPicker],
+		["card", withoutPicker],
+	] as const) {
+		it("updates " + name + " scope chrome when both sources reuse the same empty array", () => {
+			const shared: HistorySearchEntry[] = [];
+			const search = new HistorySearchComponent(
+				["first", "second"].map(label => ({ label, getRecent: () => shared, search: () => shared })),
+				() => {},
+				() => {},
+			);
+			const title = () => {
+				const root = search.describe(context);
+				return name === "picker" ? props((root.c as NativeNode[])[0]!).title : (root.p as { head: string }).head;
+			};
+			expect(title()).toContain("first");
+			search.handleInput("\t");
+			expect(title()).toContain("second");
+			expect(title()).not.toContain("first");
+			search.handleInput("\x1b[Z");
+			expect(title()).toContain("first");
+			expect(title()).not.toContain("second");
+		});
+	}
+
+	it("refreshes query hits and selectable rows when a source reuses a mutable array", () => {
+		const shared: HistorySearchEntry[] = [{ prompt: "deploy release", created_at: now }];
+		const inserted: string[] = [];
+		const search = new HistorySearchComponent(
+			[{ label: "only", getRecent: () => shared, search: () => shared }],
+			text => inserted.push(text),
+			() => {},
+		);
+		const sheet = () => props((search.describe(withPicker).c as NativeNode[])[0]!);
+		type(search, "deploy");
+		expect(sheet().items?.[0]?.hits).toEqual([[0, 6]]);
+		search.handleNativeEvent({ type: "action", key: "^picker", act: "clear", mods: [] });
+		type(search, "release");
+		expect(sheet().items?.[0]?.hits).toEqual([[7, 14]]);
+		shared.push({ prompt: "release follow-up", created_at: now + 1 });
+		search.handleInput("\x1b[D");
+		search.handleInput("s");
+		const refreshed = sheet();
+		expect(refreshed.cursor).toBe(7);
+		expect(refreshed.items?.map(item => item.label)).toEqual(["deploy release", "release follow-up"]);
+		search.handleNativeEvent({ type: "activate", key: "^picker", item: refreshed.items![1]!.id });
+		expect(inserted).toEqual(["release follow-up"]);
 	});
 });

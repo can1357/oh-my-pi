@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Improved editor history handling: history can now refresh when its source context changes, while preserving drafts created within the editor; entries are also recorded under the context active when they are added ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+
+### Fixed
+
+- Fixed existing `HistorySearchComponent` callers passing a single history source, including Proxy-backed sources, crashing on upgrade; labeled scope arrays remain supported ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+- Editor history navigation now contains failed source-key resolution and retries on the next recall instead of letting the error escape the keystroke handler ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+- Failed history refreshes no longer leave a recalled prompt from the previous scope in the composer, while edited drafts and canceled attachments remain recoverable ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+- Native history search now exposes forward/backward scope cycling and refreshes its scope title, query highlights and rows even when sources reuse result arrays ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+- Fixed rapid successive Escape keys on Windows failing to reach interrupt and backtracking handlers when the console host relays them as text records ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+
 ## [18.14.1] - 2026-10-31
 
 ### Added

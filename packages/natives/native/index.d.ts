@@ -505,6 +505,10 @@ export declare class Process {
    * signal abstraction, so the `signal` argument is ignored and the entire
    * tree is hard-killed via `TerminateProcess`. Defaults to the POSIX
    * hard-kill signal.
+   *
+   * Returns a conservative count of successful signal deliveries: one per
+   * successful group call or pinned-process send, not an exact count of
+   * distinct recipients.
    */
   killTree(signal?: number | undefined | null): number
   /**
@@ -4011,6 +4015,9 @@ export declare function vcsGitClone(url: string, target: string, options: VcsClo
 
 /** Discover the Git checkout containing a directory. */
 export declare function vcsGitDiscover(dir: string): VcsGitRepo | null
+
+/** Initialize a non-bare Git checkout. */
+export declare function vcsGitInit(dir: string): VcsGitRepo
 
 /** Discover Git metadata without opening the repository. */
 export declare function vcsGitRepoInfo(dir: string): VcsGitRepoInfo | null

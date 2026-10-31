@@ -191,6 +191,22 @@ export function resolveEquivalentPath(inputPath: string, options?: EquivalentPat
 	}
 }
 
+/**
+ * Identify an existing filesystem object without folding case-sensitive directory names.
+ * Stat follows symlinks and junctions. If filesystem identity is unavailable, preserve the
+ * resolved spelling. Unavailable aliases may compare unequal; fallback never conflates different
+ * objects solely by letter case.
+ */
+export function pathIdentityKey(inputPath: string): string {
+	try {
+		const stat = fs.statSync(path.resolve(inputPath), { bigint: true });
+		if (stat.dev !== 0n && stat.ino !== 0n) return `id:${stat.dev}:${stat.ino}`;
+	} catch {
+		// Missing paths and filesystems without usable identity fall back to spelling.
+	}
+	return `path:${resolveEquivalentPath(inputPath)}`;
+}
+
 export function normalizePathForComparison(inputPath: string): string {
 	const resolvedPath = resolveEquivalentPath(inputPath);
 	return process.platform === "win32" ? resolvedPath.toLowerCase() : resolvedPath;

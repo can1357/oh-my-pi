@@ -1,5 +1,5 @@
-import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { throwIfAborted } from "../tools/tool-errors";
+import { primaryRootOrCwd } from "./active-repo-context";
 
 // Git uses O_EXCL lock files (`index.lock`, `packed-refs.lock`, …) with no
 // waiter, so concurrent in-process mutations against the same repository fail
@@ -17,7 +17,7 @@ const repoWriteChain = new Map<string, Promise<unknown>>();
  * Not reentrant: do NOT nest acquisitions for the same repo.
  */
 export async function withRepoLock<T>(cwd: string, fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-	const key = vcs.repo(cwd)?.primaryRoot() ?? cwd;
+	const key = primaryRootOrCwd(cwd);
 	const prior = repoWriteChain.get(key);
 	const run = (async () => {
 		if (prior) {

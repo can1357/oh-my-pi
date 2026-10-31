@@ -697,6 +697,10 @@ impl Process {
 	/// signal abstraction, so the `signal` argument is ignored and the entire
 	/// tree is hard-killed via `TerminateProcess`. Defaults to the POSIX
 	/// hard-kill signal.
+	///
+	/// Returns a conservative count of successful signal deliveries: one per
+	/// successful group call or pinned-process send, not an exact count of
+	/// distinct recipients.
 	#[must_use]
 	pub fn kill_tree(&self, signal: Option<i32>) -> u32 {
 		self.signal_tree(signal.unwrap_or(KILL_SIGNAL))
@@ -788,46 +792,24 @@ impl Process {
 	/// as a false descendant; `TerminateProcess`-ing it drops the whole session
 	/// with no cleanup and no `session_exit` record (#7452, related #4605).
 	fn signal_tree_excluding(&self, signal: i32, protected: &HashSet<i32>) -> u32 {
-		let descendants = self.signalable_descendants(protected);
-		let mut signaled = 0u32;
-		// If self leads its own process group, also signal the group — this
-		// catches grandchildren reparented to init when their immediate parent
-		// died inside the descendant walk.
-		if let Some(pgid) = self.group_id()
-			&& pgid == self.inner.pid()
-		{
-			let _ = kill_process_group(pgid, signal);
-		}
-		for child in &descendants {
-			if child.inner.kill(signal) {
-				signaled += 1;
-			}
-		}
-		if !protected.contains(&self.pid()) && self.inner.kill(signal) {
-			signaled += 1;
-		}
-		signaled
+		let process_group = self.group_id().filter(|&pgid| pgid == self.pid());
+		self.signal_tree_wave(signal, process_group, protected).0
 	}
 
-	/// Live descendants with every protected subtree pruned, not just the exact
-	/// protected pids.
-	///
-	/// The flattened descendant list can contain a protected node (the harness,
-	/// on a Windows PID-reuse false-descendant) *together with* that node's real
-	/// children, which were collected by recursing through it. Skipping only the
-	/// exact protected pid would still terminate those unrelated worker/tool
-	/// subprocesses, so drop every node whose recorded parent chain — within the
-	/// enumerated set — passes through a protected pid (#7452 review).
-	fn signalable_descendants(&self, protected: &HashSet<i32>) -> Vec<Self> {
-		let descendants = self.live_descendants();
-		let parents: HashMap<i32, i32> = descendants
-			.iter()
-			.filter_map(|descendant| descendant.ppid().map(|parent| (descendant.pid(), parent)))
-			.collect();
-		descendants
-			.into_iter()
-			.filter(|descendant| !pid_in_protected_subtree(descendant.pid(), protected, &parents))
-			.collect()
+	/// Snapshot the whole tree before signalling, then retain its eligible
+	/// descendants for the exit wait without opening another process reference.
+	fn signal_tree_wave(
+		&self,
+		signal: i32,
+		process_group: Option<i32>,
+		protected: &HashSet<i32>,
+	) -> (u32, Vec<Self>) {
+		let mut processes = self.live_descendants();
+		processes.push(self.clone());
+		let (signaled, mut descendants) =
+			signal_processes(signal, process_group.as_slice(), processes, protected);
+		descendants.retain(|process| process.pid() != self.pid());
+		(signaled, descendants)
 	}
 
 	async fn terminate_tree_impl(
@@ -844,17 +826,8 @@ impl Process {
 		let process_group = if group { self.group_id() } else { None };
 		let protected = host_protected_pids();
 
-		// Polite wave: SIGTERM the group, every live descendant, then the root.
-		if let Some(pgid) = process_group {
-			let _ = kill_process_group(pgid, TERM_SIGNAL);
-		}
-		let mut descendants = self.signalable_descendants(&protected);
-		for child in &descendants {
-			let _ = child.inner.kill(TERM_SIGNAL);
-		}
-		if !protected.contains(&self.pid()) {
-			let _ = self.inner.kill(TERM_SIGNAL);
-		}
+		// Polite wave: snapshot before the group signal can reparent descendants.
+		let (_, mut descendants) = self.signal_tree_wave(TERM_SIGNAL, process_group, &protected);
 
 		// Optional grace wait. A negative `graceful_ms` skips the wait entirely
 		// (we still emit the polite signal so cleanup handlers can run before
@@ -874,20 +847,73 @@ impl Process {
 
 		// Hard wave. Re-walk the tree so any grandchild spawned during the grace
 		// period — or any process re-parented to the root — is signalled too.
-		if let Some(pgid) = process_group {
-			let _ = kill_process_group(pgid, KILL_SIGNAL);
-		}
-		descendants = self.signalable_descendants(&protected);
-		for child in &descendants {
-			let _ = child.inner.kill(KILL_SIGNAL);
-		}
-		if !protected.contains(&self.pid()) {
-			let _ = self.inner.kill(KILL_SIGNAL);
-		}
+		(_, descendants) = self.signal_tree_wave(KILL_SIGNAL, process_group, &protected);
 
 		wait_for_exit(self, &descendants, Some(Duration::from_millis(u64::from(timeout_ms))), ct)
 			.await
 	}
+}
+
+/// Deliver one signal wave without sending both a group signal and a pinned
+/// signal to its known members. Group success proves at least one delivery, not
+/// that every member accepted the signal, so each successful group counts once.
+fn signal_processes(
+	signal: i32,
+	pgids: &[i32],
+	mut processes: Vec<Process>,
+	protected: &HashSet<i32>,
+) -> (u32, Vec<Process>) {
+	let mut seen_pids = HashSet::with_capacity(processes.len());
+	processes.retain(|process| seen_pids.insert(process.pid()));
+	// Stop parent links at the snapshot boundary. The host is the real parent
+	// of normal cancellation roots, not a protected node inside their trees.
+	let parents: HashMap<i32, i32> = processes
+		.iter()
+		.filter_map(|process| process.ppid().map(|parent| (process.pid(), parent)))
+		.filter(|(_, parent)| seen_pids.contains(parent))
+		.collect();
+	let mut protected_groups: HashSet<i32> = protected
+		.iter()
+		.filter_map(|&pid| Process::from_pid(pid))
+		.filter_map(|process| process.group_id())
+		.collect();
+	let mut process_groups = Vec::with_capacity(processes.len());
+	processes.retain(|process| {
+		let group = process.group_id();
+		// Prune every protected subtree, not just the exact protected pids.
+		// A false Windows descendant can include the host's real workers too.
+		// Its group must also be excluded before removing it from the snapshot.
+		if pid_in_protected_subtree(process.pid(), protected, &parents) {
+			if let Some(pgid) = group {
+				protected_groups.insert(pgid);
+			}
+			return false;
+		}
+		process_groups.push(group);
+		true
+	});
+
+	// Capture memberships before any delivery: signalling a parent can make
+	// descendants disappear from its tree, but their pinned handles remain
+	// valid.
+	let mut signaled = 0u32;
+	let mut signaled_groups: HashSet<i32> = pgids.iter().copied().collect();
+	signaled_groups.retain(|&pgid| {
+		if protected_groups.contains(&pgid) || !kill_process_group(pgid, signal) {
+			return false;
+		}
+		signaled += 1;
+		true
+	});
+	for (process, group) in processes.iter().zip(process_groups) {
+		if group.is_some_and(|pgid| signaled_groups.contains(&pgid)) {
+			continue;
+		}
+		if process.signal(signal) {
+			signaled += 1;
+		}
+	}
+	(signaled, processes)
 }
 
 /// The harness pid — the one process a run-cancellation sweep must never
@@ -1120,12 +1146,18 @@ impl TerminationTargets {
 	/// targets routinely exit between collection and signalling, and
 	/// the caller's policy is "best effort".
 	pub fn signal(&self, signal: i32) {
-		for &pgid in &self.pgids {
-			let _ = kill_process_group(pgid, signal);
-		}
+		let mut pgids = self.pgids.clone();
+		let mut processes = Vec::new();
 		for process in &self.processes {
-			let _ = process.signal_tree(signal);
+			if let Some(pgid) = process.group_id()
+				&& pgid == process.pid()
+			{
+				pgids.push(pgid);
+			}
+			processes.extend(process.live_descendants());
+			processes.push(process.clone());
 		}
+		let _ = signal_processes(signal, &pgids, processes, &host_protected_pids());
 	}
 }
 
@@ -1405,6 +1437,102 @@ mod tests {
 		let reaped = root.signal_tree_excluding(KILL_SIGNAL, &HashSet::new());
 		assert!(reaped >= 1, "an unprotected root must be signalled");
 		let _ = child.wait();
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn signal_wave_spares_protected_group_members() {
+		use std::{os::unix::process::CommandExt, process::Command, thread};
+
+		let mut protected_child = Command::new("sleep")
+			.arg("30")
+			.process_group(0)
+			.spawn()
+			.expect("spawn protected group leader");
+		let protected_pid = i32::try_from(protected_child.id()).expect("pid fits in i32");
+		let root = Process::from_pid(protected_pid).expect("pin protected leader");
+		let mut eligible_child = Command::new("sleep")
+			.arg("30")
+			.process_group(protected_pid)
+			.spawn()
+			.expect("spawn eligible group member");
+		let eligible_pid = i32::try_from(eligible_child.id()).expect("pid fits in i32");
+		let eligible = Process::from_pid(eligible_pid).expect("pin eligible member");
+		let protected = HashSet::from([protected_pid]);
+
+		let protected_count = root.signal_tree_excluding(KILL_SIGNAL, &protected);
+		let (eligible_count, _) = signal_processes(
+			KILL_SIGNAL,
+			&[protected_pid],
+			vec![eligible.clone(), root.clone()],
+			&protected,
+		);
+		eligible_child.wait().expect("reap eligible member");
+		thread::sleep(Duration::from_millis(50));
+		let protected_status = root.status();
+		let _ = protected_child.kill();
+		let _ = protected_child.wait();
+
+		assert_eq!(protected_count, 0, "a protected leader must not be signalled through its group");
+		assert_eq!(eligible_count, 1, "a refused group signal must retain the eligible pinned send");
+		assert_eq!(eligible.status(), ProcessStatus::Exited, "the eligible member must terminate");
+		assert_eq!(
+			protected_status,
+			ProcessStatus::Running,
+			"the protected group member must survive"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn signal_wave_deduplicates_groups_and_keeps_stopped_escaped_processes() {
+		use std::{os::unix::process::CommandExt, process::Command};
+
+		let spawn = |pgid| {
+			Command::new("sleep")
+				.arg("30")
+				.process_group(pgid)
+				.spawn()
+				.expect("spawn group member")
+		};
+		let mut leader = spawn(0);
+		let pgid = i32::try_from(leader.id()).expect("pid fits in i32");
+		let mut member = spawn(pgid);
+		let mut escaped = spawn(0);
+		let pin = |child: &std::process::Child| {
+			Process::from_pid(i32::try_from(child.id()).expect("pid fits in i32")).expect("pin child")
+		};
+		let leader_process = pin(&leader);
+		let member_process = pin(&member);
+		let escaped_process = pin(&escaped);
+		let stopped = escaped_process.signal(libc::SIGSTOP);
+		let mut stop_status = 0;
+		let stopped_pid = if stopped {
+			// SAFETY: this is our unreaped child, and `stop_status` is writable.
+			unsafe { libc::waitpid(escaped_process.pid(), &raw mut stop_status, libc::WUNTRACED) }
+		} else {
+			-1
+		};
+		let (signaled, _) = signal_processes(
+			KILL_SIGNAL,
+			&[pgid, pgid],
+			vec![member_process, escaped_process.clone(), leader_process, escaped_process],
+			&host_protected_pids(),
+		);
+		let leader_status = leader.wait().expect("reap leader");
+		let member_status = member.wait().expect("reap member");
+		let escaped_status = escaped.wait().expect("reap stopped escaped process");
+
+		assert!(stopped, "the escaped process must accept SIGSTOP");
+		assert_eq!(stopped_pid, i32::try_from(escaped.id()).expect("pid fits in i32"));
+		assert!(libc::WIFSTOPPED(stop_status), "the escaped process must actually be stopped");
+		assert_eq!(signaled, 2, "count one successful group call and one deduplicated pinned send");
+		assert!(!leader_status.success(), "the group leader must terminate");
+		assert!(!member_status.success(), "the covered group member must terminate");
+		assert!(
+			!escaped_status.success(),
+			"a stopped process outside the group must still terminate"
+		);
 	}
 
 	/// Regression test for the #7453 review: pruning a protected node must drop

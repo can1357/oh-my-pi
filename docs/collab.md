@@ -143,6 +143,12 @@ Advisor records are not guest-visible subagents: they are excluded from roster s
 
 Other session/machine commands remain host-only: `/model`, `/compact`, `/resume`, `/branch`, bash (`!`), python (`$`), skills, etc. Guests keep a small local allowlist (`/dump`, `/export`, `/copy`, `/open`, `/help`, `/hotkeys`, `/theme`, `/settings`, `/leave`, `/collab`, `/exit`, `/quit`).
 
+Compaction queues enforce the slash-command guest policy both when text is queued and when it is delivered, including retry drains and the first prompt that resumes a turn. Text queued before `/join` uses the current guest permissions at dispatch; skill delivery checks again after asynchronous skill loading. Refusing a command never clears a newer composer draft. Allowed local commands still run locally. Ordinary writable-guest prompts, including Ctrl+Enter follow-ups and queued text, are forwarded to the host rather than starting local inference; view-only guests cannot prompt.
+
+A read-only guest's refused Ctrl+Enter prompt stays in the composer with its attachments; it is neither queued during compaction nor recorded in prompt history. Refused queued commands and read-only prompts pause a matching loop body instead of repeatedly resubmitting it.
+
+During a compaction drain, a successful local call to forward the first guest prompt consumes it; this is not a host acknowledgement. If a later local command fails, such as `/leave` being cancelled while restoring the local session, retrying the remaining queue does not forward that prompt again. A first queued command refused by guest permissions is likewise consumed rather than replayed.
+
 When a guest joins during an assistant turn, that in-flight turn appears on the first subsequent `message_update`: the guest synthesizes the missing `message_start` from the update's full accumulating message before forwarding the delta. If the host emits no further update for that turn after the guest joins, there is no update from which to synthesize the live component. The durable entry still reaches the replica's message state, but entry frames are intentionally not rendered, so that edge case can remain absent from the live TUI.
 
 ## Web client

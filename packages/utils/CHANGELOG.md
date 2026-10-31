@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `pathIdentityKey()` to group filesystem aliases without merging distinct-case directories on case-sensitive filesystems. It follows symlinks/junctions through device/inode identity and falls back to a case-preserving resolved path when identity is unavailable; existing path-spelling and containment normalization is unchanged ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+
 ## [18.14.1] - 2026-10-31
 
 ### Added

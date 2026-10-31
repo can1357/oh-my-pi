@@ -501,6 +501,7 @@ Post-navigation event exposing new/old leaf and optional summary entry.
 - Auto compaction emits start/end session events for UI/state updates.
 - Auto compaction can try multiple model candidates and retry transient failures; long retry delays prefer the next candidate when one is available.
 - Overflow errors are excluded from generic retry path because they are handled by context promotion/compaction.
+- If delivering input queued during compaction fails, the undelivered batch returns to the compaction queue. The flush removes its own queued messages, including skill prompts and their hidden companions, without removing unrelated extension messages. A first prompt already admitted by the session stays out of the restored batch unless its dispatch later fails or the session drops it. Guest input already forwarded or locally refused is also consumed and is not replayed because a later command fails, in both automatic retry and normal drains. If guest input is consumed after the batch was restored, that input leaves the restored queue without removing newer entries. A synchronous send failure leaves the failed input and untouched suffix available for retry.
 - If auto-compaction fails:
    - overflow path emits `Context overflow recovery failed: ...`
    - incomplete-output path emits `Incomplete response recovery failed: ...`

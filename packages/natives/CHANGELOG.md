@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `initGit` to initialize a checkout through the native VCS API without spawning Git from callers ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+
+### Fixed
+
+- Preserved ordinary file and directory types for non-name-surrogate Windows reparse points, including cloud placeholders, when native path stats follow links ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+- Fixed cancelled commands running termination cleanup more than once and being killed before cleanup finishes ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+
 ## [18.14.1] - 2026-10-31
 
 ### Added
