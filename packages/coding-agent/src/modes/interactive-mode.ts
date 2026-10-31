@@ -2675,8 +2675,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.composer.pendingImages.length > 0) return;
 		const state = this.session.getGoalModeState();
 		if (!state?.enabled || state.goal.status !== "active") return;
-		const prompt = this.session.goalRuntime.buildContinuationPrompt();
-		if (!prompt) return;
 		this.#goalContinuationTimer = setTimeout(() => {
 			this.#goalContinuationTimer = undefined;
 			try {
@@ -2695,6 +2693,8 @@ export class InteractiveMode implements InteractiveModeContext {
 				if (this.composer.pendingImages.length > 0) return;
 				const latestState = this.session.getGoalModeState();
 				if (!latestState?.enabled || latestState.goal.status !== "active") return;
+				const prompt = this.session.goalRuntime.buildContinuationPrompt();
+				if (!prompt) return;
 				this.#pendingGoalContinuationTurns++;
 				this.onInputCallback(
 					this.startPendingSubmission({

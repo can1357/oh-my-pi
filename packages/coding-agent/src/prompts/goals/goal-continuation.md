@@ -12,7 +12,7 @@ Budget:
 - Tokens remaining: {{remainingTokens}}
 - Time used: {{timeUsedSeconds}} seconds
 
-Autonomous continuation; objective persists across turns. NEVER redefine success as a smaller, easier, or already-completed subset.
+Autonomous continuation; objective persists across turns. NEVER redefine success on your own as a smaller, easier, or already-completed subset. Objective edits require an explicit user request and permission through `goal.modelObjectiveUpdates`; an automatic continuation is not user authorization.
 
 Before `goal({op:"complete"})`, MUST audit current repo state:
 
