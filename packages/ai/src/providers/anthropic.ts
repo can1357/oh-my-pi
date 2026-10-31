@@ -2404,6 +2404,9 @@ const streamAnthropicOnce = (
 				if (built.requestControls) output.requestControls = built.requestControls;
 				else delete output.requestControls;
 				replayResponse = built.replayResponse;
+				// Counted by the encoder, before `onPayload`: on the wire a demoted block is
+				// plain text (the Claude dialect renders it unwrapped), so the final body
+				// cannot be recounted. A hook that edits reasoning runs again on the retry.
 				demotedReasoningBlocks = built.demotedReasoningBlocks;
 				if (disableStrictTools) {
 					dropAnthropicStrictTools(nextParams);

@@ -468,6 +468,18 @@ describe("Anthropic prior-turn thinking preservation (#2257, #2265)", () => {
 			expect(assistantBlocks(conversation(distillTurn))).toEqual([{ type: "text", text: "Distill answer" }]);
 		});
 
+		it("drops the reasoning of a model the catalog cannot classify", () => {
+			// An opaque proxy id may serve Claude, so only a known non-Claude class keeps its reasoning.
+			const opaqueTurn = makeAssistant(
+				[
+					{ type: "thinking", thinking: "opaque private plan", thinkingSignature: "sig_opaque" },
+					{ type: "text", text: "Opaque answer" },
+				],
+				{ provider: "team-proxy", model: "house-default", stopReason: "stop", credentialId: OTHER_CREDENTIAL },
+			);
+			expect(assistantBlocks(conversation(opaqueTurn))).toEqual([{ type: "text", text: "Opaque answer" }]);
+		});
+
 		it("leaves the restored reasoning out under omitDemotedReasoning", () => {
 			expect(assistantBlocks(conversation(codexTurn), { omitDemotedReasoning: true })).toEqual([
 				{ type: "text", text: "Codex answer" },
