@@ -1524,6 +1524,86 @@ describe("a capture that could not read everything", () => {
 	});
 });
 
+describe("a capture in a process that inherited another repository's git environment", () => {
+	// omp started from a git hook, `git submodule foreach` or a CI job inherits
+	// `GIT_DIR` and `GIT_WORK_TREE`, and `git -C` does not override
+	// `GIT_WORK_TREE`. The capture has to list the workspace it was given, and
+	// it has to hear git's warning about that workspace, or the teardown
+	// deletes work on the strength of another tree's listing. Run in a child
+	// process because Bun does not hand `process.env` writes to native code:
+	// only a real environment reaches the native git runner.
+	const worktreeModule = path.join(import.meta.dir, "..", "..", "src", "task", "worktree.ts");
+	const script =
+		`import * as fs from "node:fs/promises";` +
+		`import * as path from "node:path";` +
+		`import { captureBaseline, captureDeltaPatch } from ${JSON.stringify(worktreeModule)};` +
+		`const repo = process.env.OMP_TEST_CAPTURE_REPO;` +
+		`const baseline = await captureBaseline(repo);` +
+		`const locked = process.env.OMP_TEST_CAPTURE_LOCK === "1";` +
+		`const dir = locked ? path.join(repo, "locked") : repo;` +
+		`await fs.mkdir(dir, { recursive: true });` +
+		`await fs.writeFile(path.join(dir, "only-copy.txt"), "work nobody else has\\n");` +
+		`if (locked) await fs.chmod(dir, 0o000);` +
+		`let result;` +
+		`try { result = { rootPatch: (await captureDeltaPatch(repo, baseline)).rootPatch }; }` +
+		`catch (error) { result = { error: String(error instanceof Error ? error.message : error) }; }` +
+		`finally { if (locked) await fs.chmod(dir, 0o700); }` +
+		`process.stdout.write(JSON.stringify(result));`;
+
+	async function captureUnderForeignGitEnv(lock: boolean): Promise<{ rootPatch?: string; error?: string }> {
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		// Another tree with nothing untracked: a listing of it is empty.
+		const other = await createGitRepo();
+		await runGit(other, ["config", "user.email", "src@example.com"]);
+		await runGit(other, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(other, "theirs.txt"), "theirs\n");
+		await runGit(other, ["add", "theirs.txt"]);
+		await runGit(other, ["commit", "-q", "-m", "theirs"]);
+
+		const child = Bun.spawn([process.execPath, "--eval", script], {
+			cwd: path.join(import.meta.dir, ".."),
+			env: {
+				...process.env,
+				GIT_DIR: path.join(other, ".git"),
+				GIT_WORK_TREE: other,
+				OMP_TEST_CAPTURE_REPO: repo,
+				OMP_TEST_CAPTURE_LOCK: lock ? "1" : "0",
+			},
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+		// The child restores the mode itself; this covers a child that died.
+		if (lock) await fs.chmod(path.join(repo, "locked"), 0o700).catch(() => {});
+		expect({ exitCode, stderr: exitCode === 0 ? "" : stderr }).toEqual({ exitCode: 0, stderr: "" });
+		if (lock) expect(await Bun.file(path.join(repo, "locked", "only-copy.txt")).exists()).toBe(true);
+		return JSON.parse(stdout) as { rootPatch?: string; error?: string };
+	}
+
+	it("lists the workspace it was given, not the tree GIT_DIR and GIT_WORK_TREE name", async () => {
+		const result = await captureUnderForeignGitEnv(false);
+
+		expect(result.error).toBeUndefined();
+		expect(result.rootPatch).toContain("only-copy.txt");
+	});
+
+	it("still refuses on git's warning about a directory in the workspace", async () => {
+		const result = await captureUnderForeignGitEnv(true);
+
+		expect(result.rootPatch).toBeUndefined();
+		expect(result.error).toMatch(/git could not read 1 director.*: locked$/);
+	});
+});
+
 describe("a capture that could not look everywhere", () => {
 	it("records, rather than raises, a directory the nested scan cannot list", async () => {
 		// A directory the walk could not list may hold a nested repo whose
