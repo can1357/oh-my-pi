@@ -848,7 +848,7 @@ function approvalGrantChoices(
  * nobody can see or answer. Anything but an explicit approval is `deny`.
  */
 export async function requestApproval(
-	ui: Pick<ExtensionUIContext, "select" | "approve">,
+	ui: Pick<ExtensionUIContext, "select" | "approve"> | Required<Pick<ExtensionUIContext, "approve">>,
 	tool: ApprovalSubject,
 	args: unknown,
 	options: {
@@ -895,7 +895,8 @@ export async function requestApproval(
 		return "deny";
 	}
 	const choices = { ...(session ? { session } : {}), ...(grants.length > 0 ? { grants } : {}) };
-	return approvalAnswerForChoice(choices, await ui.select(full, approvalChoiceLabels(choices), dialogOptions));
+	const choice = "select" in ui ? await ui.select(full, approvalChoiceLabels(choices), dialogOptions) : undefined;
+	return approvalAnswerForChoice(choices, choice);
 }
 
 /** The approve-this-call-only label: "Approve", or "Approve Once" beside grants that remember more. */

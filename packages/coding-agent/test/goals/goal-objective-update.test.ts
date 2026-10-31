@@ -140,6 +140,19 @@ describe("model goal objective updates", () => {
 		expect(harness.state()).toEqual(before);
 	});
 
+	it("rejects a select-only host instead of treating its choice as objective approval", async () => {
+		const harness = createHarness();
+		cfgGoalModelObjectiveUpdates.set(harness.settings, "confirm");
+		const before = harness.state();
+		const select: ExtensionUIContext["select"] = async () => "Approve";
+		const context = {
+			hasUI: true,
+			ui: { select },
+		} as AgentToolContext;
+		await expect(harness.update("Publish the release", context)).rejects.toThrow(/no interactive.*UI/);
+		expect(harness.state()).toEqual(before);
+	});
+
 	it("honors live permission changes without rebuilding the tool", async () => {
 		const harness = createHarness();
 		cfgGoalModelObjectiveUpdates.set(harness.settings, "on-request");
