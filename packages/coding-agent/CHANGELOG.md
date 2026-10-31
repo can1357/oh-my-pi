@@ -25,7 +25,7 @@
 
 ### Fixed
 
-- Fixed a message typed into a busy session waiting behind every extension or agent message queued before it, one per model turn, while the queue showed only `Steering · 1`; your queued message is now read at the next step, ahead of agent-authored steering
+- Fixed a message typed into a busy session waiting behind every extension or agent message queued before it, one per model turn, while the queue showed only `Steering · 1`; your queued message is now read at the next step, ahead of agent-authored steering ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 - Fixed Bash services failing to start with `ready.port must be an integer from 1 to 65535` when the model sent `port: 0` beside a `log` condition; a zero port now counts as unset
 - Fixed omp's title staying on the terminal tab after exit in terminals without a title stack; Windows consoles get their original title back ([#17321](https://github.com/can1357/oh-my-pi/pull/17321) by [@asuffield](https://github.com/asuffield))
 - Fixed cached approvals offering a directory grant that would not cover every target in the call ([#17309](https://github.com/can1357/oh-my-pi/pull/17309) by [@iliaal](https://github.com/iliaal)).
