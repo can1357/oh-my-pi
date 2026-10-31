@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage, AssistantMessageEvent, Context, Usage } from "@oh-my-pi/pi-ai/types";
 import { MAX_EMPTY_COMPLETION_RETRIES, withReplaySafeStreamRetry } from "@oh-my-pi/pi-ai/utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { ReplayBudget } from "@oh-my-pi/pi-ai/utils/replay-budget";
 
 const CTX = {} as Context;
 
@@ -576,36 +577,70 @@ describe("withReplaySafeStreamRetry", () => {
 			expect(result.replayBudgetExhausted).toBe(true);
 		});
 
-		it("hands each attempt only the budget that is left, so nested replays share one deadline", async () => {
-			// A fake monotonic clock that the injected retry wait advances: the
-			// budget reads elapsed time, and a real sleep would make the test pay it.
+		it("hands every attempt the call's one budget, so nested replays share its deadline and its refusals", async () => {
+			const budgets: Array<ReplayBudget | undefined> = [];
+			const stream = withReplaySafeStreamRetry(
+				{},
+				CTX,
+				{ providerRetryWait: async () => {}, replayBudgetMs: 60_000 },
+				(_model, _context, options) => {
+					budgets.push(ReplayBudget.forCall(options));
+					return emptyAttempt();
+				},
+				{ retryEmptyCompletion: true },
+			);
+
+			await stream.result();
+
+			expect(budgets).toHaveLength(3);
+			expect(budgets[0]).toBeInstanceOf(ReplayBudget);
+			expect(budgets[1]).toBe(budgets[0]);
+			expect(budgets[2]).toBe(budgets[0]);
+		});
+
+		// The wrapper admits a replay before the attempt prepares its request; a
+		// payload hook that runs past the deadline must not get the request sent.
+		it("returns the attempt it replaced, marked, when the replay's first request is refused at handoff", async () => {
 			let now = 0;
 			const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
-			const handed: number[] = [];
 			let attempts = 0;
+			let sent = 0;
 			try {
 				const stream = withReplaySafeStreamRetry(
 					{},
 					CTX,
-					{
-						providerRetryWait: async (ms: number) => {
-							now += ms;
-						},
-						replayBudgetMs: 1_200,
-					},
+					{ providerRetryWait: async () => {}, replayBudgetMs: 1_000 },
 					(_model, _context, options) => {
 						attempts++;
-						handed.push(options?.replayBudgetMs ?? Number.NaN);
-						return emptyAttempt();
+						const budget = ReplayBudget.forCall(options);
+						const out = new AssistantMessageEventStream();
+						const message = assistant();
+						out.push({ type: "start", partial: message });
+						void (async () => {
+							// Preparation that outlives the deadline, then the provider's send.
+							if (attempts === 2) now += 5_000;
+							try {
+								budget?.handoff();
+								sent++;
+								out.push({ type: "done", reason: "stop", message });
+							} catch (error) {
+								message.stopReason = "error";
+								message.errorMessage = String(error);
+								budget?.stamp(message);
+								out.push({ type: "error", reason: "error", error: message });
+							}
+						})();
+						return out;
 					},
 					{ retryEmptyCompletion: true },
 				);
 
 				const result = await stream.result();
 
-				// The 500 ms wait fits in 1.2 s; the next 1 s wait would end at 1.5 s.
 				expect(attempts).toBe(2);
-				expect(handed).toEqual([1_200, 700]);
+				expect(sent).toBe(1);
+				expect(result.stopReason).toBe("stop");
+				expect(result.errorMessage).toBeUndefined();
 				expect(result.replayBudgetExhausted).toBe(true);
 			} finally {
 				clock.mockRestore();

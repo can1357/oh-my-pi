@@ -34,6 +34,7 @@ import type {
 } from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { inheritReplayBudget } from "../utils/replay-budget";
 import { type AnthropicOptions, shouldStripThinkingHistory } from "./anthropic";
 import { mapStainlessArch, mapStainlessOs } from "./anthropic-headers";
 import { createProviderErrorMessage } from "./error-message";
@@ -696,7 +697,8 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 					systemPrompt: [DROID_SYSTEM_PREFIX, ...systemPrompt],
 				},
 				options,
-				forwarded: {
+				// Every delegate spends this call's replay budget: same deadline, same arms.
+				forwarded: inheritReplayBudget(options, {
 					apiKey: harnessToken,
 					signal: options?.signal,
 					fetch: options?.fetch,
@@ -731,7 +733,7 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 						}),
 						...options?.headers,
 					},
-				},
+				}),
 			};
 
 			for await (const event of streamWire(wire, attempt)) {

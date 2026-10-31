@@ -73,6 +73,7 @@ import { AssistantMessageEventStream } from "./utils/event-stream";
 import { applyGlyphCodec } from "./utils/glyph-codec";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
 import { withThinkingLoopGuard } from "./utils/thinking-loop";
+import { inheritReplayBudget, ReplayBudget, type ReplayArm, withReplayBudget } from "./utils/replay-budget";
 import { withTransportFetch } from "./utils/transport-fetch";
 
 function isGoogleVertexAuthenticatedModel(model: Model<Api>): boolean {
@@ -1023,6 +1024,7 @@ function isRetryableThinkingLoop(message: AssistantMessage): boolean {
  */
 async function resolveWithThinkingLoopRetries(
 	signal: AbortSignal | undefined,
+	replayBudget: ReplayBudget | undefined,
 	dispatch: () => AssistantMessageEventStream,
 	onAttempt?: (message: AssistantMessage) => void,
 ): Promise<AssistantMessage> {
@@ -1043,8 +1045,25 @@ async function resolveWithThinkingLoopRetries(
 		// rejects if the abort lands mid-delay.
 		signal?.throwIfAborted();
 		const delay = Math.min(THINKING_LOOP_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), THINKING_LOOP_RETRY_MAX_DELAY_MS);
-		await scheduler.wait(delay, { signal });
-		message = await dispatchAttempt();
+		if (!replayBudget) {
+			await scheduler.wait(delay, { signal });
+			message = await dispatchAttempt();
+		} else {
+			// A re-sample replays the call: under a budget it must fit, and its first
+			// request is checked again at handoff. Refused, the stall in hand stands.
+			if (!replayBudget.admits(delay) || !(await replayBudget.wait(delay, signal, undefined))) {
+				replayBudget.stamp(message);
+				break;
+			}
+			const arm = replayBudget.arm(undefined);
+			const next = await dispatchAttempt();
+			replayBudget.disarm(arm);
+			if (arm.refused) {
+				replayBudget.stamp(message);
+				break;
+			}
+			message = next;
+		}
 		thinkingLoopRetry = isRetryableThinkingLoop(message);
 	}
 	if (thinkingLoopRetry) signal?.throwIfAborted();
@@ -1056,7 +1075,11 @@ export async function complete<TApi extends Api>(
 	context: Context,
 	options?: OptionsForApi<TApi>,
 ): Promise<AssistantMessage> {
-	return resolveWithThinkingLoopRetries(options?.signal, () => stream(model, context, options));
+	// One budget for every re-sample of the call.
+	const budgeted = options ? withReplayBudget(options) : options;
+	return resolveWithThinkingLoopRetries(options?.signal, ReplayBudget.forCall(budgeted), () =>
+		stream(model, context, budgeted),
+	);
 }
 
 type AuthRetryFailure = {
@@ -1231,11 +1254,13 @@ function streamSimpleRequest<TApi extends Api>(
 		// One inner attempt against a resolved key, or against the Bedrock AWS
 		// credential chain when its optional resolver has no stored bearer key.
 		// Retryable auth failures are buffered until replay is safe.
+		const replayBudget = ReplayBudget.forCall(requestOptions);
 		const runAttempt = async (
 			apiKey?: string,
 			credentialId?: number,
 			oauthIdentity?: OAuthRequestIdentity,
-		): Promise<AuthRetryFailure | undefined> => {
+			arm?: ReplayArm,
+		): Promise<AuthRetryFailure | "refused" | undefined> => {
 			const bufferedEvents: AssistantMessageEvent[] = [];
 			let emittedReplayUnsafeEvent = false;
 			const flushBuffered = (): void => {
@@ -1256,6 +1281,9 @@ function streamSimpleRequest<TApi extends Api>(
 						bufferedEvents.push(event);
 						continue;
 					}
+					// A retry whose first request the budget refused at handoff sent
+					// nothing: the failure it would have replaced stands.
+					if (!emittedReplayUnsafeEvent && event.type === "error" && arm?.refused) return "refused";
 					if (
 						!emittedReplayUnsafeEvent &&
 						event.type === "error" &&
@@ -1284,6 +1312,7 @@ function streamSimpleRequest<TApi extends Api>(
 					outer.end(result);
 				}
 			} catch (error) {
+				if (!emittedReplayUnsafeEvent && arm?.refused) return "refused";
 				if (
 					!emittedReplayUnsafeEvent &&
 					isRetryableUpstreamError(
@@ -1332,7 +1361,7 @@ function streamSimpleRequest<TApi extends Api>(
 			if (lastKey === undefined) {
 				if (getProviderDefinition(model.provider)?.allowsMissingApiKey) {
 					const failure = await runAttempt();
-					if (failure) emitFailure(failure);
+					if (failure && failure !== "refused") emitFailure(failure);
 					return;
 				}
 				outer.fail(new AIError.MissingApiKeyError(model.provider));
@@ -1340,7 +1369,7 @@ function streamSimpleRequest<TApi extends Api>(
 			}
 			const retryState = createAuthRetryKeyState(lastKey);
 			let failure = await runAttempt(lastKey, credentialId, oauthIdentity);
-			if (!failure) return;
+			if (!failure || failure === "refused") return;
 			while (true) {
 				// Caller aborted between attempts: don't mint a fresh token or fire
 				// another doomed request — emit the captured failure instead.
@@ -1358,10 +1387,18 @@ function streamSimpleRequest<TApi extends Api>(
 					},
 				);
 				if (nextKey === undefined) break;
-				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
+				// Another credential re-sends the request: a replay. Under a budget it
+				// must still begin inside it, and its first request is checked again
+				// at handoff; refused either way, the failure in hand stands, marked.
+				if (replayBudget && !replayBudget.admits(0)) break;
+				const arm = replayBudget?.arm(undefined);
+				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity, arm);
+				if (arm) replayBudget?.disarm(arm);
+				if (next === "refused") break;
 				if (!next) return;
 				failure = next;
 			}
+			if (failure.terminalEvent) replayBudget?.stamp(failure.terminalEvent.error);
 			emitFailure(failure);
 		})();
 		return outer;
@@ -1516,9 +1553,11 @@ export async function completeSimple<TApi extends Api>(
 	},
 ): Promise<AssistantMessage> {
 	const { onAttempt, ...streamOptions } = options ?? {};
-	const sessionOptions = withInferenceSessionId(streamOptions);
+	// One budget for every re-sample of the call.
+	const sessionOptions = withReplayBudget(withInferenceSessionId(streamOptions));
 	return resolveWithThinkingLoopRetries(
 		options?.signal,
+		ReplayBudget.forCall(sessionOptions),
 		() => streamSimple(model, context, sessionOptions),
 		onAttempt,
 	);
@@ -1786,7 +1825,9 @@ function mapOptionsForApi<TApi extends Api>(
 ): OptionsForApi<TApi> {
 	const options = normalizeMandatoryReasoningOptions(model, rawOptions);
 	const simpleProviderOptions = getProviderDefinition(model.provider)?.mapSimpleOptions?.(options ?? {});
-	const base = {
+	// The mapped options carry the call's budget down to the provider, so its
+	// replays and an auth retry above it spend one deadline.
+	const base = inheritReplayBudget(options, {
 		temperature: options?.temperature,
 		topP: options?.topP,
 		topK: options?.topK,
@@ -1829,7 +1870,7 @@ function mapOptionsForApi<TApi extends Api>(
 		anthropicSlowMode: options?.anthropicSlowMode,
 		userProfileId: options?.userProfileId,
 		...simpleProviderOptions,
-	};
+	});
 
 	switch (model.api) {
 		case "anthropic-messages": {

@@ -17,6 +17,7 @@ import { streamAzureOpenAIResponses } from "@oh-my-pi/pi-ai/providers/azure-open
 import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
 import { streamGoogle } from "@oh-my-pi/pi-ai/providers/google";
 import { streamGoogleGeminiCli } from "@oh-my-pi/pi-ai/providers/google-gemini-cli";
+import { streamGoogleVertex } from "@oh-my-pi/pi-ai/providers/google-vertex";
 import { streamOllama } from "@oh-my-pi/pi-ai/providers/ollama";
 import { streamOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
@@ -103,7 +104,10 @@ function codexToken(): string {
 
 interface CallOptions {
 	replayBudgetMs?: number;
-	providerRetryWait?: (delayMs: number) => Promise<void>;
+	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
+	onPayload?: (payload: unknown) => unknown;
+	signal?: AbortSignal;
+	maxHttpAttempts?: number;
 }
 
 interface Lane {
@@ -950,5 +954,365 @@ describe("the stored-result poll", () => {
 
 		expect(fetches).toBe(0);
 		expect(result).toBeUndefined();
+	});
+});
+
+/** A route that answers request `n` (from 1) with `respond(n)` and records when each arrived. */
+function scripted(respond: (n: number) => Response): Route & { times: number[] } {
+	const times: number[] = [];
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		fetch: async request => {
+			await request.arrayBuffer();
+			times.push(performance.now());
+			return respond(times.length);
+		},
+	});
+	return {
+		url: `http://127.0.0.1:${server.port}`,
+		times,
+		requests: () => times.length,
+		stop: () => server.stop(true),
+	};
+}
+
+/** A JSON error every HTTP lane parses: `overloaded_error` when retryable, `invalid_request_error` for a 400. */
+function failure(status: number, headers: Record<string, string> = {}, message = "The server is overloaded"): Response {
+	return Response.json(
+		{ type: "error", error: { type: status === 400 ? "invalid_request_error" : "overloaded_error", message } },
+		{ status, headers },
+	);
+}
+
+const HTTP_LANES = lanes.filter(lane => lane.name !== "cursor");
+
+interface HintScenario {
+	name: string;
+	headers?: Record<string, string>;
+	message?: string;
+}
+
+// Every wait the server names counts, however many there are and whatever
+// malformed or shorter hint sits beside them: a retry sent inside a window the
+// server said is closed is a guaranteed failure.
+describe.each<HintScenario>([
+	{
+		name: "a short retry-after-ms beside a long retry-after",
+		headers: { "retry-after-ms": "1", "retry-after": "30" },
+	},
+	{
+		name: "a long x-ratelimit-reset-after beside shorter headers",
+		headers: { "retry-after-ms": "1", "retry-after": "0.002", "x-ratelimit-reset-after": "30" },
+	},
+	{ name: "a phrase repeated with a longer wait", message: "Please retry in 1ms. Please retry in 30s." },
+	{ name: "a malformed phrase before a valid one", message: "Please retry in ...s. Please retry in 30s." },
+	{ name: "two different phrases", message: "Please retry in 1ms; try again in 30s" },
+	{ name: "a malformed header beside a valid one", headers: { "retry-after-ms": "bad", "retry-after": "30" } },
+])("a retryable failure naming $name", ({ headers, message }) => {
+	it.each(HTTP_LANES.map(lane => [lane.name, lane] as const))(
+		"%s ends the call on the 30 s wait against a 2 s budget",
+		async (_name, lane) => {
+			const route = scripted(n => (n === 1 ? failure(503, headers, message) : failure(400)));
+			try {
+				const result = await lane.call(route.url, { replayBudgetMs: 2_000 });
+
+				expect(route.requests()).toBe(1);
+				expect(result.replayBudgetExhausted).toBe(true);
+			} finally {
+				route.stop();
+			}
+		},
+	);
+});
+
+describe("the no-budget reading of conflicting hints", () => {
+	// Without a budget nothing changes: the retry loop still sleeps on the first
+	// header it recognizes, so the conflicting pair is retried after 1 ms.
+	it("still retries on the first recognized header", async () => {
+		const route = scripted(n =>
+			n === 1 ? failure(503, { "retry-after-ms": "1", "retry-after": "30" }) : failure(400),
+		);
+		try {
+			const result = await laneNamed("openai-completions").call(route.url, {});
+
+			expect(route.requests()).toBe(2);
+			expect(result.replayBudgetExhausted).toBeUndefined();
+		} finally {
+			route.stop();
+		}
+	});
+});
+
+// A Vertex regional endpoint that 404s is retried at the global endpoint: the
+// same request again, so the budget governs it.
+describe("the Vertex global fallback", () => {
+	const savedLocation = process.env.GOOGLE_CLOUD_LOCATION;
+	beforeEach(() => {
+		process.env.GOOGLE_CLOUD_LOCATION = "us-central1";
+	});
+	afterEach(() => {
+		if (savedLocation === undefined) delete process.env.GOOGLE_CLOUD_LOCATION;
+		else process.env.GOOGLE_CLOUD_LOCATION = savedLocation;
+	});
+
+	async function vertex(budget: number | undefined): Promise<{ urls: string[]; result: AssistantMessage }> {
+		const route = scripted(n => failure(n === 1 ? 404 : 400));
+		const urls: string[] = [];
+		try {
+			const result = await streamGoogleVertex(
+				buildModel({
+					id: "gemini-2.5-pro",
+					name: "Gemini 2.5 Pro",
+					api: "google-vertex",
+					provider: "google-vertex",
+					// The request URL comes from GOOGLE_CLOUD_LOCATION, not from this.
+					baseUrl: "https://us-central1-aiplatform.googleapis.com",
+					reasoning: false,
+					input: ["text"],
+					cost,
+					contextWindow: 1_000_000,
+					maxTokens: 8_192,
+				}),
+				context,
+				{
+					apiKey: "test-key",
+					...(budget === undefined ? {} : { replayBudgetMs: budget }),
+					fetch: async (input, init) => {
+						urls.push(String(input));
+						return fetch(route.url, init);
+					},
+				},
+			).result();
+			return { urls, result };
+		} finally {
+			route.stop();
+		}
+	}
+
+	it("retries the global endpoint when no budget is set", async () => {
+		const { urls, result } = await vertex(undefined);
+
+		expect(urls).toHaveLength(2);
+		expect(urls[0]).toContain("us-central1");
+		expect(urls[1]).not.toContain("us-central1");
+		expect(result.replayBudgetExhausted).toBeUndefined();
+	});
+
+	it("keeps the regional failure, marked, once the budget is spent", async () => {
+		const { urls, result } = await vertex(0);
+
+		expect(urls).toHaveLength(1);
+		expect(result.errorStatus).toBe(404);
+		expect(result.replayBudgetExhausted).toBe(true);
+	});
+});
+
+// A replay is admitted before its request is prepared. A payload hook that
+// outlives the deadline must not get the request sent: the check that counts is
+// the one adjacent to the send.
+describe("preparation that outlives the deadline", () => {
+	// Azure's replay-safe wrapper replays a 503 once its six HTTP attempts are
+	// spent: seven requests with no budget.
+	it("keeps the replaced 503 when the replay-safe retry's request is ready only after the deadline", async () => {
+		const respond = (n: number): Response => (n <= 6 ? failure(503, { "retry-after-ms": "0" }) : failure(400));
+		const unbudgeted = scripted(respond);
+		const budgeted = scripted(respond);
+		let prepares = 0;
+		try {
+			const today = await laneNamed("azure-openai-responses").call(unbudgeted.url, {
+				providerRetryWait: async () => {},
+			});
+			const result = await laneNamed("azure-openai-responses").call(budgeted.url, {
+				replayBudgetMs: 700,
+				onPayload: async () => {
+					prepares++;
+					if (prepares === 2) await Bun.sleep(900);
+				},
+			});
+
+			expect(unbudgeted.requests()).toBe(7);
+			expect(today.replayBudgetExhausted).toBeUndefined();
+			expect(prepares).toBe(2);
+			expect(budgeted.requests()).toBe(6);
+			expect(result.errorStatus).toBe(503);
+			expect(result.replayBudgetExhausted).toBe(true);
+		} finally {
+			unbudgeted.stop();
+			budgeted.stop();
+		}
+	});
+
+	it("keeps the empty completion when its replay's request is ready only after the deadline", async () => {
+		const emptyStop = 'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n';
+		const route = scripted(() => new Response(emptyStop, { headers: { "content-type": "text/event-stream" } }));
+		let prepares = 0;
+		try {
+			const result = await laneNamed("openai-completions").call(route.url, {
+				replayBudgetMs: 700,
+				onPayload: async () => {
+					prepares++;
+					if (prepares === 2) await Bun.sleep(900);
+				},
+			});
+
+			expect(prepares).toBe(2);
+			expect(route.requests()).toBe(1);
+			expect(result.replayBudgetExhausted).toBe(true);
+		} finally {
+			route.stop();
+		}
+	});
+
+	// The Codex WebSocket generator writes the frame after its debug work and
+	// the outgoing diagnostic observer; the budget is asked after both.
+	it("does not write the Codex WebSocket frame after a slow outgoing observer passes the deadline", async () => {
+		const frames: number[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(request, srv) {
+				if (srv.upgrade(request)) return undefined;
+				return new Response("bad request", { status: 400 });
+			},
+			websocket: {
+				message(ws) {
+					frames.push(performance.now());
+					ws.close(1011, "retry");
+				},
+			},
+		});
+		let outgoing = 0;
+		try {
+			const result = await streamOpenAICodexResponses(
+				buildModel({
+					id: "gpt-5.3-codex-spark",
+					name: "Codex",
+					api: "openai-codex-responses",
+					provider: "openai-codex",
+					baseUrl: `http://127.0.0.1:${server.port}`,
+					reasoning: true,
+					preferWebsockets: true,
+					input: ["text"],
+					cost,
+					contextWindow: 128_000,
+					maxTokens: 8_192,
+				}),
+				context,
+				{
+					apiKey: codexToken(),
+					sessionId: "replay-budget-ws-observer",
+					providerSessionState: new Map(),
+					preferWebsockets: true,
+					replayBudgetMs: 800,
+					onSseEvent(event) {
+						if (!event.raw.some(line => line.startsWith(": ws →"))) return;
+						outgoing++;
+						if (outgoing === 2) {
+							const until = performance.now() + 900;
+							while (performance.now() < until) {
+								// A synchronous observer that holds the frame past the deadline.
+							}
+						}
+					},
+				},
+			).result();
+
+			expect(outgoing).toBe(2);
+			expect(frames).toHaveLength(1);
+			expect(result.replayBudgetExhausted).toBe(true);
+		} finally {
+			server.stop(true);
+		}
+	});
+});
+
+// A wait hook that never settles must not hold failover: the wait is raced
+// against the deadline and against the caller's signal.
+describe("a retry wait that never settles", () => {
+	it("ends the call at the deadline", async () => {
+		const route = cutBeforeHeaders();
+		try {
+			const started = performance.now();
+			const result = await laneNamed("anthropic").call(route.url, {
+				replayBudgetMs: 600,
+				providerRetryWait: () => new Promise<void>(() => {}),
+			});
+			const elapsedMs = performance.now() - started;
+
+			expect(route.requests()).toBe(1);
+			expect(elapsedMs).toBeLessThan(600 + ROUND_TRIP_SLACK_MS);
+			expect(result.replayBudgetExhausted).toBe(true);
+		} finally {
+			route.stop();
+		}
+	});
+
+	it("ends the call when the caller aborts", async () => {
+		const route = cutBeforeHeaders();
+		const controller = new AbortController();
+		try {
+			const call = laneNamed("anthropic").call(route.url, {
+				replayBudgetMs: 60_000,
+				signal: controller.signal,
+				providerRetryWait: () => new Promise<void>(() => {}),
+			});
+			await Bun.sleep(200);
+			const abortedAt = performance.now();
+			controller.abort();
+			const result = await call;
+
+			expect(performance.now() - abortedAt).toBeLessThan(ROUND_TRIP_SLACK_MS);
+			expect(result.stopReason).toBe("aborted");
+			expect(route.requests()).toBe(1);
+		} finally {
+			route.stop();
+		}
+	});
+});
+
+// A correction re-sends a rejected request. A server that named a wait on the
+// rejection is answered the same way as on any retryable failure.
+describe("a correction the server asked to delay", () => {
+	it("is not sent sooner than the server asked when that wait does not fit", async () => {
+		const times: number[] = [];
+		const result = await streamOpenAIResponses(
+			buildModel({
+				id: "fallback-responses-reasoner",
+				name: "Reasoner",
+				api: "openai-responses",
+				provider: "custom-responses",
+				baseUrl: "https://responses.example.test/v1",
+				reasoning: true,
+				compat: { supportsReasoningParams: true, supportsReasoningEffort: true },
+				thinking: { mode: "effort", efforts: [Effort.Low, Effort.High] },
+				input: ["text"],
+				cost,
+				contextWindow: 128_000,
+				maxTokens: 16_384,
+			}),
+			context,
+			{
+				apiKey: "test-key",
+				reasoning: Effort.High,
+				replayBudgetMs: 2_000,
+				fetch: async () => {
+					times.push(performance.now());
+					return Response.json(
+						{
+							error: {
+								message: `invalid reasoning value: 'high' (must be "low")`,
+								type: "invalid_request_error",
+								param: "reasoning.effort",
+							},
+						},
+						{ status: 400, headers: { "retry-after": "30" } },
+					);
+				},
+			},
+		).result();
+
+		expect(times).toHaveLength(1);
+		expect(result.replayBudgetExhausted).toBe(true);
 	});
 });

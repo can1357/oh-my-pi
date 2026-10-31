@@ -16,7 +16,7 @@
 import * as AIError from "../error";
 import type { AssistantMessage, AssistantMessageEvent, Context } from "../types";
 import { AssistantMessageEventStream } from "./event-stream";
-import { longestServerWaitMs, ReplayBudget } from "./replay-budget";
+import { longestServerWaitMs, ReplayBudget, type ReplayArm } from "./replay-budget";
 import { waitForRetry } from "./retry-wait";
 
 export const MAX_EMPTY_COMPLETION_RETRIES = 2;
@@ -99,12 +99,20 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 ): AssistantMessageEventStream {
 	const outer = new AssistantMessageEventStream();
 	const signal = options?.signal;
-	// One deadline for every attempt: each is handed only what is left of it, so
-	// the replays inside an attempt and the replays here spend the same budget.
-	const budget = ReplayBudget.from(options?.replayBudgetMs);
+	// One budget for every attempt: each attempt's provider call spends this
+	// same deadline, and the replay started here is armed so the attempt's first
+	// request is checked again at the moment it is handed to the transport.
+	const budget = ReplayBudget.forCall(options);
 	void (async () => {
 		let emptyRetries = 0;
 		let providerErrorRetries = 0;
+		// The attempt the running replay would replace, and the arm its first
+		// request consumes. When that request is refused at handoff, nothing of
+		// the replay reached the server and the replaced attempt stands.
+		let held:
+			| { buffered: AssistantMessageEvent[]; terminal: AssistantMessageEvent; message: AssistantMessage }
+			| undefined;
+		let arm: ReplayArm | undefined;
 		while (true) {
 			const buffered: AssistantMessageEvent[] = [];
 			let committed = options?.acceptEmptyResponse === true;
@@ -118,11 +126,7 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				// The attempt factory can throw synchronously (e.g. a config error
 				// raised before it creates its stream); surface it on the outer stream
 				// rather than leaking an unhandled rejection that never settles.
-				inner = attempt(
-					model,
-					context,
-					budget ? ({ ...options, replayBudgetMs: budget.remainingMs() } as O) : options,
-				);
+				inner = attempt(model, context, budget && options ? budget.share(options) : options);
 				for await (const event of inner) {
 					if (event.type === "done" || event.type === "error") {
 						terminal = event;
@@ -141,6 +145,18 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				flush();
 				outer.fail(error);
 				return;
+			}
+
+			if (budget && arm) {
+				const refusedAtHandoff = arm.refused;
+				budget.disarm(arm);
+				arm = undefined;
+				if (refusedAtHandoff && held) {
+					for (const event of held.buffered) outer.push(event);
+					budget.stamp(held.message);
+					outer.push(held.terminal);
+					return;
+				}
 			}
 
 			const completedMessage = terminal?.type === "done" ? terminal.message : undefined;
@@ -193,8 +209,10 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 			}
 
 			if (delayMs !== undefined && !signal?.aborted) {
+				let admitted = true;
 				try {
-					await waitForRetry(options?.providerRetryWait, delayMs, signal);
+					if (budget) admitted = await budget.wait(delayMs, signal, options?.providerRetryWait);
+					else await waitForRetry(options?.providerRetryWait, delayMs, signal);
 				} catch (waitError) {
 					flush();
 					if (signal?.aborted) {
@@ -204,9 +222,14 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 					}
 					return;
 				}
-				// The wait took real time: the next attempt must still start inside the budget.
-				if (!budget || budget.admits(0)) continue;
-				budget.stamp(replaced!);
+				if (admitted) {
+					if (budget && terminal && replaced) {
+						held = { buffered: [...buffered], terminal, message: replaced };
+						arm = budget.arm(undefined);
+					}
+					continue;
+				}
+				budget?.stamp(replaced!);
 			}
 
 			flush();

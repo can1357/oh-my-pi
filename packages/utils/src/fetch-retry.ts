@@ -27,6 +27,11 @@ const CN_RESET_AT_PATTERN = /将在\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-
 const RESET_AT_PATTERNS: readonly RegExp[] = [WILL_RESET_AT_PATTERN, CN_RESET_AT_PATTERN];
 // "retry-after-ms=98497000" / "retry-after-ms: 7200000" / "retry-after-ms = 7200000"
 const RETRY_AFTER_MS_BODY_PATTERN = /\bretry-after-ms\s*[:=]\s*([0-9]+)\b/i;
+// Legacy text forms: "retry-after: 30" / "retry-after=<HTTP date>" and the
+// `x-ratelimit-reset[-ms]` counters folded into a message.
+const RETRY_AFTER_BODY_PATTERN = /retry-after\s*[:=]\s*([^\s,;]+)/i;
+const RESET_MS_BODY_PATTERN = /x-ratelimit-reset-ms\s*[:=]\s*(\d+)/i;
+const RESET_BODY_PATTERN = /x-ratelimit-reset\s*[:=]\s*(\d+)/i;
 
 // A timezone-naive `reset at` stamp (no `Z`/offset) is the provider's
 // wall clock in an unknown zone: it cannot be converted to a delay without
@@ -114,7 +119,96 @@ export function extractRetryHint(
 	}
 
 	if (!body) return undefined;
+	return bodyRetryHint(body, options, false);
+}
 
+/**
+ * The longest wait a response names, across every retry header it carries and
+ * every occurrence of every phrase in `body`. A malformed or shorter hint never
+ * hides a longer valid one, and duplicate header lines joined by a comma are
+ * each read. `0` when the only signals ask for an immediate retry; `undefined`
+ * when nothing names a wait.
+ *
+ * {@link extractRetryHint} stops at the first recognized header and the first
+ * occurrence of each phrase, which is what the retry loop has always slept on.
+ * A caller that bounds its retries by a budget needs this reading instead: a
+ * retry sent inside a window the server said is closed is a guaranteed failure.
+ */
+export function longestRetryHint(
+	source: Response | Headers | null | undefined,
+	body?: string,
+	options?: RetryHintOptions,
+): number | undefined {
+	const headers = source instanceof Headers ? source : (source?.headers ?? undefined);
+	const hints = headers ? headerRetryHints(headers) : [];
+	const fromBody = body ? bodyRetryHint(body, options, true) : undefined;
+	if (fromBody !== undefined) hints.push(fromBody);
+	return hints.length === 0 ? undefined : Math.max(...hints);
+}
+
+/** Every wait the retry headers name, each comma-separated value read on its own. */
+function headerRetryHints(headers: Headers): number[] {
+	const hints: number[] = [];
+	const read = (name: string, parse: (value: string) => number | undefined): void => {
+		const raw = headers.get(name);
+		if (!raw) return;
+		for (const value of new Set([raw.trim(), ...raw.split(",").map(part => part.trim())])) {
+			if (value === "") continue;
+			const ms = parse(value);
+			if (ms !== undefined) hints.push(ms);
+		}
+	};
+	read("retry-after-ms", value => nonNegative(Number(value)));
+	read("retry-after", value => {
+		const seconds = Number(value);
+		if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+		const dateMs = Date.parse(value);
+		return Number.isNaN(dateMs) ? undefined : Math.max(0, dateMs - Date.now());
+	});
+	read("x-ratelimit-reset-ms", value => resetCounterMs(Number(value), 1));
+	read("x-ratelimit-reset", value => resetCounterMs(Number(value), 1000));
+	read("x-ratelimit-reset-after", value => {
+		const seconds = nonNegative(Number(value));
+		return seconds === undefined ? undefined : seconds * 1000;
+	});
+	return hints;
+}
+
+function nonNegative(value: number): number | undefined {
+	return Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/** A reset counter: a Unix epoch in ms (> 1e12) or s (> 1e9), otherwise a delta in `unitMs`. */
+function resetCounterMs(value: number, unitMs: number): number | undefined {
+	if (!Number.isFinite(value) || value <= 0) return undefined;
+	const targetMs = value > 1e12 ? value : value > 1e9 ? value * 1000 : undefined;
+	if (targetMs === undefined) return value * unitMs;
+	const delta = targetMs - Date.now();
+	return delta > 0 ? delta : undefined;
+}
+
+const GLOBAL_PATTERNS = new Map<RegExp, RegExp>();
+
+/** The first match of `pattern` in `body`, or every match when `everyOccurrence` is set. */
+function occurrences(pattern: RegExp, body: string, everyOccurrence: boolean): Iterable<RegExpMatchArray> {
+	if (!everyOccurrence) {
+		const match = pattern.exec(body);
+		return match ? [match] : [];
+	}
+	let global = GLOBAL_PATTERNS.get(pattern);
+	if (!global) {
+		global = new RegExp(pattern.source, `${pattern.flags}g`);
+		GLOBAL_PATTERNS.set(pattern, global);
+	}
+	return body.matchAll(global);
+}
+
+/** The retry wait `body` names: from the first occurrence of each phrase, or from every occurrence. */
+function bodyRetryHint(
+	body: string,
+	options: RetryHintOptions | undefined,
+	everyOccurrence: boolean,
+): number | undefined {
 	// A body can carry several timing signals at once: the account-reset
 	// window plus header timing folded into the message text (already the
 	// max across response headers — see getRetryAfterMsFromHeaders in
@@ -146,8 +240,7 @@ export function extractRetryHint(
 		else retryNow = true;
 	};
 
-	const quotaMatch = QUOTA_RESET_PATTERN.exec(body);
-	if (quotaMatch) {
+	for (const quotaMatch of occurrences(QUOTA_RESET_PATTERN, body, everyOccurrence)) {
 		const hours = quotaMatch[1] ? Number.parseInt(quotaMatch[1], 10) : 0;
 		const minutes = quotaMatch[2] ? Number.parseInt(quotaMatch[2], 10) : 0;
 		const seconds = Number.parseFloat(quotaMatch[3]!);
@@ -157,33 +250,34 @@ export function extractRetryHint(
 		}
 	}
 	for (const pattern of RESET_AT_PATTERNS) {
-		const match = pattern.exec(body);
-		if (!match?.[1]) continue;
-		// Offset-bearing stamps are unambiguous and compete by longest-wins.
-		// A configured provider offset makes an otherwise naive wall clock
-		// unambiguous too. Without one, preserve the relative-signal-first
-		// fallback and interpret the wall clock as UTC only when it stands alone.
-		const normalized = match[1].replace(" ", "T");
-		const hasOffset = /(?:Z|[+-][0-9]{2}:?[0-9]{2})$/i.test(normalized);
-		const configuredOffset = options?.naiveResetTimezoneOffset;
-		const parsed = Date.parse(hasOffset ? normalized : `${normalized}${configuredOffset ?? "Z"}`);
-		if (!Number.isNaN(parsed) && parsed > Date.now()) {
-			if (hasOffset || configuredOffset !== undefined) consider(parsed - Date.now());
-			else considerNaive(parsed - Date.now());
+		for (const match of occurrences(pattern, body, everyOccurrence)) {
+			if (!match[1]) continue;
+			// Offset-bearing stamps are unambiguous and compete by longest-wins.
+			// A configured provider offset makes an otherwise naive wall clock
+			// unambiguous too. Without one, preserve the relative-signal-first
+			// fallback and interpret the wall clock as UTC only when it stands alone.
+			const normalized = match[1].replace(" ", "T");
+			const hasOffset = /(?:Z|[+-][0-9]{2}:?[0-9]{2})$/i.test(normalized);
+			const configuredOffset = options?.naiveResetTimezoneOffset;
+			const parsed = Date.parse(hasOffset ? normalized : `${normalized}${configuredOffset ?? "Z"}`);
+			if (!Number.isNaN(parsed) && parsed > Date.now()) {
+				if (hasOffset || configuredOffset !== undefined) consider(parsed - Date.now());
+				else considerNaive(parsed - Date.now());
+			}
 		}
 	}
 	// OpenCode Go compound remainder ("Resets in 2hr 15min"): the generic
 	// pattern only captures the leading "2hr", so add the trailing minutes.
-	const compoundResetMatch = RESET_IN_HR_MIN_PATTERN.exec(body);
-	if (compoundResetMatch?.[1] && compoundResetMatch[2]) {
+	for (const compoundResetMatch of occurrences(RESET_IN_HR_MIN_PATTERN, body, everyOccurrence)) {
+		if (!compoundResetMatch[1] || !compoundResetMatch[2]) continue;
 		const hours = Number.parseFloat(compoundResetMatch[1]);
 		const minutes = Number.parseFloat(compoundResetMatch[2]);
 		if (Number.isFinite(hours) && Number.isFinite(minutes) && hours >= 0 && minutes > 0) {
 			consider(hours * 60 * 60_000 + minutes * 60_000);
 		}
 	}
-	const accountResetMatch = WILL_RESET_IN_PATTERN.exec(body);
-	if (accountResetMatch?.[1]) {
+	for (const accountResetMatch of occurrences(WILL_RESET_IN_PATTERN, body, everyOccurrence)) {
+		if (!accountResetMatch[1]) continue;
 		const value = Number.parseFloat(accountResetMatch[1]);
 		if (Number.isFinite(value) && value > 0) {
 			const unitMs = unitToMs(accountResetMatch[2]!);
@@ -191,15 +285,15 @@ export function extractRetryHint(
 		}
 	}
 
-	const retryAfterMsMatch = RETRY_AFTER_MS_BODY_PATTERN.exec(body);
-	if (retryAfterMsMatch?.[1]) {
+	for (const retryAfterMsMatch of occurrences(RETRY_AFTER_MS_BODY_PATTERN, body, everyOccurrence)) {
+		if (!retryAfterMsMatch[1]) continue;
 		const ms = Number(retryAfterMsMatch[1]);
 		if (Number.isFinite(ms)) considerClamped(ms);
 	}
 
 	for (const pattern of [PLEASE_RETRY_PATTERN, RETRY_DELAY_FIELD_PATTERN, TRY_AGAIN_PATTERN]) {
-		const match = pattern.exec(body);
-		if (match?.[1]) {
+		for (const match of occurrences(pattern, body, everyOccurrence)) {
+			if (!match[1]) continue;
 			const value = Number.parseFloat(match[1]);
 			if (Number.isFinite(value) && value > 0) {
 				const unitMs = unitToMs(match[2]!);
@@ -214,8 +308,7 @@ export function extractRetryHint(
 	// a longer legacy hint must not lose to a shorter reset phrase. Their
 	// non-positive readings (explicit zero, elapsed epoch/date) are the
 	// clamped retry-now signals above.
-	const retryAfterMatch = /retry-after\s*[:=]\s*([^\s,;]+)/i.exec(body);
-	if (retryAfterMatch) {
+	for (const retryAfterMatch of occurrences(RETRY_AFTER_BODY_PATTERN, body, everyOccurrence)) {
 		const value = retryAfterMatch[1]!;
 		const seconds = Number(value);
 		if (Number.isFinite(seconds)) {
@@ -226,16 +319,14 @@ export function extractRetryHint(
 		}
 	}
 
-	const resetMsMatch = /x-ratelimit-reset-ms\s*[:=]\s*(\d+)/i.exec(body);
-	if (resetMsMatch) {
+	for (const resetMsMatch of occurrences(RESET_MS_BODY_PATTERN, body, everyOccurrence)) {
 		const resetMs = Number(resetMsMatch[1]);
 		if (!Number.isNaN(resetMs)) {
 			considerClamped(resetMs > 1_000_000_000_000 ? resetMs - Date.now() : resetMs);
 		}
 	}
 
-	const resetMatch = /x-ratelimit-reset\s*[:=]\s*(\d+)/i.exec(body);
-	if (resetMatch) {
+	for (const resetMatch of occurrences(RESET_BODY_PATTERN, body, everyOccurrence)) {
 		const resetSeconds = Number(resetMatch[1]);
 		if (!Number.isNaN(resetSeconds)) {
 			considerClamped(resetSeconds > 1_000_000_000 ? resetSeconds * 1000 - Date.now() : resetSeconds * 1000);
@@ -244,6 +335,33 @@ export function extractRetryHint(
 	// Elapsed naive stamps were ignored before this change and stay ignored:
 	// only an explicit zero/expired relative signal is authoritative retry-now.
 	return longestMs ?? longestNaiveMs ?? (retryNow ? 0 : undefined);
+}
+
+/**
+ * Thrown by a transport gate when a retry or resend can no longer begin inside
+ * its caller's budget, at the moment it would be handed to the transport.
+ * `replaced` is the failure the refused request would have replaced, when the
+ * caller that admitted the request named one. {@link fetchWithRetry} answers a
+ * refused retry with the response or error that retry would have replaced.
+ */
+export class RetryRefusedError extends Error {
+	readonly replaced: unknown;
+
+	constructor(replaced?: unknown) {
+		super("The retry was not sent: the caller's replay budget ran out before it could begin");
+		this.name = "RetryRefusedError";
+		this.replaced = replaced;
+	}
+}
+
+/** The {@link RetryRefusedError} in `error` or in its cause chain, which transport wrappers may add. */
+export function findRetryRefusal(error: unknown): RetryRefusedError | undefined {
+	let current: unknown = error;
+	for (let depth = 0; current instanceof Error && depth < 8; depth++) {
+		if (current instanceof RetryRefusedError) return current;
+		current = current.cause;
+	}
+	return undefined;
 }
 
 function unitToMs(unit: string): number | undefined {
@@ -356,15 +474,22 @@ export async function fetchWithRetry(
 		...baseInit
 	} = options;
 	const signal = baseInit.signal as AbortSignal | undefined;
-	// Under a gate, the failure a retry would replace is held until the retry is
-	// sent: the wait and `prepareInit` take real time, so the gate is asked again
-	// immediately before the request goes out, and a refusal then returns this.
+	// Under a gate, the failure a retry would replace is held until the retry
+	// is on the wire: the wait and `prepareInit` take real time, so the gate is
+	// asked again immediately before the request goes out, and the transport may
+	// still refuse it at handoff (`RetryRefusedError`). Either refusal returns this.
 	let pending: { response: Response } | { error: Error } | undefined;
 	const releasePending = (): void => {
 		if (pending && "response" in pending && !pending.response.bodyUsed) {
 			pending.response.body?.cancel().catch(() => {});
 		}
 		pending = undefined;
+	};
+	const takePending = (): Response => {
+		const refused = pending!;
+		pending = undefined;
+		if ("error" in refused) throw refused.error;
+		return refused.response;
 	};
 
 	for (let attempt = 0; ; attempt++) {
@@ -386,20 +511,19 @@ export async function fetchWithRetry(
 				? ({ ...baseInit, timeout } as unknown as RequestInit)
 				: baseInit;
 
-		if (pending) {
-			if (retryGate && !retryGate(0)) {
-				const refused = pending;
-				pending = undefined;
-				if ("error" in refused) throw refused.error;
-				return refused.response;
-			}
-			releasePending();
-		}
+		if (pending && retryGate && !retryGate(0)) return takePending();
 
 		let response: Response;
 		try {
 			response = await fetchImpl(requestUrl, init);
 		} catch (error) {
+			if (findRetryRefusal(error)) {
+				// Refused at handoff: a held failure stands; a refused first request
+				// belongs to the caller that admitted it.
+				if (pending) return takePending();
+				throw error;
+			}
+			releasePending();
 			if (signal?.aborted) throw new Error("Request was aborted");
 			const wrapped = wrapNetworkError(error);
 			if (attempt + 1 >= maxAttempts) throw wrapped;
@@ -411,6 +535,7 @@ export async function fetchWithRetry(
 			await waitForRetry(networkDelayMs, signal);
 			continue;
 		}
+		releasePending();
 
 		if (!isRetryableStatus(response.status)) return response;
 		if (attempt + 1 >= maxAttempts) return response;
@@ -438,15 +563,6 @@ export async function fetchWithRetry(
 			throw error;
 		}
 	}
-}
-
-/** The longest wait named by a response's headers or its body; `undefined` when neither names one. */
-function longestRetryHint(response: Response, body: string): number | undefined {
-	const fromHeaders = extractRetryHint(response.headers);
-	const fromBody = extractRetryHint(undefined, body);
-	if (fromHeaders === undefined) return fromBody;
-	if (fromBody === undefined) return fromHeaders;
-	return Math.max(fromHeaders, fromBody);
 }
 
 function mergeInit(base: RequestInit, overlay: RequestInit, timeout: number | false): RequestInit {

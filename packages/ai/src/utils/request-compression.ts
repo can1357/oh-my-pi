@@ -5,7 +5,7 @@ import {
 	type RequestCompressionPolicy,
 	resolveRequestCompression,
 } from "@oh-my-pi/pi-catalog/compat/request-compression";
-import { $flag, logger } from "@oh-my-pi/pi-utils";
+import { $flag, findRetryRefusal, logger } from "@oh-my-pi/pi-utils";
 import type { FetchImpl, Model } from "../types";
 
 const gzip = promisify(zlib.gzip);
@@ -133,7 +133,8 @@ async function suspectEncodingRejection(
  * stops being re-checked for the host.
  *
  * `retryGate` is the call's replay budget (`StreamOptions.replayBudgetMs`): the
- * resend is a further request, so a refusal returns the rejection as it came.
+ * resend is a further request, so a refusal — before it is sent, or by the
+ * transport's handoff check — returns the rejection as it came.
  */
 export function wrapFetchForRequestCompression(
 	base: FetchImpl,
@@ -182,8 +183,22 @@ export function wrapFetchForRequestCompression(
 		if (suspect === "proxy" && encodingUnrelatedRefusals.has(refusal)) return response;
 		if (retryGate && !retryGate(0)) return response;
 
-		await response.body?.cancel().catch(() => {});
-		const plain = await base(input, init);
+		let plain: Response;
+		if (!retryGate) {
+			await response.body?.cancel().catch(() => {});
+			plain = await base(input, init);
+		} else {
+			// Under a budget the rejection stays readable until the resend clears
+			// the transport's handoff check, so a refusal there can hand it back.
+			try {
+				plain = await base(input, init);
+			} catch (error) {
+				if (findRetryRefusal(error)) return response;
+				await response.body?.cancel().catch(() => {});
+				throw error;
+			}
+			await response.body?.cancel().catch(() => {});
+		}
 		if (plain.ok) {
 			rejectedEncodings.add(`${origin} ${encoding}`);
 			logger.warn("Endpoint rejected compressed request body; disabling this encoding for the host", {

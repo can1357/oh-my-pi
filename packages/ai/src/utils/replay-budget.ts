@@ -1,19 +1,62 @@
-import { extractRetryHint } from "@oh-my-pi/pi-utils";
+import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
+import { findRetryRefusal, longestRetryHint, RetryRefusedError } from "@oh-my-pi/pi-utils";
 import type { AssistantMessage } from "../types";
-import { getHeadersFromError, getRetryAfterMsFromHeaders } from "./retry-after";
+import { getHeadersFromError } from "./retry-after";
+import { type RetryWaitHook, waitForRetry } from "./retry-wait";
 
 /**
- * One streaming call's {@link StreamOptions.replayBudgetMs}: decides whether a
- * replay may begin, and remembers a refusal so the result can report it.
+ * A replay admitted by a {@link ReplayBudget} whose request has not yet been
+ * handed to the transport. `refused` is set when the deadline passed first.
+ */
+export interface ReplayArm {
+	readonly replaced: unknown;
+	refused: boolean;
+}
+
+/**
+ * The budget an options bag carries down to the provider call and every call
+ * nested in it (the replay-safe wrapper's attempts, an auth retry, a delegated
+ * provider). A symbol, so object spreads carry it and serialized options drop it.
+ */
+const REPLAY_BUDGET = Symbol("omp.replayBudget");
+
+interface ReplayBudgetCarrier {
+	readonly [REPLAY_BUDGET]?: ReplayBudget;
+	readonly replayBudgetMs?: number;
+}
+
+/**
+ * One streaming call's {@link StreamOptions.replayBudgetMs}, measured on the
+ * monotonic clock from the start of the call.
  *
- * Measured on the monotonic clock from construction, which every provider does
- * at the start of its call. A nested call (the replay-safe wrapper's attempt)
- * gets its own instance built from {@link remainingMs}, so the two share one
- * deadline.
+ * A replay goes through three steps, each of which can refuse it:
+ * 1. a rung decides to replay and asks {@link admits} with the wait ahead of
+ *    it — the server's longest named wait included ({@link delayFor});
+ * 2. the wait itself runs through {@link wait}, raced against the deadline and
+ *    the caller's signal;
+ * 3. the transport handoff — the call into `fetch` ({@link gateFetch}), the
+ *    WebSocket write, the HTTP/2 stream open — calls {@link handoff}, which
+ *    refuses an admitted replay whose deadline passed while it was prepared.
+ *
+ * Step 3 is what makes the deadline hold against work between the decision
+ * and the send: payload hooks, signing, compression, diagnostics. A refusal
+ * there throws a `RetryRefusedError` carrying the failure the replay would have
+ * replaced ({@link arm}); the layer that admitted the replay answers with that
+ * failure ({@link restoreReplaced}). What the transport does with a request
+ * after the handoff — a caller-supplied `fetch` that queues it, a socket that
+ * buffers it — is outside the budget's reach.
+ *
+ * The budget governs replays, not the requests inside one attempt: the
+ * handoff gate only checks a request an admission armed, so a token fetch or
+ * an append that belongs to an attempt already on the wire goes out. A replay
+ * begins when its first request is handed off. A refusal latches for the rest
+ * of the call.
  */
 export class ReplayBudget {
 	readonly #deadline: number;
+	readonly #gated = new WeakSet<FetchImpl>();
 	#refused = false;
+	#arm: ReplayArm | undefined;
 
 	constructor(budgetMs: number) {
 		this.#deadline = performance.now() + budgetMs;
@@ -30,19 +73,156 @@ export class ReplayBudget {
 	}
 
 	/**
+	 * The budget governing a call made with `options`: the one the options
+	 * carry ({@link share}, {@link withReplayBudget}), otherwise a new one from
+	 * `replayBudgetMs`.
+	 */
+	static forCall(options: object | undefined): ReplayBudget | undefined {
+		const carrier = options as ReplayBudgetCarrier | undefined;
+		return carrier?.[REPLAY_BUDGET] ?? ReplayBudget.from(carrier?.replayBudgetMs);
+	}
+
+	/** A copy of `options` whose call, and every call nested in it, spends this budget. */
+	share<O extends object>(options: O): O {
+		return { ...options, [REPLAY_BUDGET]: this };
+	}
+
+	/**
 	 * Whether a replay that starts after waiting `delayMs` begins inside the
-	 * budget. A refusal latches: every later replay in the call is refused too.
-	 * Bound, so it can be handed to `fetchWithRetry` as its `retryGate`.
+	 * budget. An admission arms the next transport handoff, which checks the
+	 * deadline again. A refusal latches: every later replay in the call is
+	 * refused too. Bound, so it can be handed to `fetchWithRetry` as its
+	 * `retryGate`.
 	 */
 	readonly admits = (delayMs: number): boolean => {
-		if (!this.#refused && performance.now() + delayMs < this.#deadline) return true;
+		if (!this.#refused && performance.now() + delayMs < this.#deadline) {
+			this.#arm ??= { replaced: undefined, refused: false };
+			return true;
+		}
 		this.#refused = true;
 		return false;
 	};
 
-	/** Milliseconds a nested call may still begin replays in; `0` once refused or spent. */
-	remainingMs(): number {
-		return this.#refused ? 0 : Math.max(0, this.#deadline - performance.now());
+	/**
+	 * Names the failure the next handed-off request replaces. A refusal at that
+	 * handoff throws a `RetryRefusedError` carrying it.
+	 */
+	arm(replaced: unknown): ReplayArm {
+		const arm: ReplayArm = { replaced, refused: false };
+		this.#arm = arm;
+		return arm;
+	}
+
+	/** Drops `arm` when no request consumed it. */
+	disarm(arm: ReplayArm): void {
+		if (this.#arm === arm) this.#arm = undefined;
+	}
+
+	/**
+	 * Called immediately before a request is handed to the transport. An
+	 * admitted replay is checked once more and consumed; a request no admission
+	 * armed — the call's first, or one inside an attempt — passes.
+	 */
+	readonly handoff = (): void => {
+		const arm = this.#arm;
+		if (arm === undefined) return;
+		this.#arm = undefined;
+		if (!this.#refused && performance.now() < this.#deadline) return;
+		this.#refuseArm(arm);
+	};
+
+	/**
+	 * Called before opening a connection for a request (a WebSocket handshake,
+	 * an HTTP/2 session, a proxy tunnel): refuses an admitted replay whose
+	 * deadline passed, without consuming it, so the request's own
+	 * {@link handoff} is still checked.
+	 */
+	readonly connecting = (): void => {
+		const arm = this.#arm;
+		if (arm === undefined || (!this.#refused && performance.now() < this.#deadline)) return;
+		this.#arm = undefined;
+		this.#refuseArm(arm);
+	};
+
+	#refuseArm(arm: ReplayArm): never {
+		this.#refused = true;
+		arm.refused = true;
+		throw new RetryRefusedError(arm.replaced);
+	}
+
+	/**
+	 * `base`, with {@link handoff} run immediately before every request it is
+	 * handed. A fetch this budget already gates innermost is returned as it is.
+	 */
+	gateFetch(base: FetchImpl): FetchImpl {
+		if (this.#gated.has(base)) return base;
+		const gated: FetchImpl = async (input, init) => {
+			this.handoff();
+			return base(input, init);
+		};
+		if (base.preconnect) gated.preconnect = base.preconnect;
+		this.#gated.add(gated);
+		return gated;
+	}
+
+	/** Records that `fetch` runs this budget's handoff gate innermost, so {@link gateFetch} leaves it as it is. */
+	covers(fetch: FetchImpl): void {
+		this.#gated.add(fetch);
+	}
+
+	/** The wait a replay of `failure` must take: its own backoff, or the server's longest named wait. */
+	delayFor(failure: unknown, ownDelayMs: number): number {
+		return Math.max(ownDelayMs, longestServerWaitMs(failure) ?? 0);
+	}
+
+	/**
+	 * Waits `delayMs` before an admitted replay — through `hook` when the caller
+	 * injected one — and asks the budget again. Raced against the deadline and
+	 * against `signal`: a wait still running at the deadline refuses the replay
+	 * (`false`), however long the hook goes on, and an abort rejects at once.
+	 */
+	async wait(delayMs: number, signal: AbortSignal | undefined, hook: RetryWaitHook | undefined): Promise<boolean> {
+		if (signal?.aborted) throw abortError(signal);
+		const remainingMs = this.#deadline - performance.now();
+		if (this.#refused || delayMs >= remainingMs) {
+			this.#refused = true;
+			return false;
+		}
+		const raced = Promise.withResolvers<boolean>();
+		const timer = setTimeout(() => raced.resolve(false), remainingMs);
+		const onAbort = (): void => raced.reject(abortError(signal));
+		signal?.addEventListener("abort", onAbort, { once: true });
+		const waited = waitForRetry(hook, delayMs, signal).then(() => true);
+		// A hook still running when the race ends is no longer watched.
+		waited.catch(() => {});
+		try {
+			if (!(await Promise.race([waited, raced.promise]))) {
+				this.#refused = true;
+				return false;
+			}
+		} finally {
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", onAbort);
+		}
+		return this.admits(0);
+	}
+
+	/**
+	 * Decides, waits for and arms a replay of `failure` in one step: the wait
+	 * is {@link delayFor}, raced by {@link wait}. `false` when any step refuses.
+	 * For a rung with no work between its decision and its resend.
+	 */
+	async replayAfter(
+		failure: unknown,
+		ownDelayMs: number,
+		signal: AbortSignal | undefined,
+		hook: RetryWaitHook | undefined,
+	): Promise<boolean> {
+		const delayMs = this.delayFor(failure, ownDelayMs);
+		if (!this.admits(delayMs)) return false;
+		if (delayMs > 0 && !(await this.wait(delayMs, signal, hook))) return false;
+		this.arm(failure);
+		return true;
 	}
 
 	/** Marks `message` as the result of a refused replay, when one was refused. */
@@ -51,22 +231,84 @@ export class ReplayBudget {
 	}
 }
 
+/**
+ * `options` carrying the budget that governs the call — created from
+ * `replayBudgetMs` when they carry none — so every layer and nested call below
+ * spends the same one. `options` unchanged when no budget is set.
+ */
+export function withReplayBudget<O extends object>(options: O): O {
+	const budget = ReplayBudget.forCall(options);
+	if (!budget || (options as ReplayBudgetCarrier)[REPLAY_BUDGET] === budget) return options;
+	return budget.share(options);
+}
+
+/**
+ * `target` carrying the budget that governs a call made with `source`, for a
+ * provider that builds its delegate call's options field by field.
+ */
+export function inheritReplayBudget<T extends object>(source: object | undefined, target: T): T {
+	const budget = ReplayBudget.forCall(source);
+	return budget ? budget.share(target) : target;
+}
+
 /** `true` when no budget governs the call, otherwise whether `budget` admits a replay after `delayMs`. */
 export function admitsReplay(budget: ReplayBudget | undefined, delayMs: number): boolean {
 	return budget === undefined || budget.admits(delayMs);
 }
 
+/** `base` gated by `budget`'s handoff check, or `base` itself when no budget governs the call. */
+export function gateFetch(budget: ReplayBudget | undefined, base: FetchImpl): FetchImpl {
+	return budget ? budget.gateFetch(base) : base;
+}
+
 /**
- * The longest wait a failure's server asked for, across the response headers
- * it carries and the text of its message or error; `undefined` when it named
- * none. Under a replay budget this is the server's wait: a header saying zero
- * does not beat a body saying thirty seconds.
+ * For a provider that passes `options.fetch` through as given: under a budget,
+ * that fetch (or the global one) gated; with no budget, `fetch` exactly as given.
+ */
+export function gateOptionalFetch(
+	budget: ReplayBudget | undefined,
+	fetch: FetchImpl | undefined,
+): FetchImpl | undefined {
+	return budget ? budget.gateFetch(fetch ?? globalThis.fetch) : fetch;
+}
+
+/**
+ * The failure a refused replay would have replaced, when `error` is (or is
+ * caused by) a handoff refusal that named one; the refusal itself when it named
+ * none; otherwise `error` unchanged.
+ */
+export function restoreReplaced(error: unknown): unknown {
+	const refusal = findRetryRefusal(error);
+	if (!refusal) return error;
+	return refusal.replaced ?? refusal;
+}
+
+/**
+ * The longest wait a failure's server asked for, across every retry header it
+ * carries and every hint in the text of its message or error; `undefined`
+ * when it named none.
  */
 export function longestServerWaitMs(failure: unknown): number | undefined {
-	const fromHeaders = getRetryAfterMsFromHeaders(getHeadersFromError(failure));
+	const headers = getHeadersFromError(failure);
 	const text = failure instanceof Error ? failure.message : typeof failure === "string" ? failure : undefined;
-	const fromText = text ? extractRetryHint(undefined, text) : undefined;
-	if (fromHeaders === undefined) return fromText;
-	if (fromText === undefined) return fromHeaders;
-	return Math.max(fromHeaders, fromText);
+	return longestRetryHint(headers ? toHeaders(headers) : undefined, text);
+}
+
+function toHeaders(headers: Headers | Record<string, string | undefined>): Headers {
+	if (headers instanceof Headers) return headers;
+	const result = new Headers();
+	for (const [name, value] of Object.entries(headers)) {
+		if (typeof value !== "string") continue;
+		try {
+			result.set(name, value);
+		} catch {
+			// A name or value `Headers` rejects names no wait.
+		}
+	}
+	return result;
+}
+
+function abortError(signal: AbortSignal | undefined): Error {
+	const reason: unknown = signal?.reason;
+	return reason instanceof Error ? reason : new DOMException("The operation was aborted.", "AbortError");
 }

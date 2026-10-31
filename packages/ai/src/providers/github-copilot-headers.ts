@@ -6,7 +6,7 @@ import {
 	parseGitHubCopilotApiKey,
 } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
-import { $env, logger } from "@oh-my-pi/pi-utils";
+import { $env, findRetryRefusal, logger } from "@oh-my-pi/pi-utils";
 import type { FetchImpl, Message } from "../types";
 /**
  * Infer whether the current request to Copilot is user-initiated or agent-initiated.
@@ -201,7 +201,8 @@ export function wrapFetchForCopilotFallback(
 	cacheSnapshot?: string | null,
 	/**
 	 * The call's replay budget (`StreamOptions.replayBudgetMs`). The identity
-	 * retry is a further request: a refusal returns the denial as it came.
+	 * retry is a further request: refused — before it is sent, or by the
+	 * transport's handoff check — it returns the denial as it came.
 	 */
 	retryGate?: (delayMs: number) => boolean,
 ): FetchImpl {
@@ -217,6 +218,29 @@ export function wrapFetchForCopilotFallback(
 				? getCachedCopilotIntegrationId(cacheKey)
 				: normalizeCopilotIntegrationId(cacheSnapshot);
 		const response = await inner(input, init);
+		/**
+		 * Resends with `headers` after `response` was denied. Under a budget the
+		 * denial stays readable until the resend clears the transport's handoff
+		 * check; `undefined` when the check refused it.
+		 */
+		const resendAfterDenial = async (headers: Headers): Promise<Response | undefined> => {
+			if (!retryGate) {
+				try {
+					await response.arrayBuffer();
+				} catch {}
+				return inner(input, { ...init, headers });
+			}
+			let retry: Response;
+			try {
+				retry = await inner(input, { ...init, headers });
+			} catch (error) {
+				if (findRetryRefusal(error)) return undefined;
+				response.body?.cancel().catch(() => {});
+				throw error;
+			}
+			response.body?.cancel().catch(() => {});
+			return retry;
+		};
 		if (response.status !== 403 && response.status !== 400) return response;
 		if (input instanceof Request) return response;
 		if (normalizeCopilotIntegrationId(integrationId) !== undefined) return response;
@@ -225,15 +249,13 @@ export function wrapFetchForCopilotFallback(
 		if (outgoingId === COPILOT_CHAT_INTEGRATION_ID) {
 			if (await isCopilotIdentityDenied(response)) {
 				if (retryGate && !retryGate(0)) return response;
-				try {
-					await response.arrayBuffer();
-				} catch {}
 				logger.warn(
 					`GitHub Copilot chat identity denied (HTTP ${response.status}); retrying once as the Copilot CLI`,
 				);
 				const retryHeaders = new Headers(outgoing);
 				retryHeaders.set("Copilot-Integration-Id", cliIntegrationId);
-				const retry = await inner(input, { ...init, headers: retryHeaders });
+				const retry = await resendAfterDenial(retryHeaders);
+				if (!retry) return response;
 				if (cacheKey) {
 					if (retry.ok) rememberCopilotWorkingIntegrationId(cacheKey, cliIntegrationId);
 					else clearCopilotIntegrationCache(cacheKey);
@@ -246,15 +268,13 @@ export function wrapFetchForCopilotFallback(
 			if (cachedBeforeRequest !== cliIntegrationId) return response;
 			if (await isCopilotIdentityDenied(response)) {
 				if (retryGate && !retryGate(0)) return response;
-				try {
-					await response.arrayBuffer();
-				} catch {}
 				logger.warn(
 					`GitHub Copilot CLI identity denied (HTTP ${response.status}); retrying once as ${COPILOT_CHAT_INTEGRATION_ID}`,
 				);
 				const retryHeaders = new Headers(outgoing);
 				retryHeaders.set("Copilot-Integration-Id", COPILOT_CHAT_INTEGRATION_ID);
-				const retry = await inner(input, { ...init, headers: retryHeaders });
+				const retry = await resendAfterDenial(retryHeaders);
+				if (!retry) return response;
 				if (retry.ok) rememberCopilotWorkingIntegrationId(cacheKey, COPILOT_CHAT_INTEGRATION_ID);
 				else clearCopilotIntegrationCache(cacheKey);
 				return retry;

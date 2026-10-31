@@ -47,7 +47,7 @@ import {
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs } from "../utils/idle-iterator";
-import { admitsReplay, ReplayBudget } from "../utils/replay-budget";
+import { admitsReplay, gateOptionalFetch, ReplayBudget, restoreReplaced } from "../utils/replay-budget";
 import { toolWireSchema } from "../utils/schema/wire";
 import { invalidateAwsCredentialCache, resolveAwsCredentials } from "./aws-credentials";
 import { decodeEventStream } from "./aws-eventstream";
@@ -194,9 +194,9 @@ function resolveBedrockRequestUrl(
 /**
  * Sign and send one Bedrock Runtime request. A non-OK InvokeModel response's
  * body is read under the same pre-response deadline, so a stalled error body
- * cannot hang the caller. `retryGate` is the call's replay budget, consulted
- * before each transport retry; `replayOf`, the rejection this request corrects,
- * is thrown as-is when the gate refuses the request right before it is sent.
+ * cannot hang the caller. `replayBudget` gates each transport retry and the
+ * handoff of every request; `replayOf`, the rejection this request corrects, is
+ * thrown as-is when the budget is already spent before the request is signed.
  */
 async function sendBedrockRequest(
 	model: Model<"bedrock-converse-stream">,
@@ -206,7 +206,7 @@ async function sendBedrockRequest(
 	input: unknown,
 	endpoint: BedrockRequestEndpoint,
 	signal: AbortSignal | undefined,
-	retryGate: ((delayMs: number) => boolean) | undefined,
+	replayBudget: ReplayBudget | undefined,
 	replayOf?: unknown,
 ): Promise<{ response: Response; responseBody?: string }> {
 	const host = base.host;
@@ -303,7 +303,7 @@ async function sendBedrockRequest(
 			: getStreamFirstEventTimeoutMs(
 					options.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs(model.compat.streamIdleTimeoutMs),
 				));
-	if (replayOf !== undefined && retryGate && !retryGate(0)) throw replayOf;
+	if (replayOf !== undefined && !admitsReplay(replayBudget, 0)) throw replayOf;
 	const watchdog = armPreResponseTimeout(signal, firstEventTimeoutMs);
 	let response: Response;
 	let responseBody: string | undefined;
@@ -313,8 +313,8 @@ async function sendBedrockRequest(
 			headers: requestHeaders,
 			body,
 			signal: watchdog.signal,
-			fetch: options.fetch,
-			retryGate,
+			fetch: gateOptionalFetch(replayBudget, options.fetch),
+			retryGate: replayBudget?.admits,
 			timeout: false,
 		});
 		if (!response.ok && endpoint === "invoke-with-response-stream")
@@ -711,7 +711,7 @@ function createBedrockAnthropicCompactionClient(
 	region: string,
 	base: URL,
 	getPayload: () => unknown,
-	retryGate: ((delayMs: number) => boolean) | undefined,
+	replayBudget: ReplayBudget | undefined,
 ): AnthropicMessagesClientLike {
 	return {
 		messages: {
@@ -730,7 +730,7 @@ function createBedrockAnthropicCompactionClient(
 							input,
 							"invoke-with-response-stream",
 							requestOptions?.signal ?? options.signal,
-							retryGate,
+							replayBudget,
 						);
 						if (!sent.response.ok) {
 							if (
@@ -783,9 +783,9 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				const { base } = getRequestLocation();
 				return prepareBedrockAnthropicCompactionRequest(model, options, base, params, betas);
 			},
-			(getPayload, retryGate) => {
+			(getPayload, replayBudget) => {
 				const { region, base } = getRequestLocation();
-				return createBedrockAnthropicCompactionClient(model, options, region, base, getPayload, retryGate);
+				return createBedrockAnthropicCompactionClient(model, options, region, base, getPayload, replayBudget);
 			},
 			anthropicOptions => {
 				const reasoning = options.reasoning;
@@ -811,7 +811,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 
 	(async () => {
 		const startTime = performance.now();
-		const replayBudget = ReplayBudget.from(options.replayBudgetMs);
+		const replayBudget = ReplayBudget.forCall(options);
 		let firstTokenTime: number | undefined;
 
 		const output: AssistantMessage = {
@@ -920,7 +920,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					commandInput,
 					"converse-stream",
 					options.signal,
-					replayBudget?.admits,
+					replayBudget,
 					correctionOf,
 				));
 				if (response.ok) break;
@@ -938,7 +938,8 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					!prefixBindingRetryAttempted &&
 					options.anthropicPrefixMismatchBehavior !== "error" &&
 					isThinkingPrefixBindingError(errorMessage) &&
-					admitsReplay(replayBudget, 0)
+					(!replayBudget ||
+						(await replayBudget.replayAfter(rejection, 0, options.signal, options.providerRetryWait)))
 				) {
 					prefixBindingRetryAttempted = true;
 					logger.warn("bedrock: thinking prefix changed, stripping bound thinking and retrying", {
@@ -1087,7 +1088,9 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
-		} catch (error) {
+		} catch (caught) {
+			// A request the budget refused at handoff stands for the failure it replaced.
+			const error = restoreReplaced(caught);
 			for (const block of output.content) {
 				if (block.type === "toolCall") clearStreamingPartialJson(block);
 			}
@@ -1117,7 +1120,11 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					diagnostics = `\n[thinking-diag] ${JSON.stringify(thinkingBlocks)}`;
 				}
 			}
-			const result = await AIError.finalize(error, { api: model.api, signal: options.signal, rawRequestDump });
+			const result = await AIError.finalize(error, {
+				api: model.api,
+				signal: options.signal,
+				rawRequestDump,
+			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;

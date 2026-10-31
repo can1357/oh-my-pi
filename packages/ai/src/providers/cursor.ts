@@ -227,7 +227,7 @@ import {
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { connectProxiedSocket, getProxyForUrl, wrapFetchForProxy } from "../utils/proxy";
-import { admitsReplay, ReplayBudget } from "../utils/replay-budget";
+import { admitsReplay, ReplayBudget, restoreReplaced } from "../utils/replay-budget";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { waitForRetry } from "../utils/retry-wait";
 import { sanitizeSchemaForCursor, toolWireSchema } from "../utils/schema";
@@ -1196,7 +1196,7 @@ function streamCursorWithWireMode(
 		const retryContext = timing?.retry;
 		const transportMode = timing?.transport ?? (options?.transport === "http1" ? "http1" : "http2");
 		let startTime = timing?.startTime ?? performance.now();
-		const replayBudget = timing ? timing.replayBudget : ReplayBudget.from(options?.replayBudgetMs);
+		const replayBudget = timing ? timing.replayBudget : ReplayBudget.forCall(options);
 		let firstTokenTime = retryContext?.firstTokenTime;
 
 		let output = retryContext?.output ?? createCursorOutput(model, timing?.timestamp ?? Date.now());
@@ -1488,14 +1488,23 @@ function streamCursorWithWireMode(
 					})
 				: undefined;
 
+			// A continuing request names the failure it replaces: it is asked
+			// against the budget now, before any connection opens for it, and once
+			// more at the moment its stream is opened.
+			if (timing?.replayOf !== undefined && replayBudget) {
+				if (!replayBudget.admits(0)) throw timing.replayOf;
+				replayBudget.arm(timing.replayOf);
+			}
 			if (transportMode === "http2") {
 				const proxyUrl = getProxyForUrl(model.provider, new URL(baseUrl));
 				let client: http2.ClientHttp2Session;
+				replayBudget?.connecting();
 				if (proxyUrl) {
 					const tlsSocket = await connectProxiedSocket(proxyUrl, baseUrl, {
 						signal: options?.signal,
 						timeoutMs: CURSOR_PROXY_TUNNEL_TIMEOUT_MS,
 					});
+					replayBudget?.connecting();
 					client = http2.connect(baseUrl, {
 						createConnection: () => tlsSocket,
 					});
@@ -1504,12 +1513,11 @@ function streamCursorWithWireMode(
 				}
 				h2Client = client;
 				client.on("error", error => settleH2(mapH2TransportError(error, baseUrl)));
-				// A continuing request was admitted before its wait and its rebuilt
-				// request; the clock moved since, so it is asked again here.
-				if (timing?.replayOf !== undefined && !admitsReplay(replayBudget, 0)) throw timing.replayOf;
+				replayBudget?.handoff();
 				runTransport = wrapHttp2RunTransport(client.request(requestHeaders));
 			} else {
-				if (timing?.replayOf !== undefined && !admitsReplay(replayBudget, 0)) throw timing.replayOf;
+				// `createHttp1RunTransport` sends its run request synchronously.
+				replayBudget?.handoff();
 				runTransport = createHttp1RunTransport({
 					baseUrl,
 					headers: requestHeaders,
@@ -1996,7 +2004,8 @@ function streamCursorWithWireMode(
 			stream.end();
 		} catch (caughtError) {
 			if (relay) clearTimeout(relay.quietTimer);
-			let error = caughtError;
+			// A request the budget refused at handoff stands for the failure it replaced.
+			let error = restoreReplaced(caughtError);
 			const h2Unavailable = transportMode === "http2" && isHttp2Unavailable(error);
 			if (
 				h2Unavailable &&
@@ -2009,7 +2018,7 @@ function streamCursorWithWireMode(
 				conversationId !== undefined &&
 				activeBlobStore !== undefined &&
 				originalRequestId !== undefined &&
-				admitsReplay(replayBudget, 0)
+				(!replayBudget || (await replayBudget.replayAfter(error, 0, options?.signal, options?.providerRetryWait)))
 			) {
 				clearInterval(heartbeatTimer ?? undefined);
 				heartbeatTimer = null;
@@ -2059,7 +2068,7 @@ function streamCursorWithWireMode(
 				!sawProgressOrSideEffect &&
 				!options?.signal?.aborted &&
 				isCursorModelNotFound(error) &&
-				admitsReplay(replayBudget, 0)
+				(!replayBudget || (await replayBudget.replayAfter(error, 0, options?.signal, options?.providerRetryWait)))
 					? serializedFallbackWireModelId
 					: undefined;
 			if (fallbackWireModelId !== undefined) {
@@ -2116,7 +2125,9 @@ function streamCursorWithWireMode(
 			const noProgressResumes = repeatedCheckpoint ? (retryContext?.noProgressResumes ?? 0) + 1 : 0;
 			const uncappedDelayMs = CURSOR_RETRY_BASE_DELAY_MS * 2 ** retryAttempt;
 			const maxRetryDelayMs = options?.maxRetryDelayMs ?? 60_000;
-			const delayMs = maxRetryDelayMs > 0 ? Math.min(uncappedDelayMs, maxRetryDelayMs) : uncappedDelayMs;
+			const ownDelayMs = maxRetryDelayMs > 0 ? Math.min(uncappedDelayMs, maxRetryDelayMs) : uncappedDelayMs;
+			// Under a budget the server's own wait counts too.
+			const delayMs = replayBudget ? replayBudget.delayFor(error, ownDelayMs) : ownDelayMs;
 			const canRetryFromCheckpoint =
 				replaySafe &&
 				!options?.signal?.aborted &&
@@ -2154,8 +2165,16 @@ function streamCursorWithWireMode(
 				});
 				let retryDelayCompleted = false;
 				try {
-					await waitForRetry(options?.providerRetryWait, delayMs, options?.signal);
-					retryDelayCompleted = !options?.signal?.aborted;
+					if (replayBudget) {
+						// Raced against the deadline: a wait that cannot finish inside it
+						// refuses the retry, which then surfaces the failure in hand.
+						retryDelayCompleted =
+							(await replayBudget.wait(delayMs, options?.signal, options?.providerRetryWait)) &&
+							!options?.signal?.aborted;
+					} else {
+						await waitForRetry(options?.providerRetryWait, delayMs, options?.signal);
+						retryDelayCompleted = !options?.signal?.aborted;
+					}
 				} catch (waitError) {
 					error = waitError;
 				}

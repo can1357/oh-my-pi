@@ -1148,6 +1148,29 @@ describe("thinking-loop retry budget (result path)", () => {
 		}
 	});
 
+	// A re-sample replays the call: under a spent replay budget the stall in hand
+	// is the result, and it says the budget ended it.
+	test.each([
+		["completeSimple", (model: Model<Api>) => completeSimple(model, context(), { replayBudgetMs: 0 })],
+		["complete", (model: Model<Api>) => complete(model, context(), { replayBudgetMs: 0 })],
+	])("%s does not re-sample once the replay budget is spent", async (_name, run) => {
+		registerMockApi();
+		const waitSpy = spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		try {
+			const mock = createMockModel({ provider: "openrouter", id: "google/gemini-3.5-flash" });
+			for (let i = 0; i < 4; i++) mock.push(loopResponse());
+
+			const result = await run(mock.model);
+
+			expect(mock.calls).toHaveLength(1);
+			expect(result.errorMessage).toContain(THINKING_LOOP_ERROR_MARKER);
+			expect(result.replayBudgetExhausted).toBe(true);
+		} finally {
+			waitSpy.mockRestore();
+			clearCustomApis();
+		}
+	});
+
 	test("a caller abort during backoff rejects instead of returning the stall", async () => {
 		registerMockApi();
 		const controller = new AbortController();

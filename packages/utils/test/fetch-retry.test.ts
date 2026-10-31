@@ -1,5 +1,12 @@
 import { describe, expect, it } from "bun:test";
-import { extractRetryHint, fetchWithRetry, isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils/fetch-retry";
+import {
+	extractRetryHint,
+	fetchWithRetry,
+	findRetryRefusal,
+	isUnexpectedSocketCloseMessage,
+	longestRetryHint,
+	RetryRefusedError,
+} from "@oh-my-pi/pi-utils/fetch-retry";
 
 /** Await a rejection and narrow it to `Error` without asserting a shape. */
 async function rejectionOf(promise: Promise<unknown>): Promise<Error> {
@@ -293,6 +300,144 @@ describe("fetchWithRetry", () => {
 			expect(response.status).toBe(503);
 			expect(asked).toEqual([30_000]);
 		});
+
+		// The transport below the retry loop can refuse a retry at the moment it
+		// would send it. The response that retry would have replaced is the result,
+		// not the refusal and not a network error retried again.
+		it("returns the held response when the transport refuses the retry at send time", async () => {
+			let calls = 0;
+			const response = await fetchWithRetry("https://example.invalid/gate", {
+				fetch: async () => {
+					calls += 1;
+					if (calls === 2) throw new RetryRefusedError();
+					return new Response("overloaded", { status: 503 });
+				},
+				maxAttempts: 5,
+				defaultDelayMs: 1,
+				retryGate: () => true,
+			});
+
+			expect(calls).toBe(2);
+			expect(response.status).toBe(503);
+			expect(await response.text()).toBe("overloaded");
+		});
+
+		it("rethrows the held network failure when the transport refuses the retry at send time", async () => {
+			let calls = 0;
+			const error = await rejectionOf(
+				fetchWithRetry("https://example.invalid/gate", {
+					fetch: async () => {
+						calls += 1;
+						if (calls === 2) throw new RetryRefusedError();
+						throw new Error("socket hang up");
+					},
+					maxAttempts: 5,
+					defaultDelayMs: 1,
+					retryGate: () => true,
+				}),
+			);
+
+			expect(calls).toBe(2);
+			expect(error.message).toBe("socket hang up");
+		});
+
+		it("passes a refusal of its first request through unchanged", async () => {
+			const refusal = new RetryRefusedError("the rejection being corrected");
+			const error = await rejectionOf(
+				fetchWithRetry("https://example.invalid/gate", {
+					fetch: async () => {
+						throw refusal;
+					},
+					maxAttempts: 5,
+					retryGate: () => true,
+				}),
+			);
+
+			expect(error).toBe(refusal);
+		});
+
+		it("offers the gate the longest of several retry headers", async () => {
+			const asked: number[] = [];
+			await fetchWithRetry("https://example.invalid/gate", {
+				fetch: async () =>
+					new Response("", {
+						status: 503,
+						headers: { "retry-after-ms": "1", "retry-after": "0.002", "x-ratelimit-reset-after": "30" },
+					}),
+				maxAttempts: 5,
+				retryGate: delayMs => {
+					asked.push(delayMs);
+					return false;
+				},
+			});
+
+			expect(asked).toEqual([30_000]);
+		});
+	});
+
+	describe("findRetryRefusal", () => {
+		it("finds a refusal through the cause chain a transport wrapper adds", () => {
+			const refusal = new RetryRefusedError();
+			const wrapped = new Error("Connection error.", { cause: new Error("fetch failed", { cause: refusal }) });
+
+			expect(findRetryRefusal(wrapped)).toBe(refusal);
+			expect(findRetryRefusal(new Error("socket hang up"))).toBeUndefined();
+		});
+	});
+});
+
+// The retry loop's own reader stops at the first header it recognizes and the
+// first occurrence of each phrase. A caller bounding its retries by a budget
+// must see the longest wait the server named, or it resends inside a window the
+// server already said is closed.
+describe("longestRetryHint", () => {
+	it.each([
+		["retry-after-ms beside retry-after", { "retry-after-ms": "1", "retry-after": "30" }, 30_000],
+		[
+			"x-ratelimit-reset-after beside shorter headers",
+			{ "retry-after-ms": "1", "x-ratelimit-reset-after": "30" },
+			30_000,
+		],
+		["a malformed header beside a valid one", { "retry-after-ms": "bad", "retry-after": "30" }, 30_000],
+		["duplicate header lines joined by a comma", { "retry-after": "1, 30" }, 30_000],
+		["an explicit zero alone", { "retry-after-ms": "0" }, 0],
+	])("reads %s", (_name, headers, expected) => {
+		expect(longestRetryHint(new Headers(headers))).toBe(expected);
+	});
+
+	it("reads an HTTP date", () => {
+		const at = new Date(Date.now() + 60_000).toUTCString();
+		const hint = longestRetryHint(new Headers({ "retry-after": at }));
+		expect(hint).toBeGreaterThan(55_000);
+		expect(hint).toBeLessThanOrEqual(60_000);
+	});
+
+	it.each([
+		["every occurrence of one phrase", "Please retry in 1ms. Please retry in 30s."],
+		["a valid occurrence after a malformed one", "Please retry in ...s. Please retry in 30s."],
+		["different phrases", "Please retry in 1ms; try again in 30s"],
+	])("reads %s in the body", (_name, body) => {
+		expect(longestRetryHint(undefined, body)).toBe(30_000);
+	});
+
+	it("takes the longer of the headers and the body", () => {
+		expect(longestRetryHint(new Headers({ "retry-after-ms": "30000" }), "Please retry in 1ms")).toBe(30_000);
+		expect(longestRetryHint(new Headers({ "retry-after-ms": "0" }), "Please retry in 30s")).toBe(30_000);
+	});
+
+	it("names no wait when nothing names one", () => {
+		expect(longestRetryHint(new Headers({ "content-type": "application/json" }), "overloaded")).toBeUndefined();
+	});
+});
+
+describe("extractRetryHint, unchanged", () => {
+	// The retry loop with no gate keeps its first-match reading: these pin it.
+	it("still returns the first recognized header", () => {
+		expect(extractRetryHint(new Headers({ "retry-after-ms": "1", "retry-after": "30" }))).toBe(1);
+	});
+
+	it("still reads only the first occurrence of a phrase", () => {
+		expect(extractRetryHint(undefined, "Please retry in 1ms. Please retry in 30s.")).toBe(1);
 	});
 });
 

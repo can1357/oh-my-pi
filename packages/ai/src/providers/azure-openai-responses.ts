@@ -1,4 +1,4 @@
-import { $env, type ServerSentEvent } from "@oh-my-pi/pi-utils";
+import { $env, findRetryRefusal, type ServerSentEvent } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getEnvApiKey } from "../env-api-key";
 import type {
@@ -21,7 +21,7 @@ import {
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
-import { admitsReplay, ReplayBudget } from "../utils/replay-budget";
+import { gateOptionalFetch, ReplayBudget, restoreReplaced } from "../utils/replay-budget";
 import { sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { mapToOpenAIResponsesToolChoice } from "../utils/tool-choice";
 import {
@@ -88,7 +88,7 @@ const streamAzureOpenAIResponsesOnce = (
 	// Start async processing
 	(async () => {
 		const startTime = performance.now();
-		const replayBudget = ReplayBudget.from(options?.replayBudgetMs);
+		const replayBudget = ReplayBudget.forCall(options);
 		let firstTokenTime: number | undefined;
 		const deploymentName = resolveDeploymentName(model, options);
 
@@ -172,7 +172,7 @@ const streamAzureOpenAIResponsesOnce = (
 						headers: headersWithTimeout,
 						body: params,
 						signal: requestSignal,
-						fetch: options?.fetch,
+						fetch: gateOptionalFetch(replayBudget, options?.fetch),
 						retryGate: replayBudget?.admits,
 						// Transient 408/429/5xx get Retry-After-aware transport retries;
 						// the first-event watchdog aborts `requestSignal`, so retries
@@ -182,6 +182,8 @@ const streamAzureOpenAIResponsesOnce = (
 					openaiStream = handle.events;
 					break;
 				} catch (error) {
+					// A request the budget refused at handoff stands for the failure it replaced.
+					if (findRetryRefusal(error)) throw restoreReplaced(error);
 					const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
 					const reasoningEffortFallback: OpenAIReasoningEffortFallback | undefined = !requestSignal.aborted
 						? resolveOpenAIReasoningEffortFallback(error, capturedErrorResponse, params)
@@ -189,7 +191,14 @@ const streamAzureOpenAIResponsesOnce = (
 					if (reasoningEffortFallback === undefined) throw error;
 					const retryMarker = `${reasoningEffortFallbackKey}:${String(reasoningEffortFallback)}`;
 					if (attemptedReasoningEffortFallbacks.has(retryMarker)) throw error;
-					if (!admitsReplay(replayBudget, 0)) throw error;
+					// A correction is a replay: under a budget it waits the server's
+					// named wait when that fits, and is refused when it does not.
+					if (
+						replayBudget &&
+						!(await replayBudget.replayAfter(error, 0, options?.signal, options?.providerRetryWait))
+					) {
+						throw error;
+					}
 					attemptedReasoningEffortFallbacks.add(retryMarker);
 					applyOpenAIReasoningEffortFallback(params, reasoningEffortFallback);
 					rawRequestDump.body = params;
@@ -247,7 +256,11 @@ const streamAzureOpenAIResponsesOnce = (
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
-			const result = await AIError.finalize(error, { api: model.api, abortTracker, rawRequestDump });
+			const result = await AIError.finalize(restoreReplaced(error), {
+				api: model.api,
+				abortTracker,
+				rawRequestDump,
+			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;

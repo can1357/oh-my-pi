@@ -6,6 +6,7 @@ import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { clinePassClientHeaders } from "@oh-my-pi/pi-catalog/wire/cline-pass";
 import {
 	$env,
+	findRetryRefusal,
 	logger,
 	parseStreamingJson,
 	parseStreamingJsonThrottled,
@@ -48,7 +49,7 @@ import {
 } from "../utils/idle-iterator";
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
-import { admitsReplay, ReplayBudget } from "../utils/replay-budget";
+import { admitsReplay, gateFetch, ReplayBudget, restoreReplaced } from "../utils/replay-budget";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import {
 	adaptSchemaForStrict,
@@ -819,7 +820,7 @@ const streamOpenAICompletionsOnce = (
 
 	(async () => {
 		const startTime = performance.now();
-		const replayBudget = ReplayBudget.from(options?.replayBudgetMs);
+		const replayBudget = ReplayBudget.forCall(options);
 		let firstTokenTime: number | undefined;
 
 		const output: AssistantMessage = createInitialResponsesAssistantMessage(model.api, model.provider, model.id);
@@ -966,7 +967,11 @@ const streamOpenAICompletionsOnce = (
 						maxAttempts: options?.maxHttpAttempts,
 						retryGate: replayBudget?.admits,
 						fetch: wrapFetchForCopilotFallback(
-							wrapFetchForRequestCompression(options?.fetch ?? fetch, model, replayBudget?.admits),
+							wrapFetchForRequestCompression(
+								gateFetch(replayBudget, options?.fetch ?? fetch),
+								model,
+								replayBudget?.admits,
+							),
 							model.provider === "github-copilot",
 							resolveCopilotRequestIdentity(options?.headers),
 							copilotCacheKey,
@@ -1002,6 +1007,8 @@ const streamOpenAICompletionsOnce = (
 			try {
 				openaiStream = await createCompletionsStream();
 			} catch (error) {
+				// A request the budget refused at handoff stands for the failure it replaced.
+				if (findRetryRefusal(error)) throw restoreReplaced(error);
 				const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
 				// A caller disable with a retained effort preference is still an
 				// explicit disable: without this, a fieldless rejection of the
@@ -1017,7 +1024,14 @@ const streamOpenAICompletionsOnce = (
 				if (reasoningEffortFallback !== undefined && activeReasoningEffortFallbackKey) {
 					const retryMarker = `${activeReasoningEffortFallbackKey}:${String(reasoningEffortFallback)}`;
 					if (attemptedReasoningEffortFallbacks.has(retryMarker)) throw error;
-					if (!admitsReplay(replayBudget, 0)) throw error;
+					// A correction re-sends a rejected request: a replay. Under a budget it
+					// waits the server's named wait when that fits and is refused when not.
+					if (
+						replayBudget &&
+						!(await replayBudget.replayAfter(error, 0, options?.signal, options?.providerRetryWait))
+					) {
+						throw error;
+					}
 					attemptedReasoningEffortFallbacks.add(retryMarker);
 					requestReasoningEffortFallbacks.set(activeReasoningEffortFallbackKey, reasoningEffortFallback);
 					openaiStream = await createCompletionsStream(undefined, error);
@@ -1036,7 +1050,12 @@ const streamOpenAICompletionsOnce = (
 					!disableStrictTools &&
 					isCompiledGrammarTooLargeStrictError(error, capturedErrorResponse)
 				) {
-					if (!admitsReplay(replayBudget, 0)) throw error;
+					if (
+						replayBudget &&
+						!(await replayBudget.replayAfter(error, 0, options?.signal, options?.providerRetryWait))
+					) {
+						throw error;
+					}
 					disableStrictToolsForScope(providerSessionState, strictToolsScope);
 					disableStrictTools = true;
 					openaiStream = await createCompletionsStream("none", error);
@@ -1050,7 +1069,12 @@ const streamOpenAICompletionsOnce = (
 					) {
 						throw error;
 					}
-					if (!admitsReplay(replayBudget, 0)) throw error;
+					if (
+						replayBudget &&
+						!(await replayBudget.replayAfter(error, 0, options?.signal, options?.providerRetryWait))
+					) {
+						throw error;
+					}
 					// Remember the rejection for the rest of the session so every
 					// subsequent request doesn't pay a strict-400 + retry round-trip.
 					disableStrictToolsForScope(providerSessionState, strictToolsScope);
@@ -1862,7 +1886,7 @@ const streamOpenAICompletionsOnce = (
 				finishOpenBlocksOnError();
 			} catch {}
 			const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
-			const result = await AIError.finalize(error, {
+			const result = await AIError.finalize(restoreReplaced(error), {
 				api: model.api,
 				provider: model.provider,
 				abortTracker,

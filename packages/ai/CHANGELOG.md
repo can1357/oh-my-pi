@@ -5,7 +5,7 @@
 ### Added
 
 - Added `waitForSibling` to `RotateCredentialOptions`; set it to `false` to skip the short sibling-unblock wait in `limits.rotate()` while still blocking the failed credential ([#17439](https://github.com/can1357/oh-my-pi/pull/17439) by [@wolfiesch](https://github.com/wolfiesch))
-- Added `StreamOptions.replayBudgetMs`, a wall-clock budget from the start of a streaming call for every request it sends after its first (backoff retries, pre-response HTTP retries, transport and empty-response retries, endpoint switches, stored-result read-backs, corrected resends), checked again immediately before each request is sent; a wait that would end past it, the longest wait the server named included, ends the call at once, and `AssistantMessage.replayBudgetExhausted` reports that the budget stopped it
+- Added `StreamOptions.replayBudgetMs`, a wall-clock budget from the start of a streaming call for every replay it makes after a failure (backoff retries, pre-response HTTP retries, transport re-sends and reconnects, empty-response retries, thinking-loop re-samples, retries with another credential, endpoint switches, fresh GitLab Duo workflows, stored-result read-backs, corrected resends), shared by every call nested in it. A replay must be admitted, its wait is raced against the deadline and the caller's signal, and its request is checked again when it is handed to the transport. A wait that would end past the budget, the longest wait the server named included, ends the call at once, and `AssistantMessage.replayBudgetExhausted` reports that the budget stopped it
 
 ### Changed
 

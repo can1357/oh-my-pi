@@ -545,30 +545,40 @@ export interface StreamOptions {
 	maxRetryDelayMs?: number;
 	/**
 	 * Wall-clock budget, in milliseconds from the start of this call, for every
-	 * request the call sends after its first: a backoff retry, a pre-response
-	 * HTTP retry, a transport re-send, an empty-response retry, a switch to an
-	 * alternate endpoint, a read-back of a stored result, and a resend that
-	 * corrects a rejected request (an uncompressed body, another client
-	 * identity, a dropped field, a rebuilt chain). A further request is admitted
-	 * only when it, wait included, would begin inside the budget, and is asked
-	 * again immediately before it is sent, after its wait and its preparation, so
-	 * a wait that wakes late cannot carry it past the deadline. A refused request
-	 * is never sent: the provider returns the failure in hand with
+	 * replay the call makes after a failure: a backoff retry, a pre-response
+	 * HTTP retry, a transport re-send or reconnect, an empty-response retry, a
+	 * thinking-loop re-sample, a retry with another credential, a switch to an
+	 * alternate endpoint, a fresh GitLab Duo workflow, a read-back of a stored
+	 * result, and a resend that corrects a rejected request (an uncompressed
+	 * body, another client identity, a dropped field, a rebuilt chain). One
+	 * budget governs the call and every call nested in it.
+	 *
+	 * A replay passes three checks: it is admitted only when it, wait included,
+	 * would begin inside the budget; its wait is raced against the deadline and
+	 * against `signal`, so a wait hook that never settles cannot hold the call;
+	 * and its request is checked once more at the moment the library hands it to
+	 * the transport — the call into `fetch`, the WebSocket write, the HTTP/2
+	 * stream open — after every preparation hook, signature and diagnostic
+	 * observer. A refused replay is never handed off: the provider returns the
+	 * failure it would have replaced, with
 	 * {@link AssistantMessage.replayBudgetExhausted} set. A refusal latches for
-	 * the rest of the call, so a rung with a shorter wait cannot resend what a
-	 * longer wait was refused for. A failure the provider would not have
-	 * replayed anyway is never marked.
+	 * the rest of the call. A failure the provider would not have replayed is
+	 * never marked. What the transport does after the handoff — a custom `fetch`
+	 * that queues the request, a socket that buffers it — is outside the
+	 * library's control, and so outside this guarantee.
 	 *
 	 * A server's wait is never shortened to fit, because retrying sooner than
 	 * the server asked is a guaranteed failure: a requested wait that would end
 	 * past the budget ends the call at once rather than sleeping into it, and
 	 * the server's hint stays on the returned error for the caller. The wait is
-	 * the longest one the server named, across its retry headers and its error
-	 * body, at every layer that would replay.
+	 * the longest one the server named, across every retry header and every
+	 * hint in the error body, whatever shorter or malformed hints sit beside it.
 	 *
-	 * The request in flight is never cut short. `0` (and any negative or `NaN`
-	 * value) refuses every further request. Unset or `Infinity` keeps each
-	 * provider's own retry ceiling and reads no clock.
+	 * Requests inside one attempt that is already on the wire (a token fetch, a
+	 * streaming append) are not replays and are not checked. The request in
+	 * flight is never cut short. `0` (and any negative or `NaN` value) refuses
+	 * every replay. Unset or `Infinity` keeps each provider's own retry ceiling
+	 * and reads no clock.
 	 */
 	replayBudgetMs?: number;
 	/**

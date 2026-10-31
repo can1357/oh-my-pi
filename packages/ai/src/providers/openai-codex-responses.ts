@@ -17,6 +17,7 @@ import {
 	asRecord,
 	cloneJsonTree,
 	fetchWithRetry,
+	findRetryRefusal,
 	getInstallId,
 	logger,
 	readSseJson,
@@ -73,7 +74,7 @@ import {
 import { getProxyForUrl } from "../utils/proxy";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
-import { admitsReplay, longestServerWaitMs, ReplayBudget } from "../utils/replay-budget";
+import { admitsReplay, gateFetch, ReplayBudget, type ReplayArm, restoreReplaced } from "../utils/replay-budget";
 import { getHeadersFromError, getRetryAfterMsFromHeaders, type HeadersLike } from "../utils/retry-after";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { notifyRawSseEvent } from "../utils/sse-debug";
@@ -1638,17 +1639,24 @@ async function openInitialCodexEventStream(
 						activated: activateFallback,
 						fatal: isFatal,
 					});
+				const replayBudget = requestContext.replayBudget;
 				if (!activateFallback) {
 					const delayMs = CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, websocketRetries + 1);
-					if (!admitsReplay(requestContext.replayBudget, delayMs)) throw error;
+					if (!admitsReplay(replayBudget, delayMs)) throw error;
 					websocketRetries += 1;
-					await scheduler.wait(delayMs, {
-						signal: requestSetup.requestSignal,
-					});
+					if (replayBudget) {
+						// Raced against the deadline; the reconnect is checked again at handoff.
+						if (!(await replayBudget.wait(delayMs, requestSetup.requestSignal, undefined))) throw error;
+						replayBudget.arm(error);
+					} else {
+						await scheduler.wait(delayMs, {
+							signal: requestSetup.requestSignal,
+						});
+					}
 					continue;
 				}
 				// Falling back sends the request again over SSE.
-				if (!admitsReplay(requestContext.replayBudget, 0)) throw error;
+				if (replayBudget && !(await replayBudget.replayAfter(error, 0, options?.signal, undefined))) throw error;
 				break;
 			}
 		}
@@ -1666,8 +1674,11 @@ async function openInitialCodexEventStream(
 			lastWebsocketError,
 		);
 	} catch (error) {
+		// A request the budget refused at handoff stands for the failure it replaced.
+		if (findRetryRefusal(error)) throw restoreReplaced(error);
 		if (!dropRejectedCodexAccessPrograms(transformedBody, model, requestContext.accountId, error)) throw error;
-		if (!admitsReplay(requestContext.replayBudget, 0)) throw error;
+		const replayBudget = requestContext.replayBudget;
+		if (replayBudget && !(await replayBudget.replayAfter(error, 0, options?.signal, undefined))) throw error;
 		return openCodexSseTransport(
 			model,
 			requestContext,
@@ -1707,6 +1718,7 @@ export async function openCodexCompactionEventStream(
 	try {
 		requestContext = createCodexRequestContext(model, toCodexRequestBody(body), options, {
 			isolateCompactionTransport: false,
+			replayBudget: ReplayBudget.forCall(options),
 		});
 		initial = await openInitialCodexEventStream(model, options, requestSetup, requestContext);
 	} catch (error) {
@@ -1751,7 +1763,20 @@ async function* streamCodexCompactionEvents(
 				}
 				const state = requestContext.websocketState;
 				if (state && !(error instanceof CodexWebSocketBusyError)) recordCodexWebSocketFailure(state, true);
-				const fallback = await openCodexSseTransport(model, requestContext, requestSetup, options, state);
+				// The SSE replay is a replay of the request: under a budget it must fit.
+				const replayBudget = requestContext.replayBudget;
+				if (replayBudget && !(await replayBudget.replayAfter(error, 0, options.signal, undefined))) throw error;
+				const fallback = await openCodexSseTransport(
+					model,
+					requestContext,
+					requestSetup,
+					options,
+					state,
+					undefined,
+					error,
+				).catch(sseError => {
+					throw restoreReplaced(sseError);
+				});
 				if (state) state.lastTransport = fallback.transport;
 				yield* drainCodexCompactionEvents(fallback.eventStream, requestContext);
 				completed = true;
@@ -1767,7 +1792,22 @@ async function* streamCodexCompactionEvents(
 					createCodexProviderStreamError(failure),
 				)
 			) {
-				const replay = await openCodexSseTransport(model, requestContext, requestSetup, options, websocketState);
+				const rejection = createCodexProviderStreamError(failure);
+				const replayBudget = requestContext.replayBudget;
+				if (replayBudget && !(await replayBudget.replayAfter(rejection, 0, options.signal, undefined))) {
+					throw rejection;
+				}
+				const replay = await openCodexSseTransport(
+					model,
+					requestContext,
+					requestSetup,
+					options,
+					websocketState,
+					undefined,
+					rejection,
+				).catch(sseError => {
+					throw restoreReplaced(sseError);
+				});
 				if (websocketState) websocketState.lastTransport = replay.transport;
 				yield* drainCodexCompactionEvents(replay.eventStream, requestContext);
 				completed = true;
@@ -1832,6 +1872,14 @@ async function openCodexWebSocketTransport(
 	requestBodyForState: RequestBody;
 	transport: CodexTransport;
 }> {
+	const replayBudget = requestContext.replayBudget;
+	// A replay names the failure it replaces, so a refusal at the handshake or
+	// at the write below hands that failure back.
+	let replayArm: ReplayArm | undefined;
+	if (replayOf !== undefined && replayBudget) {
+		if (!replayBudget.admits(0)) throw replayOf;
+		replayArm = replayBudget.arm(replayOf);
+	}
 	const canAppendBeforeRequest = websocketState.canAppend === true;
 	let chainedBody = buildCodexChainedRequestBody(requestContext.transformedBody, websocketState);
 	const websocketHeaders = createCodexHeaders(
@@ -1860,6 +1908,7 @@ async function openCodexWebSocketTransport(
 	const onOwned = () => {
 		if (websocketState.acceptedSteering === steered) websocketState.acceptedSteering = undefined;
 	};
+	replayBudget?.connecting();
 	let websocketConnection = await getOrCreateCodexWebSocketConnection(
 		websocketState,
 		requestContext.turnState,
@@ -1884,6 +1933,8 @@ async function openCodexWebSocketTransport(
 		if (plan.kind === "attach") {
 			recordCodexTurnRequestDiagnostics(websocketState, chainedBody, "websocket", canAppendBeforeRequest);
 			requestContext.rawRequestDump.body = chainedBody;
+			// An attach sends nothing: no request spends the replay this call armed.
+			if (replayArm) replayBudget?.disarm(replayArm);
 			return {
 				eventStream: websocketConnection.streamRequest(
 					{ attachSteerIds: liveSteers.map(steer => steer.id) },
@@ -1905,6 +1956,7 @@ async function openCodexWebSocketTransport(
 			websocketState.connection = undefined;
 			resetCodexWebSocketAppendState(websocketState);
 			chainedBody = requestContext.transformedBody;
+			replayBudget?.connecting();
 			websocketConnection = await getOrCreateCodexWebSocketConnection(
 				websocketState,
 				requestContext.turnState,
@@ -1964,9 +2016,11 @@ async function openCodexWebSocketTransport(
 			retry,
 			retryBudget: CODEX_WEBSOCKET_RETRY_BUDGET,
 		});
-	if (replayOf !== undefined && !admitsReplay(requestContext.replayBudget, 0)) throw replayOf;
+	if (replayOf !== undefined && !admitsReplay(replayBudget, 0)) throw replayOf;
 	const eventStream = websocketConnection.streamRequest(
-		{ send: websocketRequest },
+		// The budget's handoff check runs inside the generator, after its debug
+		// work and the outgoing diagnostic observer, immediately before the write.
+		{ send: websocketRequest, beforeSend: replayBudget?.handoff },
 		timeouts,
 		requestSetup.requestSignal,
 		onSseEvent,
@@ -2038,8 +2092,12 @@ async function openCodexSseTransport(
 				requestSetup.firstEventTimeoutMs,
 				options?.codexSseMaxAttempts,
 				event => options?.onSseEvent?.(event, model),
-				wrapFetchForRequestCompression(options?.fetch ?? fetch, model, requestContext.replayBudget?.admits),
-				requestContext.replayBudget?.admits,
+				wrapFetchForRequestCompression(
+					gateFetch(requestContext.replayBudget, options?.fetch ?? fetch),
+					model,
+					requestContext.replayBudget?.admits,
+				),
+				requestContext.replayBudget,
 				replayOf,
 			),
 		);
@@ -2167,7 +2225,12 @@ function shouldPreserveCodexWebSocketAppendState(context: CodexStreamFailureCont
 	);
 }
 
-async function handleCodexStreamFailure(context: CodexStreamFailureContext, error: unknown): Promise<AssistantMessage> {
+async function handleCodexStreamFailure(
+	context: CodexStreamFailureContext,
+	caught: unknown,
+): Promise<AssistantMessage> {
+	// A request the budget refused at handoff stands for the failure it replaced.
+	const error = restoreReplaced(caught);
 	const { output } = context;
 	if (context.requestContext.websocketState && !shouldPreserveCodexWebSocketAppendState(context, error)) {
 		resetCodexWebSocketAppendState(context.requestContext.websocketState);
@@ -2827,13 +2890,17 @@ class CodexStreamProcessor {
 	}
 
 	async #recoverStreamError(error: unknown): Promise<boolean> {
+		// A request the budget refused at handoff is not recovered: the failure it
+		// replaced stands (`handleCodexStreamFailure` restores it).
+		if (findRetryRefusal(error)) return false;
 		this.#replayOf = error;
+		const replayBudget = this.requestContext.replayBudget;
 		if (
 			error instanceof CodexSteerCommitError &&
 			this.runtime.websocketState &&
 			this.output.content.length === 0 &&
 			!this.options?.signal?.aborted &&
-			admitsReplay(this.requestContext.replayBudget, 0)
+			(!replayBudget || (await replayBudget.replayAfter(error, 0, this.options?.signal, undefined)))
 		) {
 			// No successor is coming: send this request explicitly, steering
 			// input included as ordinary history.
@@ -2883,15 +2950,15 @@ class CodexStreamProcessor {
 		// Drop the half-built degenerate tool call whether or not we retry, so it
 		// never reaches the caller's message.
 		this.#dropTrailingDegenerateToolCall();
+		const replayBudget = this.requestContext.replayBudget;
+		const ownDelayMs = CODEX_WHITESPACE_LOOP_RETRY_DELAY_MS * (this.runtime.whitespaceLoopRetries + 1);
+		const retryDelayMs = replayBudget ? replayBudget.delayFor(error, ownDelayMs) : ownDelayMs;
 		if (
 			this.runtime.whitespaceLoopRetries >= CODEX_WHITESPACE_LOOP_RETRY_LIMIT ||
 			!this.runtime.canSafelyReplayWebsocketOverSse ||
 			this.output.content.some(block => block.type !== "thinking") ||
 			this.options?.signal?.aborted ||
-			!admitsReplay(
-				this.requestContext.replayBudget,
-				CODEX_WHITESPACE_LOOP_RETRY_DELAY_MS * (this.runtime.whitespaceLoopRetries + 1),
-			)
+			!admitsReplay(replayBudget, retryDelayMs)
 		) {
 			return false;
 		}
@@ -2915,9 +2982,14 @@ class CodexStreamProcessor {
 		this.runtime.whitespaceToolCallArgumentsDelta = undefined;
 		resetOutputState(this.output);
 		this.firstTokenTime = undefined;
-		await scheduler.wait(CODEX_WHITESPACE_LOOP_RETRY_DELAY_MS * this.runtime.whitespaceLoopRetries, {
-			signal: this.requestSetup.requestSignal,
-		});
+		if (replayBudget) {
+			// Raced against the deadline; the replay is checked again at handoff.
+			if (!(await replayBudget.wait(retryDelayMs, this.requestSetup.requestSignal, undefined))) return false;
+		} else {
+			await scheduler.wait(CODEX_WHITESPACE_LOOP_RETRY_DELAY_MS * this.runtime.whitespaceLoopRetries, {
+				signal: this.requestSetup.requestSignal,
+			});
+		}
 
 		if (this.runtime.transport === "websocket" && websocketState) {
 			await this.#reopenWebSocketStream(websocketState);
@@ -2976,8 +3048,11 @@ class CodexStreamProcessor {
 				retry: this.runtime.websocketStreamRetries,
 			});
 
+		const replayBudget = this.requestContext.replayBudget;
 		if (this.output.content.length > 0) {
-			if (!admitsReplay(this.requestContext.replayBudget, 0)) return false;
+			if (replayBudget && !(await replayBudget.replayAfter(error, 0, this.options?.signal, undefined))) {
+				return false;
+			}
 			// Content already emitted to the caller — cannot safely continue on a new WS.
 			// Reset and replay the full request over SSE.
 			this.runtime.resetAccumulators();
@@ -2996,17 +3071,24 @@ class CodexStreamProcessor {
 		this.runtime.resetAccumulators();
 		this.firstTokenTime = undefined;
 		if (this.runtime.websocketStreamRetries >= CODEX_WEBSOCKET_RETRY_BUDGET) {
-			if (!admitsReplay(this.requestContext.replayBudget, 0)) return false;
+			if (replayBudget && !(await replayBudget.replayAfter(error, 0, this.options?.signal, undefined))) {
+				return false;
+			}
 			recordCodexWebSocketFailure(websocketState, true);
 			await this.#reopenSseStream(websocketState);
 			return true;
 		}
-		const reconnectDelayMs = CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, this.runtime.websocketStreamRetries + 1);
-		if (!admitsReplay(this.requestContext.replayBudget, reconnectDelayMs)) return false;
+		const ownReconnectDelayMs = CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, this.runtime.websocketStreamRetries + 1);
+		const reconnectDelayMs = replayBudget ? replayBudget.delayFor(error, ownReconnectDelayMs) : ownReconnectDelayMs;
+		if (!admitsReplay(replayBudget, reconnectDelayMs)) return false;
 		this.runtime.websocketStreamRetries += 1;
-		await scheduler.wait(reconnectDelayMs, {
-			signal: this.requestSetup.requestSignal,
-		});
+		if (replayBudget) {
+			if (!(await replayBudget.wait(reconnectDelayMs, this.requestSetup.requestSignal, undefined))) return false;
+		} else {
+			await scheduler.wait(reconnectDelayMs, {
+				signal: this.requestSetup.requestSignal,
+			});
+		}
 		await this.#reopenWebSocketStream(websocketState);
 		return true;
 	}
@@ -3026,7 +3108,10 @@ class CodexStreamProcessor {
 				this.requestContext.accountId,
 				error,
 			) ||
-			!admitsReplay(this.requestContext.replayBudget, 0)
+			!(
+				!this.requestContext.replayBudget ||
+				(await this.requestContext.replayBudget.replayAfter(error, 0, this.options?.signal, undefined))
+			)
 		) {
 			return false;
 		}
@@ -3064,7 +3149,10 @@ class CodexStreamProcessor {
 			this.output.content.length > 0 ||
 			this.options?.signal?.aborted ||
 			this.runtime.providerRetryAttempt >= CODEX_MAX_RETRIES ||
-			!admitsReplay(this.requestContext.replayBudget, 0)
+			!(
+				!this.requestContext.replayBudget ||
+				(await this.requestContext.replayBudget.replayAfter(error, 0, this.options?.signal, undefined))
+			)
 		) {
 			return false;
 		}
@@ -3099,7 +3187,8 @@ class CodexStreamProcessor {
 			// SSE never sends previous_response_id; let other recovery handle it.
 			return false;
 		}
-		if (!admitsReplay(this.requestContext.replayBudget, 0)) return false;
+		const replayBudget = this.requestContext.replayBudget;
+		if (replayBudget && !(await replayBudget.replayAfter(error, 0, this.options?.signal, undefined))) return false;
 
 		this.runtime.providerRetryAttempt += 1;
 		resetCodexWebSocketAppendState(websocketState);
@@ -3129,10 +3218,14 @@ class CodexStreamProcessor {
 		if (!canReplay) return false;
 
 		const state = websocketState;
+		const replayBudget = this.requestContext.replayBudget;
 		if (error instanceof CodexWebSocketBusyError) {
 			// Another request claimed the shared socket first. The socket is fine and
 			// belongs to that request: send this one over SSE without closing it or
-			// disabling websockets for the session.
+			// disabling websockets for the session. Still a replay of the request.
+			if (replayBudget && !(await replayBudget.replayAfter(error, 0, this.options?.signal, undefined))) {
+				return false;
+			}
 			this.runtime.resetAccumulators();
 			resetOutputState(this.output);
 			this.firstTokenTime = undefined;
@@ -3159,10 +3252,11 @@ class CodexStreamProcessor {
 				fatal: isFatal,
 				replayedBufferedOutput: replayingBufferedOutputOverSse,
 			});
-		const replayDelayMs = activateFallback
+		const ownReplayDelayMs = activateFallback
 			? 0
 			: CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, this.runtime.websocketStreamRetries + 1);
-		if (!admitsReplay(this.requestContext.replayBudget, replayDelayMs)) return false;
+		const replayDelayMs = replayBudget ? replayBudget.delayFor(error, ownReplayDelayMs) : ownReplayDelayMs;
+		if (!admitsReplay(replayBudget, replayDelayMs)) return false;
 
 		if (!activateFallback) {
 			this.runtime.websocketStreamRetries += 1;
@@ -3171,13 +3265,21 @@ class CodexStreamProcessor {
 			// web_search_call) may already have accumulated.
 			this.runtime.resetAccumulators();
 			this.firstTokenTime = undefined;
-			await scheduler.wait(replayDelayMs, {
-				signal: this.requestSetup.requestSignal,
-			});
+			if (replayBudget) {
+				if (!(await replayBudget.wait(replayDelayMs, this.requestSetup.requestSignal, undefined))) return false;
+			} else {
+				await scheduler.wait(replayDelayMs, {
+					signal: this.requestSetup.requestSignal,
+				});
+			}
 			await this.#reopenWebSocketStream(state);
 			return true;
 		}
 
+		if (replayBudget && replayDelayMs > 0) {
+			// A fallback whose server named a wait still waits it, raced against the deadline.
+			if (!(await replayBudget.wait(replayDelayMs, this.requestSetup.requestSignal, undefined))) return false;
+		}
 		this.runtime.resetAccumulators();
 		resetOutputState(this.output);
 		this.firstTokenTime = undefined;
@@ -3232,9 +3334,9 @@ class CodexStreamProcessor {
 		);
 		// Under a replay budget the server's own wait counts too: retrying sooner
 		// than it asked is a guaranteed failure.
+		const replayBudget = this.requestContext.replayBudget;
 		const backoffMs = CODEX_RETRY_DELAY_MS * (this.runtime.providerRetryAttempt + 1);
-		const serverWaitMs = this.requestContext.replayBudget ? longestServerWaitMs(error) : undefined;
-		const retryDelayMs = serverWaitMs !== undefined && serverWaitMs > backoffMs ? serverWaitMs : backoffMs;
+		const retryDelayMs = replayBudget ? replayBudget.delayFor(error, backoffMs) : backoffMs;
 		if (
 			!retryable ||
 			hasVisibleAssistantContent(this.output) ||
@@ -3242,7 +3344,7 @@ class CodexStreamProcessor {
 			!this.runtime.canSafelyReplayWebsocketOverSse ||
 			this.runtime.providerRetryAttempt >= CODEX_MAX_RETRIES ||
 			this.options?.signal?.aborted ||
-			!admitsReplay(this.requestContext.replayBudget, retryDelayMs)
+			!admitsReplay(replayBudget, retryDelayMs)
 		) {
 			return false;
 		}
@@ -3273,9 +3375,14 @@ class CodexStreamProcessor {
 		if (this.requestSetup.requestAbortController.signal.aborted) {
 			this.requestSetup = createRequestSetup(this.options);
 		}
-		await scheduler.wait(retryDelayMs, {
-			signal: this.requestSetup.requestSignal,
-		});
+		if (replayBudget) {
+			// Raced against the deadline; the replay is checked again at handoff.
+			if (!(await replayBudget.wait(retryDelayMs, this.requestSetup.requestSignal, undefined))) return false;
+		} else {
+			await scheduler.wait(retryDelayMs, {
+				signal: this.requestSetup.requestSignal,
+			});
+		}
 
 		if (this.runtime.transport === "websocket" && websocketState) {
 			await this.#reopenWebSocketStream(websocketState);
@@ -3366,7 +3473,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 
 	(async () => {
 		const startTime = performance.now();
-		const replayBudget = ReplayBudget.from(options?.replayBudgetMs);
+		const replayBudget = ReplayBudget.forCall(options);
 		const output: AssistantMessage = {
 			role: "assistant",
 			content: [],
@@ -3905,7 +4012,8 @@ interface CodexWebSocketRequestTimeouts {
 
 /** What {@link CodexWebSocketConnection.streamRequest} puts on the wire before reading a response. */
 type CodexWebSocketExchange =
-	| { send: Record<string, unknown> }
+	/** `beforeSend` runs immediately before the frame is written, after debug work and diagnostics. */
+	| { send: Record<string, unknown>; beforeSend?: () => void }
 	/** Read the successor the server creates from accepted steering; nothing is sent. */
 	| { attachSteerIds: readonly string[] };
 
@@ -4236,6 +4344,7 @@ class CodexWebSocketConnection {
 					}
 					throw new CodexWebSocketTransportError(`websocket connection is unavailable`);
 				}
+				exchange.beforeSend?.();
 				try {
 					socket.send(requestPayload);
 				} catch (error) {
@@ -4718,8 +4827,9 @@ async function openCodexSseEventStream(
 	codexSseMaxAttempts: number | undefined,
 	onSseEvent?: OpenAICodexResponsesOptions["onSseEvent"],
 	fetchOverride?: FetchImpl,
-	retryGate?: (delayMs: number) => boolean,
-	/** The failure this request replaces; returned as-is when the gate refuses it at send time. */
+	/** The call's replay budget: gates transport retries and every handoff of this request. */
+	replayBudget?: ReplayBudget,
+	/** The failure this request replaces; returned as-is when the budget is already spent. */
 	replayOf?: unknown,
 ): Promise<AsyncGenerator<Record<string, unknown>>> {
 	const headers = createCodexHeaders(
@@ -4770,8 +4880,11 @@ async function openCodexSseEventStream(
 		});
 
 	// A replay was admitted before its wait and its rebuilt request; the clock
-	// moved since, so the gate is asked again right before it goes out.
-	if (replayOf !== undefined && retryGate && !retryGate(0)) throw replayOf;
+	// moved since, so the budget is asked again here and once more at handoff.
+	if (replayOf !== undefined && replayBudget) {
+		if (!replayBudget.admits(0)) throw replayOf;
+		replayBudget.arm(replayOf);
+	}
 	let response: Response;
 	try {
 		response = await fetchWithRetry(url, {
@@ -4791,11 +4904,13 @@ async function openCodexSseEventStream(
 			defaultDelayMs: attempt => CODEX_RETRY_DELAY_MS * (attempt + 1),
 			maxDelayMs: CODEX_RATE_LIMIT_BUDGET_MS,
 			fetch: fetchAttempt,
-			retryGate,
+			retryGate: replayBudget?.admits,
 			timeout: false,
 		});
 	} catch (error) {
 		clearPreResponseTimeout?.();
+		// A refusal at handoff carries the failure it replaced; keep it unwrapped.
+		if (findRetryRefusal(error)) throw error;
 		// Transport rejection after the retry budget: name the host and the cause
 		// instead of surfacing the runtime's bare `getaddrinfo …` text.
 		throw AIError.networkFailureError(error, url);

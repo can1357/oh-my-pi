@@ -14,7 +14,7 @@ import {
 	getAntigravityModelWireProfile,
 	getGeminiCliHeaders,
 } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
-import { extractHttpStatusFromError, fetchWithRetry, readSseJson } from "@oh-my-pi/pi-utils";
+import { extractHttpStatusFromError, fetchWithRetry, findRetryRefusal, readSseJson } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { oauthAccountKey } from "../auth/types";
 import type {
@@ -35,7 +35,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { extractGoogleValidationUrl, formatGoogleValidationRequiredMessage } from "../utils/google-validation";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
-import { admitsReplay, longestServerWaitMs, ReplayBudget } from "../utils/replay-budget";
+import { admitsReplay, gateFetch, gateOptionalFetch, ReplayBudget, restoreReplaced } from "../utils/replay-budget";
 // Refresh is the sole responsibility of AuthStorage (broker-aware, single-flighted);
 // the stream provider trusts the access token threaded through `options.apiKey`.
 import { normalizeSchemaForCCA } from "../utils/schema";
@@ -494,7 +494,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 
 	(async () => {
 		const startTime = performance.now();
-		const replayBudget = ReplayBudget.from(options?.replayBudgetMs);
+		const replayBudget = ReplayBudget.forCall(options);
 		let firstTokenTime: number | undefined;
 
 		const output: AssistantMessage = {
@@ -954,22 +954,11 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				);
 
 			// Under a replay budget the next endpoint is a replay like any other: it
-			// waits the wait the failing endpoint's server named, only if that fits
-			// the budget, and the budget is asked again right before it goes out.
-			// Without a budget the switch stays immediate.
-			const switchesEndpoint = async (failure: unknown): Promise<boolean> => {
-				if (!replayBudget) return true;
-				const waitMs = longestServerWaitMs(failure) ?? 0;
-				if (!replayBudget.admits(waitMs)) return false;
-				if (waitMs > 0) {
-					try {
-						await scheduler.wait(waitMs, { signal: options?.signal });
-					} catch {
-						throw new AIError.AbortError("Request was aborted");
-					}
-				}
-				return replayBudget.admits(0);
-			};
+			// waits the failing endpoint's longest named wait, only if that fits the
+			// budget, raced against the deadline, and its request is checked again at
+			// handoff. Called only under a budget; without one the switch is immediate.
+			const switchesEndpoint = (budget: ReplayBudget, failure: unknown): Promise<boolean> =>
+				budget.replayAfter(failure, 0, options?.signal, options?.providerRetryWait);
 			for (let i = 0; i < endpoints.length; i++) {
 				const endpoint = endpoints[i];
 				const isLastEndpoint = i === endpoints.length - 1;
@@ -991,7 +980,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							maxAttempts: isLastEndpoint ? MAX_RETRIES + 1 : 1,
 							defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
 							maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
-							fetch: options?.fetch,
+							fetch: gateOptionalFetch(replayBudget, options?.fetch),
 							retryGate: replayBudget?.admits,
 							timeout: false,
 						});
@@ -1016,7 +1005,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							response.status,
 							{ headers: response.headers },
 						);
-						if (transientElsewhere && (await switchesEndpoint(failure))) continue;
+						if (transientElsewhere && replayBudget && (await switchesEndpoint(replayBudget, failure))) continue;
 						throw failure;
 					}
 
@@ -1031,19 +1020,29 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						if (emptyAttempt > 0) {
 							const backoffMs = EMPTY_STREAM_BASE_DELAY_MS * 2 ** (emptyAttempt - 1);
 							if (!admitsReplay(replayBudget, backoffMs)) break;
-							try {
-								await scheduler.wait(backoffMs, { signal: options?.signal });
-							} catch {
-								throw new AIError.AbortError("Request was aborted");
+							if (replayBudget) {
+								// Raced against the deadline; the replay's request is checked
+								// again at handoff and, refused there, ends as the empty response.
+								if (!(await replayBudget.wait(backoffMs, options?.signal, options?.providerRetryWait))) break;
+								replayBudget.arm(
+									new AIError.ProviderResponseError("Cloud Code Assist API returned an empty response", {
+										provider: model.provider,
+										kind: "empty-body",
+									}),
+								);
+							} else {
+								try {
+									await scheduler.wait(backoffMs, { signal: options?.signal });
+								} catch {
+									throw new AIError.AbortError("Request was aborted");
+								}
 							}
-							// The wait took real time: the replay must still start inside the budget.
-							if (!admitsReplay(replayBudget, 0)) break;
 
 							if (!requestUrl) {
 								throw new AIError.ConfigurationError("Missing request URL");
 							}
 
-							currentResponse = await (options?.fetch ?? fetch)(requestUrl, {
+							currentResponse = await gateFetch(replayBudget, options?.fetch ?? fetch)(requestUrl, {
 								method: "POST",
 								headers: requestHeaders,
 								body: requestBodyJson,
@@ -1132,6 +1131,8 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					}
 					break;
 				} catch (error) {
+					// A request the budget refused at handoff stands for the failure it replaced.
+					if (findRetryRefusal(error)) throw restoreReplaced(error);
 					const status = extractHttpStatusFromError(error);
 					if (
 						!isLastEndpoint &&
@@ -1140,7 +1141,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							(status === undefined &&
 								!(error instanceof AIError.ProviderResponseError && error.kind === "output") &&
 								AIError.retriable(AIError.classify(error)))) &&
-						(await switchesEndpoint(error))
+						(!replayBudget || (await switchesEndpoint(replayBudget, error)))
 					) {
 						continue;
 					}
@@ -1160,7 +1161,11 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
-			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal, rawRequestDump });
+			const result = await AIError.finalize(restoreReplaced(error), {
+				api: model.api,
+				signal: options?.signal,
+				rawRequestDump,
+			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;

@@ -5,7 +5,8 @@
 ### Added
 
 - Added `isFileLockHeld`, which reports whether a file lock is held without acquiring it ([#17428](https://github.com/can1357/oh-my-pi/pull/17428) by [@andrebrait](https://github.com/andrebrait))
-- Added a `retryGate` option to `fetchWithRetry`: it receives each retry's wait and is asked again with `0` immediately before the retry is sent; returning `false` stops retrying and surfaces the current failure. While a gate is set, a response's wait is the longest one its headers or body name
+- Added a `retryGate` option to `fetchWithRetry`: it receives each retry's wait and is asked again with `0` immediately before the retry is sent; returning `false` stops retrying and surfaces the current failure. A retry the transport refuses at handoff with `RetryRefusedError` returns that failure too. While a gate is set, a response's wait is the longest one its headers or body name
+- Added `longestRetryHint`, the longest wait a response names across every retry header and every hint in its body, and `RetryRefusedError` / `findRetryRefusal` for a transport that refuses a retry at handoff
 
 ## [18.14.0] - 2026-10-29
 
