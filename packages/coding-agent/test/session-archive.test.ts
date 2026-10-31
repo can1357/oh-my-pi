@@ -3777,7 +3777,9 @@ test("a staging record that cannot be read stops the restore of the artifact tre
 
 	const restored = await restoreArchivedSession(archiveFile, root);
 
-	expect(restored.notRestored.join("\n")).toContain("could not be read");
+	const told = restored.notRestored.join("\n");
+	expect(told).toContain("does not hold a staging record");
+	expect(told).toContain(`move it out of ${stagingLedgerDir(root)}, and run the same command again`);
 	expect(await Bun.file(restoreRecordPath(archiveFile)).exists()).toBe(true);
 	expect(await Bun.file(path.join(liveArtifacts, "a.log")).exists()).toBe(false);
 });
@@ -5453,4 +5455,45 @@ test("a gc run still takes over a gc.lock its dead holder left", async () => {
 
 	expect(result.archive?.archived).toBe(1);
 	expect(await fs.lstat(lock).catch(() => undefined)).toBeUndefined();
+});
+
+test("a staging ground never writes its record at the record's own name, so a kill cannot leave one cut short", async () => {
+	const ledger = stagingLedgerDir(root);
+	const target = path.join(root, "staged-here", "example.log");
+	await fs.mkdir(path.dirname(target), { recursive: true });
+	// Every name in the ledger opened for writing.
+	const written: string[] = [];
+	const realOpen = fs.open;
+	spyOn(fs, "open").mockImplementation((async (at: string, flags?: unknown, ...rest: unknown[]) => {
+		const writing = typeof flags === "string" ? /[wa+]/.test(flags) : typeof flags === "number" && (flags & 3) !== 0;
+		if (writing && path.dirname(String(at)) === ledger) written.push(path.basename(String(at)));
+		return await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(at, flags, ...rest);
+	}) as typeof fs.open);
+
+	const ground = await mintStagingGround(target, ledger);
+	await ground.handle.close();
+
+	expect(written.length).toBeGreaterThan(0);
+	expect(written.filter(name => !name.endsWith(".part"))).toEqual([]);
+	expect(JSON.parse(await Bun.file(ground.record).text())).toMatchObject({ dir: ground.dir, file: ground.file });
+	expect((await fs.readdir(ledger)).filter(name => name.endsWith(".part"))).toEqual([]);
+});
+
+test("an archive run names a ledger record that does not parse, with the way out, and runs once it is moved", async () => {
+	const ledger = stagingLedgerDir(root);
+	await fs.mkdir(ledger, { recursive: true, mode: 0o700 });
+	// What an earlier version left when killed while writing a record.
+	const record = path.join(ledger, "1234567890123456.json");
+	await Bun.write(record, "");
+
+	const stopped = await archiveOnly();
+
+	const told = stopped.archive?.errors.join("\n") ?? "";
+	expect(told).toContain(`${record} does not hold a staging record`);
+	expect(told).toContain(`move it out of ${ledger}, and run the same command again`);
+	// The way out, as written.
+	await fs.rename(record, path.join(root, "moved-out-of-the-ledger"));
+	const again = await archiveOnly();
+	expect(again.archive?.errors).toEqual([]);
+	expect(again.archive?.archived).toBe(1);
 });
