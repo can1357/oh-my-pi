@@ -238,7 +238,9 @@ describe("python prelude", () => {
 		// except the `null` it sends for a token it does not have.
 		for (const args of sent) {
 			const present = Object.fromEntries(Object.entries(args).filter(([, value]) => value !== null));
-			expect(artifactRequestOf(args)).toEqual(present);
+			// Compared as a value: what arrived is the question, not what its type says.
+			const parsed: unknown = artifactRequestOf(args);
+			expect(parsed).toEqual(present);
 		}
 	});
 
