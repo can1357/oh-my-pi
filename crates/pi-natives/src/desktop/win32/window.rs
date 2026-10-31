@@ -40,7 +40,7 @@ use super::{
 		control,
 		error::{CoreResult, DesktopError},
 	},
-	delivery::{is_chromium_class, is_wpf_class},
+	delivery::{is_chromium_class, uia_takes_foreground},
 };
 
 /// Top-level classes that host XAML/UWP/WinUI content.
@@ -474,7 +474,7 @@ pub(super) fn wait_for_foreground(target: HWND, timeout: Duration) -> CoreResult
 pub(super) fn ensure_pattern_safe(root: HWND) -> CoreResult<()> {
 	if !owns_foreground(root)
 		&& (is_xaml_host(root)
-			|| with_class_name(root, |class| is_chromium_class(class) || is_wpf_class(class))
+			|| with_class_name(root, uia_takes_foreground)
 			|| has_chromium_descendant(root))
 	{
 		return Err(DesktopError::background_unavailable(format!(

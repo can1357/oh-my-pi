@@ -252,7 +252,7 @@ mod background {
 				SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK,
 				WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP,
 				WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_RBUTTONDBLCLK,
-				WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+				WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WindowFromPoint,
 			},
 		},
 	};
@@ -265,8 +265,9 @@ mod background {
 	use crate::desktop::win32::{
 		ax::Win32Ax,
 		delivery::{
-			EventKind, TargetTraits, TextUnit, is_chromium_class, non_client_drag_region,
-			posts_double_click, text_input_unsupported, text_units, would_be_silently_dropped,
+			EventKind, TargetTraits, TextUnit, is_chromium_class, is_winforms_button_class,
+			non_client_drag_region, posts_double_click, text_input_unsupported, text_units,
+			would_be_silently_dropped,
 		},
 		window,
 	};
@@ -319,13 +320,29 @@ mod background {
 		})
 	}
 
-	fn drop_reason(root: HWND, class: &str, kind: EventKind) -> Option<&'static str> {
+	/// Why posted `kind` input to `hwnd` would be dropped. `point` is a pointer
+	/// event's physical screen point; `None` for keys and window-level checks.
+	fn drop_reason(
+		hwnd: HWND,
+		class: &str,
+		kind: EventKind,
+		point: Option<POINT>,
+		ax: Option<&mut Win32Ax>,
+	) -> Option<&'static str> {
+		// SAFETY: WindowFromPoint takes a scalar point.
+		let covered = point.is_some_and(|point| unsafe { WindowFromPoint(point) } != hwnd);
+		let radio_button = covered
+			&& matches!(kind, EventKind::MouseClick)
+			&& is_winforms_button_class(class)
+			&& ax.is_some_and(|ax| ax.is_radio_button(hwnd));
 		would_be_silently_dropped(
 			TargetTraits {
 				class,
-				chromium_descendant: window::has_chromium_descendant(root),
-				foreground: window::owns_foreground(root),
-				xaml_host: window::is_xaml_host(root),
+				chromium_descendant: window::has_chromium_descendant(hwnd),
+				foreground: window::owns_foreground(hwnd),
+				xaml_host: window::is_xaml_host(hwnd),
+				covered,
+				radio_button,
 			},
 			kind,
 		)
@@ -348,10 +365,16 @@ mod background {
 		))
 	}
 
-	fn ensure_delivery(id: &str, root: HWND, kind: EventKind) -> CoreResult<()> {
-		ensure_integrity(id, root)?;
-		let class = window::class_name(root);
-		drop_reason(root, &class, kind)
+	fn ensure_delivery(
+		id: &str,
+		hwnd: HWND,
+		kind: EventKind,
+		point: Option<POINT>,
+		ax: Option<&mut Win32Ax>,
+	) -> CoreResult<()> {
+		ensure_integrity(id, hwnd)?;
+		let class = window::class_name(hwnd);
+		drop_reason(hwnd, &class, kind, point, ax)
 			.map_or(Ok(()), |reason| Err(refusal(id, &class, kind, reason)))
 	}
 
@@ -460,7 +483,7 @@ mod background {
 			PointerEvent::Scroll { .. } => EventKind::MouseScroll,
 		};
 		let class = window::class_name(root);
-		if let Some(reason) = drop_reason(root, &class, kind) {
+		if let Some(reason) = drop_reason(root, &class, kind, None, None) {
 			if let PointerEvent::Click { x, y, button: MouseButton::Left, count: 1, modifiers } = event
 				&& modifiers == Modifiers::default()
 				&& !is_chromium_class(&class)
@@ -475,7 +498,10 @@ mod background {
 		match event {
 			PointerEvent::Click { x, y, button, count, modifiers } => {
 				let (target, point) = child_at(root, x, y)?;
-				ensure_delivery(id, target, kind)?;
+				let radio_click =
+					(button == MouseButton::Left && count == 1 && modifiers == Modifiers::default())
+						.then_some(ax);
+				ensure_delivery(id, target, kind, Some(screen_point(x, y)), radio_click)?;
 				let (down, up, double, button_flag) = mouse_messages(button);
 				let flags = mouse_flags(modifiers);
 				// SAFETY: GetClassLongW reads the class style of a live window.
@@ -501,7 +527,7 @@ mod background {
 			},
 			PointerEvent::Hold { x, y, button, keys, duration } => {
 				let (target, point) = child_at(root, x, y)?;
-				ensure_delivery(id, target, kind)?;
+				ensure_delivery(id, target, kind, Some(screen_point(x, y)), None)?;
 				let (down, up, _, button_flag) = mouse_messages(button);
 				let flags = mouse_flags(control::key_modifiers(&keys));
 				with_keys(target, &keys, || {
@@ -518,7 +544,7 @@ mod background {
 			},
 			PointerEvent::Move { x, y } => {
 				let (target, point) = child_at(root, x, y)?;
-				ensure_delivery(id, target, kind)?;
+				ensure_delivery(id, target, kind, Some(screen_point(x, y)), None)?;
 				post(target, WM_MOUSEMOVE, 0, point)
 			},
 			PointerEvent::Drag { path, button, modifiers, mut keys } => {
@@ -539,7 +565,7 @@ mod background {
 					)));
 				}
 				let (target, client) = child_under(root, start)?;
-				ensure_delivery(id, target, kind)?;
+				ensure_delivery(id, target, kind, Some(start), None)?;
 				let start = packed_point(client.x, client.y)?;
 				let (down, up, _, button_flag) = mouse_messages(button);
 				let flags = mouse_flags(control::key_modifiers(&keys));
@@ -571,7 +597,7 @@ mod background {
 				// Wheel messages carry screen coordinates; unhandled wheel input
 				// bubbles from the child up its parent chain.
 				let (target, _) = child_under(root, point)?;
-				ensure_delivery(id, target, kind)?;
+				ensure_delivery(id, target, kind, Some(point), None)?;
 				let point = window::logical_screen_point(target, point).ok_or_else(|| {
 					DesktopError::input_failed("cannot map wheel coordinates to the target's DPI")
 				})?;
@@ -699,7 +725,7 @@ mod background {
 		/// go to: `element` when it is one of `root`'s child windows, else the
 		/// focused control ([`Self::focused`]). Both windows must take `kind`.
 		fn to(id: &str, root: HWND, element: Option<HWND>, kind: EventKind) -> CoreResult<Self> {
-			ensure_delivery(id, root, kind)?;
+			ensure_delivery(id, root, kind, None, None)?;
 			let emitter = match element {
 				Some(hwnd) if hwnd != root => {
 					// SAFETY: IsChild validates both handles.
@@ -712,7 +738,7 @@ mod background {
 				},
 				_ => Self::focused(root)?,
 			};
-			ensure_delivery(id, emitter.hwnd, kind)?;
+			ensure_delivery(id, emitter.hwnd, kind, None, None)?;
 			Ok(emitter)
 		}
 
@@ -830,7 +856,7 @@ mod background {
 			} else {
 				EventKind::Keystroke
 			};
-			if let Some(reason) = drop_reason(hwnd, &class, kind) {
+			if let Some(reason) = drop_reason(hwnd, &class, kind, None, None) {
 				return Err(DesktopError::background_unavailable(format!(
 					"window {} ({class}) drops held background keys: {reason}; no input was sent",
 					hwnd as usize,

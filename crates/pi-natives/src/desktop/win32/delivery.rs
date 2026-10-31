@@ -41,6 +41,12 @@ pub struct TargetTraits<'a> {
 	/// The target renders XAML/UWP/WinUI content, whose `CoreInput`
 	/// dispatcher reads keyboard input only from the system input queue.
 	pub xaml_host:           bool,
+	/// Another window shows at the pointer event's screen point instead of the
+	/// target (`WindowFromPoint`); false for keys and window-level checks.
+	pub covered:             bool,
+	/// UI Automation identifies this control as a radio button. WinForms can
+	/// select an unfocused radio on mouse-down even when mouse-up is covered.
+	pub radio_button:        bool,
 }
 
 pub fn is_chromium_class(class: &str) -> bool {
@@ -97,6 +103,26 @@ pub fn is_vcl_class(class: &str) -> bool {
 		.is_some_and(|suffix| !suffix.is_empty())
 }
 
+/// The base class WinForms wrapped, from the `WindowsForms10.<base>.app.<hash>`
+/// name it registers for every window it creates (`Window` for forms and
+/// panels, `BUTTON` for buttons, check boxes and radio buttons).
+fn winforms_base_class(class: &str) -> Option<&str> {
+	let (base, hash) = class.strip_prefix("WindowsForms10.")?.split_once(".app.")?;
+	(!base.is_empty() && !hash.is_empty()).then_some(base)
+}
+
+/// Whether `class` is a WinForms Button, CheckBox or RadioButton HWND.
+pub fn is_winforms_button_class(class: &str) -> bool {
+	winforms_base_class(class).is_some_and(|base| base.eq_ignore_ascii_case("BUTTON"))
+}
+
+/// Whether UI Automation actions on a top-level window of `class` can bring
+/// it to the foreground: Chromium and WPF providers activate their window,
+/// and so do WinForms controls for `Invoke`, `Toggle` and `SetValue`.
+pub fn uia_takes_foreground(class: &str) -> bool {
+	is_chromium_class(class) || is_wpf_class(class) || winforms_base_class(class).is_some()
+}
+
 /// Returns the empirical reason that a posted event would be accepted by
 /// Win32 but silently ignored by the target toolkit.
 pub fn would_be_silently_dropped(
@@ -140,6 +166,17 @@ pub fn would_be_silently_dropped(
 	}
 	if is_vcl_class(class) && matches!(kind, Keystroke | KeyCombo) {
 		return Some("VCL accelerators require real key state from the system input queue");
+	}
+	// RadioButton can act on focus on mouse-down even when the release point
+	// is covered; Button and CheckBox depend on the release hit test.
+	if is_winforms_button_class(class)
+		&& target.covered
+		&& !target.radio_button
+		&& matches!(kind, MouseClick)
+	{
+		return Some(
+			"WinForms buttons and check boxes ignore a click where another window covers them",
+		);
 	}
 	if is_terminal_class(class) && !target.foreground && matches!(kind, TextInput) {
 		return Some("terminal hosts read text through their console input channel");
@@ -261,7 +298,14 @@ mod tests {
 	}
 
 	const fn background(class: &str) -> TargetTraits<'_> {
-		TargetTraits { class, chromium_descendant: false, foreground: false, xaml_host: false }
+		TargetTraits {
+			class,
+			chromium_descendant: false,
+			foreground: false,
+			xaml_host: false,
+			covered: false,
+			radio_button: false,
+		}
 	}
 
 	#[test]
@@ -289,6 +333,45 @@ mod tests {
 		assert_matrix(foreground, [true, true, false, false, false, true]);
 		let native = TargetTraits { foreground: true, ..background("Notepad") };
 		assert_matrix(native, [false; 6]);
+	}
+
+	#[test]
+	fn winforms_refuses_posted_clicks_only_on_covered_button_class_controls() {
+		let covered = |class| TargetTraits { covered: true, ..background(class) };
+		// Button, CheckBox and RadioButton all register the `BUTTON` base class.
+		for class in [
+			"WindowsForms10.BUTTON.app.0.141b42a_r8_ad1",
+			"WindowsForms10.Button.app.0.2bf8098_r6_ad1",
+		] {
+			assert_matrix(covered(class), [true, false, false, false, false, false]);
+			assert_matrix(background(class), [false; 6]);
+		}
+		let radio = TargetTraits {
+			radio_button: true,
+			..covered("WindowsForms10.BUTTON.app.0.141b42a_r8_ad1")
+		};
+		assert_matrix(radio, [false; 6]);
+		// Forms and text boxes keep posted clicks (caret placement) and keys.
+		assert_matrix(covered("WindowsForms10.Window.8.app.0.141b42a_r8_ad1"), [false; 6]);
+		assert_matrix(covered("WindowsForms10.EDIT.app.0.141b42a_r8_ad1"), [false; 6]);
+		assert_matrix(covered("WindowsForms10.BUTTON.app."), [false; 6]);
+		assert_matrix(covered("Button"), [false; 6]);
+	}
+
+	#[test]
+	fn uia_actions_are_refused_only_on_self_activating_toolkits() {
+		for class in [
+			"Chrome_WidgetWin_1",
+			"HwndWrapper[App;;abc]",
+			"WindowsForms10.Window.8.app.0.141b42a_r8_ad1",
+		] {
+			assert!(uia_takes_foreground(class), "{class}");
+		}
+		for class in
+			["Notepad", "#32770", "WindowsForms10.Window.8", "XWindowsForms10.Window.8.app.0.1"]
+		{
+			assert!(!uia_takes_foreground(class), "{class}");
+		}
 	}
 
 	#[test]

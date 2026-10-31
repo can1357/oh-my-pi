@@ -70,6 +70,19 @@ impl Win32Ax {
 		Ok(native_window(Self::element(handle)?))
 	}
 
+	/// Identifies the WinForms radio-button subclass behind a `BUTTON` HWND.
+	/// On lookup failure the caller keeps its conservative covered-click
+	/// refusal.
+	pub(super) fn is_radio_button(&mut self, hwnd: HWND) -> bool {
+		let Ok(automation) = self.automation() else {
+			return false;
+		};
+		automation
+			.element_from_handle(Handle::from(hwnd.expose_provenance() as isize))
+			.and_then(|element| element.get_control_type())
+			.is_ok_and(|role| role == ControlType::RadioButton)
+	}
+
 	fn walker(&mut self) -> CoreResult<uiautomation::UITreeWalker> {
 		self.automation()?.get_raw_view_walker().map_err(ax_error)
 	}
