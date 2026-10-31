@@ -11,6 +11,7 @@ import {
 	parseDataUri,
 	sanitizeContent,
 	sanitizeMemoryRow,
+	sanitizeTextField,
 	sanitizeTimestamp,
 	scrubLiveCredentials,
 	shannonEntropy,
@@ -920,5 +921,49 @@ Tail content
 		expect(Object.keys(meta).some(k => k.includes("</memories>"))).toBe(false);
 		expect(Object.keys(meta).some(k => k.includes("superSecretToken12345"))).toBe(false);
 		expect(meta["[REDACTED]"]).toBe("v1");
+	});
+
+	it("handles unsupported charset replacement, utf-16 symmetry, percent-encoded base64, escaped Authorization quotes, keyword boundaries, and raw byte original_size", () => {
+		const blobRoot = useTempBlobDir();
+
+		// 1. Unsupported charset rewrites blob and sanitizeTextField instead of leaking raw bytes
+		const unknownCharsetRaw = Buffer.from([0x80, 0x90, 0xa0, 0xb0, 0xc0, 0xd0]);
+		const unknownUri = `data:text/plain;charset=x-not-real;base64,${unknownCharsetRaw.toString("base64")}`;
+		const [, unknownMeta] = sanitizeContent(unknownUri);
+		const unknownSha = (unknownMeta.blob_ref ?? "").replace("blob://sha256/", "");
+		const unknownStored = readFileSync(join(blobRoot, unknownSha.slice(0, 2), unknownSha.slice(0, 4), unknownSha));
+		expect(unknownStored.toString("utf8")).toBe("[REDACTED_UNSUPPORTED_CHARSET]");
+		expect(sanitizeTextField(unknownUri)).toBe("[REDACTED_UNSUPPORTED_CHARSET]");
+
+		// 2. charset=utf-16 preserves UTF-16 encoding and reports original_size as raw payload byte length
+		const utf16Secret = "Authorization: Bearer utf16GenericSecret12345";
+		const utf16Raw = Buffer.from(utf16Secret, "utf16le");
+		const utf16Uri = `data:text/plain;charset=utf-16;base64,${utf16Raw.toString("base64")}`;
+		const [, utf16Meta] = sanitizeContent(utf16Uri);
+		expect(utf16Meta.original_size).toBe(utf16Raw.length);
+		const utf16Sha = (utf16Meta.blob_ref ?? "").replace("blob://sha256/", "");
+		const utf16Stored = readFileSync(join(blobRoot, utf16Sha.slice(0, 2), utf16Sha.slice(0, 4), utf16Sha));
+		expect(utf16Stored.toString("utf16le")).toBe("Authorization: Bearer [REDACTED]");
+
+		// 3. Percent-encoded base64 data URI is decoded and scrubbed
+		const b64Secret = Buffer.from("Authorization: Bearer percentEncodedB64Secret99", "utf8")
+			.toString("base64")
+			.replace(/=/g, "%3D");
+		const pctB64Uri = `data:text/plain;base64,${b64Secret}`;
+		const [, pctMeta] = sanitizeContent(pctB64Uri);
+		expect(pctMeta.redacted_secrets).toContain("auth_bearer_basic");
+		expect(sanitizeTextField(pctB64Uri)).toBe("Authorization: Bearer [REDACTED]");
+
+		// 4. Escaped or mismatched Authorization quotes are redacted
+		const escapedAuth = '{\\"Authorization\\": \\"Bearer escapedJsonBearerSecret12345\\"}';
+		expect(scrubLiveCredentials(escapedAuth).content).toBe('{\\"Authorization\\": \\"Bearer [REDACTED]\\"}');
+		const unterminatedAuth = 'Authorization: "Bearer unterminatedQuoteSecret12345';
+		expect(scrubLiveCredentials(unterminatedAuth).content).toBe('Authorization: "Bearer [REDACTED]');
+
+		// 5. Keyword boundary prevents redacting words ending in key/sk/rk like monkey_ / network_ / task_
+		expect(scrubLiveCredentials("monkey_abcdefghijklmnop").content).toBe("monkey_abcdefghijklmnop");
+		expect(scrubLiveCredentials("network_abcdefghijklmnop").content).toBe("network_abcdefghijklmnop");
+		expect(scrubLiveCredentials("task_abcdefghijklmnop").content).toBe("task_abcdefghijklmnop");
+		expect(scrubLiveCredentials("api_key_abcdefghijklmnop").content).toBe("api_[REDACTED]");
 	});
 });

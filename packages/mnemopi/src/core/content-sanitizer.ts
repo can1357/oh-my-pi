@@ -56,9 +56,23 @@ export function parseDataUri(content: string): [mimeType: string, raw: Buffer] |
 	if (rawMime !== undefined && !VALID_MIME_RE.test(rawMime)) return null;
 	const mimeType = rawMime ?? "application/octet-stream";
 	const payload = match.groups.data ?? "";
-	if (!isValidBase64(payload)) return null;
+	const decoded = decodeBase64Payload(payload);
+	if (decoded === null) return null;
 
-	return [mimeType, Buffer.from(payload, "base64")];
+	return [mimeType, decoded];
+}
+
+function decodeBase64Payload(rawPayload: string): Buffer | null {
+	const candidate = rawPayload.includes("%")
+		? (() => {
+				try {
+					return decodeURIComponent(rawPayload);
+				} catch {
+					return rawPayload;
+				}
+			})()
+		: rawPayload;
+	return isValidBase64(candidate) ? Buffer.from(candidate, "base64") : null;
 }
 function decodePercentEncoded(raw: string): Buffer {
 	try {
@@ -73,6 +87,43 @@ function extractCharset(params: string | undefined): string | null {
 	if (!params) return null;
 	const match = /;charset=([^;,]+)/i.exec(params);
 	return match?.[1]?.trim().toLowerCase() ?? null;
+}
+
+const SUPPORTED_SYMMETRIC_CHARSETS = new Set([
+	"utf-8",
+	"utf8",
+	"iso-8859-1",
+	"latin1",
+	"windows-1252",
+	"us-ascii",
+	"ascii",
+	"utf-16",
+	"utf16",
+	"utf-16le",
+	"utf16le",
+	"utf-16be",
+	"utf16be",
+]);
+
+function isSupportedSymmetricCharset(charset: string | null): boolean {
+	if (!charset) return true;
+	return SUPPORTED_SYMMETRIC_CHARSETS.has(charset.toLowerCase());
+}
+
+function hasUtf16BeBom(rawBytes: Uint8Array | Buffer): boolean {
+	return rawBytes.length >= 2 && rawBytes[0] === 0xfe && rawBytes[1] === 0xff;
+}
+
+function swapUtf16Bytes(buf: Buffer): Buffer {
+	const swapped = Buffer.alloc(buf.length);
+	for (let i = 0; i < buf.length - 1; i += 2) {
+		swapped[i] = buf[i + 1]!;
+		swapped[i + 1] = buf[i]!;
+	}
+	if (buf.length % 2 !== 0) {
+		swapped[buf.length - 1] = buf[buf.length - 1]!;
+	}
+	return swapped;
 }
 
 function decodeWithCharset(rawBytes: Uint8Array | Buffer, charset: string | null): string {
@@ -91,33 +142,25 @@ function decodeWithCharset(rawBytes: Uint8Array | Buffer, charset: string | null
 	}
 	if (lower === "utf-16be" || lower === "utf16be") {
 		const buf = Buffer.isBuffer(rawBytes) ? rawBytes : Buffer.from(rawBytes);
-		const swapped = Buffer.alloc(buf.length);
-		for (let i = 0; i < buf.length - 1; i += 2) {
-			swapped[i] = buf[i + 1]!;
-			swapped[i + 1] = buf[i]!;
-		}
-		if (buf.length % 2 !== 0) {
-			swapped[buf.length - 1] = buf[buf.length - 1]!;
-		}
-		return swapped.toString("utf16le");
+		return swapUtf16Bytes(buf).toString("utf16le");
 	}
-	try {
-		const DecoderConstructor = TextDecoder as unknown as new (
-			label?: string,
-			options?: { fatal?: boolean },
-		) => { decode(input?: Uint8Array): string };
-		return new DecoderConstructor(lower, { fatal: false }).decode(rawBytes);
-	} catch {
-		const fallbackText = Buffer.from(rawBytes).toString("utf8");
-		const scrubbed = scrubLiveCredentials(fallbackText);
-		if (scrubbed.matchedTypes.length > 0) {
-			return scrubbed.content;
+	if (lower === "utf-16" || lower === "utf16") {
+		const buf = Buffer.isBuffer(rawBytes) ? rawBytes : Buffer.from(rawBytes);
+		if (hasUtf16BeBom(buf)) {
+			return swapUtf16Bytes(buf).toString("utf16le");
 		}
-		return "[REDACTED_UNSUPPORTED_CHARSET]";
+		return buf.toString("utf16le");
 	}
+	const fallbackText = Buffer.from(rawBytes).toString("utf8");
+	const tagRes = stripInjectedMemoryTags(fallbackText);
+	const credRes = scrubLiveCredentials(tagRes.content);
+	if (tagRes.stripped || credRes.matchedTypes.length > 0) {
+		return credRes.content;
+	}
+	return "[REDACTED_UNSUPPORTED_CHARSET]";
 }
 
-function encodeWithCharset(text: string, charset: string | null): Buffer {
+function encodeWithCharset(text: string, charset: string | null, rawBytes?: Uint8Array | Buffer): Buffer {
 	const lower = charset ? charset.toLowerCase() : null;
 	if (lower === "iso-8859-1" || lower === "latin1" || lower === "windows-1252") {
 		return Buffer.from(text, "latin1");
@@ -129,16 +172,14 @@ function encodeWithCharset(text: string, charset: string | null): Buffer {
 		return Buffer.from(text, "utf16le");
 	}
 	if (lower === "utf-16be" || lower === "utf16be") {
+		return swapUtf16Bytes(Buffer.from(text, "utf16le"));
+	}
+	if (lower === "utf-16" || lower === "utf16") {
 		const leBuf = Buffer.from(text, "utf16le");
-		const swapped = Buffer.alloc(leBuf.length);
-		for (let i = 0; i < leBuf.length - 1; i += 2) {
-			swapped[i] = leBuf[i + 1]!;
-			swapped[i + 1] = leBuf[i]!;
+		if (rawBytes && hasUtf16BeBom(rawBytes)) {
+			return swapUtf16Bytes(leBuf);
 		}
-		if (leBuf.length % 2 !== 0) {
-			swapped[leBuf.length - 1] = leBuf[leBuf.length - 1]!;
-		}
-		return swapped;
+		return leBuf;
 	}
 	return Buffer.from(text, "utf-8");
 }
@@ -380,7 +421,11 @@ const isTokenChar = (code: number) =>
 function keywordStart(input: string, delimiter: number): number {
 	for (const keyword of KEYWORDS) {
 		const start = delimiter - keyword.length;
-		if (start >= 0 && input.startsWith(keyword, start)) return start;
+		if (start < 0 || !input.startsWith(keyword, start)) continue;
+		if (start > 0 && isTokenChar(input.charCodeAt(start - 1)) && !isDelimiter(input.charCodeAt(start - 1))) {
+			continue;
+		}
+		return start;
 	}
 	return -1;
 }
@@ -580,8 +625,8 @@ const CREDENTIAL_RULES: ReadonlyArray<{
 	{
 		type: "auth_bearer_basic",
 		pattern:
-			/((?<q1>["']?)\b(?:Proxy-)?Authorization\k<q1>\s*:\s*(?<q2>["']?)(?:Bearer|Basic)\s+)[^\s"',;}{[\]]{8,}(\k<q2>)/gi,
-		replacement: "$1[REDACTED]$4",
+			/((?:\\?["'])?\b(?:Proxy-)?Authorization(?:\\?["'])?\s*:\s*(?:\\?["'])?(?:Bearer|Basic)\s+)(?:(?!\\["'])[^\s"',;}{[\]]){8,}/gi,
+		replacement: "$1[REDACTED]",
 	},
 	{
 		type: "basic_auth_url",
@@ -662,27 +707,27 @@ export function sanitizeTextField(input: string): string {
 			const rawPayload = dataUriMatch.groups.data ?? "";
 			let payloadBytes: Buffer | null = null;
 			if (isBase64) {
-				if (isValidBase64(rawPayload)) {
-					payloadBytes = Buffer.from(rawPayload, "base64");
-				}
+				payloadBytes = decodeBase64Payload(rawPayload);
 			} else {
 				payloadBytes = decodePercentEncoded(rawPayload);
 			}
 			if (payloadBytes !== null && (rawMime === undefined || isTextualMime(mimeType, payloadBytes))) {
+				const unsupportedCharset = !isSupportedSymmetricCharset(charset);
 				let decoded = decodeWithCharset(payloadBytes, charset);
 				const tagRes = stripInjectedMemoryTags(decoded);
 				if (tagRes.stripped) decoded = tagRes.content;
 				const credRes = scrubLiveCredentials(decoded);
 				if (credRes.matchedTypes.length > 0) decoded = credRes.content;
-				if (tagRes.stripped || credRes.matchedTypes.length > 0) {
+				if (unsupportedCharset || tagRes.stripped || credRes.matchedTypes.length > 0) {
 					return decoded;
 				}
 			}
 		}
 	} else if (/^data:/i.test(text)) {
 		const b64Fallback = /^data:[^,]*;base64,(?<data>[\s\S]*)$/i.exec(text);
-		if (b64Fallback?.groups?.data !== undefined && isValidBase64(b64Fallback.groups.data)) {
-			const payloadBytes = Buffer.from(b64Fallback.groups.data, "base64");
+		const payloadBytes =
+			b64Fallback?.groups?.data !== undefined ? decodeBase64Payload(b64Fallback.groups.data) : null;
+		if (payloadBytes !== null) {
 			let decoded = decodeWithCharset(payloadBytes, "utf-8");
 			const tagRes = stripInjectedMemoryTags(decoded);
 			if (tagRes.stripped) decoded = tagRes.content;
@@ -987,22 +1032,16 @@ export function sanitizeContent(content: string): [sanitizedContent: string, met
 
 				let rawBytes: Buffer | null = null;
 				if (match.groups.base64 !== undefined) {
-					if (isValidBase64(rawPayload)) {
-						rawBytes = Buffer.from(rawPayload, "base64");
-					}
+					rawBytes = decodeBase64Payload(rawPayload);
 				} else {
 					rawBytes = decodePercentEncoded(rawPayload);
 				}
 
 				if (rawBytes !== null) {
 					let bytesToStore: Buffer = rawBytes;
-					let originalPayloadSize = rawBytes.length;
+					const originalPayloadSize = rawBytes.length;
 					const omittedMime = rawMime === undefined;
 					const isTextual = omittedMime || isTextualMime(mimeType, rawBytes);
-					if (isTextual) {
-						const decoded = decodeWithCharset(rawBytes, charset);
-						originalPayloadSize = Buffer.byteLength(decoded, "utf8");
-					}
 					const dataMeta: SanitizeMetadata = {
 						original_size: originalPayloadSize,
 						mime: mimeType,
@@ -1012,6 +1051,7 @@ export function sanitizeContent(content: string): [sanitizedContent: string, met
 						dataMeta.stripped_tags = true;
 					}
 					if (isTextual) {
+						const unsupportedCharset = !isSupportedSymmetricCharset(charset);
 						let decoded = decodeWithCharset(rawBytes, charset);
 						const tagRes = stripInjectedMemoryTags(decoded);
 						if (tagRes.stripped) {
@@ -1023,8 +1063,8 @@ export function sanitizeContent(content: string): [sanitizedContent: string, met
 							decoded = credRes.content;
 							dataMeta.redacted_secrets = credRes.matchedTypes;
 						}
-						if (tagRes.stripped || credRes.matchedTypes.length > 0) {
-							bytesToStore = encodeWithCharset(decoded, charset);
+						if (unsupportedCharset || tagRes.stripped || credRes.matchedTypes.length > 0) {
+							bytesToStore = encodeWithCharset(decoded, charset, rawBytes);
 						}
 					}
 					const sha256 = storeBlob(bytesToStore);
@@ -1038,8 +1078,8 @@ export function sanitizeContent(content: string): [sanitizedContent: string, met
 			}
 		} else {
 			const b64Fallback = /^data:[^,]*;base64,(?<data>[\s\S]*)$/i.exec(workingContent);
-			if (b64Fallback?.groups?.data !== undefined && isValidBase64(b64Fallback.groups.data)) {
-				const rawBytes = Buffer.from(b64Fallback.groups.data, "base64");
+			const rawBytes = b64Fallback?.groups?.data !== undefined ? decodeBase64Payload(b64Fallback.groups.data) : null;
+			if (rawBytes !== null) {
 				let decoded = decodeWithCharset(rawBytes, "utf-8");
 				const tagRes = stripInjectedMemoryTags(decoded);
 				if (tagRes.stripped) {
@@ -1050,11 +1090,11 @@ export function sanitizeContent(content: string): [sanitizedContent: string, met
 					decoded = credRes.content;
 				}
 				if (tagRes.stripped || credRes.matchedTypes.length > 0) {
-					const bytesToStore = encodeWithCharset(decoded, "utf-8");
+					const bytesToStore = encodeWithCharset(decoded, "utf-8", rawBytes);
 					const sha256 = storeBlob(bytesToStore);
 					const blobRef = `blob://sha256/${sha256}`;
 					const dataMeta: SanitizeMetadata = {
-						original_size: Buffer.byteLength(decoded, "utf8"),
+						original_size: rawBytes.length,
 						mime: "text/plain",
 						extraction_reason: "data_uri",
 						blob_ref: blobRef,

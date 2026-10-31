@@ -4,7 +4,7 @@ import { type Env, polyphonicRecallEnabled } from "../config";
 import { closeQuietly, type DatabasePath, openDatabase } from "../db";
 import { backfillConsolidatedFacts, ensureVeracityConsolidator } from "./beam/consolidate";
 import type { BeamMemoryState, JsonValue, Metadata, RecallResult, RecallTierLabel } from "./beam/types";
-import { sanitizeMemoryRow } from "./content-sanitizer";
+import { sanitizeMemoryRow, sanitizeMetadataRecord } from "./content-sanitizer";
 import { EpisodicGraph, extractProperNouns } from "./episodic-graph";
 import { STOP_WORDS } from "./synonyms";
 import { VeracityConsolidator } from "./veracity-consolidation";
@@ -642,11 +642,12 @@ export class PolyphonicRecallEngine {
 		if (baseline !== undefined) {
 			const tier = baseline.tier_label ?? baseline.tier ?? "working";
 			if (options.includeFacts !== true && tier === "fact") return null;
+			const sanitizedPolyphonic = sanitizeMetadataRecord(candidate.metadata, true);
 			return {
 				...baseline,
 				metadata: {
 					...(baseline.metadata ?? parseMetadata(baseline.metadata_json ?? null)),
-					polyphonic: candidate.metadata,
+					polyphonic: sanitizedPolyphonic,
 				},
 				score: candidate.combinedScore,
 				combined_score: candidate.combinedScore,
@@ -658,9 +659,10 @@ export class PolyphonicRecallEngine {
 		const rawRow = this.#lookupMemory(candidate.memoryId, options.channelId);
 		if (rawRow === null) return null;
 		const row = sanitizeMemoryRow(rawRow);
+		const sanitizedPolyphonic = sanitizeMetadataRecord(candidate.metadata, true);
 		return {
 			...row,
-			metadata: { ...parseMetadata(row.metadata_json), polyphonic: candidate.metadata },
+			metadata: { ...parseMetadata(row.metadata_json), polyphonic: sanitizedPolyphonic },
 			recall_count: row.recall_count ?? undefined,
 			scope: row.scope ?? undefined,
 			trust_tier: row.trust_tier ?? undefined,
