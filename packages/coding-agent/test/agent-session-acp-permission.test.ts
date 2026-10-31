@@ -1199,12 +1199,15 @@ it("keeps the dialog open when an agent-authored steer queues mid-dialog", async
 	await permissionOpened.promise;
 
 	// An agent-authored steer queues while the dialog is open: the loop's
-	// steering signal aborts for it (any queued source), but no user
-	// steering arrival fired, so the dialog must stay open — the tool call
-	// keeps waiting on the user instead of being classified as superseded.
+	// steering signal aborts for it (any queued source), but it is not a
+	// person's message, so no steering arrival fires and the dialog must stay
+	// open — the tool call keeps waiting on the user instead of being
+	// classified as superseded. It carries `attribution: "agent"`: a bare user
+	// turn is the person's under every queue rule (chips, Esc restore).
 	await session.agent.steer({
 		role: "user",
 		content: [{ type: "text", text: "agent-authored aside while the dialog is open" }],
+		attribution: "agent",
 		timestamp: Date.now(),
 	});
 	loopSteering.abort();
@@ -1424,11 +1427,12 @@ it("delivers the user steer that supersedes a dialog ahead of an agent-authored 
 	releaseTurnStream.resolve();
 	await permissionOpened.promise;
 
-	// The agent enqueues a steer while the dialog is open. This path never
-	// fires the steering-arrival signal, so it must not be promoted.
+	// The agent enqueues a steer while the dialog is open. It is agent-attributed,
+	// so it never fires the steering-arrival signal and must not be promoted.
 	session.agent.steer({
 		role: "user",
 		content: [{ type: "text", text: "agent-authored steer" }],
+		attribution: "agent",
 		timestamp: Date.now(),
 	});
 

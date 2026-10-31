@@ -2860,7 +2860,7 @@ export class AgentSession implements SettingsScope {
 		// Always subscribe to agent events for internal handling
 		// (session persistence, hooks, auto-compaction, retry logic)
 		this.#unsubscribeAgent = this.agent.subscribe(this.#handleAgentEvent);
-		this.#unsubscribeQueueChange = this.agent.onQueueChange(() => this.#emitQueueUpdateIfChanged());
+		this.#unsubscribeQueueChange = this.agent.onQueueChange(() => this.#handleQueueChange());
 		// Re-evaluate append-only context mode when the setting changes at runtime.
 		cfgProviderAppendOnlyContext.listen(this, () => this.#syncAppendOnlyContext(this.model));
 		cfgModelRoles.listen(this, () => this.#advisors.reconcileModelRoles());
@@ -6050,7 +6050,7 @@ export class AgentSession implements SettingsScope {
 		if (this.#unsubscribeAgent) return; // Already connected
 		this.#disconnectedMessageCount = undefined;
 		this.#unsubscribeAgent = this.agent.subscribe(this.#handleAgentEvent);
-		this.#unsubscribeQueueChange = this.agent.onQueueChange(() => this.#emitQueueUpdateIfChanged());
+		this.#unsubscribeQueueChange = this.agent.onQueueChange(() => this.#handleQueueChange());
 	}
 
 	#activeProviderSessionId(sessionId?: string): string {
@@ -9577,19 +9577,10 @@ export class AgentSession implements SettingsScope {
 				timestamp: timestamp ?? Date.now(),
 			};
 			this.#queuedMessageRawText.set(userMessage, rawText);
+			// Queuing the message announces it on the steering-arrival channel
+			// (#announceSteeringArrivals), so a dialog waiting on the person ends
+			// its wait before the streaming boundary poll runs.
 			this.agent.steer(userMessage);
-			// Wake any listener parked on steering arrival (the ACP permission
-			// gate): the message is on the queue now, so its wait ends even
-			// though the streaming boundary poll has not run yet. The whole
-			// admitted group rides along so the gate promotes exactly these
-			// messages — never an agent-authored steer that happened to be
-			// enqueued in the same window without firing the signal.
-			this.#fireSteeringArrival([
-				...prependMessages,
-				...attachmentSourceNotices,
-				...(imageDescriptionNotice ? [imageDescriptionNotice] : []),
-				userMessage,
-			]);
 		}
 		// The optional call skips building the group when no caller asked for it.
 		options?.onPromptQueued?.([
@@ -9649,15 +9640,17 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Aborted (and replaced) once per user steering-message arrival. The ACP
-	 * permission gate (`SessionTools.#wrapToolForAcpPermission`) races a wait
-	 * on this signal against its elicit, so a steer sent while a permission
-	 * dialog is open ends the wait: the elicit is superseded, its tool call
-	 * throws, and the queued message is injected at the next batch boundary
-	 * instead of sitting behind the dialog until the user answers. A fire while
+	 * Aborted (and replaced) once per steering-queue change that brought in a
+	 * person's message, whatever path brought it ({@link #announceSteeringArrivals}).
+	 * Dialogs waiting on the person (`superviseUserSteering`: the ACP permission
+	 * gate, `ask`) race a wait on this signal, so a person's message sent while a
+	 * dialog is open ends the wait and is injected at the next batch boundary
+	 * instead of sitting behind the dialog until the person answers. A fire while
 	 * no listener is parked is a no-op (the fresh controller replaces the old).
 	 */
 	#steeringArrivalController = new AbortController();
+	/** Steering messages already announced on the arrival channel; a requeued one is not announced again. */
+	#announcedSteering = new WeakSet<AgentMessage>();
 
 	/**
 	 * User-message groups admitted by steering arrivals, in admission order,
@@ -9704,6 +9697,44 @@ export class AgentSession implements SettingsScope {
 			},
 			mode,
 		);
+	}
+
+	/** Queue listener: announce new steering arrivals, then publish the queue view. */
+	#handleQueueChange(): void {
+		this.#announceSteeringArrivals();
+		this.#emitQueueUpdateIfChanged();
+	}
+
+	/**
+	 * The one producer of steering arrivals. Every steering-queue mutation lands
+	 * here (agent-core emits a queue change for each), so a person's message is
+	 * announced however it reached the queue: a typed steer, a custom prompt, a
+	 * promoted follow-up, a queue replacement or a direct `agent.steer`. The group
+	 * is the message with the hidden companions queued directly before it, in queue
+	 * order. Agent-authored and system steering is never announced, and a message
+	 * announced once (an aborted run requeueing what it took) is not announced again.
+	 */
+	#announceSteeringArrivals(): void {
+		const queue = this.agent.peekSteeringQueue();
+		let arrived: AgentMessage[] | undefined;
+		for (let index = 0; index < queue.length; index++) {
+			const message = queue[index];
+			if (this.#announcedSteering.has(message) || !isUserAuthoredQueuedMessage(message)) continue;
+			let start = index;
+			while (
+				start > 0 &&
+				isHiddenUserCompanion(queue[start - 1]) &&
+				!this.#announcedSteering.has(queue[start - 1])
+			) {
+				start--;
+			}
+			arrived ??= [];
+			for (let member = start; member <= index; member++) {
+				this.#announcedSteering.add(queue[member]);
+				arrived.push(queue[member]);
+			}
+		}
+		if (arrived) this.#fireSteeringArrival(arrived);
 	}
 
 	/** Current {@link #steeringArrivalController} signal; see that field. */
@@ -10057,15 +10088,6 @@ export class AgentSession implements SettingsScope {
 			for (const notice of prependMessages) this.agent.steer(notice);
 			if (descriptionNotice) this.agent.steer(descriptionNotice);
 			this.agent.steer(normalizedAppMessage);
-			// A person's custom prompt (a typed `/skill:`, a collab guest's prompt) is the person
-			// speaking: open dialogs watching for that hear it, as they do a plain typed steer.
-			if (isUserAuthoredQueuedMessage(normalizedAppMessage)) {
-				this.#fireSteeringArrival([
-					...prependMessages,
-					...(descriptionNotice ? [descriptionNotice] : []),
-					normalizedAppMessage,
-				]);
-			}
 		}
 		onPromptQueued?.([...prependMessages, ...(descriptionNotice ? [descriptionNotice] : []), normalizedAppMessage]);
 		onPromptAdmitted?.();
@@ -10205,7 +10227,6 @@ export class AgentSession implements SettingsScope {
 				this.agent.followUp(normalizedAppMessage);
 			} else {
 				this.agent.steer(normalizedAppMessage);
-				if (isUserAuthoredQueuedMessage(normalizedAppMessage)) this.#fireSteeringArrival([normalizedAppMessage]);
 			}
 			this.#scheduleIdleQueueDrain();
 			return false;

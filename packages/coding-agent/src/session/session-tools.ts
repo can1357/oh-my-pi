@@ -93,8 +93,9 @@ export interface SessionToolsHost {
 	isDisposed(): boolean;
 	isStreaming(): boolean;
 	/**
-	 * Aborts once per user steering-message arrival; the ACP permission gate
-	 * races it against its elicit so a steer supersedes an open dialog.
+	 * Aborts once per steering-queue change that brings in a person's message,
+	 * whatever path brought it; the ACP permission gate races it against its
+	 * elicit so the person's message supersedes an open dialog.
 	 */
 	steeringArrivalSignal(): AbortSignal;
 	/**
@@ -108,10 +109,10 @@ export interface SessionToolsHost {
 	 * The user-message groups admitted by the steering arrivals after `since`
 	 * (a snapshot from {@link steeringArrivalSeq}), flattened in admission
 	 * order — first post-park arrival first — or `undefined` when none. The
-	 * permission gate promotes exactly these messages: an agent-authored
-	 * steer enqueued in the same window never fired the signal and must not
-	 * ride the promotion ahead of the user's superseding message, and an
-	 * earlier pre-dialog steer must not be re-promoted by a later dialog.
+	 * permission gate promotes the person's messages among them: an
+	 * agent-authored steer enqueued in the same window is never announced and
+	 * must not ride the promotion ahead of the person's superseding message,
+	 * and an earlier pre-dialog steer must not be re-promoted by a later dialog.
 	 */
 	steeringArrivalAdmitted(since?: number): readonly AgentMessage[] | undefined;
 	/**

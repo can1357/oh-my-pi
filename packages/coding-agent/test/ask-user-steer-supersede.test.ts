@@ -283,6 +283,74 @@ describe("ask dialog and a person's later steer", () => {
 		expect(mock.calls.slice(2).some(call => requestHas(call, "agent card"))).toBe(true);
 	});
 
+	// Every way a person's message can reach the steering queue, by the queue mutation it makes,
+	// not by the API that created the message.
+	const personPaths: Array<[string, (target: AgentSession) => Promise<unknown> | unknown]> = [
+		["a typed steer (steer)", target => target.prompt("from the person", { streamingBehavior: "steer" })],
+		[
+			"a custom prompt steered (steer)",
+			target =>
+				target.promptCustomMessage(
+					{ customType: "skill-prompt", content: "from the person", display: true, attribution: "user" },
+					{ streamingBehavior: "steer" },
+				),
+		],
+		[
+			"an extension's user-attributed steer (steer)",
+			target =>
+				target.sendCustomMessage(
+					{ customType: "guest-prompt", content: "from the person", display: true, attribution: "user" },
+					{ deliverAs: "steer", triggerTurn: true },
+				),
+		],
+		[
+			"a promoted follow-up (moveFollowUpsToSteering)",
+			async target => {
+				await target.prompt("from the person", { streamingBehavior: "followUp" });
+				expect(target.promoteQueuedMessage("from the person")).toBe(true);
+			},
+		],
+		[
+			"a promoted custom follow-up (moveFollowUpsToSteering)",
+			async target => {
+				await target.promptCustomMessage(
+					{ customType: "skill-prompt", content: "from the person", display: true, attribution: "user" },
+					{ streamingBehavior: "followUp" },
+				);
+				expect(target.promoteQueuedMessage("from the person")).toBe(true);
+			},
+		],
+		[
+			"a direct agent steer (Agent.steer)",
+			target => target.agent.steer({ role: "user", content: "from the person", timestamp: Date.now() }),
+		],
+		[
+			"a queue replacement that adds it (Agent.replaceQueue)",
+			target =>
+				target.agent.replaceQueue("steering", [
+					...target.agent.peekSteeringQueue(),
+					{ role: "user", content: "from the person", timestamp: Date.now() },
+				]),
+		],
+	];
+	for (const [path, send] of personPaths) {
+		it(`closes the dialog after an agent card for a person's message that arrives by ${path}`, async () => {
+			const { session, mock, nextDialog, askResults } = createHarness();
+			const run = session.prompt("start");
+			const dialog = await nextDialog();
+
+			await sendCard(session, dialog.loopSignal);
+			await send(session);
+			await settle();
+			expect(dialog.signal?.aborted).toBe(true);
+			await run;
+			await session.waitForIdle();
+			expect(resultText(askResults[0])).toContain("Ask interrupted by message");
+			expect(requestHas(mock.calls[1], "from the person")).toBe(true);
+			expect(requestHas(mock.calls[1], "agent card")).toBe(false);
+		});
+	}
+
 	it("closes the dialog for a person's custom prompt, such as a typed /skill", async () => {
 		const { session, nextDialog, askResults } = createHarness();
 		const run = session.prompt("start");
