@@ -210,21 +210,25 @@ function sharedBank(configured: string | undefined): string {
  * would otherwise mix the memories `per-project` is meant to isolate.
  */
 function resolveProjectRoot(directory: string): string {
-	try {
-		const root = vcs.repo(directory)?.primaryRoot() ?? directory;
-		// Canonicalize: native discovery can return the root as the caller
-		// spelled it (jj's walk is lexical; git's follows the real path but
-		// reports the spelled root when that spelling reaches the same
-		// checkout), so a checkout reached through a symlinked alias and a
-		// linked worktree whose on-disk `commondir`/`gitdir` pointers were
-		// written against the real path (git resolves symlinks when it
-		// creates them) would otherwise hash two different strings for one
-		// repository.
-		return fs.realpathSync(root);
-	} catch (error) {
-		logger.debug("mnemopi: project root resolution failed, using cwd", { directory, error: String(error) });
-		return directory;
-	}
+	// The repository walk and `realpathSync` below block the event loop, so
+	// label them for the loop watchdog like the rest of Mnemopi's startup.
+	return withLoopPhase("mnemopi.open", () => {
+		try {
+			const root = vcs.repo(directory)?.primaryRoot() ?? directory;
+			// Canonicalize: native discovery can return the root as the caller
+			// spelled it (jj's walk is lexical; git's follows the real path but
+			// reports the spelled root when that spelling reaches the same
+			// checkout), so a checkout reached through a symlinked alias and a
+			// linked worktree whose on-disk `commondir`/`gitdir` pointers were
+			// written against the real path (git resolves symlinks when it
+			// creates them) would otherwise hash two different strings for one
+			// repository.
+			return fs.realpathSync(root);
+		} catch (error) {
+			logger.debug("mnemopi: project root resolution failed, using cwd", { directory, error: String(error) });
+			return directory;
+		}
+	});
 }
 
 /**

@@ -9,7 +9,7 @@ import {
 	extendRecallWithLegacyBanks,
 	projectBankSegment,
 } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
-import { removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
+import { currentLoopPhase, removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
 import * as vcsModule from "@oh-my-pi/pi-natives/vcs";
 
 // Isolate `git` invocations in this file from the host's global config —
@@ -193,6 +193,34 @@ describe("computeMnemopiBankScope (#2412)", () => {
 		} finally {
 			repoSpy.mockRestore();
 		}
+	});
+
+	// Project root resolution runs a synchronous repository walk and
+	// `realpathSync` while Mnemopi starts. Both must run under the
+	// `mnemopi.open` loop phase, so the loop watchdog names them when they
+	// stall instead of reporting an unlabelled block.
+	it("labels project root resolution with the mnemopi.open loop phase", () => {
+		const phases: Record<"repo" | "realpath", (string | undefined)[]> = { repo: [], realpath: [] };
+		const realRepo = vcsModule.repo;
+		const realRealpath = fsSync.realpathSync;
+		const repoSpy = spyOn(vcsModule, "repo").mockImplementation(((...args: Parameters<typeof realRepo>) => {
+			phases.repo.push(currentLoopPhase());
+			return realRepo(...args);
+		}) as typeof realRepo);
+		const realpathSpy = spyOn(fsSync, "realpathSync").mockImplementation(((
+			...args: Parameters<typeof realRealpath>
+		) => {
+			phases.realpath.push(currentLoopPhase());
+			return realRealpath(...args);
+		}) as typeof realRealpath);
+		try {
+			computeMnemopiBankScope(undefined, rootDir.path(), "per-project");
+		} finally {
+			realpathSpy.mockRestore();
+			repoSpy.mockRestore();
+		}
+		expect(phases.repo).toEqual(["mnemopi.open"]);
+		expect(phases.realpath).toEqual(["mnemopi.open"]);
 	});
 });
 
