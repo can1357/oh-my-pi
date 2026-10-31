@@ -1708,9 +1708,11 @@ async function recordedStagingByPath(agentDir: string, root: string): Promise<Ma
  * the new directory with one plain `mkdir`, which fails on any name already
  * there, a link included. Then, as it runs, it resolves both session trees
  * again by the names gc uses for them and stops, moving nothing, if the new
- * directory lies inside either: a tree moved or relinked between this
- * message and the command is caught by the command itself, not by a check
- * that ran earlier. It runs in a subshell, so stopping does not close the
+ * directory lies inside either or a tree cannot be resolved: a tree moved or
+ * relinked between this message and the command is caught by the command
+ * itself, not by a check that ran earlier. Stopping takes back with `rmdir`
+ * the directory it just made, still empty, so the same command can run again
+ * once the trees are back. It runs in a subshell, so stopping does not close the
  * shell it was pasted into. When the agent directory already resolves into
  * a session tree, no command is given at all.
  */
@@ -1732,10 +1734,11 @@ export async function stagingResidueNote(dir: string, record: string, consequenc
 		const checks = [getSessionsDir(agentDir), getArchivedSessionsDir(agentDir)].map(shellQuote).join(" ");
 		example =
 			`for example \`(d=${shellQuote(aside)}; mkdir "$d" && r=$(realpath "$d") && for t in ${checks}; do ` +
-			`t=$(realpath "$t") || exit 1; case "$r/" in "$t"/*) echo "$r is inside the session tree $t, so nothing was moved" >&2; ` +
-			`exit 1;; esac; done && mv ${shellQuote(realDir)} "$d"/ && mv ${shellQuote(realRecord)} "$d"/)\`, where \`mkdir\` ` +
-			`makes that directory new and stops if anything already has its name, and the command checks the session trees ` +
-			`again before it moves anything`;
+			`t=$(realpath "$t") || { rmdir "$d"; exit 1; }; case "$r/" in "$t"/*) echo "$r is inside the session tree $t, ` +
+			`so nothing was moved" >&2; rmdir "$d"; exit 1;; esac; done && mv ${shellQuote(realDir)} "$d"/ && ` +
+			`mv ${shellQuote(realRecord)} "$d"/)\`, where \`mkdir\` makes that directory new and stops if anything already ` +
+			`has its name, and the command checks the session trees again before it moves anything, taking the still empty ` +
+			`directory back if it stops`;
 		afterSteps = writable;
 	} else {
 		example =

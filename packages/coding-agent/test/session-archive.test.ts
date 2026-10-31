@@ -4460,6 +4460,11 @@ test("the printed command stops, moving nothing, when a session tree has moved t
 	expect(said).toContain("is inside the session tree");
 	expect(await Bun.file(ground.file).text()).toBe("PARTIAL STAGE");
 	expect(await Bun.file(ground.record).exists()).toBe(true);
+	// It takes back the directory it made, so the same command runs again once the tree is back.
+	const aside = path.join(await fs.realpath(root), `gc-quarantine-${path.basename(ground.record, ".json")}`);
+	expect(await fs.lstat(aside).catch(() => undefined)).toBeUndefined();
+	expect(await Bun.spawn(["sh", "-c", move!]).exited).toBe(0);
+	expect(await Bun.file(path.join(aside, path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
 });
 
 test("the printed command moves the stage where it said, though the agent directory is relinked after the message", async () => {
