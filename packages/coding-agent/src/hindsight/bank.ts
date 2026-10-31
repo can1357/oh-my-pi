@@ -71,8 +71,11 @@ function baseBankId(config: HindsightConfig): string {
  * Sync only: this runs on the hot path of `computeBankScope`, which is
  * exposed as a sync API to callers like `backend.ts` and must stay sync.
  * Native repository discovery never launches a subprocess.
+ *
+ * Exported for `dakera/bank.ts`, which needs the same repository-root-aware
+ * label for its `agent_id` scheme.
  */
-function projectLabel(directory: string): string {
+export function projectLabel(directory: string): string {
 	if (!directory) return UNKNOWN_PROJECT;
 	const primary = vcs.repo(directory)?.primaryRoot() ?? null;
 	return path.basename(primary ?? directory).toLowerCase() || UNKNOWN_PROJECT;

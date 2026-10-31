@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- Dakera recall now renders document chunks with their provenance (`[doc:<title> #<i>/<N> «<heading>»]`) and stops double-spending the block budget: a transcript drops out when its derived fragment already rendered, and duplicate row ids never render twice ([#12987](https://github.com/can1357/oh-my-pi/pull/12987) by [@Xyzjesus](https://github.com/Xyzjesus))
+- Dakera's recall block budget rose from 1500 to 6000 characters (~1500 tokens): measured on 30 live recalls, the old budget fit 7 rows and missed 12% of the top-3 facts; the new one fits 21 rows and covers 98% at a cost comparable to other memory backends ([#12987](https://github.com/can1357/oh-my-pi/pull/12987) by [@Xyzjesus](https://github.com/Xyzjesus))
+- Dakera auto-recall re-runs when the conversation moves to a new topic (token-overlap gate plus a cooldown), replacing the injected memory block instead of freezing the first-turn one for the whole session ([#12987](https://github.com/can1357/oh-my-pi/pull/12987) by [@Xyzjesus](https://github.com/Xyzjesus))
+- Added the `save_document` tool for the Dakera backend: import a local file, web page, or text as a server-chunked document, and optionally auto-import documentation fetched through context7, GitHub, web-page, and deepwiki tools (`dakera.ingestToolResults`) ([#12987](https://github.com/can1357/oh-my-pi/pull/12987) by [@Xyzjesus](https://github.com/Xyzjesus))
+
+### Changed
+
+- Dakera's auto-recall block now packs memory items whole in rank order within a token budget (`dakera.recallBlockTokens`, default 1500, exact tokenizer): an item over its fair share (a third of the budget) is cut at a sentence boundary to that share so the top-ranked memories never drop out, and document chunks collapse to one index line per document with their bodies served by the `recall` tool ([#12987](https://github.com/can1357/oh-my-pi/pull/12987) by [@Xyzjesus](https://github.com/Xyzjesus))
+
+### Fixed
+
+- `dakera.recallTopK` now strictly limits the recall candidate pool after ranking: the 0.12.x server appends association rows past `top_k`, and older builds ignored the field entirely, so the knob silently changed meaning with the server version ([#12987](https://github.com/can1357/oh-my-pi/pull/12987) by [@Xyzjesus](https://github.com/Xyzjesus))
+
 ## [18.14.1] - 2026-10-31
 
 ### Added
