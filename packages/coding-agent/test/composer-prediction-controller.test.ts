@@ -7,6 +7,7 @@ import {
 	parseComposerPrediction,
 } from "@oh-my-pi/pi-coding-agent/modes/controllers/composer-prediction-controller";
 import type { EphemeralTurnOptions, EphemeralTurnResult } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
+import type { CustomEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
 describe("parseComposerPrediction", () => {
@@ -43,6 +44,8 @@ interface HarnessOptions {
 }
 
 const MODEL = { id: "claude-sonnet-4-5", provider: "anthropic", api: "anthropic-messages" } as Model;
+/** Session usage totals read `cost.total`, so the fixture carries one. */
+const USAGE = { input: 10, output: 5, cost: { total: 0.001 } };
 
 function userMessage(content: string, timestamp: number): Message {
 	return { role: "user", content, timestamp } as Message;
@@ -82,7 +85,7 @@ function harness(options: HarnessOptions = {}) {
 			api: MODEL.api,
 			provider: MODEL.provider,
 			model: MODEL.id,
-			usage: { input: 10, output: 5 },
+			usage: USAGE,
 			stopReason: "stop",
 		} as unknown as EphemeralTurnResult["assistantMessage"];
 		turn.resolve({ replyText, assistantMessage });
@@ -96,6 +99,16 @@ function harness(options: HarnessOptions = {}) {
 		reply,
 		renders: () => renders,
 		usageEntries: () => sessionManager.getEntries().filter(entry => entry.type === "model_usage"),
+		customEntries: (customType: string) =>
+			sessionManager
+				.getEntries()
+				.filter((entry): entry is CustomEntry => entry.type === "custom" && entry.customType === customType),
+		/** The user sends `content`; `held` puts it in the live history before its start event arrives. */
+		send: (content: string, held: boolean) => {
+			const message = userMessage(content, 3) as AgentMessage;
+			if (held) messages.push(message);
+			return message;
+		},
 		/** A new message lands on the journal and in the live history. */
 		advance: (content: string) => {
 			sessionManager.appendMessage(userMessage(content, 2));
@@ -166,7 +179,7 @@ describe("ComposerPredictionController", () => {
 			expect.objectContaining({
 				purpose: "composer-prediction",
 				parentId: firstLeafId,
-				usage: { input: 10, output: 5 },
+				usage: USAGE,
 			}),
 		]);
 	});
@@ -195,5 +208,77 @@ describe("ComposerPredictionController", () => {
 		expect(controller.text).toBeUndefined();
 		await reply(2, "latest prediction");
 		expect(controller.text).toBe("latest prediction");
+	});
+
+	it("journals each reply under its usage entry: the prediction text, or none for a skip", async () => {
+		const offered = harness();
+		offered.controller.request();
+		await offered.reply(0, "now run the tests");
+		const skipped = harness();
+		skipped.controller.request();
+		await skipped.reply(0, "NO_PREDICTION");
+
+		const version = expect.stringMatching(/^[0-9a-f]{12}$/);
+		const [offeredUsage] = offered.usageEntries();
+		const [offeredEntry] = offered.customEntries("composer_prediction");
+		expect(offeredEntry).toMatchObject({
+			parentId: offeredUsage!.id,
+			data: { promptVersion: version, text: "now run the tests" },
+		});
+		const [skippedUsage] = skipped.usageEntries();
+		const [skippedEntry] = skipped.customEntries("composer_prediction");
+		expect(skippedEntry).toEqual(
+			expect.objectContaining({ parentId: skippedUsage!.id, data: { promptVersion: version } }),
+		);
+	});
+
+	it("does not journal a prediction that arrives after the conversation moved on", async () => {
+		const { controller, reply, advance, customEntries } = harness();
+		controller.request();
+		advance("something else");
+		await reply(0, "too late");
+
+		expect(customEntries("composer_prediction")).toEqual([]);
+	});
+
+	it.each([
+		{ name: "accepted", shown: true, accepted: true, sent: "now run the tests", outcome: "accepted" },
+		{ name: "edited", shown: true, accepted: true, sent: "now run the unit tests", outcome: "edited" },
+		{ name: "ignored", shown: true, accepted: false, sent: "now run the tests", outcome: "ignored" },
+		{ name: "unseen", shown: false, accepted: false, sent: "something else", outcome: "unseen" },
+	])("records the next message's outcome as $name under the prediction entry", async c => {
+		for (const held of [false, true]) {
+			const { controller, reply, send, customEntries } = harness();
+			controller.request();
+			await reply(0, "now run the tests");
+			if (c.shown) controller.noteShown("now run the tests");
+			if (c.accepted) controller.noteAccepted("now run the tests");
+
+			controller.settle(send(c.sent, held));
+
+			const [prediction] = customEntries("composer_prediction");
+			expect(customEntries("composer_prediction_outcome")).toEqual([
+				expect.objectContaining({ parentId: prediction!.id, data: { outcome: c.outcome } }),
+			]);
+		}
+	});
+
+	it("records one outcome, and none for a message that follows a different conversation point", async () => {
+		const { controller, reply, send, advance, customEntries } = harness();
+		controller.request();
+		await reply(0, "now run the tests");
+		controller.noteShown("some other text");
+		advance("interjection");
+
+		controller.settle(send("now run the tests", true));
+		expect(customEntries("composer_prediction_outcome")).toEqual([]);
+
+		const fresh = harness();
+		fresh.controller.request();
+		await fresh.reply(0, "now run the tests");
+		const message = fresh.send("now run the tests", true);
+		fresh.controller.settle(message);
+		fresh.controller.settle(message);
+		expect(fresh.customEntries("composer_prediction_outcome")).toHaveLength(1);
 	});
 });

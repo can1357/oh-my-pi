@@ -70,6 +70,7 @@ import {
 	type ServiceTierChangeEntry,
 	sessionEntryLeafId,
 	type SessionEntry,
+	type SessionEntryBase,
 	type SessionHeader,
 	type SessionInitEntry,
 	type SessionMessageEntry,
@@ -3590,21 +3591,41 @@ export class SessionManager {
 		>,
 		owner: { sessionId: string; parentId: string | null },
 	): string | undefined {
+		return this.#appendOnBranch({ type: "model_usage", ...usage }, owner);
+	}
+
+	/**
+	 * Record a custom entry on the branch that produced it, as {@link appendModelUsage} does: nothing
+	 * is written once the session or parent entry is gone, and a branch that moved on keeps its leaf.
+	 */
+	appendCustomEntryOnBranch(
+		customType: string,
+		data: unknown,
+		owner: { sessionId: string; parentId: string | null },
+	): string | undefined {
+		return this.#appendOnBranch({ type: "custom", customType, data }, owner);
+	}
+
+	#appendOnBranch(
+		body:
+			| Omit<ModelUsageEntry, Exclude<keyof SessionEntryBase, "type">>
+			| Omit<CustomEntry, Exclude<keyof SessionEntryBase, "type">>,
+		owner: { sessionId: string; parentId: string | null },
+	): string | undefined {
 		if (this.#sessionId !== owner.sessionId || (owner.parentId !== null && !this.#index.has(owner.parentId))) {
 			return undefined;
 		}
 		const activeLeafId = this.#index.leafId();
-		const entry: ModelUsageEntry = {
-			type: "model_usage",
+		const entry: ModelUsageEntry | CustomEntry = {
+			...body,
 			id: generateId(this.#index),
 			parentId: owner.parentId,
 			timestamp: nowIso(),
 			runtime: currentRuntimeIdentity(),
-			...usage,
 			...(activeLeafId !== owner.parentId ? { activeLeafId } : {}),
 		};
 		this.#recordEntry(entry);
-		// Through #setLeaf so an in-flight atomic batch restores this leaf, not the usage entry, on rollback.
+		// Through #setLeaf so an in-flight atomic batch restores this leaf, not the new entry, on rollback.
 		if (activeLeafId !== owner.parentId) this.#setLeaf(activeLeafId);
 		return entry.id;
 	}

@@ -1278,6 +1278,7 @@ export class EventController {
 				this.#turnStartedAt = event.message.timestamp;
 				this.#turnUsage.reset();
 			}
+			this.composerPrediction.settle(event.message);
 			const userText = textContent(event.message.content);
 			const imageBlocks =
 				typeof event.message.content === "string"

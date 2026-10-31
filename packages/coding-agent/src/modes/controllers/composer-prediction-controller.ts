@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import composerPredictionPrompt from "../../prompts/system/composer-prediction-user.md" with { type: "text" };
 import type { AgentSession } from "../../session/agent-session";
@@ -21,6 +22,33 @@ const PREDICTION_MAX_TOKENS = 1024;
 const PREDICTION_DEADLINE_MS = 15_000;
 /** Usage-ledger purpose, so session totals and `/stats` include prediction requests. */
 const USAGE_PURPOSE = "composer-prediction";
+/** Custom entry for a prediction reply: its text, or none when the model skipped or the parser rejected it. */
+export const COMPOSER_PREDICTION_ENTRY_TYPE = "composer_prediction";
+/** Custom entry, child of the prediction entry, for what the next submitted message did with it. */
+export const COMPOSER_PREDICTION_OUTCOME_ENTRY_TYPE = "composer_prediction_outcome";
+
+/** Data of a {@link COMPOSER_PREDICTION_ENTRY_TYPE} entry; its parent is the request's usage entry. */
+export interface ComposerPredictionEntryData {
+	/** Identifies the prediction prompt template, so results can be compared across prompt changes. */
+	promptVersion: string;
+	/** The ghost text offered; absent when the reply was a skip. */
+	text?: string;
+}
+
+/**
+ * What the next submitted message did with a ready prediction: `accepted` sent it as inserted by
+ * Tab or Right, `edited` changed it after that insertion, `ignored` never inserted the shown ghost,
+ * and `unseen` never painted it (the draft did not match).
+ */
+export type ComposerPredictionOutcome = "accepted" | "edited" | "ignored" | "unseen";
+
+/** Data of a {@link COMPOSER_PREDICTION_OUTCOME_ENTRY_TYPE} entry. */
+export interface ComposerPredictionOutcomeEntryData {
+	outcome: ComposerPredictionOutcome;
+}
+
+/** Short digest of the prompt template; it changes whenever the template does. */
+const PROMPT_VERSION = new Bun.CryptoHasher("sha256").update(composerPredictionPrompt).digest("hex").slice(0, 12);
 /** One pair of double quotes or backticks around the whole reply. */
 const WRAPPING_QUOTES = /^(?:"([^"]*)"|“([^“”]*)”|`([^`]*)`)$/;
 
@@ -34,6 +62,15 @@ interface PredictionSource {
 }
 
 type PredictionContext = Pick<InteractiveModeContext, "settings" | "viewSession" | "focusedAgentId" | "editor" | "ui">;
+
+interface ReadyPrediction {
+	text: string;
+	source: PredictionSource;
+	/** Journal entry recording it; outcomes are written beneath it. */
+	entryId: string | undefined;
+	shown: boolean;
+	accepted: boolean;
+}
 
 /**
  * Normalize a prediction reply to the single line the composer shows, or
@@ -57,7 +94,7 @@ export class ComposerPredictionController {
 	readonly #ctx: PredictionContext;
 	readonly #deadlineMs: number;
 	#abort: AbortController | undefined;
-	#prediction: { text: string; source: PredictionSource } | undefined;
+	#prediction: ReadyPrediction | undefined;
 
 	constructor(ctx: PredictionContext, options: { deadlineMs?: number } = {}) {
 		this.#ctx = ctx;
@@ -104,6 +141,52 @@ export class ComposerPredictionController {
 		this.#ctx.ui.requestRender();
 	}
 
+	/** The composer painted `text` as ghost text. */
+	noteShown(text: string): void {
+		const prediction = this.#readyFor(text);
+		if (prediction) prediction.shown = true;
+	}
+
+	/** Tab or Right inserted `text` into the composer. */
+	noteAccepted(text: string): void {
+		const prediction = this.#readyFor(text);
+		if (!prediction) return;
+		prediction.shown = true;
+		prediction.accepted = true;
+	}
+
+	/**
+	 * Record what `message`, a user message just sent, did with the prediction offered for the
+	 * conversation point it follows. Messages after any other point leave the prediction alone.
+	 */
+	settle(message: AgentMessage): void {
+		const prediction = this.#prediction;
+		if (!prediction || message.role !== "user" || message.synthetic || message.attribution === "agent") return;
+		const { source } = prediction;
+		if (this.#ctx.viewSession !== source.session) return;
+		// The session may or may not hold the message yet when its start event arrives.
+		const messages = source.session.messages;
+		const index = messages.lastIndexOf(message);
+		const previous = index >= 0 ? messages[index - 1] : messages.at(-1);
+		if (previous !== source.lastMessage) return;
+		this.#prediction = undefined;
+		if (prediction.entryId === undefined) return;
+		const sent = textContent(message.content).trim();
+		const outcome: ComposerPredictionOutcome = prediction.accepted
+			? sent === prediction.text
+				? "accepted"
+				: "edited"
+			: prediction.shown
+				? "ignored"
+				: "unseen";
+		this.#appendEntry(
+			source,
+			COMPOSER_PREDICTION_OUTCOME_ENTRY_TYPE,
+			{ outcome } satisfies ComposerPredictionOutcomeEntryData,
+			prediction.entryId,
+		);
+	}
+
 	async #run(source: PredictionSource, abort: AbortController): Promise<void> {
 		try {
 			const { replyText, assistantMessage } = await source.session.runEphemeralTurn({
@@ -113,11 +196,16 @@ export class ComposerPredictionController {
 				signal: AbortSignal.any([abort.signal, AbortSignal.timeout(this.#deadlineMs)]),
 			});
 			// Paid for even when the reply arrives too late to show.
-			this.#recordUsage(source, assistantMessage);
+			const usageId = this.#recordUsage(source, assistantMessage);
+			// A reply the composer can no longer offer was neither shown nor skipped: record only its usage.
 			if (this.#abort !== abort || !this.#isCurrent(source)) return;
 			const text = parseComposerPrediction(replyText);
+			const data: ComposerPredictionEntryData = text
+				? { promptVersion: PROMPT_VERSION, text }
+				: { promptVersion: PROMPT_VERSION };
+			const entryId = usageId && this.#appendEntry(source, COMPOSER_PREDICTION_ENTRY_TYPE, data, usageId);
 			if (!text) return;
-			this.#prediction = { text, source };
+			this.#prediction = { text, source, entryId, shown: false, accepted: false };
 			this.#ctx.ui.requestRender();
 		} catch (error) {
 			if (!abort.signal.aborted) logger.debug("Composer prediction failed", { error: String(error) });
@@ -126,9 +214,9 @@ export class ComposerPredictionController {
 		}
 	}
 
-	#recordUsage(source: PredictionSource, message: AssistantMessage): void {
+	#recordUsage(source: PredictionSource, message: AssistantMessage): string | undefined {
 		try {
-			source.session.sessionManager.appendModelUsage(
+			return source.session.sessionManager.appendModelUsage(
 				{
 					purpose: USAGE_PURPOSE,
 					api: message.api,
@@ -141,7 +229,26 @@ export class ComposerPredictionController {
 			);
 		} catch (error) {
 			logger.debug("Failed to persist composer prediction usage", { error: String(error) });
+			return undefined;
 		}
+	}
+
+	#appendEntry(source: PredictionSource, customType: string, data: unknown, parentId: string): string | undefined {
+		try {
+			return source.session.sessionManager.appendCustomEntryOnBranch(customType, data, {
+				sessionId: source.sessionId,
+				parentId,
+			});
+		} catch (error) {
+			logger.debug("Failed to persist composer prediction entry", { customType, error: String(error) });
+			return undefined;
+		}
+	}
+
+	/** The current prediction, when `text` is what it offers. */
+	#readyFor(text: string): ReadyPrediction | undefined {
+		const prediction = this.#prediction;
+		return prediction && prediction.text === text && this.#isCurrent(prediction.source) ? prediction : undefined;
 	}
 
 	#isCurrent(source: PredictionSource): boolean {

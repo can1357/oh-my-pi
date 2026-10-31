@@ -336,4 +336,27 @@ describe("Editor prediction", () => {
 		expect(editor.getText()).toBe("run the tests");
 		expect(editor.getCursor()).toEqual({ line: 0, col: 13 });
 	});
+
+	it("reports a prediction only once a render paints it, and again when Right inserts it", () => {
+		const editor = new Editor(defaultEditorTheme);
+		const shown: string[] = [];
+		const accepted: string[] = [];
+		editor.prediction = () => "run the tests";
+		editor.onPredictionShown = text => shown.push(text);
+		editor.onPredictionAccepted = text => accepted.push(text);
+		for (const char of "rx") editor.handleInput(char);
+
+		editor.render(60);
+		editor.handleInput("\x1b[C");
+		expect(shown).toEqual([]);
+		expect(accepted).toEqual([]);
+
+		editor.handleInput("\x7f");
+		editor.render(60);
+		expect(shown).toContain("run the tests");
+
+		editor.handleInput("\x1b[C");
+		expect(accepted).toEqual(["run the tests"]);
+		expect(editor.getText()).toBe("run the tests");
+	});
 });

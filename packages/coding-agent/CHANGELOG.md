@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The session log now keeps each composer prediction (its text and a prompt version, under the prediction's usage entry) and what became of it once the next message is sent: `accepted`, `edited`, `ignored`, or `unseen`, so prediction quality can be measured from session files ([#17187](https://github.com/can1357/oh-my-pi/issues/17187))
+
 ## [18.14.1] - 2026-10-31
 
 ### Added

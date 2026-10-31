@@ -951,6 +951,10 @@ export class Editor implements Component, Focusable {
 	 *  the rest without submitting. Must be a single line. Re-evaluated on every render, so hosts can
 	 *  derive it from live state. */
 	prediction?: () => string | undefined;
+	/** Called with the whole {@link prediction} each time a render paints its ghost text. */
+	onPredictionShown?: (prediction: string) => void;
+	/** Called with the whole {@link prediction} when Tab or Right inserts it. */
+	onPredictionAccepted?: (prediction: string) => void;
 
 	// Custom top border (for status line integration). Either an eager `content`
 	// (set once, reused every frame) or a `provider` that recomputes lazily just
@@ -1598,7 +1602,7 @@ export class Editor implements Component, Focusable {
 		// Text painted after an end-of-line cursor with `avail` free cells: dim ghost text
 		// against the cursor, or the placeholder flush right.
 		const placeholder = this.#getPlaceholder();
-		const inlineHint = placeholder ? null : this.#getInlineHint();
+		const inlineHint = placeholder ? null : this.#paintedInlineHint();
 		const hintStyle = this.#theme.hintStyle ?? ((t: string) => `\x1b[2m${t}\x1b[0m`);
 		const hintTail = (avail: number): { text: string; width: number } | undefined => {
 			if (placeholder) {
@@ -1878,7 +1882,7 @@ export class Editor implements Component, Focusable {
 				? this.describePlaceholder()
 				: placeholder && plainText(placeholder).trim();
 		const atLineEnd = cursorCol >= (lines[cursorLine]?.length ?? 0);
-		const ghost = nativePlaceholder || !atLineEnd ? null : this.#getInlineHint();
+		const ghost = nativePlaceholder || !atLineEnd ? null : this.#paintedInlineHint();
 		const vim = this.#vim;
 		let anchor: number | null = null;
 		if (vim?.visual && vim.anchor !== null) {
@@ -5126,7 +5130,9 @@ export class Editor implements Component, Focusable {
 	#acceptPrediction(): boolean {
 		const suffix = this.#getPredictionSuffix();
 		if (!suffix) return false;
+		const prediction = this.prediction?.();
 		this.#insertTextAtCursor(suffix);
+		if (prediction) this.onPredictionAccepted?.(prediction);
 		return true;
 	}
 
@@ -5418,6 +5424,15 @@ export class Editor implements Component, Focusable {
 		}
 
 		return this.#getWordCompletion();
+	}
+	/** {@link #getInlineHint} for a render, reporting a painted prediction to {@link onPredictionShown}. */
+	#paintedInlineHint(): string | null {
+		const hint = this.#getInlineHint();
+		if (hint !== null && this.onPredictionShown && hint === this.#getPredictionSuffix()) {
+			const prediction = this.prediction?.();
+			if (prediction) this.onPredictionShown(prediction);
+		}
+		return hint;
 	}
 	#getPlaceholder(): string | undefined {
 		if (this.#autocompleteState || !this.#isEditorEmpty() || this.#getPredictionSuffix()) return undefined;
