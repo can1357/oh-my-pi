@@ -4,7 +4,6 @@
 
 ### Added
 
-- Added goal-objective update previews with terminal-safe objective text ([#17556](https://github.com/can1357/oh-my-pi/pull/17556) by [@wtfsayo](https://github.com/wtfsayo)).
 - Added `iconButton()`, `quietButton()` and `segmentedTabs()` to `native/overlay`, and `disabled`, `busy` and `icon` options to `actionButton()`
 - Added `nativeTail` to `Composer.setRuntimeChildren` options: containers whose children continue the native surface's `main` after the transcript instead of riding in the dock
 

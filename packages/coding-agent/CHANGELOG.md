@@ -2,9 +2,6 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added opt-in model edits to the active goal objective through `goal.modelObjectiveUpdates` (`disabled`, `confirm`, or `on-request`), preserving the goal's budget and progress; the default remains `disabled` ([#17556](https://github.com/can1357/oh-my-pi/pull/17556) by [@wtfsayo](https://github.com/wtfsayo)).
 ### Changed
 
 - Viewing a subagent or returning to the main session no longer posts a "Viewing agent …" / "Returned to main session" status (a popup in Tern); the status line and Tern's composer already show which agent is in view
