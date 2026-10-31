@@ -55,6 +55,7 @@ import {
 } from "../../extensibility/extensions";
 import { runExtensionCompact } from "../../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
+import { sendSessionUserInput } from "../../extensibility/extensions/send-user-input-handler";
 import { parseSkillInvocation } from "../../extensibility/skills";
 import { PYTHON_KERNEL_CANCEL_BUDGET_MS } from "../../eval/py/kernel";
 import { MCPManager } from "../../mcp/manager";
@@ -72,6 +73,7 @@ import type { SessionInfo as StoredSessionInfo } from "../../session/session-lis
 import { SessionManager } from "../../session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash-commands/available-commands";
+import type { SlashCommandHost } from "../../slash-commands/types";
 import { DEFAULT_STT_MODEL_KEY, STT_MODELS } from "../../stt/models";
 import { refreshAgentDiscovery } from "../../task";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
@@ -1185,22 +1187,54 @@ export class AcpAgent implements Agent {
 		}
 	}
 
-	async #runPromptOrCommand(record: ManagedSessionRecord, text: string, images: AgentImageContent[]): Promise<void> {
-		const promptTurn = record.promptTurn;
-		const skillResult = await this.#tryRunSkillCommand(record, text);
-		if (skillResult || promptTurn?.cancelRequested) {
-			return;
-		}
-
-		const builtinResult = await executeAcpBuiltinSlashCommand(text, {
-			session: record.session,
-			sessionManager: record.session.sessionManager,
-			settings: record.session.settings,
-			cwd: record.session.sessionManager.getCwd(),
-			signal: promptTurn?.abortController.signal,
-			output: output => this.#emitCommandOutput(record, output),
-			refreshCommands: () => this.#emitAvailableCommandsUpdate(record),
-			reloadPlugins: () => this.#reloadPluginState(record),
+	/**
+	 * What a built-in reports to the ACP client and the MCP manager `/mcp` works on, for a prompted
+	 * command and for an extension's `sendUserInput` alike; the prompt turn adds its own `signal` and
+	 * `keepTurnOpenUntilIdle`.
+	 *
+	 * `clientHasSession` gates every notification. A prompted command names a session the client
+	 * already has. An extension can send input from `session_start`, which runs inside `newSession`
+	 * before the client has the session id, so for its input the host reports nothing until
+	 * `#scheduleBootstrapUpdates` installs the lifetime subscription, the guard lifetime events wait
+	 * for too. The response carries the config `session_start` left, `#emitBootstrapUpdates` the
+	 * title and commands, and the extension still gets the output in its result.
+	 */
+	#slashCommandHost(record: ManagedSessionRecord, clientHasSession: () => boolean = () => true): SlashCommandHost {
+		return {
+			output: async output => {
+				if (clientHasSession()) await this.#emitCommandOutput(record, output);
+			},
+			refreshCommands: async () => {
+				if (clientHasSession()) await this.#emitAvailableCommandsUpdate(record);
+			},
+			reloadPlugins: async () => {
+				await this.#reloadPluginState(record);
+				if (clientHasSession()) await this.#emitAvailableCommandsUpdate(record);
+			},
+			notifyTitleChanged: async () => {
+				if (!clientHasSession()) return;
+				await this.#connection.sessionUpdate({
+					sessionId: record.session.sessionId,
+					update: {
+						sessionUpdate: "session_info_update",
+						title: record.session.sessionName,
+						updatedAt: new Date().toISOString(),
+					},
+				});
+			},
+			notifyConfigChanged: async options => {
+				if (!clientHasSession()) return;
+				// Mirrors `setSessionConfigOption`: once the session-lifetime
+				// subscription is installed, `model_changed`/`thinking_level_changed`
+				// already reach `#handleLifetimeEvent`, which pushes the
+				// `config_option_update`. Pushing again here would make clients
+				// redraw their config UI twice for a single change.
+				if (options?.handledBySessionEvent && record.lifetimeUnsubscribe !== undefined) {
+					await this.#waitForPromptEventHandlers(record);
+					return;
+				}
+				await this.#pushConfigOptionUpdate(record);
+			},
 			// `/mcp reauth` writes config-file credentials: reconnect the live
 			// manager's entry (with its client-supplied auth surface cleared, a
 			// pending automatic attempt superseded, and a name-collision with a
@@ -1220,6 +1254,23 @@ export class AcpAgent implements Agent {
 			// ACP-declared servers (`session/new` `mcpServers`) live in this
 			// manager, in no writable config file; `/mcp` lookups must consult it.
 			mcpManager: record.mcpManager,
+		};
+	}
+
+	async #runPromptOrCommand(record: ManagedSessionRecord, text: string, images: AgentImageContent[]): Promise<void> {
+		const promptTurn = record.promptTurn;
+		const skillResult = await this.#tryRunSkillCommand(record, text);
+		if (skillResult || promptTurn?.cancelRequested) {
+			return;
+		}
+
+		const builtinResult = await executeAcpBuiltinSlashCommand(text, {
+			session: record.session,
+			sessionManager: record.session.sessionManager,
+			settings: record.session.settings,
+			cwd: record.session.sessionManager.getCwd(),
+			signal: promptTurn?.abortController.signal,
+			...this.#slashCommandHost(record),
 			keepTurnOpenUntilIdle: async () => {
 				await record.session.waitForIdle();
 				// `AgentSession.#emit()` does not await listeners, so the retried
@@ -1229,28 +1280,6 @@ export class AcpAgent implements Agent {
 				// overtake its own updates. Same pairing as the `!agentInvoked`
 				// path below.
 				await this.#waitForPromptEventHandlers(record);
-			},
-			notifyTitleChanged: async () => {
-				await this.#connection.sessionUpdate({
-					sessionId: record.session.sessionId,
-					update: {
-						sessionUpdate: "session_info_update",
-						title: record.session.sessionName,
-						updatedAt: new Date().toISOString(),
-					},
-				});
-			},
-			notifyConfigChanged: async options => {
-				// Mirrors `setSessionConfigOption`: once the session-lifetime
-				// subscription is installed, `model_changed`/`thinking_level_changed`
-				// already reach `#handleLifetimeEvent`, which pushes the
-				// `config_option_update`. Pushing again here would make clients
-				// redraw their config UI twice for a single change.
-				if (options?.handledBySessionEvent && record.lifetimeUnsubscribe !== undefined) {
-					await this.#waitForPromptEventHandlers(record);
-					return;
-				}
-				await this.#pushConfigOptionUpdate(record);
 			},
 		});
 		if (promptTurn?.cancelRequested) return;
@@ -2567,9 +2596,9 @@ export class AcpAgent implements Agent {
 	/**
 	 * Reload plugin/registry state for an ACP session. Mirrors the interactive
 	 * `/reload-plugins` and `/move` flows: invalidates the plugin-roots cache,
-	 * refreshes task agents, resets the capability cache, refreshes the
-	 * session's slash-command state, then re-advertises commands so the client
-	 * sees newly installed/disabled plugins.
+	 * refreshes task agents, resets the capability cache and refreshes the
+	 * session's slash-command state. The host's `reloadPlugins` then
+	 * re-advertises commands so the client sees newly installed/disabled plugins.
 	 */
 	async #reloadPluginState(record: ManagedSessionRecord): Promise<void> {
 		const cwd = record.session.sessionManager.getCwd();
@@ -2577,7 +2606,6 @@ export class AcpAgent implements Agent {
 		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
 		await refreshAgentDiscovery(cwd, record.session.effectiveExtensionRoots);
 		await record.session.refreshSkillsAndCommands();
-		await this.#emitAvailableCommandsUpdate(record);
 	}
 
 	async #emitEndOfTurnUpdates(record: ManagedSessionRecord): Promise<void> {
@@ -2986,6 +3014,15 @@ export class AcpAgent implements Agent {
 				},
 				sendUserMessage: (content, options) => {
 					this.#trackExtensionUserMessage(record, record.session.sendUserMessage(content, options));
+				},
+				sendUserInput: (text, options) => {
+					const host = this.#slashCommandHost(record, () => record.lifetimeUnsubscribe !== undefined);
+					const inputTask = sendSessionUserInput(record.session, text, options, host);
+					this.#trackExtensionUserMessage(
+						record,
+						inputTask.then(() => {}),
+					);
+					return inputTask;
 				},
 				appendEntry: (customType, data) => {
 					record.session.sessionManager.appendCustomEntry(customType, data);
