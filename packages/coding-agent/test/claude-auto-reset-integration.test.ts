@@ -239,7 +239,10 @@ describe("Claude saved-reset trigger integration", () => {
 				modelRegistry,
 			);
 			vi.spyOn(extensionRunner, "hasUI").mockReturnValue(true);
-			vi.spyOn(extensionRunner.getUIContext(), "select").mockImplementation(options.consent);
+			// A UI of this runner's own: the one a runner starts with is shared by every runner, and frozen.
+			const ui = { ...extensionRunner.getUIContext() };
+			vi.spyOn(ui, "select").mockImplementation(options.consent);
+			vi.spyOn(extensionRunner, "getUIContext").mockReturnValue(ui);
 		} else if (options.withExtensionRunner) {
 			extensionRunner = new ExtensionRunner(
 				[],

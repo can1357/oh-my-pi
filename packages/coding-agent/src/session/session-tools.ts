@@ -464,9 +464,11 @@ export class SessionTools {
 		return {
 			...host.customToolSurfaces(),
 			get model() {
-				// The host's getter may throw: its failure crosses as a copy, as the model does.
+				// The host's getter may throw: its failure crosses as a copy, as the model does. A manager
+				// tool is host code with no session to answer for, so the copy's `resolveHeaders` calls
+				// the host's whenever it is called.
 				const model = fromHostCall(() => host.model());
-				return model && handHostModel(model);
+				return model && handHostModel(model, fromHostCall);
 			},
 			isIdle: () => !host.isStreaming(),
 			hasQueuedMessages: () => host.queuedMessageCount() > 0,

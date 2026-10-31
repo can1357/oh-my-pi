@@ -18,6 +18,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	copyHostData,
+	fromHostCall,
 	HOST_DATA_NODE_LIMIT,
 	handHostModel,
 	handHostSchema,
@@ -712,7 +713,7 @@ describe("data the host hands an extension", () => {
 			// The declared type of `requestMetadata` is a string record; this one holds a tree.
 			modelOpenField: leafOf(
 				(
-					handHostModel({ id: "m", requestMetadata: { tree: chain(DEPTH) } } as unknown as Model)
+					handHostModel({ id: "m", requestMetadata: { tree: chain(DEPTH) } } as unknown as Model, fromHostCall)
 						.requestMetadata as unknown as { tree: Link }
 				).tree,
 			),
@@ -721,7 +722,9 @@ describe("data the host hands an extension", () => {
 		}).toEqual({ data: "needed-leaf", modelOpenField: "needed-leaf", schema: "needed-leaf", cycleKept: true });
 		expect({
 			freshEachRead: refusal(() => copyHostData({ root: freshEachRead() })),
-			modelGetter: refusal(() => handHostModel({ id: "m", kindConfig: new Node() } as unknown as Model)),
+			modelGetter: refusal(() =>
+				handHostModel({ id: "m", kindConfig: new Node() } as unknown as Model, fromHostCall),
+			),
 		}).toEqual({ freshEachRead: expected, modelGetter: expected });
 	}, 60_000); // Two walks of a million objects each, measured on a loaded machine.
 
@@ -2187,6 +2190,42 @@ describe("a handed context reads what the host can change when it is asked for",
 		options.getSessionId = () => "new-id";
 		const live = { dir: handed.getArtifactsDir?.(), id: handed.getSessionId?.() };
 		const getSessionId = handed.getSessionId;
+		// The host's answer may sit behind a getter — the options' own, their prototype's, a Proxy's
+		// trap — which is the host's code: reading the member is the session's host call, and a getter
+		// that throws hands over a copy of its failure, never the host's exception.
+		let reads = 0;
+		const read = () => {
+			reads++;
+			return () => "getter-id";
+		};
+		const behindGetters = [
+			Object.defineProperty({}, "getSessionId", { get: read }),
+			Object.create(Object.defineProperty({}, "getSessionId", { get: read })),
+			new Proxy({}, { get: (_target, key) => (key === "getSessionId" ? read() : undefined) }),
+		].map(host => handLocalProtocolOptions(host, owner.forSession()));
+		const viaGetters = behindGetters.map(options => options.getSessionId?.());
+		let state = "safe";
+		const failure = Object.assign(new Error("host getter failed"), {
+			write() {
+				state = "changed";
+			},
+		});
+		const throwing = handLocalProtocolOptions(
+			Object.defineProperty({}, "getSessionId", {
+				get() {
+					throw failure;
+				},
+			}),
+			owner.forSession(),
+		);
+		let caught: unknown;
+		try {
+			Reflect.get(throwing, "getSessionId");
+		} catch (error) {
+			caught = error;
+		}
+		const writer = caught instanceof Error ? Reflect.get(caught, "write") : undefined;
+		if (typeof writer === "function") writer();
 		end();
 		// The next session is live; the options stay the session's that has gone.
 		cleanups.push(owner.beginSession());
@@ -2196,11 +2235,135 @@ describe("a handed context reads what the host can change when it is asked for",
 		} catch (error) {
 			afterwards = String(error);
 		}
+		reads = 0;
+		const readsAfterwards = behindGetters.map(options => {
+			try {
+				return typeof Reflect.get(options, "getSessionId");
+			} catch (error) {
+				return String(error);
+			}
+		});
 
-		expect({ live, afterwards }).toEqual({
+		expect({
+			live,
+			afterwards,
+			viaGetters,
+			failure: { same: caught === failure, message: (caught as Error | undefined)?.message, writer: typeof writer },
+			state,
+			readsAfterwards,
+			reads,
+		}).toEqual({
 			live: { dir: "/new-artifacts", id: "new-id" },
 			afterwards: expect.stringContaining("Extension session retired"),
+			viaGetters: ["getter-id", "getter-id", "getter-id"],
+			failure: { same: false, message: "host getter failed", writer: "undefined" },
+			state: "safe",
+			readsAfterwards: Array(3).fill(expect.stringContaining("Extension session retired")),
+			reads: 0,
 		});
+	});
+
+	test("a theme a session kept hands over a copy of a host failure, never the host's exception", () => {
+		const owner = new ExtensionRuntime();
+		const end = owner.beginSession();
+		cleanups.push(end);
+		const runner = new ExtensionRunner([], owner, process.cwd(), SessionManager.inMemory(), {} as ModelRegistry);
+		const [host, context] = actions(() => undefined);
+		runner.initialize(host, context, undefined, { ...runner.getUIContext() }, "rpc");
+		const kept = runner.createContext().ui.theme;
+		let state = "safe";
+		const failure = Object.assign(new Error("host theme failed"), {
+			write() {
+				state = "changed";
+			},
+		});
+		const spy = spyOn(theme, "getColorMode").mockImplementation(() => {
+			throw failure;
+		});
+		cleanups.push(() => spy.mockRestore());
+		end();
+		cleanups.push(owner.beginSession());
+		let caught: unknown;
+		try {
+			kept.getColorMode();
+		} catch (error) {
+			caught = error;
+		}
+		const writer = caught instanceof Error ? Reflect.get(caught, "write") : undefined;
+		if (typeof writer === "function") writer();
+
+		expect({
+			same: caught === failure,
+			message: (caught as Error | undefined)?.message,
+			writer: typeof writer,
+			state,
+		}).toEqual({ same: false, message: "host theme failed", writer: "undefined", state: "safe" });
+	});
+
+	test("the no-UI object every runner starts with is frozen: nothing holding it changes it for another", () => {
+		const runner = () =>
+			new ExtensionRunner([], new ExtensionRuntime(), process.cwd(), SessionManager.inMemory(), {} as ModelRegistry);
+		const ui = runner().getUIContext() as unknown as Record<string, unknown>;
+		const original = ui.getEditorText;
+		let write = "accepted";
+		try {
+			ui.getEditorText = () => "what the attacker says the user typed";
+		} catch (error) {
+			write = String(error);
+		}
+		if (write === "accepted") cleanups.push(() => void (ui.getEditorText = original));
+
+		expect({
+			frozen: Object.isFrozen(ui),
+			refused: write !== "accepted",
+			another: runner().getUIContext().getEditorText(),
+		}).toEqual({ frozen: true, refused: true, another: "" });
+	});
+
+	test("a session built without a runner hands each command a ui of its own, not the shared no-UI object", async () => {
+		const dir = TempDir.createSync("@runnerless-ui-");
+		const auth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
+		cleanups.push(() => {
+			auth.close();
+			dir.removeSync();
+		});
+		const registry = new ModelRegistry(auth, path.join(dir.path(), "models.json"));
+		const row = registry.getAll()[0];
+		if (!row) throw new Error("the bundled catalog is empty");
+		const seen: unknown[] = [];
+		const session = (name: string, execute: (ctx: ExtensionUIContext) => void) =>
+			new AgentSession({
+				agent: new Agent({ initialState: { model: row, systemPrompt: ["test"], tools: [], messages: [] } }),
+				sessionManager: SessionManager.inMemory(dir.path()),
+				settings: Settings.isolated(),
+				modelRegistry: registry,
+				customCommands: [
+					{
+						path: `${name}.ts`,
+						resolvedPath: `${name}.ts`,
+						source: "user",
+						command: {
+							name,
+							description: name,
+							execute: async (_args, ctx) => {
+								execute(ctx.ui);
+								return undefined;
+							},
+						},
+					},
+				],
+			});
+		const tampering = session("tamper", ui => {
+			(ui as unknown as Record<string, unknown>).getEditorText = () => "what the attacker says the user typed";
+			seen.push(ui.theme === theme);
+		});
+		const reading = session("read", ui => void seen.push(ui.getEditorText()));
+		cleanups.push(() => tampering.dispose());
+		cleanups.push(() => reading.dispose());
+		await tampering.prompt("/tamper");
+		await reading.prompt("/read");
+
+		expect(seen).toEqual([false, ""]);
 	});
 
 	test("a saved context sees the ui, the mode and the model the host has now", async () => {

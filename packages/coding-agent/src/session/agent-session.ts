@@ -161,7 +161,7 @@ import type {
 	TreePreparation,
 } from "../extensibility/extensions";
 import { emitSessionShutdownEvent, TOP_LEVEL_AGENT, UNAVAILABLE_ANNOTATIONS } from "../extensibility/extensions";
-import { copyHostData, handHostModel, handSessionFacade } from "../extensibility/extensions/boundary-data";
+import { handAsIs, handHostModel, handSessionFacade, sessionCall } from "../extensibility/extensions/boundary-data";
 import { runExtensionCompact } from "../extensibility/extensions/compact-handler";
 import {
 	CONTEXT_ANSWERS,
@@ -170,6 +170,7 @@ import {
 	handLocalProtocolOptions,
 	handModelRegistry,
 	handSessionManager,
+	handUIContext,
 } from "../extensibility/extensions/context-surfaces";
 import { extensionEventFromSessionEvent } from "../extensibility/extensions/lifecycle-mirror";
 import { ExtensionRuntime } from "../extensibility/extensions/loader";
@@ -278,6 +279,7 @@ import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { supportsExternalThinking } from "../tools/think";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import type { ToolRendererScope } from "@oh-my-pi/pi-tui/tools/renderer-scope";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { AgentDefinition } from "../task/types";
 import type { ModelMention } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
@@ -708,7 +710,9 @@ const EXPERIMENTAL_CONTEXT_REQUIRED_TOOLS: Record<string, true> = {
 // Constants
 // ============================================================================
 
-const noOpUIContext: ExtensionUIContext = {
+/** The UI of a session built without a runner: one object for every such session, so frozen. A
+ *  command is handed a facade over it (`handUIContext`), never the object itself. */
+const noOpUIContext: ExtensionUIContext = Object.freeze<ExtensionUIContext>({
 	select: async (_title, _options, _dialogOptions) => undefined,
 	confirm: async (_title, _message, _dialogOptions) => false,
 	input: async (_title, _placeholder, _dialogOptions) => undefined,
@@ -738,7 +742,7 @@ const noOpUIContext: ExtensionUIContext = {
 	getEditorComponent: () => undefined,
 	getToolsExpanded: () => false,
 	setToolsExpanded: () => {},
-};
+});
 
 // ============================================================================
 // AgentSession Class
@@ -9552,11 +9556,21 @@ export class AgentSession implements SettingsScope {
 		const sessionManager = this.sessionManager;
 		// Every member that calls this session is the owner's host call, as a runner's context's
 		// are: refused once the session is disposed — `shutdown` included, which would otherwise exit
-		// the process from a command kept past disposal.
+		// the process from a command kept past disposal. What a member answers crosses by the
+		// boundary's one rule (`handSessionFacade`).
+		// A session without a runner draws nothing of an extension's: what a factory handed `ctx.ui`
+		// would run in is the claim's own admission.
+		const scope: ToolRendererScope = {
+			get live() {
+				return !owner.isRetired;
+			},
+			run: call => owner.runOwned(call),
+		};
 		return handSessionFacade<ExtensionCommandContext>(
 			{
-				// Fixed: a session without a runner has no UI, now or later.
-				ui: noOpUIContext,
+				// Fixed: a session without a runner has no UI, now or later. The no-UI object is shared
+				// by every such session, so the command is handed a facade over it.
+				ui: handUIContext(noOpUIContext, owner, scope),
 				mode: "print",
 				hasUI: false,
 				// Read when asked for, as a runner's context does: a relocation moves the session's cwd.
@@ -9572,10 +9586,10 @@ export class AgentSession implements SettingsScope {
 				agent: TOP_LEVEL_AGENT,
 
 				// The host's getter may throw: its failure crosses as a copy (`handSessionFacade`), as the
-				// model does.
+				// model does. Its `resolveHeaders` is the claim's call, refused once the session is gone.
 				get model() {
 					const model = getModel();
-					return model && handHostModel(model);
+					return model && handHostModel(model, sessionCall(owner));
 				},
 				models: createExtensionModelQuery(this.#modelRegistry, this.settings, getModel, owner),
 				isIdle: () => !this.isStreaming,
@@ -9593,9 +9607,9 @@ export class AgentSession implements SettingsScope {
 				resolvePlanReview: () => false,
 				getPendingPlanReview: () => undefined,
 				openPlanReview: async () => false,
-				// What a read answers with is a copy, as a runner's context hands it.
-				getContextUsage: () => copyHostData(this.getContextUsage()),
-				getAsyncJobSnapshot: () => copyHostData(this.getAsyncJobSnapshot()),
+				// What a read answers with is a copy (`handSessionFacade`), as a runner's context hands it.
+				getContextUsage: () => this.getContextUsage(),
+				getAsyncJobSnapshot: () => this.getAsyncJobSnapshot(),
 				waitForIdle: () => this.waitForIdle(),
 				newSession: async options => {
 					const success = await this.newSession({ parentSession: options?.parentSession });
@@ -9623,16 +9637,17 @@ export class AgentSession implements SettingsScope {
 				reload: async () => {
 					await this.reload();
 				},
-				getSystemPrompt: () => copyHostData(this.systemPrompt),
-				runEphemeralTurn: async args => copyHostData(await this.runEphemeralTurn(args)),
+				getSystemPrompt: () => this.systemPrompt,
+				runEphemeralTurn: async args => this.runEphemeralTurn(args),
 				// The SDK always builds a runner (which receives the annotations factory); this runner-less
 				// context only exists for directly constructed sessions, which have no `/annotate` wiring.
 				annotations: UNAVAILABLE_ANNOTATIONS,
-				// Owned by this session: inert once it is disposed, as a runner's context's timers are.
+				// Owned by this session: inert once it is disposed, as a runner's context's timers are. The
+				// handle is the platform's own, handed as it is for `clearTimer` to take back.
 				setInterval: (callback, ms, ...args) =>
-					this.#fallbackTimers().setInterval(owner.ownCallback(callback), ms, ...args),
+					handAsIs(this.#fallbackTimers().setInterval(owner.ownCallback(callback), ms, ...args)),
 				setTimeout: (callback, ms, ...args) =>
-					this.#fallbackTimers().setTimeout(owner.ownCallback(callback), ms, ...args),
+					handAsIs(this.#fallbackTimers().setTimeout(owner.ownCallback(callback), ms, ...args)),
 				clearTimer: timer => this.#fallbackTimers().clear(timer),
 			},
 			owner,
@@ -9663,7 +9678,11 @@ export class AgentSession implements SettingsScope {
 	 *  or this session's own surfaces when it has none. */
 	#customToolSurfaces(): Pick<CustomToolContext, "sessionManager" | "modelRegistry" | "localProtocolOptions"> {
 		const runner = this.#extensionRunner;
-		if (!runner) return this.#runnerlessSurfacesClaimed();
+		if (!runner) {
+			// The surfaces alone: the claim that owns them, and its release, stay this session's.
+			const { sessionManager, modelRegistry, localProtocolOptions } = this.#runnerlessSurfacesClaimed();
+			return { sessionManager, modelRegistry, localProtocolOptions };
+		}
 		const context = runner.createContext();
 		return {
 			sessionManager: context.sessionManager,

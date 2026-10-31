@@ -581,50 +581,213 @@ export function sessionHostCall<T>(owner: ExtensionCallbackOwner, call: () => T)
 }
 
 /**
+ * How a facade's member calls the host: as one session's call, refused once that session has gone
+ * ({@link sessionCall}), or whenever it is called ({@link fromHostCall}). Either way a failure
+ * crosses as a copy.
+ */
+export type HostCall = <T>(call: () => T) => T;
+
+const sessionCalls = new WeakMap<ExtensionCallbackOwner, HostCall>();
+
+/** `owner`'s host call ({@link sessionHostCall}), one per owner. */
+export function sessionCall(owner: ExtensionCallbackOwner): HostCall {
+	let call = sessionCalls.get(owner);
+	if (!call) {
+		call = <T>(host: () => T): T => sessionHostCall(owner, host);
+		sessionCalls.set(owner, call);
+	}
+	return call;
+}
+
+/**
+ * Everything the boundary hands an extension as it is: a facade it built ({@link handSessionFacade},
+ * {@link handHostFacade}), a callable a member answered with, a model copy ({@link handHostModel}),
+ * and the deliberate identities, each named where it is handed ({@link handAsIs}).
+ */
+const handedAsIs = new WeakSet<object>();
+
+/**
+ * `value`, as one the boundary hands an extension as it is. For what the boundary itself makes,
+ * and for a deliberate identity, said where it is handed: the timer handle `clearTimer` takes
+ * back, what the extension handed in and is handed back (its editor factory, what its dialog was
+ * done with). Never a host object an extension could act on: that crosses as a facade or a copy.
+ */
+export function handAsIs<T>(value: T): T {
+	if ((typeof value === "object" && value !== null) || typeof value === "function") handedAsIs.add(value);
+	return value;
+}
+
+/**
+ * Whether `value` is data nothing can change and that runs nothing when read: frozen all the way
+ * down, plain objects and arrays only, every property a value and none a function. Such data
+ * crosses as it is (the theme's `sessionAccentInputs`, the default agent identity): sharing it
+ * hands over nothing a copy would not. A Proxy is never such data, since asking it runs its traps.
+ */
+export function isImmutableData(value: object): boolean {
+	const pending: object[] = [value];
+	const seen = new Set<object>();
+	for (let item = pending.pop(); item !== undefined; item = pending.pop()) {
+		if (seen.has(item)) continue;
+		seen.add(item);
+		if (types.isProxy(item) || !Object.isFrozen(item)) return false;
+		const prototype: unknown = Object.getPrototypeOf(item);
+		if (prototype !== Object.prototype && prototype !== Array.prototype && prototype !== null) return false;
+		for (const key of Reflect.ownKeys(item)) {
+			const descriptor = Object.getOwnPropertyDescriptor(item, key);
+			if (!descriptor || !("value" in descriptor)) return false;
+			const field: unknown = descriptor.value;
+			if (typeof field === "function") return false;
+			if (typeof field === "object" && field !== null) pending.push(field);
+		}
+	}
+	return true;
+}
+
+/**
+ * What a facade's member answered, as the extension is handed it: the one rule every answer of
+ * every facade crosses by — a method's return, a getter's value, what a promise settles with — so
+ * the boundary is on the call and on everything the call answers, and no member has to remember
+ * to copy. A member that forgets hands a copy, never the host's object:
+ *
+ * - a primitive, as it is;
+ * - what the boundary hands as it is ({@link handAsIs}), or data nothing can change
+ *   ({@link isImmutableData}), as it is;
+ * - a function — a resolver the registry made, a disposer the host returned — as a callable that
+ *   calls it through `call`: a session's member answers with a function that is that session's
+ *   call too, refused once it has gone, its failure a copy, what it answers crossing by this rule;
+ * - a promise, as a promise of what it settles with, crossing by this rule;
+ * - anything else, as a copy ({@link copyHostData}) in which what the boundary hands as it is
+ *   stays itself.
+ */
+function crossing(value: unknown, call: HostCall): unknown {
+	if (value === null || (typeof value !== "object" && typeof value !== "function")) return value;
+	if (handedAsIs.has(value)) return value;
+	if (typeof value === "function") return hostCallable(value, call, call);
+	if (value instanceof Promise) return value.then(settled => crossing(settled, call));
+	if (isImmutableData(value)) return value;
+	return new HostCopier(undefined, undefined, true).copy(value);
+}
+
+/** `wrapper`, with the name and arity of `fn`: a member keeps the ones it was written with. */
+function shapedAs<F extends Function>(wrapper: F, fn: Function): F {
+	Object.defineProperty(wrapper, "name", { value: fn.name, configurable: true });
+	Object.defineProperty(wrapper, "length", { value: fn.length, configurable: true });
+	return wrapper;
+}
+
+/** `fn` as a facade hands it: called through `call` on the receiver it is called on, its failure a
+ *  copy, and what it answers crossing through `onward` ({@link crossing}). An `async` function
+ *  stays one, so it refuses by rejecting, as every other failure of it does. */
+function hostCallable(fn: Function, call: HostCall, onward: HostCall): Function {
+	const callable =
+		fn instanceof (AsyncFunction as FunctionConstructor)
+			? async function (this: unknown, ...args: unknown[]): Promise<unknown> {
+					return call(() => crossing(Reflect.apply(fn, this, args), onward));
+				}
+			: function (this: unknown, ...args: unknown[]): unknown {
+					return call(() => crossing(Reflect.apply(fn, this, args), onward));
+				};
+	return handAsIs(shapedAs(callable, fn));
+}
+
+const NO_ANSWERS: ReadonlySet<PropertyKey> = new Set();
+
+/**
+ * Puts the boundary on every member of `facade`, in place, and answers it. A method, a getter and a
+ * setter are each called through `call` — the session's, for every member `answers` does not name
+ * — and whatever a member answers crosses by {@link crossing}, through `call`. A data member the
+ * facade was made with crosses by the same rule once, now, and is then read as the session's call
+ * like any other member. A facade made with no `call` answers whenever it is called
+ * ({@link handHostFacade}).
+ *
+ * A member the boundary cannot be put on is refused, by name, rather than left as written: one
+ * that cannot be redefined (non-configurable), and anything a facade inherits — a facade holds its
+ * members itself, so a member nobody listed is not quietly reachable through its prototype.
+ */
+function handFacade<T extends object>(facade: T, call: HostCall | undefined, answers: ReadonlySet<PropertyKey>): T {
+	const prototype: unknown = Object.getPrototypeOf(facade);
+	if (prototype !== Object.prototype && prototype !== null) {
+		throw new Error("A facade over the host must hold its members itself: this one inherits members no gate is on");
+	}
+	const onward = call ?? fromHostCall;
+	for (const key of Reflect.ownKeys(facade)) {
+		const descriptor = Object.getOwnPropertyDescriptor(facade, key);
+		if (!descriptor?.configurable) {
+			throw new Error(`The facade member ${String(key)} cannot be redefined, so no gate can be put on it`);
+		}
+		const gated = call !== undefined && !answers.has(key);
+		const gate = gated ? call : fromHostCall;
+		if ("value" in descriptor) {
+			const value: unknown = descriptor.value;
+			if (typeof value === "function") {
+				Object.defineProperty(facade, key, { ...descriptor, value: hostCallable(value, gate, onward) });
+			} else if (gated) {
+				let held = crossing(value, onward);
+				Object.defineProperty(facade, key, {
+					configurable: true,
+					enumerable: descriptor.enumerable,
+					get: () => gate(() => held),
+					set: descriptor.writable
+						? (assigned: unknown) =>
+								gate(() => {
+									held = assigned;
+								})
+						: undefined,
+				});
+			} else {
+				Object.defineProperty(facade, key, { ...descriptor, value: crossing(value, onward) });
+			}
+			continue;
+		}
+		const { get, set } = descriptor;
+		Object.defineProperty(facade, key, {
+			...descriptor,
+			get:
+				get &&
+				shapedAs(function (this: unknown): unknown {
+					return gate(() => crossing(Reflect.apply(get, this, []), onward));
+				}, get),
+			set:
+				set &&
+				shapedAs(function (this: unknown, assigned: unknown): void {
+					gate(() => {
+						Reflect.apply(set, this, [assigned]);
+					});
+				}, set),
+		});
+	}
+	return handAsIs(facade);
+}
+
+/**
  * A session's facade over the host: every member is a host call that session makes
- * ({@link sessionHostCall}) — a method's call and a getter's read alike, and a function a getter
- * answers with when it is called later — so what refuses once the session has gone is the member,
- * never whichever argument it happens to copy. A member taking `undefined`, or nothing, is refused
- * as surely as one taking a string. `answers` names the members that call no host: they answer
- * from what the facade was made with, or are facades of their own that refuse member by member.
+ * ({@link sessionHostCall}) — a method's call, a getter's read and a setter's write alike — so what
+ * refuses once the session has gone is the member, never whichever argument it happens to copy. A
+ * member taking `undefined`, or nothing, is refused as surely as one taking a string. What a member
+ * answers is handed by {@link crossing}: a function it answers with is the session's call too, and
+ * an object a copy, unless the boundary made it to be handed. `answers` names the members that call
+ * no host: they answer from what the facade was made with, or are facades of their own that refuse
+ * member by member, and what they answer crosses by the same rule.
  */
 export function handSessionFacade<T extends object>(
 	facade: T,
 	owner: ExtensionCallbackOwner,
-	answers: ReadonlySet<PropertyKey> = new Set(),
+	answers: ReadonlySet<PropertyKey> = NO_ANSWERS,
 ): T {
-	const admitted = <R>(fn: Function, receiver: unknown, args: unknown[]): R =>
-		fn instanceof (AsyncFunction as FunctionConstructor)
-			? ((async () => sessionHostCall(owner, () => Reflect.apply(fn, receiver, args)))() as R)
-			: sessionHostCall(owner, () => Reflect.apply(fn, receiver, args) as R);
-	for (const key of Reflect.ownKeys(facade)) {
-		if (answers.has(key)) continue;
-		const descriptor = Object.getOwnPropertyDescriptor(facade, key);
-		if (!descriptor?.configurable) continue;
-		const method: unknown = descriptor.value;
-		if (typeof method === "function") {
-			Object.defineProperty(facade, key, {
-				...descriptor,
-				value(this: unknown, ...args: unknown[]): unknown {
-					return admitted(method, this, args);
-				},
-			});
-		} else if (descriptor.get) {
-			const get = descriptor.get;
-			Object.defineProperty(facade, key, {
-				...descriptor,
-				get(this: unknown): unknown {
-					const value: unknown = admitted(get, this, []);
-					return typeof value === "function"
-						? function (this: unknown, ...args: unknown[]): unknown {
-								return admitted(value, this, args);
-							}
-						: value;
-				},
-			});
-		}
-	}
-	return facade;
+	return handFacade(facade, sessionCall(owner), answers);
+}
+
+/**
+ * A facade over the host that answers whoever calls it, whenever: the drawing a session's
+ * components do with the host's process-wide renderer (the theme, the TUI's render requests and
+ * frame facts, the terminal's size, the image budget), and the cleanup a session may still owe
+ * once it has gone (a live call's `stop`, an overlay's `hide`). Each is named where it is built.
+ * Everything else of {@link handSessionFacade} holds: a member's failure is a copy, and what it
+ * answers crosses by {@link crossing}, so a function it answers with is called the same way and
+ * an object it answers with is a copy.
+ */
+export function handHostFacade<T extends object>(facade: T): T {
+	return handFacade(facade, undefined, NO_ANSWERS);
 }
 
 /**
@@ -652,6 +815,9 @@ class HostCopier {
 	readonly #signals: HandedSignals | undefined;
 	/** What a function found in the data becomes: dropped, unless the copy hands callbacks in. */
 	readonly #onFunction: ((fn: Function) => unknown) | undefined;
+	/** Whether what the boundary hands as it is ({@link handAsIs}) stays itself in the copy: a facade's
+	 *  answer ({@link crossing}), where a model copy in a list stays the copy it was made as. */
+	readonly #keepHanded: boolean;
 	/** Copies made as data (own enumerable fields) and as read (`readableKeys`), by original. */
 	readonly #copies = new Map<object, unknown>();
 	readonly #readCopies = new Map<object, unknown>();
@@ -660,9 +826,10 @@ class HostCopier {
 	readonly #work: Array<() => void> = [];
 	#objects = 0;
 
-	constructor(signals?: HandedSignals, onFunction?: (fn: Function) => unknown) {
+	constructor(signals?: HandedSignals, onFunction?: (fn: Function) => unknown, keepHanded = false) {
 		this.#signals = signals;
 		this.#onFunction = onFunction;
+		this.#keepHanded = keepHanded;
 	}
 
 	/** `value`, copied completely. */
@@ -696,6 +863,9 @@ class HostCopier {
 	/** The copy of one value found in the data, or {@link DROPPED} for a function the copy leaves
 	 *  out: a function is behavior, not data, unless this copy hands callbacks in. */
 	#child(value: unknown, byRead: boolean): unknown {
+		if (this.#keepHanded && (typeof value === "function" || (typeof value === "object" && value !== null))) {
+			if (handedAsIs.has(value)) return value;
+		}
 		if (typeof value === "function") return this.#onFunction ? this.#onFunction(value) : DROPPED;
 		if (typeof value !== "object" || value === null) return value;
 		const copies = byRead ? this.#readCopies : this.#copies;
@@ -890,10 +1060,13 @@ function followWithCopiedReason(signal: AbortSignal): AbortSignal {
  * there arrives with what its accessors answer — its own, enumerable or not, and its classes' —
  * not as the `{}` its own enumerable fields would make. A getter that throws throws here, as it
  * does when the host reads the model. The copy is bounded as {@link copyHostData}'s is. A
- * `resolveHeaders` is the host's code, not data: the copy's calls it on the host's model, with a
- * signal of the host's own that follows the one the extension passes, and answers a copy.
+ * `resolveHeaders` is the host's code, not data: the copy's calls it on the host's model through
+ * `call` — for a session's facade, that session's call ({@link sessionCall}), refused once it has
+ * gone like every other member of it — with a signal of the host's own that follows the one the
+ * extension passes, and answers a copy. Which `call` is the caller's to say: a host tool handed the
+ * session's model has no session to answer for ({@link fromHostCall}).
  */
-export function handHostModel(model: Model<Api>): Model<Api> {
+export function handHostModel(model: Model<Api>, call: HostCall): Model<Api> {
 	try {
 		const copier = new HostCopier();
 		const copy: Record<PropertyKey, unknown> = {};
@@ -902,13 +1075,12 @@ export function handHostModel(model: Model<Api>): Model<Api> {
 			if (value === undefined) continue;
 			copy[field] =
 				field === "resolveHeaders" && typeof value === "function"
-					? handHostResolver(value, model)
+					? handHostResolver(value, model, call)
 					: copier.declared(value, schema);
 		}
 		copier.finish();
 		// Built from every field `Model` declares (`MODEL_ROW` is checked against it), so it is one.
-		const handed = copy as unknown as Model<Api>;
-		return handed;
+		return handAsIs(copy as unknown as Model<Api>);
 	} catch (error) {
 		// A getter of the host's model that throws fails the read, as it does for the host — with a
 		// copy of its exception, not the host's own.
@@ -916,17 +1088,20 @@ export function handHostModel(model: Model<Api>): Model<Api> {
 	}
 }
 
-function handHostResolver(resolver: Function, model: Model<Api>): NonNullable<Model<Api>["resolveHeaders"]> {
-	return async signal => {
+function handHostResolver(
+	resolver: Function,
+	model: Model<Api>,
+	call: HostCall,
+): NonNullable<Model<Api>["resolveHeaders"]> {
+	return handAsIs(async (signal?: AbortSignal) => {
 		const followed = signal === undefined ? undefined : AbortSignal.any([signal]);
-		// The resolver is the host's code: what it throws, synchronously or by rejecting, is the
-		// host's object, and crosses as a copy.
-		const headers = await fromHostCall(
-			(): Promise<Record<string, string> | undefined> | Record<string, string> | undefined =>
-				Reflect.apply(resolver, model, [followed]),
+		// The resolver is the host's code: refused once the session `call` answers for has gone, and
+		// what it throws, synchronously or by rejecting, is the host's object and crosses as a copy.
+		const headers = await call((): Promise<Record<string, string> | undefined> | Record<string, string> | undefined =>
+			Reflect.apply(resolver, model, [followed]),
 		);
 		return copyHostData(headers);
-	};
+	});
 }
 
 /** The keys a property read of `value` answers for: its own string-keyed properties, enumerable

@@ -46,9 +46,12 @@ import {
 	copyHandlerResult,
 	copyHostData,
 	HandedSignals,
+	handAsIs,
+	handHostFacade,
 	handHostModel,
 	handHostSchema,
 	handSessionFacade,
+	sessionCall,
 	sessionHostCall,
 } from "./boundary-data";
 import { providerCallGate } from "./callback-ownership";
@@ -57,6 +60,8 @@ import {
 	type ExtensionModelRegistry,
 	type ExtensionSessionManager,
 	CONTEXT_ANSWERS,
+	handAgentIdentity,
+	handAnnotations,
 	handLiveStart,
 	handLocalProtocolOptions,
 	handMemory,
@@ -527,7 +532,10 @@ export async function emitSessionShutdownEvent(extensionRunner: ExtensionRunner 
 	}
 }
 
-const noOpUIContext: ExtensionUIContext = {
+/** The UI of a runner no host gave one: one object for every such runner, so frozen — nothing
+ *  holding it changes what another runner does. An extension is never handed it, only a facade
+ *  over it (`handUIContext`). */
+const noOpUIContext: ExtensionUIContext = Object.freeze<ExtensionUIContext>({
 	select: async (_title, _options, _dialogOptions) => undefined,
 	confirm: async (_title, _message, _dialogOptions) => false,
 	input: async (_title, _placeholder, _dialogOptions) => undefined,
@@ -559,7 +567,7 @@ const noOpUIContext: ExtensionUIContext = {
 	setTheme: (_theme: string | Theme) => Promise.resolve({ success: false, error: "UI not available" }),
 	getToolsExpanded: () => false,
 	setToolsExpanded: () => {},
-};
+});
 
 interface ToolRegistrationScope {
 	pending: Set<Promise<void>>;
@@ -575,11 +583,15 @@ export const TOP_LEVEL_AGENT: ExtensionAgentIdentity = Object.freeze({
 	depth: 0,
 });
 
-/** `ctx.annotations` for hosts that inject no implementation: every call rejects. */
-export const UNAVAILABLE_ANNOTATIONS: ExtensionAnnotationsAPI = Object.freeze({
-	submit: () => Promise.reject(new Error("ctx.annotations is not available in this host.")),
-	open: () => Promise.reject(new Error("ctx.annotations is not available in this host.")),
-});
+/** `ctx.annotations` for hosts that inject no implementation: every call rejects. A facade of its
+ *  own (`handHostFacade`), so the rejection is the boundary's copy, and frozen: one for every
+ *  context. */
+export const UNAVAILABLE_ANNOTATIONS: ExtensionAnnotationsAPI = Object.freeze(
+	handHostFacade<ExtensionAnnotationsAPI>({
+		submit: () => Promise.reject(new Error("ctx.annotations is not available in this host.")),
+		open: () => Promise.reject(new Error("ctx.annotations is not available in this host.")),
+	}),
+);
 
 export class ExtensionRunner {
 	#uiContext: ExtensionUIContext;
@@ -1997,11 +2009,13 @@ export class ExtensionRunner {
 		// (`initialize`), its model, its cwd after a relocation, its memory backend, the actions it
 		// wires — is read when the extension asks for it: a context saved across the change answers
 		// as the host does now. What is captured here is captured on purpose: `model`, `delegation`
-		// and `agent` are what this one call was made with.
+		// and `agent` are what this one call was made with, and `madeWith` is what `mode` and `hasUI`
+		// answer once the context's session has gone.
 		const runner = this;
 		// The session this context is made for: its facades are that session's, so a context a
 		// session saved is refused once it has gone, even while the runtime serves the next one.
 		const session = this.#sessionOwner();
+		const madeWith = { mode: this.#mode, hasUI: this.hasUI() };
 		const getModel = model ? () => model : () => this.#getModel();
 		const sendUserMessage = (text: string, options?: SendUserMessageOptions): void =>
 			this.runtime.sendUserMessage(text, options);
@@ -2037,20 +2051,22 @@ export class ExtensionRunner {
 			get ui() {
 				return runner.handedUIContext(runner.#uiContext, session);
 			},
+			// The runner's now while the session is live; once it has gone, what it was when this
+			// context was made — never the host the runner was rebound to for the next session.
 			get mode() {
-				return runner.#mode;
+				return session.isRetired ? madeWith.mode : runner.#mode;
 			},
-			// What a read answers with is a copy, here as on `pi`: the host's prompt, its pending plan
-			// review and its job records are what it keeps acting on.
-			getContextUsage: () => copyHostData(this.#getContextUsageFn()),
+			// What a read answers with is a copy (`handSessionFacade`), here as on `pi`: the host's
+			// prompt, its pending plan review and its job records are what it keeps acting on.
+			getContextUsage: () => this.#getContextUsageFn(),
 			// `ctx` accepts callbacks too (`compact({ onError })`), and a continuation an extension
 			// hands over here outlives the command that made the call. Owned at acceptance, like
 			// everything the `pi` surface takes.
 			compact: instructionsOrOptions =>
 				this.#compactFn(ownAcceptedCallbacks(instructionsOrOptions, session) as typeof instructionsOrOptions),
-			getAsyncJobSnapshot: () => copyHostData(this.#getAsyncJobSnapshotFn()),
+			getAsyncJobSnapshot: () => this.#getAsyncJobSnapshotFn(),
 			get hasUI() {
-				return runner.hasUI();
+				return session.isRetired ? madeWith.hasUI : runner.hasUI();
 			},
 			get cwd() {
 				return runner.cwd;
@@ -2062,16 +2078,18 @@ export class ExtensionRunner {
 				handModelRegistry(this.modelRegistry, session),
 			),
 			isProjectTrusted: () => true,
-			agent,
+			// The fields the host's identity declares, read once now onto a record of the context's
+			// own: nothing of the host's object is reached again.
+			agent: handAgentIdentity(agent),
 			// A copy on every read, as `ctx.models` hands them (`handHostModel`): the host keeps building
 			// requests from its model after the handler returns — the credential it chooses by
 			// `provider`, the endpoint `baseUrl` names — so an edit to the one handed over must stay on
-			// it, whether the host holds a registry row or a class an SDK caller selected.
-			// The host's getter may throw: as every member's host call (`handSessionFacade`), its
-			// failure crosses as a copy, as the model does.
+			// it, whether the host holds a registry row or a class an SDK caller selected. Its
+			// `resolveHeaders` is the session's call. The host's getter may throw: as every member's
+			// host call (`handSessionFacade`), its failure crosses as a copy, as the model does.
 			get model() {
 				const model = getModel();
-				return model && handHostModel(model);
+				return model && handHostModel(model, sessionCall(session));
 			},
 			models: createExtensionModelQuery(this.modelRegistry, this.settings, getModel, session),
 			isIdle: () => this.#isIdleFn(),
@@ -2079,13 +2097,13 @@ export class ExtensionRunner {
 			hasPendingMessages: () => this.#hasPendingMessagesFn(),
 			shutdown: () => this.#shutdownHandler(),
 			resolvePlanReview: (reviewId, choice, input) => this.#resolvePlanReviewFn(reviewId, choice, input),
-			getPendingPlanReview: () => copyHostData(this.#getPendingPlanReviewFn()),
+			getPendingPlanReview: () => this.#getPendingPlanReviewFn(),
 			openPlanReview: () => this.#openPlanReviewFn(),
 			// Live: a context saved before or across a host rebind sees the current controls.
 			get sessionModes() {
 				return handSessionModesOnce(getSessionModes());
 			},
-			getSystemPrompt: () => copyHostData(this.#getSystemPromptFn()),
+			getSystemPrompt: () => this.#getSystemPromptFn(),
 			get runEphemeralTurn(): ExtensionContext["runEphemeralTurn"] {
 				const runEphemeralTurn = runner.#runEphemeralTurnFn;
 				return (
@@ -2113,9 +2131,7 @@ export class ExtensionRunner {
 								: undefined,
 							signal: signals.length ? AbortSignal.any(signals) : undefined,
 						};
-						return copyHostData(
-							await runner.#ephemeralTurnBlocker.run("ephemeral turn", () => runEphemeralTurn(request)),
-						);
+						return runner.#ephemeralTurnBlocker.run("ephemeral turn", () => runEphemeralTurn(request));
 					})
 				);
 			},
@@ -2148,20 +2164,26 @@ export class ExtensionRunner {
 			// `this` here is that receiver, so the overlay mounts through the handler's timeout-aware `ui`.
 			get annotations(): ExtensionAnnotationsAPI {
 				const createAnnotations = runner.#createAnnotations;
-				// What the annotations deliver is the session's message: refused once it has gone.
+				// What the annotations deliver is the session's message: refused once it has gone. The
+				// host's annotations object is its own; the session is handed a facade over it.
 				return createAnnotations
-					? createAnnotations(
-							() => this,
-							(text, options) => sessionHostCall(session, () => sendUserMessage(text, options)),
+					? handAnnotations(
+							createAnnotations(
+								() => this,
+								(text, options) => sessionHostCall(session, () => sendUserMessage(text, options)),
+							),
+							session,
 						)
 					: UNAVAILABLE_ANNOTATIONS;
 			},
 			// Owned by this context's session: scheduled after it has gone, refused; scheduled while it
-			// is live, inert once it has gone, whichever session the runtime serves when it fires.
+			// is live, inert once it has gone, whichever session the runtime serves when it fires. The
+			// handle is the platform's own, handed as it is: `clearTimer` takes it back, and it can do
+			// no more than cancel or keep alive a timer of this session's.
 			setInterval: (callback, ms, ...args) =>
-				this.#managedTimers.setInterval(session.ownCallback(callback), ms, ...args),
+				handAsIs(this.#managedTimers.setInterval(session.ownCallback(callback), ms, ...args)),
 			setTimeout: (callback, ms, ...args) =>
-				this.#managedTimers.setTimeout(session.ownCallback(callback), ms, ...args),
+				handAsIs(this.#managedTimers.setTimeout(session.ownCallback(callback), ms, ...args)),
 			clearTimer: timer => this.#managedTimers.clear(timer),
 			addAdditionalContext,
 			invokeTool:

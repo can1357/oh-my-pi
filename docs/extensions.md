@@ -94,10 +94,25 @@ What you register, and when, decides how long it lasts:
   of its `ui`, `sessionManager`, `modelRegistry`, `models`, `memory`, `sessionModes` and
   `localProtocolOptions` — however it is called: `ctx.ui.setFooter(undefined)` refuses as
   `ctx.ui.setFooter(factory)` does, and `ctx.ui.getEditorText()` answers nothing about the next
-  session. What answers from the context itself (`mode`, `hasUI`, `agent`, `clearTimer`) still
-  answers. `ctx.setTimeout`/`ctx.setInterval` refuse too, and a callback scheduled while the
-  session was live belongs to that session, whichever session the runtime serves when it fires.
-  A host call that fails reaches you as a copy of its failure, never the host's own exception.
+  session. So does what a member hands back: a function it answers with — the resolver
+  `ctx.modelRegistry.resolver()` makes, a model's `resolveHeaders`, the disposer
+  `ui.onTerminalInput()` returns, a `localProtocolOptions` member — is your session's call and
+  refuses once it has ended, wherever you call it from; anything else it answers with is a copy or
+  an object of your own. What answers from the context itself still answers: `agent` (a copy of
+  the identity the host supplied), `clearTimer`, and `mode` and `hasUI`, which once the session
+  has ended answer what they did when the context was made, not what the host was rebound to.
+  `ctx.setTimeout`/`ctx.setInterval` refuse too, and a callback scheduled while the session was
+  live belongs to that session, whichever session the runtime serves when it fires. A host call
+  that fails reaches you as a copy of its failure, never the host's own exception.
+- What your session set on the host's UI — a footer, a header, the working message, a status, the
+  title, a widget, an editor — is taken back when the session ends, unless another session has set
+  it since. You need not clear it yourself, and a `ctx` kept past the end cannot.
+- Drawing is the one thing that works for whoever holds it, whenever: the theme (`ctx.ui.theme`,
+  and the one a renderer or a `ctx.ui` factory is handed) and the TUI's drawing members, its frame
+  facts, `terminal.rows`/`columns` and image budget still reach the host's renderer after your
+  session has ended — they ask for a frame or format a string, and change nothing else — and so
+  does a live call's `stop()`, so a call your session started can always be ended. Their failures
+  reach you as copies too.
 
 ## Quick start
 
@@ -336,7 +351,8 @@ What a `ctx.ui` factory is handed besides its theme is the session's own, not th
 
 - **The TUI** has every member `TUI` declares. Drawing (`requestRender`, `requestComponentRender`,
   `invalidate`), the frame's timing, `terminal.rows`/`columns` and the image budget an image draws
-  through reach the host's. An input listener, `setFocus`, `showOverlay` and `stop` take effect
+  through reach the host's, after your session has ended too: this is drawing, which changes
+  nothing but the next frame. An input listener, `setFocus`, `showOverlay` and `stop` take effect
   only while your session is live: a listener is removed at the first key after the session has
   gone. A component you focus or show takes its keys inside your session, so an asynchronous
   `handleInput` is your session's work. Once the session has gone, every overlay it showed comes
