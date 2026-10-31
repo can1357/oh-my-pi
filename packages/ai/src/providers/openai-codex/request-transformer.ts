@@ -50,6 +50,7 @@ export interface InputItem {
 	type?: string | null;
 	role?: string;
 	content?: unknown;
+	internal_chat_message_metadata_passthrough?: unknown;
 	call_id?: string | null;
 	name?: string;
 	output?: unknown;
@@ -180,9 +181,10 @@ function filterInput(input: InputItem[] | undefined): InputItem[] | undefined {
 	return input
 		.filter(item => item.type !== "item_reference")
 		.map(item => {
-			if (item.type === "computer_call") return item;
-			if (item.id != null) {
-				const { id: _id, ...rest } = item;
+			const stripId = item.type !== "computer_call" && item.id != null;
+			if (stripId || Object.hasOwn(item, "internal_chat_message_metadata_passthrough")) {
+				const { internal_chat_message_metadata_passthrough: _internalMetadata, ...rest } = item;
+				if (stripId) delete rest.id;
 				return rest as InputItem;
 			}
 			return item;
