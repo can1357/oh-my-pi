@@ -29,7 +29,6 @@ import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
-const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait"];
 
@@ -957,13 +956,13 @@ export const cfgProvidersAnthropicServerSideFallback = register({
 export const cfgProvidersAnthropicServerSideFallbackModels = register({
 	id: "providers.anthropic.serverSideFallbackModels",
 	type: "array",
-	default: EMPTY_STRING_ARRAY,
+	default: undefined,
 	ui: {
 		tab: "model",
 		group: "Retry & Fallback",
 		label: "Anthropic Server-Side Fallback Chain",
 		description:
-			'Ordered bare Anthropic model ids forwarded as the server-side `fallbacks` chain when Anthropic Server-Side Fallback is enabled, e.g. ["claude-opus-5", "claude-opus-4-8"]. These are API model ids, not provider/model selectors, and each must be in the requested model\'s allowed fallback models. The default, an empty list left unset, follows the catalog chain for the model (Claude Opus 5 for Fable/Mythos). An empty list set explicitly sends no fallbacks even when the toggle is on; the API accepts at most three entries, so longer chains use the first three.',
+			'Ordered bare Anthropic model ids forwarded as the server-side `fallbacks` chain when Anthropic Server-Side Fallback is enabled, e.g. ["claude-opus-5", "claude-opus-4-8"]. These are API model ids, not provider/model selectors, and each must be in the requested model\'s allowed fallback models. Left unset, the catalog chain for the model applies (Claude Opus 5 for Fable/Mythos). An empty list sends no fallbacks even when the toggle is on. A value that is not a list, or a non-empty list without a single non-blank string id, is ignored with a warning, so the catalog chain applies; other non-string or blank entries are dropped with a warning. The API accepts at most three entries, so longer chains use the first three.',
 	},
 });
 

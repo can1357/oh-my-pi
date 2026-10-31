@@ -8,6 +8,7 @@
  * (can1357/oh-my-pi#3639).
  */
 import { describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import { type Context, type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
@@ -21,7 +22,8 @@ import {
 	cfgProvidersMuseCodeStoreResponses,
 } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { createSettingsAwareStreamFn } from "@oh-my-pi/pi-coding-agent/session/settings-stream-fn";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, TempDir } from "@oh-my-pi/pi-utils";
+import { YAML } from "bun";
 
 function captureBase(): { fn: StreamFn; calls: Array<{ options?: SimpleStreamOptions }> } {
 	const calls: Array<{ options?: SimpleStreamOptions }> = [];
@@ -456,17 +458,119 @@ describe("createSettingsAwareStreamFn", () => {
 			expect(calls.map(call => call.options?.fallbacks)).toEqual([undefined, undefined]);
 		});
 
-		it("drops non-string chain entries instead of throwing (YAML/CLI can inject them)", () => {
-			const settings = Settings.isolated({
-				"providers.anthropic.serverSideFallback": true,
-				"providers.anthropic.serverSideFallbackModels": [1, "claude-opus-5", null, "  "] as unknown as string[],
+		it("drops entries that are not model ids and warns naming each one and why", () => {
+			const warnings: unknown[][] = [];
+			vi.spyOn(logger, "warn").mockImplementation((message: unknown, context?: unknown) => {
+				warnings.push([message, context]);
 			});
-			const { fn: base, calls } = captureBase();
-			const wrapped = createSettingsAwareStreamFn(settings, base);
+			try {
+				const settings = Settings.isolated({
+					"providers.anthropic.serverSideFallback": true,
+					"providers.anthropic.serverSideFallbackModels": [1, "claude-opus-5", null, "  "],
+				});
+				const { fn: base, calls } = captureBase();
+				const wrapped = createSettingsAwareStreamFn(settings, base);
 
-			wrapped(stubFableModel, stubContext, { apiKey: "k" });
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
 
-			expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-opus-5" }]);
+				expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-opus-5" }]);
+				expect(warnings).toEqual([
+					[
+						"providers.anthropic.serverSideFallbackModels: dropping entries that are not model ids",
+						{
+							setting: "providers.anthropic.serverSideFallbackModels",
+							dropped: [
+								{ index: 0, value: 1, problem: "not a string (number)" },
+								{ index: 2, value: null, problem: "not a string (null)" },
+								{ index: 3, value: "  ", problem: "blank string" },
+							],
+							expected: "non-blank model id strings",
+						},
+					],
+				]);
+			} finally {
+				vi.restoreAllMocks();
+			}
+		});
+
+		// A list whose entries all fail is a value that says nothing usable, not an explicit `[]`.
+		it("follows the catalog chain, warning once, when a non-empty configured list has no model id", () => {
+			const warnings: unknown[][] = [];
+			vi.spyOn(logger, "warn").mockImplementation((message: unknown, context?: unknown) => {
+				warnings.push([message, context]);
+			});
+			try {
+				const settings = Settings.isolated({
+					"providers.anthropic.serverSideFallback": true,
+					"providers.anthropic.serverSideFallbackModels": [42, "  "],
+				});
+				const { fn: base, calls } = captureBase();
+				const wrapped = createSettingsAwareStreamFn(settings, base);
+
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+				expect(calls.map(call => call.options?.fallbacks)).toEqual([
+					[{ model: "claude-opus-5" }],
+					[{ model: "claude-opus-5" }],
+				]);
+				expect(warnings).toEqual([
+					[
+						"providers.anthropic.serverSideFallbackModels has no model id; ignoring it and following the catalog chain",
+						{
+							setting: "providers.anthropic.serverSideFallbackModels",
+							dropped: [
+								{ index: 0, value: 42, problem: "not a string (number)" },
+								{ index: 1, value: "  ", problem: "blank string" },
+							],
+							expected: "non-blank model id strings",
+						},
+					],
+				]);
+			} finally {
+				vi.restoreAllMocks();
+			}
+		});
+
+		// Hand-edited YAML is the only way to store a non-list: writes reject one.
+		it("ignores a configured value that is not a list, with a warning, and follows the catalog chain", async () => {
+			const tempDir = TempDir.createSync("@pi-fallback-chain-");
+			// Ambient overlays would join the layers under test.
+			const previousConfigFiles = process.env.PI_CONFIG_FILES;
+			delete process.env.PI_CONFIG_FILES;
+			const warnings: unknown[][] = [];
+			vi.spyOn(logger, "warn").mockImplementation((message: unknown, context?: unknown) => {
+				warnings.push([message, context]);
+			});
+			try {
+				const agentDir = tempDir.join("agent");
+				await Bun.write(
+					path.join(agentDir, "config.yml"),
+					YAML.stringify({
+						providers: { anthropic: { serverSideFallback: true, serverSideFallbackModels: "claude-opus-4-8" } },
+					}),
+				);
+				const settings = await Settings.loadReadOnly({ agentDir, cwd: tempDir.path() });
+				const { fn: base, calls } = captureBase();
+				const wrapped = createSettingsAwareStreamFn(settings, base);
+
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+				expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-opus-5" }]);
+				expect(warnings).toContainEqual([
+					"Settings: ignoring invalid value, using the default",
+					{
+						setting: "providers.anthropic.serverSideFallbackModels",
+						value: "claude-opus-4-8",
+						expected: "an array",
+					},
+				]);
+			} finally {
+				vi.restoreAllMocks();
+				if (previousConfigFiles === undefined) delete process.env.PI_CONFIG_FILES;
+				else process.env.PI_CONFIG_FILES = previousConfigFiles;
+				tempDir.removeSync();
+			}
 		});
 
 		it("trims whitespace from configured chain entries before forwarding", () => {
@@ -535,17 +639,6 @@ describe("createSettingsAwareStreamFn", () => {
 			wrapped(stubFableModel, stubContext, { apiKey: "k" });
 
 			expect(calls[0]?.options?.fallbacks).toBeUndefined();
-		});
-
-		it("reads the unset chain as the [] default and still follows the catalog chain", () => {
-			const settings = Settings.isolated({ "providers.anthropic.serverSideFallback": true });
-			const { fn: base, calls } = captureBase();
-			const wrapped = createSettingsAwareStreamFn(settings, base);
-
-			expect(cfgProvidersAnthropicServerSideFallbackModels.get(settings)).toEqual([]);
-			wrapped(stubFableModel, stubContext, { apiKey: "k" });
-
-			expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-opus-5" }]);
 		});
 	});
 

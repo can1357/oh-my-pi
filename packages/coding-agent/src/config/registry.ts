@@ -150,7 +150,12 @@ export interface EnumDefinition<T extends readonly string[] = readonly string[]>
 
 export interface ArrayDefinition<T = unknown> extends DefinitionBase {
 	type: "array";
-	default: readonly T[];
+	/**
+	 * `undefined` leaves the list unset until a layer configures one, as the scalar types allow:
+	 * the value then tells an unset list from an explicit `[]`, and an invalid configured value
+	 * reads as unset too (see {@link Setting.compute}).
+	 */
+	default: readonly T[] | undefined;
 	env?: SettingEnv<readonly T[]>;
 	/**
 	 * Closed vocabulary for the entries (`label` names one entry in messages, e.g. "status line
@@ -194,9 +199,11 @@ export type DefinitionValue<D> = D extends { type: "boolean"; default: undefined
 						? V extends readonly string[]
 							? V[number]
 							: never
-						: D extends { type: "array" | "record"; default: infer V }
-							? V
-							: never;
+						: D extends { type: "array"; default: undefined }
+							? unknown[] | undefined
+							: D extends { type: "array" | "record"; default: infer V }
+								? V
+								: never;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Scopes
@@ -623,6 +630,13 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		}
 	}
 
+	/** What {@link accepts} requires, for messages: "one of a, b", "an array", "a number". */
+	#expected(): string {
+		const values = this.enumValues;
+		if (values) return `one of ${values.join(", ")}`;
+		return this.definition.type === "array" ? "an array" : `a ${this.definition.type}`;
+	}
+
 	#parseEnvText(raw: string): unknown {
 		if (this.definition.type === "boolean") return raw === "" ? undefined : parseFlag(raw);
 		if (raw.trim() === "") return undefined;
@@ -647,7 +661,11 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		const warned = settings.warnState.invalid;
 		if (!warned.has(this.id) || !Bun.deepEquals(warned.get(this.id), raw)) {
 			warned.set(this.id, raw);
-			logger.warn("Settings: ignoring invalid value, using the default", { setting: this.id, value: raw });
+			logger.warn("Settings: ignoring invalid value, using the default", {
+				setting: this.id,
+				value: raw,
+				expected: this.#expected(),
+			});
 		}
 		return this.default;
 	}
@@ -667,8 +685,7 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		}
 		this.definition.validate?.(value);
 		if (!this.accepts(value)) {
-			const expected = this.enumValues ? `one of ${this.enumValues.join(", ")}` : `a ${this.definition.type}`;
-			throw new Error(`Invalid value for ${this.id}: ${Bun.inspect(value)} (expected ${expected})`);
+			throw new Error(`Invalid value for ${this.id}: ${Bun.inspect(value)} (expected ${this.#expected()})`);
 		}
 	}
 

@@ -49,25 +49,59 @@ export function resolveOpenAIWebsocketPreference(settings: Settings): boolean | 
 /** Anthropic `MessageCreateParams.fallbacks` accepts at most three entries. */
 const ANTHROPIC_MAX_FALLBACK_MODELS = 3;
 
+/** Configured fallback chains already warned about, so each warning fires once per distinct value. */
+interface FallbackChainWarnings {
+	/** Last configured list warned about for entries that are not model ids. */
+	unusable?: readonly unknown[];
+	/** Last overlong chain warned about. */
+	overlong?: string;
+}
+
 /**
- * Clean a configured `providers.anthropic.serverSideFallbackModels` value into
- * the wire chain. The registry guarantees an array (a non-array configured
- * value falls back to the default), but not its element types: hand-edited
- * YAML can supply non-string entries, which are dropped instead of throwing.
+ * Clean the configured `providers.anthropic.serverSideFallbackModels` value into
+ * the wire chain, or `undefined` when it states no chain, so the catalog's
+ * applies. The setting reads `undefined` when unset and when a hand-edited
+ * value is not a list (the registry warns and returns the unset default); `[]`
+ * is an explicit empty chain and sends nothing. Entries that are not non-blank
+ * strings are dropped with a warning naming each one and why; a non-empty list
+ * left without a model id states no chain, so it follows the catalog like an
+ * unset value instead of sending nothing like `[]`.
  * The wire contract allows at most three entries
  * (MessageCreateParams.fallbacks) and an overlong chain would be rejected by
- * the API instead of falling back, so cap deliberately and loudly — once per
- * distinct chain, tracked in `warned`, rather than on every request.
+ * the API instead of falling back, so cap deliberately and loudly. Each warning
+ * fires once per distinct value, tracked in `warned`, rather than on every request.
  */
-function configuredServerSideFallbackModels(configured: readonly unknown[], warned: { chain?: string }): string[] {
-	const models = configured
-		.filter((id): id is string => typeof id === "string")
-		.map(id => id.trim())
-		.filter(id => id.length > 0);
+function configuredServerSideFallbackModels(
+	configured: readonly unknown[] | undefined,
+	warned: FallbackChainWarnings,
+): string[] | undefined {
+	if (configured === undefined) return undefined;
+	const models: string[] = [];
+	const dropped: Array<{ index: number; value: unknown; problem: string }> = [];
+	for (const [index, entry] of configured.entries()) {
+		if (typeof entry !== "string") {
+			dropped.push({ index, value: entry, problem: `not a string (${entry === null ? "null" : typeof entry})` });
+			continue;
+		}
+		const id = entry.trim();
+		if (id.length > 0) models.push(id);
+		else dropped.push({ index, value: entry, problem: "blank string" });
+	}
+	const noModelId = models.length === 0 && configured.length > 0;
+	if (dropped.length > 0 && !Bun.deepEquals(warned.unusable, configured)) {
+		warned.unusable = configured;
+		logger.warn(
+			noModelId
+				? "providers.anthropic.serverSideFallbackModels has no model id; ignoring it and following the catalog chain"
+				: "providers.anthropic.serverSideFallbackModels: dropping entries that are not model ids",
+			{ setting: cfgProvidersAnthropicServerSideFallbackModels.id, dropped, expected: "non-blank model id strings" },
+		);
+	}
+	if (noModelId) return undefined;
 	if (models.length > ANTHROPIC_MAX_FALLBACK_MODELS) {
 		const chain = models.join("\n");
-		if (warned.chain !== chain) {
-			warned.chain = chain;
+		if (warned.overlong !== chain) {
+			warned.overlong = chain;
 			logger.warn("providers.anthropic.serverSideFallbackModels exceeds the wire limit; using the first three", {
 				configured: models.length,
 				limit: ANTHROPIC_MAX_FALLBACK_MODELS,
@@ -114,8 +148,8 @@ export function createSettingsAwareStreamFn(
 	// per-message counts are reused across requests: its prices (images,
 	// replayed thinking and reasoning) belong to that model and request state.
 	const tokenizers = new Map<string, Tokenizer>();
-	// Last overlong fallback chain warned about, so the cap warning fires once per chain.
-	const overlongFallbackWarning: { chain?: string } = {};
+	// Configured fallback chains already warned about (unusable entries, overlong chains).
+	const fallbackChainWarnings: FallbackChainWarnings = {};
 	return (model, context, streamOptions) => {
 		const openrouterRoutingPreset = cfgProvidersOpenrouterVariant.get(settings);
 		const openrouterVariant =
@@ -140,22 +174,22 @@ export function createSettingsAwareStreamFn(
 		// Server-side fallback (opt-in): when the user enables it AND the
 		// catalog assigns the model a chain (`server-side-fallback-models` axis,
 		// authored for Fable/Mythos on first-party Anthropic), inject `fallbacks`.
-		// A configured `providers.anthropic.serverSideFallbackModels` replaces the
-		// catalog chain, and an empty configured chain sends nothing even with the
-		// toggle on. The provider layer picks it up, sends the beta header, and
-		// honors the response signals. Models without a rule-assigned chain are
-		// untouched.
+		// A configured `providers.anthropic.serverSideFallbackModels` list replaces
+		// the catalog chain, and `[]` sends nothing even with the toggle on; an
+		// unset value (or one without a model id) keeps the catalog chain. The
+		// provider layer picks it up, sends the beta header, and honors the
+		// response signals. Models without a rule-assigned chain are untouched.
 		const catalogFallbackChain =
 			streamOptions?.fallbacks === undefined && cfgProvidersAnthropicServerSideFallback.get(settings)
 				? serverSideFallbackModels(model)
 				: [];
 		const serverSideFallbackChain =
-			catalogFallbackChain.length > 0 && cfgProvidersAnthropicServerSideFallbackModels.isConfigured(settings)
+			(catalogFallbackChain.length > 0
 				? configuredServerSideFallbackModels(
 						cfgProvidersAnthropicServerSideFallbackModels.get(settings),
-						overlongFallbackWarning,
+						fallbackChainWarnings,
 					)
-				: catalogFallbackChain;
+				: undefined) ?? catalogFallbackChain;
 		const fallbacks =
 			streamOptions?.fallbacks ??
 			(serverSideFallbackChain.length > 0 ? serverSideFallbackChain.map(id => ({ model: id })) : undefined);
