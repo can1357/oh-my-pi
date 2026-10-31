@@ -61,6 +61,7 @@ import {
 	liveSessionPathForArchive,
 	restoreArchivedSessionLocked,
 	artifactRestoreConflicts,
+	moveAsidePermission,
 	restoreRecordLeftNote,
 	restoreRecordRefusal,
 	stagingResidueNote,
@@ -2108,7 +2109,7 @@ async function copySessionIntoArchive(candidate: ArchiveCandidate): Promise<{ br
 			outstanding.length === 0
 				? `${record} records a restore that did not finish, and ${sourceSession} now holds every entry the archive ` +
 						`holds; this run did not write that record, so it was left — while it is there the session is treated ` +
-						`as unfinished: look at it, and move it aside`
+						`as unfinished: look at it, and move it aside. ${moveAsidePermission(record)}`
 				: `${sourceSession} is still missing ${outstanding.length} of the entries the archive holds ` +
 						`(${outstanding[0]}${outstanding.length > 1 ? ", …" : ""}), so the unfinished restore recorded at ` +
 						`${record} was kept; run \`omp gc --restore ${shellQuote(path.basename(destSession, ".jsonl.gz"))} --apply${candidate.recovery}\``,

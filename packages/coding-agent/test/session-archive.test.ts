@@ -4369,6 +4369,39 @@ for (const occupant of [
 	});
 }
 
+test.skipIf(process.getuid?.() === 0)(
+	"a record left at its name in a read-only archive bucket is reported with how to make it movable, and the session then finishes",
+	async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+		await archiveEverything();
+		const record = restoreRecordPath(archiveFile);
+		const bucket = path.dirname(record);
+		// The review's fixture: the archive bucket at mode 0500, with a file at
+		// the record's name that this run did not create.
+		await Bun.write(record, "not a record");
+		await fs.chmod(bucket, 0o500);
+		let applied: GcResult;
+		let moved: number;
+		try {
+			applied = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+			moved = await Bun.spawn(["mv", record, path.join(root, "aside")], { stderr: "ignore" }).exited;
+		} finally {
+			await fs.chmod(bucket, 0o700);
+		}
+
+		const told = applied.restore?.errors.join("\n") ?? "";
+		expect(told).toContain(`${bucket} is not writable`);
+		expect(told).toContain("chmod u+w");
+		expect(moved).not.toBe(0);
+		// What the message says: make it writable, then move it.
+		await fs.rename(record, path.join(root, "aside"));
+		const finished = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+		expect(finished.restore?.errors).toEqual([]);
+		expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
+	},
+);
+
 test("a restore leaves what has its record's name by the time it ends, when that is not the record it made", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");

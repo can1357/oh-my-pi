@@ -126,7 +126,19 @@ export async function restoreRecordRefusal(record: string): Promise<string | und
 				: "not a regular file";
 	return (
 		`${record}, where a restore keeps its record of being unfinished, is ${what}, not a record a restore wrote, ` +
-		`so nothing was restored and nothing was written to it; look at it, move it aside, and run the same command again`
+		`so nothing was restored and nothing was written to it; look at it, move it aside, and run the same command again. ` +
+		moveAsidePermission(record)
+	);
+}
+
+/**
+ * What to do when moving a record aside is refused: the directory it is in —
+ * the archive bucket, which can be made read-only — has to be writable.
+ */
+export function moveAsidePermission(record: string): string {
+	return (
+		`If moving it is refused permission, ${path.dirname(record)} is not writable: make it writable with ` +
+		`\`chmod u+w\` and move it again`
 	);
 }
 
@@ -140,7 +152,7 @@ export function restoreRecordLeftNote(record: string): string {
 	return (
 		`${record} was there before this run — an earlier restore's record of being unfinished, or something else — and a ` +
 		`restore removes only the record it created in the same run, so it was left; while it is there this session is treated as ` +
-		`unfinished: look at it, and once the session holds everything, move it aside`
+		`unfinished: look at it, and once the session holds everything, move it aside. ${moveAsidePermission(record)}`
 	);
 }
 
