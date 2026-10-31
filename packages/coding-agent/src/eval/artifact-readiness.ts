@@ -653,19 +653,31 @@ function pinAccountOf(session: ToolSession): PinAccount {
  * after a take or a lapse gives nothing back twice, and a session's count is
  * the pins it holds because it *is* the set of them.
  *
- * The token is a bearer capability, deliberately. Whoever presents it may take
- * or release the pin, and the charge stays with the session that asked. It is
- * random and travels only on the asking cell's own bridge back into that cell's
- * runtime, so only code in that runtime can present it — and that boundary is
- * all the protection there is. Inside a runtime nothing is checked: in a kernel
- * two sessions share, the other session's code is in that runtime too, and with
- * the token it could take the bytes — which, once the name was replaced or
- * removed, it could not have read by number; keeping the file readable then is
- * what a pin is for — or release the pin, so the reader that asked is refused.
- * Either is possible only within the lease. The token is not bound to the
- * asking session because that would refuse a legitimate reader: work a
- * finished cell left running asks through the kernel's latest session, which
- * in a shared kernel is not always the one its answer was charged to.
+ * The token is a bearer capability, deliberately: whoever presents it may take
+ * or release the pin, and nothing checks who that is — not the runtime, not
+ * the kernel, not the session. Possession is the whole check. What keeps a
+ * token where it was issued is only how it is delivered: it is random, and it
+ * goes back only in the answer to the cell that asked. Code that has it can
+ * pass it on — code beside the reader in the same runtime has it already, and
+ * in a kernel two sessions share that includes the other session's — and
+ * whatever receives it, in another kernel or another session, can redeem it:
+ * take the bytes, which once the name was replaced or removed it could not
+ * have read by number (keeping the file readable then is what a pin is for),
+ * or release the pin, so that the reader that asked is refused. Either only
+ * within the lease.
+ *
+ * The pin is charged to the session the answer was asked for, which is not a
+ * session the host has verified either. A JavaScript cell asks through its own
+ * worker's session. A Python kernel asks over the one bridge every kernel of
+ * this process shares, with the one bridge token they share; every other call
+ * there must also name a run registered to that session, and this question
+ * alone is answered on the session id the request names — so a kernel can
+ * ask, and be charged, in another registered session's name.
+ *
+ * The token is not bound to the asking session because that would refuse a
+ * legitimate reader: work a finished cell left running asks through the
+ * kernel's latest session, which in a shared kernel is not always the one its
+ * answer was charged to.
  */
 class ArtifactPin {
 	readonly token = `file-${crypto.randomUUID()}`;
