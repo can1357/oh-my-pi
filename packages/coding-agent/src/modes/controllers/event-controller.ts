@@ -467,6 +467,10 @@ export class EventController {
 				this.ctx.ui.requestRender(true);
 			},
 			goal_updated: async () => {},
+			persona_changed: async () => {
+				this.ctx.updateEditorBorderColor();
+				this.ctx.ui.requestRender();
+			},
 			// The pending-messages bar mirrors the queue snapshot this event carries.
 			// Refreshing only at the TUI's own call sites left pills of messages the
 			// agent drained by itself (live steering, a queued batch it delivered)
@@ -865,7 +869,11 @@ export class EventController {
 		// the listener's first await, preserving the timing the coalescing
 		// tests assert on. `message_update` enqueue is itself synchronous and
 		// needs no serialization.
-		this.ctx.unsubscribe = this.ctx.session.subscribe(event => this.dispatchSessionEvent(event));
+		// Startup notices (e.g. a persona model/--agent fallback) are emitted during
+		// session creation, before this subscriber exists; replay them so they render.
+		this.ctx.unsubscribe = this.ctx.session.subscribe(event => this.dispatchSessionEvent(event), {
+			replayStartupNotices: true,
+		});
 	}
 
 	/**

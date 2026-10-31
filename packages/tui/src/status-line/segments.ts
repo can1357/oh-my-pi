@@ -1294,6 +1294,23 @@ const usageSegment: StatusLineSegment = {
 	},
 };
 
+const agentPersonaSegment: StatusLineSegment = {
+	id: "agent_persona",
+	render(ctx) {
+		const name = ctx.session.activePersonaName;
+		if (!name) return { content: "", visible: false };
+		const safeName = sanitizeStatusText(name);
+		const icon = (theme.icon as Record<string, string | undefined>).persona;
+		const content = icon ? withIcon(icon, safeName) : `(${safeName})`;
+		return { content: theme.fg("statusLineModel", content), visible: true };
+	},
+	describe(ctx) {
+		const name = ctx.session.activePersonaName;
+		if (!name) return null;
+		return segView([span(sanitizeStatusText(name), "statusLineModel")], "persona");
+	},
+};
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Segment Registry
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1324,6 +1341,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	session_name: sessionNameSegment,
 	usage: usageSegment,
 	collab: collabSegment,
+	agent_persona: agentPersonaSegment,
 	stream: streamSegment,
 	vim: vimSegment,
 };

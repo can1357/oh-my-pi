@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added agent persona cycling: agents with `mode: "primary"` in their frontmatter join a `Tab` / `Ctrl+Tab` cycle in the main chat editor (while the editor is empty), `--agent <name>` picks the starting persona, and the `model` and `order` frontmatter fields set the model a persona loads with and its place in the cycle ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
+- Added an `agent_persona` status-line segment showing the active persona, and `activePersonaName` on `ExtensionContext` for extensions ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
+- Added persona restore on `/resume` and `--resume`: saved messages now record the active persona, and a resumed session reselects the last one, falling back to the first primary agent ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
+
 ### Changed
 
 - Viewing a subagent or returning to the main session no longer posts a "Viewing agent …" / "Returned to main session" status (a popup in Tern); the status line and Tern's composer already show which agent is in view
@@ -28,6 +34,8 @@
 - Fixed `read` of a whole URL returning no content when the page's first line is over the 50 KB output budget, as on minified pages read with `:raw`; it now shows that line's first 50 KB ([#17500](https://github.com/can1357/oh-my-pi/pull/17500) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed an advisor whose usage-limited account kept being reported as switchable retrying the same capped account thousands of times; it now tries each sibling account at most once per provider per failing review, then falls back, waits, or pauses on the quota ([#17472](https://github.com/can1357/oh-my-pi/issues/17472))
 - Fixed LSP definition, type definition, implementation and reference results carrying a stray carriage return on every source context line from files with Windows (CRLF) line endings ([#17549](https://github.com/can1357/oh-my-pi/pull/17549) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Fixed the startup persona overriding an explicit `--model` or thinking level with its own; explicit startup options now win ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
+- Fixed the active persona's instructions being dropped from the system prompt by any later rebuild, such as a tool-set or model change or the rebuild before each turn ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
 
 ## [18.14.1] - 2026-10-31
 

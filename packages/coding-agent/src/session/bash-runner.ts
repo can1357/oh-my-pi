@@ -52,6 +52,7 @@ export interface BashRunnerHost {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
+	activePersonaName(): string | null;
 	extensionRunner(): ExtensionRunner | undefined;
 	isStreaming(): boolean;
 }
@@ -320,16 +321,22 @@ export class BashRunner {
 	}
 
 	#appendMessage(destination: BashAppendDestination, message: BashExecutionMessage): void {
+		const personaName = this.#host.activePersonaName() ?? undefined;
 		switch (destination.kind) {
 			case "current":
 				this.#host.agent.appendMessage(message);
-				destination.manager.appendMessage(message);
+				destination.manager.appendMessage(message, personaName);
 				break;
 			case "detached":
-				destination.manager.appendMessage(message);
+				destination.manager.appendMessage(message, personaName);
 				break;
 			case "branch":
-				destination.parentId = destination.manager.appendMessageToBranch(message, destination.parentId);
+				destination.parentId = destination.manager.appendMessageToBranch(
+					message,
+					destination.parentId,
+					undefined,
+					personaName,
+				);
 				break;
 		}
 	}

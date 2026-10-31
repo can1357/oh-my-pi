@@ -178,6 +178,10 @@ export const eventDefs = {
 		{ type: "'goal_updated'", goal: "Goal | null", "state?": "GoalModeState" },
 		"Goal mode changed, by a host `goal` command or the agent's `goal` tool.",
 	),
+	PersonaChangedEvent: doc(
+		{ type: "'persona_changed'", personaName: "string | null", "source?": "AgentSource" },
+		"The active persona changed; `personaName` is null when it was explicitly cleared.",
+	),
 	QueueUpdateEvent: doc(
 		{
 			type: "'queue_update'",
@@ -228,6 +232,7 @@ export const eventDefs = {
 			"NoticeEvent",
 			"ThinkingLevelChangedEvent",
 			"GoalUpdatedEvent",
+			"PersonaChangedEvent",
 			"QueueUpdateEvent",
 		].join(" | "),
 		"A session event, discriminated by `type`; `set_event_filter` selects which are sent.",

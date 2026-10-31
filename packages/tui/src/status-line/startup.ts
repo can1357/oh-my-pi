@@ -61,6 +61,7 @@ const NO_USAGE = {
 export function createStartupStatusLine(data: StatusLineStartupData): StatusLineComponent {
 	const session: StatusLineSession = {
 		state: { model: data.model, thinkingLevel: data.thinkingLevel, messages: NO_MESSAGES },
+		activePersonaName: null,
 		model: data.model,
 		messages: NO_MESSAGES,
 		isStreaming: false,
