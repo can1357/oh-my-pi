@@ -1158,6 +1158,9 @@ describe("preparation that outlives the deadline", () => {
 
 			expect(prepares).toBe(2);
 			expect(route.requests()).toBe(1);
+			// The empty completion stands, not the refused replay's error.
+			expect(result.stopReason).toBe("stop");
+			expect(result.errorMessage).toBeUndefined();
 			expect(result.replayBudgetExhausted).toBe(true);
 		} finally {
 			route.stop();
@@ -1230,19 +1233,33 @@ describe("preparation that outlives the deadline", () => {
 // A wait hook that never settles must not hold failover: the wait is raced
 // against the deadline and against the caller's signal.
 describe("a retry wait that never settles", () => {
+	/** The call's result, or `undefined` when it is still pending after `ms`: a regression fails here, not at the runner's timeout. */
+	function resultWithin(call: Promise<AssistantMessage>, ms: number): Promise<AssistantMessage | undefined> {
+		return Promise.race([call, Bun.sleep(ms).then(() => undefined)]);
+	}
+
 	it("ends the call at the deadline", async () => {
 		const route = cutBeforeHeaders();
+		let entered = 0;
 		try {
 			const started = performance.now();
-			const result = await laneNamed("anthropic").call(route.url, {
-				replayBudgetMs: 600,
-				providerRetryWait: () => new Promise<void>(() => {}),
-			});
+			const result = await resultWithin(
+				laneNamed("anthropic").call(route.url, {
+					replayBudgetMs: 600,
+					providerRetryWait: () => {
+						entered++;
+						return new Promise<void>(() => {});
+					},
+				}),
+				600 + ROUND_TRIP_SLACK_MS,
+			);
 			const elapsedMs = performance.now() - started;
 
+			expect(entered).toBe(1);
+			expect(result).toBeDefined();
 			expect(route.requests()).toBe(1);
 			expect(elapsedMs).toBeLessThan(600 + ROUND_TRIP_SLACK_MS);
-			expect(result.replayBudgetExhausted).toBe(true);
+			expect(result?.replayBudgetExhausted).toBe(true);
 		} finally {
 			route.stop();
 		}
@@ -1251,19 +1268,22 @@ describe("a retry wait that never settles", () => {
 	it("ends the call when the caller aborts", async () => {
 		const route = cutBeforeHeaders();
 		const controller = new AbortController();
+		let entered = 0;
 		try {
 			const call = laneNamed("anthropic").call(route.url, {
 				replayBudgetMs: 60_000,
 				signal: controller.signal,
-				providerRetryWait: () => new Promise<void>(() => {}),
+				providerRetryWait: () => {
+					entered++;
+					return new Promise<void>(() => {});
+				},
 			});
 			await Bun.sleep(200);
-			const abortedAt = performance.now();
 			controller.abort();
-			const result = await call;
+			const result = await resultWithin(call, ROUND_TRIP_SLACK_MS);
 
-			expect(performance.now() - abortedAt).toBeLessThan(ROUND_TRIP_SLACK_MS);
-			expect(result.stopReason).toBe("aborted");
+			expect(entered).toBe(1);
+			expect(result?.stopReason).toBe("aborted");
 			expect(route.requests()).toBe(1);
 		} finally {
 			route.stop();

@@ -112,16 +112,29 @@ describe("the transport handoff", () => {
 });
 
 describe("the wait before a replay", () => {
+	/** How `pending` settles within `ms`: a regression that never settles fails here, not at the runner's timeout. */
+	function settlesWithin<T>(pending: Promise<T>, ms: number): Promise<{ value: T } | "rejected" | "pending"> {
+		return Promise.race([
+			pending.then(
+				value => ({ value }),
+				() => "rejected" as const,
+			),
+			Bun.sleep(ms).then(() => "pending" as const),
+		]);
+	}
+
 	// A wait hook that never settles must not hold failover past the deadline.
 	it("refuses the replay at the deadline while the hook is still running", async () => {
 		const budget = budgetOf(150);
 		const started = performance.now();
-		const admitted = await budget.wait(50, undefined, () => new Promise<void>(() => {}));
+		const outcome = await settlesWithin(
+			budget.wait(50, undefined, () => new Promise<void>(() => {})),
+			1_000,
+		);
 		const elapsedMs = performance.now() - started;
 
-		expect(admitted).toBe(false);
+		expect(outcome).toEqual({ value: false });
 		expect(elapsedMs).toBeGreaterThanOrEqual(140);
-		expect(elapsedMs).toBeLessThan(1_000);
 		expect(budget.admits(0)).toBe(false);
 	});
 
@@ -130,10 +143,8 @@ describe("the wait before a replay", () => {
 		const controller = new AbortController();
 		const waiting = budget.wait(10, controller.signal, () => new Promise<void>(() => {}));
 		setTimeout(() => controller.abort(), 20);
-		const started = performance.now();
 
-		await expect(waiting).rejects.toBeDefined();
-		expect(performance.now() - started).toBeLessThan(1_000);
+		expect(await settlesWithin(waiting, 1_000)).toBe("rejected");
 	});
 
 	it("admits the replay when the wait finishes inside the budget", async () => {
