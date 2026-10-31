@@ -36,7 +36,14 @@ function cloneState(state: GoalModeState | undefined): GoalModeState | undefined
 }
 
 function createToolSession(overrides: Partial<ToolSession>): ToolSession {
-	return { settings: Settings.isolated(), ...overrides } as ToolSession;
+	return {
+		cwd: "/tmp/goal-tool",
+		hasUI: false,
+		settings: Settings.isolated(),
+		getSessionFile: () => null,
+		getSessionSpawns: () => "*",
+		...overrides,
+	};
 }
 
 function createRuntimeHarness(initialState?: GoalModeState) {

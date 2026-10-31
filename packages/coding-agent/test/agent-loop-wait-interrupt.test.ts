@@ -17,6 +17,7 @@ import { GoalTool } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 import type { IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/irc-types";
@@ -438,7 +439,7 @@ describe("agent-loop wait wake delivery", () => {
 			{ systemPrompt: ["Test"], messages: [], tools: [goal, wait] },
 			{
 				model: mock.model,
-				convertToLlm: messages => messages as Message[],
+				convertToLlm,
 				hasSteeringMessages: () => ({ queued: steering.length > 0, source: "agent" }),
 				getSteeringMessages: async () => steering.splice(0),
 			},
