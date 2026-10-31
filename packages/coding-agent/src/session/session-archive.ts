@@ -27,6 +27,7 @@ import { createGunzip } from "node:zlib";
 import { getAgentDir, getSessionsDir, isEnoent, type FileLockHandle } from "@oh-my-pi/pi-utils";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { codeOf, statIfPresent, withGcLock } from "./gc-lock";
+import { type FileIdentity, removeOwnFile, writeExclusive } from "./regular-file";
 import { SESSION_TITLE_SLOT_BYTES } from "./session-entries";
 import { readSessionHeaderIdFromHandle, sessionHeaderIdFromBytes } from "./session-loader";
 import { SESSION_STAGING_RE, sessionStagingPath, tryAcquireSessionLease } from "./session-storage";
@@ -1292,6 +1293,12 @@ export interface StagingGround {
 	created: Stats;
 	/** This directory's record in {@link stagingLedgerDir}. */
 	record: string;
+	/**
+	 * The record's identity, from the descriptor that wrote it: what this run
+	 * removes it by, since its name is no proof the file there is still the
+	 * one this run wrote.
+	 */
+	recordIdentity: FileIdentity;
 }
 
 /**
@@ -1354,12 +1361,29 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 		const dir = sessionStagingPath(target);
 		const file = path.join(dir, path.basename(target));
 		const record = path.join(ledger, `${Snowflake.next()}.json`);
+		const part = `${record}${STAGING_RECORD_PART}`;
 		const intent: StagingRecord = { dir, file };
-		await fs.writeFile(record, JSON.stringify(intent), { flag: "wx", mode: 0o600 });
+		// Created afresh, like the replacement below: a name already taken
+		// throws EEXIST and keeps whatever holds it.
+		const written = [await writeExclusive(record, JSON.stringify(intent), 0o600)];
+		// What this attempt wrote to the ledger, and only that, by the
+		// identities it captured: at either name, anything else is kept and
+		// named — whatever it is called, it is not this run's to remove.
+		const unrecord = async (): Promise<string | undefined> => {
+			const notes: string[] = [];
+			for (const at of [part, record]) {
+				const note = await removeOwnFile(at, written, "a record this run wrote");
+				if (note) notes.push(note);
+			}
+			return notes.length > 0 ? notes.join("; ") : undefined;
+		};
+		const failed = (error: unknown, note: string): Error =>
+			new Error(`${error instanceof Error ? error.message : String(error)}; ${note}`, { cause: error });
 		try {
 			await fs.mkdir(dir, { mode: 0o700 });
 		} catch (error) {
-			await fs.rm(record, { force: true }).catch(() => undefined);
+			const note = await unrecord();
+			if (note) throw failed(error, note);
 			if (codeOf(error) === "EEXIST") continue;
 			throw error;
 		}
@@ -1374,9 +1398,12 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 				dirIdentity: { dev: minted.dev, ino: minted.ino },
 				identity: { dev: created.dev, ino: created.ino },
 			};
-			await fs.writeFile(`${record}${STAGING_RECORD_PART}`, JSON.stringify(recorded), { mode: 0o600 });
-			await fs.rename(`${record}${STAGING_RECORD_PART}`, record);
-			return { dir, file, handle, created, record };
+			// Created afresh: a FIFO, a link or anybody's file already at the
+			// name is not written through, and not this run's to remove — it
+			// fails this attempt and is kept.
+			written.push(await writeExclusive(part, JSON.stringify(recorded), 0o600));
+			await fs.rename(part, record);
+			return { dir, file, handle, created, record, recordIdentity: written[1] };
 		} catch (error) {
 			// What this attempt made goes again before the failure is
 			// reported, and the record goes with it only once nothing it
@@ -1386,9 +1413,9 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 			// Only what this attempt made, known from its own descriptor: a
 			// file it did not get to create is not its to remove.
 			const note = await clearStagingGround(dir, file, created, "this run");
-			if (note) throw new Error(`${error instanceof Error ? error.message : String(error)}; ${note}`);
-			await fs.rm(`${record}${STAGING_RECORD_PART}`, { force: true }).catch(() => undefined);
-			await fs.rm(record, { force: true }).catch(() => undefined);
+			if (note) throw failed(error, note);
+			const ledgerNote = await unrecord();
+			if (ledgerNote) throw failed(error, ledgerNote);
 			throw error;
 		}
 	}
@@ -1458,14 +1485,16 @@ async function clearStagingGround(
 
 /**
  * Take this run's staging directory away again, with what this run staged
- * there, and its record with it. A directory that cannot be taken away
- * keeps its record, so later restores leave it out of the live tree. The
- * sentence returned is the one for the command to print.
+ * there, and its record with it — the record by the identity this run
+ * captured when it wrote it, so a file put at that name since is kept and
+ * named. A directory that cannot be taken away keeps its record, so later
+ * restores leave it out of the live tree. The sentence returned is the one
+ * for the command to print.
  */
 export async function removeStagingGround(ground: StagingGround): Promise<string | undefined> {
 	const note = await clearStagingGround(ground.dir, ground.file, ground.created, "this run");
-	if (note === undefined) await fs.rm(ground.record, { force: true }).catch(() => undefined);
-	return note;
+	if (note !== undefined) return note;
+	return await removeOwnFile(ground.record, [ground.recordIdentity], "the record this run wrote");
 }
 
 /** What {@link surveyRecordedStagingGrounds} found. */
@@ -1519,9 +1548,9 @@ function parseStagingRecord(text: string): StagingRecord {
  */
 async function readStagingRecords(
 	agentDir: string,
-): Promise<{ records: { path: string; entry: StagingRecord }[]; parts: string[]; failure?: string }> {
+): Promise<{ records: { path: string; entry: StagingRecord }[]; failure?: string }> {
 	const ledger = stagingLedgerDir(agentDir);
-	const found = { records: [] as { path: string; entry: StagingRecord }[], parts: [] as string[] };
+	const found = { records: [] as { path: string; entry: StagingRecord }[] };
 	let names: string[];
 	try {
 		names = await fs.readdir(ledger);
@@ -1532,10 +1561,10 @@ async function readStagingRecords(
 	}
 	for (const name of names.sort()) {
 		const record = path.join(ledger, name);
-		if (name.endsWith(STAGING_RECORD_PART)) {
-			found.parts.push(record);
-			continue;
-		}
+		// Never read as a record, and never removed: a replacement a killed
+		// run left and a file somebody else put there look alike, and a
+		// suffix is no proof which it is.
+		if (name.endsWith(STAGING_RECORD_PART)) continue;
 		try {
 			// Non-blocking and regular files only: a FIFO among the records
 			// must refuse, not wait for a writer that never comes.
@@ -1648,20 +1677,22 @@ async function stagingRoots(agentDir: string): Promise<string[]> {
  * someone removes it by hand, and its record keeps a restore from carrying
  * it into the live tree in the meantime.
  *
- * With `apply`, the ledger's own housekeeping runs: a record whose
- * directory is gone is dropped, and a record replacement a run died writing
- * goes. Those are files in the ledger, which is this feature's alone; what a
- * record names is never touched. A record no run could have written is
- * reported and kept — see {@link checkRecordedGround}.
+ * Nothing in the ledger is removed either. A record whose directory is gone
+ * and a record replacement a run died writing are files this run did not
+ * write, and their names and shapes are no proof any run did: a file
+ * somebody put there looks the same. Both are kept and do nothing — a
+ * record whose directory is gone narrows nothing a restore does — and a
+ * record whose name now holds something other than a run's directory is
+ * reported. A record no run could have written is reported and kept — see
+ * {@link checkRecordedGround}.
  */
-export async function surveyRecordedStagingGrounds(agentDir: string, apply: boolean): Promise<StagingSurvey> {
+export async function surveyRecordedStagingGrounds(agentDir: string): Promise<StagingSurvey> {
 	const result: StagingSurvey = { residue: [], notes: [] };
-	const { records, parts, failure } = await readStagingRecords(agentDir);
+	const { records, failure } = await readStagingRecords(agentDir);
 	if (failure) {
 		result.notes.push(failure);
 		return result;
 	}
-	if (apply) for (const part of parts) await fs.rm(part, { force: true }).catch(() => undefined);
 	let roots: string[];
 	try {
 		roots = await stagingRoots(agentDir);
@@ -1676,8 +1707,12 @@ export async function surveyRecordedStagingGrounds(agentDir: string, apply: bool
 			continue;
 		}
 		if (ground.kind === "gone") {
-			if (ground.note) result.notes.push(ground.note);
-			if (apply) await fs.rm(record, { force: true }).catch(() => undefined);
+			if (ground.note) {
+				result.notes.push(
+					`${ground.note}; its record ${record} was kept, since a later run removes nothing it did not make — ` +
+						`look at both, then move the record out of ${path.dirname(record)}`,
+				);
+			}
 			continue;
 		}
 		result.residue.push(entry.dir);

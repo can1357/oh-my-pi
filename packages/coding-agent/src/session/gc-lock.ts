@@ -14,7 +14,7 @@
 import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { createExclusive, NotARegularFile, openRegularFile } from "./regular-file";
+import { createExclusive, NotARegularFile, openRegularFile, removeOwnFile } from "./regular-file";
 
 const GC_LOCK_BREAKER_SUFFIX = ".break";
 const GC_LOCK_STALE_MS = 5 * 60_000;
@@ -147,9 +147,27 @@ function shouldBreakGcLock(snapshot: GcLockSnapshot): boolean {
 	return Date.now() - ageFromMs > GC_LOCK_STALE_MS;
 }
 
+/**
+ * What gc writes into a lock: its pid and when it took the lock, one per
+ * line — or nothing yet, between creating the file and writing it.
+ */
+const GC_LOCK_TEXT = /^(?:\d+(?:\r?\n[^\r\n]*)?(?:\r?\n)?)?$/;
+
+/**
+ * Remove a lock whose holder is gone. Only a file holding what gc writes is
+ * taken for one: `gc.lock` and `gc.lock.break` are gc's names, and a name is
+ * no proof the file there is gc's — one holding anything else is somebody's,
+ * however old, and stops the command, named, instead of being removed.
+ */
 async function removeStaleGcLock(lockPath: string): Promise<boolean> {
 	const snapshot = await readGcLockSnapshot(lockPath);
 	if (!snapshot) return false;
+	if (!GC_LOCK_TEXT.test(snapshot.text)) {
+		throw new Error(
+			`${lockPath} holds something gc does not write, so it was not taken for a gc lock left by a run that is gone, ` +
+				`and nothing was done; look at it and move it aside, then run gc again`,
+		);
+	}
 	if (!shouldBreakGcLock(snapshot)) return false;
 	if (!(await gcLockSnapshotStillCurrent(lockPath, snapshot))) return false;
 	try {
@@ -170,17 +188,19 @@ async function openNewGcLock(lockPath: string): Promise<fs.FileHandle | null> {
 	}
 }
 
+/**
+ * Close and remove a sidecar lock this run created through `handle` — by the
+ * identity its descriptor reports, so a file put at the name since stays.
+ */
 async function releaseGcLockFile(lockPath: string, handle: fs.FileHandle): Promise<void> {
+	const ours = await handle.stat().catch(() => undefined);
 	try {
 		await handle.close();
 	} catch {
 		// Best effort: stale sidecar locks are recoverable by PID/timestamp.
 	}
-	try {
-		await fs.unlink(lockPath);
-	} catch (error) {
-		if (codeOf(error) === "ENOENT") return;
-	}
+	// Best effort too: one left behind is recoverable the same way.
+	if (ours) await removeOwnFile(lockPath, [ours], "the lock this run took");
 }
 
 async function openGcBreakerLock(lockPath: string): Promise<{ path: string; handle: fs.FileHandle }> {

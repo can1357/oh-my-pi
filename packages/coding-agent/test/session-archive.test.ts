@@ -36,6 +36,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 import { type FileLockHandle, getAgentDir, getSessionsDir, setAgentDir } from "@oh-my-pi/pi-utils";
+import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 
 // A session's lease is an abstract socket named by its id, and on Linux that
 // name is shared by the whole machine. Every id here starts with a part made
@@ -5341,3 +5342,115 @@ for (const form of ["a FIFO", "a link to a FIFO"] as const) {
 		);
 	}
 }
+
+// A later run removes nothing it did not create in that run, identified by
+// what it captured when it created it: a name in the staging ledger, a
+// suffix or a record's shape is not provenance.
+
+test("an archive run keeps a file in the staging ledger whose name ends in .part, in its preview as in applying", async () => {
+	const ledger = stagingLedgerDir(root);
+	await fs.mkdir(ledger, { recursive: true, mode: 0o700 });
+	const foreign = path.join(ledger, "user-notes.json.part");
+	await Bun.write(foreign, "FOREIGN USER DATA NOT WRITTEN BY GC");
+	await runGcCommand({
+		flags: {
+			agentDir: root,
+			archive: true,
+			json: true,
+			coldArchiveAfterDays: 0,
+			retainNewestGlobal: 0,
+			retainNewestPerCwd: 0,
+		},
+	});
+	expect(await Bun.file(foreign).text()).toBe("FOREIGN USER DATA NOT WRITTEN BY GC");
+
+	const applied = await archiveOnly();
+
+	expect(applied.archive?.archived).toBe(1);
+	expect(await Bun.file(foreign).text()).toBe("FOREIGN USER DATA NOT WRITTEN BY GC");
+});
+
+test("an archive run keeps a staging record whose directory is gone", async () => {
+	const ledger = stagingLedgerDir(root);
+	await fs.mkdir(ledger, { recursive: true, mode: 0o700 });
+	const dir = sessionStagingPath(path.join(getSessionsDir(root), "--work--", "x.log"));
+	const record = path.join(ledger, "1234567890123456.json");
+	const text = JSON.stringify({ dir, file: path.join(dir, "x.log") });
+	await Bun.write(record, text);
+
+	await archiveOnly();
+
+	expect(await Bun.file(record).text()).toBe(text);
+});
+
+test("a staging ground that cannot write its record's replacement keeps what already holds that name", async () => {
+	const ledger = stagingLedgerDir(root);
+	await fs.mkdir(ledger, { recursive: true, mode: 0o700 });
+	// Fixed names, so the collision is the kernel's EEXIST and not a made-up error.
+	let sequence = 0;
+	spyOn(Snowflake, "next").mockImplementation(() => {
+		sequence += 1;
+		return (sequence === 1 ? "1111111111111111" : "2222222222222222") as ReturnType<typeof Snowflake.next>;
+	});
+	const part = path.join(ledger, "2222222222222222.json.part");
+	await Bun.write(part, "SOMEBODY'S FILE, WRITTEN BEFORE THIS RUN");
+	const target = path.join(root, "staged-here", "example.log");
+	await fs.mkdir(path.dirname(target), { recursive: true });
+	let failure = "";
+	try {
+		const ground = await mintStagingGround(target, ledger);
+		await ground.handle.close();
+	} catch (error) {
+		failure = String(error);
+	}
+
+	expect(failure).toContain("EEXIST");
+	expect(failure).toContain(`${part} is not a record this run wrote, so it was left as it is`);
+	expect(await Bun.file(part).text()).toBe("SOMEBODY'S FILE, WRITTEN BEFORE THIS RUN");
+	// What this attempt did write is gone again: its record and its directory.
+	expect((await fs.readdir(ledger)).sort()).toEqual(["2222222222222222.json.part"]);
+	expect(await fs.readdir(path.dirname(target))).toEqual([]);
+});
+
+test("a run keeps a staging record that something else replaced, and says so", async () => {
+	const target = path.join(root, "staged-here", "example.log");
+	await fs.mkdir(path.dirname(target), { recursive: true });
+	const ground = await mintStagingGround(target, stagingLedgerDir(root));
+	await ground.handle.close();
+	// Another file at the record's name: written aside, then moved over it.
+	await Bun.write(`${ground.record}.aside`, "SOMEBODY ELSE'S RECORD");
+	await fs.rename(`${ground.record}.aside`, ground.record);
+
+	const note = await removeStagingGround(ground);
+
+	expect(note).toContain(`${ground.record} is not the record this run wrote, so it was left as it is`);
+	expect(await Bun.file(ground.record).text()).toBe("SOMEBODY ELSE'S RECORD");
+	expect(await fs.lstat(ground.dir).catch(() => undefined)).toBeUndefined();
+});
+
+test("a gc run keeps a gc.lock that holds something gc does not write, however old, and names it", async () => {
+	const lock = path.join(root, "gc.lock");
+	await Bun.write(lock, "MY NOTES ABOUT GC, NOT A LOCK\n");
+	const old = new Date(Date.now() - 60 * 60_000);
+	await fs.utimes(lock, old, old);
+
+	const failure = await archiveOnly().then(
+		() => "",
+		(error: unknown) => String(error),
+	);
+
+	expect(failure).toContain(`${lock} holds something gc does not write`);
+	expect(await Bun.file(lock).text()).toBe("MY NOTES ABOUT GC, NOT A LOCK\n");
+	expect(await fs.lstat(`${lock}.break`).catch(() => undefined)).toBeUndefined();
+});
+
+test("a gc run still takes over a gc.lock its dead holder left", async () => {
+	const lock = path.join(root, "gc.lock");
+	// A pid no process holds: the highest a pid can be on Linux, plus one.
+	await Bun.write(lock, `4194305\n${new Date(Date.now() - 60 * 60_000).toISOString()}\n`);
+
+	const result = await archiveOnly();
+
+	expect(result.archive?.archived).toBe(1);
+	expect(await fs.lstat(lock).catch(() => undefined)).toBeUndefined();
+});

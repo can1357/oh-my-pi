@@ -2202,10 +2202,11 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 	}
 
 	// Before this run stages anything of its own, so every staging record
-	// standing now is a dead run's. Reported, never removed: only the run
-	// that made a staging directory removes it, and nothing in this phase
-	// deletes by name — see {@link surveyRecordedStagingGrounds}.
-	const grounds = await surveyRecordedStagingGrounds(options.agentDir, options.apply);
+	// standing now is a dead run's, or somebody's. Reported, never removed:
+	// only the run that made a staging directory or a ledger file removes it,
+	// by the identity it captured making it — see
+	// {@link surveyRecordedStagingGrounds}. Preview and applying see the same.
+	const grounds = await surveyRecordedStagingGrounds(options.agentDir);
 	if (grounds.residue.length > 0) result.stagingResidue = grounds.residue;
 	result.errors.push(...grounds.notes);
 
