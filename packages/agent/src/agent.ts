@@ -32,6 +32,7 @@ import {
 	agentLoop,
 	agentLoopContinue,
 	createSyntheticToolResultMessage,
+	isUserSteeringMessage,
 	normalizeMessagesForProvider,
 	normalizeTools,
 	resolveOwnedDialectFromEnv,
@@ -132,7 +133,8 @@ export interface AgentOptions {
 	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
 
 	/**
-	 * Steering mode: "all" = send all steering messages at once, "one-at-a-time" = one per turn
+	 * Steering mode: "all" = send all steering messages at once, "one-at-a-time" = one per turn,
+	 * user-authored messages ahead of agent-authored ones (see {@link isUserSteeringMessage})
 	 */
 	steeringMode?: "all" | "one-at-a-time";
 
@@ -1513,18 +1515,43 @@ export class Agent {
 		this.#queuedMessageGrouping = predicate;
 	}
 
+	/** End (exclusive) of the grouped delivery unit that starts at `start`. */
+	#unitEnd(queue: readonly AgentMessage[], start: number): number {
+		let end = start + 1;
+		while (end < queue.length && this.#queuedMessageGrouping?.(queue[end - 1], queue[end])) end++;
+		return end;
+	}
+
 	#dequeueMessages(queue: readonly AgentMessage[], mode: "all" | "one-at-a-time"): AgentMessage[] {
-		if (mode === "all") return queue.slice();
-		let count = Math.min(1, queue.length);
-		while (count < queue.length && this.#queuedMessageGrouping?.(queue[count - 1], queue[count])) count++;
-		return queue.slice(0, count);
+		if (mode === "all" || queue.length === 0) return queue.slice();
+		return queue.slice(0, this.#unitEnd(queue, 0));
+	}
+
+	/**
+	 * Bounds of the steering unit delivered next: the whole queue in "all" mode;
+	 * in "one-at-a-time" mode the first unit holding a user-authored message, else
+	 * the head unit. A person's steer is read at the next boundary rather than
+	 * behind every agent steer queued before it; each class keeps its own order.
+	 */
+	#nextSteeringUnit(): { start: number; end: number } {
+		const queue = this.#steeringQueue;
+		if (this.#steeringMode === "all" || queue.length === 0) return { start: 0, end: queue.length };
+		const headEnd = this.#unitEnd(queue, 0);
+		for (let start = 0, end = headEnd; start < queue.length; start = end, end = this.#unitEnd(queue, start)) {
+			for (let i = start; i < end; i++) {
+				if (isUserSteeringMessage(queue[i])) return { start, end };
+			}
+		}
+		return { start: 0, end: headEnd };
 	}
 
 	#dequeueSteeringMessages(): AgentMessage[] {
-		const messages = this.#dequeueMessages(this.#steeringQueue, this.#steeringMode);
-		this.#steeringQueue = this.#steeringQueue.slice(messages.length);
-		if (messages.length > 0) this.#emitQueueChanged();
-		return messages;
+		const queue = this.#steeringQueue;
+		const { start, end } = this.#nextSteeringUnit();
+		if (start === end) return [];
+		this.#steeringQueue = start === 0 ? queue.slice(end) : [...queue.slice(0, start), ...queue.slice(end)];
+		this.#emitQueueChanged();
+		return queue.slice(start, end);
 	}
 
 	#dequeueFollowUpMessages(): AgentMessage[] {
@@ -1982,13 +2009,10 @@ export class Agent {
 				}
 				return this.#dequeueSteeringMessagesAfterHooks(signal ?? loopSignal);
 			},
-			hasSteeringMessages: () =>
-				steeringQueueState(
-					this.#steeringQueue,
-					this.#steeringMode === "one-at-a-time"
-						? Math.min(1, this.#steeringQueue.length)
-						: this.#steeringQueue.length,
-				),
+			hasSteeringMessages: () => {
+				const { start, end } = this.#nextSteeringUnit();
+				return steeringQueueState(this.#steeringQueue.slice(start, end));
+			},
 			waitForSteeringMessages: signal => this.#waitForSteeringMessages(signal),
 			onLiveSteeringTaken: messages => this.#adoptLiveSteering(messages),
 			hasIrcInterrupts: this.hasIrcInterrupts,

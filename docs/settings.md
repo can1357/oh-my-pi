@@ -907,7 +907,7 @@ The `cost` segment shows recorded session costs. For an active provider/model wi
 
 | Key                    | Type    | Default         | Values                                                                                                  |
 | ---------------------- | ------- | --------------- | ------------------------------------------------------------------------------------------------------- |
-| `steeringMode`         | enum    | `one-at-a-time` | `all`, `one-at-a-time`. How queued steering messages are delivered.                                     |
+| `steeringMode`         | enum    | `one-at-a-time` | `all`, `one-at-a-time`. How queued steering messages are delivered. In `one-at-a-time`, your own message goes ahead of agent-authored steering. |
 | `followUpMode`         | enum    | `one-at-a-time` | `all`, `one-at-a-time`.                                                                                 |
 | `interruptMode`        | enum    | `immediate`     | `immediate`, `wait`.                                                                                    |
 | `doubleEscapeAction`   | enum    | `rewind`          | `rewind`, `tree`, `none`: open the rewind selector, open the session tree, or do nothing. |

@@ -251,6 +251,12 @@ agent.followUp({
 Steering messages are checked after each tool call by default. Set `interruptMode` to `"wait"` to defer
 steering until the current turn completes.
 
+In `one-at-a-time` mode each boundary takes one delivery unit, and a unit holding a user-authored
+message (`attribution: "user"`, or a `role: "user"` message not attributed to an agent; see
+`isUserSteeringMessage`) goes ahead of agent-authored steering queued before it. A person's steer is
+read at the next boundary however many agent steers wait; user units keep their order, as do agent
+units. `all` mode delivers the whole queue in order.
+
 Hosts can use `setQueuedMessageGrouping((previous, next) => boolean)` to keep adjacent companion
 records and their prompt together in `one-at-a-time` mode. Without a grouping predicate, records
 remain separate. `replaceQueue("steering" | "followUp", messages)` replaces only the selected queue.

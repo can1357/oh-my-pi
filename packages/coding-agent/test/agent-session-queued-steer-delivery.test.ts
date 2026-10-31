@@ -220,6 +220,114 @@ describe("AgentSession queued steer delivery", () => {
 		expect(entry.message.steering).toBe(true);
 	});
 
+	describe("a typed steer queued behind extension steers", () => {
+		const CARDS = ["card one", "card two", "card three"];
+
+		/** Extension cards (`pi.sendMessage(..., { deliverAs: "steer", triggerTurn: true })`), then a person's Enter. */
+		async function queueCardsThenTypedSteer(target: AgentSession): Promise<void> {
+			for (const card of CARDS) {
+				await target.sendCustomMessage(
+					{ customType: "envoy-message", content: card, display: true },
+					{ deliverAs: "steer", triggerTurn: true },
+				);
+			}
+			await target.prompt("read me now", { streamingBehavior: "steer" });
+		}
+
+		function textsOf(call: MockModel["calls"][number]): string {
+			return JSON.stringify(call.context.messages);
+		}
+
+		function transcriptOrder(sessionManager: SessionManager): string[] {
+			return sessionManager.getEntries().flatMap(entry => {
+				if (entry.type === "custom_message" && entry.customType === "envoy-message") {
+					return [typeof entry.content === "string" ? entry.content : ""];
+				}
+				if (entry.type !== "message" || entry.message.role !== "user") return [];
+				const content = entry.message.content;
+				const text =
+					typeof content === "string"
+						? content
+						: content
+								.filter(part => part.type === "text")
+								.map(part => part.text)
+								.join("");
+				return [text];
+			});
+		}
+
+		it("reads it at the next model call and records it before the cards", async () => {
+			let queued: { steering: readonly string[] } | undefined;
+			const { session, sessionManager, mock } = await createSession([
+				async () => {
+					await queueCardsThenTypedSteer(session);
+					queued = session.getQueuedMessages();
+					return { content: ["working"] };
+				},
+				{ content: ["read the person"] },
+				{ content: ["read card one"] },
+				{ content: ["read card two"] },
+				{ content: ["read card three"] },
+			]);
+			session.setSteeringMode("one-at-a-time");
+
+			await session.prompt("start");
+			await session.waitForIdle();
+
+			// The chip lists only the person's message, and that message is the one read next.
+			expect(queued?.steering).toEqual(["read me now"]);
+			expect(textsOf(mock.calls[1])).toContain("read me now");
+			for (const card of CARDS) expect(textsOf(mock.calls[1])).not.toContain(card);
+			expect(textsOf(mock.calls[2])).toContain("card one");
+			expect(textsOf(mock.calls[2])).not.toContain("card two");
+			expect(mock.calls).toHaveLength(5);
+			expect(transcriptOrder(sessionManager)).toEqual(["start", "read me now", ...CARDS]);
+			expect(session.agent.hasQueuedMessages()).toBe(false);
+		});
+
+		it("still delivers everything in queue order at the next boundary in all mode", async () => {
+			const { session, sessionManager, mock } = await createSession([
+				async () => {
+					await queueCardsThenTypedSteer(session);
+					return { content: ["working"] };
+				},
+				{ content: ["read all"] },
+			]);
+			session.setSteeringMode("all");
+
+			await session.prompt("start");
+			await session.waitForIdle();
+
+			expect(mock.calls).toHaveLength(2);
+			expect(transcriptOrder(sessionManager)).toEqual(["start", ...CARDS, "read me now"]);
+		});
+
+		it("Esc still returns the typed text to the editor and records the cards without a turn", async () => {
+			const { promise: queuedAll, resolve: markQueued } = Promise.withResolvers<void>();
+			const { session, sessionManager, mock } = await createSession([
+				async () => {
+					await queueCardsThenTypedSteer(session);
+					markQueued();
+					// The turn stays open (the abort cancels the delay), as a busy run's would.
+					return { content: ["working"], delayMs: 60_000 };
+				},
+			]);
+			session.setSteeringMode("one-at-a-time");
+
+			const running = session.prompt("start");
+			await queuedAll;
+			const restored = session.clearQueue({ forInterrupt: true });
+			await session.abort({ reason: USER_INTERRUPT_LABEL });
+			await session.waitForIdle();
+			await running.catch(() => {});
+
+			expect(restored.steering.map(message => message.text)).toEqual(["read me now"]);
+			expect(mock.calls).toHaveLength(1);
+			expect(transcriptOrder(sessionManager)).toEqual(["start", ...CARDS]);
+			expect(session.agent.hasQueuedMessages()).toBe(false);
+		});
+	});
+
 	it("defaults direct user steers and idle prompts to user attribution", async () => {
 		const { session } = await createSession([{ content: ["ack user"] }]);
 

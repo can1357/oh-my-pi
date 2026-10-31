@@ -1886,22 +1886,28 @@ interface PreparedProviderCall {
 }
 
 /**
- * Classify the first `count` steering messages for a tool-batch interrupt:
- * any user-authored message wins, then agent-attributed user messages, else
- * system steering (advisor cards, hidden directives). Shared by the agent's
- * queue peek and the loop's live-taken steering.
+ * Whether a queued steering message is user-authored: user-attributed, or a user
+ * turn not attributed to an agent. A tool-batch interrupt classifies by it, and
+ * one-at-a-time steering delivers a unit holding one ahead of agent steering.
  */
-export function steeringQueueState(messages: readonly AgentMessage[], count = messages.length): SteeringQueueState {
-	if (count === 0) return { queued: false };
+export function isUserSteeringMessage(message: AgentMessage): boolean {
+	const attribution = "attribution" in message ? message.attribution : undefined;
+	if (attribution === "user") return true;
+	return "role" in message && message.role === "user" && attribution !== "agent";
+}
+
+/**
+ * Classify steering messages for a tool-batch interrupt: any user-authored
+ * message wins, then agent-attributed user messages, else system steering
+ * (advisor cards, hidden directives). Shared by the agent's queue peek and the
+ * loop's live-taken steering.
+ */
+export function steeringQueueState(messages: readonly AgentMessage[]): SteeringQueueState {
+	if (messages.length === 0) return { queued: false };
 	let hasAgentSteering = false;
-	for (let i = 0; i < count; i++) {
-		const message = messages[i];
-		const role = "role" in message ? message.role : undefined;
-		const attribution = "attribution" in message ? message.attribution : undefined;
-		if (attribution === "user") return { queued: true, source: "user" };
-		if (role !== "user") continue;
-		if (attribution !== "agent") return { queued: true, source: "user" };
-		hasAgentSteering = true;
+	for (const message of messages) {
+		if (isUserSteeringMessage(message)) return { queued: true, source: "user" };
+		if ("role" in message && message.role === "user") hasAgentSteering = true;
 	}
 	return { queued: true, source: hasAgentSteering ? "agent" : "system" };
 }

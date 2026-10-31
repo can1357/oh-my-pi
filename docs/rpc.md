@@ -1262,7 +1262,7 @@ they do not write global `config.yml`. `set_auto_compaction` and
 ### Mode semantics
 
 - `set_steering_mode` / `set_follow_up_mode`
-  - `"one-at-a-time"`: dequeue one delivery group per queue drain, keeping hidden companions with their user message
+  - `"one-at-a-time"`: dequeue one delivery group per queue drain, keeping hidden companions with their user message; for steering, a group holding a user-authored message goes ahead of agent-authored steering queued before it
   - `"all"`: dequeue the entire queue at once
 - `set_interrupt_mode`
   - `"immediate"`: queued steering raises a cooperative signal for foreground tools, allowing auto-backgroundable work to step aside; it does not hard-kill or skip non-interruptible tools
