@@ -5829,6 +5829,10 @@ for (const [shape, mode] of unlistable) {
 				if (mode === 0o000) expect(told).toContain(`${path.join(locked, record)} could not be read`);
 				if (mode === 0o100 || beside) expect(told).toContain(`copy ${copy} back to ${ground.record}`);
 				else expect(told).not.toContain(`back to ${ground.record}`);
+				// The run the step leads to lists the place its copy is in, so the
+				// step says to make that place listable first — and only that one.
+				if (mode === 0o100) expect(told).toContain(`make ${destination} listable by this user`);
+				if (beside) expect(told).not.toContain("listable by this user");
 				expect(told).toContain(`${locked} could not be listed`);
 				expect(told).toContain("EACCES");
 				expect(told).toContain("carries it home");
@@ -5839,6 +5843,13 @@ for (const [shape, mode] of unlistable) {
 			);
 			const listable = await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } });
 			expect(listable.quarantine?.errors.join("\n")).toContain(`copy ${copy} back to ${ground.record}`);
+			// The step, followed.
+			await fs.copyFile(copy, ground.record);
+			const finished = await runGcCommand({
+				flags: { agentDir: root, quarantine: record, apply: true, json: true },
+			});
+			expect(finished.quarantine?.errors).toEqual([]);
+			expect(finished.quarantine?.moved).toBe(true);
 		},
 	);
 }

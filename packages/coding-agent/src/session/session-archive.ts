@@ -1937,6 +1937,14 @@ function settleWithoutLedgerRecord(
 			? ""
 			: `${unread.join(" and ")} could not be read, so whether ${unread.length === 1 ? "it is" : "each is"} a whole copy ` +
 				`of the record is not known`;
+	// The run the step leads to lists the place it uses before it moves
+	// anything, so a copy in a place that cannot be listed needs that first.
+	const unlisted = copies.filter(place => place.unreadable !== undefined).map(place => place.destination);
+	const listFirst =
+		unlisted.length === 0
+			? ""
+			: ` That run lists ${unlisted.join(" or ")} before it moves anything, so make ${unlisted.join(" and ")} listable ` +
+				`by this user first.`;
 	const step =
 		copies.length === 0
 			? unread.length > 0
@@ -1947,6 +1955,7 @@ function settleWithoutLedgerRecord(
 			: `To finish a quarantine of it, or to see that one finished, copy ${which} back to ${record} and run the same command ` +
 				`again: with the ledger record to go by, it decides from what is on disk, moves the directory if it is still at its ` +
 				`old name, refuses what it has to, and reports the quarantine done once nothing is left to move.` +
+				listFirst +
 				(unknown === ""
 					? ""
 					: ` ${unknown}; once this user can read ${unread.length === 1 ? "it" : "them"}, the same command says what ${unread.length === 1 ? "it holds" : "they hold"}.`);
