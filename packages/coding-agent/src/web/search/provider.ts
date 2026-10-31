@@ -1,4 +1,6 @@
+import { retryAfterMsOf } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import type { WebSearchGrounding } from "@oh-my-pi/pi-catalog/types";
+import { withRetryWait } from "@oh-my-pi/pi-utils/format";
 import type { SearchProvider } from "./providers/base";
 import { getSearchProviderLabel, type SearchEngineId, SearchProviderError } from "./types";
 
@@ -65,8 +67,16 @@ export interface SearchProviderFailure {
 	error: unknown;
 }
 
-/** Format one provider failure for the user-facing fallback summary. */
+/**
+ * Format one provider failure for the user-facing fallback summary. This is
+ * display text: a server retry wait the error carries structured (a failed
+ * turn's `cause`, response headers) renders here and nowhere earlier.
+ */
 export function formatSearchProviderFailure(error: unknown, provider: { id: string; label: string }): string {
+	return withRetryWait(searchProviderFailureText(error, provider), retryAfterMsOf(error));
+}
+
+function searchProviderFailureText(error: unknown, provider: { id: string; label: string }): string {
 	if (error instanceof SearchProviderError) {
 		if (error.provider === "anthropic" && error.status === 404) {
 			return "Anthropic web search returned 404 (model or endpoint not found).";

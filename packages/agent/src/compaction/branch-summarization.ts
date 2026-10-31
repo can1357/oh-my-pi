@@ -46,6 +46,8 @@ export interface BranchSummaryResult {
 	modifiedFiles?: string[];
 	aborted?: boolean;
 	error?: string;
+	/** The server's retry wait (ms) the failed summarization response stated; `error` never carries it. */
+	errorRetryAfterMs?: number;
 }
 
 /** Details stored in BranchSummaryEntry.details for file tracking */
@@ -385,7 +387,7 @@ export async function generateBranchSummary(
 		return { aborted: true };
 	}
 	if (response.stopReason === "error") {
-		return { error: response.errorMessage || "Summarization failed" };
+		return { error: response.errorMessage || "Summarization failed", errorRetryAfterMs: response.errorRetryAfterMs };
 	}
 	if (response.stopReason === "length") {
 		return { error: incompleteOutputError("Summarization failed") };

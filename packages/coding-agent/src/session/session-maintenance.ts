@@ -68,6 +68,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { getHeadersFromError, getRetryAfterMsFromHeaders } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { retryAfterMsOf } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import { resolvePromptCacheLookback } from "@oh-my-pi/pi-catalog/compat/prompt-cache-lookback";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
@@ -2009,6 +2010,7 @@ export class SessionMaintenance {
 					aborted: controller.signal.aborted,
 					willRetry: false,
 					errorMessage: error instanceof Error ? error.message : String(error),
+					retryAfterMs: retryAfterMsOf(error),
 				},
 				detachPostCommit,
 			);
@@ -3130,6 +3132,7 @@ export class SessionMaintenance {
 				provider: assistantMessage.provider,
 				model: assistantMessage.model,
 				message: assistantMessage.errorMessage,
+				retryAfterMs: assistantMessage.errorRetryAfterMs,
 				storedTokens,
 				contextWindow,
 			});
@@ -3212,6 +3215,7 @@ export class SessionMaintenance {
 						provider: assistantMessage.provider,
 						model: assistantMessage.model,
 						message: assistantMessage.errorMessage,
+						retryAfterMs: assistantMessage.errorRetryAfterMs,
 						storedTokens,
 						contextWindow,
 					});
@@ -3238,6 +3242,7 @@ export class SessionMaintenance {
 					provider: assistantMessage.provider,
 					model: assistantMessage.model,
 					message: assistantMessage.errorMessage,
+					retryAfterMs: assistantMessage.errorRetryAfterMs,
 					storedTokens,
 					contextWindow,
 				});
@@ -5918,6 +5923,7 @@ export class SessionMaintenance {
 						aborted: false,
 						willRetry: false,
 						errorMessage: `${contextErrorMessage}; trying the next preferred compaction method.`,
+						retryAfterMs: retryAfterMsOf(error),
 					},
 					options.detachPostCommit === true,
 				);
@@ -5934,6 +5940,7 @@ export class SessionMaintenance {
 					aborted: false,
 					willRetry: false,
 					errorMessage: contextErrorMessage,
+					retryAfterMs: retryAfterMsOf(error),
 				},
 				options.detachPostCommit === true,
 			);
@@ -6317,6 +6324,7 @@ export class SessionMaintenance {
 					aborted: false,
 					willRetry: false,
 					errorMessage: message,
+					retryAfterMs: retryAfterMsOf(error),
 					skipped: false,
 				},
 				detachPostCommit,

@@ -3,6 +3,7 @@
  *
  * Handles /ssh subcommands for managing SSH host configurations.
  */
+import { errorText } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import { getProjectDir, getSSHConfigPath } from "@oh-my-pi/pi-utils";
 import { Text } from "@oh-my-pi/pi-tui";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -231,7 +232,7 @@ export class SSHCommandController {
 				helpText = `\n\nTip: Use ${theme.fg("accent", "/ssh remove")} first, or choose a different name.`;
 			}
 
-			this.ctx.showError(`Failed to add host: ${errorMsg}${helpText}`);
+			this.ctx.showError(`Failed to add host: ${errorText(error)}${helpText}`);
 		}
 	}
 
@@ -322,7 +323,7 @@ export class SSHCommandController {
 
 			this.#showReport("Configured SSH Hosts", lines.join("\n"));
 		} catch (error) {
-			this.ctx.showError(`Failed to list hosts: ${error instanceof Error ? error.message : String(error)}`);
+			this.ctx.showError(`Failed to list hosts: ${errorText(error)}`);
 		}
 	}
 
@@ -370,7 +371,7 @@ export class SSHCommandController {
 				["", theme.fg("success", `- Removed SSH host "${name}" from ${scope} config`), ""].join("\n"),
 			);
 		} catch (error) {
-			this.ctx.showError(`Failed to remove host: ${error instanceof Error ? error.message : String(error)}`);
+			this.ctx.showError(`Failed to remove host: ${errorText(error)}`);
 		}
 	}
 

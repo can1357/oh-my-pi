@@ -81,7 +81,7 @@ import type {
 	UsageReport,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
-import { type Effort, serviceTierFamily, streamSimple } from "@oh-my-pi/pi-ai";
+import { assistantTurnError, type Effort, serviceTierFamily, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
@@ -12870,7 +12870,7 @@ export class AgentSession implements SettingsScope {
 					break;
 				}
 				if (event.type === "error") {
-					throw new Error(event.error.errorMessage || "Ephemeral turn failed");
+					throw assistantTurnError(event.error, event.error.errorMessage || "Ephemeral turn failed");
 				}
 			}
 		} catch (error) {
@@ -13928,7 +13928,7 @@ export class AgentSession implements SettingsScope {
 				return { cancelled: true, aborted: true };
 			}
 			if (result.error) {
-				throw new Error(result.error);
+				throw assistantTurnError({ errorMessage: result.error, errorRetryAfterMs: result.errorRetryAfterMs });
 			}
 			summaryText = result.summary;
 			summaryDetails = {

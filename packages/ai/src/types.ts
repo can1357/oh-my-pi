@@ -572,11 +572,15 @@ export interface StreamOptions {
 	 * A server's wait is never shortened to fit, because retrying sooner than
 	 * the server asked is a guaranteed failure: a requested wait that would end
 	 * past the budget ends the call at once rather than sleeping into it, and
-	 * the server's hint stays on the returned error for the caller, through any
-	 * provider rewrite of the message. The wait is the longest one the server
-	 * named, across every retry header and every hint in the error body,
-	 * whatever shorter or malformed hints sit beside it; an HTTP date is read
-	 * by RFC 9110's three forms, a two-digit year as at most fifty years ahead.
+	 * the server's wait stays on the result for the caller as
+	 * {@link AssistantMessage.errorRetryAfterMs}, whatever rewrite the provider
+	 * applies to the message. The wait is the longest one the server named,
+	 * across every retry header and every hint in the error body, whatever
+	 * shorter or malformed hints sit beside it; an HTTP date is read by RFC
+	 * 9110's three forms, a two-digit year as at most fifty years ahead.
+	 *
+	 * A proxied call (`streamProxy`) sends the budget to the server that runs
+	 * it; whether that server keeps to it is up to the server.
 	 *
 	 * Requests inside one attempt that is already on the wire (a token fetch, a
 	 * streaming append) are not replays and are not checked. The request in
@@ -1402,8 +1406,10 @@ export interface AssistantMessage {
 	 * gateway) can state any value here; `markReached` caps the block it sets at
 	 * `MAX_HINTED_BLOCK_MS`. Consumers that keep a route or credential closed
 	 * take the longer of this and the first wait the message text names
-	 * (`providerRetryWaitMs`). The text may also show it, for the reader; no
-	 * consumer trusts the text for it.
+	 * (`providerRetryWaitMs`). The wait is never written into `errorMessage`:
+	 * a display renders it from this field (`assistantErrorText`), as the last
+	 * step before a person reads it, so no classifier can mistake its digits
+	 * for a status.
 	 */
 	errorRetryAfterMs?: number;
 	/**

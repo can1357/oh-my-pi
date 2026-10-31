@@ -13,7 +13,7 @@
  * 94% under 150 lines; smol fixed 99% with one feedback retry, with ~12% of
  * raw candidates being reverts — hence the explicit revert rejection.
  */
-import { completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
+import { assistantTurnError, completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { diffLineRuns, editDiffString, parseCodeStatus } from "@oh-my-pi/pi-natives";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import { resolveRoleSelection } from "../config/model-resolver";
@@ -389,7 +389,7 @@ export async function attemptEditAutoRepair(options: {
 		);
 		session.costGate?.record(response.usage.cost.total);
 		if (response.stopReason === "error") {
-			throw new Error(response.errorMessage ?? "auto-repair completion failed");
+			throw assistantTurnError(response, response.errorMessage ?? "auto-repair completion failed");
 		}
 		// An abort resolves (not rejects) with empty content; treating that as a
 		// candidate would silently burn the retry and hide the stall.

@@ -3,10 +3,9 @@ import {
 	assistantErrorText,
 	assistantTurnError,
 	errorText,
-	formatRetryWait,
 	retryAfterMsOf,
-	withRetryWait,
 } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
+import { formatRetryWait, withRetryWait } from "@oh-my-pi/pi-utils";
 
 describe("the server's retry wait at display", () => {
 	it("renders a wait after the text with the shared duration format, and nothing when there is none", () => {

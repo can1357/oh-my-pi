@@ -6,6 +6,7 @@ import {
 	formatFolder,
 	formatInteger,
 	formatMessageCost,
+	formatRequestError,
 	formatRelativeTime,
 	formatTimestamp,
 	formatTokensPerSecond,
@@ -109,7 +110,7 @@ function RequestDetailsBody({ details, aborted }: { details: RequestDetails; abo
 			{details.errorMessage && (
 				<section className="request-drawer-error" data-tone={aborted ? "warn" : "bad"} role="note">
 					<div className="request-drawer-error-label">{aborted ? "Aborted" : "Error"}</div>
-					<pre className="request-drawer-error-text">{details.errorMessage}</pre>
+					<pre className="request-drawer-error-text">{formatRequestError(details)}</pre>
 				</section>
 			)}
 

@@ -36,7 +36,8 @@ import {
 	type ToolLoadMode,
 	validateAgentToolArguments,
 } from "@oh-my-pi/pi-agent-core";
-import { type Tool as AiTool, jsonSchemaToTypeScript, toolWireSchema } from "@oh-my-pi/pi-ai";
+import { type Tool as AiTool, jsonSchemaToTypeScript, retryAfterMsOf, toolWireSchema } from "@oh-my-pi/pi-ai";
+import { withRetryWait } from "@oh-my-pi/pi-utils";
 import { schemaDeclaresIntentField } from "../utils/tool-schema";
 import { stripXdUrlPrefix, XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { truncateHeadBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
@@ -497,7 +498,8 @@ export async function dispatchXdevTool(
 		}
 		return {
 			result: {
-				content: [{ type: "text", text: renderError(error) }],
+				// A tool result is display to the model: the error's server wait renders here.
+				content: [{ type: "text", text: withRetryWait(renderError(error), retryAfterMsOf(error)) }],
 				isError: true,
 			},
 			xdev,

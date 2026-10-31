@@ -188,7 +188,10 @@ async function finalizeCodexCapacityError(retryAfterSeconds: string): Promise<AI
 	});
 }
 
-/** A stream that ends with a finalized provider error, as a provider stream does. */
+/**
+ * A stream that ends with a finalized provider error, as a provider stream does:
+ * the server's wait travels as `errorRetryAfterMs`, never in the message text.
+ */
 function finalizedErrorStream(model: Model<Api>, failure: AIError.FinalizeResult): AssistantMessageEventStream {
 	const stream = new AssistantMessageEventStream();
 	queueMicrotask(() => {
@@ -201,6 +204,7 @@ function finalizedErrorStream(model: Model<Api>, failure: AIError.FinalizeResult
 			usage: emptyUsage(),
 			stopReason: failure.stopReason,
 			errorMessage: failure.message,
+			errorRetryAfterMs: failure.retryAfterMs,
 			errorStatus: failure.status,
 			errorId: failure.id,
 			timestamp: Date.now(),

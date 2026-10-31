@@ -243,7 +243,7 @@ describe("a token fetch between the decision and the inference request", () => {
 			expect(tokens).toBe(1);
 			expect(inference).toBe(1);
 			expect(result.errorMessage).toContain("original overload sentinel");
-			expect(result.errorMessage).toContain("retry-after-ms=1");
+			expect(result.errorRetryAfterMs).toBe(1);
 			expect(result.replayBudgetExhausted).toBe(true);
 		} finally {
 			server.stop();
@@ -409,8 +409,9 @@ describe("a correction the server asked to delay by 30 s, against a 2 s budget",
 
 				expect(server.sends).toHaveLength(1);
 				expect(result.replayBudgetExhausted).toBe(true);
-				// The server's wait stays readable on the error, whatever rewrite the provider applies.
-				expect(result.errorMessage).toContain("retry-after-ms=30000");
+				// The server's wait stays on the result, structured, whatever rewrite the provider applies.
+				expect(result.errorRetryAfterMs).toBe(30_000);
+				expect(result.errorMessage).not.toContain("retry-after");
 			} finally {
 				server.stop();
 			}

@@ -14,7 +14,15 @@
 
 import { type } from "@oh-my-pi/omptype";
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import { type Api, type AssistantMessage, Effort, type Model, type Tool } from "@oh-my-pi/pi-ai";
+import {
+	type Api,
+	type AssistantMessage,
+	assistantTurnError,
+	Effort,
+	type Model,
+	retryAfterMsOf,
+	type Tool,
+} from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit/utils";
@@ -99,6 +107,8 @@ export interface CompletionHandleEntry {
 	settled: boolean;
 	result?: EvalCompletionResult;
 	error?: string;
+	/** The server's retry wait (ms) the failure stated; `error` never carries it. */
+	errorRetryAfterMs?: number;
 	evictionTimer?: NodeJS.Timeout;
 }
 
@@ -397,7 +407,10 @@ async function executeCompletion(
 			throw new ToolError("completion() request aborted.");
 		}
 		if (response.stopReason === "error") {
-			lastError = new ToolError(response.errorMessage ?? "completion() request failed.");
+			// The failed turn rides as the cause, so the server's wait stays structured (`retryAfterMsOf`).
+			lastError = Object.assign(new ToolError(response.errorMessage ?? "completion() request failed."), {
+				cause: assistantTurnError(response),
+			});
 			if (!signal.aborted && index < candidates.length - 1) continue;
 			throw lastError;
 		}
@@ -496,6 +509,7 @@ export function retainCompletionHandle(
 			},
 			error => {
 				entry.error = error instanceof Error ? error.message : String(error);
+				entry.errorRetryAfterMs = retryAfterMsOf(error);
 			},
 		)
 		.finally(() => {

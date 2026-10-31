@@ -841,9 +841,9 @@ describe("openai-codex streaming", () => {
 			const result =
 				transport === "sse" ? (await runCodexSseEvents([failure])).result : await runCodexWebSocketEvent(failure);
 			expect(result.stopReason).toBe("error");
-			expect(extractProviderRetryHint("openai-codex", result.errorMessage)).toBe(expectedDelay);
-			// The same wait, carried structured: consumers read this, never the text.
+			// The wait is carried structured, and never written into the text.
 			expect(result.errorRetryAfterMs).toBe(expectedDelay);
+			expect(extractProviderRetryHint("openai-codex", result.errorMessage)).toBeUndefined();
 		});
 	});
 

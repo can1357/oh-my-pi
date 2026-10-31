@@ -1,7 +1,7 @@
 import { type } from "@oh-my-pi/omptype";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, ApiKey, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
-import { completeSimple, retryTransientCompletion, validateToolCall } from "@oh-my-pi/pi-ai";
+import { assistantTurnError, completeSimple, retryTransientCompletion, validateToolCall } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import changelogSystemPrompt from "../../commit/prompts/changelog-system.md" with { type: "text" };
 import changelogUserPrompt from "../../commit/prompts/changelog-user.md" with { type: "text" };
@@ -72,7 +72,7 @@ export async function generateChangelogEntries({
 	);
 
 	if (response.stopReason === "error") {
-		throw new Error(response.errorMessage ?? "provider error");
+		throw assistantTurnError(response, response.errorMessage ?? "provider error");
 	}
 
 	const parsed = parseChangelogResponse(response);

@@ -5,19 +5,19 @@
 ### Added
 
 - Added `longestRetryHint`, the longest wait a response names across every retry header and every hint in its body ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- Added a `retryGate` option to `fetchWithRetry`: it receives each retry's wait and is asked again with `0` immediately before the retry is sent; returning `false` stops retrying and surfaces the current failure. A retry the transport refuses at handoff with `RetryRefusedError` returns that failure too. While a gate is set, a response's wait is the longest one its headers or body name
+- Added `RetryRefusedError` and `findRetryRefusal` for a transport that refuses a retry at handoff
+- Added `parseRetryAfter`, the one reading of a `Retry-After` header value (delta seconds or a date, the longest across a duplicated header's values), and `parseRetryAfterDate`, the one reader of a `Retry-After` date. Dates are read field by field: RFC 9110's three forms with the robustness it asks for (RFC 5322's optional weekday and seconds, folding whitespace, UT, the US zone names, numeric offsets, trailing comments, long weekday and month names), JavaScript's `Date#toString` shape, and RFC 3339 timestamps. A two-digit year is at most fifty years ahead, 23:59:60 is a leap second, and an impossible date names no wait. A date without a zone is GMT in a header, where an HTTP date is GMT by definition, and names no wait in a message body, where nothing says which zone it is in. Checked against `Date.parse` over 31,508 generated spellings read as a header: every spelling it reads the same in two machine zones is read the same
+
+### Fixed
+
+- Fixed `extractRetryHint` reading a `Retry-After` date with `Date.parse`: a two-digit RFC 850 year within fifty years read as the last century, a leap second named no wait, 31 November rolled into December, a zone-less date in a header was read in the machine's own zone, and a `retry-after: <HTTP date>` in error text was ignored. It now uses `parseRetryAfter`, the same reading as `longestRetryHint`
 
 ## [18.14.1] - 2026-10-31
 
 ### Added
 
 - Added `isFileLockHeld`, which reports whether a file lock is held without acquiring it ([#17428](https://github.com/can1357/oh-my-pi/pull/17428) by [@andrebrait](https://github.com/andrebrait))
-- Added a `retryGate` option to `fetchWithRetry`: it receives each retry's wait and is asked again with `0` immediately before the retry is sent; returning `false` stops retrying and surfaces the current failure. A retry the transport refuses at handoff with `RetryRefusedError` returns that failure too. While a gate is set, a response's wait is the longest one its headers or body name
-- Added `longestRetryHint`, the longest wait a response names across every retry header and every hint in its body, and `RetryRefusedError` / `findRetryRefusal` for a transport that refuses a retry at handoff
-- Added `parseRetryAfter`, the one reading of a `Retry-After` header value (delta seconds or a date, the longest across a duplicated header's values), and `parseRetryAfterDate`, the one reader of a `Retry-After` date. Dates are read field by field: RFC 9110's three forms with the robustness it asks for (RFC 5322's optional weekday and seconds, folding whitespace, UT, the US zone names, numeric offsets, trailing comments, long weekday and month names), JavaScript's `Date#toString` shape with a zone, and an RFC 3339 timestamp that names its zone. A two-digit year is at most fifty years ahead, 23:59:60 is a leap second, an HTTP date without a zone is GMT, and an impossible date or a zone-less shape that is not an HTTP date names no wait. Checked against `Date.parse` over 31,506 generated spellings: every spelling it reads the same in two machine zones is read the same
-
-### Fixed
-
-- Fixed `extractRetryHint` reading a `Retry-After` date with `Date.parse`: a two-digit RFC 850 year within fifty years read as the last century, a leap second named no wait, 31 November rolled into December, a zone-less asctime or IMF date was read in the machine's own zone, and a `retry-after: <HTTP date>` in error text was ignored. It now uses `parseRetryAfter`, the same reading as `longestRetryHint`
 - Added `oklabDistance`, the perceptual distance between two hex colors ([#17520](https://github.com/can1357/oh-my-pi/pull/17520))
 
 ## [18.14.0] - 2026-10-29

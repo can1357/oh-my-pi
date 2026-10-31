@@ -1,5 +1,5 @@
 import type { Usage } from "@oh-my-pi/pi-ai";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { isRecord, withRetryWait } from "@oh-my-pi/pi-utils";
 import type { ThemeColor } from "../theme/theme";
 import type { ConfiguredThinkingLevel } from "../render/render-utils";
 import type { ToolRenderer } from "./renderer";
@@ -816,12 +816,15 @@ function renderAgentProgress(
 		const waitLabel = remainingMs > 0 ? `in ${formatDuration(remainingMs)}` : "now";
 		const summary =
 			`retrying ${progress.retryState.attempt}/${progress.retryState.maxAttempts} ${waitLabel}: ` +
-			previewLine(sanitizeText(progress.retryState.errorMessage), 60);
+			withRetryWait(
+				previewLine(sanitizeText(progress.retryState.errorMessage), 60),
+				progress.retryState.retryAfterMs,
+			);
 		lines.push(`${continuePrefix}${theme.tree.hook} ${theme.fg("warning", summary)}`);
 	} else if (progress.retryFailure && progress.status !== "running") {
 		const summary = `auto-retry gave up after ${progress.retryFailure.attempt} attempt${
 			progress.retryFailure.attempt === 1 ? "" : "s"
-		}: ${previewLine(sanitizeText(progress.retryFailure.errorMessage), 80)}`;
+		}: ${withRetryWait(previewLine(sanitizeText(progress.retryFailure.errorMessage), 80), progress.retryFailure.retryAfterMs)}`;
 		lines.push(`${continuePrefix}${theme.tree.hook} ${theme.fg("error", summary)}`);
 	}
 
@@ -1272,7 +1275,7 @@ function renderAgentResult(
 	// Error message
 	if (result.error && (!success || mergeFailed) && (!aborted || result.error !== result.abortReason)) {
 		lines.push(
-			`${continuePrefix}${theme.fg(mergeFailed ? "warning" : "error", clipCollapsed(flattenLine(sanitizeText(result.error)), 70, expanded))}`,
+			`${continuePrefix}${theme.fg(mergeFailed ? "warning" : "error", withRetryWait(clipCollapsed(flattenLine(sanitizeText(result.error)), 70, expanded), result.errorRetryAfterMs))}`,
 		);
 	}
 
@@ -1919,7 +1922,7 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 					max: progress.retryState.maxAttempts,
 					age: Math.max(0, nowMs - progress.retryState.startedAtMs),
 					delay: progress.retryState.delayMs,
-					error: plainText(progress.retryState.errorMessage),
+					error: plainText(withRetryWait(progress.retryState.errorMessage, progress.retryState.retryAfterMs)),
 				}
 			: null;
 	return agentNode(
@@ -1954,7 +1957,7 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 				? text(
 						[
 							span(
-								`auto-retry gave up after ${progress.retryFailure.attempt} ${pluralize("attempt", progress.retryFailure.attempt)}: ${plainText(progress.retryFailure.errorMessage)}`,
+								`auto-retry gave up after ${progress.retryFailure.attempt} ${pluralize("attempt", progress.retryFailure.attempt)}: ${plainText(withRetryWait(progress.retryFailure.errorMessage, progress.retryFailure.retryAfterMs))}`,
 								"error",
 							),
 						],
@@ -2011,8 +2014,12 @@ function describeResultAgent(result: SingleResult, state: AgentDescribeState, de
 			result.resolvedModelRoute ? noteText(result.resolvedModelRoute, "dim") : undefined,
 			aborted && result.abortReason ? errorLine(result.abortReason) : undefined,
 			warning ? errorLine(warning, "warning") : undefined,
-			result.error ? errorLine(result.error) : undefined,
-			result.retryFailure ? errorLine(`auto-retry gave up: ${result.retryFailure.errorMessage}`) : undefined,
+			result.error ? errorLine(withRetryWait(result.error, result.errorRetryAfterMs)) : undefined,
+			result.retryFailure
+				? errorLine(
+						`auto-retry gave up: ${withRetryWait(result.retryFailure.errorMessage, result.retryFailure.retryAfterMs)}`,
+					)
+				: undefined,
 			// The structured result is the agent's answer: its containers open one level, as in the fallback tree.
 			structured !== undefined
 				? describeJsonValue(structured, { native: state.json, open: 1 })
@@ -2461,6 +2468,8 @@ export interface AgentProgress {
 		maxAttempts: number;
 		delayMs: number;
 		errorMessage: string;
+		/** The server's retry wait (ms) the failed message stated, distinct from `delayMs`; rendered only at display. */
+		retryAfterMs?: number;
 		startedAtMs: number;
 	};
 	/**
@@ -2472,6 +2481,8 @@ export interface AgentProgress {
 	retryFailure?: {
 		attempt: number;
 		errorMessage: string;
+		/** The server's retry wait (ms) the final failed message stated; rendered only at display. */
+		retryAfterMs?: number;
 	};
 	/**
 	 * Snapshot of the most recent `task` tool call's in-flight `TaskToolDetails`,
@@ -2529,6 +2540,12 @@ export interface SingleResult {
 	/** Retains {@link AgentProgress.advisor} after the advised session is disposed. */
 	advisor?: boolean;
 	error?: string;
+	/**
+	 * The server's retry wait (ms) the provider error in {@link error} stated.
+	 * `error` never carries it; renderers append it at display. Absent when
+	 * `error` is not a provider error or the server named no wait.
+	 */
+	errorRetryAfterMs?: number;
 	aborted?: boolean;
 	abortReason?: string;
 	/** Aggregated usage from the subprocess, accumulated incrementally from message_end events. */
@@ -2576,6 +2593,8 @@ export interface SingleResult {
 	retryFailure?: {
 		attempt: number;
 		errorMessage: string;
+		/** The server's retry wait (ms) the final failed message stated; rendered only at display. */
+		retryAfterMs?: number;
 	};
 	/** Output metadata for agent:// URL integration */
 	outputMeta?: { lineCount: number; charCount: number };

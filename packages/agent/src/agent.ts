@@ -25,6 +25,7 @@ import {
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
+import { retryAfterMsOf } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import {
@@ -2129,6 +2130,10 @@ export class Agent {
 					? err.message
 					: String(err);
 			const shouldEmitVisibleError = !stoppedForAbort;
+			// The server's wait rides on the thrown error's headers; the message
+			// keeps it structured beside the plain `errorMessage`.
+			const errorRetryAfterMs = stoppedForAbort ? undefined : retryAfterMsOf(err);
+			const errorRetryAfter = errorRetryAfterMs === undefined ? {} : { errorRetryAfterMs };
 			const assistantPartial = partial?.role === "assistant" ? partial : undefined;
 			const hadAssistantStart = assistantPartial !== undefined;
 			// Same contract as the normal drain in `#emitCursorSplitAssistantMessage`:
@@ -2155,6 +2160,7 @@ export class Agent {
 							),
 							stopReason: "error",
 							errorMessage,
+							...errorRetryAfter,
 						}
 					: {
 							role: "assistant",
@@ -2172,6 +2178,7 @@ export class Agent {
 							},
 							stopReason: stoppedForAbort ? "aborted" : "error",
 							errorMessage,
+							...errorRetryAfter,
 							timestamp: Date.now(),
 						};
 

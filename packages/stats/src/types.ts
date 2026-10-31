@@ -31,6 +31,13 @@ export interface MessageStats {
 	stopReason: StopReason;
 	/** Error message if stopReason is error */
 	errorMessage: string | null;
+	/**
+	 * The server's retry wait (ms) the failed turn stated (`AssistantMessage.errorRetryAfterMs`),
+	 * or `null` when it stated none. `errorMessage` stays the raw text; the UI appends the wait
+	 * at display. Always written by `rowToMessageStats` and the parser; optional only because
+	 * session fixtures that stand in for ingest input are typed as `MessageStats` too.
+	 */
+	errorRetryAfterMs?: number | null;
 	/** Token usage */
 	usage: Usage;
 	/** Which agent produced this message (main agent, task subagent, advisor) */
@@ -116,6 +123,8 @@ export interface SessionModelUsageEntry {
 	usage: Usage;
 	stopReason?: StopReason;
 	errorMessage?: string;
+	/** The server's retry wait (ms) the failed call stated; `errorMessage` never carries it. */
+	errorRetryAfterMs?: number;
 }
 
 /**

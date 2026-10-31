@@ -407,6 +407,7 @@ export interface InteractiveModeContext {
 	/** Show the ctrl+p role chip track above the editor, `activeIndex` filled. */
 	showModelCycleTrack(segments: readonly TrackSegment[], activeIndex: number): void;
 	showError(message: string): void;
+	/** Pin `message` above the editor. Display text: the caller renders a turn's retry wait into it. */
 	showPinnedError(message: string): void;
 	clearPinnedError(): void;
 	showWarning(message: string, options?: { hideWithToolActivity?: boolean }): void;

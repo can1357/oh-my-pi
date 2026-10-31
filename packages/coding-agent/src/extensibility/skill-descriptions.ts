@@ -2,7 +2,7 @@ import { Database, type Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type AgentTelemetry, instrumentedCompleteSimple } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model } from "@oh-my-pi/pi-ai";
+import { type Api, assistantTurnError, type Model } from "@oh-my-pi/pi-ai";
 import {
 	getAgentDir,
 	getSkillDescriptionsDbPath,
@@ -113,7 +113,7 @@ export function createSkillDescriptionCompressor(
 				throw new SkillDescriptionLengthError("Model stopped: length");
 			}
 			if (response.stopReason !== "stop") {
-				throw new Error(`Model stopped: ${response.stopReason} ${response.errorMessage ?? ""}`);
+				throw assistantTurnError(response, `Model stopped: ${response.stopReason} ${response.errorMessage ?? ""}`);
 			}
 			return response.content
 				.filter(block => block.type === "text")

@@ -430,9 +430,9 @@ describe("longestRetryHint", () => {
 		expect(longestRetryHint(new Headers({ "retry-after-ms": "0" }), "Please retry in 30s")).toBe(30_000);
 	});
 
-	// `retry-after: <HTTP date>` in text. The three forms RFC 9110 names are read,
-	// the zone-less asctime form as GMT: a machine in another zone would otherwise
-	// read the same text as a different instant.
+	// `retry-after: <date>` in text. A zoned date is read in its zone. A date with
+	// no zone names no wait in a body, where nothing says which zone it is in;
+	// the same date in a header is GMT, as every HTTP date is.
 	describe("an HTTP date in the body", () => {
 		const at = Date.UTC(2026, 9, 31, 12, 0, 0);
 		const imf = (ms: number): string => new Date(ms).toUTCString();
@@ -465,10 +465,29 @@ describe("longestRetryHint", () => {
 		it.each([
 			["IMF-fixdate", imf],
 			["RFC 850", rfc850],
-			["asctime, read as GMT", asctime],
 		])("reads %s", (_name, format) => {
 			vi.spyOn(Date, "now").mockReturnValue(at);
 			expect(longestRetryHint(undefined, `retry-after: ${format(at + 30_000)}`)).toBe(30_000);
+		});
+
+		it.each([
+			["asctime", asctime],
+			["IMF-fixdate without GMT", (ms: number): string => imf(ms).replace(/ GMT$/, "")],
+			["RFC 3339 without a zone", (ms: number): string => new Date(ms).toISOString().replace(/\.000Z$/, "")],
+			[
+				"RFC 3339 with a space and no zone",
+				(ms: number): string =>
+					new Date(ms)
+						.toISOString()
+						.replace("T", " ")
+						.replace(/\.000Z$/, ""),
+			],
+		])("names no wait for %s in a body, and reads it as GMT in a header", (_name, format) => {
+			vi.spyOn(Date, "now").mockReturnValue(at);
+			expect(longestRetryHint(undefined, `retry-after: ${format(at + 30_000)}`)).toBeUndefined();
+			expect(extractRetryHint(undefined, `retry-after: ${format(at + 30_000)}`)).toBeUndefined();
+			expect(longestRetryHint(new Headers({ "retry-after": format(at + 30_000) }))).toBe(30_000);
+			expect(extractRetryHint(new Headers({ "retry-after": format(at + 30_000) }))).toBe(30_000);
 		});
 
 		it("beats a short delta beside it, in either order", () => {
@@ -573,6 +592,7 @@ describe("longestRetryHint", () => {
 			vi.spyOn(Date, "now").mockReturnValue(at);
 			expect(extractRetryHint(undefined, "retry-after: 2026-10-31T12:00:30Z")).toBe(30_000);
 			expect(extractRetryHint(undefined, "retry-after: 2026-10-31T12:00:30")).toBeUndefined();
+			expect(extractRetryHint(new Headers({ "retry-after": "2026-10-31T12:00:30" }))).toBe(30_000);
 		});
 	});
 
@@ -600,7 +620,8 @@ describe("longestRetryHint", () => {
 			],
 			["an RFC 3339 timestamp with a space for the T", "2026-10-31 12:00:30Z", at + 30_000],
 		])("reads %s", (_name, value, expected) => {
-			expect(parseRetryAfterDate(value, at)).toBe(expected);
+			expect(parseRetryAfterDate(value, "gmt", at)).toBe(expected);
+			expect(parseRetryAfterDate(value, "reject", at)).toBe(expected);
 		});
 
 		// RFC 5322 section 4.3: every named zone, so no single offset can drift.
@@ -622,7 +643,7 @@ describe("longestRetryHint", () => {
 			const wall = new Date(at + offsetMinutes * 60_000);
 			const hh = String(wall.getUTCHours()).padStart(2, "0");
 			const mm = String(wall.getUTCMinutes()).padStart(2, "0");
-			expect(parseRetryAfterDate(`${wall.getUTCDate()} Oct 2026 ${hh}:${mm}:00 ${zone}`, at)).toBe(at);
+			expect(parseRetryAfterDate(`${wall.getUTCDate()} Oct 2026 ${hh}:${mm}:00 ${zone}`, "reject", at)).toBe(at);
 		});
 
 		// `Date.UTC` reads years 0-99 as 1900-1999; a four-digit year below 100 is
@@ -634,19 +655,31 @@ describe("longestRetryHint", () => {
 		])("reads a four-digit year below 100 as itself in the %s shape", (_name, value) => {
 			const year50 = new Date(0);
 			year50.setUTCFullYear(50, 0, 1);
-			expect(parseRetryAfterDate(value, at)).toBe(year50.getTime());
+			expect(parseRetryAfterDate(value, "gmt", at)).toBe(year50.getTime());
+		});
+
+		// A date with no zone: GMT from a header, no wait from a body.
+		it.each([
+			["an IMF date without its zone", "Sat, 31 Oct 2026 12:00:30"],
+			["an RFC 850 date without its zone", "Saturday, 31-Oct-26 12:00:30"],
+			["asctime", "Sat Oct 31 12:00:30 2026"],
+			["an RFC 3339 timestamp without a zone", "2026-10-31T12:00:30"],
+			["an RFC 3339 timestamp with a space and no zone", "2026-10-31 12:00:30"],
+			["JavaScript's Date#toString shape without a zone", "Sat Oct 31 2026 12:00:30"],
+		])("reads %s as GMT from a header and as nothing from a body", (_name, value) => {
+			expect(parseRetryAfterDate(value, "gmt", at)).toBe(at + 30_000);
+			expect(parseRetryAfterDate(value, "reject", at)).toBeUndefined();
 		});
 
 		it.each([
-			["an RFC 3339 timestamp without a zone", "2026-10-31T12:00:30"],
-			["JavaScript's Date#toString shape without a zone", "Sat Oct 31 2026 12:00:30"],
 			["a word that is not a weekday", "Foo, 31 Oct 2026 12:00:30 GMT"],
 			["an unknown zone", "Sat, 31 Oct 2026 12:00:30 CET"],
 			["an offset past 23 hours", "2026-10-31T12:00:30+24:00"],
 			["a seconds value", "30"],
 			["a seconds value with trailing text", "30abc"],
 		])("reads no date in %s", (_name, value) => {
-			expect(parseRetryAfterDate(value, at)).toBeUndefined();
+			expect(parseRetryAfterDate(value, "gmt", at)).toBeUndefined();
+			expect(parseRetryAfterDate(value, "reject", at)).toBeUndefined();
 		});
 	});
 

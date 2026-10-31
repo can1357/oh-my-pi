@@ -1,4 +1,6 @@
 import * as path from "node:path";
+import { retryWaitHeaders } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { retryAfterMsOf } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import { logger, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
 import {
 	createWorkerHandle,
@@ -933,10 +935,14 @@ function errorFromPayload(payload: RunErrorPayload): Error {
 	const error = new ctor(payload.message);
 	if (payload.name) error.name = payload.name;
 	if (payload.stack) error.stack = payload.stack;
-	return error;
+	// The wait stays structured until the cell prints the error (`executeJs`).
+	const headers = retryWaitHeaders(payload.retryAfterMs);
+	return headers ? Object.assign(error, { headers }) : error;
 }
 
 function toErrorPayload(error: unknown): RunErrorPayload {
+	const retryAfterMs = retryAfterMsOf(error);
+	const wait = retryAfterMs === undefined ? {} : { retryAfterMs };
 	if (error instanceof Error) {
 		return {
 			name: error.name,
@@ -944,9 +950,10 @@ function toErrorPayload(error: unknown): RunErrorPayload {
 			stack: error.stack,
 			isAbort: error.name === "AbortError" || error.name === "ToolAbortError",
 			isToolError: error instanceof ToolError || error.name === "ToolError",
+			...wait,
 		};
 	}
-	return { message: String(error) };
+	return { message: String(error), ...wait };
 }
 
 function logWorkerMessage(msg: Extract<WorkerOutbound, { type: "log" }>): void {

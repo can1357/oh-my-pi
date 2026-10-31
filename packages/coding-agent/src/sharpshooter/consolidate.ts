@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { completeSimple, Effort, retryTransientCompletion } from "@oh-my-pi/pi-ai";
+import { assistantTurnError, completeSimple, Effort, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { prompt, withFileLock } from "@oh-my-pi/pi-utils";
 
@@ -175,7 +175,7 @@ async function consolidateLocked(
 			{ provider: model.provider },
 		);
 		if (response.stopReason === "error") {
-			throw new Error(response.errorMessage || "sharpshooter consolidation model error");
+			throw assistantTurnError(response, response.errorMessage || "sharpshooter consolidation model error");
 		}
 
 		const files = parseReplacementFiles(response.content, currentFiles);

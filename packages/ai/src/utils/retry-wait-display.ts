@@ -1,12 +1,13 @@
 /**
- * The server's retry wait, rendered for a person at the point of display.
+ * The server's retry wait on a failed assistant turn or an error, rendered for
+ * a person at the point of display.
  *
  * The wait is structured data everywhere: `AssistantMessage.errorRetryAfterMs`,
  * an event's `retryAfterMs`, and on an `Error` rebuilt from a failed message a
  * `retry-after-ms` header (`retryWaitHeaders`), read back with the same header
  * reader every retry layer uses. Classifiers, retry decisions and credential
- * blocks read those numbers. These helpers turn the number into text only as the
- * last step before the text reaches a person or an external client, so no
+ * blocks read those numbers. The text is made only as the last step before it
+ * reaches a person or an external client (`withRetryWait` in pi-utils), so no
  * classifier ever sees a wait written into an error message and mistakes its
  * digits for a status.
  *
@@ -15,19 +16,8 @@
  * missing wait renders nothing — never a default, never the last wait shown,
  * never one scanned out of the text.
  */
-import { formatDuration } from "@oh-my-pi/pi-utils";
-import { getHeadersFromError, getRetryAfterMsFromHeaders, isRetryWaitMs, retryWaitHeaders } from "./retry-after";
-
-/** `retry after 30.0s`: the wait as a person reads it. */
-export function formatRetryWait(retryAfterMs: number): string {
-	return `retry after ${formatDuration(retryAfterMs)}`;
-}
-
-/** `text` with ` (retry after 30.0s)` when a positive wait is set; `text` unchanged otherwise. */
-export function withRetryWait(text: string, retryAfterMs: number | undefined): string {
-	if (!isRetryWaitMs(retryAfterMs) || retryAfterMs === 0) return text;
-	return `${text} (${formatRetryWait(retryAfterMs)})`;
-}
+import { withRetryWait } from "@oh-my-pi/pi-utils";
+import { getHeadersFromError, getRetryAfterMsFromHeaders, retryWaitHeaders } from "./retry-after";
 
 /** A failed assistant turn's error as a person reads it: its message and the server's wait. */
 export function assistantErrorText(

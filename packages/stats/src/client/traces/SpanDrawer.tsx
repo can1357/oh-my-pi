@@ -4,6 +4,7 @@
  * + text blocks, tool args/result, user text, subagent task text.
  */
 
+import { withRetryWait } from "@oh-my-pi/pi-utils/format";
 import { Check, Copy, X } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { getSessionEntryDetail } from "../api";
@@ -41,6 +42,8 @@ interface EntryDetailView {
 		provider?: string;
 		stopReason?: string;
 		errorMessage?: string;
+		/** The server's retry wait (ms) the failed turn stated; rendered beside `errorMessage` here. */
+		errorRetryAfterMs?: number;
 		duration?: number;
 		ttft?: number;
 		toolName?: string;
@@ -230,7 +233,7 @@ export function SpanDrawer({
 				{msg?.errorMessage && (
 					<div className="stack" style={{ gap: 6 }}>
 						<div className="section-label tone-bad">Error message</div>
-						<pre className="code-block traces-pre">{msg.errorMessage}</pre>
+						<pre className="code-block traces-pre">{withRetryWait(msg.errorMessage, msg.errorRetryAfterMs)}</pre>
 					</div>
 				)}
 

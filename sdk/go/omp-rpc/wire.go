@@ -618,23 +618,25 @@ func (v DeveloperMessage) MarshalJSON() ([]byte, error) {
 }
 
 type AssistantMessage struct {
-	Content          []AssistantContent         `json:"content"`
-	API              string                     `json:"api"`
-	Provider         string                     `json:"provider"`
-	Model            string                     `json:"model"`
-	Usage            Usage                      `json:"usage"`
-	StopReason       StopReason                 `json:"stopReason"`
-	Timestamp        float64                    `json:"timestamp"`
-	ResponseID       *string                    `json:"responseId,omitempty"`
-	UpstreamProvider *string                    `json:"upstreamProvider,omitempty"`
-	UpstreamModel    *string                    `json:"upstreamModel,omitempty"`
-	ErrorMessage     *string                    `json:"errorMessage,omitempty"`
-	ErrorStatus      *int64                     `json:"errorStatus,omitempty"`
-	ErrorID          *float64                   `json:"errorId,omitempty"`
-	ProviderPayload  map[string]json.RawMessage `json:"providerPayload,omitempty"`
-	Duration         *float64                   `json:"duration,omitempty"`
-	Ttft             *float64                   `json:"ttft,omitempty"`
-	CompletedAt      *float64                   `json:"completedAt,omitempty"`
+	Content          []AssistantContent `json:"content"`
+	API              string             `json:"api"`
+	Provider         string             `json:"provider"`
+	Model            string             `json:"model"`
+	Usage            Usage              `json:"usage"`
+	StopReason       StopReason         `json:"stopReason"`
+	Timestamp        float64            `json:"timestamp"`
+	ResponseID       *string            `json:"responseId,omitempty"`
+	UpstreamProvider *string            `json:"upstreamProvider,omitempty"`
+	UpstreamModel    *string            `json:"upstreamModel,omitempty"`
+	ErrorMessage     *string            `json:"errorMessage,omitempty"`
+	// The failed response's retry wait in milliseconds, from its headers. `errorMessage` never carries it.
+	ErrorRetryAfterMs *float64                   `json:"errorRetryAfterMs,omitempty"`
+	ErrorStatus       *int64                     `json:"errorStatus,omitempty"`
+	ErrorID           *float64                   `json:"errorId,omitempty"`
+	ProviderPayload   map[string]json.RawMessage `json:"providerPayload,omitempty"`
+	Duration          *float64                   `json:"duration,omitempty"`
+	Ttft              *float64                   `json:"ttft,omitempty"`
+	CompletedAt       *float64                   `json:"completedAt,omitempty"`
 	// Extra holds undeclared keys and declared keys whose value did not decode (that field stays zero).
 	// Encoding writes them back, over a declared field with the same key.
 	Extra map[string]json.RawMessage `json:"-"`
@@ -659,6 +661,7 @@ func (v *AssistantMessage) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("upstreamProvider", &out.UpstreamProvider)
 	d.optional("upstreamModel", &out.UpstreamModel)
 	d.optional("errorMessage", &out.ErrorMessage)
+	d.optional("errorRetryAfterMs", &out.ErrorRetryAfterMs)
 	d.optional("errorStatus", &out.ErrorStatus)
 	d.optional("errorId", &out.ErrorID)
 	d.optional("providerPayload", &out.ProviderPayload)
@@ -3271,6 +3274,8 @@ type BtwHistoryTurn struct {
 	// Images attached to the question.
 	Images []ImageContent `json:"images,omitempty"`
 	Error  *string        `json:"error,omitempty"`
+	// The failed turn's retry wait in milliseconds, from the error's response headers. `error` never carries it. Live frames only: history read back from disk has none.
+	ErrorRetryAfterMs *float64 `json:"errorRetryAfterMs,omitempty"`
 }
 
 func (v *BtwHistoryTurn) UnmarshalJSON(data []byte) error {
@@ -3287,6 +3292,7 @@ func (v *BtwHistoryTurn) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("updatedAt", &out.UpdatedAt)
 	d.optional("images", &out.Images)
 	d.optional("error", &out.Error)
+	d.optional("errorRetryAfterMs", &out.ErrorRetryAfterMs)
 	if d.err != nil {
 		return d.err
 	}
@@ -3304,9 +3310,11 @@ type BtwHistoryRecord struct {
 	ID        string    `json:"id"`
 	LeafID    *string   `json:"leafId"`
 	// Images attached to the question.
-	Images    []ImageContent   `json:"images,omitempty"`
-	Error     *string          `json:"error,omitempty"`
-	FollowUps []BtwHistoryTurn `json:"followUps,omitempty"`
+	Images []ImageContent `json:"images,omitempty"`
+	Error  *string        `json:"error,omitempty"`
+	// The failed turn's retry wait in milliseconds, from the error's response headers. `error` never carries it. Live frames only: history read back from disk has none.
+	ErrorRetryAfterMs *float64         `json:"errorRetryAfterMs,omitempty"`
+	FollowUps         []BtwHistoryTurn `json:"followUps,omitempty"`
 }
 
 func (v *BtwHistoryRecord) UnmarshalJSON(data []byte) error {
@@ -3325,6 +3333,7 @@ func (v *BtwHistoryRecord) decodeFrom(raw map[string]json.RawMessage) error {
 	d.nullable("leafId", &out.LeafID)
 	d.optional("images", &out.Images)
 	d.optional("error", &out.Error)
+	d.optional("errorRetryAfterMs", &out.ErrorRetryAfterMs)
 	d.optional("followUps", &out.FollowUps)
 	if d.err != nil {
 		return d.err
@@ -3913,6 +3922,8 @@ type AutoCompactionEndEvent struct {
 	WillRetry    bool                 `json:"willRetry"`
 	Result       *CompactionResult    `json:"result,omitempty"`
 	ErrorMessage *string              `json:"errorMessage,omitempty"`
+	// The failed compaction request's retry wait in milliseconds. `errorMessage` never carries it.
+	RetryAfterMs *float64 `json:"retryAfterMs,omitempty"`
 	// Compaction was skipped for a benign reason.
 	Skipped *bool `json:"skipped,omitempty"`
 }
@@ -3930,6 +3941,7 @@ func (v *AutoCompactionEndEvent) decodeFrom(raw map[string]json.RawMessage) erro
 	d.required("willRetry", &out.WillRetry)
 	d.optional("result", &out.Result)
 	d.optional("errorMessage", &out.ErrorMessage)
+	d.optional("retryAfterMs", &out.RetryAfterMs)
 	d.optional("skipped", &out.Skipped)
 	if d.err != nil {
 		return d.err
@@ -4011,6 +4023,8 @@ type AutoRetryStartEvent struct {
 	DelayMs      int64  `json:"delayMs"`
 	ErrorMessage string `json:"errorMessage"`
 	ErrorID      *int64 `json:"errorId,omitempty"`
+	// The retry wait the failed response stated, in milliseconds; distinct from `delayMs`. `errorMessage` never carries it.
+	RetryAfterMs *float64 `json:"retryAfterMs,omitempty"`
 }
 
 func (v *AutoRetryStartEvent) UnmarshalJSON(data []byte) error {
@@ -4026,6 +4040,7 @@ func (v *AutoRetryStartEvent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("delayMs", &out.DelayMs)
 	d.required("errorMessage", &out.ErrorMessage)
 	d.optional("errorId", &out.ErrorID)
+	d.optional("retryAfterMs", &out.RetryAfterMs)
 	if d.err != nil {
 		return d.err
 	}
@@ -4042,6 +4057,8 @@ type AutoRetryEndEvent struct {
 	Success    bool    `json:"success"`
 	Attempt    int64   `json:"attempt"`
 	FinalError *string `json:"finalError,omitempty"`
+	// The retry wait the final failed response stated, in milliseconds. `finalError` never carries it.
+	FinalRetryAfterMs *float64 `json:"finalRetryAfterMs,omitempty"`
 	// Persisted retry errors whose presentation changed when the retry settled.
 	RetryErrors []map[string]json.RawMessage `json:"retryErrors"`
 }
@@ -4057,6 +4074,7 @@ func (v *AutoRetryEndEvent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("success", &out.Success)
 	d.required("attempt", &out.Attempt)
 	d.optional("finalError", &out.FinalError)
+	d.optional("finalRetryAfterMs", &out.FinalRetryAfterMs)
 	d.defaulted("retryErrors", &out.RetryErrors, `[]`)
 	if d.err != nil {
 		return d.err
@@ -4709,6 +4727,8 @@ type PromptError struct {
 	Provider   *string `json:"provider,omitempty"`
 	Model      *string `json:"model,omitempty"`
 	HTTPStatus *int64  `json:"httpStatus,omitempty"`
+	// The failed response's retry wait in milliseconds, from its headers. `message` never carries it.
+	RetryAfterMs *float64 `json:"retryAfterMs,omitempty"`
 	// `cost_cap`: the session reached `session.maxCost` (`--max-cost`) and omp did not send the next request.
 	Code *PromptErrorCode `json:"code,omitempty"`
 }
@@ -4725,6 +4745,7 @@ func (v *PromptError) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("provider", &out.Provider)
 	d.optional("model", &out.Model)
 	d.optional("httpStatus", &out.HTTPStatus)
+	d.optional("retryAfterMs", &out.RetryAfterMs)
 	d.optional("code", &out.Code)
 	if d.err != nil {
 		return d.err

@@ -411,6 +411,7 @@ async function generateTitleOnlineWithModels(
 					reason: "provider-response-error",
 					stopReason: response.stopReason,
 					errorMessage: response.errorMessage,
+					retryAfterMs: response.errorRetryAfterMs,
 				});
 				continue;
 			}

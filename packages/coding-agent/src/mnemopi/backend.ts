@@ -658,6 +658,7 @@ async function resolveMnemopiProviderOptions(
 												usage: message.usage,
 												stopReason: message.stopReason,
 												errorMessage: message.errorMessage,
+												errorRetryAfterMs: message.errorRetryAfterMs,
 											}),
 									},
 								),

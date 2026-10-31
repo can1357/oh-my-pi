@@ -884,34 +884,42 @@ describe("withReplaySafeStreamRetry", () => {
 			}
 		});
 
-		it("keeps a hinted failure instead of replaying it sooner than the server asked", async () => {
-			let attempts = 0;
-			const waits: number[] = [];
-			const stream = withReplaySafeStreamRetry(
-				{},
-				CTX,
-				{ providerRetryWait: async ms => void waits.push(ms), replayBudgetMs: 2_000 },
-				() => {
-					attempts++;
-					const overloaded = assistant();
-					overloaded.stopReason = "error";
-					overloaded.errorStatus = 503;
-					overloaded.errorMessage = "503 The server is overloaded retry-after-ms=90000";
-					return streamFromEvents([
-						{ type: "start", partial: overloaded },
-						{ type: "error", reason: "error", error: overloaded },
-					]);
-				},
-				{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
-			);
+		it.each([
+			["its structured response-header wait", "503 The server is overloaded", 90_000],
+			["a wait its body names", "503 The server is overloaded. Please retry in 90s", undefined],
+		])(
+			"keeps a failure stating %s instead of replaying it sooner than the server asked",
+			async (_name, text, structured) => {
+				let attempts = 0;
+				const waits: number[] = [];
+				const stream = withReplaySafeStreamRetry(
+					{},
+					CTX,
+					{ providerRetryWait: async ms => void waits.push(ms), replayBudgetMs: 2_000 },
+					() => {
+						attempts++;
+						const overloaded = assistant();
+						overloaded.stopReason = "error";
+						overloaded.errorStatus = 503;
+						overloaded.errorMessage = text;
+						if (structured !== undefined) overloaded.errorRetryAfterMs = structured;
+						return streamFromEvents([
+							{ type: "start", partial: overloaded },
+							{ type: "error", reason: "error", error: overloaded },
+						]);
+					},
+					{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+				);
 
-			const result = await stream.result();
+				const result = await stream.result();
 
-			expect(attempts).toBe(1);
-			expect(waits).toEqual([]);
-			expect(result.errorMessage).toContain("retry-after-ms=90000");
-			expect(result.replayBudgetExhausted).toBe(true);
-		});
+				expect(attempts).toBe(1);
+				expect(waits).toEqual([]);
+				expect(result.errorMessage).toBe(text);
+				expect(result.errorRetryAfterMs).toBe(structured);
+				expect(result.replayBudgetExhausted).toBe(true);
+			},
+		);
 
 		it("replays on its own schedule and marks nothing when no budget is set", async () => {
 			let attempts = 0;

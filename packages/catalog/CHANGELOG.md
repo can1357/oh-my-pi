@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fixed GitHub Copilot Claude 5.x base models (`claude-opus-5`, `claude-opus-5.5`, `claude-sonnet-5`, `claude-sonnet-5.5`) reporting the 1M window of their `-1m` variants once the model list was read from cache; discovered limits now survive cached reads instead of reverting to bundled values ([#17481](https://github.com/can1357/oh-my-pi/issues/17481))
+- Fixed an Antigravity version lookup that a streaming call's replay budget (`StreamOptions.replayBudgetMs`) refused counting as a failed lookup and holding back every caller's version lookups for ten minutes
 
 ## [18.14.1] - 2026-10-31
 
@@ -21,7 +22,6 @@
 ### Fixed
 
 - Fixed Cursor's DeepSeek V4.1 Flash 1017 reporting zero cost; every effort level now bills at Cursor's API rate of $0.30/$1.20 per million tokens, with cache reads at $0.006 ([#17390](https://github.com/can1357/oh-my-pi/pull/17390) by [@eggpeat](https://github.com/eggpeat))
-- Fixed an Antigravity version lookup that a streaming call's replay budget (`StreamOptions.replayBudgetMs`) refused counting as a failed lookup and holding back every caller's version lookups for ten minutes
 
 ## [18.14.0] - 2026-10-29
 

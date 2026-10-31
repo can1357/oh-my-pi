@@ -36,7 +36,7 @@ import type {
 	ServiceTier,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
-import { isUsageLimitOutcome, resolveModelServiceTier, streamSimple } from "@oh-my-pi/pi-ai";
+import { errorText, isUsageLimitOutcome, resolveModelServiceTier, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import {
 	getHeadersFromError,
@@ -1644,7 +1644,8 @@ export class SessionAdvisors {
 				},
 				notifyFailure: error => {
 					this.#advisorStatuses.set(slug, { name: advisorName, status: "error" });
-					const message = error instanceof Error ? error.message : String(error);
+					// The notice is display: the failed turn's server wait renders here.
+					const message = errorText(error);
 					this.#host.emitNotice(
 						"warning",
 						`Advisor${slug ? ` "${advisorName}"` : ""} unavailable for ${formatModelString(advisorAgent.state.model)}: ${message}`,

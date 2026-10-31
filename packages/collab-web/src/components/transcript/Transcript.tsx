@@ -1,3 +1,4 @@
+import { withRetryWait } from "@oh-my-pi/pi-utils/format";
 import type { AssistantMessage, ImageContent, SessionEntry, TextContent, ToolResultMessage } from "@oh-my-pi/pi-wire";
 import { ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
@@ -156,7 +157,7 @@ function AssistantBody({
 				<div className="tr-stop">
 					<span className={`tr-chip ${stop === "error" ? "tr-chip--err" : "tr-chip--warn"}`}>{stop}</span>
 					{message.errorMessage !== undefined && message.errorMessage.length > 0 && (
-						<span className="tr-stop-msg">{message.errorMessage}</span>
+						<span className="tr-stop-msg">{withRetryWait(message.errorMessage, message.errorRetryAfterMs)}</span>
 					)}
 				</div>
 			)}

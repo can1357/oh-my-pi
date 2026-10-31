@@ -702,6 +702,7 @@ export class TurnRecovery {
 			success: false,
 			attempt,
 			finalError: message.errorMessage,
+			finalRetryAfterMs: message.errorRetryAfterMs,
 		});
 		this.#clearPendingRetryErrors();
 	}
@@ -1210,6 +1211,7 @@ export class TurnRecovery {
 				success: false,
 				attempt: this.#retryAttempt > 0 ? this.#retryAttempt : attempts,
 				finalError,
+				finalRetryAfterMs: assistantMessage.errorRetryAfterMs,
 			});
 			this.#clearPendingRetryErrors();
 			this.#retryAttempt = 0;
@@ -2757,7 +2759,12 @@ export class TurnRecovery {
 			// else would close it.
 			if (this.#retryPromise) {
 				await this.#closeRetrySaga(
-					{ success: false, attempt: this.#retryAttempt, finalError: message.errorMessage },
+					{
+						success: false,
+						attempt: this.#retryAttempt,
+						finalError: message.errorMessage,
+						finalRetryAfterMs: message.errorRetryAfterMs,
+					},
 					{},
 				);
 			}
@@ -3220,7 +3227,7 @@ export class TurnRecovery {
 				const attempt = this.#retryAttempt - 1;
 				message.errorMessage = `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${errorMessage}`;
 				await this.#closeRetrySaga(
-					{ success: false, attempt, finalError: errorMessage },
+					{ success: false, attempt, finalError: errorMessage, finalRetryAfterMs: message.errorRetryAfterMs },
 					{ terminalTurn: message, retryErrors: { status: "superseded" } },
 				);
 				return false;
@@ -3240,7 +3247,12 @@ export class TurnRecovery {
 			// an announcement that never resolves.
 			if (this.#retryAttempt > 1) {
 				await this.#closeRetrySaga(
-					{ success: false, attempt: this.#retryAttempt - 1, finalError: errorMessage },
+					{
+						success: false,
+						attempt: this.#retryAttempt - 1,
+						finalError: errorMessage,
+						finalRetryAfterMs: message.errorRetryAfterMs,
+					},
 					{ terminalTurn: message },
 				);
 			}
@@ -3261,7 +3273,12 @@ export class TurnRecovery {
 			// Same auto_retry_end backstop as the classifier-refusal branch above.
 			if (this.#retryAttempt > 1) {
 				await this.#closeRetrySaga(
-					{ success: false, attempt: this.#retryAttempt - 1, finalError: errorMessage },
+					{
+						success: false,
+						attempt: this.#retryAttempt - 1,
+						finalError: errorMessage,
+						finalRetryAfterMs: message.errorRetryAfterMs,
+					},
 					{ terminalTurn: message },
 				);
 			}
@@ -3279,6 +3296,7 @@ export class TurnRecovery {
 					success: false,
 					attempt,
 					finalError: `Provider requested ${Math.ceil(delayMs)}ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${errorMessage}`,
+					finalRetryAfterMs: message.errorRetryAfterMs,
 				},
 				{ terminalTurn: message },
 			);
@@ -3297,6 +3315,7 @@ export class TurnRecovery {
 			delayMs,
 			errorMessage,
 			errorId: message.errorId,
+			retryAfterMs: message.errorRetryAfterMs,
 		});
 		// `abortRetry()` from an `auto_retry_start` listener runs before any wait is
 		// installed for it to abort; the saga still reads it here.
@@ -3454,6 +3473,7 @@ export class TurnRecovery {
 				success: false,
 				attempt,
 				finalError: `Retry continuation failed locally: ${localError}. Original error: ${message.errorMessage ?? "Unknown error"}`,
+				finalRetryAfterMs: message.errorRetryAfterMs,
 			},
 			{ terminalTurn: message },
 		);

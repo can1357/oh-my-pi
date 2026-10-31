@@ -29,6 +29,8 @@ export interface EvalHandleSnapshot extends EvalHandleRef {
 	text?: string;
 	data?: unknown;
 	error?: string;
+	/** The server's retry wait (ms) the failure stated; the runtime keeps it off `error`. */
+	errorRetryAfterMs?: number;
 }
 
 interface EvalHandleBridgeOptions {
@@ -113,6 +115,7 @@ function completionSnapshot(ref: EvalHandleRef, entry: CompletionHandleEntry): E
 			...ref,
 			status: entry.controller.signal.aborted ? "cancelled" : "failed",
 			error: entry.error,
+			...(entry.errorRetryAfterMs === undefined ? {} : { errorRetryAfterMs: entry.errorRetryAfterMs }),
 		};
 	}
 	const snapshot: EvalHandleSnapshot = { ...ref, status: "completed", text: entry.result?.text ?? "" };

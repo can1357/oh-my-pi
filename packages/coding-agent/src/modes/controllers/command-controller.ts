@@ -10,6 +10,7 @@ import {
 	type UsageLimit,
 	type UsageReport,
 } from "@oh-my-pi/pi-ai";
+import { errorText, retryAfterMsOf } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import {
 	type Component,
 	Loader,
@@ -308,9 +309,7 @@ export class CommandController {
 		initialError?: unknown,
 	): Promise<void> {
 		if (initialError !== undefined) {
-			this.ctx.showError(
-				`Failed to switch workspace: ${initialError instanceof Error ? initialError.message : String(initialError)}`,
-			);
+			this.ctx.showError(`Failed to switch workspace: ${errorText(initialError)}`);
 		}
 
 		try {
@@ -323,14 +322,12 @@ export class CommandController {
 			} catch {}
 			if (!realigned) {
 				this.ctx.showError(
-					`Failed to roll back move: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)} (failed to re-align workspace to ${actual})`,
+					`Failed to roll back move: ${errorText(rollbackError)} (failed to re-align workspace to ${actual})`,
 				);
 				await this.ctx.shutdown();
 				return;
 			}
-			this.ctx.showError(
-				`Failed to roll back move: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)} (workspace remains at ${actual})`,
-			);
+			this.ctx.showError(`Failed to roll back move: ${errorText(rollbackError)} (workspace remains at ${actual})`);
 			return;
 		}
 
@@ -371,7 +368,7 @@ export class CommandController {
 			this.ctx.showStatus(`Session exported to: ${filePath}`);
 			this.openInBrowser(filePath);
 		} catch (error: unknown) {
-			this.ctx.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
+			this.ctx.showError(`Failed to export session: ${error instanceof Error ? errorText(error) : "Unknown error"}`);
 		}
 	}
 	async handleTraceCommand(): Promise<void> {
@@ -389,7 +386,7 @@ export class CommandController {
 			this.openInBrowser(url);
 			this.ctx.showStatus(`Trace: ${url}`);
 		} catch (error: unknown) {
-			this.ctx.showError(`Failed to open trace: ${error instanceof Error ? error.message : "Unknown error"}`);
+			this.ctx.showError(`Failed to open trace: ${error instanceof Error ? errorText(error) : "Unknown error"}`);
 		}
 	}
 
@@ -418,7 +415,7 @@ export class CommandController {
 			if (sidecarError) statusParts.push(`LLM request JSON unavailable: ${sidecarError}`);
 			this.ctx.showStatus(statusParts.join("\n"));
 		} catch (error: unknown) {
-			this.ctx.showError(`Failed to copy session: ${error instanceof Error ? error.message : "Unknown error"}`);
+			this.ctx.showError(`Failed to copy session: ${error instanceof Error ? errorText(error) : "Unknown error"}`);
 		}
 	}
 
@@ -441,7 +438,7 @@ export class CommandController {
 			this.ctx.showStatus([...formatDumpArchiveReport(archive), "Archive path copied to clipboard"].join("\n"));
 		} catch (error: unknown) {
 			this.ctx.showError(
-				`Failed to write session dump: ${error instanceof Error ? error.message : "Unknown error"}`,
+				`Failed to write session dump: ${error instanceof Error ? errorText(error) : "Unknown error"}`,
 			);
 		}
 	}
@@ -461,7 +458,7 @@ export class CommandController {
 			this.ctx.showStatus("Advisor history copied to clipboard");
 		} catch (error: unknown) {
 			this.ctx.showError(
-				`Failed to copy advisor history: ${error instanceof Error ? error.message : "Unknown error"}`,
+				`Failed to copy advisor history: ${error instanceof Error ? errorText(error) : "Unknown error"}`,
 			);
 		}
 	}
@@ -480,7 +477,7 @@ export class CommandController {
 			this.ctx.showStatus(`Debug transcript written to:\n${tmpPath}`);
 		} catch (error: unknown) {
 			this.ctx.showError(
-				`Failed to write debug transcript: ${error instanceof Error ? error.message : "Unknown error"}`,
+				`Failed to write debug transcript: ${error instanceof Error ? errorText(error) : "Unknown error"}`,
 			);
 		}
 	}
@@ -490,7 +487,7 @@ export class CommandController {
 		try {
 			customShare = await loadCustomShare();
 		} catch (err) {
-			this.ctx.showError(err instanceof Error ? err.message : String(err));
+			this.ctx.showError(errorText(err));
 			return;
 		}
 
@@ -536,7 +533,7 @@ export class CommandController {
 			} catch (err) {
 				if (!loader.signal.aborted) {
 					restoreEditor();
-					this.ctx.showError(`Custom share failed: ${err instanceof Error ? err.message : String(err)}`);
+					this.ctx.showError(`Custom share failed: ${errorText(err)}`);
 				}
 			} finally {
 				await fs.rm(tmpFile, { force: true }).catch(() => {});
@@ -564,7 +561,9 @@ export class CommandController {
 		} catch (error: unknown) {
 			if (!loader.signal.aborted) {
 				restoreEditor();
-				this.ctx.showError(`Failed to share session: ${error instanceof Error ? error.message : "Unknown error"}`);
+				this.ctx.showError(
+					`Failed to share session: ${error instanceof Error ? errorText(error) : "Unknown error"}`,
+				);
 			}
 		}
 	}
@@ -918,7 +917,7 @@ export class CommandController {
 			try {
 				usageReports = await provider.fetchUsageReports();
 			} catch (error) {
-				this.ctx.showError(`Failed to fetch usage data: ${error instanceof Error ? error.message : String(error)}`);
+				this.ctx.showError(`Failed to fetch usage data: ${errorText(error)}`);
 			}
 		}
 
@@ -1030,7 +1029,7 @@ export class CommandController {
 				await this.ctx.session.refreshBaseSystemPrompt();
 				this.ctx.showStatus("Memory data cleared and system prompt refreshed.");
 			} catch (error) {
-				this.ctx.showError(`Memory clear failed: ${error instanceof Error ? error.message : String(error)}`);
+				this.ctx.showError(`Memory clear failed: ${errorText(error)}`);
 			}
 			return;
 		}
@@ -1040,7 +1039,7 @@ export class CommandController {
 				await backend.enqueue(agentDir, this.ctx.sessionManager.getCwd(), this.ctx.session);
 				this.ctx.showStatus("Memory consolidation enqueued.");
 			} catch (error) {
-				this.ctx.showError(`Memory enqueue failed: ${error instanceof Error ? error.message : String(error)}`);
+				this.ctx.showError(`Memory enqueue failed: ${errorText(error)}`);
 			}
 			return;
 		}
@@ -1057,7 +1056,7 @@ export class CommandController {
 				}
 				this.#showMarkdownPanel("Memory Queue", payload);
 			} catch (error) {
-				this.ctx.showError(`Memory queue failed: ${error instanceof Error ? error.message : String(error)}`);
+				this.ctx.showError(`Memory queue failed: ${errorText(error)}`);
 			}
 			return;
 		}
@@ -1067,7 +1066,7 @@ export class CommandController {
 				await backend.enqueue(agentDir, this.ctx.sessionManager.getCwd(), this.ctx.session);
 				this.ctx.showStatus("Memory consolidation ran.");
 			} catch (error) {
-				this.ctx.showError(`Memory sync failed: ${error instanceof Error ? error.message : String(error)}`);
+				this.ctx.showError(`Memory sync failed: ${errorText(error)}`);
 			}
 			return;
 		}
@@ -1082,7 +1081,7 @@ export class CommandController {
 				}
 				this.#showMarkdownPanel(`Memory ${action === "stats" ? "Stats" : "Diagnostics"}`, payload);
 			} catch (error) {
-				this.ctx.showError(`Memory ${action} failed: ${error instanceof Error ? error.message : String(error)}`);
+				this.ctx.showError(`Memory ${action} failed: ${errorText(error)}`);
 			}
 			return;
 		}
@@ -1158,7 +1157,7 @@ export class CommandController {
 				.map(summarizeMentalModel);
 			this.#showMarkdownPanel(`Mental Models — ${state.bankId}`, lines.join("\n"));
 		} catch (error) {
-			this.ctx.showError(`mm list failed: ${error instanceof Error ? error.message : String(error)}`);
+			this.ctx.showError(`mm list failed: ${errorText(error)}`);
 		}
 	}
 
@@ -1175,7 +1174,7 @@ export class CommandController {
 			const content = (model.content ?? "_(empty — background reflect may still be running)_").trim();
 			this.#showMarkdownPanel(model.name, `**id:** \`${model.id}\`${tags}${refreshed}${sourceQuery}\n\n${content}`);
 		} catch (error) {
-			this.ctx.showError(`mm show failed: ${error instanceof Error ? error.message : String(error)}`);
+			this.ctx.showError(`mm show failed: ${errorText(error)}`);
 		}
 	}
 
@@ -1214,9 +1213,7 @@ export class CommandController {
 						await state.client.refreshMentalModel(state.bankId, item.id);
 						queued++;
 					} catch (error) {
-						this.ctx.showWarning(
-							`Refresh failed for ${item.id}: ${error instanceof Error ? error.message : String(error)}`,
-						);
+						this.ctx.showWarning(`Refresh failed for ${item.id}: ${errorText(error)}`);
 					}
 				}
 				const skippedSuffix = skipped > 0 ? `; skipped ${skipped} curated model(s)` : "";
@@ -1229,7 +1226,7 @@ export class CommandController {
 			await Bun.sleep(500);
 			await reloadMentalModelsForSession(state.session);
 		} catch (error) {
-			this.ctx.showError(`mm refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+			this.ctx.showError(`mm refresh failed: ${errorText(error)}`);
 		}
 	}
 
@@ -1262,7 +1259,7 @@ export class CommandController {
 			}
 			this.#showMarkdownPanel(`History — ${model.name}`, sections.join("\n\n"));
 		} catch (error) {
-			this.ctx.showError(`mm history failed: ${error instanceof Error ? error.message : String(error)}`);
+			this.ctx.showError(`mm history failed: ${errorText(error)}`);
 		}
 	}
 
@@ -1300,14 +1297,12 @@ export class CommandController {
 					});
 					created++;
 				} catch (error) {
-					this.ctx.showWarning(
-						`Seed failed for ${seed.id}: ${error instanceof Error ? error.message : String(error)}`,
-					);
+					this.ctx.showWarning(`Seed failed for ${seed.id}: ${errorText(error)}`);
 				}
 			}
 			this.ctx.showStatus(`Seeded ${created} new mental model(s); ${skipped} already present.`);
 		} catch (error) {
-			this.ctx.showError(`mm seed failed: ${error instanceof Error ? error.message : String(error)}`);
+			this.ctx.showError(`mm seed failed: ${errorText(error)}`);
 		}
 	}
 
@@ -1332,7 +1327,7 @@ export class CommandController {
 			await reloadMentalModelsForSession(state.session);
 			this.ctx.showStatus(`Deleted mental model ${id} from bank ${state.bankId}.`);
 		} catch (error) {
-			this.ctx.showError(`mm delete failed: ${error instanceof Error ? error.message : String(error)}`);
+			this.ctx.showError(`mm delete failed: ${errorText(error)}`);
 		}
 	}
 
@@ -1632,9 +1627,7 @@ export class CommandController {
 					else logger.debug("Tern refused the fork; forking in place", details);
 					return false;
 				}
-				this.ctx.showError(
-					`Tern did not confirm the fork: ${error instanceof Error ? error.message : String(error)}`,
-				);
+				this.ctx.showError(`Tern did not confirm the fork: ${errorText(error)}`);
 				return true;
 			}
 		} finally {
@@ -1716,7 +1709,7 @@ export class CommandController {
 				try {
 					await fs.mkdir(resolvedPath, { recursive: true });
 				} catch (err) {
-					this.ctx.showError(`Failed to create directory: ${err instanceof Error ? err.message : String(err)}`);
+					this.ctx.showError(`Failed to create directory: ${errorText(err)}`);
 					return false;
 				}
 			}
@@ -1762,7 +1755,7 @@ export class CommandController {
 			try {
 				worktree = await createSessionWorktree(cwd, this.ctx.settings, branchName, options);
 			} catch (err) {
-				this.ctx.showError(`Worktree creation failed: ${err instanceof Error ? err.message : String(err)}`);
+				this.ctx.showError(`Worktree creation failed: ${errorText(err)}`);
 				return false;
 			} finally {
 				loader.stop();
@@ -1800,7 +1793,7 @@ export class CommandController {
 		try {
 			await this.ctx.settings.flush();
 		} catch (err) {
-			this.ctx.showError(`Failed to save pending settings: ${err instanceof Error ? err.message : String(err)}`);
+			this.ctx.showError(`Failed to save pending settings: ${errorText(err)}`);
 			return false;
 		}
 
@@ -1815,7 +1808,7 @@ export class CommandController {
 		try {
 			await this.ctx.session.moveSession(resolvedPath);
 		} catch (err) {
-			this.ctx.showError(`Move failed: ${err instanceof Error ? err.message : String(err)}`);
+			this.ctx.showError(`Move failed: ${errorText(err)}`);
 			return false;
 		}
 		let applied = false;
@@ -1861,7 +1854,7 @@ export class CommandController {
 			this.ctx.showStatus(`Session renamed to "${name}".`);
 		} catch (err) {
 			if (!isCurrent()) return;
-			this.ctx.showError(`Rename failed: ${err instanceof Error ? err.message : String(err)}`);
+			this.ctx.showError(`Rename failed: ${errorText(err)}`);
 		}
 	}
 
@@ -1943,7 +1936,7 @@ export class CommandController {
 			} catch (error) {
 				this.ctx.showError(
 					`Bash command completed, but OMP failed to update its working directory: ${
-						error instanceof Error ? error.message : "Unknown error"
+						error instanceof Error ? errorText(error) : "Unknown error"
 					}`,
 				);
 			}
@@ -1951,7 +1944,7 @@ export class CommandController {
 			if (this.ctx.bashComponent) {
 				this.ctx.bashComponent.setComplete(undefined, false);
 			}
-			this.ctx.showError(`Bash command failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+			this.ctx.showError(`Bash command failed: ${error instanceof Error ? errorText(error) : "Unknown error"}`);
 		} finally {
 			finished = true;
 			detachInput?.();
@@ -2034,7 +2027,7 @@ export class CommandController {
 			if (this.ctx.pythonComponent) {
 				this.ctx.pythonComponent.setComplete(undefined, false);
 			}
-			this.ctx.showError(`Python execution failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+			this.ctx.showError(`Python execution failed: ${error instanceof Error ? errorText(error) : "Unknown error"}`);
 		}
 
 		this.ctx.pythonComponent = undefined;
@@ -2159,7 +2152,7 @@ export class CommandController {
 		try {
 			result = await this.ctx.session.shake(mode);
 		} catch (error) {
-			this.ctx.showError(`Shake failed: ${error instanceof Error ? error.message : String(error)}`);
+			this.ctx.showError(`Shake failed: ${errorText(error)}`);
 			return;
 		}
 
@@ -2245,8 +2238,7 @@ export class CommandController {
 				this.ctx.showError("Compaction cancelled");
 			} else {
 				outcome = "failed";
-				const message = error instanceof Error ? error.message : String(error);
-				this.ctx.showError(`Compaction failed: ${message}`);
+				this.ctx.showError(`Compaction failed: ${errorText(error)}`);
 			}
 		} finally {
 			compactingLoader.stop();
@@ -2333,8 +2325,8 @@ export class CommandController {
 			} else {
 				// Persist the real failure so it is debuggable after the transient
 				// TUI error clears (#7993).
-				logger.error("Handoff failed", { error: message });
-				this.ctx.showError(`Handoff failed: ${message}`);
+				logger.error("Handoff failed", { error: message, retryAfterMs: retryAfterMsOf(error) });
+				this.ctx.showError(`Handoff failed: ${errorText(error)}`);
 			}
 		} finally {
 			this.#finishHandoffUi(handoffLoader);

@@ -8,6 +8,7 @@ import * as fsSync from "node:fs";
 import * as os from "node:os";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
+import { errorText } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
 import { isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
 import {
@@ -496,7 +497,7 @@ export async function submitInteractiveInput(
 			try {
 				forwarded = await session.prompt(input.text, { images: input.images, streamingBehavior });
 			} catch (error: unknown) {
-				mode.showError(error instanceof Error ? error.message : "Unknown error occurred");
+				mode.showError(error instanceof Error ? errorText(error) : "Unknown error occurred");
 			}
 			// Dispatch consumed the body locally (void custom command) or rejected
 			// instead of starting a turn: when it is the armed loop body, park the
@@ -506,8 +507,7 @@ export async function submitInteractiveInput(
 			if (!forwarded && mode.loopPrompt === input.text) mode.pauseLoop?.();
 		}
 	} catch (error: unknown) {
-		const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
-		mode.showError(errorMessage);
+		mode.showError(error instanceof Error ? errorText(error) : "Unknown error occurred");
 	} finally {
 		mode.finishPendingSubmission(input);
 		await mode.checkShutdownRequested();
@@ -796,7 +796,7 @@ async function runInteractiveMode(
 		try {
 			await mode.startGoalAtStartup(startupGoal);
 		} catch (error: unknown) {
-			mode.showError(error instanceof Error ? error.message : "Unknown error occurred");
+			mode.showError(error instanceof Error ? errorText(error) : "Unknown error occurred");
 		}
 	}
 
@@ -814,7 +814,7 @@ async function runInteractiveMode(
 							: "Restored: nothing was left unfinished.",
 			);
 		} catch (error: unknown) {
-			mode.showError(error instanceof Error ? error.message : "Unknown error occurred");
+			mode.showError(error instanceof Error ? errorText(error) : "Unknown error occurred");
 		}
 	}
 
@@ -826,8 +826,7 @@ async function runInteractiveMode(
 			// dying with AgentBusyError.
 			await session.prompt(initialMessage, { images: initialImages, streamingBehavior: "steer" });
 		} catch (error: unknown) {
-			const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
-			mode.showError(errorMessage);
+			mode.showError(error instanceof Error ? errorText(error) : "Unknown error occurred");
 		}
 	}
 
@@ -835,8 +834,7 @@ async function runInteractiveMode(
 		try {
 			await session.prompt(message, { streamingBehavior: "steer" });
 		} catch (error: unknown) {
-			const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
-			mode.showError(errorMessage);
+			mode.showError(error instanceof Error ? errorText(error) : "Unknown error occurred");
 		}
 	}
 

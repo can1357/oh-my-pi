@@ -32,6 +32,7 @@ import {
 } from "../keybinding-matchers";
 import type { SpaceHoldHandler } from "../space-hold";
 import { sanitizeErrorLine } from "../chrome/error-block";
+import { withRetryWait } from "@oh-my-pi/pi-utils";
 import { sanitizeDisplayLine, sanitizeDisplayText } from "./extensions/display-text";
 import { editorKey, editorKeys, keyHint, rawKeyHint } from "../chrome/keybinding-hints";
 import { formatKeyHint, type KeyId } from "../app-keybindings";
@@ -725,7 +726,9 @@ export class BtwHistoryPanel implements Component, Focusable {
 			children.push(node("col", { role: "omp.btw.answer" }, [answer], "answer"));
 		}
 		if (turn.error) {
-			children.push(text([span(sanitizeErrorLine(turn.error), "error")], { role: "omp.btw.error", wrap: "word" }));
+			// Cut the error to a line first, then add the wait, so a long error keeps it.
+			const error = withRetryWait(sanitizeErrorLine(turn.error), turn.errorRetryAfterMs);
+			children.push(text([span(error, "error")], { role: "omp.btw.error", wrap: "word" }));
 		}
 		if (turn.status === "interrupted") {
 			children.push(text([span("Not resumed in this view.", "muted")], { role: "omp.btw.note" }));
@@ -856,6 +859,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 			turn.answer === previous?.answer &&
 			turn.status === previous?.status &&
 			turn.error === previous?.error &&
+			turn.errorRetryAfterMs === previous?.errorRetryAfterMs &&
 			turn.createdAt === previous?.createdAt
 		) {
 			return cached;
@@ -884,7 +888,10 @@ export class BtwHistoryPanel implements Component, Focusable {
 					width,
 				),
 			);
-		if (turn.error) lines.push("", ...wrapTextWithAnsi(theme.fg("error", sanitizeErrorLine(turn.error)), width));
+		if (turn.error) {
+			const error = withRetryWait(sanitizeErrorLine(turn.error), turn.errorRetryAfterMs);
+			lines.push("", ...wrapTextWithAnsi(theme.fg("error", error), width));
+		}
 		if (turn.status === "interrupted")
 			lines.push("", ...wrapTextWithAnsi(theme.fg("muted", "Not resumed in this view."), width));
 		return {
@@ -893,6 +900,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 				answer: turn.answer,
 				status: turn.status,
 				error: turn.error,
+				errorRetryAfterMs: turn.errorRetryAfterMs,
 				createdAt: turn.createdAt,
 				updatedAt: turn.updatedAt,
 			},

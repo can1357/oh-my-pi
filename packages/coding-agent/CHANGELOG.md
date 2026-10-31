@@ -8,6 +8,7 @@
 - In a Tern pane, `omp stats` shows the dashboard in place of the block it runs in, with a Close button (or Esc, or Ctrl+C) that stops it and brings the terminal back, and `/stats` opens it in a browser block beside omp, instead of the system browser
 - `bash` tool commands now see `PI_TOOL_CALL_ID`, the id of the call running them, so a script the agent runs can point at that call in the session transcript ([#17489](https://github.com/can1357/oh-my-pi/pull/17489) by [@will-bogusz](https://github.com/will-bogusz))
 - Native judgments with a configured fallback now move to it after a 3-second candidate deadline (configurable with `judgment.attemptTimeoutMs`) and briefly skip the timed-out route; without a configured fallback a slow judge is never cut off or replaced ([#17465](https://github.com/can1357/oh-my-pi/pull/17465) by [@Xytronix](https://github.com/Xytronix)).
+- A turn retried on its own model after a mid-stream disconnect, while `retry.fallbackChains` has a fallback ready, now moves to the fallback after about 2 s of retries inside the call instead of the provider's full retry ceiling (about 49 s on Anthropic), and moves at once when the server asks for a longer wait
 
 ### Fixed
 
@@ -30,6 +31,7 @@
 - Fixed LSP definition, type definition, implementation and reference results carrying a stray carriage return on every source context line from files with Windows (CRLF) line endings ([#17549](https://github.com/can1357/oh-my-pi/pull/17549) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - A cut stream — a closed socket, a truncated chunked transfer, or a stream that ended mid-frame (`Unexpected end of JSON input`, an unterminated SSE event) — on a request the provider reports it sent once now gets up to two more tries on the same model before `retry.fallbackChains` moves the session to another one. At most two per recovery however many models the chain walks, each waiting a full-jitter backoff (scheduled sleep strictly under 1.5 s in all at the default `retry.baseDelayMs`, strictly under 16 s at any base); the longest retry hint the error names that does not fit strictly inside that window, and any failure after a held retry that does not report a single request, move on instead. Only `anthropic`, `openai-codex-responses` and `cursor` report that count today. A failure from a provider that reports a replay, or reports no count at all, moves at once, as do a 429, a 529, an overload, a usage limit, a timeout and a refusal. This replaces the one same-model retry before the chain that every provider used to get for a socket close after streamed output, which re-sent requests the provider had already replayed ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
 - Cancelling a retry (`abortRetry()`, Esc while retrying, RPC `abort_retry`) now ends the retry saga from whatever moment it lands: from an `auto_retry_start` listener before the backoff starts, as a credential rotation resolves, at a fallback switch, or while the retried request is already on the wire (which then completes or fails without a further retry); before, a cancellation outside the backoff sleep could be lost and the saga went on retrying ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- Fixed web page reads reading a 429's `Retry-After` date with `Date.parse`, so a zone-less asctime date was read in the machine's own zone; they now use the shared `Retry-After` date reader
 
 ## [18.14.1] - 2026-10-31
 
@@ -45,12 +47,10 @@
 ### Changed
 
 - `read` of a web page keeps the title, description, author and dates of its `<meta>` tags and lists the others by name only, so pages cost about 6% fewer tokens ([#17393](https://github.com/can1357/oh-my-pi/pull/17393) by [@will-bogusz](https://github.com/will-bogusz))
-- A turn retried on its own model after a mid-stream disconnect, while `retry.fallbackChains` has a fallback ready, now moves to the fallback after about 2 s of retries inside the call instead of the provider's full retry ceiling (about 49 s on Anthropic), and moves at once when the server asks for a longer wait
 - On the Anthropic API, the newest message now keeps all its images up to the 128 MB request limit, past the 120 MB image budget ([#17492](https://github.com/can1357/oh-my-pi/pull/17492) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
-- Fixed web page reads reading a 429's `Retry-After` date with `Date.parse`, so a zone-less asctime date was read in the machine's own zone; they now use the shared `Retry-After` date reader
 - Fixed account-policy recovery repeatedly rotating through denied credentials instead of surfacing the error or using the configured model fallback, including unnecessary sibling-unblock waits after the account allowance is spent ([#17439](https://github.com/can1357/oh-my-pi/pull/17439) by [@wolfiesch](https://github.com/wolfiesch))
 - Startup prewalk now arms a later fallback candidate of the role named by prewalk.into when its first candidate is unavailable, matching /prewalk and /new ([#17373](https://github.com/can1357/oh-my-pi/pull/17373)).
 - Fixed `omp install git:github.com/user/repo` treating `git` as the host instead of installing the GitHub plugin ([#17436](https://github.com/can1357/oh-my-pi/issues/17436)).

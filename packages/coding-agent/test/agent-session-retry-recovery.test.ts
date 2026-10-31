@@ -564,6 +564,7 @@ describe("AgentSession retry recovery", () => {
 		expect(resolveAssistantErrorPresentation(terminalError)).toEqual({
 			kind: "full",
 			text: terminalErrorText,
+			body: terminalErrorText,
 			isError: true,
 		});
 
@@ -1333,7 +1334,7 @@ describe("AgentSession retry recovery", () => {
 			resolveAssistantErrorPresentation(
 				assistantMessage({ stopReason: "error", errorMessage: "503 service unavailable" }),
 			),
-		).toEqual({ kind: "full", text: "503 service unavailable", isError: true });
+		).toEqual({ kind: "full", text: "503 service unavailable", body: "503 service unavailable", isError: true });
 		expect(
 			resolveAssistantErrorPresentation(
 				assistantMessage({ stopReason: "aborted", errorMessage: SILENT_ABORT_MARKER }),

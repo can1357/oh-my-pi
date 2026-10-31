@@ -841,6 +841,47 @@ describe("task progress rendering", () => {
 			}
 		}
 	});
+
+	it("renders a subagent's retry wait from the structured field, never from the error text", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const render = (details: TaskToolDetails) =>
+			Bun.stripANSI(
+				taskToolRenderer
+					.renderResult({ content: [], details }, { expanded: false, isPartial: false }, theme)
+					.render(200)
+					.join("\n"),
+			);
+
+		// A transcript written before the wait went structured still carries it as
+		// text; with no field set, the renderer must add no wait of its own.
+		const legacy = render(
+			detailsFor(
+				runningProgress({
+					status: "failed",
+					retryFailure: { attempt: 3, errorMessage: "429 rate_limit_error retry-after-ms=9000" },
+				}),
+			),
+		);
+		expect(legacy).toContain("auto-retry gave up after 3 attempts: 429 rate_limit_error retry-after-ms=9000");
+		expect(legacy).not.toContain("retry after");
+
+		const stated = render(
+			detailsFor(
+				runningProgress({
+					status: "failed",
+					retryFailure: { attempt: 3, errorMessage: "429 rate_limit_error", retryAfterMs: 30_000 },
+				}),
+			),
+		);
+		expect(stated).toContain("auto-retry gave up after 3 attempts: 429 rate_limit_error (retry after 30.0s)");
+
+		const failed = render({
+			projectAgentsDir: null,
+			totalDurationMs: 0,
+			results: [finishedResult({ exitCode: 1, error: "429 rate_limit_error", errorRetryAfterMs: 30_000 })],
+		});
+		expect(failed).toContain("429 rate_limit_error (retry after 30.0s)");
+	});
 });
 
 describe("task result detail-less state", () => {

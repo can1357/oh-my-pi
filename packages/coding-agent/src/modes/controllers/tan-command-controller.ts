@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import { errorText } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import { prompt, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 import backgroundTanDispatchPrompt from "../../prompts/system/background-tan-dispatch.md" with { type: "text" };
 import tanContextSwitchPrompt from "../../prompts/system/tan-context-switch.md" with { type: "text" };
@@ -332,7 +333,7 @@ export class TanCommandController {
 			);
 		} catch (error) {
 			if (cloneFile) await removeCloneSession(cloneFile);
-			this.ctx.showError(error instanceof Error ? error.message : String(error));
+			this.ctx.showError(errorText(error));
 			return false;
 		}
 

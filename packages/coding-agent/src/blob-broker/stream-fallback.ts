@@ -65,6 +65,7 @@ export function wrapStreamFnWithBlobUrlFallback(
 								source,
 								fallback: fallbackSource,
 								error: event.error.errorMessage?.slice(0, 200),
+								retryAfterMs: event.error.errorRetryAfterMs,
 							});
 							attemptContext = fallback;
 							failedSourceAwaitingProof = source;

@@ -513,8 +513,8 @@ const OPENAI_UNAVAILABLE = { error: { message: "The server is overloaded", type:
 
 // The resolution: a server wait is never shortened to fit the budget, because a
 // retry sooner than the server asked is a guaranteed failure. A wait that would
-// end past the budget ends the call at once, with the server's hint kept on the
-// error for the caller to honour or fail over from.
+// end past the budget ends the call at once, with the server's wait kept on the
+// result (`errorRetryAfterMs`) for the caller to honour or fail over from.
 describe("a server retry-after against the budget", () => {
 	it.each([
 		{ lane: "anthropic", status: 529, body: ANTHROPIC_OVERLOADED },
@@ -531,7 +531,8 @@ describe("a server retry-after against the budget", () => {
 				expect(route.requests()).toBe(1);
 				expect(elapsedMs).toBeLessThan(ROUND_TRIP_SLACK_MS);
 				expect(result.errorStatus).toBe(status);
-				expect(result.errorMessage).toContain("retry-after-ms=30000");
+				expect(result.errorRetryAfterMs).toBe(30_000);
+				expect(result.errorMessage).not.toContain("retry-after");
 				expect(result.replayBudgetExhausted).toBe(true);
 			} finally {
 				route.stop();
@@ -609,7 +610,7 @@ describe("a server retry-after against the budget", () => {
 			const result = await laneNamed("openai-completions").call(route.url, { replayBudgetMs: 2_000 });
 
 			expect(route.requests()).toBe(1);
-			expect(result.errorMessage).toContain("retry-after-ms=90000");
+			expect(result.errorRetryAfterMs).toBe(90_000);
 			expect(result.replayBudgetExhausted).toBe(true);
 		} finally {
 			route.stop();

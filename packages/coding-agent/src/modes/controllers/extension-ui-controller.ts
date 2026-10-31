@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { errorText } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
 import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
@@ -641,7 +642,7 @@ export class ExtensionUiController {
 						compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
 					});
 				} catch (err) {
-					this.showToolError(registeredTool.definition.name, err instanceof Error ? err.message : String(err));
+					this.showToolError(registeredTool.definition.name, errorText(err));
 				}
 			}
 		}
@@ -1487,7 +1488,7 @@ export class ExtensionUiController {
 				this.#applyCustomMessageDisplay(wasStreaming, normalized, silentAppend ? messageCountBefore : undefined);
 			})
 			.catch((err: unknown) => {
-				this.ctx.showError(`Extension sendMessage failed: ${err instanceof Error ? err.message : String(err)}`);
+				this.ctx.showError(`Extension sendMessage failed: ${errorText(err)}`);
 			});
 	};
 
@@ -1495,7 +1496,7 @@ export class ExtensionUiController {
 	#sendExtensionUserMessage: SendUserMessageHandler = (content, options) => {
 		if (this.#rejectGuestExtensionTurn()) return;
 		this.ctx.session.sendUserMessage(content, options).catch((err: unknown) => {
-			this.ctx.showError(`Extension sendUserMessage failed: ${err instanceof Error ? err.message : String(err)}`);
+			this.ctx.showError(`Extension sendUserMessage failed: ${errorText(err)}`);
 		});
 	};
 

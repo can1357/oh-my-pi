@@ -128,6 +128,8 @@ export type CustomToolSessionEvent =
 			aborted: boolean;
 			willRetry: boolean;
 			errorMessage?: string;
+			/** The server's retry wait (ms) the compaction failure stated. */
+			retryAfterMs?: number;
 	  }
 	| {
 			reason: "auto_retry_start";
@@ -136,12 +138,16 @@ export type CustomToolSessionEvent =
 			delayMs: number;
 			errorMessage: string;
 			errorId?: number;
+			/** The server's retry wait (ms) the failed message stated, distinct from `delayMs`. */
+			retryAfterMs?: number;
 	  }
 	| {
 			reason: "auto_retry_end";
 			success: boolean;
 			attempt: number;
 			finalError?: string;
+			/** The server's retry wait (ms) the final failed message stated. */
+			finalRetryAfterMs?: number;
 			retryErrors?: RetryErrorUpdate[];
 	  }
 	| {

@@ -166,6 +166,9 @@ export function streamProxy(model: Model, context: Context, options: ProxyStream
 						repetitionPenalty: options.repetitionPenalty,
 						maxTokens: options.maxTokens,
 						reasoning: options.reasoning,
+						// The server runs the call, so it is the one that can keep its
+						// replays inside the caller's budget.
+						replayBudgetMs: options.replayBudgetMs,
 					},
 				}),
 				signal: options.signal,

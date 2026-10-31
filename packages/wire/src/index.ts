@@ -85,6 +85,8 @@ export interface AssistantMessage {
 	usage: WireUsage;
 	stopReason: StopReason;
 	errorMessage?: string;
+	/** The server's retry wait (ms) the failed turn stated. `errorMessage` never carries it; renderers append it. */
+	errorRetryAfterMs?: number;
 	timestamp: number;
 }
 
@@ -192,9 +194,32 @@ export type AgentEvent =
 	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: unknown; isError?: boolean }
 	| { type: "notice"; level: "info" | "warning" | "error"; message: string; source?: string }
 	| { type: "auto_compaction_start"; reason: string; action: string }
-	| { type: "auto_compaction_end"; aborted: boolean; willRetry: boolean; errorMessage?: string; skipped?: boolean }
-	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
-	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
+	| {
+			type: "auto_compaction_end";
+			aborted: boolean;
+			willRetry: boolean;
+			errorMessage?: string;
+			/** The server's retry wait (ms) the compaction failure stated. */
+			retryAfterMs?: number;
+			skipped?: boolean;
+	  }
+	| {
+			type: "auto_retry_start";
+			attempt: number;
+			maxAttempts: number;
+			delayMs: number;
+			errorMessage: string;
+			/** The server's retry wait (ms) the failed turn stated, distinct from `delayMs`. */
+			retryAfterMs?: number;
+	  }
+	| {
+			type: "auto_retry_end";
+			success: boolean;
+			attempt: number;
+			finalError?: string;
+			/** The server's retry wait (ms) the final failed turn stated. */
+			finalRetryAfterMs?: number;
+	  }
 	| { type: "thinking_level_changed"; thinkingLevel?: string };
 
 // ═══════════════════════════════════════════════════════════════════════════

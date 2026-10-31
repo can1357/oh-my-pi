@@ -5,7 +5,7 @@
  * when a woken subagent re-yields, so a parent reads the same shape (status,
  * preview, `agent://` pointer) regardless of which path delivered it.
  */
-import { prompt } from "@oh-my-pi/pi-utils";
+import { prompt, withRetryWait } from "@oh-my-pi/pi-utils";
 import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
 import { AgentRegistry, isResumable } from "../registry/agent-registry";
 import { ASYNC_INLINE_RESULT_MAX_CHARS } from "../session/async-job-delivery";
@@ -29,10 +29,16 @@ const PREVIEW_CHARS = 5000;
  * Preview text for a child result. Falls back to "(no output)" — annotated
  * with the request count when the child actually did work, so the parent can
  * tell a no-op child from one that burned requests before being cancelled.
+ * A failed child's stderr previews with the server's retry wait its provider
+ * error stated (`errorRetryAfterMs`), rendered here as the last step.
  */
-export function formatResultOutputFallback(result: Pick<SingleResult, "output" | "stderr" | "requests">): string {
-	const base = result.output.trim() || result.stderr.trim();
-	if (base) return base;
+export function formatResultOutputFallback(
+	result: Pick<SingleResult, "output" | "stderr" | "requests" | "errorRetryAfterMs">,
+): string {
+	const output = result.output.trim();
+	if (output) return output;
+	const stderr = result.stderr.trim();
+	if (stderr) return withRetryWait(stderr, result.errorRetryAfterMs);
 	return result.requests > 0 ? `(no output) after ${result.requests} req` : "(no output)";
 }
 
@@ -78,7 +84,7 @@ export function formatTaskResultSummary(
 			status,
 			duration: formatDuration(options.totalDurationMs),
 			abortReason: result.aborted ? escapeHarnessTags(result.abortReason ?? "") || undefined : undefined,
-			error: error === undefined ? undefined : escapeHarnessTags(error),
+			error: error === undefined ? undefined : escapeHarnessTags(withRetryWait(error, result.errorRetryAfterMs)),
 			resumable,
 			preview: escapeHarnessTags(truncated ? previewHead(output) : output),
 			truncated,

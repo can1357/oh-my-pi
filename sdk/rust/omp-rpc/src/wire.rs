@@ -936,6 +936,8 @@ pub struct AssistantMessage {
 	pub upstream_provider: Option<String>,
 	pub upstream_model: Option<String>,
 	pub error_message: Option<String>,
+	/// The failed response's retry wait in milliseconds, from its headers. `errorMessage` never carries it.
+	pub error_retry_after_ms: Option<f64>,
 	pub error_status: Option<i64>,
 	pub error_id: Option<f64>,
 	pub provider_payload: Option<Map<String, Value>>,
@@ -985,6 +987,9 @@ impl Serialize for AssistantMessage {
 		if let Some(value) = &self.error_message {
 			map.serialize_entry("errorMessage", value)?;
 		}
+		if let Some(value) = &self.error_retry_after_ms {
+			map.serialize_entry("errorRetryAfterMs", value)?;
+		}
 		if let Some(value) = &self.error_status {
 			map.serialize_entry("errorStatus", value)?;
 		}
@@ -1017,6 +1022,7 @@ impl Serialize for AssistantMessage {
 				"upstreamProvider" if self.upstream_provider.is_some() => continue,
 				"upstreamModel" if self.upstream_model.is_some() => continue,
 				"errorMessage" if self.error_message.is_some() => continue,
+				"errorRetryAfterMs" if self.error_retry_after_ms.is_some() => continue,
 				"errorStatus" if self.error_status.is_some() => continue,
 				"errorId" if self.error_id.is_some() => continue,
 				"providerPayload" if self.provider_payload.is_some() => continue,
@@ -1047,6 +1053,7 @@ impl<'de> Deserialize<'de> for AssistantMessage {
 			upstream_provider: take(&mut extra, "upstreamProvider"),
 			upstream_model: take(&mut extra, "upstreamModel"),
 			error_message: take(&mut extra, "errorMessage"),
+			error_retry_after_ms: take(&mut extra, "errorRetryAfterMs"),
 			error_status: take(&mut extra, "errorStatus"),
 			error_id: take(&mut extra, "errorId"),
 			provider_payload: take(&mut extra, "providerPayload"),
@@ -3448,6 +3455,9 @@ pub struct BtwHistoryTurn {
 	pub images: Option<Vec<ImageContent>>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub error: Option<String>,
+	/// The failed turn's retry wait in milliseconds, from the error's response headers. `error` never carries it. Live frames only: history read back from disk has none.
+	#[serde(rename = "errorRetryAfterMs", default, skip_serializing_if = "Option::is_none")]
+	pub error_retry_after_ms: Option<f64>,
 }
 
 /// A side-question topic: its first turn's fields plus follow-ups; the latest turn is the last follow-up, else the record.
@@ -3468,6 +3478,9 @@ pub struct BtwHistoryRecord {
 	pub images: Option<Vec<ImageContent>>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub error: Option<String>,
+	/// The failed turn's retry wait in milliseconds, from the error's response headers. `error` never carries it. Live frames only: history read back from disk has none.
+	#[serde(rename = "errorRetryAfterMs", default, skip_serializing_if = "Option::is_none")]
+	pub error_retry_after_ms: Option<f64>,
 	#[serde(rename = "followUps", default, skip_serializing_if = "Option::is_none")]
 	pub follow_ups: Option<Vec<BtwHistoryTurn>>,
 }
@@ -3746,6 +3759,9 @@ pub struct AutoCompactionEndEvent {
 	pub result: Option<CompactionResult>,
 	#[serde(rename = "errorMessage", default, skip_serializing_if = "Option::is_none")]
 	pub error_message: Option<String>,
+	/// The failed compaction request's retry wait in milliseconds. `errorMessage` never carries it.
+	#[serde(rename = "retryAfterMs", default, skip_serializing_if = "Option::is_none")]
+	pub retry_after_ms: Option<f64>,
 	/// Compaction was skipped for a benign reason.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub skipped: Option<bool>,
@@ -3785,6 +3801,9 @@ pub struct AutoRetryStartEvent {
 	pub error_message: String,
 	#[serde(rename = "errorId", default, skip_serializing_if = "Option::is_none")]
 	pub error_id: Option<i64>,
+	/// The retry wait the failed response stated, in milliseconds; distinct from `delayMs`. `errorMessage` never carries it.
+	#[serde(rename = "retryAfterMs", default, skip_serializing_if = "Option::is_none")]
+	pub retry_after_ms: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3793,6 +3812,9 @@ pub struct AutoRetryEndEvent {
 	pub attempt: i64,
 	#[serde(rename = "finalError", default, skip_serializing_if = "Option::is_none")]
 	pub final_error: Option<String>,
+	/// The retry wait the final failed response stated, in milliseconds. `finalError` never carries it.
+	#[serde(rename = "finalRetryAfterMs", default, skip_serializing_if = "Option::is_none")]
+	pub final_retry_after_ms: Option<f64>,
 	/// Persisted retry errors whose presentation changed when the retry settled.
 	#[serde(rename = "retryErrors", default = "default_auto_retry_end_event_retry_errors")]
 	pub retry_errors: Vec<Map<String, Value>>,
@@ -4094,6 +4116,9 @@ pub struct PromptError {
 	pub model: Option<String>,
 	#[serde(rename = "httpStatus", default, skip_serializing_if = "Option::is_none")]
 	pub http_status: Option<i64>,
+	/// The failed response's retry wait in milliseconds, from its headers. `message` never carries it.
+	#[serde(rename = "retryAfterMs", default, skip_serializing_if = "Option::is_none")]
+	pub retry_after_ms: Option<f64>,
 	/// `cost_cap`: the session reached `session.maxCost` (`--max-cost`) and omp did not send the next request.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub code: Option<LitCostCap>,

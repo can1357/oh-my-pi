@@ -125,7 +125,11 @@ export async function generateCommitMessage(
 			);
 
 			if (response.stopReason === "error") {
-				logger.debug("commit-msg-generator: error", { model: candidate.model.id, error: response.errorMessage });
+				logger.debug("commit-msg-generator: error", {
+					model: candidate.model.id,
+					error: response.errorMessage,
+					retryAfterMs: response.errorRetryAfterMs,
+				});
 				continue;
 			}
 
