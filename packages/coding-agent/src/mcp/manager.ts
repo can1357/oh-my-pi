@@ -12,6 +12,7 @@ import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
 import { resolveConfigValue } from "../config/resolve-config-value";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { AuthStorage } from "../session/auth-storage";
+import { McpBinaryWatcher } from "./binary-watch";
 import {
 	MCPConnectionTimeoutError,
 	connectToServer,
@@ -351,6 +352,19 @@ export class MCPManager {
 	 */
 	#lostRemoteServers = new Map<string, { timer: NodeJS.Timeout | undefined; delayMs: number }>();
 
+	/**
+	 * Respawns a stdio server whose executable or script changed on disk. A
+	 * deliberate rebuild is user-driven, so it resets the crash-burst window
+	 * like `/mcp reconnect`. Inert until {@link setBinaryHotReload} enables it.
+	 */
+	#binaryWatcher = new McpBinaryWatcher(name => {
+		logger.info("MCP server binary changed, reconnecting", { path: `mcp:${name}` });
+		void this.reconnectServer(name, { manual: true }).catch(error =>
+			logger.warn("MCP binary hot reload failed", { path: `mcp:${name}`, error }),
+		);
+	});
+	#binaryHotReload = false;
+
 	constructor(
 		private cwd: string,
 		private toolCache: MCPToolCache | null = null,
@@ -594,6 +608,27 @@ export class MCPManager {
 			.catch(error => {
 				logger.debug("Failed to subscribe to MCP resources", { path: `mcp:${name}`, error });
 			});
+	}
+
+	/**
+	 * Live `mcp.hotReload` switch: when on, a stdio server is reconnected as
+	 * soon as the bytes of its executable or script change on disk.
+	 */
+	setBinaryHotReload(enabled: boolean): void {
+		if (enabled === this.#binaryHotReload) return;
+		this.#binaryHotReload = enabled;
+		if (!enabled) {
+			this.#binaryWatcher.dispose();
+			return;
+		}
+		for (const [name, connection] of this.#connections) this.#watchBinary(name, connection.config);
+	}
+
+	#watchBinary(name: string, config: MCPServerConfig): void {
+		if (!this.#binaryHotReload) return;
+		void this.#binaryWatcher
+			.watch(name, config)
+			.catch(error => logger.debug("MCP binary watch failed", { path: `mcp:${name}`, error }));
 	}
 
 	setNotificationsEnabled(enabled: boolean): void {
@@ -875,6 +910,7 @@ export class MCPManager {
 
 					this.#pendingConnections.delete(name);
 					this.#connections.set(name, connection);
+					this.#watchBinary(name, config);
 					this.#serverConfigs.set(name, config);
 
 					// Wire auth refresh for HTTP-like transports so 401s trigger token refresh.
@@ -1365,6 +1401,7 @@ export class MCPManager {
 		connection.transport.onClose = undefined;
 		if (this.#connections.get(name) === connection) {
 			this.#connections.delete(name);
+			this.#binaryWatcher.unwatch(name);
 		}
 	}
 
@@ -1719,6 +1756,7 @@ export class MCPManager {
 		}
 
 		this.#connections.set(name, connection);
+		this.#watchBinary(name, config);
 
 		// Wire auth refresh for HTTP-like transports, and reconnect for any transport.
 		// Same gate as connectServers: any resolvable managed credential.

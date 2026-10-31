@@ -51,13 +51,15 @@ When authorized to create or edit a contributor-submitted PR, follow the checkli
 - **Prompts**: never build prompts in code (no inline strings, template literals, or concatenation). Prompts live in static `.md` files; use Handlebars for dynamic content. Import them via `import content from "./prompt.md" with { type: "text" }` — not `readFile`.
 - **Judge questions**: one JSON file per feature (`src/prompts/judge/<feature>.json`) maps question ids to `{ instructions, criteria? }`. Load it with `judgeQuestions(file)` from `@oh-my-pi/pi-ai`; fill Handlebars instructions with `renderQuestion(question, context)`. `criteria` sets the kind: a list of levels → score, omitted or `true`/`false` keys only → yes/no, any other labels → choice (`{}` when the caller supplies the labels). Choice labels and answer types come from the JSON keys.
 - **Worker scripts**: workers re-enter the CLI entrypoint; never spawn separate worker entry modules. `cli.ts` declares itself as the worker host at startup (`declareWorkerHostEntry()` from `@oh-my-pi/pi-utils/env`) and dispatches hidden argv selectors (`__omp_worker_stats_sync`, `__omp_worker_tab`, `__omp_worker_js_eval`, `__omp_worker_tiny_inference`) before loading the command registry. Spawn sites use:
+
   ```ts
   import { workerHostEntry } from "@oh-my-pi/pi-utils";
   const hostEntry = workerHostEntry();
   const worker = hostEntry
-  	? new Worker(hostEntry, { type: "module", argv: ["__omp_worker_<name>"] })
-  	: new Worker(new URL("./<worker>.ts", import.meta.url).href, { type: "module" });
+   ? new Worker(hostEntry, { type: "module", argv: ["__omp_worker_<name>"] })
+   : new Worker(new URL("./<worker>.ts", import.meta.url).href, { type: "module" });
   ```
+
   When the process was started from the omp CLI — source `cli.ts`, npm-bundle `dist/cli.js`, or compiled binary — `workerHostEntry()` is `Bun.main` and the worker re-enters the single entry module, so no per-worker `--compile` entrypoints or bundle entries exist. Outside a CLI host (`bun test`, SDK embedding, standalone `omp-stats`) it returns `null` and the direct-module fallback loads the worker source. New worker kinds MUST add their selector to the dispatch table in `cli.ts` and keep the fallback branch.
   History: `with { type: "file" }` only copied the entry as a raw asset (workers crashed silently in compiled binaries — issues #1011, #1027), and the later literal-path + extra-entrypoint pattern required keeping spawn literals and two build scripts in sync (issue #1150). The smoke probe below is the live validation of this contract.
   Validate any new worker with the dedicated smoke probe: `omp --smoke-test` spawns the stats sync worker and the tiny-model subprocess, pings them, and exits — it's wired into `ci:test:smoke` and `scripts/install-tests/run-ci.sh` so binary, source-link, and tarball installs all exercise it. Add a sibling smoke if the new worker is on a different module graph.
@@ -100,7 +102,7 @@ import { $ } from "bun";
 
 const result = await $`git status`.cwd(dir).quiet().nothrow();
 if (result.exitCode === 0) {
-	const text = result.text();
+ const text = result.text();
 }
 
 $`do-stuff ${tmpFile}`.quiet().nothrow(); // fire and forget
@@ -147,15 +149,17 @@ Use `node:fs/promises` for directory ops (`fs.mkdir`, `fs.rm`, `fs.readdir`) —
 - `existsSync`/`readFileSync`/`writeFileSync` in async code → `Bun.file()` APIs.
 - `mkdir(dirname(path), …)` before `Bun.write(path, …)` → redundant; `Bun.write` handles it.
 - `if (await file.exists()) { await file.json() }` → two syscalls plus race. Use try-catch with `isEnoent`:
+
   ```typescript
   import { isEnoent } from "@oh-my-pi/pi-utils";
   try {
-  	return await Bun.file(path).json();
+   return await Bun.file(path).json();
   } catch (err) {
-  	if (isEnoent(err)) return null;
-  	throw err;
+   if (isEnoent(err)) return null;
+   throw err;
   }
   ```
+
 - Multiple `Bun.file(path)` handles for the same path (including across `checkX`/`loadX` helpers).
 - `Buffer.from(await Bun.file(x).arrayBuffer())` → `await fs.readFile(path)`.
 - Existence check + try-catch around the same read → drop the existence check.
@@ -168,7 +172,7 @@ Prefer centralized helpers:
 import { readStream, readLines } from "./utils/stream";
 const text = await readStream(child.stdout);
 for await (const line of readLines(stream)) {
-	/* ... */
+ /* ... */
 }
 ```
 
@@ -262,17 +266,18 @@ For the bash tool specifically:
 - Never use `tsc`/`npx tsc` — always `bun check`.
 - Never run `cargo test` directly for Rust tests — use `bun run test:rs`. It runs `cargo nextest run` (config: `.config/nextest.toml`) followed by a `cargo test --doc` pass, because nextest does not execute doctests. The doctest pass runs every runnable doctest in the workspace's lib crates; today that is tree-sitter-go's one example (pi-natives is a `cdylib`, which rustdoc skips; pi-builtins' examples are `ignore`d vendored uutils docs).
 - Merge commits (maintainer merges of PRs) follow: `Merge PR #<number>: <conventional PR subject> (@<author>)` — e.g. `Merge PR #6386: feat(catalog): add native Meta Model API provider (@eggpeat)`.
+
 ## Rust Build Profiles
 
 Profiles live in the root `Cargo.toml`; `.cargo/config.toml` carries the settings Cargo.toml cannot express. Both are committed, so no local `~/.cargo/config.toml` is required.
 
-| Profile | Use |
-| --- | --- |
-| `dev` | Default. Line tables for our crates, no debuginfo for deps, deps at `opt-level = 2`. |
-| `release` | Shipping build: fat LTO, 1 codegen unit, stripped. |
-| `local` | Fast local release iteration: thin LTO, 16 codegen units, incremental. |
-| `profiling` | `release` codegen with symbols kept, for `perf`/`samply`/Instruments. |
-| `ci` | Thin LTO, no debuginfo, stripped. |
+| Profile     | Use                                                                                  |
+| ----------- | ------------------------------------------------------------------------------------ |
+| `dev`       | Default. Line tables for our crates, no debuginfo for deps, deps at `opt-level = 2`. |
+| `release`   | Shipping build: fat LTO, 1 codegen unit, stripped.                                   |
+| `local`     | Fast local release iteration: thin LTO, 16 codegen units, incremental.               |
+| `profiling` | `release` codegen with symbols kept, for `perf`/`samply`/Instruments.                |
+| `ci`        | Thin LTO, no debuginfo, stripped.                                                    |
 
 **Never set `split-debuginfo = "off"` on a profile that has debuginfo.** On Mach-O the linker never merges DWARF into the executable — it writes a debug map (`N_OSO`) pointing at the `.o` files, and `"unpacked"` is what keeps those files. With `"off"` every backtrace frame in our own crates silently loses `file:line`; the `panicked at foo.rs:3` header still prints (that is `#[track_caller]`, not debuginfo), which makes the loss easy to miss. `ci` may use `"off"` only because it sets `debug = false`.
 
@@ -344,3 +349,13 @@ Location: `packages/*/CHANGELOG.md` (per package).
 2. Run `bun run release`.
 
 The script handles version bump, CHANGELOG finalization, commit, tag, publish, and adding new `[Unreleased]` sections.
+
+<!-- BEGIN atask v:1 hash:546cb6751ad9 -->
+
+**Track verifiable objectives with `atask`.** An objective is work with a specific outcome and meaningful completion criteria. Run `atask context` to learn the workflow. Ensure an objective has a task before doing or delegating its work. The worker claims the task, follows its handoff (`atask context ID`), and requests verification with `atask verify complete`. The engine determines whether completion requirements are satisfied.
+
+Do not use markdown TODO lists for task tracking.
+
+Verbs: `atask context`, `atask list`, `atask show`, `atask add`, `atask update`, `atask claim`, `atask log`, `atask verify`.
+
+<!-- END atask -->

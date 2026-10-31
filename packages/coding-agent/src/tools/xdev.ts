@@ -61,6 +61,12 @@ export const XDEV_KEEP_TOP_LEVEL: Record<string, true> = {
 	ask: true,
 	grep: true,
 	web_search: true,
+	mcp__capability_agentmux_capability_run_command: true,
+	mcp__capability_agentmux_capability_wait: true,
+	mcp__capability_agentmux_capability_web_search: true,
+	mcp__capability_tool_call: true,
+	mcp__capability_tool_search: true,
+	mcp__capability_skill_search: true,
 };
 
 /**

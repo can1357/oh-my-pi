@@ -922,7 +922,7 @@ function streamDispatch<TApi extends Api>(
 		: { ...preparedOptions, apiKey };
 
 	const api: Api = providerModel.api;
-	if (api === "openrouter" && $env.PI_OPENROUTER_RESPONSES !== "0") {
+	if (api === "openrouter" && $env.PI_OPENROUTER_RESPONSES !== "0" && !providerModel.id.toLowerCase().includes("deepseek")) {
 		return streamOpenAIResponses(
 			providerModel as Model<"openai-responses">,
 			context,

@@ -155,6 +155,46 @@ describe("InteractiveMode deferred command preview", () => {
 		expect(transcriptText(mode)).toContain("usage panel");
 	});
 
+	it("hides the preview after five seconds but still mounts the panels at the settle", async () => {
+		const { mode, setStreaming } = await createHarness();
+		vi.useFakeTimers();
+		try {
+			setStreaming(true);
+			mode.presentCommandOutput(new Text("mcp reload complete", 1, 0));
+			expect(noticeText(mode)).toContain("mcp reload complete");
+
+			vi.advanceTimersByTime(4_999);
+			expect(noticeText(mode)).toContain("mcp reload complete");
+			vi.advanceTimersByTime(1);
+			expect(noticeText(mode)).toBe("");
+
+			// Hiding the preview must not drop the output: it still lands in the transcript.
+			setStreaming(false);
+			mode.flushPendingCommandOutput();
+			expect(transcriptText(mode)).toContain("mcp reload complete");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("restarts the five second window when another command is queued", async () => {
+		const { mode, setStreaming } = await createHarness();
+		vi.useFakeTimers();
+		try {
+			setStreaming(true);
+			mode.presentCommandOutput(new Text("first panel", 1, 0));
+			vi.advanceTimersByTime(4_000);
+			mode.presentCommandOutput(new Text("second panel", 1, 0));
+			vi.advanceTimersByTime(4_000);
+
+			expect(noticeText(mode)).toContain("second panel");
+			vi.advanceTimersByTime(1_000);
+			expect(noticeText(mode)).toBe("");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("shows no preview when the agent is idle, since output mounts immediately", async () => {
 		const { mode } = await createHarness();
 
