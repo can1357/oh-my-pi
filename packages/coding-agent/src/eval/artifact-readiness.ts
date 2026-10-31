@@ -640,15 +640,17 @@ function pinAccountOf(session: ToolSession): PinAccount {
  *
  * The token is a bearer capability, deliberately. Whoever presents it may take
  * or release the pin, and the charge stays with the session that asked. It is
- * random, and it travels only on the asking cell's own bridge to that cell's
- * runtime, so anything that can present it is code running beside the reader
- * in the same runtime. Binding it to the asking session instead would refuse a
- * legitimate reader: work a finished cell left running asks through the
- * kernel's latest session, which in a kernel two sessions share is not always
- * the one its answer was charged to. A pin is not interchangeable with reading
- * by number — it keeps a file readable after its name was replaced or
- * removed, which is what it is for — so the bearer is trusted because of where
- * the token can travel, not because it could reach the file another way.
+ * random and travels only on the asking cell's own bridge back into that cell's
+ * runtime, so only code in that runtime can present it — and that boundary is
+ * all the protection there is. Inside a runtime nothing is checked: in a kernel
+ * two sessions share, the other session's code is in that runtime too, and with
+ * the token it could take the bytes — which, once the name was replaced or
+ * removed, it could not have read by number; keeping the file readable then is
+ * what a pin is for — or release the pin, so the reader that asked is refused.
+ * Either is possible only within the lease. The token is not bound to the
+ * asking session because that would refuse a legitimate reader: work a
+ * finished cell left running asks through the kernel's latest session, which
+ * in a shared kernel is not always the one its answer was charged to.
  */
 class ArtifactPin {
 	readonly token = `file-${crypto.randomUUID()}`;

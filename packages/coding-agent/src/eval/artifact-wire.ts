@@ -8,6 +8,13 @@
  * shapes. A shape written out twice, or copied field by field at a hop, is a
  * field one end has and the other drops — which is how a reader lost the hold
  * its first read bound and went on to read another directory.
+ *
+ * The Python kernel cannot import this module, so `py/prelude.py` writes the
+ * same requests and reads the same answer fields by hand. No compiler checks
+ * that copy. `py/prelude.test.ts` drives the kernel through each of its four
+ * requests and requires `artifactRequestOf` to take every one whole; its
+ * reading of the host's real answers is checked by the real-kernel reads in
+ * `artifact-reads-in-cells.test.ts`, not by any type.
  */
 
 /** Synthetic bridge name reserved for the artifact readiness question, across both runtimes. */
@@ -104,13 +111,15 @@ const SETTLED_ARTIFACT_FIELDS: Presence<SettledArtifact> = {
 /**
  * The parser for each request variant, each against that variant's own type.
  *
- * Per variant, never against the union: `keyof` a union is the keys its
- * members share, so a shape checked against `ArtifactRequest` as a whole sees
- * only `op`, and a variant could gain a field that is not a string — which
- * the parser then refuses at run time — without anything failing to compile.
+ * Per variant, never against the union. `StringShape` of a union is the union
+ * of each variant's string shape, and a type with more fields still fits a
+ * shape with fewer, so checked against `ArtifactRequest` as a whole a `take`
+ * given a field that is not a string still fits the `release` shape and
+ * compiles — and the parser then refuses every such request at run time.
  * Each entry names its variant, so its table is checked for the variant's
  * fields and `shapeOf` for their being strings; the mapped type makes a new
- * variant without an entry a compile error too.
+ * variant without an entry a compile error too. `artifact-wire-edits.test.ts`
+ * makes each of those edits to a copy of this module and holds it to that.
  */
 const REQUEST_PARSERS: { readonly [Op in ArtifactRequest["op"]]: (value: object) => RequestOf<Op> | null } = {
 	answer: value =>
