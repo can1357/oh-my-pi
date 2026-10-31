@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Changed
+
+- Reduced the work done while a response streams, so long streaming replies no longer stutter as chunks arrive ([#15207](https://github.com/can1357/oh-my-pi/pull/15207) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Changed
 
@@ -29,7 +32,6 @@
 - Added `disableServerSideFallback` to `FactoryDroidOptions` and `SimpleStreamOptions`: a Factory Droid request leaves out the server-side refusal fallback chain and fails, before any of its content is streamed, if another model answers it ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
-- Reduced the work done while a response streams, so long streaming replies no longer stutter as chunks arrive ([#15207](https://github.com/can1357/oh-my-pi/pull/15207) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - DeepSeek and Grok models on Amazon Bedrock now get the same near-duplicate reasoning-loop checks as on other hosts
 
