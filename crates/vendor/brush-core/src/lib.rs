@@ -1,7 +1,7 @@
 //! Core implementation of the brush shell. Implements the shell's abstraction,
 //! its interpreter, and various facilities used internally by the shell.
 
-#![cfg_attr(unix, feature(process_setsid))]
+#![cfg_attr(all(unix, brush_nightly_setsid), feature(process_setsid))]
 
 pub mod arithmetic;
 mod braceexpansion;
