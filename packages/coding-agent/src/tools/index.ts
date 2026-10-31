@@ -12,6 +12,8 @@ import { EditTool } from "../edit";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
 import type {
+	BeforeSubagentApplyEvent,
+	BeforeSubagentApplyEventResult,
 	BeforeSubagentSpawnEvent,
 	BeforeSubagentSpawnEventResult,
 	PreparedExtension,
@@ -442,6 +444,12 @@ export interface ToolSession {
 		event: BeforeSubagentSpawnEvent,
 		signal?: AbortSignal,
 	): Promise<BeforeSubagentSpawnEventResult | undefined>;
+	/**
+	 * Fires `before_subagent_apply` on this session's extensions before an
+	 * isolated child's changes apply back. Undefined when the session has no
+	 * extension runner.
+	 */
+	emitBeforeSubagentApply?(event: BeforeSubagentApplyEvent): Promise<BeforeSubagentApplyEventResult | undefined>;
 	/** Auth storage for passing to subagents (avoids re-discovery) */
 	authStorage?: import("../session/auth-storage").AuthStorage;
 	/** Model registry for passing to subagents (avoids re-discovery) */

@@ -55,6 +55,8 @@ import type {
 	BeforeAgentStartEventResult,
 	BeforeProviderRequestEvent,
 	BeforeProviderRequestEventResult,
+	BeforeSubagentApplyEvent,
+	BeforeSubagentApplyEventResult,
 	BeforeSubagentSpawnEvent,
 	BeforeSubagentSpawnEventResult,
 	CompactOptions,
@@ -2453,5 +2455,35 @@ export class ExtensionRunner {
 		}
 
 		return chosen;
+	}
+
+	/**
+	 * Runs `before_subagent_apply` handlers; a `block` short-circuits. Fails
+	 * closed: a handler that throws or times out refuses the apply, which keeps
+	 * the captured changes instead of writing an unchecked checkout.
+	 */
+	async emitBeforeSubagentApply(event: BeforeSubagentApplyEvent): Promise<BeforeSubagentApplyEventResult | undefined> {
+		if (!this.hasHandlers("before_subagent_apply")) return undefined;
+		const ctx = this.createContext();
+		for (const ext of this.extensions) {
+			for (const handler of ext.handlers.get("before_subagent_apply") ?? []) {
+				const result = (await this.#runHandlerWithTimeout(
+					handler,
+					event,
+					ctx,
+					ext,
+					extensionHandlerTimeoutMs,
+					(kind, message) => ({
+						block: true,
+						reason:
+							kind === "timeout"
+								? `Extension ${ext.path} timed out after ${extensionHandlerTimeoutMs}ms`
+								: `Extension ${ext.path} failed: ${message}`,
+					}),
+				)) as BeforeSubagentApplyEventResult | undefined;
+				if (result?.block) return result;
+			}
+		}
+		return undefined;
 	}
 }

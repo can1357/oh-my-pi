@@ -765,6 +765,15 @@ function renderAgentProgress(
 		lines.push(...renderDescriptionLines(fullDescription, continuePrefix, maxWidth, theme));
 	}
 	lines.push(...renderRouteLine(progress.resolvedModelRoute, continuePrefix, maxWidth, theme));
+	if (progress.checkout) {
+		lines.push(
+			truncateTaskRow(
+				`${continuePrefix}${theme.fg("dim", `applies to: ${replaceTabs(shortenPath(progress.checkout))}`)}`,
+				maxWidth,
+				"",
+			),
+		);
+	}
 
 	lines.push(...renderTaskSection(progress.assignment ?? progress.task, continuePrefix, expanded, theme));
 
@@ -1950,6 +1959,7 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 		[
 			assignment,
 			progress.resolvedModelRoute ? noteText(progress.resolvedModelRoute, "dim") : undefined,
+			progress.checkout ? noteText(`applies to: ${shortenPath(progress.checkout)}`, "dim") : undefined,
 			!running && progress.retryFailure
 				? text(
 						[
@@ -2271,6 +2281,8 @@ export interface TaskItem {
 	tools?: string[];
 	/** Run this spawn in an isolated worktree (batch form; flat form carries it top-level). */
 	isolated?: boolean;
+	/** Checkout an isolated spawn copies and applies back into (batch form; flat form carries it top-level). */
+	checkout?: string;
 }
 
 /**
@@ -2308,6 +2320,8 @@ export interface TaskParams {
 	context?: string;
 	/** Run in an isolated worktree (flat form; per-item in batch form). */
 	isolated?: boolean;
+	/** Checkout an isolated spawn copies and applies back into (flat form; per-item in batch form). */
+	checkout?: string;
 }
 
 /**
@@ -2431,6 +2445,8 @@ export interface AgentProgress {
 	resolvedModelIsFallback?: boolean;
 	/** Extension routing note (e.g. model-pools) explaining why {@link resolvedModel} was chosen. */
 	resolvedModelRoute?: string;
+	/** Absolute checkout an isolated run applies back into, frozen when the call was made. */
+	checkout?: string;
 	/** True when a live advisor was attached to this run's session, not merely enabled in settings. */
 	advisor?: boolean;
 	/** The agent's latest self-estimate of task completion (0–100), from the periodic `task.completionProbe` side request. */

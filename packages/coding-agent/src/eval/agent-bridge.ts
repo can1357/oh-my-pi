@@ -1,6 +1,7 @@
 /**
  * Host-side handler for the eval `agent()` helper.
  */
+import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createEvalCustomTools, describeEvalTools } from "../task/eval-tools";
@@ -16,6 +17,7 @@ import {
 import type { AgentProgress, SingleResult, StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import type { NestedRepoPatch } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../tools";
+import { expandPath } from "../tools/path-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { JsStatusEvent } from "./js/shared/types";
 
@@ -30,6 +32,7 @@ const agentArgsSchema = type({
 	"schemaMode?": "'permissive' | 'strict'",
 	"isolated?": "boolean",
 	"apply?": "boolean",
+	"checkout?": "string",
 	"merge?": "boolean",
 	"tools?": "string[]",
 	"+": "delete",
@@ -43,6 +46,7 @@ interface EvalAgentArgs {
 	schemaMode?: StructuredSubagentSchemaMode;
 	isolated?: boolean;
 	apply?: boolean;
+	checkout?: string;
 	merge?: boolean;
 	tools?: string[];
 }
@@ -178,12 +182,19 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 		throw new ToolError("Eval-defined tools are unavailable in plan mode.");
 	}
 
+	// Freeze the destination now: the job may start after the session moves.
 	const isolation: StructuredSubagentIsolationControls | undefined =
-		Object.hasOwn(parsed, "isolated") || Object.hasOwn(parsed, "apply") || Object.hasOwn(parsed, "merge")
+		Object.hasOwn(parsed, "isolated") ||
+		Object.hasOwn(parsed, "apply") ||
+		Object.hasOwn(parsed, "merge") ||
+		Object.hasOwn(parsed, "checkout")
 			? {
 					...(parsed.isolated !== undefined ? { requested: parsed.isolated } : {}),
 					...(parsed.merge === false ? { merge: "patch" } : {}),
 					...(parsed.apply !== undefined ? { apply: parsed.apply } : {}),
+					...(parsed.isolated === true || parsed.checkout !== undefined
+						? { checkout: path.resolve(options.session.cwd, expandPath(parsed.checkout ?? ".")) }
+						: {}),
 				}
 			: undefined;
 	const customTools = parsed.tools?.length
@@ -228,8 +239,9 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 						keepAlive: true,
 						signal,
 						onProgress: progress => {
-							latestProgress = progress;
-							void reportProgress(`Running agent ${progress.id}...`, { progress: [progress] });
+							latestProgress =
+								isolation?.checkout === undefined ? progress : { ...progress, checkout: isolation.checkout };
+							void reportProgress(`Running agent ${progress.id}...`, { progress: [latestProgress] });
 						},
 					});
 					const result = await buildEvalAgentResult(execution);

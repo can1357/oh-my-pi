@@ -79,3 +79,18 @@ Nested repository patches (not applied):
 {{#list nestedPatchPaths prefix="- "}}{{this}}{{/list}}
 {{/if}}
 {{/when}}
+{{#when kind "==" "apply-refused"}}
+<system-notification>Changes were not applied to `{{checkout}}`: {{reason}}
+Task outputs are preserved for manual handling.</system-notification>
+{{#if branchName}}
+Unmerged branch preserved as {{branchName}}.
+{{/if}}
+{{#if rootPatchPath}}
+Patch artifact:
+- {{rootPatchPath}}
+{{/if}}
+{{#if nestedPatchPaths}}
+Nested repository patches (not applied):
+{{#list nestedPatchPaths prefix="- "}}{{this}}{{/list}}
+{{/if}}
+{{/when}}

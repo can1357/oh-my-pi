@@ -94,6 +94,11 @@ export interface StructuredSubagentIsolationControls {
 	requested?: boolean;
 	merge?: "patch" | "branch";
 	apply?: boolean;
+	/**
+	 * Checkout the isolated child copies and applies back into: an absolute
+	 * path inside it. Callers freeze it at dispatch; defaults to the session cwd.
+	 */
+	checkout?: string;
 }
 
 /** Identity and presentation metadata supplied by the calling surface. */
@@ -275,7 +280,10 @@ function assertPlanControlsAllowed(request: StructuredSubagentRequest, planMode:
 	const isolation = request.isolation;
 	if (
 		isolation &&
-		(Object.hasOwn(isolation, "requested") || Object.hasOwn(isolation, "apply") || Object.hasOwn(isolation, "merge"))
+		(Object.hasOwn(isolation, "requested") ||
+			Object.hasOwn(isolation, "apply") ||
+			Object.hasOwn(isolation, "merge") ||
+			Object.hasOwn(isolation, "checkout"))
 	) {
 		throw new StructuredSubagentError(
 			"preflight",
@@ -448,6 +456,12 @@ export async function resolveEffectiveSubagentPolicy(
 		throw new StructuredSubagentError(
 			"preflight",
 			"Subagent isolated execution requires task.isolation.enabled; it is currently false.",
+		);
+	}
+	if (request.isolation?.checkout !== undefined && !isIsolated) {
+		throw new StructuredSubagentError(
+			"preflight",
+			"`checkout` names where an isolated subagent's changes apply; it requires isolated execution.",
 		);
 	}
 	return {
@@ -856,7 +870,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		let isolationContext: IsolationContext | null = null;
 		if (policy.isIsolated) {
 			try {
-				isolationContext = await prepareIsolationContext(request.session.cwd);
+				isolationContext = await prepareIsolationContext(request.isolation?.checkout ?? request.session.cwd);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				throw new StructuredSubagentError(
@@ -914,25 +928,51 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			!result.error &&
 			!result.aborted
 		) {
-			const outcome = await mergeIsolatedChanges({
-				result,
-				repoRoot: isolationContext.repoRoot,
-				mergeMode: policy.mergeMode,
-			});
-			mergeSummary = outcome.summary;
-			changesApplied = outcome.changesApplied;
-			if (outcome.changesApplied !== false) {
-				const nestedPatchSummary = await applyEligibleNestedPatches({
+			const hasChangesToApply =
+				result.branchName !== undefined ||
+				result.hasRootChanges === true ||
+				(result.nestedPatches?.length ?? 0) > 0;
+			const refusal = hasChangesToApply
+				? await request.session.emitBeforeSubagentApply?.({
+						type: "before_subagent_apply",
+						agent: policy.agentName,
+						agentId: id,
+						invocationKind: request.invocationKind,
+						checkout: isolationContext.repoRoot,
+						merge: policy.mergeMode,
+					})
+				: undefined;
+			if (refusal?.block) {
+				changesApplied = false;
+				mergeSummary = renderIsolationSummary({
+					kind: "apply-refused",
+					checkout: isolationContext.repoRoot,
+					reason: refusal.reason || "refused by an extension",
+					branchName: result.branchName,
+					rootPatchPath: result.hasRootChanges === true ? result.patchPath : undefined,
+					nestedPatchPaths: result.nestedPatchPaths ?? [],
+				});
+			} else {
+				const outcome = await mergeIsolatedChanges({
 					result,
 					repoRoot: isolationContext.repoRoot,
 					mergeMode: policy.mergeMode,
-					changesApplied: outcome.changesApplied,
-					mergedBranchForNestedPatches: outcome.mergedBranchForNestedPatches,
-					commitMessage: makeIsolationCommitMessage(request.session)(),
 				});
-				mergeSummary += nestedPatchSummary;
-				requiresRecoveryArtifacts ||=
-					nestedPatchSummary.includes("<system-notification>") && (result.nestedPatches?.length ?? 0) > 0;
+				mergeSummary = outcome.summary;
+				changesApplied = outcome.changesApplied;
+				if (outcome.changesApplied !== false) {
+					const nestedPatchSummary = await applyEligibleNestedPatches({
+						result,
+						repoRoot: isolationContext.repoRoot,
+						mergeMode: policy.mergeMode,
+						changesApplied: outcome.changesApplied,
+						mergedBranchForNestedPatches: outcome.mergedBranchForNestedPatches,
+						commitMessage: makeIsolationCommitMessage(request.session)(),
+					});
+					mergeSummary += nestedPatchSummary;
+					requiresRecoveryArtifacts ||=
+						nestedPatchSummary.includes("<system-notification>") && (result.nestedPatches?.length ?? 0) > 0;
+				}
 			}
 		} else if (policy.isIsolated && isolationContext && result.exitCode === 0 && result.error && !result.aborted) {
 			// The agent finished but the runner could not capture, persist, or

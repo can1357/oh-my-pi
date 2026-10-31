@@ -61,7 +61,8 @@ export type IsolationSummaryKind =
 	| "not-applied"
 	| "branch-merge-failed"
 	| "branch-capture-failed"
-	| "merge-error";
+	| "merge-error"
+	| "apply-refused";
 
 /** Context for `isolation-summary.md`; unused fields are simply absent. */
 export interface IsolationSummaryContext {
@@ -73,6 +74,10 @@ export interface IsolationSummaryContext {
 	nestedPatchPaths?: string[];
 	error?: string;
 	conflict?: string;
+	/** Checkout an extension refused to let the changes apply into. */
+	checkout?: string;
+	/** The extension's refusal reason. */
+	reason?: string;
 }
 
 /**
