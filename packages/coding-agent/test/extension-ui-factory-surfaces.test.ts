@@ -8,6 +8,7 @@
  */
 import { afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import * as path from "node:path";
+import { types } from "node:util";
 import { OmpErrors, type as schemaOf } from "@oh-my-pi/omptype";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
@@ -17,6 +18,7 @@ import {
 	copyHostData,
 	HOST_DATA_DEPTH_LIMIT,
 	handHostModel,
+	handHostSchema,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/boundary-data";
 import {
 	handLocalProtocolOptions,
@@ -487,9 +489,11 @@ describe("data the host hands an extension", () => {
 		});
 	});
 
-	test("an AbortError arrives as a DOMException copy, with its name, message and code", () => {
+	test("an AbortError arrives as a branded DOMException copy, with its name, message and code", () => {
 		const original = new DOMException("stopped", "AbortError");
 		const copy = copyHostData({ error: original }).error;
+		// The platform's accessor checks the brand; a copy built on the prototype alone fails it.
+		const nameGetter = Object.getOwnPropertyDescriptor(DOMException.prototype, "name")?.get;
 
 		expect({
 			distinct: copy !== original,
@@ -497,7 +501,53 @@ describe("data the host hands an extension", () => {
 			name: copy.name,
 			message: copy.message,
 			code: copy.code,
-		}).toEqual({ distinct: true, isDOMException: true, name: "AbortError", message: "stopped", code: 20 });
+			branded: nameGetter?.call(copy),
+		}).toEqual({
+			distinct: true,
+			isDOMException: true,
+			name: "AbortError",
+			message: "stopped",
+			code: 20,
+			branded: "AbortError",
+		});
+	});
+
+	test("an error copy is a built-in error, so copying a copy gives the same error again", () => {
+		class HostFailure extends TypeError {
+			override get name(): string {
+				return "HostFailure";
+			}
+		}
+		const first = copyHostData(
+			Object.assign(new HostFailure("validation failed", { cause: { why: "x" } }), { code: "E1" }),
+		);
+		const second = copyHostData(first);
+		const read = (error: Error) => ({
+			native: types.isNativeError(error),
+			isTypeError: error instanceof TypeError,
+			name: error.name,
+			message: error.message,
+			cause: error.cause,
+			code: Reflect.get(error, "code"),
+			cloned: structuredClone(error).message,
+		});
+		const aggregate = copyHostData(copyHostData(new AggregateError([new RangeError("inner")], "outer")));
+
+		expect(read(second)).toEqual(read(first));
+		expect(read(second)).toEqual({
+			native: true,
+			isTypeError: true,
+			name: "HostFailure",
+			message: "validation failed",
+			cause: { why: "x" },
+			code: "E1",
+			cloned: "validation failed",
+		});
+		expect({
+			isAggregate: aggregate instanceof AggregateError,
+			inner: aggregate.errors[0] instanceof RangeError,
+			innerMessage: (aggregate.errors[0] as Error).message,
+		}).toEqual({ isAggregate: true, inner: true, innerMessage: "inner" });
 	});
 
 	test("a model's open fields keep their own accessors, enumerable or not, and a throwing one throws", async () => {
@@ -536,36 +586,146 @@ describe("data the host hands an extension", () => {
 		});
 	});
 
-	test("a getter that answers a fresh object on every read is copied to a fixed depth, and the copy returns", () => {
+	test("data nested past the bound is refused with a depth error, never handed over shortened", () => {
+		interface Link {
+			next?: Link;
+			leaf?: string;
+		}
+		const chain = (links: number): Link => {
+			let node: Link = { leaf: "needed-leaf" };
+			for (let index = 0; index < links; index++) node = { next: node };
+			return node;
+		};
+		const leafOf = (value: Link | undefined): string | undefined => {
+			let at = value;
+			while (at?.next !== undefined) at = at.next;
+			return at?.leaf;
+		};
+		const refusal = (copy: () => unknown): string => {
+			try {
+				copy();
+				return "copied";
+			} catch (error) {
+				return error instanceof RangeError ? error.message : `threw ${String(error)}`;
+			}
+		};
 		class Node {
-			constructor(readonly depth: number) {}
 			get child(): Node {
-				return new Node(this.depth + 1);
+				return new Node();
 			}
 		}
-		const make = (): Record<string, unknown> => ({
+		const freshEachRead = (): Record<string, unknown> => ({
 			get next() {
-				return make();
+				return freshEachRead();
 			},
 		});
-		const depthOf = (value: unknown, key: string): number => {
-			let depth = 0;
-			for (let at = value; typeof at === "object" && at !== null; at = Reflect.get(at, key)) depth++;
-			return depth;
-		};
-		const plain = copyHostData({ root: make() });
-		const firstPlain = depthOf(plain, "next");
-		const secondPlain = depthOf(copyHostData({ root: make() }), "next");
-		// Only the field under test; `handHostModel` copies the fields a model has.
-		const model = { id: "m", kindConfig: new Node(0) } as unknown as Model;
-		const handed = handHostModel(model);
-		const modelDepth = depthOf(handed.kindConfig, "child");
+		const expected = `Host data handed to an extension nests deeper than ${HOST_DATA_DEPTH_LIMIT} levels; it is not handed over in part`;
 
-		expect({ samePlain: firstPlain === secondPlain, plainBounded: firstPlain <= HOST_DATA_DEPTH_LIMIT + 1 }).toEqual({
-			samePlain: true,
-			plainBounded: true,
+		// Within the bound the copy is whole; past it nothing is handed over.
+		expect(leafOf(copyHostData(chain(HOST_DATA_DEPTH_LIMIT - 1)))).toBe("needed-leaf");
+		expect({
+			deepJson: refusal(() => copyHostData(JSON.parse(JSON.stringify(chain(600))))),
+			freshEachRead: refusal(() => copyHostData({ root: freshEachRead() })),
+			modelOpenField: refusal(() =>
+				handHostModel({ id: "m", requestMetadata: { tree: chain(600) } } as unknown as Model),
+			),
+			modelGetter: refusal(() => handHostModel({ id: "m", kindConfig: new Node() } as unknown as Model)),
+			schema: refusal(() => (handHostSchema(schemaOf("unknown")) as (data: unknown) => unknown)(chain(600))),
+		}).toEqual({
+			deepJson: expected,
+			freshEachRead: expected,
+			modelOpenField: expected,
+			modelGetter: expected,
+			schema: expected,
 		});
-		expect(modelDepth > 0 && modelDepth <= HOST_DATA_DEPTH_LIMIT + 1).toBe(true);
+	});
+
+	test("a host schema's JSON Schema fallback is handed copies, and an exception it throws is a copy", () => {
+		const defaults = { value: "original" };
+		const inner = schemaOf({ config: schemaOf({ value: "string" }).default(() => defaults) }).pipe(data => data);
+		const schema = schemaOf({ nested: inner });
+		const handed = handHostSchema(schema) as typeof schema;
+		let kept: unknown;
+		let called = 0;
+		handed.toJsonSchema({
+			fallback(context) {
+				called++;
+				kept = Reflect.get(Reflect.get(Reflect.get(context.base, "properties") ?? {}, "config") ?? {}, "default");
+				return context.base;
+			},
+		});
+		if (typeof kept === "object" && kept !== null) Reflect.set(kept, "value", "changed by the extension");
+
+		let hostState = "initial";
+		const failure = Object.assign(new Error("host schema failed"), {
+			retry: () => {
+				hostState = "changed by the extension";
+			},
+		});
+		const throwing = handHostSchema(
+			Object.assign(
+				() => {
+					throw failure;
+				},
+				{
+					assert: () => {
+						throw failure;
+					},
+					toJsonSchema: () => {
+						throw failure;
+					},
+				},
+			),
+		) as unknown as typeof schema;
+		const thrown = [() => throwing({}), () => throwing.assert({}), () => throwing.toJsonSchema()].map(call => {
+			try {
+				call();
+				return undefined;
+			} catch (error) {
+				return error;
+			}
+		});
+		for (const error of thrown) {
+			const retry: unknown = error instanceof Error ? Reflect.get(error, "retry") : undefined;
+			if (typeof retry === "function") retry();
+		}
+
+		expect({ called: called > 0, validated: schema.assert({ nested: {} }) }).toEqual({
+			called: true,
+			validated: { nested: { config: { value: "original" } } },
+		});
+		expect(
+			thrown.map(error => ({
+				isError: error instanceof Error,
+				isHostObject: error === failure,
+				message: error instanceof Error ? error.message : undefined,
+			})),
+		).toEqual(Array(3).fill({ isError: true, isHostObject: false, message: "host schema failed" }));
+		expect(hostState).toBe("initial");
+	});
+
+	test("a host schema's failure reads as the host's does, alternatives included", () => {
+		const schema = schemaOf({ a: "string" }).or({ b: "number" });
+		const handed = handHostSchema(schema) as typeof schema;
+		const messageOf = (call: () => unknown): string => {
+			try {
+				call();
+				return "accepted";
+			} catch (error) {
+				return error instanceof Error ? error.message : String(error);
+			}
+		};
+		const input = { a: 1, b: "x" };
+		const host = schema(input);
+		const copy = handed(input);
+
+		expect({
+			summary: copy instanceof OmpErrors ? copy.summary : "not a failure",
+			assert: messageOf(() => handed.assert(input)),
+		}).toEqual({
+			summary: host instanceof OmpErrors ? host.summary : "host accepted",
+			assert: messageOf(() => schema.assert(input)),
+		});
 	});
 
 	test("a host tool's details reach a hook without the callables they held", async () => {
@@ -986,6 +1146,96 @@ describe("what a session focuses or shows", () => {
 			"new",
 		]);
 		expect(h.seen).toEqual([{ name: "new", key: "key" }]);
+	});
+});
+
+describe("what a session mounted, when its runtime goes on to serve the next session", () => {
+	test("a widget its controller mounted stays inert, and sends nothing, at a loopback endpoint", async () => {
+		const h = await interactiveSession();
+		const requests: string[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(request) {
+				requests.push(request.headers.get("authorization") ?? "");
+				return new Response("ok");
+			},
+		});
+		cleanups.push(() => server.stop(true));
+		const sent: Promise<unknown>[] = [];
+		let draws = 0;
+		h.ui.setWidget("prior", () => ({
+			render: () => {
+				draws++;
+				sent.push(fetch(`http://127.0.0.1:${server.port}/draw`, { headers: { authorization: "Bearer canary" } }));
+				return ["prior widget"];
+			},
+			invalidate() {},
+		}));
+		h.mode.hookWidgetContainerAbove.render(80);
+		await Promise.all(sent);
+		const whileLive = { draws, requests: requests.length };
+		await h.session.dispose();
+		const next = new AgentSession({
+			agent: new Agent({
+				initialState: { model: h.session.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			}),
+			sessionManager: SessionManager.inMemory(h.dir.path()),
+			settings: Settings.isolated(),
+			modelRegistry: h.session.modelRegistry,
+			extensionRunner: h.runner,
+		});
+		cleanups.push(() => next.dispose());
+		const lines = h.mode.hookWidgetContainerAbove.render(80);
+		await Promise.all(sent);
+
+		expect({
+			whileLive,
+			afterReuse: { draws: draws - whileLive.draws, requests: requests.length - whileLive.requests },
+		}).toEqual({
+			whileLive: { draws: 1, requests: 1 },
+			afterReuse: { draws: 0, requests: 0 },
+		});
+		expect(lines.some(line => line.includes("prior widget"))).toBe(false);
+	});
+
+	test("an overlay shown before the first session began ends with that session, not with the runtime", () => {
+		const tui = new TUI(new VirtualTerminal(80, 24));
+		const seen: string[] = [];
+		const host: Component = {
+			render: () => ["host"],
+			invalidate() {},
+			handleInput: key => void seen.push(`host:${key}`),
+		};
+		tui.setFocus(host);
+		const owner = new ExtensionRuntime();
+		const runner = new ExtensionRunner([], owner, process.cwd(), SessionManager.inMemory(), {} as ModelRegistry);
+		let draws = 0;
+		handTUI(tui, owner, runner.rendererScope).showOverlay({
+			render: () => {
+				draws++;
+				return ["before start"];
+			},
+			invalidate() {},
+			handleInput: key => void seen.push(`before-start:${key}`),
+		});
+		const releaseFirst = owner.beginSession();
+		releaseFirst();
+		// The next session begins on the same runtime before any key or frame has swept the first.
+		const releaseNext = owner.beginSession();
+		cleanups.push(() => {
+			releaseNext();
+			tui.stop();
+		});
+		draws = 0;
+		tui.renderNow();
+		tui.injectDebugInput("next-session");
+
+		expect({ overlays: tui.overlayStack.length, draws, seen }).toEqual({
+			overlays: 0,
+			draws: 0,
+			seen: ["host:next-session"],
+		});
 	});
 });
 

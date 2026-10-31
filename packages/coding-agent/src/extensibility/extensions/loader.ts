@@ -214,12 +214,18 @@ function streamCompletion(produced: unknown): Promise<unknown> {
 /** One session's hold on an extension surface, counted so that concurrent sessions sharing a
  *  runtime release it together. Retirement belongs here rather than on the runtime because a
  *  runtime outlives the session that used it: the next session gets a new lease, and the
- *  callbacks an extension registered once are live again for it. */
+ *  callbacks an extension registered once are live again for it.
+ *
+ *  A lease exists before its session starts: it is the session the runtime will serve next, live
+ *  until that session's last holder releases it. So whatever is pinned to it before the session
+ *  begins ends with that session, and no lease is ever live again once it has retired. */
 class ExtensionCallbackLease implements ExtensionSessionGeneration {
-	#holders = 1;
+	#holders = 0;
+	#started = false;
 
 	join(): void {
 		this.#holders++;
+		this.#started = true;
 	}
 
 	release(): void {
@@ -227,7 +233,7 @@ class ExtensionCallbackLease implements ExtensionSessionGeneration {
 	}
 
 	get isRetired(): boolean {
-		return this.#holders === 0;
+		return this.#started && this.#holders === 0;
 	}
 }
 
@@ -264,8 +270,8 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	readonly #pendingCallbacks = new Set<Promise<unknown>>();
 	#callbacksChanged: PromiseWithResolvers<void> | undefined;
 	/**
-	 * The session that currently owns this runtime's callbacks, or `undefined` while no session
-	 * has claimed them.
+	 * The session this runtime's callbacks belong to: the one holding them, or the one it will
+	 * serve next while none has claimed them yet.
 	 *
 	 * Retirement is per SESSION, not per runtime: a host may build one runner and runtime and use
 	 * it for several `AgentSession`s in turn — `agent-session-concurrent.test.ts` does — so
@@ -274,7 +280,7 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	 * fresh one once the last holder has gone. Sessions sharing a runtime at the same time share
 	 * one lease, so one sibling's disposal cannot retire callbacks another is still invoking.
 	 */
-	#lease: ExtensionCallbackLease | undefined;
+	#lease = new ExtensionCallbackLease();
 
 	/** Claims this runtime's callbacks for a session that is starting, and returns the only way to
 	 *  give that claim back. A lease retired by an earlier session is replaced; a live one gains a
@@ -292,12 +298,11 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	 *  still has to be waited for. */
 	beginSession(): () => void {
 		let lease = this.#lease;
-		if (!lease || lease.isRetired) {
+		if (lease.isRetired) {
 			lease = new ExtensionCallbackLease();
 			this.#lease = lease;
-		} else {
-			lease.join();
 		}
+		lease.join();
 		const claimed = lease;
 		let released = false;
 		return () => {
@@ -308,16 +313,17 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	}
 
 	get isRetired(): boolean {
-		return this.#lease?.isRetired === true;
+		return this.#lease.isRetired;
 	}
 
 	/**
-	 * The session this runtime serves now, as an object of its own: retired once that session's
-	 * last holder has released it, and never live again — the next session gets another. What one
-	 * session leaves behind is pinned to it (`ExtensionRunner.rendererScope`'s `pin`), so reusing
-	 * the runtime cannot revive it. `undefined` before any session has claimed the runtime.
+	 * The session this runtime serves now — or, before any has claimed it, the one it will serve
+	 * first — as an object of its own: retired once that session's last holder has released it,
+	 * and never live again; the next session gets another. What one session leaves behind is
+	 * pinned to it (`ExtensionRunner.rendererScope`'s `pin`), so reusing the runtime cannot revive
+	 * it, and something pinned before the first session began ends with that session.
 	 */
-	get sessionGeneration(): ExtensionSessionGeneration | undefined {
+	get sessionGeneration(): ExtensionSessionGeneration {
 		return this.#lease;
 	}
 

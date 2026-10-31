@@ -397,6 +397,11 @@ export class OmpErrors implements Iterable<OmpError> {
 		this.#separator = " or ";
 		return this;
 	}
+	/** @internal Whether {@link asAlternatives} applies: a copy of these failures reads the same only
+	 *  when it is applied to the copy too. */
+	get rendersAsAlternatives(): boolean {
+		return this.#separator === " or ";
+	}
 	get summary(): string {
 		const entries = [...this];
 		if (

@@ -279,16 +279,25 @@ What `ctx` and `pi` read back — `getSystemPrompt()`, `getContextUsage()`, `get
 `getServiceTiers()` — and the events your hooks receive are copies of the host's data. A date, a
 map, a set, binary data, a regular expression and a URL arrive as themselves, copied; an object of
 any other class arrives as a plain object of its own enumerable fields, without its methods; an
-error arrives on the language's own error class it extends (`TypeError`, `Error`), with its own
-properties and its `name` and `message`, not on the host's error class. A function is behavior,
-not data, wherever it sits — a field of a record or of an instance, an array element, a map's key
-or value, a set's member, an error's property — and is dropped, as the session file drops it (an
-array keeps the slot, `undefined`). The copy stops 512 levels deep: anything nested deeper is left
-out the same way, so a getter that answers a fresh object on every read still copies to a finite
-value. The callables a surface declares are handed on purpose by that surface, not found in data:
-a tool's callable schema in `getAllTools()` (`ToolInfo.parameters`) is a frozen schema of your
-own — calling it, its `assert` and its `toJsonSchema` reach the host's, which you never hold — and
-a thinking renderer's `requestRender` does nothing once your session has gone.
+error arrives as a new error of the language's own class it extends (`TypeError`, `Error`,
+`AggregateError`, and `DOMException` for an `AbortError`), with its own properties and its
+`name`, `message` and `code`, never as an instance of the host's error class — so copying it again
+gives the same error. A function is behavior, not data, wherever it sits — a field of a record
+or of an instance, an array element, a map's key or value, a set's member, an error's property —
+and is dropped, as the session file drops it (an array keeps the slot, `undefined`). Data nested
+more than 512 levels deep is not handed over at all: the copy throws a `RangeError` saying so,
+rather than handing you a value that looks complete and is not; a hook whose event cannot be
+copied is reported as failed. One value is handed as itself: an `AbortSignal` you receive is a
+signal of your own, but its `reason` is the caller's own object, so the cancellation surface
+below can tell you why.
+
+The callables a surface declares are handed on purpose by that surface, not found in data. A
+tool's callable schema in `getAllTools()` (`ToolInfo.parameters`) is a frozen schema of your own:
+calling it, its `assert` and its `toJsonSchema` reach the host's, which you never hold, and
+everything crossing is a copy — the value it validates, what it answers, a failure (which reads
+exactly as the host's does, alternatives included), an exception it throws, and what a callback
+you pass to `toJsonSchema` (a `fallback`) is handed and answers. A thinking renderer's
+`requestRender` does nothing once your session has gone.
 
 What a `ctx.ui` factory is handed besides its theme is the session's own, not the host's:
 
@@ -303,8 +312,10 @@ What a `ctx.ui` factory is handed besides its theme is the session's own, not th
   showed it. The TUI never focuses a component of a session that has gone, and focus goes back to
   what the session last took it from — or to what took that one's place, when it was an
   extension's too. `setFocus(null)` gives focus back the same way. What a session leaves behind
-  belongs to it, not to the runtime: a host that starts the next session on the same runtime does
-  not bring it back. `start` ends only a suspension your session started. Members that steer the
+  belongs to it, not to the runtime — a factory it handed `ctx.ui`, a widget, editor or dialog
+  the host mounted from one, a component it focused or showed, a listener it added — so a host that
+  starts the next session on the same runtime does not bring any of it back, even before the
+  next frame. `start` ends only a suspension your session started. Members that steer the
   host's renderer, its input or its other components — `children`, `addChild`,
   `injectDebugInput`, `getFocused`, `hideOverlay`, paint and frame listeners, and the terminal's
   `write` — throw, naming the member.
@@ -331,7 +342,7 @@ receiver is handed changes nothing that executes** — to change an input, retur
 The `signal` a tool's `execute` receives, and the one a `session_stop`,
 `session_before_compact` or `session_before_tree` hook receives, is your session's own: already
 aborted if the caller's was, aborting with the caller's reason in the same turn, and no longer
-following the caller once the call ends.
+following the caller once the call ends. Its `reason` is the caller's own object, not a copy.
 
 Your `streamSimple` and `stream` receive copies of the model, the context and the options.
 Tool parameters arrive as the JSON Schema that goes on the wire, not as the host's live schema

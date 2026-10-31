@@ -5,7 +5,7 @@
 ### Added
 
 - Exported the `InputListener` and `InputListenerResult` types `TUI.addInputListener` takes ([#17402](https://github.com/can1357/oh-my-pi/pull/17402) by [@sjawhar](https://github.com/sjawhar))
-- Added `whenInputScopeGone`, `hasInputScope` and `pinInputScope` to `tools/renderer-scope`, and an optional `pin()` to `ToolRendererScope`: a host registers what it owes once a renderer scope has gone (an extension's overlays), settled by the TUI's retirement sweep before any component is retired, drawn or handed a key; bindings and obligations belong to the session the scope serves when they are made, so a scope whose owner already serves the next session does not revive them ([#17402](https://github.com/can1357/oh-my-pi/pull/17402) by [@sjawhar](https://github.com/sjawhar))
+- Added `whenInputScopeGone`, `hasInputScope` and `pinInputScope` to `tools/renderer-scope`, and an optional `pin()` to `ToolRendererScope`: a host registers what it owes once a renderer scope has gone (an extension's overlays), settled by the TUI's retirement sweep before any component is retired, drawn or handed a key; bindings, obligations, a component `SafeToolRendererComponent` mounts and a provider `scopedAutocompleteProvider` wraps belong to the session the scope serves when they are made, so a scope whose owner already serves the next session does not revive them ([#17402](https://github.com/can1357/oh-my-pi/pull/17402) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 

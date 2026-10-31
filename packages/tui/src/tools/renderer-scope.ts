@@ -112,7 +112,9 @@ function releaseRenderCachesOf(component: Component): void {
  * and the failure logged once. With a `scope` — a renderer that is not the host's own — every read
  * of the component and every call into it runs inside that scope, the lines it renders are copied
  * there, and once the scope has gone the component is never called again: `render` draws the
- * fallback and the other methods do nothing. Without one, the component is called directly.
+ * fallback and the other methods do nothing. The component belongs to the session the scope
+ * serves when it is mounted ({@link pinInputScope}): a scope whose owner goes on to serve the next
+ * session does not bring it back. Without one, the component is called directly.
  *
  * The component is held, not wrapped: its methods are called on it as their receiver, so a
  * component keeping its state in `#private` fields works as it does unmounted. Its `describe` is
@@ -134,12 +136,13 @@ export class SafeToolRendererComponent implements Component {
 		stage: ToolRendererStage,
 		component: Component,
 		fallback: () => Component | undefined,
-		scope?: ToolRendererScope,
+		rendererScope?: ToolRendererScope,
 	) {
 		this.#source = source;
 		this.#stage = stage;
 		this.#component = component;
 		this.#fallback = fallback;
+		const scope = rendererScope === undefined ? undefined : pinInputScope(rendererScope);
 		this.#scope = scope;
 		if (scope === undefined) {
 			this.wantsKeyRelease = component.wantsKeyRelease;
@@ -475,14 +478,17 @@ function scopedSignal(
  * scope when the editor calls it. Which optional methods the provider has is read once, inside the
  * scope. Once the scope has gone the provider is never called again: every call goes to `fallback`
  * — the provider the extension wrapped — and `onRetired` lets the host drop it from its chain, so
- * the editor completes as it would without the extension.
+ * the editor completes as it would without the extension. The provider belongs to the session the
+ * scope serves when it is wrapped ({@link pinInputScope}), not to whichever the scope's owner
+ * serves later.
  */
 export function scopedAutocompleteProvider(
 	provider: AutocompleteProvider,
 	fallback: AutocompleteProvider,
-	scope: ToolRendererScope,
+	rendererScope: ToolRendererScope,
 	onRetired: () => void,
 ): AutocompleteProvider {
+	const scope = pinInputScope(rendererScope);
 	const has = scope.run(() => ({
 		getInlineHint: typeof provider.getInlineHint === "function",
 		trySyncSlashCompletion: typeof provider.trySyncSlashCompletion === "function",

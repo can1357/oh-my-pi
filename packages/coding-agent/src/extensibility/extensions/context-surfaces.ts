@@ -1146,20 +1146,23 @@ export function handUIContext(
 						onExternalEditor: owned(owner, copy.onExternalEditor),
 					};
 				});
-	/** The extension's `factory`, as the host calls it: in the session's renderer scope, nothing once
-	 *  the scope has gone, and carrying the scope for the host that mounts or drives what it returns.
-	 *  `hand` turns what the host passes into what the factory is handed — the TUI, the theme, the
-	 *  keybindings, the provider it wraps, each as the session's own — before the factory runs. */
+	/** The extension's `factory`, as the host calls it: in the renderer scope of the session that
+	 *  handed it over (`pinInputScope`), nothing once that session has gone — even when the runtime
+	 *  already serves the next one, since a factory one session registered is that session's — and
+	 *  carrying that scope for the host that mounts or drives what it returns. `hand` turns what the
+	 *  host passes into what the factory is handed — the TUI, the theme, the keybindings, the
+	 *  provider it wraps, each as the session's own — before the factory runs. */
 	const scoped = <F extends (...args: never[]) => unknown>(
 		factory: F,
 		hand: (...args: Parameters<F>) => Parameters<F>,
 	): F => {
+		const session = pinInputScope(scope);
 		const run = (...args: Parameters<F>): unknown => {
-			if (!scope.live) return undefined;
+			if (!session.live) return undefined;
 			const handed = hand(...args);
-			return scope.run(() => Reflect.apply(factory, undefined, handed));
+			return session.run(() => Reflect.apply(factory, undefined, handed));
 		};
-		return Object.assign(run, { rendererScope: scope }) as unknown as F;
+		return Object.assign(run, { rendererScope: session }) as unknown as F;
 	};
 	const optionalScoped = <F extends (...args: never[]) => unknown>(
 		factory: F | undefined,

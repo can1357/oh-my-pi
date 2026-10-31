@@ -1767,7 +1767,9 @@ export class ExtensionRunner {
 		const runScoped = <T>(call: () => T): T | undefined => this.runScoped(call);
 		const pin = (): ToolRendererScope => {
 			const generation = this.#scopeOwner?.sessionGeneration;
-			// A runtime that has not been claimed yet, or never is, has no session to pin to.
+			// `ExtensionRuntime` always answers one, before its first session too. A runner whose
+			// callbacks run as the host's own, or an embedder's runtime with no session generations,
+			// has no session lifetime to pin to: its scope is the only one it has.
 			if (generation === undefined) return scope;
 			let pinned = this.#pinnedScopes.get(generation);
 			if (!pinned) {
