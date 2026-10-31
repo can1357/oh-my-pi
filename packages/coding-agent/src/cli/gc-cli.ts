@@ -169,6 +169,12 @@ export interface ArchiveGcResult {
 	 * the session leaves it in the archive, names it and does not finish.
 	 */
 	stagingResidue?: string[];
+	/**
+	 * Staging records whose directory is gone, kept in the ledger: a later
+	 * run removes nothing it did not make. Such a record narrows nothing a
+	 * restore does, so it can be moved out of the ledger by hand.
+	 */
+	stagingRecordsWithoutDirectory?: string[];
 	/** Links inside an artifact tree whose target was already gone, so the archive could not hold their bytes. */
 	brokenLinks: number;
 	errors: string[];
@@ -2315,6 +2321,7 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 	// {@link surveyRecordedStagingGrounds}. Preview and applying see the same.
 	const grounds = await surveyRecordedStagingGrounds(options.agentDir);
 	if (grounds.residue.length > 0) result.stagingResidue = grounds.residue;
+	if (grounds.withoutDirectory.length > 0) result.stagingRecordsWithoutDirectory = grounds.withoutDirectory;
 	result.errors.push(...grounds.notes);
 
 	// An archived session keeps every row that describes it. Its prompt-history,
@@ -2641,6 +2648,12 @@ export function renderText(result: GcResult): string {
 		if (result.archive.skippedActive > 0) lines.push(`sessions skipped active: ${result.archive.skippedActive}`);
 		for (const residue of result.archive.stagingResidue ?? []) {
 			lines.push(`staging recorded as left by a killed gc run, kept where it is: ${residue}`);
+		}
+		for (const record of result.archive.stagingRecordsWithoutDirectory ?? []) {
+			lines.push(
+				`staging record whose directory is gone, kept: ${record}; it narrows nothing, and can be moved out of ` +
+					`${path.dirname(record)} by hand`,
+			);
 		}
 		if (result.archive.brokenLinks > 0) {
 			lines.push(`links inside artifact trees whose target was gone: ${result.archive.brokenLinks}`);

@@ -30,8 +30,9 @@ import { codeOf, statIfPresent, withGcLock } from "./gc-lock";
 import {
 	absentFile,
 	createExclusive,
+	type HeldFile,
 	makeHeldDirectory,
-	type FileIdentity,
+	newNonce,
 	NotARegularFile,
 	notRegularAsAbsent,
 	openRegularFile,
@@ -1508,11 +1509,13 @@ export interface StagingGround {
 	/** This directory's record in {@link stagingLedgerDir}. */
 	record: string;
 	/**
-	 * The record's identity, from the descriptor that wrote it: what this run
-	 * removes it by, since its name is no proof the file there is still the
-	 * one this run wrote.
+	 * The record, held: the descriptor that wrote it, open until
+	 * {@link removeStagingGround} has removed it or given it up, and the
+	 * bytes it wrote, a random value among them. What this run removes the
+	 * record by — see {@link removeOwnFile} — since neither its name nor its
+	 * inode number is proof the file there is still the one this run wrote.
 	 */
-	recordIdentity: FileIdentity;
+	recordHeld: HeldFile;
 }
 
 /**
@@ -1552,13 +1555,18 @@ async function assertPrivateLedger(ledger: string): Promise<void> {
  * about to make; then the directory is made with `mkdir` without
  * `recursive`, so `EEXIST` is the kernel saying the name is taken and
  * another is minted, up to {@link STAGING_MINT_ATTEMPTS} times; then the
- * file is created and the record replaced, by `rename`, with the
- * directory's and the file's identities. So, while the machine stays up,
- * there is no moment at which this run has made something the ledger does
- * not name, and a later restore leaves whatever a killed run left out of
- * the live tree. Nothing here is synced, so after a power loss the
- * directory can outlive its record; it is then indistinguishable from an
- * artifact and is treated as one.
+ * file is created, and a second record, with the directory's and the
+ * file's identities, is linked in at a fresh name before the first is
+ * removed. So, while the machine stays up, there is no moment at which this
+ * run has made something the ledger does not name, and a later restore
+ * leaves whatever a killed run left out of the live tree; a run killed
+ * between the two leaves both records, naming the same directory. Nothing
+ * here writes over a name: every record is created afresh or linked in,
+ * where a name already taken fails with `EEXIST`, and only the files this
+ * attempt wrote are removed — see {@link removeOwnFile}. A `rename` onto the
+ * record's name would replace whatever stood there by then. Nothing here is
+ * synced, so after a power loss the directory can outlive its record; it is
+ * then indistinguishable from an artifact and is treated as one.
  *
  * Mode `0700`, so nothing without this user's rights puts a file inside.
  * What the directory is not: a boundary against a process that can write
@@ -1576,13 +1584,15 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 		const file = path.join(dir, path.basename(target));
 		const record = path.join(ledger, `${Snowflake.next()}.json`);
 		const part = `${record}${STAGING_RECORD_PART}`;
-		const intent: StagingRecord = { dir, file };
+		// A random value in every version this run writes: a file put at the
+		// record's name by anyone who did not read this one cannot hold it.
+		const intent: StagingRecord & { nonce: string } = { dir, file, nonce: newNonce() };
 		// Written whole under the part name, then linked into place: a run
 		// killed during the write leaves a part, which no run reads as a
 		// record, never a record cut short — which no run could tell from a
 		// damaged one. Created afresh, and `link` refuses a name already
 		// taken: either way EEXIST, and whatever holds the name is kept.
-		let written: FileIdentity[];
+		let written: HeldFile[];
 		try {
 			written = [await writeExclusive(part, JSON.stringify(intent), 0o600)];
 		} catch (error) {
@@ -1591,34 +1601,47 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 				cause: error,
 			});
 		}
+		// Every descriptor this attempt holds, closed once what it wrote is
+		// removed or handed on — never before, so no other file can take
+		// those inode numbers while this run still decides by them.
+		const release = async (keep?: HeldFile): Promise<void> => {
+			for (const held of written) if (held !== keep) await held.handle.close().catch(() => undefined);
+		};
 		// What this attempt wrote to the ledger, and only that, by the
-		// identities it captured: at either name, anything else is kept and
-		// named — whatever it is called, it is not this run's to remove.
-		const unrecord = async (): Promise<string | undefined> => {
+		// identities it captured: at any of its names, anything else is kept
+		// and named — whatever it is called, it is not this run's to remove.
+		const names = [part, record];
+		const unrecord = async (): Promise<string[]> => {
 			const notes: string[] = [];
-			for (const at of [part, record]) {
+			for (const at of names) {
 				const note = await removeOwnFile(at, written, "a record this run wrote");
 				if (note) notes.push(note);
 			}
-			return notes.length > 0 ? notes.join("; ") : undefined;
+			return notes;
 		};
-		const failed = (error: unknown, note: string): Error =>
-			new Error(`${error instanceof Error ? error.message : String(error)}; ${note}`, { cause: error });
+		// The failure, with what was left behind; what the failure already
+		// says is not said twice.
+		const failed = (error: unknown, notes: string[]): unknown => {
+			const message = error instanceof Error ? error.message : String(error);
+			const more = notes.filter(note => !message.includes(note));
+			return more.length > 0 ? new Error(`${message}; ${more.join("; ")}`, { cause: error }) : error;
+		};
 		try {
 			await fs.link(part, record);
-			// The part name goes, for the replacement below; the record keeps
-			// the file under its own name.
-			const left = await removeOwnFile(part, written, "the record this run wrote");
+			// The part name goes; the record keeps the file under its own name.
+			const left = await removeOwnFile(part, written, "a record this run wrote");
 			if (left) throw new Error(left);
 		} catch (error) {
-			const note = await unrecord();
-			throw note ? failed(error, note) : error;
+			const notes = await unrecord();
+			await release();
+			throw failed(error, notes);
 		}
 		try {
 			await fs.mkdir(dir, { mode: 0o700 });
 		} catch (error) {
-			const note = await unrecord();
-			if (note) throw failed(error, note);
+			const notes = await unrecord();
+			await release();
+			if (notes.length > 0) throw failed(error, notes);
 			if (codeOf(error) === "EEXIST") continue;
 			throw error;
 		}
@@ -1633,25 +1656,41 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 				dirIdentity: { dev: minted.dev, ino: minted.ino },
 				identity: { dev: created.dev, ino: created.ino },
 			};
-			// Created afresh: a FIFO, a link or anybody's file already at the
-			// name is not written through, and not this run's to remove — it
-			// fails this attempt and is kept.
-			written.push(await writeExclusive(part, JSON.stringify(recorded), 0o600));
-			await fs.rename(part, record);
-			return { dir, file, handle, created, record, recordIdentity: written[1] };
+			// The same way as the first: written whole under a part name of
+			// its own and linked in at a fresh record name, so neither is
+			// written over; then the first goes, only while it is still the
+			// file this run wrote. The directory is named by one record or
+			// both throughout.
+			const complete = path.join(ledger, `${Snowflake.next()}.json`);
+			const completePart = `${complete}${STAGING_RECORD_PART}`;
+			names.push(completePart, complete);
+			const recordHeld = await writeExclusive(completePart, JSON.stringify(recorded), 0o600);
+			written.push(recordHeld);
+			await fs.link(completePart, complete);
+			for (const at of [completePart, record]) {
+				const left = await removeOwnFile(at, written, "a record this run wrote");
+				if (left) throw new Error(left);
+			}
+			// Only the second record's descriptor goes on with the ground.
+			await release(recordHeld);
+			return { dir, file, handle, created, record: complete, recordHeld };
 		} catch (error) {
 			// What this attempt made goes again before the failure is
 			// reported, and the record goes with it only once nothing it
 			// names is left: a directory nothing records is a directory a
-			// restore would carry home as somebody's artifact.
-			await handle?.close().catch(() => undefined);
-			// Only what this attempt made, known from its own descriptor: a
-			// file it did not get to create is not its to remove.
+			// restore would carry home as somebody's artifact. The staged
+			// file is removed while its descriptor is still held, and only
+			// then closed: a file it did not get to create is not its to
+			// remove.
 			const note = await clearStagingGround(dir, file, created, "this run");
-			if (note) throw failed(error, note);
-			const ledgerNote = await unrecord();
-			if (ledgerNote) throw failed(error, ledgerNote);
-			throw error;
+			await handle?.close().catch(() => undefined);
+			if (note) {
+				await release();
+				throw failed(error, [note]);
+			}
+			const ledgerNotes = await unrecord();
+			await release();
+			throw failed(error, ledgerNotes);
 		}
 	}
 	throw new Error(
@@ -1727,16 +1766,68 @@ async function clearStagingGround(
  * for the command to print.
  */
 export async function removeStagingGround(ground: StagingGround): Promise<string | undefined> {
-	const note = await clearStagingGround(ground.dir, ground.file, ground.created, "this run");
-	if (note !== undefined) return note;
-	return await removeOwnFile(ground.record, [ground.recordIdentity], "the record this run wrote");
+	try {
+		const note = await clearStagingGround(ground.dir, ground.file, ground.created, "this run");
+		if (note !== undefined) return note;
+		return await removeOwnFile(ground.record, [ground.recordHeld], "the record this run wrote");
+	} finally {
+		await ground.recordHeld.handle.close().catch(() => undefined);
+	}
 }
 
 /** What {@link surveyRecordedStagingGrounds} found. */
 export interface StagingSurvey {
 	/** Recorded staging directories still standing, left by runs that are gone. */
 	residue: string[];
+	/**
+	 * Records whose directory is gone: kept, since no run removes what it did
+	 * not make, and harmless, since they narrow nothing a restore does —
+	 * but they pile up, one per staging directory that left its tree, so
+	 * they are named, each to be moved out of the ledger by hand.
+	 */
+	withoutDirectory: string[];
 	notes: string[];
+}
+
+/**
+ * A ledger file that is not JSON at all: cut short. The first version of a
+ * record goes to a part name and is linked whole into place, so no run of
+ * this version leaves one; an earlier one killed while it wrote a record's
+ * first version did, before it made any staging directory.
+ */
+class CutShortRecord extends Error {}
+
+/** A ledger file that holds JSON, but not what a gc run writes as a record. */
+class NotAStagingRecord extends Error {
+	constructor() {
+		super("not a staging record");
+	}
+}
+
+/**
+ * What to say of a ledger file that could not be taken for a record, the
+ * same in every command that meets it. One cut short or one that is not
+ * what a run writes gets the way out: move it out of the ledger; for the
+ * second, which may name something, with what that costs if it names a
+ * staging directory.
+ */
+function unreadableRecordNote(record: string, ledger: string, error: unknown): string {
+	if (error instanceof CutShortRecord) {
+		return (
+			`${record} does not hold a staging record (${error.message}). A gc run of an earlier version killed while ` +
+			`it wrote a record leaves one cut short like this, and made no staging directory before it; look at it, ` +
+			`move it out of ${ledger}, and run the same command again`
+		);
+	}
+	if (error instanceof NotAStagingRecord) {
+		return (
+			`${record} does not hold a staging record: it is JSON, but not what a gc run writes. Look at it, move it ` +
+			`out of ${ledger}, and run the same command again. If it names a staging directory that is still in a ` +
+			`session tree, move that directory out of the tree by hand first: with no record in the ledger, a restore ` +
+			`takes it for an artifact and carries it home, partial file and all`
+		);
+	}
+	return `${record} could not be read: ${errorText(error)}`;
 }
 
 function parseIdentity(value: unknown): { dev: number; ino: number } | undefined {
@@ -1747,13 +1838,18 @@ function parseIdentity(value: unknown): { dev: number; ino: number } | undefined
 		!("dev" in value && Number.isSafeInteger(value.dev) && (value.dev as number) >= 0) ||
 		!("ino" in value && Number.isSafeInteger(value.ino) && (value.ino as number) >= 0)
 	) {
-		throw new Error("not a staging record");
+		throw new NotAStagingRecord();
 	}
 	return { dev: value.dev as number, ino: value.ino as number };
 }
 
 function parseStagingRecord(text: string): StagingRecord {
-	const entry: unknown = JSON.parse(text);
+	let entry: unknown;
+	try {
+		entry = JSON.parse(text);
+	} catch (error) {
+		throw new CutShortRecord(errorText(error), { cause: error });
+	}
 	if (
 		typeof entry !== "object" ||
 		entry === null ||
@@ -1764,13 +1860,13 @@ function parseStagingRecord(text: string): StagingRecord {
 		!path.isAbsolute(entry.dir) ||
 		!path.isAbsolute(entry.file)
 	) {
-		throw new Error("not a staging record");
+		throw new NotAStagingRecord();
 	}
 	const dirIdentity = parseIdentity("dirIdentity" in entry ? entry.dirIdentity : undefined);
 	const identity = parseIdentity("identity" in entry ? entry.identity : undefined);
 	// A run writes the names first and then both identities at once, so a
 	// record holding one identity without the other is not one a run wrote.
-	if ((dirIdentity === undefined) !== (identity === undefined)) throw new Error("not a staging record");
+	if ((dirIdentity === undefined) !== (identity === undefined)) throw new NotAStagingRecord();
 	return { dir: entry.dir, file: entry.file, dirIdentity, identity };
 }
 
@@ -1811,26 +1907,9 @@ async function readStagingRecords(
 			} finally {
 				await handle.close().catch(() => undefined);
 			}
-			try {
-				JSON.parse(text);
-			} catch (error) {
-				// Not JSON at all: cut short. The first version of a record goes
-				// to a part name and is linked whole into place, so no run of
-				// this version leaves one; an earlier one killed while it wrote
-				// a record's first version did, before it made any staging
-				// directory. A well-formed record that is not one a run writes
-				// names something, and gets no such advice: it stops below.
-				return {
-					...found,
-					failure:
-						`${record} does not hold a staging record (${errorText(error)}). A gc run of an earlier version ` +
-						`killed while it wrote a record leaves one cut short like this, and made no staging directory ` +
-						`before it; look at it, move it out of ${ledger}, and run the same command again`,
-				};
-			}
 			found.records.push({ path: record, entry: parseStagingRecord(text) });
 		} catch (error) {
-			return { ...found, failure: `${record} could not be read: ${errorText(error)}` };
+			return { ...found, failure: unreadableRecordNote(record, ledger, error) };
 		}
 	}
 	return found;
@@ -1933,13 +2012,14 @@ async function stagingRoots(agentDir: string): Promise<string[]> {
  * and a record replacement a run died writing are files this run did not
  * write, and their names and shapes are no proof any run did: a file
  * somebody put there looks the same. Both are kept and do nothing — a
- * record whose directory is gone narrows nothing a restore does — and a
- * record whose name now holds something other than a run's directory is
- * reported. A record no run could have written is reported and kept — see
+ * record whose directory is gone narrows nothing a restore does — and the
+ * first is listed, since nothing else ever clears it. A record whose name
+ * now holds something other than a run's directory is reported. A record no
+ * run could have written is reported and kept — see
  * {@link checkRecordedGround}.
  */
 export async function surveyRecordedStagingGrounds(agentDir: string): Promise<StagingSurvey> {
-	const result: StagingSurvey = { residue: [], notes: [] };
+	const result: StagingSurvey = { residue: [], withoutDirectory: [], notes: [] };
 	const { records, failure } = await readStagingRecords(agentDir);
 	if (failure) {
 		result.notes.push(failure);
@@ -1964,6 +2044,8 @@ export async function surveyRecordedStagingGrounds(agentDir: string): Promise<St
 					`${ground.note}; its record ${record} was kept, since a later run removes nothing it did not make — ` +
 						`look at both, then move the record out of ${path.dirname(record)}`,
 				);
+			} else {
+				result.withoutDirectory.push(record);
 			}
 			continue;
 		}
