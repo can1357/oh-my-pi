@@ -483,6 +483,7 @@ import type { ShakeMode, ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
+import { superviseUserSteering, type UserSteeringSupersede } from "./user-steering-supersede";
 import { YieldQueue } from "./yield-queue";
 
 export * from "./agent-session-events";
@@ -9679,6 +9680,20 @@ export class AgentSession implements SettingsScope {
 	 * dialog-end release hook.
 	 */
 	#steeringArrivalParkSnapshots = new Set<number>();
+
+	/**
+	 * Watch for a person's steer while a tool's dialog waits on them, e.g. `ask`.
+	 * See {@link superviseUserSteering}; dispose the result when the dialog ends.
+	 */
+	superviseUserSteering(loopSteeringSignal: AbortSignal | undefined): UserSteeringSupersede {
+		return superviseUserSteering(loopSteeringSignal, {
+			agent: this.agent,
+			steeringArrivalSignal: () => this.#steeringArrivalSignal(),
+			steeringArrivalSeq: () => this.#steeringArrivalSeq(),
+			steeringArrivalAdmitted: since => this.#steeringArrivalAdmitted(since),
+			steeringArrivalRelease: seq => this.#steeringArrivalRelease(seq),
+		});
+	}
 
 	/** Current {@link #steeringArrivalController} signal; see that field. */
 	#steeringArrivalSignal(): AbortSignal {

@@ -43,6 +43,7 @@ import { ToolAbortError } from "./tool-errors";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import { cfgAskNotify, askTimeoutMs } from "../modes/settings";
 import { renderAttachmentSourceNotice } from "../session/attachment-source-notice";
+import { superviseUserSteering } from "../session/user-steering-supersede";
 import { cfgSpeechEnabled } from "../tts/settings";
 import { describeAttachedImagesForTextModel, shouldDescribeImagesForTextModel } from "../utils/image-vision-fallback";
 
@@ -756,16 +757,13 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		const planModeEnabled = this.session.getPlanModeState?.()?.enabled ?? false;
 		const settingsTimeout = askTimeoutMs(this.session.settings) ?? null;
 		const timeout = planModeEnabled ? null : settingsTimeout;
-		// A message the user queues closes the dialog without cancelling the turn: they moved on, and the
-		// message reaches the agent at the batch boundary. Peer IRC, asides and finished background jobs are
-		// not the user's answer, so the dialog stays open for it.
-		const steeringSignal = context?.toolCall?.steeringSignal;
-		const userSteering = new AbortController();
-		const onSteer = () => {
-			if (steeringSignal?.reason === "user") userSteering.abort();
-		};
-		if (steeringSignal?.aborted) onSteer();
-		else steeringSignal?.addEventListener("abort", onSteer, { once: true });
+		// A message the person queues closes the dialog without cancelling the turn: they moved on, and the
+		// message reaches the agent first at the batch boundary. Peer IRC, asides, agent cards and finished
+		// background jobs are not the person's answer, so the dialog stays open for them, and a person's
+		// message queued after one of them still closes it.
+		const loopSteeringSignal = context?.toolCall?.steeringSignal;
+		using userSteering =
+			this.session.superviseUserSteering?.(loopSteeringSignal) ?? superviseUserSteering(loopSteeringSignal);
 		const dialogSignal = signal ? AbortSignal.any([signal, userSteering.signal]) : userSteering.signal;
 		const abortError = (): ToolAbortError =>
 			new ToolAbortError(userSteering.signal.aborted ? "Ask interrupted by message" : "Ask input was cancelled");
