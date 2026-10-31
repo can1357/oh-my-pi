@@ -4402,6 +4402,58 @@ test.skipIf(process.getuid?.() === 0)(
 	},
 );
 
+test("a restore that cannot take its own record down says which directory to make writable", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	await archiveEverything();
+	const record = restoreRecordPath(archiveFile);
+	// The review's mid-run case: the archive bucket made read-only while the
+	// restore runs, so the rename that takes the record down is refused.
+	const realRename = fs.rename;
+	const rename = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+		if (String(from) === record && String(to).endsWith(".leaving")) {
+			throw Object.assign(new Error(`EACCES: permission denied, rename '${record}'`), { code: "EACCES" });
+		}
+		return await realRename(from, to);
+	});
+	let applied: GcResult;
+	try {
+		applied = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+	} finally {
+		rename.mockRestore();
+	}
+
+	const told = applied.restore?.errors.join("\n") ?? "";
+	expect(told).toContain(`${path.dirname(record)} is not writable`);
+	expect(told).toContain("could not take down its record");
+	expect(told).toContain("chmod u+w");
+	expect(await Bun.file(record).exists()).toBe(true);
+	expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
+});
+
+test.skipIf(process.getuid?.() === 0)(
+	"a restore that cannot make its record in a read-only archive bucket restores nothing and says which directory to make writable",
+	async () => {
+		await archiveEverything();
+		const record = restoreRecordPath(archiveFile);
+		const bucket = path.dirname(record);
+		await fs.chmod(bucket, 0o500);
+		let applied: GcResult;
+		try {
+			applied = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+		} finally {
+			await fs.chmod(bucket, 0o700);
+		}
+
+		const told = applied.restore?.errors.join("\n") ?? "";
+		expect(told).toContain(`${bucket} is not writable`);
+		expect(told).toContain("restored nothing");
+		expect(told).toContain("chmod u+w");
+		expect(await Bun.file(sessionFile).exists()).toBe(false);
+		expect(await Bun.file(record).exists()).toBe(false);
+	},
+);
+
 test("a restore leaves what has its record's name by the time it ends, when that is not the record it made", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
