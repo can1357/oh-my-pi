@@ -220,4 +220,56 @@ describe("performance optimizations: batched graph and recall cache", () => {
 		const wm1_resDeleted = resDeleted.find(r => r.id === "wm_1");
 		expect(wm1_resDeleted?.dense_score ?? 0).toBe(0);
 	});
+
+	it("preserves cached embeddings across both working and episodic tiers without cross-tier eviction", async () => {
+		const db = new Database(":memory:");
+		initBeam(db);
+		const beam = createTestBeam(db);
+
+		const now = new Date().toISOString();
+		db.run(
+			"INSERT INTO working_memory (id, content, source, timestamp, session_id, importance) VALUES (?, ?, 'user', ?, 'test-session', 0.5)",
+			["wm_a", "Working memory item A", now],
+		);
+		db.run(
+			"INSERT INTO episodic_memory (id, content, source, timestamp, session_id, importance, tier) VALUES (?, ?, 'user', ?, 'test-session', 0.5, 2)",
+			["ep_1", "Episodic memory item 1", now],
+		);
+		db.run(
+			"INSERT INTO episodic_memory (id, content, source, timestamp, session_id, importance, tier) VALUES (?, ?, 'user', ?, 'test-session', 0.5, 2)",
+			["ep_2", "Episodic memory item 2", now],
+		);
+		db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test-model')", [
+			"wm_a",
+			JSON.stringify([1.0, 0.0, 0.0]),
+		]);
+		db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test-model')", [
+			"ep_1",
+			JSON.stringify([0.8, 0.6, 0.0]),
+		]);
+		db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test-model')", [
+			"ep_2",
+			JSON.stringify([0.0, 1.0, 0.0]),
+		]);
+
+		await recall(beam, "memory", 10, {
+			queryEmbedding: [1.0, 0.0, 0.0],
+			includeWorking: true,
+			includeEpisodic: true,
+			useSynonyms: false,
+		});
+		expect(beam.caches.embeddings?.has("wm_a")).toBe(true);
+		expect(beam.caches.embeddings?.has("ep_1")).toBe(true);
+		expect(beam.caches.embeddings?.has("ep_2")).toBe(true);
+
+		await recall(beam, "memory", 10, {
+			queryEmbedding: [0.0, 1.0, 0.0],
+			includeWorking: true,
+			includeEpisodic: true,
+			useSynonyms: false,
+		});
+		expect(beam.caches.embeddings?.has("wm_a")).toBe(true);
+		expect(beam.caches.embeddings?.has("ep_1")).toBe(true);
+		expect(beam.caches.embeddings?.has("ep_2")).toBe(true);
+	});
 });

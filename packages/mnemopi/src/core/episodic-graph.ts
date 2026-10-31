@@ -568,8 +568,8 @@ export class EpisodicGraph {
 					.query("SELECT subject, object FROM facts WHERE source_msg_id = ?")
 					.all(memoryId) as FactRow[];
 				const leftEntities = lowerSet(leftRows.flatMap(row => [row.subject, row.object]));
-				const otherEntitiesMap = this.entitySetsForMemories(previousMemoryIds);
-				const otherContentMap = this.batchMemoryContent(previousMemoryIds, timestamp);
+				const otherEntitiesMap = this.#entitySetsForMemories(previousMemoryIds);
+				const otherContentMap = this.#batchMemoryContent(previousMemoryIds, timestamp);
 
 				for (const otherId of previousMemoryIds) {
 					const otherContent = otherContentMap.get(otherId) ?? "";
@@ -724,7 +724,7 @@ export class EpisodicGraph {
 		return [...ids];
 	}
 
-	private forEachChunk<T>(
+	#forEachChunk<T>(
 		items: readonly string[],
 		fn: (chunk: readonly string[], placeholders: string) => T[],
 		chunkSize = 500,
@@ -739,13 +739,13 @@ export class EpisodicGraph {
 		return result;
 	}
 
-	private entitySetsForMemories(memoryIds: readonly string[]): Map<string, Set<string>> {
+	#entitySetsForMemories(memoryIds: readonly string[]): Map<string, Set<string>> {
 		const result = new Map<string, Set<string>>();
 		if (memoryIds.length === 0) return result;
 		for (const id of memoryIds) {
 			result.set(id, new Set());
 		}
-		const rows = this.forEachChunk(
+		const rows = this.#forEachChunk(
 			memoryIds,
 			(chunk, placeholders) =>
 				this.db
@@ -764,14 +764,14 @@ export class EpisodicGraph {
 		return result;
 	}
 
-	private batchMemoryContent(memoryIds: readonly string[], now: string): Map<string, string> {
+	#batchMemoryContent(memoryIds: readonly string[], now: string): Map<string, string> {
 		const contentMap = new Map<string, string>();
 		if (memoryIds.length === 0) return contentMap;
 
 		const remaining = new Set(memoryIds);
 
 		try {
-			const rows = this.forEachChunk(
+			const rows = this.#forEachChunk(
 				[...remaining],
 				(chunk, placeholders) =>
 					this.db
@@ -788,7 +788,7 @@ export class EpisodicGraph {
 
 		if (remaining.size > 0) {
 			try {
-				const rows = this.forEachChunk(
+				const rows = this.#forEachChunk(
 					[...remaining],
 					(chunk, placeholders) =>
 						this.db
@@ -807,7 +807,7 @@ export class EpisodicGraph {
 		}
 
 		if (remaining.size > 0) {
-			const rows = this.forEachChunk(
+			const rows = this.#forEachChunk(
 				[...remaining],
 				(chunk, placeholders) =>
 					this.db

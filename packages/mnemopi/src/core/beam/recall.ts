@@ -21,6 +21,7 @@ import { isQueryCacheEnabled, QueryCache } from "../query-cache";
 import { adjustWeights, classifyIntent } from "../query-intent";
 import { getSynonyms, STOP_WORDS as QUERY_STOP_WORDS } from "../synonyms";
 import { extractTemporal } from "../temporal-parser";
+import { cosineSimilarityWithNorms, vectorNorm } from "../vector-math";
 import type { BeamMemoryState, CachedEmbedding, RecallEnhancedOptions, RecallOptions, RecallResult } from "./types";
 
 type DbValue = string | number | null | Uint8Array;
@@ -591,33 +592,6 @@ function parseEmbedding(raw: unknown): number[] | null {
 
 const MAX_EMBEDDING_CACHE_SIZE = 2048;
 
-function vectorNorm(v: readonly number[]): number {
-	let sum = 0;
-	for (let i = 0; i < v.length; i += 1) {
-		const raw = v[i] ?? 0;
-		const val = Number.isFinite(raw) ? raw : 0;
-		sum += val * val;
-	}
-	return Math.sqrt(sum);
-}
-
-function cosineSimilarityWithNorms(
-	query: readonly number[],
-	queryNorm: number,
-	vec: readonly number[],
-	vecNorm: number,
-): number {
-	if (queryNorm === 0 || vecNorm === 0) return 0;
-	const length = Math.min(query.length, vec.length);
-	let dot = 0;
-	for (let i = 0; i < length; i += 1) {
-		const raw = query[i] ?? 0;
-		const qv = Number.isFinite(raw) ? raw : 0;
-		dot += qv * (vec[i] ?? 0);
-	}
-	return dot / (queryNorm * vecNorm);
-}
-
 function vectorSimilarities(
 	beam: BeamMemoryState,
 	memoryIds: readonly string[],
@@ -634,22 +608,6 @@ function vectorSimilarities(
 	}
 
 	const cache = (beam.caches.embeddings ??= new Map<string, CachedEmbedding>());
-
-	while (cache.size > MAX_EMBEDDING_CACHE_SIZE) {
-		const oldest = cache.keys().next().value;
-		if (oldest === undefined) break;
-		cache.delete(oldest);
-	}
-
-	if (cache.size > memoryIds.length) {
-		const idSet = new Set(memoryIds);
-		for (const key of cache.keys()) {
-			if (!idSet.has(key)) {
-				cache.delete(key);
-			}
-		}
-	}
-
 	const queryNorm = vectorNorm(queryEmbedding);
 
 	for (let offset = 0; offset < memoryIds.length; offset += 500) {
@@ -668,7 +626,10 @@ function vectorSimilarities(
 			const fp = Bun.hash(rawJson);
 			const len = rawJson.length;
 			let cached = cache.get(id);
-			if (!cached || cached.fp !== fp || cached.len !== len) {
+			if (cached && cached.fp === fp && cached.len === len) {
+				cache.delete(id);
+				cache.set(id, cached);
+			} else {
 				const rawVec = parseEmbedding(rawJson);
 				if (rawVec === null) {
 					cache.delete(id);
@@ -691,6 +652,11 @@ function vectorSimilarities(
 				cache.delete(id);
 			}
 		}
+	}
+	while (cache.size > MAX_EMBEDDING_CACHE_SIZE) {
+		const oldest = cache.keys().next().value;
+		if (oldest === undefined) break;
+		cache.delete(oldest);
 	}
 	return out;
 }
