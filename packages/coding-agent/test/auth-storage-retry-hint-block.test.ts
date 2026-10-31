@@ -21,8 +21,22 @@ describe("credential block from a rate-limit failure", () => {
 		["a Retry-After and no body hint", "usage_limit_reached", "9", 9000],
 		["a zero body hint and a Retry-After", "usage_limit_reached retry-after-ms=0", "9", 9000],
 		["a malformed body hint and a Retry-After", "usage_limit_reached retry-after-ms=oops", "9", 9000],
+		// A number quoted in the body is not this response's wait. Read as one, an
+		// echoed prompt blocked the credential for a day.
+		[
+			"an echoed longer number and an equal Retry-After",
+			'usage_limit_reached retry-after-ms=200 echoed {"prompt":"retry-after-ms=86400000"}',
+			"0.2",
+			200,
+		],
+		[
+			"an echoed longer number and a longer Retry-After",
+			'usage_limit_reached retry-after-ms=200 echoed {"prompt":"retry-after-ms=86400000"}',
+			"9",
+			9000,
+		],
 	] as [string, string, string, number][])(
-		"lasts the longest wait for %s",
+		"lasts the response's own longest wait for %s",
 		async (_label, body, retryAfter, expected) => {
 			const dir = TempDir.createSync("@pi-retry-hint-block-");
 			const auth = await AuthStorage.create(`${dir.path()}/auth.db`);

@@ -20,7 +20,7 @@ import type {
 import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { shouldDropTruncatedThinkingOnlyAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
-import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { extractProviderRetryHint, longestProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-credit";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
@@ -2700,11 +2700,10 @@ export class TurnRecovery {
 	}
 
 	#parseRetryAfterMsFromError(errorMessage: string): number | undefined {
-		// The longest wait the message names, across every form (account resets,
-		// retry-after-ms, legacy retry-after / x-ratelimit-reset text) and every
-		// occurrence of each: `retry-after-ms=200 retry-after-ms=9000` is 9 s, so
-		// a held retry declines it rather than resending inside a window the
-		// server said is closed.
+		// The wait this failure names, as every caller that keeps a route or a
+		// credential closed reads it: the usage-limit mark and the retry delay.
+		// The held-retry check reads every occurrence on its own; see
+		// `longestProviderRetryHint` where the hold is decided.
 		return extractProviderRetryHint(this.#host.model()?.provider, errorMessage);
 	}
 
@@ -3076,14 +3075,23 @@ export class TurnRecovery {
 		// a retry the cap then refuses. Consult the chain instead; a switch zeroes
 		// the wait.
 		//
-		// Nor unless the wait is strictly inside the held retry's own window (or
-		// zero). Full jitter stays inside it; a provider hint can be longer and is
-		// never shortened, so a hint at or past the window consults the chain
-		// rather than break the bound on the sleep a hold adds.
+		// Nor unless every wait the message names is strictly inside the held
+		// retry's own window (or zero). Full jitter stays inside it; a provider
+		// hint can be longer and is never shortened, so a hint at or past the
+		// window consults the chain rather than break the bound on the sleep a
+		// hold adds. "Every" is the longest across all occurrences: a hint repeated
+		// with a longer value (`retry-after-ms=200 retry-after-ms=9000`) declines
+		// the hold. That reading is used here alone, where a quoted or echoed
+		// number can only cost a chain consult; the delay and the usage-limit
+		// mark keep the bounded reading.
 		const heldWindowMs = cappedRetryBackoffMs(retrySettings.baseDelayMs, heldRetryIndex);
+		const longestNamedWaitMs = connectionHoldCandidate
+			? longestProviderRetryHint(this.#host.model()?.provider, errorMessage)
+			: undefined;
 		const connectionHold =
 			connectionHoldCandidate &&
 			(sameModelDelayMs === 0 || sameModelDelayMs < heldWindowMs) &&
+			(longestNamedWaitMs === undefined || longestNamedWaitMs === 0 || longestNamedWaitMs < heldWindowMs) &&
 			!exceedsDelayCap(sameModelDelayMs);
 
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {

@@ -558,14 +558,29 @@ function isFieldKey(quote: string, key: string, separator: string): boolean {
 /** Go's frame field, which has no separator: `stream error: stream ID 503`. */
 const GO_STREAM_ID_PATTERN = /\bstream\s+ID\s+\d+/g;
 /**
+ * A port: after an IPv4 address, a bracketed IPv6 address or `localhost`
+ * (`connect ECONNRESET 127.0.0.1:503`, `[::1]:503`), or named in prose
+ * (`port 503`). A dotted host name before a colon is already a field key, so
+ * `h.invalid:503` is covered there.
+ */
+const PORT_NUMBER_PATTERN = /(?:\b\d{1,3}(?:\.\d{1,3}){3}|\[[0-9A-Fa-f:.]+\]|\blocalhost):\d+|\bport\s+\d+/gi;
+/**
+ * Characters with no width that can sit between a number and its unit
+ * (`503\u200Bms`) and would otherwise hide the unit from
+ * {@link UNIT_NUMBER_PATTERN}: zero-width space, non-joiner and joiner, word
+ * joiner, and the byte-order mark.
+ */
+const ZERO_WIDTH_PATTERN = /[\u200B-\u200D\u2060\uFEFF]/g;
+/**
  * A number in the role of a duration: followed by a time unit, glued or
  * spaced — nanoseconds through days, any common spelling, the micro sign as
  * U+00B5 or U+03BC — or by a size or token unit. The unit, not what surrounds
- * it, decides: `after 401 ns`, `403µs`, `529 microseconds`, `2.5h`. The unit
- * must end the word, so `503 Service` is not `503 s`.
+ * it, decides: `after 401 ns`, `403µs`, `529 microseconds`, `2.5h`. A Latin
+ * unit must end the word, so `503 Service` is not `503 s`; a CJK unit needs no
+ * word end, because CJK text has none (`503秒后重试`).
  */
 const UNIT_NUMBER_PATTERN =
-	/(?<![\w.])\d+(?:\.\d+)?\s*(?:ns|nanos?(?:econds?)?|us|µs|μs|micros?(?:econds?)?|ms|msecs?|millis?(?:econds?)?|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?|bytes?|[kmg]i?b|tokens?)(?![\p{L}\p{N}_])/giu;
+	/(?<![\w.])\d+(?:\.\d+)?\s*(?:(?:ns|nanos?(?:econds?)?|us|µs|μs|micros?(?:econds?)?|ms|msecs?|millis?(?:econds?)?|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?|bytes?|[kmg]i?b|tokens?)(?![\p{L}\p{N}_])|毫秒|微秒|纳秒|秒钟|秒鐘|秒|分钟|分鐘|小时|小時|時間|天)/giu;
 /**
  * Digits glued into an ASCII identifier or a path: `x-request-503-trace`,
  * `/jobs/503/`, `gpt-503-preview`. ASCII only on purpose: CJK prose glues a
@@ -575,10 +590,10 @@ const GLUED_NUMBER_PATTERN = /(?<=[A-Za-z_\-/])\d+|\d+(?=[A-Za-z_\-/])/g;
 
 /**
  * `text` with the digits that are diagnostic metadata removed, by the role
- * each number plays: inside a URL; a duration, size or token count (a unit
- * after it, or the value of a field whose key names time); the value of any
- * other field that does not name a status; or glued into an identifier or a
- * path. Every reader that takes a bare number as an HTTP status, an auth
+ * each number plays: inside a URL; a port; a duration, size or token count (a
+ * unit after it, or the value of a field whose key names time); the value of
+ * any other field that does not name a status; or glued into an identifier or
+ * a path. Every reader that takes a bare number as an HTTP status, an auth
  * rejection, a capacity refusal or a transient status reads this instead, so
  * `read ECONNRESET after 401 ns` stays a wire cut. A status the sentence
  * states — `HTTP 503`, `status=529`, `503 Service Unavailable`, `error: 429`,
@@ -586,7 +601,9 @@ const GLUED_NUMBER_PATTERN = /(?<=[A-Za-z_\-/])\d+|\d+(?=[A-Za-z_\-/])/g;
  */
 function withoutMetadataNumbers(text: string): string {
 	return text
+		.replace(ZERO_WIDTH_PATTERN, "")
 		.replace(URL_PATTERN, url => url.replace(/\d+/g, ""))
+		.replace(PORT_NUMBER_PATTERN, port => port.replace(/\d+$/, ""))
 		.replace(FIELD_NUMBER_PATTERN, (field, quote: string, key: string, separator: string, _q, value: string) => {
 			if (!isFieldKey(quote, key, separator) || STATUS_FIELD_KEY.test(key)) return field;
 			const at = field.lastIndexOf(value);
@@ -780,9 +797,13 @@ const CONNECTION_FAILURE_PATTERN =
  * word `terminated`. Anchored, because the word on its own inside a sentence
  * means something else entirely — a killed process ("Process terminated by
  * signal SIGKILL"), a policy stop ("terminated: content policy") — neither of
- * which an identical replay recovers.
+ * which an identical replay recovers. What may follow is a decoration, never a
+ * reason: metadata after `;` or in parentheses (`terminated; after 401 ns`,
+ * `terminated (https://h/v1)`), or the header wait the retry formatter appends
+ * (`terminated retry-after-ms=9000`). A colon or a following word still
+ * introduces a reason, and still does not match.
  */
-const UNDICI_TERMINATED_PATTERN = /^(?:TypeError:\s*)?terminated\.?$/i;
+const UNDICI_TERMINATED_PATTERN = /^(?:TypeError:\s*)?terminated\.?(?:$|\s*[;(]|\s+retry-after-ms=)/i;
 
 /**
  * Wire failures a runtime reports only as an errno on `err.code`, leaving the

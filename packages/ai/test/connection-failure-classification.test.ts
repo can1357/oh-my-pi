@@ -455,6 +455,67 @@ describe("connection-failure classification", () => {
 		},
 	);
 
+	const WIRE_BASES = [
+		"read ECONNRESET",
+		"write EPIPE",
+		"socket hang up",
+		"premature close",
+		"terminated",
+		"The socket connection was closed unexpectedly",
+		"other side closed",
+		"Stream closed with error code NGHTTP2_INTERNAL_ERROR",
+	];
+	const DECORATIONS = [
+		"port 503",
+		"connect ECONNRESET 127.0.0.1:503",
+		"connect ECONNRESET [::1]:503",
+		"localhost:401",
+		"after 503秒",
+		"等待503秒后重试",
+		"after 503\u200Bms",
+		"after 401\u2060ns",
+		"after 401 ns",
+		"(https://h.invalid/v1)",
+		"retry-after-ms=529",
+	];
+
+	it.each(WIRE_BASES.flatMap(base => DECORATIONS.map(decoration => [base, decoration])))(
+		"classifies %s decorated with %s like the bare diagnostic",
+		(base, decoration) => {
+			// A port, a duration split from its unit by a zero-width character, a CJK
+			// unit, or any decoration after undici's bare `terminated` is metadata:
+			// the decorated failure is the same wire cut. Read as a status, `port 503`
+			// took the cut off the connection lane; `terminated; …` matched no wire
+			// wording at all.
+			const separator = decoration.startsWith("(") ? " " : "; ";
+			const decorated = new Error(`${base}${separator}${decoration}`);
+			const bare = new Error(base);
+			for (const flag of [AIError.Flag.Connection, AIError.Flag.Transient]) {
+				expect(AIError.is(AIError.classify(decorated), flag)).toBe(AIError.is(AIError.classify(bare), flag));
+			}
+			expect(AIError.retriable(AIError.classify(decorated))).toBe(AIError.retriable(AIError.classify(bare)));
+			expect(AIError.status(decorated)).toBeUndefined();
+		},
+	);
+
+	it.each([
+		["the formatter's header wait", "terminated retry-after-ms=9000", true],
+		["metadata after a semicolon", "terminated; after 401 ns", true],
+		["a URL in parentheses", "terminated (https://h.invalid/v1)", true],
+		["a reason after a colon", "terminated: content policy", false],
+		["a killed process", "Process terminated by signal SIGKILL", false],
+		["a reason after a word", "terminated by the operator", false],
+	] as [string, string, boolean][])("reads undici's terminated with %s correctly", (_label, text, connection) => {
+		expect(AIError.is(AIError.classify(new Error(text)), AIError.Flag.Connection)).toBe(connection);
+	});
+
+	it.each([
+		["a status beside a port", "read ECONNRESET; status=529; port 503", "read ECONNRESET; status=529"],
+		["a status beside a host port", "read ECONNRESET; (529); 127.0.0.1:503", "read ECONNRESET; (529)"],
+	])("classifies %s as the status alone", (_label, decorated, bare) => {
+		expect(AIError.classify(new Error(decorated))).toBe(AIError.classify(new Error(bare)));
+	});
+
 	it("keeps a rejected credential off the connection lane", () => {
 		// The far side answered and refused the credential; replaying it holds the
 		// session on a route that refuses it again, and the hold reads only the
