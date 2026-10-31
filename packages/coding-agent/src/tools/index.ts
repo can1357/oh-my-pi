@@ -100,7 +100,7 @@ import { cfgBashEnabled } from "../exec/settings";
 import { cfgCompactionExperimentalContextManagement } from "../session/context-settings";
 import { cfgPythonInterpreter } from "../eval/settings";
 import { cfgExternalThinking } from "../session/settings";
-import { cfgGoalEnabled } from "../goals/settings";
+import { cfgGoalEnabled, cfgGoalToolDefault } from "../goals/settings";
 import { cfgLspEnabled } from "../lsp/settings";
 import { cfgMemoryBackend } from "../memory-backend/settings";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
@@ -613,9 +613,12 @@ export type ToolName = BuiltinToolName;
  * reconcile. Memory-backend tools other than `learn` follow `memory.backend` through
  * the memory backend's own tool replacement instead.
  */
-export const SETTINGS_GATED_BUILTIN_TOOL_NAMES: readonly BuiltinToolName[] = (
-	Object.keys(BUILTIN_TOOLS) as BuiltinToolName[]
-).filter(name => name === "learn" || !(MEMORY_BACKEND_TOOL_NAMES as readonly string[]).includes(name));
+export const SETTINGS_GATED_BUILTIN_TOOL_NAMES: readonly (BuiltinToolName | "goal")[] = [
+	...(Object.keys(BUILTIN_TOOLS) as BuiltinToolName[]).filter(
+		name => name === "learn" || !(MEMORY_BACKEND_TOOL_NAMES as readonly string[]).includes(name),
+	),
+	"goal",
+];
 
 /** Built-in tool selection {@link createTools} constructs for a session under its current settings. */
 export interface BuiltinToolPlan {
@@ -642,7 +645,19 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 			? normalizeToolNames(toolNames)
 			: undefined;
 	const goalEnabled = cfgGoalEnabled.get(session.settings);
-	const goalModeActive = !restrictToolNames && goalEnabled && session.getGoalModeState?.()?.enabled === true;
+	const goalModeState = session.getGoalModeState?.();
+	const goalModeActive = !restrictToolNames && goalModeState?.enabled === true && goalModeState.mode !== "exiting";
+	const goalCreationAllowed =
+		!restrictToolNames &&
+		goalEnabled &&
+		(goalModeState === undefined ||
+			(goalModeState.mode !== "exiting" &&
+				(goalModeState.goal.status === "dropped" || goalModeState.goal.status === "complete")));
+	const includeGoal =
+		goalModeActive ||
+		(goalCreationAllowed &&
+			(requestedTools?.includes("goal") ??
+				((session.taskDepth ?? 0) === 0 && cfgGoalToolDefault.get(session.settings))));
 	const externalThinkingActive =
 		cfgExternalThinking.get(session.settings) && supportsExternalThinking(session.getActiveModel?.());
 	if (goalModeActive && requestedTools && !requestedTools.includes("goal")) {
@@ -700,9 +715,6 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 			if (!requestedTools.includes("context_notes")) requestedTools.push("context_notes");
 			if (!requestedTools.includes("new_context")) requestedTools.push("new_context");
 		}
-		if (goalModeActive && !requestedTools.includes("goal")) {
-			requestedTools.push("goal");
-		}
 		if (
 			requestedTools.includes("grep") &&
 			!requestedTools.includes("ast_grep") &&
@@ -745,16 +757,9 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 		}
 	}
 	const isToolAllowed = (name: string) => {
-		// Never in the default set. Explicitly activatable while goal.enabled and
-		// no goal record exists yet — /guided-goal enables it so the agent can
-		// finish the interview with `goal create`, which turns goal mode on. Once
-		// a goal record exists, only an enabled goal keeps the tool: a completed
-		// (exiting) or paused goal must stop advertising it on the next rebuild.
-		if (name === "goal") {
-			if (!goalEnabled || restrictToolNames) return false;
-			const goalState = session.getGoalModeState?.();
-			return goalState === undefined || goalState.enabled === true || goalState.goal.status === "dropped";
-		}
+		// Active goals retain management controls when creation is disabled.
+		// Paused and exiting records stay hidden until the host resumes or clears them.
+		if (name === "goal") return goalModeActive || goalCreationAllowed;
 		if (name === "lsp") return enableLsp && cfgLspEnabled.get(session.settings);
 		if (name === "bash") return cfgBashEnabled.get(session.settings);
 		if (name === "eval") return allowEval;
@@ -817,7 +822,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 		...Object.keys(BUILTIN_TOOLS).filter(isToolAllowed),
 		...(externalThinkingActive ? ["think"] : []),
 		...(includeYield ? ["yield"] : []),
-		...(goalModeActive ? ["goal"] : []),
+		...(includeGoal ? ["goal"] : []),
 	];
 	return { requestedTools, names, isAllowed: isToolAllowed };
 }

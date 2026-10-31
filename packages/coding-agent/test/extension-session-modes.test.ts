@@ -224,7 +224,7 @@ describe("ctx.sessionModes in the interactive TUI", () => {
 	});
 
 	it("rolls back a goal whose tool fails to activate, so a later entry succeeds", async () => {
-		const { session, modes } = await tui();
+		const { session, modes, events } = await tui();
 		const tools = session.getEnabledToolNames();
 		vi.spyOn(session, "setActiveToolsByName").mockRejectedValueOnce(new Error("tool activation failed"));
 		await expect(modes.set({ mode: "goal", action: "enter", objective: "Doomed" })).rejects.toThrow(
@@ -233,8 +233,12 @@ describe("ctx.sessionModes in the interactive TUI", () => {
 		expect(modes.getState().goal).toEqual({ status: "inactive" });
 		expect(session.getGoalModeState()?.goal.status ?? "dropped").toBe("dropped");
 		expect(session.getEnabledToolNames()).toEqual(tools);
+		expect(events).toEqual([]);
 		expect(changed(await modes.set({ mode: "goal", action: "enter", objective: "Retry" }))).toBe(true);
 		expect(modes.getState().goal).toMatchObject({ status: "active", objective: "Retry" });
+		expect(changed(await modes.set({ mode: "goal", action: "drop" }))).toBe(true);
+		expect(modes.getState().goal).toEqual({ status: "inactive" });
+		expect(session.getEnabledToolNames()).toEqual(tools);
 	});
 
 	it("reports native /goal transitions only after the goal tool has been toggled", async () => {

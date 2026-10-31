@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in `goal.toolDefault` (default `false`) and explicit `--tools=...,goal` activation for agent-started goals, preserving the ordinary slash-command default ([#17609](https://github.com/can1357/oh-my-pi/pull/17609) by [@neuralyze](https://github.com/neuralyze))
+
+### Fixed
+
+- Kept opted-in goal creation available across live setting changes, guided interviews, paused-goal drops, completion, and session transitions. Native goal entry respects incompatible mode exclusions, and RPC pause hides the goal tool until the host resumes or drops it ([#17609](https://github.com/can1357/oh-my-pi/pull/17609) by [@neuralyze](https://github.com/neuralyze))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

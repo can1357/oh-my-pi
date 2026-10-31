@@ -143,6 +143,8 @@ export interface SessionToolsHost {
 export interface SettingsGatedToolDelta {
 	/** Newly registered names: `builtIn` marks built-in factory provenance, `activate` joins the enabled set. */
 	readonly added: readonly { readonly name: string; readonly builtIn: boolean; readonly activate: boolean }[];
+	/** Presentation changes for retained, lazily activatable registry entries. */
+	readonly selection?: readonly { readonly name: string; readonly activate: boolean }[];
 	/** Names whose registry entries were removed. */
 	readonly removed: readonly string[];
 	/** `xd://` state after following `tools.xdev`; undefined while mounting is off. */
@@ -167,9 +169,12 @@ interface SessionToolsOptions {
 	ensureGoalRegistered?: () => Promise<boolean>;
 	/**
 	 * Re-resolves settings-gated tools against live settings, mutating the shared
-	 * registry; `isBuiltIn` reports this session's built-in provenance.
+	 * registry; predicates report built-in provenance and explicit runtime selections.
 	 */
-	reconcileSettingsGatedTools?: (isBuiltIn: (name: string) => boolean) => Promise<SettingsGatedToolDelta>;
+	reconcileSettingsGatedTools?: (
+		isBuiltIn: (name: string) => boolean,
+		isRuntimeSelected: (name: string) => boolean,
+	) => Promise<SettingsGatedToolDelta>;
 	rebuildSystemPrompt?: (
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
@@ -397,6 +402,8 @@ export class SessionTools {
 	#announcedMountsSeeded = false;
 	#presentationPinnedToolNames: ReadonlySet<string> | undefined;
 	#runtimeSelectedToolNames: ReadonlySet<string> | undefined;
+	/** Explicit runtime grants belong to the transcript where they were selected. */
+	#runtimeSelectionSessionId: string | undefined;
 	#baseSystemPrompt: string[];
 	/**
 	 * Per-turn system prompt returned by a `before_agent_start` extension hook
@@ -2154,13 +2161,16 @@ export class SessionTools {
 			((this.#host.planModeEnabled() && (!writeSelected || deviceOnlyWriteActive)) ||
 				(writeSelected && deviceOnlyWriteActive && (retainedMountedDevice || retainedDeferrableTool)));
 		const previousRuntimeSelectedToolNames = this.#runtimeSelectedToolNames;
+		const previousRuntimeSelectionSessionId = this.#runtimeSelectionSessionId;
 		this.#runtimeSelectedToolNames = new Set(
 			normalized.filter(name => !mounted.has(name) && !(name === "write" && transportWriteActive)),
 		);
+		this.#runtimeSelectionSessionId = this.#host.sessionManager.getSessionId();
 		try {
 			await this.#applyActiveToolsByName(normalized, forcePromptRefresh, signal);
 		} catch (error) {
 			this.#runtimeSelectedToolNames = previousRuntimeSelectedToolNames;
+			this.#runtimeSelectionSessionId = previousRuntimeSelectionSessionId;
 			throw error;
 		}
 	}
@@ -2239,7 +2249,12 @@ export class SessionTools {
 			// Sampled before the delta: it still carries names mounted under the
 			// `xd://` state the reconcile may release.
 			const enabled = new Set(this.getEnabledToolNames());
-			const delta = await reconcile(name => this.#builtInToolNames.has(name));
+			const delta = await reconcile(
+				name => this.#builtInToolNames.has(name),
+				name =>
+					this.#runtimeSelectionSessionId === this.#host.sessionManager.getSessionId() &&
+					this.#runtimeSelectedToolNames?.has(name) === true,
+			);
 			for (const name of delta.removed) {
 				enabled.delete(name);
 				this.#builtInToolNames.delete(name);
@@ -2248,12 +2263,24 @@ export class SessionTools {
 				this.setToolBuiltIn(name, builtIn);
 				if (activate) enabled.add(name);
 			}
+			const selectionChanged = delta.selection?.some(({ name, activate }) => enabled.has(name) !== activate);
+			for (const { name, activate } of delta.selection ?? []) {
+				if (activate) enabled.add(name);
+				else enabled.delete(name);
+			}
 			const xdevChanged = delta.xdev !== this.#xdev;
 			if (xdevChanged) {
 				this.#xdev = delta.xdev;
 				if (delta.xdev) delta.xdev.decorateExecution = tool => this.#wrapToolForAcpPermission(tool);
 			}
-			if (!refreshPrompt && !xdevChanged && delta.added.length === 0 && delta.removed.length === 0) return;
+			if (
+				!refreshPrompt &&
+				!xdevChanged &&
+				delta.added.length === 0 &&
+				delta.removed.length === 0 &&
+				!selectionChanged
+			)
+				return;
 			await this.#applyActiveToolsByName([...enabled], true);
 		});
 	}

@@ -1,18 +1,19 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { Agent, type AgentMessage, AgentBusyError } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, AgentBusyError } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { GoalTool } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
+import { cfgGoalToolDefault } from "@oh-my-pi/pi-coding-agent/goals/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { cfgGrepEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 function createToolSession(cwd: string, settings: Settings, overrides: Partial<ToolSession> = {}): ToolSession {
@@ -30,12 +31,12 @@ type GuidedGoalHarness = {
 	mode: InteractiveMode;
 	session: AgentSession;
 	settings: Settings;
-	goalTool: GoalTool;
+	goalTool: Tool;
 	tempDir: TempDir;
 	cleanup: () => Promise<void>;
 };
 
-async function createHarness(options?: { goalEnabled?: boolean }): Promise<GuidedGoalHarness> {
+async function createHarness(options?: { goalEnabled?: boolean; toolNames?: string[] }): Promise<GuidedGoalHarness> {
 	resetSettingsForTest();
 	const tempDir = TempDir.createSync("@pi-guided-goal-");
 	await Settings.init({ inMemory: true, cwd: tempDir.path() });
@@ -43,6 +44,7 @@ async function createHarness(options?: { goalEnabled?: boolean }): Promise<Guide
 		"compaction.enabled": false,
 		"goal.enabled": options?.goalEnabled ?? true,
 		"plan.enabled": true,
+		"tools.xdev": true,
 	});
 	const authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 	const modelRegistry = new ModelRegistry(authStorage);
@@ -50,31 +52,25 @@ async function createHarness(options?: { goalEnabled?: boolean }): Promise<Guide
 	if (!model) {
 		throw new Error("Expected claude-sonnet-4-5 to exist in registry");
 	}
-	const initialTools = await createTools(createToolSession(tempDir.path(), settings), ["read"]);
-	const toolRegistry = new Map<string, Tool>(initialTools.map(tool => [tool.name, tool] as const));
-	const session = new AgentSession({
-		agent: new Agent({
-			initialState: {
-				model,
-				systemPrompt: ["Test"],
-				tools: initialTools,
-				messages: [],
-			},
-		}),
+	const { session } = await createAgentSession({
+		cwd: tempDir.path(),
+		agentDir: tempDir.path(),
 		sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
 		settings,
 		modelRegistry,
-		toolRegistry,
-		rebuildSystemPrompt: async () => ({ systemPrompt: ["Test"] }),
+		authStorage,
+		model,
+		toolNames: options?.toolNames ?? ["read"],
+		disableExtensionDiscovery: true,
+		enableMCP: false,
+		enableLsp: false,
+		skills: [],
+		contextFiles: [],
+		promptTemplates: [],
+		slashCommands: [],
+		rules: [],
+		workspaceTree: { rootPath: tempDir.path(), rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
 	});
-	// Mirror sdk.ts assembly: the goal tool is pre-registered (hidden) whenever
-	// goal.enabled, so /guided-goal can activate it by name for the interview.
-	const goalToolSession = createToolSession(tempDir.path(), settings, {
-		getGoalModeState: () => session.getGoalModeState(),
-		getGoalRuntime: () => session.goalRuntime,
-	});
-	const goalTool = new GoalTool(goalToolSession);
-	toolRegistry.set("goal", goalTool as unknown as Tool);
 	const mode = new InteractiveMode(session, "test");
 	vi.spyOn(mode, "addMessageToChat").mockReturnValue([]);
 	vi.spyOn(mode, "ensureLoadingAnimation").mockImplementation(() => {});
@@ -83,7 +79,11 @@ async function createHarness(options?: { goalEnabled?: boolean }): Promise<Guide
 		mode,
 		session,
 		settings,
-		goalTool,
+		get goalTool() {
+			const tool = session.getToolByName("goal");
+			if (!tool) throw new Error("Expected hidden goal tool to be registered");
+			return tool;
+		},
 		tempDir,
 		cleanup: async () => {
 			mode.stop();
@@ -151,6 +151,8 @@ describe("guided goal setup", () => {
 		const harness = await createHarness();
 		try {
 			const promptSpy = vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
+			expect(cfgGoalToolDefault.get(harness.settings)).toBe(false);
+			expect(harness.session.getEnabledToolNames()).not.toContain("goal");
 			const images: ImageContent[] = [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }];
 
 			await harness.mode.handleGuidedGoalCommand("automate flaky test triage", {
@@ -168,6 +170,37 @@ describe("guided goal setup", () => {
 			// The goal tool is activated up front so the agent can create the goal
 			// once the interview concludes.
 			expect(harness.session.getEnabledToolNames()).toContain("goal");
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("preserves the explicit interview grant across an unrelated live tool-setting change", async () => {
+		const harness = await createHarness({ toolNames: ["read", "write"] });
+		try {
+			await startInterview(harness);
+			expect(cfgGoalToolDefault.get(harness.settings)).toBe(false);
+			expect(harness.session.getGoalModeState()).toBeUndefined();
+			expect(harness.session.getEnabledToolNames()).toContain("goal");
+
+			cfgGrepEnabled.set(harness.settings, false);
+			expect(cfgGrepEnabled.get(harness.settings)).toBe(false);
+			await Promise.resolve();
+			await harness.session.runToolRegistryMutation(async () => {});
+
+			expect(harness.session.getEnabledToolNames()).toContain("goal");
+			// Exercise canonical XD routing, not just direct access to the goal instance.
+			const write = harness.session.agent.state.tools.find(tool => tool.name === "write");
+			expect(write).toBeDefined();
+			const result = await write!.execute("guided_after_settings", {
+				path: "xd://goal",
+				content: JSON.stringify({ op: "create", objective: "Ship after changing grep settings" }),
+			} as never);
+			expect(result.isError ?? false).toBe(false);
+			expect(harness.session.getGoalModeState()).toMatchObject({
+				enabled: true,
+				goal: { objective: "Ship after changing grep settings", status: "active" },
+			});
 		} finally {
 			await harness.cleanup();
 		}
@@ -300,21 +333,7 @@ describe("guided goal setup", () => {
 		}
 	});
 
-	it("allows explicit goal tool activation without an active goal, but keeps it out of the default set", async () => {
-		const harness = await createHarness();
-		try {
-			const explicit = await createTools(createToolSession(harness.tempDir.path(), harness.settings), [
-				"read",
-				"goal",
-			]);
-			expect(explicit.map(tool => tool.name)).toContain("goal");
-
-			const defaults = await createTools(createToolSession(harness.tempDir.path(), harness.settings));
-			expect(defaults.map(tool => tool.name)).not.toContain("goal");
-		} finally {
-			await harness.cleanup();
-		}
-
+	it("does not expose the goal tool when goal mode is disabled", async () => {
 		const disabled = await createHarness({ goalEnabled: false });
 		try {
 			const explicit = await createTools(createToolSession(disabled.tempDir.path(), disabled.settings), [
@@ -324,6 +343,24 @@ describe("guided goal setup", () => {
 			expect(explicit.map(tool => tool.name)).not.toContain("goal");
 		} finally {
 			await disabled.cleanup();
+		}
+	});
+
+	it.each([
+		{ name: "restricted", overrides: { restrictToolNames: true }, toolNames: ["read", "goal"] },
+		{ name: "subagent", overrides: { taskDepth: 1 }, toolNames: undefined },
+		{ name: "explicit", overrides: {}, toolNames: ["read"] },
+		{ name: "empty", overrides: {}, toolNames: [] },
+	])("does not auto-include the goal tool in $name tool lists", async ({ overrides, toolNames }) => {
+		const harness = await createHarness();
+		try {
+			const tools = await createTools(
+				createToolSession(harness.tempDir.path(), harness.settings, overrides),
+				toolNames?.slice(),
+			);
+			expect(tools.map(tool => tool.name)).not.toContain("goal");
+		} finally {
+			await harness.cleanup();
 		}
 	});
 

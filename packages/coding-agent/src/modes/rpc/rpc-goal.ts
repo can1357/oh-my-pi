@@ -41,6 +41,7 @@ export type RpcGoalSession = Pick<
 	| "getPlanModeState"
 	| "getEnabledToolNames"
 	| "setActiveToolsByName"
+	| "reconcileBuiltinTools"
 	| "sendGoalModeContext"
 	| "getTodoPhases"
 	| "promptCustomMessage"
@@ -52,10 +53,16 @@ export type RpcGoalSession = Pick<
 	| "queuedMessageCount"
 >;
 
+interface GoalToolSnapshot {
+	sessionId: string;
+	goalId: string;
+	tools: string[];
+}
+
 export class RpcGoalController {
 	readonly #session: RpcGoalSession;
-	/** Active tool set before goal mode added `goal`; restored when the goal ends. */
-	#previousTools: string[] | undefined;
+	/** Management-only snapshot; creation availability is restored by SDK policy. */
+	#previousTools: GoalToolSnapshot | undefined;
 	/** Continuation turns submitted whose terminal `agent_end` has not arrived. */
 	#pendingContinuationTurns = 0;
 	#previousContinuationActivity: string | undefined;
@@ -133,10 +140,12 @@ export class RpcGoalController {
 	 * the previous transcript's goal. Not for use inside extension notifications.
 	 */
 	async settled(): Promise<void> {
-		for (let tail = this.#reconcileTask; ; tail = this.#reconcileTask) {
-			await this.#exitTask;
-			await tail;
-			if (tail === this.#reconcileTask) return;
+		for (;;) {
+			const exit = this.#exitTask;
+			const reconcile = this.#reconcileTask;
+			await exit;
+			await reconcile;
+			if (exit === this.#exitTask && reconcile === this.#reconcileTask) return;
 		}
 	}
 
@@ -200,8 +209,23 @@ export class RpcGoalController {
 		this.#onContinuationDropped?.();
 	}
 
-	#queueExit(exit: () => Promise<void>): void {
-		this.#exitTask = this.#exitTask.then(exit).catch(reportControllerError);
+	#queueExit(goalId: string): void {
+		const sessionId = this.#session.sessionManager.getSessionId();
+		const previousTools = this.#previousTools;
+		this.#exitTask = this.#exitTask
+			.then(async () => {
+				const state = this.#session.getGoalModeState();
+				if (
+					this.#session.sessionManager.getSessionId() !== sessionId ||
+					this.#previousTools !== previousTools ||
+					(previousTools && (previousTools.sessionId !== sessionId || previousTools.goalId !== goalId)) ||
+					(state && (state.goal.id !== goalId || state.enabled))
+				) {
+					return;
+				}
+				await this.#exit();
+			})
+			.catch(reportControllerError);
 	}
 
 	async handle(command: RpcGoalCommand): Promise<RpcGoalResult> {
@@ -215,7 +239,7 @@ export class RpcGoalController {
 				return await this.#resume();
 			case "pause":
 				await this.#session.goalRuntime.pauseGoal();
-				await this.#exit();
+				await this.#exitTask;
 				return this.#state;
 			case "drop":
 				// The runtime's `goal_updated(dropped)` queues the exit.
@@ -265,14 +289,28 @@ export class RpcGoalController {
 	}
 
 	async #enter(start: () => Promise<GoalModeState>): Promise<void> {
-		// The pre-goal tool set is captured once, when this controller first adds `goal`
-		// (a reattached paused goal already holds it). A `goal` tool the host enabled
-		// before the goal stays enabled afterwards.
-		const previousTools = this.#previousTools ?? this.#session.getEnabledToolNames();
+		const sessionId = this.#session.sessionManager.getSessionId();
+		const previousTools =
+			this.#previousTools?.sessionId === sessionId
+				? this.#previousTools.tools
+				: this.#session.getEnabledToolNames().filter(name => name !== "goal");
 		const state = await start();
-		this.#previousTools = previousTools;
-		await this.#session.setActiveToolsByName([...new Set([...previousTools, "goal"])]);
-		this.#session.setGoalModeState(state);
+		if (
+			this.#session.sessionManager.getSessionId() !== sessionId ||
+			!this.#session.getGoalModeState()?.enabled ||
+			this.#session.getGoalModeState()?.goal.id !== state.goal.id
+		) {
+			return;
+		}
+		this.#previousTools = { sessionId, goalId: state.goal.id, tools: previousTools };
+		await this.#session.setActiveToolsByName([...previousTools, "goal"]);
+		if (
+			this.#session.sessionManager.getSessionId() !== sessionId ||
+			!this.#session.getGoalModeState()?.enabled ||
+			this.#session.getGoalModeState()?.goal.id !== state.goal.id
+		) {
+			return;
+		}
 		this.#resetContinuation();
 		if (this.#session.isStreaming) {
 			await this.#session.sendGoalModeContext({ deliverAs: "steer" });
@@ -281,12 +319,15 @@ export class RpcGoalController {
 		this.#scheduleContinuation();
 	}
 
-	/** Restore the pre-goal tool set. Idempotent. */
+	/** Restore management tools, then let SDK policy decide future creation. */
 	async #exit(): Promise<void> {
 		const previousTools = this.#previousTools;
 		this.#previousTools = undefined;
 		this.#resetContinuation();
-		if (previousTools) await this.#session.setActiveToolsByName(previousTools);
+		if (previousTools?.sessionId === this.#session.sessionManager.getSessionId()) {
+			await this.#session.setActiveToolsByName(previousTools.tools);
+		}
+		await this.#session.reconcileBuiltinTools();
 	}
 
 	/** Write the completion records into the current transcript and clear goal state. Synchronous. */
@@ -328,31 +369,46 @@ export class RpcGoalController {
 	}
 
 	async #reconcileOnce(options: { preserveActiveGoal?: boolean } | undefined): Promise<void> {
-		// Goal state and the goal tool belong to the session that set them; the
-		// session itself keeps both across a switch, so clear them here first.
+		// A snapshot from the source transcript must never overwrite the target's
+		// selection. SDK reconciliation restores creation for the target session.
 		this.#continuationScheduled = false;
 		this.#continuationGeneration++;
 		await this.#exitTask;
-		await this.#exit();
+		this.#previousTools = undefined;
+		this.#resetContinuation();
 		this.#session.setGoalModeState(undefined);
+		const sessionId = this.#session.sessionManager.getSessionId();
 		const context = this.#session.sessionManager.buildSessionContext();
 		const runtime = this.#session.goalRuntime;
 		if (context.mode !== "goal" && context.mode !== "goal_paused") {
 			runtime.clearAccounting();
+			await this.#session.reconcileBuiltinTools();
 			return;
 		}
-		const goal = cfgGoalEnabled.get(this.#session.settings) ? goalFromModeData(context.modeData) : undefined;
+		const goal = goalFromModeData(context.modeData);
 		if (!goal) {
 			runtime.clearAccounting();
 			this.#session.sessionManager.appendModeChange("none");
+			await this.#session.reconcileBuiltinTools();
 			return;
 		}
 		this.#session.setGoalModeState({ enabled: context.mode === "goal", mode: "active", goal });
 		const restored = await runtime.onThreadResumed({ preserveActiveGoal: options?.preserveActiveGoal });
-		if (!restored?.goal) return;
-		const previousTools = this.#session.getEnabledToolNames();
-		this.#previousTools = previousTools;
-		await this.#session.setActiveToolsByName([...new Set([...previousTools, "goal"])]);
+		const current = this.#session.getGoalModeState();
+		if (
+			this.#session.sessionManager.getSessionId() !== sessionId ||
+			!restored?.goal ||
+			!current ||
+			current.goal.id !== restored.goal.id
+		) {
+			return;
+		}
+		if (current.enabled && current.goal.status !== "paused") {
+			const previousTools = this.#session.getEnabledToolNames().filter(name => name !== "goal");
+			this.#previousTools = { sessionId, goalId: current.goal.id, tools: previousTools };
+			await this.#session.setActiveToolsByName([...previousTools, "goal"]);
+		}
+		await this.#session.reconcileBuiltinTools();
 	}
 
 	/**
@@ -366,12 +422,25 @@ export class RpcGoalController {
 			return;
 		}
 		if (event.type === "goal_updated") {
-			const status = event.state?.goal.status;
-			if (status === "dropped") {
-				this.#queueExit(() => this.#exit());
-			} else if (event.state?.enabled && this.#previousTools === undefined) {
-				// Created by the agent's `goal` tool rather than this controller.
-				this.#previousTools = this.#session.getEnabledToolNames();
+			const state = event.state;
+			const status = state?.goal.status;
+			const current = this.#session.getGoalModeState();
+			// A delayed notification from another goal must not touch this one's tools.
+			if (current?.goal.id !== state?.goal.id && (current || status !== "dropped")) return;
+			if (state && (status === "dropped" || status === "paused")) {
+				this.#queueExit(state.goal.id);
+			} else if (state?.enabled) {
+				// Native creation/replacement also owns a management-only snapshot.
+				const sessionId = this.#session.sessionManager.getSessionId();
+				const previous = this.#previousTools;
+				this.#previousTools = {
+					sessionId,
+					goalId: state.goal.id,
+					tools:
+						previous?.sessionId === sessionId
+							? previous.tools
+							: this.#session.getEnabledToolNames().filter(name => name !== "goal"),
+				};
 			}
 			return;
 		}
@@ -388,11 +457,12 @@ export class RpcGoalController {
 			this.#suppressContinuation = false;
 			this.#previousContinuationActivity = undefined;
 		}
-		if (this.#session.getGoalModeState()?.mode === "exiting") {
+		const state = this.#session.getGoalModeState();
+		if (state?.mode === "exiting") {
 			// Journal now, while the transcript is certainly the one that completed the
 			// goal; only the tool-set restore is queued (a later reconcile also restores it).
 			this.#journalCompletion();
-			this.#queueExit(() => this.#exit());
+			this.#queueExit(state.goal.id);
 			return;
 		}
 		this.#scheduleContinuation();

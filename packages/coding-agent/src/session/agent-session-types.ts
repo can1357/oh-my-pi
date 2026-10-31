@@ -310,7 +310,10 @@ export interface AgentSessionConfig {
 	/** Registers the hidden `goal` tool when goal mode is enabled at runtime. */
 	ensureGoalRegistered?: () => Promise<boolean>;
 	/** Re-resolves settings-gated tools against live settings; driven by `SessionTools.reconcileBuiltinTools`. */
-	reconcileSettingsGatedTools?: (isBuiltIn: (name: string) => boolean) => Promise<SettingsGatedToolDelta>;
+	reconcileSettingsGatedTools?: (
+		isBuiltIn: (name: string) => boolean,
+		isRuntimeSelected: (name: string) => boolean,
+	) => Promise<SettingsGatedToolDelta>;
 	/** Current session pre-LLM message transform pipeline. */
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	/** Provider request transform applied after message conversion. */

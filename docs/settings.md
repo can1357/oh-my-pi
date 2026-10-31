@@ -652,6 +652,36 @@ Mounting still follows the session's explicit tool allow-list. A session that pe
 
 Individual built-in tools and Eval preludes are toggled by their own keys, e.g. `bash.enabled`, `launch.enabled`, `eval.py`, `eval.js`, `glob.enabled`, `grep.enabled`, `fetch.enabled`, `browser.enabled`, `computer.enabled`, `ratchet.enabled` (default `false`; the `ratchet(flow)` eval/hillclimb prelude, which `/ratchet` turns on for the current session only), `archive.enabled` (default `true`; the read-only `archive` eval prelude over prompt history, recent projects, past sessions, and recaps), `astEdit.enabled`, `astGrep.enabled`, `find.enabled` (`auto`/`on`/`off`; `auto` enables `find` only when the `judge` role resolves to a native TypeSafe jev model), and `web_search.enabled`. Image questions use `read <image>?q=<question>` and honor `images.questionTimeoutMs`.
 
+### Goal mode
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `goal.enabled` | boolean | `true` | Permit starting and resuming goals. An existing active goal remains readable, completable, and droppable when this is turned off. |
+| `goal.toolDefault` | boolean | `false` | Offer the native `goal` tool in unrestricted top-level sessions so the agent can start a goal without a slash command. |
+| `goal.continuationModes` | array | `["interactive"]` | Run modes where an active goal may automatically continue. See [RPC goal mode](./rpc.md#goal-payload) before enabling `"rpc"`. |
+
+To opt into agent-started goals:
+
+```yaml
+goal:
+  enabled: true
+  toolDefault: true
+```
+
+The default remains manual activation through `/goal` or `/guided-goal`. An explicit
+`--tools=read,goal` also grants the tool; `goal.toolDefault` does not widen an explicit
+tool list that omits it, an empty list, or a restricted subagent's tools.
+
+These settings apply to existing sessions as well as new launches. Pausing a goal
+hides its tool until the host resumes or drops it. After completion or drop, creation
+availability follows the session's live settings and original tool selection. New
+and switched sessions retain the destination's tool policy.
+Turning `goal.enabled` off does not pause or drop an existing goal; use `/goal pause`
+or `/goal drop` to stop that goal explicitly.
+
+Native `create` and `resume` refuse active or paused plan mode and active vibe mode.
+Offering the tool does not create a goal automatically or enable automatic continuation in RPC.
+
 ### Window-scoped computer use
 
 The disabled-by-default `computer` Eval prelude captures and controls real host windows through native OS APIs. Window handles isolate an application without focusing it or moving the real pointer; the `desktop` object preserves selected-display composite and global input behavior. It remains separate from the `browser` Eval prelude, which manages Chromium/CDP tabs and structured page automation.

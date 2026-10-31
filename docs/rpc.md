@@ -589,9 +589,21 @@ including those made by the agent's `goal` tool.
 - `create` needs `goal.enabled`, a non-empty `objective`, and no active or paused
   goal. It is refused in plan mode, and `token_budget` must be a positive integer.
   It adds the `goal` tool to the active tools.
-- `resume` resumes a paused goal (refused in plan mode). `pause` and `drop` restore
-  the active tools from before the goal started.
+- `resume` resumes a paused goal (refused in plan mode). `pause` hides the agent's
+  `goal` tool until the host resumes or drops the goal.
+- `drop` restores the non-goal tools. After drop or completion, the agent can
+  create another goal only if `goal.toolDefault` or an explicit tool selection
+  opts into it. The default remains host-controlled activation.
 - Failures are ordinary `success: false` responses.
+
+On drop, `goal_updated` carries the final dropped-goal snapshot. The authoritative
+goal state has already been cleared when observers receive that event.
+
+The agent's native goal tool also refuses disabled creation/resume, active or
+paused plan mode, and active vibe mode.
+`goal.toolDefault` changes tool availability, not the RPC command contract or
+automatic continuation policy. Live setting changes and session transitions
+reconcile availability without discarding an existing goal's management controls.
 
 Goals do not continue on their own over RPC unless `goal.continuationModes`
 contains `"rpc"`; this covers both `--mode rpc` and `--mode rpc-ui`. When enabled,
@@ -621,8 +633,8 @@ turn, sent as a hidden `goal-continuation` message.
   navigation, reopening the open session), the goal continues. While such a turn is
   held, the session is not reported as settled.
 
-When the agent completes the goal, the goal tool is removed again and
-`get_state.goal` becomes `null`.
+When the agent completes the goal, `get_state.goal` becomes `null`. Tool
+availability then follows the same opt-in policy as after a drop.
 
 ### `set_slow_mode` payload
 
