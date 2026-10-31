@@ -18,6 +18,7 @@
  * then artifact tree), the reverse of what the archive phase does, so both
  * hold `<agentDir>/gc.lock` while they do it.
  */
+import { randomBytes } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { constants as fsConstants, type Stats } from "node:fs";
 import * as path from "node:path";
@@ -99,6 +100,88 @@ export function agentDirOfArchivedPath(archiveFile: string): string | undefined 
  */
 export function restoreRecordPath(archiveFile: string): string {
 	return `${archiveFile}.restoring`;
+}
+
+/** How every restore record begins: the command that finishes the restore. */
+const RESTORE_RECORD_START = "omp gc --restore ";
+
+/**
+ * Why the name of a restore record cannot take one, or undefined when it can:
+ * when nothing is there, or a regular file that reads as a record a restore
+ * wrote — its first line the command that finishes the restore. A link, a
+ * FIFO, a device or a directory there, or a file holding anything else, is
+ * not a record a restore wrote: the name being the expected one is not
+ * evidence that what holds it is ours. Nothing is written through it,
+ * waited on, replaced or removed in its place; the caller refuses, naming
+ * it. `lstat`, so a link is judged as the link, and the file is read through
+ * a descriptor that neither follows a link nor waits on a FIFO.
+ */
+export async function restoreRecordRefusal(record: string): Promise<string | undefined> {
+	const standing = await fs.lstat(record).catch((error: unknown) => {
+		if (isEnoent(error)) return undefined;
+		throw error;
+	});
+	if (!standing) return undefined;
+	const refuse = (what: string): string =>
+		`${record}, where a restore keeps its record of being unfinished, ${what}, not a record a restore wrote, ` +
+		`so nothing was restored and nothing was written to it; look at it, move it aside, and run the same command again`;
+	if (!standing.isFile()) {
+		return refuse(
+			standing.isSymbolicLink()
+				? "is a symbolic link"
+				: standing.isDirectory()
+					? "is a directory"
+					: standing.isFIFO()
+						? "is a FIFO"
+						: "is not a regular file",
+		);
+	}
+	let text: string;
+	try {
+		const handle = await openRegularFile(record);
+		if (!handle) return refuse("is not a regular file");
+		try {
+			text = await handle.readFile("utf8");
+		} finally {
+			await handle.close().catch(() => undefined);
+		}
+	} catch (error) {
+		return refuse(`could not be read (${errorText(error)})`);
+	}
+	return text.startsWith(RESTORE_RECORD_START) ? undefined : refuse("holds something else");
+}
+
+/**
+ * Put `text` at a restore record's name without writing through what stands
+ * there: into a file made for it alone, then renamed over the name, which
+ * replaces a name and never writes into another file.
+ */
+export async function writeRestoreRecord(record: string, text: string): Promise<void> {
+	const refused = await restoreRecordRefusal(record);
+	if (refused) throw new Error(refused);
+	await fs.mkdir(path.dirname(record), { recursive: true });
+	const fresh = `${record}.${randomBytes(8).toString("hex")}.tmp`;
+	const handle = await fs.open(fresh, "wx", 0o600);
+	try {
+		await handle.writeFile(text);
+	} finally {
+		await handle.close().catch(() => undefined);
+	}
+	try {
+		await fs.rename(fresh, record);
+	} catch (error) {
+		await fs.unlink(fresh).catch(() => undefined);
+		throw error;
+	}
+}
+
+/** Take a restore record's name down, removing only a regular file there. */
+export async function dropRestoreRecord(record: string): Promise<void> {
+	const refused = await restoreRecordRefusal(record);
+	if (refused) throw new Error(refused);
+	await fs.unlink(record).catch((error: unknown) => {
+		if (!isEnoent(error)) throw error;
+	});
 }
 
 /**
@@ -1306,7 +1389,11 @@ function parseStagingRecord(text: string): StagingRecord {
 		typeof entry !== "object" ||
 		entry === null ||
 		!("dir" in entry && typeof entry.dir === "string") ||
-		!("file" in entry && typeof entry.file === "string")
+		!("file" in entry && typeof entry.file === "string") ||
+		// A run records the absolute paths it made; a relative one would be
+		// read against whatever directory the reader happens to run in.
+		!path.isAbsolute(entry.dir) ||
+		!path.isAbsolute(entry.file)
 	) {
 		throw new Error("not a staging record");
 	}
@@ -1488,13 +1575,29 @@ export async function stagingResidueUnder(
 	agentDir: string,
 	root: string,
 ): Promise<(entry: string) => string | undefined> {
+	const residue = await recordedStagingByPath(agentDir, root);
+	return entry => residue.get(path.relative(root, entry));
+}
+
+/**
+ * Every recorded staging directory inside `root`, with the record that names
+ * it — what {@link stagingResidueUnder} answers one entry at a time.
+ */
+export async function recordedStagingIn(agentDir: string, root: string): Promise<{ dir: string; record: string }[]> {
+	return [...(await recordedStagingByPath(agentDir, root))]
+		.sort(([a], [b]) => a.localeCompare(b))
+		.map(([relative, record]) => ({ dir: path.join(root, relative), record }));
+}
+
+/** Recorded staging directories inside `root`, by their path under it, each with its record. */
+async function recordedStagingByPath(agentDir: string, root: string): Promise<Map<string, string>> {
+	const residue = new Map<string, string>();
 	const { records, failure } = await readStagingRecords(agentDir);
 	if (failure) throw new Error(`${failure}; staging residue cannot be told from artifacts, so nothing was carried`);
-	if (records.length === 0) return () => undefined;
+	if (records.length === 0) return residue;
 	const realRoot = await fs.realpath(root).catch(() => undefined);
-	if (realRoot === undefined) return () => undefined;
+	if (realRoot === undefined) return residue;
 	const roots = await stagingRoots(agentDir);
-	const residue = new Map<string, string>();
 	for (const { path: record, entry } of records) {
 		// A record written before its run made the directory names one that
 		// run may have made; leaving it out of the live tree is all a record
@@ -1506,34 +1609,55 @@ export async function stagingResidueUnder(
 		const relative = path.relative(realRoot, real);
 		if (relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative)) residue.set(relative, record);
 	}
-	return entry => residue.get(path.relative(root, entry));
+	return residue;
 }
 
 /**
- * What is said about a directory a staging record makes a restore leave in
- * the archive, and how to recover. It never advises removing the directory:
- * a record is not proof a run made it. The recovery for one a killed gc run
- * left is the one a review ran on a genuine killed archive: the directory,
- * then its record, moved into one new directory outside both session trees,
- * then the restore run again — which then finishes, with the partial stage
- * kept where it was put and none of it carried home. Moving the record alone
- * would turn the directory into an artifact the restore carries home.
+ * What is said about a directory a staging record names, where a command
+ * found it — `consequence` says what that command does about it — and how to
+ * recover. It never advises removing the directory: a record is not proof a
+ * run made it. The recovery for one a killed gc run left is the one a review
+ * ran on a genuine killed archive: the directory, then its record, moved
+ * into one new directory outside both session trees, then the command run
+ * again — which then finishes, with the partial stage kept where it was put
+ * and none of it carried home. Moving the record alone would turn the
+ * directory into an artifact gc carries.
+ *
+ * The example command makes that new directory with one plain `mkdir`
+ * directly in the agent directory: `mkdir` fails on any name already there,
+ * a link included, so nothing standing at that name can redirect it. The
+ * agent directory's own real path is checked here against both session
+ * trees, and when it lies inside one no command is given at all: a printed
+ * `mv` cannot check where it moves something, so this checks first.
  */
-export function stagingResidueNote(dir: string, record: string): string {
-	const aside = path.join(path.dirname(path.dirname(record)), "gc-quarantine", path.basename(record, ".json"));
-	const move =
-		`mkdir -p ${shellQuote(path.dirname(aside))} && mkdir ${shellQuote(aside)} && ` +
-		`mv ${shellQuote(dir)} ${shellQuote(aside)}/ && mv ${shellQuote(record)} ${shellQuote(aside)}/`;
+export async function stagingResidueNote(dir: string, record: string, consequence: string): Promise<string> {
+	const agentDir = path.dirname(path.dirname(record));
+	const roots = await stagingRoots(agentDir);
+	const trees = roots.length > 0 ? roots.join(" and ") : "the sessions tree and the archive";
+	const realAgentDir = await fs.realpath(agentDir).catch(() => undefined);
+	const aside = path.join(agentDir, `gc-quarantine-${path.basename(record, ".json")}`);
+	const example =
+		realAgentDir !== undefined && !roots.some(root => isWithin(root, realAgentDir))
+			? `for example \`mkdir ${shellQuote(aside)} && mv ${shellQuote(dir)} ${shellQuote(aside)}/ && ` +
+				`mv ${shellQuote(record)} ${shellQuote(aside)}/\`, where \`mkdir\` makes that directory new, directly in ` +
+				`${agentDir}, and stops it if anything already has that name`
+			: `no example is given here, because ${agentDir} resolves to ${realAgentDir ?? "a path that could not be read"}, ` +
+				`inside a session tree`;
 	return (
-		`${dir} is named by the staging record ${record}, so a restore leaves it in the archive, where it is, and does not finish. ` +
-		`If a killed gc run left it: 1. stop any gc run and any use of this session; 2. look at the record and the directory; ` +
-		`3. move the directory into a new directory outside both session trees; 4. move the record into the same directory — ` +
-		`for example \`${move}\`, where the second \`mkdir\` stops it if that directory already exists — and leave ` +
-		`the restore's \`.restoring\` record where it is; 5. run the same restore again. Moving the record without the directory ` +
-		`makes the restore carry the directory home as an artifact. If no gc run made the directory, move only the record out ` +
-		`of ${path.dirname(record)} and restore again`
+		`${dir} is named by the staging record ${record}, ${consequence}. If a killed gc run left it: 1. stop any gc run ` +
+		`and any use of this session; 2. look at the record and the directory; 3. move the directory into a new directory ` +
+		`whose real path is outside both session trees, ${trees}; 4. move the record into the same directory — ${example} ` +
+		`— and leave any \`.restoring\` record where it is; 5. run the same command again. Moving the record without the ` +
+		`directory makes gc take the directory for an artifact. If no gc run made the directory, move only the record out ` +
+		`of ${path.dirname(record)} and run the same command again`
 	);
 }
+
+/** What a restore says about a recorded staging directory in the archived tree. */
+export const ARCHIVED_RESIDUE = "so a restore leaves it in the archive, where it is, and does not finish";
+/** What a restore says about a recorded staging directory in the live tree. */
+export const LIVE_RESIDUE =
+	"in the live artifact tree, where a killed restore leaves its stage, so a restore does not finish while it is there";
 
 /**
  * Archived paths with no live counterpart, as relative names.
@@ -1597,7 +1721,7 @@ export async function artifactRestoreConflicts(
 		if (!stat) return;
 		const record = isResidue(source);
 		if (record !== undefined) {
-			conflicts.push(stagingResidueNote(source, record));
+			conflicts.push(await stagingResidueNote(source, record, ARCHIVED_RESIDUE));
 			return;
 		}
 		const existing = await fs.lstat(destination).catch(() => undefined);
@@ -1629,6 +1753,10 @@ export async function artifactRestoreConflicts(
 		);
 	};
 	await visit(archiveArtifacts, liveArtifacts);
+	// A killed restore stages in the live tree, so its residue is there.
+	for (const { dir, record } of await recordedStagingIn(agentDir, liveArtifacts)) {
+		conflicts.push(await stagingResidueNote(dir, record, LIVE_RESIDUE));
+	}
 	return conflicts;
 }
 
@@ -1974,8 +2102,7 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 		// when everything is home. Nothing that runs later has to work out from
 		// the live tree whether this finished, which is the question every
 		// earlier version of this got wrong in both directions.
-		await fs.mkdir(path.dirname(record), { recursive: true });
-		await fs.writeFile(record, `${restoreCommand}\n`);
+		await writeRestoreRecord(record, `${restoreCommand}\n`);
 		const notes: string[] = [];
 		let bytes: number;
 		if (await statIfPresent(sessionPath)) {
@@ -2026,19 +2153,26 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 				// is named, the record stays down and the command fails. The
 				// directory stays in the archive, and nothing here suggests
 				// removing it.
-				for (const [dir, staging] of leftOut) notRestored.push(stagingResidueNote(dir, staging));
-				artifactsRestored = leftOut.length === 0;
+				for (const [dir, staging] of leftOut)
+					notRestored.push(await stagingResidueNote(dir, staging, ARCHIVED_RESIDUE));
+				// A restore killed while it staged left its stage in the live
+				// tree; until that is moved out, this restore has not finished.
+				const residue = await recordedStagingIn(stagingAgentDir, liveArtifacts);
+				for (const { dir, record: staging } of residue) {
+					notRestored.push(await stagingResidueNote(dir, staging, LIVE_RESIDUE));
+				}
+				artifactsRestored = leftOut.length === 0 && residue.length === 0;
 			} catch (error) {
 				notRestored.push(
-					`the artifact tree (subagent transcripts, tool output) at ${archiveArtifacts}: ${
+					`the artifact tree (subagent transcripts, tool output) at ${archiveArtifacts} was not restored whole: ${
 						error instanceof Error ? error.message : String(error)
 					}`,
 				);
 			}
 		}
 		notRestored.push(...notes);
-		if (notRestored.length === 0) await fs.rm(record, { force: true });
-		else await fs.writeFile(record, `${restoreCommand}\n${notRestored.join("\n")}\n`);
+		if (notRestored.length === 0) await dropRestoreRecord(record);
+		else await writeRestoreRecord(record, `${restoreCommand}\n${notRestored.join("\n")}\n`);
 		return { sessionPath, archivePath: archiveFile, bytes, artifactsRestored, notRestored };
 	} finally {
 		leases.release();
@@ -2134,7 +2268,7 @@ export async function materializeSessionFile(sessionFile: string, agentDir?: str
 		const stem = path.basename(restored.sessionPath, SESSION_SUFFIX);
 		const retry = `omp gc --restore ${shellQuote(stem.slice(stem.lastIndexOf("_") + 1) || stem)} --apply${agentDirFlag(agentDir ?? agentDirOfArchivedPath(archived) ?? getAgentDir())}`;
 		throw new Error(
-			`Restored the transcript of "${archived}" to ${restored.sessionPath}, but could not restore ${restored.notRestored.join("; ")}. ` +
+			`Restored the transcript of "${archived}" to ${restored.sessionPath}, but the restore did not finish: ${restored.notRestored.join("; ")}. ` +
 				`The archive is kept; \`${retry}\` retries it once the path is clear.`,
 		);
 	}
