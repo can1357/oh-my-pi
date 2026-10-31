@@ -1,16 +1,9 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { clearClaudePluginRootsCache } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
-import { discoverCustomToolPaths, loadCustomTools } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/loader";
-import { discoverAndLoadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
-import { __closeExtensionParseCacheForTests } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
-import {
-	getAllPluginExtensionPaths,
-	getAllPluginToolPaths,
-} from "@oh-my-pi/pi-coding-agent/extensibility/plugins/loader";
-import { __resetDirsFromEnvForTests, getPluginsDir, removeWithRetries } from "@oh-my-pi/pi-utils";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import type { RunnerResult, RunnerScenario } from "./plugin-bin-path.runner";
 
 // A plugin's `bin` directories go on PATH under the plugin's installed path,
 // never its realpath, before any of its modules evaluates. A plugins root that
@@ -20,85 +13,87 @@ import { __resetDirsFromEnvForTests, getPluginsDir, removeWithRetries } from "@o
 // session and its children keep the PATH they got, so a realpath entry would
 // leave them without the plugin's commands.
 //
-// Each case loads plugins the way a session does, from an isolated home whose
-// `.omp/plugins` it builds, starting from a known PATH.
+// Each case builds a home and loads plugins by one route in a child process
+// (plugin-bin-path.runner.ts) whose environment holds only HOME, TMPDIR and
+// the case's PATH: the process's own directory state, nothing patched here.
 
+const RUNNER = path.join(import.meta.dir, "plugin-bin-path.runner.ts");
 const BASE_PATH = ["/usr/bin", "/bin"].join(path.delimiter);
-const xdgVars = ["XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"] as const;
+// A child process imports the coding agent from cold, about 6 s here.
+setDefaultTimeout(120_000);
 
 describe.skipIf(process.platform === "win32")("plugin bin directories on PATH", () => {
-	let originalEnv: Record<string, string | undefined> = {};
 	let root = "";
 	let home = "";
 	let cwd = "";
 	let pluginsDir = "";
 
 	beforeEach(async () => {
-		originalEnv = { ...process.env };
-		process.env.PATH = BASE_PATH;
 		root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "omp-plugin-bin-")));
 		home = path.join(root, "home");
 		cwd = path.join(root, "cwd");
+		pluginsDir = path.join(home, ".omp", "plugins");
 		await fs.mkdir(path.join(home, ".omp"), { recursive: true });
 		await fs.mkdir(cwd, { recursive: true });
-		// Only environment changes, so the restore below is exact: no XDG roots, no
-		// Claude config override, no profile, and the agent dir in the temp home.
-		for (const key of [...xdgVars, "CLAUDE_CONFIG_DIR", "OMP_PROFILE", "PI_PROFILE"]) delete process.env[key];
-		process.env.PI_CODING_AGENT_DIR = path.join(home, ".omp", "agent");
-		spyOn(os, "homedir").mockReturnValue(home);
-		__resetDirsFromEnvForTests();
-		pluginsDir = getPluginsDir();
-		if (pluginsDir !== path.join(home, ".omp", "plugins")) {
-			throw new Error(`plugin isolation failed: getPluginsDir() resolved to ${pluginsDir}`);
-		}
 	});
 
 	afterEach(async () => {
-		// Put back exactly the environment the case started with, then rebuild the
-		// directory and profile state from it.
-		for (const key of Object.keys(process.env)) {
-			if (!(key in originalEnv)) delete process.env[key];
-		}
-		for (const [key, value] of Object.entries(originalEnv)) {
-			if (value === undefined) delete process.env[key];
-			else process.env[key] = value;
-		}
-		spyOn(os, "homedir").mockRestore();
-		__resetDirsFromEnvForTests();
-		for (const key of Object.keys(globalThis)) {
-			if (key.startsWith("__ompBinProbe_")) delete (globalThis as Record<string, unknown>)[key];
-		}
-		clearClaudePluginRootsCache();
-		__closeExtensionParseCacheForTests();
 		await removeWithRetries(root);
 	});
+
+	/** Run one route in a child process whose environment holds only HOME, TMPDIR and this PATH. */
+	async function run(scenario: Omit<RunnerScenario, "cwd">, PATH: string = BASE_PATH) {
+		const env: Record<string, string> = { HOME: home, TMPDIR: os.tmpdir(), PATH };
+		const child = Bun.spawn([process.execPath, RUNNER, JSON.stringify({ ...scenario, cwd })], {
+			cwd: import.meta.dir,
+			env,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [exitCode, stdout, stderr] = await Promise.all([
+			child.exited,
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+		]);
+		if (exitCode !== 0) throw new Error(`runner exited ${exitCode}: ${stderr}`);
+		const result = JSON.parse(stdout.trim().split("\n").at(-1) ?? "") as RunnerResult;
+		expect(result.pluginsDir).toBe(pluginsDir);
+		return result;
+	}
 
 	async function writeJson(filePath: string, value: unknown): Promise<void> {
 		await Bun.write(filePath, `${JSON.stringify(value)}\n`);
 	}
 
 	/**
-	 * A plugin package with an executable `<name>-probe` in `bin/`. Its module
-	 * runs the probe when it evaluates and records what it printed, so a case can
-	 * tell whether PATH held the directory before the module loaded.
+	 * A plugin package with an executable `<name>-probe` in `bin/`, an extension
+	 * (`ext.js`) and a tool (`tool.js`). Each module runs the probe when it
+	 * evaluates and records what it printed, so a case can tell whether PATH held
+	 * the directory before the module loaded.
 	 */
 	async function writeBinPlugin(dir: string, name: string, manifest: Record<string, unknown>): Promise<void> {
 		await fs.mkdir(path.join(dir, "bin"), { recursive: true });
 		const probe = path.join(dir, "bin", `${name}-probe`);
 		await Bun.write(probe, `#!/bin/sh\necho "${name} ran"\n`);
 		await fs.chmod(probe, 0o755);
-		await Bun.write(
-			path.join(dir, "module.js"),
-			`const run = Bun.spawnSync(["sh", "-c", ${JSON.stringify(`${name}-probe`)}], { env: { PATH: process.env.PATH } });
+		const runProbe = `const run = Bun.spawnSync(["sh", "-c", ${JSON.stringify(`${name}-probe`)}], { env: { PATH: process.env.PATH } });
 globalThis[${JSON.stringify(`__ompBinProbe_${name}`)}] = run.stdout.toString();
-export default function () {}
+`;
+		await Bun.write(path.join(dir, "ext.js"), `${runProbe}export default function () {}\n`);
+		await Bun.write(
+			path.join(dir, "tool.js"),
+			`${runProbe}export default function (pi) {
+	return {
+		name: ${JSON.stringify(`${name}_probe`)},
+		label: ${JSON.stringify(name)},
+		description: "Runs nothing; its module ran the probe.",
+		parameters: pi.typebox.Type.Object({}),
+		execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+	};
+}
 `,
 		);
 		await writeJson(path.join(dir, "package.json"), { name, version: "1.0.0", omp: { bin: ["bin"], ...manifest } });
-	}
-
-	function probeAtLoad(name: string): unknown {
-		return (globalThis as Record<string, unknown>)[`__ompBinProbe_${name}`];
 	}
 
 	async function declare(dependencies: string[], linked: string[] = []): Promise<void> {
@@ -115,20 +110,21 @@ export default function () {}
 		}
 	}
 
+	const binOf = (name: string) => path.join(pluginsDir, "node_modules", name, "bin");
+
 	test("a plugin under a symlinked plugins root keeps its command after the link moves and the old target is removed", async () => {
 		// ~/.omp/plugins -> <root>/deploy/current/plugins, current -> v1
 		const v1Plugins = path.join(root, "deploy", "v1", "plugins");
-		await writeBinPlugin(path.join(v1Plugins, "node_modules", "rotating"), "rotating", { extensions: ["module.js"] });
+		await writeBinPlugin(path.join(v1Plugins, "node_modules", "rotating"), "rotating", { extensions: ["ext.js"] });
 		await writeJson(path.join(v1Plugins, "package.json"), { dependencies: { rotating: "1.0.0" } });
 		await fs.symlink("v1", path.join(root, "deploy", "current"));
 		await fs.symlink(path.join(root, "deploy", "current", "plugins"), pluginsDir);
 
-		const result = await discoverAndLoadExtensions([], cwd);
+		const result = await run({ route: "session" });
 
 		expect(result.errors).toEqual([]);
-		expect(probeAtLoad("rotating")).toBe("rotating ran\n");
-		const installedBin = path.join(pluginsDir, "node_modules", "rotating", "bin");
-		expect(process.env.PATH).toBe([installedBin, BASE_PATH].join(path.delimiter));
+		expect(result.probes).toEqual({ rotating: "rotating ran\n" });
+		expect(result.PATH).toBe([binOf("rotating"), BASE_PATH].join(path.delimiter));
 
 		// Publish v2 the way a versioned deployment does: re-point `current`, remove v1.
 		await fs.cp(path.join(root, "deploy", "v1"), path.join(root, "deploy", "v2"), { recursive: true });
@@ -136,65 +132,87 @@ export default function () {}
 		await fs.rename(path.join(root, "deploy", "current.next"), path.join(root, "deploy", "current"));
 		await fs.rm(path.join(root, "deploy", "v1"), { recursive: true });
 
-		const run = Bun.spawnSync(["sh", "-c", "rotating-probe"], { env: { PATH: process.env.PATH } });
-		expect(run.stdout.toString()).toBe("rotating ran\n");
-		expect(run.exitCode).toBe(0);
+		const probe = Bun.spawnSync(["sh", "-c", "rotating-probe"], { env: { PATH: result.PATH ?? "" } });
+		expect(probe.stdout.toString()).toBe("rotating ran\n");
+		expect(probe.exitCode).toBe(0);
 	});
 
-	test("a plugin tool module finds the plugin's command on PATH when it evaluates", async () => {
+	test("a plugin tool module finds the plugin's command on PATH when it evaluates, and loads", async () => {
 		const realPlugins = path.join(root, "deploy", "v1", "plugins");
-		await writeBinPlugin(path.join(realPlugins, "node_modules", "tooling"), "tooling", { tools: "module.js" });
+		await writeBinPlugin(path.join(realPlugins, "node_modules", "tooling"), "tooling", { tools: "tool.js" });
 		await writeJson(path.join(realPlugins, "package.json"), { dependencies: { tooling: "1.0.0" } });
 		await fs.symlink(realPlugins, pluginsDir);
 
-		await loadCustomTools(await discoverCustomToolPaths([], cwd), cwd, []);
+		const result = await run({ route: "tools" });
 
-		expect(probeAtLoad("tooling")).toBe("tooling ran\n");
-		expect(process.env.PATH).toBe(
-			[path.join(pluginsDir, "node_modules", "tooling", "bin"), BASE_PATH].join(path.delimiter),
-		);
+		expect(result.toolErrors).toEqual([]);
+		expect(result.tools).toContain("tooling_probe");
+		expect(result.probes).toEqual({ tooling: "tooling ran\n" });
+		expect(result.PATH).toBe([binOf("tooling"), BASE_PATH].join(path.delimiter));
+	});
+
+	test("an SDK caller that selects plugin paths itself gets the directories on PATH", async () => {
+		await writeBinPlugin(path.join(pluginsDir, "node_modules", "preload"), "preload", {
+			extensions: ["ext.js"],
+			tools: "tool.js",
+		});
+		await declare(["preload"]);
+
+		// What a caller passing preloadedExtensionPaths / preloadedCustomToolPaths selects.
+		const result = await run({ route: "selectors" });
+
+		expect(result.selected).toEqual([
+			path.join(pluginsDir, "node_modules", "preload", "ext.js"),
+			path.join(pluginsDir, "node_modules", "preload", "tool.js"),
+		]);
+		expect(result.PATH).toBe([binOf("preload"), BASE_PATH].join(path.delimiter));
+	});
+
+	test("install validation puts the candidate's directories on PATH before its extension evaluates", async () => {
+		await writeJson(path.join(pluginsDir, "package.json"), { name: "omp-plugins", private: true, dependencies: {} });
+		const source = path.join(root, "source", "candidate");
+		await writeBinPlugin(source, "candidate", { extensions: ["ext.js"] });
+
+		const result = await run({ route: "install", installSource: source, installName: "candidate" });
+
+		expect(result.errors).toEqual([]);
+		expect(result.probes).toEqual({ candidate: "candidate ran\n" });
+		expect(result.PATH).toBe([binOf("candidate"), BASE_PATH].join(path.delimiter));
 	});
 
 	test("two names for one plugin directory load one extension and put one entry on PATH, under the first name", async () => {
 		const alpha = path.join(pluginsDir, "node_modules", "alpha");
-		await writeBinPlugin(alpha, "alpha", { extensions: ["module.js"] });
+		await writeBinPlugin(alpha, "alpha", { extensions: ["ext.js"] });
 		// `omp plugin link` of the same directory under a second name.
 		await fs.symlink(alpha, path.join(pluginsDir, "node_modules", "beta"));
 		await declare(["alpha"], ["beta"]);
 
-		const result = await discoverAndLoadExtensions([], cwd);
+		const result = await run({ route: "session" });
 
-		expect(result.extensions.map(extension => extension.path)).toEqual([path.join(alpha, "module.js")]);
-		expect(process.env.PATH).toBe([path.join(alpha, "bin"), BASE_PATH].join(path.delimiter));
+		expect(result.extensions).toEqual([path.join(alpha, "ext.js")]);
+		expect(result.PATH).toBe([path.join(alpha, "bin"), BASE_PATH].join(path.delimiter));
 	});
 
 	test("an inherited PATH entry naming the realpath does not stand in for the installed path", async () => {
 		const realPlugins = path.join(root, "deploy", "v1", "plugins");
-		await writeBinPlugin(path.join(realPlugins, "node_modules", "gamma"), "gamma", { extensions: ["module.js"] });
+		await writeBinPlugin(path.join(realPlugins, "node_modules", "gamma"), "gamma", { extensions: ["ext.js"] });
 		await writeJson(path.join(realPlugins, "package.json"), { dependencies: { gamma: "1.0.0" } });
 		await fs.symlink(realPlugins, pluginsDir);
 		// What a process started by an older session inherits: the realpath entry.
 		const realBin = path.join(realPlugins, "node_modules", "gamma", "bin");
-		process.env.PATH = [realBin, BASE_PATH].join(path.delimiter);
 
-		await discoverAndLoadExtensions([], cwd);
+		const result = await run({ route: "session" }, [realBin, BASE_PATH].join(path.delimiter));
 
-		expect(process.env.PATH).toBe(
-			[path.join(pluginsDir, "node_modules", "gamma", "bin"), realBin, BASE_PATH].join(path.delimiter),
-		);
+		expect(result.PATH).toBe([binOf("gamma"), realBin, BASE_PATH].join(path.delimiter));
 	});
 
 	test("an installed bin directory already on PATH is not added again", async () => {
-		await writeBinPlugin(path.join(pluginsDir, "node_modules", "delta"), "delta", { extensions: ["module.js"] });
+		await writeBinPlugin(path.join(pluginsDir, "node_modules", "delta"), "delta", { extensions: ["ext.js"] });
 		await declare(["delta"]);
 
-		await discoverAndLoadExtensions([], cwd);
-		clearClaudePluginRootsCache();
-		await discoverAndLoadExtensions([], cwd);
+		const result = await run({ route: "twice" });
 
-		expect(process.env.PATH).toBe(
-			[path.join(pluginsDir, "node_modules", "delta", "bin"), BASE_PATH].join(path.delimiter),
-		);
+		expect(result.PATH).toBe([binOf("delta"), BASE_PATH].join(path.delimiter));
 	});
 
 	test("a bin entry that is not a directory adds nothing", async () => {
@@ -208,24 +226,19 @@ export default function () {}
 		});
 		await declare(["epsilon"]);
 
-		await discoverAndLoadExtensions([], cwd);
-
-		expect(process.env.PATH).toBe(BASE_PATH);
+		expect((await run({ route: "session" })).PATH).toBe(BASE_PATH);
 	});
 
 	test("empty PATH entries survive, and an unset PATH gets only the plugin's directories", async () => {
 		await writeBinPlugin(path.join(pluginsDir, "node_modules", "zeta"), "zeta", {});
 		await declare(["zeta"]);
-		const bin = path.join(pluginsDir, "node_modules", "zeta", "bin");
+		const bin = binOf("zeta");
 		const d = path.delimiter;
 
-		const outcomes: Array<[string | undefined, string | undefined]> = [];
+		const outcomes: Array<[string | undefined, string | null]> = [];
 		for (const inherited of ["", `${d}/usr/bin${d}`, undefined]) {
-			if (inherited === undefined) delete process.env.PATH;
-			else process.env.PATH = inherited;
-			clearClaudePluginRootsCache();
-			await discoverAndLoadExtensions([], cwd);
-			outcomes.push([inherited, process.env.PATH]);
+			const result = await run({ route: "session", unsetPath: inherited === undefined }, inherited ?? BASE_PATH);
+			outcomes.push([inherited, result.PATH]);
 		}
 
 		expect(outcomes).toEqual([
@@ -236,34 +249,15 @@ export default function () {}
 	});
 
 	test("an explicit-only extension load adds no ambient plugin's directories", async () => {
-		await writeBinPlugin(path.join(pluginsDir, "node_modules", "ambient"), "ambient", { extensions: ["module.js"] });
+		await writeBinPlugin(path.join(pluginsDir, "node_modules", "ambient"), "ambient", { extensions: ["ext.js"] });
 		await declare(["ambient"]);
 		const explicit = path.join(root, "explicit.js");
 		await Bun.write(explicit, "export default function () {}\n");
 
-		const result = await discoverAndLoadExtensions([explicit], cwd, undefined, undefined, { ambient: false });
+		const result = await run({ route: "explicit", explicitPath: explicit });
 
-		expect(result.extensions.map(extension => extension.path)).toEqual([explicit]);
-		expect(probeAtLoad("ambient")).toBeUndefined();
-		expect(process.env.PATH).toBe(BASE_PATH);
-	});
-
-	test("an SDK caller that selects plugin paths itself gets the directories on PATH", async () => {
-		await writeBinPlugin(path.join(pluginsDir, "node_modules", "preload"), "preload", {
-			extensions: ["module.js"],
-			tools: "module.js",
-		});
-		await declare(["preload"]);
-
-		// What a caller passing preloadedExtensionPaths / preloadedCustomToolPaths selects.
-		const selected = [...(await getAllPluginExtensionPaths(cwd)), ...(await getAllPluginToolPaths(cwd))];
-
-		expect(selected).toEqual([
-			path.join(pluginsDir, "node_modules", "preload", "module.js"),
-			path.join(pluginsDir, "node_modules", "preload", "module.js"),
-		]);
-		expect(process.env.PATH).toBe(
-			[path.join(pluginsDir, "node_modules", "preload", "bin"), BASE_PATH].join(path.delimiter),
-		);
+		expect(result.extensions).toEqual([explicit]);
+		expect(result.probes).toEqual({});
+		expect(result.PATH).toBe(BASE_PATH);
 	});
 });

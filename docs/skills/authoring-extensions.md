@@ -147,7 +147,7 @@ An installed plugin that ships commands for the agent's shell declares their dir
 }
 ```
 
-omp puts the directory at the front of `PATH` under the plugin's installed path before the plugin's modules load. Do not build that entry from `import.meta.url` or `__dirname`: a module's location is its realpath, and when a symlinked plugins root (a dotfiles link, a marketplace upgrade) is re-pointed and the old target removed, a running session loses every command on a realpath entry.
+When omp selects an enabled installed plugin's extensions or tools to load (ambient discovery, or a caller using `getAllPluginExtensionPaths()` / `getAllPluginToolPaths()`), and when it validates a plugin at install, it puts the plugin's `bin` directories at the front of `PATH` under the installed path, before any selected module is imported. A module file loaded by its path (for example with `--extension` or `--trusted-extension`) is not a plugin selection and adds no `bin` directory. Do not build a `PATH` entry from `import.meta.url` or `__dirname`: a module's location is its realpath, and when a symlinked plugins root (a dotfiles link, a marketplace upgrade) is re-pointed and the old target removed, a running session loses every command on a realpath entry.
 
 ## Registering commands
 
