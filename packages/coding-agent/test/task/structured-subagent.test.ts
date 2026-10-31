@@ -1642,6 +1642,46 @@ describe("per-call model preflight", () => {
 		expect(policy.parentActiveModelPattern).toBe("mock/parent");
 	});
 
+	it("rejects a per-call model for a level-tagged agent, even its own selector", async () => {
+		mockDiscovery();
+		const tagged: AgentDefinition = { ...AGENT, name: "m1", model: ["mock/target:high"], thinkingLevel: Effort.High };
+		const taggedSession = Object.assign(perCallSession({ "task.perCallModel": "on", "task.maxEffort": "low" }), {
+			getSessionAgents: () => [tagged],
+		});
+		const error = await resolveEffectiveSubagentPolicy(
+			request({ session: taggedSession, agent: "m1", perCallModel: "mock/target:high" }),
+		).catch((cause: unknown) => cause);
+		expect(error).toBeInstanceOf(StructuredSubagentError);
+		expect((error as StructuredSubagentError).kind).toBe("preflight");
+		expect((error as Error).message).toContain('agent "m1"');
+		expect((error as Error).message).toContain("Omit model");
+	});
+
+	it("routes a per-call model for an untagged mention through its own model grant", async () => {
+		mockDiscovery();
+		const untagged: AgentDefinition = { ...AGENT, name: "m2", model: ["mock/target"], thinkingLevel: "auto" };
+		const untaggedSession = Object.assign(perCallSession({ "task.perCallModel": "on" }), {
+			getSessionAgents: () => [untagged],
+		});
+		const policy = await resolveEffectiveSubagentPolicy(
+			request({ session: untaggedSession, agent: "m2", perCallModel: "mock/target:low" }),
+		);
+		expect(policy.modelOverride).toEqual(["mock/target:low"]);
+	});
+
+	it("treats a discovered agent's frontmatter level as its own, not a user tag", async () => {
+		mockDiscovery({ ...AGENT, name: "m1", source: "project", thinkingLevel: Effort.High });
+		const tagged: AgentDefinition = { ...AGENT, name: "m1", model: ["mock/target:high"], thinkingLevel: Effort.High };
+		const shadowedSession = Object.assign(
+			perCallSession({ "task.perCallModel": "on", modelRoles: { review: "mock/target" } }),
+			{ getSessionAgents: () => [tagged] },
+		);
+		const policy = await resolveEffectiveSubagentPolicy(
+			request({ session: shadowedSession, agent: "m1", perCallModel: "mock/target:low" }),
+		);
+		expect(policy.modelOverride).toEqual(["mock/target:low"]);
+	});
+
 	describe("an agent shadowing the seance name", () => {
 		const shadow: AgentDefinition = { ...AGENT, name: "seance", source: "project", model: ["mock/agent-own"] };
 

@@ -387,6 +387,7 @@ function preflightPerCallModel(
 	selector: unknown,
 	agent: AgentDefinition,
 	hasModelOverride: boolean,
+	userTaggedEffort: boolean,
 	parentModelPattern: string | undefined,
 ): PerCallModelGrants {
 	const { settings, modelRegistry } = request.session;
@@ -400,6 +401,11 @@ function preflightPerCallModel(
 	if (hasModelOverride) {
 		fail(
 			`Per-call model conflicts with task.agentModelOverrides for agent "${agent.name}". Omit model to use the configured override.`,
+		);
+	}
+	if (userTaggedEffort) {
+		fail(
+			`Per-call model conflicts with the user's \`^model:level\` tag for agent "${agent.name}". Omit model to use the tagged model and effort.`,
 		);
 	}
 	const selectorProblem = invalidModelSelectorReason(selector, "The call", {
@@ -578,6 +584,7 @@ export async function resolveEffectiveSubagentPolicy(
 					perCallSelector,
 					agent,
 					Object.hasOwn(agentModelOverrides, agentName),
+					userTaggedEffort,
 					// A multi-upstream or otherwise richer parent route cannot grant a simpler selector.
 					parentActiveModel
 						? parentModelGrantPattern(parentActiveModel)
