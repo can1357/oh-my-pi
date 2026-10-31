@@ -197,7 +197,7 @@ impl GitRepo {
 			}
 		}
 		out.sort();
-		Ok((out, String::new()))
+		Ok(out)
 	}
 
 	/// Whether default porcelain status reports a staged, unstaged, or untracked
@@ -874,7 +874,9 @@ impl GitRepo {
 			}
 		}
 		out.sort();
-		Ok(out)
+		// The in-process walk reaches what it can open and fails otherwise, so
+		// it has no warnings to report.
+		Ok((out, String::new()))
 	}
 
 	/// List recursive blob paths in a tree, optionally filtered by pathspec-like

@@ -750,8 +750,9 @@ export declare class VcsGitRepo {
   /**
    * Untracked paths, plus the directories git said it could not open.
    *
-   * `git ls-files --others` warns and exits 0 when it cannot open a directory,
-   * so the list alone cannot say whether it is complete.
+   * `git ls-files --others` warns and exits 0 when it cannot open a
+   * directory, so the list alone cannot say whether it is complete. A
+   * caller that deletes a workspace on the strength of it needs both.
    */
   lsFilesWithWarnings(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<LsFilesWithWarnings>
   /** List tree paths. */
@@ -2713,6 +2714,14 @@ export interface ListWorkspaceResult {
   unreadableDirectories: Array<WorkspaceDirectoryError>
 }
 
+/** An untracked listing with git's own report of what it could not read. */
+export interface LsFilesWithWarnings {
+  /** The untracked paths git listed. */
+  paths: Array<string>
+  /** Directories git reported it could not open, so the listing is short. */
+  unreadable: Array<string>
+}
+
 /**
  * System UI appearance reported by native macOS APIs (`detectMacOSAppearance`
  * and observer).
@@ -3968,14 +3977,6 @@ export interface VcsCommitAuthor {
   name: string
   email: string
   date?: string
-}
-
-/** An untracked listing with git's own report of what it could not read. */
-export interface LsFilesWithWarnings {
-  /** The untracked paths git listed. */
-  paths: Array<string>
-  /** Directories git reported it could not open, so the listing is short. */
-  unreadable: Array<string>
 }
 
 /** Commit metadata. */

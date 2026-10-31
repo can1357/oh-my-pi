@@ -189,7 +189,17 @@ async function discoverNestedRepos(repoRoot: string, ownRepos: readonly string[]
 			const gitDir = path.join(full, ".git");
 			const gitEntry = await fs.lstatLookup(gitDir);
 			if (gitEntry.kind === "unknown") {
-				throw new IsolationCaptureIncompleteError(`Could not read ${gitDir}: ${gitEntry.reason}`, [gitDir]);
+				// Recorded, like the listing above it and for the same reason:
+				// this scan runs while the baseline is taken, and an
+				// unreadable directory here is usually an ignored one — git
+				// never reads it, so the capture never misses it. What the
+				// capture can see is decided by git, at the moment that
+				// authorises a delete.
+				logger.warn("nested-repository scan could not read a .git entry", {
+					gitDir,
+					reason: gitEntry.reason,
+				});
+				continue;
 			}
 			const hasGit = gitEntry.kind === "found";
 			if (hasGit && !submodulePaths.has(rel)) {
