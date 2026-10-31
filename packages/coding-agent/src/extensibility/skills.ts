@@ -613,11 +613,11 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		realPathSet.add(resolvedPath);
 	}
 
-	const skills = Array.from(skillMap.values()).filter(skill => matchesIncludePatterns(skill.name));
-	// Apply visibility after collision resolution so patterns address final names.
-	for (const skill of skills) {
-		if (matchesHidePatterns(skill.name)) skill.hide = true;
-	}
+	// Apply visibility after collision resolution so patterns address final names. Hidden skills
+	// are copies, so a pattern removed later cannot leave a reused skill object hidden.
+	const skills = Array.from(skillMap.values())
+		.filter(skill => matchesIncludePatterns(skill.name))
+		.map(skill => (matchesHidePatterns(skill.name) ? { ...skill, hide: true } : skill));
 	// Deterministic ordering for prompt stability (case-insensitive, then exact name, then path).
 	skills.sort((a, b) => compareSkillOrder(a.name, a.filePath, b.name, b.filePath));
 	return {
