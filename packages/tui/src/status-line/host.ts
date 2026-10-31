@@ -20,6 +20,54 @@ export interface ActiveRepoContext {
 	source: "single-direct-child-repo";
 }
 
+/** Why the next request rewrites the cached prompt prefix instead of reading it. */
+export type PromptCacheColdReason =
+	| { kind: "expired"; at: number }
+	/** omp's warm refresh found the entry gone. */
+	| { kind: "refresh-missed" }
+	| { kind: "model"; from: string; to: string }
+	| { kind: "thinking"; from: string; to: string }
+	| { kind: "tools" }
+	| { kind: "system-prompt" }
+	| { kind: "retention" }
+	/** The OpenAI prompt-cache key the request routes by changed (`/fresh` rotated the provider session). */
+	| { kind: "cache-key" }
+	| { kind: "compaction" };
+
+/** omp's cache warmer as it concerns the entry. */
+export interface PromptCacheWarming {
+	/** `scheduled`: a refresh decision is armed; `refreshing`: a refresh was sent and is in flight. */
+	state: "scheduled" | "refreshing" | "inactive";
+	/** When the armed refresh decides. */
+	nextWarmAt?: number;
+	/** When warming gives up: its 60-minute streaming or 30-minute idle safety window. */
+	stopsAt?: number;
+	/** Why nothing is scheduled. */
+	reason?: string;
+}
+
+/** What the next request finds in the prompt cache: the `cache` segment's chip and its details. */
+export interface PromptCacheStatus {
+	/** `cold`: the next request rewrites the cached prefix. */
+	state: "warm" | "cold";
+	/** Why it is cold; absent while warm. */
+	reason?: PromptCacheColdReason;
+	/** Read off the transcript of a reopened session, not a response this process saw: thinking level, tools and credential are unknown. */
+	inferred: boolean;
+	/** Retention tier the entry was written under: `short` (5m) or `long` (1h). */
+	tier: "short" | "long";
+	/** Send time of the last request that read or wrote the entry. */
+	touchedAt: number;
+	/** Lifetime after the last touch; undefined when the provider never expires the entry. */
+	ttlMs?: number;
+	/** Prompt tokens of the request that wrote or last read the entry: what a warm cache serves. */
+	cachedTokens: number;
+	/** Estimated prompt tokens of the next request. */
+	nextTokens: number;
+	/** Absent when the entry was inferred. */
+	warming?: PromptCacheWarming;
+}
+
 export interface StatusLineSession {
 	state: { model?: Model; thinkingLevel?: ThinkingLevel; messages: readonly AgentMessage[] };
 	model?: Model;
@@ -66,6 +114,11 @@ export interface StatusLineSession {
 	getAdvisorStatusOverview?(): { configured: boolean; advisors: readonly { status: string; yielded: boolean }[] };
 	getAdvisorCost?(): number;
 	isAdvisorUsingSubscription?(): boolean;
+	/**
+	 * What the next request finds in the prompt cache at `nowMs`; undefined when there is nothing to reason about.
+	 * `nextTokens` is the caller's current context token count, so the session need not recount it.
+	 */
+	getPromptCacheStatus?(nowMs: number, nextTokens?: number): PromptCacheStatus | undefined;
 }
 
 export interface FooterSession {

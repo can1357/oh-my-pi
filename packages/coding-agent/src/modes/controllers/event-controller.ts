@@ -415,8 +415,15 @@ export class EventController {
 			manual_compaction_end: async () => {},
 			auto_retry_start: e => this.#handleAutoRetryStart(e),
 			auto_retry_end: e => this.#handleAutoRetryEnd(e),
-			cache_warming_start: async () => {},
-			cache_warming_end: async () => {},
+			// The cache details show a refresh in flight; its hit moves the entry's expiry, a miss turns it cold.
+			cache_warming_start: async () => {
+				this.ctx.statusLine.invalidate();
+				this.ctx.ui.requestRender();
+			},
+			cache_warming_end: async () => {
+				this.ctx.statusLine.invalidate();
+				this.ctx.ui.requestRender();
+			},
 			retry_fallback_applied: e => this.#handleRetryFallbackApplied(e),
 			retry_fallback_succeeded: e => this.#handleRetryFallbackSucceeded(e),
 			ttsr_triggered: e => this.#handleTtsrTriggered(e),

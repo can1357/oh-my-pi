@@ -28,7 +28,8 @@ import {
 import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import { node, span } from "../native/describe";
 import { thinkingLevelToken } from "../theme/theme-class";
-import type { StatusLineSession } from "./host";
+import type { PromptCacheStatus, StatusLineSession } from "./host";
+import { promptCacheSummary } from "./prompt-cache";
 import type { RenderedSegment, SegmentContext, SegmentView, StatusLineSegment, StatusLineSegmentId } from "./types";
 
 export type { SegmentContext } from "./types";
@@ -1030,6 +1031,35 @@ const cacheHitSegment: StatusLineSegment = {
 	},
 };
 
+/** Chip glyph and word: a quiet filled dot while cached, a hollow warning dot once the next message re-sends the prefix. */
+function promptCacheChip(status: PromptCacheStatus): { text: string; color: ThemeColor } {
+	return status.state === "warm"
+		? { text: `${theme.symbol("status.enabled")} cached`, color: "muted" }
+		: { text: `${theme.symbol("status.shadowed")} not cached`, color: "warning" };
+}
+
+/** Native view of the `cache` chip: the same glyph and word, a warning tone when not cached, the summary as tooltip. */
+export function describePromptCacheChip(status: PromptCacheStatus): SegmentView {
+	const chip = promptCacheChip(status);
+	return {
+		...segView([span(chip.text, chip.color)], undefined, toneOf(chip.color)),
+		title: promptCacheSummary(status),
+	};
+}
+
+const cacheSegment: StatusLineSegment = {
+	id: "cache",
+	render(ctx) {
+		const status = ctx.promptCache;
+		if (!status) return { content: "", visible: false };
+		const chip = promptCacheChip(status);
+		return { content: theme.fg(chip.color, chip.text), visible: true };
+	},
+	describe(ctx) {
+		return ctx.promptCache ? describePromptCacheChip(ctx.promptCache) : null;
+	},
+};
+
 const sessionNameSegment: StatusLineSegment = {
 	id: "session_name",
 	render(ctx) {
@@ -1321,6 +1351,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	cache_read: cacheReadSegment,
 	cache_write: cacheWriteSegment,
 	cache_hit: cacheHitSegment,
+	cache: cacheSegment,
 	session_name: sessionNameSegment,
 	usage: usageSegment,
 	collab: collabSegment,

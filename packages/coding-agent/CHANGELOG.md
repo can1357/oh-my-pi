@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `cache` status-line segment (in the `full` and `nerd` presets) that says before you send whether the next message reads the prompt cache ("cached") or re-sends the conversation uncached ("not cached"); in Tern hovering it shows why and when it expires, and `/session` has a Prompt Cache section ([#12677](https://github.com/can1357/oh-my-pi/issues/12677)) ([#17496](https://github.com/can1357/oh-my-pi/pull/17496) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

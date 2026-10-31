@@ -127,6 +127,11 @@ export interface ModelUsageEntry extends SessionEntryBase {
 	usage: Usage;
 	stopReason: StopReason;
 	errorMessage?: string;
+	/**
+	 * A cache-warm refresh that answered for the conversation as it stood: when it was sent (a hit restarts
+	 * the cache lifetime then) and whether it read the cache. Absent on a failed, replaced or outdated refresh.
+	 */
+	cacheRefresh?: { sentAt: number; hit: boolean };
 }
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {

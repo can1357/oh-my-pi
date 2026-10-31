@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `cache` status-line segment, `StatusLineSession.getPromptCacheStatus` (read once per status-line build into `SegmentContext.promptCache`), `ComposerFacts.cache` (role `omp.composer.cache` with a details hover card and the `status.cache` click action) and `promptCacheDetails` ([#12677](https://github.com/can1357/oh-my-pi/issues/12677)) ([#17496](https://github.com/can1357/oh-my-pi/pull/17496) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

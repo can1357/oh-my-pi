@@ -23,6 +23,7 @@ import type {
 	ActiveRepoContext,
 	StatusAccountIdentity as OAuthAccountIdentity,
 	StatusLineHost,
+	PromptCacheStatus,
 	StatusLineSession,
 } from "./host";
 import type { Editor } from "../components/editor";
@@ -38,10 +39,11 @@ import {
 import { canReuseCachedPr, createPrCacheContext, isSamePrCacheContext, type PrCacheContext } from "./git-utils";
 import { summarizeUsageResetCredits } from "../overlays/usage-display";
 import { getPreset } from "./presets";
-import { describeSegment, renderSegment, type SegmentContext } from "./segments";
+import { describePromptCacheChip, describeSegment, renderSegment, type SegmentContext } from "./segments";
+import { promptCacheDetails } from "./prompt-cache";
 import type { TspMeterMark, TspProps } from "@oh-my-pi/pi-wire";
 import type { NativeNode, NativeUiEvent } from "../native/node";
-import { col, node, span } from "../native/describe";
+import { col, compact, kv, node, propNode, span } from "../native/describe";
 import { getContextMeterThresholds } from "../chrome/context-thresholds";
 import { isNativeRendering, onNativeRenderingChange } from "../native/state";
 import { getSeparator } from "./separators";
@@ -64,9 +66,15 @@ import type {
 const JOBS_SEGMENT_SPARK_CELLS = 8;
 
 /** What a click on a native status segment asks omp to open. */
-export type StatusLineNativeAction = "status.model" | "status.context" | "status.git" | "status.cost" | "status.path";
+export type StatusLineNativeAction =
+	| "status.model"
+	| "status.context"
+	| "status.git"
+	| "status.cost"
+	| "status.path"
+	| "status.cache";
 
-/** Click action per native segment: quick model picker, `/context`, `/git`, `/usage`, the project directory. */
+/** Click action per native segment: quick model picker, `/context`, `/git`, `/usage`, the project directory, `/session`. */
 const NATIVE_SEGMENT_ACTIONS: Partial<Record<string, StatusLineNativeAction>> = {
 	model: "status.model",
 	context_pct: "status.context",
@@ -74,6 +82,7 @@ const NATIVE_SEGMENT_ACTIONS: Partial<Record<string, StatusLineNativeAction>> = 
 	git: "status.git",
 	cost: "status.cost",
 	path: "status.path",
+	cache: "status.cache",
 };
 
 /** Segments that outlast every other one as the native bar narrows (model, context, git branch). */
@@ -87,10 +96,10 @@ const PINNED_NATIVE_PRIORITY = 1000;
 
 /**
  * Segments a TSP terminal shows outside the composer's facts: the model chip,
- * the context hairline and usage text (context, cost), Tern's pane header
- * (path), the tab title (session name, PR), the HUD pills (subagents), the
- * editor (vim) and the brand (`pi`; while focus-proxied, the viewed agent is
- * the composer's viewing header).
+ * the context hairline and usage text (context, cost), the prompt-cache chip
+ * beside it, Tern's pane header (path), the tab title (session name, PR), the
+ * HUD pills (subagents), the editor (vim) and the brand (`pi`; while
+ * focus-proxied, the viewed agent is the composer's viewing header).
  */
 const COMPOSER_HOMED_SEGMENTS: Partial<Record<StatusLineSegmentId, true>> = {
 	pi: true,
@@ -98,6 +107,7 @@ const COMPOSER_HOMED_SEGMENTS: Partial<Record<StatusLineSegmentId, true>> = {
 	context_pct: true,
 	context_total: true,
 	cost: true,
+	cache: true,
 	path: true,
 	pr: true,
 	session_name: true,
@@ -718,6 +728,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#pricingTimer: NodeJS.Timeout | undefined;
 	#pricingTimerCost: ModelCost | undefined;
 	#pricingTransition: number | undefined;
+	/** One wall-clock wakeup when the warm prompt-cache entry expires or the local day turns, so the chip changes without ticking. */
+	#promptCacheTimer: NodeJS.Timeout | undefined;
+	#promptCacheWakeAt: number | undefined;
 	#hookStatuses: Map<string, string> = new Map();
 	#sortedHookStatuses: readonly string[] = [];
 	#subagentCount: number = 0;
@@ -1308,6 +1321,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#stopBrandFadeTimer();
 		this.#stopActiveWindowRepaint();
 		this.#stopPricingTimer();
+		this.#stopPromptCacheTimer();
 		this.#clearUsageStartTimer();
 		this.#unwatchNativeRendering?.();
 		this.#unwatchNativeRendering = undefined;
@@ -1485,6 +1499,43 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			this.#onBranchChange?.();
 		}, transition - now);
 		this.#pricingTimer = timer;
+		timer.unref();
+	}
+
+	#stopPromptCacheTimer(): void {
+		clearTimeout(this.#promptCacheTimer);
+		this.#promptCacheTimer = undefined;
+		this.#promptCacheWakeAt = undefined;
+	}
+
+	/**
+	 * One wakeup at the next moment what the chip shows can change: the warm
+	 * prompt cache lapsing, or the local day turning, which redates the hover
+	 * card's times. No ticking repaint; a warm refresh moves the expiry and
+	 * re-arms it on the next build.
+	 */
+	#syncPromptCacheTimer(status: PromptCacheStatus | undefined, now: number): void {
+		if (this.#disposed || !this.#onBranchChange || status === undefined) {
+			this.#stopPromptCacheTimer();
+			return;
+		}
+		const midnight = new Date(now);
+		midnight.setHours(24, 0, 0, 0);
+		let wakeAt = midnight.getTime();
+		if (status.state === "warm" && status.ttlMs !== undefined) {
+			const expiry = status.touchedAt + status.ttlMs;
+			if (expiry > now) wakeAt = Math.min(wakeAt, expiry);
+		}
+		if (this.#promptCacheWakeAt === wakeAt) return;
+		this.#stopPromptCacheTimer();
+		this.#promptCacheWakeAt = wakeAt;
+		const timer = setTimeout(() => {
+			if (this.#disposed || this.#promptCacheTimer !== timer) return;
+			this.#stopPromptCacheTimer();
+			this.invalidate();
+			this.#onBranchChange?.();
+		}, wakeAt - now);
+		this.#promptCacheTimer = timer;
 		timer.unref();
 	}
 
@@ -2591,6 +2642,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const sessionAccentEnabled = settings.sessionAccent !== false;
 		const brandVisible = settings.leftSegments.includes("pi") || settings.rightSegments.includes("pi");
 		const turnElapsedMs = this.getTurnElapsedMs();
+		const promptCache =
+			settings.leftSegments.includes("cache") || settings.rightSegments.includes("cache")
+				? this.session.getPromptCacheStatus?.(nowMs, breakdown.usedTokens)
+				: undefined;
+		this.#syncPromptCacheTimer(promptCache, nowMs);
 		return {
 			session: this.session,
 			focusedAgentId: this.#focusedAgentId,
@@ -2636,6 +2692,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			},
 			worktree: activeRepoCache.worktree,
 			usage: this.#cachedUsage,
+			promptCache,
 		};
 	}
 
@@ -3767,6 +3824,22 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			"usage",
 		);
 
+		// The chip stays two-state; the hover card carries the details with absolute
+		// times only (dated off today), since the terminal shows it later without repainting.
+		const cacheStatus = ctx.promptCache;
+		let cache: NativeNode | undefined;
+		if (cacheStatus) {
+			const rows = promptCacheDetails(cacheStatus, nowMs, "card").map(
+				row => [row.label, row.tone ? [span(row.value, row.tone)] : row.value] as const,
+			);
+			const props: TspProps<"seg"> = {
+				role: "omp.composer.cache",
+				hovercard: propNode(col(compact([kv(rows)]), { role: "omp.composer.cache.card" })),
+				actions: { click: "status.cache" },
+			};
+			cache = describeSeg("cache", props, describePromptCacheChip(cacheStatus), dim);
+		}
+
 		// The effort chip carries the thinking level.
 		const modelCtx: SegmentContext = {
 			...ctx,
@@ -3776,6 +3849,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			context,
 			model: describeSegment("model", modelCtx) ?? { spans: [] },
 			extras: node("status", { role: "omp.composer.extras", transparent: true, grow: 1 }, facts, "extras"),
+			...(cache ? { cache } : {}),
 			usage,
 		};
 	}
@@ -3783,7 +3857,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	/**
 	 * Wall-clock granularity of the native bar. Spinners, turn timers and the
 	 * brand fade are terminal-clocked, so only wall-clock text (time, loop
-	 * countdowns) advances it; VCS refreshes are deadline-driven
+	 * countdowns, the cache card's dates) advances it; VCS refreshes are deadline-driven
 	 * ({@link #expireStaleVcsRender}).
 	 */
 	#nativeClock(nowMs: number, effectiveSettings: EffectiveStatusLineSettings): number {
@@ -3796,6 +3870,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			return Math.floor(nowMs / 1_000);
 		}
 		if (includesTime) return Math.floor(nowMs / 60_000);
+		if (segments.includes("cache")) {
+			return Math.floor((nowMs - new Date(nowMs).getTimezoneOffset() * 60_000) / 86_400_000);
+		}
 		return 0;
 	}
 

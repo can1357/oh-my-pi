@@ -3587,7 +3587,7 @@ export class SessionManager {
 	appendModelUsage(
 		usage: Pick<
 			ModelUsageEntry,
-			"purpose" | "role" | "api" | "provider" | "model" | "usage" | "stopReason" | "errorMessage"
+			"purpose" | "role" | "api" | "provider" | "model" | "usage" | "stopReason" | "errorMessage" | "cacheRefresh"
 		>,
 		owner: { sessionId: string; parentId: string | null },
 	): string | undefined {

@@ -1110,7 +1110,8 @@ export class CustomEditor extends Editor {
 	 * subagent is focused, the attachment chips, a `line` row of the
 	 * shell-mode chip and the input, and the `bar`: model chip, effort chip
 	 * (or the effort glyph as the model chip's icon), the generation rate,
-	 * the other status facts, usage, dictation, then send (Stop while a turn runs).
+	 * the other status facts, the prompt-cache chip, usage, dictation, then send
+	 * (Stop while a turn runs).
 	 * Clicks come back as `status.model`, `thinking.cycle`, `dictation.toggle`,
 	 * `submit`, `interrupt` and `focus:<id>` actions.
 	 */
@@ -1170,6 +1171,7 @@ export class CustomEditor extends Editor {
 									),
 								// The status facts are the bar's flexible space; without them a spacer keeps send at the end.
 								facts?.extras ?? node("row", { grow: 1 }, [], "gap"),
+								facts?.cache,
 								facts?.usage,
 								controls.dictation,
 								controls.submit,
