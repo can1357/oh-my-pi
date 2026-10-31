@@ -1,6 +1,10 @@
 import { tryParseJson } from "@oh-my-pi/pi-utils";
+import { mapWithConcurrencyLimit } from "../../task/parallel";
 import type { SpecialHandler } from "./types";
 import { buildResult, decodeHtmlEntities, formatIsoDate, loadPage } from "./types";
+
+/** Comment threads rendered at once; each fetches up to 10 replies in parallel. */
+const HN_CHILD_THREAD_CONCURRENCY = 2;
 
 interface HNItem {
 	id: number;
@@ -91,8 +95,21 @@ async function renderStory(item: HNItem, timeout: number, depth = 0, signal?: Ab
 		if (comments.length > 0) {
 			if (depth === 0) output += "---\n\n## Comments\n\n";
 
-			for (const comment of comments) {
-				const indent = "  ".repeat(depth);
+			// Child threads are independent: render a couple at a time (each fetches up to
+			// 10 replies concurrently, so this stays near the top level's 20 requests), stitched in order.
+			const { results: childOutputs } = await mapWithConcurrencyLimit(
+				comments,
+				HN_CHILD_THREAD_CONCURRENCY,
+				comment =>
+					comment.kids && comment.kids.length > 0 && depth < 1
+						? renderStory(comment, timeout, depth + 1, signal)
+						: Promise.resolve(""),
+				signal,
+			);
+
+			const indent = "  ".repeat(depth);
+			for (let i = 0; i < comments.length; i++) {
+				const comment = comments[i];
 				output += `${indent}**${comment.by}** (${formatTimestamp(comment.time ?? 0)})`;
 				if (comment.score !== undefined) output += ` [${comment.score}]`;
 				output += "\n";
@@ -101,11 +118,7 @@ async function renderStory(item: HNItem, timeout: number, depth = 0, signal?: Ab
 					const lines = text.split("\n");
 					output += `${lines.map(line => `${indent}${line}`).join("\n")}\n\n`;
 				}
-
-				if (comment.kids && comment.kids.length > 0 && depth < 1) {
-					const childOutput = await renderStory(comment, timeout, depth + 1, signal);
-					output += childOutput;
-				}
+				output += childOutputs[i] ?? "";
 			}
 		}
 	}

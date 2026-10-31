@@ -309,7 +309,7 @@ describe("default bench runtime", () => {
 
 describe("bench credential-aware provider selection", () => {
 	it("redirects an ambiguous shared-id selector to an authenticated provider", async () => {
-		// Catalog order makes the unauthenticated `groq` win the default resolution.
+		// Built-in provider priority makes the unauthenticated `groq` win the default resolution.
 		const registry = fakeRegistry({
 			models: [fakeModel("groq", "openai/gpt-oss-20b"), fakeModel("openrouter", "openai/gpt-oss-20b")],
 			authedProviders: ["openrouter"],

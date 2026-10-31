@@ -319,17 +319,38 @@ export class Terminal {
 		}
 	}
 
+	/**
+	 * Dispatches a CSI sequence on its whole identifier (private prefix,
+	 * intermediates, final), dropping the ones without a handler as xterm does:
+	 * `CSI < u` pops the kitty keyboard stack rather than restoring the cursor,
+	 * `CSI > 4;1 m` sets modifyOtherKeys rather than SGR, and `CSI 0 SP q` sets
+	 * the cursor shape rather than anything this buffer models.
+	 */
 	#handleCsi(raw: string, final: string): void {
-		const privateMode = raw.startsWith("?");
-		const greater = raw.startsWith(">");
-		const body = privateMode || greater ? raw.slice(1) : raw;
-		const params =
-			parseCsiParams(body) ??
-			body
-				.replaceAll(":", ";")
-				.split(";")
-				.map(value => (value === "" ? 0 : Number(value)));
+		const marker = raw.charCodeAt(0);
+		// `<`, `=`, `>`, `?` open a private sequence family.
+		const prefixed = marker >= 0x3c && marker <= 0x3f;
+		// Null when intermediates or a misplaced private marker follow the parameters.
+		const params = parseCsiParams(prefixed ? raw.slice(1) : raw);
+		if (!params) return;
 		const first = params[0] ?? 0;
+		if (prefixed) {
+			if (marker !== 0x3f) return;
+			switch (final) {
+				case "h":
+				case "l":
+					this.#setModes(params, true, final === "h");
+					break;
+				// DECSED/DECSEL: no cell is ever protected, so selective erase is plain erase.
+				case "J":
+					this.#eraseDisplay(first);
+					break;
+				case "K":
+					this.#eraseLine(first);
+					break;
+			}
+			return;
+		}
 		const amount = Math.max(1, first);
 		switch (final) {
 			case "A":
@@ -399,7 +420,7 @@ export class Terminal {
 				this.#setRendition(params);
 				break;
 			case "r":
-				if (!privateMode) this.#setScrollRegion(params);
+				this.#setScrollRegion(params);
 				break;
 			case "s":
 				this.#saveCursor();
@@ -409,14 +430,13 @@ export class Terminal {
 				break;
 			case "h":
 			case "l":
-				this.#setModes(params, privateMode, final === "h");
+				this.#setModes(params, false, final === "h");
 				break;
 			case "n":
-				if (!privateMode && first === 6)
-					this.#emitData(`\x1b[${this.#active.cursorY + 1};${this.#active.cursorX + 1}R`);
+				if (first === 6) this.#emitData(`\x1b[${this.#active.cursorY + 1};${this.#active.cursorX + 1}R`);
 				break;
 			case "c":
-				if (!greater) this.#emitData("\x1b[?1;2c");
+				this.#emitData("\x1b[?1;2c");
 				break;
 		}
 	}
@@ -478,7 +498,8 @@ export class Terminal {
 		while (column >= 0 && line.cells[column]?.width === 0) column--;
 		const cell = line.cells[column];
 		// Cells are frozen and may be shared; replace instead of mutating.
-		if (cell?.chars) line.cells[column] = Object.freeze({ chars: cell.chars + mark, width: cell.width, attrs: cell.attrs });
+		if (cell?.chars)
+			line.cells[column] = Object.freeze({ chars: cell.chars + mark, width: cell.width, attrs: cell.attrs });
 	}
 
 	#lineFeed(wrapped: boolean): void {
@@ -604,7 +625,8 @@ export class Terminal {
 
 	#shiftCells(line: BufferLine, column: number, count: number): void {
 		// Inserting more than a row's worth only pushes everything past the edge.
-		const blanks = new Array<CellData>(Math.min(count, this.cols)).fill(sharedBlankCell(this.#attrs));
+		const blank = sharedBlankCell(this.#attrs);
+		const blanks = Array.from({ length: Math.min(count, this.cols) }, () => blank);
 		line.cells.splice(column, 0, ...blanks);
 		line.cells.length = this.cols;
 	}

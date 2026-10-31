@@ -1,4 +1,4 @@
-import { parseJsonWithRepair } from "@oh-my-pi/pi-utils";
+import { classifyJsonPrefix, parseJsonWithRepair } from "@oh-my-pi/pi-utils";
 import type { Message, ToolCall } from "../types";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { asRecord, mintToolCallId, partialSuffixOverlapAny } from "./coercion";
@@ -84,8 +84,133 @@ const OUTSIDE_TOKENS = [
 	...DSML_ORPHAN_CLOSE_TOKENS,
 	...CONTROL_TOKENS,
 ] as const;
+/** Outside-state tokens dropped from visible text (closers with nothing open, template control tokens). */
+const OUTSIDE_DROPPED_TOKENS: Readonly<Record<string, true>> = Object.fromEntries(
+	[
+		DEEPSEEK_TOOL_CALLS_END,
+		THINK_CLOSE,
+		DSML_TOOL_CALLS_CLOSE_FULLWIDTH,
+		DSML_TOOL_CALLS_CLOSE_ASCII,
+		...CONTROL_TOKENS,
+	].map(token => [token, true]),
+);
 
-const SECTION_TOKENS = [DEEPSEEK_TOOL_CALL_BEGIN, DEEPSEEK_TOOL_CALLS_END] as const;
+// DeepSeek's chat template delimits special tokens with fullwidth bars (U+FF5C)
+// and joins words with the tokenizer's `▁` (U+2581). Hosts that detokenize them
+// into text, and models degraded by long contexts, re-spell them: `_` for `▁`
+// (wholly or partly), or one bar dropped (`<tool_call_begin｜>`). Those spellings
+// resolve to the canonical token wherever the grammar expects one. At least one
+// fullwidth bar is required: ASCII `<|…|>` tokens belong to other templates
+// (Kimi's `<|tool_call_begin|>`, Harmony), and a bare `<word>` is prose or XML.
+const TEMPLATE_TOKEN_SPELLING = /<(｜?)([A-Za-z]+(?:[▁_][A-Za-z]+)*)(｜?)>/gu;
+const TEMPLATE_TOKEN_SPELLING_AT_START = new RegExp(TEMPLATE_TOKEN_SPELLING.source, "uy");
+// A trailing fragment that may still grow into a template token spelling.
+const TEMPLATE_TOKEN_PARTIAL = /^<｜?([A-Za-z▁_]*)(｜?)$/u;
+// Every accepted spelling carries at least one bar, so text without one cannot
+// complete a template token; argument bodies are deferred until a bar arrives.
+const TEMPLATE_TOKEN_BAR = "｜";
+/**
+ * Canonical template token by spelling-independent key (`tool_calls_begin`).
+ * A Map, not a Record: keys come from model output, so `constructor` and friends
+ * must not resolve through the prototype.
+ */
+const TEMPLATE_TOKEN_BY_KEY: ReadonlyMap<string, string> = new Map(
+	[
+		DEEPSEEK_TOOL_CALLS_BEGIN,
+		DEEPSEEK_TOOL_CALLS_END,
+		DEEPSEEK_TOOL_CALL_BEGIN,
+		DEEPSEEK_TOOL_CALL_END,
+		DEEPSEEK_TOOL_SEPARATOR,
+		...CONTROL_TOKENS,
+	].flatMap(token => {
+		// `<｜▁pad▁｜>` and ASCII `<|EOT|>` fall outside the re-spelling grammar and stay literal.
+		const name = /^<｜([A-Za-z]+(?:▁[A-Za-z]+)*)｜>$/u.exec(token)?.[1];
+		return name === undefined ? [] : [[templateTokenKey(name), token] as const];
+	}),
+);
+const TEMPLATE_TOKEN_KEYS = [...TEMPLATE_TOKEN_BY_KEY.keys()];
+// `<`, both bars, the longest name, `>`.
+const TEMPLATE_TOKEN_MAX_SPELLING = Math.max(...TEMPLATE_TOKEN_KEYS.map(key => key.length)) + 4;
+
+const OUTSIDE_TEMPLATE_TOKENS: Readonly<Record<string, true>> = Object.fromEntries(
+	[DEEPSEEK_TOOL_CALLS_BEGIN, DEEPSEEK_TOOL_CALLS_END, DEEPSEEK_TOOL_CALL_BEGIN, ...CONTROL_TOKENS].map(token => [
+		token,
+		true,
+	]),
+);
+const SEPARATOR_TOKENS: Readonly<Record<string, true>> = { [DEEPSEEK_TOOL_SEPARATOR]: true };
+// A call's arguments end at its own close or, when the model skips that close,
+// at the section close or the next call's open (left in the buffer for the next
+// state to consume). Only the canonical close ends them unconditionally; a
+// re-spelled close and both fallbacks count once the arguments before them are
+// no longer an open JSON prefix (see `#consumeArgs`).
+const ARGS_TERMINATOR_TOKENS: Readonly<Record<string, true>> = {
+	[DEEPSEEK_TOOL_CALL_END]: true,
+	[DEEPSEEK_TOOL_CALLS_END]: true,
+	[DEEPSEEK_TOOL_CALL_BEGIN]: true,
+};
+/** DeepSeek template tokens that structure a tool call. */
+export const DEEPSEEK_TOOL_CALL_TOKENS: Readonly<Record<string, true>> = {
+	[DEEPSEEK_TOOL_CALLS_BEGIN]: true,
+	[DEEPSEEK_TOOL_CALLS_END]: true,
+	[DEEPSEEK_TOOL_CALL_BEGIN]: true,
+	[DEEPSEEK_TOOL_CALL_END]: true,
+	[DEEPSEEK_TOOL_SEPARATOR]: true,
+};
+
+/** A token found in text: its canonical spelling and the text actually written. */
+export interface DeepSeekTokenMatch {
+	readonly token: string;
+	readonly raw: string;
+	readonly index: number;
+}
+
+function templateTokenKey(name: string): string {
+	return name.replaceAll("▁", "_");
+}
+
+function resolveTemplateSpelling(match: RegExpExecArray): string | undefined {
+	if (match[1]!.length === 0 && match[3]!.length === 0) return undefined;
+	return TEMPLATE_TOKEN_BY_KEY.get(templateTokenKey(match[2]!));
+}
+
+/**
+ * Find the earliest of `tokens` in `text` at or after `from`, in its canonical
+ * spelling or any re-spelling described at {@link TEMPLATE_TOKEN_SPELLING}.
+ */
+export function findDeepSeekTemplateToken(
+	text: string,
+	tokens: Readonly<Record<string, true>>,
+	from = 0,
+): DeepSeekTokenMatch | undefined {
+	TEMPLATE_TOKEN_SPELLING.lastIndex = from;
+	for (let match = TEMPLATE_TOKEN_SPELLING.exec(text); match; match = TEMPLATE_TOKEN_SPELLING.exec(text)) {
+		const token = resolveTemplateSpelling(match);
+		if (token !== undefined && tokens[token]) return { token, raw: match[0], index: match.index };
+	}
+	return undefined;
+}
+
+function templateTokenAtStart(text: string): DeepSeekTokenMatch | undefined {
+	TEMPLATE_TOKEN_SPELLING_AT_START.lastIndex = 0;
+	const match = TEMPLATE_TOKEN_SPELLING_AT_START.exec(text);
+	if (!match) return undefined;
+	const token = resolveTemplateSpelling(match);
+	return token === undefined ? undefined : { token, raw: match[0], index: 0 };
+}
+
+/** Length of a trailing fragment of `text` that could still complete into a template token spelling. */
+function templateTokenPartialLength(text: string): number {
+	const start = text.lastIndexOf("<");
+	if (start === -1 || text.length - start >= TEMPLATE_TOKEN_MAX_SPELLING) return 0;
+	const match = TEMPLATE_TOKEN_PARTIAL.exec(text.slice(start));
+	if (!match) return 0;
+	const key = templateTokenKey(match[1]!);
+	const viable =
+		match[2]!.length > 0 ? TEMPLATE_TOKEN_BY_KEY.has(key) : TEMPLATE_TOKEN_KEYS.some(known => known.startsWith(key));
+	return viable ? text.length - start : 0;
+}
+
 const DSML_SECTION_TOKENS = [
 	DSML_TOOL_CALLS_CLOSE_FULLWIDTH,
 	DSML_TOOL_CALLS_CLOSE_ASCII,
@@ -104,6 +229,79 @@ const DSML_PARAMETER_CLOSE_TOKENS = [DSML_PARAMETER_CLOSE_FULLWIDTH, DSML_PARAME
 // wrapper is missing, so the envelope scanner never consumed it.
 const BARE_DSML_OPEN = /<[｜|]DSML[｜|](?:invoke|parameter)\b/u;
 const VISIBLE_TAIL_LIMIT = 48;
+
+/**
+ * Markdown code the model has written in visible text, tracked so re-spelled
+ * template tokens it quotes (`` `<｜tool_calls_begin｜>` ``) stay prose. `fence`
+ * is the backtick run that opened the current span or block (0 outside code),
+ * `run` a backtick run still being read, `newline` whether the last
+ * non-blank character was a line break.
+ */
+interface CodeState {
+	readonly fence: number;
+	readonly run: number;
+	readonly newline: boolean;
+}
+const OUTSIDE_CODE: CodeState = { fence: 0, run: 0, newline: false };
+const BACKTICK = 0x60;
+const LINE_FEED = 0x0a;
+
+/** A finished backtick run opens code, or closes it when it matches the opening run. */
+function settleBacktickRun(fence: number, run: number): number {
+	if (run === 0) return fence;
+	if (fence === 0) return run;
+	return run === fence ? 0 : fence;
+}
+
+function advanceCodeState(state: CodeState, text: string): CodeState {
+	let { fence, run, newline } = state;
+	for (let i = 0; i < text.length; i++) {
+		const c = text.charCodeAt(i);
+		if (c === BACKTICK) {
+			run++;
+			newline = false;
+			continue;
+		}
+		fence = settleBacktickRun(fence, run);
+		run = 0;
+		if (c === LINE_FEED) {
+			// A blank line ends the paragraph and any inline span left open in it.
+			if (newline && fence < 3) fence = 0;
+			newline = true;
+		} else if (!/\s/.test(text[i]!)) {
+			newline = false;
+		}
+	}
+	return { fence, run, newline };
+}
+
+/**
+ * Whether an inline span opened by a `fence`-long backtick run closes in
+ * `text` before its paragraph ends. Markdown renders an unmatched run as plain
+ * text, so only a closed span is code. `undefined` until the stream decides.
+ */
+function inlineSpanCloses(text: string, fence: number, final: boolean): boolean | undefined {
+	let run = 0;
+	let newline = false;
+	for (let i = 0; i < text.length; i++) {
+		const c = text.charCodeAt(i);
+		if (c === BACKTICK) {
+			run++;
+			newline = false;
+			continue;
+		}
+		if (run === fence) return true;
+		run = 0;
+		if (c === LINE_FEED) {
+			if (newline) return false;
+			newline = true;
+		} else if (!/\s/.test(text[i]!)) {
+			newline = false;
+		}
+	}
+	if (!final) return undefined;
+	return run === fence;
+}
 
 type State =
 	| "outside"
@@ -142,6 +340,8 @@ export class DeepSeekInbandScanner implements InbandScanner {
 	#bareDsmlOpenVisible = false;
 	/** Last few visible characters, so a bare opener split across chunks is still seen. */
 	#visibleTail = "";
+	/** Markdown code state of the visible text emitted so far. */
+	#code = OUTSIDE_CODE;
 	readonly #closeWait = new TerminatorWait();
 
 	constructor(options: InbandScannerOptions = {}) {
@@ -153,8 +353,11 @@ export class DeepSeekInbandScanner implements InbandScanner {
 		if (this.#closeWait.absorb(text)) return [];
 		this.#buffer = this.#closeWait.release(this.#buffer) + text;
 		const events = this.#consume(false);
-		if (this.#state === "args" || this.#state === "legacyArgs") {
-			this.#closeWait.arm(DEEPSEEK_TOOL_CALL_END, this.#buffer);
+		// Arguments end at a template token in any accepted spelling, so defer
+		// deltas until a bar arrives — unless a fragment already pending at the
+		// tail could complete without one (`<tool_call_end` + `｜>`).
+		if ((this.#state === "args" || this.#state === "legacyArgs") && templateTokenPartialLength(this.#buffer) === 0) {
+			this.#closeWait.arm(TEMPLATE_TOKEN_BAR, this.#buffer);
 		}
 		return events;
 	}
@@ -178,7 +381,7 @@ export class DeepSeekInbandScanner implements InbandScanner {
 				continue;
 			}
 			if (this.#state === "section") {
-				if (!this.#consumeSection(final)) break;
+				if (!this.#consumeSection(final, events)) break;
 				continue;
 			}
 			if (this.#state === "header") {
@@ -228,69 +431,66 @@ export class DeepSeekInbandScanner implements InbandScanner {
 				this.#buffer = trimmed;
 				this.#stripLeadingWhitespace = false;
 			}
-			const match = findEarliestToken(this.#buffer, OUTSIDE_TOKENS);
+			const match = this.#findOutsideToken(final);
+			if (typeof match === "number") {
+				this.#emitText(this.#buffer.slice(0, match), events);
+				this.#buffer = this.#buffer.slice(match);
+				return;
+			}
 			if (!match) {
-				const hold = final ? 0 : partialSuffixOverlapAny(this.#buffer, OUTSIDE_TOKENS);
+				const hold = final
+					? 0
+					: Math.max(
+							partialSuffixOverlapAny(this.#buffer, OUTSIDE_TOKENS),
+							templateTokenPartialLength(this.#buffer),
+						);
 				this.#emitText(this.#buffer.slice(0, this.#buffer.length - hold), events);
 				this.#buffer = this.#buffer.slice(this.#buffer.length - hold);
 				return;
 			}
 			this.#emitText(this.#buffer.slice(0, match.index), events);
-			this.#buffer = this.#buffer.slice(match.index);
-			if (this.#buffer.startsWith(DEEPSEEK_TOOL_CALLS_BEGIN)) {
-				this.#buffer = this.#buffer.slice(DEEPSEEK_TOOL_CALLS_BEGIN.length);
+			this.#buffer = this.#buffer.slice(match.index + match.raw.length);
+			// Markup inside an open inline span proves its backticks never closed.
+			if (match.raw !== match.token) {
+				const fence = settleBacktickRun(this.#code.fence, this.#code.run);
+				if (fence > 0 && fence < 3) this.#code = OUTSIDE_CODE;
+			}
+			if (match.token === DEEPSEEK_TOOL_CALLS_BEGIN) {
 				this.#inToolSection = true;
 				this.#state = "section";
 				return;
 			}
-			if (this.#buffer.startsWith(DEEPSEEK_TOOL_CALL_BEGIN)) {
-				this.#buffer = this.#buffer.slice(DEEPSEEK_TOOL_CALL_BEGIN.length);
-				this.#rawBlock = DEEPSEEK_TOOL_CALL_BEGIN;
+			if (match.token === DEEPSEEK_TOOL_CALL_BEGIN) {
+				this.#rawBlock = match.raw;
 				this.#inToolSection = false;
 				this.#state = "header";
 				return;
 			}
-			if (this.#buffer.startsWith(THINK_OPEN)) {
-				this.#buffer = this.#buffer.slice(THINK_OPEN.length);
+			if (match.token === THINK_OPEN) {
 				this.#state = "thinking";
 				this.#thinking = "";
 				if (this.#parseThinking) events.push({ type: "thinkingStart" });
 				return;
 			}
-			if (
-				this.#buffer.startsWith(DSML_TOOL_CALLS_OPEN_FULLWIDTH) ||
-				this.#buffer.startsWith(DSML_TOOL_CALLS_OPEN_ASCII)
-			) {
-				const openToken = this.#buffer.startsWith(DSML_TOOL_CALLS_OPEN_FULLWIDTH)
-					? DSML_TOOL_CALLS_OPEN_FULLWIDTH
-					: DSML_TOOL_CALLS_OPEN_ASCII;
-				this.#buffer = this.#buffer.slice(openToken.length);
-				this.#pendingDsmlSection = openToken;
+			if (match.token === DSML_TOOL_CALLS_OPEN_FULLWIDTH || match.token === DSML_TOOL_CALLS_OPEN_ASCII) {
+				this.#pendingDsmlSection = match.raw;
 				this.#state = "dsmlSection";
 				return;
 			}
-			const orphanClose = this.#matchingOrphanDsmlClose();
-			if (orphanClose) {
-				if (this.#bareDsmlOpenVisible) this.#emitText(orphanClose, events);
-				this.#buffer = this.#buffer.slice(orphanClose.length);
+			if ((DSML_ORPHAN_CLOSE_TOKENS as readonly string[]).includes(match.token)) {
+				if (this.#bareDsmlOpenVisible) this.#emitText(match.raw, events);
 				continue;
 			}
-			const control = this.#matchingControlToken();
-			if (control) {
-				this.#buffer = this.#buffer.slice(control.length);
-				if (
-					this.#bareDsmlOpenVisible &&
-					(control === DSML_TOOL_CALLS_CLOSE_FULLWIDTH || control === DSML_TOOL_CALLS_CLOSE_ASCII)
-				) {
-					// Closes the malformed call: keep it as its end marker.
-					this.#emitText(control, events);
-					this.#bareDsmlOpenVisible = false;
-					continue;
-				}
-				this.#stripLeadingWhitespace = true;
+			if (
+				this.#bareDsmlOpenVisible &&
+				(match.token === DSML_TOOL_CALLS_CLOSE_FULLWIDTH || match.token === DSML_TOOL_CALLS_CLOSE_ASCII)
+			) {
+				// Closes the malformed call: keep it as its end marker.
+				this.#emitText(match.raw, events);
+				this.#bareDsmlOpenVisible = false;
 				continue;
 			}
-			this.#buffer = this.#buffer.slice(match.token.length);
+			if (OUTSIDE_DROPPED_TOKENS[match.token]) this.#stripLeadingWhitespace = true;
 		}
 	}
 
@@ -298,6 +498,7 @@ export class DeepSeekInbandScanner implements InbandScanner {
 		if (text.length === 0) return;
 		events.push({ type: "text", text });
 		this.#visibleTail = (this.#visibleTail + text).slice(-VISIBLE_TAIL_LIMIT);
+		this.#code = advanceCodeState(this.#code, text);
 		if (!this.#bareDsmlOpenVisible && BARE_DSML_OPEN.test(this.#visibleTail)) this.#bareDsmlOpenVisible = true;
 	}
 
@@ -315,36 +516,59 @@ export class DeepSeekInbandScanner implements InbandScanner {
 		this.#endThinking(events);
 	}
 
-	#consumeSection(final: boolean): boolean {
+	#consumeSection(final: boolean, events: InbandScanEvent[]): boolean {
 		while (this.#buffer.length > 0) {
-			this.#skipWhitespace();
-			if (this.#buffer.startsWith(DEEPSEEK_TOOL_CALLS_END)) {
-				this.#buffer = this.#buffer.slice(DEEPSEEK_TOOL_CALLS_END.length);
+			// Whitespace before a token is template layout and is dropped with it;
+			// whitespace before prose belongs to the prose. Peek, don't skip, so a
+			// chunk boundary cannot decide which.
+			const indent = this.#buffer.length - this.#buffer.trimStart().length;
+			const rest = this.#buffer.slice(indent);
+			const lead = templateTokenAtStart(rest);
+			if (lead?.token === DEEPSEEK_TOOL_CALLS_END) {
+				this.#buffer = rest.slice(lead.raw.length);
 				this.#inToolSection = false;
 				this.#state = "outside";
 				return true;
 			}
-			if (this.#buffer.startsWith(DEEPSEEK_TOOL_CALL_BEGIN)) {
-				this.#buffer = this.#buffer.slice(DEEPSEEK_TOOL_CALL_BEGIN.length);
-				this.#rawBlock = DEEPSEEK_TOOL_CALL_BEGIN;
+			if (lead?.token === DEEPSEEK_TOOL_CALL_BEGIN) {
+				this.#buffer = rest.slice(lead.raw.length);
+				this.#rawBlock = lead.raw;
 				this.#state = "header";
 				return true;
 			}
-			if (!final && partialSuffixOverlapAny(this.#buffer, SECTION_TOKENS) === this.#buffer.length) return false;
-			if (this.#buffer.length === 0) return false;
-			this.#buffer = this.#buffer.slice(1);
+			if (lead) {
+				// Any other template token here (`<｜end▁of▁sentence｜>`, a stray
+				// `<｜tool▁sep｜>`) is template structure, never prose: drop it.
+				this.#buffer = rest.slice(lead.raw.length);
+				continue;
+			}
+			if (rest.length === 0 || templateTokenPartialLength(rest) === rest.length) {
+				if (!final) return false;
+				// The stream ended on layout whitespace or mid-token
+				// (`<｜tool_call_begin｜`): markup, not prose.
+				this.#buffer = "";
+				return true;
+			}
+			// The template puts nothing but calls in a section, so anything else is
+			// the model writing prose after a stray section open: keep it visible.
+			// Trailing whitespace stays buffered until what follows it decides.
+			const next = rest.indexOf("<", 1);
+			const run = this.#buffer.slice(0, next === -1 ? this.#buffer.length : indent + next);
+			const prose = run.trimEnd();
+			this.#emitText(prose, events);
+			this.#buffer = this.#buffer.slice(prose.length);
 		}
 		return final;
 	}
 
 	#consumeHeader(final: boolean, events: InbandScanEvent[]): boolean {
-		const sep = this.#buffer.indexOf(DEEPSEEK_TOOL_SEPARATOR);
-		if (sep === -1) {
+		const sep = findDeepSeekTemplateToken(this.#buffer, SEPARATOR_TOKENS);
+		if (!sep) {
 			if (final) this.#resetTool();
 			return false;
 		}
-		const rawHead = this.#buffer.slice(0, sep + DEEPSEEK_TOOL_SEPARATOR.length);
-		const head = this.#buffer.slice(0, sep).trim();
+		const rawHead = this.#buffer.slice(0, sep.index + sep.raw.length);
+		const head = this.#buffer.slice(0, sep.index).trim();
 		this.#rawBlock += rawHead;
 		this.#buffer = this.#buffer.slice(rawHead.length);
 		if (head === LEGACY_TOOL_TYPE) {
@@ -373,18 +597,45 @@ export class DeepSeekInbandScanner implements InbandScanner {
 	}
 
 	#consumeArgs(final: boolean, events: InbandScanEvent[]): boolean {
-		const end = this.#buffer.indexOf(DEEPSEEK_TOOL_CALL_END);
-		if (end === -1) {
+		let end: DeepSeekTokenMatch | undefined;
+		let rawArgs = "";
+		for (
+			let candidate = findDeepSeekTemplateToken(this.#buffer, ARGS_TERMINATOR_TOKENS);
+			candidate;
+			candidate = findDeepSeekTemplateToken(
+				this.#buffer,
+				ARGS_TERMINATOR_TOKENS,
+				candidate.index + candidate.raw.length,
+			)
+		) {
+			rawArgs = this.#buffer.slice(0, candidate.index);
+			if (this.#state === "legacyArgs") {
+				const fence = rawArgs.lastIndexOf(CODE_FENCE);
+				if (fence !== -1) rawArgs = rawArgs.slice(0, fence);
+			}
+			// The call's own close in its canonical spelling always ends it, even
+			// after malformed JSON (the parser repairs or flags it). A re-spelled
+			// close and the fallbacks are inferred: inside a still-open JSON string
+			// or container they are argument text — e.g. a grep for the token, or
+			// a write of this very file.
+			const trimmed = rawArgs.trim();
+			if (
+				candidate.raw === DEEPSEEK_TOOL_CALL_END ||
+				trimmed.length === 0 ||
+				classifyJsonPrefix(trimmed) !== "prefix"
+			) {
+				end = candidate;
+				break;
+			}
+		}
+		if (!end) {
 			if (final) this.#resetTool();
 			return false;
 		}
-		let rawArgs = this.#buffer.slice(0, end);
-		if (this.#state === "legacyArgs") {
-			const fence = rawArgs.lastIndexOf(CODE_FENCE);
-			if (fence !== -1) rawArgs = rawArgs.slice(0, fence);
-		}
-		const rawTail = this.#buffer.slice(0, end + DEEPSEEK_TOOL_CALL_END.length);
-		this.#rawBlock += rawTail;
+		// Only the call's own close belongs to it; a section close or the next
+		// call's open stays buffered for the state that owns it.
+		const consumed = end.index + (end.token === DEEPSEEK_TOOL_CALL_END ? end.raw.length : 0);
+		this.#rawBlock += this.#buffer.slice(0, consumed);
 		events.push({
 			type: "toolEnd",
 			id: this.#id,
@@ -392,7 +643,7 @@ export class DeepSeekInbandScanner implements InbandScanner {
 			arguments: this.#parseArgs(rawArgs),
 			rawBlock: this.#rawBlock,
 		});
-		this.#buffer = this.#buffer.slice(rawTail.length);
+		this.#buffer = this.#buffer.slice(consumed);
 		this.#resetTool(this.#inToolSection ? "section" : "outside");
 		return true;
 	}
@@ -561,22 +812,34 @@ export class DeepSeekInbandScanner implements InbandScanner {
 		return "";
 	}
 
-	#matchingOrphanDsmlClose(): string | undefined {
-		for (const token of DSML_ORPHAN_CLOSE_TOKENS) {
-			if (this.#buffer.startsWith(token)) return token;
+	/**
+	 * Earliest outside-state token: a literal (`<think>`, DSML tags, canonical
+	 * template tokens) or a re-spelled template token. Ties keep the literal.
+	 * A re-spelled token inside code the model quoted is prose about the token,
+	 * not markup; canonical spellings keep their long-standing handling. An
+	 * inline span is code only once its closing run arrives, so a token after an
+	 * unclosed run returns its index to hold from until the paragraph decides.
+	 */
+	#findOutsideToken(final: boolean): DeepSeekTokenMatch | number | undefined {
+		const literal = findEarliestToken(this.#buffer, OUTSIDE_TOKENS);
+		let template = findDeepSeekTemplateToken(this.#buffer, OUTSIDE_TEMPLATE_TOKENS);
+		while (template && template.raw !== template.token && (!literal || template.index < literal.index)) {
+			const code = advanceCodeState(this.#code, this.#buffer.slice(0, template.index));
+			const fence = settleBacktickRun(code.fence, code.run);
+			if (fence === 0) break;
+			if (fence < 3) {
+				const closes = inlineSpanCloses(this.#buffer.slice(template.index + template.raw.length), fence, final);
+				if (closes === undefined) return template.index;
+				if (!closes) break;
+			}
+			template = findDeepSeekTemplateToken(
+				this.#buffer,
+				OUTSIDE_TEMPLATE_TOKENS,
+				template.index + template.raw.length,
+			);
 		}
-		return undefined;
-	}
-
-	#matchingControlToken(): string | undefined {
-		if (this.#buffer.startsWith(DEEPSEEK_TOOL_CALLS_END)) return DEEPSEEK_TOOL_CALLS_END;
-		if (this.#buffer.startsWith(THINK_CLOSE)) return THINK_CLOSE;
-		if (this.#buffer.startsWith(DSML_TOOL_CALLS_CLOSE_FULLWIDTH)) return DSML_TOOL_CALLS_CLOSE_FULLWIDTH;
-		if (this.#buffer.startsWith(DSML_TOOL_CALLS_CLOSE_ASCII)) return DSML_TOOL_CALLS_CLOSE_ASCII;
-		for (const token of CONTROL_TOKENS) {
-			if (this.#buffer.startsWith(token)) return token;
-		}
-		return undefined;
+		if (template && (!literal || template.index < literal.index)) return template;
+		return literal && { token: literal.token, raw: literal.token, index: literal.index };
 	}
 
 	#matchingDsmlClose(fullwidth: string, ascii: string): string | undefined {

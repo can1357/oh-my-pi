@@ -10,6 +10,7 @@ import { CompactionSummaryMessageComponent } from "@oh-my-pi/pi-tui/chat/compact
 import { CustomMessageComponent } from "@oh-my-pi/pi-tui/chat/custom-message";
 import { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
 import { LateDiagnosticsMessageComponent } from "@oh-my-pi/pi-tui/chat/late-diagnostics-message";
+import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
 import { StrippedToolCallsPlaceholder } from "@oh-my-pi/pi-tui/chat/stripped-tool-calls-placeholder";
 import { stopSharedSpinnerTicker, ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import type { TranscriptEntryLike } from "@oh-my-pi/pi-tui/chat/transcript-entry";
@@ -118,6 +119,140 @@ describe("native transcript", () => {
 		expect(h.errors).toEqual([]);
 	});
 
+	it("streams a table row to the terminal only once its line ends", async () => {
+		const component = new AssistantMessageComponent();
+		const h = await startWith(h => h.tui.addChild(component));
+		const table = "| PR | Who |\n|---|---|\n| [#1](https://example.com/pull/1) | a |";
+		component.updateContent(assistant([{ type: "text", text: `${table}\n| [#2](https://exa` }]), { transient: true });
+		await h.render();
+		const md = h.find(node => node.k === "md");
+		expect(md?.p).toMatchObject({ text: table, stream: true });
+
+		// A finished last row is sent once its newline arrives and stays sent while a tool call streams after it.
+		const before = h.frames.length;
+		const row = "\n| [#2](https://example.com/pull/2) | b |";
+		component.updateContent(
+			assistant([
+				{ type: "text", text: `${table}${row}\n` },
+				{ type: "toolCall", id: "call-1", name: "lookup_thing", arguments: {} },
+			]),
+			{ transient: true },
+		);
+		await h.render();
+		expect(opsSince(h, before)).toContainEqual(["text", md!.id, "append", row]);
+
+		const full = `${table}${row}\n| [#3](https://ex`;
+		component.updateContent(assistant([{ type: "text", text: full }]));
+		component.markTranscriptBlockFinalized();
+		await h.render();
+		expect(h.byId(md!.id)?.p).toMatchObject({ text: full });
+		expect(h.errors).toEqual([]);
+	});
+
+	it("streams an open link as its closed form, fixing only the tail as the URL grows", async () => {
+		const component = new AssistantMessageComponent();
+		const h = await startWith(h => h.tui.addChild(component));
+		const prose = "See [the docs](https://ex";
+		component.updateContent(assistant([{ type: "text", text: prose }]), { transient: true });
+		await h.render();
+		const md = h.find(node => node.k === "md");
+		expect(md?.p).toMatchObject({ text: `${prose})`, stream: true });
+
+		const before = h.frames.length;
+		component.updateContent(assistant([{ type: "text", text: `${prose}ample.com` }]), { transient: true });
+		await h.render();
+		// Only the new URL text crosses the wire: the guessed `)` stays in place behind it.
+		expect(opsSince(h, before)).toEqual([["splice", md!.id, prose.length, 0, "ample.com"]]);
+
+		const full = `${prose}ample.com) and more`;
+		component.updateContent(assistant([{ type: "text", text: full }]));
+		component.markTranscriptBlockFinalized();
+		await h.render();
+		expect(h.byId(md!.id)?.p).toMatchObject({ text: full });
+		expect(h.errors).toEqual([]);
+	});
+
+	it("hands the terminal session-resolved targets for relative links once the segment closes", async () => {
+		const component = new AssistantMessageComponent();
+		const h = await startWith(h => h.tui.addChild(component));
+		const source = [
+			"| Board | Shot |",
+			"|---|---|",
+			"| 10×10 | [Open screenshot](artifacts/10x10.png) |",
+			"",
+			"See [the log][log] and [the crop](crop.png).",
+			"Code `[x](artifacts/10x10.png)` stays, [web](https://x.dev) and [gone](missing.md) too.",
+			"",
+			"[log]: logs/run.txt",
+		].join("\n");
+		component.updateContent(assistant([{ type: "text", text: source }]), { transient: true });
+		await h.render();
+		expect(h.find(node => node.k === "md")?.p).toMatchObject({ text: source, stream: true });
+
+		const wt = "file:///C:/Users/me/.omp/wt/cr2-43939c6";
+		component.updateContent(assistant([{ type: "text", text: source }]));
+		component.setLinkTargets(
+			new Map([
+				["artifacts/10x10.png", `${wt}/artifacts/10x10.png`],
+				["logs/run.txt", `${wt}/logs/run.txt`],
+				["crop.png", `${wt}/crop(1).png`],
+			]),
+		);
+		component.markTranscriptBlockFinalized();
+		await h.render();
+		expect(h.find(node => node.k === "md")?.p).toMatchObject({
+			text: [
+				"| Board | Shot |",
+				"|---|---|",
+				`| 10×10 | [Open screenshot](${wt}/artifacts/10x10.png) |`,
+				"",
+				`See [the log][log] and [the crop](<${wt}/crop(1).png>).`,
+				"Code `[x](artifacts/10x10.png)` stays, [web](https://x.dev) and [gone](missing.md) too.",
+				"",
+				`[log]: ${wt}/logs/run.txt`,
+			].join("\n"),
+		});
+		expect(h.errors).toEqual([]);
+	});
+
+	it("keeps submitted skill text visible when the prompt is collapsed", async () => {
+		const component = new SkillMessageComponent({
+			role: "custom",
+			customType: "skill-prompt",
+			content: "Loaded SKILL.md instructions",
+			display: true,
+			attribution: "user",
+			timestamp: 1,
+			details: {
+				name: "grill-with-docs",
+				path: "/tmp/SKILL.md",
+				lineCount: 3,
+				prompt: "/skill:grill-with-docs Organize the project foundation",
+			},
+		});
+		const h = await startWith(h => h.tui.addChild(component));
+		const card = h.find(node => node.p?.role === "omp.skill");
+		expect(card?.p).not.toHaveProperty("collapsible");
+		expect(card?.c?.find(child => child.k === "md")?.p).toMatchObject({
+			text: "Organize the project foundation",
+		});
+		const prompt = h.find(node => node.p?.role === "omp.skill.prompt");
+		expect(prompt?.p).toMatchObject({ collapsible: true, collapsed: true });
+		expect(prompt?.c).toBeUndefined();
+
+		h.event({ ev: "toggle", sf: h.terminal.surface!, id: prompt!.id, collapsed: false });
+		expect(h.byId(prompt!.id)?.p).toMatchObject({ collapsed: false });
+		expect(h.byId(prompt!.id)?.c?.[0]?.p).toMatchObject({ text: "Loaded SKILL.md instructions" });
+
+		h.event({ ev: "toggle", sf: h.terminal.surface!, id: prompt!.id, collapsed: true });
+		expect(h.byId(prompt!.id)?.p).toMatchObject({ collapsed: true });
+		expect(h.byId(prompt!.id)?.c).toBeUndefined();
+		expect(h.byId(card!.id)?.c?.find(child => child.k === "md")?.p).toMatchObject({
+			text: "Organize the project foundation",
+		});
+		expect(h.errors).toEqual([]);
+	});
+
 	it("mirrors a native toggle into the tool card and re-collapses it on a transcript-wide collapse", async () => {
 		let builder: ChatTranscriptBuilder | undefined;
 		const h = await startWith(h => {
@@ -148,6 +283,26 @@ describe("native transcript", () => {
 			expect(tool.describe().p).toMatchObject({ status: "running", collapsed: false });
 			tool.updateResult({ content: [{ type: "text", text: "Wrote 40 lines" }], isError: false });
 			expect(tool.describe().p).toMatchObject({ status: "done", collapsed: true });
+		} finally {
+			tool.dispose();
+		}
+	});
+
+	it("keeps a finished todo call's checklist open", () => {
+		const ui = { requestRender: () => {}, requestComponentRender: () => {}, resetDisplay: () => {} };
+		const tool = new ToolExecutionComponent("todo", { op: "start", task: "lex" }, {}, undefined, ui);
+		try {
+			tool.setArgsComplete("call-1");
+			tool.setExecutionStarted("call-1");
+			tool.updateResult({
+				content: [{ type: "text", text: "ok" }],
+				details: {
+					storage: "memory",
+					phases: [{ name: "Build", tasks: [{ content: "lex", status: "in_progress" }] }],
+				},
+				isError: false,
+			});
+			expect(tool.describe().p).toMatchObject({ status: "done", collapsible: true, collapsed: false });
 		} finally {
 			tool.dispose();
 		}

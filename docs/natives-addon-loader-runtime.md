@@ -17,7 +17,7 @@ A successful call is not memoized by JS. Repeated calls rely on the runtime's `r
 - `platformTag`: `${platform}-${process.arch}`;
 - package version (the expected addon release, subject to the pre-sentinel compatibility exception below);
 - package-local `nativeDir` and the directory of `process.execPath`;
-- `nativesDir`, normally `~/.omp/natives`; it uses `$XDG_DATA_HOME/omp/natives` only when `$XDG_DATA_HOME/omp` exists;
+- `nativesDir`: `PI_NATIVES_DIR` first (trimmed, `~`-expanded, and normalized; empty or relative values are ignored), then `$XDG_DATA_HOME/omp/natives` only when `$XDG_DATA_HOME/omp` exists, otherwise `~/.omp/natives`;
 - `versionedDir`: `<nativesDir>/<packageVersion>`;
 - legacy compiled-binary directory: `%LOCALAPPDATA%/omp` (or `~/AppData/Local/omp`) on Windows, `~/.local/bin` elsewhere;
 - workspace/install/compiled mode, optional leaf directory, Windows staging policy, CPU variant, filenames, and ordered candidates.
@@ -86,8 +86,7 @@ A successfully selected embedded candidate is prepended. Windows staging is disa
 `embedded-addon.js` is always `embeddedAddon = null` on disk, including the published core. Standalone binary builds replace it in memory with a manifest from `scripts/embed-native.ts` containing:
 
 - `platformTag` and package `version`;
-- a gzip-compressed tar archive reference;
-- `files[]` with `variant`, basename-only `filename`, and `size`.
+- `files[]` with `variant`, basename-only `filename`, decompressed `size`, and `zstdPath`, the embedded `<filename>.zst` zstd frame holding that addon.
 
 Extraction runs only for compiled mode with matching platform and version and a selectable file. Selection is:
 
@@ -95,7 +94,7 @@ Extraction runs only for compiled mode with matching platform and version and a 
 - modern x64: `modern`, then `baseline`;
 - baseline x64: `baseline` only.
 
-The loader creates `versionedDir`. If every manifest file that needs extraction is already a regular file with the declared size, it reuses them. Otherwise it gunzips and parses the tar archive, rejecting unsafe names and non-regular entries, validating sizes for pending manifest files, and writing those files through a temporary file plus rename. Safe regular entries not pending in the manifest are ignored. Missing, truncated, unsafe, wrong-type, and wrong-size entries are errors. Older manifests without an archive can still provide per-file `filePath` metadata.
+The loader creates `versionedDir` and rejects any manifest filename that is not a bare basename. Each manifest file that is already a regular file with the declared size is reused; every other one is decompressed from its zstd frame, checked against the declared size, and written through a temporary file plus rename. Unreadable frames, corrupt frames, and size mismatches are errors.
 
 Extraction errors are accumulated; the loader continues to ordinary candidates.
 
@@ -132,7 +131,7 @@ Compiled help lists expected cache paths, suggests deleting the versioned direct
 ```text
 entrypoint evaluates or lazy wrapper is invoked
   -> initialize loader context
-  -> extract matching embedded archive, if any
+  -> extract matching embedded addons, if any
   -> otherwise stage Windows node_modules addon, if applicable
   -> require candidates in deterministic order
        -> validate release stamp outside workspace development

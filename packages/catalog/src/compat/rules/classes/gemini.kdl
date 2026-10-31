@@ -66,18 +66,55 @@ class "gemini" {
 			}
 		}
 	}
-	// Gemini 3.7+ Flash native thinkingLevel does not accept `minimal`
-	// (400 THINKING_LEVEL_MINIMAL; observed on 3.7 and 3.8). Only the direct
+	// Gemini 3.7+ Flash and Gemini 4 Argon native thinkingLevel does not accept
+	// `minimal` (400 THINKING_LEVEL_MINIMAL; observed on Flash 3.7 and 3.8, and
+	// documented for Argon and Argon Cyber Permissive). Only the direct
 	// google-level transports emit `thinkingLevel` on the wire, so the tier is
 	// dropped there; budget (anthropic-messages) and reasoning_effort resellers
 	// never send the rejected value and keep the four-tier ladder. The collapsed
 	// google-antigravity / google-gemini-cli variants remap minimal -> LOW and
 	// carry their own explicit ladder, so they are unaffected.
+	// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/4-argon
 	// https://ai.google.dev/gemini-api/docs/generate-content/thinking#thinking-levels
 	on "google" "google-vertex" "opencode-zen" {
 		family "flash" {
 			revision ">=3.7" {
 				thinking-efforts "low" "medium" "high"
+			}
+		}
+		// Exact ids: a revision-wide rule would tie with the Pro low/high ladder.
+		// Gemini API discovery has no bundled Argon reference and infers
+		// `reasoning: false` from the id; repair it so the ladder is selectable.
+		models "gemini-4-argon" "gemini-4-argon-cyber-permissive" {
+			thinking-upgrade-neutral #true
+			thinking-efforts "low" "medium" "high"
+		}
+	}
+	// Gemini 4 Argon's introductory list price ($2/$10, $0.10 cached) ends
+	// 2026-11-30; from 2026-12-01 Google bills $4/$20, $0.20 cached, on the
+	// Gemini API and Vertex global endpoint alike. Cloud Billing days start at
+	// midnight US Pacific. Both cards are pinned over whatever stencil.so or
+	// the bundled pricing peer reports: the switch needs no regeneration, and
+	// a row built after upstream catches up still prices earlier requests at
+	// the introductory rate.
+	// https://ai.google.dev/gemini-api/docs/pricing
+	// https://cloud.google.com/vertex-ai/generative-ai/pricing
+	on "google" "google-vertex" "google-antigravity" {
+		models "gemini-4-argon" {
+			cost-patch {
+				input 2
+				output 10
+				cache-read 0.1
+				cache-write 0
+				effective-rates {
+					list-price {
+						effective-from "2026-12-01T08:00:00Z"
+						input 4
+						output 20
+						cache-read 0.2
+						cache-write 0
+					}
+				}
 			}
 		}
 	}
@@ -87,6 +124,13 @@ class "gemini" {
 		multimodal-function-response #true
 		// Replaces the Gemini 3+ mandatory-reasoning fallback.
 		thinking-requires-effort #true
+	}
+	// Gemini 3+ takes `thinkingLevel` on the native Google transports; Gemini 4
+	// rejects `thinkingBudget` outright (400 "Use thinking level instead").
+	on-api "google-generative-ai" "google-gemini-cli" "google-vertex" {
+		revision ">=3" {
+			thinking-mode "google-level"
+		}
 	}
 	// Public Gemini requires the bypass sentinel on every unsigned call and
 	// supports function-part ids. Scope by adapter so custom providers using

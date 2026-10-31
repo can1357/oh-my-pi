@@ -7,9 +7,9 @@
  * hosts other processes started, and forwards requests over each host's socket.
  */
 import * as fs from "node:fs/promises";
-import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
+import { IpcConnection, ipcEndpoint } from "@oh-my-pi/pi-natives";
 import { logger, postmortem, ptree, untilAborted } from "@oh-my-pi/pi-utils";
 import { TERMINAL_STATES } from "@oh-my-pi/pi-tui/apps/ps-data";
 import type { DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
@@ -34,8 +34,6 @@ import {
 	idaHostEndpoint,
 	parseIdaHostResponse,
 	parseIdaHostStatus,
-	readSocketLines,
-	writeFrame,
 } from "./protocol";
 import { resolveIdaRuntime } from "./runtime";
 import { cfgIdaIdleCloseSec, cfgIdaMaxOpen } from "./settings";
@@ -62,46 +60,32 @@ const OPEN_WAIT_MS = 120_000;
 class IdaHostGoneError extends ToolError {}
 
 /** Connect to `endpoint`; undefined when nothing listens there. */
-function connectSocket(endpoint: string): Promise<net.Socket | undefined> {
-	const { promise, resolve } = Promise.withResolvers<net.Socket | undefined>();
-	const socket = net.createConnection(endpoint);
-	const timer = setTimeout(() => {
-		socket.destroy();
-		resolve(undefined);
-	}, CONNECT_TIMEOUT_MS);
-	socket.once("connect", () => {
-		clearTimeout(timer);
-		socket.removeAllListeners("error");
-		resolve(socket);
-	});
-	socket.once("error", () => {
-		clearTimeout(timer);
-		socket.destroy();
-		resolve(undefined);
-	});
-	return promise;
+function connectSocket(endpoint: string): Promise<IpcConnection | undefined> {
+	return IpcConnection.connect(endpoint, { framing: "lines", timeoutMs: CONNECT_TIMEOUT_MS }).catch(() => undefined);
 }
 
-/** One socket to a host: numbered requests, responses matched by id. */
+/** One connection to a host: numbered requests, responses matched by id. */
 class HostConnection {
 	readonly #name: string;
-	readonly #socket: net.Socket;
+	readonly #conn: IpcConnection;
 	readonly #pending = new Map<number, PromiseWithResolvers<unknown>>();
 	#nextId = 1;
 	#open = true;
 
-	constructor(name: string, socket: net.Socket, onClose: () => void) {
+	constructor(name: string, conn: IpcConnection, onClose: () => void) {
 		this.#name = name;
-		this.#socket = socket;
-		socket.on("error", error => logger.debug("IDA host connection error", { name, error: errorMessage(error) }));
-		socket.on("close", () => {
-			this.#open = false;
-			const error = new IdaHostGoneError(`IDA host ${name} exited; see \`omp ps logs ${name}\``);
-			for (const entry of this.#pending.values()) entry.reject(error);
-			this.#pending.clear();
-			onClose();
-		});
-		readSocketLines(socket, line => this.#onLine(line));
+		this.#conn = conn;
+		conn.start(
+			line => this.#onLine(line),
+			reason => {
+				if (reason) logger.debug("IDA host connection error", { name, error: reason });
+				this.#open = false;
+				const error = new IdaHostGoneError(`IDA host ${name} exited; see \`omp ps logs ${name}\``);
+				for (const entry of this.#pending.values()) entry.reject(error);
+				this.#pending.clear();
+				onClose();
+			},
+		);
 	}
 
 	get open(): boolean {
@@ -121,17 +105,17 @@ class HostConnection {
 		}
 		const entry = Promise.withResolvers<unknown>();
 		this.#pending.set(request.id, entry);
-		writeFrame(this.#socket, request);
+		this.#conn.send(JSON.stringify(request));
 		return entry.promise;
 	}
 
 	/** Send a request that has no answer (`cancel`). */
 	notify(request: IdaHostRequest): void {
-		writeFrame(this.#socket, request);
+		this.#conn.send(JSON.stringify(request));
 	}
 
 	close(): void {
-		this.#socket.destroy();
+		this.#conn.destroy();
 	}
 
 	#onLine(line: string): void {
@@ -270,7 +254,7 @@ const pending = new Map<string, Promise<IdaDatabase>>();
 let cleanupRegistered = false;
 
 function hostEndpoint(broker: DaemonBrokerClient, name: string): string {
-	return idaHostEndpoint(broker.projectDir, daemonRuntimeDir(broker.projectDir), name);
+	return idaHostEndpoint(daemonRuntimeDir(broker.projectDir), name);
 }
 
 /** Attach to the host `name`, reusing this process's live connection; undefined when none listens. */
@@ -506,8 +490,7 @@ export async function releaseIdaDatabases(): Promise<void> {
 /** Exercise worker-host IDA host startup and the ping handshake for distribution smoke tests. */
 export async function smokeTestIdaHost(): Promise<void> {
 	const dir = path.join(os.tmpdir(), `omp-ida-smoke-${process.pid.toString(36)}`);
-	const endpoint =
-		process.platform === "win32" ? `\\\\.\\pipe\\omp-ida-smoke-${process.pid.toString(16)}` : `${dir}.sock`;
+	const endpoint = ipcEndpoint(os.tmpdir(), `omp-ida-smoke-${process.pid.toString(36)}`);
 	// A missing source makes the open fail after the host listens; `ping` still answers.
 	const config: IdaHostConfig = {
 		endpoint,

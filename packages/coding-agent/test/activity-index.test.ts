@@ -10,7 +10,7 @@ function messageEntry(id: string, timestamp: number, message: Record<string, unk
 
 describe("AgentActivityIndex", () => {
 	it("normalizes transcript responses and paired tool calls without duplicating terminal rows", async () => {
-		using tempDir = TempDir.createSync("activity-index-");
+		using tempDir = TempDir.createSync("@activity-index-");
 		const sessionFile = path.join(tempDir.path(), "worker.jsonl");
 		await Bun.write(
 			sessionFile,
@@ -54,7 +54,7 @@ describe("AgentActivityIndex", () => {
 	});
 
 	it("tails appended JSONL incrementally and scopes rows by agent subtree", async () => {
-		using tempDir = TempDir.createSync("activity-index-tail-");
+		using tempDir = TempDir.createSync("@activity-index-tail-");
 		const parentFile = path.join(tempDir.path(), "parent.jsonl");
 		const childFile = path.join(tempDir.path(), "child.jsonl");
 		await Bun.write(parentFile, `${messageEntry("p1", 1_000, { role: "assistant", content: "Parent result" })}\n`);
@@ -95,7 +95,7 @@ describe("AgentActivityIndex", () => {
 	});
 
 	it("bounds retained rows and drops terminal tool mappings after eviction", async () => {
-		using tempDir = TempDir.createSync("activity-index-bound-");
+		using tempDir = TempDir.createSync("@activity-index-bound-");
 		const sessionFile = path.join(tempDir.path(), "worker.jsonl");
 		const lines: string[] = [];
 		for (let index = 0; index < 300; index++) {
@@ -170,7 +170,10 @@ describe("AgentActivityIndex", () => {
 			remote: {
 				readTranscript: async (_agentId, fromByte) => {
 					const bytes = Buffer.from(transcript);
-					return { text: bytes.subarray(Math.min(fromByte, bytes.byteLength)).toString("utf-8"), newSize: bytes.byteLength };
+					return {
+						text: bytes.subarray(Math.min(fromByte, bytes.byteLength)).toString("utf-8"),
+						newSize: bytes.byteLength,
+					};
 				},
 			},
 		});
@@ -185,7 +188,7 @@ describe("AgentActivityIndex", () => {
 	});
 
 	it("keeps a long response whose text follows a long run of leading whitespace", async () => {
-		using tempDir = TempDir.createSync("activity-index-whitespace-");
+		using tempDir = TempDir.createSync("@activity-index-whitespace-");
 		const sessionFile = path.join(tempDir.path(), "worker.jsonl");
 		await Bun.write(
 			sessionFile,
@@ -197,7 +200,7 @@ describe("AgentActivityIndex", () => {
 	});
 
 	it("retains the newest rows when one sync ingests a large backlog", async () => {
-		using tempDir = TempDir.createSync("activity-index-backlog-");
+		using tempDir = TempDir.createSync("@activity-index-backlog-");
 		const sessionFile = path.join(tempDir.path(), "worker.jsonl");
 		const lines = Array.from({ length: 1_000 }, (_, index) =>
 			messageEntry(`r${index}`, 1_000 + index, { role: "assistant", content: `answer ${index}` }),

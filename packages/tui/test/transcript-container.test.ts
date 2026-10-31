@@ -1,13 +1,14 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 import {
 	TranscriptContainer,
 	type TranscriptStableRow,
 	trimBlankEdges,
 } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { Component } from "@oh-my-pi/pi-tui";
+import { type Component, ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 
 class Block implements Component {
 	#rows: string[];
@@ -166,6 +167,283 @@ const finalAnswer: AssistantMessage = {
 };
 
 const frame = { tick: 0, now: 0 };
+
+/** Greedy word wrap, so the same content takes a different row count at each width. */
+function wrapWords(words: readonly string[], width: number): string[] {
+	const rows: string[] = [];
+	let row = "";
+	for (const word of words) {
+		if (row.length > 0 && row.length + 1 + word.length > width) {
+			rows.push(row);
+			row = word;
+		} else {
+			row = row.length > 0 ? `${row} ${word}` : word;
+		}
+	}
+	if (row.length > 0) rows.push(row);
+	return rows;
+}
+
+describe("TranscriptContainer row split", () => {
+	const words = Array.from({ length: 120 }, (_, i) => `w${i}${"x".repeat(i % 5)}`);
+	const prose: Component = { render: width => wrapWords(words, width) };
+
+	it("commits only the rows of a straddling block that left the screen", () => {
+		const transcript = new TranscriptContainer();
+		transcript.addChild(prose);
+		transcript.addChild(new Block(["tail"], true));
+		const rows = wrapWords(words, 40);
+		// Room 10: the tail and its separator leave 8 rows of the prose live.
+		const batch = transcript.peekFinalizedBatch(40, 10)!;
+		expect(batch.rows).toEqual(rows.slice(0, rows.length - 8));
+		transcript.acknowledgeFinalizedBatch(batch.id);
+		expect(transcript.renderViewport(40, 10, frame)).toEqual([...rows.slice(rows.length - 8), "", "tail"]);
+		expect(transcript.blockStates()).toEqual(["settled", "settled"]);
+	});
+
+	// An inline image: three reserved rows, then the row that draws it upward over them.
+	const imageBlock = (): Block =>
+		new Block(
+			[
+				"above 1",
+				"above 2",
+				"\x1b[0m",
+				"\x1b[0m",
+				"\x1b[0m",
+				"\x1b7\x1b[3A\x1b]1337;File=inline=1;width=10;height=4:AAAA\x07\x1b8",
+				"below 1",
+				"below 2",
+			],
+			true,
+		);
+
+	for (const [protocol, committed] of [
+		// iTerm2 cannot draw part of an image, so it goes to scrollback whole.
+		[ImageProtocol.Iterm2, 6],
+		// Kitty draws the visible part, so the cut stays where the screen ends.
+		[ImageProtocol.Kitty, 3],
+	] as const) {
+		it(`moves a split that would cut an inline image below it only where the terminal cannot draw part of it (${protocol})`, () => {
+			const previous = TERMINAL.imageProtocol;
+			setTerminalImageProtocol(protocol);
+			try {
+				const transcript = new TranscriptContainer();
+				transcript.addChild(imageBlock());
+				transcript.addChild(new Block(["tail"], true));
+				// Room 7: the tail and its separator leave 5 rows of the block live, a cut after row 3.
+				const batch = transcript.peekFinalizedBatch(40, 7)!;
+				expect(batch.rows.length).toBe(committed);
+			} finally {
+				setTerminalImageProtocol(previous);
+			}
+		});
+	}
+
+	it("retires a block in full, with its separator, when keeping its last-row image whole reaches the block's end", () => {
+		const previous = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Iterm2);
+		try {
+			const rows = imageBlock().render().slice(0, 6);
+			const transcript = new TranscriptContainer();
+			transcript.addChild(new Block([...rows], true));
+			transcript.addChild(new Block(["tail"], true));
+			// Room 5: the tail and its separator leave 3 rows live, a cut inside the image.
+			const batch = transcript.peekFinalizedBatch(40, 5)!;
+			// The next block in scrollback stays one blank row below the image.
+			expect(batch.rows).toEqual([...rows, ""]);
+			transcript.acknowledgeFinalizedBatch(batch.id);
+			expect(transcript.blockStates()).toEqual(["committed", "settled"]);
+		} finally {
+			setTerminalImageProtocol(previous);
+		}
+	});
+
+	it("keeps an archived whole image in scrollback when the width changes", () => {
+		const previous = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Iterm2);
+		try {
+			const transcript = new TranscriptContainer();
+			transcript.addChild(imageBlock());
+			transcript.addChild(new Block(["tail"], true));
+			const head = transcript.peekFinalizedBatch(40, 7)!;
+			expect(head.rows.length).toBe(6);
+			transcript.acknowledgeFinalizedBatch(head.id);
+			// The image rows hold no text, so a resize must not relocate the seam above them.
+			const rest = transcript.peekFlushBatch(50)!.rows;
+			expect(rest.some(row => TERMINAL.isImageLine(row))).toBe(false);
+			expect(rest).toContain("below 1");
+		} finally {
+			setTerminalImageProtocol(previous);
+		}
+	});
+
+	it("keeps a replacement image live when the archived one is swapped before a width change", () => {
+		const previous = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Iterm2);
+		try {
+			const block = imageBlock();
+			const transcript = new TranscriptContainer();
+			transcript.addChild(block);
+			transcript.addChild(new Block(["tail"], true));
+			const head = transcript.peekFinalizedBatch(40, 7)!;
+			transcript.acknowledgeFinalizedBatch(head.id);
+			// A parked tool card redraws a different image over the archived one.
+			block.finalize(block.render().map(row => row.replace(":AAAA", ":BBBB")));
+			const rest = transcript.peekFlushBatch(50)!.rows;
+			expect(rest.some(row => row.includes(":BBBB"))).toBe(true);
+		} finally {
+			setTerminalImageProtocol(previous);
+		}
+	});
+
+	it("keeps a row inserted above the archived image live across a width change", () => {
+		const previous = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Iterm2);
+		try {
+			const block = imageBlock();
+			const transcript = new TranscriptContainer();
+			transcript.addChild(block);
+			transcript.addChild(new Block(["tail"], true));
+			const head = transcript.peekFinalizedBatch(40, 7)!;
+			transcript.acknowledgeFinalizedBatch(head.id);
+			// An expanded pane adds a divider between the archived text and the image.
+			const rows = [...block.render()];
+			rows.splice(2, 0, "────");
+			block.finalize(rows);
+			const rest = transcript.peekFlushBatch(50)!.rows;
+			expect(rest).toContain("────");
+		} finally {
+			setTerminalImageProtocol(previous);
+		}
+	});
+
+	it("keeps an archived image in scrollback after a later split advances past it", () => {
+		const previous = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Iterm2);
+		try {
+			const transcript = new TranscriptContainer();
+			transcript.addChild(imageBlock());
+			transcript.addChild(new Block(["tail"], true));
+			const first = transcript.peekFinalizedBatch(40, 7)!;
+			transcript.acknowledgeFinalizedBatch(first.id);
+			// Growing pressure moves the seam past the image into the text below it.
+			const second = transcript.peekFinalizedBatch(40, 3)!;
+			expect(second.rows).toEqual(["below 1"]);
+			transcript.acknowledgeFinalizedBatch(second.id);
+			const rest = transcript.peekFlushBatch(50)!.rows;
+			expect(rest.some(row => TERMINAL.isImageLine(row))).toBe(false);
+			expect(rest).not.toContain("below 1");
+			expect(rest).toContain("below 2");
+		} finally {
+			setTerminalImageProtocol(previous);
+		}
+	});
+
+	it("keeps an archived image live when the block moves it to another place in its text", () => {
+		const previous = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Iterm2);
+		try {
+			const block = imageBlock();
+			const transcript = new TranscriptContainer();
+			transcript.addChild(block);
+			transcript.addChild(new Block(["tail"], true));
+			const head = transcript.peekFinalizedBatch(40, 7)!;
+			transcript.acknowledgeFinalizedBatch(head.id);
+			// A layout update draws the same image between the two text rows above it.
+			const [above1, above2, ...image] = block.render().slice(0, 6);
+			block.finalize([above1!, ...image, above2!, "below 1", "below 2"]);
+			const rest = transcript.peekFlushBatch(50)!.rows;
+			expect(rest.some(row => TERMINAL.isImageLine(row))).toBe(true);
+		} finally {
+			setTerminalImageProtocol(previous);
+		}
+	});
+
+	it("resumes a split block at the same content after a width change, repeating at most one row", () => {
+		const transcript = new TranscriptContainer();
+		transcript.addChild(prose);
+		transcript.addChild(new Block(["tail"], true));
+		const head = transcript.peekFinalizedBatch(40, 10)!;
+		transcript.acknowledgeFinalizedBatch(head.id);
+		const committed = head.rows.join(" ").split(" ");
+		// A preserve-mode resize keeps the 40-column rows in scrollback; the rest
+		// retires at 25 columns.
+		const rest = transcript.peekFlushBatch(25)!.rows.filter(row => row !== "");
+		const resumed = rest.join(" ").split(" ");
+		expect(resumed.at(-1)).toBe("tail");
+		const restart = words.indexOf(resumed[0]!);
+		// No word is lost, and only the seam row's committed words repeat.
+		expect(restart).toBeLessThanOrEqual(committed.length);
+		expect(resumed.slice(0, -1)).toEqual(words.slice(restart));
+		expect(committed.length - restart).toBeLessThan(wrapWords(words, 25)[0]!.split(" ").length);
+		expect(committed).toEqual(words.slice(0, committed.length));
+	});
+
+	it("loses no text of a split block whose wrapped rows carry a per-row prefix", () => {
+		// Every wrapped row starts with a quote bar, so a narrower width spends
+		// more cells on decoration per character of content.
+		const content = "abcdefghij".repeat(5);
+		const quoted: Component = {
+			render: width => {
+				const step = width - 1;
+				return Array.from(
+					{ length: Math.ceil(content.length / step) },
+					(_, i) => `#${content.slice(i * step, (i + 1) * step)}`,
+				);
+			},
+		};
+		const transcript = new TranscriptContainer();
+		transcript.addChild(quoted);
+		transcript.addChild(new Block(["tail"], true));
+		const head = transcript.peekFinalizedBatch(6, 3)!;
+		transcript.acknowledgeFinalizedBatch(head.id);
+		const committed = head.rows.map(row => row.slice(1)).join("");
+		expect(content.startsWith(committed)).toBe(true);
+		const rest = transcript.peekFlushBatch(9)!.rows.filter(row => row.startsWith("#"));
+		const resumed = rest.map(row => row.slice(1)).join("");
+		// The rest resumes at or before the committed end and runs to the end.
+		expect(content.endsWith(resumed)).toBe(true);
+		expect(content.length - resumed.length).toBeLessThanOrEqual(committed.length);
+	});
+
+	it("keeps rows a split block reveals at the same width, such as an expanded tool pane", () => {
+		// A settled output pane shows its tail behind a summary until expanded.
+		const lines = Array.from({ length: 30 }, (_, i) => `out${i}`);
+		let expanded = false;
+		const pane: Component = {
+			render: () => (expanded ? lines : ["… 20 earlier lines", ...lines.slice(20)]),
+		};
+		const transcript = new TranscriptContainer();
+		transcript.addChild(pane);
+		transcript.addChild(new Block(["tail"], true));
+		const head = transcript.peekFinalizedBatch(80, 6)!;
+		transcript.acknowledgeFinalizedBatch(head.id);
+		expect(head.rows).toEqual(["… 20 earlier lines", "out20", "out21", "out22", "out23", "out24", "out25"]);
+		// Ctrl+O: the pane re-renders with head rows that history never received.
+		expanded = true;
+		const rest = transcript.peekFlushBatch(80)!.rows;
+		expect(rest.filter(row => row.startsWith("out"))).toEqual(lines);
+	});
+	it("stops a relocated split before punctuation-only rows a split block reveals", () => {
+		// Expanding the pane reveals a rule row above the committed head rows;
+		// the hash rejects the stale bytes, and the empty-content row must not
+		// count as matched content on the relocation walk.
+		let expanded = false;
+		const pane: Component = {
+			render: () => (expanded ? ["---", "AAA", "BBB"] : ["AAA", "BBB"]),
+		};
+		const transcript = new TranscriptContainer();
+		transcript.addChild(pane);
+		transcript.addChild(new Block(["tail"], true));
+		const head = transcript.peekFinalizedBatch(80, 3)!;
+		transcript.acknowledgeFinalizedBatch(head.id);
+		expect(head.rows).toEqual(["AAA"]);
+		expanded = true;
+		const rest = transcript.peekFlushBatch(80)!.rows;
+		expect(rest).toContain("---");
+		expect(rest.filter(row => row === "AAA" || row === "BBB")).toEqual(["AAA", "BBB"]);
+	});
+});
 
 describe("TranscriptContainer", () => {
 	it("preserves retirement while externally reordered and replaced live children settle", () => {
@@ -345,7 +623,11 @@ describe("TranscriptContainer", () => {
 		const block = new ReflowingAppendBlock();
 		transcript.addChild(block);
 
-		const emitted = transcript.peekFinalizedBatch(4, 2)!;
+		// Room 2: "efgh" is still on screen, so its stable prefix stays live —
+		// committing it would strand that row above the live tail.
+		expect(transcript.peekFinalizedBatch(4, 2)).toBeUndefined();
+		// Room 1: the whole two-row stable prefix has left the screen.
+		const emitted = transcript.peekFinalizedBatch(4, 1)!;
 		expect(emitted.rows).toEqual(["abcd", "efgh"]);
 		transcript.acknowledgeFinalizedBatch(emitted.id);
 		expect(transcript.renderViewport(8, 1, frame)).toEqual(["partial"]);
@@ -579,6 +861,67 @@ describe("TranscriptContainer", () => {
 		expect(out).toEqual(["A3", "A4", "B1", "B2", "B3", "B4", "C1", "C2", "C3", "C4"]);
 	});
 
+	it("renders user message text in emergency layout and omits OSC 133 prompt markers (issue 13835)", () => {
+		const transcript = new TranscriptContainer();
+		transcript.addChild(new Block(["stuck tool"], false)); // pins retirement
+		for (let i = 0; i < 6; i++) transcript.addChild(new Block([`settled ${i}`], true));
+		const userMsg = new UserMessageComponent("is there a reason we haven't tested against the real device yet?");
+		transcript.addChild(userMsg);
+		transcript.addChild(new Block(["after 1"], true));
+		transcript.addChild(new Block(["after 2"], true));
+
+		const rendered = transcript.renderViewport(80, 5, frame);
+		expect(rendered).toHaveLength(5);
+		const userRow = rendered[2]!;
+		expect(userRow).toContain("is there a reason we haven't tested against the real device yet?");
+		expect(userRow).not.toContain("\x1b]133;A");
+		expect(userRow).not.toContain("\x1b]133;B");
+	});
+
+	it("recovers user message text as emergency row when behind viewport (issue 13835)", () => {
+		const transcript = new TranscriptContainer();
+		transcript.addChild(new Block(["stuck tool"], false)); // pins retirement
+		const userMsg = new UserMessageComponent("first prompt behind viewport");
+		transcript.addChild(userMsg);
+		for (let i = 0; i < 10; i++) transcript.addChild(new Block([`settled ${i}`], true));
+
+		const rendered = transcript.renderViewport(80, 2, frame);
+		expect(rendered[0]).toContain("first prompt behind viewport");
+		expect(rendered[0]).not.toContain("\x1b]133;A");
+	});
+
+	it("UserMessageComponent emergency row renders first content line and omits shell integration", () => {
+		const userMsg = new UserMessageComponent("first line\nsecond line");
+		const row = userMsg.renderTranscriptBlockEmergencyRow(80);
+		expect(row).toBeDefined();
+		expect(row).toContain("first line");
+		expect(row).not.toContain("second line");
+		expect(row).not.toContain("\x1b]133;A");
+		expect(row).not.toContain("\x1b]133;B");
+	});
+
+	it("UserMessageComponent reuses measured lines under one-row allocation without duplicate child render", () => {
+		const userMsg = new UserMessageComponent("single render test");
+		userMsg.setTranscriptAllocation(1);
+		let superRenderCalls = 0;
+		const superProto = Object.getPrototypeOf(UserMessageComponent.prototype) as {
+			render: (width: number) => readonly string[];
+		};
+		const origSuperRender = superProto.render;
+		superProto.render = function (this: unknown, width: number) {
+			superRenderCalls++;
+			return origSuperRender.call(this, width);
+		};
+		try {
+			const rows = userMsg.render(80);
+			expect(rows).toHaveLength(1);
+			expect(rows[0]).toContain("single render test");
+			expect(superRenderCalls).toBe(1);
+		} finally {
+			superProto.render = origSuperRender;
+		}
+	});
+
 	it("keeps a completed assistant answer visible behind an active prefix", () => {
 		const transcript = new TranscriptContainer();
 		transcript.addChild(new Block(["stale active"], false));
@@ -629,6 +972,68 @@ describe("TranscriptContainer", () => {
 		expect(transcript.canRemoveBlock(settled)).toBe(false);
 		transcript.removeChild(settled);
 		expect(transcript.blockStates()).toEqual(["committed", "active"]);
+	});
+
+	it("removes live blocks behind a settled one without disturbing committed or settled bookkeeping", () => {
+		const transcript = new TranscriptContainer();
+		const committedA = new Block(["committed a"], true);
+		const committedB = new Block(["committed b"], true);
+		transcript.addChild(committedA);
+		transcript.addChild(committedB);
+		const commit = transcript.peekFinalizedBatch(80, 0);
+		expect(commit?.rows).toEqual(["committed a", "", "committed b", ""]);
+		transcript.acknowledgeFinalizedBatch(commit!.id);
+
+		const settled = new Block(["settled"], true);
+		const live = [1, 2, 3, 4, 5].map(n => new Block([`live ${n}`], false));
+		transcript.addChild(settled);
+		for (const block of live) transcript.addChild(block);
+		// Room for every live row: the finalized block settles and nothing is offered.
+		expect(transcript.peekFinalizedBatch(80, 20)).toBeUndefined();
+		expect(transcript.blockStates()).toEqual([
+			"committed",
+			"committed",
+			"settled",
+			"active",
+			"active",
+			"active",
+			"active",
+			"active",
+		]);
+
+		transcript.removeChild(live[0]!);
+		transcript.removeChild(live[4]!);
+
+		expect(transcript.blockStates()).toEqual(["committed", "committed", "settled", "active", "active", "active"]);
+		const expected = [committedA, committedB, settled, live[1]!, live[2]!, live[3]!];
+		expect(transcript.children).toHaveLength(expected.length);
+		expected.forEach((component, index) => expect(transcript.children[index]).toBe(component));
+
+		// Pressure retires the settled block next; committed rows are never offered again.
+		const retire = transcript.peekFinalizedBatch(80, 5);
+		expect(retire?.rows).toEqual(["settled", ""]);
+	});
+
+	it("refuses to remove an append-only block once its stable rows are offered or emitted", () => {
+		const transcript = new TranscriptContainer();
+		const block = new AppendBlock(["one", "two"], ["one"]);
+		transcript.addChild(block);
+
+		// Offered: the stable row is mid-write to native scrollback.
+		const append = transcript.peekFinalizedBatch(80, 0)!;
+		expect(append.rows).toEqual(["one"]);
+		transcript.removeChild(block);
+		expect(transcript.children).toHaveLength(1);
+		expect(transcript.children[0]).toBe(block);
+		expect(transcript.blockStates()).toEqual(["active"]);
+
+		// Emitted: the row is in scrollback, so the block can no longer be retracted.
+		transcript.acknowledgeFinalizedBatch(append.id);
+		expect(transcript.emittedStableRows()).toEqual([1]);
+		transcript.removeChild(block);
+		expect(transcript.children).toHaveLength(1);
+		expect(transcript.children[0]).toBe(block);
+		expect(transcript.blockStates()).toEqual(["active"]);
 	});
 
 	it("replays committed history without rewinding lifecycle state", () => {
@@ -955,6 +1360,33 @@ describe("TranscriptContainer progressive assistant retirement", () => {
 		const live = transcript.renderViewport(narrow, 1000, frame);
 		expect([...emittedRows, ...next, ...live]).toEqual([...trimBlankEdges(component.render(narrow))]);
 	});
+
+	it("retires the finished lines of a still-open fence instead of holding the block live", () => {
+		// A streamed code block (SQL, logs) closes its fence only at the end. It
+		// never reaches a "\n\n" boundary, so the block walk alone publishes
+		// nothing for it and every row past the screen height is dropped from the
+		// live viewport instead of retiring into scrollback (#9780).
+		const transcript = new TranscriptContainer();
+		const component = new AssistantMessageComponent();
+		transcript.addChild(component);
+		const statement = (index: number): string => `SELECT column_${index} FROM orders_${index};\n`;
+		let body = "```sql\n";
+		for (let index = 0; index < 12; index++) {
+			body += statement(index);
+			component.updateContent({ ...finalAnswer, content: [{ type: "text", text: body }] }, { transient: true });
+			transcript.renderViewport(WIDTH, ROOM, frame);
+		}
+		const retired = retire(transcript, WIDTH);
+		const [emitted = 0] = transcript.emittedStableRows();
+		expect(emitted).toBeGreaterThan(1);
+		const retiredText = Bun.stripANSI(retired.join("\n"));
+		expect(retiredText).toContain("SELECT column_0 FROM orders_0;");
+		// The fence has no closer yet, so the renderer's fabricated closing
+		// border must not be retired as if the block had ended.
+		expect(retired.at(-1)!.trim()).not.toBe("```");
+		const live = transcript.renderViewport(WIDTH, 1000, frame);
+		expect([...retired, ...live]).toEqual([...trimBlankEdges(component.render(WIDTH))]);
+	});
 });
 
 describe("TranscriptContainer viewport click spans", () => {
@@ -1009,5 +1441,83 @@ describe("TranscriptContainer viewport click spans", () => {
 		transcript.renderViewport(80, 10, frame);
 		transcript.clear();
 		expect(transcript.getLastViewportSpans()).toEqual([]);
+	});
+});
+
+describe("TranscriptContainer insertChildAt", () => {
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+
+	it("renders a tail insertion without scanning committed history", () => {
+		const transcript = new TranscriptContainer();
+		const history = Array.from({ length: 64 }, (_, index) => new Block([`history ${index}`], true));
+		for (const block of history) transcript.addChild(block);
+		const committed = transcript.peekFlushBatch(80);
+		if (!committed) throw new Error("Expected history batch");
+		transcript.acknowledgeFinalizedBatch(committed.id);
+		transcript.addChild(new Block(["anchor"], false));
+		expect(transcript.renderViewport(80, 10, frame)).toEqual(["anchor"]);
+
+		let historyReads = 0;
+		for (const [index, block] of history.entries()) {
+			Object.defineProperty(transcript.children, index, {
+				get: () => {
+					historyReads++;
+					return block;
+				},
+				configurable: true,
+			});
+		}
+
+		transcript.insertChildAt(new Block(["inserted"], false), transcript.children.length);
+
+		expect(transcript.renderViewport(80, 10, frame)).toEqual(["anchor", "", "inserted"]);
+		expect(historyReads).toBe(0);
+	});
+
+	it("renders a middle insertion without scanning committed history", () => {
+		const transcript = new TranscriptContainer();
+		const history = Array.from({ length: 64 }, (_, index) => new Block([`history ${index}`], true));
+		for (const block of history) transcript.addChild(block);
+		const committed = transcript.peekFlushBatch(80);
+		if (!committed) throw new Error("Expected history batch");
+		transcript.acknowledgeFinalizedBatch(committed.id);
+		transcript.addChild(new Block(["anchor"], false));
+		transcript.addChild(new Block(["tail"], false));
+		expect(transcript.renderViewport(80, 10, frame)).toEqual(["anchor", "", "tail"]);
+
+		let historyReads = 0;
+		for (const [index, block] of history.entries()) {
+			Object.defineProperty(transcript.children, index, {
+				get: () => {
+					historyReads++;
+					return block;
+				},
+				configurable: true,
+			});
+		}
+
+		transcript.insertChildAt(new Block(["inserted"], false), transcript.children.length - 1);
+
+		expect(transcript.renderViewport(80, 10, frame)).toEqual(["anchor", "", "inserted", "", "tail"]);
+		expect(historyReads).toBe(0);
+	});
+
+	it("keeps inserted blocks ordered and removable across repeated inserts", () => {
+		const transcript = new TranscriptContainer();
+		const first = new Block(["first"], false);
+		const last = new Block(["last"], false);
+		transcript.addChild(first);
+		transcript.addChild(last);
+
+		const insertedA = new Block(["inserted-a"], false);
+		const insertedB = new Block(["inserted-b"], false);
+		transcript.insertChildAt(insertedA, 1);
+		transcript.insertChildAt(insertedB, 1);
+
+		expect(transcript.children).toEqual([first, insertedB, insertedA, last]);
+		expect(transcript.canRemoveBlock(insertedA)).toBe(true);
+		expect(transcript.canRemoveBlock(insertedB)).toBe(true);
 	});
 });

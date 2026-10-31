@@ -100,6 +100,9 @@ describe("model cache write churn", () => {
 		const entry = readModelCache("rewrite-test", TTL_MS, () => 2_000, dbPath);
 		expect(entry?.authoritative).toBe(false);
 		expect(entry?.updatedAt).toBe(2_000);
+		// The side row carries freshness and retry authority only; the payload still
+		// records that its models came from an authoritative discovery result.
+		expect(entry?.payloadAuthoritative).toBe(true);
 		expect(payloadRow(dbPath, "rewrite-test")?.authoritative).toBe(1);
 	});
 
@@ -134,7 +137,14 @@ describe("model cache write churn", () => {
 	/** Serialized `models` payload for `ids`, as this binary writes it. */
 	function payloadFor(ids: string[]): string {
 		const otherPath = path.join(tempDir, "payload-source.db");
-		writeModelCache("rewrite-test", 1_000, ids.map(id => model(id)), true, "fp", otherPath);
+		writeModelCache(
+			"rewrite-test",
+			1_000,
+			ids.map(id => model(id)),
+			true,
+			"fp",
+			otherPath,
+		);
 		const row = payloadRow(otherPath, "rewrite-test");
 		if (!row) throw new Error("expected payload row");
 		return row.models;

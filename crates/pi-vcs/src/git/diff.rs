@@ -1,6 +1,10 @@
 //! Git-compatible patch generation.
 
-use std::{fmt::Write as _, io::Write as _, path::Path};
+use std::{
+	fmt::{NumBuffer, Write as _},
+	io::Write as _,
+	path::Path,
+};
 
 use gix::bstr::{BStr, BString, ByteSlice};
 
@@ -43,10 +47,14 @@ impl GitRepo {
 			options.binary,
 			options.max_bytes,
 		)?;
-		// Size the joined patch once: growing it by doubling would hold up to
-		// twice the output during the copy, on top of the per-change strings
-		// that are released as they are consumed.
-		let mut text = String::with_capacity(rendered.iter().map(|item| item.text.len()).sum());
+		// Reuse the first patch's allocation; single-file requests need no
+		// joining copy. Reserve the remaining bytes once for multi-file patches.
+		let mut rendered = rendered.into_iter();
+		let Some(first) = rendered.next() else {
+			return Ok(String::new());
+		};
+		let mut text = first.text;
+		text.reserve_exact(rendered.as_slice().iter().map(|item| item.text.len()).sum());
 		for item in rendered {
 			text.push_str(&item.text);
 		}
@@ -310,6 +318,7 @@ fn tree_changes(
 			out.push(item);
 		}
 	}
+	pair_gitlink_renames(&mut out);
 	sort_changes(&mut out);
 	Ok(out)
 }
@@ -341,8 +350,46 @@ fn index_changes(
 			},
 		)
 		.map_err(|err| Error::backend("git diff --cached", err))?;
+	pair_gitlink_renames(&mut out);
 	sort_changes(&mut out);
 	Ok(out)
+}
+
+/// gix's rename tracker only considers blobs, but git pairs a deleted and an
+/// added gitlink with the same commit id as a 100% rename. Changed-id gitlinks
+/// have no content to score, so git (and this) leaves them as delete + add.
+fn pair_gitlink_renames(changes: &mut Vec<FileChange>) {
+	let is_gitlink = |mode: Option<gix::objs::tree::EntryMode>| {
+		mode.is_some_and(|mode| mode.kind() == gix::objs::tree::EntryKind::Commit)
+	};
+	let mut index = 0;
+	while index < changes.len() {
+		let deletion = &changes[index];
+		if !(deletion.new_mode.is_none() && is_gitlink(deletion.old_mode)) {
+			index += 1;
+			continue;
+		}
+		let old_id = deletion.old_id;
+		let Some(addition) = changes.iter().position(|change| {
+			change.old_mode.is_none() && is_gitlink(change.new_mode) && change.new_id == old_id
+		}) else {
+			index += 1;
+			continue;
+		};
+		let added = changes.swap_remove(addition);
+		// `swap_remove` may have moved the deletion into `addition`'s slot.
+		let index_now = if index == changes.len() {
+			addition
+		} else {
+			index
+		};
+		let deletion = &mut changes[index_now];
+		deletion.new_path = added.new_path;
+		deletion.new_id = added.new_id;
+		deletion.new_mode = added.new_mode;
+		deletion.similarity = Some(100);
+		index = 0;
+	}
 }
 
 fn base_worktree_changes(
@@ -649,6 +696,14 @@ fn render_change(
 	binary_patch: bool,
 	budget: Option<RenderBudget>,
 ) -> Result<Rendered> {
+	if change
+		.old_mode
+		.iter()
+		.chain(change.new_mode.iter())
+		.all(|mode| mode.kind() == gix::objs::tree::EntryKind::Commit)
+	{
+		return Ok(render_gitlink(change));
+	}
 	let old_kind = change
 		.old_mode
 		.or(change.new_mode)
@@ -752,6 +807,39 @@ fn render_change(
 			Err(Error::backend("git diff", "external diff drivers cannot be rendered in-process"))
 		},
 	}
+}
+
+fn render_gitlink(change: &FileChange) -> Rendered {
+	let mut text = format!("diff --git a/{} b/{}\n", change.old_path, change.new_path);
+	// Gitlinks have no content to score, so only an exact-id rename carries a
+	// meaningful similarity; the "compute later" sentinel has nothing to
+	// compute.
+	let similarity = change
+		.similarity
+		.filter(|&similarity| similarity != u8::MAX);
+	append_metadata(&mut text, change, similarity, false);
+	if change.old_id == change.new_id {
+		// Pure rename: git emits only the rename header and counts 0/0.
+		return Rendered { text, added: Some(0), removed: Some(0) };
+	}
+	text.push_str("--- ");
+	push_old_path(&mut text, change);
+	text.push_str("\n+++ ");
+	push_new_path(&mut text, change);
+	text.push('\n');
+	match (change.old_mode, change.new_mode) {
+		(Some(_), Some(_)) => text.push_str("@@ -1 +1 @@\n"),
+		(None, Some(_)) => text.push_str("@@ -0,0 +1 @@\n"),
+		(Some(_), None) => text.push_str("@@ -1 +0,0 @@\n"),
+		(None, None) => unreachable!("a change has at least one mode"),
+	}
+	if change.old_mode.is_some() {
+		let _ = writeln!(text, "-Subproject commit {}", change.old_id);
+	}
+	if change.new_mode.is_some() {
+		let _ = writeln!(text, "+Subproject commit {}", change.new_id);
+	}
+	Rendered { text, added: change.new_mode.map(|_| 1), removed: change.old_mode.map(|_| 1) }
 }
 
 fn append_metadata(out: &mut String, change: &FileChange, similarity: Option<u8>, full_ids: bool) {
@@ -1371,7 +1459,7 @@ fn no_index_label(root: &Path, path: &Path) -> String {
 }
 
 fn is_null_device(path: &Path) -> bool {
-	path == Path::new("/dev/null") || path.to_string_lossy().eq_ignore_ascii_case("NUL")
+	path == "/dev/null" || path.to_string_lossy().eq_ignore_ascii_case("NUL")
 }
 
 #[cfg(unix)]
@@ -1463,10 +1551,11 @@ const fn zero_start(start: u32, len: u32) -> u32 {
 }
 
 fn push_range(out: &mut String, start: u32, len: u32) {
-	out.push_str(&start.to_string());
+	let mut buf = NumBuffer::new();
+	out.push_str(start.format_into(&mut buf));
 	if len != 1 {
 		out.push(',');
-		out.push_str(&len.to_string());
+		out.push_str(len.format_into(&mut buf));
 	}
 }
 
@@ -1504,6 +1593,7 @@ mod tests {
 	use tempfile::TempDir;
 
 	use super::*;
+	use crate::types::ApplyOptions;
 
 	// Diff oracles pass `--no-ext-diff`: a developer's `diff.external` (e.g.
 	// difftastic) would otherwise replace git's patch with its own output.
@@ -1516,6 +1606,7 @@ mod tests {
 		assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
 		String::from_utf8(output.stdout).expect("git output is UTF-8")
 	}
+	#[cfg(unix)]
 	fn git_diff(dir: &Path, args: &[&str]) -> String {
 		let output = Command::new("git")
 			.args(args)
@@ -1659,6 +1750,61 @@ mod tests {
 			repo.diff_text(&filtered).expect("filtered diff"),
 			git(dir.path(), &["diff", "--no-ext-diff", "--cached", "--", "added.txt"])
 		);
+	}
+
+	#[test]
+	fn gitlink_patch_matches_git_and_preserves_commit_ids() {
+		let dir = fixture();
+		let old = git(dir.path(), &["rev-parse", "HEAD"]).trim().to_owned();
+		let new = "b".repeat(40); // Valid gitlink, absent from the root object database.
+		git(dir.path(), &["update-index", "--add", "--cacheinfo", &format!("160000,{old},module")]);
+		git(dir.path(), &["commit", "-qm", "add gitlink"]);
+		git(dir.path(), &["update-index", "--add", "--cacheinfo", &format!("160000,{new},module")]);
+		let repo = GitRepo::discover(dir.path())
+			.expect("discover")
+			.expect("repository");
+		let patch = git(dir.path(), &["diff", "--no-ext-diff", "--cached"]);
+		assert_eq!(
+			repo
+				.diff_text(&DiffOptions { cached: true, ..DiffOptions::default() })
+				.expect("staged gitlink"),
+			patch
+		);
+		git(dir.path(), &["update-index", "--add", "--cacheinfo", &format!("160000,{old},module")]);
+		repo
+			.apply_patch(&patch, &ApplyOptions { cached: true, ..ApplyOptions::default() })
+			.expect("apply gitlink without its commit object in the root repo");
+		assert!(git(dir.path(), &["ls-files", "--stage", "module"]).contains(&new));
+		git(dir.path(), &["commit", "-qm", "update gitlink"]);
+		assert_eq!(
+			repo
+				.diff_tree("HEAD^", "HEAD", true)
+				.expect("committed gitlink"),
+			git(dir.path(), &["diff-tree", "-r", "-p", "HEAD^", "HEAD"])
+		);
+	}
+
+	#[test]
+	fn gitlink_pure_rename_matches_git_without_synthetic_hunk() {
+		let dir = fixture();
+		let head = git(dir.path(), &["rev-parse", "HEAD"]).trim().to_owned();
+		git(dir.path(), &["update-index", "--add", "--cacheinfo", &format!("160000,{head},module")]);
+		git(dir.path(), &["commit", "-qm", "add gitlink"]);
+		git(dir.path(), &["update-index", "--force-remove", "module"]);
+		git(dir.path(), &["update-index", "--add", "--cacheinfo", &format!("160000,{head},moved")]);
+		let repo = GitRepo::discover(dir.path())
+			.expect("discover")
+			.expect("repository");
+		let options = DiffOptions { cached: true, ..DiffOptions::default() };
+		assert_eq!(
+			repo.diff_text(&options).expect("renamed gitlink"),
+			git(dir.path(), &["diff", "--no-ext-diff", "--cached", "-M"])
+		);
+		assert_eq!(repo.numstat(&options).expect("numstat"), vec![NumstatEntry {
+			path:    "moved".to_owned(),
+			added:   Some(0),
+			removed: Some(0),
+		}]);
 	}
 
 	#[test]

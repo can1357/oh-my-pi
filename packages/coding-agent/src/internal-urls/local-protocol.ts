@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import localDoc from "../prompts/internal-urls/local.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";
 import {
@@ -151,28 +152,38 @@ async function buildFileResource(
 }
 
 async function listFilesRecursively(rootPath: string): Promise<string[]> {
-	const pending = [""];
 	const files: string[] = [];
-
-	while (pending.length > 0) {
-		const relativeDir = pending.pop();
-		if (relativeDir === undefined) continue;
-		const absoluteDir = path.join(rootPath, relativeDir);
-		const entries = await fs.readdir(absoluteDir, { withFileTypes: true });
-
+	// Sibling directories are read concurrently; the final sort fixes the order.
+	const walk = async (relativeDir: string): Promise<void> => {
+		const entries = await fs.readdir(path.join(rootPath, relativeDir), { withFileTypes: true });
+		const subdirs: Promise<void>[] = [];
 		for (const entry of entries) {
 			const entryPath = path.join(relativeDir, entry.name);
 			if (entry.isDirectory()) {
-				pending.push(entryPath);
-				continue;
-			}
-			if (entry.isFile()) {
+				subdirs.push(walk(entryPath));
+			} else if (entry.isFile()) {
 				files.push(entryPath.replaceAll(path.sep, "/"));
 			}
 		}
-	}
-
+		await Promise.all(subdirs);
+	};
+	await walk("");
 	return files.sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * `complete()` runs on every keystroke; reuse a root's sorted listing for a
+ * short window instead of re-walking and re-sorting the tree each time.
+ */
+const completionListings = new LRUCache<string, Promise<string[]>>({ max: 16, ttl: 2000 });
+
+function listCompletionFiles(localRoot: string): Promise<string[]> {
+	const cached = completionListings.get(localRoot);
+	if (cached) return cached;
+	const listing = listFilesRecursively(localRoot);
+	completionListings.set(localRoot, listing);
+	listing.catch(() => completionListings.delete(localRoot));
+	return listing;
 }
 
 async function buildListing(url: InternalUrl, localRoot: string): Promise<InternalResource> {
@@ -237,6 +248,48 @@ export function resolveLocalRoot(options: LocalProtocolOptions, platform: NodeJS
 	}
 
 	return path.join(os.tmpdir(), "omp-local", safeSessionId(options));
+}
+
+export interface LocalFileEntry {
+	/** Root-relative, `/`-separated name, e.g. `plans/x-plan.md`. */
+	name: string;
+	/** `local://${name}` */
+	url: string;
+	/** Absolute path under the resolved local root. */
+	path: string;
+	size: number;
+	mtimeMs: number;
+}
+
+/**
+ * Every regular file under the session's local:// root, newest first (ties by name); missing root → [].
+ * Uncached, unlike completion listings, so pickers see files written moments ago. The walker skips
+ * symlinks, so each entry is a real file inside the root.
+ */
+export async function listLocalFiles(options: LocalProtocolOptions): Promise<LocalFileEntry[]> {
+	const root = path.resolve(resolveLocalRoot(options));
+	let names: string[];
+	try {
+		names = await listFilesRecursively(root);
+	} catch (err) {
+		if (isEnoent(err)) return [];
+		throw err;
+	}
+	const entries = await Promise.all(
+		names.map(async (name): Promise<LocalFileEntry | null> => {
+			const filePath = path.join(root, name);
+			try {
+				const stat = await fs.stat(filePath);
+				return { name, url: `local://${name}`, path: filePath, size: stat.size, mtimeMs: stat.mtimeMs };
+			} catch (err) {
+				if (isEnoent(err)) return null;
+				throw err;
+			}
+		}),
+	);
+	return entries
+		.filter((entry): entry is LocalFileEntry => entry !== null)
+		.sort((a, b) => b.mtimeMs - a.mtimeMs || a.name.localeCompare(b.name));
 }
 
 /**
@@ -517,7 +570,7 @@ export class LocalProtocolHandler implements ProtocolHandler {
 		if (!opts) return [];
 		const localRoot = path.resolve(resolveLocalRoot(opts));
 		try {
-			const files = await listFilesRecursively(localRoot);
+			const files = await listCompletionFiles(localRoot);
 			return files.map(value => ({ value }));
 		} catch (err) {
 			if (isEnoent(err)) return [];

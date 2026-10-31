@@ -24,7 +24,11 @@ describe("LSP symbols expanded tree", () => {
 		const rows = lspToolRenderer
 			.renderResult({ content: [{ type: "text", text }] }, { expanded: true, isPartial: false }, theme)
 			.render(80)
-			.map(row => Bun.stripANSI(row).replace(/^│/, "").replace(/\s*│$/, ""));
+			.map(row =>
+				Bun.stripANSI(row)
+					.replace(/^│/, "")
+					.replace(/\s*│$/, ""),
+			);
 		const start = rows.findIndex(row => row.includes("in src/a.ts"));
 		expect(rows.slice(start + 1, start + 15)).toEqual([
 			"  ├─ class Alpha",

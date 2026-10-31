@@ -1,14 +1,19 @@
 /** Shared assistant transcript construction and model-authored link caching. */
-import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Model, TextContent } from "@oh-my-pi/pi-ai";
 import { getMarkdownLinkUrls } from "../index";
 import { EMPTY_LINK_TARGETS } from "../render/render-utils";
 import type { ImageBudget } from "../components/image";
-import type { AssistantThinkingRenderer } from "../chat/extension-types";
+import type { AssistantTextRenderer, AssistantThinkingRenderer } from "../chat/extension-types";
 import { AssistantMessageComponent } from "../chat/assistant-message";
+import { ReplyWriteComponent } from "../chat/reply-write";
 /** Session display capabilities supplied unchanged by the interactive host. */
 export interface AssistantMessageSession {
 	readonly model?: Model;
-	readonly extensionRunner?: { getAssistantThinkingRenderers(): readonly AssistantThinkingRenderer[] };
+	readonly extensionRunner?: {
+		getAssistantThinkingRenderers(): readonly AssistantThinkingRenderer[];
+		/** Empty while the setting that enables them is off; hosts predating it may omit it. */
+		getAssistantTextRenderers?(): readonly AssistantTextRenderer[];
+	};
 }
 
 /** Host state required to construct and refresh assistant transcript segments. */
@@ -23,7 +28,8 @@ export interface AssistantMessageHost {
 	readonly hideToolActivity: boolean;
 	readonly toolOutputExpanded: boolean;
 	readonly ui: { requestRender(): void; readonly imageBudget: ImageBudget };
-	resolveAssistantMessageLinks(texts: readonly string[]): Promise<ReadonlyMap<string, string>>;
+	/** Resolve already-extracted Markdown link destinations to local targets. */
+	resolveAssistantMessageLinkHrefs(hrefs: readonly string[]): Promise<ReadonlyMap<string, string>>;
 }
 
 const kMarkdownLinkTargets = Symbol("markdownLinkTargets");
@@ -31,14 +37,26 @@ type SessionWithMarkdownLinkTargets = AssistantMessageSession & {
 	[kMarkdownLinkTargets]?: ReadonlyMap<string, string>;
 };
 
-function assistantTextBlocks(messages: readonly AssistantMessage[]): string[] {
-	const texts: string[] = [];
-	for (const message of messages) {
-		for (const content of message.content) {
-			if (content.type === "text") texts.push(content.text);
+/** Link destinations per text block, revalidated against the block's text (streaming blocks grow in place). */
+const textBlockHrefs = new WeakMap<TextContent, { text: string; hrefs: readonly string[] }>();
+
+/**
+ * Distinct Markdown link destinations authored in `message`'s text blocks.
+ * Each block is lexed once per text revision; transcript rebuilds and the
+ * message_end refresh reuse the result.
+ */
+function assistantMessageLinkHrefs(message: AssistantMessage): string[] {
+	const hrefs = new Set<string>();
+	for (const content of message.content) {
+		if (content.type !== "text") continue;
+		let memo = textBlockHrefs.get(content);
+		if (memo?.text !== content.text) {
+			memo = { text: content.text, hrefs: getMarkdownLinkUrls(content.text) };
+			textBlockHrefs.set(content, memo);
 		}
+		for (const href of memo.hrefs) hrefs.add(href);
 	}
-	return texts;
+	return [...hrefs];
 }
 
 /**
@@ -53,13 +71,12 @@ export async function refreshAssistantMessageLinkTargets(
 ): Promise<ReadonlyMap<string, string>> {
 	const session: SessionWithMarkdownLinkTargets = ctx.viewSession;
 	const previous = session[kMarkdownLinkTargets] ?? EMPTY_LINK_TARGETS;
-	const texts = assistantTextBlocks(messages);
 	const hrefs = new Set<string>();
-	for (const text of texts) {
-		for (const href of getMarkdownLinkUrls(text)) hrefs.add(href);
+	for (const message of messages) {
+		for (const href of assistantMessageLinkHrefs(message)) hrefs.add(href);
 	}
 	if (hrefs.size === 0) return previous;
-	const resolved = await ctx.resolveAssistantMessageLinks(texts);
+	const resolved = await ctx.resolveAssistantMessageLinkHrefs([...hrefs]);
 	let changed = false;
 	for (const href of hrefs) {
 		if (previous.get(href) !== resolved.get(href)) {
@@ -87,12 +104,9 @@ export function assistantMessageLinkTargets(
 	targets: ReadonlyMap<string, string>,
 ): ReadonlyMap<string, string> {
 	const selected = new Map<string, string>();
-	for (const content of message.content) {
-		if (content.type !== "text") continue;
-		for (const href of getMarkdownLinkUrls(content.text)) {
-			const target = targets.get(href);
-			if (target) selected.set(href, target);
-		}
+	for (const href of assistantMessageLinkHrefs(message)) {
+		const target = targets.get(href);
+		if (target) selected.set(href, target);
 	}
 	return selected;
 }
@@ -100,12 +114,15 @@ export function assistantMessageLinkTargets(
 /**
  * Construct an {@link AssistantMessageComponent} wired to the live context's
  * thinking/image settings. `message` is omitted for the streaming placeholder
- * component and supplied when rendering a persisted turn.
+ * component and supplied when rendering a persisted turn. `contentOffset` is
+ * the index in the full reply of the first block of a segment drawn after a
+ * tool call, so extension text renderers see the reply's own block indexes.
  */
 export function createAssistantMessageComponent(
 	ctx: AssistantMessageHost,
 	message?: AssistantMessage,
 	linkTargets: ReadonlyMap<string, string> = getAssistantMessageLinkTargets(ctx),
+	contentOffset = 0,
 ): AssistantMessageComponent {
 	const component = new AssistantMessageComponent(
 		message,
@@ -116,7 +133,25 @@ export function createAssistantMessageComponent(
 		ctx.proseOnlyThinking,
 		linkTargets,
 		ctx.expandThinkingBlocks,
+		{ renderers: ctx.viewSession.extensionRunner?.getAssistantTextRenderers?.() ?? [], contentOffset },
 	);
+	applyHostDisplay(ctx, component);
+	return component;
+}
+
+/** Construct a {@link ReplyWriteComponent} (an `out://` write) drawn like the context's assistant prose. */
+export function createReplyWriteComponent(ctx: AssistantMessageHost): ReplyWriteComponent {
+	const component = new ReplyWriteComponent({
+		requestRender: () => ctx.ui.requestRender(),
+		imageBudget: ctx.ui.imageBudget,
+		linkTargets: getAssistantMessageLinkTargets(ctx),
+	});
+	applyHostDisplay(ctx, component);
+	return component;
+}
+
+/** Apply the context's image, chart, expansion, and scrollback-publication display state. */
+function applyHostDisplay(ctx: AssistantMessageHost, component: AssistantMessageComponent): void {
 	component.setImagesVisible(ctx.assistantImagesVisible);
 	component.setTableChartsVisible(ctx.tableChartsVisible);
 	component.setToolResultImagesVisible(!ctx.hideToolActivity);
@@ -127,5 +162,4 @@ export function createAssistantMessageComponent(
 	const compat = ctx.viewSession.model?.compat;
 	const wireRevisable = compat !== undefined && "streamRevision" in compat && compat.streamRevision === "possible";
 	component.setMidStreamPublication(!wireRevisable);
-	return component;
 }

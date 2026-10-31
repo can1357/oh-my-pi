@@ -18,7 +18,11 @@ const MODEL = buildModel({
 });
 
 type WireMessage = { role: string; content: unknown; output_config?: { effort?: string } };
-type Payload = { output_config?: { effort?: string }; messages: WireMessage[]; tools?: { name: string }[] };
+type Payload = {
+	output_config?: { effort?: string };
+	messages: WireMessage[];
+	tools?: { name: string; defer_loading?: boolean }[];
+};
 
 let clock = 1;
 function user(text: string, steering?: boolean): Message {
@@ -142,6 +146,15 @@ function expectCacheStableContinuation(earlier: Payload, later: Payload): void {
 	expect(later.messages.slice(0, earlier.messages.length).map(serialize)).toEqual(earlier.messages.map(serialize));
 }
 
+/** Anthropic rejects a `system` message with content unless an assistant turn (or the end) follows. */
+function expectValidSystemPlacement(payload: Payload): void {
+	payload.messages.forEach((message, index) => {
+		if (message.role !== "system" || !Array.isArray(message.content) || message.content.length === 0) return;
+		const next = payload.messages.slice(index + 1).find(later => later.role !== "system");
+		expect(next?.role ?? "end").not.toBe("user");
+	});
+}
+
 describe("Anthropic controls derived from the transcript", () => {
 	it("replays a tool removal and an effort change from records so the next turn is a cache-stable continuation", async () => {
 		const turn0 = [user("start")];
@@ -194,7 +207,21 @@ describe("Anthropic controls derived from the transcript", () => {
 		expect(referencesTool(next.payload, grep)).toBe(false);
 	});
 
-	it("keeps an interrupted request's tool control when the user steers with a different effort", async () => {
+	it("loads the tools a tool-less conversation gains instead of deferring all of them", async () => {
+		const turn0 = [user("start")];
+		const first = await capture(turn0, Effort.Low, { tools: [] });
+		const turn1 = [...turn0, answering(reply("ready"), first), user("continue")];
+		const gained = await capture(turn1, Effort.Low, { tools: [tool("read"), tool("grep")] });
+
+		expect(gained.payload.tools?.map(declared => declared.defer_loading)).toEqual([undefined, undefined]);
+		expectValidSystemPlacement(gained.payload);
+		const next = await capture([...turn1, answering(reply("done"), gained), user("again")], Effort.Low, {
+			tools: [tool("read"), tool("grep")],
+		});
+		expectCacheStableContinuation(gained.payload, next.payload);
+	});
+
+	it("moves an interrupted request's tool control past the steer and keeps it there once answered", async () => {
 		const turn0 = [user("start")];
 		const first = await capture(turn0, Effort.Low, { tools: [tool("read"), tool("grep")] });
 		const loop = [
@@ -222,14 +249,28 @@ describe("Anthropic controls derived from the transcript", () => {
 		// `grep` leaves the roster: a `tool_removal` control is sent after the tool result.
 		const toolChange = await capture(loop, Effort.Low, withdrawn);
 		// The user interrupts that request before any output and steers with a different effort.
-		const steered = await capture(
-			[...loop, answering(assistant([], "aborted"), toolChange), user("stop, do it differently", true)],
+		const steeredHistory = [
+			...loop,
+			answering(assistant([], "aborted"), toolChange),
+			user("stop, do it differently", true),
+		];
+		const steered = await capture(steeredHistory, Effort.Medium, withdrawn);
+
+		// The empty interrupted reply is not replayed, so the removal moves to the
+		// steer's reply; everything the interrupted request sent before it stays.
+		const sent = toolChange.payload.messages;
+		expectCacheStableContinuation({ ...toolChange.payload, messages: sent.slice(0, -1) }, steered.payload);
+		expect(withoutCacheControl(steered.payload.messages.at(-1))).toEqual(withoutCacheControl(sent.at(-1)));
+		expectValidSystemPlacement(steered.payload);
+		// The steer's effort goes out exactly once, as its own control message.
+		expect(steered.payload.messages.flatMap(message => message.output_config?.effort ?? [])).toEqual(["medium"]);
+
+		const next = await capture(
+			[...steeredHistory, answering(reply("redone"), steered), user("thanks")],
 			Effort.Medium,
 			withdrawn,
 		);
-
-		expectCacheStableContinuation(toolChange.payload, steered.payload);
-		// The steer's effort goes out exactly once, as its own control message.
-		expect(steered.payload.messages.flatMap(message => message.output_config?.effort ?? [])).toEqual(["medium"]);
+		expectCacheStableContinuation(steered.payload, next.payload);
+		expectValidSystemPlacement(next.payload);
 	});
 });

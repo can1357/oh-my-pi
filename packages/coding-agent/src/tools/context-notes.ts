@@ -6,22 +6,23 @@ import type {
 	AgentToolUpdateCallback,
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { prompt } from "@oh-my-pi/pi-utils";
+import contextNotesDescription from "../prompts/tools/context-notes.md" with { type: "text" };
+import contextNotesTextDescription from "../prompts/tools/context-notes-text.md" with { type: "text" };
+import newContextDescription from "../prompts/tools/new-context.md" with { type: "text" };
 import {
 	CONTEXT_NOTES_ENTRY_TYPE,
+	type ContextNotesEntry,
 	getContextNotes,
 	MAX_CONTEXT_NOTES_BYTES,
-	type ContextNotesEntry,
 } from "../session/context-notes";
-import contextNotesDescription from "../prompts/tools/context-notes.md" with { type: "text" };
-import newContextDescription from "../prompts/tools/new-context.md" with { type: "text" };
+import { cfgCompactionExperimentalContextManagement } from "../session/context-settings";
 import type { ToolSession } from ".";
 import { throwIfAborted } from "./tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-
-import { cfgCompactionExperimentalContextManagement } from "../session/context-settings";
 
 const contextNotesSchema = type({
-	"text?": type("string").describe("Entire replacement notebook text. Omit to read; use an empty string to clear."),
+	"text?": type("string").describe(prompt.render(contextNotesTextDescription, { maxBytes: MAX_CONTEXT_NOTES_BYTES })),
 });
 
 const newContextSchema = type({});
@@ -83,7 +84,10 @@ export class ContextNotesTool implements AgentTool<typeof contextNotesSchema, Co
 	readonly label = "Context Notes";
 	readonly description = contextNotesDescription;
 	readonly parameters = contextNotesSchema;
-	readonly strict = true;
+	// Strict-mode providers mark every property required, so an optional `text`
+	// would force models to send `""` (a clear) just to read. Stay non-strict
+	// so omitted `text` keeps meaning "read" while an explicit empty string clears.
+	readonly strict = false;
 	readonly loadMode = "essential" as const;
 	readonly summary = "Read or replace persistent experimental context notes";
 

@@ -241,13 +241,33 @@ function windowDisplayLabel(row: UsageSnapshotRow): string {
 	return `${label} · ${windowLabel}`;
 }
 
+/** Trailing limit-id segment naming the report slot a window arrived in, not the quota itself. */
+const POSITIONAL_SLOT = /:(?:primary|secondary)$/;
+
+/**
+ * Cross-account identity of one limit window: usually the limit id. Positional
+ * ids (Codex's `openai-codex:primary`) name a slot, not a window — a Team plan
+ * reports its 5-hour window as `primary` and its 7-day one as `secondary`,
+ * while a weekly-only plan reports its 7-day window as `primary`. For those,
+ * the quota family (the id minus the slot) plus the recorded window label is
+ * the identity, so both plans' weeklies share a group while Spark's
+ * (`openai-codex:spark:*`) stays apart. A row without a window label keeps its
+ * raw id rather than having its window guessed from the slot.
+ */
+function windowKeyOf(row: UsageSnapshotRow): string {
+	if (!row.windowLabel || !POSITIONAL_SLOT.test(row.limitId)) return row.limitId;
+	return `${row.limitId.replace(POSITIONAL_SLOT, "")}:${row.windowLabel}`;
+}
+
 /**
  * Derive utilization series and per-window insights from raw snapshots.
  *
- * Windows are grouped by `(provider, limitId)` — never by display label.
- * Distinct limits can share a duration label (Anthropic's overall and
- * model-scoped 7-day windows, Codex's base and Spark weeklies); merging them
- * interleaves unrelated fractions per account and wildly inflates consumption.
+ * Windows are grouped by `(provider, windowKeyOf(row))` — never by display
+ * label alone. Distinct limits can share a duration label (Anthropic's overall
+ * and model-scoped 7-day windows, Codex's base and Spark weeklies); merging
+ * them interleaves unrelated fractions per account and wildly inflates
+ * consumption. Conversely, one window reported under different positional
+ * slots by different accounts must merge (see {@link windowKeyOf}).
  *
  * `tokensByProvider` supplies each provider's token burn over the same time
  * range (fleet-wide broker client reports when available, else local message
@@ -262,12 +282,13 @@ export function computeUsageWindowStats(
 ): UsageWindowStats {
 	const groups = new Map<string, WindowGroup>();
 	for (const row of rows) {
-		const groupKey = `${row.provider}\u0000${row.limitId}`;
+		const windowKey = windowKeyOf(row);
+		const groupKey = `${row.provider}\u0000${windowKey}`;
 		let group = groups.get(groupKey);
 		if (!group) {
 			group = {
 				provider: row.provider,
-				windowKey: row.limitId,
+				windowKey,
 				windowLabel: windowDisplayLabel(row),
 				accounts: new Map(),
 			};

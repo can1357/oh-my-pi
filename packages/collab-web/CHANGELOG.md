@@ -2,9 +2,18 @@
 
 ## [Unreleased]
 
-### Fixed
+## [18.13.3] - 2026-10-28
 
-- Fixed slow Markdown rendering for transcripts with many unclosed `\[`/`$$` openers ([#14667](https://github.com/can1357/oh-my-pi/pull/14667) by [@H4vC](https://github.com/H4vC))
+### Changed
+
+- Updated Bun engine requirement to ≥1.4.4
+
+## [18.8.0] - 2026-10-07
+
+### Changed
+
+- Improved streaming transcript performance by reducing unnecessary guest updates and Markdown re-rendering, including faster rendering for transcripts with many unclosed LaTeX delimiters.
+- Stopped tracking finished or no-longer-listed subagents, reducing unnecessary polling and memory usage in the agent drawer.
 
 ## [18.4.10] - 2026-10-02
 

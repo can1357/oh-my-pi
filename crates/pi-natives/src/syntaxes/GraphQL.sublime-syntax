@@ -1,0 +1,596 @@
+%YAML 1.2
+# Vendored from dncrews/GraphQL-SublimeText3@9b6f6d0a; WTFPL.
+---
+# See http://www.sublimetext.com/docs/3/syntax.html
+name: GraphQL
+file_extensions:
+  - graphql
+  - graphqls
+  - gql
+scope: source.graphql
+variables:
+  name_begin: (?:[_A-Za-z])
+  name_continue: (?:[_0-9A-Za-z])
+  name_break: (?!{{name_continue}})
+  name: (?:{{name_begin}}{{name_continue}}*{{name_break}})
+
+  integer_part: (?:-?(?:0|[1-9]\d*))
+  fractional_part: (?:\.\d*)
+  exponent_part: (?:[Ee][-+]?\d*)
+contexts:
+  else-pop:
+    - match: (?=\S)
+      pop: true
+
+  immediately-pop:
+    - match: ''
+      pop: true
+
+  prototype:
+    - match: '#'
+      scope: punctuation.definition.comment.graphql
+      push:
+        - meta_scope: comment.line.graphql
+        - match: $
+          pop: true
+    - match: ','
+      scope: punctuation.separator.sequence.graphql
+
+  main:
+    - match: (?=")
+      push: description
+
+    - include: executable-declaration
+    - include: type-declarations
+
+    - match: directive{{name_break}}
+      scope: keyword.declaration.directive.graphql
+      push:
+        - - match: on{{name_break}}
+            scope: keyword.declaration.directive.graphql
+            set:
+              - - match: '\|'
+                  scope: keyword.operator.graphql
+                  push: directive-location
+                - include: else-pop
+              - directive-location
+          - include: else-pop
+        - arguments-definition
+        - directive-definition-name
+
+  executable-declaration:
+    - match: query{{name_break}}
+      scope: keyword.declaration.query.graphql
+      push:
+        - selection-set
+        - directives
+        - variable-definitions
+        - query-name
+
+    - match: (?=\{)
+      push: selection-set
+
+    - match: mutation{{name_break}}
+      scope: keyword.declaration.mutation.graphql
+      push:
+        - selection-set
+        - directives
+        - variable-definitions
+        - mutation-name
+
+    - match: subscription{{name_break}}
+      scope: keyword.declaration.subscription.graphql
+      push:
+        - selection-set
+        - directives
+        - variable-definitions
+        - subscription-name
+
+    - match: fragment{{name_break}}
+      scope: keyword.declaration.fragment.graphql
+      push:
+        - selection-set
+        - directives
+        - type-condition
+        - fragment-name
+
+  type-declarations:
+    - match: schema{{name_break}}
+      scope: keyword.declaration.schema.graphql
+      push:
+        - schema-definition
+        - directives
+
+    - match: scalar{{name_break}}
+      scope: keyword.declaration.scalar.graphql
+      push:
+        - directives
+        - scalar-name
+
+    - match: type{{name_break}}
+      scope: keyword.declaration.type.graphql
+      push:
+        - type-definition
+        - directives
+        - implements
+        - type-name
+
+    - match: interface{{name_break}}
+      scope: keyword.declaration.type.interface.graphql
+      push:
+        - type-definition
+        - directives
+        - implements
+        - interface-name
+
+    - match: union{{name_break}}
+      scope: keyword.declaration.type.interface.graphql
+      push:
+        - - match: '='
+            scope: punctuation.separator.key-value.graphql
+            set:
+              - - match: '\|'
+                  scope: keyword.operator.graphql
+                  push: type-named
+                - include: else-pop
+              - - include: type-named
+                - include: else-pop
+          - include: else-pop
+        - directives
+        - union-name
+
+    - match: enum{{name_break}}
+      scope: keyword.declaration.type.enum.graphql
+      push:
+        - enum-definition
+        - directives
+        - enum-name
+
+    - match: input{{name_break}}
+      scope: keyword.declaration.type.input.graphql
+      push:
+        - input-definition
+        - directives
+        - input-name
+
+  description:
+    - match: '"""'
+      scope: string.quoted.multiline.begin.graphql
+      set:
+        - meta_include_prototype: false
+        - meta_scope: string.quoted.multiline.graphql
+        - match: '\\"""'
+          scope: constant.character.escape.graphql
+        - match: '"""'
+          scope: string.quoted.multiline.end.graphql
+          pop: true
+
+    - match: '"'
+      scope: string.quoted.double.begin.graphql
+      set:
+        - meta_include_prototype: false
+        - meta_scope: string.quoted.double.graphql
+        - match: '"'
+          scope: string.quoted.double.end.graphql
+          pop: true
+
+        - match: '\\u\h{4}'
+          scope: constant.character.escape.hex.graphql
+        - match: '\\u\h{,3}'
+          scope: invalid.illegal.escape.hex.graphql
+
+        - match: '\\["\\/bfnrt]'
+          scope: constant.character.escape.graphql
+        - match: '\\.'
+          scope: invalid.illegal.escape.graphql
+
+  query-name:
+    - match: '{{name}}'
+      scope: entity.name.query.graphql
+      pop: true
+    - include: else-pop
+
+  mutation-name:
+    - match: '{{name}}'
+      scope: entity.name.mutation.graphql
+      pop: true
+    - include: else-pop
+
+  subscription-name:
+    - match: '{{name}}'
+      scope: entity.name.subscription.graphql
+      pop: true
+    - include: else-pop
+
+  fragment-name:
+    - match: (?=on{{name_break}})
+      pop: true
+    - match: '{{name}}'
+      scope: entity.name.fragment.graphql
+      pop: true
+    - include: else-pop
+
+  scalar-name:
+    - match: '{{name}}'
+      scope: entity.name.type.scalar.graphql
+      pop: true
+    - include: else-pop
+
+  type-name:
+    - match: '{{name}}'
+      scope: entity.name.type.object.graphql
+      pop: true
+    - include: else-pop
+
+  interface-name:
+    - match: '{{name}}'
+      scope: entity.name.type.interface.graphql
+      pop: true
+    - include: else-pop
+
+  union-name:
+    - match: '{{name}}'
+      scope: entity.name.type.union.graphql
+      pop: true
+    - include: else-pop
+
+  enum-name:
+    - match: '{{name}}'
+      scope: entity.name.type.enum.graphql
+      pop: true
+    - include: else-pop
+
+  input-name:
+    - match: '{{name}}'
+      scope: entity.name.type.input.graphql
+      pop: true
+    - include: else-pop
+
+  directive-definition-name:
+    - match: '(@)({{name}})'
+      captures:
+        1: punctuation.definition.annotation.graphql
+        2: entity.name.definition.graphql
+      pop: true
+    - include: else-pop
+
+  type-condition:
+    - match: on{{name_break}}
+      scope: keyword.other.graphql
+      set: type-named
+    - include: else-pop
+
+  default-value:
+    - match: '='
+      scope: punctuation.separator.key-value.graphql
+      set: value
+    - include: else-pop
+
+  variable-definitions:
+    - match: \(
+      scope: punctuation.section.group.begin.graphql
+      set:
+      - match: \)
+        scope: punctuation.section.group.end.graphql
+        pop: true
+      - match: '(\$)({{name}})'
+        captures:
+          1: punctuation.definition.variable.graphql
+          2: variable.parameter.graphql
+        push:
+          - - include: default-value
+          - - match: ':'
+              scope: punctuation.separator.type.graphql
+              set: type
+            - include: else-pop
+    - include: else-pop
+
+  directives:
+    - match: '@'
+      scope: punctuation.definition.annotation.graphql
+      push:
+        - arguments
+        - directive-name
+
+    - include: else-pop
+
+  directive-name:
+    - match: (?:skip|include|deprecated){{name_break}}
+      scope: variable.function.annotation.graphql support.function.graphql
+      pop: true
+    - match: '{{name}}'
+      scope: variable.function.annotation.graphql
+      pop: true
+    - include: else-pop
+
+  selection-set:
+    - match: \{
+      scope: punctuation.section.block.begin.graphql
+      set:
+        - meta_scope: meta.block.graphql
+        - match: \}
+          scope: punctuation.section.block.end.graphql
+          pop: true
+        - match: '{{name}}'
+          scope: entity.name.field.graphql
+          push:
+            - selection-set
+            - directives
+            - field-arguments
+            - aliased-field-name
+    - include: else-pop
+
+  aliased-field-name:
+    - match: ':'
+      scope: punctuation.separator.key-value.graphql
+      set:
+      - match: '{{name}}'
+        scope: variable.parameter.graphql
+        pop: true
+      - include: else-pop
+    - include: else-pop
+
+  field-arguments:
+    - match: \(
+      scope: punctuation.section.group.begin.graphql
+      set:
+      - match: \)
+        scope: punctuation.section.group.end.graphql
+        pop: true
+      - match: '{{name}}'
+        scope: variable.parameter.graphql
+        push:
+          - - match: ':'
+              scope: punctuation.separator.type.graphql
+              set: value
+            - include: else-pop
+    - include: else-pop
+
+  schema-definition:
+    - match: \{
+      scope: punctuation.section.block.begin.graphql
+      set:
+        - meta_scope: meta.block.graphql
+        - match: \}
+          scope: punctuation.section.block.end.graphql
+          pop: true
+        - match: '(?:query|mutation|subscription)'
+          scope: keyword.other.graphql
+          push:
+            - match: ':'
+              scope: punctuation.separator.key-value.graphql
+              set: type-named
+            - include: else-pop
+    - include: else-pop
+
+  implements:
+    - match: implements{{name_break}}
+      scope: keyword.declaration.implements.graphql
+      set:
+        - - match: '&'
+            scope: keyword.operator.graphql
+            push: type-named
+          - include: else-pop
+        - - include: type-named
+          - include: else-pop
+    - include: else-pop
+
+  type-definition:
+    - match: \{
+      scope: punctuation.section.block.begin.graphql
+      set:
+        - meta_scope: meta.block.graphql
+        - match: \}
+          scope: punctuation.section.block.end.graphql
+          pop: true
+        - match: (?=")
+          push: description
+        - match: '{{name}}'
+          scope: entity.name.field.graphql
+          push:
+            - - match: ':'
+                scope: punctuation.separator.key-value.graphql
+                set:
+                  - directives
+                  - type
+              - include: else-pop
+            - arguments-definition
+    - include: else-pop
+
+  enum-definition:
+    - match: \{
+      scope: punctuation.section.block.begin.graphql
+      set:
+        - meta_scope: meta.block.graphql
+        - match: \}
+          scope: punctuation.section.block.end.graphql
+          pop: true
+        - match: (?=")
+          push: description
+        - match: '{{name}}'
+          scope: entity.name.constant.graphql
+          push: directives
+    - include: else-pop
+
+  input-definition:
+    - match: \{
+      scope: punctuation.section.block.begin.graphql
+      set:
+        - meta_scope: meta.block.graphql
+        - match: \}
+          scope: punctuation.section.block.end.graphql
+          pop: true
+        - include: input-value-definition
+    - include: else-pop
+
+  arguments-definition:
+    - match: \(
+      scope: punctuation.section.group.begin.graphql
+      set:
+        - match: \)
+          scope: punctuation.section.group.end.graphql
+          pop: true
+        - include: input-value-definition
+    - include: else-pop
+
+  input-value-definition:
+    - match: (?=")
+      push: description
+    - match: '{{name}}'
+      scope: variable.parameter.graphql
+      push:
+        - match: ':'
+          scope: punctuation.separator.key-value
+          set:
+            - directives
+            - default-value
+            - type
+        - include: else-pop
+
+  type:
+    - meta_include_prototype: false
+    - match: ''
+      set:
+        - type-non-null
+        - type-value
+
+  type-value:
+    - include: type-named
+    - match: \[
+      scope: storage.modifier.list.graphql
+      set:
+        - - match: \]
+            scope: storage.modifier.list.graphql
+            pop: true
+          - include: else-pop
+        - type
+    - include: else-pop
+
+  type-named:
+    - match: (?:Int|Float|String|Boolean|ID){{name_break}}
+      scope: variable.type.graphql support.type.graphql
+      pop: true
+    - match: '{{name}}'
+      scope: variable.type.graphql
+      pop: true
+
+  type-non-null:
+    - match: '!'
+      scope: storage.modifier.required.graphql
+      pop: true
+    - include: else-pop
+
+  directive-location:
+    - match: |
+        (?x)(?:
+          QUERY|MUTATION|SUBSCRIPTION|FIELD|FRAGMENT_DEFINITION|FRAGMENT_SPREAD|INLINE_FRAGMENT
+          |SCHEMA|SCALAR|OBJECT|FIELD_DEFINITION|ARGUMENT_DEFINITION|INTERFACE|UNION|ENUM|ENUM_VALUE|INPUT_OBJECT|INPUT_FIELD_DEFINITION
+        ){{name_break}}
+      scope: constant.language.graphql
+      pop: true
+    - include: else-pop
+
+  arguments:
+    - match: \(
+      scope: punctuation.section.group.begin.graphql
+      set:
+      - match: \)
+        scope: punctuation.section.group.end.graphql
+        pop: true
+      - match: '{{name}}'
+        scope: variable.parameter.graphql
+        push:
+          - match: ':'
+            scope: punctuation.separator.key-value.graphql
+            set: value
+          - include: else-pop
+      - include: else-pop
+    - include: else-pop
+
+  value:
+    - match: \$
+      scope: punctuation.definition.variable.graphql
+      set:
+        - match: '{{name}}'
+          scope: variable.other.graphql
+          pop: true
+        - include: ''
+          pop: true
+
+    - match: '{{integer_part}}(?:{{fractional_part}}{{exponent_part}}?|{{exponent_part}}){{name_break}}'
+      scope: constant.numeric.float.graphql
+      pop: true
+    - match: '{{integer_part}}{{name_break}}'
+      scope: constant.numeric.integer.graphql
+      pop: true
+
+    - match: null{{name_break}}
+      scope: constant.language.null.graphql
+      pop: true
+    - match: true{{name_break}}
+      scope: constant.language.boolean.true.graphql
+      pop: true
+    - match: false{{name_break}}
+      scope: constant.language.boolean.false.graphql
+      pop: true
+
+    - match: '{{name}}'
+      scope: constant.other.graphql
+      pop: true
+
+    - match: '"""'
+      scope: punctuation.definition.string.begin.graphql
+      set:
+        - meta_include_prototype: false
+        - meta_scope: string.quoted.triple.graphql
+        - match: '\\"""'
+          scope: constant.character.escape.graphql
+        - match: '"""'
+          scope: punctuation.definition.string.end.graphql
+          pop: true
+
+    - match: '"'
+      scope: punctuation.definition.string.begin.graphql
+      set:
+        - meta_include_prototype: false
+        - meta_scope: string.quoted.double.graphql
+        - match: '"'
+          scope: punctuation.definition.string.end.graphql
+          pop: true
+
+        - match: '\\u\h{4}'
+          scope: constant.character.escape.hex.graphql
+        - match: '\\u\h{,3}'
+          scope: invalid.illegal.escape.hex.graphql
+
+        - match: '\\["\\/bfnrt]'
+          scope: constant.character.escape.graphql
+        - match: '\\.'
+          scope: invalid.illegal.escape.graphql
+
+    - match: \[
+      scope: punctuation.section.sequence.begin.graphql
+      set:
+        - meta_scope: meta.sequence.graphql
+        - match: \]
+          scope: punctuation.section.sequence.end.graphql
+          pop: true
+        - match: (?=\S)
+          push: value
+
+    - match: \{
+      scope: punctuation.section.mapping.begin.graphql
+      set:
+        - meta_scope: meta.mapping.graphql
+        - match: \}
+          scope: punctuation.section.mapping.end.graphql
+          pop: true
+        - match: '{{name}}'
+          scope: meta.mapping.key.graphql
+          push:
+            - match: ':'
+              scope: punctuation.separator.key-value.graphql
+              set: value
+            - include: else-pop
+
+    - include: else-pop

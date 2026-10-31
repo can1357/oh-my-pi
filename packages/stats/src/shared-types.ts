@@ -438,7 +438,7 @@ export interface UsageWindowSeries {
 	accountKey: string;
 	/** Email/account id when known, else the stable account key. */
 	accountLabel: string;
-	/** Groups the same limit window across accounts (the provider limit id). */
+	/** Groups the same limit window across accounts: the limit id, or quota family + window for positional Codex slots. */
 	windowKey: string;
 	/** Human label of the limit (distinguishes same-duration windows). */
 	windowLabel: string;
@@ -452,7 +452,7 @@ export interface UsageWindowSeries {
  */
 export interface ProviderWindowInsight {
 	provider: string;
-	/** Groups the same limit window across accounts (the provider limit id). */
+	/** Groups the same limit window across accounts: the limit id, or quota family + window for positional Codex slots. */
 	windowKey: string;
 	/** Human label of the limit (distinguishes same-duration windows). */
 	windowLabel: string;
@@ -604,7 +604,7 @@ export interface TraceTrack {
 	agent: string | null;
 	/** session_init.resolvedModel ?? first assistant model. */
 	model: string | null;
-	/** Absolute transcript path (for entry fetch). */
+	/** Absolute transcript path for live entry fetch, or the embedded snapshot key. */
 	file: string;
 	/** Sorted by start. */
 	spans: TraceSpan[];
@@ -648,12 +648,13 @@ export interface SessionTrace {
 	cwd: string | null;
 	startedAt: number;
 	endedAt: number;
-	/** Root transcript mtime; doubles as the ETag. */
+	/** Root transcript mtime, or recorded root activity/header time for offline snapshots. */
 	mtimeMs: number;
 	/**
 	 * Conditional-request fingerprint `"<rootMs>:<childHighMs>"` (see
 	 * traceFingerprintForEtag): the server ETag is built from this, so a
 	 * subagent-only append changes the ETag even when the root is untouched.
+	 * Offline snapshots use "snapshot" and do not support HTTP revalidation.
 	 */
 	etag: string;
 	/** DFS order, main first. */

@@ -43,9 +43,11 @@ Which stops cap the flush:
 A signal or disconnect caps because the terminal is gone (SIGHUP, disconnect)
 or a kill usually follows (SIGTERM, SIGINT); the rows the cap skips are lost
 unless the session file holds them. InteractiveMode's provider caps only a
-saved session whose file is still being written: an unsaved session
-(`--no-session`, or one not yet on disk), a failed teardown, or a latched disk
-failure get the full flush, because scrollback is then the only complete copy.
+saved session whose file the backing store has confirmed and is still being
+written: an unsaved session (`--no-session`, one not yet on disk, or a remote
+session whose write the store has not confirmed), a failed teardown, or a
+latched disk failure get the full flush, because scrollback is then the only
+complete copy.
 Even for a saved session, only persisted messages survive the cap: errors,
 warnings and other notices older than the capped rows are not kept anywhere.
 

@@ -144,4 +144,40 @@ describe("startup model cache header restoration (#5780)", () => {
 			"Bearer test-key",
 		);
 	});
+
+	test("cached apiKey discovery models without authHeader load on registry startup", async () => {
+		const modelsPath = path.join(tempDir, "models.json");
+		await Bun.write(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					probe: {
+						baseUrl: "https://example.invalid/v1/",
+						api: "openai-completions",
+						apiKey: "test-key",
+						discovery: { type: "openai-models-list" },
+					},
+				},
+			}),
+		);
+		const primedRegistry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: async (_input, init) => {
+				expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer test-key");
+				return Response.json({ data: [{ id: "probe-model" }] });
+			},
+		});
+		await primedRegistry.refreshProvider("probe", "online");
+
+		// The discovery bearer used to be copied into every model's headers, so
+		// the cache flagged each row header-omitted and startup dropped them all.
+		const restartedRegistry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: () => Promise.reject(new Error("offline")),
+		});
+		expect(
+			restartedRegistry
+				.getAvailable("all")
+				.filter(model => model.provider === "probe")
+				.map(m => m.id),
+		).toEqual(["probe-model"]);
+	});
 });

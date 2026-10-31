@@ -98,6 +98,46 @@ it("replays a lenient-repaired function call with the arguments that were execut
 	expect(JSON.stringify(input)).not.toContain("Orphan");
 });
 
+it("replays an unrepairable function call with its parse diagnostic so the tool result stays paired", async () => {
+	// Invalid JSON the lenient parser cannot repair; the tool answered with a validation error (#15568).
+	const brokenArgs = '{"tasks": [{"task": "x" "y"}]] }}';
+	const output = emptyAssistant();
+	const nativeItems: Array<Record<string, unknown>> = [];
+	await processResponsesStream(
+		events([
+			...functionCallEvents(0, "call_bash", "bash", JSON.stringify({ command: "pwd" })),
+			...functionCallEvents(1, "call_task", "task", brokenArgs),
+		]),
+		output,
+		{ push: () => {}, end: () => {} } as never,
+		model,
+		{ onOutputItemDone: item => nativeItems.push(item as unknown as Record<string, unknown>) },
+	);
+	output.providerPayload = createOpenAIResponsesHistoryPayload(model.provider, nativeItems);
+	const results: ToolResultMessage[] = output.content.flatMap(block =>
+		block.type === "toolCall"
+			? [
+					{
+						role: "toolResult",
+						toolCallId: block.id,
+						toolName: block.name,
+						content: [{ type: "text", text: `${block.name} output` }],
+						isError: block.name === "task",
+						timestamp: 2,
+					},
+				]
+			: [],
+	);
+
+	const input = buildParams(model, { messages: [output, ...results] }, { reasoning: "high" }, undefined).params
+		.input as unknown as Array<Record<string, unknown>>;
+
+	const taskCall = input.find(item => item.type === "function_call" && item.call_id === "call_task");
+	expect(JSON.parse(String(taskCall?.arguments))).toEqual({ __parseError: expect.any(String), __rawJson: brokenArgs });
+	expect(input.at(-1)).toMatchObject({ type: "function_call_output", call_id: "call_task" });
+	expect(JSON.stringify(input)).not.toContain("Orphan");
+});
+
 it("does not crash on a relaxed scalar function-call argument", async () => {
 	const output = emptyAssistant();
 	const nativeItems: Array<Record<string, unknown>> = [];

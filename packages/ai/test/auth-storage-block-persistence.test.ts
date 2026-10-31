@@ -251,7 +251,11 @@ describe("AuthStorage credential block persistence", () => {
 		const a = new AuthStorage(storeA, options);
 		await a.credentials.reload();
 		try {
-			await a.limits.markReached(PROVIDER, "a", { credentialId: row.id, retryAfterMs: 3_600_000, providerTimed: true });
+			await a.limits.markReached(PROVIDER, "a", {
+				credentialId: row.id,
+				retryAfterMs: 3_600_000,
+				providerTimed: true,
+			});
 
 			storeB.deleteCredentialBlock(row.id, PROVIDER_KEY, "");
 

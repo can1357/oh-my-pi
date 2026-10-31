@@ -15,6 +15,7 @@ import {
 	resolveDefaultRepoMemoized,
 } from "@oh-my-pi/pi-coding-agent/tools/gh";
 import { parseIssueUrl, parsePullRequestUrl } from "@oh-my-pi/pi-coding-agent/tools/gh-common";
+import { sanitizeRemoteName } from "@oh-my-pi/pi-coding-agent/tools/gh-pr-checkout";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { withRepoLock } from "@oh-my-pi/pi-coding-agent/utils/repo-lock";
@@ -234,6 +235,13 @@ async function expectedWorktreePath(home: string, primaryRoot: string, localBran
 	const segment = `${prNumber}-${hashPath(primaryRoot)}`;
 	return fs.realpath(path.join(home, ".omp", "wt", segment));
 }
+
+describe("sanitizeRemoteName", () => {
+	it("prefixes sanitized fork owners and falls back to a bare fork remote", () => {
+		expect(sanitizeRemoteName("Octo_Cat.Org")).toBe("fork-octo-cat-org");
+		expect(sanitizeRemoteName("__")).toBe("fork");
+	});
+});
 
 describe("parsePrUnifiedDiff", () => {
 	it("parses quoted diff headers instead of falling back to unknown paths", () => {
@@ -684,14 +692,14 @@ describe("github tool", () => {
 		expect(viewArgs.slice(0, 3)).toEqual(["pr", "view", "77"]);
 		expect(viewArgs).toEqual(expect.arrayContaining(["--repo", "owner/repo"]));
 
-		// Output: PR number + summary rendered, URL surfaces, body block included.
+		// Output: PR number + summary rendered, URL surfaces, body is not echoed.
 		expect(text).toContain("# Created Pull Request #77: Add gizmo");
 		expect(text).toContain("URL: https://github.com/owner/repo/pull/77");
 		expect(text).toContain("Draft: true");
 		expect(text).toContain("Base: main");
 		expect(text).toContain("Head: feature/gizmo");
 		expect(text).toContain("Labels: enhancement");
-		expect(text).toContain("Adds a gizmo.");
+		expect(text).not.toContain("Adds a gizmo.");
 	});
 
 	it("rejects pr_create when neither title nor fill is supplied", async () => {
@@ -1254,7 +1262,7 @@ echo ok
 				child.exited,
 			]);
 			expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
-			expect(JSON.parse(stdout)).toEqual({ exitCode: 0, stderr: "", stdout: "ok" });
+			expect(JSON.parse(stdout)).toEqual({ exitCode: 0, stderr: "", stdout: "ok", stdoutTruncated: false });
 		} finally {
 			await removeWithRetries(fakeBin);
 		}

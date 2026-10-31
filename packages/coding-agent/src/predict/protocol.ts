@@ -3,12 +3,12 @@
  *
  * One daemon per agent directory runs under the `text-predict` global daemon
  * broker (`omp ps --global text-predict`) and serves ghost-text word
- * completion to every omp process over newline-delimited JSON on a Unix socket
- * (a named pipe on Windows). Each request carries a numeric `id` echoed by its
+ * completion to every omp process over newline-delimited JSON on a native IPC
+ * endpoint (`ipcEndpoint`). Each request carries a numeric `id` echoed by its
  * response; responses may arrive out of order.
  */
 import * as path from "node:path";
-import type { PredictedWord } from "@oh-my-pi/pi-natives";
+import { ipcEndpoint, type PredictedWord } from "@oh-my-pi/pi-natives";
 export { TEXT_PREDICT_WORKER_ARG } from "../cli/worker-selectors";
 
 /** Global broker scope owning the daemon. */
@@ -38,11 +38,7 @@ export function textPredictReadyBanner(endpoint: string): string {
  */
 export function textPredictDaemon(runtimeDir: string, agentDir: string): { name: string; endpoint: string } {
 	const key = Bun.hash.wyhash(path.resolve(agentDir)).toString(16).padStart(16, "0").slice(0, 12);
-	const endpoint =
-		process.platform === "win32"
-			? `\\\\.\\pipe\\omp-text-predict-${Bun.hash.wyhash(runtimeDir).toString(16)}-${key}`
-			: path.join(runtimeDir, `text-predict-${key}.sock`);
-	return { name: `omp.text-predict.${key}`, endpoint };
+	return { name: `omp.text-predict.${key}`, endpoint: ipcEndpoint(runtimeDir, `text-predict-${key}`) };
 }
 
 /** Client → daemon request. */
@@ -60,7 +56,7 @@ export type TextPredictRequest =
 	  }
 	/** Ingest history rows newer than each open engine's cursor. */
 	| { id: number; op: "sync" }
-	/** Persist and exit (a client found a daemon from another omp version). */
+	/** Persist and exit (a client found a daemon from an older omp version). */
 	| { id: number; op: "shutdown" };
 
 /** Daemon → client response. */

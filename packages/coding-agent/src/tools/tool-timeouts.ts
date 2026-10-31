@@ -37,3 +37,34 @@ export function clampTimeout(tool: ToolWithTimeout, rawTimeout?: number, maxTime
 	const capped = maxTimeout !== undefined && maxTimeout > 0 ? Math.min(timeout, maxTimeout) : timeout;
 	return Math.max(config.min, Math.min(config.max, capped));
 }
+
+/** Budgets for one `lsp` tool call, in seconds. */
+export interface LspTimeouts {
+	/** Wall-clock deadline for the whole call. */
+	call: number;
+	/** How long to wait for a server that computes its answer on demand (project-aware diagnostics). */
+	wait: number;
+}
+
+/**
+ * Resolve an `lsp` call's budgets from its `timeout` argument and the `lsp.requestTimeout` setting.
+ *
+ * Without an argument the server wait is the setting, and the call deadline is the tool default
+ * raised to the setting so the call itself never cuts a slow server off first. An explicit
+ * `timeout` sets both, raising or lowering them. Every value stays within the tool's
+ * `min`/`max` and under a positive `maxTimeout` (`tools.maxTimeout`), like {@link clampTimeout}.
+ */
+export function resolveLspTimeouts(
+	requested: number | undefined,
+	requestTimeout: number,
+	maxTimeout?: number,
+): LspTimeouts {
+	if (requested !== undefined) {
+		const seconds = clampTimeout("lsp", requested, maxTimeout);
+		return { call: seconds, wait: seconds };
+	}
+	return {
+		call: clampTimeout("lsp", Math.max(TOOL_TIMEOUTS.lsp.default, requestTimeout), maxTimeout),
+		wait: clampTimeout("lsp", requestTimeout, maxTimeout),
+	};
+}

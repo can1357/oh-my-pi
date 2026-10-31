@@ -256,6 +256,8 @@ export interface PlanReviewOverlayOptions {
 	slider?: HookSelectorSlider;
 	/** Display label for the external-editor key, surfaced in the footer help. */
 	externalEditorLabel?: string;
+	/** The external editor's name ("Notepad", "nvim") for the native Edit button; `$EDITOR` when unset. */
+	externalEditorName?: string;
 	/** Serializable annotations restored into this overlay instance. */
 	annotationState?: PlanReviewAnnotationState;
 }
@@ -286,6 +288,7 @@ export class PlanReviewOverlay implements Component {
 	#disabled: Set<number>;
 	#helpSuffix: string | undefined;
 	#externalEditorLabel: string | undefined;
+	#externalEditorName: string | undefined;
 	#promptTitle: string | undefined;
 	#selectedIndex: number;
 	#slider: HookSelectorSlider | undefined;
@@ -354,6 +357,7 @@ export class PlanReviewOverlay implements Component {
 		);
 		this.#helpSuffix = options.helpText;
 		this.#externalEditorLabel = options.externalEditorLabel;
+		this.#externalEditorName = options.externalEditorName;
 		this.#promptTitle = options.promptTitle;
 		this.#selectedIndex = this.#coerceIndex(options.initialIndex ?? 0);
 		if (options.slider && options.slider.segments.length > 0) {
@@ -604,6 +608,22 @@ export class PlanReviewOverlay implements Component {
 		if (next === this.#sliderIndex) return;
 		this.#sliderIndex = next;
 		slider.onChange?.(next);
+	}
+
+	/** Synchronize an external tier pick with the displayed slider before committing. */
+	setSliderIndex(index: number): void {
+		if (this.#committed || !this.#slider) return;
+		this.#moveSlider(index - this.#sliderIndex);
+	}
+
+	/** Commit an external answer through the same input-locking path as Enter; false when nothing was committed. */
+	selectOption(label: string): boolean {
+		if (this.#committed) return false;
+		const index = this.#options.indexOf(label);
+		if (index < 0 || this.#disabled.has(index)) return false;
+		this.#selectedIndex = index;
+		this.#confirmSelection();
+		return this.#committed;
 	}
 
 	#confirmSelection(): void {
@@ -1607,7 +1627,7 @@ export class PlanReviewOverlay implements Component {
 		return this.#nativeRoot;
 	}
 
-	/** Head tools: Copy `c` and the external editor, mirroring their keys. */
+	/** Head tools: Copy `c`, the external editor and Cancel, mirroring their keys. */
 	#describeTools(): NativeNode | undefined {
 		if (this.#committed) return undefined;
 		const buttons: NativeNode[] = [];
@@ -1616,7 +1636,19 @@ export class PlanReviewOverlay implements Component {
 		// Unbound: the button still mirrors the callback, without a keycap.
 		const editorKeyId = getKeybindings().getKeys("app.editor.external")[0];
 		if (this.callbacks.onExternalEditor) {
-			buttons.push(actionButton("Edit in $EDITOR", "externalEditor", editorKeyId ? { keys: editorKeyId } : {}));
+			buttons.push(
+				actionButton(
+					`Edit in ${this.#externalEditorName ?? "$EDITOR"}`,
+					"externalEditor",
+					editorKeyId ? { keys: editorKeyId } : {},
+				),
+			);
+		}
+		// Cancel the review the way the cancel key does; while annotating that key
+		// only leaves the draft/chooser, so the button is hidden there.
+		if (!this.#annotating && !this.#annotationChooser) {
+			const cancelKeyId = getKeybindings().getKeys("tui.select.cancel")[0];
+			buttons.push(actionButton("Cancel", "cancel", cancelKeyId ? { keys: cancelKeyId } : {}));
 		}
 		if (buttons.length === 0) return undefined;
 		return node("row", { role: "omp.plan.tools", gap: "sm", align: "center", justify: "end" }, buttons, "tools");
@@ -1625,12 +1657,15 @@ export class PlanReviewOverlay implements Component {
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (this.#committed) return;
 		if (event.type === "action") {
-			// Head tools run exactly what `c` and the external-editor key run.
+			// Head tools run exactly what `c`, the external-editor key and Esc run.
 			if (this.#annotating || this.#annotationChooser) return;
 			if (event.act === "copyPlan" && this.callbacks.onCopyPlan) {
 				void this.callbacks.onCopyPlan(joinPlanSections(this.#sections));
 			} else if (event.act === "externalEditor") {
 				this.callbacks.onExternalEditor?.();
+			} else if (event.act === "cancel") {
+				this.#committed = true;
+				this.callbacks.onCancel();
 			}
 			return;
 		}
@@ -1729,7 +1764,8 @@ export class PlanReviewOverlay implements Component {
 			"tabs",
 		);
 		const track: NativeChild[] = slider.caption ? [text([span(slider.caption, "dim")]), tabs] : [tabs];
-		const out = [keyed(rowNode(track, { gap: "sm", align: "center" }), "slider")];
+		// A role of its own: Tern's sheet lets only the role-less split row (Contents + body) shrink and scroll.
+		const out = [keyed(rowNode(track, { role: "omp.plan.slider", gap: "sm", align: "center" }), "slider")];
 		const detail = slider.segments[this.#sliderIndex]?.detail;
 		if (detail) out.push(keyed(text([span("↳ ", "dim"), span(detail, "muted")], { wrap: "word" }), "sliderDetail"));
 		return out;

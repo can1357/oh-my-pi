@@ -1,0 +1,9 @@
+// Cloudflare Workers AI runs the Clef decision models under
+// `/client/v4/accounts/{account_id}/ai/run`. Login stores the API token with
+// the account id (the shared Cloudflare credential); an env-supplied token
+// takes its account from `CLOUDFLARE_ACCOUNT_ID`.
+auth "cloudflare-workers-ai" {
+	name "Cloudflare Workers AI"
+	env "CLOUDFLARE_API_TOKEN" "CLOUDFLARE_AUTH_TOKEN"
+	login "custom" hook="cloudflare-workers-ai"
+}
