@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
-import { constants as fsConstants, type Stats } from "node:fs";
+import type { Stats } from "node:fs";
 import * as path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -26,12 +26,7 @@ import { Settings } from "../config/settings";
 import type { Setting } from "../config/registry";
 
 import { BLOB_HASH_RE, BLOB_STAGING_RE, blobStagingPath } from "../session/blob-store";
-import {
-	listSessionsReadOnly,
-	readSessionInfo,
-	type SessionInfo,
-	type SessionStatus,
-} from "../session/session-listing";
+import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { parseTerminalBreadcrumb } from "../session/session-paths";
 import {
 	archiveIsPrefixOfLive,
@@ -57,20 +52,20 @@ import {
 	shellQuote,
 	archivedHandleIsPrefixOfLive,
 	isSamePath,
-	openRegularFile,
+	bytesOfRegularFile,
 	liveSessionPathForArchive,
 	restoreArchivedSessionLocked,
-	artifactRestorePreview,
+	newRestorePlan,
 	moveAsidePermission,
-	restoreRecordLeftNote,
-	restoreRecordRefusal,
 	stagingResidueNote,
 	stagingResidueUnder,
 	type StagingGround,
 } from "../session/session-archive";
 import { codeOf, statIfPresent, withGcLock } from "../session/gc-lock";
-import { readSessionHeaderId } from "../session/session-loader";
-import { FileSessionStorage, tryAcquireSessionLease } from "../session/session-storage";
+import { RegularFileSessionStorage, readRegularSessionInfo } from "../session/gc-session-storage";
+import { absentFile, kindOf, NotARegularFile, notRegularAsAbsent, openRegularFile } from "../session/regular-file";
+import { readSessionHeaderIdFromHandle } from "../session/session-loader";
+import { tryAcquireSessionLease } from "../session/session-storage";
 import {
 	type CompressCandidate,
 	type CompressMethod,
@@ -492,11 +487,12 @@ async function pathExists(target: string): Promise<boolean> {
 
 /** Small registry/breadcrumb marker files; a missing file reads as empty. */
 async function readTextIfPresent(file: string): Promise<string> {
+	const handle = await openRegularFile(file);
+	if (!handle) return "";
 	try {
-		return await Bun.file(file).text();
-	} catch (error) {
-		if (codeOf(error) === "ENOENT") return "";
-		throw error;
+		return await handle.readFile("utf8");
+	} finally {
+		await handle.close().catch(() => undefined);
 	}
 }
 
@@ -506,7 +502,9 @@ async function scanSessionLinesIfPresent(file: string, onLine: (line: Uint8Array
 		for await (const line of readLines(stream)) onLine(line);
 	};
 	try {
-		const stream = Bun.file(file).stream();
+		// Read through a descriptor that holds a regular file: a transcript's
+		// name standing for a FIFO is refused, never waited on or drained.
+		const stream = Readable.toWeb(Readable.from(bytesOfRegularFile(file))) as ReadableStream<Uint8Array>;
 		if (file.endsWith(COMPRESSED_SESSION_SUFFIX)) {
 			const gunzip = createGunzip();
 			await pipeline(stream, gunzip, async (source: NodeJS.ReadableStream) => {
@@ -581,6 +579,11 @@ async function collectReferencedBlobHashes(sessionRoots: string[], exactSessionF
 				const hash = match[1]?.toLowerCase();
 				if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
 			}
+		}).catch((error: unknown) => {
+			// A transcript's name that stands for a FIFO, a socket or a device
+			// holds no transcript, so it keeps no blob; it is not read, and the
+			// sweep goes on with the files that do.
+			notRegularAsAbsent(error);
 		});
 	}
 	return hashes;
@@ -945,10 +948,27 @@ async function runStaleGc(options: ResolvedGcOptions): Promise<StaleGcResult> {
  */
 async function tryAcquireSessionFileLease(sessionFile: string): Promise<FileLockHandle | null | undefined> {
 	try {
-		const sessionId = await readSessionHeaderId(sessionFile);
+		const sessionId = await readRegularSessionHeaderId(sessionFile);
 		return sessionId === undefined ? undefined : tryAcquireSessionLease(sessionId);
 	} catch {
 		return null;
+	}
+}
+
+/**
+ * The session id in the header of the regular file at `file`; undefined when
+ * nothing is there or it carries no session header. Opened through
+ * {@link openRegularFile}, so a FIFO at a transcript's name — or put there
+ * after a look at the name — is never waited on: it throws
+ * {@link NotARegularFile}, as a read that fails throws its own error.
+ */
+async function readRegularSessionHeaderId(file: string): Promise<string | undefined> {
+	const handle = await openRegularFile(file);
+	if (!handle) return undefined;
+	try {
+		return await readSessionHeaderIdFromHandle(handle);
+	} finally {
+		await handle.close().catch(() => undefined);
 	}
 }
 
@@ -961,7 +981,7 @@ async function listActiveSessions(sessionsRoot: string): Promise<SessionInfo[]> 
 		throw error;
 	}
 
-	const storage = new FileSessionStorage();
+	const storage = new RegularFileSessionStorage();
 	const sessions: SessionInfo[] = [];
 	for (const entry of entries) {
 		if (!entry.isDirectory()) continue;
@@ -974,7 +994,7 @@ async function listActiveSessions(sessionsRoot: string): Promise<SessionInfo[]> 
 async function listNestedSessionsReadOnly(artifactsRoot: string): Promise<SessionInfo[]> {
 	const files = await collectJsonlFiles(artifactsRoot);
 	const dirs = [...new Set(files.map(file => path.dirname(file)))].sort();
-	const storage = new FileSessionStorage();
+	const storage = new RegularFileSessionStorage();
 	const sessions: SessionInfo[] = [];
 	for (const dir of dirs) sessions.push(...(await listSessionsReadOnly(dir, storage)));
 	sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
@@ -1032,7 +1052,7 @@ async function digestStream(stream: AsyncIterable<Uint8Array>): Promise<{ hash: 
 /** SHA-256 and byte count of what an archived transcript inflates to. */
 async function digestArchivedSessionFile(file: string): Promise<{ hash: string; bytes: number }> {
 	let digest: { hash: string; bytes: number } | undefined;
-	await pipeline(Bun.file(file).stream(), createGunzip(), async (source: NodeJS.ReadableStream) => {
+	await pipeline(bytesOfRegularFile(file), createGunzip(), async (source: NodeJS.ReadableStream) => {
 		digest = await digestStream(source as AsyncIterable<Uint8Array>);
 	});
 	if (!digest) throw new Error(`archive produced no bytes: ${file}`);
@@ -1115,7 +1135,7 @@ async function gzipSessionFile(
 	// its digest and, at the end, its mode. A file put at the live name
 	// meanwhile is not what this run archives, so it lends the archive
 	// nothing — its permissions least of all.
-	const live = await openRegularFile(source);
+	const live = await openRegularFile(source).catch(notRegularAsAbsent);
 	if (!live) throw new Error(`${source} is not a regular file, so it was not archived`);
 	let ground: StagingGround;
 	try {
@@ -1151,10 +1171,8 @@ async function gzipSessionFile(
 			// earlier proof was taken before the stage existed, so it is an
 			// observation about bytes that may since have changed. What
 			// survives is the gap between this read and the rename.
-			const archived = await fs.open(destination, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK).catch(error => {
-				if (codeOf(error) === "ENOENT") return undefined;
-				throw error;
-			});
+			// Anything but a regular file at the archived name has changed.
+			const archived = await openRegularFile(destination).catch(notRegularAsAbsent);
 			const changed = `${destination} changed while it was being archived; run \`omp gc --archive\` again`;
 			if (!archived) throw new Error(changed);
 			try {
@@ -1184,7 +1202,7 @@ async function gzipSessionFile(
 		// now that the archived name has been opened and checked, and set
 		// through a descriptor proved to hold the very inode just published —
 		// never through a name, which could by now be somebody else's file.
-		const published = await openRegularFile(destination);
+		const published = await openRegularFile(destination).catch(notRegularAsAbsent);
 		const notOurs = (): Error =>
 			new Error(`${destination} is not the archive this run wrote for ${source}, so ${source} was not archived`);
 		if (!published) throw notOurs();
@@ -1371,7 +1389,10 @@ async function publishArtifactIntoArchive(
 		return (await live.stat()).mode & 0o7777;
 	};
 	try {
-		live = await fs.open(source, "r");
+		// Through the regular-file check: a live artifact replaced by a FIFO,
+		// a socket or a device since the walk looked is refused unread.
+		live = await openRegularFile(source);
+		if (!live) throw absentFile(source);
 		const copied = await copyHandleWithDigest(live, ground.handle);
 		// `open` applies the umask; the archived copy keeps the live file's
 		// own permissions, so a deliberately private artifact stays private.
@@ -1409,11 +1430,10 @@ async function publishArtifactIntoArchive(
 				`${destination} is not the copy of ${source} this run wrote, so ${source} was not archived; ` +
 					`run \`omp gc --archive\` again`,
 			);
-		const archived = await fs.open(destination, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK).catch(error => {
-			if (codeOf(error) === "ENOENT") return undefined;
-			// A readerless FIFO at the archived name: something is there, and
-			// only absence may be read as an empty slot.
-			if (codeOf(error) === "ENXIO") throw conflict();
+		const archived = await openRegularFile(destination).catch(error => {
+			// A FIFO, a socket or a device at the archived name: something is
+			// there, and only absence may be read as an empty slot.
+			if (error instanceof NotARegularFile) throw conflict();
 			throw error;
 		});
 		if (!archived) {
@@ -1553,7 +1573,18 @@ async function copyArtifactEntryIntoArchive(
 		}
 		return;
 	}
-	if (!stat.isFile()) return;
+	if (!stat.isFile()) {
+		// A FIFO, a socket or a device — itself or behind a link — is left out
+		// unread, and named: reading one waits on it or takes what is written
+		// to it, and skipping one without a word archived a session as whole
+		// while its tree held something no copy has.
+		const named = await fs.lstat(source).catch(() => undefined);
+		state.notes.push(
+			`${source} ${named?.isSymbolicLink() ? "links to" : "is"} ${kindOf(stat)}, which the archive cannot hold, ` +
+				`so it was left out of the archive and not read`,
+		);
+		return;
+	}
 	await publishArtifactIntoArchive(source, stat, destination, sourceRoot, state);
 }
 
@@ -1704,11 +1735,16 @@ interface ProvenEntry extends EntryIdentity {
  * `unlink`, which takes a name because no system call takes an inode.
  */
 async function proveEntryStillGoes(entry: ProvenEntry): Promise<void> {
-	const live = await fs.open(entry.path, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK).catch(error => {
-		if (codeOf(error) === "ENOENT") return undefined;
+	const live = await openRegularFile(entry.path).catch(error => {
+		// Anything but a regular file at the name is not the file proved.
+		if (error instanceof NotARegularFile) {
+			throw new Error(`${entry.path} is no longer the file this run proved; it was kept`);
+		}
 		throw error;
 	});
-	if (!live) return;
+	// Gone since the walk: nothing proved stands at the name, and whatever
+	// is put there before the `unlink` would go unproved.
+	if (!live) throw new Error(`${entry.path} is gone since this run proved it; the rest of the live tree was kept`);
 	try {
 		const now = await live.stat();
 		if (!now.isFile() || !sameIdentity(identityFrom(now), entry)) {
@@ -1721,7 +1757,7 @@ async function proveEntryStillGoes(entry: ProvenEntry): Promise<void> {
 		await live.close().catch(() => undefined);
 	}
 	// The descriptor follows a link; the name has to be the file itself.
-	if ((await standsAsProved(entry.path, entry)) === false) {
+	if ((await standsAsProved(entry.path, entry)) !== true) {
 		throw new Error(`${entry.path} is no longer the file this run proved; it was kept`);
 	}
 }
@@ -1734,12 +1770,8 @@ async function proveEntryStillGoes(entry: ProvenEntry): Promise<void> {
  * fails one of the two whichever way it got there — moved in beside the
  * original, or created on the inode the original freed.
  *
- * A transcript that is a symbolic link is the one link a reclaim gives up,
- * unlike a link in the artifact tree: what it leads to is this session's own
- * transcript, which only a writer holding the session's lease appends to,
- * and it is read through and compared with the archive here, just before
- * the `unlink`. Removing that link drops a name, and the file it led to
- * stays where it is.
+ * A transcript that is a symbolic link never reaches here: the reclaim keeps
+ * it — see {@link transcriptLinkRefusal}.
  */
 async function proveTranscriptStillGoes(
 	sessionPath: string,
@@ -1799,10 +1831,10 @@ async function archivedModeWider(live: string, liveStat: Stats, archived: string
 async function carryLiveModeToArchive(live: string, archived: string): Promise<void> {
 	const changed = (): Error =>
 		new Error(`${archived} changed while it was being archived; run \`omp gc --archive\` again`);
-	const liveHandle = await openRegularFile(live);
+	const liveHandle = await openRegularFile(live).catch(notRegularAsAbsent);
 	if (!liveHandle) throw new Error(`${live} is no longer a regular file, so it was not archived`);
 	try {
-		const archivedHandle = await openRegularFile(archived);
+		const archivedHandle = await openRegularFile(archived).catch(notRegularAsAbsent);
 		if (!archivedHandle) throw changed();
 		try {
 			const held = await archivedHandle.stat();
@@ -1818,6 +1850,22 @@ async function carryLiveModeToArchive(live: string, archived: string): Promise<v
 	} finally {
 		await liveHandle.close().catch(() => undefined);
 	}
+}
+
+/**
+ * Why a reclaim keeps a session whose transcript is a symbolic link: the file
+ * it leads to is outside the session's tree and its leases, so a turn written
+ * there after the last comparison and before the `unlink` would be left at a
+ * name the session no longer references — the review did exactly that, and
+ * the reclaim and the restore after it both exited 0 without the turn.
+ */
+function transcriptLinkRefusal(sessionPath: string, target: string, kept: "was" | "would be"): string {
+	return (
+		`${sessionPath} is a symbolic link, to ${target}, which a reclaim does not give up: a turn written to that file ` +
+		`after the last comparison would be left where this session no longer looks. The live copy ${kept} kept; to give ` +
+		`it up, replace the link with a copy of the transcript it leads to, at the same name, and reclaim again. The ` +
+		`file it leads to is not touched`
+	);
 }
 
 /**
@@ -1891,12 +1939,37 @@ async function proveLiveTreeIsArchived(
 		// copy of one moment. A link takes no space, so it is kept, the way a
 		// FIFO is, and the user decides where it goes.
 		if (stat.isSymbolicLink()) {
+			// A relative link leads somewhere else once moved, so the advice for
+			// one makes it absolute first. The absolute target is the one the
+			// kernel resolves now, with no step through this tree left in it: a
+			// path that climbs out of the link's own directory with `..` stops
+			// resolving once the reclaim removes that directory.
+			const target = await fs.readlink(source).catch(() => undefined);
+			const resolved = await fs.realpath(source).catch(() => undefined);
+			let move =
+				`move the link out of the tree — it keeps leading where it leads, and the archive holds what it led to ` +
+				`when the session was archived — and reclaim again`;
+			if (target !== undefined && !path.isAbsolute(target)) {
+				const parent = await fs.realpath(path.dirname(source)).catch(() => path.dirname(source));
+				const absolute = resolved ?? path.resolve(parent, target);
+				move =
+					`move the link out of the tree and reclaim again. It is a relative link, to ${target}, so moved as it is ` +
+					`it would lead somewhere else: first make it absolute with \`ln -sfn ${shellQuote(absolute)} ` +
+					`${shellQuote(source)}\`, then move it. The archive holds what it led to when the session was archived`;
+			}
+			// Moved out, a link into this tree leads to a file the reclaim then
+			// gives up; the archive holds it, but the link will lead nowhere.
+			const realRoot = await fs.realpath(sourceRoot).catch(() => sourceRoot);
+			if (resolved !== undefined && (resolved === realRoot || resolved.startsWith(`${realRoot}${path.sep}`))) {
+				move +=
+					`. It leads into this session's own tree, to ${resolved}, so once the live copy is given up it will ` +
+					`lead nowhere: the archive holds that file, and \`omp gc --restore\` brings it back`;
+			}
 			throw new Error(
 				`${source} is a symbolic link, which a reclaim does not give up: what it leads to is outside this ` +
 					`session's tree and can change between a proof and the removal, so removing it could drop the ` +
 					`session's only reference to what changed. The live tree was kept; to give this session's live copy ` +
-					`up, move the link out of the tree — it keeps leading where it leads, and the archive holds what it ` +
-					`led to when the session was archived — and reclaim again`,
+					`up, ${move}`,
 			);
 		}
 		// A FIFO, a socket or a device: the archive holds nothing for it, so
@@ -1906,12 +1979,10 @@ async function proveLiveTreeIsArchived(
 				`hold, so the live tree was kept; move it out of the tree to give this session's live copy up`,
 		);
 	}
-	const live = await fs.open(source, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK).catch(error => {
-		// Only absence is nothing. Anything else says what is there could not
-		// be read, which is not the same as the archive holding it.
-		if (codeOf(error) === "ENOENT") return undefined;
-		throw error;
-	});
+	// Only absence is nothing. A name that is not a regular file throws, in its
+	// own words; any other look that fails says what is there could not be
+	// read, which is not the same as the archive holding it.
+	const live = await openRegularFile(source);
 	if (!live) return;
 	let liveStat: Stats;
 	try {
@@ -2036,7 +2107,9 @@ async function copyArtifactsTree(
 async function archiveAlreadyHolds(source: string, destination: string): Promise<boolean> {
 	try {
 		if (!(await fs.lstat(destination).catch(() => undefined))?.isFile()) return false;
-		const live = await digestStream(Bun.file(source).stream());
+		// Through the regular-file check: a FIFO at the live name is not waited
+		// on, and is no transcript the archive could hold.
+		const live = await digestStream(bytesOfRegularFile(source));
 		const stored = await digestArchivedSessionFile(destination);
 		return live.hash === stored.hash;
 	} catch {
@@ -2279,9 +2352,22 @@ async function collectSessionFiles(session: SessionInfo): Promise<string[]> {
  * whitespace; other binary and plain-text artifacts cost one small read.
  */
 async function readArtifactSessionId(file: string): Promise<string | undefined> {
-	const prefix = (await Bun.file(file).slice(0, HEADER_SNIFF_BYTES).text()).replace(/^[ \t\r\n]+/, "");
-	if (prefix !== "" && prefix[0] !== "{") return undefined;
-	return readSessionHeaderId(file);
+	// Through a descriptor that holds a regular file: an artifact that is, or
+	// links to, a FIFO, a socket or a device is no transcript, and reading it
+	// would wait on it or take what is written to it. It owns nothing here;
+	// the archive copy names it as what the archive cannot hold, and the
+	// reclaim keeps the live tree for it.
+	const handle = await openRegularFile(file).catch(notRegularAsAbsent);
+	if (!handle) return undefined;
+	try {
+		const sniff = Buffer.allocUnsafe(HEADER_SNIFF_BYTES);
+		const { bytesRead } = await handle.read(sniff, 0, sniff.byteLength, 0);
+		const prefix = new TextDecoder().decode(sniff.subarray(0, bytesRead)).replace(/^[ \t\r\n]+/, "");
+		if (prefix !== "" && prefix[0] !== "{") return undefined;
+		return await readSessionHeaderIdFromHandle(handle);
+	} finally {
+		await handle.close().catch(() => undefined);
+	}
 }
 
 /** The ownership leases a run holds over a session tree. */
@@ -2607,38 +2693,23 @@ export function renderText(result: GcResult): string {
 
 /**
  * What `--restore --apply` would refuse, leave or bring back, for the
- * preview to say first: what stands at the restore record's name — something
- * that is not a regular file is refused, and a regular file is left, keeping
- * the session unfinished — and, from one walk of the artifact tree, its
- * conflicts and what it lacks. A preview that checks only the transcript
- * exits 0 over a refusal applying then reports, and two walks could promise
- * an entry one of them refuses.
+ * preview to say first. It runs the restore itself in its plan mode — the
+ * same steps, refusals and order, each write replaced by a check that it
+ * could be made — so the preview cannot promise what the apply would then
+ * refuse: a preview that walked the trees its own way did, three rounds
+ * running, for a different reason each time.
  */
 async function previewRestore(
 	archiveFile: string,
 	sessionPath: string,
 	agentDir: string,
 ): Promise<{ refusals: string[]; missing?: string[] }> {
-	const refusals: string[] = [];
-	const record = restoreRecordPath(archiveFile);
+	const plan = newRestorePlan(sessionPath.slice(0, -".jsonl".length));
 	try {
-		const refused = await restoreRecordRefusal(record);
-		const standing = await fs.lstat(record).catch((error: unknown) => {
-			if (codeOf(error) === "ENOENT") return undefined;
-			throw error;
-		});
-		if (refused) refusals.push(refused);
-		else if (standing) refusals.push(restoreRecordLeftNote(record));
+		const planned = await restoreArchivedSessionLocked(archiveFile, agentDir, plan);
+		return { refusals: planned.notRestored, missing: plan.missing.sort() };
 	} catch (error) {
-		refusals.push(`${record} could not be looked at: ${errorMessage(error)}`);
-	}
-	try {
-		const tree = await artifactRestorePreview(archiveFile, sessionPath, agentDir);
-		refusals.push(...tree.conflicts.map(conflict => `the artifact tree would not be restored whole: ${conflict}`));
-		return { refusals, missing: tree.missing };
-	} catch (error) {
-		refusals.push(`the artifact tree could not be checked: ${errorMessage(error)}`);
-		return { refusals };
+		return { refusals: [errorMessage(error)] };
 	}
 }
 
@@ -2860,7 +2931,7 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 		// its exit status is how a script learns the difference. Everything
 		// applying would refuse for is checked here too, short of taking the
 		// leases: the owner is probed and released, and the tree is proved.
-		const session = await readSessionInfo(sessionPath).catch(() => undefined);
+		const session = await readRegularSessionInfo(sessionPath).catch(() => undefined);
 		const listed = session ? await sessionTree(session) : undefined;
 		const probe = listed?.files ? await tryAcquireSessionTreeLeases(session!, listed.files) : null;
 		if (probe) for (const held of probe.leases) held.release();
@@ -2885,6 +2956,11 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 			await keepTree();
 			result.errors.push(notACopy());
 			return result;
+		}
+		const transcriptTarget = (await lookAt(sessionPath))?.target;
+		if (transcriptTarget !== undefined) {
+			await keepTree();
+			result.errors.push(transcriptLinkRefusal(sessionPath, transcriptTarget, "would be"));
 		}
 		if (await pathExists(liveArtifacts)) {
 			const preview = { files: [] as ProvenEntry[], directories: [] as string[] };
@@ -2912,7 +2988,7 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 	// between the proof and the lease, and the deletion then runs against a
 	// reading that is already stale. And a parent's lease says nothing about
 	// the subagent sessions below it, whose files this deletes too.
-	const session = await readSessionInfo(sessionPath).catch(() => undefined);
+	const session = await readRegularSessionInfo(sessionPath).catch(() => undefined);
 	if (!session) {
 		await keepTree();
 		result.errors.push(`${sessionPath} is not a session file`);
@@ -2953,6 +3029,17 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 		if (!root) {
 			await keepTree();
 			result.errors.push(`${sessionPath} is no longer there to reclaim`);
+			return result;
+		}
+		// A transcript that is a symbolic link is kept, like any link in the
+		// tree: the file it leads to is outside this session's tree and its
+		// leases, so a writer that appends a turn there after the last
+		// comparison and before the `unlink` leaves that turn only at a name
+		// the session no longer references — the review did exactly that, and
+		// the reclaim and the restore after it both exited 0 without the turn.
+		if (root.target !== undefined) {
+			await keepTree();
+			result.errors.push(transcriptLinkRefusal(sessionPath, root.target, "was"));
 			return result;
 		}
 		// Every file settled before any of it goes. Proving and deleting as

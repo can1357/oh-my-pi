@@ -84,6 +84,31 @@ function hashFor(label: string): string {
 	return new Bun.SHA256().update(label).digest("hex");
 }
 
+/** A positional read, as gc calls it on a descriptor: into `buffer` at `offset`, `length` bytes from `position`. */
+type PositionalRead = (
+	buffer: Uint8Array,
+	offset: number,
+	length: number,
+	position: number | null,
+) => Promise<{ bytesRead: number; buffer: Uint8Array }>;
+
+/**
+ * Every descriptor gc opens on a path in `files` reads through what `wrap`
+ * makes of its own read: gc reads a file only through a descriptor it has
+ * checked, so that is where a test shapes what a read returns.
+ */
+function readsThrough(files: ReadonlySet<string>, wrap: (read: PositionalRead) => PositionalRead) {
+	const realOpen = fs.open;
+	return spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
+		const handle = await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
+		if (files.has(String(target))) {
+			const read = handle.read.bind(handle) as unknown as PositionalRead;
+			handle.read = wrap(read) as unknown as typeof handle.read;
+		}
+		return handle;
+	}) as typeof fs.open);
+}
+
 async function writeSession(
 	agentDir: string,
 	project: string,
@@ -461,34 +486,23 @@ describe("runGcCommand blob sweep", () => {
 			],
 		]);
 		for (const [file, bytes] of journals) await Bun.write(file, bytes);
-		const realFile = Bun.file.bind(Bun);
-		const fileSpy = spyOn(Bun, "file").mockImplementation((source, options) => {
-			const file = realFile(source as string, options);
-			const bytes = journals.get(String(source));
-			if (bytes) {
-				file.stream = () => {
-					let offset = 0;
-					return new ReadableStream<Uint8Array<ArrayBuffer>>({
-						pull(controller) {
-							if (offset >= bytes.length) {
-								controller.close();
-								return;
-							}
-							controller.enqueue(bytes.subarray(offset, offset + 7));
-							offset += 7;
-						},
-					});
-				};
-			}
-			return file;
+		// gc reads a journal through a descriptor it has checked holds a regular
+		// file; each read through one of these hands back seven bytes at most,
+		// so every reference is split across reads somewhere.
+		let shaped = 0;
+		const readSpy = readsThrough(new Set(journals.keys()), read => (buffer, offset, length, position) => {
+			shaped += 1;
+			return read(buffer, offset, Math.min(length, 7), position);
 		});
 		let result: GcResult;
 		try {
 			result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
 		} finally {
-			fileSpy.mockRestore();
+			readSpy.mockRestore();
 		}
 
+		// Many short reads, not one per journal: the split really happened.
+		expect(shaped).toBeGreaterThan(journals.size * 2);
 		expect(result.blobs?.referenced).toBe(3);
 		expect(result.blobs?.deleted).toBe(1);
 		for (const file of [active, archived, backup]) expect(await Bun.file(file).exists()).toBe(true);
@@ -516,31 +530,21 @@ describe("runGcCommand blob sweep", () => {
 		const orphan = await writeBlob(root, hashFor("read-error-orphan"), "orphan");
 		await agePath(orphan);
 		const session = await writeSession(root, "project", "read-error", "complete");
-		const realFile = Bun.file.bind(Bun);
-		const fileSpy = spyOn(Bun, "file").mockImplementation((source, options) => {
-			const file = realFile(source as string, options);
-			if (source === session) {
-				file.stream = () => {
-					let yielded = false;
-					return new ReadableStream<Uint8Array<ArrayBuffer>>({
-						pull(controller) {
-							if (yielded) controller.error(Object.assign(new Error("journal read failed"), { code: "EIO" }));
-							else {
-								yielded = true;
-								controller.enqueue(new TextEncoder().encode("{}\n"));
-							}
-						},
-					});
-				};
-			}
-			return file;
+		// The first read hands back the whole journal; the next one fails.
+		const readSpy = readsThrough(new Set([session]), read => {
+			let reads = 0;
+			return async (buffer, offset, length, position) => {
+				reads += 1;
+				if (reads > 1) throw Object.assign(new Error("journal read failed"), { code: "EIO" });
+				return await read(buffer, offset, length, position);
+			};
 		});
 		try {
 			await expect(runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } })).rejects.toThrow(
 				"journal read failed",
 			);
 		} finally {
-			fileSpy.mockRestore();
+			readSpy.mockRestore();
 		}
 
 		expect(await Bun.file(orphan).exists()).toBe(true);
