@@ -4852,3 +4852,170 @@ test("a quarantine retry with no ledger record and nothing in any destination st
 	}
 	expect(await Bun.file(ground.file).text()).toBe("PARTIAL STAGE");
 });
+
+// The review's unsearchable-ledger sequence: a quarantine stopped once its
+// record was copied and before its directory moved, then a ledger this user
+// cannot search. The record is still in it, so a copy back would land on it.
+test.skipIf(process.getuid?.() === 0)(
+	"a quarantine retry that cannot look in the ledger says so, in its preview as in applying, and gives no copy-back step",
+	async () => {
+		const { ground, record } = await archivedWithKilledStage();
+		const destination = quarantineDestination(record);
+		await quarantineStopped(ground, record, "before the directory moves");
+		const ledger = stagingLedgerDir(root);
+		await fs.chmod(ledger, 0);
+		let preview: GcResult;
+		let applied: GcResult;
+		try {
+			preview = await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } });
+			applied = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+		} finally {
+			await fs.chmod(ledger, 0o700);
+		}
+
+		for (const run of [preview, applied]) {
+			expect(run.quarantine?.moved).toBe(false);
+			const told = run.quarantine?.errors.join("\n") ?? "";
+			expect(told).toContain(`${ground.record} could not be checked`);
+			expect(told).toContain("EACCES");
+			expect(told).not.toContain(`is not in ${ledger}`);
+			expect(told).not.toContain(`back to ${ground.record}`);
+		}
+		// The record was there all along: once the ledger can be searched, the
+		// same command finishes the quarantine.
+		const finished = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+		expect(finished.quarantine?.errors).toEqual([]);
+		expect(finished.quarantine?.moved).toBe(true);
+		expect(await Bun.file(path.join(destination, path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
+	},
+);
+
+// A whole copy of the record in the destination, the ledger record gone, and
+// the copy kept from this user: it is there, and what it holds is unknown.
+const unreadableCopies: [string, (copy: string) => Promise<() => Promise<void>>][] = [
+	[
+		"the copy cannot be read",
+		async copy => {
+			await fs.chmod(copy, 0);
+			return async () => await fs.chmod(copy, 0o600);
+		},
+	],
+	[
+		"the destination cannot be searched",
+		async copy => {
+			await fs.chmod(path.dirname(copy), 0o400);
+			return async () => await fs.chmod(path.dirname(copy), 0o700);
+		},
+	],
+];
+for (const [shape, arrange] of unreadableCopies) {
+	test.skipIf(process.getuid?.() === 0)(
+		`a quarantine retry with no ledger record does not say there is no copy to put back when ${shape}`,
+		async () => {
+			const { ground, record } = await archivedWithKilledStage();
+			const copy = path.join(quarantineDestination(record), record);
+			await quarantineStopped(ground, record, "before the ledger entry goes");
+			await fs.unlink(ground.record);
+			const undo = await arrange(copy);
+			let preview: GcResult;
+			let applied: GcResult;
+			try {
+				preview = await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } });
+				applied = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+			} finally {
+				await undo();
+			}
+
+			for (const run of [preview, applied]) {
+				expect(run.quarantine?.moved).toBe(false);
+				const told = run.quarantine?.errors.join("\n") ?? "";
+				expect(told).toContain(`${copy} could not be read`);
+				expect(told).toContain("EACCES");
+				expect(told).not.toContain("none to put back");
+				expect(told).toContain("carries it home");
+			}
+			// Readable again, the copy is the step it always was.
+			const told = (await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } })).quarantine;
+			expect(told?.errors.join("\n")).toContain(`copy ${copy} back to ${ground.record}`);
+		},
+	);
+}
+
+/** Make every `fs[method]` call on exactly `at` fail with an injected EIO until restored. */
+function failAt(method: "lstat" | "realpath", at: string) {
+	const real = fs[method] as (...args: unknown[]) => Promise<unknown>;
+	return spyOn(fs, method).mockImplementation((async (target: string, ...rest: unknown[]) => {
+		if (String(target) === at) throw Object.assign(new Error(`EIO: injected, ${method} ${at}`), { code: "EIO" });
+		return await real(target, ...rest);
+	}) as never);
+}
+
+test("a quarantine retry with no ledger record says where a place resolves could not be checked", async () => {
+	const { ground, record } = await archivedWithKilledStage();
+	const destination = quarantineDestination(record);
+	await quarantineStopped(ground, record, "before the ledger entry goes");
+	await fs.unlink(ground.record);
+	const broken = failAt("realpath", destination);
+	let applied: GcResult;
+	try {
+		applied = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+	} finally {
+		broken.mockRestore();
+	}
+
+	expect(applied.quarantine?.moved).toBe(false);
+	const told = applied.quarantine?.errors.join("\n") ?? "";
+	expect(told).toContain(`where ${destination} resolves could not be checked`);
+	expect(told).toContain("EIO: injected");
+});
+
+test("a quarantine that cannot resolve the parent of a directory already gone refuses, and moves nothing", async () => {
+	const { ground, record } = await archivedWithKilledStage();
+	// The directory gone before the quarantine, so only the record would move,
+	// into the quarantine beside the tree the directory's parent is in.
+	await fs.rename(ground.dir, path.join(root, "gone-before"));
+	const broken = failAt("realpath", path.dirname(ground.dir));
+	let preview: GcResult;
+	let applied: GcResult;
+	try {
+		preview = await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } });
+		applied = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+	} finally {
+		broken.mockRestore();
+	}
+
+	for (const run of [preview, applied]) {
+		expect(run.quarantine?.moved).toBe(false);
+		const told = run.quarantine?.errors.join("\n") ?? "";
+		expect(told).toContain(`${path.dirname(ground.dir)} could not be resolved`);
+		expect(told).toContain("EIO: injected");
+	}
+	expect(await Bun.file(ground.record).exists()).toBe(true);
+	expect(await fs.lstat(path.join(root, "gc-quarantine")).catch(() => undefined)).toBeUndefined();
+	expect(await fs.lstat(quarantineDestination(record)).catch(() => undefined)).toBeUndefined();
+});
+
+test("a quarantine that cannot check its destination refuses, and moves nothing beside what is there", async () => {
+	const { ground, record } = await archivedWithKilledStage();
+	const destination = quarantineDestination(record);
+	await Bun.write(path.join(destination, "unrelated"), "UNRELATED");
+	const broken = failAt("lstat", destination);
+	let preview: GcResult;
+	let applied: GcResult;
+	try {
+		preview = await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } });
+		applied = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+	} finally {
+		broken.mockRestore();
+	}
+
+	for (const run of [preview, applied]) {
+		expect(run.quarantine?.moved).toBe(false);
+		const told = run.quarantine?.errors.join("\n") ?? "";
+		expect(told).toContain(`${destination} could not be checked, so nothing was moved`);
+		expect(told).toContain("EIO: injected");
+	}
+	expect(await fs.readdir(destination)).toEqual(["unrelated"]);
+	expect(await Bun.file(ground.file).text()).toBe("PARTIAL STAGE");
+	expect(await Bun.file(ground.record).exists()).toBe(true);
+});

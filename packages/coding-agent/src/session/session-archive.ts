@@ -1574,24 +1574,38 @@ interface QuarantinePlace {
 	unreadable?: string;
 	/** Where it resolves, when that is inside a session tree. */
 	insideTree?: string;
+	/** Why where it resolves could not be found, when it could not. */
+	unresolved?: string;
 	/** The record, when a whole copy of it is a regular file at its name there. */
 	copy?: StagingRecord;
+	/** Why what is at the record's name there could not be read, when it could not. */
+	copyUnreadable?: string;
 	/** The staging directory a part copy there begins by naming, when enough of it was copied to read that. */
 	partNames?: string;
 }
 
-/** The text of the regular file at `at`, or undefined when it is not one or cannot be read. */
-async function readRegularText(at: string): Promise<string | undefined> {
-	// The entry itself: a link to a file elsewhere is not a file here.
-	if (!(await fs.lstat(at).catch(() => undefined))?.isFile()) return undefined;
-	const handle = await openRegularFile(at).catch(() => undefined);
-	if (!handle) return undefined;
+/**
+ * The text of the regular file at `at`; undefined when nothing is there or
+ * what is there is not a regular file; or why it could not be read — which
+ * is not the same as nothing there.
+ */
+async function readRegularText(at: string): Promise<{ text: string } | { unreadable: string } | undefined> {
 	try {
-		return await handle.readFile("utf8");
-	} catch {
-		return undefined;
-	} finally {
-		await handle.close().catch(() => undefined);
+		// The entry itself: a link to a file elsewhere is not a file here.
+		const standing = await fs.lstat(at).catch((error: unknown) => {
+			if (isEnoent(error)) return undefined;
+			throw error;
+		});
+		if (!standing?.isFile()) return undefined;
+		const handle = await openRegularFile(at);
+		if (!handle) return undefined;
+		try {
+			return { text: await handle.readFile("utf8") };
+		} finally {
+			await handle.close().catch(() => undefined);
+		}
+	} catch (error) {
+		return { unreadable: errorText(error) };
 	}
 }
 
@@ -1610,12 +1624,21 @@ async function readQuarantinePlace(
 	}
 	if (names.length === 0) return undefined;
 	const place: QuarantinePlace = { destination, paths: names.map(name => path.join(destination, name)) };
-	const resolved = await resolvedPath(destination).catch(() => undefined);
-	if (resolved && roots.some(root => isWithin(root, resolved.real) || isWithin(resolved.real, root))) {
-		place.insideTree = resolved.real;
+	try {
+		const resolved = await resolvedPath(destination);
+		if (roots.some(root => isWithin(root, resolved.real) || isWithin(resolved.real, root))) {
+			place.insideTree = resolved.real;
+		}
+	} catch (error) {
+		place.unresolved = errorText(error);
 	}
-	const text = await readRegularText(path.join(destination, recordName));
-	if (text === undefined) return place;
+	const read = await readRegularText(path.join(destination, recordName));
+	if (read === undefined) return place;
+	if ("unreadable" in read) {
+		place.copyUnreadable = read.unreadable;
+		return place;
+	}
+	const { text } = read;
 	try {
 		place.copy = parseStagingRecord(text);
 	} catch {
@@ -1642,14 +1665,15 @@ const UNRECORDED_STAGE_WARNING =
  * inodes, an alias can show the original at another name, and anything put
  * beside the record's copy as evidence can be put there by other hands — so
  * this names every place a quarantine of the record uses and what each
- * holds, and gives the one step that is right whichever happened: put a copy
- * of the record back in the ledger and run the same command again. With the
- * ledger record to go by, that run decides from what is on disk, under every
- * check a first run makes, and reports the quarantine done once nothing is
- * left to move. A staging directory still in a session tree with no record
- * in the ledger is one a restore takes for an artifact and carries home, and
- * restore cannot tell it from an artifact of the same shape, so every answer
- * says so.
+ * holds, or what in it could not be looked at, and gives the one step that
+ * is right whichever happened: put a copy of the record back in the ledger
+ * and run the same command again. What could not be read may be that copy,
+ * so it is never reported as none. With the ledger record to go by, that run
+ * decides from what is on disk, under every check a first run makes, and
+ * reports the quarantine done once nothing is left to move. A staging
+ * directory still in a session tree with no record in the ledger is one a
+ * restore takes for an artifact and carries home, and restore cannot tell it
+ * from an artifact of the same shape, so every answer says so.
  */
 function settleWithoutLedgerRecord(
 	result: StagingQuarantine,
@@ -1665,27 +1689,47 @@ function settleWithoutLedgerRecord(
 		return result;
 	}
 	if (places.length === 1) result.quarantine = places[0].destination;
+	const copyOf = (place: QuarantinePlace): string => path.join(place.destination, path.basename(record));
 	const held = places
-		.map(place =>
-			place.unreadable !== undefined
-				? `${place.destination} could not be read (${place.unreadable})`
-				: `${place.destination} holds ${place.paths.join(", ")}` +
-					(place.insideTree === undefined ? "" : ` and resolves to ${place.insideTree}, inside a session tree`),
-		)
+		.map(place => {
+			if (place.unreadable !== undefined) return `${place.destination} could not be read (${place.unreadable})`;
+			let holds = `${place.destination} holds ${place.paths.join(", ")}`;
+			if (place.insideTree !== undefined) holds += ` and resolves to ${place.insideTree}, inside a session tree`;
+			if (place.unresolved !== undefined) {
+				holds +=
+					`, and where ${place.destination} resolves could not be checked (${place.unresolved}), so whether it is ` +
+					`inside a session tree is not known`;
+			}
+			if (place.copyUnreadable !== undefined)
+				holds += `; ${copyOf(place)} could not be read (${place.copyUnreadable})`;
+			return holds;
+		})
 		.join("; ");
 	const copies = places.filter(place => place.copy !== undefined);
-	const copyOf = (place: QuarantinePlace): string => path.join(place.destination, path.basename(record));
+	const unread = places.filter(place => place.copyUnreadable !== undefined).map(copyOf);
 	const which =
 		copies.length === 1
 			? copyOf(copies[0])
 			: `the copy whose directory you mean to quarantine — ${copies.map(place => `${copyOf(place)}, naming ${place.copy!.dir}`).join("; ")} —`;
+	// What could not be read may be a whole copy, so it is never called none.
+	const unknown =
+		unread.length === 0
+			? ""
+			: `${unread.join(" and ")} could not be read, so whether ${unread.length === 1 ? "it is" : "each is"} a whole copy ` +
+				`of the record is not known`;
 	const step =
 		copies.length === 0
-			? `No place holds a whole copy of the record, so there is none to put back; nothing reads what those places hold, so ` +
-				`look at it and copy out anything you want to keep.`
+			? unread.length > 0
+				? `${unknown}: once this user can read ${unread.length === 1 ? "it" : "them"}, run the same command again, and it ` +
+					`says what ${unread.length === 1 ? "it holds" : "they hold"} and the step that follows.`
+				: `No place holds a whole copy of the record, so there is none to put back; nothing reads what those places hold, so ` +
+					`look at it and copy out anything you want to keep.`
 			: `To finish a quarantine of it, or to see that one finished, copy ${which} back to ${record} and run the same command ` +
 				`again: with the ledger record to go by, it decides from what is on disk, moves the directory if it is still at its ` +
-				`old name, refuses what it has to, and reports the quarantine done once nothing is left to move.`;
+				`old name, refuses what it has to, and reports the quarantine done once nothing is left to move.` +
+				(unknown === ""
+					? ""
+					: ` ${unknown}; once this user can read ${unread.length === 1 ? "it" : "them"}, the same command says what ${unread.length === 1 ? "it holds" : "they hold"}.`);
 	const named = [...new Set(places.flatMap(place => place.copy?.dir ?? place.partNames ?? []))];
 	result.errors.push(
 		`${record} is not in ${ledger}, so this does not report a quarantine of it finished, and does not finish one: what is on ` +
@@ -1853,7 +1897,11 @@ async function putExactly(at: string, bytes: Buffer, what: string, linkFrom?: st
  * quarantine retried, and one stopped once its directory had left and then
  * followed by such a run, are both answered by
  * {@link settleWithoutLedgerRecord}, which refuses and gives the step that
- * finishes either: copy the record back to the ledger and run again.
+ * finishes either: copy the record back to the ledger and run again. A
+ * ledger entry that cannot be looked at is not taken for one that is gone:
+ * that refusal says it could not be checked and gives no copy-back step,
+ * since the record may be there. Nor is any other look that fails taken for
+ * nothing there.
  *
  * The caller holds the gc lock, so no run is staging into the directory while
  * it moves; the advice that names this command asks for activity on the
@@ -1884,8 +1932,17 @@ export async function quarantineStagingRecord(
 	const quarantineFor = (tree: string | undefined): string =>
 		path.join(tree === undefined ? agentDir : path.dirname(tree), "gc-quarantine", id);
 
-	const listed = await fs.lstat(record).catch(() => undefined);
-	if (!listed) {
+	let listed: Stats;
+	try {
+		listed = await fs.lstat(record);
+	} catch (error) {
+		if (!isEnoent(error)) {
+			return refuse(
+				`${record} could not be checked (${errorText(error)}), so whether ${ledger} still holds it is not known: ` +
+					`nothing was moved, and this is no reason to copy a record back, since one may already be there. Once ` +
+					`${record} can be checked, run the same command again.`,
+			);
+		}
 		// Already moved by an earlier run of this command, or never there.
 		const destinations = [...new Set([...roots, undefined].map(quarantineFor))];
 		const places = await Promise.all(destinations.map(at => readQuarantinePlace(at, path.basename(record), roots)));
@@ -1911,8 +1968,22 @@ export async function quarantineStagingRecord(
 	const directoryPresent = ground.kind !== "gone";
 	const moved = path.basename(entry.dir);
 
-	const parent = await fs.realpath(path.dirname(entry.dir)).catch(() => undefined);
-	const destination = quarantineFor(parent === undefined ? undefined : roots.find(root => isWithin(root, parent)));
+	// A parent that is gone takes its whole tree with it, and the quarantine
+	// goes beside the agent directory; one that cannot be resolved says
+	// nothing about where it belongs.
+	let tree: string | undefined;
+	try {
+		const parent = await fs.realpath(path.dirname(entry.dir));
+		tree = roots.find(root => isWithin(root, parent));
+	} catch (error) {
+		if (!isEnoent(error)) {
+			return refuse(
+				`${path.dirname(entry.dir)} could not be resolved (${errorText(error)}), so where a quarantine of ${entry.dir} ` +
+					`goes is not known and nothing was moved; run the same command again once it can be`,
+			);
+		}
+	}
+	const destination = quarantineFor(tree);
 	const recordInto = path.join(destination, path.basename(record));
 	const ofRecord = "this record";
 	result.quarantine = destination;
@@ -1926,7 +1997,10 @@ export async function quarantineStagingRecord(
 			if (roots.some(root => isWithin(root, real) || isWithin(real, root))) {
 				return `${destination} resolves to ${real}, inside a session tree, so nothing was moved; give it a directory of its own outside ${roots.join(" and ")}`;
 			}
-			const standing = await fs.lstat(destination).catch(() => undefined);
+			const standing = await fs.lstat(destination).catch((error: unknown) => {
+				if (isEnoent(error)) return undefined;
+				throw error;
+			});
 			if (standing) {
 				if (!standing.isDirectory())
 					return `${destination} is already there and is not a directory, so nothing was moved`;
