@@ -500,6 +500,7 @@ interface ToolRegistrationScope {
 	signal?: AbortSignal;
 	closed: boolean;
 }
+type ToolRegistrationObserver = (tool: RegisteredTool, signal?: AbortSignal) => void | Promise<void>;
 
 /** Identity reported by a session that is not a subagent and received no explicit identity. */
 export const TOP_LEVEL_AGENT: ExtensionAgentIdentity = Object.freeze({
@@ -552,6 +553,8 @@ export class ExtensionRunner {
 	#warnedLinkSchemes = new Set<string>();
 	#toolRegistrationScope = new AsyncLocalStorage<ToolRegistrationScope>();
 	#toolRegistrationBarrier: Promise<void> | undefined;
+	#toolRegistrationObservers = new Set<ToolRegistrationObserver>();
+	#toolRegistrationUnsubscribers = new Map<ToolRegistrationObserver, () => void>();
 	#initialized = false;
 	/** Full load order, captured on the first {@link setSuspendedExtensions} call. */
 	#loadOrder: Extension[] | undefined;
@@ -883,12 +886,10 @@ export class ExtensionRunner {
 		this.#mode = mode;
 		this.#initialized = true;
 
-		// Re-initialize (e.g. a mode switch rewiring UI/runtime actions) must not
-		// accumulate duplicate global registrations — drop the prior generation before
-		// installing this one's trampolines.
-		this.disposeFileFallbacks();
-		// Suspended extensions keep a (gated) trampoline so resuming them needs no rewire.
-		for (const ext of this.getLoadedExtensions()) this.#installFileFallbacks(ext);
+		// Re-initialize (for example, a mode switch rewiring runtime actions) must not
+		// accumulate process-wide registrations. Reload uses the same path after
+		// replacing the extension set.
+		this.#reinstallFileFallbacks();
 
 		// Drain events buffered by emitCredentialDisabled() before initialize ran. The
 		// spread adds the `type` discriminator — `event` is the pi-ai shape (no `type`).
@@ -922,6 +923,14 @@ export class ExtensionRunner {
 				});
 			}
 		});
+	}
+	#reinstallFileFallbacks(): void {
+		// Re-initialize (e.g. a mode switch rewiring UI/runtime actions) must not
+		// accumulate duplicate global registrations — drop the prior generation before
+		// installing this one's trampolines.
+		this.disposeFileFallbacks();
+		// Suspended extensions keep a (gated) trampoline so resuming them needs no rewire.
+		for (const ext of this.getLoadedExtensions()) this.#installFileFallbacks(ext);
 	}
 
 	/**
@@ -1203,6 +1212,103 @@ export class ExtensionRunner {
 		}
 		return { suspended, resumed };
 	}
+	/**
+	 * Supplies fresh `Extension` objects for {@link reloadExtensions}. Set by
+	 * whoever loaded the extensions in the first place, because only that caller
+	 * knows the paths, cwd and event bus this session was built with; the runner
+	 * receives an already-bound set and cannot reconstruct those inputs.
+	 */
+	#extensionReloader?: () => Promise<{ extensions: Extension[]; errors: Array<{ path: string; error: string }> }>;
+
+	setExtensionReloader(
+		reloader: () => Promise<{ extensions: Extension[]; errors: Array<{ path: string; error: string }> }>,
+	): void {
+		this.#extensionReloader = reloader;
+	}
+
+	/**
+	 * Re-import every extension module and swap the running set, without
+	 * restarting the session.
+	 *
+	 * Module identity was never the obstacle: the import specifier already
+	 * carries a monotonic `?mtime=` tag, so a second import compiles from disk
+	 * rather than returning the cached module. What was missing is that nothing
+	 * re-entered the load path and nothing tore the old registrations down.
+	 *
+	 * Order matters:
+	 *
+	 *  1. `session_shutdown` lets extensions release what they own — file
+	 *     handles, sockets, child processes. From an extension's side this IS a
+	 *     shutdown: that instance never runs again.
+	 *  2. Managed timers and process-wide file fallback registrations are cleared
+	 *     unconditionally, including when a teardown handler throws. Otherwise
+	 *     the old instance can keep acting beside its replacement.
+	 *  3. The new set is swapped in place (see {@link replaceExtensions}) and its
+	 *     file fallbacks are installed.
+	 *  4. `session_start` is re-emitted, because extensions do their
+	 *     per-session registration there. Without it the new modules are loaded
+	 *     but inert, which looks exactly like the reload did nothing.
+	 *
+	 * A module that fails to import is reported in `errors` and is absent from
+	 * the new set; the others still load. A syntax error in one extension while
+	 * editing should not take the rest of the session's extensions down.
+	 */
+	async reloadExtensions(): Promise<{ loaded: number; errors: Array<{ path: string; error: string }> } | null> {
+		const reloader = this.#extensionReloader;
+		if (!reloader) return null;
+
+		try {
+			if (this.hasHandlers("session_shutdown")) {
+				// `reason: "reload"` so handlers can tell this apart from the
+				// session actually ending. An extension that announces the end
+				// of a session to something outside the process would otherwise
+				// report a shutdown that did not happen, seconds before its
+				// replacement announces a start.
+				await this.emit({ type: "session_shutdown", reason: "reload" });
+			}
+		} catch {
+			// A hung or throwing teardown handler must not strand the session on
+			// the old code. The timer sweep below still runs.
+		}
+		this.clearManagedTimers();
+		this.disposeFileFallbacks();
+
+		const result = await reloader();
+		this.replaceExtensions(result.extensions);
+		this.#reinstallFileFallbacks();
+		await this.#refreshRegisteredTools();
+		await this.emit({ type: "session_start" });
+		return { loaded: result.extensions.length, errors: result.errors };
+	}
+
+	/**
+	 * Replace the loaded extension set in place.
+	 *
+	 * Mutates the existing array rather than rebinding it: every dispatch site
+	 * in this class iterates `this.extensions` live, and the runner reference is
+	 * handed to the session, mode controllers and the tool registry at startup.
+	 * Swapping the array itself would leave all of those pointing at the old
+	 * set, so the reload would appear to work and change nothing.
+	 */
+	replaceExtensions(next: readonly Extension[]): void {
+		this.#loadOrder = undefined;
+		this.#suspendedExtensions.clear();
+		for (const unsubscribe of this.#toolRegistrationUnsubscribers.values()) unsubscribe();
+		this.#toolRegistrationUnsubscribers.clear();
+		this.extensions.length = 0;
+		this.extensions.push(...next);
+		for (const observer of this.#toolRegistrationObservers) {
+			this.#toolRegistrationUnsubscribers.set(observer, this.#bindToolRegistrationObserver(observer));
+		}
+	}
+
+	async #refreshRegisteredTools(): Promise<void> {
+		for (const tool of this.getAllRegisteredTools()) {
+			for (const observer of this.#toolRegistrationObservers) {
+				await observer(tool, AbortSignal.timeout(extensionHandlerTimeoutMs));
+			}
+		}
+	}
 
 	/**
 	 * Call `listener` whenever {@link setSuspendedExtensions} suspends or resumes an extension, so
@@ -1238,7 +1344,17 @@ export class ExtensionRunner {
 	 * promises are drained before the lifecycle handler that registered them
 	 * completes, keeping the model tool snapshot and system prompt coherent.
 	 */
-	onToolRegistered(listener: (tool: RegisteredTool, signal?: AbortSignal) => void | Promise<void>): () => void {
+	onToolRegistered(listener: ToolRegistrationObserver): () => void {
+		this.#toolRegistrationObservers.add(listener);
+		this.#toolRegistrationUnsubscribers.set(listener, this.#bindToolRegistrationObserver(listener));
+		return () => {
+			this.#toolRegistrationObservers.delete(listener);
+			this.#toolRegistrationUnsubscribers.get(listener)?.();
+			this.#toolRegistrationUnsubscribers.delete(listener);
+		};
+	}
+
+	#bindToolRegistrationObserver(listener: ToolRegistrationObserver): () => void {
 		const subscriptions: Array<{ extension: Extension; listener: ToolRegistrationListener }> = [];
 		const attach = (extension: Extension): ToolRegistrationListener => {
 			const trackRegistration = (pending: Promise<void>): void => {
@@ -1704,6 +1820,12 @@ export class ExtensionRunner {
 	 */
 	disposeFileFallbacks(): void {
 		for (const dispose of this.#fileFallbackDisposers.splice(0)) dispose();
+	}
+
+	/** Outstanding extension-owned timers. Lets teardown be asserted directly
+	 * instead of by waiting to see whether a stale callback still fires. */
+	get managedTimerCount(): number {
+		return this.#managedTimers.size;
 	}
 
 	createCommandContext(): ExtensionCommandContext {

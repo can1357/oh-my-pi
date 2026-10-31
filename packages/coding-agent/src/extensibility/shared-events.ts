@@ -101,9 +101,19 @@ export interface SessionCompactEvent {
 	fromExtension: boolean;
 }
 
-/** Fired on process exit (SIGINT/SIGTERM) */
+/**
+ * Fired on process exit (SIGINT/SIGTERM), and before an extension is torn down
+ * for a reload.
+ *
+ * `reason` distinguishes the two. Handlers that announce the session ending,
+ * flush a transcript, or otherwise tell something outside the process that the
+ * work is over should check it: on `"reload"` the session continues, only this
+ * extension instance is being replaced. Absent means `"shutdown"`, so existing
+ * handlers keep their current behaviour.
+ */
 export interface SessionShutdownEvent {
 	type: "session_shutdown";
+	reason?: "shutdown" | "reload";
 }
 
 /** Fired when a main-agent turn is about to settle; handlers may request one continuation turn. */
