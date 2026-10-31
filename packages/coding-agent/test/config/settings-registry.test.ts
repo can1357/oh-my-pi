@@ -112,7 +112,7 @@ describe("settings registry", () => {
 		}
 	});
 
-	it("reads a value the setting rejects as unset in its own config file: value, presence and provenance agree", async () => {
+	it("reads a value the setting rejects as unset where it is written: value, presence and provenance agree", async () => {
 		const dir = TempDir.createSync("@pi-settings-rejected-layer-");
 		const aloneDir = TempDir.createSync("@pi-settings-rejected-alone-");
 		const validatedDir = TempDir.createSync("@pi-settings-rejected-validated-");

@@ -1435,6 +1435,7 @@ export class Settings {
 			if (projectResult.status === "fulfilled") {
 				const project = projectResult.value;
 				this.#applyPendingProjectWrites(project.settings);
+				this.#applyPendingProjectWrites(project.asWritten);
 				refreshed.push({
 					layer: "project",
 					settings: project.settings,
@@ -2454,9 +2455,7 @@ export class Settings {
 		for (const sourcePath of this.#projectSourcePaths) invalidateCapabilityFsCache(sourcePath);
 		let shellPathSource: string | undefined;
 		let merged: RawSettings = {};
-		let asWritten: RawSettings = {};
-		// What each file's load left out, reported once all files are read (see `reportDropped`).
-		const dropped = new Map<string, Map<AnySetting, unknown>>();
+		const items: SettingsCapabilityItem[] = [];
 		const sourcePaths: string[] = [];
 		let rejectedWarnings: string[] | undefined;
 		let warningsSeen = this.#projectSettingsWarningsSeen;
@@ -2482,18 +2481,10 @@ export class Settings {
 				warningsSeen = new Set(projectWarnings);
 				for (const item of result.items as SettingsCapabilityItem[]) {
 					if (item.level === "project") {
-						// Migrated before filtering: a legacy key or shape is valid until migration renames it.
-						const written = this.#migrateRawSettings(
-							dropSettingsGroupShadows(item.data as RawSettings, item.path),
-							quarantineInvalid,
-						);
-						const fileDropped = dropped.get(item.path) ?? new Map<AnySetting, unknown>();
-						dropped.set(item.path, fileDropped);
-						const data = this.#dropRejected(written, fileDropped);
-						asWritten = this.#deepMerge(asWritten, written);
-						merged = this.#deepMerge(merged, data);
+						merged = this.#deepMerge(merged, dropSettingsGroupShadows(item.data as RawSettings, item.path));
+						items.push(item);
 						sourcePaths.push(item.path);
-						if (Object.hasOwn(data, "shellPath")) shellPathSource = item.path;
+						if (Object.hasOwn(item.data, "shellPath")) shellPathSource = item.path;
 					}
 				}
 			}
@@ -2513,15 +2504,25 @@ export class Settings {
 				(this.#quarantinedYamlTargets.has(projectConfigPath) ? structuredClone(this.#projectFileSettings) : {}));
 		const nativeModelRoles = getByPath(nativeProject, ["modelRoles"]);
 		if (nativeModelRoles !== undefined) {
-			const written = this.#migrateRawSettings({ modelRoles: nativeModelRoles }, quarantineInvalid);
-			const fileDropped = dropped.get(projectConfigPath) ?? new Map<AnySetting, unknown>();
-			dropped.set(projectConfigPath, fileDropped);
-			asWritten = this.#deepMerge(asWritten, written);
-			merged = this.#deepMerge(merged, this.#dropRejected(written, fileDropped));
+			merged = this.#deepMerge(merged, { modelRoles: nativeModelRoles });
 		}
-		for (const [source, values] of dropped) reportDropped(this, source, values);
+		// Migrated before filtering: a legacy key or shape is valid until migration converts it, and
+		// some migrations combine keys from different files.
+		const asWritten = this.#migrateRawSettings(merged, quarantineInvalid);
+		const dropped = new Map<AnySetting, unknown>();
+		const settings = this.#dropRejected(asWritten, dropped);
+		reportDropped(this, projectConfigDir, dropped, (setting, value) => {
+			// Name the highest file holding the value; a value migration renamed names the project.
+			if (setting === cfgModelRoles && Bun.deepEquals(nativeModelRoles, value)) return projectConfigPath;
+			for (let index = items.length - 1; index >= 0; index--) {
+				if (Bun.deepEquals(getByPath(items[index].data as RawSettings, setting.segments), value)) {
+					return items[index].path;
+				}
+			}
+			return projectConfigDir;
+		});
 		return {
-			settings: merged,
+			settings,
 			asWritten,
 			fileSettings: structuredClone(nativeProject),
 			shellPathSource,

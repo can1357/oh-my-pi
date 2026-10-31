@@ -872,7 +872,7 @@ export interface WarnState {
 	readonly invalid: Map<string, unknown>;
 	/** Unknown `items` entries each setting (by id) warned about that are still configured. */
 	readonly items: Map<string, Set<string>>;
-	/** Per config file: the values a load dropped from it, by setting id (see {@link reportDropped}). */
+	/** Per loaded layer (a `--config` file, a project): values its load dropped, by setting id (see {@link reportDropped}). */
 	readonly dropped: Map<string, ReadonlyMap<string, unknown>>;
 }
 
@@ -891,22 +891,28 @@ export function inheritWarnings(target: Settings, source: Settings): void {
 }
 
 /**
- * Registry plumbing run by `Settings` each time it loads the config file `source`: warns about each
- * value in `dropped` (a value its setting rejects, so the load left it out) that the previous load of
- * that file did not already report, and remembers the set, so an unchanged file stays quiet on reload
- * and a value fixed and broken again is reported again.
+ * Registry plumbing run by `Settings` each time it loads `layer` (a `--config` file path, or a
+ * project's config directory): warns about each value in `dropped` (one its setting rejects, so the
+ * load left it out) that the previous load of `layer` did not already report, naming the file
+ * `sourceOf` gives (`layer` itself by default). Remembering the set keeps an unchanged layer quiet on
+ * reload and reports a value again once it is fixed and broken again.
  */
-export function reportDropped(settings: Settings, source: string, dropped: ReadonlyMap<AnySetting, unknown>): void {
+export function reportDropped(
+	settings: Settings,
+	layer: string,
+	dropped: ReadonlyMap<AnySetting, unknown>,
+	sourceOf: (setting: AnySetting, value: unknown) => string = () => layer,
+): void {
 	const warned = settings.warnState.dropped;
-	const previous = warned.get(source);
+	const previous = warned.get(layer);
 	const reported = new Map<string, unknown>();
 	for (const [setting, value] of dropped) {
 		reported.set(setting.id, value);
 		if (previous?.has(setting.id) && Bun.deepEquals(previous.get(setting.id), value)) continue;
-		setting.warnRejected(value, source);
+		setting.warnRejected(value, sourceOf(setting, value));
 	}
-	if (reported.size === 0) warned.delete(source);
-	else warned.set(source, reported);
+	if (reported.size === 0) warned.delete(layer);
+	else warned.set(layer, reported);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
