@@ -528,6 +528,43 @@ export function isSameModelTurn(
 }
 
 /**
+ * APIs whose encoder runs {@link transformMessages} against the target model
+ * itself, so {@link isSameModelTurn} decides what replays. Agent proxies
+ * (Factory, Cursor, Devin, GitLab Duo) and extension APIs encode through an
+ * inner model or their own path instead.
+ */
+const DIRECT_REPLAY_APIS: Partial<Record<Api, true>> = {
+	"openai-completions": true,
+	"openai-responses": true,
+	openrouter: true,
+	"openai-codex-responses": true,
+	"azure-openai-responses": true,
+	"anthropic-messages": true,
+	"bedrock-converse-stream": true,
+	"google-generative-ai": true,
+	"google-gemini-cli": true,
+	"google-vertex": true,
+	"ollama-chat": true,
+	"apple-foundation-models": true,
+};
+
+/**
+ * Whether {@link transformMessages} certainly drops `turn`'s opaque reasoning
+ * payload (thinking signatures, redacted thinking) on its way to `model`:
+ * another model's turn on a directly encoded wire keeps neither, except
+ * Anthropic-messages to Anthropic-messages, where deployment and signing
+ * rules may keep them. `false` when the payload may survive.
+ */
+export function dropsForeignReasoningPayload(
+	turn: Pick<AssistantMessage, "provider" | "api" | "model">,
+	model: Pick<Model, "provider" | "api" | "id">,
+): boolean {
+	if (DIRECT_REPLAY_APIS[model.api] !== true) return false;
+	if (model.api === "anthropic-messages" && turn.api === "anthropic-messages") return false;
+	return !isSameModelTurn(turn, model);
+}
+
+/**
  * Targets that have proven they read unsigned foreign thinking when replayed
  * natively. This is a semantic-carry allowlist only: OpenAI-compatible
  * `reasoning_content` schema requirements and llama.cpp cache-prefix replay are

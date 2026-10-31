@@ -5,6 +5,12 @@
 ### Fixed
 
 - Fixed OpenAI remote compaction (`/responses/compact`) replaying backend-only `internal_chat_message_metadata_passthrough` metadata that Codex rejects as an unknown parameter ([#17590](https://github.com/can1357/oh-my-pi/pull/17590) by [@briankeefe](https://github.com/briankeefe))
+- Context estimates for a model without a known tokenizer family (Gemini, Grok and the like) count text in o200k_base instead of guessing 4 bytes per token, which undercounted what those providers bill by 11–48% on code-heavy sessions and let compaction fire late after a switch to them
+- Context estimates no longer charge a reader another model's thinking signatures or redacted thinking, which the request strips: a Claude session switched to Grok or Gemini counted them as text
+
+### Removed
+
+- Removed `PI_TOKENIZER_ACCURATE`: every model is now counted with a native tokenizer
 
 ## [18.14.2] - 2026-10-31
 
