@@ -7,29 +7,29 @@
 - Entry: `packages/coding-agent/src/task/index.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/task.md`
 - Key collaborators:
-  - `packages/coding-agent/src/task/types.ts` — dynamic schema, agent definitions, output caps.
-  - `packages/tui/src/tools/task.ts` — progress/result and tool-details types.
-  - `packages/coding-agent/src/task/structured-subagent.ts` — shared task/eval preflight, model/schema policy, artifact retention, execution.
-  - `packages/coding-agent/src/task/isolation-runner.ts` — isolation capture, merge, recovery, and lifecycle ownership.
-  - `packages/coding-agent/src/task/eval-tools.ts` — expose parent-kernel tools to a child.
-  - `packages/coding-agent/src/task/discovery.ts` — discover project/user/plugin/bundled agents.
-  - `packages/coding-agent/src/task/agents.ts` — bundled agent definitions and frontmatter parsing.
-  - `packages/coding-agent/src/task/seance.ts` and `seance-policy.ts` — seance source/model resolution, cold-revival contract, and session isolation options.
-  - `packages/coding-agent/src/slash-commands/seance.ts` — `/seance` command and session-picker adapter.
-  - `packages/coding-agent/src/task/executor.ts` — create child sessions, run subagents, collect output, hand finished sessions to the lifecycle manager.
-  - `packages/coding-agent/src/registry/agent-lifecycle.ts` — idle-TTL parking and revival of finished subagents.
-  - `packages/coding-agent/src/registry/agent-registry.ts` — process-global agent directory (`running | idle | parked | aborted`).
-  - `packages/coding-agent/src/async/job-manager.ts` — background job registration, progress, and result delivery.
-  - `packages/coding-agent/src/task/parallel.ts` — `Semaphore` used for the session-scoped concurrency bound.
-  - `@oh-my-pi/pi-natives` (`crates/pi-iso`) — isolation PAL: `isoResolve` / `isoStart` / `isoStop` backend resolution and fallback.
-  - `packages/coding-agent/src/task/worktree.ts` — isolation backend mapping (`parseIsolationBackend`) and lifecycle (`ensureIsolation`/`cleanupIsolation`), patch capture, branch merge.
-  - `packages/coding-agent/src/task/output-manager.ts` — session-scoped `agent://` id allocation.
-  - `packages/coding-agent/src/task/name-generator.ts` — default AdjectiveNoun agent ids.
-  - `packages/coding-agent/src/internal-urls/agent-protocol.ts` — resolve `agent://<id>` to saved subagent output.
-  - `packages/coding-agent/src/internal-urls/history-protocol.ts` — resolve `history://<id>` to a concise transcript.
-  - `packages/coding-agent/src/tools/index.ts` — tool registration and recursion-depth gating.
-  - `packages/coding-agent/src/sdk.ts` — child-session router/tool wiring and per-subagent `AgentOutputManager`.
-  - `docs/task-agent-discovery.md` — deeper discovery and precedence notes.
+   - `packages/coding-agent/src/task/types.ts` — dynamic schema, agent definitions, output caps.
+   - `packages/tui/src/tools/task.ts` — progress/result and tool-details types.
+   - `packages/coding-agent/src/task/structured-subagent.ts` — shared task/eval preflight, model/schema policy, artifact retention, execution.
+   - `packages/coding-agent/src/task/isolation-runner.ts` — isolation capture, merge, recovery, and lifecycle ownership.
+   - `packages/coding-agent/src/task/eval-tools.ts` — expose parent-kernel tools to a child.
+   - `packages/coding-agent/src/task/discovery.ts` — discover project/user/plugin/bundled agents.
+   - `packages/coding-agent/src/task/agents.ts` — bundled agent definitions and frontmatter parsing.
+   - `packages/coding-agent/src/task/seance.ts` and `seance-policy.ts` — seance source/model resolution, cold-revival contract, and session isolation options.
+   - `packages/coding-agent/src/slash-commands/seance.ts` — `/seance` command and session-picker adapter.
+   - `packages/coding-agent/src/task/executor.ts` — create child sessions, run subagents, collect output, hand finished sessions to the lifecycle manager.
+   - `packages/coding-agent/src/registry/agent-lifecycle.ts` — idle-TTL parking and revival of finished subagents.
+   - `packages/coding-agent/src/registry/agent-registry.ts` — process-global agent directory (`running | idle | parked | aborted`).
+   - `packages/coding-agent/src/async/job-manager.ts` — background job registration, progress, and result delivery.
+   - `packages/coding-agent/src/task/parallel.ts` — `Semaphore` used for the session-scoped concurrency bound.
+   - `@oh-my-pi/pi-natives` (`crates/pi-iso`) — isolation PAL: `isoResolve` / `isoStart` / `isoStop` backend resolution and fallback.
+   - `packages/coding-agent/src/task/worktree.ts` — isolation backend mapping (`parseIsolationBackend`) and lifecycle (`ensureIsolation`/`cleanupIsolation`), patch capture, branch merge.
+   - `packages/coding-agent/src/task/output-manager.ts` — session-scoped `agent://` id allocation.
+   - `packages/coding-agent/src/task/name-generator.ts` — default AdjectiveNoun agent ids.
+   - `packages/coding-agent/src/internal-urls/agent-protocol.ts` — resolve `agent://<id>` to saved subagent output.
+   - `packages/coding-agent/src/internal-urls/history-protocol.ts` — resolve `history://<id>` to a concise transcript.
+   - `packages/coding-agent/src/tools/index.ts` — tool registration and recursion-depth gating.
+   - `packages/coding-agent/src/sdk.ts` — child-session router/tool wiring and per-subagent `AgentOutputManager`.
+   - `docs/task-agent-discovery.md` — deeper discovery and precedence notes.
 
 ## Inputs
 
@@ -83,7 +83,7 @@ Extensions that replace `task` inherit this guidance (the native tool's `delegat
 
 Background response (`async.enabled=true`):
 
-- `content`: ``Spawned agent `<id>` (job `<jobId>`).`` A batch call instead returns `Spawned N background agents using <agent types>. ...` (the deduped per-item agent types, comma-joined) with a per-agent `-`<id>`(job`<jobId>`)` listing.
+- `content`: ``Spawned agent `<id>` (job `<jobId>`).`` A batch call instead returns `Spawned N background agents using <agent types>. ...` (the deduped per-item agent types, comma-joined) with a per-agent `- `<id>`(job`<jobId>`)` listing.
 - `details`: `{ projectAgentsDir, results, totalDurationMs, progress: [<AgentProgress per spawn>], async: { state, jobId, type: "task" } }`. The call keeps one shared `progress[]` snapshot; `async.jobId` is the first started job and `async.state` aggregates over the async spawns ("running" until every job settles, "failed" if any spawn failed) — jobs that settled before the call returned are already reflected. A mixed call's `results` carries the blocking spawns' inline `SingleResult`s (pure background calls return `results: []`).
 - Live progress streams into the same tool block via `onUpdate(...)`; final results arrive as async-result injections. Non-isolated completions get an idle/follow-up hint when messaging is enabled. Aborted agents that can be resumed get a resume hint; isolated runs point at the transcript. The current `task-follow-up.md` template still labels isolated runs non-resumable, despite the retained-workspace lifecycle described below.
 
@@ -127,30 +127,30 @@ Artifacts and side channels:
 7. Model priority: `task.agentModelOverrides` → agent frontmatter → configured task role/session fallback. Output schema priority: per-call `outputSchema` → agent frontmatter `output` → inherited parent session schema.
 8. Plan mode supplies `read`, `grep`, `glob`, `web_search`, and any configured `ast_grep`, replaces the agent's spawn/prewalk controls, and disables LSP/IRC. Eval-defined tools and isolation/apply/merge controls are rejected.
 9. If `isolated`, it requires a git repo (`getRepoRoot(...)` / `captureBaseline(...)`), maps `isolation.backend` to a backend-kind hint (`parseIsolationBackend`), and materializes the workspace via the natives PAL (`ensureIsolation` → `isoResolve`/`isoStart`), walking the candidate list when a backend is unavailable.
-10. Artifacts dir comes from the parent session file when available, otherwise a temp dir. When the session is executing an approved plan, the plan reference is handed to the subagent.
-11. Non-isolated spawns call `runSubprocess(...)` with parent cwd. Isolated spawns run in their workspace and capture root/nested patches or a branch. Successful changes apply only when `task.isolation.apply=true`; failed capture/merge paths preserve recovery artifacts. Kept-alive runs transfer workspace cleanup to the lifecycle owner rather than tearing it down at completion.
+10.   Artifacts dir comes from the parent session file when available, otherwise a temp dir. When the session is executing an approved plan, the plan reference is handed to the subagent.
+11.   Non-isolated spawns call `runSubprocess(...)` with parent cwd. Isolated spawns run in their workspace and capture root/nested patches or a branch. Successful changes apply only when `task.isolation.apply=true`; failed capture/merge paths preserve recovery artifacts. Kept-alive runs transfer workspace cleanup to the lifecycle owner rather than tearing it down at completion.
 
-    `isolation.backend: "command"` replaces the PAL materialization with `isolation.command` (task spawns only — other worktree consumers treat `command` as `auto`): omp runs that command in the repo root with `OMP_ISOLATION_AGENT_ID`, `OMP_ISOLATION_REPO_ROOT`, `OMP_ISOLATION_BASE_SHA` (the parent HEAD), and `OMP_ISOLATION_COMMAND_MODE=create`, takes the last non-empty stdout line as the workspace path, and requires it to be the root of a worktree registered with the same repository (real paths compared; the calling and primary checkouts, their subdirectories, and independent clones are rejected). No base dir, ownership marker, or git detach is created, and omp never removes the workspace — the external tool (e.g. `wt remove`) owns it. Unlike the PAL copy backends, the workspace starts at the ref the command chooses: it does not carry the parent checkout's uncommitted state, so base the worktree on `OMP_ISOLATION_BASE_SHA` when the child should share the parent's base. A hanging command is bounded by the 30-minute isolation-command timeout.
-12. `runSubprocess(...)` creates a child agent session with an isolated settings snapshot (parent settings inherited — `async.enabled` and `bash.autoBackground.enabled` are **inherited** from the parent, not force-disabled; `tier.openai`/`tier.anthropic`/`tier.google` are first re-resolved through `tier.subagent`, then the child session resolves an exact `task.agentServiceTierOverrides[agentName]` entry handed over by task/eval dispatch against its final model and persists the result; `tools.approvalMode` is forced to `yolo` because headless subagents have no UI to confirm prompts against; `advisor.enabled` is forced off unless the spawn opts in per agent; per-spawn overrides may disable read summarization and clear extra workspace roots for isolated runs), child `agentId` equal to the allocated id, child internal URL router/`AgentOutputManager`, output schema, the shared `context` (batch calls) in the system prompt's `CONTEXT` section, and the IRC peer roster in the system prompt.
-    An exact `task.agentAccountPools[agentName]` entry is installed on the child's provider session right after the parent's account affinity is copied, and the child's model registry enforces it on every key lookup, so for each listed provider the child, its side requests, and subagents it spawns without their own entry authenticate only with those OAuth accounts; vibe workers and revived agents take the live entry. See [Task agent discovery](../task-agent-discovery.md#model-and-structured-output-precedence).
-13. Child tool availability starts from explicit `agent.tools` when provided; auto-add `task` for declared spawns below the depth limit. Explicit lists containing `task`/`bash` gain `wait` unless restricted, and the registry still requires an async/IRC/service wake source. `exec` expands to `bash` plus `eval` when a backend is enabled. Outbound messaging requires explicit `write`, while inbound steering does not. Parent-owned `todo` is stripped unless prewalk is armed.
-14. The child must finish through the hidden `yield` tool; up to 3 reminder prompts, the last forcing `toolChoice = yield` when supported. `finalizeSubprocessOutput(...)` reconciles raw text, `yield` payloads, structured schemas, and abort states.
-15. End-of-run lifecycle (keep-alive, in the run finalizer):
-    - caller signal, user interrupt, wall-clock timeout, or soft-request-budget abort on a kept-alive agent with a reviver → only the run stops: the agent becomes `idle` and may receive a follow-up/revival;
-    - explicit kill (Agent Hub, RPC `cancel_subagent`, collab, vibe), or an aborted agent without a reviver → registry status `aborted`, session disposed, kill tombstone written; a later message or Hub revive reopens the transcript as a fresh `parked` generation, removes the tombstone, and revives it;
-    - manager shutdown → dispose/unregister the process-local session without a kill tombstone;
-    - isolated kept-alive run → follows the same idle/parking/revival path while retaining its workspace; explicit release captures final patches/branch state and cleans the isolation handle;
-    - everything else (success and failure alike) → status `idle` with the live session attached, and `AgentLifecycleManager.global().adopt(id, { idleTtlMs, revive })` arms the park timer. The reviver reopens the session JSONL.
-16. Lifecycle thereafter: `idle` agents are parked after `task.agentIdleTtlMs` (session disposed; `AgentRef` + session file retained); `write agent://<id>` or the Agent Hub revives parked and killed agents back to `idle`. `"Main"` is never parked.
+      `isolation.backend: "command"` replaces the PAL materialization with `isolation.command` (task spawns only — other worktree consumers treat `command` as `auto`): omp runs that command in the repo root with `OMP_ISOLATION_AGENT_ID`, `OMP_ISOLATION_REPO_ROOT`, `OMP_ISOLATION_BASE_SHA` (the parent HEAD), and `OMP_ISOLATION_COMMAND_MODE=create`, takes the last non-empty stdout line as the workspace path, and requires it to be the root of a worktree registered with the same repository (real paths compared; the calling and primary checkouts, their subdirectories, and independent clones are rejected). No base dir, ownership marker, or git detach is created, and omp never removes the workspace — the external tool (e.g. `wt remove`) owns it. Unlike the PAL copy backends, the workspace starts at the ref the command chooses: it does not carry the parent checkout's uncommitted state, so base the worktree on `OMP_ISOLATION_BASE_SHA` when the child should share the parent's base. A hanging command is bounded by the 30-minute isolation-command timeout.
+12.   `runSubprocess(...)` creates a child agent session with an isolated settings snapshot (parent settings inherited — `async.enabled` and `bash.autoBackground.enabled` are **inherited** from the parent, not force-disabled; `tier.openai`/`tier.anthropic`/`tier.google` are first re-resolved through `tier.subagent`, then the child session resolves an exact `task.agentServiceTierOverrides[agentName]` entry handed over by task/eval dispatch against its final model and persists the result; `tools.approvalMode` is forced to `yolo` because headless subagents have no UI to confirm prompts against; `advisor.enabled` is forced off unless the spawn opts in per agent; per-spawn overrides may disable read summarization and clear extra workspace roots for isolated runs), child `agentId` equal to the allocated id, child internal URL router/`AgentOutputManager`, output schema, the shared `context` (batch calls) in the system prompt's `CONTEXT` section, and the IRC peer roster in the system prompt.
+      An exact `task.agentAccountPools[agentName]` entry is installed on the child's provider session right after the parent's account affinity is copied, and the child's model registry enforces it on every key lookup, so for each listed provider the child, its side requests, and subagents it spawns without their own entry authenticate only with those OAuth accounts; vibe workers and revived agents take the live entry. See [Task agent discovery](../task-agent-discovery.md#model-and-structured-output-precedence).
+13.   Child tool availability starts from explicit `agent.tools` when provided; auto-add `task` for declared spawns below the depth limit. Explicit lists containing `task`/`bash` gain `wait` unless restricted, and the registry still requires an async/IRC/service wake source. `exec` expands to `bash` plus `eval` when a backend is enabled. Outbound messaging requires explicit `write`, while inbound steering does not. Parent-owned `todo` is stripped unless prewalk is armed.
+14.   The child must finish through the hidden `yield` tool; up to 3 reminder prompts, the last forcing `toolChoice = yield` when supported. `finalizeSubprocessOutput(...)` reconciles raw text, `yield` payloads, structured schemas, and abort states.
+15.   End-of-run lifecycle (keep-alive, in the run finalizer):
+      - caller signal, user interrupt, wall-clock timeout, or soft-request-budget abort on a kept-alive agent with a reviver → only the run stops: the agent becomes `idle` and may receive a follow-up/revival;
+      - explicit kill (Agent Hub, RPC `cancel_subagent`, collab, vibe), or an aborted agent without a reviver → registry status `aborted`, session disposed, kill tombstone written; a later message or Hub revive reopens the transcript as a fresh `parked` generation, removes the tombstone, and revives it;
+      - manager shutdown → dispose/unregister the process-local session without a kill tombstone;
+      - isolated kept-alive run → follows the same idle/parking/revival path while retaining its workspace; explicit release captures final patches/branch state and cleans the isolation handle;
+      - everything else (success and failure alike) → status `idle` with the live session attached, and `AgentLifecycleManager.global().adopt(id, { idleTtlMs, revive })` arms the park timer. The reviver reopens the session JSONL.
+16.   Lifecycle thereafter: `idle` agents are parked after `task.agentIdleTtlMs` (session disposed; `AgentRef` + session file retained); `write agent://<id>` or the Agent Hub revives parked and killed agents back to `idle`. `"Main"` is never parked.
 
 ## Modes / Variants
 
 - Execution mode
-  - Background job — `async.enabled=true`; non-blocking spawns go through `AsyncJobManager`.
-  - Sync inline — `async.enabled=false`, no job manager, or the item's agent declares `blocking: true` (per item: a mixed call runs both modes).
+   - Background job — `async.enabled=true`; non-blocking spawns go through `AsyncJobManager`.
+   - Sync inline — `async.enabled=false`, no job manager, or the item's agent declares `blocking: true` (per item: a mixed call runs both modes).
 - Batch mode (`task.batch`, default on)
-  - on — `{ context, tasks[] }`: one independent spawn per item, required `context` shared across the call's spawns, with `agent`, `outputSchema`, and `schemaMode` per item. `effort` appears only when its setting enables it; `isolated` also requires plan mode to be disabled. Lifecycle, revival, and concurrency semantics match N parallel single calls.
-  - off — single spawn per call; `tasks`/`context` are rejected and removed from the schema, with the same conditional `effort`/`isolated` fields.
+   - on — `{ context, tasks[] }`: one independent spawn per item, required `context` shared across the call's spawns, with `agent`, `outputSchema`, and `schemaMode` per item. `effort` appears only when its setting enables it; `isolated` also requires plan mode to be disabled. Lifecycle, revival, and concurrency semantics match N parallel single calls.
+   - off — single spawn per call; `tasks`/`context` are rejected and removed from the schema, with the same conditional `effort`/`isolated` fields.
 - Speculative launch (`task.speculativeLaunch`, default on; batch mode only) — while a `{ context, tasks[] }` call streams, the tool's stream session (`src/task/speculative-launch.ts`) starts each item's `SpawnRun` as soon as that item's JSON object closes (`context` must already have closed), and starts the remainder when the call finishes streaming. Dispatch adopts runs whose normalized spawn params still match; an invalid finished call, launched items that differ from the finished call, a blocking hook, or an aborted turn aborts every launched run. Launches need host authorization (`authorizeLaunch`): auto-allowed `task` approval and no extension `tool_call`/`tool_result`/approval lifecycle handlers.
   File-backed items wait for dispatch so their bytes are read at dispatch time. Encountering a `taskFile` item stops further speculative launches for that call.
 - Isolation is available when `task.isolation.enabled` is true: each task must set `isolated: true` to use a separate checkout; omitted or `false` tasks share the parent checkout. `isolation.backend` selects `auto`, `apfs`, `btrfs`, `zfs`, `reflink`, `overlayfs`, `projfs`, `block-clone`, or `rcopy`, and the PAL resolves the actual backend with fallback.
@@ -163,24 +163,24 @@ Artifacts and side channels:
 ## Side Effects
 
 - Filesystem
-  - Writes `<id>.jsonl` and `<id>.md` under the session artifacts dir or a temp task dir; isolated patch mode writes `<id>.patch`.
-  - Creates/removes worktrees or overlay mount directories; branch mode creates temporary worktrees and task branches.
+   - Writes `<id>.jsonl` and `<id>.md` under the session artifacts dir or a temp task dir; isolated patch mode writes `<id>.patch`.
+   - Creates/removes worktrees or overlay mount directories; branch mode creates temporary worktrees and task branches.
 - Network
-  - Child sessions may use whichever networked tools/models their active tool set permits.
-  - MCP proxy tools reuse parent connections and their configured transport deadlines, including `OMP_MCP_TIMEOUT_MS` overrides and `timeout: 0`; no separate subagent deadline caps a tool call.
+   - Child sessions may use whichever networked tools/models their active tool set permits.
+   - MCP proxy tools reuse parent connections and their configured transport deadlines, including `OMP_MCP_TIMEOUT_MS` overrides and `timeout: 0`; no separate subagent deadline caps a tool call.
 - Subprocesses / native bindings
-  - Isolation backends run through the `pi-natives` PAL (`crates/pi-iso`): kernel `overlay` with `fuse-overlayfs`/`fusermount[3]` fallback on Linux, APFS/Btrfs/ZFS/reflink clones, ProjFS on Windows, recursive copy as last resort.
-  - Git operations for baseline capture, patch apply, worktrees, branches, stash, cherry-pick, commits.
+   - Isolation backends run through the `pi-natives` PAL (`crates/pi-iso`): kernel `overlay` with `fuse-overlayfs`/`fusermount[3]` fallback on Linux, APFS/Btrfs/ZFS/reflink clones, ProjFS on Windows, recursive copy as last resort.
+   - Git operations for baseline capture, patch apply, worktrees, branches, stash, cherry-pick, commits.
 - Session state (transcript, memory, jobs, checkpoints, registries)
-  - Creates child `AgentSession` instances with isolated settings snapshots; finished sessions stay registered in the process-global `AgentRegistry` as `idle`/`parked` until process teardown or explicit release.
-  - With `async.enabled=true`, registers one async job per spawn in `session.asyncJobManager`; completion is injected into the parent as an async-result message.
-  - Arms idle-TTL timers in `AgentLifecycleManager` (unref'd; they never hold the process open).
-  - Emits `task:subagent:event`, `task:subagent:progress`, and `task:subagent:lifecycle` on the parent event bus.
-  - Allocates session-scoped output ids through `AgentOutputManager` so `agent://` stays unique across invocations.
-  - Shares the parent `local://` root and `ArtifactManager` with subagents.
+   - Creates child `AgentSession` instances with isolated settings snapshots; finished sessions stay registered in the process-global `AgentRegistry` as `idle`/`parked` until process teardown or explicit release.
+   - With `async.enabled=true`, registers one async job per spawn in `session.asyncJobManager`; completion is injected into the parent as an async-result message.
+   - Arms idle-TTL timers in `AgentLifecycleManager` (unref'd; they never hold the process open).
+   - Emits `task:subagent:event`, `task:subagent:progress`, and `task:subagent:lifecycle` on the parent event bus.
+   - Allocates session-scoped output ids through `AgentOutputManager` so `agent://` stays unique across invocations.
+   - Shares the parent `local://` root and `ArtifactManager` with subagents.
 - Background work / cancellation
-  - `write proc://<jobId>/kill` (no `content` needed) or parent tool-call abort cancels background jobs; parent tool-call abort cancels sync runs through the call signal. A cancelled run stops but its agent stays `idle` and resumable. An owned running subagent without a job can be cancelled through `proc://<agentId>/kill`, which aborts and releases its session.
-  - Missing-`yield` recovery sends up to three internal reminder prompts to the child session.
+   - `write proc://<jobId>/kill` (no `content` needed) or parent tool-call abort cancels background jobs; parent tool-call abort cancels sync runs through the call signal. A cancelled run stops but its agent stays `idle` and resumable. An owned running subagent without a job can be cancelled through `proc://<agentId>/kill`, which aborts and releases its session.
+   - Missing-`yield` recovery sends up to three internal reminder prompts to the child session.
 
 ## Limits & Caps
 
@@ -201,13 +201,13 @@ Artifacts and side channels:
 ## Errors
 
 - Shape/preflight failures return `isError: true`, explanatory text, and empty `results`:
-  - `schema` (never accepted)
-  - `tasks` / `context` while `task.batch` is disabled
-  - batch calls: missing/empty `tasks`, duplicate provided names, missing shared `context`, top-level `task` or `taskFile` alongside `tasks`
-  - any item or flat call: `taskFile` or missing `task` while `task.file` is off, empty inline task text, or both/neither task sources when file input is enabled
-  - task files: relative filesystem paths, invalid `local://` URLs, unreadable or non-regular files, files larger than 4 MiB, invalid UTF-8, or empty-after-trim contents
-  - invalid effort, unknown/settings-disabled agents, depth/spawn-policy denial, invalid caller output schemas, disabled isolation, or isolation/eval-tool controls in plan mode
-  - unknown eval tools, disabled eval sharing, or a name defined in both parent kernels
+   - `schema` (never accepted)
+   - `tasks` / `context` while `task.batch` is disabled
+   - batch calls: missing/empty `tasks`, duplicate provided names, missing shared `context`, top-level `task` or `taskFile` alongside `tasks`
+   - any item or flat call: `taskFile` or missing `task` while `task.file` is off, empty inline task text, or both/neither task sources when file input is enabled
+   - task files: relative filesystem paths, invalid `local://` URLs, unreadable or non-regular files, files larger than 4 MiB, invalid UTF-8, or empty-after-trim contents
+   - invalid effort, unknown/settings-disabled agents, depth/spawn-policy denial, invalid caller output schemas, disabled isolation, or isolation/eval-tool controls in plan mode
+   - unknown eval tools, disabled eval sharing, or a name defined in both parent kernels
 - Isolation preparation failures return `Isolated subagent execution could not be prepared: ...`. They distinguish missing Git repositories, pure Jujutsu workspaces without colocated Git, and oversized snapshots. Unavailable backends fall back through the PAL candidate list; other setup/capture failures preserve available output and recovery artifacts.
 - Job registration failure returns `Failed to start background task job(s): ...`; a batch that schedules only some jobs reports the failed ids in the immediate text and keeps the started ones running.
 - Child failures surface as `SingleResult.exitCode = 1` with `stderr`/`error` populated; the async job is marked failed but the delivery text still carries the output plus a follow-up/transcript hint.
