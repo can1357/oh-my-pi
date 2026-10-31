@@ -2,7 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { SessionEntry } from "@oh-my-pi/pi-agent-core/compaction";
+import { DEFAULT_SHAKE_CONFIG, type SessionEntry } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Context, Model } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -15,7 +15,7 @@ import {
 	ExtensionRunner,
 	testSetExtensionHandlerTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import type { ExtensionError } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type { ExtensionError, ExtensionShakeOptions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -486,5 +486,74 @@ describe("automatic fallback shake", () => {
 		expect(JSON.stringify(old)).toContain("artifact://");
 		await runner.emit(event);
 		expect(allocation).toHaveBeenCalledTimes(1);
+	});
+
+	it("supports ctx.shake(mode, options) with custom config, toolResultsOnly, and requireArtifact", async () => {
+		const heavyPayload = `heavy tool output\n${"alpha beta gamma delta epsilon\n".repeat(180)}`;
+		const protectedPayload = `protected tool output\n${"zeta eta theta iota kappa\n".repeat(180)}`;
+		manager.appendMessage({
+			role: "user",
+			content: `turn with fenced block\n\`\`\`text\n${heavyPayload}\`\`\``,
+			timestamp: 1,
+		});
+		manager.appendMessage({
+			role: "assistant",
+			api: primary.api,
+			provider: primary.provider,
+			model: primary.id,
+			content: [
+				{ type: "toolCall", id: "drop-call", name: "read", arguments: { path: "/fixture/drop" } },
+				{ type: "toolCall", id: "keep-call", name: "keep_tool", arguments: { path: "/fixture/keep" } },
+			],
+			usage,
+			stopReason: "toolUse",
+			timestamp: 2,
+		});
+		manager.appendMessage({
+			role: "toolResult",
+			toolCallId: "drop-call",
+			toolName: "read",
+			content: [{ type: "text", text: heavyPayload }],
+			isError: false,
+			timestamp: 3,
+		});
+		manager.appendMessage({
+			role: "toolResult",
+			toolCallId: "keep-call",
+			toolName: "keep_tool",
+			content: [{ type: "text", text: protectedPayload }],
+			isError: false,
+			timestamp: 4,
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		const options: ExtensionShakeOptions = {
+			config: {
+				...DEFAULT_SHAKE_CONFIG,
+				protectTokens: 0,
+				minSavings: 0,
+				protectedTools: ["keep_tool"],
+			},
+			toolResultsOnly: true,
+			requireArtifact: true,
+		};
+		const result = await runner.createContext().shake("elide", options);
+		expect(result.mode).toBe("elide");
+		expect(result.toolResultsDropped).toBe(1);
+		expect(result.blocksDropped).toBe(0);
+		expect(result.artifactId).toBeDefined();
+
+		const branchMessages = manager
+			.getBranch()
+			.filter((entry): entry is Extract<SessionEntry, { type: "message" }> => entry.type === "message")
+			.map(entry => entry.message);
+		const droppedResult = branchMessages.find(
+			message => message.role === "toolResult" && message.toolCallId === "drop-call",
+		);
+		const keptResult = branchMessages.find(
+			message => message.role === "toolResult" && message.toolCallId === "keep-call",
+		);
+		expect(droppedResult?.content).toEqual([{ type: "text", text: expect.stringContaining("artifact://") }]);
+		expect(keptResult?.content).toEqual([{ type: "text", text: protectedPayload }]);
 	});
 });

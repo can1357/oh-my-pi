@@ -37,7 +37,7 @@ import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
 import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { SessionManager } from "../../session/session-manager";
-import type { ShakeOptions } from "../../session/shake-types";
+import { normalizeExtensionShakeCall, type ShakeMode, type ShakeOptions } from "../../session/shake-types";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
@@ -286,9 +286,12 @@ function createHandlerContext(
 		configurable: true,
 	});
 	Object.defineProperty(scoped, "shake", {
-		value: (options?: ShakeOptions) => {
-			const signal = options?.signal ? AbortSignal.any([options.signal, handlerSignal]) : handlerSignal;
-			const task = ctx.shake({ ...options, signal });
+		value: (modeOrOptions?: ShakeMode | ShakeOptions, options?: ShakeOptions) => {
+			const normalized = normalizeExtensionShakeCall(modeOrOptions, options);
+			const signal = normalized.options.signal
+				? AbortSignal.any([normalized.options.signal, handlerSignal])
+				: handlerSignal;
+			const task = ctx.shake(normalized.mode, { ...normalized.options, signal });
 			// A timed-out handler must not leave a rewrite racing its continuation.
 			trackMaintenance?.(task);
 			void task.catch(() => {});
@@ -1500,7 +1503,8 @@ export class ExtensionRunner {
 			mode: this.#mode,
 			getContextUsage: () => this.#getContextUsageFn(),
 			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),
-			shake: options => this.#shakeFn(options),
+			shake: ((modeOrOptions?: ShakeMode | ShakeOptions, options?: ShakeOptions) =>
+				this.#shakeFn(modeOrOptions, options)) as ExtensionContext["shake"],
 			getAsyncJobSnapshot: () => this.#getAsyncJobSnapshotFn(),
 			hasUI: this.hasUI(),
 			cwd: this.cwd,

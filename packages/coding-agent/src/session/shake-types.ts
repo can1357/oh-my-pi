@@ -5,15 +5,40 @@
  * an import cycle through the slash-command registry).
  */
 
+import type { ShakeConfig } from "@oh-my-pi/pi-agent-core/compaction";
+
 /** Mode selector for `AgentSession.shake`. */
 export type ShakeMode = "elide" | "images" | "thinking";
 
 /** Options for artifact-backed elision through the extension context. */
 export interface ShakeOptions {
+	/** Custom shake configuration (thresholds, protected tools, etc.). */
+	config?: ShakeConfig;
 	/** Keep this many newest user-started exchanges intact, including their tool results. */
 	protectTurns?: number;
+	/** Elide only tool results (skip fenced/XML blocks in messages). */
+	toolResultsOnly?: boolean;
+	/** Require saving a recovery artifact before eliding; fails if persistence is unavailable. */
+	requireArtifact?: boolean;
 	/** Handler cancellation is composed with this signal before any history mutation. */
 	signal?: AbortSignal;
+}
+
+/** Options for extension-invoked `ctx.shake`. */
+export type ExtensionShakeOptions = ShakeOptions;
+
+/** Normalize `(options?)` and `(mode, options?)` call forms for `ctx.shake`. */
+export function normalizeExtensionShakeCall(
+	modeOrOptions?: ShakeMode | ShakeOptions,
+	options?: ShakeOptions,
+): { mode: ShakeMode; options: ShakeOptions } {
+	const mode: ShakeMode = typeof modeOrOptions === "string" ? modeOrOptions : "elide";
+	const rawOptions: ShakeOptions = (typeof modeOrOptions === "string" ? options : modeOrOptions) ?? {};
+	const requireArtifact = rawOptions.requireArtifact ?? (mode === "elide" ? true : undefined);
+	return {
+		mode,
+		options: requireArtifact === undefined ? { ...rawOptions } : { ...rawOptions, requireArtifact },
+	};
 }
 
 /** Outcome of an `AgentSession.shake` run. */

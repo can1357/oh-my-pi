@@ -11,6 +11,7 @@ import { getSessionSlashCommands } from "../extensibility/extensions/get-command
 import type { ExtensionError, ExtensionMode, ExtensionUIContext } from "../extensibility/extensions/types";
 import type { AgentSession } from "../session/agent-session";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
+import { normalizeExtensionShakeCall } from "../session/shake-types";
 
 /** Action name for an extension-originated send failure. */
 export type ExtensionSendAction = "extension_send" | "extension_send_user";
@@ -148,7 +149,10 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			getSystemPrompt: () => session.systemPrompt,
 			runEphemeralTurn: args => session.runEphemeralTurn(args),
 			compact: instructionsOrOptions => runExtensionCompact(session, instructionsOrOptions),
-			shake: options => session.shake("elide", { ...options, requireArtifact: true }),
+			shake: (modeOrOptions, options) => {
+				const normalized = normalizeExtensionShakeCall(modeOrOptions, options);
+				return session.shake(normalized.mode, normalized.options);
+			},
 		},
 		// ExtensionCommandContextActions — commands invokable via prompt("/command")
 		{

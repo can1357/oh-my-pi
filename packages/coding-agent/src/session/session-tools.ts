@@ -2378,6 +2378,7 @@ export class SessionTools {
     );
   }
   applyPromptHookToolSelection(hookMatches: readonly string[]): Promise<void> {
+    if (this.#toolRegistry.size === 0) return Promise.resolve();
     const deferredNames = new Set<string>();
     for (const [name, tool] of this.#toolRegistry) {
       if (isDeferredMCPTool(tool)) deferredNames.add(name);

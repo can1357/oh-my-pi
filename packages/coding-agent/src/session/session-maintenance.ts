@@ -111,7 +111,7 @@ import type { SessionContext } from "./session-context";
 import { buildSessionContext, getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
-import type { ShakeMode, ShakeResult } from "./shake-types";
+import type { ShakeMode, ShakeOptions, ShakeResult } from "./shake-types";
 import { resolveSpeculationLeadTokens, SPECULATION_LEAD_MIN_TOKENS } from "./speculation-lead";
 import experimentalContextNotesReminderPrompt from "../prompts/system/experimental-context-notes-reminder.md" with { type: "text" };
 import experimentalContextRolloverPrompt from "../prompts/system/experimental-context-rollover.md" with { type: "text" };
@@ -494,7 +494,7 @@ export interface SessionMaintenanceHost {
 		pendingMessages?: AgentMessage[];
 	}): ContextUsageBreakdown | undefined;
 	getContextUsage(options?: { contextWindow?: number }): ContextUsage | undefined;
-	shake(mode: ShakeMode, options?: { config?: ShakeConfig; signal?: AbortSignal }): Promise<ShakeResult>;
+	shake(mode: ShakeMode, options?: ShakeOptions): Promise<ShakeResult>;
 	dropImages(): Promise<{ removed: number; tokensFreed: number }>;
 	generateHandoffDocument(
 		customInstructions?: string,

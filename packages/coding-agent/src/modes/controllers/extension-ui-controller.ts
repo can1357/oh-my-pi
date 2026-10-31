@@ -27,6 +27,7 @@ import type {
 	TerminalInputHandler,
 } from "../../extensibility/extensions";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
+import { normalizeExtensionShakeCall } from "../../session/shake-types";
 import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import {
 	type AskDialogPrompt,
@@ -253,7 +254,10 @@ export class ExtensionUiController {
 			openPlanReview: () => this.ctx.openPlanReview({ fromExtension: true }),
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
-			shake: options => this.ctx.session.shake("elide", { ...options, requireArtifact: true }),
+			shake: (modeOrOptions, options) => {
+				const normalized = normalizeExtensionShakeCall(modeOrOptions, options);
+				return this.ctx.session.shake(normalized.mode, normalized.options);
+			},
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
 			runEphemeralTurn: args => this.ctx.session.runEphemeralTurn(args),
 		};
@@ -485,7 +489,10 @@ export class ExtensionUiController {
 			openPlanReview: () => this.ctx.openPlanReview({ fromExtension: true }),
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
-			shake: options => this.ctx.session.shake("elide", { ...options, requireArtifact: true }),
+			shake: (modeOrOptions, options) => {
+				const normalized = normalizeExtensionShakeCall(modeOrOptions, options);
+				return this.ctx.session.shake(normalized.mode, normalized.options);
+			},
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
 			runEphemeralTurn: args => this.ctx.session.runEphemeralTurn(args),
 		};

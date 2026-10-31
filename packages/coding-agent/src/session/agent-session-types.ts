@@ -117,7 +117,7 @@ export interface AsyncJobTree {
 	agents: { id: string; parentId?: string }[];
 }
 
-export type { ShakeMode, ShakeResult } from "./shake-types";
+export type { ExtensionShakeOptions, ShakeMode, ShakeOptions, ShakeResult } from "./shake-types";
 
 /**
  * Prewalk switches an active session one-way from its starting model to a

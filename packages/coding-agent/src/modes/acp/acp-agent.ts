@@ -55,6 +55,7 @@ import {
 } from "../../extensibility/extensions";
 import { runExtensionCompact } from "../../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
+import { normalizeExtensionShakeCall } from "../../session/shake-types";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { MCPManager } from "../../mcp/manager";
 import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
@@ -3018,7 +3019,10 @@ export class AcpAgent implements Agent {
 				getSystemPrompt: () => record.session.systemPrompt,
 				runEphemeralTurn: args => record.session.runEphemeralTurn(args),
 				compact: instructionsOrOptions => runExtensionCompact(record.session, instructionsOrOptions),
-				shake: options => record.session.shake("elide", { ...options, requireArtifact: true }),
+				shake: (modeOrOptions, options) => {
+					const normalized = normalizeExtensionShakeCall(modeOrOptions, options);
+					return record.session.shake(normalized.mode, normalized.options);
+				},
 			},
 			{
 				getContextUsage: () => record.session.getContextUsage(),

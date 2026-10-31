@@ -52,7 +52,6 @@ import {
   type CompactionPreparation,
   type CompactionResult,
   generateBranchSummary,
-  type ShakeConfig,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type {
   AnthropicFallbackCreditHandle,
@@ -465,7 +464,7 @@ import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./ses
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
 import { resolveOpenAIWebsocketPreference } from "./settings-stream-fn";
-import type { ShakeMode, ShakeResult } from "./shake-types";
+import { normalizeExtensionShakeCall, type ShakeMode, type ShakeOptions, type ShakeResult } from "./shake-types";
 import { collectSubSessions, type SubSession } from "./sub-sessions";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
@@ -6959,10 +6958,7 @@ export class AgentSession implements SettingsScope {
   }
 
   /** Reduce stored context with the selected shake strategy. */
-	shake(
-		mode: ShakeMode,
-		opts: { config?: ShakeConfig; signal?: AbortSignal; protectTurns?: number; requireArtifact?: boolean } = {},
-	): Promise<ShakeResult> {
+	shake(mode: ShakeMode, opts: ShakeOptions = {}): Promise<ShakeResult> {
 		if (opts.protectTurns === undefined) return this.#maintenance.shake(mode, opts);
 		const leaf = this.sessionManager.getLeafId();
 		const model = this.model;
@@ -6970,7 +6966,7 @@ export class AgentSession implements SettingsScope {
 			...opts,
 			isCurrent: () => this.sessionManager.getLeafId() === leaf && this.model === model,
 		});
-  }
+	}
 
   /** Compact the active session history. */
   compact(customInstructions?: string, options?: CompactOptions): Promise<CompactionResult> {
@@ -8739,7 +8735,10 @@ export class AgentSession implements SettingsScope {
           : undefined;
         await this.compact(instructions, options);
       },
-			shake: options => this.shake("elide", { ...options, requireArtifact: true }),
+			shake: ((modeOrOptions?: ShakeMode | ShakeOptions, options?: ShakeOptions) => {
+				const normalized = normalizeExtensionShakeCall(modeOrOptions, options);
+				return this.shake(normalized.mode, normalized.options);
+			}) as ExtensionCommandContext["shake"],
       switchSession: async sessionPath => {
         const success = await this.switchSession(sessionPath);
         return { cancelled: !success };
