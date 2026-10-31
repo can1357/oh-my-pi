@@ -10,6 +10,10 @@
 
 - `one-at-a-time` steering delivers the first queued unit holding a user-authored message ahead of agent-authored steering queued before it, and the oldest waiting agent unit goes next once `MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING` (4) user units have been delivered while an agent unit waited, so an agent unit with `k` agent units ahead of it is delivered within `5 × (k + 1)` boundaries; the mid-batch interrupt classifies that whole unit instead of the first queued message ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 
+### Fixed
+
+- Fixed OpenAI remote compaction (`/responses/compact`) replaying backend-only `internal_chat_message_metadata_passthrough` metadata that Codex rejects as an unknown parameter ([#17590](https://github.com/can1357/oh-my-pi/pull/17590) by [@briankeefe](https://github.com/briankeefe))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
