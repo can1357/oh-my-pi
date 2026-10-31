@@ -9,6 +9,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type CredentialBlocks, DEFAULT_BLOCK_MS } from "@oh-my-pi/pi-ai/auth/blocks";
+import { type AuthBrokerClient, RemoteAuthCredentialStore, type SnapshotResponse } from "@oh-my-pi/pi-ai/auth-broker";
 import { type AuthCredentialStore, AuthStorage, type StoredAuthCredential } from "@oh-my-pi/pi-ai/auth-storage";
 import type { UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -169,11 +170,10 @@ describe("credential block ceiling", () => {
 		}
 	});
 
-	it("releases a block an older version wrote for longer than seven days", async () => {
-		// Before the ceiling, the store's upsert kept any finite deadline. Such a
-		// row outlives an upgrade unless reads bound it by when it was written.
-		// The rows below are written with that older statement's columns and
-		// values (a far deadline, `updated_at` in epoch seconds), not by this code.
+	it("gives a block an older version wrote past the ceiling a fixed deadline a week out, once", async () => {
+		// Before the ceiling, the store's upsert kept any finite deadline. The
+		// rows below are written with that older statement's columns and values
+		// (a far deadline, `updated_at` in epoch seconds), not by this code.
 		const dir = TempDir.createSync("@pi-block-cap-legacy-");
 		const dbPath = `${dir.path()}/auth.db`;
 		const setup = await AuthStorage.create(dbPath);
@@ -185,42 +185,179 @@ describe("credential block ceiling", () => {
 		setup.close();
 
 		const now = Date.now();
-		const tenDaysAgoSec = Math.floor((now - 10 * DAY_MS) / 1000);
-		const oneDayAgoSec = Math.floor((now - DAY_MS) / 1000);
 		const legacy = new Database(dbPath);
 		try {
 			const insert = legacy.prepare(
 				"INSERT INTO auth_credential_blocks (credential_id, provider_key, block_scope, blocked_until_ms, updated_at) VALUES (?, ?, ?, ?, ?)",
 			);
-			insert.run(first.id, "cap-local:api_key", "", now + 400 * DAY_MS, tenDaysAgoSec);
-			insert.run(second.id, "cap-local:api_key", "", now + 400 * DAY_MS, oneDayAgoSec);
+			insert.run(first.id, "cap-local:api_key", "", now + 400 * DAY_MS, Math.floor((now - 10 * DAY_MS) / 1000));
+			// A write time a month ahead of this machine's clock (a clock corrected
+			// after the write) must not lengthen anything either.
+			insert.run(second.id, "cap-local:api_key", "", now + 400 * DAY_MS, Math.floor((now + 30 * DAY_MS) / 1000));
 		} finally {
 			legacy.close();
 		}
 
+		const clock = vi.spyOn(Date, "now").mockReturnValue(now);
 		const auth = await AuthStorage.create(dbPath);
 		try {
 			await auth.credentials.reload();
-			expect(auth.credentials.list("cap-local").map(credential => credential.id)).toEqual([first.id, second.id]);
-			vi.spyOn(Date, "now").mockReturnValue(now);
-			// `updated_at` holds whole seconds; the week runs from the end of that second.
-			const boundedSecond = (oneDayAgoSec + 1) * 1000 + WEEK_MS;
-			// Written ten days ago: past its week, so released.
 			const blocks = auth.blocks as CredentialBlocks;
+			const fixed = now + WEEK_MS;
+			for (const index of [0, 1]) expect(blocks.blockedUntil("cap-local", "cap-local:api_key", index)).toBe(fixed);
+			// Repaired on disk, so the deadline holds as time passes rather than
+			// restarting at every read.
+			clock.mockReturnValue(now + 3 * DAY_MS);
+			expect(auth.blocks.list([first.id, second.id]).map(block => block.blockedUntilMs)).toEqual([fixed, fixed]);
+			// A new short block does not restart it either.
+			blocks.mark("cap-local", "cap-local:api_key", 1, now + 3 * DAY_MS + 60_000);
+			expect(auth.blocks.list([second.id]).map(block => block.blockedUntilMs)).toEqual([fixed]);
+			// And a week after the upgrade the credential is back in rotation.
+			clock.mockReturnValue(fixed + 1);
 			expect(blocks.blockedUntil("cap-local", "cap-local:api_key", 0)).toBeUndefined();
-			// Written a day ago: blocked for the six days left of its week, not 400.
-			expect(blocks.blockedUntil("cap-local", "cap-local:api_key", 1)).toBe(boundedSecond);
-			expect(
-				auth.blocks.list([first.id, second.id]).map(block => [block.credentialId, block.blockedUntilMs]),
-			).toEqual([[second.id, boundedSecond]]);
-			// A new short block merges with the legacy row's bounded deadline: it
-			// must not restart that row's week from now.
-			blocks.mark("cap-local", "cap-local:api_key", 1, now + 60_000);
-			expect(auth.blocks.list([second.id]).map(block => block.blockedUntilMs)).toEqual([boundedSecond]);
+			expect(blocks.blockedUntil("cap-local", "cap-local:api_key", 1)).toBeUndefined();
 		} finally {
 			auth.close();
 			dir.removeSync();
 		}
 		// Two SQLite opens; each takes seconds on a loaded machine.
+	}, 30_000);
+
+	it("keeps a repaired Codex deadline fixed while a pre-meter binary writes the shared mirror", async () => {
+		// An older version blocked the Codex `chat` meter for a century. A
+		// pre-meter binary still writes the physical `shared` row, whose triggers
+		// copy deadlines onto the meter rows with a fresh `updated_at`.
+		const dir = TempDir.createSync("@pi-block-cap-codex-");
+		const dbPath = `${dir.path()}/auth.db`;
+		const setup = await AuthStorage.create(dbPath);
+		await setup.credentials.set("openai-codex", [{ type: "api_key", key: "codex" }]);
+		const [codex] = setup.credentials.list("openai-codex");
+		setup.close();
+		const now = Date.now();
+		const legacy = new Database(dbPath);
+		legacy
+			.prepare(
+				"INSERT INTO auth_credential_blocks (credential_id, provider_key, block_scope, blocked_until_ms, updated_at) VALUES (?, ?, ?, ?, ?)",
+			)
+			.run(codex.id, "openai-codex:oauth", "chat", now + 36_500 * DAY_MS, Math.floor((now - DAY_MS) / 1000));
+		legacy.close();
+
+		const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+		const auth = await AuthStorage.create(dbPath);
+		const preMeter = new Database(dbPath);
+		try {
+			const chat = () => auth.blocks.list([codex.id]).find(block => block.blockScope === "chat")?.blockedUntilMs;
+			const fixed = now + WEEK_MS;
+			expect(chat()).toBe(fixed);
+			for (const round of [1, 2, 3]) {
+				const at = now + round * DAY_MS;
+				clock.mockReturnValue(at);
+				preMeter
+					.prepare(
+						`INSERT INTO auth_credential_blocks (credential_id, provider_key, block_scope, blocked_until_ms, updated_at)
+						VALUES (?, ?, ?, ?, ?)
+						ON CONFLICT(credential_id, provider_key, block_scope) DO UPDATE SET
+							blocked_until_ms = MAX(blocked_until_ms, excluded.blocked_until_ms),
+							updated_at = excluded.updated_at`,
+					)
+					.run(codex.id, "openai-codex:oauth", "shared", at + 60_000, Math.floor(at / 1000));
+				expect({ round, chat: chat() }).toEqual({ round, chat: fixed });
+			}
+			const raw = preMeter.prepare("SELECT MAX(blocked_until_ms) AS longest FROM auth_credential_blocks").get() as {
+				longest: number;
+			};
+			expect(raw.longest).toBe(fixed);
+		} finally {
+			preMeter.close();
+			auth.close();
+			dir.removeSync();
+		}
+	}, 30_000);
+
+	it("bounds a broker snapshot's deadline an older broker wrote past the ceiling", async () => {
+		const now = Date.now();
+		const snapshot: SnapshotResponse = {
+			generation: 1,
+			generatedAt: now,
+			serverNowMs: now,
+			refresher: { enabled: false, intervalMs: 0, skewMs: 0, nextSweepInMs: 0 },
+			credentials: [
+				{
+					id: 1,
+					provider: "cap-remote",
+					credential: { type: "api_key", key: "fixture" },
+					identityKey: null,
+					rotatesInMs: null,
+					blocks: [
+						{
+							providerKey: "cap-remote:api_key",
+							blockScope: "",
+							blockedUntilMs: now + 400 * DAY_MS,
+							updatedAtMs: now,
+						},
+					],
+				},
+			],
+		};
+		// An older broker: it applies block writes as written, longest-wins on
+		// upsert, with no ceiling of its own. Background long-polls report
+		// "unchanged" so only `refreshSnapshot()` reads its state.
+		const broker = {
+			current: structuredClone(snapshot),
+			writes: [] as string[],
+			async fetchSnapshot(opts: { ifGenerationGt?: number } = {}) {
+				if (opts.ifGenerationGt !== undefined) return { status: 304, generation: broker.current.generation };
+				return { status: 200, snapshot: structuredClone(broker.current), generation: broker.current.generation };
+			},
+			async deleteCredentialBlock(_id: number, target: { providerKey: string; blockScope: string }) {
+				broker.writes.push(`DELETE ${target.blockScope}`);
+				const entry = broker.current.credentials[0]!;
+				entry.blocks = entry.blocks?.filter(
+					block => block.providerKey !== target.providerKey || block.blockScope !== target.blockScope,
+				);
+				broker.current.generation++;
+				return { deleted: 1 };
+			},
+			async upsertCredentialBlock(_id: number, block: { blockScope: string; blockedUntilMs: number }) {
+				broker.writes.push(`UPSERT ${block.blockedUntilMs - now}`);
+				const entry = broker.current.credentials[0]!;
+				const existing = entry.blocks?.find(candidate => candidate.blockScope === block.blockScope);
+				if (!existing) entry.blocks = [...(entry.blocks ?? []), { ...block, providerKey: "cap-remote:api_key" }];
+				else existing.blockedUntilMs = Math.max(existing.blockedUntilMs, block.blockedUntilMs);
+				broker.current.generation++;
+				return { ok: true };
+			},
+		};
+		const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+		const remote = new RemoteAuthCredentialStore({
+			client: broker as unknown as AuthBrokerClient,
+			initialSnapshot: structuredClone(snapshot),
+			streamSnapshots: false,
+			backgroundIdleMs: 0,
+		});
+		const auth = new AuthStorage(remote);
+		try {
+			await auth.credentials.reload();
+			const fixed = now + WEEK_MS;
+			expect(auth.blocks.list([1]).map(block => block.blockedUntilMs)).toEqual([fixed]);
+			expect(remote.getCredentialBlock(1, "cap-remote:api_key", "")).toBe(fixed);
+			// The cap reaches the broker as a delete, then the capped upsert: an
+			// upsert alone is longest-wins there and would keep the 400 days.
+			await remote.refreshSnapshot();
+			expect(broker.writes).toEqual(["DELETE ", `UPSERT ${WEEK_MS}`]);
+			expect(broker.current.credentials[0]!.blocks?.map(block => block.blockedUntilMs)).toEqual([fixed]);
+			// Fixed, not restarted, as time passes and a shorter block lands.
+			clock.mockReturnValue(now + DAY_MS);
+			auth.blocks.upsert({
+				credentialId: 1,
+				providerKey: "cap-remote:api_key",
+				blockScope: "",
+				blockedUntilMs: now + DAY_MS + 60_000,
+			});
+			await remote.refreshSnapshot();
+			expect(auth.blocks.list([1]).map(block => block.blockedUntilMs)).toEqual([fixed]);
+		} finally {
+			auth.close();
+		}
 	}, 30_000);
 });

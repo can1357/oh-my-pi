@@ -1,5 +1,10 @@
-import { describe, expect, it } from "bun:test";
-import { extractRetryHint, fetchWithRetry, isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils/fetch-retry";
+import { afterEach, describe, expect, it } from "bun:test";
+import {
+	extractRetryHint,
+	fetchWithRetry,
+	isUnexpectedSocketCloseMessage,
+	longestRetryHint,
+} from "@oh-my-pi/pi-utils/fetch-retry";
 
 /** Await a rejection and narrow it to `Error` without asserting a shape. */
 async function rejectionOf(promise: Promise<unknown>): Promise<Error> {
@@ -253,14 +258,29 @@ describe("extractRetryHint", () => {
 		);
 	});
 
-	it.each([
-		["space-separated UTC", "2099-09-01 09:44:51", Date.UTC(2099, 8, 1, 9, 44, 51)],
-		["ISO-separated UTC", "2099-09-01T09:44:51", Date.UTC(2099, 8, 1, 9, 44, 51)],
-		["explicit offset", "2099-09-01 09:44:51+08:00", Date.parse("2099-09-01T09:44:51+08:00")],
-	])("parses %s absolute reset timestamp", (_label, timestamp, targetMs) => {
-		const expected = targetMs - Date.now();
-		const hint = extractRetryHint(undefined, `Your limit will reset at ${timestamp}`);
+	it("parses an offset-bearing absolute reset timestamp", () => {
+		const expected = Date.parse("2099-09-01T09:44:51+08:00") - Date.now();
+		const hint = extractRetryHint(undefined, "Your limit will reset at 2099-09-01 09:44:51+08:00");
 		expect(hint).toBeDefined();
+		expect(Math.abs(hint! - expected)).toBeLessThan(100);
+	});
+
+	// A date with no zone in a body is the server's wall clock in a zone
+	// nothing names; read as UTC it once gave eight hours where the server's
+	// header said 750 ms. A wait that cannot be computed is no wait at all.
+	it.each([
+		["a space-separated reset stamp", "Your limit will reset at 2099-09-01 09:44:51"],
+		["an ISO-separated reset stamp", "Your limit will reset at 2099-09-01T09:44:51"],
+		["a Chinese reset stamp", "已达到使用上限。您的限额将在 2099-09-01 09:44:51 重置。"],
+		["a legacy retry-after ISO date", "rate limited; retry-after: 2099-09-01T09:44:51"],
+	])("reads no wait from %s with no zone and no provider offset", (_label, body) => {
+		expect(extractRetryHint(undefined, body)).toBeUndefined();
+		expect(longestRetryHint(undefined, body)).toBeUndefined();
+	});
+
+	it("reads a legacy retry-after date in a body in its stated zone", () => {
+		const expected = Date.parse("2099-09-01T09:44:51Z") - Date.now();
+		const hint = extractRetryHint(undefined, "rate limited; retry-after: 2099-09-01T09:44:51Z");
 		expect(Math.abs(hint! - expected)).toBeLessThan(100);
 	});
 
@@ -280,12 +300,10 @@ describe("extractRetryHint", () => {
 		expect(extractRetryHint(undefined, `Your limit will reset at ${naiveWall} retry-after-ms=5000`)).toBe(5000);
 	});
 
-	it("reads a naive Chinese reset stamp as UTC without a provider offset", () => {
-		const targetMs = Date.parse("2099-09-01T09:44:51Z");
-		const expected = targetMs - Date.now();
-		const hint = extractRetryHint(undefined, "已达到使用上限。您的限额将在 2099-09-01 09:44:51 重置。");
-		expect(hint).toBeDefined();
-		expect(Math.abs(hint! - expected)).toBeLessThan(100);
+	it("still reads the relative hint beside a zone-less stamp", () => {
+		expect(
+			extractRetryHint(undefined, "已达到使用上限。您的限额将在 2099-09-01 09:44:51 重置。 retry-after-ms=5000"),
+		).toBe(5000);
 	});
 
 	it("applies naiveResetTimezoneOffset to a naive Chinese reset stamp", () => {
@@ -332,5 +350,35 @@ describe("extractRetryHint", () => {
 	it("still returns undefined when only elapsed account resets are present", () => {
 		const past = new Date(Date.now() - 60_000).toISOString();
 		expect(extractRetryHint(undefined, `Your limit will reset at ${past}`)).toBeUndefined();
+	});
+
+	describe("a zone-less date in a Retry-After header", () => {
+		// An HTTP-date is GMT by definition (RFC 9110 §5.6.7), so a header date
+		// without a zone is read as GMT, never in this machine's zone.
+		const originalTz = process.env.TZ;
+		afterEach(() => {
+			process.env.TZ = originalTz;
+		});
+		it.each([
+			["an IMF-fixdate without GMT", "Tue, 01 Sep 2099 09:44:51"],
+			["an asctime date", "Tue Sep  1 09:44:51 2099"],
+			["an ISO date-time without a zone", "2099-09-01T09:44:51"],
+		])("reads %s as GMT", (_label, value) => {
+			process.env.TZ = "America/Los_Angeles";
+			const expected = Date.UTC(2099, 8, 1, 9, 44, 51) - Date.now();
+			for (const hint of [
+				extractRetryHint(new Headers({ "retry-after": value })),
+				longestRetryHint(new Headers({ "retry-after": value })),
+			]) {
+				expect(hint).toBeDefined();
+				expect(Math.abs(hint! - expected)).toBeLessThan(1000);
+			}
+		});
+		it("reads a zoned header date in its zone", () => {
+			process.env.TZ = "America/Los_Angeles";
+			const expected = Date.UTC(2099, 8, 1, 9, 44, 51) - Date.now();
+			const hint = extractRetryHint(new Headers({ "retry-after": "Tue, 01 Sep 2099 09:44:51 GMT" }));
+			expect(Math.abs(hint! - expected)).toBeLessThan(1000);
+		});
 	});
 });

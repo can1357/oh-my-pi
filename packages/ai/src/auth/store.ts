@@ -114,6 +114,14 @@ export interface CredentialBlockStore {
 	deleteCredentialBlocks(credentialId: number): void;
 	/** Prune rows with blocked_until_ms <= nowMs. */
 	cleanExpiredCredentialBlocks(nowMs: number): void;
+	/**
+	 * Lower every stored deadline later than `untilMs` to `untilMs`, rows no
+	 * reader is shown included (the legacy Codex `shared` mirror), so a block an
+	 * older version wrote past the ceiling gets a fixed deadline once, and no
+	 * trigger or merge can copy the old one back. Optional; `CredentialBlocks`
+	 * calls it when a read finds such a row.
+	 */
+	capCredentialBlocks?(untilMs: number): void;
 	/** List non-expired blocks for broker snapshots. */
 	listCredentialBlocks(credentialIds: readonly number[]): StoredCredentialBlock[];
 }

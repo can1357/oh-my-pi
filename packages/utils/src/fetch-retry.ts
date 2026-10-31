@@ -33,20 +33,45 @@ const RETRY_AFTER_BODY_PATTERN = /retry-after\s*[:=]\s*([^\s,;]+)/i;
 const RESET_MS_BODY_PATTERN = /x-ratelimit-reset-ms\s*[:=]\s*(\d+)/i;
 const RESET_BODY_PATTERN = /x-ratelimit-reset\s*[:=]\s*(\d+)/i;
 
-// A timezone-naive `reset at` stamp (no `Z`/offset) is the provider's
-// wall clock in an unknown zone: it cannot be converted to a delay without
-// guessing the zone, so it resolves only as a fallback when the body
-// carries no unambiguous relative signal.
+// A date with no zone means different things by where it came from. In a
+// `Retry-After` header it is an HTTP-date, which RFC 9110 §5.6.7 defines as
+// GMT, so it is read as GMT. In a message body nothing says which zone the
+// server rendered it in: read as UTC, `reset at 2026-11-01 01:40:17` once gave
+// eight hours where the server's own header said 750 ms. A wait that cannot be
+// computed is no wait, so a zone-less body date is rejected and the caller
+// falls back to its own backoff — unless the provider's catalog declares the
+// zone its stamps use (`naiveResetTimezoneOffset`), which makes it explicit.
 
-// A conflict probe needs no new signal: when a naive `reset at` wall stamp
-// disagrees with the merged relative wait, the merged wait (which already
-// ignores the naive stamp) sleeps first, and the retry after it is the
-// probe — success proves skew, a fresh 429 re-anchors with live timing.
+/** A zone at the end of a date: `GMT`, `UTC`, `UT`, `Z`, a numeric offset, or a US zone name. */
+const DATE_ZONE_PATTERN = /(?:\b(?:GMT|UTC|UT|[ECMP][SD]T)|Z|[+-]\d{2}:?\d{2})\s*$/i;
+/** An ISO-style date-time: `2099-09-01T09:44:51` or `2099-09-01 09:44:51`. */
+const ISO_DATE_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/;
+
+/**
+ * Epoch ms of `value` read as a date in its stated zone. A date with no zone
+ * is read as GMT when `zoneless` is `"gmt"` (an HTTP header's date) and is
+ * `undefined` when it is `"reject"` (a date out of a message body). Not
+ * `Date.parse` alone: that reads a zone-less date in this machine's zone.
+ */
+export function parseRetryDateMs(value: string, zoneless: "gmt" | "reject"): number | undefined {
+	const trimmed = value.trim();
+	let ms: number;
+	if (DATE_ZONE_PATTERN.test(trimmed)) ms = Date.parse(trimmed);
+	else if (zoneless === "reject") return undefined;
+	else ms = Date.parse(ISO_DATE_TIME_PATTERN.test(trimmed) ? `${trimmed.replace(" ", "T")}Z` : `${trimmed} GMT`);
+	return Number.isNaN(ms) ? undefined : ms;
+}
 
 /** Provider-specific interpretation for timezone-naive retry timestamps. */
 export interface RetryHintOptions {
-	/** UTC offset appended to an absolute reset stamp that omits its timezone. */
+	/** UTC offset of the provider's zone-less reset stamps; without one they give no wait. */
 	naiveResetTimezoneOffset?: string;
+	/**
+	 * Read no date out of the body (reset-at stamps, a `retry-after` date), only
+	 * relative waits and counters. For a caller that already has the response
+	 * header's wait: an explicit header outranks any date a body states.
+	 */
+	excludeDates?: boolean;
 }
 
 /**
@@ -65,9 +90,8 @@ export interface RetryHintOptions {
  *  - `"retryDelay": "34.074824224s"` (JSON error detail field)
  *  - `try again in 250ms` / `try again in 12s` / `try again in 5 min` / `try again in ~158 min`
  *  - `retry-after-ms=98497000` / `retry-after-ms: 7200000` / `retry-after-ms = 7200000`
- *  - `Your limit will reset at 2026-09-01 09:44:51` / `将在 2026-09-01 09:44:51 重置`
- *    (a provider offset makes a naive wall clock authoritative; otherwise it
- *    resolves only when no relative signal is present)
+ *  - `Your limit will reset at 2026-09-01 09:44:51+08:00` / `将在 2026-09-01 09:44:51 重置`
+ *    (with no zone, only in the provider's declared offset; otherwise no wait)
  *
  * Returns `undefined` if no signal is found, or `0` when the provider
  * explicitly asks for an immediate retry (`retry-after…=0`, or an absolute
@@ -89,8 +113,8 @@ export function extractRetryHint(
 		if (retryAfter) {
 			const seconds = Number(retryAfter);
 			if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
-			const parsedDate = Date.parse(retryAfter);
-			if (!Number.isNaN(parsedDate)) return Math.max(0, parsedDate - Date.now());
+			const parsedDate = parseRetryDateMs(retryAfter, "gmt");
+			if (parsedDate !== undefined) return Math.max(0, parsedDate - Date.now());
 		}
 		const rateLimitResetMs = headers.get("x-ratelimit-reset-ms");
 		if (rateLimitResetMs) {
@@ -162,8 +186,8 @@ function headerRetryHints(headers: Headers): number[] {
 	read("retry-after", value => {
 		const seconds = Number(value);
 		if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
-		const dateMs = Date.parse(value);
-		return Number.isNaN(dateMs) ? undefined : Math.max(0, dateMs - Date.now());
+		const dateMs = parseRetryDateMs(value, "gmt");
+		return dateMs === undefined ? undefined : Math.max(0, dateMs - Date.now());
 	});
 	read("x-ratelimit-reset-ms", value => resetCounterMs(Number(value), 1));
 	read("x-ratelimit-reset", value => resetCounterMs(Number(value), 1000));
@@ -223,14 +247,6 @@ function bodyRetryHint(
 	// provider told to retry immediately.
 	let retryNow = false;
 
-	// Timezone-naive `reset at` stamps (no `Z`/offset) are the provider's
-	// wall clock in an unknown zone — converting them to a delay requires
-	// guessing the zone. They resolve AFTER every unambiguous signal below,
-	// and only as a fallback when none was found.
-	let longestNaiveMs: number | undefined;
-	const considerNaive = (ms: number | undefined): void => {
-		if (ms !== undefined && ms > 0 && (longestNaiveMs === undefined || ms > longestNaiveMs)) longestNaiveMs = ms;
-	};
 	const consider = (ms: number | undefined): void => {
 		if (ms !== undefined && ms > 0 && (longestMs === undefined || ms > longestMs)) longestMs = ms;
 	};
@@ -252,18 +268,16 @@ function bodyRetryHint(
 	for (const pattern of RESET_AT_PATTERNS) {
 		for (const match of occurrences(pattern, body, everyOccurrence)) {
 			if (!match[1]) continue;
-			// Offset-bearing stamps are unambiguous and compete by longest-wins.
-			// A configured provider offset makes an otherwise naive wall clock
-			// unambiguous too. Without one, preserve the relative-signal-first
-			// fallback and interpret the wall clock as UTC only when it stands alone.
+			// A stamp in its own zone, or a zone-less one in the provider's
+			// declared offset, is explicit and competes by longest-wins. A
+			// zone-less stamp with no declared offset gives no wait (see
+			// `parseRetryDateMs`).
 			const normalized = match[1].replace(" ", "T");
 			const hasOffset = /(?:Z|[+-][0-9]{2}:?[0-9]{2})$/i.test(normalized);
 			const configuredOffset = options?.naiveResetTimezoneOffset;
-			const parsed = Date.parse(hasOffset ? normalized : `${normalized}${configuredOffset ?? "Z"}`);
-			if (!Number.isNaN(parsed) && parsed > Date.now()) {
-				if (hasOffset || configuredOffset !== undefined) consider(parsed - Date.now());
-				else considerNaive(parsed - Date.now());
-			}
+			if (options?.excludeDates || (!hasOffset && configuredOffset === undefined)) continue;
+			const parsed = Date.parse(hasOffset ? normalized : `${normalized}${configuredOffset}`);
+			if (!Number.isNaN(parsed) && parsed > Date.now()) consider(parsed - Date.now());
 		}
 	}
 	// OpenCode Go compound remainder ("Resets in 2hr 15min"): the generic
@@ -314,8 +328,8 @@ function bodyRetryHint(
 		if (Number.isFinite(seconds)) {
 			considerClamped(seconds * 1000);
 		} else {
-			const dateMs = Date.parse(value);
-			if (!Number.isNaN(dateMs)) considerClamped(dateMs - Date.now());
+			const dateMs = options?.excludeDates ? undefined : parseRetryDateMs(value, "reject");
+			if (dateMs !== undefined) considerClamped(dateMs - Date.now());
 		}
 	}
 
@@ -332,9 +346,9 @@ function bodyRetryHint(
 			considerClamped(resetSeconds > 1_000_000_000 ? resetSeconds * 1000 - Date.now() : resetSeconds * 1000);
 		}
 	}
-	// Elapsed naive stamps were ignored before this change and stay ignored:
-	// only an explicit zero/expired relative signal is authoritative retry-now.
-	return longestMs ?? longestNaiveMs ?? (retryNow ? 0 : undefined);
+	// An elapsed reset stamp is no signal: only an explicit zero or an elapsed
+	// relative counter is an authoritative retry-now.
+	return longestMs ?? (retryNow ? 0 : undefined);
 }
 
 function unitToMs(unit: string): number | undefined {

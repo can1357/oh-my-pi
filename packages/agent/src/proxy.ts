@@ -20,7 +20,7 @@ import {
 	type StreamingPartialJsonCarrier,
 	setStreamingPartialJson,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { getRetryAfterMsFromHeaders, isRetryWaitMs } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { getFailureRetryAfterMs, isRetryWaitMs } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { parseToolCallArguments } from "@oh-my-pi/pi-ai/utils/tool-call-arguments";
 import { parseStreamingJsonThrottled, readSseJson } from "@oh-my-pi/pi-utils";
 
@@ -134,8 +134,11 @@ export interface ProxyStreamOptions extends SimpleStreamOptions {
  * We reconstruct the partial message client-side.
  *
  * A failure's retry wait (`errorRetryAfterMs`) comes from the terminal `error`
- * frame's `errorRetryAfterMs`, or, when the proxy answers non-2xx, from that
- * response's own `retry-after-ms` / `Retry-After` / `x-ratelimit-reset*` headers.
+ * frame's `errorRetryAfterMs`; when the proxy answers non-2xx, from that
+ * response's own `retry-after-ms` / `Retry-After` / `x-ratelimit-reset*`
+ * headers; and when an accepted (2xx) stream is cut before a terminal frame,
+ * from that response's explicit wait only (`retry-after-ms` / `Retry-After`,
+ * never `x-ratelimit-reset*`), the rule every provider applies to its own cuts.
  *
  * Use this as the `streamFn` option when creating an Agent that needs to go through a proxy.
  *
@@ -175,8 +178,6 @@ export function streamProxy(model: Model, context: Context, options: ProxyStream
 		};
 
 		let response: Response | null = null;
-		// A non-2xx proxy response's own header retry wait, for the catch below.
-		let failedResponseRetryAfterMs: number | undefined;
 		// Declared outside try so the disconnect path (catch) can finalize
 		// still-buffered tool-call arguments before emitting the error event.
 		const partialJsonByIndex = new Map<number, string>();
@@ -225,7 +226,7 @@ export function streamProxy(model: Model, context: Context, options: ProxyStream
 				} catch {
 					// Couldn't parse error response
 				}
-				failedResponseRetryAfterMs = getRetryAfterMsFromHeaders(response.headers);
+				// The catch below reads this refusal's own headers.
 				throw new Error(errorMessage);
 			}
 
@@ -257,7 +258,17 @@ export function streamProxy(model: Model, context: Context, options: ProxyStream
 			const reason = options.signal?.aborted ? "aborted" : "error";
 			partial.stopReason = reason;
 			partial.errorMessage = errorMessage;
-			if (failedResponseRetryAfterMs !== undefined) partial.errorRetryAfterMs = failedResponseRetryAfterMs;
+			// A refusal's headers name its wait in full; an accepted stream's only
+			// the explicit instructions (see `getFailureRetryAfterMs`).
+			const retryAfterMs = getFailureRetryAfterMs(
+				error,
+				response === null
+					? {}
+					: response.ok
+						? { streamResponseHeaders: response.headers }
+						: { errorResponseHeaders: response.headers },
+			);
+			if (retryAfterMs !== undefined) partial.errorRetryAfterMs = retryAfterMs;
 			// Disconnect/abort path: no terminal event ran, so trailing
 			// throttled deltas never reached content.arguments. Finalize
 			// them here so the persisted/retried transcript is complete.

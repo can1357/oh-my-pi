@@ -1,5 +1,5 @@
 import { retryResetTimezoneOffsetFor } from "@oh-my-pi/pi-catalog/compat/behavior";
-import { extractRetryHint, longestRetryHint } from "@oh-my-pi/pi-utils";
+import { extractRetryHint, longestRetryHint, parseRetryDateMs } from "@oh-my-pi/pi-utils";
 
 export type HeadersLike = Headers | Record<string, string | undefined> | undefined | null;
 
@@ -34,11 +34,13 @@ export function extractProviderRetryHint(
 /**
  * The wait a failure names, for every caller that keeps a route or a credential
  * closed for it — a credential block, a usage-limit mark, a one-shot retry, the
- * session's retry delay: the longer of the response headers' wait, passed in
- * structured (`AssistantMessage.errorRetryAfterMs`, or a thrown error's headers
- * through {@link getRetryAfterMsFromHeaders}), and the first wait the message's
- * text names ({@link extractProviderRetryHint}). The header's wait is taken from
- * the response object, so no text can stand in for it; a body that ends in
+ * session's retry delay. The response headers' wait, passed in structured
+ * (`AssistantMessage.errorRetryAfterMs`, or a thrown error's headers through
+ * {@link getRetryAfterMsFromHeaders}), outranks any date the message's text
+ * states: beside it, only the text's relative waits count, and the longer of
+ * the two wins. Without a header wait, the first wait the text names
+ * ({@link extractProviderRetryHint}). The header's wait is taken from the
+ * response object, so no text can stand in for it; a body that ends in
  * `retry-after-ms=<n>` is read like any other body.
  */
 export function providerRetryWaitMs(
@@ -46,8 +48,8 @@ export function providerRetryWaitMs(
 	message: string | undefined,
 	headerRetryAfterMs: number | undefined,
 ): number | undefined {
-	const text = extractProviderRetryHint(provider, message);
-	if (headerRetryAfterMs === undefined) return text;
+	if (headerRetryAfterMs === undefined) return extractProviderRetryHint(provider, message);
+	const text = extractRetryHint(undefined, message, { ...hintOptions(provider), excludeDates: true });
 	return text === undefined ? headerRetryAfterMs : Math.max(text, headerRetryAfterMs);
 }
 
@@ -109,7 +111,18 @@ export function isRetryWaitMs(value: unknown): value is number {
  * never stands in for it. `undefined` unless {@link isRetryWaitMs}.
  */
 export function retryWaitHeaders(retryAfterMs: number | undefined): Headers | undefined {
-	return isRetryWaitMs(retryAfterMs) ? new Headers({ "retry-after-ms": String(retryAfterMs) }) : undefined;
+	return isRetryWaitMs(retryAfterMs)
+		? new Headers({ "retry-after-ms": retryWaitHeaderValue(retryAfterMs) })
+		: undefined;
+}
+
+/**
+ * `ms` as an HTTP header integer: rounded up, and at most
+ * `Number.MAX_SAFE_INTEGER` so it never prints in exponent form (`1e+300`),
+ * which no header reader takes as a number.
+ */
+export function retryWaitHeaderValue(ms: number): string {
+	return String(Math.min(Math.ceil(ms), Number.MAX_SAFE_INTEGER));
 }
 
 /** The response headers a failed attempt can read its wait from; see {@link getFailureRetryAfterMs}. */
@@ -129,11 +142,11 @@ export interface FailureResponseHeaders {
  * provider's pre-output retry loop checks it against `maxRetryDelayMs`, so the
  * layer that retries and the layers that read the failed message see one wait.
  *
- * Headers that refused the request come first: the captured non-2xx
- * response's, else the error's own ({@link getHeadersFromError}, which include
- * the structured headers a protocol error event carries, as Codex's do). When
- * they name a wait it wins, a window reset included: on a refusal,
- * `x-ratelimit-reset` says when this request can succeed.
+ * Headers that refused the request come first, each set read for its own wait
+ * ({@link getRetryAfterMsFromHeaders}): the captured non-2xx response's, then
+ * the error's own ({@link getHeadersFromError}, which include the structured
+ * headers a protocol error event carries, as Codex's do). A set that names no
+ * wait never hides one the next set names.
  *
  * Otherwise the accepted response's headers, and from those only explicit wait
  * instructions: `retry-after-ms` and `Retry-After`. Never
@@ -145,7 +158,8 @@ export interface FailureResponseHeaders {
  */
 export function getFailureRetryAfterMs(error: unknown, headers: FailureResponseHeaders = {}): number | undefined {
 	return (
-		getRetryAfterMsFromHeaders(headers.errorResponseHeaders ?? getHeadersFromError(error)) ??
+		getRetryAfterMsFromHeaders(headers.errorResponseHeaders) ??
+		getRetryAfterMsFromHeaders(getHeadersFromError(error)) ??
 		getExplicitRetryAfterMsFromHeaders(headers.streamResponseHeaders)
 	);
 }
@@ -174,7 +188,7 @@ export function transportRetryBounds(
 	defaultMaxDelayMs: number,
 ): TransportRetryBounds {
 	const maxDelayMs =
-		maxRetryDelayMs === undefined
+		maxRetryDelayMs === undefined || Number.isNaN(maxRetryDelayMs)
 			? defaultMaxDelayMs
 			: maxRetryDelayMs > 0
 				? maxRetryDelayMs
@@ -188,12 +202,22 @@ export function transportRetryBounds(
 	};
 }
 
+/**
+ * The wait a response's headers state. `retry-after-ms` and `Retry-After` are
+ * the server telling the client how long to wait, and when either is present
+ * it is the answer. `x-ratelimit-reset[-ms]` says when a rate window ends — a
+ * bound on when capacity returns, not an instruction — and is read only when
+ * no explicit wait is stated: a "retry in 1 second" beside a window that ends
+ * in an hour is one second.
+ */
 export function getRetryAfterMsFromHeaders(headers: HeadersLike): number | undefined {
 	if (!headers) return undefined;
-	return longestWait(
-		getExplicitRetryAfterMsFromHeaders(headers),
-		parseResetHeader(getHeaderValue(headers, "x-ratelimit-reset-ms"), "ms"),
-		parseResetHeader(getHeaderValue(headers, "x-ratelimit-reset"), "s"),
+	return (
+		getExplicitRetryAfterMsFromHeaders(headers) ??
+		longestWait(
+			parseResetHeader(getHeaderValue(headers, "x-ratelimit-reset-ms"), "ms"),
+			parseResetHeader(getHeaderValue(headers, "x-ratelimit-reset"), "s"),
+		)
 	);
 }
 
@@ -264,8 +288,9 @@ function parseRetryAfterHeader(value: string | undefined): number | undefined {
 		return Math.ceil(numeric * 1000);
 	}
 
-	const dateMs = Date.parse(trimmed);
-	if (!Number.isNaN(dateMs)) {
+	// An HTTP-date is GMT by definition; a zone-less one is read as GMT, not in this machine's zone.
+	const dateMs = parseRetryDateMs(trimmed, "gmt");
+	if (dateMs !== undefined) {
 		const delay = dateMs - Date.now();
 		return delay > 0 ? Math.ceil(delay) : undefined;
 	}

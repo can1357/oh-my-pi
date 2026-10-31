@@ -160,6 +160,10 @@ export class CredentialBlocks implements BlocksApi {
 		this.#deps = deps;
 		try {
 			this.#deps.store.cleanExpiredCredentialBlocks?.(Date.now());
+			// A block an older version wrote past the ceiling, including rows no
+			// read returns (the legacy Codex `shared` mirror), gets a fixed deadline
+			// now, before a mirror trigger can copy the old one back.
+			this.#deps.store.capCredentialBlocks?.(Date.now() + MAX_HINTED_BLOCK_MS);
 		} catch (err) {
 			// Best-effort, but init-time corruption must latch the block store
 			// immediately so the first evaluation doesn't re-query a broken DB.
@@ -194,9 +198,11 @@ export class CredentialBlocks implements BlocksApi {
 			const providerKey = separator < 0 ? backoffKey : backoffKey.slice(0, separator);
 			const scope = separator < 0 ? "" : backoffKey.slice(separator + 1);
 			try {
-				const persisted = persistedScopes
-					? persistedScopes.get(scope)
-					: this.#deps.store.getCredentialBlock?.(credentialId, providerKey, scope);
+				const persisted = this.#withinCeiling(
+					persistedScopes
+						? persistedScopes.get(scope)
+						: this.#deps.store.getCredentialBlock?.(credentialId, providerKey, scope),
+				);
 				if (persisted === undefined || persisted < block.until) {
 					this.#deleteCredentialBackoff(backoffKey, credentialId);
 					return undefined;
@@ -219,18 +225,47 @@ export class CredentialBlocks implements BlocksApi {
 		if (backoffMap?.size === 0) this.#credentialBackoff.delete(backoffKey);
 	}
 
+	/**
+	 * A persisted deadline as every reader gets it: no later than
+	 * {@link MAX_HINTED_BLOCK_MS} from now. Every persisted read passes through
+	 * here, whatever store sits behind it (local SQLite, a broker snapshot, a
+	 * cached snapshot an older broker wrote). A later deadline was written with no
+	 * ceiling, by an older version or a relay; the store is repaired once
+	 * ({@link CredentialBlockStore.capCredentialBlocks}) so the row then holds a
+	 * fixed deadline that expires, rather than one a fresh write time or a mirror
+	 * trigger could push back out again.
+	 */
+	#withinCeiling(value: number | undefined): number | undefined {
+		if (value === undefined) return undefined;
+		const ceiling = Date.now() + MAX_HINTED_BLOCK_MS;
+		if (value <= ceiling) return value;
+		this.#capStoredBlocks(ceiling);
+		return ceiling;
+	}
+
+	/** Lower every stored deadline past `ceiling` to it; see {@link #withinCeiling}. */
+	#capStoredBlocks(ceiling: number): void {
+		if (this.#deps.health.damaged) return;
+		try {
+			this.#deps.store.capCredentialBlocks?.(ceiling);
+		} catch (err) {
+			if (this.#deps.health.handle(err)) return;
+			logger.debug("Failed to cap overlong credential blocks in the persistent store", { err });
+		}
+	}
+
 	#readPersistedCredentialBlock(
 		credentialId: number,
 		providerKey: string,
 		blockScope: string | undefined,
 		persistedScopes: PersistedBlockScopes = undefined,
 	): number | undefined {
-		if (persistedScopes !== undefined) return persistedScopes?.get(blockScope ?? "");
+		if (persistedScopes !== undefined) return this.#withinCeiling(persistedScopes?.get(blockScope ?? ""));
 		if (this.#deps.health.damaged) return undefined;
 		const getCredentialBlock = this.#deps.store.getCredentialBlock?.bind(this.#deps.store);
 		if (!getCredentialBlock) return undefined;
 		try {
-			return getCredentialBlock(credentialId, providerKey, blockScope ?? "");
+			return this.#withinCeiling(getCredentialBlock(credentialId, providerKey, blockScope ?? ""));
 		} catch (err) {
 			if (this.#deps.health.handle(err)) return undefined;
 			logger.debug("Failed to read credential block from persistent store", {
@@ -249,7 +284,11 @@ export class CredentialBlocks implements BlocksApi {
 		if (!store.getCredentialBlockScopes) return undefined;
 		if (this.#deps.health.damaged) return null;
 		try {
-			return store.getCredentialBlockScopes(credentialId, providerKey);
+			const scopes = store.getCredentialBlockScopes(credentialId, providerKey);
+			const ceiling = Date.now() + MAX_HINTED_BLOCK_MS;
+			if (![...scopes.values()].some(until => until > ceiling)) return scopes;
+			this.#capStoredBlocks(ceiling);
+			return new Map([...scopes].map(([scope, until]) => [scope, Math.min(until, ceiling)]));
 		} catch (err) {
 			if (this.#deps.health.handle(err)) return null;
 			logger.debug("Failed to read credential blocks from persistent store", { err, credentialId, providerKey });
@@ -664,7 +703,11 @@ export class CredentialBlocks implements BlocksApi {
 		const listCredentialBlocks = this.#deps.store.listCredentialBlocks?.bind(this.#deps.store);
 		if (!listCredentialBlocks) return [];
 		try {
-			return listCredentialBlocks(credentialIds);
+			const blocks = listCredentialBlocks(credentialIds);
+			const ceiling = Date.now() + MAX_HINTED_BLOCK_MS;
+			if (!blocks.some(block => block.blockedUntilMs > ceiling)) return blocks;
+			this.#capStoredBlocks(ceiling);
+			return blocks.map(block => ({ ...block, blockedUntilMs: Math.min(block.blockedUntilMs, ceiling) }));
 		} catch (err) {
 			if (this.#deps.health.handle(err)) return [];
 			throw err;

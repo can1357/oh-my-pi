@@ -89,6 +89,7 @@ import {
 	kStreamingPartialJson,
 } from "../utils/block-symbols";
 import { hasVisibleAssistantContent } from "../utils/empty-completion-retry";
+import { withErrorEventHeaders } from "../utils/error-event-headers";
 import type { AssistantMessageEventStream } from "../utils/event-stream";
 import {
 	escapeHarmonyControlTokens,
@@ -3896,8 +3897,10 @@ export async function processResponsesStream<TApi extends Api>(
 				// (body-error.ts). The whole envelope goes to the probe so a status or
 				// code carried beside `error` is visible, not only the inner object.
 				// Non-retryable failures keep their existing message.
+				// A relay that already committed its 200 (the omp auth gateway) states
+				// the upstream's retry wait as the error object's structured `headers`.
 				const inBand = details ? undefined : AIError.createInBandProviderError({ ...response, error });
-				if (inBand) throw inBand;
+				if (inBand) throw withErrorEventHeaders(inBand, error);
 				const message = error
 					? `${error.code || "unknown"}: ${error.message || "no message"}`
 					: details?.reason
@@ -3905,7 +3908,10 @@ export async function processResponsesStream<TApi extends Api>(
 						: typeof statusDetailsReason === "string" && statusDetailsReason.length > 0
 							? `status_details: ${statusDetailsReason}`
 							: "Unknown error (no error details in response)";
-				throw new AIError.ProviderResponseError(message, { provider: model.provider, kind: "output" });
+				throw withErrorEventHeaders(
+					new AIError.ProviderResponseError(message, { provider: model.provider, kind: "output" }),
+					error,
+				);
 			}
 			if (response?.status === "incomplete" && response.incomplete_details?.reason === "content_filter") {
 				// A content-filtered turn is a failure, not a token-cap truncation —
@@ -3945,25 +3951,31 @@ export async function processResponsesStream<TApi extends Api>(
 			// event-level status/code fields count too. Other codes keep the existing
 			// `Error Code <code>: <message>` message that error tests pin on.
 			const inBand = AIError.createInBandProviderError(event);
-			if (inBand) throw inBand;
+			if (inBand) throw withErrorEventHeaders(inBand, err);
 			const code = err.code ?? "unknown";
 			const message = err.message ?? "no message";
-			throw new AIError.ProviderResponseError(`Error Code ${code}: ${message}`, {
-				provider: model.provider,
-				kind: "output",
-			});
+			throw withErrorEventHeaders(
+				new AIError.ProviderResponseError(`Error Code ${code}: ${message}`, {
+					provider: model.provider,
+					kind: "output",
+				}),
+				err,
+			);
 		} else if (event.type === "response.failed") {
 			populateResponsesUsageFromResponse(output, event.response?.usage);
 			const error = event.response?.error ?? (event.response as any)?.status_details?.error;
 			const details = event.response?.incomplete_details;
 			const inBand = details ? undefined : AIError.createInBandProviderError({ ...event.response, error });
-			if (inBand) throw inBand;
+			if (inBand) throw withErrorEventHeaders(inBand, error);
 			const message = error
 				? `${error.code || "unknown"}: ${error.message || "no message"}`
 				: details?.reason
 					? `incomplete: ${details.reason}`
 					: "Unknown error (no error details in response)";
-			throw new AIError.ProviderResponseError(message, { provider: model.provider, kind: "output" });
+			throw withErrorEventHeaders(
+				new AIError.ProviderResponseError(message, { provider: model.provider, kind: "output" }),
+				error,
+			);
 		}
 	}
 }

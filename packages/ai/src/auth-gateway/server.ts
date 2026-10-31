@@ -300,11 +300,14 @@ function clientClosedResponse(route: { module: FormatModule }): Response {
  * Longest a streamed chat-format response withholds its status line while the
  * upstream has not yet accepted the request. Within it, an upstream failure
  * before acceptance is answered as an HTTP error that carries the upstream's
- * retry wait as headers, which streaming clients read and in-band error text
- * cannot give them. Past it the gateway commits its `200` and streams: a
+ * retry wait as real headers (`retry-after-ms`, `Retry-After`), which every
+ * streaming client reads. Past it the gateway commits its `200` and streams: a
  * provider that never reports its response (`onResponse`) and thinks long must
  * still get headers and keepalives on the wire well before Bun's, proxies' and
- * clients' silence timeouts cut the connection (#17363).
+ * clients' silence timeouts cut the connection (#17363). A failure after the
+ * commit states the wait in band instead, as the error object's structured
+ * `headers` member (`inBandErrorHeaders`), which omp's own clients read; a
+ * client that reads only real headers gets no wait from it.
  */
 export const STREAM_ACCEPT_HOLD_MAX_MS = 10_000;
 
@@ -318,8 +321,10 @@ type HeldTurn =
  * Read `events` until the upstream accepted the request — `accepted` settles
  * (an upstream 2xx response), an event other than `start` arrives, `signal`
  * aborts, or {@link STREAM_ACCEPT_HOLD_MAX_MS} passes — so that a failure
- * before then can still become an HTTP error. An open turn replays every event
- * read so far, then the rest, through a fresh stream.
+ * before then can still become an HTTP error with real retry headers; a later
+ * one reaches the client through the format encoder's in-band error and its
+ * `headers` member. An open turn replays every event read so far, then the
+ * rest, through a fresh stream.
  */
 async function holdUntilUpstreamAccepts(
 	events: AssistantMessageEventStream,

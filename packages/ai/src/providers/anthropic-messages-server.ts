@@ -1,7 +1,12 @@
 import { type } from "@oh-my-pi/omptype";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { logger } from "@oh-my-pi/pi-utils";
-import { captureRequestHeaders, resolvePromptCacheKey } from "../auth-gateway/http";
+import {
+	captureRequestHeaders,
+	inBandErrorHeaders,
+	resolvePromptCacheKey,
+	thrownRetryAfterMs,
+} from "../auth-gateway/http";
 import * as AIError from "../error";
 import type {
 	AnthropicMessagePayload,
@@ -970,7 +975,14 @@ export function encodeStream(
 						case "error": {
 							const msg = ev.error.errorMessage ?? "stream error";
 							controller.enqueue(
-								sseFrame("error", { type: "error", error: { type: "api_error", message: msg } }),
+								sseFrame("error", {
+									type: "error",
+									error: {
+										type: "api_error",
+										message: msg,
+										headers: inBandErrorHeaders(ev.error.errorRetryAfterMs),
+									},
+								}),
 							);
 							controller.close();
 							return;
@@ -996,7 +1008,11 @@ export function encodeStream(
 					controller.enqueue(
 						sseFrame("error", {
 							type: "error",
-							error: { type: "api_error", message: err instanceof Error ? err.message : String(err) },
+							error: {
+								type: "api_error",
+								message: err instanceof Error ? err.message : String(err),
+								headers: inBandErrorHeaders(thrownRetryAfterMs(err)),
+							},
 						}),
 					);
 					controller.close();

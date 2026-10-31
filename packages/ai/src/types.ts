@@ -1341,18 +1341,24 @@ export interface AssistantMessage {
 	 * the attempt's own response headers, never parsed from text
 	 * (`getFailureRetryAfterMs`): a refusing (non-2xx) response's headers or the
 	 * error's own (`retry-after-ms`, `Retry-After`, `x-ratelimit-reset[-ms]`),
-	 * including the structured `headers` the Codex protocol carries in its error
-	 * event, nested error or `response.failed` error, which win over the HTTP
-	 * response's; else the headers of the accepted (2xx) response whose body the
-	 * failure arrived in — an in-band error or a stream cut — where only the
-	 * explicit `retry-after-ms` and `Retry-After` count. A free-form message or
-	 * an arbitrary property on an Error never sets it, so a body cannot forge
-	 * it, however it is worded. A relay (the proxy transport, the pi-native
-	 * gateway) can state any value here; `markReached` caps the block it sets at
-	 * `MAX_HINTED_BLOCK_MS`. Consumers that keep a route or credential closed
-	 * take the longer of this and the first wait the message text names
-	 * (`providerRetryWaitMs`). The text may also show it, for the reader; no
-	 * consumer trusts the text for it.
+	 * including the structured `headers` member an in-band error object carries,
+	 * which wins over the HTTP response's. Four wire families read that member:
+	 * Codex (its error event, nested error or `response.failed` error), Anthropic
+	 * Messages (the `error` event's `error`), OpenAI Chat Completions (an `error`
+	 * chunk's `error`) and OpenAI Responses (the `error` event, or the
+	 * `response.failed` / failed terminal response's `error`). The omp auth
+	 * gateway writes it there as `{ "retry-after-ms": "<integer>" }` when its
+	 * upstream fails after it committed its `200`. Else the headers of the
+	 * accepted (2xx) response whose body the failure arrived in — an in-band
+	 * error or a stream cut — where only the explicit `retry-after-ms` and
+	 * `Retry-After` count. A free-form message or an arbitrary property on an
+	 * Error never sets it, so a body's text cannot forge it, however it is
+	 * worded. A relay (the proxy transport, the pi-native gateway, a chat-format
+	 * gateway route's in-band `headers`) can state any value here; `markReached`
+	 * caps the block it sets at `MAX_HINTED_BLOCK_MS`. Consumers that keep a
+	 * route or credential closed take the longer of this and the first wait the
+	 * message text names (`providerRetryWaitMs`). The text may also show it, for
+	 * the reader; no consumer trusts the text for it.
 	 */
 	errorRetryAfterMs?: number;
 	/**

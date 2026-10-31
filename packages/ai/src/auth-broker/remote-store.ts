@@ -900,6 +900,35 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		}
 	}
 
+	capCredentialBlocks(untilMs: number): void {
+		for (const entry of this.#snapshot.credentials) {
+			for (const block of entry.blocks ?? []) {
+				if (block.blockedUntilMs <= untilMs) continue;
+				// Upserts are longest-wins on both sides, so a shorter deadline
+				// only lands on an empty key: replace the row in the snapshot now,
+				// and on the broker delete before re-adding, in that order.
+				const capped = { ...block, blockedUntilMs: untilMs };
+				const key = blockKey(entry.id, block);
+				Object.assign(block, capped);
+				this.#pendingCredentialBlocks.set(key, capped);
+				this.#credentialBlockReconcileAfter.delete(key);
+				const target = { providerKey: block.providerKey, blockScope: block.blockScope };
+				void this.#client
+					.deleteCredentialBlock(entry.id, target)
+					.then(() => this.#client.upsertCredentialBlock(entry.id, capped))
+					.then(() => this.#maybeRefreshSnapshot("credential block cap"))
+					.catch(error => {
+						logger.warn("auth-broker credential block cap propagation failed", {
+							id: entry.id,
+							...target,
+							error: String(error),
+						});
+					});
+			}
+		}
+		this.#invalidateUsageCache();
+	}
+
 	/**
 	 * In-memory update from a successful refresh through the broker. AuthStorage
 	 * calls this after `#replaceCredentialAt`; the broker already persisted the

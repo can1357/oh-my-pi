@@ -690,7 +690,14 @@ function fieldKeyWords(key: string): string[] {
 		.filter(word => word !== "");
 }
 /** Key words that state why: the field is a reason whatever its value. */
-const CAUSE_KEY_WORDS: Record<string, true> = { reason: true, cause: true, why: true, signal: true, policy: true };
+const CAUSE_KEY_WORDS: Record<string, true> = {
+	reason: true,
+	cause: true,
+	why: true,
+	signal: true,
+	policy: true,
+	termination: true,
+};
 /** What an exit reports: `exit_code`, `exitStatus`, `exit_signal` state why a process ended. */
 const EXIT_KEY_WORDS: Record<string, true> = { code: true, status: true, signal: true };
 /** Key words that name where: the field is metadata whatever its value. */
@@ -712,17 +719,22 @@ const LOCATION_KEY_WORDS: Record<string, true> = {
 	socket: true,
 };
 /**
- * Whether a field's key states why — `reason`, `cause`, `why`, `signal`,
- * `policy`, or an exit's code, status or signal (`exit_code`, `exitSignal`).
- * The key decides, not the value: `signal=9` and `reason=policy_v2` are
- * reasons although their values carry a digit, so neither is metadata and
- * neither number is stripped as one.
+ * Whether a field's key states why: any word of it is `reason`, `cause`,
+ * `why`, `signal`, `policy` or `termination`, or it names an exit's code,
+ * status or signal (`exit_code`, `exitSignal`). The key's shape decides, in any
+ * separator style and position: `reason_code`, `reason.code`,
+ * `terminationReasonCode`, `cause_code`, `signal_number` all state a reason.
+ * The value never decides: `signal=9` and `reason=policy_v2` are reasons
+ * although their values carry a digit, so neither is metadata and neither
+ * number is stripped as one.
  */
 function isCauseFieldKey(key: string): boolean {
 	const words = fieldKeyWords(key);
-	const last = words.at(-1);
-	if (last === undefined) return false;
-	return CAUSE_KEY_WORDS[last] === true || (EXIT_KEY_WORDS[last] === true && words.at(-2) === "exit");
+	return words.some(
+		(word, index) =>
+			CAUSE_KEY_WORDS[word] === true ||
+			(word === "exit" && words.slice(index + 1).some(next => EXIT_KEY_WORDS[next] === true)),
+	);
 }
 /**
  * Whether a field's key names where: a host or an address (`host`,
@@ -745,6 +757,21 @@ const HOST_PATTERN =
 	/\[[\dA-Fa-f:.]*:[\dA-Fa-f:.]*(?:%[\w.-]+)?\]|(?<![\w:])(?:[\dA-Fa-f]{0,4}:){2,7}[\dA-Fa-f]{0,4}(?:%[\w.-]+)?(?![\w:])|\b\d{1,3}(?:\.\d{1,3}){3}\b|\blocalhost\b/g;
 
 /**
+ * A status introducer right before a number: `HTTP 401`, `HTTP/1.1 503`,
+ * `status 429`, `status code: 503`, `code=529`, `error: 401`, `failed 503`. A
+ * number in that position is a status, whatever follows it, so no unit reading
+ * of the next word can erase it: `HTTP 401 时请重新登录` is a 401, not 401 hours,
+ * and `HTTP 401 PS:` is not 401 picoseconds.
+ */
+const STATUS_POSITION_PATTERN =
+	/(?:\bHTTP(?:\/\d(?:\.\d)?)?|\bstatus(?:[ _-]?code)?|\bcode|\berror|\bfailed)\s*[:=]?\s*$/i;
+
+/** Whether the number at `offset` in `text` sits in a status position ({@link STATUS_POSITION_PATTERN}). */
+function isStatusPosition(text: string, offset: number): boolean {
+	return STATUS_POSITION_PATTERN.test(text.slice(Math.max(0, offset - 24), offset));
+}
+
+/**
  * `text` with the digits that are diagnostic metadata removed, by the role
  * each number plays: inside a URL; a host or a port; a stream number; a
  * duration, size or token count (a unit after it, or the value of a field
@@ -752,9 +779,11 @@ const HOST_PATTERN =
  * a status nor a cause; or glued into an identifier or a path. Every reader
  * that takes a bare number as an HTTP status, an auth rejection, a capacity
  * refusal or a transient status reads this instead, so `read ECONNRESET after
- * 401 ns` stays a wire cut. A status the sentence states — `HTTP 503`,
- * `status=529`, `503 Service Unavailable`, `error: 429`, `(429)` — keeps its
- * digits, and so does a number a cause field states (`reason=503`).
+ * 401 ns` stays a wire cut. A status comes first: a number in a status
+ * position ({@link STATUS_POSITION_PATTERN}) — `HTTP 503`, `status=529`,
+ * `error: 429` — keeps its digits before any unit or identifier reading is
+ * tried, and so do `503 Service Unavailable`, `(429)` and a number a cause
+ * field states (`reason=503`).
  */
 function withoutMetadataNumbers(text: string): string {
 	return text
@@ -768,8 +797,12 @@ function withoutMetadataNumbers(text: string): string {
 			return field.slice(0, at) + field.slice(at + value.length);
 		})
 		.replace(STREAM_NUMBER_PATTERN, field => field.replace(/\d+/g, ""))
-		.replace(UNIT_NUMBER_PATTERN, quantity => quantity.replace(/^[\d.]+/, ""))
-		.replace(GLUED_NUMBER_PATTERN, "");
+		.replace(UNIT_NUMBER_PATTERN, (quantity: string, offset: number, whole: string) =>
+			isStatusPosition(whole, offset) ? quantity : quantity.replace(/^[\d.]+/, ""),
+		)
+		.replace(GLUED_NUMBER_PATTERN, (digits: string, offset: number, whole: string) =>
+			isStatusPosition(whole, offset) ? digits : "",
+		);
 }
 
 /** Words that introduce a decoration rather than state a reason (`after 401 ns`, `took 2 s`). */

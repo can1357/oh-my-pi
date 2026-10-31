@@ -14,7 +14,10 @@ import { describe, expect, it } from "bun:test";
 import {
 	extractProviderRetryHint,
 	appendRetryAfterHint,
+	getFailureRetryAfterMs,
 	getRetryAfterMsFromHeaders,
+	retryWaitHeaders,
+	transportRetryBounds,
 	longestProviderRetryHint,
 	providerRetryWaitMs,
 } from "@oh-my-pi/pi-ai/utils/retry-after";
@@ -88,6 +91,87 @@ describe("providerRetryWaitMs", () => {
 			expect(providerRetryWaitMs("anthropic", message, header)).toBe(expected);
 		},
 	);
+
+	it("does not let a zone-less date in the body outrank the header's wait", () => {
+		// A date with no zone in a body is a wall clock in a zone nothing names;
+		// read as UTC it gave eight hours where the header said 750 ms. It is no
+		// wait at all.
+		const naive = new Date(Date.now() + 8 * 3_600_000).toISOString().slice(0, 19).replace("T", " ");
+		const message = `Service temporarily unavailable; reset at ${naive}`;
+		expect(providerRetryWaitMs("openai-codex", message, 750)).toBe(750);
+		expect(extractProviderRetryHint("openai-codex", message)).toBeUndefined();
+		// An explicit relative wait in the body still counts, the longer one winning.
+		expect(providerRetryWaitMs("openai-codex", `${message}. Please try again in 9s.`, 750)).toBe(9000);
+	});
+
+	it("ranks the header's wait above a zoned date in the body", () => {
+		// The two are not equally trustworthy: the header is the response's own
+		// instruction, the date is text the server may have rendered in any way.
+		const zoned = new Date(Date.now() + 8 * 3_600_000).toISOString();
+		const message = `Service temporarily unavailable; reset at ${zoned}`;
+		expect(providerRetryWaitMs("openai-codex", message, 750)).toBe(750);
+		// With no header, the zoned date is the wait.
+		expect(providerRetryWaitMs("openai-codex", message, undefined)).toBeGreaterThan(7 * 3_600_000);
+	});
+});
+
+describe("getRetryAfterMsFromHeaders", () => {
+	it("reads a zone-less Retry-After date as GMT, not in this machine's zone", () => {
+		const originalTz = process.env.TZ;
+		process.env.TZ = "America/Los_Angeles";
+		try {
+			const expected = Date.UTC(2099, 8, 1, 9, 44, 51) - Date.now();
+			for (const value of ["Tue, 01 Sep 2099 09:44:51", "2099-09-01T09:44:51", "Tue, 01 Sep 2099 09:44:51 GMT"]) {
+				const wait = getRetryAfterMsFromHeaders({ "retry-after": value });
+				expect(Math.abs(wait! - expected)).toBeLessThan(1000);
+			}
+		} finally {
+			process.env.TZ = originalTz;
+		}
+	});
+
+	it.each([
+		["an epoch x-ratelimit-reset", () => ({ "x-ratelimit-reset": String(Math.floor(Date.now() / 1000) + 3600) })],
+		["an epoch x-ratelimit-reset-ms", () => ({ "x-ratelimit-reset-ms": String(Date.now() + 3_600_000) })],
+		["a relative x-ratelimit-reset-ms", () => ({ "x-ratelimit-reset-ms": "86400000" })],
+	] as [string, () => Record<string, string>][])(
+		"takes an explicit Retry-After over %s on the same response",
+		(_label, reset) => {
+			// "Retry in 1 second" is an instruction; a window reset is when capacity
+			// returns. Taking the longer turned the 1 s into hours and a dead turn.
+			expect(getRetryAfterMsFromHeaders({ "retry-after": "1", ...reset() })).toBe(1000);
+			expect(getRetryAfterMsFromHeaders({ "retry-after-ms": "750", ...reset() })).toBe(750);
+			// With nothing telling the client to wait, the reset is the fallback.
+			expect(getRetryAfterMsFromHeaders(reset())).toBeGreaterThan(3_000_000);
+		},
+	);
+});
+
+describe("getFailureRetryAfterMs", () => {
+	it("reads the error's own wait when the captured response's headers name none", () => {
+		const error = Object.assign(new Error("429"), { headers: { "retry-after-ms": "30000" } });
+		expect(getFailureRetryAfterMs(error, { errorResponseHeaders: { "content-type": "application/json" } })).toBe(
+			30000,
+		);
+		// And the error's own wait outranks the accepted response's.
+		expect(
+			getFailureRetryAfterMs(error, {
+				errorResponseHeaders: { "content-type": "application/json" },
+				streamResponseHeaders: { "retry-after-ms": "5000" },
+			}),
+		).toBe(30000);
+	});
+});
+
+describe("wire restatement guards", () => {
+	it("never restates a wait in exponent form", () => {
+		expect(retryWaitHeaders(1e300)?.get("retry-after-ms")).toBe(String(Number.MAX_SAFE_INTEGER));
+		expect(retryWaitHeaders(9000.5)?.get("retry-after-ms")).toBe("9001");
+	});
+
+	it("keeps the transport default when the cap is NaN", () => {
+		expect(transportRetryBounds(Number.NaN, 60_000).maxDelayMs).toBe(60_000);
+	});
 });
 
 describe("longestProviderRetryHint", () => {
