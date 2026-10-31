@@ -46,7 +46,10 @@ use std::{
 	fmt, io,
 	path::{Path, PathBuf},
 	pin::Pin,
-	sync::{Arc, LazyLock},
+	sync::{
+		Arc, LazyLock,
+		atomic::{AtomicBool, AtomicU64, Ordering},
+	},
 	task::{Context, Poll},
 };
 
@@ -112,6 +115,60 @@ impl Options {
 			.or(*ENV)
 			.unwrap_or_else(|| fs.workers());
 		workers.clamp(1, (*CPUS).max(1))
+	}
+}
+
+/// Caps on how much of a tree a search inspects, shared by the walk's
+/// concurrent visitors: once the next entry would pass `max_entries` entries
+/// or `max_bytes` bytes, the budget is spent and the search reports it
+/// instead of growing without bound over a huge root.
+#[derive(Debug)]
+pub(crate) struct ScanBudget {
+	max_entries: u64,
+	max_bytes:   u64,
+	entries:     AtomicU64,
+	bytes:       AtomicU64,
+	exceeded:    AtomicBool,
+}
+
+impl ScanBudget {
+	/// A budget for the given caps; `None` when neither is set.
+	pub(crate) fn new(max_entries: Option<u64>, max_bytes: Option<u64>) -> Option<Self> {
+		(max_entries.is_some() || max_bytes.is_some()).then(|| Self {
+			max_entries: max_entries.unwrap_or(u64::MAX),
+			max_bytes:   max_bytes.unwrap_or(u64::MAX),
+			entries:     AtomicU64::new(0),
+			bytes:       AtomicU64::new(0),
+			exceeded:    AtomicBool::new(false),
+		})
+	}
+
+	/// Counts one entry of `size` bytes; `false` once it would cross a cap,
+	/// and for every entry after that.
+	pub(crate) fn admit(&self, size: u64) -> bool {
+		if self.exceeded() {
+			return false;
+		}
+		let entries = self.entries.fetch_add(1, Ordering::Relaxed);
+		let bytes = self
+			.bytes
+			.fetch_add(size, Ordering::Relaxed)
+			.saturating_add(size);
+		if entries >= self.max_entries || bytes > self.max_bytes {
+			self.exceeded.store(true, Ordering::Relaxed);
+			return false;
+		}
+		true
+	}
+
+	/// A cap was crossed.
+	pub(crate) fn exceeded(&self) -> bool {
+		self.exceeded.load(Ordering::Relaxed)
+	}
+
+	/// The byte cap is set, so entries need their sizes ([`Detail::Full`]).
+	pub(crate) const fn counts_bytes(&self) -> bool {
+		self.max_bytes != u64::MAX
 	}
 }
 

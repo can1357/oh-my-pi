@@ -1131,3 +1131,81 @@ async fn unlistable_root_fails_the_search() {
 		);
 	}
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bounded_grep_rejects_large_file_set_before_collecting_matches() {
+	let dir = TempDir::new();
+	for index in 0..128 {
+		dir.write(&format!("{index:03}.txt"), "needle\n");
+	}
+	let engine = needle();
+	for max_count in [None, Some(8192)] {
+		let opts = GrepOptions { max_scan_files: Some(32), max_count, ..options(&engine) };
+		let error = grep(&Fs::native(), dir.path(), opts)
+			.await
+			.expect_err("scan must stop at file cap");
+		assert!(matches!(error, GrepError::ScanLimit), "{error}");
+		assert!(error.to_string().contains("narrow the search path"), "{error}");
+	}
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn excluded_globs_do_not_spend_the_scan_budget() {
+	let dir = TempDir::new();
+	for index in 0..32 {
+		dir.write(&format!("blob{index:02}.bin"), "needle\n");
+	}
+	for name in ["a.txt", "b.txt", "c.txt"] {
+		dir.write(name, "needle\n");
+	}
+	let engine = needle();
+	let opts = GrepOptions {
+		max_scan_files: Some(3),
+		max_count: Some(8192),
+		exclude: vec!["**/*.bin".to_owned()],
+		..options(&engine)
+	};
+	assert_eq!(run(dir.path(), &opts).await.files_with_matches, 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scan_budget_counts_candidates_after_filters() {
+	let dir = TempDir::new();
+	// Entries the walk's filters discard must not consume the caller's
+	// candidate budget.
+	for index in 0..32 {
+		dir.write(&format!(".hidden{index:02}"), "needle\n");
+	}
+	for name in ["a.txt", "b.txt", "c.txt"] {
+		dir.write(name, "needle\n");
+	}
+	let engine = needle();
+	let mut opts = GrepOptions { max_scan_files: Some(3), ..options(&engine) };
+	opts.walk.hidden = false;
+	for max_count in [None, Some(8192)] {
+		let opts = GrepOptions { max_count, ..opts.clone() };
+		assert_eq!(run(dir.path(), &opts).await.files_with_matches, 3);
+	}
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bounded_grep_rejects_byte_budget_before_reading_next_file() {
+	let dir = TempDir::new();
+	dir.write("a.txt", "needle\n");
+	dir.write("b.txt", "needle\n");
+	let engine = needle();
+	for max_count in [None, Some(8192)] {
+		let opts = GrepOptions { max_scan_bytes: Some(7), max_count, ..options(&engine) };
+		let error = grep(&Fs::native(), dir.path(), opts)
+			.await
+			.expect_err("scan must stop at byte cap");
+		assert!(matches!(error, GrepError::ScanLimit), "{error}");
+	}
+	// A file root over the byte cap is rejected; one within it is searched.
+	let file = dir.path().join("a.txt");
+	let over = GrepOptions { max_scan_bytes: Some(6), ..options(&engine) };
+	assert!(matches!(grep(&Fs::native(), &file, over).await, Err(GrepError::ScanLimit)));
+	let within =
+		GrepOptions { max_scan_files: Some(1), max_scan_bytes: Some(7), ..options(&engine) };
+	assert_eq!(run(&file, &within).await.files_with_matches, 1);
+}

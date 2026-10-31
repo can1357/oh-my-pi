@@ -478,7 +478,15 @@ class DaemonBroker {
 		);
 		if (process.platform !== "win32") this.#watchEndpoint();
 		this.#scheduleIdleShutdown();
-		onListening?.();
+		try {
+			onListening?.();
+		} catch (error) {
+			// The server is already listening; without shutdown the caller's
+			// error path releases the lease while this broker keeps accepting
+			// connections without owning it.
+			await this.shutdown();
+			throw error;
+		}
 		await this.#finished.promise;
 	}
 
@@ -1027,7 +1035,11 @@ class DaemonBroker {
 		const port = ready.port;
 		if (port === undefined) return;
 		while (generation === record.generation && !terminalState(record.snapshot.state)) {
-			if (await connectPort(host, port)) {
+			const connected = await connectPort(host, port);
+			// The probe awaited; a shutdown in between retired this generation,
+			// so its result must not mark readiness or queue a metadata write.
+			if (generation !== record.generation) return;
+			if (connected) {
 				record.portReady = true;
 				syncReadyPending(record);
 				this.#markReady(record);

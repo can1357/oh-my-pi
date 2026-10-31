@@ -22,7 +22,7 @@ import { keywords as deriveKeywords } from "./keywords";
 import { type HeatRange, mergeHeat, type Passage, plainContent, selectWindows, sketch, windows } from "./passages";
 import { nameBatch, passageBatch, passageKey, entryKey, type Request, type SketchCard, sketchBatch } from "./questions";
 import { lines, readText, ReadTextError, takeChars } from "./text";
-import { type FileEntry, listFiles, type SearchRoot } from "./tree";
+import { type FileEntry, INELIGIBLE_GLOBS, listFiles, type SearchRoot } from "./tree";
 
 /** Requests in flight per dispatched phase. */
 const PARALLEL = 16;
@@ -54,6 +54,9 @@ const SKETCH_CARDS_MAX = 48;
 const VERIFY_STATE_BYTES = 24 * 1024;
 /** Wall-clock budget for the native lexical scan. */
 const SCAN_TIMEOUT_MS = 30_000;
+/** Native walk limits keep the initial scan and its retained results bounded. */
+const SCAN_MAX_FILES = 20_000;
+const SCAN_MAX_BYTES = 256 * 1024 * 1024;
 /** Distinct failure messages retained for the report. */
 const FAILURES_KEPT = 5;
 
@@ -179,10 +182,29 @@ class Cascade {
 
 		onProgress?.("lexical scan");
 		const native = filesystem.shellFilesystem();
-		const [entries, index] = await Promise.all([
-			listFiles(root, { includeHidden, filesystem: native, signal }),
-			grepIndex(root.path, keywords, { includeHidden, filesystem: native, signal, timeoutMs: SCAN_TIMEOUT_MS }),
-		]);
+		// One deadline covers the whole lexical scan phase: the listing and the
+		// grep pass must not each receive the full budget. A remaining value of
+		// zero means "already expired", so an overdrawn deadline cancels the
+		// second scan instead of disabling its timeout.
+		const scanDeadline = Date.now() + SCAN_TIMEOUT_MS;
+		const entries = await listFiles(root, {
+			includeHidden,
+			filesystem: native,
+			maxScanEntries: SCAN_MAX_FILES,
+			maxScanBytes: SCAN_MAX_BYTES,
+			signal,
+			timeoutMs: Math.max(0, scanDeadline - Date.now()),
+		});
+		throwIfAborted(signal);
+		const index = await grepIndex(root.path, keywords, {
+			includeHidden,
+			filesystem: native,
+			maxScanFiles: SCAN_MAX_FILES,
+			maxScanBytes: SCAN_MAX_BYTES,
+			excludeGlobs: INELIGIBLE_GLOBS,
+			signal,
+			timeoutMs: Math.max(0, scanDeadline - Date.now()),
+		});
 		this.stats.listed = entries.length;
 		const weights = idf(index);
 		const noCounts = Array.from({ length: keywords.length }, () => 0);

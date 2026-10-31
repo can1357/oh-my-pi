@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `find` on a huge directory tree growing the process until it was killed for running out of memory; native scans now stop at 20,000 entries, 256 MB or 30 s and ask to narrow the search path ([#16541](https://github.com/can1357/oh-my-pi/pull/16541) by [@Komzpa](https://github.com/Komzpa))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
