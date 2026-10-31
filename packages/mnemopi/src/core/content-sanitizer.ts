@@ -568,7 +568,7 @@ const CREDENTIAL_RULES: ReadonlyArray<{
 	},
 	{
 		type: "aws_access_key",
-		pattern: /(?:AKIA|ASIA)[A-Z0-9]{16}/g,
+		pattern: /(?!(?:AKIA|ASIA)IOSFODNN7EXAMPLE(?![A-Z0-9]))(?:AKIA|ASIA)[A-Z0-9]{16}/g,
 		replacement: "[REDACTED]",
 	},
 	{
@@ -695,20 +695,36 @@ export function sanitizeTextField(input: string): string {
 	return redactMemorySecrets(text);
 }
 
+function resolveTrustedFallbackTimestamp(fallback?: string): string {
+	if (fallback === undefined) {
+		return new Date().toISOString();
+	}
+	if (fallback === "") {
+		return "";
+	}
+	if (!fallback.includes("<") && !fallback.includes(">")) {
+		const parsed = Date.parse(fallback);
+		if (!Number.isNaN(parsed)) {
+			return new Date(parsed).toISOString();
+		}
+	}
+	return new Date().toISOString();
+}
+
 export function sanitizeTimestamp(ts: string | null | undefined, fallback?: string): string {
 	if (ts === undefined || ts === null) {
-		return fallback !== undefined ? fallback : new Date().toISOString();
+		return resolveTrustedFallbackTimestamp(fallback);
 	}
 	const asStr = String(ts);
 	let cleaned = asStr.includes("<") ? asStr.replace(/<[^>]*>/g, "") : asStr;
 	cleaned = stripInjectedMemoryTags(cleaned).content;
 	cleaned = redactMemorySecrets(cleaned).trim();
 	if (cleaned.includes("<") || cleaned.includes(">")) {
-		return fallback !== undefined ? fallback : new Date().toISOString();
+		return resolveTrustedFallbackTimestamp(fallback);
 	}
 	const parsed = Date.parse(cleaned);
 	if (Number.isNaN(parsed)) {
-		return fallback !== undefined ? fallback : new Date().toISOString();
+		return resolveTrustedFallbackTimestamp(fallback);
 	}
 	return new Date(parsed).toISOString();
 }
@@ -727,13 +743,13 @@ export function sanitizeMemoryRow<T extends Record<string, unknown>>(row: T): T 
 		out.embed_text = sanitizeTextField(out.embed_text);
 	}
 	if (typeof out.timestamp === "string") {
-		out.timestamp = sanitizeTimestamp(out.timestamp, out.timestamp);
+		out.timestamp = sanitizeTimestamp(out.timestamp, "");
 	}
 	if (typeof out.created_at === "string") {
-		out.created_at = sanitizeTimestamp(out.created_at, out.created_at);
+		out.created_at = sanitizeTimestamp(out.created_at, "");
 	}
 	if (typeof out.updated_at === "string") {
-		out.updated_at = sanitizeTimestamp(out.updated_at, out.updated_at);
+		out.updated_at = sanitizeTimestamp(out.updated_at, "");
 	}
 	if ("metadata_json" in out && typeof out.metadata_json === "string") {
 		try {
@@ -775,14 +791,21 @@ function redactNested(value: unknown, stripTags = false): unknown {
 	}
 	if (!value || typeof value !== "object") return value;
 	const source = value as Record<string, unknown>;
-	let out: Record<string, unknown> | undefined;
+	let changed = false;
+	const out: Record<string, unknown> = {};
 	for (const [key, item] of Object.entries(source)) {
-		const next = redactNested(item, stripTags);
-		if (next === item) continue;
-		out ??= { ...source };
-		out[key] = next;
+		const nextKeyRaw = stripTags ? sanitizeAuxiliaryString(key) : redactMemorySecrets(key);
+		const baseKey = nextKeyRaw.trim().length > 0 ? nextKeyRaw : "[REDACTED]";
+		let safeKey = baseKey;
+		let suffix = 2;
+		while (Object.hasOwn(out, safeKey)) {
+			safeKey = `${baseKey}_${suffix++}`;
+		}
+		const nextItem = redactNested(item, stripTags);
+		if (safeKey !== key || nextItem !== item) changed = true;
+		out[safeKey] = nextItem;
 	}
-	return out ?? value;
+	return changed ? out : value;
 }
 
 /**
