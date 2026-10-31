@@ -5,6 +5,7 @@ import { orderedSettings } from "@oh-my-pi/pi-coding-agent/config/all-settings";
 import { all, bindEffects, combine, effect, lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
+import { loadHandEditedSettings } from "../helpers/hand-edited-settings";
 import { YAML } from "bun";
 
 import {
@@ -15,7 +16,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { cfgSteeringMode } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { cfgEditFuzzyMatch, cfgEditModelVariants } from "@oh-my-pi/pi-coding-agent/edit/settings";
-import { cfgTaskMaxConcurrency } from "@oh-my-pi/pi-coding-agent/task/settings";
+import { cfgTaskAgentPrewalk, cfgTaskMaxConcurrency } from "@oh-my-pi/pi-coding-agent/task/settings";
 import { cfgEvalPy } from "@oh-my-pi/pi-coding-agent/eval/settings";
 import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgSearxngBasicPassword, cfgSearxngEndpoint } from "@oh-my-pi/pi-coding-agent/web/settings";
@@ -81,6 +82,65 @@ describe("settings registry", () => {
 			expect(cfgSearxngBasicPassword.isConfigured(cleared)).toBe(false);
 			expect(cfgSearxngBasicPassword.provenance(cleared)).toBe("default");
 		});
+	});
+
+	it("lets a fallback env var apply over a configured value the setting rejects, with a warning", async () => {
+		const dir = TempDir.createSync("@pi-settings-env-rejected-");
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			// `searxng.endpoint` yields to its variable on a blank value; `searxng.basicPassword` only when unset.
+			const settings = await loadHandEditedSettings(dir, {
+				global: { searxng: { endpoint: 8080, basicPassword: 42 } },
+			});
+			withEnv({ SEARXNG_ENDPOINT: "https://env.example", SEARXNG_BASIC_PASSWORD: "env-secret" }, () => {
+				expect(cfgSearxngEndpoint.get(settings)).toBe("https://env.example");
+				expect(cfgSearxngBasicPassword.get(settings)).toBe("env-secret");
+			});
+			expect(warn).toHaveBeenCalledWith("Settings: ignoring invalid value", {
+				setting: "searxng.endpoint",
+				value: 8080,
+				expected: "a string",
+			});
+			expect(warn).toHaveBeenCalledWith("Settings: ignoring invalid value", {
+				setting: "searxng.basicPassword",
+				value: 42,
+				expected: "a string",
+			});
+		} finally {
+			warn.mockRestore();
+			dir.removeSync();
+		}
+	});
+
+	it("reads a value the setting rejects as unset in its own layer: value, presence and provenance agree", async () => {
+		const dir = TempDir.createSync("@pi-settings-rejected-layer-");
+		const aloneDir = TempDir.createSync("@pi-settings-rejected-alone-");
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			const underGlobal = await loadHandEditedSettings(dir, {
+				global: { temperature: 0.2, task: { agentPrewalk: { scout: "anthropic/claude-haiku-4-5" } } },
+				project: { temperature: "hot", task: { agentPrewalk: "fast" } },
+			});
+			expect(cfgTemperature.get(underGlobal)).toBe(0.2);
+			expect(cfgTemperature.isConfigured(underGlobal)).toBe(true);
+			expect(cfgTemperature.provenance(underGlobal)).toBe("global");
+			expect(cfgTaskAgentPrewalk.get(underGlobal)).toEqual({ scout: "anthropic/claude-haiku-4-5" });
+			expect(cfgTaskAgentPrewalk.provenance(underGlobal)).toBe("global");
+			expect(warn).toHaveBeenCalledWith("Settings: ignoring invalid value", {
+				setting: "temperature",
+				value: "hot",
+				expected: "a number",
+			});
+
+			const alone = await loadHandEditedSettings(aloneDir, { overlay: { temperature: "hot" } });
+			expect(cfgTemperature.get(alone)).toBe(cfgTemperature.default);
+			expect(cfgTemperature.isConfigured(alone)).toBe(false);
+			expect(cfgTemperature.provenance(alone)).toBe("default");
+		} finally {
+			warn.mockRestore();
+			dir.removeSync();
+			aloneDir.removeSync();
+		}
 	});
 
 	it("rejects writes whose value does not fit the setting's type", () => {

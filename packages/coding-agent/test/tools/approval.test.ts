@@ -18,6 +18,8 @@ import type { MCPServerConnection, MCPToolDefinition } from "../../src/mcp/types
 import { Settings } from "../../src/config/settings";
 import { EditTool } from "../../src/edit";
 import type { ToolSession } from "../../src/tools";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { loadHandEditedSettings } from "../helpers/hand-edited-settings";
 
 type ApprovalTool = Pick<AgentTool, "name" | "approval" | "formatApprovalDetails">;
 
@@ -1114,5 +1116,20 @@ describe("resolveApprovalFromContext fail-closed default", () => {
 			}),
 		).toEqual({ approvalMode: "yolo", userPolicies: { bash: "deny" } });
 		expect(resolveApprovalFromContext({ autoApprove: true })).toEqual({ approvalMode: "yolo", userPolicies: {} });
+	});
+
+	it("still prompts under a lower layer's mode when a higher config holds a malformed approvalMode", async () => {
+		const dir = TempDir.createSync("@pi-approval-mode-layers-");
+		try {
+			const settings = await loadHandEditedSettings(dir, {
+				global: { tools: { approvalMode: "always-ask" } },
+				project: { tools: { approvalMode: "alwasy-ask" } },
+			});
+			const { approvalMode, userPolicies } = resolveApprovalFromContext({ settings });
+			expect(approvalMode).toBe("always-ask");
+			expect(resolveApproval(tool("bash", "exec"), {}, approvalMode, userPolicies).policy).toBe("prompt");
+		} finally {
+			dir.removeSync();
+		}
 	});
 });

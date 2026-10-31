@@ -78,7 +78,7 @@ export type SettingEnv<T> =
 			parse?: (raw: string) => T | undefined;
 			/**
 			 * The variable only replaces the default (env vars documented as fallbacks of a config key):
-			 *  - `true`: any settings layer configuring a non-null value wins over it.
+			 *  - `true`: any settings layer configuring a value the setting accepts wins over it.
 			 *  - `"blank"`: likewise, but a configured empty/whitespace string also yields to the variable.
 			 */
 			fallback?: true | "blank";
@@ -453,6 +453,7 @@ export function combine<R extends Record<string, Derived<unknown>>, T>(
 /**
  * Handle for one registered setting. Reads resolve, in precedence order: the definition's
  * environment variable, runtime override, `--config` overlay, project, global, then the default.
+ * A layer holding a value the setting rejects ({@link accepts}) reads as unset there, with a warning.
  */
 export class Setting<T, Id extends string = string> extends Derived<T> {
 	readonly id: Id;
@@ -530,7 +531,7 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		if (value === undefined || !this.envFallback) return value;
 		const settings = settingsOf(scope);
 		if (this.envFallback === true) return settings.isConfigured(this) ? undefined : value;
-		const configured = settings.rawValue(this);
+		const configured = settings.acceptedValue(this);
 		return configured === undefined || (typeof configured === "string" && configured.trim() === "")
 			? value
 			: undefined;
@@ -623,6 +624,13 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		}
 	}
 
+	/** What {@link accepts} requires, for messages: "one of a, b", "an array", "a number". */
+	#expected(): string {
+		const values = this.enumValues;
+		if (values) return `one of ${values.join(", ")}`;
+		return this.definition.type === "array" ? "an array" : `a ${this.definition.type}`;
+	}
+
 	#parseEnvText(raw: string): unknown {
 		if (this.definition.type === "boolean") return raw === "" ? undefined : parseFlag(raw);
 		if (raw.trim() === "") return undefined;
@@ -633,8 +641,13 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		}
 	}
 
+	/**
+	 * The configured value, and when the setting rejects it, what lies beneath: a rejected value reads
+	 * as unset in its own layer (see `Settings.acceptedValue`), so the layers below it are inputs too.
+	 */
 	inputs(settings: Settings): readonly unknown[] {
-		return [settings.rawValue(this)];
+		const raw = settings.rawValue(this);
+		return raw === undefined || this.accepts(raw) ? [raw] : [raw, settings.acceptedValue(this)];
 	}
 
 	compute(inputs: readonly unknown[], settings: Settings): T {
@@ -644,12 +657,20 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 			settings.warnState.invalid.delete(this.id);
 			return raw === undefined ? this.default : (raw as T);
 		}
+		this.reportRejected(settings, raw);
+		return (inputs[1] as T | undefined) ?? this.default;
+	}
+
+	/**
+	 * Registry plumbing: warns that `raw`, the value `settings` configures, is one this setting rejects
+	 * and reads as unset in its layer, naming the setting, the value and what was expected. Once per
+	 * instance and value: {@link compute} re-arms it when the configured value is fixed.
+	 */
+	reportRejected(settings: Settings, raw: unknown): void {
 		const warned = settings.warnState.invalid;
-		if (!warned.has(this.id) || !Bun.deepEquals(warned.get(this.id), raw)) {
-			warned.set(this.id, raw);
-			logger.warn("Settings: ignoring invalid value, using the default", { setting: this.id, value: raw });
-		}
-		return this.default;
+		if (warned.has(this.id) && Bun.deepEquals(warned.get(this.id), raw)) return;
+		warned.set(this.id, raw);
+		logger.warn("Settings: ignoring invalid value", { setting: this.id, value: raw, expected: this.#expected() });
 	}
 
 	/**
@@ -667,8 +688,7 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		}
 		this.definition.validate?.(value);
 		if (!this.accepts(value)) {
-			const expected = this.enumValues ? `one of ${this.enumValues.join(", ")}` : `a ${this.definition.type}`;
-			throw new Error(`Invalid value for ${this.id}: ${Bun.inspect(value)} (expected ${expected})`);
+			throw new Error(`Invalid value for ${this.id}: ${Bun.inspect(value)} (expected ${this.#expected()})`);
 		}
 	}
 
@@ -783,12 +803,15 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		settingsOf(scope).clearOverrideValue(this);
 	}
 
-	/** Whether the environment or any settings layer (runtime, overlay, project, global) sets this value. */
+	/**
+	 * Whether the environment or any settings layer (runtime, overlay, project, global) sets this value.
+	 * A value the setting rejects reads as unset in its layer, so it never counts (see {@link get}).
+	 */
 	isConfigured(scope: ScopeLike): boolean {
 		return this.envValue() !== undefined || settingsOf(scope).isConfigured(this);
 	}
 
-	/** Layer supplying the effective value. */
+	/** Layer supplying the effective value; a layer holding only a value the setting rejects supplies none. */
 	provenance(scope: ScopeLike): SettingProvenance {
 		return this.#effectiveEnv(scope) !== undefined ? "env" : settingsOf(scope).getProvenance(this);
 	}

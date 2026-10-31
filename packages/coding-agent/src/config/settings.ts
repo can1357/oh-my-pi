@@ -190,6 +190,21 @@ function getByPath(obj: RawSettings, segments: readonly string[]): unknown {
 }
 
 /**
+ * What one settings `layer` puts at `segments` when deep-merged over the layers beneath it (see
+ * `Settings.#deepMerge`): its value there, `undefined` when it sets nothing there so the layers beneath
+ * show through, or `null` (like a configured `null`) when a non-record on the way replaces them.
+ */
+function layerValue(layer: RawSettings, segments: readonly string[]): unknown {
+	let current: unknown = layer;
+	for (const segment of segments) {
+		if (!isRecord(current)) return null;
+		current = current[segment];
+		if (current === undefined) return undefined;
+	}
+	return current;
+}
+
+/**
  * Set a nested value in an object by path segments.
  * Creates intermediate objects as needed, replacing whatever non-record (a malformed `[]` included) is in the way.
  */
@@ -855,7 +870,8 @@ export class Settings {
 	/**
 	 * Registry plumbing behind `Setting.get`: the configured value of `id` across all layers
 	 * (path-scoped entries resolved for this cwd), or `undefined` when unset — the handle
-	 * supplies the default. Read settings through their handles, not this.
+	 * supplies the default. It may be a value the setting rejects; {@link acceptedValue} reads
+	 * past one. Read settings through their handles, not this.
 	 *
 	 * A configured `null` is treated as unset: YAML writes `null` for a key left
 	 * without a value (`fallbackChains:`), and no schema entry has a null
@@ -867,27 +883,65 @@ export class Settings {
 	}
 
 	/**
+	 * Registry plumbing behind `Setting.get`, `isConfigured` and `provenance`: {@link rawValue} with a
+	 * value the setting rejects read as unset in its own layer, so the layers beneath it apply, or the
+	 * default when none configures an accepted value (`undefined`). Reading past a rejected value
+	 * reports it (`Setting.reportRejected`).
+	 */
+	acceptedValue(setting: AnySetting): unknown {
+		const raw = this.rawValue(setting);
+		if (raw === undefined || setting.accepts(raw)) return raw;
+		setting.reportRejected(this, raw);
+		const value = this.#acceptedIn(setting, this.#ownLayers());
+		return value === undefined ? undefined : (resolvePathScopedStringArray(setting, value, this.#cwd) ?? value);
+	}
+
+	/**
+	 * What `layers`, over the overlay parent's, configure for `setting`, merged as the merged view is
+	 * but skipping each value the setting rejects; path-scoped entries stay unresolved.
+	 */
+	#acceptedIn(setting: AnySetting, layers: OwnLayers): unknown {
+		const parent = this.#parent;
+		let value = parent ? parent.#acceptedIn(setting, parent.#ownLayers()) : undefined;
+		for (const layer of [
+			layers.global,
+			projectLayerForMerge(layers.project),
+			layers.configOverlay,
+			layers.overrides,
+		]) {
+			const next = layerValue(layer, setting.segments);
+			if (next === undefined || (next !== null && !setting.accepts(next))) continue;
+			value = isRecord(value) && isRecord(next) ? this.#deepMerge(value, next) : next;
+		}
+		return value ?? undefined;
+	}
+
+	/**
 	 * Whether `setting` has an explicitly configured value (global config, project
 	 * config, or runtime override) rather than falling back to the schema default.
-	 * A configured `null` counts as unset, like in {@link rawValue}.
+	 * A configured `null` counts as unset, like in {@link rawValue}, and so does a
+	 * value the setting rejects ({@link acceptedValue}).
 	 */
 	isConfigured(setting: AnySetting): boolean {
-		const value = getByPath(this.#mergedView(), setting.segments);
-		return value !== undefined && value !== null;
+		return this.acceptedValue(setting) !== undefined;
 	}
 
 	/**
 	 * Layer supplying the effective value of `setting`, in merge precedence order:
 	 * runtime override → config overlay → project → global → (overlay parent) → schema default.
-	 * A value that merges to `null` is unset and reports `"default"`.
+	 * A value that merges to `null` is unset and reports `"default"`; a layer holding only a value
+	 * the setting rejects supplies nothing ({@link acceptedValue}).
 	 */
 	getProvenance(setting: AnySetting): SettingProvenance {
 		if (!this.isConfigured(setting)) return "default";
-		const segments = setting.segments;
-		if (getByPath(this.#overrides, segments) !== undefined) return "runtime";
-		if (getByPath(this.#configOverlay, segments) !== undefined) return "overlay";
-		if (getByPath(projectLayerForMerge(this.#project), segments) !== undefined) return "project";
-		if (getByPath(this.#global, segments) !== undefined) return "global";
+		const configures = (layer: RawSettings) => {
+			const value = layerValue(layer, setting.segments);
+			return value !== undefined && value !== null && setting.accepts(value);
+		};
+		if (configures(this.#overrides)) return "runtime";
+		if (configures(this.#configOverlay)) return "overlay";
+		if (configures(projectLayerForMerge(this.#project))) return "project";
+		if (configures(this.#global)) return "global";
 		return this.#parent?.getProvenance(setting) ?? "default";
 	}
 
@@ -1018,15 +1072,13 @@ export class Settings {
 
 	/**
 	 * Removes from `layers.overrides` (replaced by a copy) every soft pin the persisted `layers`
-	 * (global, project, `--config` overlay, parent) now configure; returns the settled settings.
+	 * (global, project, `--config` overlay, parent) now configure with a value the setting accepts;
+	 * returns the settled settings.
 	 */
 	#settlePins(layers: OwnLayers): AnySetting[] {
 		if (this.#softPins.size === 0) return [];
-		const persisted = this.#mergeOverParent(this.#mergeOwnLayers({ ...layers, overrides: {} }));
-		const settled = [...this.#softPins].filter(setting => {
-			const value = getByPath(persisted, setting.segments);
-			return value !== undefined && value !== null;
-		});
+		const persisted = { ...layers, overrides: {} };
+		const settled = [...this.#softPins].filter(setting => this.#acceptedIn(setting, persisted) !== undefined);
 		if (settled.length === 0) return settled;
 		layers.overrides = structuredClone(layers.overrides);
 		for (const setting of settled) deleteByPath(layers.overrides, setting.segments);

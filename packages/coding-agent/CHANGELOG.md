@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- In ACP sessions, a `tools.approvalMode` that is not one of the four modes (a typo, `YOLO`, a number) no longer counts as an explicit `yolo` and no longer turns off the client's permission prompts for `bash`, `edit`, `delete` and `move`
+- A hand-edited setting of the wrong type now reads as unset in its own config file, with a warning naming the setting, the value and the expected type, so a lower config's value or the default applies; it no longer bypasses a denied Auto-QA consent, turns on `out://` in print, RPC and ACP, sends Codex `textVerbosity: medium`, blocks the Nerd Font symbol upgrade, or hides the SearXNG and Mnemopi environment variable fallbacks
+
 ## [18.14.1] - 2026-10-31
 
 ### Added

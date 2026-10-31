@@ -10,6 +10,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as theme from "@oh-my-pi/pi-tui/theme";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { writeHandEditedConfig } from "../helpers/hand-edited-settings";
 
 import {
 	cfgStatusLineContextLine,
@@ -29,14 +30,8 @@ describe("InteractiveMode live settings", () => {
 		await theme.initTheme();
 	});
 
-	beforeEach(async () => {
-		resetSettingsForTest();
-		tempDir = TempDir.createSync("@pi-live-ui-settings-");
-		const settings = await Settings.init({
-			inMemory: true,
-			cwd: tempDir.path(),
-			overrides: { "startup.quiet": true, "statusLine.preset": "custom" },
-		});
+	/** Starts an interactive mode over `settings`, capturing its Glyph Protocol report callback. */
+	async function startMode(settings: Settings): Promise<void> {
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
@@ -52,6 +47,18 @@ describe("InteractiveMode live settings", () => {
 			reportGlyphProtocol = callback;
 		});
 		await mode.init({ suppressWelcomeIntro: true });
+	}
+
+	beforeEach(async () => {
+		resetSettingsForTest();
+		tempDir = TempDir.createSync("@pi-live-ui-settings-");
+		await startMode(
+			await Settings.init({
+				inMemory: true,
+				cwd: tempDir.path(),
+				overrides: { "startup.quiet": true, "statusLine.preset": "custom" },
+			}),
+		);
 	});
 
 	afterEach(async () => {
@@ -109,6 +116,24 @@ describe("InteractiveMode live settings", () => {
 	});
 
 	it("upgrades an unconfigured unicode status bar after Glyph Protocol confirmation", async () => {
+		await theme.setSymbolPreset("unicode");
+		reportGlyphProtocol(true);
+		expect(theme.getSymbolPresetOverride()).toBe("nerd");
+	});
+
+	it("upgrades a unicode status bar after Glyph Protocol confirmation when the configured preset is malformed", async () => {
+		mode.stop();
+		await session.dispose();
+		authStorage.close();
+		resetSettingsForTest();
+		const config = await writeHandEditedConfig(tempDir, { global: { symbolPreset: "fancy" } });
+		await startMode(
+			await Settings.init({
+				agentDir: config.agentDir,
+				cwd: config.cwd,
+				overrides: { "startup.quiet": true, "statusLine.preset": "custom" },
+			}),
+		);
 		await theme.setSymbolPreset("unicode");
 		reportGlyphProtocol(true);
 		expect(theme.getSymbolPresetOverride()).toBe("nerd");

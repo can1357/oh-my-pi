@@ -18,6 +18,8 @@ import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgProvidersMuseCodeStoreResponses } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { createSettingsAwareStreamFn } from "@oh-my-pi/pi-coding-agent/session/settings-stream-fn";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { loadHandEditedSettings } from "./helpers/hand-edited-settings";
 
 function captureBase(): { fn: StreamFn; calls: Array<{ options?: SimpleStreamOptions }> } {
 	const calls: Array<{ options?: SimpleStreamOptions }> = [];
@@ -140,6 +142,19 @@ describe("createSettingsAwareStreamFn", () => {
 		expect(calls[0]?.options?.textVerbosity).toBe("low");
 		expect(calls[1]?.options?.textVerbosity).toBe("low");
 		expect(calls[2]?.options?.textVerbosity).toBe("medium");
+	});
+
+	it("leaves Codex text verbosity out when the configured value is not a level", async () => {
+		const dir = TempDir.createSync("@pi-text-verbosity-malformed-");
+		try {
+			const settings = await loadHandEditedSettings(dir, { global: { textVerbosity: "verbose" } });
+			const { fn: base, calls } = captureBase();
+			createSettingsAwareStreamFn(settings, base)(stubCodexModel, stubContext, undefined);
+
+			expect(calls[0]?.options?.textVerbosity).toBeUndefined();
+		} finally {
+			dir.removeSync();
+		}
 	});
 
 	it("forwards configured stream watchdog budgets while preserving caller overrides", () => {

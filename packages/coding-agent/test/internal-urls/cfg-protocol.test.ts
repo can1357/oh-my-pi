@@ -14,6 +14,8 @@ import { cfgEditFuzzyMatch } from "@oh-my-pi/pi-coding-agent/edit/settings";
 import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgSearxngEndpoint } from "@oh-my-pi/pi-coding-agent/web/settings";
 import type { InternalWriteResult } from "@oh-my-pi/pi-coding-agent/internal-urls/types";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { loadHandEditedSettings } from "../helpers/hand-edited-settings";
 
 function sessionWith(settings: Settings, caller: Partial<ToolSession> = {}): ToolSession {
 	return { settings, hasUI: true, settingsApproval: true, taskDepth: 0, ...caller } as unknown as ToolSession;
@@ -233,6 +235,26 @@ describe("CfgProtocolHandler", () => {
 		await write("cfg://modelRoles/save", '{"smol":"anthropic/next"}', settings);
 		expect(asked[2]?.shadowedBy).toBeUndefined();
 		expect(cfgModelRoles.get(settings)).toMatchObject({ default: "anthropic/project", smol: "anthropic/next" });
+	});
+
+	it("applies a saved value over a project value the setting rejects, and names no shadowing layer", async () => {
+		const dir = TempDir.createSync("@pi-cfg-rejected-project-");
+		try {
+			const settings = await loadHandEditedSettings(dir, { project: { advisor: { syncBacklog: "always" } } });
+			const asked: CfgChangeRequest[] = [];
+			setCfgApprovalHost({
+				approve: async request => (asked.push(request), "once"),
+				applied: () => {},
+				persistentSettings: settings,
+			});
+
+			const saved = await write("cfg://advisor/syncBacklog/save", '"5"', settings);
+			expect(asked[0]?.shadowedBy).toBeUndefined();
+			expect(saved.details?.cfg?.effective).toBeUndefined();
+			expect(cfgAdvisorSyncBacklog.get(settings)).toBe("5");
+		} finally {
+			dir.removeSync();
+		}
 	});
 
 	it("persists /save writes to the host settings and mirrors them into a separate session instance", async () => {
