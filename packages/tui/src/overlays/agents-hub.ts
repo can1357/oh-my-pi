@@ -1048,10 +1048,10 @@ export class AgentsHubComponent implements Component {
 		return truncateToWidth(theme.fg("muted", ` ${scopeLabel} · ${count}`), width);
 	}
 
-	/** Clamp a list row to `width`; a banded row is painted with `selectedBg` across the full width. */
-	#finishRow(line: string, width: number, banded: boolean): string {
+	/** Clamp a list row to `width`; the bg band is reserved for mouse hover and fills the full width. */
+	#finishRow(line: string, width: number, hovered: boolean): string {
 		const out = truncateToWidth(line, width);
-		if (!banded) return out;
+		if (!hovered) return out;
 		const w = visibleWidth(out);
 		return theme.bgFill("selectedBg", w < width ? out + " ".repeat(width - w) : out);
 	}
@@ -1082,11 +1082,11 @@ export class AgentsHubComponent implements Component {
 			const rowDef = this.#rows[i];
 			if (!rowDef) continue;
 			const selected = i === this.#rowIndex;
-			const banded = (selected && listFocused) || i === this.#rowHover;
+			const hovered = i === this.#rowHover;
 			const cursor = selected && listFocused ? theme.fg("accent", theme.nav.cursor) : " ";
 			if (rowDef.kind === "new") {
 				lines.push(
-					this.#finishRow(` ${cursor} ${theme.fg(selected ? "accent" : "dim", "+ New agent…")}`, width, banded),
+					this.#finishRow(` ${cursor} ${theme.fg(selected ? "accent" : "dim", "+ New agent…")}`, width, hovered),
 				);
 				continue;
 			}
@@ -1114,7 +1114,7 @@ export class AgentsHubComponent implements Component {
 			if (rightWidth > 0 && lineWidth + rightWidth + 2 <= width) {
 				line = `${line}${" ".repeat(width - lineWidth - rightWidth - 1)}${right}`;
 			}
-			lines.push(this.#finishRow(line, width, banded));
+			lines.push(this.#finishRow(line, width, hovered));
 		}
 
 		// Selected-agent detail block pinned to the bottom of the body pane.

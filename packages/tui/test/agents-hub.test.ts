@@ -167,55 +167,37 @@ describe("AgentsHub layout", () => {
 	});
 
 	for (const width of [200, 40]) {
-		test(`paints selected and hovered rows across the body at width ${width}`, async () => {
+		test(`paints the hovered row across the body at width ${width} and leaves keyboard selection unbanded`, async () => {
 			const settings = new TestSettings();
 			settings.records.set(OVERRIDE_KEYS.model, { dev: "anthropic/claude-sonnet-4-5:high" });
 			const { hub } = await createHub(settings);
+			const bodyRow = (lines: readonly string[], text: string): number =>
+				lines.findIndex(line => Bun.stripANSI(line).split("│")[2]?.includes(text));
+			const hover = (lines: readonly string[], row: number): void => {
+				const plain = Bun.stripANSI(lines[row]);
+				const bodyColumn = plain.indexOf("│", plain.indexOf("│") + 1) + 3;
+				hub.handleInput(`\x1b[<35;${bodyColumn};${row + 1}M`);
+			};
 			let lines = hub.render(width);
-			const agentRow = (name: string): string => lines.find(line => Bun.stripANSI(line).includes(` ${name}`))!;
-			expectFullRowBackground(agentRow("dev"));
-			expect(agentRow("scout")).not.toContain(theme.getBgAnsi("selectedBg"));
-			if (width === 40) expect(Bun.stripANSI(agentRow("dev"))).toContain("…");
-			else expect(agentRow("dev")).toContain("anthropic/claude-sonnet-4-5:high");
+			const dev = bodyRow(lines, " dev");
+			expect(lines[dev]).not.toContain(theme.getBgAnsi("selectedBg"));
+			if (width === 40) expect(Bun.stripANSI(lines[dev])).toContain("…");
+			else expect(lines[dev]).toContain("anthropic/claude-sonnet-4-5:high");
 
-			hub.handleInput("\x1b[B");
+			hover(lines, dev);
 			lines = hub.render(width);
-			expect(agentRow("dev")).not.toContain(theme.getBgAnsi("selectedBg"));
-			expectFullRowBackground(agentRow("scout"));
+			expectFullRowBackground(lines[dev]);
+			expect(lines[bodyRow(lines, " scout")]).not.toContain(theme.getBgAnsi("selectedBg"));
 
-			const devRow = lines.indexOf(agentRow("dev"));
-			const plain = Bun.stripANSI(lines[devRow]);
-			const bodyColumn = plain.indexOf("│", plain.indexOf("│") + 1) + 3;
-			hub.handleInput(`\x1b[<35;${bodyColumn};${devRow + 1}M`);
-			lines = hub.render(width);
-			expectFullRowBackground(agentRow("dev"));
-			expectFullRowBackground(agentRow("scout"));
-
-			hub.handleInput("\x1b[<35;1;1M"); // clear hover
-			hub.handleInput("\x1b[B");
-			hub.handleInput("\x1b[B"); // "+ New agent" row
-			lines = hub.render(width === 40 ? 32 : width);
-			const newRow = lines.find(line => Bun.stripANSI(line).split("│")[2]?.includes("+ New"))!;
-			expectFullRowBackground(newRow);
-			if (width === 40) expect(newRow).toContain("\x1b[0m");
+			const narrow = width === 40 ? 32 : width;
+			lines = hub.render(narrow);
+			const newRow = bodyRow(lines, "+ New");
+			hover(lines, newRow);
+			lines = hub.render(narrow);
+			expectFullRowBackground(lines[newRow]);
+			if (width === 40) expect(lines[newRow]).toContain("\x1b[0m");
 		});
 	}
-
-	test("drops the keyboard band from the list while the scope sidebar has focus", async () => {
-		const { hub } = await createHub(new TestSettings());
-		const devBody = (): string =>
-			hub
-				.render(200)
-				.find(line => Bun.stripANSI(line).split("│")[2]?.includes(" dev"))!
-				.split("│")[2]!;
-		expect(devBody()).toContain(theme.getBgAnsi("selectedBg"));
-
-		hub.handleInput("\x1b[D"); // left → scope focus
-		expect(devBody()).not.toContain(theme.getBgAnsi("selectedBg"));
-
-		hub.handleInput("\x1b[C"); // right → list focus
-		expect(devBody()).toContain(theme.getBgAnsi("selectedBg"));
-	});
 
 	test("sidebar scope filters the rows to one source", async () => {
 		const { hub, strip } = await createHub(new TestSettings());
