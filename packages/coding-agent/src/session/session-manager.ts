@@ -82,6 +82,7 @@ import {
 	type UsageStatistics,
 } from "./session-entries";
 import { currentRuntimeIdentity, type RuntimeIdentity } from "./runtime-identity";
+import { isArchivedSessionPath, materializeSessionFile } from "./session-archive";
 import {
 	filterSessionsForPicker,
 	findMostRecentNonEmptySession,
@@ -2372,8 +2373,33 @@ export class SessionManager {
 		this.#sessionClaim?.release?.();
 		this.#sessionClaim = undefined;
 
-		const resolvedSessionFile = path.resolve(sessionFile);
-		const loaded = loadedSession ?? (await loadSessionFile(resolvedSessionFile, this.#storage));
+		// `gc --archive` keeps cold transcripts gzipped outside the sessions
+		// tree. Bring one back to its own path before anything reads or appends
+		// to it: the writer appends raw JSONL, so a `.jsonl.gz` must never
+		// become this manager's session file.
+		//
+		// Asked for every session, not only a `.gz`. A run killed between a
+		// restore publishing the transcript and carrying its artifact tree home
+		// leaves a live `.jsonl` with its archive still beside it, and that is
+		// the path resume-by-id resolves to; opening it as if it were whole
+		// gives a session whose subagent transcripts and tool output are
+		// missing with nothing said. `materializeSessionFile` returns the path
+		// unchanged when there is no archive to finish, so this costs one
+		// `stat` on the ordinary route.
+		const requestedFile = path.resolve(sessionFile);
+		const fromArchive = isArchivedSessionPath(requestedFile);
+		const resolvedSessionFile = await materializeSessionFile(requestedFile);
+		if (fromArchive && this.#sessionDir === path.dirname(requestedFile)) {
+			// `SessionManager.open` derived the session dir from the archive path.
+			// Follow the transcript home, or /new and /branch would write there.
+			this.#sessionDir = path.dirname(resolvedSessionFile);
+		}
+		// A caller's snapshot of an archive was read before the restore took the
+		// gc lock. Another process may have restored that archive and appended a
+		// turn while this one waited, so the live file — not the snapshot — is
+		// what this manager opens and appends to.
+		const loaded =
+			fromArchive || !loadedSession ? await loadSessionFile(resolvedSessionFile, this.#storage) : loadedSession;
 		const sourceSize =
 			loaded.sourceSize !== undefined
 				? loaded.sourceSize
@@ -4230,9 +4256,15 @@ export class SessionManager {
 
 		// A missing source must fail instead of forking an empty parentless session:
 		// the loader swallows ENOENT by default for fresh-session opens, so fork opts out.
+		// A cold session forks like any other: bring it back from the archive
+		// first, so the transcript and the artifact tree beside it (subagent
+		// transcripts, tool output) are both where the fork's artifact copy
+		// below looks for them.
 		let sourceEntries: FileEntry[];
+		let sourceFile = sourcePath;
 		try {
-			sourceEntries = await loadEntriesFromFile(sourcePath, storage, { throwIfMissing: true });
+			sourceFile = await materializeSessionFile(sourcePath);
+			sourceEntries = await loadEntriesFromFile(sourceFile, storage, { throwIfMissing: true });
 		} catch (err) {
 			if (isEnoent(err) || isEnotdir(err)) throw new ForkSourceNotFoundError(sourcePath);
 			throw err;
@@ -4260,7 +4292,7 @@ export class SessionManager {
 		manager.#header.additionalDirectories =
 			manager.#additionalDirectories.length > 0 ? manager.#additionalDirectories : undefined;
 		if (options?.seance) {
-			manager.#header.seanceSource = path.resolve(sourcePath);
+			manager.#header.seanceSource = path.resolve(sourceFile);
 			SessionManager.#neutralizeSessionInits(history);
 		}
 		manager.#sessionName = manager.#header.title;
@@ -4277,7 +4309,7 @@ export class SessionManager {
 		manager.#forceFileCreation = true;
 		await manager.#rewriteAtomically();
 		if (!options?.seance && options?.copyArtifacts !== false) {
-			await copySessionArtifacts(sourcePath, manager.#sessionFile!);
+			await copySessionArtifacts(sourceFile, manager.#sessionFile!);
 		}
 		return manager;
 	}
