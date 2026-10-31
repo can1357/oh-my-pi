@@ -655,6 +655,11 @@ export class ModelRegistry {
 		this.#backgroundRefresh = refreshPromise;
 	}
 
+	/** Whether background discovery started by {@link refreshInBackground} is still running and may add models. */
+	isBackgroundRefreshPending(): boolean {
+		return this.#backgroundRefresh !== undefined;
+	}
+
 	/**
 	 * Wait for any in-flight background model discovery to settle.
 	 *
