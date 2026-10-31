@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the title model's Chinese or Japanese answer to a message becoming the session title; a Chinese or Japanese title ending in `。`, `！` or `？` now drops it like a trailing `.` ([#17553](https://github.com/can1357/oh-my-pi/pull/17553) by [@bigHippoZz](https://github.com/bigHippoZz))
+
 ## [18.14.1] - 2026-10-31
 
 ### Added

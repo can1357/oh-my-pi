@@ -210,19 +210,56 @@ export const NO_TITLE_SENTINEL = "none";
  */
 const MAX_TITLE_CHARS = 80;
 const MAX_TITLE_WORDS = 12;
+/**
+ * Han and kana, which Chinese and Japanese write without spaces between words:
+ * {@link TITLE_WORD} reads a whole such sentence as one word, so the word bound
+ * cannot tell a title in these scripts from an answer.
+ */
+const UNSPACED_SCRIPT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
+/**
+ * Full-width clause and sentence punctuation. A title is one phrase, so one of
+ * these left inside a Han/kana title splits it into clauses: an answer. The
+ * enumeration comma `、` only counts in Japanese (see {@link JAPANESE_KANA}).
+ */
+const CLAUSE_PUNCTUATION = /[。！？；，]/u;
+/**
+ * Hiragana, which Chinese never uses. Japanese writes its ordinary clause comma
+ * as `、`, so there it splits clauses; Chinese titles list items with it.
+ */
+const JAPANESE_KANA = /\p{Script=Hiragana}/u;
+/**
+ * A short quoted, bracketed or code span. Punctuation inside one names the
+ * title's subject (`修复中文逗号（，）解析错误`) instead of splitting clauses.
+ */
+const QUOTED_SPAN =
+	/`[^`]{1,16}`|（[^（）]{1,16}）|\([^()]{1,16}\)|「[^「」]{1,16}」|『[^『』]{1,16}』|“[^“”]{1,16}”|‘[^‘’]{1,16}’|"[^"]{1,16}"/gu;
+
+/**
+ * Whether a Han/kana title splits into clauses outside its quoted spans: an
+ * answer, not a title. A span that is the whole title quotes nothing, so a
+ * fully bracketed answer is checked as is.
+ */
+function splitsIntoClauses(title: string): boolean {
+	const outsideSpans = title.replace(QUOTED_SPAN, " ");
+	const text = outsideSpans.trim() ? outsideSpans : title;
+	return CLAUSE_PUNCTUATION.test(text) || (JAPANESE_KANA.test(title) && text.includes("、"));
+}
 
 export function normalizeGeneratedTitle(value: string | null | undefined, sourceText?: string): string | null {
 	const firstLine = value?.trim().split(/\r?\n/, 1)[0]?.trim();
 	if (!firstLine) return null;
 	const unquoted = firstLine.replace(/^["']|["']$/g, "").trim();
 	if (/^<title\s*\/>$/i.test(unquoted)) return null;
-	const title = unquoted
+	const stripped = unquoted
 		.replace(/^<title>/i, "")
 		.replace(/<\/title>$/i, "")
 		.replace(/^["']|["']$/g, "")
 		.replace(/[.!?]$/, "")
 		.trim();
+	const unspaced = UNSPACED_SCRIPT.test(stripped);
+	const title = unspaced ? stripped.replace(/[。！？]$/u, "").trimEnd() : stripped;
 	if (!title || title.toLowerCase() === NO_TITLE_SENTINEL) return null;
+	if (unspaced && splitsIntoClauses(title)) return null;
 	// Zero word characters means pure punctuation/symbol junk (e.g. ".."), which
 	// a sampling model occasionally emits instead of a title; reject so the
 	// caller defers titling rather than naming the session "..".

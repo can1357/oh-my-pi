@@ -191,6 +191,28 @@ describe("normalizeGeneratedTitle", () => {
 		// A normal 3-7 word title is unaffected.
 		expect(normalizeGeneratedTitle("Investigate the title resolver bug")).toBe("Investigate the title resolver bug");
 	});
+
+	it("rejects a Chinese answer the model produced instead of a title", () => {
+		// Chinese writes no spaces between words, so a whole answer sentence used to
+		// count as a handful of words and pass the word bound as a title.
+		const answer = "我是由大语言模型驱动的 AI 助手，具体模型名称和版本号不对外确认。你可以直接叫我“助手”。";
+		expect(normalizeGeneratedTitle(answer, "你是什么大模型呢")).toBeNull();
+		expect(
+			normalizeGeneratedTitle("人生的意义因人而异，很多哲学家认为意义需要自己去创造", "人生的意义是啥"),
+		).toBeNull();
+		// Japanese writes its clause comma as `、`, which Chinese titles use only to list items.
+		expect(normalizeGeneratedTitle("私はAIアシスタントで、質問に答えます。", "あなたは誰")).toBeNull();
+	});
+
+	it("keeps a Chinese title whose punctuation splits no clause, minus its trailing terminator", () => {
+		expect(normalizeGeneratedTitle("[修复] 手机端登录按钮在横屏模式下点击无响应的问题。")).toBe(
+			"[修复] 手机端登录按钮在横屏模式下点击无响应的问题",
+		);
+		expect(normalizeGeneratedTitle("[提问] 人生的意义是什么？")).toBe("[提问] 人生的意义是什么");
+		expect(normalizeGeneratedTitle("[新增] 导入、导出功能。")).toBe("[新增] 导入、导出功能");
+		// Bracketed punctuation is the title's subject, not a clause break.
+		expect(normalizeGeneratedTitle("修复中文逗号（，）解析错误。")).toBe("修复中文逗号（，）解析错误");
+	});
 });
 
 describe("normalizeGeneratedTitle source-aware casing", () => {
