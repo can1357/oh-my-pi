@@ -291,6 +291,31 @@ describe("print mode working indicator", () => {
 		expect(stdoutOutput.join("")).toBe("final answer\n");
 	});
 
+	it("says no model server is reachable when a retry could reach neither the model nor a fallback", async () => {
+		const delayed = createDelayedSession(makeAssistantMessage("final answer"));
+		const run = runPrintMode(delayed.session, { mode: "text", initialMessage: "hello" });
+		const retryStart = {
+			type: "auto_retry_start",
+			maxAttempts: 10,
+			delayMs: 500,
+			errorMessage: "Couldn't reach api.anthropic.com (getaddrinfo ENOTFOUND).",
+		} as const;
+
+		await delayed.promptStarted;
+		try {
+			// An ordinary retry stays silent; only one that reached no server is reported.
+			delayed.emit({ ...retryStart, attempt: 1 });
+			delayed.emit({ ...retryStart, attempt: 2, unreachable: true });
+		} finally {
+			delayed.resolvePrompt();
+			await run;
+		}
+
+		expect(stderrOutput.join("")).toBe(
+			"Working...\nNo model server reachable (check your connection), retrying (2/10)...\n",
+		);
+	});
+
 	it("flushes late JSON advisor events after catch-up before disposing", async () => {
 		const message = makeAssistantMessage("advisor-aware answer");
 		const messages: AssistantMessage[] = [];

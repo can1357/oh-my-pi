@@ -90,6 +90,7 @@ import {
 import { servedModelFromOpenRouterReasoning } from "./anthropic-signature";
 import { resolveCopilotRequestIdentity, wrapFetchForCopilotFallback } from "./github-copilot-headers";
 import { getNativeFinishReasonError } from "./native-finish-reason";
+import { OPENAI_COMPLETIONS_BASE_URL_OPTIONS } from "./openai-base-url";
 import {
 	applyChatCompletionsReasoningParams,
 	applyChatCompletionsToolStream,
@@ -1922,7 +1923,7 @@ function createRequestSetup(
 		sessionId,
 		promptCacheAffinityKey,
 		messages: context.messages,
-		defaultBaseUrl: "https://api.openai.com/v1",
+		...OPENAI_COMPLETIONS_BASE_URL_OPTIONS,
 		// Provider auth/header overlay: Kimi-code hosts require shared client
 		// attribution headers prepended before caller headers. Kept here (not in
 		// the shared helper) because it is provider-specific request setup.
@@ -1933,7 +1934,6 @@ function createRequestSetup(
 				: model.provider === "cline-pass"
 					? () => clinePassClientHeaders(promptCacheSessionId)
 					: undefined,
-		alibabaCodingPlanAuth: true,
 		azureChatCompletions: { apiVersion, deploymentName },
 	});
 	if (!setup.baseUrl) {

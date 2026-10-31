@@ -3785,6 +3785,9 @@ pub struct AutoRetryStartEvent {
 	pub error_message: String,
 	#[serde(rename = "errorId", default, skip_serializing_if = "Option::is_none")]
 	pub error_id: Option<i64>,
+	/// The request could not connect, and no fallback model's server answered either; the retry stays on this model.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub unreachable: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

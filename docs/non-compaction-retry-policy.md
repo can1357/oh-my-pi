@@ -85,7 +85,7 @@ Flow (`#handleRetryableError`):
 3. Calculate whether the current model's retry budget is exhausted.
 4. Classify the error, parse retry timing, and compute capped jittered backoff: `min(retry.baseDelayMs * 2^(attempt-1), 8000ms) * (75–100% jitter)`. Stale OpenAI Responses replay errors reset the provider session and use delay `0`.
 5. For usage limits, apply a successful credential switch or banked Claude/Codex reset immediately when the corresponding reset policy permits it; otherwise wait for the earlier of the provider hint and the next temporarily blocked sibling credential.
-6. When allowed, consult configured model fallback chains. `retry.fallbackOn` decides whether this error class may (`any`, `usage-limit`, `except-usage-limit`). A switch uses delay `0`; classifier refusals and account-policy denials only continue when a credential or model switch succeeds. Thinking-loop redirects stay on the same model; a temporarily blocked sibling credential within the wait cap is preferred over model fallback.
+6. When allowed, consult configured model fallback chains. `retry.fallbackOn` decides whether this error class may (`any`, `usage-limit`, `except-usage-limit`). A switch uses delay `0`; classifier refusals and account-policy denials only continue when a credential or model switch succeeds. Thinking-loop redirects stay on the same model; a temporarily blocked sibling credential within the wait cap is preferred over model fallback. When the request could not connect at all (no HTTP status, and a DNS failure or DNS timeout, no route, or connection refused; not a TLS failure or a request timeout), a candidate is used only if its host answers a credential-less `HEAD` sent through the same transport as its requests (`probeModelConnection`, 5 s timeout, redirects not followed, cancelled by `abortRetry()`); when no configured candidate with credentials answers, no model server is reachable and the retry stays on the current model. With no usable chain entry nothing is probed and the retry is not marked unreachable. A failure counts as "could not connect" only when its message is the sentence omp writes for a rejected request (`AIError.networkFailureSentenceKind`; the Anthropic, OpenAI-compatible, Azure and Codex transports write it), so a provider's own error text that mentions a refused connection does not. The probed host is the one the candidate's requests resolve to: a `pi-native` model's gateway at its `baseUrl`; for `anthropic-messages`, `openai-completions` and `openai-responses`, the route the candidate's credential resolves to (the last dispatched origin when that resolves nothing); other APIs only after a request has been sent. A candidate whose request is changed before it reaches its API transport (a provider `prepareModel`/`prepareRequest` such as Snowflake, Cloudflare AI Gateway, Bedrock Mantle or Muse Code; an extension-registered API; GitLab Duo, Kimi Code or Synthetic) is also probed only at the origin it last sent to, and a `.invalid` host is never probed. A candidate whose host cannot be resolved is treated as reachable.
 7. If the current model's retry budget is exhausted, stop unless a model switch or confirmed credential reset permits continuation. A fallback model receives a fresh retry budget; credential recovery keeps the cumulative count. Known thinking-only stream-close routes have a one-retry cap rather than the full configured budget.
 8. If the final delay exceeds `retry.maxDelayMs` and no credential/model switch happened, emit final failure without sleeping, except an authoritative usage-reset wait explicitly allowed by `retry.waitForUsageReset`.
 9. Record the recoverable error, emit `auto_retry_start`, and remove the failed assistant from active context unless preserving a resolved interrupted tool turn or proven-unexecuted tool-call/result pairs.
@@ -140,7 +140,7 @@ If the delay exceeds `retry.maxDelayMs` and no switch succeeds, retry normally f
 
 `abortRetry()`:
 
-- aborts `#retryAbortController` (if present)
+- aborts `#retryAbortController` (if present): a credential wait, a fallback-host probe, or the backoff sleep
 - resolves retry promise (`#resolveRetry()`) so awaiters are unblocked
 
 If abort hits while sleeping, catch path emits:
@@ -224,7 +224,7 @@ Client helpers:
 
 Session-level retry events:
 
-- `auto_retry_start { attempt, maxAttempts, delayMs, errorMessage, errorId? }`
+- `auto_retry_start { attempt, maxAttempts, delayMs, errorMessage, errorId?, unreachable? }` (`unreachable` is `true` when the request could not connect and no fallback model's server answered either; the TUI and text print mode then show "No model server reachable (check your connection), retrying (n/m)")
 - `auto_retry_end { success, attempt, finalError?, retryErrors? }`
 - `retry_fallback_applied { from, to, role, reason? }`
 - `retry_fallback_succeeded { model, role }`

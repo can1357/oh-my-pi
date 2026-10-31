@@ -198,6 +198,20 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		ctx.retryLoader!.stop();
 	});
 
+	it("says no model server is reachable when the retry reached neither the model nor a fallback", async () => {
+		const { ctx, streamState } = createContext();
+		const controller = new EventController(ctx);
+		const visible = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+
+		streamState.isStreaming = true;
+		await controller.handleEvent({ ...RETRY_START, unreachable: true } as AgentSessionEvent);
+
+		expect(visible(ctx.retryLoader!.render(120).join("\n"))).toContain(
+			"No model server reachable (check your connection), retrying (1/3) in 1.0s",
+		);
+		ctx.retryLoader!.stop();
+	});
+
 	it("re-shows the Working… loader after a subagent task completes while the session keeps streaming", async () => {
 		const { ctx, streamState, statusContainer, workingLoaders } = createContext();
 		const controller = new EventController(ctx);

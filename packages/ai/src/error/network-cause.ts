@@ -138,6 +138,23 @@ export function classifyNetworkCause(err: unknown): NetworkFailure | undefined {
 	return undefined;
 }
 
+/** Fixed wording before and after the host (and detail) of each {@link networkFailureMessage} sentence. */
+const SENTENCES: Record<NetworkFailureKind, readonly [prefix: string, suffix: string]> = {
+	offline: ["No internet connection: couldn't reach ", ". Check your network or proxy and try again."],
+	unreachable: ["Couldn't reach ", ". Check the URL, your network, or proxy."],
+	// The refused sentence carries no detail: {@link detailOf} returns none for it.
+	refused: ["Couldn't connect to ", " (connection refused). Check that the server is running and reachable."],
+	tls: [
+		"TLS certificate verification failed for ",
+		". If you're behind a TLS-inspecting proxy, its CA may need to be trusted.",
+	],
+};
+
+const SENTENCE_PATTERNS = (Object.entries(SENTENCES) as [NetworkFailureKind, readonly [string, string]][]).map(
+	([kind, parts]) =>
+		[kind, new RegExp(parts.map(part => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".+?"))] as const,
+);
+
 /**
  * User-visible sentence for a network failure, or `undefined` when the error is
  * not one. `requestUrl` wins over any host parsed out of the error text.
@@ -156,16 +173,21 @@ export function networkFailureMessage(err: unknown, requestUrl?: string): string
 	}
 	const host = urlHost ?? failure.host ?? UNKNOWN_HOST;
 	const detail = failure.detail === undefined ? "" : ` (${failure.detail})`;
-	switch (failure.kind) {
-		case "offline":
-			return `No internet connection: couldn't reach ${host}${detail}. Check your network or proxy and try again.`;
-		case "unreachable":
-			return `Couldn't reach ${host}${detail}. Check the URL, your network, or proxy.`;
-		case "refused":
-			return `Couldn't connect to ${host} (connection refused). Check that the server is running and reachable.`;
-		case "tls":
-			return `TLS certificate verification failed for ${host}${detail}. If you're behind a TLS-inspecting proxy, its CA may need to be trusted.`;
-	}
+	const [prefix, suffix] = SENTENCES[failure.kind];
+	return `${prefix}${host}${detail}${suffix}`;
+}
+
+/**
+ * Kind of the {@link networkFailureMessage} sentence in `text`, or `undefined`.
+ *
+ * Only omp's own rewrite of a rejected `fetch` writes these sentences, so this
+ * reads a flattened message (an assistant `errorMessage`) as a transport
+ * failure only when one happened. {@link classifyNetworkCause} on free text
+ * would also take a provider's own words for one: an error frame inside an
+ * HTTP 200 stream that says `upstream connection refused`.
+ */
+export function networkFailureSentenceKind(text: string): NetworkFailureKind | undefined {
+	return SENTENCE_PATTERNS.find(([, pattern]) => pattern.test(text))?.[0];
 }
 
 /**

@@ -19,6 +19,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { probeModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { shouldDropTruncatedThinkingOnlyAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-credit";
@@ -2269,6 +2270,12 @@ export class TurnRecovery {
 			refusalWalk?: boolean;
 			/** The retry policy retries the failed model if this hop does not switch. */
 			sameModelRetryAvailable?: boolean;
+			/**
+			 * Set when the failed request never connected. A candidate whose host does
+			 * not answer a probe is skipped, and `unreachable` records that one was.
+			 * An aborted `signal` ends the walk without a switch.
+			 */
+			fallbackProbe?: { unreachable: boolean; signal: AbortSignal };
 		},
 	): Promise<boolean> {
 		const ceiling = this.#host.thinkingLevelCeiling();
@@ -2388,6 +2395,19 @@ export class TurnRecovery {
 					if (!(error instanceof AIError.MissingApiKeyError)) throw error;
 				}
 				if (!apiKey) continue;
+				// The failed request never connected, which says nothing about the model.
+				// A fallback whose host does not answer either would fail the same way.
+				if (options?.fallbackProbe) {
+					const reachable = await probeModelConnection(candidate, {
+						apiKey,
+						signal: options.fallbackProbe.signal,
+					});
+					if (options.fallbackProbe.signal.aborted) return false;
+					if (!reachable) {
+						options.fallbackProbe.unreachable = true;
+						continue;
+					}
+				}
 				const previousEditMode = this.#host.resolveActiveEditMode();
 				const previousSystemPrompt = [...this.#host.agent.state.systemPrompt];
 				const previousTools = [...this.#host.agent.state.tools];
@@ -2933,6 +2953,27 @@ export class TurnRecovery {
 			return maxDelayMs > 0 && waitMs > maxDelayMs && !waitForUsageReset;
 		};
 
+		// A request that never connected (no DNS, no route, connection refused) only
+		// switches to a fallback whose host answers a probe. When none does, no model
+		// server is reachable: the same-model retry runs as usual and is announced as
+		// unreachable. Only the sentence omp writes when a `fetch` is rejected counts:
+		// a provider's own error text (an error frame in an HTTP 200 stream saying
+		// `upstream connection refused`) or any HTTP status means a server answered,
+		// and a TLS failure reached the host, so those walk the chain as before.
+		// `abortRetry()` cancels the probes like the backoff sleep below; a route that
+		// drops packets would otherwise hold the cancel for the probe timeout.
+		const networkFailureKind =
+			(message.errorStatus ?? AIError.status({ message: errorMessage })) === undefined
+				? AIError.networkFailureSentenceKind(errorMessage)
+				: undefined;
+		const probeAbortController =
+			networkFailureKind !== undefined && networkFailureKind !== "tls" ? new AbortController() : undefined;
+		const fallbackProbe = probeAbortController && { unreachable: false, signal: probeAbortController.signal };
+		if (probeAbortController) {
+			this.#retryAbortController?.abort();
+			this.#retryAbortController = probeAbortController;
+		}
+
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
 			// The retry budget bounds same-model retries against a failing provider. A
 			// classifier refusal is not that: retrying the same model reproduces it, and
@@ -2995,6 +3036,7 @@ export class TurnRecovery {
 								? parsedRetryAfterMs
 								: delayMs,
 						),
+					fallbackProbe,
 				});
 			}
 			// Auto fallback from a Fireworks Fast variant to its base model. Independent
@@ -3010,6 +3052,12 @@ export class TurnRecovery {
 				delayMs = parsedRetryAfterMs;
 			}
 		}
+		if (probeAbortController) {
+			if (this.#retryAbortController !== probeAbortController) return false;
+			this.#retryAbortController = undefined;
+			if (probeAbortController.signal.aborted) return this.#endCancelledRetry();
+		}
+		const noServerReachable = fallbackProbe?.unreachable === true && !switchedModel;
 
 		if (retryBudgetExhausted) {
 			if (!switchedModel && !switchedCredential) {
@@ -3090,6 +3138,7 @@ export class TurnRecovery {
 			delayMs,
 			errorMessage,
 			errorId: message.errorId,
+			unreachable: noServerReachable || undefined,
 		});
 		if (this.#host.abortInProgress() || this.#host.promptGeneration() !== generation) {
 			return this.#endCancelledRetry();

@@ -64,7 +64,7 @@ import {
 	type Usage,
 } from "../types";
 import { resolveCopilotRequestIdentity } from "./github-copilot-headers";
-import { resolveXaiBaseUrl } from "./xai-base-url";
+import { resolveOpenAIRequestBaseUrl } from "./openai-base-url";
 
 export type { OpenAIPromptCacheOptions } from "../types";
 
@@ -102,7 +102,6 @@ import {
 	getCachedCopilotIntegrationId,
 	getCopilotIntegrationCacheKey,
 	hasCopilotVisionInput,
-	resolveGitHubCopilotBaseUrl,
 } from "./github-copilot-headers";
 import { servedModelFromOpenRouterReasoning } from "./anthropic-signature";
 import { getNativeFinishReasonError } from "./native-finish-reason";
@@ -216,17 +215,6 @@ export interface OpenAIRequestSetup {
 	copilotCacheSnapshot: string | null | undefined;
 }
 
-function normalizeSakanaRequestBaseUrl(baseUrl: string | undefined): string | undefined {
-	const value = baseUrl?.trim();
-	if (!value) return undefined;
-	const normalized = value.replace(/\/+$/, "");
-	return normalized.endsWith("/v1") ? normalized : `${normalized}/v1`;
-}
-
-function resolveSakanaRequestBaseUrl(): string | undefined {
-	return normalizeSakanaRequestBaseUrl($env.SAKANA_BASE_URL) ?? normalizeSakanaRequestBaseUrl($env.FUGU_BASE_URL);
-}
-
 function applyCoreWeaveProjectHeader(headers: Record<string, string>): void {
 	removeBlankCoreWeaveProjectHeaders(headers);
 	if (hasCoreWeaveProjectHeader(headers)) {
@@ -268,31 +256,15 @@ export function resolveOpenAIRequestSetup(
 	let copilotPremiumRequests: number | undefined;
 	let copilotCacheKey: string | undefined;
 	let copilotCacheSnapshot: string | null | undefined;
-	let baseUrl = model.baseUrl;
-	if (model.provider === "moonshot") {
-		// Bundled `moonshot` catalog models hardcode the international endpoint
-		// (`api.moonshot.ai`). MOONSHOT_BASE_URL lets users redirect the provider
-		// at the China platform (`api.moonshot.cn`), which only accepts China keys
-		// and rejects the international host. (#2883)
-		const moonshotBaseUrl = $env.MOONSHOT_BASE_URL?.trim();
-		if (moonshotBaseUrl) {
-			baseUrl = moonshotBaseUrl;
-		}
-	}
-	if (model.provider === "sakana") {
-		const sakanaBaseUrl = resolveSakanaRequestBaseUrl();
-		if (sakanaBaseUrl) {
-			baseUrl = sakanaBaseUrl;
-		}
-	}
-	if (model.provider === "xai" || model.provider === "xai-oauth") {
-		baseUrl = resolveXaiBaseUrl(model.provider, baseUrl, rawApiKey);
-	}
+	// Endpoint rules live in `resolveOpenAIRequestBaseUrl` so a connection probe
+	// resolves the same host; the default is applied below, after Azure routing.
+	let baseUrl = resolveOpenAIRequestBaseUrl(model, rawApiKey, {
+		alibabaCodingPlanAuth: options.alibabaCodingPlanAuth,
+	});
 	if (model.provider === "github-copilot") {
 		const copilotApiKey = parseGitHubCopilotApiKey(rawApiKey);
 		apiKey = copilotApiKey.accessToken;
-		const copilotBaseUrl = resolveGitHubCopilotBaseUrl(model.baseUrl, rawApiKey) ?? model.baseUrl;
-		copilotCacheKey = getCopilotIntegrationCacheKey(rawApiKey, copilotBaseUrl);
+		copilotCacheKey = getCopilotIntegrationCacheKey(rawApiKey, baseUrl);
 		const copilotCached = getCachedCopilotIntegrationId(copilotCacheKey);
 		const copilot = buildCopilotDynamicHeaders({
 			messages: options.messages,
@@ -306,7 +278,6 @@ export function resolveOpenAIRequestSetup(
 		});
 		Object.assign(headers, copilot.headers);
 		copilotPremiumRequests = copilot.premiumRequests;
-		baseUrl = copilotBaseUrl;
 		copilotCacheSnapshot = copilotCached ?? null;
 	}
 
@@ -320,7 +291,6 @@ export function resolveOpenAIRequestSetup(
 		const credential = parseAlibabaTokenPlanCredential(rawApiKey);
 		if (!credential) throw new AIError.ConfigurationError("Invalid QwenCloud Token Plan credential");
 		apiKey = credential.token;
-		if (credential.baseUrl) baseUrl = credential.baseUrl;
 	}
 
 	if (options.alibabaCodingPlanAuth && model.provider === "alibaba-coding-plan") {
@@ -329,11 +299,8 @@ export function resolveOpenAIRequestSetup(
 			if (typeof parsed?.token === "string") {
 				apiKey = parsed.token;
 			}
-			if (typeof parsed?.enterpriseUrl === "string") {
-				baseUrl = parsed.enterpriseUrl;
-			}
 		} catch {
-			// Not JSON — use raw apiKey and catalog baseUrl.
+			// Not JSON — use raw apiKey.
 		}
 	}
 

@@ -3988,6 +3988,10 @@
 				},
 				"errorId": {
 					"type": "integer"
+				},
+				"unreachable": {
+					"type": "boolean",
+					"description": "The request could not connect, and no fallback model's server answered either; the retry stays on this model."
 				}
 			},
 			"required": [

@@ -371,6 +371,12 @@ async function runPrintModeCore(
 			// say when it crossed its cost thresholds, and a memory failure must not pass
 			// as an answer that used memories.
 			writeStderrLine(event.source === COST_GATE_NOTICE_SOURCE ? event.message : `Warning: ${event.message}`);
+		} else if (mode === "text" && event.type === "auto_retry_start" && event.unreachable) {
+			// Text mode shows only `Working...` while a turn runs; a retry loop that
+			// reaches no model server must not look like a model that is still thinking.
+			writeStderrLine(
+				`No model server reachable (check your connection), retrying (${event.attempt}/${event.maxAttempts})...`,
+			);
 		}
 	});
 

@@ -1,8 +1,13 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { buildAnthropicClientOptions } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { resolveAnthropicPrewarmTarget } from "@oh-my-pi/pi-ai/providers/anthropic-http-options";
-import { prewarmModelConnection, resetConnectionPrewarmForTesting } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
+import {
+	prewarmModelConnection,
+	probeModelConnection,
+	resetConnectionPrewarmForTesting,
+} from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import type { FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
+import { PROVIDER_REGISTRY } from "@oh-my-pi/pi-ai/registry/registry";
 import { resetDispatchOriginsForTesting, transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Api } from "@oh-my-pi/pi-catalog/types";
@@ -128,5 +133,250 @@ describe("prewarmModelConnection", () => {
 		);
 
 		expect(calls).toHaveLength(0);
+	});
+});
+
+describe("probeModelConnection", () => {
+	it("probes a local server's base URL before its first request", async () => {
+		// A fallback has never sent a request, and a local server is exactly the
+		// host a warm-up skips; the probe must still reach it to report it alive.
+		const { calls, fetch } = captureFetch();
+		const local = model("local-llm", "openai-completions", "http://127.0.0.1:11434/v1");
+
+		await expect(probeModelConnection(local, { apiKey: "local-key", fetch })).resolves.toBe(true);
+
+		expect(calls.map(call => [call.url, call.init.method])).toEqual([["http://127.0.0.1:11434", "HEAD"]]);
+	});
+
+	it("reports a host whose connection is rejected as unreachable, once per origin and transport", async () => {
+		let requests = 0;
+		const fetch: FetchImpl = async () => {
+			requests++;
+			throw Object.assign(new TypeError("getaddrinfo ENOTFOUND api.openai.com"), { code: "ENOTFOUND" });
+		};
+		const openai = model("openai", "openai-responses", "https://api.openai.com/v1");
+
+		await expect(probeModelConnection(openai, { apiKey: "sk-test", fetch })).resolves.toBe(false);
+		// A second chain entry on the same host reuses the answer instead of sending another probe.
+		await expect(probeModelConnection(openai, { apiKey: "sk-test", fetch })).resolves.toBe(false);
+		expect(requests).toBe(1);
+	});
+
+	it("shares one probe per host on the default transport, as fallback recovery uses it", async () => {
+		// Turn recovery passes no fetch: back-to-back chain entries and parallel
+		// sessions on one host must send one probe between them.
+		const fetchSpy = vi
+			.spyOn(globalThis, "fetch")
+			.mockImplementation(
+				Object.assign(async () => new Response(null, { status: 404 }), { preconnect: fetch.preconnect }),
+			);
+		const openai = model("openai", "openai-responses", "https://api.openai.com/v1");
+
+		try {
+			await expect(probeModelConnection(openai, { apiKey: "sk-test" })).resolves.toBe(true);
+			await expect(probeModelConnection(openai, { apiKey: "sk-test" })).resolves.toBe(true);
+			expect(fetchSpy.mock.calls.map(call => String(call[0]))).toEqual(["https://api.openai.com"]);
+		} finally {
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("does not reuse one transport's failed probe for another transport to the same host", async () => {
+		const openai = model("openai", "openai-responses", "https://api.openai.com/v1");
+		const rejecting: FetchImpl = async () => {
+			throw Object.assign(new TypeError("getaddrinfo ENOTFOUND api.openai.com"), { code: "ENOTFOUND" });
+		};
+		const { calls, fetch: responding } = captureFetch();
+
+		await expect(probeModelConnection(openai, { apiKey: "sk-test", fetch: rejecting })).resolves.toBe(false);
+		await expect(probeModelConnection(openai, { apiKey: "sk-test", fetch: responding })).resolves.toBe(true);
+		expect(calls).toHaveLength(1);
+	});
+
+	it("does not reuse one provider's failed probe for another provider on the same host", async () => {
+		// Each provider has its own proxy (`PI_PROXY_<PROVIDER>`) and TLS options.
+		const rejectUnlessProxied: FetchImpl = async (_input, init) => {
+			if ("proxy" in (init ?? {})) return new Response(null, { status: 404 });
+			throw Object.assign(new TypeError("getaddrinfo ENOTFOUND gateway.example"), { code: "ENOTFOUND" });
+		};
+		await withEnv({ PI_PROXY_PROXIED_GW: "http://proxy.corp.example:3128" }, async () => {
+			const direct = model("direct-gw", "openai-completions", "https://gateway.example/v1");
+			const proxied = model("proxied-gw", "openai-completions", "https://gateway.example/v1");
+			await expect(probeModelConnection(direct, { apiKey: "k", fetch: rejectUnlessProxied })).resolves.toBe(false);
+			await expect(probeModelConnection(proxied, { apiKey: "k", fetch: rejectUnlessProxied })).resolves.toBe(true);
+		});
+	});
+
+	it.each([
+		[
+			"MOONSHOT_BASE_URL",
+			"moonshot",
+			"https://api.moonshot.ai/v1",
+			"https://api.moonshot.cn/v1",
+			"https://api.moonshot.cn",
+		],
+		["XAI_BASE_URL", "xai", "https://api.x.ai/v1", "https://xai-proxy.example/v1", "https://xai-proxy.example"],
+	])(
+		"probes the host %s sends requests to before the first request",
+		async (env, provider, baseUrl, override, origin) => {
+			const { calls, fetch } = captureFetch();
+			await withEnv({ [env]: override }, async () => {
+				await probeModelConnection(model(provider, "openai-completions", baseUrl), { apiKey: "sk-test", fetch });
+			});
+
+			expect(calls.map(call => call.url)).toEqual([origin]);
+		},
+	);
+
+	it("probes an Anthropic gateway with the real request's URL and TLS options", async () => {
+		const { calls, fetch } = captureFetch();
+		await withEnv({ ANTHROPIC_BASE_URL: "https://llm-gateway.corp.example" }, async () => {
+			await probeModelConnection(ANTHROPIC, { apiKey: "sk-ant-api-test", fetch });
+			const real = buildAnthropicClientOptions({ model: ANTHROPIC, apiKey: "sk-ant-api-test", extraBetas: [] });
+			expect(calls.map(call => [call.url, call.init.tls])).toEqual([
+				["https://llm-gateway.corp.example", real.fetchOptions?.tls],
+			]);
+		});
+	});
+
+	it("treats a model whose request route it cannot work out as reachable, without probing", async () => {
+		// Never skip a fallback on a guessed URL: an API with its own endpoint rules
+		// that has not sent a request yet keeps today's behaviour.
+		const { calls, fetch } = captureFetch();
+		const google = model("google", "google-generative-ai", "https://generativelanguage.googleapis.com/v1beta");
+
+		await expect(probeModelConnection(google, { apiKey: "g-test", fetch })).resolves.toBe(true);
+		expect(calls).toHaveLength(0);
+	});
+
+	it("probes the route the selected credential resolves to, not another account's last request", async () => {
+		// Dispatch history is process-wide: a business-plan session sent this model
+		// to its plan host, while the fallback's own credential is an individual one.
+		await dispatch(COPILOT, COPILOT_PLAN_URL);
+		const { calls, fetch } = captureFetch();
+
+		await probeModelConnection(COPILOT, { apiKey: "ghu_individual-token", fetch });
+
+		expect(calls.map(call => call.url)).toEqual(["https://api.githubcopilot.com"]);
+	});
+
+	it.each([
+		["google-generative-ai", "google"],
+		["anthropic-messages", "anthropic"],
+	] as const)("probes a pi-native %s model at its gateway, with no provider routing", async (api, provider) => {
+		// pi-native POSTs every API to `baseUrl/v1/pi/stream` through the plain
+		// transport fetch: no provider endpoint rules, no Anthropic TLS options.
+		const { calls, fetch } = captureFetch();
+		const gateway = buildModel({
+			...model(provider, api, "https://auth-gateway.example:8443"),
+			transport: "pi-native",
+		});
+
+		await expect(probeModelConnection(gateway, { apiKey: "gw-token", fetch })).resolves.toBe(true);
+
+		expect(calls.map(call => [call.url, call.init.tls])).toEqual([["https://auth-gateway.example:8443", undefined]]);
+	});
+
+	it("does not probe Snowflake's catalog placeholder before the account route is known", async () => {
+		// Dispatch swaps `snowflake-account.invalid` for the credential's account
+		// origin in the provider's `prepareRequest`, which a probe does not run.
+		const { calls, fetch } = captureFetch();
+		const snowflake = model("snowflake", "anthropic-messages", "https://snowflake-account.invalid/api/v2/cortex");
+
+		await expect(probeModelConnection(snowflake, { apiKey: "pat", fetch })).resolves.toBe(true);
+		expect(calls).toHaveLength(0);
+
+		// Once a request has gone out, the account origin it reached is the route.
+		await dispatch(snowflake, "https://myorg-myacct.snowflakecomputing.com/api/v2/cortex/v1/messages");
+		await probeModelConnection(snowflake, { apiKey: "pat", fetch });
+		expect(calls.map(call => call.url)).toEqual(["https://myorg-myacct.snowflakecomputing.com"]);
+	});
+
+	it("treats every provider whose requests are reshaped before dispatch as reachable until it has sent one", async () => {
+		// Provider preparers (`prepareModel` / `prepareRequest`) and the providers
+		// `stream.ts` routes to hosts of their own can move a request anywhere.
+		const reshaped = [
+			...PROVIDER_REGISTRY.filter(definition => definition.prepareModel || definition.prepareRequest).map(
+				definition => definition.id,
+			),
+			"gitlab-duo",
+			"kimi-code",
+			"synthetic",
+		];
+		expect(reshaped).toContain("snowflake");
+		const { calls, fetch } = captureFetch();
+
+		for (const provider of reshaped) {
+			for (const api of ["anthropic-messages", "openai-completions", "openai-responses"] as const) {
+				await expect(
+					probeModelConnection(model(provider, api, "https://catalog-host.example/v1"), { apiKey: "k", fetch }),
+				).resolves.toBe(true);
+			}
+		}
+		expect(calls).toHaveLength(0);
+	});
+
+	it("never probes a `.invalid` host", async () => {
+		const { calls, fetch } = captureFetch();
+		const placeholder = model("custom-gw", "openai-completions", "https://gateway.invalid/v1");
+
+		await expect(probeModelConnection(placeholder, { apiKey: "k", fetch })).resolves.toBe(true);
+		expect(calls).toHaveLength(0);
+	});
+
+	it("counts a redirect as an answer instead of following it", async () => {
+		// A gateway root that redirects to a docs or login host that is down.
+		const server = Bun.serve({
+			port: 0,
+			fetch: () => new Response(null, { status: 302, headers: { location: "http://127.0.0.1:1/" } }),
+		});
+		try {
+			const local = model("redirecting-gw", "openai-completions", `http://127.0.0.1:${server.port}/v1`);
+			await expect(probeModelConnection(local, { apiKey: "k" })).resolves.toBe(true);
+		} finally {
+			server.stop(true);
+		}
+	});
+
+	it("reports a host that never answers as unreachable once the probe's timeout fires", async () => {
+		// A route that drops packets never rejects; only the timeout ends the probe.
+		// The fake signal is already timed out, standing in for the 5 s wait.
+		vi.spyOn(AbortSignal, "timeout").mockImplementation(() =>
+			AbortSignal.abort(new DOMException("The operation timed out.", "TimeoutError")),
+		);
+		// Without a deadline the probe would wait forever; fail the test instead of hanging it.
+		const noDeadline = Promise.withResolvers<never>();
+		const fetch: FetchImpl = (_input, init) => {
+			const { promise, reject } = Promise.withResolvers<Response>();
+			const signal = init?.signal;
+			if (!signal) noDeadline.reject(new Error("the probe sent no deadline"));
+			else if (signal.aborted) reject(signal.reason);
+			else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+			return promise;
+		};
+
+		try {
+			const probe = probeModelConnection(model("openai", "openai-responses", "https://api.openai.com/v1"), {
+				apiKey: "sk-test",
+				fetch,
+			});
+			await expect(Promise.race([probe, noDeadline.promise])).resolves.toBe(false);
+		} finally {
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("sends the probe through the provider's proxy, like its requests", async () => {
+		const { calls, fetch } = captureFetch();
+		await withEnv({ PI_PROXY_PROBE_PROXY_TEST: "http://proxy.corp.example:3128" }, async () => {
+			await probeModelConnection(model("probe-proxy-test", "openai-completions", "https://llm.example/v1"), {
+				apiKey: "sk-test",
+				fetch,
+			});
+		});
+
+		expect(calls.map(call => [call.url, "proxy" in call.init ? call.init.proxy : undefined])).toEqual([
+			["https://llm.example", "http://proxy.corp.example:3128"],
+		]);
 	});
 });

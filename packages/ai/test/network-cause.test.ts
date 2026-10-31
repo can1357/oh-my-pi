@@ -149,6 +149,8 @@ describe("network failure classification flags", () => {
 			const message = AIError.networkFailureMessage(cause, "https://api.anthropic.com/v1/messages");
 			expect(AIError.classifyNetworkCause(cause)?.kind).toBe(kind);
 			if (message === undefined) throw new Error(`Expected a ${kind} network-failure sentence`);
+			// Turn recovery sees only the sentence: it must name the same failure.
+			expect(AIError.networkFailureSentenceKind(message)).toBe(kind);
 			expect(AIError.isProviderRetryableError(new Error(message))).toBe(true);
 			expect(AIError.is(AIError.classify(new Error(message)), AIError.Flag.Transient)).toBe(true);
 		}
@@ -157,6 +159,13 @@ describe("network failure classification flags", () => {
 		for (const message of [OFFLINE_ANTHROPIC, "getaddrinfo ENOTFOUND api.openai.com", "FailedToOpenSocket"]) {
 			expect(AIError.isProviderRetryableError(new Error(message))).toBe(true);
 			expect(AIError.is(AIError.classify(new Error(message)), AIError.Flag.Transient)).toBe(true);
+		}
+	});
+
+	it("reads only omp's own transport sentence, not a provider's words about a connection", () => {
+		// What a gateway can put in an error frame inside an HTTP 200 stream.
+		for (const message of ["upstream connection refused", "connect ECONNREFUSED 10.0.0.1:443"]) {
+			expect(AIError.networkFailureSentenceKind(message)).toBeUndefined();
 		}
 	});
 });

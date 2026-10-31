@@ -266,6 +266,8 @@ export interface AutoRetryStartEvent {
 	delayMs: number;
 	errorMessage: string;
 	errorId?: number;
+	/** The request could not connect, and no fallback model's server answered either; the retry stays on this model. */
+	unreachable?: boolean;
 }
 
 /** Persisted retry error whose transcript presentation changed when the retry saga settled. */
