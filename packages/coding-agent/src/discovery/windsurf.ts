@@ -20,7 +20,7 @@ import type { LoadContext, LoadResult } from "../capability/types";
 import {
 	discoverRuleFromMarkdown,
 	createSourceMeta,
-	expandEnvVarsDeep,
+	expandMCPServerEnv,
 	getProjectPath,
 	getUserPath,
 	loadFilesFromDir,
@@ -44,7 +44,7 @@ function parseServerConfig(
 		return { warning: `Invalid server config for "${name}" in ${path}` };
 	}
 
-	const server = expandEnvVarsDeep(serverConfig as Record<string, unknown>);
+	const { server, unresolvedEnv } = expandMCPServerEnv(serverConfig as Record<string, unknown>);
 	return {
 		server: {
 			name,
@@ -56,6 +56,7 @@ function parseServerConfig(
 			headers: server.headers as Record<string, string> | undefined,
 			transport: server.type as "stdio" | "sse" | "http" | undefined,
 			timeout: typeof server.timeout === "number" ? server.timeout : undefined,
+			...(unresolvedEnv && { unresolvedEnv }),
 			_source: createSourceMeta(PROVIDER_ID, path, scope),
 		},
 	};

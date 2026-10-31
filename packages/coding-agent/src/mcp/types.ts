@@ -69,6 +69,14 @@ export interface MCPAuthConfig {
 /** Encoding used for outgoing JSON-RPC request ids. */
 export type MCPRequestIdFormat = "string" | "number";
 
+/** A `${VAR}` reference in an MCP server config that has no value and no `:-default`. */
+export interface UnresolvedEnvReference {
+	/** Variable name inside `${...}`. */
+	variable: string;
+	/** Path of the config value holding the reference, e.g. `headers.Authorization` or `args[1]`. */
+	field: string;
+}
+
 /** Base server config with shared options */
 interface MCPServerConfigBase {
 	/** Whether this server is enabled (default: true) */
@@ -106,6 +114,13 @@ interface MCPServerConfigBase {
 		/** `prompt` param for the authorization request (default "consent"; "" to omit) */
 		prompt?: string;
 	};
+	/**
+	 * Runtime-only, set by discovery and never read from or written to config
+	 * files: `${VAR}` references in `command`/`args`/`env`/`url`/`headers` that
+	 * stayed unresolved. A config carrying any fails validation instead of
+	 * connecting with the literal placeholder.
+	 */
+	unresolvedEnv?: UnresolvedEnvReference[];
 }
 
 /** Stdio server configuration */

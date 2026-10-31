@@ -31,7 +31,7 @@ import {
 	calculateDepth,
 	createSourceMeta,
 	discoverExtensionModulePaths,
-	expandEnvVarsDeep,
+	expandMCPServerEnv,
 	getProjectPath,
 	getUserPath,
 } from "./helpers";
@@ -92,15 +92,13 @@ async function loadMCPFromSettings(
 		return { items, warnings };
 	}
 
-	const servers = expandEnvVarsDeep(parsed.mcpServers);
-
-	for (const [name, config] of Object.entries(servers)) {
+	for (const [name, config] of Object.entries(parsed.mcpServers)) {
 		if (!config || typeof config !== "object") {
 			warnings.push(`Invalid config for server "${name}" in ${path}`);
 			continue;
 		}
 
-		const raw = config as Record<string, unknown>;
+		const { server: raw, unresolvedEnv } = expandMCPServerEnv(config as Record<string, unknown>);
 
 		items.push({
 			name,
@@ -114,6 +112,7 @@ async function loadMCPFromSettings(
 				? (raw.type as "stdio" | "sse" | "http")
 				: undefined,
 			timeout: typeof raw.timeout === "number" ? raw.timeout : undefined,
+			...(unresolvedEnv && { unresolvedEnv }),
 			_source: createSourceMeta(PROVIDER_ID, path, level),
 		} as MCPServer);
 	}

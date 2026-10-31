@@ -9,7 +9,8 @@ import * as url from "node:url";
 import type { TSchema } from "@oh-my-pi/pi-ai";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
-import { resolveConfigValue } from "../config/resolve-config-value";
+import { isCommandConfigValue, resolveConfigValue } from "../config/resolve-config-value";
+import { substituteCommandEnvRefs } from "../discovery/helpers";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { AuthStorage } from "../session/auth-storage";
 import {
@@ -2117,6 +2118,9 @@ export class MCPManager {
 				// property, not mutate the prototype chain.
 				const nextEnv: Record<string, string> = Object.create(null);
 				const literalKeys = new Set(resolved.envLiteralKeys);
+				// `!command`-backed keys and their output: discovery leaves
+				// `${KEY}` literal in command/args for these.
+				const commandValues = new Map<string, string | undefined>();
 				for (const [key, value] of Object.entries(resolved.env)) {
 					// Provider-expanded keys are final package data: keep them
 					// verbatim (including empties) so they are never reinterpreted
@@ -2128,8 +2132,19 @@ export class MCPManager {
 					// A `!command` keeps running (shared, capped at 10 s); only this connect stops waiting.
 					const resolvedValue = await untilAborted(signal, () => resolveConfigValue(value));
 					if (resolvedValue) nextEnv[key] = resolvedValue;
+					if (isCommandConfigValue(value)) commandValues.set(key, resolvedValue);
 				}
 				resolved = { ...resolved, env: nextEnv };
+				// The child is spawned without a shell, so substitute those tokens now.
+				if (commandValues.size > 0) {
+					resolved = {
+						...resolved,
+						command: substituteCommandEnvRefs(resolved.command, commandValues),
+						...(resolved.args && {
+							args: resolved.args.map(arg => substituteCommandEnvRefs(arg, commandValues)),
+						}),
+					};
+				}
 			}
 		} else {
 			// Origin-locked servers (Agent Plugins §9.2) carry literal header

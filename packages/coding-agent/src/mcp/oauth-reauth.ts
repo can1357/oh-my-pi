@@ -16,7 +16,7 @@
 import * as path from "node:path";
 import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
 import type { OAuthController } from "@oh-my-pi/pi-ai/oauth/types";
-import { expandEnvVarsDeep } from "../discovery/helpers";
+import { expandEnvVarsDeep, expandMCPServerEnv, formatUnresolvedEnvError } from "../discovery/helpers";
 import { connectToServer, disconnectServer } from "./client";
 import { readMCPConfigFile, updateMCPServer } from "./config-writer";
 import { MCPManager } from "./manager";
@@ -742,7 +742,15 @@ export async function reauthorizeMcpServer(
 
 	const currentAuth = found.config.auth;
 	const baseConfig = stripMcpOAuthAuth(found.config);
-	const runtimeBaseConfig = expandEnvVarsDeep(baseConfig);
+	const { server: runtimeBaseConfig, unresolvedEnv } = expandMCPServerEnv(baseConfig);
+	// Same contract as discovery: never probe or authorize a remote endpoint
+	// with a literal `${VAR}` in its URL or headers. Only file entries are raw;
+	// a discovered (manager) entry already passed discovery's check. Stdio
+	// servers get their own refusal below and are never probed.
+	const isRemote = runtimeBaseConfig.type === "http" || runtimeBaseConfig.type === "sse";
+	if (unresolvedEnv && !found.discovered && isRemote) {
+		throw new McpReauthRefusalError(formatUnresolvedEnvError(name, unresolvedEnv));
+	}
 	// Resolve endpoints first: this fails fast for stdio transports and
 	// probes http/sse with { oauth: false }, so nothing destructive has
 	// happened yet if the server turns out not to need (or support) OAuth.

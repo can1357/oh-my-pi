@@ -12,7 +12,7 @@ import { registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
-import { createSourceMeta, expandEnvVarsDeep, parseRequestIdFormat } from "./helpers";
+import { createSourceMeta, expandMCPServerEnv, parseRequestIdFormat } from "./helpers";
 
 const PROVIDER_ID = "mcp-json";
 const DISPLAY_NAME = "MCP Config";
@@ -101,12 +101,8 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 				});
 			}
 
-			const server: MCPServer = {
-				name,
-				enabled,
-				timeout,
-				requestIdFormat,
-				instructions,
+			// Expand environment variables in the launch, endpoint, and auth fields.
+			const { server: expanded, unresolvedEnv } = expandMCPServerEnv({
 				command: serverConfig.command,
 				args: serverConfig.args,
 				env: serverConfig.env,
@@ -115,19 +111,26 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 				headers: serverConfig.headers,
 				auth: serverConfig.auth,
 				oauth: serverConfig.oauth,
+			});
+
+			const server: MCPServer = {
+				name,
+				enabled,
+				timeout,
+				requestIdFormat,
+				instructions,
+				command: expanded.command,
+				args: expanded.args,
+				env: expanded.env,
+				cwd: expanded.cwd,
+				url: expanded.url,
+				headers: expanded.headers,
+				auth: expanded.auth,
+				oauth: expanded.oauth,
 				transport: serverConfig.type,
+				...(unresolvedEnv && { unresolvedEnv }),
 				_source: source,
 			};
-
-			// Expand environment variables
-			if (server.command) server.command = expandEnvVarsDeep(server.command);
-			if (server.args) server.args = expandEnvVarsDeep(server.args);
-			if (server.env) server.env = expandEnvVarsDeep(server.env);
-			if (server.cwd) server.cwd = expandEnvVarsDeep(server.cwd);
-			if (server.url) server.url = expandEnvVarsDeep(server.url);
-			if (server.headers) server.headers = expandEnvVarsDeep(server.headers);
-			if (server.auth) server.auth = expandEnvVarsDeep(server.auth);
-			if (server.oauth) server.oauth = expandEnvVarsDeep(server.oauth);
 			servers.push(server);
 		}
 	}

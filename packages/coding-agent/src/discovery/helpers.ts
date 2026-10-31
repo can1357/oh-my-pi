@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { FileType, glob } from "@oh-my-pi/pi-natives";
 import {
+	$envExact,
 	CONFIG_DIR_NAME,
 	getAgentDir,
 	getConfigDirName,
@@ -30,7 +31,8 @@ import {
 import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { resolveClaudePaths } from "../config/claude-paths";
-import type { MCPRequestIdFormat } from "../mcp/types";
+import { isCommandConfigValue } from "../config/resolve-config-value";
+import type { MCPRequestIdFormat, UnresolvedEnvReference } from "../mcp/types";
 import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { normalizeToolNames } from "../tools/builtin-names";
 
@@ -536,55 +538,284 @@ export async function scanSkillsFromDir(
 }
 
 /**
- * Resolve a placeholder name against `extraEnv`, then the ambient environment.
- *
- * Inherited members of either map (`__proto__`, `constructor`, `toString`, …)
- * are never substitutable: `extraEnv` is consulted by own property only, and
- * `Bun.env`'s getter falls through to `Object.prototype`, so `${constructor}`
- * would otherwise stringify into the value as `function Object() { [native
- * code] }`. Every real variable is a string, so a non-string ambient hit means
- * the name resolved to a prototype member and counts as unset.
+ * Options for the MCP `${VAR}` expansion helpers ({@link expandMCPServerEnv},
+ * {@link expandEnvVarsInField}).
  */
-function lookupEnvValue(varName: string, extraEnv?: Record<string, string>): string | undefined {
+export interface MCPEnvExpansionOptions {
+	/** Values consulted before the ambient environment (e.g. plugin roots or plugin settings). */
+	extraEnv?: Record<string, string>;
+	/**
+	 * The server's own `env` block, consulted for `command`/`args` only after
+	 * `extraEnv` and the ambient environment both lack the variable: the child
+	 * is spawned without a shell, so a reference to it must be substituted
+	 * here rather than left literal.
+	 */
+	ownEnv?: MCPOwnEnv;
+	/**
+	 * VS Code and Cursor sources only: an unset VS Code predefined variable
+	 * (`${workspaceFolder}`, `${userHome}`, …) stays literal without being
+	 * reported. Every other source reports it like any unset variable.
+	 */
+	vscodePredefinedVariables?: boolean;
+}
+
+/** A stdio server's own `env` block as discovery expanded it, plus which keys reach the child verbatim. */
+export interface MCPOwnEnv {
+	/** Expanded env values, before connect-time resolution. */
+	env: Record<string, string>;
+	/**
+	 * Keys passed to the child verbatim (`envLiteralKeys`), or `true` when
+	 * every key is (`envPolicy: "literal"`). Other values are resolved at
+	 * connect time as `!command` output or a bare env-var name.
+	 */
+	literalKeys?: readonly string[] | true;
+}
+
+/** `${VAR}` / `${VAR:-default}` placeholder. */
+const ENV_PLACEHOLDER_PATTERN = /\$\{([^}:]+)(?::-([^}]*))?\}/g;
+
+/**
+ * Lookup result for an own-env `!command` value: it only exists once the
+ * manager runs the command at connect time, which then substitutes the
+ * placeholder ({@link substituteCommandEnvRefs}).
+ */
+const CONNECT_TIME_VALUE: unique symbol = Symbol("connect-time env value");
+
+/**
+ * Resolve a placeholder name against `extraEnv`, then the ambient environment,
+ * then `ownEnv`.
+ *
+ * Inherited members of any map (`__proto__`, `constructor`, `toString`, …)
+ * are never substitutable: `extraEnv`/`ownEnv` are consulted by own property
+ * only, and `Bun.env`'s getter falls through to `Object.prototype`, so
+ * `${constructor}` would otherwise stringify into the value as `function
+ * Object() { [native code] }`. Every real variable is a string, so a
+ * non-string hit means the name resolved to something else and counts as unset.
+ */
+function lookupEnvValue(
+	varName: string,
+	options: MCPEnvExpansionOptions,
+): string | typeof CONNECT_TIME_VALUE | undefined {
+	const { extraEnv, ownEnv } = options;
 	if (extraEnv !== undefined && Object.hasOwn(extraEnv, varName)) return extraEnv[varName];
 	const ambient = Bun.env[varName];
-	return typeof ambient === "string" ? ambient : undefined;
+	if (typeof ambient === "string") return ambient;
+	if (ownEnv === undefined || !Object.hasOwn(ownEnv.env, varName)) return undefined;
+	const value: unknown = ownEnv.env[varName];
+	if (typeof value !== "string") return undefined;
+	// Mirror the value the child receives (MCPManager auth resolution):
+	// literal keys verbatim, `!command` output once connected, otherwise the
+	// bare env-var name's value or the text itself; an empty result is dropped.
+	if (ownEnv.literalKeys === true || ownEnv.literalKeys?.includes(varName)) return value;
+	if (isCommandConfigValue(value)) return CONNECT_TIME_VALUE;
+	return $envExact(value) || value || undefined;
 }
+
+/**
+ * VS Code predefined variables (https://code.visualstudio.com/docs/reference/variables-reference).
+ * VS Code/Cursor MCP configs use them; with
+ * {@link MCPEnvExpansionOptions.vscodePredefinedVariables} they stay literal
+ * when no env var of that name is set and are not reported as unresolved.
+ */
+const VSCODE_PREDEFINED_VARIABLES: ReadonlySet<string> = new Set([
+	"workspaceFolder",
+	"workspaceFolderBasename",
+	"userHome",
+	"cwd",
+	"pathSeparator",
+	"/",
+	"execPath",
+	"defaultBuildTask",
+	"file",
+	"fileBasename",
+	"fileBasenameNoExtension",
+	"fileDirname",
+	"fileDirnameBasename",
+	"fileExtname",
+	"fileWorkspaceFolder",
+	"relativeFile",
+	"relativeFileDirname",
+	"lineNumber",
+	"columnNumber",
+	"selectedText",
+]);
 
 /**
  * Expand environment variables in a string.
  * Supports ${VAR} and ${VAR:-default} syntax.
+ *
+ * `onUnresolved` receives the name of every plain `${VAR}` reference that has
+ * no value and no default (except VS Code predefined variables when
+ * `options.vscodePredefinedVariables` is set); the reference stays literal in
+ * the result either way. A reference to a command-backed own-env value stays
+ * literal unreported: the manager substitutes it at connect time.
  */
-function expandEnvVars(value: string, extraEnv?: Record<string, string>): string {
-	return value.replace(/\$\{([^}:]+)(?::-([^}]*))?\}/g, (_, varName: string, defaultValue?: string) => {
-		const envValue = lookupEnvValue(varName, extraEnv);
+function expandEnvVars(
+	value: string,
+	options: MCPEnvExpansionOptions,
+	onUnresolved: ((varName: string) => void) | undefined,
+): string {
+	return value.replace(ENV_PLACEHOLDER_PATTERN, (match: string, varName: string, defaultValue?: string) => {
+		const envValue = lookupEnvValue(varName, options);
+		if (envValue === CONNECT_TIME_VALUE) return match;
 		// `${VAR:-default}` follows POSIX `:-`: the default applies when the
 		// variable is unset OR empty. Plain `${VAR}` keeps the value verbatim
 		// (even an empty one) and stays literal when unset.
 		if (envValue !== undefined && (defaultValue === undefined || envValue !== "")) return envValue;
 		if (defaultValue !== undefined) return defaultValue;
+		if (!(options.vscodePredefinedVariables && VSCODE_PREDEFINED_VARIABLES.has(varName))) onUnresolved?.(varName);
 		return `\${${varName}}`;
 	});
 }
 
 /**
- * Recursively expand environment variables in an object.
+ * Connect-time half of own-env substitution in a stdio server's
+ * `command`/`args`: replace each `${KEY}`/`${KEY:-default}` token whose KEY is
+ * in `commandValues` (the server's `!command`-backed env keys, mapped to their
+ * output) — exactly the tokens discovery left literal for them. Other text is
+ * never re-expanded. Empty or missing output falls back to the `:-default`, else
+ * the token stays, as the env entry itself is dropped.
  */
-export function expandEnvVarsDeep<T>(obj: T, extraEnv?: Record<string, string>): T {
+export function substituteCommandEnvRefs(
+	value: string,
+	commandValues: ReadonlyMap<string, string | undefined>,
+): string {
+	return value.replace(ENV_PLACEHOLDER_PATTERN, (match: string, varName: string, defaultValue?: string) => {
+		if (!commandValues.has(varName)) return match;
+		return commandValues.get(varName) || (defaultValue ?? match);
+	});
+}
+
+/**
+ * Recursive expansion that reports each unresolved reference together with the
+ * dotted path (`headers.Authorization`, `args[1]`) of the string holding it.
+ */
+function expandEnvVarsAt<T>(
+	obj: T,
+	options: MCPEnvExpansionOptions,
+	field: string,
+	onUnresolved: ((varName: string, field: string) => void) | undefined,
+): T {
 	if (typeof obj === "string") {
-		return expandEnvVars(obj, extraEnv) as T;
+		return expandEnvVars(obj, options, onUnresolved && (varName => onUnresolved(varName, field))) as T;
 	}
 	if (Array.isArray(obj)) {
-		return obj.map(item => expandEnvVarsDeep(item, extraEnv)) as T;
+		return obj.map((item, index) =>
+			expandEnvVarsAt(item, options, onUnresolved ? `${field}[${index}]` : field, onUnresolved),
+		) as T;
 	}
 	if (obj !== null && typeof obj === "object") {
 		const result: Record<string, unknown> = {};
 		for (const [key, value] of Object.entries(obj)) {
-			result[key] = expandEnvVarsDeep(value, extraEnv);
+			const childField = onUnresolved ? (field ? `${field}.${key}` : key) : field;
+			result[key] = expandEnvVarsAt(value, options, childField, onUnresolved);
 		}
 		return result as T;
 	}
 	return obj;
+}
+
+/**
+ * Recursively expand environment variables in an object.
+ * Unresolved `${VAR}` references stay literal.
+ */
+export function expandEnvVarsDeep<T>(obj: T, extraEnv?: Record<string, string>): T {
+	return expandEnvVarsAt(obj, { extraEnv }, "", undefined);
+}
+
+/**
+ * Recursively expand environment variables in the value of one config field,
+ * appending every `${VAR}` reference left unresolved (unset, no `:-default`)
+ * to `unresolved`. `field` names the value (e.g. `url`, `env.API_KEY`); nested
+ * strings are reported under dotted/indexed paths below it.
+ */
+export function expandEnvVarsInField<T>(
+	value: T,
+	field: string,
+	unresolved: UnresolvedEnvReference[],
+	options: MCPEnvExpansionOptions = {},
+): T {
+	return expandEnvVarsAt(value, options, field, (variable, path) => {
+		unresolved.push({ variable, field: path });
+	});
+}
+
+/** MCP server fields that launch or address the server; an unresolved reference there blocks the connect. */
+const MCP_ENV_CHECKED_FIELDS: Record<string, true> = { command: true, args: true, env: true, url: true, headers: true };
+/** Fields passed to the spawned process, which also receives the server's own `env` block. */
+const MCP_PROCESS_FIELDS: Record<string, true> = { command: true, args: true };
+
+/**
+ * Expand `${VAR}`/`${VAR:-default}` in one raw MCP server definition (every
+ * key, as {@link expandEnvVarsDeep} does) and collect the references left
+ * unresolved in `command`, `args`, `env`, `url`, or `headers`.
+ *
+ * In `command`/`args`, a variable that neither `extraEnv` nor the ambient
+ * environment defines is taken from the server's own `env` block, resolved as
+ * the child will receive it: stdio servers are spawned without a shell, so a
+ * literal `${API_KEY}` would reach the child verbatim. A `!command`-backed
+ * own-env value is left for {@link substituteCommandEnvRefs} at connect time.
+ * `unresolvedEnv` is `undefined` when nothing is unresolved; a non-object
+ * input is expanded as-is with no references reported.
+ */
+export function expandMCPServerEnv<T>(
+	server: T,
+	options: Omit<MCPEnvExpansionOptions, "ownEnv"> = {},
+): { server: T; unresolvedEnv: UnresolvedEnvReference[] | undefined } {
+	const { extraEnv, vscodePredefinedVariables } = options;
+	const fieldOptions: MCPEnvExpansionOptions = { extraEnv, vscodePredefinedVariables };
+	if (server === null || typeof server !== "object" || Array.isArray(server)) {
+		return { server: expandEnvVarsAt(server, fieldOptions, "", undefined), unresolvedEnv: undefined };
+	}
+	const raw = server as Record<string, unknown>;
+	// Expand `env` first: its final values feed `command`/`args` substitution.
+	const envUnresolved: UnresolvedEnvReference[] = [];
+	const expandedEnv = Object.hasOwn(raw, "env")
+		? expandEnvVarsInField(raw.env, "env", envUnresolved, fieldOptions)
+		: undefined;
+	let processOptions = fieldOptions;
+	if (expandedEnv !== null && typeof expandedEnv === "object" && !Array.isArray(expandedEnv)) {
+		const literalKeys =
+			raw.envPolicy === "literal"
+				? true
+				: Array.isArray(raw.envLiteralKeys)
+					? raw.envLiteralKeys.filter((key): key is string => typeof key === "string")
+					: undefined;
+		processOptions = { ...fieldOptions, ownEnv: { env: expandedEnv as Record<string, string>, literalKeys } };
+	}
+	const unresolved: UnresolvedEnvReference[] = [];
+	const result: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(raw)) {
+		if (key === "env") {
+			result[key] = expandedEnv;
+			unresolved.push(...envUnresolved);
+		} else if (!Object.hasOwn(MCP_ENV_CHECKED_FIELDS, key)) {
+			result[key] = expandEnvVarsAt(value, fieldOptions, "", undefined);
+		} else {
+			const keyOptions = Object.hasOwn(MCP_PROCESS_FIELDS, key) ? processOptions : fieldOptions;
+			result[key] = expandEnvVarsInField(value, key, unresolved, keyOptions);
+		}
+	}
+	return { server: result as T, unresolvedEnv: unresolved.length > 0 ? unresolved : undefined };
+}
+
+/**
+ * User-facing error for an MCP server whose config references unset
+ * environment variables, e.g. `MCP server "github": environment variable
+ * GITHUB_TOKEN is not set (referenced in headers.Authorization)`.
+ */
+export function formatUnresolvedEnvError(serverName: string, unresolved: readonly UnresolvedEnvReference[]): string {
+	const fieldsByVariable = new Map<string, string[]>();
+	for (const { variable, field } of unresolved) {
+		const fields = fieldsByVariable.get(variable);
+		if (!fields) fieldsByVariable.set(variable, [field]);
+		else if (!fields.includes(field)) fields.push(field);
+	}
+	const clauses = Array.from(
+		fieldsByVariable,
+		([variable, fields]) => `environment variable ${variable} is not set (referenced in ${fields.join(", ")})`,
+	);
+	return `MCP server "${serverName}": ${clauses.join("; ")}`;
 }
 
 /**

@@ -26,7 +26,7 @@ import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import {
 	discoverRuleFromMarkdown,
 	createSourceMeta,
-	expandEnvVarsDeep,
+	expandMCPServerEnv,
 	getProjectPath,
 	getUserPath,
 	loadFilesFromDir,
@@ -52,8 +52,9 @@ function parseMCPServers(
 		return { items, warning: `${path}: missing or invalid 'mcpServers' key` };
 	}
 
-	const servers = expandEnvVarsDeep(parsed.mcpServers);
-	for (const [name, config] of Object.entries(servers)) {
+	for (const [name, rawConfig] of Object.entries(parsed.mcpServers)) {
+		// Cursor configs use VS Code predefined variables; they stay literal.
+		const { server: config, unresolvedEnv } = expandMCPServerEnv(rawConfig, { vscodePredefinedVariables: true });
 		const serverConfig = config as Record<string, unknown>;
 		items.push({
 			name,
@@ -67,6 +68,7 @@ function parseMCPServers(
 				? (serverConfig.type as "stdio" | "sse" | "http")
 				: undefined,
 			timeout: typeof serverConfig.timeout === "number" ? serverConfig.timeout : undefined,
+			...(unresolvedEnv && { unresolvedEnv }),
 			_source: createSourceMeta(PROVIDER_ID, path, level),
 		});
 	}

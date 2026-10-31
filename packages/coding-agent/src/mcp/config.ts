@@ -9,6 +9,7 @@ import { mcpCapability } from "../capability/mcp";
 import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
 import type { MCPServer } from "../discovery";
 import { loadCapability } from "../discovery";
+import { expandMCPServerEnv, formatUnresolvedEnvError } from "../discovery/helpers";
 import { readMCPConfigFile } from "./config-writer";
 import type { MCPConfigFile, MCPServerConfig } from "./types";
 
@@ -47,6 +48,7 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 		instructions: server.instructions,
 		auth: server.auth,
 		oauth: server.oauth,
+		...(server.unresolvedEnv && { unresolvedEnv: server.unresolvedEnv }),
 	};
 
 	if (transport === "stdio") {
@@ -334,10 +336,29 @@ export function filterExaMCPServers(
 }
 
 /**
+ * Expand `${VAR}`/`${VAR:-default}` placeholders in a server definition read
+ * straight from a config file, as discovery does, for ad-hoc connects that
+ * bypass discovery (`/mcp test`). Throws the discovery error when a reference
+ * in `command`/`args`/`env`/`url`/`headers` stays unresolved, so the literal
+ * placeholder is never sent.
+ */
+export function expandFileServerConfig(name: string, config: MCPServerConfig): MCPServerConfig {
+	const { server, unresolvedEnv } = expandMCPServerEnv(config);
+	if (unresolvedEnv) throw new Error(formatUnresolvedEnvError(name, unresolvedEnv));
+	return server;
+}
+
+/**
  * Validate server config has required fields.
  */
 export function validateServerConfig(name: string, config: MCPServerConfig): string[] {
 	const errors: string[] = [];
+
+	// Discovery left `${VAR}` placeholders unresolved: connecting would send the
+	// literal text (e.g. `Bearer ${GITHUB_TOKEN}`) instead of failing clearly.
+	if (config.unresolvedEnv && config.unresolvedEnv.length > 0) {
+		errors.push(formatUnresolvedEnvError(name, config.unresolvedEnv));
+	}
 
 	const serverType = config.type ?? "stdio";
 
