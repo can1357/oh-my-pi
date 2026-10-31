@@ -2667,6 +2667,15 @@ export class TUI extends Container {
 		// write leaves them queued. Never re-emit ?1049l instead: on the normal
 		// screen it restores a stale saved cursor.
 		const backlogDrained = this.terminal.settleOutput?.() ?? true;
+		if (this.#resizeInPlaceActive && this.terminal.rows > 0) {
+			// The hardware cursor sits wherever the drag left it, but tracking still
+			// describes the pre-resize row (no alt-buffer restore replays it back).
+			// Park absolutely on the bottom row and record it, so tracking matches
+			// the hardware cursor again. Parked after the settle, a discard cannot
+			// drop it.
+			this.terminal.write(`\x1b[${this.terminal.rows};1H`);
+			this.#hardwareCursorRow = this.terminal.rows - 1;
+		}
 		this.#resizeInPlaceActive = false;
 		this.#altToggleEchoPending = false;
 		this.#cancelResizeProbe();
