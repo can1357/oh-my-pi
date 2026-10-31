@@ -293,4 +293,24 @@ describe("handoff helpers", () => {
 			reasoning: Effort.Medium,
 		});
 	});
+
+	test("generateHandoffFromContext rejects output cut off at the length limit without retrying", async () => {
+		const completeImpl = vi.fn(async () => ({
+			...createAssistantMessage([{ type: "text", text: "## Next Steps\nContinue by" }]),
+			stopReason: "length" as const,
+		}));
+		const error = await generateHandoffFromContext(
+			{
+				systemPrompt: ["Live system prompt"],
+				messages: [{ role: "user", content: "prepare handoff", timestamp: 1 }],
+			},
+			getTestModel(),
+			{ streamOptions: { apiKey: "test-key" }, completeImpl },
+		).catch((caught: unknown) => caught);
+
+		expect((error as Error).message).toBe(
+			"Handoff generation failed: model output ended incomplete (stopReason: length)",
+		);
+		expect(completeImpl).toHaveBeenCalledTimes(1);
+	});
 });
