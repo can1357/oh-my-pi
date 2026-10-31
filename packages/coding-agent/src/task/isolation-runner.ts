@@ -166,7 +166,7 @@ export async function prepareIsolationContext(cwd: string): Promise<IsolationCon
 function deltaFingerprint(rootPatch: string, nestedPatches: readonly NestedRepoPatch[]): bigint | number {
 	let key = rootPatch;
 	for (const { relativePath, patch } of nestedPatches) key += `\0${relativePath}\0${patch}`;
-	return Bun.hash(key);
+	return fs.hash(key);
 }
 
 /** Build a commit-message callback for branch/nested commits; `undefined` ⇒ fall back to generic message. */
@@ -231,7 +231,7 @@ export interface IsolatedRunOptions {
  * and return the paths. Throws on the first write failure: the caller must
  * then keep the isolation workspace alive, because it is the only other copy.
  * Every attempted destination is removed best-effort on failure — including
- * the in-progress file, which `Bun.write` may have created or truncated
+ * the in-progress file, which the write may have created or truncated
  * before rejecting — so a half-written set cannot be mistaken for the
  * complete capture by the persisted-agent scanner.
  */
@@ -488,7 +488,7 @@ async function retainUnderLock(
 			return { dir: path.join(retainedBase, path.basename(isolationDir)), sidecarOk, location: "here" };
 		} catch {
 			if (attempt === 2) return { dir: isolationDir, sidecarOk, location: "here" };
-			await Bun.sleep(25);
+			await fs.sleep(25);
 		}
 	}
 	return { dir: isolationDir, sidecarOk, location: "here" };

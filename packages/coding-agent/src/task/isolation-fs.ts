@@ -57,6 +57,62 @@ export const writeFile = ((...args: Parameters<typeof fs.writeFile>) => fs.write
 export const watch = nodeWatch;
 export type { FSWatcher };
 
+/**
+ * The untracked paths of a working tree, and the directories git could not
+ * read while listing them.
+ *
+ * `git ls-files --others` **warns on stderr and exits 0** when it cannot open
+ * a directory, and the native binding returns only the array, so a short
+ * listing is indistinguishable from a complete one. The warning is git's own
+ * report of what it did not look at: reading it cannot disagree with git, and
+ * it costs nothing — which a pre-walk of the tree could not say, since the
+ * walk guessed at which directories git would read and was wrong five ways.
+ *
+ * `-z` because a path with a newline or a quote in it is still a path.
+ */
+export async function listUntracked(repoDir: string): Promise<{ files: string[]; unreadable: string[] }> {
+	const git = Bun.spawn(["git", "-C", repoDir, "ls-files", "--others", "--exclude-standard", "-z"], {
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const [out, err] = await Promise.all([new Response(git.stdout).text(), new Response(git.stderr).text()]);
+	const code = await git.exited;
+	if (code !== 0) throw new Error(`git ls-files failed in ${repoDir} (exit ${code}): ${err.trim()}`);
+	const files = out.split("\0").filter(entry => entry !== "");
+	const unreadable: string[] = [];
+	for (const line of err.split("\n")) {
+		const named = /could not open directory '(.*)':/.exec(line);
+		if (named?.[1] !== undefined) unreadable.push(named[1].replace(/\/$/, ""));
+		else if (line.trim() !== "") unreadable.push(line.trim());
+	}
+	return { files, unreadable };
+}
+
+/**
+ * The start time a process reports to `ps`, or `null` when it reports none.
+ *
+ * A liveness probe, not a filesystem read, but it needs to spawn — and the
+ * modules that decide deletions name no process API of their own, so it is
+ * here with everything else that talks to the outside.
+ */
+export async function processStartTime(pid: number): Promise<string | null> {
+	const ps = Bun.spawn(["ps", "-o", "lstart=", "-p", String(pid)], { stdout: "pipe", stderr: "ignore" });
+	const out = await new Response(ps.stdout).text();
+	if ((await ps.exited) !== 0) return null;
+	const started = out.trim();
+	return started.length > 0 ? started : null;
+}
+
+/** A content hash, for a name derived from a path. Reads nothing. */
+export function hash(value: string): bigint | number {
+	return Bun.hash(value);
+}
+
+/** Sleep. Reads nothing; here so the isolation path names no `Bun` of its own. */
+export async function sleep(ms: number): Promise<void> {
+	await Bun.sleep(ms);
+}
+
 /** Write a file's whole contents, creating parent directories. */
 export async function writeFileDeep(file: string, contents: string): Promise<void> {
 	await Bun.write(file, contents);

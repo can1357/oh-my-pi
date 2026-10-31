@@ -1453,6 +1453,32 @@ describe("a capture that could not read everything", () => {
 		}
 	});
 
+	it("captures a run whose gitignored directory is unreadable", async () => {
+		// git never looks inside an ignored directory, so nothing is at risk
+		// and the run must still hand back its work. A pre-walk of the tree
+		// refused these — `target/`, `.venv`, `dist/`, `__pycache__` are all
+		// ignored in this repository alone.
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, ".gitignore"), "build/\n");
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", ".gitignore", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		const baseline = await captureBaseline(repo);
+		await fs.writeFile(path.join(repo, "work.txt"), "the run's real change\n");
+		const ignored = path.join(repo, "build", "cache");
+		await fs.mkdir(ignored, { recursive: true });
+		await fs.chmod(ignored, 0o000);
+
+		try {
+			const delta = await captureDeltaPatch(repo, baseline);
+			expect(delta.rootPatch).toContain("work.txt");
+		} finally {
+			await fs.chmod(ignored, 0o700);
+		}
+	});
+
 	it("raises when git could not open a directory, instead of reporting an empty patch", async () => {
 		// `git ls-files --others` skips a directory it cannot open, warns on
 		// stderr and exits 0, and the binding returns only the array — so a
@@ -1471,7 +1497,7 @@ describe("a capture that could not read everything", () => {
 		await fs.chmod(locked, 0o000);
 
 		try {
-			await expect(captureDeltaPatch(repo, baseline)).rejects.toThrow(/Could not list/);
+			await expect(captureDeltaPatch(repo, baseline)).rejects.toThrow(/git could not read/);
 		} finally {
 			await fs.chmod(locked, 0o700);
 		}

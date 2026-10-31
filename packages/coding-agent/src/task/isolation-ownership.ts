@@ -11,7 +11,6 @@ import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { acquireFileLock, logger, Snowflake } from "@oh-my-pi/pi-utils";
-import { $ } from "bun";
 import { hasLiveIsolationLease, hasUnfinishedWriter } from "./isolation-lease";
 
 /**
@@ -98,10 +97,7 @@ async function processStartToken(pid: number): Promise<string | null> {
 		const starttime = stat.slice(commEnd + 2).split(" ")[19];
 		return starttime && starttime.length > 0 ? starttime : null;
 	}
-	const res = await $`ps -o lstart= -p ${pid}`.quiet().nothrow();
-	if (res.exitCode !== 0) return null;
-	const started = res.text().trim();
-	return started.length > 0 ? started : null;
+	return await fs.processStartTime(pid);
 }
 
 /** A process identity recorded in a marker or a lease. */
