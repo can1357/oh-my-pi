@@ -3662,7 +3662,8 @@ export interface InteractionUpdate extends ProtoMessage {
 		| { case: "heartbeat"; value: HeartbeatUpdate }
 		| { case: "turnEnded"; value: TurnEndedUpdate }
 		| { case: "stepStarted"; value: StepStartedUpdate }
-		| { case: "stepCompleted"; value: StepCompletedUpdate };
+		| { case: "stepCompleted"; value: StepCompletedUpdate }
+		| { case: "toolRequestsListed"; value: ToolRequestsListedUpdate };
 }
 
 export const InteractionUpdateSchema: MessageCodec<InteractionUpdate> = pb<InteractionUpdate>("agent.v1.InteractionUpdate", [
@@ -3687,6 +3688,7 @@ export const InteractionUpdateSchema: MessageCodec<InteractionUpdate> = pb<Inter
 			{ no: 14, name: "turnEnded", kind: "message", T: () => TurnEndedUpdateSchema },
 			{ no: 16, name: "stepStarted", kind: "message", T: () => StepStartedUpdateSchema },
 			{ no: 17, name: "stepCompleted", kind: "message", T: () => StepCompletedUpdateSchema },
+			{ no: 27, name: "toolRequestsListed", kind: "message", T: () => ToolRequestsListedUpdateSchema },
 		],
 	},
 ]);
@@ -8249,6 +8251,15 @@ export const ToolCallStartedUpdateSchema: MessageCodec<ToolCallStartedUpdate> = 
 	{ no: 1, name: "callId", kind: "string" },
 	{ no: 2, name: "toolCall", kind: "message", T: () => ToolCallSchema },
 	{ no: 3, name: "modelCallId", kind: "string" },
+]);
+
+/** Cursor agent message agent.v1.ToolRequestsListedUpdate. */
+export interface ToolRequestsListedUpdate extends ProtoMessage {
+	callCount: number;
+}
+
+export const ToolRequestsListedUpdateSchema: MessageCodec<ToolRequestsListedUpdate> = pb<ToolRequestsListedUpdate>("agent.v1.ToolRequestsListedUpdate", [
+	{ no: 1, name: "callCount", kind: "uint32" },
 ]);
 
 /** Cursor agent message agent.v1.TruncatedToolCall. */

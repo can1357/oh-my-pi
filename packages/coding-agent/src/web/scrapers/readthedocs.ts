@@ -65,6 +65,13 @@ export const handleReadTheDocs: SpecialHandler = async (
 			el.remove();
 		});
 
+	// The requested docs version is the second path segment (/<lang>/<slug>/...).
+	// Only follow an Edit link to raw source when its repo ref matches that
+	// version: otherwise a versioned page would serve another branch's file
+	// (e.g. /en/v3.18.5/ with an Edit link to blob/main). `latest` and
+	// `stable` float, so any ref is acceptable for them.
+	const versionSlug = new URL(result.finalUrl).pathname.match(/^\/[^/]+\/([^/]+)\//)?.[1] ?? null;
+
 	// Try to find Edit on GitHub/GitLab links for raw source
 	const editLinks = root.querySelectorAll('a[href*="github.com"], a[href*="gitlab.com"]');
 	let sourceUrl: string | null = null;
@@ -74,6 +81,17 @@ export const handleReadTheDocs: SpecialHandler = async (
 		const text = link.textContent?.toLowerCase() || "";
 
 		if (href && (text.includes("edit") || text.includes("source"))) {
+			const ref = href.match(/\/(?:blob|raw|edit)\/([^/]+)\//)?.[1] ?? null;
+			const refMatches =
+				ref !== null &&
+				versionSlug !== null &&
+				(versionSlug === "latest" || versionSlug === "stable" || ref === versionSlug);
+			if (!refMatches) {
+				notes.push(
+					`Skipped raw source from ${href}: repository ref does not match documentation version ${versionSlug ?? "(unknown)"}`,
+				);
+				continue;
+			}
 			// Convert edit URL to raw URL
 			if (href.includes("github.com")) {
 				sourceUrl = href.replace("/blob/", "/raw/").replace("/edit/", "/raw/");
@@ -85,6 +103,7 @@ export const handleReadTheDocs: SpecialHandler = async (
 	}
 
 	let content = "";
+	let fetchedRaw = false;
 
 	// Try to fetch raw source if available
 	if (sourceUrl) {
@@ -92,6 +111,7 @@ export const handleReadTheDocs: SpecialHandler = async (
 			const sourceResult = await loadPage(sourceUrl, { timeout: Math.min(timeout, 10), signal });
 			if (sourceResult.ok && sourceResult.content.length > 0 && sourceResult.content.length < 1_000_000) {
 				content = sourceResult.content;
+				fetchedRaw = true;
 				notes.push(`Fetched raw source from ${sourceUrl}`);
 			}
 		} catch {
@@ -116,6 +136,6 @@ export const handleReadTheDocs: SpecialHandler = async (
 		method: "readthedocs",
 		fetchedAt,
 		notes,
-		contentType: sourceUrl ? "text/plain" : "text/html",
+		contentType: fetchedRaw ? "text/plain" : "text/html",
 	});
 };

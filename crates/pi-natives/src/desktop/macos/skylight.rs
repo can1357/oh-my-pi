@@ -1879,14 +1879,12 @@ fn rekey_unless_user_chose(
 
 pub(super) fn require_front_window(pid: pid_t, wid: u32) -> CoreResult<()> {
 	control::check()?;
-	if is_front_window(pid, wid) {
-		Ok(())
-	} else {
-		Err(DesktopError::input_failed(format!(
+	is_front_window(pid, wid).ok_or_else(|| {
+		DesktopError::input_failed(format!(
 			"takeover window {wid} lost exact keyboard focus; stopped input, which may be partial; \
 			 inspect the target before retrying"
-		)))
-	}
+		))
+	})
 }
 
 pub(super) fn is_front_window(pid: pid_t, wid: u32) -> bool {
@@ -2812,7 +2810,7 @@ mod tests {
 		}
 
 		fn user_key(&self) -> Option<u32> {
-			self.clock.set(self.clock.get() + self.key_read_takes);
+			self.clock.update(|v| v + self.key_read_takes);
 			if let Some((front, signals)) = self.switch_on_key_read.take() {
 				self.front.set(front);
 				self.signals.set(signals);
@@ -2833,7 +2831,7 @@ mod tests {
 		}
 
 		fn hand_back(&self, _since: u64) -> CoreResult<FrontRequest> {
-			self.hand_backs.set(self.hand_backs.get() + 1);
+			self.hand_backs.update(|v| v + 1);
 			if let Some(after) = self.refused_for.take() {
 				self.signals.set(after);
 				return Ok(FrontRequest::UserActed);
@@ -3280,7 +3278,7 @@ mod tests {
 		let stamps = std::cell::RefCell::new(Vec::new());
 		let handed = hand_back_through_typing(
 			|| {
-				clock.set(clock.get() + 1);
+				clock.update(|v| v + 1);
 				clock.get()
 			},
 			|| true,
@@ -3307,7 +3305,7 @@ mod tests {
 			|_| true,
 			|| true,
 			|_| {
-				requests.set(requests.get() + 1);
+				requests.update(|v| v + 1);
 				clicked.set(true);
 				Ok(FrontRequest::UserActed)
 			},
@@ -3324,7 +3322,7 @@ mod tests {
 			|_| false,
 			|| true,
 			|_| {
-				requests.set(requests.get() + 1);
+				requests.update(|v| v + 1);
 				Ok(FrontRequest::UserActed)
 			},
 		);
@@ -3339,7 +3337,7 @@ mod tests {
 			|_| true,
 			|| true,
 			|_| {
-				requests.set(requests.get() + 1);
+				requests.update(|v| v + 1);
 				Ok(FrontRequest::UserActed)
 			},
 		);
@@ -3359,7 +3357,7 @@ mod tests {
 			|_| true,
 			|| false,
 			|_| {
-				requests.set(requests.get() + 1);
+				requests.update(|v| v + 1);
 				Ok(FrontRequest::UserActed)
 			},
 		);
@@ -3382,7 +3380,7 @@ mod tests {
 			|_| true,
 			|| {
 				steps.borrow_mut().push("settled");
-				settles.set(settles.get() + 1);
+				settles.update(|v| v + 1);
 				settles.get() < 2
 			},
 			|_| {

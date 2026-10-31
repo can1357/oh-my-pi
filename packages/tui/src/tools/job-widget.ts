@@ -190,10 +190,22 @@ function headlineGlance(view: JobWidgetView): JobWidgetGlance | undefined {
 	};
 }
 
+/** The meter's `140/190` when the headline only restates its numerator (`140`). */
+function meterWhole(headline: JobWidgetGlance, view: JobWidgetView): string | undefined {
+	const meter = view.blocks.find((block): block is JobWidgetMeterBlock => block.kind === "meter");
+	const whole = meter ? plainLine(meter.text) : "";
+	return /^\s*\/\s*\S/.test(whole.slice(headline.text.trim().length)) && whole.startsWith(headline.text.trim())
+		? whole
+		: undefined;
+}
+
 /** What one glance at the widget reads: the headline, else the latest figure of its first spark or meter. */
 export function jobWidgetGlance(view: JobWidgetView): JobWidgetGlance | undefined {
 	const headline = headlineGlance(view);
-	if (headline) return headline;
+	if (headline) {
+		const whole = meterWhole(headline, view);
+		return whole ? { ...headline, text: whole } : headline;
+	}
 	for (const block of view.blocks) {
 		if (block.kind === "spark" && block.values.length > 0 && plainLine(block.last)) {
 			return { text: plainLine(block.last), label: plainLine(block.label) };

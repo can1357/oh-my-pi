@@ -118,8 +118,13 @@ function getShellConfigFile(shell: string, env: Record<string, string | undefine
 function generateSnapshotScript(shell: string, snapshotPath: string, rcFile: string): string {
 	const hasRcFile = fs.existsSync(rcFile);
 	const isZsh = shell.includes("zsh");
-	const commonToolsRegex =
-		"^(ls|dir|vdir|cat|head|tail|less|more|grep|egrep|fgrep|rg|find|fd|locate|sed|awk|perl|cp|mv|rm|mkdir|rmdir|touch|chmod|chown|ln|pwd|readlink|stat|cut|sort|uniq|xargs|tee|tr|basename|dirname)$";
+	// Core tools whose user functions/aliases are dropped so the agent always runs
+	// the real binaries. Bare alternation: each filter supplies its own anchors.
+	const commonTools =
+		"ls|dir|vdir|cat|head|tail|less|more|grep|egrep|fgrep|rg|find|fd|locate|sed|awk|perl|cp|mv|rm|mkdir|rmdir|touch|chmod|chown|ln|pwd|readlink|stat|cut|sort|uniq|xargs|tee|tr|basename|dirname";
+	const commonFunctionRegex = `^(${commonTools})$`;
+	// bash's `alias` prints `alias NAME=...`; zsh's prints `NAME=...`.
+	const commonAliasRegex = `^(alias )?(${commonTools})=`;
 
 	const quotedPath = quotePosixArgument(snapshotPath);
 
@@ -130,13 +135,13 @@ function generateSnapshotScript(shell: string, snapshotPath: string, rcFile: str
 		? `# Force autoload all functions first
 typeset -f > /dev/null 2>&1
 # Get user function names - filter system/private ones
-typeset +f 2>/dev/null | grep -vE '^(_|__)' | grep -vE '${commonToolsRegex}' | while read func; do
+typeset +f 2>/dev/null | grep -vE '^(_|__)' | grep -vE '${commonFunctionRegex}' | while read func; do
    typeset -f "$func" 2>/dev/null
 done`
 		: `# Force autoload all functions first
 declare -f > /dev/null 2>&1
 # Get user function names - filter system/private ones
-declare -F 2>/dev/null | cut -d' ' -f3 | grep -vE '^(_|__)' | grep -vE '${commonToolsRegex}' | while read func; do
+declare -F 2>/dev/null | cut -d' ' -f3 | grep -vE '^(_|__)' | grep -vE '${commonFunctionRegex}' | while read func; do
    declare -f "$func" 2>/dev/null
 done`;
 
@@ -202,9 +207,9 @@ ${optionsScript}
 echo "# Aliases" >> "$SNAPSHOT_FILE"
 # Filter out winpty aliases on Windows to avoid "stdin is not a tty" errors
 if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]]; then
-   alias 2>/dev/null | grep -v "='winpty " | grep -vE '^alias (${commonToolsRegex})=' | sed 's/^alias //g' | sed 's/^/alias -- /' | head -n 1000 >> "$SNAPSHOT_FILE"
+   alias 2>/dev/null | grep -v "='winpty " | grep -vE '${commonAliasRegex}' | sed 's/^alias //g' | sed 's/^/alias -- /' | head -n 1000 >> "$SNAPSHOT_FILE"
 else
-   alias 2>/dev/null | grep -vE '^alias (${commonToolsRegex})=' | sed 's/^alias //g' | sed 's/^/alias -- /' | head -n 1000 >> "$SNAPSHOT_FILE"
+   alias 2>/dev/null | grep -vE '${commonAliasRegex}' | sed 's/^alias //g' | sed 's/^/alias -- /' | head -n 1000 >> "$SNAPSHOT_FILE"
 fi
 
 # Export PATH

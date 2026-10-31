@@ -26,28 +26,28 @@
    "files":{"a.txt":"x\nx\nz\n"},
    "rawInput":true,
    "args":{"input":"*** Begin Patch\n*** Update File: a.txt\n@@\n-z\n+Z\n@@\n-x\n+y\n*** End Patch"},
-   "expect":{"files":{"a.txt":"x\nx\nz\n"},"error":"Found 2 occurrences in a.txt","writes":0}
+   "expect":{"files":{"a.txt":"x\nx\nz\n"},"error":"Failed to find expected lines in a.txt","writes":0}
   },
   {
    "name":"ambiguous fuzzy hunk is rejected, not bound to the first candidate",
    "files":{"a.txt":"const timeoutMs = 1000;\nother\nconst timeoutMs = 2000;\n"},
    "rawInput":true,
    "args":{"input":"*** Begin Patch\n*** Update File: a.txt\n@@\n-const timeoutMs = 3000;\n+const timeoutMs = 5000;\n@@\n-other\n+OTHER\n*** End Patch"},
-   "expect":{"files":{"a.txt":"const timeoutMs = 1000;\nother\nconst timeoutMs = 2000;\n"},"error":"Found 2 occurrences in a.txt","writes":0}
+   "expect":{"files":{"a.txt":"const timeoutMs = 1000;\nother\nconst timeoutMs = 2000;\n"},"error":"Failed to find expected lines in a.txt","writes":0}
   },
   {
    "name":"single ambiguous fuzzy hunk is rejected",
    "files":{"a.txt":"const timeoutMs = 1000;\nother\nconst timeoutMs = 2000;\n"},
    "rawInput":true,
    "args":{"input":"*** Begin Patch\n*** Update File: a.txt\n@@\n-const timeoutMs = 3000;\n+const timeoutMs = 5000;\n*** End Patch"},
-   "expect":{"files":{"a.txt":"const timeoutMs = 1000;\nother\nconst timeoutMs = 2000;\n"},"error":"Found 2 occurrences in a.txt","writes":0}
+   "expect":{"files":{"a.txt":"const timeoutMs = 1000;\nother\nconst timeoutMs = 2000;\n"},"error":"Failed to find expected lines in a.txt","writes":0}
   },
   {
    "name":"single ambiguous fuzzy hunk is rejected when the better candidate comes later",
    "files":{"a.txt":"const requestTimeoutMilliseconds = 1200;\nother\nconst requestTimeoutMilliseconds = 3001;\n"},
    "rawInput":true,
    "args":{"input":"*** Begin Patch\n*** Update File: a.txt\n@@\n-const requestTimeoutMilliseconds = 3000;\n+const requestTimeoutMilliseconds = 5000;\n*** End Patch"},
-   "expect":{"files":{"a.txt":"const requestTimeoutMilliseconds = 1200;\nother\nconst requestTimeoutMilliseconds = 3001;\n"},"error":"Found 2 occurrences in a.txt","writes":0}
+   "expect":{"files":{"a.txt":"const requestTimeoutMilliseconds = 1200;\nother\nconst requestTimeoutMilliseconds = 3001;\n"},"error":"Failed to find expected lines in a.txt","writes":0}
   },
   {
    "name":"single hunk repeated only after unicode normalization takes the first",
@@ -64,18 +64,18 @@
    "expect":{"files":{"a.txt":"  c\nmid\n  a\n  b\n"},"writes":1}
   },
   {
-   "name":"single hunk matching part of a line replaces only that part",
+   "name":"single hunk matching only part of a line rejects without changing it",
    "files":{"a.txt":"function f() {\n    if (isEnabled(featureFlagName) && user.isAdmin()) {\n        run();\n    }\n}\n"},
    "rawInput":true,
    "args":{"input":"*** Begin Patch\n*** Update File: a.txt\n@@\n-isAdmin()\n+isOwner()\n*** End Patch"},
-   "expect":{"files":{"a.txt":"function f() {\n    if (isEnabled(featureFlagName) && user.isOwner()) {\n        run();\n    }\n}\n"},"writes":1}
+   "expect":{"files":{"a.txt":"function f() {\n    if (isEnabled(featureFlagName) && user.isAdmin()) {\n        run();\n    }\n}\n"},"error":"Failed to find expected lines in a.txt","writes":0}
   },
   {
    "name":"multi-file failure is atomic",
    "files":{"a.txt":"old\n","b.txt":"value\n"},
    "rawInput":true,
    "args":{"input":"*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** Update File: b.txt\n@@\n-missing\n+changed\n*** End Patch"},
-   "expect":{"files":{"a.txt":"old\n","b.txt":"value\n"},"error":"[b.txt]: Could not find a close enough match in b.txt. Closest match (22% similar) at line 1.\nNo files were modified — sections apply atomically.","writes":0}
+   "expect":{"files":{"a.txt":"old\n","b.txt":"value\n"},"error":"[b.txt]: Failed to find expected lines in b.txt:\nmissing\nNo files were modified — sections apply atomically.","writes":0}
   },
   {
    "name":"Add File does not overwrite an existing file",

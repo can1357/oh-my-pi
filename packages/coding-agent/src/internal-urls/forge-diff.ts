@@ -63,12 +63,14 @@ export interface DiffFamilyLabels {
 	heading: string;
 	/** Short noun used in range errors, e.g. `PR`. */
 	noun: string;
+	/** Suffix such as `?at=<generation>` appended to nested diff URLs. */
+	query?: string;
 }
 
-function formatFileLine(idx: number, file: PrDiffFile, baseUrl: string): string {
+function formatFileLine(idx: number, file: PrDiffFile, baseUrl: string, query: string): string {
 	const stats = file.changeType === "binary" ? "(binary)" : `+${file.additions} -${file.deletions}`;
 	const rename = file.oldPath ? `  (renamed from ${file.oldPath})` : "";
-	return `${idx}. ${file.path}  ${stats}  [${file.changeType}]${rename}\n   ${baseUrl}/diff/${idx}`;
+	return `${idx}. ${file.path}  ${stats}  [${file.changeType}]${rename}\n   ${baseUrl}/diff/${idx}${query}`;
 }
 
 export function renderDiffFamilyResource(
@@ -79,9 +81,11 @@ export function renderDiffFamilyResource(
 	labels: DiffFamilyLabels,
 ): InternalResource {
 	const { baseUrl } = labels;
+	const query = labels.query ?? "";
 	const files = lookup.payload.files;
 	const freshness = formatFreshnessNote(lookup.status, lookup.fetchedAt);
 	const fileCount = `${files.length} file${files.length === 1 ? "" : "s"}`;
+	const pinnedNote = query === "" ? [] : ["Pinned snapshot"];
 
 	if (mode === "all") {
 		const content = lookup.payload.unified;
@@ -90,7 +94,7 @@ export function renderDiffFamilyResource(
 			content,
 			contentType: "text/plain",
 			size: Buffer.byteLength(content, "utf-8"),
-			notes: [freshness, `Full diff for ${baseUrl} (${fileCount})`],
+			notes: [freshness, ...pinnedNote, `Full diff for ${baseUrl} (${fileCount})`],
 		};
 	}
 
@@ -111,20 +115,27 @@ export function renderDiffFamilyResource(
 			content,
 			contentType: "text/plain",
 			size: Buffer.byteLength(content, "utf-8"),
-			notes: [freshness, `Showing file ${idx}/${files.length}: ${file.path}`, `Read all: ${baseUrl}/diff/all`],
+			notes: [
+				freshness,
+				...pinnedNote,
+				`Showing file ${idx}/${files.length}: ${file.path}`,
+				`Read all: ${baseUrl}/diff/all${query}`,
+			],
 		};
 	}
 
 	const header = `# ${labels.heading} (${fileCount})`;
 	const body =
-		files.length === 0 ? "_No file changes._" : files.map((f, i) => formatFileLine(i + 1, f, baseUrl)).join("\n\n");
-	const footer = `\n\n---\nRead all: \`${baseUrl}/diff/all\`. Each file is also available as \`${baseUrl}/diff/<i>\`.`;
+		files.length === 0
+			? "_No file changes._"
+			: files.map((f, i) => formatFileLine(i + 1, f, baseUrl, query)).join("\n\n");
+	const footer = `\n\n---\nRead all: \`${baseUrl}/diff/all${query}\`. Each file is also available as \`${baseUrl}/diff/<i>${query}\`.`;
 	const content = `${header}\n\n${body}${footer}`;
 	return {
 		url: url.href,
 		content,
 		contentType: "text/markdown",
 		size: Buffer.byteLength(content, "utf-8"),
-		notes: [freshness, `File listing for ${baseUrl}`],
+		notes: [freshness, ...pinnedNote, `File listing for ${baseUrl}`],
 	};
 }

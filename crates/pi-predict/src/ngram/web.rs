@@ -146,15 +146,11 @@ impl<'a> Reader<'a> {
 	}
 
 	fn u32(&mut self) -> anyhow::Result<u32> {
-		let mut raw = [0u8; 4];
-		raw.copy_from_slice(self.take(4)?);
-		Ok(u32::from_le_bytes(raw))
+		Ok(u32::from_le_bytes(*self.take(4)?.as_array().expect("take yields 4 bytes")))
 	}
 
 	fn f64(&mut self) -> anyhow::Result<f64> {
-		let mut raw = [0u8; 8];
-		raw.copy_from_slice(self.take(8)?);
-		Ok(f64::from_le_bytes(raw))
+		Ok(f64::from_le_bytes(*self.take(8)?.as_array().expect("take yields 8 bytes")))
 	}
 
 	fn u32s(&mut self, n: usize) -> anyhow::Result<Vec<u32>> {

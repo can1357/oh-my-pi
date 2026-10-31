@@ -177,12 +177,14 @@ export interface MemoryBackend {
 	 * Returning a string appends one entry to the compaction's `extraContext`
 	 * list (which becomes part of the summarization prompt). Return `undefined`
 	 * to inject nothing — the local backend takes this branch because its
-	 * summary is already part of the system prompt.
+	 * summary is already part of the system prompt. `signal` aborts when the
+	 * compaction pass is cancelled or superseded.
 	 */
 	preCompactionContext?(
 		messages: AgentMessage[],
 		settings: Settings,
 		session?: AgentSession,
+		signal?: AbortSignal,
 	): Promise<string | undefined>;
 
 	/**

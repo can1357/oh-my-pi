@@ -36,10 +36,10 @@ Does not cover extension authoring UX or command UI.
 
 - Message shapes are defined in `types.ts` (`JsonRpcRequest`, `JsonRpcNotification`, `JsonRpcResponse`, `JsonRpcMessage`).
 - MCP client logic (`client.ts`) decides method order and session handshake:
-  1. `initialize` request
-  2. record the server's negotiated protocol version, then send `notifications/initialized` before any further session traffic
-  3. for Streamable HTTP transports, start the optional background SSE listener once the initialize response has established any session id
-  4. method calls like `tools/list`, `tools/call`
+   1. `initialize` request
+   2. record the server's negotiated protocol version, then send `notifications/initialized` before any further session traffic
+   3. for Streamable HTTP transports, start the optional background SSE listener once the initialize response has established any session id
+   4. method calls like `tools/list`, `tools/call`
 
 ### Transport layer (`MCPTransport`)
 
@@ -128,16 +128,16 @@ An MCP request id correlates a JSON-RPC response, its progress token correlates 
 
 - Initial: `connected=false`, `process=null`, pending map empty
 - `connect()`:
-  - spawn subprocess with configured command/args/env/cwd (cwd defaults to `getProjectDir()`, env overlays `Bun.env`)
-  - derive platform spawn behavior: Linux/other non-macOS POSIX detach into a new session, macOS remains attached for TCC prompts, Windows remains attached and resolves npm shims/batch commands with platform-specific escaping
-  - mark connected
-  - start stdout read loop (`readJsonl`)
-  - start stderr loop (read/discard; currently silent)
+   - spawn subprocess with configured command/args/env/cwd (cwd defaults to `getProjectDir()`, env overlays `Bun.env`)
+   - derive platform spawn behavior: Linux/other non-macOS POSIX detach into a new session, macOS remains attached for TCC prompts, Windows remains attached and resolves npm shims/batch commands with platform-specific escaping
+   - mark connected
+   - start stdout read loop (`readJsonl`)
+   - start stderr loop (read/discard; currently silent)
 - `close()`:
-  - `#handleClose()`: mark disconnected, reject all pending requests (`Transport closed`), emit `onClose`
-  - close stdin, send SIGTERM, wait a bounded grace period, then escalate to SIGKILL if needed
-  - detached POSIX subprocesses are signaled as a process group; a final group SIGKILL sweep also runs after a cooperative leader exit to catch surviving descendants
-  - detach read loop without awaiting (it can hang indefinitely)
+   - `#handleClose()`: mark disconnected, reject all pending requests (`Transport closed`), emit `onClose`
+   - close stdin, send SIGTERM, wait a bounded grace period, then escalate to SIGKILL if needed
+   - detached POSIX subprocesses are signaled as a process group; a final group SIGKILL sweep also runs after a cooperative leader exit to catch surviving descendants
+   - detach read loop without awaiting (it can hang indefinitely)
 
 If the read loop exits unexpectedly, `finally` triggers `#handleClose()` with the decode/receive error or an EOF error describing stdout closure/process exit. Explicit `close()` still cleans up subprocess resources even when this callback already marked the transport disconnected.
 

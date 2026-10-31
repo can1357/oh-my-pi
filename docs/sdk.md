@@ -11,7 +11,7 @@ If you need cross-language/process isolation, use RPC mode instead.
 bun add @oh-my-pi/pi-coding-agent
 ```
 
-Requires Bun 1.3.14 or newer. Before the first model-backed prompt, configure
+Requires Bun 1.4.4 or newer. Before the first model-backed prompt, configure
 credentials for a provider or run a keyless local provider; see
 [Providers](./providers.md). Session construction can succeed without an
 available model, but prompting cannot.
@@ -34,6 +34,8 @@ Import these core embedding APIs from the package root:
 
 The narrower `@oh-my-pi/pi-coding-agent/sdk` subpath exports `createAgentSession`, its option/result types, `Settings`, `AgentRegistry`, discovery and system-prompt helpers, workspace-tree helpers, selected extension/MCP/tool types, and selected tool classes/factories. It does **not** export `SessionManager`, `AuthStorage`, or `ModelRegistry`; import those three from the package root as the examples below do.
 
+The injected `api.pi` in extensions, hooks, custom commands, and custom tools resolves the host SDK on first access. Registering callbacks or loading bundled commands does not eagerly load the full SDK and interactive composer.
+
 ## Quick start (auto-discovery defaults)
 
 ```ts
@@ -42,16 +44,13 @@ import { createAgentSession } from "@oh-my-pi/pi-coding-agent";
 const { session, modelFallbackMessage } = await createAgentSession();
 
 if (modelFallbackMessage) {
-  process.stderr.write(`${modelFallbackMessage}\n`);
+	process.stderr.write(`${modelFallbackMessage}\n`);
 }
 
-const unsubscribe = session.subscribe((event) => {
-  if (
-    event.type === "message_update" &&
-    event.assistantMessageEvent.type === "text_delta"
-  ) {
-    process.stdout.write(event.assistantMessageEvent.delta);
-  }
+const unsubscribe = session.subscribe(event => {
+	if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+		process.stdout.write(event.assistantMessageEvent.delta);
+	}
 });
 
 await session.prompt("Summarize this repository in 3 bullets.");
@@ -82,17 +81,15 @@ If omitted, it resolves:
 Typically you must provide only what you want to control:
 
 ```ts
-function createAgentSession(
-  options?: CreateAgentSessionOptions,
-): Promise<CreateAgentSessionResult>;
+function createAgentSession(options?: CreateAgentSessionOptions): Promise<CreateAgentSessionResult>;
 ```
 
 - **Must provide**: nothing for a minimal session
 - **Usually provide explicitly** in embedders:
-  - `sessionManager` (if you need in-memory or custom location)
-  - `authStorage` + `modelRegistry` (if you own credential/model lifecycle)
-  - `model` or `modelPattern` (if deterministic model selection matters)
-  - `settings` (if you need isolated/test config)
+   - `sessionManager` (if you need in-memory or custom location)
+   - `authStorage` + `modelRegistry` (if you own credential/model lifecycle)
+   - `model` or `modelPattern` (if deterministic model selection matters)
+   - `settings` (if you need isolated/test config)
 
 For multiple concurrent top-level sessions in one process, pass a private
 `AgentRegistry` to each session. The default process-global registry admits
@@ -108,7 +105,7 @@ only one `"Main"` identity per generation.
 import { createAgentSession, SessionManager } from "@oh-my-pi/pi-coding-agent";
 
 const { session } = await createAgentSession({
-  sessionManager: SessionManager.create(process.cwd()),
+	sessionManager: SessionManager.create(process.cwd()),
 });
 
 console.log(session.sessionFile); // absolute .jsonl path
@@ -124,7 +121,7 @@ console.log(session.sessionFile); // absolute .jsonl path
 import { createAgentSession, SessionManager } from "@oh-my-pi/pi-coding-agent";
 
 const { session } = await createAgentSession({
-  sessionManager: SessionManager.inMemory(),
+	sessionManager: SessionManager.inMemory(),
 });
 
 console.log(session.sessionFile); // undefined
@@ -155,27 +152,21 @@ divergent stores.
 ### Explicit wiring
 
 ```ts
-import {
-  createAgentSession,
-  discoverAuthStorage,
-  ModelRegistry,
-  SessionManager,
-} from "@oh-my-pi/pi-coding-agent";
+import { createAgentSession, discoverAuthStorage, ModelRegistry, SessionManager } from "@oh-my-pi/pi-coding-agent";
 
 const authStorage = await discoverAuthStorage();
 const modelRegistry = new ModelRegistry(authStorage);
 await modelRegistry.refresh();
 
 const available = modelRegistry.getAvailable();
-if (available.length === 0)
-  throw new Error("No authenticated models available");
+if (available.length === 0) throw new Error("No authenticated models available");
 
 const { session } = await createAgentSession({
-  authStorage,
-  modelRegistry,
-  model: available[0],
-  thinkingLevel: "medium",
-  sessionManager: SessionManager.inMemory(),
+	authStorage,
+	modelRegistry,
+	model: available[0],
+	thinkingLevel: "medium",
+	sessionManager: SessionManager.inMemory(),
 });
 ```
 
@@ -207,24 +198,25 @@ Configured values are resolved asynchronously through the registry-installed res
 Subscribe with `session.subscribe(listener)`; it returns an unsubscribe function.
 
 ```ts
-const unsubscribe = session.subscribe((event) => {
-  switch (event.type) {
-    case "agent_start":
-    case "turn_start":
-    case "tool_execution_start":
-      break;
-    case "message_update":
-      if (event.assistantMessageEvent.type === "text_delta") {
-        process.stdout.write(event.assistantMessageEvent.delta);
-      }
-      break;
-  }
+const unsubscribe = session.subscribe(event => {
+	switch (event.type) {
+		case "agent_start":
+		case "turn_start":
+		case "tool_execution_start":
+			break;
+		case "message_update":
+			if (event.assistantMessageEvent.type === "text_delta") {
+				process.stdout.write(event.assistantMessageEvent.delta);
+			}
+			break;
+	}
 });
 ```
 
 `AgentSessionEvent` includes core `AgentEvent` plus session-level events:
 
 - `auto_compaction_start` / `auto_compaction_end`
+- `manual_compaction_start` / `manual_compaction_end` (`compact()`, `/compact`, extension `ctx.compact()`)
 - `auto_retry_start` / `auto_retry_end`
 - `retry_fallback_applied` / `retry_fallback_succeeded`
 - `model_changed`
@@ -277,6 +269,10 @@ Related APIs:
 
 `deliverAs: "aside"` (both APIs) delivers at the next agent step boundary without interrupting the current tool batch, instead of steering (which skips remaining tools) or waiting for the run to finish. The one exception is a running interruptible `wait` or `vibe_wait`, which an aside ends so the message is not delayed behind it. When the session is idle both start a turn instead (in plan mode the custom message is folded into context without a turn).
 
+## Idle maintenance
+
+A session starts no autonomous idle work until its owner opts in with `session.enableIdleMaintenance({ isBlocked?, scheduledTurn?, onRecap? })`; the interactive TUI does, SDK, RPC and print sessions do not. After a turn whose last message is a generated assistant reply (text, thinking or a tool call, even if the turn was then aborted), once nothing is live, admitted, queued or scheduled, the session generates the idle recap (`recap.*` settings), journals it in the history database and passes the full nonblank reply to `onRecap`; the recap never enters the transcript or model context. Idle compaction (`compaction.idle*` settings) also waits until no background job or delivery can wake the session. `isBlocked` says the owner wants no autonomous work (a draft being composed, a view that left, startup unfinished); `scheduledTurn` says the owner has decided to start a turn it has not yet admitted. Call `session.refreshIdleMaintenance()` when either answer changes: work that is no longer wanted is dropped and what the stretch still owes is re-armed with a fresh delay. Repeated activation keeps the first owner's options; session disposal owns cleanup.
+
 ## `AgentSession` lifecycle and disposal
 
 Call `await session.dispose()` when the embedder is completely done with a session. `dispose()` starts disposal itself and is idempotent: repeated or concurrent calls receive the same teardown promise, so shutdown events and owned resources are not drained twice.
@@ -286,13 +282,10 @@ Call `await session.dispose()` when the embedder is completely done with a sessi
 ```ts
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent";
 
-async function closeEmbeddedSession(
-  session: AgentSession,
-  closeHostInputAndUi: () => Promise<void>,
-): Promise<void> {
-  session.beginDispose(); // no new deferred work may enter after this point
-  await closeHostInputAndUi();
-  await session.dispose();
+async function closeEmbeddedSession(session: AgentSession, closeHostInputAndUi: () => Promise<void>): Promise<void> {
+	session.beginDispose(); // no new deferred work may enter after this point
+	await closeHostInputAndUi();
+	await session.dispose();
 }
 ```
 
@@ -320,9 +313,9 @@ Only after work capable of appending session entries has settled does disposal c
 
 ```ts
 const { session } = await createAgentSession({
-  toolNames: ["read", "grep", "glob", "write"],
-  restrictToolNames: true,
-  requireYieldTool: true,
+	toolNames: ["read", "grep", "glob", "write"],
+	restrictToolNames: true,
+	requireYieldTool: true,
 });
 ```
 
@@ -402,20 +395,20 @@ Process-wide state that follows one settings instance — setting effects (theme
 
 ```ts
 type CreateAgentSessionResult = {
-  session: AgentSession;
-  extensionsResult: LoadExtensionsResult;
-  setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
-  mcpManager?: MCPManager;
-  modelFallbackMessage?: string;
-  lspServers?: Array<{
-    name: string;
-    status: "connecting" | "ready" | "error" | "available";
-    fileTypes: string[];
-    error?: string;
-  }>;
-  startBackgroundModelDiscovery?: () => Promise<void>;
-  eventBus: EventBus;
-  subagentEventBus?: EventBus;
+	session: AgentSession;
+	extensionsResult: LoadExtensionsResult;
+	setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
+	mcpManager?: MCPManager;
+	modelFallbackMessage?: string;
+	lspServers?: Array<{
+		name: string;
+		status: "connecting" | "ready" | "error" | "available";
+		fileTypes: string[];
+		error?: string;
+	}>;
+	startBackgroundModelDiscovery?: () => Promise<void>;
+	eventBus: EventBus;
+	subagentEventBus?: EventBus;
 };
 ```
 
@@ -429,21 +422,21 @@ Use `setToolUIContext(...)` only if your embedder provides UI capabilities that 
 
 - **Model-host warm-up.** `prewarmModelConnection(model)` (`packages/ai/src/providers/connection-prewarm.ts`) sends a credential-less `HEAD` to the model's API origin through the same transport (proxy, extra CA, TLS options) real requests use, so the next request reuses the pooled socket instead of paying DNS + TCP + TLS. The SDK fires it as soon as the model is resolved, overlapping session setup; the interactive UI repeats it while idle (first frame, model change, typing), throttled to once per 30 s per origin. First-party Anthropic resolves its official endpoint up front; every other model warms only the origin its last inference request actually reached, so dispatch-time rewrites (Copilot plan hosts, `MOONSHOT_BASE_URL`, regional hosts) are never guessed and nothing is warmed before the first request. The origin must be the provider's own endpoint (its bundled base URL host or a KDL `endpoint-hosts` entry): custom `models.yml` providers, built-in provider ids routed to a gateway, and `ANTHROPIC_BASE_URL`/Foundry gateways are never probed. Failures are silently skipped. Applies to every mode (interactive, print, RPC, ACP).
 - **Conditional LSP warmup.** Startup LSP servers (those returned by `discoverStartupLspServers(cwd)`) are only warmed when **all** of these hold:
-  - LSP integration is enabled on the session options and `lsp.enabled` is `true`, **and**
-  - `options.hasUI === true` (interactive TUI), **and**
-  - the `lsp.lazy` setting is disabled (it defaults to `true`).
+   - LSP integration is enabled on the session options and `lsp.enabled` is `true`, **and**
+   - `options.hasUI === true` (interactive TUI), **and**
+   - the `lsp.lazy` setting is disabled (it defaults to `true`).
 
-  With `lsp.lazy` enabled — the default — no language servers are launched at startup at all; each server cold-starts on first use, i.e. when the agent invokes the `lsp` tool or an edit/write touches a file whose extension matches the server's `fileTypes`. Print / script / RPC / ACP invocations (`hasUI=false`) skip the warmup regardless of the setting: they don't render the warmup status indicator and typically finish before the language servers would stabilize, so warming them just spends CPU parsing big `initialize` responses concurrently with the LLM stream consumer and jitters perceived latency. Tools that actually need an LSP server still spin one up on demand through `getOrCreateClient()` — only the _startup_ warmup is skipped. The returned `lspServers` field in `CreateAgentSessionResult` is still populated for UI sessions in lazy mode — recognized servers are discovered (no processes spawned) and reported with status `"available"` so the welcome screen and `/status` can list them; it is `undefined` when LSP integration or `lsp.enabled` is disabled, or `hasUI` is false. Turning `lsp.lazy` off mid-session (via `/settings` or any `settings.set()`/reload) runs the same warmup once for those servers, updating their status in place and emitting the usual `lsp:startup` event.
+   With `lsp.lazy` enabled — the default — no language servers are launched at startup at all; each server cold-starts on first use, i.e. when the agent invokes the `lsp` tool or an edit/write touches a file whose extension matches the server's `fileTypes`. Print / script / RPC / ACP invocations (`hasUI=false`) skip the warmup regardless of the setting: they don't render the warmup status indicator and typically finish before the language servers would stabilize, so warming them just spends CPU parsing big `initialize` responses concurrently with the LLM stream consumer and jitters perceived latency. Tools that actually need an LSP server still spin one up on demand through `getOrCreateClient()` — only the _startup_ warmup is skipped. The returned `lspServers` field in `CreateAgentSessionResult` is still populated for UI sessions in lazy mode — recognized servers are discovered (no processes spawned) and reported with status `"available"` so the welcome screen and `/status` can list them; it is `undefined` when LSP integration or `lsp.enabled` is disabled, or `hasUI` is false. Turning `lsp.lazy` off mid-session (via `/settings` or any `settings.set()`/reload) runs the same warmup once for those servers, updating their status in place and emitting the usual `lsp:startup` event.
 
 ## Minimal controlled embed example
 
 ```ts
 import {
-  createAgentSession,
-  discoverAuthStorage,
-  ModelRegistry,
-  SessionManager,
-  Settings,
+	createAgentSession,
+	discoverAuthStorage,
+	ModelRegistry,
+	SessionManager,
+	Settings,
 } from "@oh-my-pi/pi-coding-agent";
 
 const authStorage = await discoverAuthStorage();
@@ -451,28 +444,25 @@ const modelRegistry = new ModelRegistry(authStorage);
 await modelRegistry.refresh();
 
 const settings = Settings.isolated({
-  "compaction.enabled": true,
-  "retry.enabled": true,
+	"compaction.enabled": true,
+	"retry.enabled": true,
 });
 
 const { session } = await createAgentSession({
-  authStorage,
-  modelRegistry,
-  settings,
-  sessionManager: SessionManager.inMemory(),
-  toolNames: ["read", "grep", "glob", "edit", "write"],
-  restrictToolNames: true,
-  enableMCP: false,
-  enableLsp: true,
+	authStorage,
+	modelRegistry,
+	settings,
+	sessionManager: SessionManager.inMemory(),
+	toolNames: ["read", "grep", "glob", "edit", "write"],
+	restrictToolNames: true,
+	enableMCP: false,
+	enableLsp: true,
 });
 
-session.subscribe((event) => {
-  if (
-    event.type === "message_update" &&
-    event.assistantMessageEvent.type === "text_delta"
-  ) {
-    process.stdout.write(event.assistantMessageEvent.delta);
-  }
+session.subscribe(event => {
+	if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+		process.stdout.write(event.assistantMessageEvent.delta);
+	}
 });
 
 await session.prompt("Find all TODO comments in this repo and propose fixes.");

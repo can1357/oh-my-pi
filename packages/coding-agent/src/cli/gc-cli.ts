@@ -36,6 +36,7 @@ import {
 	type CompressMethod,
 	compressCandidate,
 	compressFilesInPlace,
+	compressionWorks,
 	compressMethod,
 	sweepCompressScratch,
 } from "./gc-compress";
@@ -160,6 +161,11 @@ export interface CompressGcResult {
 	supported: boolean;
 	/** The filesystem's compression method when supported. */
 	method?: CompressMethod;
+	/**
+	 * With `--apply`, why a probe file showed the filesystem does not actually
+	 * compress (e.g. macOS 27 `ditto`); set means no session was scanned.
+	 */
+	probeFailure?: string;
 	scanned: number;
 	/** Idle sessions with files to compress that a running process still owns. */
 	skippedLive: number;
@@ -1974,6 +1980,18 @@ async function runCompressGc(options: ResolvedGcOptions, archiveRoot: string): P
 			result.errors,
 		);
 	}
+	if (options.apply) {
+		// Without it, a volume that ignores the request would still copy and verify every candidate.
+		try {
+			if (!(await compressionWorks(sessionsRoot, method))) {
+				result.probeFailure = `${method} compression stored a compressible probe file uncompressed`;
+				return result;
+			}
+		} catch (error) {
+			result.errors.push(`compression probe: ${errorMessage(error)}`);
+			return result;
+		}
+	}
 	const sessions = await listActiveSessions(sessionsRoot);
 	result.scanned = sessions.length;
 	const cutoffMs = Date.now() - Math.max(options.compressAfterDays * DAY_MS, GC_WRITE_GRACE_MS);
@@ -2292,11 +2310,15 @@ function renderText(result: GcResult): string {
 		if (!compress.supported) {
 			lines.push("compress: unsupported on this filesystem (APFS or NTFS only)");
 		} else {
-			const after = result.apply ? `, ${formatBytes(compress.allocatedAfter)} after` : "";
-			lines.push(
-				`compress: ${compress.compressed}/${compress.wouldCompress} files in ${compress.sessions} sessions, ${formatBytes(compress.allocatedBefore)} on disk before${after}`,
-			);
-			if (compress.skippedLive > 0) lines.push(`compress skipped live: ${compress.skippedLive}`);
+			if (compress.probeFailure !== undefined) {
+				lines.push(`compress skipped: ${compress.probeFailure}`);
+			} else {
+				const after = result.apply ? `, ${formatBytes(compress.allocatedAfter)} after` : "";
+				lines.push(
+					`compress: ${compress.compressed}/${compress.wouldCompress} files in ${compress.sessions} sessions, ${formatBytes(compress.allocatedBefore)} on disk before${after}`,
+				);
+				if (compress.skippedLive > 0) lines.push(`compress skipped live: ${compress.skippedLive}`);
+			}
 			if (compress.leftoverScratchDirs > 0) {
 				const verb = result.apply ? "removed" : "found";
 				lines.push(`compress leftover scratch dirs ${verb}: ${compress.leftoverScratchDirs}`);

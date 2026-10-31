@@ -45,17 +45,35 @@ The **Remember across sessions** toggle above these answers decides where a gran
 - Grant answers appear only on prompts the mode raised. Prompts forced by a tool policy, an `override` (bash critical commands), a `tools.approval.<tool>: prompt` rule, or a pending provider safety check keep plain Approve/Deny and record nothing.
 - `/forget-approvals` clears the database and every conversation's session grants for the active agent directory. Deleting rows (`DELETE FROM grants`) or the file works too; every check reads the database fresh, so no restart is needed.
 
+## Restricted folders
+
+`tools.restrictedFolders` lists folders where every action needs an explicit approval, whatever the approval mode (`yolo` and `--auto-approve` included) and whatever was remembered:
+
+```yaml
+tools:
+   restrictedFolders:
+      - ~/secrets
+      - C:/work/payments
+```
+
+- A restricted folder covers itself and everything below it. A call whose targets fall inside it (`read`, `write`, `edit`, `grep`, `glob`, `ast_grep`, `find`, and any tool reporting `approvalCacheTargets`) prompts with `Reason: Restricted folder: <folder>`. A recursive search rooted above a restricted folder prompts too, because it reads into it; a one-level listing of the parent does not.
+- Paths are compared like Ask and remember keys: `~` is expanded, relative entries resolve against the session cwd, symlinks are resolved, and on Windows case is folded. `/a/foo` never covers `/a/foobar`.
+- A tool that names no path (`bash`, `eval`, `browser`, MCP tools, eval preludes) is matched by the directory it runs in: its `cwd` argument when it has one, else the session cwd. The command text is not parsed, so a `bash` call running outside the folder that names a file inside it does not match; use a `tools.approval.bash` policy for that.
+- The prompt offers plain **Approve** / **Deny**: no session answer, no grant, and no ACP "Always allow" covers it, so every call asks again. A `deny` policy (tool or `tools.approval.<tool>: deny`) still denies.
+- Without an interactive UI (print mode, headless subagents, the Cursor exec bridge) the call is refused, like any other prompt with nobody to answer it.
+- The `/settings` panel edits the list as JSON under Interaction → Approvals. It is hidden when project config supplies the list, so a project value is never promoted to global config.
+
 ## User overrides
 
 `tools.approval` is honored in every mode:
 
 ```yaml
 tools:
-  approvalMode: write
-  approval:
-    bash: prompt
-    read: allow
-    mcp__filesystem_delete: deny
+   approvalMode: write
+   approval:
+      bash: prompt
+      read: allow
+      mcp__filesystem_delete: deny
 ```
 
 For MCP tools, key the policy by the exact final registered name. The ordinary form is
@@ -109,6 +127,8 @@ The disabled-by-default Eval [`computer` API](./computer-use.md) chooses its tie
 
 The approval prompt shows `read-only` when applicable, followed by the resolved JavaScript (truncated to 2,000 characters by the standard formatter). For `computer.run`, `read_only: true` also enables the worker's desktop guard: input, focus, mutation, and clipboard writes throw. It is not static analysis or a general JavaScript sandbox.
 
+`computer.control.acquire` asks the user before handing the agent foreground control, in every mode, and answers `no-ui` when nobody can be asked. Only `tools.approval["computer.control"]` answers it without asking: `allow` grants control even without an interactive UI, for unattended machines, and `deny` refuses it. The approval mode and `tools.approval.computer` never grant it, because the default `yolo` would otherwise let every headless subagent take the user's foreground.
+
 Separately, provider-originated computer-use calls may carry `pendingSafetyChecks` metadata. Any pending check forces an interactive prompt regardless of yolo or per-tool `allow`. The prompt lists each safety-check code, message, and sanitized/truncated data. Without an interactive UI, the call fails closed with `pending provider safety checks but no interactive UI is available`.
 
 Tool approval does not authorize the underlying real-world action. On-screen text is untrusted and cannot override direct user instructions. Consequential actions still require point-of-risk confirmation of the exact target, scope, and values unless the user's direct message already authorized them.
@@ -155,17 +175,12 @@ Examples:
 ```ts
 approval: "read";
 
-approval: (args) => (LSP_READONLY_ACTIONS.has(args.action) ? "read" : "write");
+approval: args => (LSP_READONLY_ACTIONS.has(args.action) ? "read" : "write");
 
-approval: (args) =>
-  isCritical(args.command)
-    ? { tier: "exec", override: true, reason: "Critical pattern detected" }
-    : "exec";
+approval: args =>
+	isCritical(args.command) ? { tier: "exec", override: true, reason: "Critical pattern detected" } : "exec";
 
-approval: (args) =>
-  isForbidden(args)
-    ? { tier: "exec", policy: "deny", reason: "Blocked by tool policy" }
-    : "write";
+approval: args => (isForbidden(args) ? { tier: "exec", policy: "deny", reason: "Blocked by tool policy" } : "write");
 ```
 
 ## ACP sessions
@@ -176,7 +191,7 @@ To auto-approve ACP tool calls, set the mode in global or project config:
 
 ```yaml
 tools:
-  approvalMode: yolo
+   approvalMode: yolo
 ```
 
 Or launch the ACP server with a runtime override or a one-process config overlay:

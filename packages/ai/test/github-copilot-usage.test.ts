@@ -16,7 +16,9 @@
  */
 
 import { describe, expect, it } from "bun:test";
+import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import type { UsageCredential } from "@oh-my-pi/pi-ai/usage";
 import { githubCopilotUsageProvider } from "../src/usage/github-copilot";
 
 /** One billing usage item; `unitType` is the field the fix reads. */
@@ -153,5 +155,85 @@ describe("github copilot usage provider — billing units", () => {
 		const allowance = report.limits.find(limit => limit.id === "copilot:premium");
 		expect(allowance?.label).toBe("AI Credits");
 		expect(allowance?.amount.unit).toBe("credits");
+	});
+});
+
+/** Answers `/user`, billing, and `copilot_internal/user` with the given outcomes; `/user` defaults to a login. */
+function endpointFetch(outcomes: {
+	user?: number | Error;
+	userBody?: unknown;
+	billing?: number | Error;
+	internal: number | Error;
+}): FetchImpl {
+	const respond = (outcome: number | Error, body: unknown): Response => {
+		if (outcome instanceof Error) throw outcome;
+		return outcome === 200
+			? Response.json(body)
+			: new Response("Bad credentials", { status: outcome, statusText: "Unauthorized" });
+	};
+	return async (input: string | URL | Request) => {
+		const url = String(input);
+		if (url.includes("/settings/billing/premium_request/usage")) {
+			return respond(outcomes.billing ?? 404, billingPayload([REQUEST_ITEM]));
+		}
+		if (url.endsWith("/copilot_internal/user")) {
+			return respond(outcomes.internal, {
+				copilot_plan: "individual",
+				quota_snapshots: {
+					premium_interactions: { entitlement: 300, remaining: 100, percent_remaining: 33, unlimited: false },
+				},
+			});
+		}
+		return respond(outcomes.user ?? 200, "userBody" in outcomes ? outcomes.userBody : { login: "octocat" });
+	};
+}
+
+const API_KEY: UsageCredential = { type: "api_key", apiKey: "gh-test", accountId: "octocat" };
+const OAUTH: UsageCredential = { type: "oauth", accessToken: "ghu-test", refreshToken: "ghu-test" };
+/** No `accountId`, so the provider must resolve the login via `/user` before billing. */
+const BARE_API_KEY: UsageCredential = { type: "api_key", apiKey: "gh-test" };
+
+function fetchWith(credential: UsageCredential, fetch: FetchImpl) {
+	return githubCopilotUsageProvider.fetchUsage({ provider: "github-copilot", credential }, { fetch });
+}
+
+describe("github copilot usage provider — auth rejection (#17081)", () => {
+	// AuthStorage purges a credential's last-good report only for a thrown
+	// 401/403; `null` keeps serving stale quota as a transient failure.
+	it("throws when every attempted endpoint rejects the token", async () => {
+		for (const [credential, outcomes] of [
+			[OAUTH, { internal: 401 }],
+			[OAUTH, { internal: 403 }],
+			[API_KEY, { billing: 401, internal: 401 }],
+			[BARE_API_KEY, { user: 401, internal: 401 }],
+		] as const) {
+			const outcome = await fetchWith(credential, endpointFetch(outcomes)).catch(error => error);
+			expect(outcome).toBeInstanceOf(ProviderHttpError);
+			expect((outcome as ProviderHttpError).status).toBe(outcomes.internal);
+		}
+	});
+
+	it("keeps the report when a sibling endpoint rejects the token", async () => {
+		for (const [credential, outcomes] of [
+			[API_KEY, { billing: 403, internal: 200 }],
+			[OAUTH, { user: 401, internal: 200 }],
+		] as const) {
+			const report = await fetchWith(credential, endpointFetch(outcomes));
+			expect(report?.limits.find(limit => limit.id === "copilot:premium")?.amount.used).toBe(200);
+		}
+	});
+
+	it("stays transient when any attempt failed for a non-auth reason", async () => {
+		for (const [credential, outcomes] of [
+			[OAUTH, { internal: 503 }],
+			[OAUTH, { internal: new TypeError("fetch failed") }],
+			[API_KEY, { billing: 401, internal: 503 }],
+			[API_KEY, { billing: 404, internal: 401 }],
+			[BARE_API_KEY, { user: 503, internal: 401 }],
+			[BARE_API_KEY, { user: new TypeError("fetch failed"), internal: 401 }],
+			[BARE_API_KEY, { userBody: { login: null }, internal: 401 }],
+		] as const) {
+			expect(await fetchWith(credential, endpointFetch(outcomes))).toBeNull();
+		}
 	});
 });

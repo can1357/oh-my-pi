@@ -5,8 +5,7 @@
  */
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { LiveSessionController, type LiveSessionControllerOptions } from "../../live/controller";
-import { cfgLiveVoice } from "../../live/settings";
-import { DEFAULT_LIVE_VOICE } from "../../live/voices";
+import { resolveLiveVoice } from "../../live/settings";
 import type { AgentSession } from "../../session/agent-session";
 import type { RpcLiveFrame } from "./rpc-types";
 
@@ -14,15 +13,23 @@ import type { RpcLiveFrame } from "./rpc-types";
 export const RPC_LIVE_LEVELS_INTERVAL_MS = 100;
 
 /** The controller surface the RPC bridge drives. */
-export type RpcLiveSession = Pick<LiveSessionController, "start" | "stop" | "toggleMute" | "muted">;
+export type RpcLiveSession = Pick<LiveSessionController, "start" | "stop" | "toggleMute" | "muted" | "sdpAnswer">;
 
 /** Builds the controller for one live session; tests substitute a fake. */
 export type RpcLiveSessionFactory = (options: LiveSessionControllerOptions) => RpcLiveSession;
 
-/** `live_start` parameters. */
+/** `live_start` / `live_connect` parameters. */
 export interface RpcLiveStartOptions {
 	voice?: string;
 	instructions?: string;
+	/** Caller-owned WebRTC offer (`live_connect`); the result then carries the SDP answer. */
+	sdpOffer?: string;
+}
+
+/** A started live session: the voice in use, plus the SDP answer for an `sdpOffer` session. */
+export interface RpcLiveStartResult {
+	voice: string;
+	sdpAnswer?: string;
 }
 
 /** Visible assistant text: text blocks only, no thinking or tool calls. Shared with interactive mode. */
@@ -65,16 +72,17 @@ export class RpcLiveBridge {
 		return this.#controller !== undefined;
 	}
 
-	/** Connects a live session and resolves once it is recording. */
-	async start(options: RpcLiveStartOptions = {}): Promise<{ voice: string }> {
+	/** Connects a live session and resolves once it is recording (or, with `sdpOffer`, once the call is signaled). */
+	async start(options: RpcLiveStartOptions = {}): Promise<RpcLiveStartResult> {
 		if (this.#controller) throw new Error("A live session is already active");
-		const voice = options.voice?.trim() || cfgLiveVoice.get(this.#session.settings) || DEFAULT_LIVE_VOICE;
+		const voice = resolveLiveVoice(this.#session.settings, options.voice);
 		let terminated = false;
 		const controller = this.#createSession({
 			session: this.#session,
 			extractAssistantText: extractVisibleAssistantText,
 			voice,
 			instructions: options.instructions,
+			sdpOffer: options.sdpOffer,
 			callbacks: {
 				onPhase: phase => this.#output({ type: "live_phase", phase }),
 				onLevels: (input, output) => {
@@ -106,7 +114,13 @@ export class RpcLiveBridge {
 			await this.#retire(controller);
 			throw cause instanceof Error ? cause : new Error(String(cause));
 		}
-		return { voice };
+		if (options.sdpOffer === undefined) return { voice };
+		const sdpAnswer = controller.sdpAnswer;
+		if (sdpAnswer === undefined) {
+			await this.#retire(controller);
+			throw new Error("The live session stopped before its SDP answer was available");
+		}
+		return { voice, sdpAnswer };
 	}
 
 	/** Stops the active session; resolves once it has stopped. No-op without one. */

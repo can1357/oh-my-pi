@@ -516,7 +516,7 @@ mod tests {
 		// to 1.2 s; the read waits for the change instead of returning that.
 		let reads = Cell::new(0);
 		let read = || {
-			reads.set(reads.get() + 1);
+			reads.update(|v| v + 1);
 			Ok(reads.get() >= 3)
 		};
 		let changed = |first: &bool, now: &bool| first != now;

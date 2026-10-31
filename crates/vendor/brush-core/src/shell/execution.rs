@@ -270,7 +270,9 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		match result {
 			Ok(result) => Ok(result),
 			Err(err) => {
-				let _ = self.display_error(&mut params.stderr(self), &err).await;
+				if params.reports_errors() {
+					let _ = self.display_error(&mut params.stderr(self), &err).await;
+				}
 
 				let result = err.into_result(self);
 				self.set_last_exit_status(result.exit_code.into());

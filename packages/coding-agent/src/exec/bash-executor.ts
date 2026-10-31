@@ -3,7 +3,6 @@
  *
  * Uses brush-core via native bindings for shell execution.
  */
-import { ExponentialYield } from "@oh-my-pi/pi-agent-core/utils/yield";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type MinimizerOptions,
@@ -112,6 +111,11 @@ export interface BashPtyOptions {
 	rows: number;
 	/** Receives raw PTY bytes (ANSI intact) for virtual-terminal rendering. */
 	onChunk: (chunk: string) => void;
+	/**
+	 * Receives a writer for the PTY's stdin once the command starts, so the user
+	 * can answer prompts (`read`, shell-startup questions). Writes after exit are dropped.
+	 */
+	onStdin?: (write: (data: string) => void) => void;
 }
 
 export interface BashResult {
@@ -511,6 +515,16 @@ async function executeUserShellPty(run: {
 			const clean = run.graphics.push(chunk);
 			if (clean) run.sink.push(clean.replace(/\r\n?/gu, "\n"));
 		},
+		err => {
+			if (err) return;
+			run.pty.onStdin?.(data => {
+				try {
+					session.write(data);
+				} catch {
+					// The command exited between the keystroke and the write.
+				}
+			});
+		},
 	);
 	if (result.timedOut) {
 		return {
@@ -759,8 +773,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		);
 		options?.onStart?.(() => executionShell.pids());
 
-		const ey = new ExponentialYield();
-		const winner = await ey.race<
+		const winner = await Promise.race<
 			{ kind: "result"; result: ShellRunResult } | { kind: "timeout" } | { kind: "abort" }
 		>([
 			runPromise.then(result => ({ kind: "result" as const, result })),

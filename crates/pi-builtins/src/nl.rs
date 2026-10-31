@@ -8,6 +8,7 @@
 
 use std::{
 	ffi::OsString,
+	fmt::NumBuffer,
 	io::{self, BufRead, BufReader, Write},
 	sync::atomic::{AtomicBool, Ordering},
 };
@@ -271,8 +272,8 @@ enum NumberFormat {
 impl NumberFormat {
 	/// Writes `number` in at least `width` columns.
 	fn write(self, out: &mut impl Write, number: i64, width: usize) -> io::Result<()> {
-		let mut buffer = [0; 20];
-		let digits = magnitude_digits(number.unsigned_abs(), &mut buffer);
+		let mut buffer = NumBuffer::new();
+		let digits = number.unsigned_abs().format_into(&mut buffer).as_bytes();
 		let sign: &[u8] = if number < 0 { b"-" } else { b"" };
 		let padding = width.saturating_sub(sign.len() + digits.len());
 		match self {
@@ -291,19 +292,6 @@ impl NumberFormat {
 				fill(out, &ZEROS, padding)?;
 				out.write_all(digits)
 			},
-		}
-	}
-}
-
-/// The decimal digits of `value`, rendered into the tail of `buffer`.
-fn magnitude_digits(mut value: u64, buffer: &mut [u8; 20]) -> &[u8] {
-	let mut start = buffer.len();
-	loop {
-		start -= 1;
-		buffer[start] = b'0' + (value % 10) as u8;
-		value /= 10;
-		if value == 0 {
-			return &buffer[start..];
 		}
 	}
 }
@@ -332,7 +320,7 @@ impl Section {
 	/// repeated three (header), two (body), or one (footer) times, and nothing
 	/// else. An empty unit disables section matching.
 	fn of(text: &[u8], unit: &[u8]) -> Option<Self> {
-		if unit.is_empty() || text.is_empty() || text.len() % unit.len() != 0 {
+		if unit.is_empty() || text.is_empty() || !text.len().is_multiple_of(unit.len()) {
 			return None;
 		}
 		let section = match text.len() / unit.len() {

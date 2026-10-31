@@ -133,7 +133,8 @@ pub fn render(text: &str, config: &AsciiConfig, mode: ColorMode, theme: &Theme) 
 	let mut current_y = 0;
 	for component in components {
 		let entity_count = component.iter().filter(|&&member| member).count();
-		let max_per_row = ((entity_count as f64).sqrt().ceil() as usize).max(2);
+		let root = entity_count.isqrt();
+		let max_per_row = (root + usize::from(root * root < entity_count)).max(2);
 		let mut current_x = 0;
 		let mut max_row_height = 0;
 		let mut column_count = 0;

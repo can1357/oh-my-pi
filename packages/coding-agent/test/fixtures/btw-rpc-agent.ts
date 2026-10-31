@@ -10,7 +10,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
 // Real SDK session and RPC dispatch with a persisted session; only the model is scripted.
-// A main prompt containing "slow main" takes 3s to answer. The side channel is scripted at
+// A main prompt containing "slow main" streams until aborted. The side channel is scripted at
 // `runEphemeralTurn` (the provider stream is covered by AgentSession tests): a question
 // containing "slow" streams one chunk, then waits for its abort signal, where it writes
 // `btw-aborted` and emits a late chunk that must never reach the host; "fail" rejects;
@@ -40,7 +40,8 @@ const { session } = await createAgentSession({
 session.agent.streamFn = createMockModel({
 	handler: context => ({
 		content: ["Main answer."],
-		delayMs: JSON.stringify(context.messages.at(-1)).includes("slow main") ? 3_000 : 0,
+		// The delay only bounds a leaked process.
+		delayMs: JSON.stringify(context.messages.at(-1)).includes("slow main") ? 600_000 : 0,
 	}),
 }).stream;
 session.runEphemeralTurn = async args => {

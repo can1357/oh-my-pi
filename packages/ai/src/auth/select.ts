@@ -7,6 +7,7 @@ import type { CredentialRankingContext, CredentialRankingStrategy, PlanGate, Usa
 import { isWithinUsageReserve } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
 import type { SessionAffinity } from "./affinity";
+import { raceSignal } from "./abort";
 import {
 	AUTH_BLOCK_SCOPE,
 	credentialBlockScopesForRequest,
@@ -347,6 +348,87 @@ export class CredentialSelector {
 		return candidates[0]?.selection ?? fallback;
 	}
 
+	#oauthUsagePolicy(
+		provider: string,
+		credentials: readonly OAuthSelection[],
+		strategy: CredentialRankingStrategy | undefined,
+		hasPlanRequirement: boolean,
+	): { policyReserveEnabled: boolean; checkUsage: boolean } {
+		const hasAccountPolicy = credentials.some(
+			({ credential }) => this.#deps.policies.forCredential(provider, credential) !== undefined,
+		);
+		const canFetchPolicyUsage = strategy !== undefined || this.#deps.usage.canFetchOAuthUsage(provider);
+		const policyReserveEnabled = hasAccountPolicy && canFetchPolicyUsage;
+		return {
+			policyReserveEnabled,
+			checkUsage: (strategy !== undefined || policyReserveEnabled) && (credentials.length > 1 || hasPlanRequirement),
+		};
+	}
+
+	async #fetchOAuthSelectionUsage(
+		provider: string,
+		providerKey: string,
+		selection: OAuthSelection,
+		blockScopes: string | readonly string[] | undefined,
+		options?: AuthApiKeyOptions,
+	): Promise<UsageRankingResult<OAuthCredential>> {
+		let blockedUntil = this.#deps.blocks.blockedUntil(provider, providerKey, selection.index, blockScopes);
+		let usage: UsageReport | null = null;
+		let usageChecked = false;
+		if (
+			blockedUntil !== undefined &&
+			this.#deps.blocks.canHeal(provider, providerKey, selection.index, blockScopes)
+		) {
+			usage = await this.#deps.usage.report(provider, selection.credential, {
+				...options,
+				timeoutMs: this.#deps.usage.requestTimeoutMs,
+			});
+			usageChecked = true;
+			blockedUntil = this.#deps.blocks.blockedUntil(provider, providerKey, selection.index, blockScopes);
+		}
+		if (blockedUntil === undefined && !usageChecked) {
+			usage = await this.#deps.usage.report(provider, selection.credential, {
+				...options,
+				timeoutMs: this.#deps.usage.requestTimeoutMs,
+			});
+			usageChecked = true;
+		}
+		return { selection, usage, usageChecked, blockedUntil };
+	}
+
+	/** Warm exactly the usage fetches a fresh, unpinned OAuth ranking pass needs. */
+	async prefetchUsage(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<void> {
+		options?.signal?.throwIfAborted();
+		await this.#deps.pool.adoptExternalChanges();
+		options?.signal?.throwIfAborted();
+		// A working pin needs only its own report; leave that path to resolution
+		// rather than introducing sibling probes during resumed-session startup.
+		if (this.#deps.affinity.get(provider, sessionId) !== undefined) return;
+		const credentials = this.#deps.pool
+			.credentials(provider)
+			.map((credential, index) => ({ credential, index }))
+			.filter(
+				(entry): entry is OAuthSelection =>
+					entry.credential.type === "oauth" && this.#deps.affinity.allows(provider, sessionId, entry.credential),
+			);
+		const strategy = this.#deps.strategies(provider);
+		const rankingContext: CredentialRankingContext = { modelId: options?.modelId };
+		const planGate = strategy?.planGate?.(rankingContext);
+		if (!this.#oauthUsagePolicy(provider, credentials, strategy, planGate !== undefined).checkUsage) return;
+		const blockScope = strategy?.blockScope?.(rankingContext);
+		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
+		const providerKey = providerTypeKey(provider, "oauth");
+		await raceSignal(
+			Promise.all(
+				credentials.map(selection =>
+					this.#fetchOAuthSelectionUsage(provider, providerKey, selection, blockScopes, options),
+				),
+			),
+			options?.signal,
+			"usage prefetch aborted",
+		);
+	}
+
 	async #rankOAuthSelections(args: {
 		providerKey: string;
 		provider: string;
@@ -370,52 +452,17 @@ export class CredentialSelector {
 		// than to hang the agent waiting for rate-limited usage endpoints.
 		const usageTimeout = Math.max(5000, this.#deps.usage.requestTimeoutMs * 1.5);
 		const usagePromise = Promise.all(
-			args.order.map(async idx => {
+			args.order.map(idx => {
 				const selection = args.credentials[idx];
-				if (!selection) return null;
-				let blockedUntil = this.#deps.blocks.blockedUntil(
-					args.provider,
-					args.providerKey,
-					selection.index,
-					args.blockScopes ?? args.blockScope,
-				);
-				let usage: UsageReport | null = null;
-				let usageChecked = false;
-				if (
-					blockedUntil !== undefined &&
-					this.#deps.blocks.canHeal(
-						args.provider,
-						args.providerKey,
-						selection.index,
-						args.blockScopes ?? args.blockScope,
-					)
-				) {
-					usage = await this.#deps.usage.report(args.provider, selection.credential, {
-						...args.options,
-						timeoutMs: this.#deps.usage.requestTimeoutMs,
-					});
-					usageChecked = true;
-					blockedUntil = this.#deps.blocks.blockedUntil(
-						args.provider,
-						args.providerKey,
-						selection.index,
-						args.blockScopes ?? args.blockScope,
-					);
-				}
-				if (blockedUntil !== undefined) return { selection, usage, usageChecked, blockedUntil };
-				if (!usageChecked) {
-					usage = await this.#deps.usage.report(args.provider, selection.credential, {
-						...args.options,
-						timeoutMs: this.#deps.usage.requestTimeoutMs,
-					});
-					usageChecked = true;
-				}
-				return {
-					selection,
-					usage,
-					usageChecked,
-					blockedUntil: undefined as number | undefined,
-				};
+				return selection
+					? this.#fetchOAuthSelectionUsage(
+							args.provider,
+							args.providerKey,
+							selection,
+							args.blockScopes ?? args.blockScope,
+							args.options,
+						)
+					: null;
 			}),
 		);
 		const timeoutSignal = Promise.withResolvers<null>();
@@ -569,16 +616,15 @@ export class CredentialSelector {
 				const accountKey = oauthAccountKey(credential);
 				return accountKey !== undefined && accountIds.has(accountKey);
 			});
-		const hasAccountPolicy = credentials.some(
-			({ credential }) => this.#deps.policies.forCredential(provider, credential) !== undefined,
-		);
 		const hasPriorityPolicy = credentials.some(
 			({ credential }) => this.#deps.policies.forCredential(provider, credential)?.priority !== undefined,
 		);
-		const canFetchPolicyUsage = strategy !== undefined || this.#deps.usage.canFetchOAuthUsage(provider);
-		const policyReserveEnabled = hasAccountPolicy && canFetchPolicyUsage;
-		const checkUsage =
-			(strategy !== undefined || policyReserveEnabled) && (credentials.length > 1 || hasPlanRequirement);
+		const { policyReserveEnabled, checkUsage } = this.#oauthUsagePolicy(
+			provider,
+			credentials,
+			strategy,
+			hasPlanRequirement,
+		);
 		const sessionCredential = this.#deps.affinity.get(provider, sessionId);
 		const sessionPreferredIndex = sessionCredential?.type === "oauth" ? sessionCredential.index : undefined;
 		const sessionPreferredCredential =
@@ -764,7 +810,12 @@ export class CredentialSelector {
 					preflightFailures.add(candidate);
 					return;
 				}
-				const syncedPeerCredential = !authCredentialEquals(beforeSync, candidate.selection.credential);
+				// A peer row is a replacement only when its access token is not the one the
+				// provider rejected: a peer may change just the expiry, metadata or refresh token.
+				const rejectedAccess = force ? options?.rejectedAccessToken : undefined;
+				const syncedPeerCredential =
+					!authCredentialEquals(beforeSync, candidate.selection.credential) &&
+					(rejectedAccess === undefined || candidate.selection.credential.access !== rejectedAccess);
 				const hasFreshAccess = Date.now() + OAUTH_REFRESH_SKEW_MS < candidate.selection.credential.expires;
 				if ((!force || syncedPeerCredential) && hasFreshAccess) return;
 				const latestCredential = this.#deps.pool.credentials(provider)[candidate.selection.index];
@@ -791,6 +842,7 @@ export class CredentialSelector {
 						credentialId,
 						options?.signal,
 						force ? options?.refreshReason : undefined,
+						rejectedAccess,
 					);
 					const beforeRefresh = candidate.selection.credential;
 					const updated = mergeRefreshedCredential(beforeRefresh, refreshedCredentials);

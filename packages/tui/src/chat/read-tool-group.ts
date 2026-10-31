@@ -1,10 +1,9 @@
 import * as path from "node:path";
-import { pathToFileURL } from "node:url";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import { type Component } from "../tui";
 import { Container } from "../tui";
 import { Text } from "../components/text";
-import { getLanguageFromPath, theme } from "../theme";
+import { getLanguageFromPath, theme, type ThemeColor } from "../theme";
 import { parseLineRanges, selectorLineRanges } from "../tools/line-ranges";
 import {
 	type ReadRenderArgs,
@@ -13,8 +12,9 @@ import {
 	readResultIsMarkdown,
 	readSourceFsPath,
 	splitPathAndSel,
+	splitReadQuery,
 } from "../tools/read";
-import { PREVIEW_LIMITS, shortenPath } from "../render/render-utils";
+import { FILE_NAME_COLOR, formatStyledPath, PREVIEW_LIMITS, shortenPath } from "../render/render-utils";
 import { fileHyperlink, renderCodeCell, renderMarkdownCell } from "../render";
 import { wrapTreeLine } from "../render/hanging-wrap";
 import { wrapTextWithAnsi } from "../utils";
@@ -22,7 +22,7 @@ import { canonicalizeMessage } from "./thinking-display";
 import { internalUrlSchemeSpec, splitUrlScheme } from "../tools/url-scheme-host";
 import type { ToolExecutionHandle } from "./tool-execution";
 import { formatUsageRow } from "../overlays/usage-row";
-import { formatCount, sanitizeText, sanitizeTextDeep } from "@oh-my-pi/pi-utils";
+import { formatCount, isUrlLikePath, sanitizeText, sanitizeTextDeep } from "@oh-my-pi/pi-utils";
 import type { TspCardStatus, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { NativeToolHead } from "../tools/renderer";
 import { card, code, keyed, md, node, span, text, withHidden } from "../native/describe";
@@ -158,6 +158,21 @@ const COLLAPSED_PREVIEW_LINES = PREVIEW_LIMITS.OUTPUT_COLLAPSED;
  * source line and Markdown is clamped by each file's native card after rendering.
  */
 const TRIMMED_BODY_PREVIEW = { lines: 1000 } as const;
+
+/** How a read path is painted: its path (`isUrl` for a whole URL) and its selectors' color. */
+interface PathPaint {
+	path(filePath: string, isUrl: boolean): string;
+	selectors: ThemeColor;
+}
+
+/** A `Read <path>` header line keeps the accent subject color. */
+const HEADER_PATH_PAINT: PathPaint = { path: filePath => theme.fg("accent", filePath), selectors: "accent" };
+
+/** Group rows share the tool-body path style with muted selectors. */
+const ROW_PATH_PAINT: PathPaint = {
+	path: (filePath, isUrl) => (isUrl ? theme.fg(FILE_NAME_COLOR, filePath) : formatStyledPath(filePath, theme)),
+	selectors: "muted",
+};
 
 /** Native item tone per read status; successful reads stay neutral. */
 const READ_STATUS_TONE: Record<ReadEntry["status"], "pending" | "warning" | "error" | undefined> = {
@@ -876,7 +891,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		const linkPath = linkPathForTargets(row.targets);
 		const spans: TspSpan[] = [];
 		if (filePath) {
-			const href = linkPath && path.isAbsolute(linkPath) ? pathToFileURL(linkPath).href : undefined;
+			const href = linkPath ? fileHref(linkPath) : undefined;
 			spans.push(span(filePath, "path", href ? { href } : undefined));
 		} else {
 			spans.push(span("…", "toolOutput"));
@@ -916,7 +931,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			const row = displayRows[0]!;
 			if (!this.#shouldRenderPreviewRow(row)) {
 				const statusSymbol = this.#formatStatus(this.#statusForTargets(row.targets));
-				const pathDisplay = this.#formatRowPath(row);
+				const pathDisplay = this.#formatRowPath(row, HEADER_PATH_PAINT);
 				const lines = [` ${statusSymbol} ${theme.fg("toolTitle", theme.bold("Read"))} ${pathDisplay}`.trimEnd()];
 				const usageRows = this.#usageRowsBySummaryRow(displayRows).get(0) ?? [];
 				this.#appendUsageRows(lines, usageRows, "   ");
@@ -1085,12 +1100,13 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		return `${statusPrefix}${this.#formatRowPath(row)}`;
 	}
 
-	#formatRowPath(row: ReadSummaryRow): string {
-		return this.#formatPathValue(row.targetPath, {
+	#formatRowPath(row: ReadSummaryRow, paint = ROW_PATH_PAINT): string {
+		return this.#formatPathValue(row.targetPath, paint, {
 			correctedFrom: this.#correctedFromForTargets(row.targets),
 			conflictCount: this.#conflictCountForTargets(row.targets),
 			line: firstSelectorLineForTargets(row.targets),
 			linkPath: linkPathForTargets(row.targets),
+			basePath: row.basePath,
 		});
 	}
 
@@ -1138,25 +1154,35 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	#formatPathValue(
 		value: string,
-		options: { correctedFrom?: string; conflictCount?: number; line?: number; linkPath?: string } = {},
+		paint: PathPaint,
+		options: {
+			correctedFrom?: string;
+			conflictCount?: number;
+			line?: number;
+			linkPath?: string;
+			/** The path `value` selects from; merged selectors (`1-5,…,9`) do not parse back out of it. */
+			basePath?: string;
+		} = {},
 	): string {
-		const split = splitPathAndSel(value);
-		const selectorSuffix = split.sel ? `:${split.sel}` : "";
-		const baseValue = split.sel ? split.path : value;
-		const filePath = shortenPath(baseValue);
-		let pathDisplay = filePath ? theme.fg("accent", filePath) : theme.fg("toolOutput", "…");
+		const { basePath } = options;
+		const split =
+			basePath !== undefined && value.startsWith(`${basePath}:`)
+				? { path: basePath, sel: value.slice(basePath.length + 1) }
+				: splitPathAndSel(value);
+		// `?q=…` queries read like selectors: they follow the path, outside its link.
+		const target = splitReadQuery(split.sel ? split.path : value);
+		const filePath = shortenPath(target.path);
+		const selectors = split.sel ? `${target.query ?? ""}:${split.sel}` : (target.query ?? "");
+		let pathDisplay = filePath ? paint.path(filePath, isUrlLikePath(target.path)) : theme.fg("toolOutput", "…");
 		if (filePath && options.linkPath) {
 			const linkOptions = options.line !== undefined ? { line: options.line } : undefined;
 			pathDisplay = fileHyperlink(options.linkPath, pathDisplay, linkOptions);
 		}
-		if (selectorSuffix) {
-			pathDisplay += theme.fg("accent", selectorSuffix);
-		}
+		if (selectors) pathDisplay += theme.fg(paint.selectors, selectors);
 		if (options.correctedFrom) {
 			pathDisplay += theme.fg("dim", ` (corrected from ${shortenPath(options.correctedFrom)})`);
 		}
-		pathDisplay += this.#formatConflictBadge(options.conflictCount);
-		return pathDisplay;
+		return pathDisplay + this.#formatConflictBadge(options.conflictCount);
 	}
 
 	#formatConflictBadge(conflictCount: number | undefined): string {
@@ -1175,7 +1201,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		const lang = getLanguageFromPath(split.path);
 		const pathValue = shortenPath(entry.path);
 		const pathDisplay = pathValue
-			? this.#formatPathValue(entry.path, {
+			? this.#formatPathValue(entry.path, HEADER_PATH_PAINT, {
 					correctedFrom: entry.correctedFrom,
 					conflictCount: entry.conflictCount,
 					line: firstSelectorLine(split.sel),

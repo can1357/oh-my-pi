@@ -94,11 +94,10 @@ export function openaiCodexModelManagerOptions(
  * {@link unionAccountCatalogs}.
  *
  * Returns `null` when any account's fetch failed transiently, so a partial list
- * cannot replace the previous or bundled authoritative catalog. An account
- * whose credential the backend rejected outright (401/403 — revoked or
- * deauthorized) contributes nothing and is skipped instead: it would otherwise
- * veto every sibling account's models until the user removes it. If no account
- * produced a catalog, discovery aborts the same way.
+ * cannot replace the previous or bundled authoritative catalog. A definitive
+ * account denial (401/403 auth or 402 payment) contributes nothing and is skipped
+ * instead: it would otherwise veto every sibling account's models until the
+ * account recovers. If no account produced a catalog, discovery aborts.
  */
 function unionCodexModels(
 	results: readonly { accountId: string | undefined; result: CodexModelDiscoveryResult | null }[],
@@ -107,7 +106,7 @@ function unionCodexModels(
 	for (const { accountId, result } of results) {
 		if (!result) return null;
 		if (result.rejectedStatus !== undefined) {
-			logger.warn("Codex model discovery skipped an account whose credential was rejected", {
+			logger.warn("Codex model discovery skipped an account denied by the backend", {
 				accountId,
 				status: result.rejectedStatus,
 			});

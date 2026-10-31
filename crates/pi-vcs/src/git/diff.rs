@@ -1,6 +1,10 @@
 //! Git-compatible patch generation.
 
-use std::{fmt::Write as _, io::Write as _, path::Path};
+use std::{
+	fmt::{NumBuffer, Write as _},
+	io::Write as _,
+	path::Path,
+};
 
 use gix::bstr::{BStr, BString, ByteSlice};
 
@@ -1455,7 +1459,7 @@ fn no_index_label(root: &Path, path: &Path) -> String {
 }
 
 fn is_null_device(path: &Path) -> bool {
-	path == Path::new("/dev/null") || path.to_string_lossy().eq_ignore_ascii_case("NUL")
+	path == "/dev/null" || path.to_string_lossy().eq_ignore_ascii_case("NUL")
 }
 
 #[cfg(unix)]
@@ -1547,10 +1551,11 @@ const fn zero_start(start: u32, len: u32) -> u32 {
 }
 
 fn push_range(out: &mut String, start: u32, len: u32) {
-	out.push_str(&start.to_string());
+	let mut buf = NumBuffer::new();
+	out.push_str(start.format_into(&mut buf));
 	if len != 1 {
 		out.push(',');
-		out.push_str(&len.to_string());
+		out.push_str(len.format_into(&mut buf));
 	}
 }
 

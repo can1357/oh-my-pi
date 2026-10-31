@@ -21,7 +21,8 @@
  * Endpoint contract:
  *   POST /v1/pi/stream
  *   body:    { modelId, context, options?, stream? }   // `stream` defaults to true
- *   200 SSE: stream of `AssistantMessageEvent` (terminated by `data: [DONE]`)
+ *   200 SSE: stream of `AssistantMessageEvent` (terminated by `data: [DONE]`),
+ *            interleaved with `: keepalive` comment frames
  *   200 JSON (stream=false): { message: AssistantMessage }
  *   4xx/5xx: { error: { type, message } }
  */
@@ -68,6 +69,7 @@ const ALLOWED_OPTION_KEYS: ReadonlySet<keyof SimpleStreamOptions> = new Set([
 	"promptCache",
 	"statefulResponses",
 	"storeResponses",
+	"codexAccessPrograms",
 	"streamFirstEventTimeoutMs",
 	"streamIdleTimeoutMs",
 	"reasoning",
@@ -167,6 +169,13 @@ export function parseRequest(body: unknown, _headers?: Headers): PiNativeParsedR
 
 const SSE_ENCODER = new TextEncoder();
 const SSE_DONE = SSE_ENCODER.encode("data: [DONE]\n\n");
+// SSE comment frame, skipped by the client's parser. Sent once up front so the
+// status line and headers leave Bun.serve before the first event, then on an
+// interval so a model thinking for minutes keeps bytes on the wire: Bun fetch,
+// proxies, and server idle timers otherwise cut the silent connection
+// (issue #17363).
+const SSE_KEEPALIVE = SSE_ENCODER.encode(": keepalive\n\n");
+const STREAM_KEEPALIVE_INTERVAL_MS = 15_000;
 
 /**
  * Ship every {@link AssistantMessageEvent} verbatim, SSE-framed.
@@ -187,8 +196,16 @@ export function encodeStream(
 	control?: AuthGatewayStreamControl,
 ): ReadableStream<Uint8Array> {
 	let cancelled = control?.signal?.aborted === true;
+	let keepaliveTimer: NodeJS.Timeout | undefined;
+	const stopKeepalive = () => {
+		if (keepaliveTimer !== undefined) {
+			clearInterval(keepaliveTimer);
+			keepaliveTimer = undefined;
+		}
+	};
 	const markCancelled = () => {
 		cancelled = true;
+		stopKeepalive();
 	};
 	control?.signal?.addEventListener("abort", markCancelled, { once: true });
 	return new ReadableStream<Uint8Array>({
@@ -198,6 +215,19 @@ export function encodeStream(
 					controller.close();
 					return;
 				}
+				controller.enqueue(SSE_KEEPALIVE);
+				keepaliveTimer = setInterval(() => {
+					try {
+						if (cancelled) {
+							stopKeepalive();
+							return;
+						}
+						controller.enqueue(SSE_KEEPALIVE);
+					} catch {
+						// Controller already closed/errored (client gone); stop the timer.
+						stopKeepalive();
+					}
+				}, STREAM_KEEPALIVE_INTERVAL_MS);
 				for await (const event of events) {
 					if (cancelled) return;
 					controller.enqueue(SSE_ENCODER.encode(`data: ${JSON.stringify(event)}\n\n`));
@@ -211,8 +241,9 @@ export function encodeStream(
 				if (!cancelled) {
 					// Best-effort error envelope so the client iterator resolves
 					// instead of hanging on the dropped connection. Shape matches the
-					// canonical `error` event minus the unrecoverable `error:
-					// AssistantMessage` payload (we don't have a usable one here).
+					// canonical `error` event minus the `error: AssistantMessage`
+					// payload (we don't have a usable one here); `streamPiNative`
+					// rebuilds that payload from its own model.
 					const message = err instanceof Error ? err.message : String(err);
 					controller.enqueue(
 						SSE_ENCODER.encode(
@@ -223,11 +254,12 @@ export function encodeStream(
 					controller.close();
 				}
 			} finally {
+				stopKeepalive();
 				control?.signal?.removeEventListener("abort", markCancelled);
 			}
 		},
 		cancel(reason) {
-			cancelled = true;
+			markCancelled();
 			control?.signal?.removeEventListener("abort", markCancelled);
 			control?.onCancel?.(reason);
 		},

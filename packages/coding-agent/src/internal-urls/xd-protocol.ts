@@ -102,9 +102,9 @@ export class XdProtocolHandler implements ProtocolHandler {
 			context.signal,
 			toolCall.onUpdate,
 			// The write tool's gate already resolved approval at this device's tier
-			// (see `deviceWriteTier`) — mark it so a wrapped inner tool does not
-			// prompt a second time.
-			toolCall.context ? { ...toolCall.context, xdevApproved: true } : undefined,
+			// and under `tools.approval.<device>` (see `deviceWriteTier`) — record the
+			// key so a wrapped inner tool does not ask the same question again.
+			toolCall.context ? { ...toolCall.context, xdevPolicyKey: name } : undefined,
 		);
 		return {
 			content: result.content,

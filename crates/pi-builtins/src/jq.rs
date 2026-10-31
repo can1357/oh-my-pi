@@ -470,7 +470,7 @@ def tonumber: tonumber_;
 		let read = |import: load::Import<&str, PathBuf>| -> Result<File<String, PathBuf>, String> {
 			let path = find_import(fs, &import, paths, "jq")?;
 			let code = fs.read_to_string(&path).map_err(|e| e.to_string())?;
-			counts_lines.set(counts_lines.get() || code.contains("input_line_number"));
+			counts_lines.update(|v| v || code.contains("input_line_number"));
 			Ok(File { code, path })
 		};
 		let loader = Loader::new(defs).with_read(read);
@@ -589,10 +589,7 @@ def tonumber: tonumber_;
 	/// A plain string literal without interpolation or format.
 	fn term_str<'t, 's>(term: &'t load::parse::Term<&'s str>) -> Option<&'t &'s str> {
 		match term {
-			load::parse::Term::Str(None, parts) => match &parts[..] {
-				[load::lex::StrPart::Str(text)] => Some(text),
-				_ => None,
-			},
+			load::parse::Term::Str(None, parts) if let [load::lex::StrPart::Str(text)] = &parts[..] => Some(text),
 			_ => None,
 		}
 	}
@@ -756,7 +753,7 @@ def tonumber: tonumber_;
 
 	fn report_lex(code: &str, (expected, found): load::lex::Error<&str>) -> Report {
 		// truncate found string to its first character
-		let found = &found[..found.char_indices().nth(1).map_or(found.len(), |(i, _)| i)];
+		let found = &found[..found.ceil_char_boundary(1)];
 
 		let found_range = load::span(code, found);
 		let found = match found {
@@ -869,7 +866,33 @@ mod read {
 	}
 
 	pub fn json_array(fs: &BlockingFs, path: &Path) -> io::Result<Val> {
-		parse_many(&load_file(fs, path)?).map(|r| r.map_err(invalid_data)).collect()
+		parse_many(json_bytes(&load_file(fs, path)?)).map(|r| r.map_err(invalid_data)).collect()
+	}
+
+	/// Ignore one UTF-8 BOM at the start of each JSON input, never within a value.
+	fn json_bytes(bytes: &[u8]) -> &[u8] {
+		bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes)
+	}
+
+	/// Peek at most three bytes, including across short buffers, without copying the input.
+	fn json_reader(mut read: impl BufRead) -> io::Result<impl BufRead> {
+		let mut prefix = [0; 3];
+		let mut len = 0;
+		while len < prefix.len() {
+			let available = read.fill_buf()?;
+			let n = available.len().min(prefix.len() - len);
+			if n == 0 {
+				break;
+			}
+			prefix[len..len + n].copy_from_slice(&available[..n]);
+			read.consume(n);
+			len += n;
+			if prefix[..len] != b"\xef\xbb\xbf"[..len] {
+				break;
+			}
+		}
+		let keep = if prefix == *b"\xef\xbb\xbf" { 0 } else { len };
+		Ok(io::Cursor::new(prefix).take(keep as u64).chain(read))
 	}
 
 	pub type Vals<'a> = Box<dyn Iterator<Item = io::Result<Val>> + 'a>;
@@ -950,7 +973,7 @@ mod read {
 				if raw || count_lines {
 					values(raw, &bytes[..], lines, count_lines)
 				} else {
-					Box::new(parse_many(bytes).map(|r| r.map_err(invalid_data)))
+					Box::new(parse_many(json_bytes(bytes)).map(|r| r.map_err(invalid_data)))
 				}
 			})
 		});
@@ -984,10 +1007,14 @@ mod read {
 	) -> Vals<'a> {
 		if raw {
 			Box::new(RawLines { read, lines })
-		} else if count_lines {
-			Box::new(read_many(LineFeed { read, line: Vec::new(), pos: 0, lines }))
 		} else {
-			Box::new(read_many(read))
+			match json_reader(read) {
+				Ok(read) if count_lines => {
+					Box::new(read_many(LineFeed { read, line: Vec::new(), pos: 0, lines }))
+				},
+				Ok(read) => Box::new(read_many(read)),
+				Err(error) => Box::new(core::iter::once(Err(error))),
+			}
 		}
 	}
 
@@ -1005,12 +1032,9 @@ mod read {
 			match self.read.read_until(b'\n', &mut line) {
 				Ok(0) => None,
 				Ok(_) => {
-					if line.last() == Some(&b'\n') {
-						line.pop();
-						if line.last() == Some(&b'\r') {
-							line.pop();
-						}
-						self.lines.set(self.lines.get() + 1);
+					if line.pop_if(|byte| *byte == b'\n').is_some() {
+						line.pop_if(|byte| *byte == b'\r');
+						self.lines.update(|v| v + 1);
 					}
 					Some(Ok(Val::utf8_str(line)))
 				},
@@ -1046,7 +1070,7 @@ mod read {
 				self.pos = 0;
 				self.read.read_until(b'\n', &mut self.line)?;
 				if self.line.last() == Some(&b'\n') {
-					self.lines.set(self.lines.get() + 1);
+					self.lines.update(|v| v + 1);
 				}
 			}
 			Ok(&self.line[self.pos..])
@@ -1067,6 +1091,27 @@ mod read {
 			Box::new(core::iter::once_with(move || iter.collect()))
 		} else {
 			Box::new(iter)
+		}
+	}
+
+	#[cfg(test)]
+	mod tests {
+		use std::io::{BufReader, Cursor, Read};
+
+		#[test]
+		fn json_bom_can_span_input_buffers_without_losing_other_prefixes() {
+			for input in [
+				&b"\xef\xbb\xbf{\"ok\":true}"[..],
+				&b"123"[..],
+				&b"\xef"[..],
+				&b"\xef\xbb"[..],
+				&b"\xef\xbb\xbf\xef\xbb\xbf1"[..],
+			] {
+				let mut read = super::json_reader(BufReader::with_capacity(1, Cursor::new(input))).unwrap();
+				let mut output = Vec::new();
+				read.read_to_end(&mut output).unwrap();
+				assert_eq!(output, super::json_bytes(input));
+			}
 		}
 	}
 }

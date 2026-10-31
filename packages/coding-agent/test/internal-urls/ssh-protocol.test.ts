@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { ShellFsFileType } from "@oh-my-pi/pi-natives";
 import * as capability from "../../src/capability";
 import type { SSHHost } from "../../src/capability/ssh";
 import type { CapabilityResult, SourceMeta } from "../../src/capability/types";
@@ -90,7 +91,9 @@ describe("SshProtocolHandler", () => {
 		mockHosts();
 		vi.spyOn(fileTransfer, "readRemoteFile").mockRejectedValue(new Error("Is a directory"));
 		vi.spyOn(fileTransfer, "statRemotePath").mockResolvedValue("directory");
-		const listSpy = vi.spyOn(fileTransfer, "listRemoteDir").mockResolvedValue([{ name: "etc", isDirectory: true }]);
+		const listSpy = vi
+			.spyOn(fileTransfer, "listRemoteDir")
+			.mockResolvedValue([{ name: "etc", fileType: ShellFsFileType.Dir }]);
 		const res = await handler.resolve(parseInternalUrl("ssh://icaro/"));
 		expect(res.isDirectory).toBe(true);
 		expect(res.content).toBe("etc/");
@@ -146,8 +149,8 @@ describe("SshProtocolHandler", () => {
 		);
 		vi.spyOn(fileTransfer, "statRemotePath").mockResolvedValue("directory");
 		const listSpy = vi.spyOn(fileTransfer, "listRemoteDir").mockResolvedValue([
-			{ name: "conf.d", isDirectory: true },
-			{ name: "hosts", isDirectory: false },
+			{ name: "conf.d", fileType: ShellFsFileType.Dir },
+			{ name: "hosts", fileType: ShellFsFileType.File },
 		]);
 		const res = await handler.resolve(parseInternalUrl("ssh://icaro/etc"));
 		expect(res.isDirectory).toBe(true);

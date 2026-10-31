@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { resolveImageCountBudget, resolveInlineImageByteBudget } from "@oh-my-pi/pi-catalog/compat/request-size";
+import {
+	resolveImageCountBudget,
+	resolveInlineImageByteBudget,
+	resolveRequestBodyByteLimit,
+} from "@oh-my-pi/pi-catalog/compat/request-size";
 import type { Api, Model } from "@oh-my-pi/pi-catalog/types";
 import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
 
@@ -124,6 +128,22 @@ describe("image-count-budget", () => {
 });
 
 describe("inline-image-byte-budget", () => {
+	test("the Anthropic API carries 120 MB of images under its 128 MB body; a custom baseUrl carries neither", () => {
+		const opus = imageModel("anthropic", "anthropic-messages", ANTHROPIC_API, "claude-opus-5-5");
+		expect(configuredOfficial(opus)).toBe(true);
+		expect(inlineImageByteBudget(opus)).toBe(120_000_000);
+		expect(resolveRequestBodyByteLimit(opus, configuredOfficial(opus))).toBe(128_000_000);
+		const proxied = imageModel(
+			"anthropic",
+			"anthropic-messages",
+			"https://anthropic-proxy.example",
+			"claude-opus-5-5",
+		);
+		expect(configuredOfficial(proxied)).toBe(false);
+		expect(inlineImageByteBudget(proxied)).toBeUndefined();
+		expect(resolveRequestBodyByteLimit(proxied, configuredOfficial(proxied))).toBeUndefined();
+	});
+
 	test("the Codex backend carries 24 MB; a rerouted Codex baseUrl carries none", () => {
 		const sol = codex();
 		expect(configuredOfficial(sol)).toBe(true);

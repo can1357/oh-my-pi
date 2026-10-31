@@ -8,6 +8,7 @@ import type {
 	Usage,
 } from "@oh-my-pi/pi-ai";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { CompactionMethod } from "./compaction-methods";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { RetryFallbackRole } from "./retry-fallback-chains";
@@ -35,6 +36,9 @@ export interface SessionTitleSlotEntry {
 
 export const EPHEMERAL_MODEL_CHANGE_ROLE = "fallback";
 
+/** A prewalk or plan-yolo handoff: restored on resume, passed over when looking up the assigned role. */
+export const PREWALK_MODEL_CHANGE_ROLE = "prewalk";
+
 export interface SessionHeader {
 	type: "session";
 	version?: number; // v1 sessions don't have this
@@ -50,6 +54,13 @@ export interface SessionHeader {
 	 */
 	additionalDirectories?: string[];
 	parentSession?: string;
+	/**
+	 * Set, to the `parentSession` id, when this session is that same conversation
+	 * continued in a new file because it could not keep writing its own (another
+	 * live process held it, or the file changed under it). Resuming the parent
+	 * resumes the most recently active continuation instead. Forks never set it.
+	 */
+	continuationOf?: string;
 	/** Prior absolute JSONL locations recorded by successful session moves. */
 	previousSessionFiles?: string[];
 	/** Local-only provider prompt-cache identity inherited by exact-route full forks; omitted from shares and HTML. */
@@ -68,7 +79,10 @@ export interface NewSessionOptions {
 	/** Provider prompt-cache identity to seed on the new session header. */
 	providerPromptCacheKey?: string;
 	taskPromptCacheKey?: string;
-	/** Skip flushing the current session and delete it instead of saving. */
+	/**
+	 * Skip flushing the current session and delete it instead of saving. The
+	 * successor starts lazy: no empty header is written until it has content.
+	 */
 	drop?: boolean;
 	/** Additional workspace directories to seed on the new session. */
 	additionalDirectories?: string[];
@@ -269,6 +283,12 @@ export interface SessionInitEntry extends SessionEntryBase {
 	modelRole?: string;
 	/** Initially resolved provider/model selector for historical display. */
 	resolvedModel?: string;
+	/** The model came from a per-call `model`; cold revival re-checks it against the current operator grants. */
+	perCallModel?: boolean;
+	/** Exact canonical provider/id[@upstream] identity, without a thinking suffix; required for per-call revival. */
+	perCallModelIdentity?: string;
+	/** Configured thinking selector, or null when unset; required for per-call revival. */
+	perCallThinkingLevel?: ConfiguredThinkingLevel | null;
 	/** Subagent's `subagent:<id>` retry fallback role as installed at spawn; cold revival reinstalls it. Absent when none was installed or on older files. */
 	retryFallback?: RetryFallbackRole;
 	/** Whether the agent definition is read-only, allowing an exact zero-LoC attribution. */

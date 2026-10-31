@@ -51,6 +51,7 @@ export class CollabController {
 	#stopEpoch = 0;
 	/** Installed when the first room starts; a process that never hosts never subscribes. */
 	#unsubscribeSessionChange: (() => void) | undefined;
+	#unsubscribeSessionMove: (() => void) | undefined;
 	/** Guests may drive the session only once interactive startup has finished. */
 	#startupComplete = false;
 	#shutdown = false;
@@ -134,6 +135,16 @@ export class CollabController {
 		this.#unsubscribeSessionChange ??= this.#ctx.session.registerSessionChangeCallback(() =>
 			this.#onSessionChanged(),
 		);
+		// A write that finds the session file open in another omp process (or
+		// replaced/contested on disk) moves the session to a sibling file under a
+		// new id without an AgentSession transition; rotate the room for it too.
+		// Moves replayed at subscription predate every room this controller hosts.
+		if (this.#unsubscribeSessionMove) return;
+		let live = false;
+		this.#unsubscribeSessionMove = this.#ctx.sessionManager.onPersistenceNotice(() => {
+			if (live) this.#onSessionChanged();
+		});
+		live = true;
 	}
 
 	/**
@@ -198,6 +209,8 @@ export class CollabController {
 		this.#relaunchTimer = undefined;
 		this.#unsubscribeSessionChange?.();
 		this.#unsubscribeSessionChange = undefined;
+		this.#unsubscribeSessionMove?.();
+		this.#unsubscribeSessionMove = undefined;
 		// Stop before draining the chain: a room still connecting is aborted at
 		// once instead of holding shutdown for the relay connect timeout.
 		await this.stop(reason);
@@ -292,9 +305,9 @@ export class CollabController {
 
 	/**
 	 * The session this process drives changed identity (new, resume, fork,
-	 * branch). The old room is already inert — the host refuses frames and
-	 * queries for a session it never shared — so stop it, then apply the
-	 * auto-start policy to the new session.
+	 * branch, or a move to a sibling file). The old room is already inert —
+	 * the host refuses frames and queries for a session it never shared — so
+	 * stop it, then apply the auto-start policy to the new session.
 	 */
 	#onSessionChanged(): void {
 		const previous = this.#host;

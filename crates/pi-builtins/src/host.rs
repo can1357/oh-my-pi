@@ -10,7 +10,9 @@
 //! process's.
 //!
 //! A utility implements [`Utility`]: a `clap` argument model plus a synchronous
-//! [`Utility::run`] body. [`util`] wraps that into a [`Registration`] which
+//! [`Utility::run`] body (or [`AsyncUtility`], with an `async` body awaited on
+//! the shell task; see [`async_util`]). [`util`] wraps that into a
+//! [`Registration`] which
 //!
 //! 1. parses `argv`, rendering `--help`/`--version` on stdout and usage errors
 //!    on stderr with the utility's own exit status,
@@ -33,10 +35,12 @@ use std::{
 	cell::Cell,
 	collections::HashMap,
 	ffi::OsString,
+	future::poll_fn,
 	io::{self, BufWriter, LineWriter, Read, Write},
 	marker::PhantomData,
 	panic::{AssertUnwindSafe, catch_unwind},
 	path::{Path, PathBuf},
+	pin::pin,
 	time::Duration,
 	sync::{
 		Arc, OnceLock,
@@ -44,7 +48,10 @@ use std::{
 	},
 };
 
-use futures::stream::{FuturesUnordered, StreamExt};
+use futures::{
+	FutureExt,
+	stream::{FuturesUnordered, StreamExt},
+};
 use parking_lot::Mutex;
 use pi_vfs::{BlockingFs, Metadata, absolute_path};
 
@@ -57,6 +64,8 @@ use brush_core::{
 	processes::ProcessWaitResult,
 };
 use tokio_util::sync::CancellationToken;
+
+use crate::stdio::{AsyncOut, Source};
 
 /// A command-line utility implemented as a shell builtin.
 ///
@@ -76,6 +85,16 @@ pub(crate) trait Utility: clap::Parser + Send + Sync + 'static {
 	/// forks subshells of the invoking shell to serve them; every other utility
 	/// skips that cost.
 	const RUNS_COMMANDS: bool = false;
+
+	/// Whether the utility handles cancellation like a process that catches
+	/// SIGINT/SIGTERM/SIGHUP: once the shell cancels it (abort, `timeout`), it
+	/// still reports its own exit status and its final diagnostics (`rsync`'s
+	/// `received SIGINT, SIGTERM, or SIGHUP (code 20)` trailer). The adapter
+	/// then awaits the body's status instead of reporting 130, and output
+	/// written after the cancellation is not dropped. The body must still end
+	/// promptly once [`Host::is_cancelled`] turns true. Every other utility
+	/// keeps the default: killed silently with status 130.
+	const OWNS_CANCELLATION: bool = false;
 
 	/// Whether the utility asks [`Host::path_is_stdout`] (`rg`, which must not
 	/// read the file its own output lands in). Only then does the host keep a
@@ -100,6 +119,40 @@ pub(crate) trait Utility: clap::Parser + Send + Sync + 'static {
 	fn run(self, host: &mut Host) -> i32;
 }
 
+/// A command-line utility whose body is `async`, awaited directly on the
+/// shell task by the adapter [`AsyncUtil`] (no blocking thread).
+///
+/// The constants and [`AsyncUtility::rewrite_argv`] mean what they do for
+/// [`Utility`]. The body is dropped when the shell cancels the utility, so it
+/// needs no polling of [`Host::is_cancelled`]; it MUST NOT block. Its output
+/// is memory-backed: writes to [`Host::stdout_writer`] and [`Host::stderr`]
+/// are delivered by [`Host::flush_output`] (called at unit boundaries) and by
+/// the adapter when the body ends, and stdin is read with
+/// [`Host::read_stdin`] or [`Host::read_stdin_to_end`]. Register with
+/// [`async_util`].
+pub(crate) trait AsyncUtility: clap::Parser + Send + Sync + 'static {
+	/// Program name, used in diagnostics.
+	const NAME: &'static str;
+
+	/// Exit status for a usage error; see [`Utility::USAGE_ERROR`].
+	const USAGE_ERROR: u8 = 1;
+
+	/// Whether the body runs command lines through [`Host::run_command_async`]
+	/// or [`Host::spawn_command_async`].
+	const RUNS_COMMANDS: bool = false;
+
+	/// Whether the body asks [`Host::path_is_stdout`].
+	const CHECKS_STDOUT_PATH: bool = false;
+
+	/// Rewrites raw `argv` before clap parses it; see [`Utility::rewrite_argv`].
+	fn rewrite_argv(argv: Vec<OsString>) -> Result<Vec<OsString>, String> {
+		Ok(argv)
+	}
+
+	/// Runs the utility to completion, returning its exit status.
+	fn run(self, host: &mut Host) -> impl Future<Output = i32> + Send;
+}
+
 /// The shell as a utility builtin sees it: standard streams, working
 /// directory, exported environment, cancellation, and accumulated exit status.
 ///
@@ -108,7 +161,7 @@ pub(crate) trait Utility: clap::Parser + Send + Sync + 'static {
 /// stdout is the common case).
 pub(crate) struct Host {
 	/// Standard input. Reads observe cancellation, so a blocked pipe read
-	/// returns EOF on abort instead of hanging the shell.
+	/// fails with the cancellation error on abort instead of hanging the shell.
 	pub stdin:  Stdin,
 	/// Standard output; the null device when fd 1 is closed. Raw: utilities
 	/// with bulk output buffer it themselves via [`Host::stdout_writer`].
@@ -148,6 +201,18 @@ pub(crate) struct Host {
 	/// Raised when the utility reports an error yet goes on; `None` when the
 	/// shell asked for no such report.
 	reported_error:        Option<Arc<AtomicBool>>,
+	/// The memory-backed stdout and stderr of an async utility; `None` for a
+	/// sync one, whose writers deliver on every write.
+	async_out:             Option<AsyncStreams>,
+	/// Stdin as an async [`Source`], opened by the first [`Host::read_stdin`].
+	stdin_source:          Option<Source>,
+}
+
+/// The two [`AsyncOut`]s of an async utility; one buffer when stdout and
+/// stderr share a destination.
+struct AsyncStreams {
+	stdout: AsyncOut,
+	stderr: AsyncOut,
 }
 
 fn output_handle(file: &OpenFile) -> Option<OpenFile> {
@@ -183,6 +248,18 @@ fn output_metadata(file: &OpenFile) -> Option<Metadata> {
 			}
 		},
 		_ => None,
+	}
+}
+
+/// Metadata of the regular file backing a utility's stdout (see
+/// [`Host::stdout_file`]).
+#[derive(Clone, Debug)]
+pub(crate) struct StdoutFile(Metadata);
+
+impl StdoutFile {
+	/// Whether `path` on `fs` is this file.
+	pub async fn is(&self, fs: &pi_vfs::Fs, path: &Path) -> bool {
+		fs.metadata(path).await.is_ok_and(|candidate| self.0.same_file(&candidate))
 	}
 }
 
@@ -231,18 +308,69 @@ enum GuardedStream {
 	Stderr,
 }
 
+/// What the death of the emulated process (SIGPIPE, cancellation) does to one
+/// output stream; shared by [`SigpipeGuard`] and the async utilities'
+/// memory-backed output.
+#[derive(Clone)]
+pub(crate) struct OutputGate {
+	stream:  GuardedStream,
+	sigpipe: Arc<Sigpipe>,
+	cancel:  CommandCancel,
+}
+
+impl OutputGate {
+	fn new(stream: GuardedStream, sigpipe: &Arc<Sigpipe>, cancel: &CommandCancel) -> Self {
+		Self { stream, sigpipe: Arc::clone(sigpipe), cancel: cancel.clone() }
+	}
+
+	/// Whether the emulated process is dead to this stream's reader: writes
+	/// are dropped.
+	pub fn discards(&self) -> bool {
+		(self.cancel.silences && self.cancel.fired())
+			|| matches!(self.stream, GuardedStream::Stderr) && self.sigpipe.is_hit()
+	}
+
+	/// Whether writes to this stream fail: stdout once a reader has gone.
+	pub fn fails(&self) -> bool {
+		matches!(self.stream, GuardedStream::Stdout) && self.sigpipe.is_hit()
+	}
+
+	/// Notes a failed write, flipping the SIGPIPE state on a closed reader.
+	pub fn record(&self, error: &io::Error) {
+		self.sigpipe.record(error);
+	}
+}
+
 /// An [`openfiles::Stream`] wrapper that turns `EPIPE` into emulated SIGPIPE.
 /// Clones share the [`Sigpipe`] state, so `stdout_clone()` handles given to
 /// helper threads participate too.
+///
+/// It also emulates the other way a command dies: once the command is
+/// cancelled (abort, `timeout`, `kill %N`), a standalone utility would be
+/// killed and print nothing more, so every later write on either stream is
+/// dropped. This is the one place that silences what a cancelled utility
+/// says about its cancelled reads (`cat: /dev/zero: Operation canceled`,
+/// `tail: internal error`); utilities need no case of their own. A utility
+/// that owns its cancellation ([`Utility::OWNS_CANCELLATION`]) is not
+/// silenced: it reports its own end, like a process that catches the signal.
 struct SigpipeGuard {
-	inner:   OpenFile,
-	stream:  GuardedStream,
-	sigpipe: Arc<Sigpipe>,
+	inner: OpenFile,
+	gate:  OutputGate,
 }
 
 impl SigpipeGuard {
-	fn wrap(inner: OpenFile, stream: GuardedStream, sigpipe: &Arc<Sigpipe>) -> OpenFile {
-		OpenFile::Stream(Box::new(Self { inner, stream, sigpipe: Arc::clone(sigpipe) }))
+	fn wrap(
+		inner: OpenFile,
+		stream: GuardedStream,
+		sigpipe: &Arc<Sigpipe>,
+		cancel: &CommandCancel,
+	) -> OpenFile {
+		OpenFile::Stream(Box::new(Self { inner, gate: OutputGate::new(stream, sigpipe, cancel) }))
+	}
+
+	/// Whether the emulated process is dead to this stream's reader.
+	fn discards(&self) -> bool {
+		self.gate.discards()
 	}
 }
 
@@ -254,27 +382,23 @@ impl Read for SigpipeGuard {
 
 impl Write for SigpipeGuard {
 	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-		if matches!(self.stream, GuardedStream::Stderr) && self.sigpipe.is_hit() {
+		if self.discards() {
 			return Ok(buf.len());
 		}
-		self.inner.write(buf).inspect_err(|error| self.sigpipe.record(error))
+		self.inner.write(buf).inspect_err(|error| self.gate.record(error))
 	}
 
 	fn flush(&mut self) -> io::Result<()> {
-		if matches!(self.stream, GuardedStream::Stderr) && self.sigpipe.is_hit() {
+		if self.discards() {
 			return Ok(());
 		}
-		self.inner.flush().inspect_err(|error| self.sigpipe.record(error))
+		self.inner.flush().inspect_err(|error| self.gate.record(error))
 	}
 }
 
 impl openfiles::Stream for SigpipeGuard {
 	fn clone_box(&self) -> Box<dyn openfiles::Stream> {
-		Box::new(Self {
-			inner:   self.inner.clone(),
-			stream:  self.stream,
-			sigpipe: Arc::clone(&self.sigpipe),
-		})
+		Box::new(Self { inner: self.inner.clone(), gate: self.gate.clone() })
 	}
 
 	#[cfg(unix)]
@@ -285,6 +409,24 @@ impl openfiles::Stream for SigpipeGuard {
 	#[cfg(unix)]
 	fn try_borrow_as_fd(&self) -> Result<std::os::fd::BorrowedFd<'_>, Error> {
 		self.inner.try_borrow_as_fd()
+	}
+}
+
+/// Whether the command a utility runs for has been cancelled: its token fired
+/// (checked directly, so a diagnostic written before the adapter reacts is
+/// still dropped), or the adapter raised the host's flag.
+#[derive(Clone)]
+struct CommandCancel {
+	flag:     Arc<AtomicBool>,
+	token:    Option<CancellationToken>,
+	/// Writes on guarded streams are dropped once cancelled (false for a
+	/// [`Utility::OWNS_CANCELLATION`] utility, which reports its own end).
+	silences: bool,
+}
+
+impl CommandCancel {
+	fn fired(&self) -> bool {
+		self.flag.load(Ordering::Relaxed) || self.token.as_ref().is_some_and(CancellationToken::is_cancelled)
 	}
 }
 
@@ -339,7 +481,15 @@ impl ShellPaths {
 	/// command in `context`: usually just 0/1/2, plus any from `exec N>` or
 	/// process substitution.
 	pub fn new<SE: ShellExtensions>(context: &ExecutionContext<'_, SE>) -> Self {
+		// Scoped to the command's own cancellation (the operand's token under
+		// `timeout`), so a utility reading a host file stops when it fires
+		// instead of draining the file first: `timeout 1 cat /dev/zero` never
+		// returned.
 		let filesystem = context.shell.filesystem().blocking();
+		let filesystem = match context.cancel_token() {
+			Some(token) => filesystem.with_cancellation(token),
+			None => filesystem,
+		};
 		#[cfg(unix)]
 		let descriptors: Arc<[(brush_core::ShellFd, OpenFile)]> = context
 			.open_fds()
@@ -480,16 +630,15 @@ pub(crate) fn process_umask() -> u32 {
 		umask(mask);
 		u32::from(mask.bits())
 	});
-	cfg_if::cfg_if! {
-		if #[cfg(any(target_os = "linux", target_os = "android"))] {
+	cfg_select! {
+		any(target_os = "linux", target_os = "android") => {
 			procfs::process::Process::myself()
 				.ok()
 				.and_then(|me| me.status().ok())
 				.and_then(|status| status.umask)
 				.unwrap_or_else(|| *TOGGLED)
-		} else {
-			*TOGGLED
 		}
+		_ => *TOGGLED,
 	}
 }
 
@@ -548,13 +697,22 @@ impl Host {
 
 	/// Whether `path` identifies the regular file currently backing stdout.
 	/// Always `false` unless the utility set [`Utility::CHECKS_STDOUT_PATH`].
-	pub fn path_is_stdout(&self, path: &Path) -> bool {
+	pub async fn path_is_stdout(&self, path: &Path) -> bool {
+		match self.stdout_file() {
+			Some(stdout) => stdout.is(&self.vfs(), path).await,
+			None => false,
+		}
+	}
+
+	/// The regular file backing stdout, as a `Sync` value worker threads can
+	/// test paths against; `None` when stdout is no regular file or the
+	/// utility did not set [`Utility::CHECKS_STDOUT_PATH`].
+	pub fn stdout_file(&self) -> Option<StdoutFile> {
 		self.stdout_metadata
 			.get_or_init(|| self.stdout_handle.as_ref().and_then(output_metadata))
 			.as_ref()
-			.is_some_and(|stdout| {
-				stdout.is_file() && self.fs().metadata(path).is_ok_and(|candidate| stdout.same_file(&candidate))
-			})
+			.filter(|stdout| stdout.is_file())
+			.map(|stdout| StdoutFile(stdout.clone()))
 	}
 
 	/// Looks up an exported shell variable.
@@ -592,23 +750,10 @@ impl Host {
 		self.reported_error.clone()
 	}
 
-	/// A `pi_walker` heartbeat that fails with `Interrupted` once the host
-	/// cancels. Without it the walker's per-entry heartbeat never sees the
-	/// flag, and a cancelled walk traverses the whole tree before the utility
-	/// notices (#3949, #3933). The walker surfaces the error as
-	/// `WalkError::Interrupted`; `grep`, `rg`, and `fd` tell it from a real
-	/// failure with [`Host::is_cancelled`] and stay silent, since the shell
-	/// adapter owns the cancellation status (130), while `find` prints it as
-	/// `Error: cancelled`.
-	pub fn cancel_heartbeat(&self) -> impl Fn() -> io::Result<()> + Send + Sync + 'static {
-		let cancel = Arc::clone(&self.cancel);
-		move || {
-			if cancel.load(Ordering::Relaxed) {
-				Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
-			} else {
-				Ok(())
-			}
-		}
+	/// The async facade of the host filesystem, for utilities awaiting
+	/// provider I/O.
+	pub fn vfs(&self) -> pi_vfs::Fs {
+		self.paths.fs().to_async()
 	}
 
 	/// Whether stdin is a shell pipe, virtual file, or custom stream, and so should be treated
@@ -698,10 +843,76 @@ impl Host {
 	/// produced. Batch emitters whose output only exists once all input is
 	/// consumed (`sort`, `tac`, `seq`) may keep plain block buffering.
 	pub fn stdout_writer(&self) -> StreamWriter {
+		if let Some(streams) = &self.async_out {
+			return StreamWriter::Async(streams.stdout.clone());
+		}
 		match &self.merged_out {
 			Some(shared) => StreamWriter::Shared(Arc::clone(shared)),
 			None => StreamWriter::new(self.stdout.clone(), self.stdout_is_file),
 		}
+	}
+
+	/// Delivers pending output of stdout and stderr: everything for non-file destinations, regular-file output once 64 KiB is pending; returns at once when nothing is due.
+	///
+	/// Output of an async utility sits in memory until this runs; the adapter
+	/// delivers whatever remains when the body ends. Sync utilities write
+	/// through, so this is a no-op for them.
+	///
+	/// # Errors
+	///
+	/// The first write failure; a closed reader is [`io::ErrorKind::BrokenPipe`]
+	/// and ends the utility with the SIGPIPE status.
+	pub async fn flush_output(&self) -> io::Result<()> {
+		self.drain_output(false).await
+	}
+
+	/// Delivers pending output: all of it when `full`, else as
+	/// [`Host::flush_output`].
+	async fn drain_output(&self, full: bool) -> io::Result<()> {
+		let Some(streams) = &self.async_out else {
+			return Ok(());
+		};
+		let stdout = streams.stdout.drain(full).await;
+		let stderr = if streams.stdout.same_as(&streams.stderr) {
+			Ok(())
+		} else {
+			streams.stderr.drain(full).await
+		};
+		stdout.and(stderr)
+	}
+
+	/// Reads up to `buf.len()` bytes of stdin (0 at EOF): a provider file through its async API, a descriptor once the reactor reports it readable.
+	///
+	/// Dropping the future cancels the read; nothing keeps running.
+	///
+	/// # Errors
+	///
+	/// The read error; [`pi_vfs::cancelled`] once the command is cancelled.
+	pub async fn read_stdin(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+		if buf.is_empty() {
+			return Ok(0);
+		}
+		if self.stdin.cancel.fired() {
+			return Err(pi_vfs::cancelled());
+		}
+		let source = open_stdin(&mut self.stdin_source, &self.stdin.file)?;
+		until_cancelled(&self.stdin.cancel, source.read(buf)).await
+	}
+
+	/// Reads the rest of stdin into `buf`, failing with `io::ErrorKind::OutOfMemory` past `limit` bytes.
+	///
+	/// Returns the bytes appended; on an error, or when the future is dropped
+	/// mid-read, `buf` keeps what was read within the limit.
+	///
+	/// # Errors
+	///
+	/// [`io::ErrorKind::OutOfMemory`] past `limit`, else the read error.
+	pub async fn read_stdin_to_end(&mut self, buf: &mut Vec<u8>, limit: usize) -> io::Result<usize> {
+		if self.stdin.cancel.fired() {
+			return Err(pi_vfs::cancelled());
+		}
+		let source = open_stdin(&mut self.stdin_source, &self.stdin.file)?;
+		until_cancelled(&self.stdin.cancel, source.read_to_end(buf, limit)).await
 	}
 
 	/// A launcher for child processes started by this utility.
@@ -762,8 +973,41 @@ impl Host {
 	///   [`Utility::RUNS_COMMANDS`].
 	///
 	/// Failures to run the command itself surface from [`RunningCommand::wait`].
-	pub fn spawn_command(&mut self, mut command: ShellCommand) -> io::Result<RunningCommand> {
-		let Some(commands) = &self.commands else {
+	pub fn spawn_command(&mut self, command: ShellCommand) -> io::Result<RunningCommand> {
+		let (commands, request, response) = self.enqueue(command)?;
+		commands.send(request).map_err(|_| cancelled_command())?;
+		Ok(RunningCommand { response })
+	}
+
+	/// Async twin of [`Host::run_command`]; the adapter keeps serving command
+	/// requests while this is awaited.
+	///
+	/// # Errors
+	///
+	/// As for [`Host::run_command`], with [`AsyncUtility::RUNS_COMMANDS`].
+	pub async fn run_command_async(&mut self, command: ShellCommand) -> io::Result<CommandStatus> {
+		self.spawn_command_async(command).await?.wait().await
+	}
+
+	/// Async twin of [`Host::spawn_command`].
+	///
+	/// # Errors
+	///
+	/// As for [`Host::spawn_command`], with [`AsyncUtility::RUNS_COMMANDS`].
+	pub async fn spawn_command_async(&mut self, command: ShellCommand) -> io::Result<RunningCommandAsync> {
+		let _ = self.drain_output(true).await;
+		let (commands, request, response) = self.enqueue(command)?;
+		commands.send_async(request).await.map_err(|_| cancelled_command())?;
+		Ok(RunningCommandAsync { response })
+	}
+
+	/// Builds the request for `command`, flushing pending diagnostics first so
+	/// output stays in order.
+	fn enqueue(
+		&mut self,
+		mut command: ShellCommand,
+	) -> io::Result<(flume::Sender<CommandRequest>, CommandRequest, flume::Receiver<io::Result<CommandStatus>>)> {
+		let Some(commands) = self.commands.clone() else {
 			return Err(io::Error::new(
 				io::ErrorKind::Unsupported,
 				format!("{} cannot run commands", self.name),
@@ -771,10 +1015,25 @@ impl Host {
 		};
 		command.cwd = command.cwd.map(|dir| self.paths.resolve(dir));
 		let (reply, response) = flume::bounded(1);
-		let request = CommandRequest { command, reply };
 		let _ = self.stderr.flush();
-		commands.send(request).map_err(|_| cancelled_command())?;
-		Ok(RunningCommand { response })
+		Ok((commands, CommandRequest { command, reply }, response))
+	}
+}
+
+/// A command started by [`Host::spawn_command_async`].
+#[must_use = "a started command should be waited for"]
+pub(crate) struct RunningCommandAsync {
+	response: flume::Receiver<io::Result<CommandStatus>>,
+}
+
+impl RunningCommandAsync {
+	/// Waits for the command to finish.
+	///
+	/// # Errors
+	///
+	/// As for [`Host::run_command`].
+	pub async fn wait(self) -> io::Result<CommandStatus> {
+		self.response.recv_async().await.map_err(|_| cancelled_command())?
 	}
 }
 
@@ -812,7 +1071,7 @@ impl RunningCommand {
 			})
 			.wait();
 		drop(running.swap_remove(index));
-		Some(response.map_err(|_| cancelled_command()).and_then(|status| status))
+		Some(response.map_err(|_| cancelled_command()).flatten())
 	}
 }
 
@@ -1083,7 +1342,7 @@ async fn dispatch<SE: ShellExtensions>(
 		.into_iter()
 		.map(|arg| CommandArg::from(arg.to_string_lossy().into_owned()))
 		.collect();
-	let name = args.first().map(ToString::to_string).unwrap_or_default();
+	let name = args.first().map_or_default(ToString::to_string);
 	let argv0 = command.argv0.map(|argv0| argv0.to_string_lossy().into_owned());
 	if let (Some(argv0), Some(first)) = (&argv0, args.first_mut()) {
 		*first = CommandArg::from(argv0.clone());
@@ -1161,6 +1420,9 @@ pub(crate) enum StreamWriter {
 	/// capture pipe): one buffer means diagnostics and output interleave in
 	/// exactly the order they were written.
 	Shared(Arc<Mutex<StreamWriter>>),
+	/// Memory-backed output of an async utility: writes append to a buffer
+	/// the host delivers asynchronously (see [`Host::flush_output`]).
+	Async(AsyncOut),
 }
 
 impl StreamWriter {
@@ -1193,6 +1455,7 @@ impl StreamWriter {
 			Self::Block(w) => w.get_ref().clone(),
 			Self::Line(w) => w.get_ref().clone(),
 			Self::Shared(shared) => shared.lock().dup_file(),
+			Self::Async(out) => out.dup_file(),
 		}
 	}
 
@@ -1203,6 +1466,7 @@ impl StreamWriter {
 			Self::Block(w) => w.get_ref().is_terminal(),
 			Self::Line(w) => w.get_ref().is_terminal(),
 			Self::Shared(shared) => shared.lock().is_terminal(),
+			Self::Async(out) => out.is_terminal(),
 		}
 	}
 }
@@ -1213,6 +1477,7 @@ impl Write for StreamWriter {
 			Self::Block(w) => w.write(buf),
 			Self::Line(w) => w.write(buf),
 			Self::Shared(shared) => shared.lock().write(buf),
+			Self::Async(out) => out.write(buf),
 		}
 	}
 
@@ -1221,6 +1486,7 @@ impl Write for StreamWriter {
 			Self::Block(w) => w.flush(),
 			Self::Line(w) => w.flush(),
 			Self::Shared(shared) => shared.lock().flush(),
+			Self::Async(out) => out.flush(),
 		}
 	}
 
@@ -1229,6 +1495,7 @@ impl Write for StreamWriter {
 			Self::Block(w) => w.write_vectored(bufs),
 			Self::Line(w) => w.write_vectored(bufs),
 			Self::Shared(shared) => shared.lock().write_vectored(bufs),
+			Self::Async(out) => out.write_vectored(bufs),
 		}
 	}
 
@@ -1243,6 +1510,7 @@ impl Write for StreamWriter {
 			Self::Block(w) => w.write_all(buf),
 			Self::Line(w) => w.write_all(buf),
 			Self::Shared(shared) => shared.lock().write_all(buf),
+			Self::Async(out) => out.write_all(buf),
 		}
 	}
 
@@ -1251,6 +1519,7 @@ impl Write for StreamWriter {
 			Self::Block(w) => w.write_fmt(args),
 			Self::Line(w) => w.write_fmt(args),
 			Self::Shared(shared) => shared.lock().write_fmt(args),
+			Self::Async(out) => out.write_fmt(args),
 		}
 	}
 }
@@ -1379,15 +1648,23 @@ impl ChildEnv {
 /// Standard input for a utility builtin: the command's fd 0 plus the
 /// cancellation flag.
 ///
-/// On unix, when fd 0 is a real descriptor, reads wait for readiness in short
+/// On unix, when fd 0 is a descriptor whose reads can block (a pipe, FIFO,
+/// terminal, socket or device), reads wait for readiness in short
 /// slices so an abort or `timeout` is observed even when input never arrives on
-/// a blocked pipe; the utility then sees EOF and unwinds cleanly rather than
-/// leaving a detached thread writing to descriptors the host has moved on from.
+/// a blocked pipe. A cancelled read fails with [`pi_vfs::cancelled`], not EOF,
+/// so a utility never reports a result for input it did not finish reading
+/// (`timeout 1 md5sum - < big` printed a checksum of a prefix); it unwinds
+/// rather than leaving a detached thread writing to descriptors the host has
+/// moved on from, and what it says about the error is dropped.
 pub(crate) struct Stdin {
 	file:   OpenFile,
 	#[cfg_attr(not(unix), allow(dead_code, reason = "readiness polling is unix-only"))]
 	fd:     Option<i32>,
-	cancel: Arc<AtomicBool>,
+	/// The command's cancellation. A provider-backed fd 0 (`< virtual://f`) has
+	/// no descriptor to poll, and the facade that opened it is usually the
+	/// outer command's, not this command's (a `timeout` operand), so its reads
+	/// are raced against this command's token directly.
+	cancel: CommandCancel,
 }
 
 impl Stdin {
@@ -1408,17 +1685,28 @@ impl Stdin {
 	pub fn try_clone(&self) -> io::Result<Self> {
 		let file = self.file.try_clone()?;
 		let fd = pollable_fd(&file);
-		Ok(Self { file, fd, cancel: Arc::clone(&self.cancel) })
+		Ok(Self { file, fd, cancel: self.cancel.clone() })
+	}
+
+	/// Whether the command was cancelled, for utilities that read fd 0's
+	/// descriptor directly (`wc -c` splices a pipe) and so bypass the reads
+	/// that fail once it is.
+	pub fn is_cancelled(&self) -> bool {
+		self.cancel.fired()
 	}
 }
 
 /// The raw descriptor [`Stdin`] polls for readiness, so a blocked read
-/// observes cancellation; `None` off unix or for in-process streams.
+/// observes cancellation; `None` off unix, for in-process streams, and for a
+/// descriptor whose reads never block (see [`pi_vfs::reads_can_block`]).
 fn pollable_fd(file: &OpenFile) -> Option<i32> {
 	#[cfg(unix)]
 	{
 		use std::os::fd::AsRawFd;
-		file.try_borrow_as_fd().ok().map(|fd| fd.as_raw_fd())
+		file.try_borrow_as_fd()
+			.ok()
+			.filter(|fd| pi_vfs::fd_reads_can_block(*fd))
+			.map(|fd| fd.as_raw_fd())
 	}
 	#[cfg(not(unix))]
 	{
@@ -1429,32 +1717,47 @@ fn pollable_fd(file: &OpenFile) -> Option<i32> {
 
 impl Read for Stdin {
 	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-		if self.cancel.load(Ordering::Relaxed) {
-			return Ok(0);
+		if self.cancel.fired() {
+			return Err(pi_vfs::cancelled());
 		}
 		#[cfg(unix)]
 		if let Some(fd) = self.fd {
-			loop {
-				if self.cancel.load(Ordering::Relaxed) {
-					return Ok(0);
-				}
-				let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-				// SAFETY: one `pollfd` valid for the call; `fd` is owned by the
-				// live `OpenFile` held in this struct.
-				let ready = unsafe { libc::poll(&mut pfd, 1, 200) };
-				if ready < 0 {
-					let err = io::Error::last_os_error();
-					if err.kind() == io::ErrorKind::Interrupted {
-						continue;
-					}
-					return Err(err);
-				}
-				if ready > 0 {
-					break;
-				}
-			}
+			// SAFETY: `fd` is owned by the live `OpenFile` held in this struct.
+			let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+			pi_vfs::wait_readable(fd, || self.cancel.fired())?;
 		}
-		self.file.read(buf)
+		match (&self.file, &self.cancel.token) {
+			(OpenFile::Vfs(file), Some(token)) => file.read_until_cancelled(buf, token),
+			_ => self.file.read(buf),
+		}
+	}
+}
+
+/// Stdin as a [`Source`], opened on first use and kept in `slot`.
+fn open_stdin<'a>(slot: &'a mut Option<Source>, file: &OpenFile) -> io::Result<&'a mut Source> {
+	let source = match slot.take() {
+		Some(source) => source,
+		None => Source::inherited(file)?,
+	};
+	Ok(slot.insert(source))
+}
+
+/// Awaits `read`, failing with [`pi_vfs::cancelled`] once the command is
+/// cancelled: a provider-backed stdin's facade is usually the outer
+/// command's, not this command's (a `timeout` operand), so the read is raced
+/// against this command's own token. Without a token, dropping the future is
+/// the only cancellation.
+async fn until_cancelled<T>(
+	cancel: &CommandCancel,
+	read: impl Future<Output = io::Result<T>>,
+) -> io::Result<T> {
+	match &cancel.token {
+		Some(token) => tokio::select! {
+			biased;
+			() = token.cancelled() => Err(pi_vfs::cancelled()),
+			read = read => read,
+		},
+		None => read.await,
 	}
 }
 
@@ -1544,13 +1847,16 @@ fn posix_strerror(kind: io::ErrorKind) -> Option<&'static str> {
 /// render them the way the bash they emulate does, with `/` separators, so
 /// output does not change spelling with the host platform.
 pub(crate) fn forward_slash_display(path: &Path) -> Option<PathBuf> {
-	if !cfg!(windows) || path.to_str().is_none() {
+	if !cfg!(windows) {
 		return None;
 	}
-	match pi_walker::normalize_path(path) {
-		std::borrow::Cow::Owned(text) => Some(PathBuf::from(text)),
-		std::borrow::Cow::Borrowed(_) => None,
-	}
+	let text = path.to_str()?;
+	let literal = matches!(
+		path.components().next(),
+		Some(std::path::Component::Prefix(prefix))
+			if prefix.kind().is_verbatim() || matches!(prefix.kind(), std::path::Prefix::DeviceNS(_))
+	);
+	(text.contains('\\') && !literal).then(|| PathBuf::from(text.replace('\\', "/")))
 }
 
 /// Borrows an `OsStr` as raw bytes.
@@ -1643,6 +1949,98 @@ pub(crate) fn util<U: Utility, SE: ShellExtensions>() -> Registration<SE> {
 	builtins::builtin::<Util<U>, SE>()
 }
 
+/// Returns the [`Registration`] for an [`AsyncUtility`].
+pub(crate) fn async_util<U: AsyncUtility, SE: ShellExtensions>() -> Registration<SE> {
+	builtins::builtin::<AsyncUtil<U>, SE>().async_io()
+}
+
+/// What the shared adapter needs to know about a utility, whichever trait it
+/// implements.
+#[derive(Clone, Copy)]
+struct Spec {
+	name:               &'static str,
+	usage_error:        u8,
+	runs_commands:      bool,
+	checks_stdout_path: bool,
+	owns_cancellation:  bool,
+	/// Whether the body is async, so its output is memory-backed (see
+	/// [`AsyncOut`]).
+	async_io:           bool,
+	rewrite_argv:       fn(Vec<OsString>) -> Result<Vec<OsString>, String>,
+}
+
+impl Spec {
+	fn of_sync<U: Utility>() -> Self {
+		Self {
+			name:               U::NAME,
+			usage_error:        U::USAGE_ERROR,
+			runs_commands:      U::RUNS_COMMANDS,
+			checks_stdout_path: U::CHECKS_STDOUT_PATH,
+			owns_cancellation:  U::OWNS_CANCELLATION,
+			async_io:           false,
+			rewrite_argv:       U::rewrite_argv,
+		}
+	}
+
+	fn of_async<U: AsyncUtility>() -> Self {
+		Self {
+			name:               U::NAME,
+			usage_error:        U::USAGE_ERROR,
+			runs_commands:      U::RUNS_COMMANDS,
+			checks_stdout_path: U::CHECKS_STDOUT_PATH,
+			owns_cancellation:  false,
+			async_io:           true,
+			rewrite_argv:       U::rewrite_argv,
+		}
+	}
+}
+
+/// Adapter turning an [`AsyncUtility`] into a brush builtin; see [`Util`].
+pub(crate) struct AsyncUtil<U: AsyncUtility> {
+	argv:    Vec<String>,
+	_marker: PhantomData<fn() -> U>,
+}
+
+impl<U: AsyncUtility> clap::FromArgMatches for AsyncUtil<U> {
+	fn from_arg_matches(_matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
+		Ok(Self { argv: Vec::new(), _marker: PhantomData })
+	}
+
+	fn update_from_arg_matches(&mut self, _matches: &clap::ArgMatches) -> Result<(), clap::Error> {
+		Ok(())
+	}
+}
+
+impl<U: AsyncUtility> clap::CommandFactory for AsyncUtil<U> {
+	fn command() -> clap::Command {
+		U::command()
+	}
+
+	fn command_for_update() -> clap::Command {
+		U::command_for_update()
+	}
+}
+
+impl<U: AsyncUtility> clap::Parser for AsyncUtil<U> {}
+
+impl<U: AsyncUtility> builtins::Command for AsyncUtil<U> {
+	type Error = Error;
+
+	fn new<I>(args: I) -> Result<Self, clap::Error>
+	where
+		I: IntoIterator<Item = String>,
+	{
+		Ok(Self { argv: args.into_iter().collect(), _marker: PhantomData })
+	}
+
+	async fn execute<SE: ShellExtensions>(
+		&self,
+		context: ExecutionContext<'_, SE>,
+	) -> Result<ExecutionResult, Self::Error> {
+		run_async_utility::<U, SE>(context, self.argv.clone()).await
+	}
+}
+
 /// Adapter turning a [`Utility`] into a brush builtin.
 ///
 /// Holds the raw argument vector rather than a parsed `U`: parse failures must
@@ -1699,20 +2097,81 @@ async fn run_utility<U: Utility, SE: ShellExtensions>(
 	context: ExecutionContext<'_, SE>,
 	argv: Vec<String>,
 ) -> Result<ExecutionResult, Error> {
-	// Capture everything owned *before* the first await so the returned future
-	// stays `Send`: the borrowed `ExecutionContext` (and its `&mut Shell`) is
-	// dropped before we await the blocking task.
+	let spec = Spec::of_sync::<U>();
+	let Prepared { parsed, mut host, runner, cancel, cancel_flag, _cancel_on_drop } =
+		match prepare::<U, SE>(context, argv, spec) {
+			Ok(prepared) => prepared,
+			Err(done) => return done,
+		};
+
+	let handle = tokio::task::spawn_blocking(move || {
+		let code = run_caught::<U>(parsed, &mut host);
+		let closes = host.fs().drain_closes();
+		closes_status(&mut host, closes, code)
+	});
+
+	// Respect shell abort/`timeout`. On cancel `drive` sets the host's cancel
+	// flag, which makes a blocked stdin read return EOF, and drops the runner,
+	// which fails any later `spawn_command`; the utility unwinds cleanly
+	// (flushing what it already produced) and the blocking task completes.
+	// The blocking thread cannot be dropped, so it is always awaited: no
+	// detached thread keeps writing to the builtin's descriptors.
+	let code = drive(spec, cancel, cancel_flag, runner, async { handle.await.ok() }, false).await;
+	Ok(ExecutionResult::new((code & 0xff) as u8))
+}
+
+/// Drives an [`AsyncUtility`] from raw arguments to an exit status, awaiting
+/// its body on the shell task.
+async fn run_async_utility<U: AsyncUtility, SE: ShellExtensions>(
+	context: ExecutionContext<'_, SE>,
+	argv: Vec<String>,
+) -> Result<ExecutionResult, Error> {
+	let spec = Spec::of_async::<U>();
+	let Prepared { parsed, mut host, runner, cancel, cancel_flag, _cancel_on_drop } =
+		match prepare::<U, SE>(context, argv, spec) {
+			Ok(prepared) => prepared,
+			Err(done) => return done,
+		};
+
+	// On cancel the body is dropped, which cancels whatever it awaits.
+	let body = async { Some(run_caught_async::<U>(parsed, &mut host).await) };
+	let code = drive(spec, cancel, cancel_flag, runner, body, true).await;
+	Ok(ExecutionResult::new((code & 0xff) as u8))
+}
+
+/// A utility ready to run: parsed arguments, its host, and the adapter's
+/// cancellation and command-serving state.
+struct Prepared<P, SE: ShellExtensions> {
+	parsed:           P,
+	host:             Host,
+	runner:           Option<CommandRunner<SE>>,
+	cancel:           Option<CancellationToken>,
+	cancel_flag:      Arc<AtomicBool>,
+	_cancel_on_drop:  CancelOnDrop,
+}
+
+/// Rewrites and parses `argv` and builds the host. `Err` carries the finished
+/// result when the invocation ends early (usage error, `--help`, host failure).
+///
+/// Everything owned is captured here, before the caller's first await, so its
+/// future stays `Send`: the borrowed `ExecutionContext` (and its `&mut Shell`)
+/// is dropped on return.
+fn prepare<P: clap::Parser, SE: ShellExtensions>(
+	context: ExecutionContext<'_, SE>,
+	argv: Vec<String>,
+	spec: Spec,
+) -> Result<Prepared<P, SE>, Result<ExecutionResult, Error>> {
 	let argv: Vec<OsString> = argv.into_iter().map(OsString::from).collect();
 
-	let argv = match U::rewrite_argv(argv) {
+	let argv = match (spec.rewrite_argv)(argv) {
 		Ok(argv) => argv,
 		Err(message) => {
-			let _ = writeln!(context.stderr(), "{}: {message}", U::NAME);
-			return Ok(ExecutionResult::new(U::USAGE_ERROR));
+			let _ = writeln!(context.stderr(), "{}: {message}", spec.name);
+			return Err(Ok(ExecutionResult::new(spec.usage_error)));
 		},
 	};
 
-	let parsed = match U::try_parse_from(&argv) {
+	let parsed = match P::try_parse_from(&argv) {
 		Ok(parsed) => parsed,
 		Err(err) => {
 			// clap reports `--help` and `--version` as errors; those belong on
@@ -1720,41 +2179,42 @@ async fn run_utility<U: Utility, SE: ShellExtensions>(
 			let rendered = err.to_string();
 			if err.use_stderr() {
 				let _ = write!(context.stderr(), "{rendered}");
-				return Ok(ExecutionResult::new(U::USAGE_ERROR));
+				return Err(Ok(ExecutionResult::new(spec.usage_error)));
 			}
 			let _ = write!(context.stdout(), "{rendered}");
-			return Ok(ExecutionResult::success());
+			return Err(Ok(ExecutionResult::success()));
 		},
 	};
 
-	let mut host = build_host(&context, U::NAME, U::CHECKS_STDOUT_PATH)?;
+	let mut host = build_host(&context, spec).map_err(Err)?;
 	let cancel = context.cancel_token();
 	let cancel_flag = host.cancel_flag();
-	let _cancel_on_drop = CancelOnDrop(Arc::clone(&cancel_flag));
-	let mut runner = U::RUNS_COMMANDS.then(|| {
+	let cancel_on_drop = CancelOnDrop(Arc::clone(&cancel_flag));
+	let runner = spec.runs_commands.then(|| {
 		let (sender, requests) = flume::unbounded();
 		host.commands = Some(sender);
 		CommandRunner::new(&context, requests)
 	});
-	drop(context);
+	Ok(Prepared { parsed, host, runner, cancel, cancel_flag, _cancel_on_drop: cancel_on_drop })
+}
 
-	let mut handle = tokio::task::spawn_blocking(move || {
-		let code = run_caught::<U>(parsed, &mut host);
-		if let Err(error) = host.fs().drain_closes() {
-			host.error(error, 1);
-			if code == 0 { 1 } else { code }
-		} else {
-			code
-		}
-	});
-
-	// Respect shell abort/`timeout`. On cancel we set the host's cancel flag,
-	// which makes a blocked stdin read return EOF, and drop the runner, which
-	// fails any later `spawn_command`; the utility unwinds cleanly (flushing
-	// what it already produced) and the blocking task completes. Commands
-	// already running are cancelled through their own params. We await all of
-	// it before returning so no detached thread or command keeps writing to
-	// the builtin's (possibly redirected) descriptors.
+/// Awaits `body` (`None` when its task failed) while serving the utility's
+/// command requests and watching for the shell's cancellation, returning the
+/// exit status the adapter reports.
+///
+/// A cancelled body is awaited to its end unless `abandon` drops it instead
+/// (an async body is cancelled by being dropped). Commands already running
+/// are awaited either way, so none keeps writing to the builtin's (possibly
+/// redirected) descriptors.
+async fn drive<SE: ShellExtensions>(
+	spec: Spec,
+	cancel: Option<CancellationToken>,
+	cancel_flag: Arc<AtomicBool>,
+	mut runner: Option<CommandRunner<SE>>,
+	body: impl Future<Output = Option<i32>>,
+	abandon: bool,
+) -> i32 {
+	let mut body = pin!(body);
 	let cancelled = async {
 		match &cancel {
 			Some(token) => token.cancelled().await,
@@ -1763,27 +2223,31 @@ async fn run_utility<U: Utility, SE: ShellExtensions>(
 	};
 	tokio::pin!(cancelled);
 	let mut running = FuturesUnordered::new();
-	let code = loop {
+	loop {
 		tokio::select! {
 			biased;
 			() = &mut cancelled => {
 				cancel_flag.store(true, Ordering::Relaxed);
 				drop(runner.take());
-				let _ = tokio::join!(&mut handle, drain(&mut running));
-				break 130;
+				if abandon && !spec.owns_cancellation {
+					drain(&mut running).await;
+					break final_status(false, true, None);
+				}
+				let (result, ()) = tokio::join!(&mut body, drain(&mut running));
+				break final_status(spec.owns_cancellation, true, result);
 			},
 			Some(shell) = running.next(), if !running.is_empty() => {
 				if let Some(runner) = runner.as_mut() {
 					runner.release(shell);
 				}
 			},
-			result = &mut handle => {
+			result = &mut body => {
 				// Commands the utility started but never waited for.
 				drain(&mut running).await;
-				// If the token already fired, the task only finished because
-				// our cancel flag unblocked it — report interrupted.
+				// If the token already fired, a blocking body only finished
+				// because our cancel flag unblocked it: report interrupted.
 				let interrupted = cancel.as_ref().is_some_and(CancellationToken::is_cancelled);
-				break if interrupted { 130 } else { result.unwrap_or(1) };
+				break final_status(spec.owns_cancellation, interrupted, result);
 			},
 			Some(request) = next_request(runner.as_ref()) => {
 				if let Some(runner) = runner.as_mut() {
@@ -1791,9 +2255,26 @@ async fn run_utility<U: Utility, SE: ShellExtensions>(
 				}
 			},
 		}
-	};
+	}
+}
 
-	Ok(ExecutionResult::new((code & 0xff) as u8))
+/// Reports a failed drain of the files the utility left to close: the first
+/// error is printed and turns a zero `code` into 1.
+fn closes_status(host: &mut Host, closes: io::Result<()>, code: i32) -> i32 {
+	match closes {
+		Ok(()) => code,
+		Err(error) => {
+			host.error(error, 1);
+			if code == 0 { 1 } else { code }
+		},
+	}
+}
+
+/// The exit status the adapter reports: 130 for a cancelled utility, unless
+/// it owns its cancellation ([`Utility::OWNS_CANCELLATION`]); otherwise the
+/// body's status (1 when the body task itself failed).
+fn final_status(owns_cancellation: bool, cancelled: bool, body: Option<i32>) -> i32 {
+	if cancelled && !owns_cancellation { 130 } else { body.unwrap_or(1) }
 }
 
 /// Runs every command in `running` to completion.
@@ -1825,23 +2306,69 @@ async fn next_request<SE: ShellExtensions>(
 /// mid-write would never have produced, so the result is [`SIGPIPE_EXIT_CODE`]
 /// and nothing else.
 pub(crate) fn run_caught<U: Utility>(parsed: U, host: &mut Host) -> i32 {
-	struct Guard;
-	impl Drop for Guard {
-		fn drop(&mut self) {
-			PANIC_SCOPE_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
-		}
-	}
-	PANIC_SCOPE_DEPTH.with(|depth| depth.set(depth.get() + 1));
-	let _guard = Guard;
-
+	let _scope = PanicScope::enter();
 	let outcome = catch_unwind(AssertUnwindSafe(|| parsed.run(host)));
+	settle(U::NAME, outcome, host)
+}
+
+/// [`run_caught`] for an [`AsyncUtility`]: the panic scope covers each poll of
+/// the body, which may resume on another thread, and the body's closes are
+/// drained afterwards.
+///
+/// All output the body left pending is delivered before the status is
+/// settled, so a closed reader still ends it with [`SIGPIPE_EXIT_CODE`]; a
+/// cancelled command delivers nothing more.
+async fn run_caught_async<U: AsyncUtility>(parsed: U, host: &mut Host) -> i32 {
+	let outcome = {
+		let body = AssertUnwindSafe(async { parsed.run(host).await }).catch_unwind();
+		let mut body = pin!(body);
+		poll_fn(|cx| {
+			let _scope = PanicScope::enter();
+			body.as_mut().poll(cx)
+		})
+		.await
+	};
+	let write_failed = match host.drain_output(true).await {
+		Err(error) if !host.sigpipe_hit() => {
+			host.error(format!("write error: {}", strip_errno(&error)), 1);
+			true
+		},
+		_ => false,
+	};
+	let code = settle(U::NAME, outcome, host);
+	let code = if write_failed && code == 0 { 1 } else { code };
+	let closes = host.vfs().drain_closes().await;
+	let code = closes_status(host, closes, code);
+	let _ = host.drain_output(true).await;
+	if host.sigpipe_hit() { SIGPIPE_EXIT_CODE } else { code }
+}
+
+/// Marks the current thread as inside a utility body for [`panic_scope_active`].
+struct PanicScope;
+
+impl PanicScope {
+	fn enter() -> Self {
+		PANIC_SCOPE_DEPTH.update(|depth| depth + 1);
+		Self
+	}
+}
+
+impl Drop for PanicScope {
+	fn drop(&mut self) {
+		PANIC_SCOPE_DEPTH.update(|depth| depth.saturating_sub(1));
+	}
+}
+
+/// The status of a finished body: [`SIGPIPE_EXIT_CODE`] when a guarded stream
+/// hit a closed reader, 1 with a note after a panic, else the body's own.
+fn settle(name: &str, outcome: std::thread::Result<i32>, host: &mut Host) -> i32 {
 	if host.sigpipe_hit() {
 		return SIGPIPE_EXIT_CODE;
 	}
 	match outcome {
 		Ok(code) => code,
 		Err(_) => {
-			let _ = writeln!(host.stderr, "{}: internal error", U::NAME);
+			let _ = writeln!(host.stderr, "{name}: internal error");
 			1
 		},
 	}
@@ -1849,11 +2376,8 @@ pub(crate) fn run_caught<U: Utility>(parsed: U, host: &mut Host) -> i32 {
 
 /// Snapshots the command's streams, working directory, and exported
 /// environment into an owned [`Host`] that can move to a blocking thread.
-fn build_host<SE: ShellExtensions>(
-	context: &ExecutionContext<'_, SE>,
-	name: &str,
-	checks_stdout_path: bool,
-) -> Result<Host, Error> {
+fn build_host<SE: ShellExtensions>(context: &ExecutionContext<'_, SE>, spec: Spec) -> Result<Host, Error> {
+	let Spec { name, checks_stdout_path, owns_cancellation, async_io, .. } = spec;
 	let stdin = context.try_fd(OpenFiles::STDIN_FD);
 	// The `OpenFile` is kept alive by the `Stdin` below, so the fd stays valid.
 	let stdin_fd = stdin.as_ref().and_then(pollable_fd);
@@ -1877,6 +2401,11 @@ fn build_host<SE: ShellExtensions>(
 	// One flag, shared: the adapter flips it on cancellation, and a blocked
 	// `Stdin::read` must observe the very same flag or it never wakes.
 	let cancel = Arc::new(AtomicBool::new(false));
+	let command_cancel = CommandCancel {
+		flag:     Arc::clone(&cancel),
+		token:    context.cancel_token(),
+		silences: !owns_cancellation,
+	};
 
 	let stdout = or_null(context.try_fd(OpenFiles::STDOUT_FD))?;
 	let stdout_handle = if checks_stdout_path { output_handle(&stdout) } else { None };
@@ -1891,22 +2420,55 @@ fn build_host<SE: ShellExtensions>(
 	// diagnostics and output in exact write order. It carries stdout output,
 	// so it takes the stdout guard: once the reader is gone every write fails
 	// and nothing is observable either way.
+	//
+	// An async utility's writers never touch a descriptor: they append to
+	// memory-backed `AsyncOut`s that the host drains asynchronously.
+	let mut async_out = None;
 	let (merged_out, stderr) = if stdout_destination.shares_with(&stderr_destination) {
-		let guarded = SigpipeGuard::wrap(stderr_file, GuardedStream::Stdout, &sigpipe);
-		let shared =
-			Arc::new(Mutex::new(StreamWriter::new(guarded, stderr_destination.regular_file)));
-		(Some(Arc::clone(&shared)), StreamWriter::Shared(shared))
+		if async_io {
+			let out = async_out_for(
+				stderr_file,
+				GuardedStream::Stdout,
+				stderr_destination.regular_file,
+				&sigpipe,
+				&command_cancel,
+			);
+			async_out = Some(AsyncStreams { stdout: out.clone(), stderr: out.clone() });
+			(None, StreamWriter::Async(out))
+		} else {
+			let guarded = SigpipeGuard::wrap(stderr_file, GuardedStream::Stdout, &sigpipe, &command_cancel);
+			let shared =
+				Arc::new(Mutex::new(StreamWriter::new(guarded, stderr_destination.regular_file)));
+			(Some(Arc::clone(&shared)), StreamWriter::Shared(shared))
+		}
+	} else if async_io {
+		let out = async_out_for(
+			stderr_file,
+			GuardedStream::Stderr,
+			stderr_destination.regular_file,
+			&sigpipe,
+			&command_cancel,
+		);
+		let stdout_out = async_out_for(
+			stdout.clone(),
+			GuardedStream::Stdout,
+			stdout_destination.regular_file,
+			&sigpipe,
+			&command_cancel,
+		);
+		async_out = Some(AsyncStreams { stdout: stdout_out, stderr: out.clone() });
+		(None, StreamWriter::Async(out))
 	} else {
-		let guarded = SigpipeGuard::wrap(stderr_file, GuardedStream::Stderr, &sigpipe);
+		let guarded = SigpipeGuard::wrap(stderr_file, GuardedStream::Stderr, &sigpipe, &command_cancel);
 		(None, StreamWriter::new(guarded, stderr_destination.regular_file))
 	};
-	let stdout = SigpipeGuard::wrap(stdout, GuardedStream::Stdout, &sigpipe);
+	let stdout = SigpipeGuard::wrap(stdout, GuardedStream::Stdout, &sigpipe, &command_cancel);
 
 	Ok(Host {
 		stdin: Stdin {
 			file:   or_null(stdin)?,
 			fd:     stdin_fd,
-			cancel: Arc::clone(&cancel),
+			cancel: command_cancel,
 		},
 		stdout,
 		stderr,
@@ -1924,7 +2486,30 @@ fn build_host<SE: ShellExtensions>(
 		sigpipe,
 		commands: None,
 		reported_error: context.params.reported_error().cloned(),
+		async_out,
+		stdin_source: None,
 	})
+}
+
+/// The memory-backed output for `file`, a standard stream with `stream`'s
+/// SIGPIPE and cancellation rules: provider files are written through their
+/// async API, descriptors once the reactor reports them writable (see
+/// [`AsyncOut`]).
+fn async_out_for(
+	file: OpenFile,
+	stream: GuardedStream,
+	regular_file: bool,
+	sigpipe: &Arc<Sigpipe>,
+	cancel: &CommandCancel,
+) -> AsyncOut {
+	let gate = OutputGate::new(stream, sigpipe, cancel);
+	match file {
+		OpenFile::Vfs(file) => AsyncOut::provider(file, gate),
+		file => {
+			let guarded = SigpipeGuard::wrap(file, stream, sigpipe, cancel);
+			AsyncOut::native(guarded, regular_file, gate)
+		},
+	}
 }
 
 /// Substitutes the null device for a closed descriptor, so a utility reading
@@ -1983,9 +2568,10 @@ mod testing {
 	use parking_lot::Mutex;
 
 	use super::{
-		Arc, AtomicBool, GuardedStream, HashMap, Host, OpenFile, OpenFiles, OsString, PathBuf, Read,
-		ShellPaths, Sigpipe, SigpipeGuard, Stdin, StreamWriter, Utility, Write, io, openfiles,
+		Arc, AtomicBool, CommandCancel, GuardedStream, HashMap, Host, OpenFile, OpenFiles, OsString,
+		PathBuf, Read, ShellPaths, Sigpipe, SigpipeGuard, Stdin, StreamWriter, Utility, Write, io, openfiles,
 		output_handle, run_caught,
+		AsyncStreams, AsyncUtility, Spec, async_out_for, run_caught_async,
 	};
 
 	/// Captured in-memory output from [`Host::for_test`].
@@ -2012,12 +2598,12 @@ mod testing {
 
 		/// Stdout as a lossy string, for readable assertions.
 		pub fn out(&self) -> String {
-			String::from_utf8_lossy(&self.stdout()).into_owned()
+			String::from_utf8_lossy_owned(self.stdout())
 		}
 
 		/// Stderr as a lossy string, for readable assertions.
 		pub fn err(&self) -> String {
-			String::from_utf8_lossy(&self.stderr()).into_owned()
+			String::from_utf8_lossy_owned(self.stderr())
 		}
 	}
 
@@ -2044,26 +2630,72 @@ mod testing {
 			stdin: Box<dyn openfiles::Stream>,
 			cwd: impl Into<PathBuf>,
 		) -> (Self, Capture) {
+			Self::for_test_streams(name, stdin, cwd, false, false)
+		}
+
+		/// [`Host::for_test`] for an async utility: output is memory-backed and
+		/// reaches the [`Capture`] once drained (see [`Host::flush_output`]).
+		pub(crate) fn for_test_async(
+			name: &str,
+			stdin: impl Into<Vec<u8>>,
+			cwd: impl Into<PathBuf>,
+		) -> (Self, Capture) {
+			Self::for_test_streams(name, Box::new(MemStream::reader(stdin.into())), cwd, false, true)
+		}
+
+		/// [`Host::for_test`] for a utility that owns its cancellation
+		/// ([`Utility::OWNS_CANCELLATION`]): writes after cancellation survive.
+		pub(crate) fn for_test_owning(
+			name: &str,
+			stdin: impl Into<Vec<u8>>,
+			cwd: impl Into<PathBuf>,
+		) -> (Self, Capture) {
+			Self::for_test_streams(name, Box::new(MemStream::reader(stdin.into())), cwd, true, false)
+		}
+
+		fn for_test_streams(
+			name: &str,
+			stdin: Box<dyn openfiles::Stream>,
+			cwd: impl Into<PathBuf>,
+			owns_cancellation: bool,
+			async_io: bool,
+		) -> (Self, Capture) {
 			let capture = Capture {
 				stdout: Arc::new(Mutex::new(Vec::new())),
 				stderr: Arc::new(Mutex::new(Vec::new())),
 			};
 			let cancel = Arc::new(AtomicBool::new(false));
 			let sigpipe = Arc::new(Sigpipe::default());
+			let command_cancel =
+				CommandCancel { flag: Arc::clone(&cancel), token: None, silences: !owns_cancellation };
 			let stdout = OpenFile::Stream(Box::new(MemStream::writer(Arc::clone(&capture.stdout))));
 			let stderr = OpenFile::Stream(Box::new(MemStream::writer(Arc::clone(&capture.stderr))));
+			let async_out = async_io.then(|| AsyncStreams {
+				stdout: async_out_for(stdout.clone(), GuardedStream::Stdout, false, &sigpipe, &command_cancel),
+				stderr: async_out_for(stderr.clone(), GuardedStream::Stderr, false, &sigpipe, &command_cancel),
+			});
+			let stderr_writer = match &async_out {
+				Some(streams) => StreamWriter::Async(streams.stderr.clone()),
+				None => StreamWriter::line(SigpipeGuard::wrap(
+					stderr,
+					GuardedStream::Stderr,
+					&sigpipe,
+					&command_cancel,
+				)),
+			};
 			let host = Self {
 				stdin:                 Stdin {
 					file:   OpenFile::Stream(stdin),
 					fd:     None,
-					cancel: Arc::clone(&cancel),
+					cancel: command_cancel.clone(),
 				},
-				stdout:                SigpipeGuard::wrap(stdout, GuardedStream::Stdout, &sigpipe),
-				stderr:                StreamWriter::line(SigpipeGuard::wrap(
-					stderr,
-					GuardedStream::Stderr,
+				stdout:                SigpipeGuard::wrap(
+					stdout,
+					GuardedStream::Stdout,
 					&sigpipe,
-				)),
+					&command_cancel,
+				),
+				stderr:                stderr_writer,
 				stdout_is_file:        false,
 				stdout_handle:         None,
 				stdout_metadata:       Default::default(),
@@ -2078,6 +2710,8 @@ mod testing {
 				sigpipe,
 				commands:              None,
 				reported_error:        None,
+				async_out,
+				stdin_source:          None,
 			};
 			(host, capture)
 		}
@@ -2090,7 +2724,25 @@ mod testing {
 			self.stdout_is_file = super::Destination::of(&file).regular_file;
 			self.stdout_handle = output_handle(&file);
 			self.stdout_metadata.take();
-			self.stdout = SigpipeGuard::wrap(file, GuardedStream::Stdout, &self.sigpipe);
+			let command_cancel = self.stdin.cancel.clone();
+			if let Some(streams) = &mut self.async_out {
+				streams.stdout = async_out_for(
+					file.clone(),
+					GuardedStream::Stdout,
+					self.stdout_is_file,
+					&self.sigpipe,
+					&command_cancel,
+				);
+			}
+			self.stdout = SigpipeGuard::wrap(file, GuardedStream::Stdout, &self.sigpipe, &command_cancel);
+		}
+
+		/// Replaces stdin on a test host with a native descriptor, classified
+		/// like the one [`build_host`](super::build_host) installs.
+		pub(crate) fn set_test_stdin(&mut self, file: OpenFile) {
+			self.stdin.fd = super::pollable_fd(&file);
+			self.stdin.file = file;
+			self.stdin_source = None;
 		}
 
 		/// Sets an exported variable on a test host.
@@ -2110,6 +2762,18 @@ mod testing {
 		}
 	}
 
+	/// `poll` never reports the null device readable on macOS and the BSDs, so
+	/// a utility whose stdin is `/dev/null` (the bash tool wires it there)
+	/// waited for cancellation before it saw EOF. Stdin from a pipe still polls.
+	#[cfg(unix)]
+	#[test]
+	fn stdin_from_the_null_device_is_not_polled() {
+		let null = openfiles::null().unwrap();
+		assert_eq!(super::pollable_fd(&null), None);
+		let (reader, _writer) = std::io::pipe().unwrap();
+		assert!(super::pollable_fd(&OpenFile::from(reader)).is_some());
+	}
+
 	#[cfg(windows)]
 	#[test]
 	fn resolves_msys_and_tmp_aliases_to_native_locations() {
@@ -2127,31 +2791,77 @@ mod testing {
 		stdin: &str,
 		cwd: impl Into<PathBuf>,
 	) -> (i32, Capture) {
-		let (mut host, capture) = Host::for_test(U::NAME, stdin.as_bytes().to_vec(), cwd);
-		let full: Vec<OsString> = std::iter::once(OsString::from(U::NAME))
-			.chain(argv.iter().map(OsString::from))
-			.collect();
-		let full = match U::rewrite_argv(full) {
-			Ok(full) => full,
-			Err(message) => {
-				let _ = writeln!(host.stderr, "{}: {message}", U::NAME);
-				return (i32::from(U::USAGE_ERROR), capture);
-			},
-		};
-		let code = match U::try_parse_from(&full) {
+		let spec = Spec::of_sync::<U>();
+		let (mut host, capture) = test_host(spec, stdin, cwd);
+		let code = match parse_for_test::<U>(spec, argv, &mut host) {
 			Ok(parsed) => run_caught::<U>(parsed, &mut host),
-			Err(err) => {
-				let rendered = err.to_string();
-				if err.use_stderr() {
-					let _ = write!(host.stderr, "{rendered}");
-					i32::from(U::USAGE_ERROR)
-				} else {
-					let _ = write!(host.stdout, "{rendered}");
-					0
-				}
-			},
+			Err(code) => code,
 		};
 		(code, capture)
+	}
+
+	/// [`run_util`] for an [`AsyncUtility`]: the body is awaited in place and
+	/// its output drained into the [`Capture`] before it returns.
+	pub(crate) async fn run_async_util<U: AsyncUtility>(
+		argv: &[&str],
+		stdin: &str,
+		cwd: impl Into<PathBuf>,
+	) -> (i32, Capture) {
+		let spec = Spec::of_async::<U>();
+		let (mut host, capture) = test_host(spec, stdin, cwd);
+		let code = match parse_for_test::<U>(spec, argv, &mut host) {
+			Ok(parsed) => run_caught_async::<U>(parsed, &mut host).await,
+			Err(code) => code,
+		};
+		let _ = host.drain_output(true).await;
+		(code, capture)
+	}
+
+	/// An in-memory host for a utility with `spec`.
+	fn test_host(spec: Spec, stdin: &str, cwd: impl Into<PathBuf>) -> (Host, Capture) {
+		if spec.async_io {
+			Host::for_test_async(spec.name, stdin.as_bytes().to_vec(), cwd)
+		} else if spec.owns_cancellation {
+			Host::for_test_owning(spec.name, stdin.as_bytes().to_vec(), cwd)
+		} else {
+			Host::for_test(spec.name, stdin.as_bytes().to_vec(), cwd)
+		}
+	}
+
+	/// Rewrites and parses `argv` as the adapter does; `Err` is the exit status
+	/// of an invocation that ends before the body (usage error, `--help`).
+	fn parse_for_test<P: clap::Parser>(spec: Spec, argv: &[&str], host: &mut Host) -> Result<P, i32> {
+		let full: Vec<OsString> = std::iter::once(OsString::from(spec.name))
+			.chain(argv.iter().map(OsString::from))
+			.collect();
+		let full = match (spec.rewrite_argv)(full) {
+			Ok(full) => full,
+			Err(message) => {
+				let _ = writeln!(host.stderr, "{}: {message}", spec.name);
+				return Err(i32::from(spec.usage_error));
+			},
+		};
+		P::try_parse_from(&full).map_err(|err| {
+			let rendered = err.to_string();
+			if err.use_stderr() {
+				let _ = write!(host.stderr, "{rendered}");
+				i32::from(spec.usage_error)
+			} else {
+				let _ = write!(host.stdout, "{rendered}");
+				0
+			}
+		})
+	}
+
+	/// Writes `small` holding `needle` and a sparse `big` twice the line limit
+	/// of `grep` and `rg`, with no line terminator and no disk space used.
+	#[cfg(all(unix, feature = "util.grep"))]
+	pub(crate) fn tree_with_sparse_file() -> tempfile::TempDir {
+		let tree = tempfile::tempdir().unwrap();
+		std::fs::write(tree.path().join("small"), "needle\n").unwrap();
+		let big = std::fs::File::create(tree.path().join("big")).unwrap();
+		big.set_len(2 * crate::grep::MAX_LINE_BYTES as u64).unwrap();
+		tree
 	}
 
 	/// Runs `script` in a real shell with every builtin registered, from `cwd`
@@ -2388,6 +3098,238 @@ mod testing {
 	}
 
 	#[cfg(unix)]
+	mod native_descriptors {
+		use std::io::{Read, Write};
+
+		use crate::host::{Host, OpenFile};
+
+		/// Contract: reading a pipe waits for its writer without holding the
+		/// runtime thread; a blocking read would deadlock this current-thread
+		/// runtime, whose only thread is the one that must write.
+		#[tokio::test(flavor = "current_thread")]
+		async fn stdin_pipe_read_waits_for_a_later_writer() {
+			let (mut host, _capture) = Host::for_test_async("reader", "", "/");
+			let (reader, mut writer) = std::io::pipe().unwrap();
+			host.set_test_stdin(OpenFile::from(reader));
+
+			let mut buf = [0; 16];
+			let read = host.read_stdin(&mut buf);
+			let write = async {
+				tokio::task::yield_now().await;
+				writer.write_all(b"later").unwrap();
+			};
+			let (count, ()) = tokio::join!(read, write);
+			assert_eq!(&buf[..count.unwrap()], b"later");
+
+			drop(writer);
+			assert_eq!(host.read_stdin(&mut buf).await.unwrap(), 0);
+		}
+
+		/// Contract: `read_stdin_to_end` over a pipe collects what the writer
+		/// sends later and ends at its close.
+		#[tokio::test(flavor = "current_thread")]
+		async fn stdin_pipe_read_to_end_collects_late_writes() {
+			let (mut host, _capture) = Host::for_test_async("reader", "", "/");
+			let (reader, mut writer) = std::io::pipe().unwrap();
+			host.set_test_stdin(OpenFile::from(reader));
+
+			let mut bytes = Vec::new();
+			let read = host.read_stdin_to_end(&mut bytes, usize::MAX);
+			let write = async {
+				tokio::task::yield_now().await;
+				writer.write_all(b"one ").unwrap();
+				tokio::task::yield_now().await;
+				writer.write_all(b"two").unwrap();
+				drop(writer);
+			};
+			let (count, ()) = tokio::join!(read, write);
+			assert_eq!(count.unwrap(), 7);
+			assert_eq!(bytes, b"one two");
+		}
+
+		/// Contract: a drain larger than the pipe waits for its reader instead
+		/// of blocking; every byte arrives in order.
+		#[tokio::test(flavor = "current_thread")]
+		async fn drain_to_a_pipe_waits_for_a_slow_reader() {
+			let (mut host, _capture) = Host::for_test_async("writer", "", "/");
+			let (mut reader, writer) = std::io::pipe().unwrap();
+			host.set_test_stdout(OpenFile::from(writer));
+			let collector = std::thread::spawn(move || {
+				let mut bytes = Vec::new();
+				reader.read_to_end(&mut bytes).unwrap();
+				bytes
+			});
+
+			let payload: Vec<u8> = (0..2_000_000_u32).map(|n| u8::try_from(n % 251).unwrap()).collect();
+			let mut out = host.stdout_writer();
+			out.write_all(&payload).unwrap();
+			host.flush_output().await.unwrap();
+			drop(out);
+			drop(host);
+
+			assert_eq!(collector.join().unwrap(), payload);
+		}
+	}
+
+	mod async_stdio {
+		use parking_lot::Mutex;
+
+		use super::MemStream;
+		use crate::host::{
+			Arc, AsyncUtility, AtomicBool, CommandCancel, GuardedStream, Host, OpenFile, Sigpipe, StreamWriter,
+			Write, async_out_for, run_caught_async,
+		};
+
+		/// Writes a line to stdout and a note to stderr, knowing nothing of
+		/// descriptors or pipes.
+		#[derive(clap::Parser)]
+		struct Chatty;
+
+		impl AsyncUtility for Chatty {
+			const NAME: &'static str = "chatty";
+
+			async fn run(self, host: &mut Host) -> i32 {
+				let mut out = host.stdout_writer();
+				let _ = writeln!(out, "line");
+				let _ = writeln!(host.stderr, "chatty: note");
+				0
+			}
+		}
+
+		/// Contract for `2>&1`: handles onto one `AsyncOut` deliver in exact
+		/// write order, and nothing reaches the destination before a drain.
+		#[tokio::test]
+		async fn merged_streams_keep_write_order() {
+			let buf = Arc::new(Mutex::new(Vec::new()));
+			let sigpipe = Arc::new(Sigpipe::default());
+			let cancel =
+				CommandCancel { flag: Arc::new(AtomicBool::new(false)), token: None, silences: true };
+			let out = async_out_for(
+				OpenFile::Stream(Box::new(MemStream::writer(Arc::clone(&buf)))),
+				GuardedStream::Stdout,
+				false,
+				&sigpipe,
+				&cancel,
+			);
+			let mut stdout = StreamWriter::Async(out.clone());
+			let mut stderr = StreamWriter::Async(out.clone());
+
+			writeln!(stdout, "out 1").unwrap();
+			writeln!(stderr, "err 1").unwrap();
+			writeln!(stdout, "out 2").unwrap();
+			assert_eq!(buf.lock().as_slice(), b"");
+
+			out.drain(false).await.unwrap();
+			assert_eq!(buf.lock().as_slice(), b"out 1\nerr 1\nout 2\n");
+		}
+
+		/// Contract: a reader that is gone by the final drain ends the utility
+		/// with the SIGPIPE status, and its stderr output is discarded.
+		#[cfg(unix)]
+		#[tokio::test]
+		async fn closed_reader_in_the_final_drain_yields_141_and_silences_stderr() {
+			let (mut host, capture) = Host::for_test_async("chatty", "", "/");
+			let (reader, writer) = std::io::pipe().unwrap();
+			drop(reader);
+			host.set_test_stdout(OpenFile::from(writer));
+
+			let code = run_caught_async::<Chatty>(Chatty, &mut host).await;
+
+			assert_eq!(code, crate::host::SIGPIPE_EXIT_CODE);
+			assert_eq!(capture.err(), "");
+		}
+
+		/// Contract: output written once the command is cancelled is dropped,
+		/// while what was delivered before stays delivered.
+		#[tokio::test]
+		async fn output_after_cancellation_is_dropped() {
+			let (host, capture) = Host::for_test_async("chatty", "", "/");
+			let mut out = host.stdout_writer();
+			let mut err = StreamWriter::Async(match &host.async_out {
+				Some(streams) => streams.stderr.clone(),
+				None => unreachable!("an async test host has memory-backed output"),
+			});
+
+			writeln!(out, "before").unwrap();
+			host.flush_output().await.unwrap();
+			assert_eq!(capture.out(), "before\n");
+
+			host.cancel_for_test();
+			writeln!(out, "after").unwrap();
+			writeln!(err, "diagnostic").unwrap();
+			host.flush_output().await.unwrap();
+
+			assert_eq!(capture.out(), "before\n");
+			assert_eq!(capture.err(), "");
+		}
+	}
+
+	mod cancellation {
+		use crate::host::{Host, Utility, Write, final_status, run_caught};
+
+		/// Reports its cancellation on stderr and exits 20, like a process that
+		/// catches SIGTERM.
+		#[derive(clap::Parser)]
+		struct Catcher;
+
+		impl Utility for Catcher {
+			const NAME: &'static str = "catcher";
+			const OWNS_CANCELLATION: bool = true;
+
+			fn run(self, host: &mut Host) -> i32 {
+				while !host.is_cancelled() {
+					std::thread::yield_now();
+				}
+				let _ = writeln!(host.stderr, "catcher: received SIGTERM (code 20)");
+				let _ = host.stderr.flush();
+				20
+			}
+		}
+
+		/// The same body without owning cancellation: killed silently.
+		#[derive(clap::Parser)]
+		struct Plain;
+
+		impl Utility for Plain {
+			const NAME: &'static str = "plain";
+
+			fn run(self, host: &mut Host) -> i32 {
+				while !host.is_cancelled() {
+					std::thread::yield_now();
+				}
+				let _ = writeln!(host.stderr, "plain: interrupted");
+				let _ = host.stderr.flush();
+				20
+			}
+		}
+
+		/// Contract: a default utility is cancelled like a killed process,
+		/// with status 130 and nothing printed after the cancellation.
+		#[test]
+		fn default_utility_is_silenced_and_reports_130() {
+			let (mut host, capture) = Host::for_test("plain", "", "/");
+			host.cancel_for_test();
+			let code = run_caught::<Plain>(Plain, &mut host);
+			assert_eq!(capture.err(), "");
+			assert_eq!(final_status(Plain::OWNS_CANCELLATION, true, Some(code)), 130);
+		}
+
+		/// Contract: a utility that owns its cancellation reports its own
+		/// status, and its final diagnostics reach stderr.
+		#[test]
+		fn owning_utility_reports_its_own_status_and_text() {
+			let (mut host, capture) = Host::for_test_owning("catcher", "", "/");
+			host.cancel_for_test();
+			let code = run_caught::<Catcher>(Catcher, &mut host);
+			assert_eq!(capture.err(), "catcher: received SIGTERM (code 20)\n");
+			assert_eq!(final_status(Catcher::OWNS_CANCELLATION, true, Some(code)), 20);
+			// Uncancelled runs keep the body's status either way.
+			assert_eq!(final_status(false, false, Some(3)), 3);
+			assert_eq!(final_status(true, false, None), 1);
+		}
+	}
+
+	#[cfg(unix)]
 	mod sigpipe {
 		use std::ffi::OsString;
 
@@ -2452,5 +3394,7 @@ mod testing {
 
 #[cfg(test)]
 #[allow(unused_imports, reason = "used by utility test modules, which are feature-gated")]
-pub(crate) use testing::{Capture, run_script, run_util};
+pub(crate) use testing::{Capture, run_async_util, run_script, run_util};
+#[cfg(all(test, unix, feature = "util.grep"))]
+pub(crate) use testing::tree_with_sparse_file;
 

@@ -1160,7 +1160,9 @@ describe("AgentSession advisor toggle", () => {
 
 			expect(markUsageLimitReached).toHaveBeenCalledTimes(1);
 			expect(markUsageLimitReached.mock.calls[0]?.[0]).toBe(model.provider);
-			expect(quotaSession.getAdvisorStatusOverview().advisors[0]?.yielded).toBe(true);
+			const quotaStatus = quotaSession.getAdvisorStatusOverview().advisors[0];
+			expect(quotaStatus).toMatchObject({ yielded: true });
+			expect(quotaStatus?.backlog).toBeGreaterThan(0);
 			// A quota-paused runtime cannot accept work either — the streaming
 			// mask must not reopen its eye mid-turn.
 			quotaSession.agent.state.isStreaming = true;
@@ -1269,5 +1271,41 @@ describe("AgentSession advisor toggle", () => {
 		// Settings (2) overrides the default (4) when shared and per-advisor are undefined.
 		expect(session.applyAdvisorConfigs([{ name: "SettingsOnly" }], undefined, undefined)).toBe(1);
 		await exerciseBudget("settings", 2);
+	});
+
+	it("filters WATCHDOG.yml advisors by scope (main vs subagent vs all)", () => {
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const roster = [
+			{ name: "Main Guard", scope: "main" as const },
+			{ name: "Subagent Verifier", scope: "subagent" as const, includeReasoning: false },
+			{ name: "Universal Guard", scope: "all" as const },
+		];
+
+		// Top-level main session builds main + all (2 advisors)
+		expect(session.applyAdvisorConfigs(roster, undefined)).toBe(2);
+		expect(session.getAdvisorStats().advisors.map(a => a.name)).toEqual(["Main Guard", "Universal Guard"]);
+
+		// Subagent session builds subagent + all (2 advisors)
+		const subAgent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["Subagent"],
+				tools: [],
+				messages: [],
+			},
+		});
+		const subSettings = Settings.isolated({ "compaction.enabled": false, "advisor.enabled": true });
+		subSettings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		const subSession = new AgentSession({
+			agent: subAgent,
+			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
+			settings: subSettings,
+			modelRegistry,
+			advisorTools: [],
+			agentKind: "sub",
+			advisorConfigs: roster,
+		});
+		expect(subSession.getAdvisorStats().advisors.map(a => a.name)).toEqual(["Subagent Verifier", "Universal Guard"]);
 	});
 });

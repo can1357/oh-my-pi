@@ -202,6 +202,115 @@ describe("default echo/printf redirect rule", () => {
 		expect(checkBashInterception("printf 'use 2>&1'", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
 		expect(checkBashInterception('echo "err" >&2', tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
 	});
+
+	it("does not attribute a later command's stderr redirect to echo", () => {
+		const tools = ["write", "read"];
+		for (const command of [
+			'echo "hi"; gcloud auth print-access-token 2>/tmp/tok.err',
+			'echo "hi" && ls 2>/tmp/e.err',
+			"echo start\nmake 2>build.err",
+			"echo x > /dev/null; ls > listing.txt",
+			"echo x 2>err.log",
+			"echo x 2>>err.log",
+			"echo x 2>&1 && ls > listing.txt",
+		]) {
+			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
+		}
+		expect(checkBashInterception("ls; echo hi > out.txt", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
+		expect(checkBashInterception("echo hi 1> out.txt", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
+		expect(checkBashInterception("echo hi &> out.txt", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
+		for (const command of ["echo hi 2>err.txt > out.txt", "echo hi 2>|err.txt > out.txt", "echo hi 2>&1 > out.txt"]) {
+			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
+		}
+	});
+
+	it("keeps scanning past escaped separators and input fd duplication", () => {
+		const tools = ["write", "read"];
+		for (const command of [
+			"echo foo\\; > out.txt",
+			"echo a \\| b > out.txt",
+			"echo a \\& b > out.txt",
+			"echo hi <&0 > out.txt",
+			"echo hi 0<&- > out.txt",
+			"echo one\\\ntwo > out.txt",
+		]) {
+			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).suggestedTool).toBe("write");
+		}
+		expect(checkBashInterception("echo hi <&0", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
+	});
+
+	it("keeps separators inside a substitution out of the boundary scan", () => {
+		const tools = ["write", "read"];
+		for (const command of [
+			"echo $(printf foo; printf bar) > out.txt",
+			"echo `date; ls` > out.txt",
+			"echo ${x:-a;b} > out.txt",
+			"echo $(ls > /dev/null) > out.txt",
+			"echo ${a:-${b}} > out.txt",
+			"echo $(( (1 + 2) * 3 )) > out.txt",
+			"printf %s ${HOME:-${USER}} >> out.txt",
+		]) {
+			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).suggestedTool).toBe("write");
+		}
+		expect(checkBashInterception("echo $(ls) ; ls > f", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
+		expect(checkBashInterception("echo ${a:-${b}}; ls 2>e.log", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(
+			false,
+		);
+		expect(checkBashInterception("echo $(printf a; printf b)", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(
+			false,
+		);
+	});
+
+	it("matches commands with many stderr sinks without exponential backtracking", () => {
+		const start = performance.now();
+		const echo = checkBashInterception(
+			"echo hi" + " 2>/dev/null 2>>/dev/null 2>&1 \\; <&0 $(a; b) `c; d` ${e:-f;g}".repeat(20),
+			["write"],
+			DEFAULT_BASH_INTERCEPTOR_RULES,
+		);
+		const cat = checkBashInterception(
+			`cat${" 2>>/dev/null 2>|e.log".repeat(20)} file.txt`,
+			["write", "read"],
+			DEFAULT_BASH_INTERCEPTOR_RULES,
+		);
+		expect(performance.now() - start).toBeLessThan(1000);
+		expect(echo.block).toBe(false);
+		expect(cat.suggestedTool).toBe("read");
+	});
+
+	it("routes cat heredoc and redirect writes to write, not read", () => {
+		const tools = ["write", "read"];
+		for (const command of ["cat > /tmp/f <<'EOF'\nx\nEOF", "cat <<'EOF' > /tmp/f\nx\nEOF", "cat >> log.txt"]) {
+			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).suggestedTool).toBe("write");
+		}
+		expect(checkBashInterception("cat <<'EOF'\nx\nEOF", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
+		expect(checkBashInterception("cat file.txt", tools, DEFAULT_BASH_INTERCEPTOR_RULES).suggestedTool).toBe("read");
+	});
+
+	it("keeps cat on read unless its stdout goes to a file", () => {
+		const tools = ["write", "read"];
+		for (const command of [
+			"cat 2>/dev/null file.txt",
+			"cat 2>err.log file.txt",
+			"cat 2>&1 file.txt",
+			"cat >&2 file.txt",
+			"cat 1>&2 file.txt",
+		]) {
+			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).suggestedTool).toBe("read");
+		}
+		for (const command of [
+			"cat 2>err.log > out.txt",
+			"cat 2> err.log >> out.txt",
+			"cat 2>/dev/null 1>out.txt",
+			"cat &>out.txt",
+			"cat 2>&1 1>out.txt",
+		]) {
+			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).suggestedTool).toBe("write");
+		}
+		expect(
+			checkBashInterception("cat 2>/dev/null <<'EOF'\nx\nEOF", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block,
+		).toBe(false);
+	});
 });
 
 describe("default grep rule and pipeline stdin", () => {

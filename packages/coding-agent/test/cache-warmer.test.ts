@@ -3,6 +3,7 @@ import type { AssistantMessage, AssistantMessageEvent, SimpleStreamOptions, Usag
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
+import { factoryModel } from "../../ai/test/helpers/factory-droid";
 import {
 	CacheWarmer,
 	type CacheWarmerDeps,
@@ -450,6 +451,78 @@ describe("cache warmer lifecycle", () => {
 		// A settled 1h run no longer idle-warms every 4.5 minutes.
 		h.warmer.onAgentSettled();
 		expect(h.warmer.status.reason).toBe("cache entry outlives the 30-minute idle window");
+	});
+
+	test("schedules Factory Droid Claude models at the tier their upstream actually writes", () => {
+		const model = factoryModel("claude-opus-4-6", ["snowflake"]);
+		const reply = (cttl: Usage["cttl"]) => ({
+			...makeMessage(makeUsage({ cacheWrite: 500, cttl })),
+			provider: model.provider,
+			model: model.id,
+		});
+		const h = harness();
+		h.warmer.start({ model, context: { messages: [] }, options: {} }, () => h.current);
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + SHORT_DELAY_MS);
+
+		// Long retention on an upstream that writes 5m entries keeps the 5m schedule.
+		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => h.current);
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + SHORT_DELAY_MS);
+		h.warmer.onResponse(reply({ ephemeral5m: 500 }));
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + SHORT_DELAY_MS);
+
+		// A reported 1h write moves the schedule to the 1h lifetime.
+		h.warmer.onResponse(reply({ ephemeral1h: 500 }));
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + LONG_DELAY_MS);
+	});
+
+	test("stops when a response reports a tier the model has no lifetime for", () => {
+		const model = factoryModel("claude-opus-4-6", ["anthropic"]);
+		model.promptCache = { short: 300 };
+		const h = harness();
+		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => h.current);
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + SHORT_DELAY_MS);
+		h.warmer.onResponse({
+			...makeMessage(makeUsage({ cacheWrite: 500, cttl: { ephemeral1h: 500 } })),
+			provider: model.provider,
+			model: model.id,
+		});
+		expect(h.warmer.status).toMatchObject({ state: "inactive", reason: "cache lifetime unavailable" });
+	});
+
+	test("warms a Factory Droid model whose override declares only the 1h lifetime", () => {
+		const model = factoryModel("claude-opus-4-6", ["anthropic"]);
+		model.promptCache = { long: 3600 };
+		const reply = (cttl: Usage["cttl"]) => ({
+			...makeMessage(makeUsage({ cacheWrite: 500, cttl })),
+			provider: model.provider,
+			model: model.id,
+		});
+		const h = harness();
+		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => h.current);
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + LONG_DELAY_MS);
+		h.warmer.onResponse(reply({ ephemeral1h: 500 }));
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + LONG_DELAY_MS);
+
+		// An upstream that wrote a 5m entry has no declared lifetime: stop.
+		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => h.current);
+		h.warmer.onResponse(reply({ ephemeral5m: 500 }));
+		expect(h.warmer.status).toMatchObject({ state: "inactive", reason: "cache lifetime unavailable" });
+	});
+
+	test("adopts the tier a Factory Droid server-side fallback response reports", () => {
+		const model = factoryModel("claude-fable-5", ["anthropic"]);
+		const h = harness();
+		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => h.current);
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + SHORT_DELAY_MS);
+		// The refused request retried on claude-opus-5; the response carries the served id.
+		h.warmer.onResponse({
+			...makeMessage(makeUsage({ cacheWrite: 500, cttl: { ephemeral1h: 500 } })),
+			content: [{ type: "fallback", from: { model: model.id }, to: { model: "claude-opus-5" } }],
+			provider: model.provider,
+			model: "claude-opus-5",
+		});
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + LONG_DELAY_MS);
+		expect(h.warmer.cacheEntry).toMatchObject({ tier: "long", ttlMs: 3_600_000 });
 	});
 
 	test("streaming mode stops when the agent settles", () => {

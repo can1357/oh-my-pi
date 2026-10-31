@@ -52,9 +52,13 @@ if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
 	process.exit(1);
 }
 
-try {
-	process.title = APP_NAME;
-} catch {}
+// On Windows `process.title` is the shared console title, not a process name
+// (see `setProcessName`): every omp child would retitle the pane's tab.
+if (process.platform !== "win32") {
+	try {
+		process.title = APP_NAME;
+	} catch {}
+}
 
 // `Bun.build`-API compiled Windows executables report `import.meta.main ===
 // false`: the standalone loader keys the entry module with native backslashes
@@ -84,6 +88,7 @@ const PREPAINT_SAFE_FLAGS: Record<string, true> = {
 	"--no-extensions": true,
 	"--no-skills": true,
 	"--no-rules": true,
+	"--no-context-files": true,
 	"--no-tools": true,
 	"--no-lsp": true,
 	"--no-title": true,

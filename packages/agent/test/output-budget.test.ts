@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { AssistantMessage, Context, Message, Model } from "@oh-my-pi/pi-ai";
 import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	fitOutputTokensToContextWindow,
@@ -140,8 +141,21 @@ describe("fitOutputTokensToContextWindow", () => {
 		expect(fitOutputTokensToContextWindow(bedrockOpus, promptOf(990_000), undefined, tokenizer)).toBe(
 			MIN_FITTED_OUTPUT_TOKENS,
 		);
-		const opus41 = getBundledModel("anthropic", "claude-opus-4-1");
-		// 199k of Opus 4.1's 200k window leaves less than its 32k default cap.
+		// Anthropic no longer serves Opus 4.1, so the catalog omits it; keep the
+		// pre-4.5 contrast with a first-party spec. 199k of its 200k window leaves
+		// less than its 32k default cap.
+		const opus41 = buildModel({
+			id: "claude-opus-4-1-20250805",
+			name: "Claude Opus 4.1",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			baseUrl: "https://api.anthropic.com",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
+			contextWindow: 200_000,
+			maxTokens: 32_000,
+		});
 		expect(fitOutputTokensToContextWindow(opus41, promptOf(199_000), undefined, tokenizer)).toBe(
 			MIN_FITTED_OUTPUT_TOKENS,
 		);

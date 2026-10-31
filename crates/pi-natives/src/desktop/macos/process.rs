@@ -147,7 +147,7 @@ fn tk_image(path: &str) -> Option<TkImage> {
 	{
 		return Some(TkImage::Tkinter);
 	}
-	let stem = file.strip_suffix(".dylib")?.strip_prefix("lib")?;
+	let stem = file.strip_circumfix("lib", ".dylib")?;
 	let stem = match stem.strip_prefix("tcl") {
 		Some(after_tcl) => {
 			let digits = after_tcl.bytes().take_while(u8::is_ascii_digit).count();
@@ -373,7 +373,7 @@ fn linked_dylibs(file: &mut (impl Read + Seek)) -> Option<Vec<Vec<u8>>> {
 			if fat == FAT_MAGIC {
 				u64::from(be_u32(entry, 8)?)
 			} else {
-				u64::from_be_bytes(entry.get(8..16)?.try_into().ok()?)
+				u64::from_be_bytes(*entry.get(8..)?.first_chunk()?)
 			}
 		},
 		_ => 0,
@@ -397,22 +397,22 @@ fn linked_dylibs(file: &mut (impl Read + Seek)) -> Option<Vec<Vec<u8>>> {
 		// Every load command starts with its kind and total size; a dylib
 		// command's install name sits at the offset stored at 8.
 		let length = usize::try_from(le_u32(rest, 4)?).ok()?;
-		let command = rest.get(..length).filter(|_| length >= 8)?;
+		let (command, tail) = rest.split_at_checked(length).filter(|_| length >= 8)?;
 		if DYLIB_COMMANDS.contains(&le_u32(command, 0)?) {
 			let name = command.get(usize::try_from(le_u32(command, 8)?).ok()?..)?;
 			dylibs.push(name.split(|&byte| byte == 0).next()?.to_vec());
 		}
-		rest = &rest[length..];
+		rest = tail;
 	}
 	Some(dylibs)
 }
 
 fn be_u32(bytes: &[u8], at: usize) -> Option<u32> {
-	Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+	Some(u32::from_be_bytes(*bytes.get(at..)?.first_chunk()?))
 }
 
 fn le_u32(bytes: &[u8], at: usize) -> Option<u32> {
-	Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+	Some(u32::from_le_bytes(*bytes.get(at..)?.first_chunk()?))
 }
 
 /// Whether `pid` is a `UIKit` app such as Mac Catalyst: its bundle declares
@@ -734,7 +734,7 @@ mod tests {
 		let cache = LinkageCache::default();
 		let reads = std::cell::Cell::new(0);
 		let read = |_: &Path| {
-			reads.set(reads.get() + 1);
+			reads.update(|v| v + 1);
 			Some(vec![KIT.as_bytes().to_vec()])
 		};
 		let viewer = PathBuf::from("/Applications/Viewer.app/Contents/MacOS/Viewer");
@@ -757,7 +757,7 @@ mod tests {
 		let cache = LinkageCache::default();
 		let reads = std::cell::Cell::new(0);
 		let read = |_: &Path| {
-			reads.set(reads.get() + 1);
+			reads.update(|v| v + 1);
 			Some(vec![KIT.as_bytes().to_vec()])
 		};
 		let viewer = PathBuf::from("/Applications/Viewer.app/Contents/MacOS/Viewer");

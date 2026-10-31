@@ -204,6 +204,11 @@ export function isBareIdReferenceProvider(provider: string): boolean {
 	return !behavior.referenceIsolatedProviders.includes(provider);
 }
 
+/** Whether a host's prefix cache should use append-only conversation context by default. */
+export function prefersAppendOnlyContext(provider: string): boolean {
+	return behavior.appendOnlyContextProviders.includes(provider);
+}
+
 /** The declared subscription tier required to use a provider model id, if any. */
 export function planRequirementFor(provider: string, model: string): string | undefined {
 	const rule = behavior.planRequirements.find(candidate => candidate.provider === provider);

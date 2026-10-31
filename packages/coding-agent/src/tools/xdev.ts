@@ -91,7 +91,7 @@ export function isMountableUnderXdev(tool: { name: string; loadMode?: ToolLoadMo
 export interface XdevDispatch {
 	tool: string;
 	mode: "help" | "execute";
-	/** Validated inner args, kept for renderer delegation on result rebuilds. */
+	/** Validated renderer args, projected where execution-only payloads are unnecessary. */
 	args?: Record<string, unknown>;
 	/**
 	 * Approval tier of the wrapped tool for {@link args} (`read` = no workspace
@@ -462,7 +462,11 @@ export async function dispatchXdevTool(
 		} catch {
 			tier = undefined;
 		}
-		xdev = { ...xdev, args: validated, tier };
+		// PR creation renders only its operation and repository. Keep the body
+		// in the validated execution input, not a second copy in result details.
+		const renderArgs =
+			name === "github" && validated.op === "pr_create" ? { op: validated.op, repo: validated.repo } : validated;
+		xdev = { ...xdev, args: renderArgs, tier };
 		if ("mcpReadOnlyHint" in canonical && canonical.mcpReadOnlyHint === true) xdev.readOnlyHint = true;
 		const innerOnUpdate: AgentToolUpdateCallback | undefined = onUpdate
 			? partial =>

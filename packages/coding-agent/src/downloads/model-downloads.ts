@@ -115,6 +115,18 @@ export class ModelDownloadActivity {
 		this.#report(modelKey, load, update);
 	}
 
+	/**
+	 * End a load still open for `modelKey` (its worker went away mid-load with no
+	 * request left waiting on it) without creating a new row when none is open.
+	 */
+	failOpen(modelKey: string, error: string): void {
+		const load = this.#loads.get(modelKey);
+		if (!load) return;
+		this.#loads.delete(modelKey);
+		this.#settled.set(modelKey, "failed");
+		load.tracker?.fail(error.split("\n", 1)[0] || "model load failed");
+	}
+
 	#report(modelKey: string, load: ModelLoad, update: DownloadProgressUpdate): void {
 		if (load.tracker) load.tracker.update(update);
 		else load.tracker = trackDownload(this.#label(modelKey), update);

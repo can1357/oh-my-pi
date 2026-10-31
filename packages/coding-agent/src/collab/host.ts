@@ -250,6 +250,8 @@ export class CollabHost {
 	/** The in-flight or finished `stop()`; concurrent callers share it. */
 	#stopDone: Promise<void> | undefined;
 	#stopped = false;
+	/** Bumped on every `message_start`; keys a streaming message's superseding updates. */
+	#messageSeq = 0;
 
 	constructor(ctx: InteractiveModeContext, options: CollabHostOptions = {}) {
 		this.#ctx = ctx;
@@ -711,8 +713,14 @@ export class CollabHost {
 
 	/** Broadcast one session event, bounded and serialized exactly once. */
 	#broadcastEvent(event: AgentSessionEvent): void {
+		if (event.type === "message_start") this.#messageSeq++;
 		if (!this.#broadcastAllowed()) return;
-		this.#socket?.send(encodeEventFrame(serializeReplicatedEvent(event).json));
+		const frame = encodeEventFrame(serializeReplicatedEvent(event).json);
+		// Each update carries the whole message so far, so a newer one supersedes
+		// any still queued for the same message (#16956). Keyed per message so the
+		// last update of one message is never superseded by the next one's.
+		if (event.type === "message_update") this.#socket?.sendLatest(`message_update:${this.#messageSeq}`, frame);
+		else this.#socket?.send(frame);
 	}
 
 	#handleFrame(frame: CollabFrame, fromPeer: number): void {

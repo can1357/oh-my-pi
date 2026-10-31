@@ -28,6 +28,7 @@ import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { t
 import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" with { type: "text" };
 import ttsrWarningTemplate from "../prompts/system/ttsr-warning.md" with { type: "text" };
 import type { AgentSessionEvent } from "./agent-session-events";
+import { escapeHarnessTags } from "./harness-tags";
 import type { SessionManager } from "./session-manager";
 import { TtsrToolInspector } from "./ttsr-outputs";
 
@@ -76,6 +77,7 @@ export class TtsrCoordinator {
 	readonly #manager: TtsrManager | undefined;
 	readonly #inspector: TtsrToolInspector;
 	#pendingInjections: Rule[] = [];
+	#pendingExcerpts: Record<string, string> = {};
 	#perToolInjections = new Map<string, Rule[]>();
 	#deferredReservations = new Map<string, number>();
 	#nextDeferredDeliveryId = 0;
@@ -207,11 +209,13 @@ export class TtsrCoordinator {
 		const toolCall = { type: "toolCall", id: toolCallId, name: tool.name, arguments: args } as ToolCall;
 		const matchContext = this.#inspector.matchContext(toolCall, 0);
 		let matches: Rule[];
+		let matched: Record<string, string>;
 		try {
-			matches = [
-				...this.#checkStream("", matchContext, toolCall, true),
-				...(await this.#checkAstStream(matchContext, toolCall)),
-			].filter((rule, index, all) => all.findIndex(candidate => candidate.name === rule.name) === index);
+			const regexMatches = this.#checkStream("", matchContext, toolCall, true);
+			matched = this.#matchedExcerpts(regexMatches, matchContext);
+			matches = [...regexMatches, ...(await this.#checkAstStream(matchContext, toolCall))].filter(
+				(rule, index, all) => all.findIndex(candidate => candidate.name === rule.name) === index,
+			);
 		} finally {
 			if (matchContext.streamKey) this.#manager.clearStream(matchContext.streamKey);
 		}
@@ -228,6 +232,8 @@ export class TtsrCoordinator {
 				prompt.render(ttsrInterruptTemplate, {
 					name: rule.name,
 					path: this.#displayRulePath(rule.path),
+					matched:
+						matched[rule.name] === undefined ? undefined : escapeHarnessTags(JSON.stringify(matched[rule.name])),
 					content: rule.content,
 				}),
 			)
@@ -348,20 +354,33 @@ export class TtsrCoordinator {
 		return `TTSR matched ${label}: ${rules.map(rule => rule.name).join(", ")}`;
 	}
 
-	#getInjectionContent(): { content: string; rules: Rule[] } | undefined {
+	#getInjectionContent(): { content: string; rules: Rule[]; matched: Record<string, string> } | undefined {
 		if (this.#pendingInjections.length === 0) return undefined;
 		const rules = this.#pendingInjections;
+		const matched = this.#pendingExcerpts;
 		const content = rules
 			.map(rule =>
 				prompt.render(ttsrInterruptTemplate, {
 					name: rule.name,
 					path: this.#displayRulePath(rule.path),
+					matched:
+						matched[rule.name] === undefined ? undefined : escapeHarnessTags(JSON.stringify(matched[rule.name])),
 					content: rule.content,
 				}),
 			)
 			.join("\n\n");
 		this.#pendingInjections = [];
-		return { content, rules };
+		this.#pendingExcerpts = {};
+		return { content, rules, matched };
+	}
+
+	#matchedExcerpts(rules: Rule[], context: TtsrMatchContext): Record<string, string> {
+		const matched: Record<string, string> = {};
+		for (const rule of rules) {
+			const excerpt = this.#manager?.matchExcerpt(rule.name, context);
+			if (excerpt) matched[rule.name] = excerpt;
+		}
+		return matched;
 	}
 
 	#displayRulePath(rulePath: string): string {
@@ -378,11 +397,13 @@ export class TtsrCoordinator {
 		return relative && !relative.startsWith("..") && !path.isAbsolute(relative) ? relative : null;
 	}
 
-	#addPendingInjections(rules: Rule[]): void {
+	#addPendingInjections(rules: Rule[], context: TtsrMatchContext): void {
 		const seen = new Set(this.#pendingInjections.map(rule => rule.name));
 		for (const rule of rules) {
 			if (seen.has(rule.name) || this.#deferredReservations.has(rule.name)) continue;
 			this.#pendingInjections.push(rule);
+			const excerpt = this.#manager?.matchExcerpt(rule.name, context);
+			if (excerpt !== undefined) this.#pendingExcerpts[rule.name] = excerpt;
 			seen.add(rule.name);
 		}
 	}
@@ -490,6 +511,7 @@ export class TtsrCoordinator {
 		if (this.#abortPending || this.#pendingInjections.length === 0) return;
 		if (message.stopReason === "aborted" || message.stopReason === "error") {
 			this.#pendingInjections = [];
+			this.#pendingExcerpts = {};
 			return;
 		}
 		const injection = this.#getInjectionContent();
@@ -502,7 +524,7 @@ export class TtsrCoordinator {
 				customType: "ttsr-injection",
 				content: injection.content,
 				display: false,
-				details: { rules: ruleNames, deliveryId },
+				details: { rules: ruleNames, matched: injection.matched, deliveryId },
 				attribution: "agent",
 				timestamp: Date.now(),
 			});
@@ -662,7 +684,7 @@ export class TtsrCoordinator {
 			this.#emitTriggerOnce(matchContext, matches);
 			return false;
 		}
-		this.#addPendingInjections(matches);
+		this.#addPendingInjections(matches, matchContext);
 		if (!shouldInterrupt) return false;
 
 		this.#abortPending = true;
@@ -690,6 +712,7 @@ export class TtsrCoordinator {
 				if (!this.#abortPending || this.#host.promptGeneration() !== generation || targetAssistantIndex === -1) {
 					this.#abortPending = false;
 					this.#pendingInjections = [];
+					this.#pendingExcerpts = {};
 					this.#perToolInjections.clear();
 					this.resolveResume();
 					return;
@@ -701,7 +724,7 @@ export class TtsrCoordinator {
 				}
 				const injection = this.#getInjectionContent();
 				if (injection) {
-					const details = { rules: injection.rules.map(rule => rule.name) };
+					const details = { rules: injection.rules.map(rule => rule.name), matched: injection.matched };
 					this.#host.agent.appendMessage({
 						role: "custom",
 						customType: "ttsr-injection",

@@ -8,6 +8,7 @@ import { generateImage } from "@oh-my-pi/pi-ai/images";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Api, FetchImpl, Model } from "@oh-my-pi/pi-catalog/types";
 import { toDataUrl } from "../src/images/shared";
+import { factoryModel } from "./helpers/factory-droid";
 
 const IMAGE_DATA = Buffer.from("gateway-image").toString("base64");
 
@@ -74,6 +75,23 @@ function gatewayRequest(
 }
 
 describe("auth gateway images", () => {
+	it("serves Factory Droid image models through the Factory Images route", async () => {
+		const model = factoryModel("gpt-image-2.5-flare");
+		const urls: string[] = [];
+		const fetchStub: FetchImpl = async input => {
+			urls.push(input.toString());
+			return Response.json({ data: [{ b64_json: IMAGE_DATA }], usage: { input_tokens: 3, output_tokens: 4 } });
+		};
+		await withGateway([model], fetchStub, async url => {
+			const response = await gatewayRequest(url, "/v1/images/generations", {
+				model: "factory-droid/gpt-image-2.5-flare",
+				prompt: "paint a lighthouse",
+			});
+			expect(response.status).toBe(200);
+			expect(urls).toEqual(["https://api.factory.ai/api/llm/o/v1/images/generations"]);
+		});
+	});
+
 	it("translates OpenAI generations and returns the OpenAI image wire response", async () => {
 		const model = imageModel("openai", "gpt-image-test", "openai-images");
 		let upstream: { url: string; authorization: string | null; body: unknown } | undefined;

@@ -14,6 +14,7 @@ import type {
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { ShellFsDirEntry } from "@oh-my-pi/pi-natives";
 import type { Settings } from "../config/settings";
 import type { Rule } from "../capability/rule";
 import type { Skill } from "../extensibility/skills";
@@ -25,6 +26,7 @@ import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import type { ProcReadDetails, ProcWriteDetails } from "@oh-my-pi/pi-tui/tools/proc-render";
 import type { CfgReadDetails, CfgWriteDetails } from "@oh-my-pi/pi-tui/tools/cfg-render";
 import type { XdevRenderDispatch } from "@oh-my-pi/pi-tui/tools/xdev";
+import type { SchemeWriteScope } from "@oh-my-pi/pi-tui/tools/url-scheme-host";
 
 /** Transcript-only render state a handler write attaches to the `write` tool result. */
 export interface InternalWriteDetails {
@@ -65,15 +67,6 @@ export type SchemeBacking = "file" | "virtual" | "remote" | "device";
  */
 export type SchemeSelectors = "lines" | "none" | "opaque";
 
-/**
- * Mutation class of a writable scheme; drives plan-mode and device-only `write` gates.
- * - `workspace`: mutates user/external state; blocked in plan mode and device-only sessions.
- * - `sandbox`: session scratch space (local://); allowed in plan mode and device-only sessions.
- * - `coordination`: peer messaging (agent://); always allowed. {@link SchemeWritePolicy.cancels} grants the same per URL.
- * - `device`: tool-device dispatch (xd://); always allowed, the device enforces its own policy.
- */
-export type SchemeWriteScope = "workspace" | "sandbox" | "coordination" | "device";
-
 /** Write policy for a writable scheme. Absent on read-only schemes. */
 export interface SchemeWritePolicy {
 	/**
@@ -90,9 +83,12 @@ export interface SchemeWritePolicy {
 	 * `verbatim`: raw payload (messages, stdin, setting values); neither transform applies.
 	 */
 	payload: "text" | "verbatim";
+	/** Mutation class; see {@link SchemeWriteScope}. */
 	scope: SchemeWriteScope;
 	/** Approval tier for `write`/`edit`/`ast_edit` targeting this URL. `session` is absent when approval is evaluated outside a tool session. */
 	tier(url: InternalUrl, content: string | undefined, session: ToolSession | undefined): ToolApprovalDecision;
+	/** Largest payload in UTF-8 bytes the scheme accepts; the shell refuses writes past it (EFBIG). Default: unbounded. */
+	maxBytes?: number;
 	/** True when `write` may omit `content` for this URL (`proc://<id>/kill`). */
 	contentOptional?(url: InternalUrl): boolean;
 	/**
@@ -158,6 +154,8 @@ export interface SchemeHost {
 	securityEnabled: boolean;
 	/** The user approves `cfg://` writes for this session (top-level TUI session). */
 	settingsApproval: boolean;
+	/** `out://` writes reach the user as transcript replies: `out.enabled` is on in the top-level TUI session. */
+	outReplies: boolean;
 }
 
 /**
@@ -176,14 +174,14 @@ export interface InternalResource {
 	size?: number;
 	/** Underlying filesystem path (for debugging, not exposed to agent) */
 	sourcePath?: string;
+	/** First source-file line of an excerpt; selectors remain relative to `content`. */
+	sourceStartLine?: number;
 	/** Additional notes about resolution */
 	notes?: string[];
 	/** Structured snapshots used only for transcript rendering. */
 	details?: {
 		proc?: ProcReadDetails;
 		cfg?: CfgReadDetails;
-		/** Prefix-free text + gutter start for the TUI read card when `content` carries hashline/line prefixes (conflict://). */
-		display?: { text: string; startLine: number; lineNumbers?: Array<number | null> };
 	};
 	/**
 	 * `value` marks a discrete extracted value (agent://<id>/<json-path>) that
@@ -202,9 +200,8 @@ export interface InternalResource {
 	unbounded?: boolean;
 	/**
 	 * True when the resource is a directory listing rather than file content.
-	 * `search` refuses to grep such a resource when it has no `sourcePath` — a
-	 * remote `ssh://` listing has no local path to recurse, so its listing text
-	 * must never be mistaken for the directory's contents.
+	 * Traversal needs a `sourcePath`, enumerated leaves, or the handler's
+	 * `readDirectory` hook; the rendered listing is never searched as file text.
 	 */
 	isDirectory?: boolean;
 }
@@ -309,6 +306,8 @@ export interface ResolveContext {
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Calling session's loaded skills. Prefer this over process-global skill state. */
 	skills?: readonly Skill[];
+	/** Search walks may follow skill links only within the plugin root (or the local skill root). */
+	containSkillPaths?: boolean;
 	/**
 	 * Calling session's agent-scoped applicable rule set (rulebook + always-apply
 	 * + triggered TTSR rules, already bucketed by `agents` frontmatter). Prefer
@@ -325,9 +324,8 @@ export interface ResolveContext {
 	session?: ToolSession;
 	/**
 	 * When set, handlers that would otherwise materialize an expensive directory
-	 * listing (e.g. the ssh:// handler draining a full remote `ls`) instead return
-	 * the directory shape (`isDirectory: true`) with empty content. `search`/`find`
-	 * reject directory resources, so they never need the listing.
+	 * listing instead return the directory shape (`isDirectory: true`) with empty
+	 * content. Filesystem consumers list through `readDirectory` when needed.
 	 */
 	skipDirectoryListing?: boolean;
 }
@@ -421,6 +419,12 @@ export interface ProtocolHandler {
 	 * leaf documents for `grep`/`find`. Leaf `url`s must round-trip through `resolve`.
 	 */
 	enumerate?(url: InternalUrl, context?: ResolveContext): Promise<Array<{ url: string; content: string }>>;
+	/**
+	 * Immediate structured children of a remote/virtual directory, without
+	 * rendering listing text or materializing a local directory. Entry names
+	 * are raw basenames; the URL filesystem encodes them when traversing.
+	 */
+	readDirectory?(url: InternalUrl, context?: ResolveContext): Promise<ShellFsDirEntry[]>;
 	/**
 	 * One-line system-prompt entry (rendered from `prompts/internal-urls/<scheme>.md`)
 	 * when the scheme is usable in the session described by `host`; `undefined`

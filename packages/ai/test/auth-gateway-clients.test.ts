@@ -65,23 +65,27 @@ describe("auth-gateway scoped clients", () => {
 		await fs.rm(dir, { recursive: true, force: true });
 	});
 
-	/** Serve `models` the way `serve` indexes its catalog: qualified ids, then each bare id's first model. */
+	/**
+	 * Serve `models` the way `serve` resolves its catalog: a `provider/id` names one model,
+	 * a bare id the first listed model of that id the caller accepts.
+	 */
 	function boot(
 		models: MockModel[],
 		clients: readonly AuthGatewayClient[] | undefined,
 		bearerTokens = [GATEWAY_TOKEN],
 	): AuthGatewayServerHandle {
-		const byId = new Map<string, Model<Api>>();
-		for (const model of models) {
-			byId.set(`${model.provider}/${model.id}`, model);
-			if (!byId.has(model.id)) byId.set(model.id, model);
-		}
+		const byKey = new Map<string, Model<Api>>(models.map(model => [`${model.provider}/${model.id}`, model]));
 		gateway = startAuthGateway({
 			bind: "127.0.0.1:0",
 			bearerTokens,
 			storage,
-			resolveModel: id => byId.get(id),
-			listModels: () => byId.values(),
+			resolveModel: (id, options) => {
+				const accepts = options?.accepts ?? (() => true);
+				const qualified = byKey.get(id);
+				if (qualified) return accepts(qualified) ? qualified : undefined;
+				return models.find(model => model.id === id && accepts(model));
+			},
+			listModels: () => byKey.values(),
 			clients,
 			version: "test",
 		});

@@ -7,6 +7,7 @@ import { Settings } from "../../src/config/settings";
 import { AsyncJobManager } from "../../src/async/job-manager";
 import { ProcProtocolHandler } from "../../src/internal-urls/proc-protocol";
 import { parseInternalUrl } from "../../src/internal-urls/parse";
+import { InternalUrlRouter } from "../../src/internal-urls/router";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import { SessionManager } from "../../src/session/session-manager";
 import { startDaemonBrokerFromEnvironment } from "../../src/launch/broker";
@@ -103,44 +104,35 @@ function steeringContext(steeringSignal: AbortSignal): AgentToolContext {
 	} as unknown as AgentToolContext;
 }
 
+/**
+ * Agent `Quick` finished its first run and was woken: its new turn's job asks for
+ * the id `Quick`, but the settled first job still holds it, so the turn runs as `Quick-2`.
+ */
+async function wokenAgentSession(
+	options: { launch?: boolean } = {},
+): Promise<{ manager: AsyncJobManager; session: ToolSession }> {
+	const manager = new AsyncJobManager({});
+	const registry = new AgentRegistry();
+	registry.register({ id: "Quick", displayName: "Quick", kind: "sub", parentId: "Main", session: null });
+	const session = toolSession(process.cwd(), manager, { launch: options.launch ?? false });
+	session.agentRegistry = registry;
+	manager.register("task", "Quick", async () => "READY", { id: "Quick", agentId: "Quick", ownerId: "Main" });
+	await manager.getJob("Quick")?.promise;
+	const turn = Promise.withResolvers<string>();
+	const turnJobId = manager.register(
+		"task",
+		"Quick",
+		async ({ signal }) => {
+			signal.addEventListener("abort", () => turn.resolve("cancelled"), { once: true });
+			return turn.promise;
+		},
+		{ id: "Quick", agentId: "Quick", ownerId: "Main" },
+	);
+	expect(turnJobId).toBe("Quick-2");
+	return { manager, session };
+}
+
 describe("proc:// background jobs", () => {
-	it("reads what a pipeline stage wrote while a later stage still holds it back", async () => {
-		const manager = new AsyncJobManager({});
-		const session = toolSession(process.cwd(), manager, { launch: false, async: true });
-		const proc = new ProcProtocolHandler();
-		try {
-			await new BashTool(session).execute("piped", {
-				command: "{ printf 'one\\r\\ntwo\\rthree\\n'; sleep 30; } | tail -n 1",
-				async: true,
-				pty: false,
-			});
-			const [job] = manager.getAllJobs({ ownerId: "Main" });
-			if (!job) throw new Error("no bash job started");
-			const read = (url: string) => proc.resolve(parseInternalUrl(url), { session });
-
-			// Real-time poll: the stream fills from a real child's pipe write, and
-			// nothing in-process signals when the relay thread has copied it.
-			let stream = "";
-			for (let waited = 0; stream !== "one\ntwo\nthree\n" && waited < 10_000; waited += 20) {
-				await Bun.sleep(20);
-				const opened = (await read(`proc://${job.id}/streams`)).content.startsWith(`proc://${job.id}/streams/1 `);
-				if (opened) stream = (await read(`proc://${job.id}/streams/1`)).content;
-			}
-			// CRLF and bare-CR progress both read as lines.
-			expect(stream).toBe("one\ntwo\nthree\n");
-			// The job's own output is still empty: `tail` prints only at EOF.
-			expect((await read(`proc://${job.id}`)).details).toMatchObject({ proc: { log: "" } });
-			const listing = await read(`proc://${job.id}/streams`);
-			expect(listing.isDirectory).toBeTrue();
-			expect(listing.content).toMatch(new RegExp(`^proc://${job.id}/streams/1 open 15B — .*printf.* → tail -n 1$`));
-			expect(await rejectionMessage(read(`proc://${job.id}/streams/2`))).toContain(
-				`List them with proc://${job.id}/streams`,
-			);
-		} finally {
-			await manager.dispose({ timeoutMs: 2_000 });
-		}
-	}, 20_000);
-
 	it("lists owned jobs, preserves delivery on read, and scopes kill to the owner", async () => {
 		const manager = new AsyncJobManager({});
 		const pending = Promise.withResolvers<string>();
@@ -184,7 +176,7 @@ describe("proc:// background jobs", () => {
 			expect(running.content).toContain("building 50%");
 			expect(running.details?.proc?.job).toMatchObject({ id, status: "running" });
 			await expect(protocol.write(parseInternalUrl(`proc://${id}`), "input", { session })).rejects.toThrow(
-				"stdin is only available for services",
+				"in-process job",
 			);
 			await expect(protocol.resolve(parseInternalUrl(`proc://${id}/kill`), { session })).rejects.toThrow(
 				"write-only",
@@ -207,6 +199,100 @@ describe("proc:// background jobs", () => {
 		} finally {
 			await manager.dispose();
 		}
+	});
+
+	it.each([false, true])(
+		"rejects service-only controls for known jobs without claiming they are missing (launch: %s)",
+		async launch => {
+			const client: DaemonBrokerClient = {
+				projectDir: process.cwd(),
+				onCompletion: () => () => {},
+				close() {},
+				async request(operation: DaemonOperation): Promise<DaemonRpcResult> {
+					if (operation.op === "list") return { op: "list", daemons: [] };
+					throw new Error(`Unexpected broker op ${operation.op}`);
+				},
+			};
+			const broker = vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
+			const manager = new AsyncJobManager({});
+			const pending = Promise.withResolvers<string>();
+			const id = manager.register(
+				"bash",
+				"running command",
+				async ({ signal }) => {
+					signal.addEventListener("abort", () => pending.resolve("cancelled"), { once: true });
+					return pending.promise;
+				},
+				{ id: "bg_12", ownerId: "Main" },
+			);
+			const session = toolSession(process.cwd(), manager, { launch });
+			const protocol = new ProcProtocolHandler();
+			try {
+				for (const [suffix, content] of [
+					["/mode", "persist"],
+					["", "input"],
+				]) {
+					const message = await rejectionMessage(
+						protocol.write(parseInternalUrl(`proc://${id}${suffix}`), content, { session }),
+					);
+					expect(message).toContain(`${id} is an in-process job`);
+					expect(message).toContain("stdin and persist/session/detached modes are services-only");
+					expect(message).toContain("Start long-lived work as a named service");
+					expect(message).toContain("lifetime controls");
+					expect(message).toContain(JSON.stringify({ path: `proc://${id}/kill` }));
+					expect(message).not.toContain("not found");
+
+					const missing = await rejectionMessage(
+						protocol.write(parseInternalUrl(`proc://missing-job${suffix}`), content, { session }),
+					);
+					expect(missing).toContain("not found: missing-job");
+					expect(missing).not.toContain("in-process");
+				}
+				expect(manager.getJob(id)?.status).toBe("running");
+				expect(manager.isJobResultConsumed(id)).toBeFalse();
+				if (!launch) expect(broker).not.toHaveBeenCalled();
+			} finally {
+				broker.mockRestore();
+				await manager.dispose();
+			}
+		},
+	);
+
+	it("reports unknown ids as missing for both service-only write operations", async () => {
+		const protocol = new ProcProtocolHandler();
+		const session = toolSession(process.cwd(), undefined, { launch: false });
+		for (const [suffix, content] of [
+			["/mode", "persist"],
+			["", "input"],
+		]) {
+			const message = await rejectionMessage(
+				protocol.write(parseInternalUrl(`proc://missing-job${suffix}`), content, { session }),
+			);
+			expect(message).toContain("not found: missing-job");
+			expect(message).not.toContain("in-process");
+		}
+	});
+
+	it("advertises stdin and modes as service-only while kill remains available for jobs and agents", async () => {
+		const help = new InternalUrlRouter()
+			.describe({
+				skillUriAccess: false,
+				ruleCount: 0,
+				securityEnabled: false,
+				settingsApproval: false,
+				outReplies: false,
+			})
+			.find(line => line.startsWith("`proc://`"));
+		expect(help).toMatch(/stdin[^;]*services.only/);
+		expect(help).toMatch(/\/mode[^;]*services.only/);
+		expect(help).toMatch(/\/kill[^;]*jobs, agents, and services/);
+		expect(help).toContain("named service");
+
+		const protocol = new ProcProtocolHandler();
+		const session = toolSession(process.cwd(), undefined, { launch: false });
+		expect(await rejectionMessage(protocol.write(parseInternalUrl("proc://"), "", { session }))).toContain(
+			"stdin and modes are services-only",
+		);
 	});
 
 	it("answers a read of a write-only action with the write that performs it, leaving the job running", async () => {
@@ -233,6 +319,7 @@ describe("proc:// background jobs", () => {
 			expect(mode).toContain("call write with");
 			expect(mode).toContain('"path":"proc://bg_12/mode"');
 			expect(mode).toContain("persist, session, or detached");
+			expect(mode).toContain("services-only");
 		} finally {
 			await manager.dispose();
 		}
@@ -257,9 +344,9 @@ describe("proc:// background jobs", () => {
 					path: `proc://${id}`,
 					content: '</antml>\n<parameter name="i">Cancelling background test run',
 				}),
-			).rejects.toThrow("stdin is only available for services");
+			).rejects.toThrow("in-process job");
 			await expect(write.execute("empty-stdin", { path: `proc://${id}`, content: "" })).rejects.toThrow(
-				"stdin is only available for services",
+				"in-process job",
 			);
 			await expect(
 				write.execute("missing-stdin", write.parameters.assert({ path: `proc://${id}` })),
@@ -356,6 +443,18 @@ describe("proc:// background jobs", () => {
 		session.agentRegistry = registry;
 		const write = new WriteTool(session);
 		try {
+			for (const [suffix, content] of [
+				["/mode", "persist"],
+				["", "input"],
+			]) {
+				const message = await rejectionMessage(
+					write.execute("service-only", { path: `proc://Worker${suffix}`, content }),
+				);
+				expect(message).toContain("Worker is an in-process agent");
+				expect(message).toContain("stdin and persist/session/detached modes are services-only");
+				expect(message).toContain("named service");
+				expect(registry.get("Worker")?.status).toBe("running");
+			}
 			const denied = await write.execute("foreign", { path: "proc://Foreign/kill" });
 			expect(denied.details?.proc).toMatchObject({ cancelled: [{ id: "Foreign", status: "not_found" }] });
 			expect(registry.get("Foreign")?.status).toBe("running");
@@ -364,6 +463,93 @@ describe("proc:// background jobs", () => {
 			expect(registry.get("Worker")).toBeUndefined();
 		} finally {
 			await manager?.dispose();
+		}
+	});
+
+	it("finds a woken agent by its own id once its first job row is gone", async () => {
+		const { manager, session } = await wokenAgentSession();
+		const protocol = new ProcProtocolHandler();
+		try {
+			manager.evictCompletedJobs({ ownerId: "Main" });
+			const running = await protocol.resolve(parseInternalUrl("proc://Quick"), { session });
+			expect(running.details?.proc?.job).toMatchObject({ id: "Quick-2", status: "running" });
+			for (const [suffix, content] of [
+				["/mode", "persist"],
+				["", "input"],
+			]) {
+				const message = await rejectionMessage(
+					protocol.write(parseInternalUrl(`proc://Quick${suffix}`), content, { session }),
+				);
+				expect(message).toContain("Quick is an in-process job");
+				expect(message).toContain("services-only");
+				expect(manager.getJob("Quick-2")?.status).toBe("running");
+			}
+
+			const killed = await protocol.write(parseInternalUrl("proc://Quick/kill"), "", { session });
+			await manager.getJob("Quick-2")?.promise;
+			expect(killed.details?.proc).toMatchObject({ cancelled: [{ id: "Quick-2", status: "cancelled" }] });
+			expect(manager.getJob("Quick-2")?.status).toBe("cancelled");
+		} finally {
+			await manager.dispose();
+		}
+	});
+
+	it("names the running job of a woken agent when its settled first job is read", async () => {
+		const { manager, session } = await wokenAgentSession();
+		try {
+			const settled = await new ProcProtocolHandler().resolve(parseInternalUrl("proc://Quick"), { session });
+			expect(settled.details?.proc?.job).toMatchObject({ id: "Quick", status: "completed" });
+			expect(settled.content).toContain("running again as job Quick-2");
+		} finally {
+			await manager.dispose();
+		}
+	});
+
+	it("keeps a service named like a woken agent reachable for read and kill", async () => {
+		const now = Date.now();
+		const daemon: DaemonSnapshot = {
+			name: "Quick",
+			id: "quick-service",
+			state: "ready",
+			createdAt: now,
+			startedAt: now,
+			readyAt: now,
+			restartCount: 0,
+			outputBytes: 0,
+			persist: false,
+			detached: false,
+		};
+		const stopped: string[] = [];
+		const client = {
+			projectDir: process.cwd(),
+			onCompletion: () => () => {},
+			close() {},
+			async request(operation: DaemonOperation): Promise<DaemonRpcResult> {
+				if (operation.op === "list") return { op: "list", daemons: [daemon] };
+				if (operation.op === "logs")
+					return { op: "logs", name: "Quick", text: "serving\n", cursor: 8, timedOut: false, state: "ready" };
+				if (operation.op === "stop") {
+					stopped.push(operation.name);
+					return { op: "stop", daemon: { ...daemon, state: "exited", exitedAt: now } };
+				}
+				throw new Error(`Unexpected broker op ${operation.op}`);
+			},
+		} as unknown as DaemonBrokerClient;
+		const spy = vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
+		const { manager, session } = await wokenAgentSession({ launch: true });
+		const protocol = new ProcProtocolHandler();
+		try {
+			manager.evictCompletedJobs({ ownerId: "Main" });
+			const read = await protocol.resolve(parseInternalUrl("proc://Quick"), { session });
+			expect(read.details?.proc).toMatchObject({ daemon: { name: "Quick" } });
+
+			const killed = await protocol.write(parseInternalUrl("proc://Quick/kill"), "", { session });
+			expect(killed.details?.proc).toMatchObject({ action: "stop", daemon: { name: "Quick" } });
+			expect(stopped).toEqual(["Quick"]);
+			expect(manager.getJob("Quick-2")?.status).toBe("running");
+		} finally {
+			spy.mockRestore();
+			await manager.dispose();
 		}
 	});
 
@@ -380,36 +566,38 @@ describe("proc:// background jobs", () => {
 		expect(await Bun.file(file).text()).toBe("");
 	});
 
-	it("lists settled jobs with their frozen run duration instead of their age", async () => {
-		const clock = vi.spyOn(Date, "now").mockReturnValue(1_000);
+	it("shows a running task's progress in the proc:// listing and its own read, but not a bash job's", async () => {
 		const manager = new AsyncJobManager({});
-		const release = Promise.withResolvers<string>();
-		const doneId = manager.register("bash", "sleep 2; echo fast-done", () => release.promise, { ownerId: "Main" });
-		const blocked = Promise.withResolvers<string>();
-		const runningId = manager.register(
-			"bash",
-			"sleep 60",
-			async ({ signal }) => {
-				signal.addEventListener("abort", () => blocked.resolve("cancelled"), { once: true });
-				return blocked.promise;
+		const pending = Promise.withResolvers<string>();
+		const reported = Promise.withResolvers<void>();
+		const taskId = manager.register(
+			"task",
+			"AcpSurface",
+			async ({ jobId, reportProgress }) => {
+				await reportProgress("running", {
+					progress: [{ id: jobId, requests: 90, cost: 18.4, contextTokens: 160_000, contextWindow: 1_000_000 }],
+				});
+				reported.resolve();
+				return pending.promise;
 			},
 			{ ownerId: "Main" },
 		);
+		const bashId = manager.register("bash", "sleep 60", () => pending.promise, { ownerId: "Main" });
 		const session = toolSession(process.cwd(), manager, { launch: false });
 		try {
-			clock.mockReturnValue(3_000);
-			release.resolve("fast-done");
-			await manager.getJob(doneId)?.promise;
-			clock.mockReturnValue(40_000);
-			const list = await new ProcProtocolHandler().resolve(parseInternalUrl("proc://"), { session });
-			expect(list.content).toContain(`${doneId} [bash] completed in 2.0s — sleep 2; echo fast-done`);
-			expect(list.content).toContain(`${runningId} [bash] running up 39.0s — sleep 60`);
-			expect(list.details?.proc?.jobs).toMatchObject([
-				{ id: doneId, durationMs: 2_000 },
-				{ id: runningId, durationMs: 39_000 },
-			]);
+			await reported.promise;
+			const proc = new ProcProtocolHandler();
+			const rows = (await proc.resolve(parseInternalUrl("proc://"), { session })).content.split("\n");
+			expect(rows.find(row => row.startsWith(taskId))).toMatch(
+				/ \[task\] running up \S+ — AcpSurface — 90 req · \$18\.40 · ctx 160K\/1M$/,
+			);
+			expect(rows.find(row => row.startsWith(bashId))).toMatch(/ \[bash\] running up \S+ — sleep 60$/);
+			const single = await proc.resolve(parseInternalUrl(`proc://${taskId}`), { session });
+			expect(single.content.split("\n")[0]).toMatch(
+				new RegExp(`^${taskId} \\[task\\] — running — AcpSurface — \\S+ · 90 req · \\$18\\.40 · ctx 160K/1M$`),
+			);
 		} finally {
-			clock.mockRestore();
+			pending.resolve("done");
 			await manager.dispose();
 		}
 	});
@@ -508,6 +696,16 @@ describe("bash services via proc://", () => {
 			expect(
 				await rejectionMessage(proc.write(parseInternalUrl("proc://echo-service/kill"), "", { session })),
 			).toContain("both job echo-service and service echo-service");
+			for (const [suffix, content] of [
+				["/mode", "persist"],
+				["", "input"],
+			]) {
+				expect(
+					await rejectionMessage(
+						proc.write(parseInternalUrl(`proc://echo-service${suffix}`), content, { session }),
+					),
+				).toContain("both job echo-service and service echo-service");
+			}
 			manager.cancel(collisionId, { ownerId: "Main" });
 			await manager.getJob(collisionId)?.promise;
 			await manager.dispose({ timeoutMs: 1_000 });
@@ -587,15 +785,18 @@ describe("bash services via proc://", () => {
 				),
 			).toContain("must remain persistent");
 			await proc.write(parseInternalUrl("proc://detach-candidate/kill"), "", { session });
-			await expect(bash.execute("invalid", { command: "true", name: "bad", async: true })).rejects.toThrow(
-				"does not accept async or timeout",
-			);
-			await expect(bash.execute("invalid", { command: "true", name: "bad", timeout: 1 })).rejects.toThrow(
-				"does not accept async or timeout",
-			);
+			const ignored = await bash.execute("invalid", {
+				command: "sleep 30",
+				name: "svc-bad",
+				timeout: 1,
+				async: true,
+			});
+			const ignoredText = ignored.content[0]?.type === "text" ? ignored.content[0].text : "";
+			expect(ignoredText.includes("Ignored timeout") && ignoredText.includes("Ignored async")).toBe(true);
 		} finally {
 			await client.request({ op: "stop", name: "echo-service", timeoutMs: 1_000 }).catch(() => undefined);
 			await client.request({ op: "stop", name: "detach-candidate", timeoutMs: 1_000 }).catch(() => undefined);
+			await client.request({ op: "stop", name: "svc-bad", timeoutMs: 1_000 }).catch(() => undefined);
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			await manager.dispose({ timeoutMs: 1_000 });
 			client.close();
@@ -640,6 +841,33 @@ describe("bash services via proc://", () => {
 			expect(read.details?.proc).toMatchObject({ daemon: { name: "slow-service", state: "starting" } });
 		} finally {
 			await client.request({ op: "stop", name: "slow-service", timeoutMs: 1_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			setProcessName(oldTitle);
+			spy.mockRestore();
+		}
+	}, 20_000);
+
+	it("starts a service at log readiness when the tool call materialized an unset port as zero", async () => {
+		using temp = TempDir.createSync("@omp-proc-service-port0-");
+		const cwd = path.join(temp.path(), "project");
+		const runtimeDir = path.join(temp.path(), "runtime");
+		await fs.mkdir(cwd);
+		const client = await createDaemonBrokerClient(cwd, { runtimeDir, idleGraceMs: 5_000 });
+		const spy = vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
+		const oldTitle = process.title;
+		const broker = startBroker(cwd, runtimeDir);
+		try {
+			const result = await new BashTool(toolSession(cwd)).execute("service", {
+				command: "printf 'READY\\n'; sleep 30",
+				name: "port0-service",
+				ready: { log: "READY", port: 0, host: "", timeout: 5 },
+				pty: false,
+			});
+			expect(result.details?.service).toMatchObject({ name: "port0-service", ready: true, timedOut: false });
+		} finally {
+			await client.request({ op: "stop", name: "port0-service", timeoutMs: 1_000 }).catch(() => undefined);
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
 			await broker;

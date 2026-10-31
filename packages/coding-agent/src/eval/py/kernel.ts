@@ -8,7 +8,7 @@
  * timeout.
  */
 import * as path from "node:path";
-import { $flag, isBunTestRuntime, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, $flag, isBunTestRuntime, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../config/settings";
 import {
 	BaseKernel,
@@ -51,6 +51,8 @@ const STARTUP_TIMEOUT_MS = 10_000;
 // generous: a clean interrupt is far preferable to losing the persistent
 // kernel's state, so we only kill as a last-resort recovery path.
 const INTERRUPT_ESCALATION_MS = 5_000;
+/** Bounds interrupt escalation plus the three shutdown grace windows before ACP abandons a session. */
+export const PYTHON_KERNEL_CANCEL_BUDGET_MS = INTERRUPT_ESCALATION_MS + 3 * SHUTDOWN_GRACE_MS;
 
 const PYTHON_RESERVED_PRELUDE_EXPORTS: Record<string, true> = {
 	__omp_tools__: true,
@@ -82,6 +84,8 @@ export interface PythonKernelAvailability {
 	reason?: string;
 	/** The probed-working runtime, when one was found. */
 	runtime?: PythonRuntime;
+	/** Cancellation or an exhausted probe budget does not establish runtime unavailability. */
+	transient?: boolean;
 }
 
 export interface PythonPreludeSource {
@@ -105,11 +109,31 @@ interface PythonKernelExecuteOptions extends KernelExecuteOptions {
 	expectedShadowDigest?: string;
 }
 
-// Cache successful probes per resolved cwd + explicit interpreter: every cell
-// otherwise pays one (or two — backend.isAvailable + ensureKernelAvailable)
-// interpreter spawns even when the kernel is already hot. Failures are not
-// cached so installing a Python mid-session is picked up on the next attempt.
-const availabilityCache = new Map<string, Promise<PythonKernelAvailability>>();
+// Retain definitive results for synchronous capability advertisement. Execution
+// reuses only successes: failed probes are retried on an explicit invocation, so
+// installing Python mid-session remains discoverable without restarting.
+const availabilityCache = new Map<string, PythonKernelAvailability>();
+
+function availabilityKey(cwd: string, interpreter?: string): string {
+	return [
+		path.resolve(cwd),
+		interpreter ?? "",
+		$env.PATH,
+		$env.VIRTUAL_ENV,
+		$env.CONDA_PREFIX,
+		$env.HOME,
+		$env.PYTHONPATH,
+		$env.LD_LIBRARY_PATH,
+	].join("\0");
+}
+
+/** Read the last definitive probe without spawning or awaiting interpreter discovery. */
+export function getCachedPythonKernelAvailability(
+	cwd: string,
+	interpreter?: string,
+): PythonKernelAvailability | undefined {
+	return availabilityCache.get(availabilityKey(cwd, interpreter));
+}
 
 export async function checkPythonKernelAvailability(
 	cwd: string,
@@ -120,13 +144,13 @@ export async function checkPythonKernelAvailability(
 		return { ok: true };
 	}
 	const resolvedCwd = path.resolve(cwd);
-	const key = `${resolvedCwd}\0${interpreter ?? ""}`;
+	const key = availabilityKey(resolvedCwd, interpreter);
 	const cached = availabilityCache.get(key);
-	if (cached) return await cached;
+	if (!options?.forceProbe && cached?.ok) return cached;
 	// Probe controls belong to one caller. Do not share an in-flight promise:
 	// aborting one eval must not cancel a concurrent session's availability check.
 	const result = await probePythonKernelAvailability(resolvedCwd, interpreter, options);
-	if (result.ok) availabilityCache.set(key, Promise.resolve(result));
+	if (!result.transient && !options?.signal?.aborted) availabilityCache.set(key, result);
 	return result;
 }
 
@@ -158,15 +182,21 @@ async function probePythonKernelAvailability(
 			return { ok: true, pythonPath: runtime.pythonPath, runtime };
 		}
 		if (result.aborted) {
-			return { ok: false, pythonPath: runtimes[0].pythonPath, reason: "Python availability probe was cancelled." };
+			return {
+				ok: false,
+				pythonPath: runtimes[0].pythonPath,
+				reason: "Python availability probe was cancelled.",
+				transient: true,
+			};
 		}
 		return {
 			ok: false,
 			pythonPath: runtimes[0].pythonPath,
 			reason: `No working Python interpreter found. Tried: ${result.failures.join("; ")}`,
+			...(result.timedOut ? { transient: true } : {}),
 		};
 	} catch (err) {
-		return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+		return { ok: false, reason: err instanceof Error ? err.message : String(err), transient: true };
 	}
 }
 
