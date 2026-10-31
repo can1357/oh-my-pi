@@ -171,6 +171,32 @@ describe("pruned tool description accounting", () => {
 		),
 	);
 
+	it("refreshes per-tool details when effective pruning changes without replacing the roster", () => {
+		let prune = true;
+		const model = { toolSchemasInContext: true } as Model;
+		const session = {
+			model,
+			agent: {
+				tokenizer,
+				state: { tools: tools as never },
+				prunesToolDescriptions: (requestedModel: Model | undefined) => {
+					expect(requestedModel).toBe(model);
+					return prune;
+				},
+			},
+		};
+		expect(computeContextUsageDetails(session).tools).toEqual([{ name: "grep", tokens: prunedWireTokens }]);
+
+		// Owned dialects retain descriptions even when the raw prune setting is enabled.
+		prune = false;
+		const full = computeContextUsageDetails(session).tools;
+		expect(full).toEqual([{ name: "grep", tokens: estimateToolSchemaTokens(tools as never, tokenizer) }]);
+		expect(full[0]!.tokens).toBeGreaterThan(prunedWireTokens);
+
+		prune = true;
+		expect(computeContextUsageDetails(session).tools).toEqual([{ name: "grep", tokens: prunedWireTokens }]);
+	});
+
 	it("counts the pruned wire specs while the agent prunes, and the full specs otherwise", () => {
 		const systemPrompt = ["You are an assistant."];
 		let prune = true;
