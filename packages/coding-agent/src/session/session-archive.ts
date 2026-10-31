@@ -1810,7 +1810,7 @@ export async function stagingResidueNote(dir: string, record: string, consequenc
 		`make it writable with \`chmod u+w\` and run the printed command again. On a read-only mount, or for a file or ` +
 		`directory marked immutable, \`chmod\` does not help: that has to be undone first. The command is not ` +
 		`failure-atomic: if it cannot take back what it did it says so, and then, as when it is killed part-way, the ` +
-		`directory it made is left and the command stops at its \`mkdir\` until that is finished by hand.`;
+		`directory it made is left and the command stops at its \`mkdir\` until step 4 is finished without it.`;
 	let example: string;
 	let afterSteps = "";
 	if (realAgentDir !== undefined && !roots.some(root => isWithin(root, realAgentDir))) {
@@ -1823,8 +1823,8 @@ export async function stagingResidueNote(dir: string, record: string, consequenc
 		example =
 			`for example \`(d=${shellQuote(aside)}; s=${shellQuote(realDir)}; c=${shellQuote(realRecord)}; kept() { echo ` +
 			`"stopped part-way and could not take back all it did: everything that left $s or $c is in $d, so nothing ` +
-			`is lost; look at all three, and once the cause is fixed finish step 4 by hand, since this command stops at ` +
-			`its mkdir while $d is there" >&2; exit 1; }; back() { rmdir "$d" || kept; echo "nothing was moved: once the ` +
+			`is lost; look at all three, and once the cause is fixed finish step 4 yourself, since this command stops ` +
+			`at its mkdir while $d is there" >&2; exit 1; }; back() { rmdir "$d" || kept; echo "nothing was moved: once the ` +
 			`cause is fixed, run this command again" >&2; exit 1; }; for p in ${sources}; do [ -w "$p" ] || { echo "$p ` +
 			`is not writable: make it writable with chmod u+w and run this command again" >&2; exit 1; }; done; ` +
 			`mkdir "$d" || exit 1; r=$(realpath "$d") || back; for t in ${checks}; do t=$(realpath "$t") || back; ` +
@@ -1835,7 +1835,7 @@ export async function stagingResidueNote(dir: string, record: string, consequenc
 			`already has its name, and the command checks first that both directories it moves out of are writable, ` +
 			`then checks the session trees again before it moves anything. A move onto another filesystem is a copy ` +
 			`and then a delete, so it can stop part-way; when the staging directory is then still whole, the command ` +
-			`deletes the partial copy it made, and it takes back the rest of what it did — or, if it cannot, says what ` +
+			`deletes the partial copy it made, and it takes back the rest of what it did or, if it cannot, says what ` +
 			`it left where`;
 		afterSteps = writable;
 	} else {
