@@ -1133,6 +1133,7 @@ export class UiHelpers {
 			// Drops deferred bash/python blocks with the old transcript, then repaints
 			// the queued-message bar from the live session queue: a mid-turn rebuild
 			// (rewind, /tree) keeps the queue, so it must stay visible and editable.
+			this.ctx.pendingShellContainer.disposeChildren();
 			this.ctx.updatePendingMessagesDisplay();
 			this.ctx.pendingBashComponents = [];
 			this.ctx.pendingPythonComponents = [];
@@ -1593,12 +1594,12 @@ export class UiHelpers {
 	/** Move pending bash components from pending area to chat */
 	flushPendingBashComponents(): void {
 		for (const component of this.ctx.pendingBashComponents) {
-			this.ctx.pendingMessagesContainer.removeChild(component);
+			this.ctx.pendingShellContainer.removeChild(component);
 			this.ctx.chatContainer.addChild(component);
 		}
 		this.ctx.pendingBashComponents = [];
 		for (const component of this.ctx.pendingPythonComponents) {
-			this.ctx.pendingMessagesContainer.removeChild(component);
+			this.ctx.pendingShellContainer.removeChild(component);
 			this.ctx.chatContainer.addChild(component);
 		}
 		this.ctx.pendingPythonComponents = [];

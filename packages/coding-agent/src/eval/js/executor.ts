@@ -27,6 +27,8 @@ export interface JsExecutorOptions {
 	idleTimeoutMs?: number;
 	onChunk?: (chunk: string) => Promise<void> | void;
 	onStatus?: (event: JsStatusEvent) => void;
+	/** Shows the user `out://` replies of the cell's bridged tool calls; absent, those calls are refused. */
+	onReply?: (text: string) => void;
 	signal?: AbortSignal;
 	sessionId: string;
 	/** Logical owner identifier; scopes retained-worker cleanup. */
@@ -176,6 +178,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			timeoutMs: runtimeTimeoutMs ?? options.idleTimeoutMs,
 			runState: {
 				signal,
+				onReply: options.onReply,
 				onText: chunk => outputSink.push(chunk),
 				onDisplay: output => {
 					if (output.type === "status") {

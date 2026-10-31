@@ -167,6 +167,85 @@ describe("OAuth refresh budget", () => {
 		hung.reject(new Error("done"));
 	});
 
+	test("closing auth storage mid-exchange still saves the rotated token and refuses new refreshes", async () => {
+		if (!store) throw new Error("test setup failed");
+		const authStorage = new AuthStorage(store, {});
+		await authStorage.credentials.set(PROVIDER, [{ type: "oauth", access: "access-r0", refresh: "r0", expires: 0 }]);
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const refresh = authStorage.oauth.refreshStored(PROVIDER, {
+			credentialFromRow: row => row,
+			refreshTimeoutMs: 1_000,
+			refresh: async () => {
+				started.resolve();
+				await release.promise;
+				return { access: "access-r1", refresh: "r1", expires: Date.now() + 3_600_000 };
+			},
+		});
+		await started.promise;
+		authStorage.close();
+		await expect(
+			authStorage.oauth.refreshStored(PROVIDER, {
+				credentialFromRow: row => row,
+				forceRefresh: true,
+				refresh: async () => {
+					throw new Error("a closed auth storage must not start an exchange");
+				},
+			}),
+		).rejects.toMatchObject({ message: "OAuth refresh stopped during shutdown" });
+		release.resolve();
+		await expect(refresh).resolves.toMatchObject({ refreshed: true, credential: { refresh: "r1" } });
+
+		const reopened = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		try {
+			const [row] = reopened.listAuthCredentials(PROVIDER);
+			expect(row?.credential).toMatchObject({ type: "oauth", refresh: "r1" });
+		} finally {
+			reopened.close();
+		}
+	});
+
+	test("closing auth storage mid-refresh on a store without leases still saves the rotated token", async () => {
+		if (!store) throw new Error("test setup failed");
+		const sqlite = store;
+		// A store without the durable lease concern refreshes outside `refreshStored`.
+		const leaseless = new Proxy(sqlite, {
+			get(target, key) {
+				if (typeof key === "string" && key.endsWith("RefreshLease")) return undefined;
+				if (key === "getCredentialRefreshLeaseExpiresAt") return undefined;
+				const value: unknown = Reflect.get(target, key, target);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const authStorage = new AuthStorage(leaseless, {
+			refreshOAuthCredential: async () => {
+				started.resolve();
+				await release.promise;
+				return { access: "access-r1", refresh: "r1", expires: Date.now() + 3_600_000 };
+			},
+		});
+		await authStorage.credentials.set(PROVIDER, [{ type: "oauth", access: "access-r0", refresh: "r0", expires: 0 }]);
+		const credentialId = sqlite.listAuthCredentials(PROVIDER)[0]!.id;
+		const refresh = authStorage.oauth.refresh(credentialId);
+		await started.promise;
+		authStorage.close();
+		await expect(authStorage.oauth.refresh(credentialId)).rejects.toMatchObject({
+			message: "OAuth refresh stopped during shutdown",
+		});
+		release.resolve();
+		await refresh;
+
+		const reopened = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		try {
+			const [row] = reopened.listAuthCredentials(PROVIDER);
+			expect(row?.credential).toMatchObject({ type: "oauth", refresh: "r1" });
+		} finally {
+			reopened.close();
+		}
+	});
+
 	test("a credential removed while the exchange ran is not restored to the pool", async () => {
 		if (!store) throw new Error("test setup failed");
 		const authStorage = new AuthStorage(store, {});
