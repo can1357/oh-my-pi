@@ -282,7 +282,12 @@ interface UserPolicy {
  */
 const warnedEntries = new WeakMap<object, Set<string>>();
 
-function warnEntryOnce(userConfig: Record<string, unknown>, key: string, message: string, context: object): void {
+function warnEntryOnce(
+	userConfig: Record<string, unknown>,
+	key: string,
+	message: string,
+	context: Record<string, unknown>,
+): void {
 	let warned = warnedEntries.get(userConfig);
 	if (!warned) {
 		warned = new Set();
