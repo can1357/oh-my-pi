@@ -10,6 +10,8 @@ import {
 	looksLikeBase64Blob,
 	parseDataUri,
 	sanitizeContent,
+	sanitizeMemoryRow,
+	sanitizeTimestamp,
 	scrubLiveCredentials,
 	shannonEntropy,
 	storeBlob,

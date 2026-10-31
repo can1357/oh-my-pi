@@ -1,6 +1,6 @@
 /**
- * Overlay chrome for `describe()`: root cards, key-hint footers, selectable
- * lists and annotation callouts.
+ * Overlay chrome for `describe()`: root cards, key-hint footers, buttons and
+ * segmented controls, selectable lists and annotation callouts.
  *
  * The overlay frame itself (glass, ring, placement) is the terminal's: the
  * engine wraps every overlay-stack component in an `overlay` node. An overlay
@@ -9,8 +9,9 @@
 import type { TspProps, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import { formatTooltipKey, type KeyName } from "../key-hint-format";
 import { getKeybindings, type Keybinding } from "../keybindings";
-import { card, kbd, list, node, row, span, text } from "./describe";
+import { card, kbd, keyNames, list, node, row, span, text } from "./describe";
 import type { NativeChild, NativeNode } from "./node";
+import { nativeButtons } from "./state";
 
 /** Below this many columns a centered sheet fills the pane instead of floating with margins. */
 export const NARROW_SHEET_COLS = 100;
@@ -96,29 +97,68 @@ export interface ActionButtonOptions {
 	readonly title?: string;
 	/** Target of an `open` action (URL or `file://` path). */
 	readonly href?: string;
+	/** Why the action can't run now: the button dims and a click sends nothing. */
+	readonly disabled?: string;
+	/** The button's work is running: a spinner leads the label. */
+	readonly busy?: boolean;
+	/** Icon beside the label (before it on a `button` node, after it on a row). */
+	readonly icon?: string;
 }
 
 /**
  * A native button (role `omp.btn`): a label plus an optional keycap. A click
  * sends `act` back as an `action` event (or runs a terminal-local `open`/`copy`),
  * which the component routes to the same code path as the key.
+ *
+ * A terminal that draws the `button` kind ({@link nativeButtons}) gets one
+ * (tone `accent` → variant `primary`, `error` → `danger`, `disabled` with its
+ * reason as the tooltip); older ones get the row their stylesheets draw by
+ * role. Both keep the role and tone the omp sheets' context rules key on; a
+ * disabled button's tone is `muted`.
  */
 export function actionButton(label: string, act: string, options: ActionButtonOptions = {}): NativeNode {
-	const children: NativeChild[] = [text(label)];
-	if (options.keys) children.push(kbd(options.keys));
+	const { keys, href, disabled, busy, icon } = options;
+	const title = options.title ?? (keys ? `${label}  ${formatTooltipKey(keys)}` : label);
+	const tone = disabled === undefined ? options.tone : "muted";
+	const key = options.key ?? act;
+	if (nativeButtons()) {
+		return node(
+			"button",
+			{
+				role: "omp.btn",
+				text: label,
+				actions: { click: act },
+				title,
+				...(keys ? { keys: keyNames(keys) } : {}),
+				...(icon ? { icon } : {}),
+				...(tone === "accent" ? { variant: "primary" } : tone === "error" ? { variant: "danger" } : {}),
+				...(tone ? { tone } : {}),
+				...(disabled !== undefined ? { disabled: disabled || true } : {}),
+				...(busy ? { busy } : {}),
+				...(href ? { href } : {}),
+			},
+			undefined,
+			key,
+		);
+	}
+	const children: NativeChild[] = [];
+	if (busy) children.push(node("spinner", { style: "dots" }));
+	children.push(text(label));
+	if (icon) children.push(node("icon", { name: icon }, undefined, "icon"));
+	if (keys) children.push(kbd(keys));
 	return node(
 		"row",
 		{
 			role: "omp.btn",
 			gap: "xs",
 			align: "center",
-			actions: { click: act },
-			title: options.title ?? (options.keys ? `${label}  ${formatTooltipKey(options.keys)}` : label),
-			...(options.tone ? { tone: options.tone } : {}),
-			...(options.href ? { href: options.href } : {}),
+			...(disabled === undefined ? { actions: { click: act } } : {}),
+			title,
+			...(tone ? { tone } : {}),
+			...(href ? { href } : {}),
 		},
 		children,
-		options.key ?? act,
+		key,
 	);
 }
 
@@ -127,12 +167,80 @@ export function actionButton(label: string, act: string, options: ActionButtonOp
  * `act` (default `close`), which the component routes to its Esc path.
  */
 export function escCloseButton(act = "close", key = "esc-close"): NativeNode {
-	return node(
-		"row",
-		{ role: "omp.btn", align: "center", actions: { click: act }, title: `Close  ${formatTooltipKey("escape")}` },
-		[kbd("escape")],
-		key,
-	);
+	const title = `Close  ${formatTooltipKey("escape")}`;
+	if (nativeButtons()) {
+		return node(
+			"button",
+			{ role: "omp.btn", keys: ["escape"], actions: { click: act }, title, aria: "Close" },
+			undefined,
+			key,
+		);
+	}
+	return node("row", { role: "omp.btn", align: "center", actions: { click: act }, title }, [kbd("escape")], key);
+}
+
+/** Options of an {@link iconButton}. */
+export interface IconButtonOptions {
+	/** Sibling identity key; unkeyed buttons take their position. */
+	readonly key?: string;
+	/** Accessible name; defaults to the title. */
+	readonly aria?: string;
+	/** A toggle that is on (role `omp.app.ibtn.set`). */
+	readonly on?: boolean;
+}
+
+/**
+ * A quiet icon-only button (role `omp.app.ibtn`, the kit's icon button) for an
+ * app head or toolbar: a `button` node where the terminal draws one
+ * ({@link nativeButtons}), else an `icon` with a click action.
+ */
+export function iconButton(name: string, act: string, title: string, options: IconButtonOptions = {}): NativeNode {
+	const role = options.on ? "omp.app.ibtn.set" : "omp.app.ibtn";
+	const aria = options.aria ?? title;
+	if (nativeButtons()) {
+		return node(
+			"button",
+			{
+				role,
+				variant: "quiet",
+				icon: name,
+				title,
+				aria,
+				actions: { click: act },
+				...(options.on ? { on: true } : {}),
+			},
+			undefined,
+			options.key,
+		);
+	}
+	return node("icon", { name, role, title, aria, actions: { click: act } }, undefined, options.key);
+}
+
+/**
+ * A quiet text button (role `omp.app.qbtn`, the kit's quiet button) for a
+ * section head or toolbar, keyed by its action: a small quiet `button` where
+ * the terminal draws one ({@link nativeButtons}), else a row.
+ */
+export function quietButton(label: string, act: string, title: string): NativeNode {
+	if (nativeButtons()) {
+		return node(
+			"button",
+			{ role: "omp.app.qbtn", variant: "quiet", size: "sm", text: label, actions: { click: act }, title },
+			undefined,
+			act,
+		);
+	}
+	return node("row", { role: "omp.app.qbtn", actions: { click: act }, title }, [text(label)], act);
+}
+
+/**
+ * A segmented control: `tabs` drawn as a well with a raised thumb on the
+ * active tab. A terminal that draws the `button` kind ({@link nativeButtons})
+ * draws `variant: "segmented"` too; older ones restyle the tabs by role
+ * (`omp.app.seg`) or parent.
+ */
+export function segmentedTabs(p: TspProps<"tabs">, key: string): NativeNode {
+	return node("tabs", nativeButtons() ? { ...p, variant: "segmented" } : p, undefined, key);
 }
 
 /** A row of {@link actionButton}s (role `omp.actions`); `null` entries become the spacer that end-aligns what follows. */

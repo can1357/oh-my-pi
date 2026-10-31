@@ -105,10 +105,11 @@ function decodeWithCharset(rawBytes: Uint8Array | Buffer, charset: string | null
 		const DecoderConstructor = TextDecoder as unknown as new (
 			label?: string,
 			options?: { fatal?: boolean },
-		) => { decode(input?: BufferSource): string };
+		) => { decode(input?: Uint8Array): string };
 		return new DecoderConstructor(lower, { fatal: false }).decode(rawBytes);
 	} catch {
-		const scrubbed = scrubLiveCredentials(text);
+		const fallbackText = Buffer.from(rawBytes).toString("utf8");
+		const scrubbed = scrubLiveCredentials(fallbackText);
 		if (scrubbed.matchedTypes.length > 0) {
 			return scrubbed.content;
 		}
@@ -728,8 +729,8 @@ export function sanitizeTimestamp(ts: string | null | undefined, fallback?: stri
 	}
 	return new Date(parsed).toISOString();
 }
-export function sanitizeMemoryRow<T extends Record<string, unknown>>(row: T): T {
-	const out: Record<string, unknown> = { ...row };
+export function sanitizeMemoryRow<T extends object>(row: T): T {
+	const out: Record<string, unknown> = { ...(row as Record<string, unknown>) };
 	if (typeof out.content === "string") {
 		out.content = sanitizeTextField(out.content);
 	}
