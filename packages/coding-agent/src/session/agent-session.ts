@@ -483,7 +483,11 @@ import type { ShakeMode, ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
-import { superviseUserSteering, type UserSteeringSupersede } from "./user-steering-supersede";
+import {
+	superviseUserSteering,
+	type UserSteeringSupersede,
+	type UserSteeringSupersedeMode,
+} from "./user-steering-supersede";
 import { YieldQueue } from "./yield-queue";
 
 export * from "./agent-session-events";
@@ -9685,14 +9689,21 @@ export class AgentSession implements SettingsScope {
 	 * Watch for a person's steer while a tool's dialog waits on them, e.g. `ask`.
 	 * See {@link superviseUserSteering}; dispose the result when the dialog ends.
 	 */
-	superviseUserSteering(loopSteeringSignal: AbortSignal | undefined): UserSteeringSupersede {
-		return superviseUserSteering(loopSteeringSignal, {
-			agent: this.agent,
-			steeringArrivalSignal: () => this.#steeringArrivalSignal(),
-			steeringArrivalSeq: () => this.#steeringArrivalSeq(),
-			steeringArrivalAdmitted: since => this.#steeringArrivalAdmitted(since),
-			steeringArrivalRelease: seq => this.#steeringArrivalRelease(seq),
-		});
+	superviseUserSteering(
+		loopSteeringSignal: AbortSignal | undefined,
+		mode?: UserSteeringSupersedeMode,
+	): UserSteeringSupersede {
+		return superviseUserSteering(
+			loopSteeringSignal,
+			{
+				agent: this.agent,
+				steeringArrivalSignal: () => this.#steeringArrivalSignal(),
+				steeringArrivalSeq: () => this.#steeringArrivalSeq(),
+				steeringArrivalAdmitted: since => this.#steeringArrivalAdmitted(since),
+				steeringArrivalRelease: seq => this.#steeringArrivalRelease(seq),
+			},
+			mode,
+		);
 	}
 
 	/** Current {@link #steeringArrivalController} signal; see that field. */
@@ -10046,6 +10057,15 @@ export class AgentSession implements SettingsScope {
 			for (const notice of prependMessages) this.agent.steer(notice);
 			if (descriptionNotice) this.agent.steer(descriptionNotice);
 			this.agent.steer(normalizedAppMessage);
+			// A person's custom prompt (a typed `/skill:`, a collab guest's prompt) is the person
+			// speaking: open dialogs watching for that hear it, as they do a plain typed steer.
+			if (isUserAuthoredQueuedMessage(normalizedAppMessage)) {
+				this.#fireSteeringArrival([
+					...prependMessages,
+					...(descriptionNotice ? [descriptionNotice] : []),
+					normalizedAppMessage,
+				]);
+			}
 		}
 		onPromptQueued?.([...prependMessages, ...(descriptionNotice ? [descriptionNotice] : []), normalizedAppMessage]);
 		onPromptAdmitted?.();
@@ -10185,6 +10205,7 @@ export class AgentSession implements SettingsScope {
 				this.agent.followUp(normalizedAppMessage);
 			} else {
 				this.agent.steer(normalizedAppMessage);
+				if (isUserAuthoredQueuedMessage(normalizedAppMessage)) this.#fireSteeringArrival([normalizedAppMessage]);
 			}
 			this.#scheduleIdleQueueDrain();
 			return false;

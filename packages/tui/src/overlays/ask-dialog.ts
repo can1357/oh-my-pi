@@ -60,6 +60,12 @@ export interface ExtensionAskDialogResultItem {
 export interface ExtensionAskDialogSubmitResult {
 	kind: "submit";
 	results: ExtensionAskDialogResultItem[];
+	/**
+	 * Set when the host closed the dialog before the person submitted (a message from them
+	 * superseded it, `ExtensionUIDialogOptions.interrupt`): `results` hold what they had
+	 * entered, and unanswered questions have no selection and no custom input.
+	 */
+	interrupted?: boolean;
 }
 
 /** Request to discuss the question instead of answering it. */
@@ -1790,6 +1796,19 @@ export class AskDialogComponent implements Component {
 		this.#countdown?.dispose();
 		this.#stopRingTick();
 		this.callbacks.onCancel();
+	}
+
+	/**
+	 * Close the dialog and submit what the person has entered so far, marked
+	 * `interrupted`: a message from them superseded the question, and their
+	 * answers must not be lost with it.
+	 */
+	interrupt(): void {
+		if (this.#closed) return;
+		this.#closed = true;
+		this.#countdown?.dispose();
+		this.#stopRingTick();
+		this.callbacks.onSubmit({ kind: "submit", results: this.#buildResults(), interrupted: true });
 	}
 
 	#buildResults(): ExtensionAskDialogResultItem[] {

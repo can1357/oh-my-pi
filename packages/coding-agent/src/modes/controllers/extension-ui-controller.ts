@@ -938,14 +938,30 @@ export class ExtensionUiController {
 					inputGuard,
 				},
 			);
+			// A message from the person supersedes the ask: hand back what they entered,
+			// including a custom answer or note still being typed, instead of dropping it.
+			const interrupt = dialogOptions?.interrupt;
+			const onInterrupt = (): void => {
+				if (closed) return;
+				if (promptEditor) {
+					// The prompt's answer reaches AskDialog in the next microtask (see finishPrompt).
+					promptEditor.submitDraft();
+					queueMicrotask(() => askDialog.interrupt());
+				} else {
+					askDialog.interrupt();
+				}
+			};
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(askDialog);
 			if (inputGuard) this.ctx.editorContainer.addChild(this.ctx.editor);
 			this.ctx.ui.setFocus(askDialog);
 			this.ctx.ui.requestRender();
+			if (interrupt?.aborted) queueMicrotask(onInterrupt);
+			else interrupt?.addEventListener("abort", onInterrupt, { once: true });
 
 			return () => {
 				closed = true;
+				interrupt?.removeEventListener("abort", onInterrupt);
 				askDialog?.dispose();
 				promptEditor?.dispose();
 				promptResolve?.(undefined);

@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { isUserAuthoredQueuedMessage } from "./queued-messages";
+import { isHiddenUserCompanion, isUserAuthoredQueuedMessage } from "./queued-messages";
 
 /** Session steering-arrival channel and queue access a dialog needs to watch for a person's steer. */
 export interface UserSteeringHost {
@@ -17,10 +17,36 @@ export interface UserSteeringHost {
 	};
 }
 
+/**
+ * Which person's steer supersedes the dialog, and which messages then go first.
+ * - `"arrivals"` (ACP permission requests): one admitted after the dialog opened; a steer
+ *   queued before the request was not written in answer to it. The superseding messages move
+ *   to the front of the queue, so the agent reads what stopped the call first (#15642).
+ * - `"pending"` (`ask`): any still queued and unread; a question shown over an unread message
+ *   from the person hides their latest input, so a second question in the same batch closes
+ *   too. Every queued person's message moves ahead of agent steering in the order they were
+ *   queued ({@link promotePersonSteering}).
+ */
+export type UserSteeringSupersedeMode = "arrivals" | "pending";
+
 /** A dialog's watch for a person's steer; dispose it when the dialog ends. */
 export interface UserSteeringSupersede extends Disposable {
 	/** Aborts when a person's steer supersedes the dialog. */
 	readonly signal: AbortSignal;
+}
+
+/**
+ * Move every queued person's message, with its hidden companions, ahead of agent-authored
+ * steering, keeping the person's messages in the order they were queued. A message that
+ * supersedes a dialog is read before an agent card that reached the batch first, but never
+ * before an earlier message from the person. Agent steering keeps its own order. Where the
+ * agent core reads a person's steering first anyway (one-at-a-time priority), this changes no
+ * delivery order, and the core's allowance for waiting agent steering does not depend on where
+ * a message sits, so moving messages cannot reset or bypass it.
+ */
+export function promotePersonSteering(agent: UserSteeringHost["agent"]): void {
+	const person = agent.peekSteeringQueue().filter(m => isUserAuthoredQueuedMessage(m) || isHiddenUserCompanion(m));
+	if (person.length > 0) agent.prioritizeSteering(person);
 }
 
 /**
@@ -32,13 +58,12 @@ export interface UserSteeringSupersede extends Disposable {
  * interrupt in this batch, not the answer to "did a person speak". An agent
  * card, a peer message or an aside can spend it first; a person's steer queued
  * after that must still supersede the dialog. The session's arrival channel
- * re-arms on every user-steering admission, so the watch reads it at each one
- * while the loop signal is down. A direct executor with no loop signal has no
- * policy to consult, and every admission counts.
+ * re-arms on every person's steer, so the watch checks again at each one while
+ * the loop signal is down. A direct executor with no loop signal has no policy
+ * to consult, and every admission counts.
  *
  * Only a person's steer supersedes: an agent-attributed steer leaves the dialog
- * open. The superseding group moves to the front of the steering queue, so the
- * agent reads what stopped the dialog before older queued steering.
+ * open, and is not moved ahead.
  *
  * Without a `host` (a tool context with no session queue), only the loop
  * signal's `"user"` reason supersedes.
@@ -46,47 +71,48 @@ export interface UserSteeringSupersede extends Disposable {
 export function superviseUserSteering(
 	loopSteeringSignal: AbortSignal | undefined,
 	host?: UserSteeringHost,
+	mode: UserSteeringSupersedeMode = "arrivals",
 ): UserSteeringSupersede {
 	const controller = new AbortController();
-	// Arrivals before the dialog opened keep their queue position.
-	const parkSeq = host?.steeringArrivalSeq();
-	const supersede = (arrived: readonly AgentMessage[]): void => {
-		if (controller.signal.aborted) return;
-		if (host && arrived.length > 0) {
-			const queued = new Set(host.agent.peekSteeringQueue());
-			const promotable = arrived.filter(message => queued.has(message));
-			if (promotable.length > 0) host.agent.prioritizeSteering(promotable);
+	// Arrivals before the dialog opened do not count in "arrivals" mode.
+	const parkSeq = host && mode === "arrivals" ? host.steeringArrivalSeq() : undefined;
+	/** Whether a person's steer supersedes the dialog now; moves the messages that go first. */
+	const supersedes = (): boolean => {
+		if (!host) return loopSteeringSignal?.reason === "user";
+		if (mode === "pending") {
+			if (!host.agent.peekSteeringQueue().some(isUserAuthoredQueuedMessage)) return false;
+			promotePersonSteering(host.agent);
+			return true;
 		}
-		controller.abort();
-	};
-	const readUserArrivals = (): readonly AgentMessage[] => {
-		if (!host || parkSeq === undefined) return [];
 		const arrived = host.steeringArrivalAdmitted(parkSeq) ?? [];
-		return arrived.some(isUserAuthoredQueuedMessage) ? arrived : [];
+		if (!arrived.some(isUserAuthoredQueuedMessage)) return false;
+		const queued = new Set(host.agent.peekSteeringQueue());
+		const promotable = arrived.filter(
+			message => queued.has(message) && (isUserAuthoredQueuedMessage(message) || isHiddenUserCompanion(message)),
+		);
+		if (promotable.length > 0) host.agent.prioritizeSteering(promotable);
+		return true;
 	};
-	const onLoopSteer = (): void => {
-		const arrived = readUserArrivals();
-		if (arrived.length > 0 || loopSteeringSignal?.reason === "user") supersede(arrived);
+	const check = (): void => {
+		if (controller.signal.aborted) return;
+		if (loopSteeringSignal && !loopSteeringSignal.aborted) return;
+		if (supersedes()) controller.abort();
 	};
 	let arrivalSignal = host?.steeringArrivalSignal();
 	const onArrival = (): void => {
-		if (!loopSteeringSignal || loopSteeringSignal.aborted) {
-			const arrived = readUserArrivals();
-			if (arrived.length > 0) supersede(arrived);
-		}
+		check();
 		if (controller.signal.aborted || !host) return;
 		// The channel replaces its signal after each admission: follow it.
 		arrivalSignal = host.steeringArrivalSignal();
 		arrivalSignal.addEventListener("abort", onArrival, { once: true });
 	};
-	if (loopSteeringSignal?.aborted) onLoopSteer();
-	else loopSteeringSignal?.addEventListener("abort", onLoopSteer, { once: true });
-	if (arrivalSignal?.aborted) onArrival();
-	else arrivalSignal?.addEventListener("abort", onArrival, { once: true });
+	loopSteeringSignal?.addEventListener("abort", check, { once: true });
+	arrivalSignal?.addEventListener("abort", onArrival, { once: true });
+	if (loopSteeringSignal?.aborted || (!loopSteeringSignal && mode === "pending")) check();
 	return {
 		signal: controller.signal,
 		[Symbol.dispose]: () => {
-			loopSteeringSignal?.removeEventListener("abort", onLoopSteer);
+			loopSteeringSignal?.removeEventListener("abort", check);
 			arrivalSignal?.removeEventListener("abort", onArrival);
 			if (parkSeq !== undefined) host?.steeringArrivalRelease(parkSeq);
 		},

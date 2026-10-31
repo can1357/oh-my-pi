@@ -82,7 +82,7 @@
    - Calls `context.abort()` on headless use or user cancellation.
 - Background work / cancellation
    - Wraps UI waits in `untilAborted(...)` so abort signals interrupt pending dialogs.
-   - A message the person queues while the dialog is open closes it with `ToolAbortError("Ask interrupted by message")` and moves to the front of the steering queue, so the agent reads it first. This holds when an agent card, peer message or aside reached the batch first. Agent-authored steering keeps the dialog open, and so does `interruptMode: "wait"` (the message is read after the dialog).
+   - A message the person queues while a question is open closes it, and the person's queued messages move ahead of agent-authored steering in the order they were sent, so the agent reads them first. This holds when an agent card, peer message or aside reached the batch first. While that message is unread, a later `ask` in the same batch closes without showing. Answers already given are returned with the questions left open named; a custom answer being typed is not cut off (the TUI's rich dialog hands back the typed text). With no answer given the result is `ToolAbortError("Ask interrupted by message")`. Agent-authored steering keeps the question open, and so does `interruptMode: "wait"` (the message is read after the dialog).
 
 ## Limits & Caps
 

@@ -1229,6 +1229,110 @@ it("keeps the dialog open when an agent-authored steer queues mid-dialog", async
 	permissionPending.resolve({ outcome: "cancelled" });
 });
 
+it("keeps the dialog open for an agent-attributed steer that fires the arrival channel, then yields to a person's steer", async () => {
+	const deleteTool = makeFakeTool("delete");
+	const permissionPending = Promise.withResolvers<ClientBridgePermissionOutcome>();
+	const permissionOpened = Promise.withResolvers<void>();
+	let wireCancel: AbortSignal | undefined;
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		async requestPermission(_toolCall, _options, _signal, steeringSignal) {
+			wireCancel = steeringSignal;
+			permissionOpened.resolve();
+			return await permissionPending.promise;
+		},
+	};
+	const loopSteering = new AbortController();
+	session = await createSessionWithMockModel(
+		[deleteTool as AgentTool],
+		bridge,
+		[
+			{ content: [{ type: "toolCall", id: "call-delete-a", name: "delete", arguments: { path: "/tmp/a.ts" } }] },
+			{ content: ["read the person"] },
+			{ content: ["read the notice"] },
+		],
+		{ loopSteeringSignal: loopSteering.signal },
+	);
+
+	let promptSettled = false;
+	const promptDone = session.prompt("delete something").then(() => {
+		promptSettled = true;
+	});
+	await permissionOpened.promise;
+
+	// `sendUserMessage` with agent attribution goes through the arrival channel, unlike `agent.steer`.
+	await session.sendUserMessage("parent budget notice", { deliverAs: "steer", attribution: "agent" });
+	loopSteering.abort("system");
+	for (let i = 0; i < 8; i++) await new Promise<void>(resolve => setImmediate(resolve));
+	expect(promptSettled).toBe(false);
+	expect(wireCancel?.aborted).toBe(false);
+
+	await session.prompt("why this deletion?", { streamingBehavior: "steer" });
+	expect(wireCancel?.aborted).toBe(true);
+	await promptDone;
+	await session.waitForIdle();
+	expect(deleteTool.executeCalls).toBe(0);
+	const messages = session.agent.state.messages;
+	const indexOf = (needle: string) =>
+		messages.findIndex(message => message.role === "user" && JSON.stringify(message.content).includes(needle));
+	// The person's message is read first; the agent-attributed notice is not moved ahead with it.
+	expect(indexOf("why this deletion?")).toBeGreaterThanOrEqual(0);
+	expect(indexOf("parent budget notice")).toBeGreaterThan(indexOf("why this deletion?"));
+	permissionPending.resolve({ outcome: "cancelled" });
+});
+
+it("keeps the dialog open for a person's steer queued before the dialog opened", async () => {
+	const deleteTool = makeFakeTool("delete");
+	const permissionPending = Promise.withResolvers<ClientBridgePermissionOutcome>();
+	const permissionOpened = Promise.withResolvers<void>();
+	let wireCancel: AbortSignal | undefined;
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		async requestPermission(_toolCall, _options, _signal, steeringSignal) {
+			wireCancel = steeringSignal;
+			permissionOpened.resolve();
+			return await permissionPending.promise;
+		},
+	};
+	const loopSteering = new AbortController();
+	const turnStreamStarted = Promise.withResolvers<void>();
+	const releaseTurnStream = Promise.withResolvers<void>();
+	session = await createSessionWithMockModel(
+		[deleteTool as AgentTool],
+		bridge,
+		[
+			async () => {
+				turnStreamStarted.resolve();
+				await releaseTurnStream.promise;
+				return {
+					content: [{ type: "toolCall", id: "call-delete-b", name: "delete", arguments: { path: "/tmp/b.ts" } }],
+				};
+			},
+			{ content: ["read the earlier message"] },
+		],
+		{ loopSteeringSignal: loopSteering.signal },
+	);
+
+	let promptSettled = false;
+	const promptDone = session.prompt("delete something").then(() => {
+		promptSettled = true;
+	});
+	await withTimeout(turnStreamStarted.promise, 5_000, "Held turn stream never started");
+	// The person speaks before the permission request exists, so it was not written in answer to it.
+	expect(await session.joinActiveTurn("an earlier thought")).toBe(true);
+	releaseTurnStream.resolve();
+	await permissionOpened.promise;
+	loopSteering.abort("user");
+	for (let i = 0; i < 8; i++) await new Promise<void>(resolve => setImmediate(resolve));
+	expect(promptSettled).toBe(false);
+	expect(wireCancel?.aborted).toBe(false);
+
+	permissionPending.resolve({ outcome: "cancelled" });
+	await promptDone;
+	await session.waitForIdle();
+	expect(deleteTool.executeCalls).toBe(0);
+});
+
 it("delivers the steer that supersedes a permission dialog ahead of older queued steers", async () => {
 	const deleteTool = makeFakeTool("delete");
 	const permissionPending = Promise.withResolvers<ClientBridgePermissionOutcome>();

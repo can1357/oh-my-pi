@@ -184,6 +184,8 @@ interface SelectionResult {
 	timedOut: boolean;
 	navigation?: "back" | "forward";
 	cancelled?: boolean;
+	/** A message from the person superseded the question; the fields hold what they had entered. */
+	interrupted?: boolean;
 }
 
 interface NavigationControls {
@@ -194,7 +196,13 @@ interface NavigationControls {
 interface AskSingleQuestionOptions {
 	recommended?: number;
 	timeout?: number;
+	/** Run abort: closes the question and throws. */
 	signal?: AbortSignal;
+	/**
+	 * A message from the person: closes an option picker, returning `interrupted` with what was
+	 * entered. A custom answer being typed is not cut off; the next picker returns instead.
+	 */
+	interrupt?: AbortSignal;
 	initialSelection?: Pick<SelectionResult, "selectedOptions" | "customInput" | "note">;
 	navigation?: NavigationControls;
 }
@@ -235,7 +243,7 @@ async function askSingleQuestion(
 	multi: boolean,
 	options: AskSingleQuestionOptions = {},
 ): Promise<SelectionResult> {
-	const { recommended, timeout, signal, initialSelection, navigation } = options;
+	const { recommended, timeout, signal, interrupt, initialSelection, navigation } = options;
 	const doneLabel = getDoneOptionLabel();
 	let selectedOptions = [...(initialSelection?.selectedOptions ?? [])];
 	let customInput = initialSelection?.customInput;
@@ -247,7 +255,12 @@ async function askSingleQuestion(
 		optionsToShow: ExtensionUISelectItem[],
 		initialIndex?: number,
 		marker?: { selectionMarker: "radio" | "checkbox"; checkedIndices?: readonly number[]; markableCount: number },
-	): Promise<{ choice: string | undefined; timedOut: boolean; navigation?: "back" | "forward" }> => {
+	): Promise<{
+		choice: string | undefined;
+		timedOut: boolean;
+		navigation?: "back" | "forward";
+		interrupted?: boolean;
+	}> => {
 		let timeoutTriggered = false;
 		const onTimeout = () => {
 			timeoutTriggered = true;
@@ -257,10 +270,10 @@ async function askSingleQuestion(
 		const helpText = `${editorKeys("tui.select.up", "tui.select.down")} navigate  ${formatKeyHint("enter")} select  ${questionHint}${editorKey("tui.select.cancel")} cancel`;
 		const timeoutMs = typeof timeout === "number" && timeout > 0 ? timeout : undefined;
 		const timeoutController = timeoutMs === undefined ? undefined : new AbortController();
-		const dialogSignal =
-			signal && timeoutController
-				? AbortSignal.any([signal, timeoutController.signal])
-				: (timeoutController?.signal ?? signal);
+		const closeSignals = [signal, interrupt, timeoutController?.signal].filter(
+			(candidate): candidate is AbortSignal => candidate !== undefined,
+		);
+		const dialogSignal = closeSignals.length > 1 ? AbortSignal.any(closeSignals) : closeSignals[0];
 		let timeoutId: NodeJS.Timeout | undefined;
 		let timeoutStartedMs = Date.now();
 		const armFallbackTimeout = (durationMs: number) => {
@@ -316,6 +329,9 @@ async function askSingleQuestion(
 			if (timeoutTriggered && error instanceof Error && error.name === "AbortError") {
 				return { choice: undefined, timedOut: true, navigation: navigationAction };
 			}
+			if (interrupt?.aborted && !signal?.aborted && error instanceof Error && error.name === "AbortError") {
+				return { choice: undefined, timedOut: false, interrupted: true };
+			}
 			throw error;
 		} finally {
 			clearTimeout(timeoutId);
@@ -356,11 +372,15 @@ async function askSingleQuestion(
 				choice,
 				timedOut: selectTimedOut,
 				navigation: arrowNavigation,
+				interrupted,
 			} = await selectOption(`${prefix}${promptWithProgress}`, opts, cursorIndex, {
 				selectionMarker: "checkbox",
 				checkedIndices,
 				markableCount: questionOptions.length,
 			});
+			if (interrupted) {
+				return { selectedOptions: Array.from(selected), customInput, note, timedOut, interrupted: true };
+			}
 
 			if (arrowNavigation) {
 				return { selectedOptions: Array.from(selected), customInput, note, timedOut, navigation: arrowNavigation };
@@ -433,10 +453,12 @@ async function askSingleQuestion(
 				choice,
 				timedOut: selectTimedOut,
 				navigation: arrowNavigation,
+				interrupted,
 			} = await selectOption(promptWithProgress, optionsWithNavigation, initialIndex, {
 				selectionMarker: "radio",
 				markableCount: displayOptions.length,
 			});
+			if (interrupted) return { selectedOptions, customInput, note, timedOut: false, interrupted: true };
 			timedOut = selectTimedOut;
 
 			if (arrowNavigation) {
@@ -496,6 +518,63 @@ function formatQuestionResult(result: QuestionResult): string {
 	const answer = custom === undefined ? picked : `${picked} + ${custom}`;
 	const timeoutSuffix = result.timedOut ? " (auto-selected after timeout)" : "";
 	return `${result.id}: ${answer}${timeoutSuffix}${noteSuffix}`;
+}
+
+function isAnswered(result: QuestionResult): boolean {
+	return result.selectedOptions.length > 0 || result.customInput !== undefined;
+}
+
+/**
+ * Result for an ask a message from the person superseded: the answers they gave before it,
+ * so their work is not lost, and the questions left open. With no answer given it is the
+ * "Ask interrupted by message" error, as before.
+ */
+function interruptedAnswers(
+	results: readonly QuestionResult[],
+	abortError: () => ToolAbortError,
+	imageBlocks: (ImageContent | TextContent)[] = [],
+): AgentToolResult<AskToolDetails> {
+	const answered = results.filter(isAnswered);
+	if (answered.length === 0) throw abortError();
+	const open = results.filter(result => !isAnswered(result)).map(result => result.id);
+	const lines = [
+		"The user sent a message before finishing these questions; it follows this result.",
+		`Answers given:\n${answered.map(formatQuestionResult).join("\n")}`,
+	];
+	if (open.length > 0) lines.push(`Not answered: ${open.join(", ")}`);
+	return {
+		content: [{ type: "text" as const, text: lines.join("\n") }, ...imageBlocks],
+		details: { results: answered },
+	};
+}
+
+const HOST_IGNORED_INTERRUPT = Symbol("host ignored interrupt");
+
+/**
+ * Await a dialog that a message from the person may supersede. A host that honors
+ * `interrupt` settles at once with what was entered; one that does not is closed through
+ * `close` once a macrotask passes after the interrupt, and this resolves `undefined`.
+ */
+async function awaitSupersedable<T>(
+	dialog: Promise<T>,
+	interrupt: AbortSignal,
+	close: AbortController,
+): Promise<T | undefined> {
+	const { promise: ignored, resolve } = Promise.withResolvers<typeof HOST_IGNORED_INTERRUPT>();
+	const onInterrupt = (): void => {
+		setImmediate(() => resolve(HOST_IGNORED_INTERRUPT));
+	};
+	if (interrupt.aborted) onInterrupt();
+	else interrupt.addEventListener("abort", onInterrupt, { once: true });
+	try {
+		const raced = await Promise.race([dialog, ignored]);
+		if (raced !== HOST_IGNORED_INTERRUPT) return raced;
+		dialog.catch(() => {});
+		close.abort();
+		return undefined;
+	} finally {
+		interrupt.removeEventListener("abort", onInterrupt);
+	}
 }
 
 function formatSingleQuestionResponse(result: {
@@ -758,13 +837,14 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		const settingsTimeout = askTimeoutMs(this.session.settings) ?? null;
 		const timeout = planModeEnabled ? null : settingsTimeout;
 		// A message the person queues closes the dialog without cancelling the turn: they moved on, and the
-		// message reaches the agent first at the batch boundary. Peer IRC, asides, agent cards and finished
-		// background jobs are not the person's answer, so the dialog stays open for them, and a person's
-		// message queued after one of them still closes it.
+		// message reaches the agent first at the batch boundary. Any of their messages still unread counts, so a
+		// second ask in the same batch closes too instead of hiding that message. Peer IRC, asides, agent cards and
+		// finished background jobs are not the person's answer and leave the dialog open. Answers the person already
+		// gave are returned, not dropped.
 		const loopSteeringSignal = context?.toolCall?.steeringSignal;
 		using userSteering =
-			this.session.superviseUserSteering?.(loopSteeringSignal) ?? superviseUserSteering(loopSteeringSignal);
-		const dialogSignal = signal ? AbortSignal.any([signal, userSteering.signal]) : userSteering.signal;
+			this.session.superviseUserSteering?.(loopSteeringSignal, "pending") ??
+			superviseUserSteering(loopSteeringSignal);
 		const abortError = (): ToolAbortError =>
 			new ToolAbortError(userSteering.signal.aborted ? "Ask interrupted by message" : "Ask input was cancelled");
 		const cancelAsk = (): never => {
@@ -772,6 +852,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			context.abort();
 			throw new ToolAbortError("Ask tool was cancelled by the user");
 		};
+		if (userSteering.signal.aborted) throw abortError();
 
 		// Send notification if waiting and not suppressed
 		this.#sendAskNotification();
@@ -793,6 +874,10 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		const richAskDialog = extensionUi.askDialog;
 		if (richAskDialog) {
 			try {
+				// A person's message closes the dialog through `interrupt`, so a host that supports it
+				// hands back what was entered; one that does not is closed with `closeDialog`.
+				const closeDialog = new AbortController();
+				const richSignal = signal ? AbortSignal.any([signal, closeDialog.signal]) : closeDialog.signal;
 				const showRichDialog = () =>
 					richAskDialog(
 						params.questions.map(q => ({
@@ -807,9 +892,18 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 							...(q.multi !== undefined ? { multi: q.multi } : {}),
 							...(q.recommended !== undefined ? { recommended: q.recommended } : {}),
 						})),
-						{ timeout: timeout ?? undefined, signal: dialogSignal, acceptImages: true },
+						{
+							timeout: timeout ?? undefined,
+							signal: richSignal,
+							interrupt: userSteering.signal,
+							acceptImages: true,
+						},
 					);
-				const richResult = await untilAborted(dialogSignal, showRichDialog);
+				const richResult = await awaitSupersedable(
+					untilAborted(richSignal, showRichDialog),
+					userSteering.signal,
+					closeDialog,
+				);
 				if (!richResult) return cancelAsk();
 				if (richResult.kind === "chat") {
 					const questionText = params.questions.map(q => q.question).join("\n");
@@ -856,6 +950,9 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 						noteOption: result.noteOption,
 						timedOut: result.timedOut,
 					});
+				}
+				if (richResult.interrupted) {
+					return interruptedAnswers(results, abortError, await this.#answerImageBlocks(answerImages, signal));
 				}
 				if (params.questions.length === 1) {
 					const result = results[0];
@@ -904,20 +1001,16 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			}));
 			const optionLabels = questionOptions.map(getAskOptionLabel);
 			try {
-				const { selectedOptions, customInput, note, navigation, cancelled, timedOut } = await askSingleQuestion(
-					ui,
-					q.question,
-					questionOptions,
-					q.multi ?? false,
-					{
+				const { selectedOptions, customInput, note, navigation, cancelled, timedOut, interrupted } =
+					await askSingleQuestion(ui, q.question, questionOptions, q.multi ?? false, {
 						recommended: q.recommended,
 						timeout: timeout ?? undefined,
-						signal: dialogSignal,
+						signal,
+						interrupt: userSteering.signal,
 						initialSelection: options?.previous,
 						navigation: options?.navigation,
-					},
-				);
-				return { optionLabels, selectedOptions, customInput, note, navigation, cancelled, timedOut };
+					});
+				return { optionLabels, selectedOptions, customInput, note, navigation, cancelled, timedOut, interrupted };
 			} catch (error) {
 				if (error instanceof Error && error.name === "AbortError") throw abortError();
 				throw error;
@@ -926,7 +1019,18 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 
 		if (params.questions.length === 1) {
 			const [q] = params.questions;
-			const { optionLabels, selectedOptions, customInput, note, cancelled, timedOut } = await askQuestion(q);
+			const { optionLabels, selectedOptions, customInput, note, cancelled, timedOut, interrupted } =
+				await askQuestion(q);
+			const answer: QuestionResult = {
+				id: q.id,
+				question: q.question,
+				options: optionLabels,
+				multi: q.multi ?? false,
+				selectedOptions,
+				customInput,
+				note,
+			};
+			if (interrupted) return interruptedAnswers([answer], abortError);
 
 			if (!timedOut && (cancelled || (selectedOptions.length === 0 && customInput === undefined))) cancelAsk();
 			const details: AskToolDetails = {
@@ -969,7 +1073,32 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 				navigation: navAction,
 				cancelled,
 				timedOut,
+				interrupted,
 			} = await askQuestion(q, { previous, navigation });
+
+			if (interrupted) {
+				// The person's message superseded the question: keep every answer given, this one included.
+				resultsByIndex[questionIndex] = {
+					id: q.id,
+					question: q.question,
+					options: optionLabels,
+					multi: q.multi ?? false,
+					selectedOptions,
+					customInput,
+					note,
+				};
+				const asked = params.questions.map(
+					(question, index): QuestionResult =>
+						resultsByIndex[index] ?? {
+							id: question.id,
+							question: question.question,
+							options: question.options.map(o => o.label),
+							multi: question.multi ?? false,
+							selectedOptions: [],
+						},
+				);
+				return interruptedAnswers(asked, abortError);
+			}
 
 			if (cancelled && !timedOut) cancelAsk();
 

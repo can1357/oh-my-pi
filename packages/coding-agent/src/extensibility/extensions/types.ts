@@ -206,6 +206,13 @@ export function timedOutAskDialogResult(questions: ExtensionAskDialogQuestion[])
  */
 export interface ExtensionUIDialogOptions {
 	signal?: AbortSignal;
+	/**
+	 * Aborts when the dialog should close and hand back what the person has entered so far,
+	 * because a message from them superseded it. The interactive TUI's `askDialog` then
+	 * resolves a submit result with `interrupted: true`. Hosts that do not support it ignore
+	 * it, and the caller closes their dialog with `signal`.
+	 */
+	interrupt?: AbortSignal;
 	timeout?: number;
 	/** Invoked when the UI times out while waiting for a selection/input */
 	onTimeout?: () => void;
