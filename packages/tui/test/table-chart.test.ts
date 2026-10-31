@@ -381,6 +381,20 @@ describe("analyzeTable", () => {
 			386, 1988, 7715, 17_083, 31_489,
 		]);
 	});
+
+	// Regression: a bare `ratio` of two timings stayed a measure, and a judged chart drew it as 719× less than C++.
+	it("reads a column dividing two others as restating them, never one of the terms", () => {
+		const bare = analyze(
+			"| mode | old C++ (ms) | Python (ms) | ratio | median per request |\n|---|---|---|---|---|\n| probe-best4 | 717 | 715 | 0.997 | 1.000 |\n| probe-all-heads | 1298 | 1294 | 0.997 | 1.000 |\n| call | 2320 | 2325 | 1.002 | 1.003 |\n| gen32 | 5536 | 5545 | 1.002 | 1.001 |\n| all, wall time | 10181 | 10180 | 1.000 | |",
+		);
+		// Every column is the others' quotient or product: the ratio is the one steady across workload sizes.
+		expect(bare.measures.map(column => column.header)).toEqual(["old C++ (ms)", "Python (ms)", "median per request"]);
+		// A speedup written as a factor is the ratio however much more than the timings it varies.
+		const factors = analyze(
+			"| case | Go | Zig | speedup |\n|---|---|---|---|\n| a | 80 ms | 20 ms | 4.0× |\n| b | 90 ms | 60 ms | 1.5× |\n| c | 100 ms | 10.0 ms | 10.0× |",
+		);
+		expect(factors.measures.map(column => column.header)).toEqual(["Go", "Zig"]);
+	});
 });
 
 describe("planChart", () => {

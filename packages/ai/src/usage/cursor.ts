@@ -140,6 +140,12 @@ function parseCursorCentsBucket(bucket: Record<string, unknown>): UsageAmount | 
  *   (includes Cursor Grok 4.5 and Composer 2.5)
  * - Other Models   ← apiPercentUsed (separate included-$ pool; different quota)
  * Prefer those fractions when present; fall back to cents only for older overall buckets.
+ *
+ * Both rails stay percentages. `plan.limit` is not the Other Models pool:
+ * an Ultra account reporting `limit: 40000` and `apiPercentUsed: 48.44` had
+ * $48.44 of third-party requests charged (the dashboard's per-request
+ * `chargedCents`, at list price), a $100 pool, so percent × limit would
+ * show $193.76 of $400. Cursor no longer publishes the pool's size.
  */
 function parseCursorPlanDashboardAmounts(bucket: Record<string, unknown>): {
 	auto?: UsageAmount;
@@ -172,7 +178,7 @@ function parseCursorPlanDashboardAmounts(bucket: Record<string, unknown>): {
 
 	const result: { auto?: UsageAmount; api?: UsageAmount; fallback?: UsageAmount } = {};
 	if (autoPct !== undefined) result.auto = fromPercent(autoPct, false);
-	if (apiPct !== undefined) result.api = fromPercent(apiPct, true);
+	if (apiPct !== undefined) result.api = fromPercent(apiPct, false);
 	if (!result.auto && !result.api) {
 		if (totalPct !== undefined) {
 			result.fallback = fromPercent(totalPct, true);
