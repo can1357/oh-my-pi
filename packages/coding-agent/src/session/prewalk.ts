@@ -126,6 +126,8 @@ export class PrewalkCoordinator {
 	#prewalk: Prewalk | undefined;
 	#planInjected = false;
 	#continuePending = false;
+	/** Whether this arm already spent its one continuation after the planning nudge (issue #6174). */
+	#continueIssued = false;
 	#todoSeen = false;
 	#planYolo: PlanYolo | undefined;
 	#planYoloPreviousNonMCPPresentation: { enabled: string[]; mounted: string[]; registered: string[] } | undefined;
@@ -178,6 +180,7 @@ export class PrewalkCoordinator {
 		this.#autoArm = undefined;
 		this.#planInjected = false;
 		this.#continuePending = false;
+		this.#continueIssued = false;
 		this.#todoSeen = false;
 	}
 
@@ -324,13 +327,22 @@ export class PrewalkCoordinator {
 			this.#disarmNoop(prewalk);
 			return;
 		}
-		if (context.toolResults.some(result => result.toolName === "todo" && !result.isError)) this.#todoSeen = true;
+		const todoProgress = context.toolResults.some(result => result.toolName === "todo" && !result.isError);
+		if (todoProgress) this.#todoSeen = true;
 
 		const hasToolResults = context.toolResults.length > 0;
-		if (this.#planInjected && hasToolResults) {
+		// The plan nudge asks for prose, so the first tool turn must earn one
+		// continuation or a planned reply ends the run before the handoff
+		// (#5551). After that, only a todo transition re-earns it: with every
+		// tool turn re-arming, a read-only task alternated tool results and prose
+		// forever, each completed answer buying the next "continue" (#6174,
+		// #16385). Read-only work can still cross one boundary; the second prose
+		// reply ends the run for the user instead of inventing more work.
+		if (hasToolResults && this.#planInjected && (!this.#continueIssued || todoProgress)) {
 			this.#continuePending = true;
-		} else if (this.#continuePending) {
+		} else if (!hasToolResults && this.#continuePending) {
 			this.#continuePending = false;
+			this.#continueIssued = true;
 			this.#host.agent.steer({
 				role: "custom",
 				customType: PREWALK_CONTINUE_MESSAGE_TYPE,

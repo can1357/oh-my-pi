@@ -863,6 +863,68 @@ describe("AgentSession prewalk", () => {
 		expect(session.model?.id).toBe(primary.id);
 	});
 
+	it("bounds a completed read-only task to one continuation when replies alternate with tool results", async () => {
+		// Regression (#6174, #16385): every tool-result turn re-armed the net, so
+		// "read-only tool call → completed answer" repeated without bound: each
+		// answer bought the next "Continue task now", prewalk never handed off,
+		// and the model answered the same finished task again. Only the first
+		// post-plan tool turn may earn a continuation; the second text-only reply
+		// must end the run.
+		const primary = modelOrThrow("claude-sonnet-4-5");
+		const target = modelOrThrow("claude-sonnet-4-6");
+
+		// Turn 1: record — plan nudge, then the net is armed once. Turn 2: answer,
+		// bridged. Turn 3: another read-only step — no new continuation. Turn 4:
+		// the answer is accepted as final. No mock fallback: a 5th call rejects.
+		const mock = createMockModel({
+			responses: [
+				toolCall("t1", "record"),
+				{ content: [{ type: "text", text: "Answer: the task is complete." }], stopReason: "stop" },
+				toolCall("t3", "record"),
+				{ content: [{ type: "text", text: "Answer: nothing left to do." }], stopReason: "stop" },
+			],
+		});
+		const requested: string[] = [];
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: primary,
+				systemPrompt: ["Test"],
+				tools: [recordTool as AgentTool],
+				messages: [],
+				thinkingLevel: Effort.Medium,
+			},
+			convertToLlm,
+			streamFn: (model, context, options) => {
+				requested.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, context, options);
+			},
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			toolRegistry,
+			prewalk: { target },
+		});
+
+		await session.prompt("research the question");
+
+		expect(requested).toEqual([
+			`${primary.provider}/${primary.id}`,
+			`${primary.provider}/${primary.id}`,
+			`${primary.provider}/${primary.id}`,
+			`${primary.provider}/${primary.id}`,
+		]);
+		const continuations = session.messages.filter(
+			message => message.role === "custom" && message.customType === "prewalk-continue",
+		);
+		expect(continuations).toHaveLength(1);
+		expect(session.model?.id).toBe(primary.id);
+		expect(session.getPrewalkState()).toBeDefined();
+	});
+
 	it("does not switch on a read-only xd:// device dispatched through write (issue #7312)", async () => {
 		const primary = modelOrThrow("claude-sonnet-4-5");
 		const target = modelOrThrow("claude-sonnet-4-6");
