@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
-import { expandAtImports, MAX_AT_IMPORT_DEPTH } from "@oh-my-pi/pi-coding-agent/discovery/at-imports";
+import { expandAtImports, MAX_AT_IMPORT_DEPTH, MAX_AT_IMPORT_EXPANSIONS } from "@oh-my-pi/pi-coding-agent/discovery/at-imports";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 /**
@@ -131,6 +131,16 @@ describe("expandAtImports", () => {
 		// A repeated include is not a cycle: both occurrences must carry the
 		// included content.
 		expect(expanded).toBe("A\nSHARED CONTENT\n\nB\nSHARED CONTENT\n\n");
+	});
+
+	test("caps total repeated include expansions", async () => {
+		await writeFile("leaf.md", "LEAF\n");
+		const root = await writeFile("root.md", Array.from({ length: MAX_AT_IMPORT_EXPANSIONS + 20 }, () => "@leaf.md").join("\n"));
+
+		const expanded = await expandAtImports(await fs.readFile(root, "utf8"), root);
+
+		expect(expanded.split("LEAF").length - 1).toBe(MAX_AT_IMPORT_EXPANSIONS);
+		expect(expanded).toContain("@leaf.md");
 	});
 
 	test("expands a shared include reached through two different files", async () => {
