@@ -436,16 +436,17 @@ export function resolvePluginExtensionPaths(plugin: InstalledPlugin): string[] {
  * re-pointed at a new cache directory on upgrade) can be moved and its old target removed under
  * them: the installed path follows the link, the realpath goes with the old target.
  *
- * The realpath is the identity: two names for one directory add one entry, the first. A
- * directory whose installed path is already on PATH is not added again; an inherited entry that
- * names its realpath does not count, since that is the entry that goes stale, and it must not stay
- * ahead: a shell keeps the path it found for a command it already ran. Entries that are not
- * directories add nothing. The inherited PATH string is kept as it was, empty entries included.
- * Entries stay for the life of the process.
+ * The realpath is the identity: two names for one directory add one entry, the first. The
+ * installed path must be the first name for its directory on PATH: a shell keeps the path it
+ * found for a command it already ran, so any other name ahead of it (an inherited entry naming the
+ * realpath, which is the one that goes stale) would keep its commands on the old target. An
+ * installed path already on PATH with no other name for its directory ahead of it is not added
+ * again. Entries that are not directories add nothing. The inherited PATH string is kept as it was,
+ * empty entries included. Entries stay for the life of the process.
  */
 export function prependPluginBinDirs(plugins: readonly InstalledPlugin[]): void {
 	const inherited = process.env.PATH;
-	const present = new Set((inherited ?? "").split(path.delimiter));
+	const pathEntries = (inherited ?? "").split(path.delimiter);
 	const identities = new Set<string>();
 	const added: string[] = [];
 	for (const plugin of plugins) {
@@ -462,11 +463,22 @@ export function prependPluginBinDirs(plugins: readonly InstalledPlugin[]): void 
 			}
 			if (identities.has(identity)) continue;
 			identities.add(identity);
-			if (!present.has(dir)) added.push(dir);
+			const at = pathEntries.indexOf(dir);
+			if (at === -1 || pathEntries.slice(0, at).some(ahead => namesDirectory(ahead, identity))) added.push(dir);
 		}
 	}
 	if (added.length === 0) return;
 	process.env.PATH = [...added, ...(inherited === undefined ? [] : [inherited])].join(path.delimiter);
+}
+
+/** Whether the PATH entry `entry` is a name for the directory whose realpath is `identity`. */
+function namesDirectory(entry: string, identity: string): boolean {
+	if (entry.length === 0) return false;
+	try {
+		return fs.realpathSync(entry) === identity;
+	} catch {
+		return false;
+	}
 }
 
 // =============================================================================
@@ -474,18 +486,24 @@ export function prependPluginBinDirs(plugins: readonly InstalledPlugin[]): void 
 // =============================================================================
 
 /**
- * Get all tool paths from all enabled plugins, for loading: the plugins' `bin`
- * directories go on PATH here, before any returned module can be imported.
+ * Get all tool paths from all enabled plugins, for loading: the `bin`
+ * directories of the plugins that ship tools go on PATH here, before any
+ * returned module can be imported. Tool discovery also runs in an explicit-only
+ * session, which loads no other installed plugin code, so no other plugin's
+ * directories are added.
  */
 export async function getAllPluginToolPaths(cwd: string): Promise<string[]> {
-	const plugins = await getEnabledPlugins(cwd);
-	prependPluginBinDirs(plugins);
+	const withTools: InstalledPlugin[] = [];
 	const paths: string[] = [];
 
-	for (const plugin of plugins) {
-		paths.push(...resolvePluginToolPaths(plugin));
+	for (const plugin of await getEnabledPlugins(cwd)) {
+		const toolPaths = resolvePluginToolPaths(plugin);
+		if (toolPaths.length === 0) continue;
+		withTools.push(plugin);
+		paths.push(...toolPaths);
 	}
 
+	prependPluginBinDirs(withTools);
 	return paths;
 }
 
@@ -518,9 +536,11 @@ export async function getAllPluginCommandPaths(cwd: string): Promise<string[]> {
 }
 
 /**
- * Get all extension module paths from all enabled plugins, for loading: the
- * plugins' `bin` directories go on PATH here, before any returned module can
- * be imported.
+ * Get all extension module paths from all enabled plugins, for loading. This
+ * is a session's ambient selection of its installed plugins, which an
+ * explicit-only session skips: every enabled plugin's `bin` directories go on
+ * PATH here, a plugin that ships only commands included, before any returned
+ * module can be imported.
  */
 export async function getAllPluginExtensionPaths(cwd: string): Promise<string[]> {
 	const plugins = await getEnabledPlugins(cwd);
