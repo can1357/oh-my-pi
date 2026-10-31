@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import { randomBytes } from "node:crypto";
 import { constants as fsConstants, type Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -35,7 +36,14 @@ import {
 import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 import { type FileLockHandle, getAgentDir, getSessionsDir, setAgentDir } from "@oh-my-pi/pi-utils";
 
-const SESSION_ID = "01a18630-42ae-7117-ba7c-029b1eee0f4b";
+// A session's lease is an abstract socket named by its id, and on Linux that
+// name is shared by the whole machine. Every id here starts with a part made
+// fresh for each test, so neither another run of this file nor an earlier test
+// in this one — one that timed out with a restore still running, say — holds
+// the lease a test needs.
+let testPrefix = "";
+const sessionId = (last: string): string => `${testPrefix}-42ae-7117-ba7c-${last}`;
+let SESSION_ID = "";
 const PROMPT = "reply with exactly BRIDGE-PROOF-ONE";
 let root: string;
 let originalAgentDir: string;
@@ -205,6 +213,8 @@ async function archiveEverything(): Promise<GcResult> {
 }
 
 beforeEach(async () => {
+	testPrefix = randomBytes(4).toString("hex");
+	SESSION_ID = sessionId("029b1eee0f4b");
 	originalAgentDir = getAgentDir();
 	root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-session-archive-"));
 	setAgentDir(root);
@@ -250,7 +260,7 @@ test("a session archived by gc resumes by id and comes back byte for byte", asyn
 test("exporting an archived session yields the same document as live, subagent transcripts included", async () => {
 	const artifacts = sessionFile.slice(0, -".jsonl".length);
 	await fs.mkdir(artifacts, { recursive: true });
-	await Bun.write(path.join(artifacts, "sub.jsonl"), sessionBody("sub-1", "nested subagent prompt", root));
+	await Bun.write(path.join(artifacts, "sub.jsonl"), sessionBody(sessionId("sub-1"), "nested subagent prompt", root));
 	const livePath = path.join(root, "live.html");
 	await exportFromFile(sessionFile, { outputPath: livePath });
 	const live = await Bun.file(livePath).text();
@@ -319,7 +329,7 @@ test("gc --restore dry run reports the refusal instead of promising a restore", 
 test("gc --restore dry run reports the artifact recovery --apply would finish", async () => {
 	const artifacts = sessionFile.slice(0, -".jsonl".length);
 	await fs.mkdir(artifacts, { recursive: true });
-	await Bun.write(path.join(artifacts, "sub.jsonl"), sessionBody("sub-1", "nested", root));
+	await Bun.write(path.join(artifacts, "sub.jsonl"), sessionBody(sessionId("sub-1"), "nested", root));
 	await archiveEverything();
 	// What an interrupted restore leaves: the transcript live and carried on,
 	// the artifact tree still in the archive. `--apply` finishes that; the dry
@@ -405,7 +415,7 @@ test("gc --archive finishes a move a killed run left half-done instead of wedgin
 });
 
 test("gc --archive refuses an archive destination holding a different session", async () => {
-	await Bun.write(archiveFile, gzipSync(Buffer.from(sessionBody("someone-else", "other", root))));
+	await Bun.write(archiveFile, gzipSync(Buffer.from(sessionBody(sessionId("someone-else"), "other", root))));
 
 	const result = await archiveEverything();
 
@@ -419,7 +429,7 @@ test("gc --archive keeps the session's artifact tree readable from the archive",
 	const nestedStore = path.join(root, "offload-nested");
 	await fs.mkdir(nestedStore, { recursive: true });
 	const nestedTarget = path.join(nestedStore, "sub.jsonl");
-	await Bun.write(nestedTarget, sessionBody("sub-1", "nested", root));
+	await Bun.write(nestedTarget, sessionBody(sessionId("sub-1"), "nested", root));
 	await fs.mkdir(artifacts, { recursive: true });
 	await fs.symlink(nestedTarget, path.join(artifacts, "sub.jsonl"));
 
@@ -509,7 +519,7 @@ test("opening an archived session a second time finds the one already restored",
 test("a restore whose artifact tree did not come back can be finished by a retry", async () => {
 	const artifacts = sessionFile.slice(0, -".jsonl".length);
 	await fs.mkdir(artifacts, { recursive: true });
-	await Bun.write(path.join(artifacts, "sub.jsonl"), sessionBody("sub-1", "nested", root));
+	await Bun.write(path.join(artifacts, "sub.jsonl"), sessionBody(sessionId("sub-1"), "nested", root));
 	await archiveEverything();
 	// The shape an interrupted restore leaves: transcript live, tree still in
 	// the archive beside the `.gz` the first attempt kept.
@@ -533,7 +543,7 @@ test("a restore refuses an archive that is not the session already at that path"
 test("a half-restored session that has since been resumed still gets its artifact tree back", async () => {
 	const artifacts = sessionFile.slice(0, -".jsonl".length);
 	await fs.mkdir(artifacts, { recursive: true });
-	await Bun.write(path.join(artifacts, "sub.jsonl"), sessionBody("sub-1", "nested", root));
+	await Bun.write(path.join(artifacts, "sub.jsonl"), sessionBody(sessionId("sub-1"), "nested", root));
 	await archiveEverything();
 	// Transcript back and carried on, artifact tree still in the archive.
 	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
@@ -708,7 +718,7 @@ test("a restore does not carry home, and does not remove, a staging directory a 
 
 test("resuming an archived id opens the live file its conversation went on in", async () => {
 	await archiveEverything();
-	const continuationId = "01a18630-42ae-7117-ba7c-ffffffffffff";
+	const continuationId = sessionId("ffffffffffff");
 	const continuationFile = path.join(path.dirname(sessionFile), `2026-02-01T00-00-00-000Z_${continuationId}.jsonl`);
 	await Bun.write(
 		continuationFile,
@@ -741,7 +751,7 @@ test("resuming an archived id opens the live file its conversation went on in", 
 test("forking an archived session brings its subagent transcripts along", async () => {
 	const artifacts = sessionFile.slice(0, -".jsonl".length);
 	await fs.mkdir(artifacts, { recursive: true });
-	await Bun.write(path.join(artifacts, "sub.jsonl"), sessionBody("sub-1", "nested subagent prompt", root));
+	await Bun.write(path.join(artifacts, "sub.jsonl"), sessionBody(sessionId("sub-1"), "nested subagent prompt", root));
 	await archiveEverything();
 
 	const fork = await SessionManager.forkFrom(archiveFile, root, undefined, undefined, {
@@ -761,7 +771,7 @@ test("forking an archived session brings its subagent transcripts along", async 
 test("a plain-file command resolves an archived id to a live transcript with its artifacts", async () => {
 	const artifacts = sessionFile.slice(0, -".jsonl".length);
 	await fs.mkdir(artifacts, { recursive: true });
-	await Bun.write(path.join(artifacts, "sub.jsonl"), sessionBody("sub-1", "nested subagent prompt", root));
+	await Bun.write(path.join(artifacts, "sub.jsonl"), sessionBody(sessionId("sub-1"), "nested subagent prompt", root));
 	await archiveEverything();
 
 	// `omp render`, `omp session pack`/`moved` and `omp anonymize` all read
@@ -776,7 +786,7 @@ test("a plain-file command resolves an archived id to a live transcript with its
 test("a restore keeps the permissions of an artifact directory it merges into", async () => {
 	const artifacts = sessionFile.slice(0, -".jsonl".length);
 	await fs.mkdir(artifacts, { recursive: true });
-	await Bun.write(path.join(artifacts, "sub.jsonl"), sessionBody("sub-1", "nested", root));
+	await Bun.write(path.join(artifacts, "sub.jsonl"), sessionBody(sessionId("sub-1"), "nested", root));
 	await fs.chmod(artifacts, 0o755);
 	await archiveEverything();
 	// A directory the live tree already holds, tightened against other local users.
@@ -813,7 +823,7 @@ test("opening an archive another process already restored and carried on reads t
 test("opening a session whose artifact tree could not be restored fails instead of hiding it", async () => {
 	const artifacts = sessionFile.slice(0, -".jsonl".length);
 	await fs.mkdir(artifacts, { recursive: true });
-	await Bun.write(path.join(artifacts, "sub.jsonl"), sessionBody("sub-1", "nested", root));
+	await Bun.write(path.join(artifacts, "sub.jsonl"), sessionBody(sessionId("sub-1"), "nested", root));
 	await archiveEverything();
 	// A live directory standing where the archived artifact file belongs: the
 	// transcript comes back, the tree cannot.
@@ -851,7 +861,7 @@ test("an empty --restore is refused instead of running the configured phases", a
 test("an artifact tree that cannot be dropped leaves the archive complete, not deleted", async () => {
 	const artifacts = sessionFile.slice(0, -".jsonl".length);
 	await fs.mkdir(artifacts, { recursive: true });
-	await Bun.write(path.join(artifacts, "sub.jsonl"), sessionBody("sub-1", "nested", root));
+	await Bun.write(path.join(artifacts, "sub.jsonl"), sessionBody(sessionId("sub-1"), "nested", root));
 	const realUnlink = fs.unlink;
 	const rm = spyOn(fs, "unlink").mockImplementation(async target => {
 		// A locked artifact: the copy into the archive succeeded, dropping the
@@ -914,7 +924,7 @@ test("re-archiving a half-restored session keeps the artifacts only the archive 
 test("a session is left alone while a process owns a transcript below a symlinked artifact directory", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	const offloaded = path.join(root, "offloaded-children");
-	const childId = "01a18630-42ae-7117-ba7c-029b1eee0f4c";
+	const childId = sessionId("029b1eee0f4c");
 	const child = path.join(offloaded, "child.jsonl");
 	await Bun.write(child, sessionBody(childId, "nested turn", root));
 	await fs.mkdir(liveArtifacts, { recursive: true });
@@ -1072,7 +1082,7 @@ test("a nested transcript renamed after a half restore keeps both copies", async
 	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
 	const stamp = "2026-01-01T00:00:00.000Z";
 	const nested = (title: string) =>
-		`${serializeTitleSlot({ title, source: "user", updatedAt: stamp })}${sessionBody("01a18630-42ae-7117-ba7c-029b1eee0f4c", "nested turn", root)}`;
+		`${serializeTitleSlot({ title, source: "user", updatedAt: stamp })}${sessionBody(sessionId("029b1eee0f4c"), "nested turn", root)}`;
 	await Bun.write(path.join(artifacts, "sub.jsonl"), nested("Before"));
 	await archiveEverything();
 	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
@@ -1095,7 +1105,7 @@ test("a short title record does not let the comparison skip the session header",
 	// fixed width, so the header that carries the session id still lies inside
 	// the first slot-sized window.
 	const short = `${JSON.stringify({ type: "title", v: 1, title: "t", updatedAt: "2026-01-01T00:00:00.000Z", pad: "" })}\n`;
-	const other = "01a18630-42ae-7117-ba7c-029b1eee0f4c";
+	const other = sessionId("029b1eee0f4c");
 	await Bun.write(sessionFile, `${short}${sessionBody(SESSION_ID, PROMPT, root)}`);
 	await Bun.write(path.join(artifacts, "sub.jsonl"), "ONLY-ARCHIVED-CHILD\n");
 	await archiveEverything();
@@ -1548,7 +1558,7 @@ test("tool output named like a transcript keeps every byte", async () => {
 	// Neither its name nor its shape says omp wrote it as a transcript, so
 	// none of its bytes may be read as a name and skipped.
 	const shaped = (title: string) =>
-		`${JSON.stringify({ type: "session", version: 3, id: "example", title })}\n${JSON.stringify({
+		`${JSON.stringify({ type: "session", version: 3, id: sessionId("example"), title })}\n${JSON.stringify({
 			type: "message",
 			id: "a",
 			message: { role: "assistant", content: [] },
@@ -1790,7 +1800,7 @@ test("a restore refuses while a process owns the session under a name of its own
 test("a restore refuses while a process owns a subagent session below it", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
-	const childId = "01a18630-42ae-7117-ba7c-029b1eee0f4c";
+	const childId = sessionId("029b1eee0f4c");
 	// Named `.log`, because a name says nothing: the header is what the owner
 	// leases and what archiving reads.
 	await Bun.write(path.join(liveArtifacts, "child.log"), sessionBody(childId, "UNIQUE ORIGINAL", root));
@@ -1923,7 +1933,7 @@ test("a failed archive leaves no empty directory behind its own staging residue"
 test("a restore sees an owner whose transcript opens the way the session loader allows", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
-	const childId = "01a18630-42ae-7117-ba7c-029b1eee0f4c";
+	const childId = sessionId("029b1eee0f4c");
 	const body = sessionBody(childId, "UNIQUE ORIGINAL", root);
 	const header = body.slice(0, body.indexOf("\n"));
 	// Headers the production reader accepts and a hand-rolled one does not:
@@ -1958,7 +1968,7 @@ test("a child that appears after the owners were counted still stops the restore
 	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
 	await Bun.write(path.join(liveArtifacts, "first.log"), "FIRST");
 	await archiveEverything();
-	const lateId = "01a18630-42ae-7117-ba7c-029b1eee0f4c";
+	const lateId = sessionId("029b1eee0f4c");
 	const late: { lease: { release(): void } | null } = { lease: null };
 
 	// A subagent session joins the tree after the owners were counted and
@@ -2025,7 +2035,7 @@ test("a migrated transcript that gives one entry another's name is refused", asy
 });
 
 test("archiving over a different archived session names the way back", async () => {
-	const other = "01a18630-42ae-7117-ba7c-029b1eee0f4c";
+	const other = sessionId("029b1eee0f4c");
 	await fs.mkdir(path.dirname(archiveFile), { recursive: true });
 	await Bun.write(archiveFile, Bun.gzipSync(Buffer.from(sessionBody(other, "ANOTHER SESSION", root))));
 	const old = new Date(Date.now() - 30 * 86_400_000);
@@ -2046,7 +2056,7 @@ test("a child that joins while the tree is being copied stops the archive going"
 	await Bun.write(path.join(liveArtifacts, "a.log"), "UNIQUE ORIGINAL");
 	await Bun.write(path.join(liveArtifacts, "z.log"), "SECOND");
 	await archiveEverything();
-	const lateId = "01a18630-42ae-7117-ba7c-029b1eee0f4c";
+	const lateId = sessionId("029b1eee0f4c");
 	const late: { lease: { release(): void } | null } = { lease: null };
 
 	// A subagent session joins the tree while the copy is running — after
@@ -2075,7 +2085,7 @@ test("a child that joins while the tree is being copied stops the archive going"
 
 test("the divergent-transcript refusal does not send anyone down a route that fails", async () => {
 	await archiveEverything();
-	const other = "01a18630-42ae-7117-ba7c-029b1eee0f4c";
+	const other = sessionId("029b1eee0f4c");
 	await Bun.write(sessionFile, sessionBody(other, "ANOTHER SESSION", root));
 
 	const refusal = await restoreArchivedSession(archiveFile, root).then(
@@ -2093,7 +2103,7 @@ test("the divergent-transcript refusal does not send anyone down a route that fa
 });
 
 test("archiving over a different archived session names both halves to move", async () => {
-	const other = "01a18630-42ae-7117-ba7c-029b1eee0f4c";
+	const other = sessionId("029b1eee0f4c");
 	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
 	await fs.mkdir(path.dirname(archiveFile), { recursive: true });
 	await Bun.write(archiveFile, Bun.gzipSync(Buffer.from(sessionBody(other, "ANOTHER SESSION", root))));
@@ -2177,7 +2187,7 @@ test("reclaiming refuses while a process owns the session", async () => {
 
 test("reclaiming refuses while a process owns a subagent session below it", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
-	const childId = "01a18630-42ae-7117-ba7c-029b1eee0f4c";
+	const childId = sessionId("029b1eee0f4c");
 	await Bun.write(path.join(liveArtifacts, "child.log"), sessionBody(childId, "UNIQUE CHILD TURN", root));
 	await archiveEverything();
 	await restoreArchivedSession(archiveFile, root);
@@ -2516,7 +2526,7 @@ test("the resume route finishes a half restore rather than opening a session wit
 });
 test("a complete session that carried on since it was archived still opens", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
-	const childId = "01a18630-42ae-7117-ba7c-029b1eee0f4c";
+	const childId = sessionId("029b1eee0f4c");
 	const child = path.join(liveArtifacts, "child.jsonl");
 	await Bun.write(child, sessionBody(childId, "FIRST TURN", root));
 	await Bun.write(path.join(liveArtifacts, "tool.log"), "ORIGINAL");
@@ -2743,7 +2753,7 @@ test("a reclaim whose transcript is already gone names the artifact tree it leav
 for (const apply of [false, true]) {
 	test(`a session tree that cannot be listed is reported as that, not as an owner (${apply ? "apply" : "preview"})`, async () => {
 		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
-		const sub = sessionBody("01a18630-42ae-7117-ba7c-029b1eee0f4d", "SUB", root);
+		const sub = sessionBody(sessionId("029b1eee0f4d"), "SUB", root);
 		await Bun.write(path.join(liveArtifacts, "sub.jsonl"), sub);
 		await archiveOnly();
 
@@ -2781,9 +2791,9 @@ for (const apply of [false, true]) {
 test("a printed recovery command survives an agent directory with a space in it", async () => {
 	const spaced = path.join(root, "agent dir");
 	await fs.mkdir(path.join(getSessionsDir(spaced), "--work--"), { recursive: true });
-	const name = "2026-01-01T00-00-00-000Z_01a18630-42ae-7117-ba7c-029b1eee0f4e.jsonl";
+	const name = `2026-01-01T00-00-00-000Z_${sessionId("029b1eee0f4e")}.jsonl`;
 	const spacedSession = path.join(getSessionsDir(spaced), "--work--", name);
-	await Bun.write(spacedSession, sessionBody("01a18630-42ae-7117-ba7c-029b1eee0f4e", PROMPT, spaced));
+	await Bun.write(spacedSession, sessionBody(sessionId("029b1eee0f4e"), PROMPT, spaced));
 	const old = new Date(Date.now() - 30 * 86_400_000);
 	await fs.utimes(spacedSession, old, old);
 	await archiveOnly(spaced);
@@ -3058,7 +3068,7 @@ for (const apply of [false, true]) {
 		await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
 		await archiveEverything();
 		await restoreArchivedSession(archiveFile, root);
-		const childId = "01a18630-42ae-7117-ba7c-029b1eee0f4c";
+		const childId = sessionId("029b1eee0f4c");
 		const child = path.join(liveArtifacts, "child.jsonl");
 		const body = sessionBody(childId, "UNIQUE CHILD TURN", root);
 
@@ -3094,7 +3104,7 @@ test("a reclaim holds the lease of every transcript it removes until the file is
 	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
 	await archiveEverything();
 	await restoreArchivedSession(archiveFile, root);
-	const childId = "01a18630-42ae-7117-ba7c-029b1eee0f4c";
+	const childId = sessionId("029b1eee0f4c");
 	const child = path.join(liveArtifacts, "child.jsonl");
 
 	// A child that joined and is gone: a dead owner writes nothing late, so
@@ -3376,7 +3386,7 @@ for (const how of ["moved aside", "deleted"] as const) {
 		// Somebody else's session, put at the root name while an earlier entry
 		// was being removed: the root goes last, and it has to be the file
 		// that was proved, not whatever wears its name by then.
-		const foreign = sessionBody("01a18630-42ae-7117-ba7c-029b1eee0f4d", "UNIQUE FOREIGN TURN", root);
+		const foreign = sessionBody(sessionId("029b1eee0f4d"), "UNIQUE FOREIGN TURN", root);
 		const realUnlink = fs.unlink;
 		let rebound = false;
 		const unlink = spyOn(fs, "unlink").mockImplementation(async target => {
