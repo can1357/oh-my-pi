@@ -112,8 +112,11 @@ export interface StatusLineSession {
 	getAdvisorStatusOverview?(): { configured: boolean; advisors: readonly { status: string; yielded: boolean }[] };
 	getAdvisorCost?(): number;
 	isAdvisorUsingSubscription?(): boolean;
-	/** What the next request finds in the prompt cache at `nowMs`; undefined when there is nothing to reason about. */
-	getPromptCacheStatus?(nowMs: number): PromptCacheStatus | undefined;
+	/**
+	 * What the next request finds in the prompt cache at `nowMs`; undefined when there is nothing to reason about.
+	 * `nextTokens` is the caller's current context token count, so the session need not recount it.
+	 */
+	getPromptCacheStatus?(nowMs: number, nextTokens?: number): PromptCacheStatus | undefined;
 }
 
 export interface FooterSession {

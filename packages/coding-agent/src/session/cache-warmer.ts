@@ -432,8 +432,12 @@ export class CacheWarmer {
 		};
 	}
 
-	/** Keep the prompt cache entry written by `request` warm until `change` reports a difference in the next request. */
-	start(request: CacheWarmRequest, change: () => PromptCacheChange | undefined): void {
+	/**
+	 * Keep the prompt cache entry written by `request` warm until `change` reports a difference in the next request.
+	 * Returns the request's dispatch hook: call it each time the provider sends the request (its `onPayload`),
+	 * so the entry's lifetime counts from when it left rather than from a wait for a provider slot.
+	 */
+	start(request: CacheWarmRequest, change: () => PromptCacheChange | undefined): () => void {
 		this.#clearRun();
 		// A string key is classified up front. Resolver keys (rotating
 		// credentials) cannot be inspected without consuming them; they start on
@@ -444,24 +448,27 @@ export class CacheWarmer {
 			request.model.api === "anthropic-messages" && typeof apiKey === "string" && isAnthropicOAuthToken(apiKey);
 		const tier = resolvePromptCacheTier(request.model, request.options, isOAuthToken);
 		const entry = tier === undefined ? undefined : { model: request.model, tier, touchedAt: Date.now(), change };
+		const dispatched = () => {
+			if (entry) entry.touchedAt = Date.now();
+		};
 		this.#pendingEntry = entry;
 		const mode = this.#deps.getMode();
 		if (mode === "off") {
 			this.#stop("cache warming disabled");
-			return;
+			return dispatched;
 		}
 		if (!isReplayable(request.model, request.options)) {
 			this.#stop("request cannot be replayed safely");
-			return;
+			return dispatched;
 		}
 		if (entry === undefined) {
 			this.#stop("request disabled prompt caching");
-			return;
+			return dispatched;
 		}
 		const delayMs = this.#delayFor(request.model, entry.tier);
 		if (delayMs === undefined) {
 			this.#stop("cache lifetime unavailable");
-			return;
+			return dispatched;
 		}
 		this.#run = {
 			...request,
@@ -476,6 +483,7 @@ export class CacheWarmer {
 			extensionOverride: false,
 		};
 		this.#schedule(this.#run);
+		return dispatched;
 	}
 
 	/**
@@ -635,9 +643,11 @@ export class CacheWarmer {
 		this.onRefreshStart?.(refresh);
 		let outcome: CacheWarmingRefreshEnd["outcome"] = "error";
 		let usage: Usage | undefined;
-		const sentAt = Date.now();
+		// Moved to when the provider sends it, past any wait for an in-flight slot.
+		const dispatch = { at: Date.now() };
 		try {
-			const message = await this.#replay(run);
+			const message = await this.#replay(run, dispatch);
+			const sentAt = dispatch.at;
 			// Record before the abort check: a refresh cancelled or replaced after the
 			// provider accepted it was still billed, and spend tracking must see it.
 			// Only a refresh that answered for the conversation as it still stands
@@ -693,13 +703,18 @@ export class CacheWarmer {
 	 * adaptive allowance and runs to terminal metadata under a true one-token
 	 * total-generation cap.
 	 */
-	async #replay(run: ActiveRun): Promise<AssistantMessage | undefined> {
+	async #replay(run: ActiveRun, dispatch: { at: number }): Promise<AssistantMessage | undefined> {
 		const cutoff = new AbortController();
 		let stream: CacheWarmStream;
+		const onPayload = run.options.onPayload;
 		const replayOptions: SimpleStreamOptions = {
 			...run.options,
 			maxTokens: 1,
 			signal: AbortSignal.any([run.controller.signal, cutoff.signal]),
+			onPayload: (payload, model, signal) => {
+				dispatch.at = Date.now();
+				return onPayload?.(payload, model, signal);
+			},
 		};
 		if (run.model.api === "bedrock-converse-stream" && run.model.thinking?.mode === "anthropic-adaptive") {
 			// Adaptive Converse ignores thinkingBudgets on the wire. Zero each

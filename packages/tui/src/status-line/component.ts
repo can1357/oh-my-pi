@@ -2644,7 +2644,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const turnElapsedMs = this.getTurnElapsedMs();
 		const promptCache =
 			settings.leftSegments.includes("cache") || settings.rightSegments.includes("cache")
-				? this.session.getPromptCacheStatus?.(nowMs)
+				? this.session.getPromptCacheStatus?.(nowMs, breakdown.usedTokens)
 				: undefined;
 		this.#syncPromptCacheTimer(promptCache, nowMs);
 		return {

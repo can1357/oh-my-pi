@@ -793,6 +793,11 @@ function scanBranchPromptCache(scan: BranchPromptCacheScan): void {
 			if (observation) observation.compacted = true;
 			continue;
 		}
+		// `/clear` starts a new transcript: nothing before the boundary is a prefix of the next request.
+		if (entry.type === "reset_boundary") {
+			scan.observation = undefined;
+			continue;
+		}
 		// Failed, replaced and outdated refreshes carry no outcome: they say nothing about this entry.
 		if (entry.type === "model_usage" && entry.cacheRefresh !== undefined) {
 			if (!observation) continue;
@@ -5985,11 +5990,12 @@ export class AgentSession implements SettingsScope {
 	 * Arms the prompt-cache warmer for a main-loop request. Called from the
 	 * session streamFn with its raw request options; retention settings are
 	 * resolved here to match the settings-aware stream wrapper.
-	 * A no-op when the session has no warmer.
+	 * Returns the request's dispatch hook (see {@link CacheWarmer.start}); a no-op
+	 * when the session has no warmer.
 	 */
-	startCacheWarming(model: Model, context: Context, options: SimpleStreamOptions): void {
+	startCacheWarming(model: Model, context: Context, options: SimpleStreamOptions): () => void {
 		const warmer = this.#cacheWarmer;
-		if (!warmer) return;
+		if (!warmer) return () => {};
 		// The warmer keeps its confirmed entry across requests until a response
 		// replaces it; another transcript's entry says nothing about this one.
 		if (this.#promptCacheArmSessionId !== this.sessionId) warmer.cancel();
@@ -6002,7 +6008,7 @@ export class AgentSession implements SettingsScope {
 		};
 		const armShape = this.#promptCacheShape(model);
 		this.#promptCacheArmSessionId = this.sessionId;
-		warmer.start({ model, context, options: warmingOptions }, () =>
+		return warmer.start({ model, context, options: warmingOptions }, () =>
 			this.#promptCacheChange(armShape, armMessages, armedAt),
 		);
 	}
@@ -6080,8 +6086,10 @@ export class AgentSession implements SettingsScope {
 	 * What the next request finds in the prompt cache at `nowMs`. Undefined
 	 * without a warmer (side sessions), a reply that used the cache, or a
 	 * declared lifetime for the entry's tier on a provider that expires entries.
+	 * `nextTokens` is the next request's context size when the caller already
+	 * counted it (the status line); otherwise it is counted here.
 	 */
-	getPromptCacheStatus(nowMs = Date.now()): PromptCacheStatus | undefined {
+	getPromptCacheStatus(nowMs = Date.now(), nextTokens?: number): PromptCacheStatus | undefined {
 		const warmer = this.#cacheWarmer;
 		if (!warmer) return undefined;
 		const confirmed = this.#promptCacheArmSessionId === this.sessionId ? warmer.confirmedEntry : undefined;
@@ -6096,7 +6104,7 @@ export class AgentSession implements SettingsScope {
 		return promptCacheStatus(entry, {
 			nowMs,
 			warming: live ? warmer.status : undefined,
-			nextTokens: this.getContextUsage()?.tokens ?? 0,
+			nextTokens: nextTokens ?? this.getContextUsage()?.tokens ?? 0,
 		});
 	}
 
