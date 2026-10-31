@@ -5,9 +5,10 @@
  * session. Unlike agent://, artifacts are raw text with no JSON extraction.
  *
  * URL form:
- * - artifact://<id> - Full artifact content
+ * - artifact://<id> - Artifact content, bounded by the read tool's byte/line limits
  *
- * Pagination is handled by the read tool via offset/limit parameters.
+ * Pagination is handled by the read tool via line selectors; requested artifact lines retain full
+ * columns within byte/line limits, while off-window context retains the configured column cap.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";

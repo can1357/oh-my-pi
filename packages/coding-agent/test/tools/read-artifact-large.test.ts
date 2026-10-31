@@ -70,6 +70,73 @@ describe("read tool large artifact handling", () => {
 		await fs.rm(testDir, { recursive: true, force: true });
 	});
 
+	it("preserves a single-line JSON artifact within the byte budget in default and raw reads", async () => {
+		const json = JSON.stringify({ payload: "x".repeat(15_000), tail: "complete-json" });
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), json);
+
+		const defaultResult = await tool.execute("call-json-default", { path: "artifact://0" });
+		const defaultOutput = getTextOutput(defaultResult);
+		expect(defaultOutput).toContain(json);
+		expect(defaultResult.details?.meta?.truncation).toBeUndefined();
+
+		const rawResult = await tool.execute("call-json-raw", { path: "artifact://0:raw" });
+		expect(getTextOutput(rawResult)).toBe(json);
+		expect(rawResult.details?.meta?.truncation).toBeUndefined();
+	});
+
+	it("preserves distinct long JSON lines in a multi-range artifact read", async () => {
+		const first = JSON.stringify({ payload: "a".repeat(15_000), tail: "first-json-tail" });
+		const last = JSON.stringify({ payload: "z".repeat(15_000), tail: "last-json-tail" });
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), `${first}\nmiddle\n${last}`);
+
+		const result = await tool.execute("call-json-multi-range", { path: "artifact://0:1-1,3-3" });
+		const output = getTextOutput(result);
+		expect(output).toContain(first);
+		expect(output).toContain(last);
+		expect(result.details?.meta?.truncation).toBeUndefined();
+	});
+
+	it("bounds oversized selected lines in buffered multi-range artifacts and reports omission", async () => {
+		await Bun.write(
+			path.join(artifactDir, "0.mcp.log"),
+			`${"a".repeat(1_900_000)}\nmiddle\n${"z".repeat(1_900_000)}`,
+		);
+
+		const result = await tool.execute("call-budget-multi", { path: "artifact://0:1-1,3-3" });
+		const output = getTextOutput(result);
+		expect(Buffer.byteLength(output)).toBeLessThan(110_000);
+		expect(output).toContain("Line 1");
+		expect(output).toContain("Line 3");
+		expect(output).toContain("50.0KB");
+		const truncation = result.details?.meta?.truncation;
+		expect(truncation).toBeDefined();
+		expect(truncation?.nextOffset).toBeUndefined();
+		if (!truncation) throw new Error("expected truncation metadata");
+		expect(formatTruncationMetaNotice(truncation)).not.toContain("to continue");
+	});
+
+	it("clips oversized enclosing context without clipping selected artifact lines", async () => {
+		const selected = JSON.stringify({ item: "x".repeat(15_000), tail: "selected-tail" });
+		await fs.rm(path.join(artifactDir, "0.mcp.log"));
+		await Bun.write(
+			path.join(artifactDir, "0.json"),
+			[
+				`{"payload":"${"p".repeat(1_000_000)}","items":[`,
+				...Array.from({ length: 520 }, (_, index) => (index === 519 ? `${selected},` : `{"item":${index}},`)),
+				"{}]}",
+			].join("\n"),
+		);
+
+		for (const selector of ["520-522", "2-2,521-522"]) {
+			const result = await tool.execute(`call-budget-context-${selector}`, { path: `artifact://0:${selector}` });
+			const output = getTextOutput(result);
+			expect(Buffer.byteLength(output)).toBeLessThan(50_000);
+			expect(output).toContain(selected);
+			expect(output).toContain('{"payload":"');
+			expect(result.details?.meta?.limits?.columnTruncated?.maxColumn).toBeGreaterThan(0);
+		}
+	});
+
 	it("blocks unbounded raw reads and points to bounded artifact workflows", async () => {
 		const result = await tool.execute("call-raw", { path: "artifact://0:raw" });
 		const output = getTextOutput(result);
