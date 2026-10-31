@@ -10,7 +10,12 @@ import * as path from "node:path";
 import { Type } from "@oh-my-pi/omptype/typebox";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { handSessionFacade } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/boundary-data";
-import { handAnnotations, handMemory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/context-surfaces";
+import {
+	handAnnotations,
+	handLiveStart,
+	handMemory,
+	handUIContext,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/context-surfaces";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type {
@@ -21,6 +26,8 @@ import type {
 	ExtensionCommandContextActions,
 	ExtensionContext,
 	ExtensionContextActions,
+	ExtensionLiveSession,
+	ExtensionLiveStartOptions,
 	ExtensionUIContext,
 	SessionStopEvent,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
@@ -28,6 +35,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import type { ToolRendererScope } from "@oh-my-pi/pi-tui/tools/renderer-scope";
 
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => {
@@ -1518,6 +1526,217 @@ describe("what a session set on the host's UI", () => {
 			tracked: { wrappersDiffer: true, status: "B's status", footer: { before: "set", after: "set" } },
 			proxied: { wrappersDiffer: true, status: "B's status", footer: { before: "set", after: "set" } },
 			bare: { wrappersDiffer: false, status: "B's status", footer: { before: "set", after: "set" } },
+		});
+	});
+
+	test("is each host UI's own: two UIs that inherit from one prototype keep separate slots", () => {
+		const withUI = (ui: object) => {
+			const owner = new ExtensionRuntime();
+			const end = owner.beginSession();
+			const session = owner.forSession();
+			const scope = {
+				get live() {
+					return !session.isRetired;
+				},
+				run: <T>(call: () => T): T => call(),
+			} satisfies ToolRendererScope;
+			return { end, ui: handUIContext(ui as ExtensionUIContext, session, scope) };
+		};
+		const parent = {
+			setStatus(this: { status?: string }, _key: string, value: string | undefined) {
+				this.status = value;
+			},
+		};
+		// The prototype is a host UI too, keyed before its children are.
+		const keyedFirst = withUI(parent);
+		const first: { status?: string } = Object.create(parent);
+		const second: { status?: string } = Object.create(parent);
+		const a = withUI(first);
+		const b = withUI(second);
+		a.ui.setStatus("same", "A");
+		b.ui.setStatus("same", "B");
+		a.end();
+		const afterA = { first: first.status, second: second.status };
+		b.end();
+		keyedFirst.end();
+
+		expect(afterA).toEqual({ first: undefined, second: "B" });
+	});
+});
+
+/** Real macrotask turns: the runtime reports an unobserved rejection only once its microtask queue
+ *  has drained, which no fake clock in this process drives. */
+async function macrotasks(count: number): Promise<void> {
+	for (let turn = 0; turn < count; turn++) {
+		const next = Promise.withResolvers<void>();
+		setImmediate(next.resolve);
+		await next.promise;
+	}
+}
+
+describe("an answer that arrives after its session has gone", () => {
+	test("is refused without ending the process: a call nobody awaits is observed, and one awaited still rejects", async () => {
+		const h = await reusedRuntime(() => {});
+		const compaction = Promise.withResolvers<void>();
+		cleanups.push(() => compaction.resolve());
+		const [host, context] = actions();
+		h.runner.initialize(
+			host,
+			{ ...context, compact: async () => await compaction.promise },
+			undefined,
+			{ ...h.runner.getUIContext() },
+			"rpc",
+		);
+		const unhandled: string[] = [];
+		const listener = (reason: unknown) => void unhandled.push(String(reason));
+		process.on("unhandledRejection", listener);
+		cleanups.push(() => void process.off("unhandledRejection", listener));
+		const endA = h.session();
+		const ctx = h.runner.createContext();
+		// In flight when the session ends: one dropped, as `compact({ onComplete, onError })` invites.
+		void ctx.compact();
+		const awaited = outcome(() => ctx.compact());
+		endA();
+		h.session();
+		// Made after the session ended, by an async member: refused at entry, and dropped too.
+		void ctx.modelRegistry.getProviderHeaders("anthropic");
+		compaction.resolve();
+		const answer = await awaited;
+		await macrotasks(2);
+
+		expect({ answer, unhandled }).toEqual({ answer: REFUSED, unhandled: [] });
+	});
+
+	test("of a live call is ended by the host when the handle is refused, whichever turn the session ends on", async () => {
+		const results: Array<{ turns: number; delivered: boolean; stops: number }> = [];
+		for (let turns = 0; turns < 12; turns++) {
+			const h = await reusedRuntime(() => {});
+			const connecting = Promise.withResolvers<void>();
+			cleanups.push(() => connecting.resolve());
+			let stops = 0;
+			const [host, context] = actions();
+			h.runner.initialize(
+				host,
+				{
+					...context,
+					startLive: async () => {
+						await connecting.promise;
+						return { sdpAnswer: "answer", voice: "alloy", stop: async () => void stops++ };
+					},
+				},
+				undefined,
+				{ ...h.runner.getUIContext() },
+				"rpc",
+			);
+			const endA = h.session();
+			const starting = h.runner
+				.createContext()
+				.startLive?.({ sdpOffer: "offer" })
+				.then(
+					live => ({ live }),
+					() => ({ refused: true }),
+				);
+			connecting.resolve();
+			for (let turn = 0; turn < turns; turn++) await Promise.resolve();
+			endA();
+			const answer = await starting;
+			const delivered = answer !== undefined && "live" in answer;
+			results.push({ turns, delivered, stops });
+			if (answer !== undefined && "live" in answer) await answer.live.stop();
+		}
+
+		expect(results.filter(result => !result.delivered && result.stops !== 1)).toEqual([]);
+	});
+
+	test("of a live call is stopped before anything of it is read", async () => {
+		const owner = new ExtensionRuntime();
+		const endA = owner.beginSession();
+		const connecting = Promise.withResolvers<ExtensionLiveSession>();
+		let stops = 0;
+		let reads = 0;
+		const live = {
+			get sdpAnswer() {
+				reads++;
+				return "answer";
+			},
+			get voice() {
+				reads++;
+				return "alloy";
+			},
+			stop: async () => void stops++,
+		};
+		const session = owner.forSession();
+		const facade = handSessionFacade({ start: handLiveStart(async () => connecting.promise, session) }, session);
+		const pending = outcome(() => facade.start({ sdpOffer: "offer" }));
+		endA();
+		cleanups.push(owner.beginSession());
+		connecting.resolve(live);
+
+		expect({ answer: await pending, stops, reads }).toEqual({ answer: REFUSED, stops: 1, reads: 0 });
+	});
+
+	test("to a live call's transcript callback is not copied once the session has gone", async () => {
+		const owner = new ExtensionRuntime();
+		const endA = owner.beginSession();
+		let handed: ExtensionLiveStartOptions | undefined;
+		let reads = 0;
+		let calls = 0;
+		const session = owner.forSession();
+		const facade = handSessionFacade(
+			{
+				start: handLiveStart(async options => {
+					handed = options;
+					return { sdpAnswer: "answer", voice: "alloy", stop: async () => {} };
+				}, session),
+			},
+			session,
+		);
+		await facade.start({ sdpOffer: "offer", onTranscript: () => void calls++ });
+		endA();
+		cleanups.push(owner.beginSession());
+		const row = Object.defineProperty({}, "text", {
+			enumerable: true,
+			get() {
+				reads++;
+				return "the next session's";
+			},
+		});
+		handed?.onTranscript?.(row as never);
+
+		expect({ reads, calls }).toEqual({ reads: 0, calls: 0 });
+	});
+
+	test("is refused when its promise names its own constructor: that constructor never runs, nothing it returns is handed on", async () => {
+		const owner = new ExtensionRuntime();
+		cleanups.push(owner.beginSession());
+		let writes = 0;
+		let constructs = 0;
+		const host = {
+			credential: "host",
+			write() {
+				writes++;
+			},
+		};
+		const promise = Promise.resolve("settled");
+		function Species(executor: (resolve: () => void, reject: () => void) => void) {
+			constructs++;
+			executor(
+				() => {},
+				() => {},
+			);
+			return host;
+		}
+		Object.defineProperty(promise, "constructor", { value: { [Symbol.species]: Species } });
+		const facade = handSessionFacade({ answer: () => promise }, owner.forSession());
+		const handed: unknown = facade.answer();
+		if (handed === host) host.write();
+		const settled = await outcome(() => handed);
+
+		expect({ handedHost: handed === host, settled, constructs, writes }).toEqual({
+			handedHost: false,
+			settled: expect.stringContaining("names its own constructor or prototype cannot be followed"),
+			constructs: 0,
+			writes: 0,
 		});
 	});
 });

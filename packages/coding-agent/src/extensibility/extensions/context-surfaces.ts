@@ -78,13 +78,15 @@ import type { ReadonlySessionManager } from "../../session/session-manager";
 import { type AuthorDataSite, CALLBACK, DATA, fieldsOf, snapshotAuthorData } from "./author-data";
 import {
 	copyHostData,
-	fromHostCall,
 	handAsIs,
 	handHostFacade,
 	handHostModel,
 	handSessionFacade,
 	isImmutableData,
+	releaseHandle,
+	releaseIfUndelivered,
 	sessionCall,
+	sessionHostCall,
 } from "./boundary-data";
 import { copyHandedModel } from "./compact-handler";
 import { hostUIOf } from "./user-wait";
@@ -559,14 +561,18 @@ export function handAnnotations(
 
 /**
  * `ctx.startLive` as a session hands it: the options cross as the strings they name and the
- * session's callbacks — inert once it has gone, each handed copies of what the host reports — and
- * the live session comes back as its strings and a `stop`. Ending the call it started stays the
- * extension's to do once its session has gone too: its own peer going away is the only signal the
- * host gets, and a call left open keeps the host's visualizer up for whoever comes next. So the
- * live session is a facade that answers whenever it is called ({@link handHostFacade}), and a
- * failure of `stop` crosses as a copy. A session that ends while its call is still starting is
- * refused the handle (the answer is gated when it settles, `handSessionFacade`), so nobody would be
- * left to end the call: the host ends it then.
+ * session's callbacks — inert once it has gone, each handed copies of what the host reports, the
+ * copy taken only once the callback is admitted — and the live session comes back as its strings
+ * and a `stop`. Ending the call it started stays the extension's to do once its session has gone
+ * too: its own peer going away is the only signal the host gets, and a call left open keeps the
+ * host's visualizer up for whoever comes next. So the live session is a facade that answers
+ * whenever it is called ({@link handHostFacade}), and a failure of `stop` crosses as a copy.
+ *
+ * A call the session cannot be handed is ended by the host, whenever the session goes: gone while
+ * the call was starting, the host stops it and the session is refused before anything of the live
+ * session is read; gone after the handle was built but before it is delivered (the answer is gated
+ * again when it settles, `handSessionFacade`), the boundary refuses the handle and the host stops
+ * the call ({@link releaseIfUndelivered}). A refused handle never leaves a running call behind.
  */
 export function handLiveStart(
 	startLive: NonNullable<ExtensionContext["startLive"]>,
@@ -586,8 +592,15 @@ export function handLiveStart(
 				const value = read(key);
 				if (value === undefined) return undefined;
 				if (typeof value !== "function") throw new Error(`${subject}: options.${key} is not a function.`);
-				const run = owner.ownCallback(value as (...args: unknown[]) => unknown);
-				return ((...args: unknown[]) => run(...args.map(arg => copyHostData(arg)))) as unknown as F;
+				// Admitted first, copied second: once the session has gone, what the host reports is
+				// not read at all.
+				return owner.ownCallback((...args: unknown[]) =>
+					Reflect.apply(
+						value,
+						undefined,
+						args.map(arg => copyHostData(arg)),
+					),
+				) as unknown as F;
 			};
 			return {
 				sdpOffer: String(read("sdpOffer")),
@@ -599,13 +612,19 @@ export function handLiveStart(
 			};
 		});
 		const live = await startLive(handed);
-		if (owner.isRetired) await fromHostCall(() => live.stop());
+		if (owner.isRetired) {
+			releaseHandle(() => live.stop());
+			// The session's refusal, before anything of the live session is read.
+			return sessionHostCall(owner, () => {
+				throw new Error(`${subject}: the session ended while its live call was starting.`);
+			});
+		}
 		const session: Decided<ExtensionLiveSession> = {
 			sdpAnswer: String(live.sdpAnswer),
 			voice: String(live.voice),
 			stop: () => live.stop(),
 		};
-		return handHostFacade(session);
+		return releaseIfUndelivered(handHostFacade(session), () => live.stop());
 	};
 }
 
@@ -1349,12 +1368,31 @@ const HOST_UI_KEY = Symbol("omp.extension.hostUIKey");
  * sessions on two runners write to the same host UI through two wrappers, so the wrapper's identity
  * cannot say which UI a slot is on. The key is defined on the UI through `ui`: a wrapper that
  * forwards to the host's object — `trackUserWaits`, a transparent Proxy an embedder makes — defines
- * it there, and every wrapper over that object reads the same key. A host UI that cannot take the
- * key (a frozen one) is keyed by the UI `trackUserWaits` wrapped ({@link hostUIOf}).
+ * it there, and every wrapper over that object reads the same key.
+ *
+ * The key is the object's own: read from its own property table, never through its prototype
+ * chain, so two host UIs made from one prototype (`Object.create(parent)`) are two keys even once
+ * the prototype has one. A host UI that cannot take a key — one made non-extensible, such as the
+ * frozen no-UI object every runner without a UI shares — is keyed by its identity, seen through
+ * `trackUserWaits` ({@link hostUIOf}). (A frozen UI is never wrapped by `trackUserWaits`: the Proxy
+ * invariant forbids answering its frozen members with wrappers, and a runner wraps only a UI it is
+ * given.)
+ *
+ * What no key can see through is a wrapper that leaves no trace on the host: an object that
+ * forwards by copying its members — `{ ...hostUI, setStatus: hostUI.setStatus.bind(hostUI) }` —
+ * or a Proxy over a host that cannot take a key (a frozen one), one per runner. Nothing on such a
+ * wrapper names the host behind it — a bound function's target and a Proxy's target are not
+ * observable — and the members it shares with the host are shared just as much by unrelated UIs
+ * made from the same base, which must stay apart (the `Object.create(parent)` case above). So two
+ * runners over such wrappers hold separate slots, and one session's end can clear a slot another
+ * set since through its own wrapper. No shipped host builds that: the TUI drives one runner, a
+ * subagent's runner holds the shared no-UI object, and ACP's per-session UIs set no slots. An
+ * embedder that runs two agents over one UI hands each the same object, or a Proxy over an object
+ * that can take a key.
  */
 function hostUIKey(ui: ExtensionUIContext): object {
-	const known: unknown = Reflect.get(ui, HOST_UI_KEY);
-	if (typeof known === "object" && known !== null) return known;
+	const own: unknown = Reflect.getOwnPropertyDescriptor(ui, HOST_UI_KEY)?.value;
+	if (typeof own === "object" && own !== null) return own;
 	const key = {};
 	return Reflect.defineProperty(ui, HOST_UI_KEY, { value: key }) ? key : hostUIOf(ui);
 }

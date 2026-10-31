@@ -37,6 +37,12 @@ function respond(pendingRequests: Map<string, PendingExtensionRequest>, id: stri
 const CHILD_DEADLINE_MS = Number(Bun.env.OMP_TEST_CHILD_DEADLINE_MS) || 120_000;
 /** The test's own timeout: past the child's deadline, so the deadline's message is what fails it. */
 const CHILD_TEST_TIMEOUT_MS = CHILD_DEADLINE_MS + 15_000;
+/**
+ * The runtime's own reaper for each child (`Bun.spawn`'s `timeout`), past the deadline so the
+ * deadline's message is what a slow child fails with: it stops a child no test is left to stop —
+ * one whose test threw before its deadline was armed, or one the test runner abandoned.
+ */
+const CHILD_REAP_MS = CHILD_DEADLINE_MS + 10_000;
 
 /**
  * The deadline for one omp child ({@link CHILD_DEADLINE_MS}). When it passes the child is stopped,
@@ -185,6 +191,7 @@ await runRpcMode(session, {
 				stdin: "pipe",
 				stdout: "pipe",
 				stderr: "pipe",
+				timeout: CHILD_REAP_MS,
 			});
 			using deadline = childDeadline(child, "RPC UI fixture");
 			const stderr = new Response(child.stderr).text();
@@ -267,6 +274,7 @@ await runRpcMode(session);
 			stdin: "pipe",
 			stdout: "pipe",
 			stderr: "pipe",
+			timeout: CHILD_REAP_MS,
 		});
 	}
 
@@ -523,11 +531,12 @@ export default function(pi) {
 					stdin: "pipe",
 					stdout: "pipe",
 					stderr: "pipe",
+					timeout: CHILD_REAP_MS,
 				},
 			);
+			using deadline = childDeadline(child, "RPC login fixture");
 			const stdout = new Response(child.stdout).body;
 			if (!stdout) throw new Error("RPC login fixture did not expose stdout");
-			using deadline = childDeadline(child, "RPC login fixture");
 			const stderr = new Response(child.stderr).text();
 			const inputTitles: string[] = [];
 			let secretResponse: unknown;
@@ -804,11 +813,12 @@ describe("RPC ask dialog", () => {
 					stdin: "pipe",
 					stdout: "pipe",
 					stderr: "pipe",
+					timeout: CHILD_REAP_MS,
 				},
 			);
+			using deadline = childDeadline(child, "RPC ask fixture");
 			const stdout = new Response(child.stdout).body;
 			if (!stdout) throw new Error("RPC ask fixture did not expose stdout");
-			using deadline = childDeadline(child, "RPC ask fixture");
 			const stderr = new Response(child.stderr).text();
 			const send = async (frame: object) => {
 				child.stdin.write(`${JSON.stringify(frame)}\n`);

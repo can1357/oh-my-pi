@@ -98,11 +98,17 @@ What you register, and when, decides how long it lasts:
   `ctx.modelRegistry.resolver()` makes, a model's `resolveHeaders`, the disposer
   `ui.onTerminalInput()` returns, a `localProtocolOptions` member — is your session's call and
   refuses once it has ended, wherever you call it from; anything else it answers with is a copy or
-  an object of your own. An answer that arrives later is checked again when it arrives: a call
+  an object of your own. An answer that arrives later is checked again when it is delivered: a call
   your session made while it was live — `getApiKeyForProvider()`, a dialog, `compact()` — rejects,
-  saying the session has ended, if the session has ended by the time the host answers, rather than
-  handing you what the host worked out afterwards. A live call still starting when its session ends
-  is ended by the host, since nobody is left to end it. What answers from the context itself still
+  saying the session has ended, if the session has ended by the time the answer would reach you,
+  rather than handing you what the host worked out afterwards. What is checked is delivery, not
+  the moment the host settled: an answer the host had already settled is refused too if the session
+  ends before it reaches you. A call you do not await is refused the same way, but its rejection
+  ends only that call, never your session or the process; await it to learn how it ended. A live
+  call is never left running with its handle refused: still starting when its session ends, or
+  settled just before the end, the host ends it. A host answer whose promise names its own
+  constructor is refused rather than followed, since following it would run that constructor.
+  What answers from the context itself still
   answers: `agent` (a copy of the identity the host supplied), `clearTimer`, and `mode` and
   `hasUI`, which once the session has ended answer what they did when the context was made, not
   what the host was rebound to.

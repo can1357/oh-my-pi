@@ -34,10 +34,12 @@ import {
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { wireJsonSchemaOptions } from "@oh-my-pi/pi-ai/utils/schema";
 import type { NativeToolView } from "@oh-my-pi/pi-tui/tools/renderer";
+import { logger } from "@oh-my-pi/pi-utils";
 import { MODEL_ROW } from "../../config/model-registry";
 import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
 import type { CustomMessagePayload } from "../../session/messages";
+import { markHandled } from "../../tools/run-scope";
 import type {
 	CacheWarmingDecisionEventResult,
 	SessionBeforeBranchResult,
@@ -543,12 +545,57 @@ function copiedFailure(error: unknown): unknown {
 const nativeThen = Promise.prototype.then;
 
 /**
+ * Whether the boundary can follow `value` to its settlement reading nothing `value` supplies: a
+ * promise the runtime made (not a Proxy over one), whose prototype is `Promise.prototype` and which
+ * names no constructor of its own. The runtime's `then` finds the constructor of the promise it
+ * derives through `value.constructor[Symbol.species]`, so a promise naming its own constructor —
+ * or inheriting one from another prototype — would run that constructor, and could hand back
+ * whatever it returns before any settlement is seen. Every check here reads only the runtime's own
+ * slots and `value`'s own property table, so asking runs nothing of `value`'s. A `then` of its own
+ * is not read by the runtime's `then`, so it does not stop a promise being followed.
+ */
+function followable(value: unknown): value is Promise<unknown> {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		!types.isProxy(value) &&
+		types.isPromise(value) &&
+		Object.getPrototypeOf(value) === Promise.prototype &&
+		!Object.hasOwn(value, "constructor")
+	);
+}
+
+/**
+ * `value`'s settlement, followed as {@link followable} allows: `onSettled` with what it fulfils
+ * with, `onFailed` with what it rejects with. What this answers is a promise the runtime made, and
+ * observed ({@link markHandled}), so a rejection a caller drops ends nothing but that call — the
+ * process treats an unobserved rejection as fatal. A promise that cannot be followed without
+ * running something of its own is refused, by a rejection saying so.
+ */
+function followed(
+	value: Promise<unknown>,
+	onSettled: ((settled: unknown) => unknown) | undefined,
+	onFailed: (failure: unknown) => unknown,
+): Promise<unknown> {
+	if (!followable(value)) {
+		return markHandled(
+			Promise.reject(
+				new Error(
+					"A host answer whose promise names its own constructor or prototype cannot be followed without running them, so it is not handed over.",
+				),
+			),
+		);
+	}
+	return markHandled(Reflect.apply(nativeThen, value, [onSettled, onFailed]) as Promise<unknown>);
+}
+
+/**
  * Runs one call into the host for an extension, and hands its failure over as a copy
  * ({@link copiedFailure}) — thrown synchronously or by a returned promise's rejection — never the
  * host's own exception, which may hold the host's callables. What it answers is the caller's to
  * copy. A copy is taken around the host call itself: copying only what the call returned leaves
- * the failure it raised before returning. Only a promise the runtime made is chained on, and with
- * the runtime's own `then`.
+ * the failure it raised before returning. A returned promise is followed only as {@link followed}
+ * allows, and what this answers for it is observed.
  */
 export function fromHostCall<T>(call: () => T): T {
 	let result: T;
@@ -557,15 +604,51 @@ export function fromHostCall<T>(call: () => T): T {
 	} catch (error) {
 		throw copiedFailure(error);
 	}
-	if (types.isPromise(result)) {
-		return Reflect.apply(nativeThen, result, [
-			undefined,
-			(error: unknown) => {
-				throw copiedFailure(error);
-			},
-		]) as T;
+	if (!types.isProxy(result) && types.isPromise(result)) {
+		return followed(result, undefined, (error: unknown) => {
+			throw copiedFailure(error);
+		}) as T;
 	}
 	return result;
+}
+
+/**
+ * What the host is to do when the boundary does not deliver a handle it built — refused at exit,
+ * because the session that asked for it has gone by the time it settles ({@link crossing}). A
+ * handle to something that has started (a live call) is left running by a refusal, and the
+ * extension, refused the handle, cannot end it: so the host ends it. One-shot.
+ */
+const releasesIfUndelivered = new WeakMap<object, () => unknown>();
+
+/** `handle`, with `release` for the host to run if the boundary does not deliver it
+ *  ({@link releasesIfUndelivered}). */
+export function releaseIfUndelivered<T extends object>(handle: T, release: () => unknown): T {
+	releasesIfUndelivered.set(handle, release);
+	return handle;
+}
+
+/** Runs the release registered for `value`, if any, once ({@link releaseHandle}). */
+function releaseUndelivered(value: unknown): void {
+	if ((typeof value !== "object" || value === null) && typeof value !== "function") return;
+	const release = releasesIfUndelivered.get(value);
+	if (!release) return;
+	releasesIfUndelivered.delete(value);
+	releaseHandle(release);
+}
+
+/** Runs `release`, the host ending something no extension holds a handle to any more. It is not
+ *  awaited; a release that fails is the host's own cleanup failing, with no extension left to
+ *  tell, so it is logged. */
+export function releaseHandle(release: () => unknown): void {
+	const failed = (error: unknown): void => {
+		logger.warn("Releasing an undelivered extension handle failed", { error: String(error) });
+	};
+	try {
+		const result = fromHostCall(release);
+		if (followable(result)) Reflect.apply(nativeThen, result, [undefined, failed]);
+	} catch (error) {
+		failed(error);
+	}
 }
 
 /** The constructor of every `async` function, so a facade can tell which of its members answer
@@ -663,12 +746,17 @@ export function isImmutableData(value: object): boolean {
  * - a function — a resolver the registry made, a disposer the host returned — as a callable that
  *   calls it through `call`: a session's member answers with a function that is that session's
  *   call too, refused once it has gone, its failure a copy, what it answers crossing by this rule;
- * - a promise the runtime made, as a promise of what it settles with, which crosses at exit as it
- *   did at entry: through `call` again, so an answer that settles once its session has gone — a
- *   credential the registry resolved against the next session's state, a host object whose getter
- *   would run — is refused before anything of it is read, and a rejection is a copy. The boundary
- *   chains with the runtime's own `then` ({@link nativeThen}), so a value that only says it is a
- *   promise — a `then` of its own, a Proxy over a promise — is not one, and is data like any other;
+ * - a promise, as a promise of what it settles with, which crosses at exit as it did at entry:
+ *   through `call` again, so an answer delivered once its session has gone — a credential the
+ *   registry resolved against the next session's state, a host object whose getter would run — is
+ *   refused before anything of it is read, and a rejection is a copy. What is checked is delivery,
+ *   not the instant of settlement: a promise already fulfilled is refused too if its session ends
+ *   before the reaction that would deliver it runs. A handle the boundary built and does not
+ *   deliver is released by the host ({@link releaseIfUndelivered}): a live call refused at exit is
+ *   ended, not stranded. The promise is followed reading nothing it supplies ({@link followed}): a
+ *   value that only says it is a promise — a `then` of its own on something else, a Proxy over a
+ *   promise — is not one, and is data like any other; a promise naming its own constructor is
+ *   refused. What the extension is handed is observed, so a rejection it drops ends only that call;
  * - anything else, as a copy ({@link copyHostData}) in which what the boundary hands as it is
  *   stays itself.
  */
@@ -676,14 +764,22 @@ function crossing(value: unknown, call: HostCall): unknown {
 	if (value === null || (typeof value !== "object" && typeof value !== "function")) return value;
 	if (handedAsIs.has(value)) return value;
 	if (typeof value === "function") return hostCallable(value, call, call);
-	if (types.isPromise(value)) {
-		return Reflect.apply(nativeThen, value, [
-			(settled: unknown) => call(() => crossing(settled, call)),
+	if (!types.isProxy(value) && types.isPromise(value)) {
+		return followed(
+			value,
+			(settled: unknown) => {
+				try {
+					return call(() => crossing(settled, call));
+				} catch (refusal) {
+					releaseUndelivered(settled);
+					throw refusal;
+				}
+			},
 			(failure: unknown) =>
 				call(() => {
 					throw failure;
 				}),
-		]);
+		);
 	}
 	if (isImmutableData(value)) return value;
 	return new HostCopier(undefined, undefined, true).copy(value);
@@ -698,12 +794,15 @@ function shapedAs<F extends Function>(wrapper: F, fn: Function): F {
 
 /** `fn` as a facade hands it: called through `call` on the receiver it is called on, its failure a
  *  copy, and what it answers crossing through `onward` ({@link crossing}). An `async` function
- *  stays one, so it refuses by rejecting, as every other failure of it does. */
+ *  still answers with a promise, so it refuses by rejecting, as every other failure of it does; that
+ *  promise is observed ({@link markHandled}), so a call an extension does not await ends nothing
+ *  but itself when it is refused. */
 function hostCallable(fn: Function, call: HostCall, onward: HostCall): Function {
 	const callable =
 		fn instanceof (AsyncFunction as FunctionConstructor)
-			? async function (this: unknown, ...args: unknown[]): Promise<unknown> {
-					return call(() => crossing(Reflect.apply(fn, this, args), onward));
+			? function (this: unknown, ...args: unknown[]): Promise<unknown> {
+					const receiver = this;
+					return markHandled((async () => call(() => crossing(Reflect.apply(fn, receiver, args), onward)))());
 				}
 			: function (this: unknown, ...args: unknown[]): unknown {
 					return call(() => crossing(Reflect.apply(fn, this, args), onward));
@@ -1116,16 +1215,19 @@ function handHostResolver(
 	model: Model<Api>,
 	call: HostCall,
 ): NonNullable<Model<Api>["resolveHeaders"]> {
-	return handAsIs(async (signal?: AbortSignal) => {
-		const followed = signal === undefined ? undefined : AbortSignal.any([signal]);
+	const resolve = async (signal?: AbortSignal): Promise<Record<string, string> | undefined> => {
+		const followedSignal = signal === undefined ? undefined : AbortSignal.any([signal]);
 		// The resolver is the host's code: refused once the session `call` answers for has gone, what
 		// it throws is the host's object and crosses as a copy, and what it answers crosses by the one
 		// rule ({@link crossing}) — at exit too, so headers resolved after the session has gone are not
 		// its answer.
-		return call(() => crossing(Reflect.apply(resolver, model, [followed]), call)) as Promise<
+		return call(() => crossing(Reflect.apply(resolver, model, [followedSignal]), call)) as Promise<
 			Record<string, string> | undefined
 		>;
-	});
+	};
+	// Observed, as every promise the boundary hands is: a resolver nobody awaits ends nothing when
+	// it is refused.
+	return handAsIs((signal?: AbortSignal) => markHandled(resolve(signal)));
 }
 
 /** The keys a property read of `value` answers for: its own string-keyed properties, enumerable
@@ -1882,7 +1984,13 @@ function handChildHandle(
 		effect: copyHostData(handle.effect),
 		// Asked for when read, so a rejection nobody reads is not an unhandled one.
 		get outcome() {
-			handedOutcome ??= outcome.then(value => copyHostData(value));
+			handedOutcome ??= followed(
+				outcome,
+				value => copyHostData(value),
+				failure => {
+					throw copiedFailure(failure);
+				},
+			) as Promise<SpeculativePhysicalOutcome>;
 			return handedOutcome;
 		},
 		commit: async actualArgs => {
