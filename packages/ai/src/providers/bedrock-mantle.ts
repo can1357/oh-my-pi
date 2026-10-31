@@ -1,5 +1,6 @@
 import { NO_AUTH_SENTINEL } from "../auth-retry";
 import { type AwsBedrockProviderOptions, resolveAwsBearerToken } from "../registry/aws";
+import { gatedFetch } from "../request-hold";
 import type { FetchImpl, Model } from "../types";
 import { resolveAwsRegion } from "../utils/aws-profile";
 import { invalidateAwsCredentialCache, resolveAwsCredentials } from "./aws-credentials";
@@ -24,7 +25,8 @@ async function requestBody(input: string | URL | Request, init?: RequestInit): P
 }
 
 function createSignedFetch(options: BedrockMantleOptions, region: string): FetchImpl {
-	const baseFetch = options.fetch ?? (globalThis.fetch as FetchImpl);
+	// model-request: transport stream — Bedrock Mantle's signed requests.
+	const baseFetch = gatedFetch(options.fetch);
 	const signedFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
 		const url = new URL(input instanceof Request ? input.url : input.toString());
 		const method = init?.method ?? (input instanceof Request ? input.method : "POST");
@@ -32,11 +34,12 @@ function createSignedFetch(options: BedrockMantleOptions, region: string): Fetch
 		for (const [name, value] of new Headers(init?.headers)) headers.set(name, value);
 		headers.delete("authorization");
 		const body = await requestBody(input, init);
+		// The credential lookup is shared work, which a gated fetch would refuse: it gets the caller's fetch.
 		const credentials = await resolveAwsCredentials({
 			profile: options.providerOptions?.profile,
 			region,
 			signal: options.signal,
-			fetch: baseFetch,
+			fetch: options.fetch,
 		});
 		const signed = await signRequest({
 			method,
@@ -74,7 +77,8 @@ export function createBedrockMantleAuthenticatedFetch(options: BedrockMantleOpti
 	const bearerToken = resolveBearerToken(options);
 	if (!bearerToken) return createSignedFetch(options, region);
 
-	const baseFetch = options.fetch ?? (globalThis.fetch as FetchImpl);
+	// model-request: transport stream — Bedrock Mantle's bearer-authenticated requests.
+	const baseFetch = gatedFetch(options.fetch);
 	const authenticatedFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
 		const headers = new Headers(input instanceof Request ? input.headers : undefined);
 		for (const [name, value] of new Headers(init?.headers)) headers.set(name, value);

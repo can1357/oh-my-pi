@@ -191,6 +191,7 @@ export async function fetchFactoryDroidModels(
 ): Promise<ModelSpec<"factory-droid-agent">[] | null> {
 	const token = options.apiKey?.trim();
 	if (!token) return null;
+	// model-request: none — model discovery (feature flags and models), not inference.
 	const fetchImpl = options.fetch ?? fetch;
 	const headers = { Authorization: `Bearer ${token}`, ...factoryDroidClientHeaders(options.orgId) };
 	const apiBaseUrl = factoryDroidApiBaseUrl(options.region);

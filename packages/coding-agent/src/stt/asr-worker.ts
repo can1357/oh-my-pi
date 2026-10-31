@@ -274,6 +274,7 @@ async function downloadSherpaFile(
 	requestId: string,
 ): Promise<void> {
 	const url = `${HF_RESOLVE_BASE}/${repo}/resolve/main/${filename}`;
+	// model-request: none — downloads a local speech-recognition model's weights.
 	const response = await fetch(url, { redirect: "follow" });
 	if (!response.ok || !response.body) {
 		throw new Error(`Failed to download ${filename} (${repo}): HTTP ${response.status}`);

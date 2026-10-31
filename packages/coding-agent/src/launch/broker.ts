@@ -407,6 +407,7 @@ async function releaseBrokerLease(lease: BrokerLease): Promise<void> {
 
 function connectPort(host: string, port: number): Promise<boolean> {
 	const { promise, resolve } = Promise.withResolvers<boolean>();
+	// model-request: none — probes whether the session broker's port accepts a connection, a local service.
 	const socket = net.createConnection({ host, port });
 	let settled = false;
 	const finish = (connected: boolean): void => {

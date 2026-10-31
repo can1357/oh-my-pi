@@ -28,6 +28,7 @@ const directAccessCache = new Map<string, DirectAccessToken>();
 
 async function getDirectAccessToken(
 	gitlabAccessToken: string,
+	// model-request: none — exchanges a GitLab token for a direct-access token, not a model request.
 	fetchImpl: FetchImpl = fetch,
 ): Promise<DirectAccessToken> {
 	const cached = directAccessCache.get(gitlabAccessToken);

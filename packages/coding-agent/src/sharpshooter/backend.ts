@@ -89,6 +89,9 @@ export const sharpshooterBackend: MemoryBackend = {
 				modelRegistry,
 				sessionId: session.sessionId,
 			});
+			// Let go of the scheduler when the session begins disposing, not later in dispose(): the last session to let
+			// go aborts a consolidation in flight. Releasing twice is harmless.
+			session.addDisposer(disposeScheduler);
 			try {
 				const unsubscribe = session.subscribe(event => {
 					// message_start is the only event that carries the committed user
@@ -142,6 +145,7 @@ export const sharpshooterBackend: MemoryBackend = {
 			logger.debug("Sharpshooter: consolidation skipped without an active session.");
 			return;
 		}
+		// model-request: session — a forced consolidation (`/memory enqueue`), cancelled when the session begins disposing.
 		await runSharpshooterConsolidation({
 			agentDir,
 			cwd,
@@ -149,6 +153,7 @@ export const sharpshooterBackend: MemoryBackend = {
 			modelRegistry: session.modelRegistry,
 			sessionId: session.sessionId,
 			force: true,
+			signal: session.disposeSignal,
 		});
 	},
 

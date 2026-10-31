@@ -259,6 +259,8 @@ describe("LiveSessionController with a caller-owned peer", () => {
 		const agentSession = {
 			modelRegistry: { authStorage: {} },
 			sessionId: "s1",
+			// The call's signal joins the controller's stop to the session's disposal signal.
+			disposeSignal: new AbortController().signal,
 			subscribe: () => () => {},
 			sendCustomMessage: async (message: { content: string }) => {
 				delegated.push(message.content);

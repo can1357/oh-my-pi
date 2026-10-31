@@ -5,6 +5,7 @@ import {
 	type GitLabDuoWorkflowNamespaceSelection,
 } from "@oh-my-pi/pi-catalog/discovery/gitlab-duo-workflow";
 import * as AIError from "../error";
+import { admitSend, bindSendAdmission, cutIfHeldBeforeResponse, gatedFetch } from "../request-hold";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import type {
 	Api,
@@ -1041,7 +1042,8 @@ async function runGitLabDuoWorkflow(
 	const apiKey = options.apiKey;
 	if (!apiKey) throw new AIError.MissingApiKeyError("gitlab-duo-agent");
 	const baseUrl = normalizeGitLabBaseUrl(model.baseUrl || DEFAULT_GITLAB_BASE_URL);
-	const fetchImpl = options.fetch ?? fetch;
+	// model-request: transport stream — the GitLab Duo workflow stream's requests.
+	const fetchImpl = gatedFetch(options.fetch);
 	const providerSessionState = getGitLabDuoWorkflowProviderSessionState(
 		options.providerSessionState,
 		baseUrl,
@@ -1355,6 +1357,10 @@ async function runGitLabDuoWorkflow(
 	let settledNormally = false;
 	try {
 		for (let attempt = 0; attempt < 12; attempt++) {
+			// A held scope opens no socket (see `request-hold.ts`): checked with no await before the
+			// socket is created, so a hold that began during the setup above still stops it.
+			const refusal = admitSend(options.signal);
+			if (refusal) await refusal;
 			const ws = openGitLabDuoWorkflowSocket(workflowConnection.baseUrl ?? baseUrl, {
 				token: workflowConnection.token,
 				projectId: webSocketProjectId,
@@ -1903,6 +1909,7 @@ function defaultGitLabDuoWorkflowWebSocketFactory(
 	url: string,
 	options: GitLabDuoWorkflowWebSocketFactoryOptions,
 ): GitLabDuoWorkflowWebSocketLike {
+	// model-request: transport stream — the GitLab Duo workflow stream's socket.
 	return new (WebSocket as unknown as new (
 		url: string,
 		options: Bun.WebSocketOptions,
@@ -2041,6 +2048,23 @@ export function runGitLabDuoWorkflowSocket(
 			error => settle("closed", error),
 		);
 	};
+	// A held scope sends no frame (see `request-hold.ts`): each send asks the hold of the request that
+	// opened this socket, and the sender's own, with nothing between the answer and the send. Refused,
+	// the frame is never sent: the refusal ends this turn when it rejects (at once in shared work, when
+	// the scope ends while held).
+	const admit = bindSendAdmission();
+	const send = (frame: unknown): void => {
+		const refusal = admit(options.signal);
+		if (refusal) {
+			void refusal.catch(error => {
+				close();
+				settle("closed", error);
+			});
+			return;
+		}
+		ws.send(JSON.stringify(frame));
+	};
+	let releaseHoldCut = (): void => {};
 	if (replayMessages && replayMessages.length > 0) {
 		ws.onopen = null;
 		void (async () => {
@@ -2086,11 +2110,17 @@ export function runGitLabDuoWorkflowSocket(
 		// inline flow only ever has one.) DWS matches it by requestID to the awaiting
 		// outbox future and the workflow continues on the same connection.
 		const responses = Array.isArray(resumeResponse) ? resumeResponse : [resumeResponse];
-		for (const response of responses) {
-			ws.send(JSON.stringify(response));
-		}
+		for (const response of responses) send(response);
 	} else {
+		// A fresh socket: its upgrade was admitted when the socket was created, but the request lands
+		// only after the handshake. A hold that begins before the socket opens cuts it, like any request
+		// still waiting for its response (see `request-hold.ts`).
+		releaseHoldCut = cutIfHeldBeforeResponse(reason => {
+			close();
+			settle("closed", reason);
+		});
 		ws.onopen = () => {
+			releaseHoldCut();
 			traceGitLabDuoWorkflow("websocket.open", {
 				workflowId: startPayload.workflowID,
 				workflowDefinition: startPayload.workflowDefinition,
@@ -2100,11 +2130,12 @@ export function runGitLabDuoWorkflowSocket(
 				mcpTools: startPayload.mcpTools.length,
 				preapprovedTools: startPayload.preapproved_tools.length,
 			});
-			ws.send(JSON.stringify({ startRequest: startPayload }));
+			send({ startRequest: startPayload });
 		};
 	}
 	resetIdleTimer();
 	return promise.finally(() => {
+		releaseHoldCut();
 		clearIdleTimer();
 		options.signal?.removeEventListener("abort", abort);
 	});

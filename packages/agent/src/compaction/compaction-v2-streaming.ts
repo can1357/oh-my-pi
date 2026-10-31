@@ -9,6 +9,7 @@
 
 import type { Api, CodexCompactionContext, FetchImpl, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { gatedFetch } from "@oh-my-pi/pi-ai/request-hold";
 import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-compaction";
 import { applyCodexResponsesLiteShape } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
 import type {
@@ -277,13 +278,14 @@ export async function requestCompactionV2Streaming(
 		codexAccessPrograms?: boolean;
 	},
 ): Promise<CompactionV2Response> {
-	let fetchImpl: FetchImpl = options?.fetch ?? globalThis.fetch;
+	// model-request: transport requestCompactionV2Streaming — the compaction request.
+	let fetchImpl: FetchImpl = gatedFetch(options?.fetch);
 	if (isBedrockOpenAIUrl(model.baseUrl)) {
-		({
-			model,
-			apiKey,
-			fetch: fetchImpl,
-		} = await prepareBedrockCompactionRequest(model, apiKey, options?.fetch, signal));
+		// The Bedrock preparation resolves credentials in shared work, which a gated fetch would refuse.
+		const prepared = await prepareBedrockCompactionRequest(model, apiKey, options?.fetch, signal);
+		({ model, apiKey } = prepared);
+		// model-request: transport requestCompactionV2Streaming — the compaction request, Bedrock-signed.
+		fetchImpl = gatedFetch(prepared.fetch);
 	}
 	const endpoint = getCompactionV2Endpoint(model);
 	if (!endpoint) {

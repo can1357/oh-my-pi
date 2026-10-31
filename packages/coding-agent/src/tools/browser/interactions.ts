@@ -282,6 +282,7 @@ function checkClickActionable(
 }
 
 /** {@link checkClickActionable} with {@link composedContains} bound in, as one self-contained page function. */
+// model-request: none — builds a page function that Puppeteer serializes into the browser page; it never runs in this process.
 const clickActionableInPage = new Function(
 	"el",
 	"flags",

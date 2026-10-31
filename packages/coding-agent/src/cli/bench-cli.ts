@@ -1111,6 +1111,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 		((code: number) => {
 			process.exitCode = code;
 		});
+	// model-request: no-session — `omp bench` drives its own requests from the command line; no session exists.
 	const streamFn = deps.streamSimple ?? streamSimple;
 	const now = deps.now ?? (() => performance.now());
 	const interactive = deps.stdoutIsTTY ?? process.stdout.isTTY === true;

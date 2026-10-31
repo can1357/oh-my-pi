@@ -69,6 +69,7 @@ async function resolveFont(explicit: string | undefined): Promise<string> {
 	const cached = path.join(cacheDir, `${NERD_FONTS_VERSION}-${NERD_FONTS_MEMBER}`);
 	if (await Bun.file(cached).exists()) return cached;
 	console.error(`fetching ${NERD_FONTS_ARCHIVE}`);
+	// model-request: none — downloads a font archive at build time, not a model request.
 	const response = await fetch(NERD_FONTS_ARCHIVE);
 	if (!response.ok) throw new Error(`download failed: ${response.status} ${response.statusText}`);
 	await fs.mkdir(cacheDir, { recursive: true });

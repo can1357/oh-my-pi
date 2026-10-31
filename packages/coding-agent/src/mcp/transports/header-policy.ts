@@ -108,6 +108,7 @@ export async function mcpFetch(
 	originLocked: boolean,
 ): Promise<Response> {
 	if (!originLocked) {
+		// model-request: none — an MCP server's HTTP transport, not a model request.
 		return fetch(url, { ...init, headers: mergeMCPHeaders(sources), timeout: false });
 	}
 
@@ -116,6 +117,7 @@ export async function mcpFetch(
 	for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
 		const attachConfigured = new URL(currentUrl).origin === configuredOrigin;
 		const headers = mergeMCPHeaders(attachConfigured ? sources : { generated: sources.generated });
+		// model-request: none — an MCP server's HTTP transport, not a model request.
 		const response = await fetch(currentUrl, { ...init, headers, redirect: "manual", timeout: false });
 		if (!REDIRECT_STATUSES[response.status]) return response;
 

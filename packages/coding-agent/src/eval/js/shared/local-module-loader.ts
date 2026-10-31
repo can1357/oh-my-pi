@@ -33,6 +33,7 @@ export class LocalModuleLoader {
 	#linkChain: Promise<void> = Promise.resolve();
 
 	constructor(sessionId: string) {
+		// model-request: none — makes the process global the context eval modules link against; this sends nothing, and their fetches go through the global the request hold wraps.
 		this.#context = vm.createContext(globalThis);
 		this.#sessionTag = Bun.hash(sessionId).toString(16);
 	}
@@ -239,6 +240,7 @@ export class LocalModuleLoader {
 		const existing = this.#externalModules.get(target);
 		if (existing) return await existing;
 		const loadPromise = (async () => {
+			// model-request: turn — an eval cell's own import of a module it names; it runs inside the cell's tool call (or its job, which a disposing owner holds or cancels).
 			const namespace = await import(target);
 			const exportNames = Object.keys(namespace);
 			const module = new vm.SyntheticModule(

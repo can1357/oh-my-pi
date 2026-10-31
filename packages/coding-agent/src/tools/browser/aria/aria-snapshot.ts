@@ -41,6 +41,7 @@ export interface AriaSnapshotPayload {
  * standalone script in the page world, so refs are backend-local.
  */
 function buildEvaluator(params: string, call: string): (...args: unknown[]) => unknown {
+	// model-request: none — builds a page function that Puppeteer serializes into the browser page; it never runs in this process.
 	return new Function(
 		...params.split(",").map(p => p.trim()),
 		`var module = { exports: {} };\n${ariaBundle}\nreturn module.exports.${call};`,
@@ -51,6 +52,7 @@ function buildEvaluator(params: string, call: string): (...args: unknown[]) => u
 // passed positionally to page.evaluate, never ones nested inside an object.
 const evaluateAriaSnapshot = buildEvaluator("root, request", "ariaSnapshot(root, request)");
 const evaluateResolveRef = buildEvaluator("ref", "resolveAriaRef(ref)");
+// model-request: none — builds a page function that Puppeteer serializes into the browser page; it never runs in this process.
 const evaluateAriaHrefs = new Function(
 	"refs",
 	`var module = { exports: {} };\n${ariaBundle}\nvar hrefs = {}; for (var ref of refs) { var el = module.exports.resolveAriaRef(ref); if (el && el.tagName === "A" && el.href) hrefs[ref] = el.href; } return hrefs;`,

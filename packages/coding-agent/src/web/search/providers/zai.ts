@@ -283,6 +283,8 @@ async function callZaiTool(
 
 async function callZaiSearch(apiKey: string, params: ZaiSearchParams): Promise<unknown> {
 	const count = params.num_results ?? DEFAULT_NUM_RESULTS;
+	// model-request: none — Z.ai's search API (its MCP tool `web_search_prime`), not a model request; each attempt still
+	// passes `params.signal`.
 	const fetchImpl = params.fetch ?? fetch;
 	const attempts: Record<string, unknown>[] = [
 		{ query: params.query, count },

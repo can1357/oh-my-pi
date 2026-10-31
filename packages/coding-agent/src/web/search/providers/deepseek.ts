@@ -83,6 +83,8 @@ async function callDeepSeekSearch(
 	count: number,
 	params: SearchParamsWithFetch,
 ): Promise<DeepSeekSearchResponse> {
+	// model-request: none — DeepSeek's search API (`/v1/tools/search`), not a model request; the vendor's credential does
+	// not make it one.
 	const fetchImpl = params.fetch ?? fetch;
 	const response = await fetchImpl(DEEPSEEK_SEARCH_URL, {
 		method: "POST",

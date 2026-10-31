@@ -205,7 +205,7 @@ export function normalizeConnectedCdpUrl(rawCdpUrl: string): string {
 async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions): Promise<BrowserHandle> {
 	if (kind.kind === "cmux") {
 		const client = new CmuxSocketClient({ socketPath: kind.socketPath, password: kind.password });
-		await client.connect();
+		await client.connect(opts.signal);
 		return {
 			key: browserKey(kind),
 			kind,

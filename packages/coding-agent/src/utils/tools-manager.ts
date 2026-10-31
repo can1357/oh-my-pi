@@ -182,6 +182,7 @@ export async function getLatestVersion(repo: string, signal?: AbortSignal): Prom
 	}
 	let response: Response;
 	try {
+		// model-request: none — release metadata for a bundled tool.
 		response = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
 			headers,
 			signal: ptree.combineSignals(signal, TOOL_METADATA_TIMEOUT_MS),
@@ -216,6 +217,7 @@ export async function downloadFile(url: string, dest: string, options: DownloadF
 	const downloadSignal = ptree.combineSignals(signal, timeoutMs);
 	let response: Response;
 	try {
+		// model-request: none — downloads a bundled tool.
 		response = await fetch(url, {
 			signal: downloadSignal,
 		});

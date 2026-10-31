@@ -109,6 +109,7 @@ class SnowflakeOAuthFlow extends OAuthCallbackFlow {
 
 	async exchangeToken(code: string, _state: string, redirectUri: string): Promise<OAuthCredentials> {
 		const signal = this.ctrl.signal;
+		// model-request: none — an OAuth token request, not a model request.
 		const fetchImpl = this.ctrl.fetch ?? fetch;
 		let tokens: SnowflakeTokens;
 		try {
@@ -167,6 +168,7 @@ export async function refreshSnowflakeToken(
 			provider: "snowflake",
 		});
 	}
+	// model-request: none — an OAuth token refresh, not a model request.
 	const response = await fetch(`${accountUrl}/oauth/token-request`, {
 		method: "POST",
 		headers: { "Content-Type": "application/x-www-form-urlencoded" },

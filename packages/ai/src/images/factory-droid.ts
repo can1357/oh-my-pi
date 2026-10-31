@@ -3,6 +3,7 @@ import { prompt, readSseJson } from "@oh-my-pi/pi-utils";
 import { type ApiKey, isApiKeyResolver, resolvedApiKeyBearer, withAuth } from "../auth-retry";
 import type { OAuthRequestIdentity } from "../auth/types";
 import * as AIError from "../error";
+import { gatedFetch } from "../request-hold";
 import { factoryDroidImageRoute } from "../providers/factory-droid";
 import { googleStreamChunkError } from "../providers/google-shared";
 import type { GenerateContentResponse } from "../providers/google-types";
@@ -94,7 +95,8 @@ export async function generateFactoryDroidImage(
 	request: ImageGenerationRequest,
 	options: ImageGenerationOptions,
 ): Promise<ImageGenerationResult> {
-	const fetchImpl = options.fetch ?? fetch;
+	// model-request: transport generateImage — the image request.
+	const fetchImpl = gatedFetch(options.fetch);
 	const inputImages = request.inputImages ?? [];
 	const auth = trackIdentities(options.apiKey);
 	const result = await withAuth(

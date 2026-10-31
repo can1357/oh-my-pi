@@ -45,7 +45,13 @@ describe("role thinking helper propagation", () => {
 			content: [{ type: "text", text: "fix scope handling" }],
 		} as never);
 
-		const message = await generateCommitMessage(`diff --git a/x b/x\n+change\n`, registry as never, settings);
+		const message = await generateCommitMessage(
+			`diff --git a/x b/x\n+change\n`,
+			registry as never,
+			settings,
+			undefined,
+			undefined,
+		);
 		expect(message).toBe("fix scope handling");
 		expect(completeSimpleMock.mock.calls[0]?.[2]).toMatchObject({
 			reasoning: Effort.Minimal,
@@ -64,7 +70,13 @@ describe("role thinking helper propagation", () => {
 			content: [{ type: "text", text: "fix qwen title budget" }],
 		} as never);
 
-		const message = await generateCommitMessage(`diff --git a/x b/x\n+change\n`, registry as never, settings);
+		const message = await generateCommitMessage(
+			`diff --git a/x b/x\n+change\n`,
+			registry as never,
+			settings,
+			undefined,
+			undefined,
+		);
 		expect(message).toBe("fix qwen title budget");
 		expect(completeSimpleMock.mock.calls[0]?.[2]).toMatchObject({
 			maxTokens: 1024,

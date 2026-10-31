@@ -353,8 +353,10 @@ export class JsRuntime {
 		this.#activateGlobals("snapshot user globals");
 		const values: Record<string, unknown> = {};
 		const snapshotState = { nodes: 0, bytes: 0, seen: new Set<object>() };
+		// model-request: none — lists the global's own names to snapshot user globals; the listing sends nothing.
 		for (const key of Object.getOwnPropertyNames(globalThis)) {
 			if (this.#ownedGlobalKeys.has(key) || this.#initialGlobalKeys.has(key)) continue;
+			// model-request: none — reads a user global's descriptor to copy its value; the read sends nothing.
 			const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
 			if (!descriptor || !("value" in descriptor)) continue;
 			const copied = copyShadowValue(descriptor.value, 0, snapshotState);
@@ -397,6 +399,7 @@ export class JsRuntime {
 			localRoots: () => this.#als.getStore()?.localRoots ?? this.#localRoots,
 			emitStatus: event => this.#activeHooks("emitStatus")?.onDisplay({ type: "status", event }),
 		});
+		// model-request: none — records the global's names before the runtime installs its helpers; the listing sends nothing.
 		this.#initialGlobalKeys = new Set(Object.getOwnPropertyNames(globalThis));
 		this.#install(opts.extraGlobals);
 	}
@@ -503,6 +506,7 @@ export class JsRuntime {
 	/** Read a prelude-owned global from this runtime's active global set. */
 	getGlobal(name: string): unknown {
 		this.#activateGlobals("read runtime global");
+		// model-request: none — reads a prelude-owned helper global by name for an eval cell; the read sends nothing.
 		return Reflect.get(globalThis, name);
 	}
 
@@ -667,12 +671,16 @@ export class JsRuntime {
 				const resolved = await this.#moduleLoader.resolveForRun(baseDir, source);
 				if (resolved.mode === "local") return resolved.value;
 				const target = resolved.target;
+				// model-request: turn — an eval cell's own import of a module it names; it runs inside the cell's tool call
+				// (or its job, which a disposing owner holds or cancels).
 				return options !== undefined ? await import(target, options) : await import(target);
 			},
 			__omp_import_from__: async (moduleUrl: string, source: string, options?: ImportCallOptions) => {
 				const resolved = await this.#moduleLoader.resolveForModule(moduleUrl, source, this.#activeCwd());
 				if (resolved.mode === "local") return resolved.value;
 				const target = resolved.target;
+				// model-request: turn — an eval cell's own import of a module it names; it runs inside the cell's tool call
+				// (or its job, which a disposing owner holds or cancels).
 				return options !== undefined ? await import(target, options) : await import(target);
 			},
 			__omp_get_require__: (moduleUrl?: string) => this.#activeRequire(moduleUrl),
@@ -734,6 +742,7 @@ export class JsRuntime {
 			this.#ownGlobal(key);
 		}
 
+		// model-request: none — installs the eval runtime's helpers and the caller's extra globals onto the global object; the install sends nothing.
 		Object.assign(globalThis, injected, extraGlobals ?? {});
 		// Prelude assigns console bridge + short aliases (`read`, `write`, `tool`, `print`, ...)
 		// onto globalThis. Must run after helpers are in place.
@@ -783,6 +792,7 @@ interface GlobalStack {
 const GLOBAL_STACKS = new Map<string, GlobalStack>();
 
 function snapshotGlobal(key: string): GlobalSnapshot {
+	// model-request: none — snapshots a reserved helper global so a later release can restore it; the read sends nothing.
 	return {
 		exists: key in globalThis,
 		value: (globalThis as Record<string, unknown>)[key],
@@ -803,12 +813,14 @@ function claimGlobalKey(key: string, owner: symbol): void {
 		stack = { base: snapshotGlobal(key), entries: [] };
 		GLOBAL_STACKS.set(key, stack);
 	}
+	// model-request: none — records a reserved helper global's value for its owner; the read sends nothing.
 	stack.entries.push({ owner, value: (globalThis as Record<string, unknown>)[key] });
 }
 
 function recordGlobalValue(key: string, owner: symbol): void {
 	const stack = GLOBAL_STACKS.get(key);
 	const entry = stack?.entries.findLast(item => item.owner === owner);
+	// model-request: none — records a reserved helper global's value for its owner; the read sends nothing.
 	if (entry) entry.value = (globalThis as Record<string, unknown>)[key];
 }
 

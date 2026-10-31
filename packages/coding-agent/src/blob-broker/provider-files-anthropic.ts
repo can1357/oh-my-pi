@@ -93,6 +93,8 @@ function uploadedFile(request: ProviderFileUploadRequest): File {
 export function createAnthropicFileClient(
 	model: Model,
 	credential: string,
+	// model-request: none — a credentialed upload to Anthropic's file store for the blob broker: provider HTTP, but not
+	// inference.
 	fetchImpl: FetchImpl = globalThis.fetch,
 ): ProviderFileClient | null {
 	if (

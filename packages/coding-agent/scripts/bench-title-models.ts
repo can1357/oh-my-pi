@@ -153,6 +153,7 @@ async function runOllamaLane(baseUrl: string, model: string, prompts: PreparedPr
 	const samples: BenchSample[] = [];
 	for (const item of prompts) {
 		const started = performance.now();
+		// model-request: no-session — a developer benchmark script against a local model server; no session exists.
 		const response = await fetch(new URL("/api/chat", baseUrl), {
 			method: "POST",
 			headers: { "content-type": "application/json" },

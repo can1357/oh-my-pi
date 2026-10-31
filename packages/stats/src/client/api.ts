@@ -64,6 +64,7 @@ async function fetchJson<T>(endpoint: string, options?: RequestInit, previous?: 
 		headers.set("If-None-Match", etag);
 		init = { ...options, headers };
 	}
+	// model-request: none — the stats dashboard's own API, in the browser.
 	const res = await fetch(endpoint, init);
 	if (res.status === 304 && etag) return previous as T;
 	if (!res.ok) {
@@ -130,6 +131,7 @@ export async function getClosable(signal?: AbortSignal): Promise<boolean> {
 /** Close the dashboard: its host takes the page away and stops serving it. */
 export async function closeDashboard(): Promise<void> {
 	const endpoint = `${API_BASE}/close`;
+	// model-request: none — the stats dashboard's own API, in the browser.
 	const res = await fetch(endpoint, { method: "POST", headers: ACTION_HEADERS });
 	if (!res.ok) throw new ApiError(res.status, endpoint, await readErrorMessage(res, endpoint));
 }

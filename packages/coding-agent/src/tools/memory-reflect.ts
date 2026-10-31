@@ -52,7 +52,8 @@ export class MemoryReflectTool implements AgentTool<typeof memoryReflectSchema> 
 					const query = params.context?.trim()
 						? `${params.query.trim()}\n\nAdditional context:\n${params.context.trim()}`
 						: params.query;
-					const results = await state.recallResultsScoped(query);
+					// model-request: turn — the tool call's signal.
+					const results = await state.recallResultsScoped(query, signal);
 					if (results.length === 0) {
 						return {
 							content: [{ type: "text", text: "No relevant information found to reflect on." }],
@@ -76,12 +77,15 @@ export class MemoryReflectTool implements AgentTool<typeof memoryReflectSchema> 
 			}
 
 			try {
-				await ensureBankExists(state.client, state.bankId, state.config, state.banksSet);
+				// model-request: turn — the tool call's signal.
+				await ensureBankExists(state.client, state.bankId, state.config, state.banksSet, signal);
+				// model-request: turn — the tool call's signal.
 				const response = await state.client.reflect(state.bankId, params.query, {
 					context: params.context,
 					budget: state.config.recallBudget,
 					tags: state.recallTags,
 					tagsMatch: state.recallTagsMatch,
+					signal,
 				});
 				const text = response.text?.trim() || "No relevant information found to reflect on.";
 				return {

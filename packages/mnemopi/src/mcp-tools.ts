@@ -543,6 +543,7 @@ async function handleRecall(args: ToolArguments): Promise<ToolResult> {
 		for (const key of ["vec_weight", "fts_weight", "importance_weight"] as const) {
 			if (key in args) options[key.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase())] = args[key];
 		}
+		// model-request: no-session — Mnemopi's MCP server tools; no coding-agent session exists there.
 		const results = (await beam.recall(query, topK, options)).map(row => ({ ...row, bank }));
 		return { status: "ok", query, count: results.length, results: serialize(results), bank };
 	});
@@ -781,6 +782,7 @@ async function handleSharedRecall(args: ToolArguments): Promise<ToolResult> {
 	const query = required(args, "query");
 	if (typeof query !== "string") return query;
 	return withSharedBeam(async beam => {
+		// model-request: no-session — Mnemopi's MCP server tools; no coding-agent session exists there.
 		const results = (await beam.recall(query, Math.trunc(numberArg(args, "limit", 5)))).map(row => ({
 			...row,
 			bank: "surface",

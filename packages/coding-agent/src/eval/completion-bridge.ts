@@ -131,6 +131,18 @@ export function releaseCompletionHandles(ownerId: string): void {
 	}
 }
 
+/**
+ * Refuse eval work the host would own past the cell that asks for it (a `completion()` handle, a
+ * `judgeBatch()` run) once the session has begun disposing: no turn awaits it after its cell, so
+ * it would reach the provider from the closing session. The session stops such work already
+ * running at that point (`AgentSession.beginDispose`).
+ */
+export function assertDetachedEvalWorkAllowed(session: ToolSession, work: string): void {
+	if (session.isDisposed?.()) {
+		throw new ToolError(`This session has begun disposing, so this ${work} was refused: it would outlive its turn.`);
+	}
+}
+
 interface CompletionCandidate {
 	/** Raw fallback-chain selector this candidate was resolved from. */
 	selector: string;
@@ -371,6 +383,7 @@ async function executeCompletion(
 				continue;
 			}
 			if (index > 0) retriesUsed += 1;
+			// model-request: caller executeCompletion — the completion carries the handle signal it is given.
 			response = await instrumentedCompleteSimple(
 				model,
 				{
@@ -455,6 +468,8 @@ export async function runEvalCompletion(
 	}
 
 	return retainCompletionHandle("cmp", options, signal =>
+		// model-request: session — the handle's signal: the cell's joined to the handle's controller, which the
+		// session releases when it begins disposing (the handle outlives the cell, so no turn owns it).
 		executeCompletion(prompt, finalTier, system, schema, candidates, options.session, signal),
 	);
 }
@@ -471,6 +486,7 @@ export function retainCompletionHandle(
 	execute: (signal: AbortSignal) => Promise<EvalCompletionResult>,
 ): EvalCompletionHandleResult {
 	const id = `${prefix}-${Snowflake.next()}`;
+	assertDetachedEvalWorkAllowed(options.session, "background handle");
 	const ownerId = options.session.getAgentId?.() ?? MAIN_AGENT_ID;
 	const controller = new AbortController();
 	const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;

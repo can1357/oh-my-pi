@@ -33,6 +33,7 @@ import { DEVIN_DEFAULT_BASE_URL, devinCliMetadata } from "@oh-my-pi/pi-catalog/w
 import { decodeDevinUnaryMessage } from "@oh-my-pi/pi-catalog/wire/devin-proto";
 import { isRecord, logger, parseStreamingJsonThrottled, sanitizeText } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+import { gatedFetch } from "../request-hold";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
 
 import type {
@@ -238,7 +239,8 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 		};
 
 		try {
-			const fetchImpl = options?.fetch ?? fetch;
+			// model-request: transport stream — the Devin stream's requests.
+			const fetchImpl = gatedFetch(options?.fetch);
 			const baseUrl = (model.baseUrl || DEVIN_API_URL).replace(/\/+$/, "");
 			const auth = await fetchDevinAuthMetadata(options?.apiKey, baseUrl, fetchImpl, options?.signal);
 			const chatBaseUrl = auth.baseUrl ?? baseUrl;

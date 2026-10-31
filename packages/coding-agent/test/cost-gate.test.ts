@@ -579,9 +579,11 @@ describe("cost gate in a running session", () => {
 			const session = await createSession(api, { "session.maxCost": 1 });
 			const output = captureOutput();
 
-			expect(await runPrintMode(session, { mode: "text", initialMessage: "first" })).toBe(
-				PRINT_MODE_COST_CAP_EXIT_CODE,
-			);
+			// The earlier capped run is a plain prompt: print mode disposes the session it ran, and a
+			// disposed session takes no further prompt.
+			await session.prompt("first");
+			await session.waitForIdle();
+			expect(session.costCapRefusal).toBeDefined();
 			cfgSessionMaxCost.override(session.settings, 10);
 			expect(await runPrintMode(session, { mode: "text", initialMessage: "second" })).toBe(0);
 			expect(output.stdout.join("")).toContain("Answer");

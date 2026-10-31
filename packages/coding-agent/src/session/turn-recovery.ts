@@ -1209,6 +1209,7 @@ export class TurnRecovery {
 			const stop = { message: text, request: this.#latestOperatorRequest() };
 			let classification: boolean | undefined;
 			try {
+				// model-request: session — aborted by the post-prompt signal, which `beginDispose()` aborts, or its timeout.
 				classification = await classifyUnexpectedStop(stop, {
 					settings: this.#host.settings,
 					registry: this.#host.modelRegistry,

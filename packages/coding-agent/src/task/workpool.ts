@@ -1,4 +1,5 @@
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
+import { SUBAGENT_TEARDOWN_DECIDES } from "../async";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import workpoolBatchTemplate from "../prompts/tools/workpool-batch.md" with { type: "text" };
 import workpoolTurnResultTemplate from "../prompts/tools/workpool-turn-result.md" with { type: "text" };
@@ -205,7 +206,7 @@ export class WorkPool {
 					signal.removeEventListener("abort", onAbort);
 				}
 			},
-			{ id: this.name, ownerId: this.ownerId, queued: true },
+			{ id: this.name, ownerId: this.ownerId, queued: true, survivesBeginDispose: SUBAGENT_TEARDOWN_DECIDES },
 		);
 		if (id !== this.name) {
 			manager.cancel(id, { ownerId: this.ownerId });
@@ -426,7 +427,7 @@ export class WorkPool {
 				}
 				return this.#settleTurn(agent, batch, result);
 			},
-			{ id: batch.id, agentId: agent.id, ownerId: this.ownerId },
+			{ id: batch.id, agentId: agent.id, ownerId: this.ownerId, survivesBeginDispose: SUBAGENT_TEARDOWN_DECIDES },
 		);
 		batch.jobId = jobId;
 		agent.jobId = jobId;

@@ -16,6 +16,7 @@ import {
 } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import { extractHttpStatusFromError, fetchWithRetry, readSseJson } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+import { gatedFetch } from "../request-hold";
 import { oauthAccountKey } from "../auth/types";
 import type {
 	AntigravityModelWireProfile,
@@ -605,6 +606,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			}
 			// The backend gates newer models on the client version; a process that
 			// skipped discovery (fresh model cache) must still send the current one.
+			// model-request: none — fetches the client version Antigravity requires, not a model request.
 			if (isAntigravity) await ensureAntigravityVersion(options?.fetch ?? fetch, options?.signal);
 			// Antigravity mirrors the native Go client: no `Accept`, gzip only, and
 			// no Claude-thinking beta on Claude 5.x (the compat flag scopes it).
@@ -972,7 +974,8 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							maxAttempts: isLastEndpoint ? MAX_RETRIES + 1 : 1,
 							defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
 							maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
-							fetch: options?.fetch,
+							// model-request: transport stream — the Gemini CLI stream's request.
+							fetch: gatedFetch(options?.fetch),
 							timeout: false,
 						});
 					} finally {
@@ -1021,7 +1024,8 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 								throw new AIError.ConfigurationError("Missing request URL");
 							}
 
-							currentResponse = await (options?.fetch ?? fetch)(requestUrl, {
+							// model-request: transport stream — the Gemini CLI stream's request.
+							currentResponse = await gatedFetch(options?.fetch)(requestUrl, {
 								method: "POST",
 								headers: requestHeaders,
 								body: requestBodyJson,

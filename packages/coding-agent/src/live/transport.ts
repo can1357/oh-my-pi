@@ -1,5 +1,5 @@
 import { type AuthStorage, type OAuthAccess, withOAuthAccess } from "@oh-my-pi/pi-ai";
-import { getProxyForUrl, wrapFetchForProxy } from "@oh-my-pi/pi-ai/utils/proxy";
+import { getProxyForProvider, getProxyForUrl, withProxyInit } from "@oh-my-pi/pi-ai/utils/proxy";
 import {
 	CODEX_BASE_URL,
 	CODEX_CLIENT_VERSION,
@@ -57,7 +57,11 @@ export interface LiveTransportOptions {
 	instructions: string;
 	voice: string;
 	callbacks: LiveTransportCallbacks;
-	signal?: AbortSignal;
+	/**
+	 * The call's lifetime: its controller's `stop()` joined to the session's disposal signal. The credential
+	 * lookup, the signaling request and the sideband socket all stop when it aborts, and nothing is sent after.
+	 */
+	signal: AbortSignal;
 	/**
 	 * SDP offer from a caller-owned WebRTC peer (one Opus audio track plus an `oai-events`
 	 * data channel). When set, no native peer is created: the caller's peer carries the audio,
@@ -112,8 +116,8 @@ function boundedErrorBody(body: string, statusText: string): string {
 	return `${normalized.slice(0, MAX_ERROR_BODY_LENGTH)}…`;
 }
 
-function abortReason(signal: AbortSignal | undefined): Error {
-	if (signal?.reason instanceof Error) return signal.reason;
+function abortReason(signal: AbortSignal): Error {
+	if (signal.reason instanceof Error) return signal.reason;
 	return new DOMException("Live connection aborted", "AbortError");
 }
 
@@ -137,7 +141,7 @@ export class CodexLiveTransport {
 		this.#abortListener = () => {
 			void this.close();
 		};
-		if (!options.signal?.aborted) options.signal?.addEventListener("abort", this.#abortListener, { once: true });
+		if (!options.signal.aborted) options.signal.addEventListener("abort", this.#abortListener, { once: true });
 	}
 
 	/** SDP answer for the caller's peer once a {@link LiveTransportOptions.sdpOffer} call has been signaled. */
@@ -151,7 +155,7 @@ export class CodexLiveTransport {
 		if (this.#connectPromise) return this.#connectPromise;
 		if (this.#state === "closing" || this.#state === "closed")
 			return Promise.reject(new Error("Live transport is closed"));
-		if (this.#options.signal?.aborted) return Promise.reject(abortReason(this.#options.signal));
+		if (this.#options.signal.aborted) return Promise.reject(abortReason(this.#options.signal));
 		this.#state = "connecting";
 		const operation = this.#connect().catch(async error => {
 			await this.close();
@@ -169,7 +173,7 @@ export class CodexLiveTransport {
 			this.#peer = peer;
 			offer = await peer.createOffer();
 		}
-		if (this.#state !== "connecting") throw abortReason(this.#options.signal);
+		this.#throwIfEnded();
 		const signaling = await this.#signal(offer);
 		if (peer) {
 			await peer.acceptAnswer(signaling.answer);
@@ -178,10 +182,18 @@ export class CodexLiveTransport {
 		} else {
 			this.#sdpAnswer = signaling.answer;
 		}
-		if (this.#state !== "connecting") throw abortReason(this.#options.signal);
+		this.#throwIfEnded();
 		await this.#connectSideband(signaling.callId, signaling.access, signaling.attestation);
-		if (this.#state !== "connecting") throw abortReason(this.#options.signal);
+		this.#throwIfEnded();
 		this.#state = "connected";
+	}
+
+	/**
+	 * Throws once the call has closed or its signal has aborted. Every await on the way to a send is followed
+	 * by this check: a credential lookup or a backoff that finishes after `stop()` must send nothing.
+	 */
+	#throwIfEnded(): void {
+		if (this.#state !== "connecting" || this.#options.signal.aborted) throw abortReason(this.#options.signal);
 	}
 
 	#createPeer(): LiveWebRtcPeer {
@@ -206,6 +218,7 @@ export class CodexLiveTransport {
 
 	async #signal(offer: string): Promise<LiveSignalingResult> {
 		const attestation = await generateCodexAttestation();
+		this.#throwIfEnded();
 		return await withOAuthAccess(
 			this.#options.authStorage,
 			LIVE_PROVIDER,
@@ -223,13 +236,20 @@ export class CodexLiveTransport {
 		access: OAuthAccess,
 		attestation: string | undefined,
 	): Promise<LiveSignalingResult> {
+		// `withOAuthAccess` resolves, and may refresh, the credential before each attempt.
+		this.#throwIfEnded();
 		const headers = new Headers({
 			...liveSessionHeaders(access, this.#options.sessionId, this.#realtimeSessionId, attestation),
 			Accept: "*/*",
 			"Content-Type": "application/json",
 		});
-		const fetchImpl = wrapFetchForProxy(fetch, LIVE_PROVIDER);
-		const response = await fetchImpl(SIGNALING_URL, {
+		const proxy = getProxyForProvider(LIVE_PROVIDER);
+		// model-request: session — the live call's signaling, on the call's signal: the controller's stop() joined to the
+		// session's disposal signal.
+		const response = await fetch(SIGNALING_URL, {
+			// The provider's proxy, as `wrapFetchForProxy` adds it. It comes first so nothing it holds can replace the
+			// call's signal below.
+			...(proxy ? withProxyInit(SIGNALING_URL, undefined, proxy) : undefined),
 			method: "POST",
 			headers,
 			body: JSON.stringify({
@@ -256,12 +276,13 @@ export class CodexLiveTransport {
 	async #connectSideband(callId: string, access: OAuthAccess, attestation: string | undefined): Promise<void> {
 		let failure = new Error("Codex live sideband connection failed");
 		for (let attempt = 0; attempt < SIDEBAND_CONNECT_ATTEMPTS; attempt++) {
+			this.#throwIfEnded();
 			try {
 				await this.#openSideband(callId, access, attestation);
 				return;
 			} catch (cause) {
 				failure = cause instanceof Error ? cause : new Error(String(cause));
-				if (this.#options.signal?.aborted) throw abortReason(this.#options.signal);
+				this.#throwIfEnded();
 				if (attempt + 1 < SIDEBAND_CONNECT_ATTEMPTS) await Bun.sleep(200 * 2 ** attempt);
 			}
 		}
@@ -269,12 +290,17 @@ export class CodexLiveTransport {
 	}
 
 	async #openSideband(callId: string, access: OAuthAccess, attestation: string | undefined): Promise<void> {
+		const signal = this.#options.signal;
 		const url = buildLiveSidebandUrl(callId);
 		const options = {
 			headers: liveSessionHeaders(access, this.#options.sessionId, this.#realtimeSessionId, attestation),
 			proxy: getProxyForUrl(LIVE_PROVIDER, new URL(url)),
 		} satisfies Bun.WebSocketOptions;
+		// model-request: session — the live call's sideband socket, on the call's signal: the controller's stop() joined to
+		// the session's disposal signal. The caller checks the signal just before this, and the listener below closes the
+		// socket when the signal aborts, whether it is still connecting or open.
 		const socket: Bun.WebSocket = Reflect.construct(WebSocket, [url, options]);
+		signal.addEventListener("abort", () => socket.close(1000, "aborted"), { once: true });
 		socket.binaryType = "nodebuffer";
 		const { promise, resolve, reject } = Promise.withResolvers<void>();
 		let opened = false;
@@ -285,7 +311,7 @@ export class CodexLiveTransport {
 				clearTimeout(timeout);
 				timeout = undefined;
 			}
-			this.#options.signal?.removeEventListener("abort", onAbort);
+			signal.removeEventListener("abort", onAbort);
 		};
 		const rejectConnect = (error: Error): void => {
 			if (settled) return;
@@ -293,9 +319,9 @@ export class CodexLiveTransport {
 			cleanup();
 			reject(error);
 		};
+		// The listener above closes the socket; this one settles a pending connect with the abort's reason.
 		const onAbort = (): void => {
-			socket.close(1000, "aborted");
-			rejectConnect(abortReason(this.#options.signal));
+			rejectConnect(abortReason(signal));
 		};
 		socket.onopen = () => {
 			if (settled) {
@@ -336,16 +362,12 @@ export class CodexLiveTransport {
 				this.#reportFailure(`Codex live sideband closed (${event.code})${detail}`);
 			}
 		};
-		if (this.#options.signal?.aborted) {
-			onAbort();
-		} else {
-			this.#options.signal?.addEventListener("abort", onAbort, { once: true });
-			timeout = setTimeout(() => {
-				socket.close(1000, "connect timeout");
-				rejectConnect(new Error("Codex live sideband connection timed out"));
-			}, SIDEBAND_CONNECT_TIMEOUT_MS);
-			timeout.unref?.();
-		}
+		signal.addEventListener("abort", onAbort, { once: true });
+		timeout = setTimeout(() => {
+			socket.close(1000, "connect timeout");
+			rejectConnect(new Error("Codex live sideband connection timed out"));
+		}, SIDEBAND_CONNECT_TIMEOUT_MS);
+		timeout.unref?.();
 		await promise;
 	}
 
@@ -420,7 +442,7 @@ export class CodexLiveTransport {
 	}
 
 	async #close(): Promise<void> {
-		this.#options.signal?.removeEventListener("abort", this.#abortListener);
+		this.#options.signal.removeEventListener("abort", this.#abortListener);
 		const sideband = this.#sideband;
 		const peer = this.#peer;
 		this.#sideband = undefined;

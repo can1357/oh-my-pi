@@ -170,6 +170,7 @@ export async function runRenderCommand(args: RenderCommandArgs): Promise<number>
 		if (!model) throw new Error("No models available in the bundled catalog");
 
 		session = new AgentSession({
+			// model-request: no-session — `omp render` draws a saved transcript; this agent is never prompted.
 			agent: new Agent({ initialState: { model, systemPrompt: [], tools: [], messages: [] } }),
 			sessionManager,
 			settings,

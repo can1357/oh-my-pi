@@ -1,4 +1,7 @@
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, runOutsideRequestHold } from "@oh-my-pi/pi-utils";
+import { SharedFlight } from "@oh-my-pi/pi-utils/shared-flight";
+import type { FetchImpl } from "@oh-my-pi/pi-utils/tls-fetch";
+import * as AIError from "../error";
 import { USAGE_REPORT_TTL_MS } from "./sqlite-credential-store";
 import type { UsageReport } from "../usage";
 import { claudeResetClearedBlockScopes, consumeClaudeResetCredit, listClaudeResetCredits } from "../usage/claude-reset";
@@ -32,12 +35,55 @@ export interface ResetCreditsDeps {
 	blocks: CredentialBlocks;
 }
 
+/** One account's live reset discovery; each caller adds the account summary its own session sees. */
+type ResetDiscovery = Omit<ResetCreditAccountStatus, keyof OAuthAccountSummary | "provider">;
+
+/** How one discovery pass reaches the network. */
+interface ResetTransport {
+	/** Ends the pass: checked between accounts and passed to each account's credential lookup. */
+	signal?: AbortSignal;
+	/** The signal each provider call gets. Without one, the provider applies its own request timeouts. */
+	requestSignal?: AbortSignal;
+	fetch: FetchImpl;
+}
+
+/**
+ * `fetch` for shared reset work: each request also ends once the work's own `lifetime` does, when every
+ * caller has left (and, for a redemption, at {@link REDEMPTION_TIMEOUT_MS}). The work gives the provider
+ * no signal of its own, so a provider that bounds each request itself (Claude) still does.
+ */
+function fetchWithin(fetchImpl: FetchImpl, lifetime: AbortSignal): FetchImpl {
+	return (input, init) =>
+		fetchImpl(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, lifetime]) : lifetime });
+}
+
+/**
+ * The longest one redemption runs, however long its callers wait. A caller's own timeout no longer
+ * ends the shared work while another caller waits, and a Codex consume sets no timeout of its own;
+ * this bound keeps every attempt well inside a caller's cross-process fence (the coding agent's
+ * holds a `pending` marker for 60 s), so no other process spends while the attempt may still land.
+ * Claude's own requests stop sooner (5 s offer list, 25 s claim).
+ */
+const REDEMPTION_TIMEOUT_MS = 45_000;
+
+/** Each account's discovery under the summary the caller's own session sees, in the caller's order. */
+function composeStatuses(
+	provider: string,
+	accounts: readonly OAuthAccountSummary[],
+	discovered: ReadonlyMap<number, ResetDiscovery>,
+): ResetCreditAccountStatus[] {
+	return accounts.flatMap(account => {
+		const discovery = discovered.get(account.credentialId);
+		return discovery ? [{ ...account, provider, ...discovery }] : [];
+	});
+}
+
 /** Saved rate-limit resets (Codex / Claude): list offers and redeem one per account. */
 export class ResetCredits implements ResetsApi {
 	#deps: ResetCreditsDeps;
 	/** Manual and automatic attempts on one stored account share a mutation. */
-	#resetInFlight = new Map<string, { creditId?: string; promise: Promise<ResetCreditRedeemOutcome> }>();
-	#listInFlight = new Map<string, Promise<ResetCreditAccountStatus[]>>();
+	#resetInFlight = new Map<string, { creditId?: string; flight: SharedFlight<ResetCreditRedeemOutcome> }>();
+	#listInFlight = new Map<string, SharedFlight<Map<number, ResetDiscovery>>>();
 	/** Ambiguous Claude claims retain their idempotency key until reconciled. */
 	#pendingClaudeResets = new Map<
 		string,
@@ -53,71 +99,95 @@ export class ResetCredits implements ResetsApi {
 		const provider = options?.provider ?? "openai-codex";
 		if (provider !== "openai-codex" && provider !== "anthropic") return [];
 		const baseUrl = options?.baseUrlResolver?.(provider);
-		if (provider !== "anthropic") return this.#listAccounts(provider, baseUrl, options);
-		options?.signal?.throwIfAborted();
-		const activeId = this.#deps.oauth
-			.accounts(provider, options?.sessionId)
-			.find(account => account.active)?.credentialId;
+		const signal = options?.signal;
+		// The caller's own session decides which accounts it sees and which is active; a shared pass only
+		// supplies what the network says about each.
+		const accounts = this.#deps.oauth.accounts(provider, options?.sessionId);
+		if (provider !== "anthropic") {
+			const discovered = await this.#discoverResets(provider, baseUrl, accounts, {
+				signal,
+				requestSignal: signal,
+				fetch: this.#deps.usage.fetch,
+			});
+			return composeStatuses(provider, accounts, discovered);
+		}
+		signal?.throwIfAborted();
+		if (accounts.length === 0) return [];
 		// Discovery is sequential and probes the active account first, so only
 		// callers sharing that account can share one pass.
+		accounts.sort((left, right) => Number(right.active) - Number(left.active));
+		const activeId = accounts.find(account => account.active)?.credentialId;
 		const key = JSON.stringify([provider, baseUrl, activeId]);
-		let pending = this.#listInFlight.get(key);
-		if (!pending) {
-			pending = this.#listAccounts(provider, baseUrl, { ...options, signal: undefined }).finally(() =>
-				this.#listInFlight.delete(key),
-			);
-			this.#listInFlight.set(key, pending);
+		let flight = this.#listInFlight.get(key);
+		if (flight?.abandoned) {
+			// Every caller left that pass, so it stops at its next request. Wait it out, then start afresh.
+			await raceSignal(flight.settled, signal, "Reset discovery aborted");
+			return this.list(options);
 		}
-		return raceSignal(pending, options?.signal, "Reset discovery aborted");
+		if (!flight) {
+			const started = SharedFlight.start(signal, lifetime =>
+				// Shared by every caller on this account, so started outside the caller's provider-request hold.
+				runOutsideRequestHold(() =>
+					this.#discoverResets(provider, baseUrl, accounts, {
+						signal: lifetime,
+						fetch: fetchWithin(this.#deps.usage.fetch, lifetime),
+					}),
+				).finally(() => this.#listInFlight.delete(key)),
+			);
+			if (started instanceof Promise) return started;
+			this.#listInFlight.set(key, started);
+			flight = started;
+		}
+		const discovered = await flight.join(signal, () => new AIError.AbortError("Reset discovery aborted"));
+		return composeStatuses(provider, accounts, discovered);
 	}
 
-	async #listAccounts(
+	/** What the network says about each account's saved resets, keyed by credential id. */
+	async #discoverResets(
 		provider: string,
 		baseUrl: string | undefined,
-		options?: ListResetCreditsOptions,
-	): Promise<ResetCreditAccountStatus[]> {
-		const accounts = this.#deps.oauth.accounts(provider, options?.sessionId);
-		const loadAccount = async (account: OAuthAccountSummary): Promise<ResetCreditAccountStatus> => {
-			const base = { ...account, provider };
+		accounts: readonly OAuthAccountSummary[],
+		transport: ResetTransport,
+	): Promise<Map<number, ResetDiscovery>> {
+		const discover = async (account: OAuthAccountSummary): Promise<ResetDiscovery> => {
 			const access = await this.#deps.oauth.accessById(provider, account.credentialId, {
-				signal: options?.signal,
+				signal: transport.signal,
 			});
-			if (!access?.ok)
-				return {
-					...base,
-					availableCount: 0,
-					credits: [],
-					error: access?.error ?? "Account no longer available",
-				};
+			if (!access?.ok) {
+				return { availableCount: 0, credits: [], error: access?.error ?? "Account no longer available" };
+			}
 			let retryAfterMs: number | undefined;
 			const auth = {
 				...access,
 				baseUrl,
-				fetch: this.#deps.usage.fetch,
-				signal: options?.signal,
+				fetch: transport.fetch,
+				signal: transport.requestSignal,
 				onRateLimited: (delay: number | undefined) => {
 					retryAfterMs = delay ?? 0;
 				},
 			};
 			const list = provider === "anthropic" ? await listClaudeResetCredits(auth) : await listCodexResetCredits(auth);
-			if (!list)
+			if (!list) {
 				return {
-					...base,
 					availableCount: 0,
 					credits: [],
 					error: "Failed to load saved resets",
 					...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
 				};
-			return { ...base, ...list };
+			}
+			return list;
 		};
-		if (provider !== "anthropic") return Promise.all(accounts.map(loadAccount));
-		const results: ResetCreditAccountStatus[] = [];
-		accounts.sort((left, right) => Number(right.active) - Number(left.active));
-		for (const account of accounts) {
-			options?.signal?.throwIfAborted();
-			results.push(await loadAccount(account));
+		if (provider !== "anthropic") {
+			return new Map(
+				await Promise.all(accounts.map(async account => [account.credentialId, await discover(account)] as const)),
+			);
 		}
-		return results;
+		const discovered = new Map<number, ResetDiscovery>();
+		for (const account of accounts) {
+			transport.signal?.throwIfAborted();
+			discovered.set(account.credentialId, await discover(account));
+		}
+		return discovered;
 	}
 
 	/**
@@ -145,25 +215,39 @@ export class ResetCredits implements ResetsApi {
 		const inFlight = this.#resetInFlight.get(accountKey);
 		if (inFlight) {
 			if (inFlight.creditId !== creditId) return { ...resolvedIdentity, ok: false, code: "reset_in_progress" };
-			return inFlight.promise;
+			if (!inFlight.flight.abandoned) {
+				return inFlight.flight.join(options.signal, () => new AIError.AbortError("Reset redemption aborted"));
+			}
+			// Every caller left that redemption, so it stops at its next request; a new one must not spend
+			// beside it. Wait it out, then start afresh.
+			await raceSignal(inFlight.flight.settled, options.signal, "Reset redemption aborted");
+			return this.redeem(options);
 		}
-		const promise = this.#redeemAccountReset(provider, match, accountKey, {
-			creditId,
-			baseUrl,
-			signal: options.signal,
-		}).finally(() => this.#resetInFlight.delete(accountKey));
-		this.#resetInFlight.set(accountKey, { creditId, promise });
-		return promise;
+		const flight = SharedFlight.start(options.signal, lifetime =>
+			// Shared with every attempt on this account, so started outside the caller's provider-request hold.
+			runOutsideRequestHold(() =>
+				this.#redeemAccountReset(provider, match, accountKey, {
+					creditId,
+					baseUrl,
+					signal: AbortSignal.any([lifetime, AbortSignal.timeout(REDEMPTION_TIMEOUT_MS)]),
+				}),
+			).finally(() => this.#resetInFlight.delete(accountKey)),
+		);
+		if (flight instanceof Promise) return flight;
+		this.#resetInFlight.set(accountKey, { creditId, flight });
+		return flight.join(options.signal, () => new AIError.AbortError("Reset redemption aborted"));
 	}
 
 	async #redeemAccountReset(
 		provider: string,
 		access: OAuthAccess,
 		accountKey: string,
-		options: { creditId?: string; baseUrl?: string; signal?: AbortSignal },
+		options: { creditId?: string; baseUrl?: string; signal: AbortSignal },
 	): Promise<ResetCreditRedeemOutcome> {
 		const identity = { provider, accountId: access.accountId, email: access.email, orgId: access.orgId };
-		const auth = { ...access, baseUrl: options.baseUrl, fetch: this.#deps.usage.fetch, signal: options.signal };
+		// The redemption's own signal ends it once every caller has left, or at its bound; a provider that
+		// bounds each request itself still does.
+		const auth = { ...access, baseUrl: options.baseUrl, fetch: fetchWithin(this.#deps.usage.fetch, options.signal) };
 		let creditId = options.creditId;
 		let result: ResetCreditRedeemOutcome;
 		let report: UsageReport | null = null;
@@ -211,7 +295,7 @@ export class ResetCredits implements ResetsApi {
 			}
 			report = list.report ?? null;
 			const requestId = pending?.requestId ?? crypto.randomUUID();
-			options.signal?.throwIfAborted();
+			options.signal.throwIfAborted();
 			this.#pendingClaudeResets.set(accountKey, {
 				creditId,
 				requestId,

@@ -126,6 +126,7 @@ export async function embedBatch(texts: readonly string[]): Promise<Vector[]> {
 	if (texts.length === 0) return [];
 	let matrix: embeddings.EmbeddingMatrix | null = null;
 	try {
+		// model-request: no-session — SHMR's embeddings: no module in the walked packages imports shmr.ts, so no session reaches it.
 		matrix = await embeddings.embed(texts);
 	} catch (error) {
 		logger.debug("mnemopi shmr embedding failed; using hash fallback", { error: String(error) });

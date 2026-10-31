@@ -160,6 +160,7 @@ async function describeImage(
 ): Promise<string | null> {
 	if (deps.costGate?.check()) return null;
 	try {
+		// model-request: caller describeImage — the `signal` its caller passes.
 		const response = await instrumentedCompleteSimple(
 			visionModel,
 			{
@@ -220,6 +221,7 @@ export async function describeAttachedImagesForTextModel(
 			let description: string;
 			if (canDescribe && visionModel) {
 				description =
+					// model-request: caller describeAttachedImagesForTextModel — the `signal` its caller passes.
 					(await describeImage(image, visionModel, deps, telemetry, signal)) ?? DESCRIPTION_UNAVAILABLE_NOTE;
 			} else {
 				description = NO_VISION_MODEL_NOTE;

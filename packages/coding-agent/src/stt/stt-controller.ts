@@ -337,6 +337,9 @@ export class STTController {
 		let finalText = "";
 		try {
 			const language = cfgSttLanguage.get(this.#settings);
+			// model-request: outlives-disposal — dictation belongs to the editor, not the session: it transcribes what the user
+			// is about to send. Its signal ends with the dictation (cancel, or the controller's dispose() when the interactive
+			// mode shuts down), not with the session.
 			const result = await transcribeAudio(
 				model,
 				{

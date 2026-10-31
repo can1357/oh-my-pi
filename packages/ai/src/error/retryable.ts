@@ -1,4 +1,5 @@
 import { isRetryableError, isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils";
+import { isRequestRefusal } from "@oh-my-pi/pi-utils/request-hold-scope";
 import {
 	ALIYUN_MM_GATEWAY_PATTERN,
 	CODEX_HTTP_BODY_READ_ERROR_PATTERN,
@@ -41,9 +42,11 @@ function isTransientTransportMessage(message: string): boolean {
  *
  * Every 4xx other than 408/429 is terminal: a request the provider rejected
  * as malformed, unauthorized, or unentitled fails identically on replay.
+ * A refusal of the provider-request hold is terminal too: a replay is refused the same way.
  */
 export function isProviderRetryableError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
+	if (isRequestRefusal(error)) return false;
 	if (isUsageLimit(error)) return false;
 	const httpStatus = status(error);
 	if (httpStatus !== undefined && httpStatus >= 400 && httpStatus < 500 && httpStatus !== 408 && httpStatus !== 429) {

@@ -508,6 +508,8 @@ async function callPerplexityApi(
 		collectPerplexityMetadata(metadata, event.data);
 	};
 
+	// model-request: turn — Perplexity's answer through the OpenAI Responses or Completions provider, for the web_search
+	// tool call, with its signal (`requestSignal`).
 	const message = config.useResponses
 		? await drainAssistantStream(
 				streamOpenAIResponses(buildPerplexityResponsesModel(request), context, {
@@ -726,6 +728,7 @@ async function callPerplexityAsk(
 	if (filters.beforeDate) requestParams.search_before_date_filter = filters.beforeDate;
 	if (filters.languageFilter) requestParams.search_language_filter = filters.languageFilter;
 
+	const requestSignal = withHardTimeout(params.signal, params.timeoutMs);
 	const requestInit = {
 		method: "POST",
 		headers,
@@ -733,7 +736,6 @@ async function callPerplexityAsk(
 			query_str: effectiveQuery,
 			params: requestParams,
 		}),
-		signal: withHardTimeout(params.signal, params.timeoutMs),
 	};
 
 	// The consumer ask endpoint intermittently drops the socket before sending an
@@ -742,10 +744,12 @@ async function callPerplexityAsk(
 	// never retried, so a real 401/429 is never papered over by a second attempt.
 	let response: Response;
 	try {
-		response = await (params.fetch ?? fetch)(PERPLEXITY_OAUTH_ASK_URL, requestInit);
+		// model-request: turn — Perplexity's answer, a model request made by the web_search tool call with its signal.
+		response = await (params.fetch ?? fetch)(PERPLEXITY_OAUTH_ASK_URL, { ...requestInit, signal: requestSignal });
 	} catch (error) {
 		if (params.signal?.aborted) throw error;
-		response = await (params.fetch ?? fetch)(PERPLEXITY_OAUTH_ASK_URL, requestInit);
+		// model-request: turn — Perplexity's answer, retried once, with the web_search tool call's signal.
+		response = await (params.fetch ?? fetch)(PERPLEXITY_OAUTH_ASK_URL, { ...requestInit, signal: requestSignal });
 	}
 
 	if (!response.ok) {

@@ -39,6 +39,7 @@ export function createDeviceCodeLogin(
 ): (ctrl: OAuthController) => Promise<OAuthCredentials> {
 	return async ctrl => {
 		const signal = ctrl.signal;
+		// model-request: none — an OAuth device-code login, not a model request.
 		const fetchImpl = ctrl.fetch ?? fetch;
 		throwIfCancelled(signal);
 		const clientId = await resolveValue(rule.clientId, signal);

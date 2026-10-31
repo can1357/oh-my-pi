@@ -372,6 +372,7 @@ export class TernSocketClient {
 	}
 
 	async #open(): Promise<void> {
+		// model-request: none — connects to the Tern browser host's local socket.
 		const socket = net.createConnection({ path: this.#socketPath });
 		this.#socket = socket;
 		const greeting = Promise.withResolvers<void>();

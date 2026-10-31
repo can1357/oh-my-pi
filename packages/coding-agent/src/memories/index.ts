@@ -394,7 +394,7 @@ async function runPhase1(options: MemoryStartupOptions): Promise<void> {
 			logger.debug("Phase1 skipped: no model available");
 			return;
 		}
-		const phase1ApiKey = await modelRegistry.getApiKey(phase1Model, session.sessionId);
+		const phase1ApiKey = await modelRegistry.getApiKey(phase1Model, session.sessionId, { signal: options.signal });
 		if (!phase1ApiKey) {
 			logger.debug("Phase1 skipped: no API key for phase1 model", {
 				provider: phase1Model.provider,
@@ -428,6 +428,7 @@ async function runPhase1(options: MemoryStartupOptions): Promise<void> {
 
 		await runWithConcurrency(claims, config.stage1Concurrency, async claim => {
 			if (!isMemoryStartupActive(options)) return;
+			// model-request: session — the startup signal, which the session aborts when it begins disposing.
 			const result = await runStage1Job({
 				claim,
 				model: phase1Model,
@@ -436,6 +437,7 @@ async function runPhase1(options: MemoryStartupOptions): Promise<void> {
 				modelMaxTokens: computeModelTokenBudget(phase1Model, config),
 				config,
 				metadata: session.agent?.metadataForProvider(phase1Model.provider),
+				signal: options.signal,
 			});
 			if (!isMemoryStartupActive(options)) return;
 
@@ -558,7 +560,7 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 			});
 			return;
 		}
-		const phase2ApiKey = await modelRegistry.getApiKey(phase2Model, session.sessionId);
+		const phase2ApiKey = await modelRegistry.getApiKey(phase2Model, session.sessionId, { signal: options.signal });
 		if (!phase2ApiKey) {
 			markPhase2FailureWithFallback(db, {
 				claim,
@@ -591,12 +593,14 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 
 		try {
 			if (!isMemoryStartupActive(options)) return;
+			// model-request: session — the startup signal, which the session aborts when it begins disposing.
 			const consolidated = await runConsolidationModel({
 				memoryRoot,
 				model: phase2Model,
 				apiKey: modelRegistry.resolver(phase2Model, session.sessionId),
 				sessionId: session.sessionId,
 				metadata: session.agent?.metadataForProvider(phase2Model.provider),
+				signal: options.signal,
 			});
 			if (!isMemoryStartupActive(options)) return;
 			await applyConsolidation(memoryRoot, consolidated);
@@ -871,6 +875,8 @@ async function runStage1Job(options: {
 	modelMaxTokens: number;
 	config: MemoryRuntimeConfig;
 	metadata?: Record<string, unknown>;
+	/** The startup's cancellation: the session aborts it when it begins disposing. */
+	signal: AbortSignal;
 }): Promise<
 	| {
 			kind: "output";
@@ -892,6 +898,7 @@ async function runStage1Job(options: {
 			response_items_json: truncatedItems,
 		});
 
+		// model-request: caller runStage1Job — the startup signal its caller passes.
 		const response = await retryTransientCompletion(
 			() =>
 				completeSimple(
@@ -904,6 +911,7 @@ async function runStage1Job(options: {
 						apiKey,
 						sessionId: options.sessionId,
 						metadata: options.metadata,
+						signal: options.signal,
 						maxTokens: Math.max(1024, Math.min(4096, Math.floor(modelMaxTokens * 0.2))),
 						reasoning: clampThinkingLevelForModel(model, Effort.Low),
 						// OpenAI chat-completions owns its transient retries in the HTTP
@@ -911,7 +919,11 @@ async function runStage1Job(options: {
 						maxHttpAttempts: model.api === "openai-completions" ? 3 : undefined,
 					},
 				),
-			{ provider: model.provider, maxAttempts: model.api === "openai-completions" ? 1 : undefined },
+			{
+				provider: model.provider,
+				maxAttempts: model.api === "openai-completions" ? 1 : undefined,
+				signal: options.signal,
+			},
 		);
 
 		if (response.stopReason === "error") {
@@ -1019,6 +1031,8 @@ async function runConsolidationModel(options: {
 	apiKey: ApiKey;
 	sessionId: string;
 	metadata?: Record<string, unknown>;
+	/** The startup's cancellation: the session aborts it when it begins disposing. */
+	signal: AbortSignal;
 }): Promise<{
 	memoryMd: string;
 	memorySummary: string;
@@ -1038,6 +1052,7 @@ async function runConsolidationModel(options: {
 		rollout_summaries: truncateByApproxTokens(rolloutSummaries, 12_000),
 	});
 
+	// model-request: caller runConsolidationModel — the startup signal its caller passes.
 	const response = await retryTransientCompletion(
 		() =>
 			completeSimple(
@@ -1050,12 +1065,17 @@ async function runConsolidationModel(options: {
 					apiKey,
 					sessionId: options.sessionId,
 					metadata: options.metadata,
+					signal: options.signal,
 					maxTokens: 8192,
 					reasoning: clampThinkingLevelForModel(model, Effort.Medium),
 					maxHttpAttempts: model.api === "openai-completions" ? 3 : undefined,
 				},
 			),
-		{ provider: model.provider, maxAttempts: model.api === "openai-completions" ? 1 : undefined },
+		{
+			provider: model.provider,
+			maxAttempts: model.api === "openai-completions" ? 1 : undefined,
+			signal: options.signal,
+		},
 	);
 	if (response.stopReason === "error") {
 		throw new Error(response.errorMessage || "phase2 model error");

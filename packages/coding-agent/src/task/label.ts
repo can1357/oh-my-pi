@@ -31,6 +31,7 @@ export async function generateTaskLabel(
 	const text = assignment.trim();
 	if (!text) return null;
 	try {
+		// model-request: caller generateTaskLabel — the `signal` its caller passes.
 		const label = await generateSessionTitle(
 			text,
 			registry,

@@ -27,6 +27,7 @@ export async function openStandaloneJudge(cwd: string, purpose: string): Promise
 		await registry.refresh();
 		await loadCliExtensionProviders(registry, settings, cwd);
 		return {
+			// model-request: no-session — the judge the CLI commands use (`omp find`, `omp stats`, the git TUI); no session exists.
 			judge: resolveJudge({
 				settings,
 				registry,

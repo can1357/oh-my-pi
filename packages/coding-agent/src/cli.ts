@@ -160,6 +160,7 @@ async function runSmokeTest(): Promise<void> {
 
 	const statsServer = await startServer(0);
 	try {
+		// model-request: none — a smoke check of the local stats dashboard.
 		const response = await fetch(`http://127.0.0.1:${statsServer.port}/`);
 		if (!response.ok) throw new Error(`stats dashboard smoke failed: HTTP ${response.status}`);
 		const html = await response.text();
@@ -218,6 +219,7 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		await import("@oh-my-pi/omp-stats/sync-worker");
 		const handler = scope.onmessage;
 		if (handler && handler !== buffer) {
+			// model-request: none — replays buffered messages to the stats worker's handler with the worker scope as `this`; sends nothing.
 			for (const event of pending) handler.call(scope, event);
 		}
 		return true;

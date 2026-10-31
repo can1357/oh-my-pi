@@ -98,6 +98,7 @@ export class LocalBlobBackend implements BlobBackend {
 	#dead = false;
 
 	/** Create one local serving or configured upload backend. */
+	// model-request: none — the blob broker's serving and upload backend, not a model request.
 	constructor(config: BlobBrokerWorkerConfig, fetchFn: typeof globalThis.fetch = globalThis.fetch) {
 		this.#config = config;
 		this.#fetch = fetchFn;

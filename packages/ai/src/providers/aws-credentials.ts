@@ -18,7 +18,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $env, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { $env, isEnoent, logger, runOutsideRequestHold } from "@oh-my-pi/pi-utils";
+import { fetchKey, SharedFlight } from "@oh-my-pi/pi-utils/shared-flight";
 import * as AIError from "../error";
 import type { FetchImpl } from "../types";
 import { raceWithSignal } from "../utils/abort";
@@ -54,8 +55,8 @@ const REFRESH_SKEW_MS = 60_000;
  */
 const FILE_SESSION_CREDS_TTL_MS = 5 * 60_000;
 /**
- * Bound for the detached (signal-free) shared resolution: a hung
- * credential_process/SSO/IMDS fetch must not pin the inflight slot forever.
+ * Bound for the shared resolution, whatever its callers' signals: a hung credential_process/SSO/IMDS
+ * fetch must not pin the inflight slot forever while a caller that brought no signal waits on it.
  */
 const SHARED_RESOLVE_TIMEOUT_MS = 30_000;
 
@@ -82,7 +83,7 @@ interface CacheEntry {
 }
 
 const cache: Map<string, CacheEntry> = new Map();
-const inflight: Map<string, Promise<ResolvedCredentials>> = new Map();
+const inflight: Map<string, SharedFlight<ResolvedCredentials>> = new Map();
 
 function credentialCacheKey(profile: string, region: string, loadSharedConfig: boolean): string {
 	return `${profile}\x00${region}\x00${loadSharedConfig ? "config" : "credentials"}`;
@@ -98,30 +99,42 @@ export async function resolveAwsCredentials(opts: CredentialResolveOptions = {})
 	if (hit && hit.expiresAt - REFRESH_SKEW_MS > Date.now()) return hit.creds;
 
 	// Single-flight: N concurrent cold calls must not each spawn credential_process/SSO/IMDS fetches.
-	// The shared resolution is deliberately detached from any caller's signal — aborting one
-	// request must not fail every waiter — and bounded by its own timeout instead; each caller
-	// races its own signal against the shared promise.
-	const existing = inflight.get(cacheKey);
-	if (existing) return raceWithSignal(existing, opts.signal);
+	// The shared resolution runs on its own signal, which ends only once every caller has left, and is
+	// bounded by its own timeout; each caller waits with its own signal, so one caller's abort fails no
+	// other. It is shared only among callers of the same `fetch`, so no caller's lookup goes out on
+	// another caller's transport. It starts outside the caller's provider-request hold, and a held
+	// caller starts none.
+	const flightKey = `${cacheKey}\x00${fetchKey(opts.fetch)}`;
+	const existing = inflight.get(flightKey);
+	if (existing?.abandoned) {
+		// Every caller left that resolution; it stops at its next step. Wait it out, then look again.
+		await raceWithSignal(existing.settled, opts.signal);
+		return resolveAwsCredentials(opts);
+	}
+	if (existing) return existing.join(opts.signal);
 
+	// model-request: none — resolves AWS credentials (instance metadata, STS), not a model request.
 	const fetchImpl = opts.fetch ?? (globalThis.fetch as FetchImpl);
-	const promise = (async () => {
-		try {
-			const creds = await resolveFresh(
-				profile,
-				region,
-				loadSharedConfig,
-				AbortSignal.timeout(SHARED_RESOLVE_TIMEOUT_MS),
-				fetchImpl,
-			);
-			cache.set(cacheKey, { creds, expiresAt: creds.expiresAt ?? Number.POSITIVE_INFINITY });
-			return creds;
-		} finally {
-			inflight.delete(cacheKey);
-		}
-	})();
-	inflight.set(cacheKey, promise);
-	return raceWithSignal(promise, opts.signal);
+	const flight = SharedFlight.start(opts.signal, signal =>
+		runOutsideRequestHold(async () => {
+			try {
+				const creds = await resolveFresh(
+					profile,
+					region,
+					loadSharedConfig,
+					AbortSignal.any([signal, AbortSignal.timeout(SHARED_RESOLVE_TIMEOUT_MS)]),
+					fetchImpl,
+				);
+				cache.set(cacheKey, { creds, expiresAt: creds.expiresAt ?? Number.POSITIVE_INFINITY });
+				return creds;
+			} finally {
+				inflight.delete(flightKey);
+			}
+		}),
+	);
+	if (flight instanceof Promise) return flight;
+	inflight.set(flightKey, flight);
+	return flight.join(opts.signal);
 }
 
 async function resolveFresh(
@@ -129,6 +142,7 @@ async function resolveFresh(
 	region: string,
 	loadSharedConfig: boolean,
 	signal?: AbortSignal,
+	// model-request: none — resolves AWS credentials (web identity, SSO, STS, instance metadata), not a model request.
 	fetchImpl: FetchImpl = globalThis.fetch as FetchImpl,
 ): Promise<ResolvedCredentials> {
 	// 1. Environment first — matches the AWS SDK chain order.

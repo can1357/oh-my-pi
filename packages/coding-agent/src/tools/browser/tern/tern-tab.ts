@@ -264,10 +264,12 @@ function pageErrorText(error: TernError): string {
 export function userSourceFunction(source: string): string {
 	const expression = `return (\n${source}\n);`;
 	try {
+		// model-request: none — compiles the user's page source only to choose its form; the function is never called.
 		new Function(expression);
 		return `function () {\n${expression}\n}`;
 	} catch {}
 	try {
+		// model-request: none — compiles the user's page source only to choose its form; the function is never called.
 		new Function(source);
 		return `function () {\n${source}\n}`;
 	} catch {}

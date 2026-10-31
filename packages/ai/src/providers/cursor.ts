@@ -185,6 +185,7 @@ import { classifyJsonPrefix } from "@oh-my-pi/pi-utils/json-parse";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import * as AIError from "../error";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
+import { admitSend, bindSendAdmission, cutIfHeldBeforeResponse, gatedFetch } from "../request-hold";
 import type {
 	Api,
 	AssistantMessage,
@@ -810,13 +811,37 @@ interface CursorRunTransport extends CursorMessageWriter {
 	onError(listener: (error: unknown) => void): void;
 }
 
-function wrapHttp2RunTransport(request: http2.ClientHttp2Stream): CursorRunTransport {
+/**
+ * The run's HTTP/2 stream. Every frame written on it after it opened (the request, tool results,
+ * KV replies, heartbeats) is a send of its own, so each asks the hold of the request that opened the
+ * stream, with nothing between the answer and the write: a held run writes nothing more, and its
+ * stream fails with the refusal when that rejects, as an HTTP/1 append does. A hold that begins
+ * before the response does cuts the stream, whose frames would otherwise flush after the handshake;
+ * the response already begun keeps arriving until the refusal.
+ */
+function wrapHttp2RunTransport(request: http2.ClientHttp2Stream, signal: AbortSignal | undefined): CursorRunTransport {
+	const admit = bindSendAdmission();
+	const releaseHoldCut = cutIfHeldBeforeResponse(reason => {
+		if (!request.destroyed) request.destroy(reason);
+	});
+	request.once("response", releaseHoldCut);
+	request.once("close", releaseHoldCut);
+	let refused = false;
 	return {
 		get closed() {
 			return request.closed;
 		},
 		write(frame) {
-			if (!request.writableEnded) request.write(frame);
+			if (refused || request.writableEnded) return;
+			const refusal = admit(signal);
+			if (refusal) {
+				refused = true;
+				refusal.catch((error: unknown) => {
+					if (!request.destroyed) request.destroy(error instanceof Error ? error : new Error(String(error)));
+				});
+				return;
+			}
+			request.write(frame);
 		},
 		close() {
 			request.close();
@@ -876,7 +901,8 @@ function readConnectFrameMessage(frame: Uint8Array): Uint8Array {
 function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): CursorRunTransport {
 	const abortController = new AbortController();
 	const signal = options.signal ? AbortSignal.any([options.signal, abortController.signal]) : abortController.signal;
-	const fetchImpl = wrapFetchForProxy(globalThis.fetch, "cursor");
+	// model-request: transport stream — the Cursor agent stream's requests.
+	const fetchImpl = wrapFetchForProxy(gatedFetch(), "cursor");
 	const requestId = create(BidiRequestIdSchema, { requestId: options.requestId });
 	const pendingAppends: CursorPendingAppend[] = [];
 	let appendSeqno = 0n;
@@ -1485,20 +1511,36 @@ function streamCursorWithWireMode(
 			if (transportMode === "http2") {
 				const proxyUrl = getProxyForUrl(model.provider, new URL(baseUrl));
 				let client: http2.ClientHttp2Session;
+				// The hold is asked in the turn the session opens and the run request goes out: nothing
+				// from the check to `client.request` awaits, so a hold that begins in between is not missed.
 				if (proxyUrl) {
 					const tlsSocket = await connectProxiedSocket(proxyUrl, baseUrl, {
 						signal: options?.signal,
 						timeoutMs: CURSOR_PROXY_TUNNEL_TIMEOUT_MS,
 					});
+					// The tunnel took turns to open, so the hold is asked again; a refused run closes it.
+					try {
+						const refusal = admitSend(options?.signal);
+						if (refusal) await refusal;
+					} catch (error) {
+						tlsSocket.destroy();
+						throw error;
+					}
+					// model-request: transport stream — the Cursor agent stream's HTTP/2 session over the proxy tunnel.
 					client = http2.connect(baseUrl, {
 						createConnection: () => tlsSocket,
 					});
 				} else {
+					const refusal = admitSend(options?.signal);
+					if (refusal) await refusal;
+					// model-request: transport stream — the Cursor agent stream's HTTP/2 session.
 					client = http2.connect(baseUrl);
 				}
 				h2Client = client;
 				client.on("error", error => settleH2(mapH2TransportError(error, baseUrl)));
-				runTransport = wrapHttp2RunTransport(client.request(requestHeaders));
+				// The run request goes out on the session just opened, in the same turn as its admission above;
+				// every later frame on it asks the hold again (see `wrapHttp2RunTransport`).
+				runTransport = wrapHttp2RunTransport(client.request(requestHeaders), options?.signal);
 			} else {
 				runTransport = createHttp1RunTransport({
 					baseUrl,

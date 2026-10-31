@@ -299,6 +299,7 @@ const DEFAULT_DEPENDENCIES: ImagesCliDependencies = {
 	queryProbe: queryBlobBrokerProbe,
 	queryPurge: queryBlobBrokerPurge,
 	which: binary => $which(binary) ?? null,
+	// model-request: none — `omp images` blob-broker commands; no model request.
 	fetch: globalThis.fetch,
 	writeStdout: text => {
 		process.stdout.write(text);

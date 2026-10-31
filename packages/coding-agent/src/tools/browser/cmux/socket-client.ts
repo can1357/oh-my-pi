@@ -3,6 +3,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { admitNetworkSend } from "@oh-my-pi/pi-utils/request-hold-scope";
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
@@ -88,7 +89,8 @@ export class CmuxSocketClient {
 		this.#relayToken = opts.relayToken ?? process.env.CMUX_RELAY_TOKEN;
 	}
 
-	async connect(): Promise<void> {
+	/** Connect if not connected. `signal` is the caller's; held, the connection waits no longer than it or the connect timeout. */
+	async connect(signal?: AbortSignal): Promise<void> {
 		if (this.#disposed) {
 			throw new ToolError("cmux socket closed");
 		}
@@ -99,7 +101,7 @@ export class CmuxSocketClient {
 			return await this.#connectPromise;
 		}
 
-		this.#connectPromise = this.#openSocket();
+		this.#connectPromise = this.#openSocket(signal);
 		try {
 			await this.#connectPromise;
 		} finally {
@@ -138,9 +140,15 @@ export class CmuxSocketClient {
 		this.#connectPromise = null;
 	}
 
-	async #openSocket(): Promise<void> {
+	async #openSocket(signal: AbortSignal | undefined): Promise<void> {
 		const relayEndpoint = this.#parseRelayEndpoint();
 		const relayCredentials = relayEndpoint ? await this.#loadRelayCredentials(relayEndpoint) : null;
+		// A held job connects nothing, and a raw socket is no fetch the hold's backstop sees: ask it here.
+		// Held, it waits no longer than connecting may take, or than the caller's own signal.
+		const deadline = AbortSignal.timeout(DEFAULT_CONNECT_TIMEOUT_MS);
+		const refusal = admitNetworkSend(signal ? AbortSignal.any([signal, deadline]) : deadline);
+		if (refusal) await refusal;
+		// model-request: none — connects to the cmux browser host (its relay or its local socket), not a model request; asks the hold above.
 		const socket = relayEndpoint
 			? net.createConnection({ host: relayEndpoint.host, port: relayEndpoint.port })
 			: net.createConnection({ path: this.#socketPath });

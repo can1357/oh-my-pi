@@ -476,6 +476,7 @@ async function performFlush(db: Database, config: PushConfig, options: FlushOpti
 		const totalRow = db.prepare("SELECT COUNT(*) AS n FROM grievances WHERE pushed = 0").get() as { n: number };
 		options.onStart(totalRow.n);
 	}
+	// model-request: none — the tool-issue report endpoint, not a model request.
 	const fetchImpl = options.fetch ?? fetch;
 	let totalPushed = 0;
 	let totalRejected = 0;

@@ -1,4 +1,5 @@
-import { USER_AGENT, getInstallId } from "@oh-my-pi/pi-utils";
+import { USER_AGENT, getInstallId, runOutsideRequestHold } from "@oh-my-pi/pi-utils";
+import { admitSharedStart } from "@oh-my-pi/pi-utils/request-hold-scope";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { toClinePassPublicModelId } from "../cline-pass-model-id";
 import {
@@ -226,8 +227,14 @@ export function fetchWellKnownModels(fetchImpl?: FetchImpl, signal?: AbortSignal
 function fetchRevalidatedWellKnownModels(fetchImpl?: FetchImpl, signal?: AbortSignal): Promise<unknown> {
 	const session = getCatalogSession(fetchImpl);
 	if (!session.inflight) {
-		session.inflight = withCatalogDiscoveryTimeout(DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS, transportSignal =>
-			fetchCatalogPayload(fetchImpl ?? discoveryFetch(), session, transportSignal),
+		// A held caller must not start the lookup for the others; it may only join one in flight.
+		const refusal = admitSharedStart(signal);
+		if (refusal) return refusal;
+		// Shared by every caller of this fetch context, so started outside the caller's provider-request hold.
+		session.inflight = runOutsideRequestHold(() =>
+			withCatalogDiscoveryTimeout(DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS, transportSignal =>
+				fetchCatalogPayload(fetchImpl ?? discoveryFetch(), session, transportSignal),
+			),
 		).finally(() => {
 			session.inflight = null;
 		});
@@ -765,7 +772,11 @@ function createOllamaMetadataResolver(
 	return modelId => {
 		const cached = cache.get(modelId);
 		if (cached) return cached;
-		const pending = (async () => {
+		// A held caller must not start the lookup for every later caller; it may only join one in flight.
+		const refusal = admitSharedStart();
+		if (refusal) return refusal;
+		// Shared by every later lookup of this model, so started outside the caller's provider-request hold.
+		const pending = runOutsideRequestHold(async () => {
 			const metadata = await fetchOllamaShowMetadata(nativeBaseUrl, modelId, fetchImpl);
 			if (!metadata) {
 				cache.delete(modelId);
@@ -776,7 +787,7 @@ function createOllamaMetadataResolver(
 				contextWindow: metadata.contextWindow ?? OLLAMA_FALLBACK_CONTEXT_WINDOW,
 				maxTokens: metadata.maxTokens ?? OLLAMA_DEFAULT_MAX_TOKENS,
 			};
-		})();
+		});
 		cache.set(modelId, pending);
 		void pending.catch(() => cache.delete(modelId));
 		return pending;
@@ -4379,6 +4390,7 @@ function getLmStudioNativeContextWindow(entry: Record<string, unknown>): number 
  */
 export async function fetchLmStudioNativeModelMetadata(
 	baseUrl: string,
+	// model-request: none — model discovery (LM Studio's model metadata), not inference.
 	fetchImpl: FetchImpl = fetch,
 	options?: LmStudioNativeModelMetadataOptions,
 ): Promise<Map<string, LmStudioNativeModelMetadata> | null> {

@@ -54,15 +54,18 @@ export async function orchestrateRecall(
 		// Auto-derive when the caller did not pass one. `embedQuery()` returns null when
 		// embeddings are disabled or no provider is configured, so this is a no-op for
 		// FTS-only deployments. `null` (explicit "no embedding") is preserved untouched.
-		queryEmbedding = await embedQuery(query);
+		// model-request: caller orchestrateRecall(options.signal) — the query embedding stops on the reader's `signal`.
+		queryEmbedding = await embedQuery(query, options.signal);
 	}
 	if (polyphonic) {
 		return polyphonicRecall(beam, query, topK, { ...options, queryEmbedding });
 	}
 	const linearOptions = toLinearRecallOptions({ ...options, queryEmbedding });
 	if (options.enhanced === true && typeof beam.recallEnhanced === "function") {
-		return beam.recallEnhanced(query, topK, linearOptions);
+		// model-request: caller orchestrateRecall(options.signal) — the linear recall carries the reader's `signal`.
+		return beam.recallEnhanced(query, topK, { ...linearOptions, signal: options.signal });
 	}
-	if (typeof beam.recall === "function") return beam.recall(query, topK, linearOptions);
+	// model-request: caller orchestrateRecall(options.signal) — the linear recall carries the reader's `signal`.
+	if (typeof beam.recall === "function") return beam.recall(query, topK, { ...linearOptions, signal: options.signal });
 	return [];
 }

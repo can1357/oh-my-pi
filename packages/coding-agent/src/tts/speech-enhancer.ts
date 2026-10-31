@@ -41,6 +41,8 @@ export interface SpeechEnhancerDeps {
 	registry: ModelRegistry;
 	sessionId: string;
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
+	/** The owning session's disposal signal: no rewrite reaches the provider once it aborts. */
+	signal?: AbortSignal;
 }
 
 function extractText(content: AssistantMessage["content"]): string {
@@ -68,7 +70,9 @@ export class SpeechEnhancer {
 	 * the rewrite failed, timed out, or no model/key resolved; the caller then
 	 * falls back to mechanical normalization.
 	 */
-	async rewrite(block: string, signal?: AbortSignal): Promise<string | null> {
+	async rewrite(block: string, callSignal?: AbortSignal): Promise<string | null> {
+		const owner = this.#deps.signal;
+		const signal = owner && callSignal ? AbortSignal.any([owner, callSignal]) : (owner ?? callSignal);
 		try {
 			const { settings, registry, sessionId } = this.#deps;
 			// `@tiny` expands a configured `modelRoles.tiny` and otherwise falls
@@ -79,13 +83,14 @@ export class SpeechEnhancer {
 				matchPreferences: getModelMatchPreferences(settings),
 			}).model;
 			if (!model) return null;
-			const apiKey = await registry.getApiKey(model, sessionId);
+			const apiKey = await registry.getApiKey(model, sessionId, { signal });
 			if (!apiKey) return null;
 			// Resolve metadata after getApiKey so the session-sticky credential is recorded first.
 			const metadata = this.#deps.metadataResolver?.(model.provider);
 			const response = await retryTransientCompletion(
 				() => {
 					const timeout = AbortSignal.timeout(REWRITE_TIMEOUT_MS);
+					// model-request: caller SpeechEnhancer — the enhancer's owner signal joined to the vocalizer's per-block one.
 					return completeSimple(
 						model,
 						{

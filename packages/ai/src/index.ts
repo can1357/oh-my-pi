@@ -42,6 +42,7 @@ export type * from "./providers/openai-completions";
 export type * from "./providers/openai-responses";
 export type * from "./providers/synthetic";
 export * from "./registry";
+export * from "./request-hold";
 export { resolveCacheRetention } from "./utils";
 export * from "./env-api-key";
 export * from "./stream";

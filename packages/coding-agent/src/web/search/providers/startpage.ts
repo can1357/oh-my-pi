@@ -138,6 +138,7 @@ async function fetchFormInputs(
 }
 
 async function callStartpageHtml(params: SearchParams): Promise<string> {
+	// model-request: none — a Startpage results page, not a model request.
 	const fetchImpl = params.fetch ?? fetch;
 	const signal = withHardTimeout(params.signal, params.timeoutMs);
 	const withDate = params.recency ? RECENCY_TO_STARTPAGE_WITH_DATE[params.recency] : undefined;

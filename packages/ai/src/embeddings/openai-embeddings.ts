@@ -3,6 +3,7 @@ import type { Api, FetchImpl, Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import { type } from "@oh-my-pi/omptype";
 import { type ApiKey, withAuth } from "../auth-retry";
 import * as AIError from "../error";
+import { gatedFetch } from "../request-hold";
 import type { EmbeddingRequest, EmbeddingResult } from "./types";
 
 export interface EmbeddingOptions {
@@ -102,7 +103,8 @@ export async function embedOpenAI(
 	request: EmbeddingRequest,
 	options: EmbeddingOptions,
 ): Promise<EmbeddingResult> {
-	const fetchImpl = options.fetch ?? fetch;
+	// model-request: transport embed — the embedding request.
+	const fetchImpl = gatedFetch(options.fetch);
 	const body = {
 		model: model.id,
 		input: request.input,

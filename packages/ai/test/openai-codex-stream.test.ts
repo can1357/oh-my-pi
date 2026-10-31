@@ -1830,7 +1830,11 @@ describe("openai-codex streaming", () => {
 			}
 
 			override send(): void {
-				this.emitCodexResponse({ messageId: "msg_obs", responseId: "resp_obs", text: "Observed" });
+				// A real socket delivers no message inside `send()`, and the observer is told about the
+				// outbound frame once `send()` returns; reply on the next microtask, as the network would.
+				queueMicrotask(() =>
+					this.emitCodexResponse({ messageId: "msg_obs", responseId: "resp_obs", text: "Observed" }),
+				);
 			}
 		}
 		global.WebSocket = ObservedWebSocket as unknown as typeof WebSocket;

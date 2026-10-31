@@ -16,7 +16,8 @@
 import { Buffer } from "node:buffer";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $envpos, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { $envpos, isEnoent, logger, runOutsideRequestHold } from "@oh-my-pi/pi-utils";
+import { fetchKey, SharedFlight } from "@oh-my-pi/pi-utils/shared-flight";
 import * as AIError from "../error";
 import type { FetchImpl } from "../types";
 import { raceWithSignal } from "../utils/abort";
@@ -61,7 +62,7 @@ interface TokenResponse {
 }
 
 const tokenCache = new Map<string, CachedToken>();
-const inflight = new Map<string, Promise<string>>();
+const inflight = new Map<string, SharedFlight<string>>();
 
 function getRefreshSkewMs(): number {
 	return $envpos("GOOGLE_VERTEX_REFRESH_SKEW_MS", 60_000);
@@ -277,9 +278,9 @@ async function resolveAccessTokenUncached(
 }
 
 /**
- * Bound for the detached (signal-free) shared token resolution: a hung OAuth
- * exchange or metadata fetch must not pin the inflight slot forever — every
- * later call would await the stuck promise until process restart.
+ * Bound for the shared token resolution, whatever its callers' signals: a hung OAuth exchange or
+ * metadata fetch must not pin the inflight slot forever while a caller that brought no signal waits —
+ * every later call would await the stuck resolution until process restart.
  */
 const SHARED_TOKEN_RESOLVE_TIMEOUT_MS = 30_000;
 
@@ -293,6 +294,7 @@ export async function getVertexAccessToken(options?: { signal?: AbortSignal; fet
 	// override var; `GOOGLE_CLOUD_ACCESS_TOKEN` is the omp-facing alias.
 	const explicitToken = Bun.env.GOOGLE_CLOUD_ACCESS_TOKEN || Bun.env.CLOUDSDK_AUTH_ACCESS_TOKEN;
 	if (explicitToken) return explicitToken;
+	// model-request: none — fetches a Google access token, not a model request.
 	const fetchImpl = options?.fetch ?? globalThis.fetch.bind(globalThis);
 	const skew = getRefreshSkewMs();
 	const now = Date.now();
@@ -305,29 +307,40 @@ export async function getVertexAccessToken(options?: { signal?: AbortSignal; fet
 		tokenCache.delete(source);
 	}
 
-	const cacheKey = "vertex-adc";
+	// Shared only among callers of the same `fetch`, so no caller's token request goes out on another
+	// caller's transport.
+	const cacheKey = `vertex-adc\x00${fetchKey(options?.fetch)}`;
 	const existing = inflight.get(cacheKey);
-	if (existing) return raceWithSignal(existing, options?.signal);
+	if (existing?.abandoned) {
+		// Every caller left that resolution; it stops at its next step. Wait it out, then look again.
+		await raceWithSignal(existing.settled, options?.signal);
+		return getVertexAccessToken(options);
+	}
+	if (existing) return existing.join(options?.signal);
 
-	// Deliberately resolve without any caller's signal: the in-flight promise is shared
-	// by every concurrent caller, so aborting one request must not fail the whole batch.
-	// Each caller races its own signal against the shared promise instead.
-	const promise = (async () => {
-		try {
-			const { source, token } = await resolveAccessTokenUncached(
-				AbortSignal.timeout(SHARED_TOKEN_RESOLVE_TIMEOUT_MS),
-				fetchImpl,
-			);
-			const expiresAtMs = Date.now() + Math.max(0, token.expires_in * 1000);
-			tokenCache.set(source, { token: token.access_token, expiresAtMs });
-			logger.debug("vertex.adc acquired access token", { source, expiresInSec: token.expires_in });
-			return token.access_token;
-		} finally {
-			inflight.delete(cacheKey);
-		}
-	})();
-	inflight.set(cacheKey, promise);
-	return raceWithSignal(promise, options?.signal);
+	// The resolution is shared by every concurrent caller, so it runs on its own signal, which ends only
+	// once every caller has left, and is bounded by its own timeout; each caller waits with its own
+	// signal, so aborting one request fails no other. For the same reason it starts outside the caller's
+	// provider-request hold, and a held caller starts none.
+	const flight = SharedFlight.start(options?.signal, signal =>
+		runOutsideRequestHold(async () => {
+			try {
+				const { source, token } = await resolveAccessTokenUncached(
+					AbortSignal.any([signal, AbortSignal.timeout(SHARED_TOKEN_RESOLVE_TIMEOUT_MS)]),
+					fetchImpl,
+				);
+				const expiresAtMs = Date.now() + Math.max(0, token.expires_in * 1000);
+				tokenCache.set(source, { token: token.access_token, expiresAtMs });
+				logger.debug("vertex.adc acquired access token", { source, expiresInSec: token.expires_in });
+				return token.access_token;
+			} finally {
+				inflight.delete(cacheKey);
+			}
+		}),
+	);
+	if (flight instanceof Promise) return flight;
+	inflight.set(cacheKey, flight);
+	return flight.join(options?.signal);
 }
 
 /** Test seam: clears every cached token. */

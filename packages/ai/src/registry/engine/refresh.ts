@@ -61,6 +61,7 @@ function createRequestRefresh(rule: RequestRefresh, policy: CompiledAuthProvider
 		throwIfCancelled(signal);
 		const client = await loginClient(policy, signal);
 		const hookHeaders = rule.headersHook ? (await loadHeadersHook(rule.headersHook))() : undefined;
+		// model-request: none — an OAuth token refresh, not a model request.
 		const context = { provider, fetch, signal, headers: hookHeaders };
 		const vars: TemplateVars = {
 			refresh_token: credentials.refresh,
@@ -91,6 +92,7 @@ function createRequestRefresh(rule: RequestRefresh, policy: CompiledAuthProvider
 			provider,
 			phase: "refresh",
 			raw: body,
+			// model-request: none — an OAuth token refresh, not a model request.
 			fetch,
 			signal,
 			stored: credentials,

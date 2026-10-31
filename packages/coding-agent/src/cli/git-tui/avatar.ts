@@ -33,6 +33,7 @@ function noreplyUrls(email: string): string[] {
 
 async function fetchBytes(url: string, headers?: Record<string, string>): Promise<Uint8Array | null> {
 	try {
+		// model-request: none — an author avatar for the git TUI.
 		const response = await fetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
 		if (!response.ok) return null;
 		return new Uint8Array(await response.arrayBuffer());
@@ -50,6 +51,7 @@ async function githubApiAvatarUrl(cwd: string, email: string): Promise<string | 
 	const headers: Record<string, string> = { Accept: "application/vnd.github+json", "User-Agent": "omp" };
 	if (token) headers.Authorization = `Bearer ${token}`;
 	try {
+		// model-request: none — looks up an author's GitHub login for the git TUI.
 		const response = await fetch(
 			`https://api.github.com/repos/${match[1]}/${match[2]}/commits?per_page=1&author=${encodeURIComponent(email)}`,
 			{ headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) },

@@ -3,6 +3,7 @@ import type { Api, Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import { withAuth } from "../auth-retry";
 import * as AIError from "../error";
+import { gatedFetch } from "../request-hold";
 import { SPEECH_FORMAT_MIME_TYPES, type SpeechFormat, type SpeechOptions, type SpeechResult } from "./types";
 
 const SPEECH_TIMEOUT_MS = 60_000;
@@ -20,7 +21,8 @@ export async function postSpeechRequest(
 ): Promise<SpeechResult> {
 	const timeoutSignal = AbortSignal.timeout(SPEECH_TIMEOUT_MS);
 	const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
-	const fetchImpl = options.fetch ?? fetch;
+	// model-request: transport synthesizeSpeech — the speech request.
+	const fetchImpl = gatedFetch(options.fetch);
 	const label = `${model.provider}/${model.id}`;
 	const audio = await withAuth(
 		options.apiKey,

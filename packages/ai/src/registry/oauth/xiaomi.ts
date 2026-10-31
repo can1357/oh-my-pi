@@ -22,6 +22,7 @@ const STANDARD_API_BASE_URL = "https://api.xiaomimimo.com/v1";
 const VALIDATION_TIMEOUT_MS = 15_000;
 
 async function validateXiaomiApiKey(apiKey: string, signal?: AbortSignal, fetchOverride?: FetchImpl): Promise<void> {
+	// model-request: none — validates a key at login, not a model request a session makes.
 	const fetchImpl = fetchOverride ?? fetch;
 	// Generic Xiaomi login keeps the historical SGP → AMS → CN fallback.
 	const endpoints = isXiaomiTokenPlanKey(apiKey)
@@ -108,6 +109,7 @@ async function validateXiaomiApiKey(apiKey: string, signal?: AbortSignal, fetchO
  * Returns the API key directly (not OAuthCredentials - this isn't OAuth).
  */
 export async function loginXiaomi(options: OAuthController): Promise<string> {
+	// model-request: none — a login, not a model request.
 	const fetchImpl = options.fetch ?? fetch;
 	if (!options.onPrompt) {
 		throw new AIError.OnPromptRequiredError(PROVIDER_NAME);

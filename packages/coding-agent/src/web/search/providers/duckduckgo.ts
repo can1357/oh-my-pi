@@ -303,6 +303,7 @@ function createDuckDuckGoForm(params: SearchParams): URLSearchParams {
 
 async function callDuckDuckGoHtml(params: SearchParams, form: URLSearchParams, signal: AbortSignal): Promise<string> {
 	const page = await browserFetch(DUCKDUCKGO_HTML_URL, {
+		// model-request: none — the DuckDuckGo results page, not a model request.
 		fetch: params.fetch ?? fetch,
 		signal,
 		timeoutMs: params.timeoutMs,

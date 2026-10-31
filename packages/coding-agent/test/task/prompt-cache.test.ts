@@ -1043,15 +1043,12 @@ describe("task sibling prompt-cache routing", () => {
 			childFor,
 		} = h;
 		try {
-			const parent = await createParent("parent-lineage", initialModel);
-			await runTask(parent.getToolByName("task") as TaskTool, "SiblingA");
-			const child = childFor(requests[0]?.sessionId);
-			const childFile = child.sessionManager.getSessionFile();
-			if (!childFile) throw new Error("Expected a persisted Task child");
-
 			// Target: a different session at a different cwd with no task key of
 			// its own, so the onCwdChange hook can drive both the rejected and
-			// the committed switch below.
+			// the committed switch below. It is written and disposed before the
+			// Task runs: disposing a main session tears down the process's agent
+			// lifecycle, which would dispose the Task child too, and a disposed
+			// session takes no further prompt.
 			const altCwd = directory.join("alt");
 			fs.mkdirSync(altCwd, { recursive: true });
 			const { session: alt } = await sdk.createAgentSession({
@@ -1076,6 +1073,13 @@ describe("task sibling prompt-cache routing", () => {
 			// The file must not stay owned by a live manager: the switched child
 			// becomes its next claimant.
 			await alt.dispose();
+			const firstTaskRequest = requests.length;
+
+			const parent = await createParent("parent-lineage", initialModel);
+			await runTask(parent.getToolByName("task") as TaskTool, "SiblingA");
+			const child = childFor(requests[firstTaskRequest]?.sessionId);
+			const childFile = child.sessionManager.getSessionFile();
+			if (!childFile) throw new Error("Expected a persisted Task child");
 
 			// A rejected switch rolls back after the target header was already
 			// loaded: the stash must survive it.
