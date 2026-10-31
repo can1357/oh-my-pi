@@ -22,17 +22,21 @@ export function extractProviderRetryHint(
 
 const RETRY_AFTER_HINT = "retry-after-ms=";
 
+/**
+ * `error`'s message with the response headers' retry wait appended as
+ * `retry-after-ms=`, so the readers above see the header timing in the text.
+ * A hint the message already carries does not stand in for a longer one in the
+ * headers: the header wait is appended unless the message already names a
+ * wait at least as long, and the readers take the longest the text names.
+ * Returning early on any `retry-after-ms=` dropped `Retry-After: 9` behind a
+ * body's `retry-after-ms=200`, and every consumer retried at 200 ms.
+ */
 export function formatErrorMessageWithRetryAfter(error: unknown, headers?: HeadersLike): string {
 	const message = error instanceof Error ? error.message : JSON.stringify(error);
-	if (message.includes(RETRY_AFTER_HINT)) {
-		return message;
-	}
-
 	const retryAfterMs = getRetryAfterMsFromHeaders(headers ?? getHeadersFromError(error));
-	if (retryAfterMs === undefined) {
-		return message;
-	}
-
+	if (retryAfterMs === undefined) return message;
+	const named = message.includes(RETRY_AFTER_HINT) ? longestRetryHint(undefined, message) : undefined;
+	if (named !== undefined && named >= retryAfterMs) return message;
 	return `${message} ${RETRY_AFTER_HINT}${retryAfterMs}`;
 }
 

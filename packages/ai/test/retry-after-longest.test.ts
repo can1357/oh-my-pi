@@ -5,7 +5,7 @@
  * window. A message can name its wait more than once; the longest counts.
  */
 import { describe, expect, it } from "bun:test";
-import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { extractProviderRetryHint, formatErrorMessageWithRetryAfter } from "@oh-my-pi/pi-ai/utils/retry-after";
 
 describe("extractProviderRetryHint", () => {
 	it.each([
@@ -21,5 +21,38 @@ describe("extractProviderRetryHint", () => {
 	it("keeps an explicit retry-now as zero and a message with no hint as unknown", () => {
 		expect(extractProviderRetryHint("anthropic", "overloaded retry-after-ms=0")).toBe(0);
 		expect(extractProviderRetryHint("anthropic", "overloaded")).toBeUndefined();
+	});
+});
+
+describe("formatErrorMessageWithRetryAfter", () => {
+	it.each([
+		[
+			"a shorter body hint and a longer Retry-After",
+			"read ECONNRESET retry-after-ms=200",
+			{ "retry-after": "9" },
+			9000,
+		],
+		[
+			"a shorter body hint and a longer retry-after-ms header",
+			"usage_limit_reached retry-after-ms=200",
+			{ "retry-after-ms": "9000" },
+			9000,
+		],
+		["a longer body hint and a shorter header", "read ECONNRESET retry-after-ms=9000", { "retry-after": "1" }, 9000],
+		["no body hint", "read ECONNRESET", { "retry-after": "9" }, 9000],
+	] as [string, string, Record<string, string>, number][])(
+		"keeps the longest wait for %s",
+		(_label, message, headers, expected) => {
+			// A hint already in the message used to end the formatting, so a longer
+			// header wait never reached the readers and every consumer — credential
+			// blocks, one-shot retries, turn recovery — retried at the shorter one.
+			const formatted = formatErrorMessageWithRetryAfter(new Error(message), headers);
+			expect(extractProviderRetryHint("anthropic", formatted)).toBe(expected);
+		},
+	);
+
+	it("does not repeat a header wait the message already covers", () => {
+		const message = "read ECONNRESET retry-after-ms=9000";
+		expect(formatErrorMessageWithRetryAfter(new Error(message), { "retry-after": "9" })).toBe(message);
 	});
 });
