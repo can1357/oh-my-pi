@@ -703,14 +703,34 @@ impl Options {
 ///
 /// Includes main()'s checks around option parsing: an empty argv and a run
 /// without operands are usage errors (help text on stderr, exit 1).
-pub(crate) fn parse(argv: &[std::ffi::OsString], env: &dyn Fn(&str) -> Option<String>) -> Result<Parsed, crate::rsync::exit::RsyncError> {
+pub(crate) fn parse(
+	argv: &[std::ffi::OsString],
+	env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Parsed, ParseFailure> {
 	if argv.is_empty() {
-		return Err(usage_err(("main.c", 1898)));
+		return Err(ParseFailure { error: usage_err(("main.c", 1898)), allow_8bit_chars: false });
 	}
 	let opts = Options { am_root: process_am_root(), ..Options::default() };
 	let mut p = Parser::new(opts, env, ("main.c", 1913));
-	let parsed = p.parse_arguments(argv)?;
-	after_parse(parsed)
+	let parsed = match p.parse_arguments(argv) {
+		Ok(parsed) => parsed,
+		Err(error) => return Err(ParseFailure { error, allow_8bit_chars: p.o.allow_8bit_chars }),
+	};
+	let allow_8bit_chars = match &parsed {
+		Parsed::Run(opts) => opts.allow_8bit_chars,
+		_ => false,
+	};
+	after_parse(parsed).map_err(|error| ParseFailure { error, allow_8bit_chars })
+}
+
+/// A failed parse and what the options had already set when it stopped.
+/// Upstream parses before `setup_iconv`, so its diagnostics are escaped by
+/// printability unless an earlier `-8` turned that off: `rsync -8 --bad-ün`
+/// prints the name's bytes, `rsync --bad-ün` escapes them.
+#[derive(Debug)]
+pub(crate) struct ParseFailure {
+	pub error: RsyncError,
+	pub allow_8bit_chars: bool,
 }
 
 /// Upstream initializes `am_root` from the real uid before parsing. Windows has no

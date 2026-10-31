@@ -3478,7 +3478,7 @@ use uucore::{
 };
 
 #[cfg(unix)]
-use crate::locale::locale_loadable;
+use crate::locale::{ShellLocale, shell_locale_initialises};
 use crate::{
 	host::{Host, Utility, format_usage, rayon_global_pool_available, util},
 	locale::{numeric_symbols, parse_locale_name, shell_locale},
@@ -5356,10 +5356,12 @@ fn locale_failed_to_set(host: &Host) -> bool {
 	host.var("LC_ALL") == Some("missing")
 }
 
+/// Whether a GNU `sort`'s own `setlocale(LC_ALL, "")` would have failed and
+/// left it in the C locale. A locale libc could not be asked about is not
+/// that: it is reported where it is read, and the names stand.
 #[cfg(unix)]
 fn locale_failed_to_set(host: &Host) -> bool {
-	shell_locale(host, "LC_COLLATE")
-		.is_some_and(|locale| !locale_loadable(locale, nix::libc::LC_COLLATE_MASK))
+	matches!(shell_locale_initialises(host), ShellLocale::C)
 }
 
 fn key_zero_width(selector: &FieldSelector) -> bool {
@@ -7204,7 +7206,7 @@ mod tests {
 	/// locale (as GNU does) for one that is not installed.
 	#[cfg(unix)]
 	fn locale_installed(locale: &str) -> bool {
-		locale_loadable(locale, nix::libc::LC_ALL_MASK)
+		crate::locale::locale_loadable(locale, nix::libc::LC_ALL_MASK)
 	}
 
 	/// Windows sort reads ICU's data for any locale name: nothing to install.
