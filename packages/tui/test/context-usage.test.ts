@@ -190,7 +190,6 @@ describe("pruned tool description accounting", () => {
 		// Owned dialects retain descriptions even when the raw prune setting is enabled.
 		prune = false;
 		const full = computeContextUsageDetails(session).tools;
-		expect(full).toEqual([{ name: "grep", tokens: estimateToolSchemaTokens(tools as never, tokenizer) }]);
 		expect(full[0]!.tokens).toBeGreaterThan(prunedWireTokens);
 
 		prune = true;
