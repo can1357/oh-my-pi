@@ -2976,16 +2976,24 @@ export class AcpAgent implements Agent {
 			record.extensionsConfigured = true;
 			return;
 		}
-
+		// resources_discover and session_start handlers share this action context, so
+		// a handler calling sendMessage/sendUserMessage starts an async session send
+		// that the action itself does not expose a promise for. Every such send
+		// dispatches through the runner, which holds it until startup discovery
+		// below has rebuilt the prompt — the same hold `initializeExtensions`
+		// (runtime-init.ts) uses for print/RPC.
 		extensionRunner.initialize(
 			{
 				sendMessage: (message, options) => {
-					record.session.sendCustomMessage(message, options).catch((error: unknown) => {
-						logger.warn("ACP extension sendMessage failed", { error });
-					});
+					extensionRunner.sends
+						.dispatch(() => record.session.sendCustomMessage(message, options))
+						.catch((error: unknown) => {
+							logger.warn("ACP extension sendMessage failed", { error });
+						});
 				},
 				sendUserMessage: (content, options) => {
-					this.#trackExtensionUserMessage(record, record.session.sendUserMessage(content, options));
+					const sendTask = extensionRunner.sends.dispatch(() => record.session.sendUserMessage(content, options));
+					this.#trackExtensionUserMessage(record, sendTask);
 				},
 				appendEntry: (customType, data) => {
 					record.session.sessionManager.appendCustomEntry(customType, data);
@@ -3057,7 +3065,22 @@ export class AcpAgent implements Agent {
 			uiContext,
 			"rpc",
 		);
-		await extensionRunner.emit({ type: "session_start" });
+		// A `session_start` or `resources_discover` handler can call
+		// sendMessage/sendUserMessage synchronously; a triggered turn would read
+		// the system prompt before `discoverStartupSkillPaths()` has folded any
+		// extension-contributed skill directories into it (PR #9379 review). Hold
+		// those sends until discovery has rebuilt the prompt.
+		await extensionRunner.sends.withHeld(async () => {
+			await extensionRunner.emit({ type: "session_start" });
+			// resources_discover fires after `session_start` (extensibility/extensions/types.ts) —
+			// only now are runtime actions wired, so extension-contributed skill directories
+			// are folded into the session's skill snapshot before the first prompt.
+			await record.session.discoverStartupSkillPaths();
+		});
+		// Session creation does not wait for a turn those sends start: the client
+		// gets its session id at once, and the startup turn runs like any other
+		// turn the client did not prompt (a `session/prompt` during it is answered
+		// with `session_busy`, as during any such turn).
 		record.extensionsConfigured = true;
 	}
 

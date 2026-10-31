@@ -571,10 +571,11 @@ async function refreshSkillsForAutoload(session: ToolSession, agent: AgentDefini
 
 function resolveAutoloadSkills(session: ToolSession, agent: AgentDefinition) {
 	const skills = [...(session.skills ?? [])];
-	const autoloadSkills = agent.autoloadSkills?.length
-		? agent.autoloadSkills.map(name => skills.find(skill => skill.name === name)).filter(skill => skill !== undefined)
-		: [];
-	return { skills, autoloadSkills };
+	// Names only: the executor resolves them against the child session's
+	// merged skill set after startup `resources_discover`, so child-discovered
+	// or child-replaced skills autoload correctly (executor.ts).
+	const autoloadSkillNames = agent.autoloadSkills ?? [];
+	return { skills, autoloadSkillNames };
 }
 
 function buildExecutorOptions(
@@ -585,7 +586,7 @@ function buildExecutorOptions(
 ): ExecutorOptions {
 	const { session } = request;
 	const preparedSession = policy.preparedSession;
-	const { skills, autoloadSkills } = resolveAutoloadSkills(session, policy.agent);
+	const { skills, autoloadSkillNames } = resolveAutoloadSkills(session, policy.agent);
 	const localProtocolOptions = sessionLocalProtocolOptions(session);
 	const restrictToolNames = preparedSession !== undefined || policy.planMode || session.restrictToolNames === true;
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
@@ -655,8 +656,11 @@ function buildExecutorOptions(
 		contextFiles: session.contextFiles,
 		noContextFiles: session.noContextFiles,
 		skills,
+		// Parent snapshot forwarded for perf; the child still merges its own
+		// resources_discover contributions (executor.ts, session-tools.ts).
+		mergeDiscoveredSkillPaths: true,
 		// Autoload runs after session start, outside the seance isolation options.
-		autoloadSkills: preparedSession ? undefined : autoloadSkills,
+		autoloadSkillNames: preparedSession ? undefined : autoloadSkillNames,
 		workspaceTree: session.workspaceTree,
 		promptTemplates: session.promptTemplates,
 		rules: session.rules,

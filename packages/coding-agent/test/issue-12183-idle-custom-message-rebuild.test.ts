@@ -4,7 +4,7 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ExtensionActions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { type ExtensionActions, ExtensionSendQueue } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -105,6 +105,8 @@ async function createHarness() {
 		},
 		onError: () => {},
 		emit: async () => undefined,
+		emitResourcesDiscover: async () => ({ skillPaths: [], promptPaths: [], themePaths: [] }),
+		sends: new ExtensionSendQueue(),
 		hasHandlers: () => false,
 		setToolApprovalPreviewWaiter: () => () => {},
 		getMessageRenderer: () => undefined,

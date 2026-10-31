@@ -1722,6 +1722,15 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const onPromptError = (id: string | undefined, command: string) => (promptError: Error) =>
 		output(error(id, command, promptError.message));
 
+	// Output all agent events as JSON; prompt results follow the frame that settled them.
+	session.subscribe(event => {
+		sessionEvents.forward(event);
+		// Before the prompt-result and settle reports: a goal continuation decided at this
+		// agent_end is scheduled (and reported as pending) before either reads settlement.
+		goalController.observe(event);
+		promptResults.observe(event);
+		settleWatcher.observe(event);
+	});
 	// Read stdin from now on: `session_start` may be waiting on a dialog only the client can answer. Until the
 	// command loop below exists, a dialog answer and the ask-dialog opt-in are handled at once and every other
 	// frame is held, in arrival order, for that loop.
@@ -1789,17 +1798,13 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		},
 		// Headless hosts get the extension runner's no-op UI: hasUI=false, dialogs resolve to defaults.
 		uiContext: headless ? undefined : rpcUiContext,
+		// Start reading commands while a turn a startup handler triggered still runs:
+		// the client gets `negotiate_protocol`, `get_state` and `abort` answered (and an
+		// extension dialog that turn raises gets its response read) instead of waiting
+		// for the whole turn.
+		drainSends: false,
 	});
 
-	// Output all agent events as JSON; prompt results follow the frame that settled them.
-	session.subscribe(event => {
-		sessionEvents.forward(event);
-		// Before the prompt-result and settle reports: a goal continuation decided at this
-		// agent_end is scheduled (and reported as pending) before either reads settlement.
-		goalController.observe(event);
-		promptResults.observe(event);
-		settleWatcher.observe(event);
-	});
 	await goalController.reconcile();
 	await goalController.settled();
 

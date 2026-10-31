@@ -9,6 +9,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ExtensionSendQueue } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/send-queue";
 import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -112,6 +113,8 @@ describe("AgentSession auto-compaction progress guard", () => {
 				};
 			},
 			emitBeforeAgentStart: async () => undefined,
+			emitResourcesDiscover: async () => ({ skillPaths: [], promptPaths: [], themePaths: [] }),
+			sends: new ExtensionSendQueue(),
 		};
 
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
