@@ -127,6 +127,25 @@ describe("AsyncJobManager ownership across concurrent top-level sessions", () =>
 		}
 	}, 60000);
 
+	it("lets a root session's async.maxJobs above 100 cap it and its subagent", async () => {
+		const root = await spawnTopLevelSession({ "async.maxJobs": 101 });
+		const subagent = await spawnSubagent(root);
+		const release = Promise.withResolvers<void>();
+		try {
+			registerHeldJobs(root, "Main", 50, release.promise);
+			registerHeldJobs(subagent, "0-Sub", 51, release.promise);
+			expect(root.asyncJobManager!.getRunningJobs()).toHaveLength(101);
+			expect(() => registerHeldJobs(subagent, "0-Sub", 1, release.promise)).toThrow(
+				"Background job limit reached (101)",
+			);
+		} finally {
+			release.resolve();
+			await root.asyncJobManager!.waitForAll();
+			await subagent.dispose();
+			await root.dispose();
+		}
+	}, 60000);
+
 	it("still refuses the 101st background job of a root session and its subagent at the async.maxJobs default", async () => {
 		const root = await spawnTopLevelSession();
 		const subagent = await spawnSubagent(root);
