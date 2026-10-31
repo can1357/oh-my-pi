@@ -5,7 +5,7 @@ use std::{
 	collections::{BTreeMap, BTreeSet},
 	ffi::OsStr,
 	fs,
-	path::{Path, PathBuf},
+	path::{Component, Path, PathBuf},
 	process::{Command, Stdio},
 };
 
@@ -643,6 +643,42 @@ impl GitRepo {
 				));
 			}
 		}
+		let preferred = match options.clone {
+			WorktreeClone::Off => None,
+			WorktreeClone::Auto => Some(None),
+			WorktreeClone::Prefer(kind) => Some(Some(kind)),
+		};
+		let candidates = preferred.map(pi_iso::clone_candidates);
+		// A clone copies the source tree verbatim, so a destination inside it
+		// would be copied into itself (recursing until the path is too long)
+		// and would drag nested worktrees' `.git` pointers along. Only the
+		// clone path recurses; a plain checkout writes the target tree in
+		// place and is safe — an in-tree worktree is legitimate (omp's own
+		// `.worktrees/`). This is policy rather than a backend failure, so it
+		// is decided before the branch is created: a rejected destination must
+		// not leave an unregistered branch behind.
+		if let Some(candidates) = &candidates
+			&& !candidates.is_empty()
+			&& self.clone_preconditions(&repo).is_none()
+		{
+			let source_root = fs::canonicalize(self.root())
+				.map_err(|e| Error::backend("git worktree add", format!("canonicalize source: {e}")))?;
+			// The refusal does not depend on what the destination's
+			// filesystem supports. The copy walks the source tree, so a
+			// destination inside the source is copied into itself: the walk
+			// finds the directory the copy just created and descends into it
+			// again, until the path is too long. That happens while the tree
+			// is copied, before a single file is cloned, so it is the same on
+			// every filesystem and no probe of the filesystem can rule it out.
+			// The refusal therefore applies wherever a copy would start.
+			if destination_inside_source(path, &source_root) {
+				return Err(Error::backend(
+					"git worktree add",
+					"destination is inside the source checkout; set worktree.clone=false to check out \
+					 in place",
+				));
+			}
+		}
 		let head = if options.detach {
 			id.to_hex().to_string()
 		} else {
@@ -675,14 +711,9 @@ impl GitRepo {
 			format!("ref: {full}")
 		};
 
-		let preferred = match options.clone {
-			WorktreeClone::Off => None,
-			WorktreeClone::Auto => Some(None),
-			WorktreeClone::Prefer(kind) => Some(Some(kind)),
-		};
 		let mut clone_error = None;
-		if let Some(preferred) = preferred {
-			for kind in pi_iso::clone_candidates(preferred) {
+		if let Some(candidates) = candidates {
+			for kind in candidates {
 				match self.worktree_add_cloned(path, id, &head, kind, options.keep_changes) {
 					Ok(()) => {
 						return Ok(WorktreeAddResult { cloned_with: Some(kind), clone_error });
@@ -756,6 +787,27 @@ impl GitRepo {
 			.map_err(|err| Error::backend("git worktree add", err))
 	}
 
+	/// Why a clone cannot run for this repository, if it cannot.
+	///
+	/// A clone copies the working tree verbatim, which a sparse checkout or a
+	/// split index does not describe, and it needs the source's index to
+	/// reconcile the copy against the target tree. Such a repository is
+	/// checked out in place instead — which is safe even inside the source,
+	/// because no tree is copied.
+	fn clone_preconditions(&self, repo: &gix::Repository) -> Option<String> {
+		for key in ["core.sparseCheckout", "core.splitIndex"] {
+			if repo.config_snapshot().string(key).is_some_and(|value| {
+				!matches!(value.to_str_lossy().as_ref(), "false" | "no" | "off" | "0")
+			}) {
+				return Some(format!("{key} is enabled"));
+			}
+		}
+		if !self.info().git_dir.join("index").is_file() {
+			return Some("source index is missing".to_owned());
+		}
+		None
+	}
+
 	fn worktree_add_cloned(
 		&self,
 		path: &Path,
@@ -765,22 +817,21 @@ impl GitRepo {
 		keep_changes: bool,
 	) -> Result<()> {
 		let repo = self.gix()?;
-		for key in ["core.sparseCheckout", "core.splitIndex"] {
-			if repo.config_snapshot().string(key).is_some_and(|value| {
-				!matches!(value.to_str_lossy().as_ref(), "false" | "no" | "off" | "0")
-			}) {
-				return Err(Error::backend("git worktree add", format!("{key} is enabled")));
-			}
+		if let Some(reason) = self.clone_preconditions(&repo) {
+			return Err(Error::backend("git worktree add", reason));
 		}
 		let source_index = self.info().git_dir.join("index");
-		if !source_index.is_file() {
-			return Err(Error::backend("git worktree add", "source index is missing"));
-		}
+		// The commits the target tree pins its submodules to: a detached
+		// submodule is reset to the commit its superproject records, so the
+		// copy does not report a modified submodule right away.
+		let tree = commit_tree(&repo, &id)?;
+		let gitlinks = collect_gitlinks(&repo, tree)?;
 
 		pi_iso::backend(kind)
 			.clone_tree(self.root(), path, &[OsStr::new(".git")])
 			.map_err(|err| Error::backend("git worktree add", err))?;
 		let admin = register_worktree(path, &self.info().common_dir, head)?;
+		remove_nested_git_files(path, self.root(), &self.info().common_dir, &gitlinks, keep_changes)?;
 		fs::copy(&source_index, admin.join("index"))?;
 
 		let (dirty_tracked, _) = collect_clone_reconciliation_paths(&repo)?;
@@ -1942,6 +1993,533 @@ fn remove_existing(path: &Path) -> Result<()> {
 	Ok(())
 }
 
+/// Give every nested `.git` entry of the copied tree a repository of its own.
+///
+/// A clone copies the source tree verbatim, so the nested worktrees' `.git`
+/// pointers come along — and they still address the source's metadata, which
+/// makes the copy a second checkout of the source: staging in the copy
+/// changes the source's index.
+///
+/// Every pointer is therefore either removed (when it addresses the source's
+/// own worktree metadata, which the copy cannot use) or detached into a
+/// repository of its own that borrows the original's objects (a submodule's
+/// module directory, a separate git directory, or another repository's linked
+/// worktree). A nested repository's own `.git` directory is self-contained
+/// and stays, and so does a pointer whose target the copy carries along.
+///
+/// `source_root` is the checkout the tree was copied from: a submodule's
+/// pointer — and a linked worktree's pointer written with
+/// `worktree.useRelativePaths` — is relative to that checkout, so it only
+/// resolves there. `gitlinks` holds the commits the target tree pins its
+/// submodules to; a detached submodule is reset to the commit its
+/// superproject records, unless the source's uncommitted state is kept.
+fn remove_nested_git_files(
+	root: &Path,
+	source_root: &Path,
+	common: &Path,
+	gitlinks: &BTreeMap<String, gix::hash::ObjectId>,
+	keep_changes: bool,
+) -> Result<()> {
+	let source_common = fs::canonicalize(common).unwrap_or_else(|_| normalize_path(common));
+	let canonical_source =
+		fs::canonicalize(source_root).unwrap_or_else(|_| normalize_path(source_root));
+	let mut dirs = vec![root.to_path_buf()];
+	while let Some(dir) = dirs.pop() {
+		// The directory the same path had in the source checkout: a pointer
+		// copied from there is relative to it, not to the copy.
+		let source_dir = match dir.strip_prefix(root) {
+			Ok(relative) if !relative.as_os_str().is_empty() => source_root.join(relative),
+			_ => source_root.to_path_buf(),
+		};
+		let entries = fs::read_dir(&dir).map_err(|e| {
+			Error::backend("git worktree add", format!("read_dir {}: {e}", dir.display()))
+		})?;
+		for entry in entries {
+			let entry = entry.map_err(|e| {
+				Error::backend("git worktree add", format!("dir entry in {}: {e}", dir.display()))
+			})?;
+			let path = entry.path();
+			let name = entry.file_name();
+			if name != OsStr::new(".git") {
+				let file_type = entry.file_type().map_err(|e| {
+					Error::backend("git worktree add", format!("file_type {}: {e}", path.display()))
+				})?;
+				if file_type.is_dir() {
+					dirs.push(path);
+				}
+				continue;
+			}
+			// The root `.git` was written by `register_worktree` and belongs to
+			// this worktree.
+			if path == root.join(".git") {
+				continue;
+			}
+			let file_type = entry.file_type().map_err(|e| {
+				Error::backend("git worktree add", format!("file_type {}: {e}", path.display()))
+			})?;
+			if file_type.is_symlink() {
+				// A symlinked `.git` still addresses the source's metadata, and
+				// the copy must not share it. The link may point at the
+				// metadata directory itself or at a pointer file that names
+				// it.
+				if let Some(target) = git_entry_target(&path, &source_dir) {
+					let resolved = fs::canonicalize(&target).unwrap_or_else(|_| normalize_path(&target));
+					if resolved.starts_with(&source_common) {
+						remove_existing(&path)?;
+					}
+				}
+				continue;
+			}
+			if !file_type.is_file() {
+				continue;
+			}
+			// The pointer as the source wrote it: a relative target is
+			// relative to the directory it was written in.
+			let Some(target) = gitdir_pointer_target(&source_dir.join(".git"), &source_dir) else {
+				continue;
+			};
+			if !target.exists() {
+				// A pointer that addresses nothing cannot be repaired.
+				remove_existing(&path)?;
+				continue;
+			}
+			// The copy carries its own copy of the target when the target
+			// lives inside the copied tree: a submodule of an independent
+			// nested repository keeps working then.
+			let canonical_target = fs::canonicalize(&target).unwrap_or_else(|_| target.clone());
+			if let Ok(relative) = canonical_target.strip_prefix(&canonical_source)
+				&& root.join(relative).exists()
+			{
+				continue;
+			}
+			match classify_nested_git(&canonical_target, &source_common) {
+				NestedGit::SourceWorktree => {
+					// The pointer addresses the source's own worktree
+					// metadata: the copy cannot use it.
+					remove_existing(&path)?;
+				},
+				NestedGit::Repository { git_dir, common_dir } => {
+					remove_existing(&path)?;
+					detach_repository(&git_dir, &common_dir, &dir.join(".git"))?;
+					// A submodule that keeps the source's commit describes a
+					// different one than the superproject pins, so the copy
+					// would report it as modified right away.
+					if !keep_changes
+						&& let Some(relative) = git_relative_path(root, &dir)
+						&& let Some(commit) = gitlinks.get(&relative)
+					{
+						reset_detached_submodule(&dir, *commit)?;
+					}
+				},
+			}
+		}
+	}
+	Ok(())
+}
+
+/// The directory a `.git` pointer file addresses, resolved against `base`.
+///
+/// `base` is the directory the pointer is relative to: a submodule's pointer
+/// is written relative to the checkout it lives in, so it only resolves
+/// there.
+fn gitdir_pointer_target(path: &Path, base: &Path) -> Option<PathBuf> {
+	let content = fs::read_to_string(path).ok()?;
+	let target = content
+		.lines()
+		.next()
+		.map(str::trim)
+		.and_then(|line| line.strip_prefix("gitdir:"))?
+		.trim();
+	if target.is_empty() {
+		return None;
+	}
+	let target = Path::new(target);
+	let joined = if target.is_absolute() {
+		target.to_path_buf()
+	} else {
+		base.join(target)
+	};
+	Some(normalize_path(&joined))
+}
+
+/// The metadata directory a `.git` entry addresses.
+///
+/// A `.git` entry is a pointer file that names the directory in its first
+/// line (`gitdir: <path>`), or a symlink to such a file or to the directory
+/// itself. A relative path is resolved against the directory the pointer was
+/// written in.
+fn git_entry_target(path: &Path, base: &Path) -> Option<PathBuf> {
+	let meta = fs::symlink_metadata(path).ok()?;
+	if !meta.file_type().is_symlink() {
+		return gitdir_pointer_target(path, base);
+	}
+	let link = fs::read_link(path).ok()?;
+	let linked = if link.is_absolute() {
+		link
+	} else {
+		base.join(link)
+	};
+	if linked.is_file() {
+		// The link points at a pointer file, which names the directory.
+		let parent = linked.parent()?;
+		return gitdir_pointer_target(&linked, parent);
+	}
+	Some(normalize_path(&linked))
+}
+
+/// What a nested `.git` entry of a copied tree refers to.
+enum NestedGit {
+	/// The source repository's own worktree metadata. A copy cannot use it:
+	/// the metadata describes the source's checkout, not the copy.
+	SourceWorktree,
+	/// A repository of its own: a submodule's module directory, a separate git
+	/// directory, or another repository's linked worktree.
+	Repository {
+		/// The metadata directory the pointer addresses.
+		git_dir:    PathBuf,
+		/// The directory the repository keeps its configuration and refs in.
+		common_dir: PathBuf,
+	},
+}
+
+/// Classify what a `.git` pointer addresses.
+///
+/// A linked worktree's admin directory names the repository it belongs to in
+/// its `commondir` file; a repository of its own — a submodule's module
+/// directory, or a separate git directory — keeps that information in its own
+/// configuration instead. The distinction is made by the metadata itself, not
+/// by the path: a submodule may live at any path, including one that reads
+/// like `worktrees` or `modules`.
+fn classify_nested_git(target: &Path, source_common: &Path) -> NestedGit {
+	let commondir = target.join("commondir");
+	if commondir.is_file() {
+		let common = fs::read_to_string(&commondir)
+			.ok()
+			.map(|text| text.trim().to_owned())
+			.filter(|text| !text.is_empty())
+			.map(|text| {
+				let path = PathBuf::from(text);
+				if path.is_absolute() {
+					path
+				} else {
+					target.join(path)
+				}
+			})
+			.map(|path| normalize_path(&path))
+			.map_or_else(|| target.to_path_buf(), |path| fs::canonicalize(&path).unwrap_or(path));
+		if common.starts_with(source_common) {
+			return NestedGit::SourceWorktree;
+		}
+		return NestedGit::Repository { git_dir: target.to_path_buf(), common_dir: common };
+	}
+	NestedGit::Repository { git_dir: target.to_path_buf(), common_dir: target.to_path_buf() }
+}
+
+/// Copy a repository's metadata into `dest` as a repository of its own that
+/// borrows the original's objects.
+///
+/// The configuration travels verbatim, so the copy keeps every remote — with
+/// all of its refspecs, its push endpoint and its partial-clone markers — the
+/// branches that track them, the object format and the ref storage. Only
+/// `core.worktree` is rewritten: the copy sits inside the worktree it
+/// serves, so that worktree is its parent.
+fn detach_repository(git_dir: &Path, common_dir: &Path, dest: &Path) -> Result<()> {
+	remove_existing(dest)?;
+	fs::create_dir_all(dest)?;
+	// `HEAD` and the index describe this checkout; the configuration and the
+	// references belong to the repository it belongs to.
+	for name in ["HEAD", "index"] {
+		if let Some(bytes) = read_optional_file(&git_dir.join(name))? {
+			fs::write(dest.join(name), bytes)?;
+		}
+	}
+	for name in ["config", "packed-refs", "shallow"] {
+		let source = if common_dir.join(name).is_file() {
+			common_dir
+		} else {
+			git_dir
+		};
+		if let Some(bytes) = read_optional_file(&source.join(name))? {
+			fs::write(dest.join(name), bytes)?;
+		}
+	}
+	for name in ["refs", "reftable"] {
+		let source = if common_dir.join(name).is_dir() {
+			common_dir
+		} else {
+			git_dir
+		};
+		if source.join(name).is_dir() {
+			copy_dir(&source.join(name), &dest.join(name))?;
+		}
+	}
+	let config = dest.join("config");
+	if config.is_file() {
+		let mut text = fs::read_to_string(&config)?;
+		text.push_str("\n[core]\n\tworktree = ..\n");
+		fs::write(&config, text)?;
+	}
+	// The objects are borrowed, not copied.
+	let objects_info = dest.join("objects/info");
+	fs::create_dir_all(&objects_info)?;
+	let mut alternates = vec![common_dir.join("objects")];
+	if let Ok(chained) = fs::read_to_string(common_dir.join("objects/info/alternates")) {
+		for line in chained
+			.lines()
+			.map(str::trim)
+			.filter(|line| !line.is_empty())
+		{
+			let path = Path::new(line);
+			alternates.push(if path.is_absolute() {
+				path.to_owned()
+			} else {
+				common_dir.join("objects").join(path)
+			});
+		}
+	}
+	let alternate_text = alternates
+		.iter()
+		.map(|path| path.to_string_lossy())
+		.collect::<Vec<_>>()
+		.join("\n")
+		+ "\n";
+	fs::write(objects_info.join("alternates"), alternate_text)?;
+	Ok(())
+}
+
+/// Copy a directory tree, creating the destination.
+fn copy_dir(src: &Path, dest: &Path) -> Result<()> {
+	fs::create_dir_all(dest)?;
+	let entries = fs::read_dir(src)
+		.map_err(|e| Error::backend("git worktree add", format!("read_dir: {e}")))?;
+	for entry in entries {
+		let entry =
+			entry.map_err(|e| Error::backend("git worktree add", format!("dir entry: {e}")))?;
+		let from = entry.path();
+		let to = dest.join(entry.file_name());
+		let file_type = entry
+			.file_type()
+			.map_err(|e| Error::backend("git worktree add", format!("file_type: {e}")))?;
+		if file_type.is_dir() {
+			copy_dir(&from, &to)?;
+		} else if file_type.is_symlink() {
+			copy_symlink(&from, &to)?;
+		} else {
+			fs::copy(&from, &to).map_err(|e| Error::backend("git worktree add", e))?;
+		}
+	}
+	Ok(())
+}
+
+/// Reset a detached submodule to the commit its superproject records.
+///
+/// A submodule that keeps the source's `HEAD` describes a different commit
+/// than the one the superproject pins, so the copy would report a modified
+/// submodule right away.
+fn reset_detached_submodule(dir: &Path, commit: gix::hash::ObjectId) -> Result<()> {
+	let repo = GitRepo::require(dir)?;
+	if repo.info().is_reftable {
+		// gitoxide cannot read reftable repositories, so the checkout and the
+		// clean go through the command line.
+		let args = vec![
+			"checkout".to_owned(),
+			"--detach".to_owned(),
+			"--force".to_owned(),
+			commit.to_hex().to_string(),
+		];
+		super::cli::run_sync(dir, &args, super::cli::COMMAND_TIMEOUT)?.into_checked(&args)?;
+		// A checkout replaces the tracked files only, so the untracked files
+		// the copy carried along would still be reported; `git clean` removes
+		// them.
+		let args = vec!["clean".to_owned(), "-fd".to_owned()];
+		super::cli::run_sync_write(
+			dir,
+			&args,
+			super::cli::COMMAND_TIMEOUT,
+			&super::cli::SyncWrite { stdin: b"", env: &[] },
+		)?
+		.into_checked(&args)?;
+		return Ok(());
+	}
+	let gix_repo = repo.gix()?;
+	fs::write(dir.join(".git").join("HEAD"), format!("{}\n", commit.to_hex()))?;
+	checkout_tree(&repo, &gix_repo, commit, true)?;
+	// A checkout replaces the tracked files only, so the untracked files the
+	// copy carried along — the source's build artifacts, for instance — would
+	// still be reported and could be consumed by the new worktree.
+	repo.clean(&CleanOptions::default())?;
+	Ok(())
+}
+
+/// The path of `path` relative to `root`, in git's `/`-separated form.
+fn git_relative_path(root: &Path, path: &Path) -> Option<String> {
+	let relative = path.strip_prefix(root).ok()?;
+	let mut out = String::new();
+	for component in relative.components() {
+		if !out.is_empty() {
+			out.push('/');
+		}
+		out.push_str(&component.as_os_str().to_string_lossy());
+	}
+	Some(out)
+}
+
+/// The commits a tree pins its submodules to.
+///
+/// A gitlink entry — mode `160000` — names the commit a submodule is pinned
+/// to.
+fn collect_gitlinks(
+	repo: &gix::Repository,
+	tree_id: gix::hash::ObjectId,
+) -> Result<BTreeMap<String, gix::hash::ObjectId>> {
+	let mut out = BTreeMap::new();
+	collect_gitlinks_into(repo, tree_id, "", &mut out)?;
+	Ok(out)
+}
+
+fn collect_gitlinks_into(
+	repo: &gix::Repository,
+	tree_id: gix::hash::ObjectId,
+	prefix: &str,
+	out: &mut BTreeMap<String, gix::hash::ObjectId>,
+) -> Result<()> {
+	let tree = repo
+		.find_tree(tree_id)
+		.map_err(|err| Error::backend("git worktree add", err))?;
+	for entry in tree.iter() {
+		let entry = entry.map_err(|err| Error::backend("git worktree add", err))?;
+		let name = entry.inner.filename.to_str_lossy().into_owned();
+		let path = if prefix.is_empty() {
+			name
+		} else {
+			format!("{prefix}/{name}")
+		};
+		let oid = entry.inner.oid.to_owned();
+		if entry.inner.mode.is_commit() {
+			out.insert(path, oid);
+		} else if entry.inner.mode.is_tree() {
+			collect_gitlinks_into(repo, oid, &path, out)?;
+		}
+	}
+	Ok(())
+}
+
+/// Whether a clone destination would land inside the source checkout.
+///
+/// A clone copies the source tree verbatim, so a destination inside it would
+/// be copied into itself (recursing until the path is too long). The
+/// destination is compared against the source root and its ancestors: a
+/// destination that collapses onto the source, or onto a directory that
+/// contains it, would swallow the source as well.
+fn destination_inside_source(path: &Path, source_root: &Path) -> bool {
+	let Ok(source) = fs::canonicalize(source_root) else {
+		// An undecidable destination is rejected rather than guessed at.
+		return true;
+	};
+	let Some(dest) = resolve_destination(path) else {
+		return true;
+	};
+	if dest == source || dest.starts_with(&source) || source.starts_with(&dest) {
+		return true;
+	}
+	// A bind mount publishes the same directory under a second name, which no
+	// comparison of path names can see: the directories are compared by their
+	// filesystem identity instead.
+	destination_aliases_source(&dest, &source)
+}
+
+/// The path a clone would create, with the symlinked parents resolved.
+///
+/// The path is resolved the way the filesystem resolves it once the missing
+/// parents have been created: every component that already exists is
+/// canonicalized, so a symlinked parent is followed, while the components
+/// that do not exist yet stay as spelled, with a `..` cancelling the
+/// component in front of it. A lexical `..` (e.g. `checkout/../sibling`) or
+/// a symlinked parent must not disguise a destination as a child of the
+/// source tree.
+///
+/// The final entry stays lexical: the clone backend replaces it, so a symlink
+/// there is removed and a directory is created in its place.
+fn resolve_destination(path: &Path) -> Option<PathBuf> {
+	let absolute = std::path::absolute(path).ok()?;
+	let components = absolute.components().collect::<Vec<_>>();
+	let last = components.len().saturating_sub(1);
+	let mut resolved = PathBuf::new();
+	for (index, component) in components.iter().enumerate() {
+		match component {
+			Component::CurDir => {},
+			// `..` cancels the component in front of it. The resolved path is
+			// symlink-free by then, so this is the same parent the filesystem
+			// would walk into.
+			Component::ParentDir => {
+				resolved.pop();
+			},
+			// Canonicalizing follows a symlinked component and resolves the
+			// parents it inherits from; a component that does not exist yet
+			// stays as spelled, because the clone backend creates it as a
+			// plain directory.
+			Component::Normal(name) => {
+				let candidate = resolved.join(name);
+				resolved = if index == last {
+					candidate
+				} else {
+					fs::canonicalize(&candidate).unwrap_or(candidate)
+				};
+			},
+			// The root and a Windows drive prefix start the path.
+			Component::Prefix(prefix) => resolved.push(prefix.as_os_str()),
+			Component::RootDir => resolved.push(std::path::MAIN_SEPARATOR_STR),
+		}
+	}
+	Some(resolved)
+}
+
+/// Whether the destination's directory is the source's directory under
+/// another name.
+///
+/// A bind mount publishes a directory under a second path, which no
+/// comparison of path names can see. The directories are compared by their
+/// filesystem identity instead: the destination is inside the source when
+/// the directory it would be created in *is* the source, however it is
+/// named.
+fn destination_aliases_source(dest: &Path, source: &Path) -> bool {
+	let Some(existing) = nearest_existing_ancestor(dest) else {
+		return false;
+	};
+	same_directory(&existing, source)
+}
+
+/// The closest ancestor of `path` that exists.
+fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
+	let mut current = path.parent();
+	while let Some(candidate) = current {
+		if candidate.exists() {
+			return Some(candidate.to_path_buf());
+		}
+		current = candidate.parent();
+	}
+	None
+}
+
+/// Whether two paths name the same directory on disk.
+#[cfg(unix)]
+fn same_directory(a: &Path, b: &Path) -> bool {
+	use std::os::unix::fs::MetadataExt;
+	let (Ok(left), Ok(right)) = (fs::metadata(a), fs::metadata(b)) else {
+		return false;
+	};
+	left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+/// Whether two paths name the same directory on disk.
+///
+/// Windows has no comparable identity, so the paths are only compared by
+/// name there.
+#[cfg(not(unix))]
+fn same_directory(_a: &Path, _b: &Path) -> bool {
+	false
+}
+
 /// Recreate the symlink at `src` as `dst` (a plain file holding the link
 /// target on platforms without symlinks, matching git's `core.symlinks=false`).
 fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
@@ -2117,6 +2695,38 @@ mod tests {
 			.unwrap()
 			.trim_end()
 			.to_owned()
+	}
+
+	/// The value of a configuration key, empty when the key is unset. `git
+	/// config --get` fails for an unset key, which the `git` helper above
+	/// treats as a fatal error, so a missing key needs its own accessor.
+	fn git_config(dir: &Path, key: &str) -> String {
+		let output = Command::new("git")
+			.arg("-C")
+			.arg(dir)
+			.args(["config", "--get", key])
+			.output()
+			.unwrap();
+		String::from_utf8(output.stdout)
+			.unwrap()
+			.trim_end()
+			.to_owned()
+	}
+
+	/// Every value of a configuration key. `git config --get` reports only one
+	/// value of a multi-valued key, so the refspecs need their own accessor.
+	fn git_config_all(dir: &Path, key: &str) -> Vec<String> {
+		let output = Command::new("git")
+			.arg("-C")
+			.arg(dir)
+			.args(["config", "--get-all", key])
+			.output()
+			.unwrap();
+		String::from_utf8(output.stdout)
+			.unwrap()
+			.lines()
+			.map(str::to_owned)
+			.collect()
 	}
 
 	fn fixture() -> (TempDir, GitRepo) {
@@ -3193,5 +3803,939 @@ mod tests {
 		);
 		assert!(repo.worktree_prune().is_ok());
 		let _ = fs::remove_dir_all(linked);
+	}
+
+	#[test]
+	fn clone_first_worktree_rejects_destination_inside_source() {
+		let (temp, repo) = fixture();
+		git(temp.path(), &["branch", "target"]);
+		let nested_dest = temp.path().join("nested-dest");
+		let _ = fs::remove_dir_all(&nested_dest);
+		// Without a copy-on-write backend no clone runs, so the destination
+		// is checked out in place and the policy does not apply.
+		if pi_iso::clone_candidates(None).is_empty() {
+			return;
+		}
+		let error = repo
+			.worktree_add(&nested_dest, "target", WorktreeAddOptions {
+				detach:       false,
+				clone:        WorktreeClone::Auto,
+				keep_changes: false,
+			})
+			.expect_err("a destination inside the source must be rejected");
+		assert!(error.to_string().contains("inside the source"), "{error}");
+		assert!(!nested_dest.exists(), "the rejected destination must not be created");
+		let _ = fs::remove_dir_all(&nested_dest);
+	}
+
+	#[test]
+	fn clone_first_worktree_rejects_destination_inside_source_behind_a_missing_component() {
+		let (temp, repo) = fixture();
+		git(temp.path(), &["branch", "target"]);
+		// `missing` does not exist, so the destination can only be resolved by
+		// canonicalizing the nearest existing ancestor and collapsing the
+		// remaining tail lexically. Without that collapse the destination
+		// hides inside the source and the clone recurses into itself.
+		let nested_dest = temp.path().join("missing/../nested-dest");
+		let _ = fs::remove_dir_all(temp.path().join("nested-dest"));
+		if pi_iso::clone_candidates(None).is_empty() {
+			return;
+		}
+		let error = repo
+			.worktree_add(&nested_dest, "target", WorktreeAddOptions {
+				detach:       false,
+				clone:        WorktreeClone::Auto,
+				keep_changes: false,
+			})
+			.expect_err("a destination inside the source must be rejected");
+		assert!(error.to_string().contains("inside the source"), "{error}");
+		assert!(
+			!temp.path().join("nested-dest").exists(),
+			"the rejected destination must not be created"
+		);
+		let _ = fs::remove_dir_all(temp.path().join("nested-dest"));
+		let _ = fs::remove_dir_all(temp.path().join("missing"));
+	}
+
+	#[test]
+	fn resolve_destination_collapses_a_parent_after_a_missing_component() {
+		let (temp, _repo) = fixture();
+		let base = fs::canonicalize(temp.path()).unwrap();
+		let source = base.join("repo");
+		fs::create_dir_all(&source).unwrap();
+
+		assert_eq!(resolve_destination(&base.join("child")).unwrap(), base.join("child"));
+		assert_eq!(resolve_destination(&base.join("repo/../child")).unwrap(), base.join("child"));
+		// The `..` follows a component that does not exist, so only a lexical
+		// collapse can resolve it.
+		assert_eq!(
+			resolve_destination(&base.join("missing/../repo/child")).unwrap(),
+			base.join("repo/child")
+		);
+		// The same path must not change its meaning once an unrelated sibling
+		// directory happens to exist.
+		fs::create_dir_all(base.join("missing")).unwrap();
+		assert_eq!(
+			resolve_destination(&base.join("missing/../repo/child")).unwrap(),
+			base.join("repo/child")
+		);
+		assert_eq!(
+			resolve_destination(&base.join("../outside")).unwrap(),
+			base.parent().unwrap().join("outside")
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn resolve_destination_follows_a_symlinked_parent_before_a_missing_component() {
+		let (temp, _repo) = fixture();
+		let base = fs::canonicalize(temp.path()).unwrap();
+		let source = base.join("repo");
+		fs::create_dir_all(&source).unwrap();
+		// A symlink that points at the source checkout. The destination is
+		// spelled through that link, so it only lands inside the source once
+		// the link is resolved.
+		let link = base.join("link");
+		std::os::unix::fs::symlink(&source, &link).unwrap();
+
+		// `missing` does not exist, so the `..` behind it cannot be collapsed
+		// by the filesystem: the resolution has to follow the link first and
+		// only then cancel the missing component.
+		assert_eq!(
+			resolve_destination(&link.join("missing/../child")).unwrap(),
+			source.join("child"),
+			"a symlinked parent must be resolved before the missing component is collapsed"
+		);
+		// The same path must not change its meaning once the missing component
+		// happens to exist.
+		fs::create_dir_all(source.join("missing")).unwrap();
+		assert_eq!(
+			resolve_destination(&link.join("missing/../child")).unwrap(),
+			source.join("child")
+		);
+		// A symlink that points elsewhere stays outside the source.
+		let elsewhere = base.join("elsewhere");
+		fs::create_dir_all(&elsewhere).unwrap();
+		let out_link = base.join("outlink");
+		std::os::unix::fs::symlink(&elsewhere, &out_link).unwrap();
+		assert_eq!(resolve_destination(&out_link.join("child")).unwrap(), elsewhere.join("child"));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn clone_first_worktree_rejects_destination_behind_a_symlinked_parent() {
+		let (temp, repo) = fixture();
+		git(temp.path(), &["branch", "target"]);
+		let source = fs::canonicalize(temp.path()).unwrap();
+		// The symlink sits outside the checkout and points at it, so the
+		// destination only lands inside the source once the link is resolved.
+		let outside = tempfile::tempdir().unwrap();
+		let link = outside.path().join("link");
+		std::os::unix::fs::symlink(&source, &link).unwrap();
+
+		let nested_dest = link.join("missing/../child");
+		if pi_iso::clone_candidates(None).is_empty() {
+			return;
+		}
+		let error = repo
+			.worktree_add(&nested_dest, "target", WorktreeAddOptions {
+				detach:       false,
+				clone:        WorktreeClone::Auto,
+				keep_changes: false,
+			})
+			.expect_err("a destination that resolves inside the source must be rejected");
+		assert!(error.to_string().contains("inside the source"), "{error}");
+		assert!(!source.join("child").exists(), "the rejected destination must not be created");
+		assert!(!source.join("missing").exists(), "the rejected destination must not create parents");
+	}
+
+	#[test]
+	fn remove_nested_git_files_strips_only_pointers_into_this_repository() {
+		let (temp, repo) = fixture();
+		// A nested linked worktree of this repository: its `.git` file points
+		// into this repository's metadata and must not survive the clone.
+		git(temp.path(), &["worktree", "add", "-q", "-b", "inner", ".worktrees/inner"]);
+		let outside = tempfile::tempdir().unwrap();
+		let root = outside.path().join("clone-target");
+		copy_tree(temp.path(), &root, true);
+		// The root `.git` belongs to the new worktree itself. It points into
+		// this repository's metadata like every other worktree pointer, but
+		// it must survive: it is the new worktree's own link.
+		let root_admin = repo.info().common_dir.join("worktrees/root");
+		fs::create_dir_all(&root_admin).unwrap();
+		fs::write(root.join(".git"), format!("gitdir: {}\n", root_admin.display())).unwrap();
+		// A nested independent repository: its `.git` is a self-contained
+		// directory and must survive.
+		let independent = root.join("vendor");
+		fs::create_dir_all(independent.join(".git")).unwrap();
+		fs::write(independent.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+
+		remove_nested_git_files(&root, temp.path(), &repo.info().common_dir, &BTreeMap::new(), false)
+			.unwrap();
+
+		assert!(root.join(".git").exists(), "the root .git belongs to the new worktree");
+		assert!(
+			!root.join(".worktrees/inner/.git").exists(),
+			"a pointer into this repository's metadata must be removed"
+		);
+		assert!(
+			independent.join(".git").is_dir(),
+			"a nested repository's own .git directory must survive"
+		);
+	}
+
+	#[test]
+	fn remove_nested_git_files_detaches_a_pointer_to_another_repository() {
+		let (temp, repo) = fixture();
+		// Another repository with a linked worktree of its own.
+		let other = tempfile::tempdir().unwrap();
+		git(other.path(), &["init", "-q", "-b", "main"]);
+		git(other.path(), &["config", "user.name", "Test"]);
+		git(other.path(), &["config", "user.email", "test@example.com"]);
+		fs::write(other.path().join("a"), "one\n").unwrap();
+		git(other.path(), &["add", "."]);
+		git(other.path(), &["commit", "-qm", "base"]);
+		git(other.path(), &["worktree", "add", "-q", "-b", "inner", "wt"]);
+		// A nested checkout of the source that points at the other
+		// repository's worktree metadata.
+		fs::create_dir_all(temp.path().join("nested")).unwrap();
+		let foreign = fs::read_to_string(other.path().join("wt/.git")).unwrap();
+		fs::write(temp.path().join("nested/.git"), foreign).unwrap();
+
+		let outside = tempfile::tempdir().unwrap();
+		let clone = outside.path().join("clone");
+		copy_tree(temp.path(), &clone, true);
+		remove_nested_git_files(
+			&clone,
+			temp.path(),
+			&repo.info().common_dir,
+			&BTreeMap::new(),
+			false,
+		)
+		.unwrap();
+
+		// The pointer must not survive: the copy would otherwise share the
+		// other repository's index and HEAD.
+		assert!(
+			clone.join("nested/.git").is_dir(),
+			"a pointer into another repository must be detached into private metadata"
+		);
+		assert!(
+			!clone.join("nested/.git").join("commondir").exists(),
+			"the detached copy must not address the other repository's metadata"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn remove_nested_git_files_removes_a_symlinked_git_that_targets_the_source() {
+		let (temp, repo) = fixture();
+		// A nested checkout whose `.git` is a symlink into the source's
+		// metadata: the copy must not share it.
+		git(temp.path(), &["worktree", "add", "-q", "-b", "inner", ".worktrees/inner"]);
+		// The admin directory the nested worktree's metadata lives in.
+		let pointer = temp.path().join(".worktrees/inner/.git");
+		let admin = PathBuf::from(
+			fs::read_to_string(&pointer)
+				.unwrap()
+				.trim()
+				.strip_prefix("gitdir: ")
+				.unwrap()
+				.to_owned(),
+		);
+		// A symlink to the admin directory itself, and one to the pointer
+		// file that names it: both address the source's metadata.
+		let direct = temp.path().join("linked");
+		fs::create_dir_all(&direct).unwrap();
+		std::os::unix::fs::symlink(&admin, direct.join(".git")).unwrap();
+		let indirect = temp.path().join("linked-pointer");
+		fs::create_dir_all(&indirect).unwrap();
+		std::os::unix::fs::symlink(&pointer, indirect.join(".git")).unwrap();
+
+		let outside = tempfile::tempdir().unwrap();
+		let clone = outside.path().join("clone");
+		copy_tree(temp.path(), &clone, true);
+		remove_nested_git_files(
+			&clone,
+			temp.path(),
+			&repo.info().common_dir,
+			&BTreeMap::new(),
+			false,
+		)
+		.unwrap();
+
+		assert!(
+			!clone.join("linked/.git").exists(),
+			"a symlinked .git that targets the source's metadata must be removed"
+		);
+		assert!(
+			!clone.join("linked-pointer/.git").exists(),
+			"a symlinked .git that names the source's metadata must be removed"
+		);
+	}
+
+	/// A repository with an initialized submodule at `submodule_path`, a
+	/// nested linked worktree, and a nested independent repository — the
+	/// three shapes a clone copies along. The submodule's origin is returned
+	/// as well, so a test can compare the submodule's history.
+	fn fixture_with_submodule(submodule_path: &str) -> (TempDir, PathBuf, PathBuf, GitRepo) {
+		let temp = tempfile::tempdir().unwrap();
+		let origin = temp.path().join("origin");
+		let source = temp.path().join("source");
+		fs::create_dir_all(&origin).unwrap();
+		fs::create_dir_all(&source).unwrap();
+		git(&origin, &["init", "-q", "-b", "main"]);
+		git(&origin, &["config", "user.name", "Test"]);
+		git(&origin, &["config", "user.email", "test@example.com"]);
+		fs::write(origin.join("a"), "one\n").unwrap();
+		git(&origin, &["add", "."]);
+		git(&origin, &["commit", "-qm", "base"]);
+		git(&source, &["init", "-q", "-b", "main"]);
+		git(&source, &["config", "user.name", "Test"]);
+		git(&source, &["config", "user.email", "test@example.com"]);
+		git(&source, &[
+			"-c",
+			"protocol.file.allow=always",
+			"submodule",
+			"add",
+			"-q",
+			origin.to_str().unwrap(),
+			submodule_path,
+		]);
+		git(&source, &["commit", "-qm", "add submodule"]);
+		// A nested linked worktree of this repository: its `.git` points into
+		// this repository's metadata and must not survive the clone.
+		git(&source, &["worktree", "add", "-q", "-b", "inner", ".worktrees/inner"]);
+		// A nested independent repository: its `.git` is a self-contained
+		// directory and must survive.
+		git(&source, &["init", "-q", "vendor"]);
+		let repo = GitRepo::require(&source).unwrap();
+		(temp, source, origin, repo)
+	}
+
+	/// Copy a tree the way the clone backends do: everything but the
+	/// top-level `.git` entry, with symlinks kept as symlinks.
+	fn copy_tree(src: &Path, dst: &Path, skip_root_git: bool) {
+		fs::create_dir_all(dst).unwrap();
+		for entry in fs::read_dir(src).unwrap() {
+			let entry = entry.unwrap();
+			let name = entry.file_name();
+			if skip_root_git && name == OsStr::new(".git") {
+				continue;
+			}
+			let from = entry.path();
+			let to = dst.join(&name);
+			let file_type = entry.file_type().unwrap();
+			if file_type.is_dir() {
+				copy_tree(&from, &to, false);
+			} else if file_type.is_symlink() {
+				let target = fs::read_link(&from).unwrap();
+				#[cfg(unix)]
+				std::os::unix::fs::symlink(&target, &to).unwrap();
+				#[cfg(not(unix))]
+				fs::write(&to, target.to_string_lossy().as_bytes()).unwrap();
+			} else {
+				fs::copy(&from, &to).unwrap();
+			}
+		}
+	}
+
+	#[test]
+	fn remove_nested_git_files_keeps_a_submodule_repository() {
+		let (temp, source, origin, repo) = fixture_with_submodule("sub");
+		// The clone copies the source tree verbatim, minus the root `.git`.
+		let clone = temp.path().join("clone");
+		copy_tree(&source, &clone, true);
+		// The clone's own `.git` is written by the worktree registration and
+		// points into the source's metadata, like every worktree pointer.
+		let clone_admin = repo.info().common_dir.join("worktrees/clone");
+		fs::create_dir_all(&clone_admin).unwrap();
+		fs::write(clone.join(".git"), format!("gitdir: {}\n", clone_admin.display())).unwrap();
+
+		remove_nested_git_files(&clone, &source, &repo.info().common_dir, &BTreeMap::new(), false)
+			.unwrap();
+
+		// The submodule keeps a repository of its own: Git commands inside it
+		// resolve to the submodule, not to the outer clone.
+		let submodule = clone.join("sub");
+		assert!(submodule.join(".git").exists(), "the submodule's Git metadata must survive");
+		let toplevel = git(&submodule, &["rev-parse", "--show-toplevel"]);
+		assert_eq!(
+			fs::canonicalize(&toplevel).unwrap(),
+			fs::canonicalize(&submodule).unwrap(),
+			"Git inside the submodule must resolve to the submodule, not to the outer clone"
+		);
+		assert_eq!(
+			git(&submodule, &["rev-parse", "HEAD"]),
+			git(&origin, &["rev-parse", "HEAD"]),
+			"the detached submodule must keep the submodule's history"
+		);
+		// A nested linked worktree still loses its pointer into the source's
+		// metadata, and a nested repository keeps its own.
+		assert!(
+			!clone.join(".worktrees/inner/.git").exists(),
+			"a pointer into this repository's metadata must be removed"
+		);
+		assert!(
+			clone.join("vendor/.git").is_dir(),
+			"a nested repository's own .git directory must survive"
+		);
+		assert!(clone.join(".git").exists(), "the root .git belongs to the new worktree");
+	}
+
+	#[test]
+	fn remove_nested_git_files_cleans_the_untracked_files_a_copied_submodule_carried() {
+		let (temp, source, origin, repo) = fixture_with_submodule("sub");
+		// A build artifact the source's submodule was never told about: it is
+		// untracked, so the copy carries it along.
+		fs::write(source.join("sub/stray.bin"), "artifact\n").unwrap();
+		// The clone copies the source tree verbatim, minus the root `.git`.
+		let clone = temp.path().join("clone");
+		copy_tree(&source, &clone, true);
+		let clone_admin = repo.info().common_dir.join("worktrees/clone");
+		fs::create_dir_all(&clone_admin).unwrap();
+		fs::write(clone.join(".git"), format!("gitdir: {}\n", clone_admin.display())).unwrap();
+		// The superproject pins the submodule to the commit it recorded.
+		let mut gitlinks = BTreeMap::new();
+		gitlinks.insert(
+			"sub".to_owned(),
+			gix::hash::ObjectId::from_hex(git(&origin, &["rev-parse", "HEAD"]).trim().as_bytes())
+				.unwrap(),
+		);
+
+		remove_nested_git_files(&clone, &source, &repo.info().common_dir, &gitlinks, false).unwrap();
+
+		// The stray file would still be reported as untracked inside the
+		// submodule, and a build in the new worktree would consume it.
+		let submodule = clone.join("sub");
+		assert!(
+			!submodule.join("stray.bin").exists(),
+			"the untracked file the copy carried must not survive the reset"
+		);
+		assert_eq!(
+			git(&submodule, &["status", "--porcelain"]),
+			"",
+			"the reset submodule must report a clean tree"
+		);
+		// The submodule keeps its own repository: the clean must not take it.
+		assert!(submodule.join(".git").exists(), "the submodule's Git metadata must survive");
+		assert_eq!(
+			git(&submodule, &["rev-parse", "HEAD"]),
+			git(&origin, &["rev-parse", "HEAD"]),
+			"the detached submodule must keep the submodule's history"
+		);
+	}
+
+	#[test]
+	fn remove_nested_git_files_detaches_a_submodule_at_a_multi_component_path() {
+		let (temp, source, origin, repo) = fixture_with_submodule("packages/module");
+		// The clone copies the source tree verbatim, minus the root `.git`.
+		let clone = temp.path().join("clone");
+		copy_tree(&source, &clone, true);
+		let clone_admin = repo.info().common_dir.join("worktrees/clone");
+		fs::create_dir_all(&clone_admin).unwrap();
+		fs::write(clone.join(".git"), format!("gitdir: {}\n", clone_admin.display())).unwrap();
+
+		remove_nested_git_files(&clone, &source, &repo.info().common_dir, &BTreeMap::new(), false)
+			.unwrap();
+
+		// Git keeps the module directory of a submodule at a multi-component
+		// path below `modules`, so the pointer addresses
+		// `.git/modules/packages/module` — the copy must detach it just like
+		// a submodule at the repository root.
+		let submodule = clone.join("packages/module");
+		assert!(submodule.join(".git").exists(), "the submodule's Git metadata must survive");
+		let toplevel = git(&submodule, &["rev-parse", "--show-toplevel"]);
+		assert_eq!(
+			fs::canonicalize(&toplevel).unwrap(),
+			fs::canonicalize(&submodule).unwrap(),
+			"Git inside the submodule must resolve to the submodule, not to the outer clone"
+		);
+		assert_eq!(
+			git(&submodule, &["rev-parse", "HEAD"]),
+			git(&origin, &["rev-parse", "HEAD"]),
+			"the detached submodule must keep the submodule's history"
+		);
+	}
+
+	#[test]
+	fn remove_nested_git_files_strips_a_relative_pointer_into_this_repository() {
+		let (temp, repo) = fixture();
+		// A linked worktree of this repository that records its metadata path
+		// relative to the checkout — the form git writes when
+		// `worktree.useRelativePaths` is enabled.
+		git(temp.path(), &["config", "worktree.useRelativePaths", "true"]);
+		git(temp.path(), &["worktree", "add", "-q", "-b", "inner", "nested/deep/inner"]);
+		// The copy lives outside the source, so copying the source tree into
+		// it does not recurse.
+		let outside = tempfile::tempdir().unwrap();
+		let clone = outside.path().join("clone");
+		copy_tree(temp.path(), &clone, true);
+		assert!(
+			clone.join("nested/deep/inner/.git").exists(),
+			"the copy must carry the nested worktree's pointer"
+		);
+
+		remove_nested_git_files(
+			&clone,
+			temp.path(),
+			&repo.info().common_dir,
+			&BTreeMap::new(),
+			false,
+		)
+		.unwrap();
+
+		// The pointer is relative to the source checkout, so it addresses the
+		// source's metadata — it must not survive as a dangling reference.
+		assert!(
+			!clone.join("nested/deep/inner/.git").exists(),
+			"a relative pointer into this repository's metadata must be removed"
+		);
+	}
+
+	#[test]
+	fn remove_nested_git_files_keeps_the_submodule_remote_configuration() {
+		let (temp, source, origin, repo) = fixture_with_submodule("sub");
+		let clone = temp.path().join("clone");
+		copy_tree(&source, &clone, true);
+		let clone_admin = repo.info().common_dir.join("worktrees/clone");
+		fs::create_dir_all(&clone_admin).unwrap();
+		fs::write(clone.join(".git"), format!("gitdir: {}\n", clone_admin.display())).unwrap();
+
+		remove_nested_git_files(&clone, &source, &repo.info().common_dir, &BTreeMap::new(), false)
+			.unwrap();
+
+		// A detached submodule that lost its `origin` could never fetch
+		// again, so the remote travels with it.
+		let submodule = clone.join("sub");
+		assert_eq!(
+			git(&submodule, &["config", "--get", "remote.origin.url"]),
+			origin.to_str().unwrap(),
+			"a detached submodule must keep the remote it fetches from"
+		);
+		// Everything the module configured to stay connected to its upstream
+		// travels with it: the refspec it fetches with and the branch
+		// tracking it fetches into.
+		let module_dir = source.join(".git/modules/sub");
+		for key in ["remote.origin.fetch", "branch.main.remote", "branch.main.merge"] {
+			let expected = git_config(&module_dir, key);
+			if expected.is_empty() {
+				continue;
+			}
+			assert_eq!(git_config(&submodule, key), expected, "a detached submodule must keep {key}");
+		}
+	}
+
+	#[test]
+	fn remove_nested_git_files_keeps_every_refspec_and_the_push_endpoint() {
+		let (temp, source, _origin, repo) = fixture_with_submodule("sub");
+		let module_dir = source.join(".git/modules/sub");
+		// A second refspec, a separate push endpoint and the markers of a
+		// partial clone: everything that keeps the module connected to its
+		// upstream.
+		git(&module_dir, &["config", "--add", "remote.origin.fetch", "+refs/tags/*:refs/tags/*"]);
+		git(&module_dir, &["config", "remote.origin.pushurl", "git@example.com:origin.git"]);
+		git(&module_dir, &["config", "remote.origin.promisor", "true"]);
+		git(&module_dir, &["config", "remote.origin.partialclonefilter", "blob:none"]);
+
+		let clone = temp.path().join("clone");
+		copy_tree(&source, &clone, true);
+		let clone_admin = repo.info().common_dir.join("worktrees/clone");
+		fs::create_dir_all(&clone_admin).unwrap();
+		fs::write(clone.join(".git"), format!("gitdir: {}\n", clone_admin.display())).unwrap();
+
+		remove_nested_git_files(&clone, &source, &repo.info().common_dir, &BTreeMap::new(), false)
+			.unwrap();
+
+		let submodule = clone.join("sub");
+		let fetches = git_config_all(&submodule, "remote.origin.fetch");
+		assert!(
+			fetches.len() >= 2,
+			"every fetch refspec must travel with the detached submodule: {fetches:?}"
+		);
+		assert!(
+			fetches.iter().any(|spec| spec.contains("refs/tags/*")),
+			"the second refspec must travel with the detached submodule: {fetches:?}"
+		);
+		assert_eq!(
+			git_config(&submodule, "remote.origin.pushurl"),
+			"git@example.com:origin.git",
+			"a detached submodule must keep the endpoint it pushes to"
+		);
+		assert_eq!(
+			git_config(&submodule, "remote.origin.promisor"),
+			"true",
+			"a detached submodule must keep the partial-clone marker"
+		);
+		assert_eq!(
+			git_config(&submodule, "remote.origin.partialclonefilter"),
+			"blob:none",
+			"a detached submodule must keep the partial-clone filter"
+		);
+	}
+
+	#[test]
+	fn remove_nested_git_files_detaches_a_submodule_below_a_worktrees_path() {
+		let (temp, source, origin, repo) = fixture_with_submodule("foo/worktrees/bar");
+		let clone = temp.path().join("clone");
+		copy_tree(&source, &clone, true);
+		let clone_admin = repo.info().common_dir.join("worktrees/clone");
+		fs::create_dir_all(&clone_admin).unwrap();
+		fs::write(clone.join(".git"), format!("gitdir: {}\n", clone_admin.display())).unwrap();
+
+		remove_nested_git_files(&clone, &source, &repo.info().common_dir, &BTreeMap::new(), false)
+			.unwrap();
+
+		// The submodule's path says nothing about what its metadata is: a
+		// path that reads like `worktrees` is still a submodule.
+		let submodule = clone.join("foo/worktrees/bar");
+		assert!(submodule.join(".git").exists(), "the submodule's Git metadata must survive");
+		let toplevel = git(&submodule, &["rev-parse", "--show-toplevel"]);
+		assert_eq!(
+			fs::canonicalize(&toplevel).unwrap(),
+			fs::canonicalize(&submodule).unwrap(),
+			"Git inside the submodule must resolve to the submodule, not to the outer clone"
+		);
+		assert_eq!(
+			git(&submodule, &["rev-parse", "HEAD"]),
+			git(&origin, &["rev-parse", "HEAD"]),
+			"the detached submodule must keep the submodule's history"
+		);
+	}
+
+	#[test]
+	fn remove_nested_git_files_keeps_the_submodule_of_an_independent_nested_repository() {
+		let (temp, repo) = fixture();
+		// An independent nested repository with a submodule of its own. The
+		// copy carries the nested repository's metadata along, so its
+		// submodule's pointer stays valid there.
+		let origin = temp.path().join("origin");
+		fs::create_dir_all(&origin).unwrap();
+		git(&origin, &["init", "-q", "-b", "main"]);
+		git(&origin, &["config", "user.name", "Test"]);
+		git(&origin, &["config", "user.email", "test@example.com"]);
+		fs::write(origin.join("a"), "one\n").unwrap();
+		git(&origin, &["add", "."]);
+		git(&origin, &["commit", "-qm", "base"]);
+		let vendor = temp.path().join("vendor");
+		fs::create_dir_all(&vendor).unwrap();
+		git(&vendor, &["init", "-q", "-b", "main"]);
+		git(&vendor, &["config", "user.name", "Test"]);
+		git(&vendor, &["config", "user.email", "test@example.com"]);
+		git(&vendor, &[
+			"-c",
+			"protocol.file.allow=always",
+			"submodule",
+			"add",
+			"-q",
+			origin.to_str().unwrap(),
+			"lib",
+		]);
+		git(&vendor, &["commit", "-qm", "add submodule"]);
+
+		let outside = tempfile::tempdir().unwrap();
+		let clone = outside.path().join("clone");
+		copy_tree(temp.path(), &clone, true);
+		remove_nested_git_files(
+			&clone,
+			temp.path(),
+			&repo.info().common_dir,
+			&BTreeMap::new(),
+			false,
+		)
+		.unwrap();
+
+		// The nested repository's submodule keeps its pointer: the copy
+		// carries the module directory along.
+		let submodule = clone.join("vendor/lib");
+		assert!(
+			submodule.join(".git").is_file(),
+			"the nested repository's submodule must keep its pointer"
+		);
+		let toplevel = git(&submodule, &["rev-parse", "--show-toplevel"]);
+		assert_eq!(
+			fs::canonicalize(&toplevel).unwrap(),
+			fs::canonicalize(&submodule).unwrap(),
+			"Git inside the nested submodule must resolve to the nested repository"
+		);
+	}
+
+	#[test]
+	fn clone_first_worktree_resets_a_submodule_to_its_gitlink() {
+		let (_temp, source, origin, repo) = fixture_with_submodule("sub");
+		// The commit the superproject pins the submodule to.
+		let pinned = git(&origin, &["rev-parse", "HEAD"]);
+		// Move the submodule to another commit without recording it: the copy
+		// must follow the superproject, not the source's submodule.
+		fs::write(origin.join("a"), "two\n").unwrap();
+		git(&origin, &["commit", "-qam", "second"]);
+		git(&source.join("sub"), &["-c", "protocol.file.allow=always", "fetch", "-q", "origin"]);
+		git(&source.join("sub"), &["checkout", "-q", "FETCH_HEAD"]);
+		git(&source, &["branch", "clone-target"]);
+		let outside = tempfile::tempdir().unwrap();
+		let linked = outside.path().join("clone");
+		let result = repo
+			.worktree_add(&linked, "clone-target", WorktreeAddOptions {
+				detach:       false,
+				clone:        WorktreeClone::Auto,
+				keep_changes: false,
+			})
+			.unwrap();
+		if result.cloned_with.is_none() {
+			// Without a copy-on-write backend the destination is checked out
+			// in place, and git does not materialize submodule content there.
+			return;
+		}
+		let submodule = linked.join("sub");
+		assert_eq!(
+			git(&submodule, &["rev-parse", "HEAD"]),
+			pinned,
+			"the detached submodule must be reset to the commit its superproject pins"
+		);
+		assert_eq!(
+			git(&submodule, &["status", "--porcelain"]),
+			"",
+			"the reset submodule must be clean"
+		);
+		let _ = repo.worktree_remove(&linked, true);
+	}
+
+	#[test]
+	fn clone_first_worktree_keeps_a_submodule_repository() {
+		let (temp, source, origin, repo) = fixture_with_submodule("sub");
+		git(&source, &["branch", "clone-target"]);
+		let linked = temp.path().join("../linked-clone-submodule");
+		let _ = fs::remove_dir_all(&linked);
+		let result = repo
+			.worktree_add(&linked, "clone-target", WorktreeAddOptions {
+				detach:       false,
+				clone:        WorktreeClone::Auto,
+				keep_changes: false,
+			})
+			.unwrap();
+		if result.cloned_with.is_none() {
+			assert!(
+				result.clone_error.is_some() || pi_iso::clone_candidates(None).is_empty(),
+				"a failed clone attempt must surface its reason"
+			);
+			// Without a copy-on-write backend the destination is checked out
+			// in place, and git does not materialize submodule content there.
+			return;
+		}
+		let submodule = linked.join("sub");
+		assert!(submodule.join(".git").exists(), "the submodule's Git metadata must survive");
+		let toplevel = git(&submodule, &["rev-parse", "--show-toplevel"]);
+		assert_eq!(
+			fs::canonicalize(&toplevel).unwrap(),
+			fs::canonicalize(&submodule).unwrap(),
+			"Git inside the submodule must resolve to the submodule, not to the outer clone"
+		);
+		assert_eq!(
+			git(&submodule, &["rev-parse", "HEAD"]),
+			git(&origin, &["rev-parse", "HEAD"]),
+			"the detached submodule must keep the submodule's history"
+		);
+		let _ = repo.worktree_remove(&linked, true);
+	}
+
+	#[test]
+	fn destination_inside_source_rejects_a_destination_that_collapses_onto_the_source() {
+		let (temp, _repo) = fixture();
+		let source = fs::canonicalize(temp.path()).unwrap();
+		// The destination does not exist, but it collapses onto the source
+		// itself: the backend would clear the source before cloning.
+		assert!(
+			destination_inside_source(&source.join("missing/.."), &source),
+			"a destination that collapses onto the source must be rejected"
+		);
+		assert!(destination_inside_source(&source, &source), "the source itself must be rejected");
+	}
+
+	#[test]
+	fn destination_inside_source_accepts_a_sibling_in_a_shared_parent() {
+		let (temp, _repo) = fixture();
+		let source = fs::canonicalize(temp.path()).unwrap();
+		// The destination shares the source's parent directory. That says
+		// nothing about the destination being inside the source: only the
+		// source's own identity counts.
+		let sibling = source.parent().unwrap().join("sibling-destination");
+		assert!(
+			!destination_inside_source(&sibling, &source),
+			"a sibling of the source must not be rejected"
+		);
+	}
+
+	#[test]
+	fn destination_inside_source_rejects_a_destination_that_contains_the_source() {
+		let (temp, _repo) = fixture();
+		let source = fs::canonicalize(temp.path()).unwrap();
+		let parent = source.parent().unwrap();
+		// A destination that contains the source would swallow it.
+		assert!(
+			destination_inside_source(parent, &source),
+			"a destination that contains the source must be rejected"
+		);
+		let outside = tempfile::tempdir().unwrap();
+		assert!(
+			!destination_inside_source(&outside.path().join("wt"), &source),
+			"a destination outside the source must be accepted"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn destination_inside_source_keeps_the_final_entry_lexical() {
+		let (temp, _repo) = fixture();
+		let source = fs::canonicalize(temp.path()).unwrap();
+		let outside = tempfile::tempdir().unwrap();
+		let target = outside.path().join("target");
+		fs::create_dir_all(&target).unwrap();
+		let link = outside.path().join("link");
+		std::os::unix::fs::symlink(&target, &link).unwrap();
+		// The clone backend replaces the destination, so the copy lands where
+		// the link spells it — outside the source.
+		assert!(
+			!destination_inside_source(&link, &source),
+			"a destination that is a symlink outside the source must be accepted"
+		);
+		// A link inside the source still names a destination inside it.
+		let inside = source.join("link");
+		std::os::unix::fs::symlink(&target, &inside).unwrap();
+		assert!(
+			destination_inside_source(&inside, &source),
+			"a destination inside the source must be rejected"
+		);
+	}
+
+	#[test]
+	fn worktree_add_rejects_an_in_tree_destination_before_creating_the_branch() {
+		let (temp, repo) = fixture();
+		// A commit id names a branch that does not exist yet: `worktree_add`
+		// would create it for the new worktree.
+		let head = git(temp.path(), &["rev-parse", "HEAD"]);
+		let nested_dest = temp.path().join("nested-dest");
+		if pi_iso::clone_candidates(None).is_empty() {
+			return;
+		}
+		let error = repo
+			.worktree_add(&nested_dest, &head, WorktreeAddOptions {
+				detach:       false,
+				clone:        WorktreeClone::Auto,
+				keep_changes: false,
+			})
+			.expect_err("a destination inside the source must be rejected");
+		assert!(error.to_string().contains("inside the source"), "{error}");
+		assert!(!nested_dest.exists(), "the rejected destination must not be created");
+		// The refusal happens before the branch is created, so a retry is not
+		// blocked by a branch that no worktree uses.
+		let branch = Command::new("git")
+			.arg("-C")
+			.arg(temp.path())
+			.args(["rev-parse", "--verify"])
+			.arg(format!("refs/heads/{head}"))
+			.output()
+			.unwrap();
+		assert!(!branch.status.success(), "the rejected destination must not leave a branch behind");
+	}
+
+	#[test]
+	fn worktree_add_checks_out_in_place_when_a_clone_precondition_fails() {
+		let (temp, repo) = fixture();
+		git(temp.path(), &["branch", "target"]);
+		// A clone reconciles the copy against the target tree with the
+		// source's index; without it no clone runs — and a plain checkout in
+		// place is safe even inside the source.
+		fs::remove_file(temp.path().join(".git/index")).unwrap();
+		let nested_dest = temp.path().join("nested-dest");
+		let _ = fs::remove_dir_all(&nested_dest);
+		let result = repo
+			.worktree_add(&nested_dest, "target", WorktreeAddOptions {
+				detach:       false,
+				clone:        WorktreeClone::Auto,
+				keep_changes: false,
+			})
+			.unwrap();
+		assert!(result.cloned_with.is_none());
+		assert!(nested_dest.join("a").exists(), "the plain checkout must materialize the tree");
+		let _ = repo.worktree_remove(&nested_dest, true);
+	}
+
+	#[test]
+	fn worktree_add_without_clone_checks_out_in_place_inside_the_source() {
+		let (temp, repo) = fixture();
+		git(temp.path(), &["branch", "target"]);
+		let nested_dest = temp.path().join("nested-dest");
+		let _ = fs::remove_dir_all(&nested_dest);
+		// The remedy the rejection names: with cloning off, no tree is copied,
+		// so an in-tree destination is checked out in place like real git does.
+		let result = repo
+			.worktree_add(&nested_dest, "target", WorktreeAddOptions {
+				detach:       false,
+				clone:        WorktreeClone::Off,
+				keep_changes: false,
+			})
+			.unwrap();
+		assert!(result.cloned_with.is_none());
+		assert!(nested_dest.join("a").exists(), "the plain checkout must materialize the tree");
+		assert_eq!(
+			git(&nested_dest, &["rev-parse", "HEAD"]),
+			git(temp.path(), &["rev-parse", "target"])
+		);
+		let _ = repo.worktree_remove(&nested_dest, true);
+	}
+
+	#[test]
+	fn a_destination_outside_the_source_still_falls_back_to_a_plain_checkout() {
+		// The refusal is a policy about where a COPY may land. A destination
+		// outside the source is copied into a fresh directory, which never
+		// re-enters the source, so a filesystem that cannot copy must leave
+		// the caller with a usable worktree rather than a failure: the
+		// clone attempt is cleaned up and the plain checkout takes over.
+		let (temp, repo) = fixture();
+		git(temp.path(), &["branch", "target"]);
+		let linked = temp.path().join("../linked-outside-source");
+		let _ = fs::remove_dir_all(&linked);
+		let result = repo
+			.worktree_add(&linked, "target", WorktreeAddOptions {
+				detach:       false,
+				clone:        WorktreeClone::Auto,
+				keep_changes: false,
+			})
+			.expect("a destination outside the source must not fail");
+		if result.cloned_with.is_none() {
+			// The copy did not run, so the reason has to be reported.
+			assert!(
+				result.clone_error.is_some() || pi_iso::clone_candidates(None).is_empty(),
+				"a failed clone attempt must surface its reason"
+			);
+		}
+		assert_eq!(git(&linked, &["rev-parse", "HEAD"]), git(temp.path(), &["rev-parse", "target"]));
+		assert_eq!(git(&linked, &["status", "--porcelain"]), "");
+		let _ = repo.worktree_remove(&linked, true);
+	}
+
+	#[test]
+	fn an_in_tree_destination_is_refused_whatever_the_filesystem_supports() {
+		// The refusal must not depend on what the destination's filesystem
+		// can do. A copy creates the destination inside the source and only
+		// then walks the source, so it re-enters the directory it just made
+		// and copies it into itself — while copying DIRECTORIES, before a
+		// single file is cloned. A filesystem that cannot clone a file
+		// therefore recurses exactly like one that can, and a refusal that
+		// consulted the filesystem would let the recursion through exactly
+		// where the probe and the backend disagree.
+		let (temp, repo) = fixture();
+		git(temp.path(), &["branch", "target"]);
+		let nested_dest = temp.path().join("nested-dest");
+		let _ = fs::remove_dir_all(&nested_dest);
+		let error = repo
+			.worktree_add(&nested_dest, "target", WorktreeAddOptions {
+				detach:       false,
+				clone:        WorktreeClone::Auto,
+				keep_changes: false,
+			})
+			.expect_err("a destination inside the source must be refused");
+		assert!(error.to_string().contains("inside the source"), "{error}");
+		assert!(!nested_dest.exists(), "the rejected destination must not be created");
 	}
 }
