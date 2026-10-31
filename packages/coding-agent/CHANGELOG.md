@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Stash a prompt draft with Ctrl+S and restore or swap it without losing attachments; the composer briefly confirms when a draft is stashed. Mode prompts queued during compaction dispatch once without replaying the slash command or parking their loop continuation ([#13468](https://github.com/can1357/oh-my-pi/pull/13468) by [@pedropaulovc](https://github.com/pedropaulovc)).
+
+### Fixed
+
+- Preserve restored rich drafts when a submitted prompt fails after acceptance, and return mode-command attachments when an input hook fails before admission.
+
 ## [18.14.1] - 2026-10-31
 
 ### Added
@@ -142,9 +150,6 @@
 - The plan review's edit button in Tern names your editor ("Edit in Notepad", "Edit in nvim") instead of "Edit in $EDITOR"
 - Fixed `/tan` clones ending without a final answer when they call `ask`; the clone now keeps running and the parent receives its final answer instead of an empty result ([#17223](https://github.com/can1357/oh-my-pi/pull/17223) by [@trukhinyuri](https://github.com/trukhinyuri))
 - Fixed GitHub `/review` diff links keeping the snapshot that built the request after the cached diff refreshes in the background, instead of opening whatever file now sits at the same index ([#16310](https://github.com/can1357/oh-my-pi/pull/16310) by [@tkossak](https://github.com/tkossak))
-### Changed
-
-- Stash a prompt draft with Ctrl+S and restore or swap it without losing attachments; the composer briefly confirms when a draft is stashed. Mode prompts queued during compaction dispatch once without replaying the slash command or parking their loop continuation ([#13468](https://github.com/can1357/oh-my-pi/pull/13468) by [@pedropaulovc](https://github.com/pedropaulovc)).
 
 ## [18.13.2] - 2026-10-27
 

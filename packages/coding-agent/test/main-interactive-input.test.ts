@@ -126,14 +126,12 @@ describe("submitInteractiveInput", () => {
 			resume: vi.fn(async () => {}),
 			isStreaming: false,
 		};
-		const onAccepted = vi.fn();
-		const input = createInput({ text: ".", started: true, resume: true, onAccepted });
+		const input = createInput({ text: ".", started: true, resume: true });
 
 		await submitInteractiveInput(mode, session, input);
 
 		expect(mode.markPendingSubmissionStarted).not.toHaveBeenCalled();
 		expect(session.resume).toHaveBeenCalledTimes(1);
-		expect(session.resume).toHaveBeenCalledWith({ onAccepted });
 		expect(session.prompt).not.toHaveBeenCalled();
 		expect(mode.finishPendingSubmission).toHaveBeenCalledWith(input);
 		expect(mode.showError).not.toHaveBeenCalled();
