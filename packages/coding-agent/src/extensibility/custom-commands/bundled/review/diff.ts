@@ -8,7 +8,8 @@ export interface ExcludedReviewFile {
 }
 
 export interface ReviewDiffSnapshot {
-	files: ReviewDiffFile[];
+	/** Original 1-based section index, including files excluded from review. */
+	files: (ReviewDiffFile & { diffIndex: number })[];
 	excluded: ExcludedReviewFile[];
 	totalAdded: number;
 	totalRemoved: number;
@@ -140,7 +141,7 @@ function splitFileDiffs(rawDiff: string): string[] {
 	return starts.map((start, index) => {
 		const end = starts[index + 1] ?? rawDiff.length;
 		const fileDiff = rawDiff.slice(start, end);
-		return fileDiff.endsWith("\n") ? fileDiff.slice(0, -1) : fileDiff;
+		return fileDiff.replace(/\r?\n$/, "");
 	});
 }
 
@@ -188,14 +189,16 @@ function parseRows(lines: readonly string[]): ParsedRows {
 
 /** Parses a frozen git-format patch into independently addressable file occurrences. */
 export function parseReviewDiffSnapshot(rawDiff: string): ReviewDiffSnapshot {
-	const files: ReviewDiffFile[] = [];
+	const files: ReviewDiffSnapshot["files"] = [];
 	const excluded: ExcludedReviewFile[] = [];
 	const occurrences = new Map<string, number>();
 	let totalAdded = 0;
 	let totalRemoved = 0;
+	let diffIndex = 0;
 
 	for (const rawFileDiff of splitFileDiffs(rawDiff)) {
-		const lines = rawFileDiff.split("\n");
+		diffIndex++;
+		const lines = rawFileDiff.split(/\r?\n/);
 		let { oldPath, newPath } = parseHeaderPaths(lines[0] ?? "");
 		for (const line of lines) {
 			if (HUNK_HEADER_PATTERN.test(line)) break;
@@ -221,6 +224,7 @@ export function parseReviewDiffSnapshot(rawDiff: string): ReviewDiffSnapshot {
 		occurrences.set(path, occurrence);
 		files.push({
 			path,
+			diffIndex,
 			oldPath,
 			newPath,
 			occurrence,

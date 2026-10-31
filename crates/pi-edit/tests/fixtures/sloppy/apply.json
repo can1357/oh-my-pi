@@ -623,15 +623,18 @@
    }
   },
   {
-   "name": "still rejects overlapping edits that disagree",
+   "name": "applies an op overlapping an earlier op to the earlier op's result",
    "files": {
-    "a.ts": "const b = avlue.models;\n"
+    "a.ts": "const { header, entries } = data;\nconst main = { entries };\nrender(main);\nlog(main);\n"
    },
    "args": {
-    "input": "*** Edit File: a.ts all\n*** Find\navlue\n*** Replace\nvalue\n*** Find\nconst b = avlue.models;\n*** Replace\nconst b = other.models;\n"
+    "input": "*** Edit File: a.ts\n*** Find\nconst { header, entries } = data;\nconst main = { entries };\n*** Replace\nlet { header, entries } = data;\nlet context = { entries };\n*** Edit File: a.ts all\n*** Find\nmain\n*** Replace\ncontext\n"
    },
    "expect": {
-    "error": "target overlapping original spans"
+    "files": {
+     "a.ts": "let { header, entries } = data;\nlet context = { entries };\nrender(context);\nlog(context);\n"
+    },
+    "textContains": ["operation 2 overlaps operation 1"]
    }
   },
   {
@@ -895,7 +898,7 @@
    }
   },
   {
-   "name": "rejects overlapping original target spans atomically",
+   "name": "rejects an overlapping op that no longer matches the earlier op's result atomically",
    "files": {
     "a.ts": "const value = oldValue;\n"
    },
@@ -903,7 +906,11 @@
     "input": "*** Edit File: a.ts\n*** Find\nconst value = ⟪oldValue⟫;\n*** Replace\nnewValue\n*** Find\n⟪oldValue⟫\n*** Replace\nnewerValue\n"
    },
    "expect": {
-    "error": "Operations 1 and 2 target overlapping original spans"
+    "error": "operation 2 overlaps operation 1, so it was located in the file as operation 1 left it.\nOperation 2 did not match a.ts",
+    "files": {
+     "a.ts": "const value = oldValue;\n"
+    },
+    "writes": 0
    }
   },
   {

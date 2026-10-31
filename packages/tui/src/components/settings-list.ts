@@ -4,6 +4,7 @@ import { fuzzyFilter } from "../fuzzy";
 import { getKeybindings } from "../keybindings";
 import { extractPrintableText } from "../keys";
 import type { MouseRoutable, SgrMouseEvent } from "../mouse";
+import { slugify } from "@oh-my-pi/pi-utils";
 import type { TspPrefsControl, TspPrefsRow, TspPrefsSection, TspProps, TspSpan } from "@oh-my-pi/pi-wire";
 import { col, node, span } from "../native/describe";
 import { sameItems, sameProps } from "../native/memo";
@@ -78,10 +79,7 @@ export interface PrefsSectionRef {
 
 /** The section id for a section title (`"Status Line"` → `"status-line"`). */
 export function prefsSectionId(title: string): string {
-	return title
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-|-$/g, "");
+	return slugify(title);
 }
 
 /** A setting as a native settings row, given its typed control; `undefined` for headings. */
@@ -346,6 +344,8 @@ export class SettingsList implements Component {
 			return { row: id, option: component.selectList.getSelectedItem()?.value };
 		}
 		if (component instanceof TextFormField) {
+			// Native inline text editing has no error slot; show the form until corrected.
+			if (component.hasError) return null;
 			const draft = component.getValue();
 			return {
 				row: id,

@@ -38,6 +38,10 @@ export type SymbolKey =
 	// Context gauge boundaries
 	| "context.speculation"
 	| "context.compaction"
+	| "context.content"
+	| "context.messages"
+	| "context.buffer"
+	| "context.free"
 	// Box Drawing - Rounded
 	| "boxRound.topLeft"
 	| "boxRound.topRight"
@@ -129,6 +133,7 @@ export type SymbolKey =
 	| "icon.vimInsert"
 	| "icon.vimVisual"
 	| "icon.vimVisualLine"
+	| "icon.vimReplace"
 	// Slash-command type indicators (autocomplete); names without an existing
 	// icon.* equivalent — see SlashCommandIconName for the full vocabulary.
 	| "cmd.action"
@@ -370,6 +375,7 @@ export type SlashCommandIconName =
 	| "jobs"
 	| "gauge"
 	| "context"
+	| "ghost"
 	| "agents"
 	| "branch"
 	| "tree"
@@ -417,6 +423,10 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	// Context gauge boundaries
 	"context.speculation": "╎",
 	"context.compaction": "┃",
+	"context.content": "⛁",
+	"context.messages": "⛃",
+	"context.buffer": "⛝",
+	"context.free": "⛶",
 	// Box (rounded)
 	"boxRound.topLeft": "╭",
 	"boxRound.topRight": "╮",
@@ -511,6 +521,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"icon.vimInsert": "▎",
 	"icon.vimVisual": "◉",
 	"icon.vimVisualLine": "≡",
+	"icon.vimReplace": "▁",
 	// Slash-command type indicators
 	"cmd.action": "❯",
 	"cmd.prompt": "✎",
@@ -625,9 +636,11 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"lang.pdf": "📕",
 	"lang.archive": "🗜",
 	"lang.binary": "⚙",
-	// Composer attachment chips
-	"chip.image": "🖼",
-	"chip.video": "🎞",
+	// Composer attachment chips. These sit inside the editable buffer, so the caret column
+	// depends on their width: use Emoji_Presentation glyphs, which every terminal draws 2 cells
+	// wide. Text-presentation pictographs (🖼, 🎞) measure 1 cell but many terminals draw them 2.
+	"chip.image": "📷",
+	"chip.video": "🎬",
 	"chip.paste": "📄",
 	// Settings tabs
 	"tab.appearance": "🎨",
@@ -740,6 +753,10 @@ const NERD_SYMBOLS: SymbolMap = {
 	// Context gauge boundaries — vector intersection starts async speculation; auto-fix applies compaction.
 	"context.speculation": "\u{f055d}",
 	"context.compaction": "\u{f0068}",
+	"context.content": "⛁",
+	"context.messages": "⛃",
+	"context.buffer": "⛝",
+	"context.free": "⛶",
 	// Box Drawing - Rounded (same as unicode)
 	// pick: ╭ | alt: ┌ ┏ ╔
 	"boxRound.topLeft": "╭",
@@ -921,6 +938,8 @@ const NERD_SYMBOLS: SymbolMap = {
 	"icon.vimVisual": "\uf06e",
 	// pick:  (nf-fa-bars) | alt:  (nf-fa-align_left)
 	"icon.vimVisualLine": "\uf0c9",
+	// pick:  (nf-fa-exchange) | alt:  (nf-fa-repeat)
+	"icon.vimReplace": "\uf0ec",
 	// Slash-command type indicators
 	// pick:  (nf-cod-terminal) | alt:  (nf-fa-terminal)
 	"cmd.action": "\uea85",
@@ -1196,6 +1215,10 @@ const ASCII_SYMBOLS: SymbolMap = {
 	// Context gauge boundaries
 	"context.speculation": ":",
 	"context.compaction": "|",
+	"context.content": "#",
+	"context.messages": "@",
+	"context.buffer": "x",
+	"context.free": ".",
 	// Box Drawing - Rounded (ASCII fallback)
 	"boxRound.topLeft": "+",
 	"boxRound.topRight": "+",
@@ -1289,6 +1312,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"icon.vimInsert": "I",
 	"icon.vimVisual": "V",
 	"icon.vimVisualLine": "L",
+	"icon.vimReplace": "R",
 	// Slash-command type indicators — unused; the icon column is disabled in ASCII mode
 	"cmd.action": "",
 	"cmd.prompt": "",

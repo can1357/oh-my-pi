@@ -12,12 +12,18 @@
 
 use std::{
 	ffi::{OsStr, OsString},
-	io::{self, Read, Write},
+	io::{self, Write},
 	path::{Path, PathBuf},
+	process::Stdio,
+	sync::{
+		Arc, Mutex, PoisonError,
+		atomic::{AtomicBool, Ordering},
+	},
 };
 
 use clap::{ArgAction, Parser, ValueEnum};
-use grep_cli::{CommandReader, DecompressionReaderBuilder};
+use futures::{StreamExt, stream};
+use grep_cli::DecompressionMatcher;
 use grep_matcher::{Captures, LineTerminator, Matcher};
 use grep_pcre2::{RegexMatcher as PcreMatcher, RegexMatcherBuilder as PcreMatcherBuilder};
 use grep_printer::{JSONBuilder, Stats};
@@ -25,16 +31,30 @@ use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{
 	BinaryDetection, Encoding, Searcher, SearcherBuilder, Sink, SinkContext, SinkFinish, SinkMatch,
 };
-use crate::grep::{
-	CompiledMatcher, RecordFormat, exit_status, for_each_nonempty_match, pcre2_jit_enabled,
+use tokio::{
+	io::{AsyncReadExt, AsyncWriteExt},
+	process::{Child, ChildStdout},
+	task::JoinHandle,
 };
-use crate::host::{Host, StreamWriter, Utility, forward_slash_display};
+
+use crate::grep::{
+	MAX_LINE_BYTES, RecordFormat, SEARCH_HEAP_LIMIT, bound_terminator, check_run,
+	describe_search_error, exit_status, for_each_nonempty_match,
+};
+use crate::host::{AsyncUtility, Host, StdoutFile, StreamWriter, forward_slash_display};
+use crate::stdio;
 
 use ignore::{
 	Match,
-	gitignore::{Gitignore, GitignoreBuilder},
 	overrides::{Override, OverrideBuilder},
 	types::{Types, TypesBuilder},
+};
+use pi_walker::{
+	Detail, FileType,
+	exec,
+	grep::{Engine, pcre2_jit_enabled},
+	ignore::{Match as RuleMatch, Rules},
+	walk,
 };
 
 #[derive(Parser, Debug)]
@@ -346,6 +366,14 @@ pub(crate) struct Rg {
 	#[arg(long = "count-matches")]
 	count_matches: bool,
 
+	/// With -c/--count-matches, also print files with zero matches.
+	#[arg(long = "include-zero", overrides_with = "no_include_zero")]
+	include_zero: bool,
+
+	/// Print counts only for files with matches.
+	#[arg(long = "no-include-zero", overrides_with = "include_zero", hide = true)]
+	no_include_zero: bool,
+
 	/// Print only matching spans.
 	#[arg(short = 'o', long = "only-matching")]
 	only_matching: bool,
@@ -474,10 +502,9 @@ pub(crate) struct Rg {
 	#[arg(long = "no-config")]
 	_no_config: bool,
 
-	/// Number of search threads (accepted; this builtin searches in-process,
-	/// serially).
+	/// Number of walk and search threads (0 or absent: the default).
 	#[arg(short = 'j', long = "threads", value_name = "NUM")]
-	_threads: Option<usize>,
+	threads: Option<usize>,
 
 	/// Print SEPARATOR instead of '/' in printed file paths.
 	#[arg(long = "path-separator", value_name = "SEPARATOR")]
@@ -495,12 +522,14 @@ enum RegexEngine {
 	Auto,
 }
 
+#[derive(Clone)]
 struct SearchOptions {
 	line_number:         bool,
 	column:              bool,
 	byte_offset:         bool,
 	count:               bool,
 	count_matches:       bool,
+	include_zero:        bool,
 	files_with_matches:  bool,
 	files_without_match: bool,
 	only_matching:       bool,
@@ -749,7 +778,9 @@ impl<M: Matcher, W: Write> Sink for RgSink<'_, M, W> {
 			} else {
 				self.line_count
 			};
-			self.opts.record.write_count_record(self.out, self.display, count)?;
+			if count > 0 || self.opts.include_zero {
+				self.opts.record.write_count_record(self.out, self.display, count)?;
+			}
 		}
 		Ok(())
 	}
@@ -853,7 +884,7 @@ fn build_pcre_matcher(host: &Host, patterns: &[String], cli: &Rg) -> Result<Pcre
 		.map_err(|error| error.to_string())
 }
 
-fn build_matcher(host: &Host, patterns: &[String], cli: &Rg) -> Result<CompiledMatcher, String> {
+fn build_matcher(host: &Host, patterns: &[String], cli: &Rg) -> Result<Engine, String> {
 	let engine = cli.engine.unwrap_or(if cli.pcre2 {
 		RegexEngine::Pcre2
 	} else {
@@ -861,12 +892,12 @@ fn build_matcher(host: &Host, patterns: &[String], cli: &Rg) -> Result<CompiledM
 	});
 	match engine {
 		RegexEngine::Default => build_rust_matcher(patterns, cli)
-			.map(CompiledMatcher::Rust)
+			.map(Engine::Rust)
 			.map_err(|error| error.to_string()),
-		RegexEngine::Pcre2 => build_pcre_matcher(host, patterns, cli).map(CompiledMatcher::Pcre),
+		RegexEngine::Pcre2 => build_pcre_matcher(host, patterns, cli).map(Engine::Pcre),
 		RegexEngine::Auto => match build_rust_matcher(patterns, cli) {
-			Ok(matcher) => Ok(CompiledMatcher::Rust(matcher)),
-			Err(_) => build_pcre_matcher(host, patterns, cli).map(CompiledMatcher::Pcre),
+			Ok(matcher) => Ok(Engine::Rust(matcher)),
+			Err(_) => build_pcre_matcher(host, patterns, cli).map(Engine::Pcre),
 		},
 	}
 }
@@ -888,7 +919,11 @@ fn binary_detection(cli: &Rg, mode: BinaryMode) -> BinaryDetection {
 	}
 }
 
-fn build_searcher(cli: &Rg, opts: &SearchOptions, mode: BinaryMode) -> Result<Searcher, String> {
+fn build_searcher(
+	cli: &Rg,
+	opts: &SearchOptions,
+	mode: BinaryMode,
+) -> Result<SearcherBuilder, String> {
 	let (encoding, bom_sniffing) = match cli.encoding.as_deref() {
 		None | Some("auto") => (None, true),
 		Some("none") => (None, false),
@@ -905,38 +940,47 @@ fn build_searcher(cli: &Rg, opts: &SearchOptions, mode: BinaryMode) -> Result<Se
 		.binary_detection(binary_detection(cli, mode))
 		.max_matches(cli.max_count)
 		.encoding(encoding)
-		.bom_sniffing(bom_sniffing);
+		.bom_sniffing(bom_sniffing)
+		.heap_limit(Some(SEARCH_HEAP_LIMIT));
 	if cli.null_data {
 		builder.line_terminator(LineTerminator::byte(b'\0'));
 	} else if cli.crlf && !cli.no_crlf {
 		builder.line_terminator(LineTerminator::crlf());
 	}
-	Ok(builder.build())
+	Ok(builder)
 }
 
-fn read_pattern_file(host: &mut Host, path: &OsStr) -> Result<Vec<String>, String> {
-	let mut text = String::new();
-	if path == OsStr::new("-") {
-		host.stdin
-			.read_to_string(&mut text)
-			.map_err(|err| format!("rg: -: {err}"))?;
+async fn pattern_file_lines(host: &mut Host, path: &OsStr) -> Result<Vec<String>, String> {
+	let bytes = if path == OsStr::new("-") {
+		let mut bytes = Vec::new();
+		match host.read_stdin_to_end(&mut bytes, MAX_LINE_BYTES).await {
+			Ok(_) => Ok(bytes),
+			Err(error) if error.kind() == io::ErrorKind::OutOfMemory => Err(io::Error::other(format!(
+				"pattern file larger than {} MiB",
+				MAX_LINE_BYTES >> 20
+			))),
+			Err(error) => Err(error),
+		}
 	} else {
-		let resolved = host.resolve(path);
-		text = host
-			.fs()
-			.read_to_string(&resolved)
-			.map_err(|err| format!("rg: {}: {err}", path.to_string_lossy()))?;
-	}
+		crate::grep::read_pattern_file(&host.vfs(), &host.resolve(path)).await
+	};
+	let text = bytes
+		.and_then(|bytes| {
+			String::from_utf8(bytes).map_err(|_| {
+				io::Error::new(io::ErrorKind::InvalidData, "stream did not contain valid UTF-8")
+			})
+		})
+		.map_err(|err| format!("rg: {}: {err}", path.display()))?;
 	Ok(text
 		.lines()
 		.map(|line| line.strip_suffix('\r').unwrap_or(line).to_string())
 		.collect())
 }
 
-fn resolve_patterns(host: &mut Host, cli: &Rg) -> Result<(Vec<String>, Vec<OsString>), String> {
+async fn resolve_patterns(host: &mut Host, cli: &Rg) -> Result<(Vec<String>, Vec<OsString>), String> {
 	let mut patterns = cli.patterns.clone();
 	for pattern_file in &cli.pattern_files {
-		patterns.extend(read_pattern_file(host, pattern_file.as_os_str())?);
+		patterns.extend(pattern_file_lines(host, pattern_file.as_os_str()).await?);
 	}
 	let mut paths = Vec::new();
 	if cli.files || cli.type_list || !cli.patterns.is_empty() || !cli.pattern_files.is_empty() {
@@ -962,6 +1006,7 @@ fn search_options(cli: &Rg) -> SearchOptions {
 		byte_offset: cli.byte_offset,
 		count: cli.count && !count_matches,
 		count_matches,
+		include_zero: cli.include_zero,
 		files_with_matches: cli.files_with_matches && !cli.files_without_match,
 		files_without_match: cli.files_without_match,
 		only_matching: cli.only_matching,
@@ -1038,22 +1083,18 @@ fn print_type_list<W: Write>(cli: &Rg, out: &mut W) -> Result<(), String> {
 	Ok(())
 }
 
-struct RgWalk {
-	request: pi_walker::WalkRequest,
-	filters: PathFilters,
-}
-
 struct PathFilters {
-	fs:           pi_vfs::BlockingFs,
 	overrides:    Option<Override>,
-	explicit:     Option<Gitignore>,
+	/// `--ignore-file` rules in command-line order, matched relative to `cwd`.
+	explicit:     Vec<Rules>,
+	cwd:          PathBuf,
 	types:        Option<Types>,
 	max_filesize: Option<u64>,
 }
 
 impl PathFilters {
-	fn includes(&self, path: &Path, file_type: pi_walker::FileType, size: Option<f64>) -> bool {
-		let is_dir = file_type == pi_walker::FileType::Dir;
+	fn includes(&self, path: &Path, file_type: FileType, size: Option<u64>) -> bool {
+		let is_dir = file_type == FileType::Dir;
 		let override_match = self
 			.overrides
 			.as_ref()
@@ -1067,15 +1108,10 @@ impl PathFilters {
 		let explicitly_included = override_match
 			.as_ref()
 			.is_some_and(|matched| matches!(matched, Match::Whitelist(_)));
-		if !explicitly_included
-			&& self
-				.explicit
-				.as_ref()
-				.is_some_and(|ignore| matches!(ignore.matched(path, is_dir), Match::Ignore(_)))
-		{
+		if !explicitly_included && self.explicitly_ignored(path, is_dir) {
 			return false;
 		}
-		if file_type != pi_walker::FileType::File {
+		if file_type != FileType::File {
 			return true;
 		}
 		if !explicitly_included
@@ -1086,17 +1122,29 @@ impl PathFilters {
 		{
 			return false;
 		}
-		if let Some(limit) = self.max_filesize {
-			let size = size.or_else(|| self.fs.metadata(path).ok().map(|meta| meta.len() as f64));
-			if size.is_some_and(|size| size > limit as f64) {
-				return false;
-			}
+		if let Some(limit) = self.max_filesize
+			&& size.is_some_and(|size| size > limit)
+		{
+			return false;
 		}
 		true
 	}
+
+	/// Whether the last `--ignore-file` rule matching `path` ignores it.
+	fn explicitly_ignored(&self, path: &Path, is_dir: bool) -> bool {
+		if self.explicit.is_empty() {
+			return false;
+		}
+		self.explicit
+			.iter()
+			.rev()
+			.map(|rules| rules.matched_below(&self.cwd, path, is_dir))
+			.find(|matched| *matched != RuleMatch::None)
+			== Some(RuleMatch::Ignore)
+	}
 }
 
-fn build_path_filters(host: &mut Host, cli: &Rg) -> Result<PathFilters, String> {
+async fn build_path_filters(host: &mut Host, cli: &Rg) -> Result<Arc<PathFilters>, String> {
 	let cwd = host.cwd().to_path_buf();
 	let max_filesize = cli
 		.max_filesize
@@ -1129,18 +1177,14 @@ fn build_path_filters(host: &mut Host, cli: &Rg) -> Result<PathFilters, String> 
 		}
 		Some(overrides.build().map_err(|error| format!("rg: {error}"))?)
 	};
-	let explicit = if cli.ignore_files.is_empty() {
-		None
-	} else {
-		let mut builder = GitignoreBuilder::new(&cwd);
-		for path in &cli.ignore_files {
-			let resolved = host.resolve(path);
-			if let Some(error) = pi_walker::add_ignore_file(&mut builder, host.fs(), &resolved) {
-				return Err(format!("rg: {}: {error}", path.to_string_lossy()));
-			}
-		}
-		Some(builder.build().map_err(|error| format!("rg: {error}"))?)
-	};
+	let fs = host.vfs();
+	let mut explicit = Vec::with_capacity(cli.ignore_files.len());
+	for path in &cli.ignore_files {
+		let rules = Rules::read(&fs, &host.resolve(path))
+			.await
+			.map_err(|error| format!("rg: {}: {error}", path.display()))?;
+		explicit.push(rules);
+	}
 	let types = if cli.types.is_empty() && cli.type_nots.is_empty() {
 		None
 	} else {
@@ -1150,39 +1194,90 @@ fn build_path_filters(host: &mut Host, cli: &Rg) -> Result<PathFilters, String> 
 				.map_err(|error| format!("rg: {error}"))?,
 		)
 	};
-	Ok(PathFilters { fs: host.fs().clone(), overrides, explicit, types, max_filesize })
+	Ok(Arc::new(PathFilters { overrides, explicit, cwd, types, max_filesize }))
 }
 
-fn build_walk(host: &mut Host, cli: &Rg, root: &Path) -> Result<RgWalk, String> {
-	let filters = build_path_filters(host, cli)?;
-	let unrestricted_no_ignore = cli.unrestricted >= 1;
-	let include_hidden = (cli.hidden || cli.unrestricted >= 2) && !cli.no_hidden;
-	let no_ignore = (cli.no_ignore || unrestricted_no_ignore) && !cli.ignore;
-	let order = if cli.sort_files || cli.sort.as_deref() == Some("path") {
-		pi_walker::WalkOrder::Path
-	} else {
-		pi_walker::WalkOrder::Unordered
-	};
-	let request = pi_walker::WalkRequest::new(root)
-		.filesystem(host.fs().clone())
-		.hidden(include_hidden)
-		.gitignore(!no_ignore)
-		.skip_git(!no_ignore)
-		.skip_node_modules(false)
-		.follow_links(pi_walker::FollowLinks::from(cli.follow && !cli.no_follow))
-		.detail(if filters.max_filesize.is_some() {
-			pi_walker::WalkDetail::Full
+fn walk_options(cli: &Rg, filters: &PathFilters) -> walk::Options {
+	let no_ignore = (cli.no_ignore || cli.unrestricted >= 1) && !cli.ignore;
+	walk::Options {
+		hidden: (cli.hidden || cli.unrestricted >= 2) && !cli.no_hidden,
+		gitignore: !no_ignore,
+		skip_git: !no_ignore,
+		// The walk root is always resolved through symlinks, as ripgrep follows
+		// a path operand that is itself a symlink (even with `--no-follow`);
+		// `-L` extends that to links found during the walk.
+		follow_links: cli.follow && !cli.no_follow,
+		detail: if filters.max_filesize.is_some() {
+			Detail::Full
 		} else {
-			pi_walker::WalkDetail::Minimal
-		})
-		.order(order)
-		.emit_root(false)
-		.depth(1, cli.max_depth.unwrap_or(usize::MAX))
-		.visit_order(pi_walker::VisitOrder::PreOrder)
-		.directory_errors(pi_walker::DirectoryErrorMode::Visit)
-		.same_file_system(cli.one_file_system && !cli.no_one_file_system)
-		.cache(false);
-	Ok(RgWalk { request, filters })
+			Detail::Minimal
+		},
+		max_depth: cli.max_depth,
+		same_file_system: cli.one_file_system && !cli.no_one_file_system,
+		workers: cli.threads,
+		..walk::Options::default()
+	}
+}
+
+/// The files a directory walk found, in report order, and how many may be
+/// searched concurrently.
+struct CollectedFiles {
+	paths:       Vec<PathBuf>,
+	parallelism: usize,
+}
+
+/// The files below `root` that rg searches or lists, in report order (path
+/// order, or its reverse under `--sortr path`). Unreadable directories are
+/// reported and set `had_error`; `None` when the walk failed (reported).
+async fn collect_files(
+	host: &mut Host,
+	cli: &Rg,
+	filters: &Arc<PathFilters>,
+	root: &Path,
+	no_messages: bool,
+	had_error: &mut bool,
+) -> Option<CollectedFiles> {
+	let layer = pi_walker::Fs::new(&host.vfs(), root);
+	let options = walk_options(cli, filters);
+	let filter = Arc::clone(filters);
+	let collected = walk::collect(&layer, root, &options, true, move |worker, entry| {
+		if !filter.includes(worker.abs(entry), entry.file_type, entry.size) {
+			return if entry.file_type == FileType::Dir {
+				walk::Action::SkipDir
+			} else {
+				walk::Action::Skip
+			};
+		}
+		if entry.file_type == FileType::File {
+			walk::Action::Continue
+		} else {
+			walk::Action::Skip
+		}
+	})
+	.await;
+	match collected {
+		Ok(files) => {
+			for error in files.errors() {
+				*had_error = true;
+				if !no_messages {
+					let _ = writeln!(host.stderr, "rg: {}: {}", error.path.display(), error.error);
+				}
+			}
+			let mut paths: Vec<PathBuf> =
+				(0..files.len()).map(|index| layer.join(root, files.get(index).path)).collect();
+			if cli.sortr.as_deref() == Some("path") {
+				paths.reverse();
+			}
+			Some(CollectedFiles { paths, parallelism: options.parallelism(&layer) })
+		},
+		Err(error) => {
+			*had_error = true;
+			if !no_messages {
+				let _ = writeln!(host.stderr, "rg: {error}");
+			}
+			None
+		},
+	}
 }
 
 /// Display spelling of a walked `path` under the `operand` it was found from
@@ -1190,7 +1285,7 @@ fn build_walk(host: &mut Host, cli: &Rg, root: &Path) -> Result<RgWalk, String> 
 /// path-printing utilities.
 fn display_path(operand: &OsStr, root: &Path, path: &Path) -> PathBuf {
 	let rel = path.strip_prefix(root).unwrap_or(path);
-	if rel.as_os_str().is_empty() {
+	if rel.is_empty() {
 		return PathBuf::from(operand);
 	}
 	let display = if operand == OsStr::new(".") {
@@ -1201,10 +1296,237 @@ fn display_path(operand: &OsStr, root: &Path, path: &Path) -> PathBuf {
 	forward_slash_display(&display).unwrap_or(display)
 }
 
-fn process_reader<M: Matcher, R: Read, W: Write>(
+/// Bytes read per search step.
+const READ_CHUNK: usize = 64 * 1024;
+
+/// Output a streaming search has produced but the host has not been handed yet.
+#[derive(Clone, Default)]
+struct Pending(Arc<Mutex<Vec<u8>>>);
+
+impl Pending {
+	fn take(&self) -> Vec<u8> {
+		std::mem::take(&mut *self.0.lock().unwrap_or_else(PoisonError::into_inner))
+	}
+}
+
+impl Write for Pending {
+	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+		self.0.lock().unwrap_or_else(PoisonError::into_inner).extend_from_slice(buf);
+		Ok(buf.len())
+	}
+
+	fn flush(&mut self) -> io::Result<()> {
+		Ok(())
+	}
+}
+
+/// A task cancelled when dropped.
+struct Aborting<T>(Option<JoinHandle<T>>);
+
+impl<T: Send + 'static> Aborting<T> {
+	fn spawn(future: impl Future<Output = T> + Send + 'static) -> Self {
+		Self(Some(tokio::spawn(future)))
+	}
+
+	async fn join(mut self) -> io::Result<T> {
+		match self.0.take() {
+			Some(handle) => handle.await.map_err(io::Error::other),
+			None => Err(io::Error::other("task already joined")),
+		}
+	}
+}
+
+impl<T> Drop for Aborting<T> {
+	fn drop(&mut self) {
+		if let Some(handle) = self.0.take() {
+			handle.abort();
+		}
+	}
+}
+
+/// Copies `source` into a decompressor's stdin, then closes it.
+async fn feed_decompressor(mut source: stdio::Source, mut stdin: tokio::process::ChildStdin) -> io::Result<()> {
+	let mut buf = vec![0; READ_CHUNK];
+	loop {
+		let read = source.read(&mut buf).await?;
+		if read == 0 {
+			return Ok(());
+		}
+		match stdin.write_all(&buf[..read]).await {
+			Ok(()) => {},
+			// The decompressor stopped reading (search ended early or it failed);
+			// its own exit status/stderr is reported when it is closed.
+			Err(error) if error.kind() == io::ErrorKind::BrokenPipe => return Ok(()),
+			Err(error) => return Err(error),
+		}
+	}
+}
+
+/// The error for a decompressor that exited unsuccessfully, worded as
+/// `grep_cli::CommandReader` words it.
+fn decompressor_failure(stderr: &[u8]) -> io::Error {
+	let message = String::from_utf8_lossy(stderr);
+	let message = message.trim();
+	if message.is_empty() {
+		return io::Error::other("<stderr is empty>");
+	}
+	let rule = "-".repeat(79);
+	io::Error::other(format!("\n{rule}\n{message}\n{rule}"))
+}
+
+/// A decompressor child process read through its stdout.
+struct Decompressor {
+	child:  Child,
+	stdout: Option<ChildStdout>,
+	stderr: Option<Aborting<io::Result<Vec<u8>>>>,
+	feeder: Option<Aborting<io::Result<()>>>,
+}
+
+impl Decompressor {
+	/// Spawns `command` with piped output and, when `piped_stdin`, a piped stdin to feed.
+	fn spawn(command: std::process::Command, piped_stdin: bool) -> io::Result<Self> {
+		let mut command = tokio::process::Command::from(command);
+		command
+			.stdin(if piped_stdin { Stdio::piped() } else { Stdio::null() })
+			.stdout(Stdio::piped())
+			.stderr(Stdio::piped())
+			.kill_on_drop(true);
+		let mut child = command.spawn()?;
+		let stdout = child.stdout.take();
+		let mut stderr = child.stderr.take().ok_or_else(|| io::Error::other("decompressor stderr missing"))?;
+		let stderr = Aborting::spawn(async move {
+			let mut bytes = Vec::new();
+			stderr.read_to_end(&mut bytes).await.map(|_| bytes)
+		});
+		Ok(Self { child, stdout, stderr: Some(stderr), feeder: None })
+	}
+
+	/// Streams `source` into the decompressor's stdin on a task of its own.
+	fn feed(&mut self, source: stdio::Source) {
+		if let Some(stdin) = self.child.stdin.take() {
+			self.feeder = Some(Aborting::spawn(feed_decompressor(source, stdin)));
+		}
+	}
+
+	/// Reads decompressed bytes; at the end of the output, reports the decompressor's failure.
+	async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+		let Some(stdout) = self.stdout.as_mut() else {
+			return Ok(0);
+		};
+		let read = stdout.read(buf).await?;
+		if read > 0 {
+			return Ok(read);
+		}
+		self.close(true).await?;
+		if let Some(feeder) = self.feeder.take() {
+			feeder.join().await??;
+		}
+		Ok(0)
+	}
+
+	/// Closes the output and reaps the child. A non-zero exit is an error when
+	/// the output was read to its end or the child said anything on stderr.
+	async fn close(&mut self, at_end: bool) -> io::Result<()> {
+		let Some(stdout) = self.stdout.take() else {
+			return Ok(());
+		};
+		drop(stdout);
+		if self.child.wait().await?.success() {
+			return Ok(());
+		}
+		let stderr = match self.stderr.take() {
+			Some(stderr) => stderr.join().await??,
+			None => Vec::new(),
+		};
+		if !at_end && stderr.is_empty() {
+			return Ok(());
+		}
+		Err(decompressor_failure(&stderr))
+	}
+}
+
+/// Where a search reads its bytes from.
+enum Input<'a> {
+	/// A file read through the filesystem.
+	Source(stdio::Source),
+	/// Stdin, handing the search's output on before each read.
+	Stdin { host: &'a mut Host, pending: Pending, out: &'a mut (dyn Write + Send) },
+	/// A decompressor's output.
+	Child(Decompressor),
+}
+
+impl Input<'_> {
+	async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+		match self {
+			Self::Source(source) => source.read(buf).await,
+			Self::Child(child) => child.read(buf).await,
+			Self::Stdin { host, pending, out } => {
+				let produced = pending.take();
+				if !produced.is_empty() {
+					out.write_all(&produced)?;
+					out.flush()?;
+					host.flush_output().await?;
+				}
+				host.read_stdin(buf).await
+			},
+		}
+	}
+
+	/// Ends the input before its end; a decompressor's complaint about the cut-off is not an error.
+	async fn abandon(&mut self) {
+		if let Self::Child(child) = self {
+			let _ = child.close(false).await;
+		}
+	}
+}
+
+/// What a search reuses across inputs: its searcher and read buffer.
+struct Scratch {
+	searcher: Searcher,
+	buf:      Vec<u8>,
+}
+
+impl Scratch {
+	fn new(builder: &SearcherBuilder) -> Self {
+		Self { searcher: builder.build(), buf: vec![0; READ_CHUNK] }
+	}
+}
+
+/// Feeds `input` to a search into `sink` until the input or the sink ends it.
+async fn push_all<M: Matcher, S: Sink<Error = io::Error>>(
 	matcher: &M,
-	searcher: &mut Searcher,
-	reader: R,
+	scratch: &mut Scratch,
+	sink: S,
+	input: &mut Input<'_>,
+	halt: Option<&AtomicBool>,
+) -> io::Result<()> {
+	let Scratch { searcher, buf } = scratch;
+	let terminator = bound_terminator(searcher, matcher);
+	let mut run = 0;
+	let mut search = searcher.search_push(matcher, sink);
+	loop {
+		if let Some(halt) = halt {
+			check_halt(halt)?;
+		}
+		let read = input.read(buf).await?;
+		if read == 0 {
+			break;
+		}
+		check_run(terminator, &mut run, &buf[..read])?;
+		if !search.push(&buf[..read])? {
+			input.abandon().await;
+			break;
+		}
+	}
+	search.finish()
+}
+
+/// Searches `input`, appending the output to `out` and returning whether anything matched.
+async fn process_input<M: Matcher, W: Write>(
+	matcher: &M,
+	scratch: &mut Scratch,
+	mut input: Input<'_>,
+	halt: Option<&AtomicBool>,
 	display: Option<&[u8]>,
 	opts: &SearchOptions,
 	stats: &mut Stats,
@@ -1217,13 +1539,13 @@ fn process_reader<M: Matcher, R: Read, W: Write>(
 		if let Some(display) = display {
 			let path = PathBuf::from(String::from_utf8_lossy(display).into_owned());
 			let mut sink = printer.sink_with_path(matcher, &path);
-			searcher.search_reader(matcher, reader, &mut sink)?;
+			push_all(matcher, scratch, &mut sink, &mut input, halt).await?;
 			let matched = sink.has_match();
 			*stats += sink.stats();
 			return Ok(matched);
 		}
 		let mut sink = printer.sink(matcher);
-		searcher.search_reader(matcher, reader, &mut sink)?;
+		push_all(matcher, scratch, &mut sink, &mut input, halt).await?;
 		let matched = sink.has_match();
 		*stats += sink.stats();
 		return Ok(matched);
@@ -1243,146 +1565,231 @@ fn process_reader<M: Matcher, R: Read, W: Write>(
 		match_count: 0,
 		any_match: false,
 	};
-	searcher.search_reader(matcher, reader, &mut sink)?;
+	push_all(matcher, scratch, &mut sink, &mut input, halt).await?;
 	Ok(sink.any_match)
 }
 
-#[allow(
-	clippy::too_many_arguments,
-	reason = "file processing needs the matcher, searcher, output state, and path metadata"
-)]
-fn process_file<M: Matcher, W: Write>(
-	host: &mut Host,
-	cli: &Rg,
-	matcher: &M,
-	searcher: &mut Searcher,
+/// Raises its flag when dropped, stopping the file searches running under it.
+struct HaltOnDrop(Arc<AtomicBool>);
+
+impl HaltOnDrop {
+	fn new() -> Self {
+		Self(Arc::new(AtomicBool::new(false)))
+	}
+
+	fn flag(&self) -> Arc<AtomicBool> {
+		Arc::clone(&self.0)
+	}
+}
+
+impl Drop for HaltOnDrop {
+	fn drop(&mut self) {
+		self.0.store(true, Ordering::Relaxed);
+	}
+}
+
+fn check_halt(halt: &AtomicBool) -> io::Result<()> {
+	if halt.load(Ordering::Relaxed) {
+		Err(io::Error::other("search halted"))
+	} else {
+		Ok(())
+	}
+}
+
+/// One searched file's output, handed to the consumer in path order.
+struct FileSearch {
+	out:     Vec<u8>,
+	err:     Vec<u8>,
+	stats:   Stats,
+	outcome: io::Result<SearchOutcome>,
+}
+
+async fn process_file<M: Matcher + Send + Sync + 'static, W: Write, E: Write>(
+	shared: &Arc<DirSearch<M>>,
+	scratch: &mut Scratch,
 	path: &Path,
 	display: Option<&[u8]>,
-	opts: &SearchOptions,
 	stats: &mut Stats,
 	out: &mut W,
+	err: &mut E,
 ) -> io::Result<SearchOutcome> {
-	if host.path_is_stdout(path) {
+	let opts = &shared.opts;
+	if let Some(stdout) = shared.stdout.as_ref()
+		&& stdout.is(&shared.fs, path).await
+	{
 		return Ok(SearchOutcome { any_match: false, had_error: false });
 	}
-	let fs = host.fs();
-	let result = if cli.search_zip && !cli.no_search_zip {
-		let builder = DecompressionReaderBuilder::new();
-		if !builder.get_matcher().has_command(path) {
-			fs.open(path)
-				.and_then(|file| process_reader(matcher, searcher, file, display, opts, stats, out))
-		} else if fs.is_native_local(path) {
-			builder
-				.build(path)
-				.map_err(|error| io::Error::other(error.to_string()))
-				.and_then(|reader| process_reader(matcher, searcher, reader, display, opts, stats, out))
-		} else {
-			open_provider_decompression(&builder, fs, path)
-				.and_then(|reader| process_reader(matcher, searcher, reader, display, opts, stats, out))
-		}
-	} else {
-		fs.open(path)
-			.and_then(|file| process_reader(matcher, searcher, file, display, opts, stats, out))
-	};
+	let result = search_path(shared, scratch, path, display, stats, out).await;
 	match result {
 		Ok(any_match) => Ok(SearchOutcome { any_match, had_error: false }),
 		Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Err(error),
-		Err(error) => Ok(SearchOutcome {
-			any_match: false,
-			had_error: report_path_error(host, display, path, error, opts),
-		}),
+		Err(error) => {
+			let message = describe_search_error(&error);
+			Ok(SearchOutcome {
+				any_match: false,
+				had_error: report_path_error(err, display, path, &message, opts),
+			})
+		},
 	}
 }
 
-/// Compressed input read through a filesystem provider rather than a host path.
-enum ProviderDecompression {
-	/// Decompressor child process whose stdin is fed from the provider file.
-	Command { reader: CommandReader, feeder: Option<std::thread::JoinHandle<io::Result<()>>> },
-	/// No decompressor could be spawned; search the raw bytes like
-	/// `DecompressionReaderBuilder` does for host paths.
-	Passthru(pi_vfs::File),
-}
-
-impl Read for ProviderDecompression {
-	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-		match self {
-			Self::Passthru(file) => file.read(buf),
-			Self::Command { reader, feeder } => {
-				let read = reader.read(buf)?;
-				if read == 0
-					&& !buf.is_empty()
-					&& let Some(feeder) = feeder.take()
-				{
-					match feeder.join() {
-						Ok(Ok(())) => {},
-						Ok(Err(error)) => return Err(error),
-						Err(_) => return Err(io::Error::other("decompression input feeder panicked")),
-					}
-				}
-				Ok(read)
-			},
-		}
-	}
-}
-
-/// Decompress a provider-owned file by streaming its bytes into the matching
-/// decompressor's stdin. External decompressors cannot open virtual paths, so
-/// the path itself is never passed to the child process.
-fn open_provider_decompression(
-	builder: &DecompressionReaderBuilder,
-	fs: &pi_vfs::BlockingFs,
+/// Reads `path` and searches it, decompressing first under `--search-zip`.
+/// Files and decompressor output are read without blocking the runtime.
+async fn search_path<M: Matcher + Send + Sync + 'static, W: Write>(
+	shared: &Arc<DirSearch<M>>,
+	scratch: &mut Scratch,
 	path: &Path,
-) -> io::Result<ProviderDecompression> {
-	let mut file = fs.open(path)?;
-	let Some(mut command) = builder.get_matcher().command(path) else {
-		return Ok(ProviderDecompression::Passthru(file));
+	display: Option<&[u8]>,
+	stats: &mut Stats,
+	out: &mut W,
+) -> io::Result<bool> {
+	let (fs, opts, halt) = (&shared.fs, &shared.opts, &*shared.halt);
+	check_halt(halt)?;
+	let command = if shared.search_zip {
+		DecompressionMatcher::new().command(path)
+	} else {
+		None
 	};
-	let (stdin, mut feed) = io::pipe()?;
-	command.stdin(stdin);
-	let reader = match CommandReader::new(&mut command) {
-		Ok(reader) => reader,
-		// Match `DecompressionReaderBuilder::build`: an unavailable decompressor
-		// falls back to searching the undecoded bytes.
-		Err(_) => return Ok(ProviderDecompression::Passthru(file)),
+	let input = match command {
+		// An unavailable decompressor falls back to searching the undecoded
+		// bytes. External decompressors cannot open virtual paths, so a
+		// provider file's bytes are streamed into the child's stdin instead.
+		Some(mut command) if fs.is_native_local(path) => {
+			command.arg(path);
+			match Decompressor::spawn(command, false) {
+				Ok(child) => Input::Child(child),
+				Err(_) => Input::Source(stdio::Source::open(fs, path).await?),
+			}
+		},
+		Some(command) => {
+			let source = stdio::Source::open(fs, path).await?;
+			match Decompressor::spawn(command, true) {
+				Ok(mut child) => {
+					child.feed(source);
+					Input::Child(child)
+				},
+				Err(_) => Input::Source(source),
+			}
+		},
+		None => Input::Source(stdio::Source::open(fs, path).await?),
 	};
-	// Drop the parent's copy of the pipe read end so the child sees EOF once
-	// the feeder finishes.
-	drop(command);
-	let feeder = std::thread::spawn(move || match io::copy(&mut file, &mut feed) {
-		Ok(_) => Ok(()),
-		// The decompressor stopped reading (search ended early or it failed);
-		// its own exit status/stderr is reported by `CommandReader`.
-		Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
-		Err(error) => Err(error),
-	});
-	Ok(ProviderDecompression::Command { reader, feeder: Some(feeder) })
+	process_input(&shared.matcher, scratch, input, Some(halt), display, opts, stats, out).await
 }
 
 fn report_path_error(
-	host: &mut Host,
+	err_out: &mut impl Write,
 	display: Option<&[u8]>,
 	fallback: &Path,
-	err: io::Error,
+	err: &str,
 	opts: &SearchOptions,
 ) -> bool {
 	if !opts.no_messages {
 		let name = display
 			.map(|bytes| String::from_utf8_lossy(bytes).into_owned())
 			.unwrap_or_else(|| fallback.display().to_string());
-		let _ = writeln!(host.stderr, "rg: {name}: {err}");
+		let _ = writeln!(err_out, "rg: {name}: {err}");
 	}
 	true
 }
 
+/// Everything the concurrent per-file searches of one operand share. `direct`
+/// operands are files named on the command line and print under their
+/// operand spelling.
+struct DirSearch<M> {
+	fs:         pi_vfs::Fs,
+	halt:       Arc<AtomicBool>,
+	direct:     bool,
+	stdout:     Option<StdoutFile>,
+	search_zip: bool,
+	opts:       SearchOptions,
+	matcher:    M,
+	searcher:   SearcherBuilder,
+	operand:    OsString,
+	root:       PathBuf,
+	show_names: bool,
+}
+
+/// What one search worker reuses across files: its scratch and output buffer.
+struct Worker {
+	scratch: Scratch,
+	out:     Vec<u8>,
+}
+
+impl Worker {
+	/// Hands the file's output to the consumer, leaving an empty buffer in place when nothing was written.
+	fn take_out(&mut self) -> Vec<u8> {
+		if self.out.is_empty() {
+			Vec::new()
+		} else {
+			std::mem::take(&mut self.out)
+		}
+	}
+}
+
+impl<M: Matcher + Send + Sync + 'static> DirSearch<M> {
+	/// A worker whose searcher is built once from the shared builder.
+	fn worker(&self) -> Worker {
+		Worker { scratch: Scratch::new(&self.searcher), out: Vec::new() }
+	}
+
+	async fn search(self: &Arc<Self>, worker: &mut Worker, path: &Path) -> FileSearch {
+		let display_path = if self.direct {
+			PathBuf::from(&self.operand)
+		} else {
+			display_path(&self.operand, &self.root, path)
+		};
+		let display =
+			(self.show_names || self.opts.json).then_some(display_path.as_os_str().as_encoded_bytes());
+		let (mut file_err, mut file_stats) = (Vec::<u8>::new(), Stats::new());
+		let Worker { scratch, out } = &mut *worker;
+		let outcome = process_file(self, scratch, path, display, &mut file_stats, out, &mut file_err).await;
+		FileSearch { out: worker.take_out(), err: file_err, stats: file_stats, outcome }
+	}
+}
+
+#[allow(
+	clippy::too_many_arguments,
+	reason = "gathers the shared state of one operand's searches"
+)]
+fn dir_search<M: Clone>(
+	host: &Host,
+	cli: &Rg,
+	matcher: &M,
+	searcher: &SearcherBuilder,
+	operand: &OsStr,
+	root: &Path,
+	show_names: bool,
+	opts: &SearchOptions,
+	halt: &HaltOnDrop,
+	direct: bool,
+) -> Arc<DirSearch<M>> {
+	Arc::new(DirSearch {
+		fs: host.vfs(),
+		halt: halt.flag(),
+		direct,
+		stdout: host.stdout_file(),
+		search_zip: cli.search_zip && !cli.no_search_zip,
+		opts: opts.clone(),
+		matcher: matcher.clone(),
+		searcher: searcher.clone(),
+		operand: operand.to_owned(),
+		root: root.to_owned(),
+		show_names,
+	})
+}
+
+/// Searches the files below `root` on parallel workers, writing each file's
+/// output in path order.
 #[allow(
 	clippy::too_many_arguments,
 	reason = "required by standard walk/configure interfaces and search parameters"
 )]
-fn search_collected_files<M: Matcher, W: Write>(
+async fn search_dir<M: Matcher<Captures: Send> + Clone + Send + Sync + 'static, W: Write + Send>(
 	host: &mut Host,
 	cli: &Rg,
+	filters: &Arc<PathFilters>,
 	matcher: &M,
-	searcher: &mut Searcher,
+	searcher: &SearcherBuilder,
 	operand: &OsStr,
 	root: &Path,
 	show_names: bool,
@@ -1390,184 +1797,120 @@ fn search_collected_files<M: Matcher, W: Write>(
 	stats: &mut Stats,
 	out: &mut W,
 ) -> io::Result<SearchOutcome> {
-	let mut files = match collect_filtered_files(host, cli, root) {
-		Ok(files) => files,
-		Err(_) if host.is_cancelled() => {
-			return Ok(SearchOutcome { any_match: false, had_error: true });
-		},
-		Err(err) if err.kind() == io::ErrorKind::BrokenPipe => return Err(err),
-		Err(err) => {
-			if !opts.no_messages {
-				let _ = writeln!(host.stderr, "{err}");
-			}
-			return Ok(SearchOutcome { any_match: false, had_error: true });
-		},
-	};
-	files.sort_unstable_by(|a, b| b.cmp(a));
-	let mut any_match = false;
 	let mut had_error = false;
-	let mut processed_file = false;
-	for path in files {
+	let Some(CollectedFiles { paths, parallelism }) =
+		collect_files(host, cli, filters, root, opts.no_messages, &mut had_error).await
+	else {
+		return Ok(SearchOutcome { any_match: false, had_error });
+	};
+	let workers = if cli.line_buffered && !cli.no_line_buffered {
+		1
+	} else {
+		parallelism
+	};
+	let halt = HaltOnDrop::new();
+	let shared = dir_search(host, cli, matcher, searcher, operand, root, show_names, opts, &halt, false);
+	let mut any_match = false;
+	let mut failed = None;
+	let mut results = exec::ordered(stream::iter(paths), workers, workers, || shared.worker(), {
+		let shared = Arc::clone(&shared);
+		move |mut worker: Worker, path: PathBuf| {
+			let shared = Arc::clone(&shared);
+			async move {
+				let found = shared.search(&mut worker, &path).await;
+				(worker, found)
+			}
+		}
+	});
+	while let Some(found) = results.next().await {
+		*stats += &found.stats;
+		if let Err(error) = out.write_all(&found.out) {
+			failed = Some(error);
+			break;
+		}
+		let _ = host.stderr.write_all(&found.err);
+		if let Err(error) = deliver(host, out).await {
+			failed = Some(error);
+			break;
+		}
+		match found.outcome {
+			Ok(outcome) => {
+				any_match |= outcome.any_match;
+				had_error |= outcome.had_error;
+			},
+			Err(error) => {
+				failed = Some(error);
+				break;
+			},
+		}
 		if opts.quiet && any_match {
 			break;
 		}
-		if processed_file && host.is_cancelled() {
-			had_error = true;
-			break;
-		}
-		processed_file = true;
-		let display_path = display_path(operand, root, &path);
-		let display_bytes = display_path.as_os_str().as_encoded_bytes().to_vec();
-		let display = (show_names || opts.json).then_some(display_bytes.as_slice());
-		let outcome = process_file(host, cli, matcher, searcher, &path, display, opts, stats, out)?;
-		any_match |= outcome.any_match;
-		had_error |= outcome.had_error;
-		if host.is_cancelled() {
-			had_error = true;
-			break;
-		}
+	}
+	drop(results);
+	if let Some(error) = failed {
+		return Err(error);
+	}
+	if host.is_cancelled() {
+		had_error = true;
 	}
 	Ok(SearchOutcome { any_match, had_error })
 }
 
-#[allow(
-	clippy::too_many_arguments,
-	reason = "required by standard walk/configure interfaces and search parameters"
-)]
-fn search_dir<M: Matcher, W: Write>(
+/// Hands everything written to `out` and `host.stderr` so far to the host's destinations.
+async fn deliver<W: Write>(host: &Host, out: &mut W) -> io::Result<()> {
+	out.flush()?;
+	host.flush_output().await
+}
+
+/// Searches stdin chunk by chunk, handing its output to the host as it is
+/// produced.
+async fn search_stdin<M: Matcher, W: Write + Send>(
 	host: &mut Host,
-	cli: &Rg,
 	matcher: &M,
-	searcher: &mut Searcher,
-	operand: &OsStr,
-	root: &Path,
-	show_names: bool,
+	searcher: &SearcherBuilder,
+	display: Option<&[u8]>,
 	opts: &SearchOptions,
 	stats: &mut Stats,
 	out: &mut W,
-) -> io::Result<SearchOutcome> {
-	if cli.sortr.as_deref() == Some("path") {
-		return search_collected_files(
-			host, cli, matcher, searcher, operand, root, show_names, opts, stats, out,
-		);
-	}
-	let walk = match build_walk(host, cli, root) {
-		Ok(walk) => walk,
-		Err(err) => {
-			if !opts.no_messages {
-				let _ = writeln!(host.stderr, "{err}");
-			}
-			return Ok(SearchOutcome { any_match: false, had_error: true });
-		},
-	};
-	let any_match = std::cell::Cell::new(false);
-	let had_error = std::cell::Cell::new(false);
-	let mut walk_err = host.stderr_clone();
-	let streamed = match walk.request.for_each_entry_with_heartbeat(
-		host.cancel_heartbeat(),
-		|entry| {
-			if opts.quiet && any_match.get() {
-				return Ok(pi_walker::WalkDecision::Stop);
-			}
-			let path = entry.absolute_path.as_ref();
-			if !walk.filters.includes(path, entry.file_type, entry.size) {
-				return Ok(if entry.file_type == pi_walker::FileType::Dir {
-					pi_walker::WalkDecision::SkipDescend
-				} else {
-					pi_walker::WalkDecision::Skip
-				});
-			}
-			if entry.file_type != pi_walker::FileType::File {
-				return Ok(pi_walker::WalkDecision::Skip);
-			}
-			let display_path = display_path(operand, root, path);
-			let display_bytes = display_path.as_os_str().as_encoded_bytes().to_vec();
-			let display = (show_names || opts.json).then_some(display_bytes.as_slice());
-			let outcome = process_file(host, cli, matcher, searcher, path, display, opts, stats, out)?;
-			any_match.set(any_match.get() || outcome.any_match);
-			had_error.set(had_error.get() || outcome.had_error);
-			Ok(if opts.quiet && any_match.get() {
-				pi_walker::WalkDecision::Stop
-			} else {
-				pi_walker::WalkDecision::Include
-			})
-		},
-		|error| {
-			had_error.set(true);
-			if !opts.no_messages {
-				let _ =
-					writeln!(walk_err, "rg: {}: {}", error.path.display(), error.error);
-			}
-			Ok(pi_walker::WalkDecision::Include)
-		},
-	) {
-		Ok(pi_walker::WalkStatus::Complete | pi_walker::WalkStatus::Stopped) => {
-			Some(Ok(SearchOutcome { any_match: any_match.get(), had_error: had_error.get() }))
-		},
-		Err(pi_walker::WalkError::Interrupted(_)) if host.is_cancelled() => {
-			// Harness cancellation; the shell wrapper overrides the exit code
-			// and stay-silent on stderr — no spurious "interrupted" diagnostic.
-			had_error.set(true);
-			Some(Ok(SearchOutcome { any_match: any_match.get(), had_error: true }))
-		},
-		Err(pi_walker::WalkError::Interrupted(error))
-			if error.kind() == io::ErrorKind::BrokenPipe =>
-		{
-			Some(Err(error))
-		},
-		Err(err) => {
-			had_error.set(true);
-			if !opts.no_messages {
-				let _ = writeln!(host.stderr, "rg: {err}");
-			}
-			Some(Ok(SearchOutcome {
-				any_match: any_match.get(),
-				had_error: had_error.get(),
-			}))
-		},
-	};
-	streamed.unwrap_or_else(|| {
-		search_collected_files(host, cli, matcher, searcher, operand, root, show_names, opts, stats, out)
-	})
+) -> io::Result<bool> {
+	let pending = Pending::default();
+	let mut produced = pending.clone();
+	let input = Input::Stdin { host, pending: pending.clone(), out: &mut *out };
+	let result = process_input(
+		matcher,
+		&mut Scratch::new(searcher),
+		input,
+		None,
+		display,
+		opts,
+		stats,
+		&mut produced,
+	)
+	.await;
+	out.write_all(&pending.take())?;
+	result
 }
 
-fn collect_filtered_files(host: &mut Host, cli: &Rg, root: &Path) -> io::Result<Vec<PathBuf>> {
-	let walk = build_walk(host, cli, root).map_err(io::Error::other)?;
-	let mut files = Vec::new();
-	let result = walk.request.for_each_entry_with_heartbeat(
-		host.cancel_heartbeat(),
-		|entry| {
-			if entry.file_type == pi_walker::FileType::File {
-				let path = entry.absolute_path.as_ref();
-				if walk.filters.includes(path, entry.file_type, entry.size) {
-					files.push(path.to_path_buf());
-				}
-			}
-			Ok(pi_walker::WalkDecision::Include)
-		},
-		|_| Ok(pi_walker::WalkDecision::Include),
-	);
-	match result {
-		Ok(pi_walker::WalkStatus::Complete | pi_walker::WalkStatus::Stopped) => Ok(files),
-		Err(pi_walker::WalkError::Interrupted(_)) if host.is_cancelled() => {
-			Err(io::Error::other("rg: cancelled"))
-		},
-		Err(pi_walker::WalkError::Interrupted(error))
-			if error.kind() == io::ErrorKind::BrokenPipe =>
-		{
-			Err(error)
-		},
-		Err(err) => Err(io::Error::other(format!("rg: {err}"))),
+/// Whether `path` is the file backing stdout.
+async fn path_is_stdout(stdout: Option<&StdoutFile>, fs: &pi_vfs::Fs, path: &Path) -> bool {
+	match stdout {
+		Some(stdout) => stdout.is(fs, path).await,
+		None => false,
 	}
 }
 
-fn list_files<W: Write>(
+async fn list_files<W: Write>(
 	host: &mut Host,
 	cli: &Rg,
 	paths: &[OsString],
 	record: &RecordFormat,
 	out: &mut W,
 ) -> SearchOutcome {
+	let no_messages = cli.no_messages && !cli.messages;
+	let filters = build_path_filters(host, cli).await;
+	let fs = host.vfs();
+	let stdout = host.stdout_file();
 	let mut any = false;
 	let mut had_error = false;
 	let mut processed_operand = false;
@@ -1578,39 +1921,42 @@ fn list_files<W: Write>(
 		}
 		processed_operand = true;
 		let resolved = host.resolve(operand);
-		match host.fs().metadata(&resolved) {
+		match fs.metadata(&resolved).await {
 			Ok(meta) if meta.is_dir() => {
-				let mut files = match collect_filtered_files(host, cli, &resolved) {
-					Ok(files) => files,
-					Err(_) if host.is_cancelled() => {
-						had_error = true;
-						break;
-					},
-					Err(err) => {
-						let _ = writeln!(host.stderr, "{err}");
+				let filters = match &filters {
+					Ok(filters) => filters,
+					Err(error) => {
+						let _ = writeln!(host.stderr, "{error}");
 						had_error = true;
 						continue;
 					},
 				};
-				if cli.sortr.as_deref() == Some("path") {
-					files.sort_unstable_by(|a, b| b.cmp(a));
-				}
-				for path in files {
-					if host.path_is_stdout(&path) {
+				let Some(files) =
+					collect_files(host, cli, filters, &resolved, no_messages, &mut had_error).await
+				else {
+					if host.is_cancelled() {
+						break;
+					}
+					continue;
+				};
+				for path in &files.paths {
+					if path_is_stdout(stdout.as_ref(), &fs, path).await {
 						continue;
 					}
-					let display = display_path(operand.as_os_str(), &resolved, &path);
+					let display = display_path(operand.as_os_str(), &resolved, path);
 					let _ = record.write_path_record(out, Some(display.as_os_str().as_encoded_bytes()));
 					any = true;
 				}
 			},
-			Ok(meta) if meta.is_file() && !host.path_is_stdout(&resolved) => {
-				let _ = record.write_path_record(out, Some(operand.as_encoded_bytes()));
-				any = true;
+			Ok(meta) if meta.is_file() => {
+				if !path_is_stdout(stdout.as_ref(), &fs, &resolved).await {
+					let _ = record.write_path_record(out, Some(operand.as_encoded_bytes()));
+					any = true;
+				}
 			},
 			Ok(_) => {},
 			Err(err) => {
-				let _ = writeln!(host.stderr, "rg: {}: {err}", operand.to_string_lossy());
+				let _ = writeln!(host.stderr, "rg: {}: {err}", operand.display());
 				had_error = true;
 			},
 		}
@@ -1670,7 +2016,7 @@ fn write_json_summary<W: Write>(out: &mut W, stats: &Stats) -> io::Result<()> {
 	out.write_all(b"\n")
 }
 
-fn execute_search<M: Matcher, W: Write>(
+async fn execute_search<M: Matcher<Captures: Send> + Clone + Send + Sync + 'static, W: Write + Send>(
 	host: &mut Host,
 	cli: &Rg,
 	matcher: &M,
@@ -1678,25 +2024,32 @@ fn execute_search<M: Matcher, W: Write>(
 	opts: &SearchOptions,
 	out: &mut W,
 ) -> i32 {
-	let mut auto_searcher = match build_searcher(cli, opts, BinaryMode::Automatic) {
+	let auto_searcher = match build_searcher(cli, opts, BinaryMode::Automatic) {
 		Ok(searcher) => searcher,
 		Err(error) => {
 			let _ = writeln!(host.stderr, "rg: {error}");
 			return 2;
 		},
 	};
-	let mut explicit_searcher = match build_searcher(cli, opts, BinaryMode::Explicit) {
+	let explicit_builder = match build_searcher(cli, opts, BinaryMode::Explicit) {
 		Ok(searcher) => searcher,
 		Err(error) => {
 			let _ = writeln!(host.stderr, "rg: {error}");
 			return 2;
 		},
 	};
-	let recursive = paths.iter().any(|path| {
-		path.as_os_str() != OsStr::new("-")
-			&& host.fs().metadata(&host.resolve(path)).is_ok_and(|meta| meta.is_dir())
-	});
+	let fs = host.vfs();
+	let mut recursive = false;
+	for path in paths {
+		if path.as_os_str() != OsStr::new("-")
+			&& fs.metadata(&host.resolve(path)).await.is_ok_and(|meta| meta.is_dir())
+		{
+			recursive = true;
+			break;
+		}
+	}
 	let show_names = show_names_for(paths, recursive, cli, opts);
+	let mut filters = None;
 	let mut stats = Stats::new();
 	let mut any_match = false;
 	let mut had_error = false;
@@ -1712,15 +2065,13 @@ fn execute_search<M: Matcher, W: Write>(
 		processed_operand = true;
 		if operand.as_os_str() == OsStr::new("-") {
 			let display = show_names.then_some(b"<stdin>".as_slice());
-			match process_reader(
-				matcher,
-				&mut explicit_searcher,
-				&mut host.stdin,
-				display,
-				opts,
-				&mut stats,
-				out,
-			) {
+			let searched =
+				search_stdin(host, matcher, &explicit_builder, display, opts, &mut stats, out).await;
+			let searched = match deliver(host, out).await {
+				Ok(()) => searched,
+				Err(error) => searched.and(Err(error)),
+			};
+			match searched {
 				Ok(matched) => any_match |= matched,
 				Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
 					return crate::host::SIGPIPE_EXIT_CODE;
@@ -1728,7 +2079,7 @@ fn execute_search<M: Matcher, W: Write>(
 				Err(error) => {
 					had_error = true;
 					if !opts.no_messages {
-						let _ = writeln!(host.stderr, "rg: <stdin>: {error}");
+						let _ = writeln!(host.stderr, "rg: <stdin>: {}", describe_search_error(&error));
 					}
 				},
 			}
@@ -1739,20 +2090,38 @@ fn execute_search<M: Matcher, W: Write>(
 			continue;
 		}
 		let resolved = host.resolve(operand);
-		match host.fs().metadata(&resolved) {
+		match fs.metadata(&resolved).await {
 			Ok(meta) if meta.is_dir() => {
-				match search_dir(
-					host,
-					cli,
-					matcher,
-					&mut auto_searcher,
-					operand.as_os_str(),
-					&resolved,
-					show_names,
-					opts,
-					&mut stats,
-					out,
-				) {
+				let built = match filters.take() {
+					Some(built) => built,
+					None => build_path_filters(host, cli).await,
+				};
+				let searched = match &built {
+					Ok(filters) => {
+						search_dir(
+							host,
+							cli,
+							filters,
+							matcher,
+							&auto_searcher,
+							operand.as_os_str(),
+							&resolved,
+							show_names,
+							opts,
+							&mut stats,
+							out,
+						)
+						.await
+					},
+					Err(error) => {
+						if !opts.no_messages {
+							let _ = writeln!(host.stderr, "{error}");
+						}
+						Ok(SearchOutcome { any_match: false, had_error: true })
+					},
+				};
+				filters = Some(built);
+				match searched {
 					Ok(outcome) => {
 						any_match |= outcome.any_match;
 						had_error |= outcome.had_error;
@@ -1769,19 +2138,37 @@ fn execute_search<M: Matcher, W: Write>(
 				}
 			},
 			Ok(meta) if meta.is_file() => {
-				let display =
-					(show_names || opts.json).then_some(operand.as_os_str().as_encoded_bytes());
-				match process_file(
+				let halt = HaltOnDrop::new();
+				let shared = dir_search(
 					host,
 					cli,
 					matcher,
-					&mut explicit_searcher,
+					&explicit_builder,
+					operand.as_os_str(),
 					&resolved,
-					display,
+					show_names,
 					opts,
-					&mut stats,
-					out,
-				) {
+					&halt,
+					true,
+				);
+				// Its own task, so dropping this body (cancellation) raises the
+				// halt flag the search checks between reads.
+				let path = resolved.clone();
+				let found = match tokio::spawn(async move {
+					let mut worker = shared.worker();
+					shared.search(&mut worker, &path).await
+				})
+				.await
+				{
+					Ok(found) => found,
+					Err(join) => std::panic::resume_unwind(join.into_panic()),
+				};
+				stats += &found.stats;
+				let written = out.write_all(&found.out);
+				let _ = host.stderr.write_all(&found.err);
+				let delivered = deliver(host, out).await;
+				let searched = written.and(delivered).and(found.outcome);
+				match searched {
 					Ok(outcome) => {
 						any_match |= outcome.any_match;
 						had_error |= outcome.had_error;
@@ -1802,7 +2189,7 @@ fn execute_search<M: Matcher, W: Write>(
 				had_error = true;
 				if !opts.no_messages {
 					let _ =
-						writeln!(host.stderr, "rg: {}: {error}", operand.to_string_lossy());
+						writeln!(host.stderr, "rg: {}: {error}", operand.display());
 				}
 			},
 		}
@@ -1824,12 +2211,12 @@ fn execute_search<M: Matcher, W: Write>(
 	exit_status(opts.quiet, any_match, had_error)
 }
 
-impl Utility for Rg {
+impl AsyncUtility for Rg {
 	const NAME: &'static str = "rg";
 	const USAGE_ERROR: u8 = 2;
 	const CHECKS_STDOUT_PATH: bool = true;
 
-	fn run(self, host: &mut Host) -> i32 {
+	async fn run(self, host: &mut Host) -> i32 {
 		let cli = self;
 	let mut opts = search_options(&cli);
 	match parse_path_separator(cli.path_separator.as_deref()) {
@@ -1860,7 +2247,7 @@ impl Utility for Rg {
 	} else {
 		host.stdout_writer()
 	};
-	let (patterns, mut paths) = match resolve_patterns(host, &cli) {
+	let (patterns, mut paths) = match resolve_patterns(host, &cli).await {
 		Ok(resolved) => resolved,
 		Err(error) => {
 			let _ = writeln!(host.stderr, "{error}");
@@ -1883,7 +2270,7 @@ impl Utility for Rg {
 	);
 	opts.line_number = effective_line_number(&cli);
 	if cli.files {
-		let outcome = list_files(host, &cli, &paths, &opts.record, &mut out);
+		let outcome = list_files(host, &cli, &paths, &opts.record, &mut out).await;
 		let _ = out.flush();
 		return exit_status(false, outcome.any_match, outcome.had_error);
 	}
@@ -1898,8 +2285,8 @@ impl Utility for Rg {
 		},
 	};
 	match &matcher {
-		CompiledMatcher::Rust(matcher) => execute_search(host, &cli, matcher, &paths, &opts, &mut out),
-		CompiledMatcher::Pcre(matcher) => execute_search(host, &cli, matcher, &paths, &opts, &mut out),
+		Engine::Rust(matcher) => execute_search(host, &cli, matcher, &paths, &opts, &mut out).await,
+		Engine::Pcre(matcher) => execute_search(host, &cli, matcher, &paths, &opts, &mut out).await,
 	}
 }
 }
@@ -1907,118 +2294,171 @@ impl Utility for Rg {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::host::{Host, run_util};
+	use crate::host::run_async_util;
+	#[cfg(unix)]
+	use crate::host::tree_with_sparse_file;
 
-	fn run(args: &[&str], stdin: &str) -> (i32, String, String) {
-		let (code, capture) = run_util::<Rg>(args, stdin, "/");
+	async fn run(args: &[&str], stdin: &str) -> (i32, String, String) {
+		let (code, capture) = run_async_util::<Rg>(args, stdin, "/").await;
 		(code, capture.out(), capture.err())
 	}
 
-	#[test]
-	fn max_count_stops_after_one_match() {
-		let (code, out, err) = run(&["-m1", "hit", "-"], "hit\nmiss\nhit\n");
+	#[tokio::test(flavor = "multi_thread")]
+	async fn max_count_stops_after_one_match() {
+		let (code, out, err) = run(&["-m1", "hit", "-"], "hit\nmiss\nhit\n").await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "hit\n");
 	}
 
-	#[test]
-	fn crlf_anchors_end_of_line_before_carriage_return() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn crlf_anchors_end_of_line_before_carriage_return() {
 		// Defends: `--crlf` must configure the matcher and searcher with the
 		// same terminator; a mismatch fails every search with a config error.
-		let (code, out, err) = run(&["--crlf", "-c", "x$", "-"], "ax\r\nbx\nc\r\n");
+		let (code, out, err) = run(&["--crlf", "-c", "x$", "-"], "ax\r\nbx\nc\r\n").await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "2\n");
 	}
 
-	#[test]
-	fn pcre2_supports_lookbehind() {
-		let (code, out, err) = run(&["--pcre2", "(?<=foo)bar", "-"], "foobar\nbar\n");
+	#[tokio::test(flavor = "multi_thread")]
+	async fn count_skips_files_without_matches_unless_include_zero() {
+		let tree = tempfile::tempdir().unwrap();
+		std::fs::write(tree.path().join("a"), "hit\nhit\n").unwrap();
+		std::fs::write(tree.path().join("b"), "miss\n").unwrap();
+		let count = async |args: &[&str]| {
+			let (code, capture) = run_async_util::<Rg>(args, "", tree.path()).await;
+			(code, capture.out())
+		};
+
+		assert_eq!(count(&["-c", "hit", "a", "b"]).await, (0, "a:2\n".to_owned()));
+		assert_eq!(count(&["--count-matches", "hit", "a", "b"]).await, (0, "a:2\n".to_owned()));
+		assert_eq!(count(&["-c", "hit", "b"]).await, (1, String::new()));
+		assert_eq!(count(&["-c", "--include-zero", "hit", "a", "b"]).await, (0, "a:2\nb:0\n".to_owned()));
+		assert_eq!(count(&["-c", "--include-zero", "--no-include-zero", "hit", "a", "b"]).await, (0, "a:2\n".to_owned()));
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn pcre2_supports_lookbehind() {
+		let (code, out, err) = run(&["--pcre2", "(?<=foo)bar", "-"], "foobar\nbar\n").await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "foobar\n");
 	}
 
-	#[test]
-	fn replacement_expands_named_capture() {
-		let (code, out, err) = run(&["-o", "--replace=${word}-x", "(?P<word>foo)", "-"], "foo bar\n");
+	#[tokio::test(flavor = "multi_thread")]
+	async fn replacement_expands_named_capture() {
+		let (code, out, err) = run(&["-o", "--replace=${word}-x", "(?P<word>foo)", "-"], "foo bar\n").await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "foo-x\n");
 	}
 
-	#[test]
-	fn json_emits_search_events_and_summary() {
-		let (code, out, err) = run(&["--json", "hit", "-"], "miss\nhit\n");
+	#[tokio::test(flavor = "multi_thread")]
+	async fn json_emits_search_events_and_summary() {
+		let (code, out, err) = run(&["--json", "hit", "-"], "miss\nhit\n").await;
 		assert_eq!(code, 0, "{err}");
 		let events: Vec<serde_json::Value> = out.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
 		let kinds: Vec<_> = events.iter().map(|event| event["type"].as_str().unwrap()).collect();
 		assert_eq!(kinds, ["begin", "match", "end", "summary"]);
 	}
 
-	#[test]
-	fn ignore_file_is_resolved_against_shell_cwd() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn ignore_file_is_resolved_against_shell_cwd() {
 		let tree = tempfile::tempdir().unwrap();
 		std::fs::write(tree.path().join("keep.txt"), "hit\n").unwrap();
 		std::fs::write(tree.path().join("skip.txt"), "hit\n").unwrap();
 		std::fs::write(tree.path().join("rules.ignore"), "skip.txt\n").unwrap();
-		let (code, capture) = run_util::<Rg>(&["--ignore-file=rules.ignore", "hit", "."], "", tree.path());
+		let (code, capture) = run_async_util::<Rg>(&["--ignore-file=rules.ignore", "hit", "."], "", tree.path()).await;
 		assert_eq!(code, 0, "{}", capture.err());
 		assert!(capture.out().contains("keep.txt:hit\n"));
 		assert!(!capture.out().contains("skip.txt"));
 	}
 
-	#[test]
-	fn files_mode_preserves_relative_paths() {
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn follows_a_symlinked_root_operand_but_not_nested_links() {
+		let tree = tempfile::tempdir().unwrap();
+		std::fs::create_dir_all(tree.path().join("real/sub")).unwrap();
+		std::fs::write(tree.path().join("real/a.txt"), "hit\n").unwrap();
+		std::fs::write(tree.path().join("real/sub/b.txt"), "hit\n").unwrap();
+		std::os::unix::fs::symlink("real", tree.path().join("link")).unwrap();
+		std::fs::create_dir(tree.path().join("parent")).unwrap();
+		std::os::unix::fs::symlink("../real", tree.path().join("parent/inner")).unwrap();
+		let files = async |args: &[&str]| {
+			let (code, capture) = run_async_util::<Rg>(args, "", tree.path()).await;
+			let mut lines: Vec<String> = capture.out().lines().map(str::to_owned).collect();
+			lines.sort();
+			(code, lines)
+		};
+
+		let linked = (0, vec!["link/a.txt".to_owned(), "link/sub/b.txt".to_owned()]);
+		assert_eq!(files(&["-l", "hit", "link"]).await, linked);
+		assert_eq!(files(&["-l", "--no-follow", "hit", "link"]).await, linked);
+		assert_eq!(files(&["--files", "link"]).await, linked);
+		// Links met during the walk stay unfollowed unless -L asks for them.
+		assert_eq!(files(&["-l", "hit", "parent"]).await, (1, Vec::new()));
+		assert_eq!(
+			files(&["-l", "-L", "hit", "parent"]).await,
+			(0, vec!["parent/inner/a.txt".to_owned(), "parent/inner/sub/b.txt".to_owned()])
+		);
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn recursive_search_prints_files_in_path_order() {
+		let tree = tempfile::tempdir().unwrap();
+		for file in ["z.txt", "b/1.txt", "a/c/2.txt", "a/b/3.txt", "a/0.txt", "m.txt"] {
+			let path = tree.path().join(file);
+			std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+			std::fs::write(path, "hit\n").unwrap();
+		}
+		let sorted = "a/0.txt\na/b/3.txt\na/c/2.txt\nb/1.txt\nm.txt\nz.txt\n";
+		let (code, capture) = run_async_util::<Rg>(&["-l", "hit", "."], "", tree.path()).await;
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), sorted);
+		let (code, capture) = run_async_util::<Rg>(&["--sortr", "path", "-l", "hit", "."], "", tree.path()).await;
+		assert_eq!(code, 0, "{}", capture.err());
+		let reversed: String = sorted.lines().rev().map(|line| format!("{line}\n")).collect();
+		assert_eq!(capture.out(), reversed);
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn files_mode_preserves_relative_paths() {
 		let tree = tempfile::tempdir().unwrap();
 		std::fs::create_dir(tree.path().join("sub")).unwrap();
 		std::fs::write(tree.path().join("sub/file.txt"), "x\n").unwrap();
-		let (code, capture) = run_util::<Rg>(&["--files", "sub"], "", tree.path());
+		let (code, capture) = run_async_util::<Rg>(&["--files", "sub"], "", tree.path()).await;
 		assert_eq!(code, 0, "{}", capture.err());
 		assert_eq!(capture.out(), "sub/file.txt\n");
 	}
 
 
-	#[test]
-	fn recursive_walk_observes_cancellation() {
-		let tree = tempfile::tempdir().unwrap();
-		std::fs::create_dir(tree.path().join("root")).unwrap();
-		std::fs::write(tree.path().join("root/file"), "hit\n").unwrap();
-		let parsed = Rg::try_parse_from(["rg", "hit", "root"]).unwrap();
-		let (mut host, capture) = Host::for_test("rg", Vec::new(), tree.path());
-		host.cancel_for_test();
-		assert_eq!(parsed.run(&mut host), 2);
-		assert!(capture.out().is_empty());
-		assert!(capture.err().is_empty());
-	}
-
-	#[test]
-	fn auto_engine_and_byte_offsets_match_ripgrep() {
-		let (code, out, err) = run(&["--engine=auto", "(?<=foo)bar", "-"], "foobar\nbar\n");
+	#[tokio::test(flavor = "multi_thread")]
+	async fn auto_engine_and_byte_offsets_match_ripgrep() {
+		let (code, out, err) = run(&["--engine=auto", "(?<=foo)bar", "-"], "foobar\nbar\n").await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "foobar\n");
-		let (code, out, err) = run(&["--byte-offset", "hit", "-"], "zero\nhit\n");
+		let (code, out, err) = run(&["--byte-offset", "hit", "-"], "zero\nhit\n").await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "5:hit\n");
 	}
 
-	#[test]
-	fn encoding_and_case_insensitive_globs_apply_to_files() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn encoding_and_case_insensitive_globs_apply_to_files() {
 		let tree = tempfile::tempdir().unwrap();
 		std::fs::write(tree.path().join("utf16.txt"), b"h\0i\0t\0\n\0").unwrap();
 		let (code, capture) =
-			run_util::<Rg>(&["--encoding=utf-16le", "hit", "utf16.txt"], "", tree.path());
+			run_async_util::<Rg>(&["--encoding=utf-16le", "hit", "utf16.txt"], "", tree.path()).await;
 		assert_eq!(code, 0, "{}", capture.err());
 		assert_eq!(capture.out(), "hit\n");
 		std::fs::write(tree.path().join("UPPER.TXT"), "hit\n").unwrap();
-		let (code, capture) = run_util::<Rg>(
+		let (code, capture) = run_async_util::<Rg>(
 			&["--glob-case-insensitive", "--glob=*.txt", "hit", "."],
 			"",
 			tree.path(),
-		);
+		).await;
 		assert_eq!(code, 0, "{}", capture.err());
 		assert!(capture.out().contains("UPPER.TXT:hit\n"));
 	}
 
-	#[test]
-	fn search_zip_decompresses_gzip() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn search_zip_decompresses_gzip() {
 		let tree = tempfile::tempdir().unwrap();
 		let gzip = [
 			31, 139, 8, 0, 0, 0, 0, 0, 2, 255, 203, 205, 44, 46, 230, 202, 200, 44, 225, 2,
@@ -2026,103 +2466,159 @@ mod tests {
 		];
 		std::fs::write(tree.path().join("sample.gz"), gzip).unwrap();
 		let (code, capture) =
-			run_util::<Rg>(&["--search-zip", "hit", "sample.gz"], "", tree.path());
+			run_async_util::<Rg>(&["--search-zip", "hit", "sample.gz"], "", tree.path()).await;
 		assert_eq!(code, 0, "{}", capture.err());
 		assert_eq!(capture.out(), "hit\n");
 	}
 
-	#[test]
-	fn line_numbers_stay_off_when_piped_unless_requested() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn line_numbers_stay_off_when_piped_unless_requested() {
 		// Defends: the builtin's output is always consumed piped, where real
 		// rg omits line numbers; `1:` prefixes sprouting by default break
 		// text consumers. `-n` opts in, `-N` beats `-n`.
 		let tree = tempfile::tempdir().unwrap();
 		std::fs::write(tree.path().join("a.txt"), "miss\nhit\n").unwrap();
-		let (code, capture) = run_util::<Rg>(&["hit", "."], "", tree.path());
+		let (code, capture) = run_async_util::<Rg>(&["hit", "."], "", tree.path()).await;
 		assert_eq!(code, 0, "{}", capture.err());
 		assert_eq!(capture.out(), "a.txt:hit\n");
-		let (code, capture) = run_util::<Rg>(&["-n", "hit", "."], "", tree.path());
+		let (code, capture) = run_async_util::<Rg>(&["-n", "hit", "."], "", tree.path()).await;
 		assert_eq!(code, 0, "{}", capture.err());
 		assert_eq!(capture.out(), "a.txt:2:hit\n");
-		let (code, capture) = run_util::<Rg>(&["-n", "-N", "hit", "."], "", tree.path());
+		let (code, capture) = run_async_util::<Rg>(&["-n", "-N", "hit", "."], "", tree.path()).await;
 		assert_eq!(code, 0, "{}", capture.err());
 		assert_eq!(capture.out(), "a.txt:hit\n");
 	}
 
-	#[test]
-	fn null_terminates_paths_without_trailing_newline() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn null_terminates_paths_without_trailing_newline() {
 		// Defends: `rg -l0 | xargs -0` must see `path\0`, not `path\0\n`.
 		let tree = tempfile::tempdir().unwrap();
 		std::fs::write(tree.path().join("a.txt"), "hit\n").unwrap();
-		let (code, capture) = run_util::<Rg>(&["-l0", "hit", "."], "", tree.path());
+		let (code, capture) = run_async_util::<Rg>(&["-l0", "hit", "."], "", tree.path()).await;
 		assert_eq!(code, 0, "{}", capture.err());
 		assert_eq!(capture.out(), "a.txt\0");
 		// Match lines: `path\0text` with no `:` after the NUL; with -n the
 		// line number follows the NUL (`path\0N:text`).
-		let (code, capture) = run_util::<Rg>(&["-0", "hit", "."], "", tree.path());
+		let (code, capture) = run_async_util::<Rg>(&["-0", "hit", "."], "", tree.path()).await;
 		assert_eq!(code, 0, "{}", capture.err());
 		assert_eq!(capture.out(), "a.txt\0hit\n");
-		let (code, capture) = run_util::<Rg>(&["-n0", "hit", "."], "", tree.path());
+		let (code, capture) = run_async_util::<Rg>(&["-n0", "hit", "."], "", tree.path()).await;
 		assert_eq!(code, 0, "{}", capture.err());
 		assert_eq!(capture.out(), "a.txt\01:hit\n");
 		// --files-without-match also emits bare `path\0`. (Exit code for this
 		// mode is a pre-existing divergence outside this test's contract.)
 		let (_code, capture) =
-			run_util::<Rg>(&["--files-without-match", "-0", "nope", "."], "", tree.path());
+			run_async_util::<Rg>(&["--files-without-match", "-0", "nope", "."], "", tree.path()).await;
 		assert_eq!(capture.out(), "a.txt\0");
 	}
 
-	#[test]
-	fn last_case_flag_wins() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn last_case_flag_wins() {
 		// Defends: real rg resolves -s/-i/-S by last occurrence, not by a
 		// fixed precedence.
-		let (code, out, err) = run(&["-s", "-i", "HIT", "-"], "hit\n");
+		let (code, out, err) = run(&["-s", "-i", "HIT", "-"], "hit\n").await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "hit\n");
-		let (code, out, _) = run(&["-i", "-s", "HIT", "-"], "hit\n");
+		let (code, out, _) = run(&["-i", "-s", "HIT", "-"], "hit\n").await;
 		assert_eq!(code, 1);
 		assert_eq!(out, "");
 		// -i then -S: smart case wins, and an uppercase pattern stays sensitive.
-		let (code, _, _) = run(&["-i", "-S", "HIT", "-"], "hit\n");
+		let (code, _, _) = run(&["-i", "-S", "HIT", "-"], "hit\n").await;
 		assert_eq!(code, 1);
 	}
 
-	#[test]
-	fn compat_flags_are_accepted() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn compat_flags_are_accepted() {
 		// Defends: `--no-config`/`-j`/`--threads`/`--no-column` must not be
 		// clap parse errors.
-		let (code, out, err) = run(&["--no-config", "-j2", "-S", "hit", "-"], "hit\n");
+		let (code, out, err) = run(&["--no-config", "-j2", "-S", "hit", "-"], "hit\n").await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "hit\n");
 		let (code, out, err) =
-			run(&["--threads", "4", "-n", "--column", "--no-column", "hit", "-"], "hit\n");
+			run(&["--threads", "4", "-n", "--column", "--no-column", "hit", "-"], "hit\n").await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "1:hit\n");
 	}
 
-	#[test]
-	fn path_separator_replaces_slash() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn path_separator_replaces_slash() {
 		// Defends: --path-separator must rewrite `/` in printed paths and
 		// reject multi-byte separators like real rg.
 		let tree = tempfile::tempdir().unwrap();
 		std::fs::create_dir(tree.path().join("sub")).unwrap();
 		std::fs::write(tree.path().join("sub/a.txt"), "hit\n").unwrap();
 		let (code, capture) =
-			run_util::<Rg>(&["--path-separator", "|", "hit", "."], "", tree.path());
+			run_async_util::<Rg>(&["--path-separator", "|", "hit", "."], "", tree.path()).await;
 		assert_eq!(code, 0, "{}", capture.err());
 		assert_eq!(capture.out(), "sub|a.txt:hit\n");
 		let (code, capture) =
-			run_util::<Rg>(&["--path-separator", "::", "hit", "."], "", tree.path());
+			run_async_util::<Rg>(&["--path-separator", "::", "hit", "."], "", tree.path()).await;
 		assert_eq!(code, 2);
 		assert!(capture.err().contains("exactly one byte"));
+		// An explicit operand is printed as spelled (`-H`: a lone file operand
+		// prints no path otherwise); on Windows its native `\` separators are
+		// rewritten too, so displayed paths stay uniform.
+		let (code, capture) = run_async_util::<Rg>(
+			&["--path-separator", "|", "-H", "hit", if cfg!(windows) { "sub\\a.txt" } else { "sub/a.txt" }],
+			"",
+			tree.path(),
+		).await;
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "sub|a.txt:hit\n");
+	}
+
+	/// `rg -a` searches a sparse file as one endless line of NUL bytes; with no
+	/// bound on the line buffer the host process grew until the kernel killed
+	/// it. Now that file is a per-file error and the other files are searched.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn text_search_of_a_line_longer_than_the_limit_is_a_file_error() {
+		let tree = tree_with_sparse_file();
+
+		let (code, capture) = run_async_util::<Rg>(&["-a", "needle", "."], "", tree.path()).await;
+
+		assert_eq!(code, 2, "{}", capture.err());
+		assert!(capture.out().lines().any(|line| line.ends_with("small:needle")), "{}", capture.out());
+		let err = capture.err();
+		assert!(err.contains("big: line longer than 256 MiB, not searched"), "{err}");
+	}
+
+	/// A multi-line search (`-U`) that can match across lines buffers the whole
+	/// file, which on a sparse file grew the host without bound.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn multiline_text_search_of_a_file_larger_than_the_limit_is_a_file_error() {
+		let tree = tree_with_sparse_file();
+
+		let (code, capture) = run_async_util::<Rg>(&["-U", "-a", "needle\\n", "."], "", tree.path()).await;
+
+		assert_eq!(code, 2, "{}", capture.err());
+		assert!(capture.out().lines().any(|line| line.ends_with("small:needle")), "{}", capture.out());
+		let err = capture.err();
+		assert!(err.contains("big: file larger than 256 MiB, not searched"), "{err}");
+	}
+
+	/// `-f` used to read the whole pattern file into memory; on a sparse file
+	/// that killed the host. Now an over-size pattern file is refused.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn pattern_file_larger_than_the_limit_is_refused() {
+		let tree = tree_with_sparse_file();
+
+		let (code, capture) = run_async_util::<Rg>(&["-f", "big", "small"], "", tree.path()).await;
+
+		assert_eq!(code, 2);
+		assert_eq!(capture.out(), "");
+		let err = capture.err();
+		assert!(err.contains("rg: big: pattern file larger than 256 MiB"), "{err}");
 	}
 }
 
 use brush_core::{ShellExtensions, builtins::Registration};
 
-use crate::host::util;
+use crate::host::async_util;
 
 /// Creates the ripgrep-compatible `rg` builtin registration.
 pub(crate) fn rg_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Rg, SE>()
+	async_util::<Rg, SE>()
 }

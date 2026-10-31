@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { $env, APP_NAME } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { ServiceTierOpenAISettingValue } from "../config/service-tier";
+import type { ApprovalMode } from "../tools/approval";
 import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import {
@@ -43,6 +44,8 @@ export interface Args {
 	planYolo?: boolean;
 	planYoloInto?: string;
 	maxTime?: number;
+	warnCost?: number;
+	maxCost?: number;
 	apiKey?: string;
 	systemPrompt?: string;
 	systemPromptTemplate?: string;
@@ -51,9 +54,16 @@ export interface Args {
 	serviceTier?: ServiceTierOpenAISettingValue;
 	hideThinking?: boolean;
 	advisor?: boolean;
+	/** Print mode: wake the session with background-job results before exiting (`async.printWake`). */
+	waitAsync?: boolean;
 	externalThinking?: boolean;
 	continue?: boolean;
 	resume?: string | true;
+	/**
+	 * `--restore`: resume the session {@link resume} names, then go on with what its last
+	 * process left unfinished (the turn it was in, the subagents it was running).
+	 */
+	restore?: boolean;
 	fromClaude?: boolean;
 	fromCodex?: boolean;
 	help?: boolean;
@@ -82,11 +92,12 @@ export interface Args {
 	noSkills?: boolean;
 	skills?: string[];
 	noRules?: boolean;
+	noContextFiles?: boolean;
 	noTitle?: boolean;
 	/** RPC modes only: run extensions without a UI; `rpc-ui` tool UI remains enabled. */
 	noUi?: boolean;
 	autoApprove?: boolean;
-	approvalMode?: "always-ask" | "write" | "yolo";
+	approvalMode?: ApprovalMode;
 	messages: string[];
 	fileArgs: string[];
 	/** Extension-registered flags this parse recognized — name to value. */
@@ -128,6 +139,34 @@ export function validateGoalLaunch(args: Args, interactive: boolean): void {
 	}
 	if (args.continue || args.resume || args.fork || args.fromClaude || args.fromCodex) {
 		throw new CliUsageError("--goal requires a fresh session (no resume, continue, fork, or import).");
+	}
+}
+
+/**
+ * Reject a `--restore` launch that cannot go on with an interrupted session: it
+ * needs the interactive TUI and exactly the session it names. Judged on the
+ * startup parse, before session resolution, like {@link validateGoalLaunch}.
+ */
+export function validateRestoreLaunch(args: Args, interactive: boolean): void {
+	if (!args.restore) return;
+	if (!interactive) {
+		throw new CliUsageError("--restore requires an interactive terminal (not --print or --mode).");
+	}
+	if (args.continue || args.fork || args.fromClaude || args.fromCodex || args.noSession || args.goal !== undefined) {
+		throw new CliUsageError(
+			"--restore resumes one existing session (no continue, fork, import, goal, or --no-session).",
+		);
+	}
+}
+
+/**
+ * Reject a `--restore` launch that also carries a prompt: the restored session
+ * goes on with its interrupted turn instead. Runs on the extension-aware
+ * reparse, where positionals are settled.
+ */
+export function validateRestorePrompt(args: Args): void {
+	if (args.restore && (args.messages.length > 0 || args.fileArgs.length > 0)) {
+		throw new CliUsageError("--restore takes no prompt: the session goes on with its interrupted turn.");
 	}
 }
 
@@ -326,6 +365,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.hideThinking = true;
 		} else if (arg === "--advisor") {
 			result.advisor = true;
+		} else if (arg === "--wait-async") {
+			result.waitAsync = true;
 		} else if (arg === "--external-thinking") {
 			result.externalThinking = true;
 		} else if (arg === "--prewalk") {
@@ -344,6 +385,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noSkills = true;
 		} else if (arg === "--no-rules") {
 			result.noRules = true;
+		} else if (arg === "--no-context-files") {
+			result.noContextFiles = true;
 		} else if (arg === "--no-title") {
 			result.noTitle = true;
 		} else if (arg === "--no-ui") {

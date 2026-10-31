@@ -223,6 +223,11 @@ describe("SQLite tool support", () => {
 			where: undefined,
 		});
 		expect(parseSqliteSelector("", "q=SELECT+1")).toEqual({ kind: "raw", sql: "SELECT 1" });
+		expect(parseSqliteSelector("", "q=SELECT+1&limit=5&offset=10")).toEqual({
+			kind: "raw",
+			sql: "SELECT 1",
+			page: { limit: 5, offset: 10 },
+		});
 	});
 
 	it("lists tables for a .sqlite database and excludes sqlite internal tables", async () => {
@@ -277,6 +282,37 @@ describe("SQLite tool support", () => {
 		expect(text).toContain("Alice");
 	});
 
+	it.each(["", "?limit=2", "?order=total:desc&limit=2"])(
+		"reads generated columns through the table selector %s",
+		async selector => {
+			const dbPath = path.join(tmpDir, `generated-${encodeURIComponent(selector)}.sqlite`);
+			const db = new Database(":memory:");
+			try {
+				db.run(`
+					CREATE TABLE products (
+						id INTEGER PRIMARY KEY,
+						price INTEGER,
+						quantity INTEGER,
+						total INTEGER GENERATED ALWAYS AS (price * quantity) STORED,
+						label TEXT GENERATED ALWAYS AS ('total-' || total) VIRTUAL
+					);
+					INSERT INTO products (id, price, quantity) VALUES (1, 5, 2), (2, 3, 5);
+				`);
+				await Bun.write(dbPath, db.serialize());
+			} finally {
+				db.close();
+			}
+
+			const result = await readTool.execute("sqlite-generated", { path: `${dbPath}:products${selector}` });
+			const text = getText(result);
+			expect(text).toMatch(/\|\s+10\s+\|\s+total-10\s+\|/);
+			expect(text).toMatch(/\|\s+15\s+\|\s+total-15\s+\|/);
+			if (selector.includes("order=")) {
+				expect(text.indexOf("total-15")).toBeLessThan(text.indexOf("total-10"));
+			}
+		},
+	);
+
 	it("returns a row by integer primary key", async () => {
 		const result = await readTool.execute("sqlite-row-int", { path: `${sqlitePath}:users:2` });
 		const text = getText(result);
@@ -324,6 +360,26 @@ describe("SQLite tool support", () => {
 		expect(text).toContain("Frank");
 		expect(text).toContain("Eve");
 		expect(text).not.toContain("Bob");
+	});
+
+	it.each([
+		["where=status='active'", ["Eve", "Frank"]],
+		["order=created:desc", ["Dave", "Carol"]],
+		["where=status='active'&order=created:desc", ["Carol", "Alice"]],
+		[
+			`where=${encodeURIComponent("status='active' AND 'a&b+c%20'='a&b+c%20'")}&order=created:desc`,
+			["Carol", "Alice"],
+		],
+	] as const)("follows SQLite continuation with %s", async (query, expectedNames) => {
+		const first = await readTool.execute("sqlite-filtered-page", {
+			path: `${sqlitePath}:users?${query}&limit=2`,
+		});
+		const suffix = getText(first).match(/append (:[^\n]+?) to the database path to continue/)?.[1];
+		expect(suffix).toBeDefined();
+
+		const next = await readTool.execute("sqlite-filtered-next", { path: `${sqlitePath}${suffix}` });
+		const names = getText(next).match(/\b(?:Alice|Bob|Carol|Dave|Eve|Frank)\b/g);
+		expect(names).toEqual<readonly string[]>(expectedNames);
 	});
 
 	it("rejects where= clauses that try to bypass pagination", () => {
@@ -377,6 +433,60 @@ describe("SQLite tool support", () => {
 		expect(text).toContain("val_1000_end");
 		expect(text).not.toContain("val_1001_end");
 		expect(text).toContain("Output capped at 1000 rows");
+	});
+
+	it("pages raw ?q= rows with limit and offset and names the next page", async () => {
+		const first = getText(
+			await readTool.execute("sqlite-raw-page", {
+				path: `${sqlitePath}?q=SELECT name FROM users ORDER BY id&limit=2&offset=1`,
+			}),
+		);
+		expect(first).toContain("Bob");
+		expect(first).toContain("Carol");
+		expect(first).not.toContain("Alice");
+		expect(first).not.toContain("Dave");
+		const next = /append \?(\S+) to the database path/.exec(first)?.[1];
+		expect(next).toBeDefined();
+
+		const second = getText(await readTool.execute("sqlite-raw-next", { path: `${sqlitePath}?${next}` }));
+		expect(second).toContain("Dave");
+		expect(second).toContain("Eve");
+		expect(second).not.toContain("Carol");
+		expect(second).not.toContain("Frank");
+	});
+
+	it("names the fix when raw ?q= queries carry a table selector or table-only parameters", () => {
+		expect(() => parseSqliteSelector("users", "q=SELECT+1")).toThrow("drop ':users' from the path");
+		expect(() => parseSqliteSelector("", "q=SELECT+1&where=id=1")).toThrow("put 'where' into the SQL");
+	});
+
+	it("pages raw ?q= statements of every shape", async () => {
+		const pageOf = async (sql: string) =>
+			getText(
+				await readTool.execute("sqlite-raw-shape", {
+					path: `${sqlitePath}?q=${encodeURIComponent(sql)}&limit=1&offset=1`,
+				}),
+			);
+		// Inner LIMIT, a CTE, a trailing semicolon and a trailing line comment all page as subqueries.
+		expect(await pageOf("SELECT name FROM users ORDER BY id LIMIT 3")).toContain("Bob");
+		expect(await pageOf("WITH u AS (SELECT name, id FROM users) SELECT name FROM u ORDER BY id;")).toContain("Bob");
+		expect(await pageOf("SELECT name FROM users ORDER BY id -- by id")).toContain("Bob");
+		// PRAGMA cannot nest as a subquery and pages by skipping rows instead: row 2 is `name TEXT`, not `id INTEGER`.
+		const pragma = await pageOf("PRAGMA table_info(users)");
+		expect(pragma).toContain("TEXT");
+		expect(pragma).not.toContain("INTEGER");
+		expect(pragma).toContain("offset=2");
+	});
+
+	it("pages a query with repeated column names exactly as it reads unpaged", async () => {
+		const read = async (query: string) =>
+			getText(await readTool.execute("sqlite-raw-dup", { path: `${sqlitePath}?${query}` })).split("\n[")[0];
+		const sql = encodeURIComponent("SELECT id AS x, id + 10 AS x FROM users ORDER BY id");
+		const unpagedRow = await read(
+			`q=${encodeURIComponent("SELECT id AS x, id + 10 AS x FROM users ORDER BY id LIMIT 1 OFFSET 1")}`,
+		);
+
+		expect(await read(`q=${sql}&limit=1&offset=1`)).toBe(unpagedRow);
 	});
 
 	it("rejects table names that do not exist instead of interpolating them", async () => {
@@ -505,6 +615,58 @@ describe("SQLite tool support", () => {
 				content: "{ bogus: 1 }",
 			}),
 		).rejects.toThrow(/no column named 'bogus'/i);
+	});
+
+	it("enforces the schema's declared foreign keys on SQLite writes", async () => {
+		const dbPath = path.join(tmpDir, "write-foreign-keys.sqlite");
+		const setup = new Database(dbPath);
+		try {
+			setup.run(`
+				PRAGMA foreign_keys = ON;
+				CREATE TABLE parents (id INTEGER PRIMARY KEY);
+				CREATE TABLE children (
+					id INTEGER PRIMARY KEY,
+					parent_id INTEGER REFERENCES parents(id) ON DELETE CASCADE
+				);
+				CREATE TABLE pins (
+					id INTEGER PRIMARY KEY,
+					parent_id INTEGER REFERENCES parents(id) ON DELETE RESTRICT
+				);
+				INSERT INTO parents VALUES (1), (2);
+				INSERT INTO children VALUES (1, 1), (2, 2);
+				INSERT INTO pins VALUES (1, 2);
+			`);
+		} finally {
+			setup.close();
+		}
+
+		await expect(
+			writeTool.execute("sqlite-write-fk-orphan", {
+				path: `${dbPath}:children`,
+				content: "{ id: 3, parent_id: 999 }",
+			}),
+		).rejects.toThrow(/FOREIGN KEY constraint failed/);
+		await expect(
+			writeTool.execute("sqlite-write-fk-restrict", {
+				path: `${dbPath}:parents:2`,
+				content: "",
+			}),
+		).rejects.toThrow(/FOREIGN KEY constraint failed/);
+		await writeTool.execute("sqlite-write-fk-cascade", {
+			path: `${dbPath}:parents:1`,
+			content: "",
+		});
+
+		const check = new Database(dbPath, { readonly: true });
+		try {
+			expect(check.prepare("SELECT id, parent_id FROM children ORDER BY id").all()).toEqual([
+				{ id: 2, parent_id: 2 },
+			]);
+			expect(check.prepare("SELECT id FROM parents ORDER BY id").all()).toEqual([{ id: 2 }]);
+			expect(check.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+		} finally {
+			check.close();
+		}
 	});
 });
 

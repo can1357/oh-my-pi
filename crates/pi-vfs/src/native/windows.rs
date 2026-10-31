@@ -53,11 +53,7 @@ fn wide(path: &Path) -> io::Result<Vec<u16>> {
 }
 
 fn cvt(ok: i32) -> io::Result<()> {
-	if ok == 0 {
-		Err(io::Error::last_os_error())
-	} else {
-		Ok(())
-	}
+	(ok != 0).ok_or_else(io::Error::last_os_error)
 }
 
 fn handle_info(file: &fs::File) -> io::Result<HandleInfo> {
@@ -161,16 +157,14 @@ pub(crate) fn chown(
 }
 
 static PATHEXT: LazyLock<Vec<String>> = LazyLock::new(|| {
-	let parsed: Vec<String> = std::env::var_os("PATHEXT")
-		.map(|value| {
-			value
-				.to_string_lossy()
-				.split(';')
-				.map(|entry| entry.trim().trim_start_matches('.').to_ascii_lowercase())
-				.filter(|entry| !entry.is_empty())
-				.collect()
-		})
-		.unwrap_or_default();
+	let parsed: Vec<String> = std::env::var_os("PATHEXT").map_or_default(|value| {
+		value
+			.to_string_lossy()
+			.split(';')
+			.map(|entry| entry.trim().trim_start_matches('.').to_ascii_lowercase())
+			.filter(|entry| !entry.is_empty())
+			.collect()
+	});
 	if parsed.is_empty() {
 		["com", "exe", "bat", "cmd"].map(str::to_owned).to_vec()
 	} else {

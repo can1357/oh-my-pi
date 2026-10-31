@@ -1,1 +1,0 @@
-The state is a Markdown table from a coding assistant's answer, with each column's inferred type. A chart will be drawn under the table. Choose the chart that makes its comparison, trend or pattern clearest at a glance. Choose none when the numbers are identifiers, settings, or too few or too similar to compare: the table already says it.

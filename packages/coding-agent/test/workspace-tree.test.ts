@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as natives from "@oh-my-pi/pi-natives";
 import { buildDirectoryTree, buildWorkspaceTree } from "@oh-my-pi/pi-coding-agent/workspace-tree";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -31,6 +32,7 @@ function lineIndex(rendered: string, needle: string): number {
 
 describe("buildWorkspaceTree", () => {
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		await Promise.all(tempDirs.splice(0).map(dir => removeWithRetries(dir)));
 	});
 
@@ -124,6 +126,32 @@ describe("buildWorkspaceTree", () => {
 		expect(tree.rendered).toContain("ln elided…]");
 	});
 
+	it("rejects native scan failures instead of returning an empty listing", async () => {
+		const missing = path.join(await makeTempDir(), "missing");
+		await expect(buildDirectoryTree(missing)).rejects.toThrow(/missing|not found/i);
+	});
+
+	it("renders an unreadable directory's error as one bounded, control-free line", async () => {
+		const cwd = await makeTempDir();
+		vi.spyOn(natives, "listWorkspace").mockResolvedValue({
+			entries: [{ path: "blocked", fileType: natives.FileType.Dir, mtime: Date.now(), size: undefined }],
+			agentsMdFiles: [],
+			truncated: false,
+			unreadableDirectories: [
+				{ path: "blocked", message: `Permission\tdenied\nforged row\u001b[31m${"x".repeat(500)}` },
+			],
+		});
+
+		const tree = await buildDirectoryTree(cwd);
+
+		const lines = tree.rendered.split("\n");
+		expect(lines).toHaveLength(2);
+		expect(lines[1]).toContain("- blocked/ [unreadable: Permission");
+		expect(lines[1]).toContain("denied forged row");
+		expect(lines[1]).not.toMatch(/[\t\u001b]/);
+		expect(lines[1]!.length).toBeLessThan(200);
+	});
+
 	it("can keep root entries uncapped while truncating child directories", async () => {
 		const cwd = await makeTempDir();
 		const childDir = path.join(cwd, "child");
@@ -196,29 +224,36 @@ describe("buildWorkspaceTree", () => {
 		expect(tree.agentsMdFiles).toEqual(["src/AGENTS.md"]);
 	});
 
-	it("renders prompt-cache-stable absolute mtimes (not render-time relative ages)", async () => {
+	it("keeps aligned metadata and absolute mtimes stable in the workspace prompt", async () => {
 		const cwd = await makeTempDir();
 		// Fixed mtime in the past so the absolute render is deterministic.
 		const fixedMtime = Date.UTC(2025, 0, 2, 3, 4, 0); // 2025-01-02 03:04 UTC
-		await writeFileWithMtime(path.join(cwd, "stable.txt"), "x", fixedMtime);
+		await writeFileWithMtime(path.join(cwd, "short.txt"), "x", fixedMtime);
+		await writeFileWithMtime(path.join(cwd, "much-longer-name.txt"), "ten bytes!", fixedMtime);
 
 		const first = await buildWorkspaceTree(cwd);
 		// A relative "ago" age would drift with the wall clock between builds;
 		// an absolute mtime must not. Two builds of an unchanged tree must be
 		// byte-identical so the system-prompt prefix stays cacheable.
 		const second = await buildWorkspaceTree(cwd);
+		const lines = first.rendered.split("\n");
+		const shortLine = lines.find(line => line.includes("short.txt")) ?? "";
+		const longLine = lines.find(line => line.includes("much-longer-name.txt")) ?? "";
 
 		expect(first.rendered).toBe(second.rendered);
-		expect(first.rendered).toContain("2025-01-02 03:04");
+		expect(shortLine).toMatch(/short\.txt\s+1B\s+2025-01-02 03:04$/u);
+		expect(longLine).toMatch(/much-longer-name\.txt\s+10B\s+2025-01-02 03:04$/u);
+		expect(shortLine.indexOf("1B")).toBe(longLine.indexOf("10B"));
+		expect(shortLine.indexOf("2025-01-02 03:04")).toBe(longLine.indexOf("2025-01-02 03:04"));
 		expect(first.rendered).not.toContain("ago");
 	});
 
-	it("keeps relative ages for buildDirectoryTree (tool output, not cached)", async () => {
+	it("keeps relative ages with compact directory metadata spacing", async () => {
 		const cwd = await makeTempDir();
 		await writeFileWithMtime(path.join(cwd, "recent.txt"), "x", Date.now() - 5 * 60_000);
 
 		const tree = await buildDirectoryTree(cwd, { maxDepth: 1 });
 
-		expect(tree.rendered).toContain("ago");
+		expect(tree.rendered).toMatch(/^\.\n  - recent\.txt 1B \d+[smhdw]+ ago$/u);
 	});
 });

@@ -8,6 +8,7 @@ import type { RenderResultOptions } from "./renderer";
 import type { Theme } from "../theme/theme";
 
 import { renderStatusLine, renderTreeList } from "../render";
+import { wrapTreeLine } from "../render/hanging-wrap";
 import { framedToolCard } from "../render/tool-card";
 
 import { formatErrorDetail, formatMoreItems, PREVIEW_LIMITS, pluralize, replaceTabs } from "../render/render-utils";
@@ -161,13 +162,16 @@ const COLLAPSED_CLOSED_CONTEXT = 1;
  * 3. When active tasks alone exceed `cap`, only the first `cap` active tasks are
  *    shown and the summary counts the hidden *active* todos, never replacing
  *    them with unrelated pending rows.
+ *
+ * The summary occupies a row, so a summary that would hide exactly one task is
+ * replaced by that task: the selection spends at most `cap + 1` rows.
  */
 function selectWithinCap<T extends { status: TodoStatus }>(
 	base: T[],
 	isMatched: (task: T) => boolean,
 	cap: number,
 ): CollapsedTodoSelection<T> {
-	if (base.length <= cap) return { items: base, summary: "" };
+	if (base.length <= cap + 1) return { items: base, summary: "" };
 
 	const active = base.filter(task => isActiveTodo(task, isMatched));
 	// Only when active work strictly exceeds the cap do we drop pending rows and
@@ -641,7 +645,7 @@ export const todoToolRenderer = {
 			matchByContent.clear();
 		};
 
-		return framedToolCard(uiTheme, () => {
+		return framedToolCard(uiTheme, ({ contentWidth }) => {
 			const { expanded, spinnerFrame } = options;
 			const multiPhase = phases.length > 1;
 			const indent = multiPhase ? "  " : "";
@@ -722,7 +726,7 @@ export const todoToolRenderer = {
 							);
 						})();
 				for (const line of treeLines) {
-					bodyLines.push(`${indent}${line}`);
+					bodyLines.push(...(wrapTreeLine(`${indent}${line}`, contentWidth, uiTheme) ?? [`${indent}${line}`]));
 				}
 			}
 			while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();

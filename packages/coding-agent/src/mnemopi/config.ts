@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { MnemopiOptions } from "@oh-my-pi/pi-mnemopi";
-import { getMemoriesDir, logger } from "@oh-my-pi/pi-utils";
+import { getMemoriesDir, logger, withLoopPhase } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 
 import {
@@ -230,25 +230,27 @@ export function extendRecallWithLegacyBanks(
 	dbPath: string,
 	cwd: string,
 ): readonly string[] {
-	const banksDir = path.join(path.dirname(dbPath), "banks");
-	const cwdAbs = path.resolve(cwd || ".");
-	let entries: fs.Dirent[];
-	try {
-		entries = fs.readdirSync(banksDir, { withFileTypes: true });
-	} catch {
-		return resolved;
-	}
-	const have = new Set(resolved);
-	const extras: string[] = [];
-	let scanned = 0;
-	for (const entry of entries) {
-		if (!entry.isDirectory() || have.has(entry.name)) continue;
-		if (scanned >= LEGACY_BANK_SCAN_LIMIT) break;
-		scanned++;
-		const candidate = path.join(banksDir, entry.name, "mnemopi.db");
-		if (bankOnlyHasCwd(candidate, cwdAbs)) extras.push(entry.name);
-	}
-	return extras.length === 0 ? resolved : [...resolved, ...extras];
+	return withLoopPhase("mnemopi.open", () => {
+		const banksDir = path.join(path.dirname(dbPath), "banks");
+		const cwdAbs = path.resolve(cwd || ".");
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(banksDir, { withFileTypes: true });
+		} catch {
+			return resolved;
+		}
+		const have = new Set(resolved);
+		const extras: string[] = [];
+		let scanned = 0;
+		for (const entry of entries) {
+			if (!entry.isDirectory() || have.has(entry.name)) continue;
+			if (scanned >= LEGACY_BANK_SCAN_LIMIT) break;
+			scanned++;
+			const candidate = path.join(banksDir, entry.name, "mnemopi.db");
+			if (bankOnlyHasCwd(candidate, cwdAbs)) extras.push(entry.name);
+		}
+		return extras.length === 0 ? resolved : [...resolved, ...extras];
+	});
 }
 
 function bankOnlyHasCwd(dbPath: string, cwd: string): boolean {
@@ -257,14 +259,13 @@ function bankOnlyHasCwd(dbPath: string, cwd: string): boolean {
 		db = new Database(dbPath, { readonly: true });
 		// "Safe" = no row with a different/missing cwd AND at least one matching row. Both probes stop at
 		// the first hit, and CASE skips the matching probe once an unsafe row disqualifies the bank.
-		const row = db
-			.prepare<{ safe: number }, [string]>(`
+		using statement = db.prepare<{ safe: number }, [string]>(`
 				SELECT CASE
 					WHEN EXISTS(SELECT 1 FROM working_memory WHERE json_extract(metadata_json, '$.cwd') IS NOT ?1) THEN 0
 					ELSE EXISTS(SELECT 1 FROM working_memory WHERE json_extract(metadata_json, '$.cwd') = ?1)
 				END AS safe
-			`)
-			.get(cwd);
+		`);
+		const row = statement.get(cwd);
 		return row?.safe === 1;
 	} catch (error) {
 		logger.debug("Mnemopi: legacy bank probe failed", { dbPath, error: String(error) });

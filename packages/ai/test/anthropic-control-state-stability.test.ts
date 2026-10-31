@@ -18,7 +18,11 @@ const MODEL = buildModel({
 });
 
 type WireMessage = { role: string; content: unknown; output_config?: { effort?: string } };
-type Payload = { output_config?: { effort?: string }; messages: WireMessage[]; tools?: { name: string }[] };
+type Payload = {
+	output_config?: { effort?: string };
+	messages: WireMessage[];
+	tools?: { name: string; defer_loading?: boolean }[];
+};
 
 let clock = 1;
 function user(text: string, steering?: boolean): Message {
@@ -201,6 +205,20 @@ describe("Anthropic controls derived from the transcript", () => {
 
 		expect(next.payload.tools?.map(declared => declared.name)).toEqual([wireName(first, 0)]);
 		expect(referencesTool(next.payload, grep)).toBe(false);
+	});
+
+	it("loads the tools a tool-less conversation gains instead of deferring all of them", async () => {
+		const turn0 = [user("start")];
+		const first = await capture(turn0, Effort.Low, { tools: [] });
+		const turn1 = [...turn0, answering(reply("ready"), first), user("continue")];
+		const gained = await capture(turn1, Effort.Low, { tools: [tool("read"), tool("grep")] });
+
+		expect(gained.payload.tools?.map(declared => declared.defer_loading)).toEqual([undefined, undefined]);
+		expectValidSystemPlacement(gained.payload);
+		const next = await capture([...turn1, answering(reply("done"), gained), user("again")], Effort.Low, {
+			tools: [tool("read"), tool("grep")],
+		});
+		expectCacheStableContinuation(gained.payload, next.payload);
 	});
 
 	it("moves an interrupted request's tool control past the steer and keeps it there once answered", async () => {

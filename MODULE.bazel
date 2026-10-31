@@ -2,7 +2,7 @@
 
 Builds the pi_natives NAPI cdylib for every shipped target with hermetic
 toolchains, replacing cargo-zigbuild/cargo-xwin/sccache plus the hand-rolled
-CI caches with Bazel's content-addressed action cache (see infra/bazel-remote.yaml).
+CI caches with Bazel's content-addressed action cache (see infra/docs/03-caching.md).
 
 Layout:
   //:natives-<target>      release-grade renamed .node artifacts (root BUILD.bazel)
@@ -35,6 +35,17 @@ single_version_override(
         "//bazel/patches:hermetic_cc_toolchain-isolated-compile-cache.patch",
         "//bazel/patches:hermetic_cc_toolchain-drop-cortex-a53-link-arg.patch",
     ],
+)
+
+# rules_rust 0.71.3 writes `DEP_<links>_*` paths into a build script's out_dir
+# with an `${out_dir}` token that dependents' build scripts never resolve, so
+# e.g. tree-sitter's `DEP_WASMTIME_C_API_INCLUDE` pointed nowhere. The patch
+# keeps those paths exec-root relative (`${pwd}/bazel-out/.../_bs.out_dir/...`);
+# dependents already receive the out_dir as an input.
+single_version_override(
+    module_name = "rules_rust",
+    patch_strip = 1,
+    patches = ["//bazel/patches:rules_rust-dep-env-exec-root-paths.patch"],
 )
 
 # --- Rust toolchains ----------------------------------------------------------
@@ -191,6 +202,15 @@ crate.annotation(
     crate = "opusic-sys",
 )
 
+# wasmtime-c-api-impl (tree-sitter's `wasm` feature) runs `cmake -P` to install
+# the C API headers tree-sitter compiles against; same host PATH as opusic-sys.
+crate.annotation(
+    build_script_env = {
+        "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:/run/current-system/sw/bin",
+    },
+    crate = "wasmtime-c-api-impl",
+)
+
 # cargo-bazel omits workspace-local build dependencies from generated registry
 # build scripts; restore nix 0.28's edge to the patched cfg_aliases crate.
 crate.annotation(
@@ -199,18 +219,19 @@ crate.annotation(
     version = "0.28.0",
 )
 
+# Same for normal dependencies: grep-printer's edge to the vendored
+# grep-searcher (a workspace member via [patch.crates-io]) is dropped, so its
+# rustc invocation has no `--extern grep_searcher`.
+crate.annotation(
+    crate = "grep-printer",
+    deps = ["@@//crates/vendor/grep-searcher:grep-searcher"],
+)
+
 # Release addons must never pick up a host libpcre2 (Homebrew paths leaked into
 # shipped dylibs before); always build the vendored static copy.
 crate.annotation(
     build_script_env = {"PCRE2_SYS_STATIC": "1"},
     crate = "pcre2-sys",
-)
-
-# tree-sitter-just's scanner.c hard-errors when NDEBUG is set (opt-mode cc
-# default). cc-rs appends env CFLAGS after its computed flags, so -UNDEBUG wins.
-crate.annotation(
-    build_script_env = {"CFLAGS": "-UNDEBUG"},
-    crate = "tree-sitter-just",
 )
 use_repo(crate, "crates")
 

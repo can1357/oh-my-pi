@@ -539,3 +539,64 @@ describe("long in-band tool calls fed in many deltas", () => {
 		expect(toolEnds(feedChunks(dialect, truncated, 7))).toEqual([]);
 	});
 });
+
+describe("complete tool name before toolStart", () => {
+	function feedChunks(dialect: Dialect, chunks: readonly string[]): InbandScanEvent[] {
+		const scanner = createInbandScanner(dialect, { tools: TOOLS, parseThinking: true });
+		const events: InbandScanEvent[] = [];
+		for (const chunk of chunks) events.push(...scanner.feed(chunk));
+		events.push(...scanner.flush());
+		return events;
+	}
+
+	function toolStarts(events: readonly InbandScanEvent[]): Extract<InbandScanEvent, { type: "toolStart" }>[] {
+		return events.filter((event): event is Extract<InbandScanEvent, { type: "toolStart" }> => {
+			return event.type === "toolStart";
+		});
+	}
+
+	const envelope = getDialectDefinition("hermes").renderAssistantToolCalls(
+		[
+			{
+				type: "toolCall",
+				id: "c1",
+				name: "write_file",
+				arguments: { path: "a.ts", content: "hi" },
+			},
+		],
+		{ tools: TOOLS },
+	);
+
+	it("never exposes a partial name when the chunk splits inside the hermes name", () => {
+		const cut = envelope.indexOf("write_file") + "write_".length;
+		const events = feedChunks("hermes", [envelope.slice(0, cut), envelope.slice(cut)]);
+		const starts = toolStarts(events);
+		// The first chunk ends inside the name, so no toolStart may fire there.
+		expect(starts.map(start => start.name)).toEqual(["write_file"]);
+		const ends = toolEnds(events);
+		expect(ends).toHaveLength(1);
+		expect(ends[0]!.name).toBe("write_file");
+		expect(ends[0]!.arguments).toEqual({ path: "a.ts", content: "hi" });
+	});
+
+	it.each(["hermes", "qwen3"] as const)(
+		"emits no tool events when the %s stream stops mid-name without a closing tag",
+		dialect => {
+			// Stop right after "write_" — inside the name, before the closing quote
+			// and with no closing tag anywhere.
+			const partial = envelope.slice(0, envelope.indexOf("write_file") + "write_".length);
+			const events = feedChunks(dialect, [partial]);
+			expect(toolStarts(events)).toEqual([]);
+			expect(toolEnds(events)).toEqual([]);
+
+			const parsed = parseInbandToolMessage(assistant([{ type: "text", text: partial }]), dialect, TOOLS);
+			expect(parsed.content.filter(block => block.type === "toolCall")).toEqual([]);
+		},
+	);
+
+	it("still starts a whole hermes envelope fed in one chunk", () => {
+		const events = feedChunks("hermes", [envelope]);
+		expect(toolStarts(events).map(start => start.name)).toEqual(["write_file"]);
+		expect(toolEnds(events)).toHaveLength(1);
+	});
+});

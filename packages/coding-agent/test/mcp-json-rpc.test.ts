@@ -44,6 +44,14 @@ describe("redactUrlForLog", () => {
 	it("drops the query string entirely for unparseable URLs", () => {
 		expect(redactUrlForLog("not a url?apiKey=zzz")).toBe("not a url");
 	});
+
+	it("strips URL userinfo, including from unparseable URLs", () => {
+		const redacted = redactUrlForLog("http://reviewer:topsecret@127.0.0.1:11434/v1");
+		expect(redacted).not.toContain("topsecret");
+		expect(redacted).not.toContain("reviewer");
+		expect(redacted).toContain("127.0.0.1:11434/v1");
+		expect(redactUrlForLog("http://user:pw@exa mple?x=1")).toBe("http://exa mple");
+	});
 });
 
 describe("callMCP", () => {

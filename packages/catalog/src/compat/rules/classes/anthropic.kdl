@@ -9,9 +9,30 @@
 // are never undercounted; only Opus/Sonnet/Haiku revisions known to predate
 // 4.7 take the standard tier. Separator-collapsed revisions parse as two
 // digits (`claude-opus-45` is Opus 4.5 → 45), so 10–46 is standard too.
+// Claude's prompt cache finds an earlier request's entry only within 20 block
+// positions back from a breakpoint, counting the breakpoint; a run of
+// consecutive tool_use or tool_result blocks is one position. Warm-cache
+// tool-result pruning keeps its rewrites inside this window.
+// https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+// A replayed signed thinking block bills the full reasoning its signature
+// carries (the server rebuilds it from the signature), at the size its turn
+// billed as output, not the signature's bytes. Thinking a request drops bills
+// nothing (earlier turns on lines that strip it: Opus before 4.5, Sonnet
+// before 4.6, Haiku before 5.5; turns before a compaction or prune on
+// prefix-bound lines; another model's blocks the reader cannot read), so
+// those turns count high.
+// https://platform.claude.com/docs/en/build-with-claude/context-windows#the-context-window-with-thinking
+// https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#switching-models
 class "anthropic" {
+	prompt-cache-lookback 20
+	// Claude's input classifier refuses requests that quote earlier reasoning
+	// back as text (`reasoning_extraction`, issue #6093).
+	classifier-cot-extraction #true
+	thinking-replay-tokens "output"
+	// verified: billing matched this formula on Opus 4.7+ and Fable 5.1.
 	image-tokenization {
 		regime "anthropic-patch"
+		verified #true
 		max-edge 2576
 		max-tokens 4784
 	}
@@ -31,17 +52,35 @@ class "anthropic" {
 			}
 		}
 	}
+	// Standard tier. verified: billing matched it on Sonnet 4.6 only; older
+	// Sonnet lines keep the floor until measured.
 	family "sonnet" {
-		revision "<4.7" {
+		revision "<4.6" {
 			image-tokenization {
 				regime "anthropic-patch"
 				max-edge 1568
 				max-tokens 1568
 			}
 		}
-		revision ">=10 <47" {
+		revision ">=4.6 <4.7" {
 			image-tokenization {
 				regime "anthropic-patch"
+				verified #true
+				max-edge 1568
+				max-tokens 1568
+			}
+		}
+		revision ">=10 <46" {
+			image-tokenization {
+				regime "anthropic-patch"
+				max-edge 1568
+				max-tokens 1568
+			}
+		}
+		revision ">=46 <47" {
+			image-tokenization {
+				regime "anthropic-patch"
+				verified #true
 				max-edge 1568
 				max-tokens 1568
 			}
@@ -81,6 +120,13 @@ class "anthropic" {
 			supports-sampling-params #false
 		}
 	}
+	// Opus 5.5 edits from imaged `read` results within one miss of text; Sonnet
+	// and Haiku 5.5 miscount deep tab indents (measurements: rules/README.md).
+	family "opus" {
+		revision ">=5.5 <10" {
+			snapcompact-image-reads #true
+		}
+	}
 	family "sonnet" {
 		revision ">=5 <10" {
 			supports-sampling-params #false
@@ -100,39 +146,52 @@ class "anthropic" {
 		revision ">=5.5 <10" {
 			supports-sampling-params #false
 		}
+		// Haiku 5.5 bills every rate 5x for prompts over 100K. Derived from each
+		// host's list price so non-Anthropic hosts get the band too; the Claude
+		// API and Cursor pin absolute rates, and GitHub Copilot opts out because
+		// its long tier is the `-1m` sibling row.
+		// https://platform.claude.com/docs/en/models/haiku-5-5/overview#pricing
+		revision ">=5.5 <6" {
+			long-context-cost {
+				input-threshold 100000
+				multiplier 5.0
+			}
+		}
 	}
 	// On-demand compaction (compact-2026-09-04) works on the Claude API, Vertex,
 	// and Amazon Bedrock's `/anthropic` routes, not Bedrock Converse.
 	// Foundry / Claude Platform on AWS are first-party Anthropic routes whose
 	// effective URLs are checked at request time.
 	on "anthropic" "google-vertex" "amazon-bedrock" "bedrock-mantle" {
-		family "fable" {
-			revision ">=5" {
+		on-api "anthropic-messages" {
+			family "fable" {
+				revision ">=5" {
+					supports-server-compaction #true
+				}
+			}
+			family "mythos" {
+				revision ">=5" {
+					supports-server-compaction #true
+				}
+			}
+			family "opus" {
+				revision ">=4.6" {
+					supports-server-compaction #true
+				}
+			}
+			family "sonnet" {
+				revision ">=4.6" {
+					supports-server-compaction #true
+				}
+			}
+			family "haiku" {
+				revision ">=5.5 <6" {
+					supports-server-compaction #true
+				}
+			}
+			models "claude-mythos-preview" {
 				supports-server-compaction #true
 			}
-		}
-		family "mythos" {
-			revision ">=5" {
-				supports-server-compaction #true
-			}
-		}
-		family "opus" {
-			revision ">=4.6" {
-				supports-server-compaction #true
-			}
-		}
-		family "sonnet" {
-			revision ">=4.6" {
-				supports-server-compaction #true
-			}
-		}
-		family "haiku" {
-			revision ">=5.5 <6" {
-				supports-server-compaction #true
-			}
-		}
-		models "claude-mythos-preview" {
-			supports-server-compaction #true
 		}
 	}
 	// Sonnet 4.5 and newer end generation with `model_context_window_exceeded`
@@ -291,8 +350,12 @@ class "anthropic" {
 		family "haiku" {
 			thinking-mode "budget"
 			// Haiku 5.5 is the first adaptive Haiku: `budget_tokens` is a 400.
+			// An omitted `thinking` is adaptive, but unlike Sonnet/Opus 5.5 it
+			// accepts `disabled` at effort `high` or below, so Off is explicit.
+			// https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-haiku-5-5#use-effort-to-control-thinking
 			revision ">=5.5 <6" {
 				thinking-mode "anthropic-adaptive"
+				disabled-thinking "disabled"
 			}
 		}
 	}
@@ -679,9 +742,14 @@ class "anthropic" {
 	}
 	on "google-antigravity" {
 		drop-unsigned-thinking #true
-		claude-thinking-beta-header #true
 		antigravity-claude-tool-mode #true
 		antigravity-usage-label "true"
+		// The interleaved-thinking beta gated Claude 4.x thinking here. The
+		// native 2.26.0 client sends no beta for Claude 5.5, whose thinking
+		// streams without it.
+		revision "<5" {
+			claude-thinking-beta-header #true
+		}
 	}
 }
 

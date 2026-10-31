@@ -1,5 +1,5 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import type { EvalLanguage, EvalStatusEvent } from "@oh-my-pi/pi-tui/tools/eval";
+import type { EvalLanguage, EvalStatusEvent, EvalView } from "@oh-my-pi/pi-tui/tools/eval";
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 
 /** Kernel-defined tool metadata exposed to task subagents. */
@@ -33,9 +33,14 @@ export function evalImageMetadata(value: unknown): Pick<ImageContent, "detail" |
 	return metadata;
 }
 
-/** Display output captured during eval execution across supported backends. */
+/**
+ * Non-text output of an eval cell, from either backend:
+ * - an image, sent to the model and shown to the user;
+ * - a `view`: a pretty rendering of `text` the cell printed, for the user only
+ *   (the model sees `text` in the output stream);
+ * - a helper `status` event for the UI.
+ */
 export type EvalDisplayOutput =
-	| { type: "json"; data: unknown }
 	| ImageContent
-	| { type: "markdown"; text?: string }
+	| { type: "view"; text: string; view: EvalView }
 	| { type: "status"; event: EvalStatusEvent };

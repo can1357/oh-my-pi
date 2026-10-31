@@ -6,8 +6,11 @@ import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import type { ExtensionEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type { AgentEndEvent } from "@oh-my-pi/pi-coding-agent/extensibility/shared-events";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
@@ -60,6 +63,7 @@ describe("AgentSession todo reminder async-job deferral", () => {
 	let sessionManager: SessionManager;
 	let manager: AsyncJobManager;
 	let extensionRunner: ExtensionRunner;
+	let extensionEnds: AgentEndEvent[];
 	let gates: Array<PromiseWithResolvers<string>>;
 	let reminderAttempts: number[];
 	let agentEndTerminalStates: Array<boolean | undefined>;
@@ -117,8 +121,11 @@ describe("AgentSession todo reminder async-job deferral", () => {
 		sessionManager = SessionManager.inMemory(tempDir.path());
 		manager = new AsyncJobManager({});
 		gates = [];
+		extensionEnds = [];
 		extensionRunner = {
-			emit: vi.fn().mockResolvedValue(undefined),
+			emit: vi.fn(async (event: ExtensionEvent) => {
+				if (event.type === "agent_end") extensionEnds.push(event);
+			}),
 			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
 			hasHandlers: vi.fn((eventType: string) => eventType === "session_stop"),
 			emitSessionStop: vi.fn().mockResolvedValue(undefined),
@@ -127,11 +134,25 @@ describe("AgentSession todo reminder async-job deferral", () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected built-in anthropic model to exist");
 
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"todo.enabled": true,
+			"todo.reminders": true,
+			"todo.remindersMax": 3,
+		});
+		const toolSession: ToolSession = {
+			cwd: tempDir.path(),
+			hasUI: false,
+			getSessionFile: () => sessionManager.getSessionFile() ?? null,
+			getSessionSpawns: () => "*",
+			settings,
+		};
+
 		const agent = new Agent({
 			initialState: {
 				model,
 				systemPrompt: ["Test"],
-				tools: [],
+				tools: [new TodoTool(toolSession)],
 				messages: [],
 			},
 		});
@@ -139,12 +160,7 @@ describe("AgentSession todo reminder async-job deferral", () => {
 		session = new AgentSession({
 			agent,
 			sessionManager,
-			settings: Settings.isolated({
-				"compaction.enabled": false,
-				"todo.enabled": true,
-				"todo.reminders": true,
-				"todo.remindersMax": 3,
-			}),
+			settings,
 			modelRegistry: sharedModelRegistry,
 			agentId: "Main",
 			asyncJobManager: manager,
@@ -191,6 +207,7 @@ describe("AgentSession todo reminder async-job deferral", () => {
 		expect(agentEndTerminalStates).toEqual([false]);
 		// Only a background result can resume this pause, so the event says so.
 		expect(agentEndAwaitingAsyncWork).toEqual([true]);
+		expect(extensionEnds).toEqual([expect.objectContaining({ willContinue: true, awaitingAsyncWork: true })]);
 	});
 
 	it("does not defer for a running job owned by a different agent", async () => {
@@ -204,6 +221,9 @@ describe("AgentSession todo reminder async-job deferral", () => {
 		expect(reminderAttempts).toEqual([1]);
 		// The reminder is the agent's own continuation, not an async wait.
 		expect(agentEndAwaitingAsyncWork).toEqual([undefined]);
+		expect(extensionEnds).toHaveLength(1);
+		expect(extensionEnds[0]?.willContinue).toBe(true);
+		expect(extensionEnds[0]).not.toHaveProperty("awaitingAsyncWork");
 	});
 
 	it("fires the reminder on the next stop once the owned job completes and its delivery drains", async () => {

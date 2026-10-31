@@ -1,8 +1,13 @@
+import {
+	type AgentCompactionThresholdOverride,
+	validateModelCompactionThresholds,
+} from "../config/compaction-threshold";
 import { combine, register, type SettingValueOf } from "../config/registry";
 import { COMPACTION_METHOD_CHOICES, DEFAULT_COMPACTION_METHOD_ORDER } from "./compaction-methods";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 
 const EMPTY_STRING_ARRAY: string[] = [];
+const EMPTY_MODEL_COMPACTION_THRESHOLDS: Record<string, AgentCompactionThresholdOverride> = {};
 
 export const cfgWorkspaceAdditionalDirectories = register({
 	id: "workspace.additionalDirectories",
@@ -14,6 +19,52 @@ export const cfgWorkspaceAdditionalDirectories = register({
 		label: "Additional Workspace Dirs",
 		description:
 			"Extra workspace directories added to every session as additional roots (multi-root workspace). Managed live via /add-dir and /remove-dir. Paths resolve relative to cwd; absolute paths recommended. The agent is told these roots exist and can read/grep/glob them.",
+	},
+});
+
+/** Built-in context filenames. Listing them in `contextFiles.extra` would load a second copy or bypass one-per-depth shadowing. */
+const BUILTIN_CONTEXT_FILE_NAMES: Record<string, true> = {
+	"agents.md": true,
+	"claude.md": true,
+	"gemini.md": true,
+	"copilot-instructions.md": true,
+};
+
+/** Why `entry` is not a valid `contextFiles.extra` name; undefined for a plain, non-built-in file name. */
+function contextFileNameError(entry: unknown): string | undefined {
+	if (typeof entry !== "string") return `contextFiles.extra entries must be strings (${String(entry)})`;
+	const name = entry.trim();
+	if (name === "") return "contextFiles.extra entries must not be empty";
+	if (BUILTIN_CONTEXT_FILE_NAMES[name.toLowerCase()] === true) {
+		return `contextFiles.extra cannot list a built-in context file (${name})`;
+	}
+	if (name === "." || name === ".." || name.includes("/") || name.includes("\\") || name.includes("\0")) {
+		return `contextFiles.extra entries must be file names, not paths (${name})`;
+	}
+	return undefined;
+}
+
+/** Extra instruction filenames discovered in addition to AGENTS.md / CLAUDE.md / GEMINI.md. */
+export const cfgContextFilesExtra = register({
+	id: "contextFiles.extra",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+	ui: {
+		tab: "context",
+		group: "General",
+		label: "Extra Context Files",
+		editor: "json",
+		description:
+			'Extra instruction filenames loaded beside AGENTS.md. Use a JSON list of names, not paths, e.g. ["AGENTS.local.md"]; [] disables extras. Start a new session to load them.',
+		condition: "contextFilesExtraNotProject",
+	},
+	validate: raw => {
+		if (raw === undefined) return;
+		if (!Array.isArray(raw)) throw new Error("contextFiles.extra must be a list of file names");
+		for (const entry of raw) {
+			const error = contextFileNameError(entry);
+			if (error !== undefined) throw new Error(error);
+		}
 	},
 });
 
@@ -30,7 +81,8 @@ export const cfgContextPromotionEnabled = register({
 		tab: "context",
 		group: "General",
 		label: "Auto-Promote Context",
-		description: "Promote to a larger-context model on context overflow instead of compacting",
+		description:
+			"Promote to the model's contextPromotionTarget on context overflow instead of compacting. Retry fallback switches are controlled by Retry Model Fallback",
 	},
 });
 
@@ -152,6 +204,34 @@ export const cfgCompactionThresholdTokens = register({
 	},
 });
 
+/**
+ * Per-model compaction limits for the models they match: `provider/model-id`
+ * exactly, else the longest `…*` prefix. A token entry is the base the
+ * threshold policy scales in place of the window (see
+ * `applyModelCompactionThreshold`); a percentage entry replaces both
+ * `compaction.threshold*` fields. Edited from the /models hub; a per-agent
+ * `task.agentCompactionThresholdOverrides` entry still wins. A token base past a
+ * model's standard window opts that model into its extended window
+ * (`ModelRegistry.contextWindowTiers`).
+ */
+export const cfgCompactionModelThresholds = register({
+	id: "compaction.modelThresholds",
+	type: "record",
+	default: EMPTY_MODEL_COMPACTION_THRESHOLDS,
+	validate: validateModelCompactionThresholds,
+});
+
+/**
+ * Whether `compaction.modelThresholds` applies. Subagent spawn turns it off for an
+ * agent whose `task.agentCompactionThresholdOverrides` entry applies, so that entry
+ * outranks every model entry, including ones added while the agent runs.
+ */
+export const cfgCompactionModelThresholdsEnabled = register({
+	id: "compaction.modelThresholdsEnabled",
+	type: "boolean",
+	default: true,
+});
+
 export const cfgCompactionHandoffSaveToDisk = register({
 	id: "compaction.handoffSaveToDisk",
 	type: "boolean",
@@ -263,7 +343,8 @@ export const cfgCompactionIdleTimeoutSeconds = register({
 		tab: "context",
 		group: "Compaction",
 		label: "Idle Compaction Delay",
-		description: "Seconds to wait while idle before compacting",
+		description:
+			"Seconds to wait while idle before compacting; with a 1-hour prompt cache, compaction instead runs just before the cache expires",
 		options: [
 			{ value: "60", label: "1 minute" },
 			{ value: "120", label: "2 minutes" },
@@ -323,8 +404,12 @@ export const cfgCompaction = combine({
 	dropUseless: cfgCompactionDropUseless,
 });
 
-/** Configured compaction policy ({@link cfgCompaction}). */
-export type CompactionSettings = SettingValueOf<typeof cfgCompaction>;
+/**
+ * Configured compaction policy ({@link cfgCompaction}). `baseWindowTokens` is
+ * never configured directly: a `compaction.modelThresholds` token entry sets it
+ * for its model (see `applyModelCompactionThreshold`).
+ */
+export type CompactionSettings = SettingValueOf<typeof cfgCompaction> & { baseWindowTokens?: number };
 
 // Experimental: snapcompact inline imaging (transient, per-request; never persisted)
 export const cfgSnapcompactSystemPrompt = register({
@@ -363,7 +448,7 @@ export const cfgSnapcompactToolResults = register({
 		group: "Experimental",
 		label: "Snapcompact Tool Results",
 		description:
-			"Experimental: render large historical tool results as dense PNG image(s) instead of text (vision models only). Saves tokens on accumulated read/search output.",
+			"Experimental: render large tool results, the newest one included, as dense PNG image(s) instead of text (vision models only). Saves tokens on accumulated search and command output; read results stay text unless the model is known to edit exactly from images.",
 	},
 });
 

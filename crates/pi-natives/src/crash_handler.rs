@@ -24,6 +24,10 @@
 //!   XDG (i.e. that directory already exists and `PI_CODING_AGENT_DIR` isn't
 //!   pointed somewhere custom), otherwise `<home>/<PI_CONFIG_DIR>/logs/`
 //!   (defaulting to `~/.omp/logs/`).
+//! - This crate's own unit-test build writes to a per-user temp dir instead
+//!   (see `test_logs_dir`). The release addon a `bun test` process loads is not
+//!   a test build, so its crash reports still go to the path above while that
+//!   process's JS logs go to the temp dir.
 //! - Hook installation is idempotent across repeated module loads.
 
 use std::{
@@ -31,7 +35,7 @@ use std::{
 	backtrace::Backtrace,
 	cell::Cell,
 	ffi::OsStr,
-	fmt::Write as _,
+	fmt::{NumBuffer, Write as _},
 	fs::{self, OpenOptions},
 	io::Write as _,
 	path::{Path, PathBuf},
@@ -122,11 +126,11 @@ pub(crate) fn blocking_task_panic_scope<R>(f: impl FnOnce() -> R) -> R {
 
 	impl Drop for Guard {
 		fn drop(&mut self) {
-			BLOCKING_TASK_PANIC_SCOPE_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+			BLOCKING_TASK_PANIC_SCOPE_DEPTH.update(|d| d.saturating_sub(1));
 		}
 	}
 
-	BLOCKING_TASK_PANIC_SCOPE_DEPTH.with(|d| d.set(d.get() + 1));
+	BLOCKING_TASK_PANIC_SCOPE_DEPTH.update(|d| d + 1);
 	let _guard = Guard;
 	f()
 }
@@ -197,20 +201,7 @@ fn report_header(kind: CrashKind) -> String {
 }
 fn write_alloc_failure_line(mut out: impl std::io::Write, size: usize) {
 	let _ = out.write_all(b"memory allocation of ");
-	let mut digits = [0u8; usize::MAX.ilog10() as usize + 1];
-	let mut pos = digits.len();
-	let mut value = size;
-	if value == 0 {
-		pos -= 1;
-		digits[pos] = b'0';
-	} else {
-		while value > 0 {
-			pos -= 1;
-			digits[pos] = b'0' + (value % 10) as u8;
-			value /= 10;
-		}
-	}
-	let _ = out.write_all(&digits[pos..]);
+	let _ = out.write_all(size.format_into(&mut NumBuffer::new()).as_bytes());
 	let _ = out.write_all(b" bytes failed\n");
 }
 
@@ -256,8 +247,26 @@ fn persist(report: &str, kind: CrashKind, echo_stderr: bool) {
 }
 
 fn crash_log_path(kind: CrashKind) -> Option<PathBuf> {
-	let dir = logs_dir()?;
+	// Unit tests panic, many on purpose; keep their reports out of the
+	// developer's real logs dir.
+	let dir = if cfg!(test) {
+		test_logs_dir()
+	} else {
+		logs_dir()?
+	};
 	Some(build_crash_log_path(&dir, kind, process::id(), unix_millis()))
+}
+
+/// Crash-report directory of the unit-test build. On Unix the uid suffix keeps
+/// users of a shared `/tmp` from owning each other's directory; Windows' temp
+/// dir is already per-user.
+fn test_logs_dir() -> PathBuf {
+	#[cfg(unix)]
+	// SAFETY: getuid takes no arguments and cannot fail.
+	let name = format!("pi-natives-test-logs-{}", unsafe { libc::getuid() });
+	#[cfg(not(unix))]
+	let name = String::from("pi-natives-test-logs");
+	std::env::temp_dir().join(name)
 }
 
 fn build_crash_log_path(dir: &Path, kind: CrashKind, pid: u32, now_ms: u128) -> PathBuf {
@@ -603,5 +612,18 @@ mod tests {
 			alloc_log,
 			PathBuf::from("/tmp/pi-natives-test-home/.omp/logs/native-alloc-99-1.log")
 		);
+	}
+
+	#[test]
+	fn unit_test_crash_reports_stay_out_of_the_real_logs_dir() {
+		let test_logs = test_logs_dir();
+		assert!(test_logs.starts_with(std::env::temp_dir()));
+		// SAFETY: getuid takes no arguments and cannot fail.
+		#[cfg(unix)]
+		assert!(test_logs.ends_with(format!("pi-natives-test-logs-{}", unsafe { libc::getuid() })));
+		for kind in [CrashKind::Panic, CrashKind::Alloc] {
+			let path = crash_log_path(kind).expect("a test build always has a crash log path");
+			assert_eq!(path.parent(), Some(test_logs.as_path()));
+		}
 	}
 }

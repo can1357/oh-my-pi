@@ -2,7 +2,7 @@
  * Integration test: the real broker socket and child-process exit drive the
  * generation transition, so fake timers cannot control the observed events.
  */
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -133,6 +133,68 @@ describe("daemon wait generation binding", () => {
 			expect(elapsed).toBeLessThan(5_000);
 		} finally {
 			await shutdown(client, broker, "crashing");
+			process.title = previousTitle;
+		}
+	}, 25_000);
+
+	it("stops polling a wait its client cancelled or aborted", async () => {
+		using tempDir = TempDir.createSync("@omp-wait-cancel-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir);
+		const ids: string[] = [];
+		const randomUUID = crypto.randomUUID.bind(crypto);
+		const uuidSpy = spyOn(crypto, "randomUUID").mockImplementation(() => {
+			const id = randomUUID();
+			ids.push(id);
+			return id;
+		});
+		try {
+			const spec: DaemonSpec = {
+				...exitingSpec("idle", projectDir, "no"),
+				args: ["-e", "setInterval(() => {}, 1000)"],
+			};
+			const started = await client.request({ op: "start", spec });
+			if (started.op !== "start") throw new Error("unexpected start result");
+			const waitOperation = { op: "wait", name: "idle", for: "exit", pattern: "NEVER", timeoutMs: 60_000 } as const;
+
+			// Requests on one socket reach the broker in order, and it registers a
+			// wait before its first await, so a completed `list` sent afterwards proves
+			// the wait is live. The client mints a request's id after its connect
+			// await, so the id is read only once that barrier returns.
+			ids.length = 0;
+			const waitStartedAt = Date.now();
+			const waitPending = client.request(waitOperation).then(
+				() => undefined,
+				(reason: unknown) => reason,
+			);
+			await client.request({ op: "list" });
+			const waitId = ids[0]!;
+			const cancelled = await client.request({ op: "cancel", requestId: waitId });
+			expect(cancelled).toEqual({ op: "cancel", cancelled: true });
+			const error = await waitPending;
+			expect(error).toBeInstanceOf(DaemonBrokerRejectedError);
+			expect((error as Error).message).toContain("cancelled");
+			expect(Date.now() - waitStartedAt).toBeLessThan(5_000);
+
+			// Aborting the client request cancels the broker's poll as well, so
+			// nothing is left for a later cancel to stop.
+			ids.length = 0;
+			const controller = new AbortController();
+			const aborted = client.request(waitOperation, controller.signal).catch(() => undefined);
+			await client.request({ op: "list" });
+			const abortedId = ids[0]!;
+			controller.abort();
+			await aborted;
+			const late = await client.request({ op: "cancel", requestId: abortedId });
+			expect(late).toEqual({ op: "cancel", cancelled: false });
+		} finally {
+			uuidSpy.mockRestore();
+			await shutdown(client, broker, "idle");
 			process.title = previousTitle;
 		}
 	}, 25_000);

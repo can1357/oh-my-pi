@@ -393,62 +393,6 @@ describe("AuthStorage OAuth refresh race", () => {
 		expect(refreshCalls).toBe(1);
 	});
 
-	test("serializes rotating provider refresh tokens across AuthStorage instances", async () => {
-		if (!authStorage) throw new Error("test setup failed");
-
-		const expires = Date.now() - 60_000;
-		const refreshedExpires = Date.now() + 60 * 60_000;
-		const usedRefreshTokens = new Set<string>();
-		let refreshCalls = 0;
-
-		oauthUtils.registerOAuthProvider({
-			id: "unit-oauth-cross-process",
-			name: "Unit OAuth Cross Process",
-			sourceId: "auth-storage-oauth-refresh-race-test",
-			async login() {
-				return { access: "unused", refresh: "unused", expires: refreshedExpires };
-			},
-			async refreshToken(credentials) {
-				refreshCalls += 1;
-				if (usedRefreshTokens.has(credentials.refresh)) {
-					throw new Error('HTTP 400 invalid_grant {"error":"invalid_grant"}');
-				}
-				usedRefreshTokens.add(credentials.refresh);
-				await Bun.sleep(50);
-				return {
-					...credentials,
-					access: "access-rotated",
-					refresh: "refresh-rotated",
-					expires: refreshedExpires,
-				};
-			},
-			getApiKey(credentials) {
-				return credentials.access;
-			},
-		});
-
-		await authStorage.credentials.set("unit-oauth-cross-process", [
-			{ type: "oauth", access: "access-old", refresh: "refresh-old", expires },
-		]);
-
-		const secondStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
-		const secondStorage = new AuthStorage(secondStore);
-		await secondStorage.credentials.reload();
-		try {
-			const [first, second] = await Promise.all([
-				authStorage.keys.get("unit-oauth-cross-process", "session-first"),
-				secondStorage.keys.get("unit-oauth-cross-process", "session-second"),
-			]);
-
-			expect(first).toBe("access-rotated");
-			expect(second).toBe("access-rotated");
-			expect(refreshCalls).toBe(1);
-			expect(secondStore.listAuthCredentials("unit-oauth-cross-process")).toHaveLength(1);
-		} finally {
-			secondStorage.close();
-		}
-	});
-
 	test("does not overwrite a peer rotation after releasing the refresh lease", async () => {
 		if (!authStorage || !store) throw new Error("test setup failed");
 		const sharedStore = store;
@@ -759,60 +703,6 @@ describe("AuthStorage OAuth refresh race", () => {
 		});
 	});
 
-	test("does not persist a refresh when durable lease ownership is lost before CAS update", async () => {
-		if (!authStorage || !store) throw new Error("test setup failed");
-
-		const now = Date.parse("2026-07-10T12:00:00.000Z");
-		setSystemTime(new Date(now));
-		await authStorage.credentials.set("unit-oauth-lease-update", [
-			{
-				type: "oauth",
-				access: "access-old",
-				refresh: "refresh-old",
-				expires: now - 60_000,
-			},
-		]);
-		const storedBefore = store.listAuthCredentials("unit-oauth-lease-update");
-		expect(storedBefore).toHaveLength(1);
-		const credentialId = storedBefore[0]!.id;
-		const stealLease = store.tryAcquireCredentialRefreshLease?.bind(store);
-		if (!stealLease) throw new Error("test store does not support refresh leases");
-		const updateSpy = vi.spyOn(store, "tryUpdateAuthCredentialIfMatches");
-
-		const result = await authStorage.oauth.refreshStored("unit-oauth-lease-update", {
-			credentialFromRow: row => row,
-			forceRefresh: true,
-			refresh: async credential => {
-				// Keep the credential row bytes unchanged while expiring owner A's
-				// lease. A non-lease-fenced final CAS would still persist this token.
-				setSystemTime(new Date(now + 16_000));
-				expect(stealLease(credentialId, "peer-owner", now + 31_000)).toBe(true);
-				return {
-					...credential,
-					access: "access-from-lost-owner",
-					refresh: "refresh-from-lost-owner",
-					expires: now + 60 * 60_000,
-				};
-			},
-		});
-
-		expect(updateSpy).toHaveBeenCalled();
-		expect(result).toMatchObject({ refreshed: false, removed: false });
-		expect(result.credential).toMatchObject({
-			type: "oauth",
-			access: "access-old",
-			refresh: "refresh-old",
-		});
-		const stored = store.listAuthCredentials("unit-oauth-lease-update");
-		expect(stored).toHaveLength(1);
-		expect(stored[0]?.id).toBe(credentialId);
-		expect(stored[0]?.credential).toMatchObject({
-			type: "oauth",
-			access: "access-old",
-			refresh: "refresh-old",
-		});
-	});
-
 	test("does not terminal-disable a credential when durable lease ownership is lost before CAS disable", async () => {
 		if (!authStorage || !store) throw new Error("test setup failed");
 
@@ -994,5 +884,800 @@ describe("AuthStorage OAuth refresh race", () => {
 			}),
 		).resolves.toBeUndefined();
 		expect(refreshCalls).toBe(1);
+	});
+	test("persists a rotated token when the requesting usage call is canceled", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		oauthUtils.registerOAuthProvider({
+			id: "unit-oauth-caller-abort",
+			name: "Unit OAuth Caller Abort",
+			sourceId: "auth-storage-oauth-refresh-race-test",
+			async login() {
+				return { access: "unused", refresh: "unused", expires: 0 };
+			},
+			async refreshToken(current) {
+				started.resolve();
+				await release.promise;
+				return { ...current, access: "new-access", refresh: "new-refresh", expires: Date.now() + 3_600_000 };
+			},
+			getApiKey(current) {
+				return current.access;
+			},
+		});
+		await authStorage.credentials.set("unit-oauth-caller-abort", [
+			{ type: "oauth", access: "old-access", refresh: "old-refresh", expires: 0 },
+		]);
+		const credentialId = store.listAuthCredentials("unit-oauth-caller-abort")[0]?.id;
+		if (credentialId === undefined) throw new Error("missing stored credential");
+		const controller = new AbortController();
+		const request = authStorage.oauth.refresh(credentialId, controller.signal);
+		await started.promise;
+		controller.abort();
+		await expect(request).rejects.toThrow();
+		release.resolve();
+		// A second consumer must see the rotated token rather than replaying the consumed grant.
+		expect(await authStorage.keys.get("unit-oauth-caller-abort", "next-session")).toBe("new-access");
+		expect(store.listAuthCredentials("unit-oauth-caller-abort")[0]?.credential).toMatchObject({
+			type: "oauth",
+			refresh: "new-refresh",
+		});
+	});
+
+	test("a key request cancelled while taking the refresh lease settles without an unhandled rejection", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		const provider = "unit-oauth-abort-during-lease";
+		const exchanges = registerSingleUseProvider(provider);
+		await authStorage.credentials.set(provider, [
+			{ type: "oauth", access: "access-0", refresh: "refresh-0", expires: 0 },
+		]);
+		const controller = new AbortController();
+		const acquire = store.tryAcquireCredentialRefreshLease?.bind(store);
+		if (!acquire) throw new Error("test store does not support refresh leases");
+		// The caller cancels while the refresh it started is still inside its synchronous lease acquisition.
+		vi.spyOn(store, "tryAcquireCredentialRefreshLease").mockImplementation((id, owner, expiresAt) => {
+			controller.abort();
+			return acquire(id, owner, expiresAt);
+		});
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown): void => {
+			unhandled.push(reason);
+		};
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			await expect(
+				authStorage.keys.get(provider, "cancelled-session", { signal: controller.signal }),
+			).resolves.toBeUndefined();
+			const turn = Promise.withResolvers<void>();
+			setImmediate(turn.resolve);
+			await turn.promise;
+			expect(unhandled).toEqual([]);
+			expect(exchanges.exchanges()).toBe(0);
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+		}
+	});
+
+	test("a caller cancelled before refreshing does not hand its cancellation to a joining caller", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		const provider = "unit-oauth-cancelled-owner";
+		const exchanges = registerSingleUseProvider(provider);
+		await authStorage.credentials.set(provider, [
+			{ type: "oauth", access: "access-0", refresh: "refresh-0", expires: 0 },
+		]);
+		const credentialId = store.listAuthCredentials(provider)[0]?.id;
+		if (credentialId === undefined) throw new Error("missing stored credential");
+		const cancelled = authStorage.oauth.refresh(credentialId, AbortSignal.abort());
+		const live = authStorage.oauth.refresh(credentialId);
+		await expect(cancelled).rejects.toThrow("credential refresh aborted");
+		expect((await live).credential).toMatchObject({ type: "oauth", access: "access-1" });
+		expect(exchanges.exchanges()).toBe(1);
+	});
+
+	/** Provider whose refresh tokens are single-use, like Anthropic's; counts exchanges. */
+	function registerSingleUseProvider(id: string): { exchanges: () => number } {
+		let generation = 0;
+		let liveRefresh = "refresh-0";
+		oauthUtils.registerOAuthProvider({
+			id,
+			name: id,
+			sourceId: "auth-storage-oauth-refresh-race-test",
+			async login() {
+				return { access: "unused", refresh: "unused", expires: 0 };
+			},
+			async refreshToken(current) {
+				if (current.refresh !== liveRefresh) {
+					throw new Error('HTTP 400 invalid_grant {"error":"invalid_grant"}');
+				}
+				generation += 1;
+				liveRefresh = `refresh-${generation}`;
+				return {
+					...current,
+					access: `access-${generation}`,
+					refresh: liveRefresh,
+					expires: Date.now() + 3_600_000,
+				};
+			},
+			getApiKey(current) {
+				return current.access;
+			},
+		});
+		return { exchanges: () => generation };
+	}
+
+	/** Store a login with a fresh access token, and return its row id. */
+	async function seedLogin(provider: string): Promise<number> {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		await authStorage.credentials.set(provider, [
+			{ type: "oauth", access: "access-0", refresh: "refresh-0", expires: Date.now() + 3_600_000 },
+		]);
+		const credentialId = store.listAuthCredentials(provider)[0]?.id;
+		if (credentialId === undefined) throw new Error("missing stored credential");
+		return credentialId;
+	}
+
+	test("a provider-401 refresh adopts the token another process rotated to, instead of exchanging again", async () => {
+		if (!authStorage || !tempDir) throw new Error("test setup failed");
+		const provider = "unit-oauth-401-peer-rotated";
+		const peerRotation = registerSingleUseProvider(provider);
+		await seedLogin(provider);
+
+		const peerStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		const peer = new AuthStorage(peerStore);
+		try {
+			await peer.credentials.reload();
+			// The peer's own 401 rotates the row, which revokes access-0 everywhere.
+			expect(
+				await peer.oauth.access(provider, "peer-session", {
+					forceRefresh: true,
+					refreshReason: "auth-recovery",
+					rejectedAccessToken: "access-0",
+				}),
+			).toMatchObject({ accessToken: "access-1" });
+			// This process reloaded the rotated row before its own in-flight request
+			// failed with a 401 on access-0: adopt access-1 rather than exchange.
+			await authStorage.credentials.reload();
+			expect(
+				await authStorage.oauth.access(provider, "own-session", {
+					forceRefresh: true,
+					refreshReason: "auth-recovery",
+					rejectedAccessToken: "access-0",
+				}),
+			).toMatchObject({ accessToken: "access-1" });
+			expect(peerRotation.exchanges()).toBe(1);
+			expect(events).toHaveLength(0);
+		} finally {
+			peer.close();
+		}
+	});
+
+	test("a provider-401 refresh still exchanges when the stored token is the rejected one", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		const provider = "unit-oauth-401-no-peer";
+		const noPeer = registerSingleUseProvider(provider);
+		await seedLogin(provider);
+
+		expect(
+			await authStorage.oauth.access(provider, "own-session", {
+				forceRefresh: true,
+				refreshReason: "auth-recovery",
+				rejectedAccessToken: "access-0",
+			}),
+		).toMatchObject({ accessToken: "access-1" });
+		expect(noPeer.exchanges()).toBe(1);
+	});
+
+	test("a forced refresh adopts the row a peer rotated after this process loaded it", async () => {
+		if (!authStorage || !tempDir) throw new Error("test setup failed");
+		const provider = "unit-oauth-forced-peer-rotated";
+		const forced = registerSingleUseProvider(provider);
+		const credentialId = await seedLogin(provider);
+
+		const peerStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		const peer = new AuthStorage(peerStore);
+		try {
+			await peer.credentials.reload();
+			await peer.oauth.refresh(credentialId);
+			// This process still holds access-0 / refresh-0 in memory.
+			const refreshed = await authStorage.oauth.refresh(credentialId);
+			expect(refreshed.credential).toMatchObject({ type: "oauth", access: "access-1" });
+			expect(forced.exchanges()).toBe(1);
+			expect(events).toHaveLength(0);
+		} finally {
+			peer.close();
+		}
+	});
+
+	test("keeps an exchanged token when the store is busy at save time", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		const provider = "unit-oauth-busy-save";
+		const busy = registerSingleUseProvider(provider);
+		await authStorage.credentials.set(provider, [
+			{ type: "oauth", access: "access-0", refresh: "refresh-0", expires: Date.now() - 60_000 },
+		]);
+		const original = store.tryUpdateAuthCredentialIfMatches?.bind(store);
+		if (!original) throw new Error("test store does not support compare-and-set updates");
+		let busyWrites = 0;
+		vi.spyOn(store, "tryUpdateAuthCredentialIfMatches").mockImplementation((...args) => {
+			if (busyWrites < 2) {
+				busyWrites += 1;
+				throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+			}
+			return original(...args);
+		});
+
+		expect(await authStorage.keys.get(provider, "session")).toBe("access-1");
+		expect(busyWrites).toBe(2);
+		expect(busy.exchanges()).toBe(1);
+		expect(store.listAuthCredentials(provider)[0]?.credential).toMatchObject({
+			type: "oauth",
+			access: "access-1",
+			refresh: "refresh-1",
+		});
+	});
+
+	test.skipIf(process.platform === "win32")("SIGTERM waits for a rotated token to reach SQLite", async () => {
+		if (!store || !tempDir) throw new Error("test setup failed");
+		const release = path.join(tempDir, "release-response");
+		const child = Bun.spawn(
+			[
+				process.execPath,
+				path.join(import.meta.dir, "fixtures/oauth-sigterm-child.ts"),
+				path.join(tempDir, "agent.db"),
+				release,
+			],
+			{ stdout: "pipe", stderr: "pipe" },
+		);
+		try {
+			const first = await Promise.race([
+				child.stdout.getReader().read(),
+				child.exited.then(() => {
+					throw new Error("OAuth child exited before the provider rotated its token");
+				}),
+			]);
+			expect(new TextDecoder().decode(first.value)).toContain("rotated");
+			child.kill("SIGTERM");
+			await Bun.write(release, "complete");
+			expect(await child.exited).toBe(143);
+			expect(store.listAuthCredentials("anthropic")[0]?.credential).toMatchObject({
+				type: "oauth",
+				access: "new",
+				refresh: "new-refresh",
+			});
+		} finally {
+			if (child.exitCode === null) child.kill();
+			await child.exited;
+		}
+	});
+
+	for (const stage of ["during-pass", "after-pass"] as const) {
+		test.skipIf(process.platform === "win32")(
+			`a refresh that starts once exit has begun never leaves a spent token (${stage})`,
+			async () => {
+				if (!store || !tempDir) throw new Error("test setup failed");
+				const dbPath = path.join(tempDir, "agent.db");
+				const marker = path.join(tempDir, "exchanged");
+				await authStorage!.credentials.set("anthropic", [
+					{ type: "oauth", access: "old", refresh: "old-refresh", expires: 0 },
+				]);
+				// `during-pass`: the refresh starts in another owner's cleanup; `after-pass`: just before the real exit.
+				const child = Bun.spawn(
+					[
+						process.execPath,
+						path.join(import.meta.dir, "fixtures/oauth-refresh-during-exit-child.ts"),
+						dbPath,
+						marker,
+						stage,
+					],
+					{ stdout: "pipe", stderr: "pipe" },
+				);
+				try {
+					expect(await child.exited).toBe(0);
+					// Nothing was left to save, so the quit printed no wait line.
+					expect(await new Response(child.stderr).text()).not.toContain("Waiting for the login refresh");
+					expect(await Bun.file(`${marker}.started`).exists()).toBe(true);
+					// Either no exchange started, or the token it got was saved before exit.
+					const exchanged = await Bun.file(marker).exists();
+					expect(store.listAuthCredentials("anthropic")[0]?.credential).toMatchObject(
+						exchanged ? { access: "new", refresh: "new-refresh" } : { access: "old", refresh: "old-refresh" },
+					);
+				} finally {
+					if (child.exitCode === null) child.kill();
+					await child.exited;
+				}
+			},
+			30_000,
+		);
+	}
+
+	test("a 401 names the token of the request that failed, not of the last request started", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		const provider = "unit-oauth-interleaved-401";
+		const interleaved = registerSingleUseProvider(provider);
+		await seedLogin(provider);
+		const resolver = authStorage.keys.resolver(provider, { sessionId: "shared" });
+
+		// Two requests share the resolver and both send access-0.
+		const first = await resolver({ lastChance: false, error: undefined });
+		const second = await resolver({ lastChance: false, error: undefined });
+		expect(first).toMatchObject({ apiKey: "access-0" });
+		expect(second).toMatchObject({ apiKey: "access-0" });
+
+		// The first 401 exchanges once; the resolver has now served access-1.
+		const unauthorized = Object.assign(new Error("401 revoked"), { status: 401 });
+		const recovered = await resolver({ lastChance: false, error: unauthorized, previousKey: "access-0" });
+		expect(recovered).toMatchObject({ apiKey: "access-1" });
+		expect(interleaved.exchanges()).toBe(1);
+
+		// The second request's 401 arrives late and still names access-0: it adopts
+		// the peer's access-1 rather than exchanging the refresh token again.
+		const late = await resolver({ lastChance: false, error: unauthorized, previousKey: "access-0" });
+		expect(late).toMatchObject({ apiKey: "access-1" });
+		expect(interleaved.exchanges()).toBe(1);
+
+		// A 401 on the token the resolver now serves does exchange again.
+		const current = await resolver({ lastChance: false, error: unauthorized, previousKey: "access-1" });
+		expect(current).toMatchObject({ apiKey: "access-2" });
+		expect(interleaved.exchanges()).toBe(2);
+	});
+
+	test("a 401 recovery that joins a row refresh landing on the rejected token refreshes again", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		const provider = "unit-oauth-joined-row-refresh";
+		const firstAnswer = Promise.withResolvers<void>();
+		let exchanges = 0;
+		oauthUtils.registerOAuthProvider({
+			id: provider,
+			name: provider,
+			sourceId: "auth-storage-oauth-refresh-race-test",
+			async login() {
+				return { access: "unused", refresh: "unused", expires: 0 };
+			},
+			async refreshToken(current) {
+				exchanges += 1;
+				const generation = exchanges;
+				if (generation === 1) await firstAnswer.promise;
+				return {
+					...current,
+					access: `access-${generation}`,
+					refresh: `refresh-${generation}`,
+					expires: Date.now() + 3_600_000,
+				};
+			},
+			getApiKey(current) {
+				return current.access;
+			},
+		});
+		const credentialId = await seedLogin(provider);
+
+		// An older request starts a row refresh, which will land on access-1.
+		const first = authStorage.oauth.refresh(credentialId);
+		// A second request already got a 401 for access-1 (it was served access-1 from a
+		// peer, say) and recovers while the first refresh is still in flight.
+		const recovery = authStorage.oauth.refresh(credentialId, undefined, {
+			reason: "auth-recovery",
+			rejectedAccess: "access-1",
+		});
+		firstAnswer.resolve();
+		expect((await first).credential).toMatchObject({ access: "access-1" });
+		expect((await recovery).credential).toMatchObject({ access: "access-2" });
+		expect(exchanges).toBe(2);
+	});
+
+	test("a 401 recovery does not adopt a peer row that still carries the rejected access token", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		const provider = "unit-oauth-peer-same-access";
+		const singleUse = registerSingleUseProvider(provider);
+		const credentialId = await seedLogin(provider);
+		const resolver = authStorage.keys.resolver(provider, { sessionId: "peer-same-access" });
+		expect(await resolver({ lastChance: false, error: undefined })).toMatchObject({ apiKey: "access-0" });
+
+		// A peer rewrote the row without replacing its access token: only the expiry moved.
+		store.updateAuthCredential(credentialId, {
+			type: "oauth",
+			access: "access-0",
+			refresh: "refresh-0",
+			expires: Date.now() + 2 * 3_600_000,
+		});
+		const unauthorized = Object.assign(new Error("401 revoked"), { status: 401 });
+		const recovered = await resolver({ lastChance: false, error: unauthorized, previousKey: "access-0" });
+		expect(recovered).toMatchObject({ apiKey: "access-1" });
+		expect(singleUse.exchanges()).toBe(1);
+	});
+
+	test("does not disable a login when its refresh token is rejected after taking over a stalled refresher", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		const provider = "unit-oauth-stalled-owner";
+		await seedLogin(provider);
+		const credentialId = store.listAuthCredentials(provider)[0]?.id;
+		if (credentialId === undefined) throw new Error("missing stored credential");
+		const takeLease = store.tryAcquireCredentialRefreshLease?.bind(store);
+		if (!takeLease) throw new Error("test store does not support refresh leases");
+		// A peer took the lease, spent refresh-0 at the provider, and is still
+		// retrying its save; its lease has just lapsed.
+		expect(takeLease(credentialId, "stalled-peer", Date.now() - 1_000)).toBe(true);
+
+		const result = await authStorage.oauth
+			.refreshStored(provider, {
+				credentialId,
+				credentialFromRow: row => row,
+				forceRefresh: true,
+				refresh: async () => {
+					throw new Error('HTTP 400 invalid_grant {"error":"invalid_grant"}');
+				},
+				isDefinitiveFailure: error => error instanceof Error && error.message.includes("invalid_grant"),
+				disabledCause: () => "oauth refresh failed",
+			})
+			.then(
+				value => ({ value }),
+				(error: unknown) => ({ error }),
+			);
+
+		expect(String("error" in result ? result.error : "")).toContain("stalled refresher");
+		expect(events).toHaveLength(0);
+		const stored = store.listAuthCredentials(provider);
+		expect(stored).toHaveLength(1);
+		expect(stored[0]?.credential).toMatchObject({ type: "oauth", refresh: "refresh-0" });
+		// The lease went back to the stalled owner so it can still save its token.
+		expect(store.getCredentialRefreshLeaseHolder?.(credentialId)?.owner).toBe("stalled-peer");
+	});
+
+	test("a caller that keeps its credential on refresh failure gets it back after a takeover rejection", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		const provider = "unit-oauth-stalled-owner-keep";
+		await seedLogin(provider);
+		const credentialId = store.listAuthCredentials(provider)[0]?.id;
+		if (credentialId === undefined) throw new Error("missing stored credential");
+		const takeLease = store.tryAcquireCredentialRefreshLease?.bind(store);
+		if (!takeLease) throw new Error("test store does not support refresh leases");
+		expect(takeLease(credentialId, "stalled-peer", Date.now() - 1_000)).toBe(true);
+		const failures: unknown[] = [];
+
+		// The options an MCP server refresh passes: keep the current token on any
+		// refresh failure that does not disable the login.
+		const result = await authStorage.oauth.refreshStored(provider, {
+			credentialId,
+			credentialFromRow: row => row,
+			forceRefresh: true,
+			refresh: async () => {
+				throw new Error('HTTP 400 invalid_grant {"error":"invalid_grant"}');
+			},
+			isDefinitiveFailure: error => error instanceof Error && error.message.includes("invalid_grant"),
+			disabledCause: () => "oauth refresh failed",
+			keepCredentialOnRefreshFailure: true,
+			onRefreshFailure: error => {
+				failures.push(error);
+			},
+		});
+
+		expect(result).toMatchObject({ refreshed: false, removed: false });
+		expect(result.credential).toMatchObject({ type: "oauth", refresh: "refresh-0" });
+		expect(failures).toHaveLength(1);
+		expect(String(failures[0])).toContain("stalled refresher");
+		expect(events).toHaveLength(0);
+		expect(store.getCredentialRefreshLeaseHolder?.(credentialId)?.owner).toBe("stalled-peer");
+	});
+
+	test("a store error during the hand-back after a takeover rejection still goes through the failure policy", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		const provider = "unit-oauth-stalled-owner-handback-error";
+		await seedLogin(provider);
+		const credentialId = store.listAuthCredentials(provider)[0]?.id;
+		if (credentialId === undefined) throw new Error("missing stored credential");
+		expect(store.tryAcquireCredentialRefreshLease?.(credentialId, "stalled-peer", Date.now() - 1_000)).toBe(true);
+		vi.spyOn(store, "handBackCredentialRefreshLease").mockImplementation(() => {
+			throw new Error("disk I/O error");
+		});
+		const failures: unknown[] = [];
+
+		const result = await authStorage.oauth.refreshStored(provider, {
+			credentialId,
+			credentialFromRow: row => row,
+			forceRefresh: true,
+			refresh: async () => {
+				throw new Error('HTTP 400 invalid_grant {"error":"invalid_grant"}');
+			},
+			isDefinitiveFailure: error => error instanceof Error && error.message.includes("invalid_grant"),
+			disabledCause: () => "oauth refresh failed",
+			keepCredentialOnRefreshFailure: true,
+			onRefreshFailure: error => {
+				failures.push(error);
+			},
+		});
+
+		expect(result.credential).toMatchObject({ type: "oauth", refresh: "refresh-0" });
+		expect(String(failures[0])).toContain("stalled refresher");
+		expect(events).toHaveLength(0);
+	});
+
+	/** Refresh options for a 401 on access-0 whose refresh token the provider already rejects as spent. */
+	function refreshSpentToken(
+		credentialId: number,
+		onExchange: () => void,
+	): Parameters<AuthStorage["oauth"]["refreshStored"]>[1] {
+		return {
+			credentialId,
+			credentialFromRow: row => row,
+			forceRefresh: true,
+			rejectedAccess: "access-0",
+			refresh: async () => {
+				onExchange();
+				throw new Error('HTTP 400 invalid_grant {"error":"invalid_grant"}');
+			},
+			isDefinitiveFailure: error => error instanceof Error && error.message.includes("invalid_grant"),
+			disabledCause: () => "oauth refresh failed",
+		};
+	}
+
+	test("keeps a stalled refresher's lease when the store is busy at hand-back", async () => {
+		if (!store || !tempDir) throw new Error("test setup failed");
+		const provider = "unit-oauth-handback-busy";
+		const credentialId = await seedLogin(provider);
+		const peerStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		const peer = new AuthStorage(peerStore);
+		const laterStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		const later = new AuthStorage(laterStore);
+		const options = refreshSpentToken(credentialId, () => {});
+		try {
+			// A refresher spent refresh-0 and is still saving refresh-1; its lease just lapsed.
+			expect(store.tryAcquireCredentialRefreshLease?.(credentialId, "stalled-peer", Date.now() - 1_000)).toBe(true);
+			const handBack = peerStore.handBackCredentialRefreshLease.bind(peerStore);
+			let busyHandBacks = 0;
+			vi.spyOn(peerStore, "handBackCredentialRefreshLease").mockImplementation((...args) => {
+				if (busyHandBacks === 0) {
+					busyHandBacks += 1;
+					throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+				}
+				return handBack(...args);
+			});
+			const takeover = await peer.oauth.refreshStored(provider, options).then(
+				() => "resolved",
+				(error: unknown) => String(error),
+			);
+			expect(takeover).toContain("stalled refresher");
+			expect(busyHandBacks).toBe(1);
+			expect(store.getCredentialRefreshLeaseHolder?.(credentialId)?.owner).toBe("stalled-peer");
+
+			// Another process has the same spent token rejected: the login stays.
+			const next = await later.oauth.refreshStored(provider, options).then(
+				() => "resolved",
+				(error: unknown) => String(error),
+			);
+			expect(next).toContain("stalled refresher");
+			expect(store.listAuthCredentials(provider)[0]?.credential).toMatchObject({ refresh: "refresh-0" });
+		} finally {
+			peer.close();
+			later.close();
+		}
+	});
+
+	/**
+	 * A refresher takes over the lapsed lease of one that spent refresh-0 and is
+	 * still saving, then leaves without saving; another process then has
+	 * refresh-0 rejected. The lease must have gone back to the stalled refresher,
+	 * so that rejection is not taken as proof the login is dead.
+	 */
+	async function expectTakeoverLeftForStalledOwner(
+		provider: string,
+		takeover: (peer: AuthStorage, peerStore: SqliteAuthCredentialStore, credentialId: number) => Promise<unknown>,
+	): Promise<void> {
+		if (!store || !tempDir) throw new Error("test setup failed");
+		const credentialId = await seedLogin(provider);
+		const peerStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		const peer = new AuthStorage(peerStore);
+		const laterStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		const later = new AuthStorage(laterStore);
+		try {
+			expect(store.tryAcquireCredentialRefreshLease?.(credentialId, "stalled-peer", Date.now() - 1_000)).toBe(true);
+			await takeover(peer, peerStore, credentialId);
+			expect(store.getCredentialRefreshLeaseHolder?.(credentialId)?.owner).toBe("stalled-peer");
+			const next = await later.oauth
+				.refreshStored(
+					provider,
+					refreshSpentToken(credentialId, () => {}),
+				)
+				.then(
+					() => "resolved",
+					(error: unknown) => String(error),
+				);
+			expect(next).toContain("stalled refresher");
+			expect(store.listAuthCredentials(provider)[0]?.credential).toMatchObject({ refresh: "refresh-0" });
+		} finally {
+			peer.close();
+			later.close();
+		}
+	}
+
+	test("hands a taken-over lease back when it leaves before the exchange", async () => {
+		await expectTakeoverLeftForStalledOwner("unit-oauth-takeover-cannot", async (peer, _peerStore, credentialId) => {
+			let checks = 0;
+			const result = await peer.oauth.refreshStored("unit-oauth-takeover-cannot", {
+				...refreshSpentToken(credentialId, () => {}),
+				// Refreshable when the lease is taken, no longer once the row is re-read under it.
+				canRefresh: () => {
+					checks += 1;
+					return checks === 1;
+				},
+			});
+			expect(result).toMatchObject({ refreshed: false });
+			expect(checks).toBe(2);
+		});
+	});
+
+	test("hands a taken-over lease back when the exchange fails transiently", async () => {
+		await expectTakeoverLeftForStalledOwner(
+			"unit-oauth-takeover-transient",
+			async (peer, _peerStore, credentialId) => {
+				await expect(
+					peer.oauth.refreshStored("unit-oauth-takeover-transient", {
+						...refreshSpentToken(credentialId, () => {}),
+						refresh: async () => {
+							throw new Error("HTTP 503 overloaded");
+						},
+					}),
+				).rejects.toThrow("503");
+			},
+		);
+	});
+
+	test("saves an exchanged token when a peer holds the lease handed back to the stalled refresher", async () => {
+		if (!authStorage || !store || !tempDir) throw new Error("test setup failed");
+		const provider = "unit-oauth-handback-save";
+		const credentialId = await seedLogin(provider);
+		const peerStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		const peer = new AuthStorage(peerStore);
+		const ownerStore = store;
+		const save = ownerStore.tryUpdateAuthCredentialIfMatches?.bind(ownerStore);
+		if (!save) throw new Error("test store does not support compare-and-set updates");
+		// The lease the third refresher gives back once its own exchange is rejected.
+		let thirdHandsBackTo: { owner: string; expiresAtMs: number } | undefined;
+		vi.spyOn(ownerStore, "tryUpdateAuthCredentialIfMatches").mockImplementation((...args) => {
+			const saved = save(...args);
+			if (!saved && thirdHandsBackTo) {
+				peerStore.handBackCredentialRefreshLease(credentialId, "third", thirdHandsBackTo);
+				thirdHandsBackTo = undefined;
+			}
+			return saved;
+		});
+		try {
+			const result = await authStorage.oauth.refreshStored(provider, {
+				credentialId,
+				credentialFromRow: row => row,
+				forceRefresh: true,
+				refresh: async current => {
+					// This exchange stalls past its lease. A peer takes the lease over, has
+					// the spent refresh-0 rejected and hands the lease back; a third
+					// refresher holds it when this exchange's save lands.
+					const holder = peerStore.getCredentialRefreshLeaseHolder(credentialId);
+					if (!holder) throw new Error("the refreshing process holds no lease");
+					expect(peerStore.renewCredentialRefreshLease(credentialId, holder.owner, Date.now() - 1_000)).toBe(true);
+					const takeover = await peer.oauth
+						.refreshStored(
+							provider,
+							refreshSpentToken(credentialId, () => {}),
+						)
+						.then(
+							() => "resolved",
+							(error: unknown) => String(error),
+						);
+					expect(takeover).toContain("stalled refresher");
+					thirdHandsBackTo = peerStore.getCredentialRefreshLeaseHolder(credentialId);
+					expect(thirdHandsBackTo?.owner).toBe(holder.owner);
+					expect(peerStore.tryAcquireCredentialRefreshLease(credentialId, "third", Date.now() + 15_000)).toBe(
+						true,
+					);
+					return { ...current, access: "access-1", refresh: "refresh-1", expires: Date.now() + 3_600_000 };
+				},
+				isDefinitiveFailure: () => false,
+			});
+
+			expect(result).toMatchObject({ refreshed: true, credential: { access: "access-1" } });
+			expect(store.listAuthCredentials(provider)[0]?.credential).toMatchObject({
+				type: "oauth",
+				access: "access-1",
+				refresh: "refresh-1",
+			});
+			expect(events).toHaveLength(0);
+		} finally {
+			peer.close();
+		}
+	});
+
+	test("waits for a stalled refresher's save instead of replaying the refresh token it spent", async () => {
+		if (!tempDir) throw new Error("test setup failed");
+		const provider = "unit-oauth-stalled-replay";
+		const credentialId = await seedLogin(provider);
+		const stores = await Promise.all(
+			[0, 1].map(() => SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"))),
+		);
+		const processes = stores.map(peerStore => new AuthStorage(peerStore));
+		let invalidGrants = 0;
+		const options = refreshSpentToken(credentialId, () => {
+			invalidGrants += 1;
+		});
+		try {
+			// A refresher spent refresh-0 and is still saving refresh-1; its lease just lapsed.
+			expect(stores[0]?.tryAcquireCredentialRefreshLease(credentialId, "stalled-peer", Date.now() - 1_000)).toBe(
+				true,
+			);
+			for (const peer of processes) {
+				const first = await peer.oauth.refreshStored(provider, options).then(
+					() => "resolved",
+					(error: unknown) => String(error),
+				);
+				expect(first).toContain("stalled refresher");
+			}
+			expect(invalidGrants).toBe(2);
+
+			// Every process retries its failed requests while that refresher still
+			// saves; let the retries re-read the row twice each before it does.
+			const rereads = Promise.withResolvers<void>();
+			let reads = 0;
+			for (const peerStore of stores) {
+				const list = peerStore.listAuthCredentials.bind(peerStore);
+				vi.spyOn(peerStore, "listAuthCredentials").mockImplementation(listed => {
+					reads += 1;
+					if (reads >= 8) rereads.resolve();
+					return list(listed);
+				});
+			}
+			const retries = processes.flatMap(peer =>
+				[0, 1].map(() =>
+					peer.oauth.refreshStored(provider, options).then(
+						value => ({ value }),
+						(error: unknown) => ({ error }),
+					),
+				),
+			);
+			await rereads.promise;
+			expect(invalidGrants).toBe(2);
+			stores[0]?.updateAuthCredential(credentialId, {
+				type: "oauth",
+				access: "access-1",
+				refresh: "refresh-1",
+				expires: Date.now() + 3_600_000,
+			});
+			for (const retry of await Promise.all(retries)) {
+				expect(retry).toMatchObject({ value: { credential: { access: "access-1" }, refreshed: false } });
+			}
+			expect(invalidGrants).toBe(2);
+			expect(events).toHaveLength(0);
+		} finally {
+			for (const peer of processes) peer.close();
+		}
+	});
+
+	test("a 401 recovery that joins another request's refresh does not get back the token it was refused", async () => {
+		if (!authStorage || !tempDir) throw new Error("test setup failed");
+		const provider = "unit-oauth-join-rejected";
+		const joined = registerSingleUseProvider(provider);
+		await seedLogin(provider);
+		const resolver = authStorage.keys.resolver(provider, { sessionId: "shared" });
+		expect(await resolver({ lastChance: false, error: undefined })).toMatchObject({ apiKey: "access-0" });
+		const peerStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		const peer = new AuthStorage(peerStore);
+		try {
+			await peer.credentials.reload();
+			// Another process's 401 rotates access-0 to access-1, and a later request here sends access-1.
+			await peer.oauth.access(provider, "peer-session", {
+				forceRefresh: true,
+				refreshReason: "auth-recovery",
+				rejectedAccessToken: "access-0",
+			});
+			await authStorage.credentials.reload();
+			expect(await resolver({ lastChance: false, error: undefined })).toMatchObject({ apiKey: "access-1" });
+
+			// Both requests fail at once. The one that sent access-0 adopts access-1;
+			// the one that sent access-1 must not get access-1 back from that refresh.
+			const unauthorized = Object.assign(new Error("401 revoked"), { status: 401 });
+			const [, current] = await Promise.all([
+				resolver({ lastChance: false, error: unauthorized, previousKey: "access-0" }),
+				resolver({ lastChance: false, error: unauthorized, previousKey: "access-1" }),
+			]);
+			expect(current).toMatchObject({ apiKey: "access-2" });
+			expect(joined.exchanges()).toBe(2);
+		} finally {
+			peer.close();
+		}
 	});
 });
