@@ -790,11 +790,13 @@ function getFact(beam: BeamMemoryState, memoryId: string): Row | null {
 	const sourceId = typeof fact.source_msg_id === "string" ? fact.source_msg_id : "";
 	if (sourceId.length > 0) {
 		type SourceRow = { superseded_by: string | null; valid_until: string | null; session_id: string | null; scope: string | null };
-		let source = beam.db.prepare("SELECT superseded_by, valid_until, session_id, scope FROM working_memory WHERE id = ?").get(sourceId) as SourceRow | undefined;
-		if (source === undefined) {
-			source = beam.db.prepare("SELECT superseded_by, valid_until, session_id, scope FROM episodic_memory WHERE id = ?").get(sourceId) as SourceRow | undefined;
+		// bun:sqlite get() returns null (not undefined) for a missing row, so
+		// both lookups need nullish checks.
+		let source = beam.db.prepare("SELECT superseded_by, valid_until, session_id, scope FROM working_memory WHERE id = ?").get(sourceId) as SourceRow | null;
+		if (source == null) {
+			source = beam.db.prepare("SELECT superseded_by, valid_until, session_id, scope FROM episodic_memory WHERE id = ?").get(sourceId) as SourceRow | null;
 		}
-		if (source !== undefined) {
+		if (source != null) {
 			if (source.superseded_by != null) return null;
 			const now = toUtcIso(new Date());
 			if (source.valid_until != null && source.valid_until <= now) return null;

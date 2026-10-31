@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { closeQuietly, type DatabasePath, openDatabase, transaction } from "../db";
+import { ensureFactsFtsUpdateTrigger } from "./facts-fts";
 
 export interface Gist {
 	readonly id: string;
@@ -322,21 +323,9 @@ export class EpisodicGraph {
 		}
 		// Banks opened directly through this store (without BeamMemory/initBeam)
 		// may have an fts_facts index with only insert/delete triggers; install
-		// the update trigger so in-place re-stores keep the index fresh there
-		// too. initBeam installs the identical trigger on the normal path.
-		const ftsPresent =
-			this.db
-				.query("SELECT 1 FROM sqlite_master WHERE type IN ('table', 'virtual table') AND name = 'fts_facts'")
-				.get() !== null;
-		if (ftsPresent) {
-			this.db.run(`
-				CREATE TRIGGER IF NOT EXISTS facts_au AFTER UPDATE ON facts BEGIN
-					INSERT INTO fts_facts(fts_facts, rowid, subject, predicate, object)
-					VALUES ('delete', old.rowid, old.subject, old.predicate, old.object);
-					INSERT INTO fts_facts(rowid, subject, predicate, object)
-					VALUES (new.rowid, new.subject, new.predicate, new.object);
-				END`);
-		}
+		// the shared update trigger so in-place re-stores keep the index fresh
+		// there too. initBeam uses the same helper on the normal path.
+		ensureFactsFtsUpdateTrigger(this.db);
 		this.db.run("CREATE INDEX IF NOT EXISTS idx_facts_subject ON facts(subject)");
 		this.db.run("CREATE INDEX IF NOT EXISTS idx_facts_predicate ON facts(predicate)");
 		this.db.run("CREATE INDEX IF NOT EXISTS idx_facts_object ON facts(object)");

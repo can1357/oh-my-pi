@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { factsFtsUpdateTriggerSql } from "../facts-fts";
 
 type PragmaTableInfoRow = {
 	name: string;
@@ -379,15 +380,10 @@ export function initBeam(db: Database): void {
 			INSERT INTO fts_facts(fts_facts, rowid, subject, predicate, object)
 			VALUES ('delete', old.rowid, old.subject, old.predicate, old.object);
 		END`,
-		// External-content FTS is only refreshed by INSERT/DELETE triggers, so
-		// in-place UPDATEs (e.g. re-stored facts, belief revisions) would leave
-		// fts_facts stale without this one.
-		`CREATE TRIGGER IF NOT EXISTS facts_au AFTER UPDATE ON facts BEGIN
-			INSERT INTO fts_facts(fts_facts, rowid, subject, predicate, object)
-			VALUES ('delete', old.rowid, old.subject, old.predicate, old.object);
-			INSERT INTO fts_facts(rowid, subject, predicate, object)
-			VALUES (new.rowid, new.subject, new.predicate, new.object);
-		END`,
+		// In-place UPDATEs (re-stored facts, belief revisions) would leave the
+		// external-content index stale without the shared update trigger
+		// (core/facts-fts.ts), which the standalone graph path uses too.
+		factsFtsUpdateTriggerSql,
 	]);
 
 	for (const table of ["working_memory", "episodic_memory"] as const) {

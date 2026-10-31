@@ -300,6 +300,51 @@ describe("E7 facts scope migration", () => {
 			beamA.close();
 		}
 	});
+
+	it("get-by-id resolves episodic-sourced facts and honors their source rules", () => {
+		const dbPath = tempDb();
+		const beamA = new BeamMemory({ sessionId: "session-a", dbPath });
+		try {
+			beamA.db.run(
+				"INSERT INTO episodic_memory (id, content, session_id, scope) VALUES ('ep-gid', 'e content', 'session-a', 'global')",
+			);
+			storeFactStrings(beamA, ["I use the quorum relay for tokens"], 0, "ep-gid");
+			const factId = (beamA.db
+				.query("SELECT fact_id FROM facts WHERE source_msg_id = 'ep-gid'")
+				.get() as { fact_id: string }).fact_id;
+			const beamB = new BeamMemory({ sessionId: "session-b", dbPath });
+			try {
+				expect(get(beamB, factId)).not.toBeNull();
+			} finally {
+				beamB.close();
+			}
+
+			beamA.db.run("UPDATE episodic_memory SET scope = 'session' WHERE id = 'ep-gid'");
+			const beamC = new BeamMemory({ sessionId: "session-b", dbPath });
+			try {
+				expect(get(beamC, factId)).toBeNull();
+			} finally {
+				beamC.close();
+			}
+			expect(get(beamA, factId)).not.toBeNull();
+		} finally {
+			beamA.close();
+		}
+	});
+
+	it("get-by-id tolerates facts whose source row no longer exists", () => {
+		const dbPath = tempDb();
+		const beam = new BeamMemory({ sessionId: "session-a", dbPath });
+		try {
+			storeFactStrings(beam, ["I use the quorum relay for tokens"], 0, "wm-gone");
+			const factId = (beam.db
+				.query("SELECT fact_id FROM facts WHERE source_msg_id = 'wm-gone'")
+				.get() as { fact_id: string }).fact_id;
+			expect(get(beam, factId)).not.toBeNull();
+		} finally {
+			beam.close();
+		}
+	});
 });
 
 describe("E7 facts scope recall, end to end", () => {
