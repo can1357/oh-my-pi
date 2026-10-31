@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `/fork pane` and `/fork tab` refusing terminals hosted by the Herdr desktop app: herdr-core terminals are detected via `HC_TERMINAL_ID`, the forked session is placed with `herdr-app do` (`pane.split`/`tab.new`), and `hc run --bg` is the fallback when no app window is open ([#17525](https://github.com/can1357/oh-my-pi/pull/17525) by [@alanszhang](https://github.com/alanszhang))
+
 ## [18.14.1] - 2026-10-31
 
 ### Added
